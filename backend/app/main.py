@@ -1,12 +1,15 @@
 """Điểm vào ứng dụng FastAPI (modular monolith)."""
 
-from fastapi import FastAPI, Request
+import os
+
+from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .config import APP_NAME, FRONTEND_DIR
 from .database import init_db
 from .errors import DomainError, NotFoundError, PermissionError_
+from .security import get_current_user
 from .routers import (
     ai,
     audit,
@@ -31,15 +34,22 @@ from .routers import (
     workorders,
 )
 
+# Tài liệu API (/docs, /redoc, /openapi.json) chỉ bật khi MES_DEBUG — production tắt
+# để tránh lộ bề mặt API & hướng dẫn xác thực. Đặt MES_DEBUG=1 ở môi trường dev.
+_DEBUG = os.environ.get("MES_DEBUG", "").lower() in ("1", "true", "on")
+
 app = FastAPI(
     title=APP_NAME,
     version="0.1.0-mvp",
     description=(
         "MES Nhà máy Bia — MVP P0 (Order → Batch → Recipe/version → "
         "QC hold/release → Genealogy → Audit). Theo blueprint MES-ARCH-002.\n\n"
-        "Xác thực MVP: truyền header **X-User** và **X-Role** "
-        "(operator|supervisor|qa|engineer|admin)."
+        "Xác thực: đăng nhập qua `POST /api/auth/login` rồi gửi "
+        "`Authorization: Bearer <token>`."
     ),
+    docs_url="/docs" if _DEBUG else None,
+    redoc_url="/redoc" if _DEBUG else None,
+    openapi_url="/openapi.json" if _DEBUG else None,
 )
 
 
@@ -65,10 +75,16 @@ async def _perm(_: Request, exc: PermissionError_):
 
 
 # ---- Routers ----
-for r in (auth, master, orders, workorders, recipes, batches, materials, quality, traceability,
+# auth: chứa /login, /logout — không gắn phụ thuộc xác thực toàn router (login phải mở).
+app.include_router(auth.router)
+# gateway: cổng ngoài /api/v1 dùng X-API-Key + phần /api/integration tự kiểm tra vai trò.
+app.include_router(gateway.router)
+# Mọi router còn lại: BẮT BUỘC đăng nhập (đóng các endpoint đọc/ghi từng bị mở).
+# require_perm/require_role ở từng endpoint vẫn áp dụng chồng lên (defense in depth).
+for r in (master, orders, workorders, recipes, batches, materials, quality, traceability,
           performance, warehouse, energy, maintenance, process, brewing, reports, historian,
-          scan, ai, gateway, audit):
-    app.include_router(r.router)
+          scan, ai, audit):
+    app.include_router(r.router, dependencies=[Depends(get_current_user)])
 
 
 @app.get("/api/health", tags=["system"])
