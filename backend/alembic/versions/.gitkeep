@@ -1,0 +1,4 @@
+# Thư mục chứa migration. Tạo migration đầu:
+#   cd backend && alembic revision --autogenerate -m "init schema"
+#   alembic upgrade head
+# (App cũng tự create_all khi khởi động cho môi trường dev; production nên dùng alembic.)

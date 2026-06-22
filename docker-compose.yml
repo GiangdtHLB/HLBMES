@@ -1,0 +1,52 @@
+# MES Nhà máy Bia — production stack: app (FastAPI) + PostgreSQL.
+# Chạy:  docker compose up -d   →  http://localhost:8077
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: mes
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mes_secret}
+      POSTGRES_DB: mes
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mes -d mes"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  app:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    environment:
+      MES_DATABASE_URL: postgresql+psycopg://mes:${POSTGRES_PASSWORD:-mes_secret}@db:5432/mes
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      MES_LLM_ENABLED: ${MES_LLM_ENABLED:-auto}
+      MES_DEV_HEADER_AUTH: "0"
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8077:8077"
+    restart: unless-stopped
+    # Migration + seed lần đầu rồi chạy app (idempotent: seed tự bỏ qua nếu đã có dữ liệu).
+    # Chạy từ thư mục backend để 'app' import được và alembic.ini ở đúng chỗ.
+    command: >
+      sh -c "cd backend &&
+             alembic upgrade head &&
+             (python -m app.seed || true) &&
+             python -m uvicorn app.main:app --host 0.0.0.0 --port 8077"
+
+  # TLS termination (HTTPS) — bật khi cần: đặt cert vào ./deploy/certs, cấu hình ./deploy/nginx.conf
+  # proxy:
+  #   image: nginx:alpine
+  #   ports: ["443:443"]
+  #   volumes:
+  #     - ./deploy/nginx.conf:/etc/nginx/nginx.conf:ro
+  #     - ./deploy/certs:/certs:ro
+  #   depends_on: [app]
+
+volumes:
+  pgdata:

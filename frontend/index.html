@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MES Nhà máy Bia</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <!-- Màn hình đăng nhập -->
+  <div id="login" class="login-screen">
+    <div class="login-box">
+      <h1>🍺 MES Nhà máy Bia</h1>
+      <div class="muted" style="margin-bottom:18px">Hệ thống quản lý sản xuất — đăng nhập</div>
+      <div class="field"><label>Tên đăng nhập</label><input id="li_user" autocomplete="username" /></div>
+      <div class="field" style="margin-top:10px"><label>Mật khẩu</label><input id="li_pass" type="password" autocomplete="current-password" /></div>
+      <button class="btn" id="li_btn" style="width:100%;margin-top:16px;padding:10px">Đăng nhập</button>
+      <div id="li_err" style="color:var(--red);font-size:13px;margin-top:10px;min-height:18px"></div>
+      <div class="muted" style="font-size:12px;margin-top:14px;line-height:1.7">
+        <b>Tài khoản demo</b> (mật khẩu <code class="k">123456</code>, admin: <code class="k">admin123</code>):<br>
+        <code class="k">admin</code> · <code class="k">giamdoc</code> · <code class="k">quandoc</code> · <code class="k">truongca</code> ·
+        <code class="k">vanhanh</code> · <code class="k">kcs</code> · <code class="k">kysu</code> · <code class="k">thukho</code> ·
+        <code class="k">baotri</code> · <code class="k">nangluong</code>
+      </div>
+    </div>
+  </div>
+
+  <div id="app" style="display:none">
+  <header>
+    <div>
+      <h1>🍺 MES Nhà máy Bia</h1>
+      <div class="sub">MVP P0 · Order → Batch → Recipe → QC → Truy xuất → Audit</div>
+    </div>
+    <div class="spacer"></div>
+    <div class="userbox">
+      <div style="text-align:right">
+        <div id="u_name" style="font-weight:700"></div>
+        <div id="u_title" class="muted" style="font-size:12px"></div>
+      </div>
+      <a class="btn sec sm" href="/kiosk.html" title="Giao diện kiosk/tablet cho xưởng" style="text-decoration:none">📱 Kiosk</a>
+      <button class="btn sec sm" id="logout">Đăng xuất</button>
+    </div>
+  </header>
+
+  <nav id="nav">
+    <button data-view="dashboard" class="active">Tổng quan</button>
+    <button data-view="orders">Lệnh SX</button>
+    <button data-view="dispatch">Điều độ</button>
+    <button data-view="recipes">Công thức</button>
+    <button data-view="batches">Mẻ sản xuất</button>
+    <button data-view="quality">Chất lượng</button>
+    <button data-view="process">Nấu-Lọc-Chiết</button>
+    <button data-view="trace">Truy xuất</button>
+    <button data-view="warehouse">Kho NVL</button>
+    <button data-view="energy">Năng lượng</button>
+    <button data-view="realtime">📡 Realtime</button>
+    <button data-view="maint">Bảo trì</button>
+    <button data-view="calib">Kiểm định</button>
+    <button data-view="reports">Báo cáo</button>
+    <button data-view="ai">🤖 Trợ lý AI</button>
+    <button data-view="integration">Tích hợp</button>
+    <button data-view="users">Tài khoản</button>
+    <button data-view="audit">Audit</button>
+    <button data-view="profile">Hồ sơ</button>
+  </nav>
+
+  <main>
+    <section id="view-dashboard" class="view active"></section>
+    <section id="view-orders" class="view"></section>
+    <section id="view-dispatch" class="view"></section>
+    <section id="view-recipes" class="view"></section>
+    <section id="view-batches" class="view"></section>
+    <section id="view-quality" class="view"></section>
+    <section id="view-process" class="view"></section>
+    <section id="view-trace" class="view"></section>
+    <section id="view-warehouse" class="view"></section>
+    <section id="view-energy" class="view"></section>
+    <section id="view-realtime" class="view"></section>
+    <section id="view-maint" class="view"></section>
+    <section id="view-calib" class="view"></section>
+    <section id="view-reports" class="view"></section>
+    <section id="view-ai" class="view"></section>
+    <section id="view-integration" class="view"></section>
+    <section id="view-users" class="view"></section>
+    <section id="view-audit" class="view"></section>
+    <section id="view-profile" class="view"></section>
+  </main>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

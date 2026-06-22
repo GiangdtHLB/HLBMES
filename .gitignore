@@ -1,0 +1,45 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtualenvs
+.venv/
+venv/
+env/
+ENV/
+
+# --- Database ---
+*.db
+*.sqlite
+*.sqlite3
+backend/mes.db
+
+# --- Environment / secrets ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# --- Claude local settings (chứa cấu hình/token cục bộ) ---
+.claude/settings.local.json
+
+# --- Node (frontend deps nếu có sau này) ---
+node_modules/
+dist/
+build/
+
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+
+# Tạm bỏ qua workflow cho tới khi dùng token có scope 'workflow'
+.github/workflows/
