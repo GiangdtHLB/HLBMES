@@ -28,7 +28,10 @@ def get_db() -> Generator[Session, None, None]:
 
 
 def init_db() -> None:
-    """Tạo bảng nếu chưa có. (Production nên dùng migration như Alembic.)"""
+    """Tạo bảng cho dev SQLite. Với Postgres (production) KHÔNG tự create_all —
+    Alembic là nguồn schema duy nhất (`alembic upgrade head`), tránh lệch schema."""
     from . import models  # noqa: F401  đảm bảo model đã được import/đăng ký
 
+    if not DATABASE_URL.startswith("sqlite"):
+        return
     Base.metadata.create_all(bind=engine)

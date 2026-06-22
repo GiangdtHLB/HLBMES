@@ -1,0 +1,16 @@
+.git
+.env
+.env.*
+**/.venv
+**/venv
+**/__pycache__
+**/.pytest_cache
+**/*.pyc
+**/*.pyo
+**/*.db
+**/*.sqlite
+frontend/node_modules
+node_modules
+dist
+build
+.next

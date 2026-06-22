@@ -3,6 +3,9 @@ uvicorn[standard]==0.30.1
 SQLAlchemy==2.0.30
 pydantic==2.7.4
 python-multipart==0.0.9
+# Alembic là nguồn schema cho Postgres production → BẮT BUỘC có ở runtime
+# (compose chạy `alembic upgrade head` lúc deploy), không chỉ ở dev.
+alembic==1.13.2
 # Tùy chọn: bật trợ lý AI bằng Claude thật (đặt ANTHROPIC_API_KEY).
 # Bỏ comment để cài; nếu không cài, trợ lý dùng engine luật nội bộ (offline).
 # anthropic==0.69.0

@@ -5,7 +5,7 @@ services:
     image: postgres:16-alpine
     environment:
       POSTGRES_USER: mes
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mes_secret}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD bắt buộc — tạo .env trước}
       POSTGRES_DB: mes
     volumes:
       - pgdata:/var/lib/postgresql/data
@@ -21,22 +21,27 @@ services:
       context: .
       dockerfile: backend/Dockerfile
     environment:
-      MES_DATABASE_URL: postgresql+psycopg://mes:${POSTGRES_PASSWORD:-mes_secret}@db:5432/mes
+      MES_DATABASE_URL: postgresql+psycopg://mes:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD bắt buộc — tạo .env trước}@db:5432/mes
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       MES_LLM_ENABLED: ${MES_LLM_ENABLED:-auto}
       MES_DEV_HEADER_AUTH: "0"
+      # Seed dữ liệu/ tài khoản demo CHỈ khi bật rõ ràng. Public/prod PHẢI để 0.
+      MES_SEED_DEMO: ${MES_SEED_DEMO:-0}
     depends_on:
       db:
         condition: service_healthy
+    # Local-only: chỉ nghe loopback của host. Internet vào qua Nginx Proxy Manager,
+    # KHÔNG publish 0.0.0.0 ở giai đoạn test.
     ports:
-      - "8077:8077"
+      - "127.0.0.1:8077:8077"
     restart: unless-stopped
-    # Migration + seed lần đầu rồi chạy app (idempotent: seed tự bỏ qua nếu đã có dữ liệu).
-    # Chạy từ thư mục backend để 'app' import được và alembic.ini ở đúng chỗ.
+    # Migration luôn chạy (Alembic = nguồn schema). Seed demo CHỈ khi MES_SEED_DEMO=1.
+    # --host 0.0.0.0 là bind TRONG container (cần để mapping 127.0.0.1:8077 tới được);
+    # giới hạn public do port mapping "127.0.0.1:8077:8077" ở trên đảm nhiệm.
     command: >
       sh -c "cd backend &&
              alembic upgrade head &&
-             (python -m app.seed || true) &&
+             ([ \"$$MES_SEED_DEMO\" = \"1\" ] && python -m app.seed || echo 'seed bỏ qua (MES_SEED_DEMO!=1)') &&
              python -m uvicorn app.main:app --host 0.0.0.0 --port 8077"
 
   # TLS termination (HTTPS) — bật khi cần: đặt cert vào ./deploy/certs, cấu hình ./deploy/nginx.conf
