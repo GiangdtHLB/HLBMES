@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from ..audit import record_audit
 from ..common import new_id, utcnow
-from ..errors import DomainError, NotFoundError, PermissionError_
+from ..errors import DomainError, PermissionError_
 from ..models.audit import AuditLog
 from ..models.auth import User as UserModel
 from ..models.batches import BatchExecution

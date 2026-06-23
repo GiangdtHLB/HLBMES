@@ -146,19 +146,8 @@ def complete_plan(plan_id: str, db: Session = Depends(get_db), user: User = Depe
 # ---- Kiểm định / hiệu chuẩn ----
 @router.get("/calibrations")
 def list_calibrations(calib_type: str = None, db: Session = Depends(get_db)):
-    items = db.execute(select(Calibration).order_by(Calibration.due_date)).scalars().all()
-    today = date.today()
-    out = []
-    for c in items:
-        if calib_type and c.calib_type != calib_type:
-            continue
-        days = (c.due_date - today).days
-        status = "overdue" if days < 0 else ("due" if days <= 30 else "valid")
-        eq = db.get(Equipment, c.equipment_id) if c.equipment_id else None
-        out.append({"calib_id": c.calib_id, "name": c.name, "calib_type": c.calib_type,
-                    "equipment": eq.code if eq else None, "last_date": c.last_date,
-                    "due_date": c.due_date, "days_left": days, "result": c.result, "status": status})
-    return out
+    from ..services import derived
+    return derived.calibrations(db, calib_type)
 
 
 @router.post("/calibrations", status_code=201)

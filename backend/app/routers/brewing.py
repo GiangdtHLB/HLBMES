@@ -1,9 +1,8 @@
 """Nấu-Lọc-Chiết chi tiết: nguyên liệu, nấu, lên men, lọc, chiết, chỉ tiêu, cảnh báo."""
 
-from datetime import datetime
 
 from fastapi import APIRouter, Depends
-from sqlalchemy import extract, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..common import new_id, utcnow
@@ -208,33 +207,5 @@ def add_indicator(payload: StageIndicatorIn, db: Session = Depends(get_db),
 # ===== Cảnh báo chỉ tiêu chất lượng (theo tháng/năm) =====
 @router.get("/alerts")
 def alerts(month: int = None, year: int = None, db: Session = Depends(get_db)):
-    now = utcnow()
-    month = month or now.month
-    year = year or now.year
-    out = []
-
-    brews = db.execute(select(BrewRecord).where(
-        extract("month", BrewRecord.brew_date) == month,
-        extract("year", BrewRecord.brew_date) == year)).scalars().all()
-    for b in brews:
-        if b.original_extract is None:
-            out.append(f"Mã thông tin nấu = {b.brew_code} Tên chỉ tiêu: Độ hòa tan nguyên thủy không được để trống")
-        if b.plato is None:
-            out.append(f"Mã thông tin nấu = {b.brew_code} Tên chỉ tiêu: Plato không được để trống")
-
-    bottles = db.execute(select(BottleRecord).where(
-        extract("month", BottleRecord.bottle_date) == month,
-        extract("year", BottleRecord.bottle_date) == year)).scalars().all()
-    for bo in bottles:
-        total = bo.ca1 + bo.ca2 + bo.ca3
-        if bo.v_cap_chiet_hl > 0 and total <= 0:
-            out.append(f"Mã thông tin chiết = {bo.bottle_code} Nhập sản lượng không đúng")
-
-    filters = db.execute(select(FilterRecord).where(
-        extract("month", FilterRecord.filter_date) == month,
-        extract("year", FilterRecord.filter_date) == year)).scalars().all()
-    for fl in filters:
-        if fl.filter_type != "ve_bbt_phoi" and not fl.has_indicators:
-            out.append(f"Mã thông tin lọc = {fl.filter_code} Chưa nhập chỉ tiêu lọc")
-
-    return {"month": month, "year": year, "count": len(out), "alerts": out}
+    from ..services import derived
+    return derived.brewing_alerts(db, month, year)

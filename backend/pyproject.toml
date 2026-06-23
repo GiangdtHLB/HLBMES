@@ -1,0 +1,11 @@
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+extend-exclude = ["alembic", ".venv"]
+
+[tool.ruff.lint]
+# Tập trung lỗi thực: syntax (E9) + pyflakes (F: undefined/unused/redefined).
+select = ["E9", "F"]
+
+[tool.ruff.lint.per-file-ignores]
+"**/__init__.py" = ["F401"]      # re-export gom model/router là cố ý

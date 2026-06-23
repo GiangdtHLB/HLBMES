@@ -5,7 +5,6 @@ không có tool nào thay đổi setpoint, điều khiển thiết bị hay ghi 
 có schema (JSON Schema) để vừa dùng cho tool-use của Claude vừa xuất manifest cho agent.
 """
 
-from datetime import date
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -36,12 +35,9 @@ def get_oee(db: Session, line: str = None) -> dict:
 
 
 def get_quality_alerts(db: Session, month: int = None, year: int = None) -> dict:
-    from ..routers.brewing import alerts as brewing_alerts
-    from ..routers.process import quality_alerts as process_alerts
-    today = date.today()
-    b = brewing_alerts(month or today.month, year or today.year, db)
-    p = process_alerts(db)
-    return {"brewing": b, "process": p}
+    from . import derived
+    return {"brewing": derived.brewing_alerts(db, month, year),
+            "process": derived.process_quality_alerts(db)}
 
 
 def get_batch_status(db: Session, batch_code: str = None) -> dict:
@@ -55,8 +51,8 @@ def get_batch_status(db: Session, batch_code: str = None) -> dict:
 
 
 def get_calibrations_due(db: Session) -> dict:
-    from ..routers.maintenance import list_calibrations
-    items = list_calibrations(None, db)
+    from . import derived
+    items = derived.calibrations(db)
     due = [c for c in items if c["status"] in ("due", "overdue")]
     return {"due_or_overdue": due, "total": len(items)}
 
@@ -69,8 +65,8 @@ def get_open_incidents(db: Session) -> dict:
 
 
 def get_energy_summary(db: Session) -> dict:
-    from ..routers.energy import monthly
-    return {"monthly": monthly(None, db)}
+    from . import derived
+    return {"monthly": derived.energy_monthly(db)}
 
 
 def trace_lot(db: Session, code: str) -> dict:

@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..schemas import CapaIn, CapaTransitionIn, SampleIn, SampleTransitionIn
-from ..security import User, get_current_user, require_perm
+from ..security import User, get_current_user
 from ..services import quality_adv as svc
 
 router = APIRouter(prefix="/api/qc", tags=["quality-adv"])

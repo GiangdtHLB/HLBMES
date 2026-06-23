@@ -10,6 +10,7 @@ import tempfile
 _TMP = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
 os.environ["MES_DATABASE_URL"] = f"sqlite:///{_TMP.name}"
 os.environ["MES_DEV_HEADER_AUTH"] = "0"
+os.environ["MES_RL_ENABLED"] = "0"   # tắt rate-limit để test đăng nhập nhiều lần
 
 import pytest
 from fastapi.testclient import TestClient

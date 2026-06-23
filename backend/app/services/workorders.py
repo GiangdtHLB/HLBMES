@@ -10,7 +10,6 @@ from ..common import WORKORDER_TRANSITIONS, WorkOrderState, new_id, utcnow
 from ..errors import DomainError, NotFoundError
 from ..models.batches import BatchExecution
 from ..models.orders import ProductionOrder
-from ..models.recipes import RecipeVersion
 from ..models.workorder import WorkOrder
 from ..security import User, filter_by_scope, require_perm, require_scope
 from . import batches as batch_svc

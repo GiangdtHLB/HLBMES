@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..schemas import DowntimeIn
-from ..security import User, get_current_user, require_perm
+from ..security import User, get_current_user
 from ..services import downtime as svc
 
 router = APIRouter(prefix="/api/downtime", tags=["downtime"])

@@ -11,9 +11,8 @@ from sqlalchemy.orm import Session
 
 from ..audit import record_audit
 from ..common import Role, new_id, utcnow
-from ..errors import DomainError, NotFoundError
+from ..errors import DomainError
 from ..models.maintenance import Equipment, Incident
-from ..models.metrics import OEERecord
 from ..models.oee_ext import DowntimeEvent
 from ..security import User, require_role
 

@@ -9,7 +9,7 @@ mô hình BatchExecution trừu tượng của lõi MES.
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import Boolean, DateTime, Float, Integer, String
+from sqlalchemy import Boolean, DateTime, Float, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ..common import new_id, utcnow
