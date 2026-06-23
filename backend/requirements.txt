@@ -4,6 +4,9 @@ SQLAlchemy==2.0.30
 pydantic==2.7.4
 python-multipart==0.0.9
 pydantic-settings==2.3.4
+# Alembic = nguồn schema, compose chạy `alembic upgrade head` lúc deploy → BẮT BUỘC ở runtime.
+# (Bản main đang thiếu dòng này khiến container crash-loop "alembic: not found".)
+alembic==1.13.2
 # OPC UA edge connector (tiến trình app.opcua_edge — core app KHÔNG import; chỉ cần ở máy chạy edge).
 asyncua==1.1.8
 # Sinh mã QR cho tem pallet/case (thuần Python, không phụ thuộc ngoài).
