@@ -30,10 +30,11 @@ services:
     depends_on:
       db:
         condition: service_healthy
-    # Local-only: chỉ nghe loopback của host. Internet vào qua Nginx Proxy Manager,
-    # KHÔNG publish 0.0.0.0 ở giai đoạn test.
+    # Bind tham số hoá: mặc định AN TOÀN 127.0.0.1 (chỉ loopback). Server cần
+    # LAN + Cloudflare Tunnel thì đặt MES_BIND=0.0.0.0 trong .env local (không commit).
+    # KHÔNG hardcode IP máy. Bảo vệ internet do Cloudflare Access + firewall host lo.
     ports:
-      - "127.0.0.1:8077:8077"
+      - "${MES_BIND:-127.0.0.1}:8077:8077"
     restart: unless-stopped
     # Migration luôn chạy (Alembic = nguồn schema). Seed demo CHỈ khi MES_SEED_DEMO=1.
     # --host 0.0.0.0 là bind TRONG container (cần để mapping 127.0.0.1:8077 tới được);
