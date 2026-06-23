@@ -265,6 +265,19 @@ Danh sách lớn được chia giai đoạn, mỗi giai đoạn chạy được 
 
 > **P2 còn lại (khi quy mô rất lớn):** chuyển worker sang Celery/RQ + Redis (broker); cảnh báo Prometheus Alertmanager theo metric; tách `app.js` sâu hơn theo nhóm view. Hạ tầng cần server ngoài (Redis/Prometheus/Postgres) đã có **điểm cắm + fallback**, chỉ việc bật.
 
+### Nâng cấp production-grade (P3) — theo lộ trình 6 mục
+
+| Mục lộ trình | Trạng thái | Thực hiện |
+|---|---|---|
+| **1. Nền công nghệ** (Postgres, migration, HTTPS, SSO, backup/restore, logging/monitoring) | 🟢 Phần lớn xong | Postgres + **Alembic 6 migration**, backup/restore + **test_restore**, structured logging + **/metrics**. *Còn:* **SSO/OIDC** (cần IdP) + **bật HTTPS** (mẫu nginx sẵn). |
+| **2. SCADA/PLC/historian** (OPC UA / Weihenstephan line chiết) | 🟢 Phần mềm xong | **`app/opcua_edge.py`** — client OPC UA THẬT (asyncua) đọc bộ tag chuẩn **Weihenstephan** → map UNS → historian; verify bằng OPC UA server cục bộ. *Còn:* trỏ tới PLC/SCADA thật tại hiện trường. |
+| **3. ISA-88 recipe/batch** (nấu/lên men/lọc + CIP/SIP) | ✅ Xong | `procedure` (UP→operation→phase) + `BatchPhaseRun` + state machine; tab **ISA-88**. |
+| **4. LIMS + WMS + barcode** (pallet/case, handheld) | ✅ Xong | LIMS (sample→test→COA, QC Lab) + **WMS** (vị trí/pallet/case + putaway/ship) + **barcode Code39** pallet/case (kiosk scan `/api/scan`); tab **Kho TP (WMS)**. *Còn:* tích hợp đầu đọc cầm tay vật lý. |
+| **5. Scheduling tối ưu** (tank/line/CIP/material/maintenance) | ✅ Xong | `services/scheduler.py` greedy earliest-fit + CIP + né bảo trì + check NVL + phát hiện xung đột; tab **Lập lịch** (Gantt). |
+| **6. Validation/audit/test/UAT** | 🟢 Phần lớn xong | **Audit hash-chain bất biến** + verify-chain; **30/30 test + CI (ruff+pytest+docker)**; review đối kháng. *Còn:* hồ sơ **CSV/IQ-OQ-PQ** + **UAT theo ca thật** (quy trình tại site). |
+
+Mỗi mục #3/#4/#5 có **migration riêng** (`b2c3…` ISA-88, `c3d4…` schedule, `d4e5…` WMS) + **test** trong `tests/test_depth.py` & `tests/test_opcua.py`. Chạy edge OPC UA demo: `python -m app.opcua_edge --demo`.
+
 ### Edge + Historian real-time (Phase 3)
 - **Historian** (`services/historian.py`): time-series theo tag UNS (`brewery/site01/<area>/<device>/<metric>`); `POST /api/historian/ingest` (xác thực **X-API-Key** scope write), `GET /api/historian/{tags,latest,series}` (downsample min/avg/max cho biểu đồ). SQLite cho demo — interface swap được TimescaleDB/Influx.
 - **Edge connector** `python -m app.edge_sim`: tiến trình **độc lập** mô phỏng gateway OPC UA/MQTT, đẩy 8 tag (nhiệt độ/áp suất/°P/DO/flow/hơi/điện) mỗi vài giây qua API key `mes_edge_writer_key_0001`. Thay phần sinh giá trị bằng client OPC UA/MQTT thật là chạy production.
