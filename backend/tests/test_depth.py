@@ -296,6 +296,57 @@ def test_job_queue_unknown_kind(client):
     assert client.post("/api/jobs", headers=h, json={"kind": "khong_ton_tai"}).status_code == 409
 
 
+# ---------------- Q1: recipe suspend/resume ----------------
+def test_recipe_suspend_resume(client):
+    h = _login(client, "kysu", "123456")              # recipe.approve
+    rid = client.get("/api/recipes", headers=h).json()[0]["recipe_id"]
+    vers = client.get(f"/api/recipes/{rid}/versions", headers=h).json()
+    vid = next(v["version_id"] for v in vers if v["state"] == "effective")
+    # tạm ngưng
+    assert client.post(f"/api/recipes/versions/{vid}/transition", headers=h,
+                       json={"target": "suspended"}).json()["state"] == "suspended"
+    # đang tạm ngưng → KHÔNG tạo được mẻ
+    hq = _login(client, "quandoc", "123456")
+    oid = client.get("/api/orders", headers=hq).json()[0]["order_id"]
+    bad = client.post("/api/batches", headers=hq,
+                      json={"order_id": oid, "recipe_version_id": vid, "planned_qty": 1000, "allow_shortage": True})
+    assert bad.status_code == 409
+    # kích hoạt lại
+    assert client.post(f"/api/recipes/versions/{vid}/transition", headers=h,
+                       json={"target": "effective"}).json()["state"] == "effective"
+
+
+# ---------------- Q2: production line master ----------------
+def test_line_master_and_oee(client):
+    h = _login(client, "kysu", "123456")              # master.manage
+    assert len(client.get("/api/lines", headers=h).json()) >= 2
+    r = client.post("/api/lines", headers=h,
+                    json={"code": "Line-9 (test)", "name": "Line test", "ideal_rate_per_min": 150})
+    assert r.status_code == 201
+    lid = r.json()["line_id"]
+    assert client.post(f"/api/lines/{lid}/toggle", headers=h).json()["active"] is False
+    act = client.get("/api/lines", params={"active_only": True}, headers=h).json()
+    assert all(l["code"] != "Line-9 (test)" for l in act)
+    # không có master.manage → không thêm được dây chuyền
+    no = _login(client, "vanhanh", "123456")
+    assert client.post("/api/lines", headers=no, json={"code": "X", "name": "x"}).status_code == 403
+    # nhập OEE theo dây chuyền
+    hq = _login(client, "quandoc", "123456")
+    oe = client.post("/api/oee", headers=hq, json={"line": "Line-1 (chai)", "shift": "C",
+                     "planned_time_min": 480, "downtime_min": 30, "ideal_rate_per_min": 300,
+                     "total_count": 100000, "good_count": 98000})
+    assert oe.status_code == 201 and oe.json()["oee"] > 0
+
+
+# ---------------- Q3: QR label ----------------
+def test_qr_label(client):
+    h = _login(client, "thukho", "123456")
+    r = client.get("/api/label/qr", params={"data": "PLT-2406-01"}, headers=h)
+    assert r.status_code == 200 and "image/svg" in r.headers.get("content-type", "")
+    assert "<svg" in r.text and ("<path" in r.text or "<rect" in r.text)
+    assert client.get("/api/label/qr", params={"data": "X"}).status_code == 403   # cần đăng nhập
+
+
 # ---------------- rate-limit (bật riêng để test) ----------------
 def test_rate_limit_login(client, monkeypatch):
     from app import ratelimit

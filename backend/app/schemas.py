@@ -253,6 +253,14 @@ class PutawayIn(BaseModel):
     loc_id: str
 
 
+# ---- Dây chuyền (line master) ----
+class LineIn(BaseModel):
+    code: str
+    name: str
+    area: Optional[str] = None
+    ideal_rate_per_min: float = 0.0
+
+
 class EbrSignIn(BaseModel):
     password: str
     meaning: str

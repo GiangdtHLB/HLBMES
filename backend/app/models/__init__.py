@@ -38,6 +38,7 @@ from .jobs import Job
 from .isa88 import BatchPhaseRun
 from .scheduling import ScheduleSlot
 from .wms import Case, Pallet, WmsLocation
+from .lines import ProductionLine
 
 __all__ = [
     "AuditLog",
@@ -88,4 +89,5 @@ __all__ = [
     "WmsLocation",
     "Pallet",
     "Case",
+    "ProductionLine",
 ]

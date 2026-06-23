@@ -242,6 +242,7 @@ def seed():
     _seed_dispense(db, batch.batch_id, [malt, hop, yeast])
     _seed_schedule(db)
     _seed_wms(db)
+    _seed_lines(db)
     db.add(ApiKey(key_id=new_id(), name="Demo ERP", token="mes_demo_readonly_key_0001",
                   scopes="read", created_by="admin"))
     db.add(ApiKey(key_id=new_id(), name="Edge Gateway", token="mes_edge_writer_key_0001",
@@ -613,6 +614,18 @@ def _seed_recipe_ext(db, recipe_id, rv_effective, batch_id) -> None:
     rv2.state = "approved"
     rv2.approved_by = "qa1"
     rv2.approved_at = utcnow()
+    db.commit()
+
+
+def _seed_lines(db) -> None:
+    """#Q2: danh mục dây chuyền đóng gói (khớp tên line trong OEERecord)."""
+    from .models.lines import ProductionLine
+    db.add_all([
+        ProductionLine(line_id=new_id(), code="Line-1 (chai)", name="Dây chuyền chai #1",
+                       area="chiet", ideal_rate_per_min=300, active=True),
+        ProductionLine(line_id=new_id(), code="Line-2 (lon)", name="Dây chuyền lon #2",
+                       area="chiet", ideal_rate_per_min=500, active=True),
+    ])
     db.commit()
 
 

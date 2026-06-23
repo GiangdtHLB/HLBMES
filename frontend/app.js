@@ -299,8 +299,14 @@ VIEWS.recipes = async function () {
   }));
 };
 function recipeVerRow(r, v) {
-  const next = { draft: ["review"], review: ["approved"], approved: ["effective"], effective: ["obsolete"], obsolete: [] }[v.state] || [];
-  const btns = next.map(n => `<button class="btn sm sec" data-vtrans="${n}" data-vid="${v.version_id}">→ ${n}</button>`).join(" ");
+  const next = { draft: ["review"], review: ["approved"], approved: ["effective"],
+    effective: ["suspended", "obsolete"], suspended: ["effective", "obsolete"], obsolete: [] }[v.state] || [];
+  const btns = next.map(n => {
+    const lab = { review: "→ review", approved: "→ duyệt",
+      effective: v.state === "suspended" ? "▶ Kích hoạt lại" : "→ hiệu lực",
+      suspended: "⏸ Tạm ngưng", obsolete: "⏹ Ngừng dùng" }[n] || ("→ " + n);
+    return `<button class="btn sm sec" data-vtrans="${n}" data-vid="${v.version_id}">${lab}</button>`;
+  }).join(" ");
   return `<tr><td>v${v.version_no}</td><td>${badge(v.state)}</td>
     <td>${v.base_qty ? v.base_qty.toLocaleString("vi-VN") + " " + esc(v.base_uom) : "—"}</td>
     <td><b>${(v.materials || []).length}</b></td><td>${v.parameters.length}</td>
@@ -1513,7 +1519,8 @@ const ALL_VIEWS = ["dashboard","orders","dispatch","recipes","batches","quality"
 
 // ================= DANH MỤC (master data: sản phẩm + vật tư) =================
 VIEWS.master = async function () {
-  const [products, materials] = await Promise.all([GET("/products"), GET("/materials")]);
+  const [products, materials, plines] = await Promise.all([
+    GET("/products"), GET("/materials"), GET("/lines").catch(() => [])]);
   const canManage = CURRENT_USER && (CURRENT_USER.permissions === "*" ||
     (Array.isArray(CURRENT_USER.permissions) && CURRENT_USER.permissions.includes("master.manage")));
   const noPerm = canManage ? "" :
@@ -1556,6 +1563,24 @@ VIEWS.master = async function () {
             ${canManage ? `<td><button class="btn sm sec" data-em="${esc(m.material_id)}">Sửa</button></td>` : ""}</tr>`).join("")}</tbody>
         </table></div>
       </div>
+    </div>
+    <div class="panel"><h2>🏭 Dây chuyền sản xuất <span class="muted">(${plines.length})</span></h2>
+      ${noPerm}
+      ${canManage ? `<div class="row">
+        <div class="field"><label>Mã line</label><input id="ln_code" placeholder="Line-3 (keg)"/></div>
+        <div class="field"><label>Tên</label><input id="ln_name" placeholder="Dây chuyền keg #3"/></div>
+        <div class="field"><label>Khu vực</label><input id="ln_area" value="chiet" style="width:90px"/></div>
+        <div class="field"><label>Tốc độ lý tưởng</label><input id="ln_rate" value="200" style="width:110px"/></div>
+        <button class="btn" id="ln_add" style="align-self:flex-end">+ Thêm dây chuyền</button>
+      </div>` : ""}
+      <div class="tablewrap" style="margin-top:12px"><table>
+        <thead><tr><th>Mã</th><th>Tên</th><th>Khu vực</th><th>Tốc độ lý tưởng</th><th>Trạng thái</th>${canManage ? "<th></th>" : ""}</tr></thead>
+        <tbody>${plines.map(l => `<tr>
+          <td><code class="k">${esc(l.code)}</code></td><td>${esc(l.name)}</td><td>${esc(l.area || "—")}</td>
+          <td>${l.ideal_rate_per_min}/phút</td>
+          <td>${badge(l.active ? "available" : "obsolete")}${l.active ? "hoạt động" : "ngừng"}</td>
+          ${canManage ? `<td><button class="btn sm sec" data-ltoggle="${esc(l.line_id)}">${l.active ? "Ngừng" : "Bật lại"}</button></td>` : ""}</tr>`).join("")}</tbody>
+      </table></div>
     </div>`;
 
   if (canManage) {
@@ -1569,6 +1594,14 @@ VIEWS.master = async function () {
         uom: $("mt_uom").value.trim() || "kg", category: $("mt_cat").value });
       toast("Đã tạo vật tư"); render("master");
     });
+    if ($("ln_add")) $("ln_add").onclick = () => guard(async () => {
+      await POST("/lines", { code: $("ln_code").value.trim(), name: $("ln_name").value.trim(),
+        area: $("ln_area").value.trim() || null, ideal_rate_per_min: parseFloat($("ln_rate").value) || 0 });
+      toast("Đã thêm dây chuyền"); render("master");
+    });
+    document.querySelectorAll("[data-ltoggle]").forEach(b => b.onclick = () => guard(async () => {
+      await POST(`/lines/${b.dataset.ltoggle}/toggle`); toast("Đã đổi trạng thái dây chuyền"); render("master");
+    }));
     document.querySelectorAll("[data-ep]").forEach(b => b.onclick = () => {
       const p = products.find(x => x.product_id === b.dataset.ep);
       modal(`<h3>Sửa sản phẩm</h3>

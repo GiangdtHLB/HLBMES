@@ -67,6 +67,7 @@ class RecipeState(str, Enum):
     REVIEW = "review"
     APPROVED = "approved"
     EFFECTIVE = "effective"
+    SUSPENDED = "suspended"   # tạm ngưng (có thể kích hoạt lại) — khác OBSOLETE (loại bỏ vĩnh viễn)
     OBSOLETE = "obsolete"
 
 
@@ -74,7 +75,8 @@ RECIPE_TRANSITIONS: dict[RecipeState, set[RecipeState]] = {
     RecipeState.DRAFT: {RecipeState.REVIEW},
     RecipeState.REVIEW: {RecipeState.APPROVED, RecipeState.DRAFT},
     RecipeState.APPROVED: {RecipeState.EFFECTIVE, RecipeState.OBSOLETE},
-    RecipeState.EFFECTIVE: {RecipeState.OBSOLETE},
+    RecipeState.EFFECTIVE: {RecipeState.SUSPENDED, RecipeState.OBSOLETE},
+    RecipeState.SUSPENDED: {RecipeState.EFFECTIVE, RecipeState.OBSOLETE},
     RecipeState.OBSOLETE: set(),
 }
 

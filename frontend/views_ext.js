@@ -13,6 +13,26 @@
     `<option value="${esc(val(o))}" ${String(val(o)) === String(sel) ? "selected" : ""}>${esc(lab(o))}</option>`).join("");
   const panel = (title, body) => `<div class="panel"><h2>${title}</h2>${body}</div>`;
 
+  // Tem mã vạch: chọn Code39 (render client) hoặc QR (segno từ /api/label/qr) + in.
+  function labelModal(code) {
+    const c39 = (typeof code39SVG === "function") ? code39SVG(code, { height: 70 })
+      : `<div style="font-family:monospace">${esc(code)}</div>`;
+    modal(`<h3>Tem: ${esc(code)}</h3>
+      <div class="row" style="margin-bottom:8px">
+        <button class="btn sm" id="lb_c39">Code39</button>
+        <button class="btn sm sec" id="lb_qr">QR code</button>
+        <button class="btn sm sec" id="lb_print" style="margin-left:auto">🖨️ In</button></div>
+      <div id="lb_view" style="text-align:center;padding:12px;background:#fff;border-radius:8px;min-height:90px">${c39}</div>`);
+    $("lb_c39").onclick = () => { $("lb_view").innerHTML = c39; };
+    $("lb_qr").onclick = () => guard(async () => {
+      const r = await fetch("/api/label/qr?data=" + encodeURIComponent(code) + "&scale=5",
+        { headers: { "Authorization": "Bearer " + TOKEN } });
+      if (!r.ok) { toast("Lỗi sinh QR", "err"); return; }
+      $("lb_view").innerHTML = await r.text();
+    });
+    $("lb_print").onclick = () => window.print();
+  }
+
   // ---------- Biểu đồ kiểm soát SPC (control chart) ----------
   function controlChart(spc) {
     const pts = spc.points || [];
@@ -327,18 +347,32 @@
   // ======================================================================
   VIEWS.oee = async function () {
     const root = $("view-oee");
-    const [oee, tree, pareto, losses, mtbf] = await Promise.all([
+    const [oee, tree, pareto, losses, mtbf, lns] = await Promise.all([
       GET("/oee"), GET("/downtime/reason-tree"), GET("/downtime/pareto"),
-      GET("/downtime/big-losses"), GET("/downtime/mtbf")]);
+      GET("/downtime/big-losses"), GET("/downtime/mtbf"), GET("/lines?active_only=true").catch(() => [])]);
     const donuts = oee.map(r => `<div class="panel" style="text-align:center">
       <h3>${esc(r.line)} · ca ${esc(r.shift)}</h3>${CH.donut(r.oee, { label: "OEE" })}
       <div class="muted" style="font-size:12px">A ${(r.availability * 100).toFixed(0)}% · P ${(r.performance * 100).toFixed(0)}% · Q ${(r.quality * 100).toFixed(0)}%</div></div>`).join("");
     const groups = Object.keys(tree);
+    const lineOpts = lns.map(l => `<option value="${esc(l.code)}" data-rate="${l.ideal_rate_per_min}">${esc(l.code)}</option>`).join("")
+      || `<option value="">(chưa có dây chuyền — thêm ở Danh mục)</option>`;
     root.innerHTML = `
       ${panel("⚙️ OEE đóng gói", `<div class="split">${donuts || '<div class="muted">—</div>'}</div>`)}
+      ${panel("📝 Nhập OEE theo ca (chọn dây chuyền)", `
+        <div class="row">
+          <div class="field"><label>Dây chuyền</label><select id="oe_line">${lineOpts}</select></div>
+          <div class="field"><label>Ca</label><select id="oe_shift"><option>A</option><option>B</option><option>C</option></select></div>
+          <div class="field"><label>TG kế hoạch (phút)</label><input id="oe_plan" value="480" style="width:90px"/></div>
+          <div class="field"><label>Dừng (phút)</label><input id="oe_dt" value="60" style="width:80px"/></div>
+          <div class="field"><label>Tốc độ lý tưởng</label><input id="oe_rate" value="0" style="width:90px"/></div>
+          <div class="field"><label>Tổng SP</label><input id="oe_tot" value="0" style="width:90px"/></div>
+          <div class="field"><label>SP đạt</label><input id="oe_good" value="0" style="width:90px"/></div>
+          <div class="field" style="align-self:flex-end"><button class="btn" id="oe_go">Ghi OEE</button></div>
+        </div>
+        <div class="muted" style="margin-top:4px">Thêm/ngừng dây chuyền ở tab <b>Danh mục</b>.</div>`)}
       ${panel("⏱️ Ghi sự kiện dừng máy (reason-tree)", `
         <div class="row">
-          <div class="field"><label>Line</label><input id="dt_line" value="Line-1 (chai)" style="width:140px"/></div>
+          <div class="field"><label>Line</label><select id="dt_line">${lineOpts}</select></div>
           <div class="field"><label>Nhóm lý do</label><select id="dt_grp">${groups.map(g => `<option value="${g}">${esc(tree[g].label)}</option>`).join("")}</select></div>
           <div class="field"><label>Lý do</label><select id="dt_code"></select></div>
           <div class="field"><label>Phút</label><input id="dt_min" value="15" style="width:80px"/></div>
@@ -367,6 +401,17 @@
       await POST("/downtime", { line: $("dt_line").value, reason_group: $("dt_grp").value,
         reason_code: $("dt_code").value, minutes: num("dt_min") || 0, shift: $("dt_shift").value });
       toast("Đã ghi sự kiện dừng"); render("oee");
+    });
+    // Tự điền tốc độ lý tưởng theo dây chuyền chọn.
+    const syncRate = () => { const o = $("oe_line").selectedOptions[0]; if (o && o.dataset.rate) $("oe_rate").value = o.dataset.rate; };
+    $("oe_line").onchange = syncRate; syncRate();
+    $("oe_go").onclick = () => guard(async () => {
+      if (!$("oe_line").value) { toast("Chưa có dây chuyền — thêm ở Danh mục", "err"); return; }
+      await POST("/oee", { line: $("oe_line").value, shift: $("oe_shift").value,
+        planned_time_min: num("oe_plan") || 0, downtime_min: num("oe_dt") || 0,
+        ideal_rate_per_min: num("oe_rate") || 0, total_count: num("oe_tot") || 0,
+        good_count: num("oe_good") || 0 });
+      toast("Đã ghi OEE ca"); render("oee");
     });
   };
 
@@ -539,12 +584,7 @@
       document.querySelectorAll("[data-ship]").forEach(b => b.onclick = () => guard(async () => {
         await POST(`/wms/pallets/${b.dataset.ship}/ship`, {}); toast("Đã xuất pallet"); render("wms");
       }));
-      document.querySelectorAll("[data-label]").forEach(b => b.onclick = () => {
-        const svg = (typeof code39SVG === "function") ? code39SVG(b.dataset.label, { height: 70 })
-          : `<div style="font-family:monospace">${esc(b.dataset.label)}</div>`;
-        modal(`<h3>Tem pallet</h3><div style="text-align:center;padding:10px">${svg}</div>
-          <button class="btn" onclick="window.print()">In</button>`);
-      });
+      document.querySelectorAll("[data-label]").forEach(b => b.onclick = () => labelModal(b.dataset.label));
     }
     renderPallets(pals);
     $("pl_build").onclick = () => guard(async () => {
