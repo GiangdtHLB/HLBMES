@@ -68,7 +68,8 @@ def _profile(u: UserModel) -> dict:
                            [p.strip() for p in (u.permissions or "").split(",") if p.strip()],
             "scope_lines": getattr(u, "scope_lines", "*") or "*",
             "scope_areas": getattr(u, "scope_areas", "*") or "*",
-            "scope_qc": getattr(u, "scope_qc", "*") or "*"}
+            "scope_qc": getattr(u, "scope_qc", "*") or "*",
+            "must_change_password": bool(getattr(u, "must_change_password", False))}
 
 
 def _audit_auth(db, username, role, action, reason=None):
@@ -118,6 +119,7 @@ def change_password(payload: ChangePasswordIn, db: Session = Depends(get_db),
     if len(payload.new_password) < 6:
         raise PermissionError_("Mật khẩu mới tối thiểu 6 ký tự.")
     u.password_hash = hash_password(payload.new_password)
+    u.must_change_password = False          # đã đổi → bỏ cờ buộc đổi
     _audit_auth(db, u.username, u.role, "change_password")
     db.commit()
     return {"ok": True}

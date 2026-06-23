@@ -1,5 +1,9 @@
 """Điểm vào ứng dụng FastAPI (modular monolith)."""
 
+import time
+import uuid
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -7,6 +11,8 @@ from fastapi.staticfiles import StaticFiles
 from .config import APP_NAME, FRONTEND_DIR
 from .database import init_db
 from .errors import DomainError, NotFoundError, PermissionError_
+from .logging_config import configure_logging, get_logger, request_id_var
+from .ratelimit import check_rate_limit
 from .routers import (
     ai,
     audit,
@@ -34,21 +40,49 @@ from .routers import (
     workorders,
 )
 
+configure_logging()
+log = get_logger("mes.http")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    init_db()
+    get_logger("mes").info("MES khởi động — %s", APP_NAME)
+    yield
+
+
 app = FastAPI(
     title=APP_NAME,
     version="0.1.0-mvp",
+    lifespan=lifespan,
     description=(
         "MES Nhà máy Bia — MVP P0 (Order → Batch → Recipe/version → "
-        "QC hold/release → Genealogy → Audit). Theo blueprint MES-ARCH-002.\n\n"
-        "Xác thực MVP: truyền header **X-User** và **X-Role** "
-        "(operator|supervisor|qa|engineer|admin)."
+        "QC hold/release → Genealogy → Audit). Theo blueprint MES-ARCH-002."
     ),
 )
 
 
-@app.on_event("startup")
-def _startup() -> None:
-    init_db()
+@app.middleware("http")
+async def _observability(request: Request, call_next):
+    """Gắn request-id, áp rate-limit, đo độ trễ + log mỗi request."""
+    rid = request.headers.get("X-Request-ID") or uuid.uuid4().hex[:12]
+    token = request_id_var.set(rid)
+    start = time.monotonic()
+    try:
+        blocked = check_rate_limit(request)   # 429 nếu vượt giới hạn
+        if blocked is not None:
+            log.warning("rate_limited %s %s", request.method, request.url.path)
+            blocked.headers["X-Request-ID"] = rid
+            return blocked
+        resp = await call_next(request)
+        dur = (time.monotonic() - start) * 1000
+        resp.headers["X-Request-ID"] = rid
+        if request.url.path.startswith("/api"):
+            log.info("%s %s -> %s %.0fms", request.method, request.url.path,
+                     resp.status_code, dur)
+        return resp
+    finally:
+        request_id_var.reset(token)
 
 
 # ---- Ánh xạ lỗi nghiệp vụ sang HTTP ----
@@ -84,8 +118,9 @@ def health():
     try:
         with engine.connect() as conn:
             conn.execute(text("SELECT 1"))
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001 — health không được ném; nhưng PHẢI log
         db_ok = False
+        log.error("health DB check failed: %s", e, exc_info=True)
     return {"status": "ok" if db_ok else "degraded", "app": APP_NAME, "version": "0.1.0-mvp",
             "db": {"ok": db_ok, "dialect": dialect}, "time": utcnow().isoformat()}
 

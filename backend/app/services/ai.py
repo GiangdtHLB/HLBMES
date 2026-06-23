@@ -9,7 +9,10 @@
 from sqlalchemy.orm import Session
 
 from ..config import LLM_API_KEY, LLM_ENABLED, LLM_MODEL
+from ..logging_config import get_logger, log_ai_call
 from . import ai_tools
+
+log = get_logger("mes.ai")
 
 SYSTEM_PROMPT = (
     "Bạn là trợ lý vận hành cho hệ thống MES nhà máy bia. Trả lời ngắn gọn, "
@@ -94,7 +97,8 @@ def chat(db: Session, message: str, history: list = None) -> dict:
     if llm_available():
         try:
             return _chat_llm(db, message, history or [])
-        except Exception as e:  # noqa: BLE001 — fallback an toàn
+        except Exception as e:  # noqa: BLE001 — fallback an toàn sang engine luật
+            log.warning("LLM chat lỗi, fallback engine luật: %s", e, exc_info=True)
             res = _chat_local(db, message)
             res["note"] = f"(LLM lỗi, đã dùng engine luật: {e})"
             return res
@@ -105,12 +109,15 @@ def _chat_llm(db: Session, message: str, history: list) -> dict:
     """Dùng Claude (claude-opus-4-8) với tool-use loop trên các tool MES."""
     import anthropic
 
+    import time
     client = anthropic.Anthropic(api_key=LLM_API_KEY)
     tools = ai_tools.anthropic_tool_specs()
     messages = [{"role": h["role"], "content": h["content"]} for h in history[-8:]]
     messages.append({"role": "user", "content": message})
 
     used = []
+    in_tok = out_tok = 0
+    t0 = time.monotonic()
     for _ in range(6):  # giới hạn vòng lặp tool-use
         resp = client.messages.create(
             model=LLM_MODEL,
@@ -120,6 +127,10 @@ def _chat_llm(db: Session, message: str, history: list) -> dict:
             tools=tools,
             messages=messages,
         )
+        u = getattr(resp, "usage", None)
+        if u:
+            in_tok += getattr(u, "input_tokens", 0) or 0
+            out_tok += getattr(u, "output_tokens", 0) or 0
         if resp.stop_reason == "tool_use":
             messages.append({"role": "assistant", "content": resp.content})
             results = []
@@ -132,7 +143,11 @@ def _chat_llm(db: Session, message: str, history: list) -> dict:
             messages.append({"role": "user", "content": results})
             continue
         answer = "".join(b.text for b in resp.content if b.type == "text")
+        log_ai_call(log, model=LLM_MODEL, input_tokens=in_tok, output_tokens=out_tok,
+                    latency_ms=(time.monotonic() - t0) * 1000, tools=used)
         return {"answer": answer, "tools_used": used, "mode": "claude:" + LLM_MODEL}
+    log_ai_call(log, model=LLM_MODEL, input_tokens=in_tok, output_tokens=out_tok,
+                latency_ms=(time.monotonic() - t0) * 1000, tools=used, ok=False)
     return {"answer": "Xin lỗi, truy vấn quá phức tạp.", "tools_used": used, "mode": "claude:" + LLM_MODEL}
 
 

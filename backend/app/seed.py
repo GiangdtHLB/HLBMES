@@ -11,6 +11,7 @@ from datetime import timedelta
 from sqlalchemy import select
 
 from .common import LotStatus, Role, new_id, utcnow
+from .config import SEED_DEMO
 from .database import SessionLocal, init_db
 from .models.brewing import (
     BottleRecord,
@@ -66,9 +67,32 @@ def _get_or_create_material(db, code, name, uom, category):
     return m
 
 
+def ensure_admin(db) -> None:
+    """Luôn đảm bảo có tài khoản admin. Mật khẩu lấy từ MES_ADMIN_PASSWORD;
+    nếu không đặt → dùng 'admin123' nhưng BẮT BUỘC đổi mật khẩu lần đầu."""
+    from .config import ADMIN_PASSWORD
+    if db.execute(select(AppUser).where(AppUser.username == "admin")).scalar_one_or_none():
+        return
+    pw = ADMIN_PASSWORD or "admin123"
+    must_change = not ADMIN_PASSWORD          # mật khẩu mặc định → buộc đổi
+    db.add(AppUser(user_id=new_id(), username="admin", password_hash=hash_password(pw),
+                   full_name="Quản trị viên", job_title="Quản trị hệ thống", role="admin",
+                   allowed_views="*", permissions="*", scope_lines="*", scope_areas="*",
+                   scope_qc="*", active=True, must_change_password=must_change))
+    db.commit()
+    if must_change:
+        print("⚠️  Đã tạo admin với mật khẩu MẶC ĐỊNH 'admin123' — sẽ buộc đổi khi đăng nhập. "
+              "Đặt MES_ADMIN_PASSWORD để dùng mật khẩu riêng (không buộc đổi).")
+
+
 def seed():
     init_db()
     db = SessionLocal()
+    ensure_admin(db)
+    if not SEED_DEMO:
+        print("MES_SEED_DEMO=0 → chỉ tạo admin, KHÔNG seed tài khoản/API key/dữ liệu demo (an toàn cho production).")
+        db.close()
+        return
     if db.execute(select(ProductionOrder)).first():
         print("Đã có dữ liệu — bỏ qua seed. (Xóa backend/mes.db để seed lại.)")
         db.close()
@@ -658,8 +682,7 @@ def _seed_users(db) -> None:
     """
     accounts = [
         # username, password, full_name, job_title, role, views, permissions,
-        #   scope_lines, scope_areas, scope_qc
-        ("admin", "admin123", "Quản trị viên", "Quản trị hệ thống", "admin", "*", "*", "*", "*", "*"),
+        #   scope_lines, scope_areas, scope_qc  (admin do ensure_admin tạo riêng)
         ("giamdoc", "123456", "Nguyễn Văn Giám", "Giám đốc nhà máy", "supervisor",
          "dashboard,dispatch,oee,qclab,realtime,ai,trace,energy,reports,integration,audit", "",  # chỉ xem
          "*", "*", "*"),

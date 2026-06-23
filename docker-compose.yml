@@ -25,6 +25,12 @@ services:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       MES_LLM_ENABLED: ${MES_LLM_ENABLED:-auto}
       MES_DEV_HEADER_AUTH: "0"
+      # Production: KHÔNG seed demo; tạo admin từ mật khẩu riêng.
+      MES_SEED_DEMO: ${MES_SEED_DEMO:-0}
+      MES_ADMIN_PASSWORD: ${MES_ADMIN_PASSWORD:-}
+      MES_RL_ENABLED: "1"
+      MES_AI_DAILY_QUOTA: ${MES_AI_DAILY_QUOTA:-300}
+      MES_LOG_JSON: ${MES_LOG_JSON:-1}
     depends_on:
       db:
         condition: service_healthy

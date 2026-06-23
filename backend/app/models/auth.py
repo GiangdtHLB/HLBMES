@@ -31,6 +31,8 @@ class User(Base):
     scope_areas: Mapped[str] = mapped_column(String, default="*")
     scope_qc: Mapped[str] = mapped_column(String, default="*")
     active: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Buộc đổi mật khẩu lần đăng nhập đầu (admin tạo bằng mật khẩu mặc định).
+    must_change_password: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     last_login_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 

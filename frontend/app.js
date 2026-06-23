@@ -1777,6 +1777,18 @@ function enterApp() {
   $("login").style.display = "none";
   $("app").style.display = "";
   applyMenu();
+  // Buộc đổi mật khẩu nếu admin tạo bằng mật khẩu mặc định.
+  if (CURRENT_USER && CURRENT_USER.must_change_password) {
+    const pf = document.querySelector('#nav button[data-view="profile"]');
+    if (pf) {
+      document.querySelectorAll("#nav button").forEach(x => x.classList.remove("active"));
+      document.querySelectorAll(".view").forEach(x => x.classList.remove("active"));
+      pf.classList.add("active");
+      $("view-profile").classList.add("active");
+      render("profile");
+    }
+    toast("Bạn đang dùng mật khẩu mặc định — vui lòng đổi mật khẩu ngay.", "err");
+  }
 }
 
 function showLogin(msg) {
