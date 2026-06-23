@@ -1,4 +1,4 @@
-"""MES Nhà máy Bia — backend package (MVP P0).
+"""MES Bia Hạ Long - Nhà Máy Đông Mai — backend package.
 
 Modular monolith theo khuyến nghị tài liệu MES-ARCH-002:
 mỗi bounded context là một module models/routers/services riêng,

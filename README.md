@@ -1,4 +1,4 @@
-# MES Nhà máy Bia — MVP P0
+# MES Bia Hạ Long - Nhà Máy Đông Mai
 
 Phần mềm MES (Manufacturing Execution System) cho nhà máy bia, hiện thực hóa **lõi P0**
 trong blueprint kiến trúc `MES-ARCH-002` (tài liệu *MES-Nha-may-Bia-Kien-truc-Chuan-V2.0*).

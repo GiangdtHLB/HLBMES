@@ -3,7 +3,7 @@
 from datetime import date, datetime
 from typing import Any, Optional
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class ORMModel(BaseModel):
@@ -268,16 +268,16 @@ class PackagingTypeIn(BaseModel):
     name: str
     category: str                      # vo_chai | ket_gong | keg
     material: Optional[str] = None
-    volume_l: Optional[float] = None
-    deposit: float = 0.0
-    on_hand: float = 0.0
-    in_circulation: float = 0.0
+    volume_l: Optional[float] = Field(default=None, ge=0)
+    deposit: float = Field(default=0.0, ge=0)
+    on_hand: float = Field(default=0.0, ge=0)
+    in_circulation: float = Field(default=0.0, ge=0)
 
 
 class PackagingMoveIn(BaseModel):
     pkg_id: str
     kind: str                          # nhap | xuat | thu_hoi | loai_bo | kiem_ke
-    qty: float = 0.0
+    qty: float = Field(default=0.0, ge=0)
     ref: Optional[str] = None
     note: Optional[str] = None
 

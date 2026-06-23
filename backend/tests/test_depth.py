@@ -428,6 +428,16 @@ def test_packaging_move_flow(client):
     r3 = client.post("/api/packaging/move", headers=h,
                      json={"pkg_id": pid, "kind": "kiem_ke", "qty": 123, "note": "kiểm kê quý"}).json()
     assert r3["on_hand"] == 123
+    # kiểm kê về 0 → hợp lệ
+    assert client.post("/api/packaging/move", headers=h,
+                       json={"pkg_id": pid, "kind": "kiem_ke", "qty": 0}).json()["on_hand"] == 0
+    # kiểm kê âm → bị chặn (không cho tồn kho âm); schema ge=0 trả 422
+    neg = client.post("/api/packaging/move", headers=h,
+                      json={"pkg_id": pid, "kind": "kiem_ke", "qty": -100})
+    assert neg.status_code in (409, 422)
+    # tồn kho không bị kéo âm
+    after = client.get("/api/packaging", headers=h).json()["types"]
+    assert next(t for t in after if t["pkg_id"] == pid)["on_hand"] >= 0
     # lịch sử có bản ghi
     hist = client.get("/api/packaging/moves", params={"pkg_id": pid}, headers=h).json()
     assert len(hist) >= 3

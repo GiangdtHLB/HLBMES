@@ -51,7 +51,7 @@ class Settings(BaseSettings):
 settings = Settings()
 
 # ---- Hằng module-level (tương thích ngược) ----
-APP_NAME = "MES Nhà máy Bia — MVP P0"
+APP_NAME = "MES Bia Hạ Long - Nhà Máy Đông Mai"
 FRONTEND_DIR = BASE_DIR.parent / "frontend"
 DATABASE_URL = settings.database_url or f"sqlite:///{BASE_DIR / 'mes.db'}"
 

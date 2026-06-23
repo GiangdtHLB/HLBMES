@@ -69,7 +69,10 @@ def move(db: Session, pkg_id: str, kind: str, qty: float, user: User,
     if not p:
         raise NotFoundError("Loại bao bì không tồn tại.")
     qty = float(qty or 0)
-    if kind != "kiem_ke" and qty <= 0:
+    if kind == "kiem_ke":
+        if qty < 0:
+            raise DomainError("Số lượng kiểm kê không được âm.")
+    elif qty <= 0:
         raise DomainError("Số lượng phải > 0.")
     before = {"on_hand": p.on_hand, "in_circulation": p.in_circulation}
     if kind == "nhap":

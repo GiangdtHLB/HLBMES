@@ -64,8 +64,8 @@ app = FastAPI(
     version="0.1.0-mvp",
     lifespan=lifespan,
     description=(
-        "MES Nhà máy Bia — MVP P0 (Order → Batch → Recipe/version → "
-        "QC hold/release → Genealogy → Audit). Theo blueprint MES-ARCH-002."
+        "MES Bia Hạ Long - Nhà Máy Đông Mai — Hệ thống điều hành sản xuất "
+        "(Order → Batch → Recipe/version → QC hold/release → Genealogy → Audit)."
     ),
 )
 
