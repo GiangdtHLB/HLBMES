@@ -43,6 +43,12 @@ def scan(code: str, db: Session = Depends(get_db), user: User = Depends(get_curr
         return {"type": "production_order", "data": {"order_id": po.order_id, "order_code": po.order_code,
                 "status": po.status, "planned_qty": po.planned_qty, "uom": po.uom}}
 
+    # Pallet / Case kho thành phẩm (đầu đọc cầm tay quét pallet/case — WMS)
+    from ..services import wms as wms_svc
+    w = wms_svc.resolve(db, code)
+    if w.get("type") in ("pallet", "case"):
+        return {"type": w["type"], "data": w}
+
     # Gợi ý: tìm gần đúng (prefix) lô đang available
     near = db.execute(select(MaterialLot.lot_code).where(MaterialLot.lot_code.like(f"%{code}%")).limit(5)).scalars().all()
     return {"type": "unknown", "code": code, "suggestions": near}

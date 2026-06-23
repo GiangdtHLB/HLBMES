@@ -233,6 +233,26 @@ class AutoScheduleIn(BaseModel):
     cip_hours: int = 4
 
 
+# ---- WMS ----
+class WmsLocationIn(BaseModel):
+    code: str
+    name: str
+    zone: Optional[str] = None
+    kind: str = "bin"
+    capacity: int = 10
+
+
+class PalletBuildIn(BaseModel):
+    product: Optional[str] = None
+    lot_code: Optional[str] = None
+    case_count: int = 1
+    units_per_case: int = 24
+
+
+class PutawayIn(BaseModel):
+    loc_id: str
+
+
 class EbrSignIn(BaseModel):
     password: str
     meaning: str

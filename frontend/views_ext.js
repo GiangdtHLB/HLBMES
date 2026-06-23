@@ -6,7 +6,7 @@
 //   recipeadv (#3) · dispense (#6) · qclab (#7) · oee (#8)
 // ============================================================================
 (function () {
-  ["recipeadv", "dispense", "qclab", "oee", "isa88", "schedule"].forEach(v => { if (!ALL_VIEWS.includes(v)) ALL_VIEWS.push(v); });
+  ["recipeadv", "dispense", "qclab", "oee", "isa88", "schedule", "wms"].forEach(v => { if (!ALL_VIEWS.includes(v)) ALL_VIEWS.push(v); });
 
   const num = (id) => { const x = $(id).value; return x === "" ? null : parseFloat(x); };
   const opt = (arr, val, lab, sel) => arr.map(o =>
@@ -492,5 +492,65 @@
       load();
     });
     load();
+  };
+
+  // ======================================================================
+  // #P3-4 — WMS kho thành phẩm (pallet/case + barcode)
+  // ======================================================================
+  VIEWS.wms = async function () {
+    const root = $("view-wms");
+    const [locs, pals] = await Promise.all([GET("/wms/locations"), GET("/wms/pallets")]);
+    const locOpt = locs.map(l => `<option value="${esc(l.loc_id)}">${esc(l.code)} (${l.used}/${l.capacity})</option>`).join("");
+    root.innerHTML = `
+      ${panel("📍 Vị trí kho thành phẩm", `
+        <div class="tablewrap"><table><thead><tr><th>Mã</th><th>Tên</th><th>Khu</th><th>Loại</th><th>Sử dụng</th></tr></thead>
+        <tbody>${locs.map(l => `<tr><td><code class="k">${esc(l.code)}</code></td><td>${esc(l.name)}</td>
+          <td>${esc(l.zone || "")}</td><td>${esc(l.kind)}</td>
+          <td>${l.used}/${l.capacity} ${l.used >= l.capacity ? badge("critical") + "đầy" : ""}</td></tr>`).join("")}</tbody></table></div>`)}
+      ${panel("📦 Đóng pallet (tự sinh case + barcode)", `
+        <div class="row">
+          <div class="field"><label>Sản phẩm</label><input id="pl_prod" value="BIA-LAGER" style="width:120px"/></div>
+          <div class="field"><label>Lô TP</label><input id="pl_lot" value="PKG-2406-0001" style="width:150px"/></div>
+          <div class="field"><label>Số case</label><input id="pl_n" value="40" style="width:80px"/></div>
+          <div class="field"><label>Lon/case</label><input id="pl_u" value="24" style="width:80px"/></div>
+          <div class="field" style="align-self:flex-end"><button class="btn" id="pl_build">+ Đóng pallet</button></div>
+        </div>`)}
+      ${panel("🟦 Pallet", `<div id="pl_box" class="muted">Đang tải…</div>`)}
+    `;
+    function renderPallets(list) {
+      $("pl_box").innerHTML = `<div class="tablewrap"><table>
+        <thead><tr><th>Mã pallet</th><th>SP</th><th>Lô</th><th>Case</th><th>Lon</th><th>Trạng thái</th><th>Vị trí</th><th></th></tr></thead>
+        <tbody>${list.map(p => `<tr>
+          <td><code class="k">${esc(p.pallet_code)}</code></td><td>${esc(p.product || "")}</td><td>${esc(p.lot_code || "")}</td>
+          <td>${p.case_count}</td><td>${p.total_units}</td>
+          <td>${badge(p.status === "stored" ? "available" : p.status === "shipped" ? "obsolete" : "planned")}${esc(p.status)}</td>
+          <td>${esc(p.location || "—")}</td>
+          <td style="white-space:nowrap">
+            ${p.status !== "shipped" ? `<select class="pl_loc" data-id="${esc(p.pallet_id)}" style="width:auto"><option value="">— vị trí —</option>${locOpt}</select>
+              <button class="btn sm" data-putaway="${esc(p.pallet_id)}">Cất</button>
+              <button class="btn sm sec" data-ship="${esc(p.pallet_id)}">Xuất</button>` : ""}
+            <button class="btn sm sec" data-label="${esc(p.pallet_code)}">🖨️ Tem</button></td></tr>`).join("")}</tbody></table></div>`;
+      document.querySelectorAll("[data-putaway]").forEach(b => b.onclick = () => guard(async () => {
+        const sel = document.querySelector(`.pl_loc[data-id="${b.dataset.putaway}"]`);
+        if (!sel.value) { toast("Chọn vị trí", "err"); return; }
+        await POST(`/wms/pallets/${b.dataset.putaway}/putaway`, { loc_id: sel.value });
+        toast("Đã cất pallet"); render("wms");
+      }));
+      document.querySelectorAll("[data-ship]").forEach(b => b.onclick = () => guard(async () => {
+        await POST(`/wms/pallets/${b.dataset.ship}/ship`, {}); toast("Đã xuất pallet"); render("wms");
+      }));
+      document.querySelectorAll("[data-label]").forEach(b => b.onclick = () => {
+        const svg = (typeof code39SVG === "function") ? code39SVG(b.dataset.label, { height: 70 })
+          : `<div style="font-family:monospace">${esc(b.dataset.label)}</div>`;
+        modal(`<h3>Tem pallet</h3><div style="text-align:center;padding:10px">${svg}</div>
+          <button class="btn" onclick="window.print()">In</button>`);
+      });
+    }
+    renderPallets(pals);
+    $("pl_build").onclick = () => guard(async () => {
+      await POST("/wms/pallets", { product: $("pl_prod").value, lot_code: $("pl_lot").value,
+        case_count: num("pl_n") || 1, units_per_case: num("pl_u") || 24 });
+      toast("Đã đóng pallet (kèm case + barcode)"); render("wms");
+    });
   };
 })();

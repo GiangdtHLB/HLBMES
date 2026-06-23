@@ -241,6 +241,7 @@ def seed():
     _seed_downtime(db)
     _seed_dispense(db, batch.batch_id, [malt, hop, yeast])
     _seed_schedule(db)
+    _seed_wms(db)
     db.add(ApiKey(key_id=new_id(), name="Demo ERP", token="mes_demo_readonly_key_0001",
                   scopes="read", created_by="admin"))
     db.add(ApiKey(key_id=new_id(), name="Edge Gateway", token="mes_edge_writer_key_0001",
@@ -615,6 +616,33 @@ def _seed_recipe_ext(db, recipe_id, rv_effective, batch_id) -> None:
     db.commit()
 
 
+def _seed_wms(db) -> None:
+    """#P3-4: vị trí kho TP + vài pallet (gồm case) cho lô đóng gói PKG-2406-0001."""
+    from .models.wms import Case, Pallet, WmsLocation
+    locs = [
+        WmsLocation(loc_id=new_id(), code="TP-A1", name="Kho TP - Kệ A1", zone="A", kind="bin", capacity=12),
+        WmsLocation(loc_id=new_id(), code="TP-A2", name="Kho TP - Kệ A2", zone="A", kind="bin", capacity=12),
+        WmsLocation(loc_id=new_id(), code="TP-COLD", name="Kho lạnh TP", zone="COLD", kind="cold", capacity=20),
+        WmsLocation(loc_id=new_id(), code="DOCK-1", name="Bãi xuất hàng", zone="DOCK", kind="dock", capacity=6),
+    ]
+    db.add_all(locs)
+    db.commit()
+    # 3 pallet (mỗi 40 case × 24 lon) — 2 đã cất kệ A1/A2, 1 đang building tại dock.
+    plan = [("TP-A1", "stored"), ("TP-A2", "stored"), (None, "building")]
+    for i, (loc_code, status) in enumerate(plan, start=1):
+        loc = next((l for l in locs if l.code == loc_code), None)
+        stamp = f"2406-{i:02d}"
+        p = Pallet(pallet_id=new_id(), pallet_code=f"PLT-{stamp}", product="BIA-LAGER",
+                   lot_code="PKG-2406-0001", case_count=40, units_per_case=24, status=status,
+                   location_id=loc.loc_id if loc else None, created_by="thukho")
+        db.add(p)
+        db.flush()
+        for j in range(1, 41):
+            db.add(Case(case_id=new_id(), case_code=f"CS-{stamp}-{j:03d}", pallet_id=p.pallet_id,
+                        product="BIA-LAGER", units=24, lot_code="PKG-2406-0001"))
+    db.commit()
+
+
 def _seed_schedule(db) -> None:
     """#P3-2: 1 cửa sổ bảo trì FV-02 + chạy bộ lập lịch tự động cho các WO released."""
     from .models.scheduling import ScheduleSlot
@@ -751,10 +779,10 @@ def _seed_users(db) -> None:
         # username, password, full_name, job_title, role, views, permissions,
         #   scope_lines, scope_areas, scope_qc  (admin do ensure_admin tạo riêng)
         ("giamdoc", "123456", "Nguyễn Văn Giám", "Giám đốc nhà máy", "supervisor",
-         "dashboard,dispatch,schedule,oee,qclab,realtime,ai,trace,energy,reports,integration,audit", "",  # chỉ xem
+         "dashboard,dispatch,schedule,oee,qclab,realtime,ai,trace,energy,wms,reports,integration,audit", "",  # chỉ xem
          "*", "*", "*"),
         ("quandoc", "123456", "Trần Quang Đốc", "Quản đốc phân xưởng", "supervisor",
-         "dashboard,master,orders,dispatch,schedule,batches,isa88,dispense,recipeadv,process,realtime,quality,qclab,oee,trace,reports,ai,audit",
+         "dashboard,master,orders,dispatch,schedule,batches,isa88,dispense,recipeadv,process,realtime,quality,qclab,oee,trace,wms,reports,ai,audit",
          "master.manage,order.create,wo.manage,wo.dispatch,batch.create,batch.execute,quality.deviation,ebr.sign,ebr.approve",
          "*", "*", "*"),
         ("truongca", "123456", "Lê Thị Ca", "Trưởng ca sản xuất", "supervisor",
@@ -772,7 +800,7 @@ def _seed_users(db) -> None:
          "master.manage,recipe.author,recipe.approve,batch.create,batch.execute,ebr.sign",
          "*", "*", "*"),
         ("thukho", "123456", "Vũ Thị Kho", "Thủ kho NVL", "operator",
-         "dashboard,warehouse,dispense", "warehouse.receive,warehouse.issue",
+         "dashboard,warehouse,wms,dispense", "warehouse.receive,warehouse.issue",
          "*", "kho", "*"),
         ("baotri", "123456", "Bùi Văn Trì", "Nhân viên bảo trì", "operator",
          "dashboard,maint,calib,oee", "maintenance.manage,calibration.manage",

@@ -246,6 +246,28 @@ def test_scheduler_auto_no_overlap(client):
     assert any(s["wo_code"] == "WO-2406-006" for s in conf["material_short"])
 
 
+# ---------------- P3-4: WMS pallet/case + barcode ----------------
+def test_wms_pallet_lifecycle(client):
+    h = _login(client, "thukho", "123456")            # warehouse.receive + warehouse.issue
+    locs = client.get("/api/wms/locations", headers=h).json()
+    assert len(locs) >= 3
+    r = client.post("/api/wms/pallets", headers=h,
+                    json={"product": "BIA-LAGER", "lot_code": "PKG-2406-0001",
+                          "case_count": 10, "units_per_case": 24})
+    assert r.status_code == 201
+    pid, pcode = r.json()["pallet_id"], r.json()["pallet_code"]
+    pa = client.post(f"/api/wms/pallets/{pid}/putaway", headers=h, json={"loc_id": locs[0]["loc_id"]})
+    assert pa.json()["status"] == "stored"
+    # barcode pallet phân giải qua kiosk /api/scan
+    sc = client.get("/api/scan", params={"code": pcode}, headers=h).json()
+    assert sc["type"] == "pallet"
+    # barcode case phân giải qua /api/wms/resolve
+    pals = client.get("/api/wms/pallets", headers=h).json()
+    case_code = next(p for p in pals if p["pallet_code"] == pcode)["cases"][0]["case_code"]
+    rc = client.get("/api/wms/resolve", params={"code": case_code}, headers=h).json()
+    assert rc["type"] == "case" and rc["pallet_code"] == pcode
+
+
 # ---------------- P2: worker job queue ----------------
 def test_job_queue_ai_report(client):
     import time as _t
