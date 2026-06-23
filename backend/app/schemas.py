@@ -226,6 +226,13 @@ class PhaseTransitionIn(BaseModel):
     values: dict = {}
 
 
+# ---- Scheduling ----
+class AutoScheduleIn(BaseModel):
+    days: int = 10
+    prod_hours: int = 48
+    cip_hours: int = 4
+
+
 class EbrSignIn(BaseModel):
     password: str
     meaning: str

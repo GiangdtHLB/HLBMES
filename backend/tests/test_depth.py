@@ -233,6 +233,19 @@ def test_isa88_procedure_execution(client):
     assert bad.status_code == 409
 
 
+# ---------------- P3-2: Scheduling ----------------
+def test_scheduler_auto_no_overlap(client):
+    h = _login(client, "quandoc", "123456")
+    r = client.post("/api/schedule/auto", headers=h, json={"days": 12})
+    assert r.status_code == 200 and r.json()["placed"] >= 1
+    board = client.get("/api/schedule", headers=h).json()
+    assert any(board["lanes"][res] for res in board["resources"])
+    conf = client.get("/api/schedule/conflicts", headers=h).json()
+    assert conf["overlaps"] == []          # bộ lập lịch KHÔNG được tạo chồng lấn tài nguyên
+    # WO-2406-006 sản lượng rất lớn → thiếu NVL theo BOM
+    assert any(s["wo_code"] == "WO-2406-006" for s in conf["material_short"])
+
+
 # ---------------- P2: worker job queue ----------------
 def test_job_queue_ai_report(client):
     import time as _t

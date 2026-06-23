@@ -6,7 +6,7 @@
 //   recipeadv (#3) · dispense (#6) · qclab (#7) · oee (#8)
 // ============================================================================
 (function () {
-  ["recipeadv", "dispense", "qclab", "oee", "isa88"].forEach(v => { if (!ALL_VIEWS.includes(v)) ALL_VIEWS.push(v); });
+  ["recipeadv", "dispense", "qclab", "oee", "isa88", "schedule"].forEach(v => { if (!ALL_VIEWS.includes(v)) ALL_VIEWS.push(v); });
 
   const num = (id) => { const x = $(id).value; return x === "" ? null : parseFloat(x); };
   const opt = (arr, val, lab, sel) => arr.map(o =>
@@ -424,6 +424,73 @@
       }));
     }
     $("i8_batch").onchange = load;
+    load();
+  };
+
+  // ======================================================================
+  // #P3-2 — Scheduling (Gantt theo tank + CIP + bảo trì)
+  // ======================================================================
+  function gantt(board) {
+    const res = board.resources || [];
+    const from = board.from ? new Date(board.from).getTime() : 0;
+    const to = board.to ? new Date(board.to).getTime() : 0;
+    if (!from || !to || to <= from) return '<div class="muted">Chưa có lịch. Bấm "Tự lập lịch".</div>';
+    const W = 900, laneH = 30, padL = 92, padT = 26, H = padT + res.length * laneH + 8, span = to - from;
+    const KIND = { production: "#3498db", cip: "#e67e22", maintenance: "#e74c3c" };
+    const x = (t) => padL + (new Date(t).getTime() - from) / span * (W - padL - 12);
+    let svg = `<svg viewBox="0 0 ${W} ${H}" width="100%" style="display:block;background:var(--panel2);border-radius:8px">`;
+    // vạch ngày
+    const day = 86400000;
+    for (let t = Math.ceil(from / day) * day; t <= to; t += day) {
+      const xx = x(t);
+      svg += `<line x1="${xx.toFixed(1)}" y1="${padT - 4}" x2="${xx.toFixed(1)}" y2="${H - 4}" stroke="#2b3a47" stroke-dasharray="2 3"/>
+        <text x="${(xx + 2).toFixed(1)}" y="14" fill="#8aa0b2" font-size="9">${new Date(t).toLocaleDateString("vi-VN", { day: "2-digit", month: "2-digit" })}</text>`;
+    }
+    res.forEach((r, i) => {
+      const y = padT + i * laneH;
+      svg += `<text x="6" y="${y + 18}" fill="#cdd9e3" font-size="11">${esc(r)}</text>
+        <line x1="${padL}" y1="${y + laneH - 1}" x2="${W - 12}" y2="${y + laneH - 1}" stroke="#2b3a47"/>`;
+      (board.lanes[r] || []).forEach(s => {
+        const x1 = x(s.start_at), w = Math.max(x(s.end_at) - x1, 3);
+        const col = s.status === "material_short" ? "#c0392b" : (KIND[s.kind] || "#7f8c8d");
+        const lbl = s.kind === "cip" ? "CIP" : s.kind === "maintenance" ? "BẢO TRÌ" : (s.wo_code || "");
+        svg += `<rect x="${x1.toFixed(1)}" y="${y + 4}" width="${w.toFixed(1)}" height="${laneH - 9}" rx="3" fill="${col}">
+          <title>${esc(r)} · ${esc(lbl)}${s.product ? " · " + esc(s.product) : ""} (${fmt(s.start_at)} → ${fmt(s.end_at)})${s.status === "material_short" ? " · THIẾU NVL" : ""}</title></rect>`;
+        if (w > 34) svg += `<text x="${(x1 + 4).toFixed(1)}" y="${y + 18}" fill="#fff" font-size="9">${esc(lbl)}</text>`;
+      });
+    });
+    return svg + "</svg>";
+  }
+
+  VIEWS.schedule = async function () {
+    const root = $("view-schedule");
+    const legend = `<span style="font-size:12px"><span style="color:#3498db">■</span> Sản xuất
+      <span style="color:#e67e22">■</span> CIP <span style="color:#e74c3c">■</span> Bảo trì
+      <span style="color:#c0392b">■</span> Thiếu NVL</span>`;
+    root.innerHTML = `
+      ${panel("🗓️ Lập lịch sản xuất (tank · CIP · bảo trì · vật tư)", `
+        <div class="row" style="align-items:flex-end">
+          <div class="field"><label>Số ngày</label><input id="sc_days" value="12" style="width:80px"/></div>
+          <div><button class="btn" id="sc_auto">⚙️ Tự lập lịch tối ưu</button></div>
+          <div style="margin-left:auto">${legend}</div>
+        </div>
+        <div id="sc_gantt" class="muted" style="margin-top:10px">Đang tải…</div>`)}
+      ${panel("⚠️ Xung đột & cảnh báo", `<div id="sc_conf" class="muted">Đang tải…</div>`)}
+    `;
+    async function load() {
+      const [b, c] = await Promise.all([GET("/schedule"), GET("/schedule/conflicts")]);
+      $("sc_gantt").innerHTML = gantt(b);
+      const ovl = c.overlaps.map(o => `<li>Chồng lịch trên <b>${esc(o.resource)}</b>: ${esc(o.a)} ↔ ${esc(o.b)}</li>`).join("");
+      const sh = c.material_short.map(s => `<li>${esc(s.wo_code)} trên ${esc(s.resource)}: ${badge("critical")}thiếu NVL theo BOM</li>`).join("");
+      $("sc_conf").innerHTML = (c.ok)
+        ? `${badge("available")}Không có xung đột — lịch khả thi.`
+        : `<ul style="margin:4px 0 0 18px">${ovl}${sh}</ul>`;
+    }
+    $("sc_auto").onclick = () => guard(async () => {
+      const r = await POST("/schedule/auto", { days: num("sc_days") || 12 });
+      toast(`Đã xếp ${r.placed} mẻ lên ${r.tanks} tank` + (r.shortages ? `, ${r.shortages} thiếu NVL` : ""));
+      load();
+    });
     load();
   };
 })();

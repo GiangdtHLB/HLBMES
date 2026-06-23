@@ -240,6 +240,7 @@ def seed():
     _seed_quality_adv(db, batch.batch_id)
     _seed_downtime(db)
     _seed_dispense(db, batch.batch_id, [malt, hop, yeast])
+    _seed_schedule(db)
     db.add(ApiKey(key_id=new_id(), name="Demo ERP", token="mes_demo_readonly_key_0001",
                   scopes="read", created_by="admin"))
     db.add(ApiKey(key_id=new_id(), name="Edge Gateway", token="mes_edge_writer_key_0001",
@@ -272,7 +273,16 @@ def _seed_workorders(db, order, rv, batch) -> None:
                     product_id=order.product_id, recipe_version_id=rv.version_id, planned_qty=25000,
                     uom="L", line="Nấu B", shift="A", scheduled_date=today + timedelta(days=1),
                     priority=5, status=WorkOrderState.PLANNED.value, created_by="quandoc")
-    db.add_all([wo1, wo2, wo3])
+    # Thêm nhu cầu cho bộ lập lịch (P3-2): vài WO released rải trong tuần; WO-006 SL lớn → thiếu NVL.
+    extra = []
+    demand = [("004", 40000, 0, 2), ("005", 50000, 1, 3), ("006", 500000, 1, 1),
+              ("007", 30000, 2, 4), ("008", 45000, 3, 2)]
+    for code, qty, day_off, prio in demand:
+        extra.append(WorkOrder(wo_id=new_id(), wo_code=f"WO-2406-{code}", production_order_id=order.order_id,
+                               product_id=order.product_id, recipe_version_id=rv.version_id, planned_qty=qty,
+                               uom="L", line="Nấu A", shift="A", scheduled_date=today + timedelta(days=day_off),
+                               priority=prio, status=WorkOrderState.RELEASED.value, created_by="quandoc"))
+    db.add_all([wo1, wo2, wo3] + extra)
     db.commit()
     batch.work_order_id = wo1.wo_id   # mẻ đã chạy thuộc WO-001 (completed)
     db.commit()
@@ -605,6 +615,18 @@ def _seed_recipe_ext(db, recipe_id, rv_effective, batch_id) -> None:
     db.commit()
 
 
+def _seed_schedule(db) -> None:
+    """#P3-2: 1 cửa sổ bảo trì FV-02 + chạy bộ lập lịch tự động cho các WO released."""
+    from .models.scheduling import ScheduleSlot
+    from .services import scheduler
+    start = (utcnow() + timedelta(days=2)).replace(microsecond=0)
+    db.add(ScheduleSlot(slot_id=new_id(), resource="FV-02", kind="maintenance",
+                        status="planned", start_at=start, end_at=start + timedelta(hours=12),
+                        note="Bảo trì van đáy FV-02"))
+    db.commit()
+    scheduler.auto_schedule(db, SUP, days=12)
+
+
 def _seed_isa88(db) -> None:
     """#P3-1: chạy vài phase ISA-88 trên mẻ B-2406-0002 (đang chạy)."""
     from .models.isa88 import BatchPhaseRun
@@ -729,14 +751,14 @@ def _seed_users(db) -> None:
         # username, password, full_name, job_title, role, views, permissions,
         #   scope_lines, scope_areas, scope_qc  (admin do ensure_admin tạo riêng)
         ("giamdoc", "123456", "Nguyễn Văn Giám", "Giám đốc nhà máy", "supervisor",
-         "dashboard,dispatch,oee,qclab,realtime,ai,trace,energy,reports,integration,audit", "",  # chỉ xem
+         "dashboard,dispatch,schedule,oee,qclab,realtime,ai,trace,energy,reports,integration,audit", "",  # chỉ xem
          "*", "*", "*"),
         ("quandoc", "123456", "Trần Quang Đốc", "Quản đốc phân xưởng", "supervisor",
-         "dashboard,master,orders,dispatch,batches,isa88,dispense,recipeadv,process,realtime,quality,qclab,oee,trace,reports,ai,audit",
+         "dashboard,master,orders,dispatch,schedule,batches,isa88,dispense,recipeadv,process,realtime,quality,qclab,oee,trace,reports,ai,audit",
          "master.manage,order.create,wo.manage,wo.dispatch,batch.create,batch.execute,quality.deviation,ebr.sign,ebr.approve",
          "*", "*", "*"),
         ("truongca", "123456", "Lê Thị Ca", "Trưởng ca sản xuất", "supervisor",
-         "dashboard,orders,dispatch,batches,isa88,dispense,process,realtime,oee,reports,ai",
+         "dashboard,orders,dispatch,schedule,batches,isa88,dispense,process,realtime,oee,reports,ai",
          "order.create,wo.dispatch,batch.create,batch.execute,ebr.sign",
          "Nấu A", "nau,len_men,chiet", "*"),
         ("vanhanh", "123456", "Phạm Văn Hành", "Nhân viên vận hành", "operator",
@@ -746,7 +768,7 @@ def _seed_users(db) -> None:
          "dashboard,quality,qclab,process,trace,ai", "quality.release,quality.deviation,recipe.approve,ebr.sign,ebr.approve",
          "*", "*", "Độ đường (°P),pH"),
         ("kysu", "123456", "Đỗ Công Kỹ", "Kỹ sư công nghệ", "engineer",
-         "dashboard,master,recipes,recipeadv,batches,isa88,qclab,process,realtime,oee,trace,reports",
+         "dashboard,master,recipes,recipeadv,batches,isa88,qclab,process,realtime,oee,trace,reports,schedule",
          "master.manage,recipe.author,recipe.approve,batch.create,batch.execute,ebr.sign",
          "*", "*", "*"),
         ("thukho", "123456", "Vũ Thị Kho", "Thủ kho NVL", "operator",

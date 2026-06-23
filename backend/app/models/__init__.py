@@ -36,6 +36,7 @@ from .oee_ext import DowntimeEvent
 from .ai_memory import AiConversation, AiMessage
 from .jobs import Job
 from .isa88 import BatchPhaseRun
+from .scheduling import ScheduleSlot
 
 __all__ = [
     "AuditLog",
@@ -82,4 +83,5 @@ __all__ = [
     "AiMessage",
     "Job",
     "BatchPhaseRun",
+    "ScheduleSlot",
 ]
