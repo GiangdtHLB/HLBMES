@@ -23,7 +23,17 @@ from ..models.workorder import WorkOrder
 from ..security import User, require_role
 from . import bom
 
-TANKS = ["FV-01", "FV-02", "FV-03", "FV-04"]
+TANKS = ["FV-01", "FV-02", "FV-03", "FV-04"]   # fallback nếu chưa khai báo tank trong danh mục
+
+
+def _tanks(db: Session) -> list:
+    """Tank lên men lấy từ danh mục resource (ProductionLine kind='tank', active).
+    Chưa khai báo → dùng hằng TANKS để hệ thống vẫn chạy."""
+    from ..models.lines import ProductionLine
+    rows = db.execute(select(ProductionLine).where(
+        ProductionLine.kind == "tank", ProductionLine.active == True  # noqa: E712
+    ).order_by(ProductionLine.code)).scalars().all()
+    return [r.code for r in rows] or list(TANKS)
 
 
 def _naive(dt: datetime) -> datetime:
@@ -54,10 +64,11 @@ def auto_schedule(db: Session, user: User, days: int = 10,
     horizon = now + timedelta(days=days)
     prod = timedelta(hours=prod_hours)
     cip = timedelta(hours=cip_hours)
+    tanks = _tanks(db)
 
     # busy theo tài nguyên: khởi tạo từ slot maintenance.
-    busy = {t: [] for t in TANKS}
-    used = {t: False for t in TANKS}      # tank đã có mẻ trước đó → cần CIP trước mẻ mới
+    busy = {t: [] for t in tanks}
+    used = {t: False for t in tanks}      # tank đã có mẻ trước đó → cần CIP trước mẻ mới
     for m in db.execute(select(ScheduleSlot).where(ScheduleSlot.kind == "maintenance")).scalars().all():
         if m.resource in busy:
             busy[m.resource].append((_naive(m.start_at), _naive(m.end_at)))
@@ -84,7 +95,7 @@ def auto_schedule(db: Session, user: User, days: int = 10,
                     short = False
         # chọn tank: thử mọi tank, lấy nơi production bắt đầu sớm nhất.
         best = None
-        for t in TANKS:
+        for t in tanks:
             need = (cip + prod) if used[t] else prod
             start = _earliest_start(busy[t], anchor, need)
             prod_start = start + (cip if used[t] else timedelta())
@@ -119,13 +130,14 @@ def auto_schedule(db: Session, user: User, days: int = 10,
     record_audit(db, entity_type="schedule", entity_id="auto", action="auto_schedule",
                  actor=user, after={"placed": len(placed), "shortages": shortages})
     db.commit()
-    return {"placed": len(placed), "shortages": shortages, "tanks": len(TANKS), "items": placed}
+    return {"placed": len(placed), "shortages": shortages, "tanks": len(tanks), "items": placed}
 
 
 def board(db: Session) -> dict:
     """Slot theo tài nguyên cho Gantt."""
+    tanks = _tanks(db)
     slots = db.execute(select(ScheduleSlot).order_by(ScheduleSlot.start_at)).scalars().all()
-    resources = TANKS + sorted({s.resource for s in slots if s.resource not in TANKS})
+    resources = tanks + sorted({s.resource for s in slots if s.resource not in tanks})
     by_res = {r: [] for r in resources}
     for s in slots:
         by_res.setdefault(s.resource, []).append(

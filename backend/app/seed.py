@@ -240,9 +240,10 @@ def seed():
     _seed_quality_adv(db, batch.batch_id)
     _seed_downtime(db)
     _seed_dispense(db, batch.batch_id, [malt, hop, yeast])
+    _seed_lines(db)
+    _seed_packaging(db)
     _seed_schedule(db)
     _seed_wms(db)
-    _seed_lines(db)
     db.add(ApiKey(key_id=new_id(), name="Demo ERP", token="mes_demo_readonly_key_0001",
                   scopes="read", created_by="admin"))
     db.add(ApiKey(key_id=new_id(), name="Edge Gateway", token="mes_edge_writer_key_0001",
@@ -618,14 +619,35 @@ def _seed_recipe_ext(db, recipe_id, rv_effective, batch_id) -> None:
 
 
 def _seed_lines(db) -> None:
-    """#Q2: danh mục dây chuyền đóng gói (khớp tên line trong OEERecord)."""
+    """#Q2/B: danh mục dây chuyền (đóng gói) + tank lên men (cho scheduler dùng chung)."""
     from .models.lines import ProductionLine
     db.add_all([
         ProductionLine(line_id=new_id(), code="Line-1 (chai)", name="Dây chuyền chai #1",
-                       area="chiet", ideal_rate_per_min=300, active=True),
+                       kind="line", area="chiet", ideal_rate_per_min=300, active=True),
         ProductionLine(line_id=new_id(), code="Line-2 (lon)", name="Dây chuyền lon #2",
-                       area="chiet", ideal_rate_per_min=500, active=True),
+                       kind="line", area="chiet", ideal_rate_per_min=500, active=True),
+    ] + [
+        ProductionLine(line_id=new_id(), code=f"FV-0{i}", name=f"Tank lên men {i}",
+                       kind="tank", area="len_men", ideal_rate_per_min=0, active=True)
+        for i in range(1, 5)
     ])
+    db.commit()
+
+
+def _seed_packaging(db) -> None:
+    """#D: bao bì tuần hoàn — vỏ chai / két-gông / keg inox."""
+    from .models.packaging import PackagingType
+    rows = [
+        ("VOCHAI-450", "Vỏ chai thủy tinh 450ml", "vo_chai", "glass", 0.45, 1200, 80000, 220000),
+        ("VOCHAI-330", "Vỏ chai thủy tinh 330ml", "vo_chai", "glass", 0.33, 1000, 45000, 130000),
+        ("KET-24", "Két nhựa 24 chai", "ket_gong", "plastic", None, 30000, 6500, 9800),
+        ("GONG-20", "Gông sắt 20 chai", "ket_gong", "steel", None, 25000, 1200, 800),
+        ("KEG-30", "Keg inox 30L", "keg", "steel", 30, 1500000, 320, 540),
+        ("KEG-50", "Keg inox 50L", "keg", "steel", 50, 2200000, 180, 260),
+    ]
+    for code, name, cat, mat, vol, dep, on_hand, circ in rows:
+        db.add(PackagingType(pkg_id=new_id(), code=code, name=name, category=cat, material=mat,
+                             volume_l=vol, deposit=dep, on_hand=on_hand, in_circulation=circ, active=True))
     db.commit()
 
 
@@ -792,10 +814,10 @@ def _seed_users(db) -> None:
         # username, password, full_name, job_title, role, views, permissions,
         #   scope_lines, scope_areas, scope_qc  (admin do ensure_admin tạo riêng)
         ("giamdoc", "123456", "Nguyễn Văn Giám", "Giám đốc nhà máy", "supervisor",
-         "dashboard,dispatch,schedule,oee,qclab,realtime,ai,trace,energy,wms,reports,integration,audit", "",  # chỉ xem
+         "dashboard,dispatch,schedule,oee,qclab,realtime,ai,trace,energy,wms,packaging,reports,integration,audit", "",  # chỉ xem
          "*", "*", "*"),
         ("quandoc", "123456", "Trần Quang Đốc", "Quản đốc phân xưởng", "supervisor",
-         "dashboard,master,orders,dispatch,schedule,batches,isa88,dispense,recipeadv,process,realtime,quality,qclab,oee,trace,wms,reports,ai,audit",
+         "dashboard,master,orders,dispatch,schedule,batches,isa88,dispense,recipeadv,process,realtime,quality,qclab,oee,trace,wms,packaging,reports,ai,audit",
          "master.manage,order.create,wo.manage,wo.dispatch,batch.create,batch.execute,quality.deviation,ebr.sign,ebr.approve",
          "*", "*", "*"),
         ("truongca", "123456", "Lê Thị Ca", "Trưởng ca sản xuất", "supervisor",
@@ -813,7 +835,7 @@ def _seed_users(db) -> None:
          "master.manage,recipe.author,recipe.approve,batch.create,batch.execute,ebr.sign",
          "*", "*", "*"),
         ("thukho", "123456", "Vũ Thị Kho", "Thủ kho NVL", "operator",
-         "dashboard,warehouse,wms,dispense", "warehouse.receive,warehouse.issue",
+         "dashboard,warehouse,wms,packaging,dispense", "warehouse.receive,warehouse.issue",
          "*", "kho", "*"),
         ("baotri", "123456", "Bùi Văn Trì", "Nhân viên bảo trì", "operator",
          "dashboard,maint,calib,oee", "maintenance.manage,calibration.manage",

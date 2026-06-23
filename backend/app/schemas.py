@@ -257,8 +257,29 @@ class PutawayIn(BaseModel):
 class LineIn(BaseModel):
     code: str
     name: str
+    kind: str = "line"                 # line | tank | brewhouse
     area: Optional[str] = None
     ideal_rate_per_min: float = 0.0
+
+
+# ---- Bao bì tuần hoàn ----
+class PackagingTypeIn(BaseModel):
+    code: str
+    name: str
+    category: str                      # vo_chai | ket_gong | keg
+    material: Optional[str] = None
+    volume_l: Optional[float] = None
+    deposit: float = 0.0
+    on_hand: float = 0.0
+    in_circulation: float = 0.0
+
+
+class PackagingMoveIn(BaseModel):
+    pkg_id: str
+    kind: str                          # nhap | xuat | thu_hoi | loai_bo | kiem_ke
+    qty: float = 0.0
+    ref: Optional[str] = None
+    note: Optional[str] = None
 
 
 class EbrSignIn(BaseModel):

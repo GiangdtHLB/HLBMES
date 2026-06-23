@@ -201,7 +201,10 @@ def scope_catalog(db: Session = Depends(get_db), user: User = Depends(get_curren
     from ..security import SCOPE_AREAS
     from ..models.workorder import WorkOrder
     from ..models.quality import QualityResult
-    lines = sorted({l for (l,) in db.execute(select(WorkOrder.line).distinct()).all() if l})
+    from ..models.lines import ProductionLine
+    wo_lines = {l for (l,) in db.execute(select(WorkOrder.line).distinct()).all() if l}
+    master_lines = {l for (l,) in db.execute(select(ProductionLine.code)).all() if l}
+    lines = sorted(wo_lines | master_lines)   # gộp line từ WO + danh mục dây chuyền
     qc = sorted({p for (p,) in db.execute(select(QualityResult.parameter).distinct()).all() if p})
     return {"areas": [{"key": k, "label": v} for k, v in SCOPE_AREAS.items()],
             "lines": lines, "qc_params": qc}

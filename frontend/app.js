@@ -293,10 +293,19 @@ VIEWS.recipes = async function () {
   });
   document.querySelectorAll("[data-newver]").forEach(b => b.onclick = () => newVersionForm(b.dataset.newver));
   document.querySelectorAll("[data-vdetail]").forEach(b => b.onclick = () => showVersion(b.dataset.vdetail));
-  document.querySelectorAll("[data-vtrans]").forEach(b => b.onclick = () => guard(async () => {
-    await POST(`/recipes/versions/${b.dataset.vid}/transition`, { target: b.dataset.vtrans });
-    toast(`Chuyển version → ${b.dataset.vtrans}`); render("recipes");
-  }));
+  document.querySelectorAll("[data-vtrans]").forEach(b => b.onclick = () => {
+    const t = b.dataset.vtrans, vid = b.dataset.vid;
+    const doIt = (reason) => guard(async () => {
+      await POST(`/recipes/versions/${vid}/transition`, { target: t, reason: reason || null });
+      toast(`Chuyển version → ${t}`); render("recipes");
+    });
+    if (t === "suspended" || t === "obsolete") {     // bắt buộc lý do
+      modal(`<h3>${t === "suspended" ? "Tạm ngưng" : "Ngừng dùng"} công thức</h3>
+        <div class="field"><label>Lý do (bắt buộc)</label><input id="rs_reason" style="width:100%" placeholder="vd: phát hiện lệch chỉ tiêu / đổi nhà cung cấp NVL"/></div>
+        <button class="btn" id="rs_go" style="margin-top:12px">Xác nhận</button>`);
+      $("rs_go").onclick = () => { const r = $("rs_reason").value.trim(); if (!r) { toast("Nhập lý do", "err"); return; } closeModal(); doIt(r); };
+    } else { doIt(); }
+  });
 };
 function recipeVerRow(r, v) {
   const next = { draft: ["review"], review: ["approved"], approved: ["effective"],
@@ -1564,20 +1573,27 @@ VIEWS.master = async function () {
         </table></div>
       </div>
     </div>
-    <div class="panel"><h2>🏭 Dây chuyền sản xuất <span class="muted">(${plines.length})</span></h2>
+    <div class="panel"><h2>🏭 Dây chuyền & Tank (tài nguyên SX) <span class="muted">(${plines.length})</span></h2>
+      <div class="muted" style="margin-bottom:6px">Dây chuyền dùng cho OEE đóng gói; Tank lên men (FV) dùng chung cho bộ lập lịch.</div>
       ${noPerm}
       ${canManage ? `<div class="row">
-        <div class="field"><label>Mã line</label><input id="ln_code" placeholder="Line-3 (keg)"/></div>
+        <div class="field"><label>Mã</label><input id="ln_code" placeholder="Line-3 (keg) / FV-05"/></div>
         <div class="field"><label>Tên</label><input id="ln_name" placeholder="Dây chuyền keg #3"/></div>
+        <div class="field"><label>Loại</label><select id="ln_kind">
+          <option value="line">Dây chuyền (đóng gói)</option>
+          <option value="tank">Tank lên men (FV)</option>
+          <option value="brewhouse">Nhà nấu (brewhouse)</option></select></div>
         <div class="field"><label>Khu vực</label><input id="ln_area" value="chiet" style="width:90px"/></div>
         <div class="field"><label>Tốc độ lý tưởng</label><input id="ln_rate" value="200" style="width:110px"/></div>
-        <button class="btn" id="ln_add" style="align-self:flex-end">+ Thêm dây chuyền</button>
+        <button class="btn" id="ln_add" style="align-self:flex-end">+ Thêm tài nguyên</button>
       </div>` : ""}
       <div class="tablewrap" style="margin-top:12px"><table>
-        <thead><tr><th>Mã</th><th>Tên</th><th>Khu vực</th><th>Tốc độ lý tưởng</th><th>Trạng thái</th>${canManage ? "<th></th>" : ""}</tr></thead>
+        <thead><tr><th>Mã</th><th>Tên</th><th>Loại</th><th>Khu vực</th><th>Tốc độ lý tưởng</th><th>Trạng thái</th>${canManage ? "<th></th>" : ""}</tr></thead>
         <tbody>${plines.map(l => `<tr>
-          <td><code class="k">${esc(l.code)}</code></td><td>${esc(l.name)}</td><td>${esc(l.area || "—")}</td>
-          <td>${l.ideal_rate_per_min}/phút</td>
+          <td><code class="k">${esc(l.code)}</code></td><td>${esc(l.name)}</td>
+          <td>${l.kind === "tank" ? badge("planned") + "Tank" : l.kind === "brewhouse" ? badge("due") + "Nhà nấu" : badge("available") + "Dây chuyền"}</td>
+          <td>${esc(l.area || "—")}</td>
+          <td>${l.ideal_rate_per_min ? l.ideal_rate_per_min + "/phút" : "—"}</td>
           <td>${badge(l.active ? "available" : "obsolete")}${l.active ? "hoạt động" : "ngừng"}</td>
           ${canManage ? `<td><button class="btn sm sec" data-ltoggle="${esc(l.line_id)}">${l.active ? "Ngừng" : "Bật lại"}</button></td>` : ""}</tr>`).join("")}</tbody>
       </table></div>
@@ -1596,8 +1612,9 @@ VIEWS.master = async function () {
     });
     if ($("ln_add")) $("ln_add").onclick = () => guard(async () => {
       await POST("/lines", { code: $("ln_code").value.trim(), name: $("ln_name").value.trim(),
-        area: $("ln_area").value.trim() || null, ideal_rate_per_min: parseFloat($("ln_rate").value) || 0 });
-      toast("Đã thêm dây chuyền"); render("master");
+        kind: $("ln_kind").value, area: $("ln_area").value.trim() || null,
+        ideal_rate_per_min: parseFloat($("ln_rate").value) || 0 });
+      toast("Đã thêm tài nguyên"); render("master");
     });
     document.querySelectorAll("[data-ltoggle]").forEach(b => b.onclick = () => guard(async () => {
       await POST(`/lines/${b.dataset.ltoggle}/toggle`); toast("Đã đổi trạng thái dây chuyền"); render("master");

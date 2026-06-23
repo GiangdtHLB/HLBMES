@@ -13,6 +13,11 @@ from ..services import wms as svc
 router = APIRouter(prefix="/api/wms", tags=["wms"])
 
 
+@router.get("/summary")
+def summary(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    return svc.summary(db)
+
+
 @router.get("/locations")
 def locations(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     return svc.list_locations(db)

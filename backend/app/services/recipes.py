@@ -86,6 +86,10 @@ def transition(db: Session, version_id: str, target: str, user: User, reason: st
     if target_state not in RECIPE_TRANSITIONS[current]:
         raise DomainError(f"Không thể chuyển recipe từ {current.value} sang {target}.")
 
+    # Tạm ngưng / ngừng dùng: BẮT BUỘC nêu lý do (truy vết audit).
+    if target_state in (RecipeState.SUSPENDED, RecipeState.OBSOLETE) and not (reason or "").strip():
+        raise DomainError("Phải nêu lý do khi tạm ngưng/ngừng dùng công thức.")
+
     # Duyệt (approved) yêu cầu vai trò ENGINEER/QA và SoD với người soạn.
     if target_state == RecipeState.APPROVED:
         require_role(user, Role.ENGINEER, Role.QA)

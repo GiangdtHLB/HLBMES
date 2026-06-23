@@ -6,7 +6,7 @@
 //   recipeadv (#3) · dispense (#6) · qclab (#7) · oee (#8)
 // ============================================================================
 (function () {
-  ["recipeadv", "dispense", "qclab", "oee", "isa88", "schedule", "wms"].forEach(v => { if (!ALL_VIEWS.includes(v)) ALL_VIEWS.push(v); });
+  ["recipeadv", "dispense", "qclab", "oee", "isa88", "schedule", "wms", "packaging"].forEach(v => { if (!ALL_VIEWS.includes(v)) ALL_VIEWS.push(v); });
 
   const num = (id) => { const x = $(id).value; return x === "" ? null : parseFloat(x); };
   const opt = (arr, val, lab, sel) => arr.map(o =>
@@ -349,7 +349,7 @@
     const root = $("view-oee");
     const [oee, tree, pareto, losses, mtbf, lns] = await Promise.all([
       GET("/oee"), GET("/downtime/reason-tree"), GET("/downtime/pareto"),
-      GET("/downtime/big-losses"), GET("/downtime/mtbf"), GET("/lines?active_only=true").catch(() => [])]);
+      GET("/downtime/big-losses"), GET("/downtime/mtbf"), GET("/lines?active_only=true&kind=line").catch(() => [])]);
     const donuts = oee.map(r => `<div class="panel" style="text-align:center">
       <h3>${esc(r.line)} · ca ${esc(r.shift)}</h3>${CH.donut(r.oee, { label: "OEE" })}
       <div class="muted" style="font-size:12px">A ${(r.availability * 100).toFixed(0)}% · P ${(r.performance * 100).toFixed(0)}% · Q ${(r.quality * 100).toFixed(0)}%</div></div>`).join("");
@@ -544,9 +544,23 @@
   // ======================================================================
   VIEWS.wms = async function () {
     const root = $("view-wms");
-    const [locs, pals] = await Promise.all([GET("/wms/locations"), GET("/wms/pallets")]);
+    const [sm, locs, pals] = await Promise.all([
+      GET("/wms/summary"), GET("/wms/locations"), GET("/wms/pallets")]);
     const locOpt = locs.map(l => `<option value="${esc(l.loc_id)}">${esc(l.code)} (${l.used}/${l.capacity})</option>`).join("");
+    const card = (val, label, sub) => `<div class="card"><div class="n">${val}</div><div class="l">${label}</div>${sub ? `<div class="muted" style="font-size:11px;margin-top:2px">${sub}</div>` : ""}</div>`;
+    const byStatus = Object.entries(sm.by_status || {}).map(([k, v]) => `${esc(k)}: <b>${v}</b>`).join(" · ") || "—";
     root.innerHTML = `
+      ${panel("📊 Tổng quan kho thành phẩm", `
+        <div class="cards" style="margin-bottom:10px">
+          ${card(sm.pallets_total, "Tổng pallet", byStatus)}
+          ${card(sm.pallets_stored, "Đang lưu kho", `Sức chứa ${sm.capacity_pallets} pallet`)}
+          ${card((sm.fill_pct ?? 0) + "%", "Mức lấp đầy", `${sm.locations} vị trí`)}
+          ${card((sm.cases || 0).toLocaleString("vi-VN"), "Tổng thùng (case)")}
+          ${card((sm.units || 0).toLocaleString("vi-VN"), "Tổng lon/chai")}
+        </div>
+        <div style="height:14px;background:var(--panel2);border-radius:7px;overflow:hidden" title="Mức lấp đầy ${sm.fill_pct ?? 0}%">
+          <div style="height:100%;width:${Math.min(sm.fill_pct || 0, 100)}%;background:${(sm.fill_pct || 0) >= 90 ? "#e74c3c" : "#3498db"}"></div>
+        </div>`)}
       ${panel("📍 Vị trí kho thành phẩm", `
         <div class="tablewrap"><table><thead><tr><th>Mã</th><th>Tên</th><th>Khu</th><th>Loại</th><th>Sử dụng</th></tr></thead>
         <tbody>${locs.map(l => `<tr><td><code class="k">${esc(l.code)}</code></td><td>${esc(l.name)}</td>
@@ -592,5 +606,111 @@
         case_count: num("pl_n") || 1, units_per_case: num("pl_u") || 24 });
       toast("Đã đóng pallet (kèm case + barcode)"); render("wms");
     });
+  };
+
+  // ======================================================================
+  // #D — BAO BÌ TUẦN HOÀN (vỏ chai · két/gông · keg inox)
+  // ======================================================================
+  const PKG_ICON = { vo_chai: "🍾", ket_gong: "🧺", keg: "🛢️" };
+  const hasPerm = (p) => CURRENT_USER && (CURRENT_USER.permissions === "*" ||
+    (Array.isArray(CURRENT_USER.permissions) && CURRENT_USER.permissions.includes(p)));
+  VIEWS.packaging = async function () {
+    const root = $("view-packaging");
+    const [data, history] = await Promise.all([GET("/packaging"), GET("/packaging/moves")]);
+    const { summary: sm, types, categories, moves: moveKinds } = data;
+    const moves = history;
+    const canManage = hasPerm("master.manage");
+    const canMove = hasPerm("warehouse.issue");
+    const fmtN = (n) => (n == null ? "—" : Number(n).toLocaleString("vi-VN"));
+
+    // Thẻ tổng hợp theo nhóm.
+    const cards = (sm.by_category || []).map(c => `<div class="card">
+      <div class="n">${PKG_ICON[c.category] || "📦"} ${fmtN(c.on_hand + c.in_circulation)}</div>
+      <div class="l">${esc(c.label)} (${c.types} loại)</div>
+      <div class="muted" style="font-size:11px;margin-top:2px">Tồn kho ${fmtN(c.on_hand)} · Lưu hành ${fmtN(c.in_circulation)}</div>
+    </div>`).join("") || '<div class="muted">Chưa khai báo bao bì.</div>';
+
+    // Bảng loại bao bì.
+    const rows = types.map(p => `<tr>
+      <td><code class="k">${esc(p.code)}</code></td>
+      <td>${PKG_ICON[p.category] || ""} ${esc(p.name)}</td>
+      <td>${esc(p.category_label)}</td>
+      <td class="muted">${esc(p.material || "—")}${p.volume_l != null ? " · " + p.volume_l + "L" : ""}</td>
+      <td style="text-align:right">${fmtN(p.on_hand)}</td>
+      <td style="text-align:right">${fmtN(p.in_circulation)}</td>
+      <td style="text-align:right"><b>${fmtN(p.total)}</b></td>
+      <td style="text-align:right" class="muted">${fmtN(p.deposit)}</td>
+      <td>${p.active ? badge("available") + "đang dùng" : badge("obsolete") + "ngừng"}</td>
+    </tr>`).join("");
+
+    root.innerHTML = `
+      ${panel("📊 Tổng quan bao bì tuần hoàn", `
+        <div class="cards">${cards}</div>
+        <div class="muted" style="margin-top:4px">Tổng tồn kho <b>${fmtN(sm.total_on_hand)}</b> · Tổng đang lưu hành (ngoài thị trường) <b>${fmtN(sm.total_in_circulation)}</b></div>`)}
+      ${panel("📋 Danh mục loại bao bì", `
+        <div class="tablewrap"><table>
+          <thead><tr><th>Mã</th><th>Tên</th><th>Nhóm</th><th>Vật liệu</th>
+            <th style="text-align:right">Tồn kho</th><th style="text-align:right">Lưu hành</th>
+            <th style="text-align:right">Tổng</th><th style="text-align:right">Đặt cọc</th><th>Trạng thái</th></tr></thead>
+          <tbody>${rows || '<tr><td colspan="9" class="muted">Chưa có loại bao bì.</td></tr>'}</tbody></table></div>`)}
+      ${canManage ? panel("➕ Khai báo loại bao bì mới", `
+        <div class="row">
+          <div class="field"><label>Mã</label><input id="pk_code" placeholder="VOCHAI-450" style="width:130px"/></div>
+          <div class="field"><label>Tên</label><input id="pk_name" placeholder="Vỏ chai 450ml" style="width:220px"/></div>
+          <div class="field"><label>Nhóm</label><select id="pk_cat">${Object.entries(categories).map(([k, v]) => `<option value="${esc(k)}">${esc(v)}</option>`).join("")}</select></div>
+          <div class="field"><label>Vật liệu</label><input id="pk_mat" placeholder="glass/steel/plastic" style="width:120px"/></div>
+          <div class="field"><label>Dung tích (L)</label><input id="pk_vol" style="width:90px"/></div>
+          <div class="field"><label>Đặt cọc (đ)</label><input id="pk_dep" value="0" style="width:100px"/></div>
+          <div class="field"><label>Tồn kho đầu</label><input id="pk_on" value="0" style="width:100px"/></div>
+          <div class="field"><label>Đang lưu hành</label><input id="pk_circ" value="0" style="width:100px"/></div>
+          <div class="field" style="align-self:flex-end"><button class="btn" id="pk_add">Khai báo</button></div>
+        </div>`) : ""}
+      ${canMove ? panel("🔄 Ghi biến động bao bì", `
+        <div class="row">
+          <div class="field"><label>Loại bao bì</label><select id="mv_pkg">${opt(types, p => p.pkg_id, p => p.code + " · " + p.name)}</select></div>
+          <div class="field"><label>Biến động</label><select id="mv_kind">${Object.entries(moveKinds).map(([k, v]) => `<option value="${esc(k)}">${esc(v)}</option>`).join("")}</select></div>
+          <div class="field"><label>Số lượng</label><input id="mv_qty" style="width:110px"/></div>
+          <div class="field"><label>Chứng từ</label><input id="mv_ref" placeholder="PX/PN…" style="width:120px"/></div>
+          <div class="field"><label>Ghi chú</label><input id="mv_note" style="width:180px"/></div>
+          <div class="field" style="align-self:flex-end"><button class="btn" id="mv_go">Ghi</button></div>
+        </div>
+        <div class="muted" id="mv_hint" style="margin-top:2px"></div>`) : ""}
+      ${panel("📜 Lịch sử biến động (100 gần nhất)", `
+        <div class="tablewrap"><table>
+          <thead><tr><th>Thời điểm</th><th>Loại</th><th>Biến động</th><th style="text-align:right">SL</th><th>Chứng từ</th><th>Ghi chú</th><th>Người</th></tr></thead>
+          <tbody>${moves.length ? moves.map(m => {
+            const t = types.find(x => x.pkg_id === m.pkg_id);
+            return `<tr><td class="muted">${fmt(m.ts)}</td><td>${esc(t ? t.code : m.pkg_id)}</td>
+              <td>${badge(m.kind === "nhap" || m.kind === "thu_hoi" ? "available" : m.kind === "loai_bo" ? "critical" : "planned")}${esc(m.kind_label)}</td>
+              <td style="text-align:right">${fmtN(m.qty)}</td><td>${esc(m.ref || "—")}</td>
+              <td>${esc(m.note || "")}</td><td class="muted">${esc(m.by || "")}</td></tr>`;
+          }).join("") : '<tr><td colspan="7" class="muted">Chưa có biến động.</td></tr>'}</tbody></table></div>`)}
+    `;
+
+    if (canManage) $("pk_add").onclick = () => guard(async () => {
+      await POST("/packaging", { code: $("pk_code").value, name: $("pk_name").value,
+        category: $("pk_cat").value, material: $("pk_mat").value || null,
+        volume_l: num("pk_vol"), deposit: num("pk_dep") || 0,
+        on_hand: num("pk_on") || 0, in_circulation: num("pk_circ") || 0 });
+      toast("Đã khai báo loại bao bì"); render("packaging");
+    });
+
+    if (canMove) {
+      const HINTS = {
+        nhap: "Nhập vỏ/két/keg mới về kho → tăng tồn kho.",
+        xuat: "Xuất theo hàng đi (gắn bia) → chuyển từ tồn kho sang đang lưu hành.",
+        thu_hoi: "Khách trả vỏ/két/keg về → chuyển từ lưu hành về tồn kho.",
+        loai_bo: "Vỏ/két/keg hỏng, thanh lý → giảm tồn kho.",
+        kiem_ke: "Đặt lại tồn kho theo số đếm kiểm kê thực tế.",
+      };
+      const hint = () => { $("mv_hint").textContent = HINTS[$("mv_kind").value] || ""; };
+      $("mv_kind").onchange = hint; hint();
+      $("mv_go").onclick = () => guard(async () => {
+        if (!$("mv_pkg").value) { toast("Chưa có loại bao bì", "err"); return; }
+        const r = await POST("/packaging/move", { pkg_id: $("mv_pkg").value, kind: $("mv_kind").value,
+          qty: num("mv_qty") || 0, ref: $("mv_ref").value || null, note: $("mv_note").value || null });
+        toast(`Đã ghi · tồn ${fmtN(r.on_hand)} · lưu hành ${fmtN(r.in_circulation)}`); render("packaging");
+      });
+    }
   };
 })();

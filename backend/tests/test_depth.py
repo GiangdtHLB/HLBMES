@@ -302,18 +302,139 @@ def test_recipe_suspend_resume(client):
     rid = client.get("/api/recipes", headers=h).json()[0]["recipe_id"]
     vers = client.get(f"/api/recipes/{rid}/versions", headers=h).json()
     vid = next(v["version_id"] for v in vers if v["state"] == "effective")
-    # tạm ngưng
+    # A: tạm ngưng KHÔNG nêu lý do → bị chặn
     assert client.post(f"/api/recipes/versions/{vid}/transition", headers=h,
-                       json={"target": "suspended"}).json()["state"] == "suspended"
+                       json={"target": "suspended"}).status_code == 409
+    # tạm ngưng kèm lý do → OK
+    assert client.post(f"/api/recipes/versions/{vid}/transition", headers=h,
+                       json={"target": "suspended", "reason": "Tạm ngưng để hiệu chỉnh men"}).json()["state"] == "suspended"
     # đang tạm ngưng → KHÔNG tạo được mẻ
     hq = _login(client, "quandoc", "123456")
     oid = client.get("/api/orders", headers=hq).json()[0]["order_id"]
     bad = client.post("/api/batches", headers=hq,
                       json={"order_id": oid, "recipe_version_id": vid, "planned_qty": 1000, "allow_shortage": True})
     assert bad.status_code == 409
-    # kích hoạt lại
+    # kích hoạt lại (không cần lý do)
     assert client.post(f"/api/recipes/versions/{vid}/transition", headers=h,
                        json={"target": "effective"}).json()["state"] == "effective"
+
+
+# ---------------- A: lý do bắt buộc khi tạm ngưng + ghi audit ----------------
+def test_recipe_suspend_requires_reason_and_audits(client):
+    h = _login(client, "kysu", "123456")
+    rid = client.get("/api/recipes", headers=h).json()[0]["recipe_id"]
+    vers = client.get(f"/api/recipes/{rid}/versions", headers=h).json()
+    vid = next(v["version_id"] for v in vers if v["state"] == "effective")
+    # reason rỗng / chỉ khoảng trắng → chặn
+    assert client.post(f"/api/recipes/versions/{vid}/transition", headers=h,
+                       json={"target": "suspended", "reason": "   "}).status_code == 409
+    # có lý do → OK + audit ghi lý do
+    reason = "Phát hiện lệch độ đắng — review lại định mức hoa"
+    assert client.post(f"/api/recipes/versions/{vid}/transition", headers=h,
+                       json={"target": "suspended", "reason": reason}).status_code == 200
+    ha = _login(client, "quandoc", "123456")
+    audits = client.get("/api/audit", params={"entity_type": "recipe_version"}, headers=ha).json()
+    rows = audits.get("entries", audits) if isinstance(audits, dict) else audits
+    assert any(reason in (str(a.get("reason") or "") + str(a.get("after") or "")) for a in rows)
+    # khôi phục để không ảnh hưởng test khác
+    client.post(f"/api/recipes/versions/{vid}/transition", headers=h, json={"target": "effective"})
+
+
+# ---------------- B: scheduler dùng danh mục tank master ----------------
+def test_scheduler_uses_master_tanks(client):
+    h = _login(client, "kysu", "123456")              # master.manage
+    # danh mục có tank FV (kind=tank) từ seed
+    lines = client.get("/api/lines", headers=h).json()
+    tanks = [l for l in lines if l.get("kind") == "tank"]
+    assert len(tanks) >= 4
+    # thêm 1 tank mới rồi auto-schedule → board phải dùng được tài nguyên tank master
+    r = client.post("/api/lines", headers=h,
+                    json={"code": "FV-99", "name": "Tank test 99", "kind": "tank", "area": "len_men"})
+    assert r.status_code == 201
+    hq = _login(client, "quandoc", "123456")          # wo.dispatch
+    auto = client.post("/api/schedule/auto", headers=hq, json={"days": 12})
+    assert auto.status_code == 200
+    # số tank trả về khớp danh mục (>= số tank active), và FV-99 nằm trong tài nguyên board
+    board = client.get("/api/schedule", headers=hq).json()
+    assert "FV-99" in board["resources"]
+
+
+# ---------------- C: WMS summary tổng hợp ----------------
+def test_wms_summary(client):
+    h = _login(client, "thukho", "123456")
+    sm = client.get("/api/wms/summary", headers=h).json()
+    assert sm["locations"] >= 4
+    assert sm["capacity_pallets"] >= sm["pallets_stored"]
+    assert sm["pallets_total"] >= 3
+    assert sm["cases"] >= 80            # 2 pallet stored × 40 case (pallet building cũng tính)
+    assert sm["units"] >= sm["cases"]   # mỗi case ≥ 1 lon
+    assert 0 <= sm["fill_pct"] <= 100
+    # cần đăng nhập
+    assert client.get("/api/wms/summary").status_code == 403
+
+
+# ---------------- D: bao bì tuần hoàn (vỏ chai/két-gông/keg) ----------------
+def test_packaging_declare_and_summary(client):
+    h = _login(client, "thukho", "123456")
+    data = client.get("/api/packaging", headers=h).json()
+    assert set(["vo_chai", "ket_gong", "keg"]).issubset(set(data["categories"].keys()))
+    assert len(data["types"]) >= 6
+    # tổng hợp theo nhóm
+    cats = {c["category"] for c in data["summary"]["by_category"]}
+    assert {"vo_chai", "ket_gong", "keg"}.issubset(cats)
+
+
+def test_packaging_create_requires_master_manage(client):
+    # thủ kho KHÔNG có master.manage → không khai báo loại mới được
+    h = _login(client, "thukho", "123456")
+    bad = client.post("/api/packaging", headers=h,
+                      json={"code": "VOCHAI-X", "name": "x", "category": "vo_chai"})
+    assert bad.status_code == 403
+    # kysu có master.manage → tạo được
+    hk = _login(client, "kysu", "123456")
+    ok = client.post("/api/packaging", headers=hk,
+                     json={"code": "KEG-20", "name": "Keg inox 20L", "category": "keg",
+                           "material": "steel", "volume_l": 20, "on_hand": 100, "in_circulation": 10})
+    assert ok.status_code == 201
+    # mã trùng → chặn
+    dup = client.post("/api/packaging", headers=hk,
+                      json={"code": "KEG-20", "name": "trùng", "category": "keg"})
+    assert dup.status_code == 409
+    # category sai → chặn
+    badcat = client.post("/api/packaging", headers=hk,
+                         json={"code": "ZZ-1", "name": "z", "category": "khong_hop_le"})
+    assert badcat.status_code == 409
+
+
+def test_packaging_move_flow(client):
+    h = _login(client, "thukho", "123456")            # warehouse.issue
+    types = client.get("/api/packaging", headers=h).json()["types"]
+    keg = next(t for t in types if t["code"] == "KEG-30")
+    pid = keg["pkg_id"]
+    on0, circ0 = keg["on_hand"], keg["in_circulation"]
+    # xuất (ra lưu hành): tồn giảm, lưu hành tăng
+    r = client.post("/api/packaging/move", headers=h,
+                    json={"pkg_id": pid, "kind": "xuat", "qty": 50, "ref": "PX-001"}).json()
+    assert r["on_hand"] == on0 - 50 and r["in_circulation"] == circ0 + 50
+    # thu hồi: lưu hành giảm, tồn tăng
+    r2 = client.post("/api/packaging/move", headers=h,
+                     json={"pkg_id": pid, "kind": "thu_hoi", "qty": 30}).json()
+    assert r2["on_hand"] == on0 - 20 and r2["in_circulation"] == circ0 + 20
+    # xuất quá tồn → chặn
+    over = client.post("/api/packaging/move", headers=h,
+                       json={"pkg_id": pid, "kind": "xuat", "qty": 9_999_999})
+    assert over.status_code == 409
+    # kiểm kê: đặt lại tồn
+    r3 = client.post("/api/packaging/move", headers=h,
+                     json={"pkg_id": pid, "kind": "kiem_ke", "qty": 123, "note": "kiểm kê quý"}).json()
+    assert r3["on_hand"] == 123
+    # lịch sử có bản ghi
+    hist = client.get("/api/packaging/moves", params={"pkg_id": pid}, headers=h).json()
+    assert len(hist) >= 3
+    # operator không có warehouse.issue → không ghi được
+    no = _login(client, "vanhanh", "123456")
+    assert client.post("/api/packaging/move", headers=no,
+                       json={"pkg_id": pid, "kind": "nhap", "qty": 1}).status_code == 403
 
 
 # ---------------- Q2: production line master ----------------

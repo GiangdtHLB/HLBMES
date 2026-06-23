@@ -20,6 +20,23 @@ def list_locations(db: Session) -> list:
              "capacity": l.capacity, "used": counts.get(l.loc_id, 0)} for l in locs]
 
 
+def summary(db: Session) -> dict:
+    """Tổng hợp toàn kho: số vị trí + sức chứa, tổng pallet (theo trạng thái), case/units."""
+    locs = db.execute(select(WmsLocation)).scalars().all()
+    capacity = sum(l.capacity for l in locs)
+    pallets = db.execute(select(Pallet)).scalars().all()
+    stored = [p for p in pallets if p.status == "stored"]
+    cases = db.execute(select(func.count(Case.case_id))).scalar() or 0
+    units = db.execute(select(func.coalesce(func.sum(Case.units), 0))).scalar() or 0
+    by_status = {}
+    for p in pallets:
+        by_status[p.status] = by_status.get(p.status, 0) + 1
+    return {"locations": len(locs), "capacity_pallets": capacity,
+            "pallets_total": len(pallets), "pallets_stored": len(stored),
+            "fill_pct": round(len(stored) / capacity * 100, 1) if capacity else 0.0,
+            "by_status": by_status, "cases": cases, "units": int(units)}
+
+
 def list_pallets(db: Session, status: str = None) -> list:
     stmt = select(Pallet).order_by(Pallet.created_at.desc())
     if status:

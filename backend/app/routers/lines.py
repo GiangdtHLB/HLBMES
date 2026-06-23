@@ -16,13 +16,15 @@ router = APIRouter(prefix="/api/lines", tags=["lines"])
 
 
 @router.get("")
-def list_lines(active_only: bool = False, db: Session = Depends(get_db),
+def list_lines(active_only: bool = False, kind: str = None, db: Session = Depends(get_db),
                user: User = Depends(get_current_user)):
     stmt = select(ProductionLine).order_by(ProductionLine.code)
     if active_only:
         stmt = stmt.where(ProductionLine.active == True)  # noqa: E712
+    if kind:
+        stmt = stmt.where(ProductionLine.kind == kind)
     return [{"line_id": l.line_id, "code": l.code, "name": l.name, "area": l.area,
-             "ideal_rate_per_min": l.ideal_rate_per_min, "active": l.active}
+             "kind": l.kind, "ideal_rate_per_min": l.ideal_rate_per_min, "active": l.active}
             for l in db.execute(stmt).scalars().all()]
 
 

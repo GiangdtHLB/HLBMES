@@ -39,6 +39,7 @@ from .isa88 import BatchPhaseRun
 from .scheduling import ScheduleSlot
 from .wms import Case, Pallet, WmsLocation
 from .lines import ProductionLine
+from .packaging import PackagingMove, PackagingType
 
 __all__ = [
     "AuditLog",
@@ -90,4 +91,6 @@ __all__ = [
     "Pallet",
     "Case",
     "ProductionLine",
+    "PackagingType",
+    "PackagingMove",
 ]
