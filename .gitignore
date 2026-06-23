@@ -40,3 +40,7 @@ Thumbs.db
 *.swp
 .idea/
 .vscode/
+
+# Claude runtime lock files
+.claude/scheduled_tasks.lock
+.claude/*.lock
