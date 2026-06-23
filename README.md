@@ -237,10 +237,21 @@ Danh sách lớn được chia giai đoạn, mỗi giai đoạn chạy được 
 ### Hạ tầng production (Phase 5)
 - **Docker**: `backend/Dockerfile` + `docker-compose.yml` (app FastAPI + **PostgreSQL 16**), healthcheck, volume bền. `docker compose up -d` → tự `alembic upgrade head` + seed + chạy.
 - **Migration thật**: Alembic (`backend/alembic/`) — `alembic revision --autogenerate` + `upgrade head` (đã sinh migration đầu tạo **40 bảng**). App cũng `create_all` cho dev.
-- **Test tự động**: `backend/tests/` pytest + FastAPI TestClient (**8/8 pass**: health, login, RBAC, work order, audit-chain, scan, historian, BOM). **CI** GitHub Actions (`.github/workflows/ci.yml`: pytest + docker build).
+- **Test tự động**: `backend/tests/` pytest + FastAPI TestClient (**22/22 pass**: smoke + 5 phân hệ chiều sâu + hardening). **CI** GitHub Actions (`.github/workflows/ci.yml`: ruff lint + pytest + docker build).
 - **Vận hành**: `/api/health` kiểm tra kết nối DB + dialect + version; `scripts/backup.sh` / `restore.sh` (pg_dump 3-2-1); `.env.example`; HTTPS qua reverse proxy (mẫu nginx trong compose, comment sẵn); cấu hình qua biến môi trường; `MES_DEV_HEADER_AUTH=0` ở production.
 
 > **Cách chạy production:** `cp .env.example .env` → chỉnh `POSTGRES_PASSWORD` → `docker compose up -d` → https qua proxy. **Dev:** như mục "Chạy" (SQLite). **Test:** `cd backend && pip install -r requirements-dev.txt && pytest -q`.
+
+### Vận hành & Bảo mật — hardening P0/P1
+- **Rate-limit + quota AI** (`ratelimit.py`, middleware in-proc sliding-window): `/api/auth/login` chống brute-force (mặc định 10/phút/IP); `/api/ai/*` giới hạn 20/phút/phiên + **hạn mức chat AI/ngày** (mặc định 300) — chặn lạm dụng vì AI gọi **Claude thật = chi phí**. `/api/ai/chat|insights|tools` nay **bắt buộc đăng nhập**.
+- **Seed an toàn production**: `MES_SEED_DEMO=0` → **chỉ tạo admin**, không seed tài khoản/API key/dữ liệu demo. Admin lấy mật khẩu từ `MES_ADMIN_PASSWORD`; nếu dùng mặc định `admin123` thì **buộc đổi mật khẩu lần đầu** (`must_change_password`). docker-compose đặt `MES_SEED_DEMO=0` sẵn.
+- **Audit chống race + bất biến**: `record_audit` tuần tự hoá bằng `pg_advisory_xact_lock` (Postgres) + khoá tiến trình; cột `seq` **UNIQUE** (fail-loud). `POST /api/v1/events` ghi **qua `record_audit`** nên không còn làm gãy chuỗi hash (đã kiểm chứng: chèn external event → verify-chain vẫn intact).
+- **Cấu hình tập trung** `pydantic-settings` (`config.Settings`) — validate kiểu, gom mọi biến `MES_*` + `ANTHROPIC_API_KEY`.
+- **Structured logging + request-id** (`logging_config.py`): mỗi request có `X-Request-ID`, log JSON tuỳ chọn (`MES_LOG_JSON=1`); **log chi phí AI** (model/token/USD ước tính/latency) mỗi lượt gọi LLM; bỏ pattern nuốt exception (health, fallback LLM đều log có ngữ cảnh).
+- **Test + CI**: **22/22 pass** (smoke 8 + depth/hardening 14: SPC, downtime/MTBF, dispense, scope, audit-chain-qua-event, rate-limit, auth-gap…); CI chạy **ruff lint + pytest + docker build**.
+- **Kiến trúc**: gỡ phụ thuộc ngược service→router (`services/derived.py`); dùng FastAPI `lifespan`; validate payload gateway bằng Pydantic.
+
+> **Còn lại (P2 — khi quy mô/đồng thời tăng, đặc biệt nếu làm AI agent):** chat AI **async + streaming SSE** + worker/queue; lưu **ConversationMemory** (bảng `ai_conversation/ai_message` qua Alembic) thay vì chỉ giữ ở client; **monitoring** `/metrics` + cảnh báo lỗi LLM/timeout + kiểm thử restore backup định kỳ; **module hoá `frontend/app.js`** khi UI phình thêm. Rate-limit hiện in-process — nhiều worker/replica nên chuyển sang Redis (token bucket), interface `check_rate_limit()` giữ nguyên.
 
 ### Edge + Historian real-time (Phase 3)
 - **Historian** (`services/historian.py`): time-series theo tag UNS (`brewery/site01/<area>/<device>/<metric>`); `POST /api/historian/ingest` (xác thực **X-API-Key** scope write), `GET /api/historian/{tags,latest,series}` (downsample min/avg/max cho biểu đồ). SQLite cho demo — interface swap được TimescaleDB/Influx.
