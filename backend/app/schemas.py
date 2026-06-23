@@ -206,6 +206,12 @@ class BackflushIn(BaseModel):
     produced_qty: float
 
 
+# ---- Tác vụ nền (jobs) ----
+class JobIn(BaseModel):
+    kind: str                          # ai_report | recall
+    params: dict = {}
+
+
 class EbrSignIn(BaseModel):
     password: str
     meaning: str

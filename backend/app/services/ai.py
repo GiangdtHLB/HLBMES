@@ -101,6 +101,8 @@ def chat(db: Session, message: str, history: list = None) -> dict:
             return _chat_llm(db, message, history or [])
         except Exception as e:  # noqa: BLE001 — fallback an toàn sang engine luật
             log.warning("LLM chat lỗi, fallback engine luật: %s", e, exc_info=True)
+            from .. import metrics_prom
+            metrics_prom.inc("mes_ai_errors_total")
             res = _chat_local(db, message)
             res["note"] = f"(LLM lỗi, đã dùng engine luật: {e})"
             return res
@@ -122,6 +124,8 @@ def stream_chat(db: Session, message: str, history: list = None):
             return
         except Exception as e:  # noqa: BLE001 — fallback an toàn sang engine luật
             log.warning("LLM stream lỗi, fallback engine luật: %s", e, exc_info=True)
+            from .. import metrics_prom
+            metrics_prom.inc("mes_ai_errors_total")
             res = _chat_local(db, message)
             yield from _stream_text(res["answer"], res.get("tools_used"), "local (LLM lỗi)")
             return

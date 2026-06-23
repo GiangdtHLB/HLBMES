@@ -203,6 +203,34 @@ def test_ai_chat_stream(client):
     assert len(msgs) == 2 and msgs[1]["role"] == "assistant"
 
 
+# ---------------- P2: worker job queue ----------------
+def test_job_queue_ai_report(client):
+    import time as _t
+    h = _login(client, "quandoc", "123456")
+    sub = client.post("/api/jobs", headers=h, json={"kind": "ai_report"})
+    assert sub.status_code == 201
+    jid = sub.json()["job_id"]
+    # poll tới khi worker (thread) hoàn thành
+    status, result = None, None
+    for _ in range(40):
+        j = client.get(f"/api/jobs/{jid}", headers=h).json()
+        status = j["status"]
+        if status in ("done", "error"):
+            result = j["result"]
+            break
+        _t.sleep(0.1)
+    assert status == "done", f"job không hoàn thành: {status}"
+    assert result and "headline" in result and "summary" in result
+    # cô lập theo user
+    h2 = _login(client, "kcs", "123456")
+    assert client.get(f"/api/jobs/{jid}", headers=h2).status_code == 403
+
+
+def test_job_queue_unknown_kind(client):
+    h = _login(client, "quandoc", "123456")
+    assert client.post("/api/jobs", headers=h, json={"kind": "khong_ton_tai"}).status_code == 409
+
+
 # ---------------- rate-limit (bật riêng để test) ----------------
 def test_rate_limit_login(client, monkeypatch):
     from app import ratelimit

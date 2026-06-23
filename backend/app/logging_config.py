@@ -68,3 +68,9 @@ def log_ai_call(logger: logging.Logger, *, model: str, input_tokens: int, output
     logger.info(
         "ai_call model=%s in_tok=%d out_tok=%d est_usd=%.5f latency_ms=%.0f tools=%s ok=%s",
         model, input_tokens, output_tokens, cost, latency_ms, ",".join(tools) or "-", ok)
+    from . import metrics_prom
+    metrics_prom.inc("mes_ai_calls_total")
+    metrics_prom.inc("mes_ai_tokens_total", input_tokens, direction="input")
+    metrics_prom.inc("mes_ai_tokens_total", output_tokens, direction="output")
+    if not ok:
+        metrics_prom.inc("mes_ai_errors_total")

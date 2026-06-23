@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     rl_login_per_min: int = 10             # MES_RL_LOGIN_PER_MIN
     rl_ai_per_min: int = 20                # MES_RL_AI_PER_MIN
     rl_ai_daily_quota: int = 300           # MES_AI_DAILY_QUOTA (chat AI/ngày/phiên)
+    redis_url: str = ""                    # MES_REDIS_URL: bật backend Redis cho rate-limit (nhiều worker)
 
     # --- Logging ---
     log_level: str = "INFO"                # MES_LOG_LEVEL
@@ -67,6 +68,7 @@ RL_ENABLED = settings.rl_enabled
 RL_LOGIN_PER_MIN = settings.rl_login_per_min
 RL_AI_PER_MIN = settings.rl_ai_per_min
 RL_AI_DAILY_QUOTA = settings.rl_ai_daily_quota
+REDIS_URL = settings.redis_url
 
 LOG_LEVEL = settings.log_level
 LOG_JSON = settings.log_json

@@ -34,6 +34,7 @@ from .materials_ext import Dispense, DispenseLine
 from .quality_ext import CAPA, QCParameter, Sample
 from .oee_ext import DowntimeEvent
 from .ai_memory import AiConversation, AiMessage
+from .jobs import Job
 
 __all__ = [
     "AuditLog",
@@ -78,4 +79,5 @@ __all__ = [
     "DowntimeEvent",
     "AiConversation",
     "AiMessage",
+    "Job",
 ]

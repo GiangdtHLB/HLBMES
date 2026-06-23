@@ -11,6 +11,7 @@ from fastapi.staticfiles import StaticFiles
 from .config import APP_NAME, FRONTEND_DIR
 from .database import init_db
 from .errors import DomainError, NotFoundError, PermissionError_
+from . import metrics_prom
 from .logging_config import configure_logging, get_logger, request_id_var
 from .ratelimit import check_rate_limit
 from .routers import (
@@ -24,6 +25,7 @@ from .routers import (
     energy,
     gateway,
     historian,
+    jobs,
     maintenance,
     master,
     materials,
@@ -77,6 +79,13 @@ async def _observability(request: Request, call_next):
         resp = await call_next(request)
         dur = (time.monotonic() - start) * 1000
         resp.headers["X-Request-ID"] = rid
+        # Metrics: dùng route template (vd /api/batches/{batch_id}) để giới hạn cardinality.
+        r = request.scope.get("route")
+        route = getattr(r, "path", request.url.path)
+        if route != "/metrics":
+            metrics_prom.inc("mes_http_requests_total", method=request.method,
+                             route=route, status=resp.status_code)
+            metrics_prom.observe_duration(route, dur / 1000.0)
         if request.url.path.startswith("/api"):
             log.info("%s %s -> %s %.0fms", request.method, request.url.path,
                      resp.status_code, dur)
@@ -104,7 +113,7 @@ async def _perm(_: Request, exc: PermissionError_):
 # ---- Routers ----
 for r in (auth, master, orders, workorders, recipes, batches, materials, dispense, quality,
           quality_adv, traceability, performance, downtime, warehouse, energy, maintenance,
-          process, brewing, reports, historian, scan, ai, gateway, audit):
+          process, brewing, reports, historian, scan, ai, jobs, gateway, audit):
     app.include_router(r.router)
 
 
@@ -123,6 +132,24 @@ def health():
         log.error("health DB check failed: %s", e, exc_info=True)
     return {"status": "ok" if db_ok else "degraded", "app": APP_NAME, "version": "0.1.0-mvp",
             "db": {"ok": db_ok, "dialect": dialect}, "time": utcnow().isoformat()}
+
+
+@app.get("/metrics", tags=["system"])
+def metrics():
+    """Số liệu Prometheus (text exposition). Cập nhật gauge audit-chain khi scrape."""
+    from fastapi.responses import PlainTextResponse
+    from .audit import verify_chain
+    from .database import SessionLocal
+    db = SessionLocal()
+    try:
+        vc = verify_chain(db)
+        metrics_prom.set_gauge("mes_audit_chain_intact", 1 if vc.get("intact") else 0)
+        metrics_prom.set_gauge("mes_audit_entries", vc.get("count", 0))
+    except Exception as e:  # noqa: BLE001
+        log.error("metrics audit gauge failed: %s", e)
+    finally:
+        db.close()
+    return PlainTextResponse(metrics_prom.render(), media_type="text/plain; version=0.0.4")
 
 
 # ---- Frontend tĩnh (đặt cuối để không che /api) ----
