@@ -1,5 +1,7 @@
 """Lớp AI: trợ lý chat + AI vận hành (advisory) + manifest tool cho agent."""
 
+from typing import Optional
+
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -7,14 +9,15 @@ from sqlalchemy.orm import Session
 from ..config import LLM_MODEL
 from ..database import get_db
 from ..security import User, get_current_user
-from ..services import ai, ai_tools
+from ..services import ai, ai_tools, conversations
 
 router = APIRouter(prefix="/api/ai", tags=["ai"])
 
 
 class ChatIn(BaseModel):
     message: str = Field(min_length=1, max_length=4000)
-    history: list = Field(default_factory=list, max_length=20)
+    history: list = Field(default_factory=list, max_length=20)   # giữ tương thích client cũ
+    conversation_id: Optional[str] = None
 
 
 @router.get("/status")
@@ -26,7 +29,25 @@ def status():
 @router.post("/chat")
 def chat(payload: ChatIn, db: Session = Depends(get_db),
          user: User = Depends(get_current_user)):
-    return ai.chat(db, payload.message, payload.history)
+    """Chat có bộ nhớ: lưu/nạp lịch sử theo conversation_id (phía server)."""
+    return conversations.chat_with_memory(db, user, payload.message, payload.conversation_id)
+
+
+@router.get("/conversations")
+def list_conversations(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    return conversations.list_conversations(db, user.username)
+
+
+@router.get("/conversations/{conv_id}")
+def get_conversation(conv_id: str, db: Session = Depends(get_db),
+                     user: User = Depends(get_current_user)):
+    return conversations.get_messages(db, conv_id, user.username)
+
+
+@router.delete("/conversations/{conv_id}")
+def delete_conversation(conv_id: str, db: Session = Depends(get_db),
+                        user: User = Depends(get_current_user)):
+    return conversations.delete_conversation(db, conv_id, user.username)
 
 
 @router.get("/insights")

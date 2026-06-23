@@ -163,6 +163,27 @@ def test_external_event_keeps_chain(client):
     assert after["intact"] is True and after["count"] == before["count"] + 1
 
 
+# ---------------- P2: ConversationMemory ----------------
+def test_ai_conversation_memory(client):
+    h = _login(client, "quandoc", "123456")
+    # lượt 1 → tạo hội thoại mới (engine luật offline, không tốn LLM)
+    r1 = client.post("/api/ai/chat", headers=h, json={"message": "tồn kho thế nào?"}).json()
+    cid = r1["conversation_id"]
+    assert cid and r1.get("answer")
+    # lượt 2 → nối vào cùng hội thoại
+    r2 = client.post("/api/ai/chat", headers=h, json={"message": "còn OEE?", "conversation_id": cid}).json()
+    assert r2["conversation_id"] == cid
+    # lịch sử lưu server: 4 message (2 user + 2 assistant)
+    msgs = client.get(f"/api/ai/conversations/{cid}", headers=h).json()["messages"]
+    assert len(msgs) == 4 and msgs[0]["role"] == "user"
+    # xuất hiện trong danh sách hội thoại của user
+    convs = client.get("/api/ai/conversations", headers=h).json()
+    assert any(c["conv_id"] == cid for c in convs)
+    # cô lập theo người dùng: user khác không xem được
+    h2 = _login(client, "kcs", "123456")
+    assert client.get(f"/api/ai/conversations/{cid}", headers=h2).status_code == 403
+
+
 # ---------------- rate-limit (bật riêng để test) ----------------
 def test_rate_limit_login(client, monkeypatch):
     from app import ratelimit

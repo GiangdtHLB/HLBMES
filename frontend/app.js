@@ -1410,22 +1410,32 @@ VIEWS.realtime = async function () {
 
 // ================= TRỢ LÝ AI =================
 let AI_HISTORY = [];
+let CURRENT_CONV = null;   // hội thoại đang mở (lưu phía server)
 const sevBadge = (s) => badge(s === "high" ? "critical" : s === "medium" ? "due" : "available") + s;
 VIEWS.ai = async function () {
-  const [status, ins] = await Promise.all([GET("/ai/status"), GET("/ai/insights")]);
+  const [status, ins, convs] = await Promise.all([
+    GET("/ai/status"), GET("/ai/insights"), GET("/ai/conversations").catch(() => [])]);
   const modeTag = status.llm_available
     ? `<span class="badge available">Claude ${esc(status.model)}</span>`
     : `<span class="badge planned">Engine luật (offline)</span>`;
+  const convOpts = (list, sel) => `<option value="">+ Hội thoại mới</option>` +
+    list.map(c => `<option value="${esc(c.conv_id)}" ${c.conv_id === sel ? "selected" : ""}>${esc(c.title)} (${c.messages})</option>`).join("");
   $("view-ai").innerHTML = `
     <div class="split">
       <div class="panel">
         <h2>Trợ lý AI ${modeTag} <span class="badge due">chỉ tư vấn</span></h2>
-        <div id="chatlog" style="height:360px;overflow-y:auto;background:var(--panel2);border:1px solid var(--border);border-radius:8px;padding:12px;margin-bottom:10px"></div>
+        <div class="row" style="margin-bottom:8px">
+          <div class="field" style="flex:1"><label>Hội thoại (lưu trên máy chủ)</label>
+            <select id="ai_conv" style="width:100%">${convOpts(convs, CURRENT_CONV)}</select></div>
+          <button class="btn sec sm" id="ai_new" style="align-self:flex-end">Mới</button>
+          <button class="btn sec sm" id="ai_del" style="align-self:flex-end">Xoá</button>
+        </div>
+        <div id="chatlog" style="height:330px;overflow-y:auto;background:var(--panel2);border:1px solid var(--border);border-radius:8px;padding:12px;margin-bottom:10px"></div>
         <div class="row">
           <div class="field" style="flex:1"><input id="chatmsg" placeholder="Hỏi: tồn kho, OEE, cảnh báo, mẻ, kiểm định, sự cố, năng lượng, truy xuất…" style="width:100%"/></div>
           <button class="btn" id="chatsend">Gửi</button>
         </div>
-        <div class="muted" style="margin-top:6px">Gợi ý: "OEE hôm nay?", "cảnh báo chất lượng", "truy xuất PKG-2406-0001". ${status.llm_available ? "" : "Đặt ANTHROPIC_API_KEY + cài <code class='k'>anthropic</code> để bật Claude thật."}</div>
+        <div class="muted" style="margin-top:6px">Lịch sử lưu trên máy chủ — còn nguyên khi tải lại/đổi máy. ${status.llm_available ? "" : "Đặt ANTHROPIC_API_KEY + cài <code class='k'>anthropic</code> để bật Claude thật."}</div>
       </div>
       <div class="panel">
         <h2>AI vận hành — cảnh báo & đề xuất <span class="muted">(${ins.count})</span></h2>
@@ -1443,21 +1453,42 @@ VIEWS.ai = async function () {
   const renderChat = () => {
     $("chatlog").innerHTML = AI_HISTORY.map(m => {
       const me = m.role === "user";
+      const tools = m.tools_used ? (Array.isArray(m.tools_used) ? m.tools_used : String(m.tools_used).split(",")) : (m.tools || null);
       return `<div style="margin:6px 0;text-align:${me ? "right" : "left"}">
         <span style="display:inline-block;max-width:85%;padding:8px 12px;border-radius:10px;text-align:left;
           background:${me ? "var(--accent)" : "var(--panel)"};color:${me ? "#1a1206" : "var(--text)"};border:1px solid var(--border)">
-          ${esc(m.content)}${m.tools ? `<div style="font-size:11px;opacity:.7;margin-top:4px">🔧 ${m.tools.join(", ")}</div>` : ""}</span></div>`;
+          ${esc(m.content)}${tools && tools.length ? `<div style="font-size:11px;opacity:.7;margin-top:4px">🔧 ${tools.map(esc).join(", ")}</div>` : ""}</span></div>`;
     }).join("") || '<div class="muted">Bắt đầu hỏi trợ lý…</div>';
     $("chatlog").scrollTop = $("chatlog").scrollHeight;
   };
-  renderChat();
+  const refreshConvList = async () => {
+    const list = await GET("/ai/conversations").catch(() => []);
+    $("ai_conv").innerHTML = convOpts(list, CURRENT_CONV);
+  };
+  const loadConv = async (id) => {
+    if (!id) { CURRENT_CONV = null; AI_HISTORY = []; renderChat(); return; }
+    const c = await GET(`/ai/conversations/${id}`);
+    CURRENT_CONV = id; AI_HISTORY = c.messages; renderChat();
+  };
+  // nạp hội thoại đang chọn (nếu có) khi mở view
+  if (CURRENT_CONV && convs.some(c => c.conv_id === CURRENT_CONV)) await loadConv(CURRENT_CONV);
+  else renderChat();
+
+  $("ai_conv").onchange = () => guard(() => loadConv($("ai_conv").value));
+  $("ai_new").onclick = () => { CURRENT_CONV = null; AI_HISTORY = []; $("ai_conv").value = ""; renderChat(); };
+  $("ai_del").onclick = () => guard(async () => {
+    if (!CURRENT_CONV) return;
+    await api(`/ai/conversations/${CURRENT_CONV}`, { method: "DELETE" });
+    CURRENT_CONV = null; AI_HISTORY = []; renderChat(); await refreshConvList(); toast("Đã xoá hội thoại");
+  });
   const send = () => guard(async () => {
     const msg = $("chatmsg").value.trim(); if (!msg) return;
     AI_HISTORY.push({ role: "user", content: msg }); $("chatmsg").value = ""; renderChat();
-    const hist = AI_HISTORY.filter(m => m.role === "user" || m.role === "assistant").map(m => ({ role: m.role, content: m.content }));
-    const res = await POST("/ai/chat", { message: msg, history: hist.slice(0, -1) });
-    AI_HISTORY.push({ role: "assistant", content: res.answer, tools: res.tools_used });
+    const res = await POST("/ai/chat", { message: msg, conversation_id: CURRENT_CONV });
+    CURRENT_CONV = res.conversation_id;
+    AI_HISTORY.push({ role: "assistant", content: res.answer, tools_used: res.tools_used });
     renderChat();
+    await refreshConvList();           // cập nhật danh sách + giữ chọn hội thoại hiện tại
   });
   $("chatsend").onclick = send;
   $("chatmsg").onkeydown = (e) => { if (e.key === "Enter") send(); };
@@ -1816,7 +1847,7 @@ async function doLogin() {
 async function doLogout() {
   try { await fetch("/api/auth/logout", { method: "POST", headers: { "Authorization": "Bearer " + TOKEN } }); } catch (e) {}
   TOKEN = ""; CURRENT_USER = null; localStorage.removeItem("mes_token");
-  AI_HISTORY = [];
+  AI_HISTORY = []; CURRENT_CONV = null;
   showLogin();
 }
 

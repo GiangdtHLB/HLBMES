@@ -33,6 +33,7 @@ from .workorder import WorkOrder
 from .materials_ext import Dispense, DispenseLine
 from .quality_ext import CAPA, QCParameter, Sample
 from .oee_ext import DowntimeEvent
+from .ai_memory import AiConversation, AiMessage
 
 __all__ = [
     "AuditLog",
@@ -75,4 +76,6 @@ __all__ = [
     "CAPA",
     "Sample",
     "DowntimeEvent",
+    "AiConversation",
+    "AiMessage",
 ]

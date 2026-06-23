@@ -55,7 +55,6 @@ def test_auth_required_without_token(client):
 
 def test_rbac_permission(client):
     h = _login(client, "vanhanh", "123456")            # operator, không có order.create
-    po = client.get("/api/orders", headers=h).json()[0]["order_id"]
     r = client.post("/api/orders", headers=h,
                     json={"order_code": "PO-X", "product_id": "x", "planned_qty": 1})
     assert r.status_code == 403   # thiếu quyền order.create

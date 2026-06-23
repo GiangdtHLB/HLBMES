@@ -251,7 +251,11 @@ Danh sách lớn được chia giai đoạn, mỗi giai đoạn chạy được 
 - **Test + CI**: **22/22 pass** (smoke 8 + depth/hardening 14: SPC, downtime/MTBF, dispense, scope, audit-chain-qua-event, rate-limit, auth-gap…); CI chạy **ruff lint + pytest + docker build**.
 - **Kiến trúc**: gỡ phụ thuộc ngược service→router (`services/derived.py`); dùng FastAPI `lifespan`; validate payload gateway bằng Pydantic.
 
-> **Còn lại (P2 — khi quy mô/đồng thời tăng, đặc biệt nếu làm AI agent):** chat AI **async + streaming SSE** + worker/queue; lưu **ConversationMemory** (bảng `ai_conversation/ai_message` qua Alembic) thay vì chỉ giữ ở client; **monitoring** `/metrics` + cảnh báo lỗi LLM/timeout + kiểm thử restore backup định kỳ; **module hoá `frontend/app.js`** khi UI phình thêm. Rate-limit hiện in-process — nhiều worker/replica nên chuyển sang Redis (token bucket), interface `check_rate_limit()` giữ nguyên.
+**P2 đã làm:**
+- **Alembic migration** `89f74fef30e3` (nối tiếp `4b0bfd0900bd`): thêm 10 bảng mới + 6 cột + đổi `audit_log.seq` thành UNIQUE; có `server_default` cho cột NOT NULL (an toàn khi nâng cấp prod đang chạy). Đã kiểm chứng `alembic upgrade head` trên DB sạch → 50 bảng, ở `head`.
+- **ConversationMemory** (`models/ai_memory.py`, `services/conversations.py`): chat AI nay **lưu hội thoại phía server** (bảng `ai_conversation/ai_message`) — `POST /api/ai/chat` nạp lịch sử từ DB làm ngữ cảnh + lưu cả 2 lượt; `GET/DELETE /api/ai/conversations[/{id}]` (cô lập theo người dùng). UI tab Trợ lý AI: chọn/đổi/xoá/tạo hội thoại; lịch sử **còn nguyên khi tải lại/đổi máy**.
+
+> **P2 còn lại (khi quy mô/đồng thời tăng):** chat AI **async + streaming SSE** + worker/queue; **monitoring** `/metrics` + cảnh báo lỗi LLM/timeout + kiểm thử restore backup định kỳ; **module hoá `frontend/app.js`** khi UI phình thêm. Rate-limit hiện in-process — nhiều worker/replica nên chuyển sang Redis (token bucket), interface `check_rate_limit()` giữ nguyên.
 
 ### Edge + Historian real-time (Phase 3)
 - **Historian** (`services/historian.py`): time-series theo tag UNS (`brewery/site01/<area>/<device>/<metric>`); `POST /api/historian/ingest` (xác thực **X-API-Key** scope write), `GET /api/historian/{tags,latest,series}` (downsample min/avg/max cho biểu đồ). SQLite cho demo — interface swap được TimescaleDB/Influx.
