@@ -4,6 +4,8 @@ SQLAlchemy==2.0.30
 pydantic==2.7.4
 python-multipart==0.0.9
 pydantic-settings==2.3.4
+# OPC UA edge connector (tiến trình app.opcua_edge — core app KHÔNG import; chỉ cần ở máy chạy edge).
+asyncua==1.1.8
 # Trợ lý AI bằng Claude thật (đặt ANTHROPIC_API_KEY để kích hoạt; nếu không có key,
 # trợ lý tự fallback sang engine luật nội bộ offline — vẫn chạy bình thường).
 anthropic==0.69.0
