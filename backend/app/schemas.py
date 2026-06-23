@@ -107,6 +107,7 @@ class RecipeVersionIn(BaseModel):
     materials: list[dict] = []
     quality_checks: list[dict] = []
     yield_steps: list[dict] = []
+    procedure: list[dict] = []
     change_reason: Optional[str] = None
 
 
@@ -121,6 +122,7 @@ class RecipeVersionOut(ORMModel):
     materials: list
     quality_checks: list
     yield_steps: list = []
+    procedure: list = []
     change_reason: Optional[str] = None
     created_by: Optional[str] = None
     approved_by: Optional[str] = None
@@ -210,6 +212,18 @@ class BackflushIn(BaseModel):
 class JobIn(BaseModel):
     kind: str                          # ai_report | recall
     params: dict = {}
+
+
+# ---- ISA-88 procedural ----
+class PhaseStartIn(BaseModel):
+    up: str
+    op: str
+    phase: str
+
+
+class PhaseTransitionIn(BaseModel):
+    target: str                        # running | held | complete | aborted
+    values: dict = {}
 
 
 class EbrSignIn(BaseModel):

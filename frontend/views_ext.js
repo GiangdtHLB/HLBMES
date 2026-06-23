@@ -6,7 +6,7 @@
 //   recipeadv (#3) · dispense (#6) · qclab (#7) · oee (#8)
 // ============================================================================
 (function () {
-  ["recipeadv", "dispense", "qclab", "oee"].forEach(v => { if (!ALL_VIEWS.includes(v)) ALL_VIEWS.push(v); });
+  ["recipeadv", "dispense", "qclab", "oee", "isa88"].forEach(v => { if (!ALL_VIEWS.includes(v)) ALL_VIEWS.push(v); });
 
   const num = (id) => { const x = $(id).value; return x === "" ? null : parseFloat(x); };
   const opt = (arr, val, lab, sel) => arr.map(o =>
@@ -368,5 +368,62 @@
         reason_code: $("dt_code").value, minutes: num("dt_min") || 0, shift: $("dt_shift").value });
       toast("Đã ghi sự kiện dừng"); render("oee");
     });
+  };
+
+  // ======================================================================
+  // #P3-1 — ISA-88 procedural (thực thi phase theo mẻ)
+  // ======================================================================
+  const PHASE_BADGE = { idle: "planned", running: "due", held: "critical", complete: "available", aborted: "obsolete" };
+  VIEWS.isa88 = async function () {
+    const root = $("view-isa88");
+    const batches = await GET("/batches");
+    const running = batches.find(b => b.state === "running") || batches[0];
+    root.innerHTML = `
+      ${panel("🏭 Thực thi thủ tục ISA-88", `
+        <div class="row"><div class="field"><label>Mẻ</label>
+          <select id="i8_batch">${opt(batches, b => b.batch_id, b => b.batch_code + " · " + b.state, running && running.batch_id)}</select></div></div>
+        <div id="i8_box" class="muted" style="margin-top:8px">Đang tải…</div>`)}
+    `;
+    async function load() {
+      const bid = $("i8_batch").value;
+      if (!bid) { $("i8_box").innerHTML = '<div class="muted">Chưa có mẻ.</div>'; return; }
+      const st = await GET(`/isa88/batch/${bid}`);
+      const phaseRow = (up, op, p) => {
+        const b = PHASE_BADGE[p.state] || "planned";
+        const sp = (p.params || []).map(x => `${esc(x.name)}=${esc(x.setpoint)}${esc(x.unit || "")}`).join(", ");
+        let btns = "";
+        if (p.state === "idle") btns = `<button class="btn sm" data-act="start" data-up="${esc(up)}" data-op="${esc(op)}" data-ph="${esc(p.phase)}">Bắt đầu</button>`;
+        else if (p.state === "running") btns = `<button class="btn sm" data-act="complete" data-run="${p.run_id}">Hoàn thành</button> <button class="btn sm sec" data-act="held" data-run="${p.run_id}">Giữ</button>`;
+        else if (p.state === "held") btns = `<button class="btn sm" data-act="running" data-run="${p.run_id}">Tiếp</button> <button class="btn sm sec" data-act="aborted" data-run="${p.run_id}">Hủy</button>`;
+        return `<tr><td style="padding-left:24px">${esc(p.phase)} ${p.duration_min ? `<span class="muted">(${p.duration_min}')</span>` : ""}</td>
+          <td class="muted" style="font-size:12px">${sp || "—"}</td>
+          <td>${badge(b)}${esc(p.state)}</td><td>${esc(p.operator || "")}</td><td>${btns}</td></tr>`;
+      };
+      const rows = st.unit_procedures.map(u => {
+        const head = `<tr style="background:var(--panel2)"><td colspan="5"><b>▸ ${esc(u.unit_procedure)}</b>
+          ${u.unit_class === "cip" ? badge("critical") + "CIP" : badge("available") + esc(u.unit_class || "")}</td></tr>`;
+        const ops = u.operations.map(o =>
+          `<tr><td colspan="5" style="padding-left:12px"><i>${esc(o.operation)}</i></td></tr>` +
+          o.phases.map(p => phaseRow(u.unit_procedure, o.operation, p)).join("")).join("");
+        return head + ops;
+      }).join("");
+      $("i8_box").innerHTML = `
+        <div style="margin-bottom:8px">Tiến độ: <b>${st.completion_pct}%</b>
+          (${st.phases_done}/${st.phases_total} phase) ${CH.donut(st.completion_pct / 100, { label: "phase", size: 96 })}</div>
+        <div class="tablewrap"><table><thead><tr><th>Unit procedure / Operation / Phase</th><th>Setpoint</th><th>Trạng thái</th><th>Người</th><th></th></tr></thead>
+        <tbody>${rows}</tbody></table></div>`;
+      const bid2 = bid;
+      document.querySelectorAll("#i8_box [data-act]").forEach(btn => btn.onclick = () => guard(async () => {
+        const act = btn.dataset.act;
+        if (act === "start") {
+          await POST(`/isa88/batch/${bid2}/start`, { up: btn.dataset.up, op: btn.dataset.op, phase: btn.dataset.ph });
+        } else {
+          await POST(`/isa88/phase/${btn.dataset.run}/transition`, { target: act });
+        }
+        toast("Đã cập nhật phase"); load();
+      }));
+    }
+    $("i8_batch").onchange = load;
+    load();
   };
 })();

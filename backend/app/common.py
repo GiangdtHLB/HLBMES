@@ -132,6 +132,26 @@ class GenealogyRelation(str, Enum):
     TRANSFER = "transfer"
 
 
+class PhaseState(str, Enum):
+    """Trạng thái phase theo ISA-88 (rút gọn cho thực thi mẻ)."""
+
+    IDLE = "idle"          # chưa chạy
+    RUNNING = "running"
+    HELD = "held"
+    COMPLETE = "complete"
+    ABORTED = "aborted"
+
+
+# Chuyển trạng thái phase hợp lệ (ISA-88 procedural).
+PHASE_TRANSITIONS: dict = {
+    PhaseState.IDLE: {PhaseState.RUNNING},
+    PhaseState.RUNNING: {PhaseState.HELD, PhaseState.COMPLETE, PhaseState.ABORTED},
+    PhaseState.HELD: {PhaseState.RUNNING, PhaseState.ABORTED},
+    PhaseState.COMPLETE: set(),
+    PhaseState.ABORTED: set(),
+}
+
+
 class Role(str, Enum):
     """Vai trò tối thiểu để minh hoạ RBAC + SoD (tài liệu §7.8, §10.2)."""
 

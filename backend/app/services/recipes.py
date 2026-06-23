@@ -34,6 +34,7 @@ def create_version(db: Session, recipe_id: str, payload: dict, user: User) -> Re
         materials=payload.get("materials", []),
         quality_checks=payload.get("quality_checks", []),
         yield_steps=payload.get("yield_steps", []),
+        procedure=payload.get("procedure", []),
         change_reason=payload.get("change_reason"),
         created_by=user.username,
         created_at=utcnow(),
@@ -61,6 +62,7 @@ def update_draft(db: Session, version_id: str, payload: dict, user: User) -> Rec
     rv.materials = payload.get("materials", rv.materials)
     rv.quality_checks = payload.get("quality_checks", rv.quality_checks)
     rv.yield_steps = payload.get("yield_steps", rv.yield_steps)
+    rv.procedure = payload.get("procedure", rv.procedure)
     if payload.get("change_reason") is not None:
         rv.change_reason = payload.get("change_reason")
     record_audit(db, entity_type="recipe_version", entity_id=rv.version_id,

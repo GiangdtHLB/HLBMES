@@ -203,6 +203,36 @@ def test_ai_chat_stream(client):
     assert len(msgs) == 2 and msgs[1]["role"] == "assistant"
 
 
+# ---------------- P3-1: ISA-88 procedural ----------------
+def test_isa88_procedure_execution(client):
+    h = _login(client, "quandoc", "123456")
+    b2 = _batch_id(client, h, "B-2406-0002")
+    st = client.get(f"/api/isa88/batch/{b2}", headers=h).json()
+    assert st["phases_total"] > 0 and st["phases_done"] >= 2   # seed đã chạy 2 phase complete
+    # tìm 1 phase idle → start → complete
+    idle = None
+    for u in st["unit_procedures"]:
+        for o in u["operations"]:
+            for p in o["phases"]:
+                if p["state"] == "idle":
+                    idle = (u["unit_procedure"], o["operation"], p["phase"])
+                    break
+            if idle:
+                break
+        if idle:
+            break
+    assert idle, "không có phase idle để test"
+    r = client.post(f"/api/isa88/batch/{b2}/start", headers=h,
+                    json={"up": idle[0], "op": idle[1], "phase": idle[2]})
+    assert r.status_code == 200
+    rid = r.json()["run_id"]
+    done = client.post(f"/api/isa88/phase/{rid}/transition", headers=h, json={"target": "complete"})
+    assert done.json()["state"] == "complete"
+    # transition không hợp lệ: complete → running phải bị chặn
+    bad = client.post(f"/api/isa88/phase/{rid}/transition", headers=h, json={"target": "running"})
+    assert bad.status_code == 409
+
+
 # ---------------- P2: worker job queue ----------------
 def test_job_queue_ai_report(client):
     import time as _t

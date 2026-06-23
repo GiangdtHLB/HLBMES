@@ -35,6 +35,7 @@ from .quality_ext import CAPA, QCParameter, Sample
 from .oee_ext import DowntimeEvent
 from .ai_memory import AiConversation, AiMessage
 from .jobs import Job
+from .isa88 import BatchPhaseRun
 
 __all__ = [
     "AuditLog",
@@ -80,4 +81,5 @@ __all__ = [
     "AiConversation",
     "AiMessage",
     "Job",
+    "BatchPhaseRun",
 ]

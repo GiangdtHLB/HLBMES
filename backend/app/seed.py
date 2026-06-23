@@ -22,6 +22,7 @@ from .models.brewing import (
     StageIndicator,
 )
 from .models.auth import User as AppUser
+from .models.batches import BatchExecution
 from .models.energy import EnergyArea, EnergyGroup, EnergyReading
 from .models.integration import ApiKey
 from .security import hash_password
@@ -157,6 +158,29 @@ def seed():
             {"step_key": "loc", "label": "Lọc", "step_no": 3, "expected_pct": 98, "warn_pct": 96},
             {"step_key": "chiet", "label": "Chiết", "step_no": 4, "expected_pct": 97, "warn_pct": 94},
         ],
+        # Thủ tục ISA-88 (procedure → unit procedure → operation → phase) — demo #P3-1.
+        "procedure": [
+            {"name": "Nấu", "unit_class": "brewhouse", "operations": [
+                {"name": "Đường hóa", "phases": [
+                    {"name": "Vào liệu", "params": [{"name": "Nhiệt độ", "setpoint": 52, "unit": "°C"}]},
+                    {"name": "Giữ 65°C", "params": [{"name": "Nhiệt độ", "setpoint": 65, "unit": "°C"}], "duration_min": 30},
+                    {"name": "Nâng 76°C", "params": [{"name": "Nhiệt độ", "setpoint": 76, "unit": "°C"}], "duration_min": 10}]},
+                {"name": "Lọc bã", "phases": [{"name": "Lọc bã", "duration_min": 60}]},
+                {"name": "Sôi hoa", "phases": [
+                    {"name": "Thêm hoa", "params": [{"name": "Hoa Saaz", "setpoint": 15, "unit": "kg"}]},
+                    {"name": "Sôi", "duration_min": 60}]}]},
+            {"name": "Lên men", "unit_class": "fv", "operations": [
+                {"name": "Cấy men", "phases": [{"name": "Bơm men", "params": [{"name": "Men", "setpoint": 50, "unit": "L"}]}]},
+                {"name": "Lên men chính", "phases": [{"name": "Giữ 12°C", "params": [{"name": "Nhiệt độ", "setpoint": 12, "unit": "°C"}], "duration_min": 10080}]},
+                {"name": "Hạ nhiệt", "phases": [{"name": "Hạ 2°C", "params": [{"name": "Nhiệt độ", "setpoint": 2, "unit": "°C"}]}]}]},
+            {"name": "Lọc", "unit_class": "filter", "operations": [
+                {"name": "Lọc nến", "phases": [{"name": "Lọc", "duration_min": 120}]}]},
+            {"name": "CIP Nồi nấu", "unit_class": "cip", "operations": [
+                {"name": "CIP", "phases": [
+                    {"name": "Tiền rửa", "duration_min": 10},
+                    {"name": "Xút 2%", "params": [{"name": "NaOH", "setpoint": 2, "unit": "%"}], "duration_min": 20},
+                    {"name": "Tráng nước", "duration_min": 10}]}]},
+        ],
     }, ENG)
     recipe_svc.transition(db, rv.version_id, "review", ENG)
     recipe_svc.transition(db, rv.version_id, "approved", QA)   # QA duyệt (SoD: khác người soạn)
@@ -212,6 +236,7 @@ def seed():
     _seed_process(db, batch.batch_id)
     _seed_brewing(db)
     _seed_recipe_ext(db, recipe.recipe_id, rv, batch.batch_id)
+    _seed_isa88(db)
     _seed_quality_adv(db, batch.batch_id)
     _seed_downtime(db)
     _seed_dispense(db, batch.batch_id, [malt, hop, yeast])
@@ -580,6 +605,26 @@ def _seed_recipe_ext(db, recipe_id, rv_effective, batch_id) -> None:
     db.commit()
 
 
+def _seed_isa88(db) -> None:
+    """#P3-1: chạy vài phase ISA-88 trên mẻ B-2406-0002 (đang chạy)."""
+    from .models.isa88 import BatchPhaseRun
+    b = db.execute(select(BatchExecution).where(BatchExecution.batch_code == "B-2406-0002")).scalar_one_or_none()
+    if not b:
+        return
+    plan = [("Nấu", "Đường hóa", "Vào liệu", "complete"),
+            ("Nấu", "Đường hóa", "Giữ 65°C", "complete"),
+            ("Nấu", "Đường hóa", "Nâng 76°C", "running")]
+    for i, (up, op, ph, state) in enumerate(plan, start=1):
+        start = utcnow() - timedelta(hours=4 - i)
+        db.add(BatchPhaseRun(run_id=new_id(), batch_id=b.batch_id, seq=i, unit_class="brewhouse",
+                             up_name=up, op_name=op, phase_name=ph, state=state,
+                             params={"params": [{"name": "Nhiệt độ", "setpoint": 65, "unit": "°C"}]},
+                             values={"Nhiệt độ": 64.6} if state == "complete" else {},
+                             operator="vanhanh", started_at=start,
+                             ended_at=(start + timedelta(minutes=28)) if state == "complete" else None))
+    db.commit()
+
+
 def _seed_quality_adv(db, batch_id) -> None:
     """#7: định nghĩa chỉ tiêu SPC + chuỗi kết quả (control chart) + CAPA + LIMS sample."""
     db.add_all([
@@ -687,21 +732,21 @@ def _seed_users(db) -> None:
          "dashboard,dispatch,oee,qclab,realtime,ai,trace,energy,reports,integration,audit", "",  # chỉ xem
          "*", "*", "*"),
         ("quandoc", "123456", "Trần Quang Đốc", "Quản đốc phân xưởng", "supervisor",
-         "dashboard,master,orders,dispatch,batches,dispense,recipeadv,process,realtime,quality,qclab,oee,trace,reports,ai,audit",
+         "dashboard,master,orders,dispatch,batches,isa88,dispense,recipeadv,process,realtime,quality,qclab,oee,trace,reports,ai,audit",
          "master.manage,order.create,wo.manage,wo.dispatch,batch.create,batch.execute,quality.deviation,ebr.sign,ebr.approve",
          "*", "*", "*"),
         ("truongca", "123456", "Lê Thị Ca", "Trưởng ca sản xuất", "supervisor",
-         "dashboard,orders,dispatch,batches,dispense,process,realtime,oee,reports,ai",
+         "dashboard,orders,dispatch,batches,isa88,dispense,process,realtime,oee,reports,ai",
          "order.create,wo.dispatch,batch.create,batch.execute,ebr.sign",
          "Nấu A", "nau,len_men,chiet", "*"),
         ("vanhanh", "123456", "Phạm Văn Hành", "Nhân viên vận hành", "operator",
-         "dashboard,batches,dispense,process,realtime", "batch.execute,ebr.sign",
+         "dashboard,batches,isa88,dispense,process,realtime", "batch.execute,ebr.sign",
          "Nấu A", "nau,len_men", "*"),
         ("kcs", "123456", "Hoàng Thị Kiểm", "Nhân viên KCS / QA", "qa",
          "dashboard,quality,qclab,process,trace,ai", "quality.release,quality.deviation,recipe.approve,ebr.sign,ebr.approve",
          "*", "*", "Độ đường (°P),pH"),
         ("kysu", "123456", "Đỗ Công Kỹ", "Kỹ sư công nghệ", "engineer",
-         "dashboard,master,recipes,recipeadv,batches,qclab,process,realtime,oee,trace,reports",
+         "dashboard,master,recipes,recipeadv,batches,isa88,qclab,process,realtime,oee,trace,reports",
          "master.manage,recipe.author,recipe.approve,batch.create,batch.execute,ebr.sign",
          "*", "*", "*"),
         ("thukho", "123456", "Vũ Thị Kho", "Thủ kho NVL", "operator",

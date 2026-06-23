@@ -50,6 +50,9 @@ class RecipeVersion(Base):
     yield_steps: Mapped[list] = mapped_column(JSON, default=list)
     # Lý do thay đổi (change-control) khi tạo version mới.
     change_reason: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    # Thủ tục ISA-88: list unit procedure → operation → phase.
+    # [{name, unit_class, operations:[{name, phases:[{name, params:[{name,setpoint,unit}], duration_min}]}]}]
+    procedure: Mapped[list] = mapped_column(JSON, default=list)
 
     created_by: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     approved_by: Mapped[Optional[str]] = mapped_column(String, nullable=True)
