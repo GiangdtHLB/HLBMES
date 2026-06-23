@@ -18,7 +18,7 @@ router = APIRouter(prefix="/api/workorders", tags=["workorders"])
 @router.get("")
 def list_board(date_from: date = None, date_to: date = None, line: str = None,
                db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    return svc.board(db, date_from, date_to, line)
+    return svc.board(db, date_from, date_to, line, user=user)
 
 
 @router.get("/{wo_id}")

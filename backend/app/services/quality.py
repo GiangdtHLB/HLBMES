@@ -39,6 +39,9 @@ def _evaluate(value, lower, upper) -> str:
 
 def record_result(db: Session, payload: dict, user: User) -> QualityResult:
     require_role(user, Role.QA, Role.OPERATOR)
+    # Phạm vi loại test (§10.2): KCS chỉ ghi loại test được phân.
+    from ..security import require_scope
+    require_scope(user, "qc", payload.get("parameter"))
     scope_type = payload.get("scope_type", "batch")
     scope_id = payload["scope_id"]
     _assert_scope_exists(db, scope_type, scope_id)

@@ -55,6 +55,7 @@ def create_batch(db: Session, order_id: str, recipe_version_id: str, user: User,
         "parameters": rv.parameters,
         "materials": rv.materials,
         "quality_checks": rv.quality_checks,
+        "yield_steps": getattr(rv, "yield_steps", []) or [],
         "snapshot_at": utcnow().isoformat(),
     }
     # Kiểm tra tồn kho theo BOM trước khi tạo mẻ (tài liệu §7.1: material availability).

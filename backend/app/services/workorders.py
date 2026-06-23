@@ -12,12 +12,13 @@ from ..models.batches import BatchExecution
 from ..models.orders import ProductionOrder
 from ..models.recipes import RecipeVersion
 from ..models.workorder import WorkOrder
-from ..security import User, require_perm
+from ..security import User, filter_by_scope, require_perm, require_scope
 from . import batches as batch_svc
 
 
 def create_wo(db: Session, payload: dict, user: User) -> WorkOrder:
     require_perm(user, "wo.manage")
+    require_scope(user, "lines", payload.get("line"))
     po = db.get(ProductionOrder, payload["production_order_id"])
     if not po:
         raise NotFoundError("Production order không tồn tại.")
@@ -49,6 +50,7 @@ def create_wo(db: Session, payload: dict, user: User) -> WorkOrder:
 def transition(db: Session, wo_id: str, target: str, user: User, reason: str = None) -> WorkOrder:
     require_perm(user, "wo.manage")
     wo = _get(db, wo_id)
+    require_scope(user, "lines", wo.line)
     try:
         target_state = WorkOrderState(target)
     except ValueError:
@@ -70,6 +72,7 @@ def dispatch(db: Session, wo_id: str, user: User, recipe_version_id: str = None,
     """Điều độ: phát mẻ từ lệnh sản xuất (tạo BatchExecution, đặt WO → in_progress)."""
     require_perm(user, "wo.dispatch")
     wo = _get(db, wo_id)
+    require_scope(user, "lines", wo.line)
     if wo.status not in (WorkOrderState.RELEASED.value, WorkOrderState.IN_PROGRESS.value):
         raise DomainError("Chỉ dispatch lệnh đã 'released' (hoặc đang chạy).")
     rv_id = recipe_version_id or wo.recipe_version_id
@@ -100,8 +103,11 @@ def rollup(db: Session, wo: WorkOrder) -> dict:
                            for b in batches]}
 
 
-def board(db: Session, date_from: date = None, date_to: date = None, line: str = None) -> list:
-    """Bảng điều độ: danh sách lệnh + planned/actual, lọc theo ngày/line."""
+def board(db: Session, date_from: date = None, date_to: date = None, line: str = None,
+          user: User = None) -> list:
+    """Bảng điều độ: danh sách lệnh + planned/actual, lọc theo ngày/line.
+
+    Nếu truyền `user`, lọc thêm theo phạm vi (scope) line của tài khoản (§10.2)."""
     stmt = select(WorkOrder)
     if date_from:
         stmt = stmt.where(WorkOrder.scheduled_date >= date_from)
@@ -120,6 +126,8 @@ def board(db: Session, date_from: date = None, date_to: date = None, line: str =
                     "scheduled_date": wo.scheduled_date, "priority": wo.priority, "status": wo.status,
                     "note": wo.note, "actual_qty": r["actual_qty"], "completion_pct": r["completion_pct"],
                     "batches": r["batches"]})
+    if user is not None:
+        out = filter_by_scope(user, out, "lines", "line")
     return out
 
 

@@ -114,6 +114,46 @@ def availability(db: Session, snapshot: dict, planned_qty: float) -> dict:
     return {"factor": round(factor, 4), "shortage": shortage, "rows": rows}
 
 
+def availability_with_alternates(db: Session, snapshot: dict, planned_qty: float) -> dict:
+    """Như availability(), nhưng khi NVL chính thiếu thì gợi ý nguyên liệu thay thế.
+
+    Mỗi dòng BOM có thể khai key 'alternates': list[{material_code, factor, priority}].
+    factor = hệ số quy đổi (cần qty_chính × factor của NVL thay thế). priority nhỏ = ưu tiên.
+    """
+    factor = factor_for(snapshot, planned_qty)
+    avail = stock_available(db)
+    # Gộp định mức + giữ alternates theo material_code.
+    req_by, uom_by, alt_by = {}, {}, {}
+    for m in (snapshot.get("materials") or []):
+        code = m.get("material_code")
+        req_by[code] = req_by.get(code, 0.0) + (m.get("qty", 0) or 0) * factor
+        uom_by.setdefault(code, m.get("uom"))
+        if m.get("alternates"):
+            alt_by.setdefault(code, m.get("alternates"))
+    rows, shortage = [], False
+    for code, req in req_by.items():
+        req = round(req, 3)
+        have = round(avail.get(code, 0.0), 3)
+        ok = have >= req
+        short = round(max(req - have, 0), 3)
+        suggestions = []
+        if not ok:
+            shortage = True
+            need_more = short  # phần thiếu của NVL chính (theo đơn vị NVL chính)
+            for alt in sorted(alt_by.get(code, []), key=lambda a: a.get("priority", 99)):
+                acode = alt.get("material_code")
+                af = alt.get("factor")            # 0 là giá trị hợp lệ (không quy đổi)
+                af = 1 if af is None else af
+                alt_need = round(need_more * af, 3)         # quy đổi sang NVL thay thế
+                alt_have = round(avail.get(acode, 0.0), 3)
+                suggestions.append({"material_code": acode, "factor": af,
+                                    "need": alt_need, "available": alt_have,
+                                    "covers": alt_have >= alt_need})
+        rows.append({"material_code": code, "uom": uom_by.get(code), "required": req,
+                     "available": have, "ok": ok, "short": short, "alternates": suggestions})
+    return {"factor": round(factor, 4), "shortage": shortage, "rows": rows}
+
+
 def ceiling_for_material(db: Session, batch, material_code: str):
     """Ngưỡng tối đa cho phép tiêu thụ một vật tư (định mức scale × (1+dung sai)).
 

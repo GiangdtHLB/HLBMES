@@ -26,6 +26,10 @@ class User(Base):
     role: Mapped[str] = mapped_column(String)               # vai trò nghiệp vụ (Role enum)
     allowed_views: Mapped[str] = mapped_column(String, default="dashboard")  # csv hoặc "*"
     permissions: Mapped[str] = mapped_column(String, default="")  # csv quyền chi tiết hoặc "*"
+    # Phạm vi dữ liệu (data-scoping §10.2): csv hoặc "*" (toàn nhà máy).
+    scope_lines: Mapped[str] = mapped_column(String, default="*")
+    scope_areas: Mapped[str] = mapped_column(String, default="*")
+    scope_qc: Mapped[str] = mapped_column(String, default="*")
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     last_login_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)

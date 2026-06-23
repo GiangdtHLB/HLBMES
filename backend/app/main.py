@@ -13,6 +13,8 @@ from .routers import (
     auth,
     batches,
     brewing,
+    dispense,
+    downtime,
     energy,
     gateway,
     historian,
@@ -23,6 +25,7 @@ from .routers import (
     performance,
     process,
     quality,
+    quality_adv,
     recipes,
     reports,
     scan,
@@ -65,9 +68,9 @@ async def _perm(_: Request, exc: PermissionError_):
 
 
 # ---- Routers ----
-for r in (auth, master, orders, workorders, recipes, batches, materials, quality, traceability,
-          performance, warehouse, energy, maintenance, process, brewing, reports, historian,
-          scan, ai, gateway, audit):
+for r in (auth, master, orders, workorders, recipes, batches, materials, dispense, quality,
+          quality_adv, traceability, performance, downtime, warehouse, energy, maintenance,
+          process, brewing, reports, historian, scan, ai, gateway, audit):
     app.include_router(r.router)
 
 

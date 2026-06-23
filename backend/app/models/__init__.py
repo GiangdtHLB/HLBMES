@@ -26,9 +26,13 @@ from .orders import ProductionOrder
 from .process import ChemicalUsage, YeastIssue, YeastLot
 from .quality import Deviation, QualityResult
 from .recipes import Recipe, RecipeVersion
+from .recipe_ext import BatchYieldActual, RecipeChange
 from .signature import EBRSnapshot, Signature
 from .warehouse import StockMovement
 from .workorder import WorkOrder
+from .materials_ext import Dispense, DispenseLine
+from .quality_ext import CAPA, QCParameter, Sample
+from .oee_ext import DowntimeEvent
 
 __all__ = [
     "AuditLog",
@@ -61,5 +65,14 @@ __all__ = [
     "QualityResult",
     "Recipe",
     "RecipeVersion",
+    "BatchYieldActual",
+    "RecipeChange",
     "StockMovement",
+    "WorkOrder",
+    "Dispense",
+    "DispenseLine",
+    "QCParameter",
+    "CAPA",
+    "Sample",
+    "DowntimeEvent",
 ]
