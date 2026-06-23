@@ -6,6 +6,8 @@
   dùng Claude (claude-opus-4-8, adaptive thinking, tool-use). Nếu không → engine luật.
 """
 
+import re
+
 from sqlalchemy.orm import Session
 
 from ..config import LLM_API_KEY, LLM_ENABLED, LLM_MODEL
@@ -103,6 +105,74 @@ def chat(db: Session, message: str, history: list = None) -> dict:
             res["note"] = f"(LLM lỗi, đã dùng engine luật: {e})"
             return res
     return _chat_local(db, message)
+
+
+# ===================== CHAT STREAMING (SSE) =====================
+
+def stream_chat(db: Session, message: str, history: list = None):
+    """Generator phát sự kiện token-by-token cho SSE.
+
+    Yield dict: {"type":"delta","text"} | {"type":"tool","name"} | {"type":"final","mode","tools_used"}.
+    Dùng Claude streaming nếu khả dụng; ngược lại stream câu trả lời engine luật từng từ.
+    """
+    history = history or []
+    if llm_available():
+        try:
+            yield from _stream_llm(db, message, history)
+            return
+        except Exception as e:  # noqa: BLE001 — fallback an toàn sang engine luật
+            log.warning("LLM stream lỗi, fallback engine luật: %s", e, exc_info=True)
+            res = _chat_local(db, message)
+            yield from _stream_text(res["answer"], res.get("tools_used"), "local (LLM lỗi)")
+            return
+    res = _chat_local(db, message)
+    yield from _stream_text(res["answer"], res.get("tools_used"), "local")
+
+
+def _stream_text(text: str, tools: list, mode: str):
+    """Mô phỏng stream cho engine luật: phát tool trước rồi nhả từng từ."""
+    for t in (tools or []):
+        yield {"type": "tool", "name": t}
+    for chunk in re.findall(r"\S+\s*", text or ""):
+        yield {"type": "delta", "text": chunk}
+    yield {"type": "final", "mode": mode, "tools_used": tools or []}
+
+
+def _stream_llm(db: Session, message: str, history: list):
+    """Claude streaming + vòng lặp tool-use (nhả text delta giữa các lần gọi tool)."""
+    import time
+
+    import anthropic
+    client = anthropic.Anthropic(api_key=LLM_API_KEY)
+    tools = ai_tools.anthropic_tool_specs()
+    messages = [{"role": h["role"], "content": h["content"]} for h in history[-8:]]
+    messages.append({"role": "user", "content": message})
+    used, in_tok, out_tok, t0 = [], 0, 0, time.monotonic()
+    for _ in range(6):
+        with client.messages.stream(model=LLM_MODEL, max_tokens=2048, system=SYSTEM_PROMPT,
+                                    tools=tools, messages=messages) as stream:
+            for text in stream.text_stream:
+                yield {"type": "delta", "text": text}
+            final = stream.get_final_message()
+        u = getattr(final, "usage", None)
+        if u:
+            in_tok += getattr(u, "input_tokens", 0) or 0
+            out_tok += getattr(u, "output_tokens", 0) or 0
+        if final.stop_reason == "tool_use":
+            messages.append({"role": "assistant", "content": final.content})
+            results = []
+            for block in final.content:
+                if block.type == "tool_use":
+                    used.append(block.name)
+                    yield {"type": "tool", "name": block.name}
+                    out = ai_tools.call_tool(db, block.name, block.input)
+                    results.append({"type": "tool_result", "tool_use_id": block.id, "content": _json(out)})
+            messages.append({"role": "user", "content": results})
+            continue
+        break
+    log_ai_call(log, model=LLM_MODEL, input_tokens=in_tok, output_tokens=out_tok,
+                latency_ms=(time.monotonic() - t0) * 1000, tools=used)
+    yield {"type": "final", "mode": "claude:" + LLM_MODEL, "tools_used": used}
 
 
 def _chat_llm(db: Session, message: str, history: list) -> dict:

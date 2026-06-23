@@ -3,6 +3,7 @@
 from typing import Optional
 
 from fastapi import APIRouter, Depends
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -31,6 +32,16 @@ def chat(payload: ChatIn, db: Session = Depends(get_db),
          user: User = Depends(get_current_user)):
     """Chat có bộ nhớ: lưu/nạp lịch sử theo conversation_id (phía server)."""
     return conversations.chat_with_memory(db, user, payload.message, payload.conversation_id)
+
+
+@router.post("/chat/stream")
+def chat_stream(payload: ChatIn, user: User = Depends(get_current_user)):
+    """Chat streaming (SSE): token hiện dần + sự kiện tool, vẫn lưu ConversationMemory.
+
+    Tiêu thụ bằng fetch() + ReadableStream (hỗ trợ gửi header Authorization)."""
+    gen = conversations.stream_chat_with_memory(user, payload.message, payload.conversation_id)
+    return StreamingResponse(gen, media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 @router.get("/conversations")

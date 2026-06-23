@@ -77,7 +77,7 @@ def check_rate_limit(request: Request) -> Optional[JSONResponse]:
         key = _client_key(request)
         with _lock:
             ok, retry = _allow_window("ai:" + key, RL_AI_PER_MIN, time.monotonic())
-            if ok and path == "/api/ai/chat" and method == "POST":
+            if ok and method == "POST" and path in ("/api/ai/chat", "/api/ai/chat/stream"):
                 today = date.today().isoformat()
                 rec = _ai_daily.get(key)
                 if not rec or rec[0] != today:

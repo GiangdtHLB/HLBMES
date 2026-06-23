@@ -1483,11 +1483,37 @@ VIEWS.ai = async function () {
   });
   const send = () => guard(async () => {
     const msg = $("chatmsg").value.trim(); if (!msg) return;
-    AI_HISTORY.push({ role: "user", content: msg }); $("chatmsg").value = ""; renderChat();
-    const res = await POST("/ai/chat", { message: msg, conversation_id: CURRENT_CONV });
-    CURRENT_CONV = res.conversation_id;
-    AI_HISTORY.push({ role: "assistant", content: res.answer, tools_used: res.tools_used });
-    renderChat();
+    AI_HISTORY.push({ role: "user", content: msg }); $("chatmsg").value = "";
+    const asst = { role: "assistant", content: "", tools_used: [] };
+    AI_HISTORY.push(asst); renderChat();
+    let res;
+    try {
+      res = await fetch("/api/ai/chat/stream", { method: "POST",
+        headers: { "Content-Type": "application/json", "Authorization": "Bearer " + TOKEN },
+        body: JSON.stringify({ message: msg, conversation_id: CURRENT_CONV }) });
+    } catch (e) { asst.content = "[lỗi kết nối]"; renderChat(); return; }
+    const ct = res.headers.get("content-type") || "";
+    if (!res.ok || !ct.includes("event-stream")) {     // vd 429 rate-limit trả JSON
+      let detail = "Lỗi " + res.status;
+      try { detail = (await res.json()).detail || detail; } catch (e) {}
+      asst.content = "[" + detail + "]"; renderChat(); toast(detail, "err"); return;
+    }
+    const reader = res.body.getReader(), dec = new TextDecoder(); let buf = "";
+    while (true) {
+      const { value, done } = await reader.read(); if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let i;
+      while ((i = buf.indexOf("\n\n")) >= 0) {
+        const raw = buf.slice(0, i).trim(); buf = buf.slice(i + 2);
+        if (!raw.startsWith("data:")) continue;
+        let ev; try { ev = JSON.parse(raw.slice(5).trim()); } catch (e) { continue; }
+        if (ev.type === "meta") CURRENT_CONV = ev.conversation_id;
+        else if (ev.type === "delta") { asst.content += ev.text; renderChat(); }
+        else if (ev.type === "tool") { asst.tools_used.push(ev.name); renderChat(); }
+        else if (ev.type === "done") { CURRENT_CONV = ev.conversation_id; if (ev.answer) asst.content = ev.answer; if (ev.tools_used) asst.tools_used = ev.tools_used; renderChat(); }
+        else if (ev.type === "error") { asst.content += " [lỗi: " + esc(ev.detail) + "]"; renderChat(); }
+      }
+    }
     await refreshConvList();           // cập nhật danh sách + giữ chọn hội thoại hiện tại
   });
   $("chatsend").onclick = send;

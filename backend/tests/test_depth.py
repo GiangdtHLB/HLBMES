@@ -184,6 +184,25 @@ def test_ai_conversation_memory(client):
     assert client.get(f"/api/ai/conversations/{cid}", headers=h2).status_code == 403
 
 
+# ---------------- P2: SSE streaming chat ----------------
+def test_ai_chat_stream(client):
+    import json as _j
+    h = _login(client, "kysu", "123456")
+    r = client.post("/api/ai/chat/stream", headers=h, json={"message": "tồn kho thế nào?"})
+    assert r.status_code == 200
+    assert "text/event-stream" in r.headers.get("content-type", "")
+    events = [_j.loads(ln[5:].strip()) for ln in r.text.splitlines() if ln.startswith("data:")]
+    types = {e["type"] for e in events}
+    assert {"meta", "delta", "done"} <= types          # đủ chuỗi sự kiện SSE
+    done = next(e for e in events if e["type"] == "done")
+    full = "".join(e["text"] for e in events if e["type"] == "delta")
+    assert full.strip() and done["answer"].strip()
+    # đã lưu vào ConversationMemory (2 message)
+    cid = done["conversation_id"]
+    msgs = client.get(f"/api/ai/conversations/{cid}", headers=h).json()["messages"]
+    assert len(msgs) == 2 and msgs[1]["role"] == "assistant"
+
+
 # ---------------- rate-limit (bật riêng để test) ----------------
 def test_rate_limit_login(client, monkeypatch):
     from app import ratelimit
