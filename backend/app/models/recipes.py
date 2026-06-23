@@ -45,6 +45,11 @@ class RecipeVersion(Base):
     materials: Mapped[list] = mapped_column(JSON, default=list)
     # Các checkpoint QC bắt buộc: list[{parameter, method, lower, upper, unit, mandatory}]
     quality_checks: Mapped[list] = mapped_column(JSON, default=list)
+    # Hiệu suất kỳ vọng theo công đoạn: list[{step_key, label, step_no, expected_pct, warn_pct}]
+    # step_key ∈ {nau, len_men, loc, chiet}; warn_pct = ngưỡng cảnh báo (yield thực < warn_pct).
+    yield_steps: Mapped[list] = mapped_column(JSON, default=list)
+    # Lý do thay đổi (change-control) khi tạo version mới.
+    change_reason: Mapped[Optional[str]] = mapped_column(String, nullable=True)
 
     created_by: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     approved_by: Mapped[Optional[str]] = mapped_column(String, nullable=True)

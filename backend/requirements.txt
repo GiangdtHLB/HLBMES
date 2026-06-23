@@ -3,6 +3,7 @@ uvicorn[standard]==0.30.1
 SQLAlchemy==2.0.30
 pydantic==2.7.4
 python-multipart==0.0.9
-# Tùy chọn: bật trợ lý AI bằng Claude thật (đặt ANTHROPIC_API_KEY).
-# Bỏ comment để cài; nếu không cài, trợ lý dùng engine luật nội bộ (offline).
-# anthropic==0.69.0
+pydantic-settings==2.3.4
+# Trợ lý AI bằng Claude thật (đặt ANTHROPIC_API_KEY để kích hoạt; nếu không có key,
+# trợ lý tự fallback sang engine luật nội bộ offline — vẫn chạy bình thường).
+anthropic==0.69.0

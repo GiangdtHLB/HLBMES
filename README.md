@@ -210,24 +210,26 @@ curl -X POST localhost:8077/api/recipes/<id>/versions -H "X-Role: engineer" \
 
 ## Lộ trình "MES hardcore" (13 phân hệ)
 
-Danh sách lớn được chia giai đoạn, mỗi giai đoạn chạy được + verify. **Phase 1 đã xong.**
+Danh sách lớn được chia giai đoạn, mỗi giai đoạn chạy được + verify. **✅ Hoàn thành 13/13.**
 
 | # | Phân hệ | Trạng thái | Ghi chú |
 |---|---|---|---|
 | 1 | **Lệnh sản xuất & Điều độ** (work order, kế hoạch ngày/ca, dispatch, planned vs actual) | ✅ **Xong** | PO→WO→batch; tab Điều độ; quyền wo.manage/dispatch |
 | 2 | **EBR — hồ sơ mẻ điện tử** step-by-step (ai/bước/lúc/thông số/thiết bị/NVL/deviation/duyệt) | ✅ **Xong** | Dossier từ audit+genealogy+QC+hóa chất+BOM; modal EBR; e-sign + hash + khóa hồ sơ |
-| 3 | **Recipe/BOM nâng cao** (effective date chặt, change control, yield/hao hụt chuẩn, alt material) | 🟡 Một phần | Đã có version-approval+SoD, scale theo mẻ, đối chiếu ĐM↔thực tế; còn yield/alt/change-control |
+| 3 | **Recipe/BOM nâng cao** (effective date chặt, change control, yield/hao hụt chuẩn, alt material) | ✅ **Xong** | + **Yield theo công đoạn** (`yield_calc.py`, cumulative/loss + cảnh báo), **nguyên liệu thay thế** (`/batches/availability-alt`), **change-control e-sign** (`/recipes/versions/{id}/change-approve` re-auth + diff + `RecipeChange`); tab **Công thức+** |
 | 4 | **Tích hợp thiết bị** (OPC UA/MQTT/edge gateway, cân, lưu lượng kế, tank sensor) | ✅ **Xong** | **edge_sim** (tiến trình độc lập) đẩy telemetry qua API key; ranh giới cắm PLC thật rõ ràng |
 | 5 | **Historian/time-series** (timestamped sensor, downsample) | ✅ **Xong** | `services/historian.py` (ingest/query/series/downsample), swap được TimescaleDB/Influx; tab Realtime auto-refresh |
-| 6 | **Material consumption thật** (cấp phát theo lệnh, cân/dispense, backflush, hold/release NVL) | 🟡 Một phần | Đã có nhập/xuất/tồn + consume genealogy + đối chiếu BOM + hold/release; còn dispense/backflush/scan |
-| 7 | **Quality hardcore** (sampling plan, spec theo SP/công đoạn, SPC chart, OOS/OOT, CAPA, COA, LIMS) | 🟡 Một phần | Đã có QC limit/pass-fail/deviation/hold-release; còn SPC/sampling-plan/CAPA/COA |
-| 8 | **OEE/downtime** (reason tree, changeover, micro-stop, MTBF/MTTR) | 🟡 Một phần | Đã có OEE A×P×Q + downtime reason; còn reason-tree/MTBF/MTTR |
+| 6 | **Material consumption thật** (cấp phát theo lệnh, cân/dispense, backflush, hold/release NVL) | ✅ **Xong** | + **Dispense theo lô FEFO** (`dispense.py`, chặn lô hết hạn + vượt định mức), **backflush** theo định mức × sản lượng (không trừ trùng); tab **Cấp liệu** |
+| 7 | **Quality hardcore** (sampling plan, spec theo SP/công đoạn, SPC chart, OOS/OOT, CAPA, COA, LIMS) | ✅ **Xong** | + **SPC control chart** (I-MR, UCL/LCL, **luật Western Electric**, Cp/Cpk — `quality_adv.py`), **CAPA** workflow, **COA** xuất phiếu, **LIMS-lite** sample; tab **QC Lab** |
+| 8 | **OEE/downtime** (reason tree, changeover, micro-stop, MTBF/MTTR) | ✅ **Xong** | + **Cây lý do dừng máy** (`downtime.py` REASON_TREE), **Pareto** + % tích lũy, **6 big losses**, **MTBF/MTTR** theo thiết bị; tab **OEE/Dừng máy** |
 | 9 | **Barcode/RFID/mobile/kiosk** (in tem, quét lô/vật tư/pallet, xác nhận nhanh) | ✅ **Xong** | `/kiosk.html` UI cảm ứng (đăng nhập, quét→tra cứu→cấp liệu nhanh, in tem **Code39**); `GET /api/scan` |
-| 10 | **Phân quyền sâu** (theo phân xưởng/line/ca/loại kiểm nghiệm) | 🟡 Một phần | Đã có RBAC + 16 quyền thao tác + menu/chức danh; còn scope theo line/khu/loại test |
+| 10 | **Phân quyền sâu** (theo phân xưởng/line/ca/loại kiểm nghiệm) | ✅ **Xong** | + **Data-scoping** theo line/khu vực/loại test (`require_scope`/`filter_by_scope` trong `security.py`): lọc work order & batch, chặn ghi QC ngoài phạm vi; UI gán phạm vi (Tài khoản) + hiển thị (Hồ sơ) |
 | 11 | **E-signature & audit bất biến** (e-sign 2 lớp, reason-for-change, record locking, 21 CFR Part 11) | ✅ **Xong** | E-sign re-auth + ý nghĩa/lý do; **audit hash-chain tamper-evident** (`/api/audit/verify-chain` phát hiện giả mạo); khóa hồ sơ → mẻ bất biến |
 | 12 | **Kiến trúc production** (PostgreSQL, Alembic migration, Docker, HTTPS, monitoring, CI, backup, job queue) | ✅ **Xong** | Dockerfile + docker-compose (app+Postgres); **Alembic migration** (40 bảng); pytest 8/8; /api/health (DB check); backup/restore; CI |
 
-**Đã xong: Phase 1 (mục 1), Phase 2 (mục 2+11), Phase 3 (mục 4+5), Phase 4 (mục 9), Phase 5 (mục 12).** Còn lại là mở rộng chiều sâu trên nền đã có: #3 Recipe/BOM (yield/alt/change-control), #6 Material (dispense/backflush/scan), #7 Quality (SPC/CAPA/COA/LIMS), #8 OEE (reason-tree/MTBF), #10 RBAC (scope line/khu/loại test).
+**✅ Đã xong toàn bộ 13/13 phân hệ.** Phase 1–5 + 5 phân hệ chiều sâu #3/#6/#7/#8/#10. Riêng #4 (tích hợp thiết bị) chạy ở dạng **mô phỏng edge** (`edge_sim`) với ranh giới cắm PLC/SCADA thật rõ ràng — phần còn lại cần phần cứng/giao thức tại hiện trường.
+
+**Màn hình quản lý danh mục:** tab **Danh mục** cho phép **tạo/sửa Sản phẩm & Vật tư** (`POST/PUT /api/products`, `/api/materials` — yêu cầu quyền `master.manage` + audit + chặn trùng mã). Sản phẩm mới dùng được ngay khi tạo Công thức/Lệnh SX.
 
 ### Mobile/Kiosk + barcode (Phase 4)
 - **`/kiosk.html`** — giao diện cảm ứng cho xưởng (tablet/scanner): đăng nhập, **Quét mã** (scanner gõ + Enter → `GET /api/scan` phân giải lô/mẻ/lệnh), **cấp liệu nhanh** vào mẻ đang chạy (nút SL lớn, chặn vượt định mức), **In tem** mã vạch **Code 39** (`barcode.js`, in trực tiếp), xem mẻ đang chạy. Link "📱 Kiosk" ở header bản đầy đủ.

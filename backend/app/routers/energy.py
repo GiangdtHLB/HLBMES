@@ -1,6 +1,6 @@
 """Năng lượng hàng ngày/tháng + danh mục."""
 
-from datetime import date, datetime
+from datetime import date
 
 from fastapi import APIRouter, Depends
 from sqlalchemy import select
@@ -8,7 +8,6 @@ from sqlalchemy.orm import Session
 
 from ..common import new_id
 from ..database import get_db
-from ..errors import DomainError
 from ..models.energy import EnergyArea, EnergyGroup, EnergyReading
 from ..schemas import (
     EnergyAreaIn,
@@ -93,18 +92,5 @@ def daily(group_id: str = None, days: int = 30, db: Session = Depends(get_db)):
 # ---- Tổng hợp tháng ----
 @router.get("/monthly")
 def monthly(year: int = None, db: Session = Depends(get_db)):
-    rows = db.execute(select(EnergyReading)).scalars().all()
-    groups = {g.group_id: g for g in db.execute(select(EnergyGroup)).scalars().all()}
-    agg = {}
-    for r in rows:
-        if year and r.day.year != year:
-            continue
-        ym = f"{r.day.year}-{r.day.month:02d}"
-        agg.setdefault((ym, r.group_id), 0.0)
-        agg[(ym, r.group_id)] += r.value
-    out = []
-    for (ym, gid), v in agg.items():
-        g = groups.get(gid)
-        out.append({"month": ym, "group_id": gid, "group": g.name if g else gid,
-                    "unit": g.unit if g else "", "value": round(v, 3)})
-    return sorted(out, key=lambda x: (x["month"], x["group"]))
+    from ..services import derived
+    return derived.energy_monthly(db, year)

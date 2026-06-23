@@ -124,29 +124,5 @@ def yeast_issues(db: Session = Depends(get_db)):
 @router.get("/alerts")
 def quality_alerts(db: Session = Depends(get_db)):
     """Tổng hợp cảnh báo: QC FAIL + reading vượt giới hạn QC trong recipe snapshot."""
-    alerts = []
-    batches = db.execute(select(BatchExecution)).scalars().all()
-    for b in batches:
-        # QC FAIL
-        fails = db.execute(select(QualityResult).where(
-            QualityResult.scope_type == "batch", QualityResult.scope_id == b.batch_id,
-            QualityResult.status == "fail")).scalars().all()
-        for f in fails:
-            alerts.append({"severity": "high", "batch": b.batch_code, "type": "QC FAIL",
-                           "detail": f"{f.parameter} = {f.value} {f.unit or ''} ngoài [{f.lower_limit}, {f.upper_limit}]"})
-        # reading vượt giới hạn theo quality_checks snapshot
-        checks = {c.get("parameter"): c for c in (b.recipe_snapshot or {}).get("quality_checks", [])}
-        readings = db.execute(select(ProcessReading).where(ProcessReading.batch_id == b.batch_id)).scalars().all()
-        seen = set()
-        for r in readings:
-            chk = checks.get(r.parameter)
-            if not chk:
-                continue
-            lo, hi = chk.get("lower"), chk.get("upper")
-            if (lo is not None and r.value < lo) or (hi is not None and r.value > hi):
-                key = (b.batch_id, r.parameter)
-                if key not in seen:
-                    seen.add(key)
-                    alerts.append({"severity": "medium", "batch": b.batch_code, "type": "Reading out-of-range",
-                                   "detail": f"{r.parameter} = {r.value} {r.unit or ''} ngoài [{lo}, {hi}]"})
-    return {"count": len(alerts), "alerts": alerts}
+    from ..services import derived
+    return derived.process_quality_alerts(db)

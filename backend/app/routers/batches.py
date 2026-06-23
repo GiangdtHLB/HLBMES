@@ -32,10 +32,15 @@ router = APIRouter(prefix="/api/batches", tags=["batches"])
 
 
 @router.get("", response_model=list[BatchOut])
-def list_batches(db: Session = Depends(get_db)):
-    return db.execute(
+def list_batches(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    from ..models.workorder import WorkOrder
+    from ..security import filter_by_scope
+    rows = db.execute(
         select(BatchExecution).order_by(BatchExecution.created_at.desc())
     ).scalars().all()
+    # Lọc theo phạm vi line (§10.2): line suy ra từ work order của mẻ.
+    line_map = {w.wo_id: w.line for w in db.execute(select(WorkOrder)).scalars().all()}
+    return filter_by_scope(user, rows, "lines", lambda b: line_map.get(b.work_order_id))
 
 
 @router.get("/availability")
@@ -51,11 +56,24 @@ def check_availability(recipe_version_id: str, planned_qty: float, db: Session =
     return bom_svc.availability(db, snap, planned_qty)
 
 
+@router.get("/availability-alt")
+def check_availability_alt(recipe_version_id: str, planned_qty: float, db: Session = Depends(get_db),
+                           user: User = Depends(get_current_user)):
+    """Như /availability nhưng kèm gợi ý nguyên liệu thay thế khi NVL chính thiếu (§7.2)."""
+    rv = db.get(RecipeVersion, recipe_version_id)
+    if not rv:
+        raise NotFoundError("Recipe version không tồn tại.")
+    snap = {"base_qty": rv.base_qty, "base_uom": rv.base_uom, "materials": rv.materials}
+    return bom_svc.availability_with_alternates(db, snap, planned_qty)
+
+
 @router.get("/{batch_id}", response_model=BatchOut)
-def get_batch(batch_id: str, db: Session = Depends(get_db)):
+def get_batch(batch_id: str, db: Session = Depends(get_db),
+              user: User = Depends(get_current_user)):
     b = db.get(BatchExecution, batch_id)
     if not b:
         raise NotFoundError("Batch không tồn tại.")
+    _assert_batch_scope(db, b, user)
     return b
 
 
@@ -97,12 +115,31 @@ def produce(batch_id: str, payload: ProduceIn, db: Session = Depends(get_db),
 
 
 @router.get("/{batch_id}/bom")
-def bom_compare(batch_id: str, db: Session = Depends(get_db)):
+def bom_compare(batch_id: str, db: Session = Depends(get_db),
+                user: User = Depends(get_current_user)):
     """Đối chiếu định mức (BOM, scale theo quy mô mẻ) với thực tế tiêu thụ (genealogy)."""
     b = db.get(BatchExecution, batch_id)
     if not b:
         raise NotFoundError("Batch không tồn tại.")
+    _assert_batch_scope(db, b, user)
     return bom_svc.compare_batch(db, b)
+
+
+@router.get("/{batch_id}/yield")
+def get_yield(batch_id: str, db: Session = Depends(get_db),
+              user: User = Depends(get_current_user)):
+    """Hiệu suất theo công đoạn + cumulative yield/loss của mẻ (§7.2)."""
+    from ..services import yield_calc
+    return yield_calc.yield_report(db, batch_id)
+
+
+@router.post("/{batch_id}/yield")
+def record_yield(batch_id: str, payload: dict, db: Session = Depends(get_db),
+                 user: User = Depends(get_current_user)):
+    """Ghi hiệu suất 1 công đoạn (input/output) cho mẻ."""
+    from ..services import yield_calc
+    require_perm(user, "batch.execute")
+    return yield_calc.record_yield(db, batch_id, payload, user)
 
 
 @router.get("/{batch_id}/ebr")
@@ -133,7 +170,8 @@ def lock_ebr(batch_id: str, payload: EbrLockIn, db: Session = Depends(get_db),
 
 
 @router.get("/{batch_id}/readings", response_model=list[ReadingOut])
-def list_readings(batch_id: str, parameter: str = None, db: Session = Depends(get_db)):
+def list_readings(batch_id: str, parameter: str = None, db: Session = Depends(get_db),
+                  user: User = Depends(get_current_user)):
     """Telemetry curated cho đường cong lên men (nhiệt độ/°P/pH...)."""
     stmt = select(ProcessReading).where(ProcessReading.batch_id == batch_id)
     if parameter:
@@ -142,12 +180,27 @@ def list_readings(batch_id: str, parameter: str = None, db: Session = Depends(ge
 
 
 @router.post("/{batch_id}/readings", response_model=ReadingOut, status_code=201)
-def add_reading(batch_id: str, payload: ReadingIn, db: Session = Depends(get_db)):
-    if not db.get(BatchExecution, batch_id):
+def add_reading(batch_id: str, payload: ReadingIn, db: Session = Depends(get_db),
+                user: User = Depends(get_current_user)):
+    require_perm(user, "batch.execute")
+    b = db.get(BatchExecution, batch_id)
+    if not b:
         raise NotFoundError("Batch không tồn tại.")
+    _assert_batch_scope(db, b, user)
     r = ProcessReading(reading_id=new_id(), batch_id=batch_id, parameter=payload.parameter,
                        value=payload.value, unit=payload.unit, ts=payload.ts or utcnow())
     db.add(r)
     db.commit()
     db.refresh(r)
     return r
+
+
+def _assert_batch_scope(db, batch, user) -> None:
+    """Chặn truy cập 1 mẻ ngoài phạm vi line (§10.2): line suy ra từ work order."""
+    from ..models.workorder import WorkOrder
+    from ..security import require_scope
+    line = None
+    if batch.work_order_id:
+        wo = db.get(WorkOrder, batch.work_order_id)
+        line = wo.line if wo else None
+    require_scope(user, "lines", line)

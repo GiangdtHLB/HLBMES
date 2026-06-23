@@ -24,6 +24,9 @@ const PUT = (p, body) => api(p, { method: "PUT", body: JSON.stringify(body || {}
 const $ = (id) => document.getElementById(id);
 const el = (html) => { const d = document.createElement("div"); d.innerHTML = html.trim(); return d.firstChild; };
 const badge = (s) => `<span class="badge ${s}">${s}</span>`;
+const scopeBadge = (raw) => (raw === "*" || raw == null || raw === "")
+  ? '<span class="badge available">Toàn nhà máy</span>'
+  : String(raw).split(",").map(s => `<span class="badge planned" style="margin:2px">${esc(s.trim())}</span>`).join(" ");
 const fmt = (t) => t ? new Date(t).toLocaleString("vi-VN") : "—";
 const esc = (s) => (s == null ? "" : String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])));
 function toast(msg, kind = "ok") {
@@ -99,6 +102,65 @@ const CH = {
         <div style="background:#1e2a36;border-radius:4px;height:10px;overflow:hidden"><div style="width:${w}%;height:100%;background:${col}"></div></div></div>`;
     }).join("")}</div>`;
   },
+  // Cột đứng: items=[{label,value,color?}]
+  vbars(items, { unit = "", height = 150, color = "#17a2b8" } = {}) {
+    if (!items || !items.length) return '<div class="muted">Không có dữ liệu.</div>';
+    const W = 560, H = height, pad = { l: 40, r: 8, t: 10, b: 40 };
+    const max = Math.max(...items.map(i => i.value), 1e-9);
+    const bw = (W - pad.l - pad.r) / items.length;
+    const bars = items.map((it, i) => {
+      const h = (it.value / max) * (H - pad.t - pad.b);
+      const x = pad.l + i * bw + bw * 0.15, w = bw * 0.7, y = H - pad.b - h;
+      return `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${w.toFixed(1)}" height="${Math.max(h,0).toFixed(1)}" rx="2" fill="${it.color || color}"/>
+        <text x="${(x + w / 2).toFixed(1)}" y="${(y - 3).toFixed(1)}" fill="#cdd9e3" font-size="10" text-anchor="middle">${typeof it.value === "number" ? (it.value >= 1000 ? (it.value / 1000).toFixed(1) + "k" : it.value) : it.value}</text>
+        <text x="${(x + w / 2).toFixed(1)}" y="${H - pad.b + 13}" fill="#8aa0b2" font-size="10" text-anchor="middle">${esc(String(it.label).slice(0, 8))}</text>`;
+    }).join("");
+    return `<svg viewBox="0 0 ${W} ${H}" width="100%" style="display:block">
+      <line x1="${pad.l}" y1="${H - pad.b}" x2="${W - pad.r}" y2="${H - pad.b}" stroke="#2b3a47"/>
+      <text x="4" y="${pad.t + 8}" fill="#8aa0b2" font-size="10">${max >= 1000 ? (max / 1000).toFixed(1) + "k" : Math.round(max)} ${esc(unit)}</text>${bars}</svg>`;
+  },
+  // Cột nhóm 2 series (vd định mức vs thực tế): items=[{label,a,b}]
+  grouped(items, { labelA = "A", labelB = "B", colorA = "#3498db", colorB = "#f5a623", height = 160 } = {}) {
+    if (!items || !items.length) return '<div class="muted">Không có dữ liệu.</div>';
+    const W = 560, H = height, pad = { l: 44, r: 8, t: 14, b: 42 };
+    const max = Math.max(...items.flatMap(i => [i.a, i.b]), 1e-9);
+    const gw = (W - pad.l - pad.r) / items.length;
+    const norm = (v) => (v / max) * (H - pad.t - pad.b);
+    const g = items.map((it, i) => {
+      const x0 = pad.l + i * gw;
+      const bw = gw * 0.32;
+      const ya = H - pad.b - norm(it.a), yb = H - pad.b - norm(it.b);
+      return `<rect x="${(x0 + gw * 0.15).toFixed(1)}" y="${ya.toFixed(1)}" width="${bw.toFixed(1)}" height="${Math.max(norm(it.a),0).toFixed(1)}" fill="${colorA}"/>
+        <rect x="${(x0 + gw * 0.15 + bw + 3).toFixed(1)}" y="${yb.toFixed(1)}" width="${bw.toFixed(1)}" height="${Math.max(norm(it.b),0).toFixed(1)}" fill="${colorB}"/>
+        <text x="${(x0 + gw / 2).toFixed(1)}" y="${H - pad.b + 13}" fill="#8aa0b2" font-size="10" text-anchor="middle">${esc(String(it.label).slice(0, 9))}</text>`;
+    }).join("");
+    return `<svg viewBox="0 0 ${W} ${H}" width="100%" style="display:block">
+      <line x1="${pad.l}" y1="${H - pad.b}" x2="${W - pad.r}" y2="${H - pad.b}" stroke="#2b3a47"/>
+      <rect x="${pad.l}" y="2" width="9" height="9" fill="${colorA}"/><text x="${pad.l + 13}" y="10" fill="#8aa0b2" font-size="10">${esc(labelA)}</text>
+      <rect x="${pad.l + 70}" y="2" width="9" height="9" fill="${colorB}"/><text x="${pad.l + 83}" y="10" fill="#8aa0b2" font-size="10">${esc(labelB)}</text>${g}</svg>`;
+  },
+  // Tròn/donut phân loại: items=[{label,value,color?}]
+  pie(items, { size = 170, donut = true } = {}) {
+    const total = items.reduce((s, i) => s + i.value, 0) || 1;
+    const cx = size / 2, cy = size / 2, r = size / 2 - 6, ri = donut ? r * 0.58 : 0;
+    const PAL = ["#f5a623", "#3498db", "#2ecc71", "#e74c3c", "#9b59b6", "#1abc9c", "#e67e22", "#8aa0b2"];
+    let ang = -Math.PI / 2, segs = "";
+    items.forEach((it, i) => {
+      const frac = it.value / total, a2 = ang + frac * 2 * Math.PI;
+      const large = frac > 0.5 ? 1 : 0;
+      const x1 = cx + r * Math.cos(ang), y1 = cy + r * Math.sin(ang);
+      const x2 = cx + r * Math.cos(a2), y2 = cy + r * Math.sin(a2);
+      const col = it.color || PAL[i % PAL.length];
+      if (frac > 0.999) { segs += `<circle cx="${cx}" cy="${cy}" r="${r}" fill="${col}"/>`; }
+      else { segs += `<path d="M ${cx} ${cy} L ${x1.toFixed(1)} ${y1.toFixed(1)} A ${r} ${r} 0 ${large} 1 ${x2.toFixed(1)} ${y2.toFixed(1)} Z" fill="${col}"/>`; }
+      ang = a2;
+    });
+    const hole = donut ? `<circle cx="${cx}" cy="${cy}" r="${ri}" fill="#17212b"/><text x="${cx}" y="${cy + 4}" fill="#e6edf3" font-size="15" font-weight="700" text-anchor="middle">${total}</text>` : "";
+    const legend = items.map((it, i) => `<div style="display:flex;align-items:center;gap:6px;font-size:12px;margin:2px 0">
+      <span style="width:10px;height:10px;border-radius:2px;background:${it.color || PAL[i % PAL.length]}"></span>${esc(it.label)} <span class="muted">(${it.value})</span></div>`).join("");
+    return `<div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap">
+      <svg viewBox="0 0 ${size} ${size}" width="${size}" height="${size}">${segs}${hole}</svg><div>${legend}</div></div>`;
+  },
 };
 
 // caches for dropdowns
@@ -122,50 +184,84 @@ function render(view) {
 
 // ================= DASHBOARD =================
 VIEWS.dashboard = async function () {
-  const [orders, batches, devs, lots, audit, oee] = await Promise.all([
+  const safe = async (p) => { try { return await GET(p); } catch (e) { return null; } };
+  const [orders, batches, devs, lots, audit, oee, energy, norm, stock, ins, woBoard] = await Promise.all([
     GET("/orders"), GET("/batches"), GET("/quality/deviations"), GET("/lots"),
-    GET("/audit?limit=12"), GET("/oee")
+    GET("/audit?limit=10"), GET("/oee"),
+    safe("/energy/monthly"), safe("/reports/material-norm"), safe("/warehouse/stock"),
+    safe("/ai/insights"), safe("/workorders"),
   ]);
+  const fvTag = "brewery/site01/fermentation/FV07/temperature";
+  const fvSeries = await safe("/historian/series?tag=" + encodeURIComponent(fvTag) + "&hours=6&buckets=40");
+
   const byState = {};
   batches.forEach(b => byState[b.state] = (byState[b.state] || 0) + 1);
   const onHold = lots.filter(l => l.status === "on_hold").length
               + batches.filter(b => b.quality_status === "on_hold").length;
   const openDev = devs.filter(d => d.state !== "closed").length;
+  const woActive = (woBoard || []).filter(w => ["released", "in_progress"].includes(w.status)).length;
 
   const stateColors = { planned: "#8aa0b2", ready: "#3498db", running: "#2ecc71",
-    held: "#e67e22", completed: "#17a2b8", closed: "#17a2b8", cancelled: "#e74c3c" };
-  const stateBars = Object.keys(byState).map(s => ({ label: s, value: byState[s], color: stateColors[s] }));
+    held: "#e67e22", completed: "#17a2b8", closed: "#1c5a7a", cancelled: "#e74c3c" };
+  const statePie = Object.keys(byState).map(s => ({ label: s, value: byState[s], color: stateColors[s] }));
 
-  // OEE gần nhất theo từng line (lấy bản ghi mới nhất mỗi line)
+  // OEE donuts (giữ)
   const byLine = {};
   oee.forEach(r => { if (!byLine[r.line]) byLine[r.line] = r; });
   const oeeCards = Object.values(byLine).map(r => `
     <div class="panel" style="text-align:center">
-      <h2>${esc(r.line)} · ca ${esc(r.shift)}</h2>
-      ${CH.donut(r.oee, { label: "OEE" })}
+      <h2>${esc(r.line)} · ca ${esc(r.shift)}</h2>${CH.donut(r.oee, { label: "OEE" })}
       <div style="margin-top:10px">${CH.hbars([
         { label: "Khả dụng (A)", value: r.availability, pct: true, color: "#3498db" },
         { label: "Hiệu suất (P)", value: r.performance, pct: true, color: "#f5a623" },
-        { label: "Chất lượng (Q)", value: r.quality, pct: true, color: "#2ecc71" },
-      ])}</div>
-      <div class="muted" style="margin-top:8px;font-size:12px">
-        ${r.good_count.toLocaleString("vi-VN")}/${r.total_count.toLocaleString("vi-VN")} đạt ·
-        dừng ${r.downtime_min} phút</div>
+        { label: "Chất lượng (Q)", value: r.quality, pct: true, color: "#2ecc71" }])}</div>
+      <div class="muted" style="margin-top:8px;font-size:12px">${r.good_count.toLocaleString("vi-VN")}/${r.total_count.toLocaleString("vi-VN")} đạt · dừng ${r.downtime_min}'</div>
     </div>`).join("");
+
+  // Năng lượng Điện theo tháng
+  const elec = (energy || []).filter(e => (e.group || "").toLowerCase().includes("điện"))
+    .map(e => ({ label: e.month.slice(5), value: Math.round(e.value) }));
+  // Sản lượng đóng gói theo ca (OEE good_count)
+  const prod = oee.map(r => ({ label: r.line.split(" ")[0] + "/" + r.shift, value: r.good_count,
+    color: r.oee >= 0.85 ? "#2ecc71" : r.oee >= 0.65 ? "#f5a623" : "#e74c3c" }));
+  // Định mức vs thực tế NVL
+  const normItems = (norm && norm.materials || []).map(m => ({ label: m.material_code, a: m.planned, b: m.actual }));
+  // Cơ cấu tồn kho
+  const stockPie = (stock || []).map(s => ({ label: s.material_code, value: Math.round(s.on_hand) }));
+  // Cảnh báo theo mức
+  const insSum = (ins && ins.summary) || { high: 0, medium: 0, low: 0 };
+  const insBars = [{ label: "Cao", value: insSum.high, color: "#e74c3c" },
+                   { label: "TB", value: insSum.medium, color: "#f5a623" },
+                   { label: "Thấp", value: insSum.low, color: "#2ecc71" }];
+  const fvPts = (fvSeries && fvSeries.points || []).map(p => ({ ts: p.ts, value: p.value }));
+
+  const chartPanel = (title, body) => `<div class="panel"><h2>${title}</h2>${body}</div>`;
 
   $("view-dashboard").innerHTML = `
     <div class="cards">
-      <div class="card"><div class="n">${orders.length}</div><div class="l">Lệnh sản xuất</div></div>
-      <div class="card"><div class="n">${batches.length}</div><div class="l">Mẻ</div></div>
-      <div class="card"><div class="n">${byState.running || 0}</div><div class="l">Đang chạy</div></div>
-      <div class="card"><div class="n">${onHold}</div><div class="l">Đang HOLD</div></div>
-      <div class="card"><div class="n">${openDev}</div><div class="l">Deviation mở</div></div>
-      <div class="card"><div class="n">${lots.length}</div><div class="l">Lô vật tư/SP</div></div>
+      <div class="card"><div class="n">${orders.length}</div><div class="l">Lệnh ERP</div></div>
+      <div class="card"><div class="n">${woActive}</div><div class="l">WO đang chạy/chờ</div></div>
+      <div class="card"><div class="n">${byState.running || 0}</div><div class="l">Mẻ đang chạy</div></div>
+      <div class="card"><div class="n" style="color:${onHold ? 'var(--orange)' : 'var(--green)'}">${onHold}</div><div class="l">Đang HOLD</div></div>
+      <div class="card"><div class="n" style="color:${openDev ? 'var(--red)' : 'var(--green)'}">${openDev}</div><div class="l">Deviation mở</div></div>
+      <div class="card"><div class="n" style="color:${insSum.high ? 'var(--red)' : 'var(--green)'}">${insSum.high}</div><div class="l">Cảnh báo cao</div></div>
     </div>
     <h3 style="color:var(--muted);text-transform:uppercase;letter-spacing:.5px;font-size:12px;margin:4px 2px 10px">OEE đóng gói (ca gần nhất)</h3>
     <div class="cards">${oeeCards || '<div class="panel muted">Chưa có dữ liệu OEE.</div>'}</div>
     <div class="split">
-      <div class="panel"><h2>Phân bố trạng thái mẻ</h2>${CH.hbars(stateBars)}</div>
+      ${chartPanel("🍺 Nhiệt độ lên men FV07 (6h, realtime)", CH.line(fvPts, { color: "#e74c3c", unit: "°C", label: "FV07", height: 150 }))}
+      ${chartPanel("⚡ Điện tiêu thụ theo tháng", CH.vbars(elec, { unit: "kWh", color: "#f5a623" }))}
+    </div>
+    <div class="split">
+      ${chartPanel("📦 Phân bố trạng thái mẻ", CH.pie(statePie))}
+      ${chartPanel("🏭 Sản lượng đóng gói theo ca", CH.vbars(prod, { unit: "đv" }))}
+    </div>
+    <div class="split">
+      ${chartPanel("📋 Định mức ↔ Thực tế NVL", CH.grouped(normItems, { labelA: "Định mức", labelB: "Thực tế" }))}
+      ${chartPanel("🗄️ Cơ cấu tồn kho", CH.pie(stockPie))}
+    </div>
+    <div class="split">
+      ${chartPanel("🚨 Cảnh báo vận hành (AI)", CH.vbars(insBars, { unit: "" }))}
       <div class="panel"><h2>Audit gần đây</h2>${tableAudit(audit)}</div>
     </div>
     <div class="panel"><h2>Mẻ gần đây</h2>${tableBatches(batches.slice(0, 8))}</div>`;
@@ -1457,13 +1553,103 @@ VIEWS.reports = async function () {
 const ROLE_DESC = { operator: "Vận hành (ghi nhận)", supervisor: "Trưởng ca/Quản đốc",
   qa: "QA/KCS (release)", engineer: "Kỹ sư (recipe)", admin: "Quản trị" };
 const ALL_VIEWS = ["dashboard","orders","dispatch","recipes","batches","quality","process","trace",
-  "warehouse","energy","realtime","maint","calib","reports","ai","integration","users","audit"];
+  "warehouse","energy","realtime","maint","calib","reports","ai","integration","master","users","audit"];
+
+// ================= DANH MỤC (master data: sản phẩm + vật tư) =================
+VIEWS.master = async function () {
+  const [products, materials] = await Promise.all([GET("/products"), GET("/materials")]);
+  const canManage = CURRENT_USER && (CURRENT_USER.permissions === "*" ||
+    (Array.isArray(CURRENT_USER.permissions) && CURRENT_USER.permissions.includes("master.manage")));
+  const noPerm = canManage ? "" :
+    `<div class="muted" style="margin-bottom:8px">Bạn chỉ có quyền xem danh mục (cần quyền <code class="k">master.manage</code> để tạo/sửa).</div>`;
+  const cats = ["malt", "hop", "yeast", "adjunct", "packaging", "chemical", "other"];
+  $("view-master").innerHTML = `
+    <div class="split">
+      <div class="panel"><h2>🍺 Sản phẩm <span class="muted">(${products.length})</span></h2>
+        ${noPerm}
+        ${canManage ? `<div class="row">
+          <div class="field"><label>Mã SP</label><input id="pr_code" placeholder="BIA-IPA"/></div>
+          <div class="field"><label>Tên sản phẩm</label><input id="pr_name" placeholder="Bia IPA 5.5%"/></div>
+          <div class="field"><label>ĐVT</label><input id="pr_uom" value="L" style="width:70px"/></div>
+        </div>
+        <div class="field"><label>Mô tả</label><input id="pr_desc" placeholder="(tuỳ chọn)" style="width:100%"/></div>
+        <button class="btn" id="pr_add" style="margin-top:10px">+ Tạo sản phẩm</button>` : ""}
+        <div class="tablewrap" style="margin-top:12px"><table>
+          <thead><tr><th>Mã</th><th>Tên</th><th>ĐVT</th><th>Mô tả</th>${canManage ? "<th></th>" : ""}</tr></thead>
+          <tbody>${products.map(p => `<tr>
+            <td><code class="k">${esc(p.code)}</code></td><td>${esc(p.name)}</td><td>${esc(p.uom)}</td>
+            <td class="muted">${esc(p.description || "—")}</td>
+            ${canManage ? `<td><button class="btn sm sec" data-ep="${esc(p.product_id)}">Sửa</button></td>` : ""}</tr>`).join("")}</tbody>
+        </table></div>
+      </div>
+
+      <div class="panel"><h2>📦 Vật tư / Nguyên liệu <span class="muted">(${materials.length})</span></h2>
+        ${noPerm}
+        ${canManage ? `<div class="row">
+          <div class="field"><label>Mã VT</label><input id="mt_code" placeholder="MALT-CARA"/></div>
+          <div class="field"><label>Tên vật tư</label><input id="mt_name" placeholder="Malt Caramel"/></div>
+          <div class="field"><label>ĐVT</label><input id="mt_uom" value="kg" style="width:70px"/></div>
+          <div class="field"><label>Nhóm</label><select id="mt_cat">${cats.map(c => `<option>${c}</option>`).join("")}</select></div>
+        </div>
+        <button class="btn" id="mt_add" style="margin-top:10px">+ Tạo vật tư</button>` : ""}
+        <div class="tablewrap" style="margin-top:12px"><table>
+          <thead><tr><th>Mã</th><th>Tên</th><th>ĐVT</th><th>Nhóm</th>${canManage ? "<th></th>" : ""}</tr></thead>
+          <tbody>${materials.map(m => `<tr>
+            <td><code class="k">${esc(m.code)}</code></td><td>${esc(m.name)}</td><td>${esc(m.uom)}</td>
+            <td>${esc(m.category || "—")}</td>
+            ${canManage ? `<td><button class="btn sm sec" data-em="${esc(m.material_id)}">Sửa</button></td>` : ""}</tr>`).join("")}</tbody>
+        </table></div>
+      </div>
+    </div>`;
+
+  if (canManage) {
+    $("pr_add").onclick = () => guard(async () => {
+      await POST("/products", { code: $("pr_code").value.trim(), name: $("pr_name").value.trim(),
+        uom: $("pr_uom").value.trim() || "L", description: $("pr_desc").value.trim() || null });
+      toast("Đã tạo sản phẩm"); render("master");
+    });
+    $("mt_add").onclick = () => guard(async () => {
+      await POST("/materials", { code: $("mt_code").value.trim(), name: $("mt_name").value.trim(),
+        uom: $("mt_uom").value.trim() || "kg", category: $("mt_cat").value });
+      toast("Đã tạo vật tư"); render("master");
+    });
+    document.querySelectorAll("[data-ep]").forEach(b => b.onclick = () => {
+      const p = products.find(x => x.product_id === b.dataset.ep);
+      modal(`<h3>Sửa sản phẩm</h3>
+        <div class="field"><label>Mã</label><input id="ep_code" value="${esc(p.code)}"/></div>
+        <div class="field" style="margin-top:8px"><label>Tên</label><input id="ep_name" value="${esc(p.name)}"/></div>
+        <div class="field" style="margin-top:8px"><label>ĐVT</label><input id="ep_uom" value="${esc(p.uom)}"/></div>
+        <div class="field" style="margin-top:8px"><label>Mô tả</label><input id="ep_desc" value="${esc(p.description || "")}"/></div>
+        <button class="btn" id="ep_save" style="margin-top:12px">Lưu</button>`);
+      $("ep_save").onclick = () => guard(async () => {
+        await PUT(`/products/${p.product_id}`, { code: $("ep_code").value.trim(), name: $("ep_name").value.trim(),
+          uom: $("ep_uom").value.trim(), description: $("ep_desc").value.trim() || null });
+        closeModal(); toast("Đã cập nhật"); render("master");
+      });
+    });
+    document.querySelectorAll("[data-em]").forEach(b => b.onclick = () => {
+      const m = materials.find(x => x.material_id === b.dataset.em);
+      modal(`<h3>Sửa vật tư</h3>
+        <div class="field"><label>Mã</label><input id="em_code" value="${esc(m.code)}"/></div>
+        <div class="field" style="margin-top:8px"><label>Tên</label><input id="em_name" value="${esc(m.name)}"/></div>
+        <div class="field" style="margin-top:8px"><label>ĐVT</label><input id="em_uom" value="${esc(m.uom)}"/></div>
+        <div class="field" style="margin-top:8px"><label>Nhóm</label><input id="em_cat" value="${esc(m.category || "")}"/></div>
+        <button class="btn" id="em_save" style="margin-top:12px">Lưu</button>`);
+      $("em_save").onclick = () => guard(async () => {
+        await PUT(`/materials/${m.material_id}`, { code: $("em_code").value.trim(), name: $("em_name").value.trim(),
+          uom: $("em_uom").value.trim(), category: $("em_cat").value.trim() || null });
+        closeModal(); toast("Đã cập nhật"); render("master");
+      });
+    });
+  }
+};
 VIEWS.users = async function () {
   if (!CURRENT_USER || CURRENT_USER.role !== "admin") {
     $("view-users").innerHTML = '<div class="panel muted">Chỉ quản trị viên (admin) xem được trang này.</div>';
     return;
   }
-  const [users, pcat] = await Promise.all([GET("/auth/users"), GET("/auth/permissions")]);
+  const [users, pcat, scat] = await Promise.all([
+    GET("/auth/users"), GET("/auth/permissions"), GET("/auth/scope-catalog").catch(() => ({ areas: [], lines: [], qc_params: [] }))]);
   const roleOpts = Object.keys(ROLE_DESC).map(r => `<option value="${r}">${r} — ${ROLE_DESC[r]}</option>`).join("");
   const permBoxes = pcat.catalog.map(p =>
     `<label style="display:inline-flex;align-items:center;gap:4px;margin:3px 10px 3px 0;font-size:12px">
@@ -1480,28 +1666,52 @@ VIEWS.users = async function () {
       <div class="field"><label>Menu được phép (cách nhau dấu phẩy, hoặc * = tất cả)</label>
         <input id="nu_views" value="dashboard" style="width:100%"/></div>
       <div class="muted" style="margin:4px 0">Menu hợp lệ: ${ALL_VIEWS.join(", ")}</div>
+      <h3>Phạm vi dữ liệu (data-scoping)</h3>
+      <div class="row">
+        <div class="field"><label>Line (csv / *)</label><input id="nu_lines" value="*"/></div>
+        <div class="field"><label>Khu vực (csv / *)</label><input id="nu_areas" value="*"/></div>
+        <div class="field"><label>Loại test QC (csv / *)</label><input id="nu_qc" value="*"/></div>
+      </div>
+      <div class="muted" style="margin:4px 0">Khu vực: ${scat.areas.map(a => esc(a.key)).join(", ") || "—"} · Line: ${scat.lines.map(esc).join(", ") || "(chưa có)"}</div>
       <h3>Quyền thao tác (ma trận quyền)</h3>
       <div style="background:var(--panel2);border:1px solid var(--border);border-radius:8px;padding:10px">${permBoxes}</div>
       <button class="btn" id="nu_add" style="margin-top:12px">Tạo tài khoản</button>
     </div>
     <div class="panel"><h2>Danh sách tài khoản <span class="muted">(${users.length})</span></h2>
-      <div class="tablewrap"><table><thead><tr><th>Đăng nhập</th><th>Họ tên</th><th>Chức danh</th><th>Vai trò</th><th>Quyền thao tác</th><th>Đăng nhập gần nhất</th><th>Trạng thái</th><th></th></tr></thead>
-      <tbody>${users.map(u => `<tr><td><code class="k">${esc(u.username)}</code></td><td>${esc(u.full_name)}</td>
-        <td>${esc(u.job_title)}</td><td>${badge(u.role === "admin" ? "critical" : "available")}${esc(u.role)}</td>
+      <div class="tablewrap"><table><thead><tr><th>Đăng nhập</th><th>Họ tên</th><th>Vai trò</th><th>Quyền thao tác</th><th>Phạm vi (line)</th><th>Đăng nhập gần nhất</th><th>Trạng thái</th><th></th></tr></thead>
+      <tbody>${users.map(u => `<tr><td><code class="k">${esc(u.username)}</code></td><td>${esc(u.full_name)}<div class="muted" style="font-size:11px">${esc(u.job_title)}</div></td>
+        <td>${badge(u.role === "admin" ? "critical" : "available")}${esc(u.role)}</td>
         <td style="font-size:12px">${u.permissions === "*" ? '<span class="badge critical">toàn quyền</span>' : (u.permissions ? u.permissions.split(",").map(p => `<span class="badge planned" style="margin:1px">${esc(p)}</span>`).join(" ") : '<span class="muted">chỉ xem</span>')}</td>
+        <td style="font-size:12px">${scopeBadge(u.scope_lines)}</td>
         <td class="muted">${fmt(u.last_login_at)}</td>
         <td>${badge(u.active ? "available" : "obsolete")}${u.active ? "hoạt động" : "khoá"}</td>
-        <td>${u.username !== CURRENT_USER.username ? `<button class="btn sm sec" data-toggle="${u.username}">${u.active ? "Khoá" : "Mở"}</button>` : ""}</td></tr>`).join("")}</tbody></table></div></div>`;
+        <td style="white-space:nowrap"><button class="btn sm sec" data-scope="${esc(u.username)}">Phạm vi</button>
+          ${u.username !== CURRENT_USER.username ? `<button class="btn sm sec" data-toggle="${u.username}">${u.active ? "Khoá" : "Mở"}</button>` : ""}</td></tr>`).join("")}</tbody></table></div></div>`;
   $("nu_add").onclick = () => guard(async () => {
     const perms = [...document.querySelectorAll(".nu_perm:checked")].map(c => c.value).join(",");
     await POST("/auth/users", { username: $("nu_user").value, password: $("nu_pass").value,
       full_name: $("nu_name").value, job_title: $("nu_title").value, role: $("nu_role").value,
-      allowed_views: $("nu_views").value, permissions: perms });
+      allowed_views: $("nu_views").value, permissions: perms,
+      scope_lines: $("nu_lines").value || "*", scope_areas: $("nu_areas").value || "*", scope_qc: $("nu_qc").value || "*" });
     toast("Đã tạo tài khoản"); render("users");
   });
   document.querySelectorAll("[data-toggle]").forEach(b => b.onclick = () => guard(async () => {
     await POST(`/auth/users/${b.dataset.toggle}/toggle`); toast("Đã đổi trạng thái"); render("users");
   }));
+  document.querySelectorAll("[data-scope]").forEach(b => b.onclick = () => {
+    const u = users.find(x => x.username === b.dataset.scope);
+    modal(`<h3>Phạm vi dữ liệu: ${esc(u.username)}</h3>
+      <div class="muted" style="margin-bottom:8px">Để <code class="k">*</code> = toàn nhà máy. Nhiều giá trị cách nhau dấu phẩy.</div>
+      <div class="field"><label>Line</label><input id="sc_lines" value="${esc(u.scope_lines || "*")}"/></div>
+      <div class="field" style="margin-top:8px"><label>Khu vực (${(scat.areas || []).map(a => esc(a.key)).join(",")})</label><input id="sc_areas" value="${esc(u.scope_areas || "*")}"/></div>
+      <div class="field" style="margin-top:8px"><label>Loại test QC</label><input id="sc_qc" value="${esc(u.scope_qc || "*")}"/></div>
+      <button class="btn" id="sc_save" style="margin-top:12px">Lưu phạm vi</button>`);
+    $("sc_save").onclick = () => guard(async () => {
+      await PUT(`/auth/users/${u.username}/scope`, { scope_lines: $("sc_lines").value,
+        scope_areas: $("sc_areas").value, scope_qc: $("sc_qc").value });
+      closeModal(); toast("Đã cập nhật phạm vi"); render("users");
+    });
+  });
 };
 
 // ================= HỒ SƠ CÁ NHÂN =================
@@ -1517,6 +1727,9 @@ VIEWS.profile = async function () {
           <dt>Chức danh</dt><dd>${esc(me.job_title)}</dd>
           <dt>Vai trò</dt><dd>${badge(me.role === "admin" ? "critical" : "available")}${esc(me.role)}</dd>
           <dt>Quyền được cấp</dt><dd>${(Array.isArray(perms) ? perms : [perms]).map(p => `<span class="badge planned" style="margin:2px">${esc(p)}</span>`).join(" ") || '<span class="muted">— chỉ xem —</span>'}</dd>
+          <dt>Phạm vi line</dt><dd>${scopeBadge(me.scope_lines)}</dd>
+          <dt>Phạm vi khu vực</dt><dd>${scopeBadge(me.scope_areas)}</dd>
+          <dt>Phạm vi loại test</dt><dd>${scopeBadge(me.scope_qc)}</dd>
         </dl>
       </div>
       <div class="panel"><h2>Đổi mật khẩu</h2>
@@ -1564,6 +1777,18 @@ function enterApp() {
   $("login").style.display = "none";
   $("app").style.display = "";
   applyMenu();
+  // Buộc đổi mật khẩu nếu admin tạo bằng mật khẩu mặc định.
+  if (CURRENT_USER && CURRENT_USER.must_change_password) {
+    const pf = document.querySelector('#nav button[data-view="profile"]');
+    if (pf) {
+      document.querySelectorAll("#nav button").forEach(x => x.classList.remove("active"));
+      document.querySelectorAll(".view").forEach(x => x.classList.remove("active"));
+      pf.classList.add("active");
+      $("view-profile").classList.add("active");
+      render("profile");
+    }
+    toast("Bạn đang dùng mật khẩu mặc định — vui lòng đổi mật khẩu ngay.", "err");
+  }
 }
 
 function showLogin(msg) {

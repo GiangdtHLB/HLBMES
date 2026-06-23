@@ -106,6 +106,8 @@ class RecipeVersionIn(BaseModel):
     parameters: list[dict] = []
     materials: list[dict] = []
     quality_checks: list[dict] = []
+    yield_steps: list[dict] = []
+    change_reason: Optional[str] = None
 
 
 class RecipeVersionOut(ORMModel):
@@ -118,6 +120,8 @@ class RecipeVersionOut(ORMModel):
     parameters: list
     materials: list
     quality_checks: list
+    yield_steps: list = []
+    change_reason: Optional[str] = None
     created_by: Optional[str] = None
     approved_by: Optional[str] = None
     approved_at: Optional[datetime] = None
@@ -127,6 +131,20 @@ class RecipeVersionOut(ORMModel):
 class TransitionIn(BaseModel):
     target: str
     reason: Optional[str] = None
+
+
+class ChangeApproveIn(BaseModel):
+    password: str
+    change_reason: str
+
+
+class YieldIn(BaseModel):
+    step_key: str            # nau | len_men | loc | chiet
+    step_no: int = 0
+    input_qty: float = 0.0
+    output_qty: float = 0.0
+    uom: Optional[str] = None
+    note: Optional[str] = None
 
 
 # ---- Batches ----
@@ -169,6 +187,23 @@ class ConsumeIn(BaseModel):
     lot_id: str
     quantity: float
     allow_over: bool = False   # cho phép vượt định mức BOM (có phê duyệt)
+
+
+# ---- Cấp phát NVL (dispense / backflush) ----
+class DispenseLineIn(BaseModel):
+    material_code: str
+    quantity: float
+    lot_id: Optional[str] = None       # None → tự chọn lô theo FEFO
+    allow_over: bool = False
+
+
+class DispenseIn(BaseModel):
+    lines: list[DispenseLineIn]
+    note: Optional[str] = None
+
+
+class BackflushIn(BaseModel):
+    produced_qty: float
 
 
 class EbrSignIn(BaseModel):
@@ -284,6 +319,38 @@ class DeviationTransitionIn(BaseModel):
     disposition: Optional[str] = None
 
 
+# ---- Quality hardcore: CAPA + LIMS ----
+class CapaIn(BaseModel):
+    title: str
+    deviation_id: Optional[str] = None
+    capa_type: str = "corrective"     # corrective | preventive
+    severity: str = "minor"
+    root_cause: Optional[str] = None
+    action_plan: Optional[str] = None
+    owner: Optional[str] = None
+    due_date: Optional[date] = None
+
+
+class CapaTransitionIn(BaseModel):
+    target: str
+    root_cause: Optional[str] = None
+    action_plan: Optional[str] = None
+    effectiveness: Optional[str] = None
+
+
+class SampleIn(BaseModel):
+    scope_type: str = "batch"
+    scope_id: str
+    sample_code: Optional[str] = None
+    stage: Optional[str] = None
+    test_set: Optional[str] = None
+    note: Optional[str] = None
+
+
+class SampleTransitionIn(BaseModel):
+    target: str   # in_test | completed
+
+
 # ---- Metrics: readings + OEE ----
 class ReadingIn(BaseModel):
     parameter: str
@@ -312,6 +379,17 @@ class OEEIn(BaseModel):
     total_count: int = 0
     good_count: int = 0
     downtime_reasons: list[dict] = []
+
+
+class DowntimeIn(BaseModel):
+    line: str
+    reason_group: str
+    reason_code: str
+    minutes: float = 0.0
+    equipment_id: Optional[str] = None
+    shift: str = "A"
+    shift_date: Optional[datetime] = None
+    note: Optional[str] = None
 
 
 class OEEOut(BaseModel):

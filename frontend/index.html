@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>MES Nhà máy Bia</title>
-  <link rel="stylesheet" href="/styles.css" />
+  <link rel="stylesheet" href="/styles.css?v=10" />
 </head>
 <body>
   <!-- Màn hình đăng nhập -->
@@ -47,18 +47,23 @@
     <button data-view="orders">Lệnh SX</button>
     <button data-view="dispatch">Điều độ</button>
     <button data-view="recipes">Công thức</button>
+    <button data-view="recipeadv">Công thức+</button>
     <button data-view="batches">Mẻ sản xuất</button>
+    <button data-view="dispense">Cấp liệu</button>
     <button data-view="quality">Chất lượng</button>
+    <button data-view="qclab">QC Lab</button>
     <button data-view="process">Nấu-Lọc-Chiết</button>
     <button data-view="trace">Truy xuất</button>
     <button data-view="warehouse">Kho NVL</button>
     <button data-view="energy">Năng lượng</button>
     <button data-view="realtime">📡 Realtime</button>
+    <button data-view="oee">OEE/Dừng máy</button>
     <button data-view="maint">Bảo trì</button>
     <button data-view="calib">Kiểm định</button>
     <button data-view="reports">Báo cáo</button>
     <button data-view="ai">🤖 Trợ lý AI</button>
     <button data-view="integration">Tích hợp</button>
+    <button data-view="master">Danh mục</button>
     <button data-view="users">Tài khoản</button>
     <button data-view="audit">Audit</button>
     <button data-view="profile">Hồ sơ</button>
@@ -69,24 +74,30 @@
     <section id="view-orders" class="view"></section>
     <section id="view-dispatch" class="view"></section>
     <section id="view-recipes" class="view"></section>
+    <section id="view-recipeadv" class="view"></section>
     <section id="view-batches" class="view"></section>
+    <section id="view-dispense" class="view"></section>
     <section id="view-quality" class="view"></section>
+    <section id="view-qclab" class="view"></section>
     <section id="view-process" class="view"></section>
     <section id="view-trace" class="view"></section>
     <section id="view-warehouse" class="view"></section>
     <section id="view-energy" class="view"></section>
     <section id="view-realtime" class="view"></section>
+    <section id="view-oee" class="view"></section>
     <section id="view-maint" class="view"></section>
     <section id="view-calib" class="view"></section>
     <section id="view-reports" class="view"></section>
     <section id="view-ai" class="view"></section>
     <section id="view-integration" class="view"></section>
+    <section id="view-master" class="view"></section>
     <section id="view-users" class="view"></section>
     <section id="view-audit" class="view"></section>
     <section id="view-profile" class="view"></section>
   </main>
   </div>
 
-  <script src="/app.js"></script>
+  <script src="/app.js?v=10"></script>
+  <script src="/views_ext.js?v=10"></script>
 </body>
 </html>

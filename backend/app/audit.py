@@ -3,14 +3,27 @@ thay đổi nghiệp vụ để bản ghi audit và dữ liệu nhất quán."""
 
 import hashlib
 import json
+import threading
 from typing import Optional
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from .common import new_id, utcnow
 from .models.audit import AuditLog
 from .security import User
+
+# Tuần tự hoá ghi audit để bảo vệ tính toàn vẹn chuỗi hash (seq + prev_hash).
+# - Postgres: pg_advisory_xact_lock (giữ tới hết transaction) — chuẩn cho production.
+# - SQLite/đơn tiến trình: khoá Python serialize giữa các thread của uvicorn.
+_AUDIT_LOCK = threading.Lock()
+_PG_ADVISORY_KEY = 920145  # hằng tuỳ ý, riêng cho audit chain
+
+
+def _acquire_db_lock(db: Session) -> None:
+    from .database import engine
+    if engine.dialect.name == "postgresql":
+        db.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": _PG_ADVISORY_KEY})
 
 
 def _ts_str(ts) -> str:
@@ -35,22 +48,26 @@ def record_audit(
     reason: Optional[str] = None,
     correlation_id: Optional[str] = None,
 ) -> AuditLog:
-    # Lấy bản ghi cuối theo seq (autoflush khiến bản ghi pending cùng transaction hiện ra).
-    last = db.execute(select(AuditLog).order_by(AuditLog.seq.desc()).limit(1)).scalar_one_or_none()
-    next_seq = (last.seq + 1) if last else 1
-    prev_hash = last.entry_hash if last else ""
-    ts = utcnow()
-    fields = {"seq": next_seq, "entity_type": entity_type, "entity_id": entity_id,
-              "action": action, "actor": actor.username, "actor_role": actor.role,
-              "reason": reason, "before": before, "after": after,
-              "correlation_id": correlation_id, "ts": _ts_str(ts)}
-    entry = AuditLog(
-        audit_id=new_id(), seq=next_seq, entity_type=entity_type, entity_id=entity_id,
-        action=action, actor=actor.username, actor_role=actor.role, reason=reason,
-        before=before, after=after, correlation_id=correlation_id, ts=ts,
-        prev_hash=prev_hash or None, entry_hash=_entry_hash(prev_hash, fields),
-    )
-    db.add(entry)
+    # Khoá DB ở mức transaction (Postgres) để các giao dịch ghi audit không chen seq.
+    _acquire_db_lock(db)
+    with _AUDIT_LOCK:
+        # Lấy bản ghi cuối theo seq (autoflush khiến bản ghi pending cùng transaction hiện ra).
+        last = db.execute(select(AuditLog).order_by(AuditLog.seq.desc()).limit(1)).scalar_one_or_none()
+        next_seq = (last.seq + 1) if last else 1
+        prev_hash = last.entry_hash if last else ""
+        ts = utcnow()
+        fields = {"seq": next_seq, "entity_type": entity_type, "entity_id": entity_id,
+                  "action": action, "actor": actor.username, "actor_role": actor.role,
+                  "reason": reason, "before": before, "after": after,
+                  "correlation_id": correlation_id, "ts": _ts_str(ts)}
+        entry = AuditLog(
+            audit_id=new_id(), seq=next_seq, entity_type=entity_type, entity_id=entity_id,
+            action=action, actor=actor.username, actor_role=actor.role, reason=reason,
+            before=before, after=after, correlation_id=correlation_id, ts=ts,
+            prev_hash=prev_hash or None, entry_hash=_entry_hash(prev_hash, fields),
+        )
+        db.add(entry)
+        db.flush()   # phát INSERT trong khoá → seq trùng (nếu có) lỗi ngay tại đây
     return entry
 
 

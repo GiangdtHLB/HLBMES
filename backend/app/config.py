@@ -1,29 +1,72 @@
-"""Cấu hình ứng dụng. Mặc định SQLite để chạy ngay; đặt MES_DATABASE_URL
-để chuyển sang PostgreSQL (vd: postgresql+psycopg://user:pass@host/db)."""
+"""Cấu hình tập trung qua pydantic-settings (validate kiểu + nguồn env/.env).
 
-import os
+Mọi biến môi trường gom về một class Settings để dễ kiểm tra & tài liệu hoá.
+Giữ các tên hằng module-level (DATABASE_URL, APP_NAME, ...) để code hiện có
+`from .config import X` không phải đổi.
+"""
+
 from pathlib import Path
 
-BASE_DIR = Path(__file__).resolve().parent.parent  # .../backend
+from pydantic import AliasChoices, Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
-# Mặc định SQLite trong thư mục backend để không cần cài Postgres.
-# Tài liệu khuyến nghị PostgreSQL cho transactional — chỉ cần đổi biến môi trường.
-DATABASE_URL = os.environ.get(
-    "MES_DATABASE_URL",
-    f"sqlite:///{BASE_DIR / 'mes.db'}",
-)
+BASE_DIR = Path(__file__).resolve().parent.parent          # .../backend
+_ENV_FILE = str(BASE_DIR.parent / ".env")                  # .env ở gốc repo
 
-# Múi giờ lưu trữ: luôn UTC (tài liệu §8.3). Hiển thị cục bộ do client lo.
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_prefix="MES_", env_file=_ENV_FILE, extra="ignore", case_sensitive=False
+    )
+
+    # --- Database ---
+    database_url: str = ""        # MES_DATABASE_URL; rỗng → SQLite dev (tính bên dưới)
+
+    # --- AI (advisory; §1.1) ---
+    # ANTHROPIC_API_KEY không có tiền tố MES_ → dùng alias.
+    llm_api_key: str = Field(default="", validation_alias=AliasChoices("ANTHROPIC_API_KEY"))
+    llm_model: str = "claude-opus-4-8"     # MES_LLM_MODEL
+    llm_enabled: str = "auto"              # MES_LLM_ENABLED: auto | on | off
+
+    # --- Bảo mật / phiên ---
+    dev_header_auth: bool = False          # MES_DEV_HEADER_AUTH (CHỈ dev)
+    session_hours: int = 12                # MES_SESSION_HOURS
+    admin_password: str = ""               # MES_ADMIN_PASSWORD (rỗng → mặc định + buộc đổi)
+
+    # --- Seed ---
+    seed_demo: bool = True                 # MES_SEED_DEMO: tạo tài khoản/API key/dữ liệu demo
+
+    # --- Rate-limit / quota ---
+    rl_enabled: bool = True                # MES_RL_ENABLED
+    rl_login_per_min: int = 10             # MES_RL_LOGIN_PER_MIN
+    rl_ai_per_min: int = 20                # MES_RL_AI_PER_MIN
+    rl_ai_daily_quota: int = 300           # MES_AI_DAILY_QUOTA (chat AI/ngày/phiên)
+
+    # --- Logging ---
+    log_level: str = "INFO"                # MES_LOG_LEVEL
+    log_json: bool = False                 # MES_LOG_JSON (log JSON cho thu thập tập trung)
+
+
+settings = Settings()
+
+# ---- Hằng module-level (tương thích ngược) ----
 APP_NAME = "MES Nhà máy Bia — MVP P0"
 FRONTEND_DIR = BASE_DIR.parent / "frontend"
+DATABASE_URL = settings.database_url or f"sqlite:///{BASE_DIR / 'mes.db'}"
 
-# ---- Lớp AI (tài liệu §1.1: AI chỉ tư vấn, human-in-the-loop) ----
-# Nếu có ANTHROPIC_API_KEY và cài 'anthropic', trợ lý dùng Claude thật (claude-opus-4-8);
-# nếu không, dùng engine luật nội bộ để vẫn chạy offline.
-LLM_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-LLM_MODEL = os.environ.get("MES_LLM_MODEL", "claude-opus-4-8")
-LLM_ENABLED = os.environ.get("MES_LLM_ENABLED", "auto")  # auto | on | off
+LLM_API_KEY = settings.llm_api_key
+LLM_MODEL = settings.llm_model
+LLM_ENABLED = settings.llm_enabled
 
-# Cho phép xác thực dự phòng bằng header X-User/X-Role (CHỈ để test/dev /docs).
-# MẶC ĐỊNH TẮT — nếu bật sẽ cho bỏ qua đăng nhập, không dùng ở production.
-DEV_HEADER_AUTH = os.environ.get("MES_DEV_HEADER_AUTH", "").lower() in ("1", "true", "on")
+DEV_HEADER_AUTH = settings.dev_header_auth
+SESSION_HOURS = settings.session_hours
+ADMIN_PASSWORD = settings.admin_password
+SEED_DEMO = settings.seed_demo
+
+RL_ENABLED = settings.rl_enabled
+RL_LOGIN_PER_MIN = settings.rl_login_per_min
+RL_AI_PER_MIN = settings.rl_ai_per_min
+RL_AI_DAILY_QUOTA = settings.rl_ai_daily_quota
+
+LOG_LEVEL = settings.log_level
+LOG_JSON = settings.log_json

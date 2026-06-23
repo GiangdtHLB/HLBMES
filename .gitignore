@@ -40,6 +40,3 @@ Thumbs.db
 *.swp
 .idea/
 .vscode/
-
-# Tạm bỏ qua workflow cho tới khi dùng token có scope 'workflow'
-.github/workflows/

@@ -11,6 +11,7 @@ from datetime import timedelta
 from sqlalchemy import select
 
 from .common import LotStatus, Role, new_id, utcnow
+from .config import SEED_DEMO
 from .database import SessionLocal, init_db
 from .models.brewing import (
     BottleRecord,
@@ -30,7 +31,12 @@ from .models.materials import MaterialLot
 from .models.metrics import OEERecord, ProcessReading
 from .models.orders import ProductionOrder
 from .models.process import ChemicalUsage, YeastIssue, YeastLot
-from .models.recipes import Recipe
+from .models.recipes import Recipe, RecipeVersion
+from .models.recipe_ext import BatchYieldActual, RecipeChange
+from .models.quality_ext import CAPA, QCParameter, Sample
+from .models.quality import QualityResult
+from .models.oee_ext import DowntimeEvent
+from .models.materials_ext import Dispense, DispenseLine
 from .models.warehouse import StockMovement
 from .security import User
 from .services import batches as batch_svc
@@ -61,9 +67,32 @@ def _get_or_create_material(db, code, name, uom, category):
     return m
 
 
+def ensure_admin(db) -> None:
+    """Luôn đảm bảo có tài khoản admin. Mật khẩu lấy từ MES_ADMIN_PASSWORD;
+    nếu không đặt → dùng 'admin123' nhưng BẮT BUỘC đổi mật khẩu lần đầu."""
+    from .config import ADMIN_PASSWORD
+    if db.execute(select(AppUser).where(AppUser.username == "admin")).scalar_one_or_none():
+        return
+    pw = ADMIN_PASSWORD or "admin123"
+    must_change = not ADMIN_PASSWORD          # mật khẩu mặc định → buộc đổi
+    db.add(AppUser(user_id=new_id(), username="admin", password_hash=hash_password(pw),
+                   full_name="Quản trị viên", job_title="Quản trị hệ thống", role="admin",
+                   allowed_views="*", permissions="*", scope_lines="*", scope_areas="*",
+                   scope_qc="*", active=True, must_change_password=must_change))
+    db.commit()
+    if must_change:
+        print("⚠️  Đã tạo admin với mật khẩu MẶC ĐỊNH 'admin123' — sẽ buộc đổi khi đăng nhập. "
+              "Đặt MES_ADMIN_PASSWORD để dùng mật khẩu riêng (không buộc đổi).")
+
+
 def seed():
     init_db()
     db = SessionLocal()
+    ensure_admin(db)
+    if not SEED_DEMO:
+        print("MES_SEED_DEMO=0 → chỉ tạo admin, KHÔNG seed tài khoản/API key/dữ liệu demo (an toàn cho production).")
+        db.close()
+        return
     if db.execute(select(ProductionOrder)).first():
         print("Đã có dữ liệu — bỏ qua seed. (Xóa backend/mes.db để seed lại.)")
         db.close()
@@ -74,6 +103,8 @@ def seed():
     malt = _get_or_create_material(db, "MALT-PILS", "Malt Pilsner", "kg", "malt")
     hop = _get_or_create_material(db, "HOP-SAAZ", "Hoa bia Saaz", "kg", "hop")
     yeast = _get_or_create_material(db, "YEAST-L34", "Men Lager W-34/70", "L", "yeast")
+    # Nguyên liệu thay thế (alternates) cho malt chính — demo #3.
+    malt_alt = _get_or_create_material(db, "MALT-VIENNA", "Malt Vienna (thay thế)", "kg", "malt")
 
     # --- Material lots (nguyên liệu đầu vào) ---
     lots = [
@@ -86,6 +117,10 @@ def seed():
         MaterialLot(lot_id=new_id(), lot_code="YEAST-2406-01", material_id=yeast.material_id,
                     lot_type="material", supplier_lot="SUP-Y-007", quantity=200, uom="L",
                     status=LotStatus.AVAILABLE.value, location="Lab men"),
+        MaterialLot(lot_id=new_id(), lot_code="MALT-V-2406-01", material_id=malt_alt.material_id,
+                    lot_type="material", supplier_lot="SUP-MV-101", quantity=3000, uom="kg",
+                    status=LotStatus.AVAILABLE.value, location="Kho A",
+                    expiry=utcnow() + timedelta(days=180)),
     ]
     db.add_all(lots)
     db.commit()
@@ -106,13 +141,21 @@ def seed():
             {"name": "Nhiệt độ lên men", "target": 12, "lower": 10, "upper": 14, "unit": "°C", "phase": "ferment"},
         ],
         "materials": [
-            {"material_code": "MALT-PILS", "qty": 1200, "uom": "kg", "tol_pct": 3},
+            {"material_code": "MALT-PILS", "qty": 1200, "uom": "kg", "tol_pct": 3,
+             "alternates": [{"material_code": "MALT-VIENNA", "factor": 1.05, "priority": 1}]},
             {"material_code": "HOP-SAAZ", "qty": 15, "uom": "kg", "tol_pct": 5},
             {"material_code": "YEAST-L34", "qty": 50, "uom": "L", "tol_pct": 10},
         ],
         "quality_checks": [
             {"parameter": "Độ đường (°P)", "method": "Refractometer", "lower": 11.0, "upper": 12.5, "unit": "°P", "mandatory": True},
             {"parameter": "pH", "method": "pH meter", "lower": 4.2, "upper": 4.6, "unit": "", "mandatory": True},
+        ],
+        # Hiệu suất kỳ vọng theo công đoạn (yield) — demo #3.
+        "yield_steps": [
+            {"step_key": "nau", "label": "Nấu (dịch nha)", "step_no": 1, "expected_pct": 98, "warn_pct": 95},
+            {"step_key": "len_men", "label": "Lên men", "step_no": 2, "expected_pct": 95, "warn_pct": 90},
+            {"step_key": "loc", "label": "Lọc", "step_no": 3, "expected_pct": 98, "warn_pct": 96},
+            {"step_key": "chiet", "label": "Chiết", "step_no": 4, "expected_pct": 97, "warn_pct": 94},
         ],
     }, ENG)
     recipe_svc.transition(db, rv.version_id, "review", ENG)
@@ -168,6 +211,10 @@ def seed():
     _seed_maintenance(db)
     _seed_process(db, batch.batch_id)
     _seed_brewing(db)
+    _seed_recipe_ext(db, recipe.recipe_id, rv, batch.batch_id)
+    _seed_quality_adv(db, batch.batch_id)
+    _seed_downtime(db)
+    _seed_dispense(db, batch.batch_id, [malt, hop, yeast])
     db.add(ApiKey(key_id=new_id(), name="Demo ERP", token="mes_demo_readonly_key_0001",
                   scopes="read", created_by="admin"))
     db.add(ApiKey(key_id=new_id(), name="Edge Gateway", token="mes_edge_writer_key_0001",
@@ -204,6 +251,15 @@ def _seed_workorders(db, order, rv, batch) -> None:
     db.commit()
     batch.work_order_id = wo1.wo_id   # mẻ đã chạy thuộc WO-001 (completed)
     db.commit()
+
+    # Mẻ thứ 2 (đang chạy, CHƯA cấp liệu) thuộc WO-002 (Nấu A) — để demo Cấp liệu/Backflush.
+    rv_eff = db.execute(select(RecipeVersion).where(
+        RecipeVersion.recipe_id == rv.recipe_id, RecipeVersion.state == "effective")).scalars().first()
+    b2 = batch_svc.create_batch(db, order.order_id, rv_eff.version_id, SUP,
+                                batch_code="B-2406-0002", planned_qty=50000,
+                                work_order_id=wo2.wo_id)
+    batch_svc.transition(db, b2.batch_id, "ready", SUP)
+    batch_svc.transition(db, b2.batch_id, "running", OP)
 
 
 def _seed_fermentation_curve(db, batch_id: str) -> None:
@@ -484,39 +540,184 @@ def _seed_brewing(db) -> None:
         db.commit()
 
 
+def _seed_recipe_ext(db, recipe_id, rv_effective, batch_id) -> None:
+    """#3: yield thực tế theo công đoạn + 1 phiếu change-control (version 2 + diff)."""
+    # Yield thực tế cho mẻ đã chạy (sát expected, riêng lọc thấp hơn → cảnh báo nhẹ).
+    steps = [("nau", 1, 52000, 51000), ("len_men", 2, 51000, 48500),
+             ("loc", 3, 48500, 47100), ("chiet", 4, 47100, 47000)]
+    snap_steps = {s["step_key"]: s for s in (rv_effective.yield_steps or [])}
+    for key, no, inp, outp in steps:
+        meta = snap_steps.get(key, {})
+        db.add(BatchYieldActual(yield_id=new_id(), batch_id=batch_id, step_key=key, step_no=no,
+                                input_qty=inp, output_qty=outp, uom="L",
+                                expected_pct=meta.get("expected_pct"),
+                                recorded_by="operator1", recorded_at=utcnow()))
+    db.commit()
+
+    # Change-control: tạo version 2 (draft) đổi định mức malt + lý do, lưu RecipeChange + diff.
+    rv2 = recipe_svc.create_version(db, recipe_id, {
+        "base_qty": rv_effective.base_qty, "base_uom": rv_effective.base_uom,
+        "parameters": rv_effective.parameters,
+        "materials": [
+            {"material_code": "MALT-PILS", "qty": 1250, "uom": "kg", "tol_pct": 3,
+             "alternates": [{"material_code": "MALT-VIENNA", "factor": 1.05, "priority": 1}]},
+            {"material_code": "HOP-SAAZ", "qty": 16, "uom": "kg", "tol_pct": 5},
+            {"material_code": "YEAST-L34", "qty": 50, "uom": "L", "tol_pct": 10},
+        ],
+        "quality_checks": rv_effective.quality_checks,
+        "yield_steps": rv_effective.yield_steps,
+        "change_reason": "Tăng định mức malt +50kg/hoa bia +1kg để nâng độ đắng theo phản hồi cảm quan.",
+    }, ENG)
+    recipe_svc.transition(db, rv2.version_id, "review", ENG)
+    diff = recipe_svc.diff_versions(db, rv_effective.version_id, rv2.version_id)
+    db.add(RecipeChange(change_id=new_id(), change_code="CHG-2406-0001", recipe_id=recipe_id,
+                        version_id=rv2.version_id, from_version_id=rv_effective.version_id,
+                        reason=rv2.change_reason, diff=diff, state="approved",
+                        requested_by="engineer1", approved_by="qa1", approved_at=utcnow()))
+    rv2.state = "approved"
+    rv2.approved_by = "qa1"
+    rv2.approved_at = utcnow()
+    db.commit()
+
+
+def _seed_quality_adv(db, batch_id) -> None:
+    """#7: định nghĩa chỉ tiêu SPC + chuỗi kết quả (control chart) + CAPA + LIMS sample."""
+    db.add_all([
+        QCParameter(param_id=new_id(), code="OG", name="Độ đường (°P)", unit="°P",
+                    target=11.8, lsl=11.0, usl=12.5, stage="len_men"),
+        QCParameter(param_id=new_id(), code="PH", name="pH", unit="",
+                    target=4.4, lsl=4.2, usl=4.6, stage="len_men"),
+        QCParameter(param_id=new_id(), code="CO2", name="CO2 (g/L)", unit="g/L",
+                    target=5.2, lsl=4.8, usl=5.6, stage="chiet"),
+        QCParameter(param_id=new_id(), code="IBU", name="Độ đắng (IBU)", unit="IBU",
+                    target=22, lsl=18, usl=26, stage="nau"),
+    ])
+    # 24 kết quả "Độ đường (°P)" — biến thiên nhỏ + 8 điểm cuối lệch lên (Western Electric R4).
+    og_vals = [11.8, 11.7, 11.9, 11.6, 11.8, 11.75, 11.85, 11.7, 11.9, 11.65,
+               11.8, 11.7, 11.55, 11.85, 11.9, 11.95, 11.98, 12.0, 12.02, 12.05,
+               12.08, 12.0, 12.05, 12.1]
+    base_t = utcnow() - timedelta(hours=len(og_vals))
+    for i, v in enumerate(og_vals):
+        db.add(QualityResult(result_id=new_id(), sample_id=f"SPC-OG-{i+1:02d}",
+                             scope_type="batch", scope_id=batch_id, parameter="Độ đường (°P)",
+                             method="Refractometer", value=v, unit="°P",
+                             lower_limit=11.0, upper_limit=12.5,
+                             status=("pass" if 11.0 <= v <= 12.5 else "fail"),
+                             recorded_by="qa1", recorded_at=base_t + timedelta(hours=i)))
+    # CAPA: 1 đang xử lý (action) + 1 mới mở.
+    db.add(CAPA(capa_id=new_id(), capa_code="CAPA-2406-0001", title="Độ đường có xu hướng tăng (drift)",
+                capa_type="corrective", severity="major", state="action",
+                root_cause="Hiệu chuẩn refractometer lệch + nhiệt độ đường hóa cao",
+                action_plan="Hiệu chuẩn lại thiết bị; siết kiểm soát nhiệt độ mash; theo dõi 5 mẻ.",
+                owner="kcs", opened_by="qa1", opened_at=utcnow() - timedelta(days=2)))
+    db.add(CAPA(capa_id=new_id(), capa_code="CAPA-2406-0002", title="Phòng ngừa kẹt chai Line-1",
+                capa_type="preventive", severity="minor", state="open",
+                owner="baotri", opened_by="quandoc", opened_at=utcnow()))
+    # LIMS-lite: 2 phiếu mẫu cho mẻ.
+    db.add(Sample(sample_id=new_id(), sample_code="SMP-2406-0001", scope_type="batch",
+                  scope_id=batch_id, stage="len_men", status="completed",
+                  test_set="Độ đường (°P),pH", registered_by="qa1",
+                  registered_at=utcnow() - timedelta(hours=6), completed_at=utcnow() - timedelta(hours=3)))
+    db.add(Sample(sample_id=new_id(), sample_code="SMP-2406-0002", scope_type="batch",
+                  scope_id=batch_id, stage="chiet", status="in_test",
+                  test_set="CO2 (g/L)", registered_by="kcs", registered_at=utcnow()))
+    db.commit()
+
+
+def _seed_downtime(db) -> None:
+    """#8: sự kiện dừng máy cho reason-tree/Pareto/big-losses (2 line đóng gói)."""
+    from .services.downtime import REASON_TREE
+    eqs = db.execute(select(Equipment)).scalars().all()
+    eq_by = {e.code: e for e in eqs}
+    # (line, group, code, minutes, shift)
+    events = [
+        ("Line-1 (chai)", "thiet_bi", "kep_chai", 38, "A"),
+        ("Line-1 (chai)", "thiet_bi", "hong_co_khi", 25, "A"),
+        ("Line-1 (chai)", "chuyen_doi", "cip", 45, "A"),
+        ("Line-1 (chai)", "thieu_vat_tu", "het_nhan", 18, "B"),
+        ("Line-1 (chai)", "van_hanh", "cho_lenh", 12, "B"),
+        ("Line-1 (chai)", "chat_luong", "loi_nhan", 9, "B"),
+        ("Line-1 (chai)", "toc_do", "dung_nho", 14, "A"),
+        ("Line-2 (lon)", "thiet_bi", "kep_chai", 30, "A"),
+        ("Line-2 (lon)", "chuyen_doi", "doi_san_pham", 40, "A"),
+        ("Line-2 (lon)", "thieu_vat_tu", "het_co2", 22, "A"),
+        ("Line-2 (lon)", "van_hanh", "thieu_nhan_luc", 16, "B"),
+        ("Line-2 (lon)", "chat_luong", "do_day_sai", 11, "B"),
+        ("Line-2 (lon)", "toc_do", "chay_cham", 20, "B"),
+        ("Line-2 (lon)", "thiet_bi", "hong_dien", 28, "A"),
+    ]
+    for i, (line, grp, code, mins, shift) in enumerate(events):
+        g = REASON_TREE[grp]
+        eq = eq_by.get("FILL-01") or (eqs[i % len(eqs)] if eqs else None)
+        db.add(DowntimeEvent(event_id=new_id(), line=line,
+                             equipment_id=(eq.equipment_id if (eq and i % 3 == 0) else None),
+                             shift=shift, shift_date=utcnow() - timedelta(days=i % 5),
+                             reason_group=grp, reason_code=code,
+                             reason_label=g["reasons"][code], loss_category=g["loss"],
+                             minutes=mins, recorded_by="truongca",
+                             recorded_at=utcnow() - timedelta(hours=i)))
+    db.commit()
+
+
+def _seed_dispense(db, batch_id, materials) -> None:
+    """#6: 1 phiếu cấp liệu (informational) khớp lượng đã tiêu thụ của mẻ demo."""
+    disp = Dispense(dispense_id=new_id(), dispense_code="DISP-2406-0001", batch_id=batch_id,
+                    mode="dispense", status="issued", note="Cấp liệu mẻ B-2406-0001 (FEFO)",
+                    created_by="vanhanh", created_at=utcnow())
+    db.add(disp)
+    db.flush()
+    lines = [("MALT-PILS", "MALT-2406-01", 1200, "kg"),
+             ("HOP-SAAZ", "HOP-2406-01", 15, "kg"),
+             ("YEAST-L34", "YEAST-2406-01", 50, "L")]
+    for code, lot_code, qty, uom in lines:
+        db.add(DispenseLine(line_id=new_id(), dispense_id=disp.dispense_id, material_code=code,
+                            lot_code=lot_code, quantity=qty, uom=uom))
+    db.commit()
+
+
 def _seed_users(db) -> None:
     """Tài khoản theo chức danh nhà máy. Mật khẩu demo: 123456 (admin: admin123).
 
     role = vai trò nghiệp vụ (quyết định quyền/SoD); views = menu được phép.
     """
     accounts = [
-        # username, password, full_name, job_title, role, views, permissions
-        ("admin", "admin123", "Quản trị viên", "Quản trị hệ thống", "admin", "*", "*"),
+        # username, password, full_name, job_title, role, views, permissions,
+        #   scope_lines, scope_areas, scope_qc  (admin do ensure_admin tạo riêng)
         ("giamdoc", "123456", "Nguyễn Văn Giám", "Giám đốc nhà máy", "supervisor",
-         "dashboard,dispatch,realtime,ai,trace,energy,reports,integration,audit", ""),  # chỉ xem
+         "dashboard,dispatch,oee,qclab,realtime,ai,trace,energy,reports,integration,audit", "",  # chỉ xem
+         "*", "*", "*"),
         ("quandoc", "123456", "Trần Quang Đốc", "Quản đốc phân xưởng", "supervisor",
-         "dashboard,orders,dispatch,batches,process,realtime,quality,trace,reports,ai,audit",
-         "order.create,wo.manage,wo.dispatch,batch.create,batch.execute,quality.deviation,ebr.sign,ebr.approve"),
+         "dashboard,master,orders,dispatch,batches,dispense,recipeadv,process,realtime,quality,qclab,oee,trace,reports,ai,audit",
+         "master.manage,order.create,wo.manage,wo.dispatch,batch.create,batch.execute,quality.deviation,ebr.sign,ebr.approve",
+         "*", "*", "*"),
         ("truongca", "123456", "Lê Thị Ca", "Trưởng ca sản xuất", "supervisor",
-         "dashboard,orders,dispatch,batches,process,realtime,reports,ai",
-         "order.create,wo.dispatch,batch.create,batch.execute,ebr.sign"),
+         "dashboard,orders,dispatch,batches,dispense,process,realtime,oee,reports,ai",
+         "order.create,wo.dispatch,batch.create,batch.execute,ebr.sign",
+         "Nấu A", "nau,len_men,chiet", "*"),
         ("vanhanh", "123456", "Phạm Văn Hành", "Nhân viên vận hành", "operator",
-         "dashboard,batches,process,realtime", "batch.execute,ebr.sign"),
+         "dashboard,batches,dispense,process,realtime", "batch.execute,ebr.sign",
+         "Nấu A", "nau,len_men", "*"),
         ("kcs", "123456", "Hoàng Thị Kiểm", "Nhân viên KCS / QA", "qa",
-         "dashboard,quality,process,trace,ai", "quality.release,quality.deviation,recipe.approve,ebr.sign,ebr.approve"),
+         "dashboard,quality,qclab,process,trace,ai", "quality.release,quality.deviation,recipe.approve,ebr.sign,ebr.approve",
+         "*", "*", "Độ đường (°P),pH"),
         ("kysu", "123456", "Đỗ Công Kỹ", "Kỹ sư công nghệ", "engineer",
-         "dashboard,recipes,batches,process,realtime,trace,reports", "recipe.author,recipe.approve,batch.create,batch.execute,ebr.sign"),
+         "dashboard,master,recipes,recipeadv,batches,qclab,process,realtime,oee,trace,reports",
+         "master.manage,recipe.author,recipe.approve,batch.create,batch.execute,ebr.sign",
+         "*", "*", "*"),
         ("thukho", "123456", "Vũ Thị Kho", "Thủ kho NVL", "operator",
-         "dashboard,warehouse", "warehouse.receive,warehouse.issue"),
+         "dashboard,warehouse,dispense", "warehouse.receive,warehouse.issue",
+         "*", "kho", "*"),
         ("baotri", "123456", "Bùi Văn Trì", "Nhân viên bảo trì", "operator",
-         "dashboard,maint,calib", "maintenance.manage,calibration.manage"),
+         "dashboard,maint,calib,oee", "maintenance.manage,calibration.manage",
+         "*", "loc,chiet", "*"),
         ("nangluong", "123456", "Ngô Văn Điện", "NV quản lý năng lượng", "operator",
-         "dashboard,energy", "energy.update"),
+         "dashboard,energy", "energy.update",
+         "*", "nau,len_men,chiet", "*"),
     ]
-    for username, pw, full, title, role, views, perms in accounts:
+    for username, pw, full, title, role, views, perms, sl, sa, sq in accounts:
         db.add(AppUser(user_id=new_id(), username=username, password_hash=hash_password(pw),
                        full_name=full, job_title=title, role=role, allowed_views=views,
-                       permissions=perms, active=True))
+                       permissions=perms, scope_lines=sl, scope_areas=sa, scope_qc=sq, active=True))
     db.commit()
     print("Tài khoản: admin/admin123 · giamdoc,quandoc,truongca,vanhanh,kcs,kysu,thukho,baotri,nangluong /123456")
 

@@ -5,17 +5,41 @@
 - /api/v1/events: feed sự kiện (từ audit log) cho tích hợp event-driven (§9.1).
 """
 
+from typing import Optional
+
 from fastapi import APIRouter, Depends
+from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..common import Role, new_id, utcnow
+from ..audit import record_audit
+from ..common import Role, new_id
 from ..database import get_db
 from ..errors import NotFoundError
 from ..models.audit import AuditLog
 from ..models.integration import ApiKey, Webhook
 from ..security import User, get_current_user, require_api_key, require_role
 from ..services import ai_tools
+
+
+class ExternalEventIn(BaseModel):
+    entity_type: str = "external"
+    entity_id: str = "-"
+    action: str = "external_event"
+    reason: Optional[str] = None
+    data: Optional[dict] = None
+    correlation_id: Optional[str] = None
+
+
+class WebhookIn(BaseModel):
+    target_url: str
+    event_types: str = "*"
+    secret: Optional[str] = None
+
+
+class ApiKeyIn(BaseModel):
+    name: str = "external"
+    scopes: str = "read"
 
 router = APIRouter(tags=["gateway"])
 
@@ -73,18 +97,16 @@ def v1_events(since_seq: int = 0, limit: int = 100, db: Session = Depends(get_db
 
 
 @v1.post("/events")
-def v1_ingest_event(payload: dict, db: Session = Depends(get_db),
+def v1_ingest_event(payload: ExternalEventIn, db: Session = Depends(get_db),
                     client=Depends(require_api_key(write=True))):
-    """Nhận event từ hệ ngoài (vd ERP xác nhận) — ghi vào audit log (idempotency tùy chọn)."""
-    from ..models.audit import AuditLog as AL
-    seq = (db.execute(select(__import__("sqlalchemy").func.max(AL.seq))).scalar() or 0) + 1
-    entry = AL(audit_id=new_id(), seq=seq, entity_type=payload.get("entity_type", "external"),
-               entity_id=payload.get("entity_id", "-"), action=payload.get("action", "external_event"),
-               actor=f"api:{client['name']}", reason=payload.get("reason"),
-               after=payload.get("data"), correlation_id=payload.get("correlation_id"), ts=utcnow())
-    db.add(entry)
+    """Nhận event từ hệ ngoài (vd ERP xác nhận) — ghi vào audit log QUA record_audit
+    để giữ nguyên chuỗi hash tamper-evident (trước đây insert thẳng làm hỏng chain)."""
+    actor = User(username=f"api:{client['name']}", role="external", permissions=set())
+    entry = record_audit(db, entity_type=payload.entity_type, entity_id=payload.entity_id,
+                         action=payload.action, actor=actor, reason=payload.reason,
+                         after=payload.data, correlation_id=payload.correlation_id)
     db.commit()
-    return {"accepted": True, "seq": seq}
+    return {"accepted": True, "seq": entry.seq}
 
 
 router.include_router(v1)
@@ -105,11 +127,11 @@ def list_keys(db: Session = Depends(get_db), user: User = Depends(get_current_us
 
 
 @admin.post("/keys", status_code=201)
-def create_key(payload: dict, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+def create_key(payload: ApiKeyIn, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     require_role(user, Role.ADMIN)
     token = "mes_" + new_id().replace("-", "") + new_id().replace("-", "")[:8]
-    k = ApiKey(key_id=new_id(), name=payload.get("name", "external"), token=token,
-               scopes=payload.get("scopes", "read"), created_by=user.username)
+    k = ApiKey(key_id=new_id(), name=payload.name, token=token,
+               scopes=payload.scopes, created_by=user.username)
     db.add(k)
     db.commit()
     # token đầy đủ chỉ trả về lúc tạo
@@ -135,10 +157,10 @@ def list_webhooks(db: Session = Depends(get_db), user: User = Depends(get_curren
 
 
 @admin.post("/webhooks", status_code=201)
-def create_webhook(payload: dict, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+def create_webhook(payload: WebhookIn, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     require_role(user, Role.ADMIN)
-    w = Webhook(webhook_id=new_id(), target_url=payload["target_url"],
-                event_types=payload.get("event_types", "*"), secret=payload.get("secret"))
+    w = Webhook(webhook_id=new_id(), target_url=payload.target_url,
+                event_types=payload.event_types, secret=payload.secret)
     db.add(w)
     db.commit()
     db.refresh(w)

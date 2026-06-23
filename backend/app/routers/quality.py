@@ -21,7 +21,8 @@ router = APIRouter(prefix="/api/quality", tags=["quality"])
 
 
 @router.get("/results", response_model=list[ResultOut])
-def list_results(scope_id: str = None, db: Session = Depends(get_db)):
+def list_results(scope_id: str = None, db: Session = Depends(get_db),
+                 user: User = Depends(get_current_user)):
     stmt = select(QualityResult).order_by(QualityResult.recorded_at.desc())
     if scope_id:
         stmt = stmt.where(QualityResult.scope_id == scope_id)
@@ -44,7 +45,7 @@ def set_hold(payload: HoldIn, db: Session = Depends(get_db),
 
 
 @router.get("/deviations", response_model=list[DeviationOut])
-def list_deviations(db: Session = Depends(get_db)):
+def list_deviations(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     return db.execute(select(Deviation).order_by(Deviation.opened_at.desc())).scalars().all()
 
 

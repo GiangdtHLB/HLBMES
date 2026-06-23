@@ -22,11 +22,16 @@ class User:
     full_name: Optional[str] = None
     job_title: Optional[str] = None
     permissions: object = "*"   # set[str] hoặc "*" (toàn quyền)
+    # Phạm vi dữ liệu (data-scoping §10.2): "*" = toàn nhà máy, hoặc set[str] cụ thể.
+    scope_lines: object = "*"   # line đóng gói / dây chuyền
+    scope_areas: object = "*"   # khu vực: nau|len_men|loc|chiet|kho
+    scope_qc: object = "*"      # loại test QC được phân (theo tên parameter)
 
 
 # ---- Ma trận quyền chi tiết (catalog) ----
 # key -> nhãn hiển thị. Áp ở tầng router cho các thao tác nhạy cảm.
 PERMISSION_CATALOG = {
+    "master.manage": "Quản lý danh mục sản phẩm/vật tư",
     "order.create": "Tạo/điều phối lệnh sản xuất",
     "wo.manage": "Lập/sửa lệnh sản xuất (work order)",
     "wo.dispatch": "Điều độ — phát mẻ từ lệnh",
@@ -109,7 +114,10 @@ def get_current_user(
             perms = "*" if (u.permissions or "").strip() == "*" else {
                 p.strip() for p in (u.permissions or "").split(",") if p.strip()}
             return User(username=u.username, role=u.role, full_name=u.full_name,
-                        job_title=u.job_title, permissions=perms)
+                        job_title=u.job_title, permissions=perms,
+                        scope_lines=_parse_scope(getattr(u, "scope_lines", "*")),
+                        scope_areas=_parse_scope(getattr(u, "scope_areas", "*")),
+                        scope_qc=_parse_scope(getattr(u, "scope_qc", "*")))
         finally:
             db.close()
     # Fallback X-User/X-Role: CHỈ khi bật cờ dev (mặc định tắt) — tránh bypass quyền.
@@ -168,3 +176,67 @@ def enforce_sod(actor_username: Optional[str], current: User, action: str) -> No
             f"Vi phạm phân tách nhiệm vụ (SoD): '{current.username}' không thể tự "
             f"{action} thứ do chính mình tạo/ghi."
         )
+
+
+# ============================================================================
+# RBAC data-scoping (§10.2): phân quyền theo phạm vi dữ liệu (line/khu vực/loại
+# test) — bổ sung cho require_perm (phân quyền theo *hành động*). Một operator
+# Line-1 chỉ thao tác/nhìn mẻ & lệnh thuộc Line-1; KCS chỉ ghi loại test mình phụ trách.
+# ============================================================================
+
+# Danh mục khu vực chuẩn (khớp 'stage' trong process/brewing và Equipment.system).
+SCOPE_AREAS = {
+    "nau": "Nấu",
+    "len_men": "Lên men",
+    "loc": "Lọc",
+    "chiet": "Chiết",
+    "kho": "Kho",
+}
+
+
+def _parse_scope(raw) -> object:
+    """Chuẩn hóa giá trị scope từ DB (csv|'*') thành '*' hoặc set[str]."""
+    if raw is None:
+        return "*"
+    if not isinstance(raw, str):
+        return raw  # đã là set (vd test) → giữ nguyên
+    raw = raw.strip()
+    if raw == "" or raw == "*":
+        return "*"
+    return {s.strip() for s in raw.split(",") if s.strip()}
+
+
+def has_scope(user: User, dimension: str, value) -> bool:
+    """True nếu user được phép với 'value' ở chiều 'dimension' (lines|areas|qc).
+
+    - admin hoặc scope '*' → luôn True.
+    - value rỗng/None (bản ghi chưa gắn line/khu vực) → True (không khóa cứng dữ liệu cũ).
+    """
+    if user.role == Role.ADMIN.value:
+        return True
+    scope = getattr(user, {"lines": "scope_lines", "areas": "scope_areas",
+                           "qc": "scope_qc"}.get(dimension, "scope_lines"), "*")
+    if scope == "*":
+        return True
+    if value is None or value == "":
+        return True
+    return value in scope
+
+
+def require_scope(user: User, dimension: str, value) -> None:
+    """Chặn thao tác ngoài phạm vi (gọi SAU require_perm/require_role)."""
+    if not has_scope(user, dimension, value):
+        label = {"lines": "line", "areas": "khu vực", "qc": "loại test"}.get(dimension, dimension)
+        raise PermissionError_(
+            f"Ngoài phạm vi được phân ({label}='{value}'): tài khoản '{user.username}' "
+            f"không có quyền thao tác/xem dữ liệu này."
+        )
+
+
+def filter_by_scope(user: User, rows: list, dimension: str, key) -> list:
+    """Lọc list (dict hoặc ORM) theo scope. key: callable(row)->value hoặc tên thuộc tính."""
+    if user.role == Role.ADMIN.value:
+        return rows
+    getval = key if callable(key) else (
+        lambda r: r.get(key) if isinstance(r, dict) else getattr(r, key, None))
+    return [r for r in rows if has_scope(user, dimension, getval(r))]

@@ -19,7 +19,8 @@ class AuditLog(Base):
 
     audit_id: Mapped[str] = mapped_column(String, primary_key=True, default=new_id)
     # seq gán tăng dần ở tầng service (DB-agnostic), dùng để sắp xếp ổn định.
-    seq: Mapped[int] = mapped_column(Integer, index=True, default=0)
+    # unique=True: nếu có race tạo trùng seq → lỗi ngay (fail-loud), tránh hỏng âm thầm chuỗi hash.
+    seq: Mapped[int] = mapped_column(Integer, index=True, unique=True, default=0)
     entity_type: Mapped[str] = mapped_column(String, index=True)
     entity_id: Mapped[str] = mapped_column(String, index=True)
     action: Mapped[str] = mapped_column(String)
