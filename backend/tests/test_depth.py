@@ -478,6 +478,29 @@ def test_qr_label(client):
     assert client.get("/api/label/qr", params={"data": "X"}).status_code == 403   # cần đăng nhập
 
 
+# ---------------- Chính sách mật khẩu mạnh (tạo TK + đổi MK) ----------------
+def test_password_policy_create_and_change(client):
+    ha = _login(client, "admin", "admin123")
+    mk = lambda pw: {"username": "tmppw", "password": pw, "full_name": "Tmp", "job_title": "x",
+                     "role": "operator", "allowed_views": "dashboard", "permissions": ""}
+    # create_user: yếu (ngắn / thiếu số) → 409
+    assert client.post("/api/auth/users", headers=ha, json=mk("abc")).status_code == 409
+    assert client.post("/api/auth/users", headers=ha, json=mk("abcdefgh")).status_code == 409
+    # mạnh → 201
+    assert client.post("/api/auth/users", headers=ha, json=mk("Strong123")).status_code == 201
+    hu = _login(client, "tmppw", "Strong123")
+    cp = lambda old, new: client.post("/api/auth/change-password", headers=hu,
+                                      json={"old_password": old, "new_password": new})
+    assert cp("nope", "Another123").status_code == 403       # sai MK hiện tại
+    assert cp("Strong123", "ab1").status_code == 409          # quá ngắn
+    assert cp("Strong123", "abcdefgh").status_code == 409     # thiếu số
+    assert cp("Strong123", "Strong123").status_code == 409    # trùng MK cũ
+    assert cp("Strong123", "tmppw123").status_code == 409     # chứa tên đăng nhập
+    assert cp("Strong123", "Brandnew99").status_code == 200   # hợp lệ
+    hu2 = _login(client, "tmppw", "Brandnew99")
+    assert client.get("/api/auth/me", headers=hu2).json()["must_change_password"] is False
+
+
 # ---------------- rate-limit (bật riêng để test) ----------------
 def test_rate_limit_login(client, monkeypatch):
     from app import ratelimit

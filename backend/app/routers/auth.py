@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from ..audit import record_audit
 from ..common import Role, new_id, utcnow
 from ..database import get_db
-from ..errors import NotFoundError, PermissionError_
+from ..errors import DomainError, NotFoundError, PermissionError_
 from ..models.auth import User as UserModel, UserSession
 from ..security import (
     PERMISSION_CATALOG,
@@ -19,6 +19,7 @@ from ..security import (
     hash_password,
     new_token,
     require_role,
+    validate_password_strength,
     verify_password,
 )
 
@@ -116,8 +117,9 @@ def change_password(payload: ChangePasswordIn, db: Session = Depends(get_db),
     u = db.execute(select(UserModel).where(UserModel.username == user.username)).scalar_one_or_none()
     if not u or not verify_password(payload.old_password, u.password_hash):
         raise PermissionError_("Mật khẩu hiện tại không đúng.")
-    if len(payload.new_password) < 6:
-        raise PermissionError_("Mật khẩu mới tối thiểu 6 ký tự.")
+    if verify_password(payload.new_password, u.password_hash):
+        raise DomainError("Mật khẩu mới phải khác mật khẩu hiện tại.")
+    validate_password_strength(payload.new_password, u.username)
     u.password_hash = hash_password(payload.new_password)
     u.must_change_password = False          # đã đổi → bỏ cờ buộc đổi
     _audit_auth(db, u.username, u.role, "change_password")
@@ -164,6 +166,7 @@ def create_user(payload: CreateUserIn, db: Session = Depends(get_db), user: User
         raise PermissionError_(f"Vai trò không hợp lệ: {payload.role}")
     if db.execute(select(UserModel).where(UserModel.username == payload.username)).scalar_one_or_none():
         raise PermissionError_("Tên đăng nhập đã tồn tại.")
+    validate_password_strength(payload.password, payload.username)
     u = UserModel(user_id=new_id(), username=payload.username, password_hash=hash_password(payload.password),
                   full_name=payload.full_name, job_title=payload.job_title, role=payload.role,
                   allowed_views=payload.allowed_views, permissions=payload.permissions,

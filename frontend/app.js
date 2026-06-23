@@ -36,6 +36,18 @@ function toast(msg, kind = "ok") {
 }
 async function guard(fn) { try { await fn(); } catch (e) { toast(e.message, "err"); } }
 
+// Chính sách mật khẩu mạnh (khớp backend security.validate_password_strength).
+// Trả null nếu hợp lệ, hoặc thông báo lỗi tiếng Việt nếu yếu.
+function passwordPolicyMsg(pw, username) {
+  pw = pw || "";
+  if (pw.length < 8) return "Mật khẩu phải có tối thiểu 8 ký tự.";
+  if (!/[a-zA-ZÀ-ỹ]/.test(pw)) return "Mật khẩu phải có ít nhất một chữ cái.";
+  if (!/[0-9]/.test(pw)) return "Mật khẩu phải có ít nhất một chữ số.";
+  if (username && username.length >= 3 && pw.toLowerCase().includes(username.toLowerCase()))
+    return "Mật khẩu không được chứa tên đăng nhập.";
+  return null;
+}
+
 function modal(html) {
   closeModal();
   const bg = el(`<div class="modal-bg" id="modalbg"><div class="modal">${html}</div></div>`);
@@ -1664,7 +1676,8 @@ VIEWS.users = async function () {
     <div class="panel"><h2>Tạo tài khoản</h2>
       <div class="row">
         <div class="field"><label>Đăng nhập</label><input id="nu_user"/></div>
-        <div class="field"><label>Mật khẩu</label><input id="nu_pass"/></div>
+        <div class="field"><label>Mật khẩu</label><input id="nu_pass" type="password" autocomplete="new-password"/>
+          <div class="muted" style="font-size:11px">≥ 8 ký tự, gồm chữ và số</div></div>
         <div class="field"><label>Họ tên</label><input id="nu_name"/></div>
         <div class="field"><label>Chức danh</label><input id="nu_title"/></div>
         <div class="field"><label>Vai trò</label><select id="nu_role">${roleOpts}</select></div>
@@ -1694,6 +1707,8 @@ VIEWS.users = async function () {
         <td style="white-space:nowrap"><button class="btn sm sec" data-scope="${esc(u.username)}">Phạm vi</button>
           ${u.username !== CURRENT_USER.username ? `<button class="btn sm sec" data-toggle="${u.username}">${u.active ? "Khoá" : "Mở"}</button>` : ""}</td></tr>`).join("")}</tbody></table></div></div>`;
   $("nu_add").onclick = () => guard(async () => {
+    const weak = passwordPolicyMsg($("nu_pass").value, $("nu_user").value);
+    if (weak) { toast(weak, "err"); return; }
     const perms = [...document.querySelectorAll(".nu_perm:checked")].map(c => c.value).join(",");
     await POST("/auth/users", { username: $("nu_user").value, password: $("nu_pass").value,
       full_name: $("nu_name").value, job_title: $("nu_title").value, role: $("nu_role").value,
@@ -1739,9 +1754,10 @@ VIEWS.profile = async function () {
         </dl>
       </div>
       <div class="panel"><h2>Đổi mật khẩu</h2>
-        <div class="field"><label>Mật khẩu hiện tại</label><input id="pf_old" type="password"/></div>
-        <div class="field" style="margin-top:8px"><label>Mật khẩu mới (≥ 6 ký tự)</label><input id="pf_new" type="password"/></div>
-        <div class="field" style="margin-top:8px"><label>Nhập lại mật khẩu mới</label><input id="pf_new2" type="password"/></div>
+        <div class="field"><label>Mật khẩu hiện tại</label><input id="pf_old" type="password" autocomplete="current-password"/></div>
+        <div class="field" style="margin-top:8px"><label>Mật khẩu mới</label><input id="pf_new" type="password" autocomplete="new-password"/></div>
+        <div class="muted" style="font-size:12px;margin:2px 0">Mật khẩu mạnh: tối thiểu 8 ký tự, gồm cả chữ và số, không chứa tên đăng nhập.</div>
+        <div class="field" style="margin-top:8px"><label>Nhập lại mật khẩu mới</label><input id="pf_new2" type="password" autocomplete="new-password"/></div>
         <button class="btn" id="pf_pwd" style="margin-top:12px">Đổi mật khẩu</button>
       </div>
     </div>`;
@@ -1752,7 +1768,10 @@ VIEWS.profile = async function () {
   });
   $("pf_pwd").onclick = () => guard(async () => {
     if ($("pf_new").value !== $("pf_new2").value) { toast("Mật khẩu nhập lại không khớp", "err"); return; }
+    const weak = passwordPolicyMsg($("pf_new").value, CURRENT_USER && CURRENT_USER.username);
+    if (weak) { toast(weak, "err"); return; }
     await POST("/auth/change-password", { old_password: $("pf_old").value, new_password: $("pf_new").value });
+    if (CURRENT_USER) CURRENT_USER.must_change_password = false;   // bỏ cờ buộc đổi trong phiên
     toast("Đã đổi mật khẩu"); $("pf_old").value = $("pf_new").value = $("pf_new2").value = "";
   });
 };
@@ -1783,18 +1802,39 @@ function enterApp() {
   $("login").style.display = "none";
   $("app").style.display = "";
   applyMenu();
-  // Buộc đổi mật khẩu nếu admin tạo bằng mật khẩu mặc định.
-  if (CURRENT_USER && CURRENT_USER.must_change_password) {
-    const pf = document.querySelector('#nav button[data-view="profile"]');
-    if (pf) {
-      document.querySelectorAll("#nav button").forEach(x => x.classList.remove("active"));
-      document.querySelectorAll(".view").forEach(x => x.classList.remove("active"));
-      pf.classList.add("active");
-      $("view-profile").classList.add("active");
-      render("profile");
-    }
-    toast("Bạn đang dùng mật khẩu mặc định — vui lòng đổi mật khẩu ngay.", "err");
-  }
+  // Buộc đổi mật khẩu lần đầu (mật khẩu mặc định) — modal chặn, không bỏ qua được.
+  if (CURRENT_USER && CURRENT_USER.must_change_password) forcePasswordChange();
+}
+
+// Modal đổi mật khẩu lần đầu — KHÔNG cho đóng/bỏ qua cho tới khi đặt mật khẩu mạnh.
+function forcePasswordChange() {
+  closeModal();
+  const bg = el(`<div class="modal-bg" id="modalbg"><div class="modal">
+    <h2>🔒 Đổi mật khẩu lần đầu</h2>
+    <div class="muted" style="margin-bottom:10px">Tài khoản đang dùng <b>mật khẩu mặc định</b>. Vì lý do an toàn, bạn phải đặt mật khẩu mới trước khi tiếp tục sử dụng hệ thống.</div>
+    <div class="field"><label>Mật khẩu hiện tại</label><input id="fp_old" type="password" autocomplete="current-password"/></div>
+    <div class="field" style="margin-top:8px"><label>Mật khẩu mới</label><input id="fp_new" type="password" autocomplete="new-password"/></div>
+    <div class="muted" style="font-size:12px;margin:2px 0">Mật khẩu mạnh: tối thiểu 8 ký tự, gồm cả chữ và số, không chứa tên đăng nhập.</div>
+    <div class="field" style="margin-top:8px"><label>Nhập lại mật khẩu mới</label><input id="fp_new2" type="password" autocomplete="new-password"/></div>
+    <div id="fp_err" style="color:var(--red);font-size:13px;min-height:18px;margin-top:6px"></div>
+    <button class="btn" id="fp_go" style="margin-top:8px;width:100%;padding:10px">Đặt mật khẩu & tiếp tục</button>
+  </div></div>`);
+  document.body.appendChild(bg);   // không gắn sự kiện đóng nền → bắt buộc hoàn thành
+  const submit = async () => {
+    const err = $("fp_err");
+    if ($("fp_new").value !== $("fp_new2").value) { err.textContent = "Mật khẩu nhập lại không khớp."; return; }
+    const weak = passwordPolicyMsg($("fp_new").value, CURRENT_USER && CURRENT_USER.username);
+    if (weak) { err.textContent = weak; return; }
+    try {
+      await POST("/auth/change-password", { old_password: $("fp_old").value, new_password: $("fp_new").value });
+      if (CURRENT_USER) CURRENT_USER.must_change_password = false;
+      closeModal();
+      toast("Đã đổi mật khẩu thành công.");
+    } catch (e) { err.textContent = e.message; }
+  };
+  $("fp_go").onclick = submit;
+  $("fp_new2").onkeydown = (e) => { if (e.key === "Enter") submit(); };
+  $("fp_old").focus();
 }
 
 function showLogin(msg) {

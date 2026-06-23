@@ -12,7 +12,7 @@ from typing import Optional
 from fastapi import Header
 
 from .common import Role, utcnow
-from .errors import PermissionError_
+from .errors import DomainError, PermissionError_
 
 
 @dataclass
@@ -80,6 +80,26 @@ def verify_password(pw: str, stored: str) -> bool:
         return False
     dk = hashlib.pbkdf2_hmac("sha256", pw.encode(), salt.encode(), 100_000)
     return secrets.compare_digest(dk.hex(), h)
+
+
+PASSWORD_MIN_LEN = 8
+
+
+def validate_password_strength(pw: str, username: Optional[str] = None) -> None:
+    """Chính sách mật khẩu mạnh (dùng chung: đổi mật khẩu + tạo tài khoản).
+
+    Yêu cầu: ≥8 ký tự, có cả chữ và số, không chứa tên đăng nhập.
+    Vi phạm → DomainError (HTTP 409) với thông báo rõ ràng (không phải 403).
+    """
+    pw = pw or ""
+    if len(pw) < PASSWORD_MIN_LEN:
+        raise DomainError(f"Mật khẩu phải có tối thiểu {PASSWORD_MIN_LEN} ký tự.")
+    if not any(c.isalpha() for c in pw):
+        raise DomainError("Mật khẩu phải có ít nhất một chữ cái.")
+    if not any(c.isdigit() for c in pw):
+        raise DomainError("Mật khẩu phải có ít nhất một chữ số.")
+    if username and len(username) >= 3 and username.lower() in pw.lower():
+        raise DomainError("Mật khẩu không được chứa tên đăng nhập.")
 
 
 def new_token() -> str:
