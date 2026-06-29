@@ -15,15 +15,26 @@ from .security import User
 
 # Tuần tự hoá ghi audit để bảo vệ tính toàn vẹn chuỗi hash (seq + prev_hash).
 # - Postgres: pg_advisory_xact_lock (giữ tới hết transaction) — chuẩn cho production.
+# - SQL Server: sp_getapplock @LockOwner='Transaction' (tự nhả khi commit/rollback).
 # - SQLite/đơn tiến trình: khoá Python serialize giữa các thread của uvicorn.
 _AUDIT_LOCK = threading.Lock()
-_PG_ADVISORY_KEY = 920145  # hằng tuỳ ý, riêng cho audit chain
+_PG_ADVISORY_KEY = 920145         # hằng tuỳ ý, riêng cho audit chain
+_LOCK_RESOURCE = "mes_audit_chain"  # tên resource cho sp_getapplock (MSSQL)
 
 
 def _acquire_db_lock(db: Session) -> None:
     from .database import engine
-    if engine.dialect.name == "postgresql":
+    name = engine.dialect.name
+    if name == "postgresql":
         db.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": _PG_ADVISORY_KEY})
+    elif name == "mssql":
+        # Khoá ứng dụng phạm vi transaction trên SQL Server — tuần tự hoá ghi audit
+        # an toàn khi nhiều worker/replica cùng ghi.
+        db.execute(
+            text("EXEC sp_getapplock @Resource=:r, @LockMode='Exclusive', "
+                 "@LockOwner='Transaction', @LockTimeout=10000"),
+            {"r": _LOCK_RESOURCE},
+        )
 
 
 def _ts_str(ts) -> str:

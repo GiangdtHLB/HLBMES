@@ -31,7 +31,7 @@ WS_MAP = [
 ]
 
 BASE = os.environ.get("MES_BASE_URL", "http://localhost:8077")
-KEY = os.environ.get("MES_EDGE_KEY", "mes_edge_writer_key_0001")
+KEY = os.environ.get("MES_EDGE_KEY", "")  # bắt buộc đặt MES_EDGE_KEY (in ra khi seed)
 INTERVAL = float(os.environ.get("EDGE_INTERVAL", "3"))
 
 

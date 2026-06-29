@@ -21,6 +21,11 @@ class Settings(BaseSettings):
 
     # --- Database ---
     database_url: str = ""        # MES_DATABASE_URL; rỗng → SQLite dev (tính bên dưới)
+    # Tự tạo bảng bằng create_all. SQLite luôn tự tạo (dev/test); Postgres/SQL Server
+    # CHỈ tạo khi bật cờ này — production dùng Alembic làm nguồn schema duy nhất.
+    auto_create: bool = False     # MES_AUTO_CREATE
+    db_pool_size: int = 10        # MES_DB_POOL_SIZE (Postgres/MSSQL)
+    db_max_overflow: int = 20     # MES_DB_MAX_OVERFLOW
 
     # --- AI (advisory; §1.1) ---
     # ANTHROPIC_API_KEY không có tiền tố MES_ → dùng alias.
@@ -47,6 +52,11 @@ class Settings(BaseSettings):
     log_level: str = "INFO"                # MES_LOG_LEVEL
     log_json: bool = False                 # MES_LOG_JSON (log JSON cho thu thập tập trung)
 
+    # --- Web hardening ---
+    cors_origins: str = ""                 # MES_CORS_ORIGINS: csv origin được phép (rỗng = same-origin, không bật CORS)
+    trusted_proxy: bool = False            # MES_TRUSTED_PROXY: chỉ tin X-Forwarded-For khi chạy sau reverse proxy tin cậy
+    hsts: bool = False                     # MES_HSTS: gửi Strict-Transport-Security (bật khi đã có HTTPS)
+
 
 settings = Settings()
 
@@ -72,3 +82,13 @@ REDIS_URL = settings.redis_url
 
 LOG_LEVEL = settings.log_level
 LOG_JSON = settings.log_json
+
+AUTO_CREATE = settings.auto_create
+DB_POOL_SIZE = settings.db_pool_size
+DB_MAX_OVERFLOW = settings.db_max_overflow
+CORS_ORIGINS = [o.strip() for o in settings.cors_origins.split(",") if o.strip()]
+TRUSTED_PROXY = settings.trusted_proxy
+HSTS = settings.hsts
+
+# Loại CSDL suy ra từ URL (sqlite | postgresql | mssql | ...). Dùng cho nhánh dialect.
+DB_DIALECT = (DATABASE_URL.split(":", 1)[0].split("+", 1)[0] or "sqlite").lower()

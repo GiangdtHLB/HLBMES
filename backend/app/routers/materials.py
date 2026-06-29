@@ -11,7 +11,8 @@ from ..models.materials import MaterialLot
 from ..schemas import LotIn, LotOut
 from ..security import User, get_current_user
 
-router = APIRouter(prefix="/api/lots", tags=["lots"])
+router = APIRouter(prefix="/api/lots", tags=["lots"],
+                   dependencies=[Depends(get_current_user)])
 
 
 @router.get("", response_model=list[LotOut])

@@ -7,9 +7,12 @@ from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..errors import NotFoundError
+from ..security import get_current_user
 from ..services import genealogy
 
-router = APIRouter(prefix="/api/trace", tags=["traceability"])
+# Truy xuất/recall lộ toàn bộ genealogy nhà máy → bắt buộc đăng nhập.
+router = APIRouter(prefix="/api/trace", tags=["traceability"],
+                   dependencies=[Depends(get_current_user)])
 
 
 def _resolve(db: Session, code: str, node_type: str, node_id: str):

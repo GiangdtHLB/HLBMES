@@ -9,7 +9,7 @@ import secrets
 from dataclasses import dataclass
 from typing import Optional
 
-from fastapi import Header
+from fastapi import Header, Request
 
 from .common import Role, utcnow
 from .errors import DomainError, PermissionError_
@@ -26,6 +26,7 @@ class User:
     scope_lines: object = "*"   # line đóng gói / dây chuyền
     scope_areas: object = "*"   # khu vực: nau|len_men|loc|chiet|kho
     scope_qc: object = "*"      # loại test QC được phân (theo tên parameter)
+    must_change_password: bool = False  # đang dùng mật khẩu mặc định → buộc đổi trước khi thao tác
 
 
 # ---- Ma trận quyền chi tiết (catalog) ----
@@ -106,7 +107,12 @@ def new_token() -> str:
     return secrets.token_urlsafe(32)
 
 
+# Đường dẫn được phép khi tài khoản đang buộc đổi mật khẩu (chưa đổi → chặn phần còn lại).
+_MUST_CHANGE_ALLOW = {"/api/auth/change-password", "/api/auth/me", "/api/auth/logout"}
+
+
 def get_current_user(
+    request: Request = None,
     authorization: str = Header(default=""),
     x_user: str = Header(default="", alias="X-User"),
     x_role: str = Header(default="", alias="X-Role"),
@@ -131,13 +137,21 @@ def get_current_user(
             u = db.execute(select(UserModel).where(UserModel.username == sess.username)).scalar_one_or_none()
             if not u or not u.active:
                 raise PermissionError_("Tài khoản không tồn tại hoặc đã bị khoá.")
+            must_change = bool(getattr(u, "must_change_password", False))
+            # Buộc đổi mật khẩu lần đầu: chặn mọi thao tác trừ đổi mật khẩu/hồ sơ/đăng xuất.
+            if must_change and request is not None and request.url.path not in _MUST_CHANGE_ALLOW:
+                raise PermissionError_(
+                    "Cần đổi mật khẩu lần đầu trước khi sử dụng hệ thống "
+                    "(POST /api/auth/change-password)."
+                )
             perms = "*" if (u.permissions or "").strip() == "*" else {
                 p.strip() for p in (u.permissions or "").split(",") if p.strip()}
             return User(username=u.username, role=u.role, full_name=u.full_name,
                         job_title=u.job_title, permissions=perms,
                         scope_lines=_parse_scope(getattr(u, "scope_lines", "*")),
                         scope_areas=_parse_scope(getattr(u, "scope_areas", "*")),
-                        scope_qc=_parse_scope(getattr(u, "scope_qc", "*")))
+                        scope_qc=_parse_scope(getattr(u, "scope_qc", "*")),
+                        must_change_password=must_change)
         finally:
             db.close()
     # Fallback X-User/X-Role: CHỈ khi bật cờ dev (mặc định tắt) — tránh bypass quyền.

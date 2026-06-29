@@ -8,7 +8,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from .config import APP_NAME, FRONTEND_DIR
+from .config import APP_NAME, CORS_ORIGINS, FRONTEND_DIR, HSTS
 from .database import init_db
 from .errors import DomainError, NotFoundError, PermissionError_
 from . import metrics_prom
@@ -70,6 +70,13 @@ app = FastAPI(
 )
 
 
+# CORS: chỉ bật khi cấu hình tường minh MES_CORS_ORIGINS (mặc định same-origin → tắt).
+if CORS_ORIGINS:
+    from fastapi.middleware.cors import CORSMiddleware
+    app.add_middleware(CORSMiddleware, allow_origins=CORS_ORIGINS, allow_credentials=True,
+                       allow_methods=["*"], allow_headers=["*"])
+
+
 @app.middleware("http")
 async def _observability(request: Request, call_next):
     """Gắn request-id, áp rate-limit, đo độ trễ + log mỗi request."""
@@ -85,6 +92,13 @@ async def _observability(request: Request, call_next):
         resp = await call_next(request)
         dur = (time.monotonic() - start) * 1000
         resp.headers["X-Request-ID"] = rid
+        # Security headers (an toàn mặc định cho trình duyệt).
+        resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+        resp.headers.setdefault("X-Frame-Options", "DENY")
+        resp.headers.setdefault("Referrer-Policy", "no-referrer")
+        if HSTS:
+            resp.headers.setdefault("Strict-Transport-Security",
+                                    "max-age=31536000; includeSubDomains")
         # Metrics: dùng route template (vd /api/batches/{batch_id}) để giới hạn cardinality.
         r = request.scope.get("route")
         route = getattr(r, "path", request.url.path)

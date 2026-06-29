@@ -89,6 +89,7 @@ def create_batch(payload: BatchIn, db: Session = Depends(get_db),
 def transition(batch_id: str, payload: TransitionIn, db: Session = Depends(get_db),
                user: User = Depends(get_current_user)):
     require_perm(user, "batch.execute")
+    _scope_guard(db, batch_id, user)
     return svc.transition(db, batch_id, payload.target, user, payload.reason)
 
 
@@ -96,6 +97,7 @@ def transition(batch_id: str, payload: TransitionIn, db: Session = Depends(get_d
 def record_actual(batch_id: str, payload: ActualIn, db: Session = Depends(get_db),
                   user: User = Depends(get_current_user)):
     require_perm(user, "batch.execute")
+    _scope_guard(db, batch_id, user)
     return svc.record_actual(db, batch_id, payload.model_dump(), user)
 
 
@@ -103,6 +105,7 @@ def record_actual(batch_id: str, payload: ActualIn, db: Session = Depends(get_db
 def consume(batch_id: str, payload: ConsumeIn, db: Session = Depends(get_db),
             user: User = Depends(get_current_user)):
     require_perm(user, "batch.execute")
+    _scope_guard(db, batch_id, user)
     return svc.consume_lot(db, batch_id, payload.lot_id, payload.quantity, user, payload.allow_over)
 
 
@@ -110,6 +113,7 @@ def consume(batch_id: str, payload: ConsumeIn, db: Session = Depends(get_db),
 def produce(batch_id: str, payload: ProduceIn, db: Session = Depends(get_db),
             user: User = Depends(get_current_user)):
     require_perm(user, "batch.execute")
+    _scope_guard(db, batch_id, user)
     return svc.produce_lot(db, batch_id, payload.lot_code, payload.quantity,
                            payload.lot_type, user)
 
@@ -139,6 +143,7 @@ def record_yield(batch_id: str, payload: dict, db: Session = Depends(get_db),
     """Ghi hiệu suất 1 công đoạn (input/output) cho mẻ."""
     from ..services import yield_calc
     require_perm(user, "batch.execute")
+    _scope_guard(db, batch_id, user)
     return yield_calc.record_yield(db, batch_id, payload, user)
 
 
@@ -193,6 +198,14 @@ def add_reading(batch_id: str, payload: ReadingIn, db: Session = Depends(get_db)
     db.commit()
     db.refresh(r)
     return r
+
+
+def _scope_guard(db, batch_id: str, user) -> None:
+    """Nạp mẻ + kiểm phạm vi line trước khi thao tác ghi (chống vận hành chéo dây chuyền)."""
+    b = db.get(BatchExecution, batch_id)
+    if not b:
+        raise NotFoundError("Batch không tồn tại.")
+    _assert_batch_scope(db, b, user)
 
 
 def _assert_batch_scope(db, batch, user) -> None:

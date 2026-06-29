@@ -26,7 +26,8 @@ from ..schemas import (
 )
 from ..security import User, get_current_user, require_perm
 
-router = APIRouter(prefix="/api/maint", tags=["maintenance"])
+router = APIRouter(prefix="/api/maint", tags=["maintenance"],
+                   dependencies=[Depends(get_current_user)])
 
 
 # ---- Danh mục thiết bị / phụ tùng ----
@@ -52,7 +53,9 @@ def list_parts(db: Session = Depends(get_db)):
 
 
 @router.post("/parts", status_code=201)
-def create_part(payload: SparePartIn, db: Session = Depends(get_db)):
+def create_part(payload: SparePartIn, db: Session = Depends(get_db),
+                user: User = Depends(get_current_user)):
+    require_perm(user, "maintenance.manage")
     p = SparePart(part_id=new_id(), **payload.model_dump())
     db.add(p); db.commit(); db.refresh(p)
     return p

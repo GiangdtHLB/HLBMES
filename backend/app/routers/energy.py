@@ -16,7 +16,8 @@ from ..schemas import (
 )
 from ..security import User, get_current_user, require_perm
 
-router = APIRouter(prefix="/api/energy", tags=["energy"])
+router = APIRouter(prefix="/api/energy", tags=["energy"],
+                   dependencies=[Depends(get_current_user)])
 
 
 # ---- Danh mục ----

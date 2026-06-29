@@ -15,7 +15,8 @@ from ..models.master import Material, Product
 from ..schemas import MaterialIn, MaterialOut, ProductIn, ProductOut
 from ..security import User, get_current_user, require_perm
 
-router = APIRouter(prefix="/api", tags=["master"])
+router = APIRouter(prefix="/api", tags=["master"],
+                   dependencies=[Depends(get_current_user)])
 
 
 # ---- Sản phẩm ----

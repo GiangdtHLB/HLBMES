@@ -11,6 +11,7 @@ _TMP = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
 os.environ["MES_DATABASE_URL"] = f"sqlite:///{_TMP.name}"
 os.environ["MES_DEV_HEADER_AUTH"] = "0"
 os.environ["MES_RL_ENABLED"] = "0"   # tắt rate-limit để test đăng nhập nhiều lần
+os.environ["MES_ADMIN_PASSWORD"] = "AdminTest123"   # admin không bị cờ buộc-đổi-lần-đầu
 
 import pytest
 from fastapi.testclient import TestClient
@@ -43,7 +44,7 @@ def test_health(client):
 
 
 def test_login_and_me(client):
-    h = _login(client, "admin", "admin123")
+    h = _login(client, "admin", "AdminTest123")
     me = client.get("/api/auth/me", headers=h).json()
     assert me["username"] == "admin" and me["role"] == "admin"
 
@@ -67,7 +68,7 @@ def test_workorder_board(client):
 
 
 def test_audit_chain_intact(client):
-    h = _login(client, "admin", "admin123")
+    h = _login(client, "admin", "AdminTest123")
     assert client.get("/api/audit/verify-chain", headers=h).json()["intact"] is True
 
 

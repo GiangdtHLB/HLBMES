@@ -204,10 +204,24 @@ def approve_with_signature(db: Session, version_id: str, user: User, password: s
         reason=change_reason, diff=diff, state="approved",
         requested_by=rv.created_by, approved_by=user.username, approved_at=utcnow())
     db.add(change)
+    # Gắn nội dung đã ký vào chữ ký (signature/record linking, 21 CFR §11.70): hash
+    # bao trùm phần thực chất của version → phát hiện nếu nội dung bị đổi sau khi ký.
+    import hashlib
+    import json
+    signed_content = {
+        "version_id": rv.version_id, "version_no": rv.version_no,
+        "base_qty": rv.base_qty, "base_uom": rv.base_uom,
+        "parameters": rv.parameters, "materials": rv.materials,
+        "quality_checks": rv.quality_checks, "yield_steps": rv.yield_steps,
+        "procedure": getattr(rv, "procedure", None),
+    }
+    content_hash = hashlib.sha256(
+        json.dumps(signed_content, sort_keys=True, ensure_ascii=False, default=str).encode()
+    ).hexdigest()
     db.add(Signature(sig_id=new_id(), scope_type="recipe_version", scope_id=rv.version_id,
                      meaning="Phê duyệt thay đổi công thức", signed_by=user.username,
                      role=user.role, reason=change_reason,
-                     content_hash="", signed_at=utcnow()))
+                     content_hash=content_hash, signed_at=utcnow()))
     record_audit(db, entity_type="recipe_version", entity_id=rv.version_id,
                  action="change_control:approved", actor=user,
                  before={"state": "review"}, after={"state": rv.state, "change": change.change_code},

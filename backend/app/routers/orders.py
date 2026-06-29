@@ -11,7 +11,8 @@ from ..models.orders import ProductionOrder
 from ..schemas import OrderIn, OrderOut
 from ..security import User, get_current_user, require_perm
 
-router = APIRouter(prefix="/api/orders", tags=["orders"])
+router = APIRouter(prefix="/api/orders", tags=["orders"],
+                   dependencies=[Depends(get_current_user)])
 
 
 @router.get("", response_model=list[OrderOut])

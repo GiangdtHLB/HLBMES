@@ -8,8 +8,11 @@ from ..audit import verify_chain
 from ..database import get_db
 from ..models.audit import AuditLog
 from ..schemas import AuditOut
+from ..security import get_current_user
 
-router = APIRouter(prefix="/api/audit", tags=["audit"])
+# Sổ audit chứa toàn bộ vết thao tác nhà máy → bắt buộc đăng nhập mới được xem.
+router = APIRouter(prefix="/api/audit", tags=["audit"],
+                   dependencies=[Depends(get_current_user)])
 
 
 @router.get("/verify-chain")

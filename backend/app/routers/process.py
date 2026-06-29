@@ -13,9 +13,10 @@ from ..models.metrics import ProcessReading
 from ..models.process import ChemicalUsage, YeastIssue, YeastLot
 from ..models.quality import QualityResult
 from ..schemas import ChemicalUsageIn, YeastIssueIn, YeastLotIn
-from ..security import User, get_current_user
+from ..security import User, get_current_user, require_perm
 
-router = APIRouter(prefix="/api/process", tags=["process"])
+router = APIRouter(prefix="/api/process", tags=["process"],
+                   dependencies=[Depends(get_current_user)])
 
 
 # ---- Thông tin công đoạn theo mẻ (tổng hợp từ dữ liệu sẵn có) ----
@@ -62,7 +63,9 @@ def list_chemicals(batch_id: str = None, db: Session = Depends(get_db)):
 
 
 @router.post("/chemicals", status_code=201)
-def add_chemical(payload: ChemicalUsageIn, db: Session = Depends(get_db)):
+def add_chemical(payload: ChemicalUsageIn, db: Session = Depends(get_db),
+                 user: User = Depends(get_current_user)):
+    require_perm(user, "batch.execute")
     c = ChemicalUsage(usage_id=new_id(), **payload.model_dump())
     db.add(c); db.commit(); db.refresh(c)
     return c

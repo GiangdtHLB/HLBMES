@@ -24,9 +24,11 @@ from ..schemas import (
     MaterialReceiptIn,
     StageIndicatorIn,
 )
-from ..security import User, get_current_user
+from ..security import User, get_current_user, require_perm
 
-router = APIRouter(prefix="/api/brewing", tags=["brewing"])
+# Mọi route yêu cầu đăng nhập (an toàn mặc định); thao tác ghi thêm require_perm bên dưới.
+router = APIRouter(prefix="/api/brewing", tags=["brewing"],
+                   dependencies=[Depends(get_current_user)])
 
 # Trạng thái lọc/chiết hiển thị
 FILTER_STATUS = {"cho_chiet": "Chờ chiết", "chiet_1_phan": "Chiết 1 phần", "da_chiet_het": "Đã chiết hết"}
@@ -58,7 +60,9 @@ def list_materials(db: Session = Depends(get_db)):
 
 
 @router.post("/materials", status_code=201)
-def add_material(payload: MaterialReceiptIn, db: Session = Depends(get_db)):
+def add_material(payload: MaterialReceiptIn, db: Session = Depends(get_db),
+                 user: User = Depends(get_current_user)):
+    require_perm(user, "batch.execute")
     data = payload.model_dump()
     data["mskt"] = data.get("mskt") or f"{50000 + int(utcnow().timestamp()) % 9999}"
     r = MaterialReceipt(receipt_id=new_id(), **data)
@@ -78,7 +82,9 @@ def list_brews(db: Session = Depends(get_db)):
 
 
 @router.post("/brews", status_code=201)
-def add_brew(payload: BrewIn, db: Session = Depends(get_db)):
+def add_brew(payload: BrewIn, db: Session = Depends(get_db),
+             user: User = Depends(get_current_user)):
+    require_perm(user, "batch.execute")
     b = BrewRecord(brew_id=new_id(), **payload.model_dump())
     db.add(b); db.commit(); db.refresh(b)
     return b
@@ -99,7 +105,9 @@ def list_ferments(db: Session = Depends(get_db)):
 
 
 @router.post("/ferments", status_code=201)
-def add_ferment(payload: FermentIn, db: Session = Depends(get_db)):
+def add_ferment(payload: FermentIn, db: Session = Depends(get_db),
+                user: User = Depends(get_current_user)):
+    require_perm(user, "batch.execute")
     f = FermentRecord(ferment_id=new_id(), **payload.model_dump())
     if not f.on_hand_cct:
         f.on_hand_cct = f.volume_hl
@@ -131,7 +139,9 @@ def list_filters(db: Session = Depends(get_db)):
 
 
 @router.post("/filters", status_code=201)
-def add_filter(payload: FilterIn, db: Session = Depends(get_db)):
+def add_filter(payload: FilterIn, db: Session = Depends(get_db),
+               user: User = Depends(get_current_user)):
+    require_perm(user, "batch.execute")
     f = FilterRecord(filter_id=new_id(), **payload.model_dump())
     if not f.on_hand_bbt:
         f.on_hand_bbt = f.v_beer_hl
@@ -161,7 +171,9 @@ def list_bottles(db: Session = Depends(get_db)):
 
 
 @router.post("/bottles", status_code=201)
-def add_bottle(payload: BottleIn, db: Session = Depends(get_db)):
+def add_bottle(payload: BottleIn, db: Session = Depends(get_db),
+               user: User = Depends(get_current_user)):
+    require_perm(user, "batch.execute")
     b = BottleRecord(bottle_id=new_id(), **payload.model_dump())
     db.add(b); db.commit(); db.refresh(b)
     return b

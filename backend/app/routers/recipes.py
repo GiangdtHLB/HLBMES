@@ -19,7 +19,8 @@ from ..schemas import (
 from ..security import User, get_current_user, require_perm
 from ..services import recipes as svc
 
-router = APIRouter(prefix="/api/recipes", tags=["recipes"])
+router = APIRouter(prefix="/api/recipes", tags=["recipes"],
+                   dependencies=[Depends(get_current_user)])
 
 
 @router.get("", response_model=list[RecipeOut])
@@ -28,7 +29,9 @@ def list_recipes(db: Session = Depends(get_db)):
 
 
 @router.post("", response_model=RecipeOut, status_code=201)
-def create_recipe(payload: RecipeIn, db: Session = Depends(get_db)):
+def create_recipe(payload: RecipeIn, db: Session = Depends(get_db),
+                  user: User = Depends(get_current_user)):
+    require_perm(user, "recipe.author")
     r = Recipe(recipe_id=new_id(), **payload.model_dump())
     db.add(r)
     db.commit()

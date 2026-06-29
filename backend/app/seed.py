@@ -244,9 +244,15 @@ def seed():
     _seed_packaging(db)
     _seed_schedule(db)
     _seed_wms(db)
-    db.add(ApiKey(key_id=new_id(), name="Demo ERP", token="mes_demo_readonly_key_0001",
+    # API key: lấy từ env (MES_DEMO_READ_KEY/MES_EDGE_KEY) nếu có, KHÔNG hardcode bí mật.
+    # Thiếu env → sinh ngẫu nhiên và IN RA MỘT LẦN (lưu lại để cấu hình edge/ERP).
+    import os
+    import secrets
+    read_token = os.environ.get("MES_DEMO_READ_KEY") or ("read_" + secrets.token_urlsafe(18))
+    edge_token = os.environ.get("MES_EDGE_KEY") or ("edge_" + secrets.token_urlsafe(18))
+    db.add(ApiKey(key_id=new_id(), name="Demo ERP (read)", token=read_token,
                   scopes="read", created_by="admin"))
-    db.add(ApiKey(key_id=new_id(), name="Edge Gateway", token="mes_edge_writer_key_0001",
+    db.add(ApiKey(key_id=new_id(), name="Edge Gateway (write)", token=edge_token,
                   scopes="read,write", created_by="admin"))
     from .services import historian as hist_svc
     hist_svc.backfill(db, hours=6, step_min=5)   # 6h dữ liệu sensor mô phỏng
@@ -256,7 +262,9 @@ def seed():
     db.close()
     print("Seed xong. Order PO-2406-1001, mẻ B-2406-0001 đã chạy & close.")
     print("Thử truy xuất: GET /api/trace/backward?code=PKG-2406-0001")
-    print("API key demo (read): mes_demo_readonly_key_0001 → thử: GET /api/v1/inventory")
+    print(f"API key (read) : {read_token}")
+    print(f"API key (write/edge): {edge_token}")
+    print("→ Lưu lại 2 khóa trên (đặt MES_EDGE_KEY / MES_DEMO_READ_KEY để cố định).")
 
 
 def _seed_workorders(db, order, rv, batch) -> None:

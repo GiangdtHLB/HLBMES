@@ -6,6 +6,7 @@ chuỗi audit qua external event, auth bắt buộc cho AI, và rate-limit.
 """
 
 import os
+import re
 import tempfile
 
 # Đặt DB tạm + tắt rate-limit TRƯỚC khi import app.
@@ -13,6 +14,11 @@ _TMP = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
 os.environ["MES_DATABASE_URL"] = f"sqlite:///{_TMP.name}"
 os.environ["MES_DEV_HEADER_AUTH"] = "0"
 os.environ["MES_RL_ENABLED"] = "0"
+# Đặt mật khẩu admin cố định → admin KHÔNG bị cờ buộc-đổi-lần-đầu (test thao tác admin được).
+os.environ["MES_ADMIN_PASSWORD"] = "AdminTest123"
+# Khoá API edge cố định để test cổng /api/v1 (thay cho key hardcode trong seed).
+os.environ["MES_EDGE_KEY"] = "test_edge_key_0001"
+os.environ["MES_DEMO_READ_KEY"] = "test_read_key_0001"
 
 import pytest
 from fastapi.testclient import TestClient
@@ -125,7 +131,7 @@ def test_scope_line_filters_workorders(client):
 
 def test_scope_qc_blocks_unassigned_test(client):
     h = _login(client, "kcs", "123456")               # scope_qc = "Độ đường (°P),pH"
-    b1 = _batch_id(client, _login(client, "admin", "admin123"), "B-2406-0001")
+    b1 = _batch_id(client, _login(client, "admin", "AdminTest123"), "B-2406-0001")
     bad = client.post("/api/quality/results", headers=h,
                       json={"scope_id": b1, "parameter": "CO2 (g/L)", "value": 5.2})
     assert bad.status_code == 403
@@ -153,10 +159,10 @@ def test_batch_read_requires_auth(client):
 
 # ---------------- audit chain qua external event ----------------
 def test_external_event_keeps_chain(client):
-    h = _login(client, "admin", "admin123")
+    h = _login(client, "admin", "AdminTest123")
     before = client.get("/api/audit/verify-chain", headers=h).json()
     assert before["intact"] is True
-    r = client.post("/api/v1/events", headers={"X-API-Key": "mes_edge_writer_key_0001"},
+    r = client.post("/api/v1/events", headers={"X-API-Key": "test_edge_key_0001"},
                     json={"entity_type": "erp", "entity_id": "PO-T", "action": "erp_confirm"})
     assert r.status_code == 200 and r.json()["accepted"]
     after = client.get("/api/audit/verify-chain", headers=h).json()
@@ -480,7 +486,7 @@ def test_qr_label(client):
 
 # ---------------- Chính sách mật khẩu mạnh (tạo TK + đổi MK) ----------------
 def test_password_policy_create_and_change(client):
-    ha = _login(client, "admin", "admin123")
+    ha = _login(client, "admin", "AdminTest123")
     mk = lambda pw: {"username": "tmppw", "password": pw, "full_name": "Tmp", "job_title": "x",
                      "role": "operator", "allowed_views": "dashboard", "permissions": ""}
     # create_user: yếu (ngắn / thiếu số) → 409
@@ -499,6 +505,56 @@ def test_password_policy_create_and_change(client):
     assert cp("Strong123", "Brandnew99").status_code == 200   # hợp lệ
     hu2 = _login(client, "tmppw", "Brandnew99")
     assert client.get("/api/auth/me", headers=hu2).json()["must_change_password"] is False
+
+
+# ---------------- P0: enforce must_change_password ở backend ----------------
+def test_must_change_password_enforced(client):
+    ha = _login(client, "admin", "AdminTest123")
+    client.post("/api/auth/users", headers=ha, json={
+        "username": "mc1", "password": "Initpass1", "full_name": "MC", "job_title": "x",
+        "role": "operator", "allowed_views": "dashboard", "permissions": ""})
+    # bật cờ buộc đổi mật khẩu trực tiếp ở DB (mô phỏng tài khoản mật khẩu mặc định)
+    from sqlalchemy import select
+
+    from app.database import SessionLocal
+    from app.models.auth import User as UM
+    db = SessionLocal()
+    db.execute(select(UM).where(UM.username == "mc1")).scalar_one().must_change_password = True
+    db.commit(); db.close()
+    h = _login(client, "mc1", "Initpass1")                       # đăng nhập vẫn được
+    assert client.get("/api/products", headers=h).status_code == 403   # thao tác bị chặn
+    assert client.get("/api/auth/me", headers=h).status_code == 200    # /me vẫn được
+    assert client.post("/api/auth/change-password", headers=h,
+                       json={"old_password": "Initpass1", "new_password": "Newpass123"}).status_code == 200
+    h2 = _login(client, "mc1", "Newpass123")                     # sau khi đổi → thao tác bình thường
+    assert client.get("/api/products", headers=h2).status_code == 200
+
+
+# ---------------- P0: mọi /api route phải yêu cầu xác thực ----------------
+# Public (không cần token): health, login, trạng thái AI. Cổng /api/v1 dùng X-API-Key
+# → không key vẫn trả 403. Mọi route còn lại phải trả 401/403 khi gọi không token.
+_PUBLIC_ROUTES = {"/api/health", "/api/auth/login", "/api/auth/logout", "/api/ai/status"}
+
+
+def test_all_api_routes_require_auth(client):
+    leaks = []
+    for r in app.routes:
+        path = getattr(r, "path", "")
+        methods = getattr(r, "methods", None) or set()
+        if not path.startswith("/api/") or path in _PUBLIC_ROUTES:
+            continue
+        verbs = [m for m in methods if m in ("GET", "POST", "PUT", "PATCH", "DELETE")]
+        if not verbs:
+            continue
+        verb = "GET" if "GET" in verbs else verbs[0]
+        test_path = re.sub(r"\{[^}]+\}", "x", path)
+        body = {} if verb in ("POST", "PUT", "PATCH") else None
+        resp = client.request(verb, test_path, json=body)
+        # 401/403 = chặn đúng. 422 (thiếu body) cũng chấp nhận CHỈ KHI vẫn yêu cầu auth:
+        # nên ta coi 200/201/2xx hoặc 404/405/500 là rò rỉ (lọt qua tầng auth).
+        if resp.status_code not in (401, 403):
+            leaks.append(f"{verb} {path} -> {resp.status_code}")
+    assert not leaks, "Route lọt qua xác thực (cần thêm get_current_user):\n" + "\n".join(leaks)
 
 
 # ---------------- rate-limit (bật riêng để test) ----------------

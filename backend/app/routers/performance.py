@@ -11,7 +11,8 @@ from ..schemas import OEEIn, OEEOut
 from ..security import User, get_current_user, require_role
 from ..services.performance import compute_oee
 
-router = APIRouter(prefix="/api/oee", tags=["performance"])
+router = APIRouter(prefix="/api/oee", tags=["performance"],
+                   dependencies=[Depends(get_current_user)])
 
 
 @router.get("", response_model=list[OEEOut])

@@ -13,7 +13,8 @@ from ..schemas import (
     TransferIn,
 )
 
-router = APIRouter(prefix="/api/warehouse", tags=["warehouse"])
+router = APIRouter(prefix="/api/warehouse", tags=["warehouse"],
+                   dependencies=[Depends(get_current_user)])
 
 
 @router.post("/receive")

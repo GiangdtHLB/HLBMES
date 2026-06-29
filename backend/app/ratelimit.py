@@ -24,6 +24,7 @@ from .config import (
     RL_AI_PER_MIN,
     RL_ENABLED,
     RL_LOGIN_PER_MIN,
+    TRUSTED_PROXY,
 )
 from .logging_config import get_logger
 
@@ -124,9 +125,14 @@ def _client_key(request: Request) -> str:
     auth = request.headers.get("authorization", "")
     if auth.startswith("Bearer "):
         return "t:" + auth[7:][:16]
-    xff = request.headers.get("x-forwarded-for")
-    ip = xff.split(",")[0].strip() if xff else (request.client.host if request.client else "?")
-    return "ip:" + ip
+    # CHỈ tin X-Forwarded-For khi chạy sau reverse proxy tin cậy (MES_TRUSTED_PROXY=1);
+    # nếu không, kẻ tấn công có thể giả header để né rate-limit → dùng IP kết nối thực.
+    client_ip = request.client.host if request.client else "?"
+    if TRUSTED_PROXY:
+        xff = request.headers.get("x-forwarded-for")
+        if xff:
+            client_ip = xff.split(",")[0].strip()
+    return "ip:" + client_ip
 
 
 def _deny(detail: str, retry: int, kind: str) -> JSONResponse:
