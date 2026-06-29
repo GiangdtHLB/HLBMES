@@ -14,14 +14,14 @@ from ..database import Base
 class ProductionOrder(Base):
     __tablename__ = "production_order"
 
-    order_id: Mapped[str] = mapped_column(String, primary_key=True, default=new_id)
-    order_code: Mapped[str] = mapped_column(String, unique=True, index=True)
+    order_id: Mapped[str] = mapped_column(String(64), primary_key=True, default=new_id)
+    order_code: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     product_id: Mapped[str] = mapped_column(ForeignKey("product.product_id"))
     planned_qty: Mapped[float] = mapped_column(Float)
-    uom: Mapped[str] = mapped_column(String, default="L")
+    uom: Mapped[str] = mapped_column(String(255), default="L")
     due_time: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     priority: Mapped[int] = mapped_column(Integer, default=5)
     # released = sẵn sàng dispatch; in_progress = đã tạo batch; completed; cancelled
-    status: Mapped[str] = mapped_column(String, default="released")
-    source_version: Mapped[Optional[str]] = mapped_column(String, nullable=True)  # version từ ERP
+    status: Mapped[str] = mapped_column(String(255), default="released")
+    source_version: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)  # version từ ERP
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

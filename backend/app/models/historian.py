@@ -19,10 +19,10 @@ class HistorianPoint(Base):
     __tablename__ = "historian_point"
     __table_args__ = (Index("ix_hist_tag_ts", "tag", "ts"),)
 
-    point_id: Mapped[str] = mapped_column(String, primary_key=True, default=new_id)
-    tag: Mapped[str] = mapped_column(String, index=True)   # enterprise/site/area/device/metric
+    point_id: Mapped[str] = mapped_column(String(64), primary_key=True, default=new_id)
+    tag: Mapped[str] = mapped_column(String(255), index=True)   # enterprise/site/area/device/metric
     value: Mapped[float] = mapped_column(Float)
-    unit: Mapped[Optional[str]] = mapped_column(String, nullable=True)
-    quality: Mapped[str] = mapped_column(String, default="good")  # good | bad | stale
-    source: Mapped[Optional[str]] = mapped_column(String, nullable=True)  # connector/gateway
+    unit: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    quality: Mapped[str] = mapped_column(String(255), default="good")  # good | bad | stale
+    source: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)  # connector/gateway
     ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)

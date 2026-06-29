@@ -16,14 +16,14 @@ depends_on = None
 def upgrade() -> None:
     op.create_table(
         'job',
-        sa.Column('job_id', sa.String(), nullable=False),
-        sa.Column('kind', sa.String(), nullable=False),
-        sa.Column('status', sa.String(), nullable=False, server_default='queued'),
+        sa.Column('job_id', sa.String(length=64), nullable=False),
+        sa.Column('kind', sa.String(length=255), nullable=False),
+        sa.Column('status', sa.String(length=255), nullable=False, server_default='queued'),
         sa.Column('params', sa.JSON(), nullable=False, server_default=sa.text("'{}'")),
         sa.Column('result', sa.JSON(), nullable=True),
         sa.Column('error', sa.Text(), nullable=True),
         sa.Column('progress', sa.Integer(), nullable=False, server_default='0'),
-        sa.Column('created_by', sa.String(), nullable=True),
+        sa.Column('created_by', sa.String(length=255), nullable=True),
         sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
         sa.Column('started_at', sa.DateTime(timezone=True), nullable=True),
         sa.Column('finished_at', sa.DateTime(timezone=True), nullable=True),

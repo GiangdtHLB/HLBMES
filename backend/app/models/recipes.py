@@ -20,9 +20,9 @@ from ..database import Base
 class Recipe(Base):
     __tablename__ = "recipe"
 
-    recipe_id: Mapped[str] = mapped_column(String, primary_key=True, default=new_id)
-    code: Mapped[str] = mapped_column(String, unique=True, index=True)
-    name: Mapped[str] = mapped_column(String)
+    recipe_id: Mapped[str] = mapped_column(String(64), primary_key=True, default=new_id)
+    code: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(255))
     product_id: Mapped[str] = mapped_column(ForeignKey("product.product_id"))
 
 
@@ -30,14 +30,14 @@ class RecipeVersion(Base):
     __tablename__ = "recipe_version"
     __table_args__ = (UniqueConstraint("recipe_id", "version_no", name="uq_recipe_version"),)
 
-    version_id: Mapped[str] = mapped_column(String, primary_key=True, default=new_id)
+    version_id: Mapped[str] = mapped_column(String(64), primary_key=True, default=new_id)
     recipe_id: Mapped[str] = mapped_column(ForeignKey("recipe.recipe_id"), index=True)
     version_no: Mapped[int] = mapped_column(Integer)
-    state: Mapped[str] = mapped_column(String, default=RecipeState.DRAFT.value)
+    state: Mapped[str] = mapped_column(String(255), default=RecipeState.DRAFT.value)
 
     # Quy mô mẻ chuẩn mà BOM định mức tính cho (để scale theo planned_qty của mẻ).
     base_qty: Mapped[float] = mapped_column(Float, default=0.0)
-    base_uom: Mapped[str] = mapped_column(String, default="L")
+    base_uom: Mapped[str] = mapped_column(String(255), default="L")
 
     # Tham số quy trình: list[{name, target, lower, upper, unit, phase}]
     parameters: Mapped[list] = mapped_column(JSON, default=list)
@@ -49,12 +49,12 @@ class RecipeVersion(Base):
     # step_key ∈ {nau, len_men, loc, chiet}; warn_pct = ngưỡng cảnh báo (yield thực < warn_pct).
     yield_steps: Mapped[list] = mapped_column(JSON, default=list)
     # Lý do thay đổi (change-control) khi tạo version mới.
-    change_reason: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    change_reason: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     # Thủ tục ISA-88: list unit procedure → operation → phase.
     # [{name, unit_class, operations:[{name, phases:[{name, params:[{name,setpoint,unit}], duration_min}]}]}]
     procedure: Mapped[list] = mapped_column(JSON, default=list)
 
-    created_by: Mapped[Optional[str]] = mapped_column(String, nullable=True)
-    approved_by: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    created_by: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    approved_by: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     approved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

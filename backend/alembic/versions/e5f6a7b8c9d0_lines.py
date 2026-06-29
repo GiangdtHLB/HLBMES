@@ -16,10 +16,10 @@ depends_on = None
 def upgrade() -> None:
     op.create_table(
         'production_line',
-        sa.Column('line_id', sa.String(), nullable=False),
-        sa.Column('code', sa.String(), nullable=False),
-        sa.Column('name', sa.String(), nullable=False),
-        sa.Column('area', sa.String(), nullable=True),
+        sa.Column('line_id', sa.String(length=64), nullable=False),
+        sa.Column('code', sa.String(length=64), nullable=False),
+        sa.Column('name', sa.String(length=255), nullable=False),
+        sa.Column('area', sa.String(length=255), nullable=True),
         sa.Column('ideal_rate_per_min', sa.Float(), nullable=False, server_default='0'),
         sa.Column('active', sa.Boolean(), nullable=False, server_default=sa.true()),
         sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
