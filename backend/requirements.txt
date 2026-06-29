@@ -14,8 +14,8 @@ segno==1.6.6
 # Trợ lý AI bằng Claude thật (đặt ANTHROPIC_API_KEY để kích hoạt; nếu không có key,
 # trợ lý tự fallback sang engine luật nội bộ offline — vẫn chạy bình thường).
 anthropic==0.69.0
-# --- Driver CSDL production (cài theo loại DB triển khai) ---
-# PostgreSQL:  pip install "psycopg[binary]==3.2.1"
-# Microsoft SQL Server: cần ODBC Driver 18 for SQL Server ở OS, rồi  pip install pyodbc==5.1.0
-#   MES_DATABASE_URL="mssql+pyodbc://user:pass@host:1433/MES?driver=ODBC+Driver+18+for+SQL+Server&Encrypt=yes&TrustServerCertificate=yes"
-# (Không ghim cứng vì pyodbc cần ODBC driver hệ điều hành — cài ở môi trường deploy.)
+# --- Driver CSDL production ---
+# PostgreSQL: psycopg[binary] cài trong Dockerfile (không bắt buộc cho dev SQLite).
+# Microsoft SQL Server: pyodbc (wheel) + ODBC Driver 18 (cài ở Dockerfile/OS).
+#   MES_DATABASE_URL="mssql+pyodbc://user:pass@host,1433/HLBMES?driver=ODBC+Driver+18+for+SQL+Server&Encrypt=yes&TrustServerCertificate=yes"
+pyodbc==5.1.0

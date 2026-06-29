@@ -4,12 +4,19 @@ FROM python:3.11-slim
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
 WORKDIR /app
 
-# Phụ thuộc hệ thống tối thiểu (libpq cho psycopg, curl cho healthcheck)
-RUN apt-get update && apt-get install -y --no-install-recommends libpq5 curl \
+# Phụ thuộc hệ thống: libpq5 (psycopg/PostgreSQL), curl (healthcheck),
+# msodbcsql18 + unixodbc (pyodbc/Microsoft SQL Server). Giữ cả hai để chạy được
+# cả Postgres lẫn SQL Server tuỳ MES_DATABASE_URL.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libpq5 curl gnupg apt-transport-https ca-certificates \
+    && curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor -o /usr/share/keyrings/microsoft-prod.gpg \
+    && curl -fsSL https://packages.microsoft.com/config/debian/12/prod.list > /etc/apt/sources.list.d/mssql-release.list \
+    && apt-get update \
+    && ACCEPT_EULA=Y apt-get install -y --no-install-recommends msodbcsql18 unixodbc-dev \
     && rm -rf /var/lib/apt/lists/*
 
 COPY backend/requirements.txt .
-# psycopg[binary] để chạy PostgreSQL ở production (không bắt buộc cho SQLite dev)
+# requirements.txt đã có pyodbc (SQL Server); psycopg[binary] thêm riêng cho PostgreSQL.
 RUN pip install --no-cache-dir -r requirements.txt "psycopg[binary]==3.2.1"
 
 COPY backend/ /app/backend/
