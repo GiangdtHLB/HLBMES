@@ -4,7 +4,7 @@
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String
+from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, Unicode
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ..common import BatchState, QualityStatus, new_id, utcnow
@@ -14,19 +14,19 @@ from ..database import Base
 class BatchExecution(Base):
     __tablename__ = "batch_execution"
 
-    batch_id: Mapped[str] = mapped_column(String(64), primary_key=True, default=new_id)
-    batch_code: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    batch_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
+    batch_code: Mapped[str] = mapped_column(Unicode(64), unique=True, index=True)
     order_id: Mapped[str] = mapped_column(ForeignKey("production_order.order_id"), index=True)
-    work_order_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    work_order_id: Mapped[Optional[str]] = mapped_column(Unicode(64), nullable=True, index=True)
     recipe_version_id: Mapped[str] = mapped_column(ForeignKey("recipe_version.version_id"))
     product_id: Mapped[str] = mapped_column(ForeignKey("product.product_id"))
 
-    state: Mapped[str] = mapped_column(String(255), default=BatchState.PLANNED.value)
-    quality_status: Mapped[str] = mapped_column(String(255), default=QualityStatus.PENDING.value)
+    state: Mapped[str] = mapped_column(Unicode(255), default=BatchState.PLANNED.value)
+    quality_status: Mapped[str] = mapped_column(Unicode(255), default=QualityStatus.PENDING.value)
 
     planned_qty: Mapped[float] = mapped_column(Float)
     actual_qty: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
-    uom: Mapped[str] = mapped_column(String(255), default="L")
+    uom: Mapped[str] = mapped_column(Unicode(255), default="L")
 
     # Snapshot bất biến của recipe version tại thời điểm release (parameters/materials/checks).
     recipe_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)

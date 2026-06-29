@@ -8,7 +8,7 @@ qua lớp services/historian.py (interface không đổi).
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import DateTime, Float, Index, String
+from sqlalchemy import DateTime, Float, Index, Unicode
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ..common import new_id, utcnow
@@ -19,10 +19,10 @@ class HistorianPoint(Base):
     __tablename__ = "historian_point"
     __table_args__ = (Index("ix_hist_tag_ts", "tag", "ts"),)
 
-    point_id: Mapped[str] = mapped_column(String(64), primary_key=True, default=new_id)
-    tag: Mapped[str] = mapped_column(String(255), index=True)   # enterprise/site/area/device/metric
+    point_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
+    tag: Mapped[str] = mapped_column(Unicode(255), index=True)   # enterprise/site/area/device/metric
     value: Mapped[float] = mapped_column(Float)
-    unit: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-    quality: Mapped[str] = mapped_column(String(255), default="good")  # good | bad | stale
-    source: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)  # connector/gateway
+    unit: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    quality: Mapped[str] = mapped_column(Unicode(255), default="good")  # good | bad | stale
+    source: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)  # connector/gateway
     ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)

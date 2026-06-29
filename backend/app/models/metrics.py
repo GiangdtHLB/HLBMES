@@ -8,7 +8,7 @@
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import JSON, DateTime, Float, ForeignKey, Integer, String
+from sqlalchemy import JSON, DateTime, Float, ForeignKey, Integer, Unicode
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ..common import new_id, utcnow
@@ -18,22 +18,22 @@ from ..database import Base
 class ProcessReading(Base):
     __tablename__ = "process_reading"
 
-    reading_id: Mapped[str] = mapped_column(String(64), primary_key=True, default=new_id)
+    reading_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
     batch_id: Mapped[str] = mapped_column(ForeignKey("batch_execution.batch_id"), index=True)
-    parameter: Mapped[str] = mapped_column(String(255), index=True)  # temperature | gravity | pH ...
+    parameter: Mapped[str] = mapped_column(Unicode(255), index=True)  # temperature | gravity | pH ...
     value: Mapped[float] = mapped_column(Float)
-    unit: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    unit: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
     # source/ingest timestamp (tài liệu §8.3) — ở MVP gộp làm một mốc UTC.
     ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
-    quality: Mapped[str] = mapped_column(String(255), default="good")  # good | stale | bad
+    quality: Mapped[str] = mapped_column(Unicode(255), default="good")  # good | stale | bad
 
 
 class OEERecord(Base):
     __tablename__ = "oee_record"
 
-    oee_id: Mapped[str] = mapped_column(String(64), primary_key=True, default=new_id)
-    line: Mapped[str] = mapped_column(String(255), index=True)
-    shift: Mapped[str] = mapped_column(String(255), default="A")
+    oee_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
+    line: Mapped[str] = mapped_column(Unicode(255), index=True)
+    shift: Mapped[str] = mapped_column(Unicode(255), default="A")
     shift_date: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
 
     planned_time_min: Mapped[float] = mapped_column(Float)      # thời gian sản xuất theo kế hoạch
