@@ -416,6 +416,12 @@ function versionFormHTML(v) {
       <div><h3>Chỉ tiêu QC (JSON)</h3>
         <textarea id="vf_qc" style="width:100%;height:120px;font-family:monospace">${esc(JSON.stringify(v.quality_checks || [{parameter:"pH",lower:4.2,upper:4.6,unit:"",mandatory:true}], null, 1))}</textarea></div>
     </div>
+    <div class="row" style="margin-top:14px;align-items:center">
+      <h3 style="margin:0">🏭 Quy trình ISA-88</h3>
+      <button class="btn sm sec" id="proc_tpl" type="button">Nạp mẫu quy trình bia</button>
+    </div>
+    <div class="muted" style="font-size:12px;margin-bottom:6px">Khai báo <b>Công đoạn → Operation → Phase</b> (kèm setpoint, thời lượng). Mẻ tạo từ công thức này sẽ hiện bảng điều khiển nấu/lên men ở tab <b>ISA-88</b>. Để trống nếu chưa dùng.</div>
+    <div id="vf_proc"></div>
     <div class="row" style="margin-top:12px">
       <button class="btn" id="vf_save">${v.version_id ? "Lưu version" : "Tạo version (draft)"}</button>
       <button class="btn sec" id="vf_cancel">Hủy</button>
@@ -424,6 +430,8 @@ function versionFormHTML(v) {
 function newVersionForm(recipeId) {
   $("rv_detail").innerHTML = versionFormHTML(null);
   wireBomEditor();
+  PROC_MODEL = []; _FORM_YIELD = null; procRender();
+  $("proc_tpl").onclick = () => { PROC_MODEL = procTemplate(); procRender(); };
   $("vf_cancel").onclick = () => { $("rv_detail").innerHTML = ""; };
   $("vf_save").onclick = () => guard(async () => {
     await POST(`/recipes/${recipeId}/versions`, _versionPayload());
@@ -433,6 +441,10 @@ function newVersionForm(recipeId) {
 function editVersionForm(v) {
   $("rv_detail").innerHTML = versionFormHTML(v);
   wireBomEditor();
+  PROC_MODEL = v.procedure ? JSON.parse(JSON.stringify(v.procedure)) : [];
+  _FORM_YIELD = v.yield_steps && v.yield_steps.length ? v.yield_steps : null;  // giữ yield_steps, không ghi đè rỗng
+  procRender();
+  $("proc_tpl").onclick = () => { PROC_MODEL = procTemplate(); procRender(); };
   $("vf_cancel").onclick = () => showVersion(v.version_id);
   $("vf_save").onclick = () => guard(async () => {
     await PUT(`/recipes/versions/${v.version_id}`, _versionPayload());
@@ -440,13 +452,129 @@ function editVersionForm(v) {
   });
 }
 function _versionPayload() {
-  return {
+  const p = {
     base_qty: parseFloat($("vf_base").value) || 0,
     base_uom: $("vf_baseu").value,
     materials: collectBom(),
     parameters: JSON.parse($("vf_params").value || "[]"),
     quality_checks: JSON.parse($("vf_qc").value || "[]"),
+    procedure: procHarvest().filter(up => up.name),   // bỏ công đoạn chưa đặt tên
   };
+  if (_FORM_YIELD) p.yield_steps = _FORM_YIELD;        // giữ hiệu suất công đoạn khi sửa
+  return p;
+}
+
+// ============ Trình soạn quy trình ISA-88 (Unit Procedure → Operation → Phase) ============
+const UNIT_CLASSES = [
+  { v: "brewhouse", t: "Nhà nấu (brewhouse)" },
+  { v: "fv", t: "Lên men (FV)" },
+  { v: "filter", t: "Lọc (filter)" },
+  { v: "bbt", t: "Tàng trữ (BBT)" },
+  { v: "packaging", t: "Đóng gói" },
+  { v: "cip", t: "CIP (vệ sinh)" },
+];
+let PROC_MODEL = [];     // [{name, unit_class, operations:[{name, phases:[{name,duration_min,params:[{name,setpoint,unit}]}]}]}]
+let _FORM_YIELD = null;  // giữ yield_steps khi sửa version (tránh ghi đè rỗng)
+
+function procTemplate() {
+  return [
+    { name: "Nấu", unit_class: "brewhouse", operations: [
+      { name: "Đường hóa", phases: [
+        { name: "Vào liệu", params: [{ name: "Nhiệt độ", setpoint: 52, unit: "°C" }] },
+        { name: "Giữ 65°C", duration_min: 30, params: [{ name: "Nhiệt độ", setpoint: 65, unit: "°C" }] },
+        { name: "Nâng 76°C", duration_min: 10, params: [{ name: "Nhiệt độ", setpoint: 76, unit: "°C" }] }] },
+      { name: "Lọc bã", phases: [{ name: "Lọc bã", duration_min: 60, params: [] }] },
+      { name: "Sôi hoa", phases: [
+        { name: "Thêm hoa", params: [{ name: "Hoa", setpoint: 15, unit: "kg" }] },
+        { name: "Sôi", duration_min: 60, params: [] }] }] },
+    { name: "Lên men", unit_class: "fv", operations: [
+      { name: "Cấy men", phases: [{ name: "Bơm men", params: [{ name: "Men", setpoint: 50, unit: "L" }] }] },
+      { name: "Lên men chính", phases: [{ name: "Giữ 12°C", duration_min: 10080, params: [{ name: "Nhiệt độ", setpoint: 12, unit: "°C" }] }] },
+      { name: "Hạ nhiệt", phases: [{ name: "Hạ 2°C", params: [{ name: "Nhiệt độ", setpoint: 2, unit: "°C" }] }] }] },
+    { name: "Lọc", unit_class: "filter", operations: [
+      { name: "Lọc nến", phases: [{ name: "Lọc", duration_min: 120, params: [] }] }] },
+    { name: "CIP Nồi nấu", unit_class: "cip", operations: [
+      { name: "CIP", phases: [
+        { name: "Tiền rửa", duration_min: 10, params: [] },
+        { name: "Xút 2%", duration_min: 20, params: [{ name: "NaOH", setpoint: 2, unit: "%" }] },
+        { name: "Tráng nước", duration_min: 10, params: [] }] }] },
+  ];
+}
+
+function procHarvest() {
+  const box = $("vf_proc");
+  if (!box) return PROC_MODEL;
+  const ups = [];
+  box.querySelectorAll(":scope > .proc-up").forEach(upEl => {
+    const up = { name: upEl.querySelector(".pu-name").value.trim(),
+                 unit_class: upEl.querySelector(".pu-class").value, operations: [] };
+    upEl.querySelectorAll(":scope > .proc-op").forEach(opEl => {
+      const op = { name: opEl.querySelector(".po-name").value.trim(), phases: [] };
+      opEl.querySelectorAll(":scope > .proc-ph").forEach(phEl => {
+        const ph = { name: phEl.querySelector(".pp-name").value.trim() };
+        const dur = phEl.querySelector(".pp-dur").value.trim();
+        if (dur !== "") ph.duration_min = parseFloat(dur);
+        const pn = phEl.querySelector(".pp-pn").value.trim();
+        if (pn) {
+          const pv = phEl.querySelector(".pp-pv").value.trim();
+          const num = parseFloat(pv);
+          ph.params = [{ name: pn, setpoint: (pv !== "" && !isNaN(num)) ? num : pv,
+                         unit: phEl.querySelector(".pp-pu").value.trim() }];
+        } else {
+          ph.params = [];
+        }
+        op.phases.push(ph);
+      });
+      up.operations.push(op);
+    });
+    ups.push(up);
+  });
+  PROC_MODEL = ups;
+  return ups;
+}
+
+function procRender() {
+  const box = $("vf_proc");
+  if (!box) return;
+  const p0 = (ph) => (ph.params && ph.params[0]) || {};
+  box.innerHTML = PROC_MODEL.map((up, ui) => `
+    <div class="proc-up" style="border:1px solid var(--border);border-radius:8px;padding:8px;margin-bottom:8px;background:var(--panel2)">
+      <div class="row">
+        <div class="field"><label>Công đoạn (Unit Procedure)</label><input class="pu-name" value="${esc(up.name || "")}" placeholder="Nấu / Lên men..."/></div>
+        <div class="field"><label>Loại unit</label><select class="pu-class">${UNIT_CLASSES.map(c => `<option value="${c.v}" ${up.unit_class === c.v ? "selected" : ""}>${esc(c.t)}</option>`).join("")}</select></div>
+        <div class="field" style="align-self:flex-end">
+          <button class="btn sm sec" type="button" data-add-op="${ui}">+ Operation</button>
+          <button class="btn sm sec" type="button" data-del-up="${ui}">✕ Xóa</button></div>
+      </div>
+      ${(up.operations || []).map((op, oi) => `
+        <div class="proc-op" style="margin-left:14px;border-left:2px solid var(--border);padding-left:10px;margin-top:6px">
+          <div class="row">
+            <div class="field"><label>Operation</label><input class="po-name" value="${esc(op.name || "")}" placeholder="Đường hóa..."/></div>
+            <div class="field" style="align-self:flex-end">
+              <button class="btn sm sec" type="button" data-add-ph="${ui}.${oi}">+ Phase</button>
+              <button class="btn sm sec" type="button" data-del-op="${ui}.${oi}">✕</button></div>
+          </div>
+          ${(op.phases || []).map((ph, pi) => `
+            <div class="proc-ph" style="margin-left:14px;margin-top:4px">
+              <div class="row">
+                <div class="field"><label>Phase</label><input class="pp-name" value="${esc(ph.name || "")}"/></div>
+                <div class="field"><label>Phút</label><input class="pp-dur" type="number" value="${ph.duration_min ?? ""}" style="width:90px"/></div>
+                <div class="field"><label>Setpoint</label><input class="pp-pn" value="${esc(p0(ph).name || "")}" placeholder="Nhiệt độ" style="width:120px"/></div>
+                <div class="field"><label>Giá trị</label><input class="pp-pv" value="${p0(ph).setpoint ?? ""}" style="width:80px"/></div>
+                <div class="field"><label>ĐVT</label><input class="pp-pu" value="${esc(p0(ph).unit || "")}" size="4"/></div>
+                <div class="field" style="align-self:flex-end"><button class="btn sm sec" type="button" data-del-ph="${ui}.${oi}.${pi}">✕</button></div>
+              </div>
+            </div>`).join("")}
+        </div>`).join("")}
+    </div>`).join("") +
+    `<button class="btn sm" type="button" id="proc_add_up">+ Thêm công đoạn</button>`;
+
+  $("proc_add_up").onclick = () => { procHarvest(); PROC_MODEL.push({ name: "", unit_class: "brewhouse", operations: [] }); procRender(); };
+  box.querySelectorAll("[data-del-up]").forEach(b => b.onclick = () => { procHarvest(); PROC_MODEL.splice(+b.dataset.delUp, 1); procRender(); });
+  box.querySelectorAll("[data-add-op]").forEach(b => b.onclick = () => { procHarvest(); PROC_MODEL[+b.dataset.addOp].operations.push({ name: "", phases: [] }); procRender(); });
+  box.querySelectorAll("[data-del-op]").forEach(b => b.onclick = () => { procHarvest(); const [u, o] = b.dataset.delOp.split(".").map(Number); PROC_MODEL[u].operations.splice(o, 1); procRender(); });
+  box.querySelectorAll("[data-add-ph]").forEach(b => b.onclick = () => { procHarvest(); const [u, o] = b.dataset.addPh.split(".").map(Number); PROC_MODEL[u].operations[o].phases.push({ name: "", params: [] }); procRender(); });
+  box.querySelectorAll("[data-del-ph]").forEach(b => b.onclick = () => { procHarvest(); const [u, o, p] = b.dataset.delPh.split(".").map(Number); PROC_MODEL[u].operations[o].phases.splice(p, 1); procRender(); });
 }
 
 // ================= BATCHES =================
