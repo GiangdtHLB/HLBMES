@@ -259,3 +259,55 @@ def test_export_report_csv_xlsx(db):
     assert name_csv.endswith(".csv") and b"SUMMARY" in content_csv and b"row_number" in content_csv
     name_x, content_x, media_x = import_mapping.export_report(db, r["run_id"], "xlsx")
     assert name_x.endswith(".xlsx") and content_x[:2] == b"PK"   # xlsx = zip
+
+
+# ================= PHASE 1.2 — CUSTOM FIELDS =================
+from app.services import custom_fields
+
+
+def test_custom_field_create_and_schema(db):
+    cf = custom_fields.create_definition(db, "material", "Ghi chú nội bộ", "string")
+    assert cf["field_key"] == "ghi_chu_noi_bo" and cf["is_active"]
+    sch = import_targets.target_schema("material", db)
+    col = next((c for c in sch["columns"] if c["name"] == "ghi_chu_noi_bo"), None)
+    assert col and col["is_custom"] is True
+    assert "ghi_chu_noi_bo" in sch["custom_columns"]
+    assert sch["pk_col"] == "material_id"
+
+
+def test_custom_field_collision_core(db):
+    with pytest.raises(DomainError):
+        custom_fields.create_definition(db, "material", "code", "string")   # trùng cột core
+
+
+def test_custom_field_blacklist_table(db):
+    with pytest.raises(DomainError):
+        custom_fields.create_definition(db, "audit_log", "x", "string")
+
+
+def test_import_with_custom_field(db):
+    custom_fields.create_definition(db, "material", "Nhà cung cấp", "string", field_key="ncc")
+    fid = _upload(db, "MaVT,Ten,DonVi,NCC\nCF-IMP-1,Malt CF,kg,Brenntag Việt Nam\n")
+    r = import_mapping.run_import(db, fid, "material",
+                                  {"code": "MaVT", "name": "Ten", "uom": "DonVi", "ncc": "NCC"}, {}, "code", "tester")
+    assert r["inserted"] == 1 and r["errored"] == 0
+    import sqlalchemy as sa
+    from app.models.master import Material
+    m = db.execute(sa.select(Material).where(Material.code == "CF-IMP-1")).scalar_one()
+    # custom value lưu ở custom_field_value, KHÔNG ở core
+    vals = custom_fields.get_values(db, "material", m.material_id)
+    assert vals["ncc"]["value"] == "Brenntag Việt Nam"     # Unicode + EAV
+    assert vals["ncc"]["display_name"] == "Nhà cung cấp"
+    # validate phân biệt custom trong preview
+    fid2 = _upload(db, "MaVT,Ten,NCC\nCF-IMP-2,X,Cty Y\n")
+    vr = import_mapping.validate(db, fid2, "material", {"code": "MaVT", "name": "Ten", "ncc": "NCC"}, {}, "code")
+    item = vr["preview"][0]
+    assert "ncc" in (item.get("custom") or {}) and "ncc" not in item["data"]
+
+
+def test_custom_field_required_conflict(db):
+    custom_fields.create_definition(db, "product", "Mã ERP", "string", field_key="ma_erp", is_required=True)
+    fid = _upload(db, "Code,Name\nCF-P-1,SP A\n")        # thiếu cột cho ma_erp
+    vr = import_mapping.validate(db, fid, "product", {"code": "Code", "name": "Name"}, {}, "code")
+    assert vr["summary"]["conflict"] >= 1
+    assert any(c["column"] == "ma_erp" for c in vr["conflicts"])

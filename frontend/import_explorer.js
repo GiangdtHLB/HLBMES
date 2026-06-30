@@ -63,14 +63,17 @@
     const keyCands = S.schema.key_candidates || ["code"];
     return `<div class="panel"><h2>Bước 3 — Map cột + Rule (file → ${esc(S.table)})</h2>
       <div class="field" style="max-width:280px">Khóa upsert: <select id="imp_key">${keyCands.map(k => `<option ${S.key_field === k ? "selected" : ""}>${esc(k)}</option>`).join("")}</select></div>
-      <table><thead><tr><th>Cột MES</th><th>BB</th><th>← Cột file</th><th>Rule</th><th>Tham số rule</th><th>Default</th></tr></thead>
+      <div style="margin:6px 0"><button class="btn sec" id="imp_newcf">➕ New Custom Field</button>
+        <span class="muted"> — cột file không có trong schema core sẽ lưu dạng Custom Field (không tạo cột mới trong bảng core).</span></div>
+      <table><thead><tr><th>Cột MES</th><th>Loại</th><th>BB</th><th>← Cột file</th><th>Rule</th><th>Tham số rule</th><th>Default</th></tr></thead>
       <tbody>${S.schema.columns.filter(c => !c.primary_key).map(c => { const ru = S.rules[c.name] || {}; return `<tr>
         <td><code>${esc(c.name)}</code> <span class="muted">(${c.type})</span></td>
+        <td>${c.is_custom ? "<span class='badge due'>custom</span>" : "<span class='badge available'>core</span>"}</td>
         <td>${c.required ? "<b style='color:#e74c3c'>✓</b>" : ""}</td>
         <td><select data-map="${esc(c.name)}">${opts(S.mappings[c.name] || "")}</select></td>
         <td><select data-rule="${esc(c.name)}">${ropts(ru.type || "")}</select></td>
-        <td><input data-rp="${esc(c.name)}" value="${esc(ru.params ? JSON.stringify(ru.params) : (ru._raw || ""))}" placeholder="${NEEDS_PARAM[ru.type] || ""}" style="width:170px"/></td>
-        <td><input data-def="${esc(c.name)}" value="${esc(S.defaults[c.name] || "")}" style="width:120px"/></td></tr>`; }).join("")}</tbody></table>
+        <td><input data-rp="${esc(c.name)}" value="${esc(ru.params ? JSON.stringify(ru.params) : (ru._raw || ""))}" placeholder="${NEEDS_PARAM[ru.type] || ""}" style="width:160px"/></td>
+        <td><input data-def="${esc(c.name)}" value="${esc(S.defaults[c.name] || "")}" style="width:110px"/></td></tr>`; }).join("")}</tbody></table>
       <div style="margin-top:8px"><button class="btn sec" id="imp_back3">← Back</button>
         <button class="btn" id="imp_valid">Validate →</button> <button class="btn sec" id="imp_saveprof">💾 Lưu profile</button></div></div>`;
   }
@@ -100,7 +103,10 @@
         <span class="badge ${r.warning ? "due" : "available"}">Warning ${r.warning || 0}</span><span class="badge">${r.duration_ms}ms · ${esc(r.status)}</span></div>
       <div style="margin-top:10px"><button class="btn" id="imp_new">Import file mới</button>
         <button class="btn sec" id="imp_expcsv">⬇ Export CSV</button> <button class="btn sec" id="imp_expx">⬇ Export Excel</button>
-        <button class="btn sec" id="imp_gohist">Lịch sử</button></div></div>`;
+        <button class="btn sec" id="imp_gohist">Lịch sử</button></div>
+      <hr/><h3>Kiểm tra dữ liệu đã import (Core + Custom Fields)</h3>
+      <div class="field" style="max-width:340px">Nhập mã (code) của ${esc(r.table)}: <input id="imp_lkcode" placeholder="vd TEST-001"/> <button class="btn sec" id="imp_lookup">Xem</button></div>
+      <div id="imp_lkbox"></div></div>`;
   }
 
   function renderWizard() {
@@ -175,6 +181,28 @@
       collectMap(); const name = prompt("Tên profile:", (S.source_system || "") + " " + S.table); if (!name) return;
       try { await POST(B + "/profiles", { name, target_table: S.table, source_system: S.source_system, source_type: S.file.source_type, key_field: S.key_field, mappings: S.mappings, defaults: S.defaults, rules: cleanRules() }); toast("Đã lưu profile"); }
       catch (e) { toast(e.message, "err"); }
+    };
+    if ($("imp_newcf")) $("imp_newcf").onclick = async () => {
+      collectMap();
+      const name = prompt("Tên Custom Field (hiển thị), vd 'Ghi chú nội bộ':"); if (!name) return;
+      const dt = (prompt("Kiểu dữ liệu: string / int / float / bool / date", "string") || "string").trim();
+      try {
+        const cf = await POST(B + "/custom-fields", { table_name: S.table, display_name: name, data_type: dt });
+        S.schema = await GET(B + "/targets/" + S.table);   // field xuất hiện ngay trong target
+        const norm = (x) => x.toLowerCase().replace(/[^a-z0-9]/g, "");
+        const m = S.columns.find(x => norm(x) === norm(cf.field_key));
+        if (m) S.mappings[cf.field_key] = m;
+        renderWizard(); toast("Đã tạo Custom Field: " + cf.field_key);
+      } catch (e) { toast(e.message, "err"); }
+    };
+    if ($("imp_lookup")) $("imp_lookup").onclick = async () => {
+      const code = $("imp_lkcode").value.trim(); if (!code) return;
+      try {
+        const d = await GET(B + "/lookup/" + S.run.table + "/" + encodeURIComponent(code));
+        const core = Object.entries(d.core).map(([k, v]) => `<tr><td><code>${esc(k)}</code></td><td>${esc(String(v ?? ""))}</td></tr>`).join("");
+        const cust = Object.entries(d.custom).map(([k, v]) => `<tr><td>${esc(v.display_name)} <code>(${esc(k)})</code></td><td>${esc(String(v.value ?? ""))}</td></tr>`).join("") || "<tr><td colspan='2' class='muted'>(chưa có custom field)</td></tr>";
+        $("imp_lkbox").innerHTML = `<h4>Core Fields</h4><table>${core}</table><h4>Custom Fields</h4><table>${cust}</table>`;
+      } catch (e) { toast(e.message, "err"); }
     };
     if ($("imp_back4")) $("imp_back4").onclick = () => { S.step = 3; renderWizard(); };
     if ($("imp_confirm")) $("imp_confirm").onclick = async () => {
