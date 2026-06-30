@@ -19,3 +19,5 @@ anthropic==0.69.0
 # Microsoft SQL Server: pyodbc (wheel) + ODBC Driver 18 (cài ở Dockerfile/OS).
 #   MES_DATABASE_URL="mssql+pyodbc://user:pass@host,1433/HLBMES?driver=ODBC+Driver+18+for+SQL+Server&Encrypt=yes&TrustServerCertificate=yes"
 pyodbc==5.1.0
+# Đọc file Excel (.xlsx) cho Import Mapping Explorer.
+openpyxl==3.1.5
