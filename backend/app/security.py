@@ -51,6 +51,7 @@ PERMISSION_CATALOG = {
     "energy.update": "Cập nhật số liệu năng lượng",
     "user.manage": "Quản trị tài khoản",
     "integration.manage": "Quản trị API key/webhook",
+    "integration.import": "Import dữ liệu từ file ngoài (CSV/Excel)",
 }
 
 

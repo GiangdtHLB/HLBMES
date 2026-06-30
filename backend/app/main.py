@@ -25,6 +25,7 @@ from .routers import (
     energy,
     gateway,
     historian,
+    import_explorer,
     isa88,
     jobs,
     label,
@@ -134,7 +135,7 @@ async def _perm(_: Request, exc: PermissionError_):
 for r in (auth, master, orders, workorders, recipes, batches, materials, dispense, quality,
           quality_adv, traceability, performance, downtime, warehouse, energy, maintenance,
           process, brewing, reports, historian, scan, schedule, ai, jobs, isa88, wms,
-          label, lines, packaging, gateway, audit):
+          label, lines, packaging, import_explorer, gateway, audit):
     app.include_router(r.router)
 
 
