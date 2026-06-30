@@ -311,3 +311,17 @@ def test_custom_field_required_conflict(db):
     vr = import_mapping.validate(db, fid, "product", {"code": "Code", "name": "Name"}, {}, "code")
     assert vr["summary"]["conflict"] >= 1
     assert any(c["column"] == "ma_erp" for c in vr["conflicts"])
+
+
+def test_custom_field_delete_soft_and_hard(db):
+    custom_fields.create_definition(db, "equipment", "Vị trí GPS", "string", field_key="gps")
+    custom_fields.delete_definition(db, "equipment", "gps", hard=False)      # soft → ẩn
+    sch = import_targets.target_schema("equipment", db)
+    assert "gps" not in sch["custom_columns"]
+    custom_fields.create_definition(db, "equipment", "Mã tài sản", "string", field_key="ma_ts")
+    custom_fields.upsert_value(db, "equipment", "rec-1", "ma_ts", "TS-001"); db.commit()
+    res = custom_fields.delete_definition(db, "equipment", "ma_ts", hard=True)  # hard → xoá cả value
+    assert res["hard"] is True and res["values_removed"] == 1
+    assert custom_fields.get_values(db, "equipment", "rec-1") == {}
+    with pytest.raises(DomainError):
+        custom_fields.delete_definition(db, "equipment", "khong_co", hard=False)

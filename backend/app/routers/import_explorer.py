@@ -77,6 +77,12 @@ def create_custom_field(payload: CustomFieldIn, db: Session = Depends(get_db), u
                                            payload.data_type, payload.field_key, payload.is_required)
 
 
+@router.delete("/custom-fields/{table}/{field_key}")
+def delete_custom_field(table: str, field_key: str, hard: bool = False,
+                        db: Session = Depends(get_db), user: User = Depends(guard)):
+    return custom_fields.delete_definition(db, table, field_key, hard)
+
+
 @router.get("/records/{table}/{record_id}/custom")
 def record_custom_values(table: str, record_id: str, db: Session = Depends(get_db), user: User = Depends(guard)):
     return {"table": table, "record_id": record_id, "values": custom_fields.get_values(db, table, record_id)}

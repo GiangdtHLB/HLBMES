@@ -68,7 +68,7 @@
       <table><thead><tr><th>Cột MES</th><th>Loại</th><th>BB</th><th>← Cột file</th><th>Rule</th><th>Tham số rule</th><th>Default</th></tr></thead>
       <tbody>${S.schema.columns.filter(c => !c.primary_key).map(c => { const ru = S.rules[c.name] || {}; return `<tr>
         <td><code>${esc(c.name)}</code> <span class="muted">(${c.type})</span></td>
-        <td>${c.is_custom ? "<span class='badge due'>custom</span>" : "<span class='badge available'>core</span>"}</td>
+        <td>${c.is_custom ? `<span class='badge due'>custom</span> <a href="#" data-delcf="${esc(c.name)}" title="Xoá custom field" style="color:#e74c3c">🗑</a>` : "<span class='badge available'>core</span>"}</td>
         <td>${c.required ? "<b style='color:#e74c3c'>✓</b>" : ""}</td>
         <td><select data-map="${esc(c.name)}">${opts(S.mappings[c.name] || "")}</select></td>
         <td><select data-rule="${esc(c.name)}">${ropts(ru.type || "")}</select></td>
@@ -195,6 +195,22 @@
         renderWizard(); toast("Đã tạo Custom Field: " + cf.field_key);
       } catch (e) { toast(e.message, "err"); }
     };
+    document.querySelectorAll("[data-delcf]").forEach(a => a.onclick = async (e) => {
+      e.preventDefault();
+      const fk = a.dataset.delcf;
+      const hard = confirm(`Xoá custom field "${fk}"?\n\nOK = XOÁ HẲN (xoá cả dữ liệu đã import của field này).\nCancel = chỉ ẩn (giữ dữ liệu).`);
+      // nếu người dùng bấm Cancel ở confirm trên → vẫn hỏi có muốn ẩn không
+      let doDelete = hard;
+      if (!hard) doDelete = confirm(`Ẩn custom field "${fk}" khỏi danh sách? (dữ liệu đã import vẫn giữ)`);
+      if (!doDelete) return;
+      collectMap();
+      try {
+        await api(`${B}/custom-fields/${S.table}/${encodeURIComponent(fk)}?hard=${hard ? "true" : "false"}`, { method: "DELETE" });
+        delete S.mappings[fk]; delete S.rules[fk]; delete S.defaults[fk];
+        S.schema = await GET(B + "/targets/" + S.table);
+        renderWizard(); toast(`Đã ${hard ? "xoá hẳn" : "ẩn"} custom field ${fk}`);
+      } catch (err) { toast(err.message, "err"); }
+    });
     if ($("imp_lookup")) $("imp_lookup").onclick = async () => {
       const code = $("imp_lkcode").value.trim(); if (!code) return;
       try {

@@ -60,6 +60,24 @@ def _def_dict(d: CustomFieldDefinition) -> dict:
             "is_required": d.is_required, "is_active": d.is_active}
 
 
+def delete_definition(db: Session, table: str, field_key: str, hard: bool = False) -> dict:
+    """Xoá custom field. Mặc định soft (is_active=False → ẩn khỏi target, GIỮ dữ liệu đã import).
+    hard=True → xoá hẳn định nghĩa + toàn bộ giá trị custom_field_value của field này."""
+    d = db.execute(select(CustomFieldDefinition).where(
+        CustomFieldDefinition.table_name == table, CustomFieldDefinition.field_key == field_key)).scalar_one_or_none()
+    if not d:
+        raise DomainError(f"Không thấy custom field '{field_key}' của bảng {table}.")
+    if hard:
+        n = db.query(CustomFieldValue).filter(CustomFieldValue.table_name == table,
+                                              CustomFieldValue.field_key == field_key).delete()
+        db.delete(d)
+        db.commit()
+        return {"deleted": True, "hard": True, "field_key": field_key, "values_removed": n}
+    d.is_active = False
+    db.commit()
+    return {"deleted": True, "hard": False, "field_key": field_key, "note": "đã ẩn; dữ liệu đã import vẫn giữ"}
+
+
 def list_definitions(db: Session, table: str, active_only: bool = False) -> list:
     stmt = select(CustomFieldDefinition).where(CustomFieldDefinition.table_name == table)
     if active_only:
