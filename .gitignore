@@ -49,3 +49,4 @@ Thumbs.db
 # Giữ theo dõi script build tài liệu (là mã nguồn, không phải build output)
 !docs/build/
 !docs/build/**
+.import_uploads/

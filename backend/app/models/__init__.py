@@ -40,6 +40,13 @@ from .scheduling import ScheduleSlot
 from .wms import Case, Pallet, WmsLocation
 from .lines import ProductionLine
 from .packaging import PackagingMove, PackagingType
+from .integration_import import (  # noqa: F401
+    IntegrationColumnMapping,
+    IntegrationImportError,
+    IntegrationImportFile,
+    IntegrationImportRun,
+    IntegrationMappingProfile,
+)
 
 __all__ = [
     "AuditLog",
