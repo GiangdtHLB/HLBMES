@@ -38,8 +38,9 @@ def _coerce(value, col):
 
 def build_plan(db: Session, table: str, mapping: dict, defaults: dict, key_field: str,
                rows: list, rules: dict = None) -> dict:
-    schema = import_targets.target_schema(table)        # raise nếu ngoài whitelist
+    schema = import_targets.target_schema(table, db)    # gồm custom field active
     cols = {c["name"]: c for c in schema["columns"]}
+    custom_set = set(schema.get("custom_columns", []))
     if key_field not in cols:
         key_field = "code" if "code" in cols else schema["key_candidates"][0]
     mapping = {k: v for k, v in (mapping or {}).items() if k in cols and v}
@@ -139,8 +140,10 @@ def build_plan(db: Session, table: str, mapping: dict, defaults: dict, key_field
             conflict += 1
         for i in issues:
             issues_all.append({"row_index": idx, **i})
-        items.append({"row_index": idx, "action": action, "data": data,
-                      "raw_payload": raw_extra or None, "issues": issues})
+        core_data = {k: v for k, v in data.items() if k not in custom_set}
+        custom_data = {k: v for k, v in data.items() if k in custom_set}
+        items.append({"row_index": idx, "action": action, "data": core_data,
+                      "custom": custom_data or None, "raw_payload": raw_extra or None, "issues": issues})
 
     return {
         "table": table, "key_field": key_field,

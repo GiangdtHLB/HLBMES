@@ -105,7 +105,8 @@ def run_import(db: Session, file_id: str, table: str, mapping: dict, defaults: d
     db.add(run)
     db.flush()
 
-    result = import_runner.run_upsert(db, table, kf, plan["items"])
+    pk_col = import_targets.target_schema(table, db).get("pk_col")
+    result = import_runner.run_upsert(db, table, kf, plan["items"], pk_col)
 
     # lưu MỌI issue (conflict/error/warning) + lỗi DB → để soi & export report
     for e in (plan["issues"] + result["db_errors"])[:2000]:
@@ -179,6 +180,24 @@ def history(db: Session, limit: int = 50) -> list:
              "total": r.total, "inserted": r.inserted, "updated": r.updated,
              "skipped": r.skipped, "errored": r.errored, "duration_ms": r.duration_ms,
              "run_by": r.run_by, "started_at": r.started_at} for r in rows]
+
+
+def lookup_record(db: Session, table: str, code: str) -> dict:
+    """Tra 1 record theo mã (code/key) → trả cột core + custom field values (để kiểm tra import)."""
+    _ensure_table(table)
+    from ..database import Base
+    from . import custom_fields
+    schema = import_targets.target_schema(table, db)
+    pk = schema["pk_col"]
+    key = "code" if "code" in schema["core_columns"] else (schema["key_candidates"][0])
+    tbl = Base.metadata.tables[table]
+    row = db.execute(select(tbl).where(tbl.c[key] == code)).mappings().first()
+    if not row:
+        raise NotFoundError(f"Không thấy {table} có {key}={code}")
+    core = {k: (str(v) if v is not None else None) for k, v in dict(row).items()}
+    rid = str(row[pk])
+    return {"table": table, "key": key, "record_id": rid, "core": core,
+            "custom": custom_fields.get_values(db, table, rid)}
 
 
 def errors(db: Session, run_id: str, limit: int = 500) -> list:

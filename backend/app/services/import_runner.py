@@ -8,8 +8,11 @@ from sqlalchemy.orm import Session
 from ..database import Base
 
 
-def run_upsert(db: Session, table: str, key_field: str, items: list) -> dict:
-    """items: list từ validator (chỉ xử lý action insert/update). Trả thống kê + lỗi DB."""
+def run_upsert(db: Session, table: str, key_field: str, items: list, pk_col: str = None) -> dict:
+    """items: list từ validator (chỉ xử lý action insert/update). Ghi core + custom field.
+    Trả thống kê + lỗi DB."""
+    from sqlalchemy import select as _select
+    from . import custom_fields
     tbl = Base.metadata.tables[table]
     inserted = updated = errored = 0
     db_errors = []
@@ -19,6 +22,7 @@ def run_upsert(db: Session, table: str, key_field: str, items: list) -> dict:
             continue
         data = {k: v for k, v in it["data"].items() if v is not None}
         keyval = it["data"].get(key_field)
+        custom = it.get("custom") or {}
         try:
             with db.begin_nested():   # SAVEPOINT — lỗi dòng không phá cả mẻ
                 if action == "insert":
@@ -26,8 +30,15 @@ def run_upsert(db: Session, table: str, key_field: str, items: list) -> dict:
                     inserted += 1
                 else:
                     setvals = {k: v for k, v in data.items() if k != key_field}
-                    db.execute(tbl.update().where(tbl.c[key_field] == keyval).values(**setvals))
+                    if setvals:
+                        db.execute(tbl.update().where(tbl.c[key_field] == keyval).values(**setvals))
                     updated += 1
+                # ghi custom field (EAV) — KHÔNG đụng schema core
+                if custom and pk_col:
+                    rid = db.execute(_select(tbl.c[pk_col]).where(tbl.c[key_field] == keyval)).scalar()
+                    if rid is not None:
+                        for fk, fv in custom.items():
+                            custom_fields.upsert_value(db, table, str(rid), fk, fv)
         except Exception as e:  # noqa: BLE001 — lỗi DB từng dòng: ghi lại, tiếp tục
             errored += 1
             db_errors.append({"row_index": it["row_index"], "column": None,

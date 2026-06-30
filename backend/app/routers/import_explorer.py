@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..security import User, get_current_user, require_perm
-from ..services import import_mapping, import_targets
+from ..services import custom_fields, import_mapping, import_targets
 
 router = APIRouter(prefix="/api/integration/import", tags=["integration-import"])
 
@@ -53,8 +53,38 @@ def targets(user: User = Depends(guard)):
 
 
 @router.get("/targets/{table}")
-def target_schema(table: str, user: User = Depends(guard)):
-    return import_targets.target_schema(table)
+def target_schema(table: str, db: Session = Depends(get_db), user: User = Depends(guard)):
+    return import_targets.target_schema(table, db)   # gồm cả custom field active
+
+
+# ---- Custom Fields (dynamic) ----
+class CustomFieldIn(BaseModel):
+    table_name: str
+    display_name: str
+    data_type: str = "string"      # string|int|float|bool|date
+    field_key: str | None = None
+    is_required: bool = False
+
+
+@router.get("/custom-fields/{table}")
+def list_custom_fields(table: str, db: Session = Depends(get_db), user: User = Depends(guard)):
+    return {"fields": custom_fields.list_definitions(db, table)}
+
+
+@router.post("/custom-fields", status_code=201)
+def create_custom_field(payload: CustomFieldIn, db: Session = Depends(get_db), user: User = Depends(guard)):
+    return custom_fields.create_definition(db, payload.table_name, payload.display_name,
+                                           payload.data_type, payload.field_key, payload.is_required)
+
+
+@router.get("/records/{table}/{record_id}/custom")
+def record_custom_values(table: str, record_id: str, db: Session = Depends(get_db), user: User = Depends(guard)):
+    return {"table": table, "record_id": record_id, "values": custom_fields.get_values(db, table, record_id)}
+
+
+@router.get("/lookup/{table}/{code}")
+def lookup_record(table: str, code: str, db: Session = Depends(get_db), user: User = Depends(guard)):
+    return import_mapping.lookup_record(db, table, code)
 
 
 # ---- Upload (chỉ đọc, chưa import) ----

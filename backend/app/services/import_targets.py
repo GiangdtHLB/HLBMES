@@ -62,36 +62,42 @@ def list_targets() -> list:
     return [{"table": t, "description": TABLE_DESC.get(t, t)} for t in sorted(WHITELIST)]
 
 
-def target_schema(table: str) -> dict:
-    """Mô tả cột của bảng đích (introspect). Raise nếu ngoài whitelist."""
+def target_schema(table: str, db=None) -> dict:
+    """Mô tả cột của bảng đích (introspect core + custom field active). Raise nếu ngoài whitelist.
+
+    db != None → ghép thêm các Custom Field đang active (is_custom=True)."""
     if not is_allowed(table):
         raise ValueError(f"Bảng '{table}' không nằm trong whitelist import (Phase 1: chỉ master data).")
     tbl = Base.metadata.tables[table]
     cols = []
     key_candidates = []
+    pk_col = None
     for c in tbl.columns:
         if c.name in _SYSTEM_COLS:
             continue
         has_default = c.default is not None or c.server_default is not None
-        # required = bắt buộc nhập từ file: NOT NULL, không default, không phải PK auto.
         required = (not c.nullable) and (not has_default) and (not c.primary_key)
         maxlen = getattr(c.type, "length", None)
         unique = bool(c.unique) or any(c.name in idx.columns and idx.unique for idx in tbl.indexes)
+        if c.primary_key:
+            pk_col = c.name
         if unique and not c.primary_key:
             key_candidates.append(c.name)
         cols.append({
-            "name": c.name,
-            "type": _py_type(c.type),
-            "nullable": bool(c.nullable),
-            "required": required,
-            "unique": unique,
-            "max_length": maxlen,
-            "primary_key": bool(c.primary_key),
-            "has_default": has_default,
+            "name": c.name, "type": _py_type(c.type), "nullable": bool(c.nullable),
+            "required": required, "unique": unique, "max_length": maxlen,
+            "primary_key": bool(c.primary_key), "has_default": has_default, "is_custom": False,
         })
+    custom = []
+    if db is not None:
+        from . import custom_fields  # lazy — tránh vòng import
+        custom = custom_fields.active_columns(db, table)
     return {
         "table": table,
         "description": TABLE_DESC.get(table, table),
-        "columns": cols,
+        "columns": cols + custom,
+        "core_columns": [c["name"] for c in cols],
+        "custom_columns": [c["name"] for c in custom],
+        "pk_col": pk_col,
         "key_candidates": key_candidates or ["code"],
     }
