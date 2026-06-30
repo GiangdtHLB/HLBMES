@@ -8,9 +8,10 @@
   const NEEDS_PARAM = { date_parse: "format dd/MM/yyyy", regex_validate: "pattern regex",
     enum_map: 'JSON map {"src":"tgt"}', lookup: 'JSON map', default_if_empty: "giá trị default" };
   let S = {};
+  let HOST_ID = "view-import";   // container đích (có thể đổi để nhúng vào view khác)
   const reset = () => { S = { step: 1, tab: "wizard", file: null, columns: [], preview: [], targets: [], table: "", schema: null, mappings: {}, defaults: {}, rules: {}, key_field: "code", source_system: "brawmart", vr: null, run: null }; };
   reset();
-  const host = () => $("view-import");
+  const host = () => document.getElementById(HOST_ID);
 
   async function uploadFile(f) {
     const fd = new FormData(); fd.append("file", f);
@@ -268,5 +269,8 @@
   function wireTabs() { document.querySelectorAll("[data-itab]").forEach(a => a.onclick = (e) => { e.preventDefault(); S.tab = a.dataset.itab; renderTab(); }); }
   function renderTab() { if (S.tab === "history") renderHistory(); else if (S.tab === "profiles") renderProfiles(); else renderWizard(); }
 
-  VIEWS.import = function () { renderTab(); };
+  // Nhúng vào view khác (vd tab trong "Tích hợp"): open("intg-import")
+  window.ImportExplorer = { open: function (containerId) { HOST_ID = containerId; if (!S.file) reset(); renderTab(); } };
+  // tương thích nếu vẫn có section riêng
+  VIEWS.import = function () { HOST_ID = "view-import"; renderTab(); };
 })();

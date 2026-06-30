@@ -1581,6 +1581,9 @@ VIEWS.integration = async function () {
   if (isAdmin) { [keys, hooks] = await Promise.all([GET("/integration/keys"), GET("/integration/webhooks")]); }
   const manifest = await GET("/ai/tools");
   $("view-integration").innerHTML = `
+    <div class="subnav"><a href="#" data-itg="gateway" class="active">Cổng API & Webhook</a><a href="#" data-itg="import">📥 Tích hợp dữ liệu (Import)</a></div>
+    <div id="intg-import" style="display:none"></div>
+    <div id="intg-gateway">
     <div class="panel"><h2>Cổng API mở <code class="k">/api/v1</code></h2>
       <div class="muted">Phần mềm ngoài (ERP/WMS/BI/AI agent) gọi qua header <code class="k">X-API-Key</code>. Đọc theo scope <code class="k">read</code>; ghi cần <code class="k">write</code>.</div>
       <h3>Endpoint sẵn có</h3>
@@ -1616,7 +1619,16 @@ VIEWS.integration = async function () {
         <table><thead><tr><th>URL</th><th>Loại</th><th>Đã gửi</th><th>Trạng thái</th></tr></thead>
         <tbody>${hooks.map(w => `<tr><td class="muted">${esc(w.target_url)}</td><td>${esc(w.event_types)}</td><td>${w.delivered_count}</td>
           <td>${badge(w.active ? "available" : "obsolete")}${w.active ? "active" : "off"}</td></tr>`).join("") || '<tr><td colspan=4 class="muted">Chưa có webhook.</td></tr>'}</tbody></table></div>
-    </div>` : `<div class="panel muted">Đăng nhập vai trò <code class="k">admin</code> (góc phải) để quản trị API key & webhook.</div>`}`;
+    </div>` : `<div class="panel muted">Đăng nhập vai trò <code class="k">admin</code> (góc phải) để quản trị API key & webhook.</div>`}</div>`;
+  // sub-tab: Cổng API ↔ Import dữ liệu (Import Mapping Explorer)
+  document.querySelectorAll("[data-itg]").forEach(a => a.onclick = (e) => {
+    e.preventDefault();
+    const t = a.dataset.itg;
+    document.querySelectorAll("[data-itg]").forEach(x => x.classList.toggle("active", x.dataset.itg === t));
+    $("intg-gateway").style.display = t === "import" ? "none" : "";
+    $("intg-import").style.display = t === "import" ? "" : "none";
+    if (t === "import" && window.ImportExplorer) window.ImportExplorer.open("intg-import");
+  });
   if (isAdmin) {
     $("k_add").onclick = () => guard(async () => {
       const r = await POST("/integration/keys", { name: $("k_name").value, scopes: $("k_scope").value });
