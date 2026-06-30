@@ -47,6 +47,7 @@ from .integration_import import (  # noqa: F401
     IntegrationImportRun,
     IntegrationMappingProfile,
 )
+from .custom_fields import CustomFieldDefinition, CustomFieldValue  # noqa: F401
 
 __all__ = [
     "AuditLog",
