@@ -1,7 +1,7 @@
 """Phân quyền theo địa điểm kho: app_user.scope_warehouse
 
 Revision ID: b7c8d9e0f1a3
-Revises: c3d4e5f6a7b8
+Revises: fcdc12af8c62
 Create Date: 2026-07-23
 
 - app_user.scope_warehouse (csv|'*'): chiều data-scoping thứ 4 (bên cạnh
@@ -13,7 +13,7 @@ from alembic import op
 import sqlalchemy as sa
 
 revision = 'b7c8d9e0f1a3'
-down_revision = 'c3d4e5f6a7b8'
+down_revision = 'fcdc12af8c62'
 branch_labels = None
 depends_on = None
 

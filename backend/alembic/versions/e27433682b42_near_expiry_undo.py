@@ -1,6 +1,6 @@
 """Bia cận date: hỗ trợ Hoàn tác bản khai nhập
 
-Revision ID: a1b2c3d4e5f6
+Revision ID: e27433682b42
 Revises: f1a2b3c4d5ea
 Create Date: 2026-07-22
 
@@ -11,7 +11,7 @@ Create Date: 2026-07-22
 from alembic import op
 import sqlalchemy as sa
 
-revision = 'a1b2c3d4e5f6'
+revision = 'e27433682b42'
 down_revision = 'f1a2b3c4d5ea'
 branch_labels = None
 depends_on = None

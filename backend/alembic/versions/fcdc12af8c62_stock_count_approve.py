@@ -1,7 +1,7 @@
 """Kiểm kê định kỳ: thêm Duyệt (giám đốc nhà máy trở lên) sau khi chốt
 
-Revision ID: c3d4e5f6a7b8
-Revises: 89f74fef30e3
+Revision ID: fcdc12af8c62
+Revises: e27433682b42
 Create Date: 2026-07-22
 
 - stock_count.approved_by / approved_at (nullable): duyệt CHỈ áp dụng sau khi đã chốt (post),
@@ -11,8 +11,8 @@ Create Date: 2026-07-22
 from alembic import op
 import sqlalchemy as sa
 
-revision = 'c3d4e5f6a7b8'
-down_revision = '89f74fef30e3'
+revision = 'fcdc12af8c62'
+down_revision = 'e27433682b42'
 branch_labels = None
 depends_on = None
 
