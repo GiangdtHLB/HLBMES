@@ -4,7 +4,7 @@ Biến động: nhap (nhập kho) · xuat (xuất theo hàng → ra lưu hành) 
 · loai_bo (vỏ hỏng) · kiem_ke (đặt lại tồn theo kiểm kê).
 """
 
-from sqlalchemy import select
+from sqlalchemy import select, true
 from sqlalchemy.orm import Session
 
 from ..audit import record_audit
@@ -112,7 +112,7 @@ def lot_report(db: Session) -> list[dict]:
     thường, xuất dùng cho mẻ chiết qua nút NVL trên dòng Chiết (BottleMaterialUsage) —
     KHÔNG áp dụng cho vỏ chai/két/keg tuần hoàn (vẫn dùng packaging_type/packaging_move)."""
     packaging_group_codes = [g.code for g in db.execute(
-        select(MaterialGroup).where(MaterialGroup.is_packaging.is_(True))).scalars().all()]
+        select(MaterialGroup).where(MaterialGroup.is_packaging == true())).scalars().all()]
     if not packaging_group_codes:
         return []
     materials = db.execute(select(Material).where(Material.category.in_(packaging_group_codes))).scalars().all()

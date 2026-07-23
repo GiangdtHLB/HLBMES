@@ -6,7 +6,7 @@
   bắt buộc khai báo/duyệt chỉ tiêu trước khi được coi là nhập kho nhà máy chính thức.
 """
 
-from sqlalchemy import select
+from sqlalchemy import select, true
 from sqlalchemy.orm import Session
 
 from ..audit import record_audit
@@ -65,9 +65,9 @@ def delete_group(db: Session, group_id: str, user: User) -> None:
     if not g:
         raise NotFoundError("Nhóm chỉ tiêu không tồn tại.")
     mat_links = db.execute(select(MaterialQcGroup).where(
-        MaterialQcGroup.group_id == group_id, MaterialQcGroup.active.is_(True))).scalars().all()
+        MaterialQcGroup.group_id == group_id, MaterialQcGroup.active == true())).scalars().all()
     stage_links = db.execute(select(StageQcGroup).where(
-        StageQcGroup.group_id == group_id, StageQcGroup.active.is_(True))).scalars().all()
+        StageQcGroup.group_id == group_id, StageQcGroup.active == true())).scalars().all()
     if mat_links or stage_links:
         parts = []
         if mat_links:
@@ -150,7 +150,7 @@ def delete_item(db: Session, item_id: str, user: User) -> None:
 def list_material_groups(db: Session, material_id: str) -> list[dict]:
     links = db.execute(
         select(MaterialQcGroup).where(MaterialQcGroup.material_id == material_id,
-                                       MaterialQcGroup.active.is_(True))
+                                       MaterialQcGroup.active == true())
     ).scalars().all()
     out = []
     for link in links:
@@ -209,11 +209,11 @@ def required_params_for_material(db: Session, material_id: str, mandatory_only: 
         select(QCParameterGroupItem, QCParameter)
         .join(MaterialQcGroup, MaterialQcGroup.group_id == QCParameterGroupItem.group_id)
         .join(QCParameter, QCParameter.param_id == QCParameterGroupItem.param_id)
-        .where(MaterialQcGroup.material_id == material_id, MaterialQcGroup.active.is_(True),
-               QCParameter.active.is_(True))
+        .where(MaterialQcGroup.material_id == material_id, MaterialQcGroup.active == true(),
+               QCParameter.active == true())
     )
     if mandatory_only:
-        stmt = stmt.where(QCParameterGroupItem.mandatory.is_(True))
+        stmt = stmt.where(QCParameterGroupItem.mandatory == true())
     rows = db.execute(stmt.order_by(QCParameterGroupItem.seq)).all()
     out = []
     for item, param in rows:
@@ -286,7 +286,7 @@ def _stage_group_out(db: Session, link: StageQcGroup) -> dict:
 
 
 def list_stage_groups(db: Session, stage: str = None) -> list[dict]:
-    stmt = select(StageQcGroup).where(StageQcGroup.active.is_(True))
+    stmt = select(StageQcGroup).where(StageQcGroup.active == true())
     if stage:
         stmt = stmt.where(StageQcGroup.stage == stage)
     links = db.execute(stmt).scalars().all()
@@ -345,7 +345,7 @@ def update_stage_group(db: Session, link_id: str, payload: dict, user: User) -> 
     beer_type_id = (payload.get("beer_type_id") or None) if not is_product_scoped else None
     finished_product_id = (payload.get("finished_product_id") or None) if payload["stage"] in SKU_SCOPED_STAGES else None
     dup = db.execute(
-        select(StageQcGroup).where(StageQcGroup.link_id != link_id, StageQcGroup.active.is_(True),
+        select(StageQcGroup).where(StageQcGroup.link_id != link_id, StageQcGroup.active == true(),
                                    StageQcGroup.stage == payload["stage"],
                                    StageQcGroup.product_id == product_id,
                                    StageQcGroup.beer_type_id == beer_type_id,
@@ -407,7 +407,7 @@ def required_params_for_stage(db: Session, stage: str, product_id: str = None,
         select(QCParameterGroupItem, QCParameter, StageQcGroup)
         .join(StageQcGroup, StageQcGroup.group_id == QCParameterGroupItem.group_id)
         .join(QCParameter, QCParameter.param_id == QCParameterGroupItem.param_id)
-        .where(StageQcGroup.stage == stage, StageQcGroup.active.is_(True), QCParameter.active.is_(True))
+        .where(StageQcGroup.stage == stage, StageQcGroup.active == true(), QCParameter.active == true())
     )
     if stage in PRODUCT_SCOPED_STAGES:
         if product_id:
@@ -425,7 +425,7 @@ def required_params_for_stage(db: Session, stage: str, product_id: str = None,
     else:
         stmt = stmt.where(StageQcGroup.finished_product_id.is_(None))
     if mandatory_only:
-        stmt = stmt.where(QCParameterGroupItem.mandatory.is_(True))
+        stmt = stmt.where(QCParameterGroupItem.mandatory == true())
     rows = db.execute(stmt.order_by(QCParameterGroupItem.seq)).all()
     best_by_code: dict[str, dict] = {}
     for item, param, link in rows:

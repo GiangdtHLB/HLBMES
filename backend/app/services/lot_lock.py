@@ -9,7 +9,7 @@ khóa/mở khóa riêng — trạng thái `locked` tự suy ra từ TẤT CẢ c
 _recompute_brew_order_lock/_recompute_filter_order_lock/_recompute_filter_master_order_lock),
 khóa khi mọi con đã khóa, tự mở ngay khi có 1 con được mở."""
 
-from sqlalchemy import select
+from sqlalchemy import select, true
 from sqlalchemy.orm import Session
 
 from ..common import utcnow
@@ -88,7 +88,7 @@ def unlock_brew(db: Session, brew_id: str, user: User) -> BrewRecord:
         raise DomainError("Mã nấu này chưa bị khóa.")
     dependents = db.execute(select(FermentRecord).join(
         FermentBrewLink, FermentBrewLink.ferment_id == FermentRecord.ferment_id
-    ).where(FermentBrewLink.brew_id == brew_id, FermentRecord.locked.is_(True))).scalars().all()
+    ).where(FermentBrewLink.brew_id == brew_id, FermentRecord.locked == true())).scalars().all()
     if dependents:
         names = ", ".join(f.lm_code for f in dependents)
         raise DomainError(f"Phải mở khóa Lên men trước (lô LM: {names}).")
@@ -221,7 +221,7 @@ def unlock_filter(db: Session, filter_id: str, user: User) -> FilterRecord:
     if not f.locked:
         raise DomainError("Mẻ lọc này chưa bị khóa.")
     dependent_bottles = db.execute(select(BottleRecord).where(
-        BottleRecord.filter_id == filter_id, BottleRecord.locked.is_(True))).scalars().all()
+        BottleRecord.filter_id == filter_id, BottleRecord.locked == true())).scalars().all()
     if dependent_bottles:
         names = ", ".join(b.bottle_code for b in dependent_bottles)
         raise DomainError(f"Phải mở khóa Chiết trước (mẻ chiết: {names}).")
@@ -231,7 +231,7 @@ def unlock_filter(db: Session, filter_id: str, user: User) -> FilterRecord:
         FilterOrderTank.filter_id.is_not(None))).all()}
     if downstream_ids:
         locked_downstream = db.execute(select(FilterRecord).where(
-            FilterRecord.filter_id.in_(downstream_ids), FilterRecord.locked.is_(True))).scalars().all()
+            FilterRecord.filter_id.in_(downstream_ids), FilterRecord.locked == true())).scalars().all()
         if locked_downstream:
             names = ", ".join(x.filter_code for x in locked_downstream)
             raise DomainError(f"Phải mở khóa mẻ lọc lại trước (mẻ: {names}).")

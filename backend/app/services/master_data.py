@@ -3,7 +3,7 @@ mã đó đã được tham chiếu ở bất kỳ đâu (kể cả lịch sử,
 dữ liệu gốc ảnh hưởng truy xuất nguồn gốc một khi đã có bản ghi trỏ tới (mirror
 qc_catalog.py::delete_group và wms.py::delete_ship_to)."""
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, true
 from sqlalchemy.orm import Session
 
 from ..audit import record_audit
@@ -54,7 +54,7 @@ def delete_beer_type(db: Session, beer_type_id: str, user: User) -> None:
         ("mẻ lọc", select(func.count(FilterRecord.filter_id)).where(FilterRecord.beer_type_id == beer_type_id)),
         ("mẻ chiết", select(func.count(BottleRecord.bottle_id)).where(BottleRecord.beer_type_id == beer_type_id)),
         ("nhóm chỉ tiêu công đoạn", select(func.count(StageQcGroup.link_id)).where(
-            StageQcGroup.beer_type_id == beer_type_id, StageQcGroup.active.is_(True))),
+            StageQcGroup.beer_type_id == beer_type_id, StageQcGroup.active == true())),
     ]
     _block_if_used(_used_by(db, checks), "Loại bia", bt.code)
     record_audit(db, entity_type="beer_type", entity_id=bt.beer_type_id, action="delete",
@@ -108,7 +108,7 @@ def delete_product(db: Session, product_id: str, user: User) -> None:
         ("sản phẩm thành phẩm", select(func.count(FinishedProduct.finished_product_id)).where(
             FinishedProduct.product_id == product_id)),
         ("nhóm chỉ tiêu công đoạn", select(func.count(StageQcGroup.link_id)).where(
-            StageQcGroup.product_id == product_id, StageQcGroup.active.is_(True))),
+            StageQcGroup.product_id == product_id, StageQcGroup.active == true())),
         ("lệnh sản xuất (ERP cũ)", select(func.count(ProductionOrder.order_id)).where(
             ProductionOrder.product_id == product_id)),
         ("work order", select(func.count(WorkOrder.wo_id)).where(WorkOrder.product_id == product_id)),
@@ -135,7 +135,7 @@ def delete_material(db: Session, material_id: str, user: User) -> None:
             FilterOrderMaterialLine.material_id == material_id)),
         ("lô hàng tồn kho", select(func.count(MaterialLot.lot_id)).where(MaterialLot.material_id == material_id)),
         ("gán nhóm chỉ tiêu QC", select(func.count(MaterialQcGroup.link_id)).where(
-            MaterialQcGroup.material_id == material_id, MaterialQcGroup.active.is_(True))),
+            MaterialQcGroup.material_id == material_id, MaterialQcGroup.active == true())),
         ("phiếu nhập/xuất kho", select(func.count(StockMovement.movement_id)).where(
             StockMovement.material_id == material_id)),
         ("đề nghị nhận kho", select(func.count(MaterialRequestLine.line_id)).where(
@@ -157,7 +157,7 @@ def delete_finished_product(db: Session, finished_product_id: str, user: User) -
         ("mẻ chiết", select(func.count(BottleRecord.bottle_id)).where(
             BottleRecord.finished_product_id == finished_product_id)),
         ("nhóm chỉ tiêu công đoạn", select(func.count(StageQcGroup.link_id)).where(
-            StageQcGroup.finished_product_id == finished_product_id, StageQcGroup.active.is_(True))),
+            StageQcGroup.finished_product_id == finished_product_id, StageQcGroup.active == true())),
         ("vỉ/keg tồn kho thành phẩm", select(func.count(FinishedGoodsUnit.unit_id)).where(
             FinishedGoodsUnit.finished_product_id == finished_product_id)),
     ]
