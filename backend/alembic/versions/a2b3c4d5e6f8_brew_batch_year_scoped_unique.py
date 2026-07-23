@@ -22,11 +22,21 @@ depends_on = None
 
 def upgrade() -> None:
     op.add_column('brew_batch', sa.Column('batch_year', sa.Integer(), nullable=True))
-    op.execute("""
-        UPDATE brew_batch SET batch_year = CAST(
-            strftime('%Y', COALESCE(started_at, created_at)) AS INTEGER
+    # Backfill batch_year trong Python — tránh strftime() (SQLite-only, fail trên SQL Server).
+    conn = op.get_bind()
+    brew_batch = sa.table(
+        'brew_batch',
+        sa.column('batch_id', sa.Unicode(64)),
+        sa.column('started_at', sa.DateTime(timezone=True)),
+        sa.column('created_at', sa.DateTime(timezone=True)),
+        sa.column('batch_year', sa.Integer()),
+    )
+    rows = conn.execute(sa.select(brew_batch.c.batch_id, brew_batch.c.started_at, brew_batch.c.created_at)).all()
+    for batch_id, started_at, created_at in rows:
+        year = (started_at or created_at).year
+        conn.execute(
+            brew_batch.update().where(brew_batch.c.batch_id == batch_id).values(batch_year=year)
         )
-    """)
     with op.batch_alter_table('brew_batch', recreate='always') as batch_op:
         batch_op.alter_column('batch_year', nullable=False)
         batch_op.drop_constraint('uq_brew_batch_brew_code', type_='unique')

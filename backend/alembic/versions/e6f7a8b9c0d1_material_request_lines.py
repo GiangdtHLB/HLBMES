@@ -9,6 +9,8 @@ quantity/uom/preferred_lot_id/status/fulfilled_*/reason từ material_request
 (trước đây 1 dòng = 1 phiếu) sang bảng con material_request_line mới (1 phiếu
 = nhiều dòng, mỗi dòng xử lý duyệt/từ chối độc lập vì mỗi vật tư cần chọn lô riêng).
 """
+import uuid
+
 from alembic import op
 import sqlalchemy as sa
 
@@ -41,16 +43,23 @@ def upgrade() -> None:
     op.create_index('ix_material_request_line_status', 'material_request_line', ['status'])
 
     # Chuyển dữ liệu cũ (1 dòng = 1 phiếu) thành 1 dòng con của chính phiếu đó,
-    # rồi bỏ các cột dòng-cụ-thể khỏi header (môi trường dev, chưa có dữ liệu thật cần giữ nguyên).
+    # rồi bỏ các cột dòng-cụ-thể khỏi header. line_id sinh bằng Python (uuid4) —
+    # không dùng randomblob/hex (SQLite-only, fail trên SQL Server).
     conn = op.get_bind()
-    conn.execute(sa.text("""
-        INSERT INTO material_request_line
-            (line_id, request_id, seq, material_id, quantity, uom, preferred_lot_id,
-             status, fulfilled_lot_id, fulfilled_qty, fulfilled_by, fulfilled_at, reason)
-        SELECT lower(hex(randomblob(16))), request_id, 0, material_id, quantity, uom, preferred_lot_id,
+    rows = conn.execute(sa.text("""
+        SELECT request_id, material_id, quantity, uom, preferred_lot_id,
                status, fulfilled_lot_id, fulfilled_qty, fulfilled_by, fulfilled_at, reason
         FROM material_request
-    """))
+    """)).mappings().all()
+    for row in rows:
+        conn.execute(sa.text("""
+            INSERT INTO material_request_line
+                (line_id, request_id, seq, material_id, quantity, uom, preferred_lot_id,
+                 status, fulfilled_lot_id, fulfilled_qty, fulfilled_by, fulfilled_at, reason)
+            VALUES
+                (:line_id, :request_id, 0, :material_id, :quantity, :uom, :preferred_lot_id,
+                 :status, :fulfilled_lot_id, :fulfilled_qty, :fulfilled_by, :fulfilled_at, :reason)
+        """), {**row, "line_id": str(uuid.uuid4())})
 
     with op.batch_alter_table('material_request') as batch:
         batch.drop_index('ix_material_request_material_id')
