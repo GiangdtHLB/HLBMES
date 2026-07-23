@@ -65,6 +65,20 @@ công thức cùng 1 product → xử lý dữ liệu (không sửa migration, k
 báo bên vận hành, thống nhất cách làm sạch/tách dữ liệu **trước** khi áp migration.
 Nếu migration mới đặt ràng buộc chặt hơn dữ liệu hiện có, ghi rõ trong mô tả migration.
 
+## 3b. Lỗi dialect TẦNG ỨNG DỤNG (query runtime — gate migration KHÔNG bắt được)
+Không chỉ migration; **code truy vấn** cũng phải chạy trên MSSQL. Đã gặp:
+
+- **`Column.is_(True)` / `.is_(False)` trên cột Boolean** → SQLAlchemy render `col IS 1`.
+  MSSQL chỉ cho `IS NULL` → 500 `Incorrect syntax near '1'`. SQLite/Postgres thì chạy.
+  **Dùng `Column == true()` / `== false()`** (`from sqlalchemy import true, false`) → render
+  `col = 1`, chạy mọi dialect, sạch ruff E712. KHÔNG dùng `== True` (E712).
+- Tránh raw SQL đặc thù dialect trong service: `LIMIT`/`OFFSET` thô (MSSQL: `TOP`/`OFFSET
+  FETCH` — ưu tiên `.limit()`/`.offset()` của ORM), `strftime`/`randomblob`/`hex()`/`ilike`.
+
+Cách bắt: sau khi lên MSSQL, chạy smoke toàn bộ GET endpoint (enumerate `/openapi.json`,
+gọi từng route không path-param với token admin, gom mọi HTTP 500). Đợt vừa rồi quét 143
+endpoint bắt trọn lớp `.is_(True)`.
+
 ## 4. `alembic.ini` / URL
 Mật khẩu SA test **không dùng ký tự đặc biệt** (`% @ ! /`) — ConfigParser của alembic.ini
 nội suy `%` gây lỗi. File `.env`/`docker-compose.override.yml` (chứa secret) **không commit**.
