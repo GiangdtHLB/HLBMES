@@ -11,6 +11,8 @@ Create Date: 2026-07-09
 from alembic import op
 import sqlalchemy as sa
 
+from app.alembic_mssql import prep_drop_columns
+
 revision = 'b0c1d2e3f4a5'
 down_revision = 'a9b0c1d2e3f4'
 branch_labels = None
@@ -25,6 +27,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    prep_drop_columns(op.get_bind(), 'filter_record', ['ferment_id'])
     with op.batch_alter_table('filter_record') as batch_op:
         batch_op.drop_index('ix_filter_record_ferment_id')
         batch_op.drop_column('ferment_id')

@@ -12,6 +12,8 @@ quantity/uom/preferred_lot_id/status/fulfilled_*/reason từ material_request
 from alembic import op
 import sqlalchemy as sa
 
+from app.alembic_mssql import prep_drop_columns
+
 revision = 'e6f7a8b9c0d1'
 down_revision = 'd5e6f7a8b9c0'
 branch_labels = None
@@ -43,14 +45,25 @@ def upgrade() -> None:
     # Chuyển dữ liệu cũ (1 dòng = 1 phiếu) thành 1 dòng con của chính phiếu đó,
     # rồi bỏ các cột dòng-cụ-thể khỏi header (môi trường dev, chưa có dữ liệu thật cần giữ nguyên).
     conn = op.get_bind()
-    conn.execute(sa.text("""
+    # Sinh id ngẫu nhiên theo từng dialect (randomblob chỉ có ở SQLite; MSSQL dùng NEWID()).
+    _d = conn.dialect.name
+    _idexpr = {
+        "sqlite": "lower(hex(randomblob(16)))",
+        "postgresql": "replace(cast(gen_random_uuid() as text), '-', '')",
+    }.get(_d, "lower(replace(convert(varchar(36), newid()), '-', ''))")  # mssql & mặc định
+    conn.execute(sa.text(f"""
         INSERT INTO material_request_line
             (line_id, request_id, seq, material_id, quantity, uom, preferred_lot_id,
              status, fulfilled_lot_id, fulfilled_qty, fulfilled_by, fulfilled_at, reason)
-        SELECT lower(hex(randomblob(16))), request_id, 0, material_id, quantity, uom, preferred_lot_id,
+        SELECT {_idexpr}, request_id, 0, material_id, quantity, uom, preferred_lot_id,
                status, fulfilled_lot_id, fulfilled_qty, fulfilled_by, fulfilled_at, reason
         FROM material_request
     """))
+
+    # MSSQL: DROP COLUMN chặn nếu cột còn FK / DEFAULT phụ thuộc (SQLite recreate tự lo).
+    _dropcols = ("material_id", "quantity", "uom", "preferred_lot_id", "status",
+                 "fulfilled_lot_id", "fulfilled_qty", "fulfilled_by", "fulfilled_at", "reason")
+    prep_drop_columns(conn, "material_request", _dropcols)
 
     with op.batch_alter_table('material_request') as batch:
         batch.drop_index('ix_material_request_material_id')

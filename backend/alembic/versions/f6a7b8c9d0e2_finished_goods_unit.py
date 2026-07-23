@@ -19,6 +19,8 @@ Create Date: 2026-07-18
 from alembic import op
 import sqlalchemy as sa
 
+from app.alembic_mssql import prep_drop_columns
+
 revision = 'f6a7b8c9d0e2'
 down_revision = 'c318ff4686d7'
 branch_labels = None
@@ -62,6 +64,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    prep_drop_columns(op.get_bind(), 'finished_product', ['unit_type'])
     with op.batch_alter_table('finished_product') as batch_op:
         batch_op.drop_column('unit_type')
         batch_op.alter_column('pack_size', new_column_name='units_per_case')

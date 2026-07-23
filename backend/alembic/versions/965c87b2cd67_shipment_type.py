@@ -10,6 +10,8 @@ Create Date: 2026-07-18
 from alembic import op
 import sqlalchemy as sa
 
+from app.alembic_mssql import prep_drop_columns
+
 revision = '965c87b2cd67'
 down_revision = 'f6a7b8c9d0e2'
 branch_labels = None
@@ -22,5 +24,6 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    prep_drop_columns(op.get_bind(), 'shipment', ['shipment_type'])
     with op.batch_alter_table('shipment') as batch_op:
         batch_op.drop_column('shipment_type')

@@ -15,6 +15,8 @@ Không backfill dữ liệu.
 from alembic import op
 import sqlalchemy as sa
 
+from app.alembic_mssql import prep_drop_columns
+
 revision = 'd0e1f2a3b4c5'
 down_revision = 'c8d9e0f1a2b3'
 branch_labels = None
@@ -36,8 +38,10 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    conn = op.get_bind()
     op.drop_index('ix_filter_order_tank_source_filter_id', table_name='filter_order_tank')
     op.drop_index('ix_filter_order_tank_source_bbt_code', table_name='filter_order_tank')
+    prep_drop_columns(conn, 'filter_order_tank', ['reason', 'source_filter_id', 'source_bbt_code', 'tank_type'])
     with op.batch_alter_table('filter_order_tank') as batch_op:
         batch_op.drop_column('reason')
         batch_op.drop_column('source_filter_id')
@@ -45,6 +49,7 @@ def downgrade() -> None:
         batch_op.drop_column('tank_type')
         batch_op.alter_column('ferment_id', existing_type=sa.Unicode(64), nullable=False)
 
+    prep_drop_columns(conn, 'filter_record', ['source_filter_id'])
     with op.batch_alter_table('filter_record') as batch_op:
         batch_op.drop_index('ix_filter_record_source_filter_id')
         batch_op.drop_column('source_filter_id')

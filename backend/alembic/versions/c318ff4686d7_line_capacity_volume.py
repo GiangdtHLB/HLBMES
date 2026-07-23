@@ -12,6 +12,8 @@ Create Date: 2026-07-18
 from alembic import op
 import sqlalchemy as sa
 
+from app.alembic_mssql import prep_drop_columns
+
 revision = 'c318ff4686d7'
 down_revision = '72757896fc52'
 branch_labels = None
@@ -26,6 +28,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    prep_drop_columns(op.get_bind(), 'production_line', ['volume_uom', 'volume', 'capacity_uom'])
     with op.batch_alter_table('production_line') as batch_op:
         batch_op.drop_column('volume_uom')
         batch_op.drop_column('volume')

@@ -16,6 +16,8 @@ Create Date: 2026-07-20
 from alembic import op
 import sqlalchemy as sa
 
+from app.alembic_mssql import prep_drop_columns
+
 revision = 'a4b5c6d7e8f9'
 down_revision = 'b1c2d3e4f5a7'
 branch_labels = None
@@ -33,10 +35,13 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    conn = op.get_bind()
+    prep_drop_columns(conn, 'material_request_line', ['fifo_ok'])
     with op.batch_alter_table('material_request_line') as batch:
         batch.drop_column('fifo_ok')
     op.drop_index('ix_material_request_source_id', table_name='material_request')
     op.drop_index('ix_material_request_source_type', table_name='material_request')
+    prep_drop_columns(conn, 'material_request', ['source_id', 'source_type'])
     with op.batch_alter_table('material_request') as batch:
         batch.drop_column('source_id')
         batch.drop_column('source_type')

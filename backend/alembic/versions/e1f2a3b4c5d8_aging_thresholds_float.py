@@ -13,21 +13,38 @@ Create Date: 2026-07-22
 from alembic import op
 import sqlalchemy as sa
 
+from app.alembic_mssql import prep_drop_columns
+
 revision = 'e1f2a3b4c5d8'
 down_revision = 'd0e1f2a3b4c6'
 branch_labels = None
 depends_on = None
 
+# Ngưỡng aging_* được thêm kèm server_default (30/60/90) ở d0e1f2a3b4c6 → có ràng buộc
+# DF__ trên MSSQL. MSSQL từ chối ALTER COLUMN đổi kiểu khi cột còn DEFAULT phụ thuộc
+# (error 5074) → phải gỡ DEFAULT trước, đổi kiểu, rồi gắn lại DEFAULT.
+_AGING = (('aging_caution_days', '30'), ('aging_warning_days', '60'), ('aging_critical_days', '90'))
+
+
+def _retype(new_type, defaults):
+    d = op.get_bind().dialect.name
+    if d == 'mssql':
+        conn = op.get_bind()
+        cols = [c for c, _ in _AGING]
+        prep_drop_columns(conn, 'ops_setting', cols)   # gỡ DEFAULT (DF__) trước
+        for c in cols:
+            op.alter_column('ops_setting', c, type_=new_type, existing_nullable=False)
+        for c, dv in defaults:                          # gắn lại DEFAULT
+            conn.execute(sa.text(f"ALTER TABLE ops_setting ADD CONSTRAINT df_ops_setting_{c} DEFAULT {dv} FOR {c}"))
+    else:
+        with op.batch_alter_table('ops_setting') as batch_op:
+            for c in (c for c, _ in _AGING):
+                batch_op.alter_column(c, type_=new_type, existing_nullable=False)
+
 
 def upgrade() -> None:
-    with op.batch_alter_table('ops_setting') as batch_op:
-        batch_op.alter_column('aging_caution_days', type_=sa.Float(), existing_nullable=False)
-        batch_op.alter_column('aging_warning_days', type_=sa.Float(), existing_nullable=False)
-        batch_op.alter_column('aging_critical_days', type_=sa.Float(), existing_nullable=False)
+    _retype(sa.Float(), _AGING)
 
 
 def downgrade() -> None:
-    with op.batch_alter_table('ops_setting') as batch_op:
-        batch_op.alter_column('aging_caution_days', type_=sa.Integer(), existing_nullable=False)
-        batch_op.alter_column('aging_warning_days', type_=sa.Integer(), existing_nullable=False)
-        batch_op.alter_column('aging_critical_days', type_=sa.Integer(), existing_nullable=False)
+    _retype(sa.Integer(), _AGING)

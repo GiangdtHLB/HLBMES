@@ -10,7 +10,6 @@ Create Date: 2026-07-16
   làm Lệnh nấu không tự nạp được định mức NVL từ Công thức.
 """
 from alembic import op
-import sqlalchemy as sa
 
 revision = 'e7f8a9b0c1d2'
 down_revision = 'd6e7f8a9b0c1'

@@ -12,6 +12,8 @@ Create Date: 2026-07-16
 from alembic import op
 import sqlalchemy as sa
 
+from app.alembic_mssql import prep_drop_columns
+
 revision = 'b4c5d6e7f8a9'
 down_revision = 'a3b4c5d6e7f8'
 branch_labels = None
@@ -24,5 +26,6 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    prep_drop_columns(op.get_bind(), 'filter_record', ['nuoc_bai_khi_hl'])
     with op.batch_alter_table('filter_record') as batch_op:
         batch_op.drop_column('nuoc_bai_khi_hl')
