@@ -117,7 +117,7 @@ def title_slide(prs, kicker, title, subtitle):
     tb(s, 0.92, 4.35, 11, 0.6, [one(subtitle, 19, ICE)])
     rect(s, 0.95, 5.25, 2.6, 0.06, TEAL)
     tb(s, 0.9, 6.6, 11, 0.4,
-       [one(kicker + "  ·  Phiên bản 0.1.0-mvp  ·  Tài liệu hướng dẫn nội bộ", 12, ICE)])
+       [one(kicker + "  ·  Phiên bản 0.1.0-mvp  ·  Cập nhật 23/07/2026", 12, ICE)])
     return s
 
 
@@ -232,9 +232,9 @@ def deck_architecture():
     s = blank(prs); heading(s, "Kiến trúc phân tầng", "Layered architecture")
     layers = [("CLIENT", "Web UI · Kiosk · Swagger · phần mềm ngoài (API) · edge OPC UA", ICE, NAVY),
               ("MIDDLEWARE", "request-id · rate-limit · log · /metrics · ánh xạ lỗi → HTTP", SEA, WHITE),
-              ("ROUTERS", "~31 router · ~180 REST endpoint", TEAL, WHITE),
-              ("SERVICES", "23 module quy tắc nghiệp vụ (batches, recipes, quality, bom…)", TEAL, WHITE),
-              ("MODELS (ORM)", "~40 bảng theo bounded context", NAVY, WHITE),
+              ("ROUTERS", "32 router · ~379 REST endpoint", TEAL, WHITE),
+              ("SERVICES", "47 module quy tắc nghiệp vụ (batches, recipes, quality, bom, brew_order, filter_order, integration_connection…)", TEAL, WHITE),
+              ("MODELS (ORM)", "~100 lớp theo bounded context", NAVY, WHITE),
               ("DATABASE", "SQLite (dev)  ·  PostgreSQL 16 + Alembic (prod)", NAVY2, WHITE)]
     y = 1.7
     for name, desc, fill, fg in layers:
@@ -266,13 +266,13 @@ def deck_architecture():
     simple_table(s, 0.6, 1.75, 12.1, rows, [0.26, 0.30, 0.44], rh=0.42, bsize=11)
 
     # 6. Mô hình dữ liệu
-    s = blank(prs); heading(s, "Mô hình dữ liệu (~40 bảng)", "12 bounded context")
-    ctxs = [("Auth", "User, Session"), ("Master", "Product, Material, Line"),
-            ("Lệnh & điều độ", "PO, WorkOrder, ScheduleSlot"), ("Công thức", "Recipe, Version, Change"),
-            ("Thực thi mẻ", "Batch, PhaseRun, Reading, OEE"), ("Vật tư & phả hệ", "Lot, GenealogyEdge, Dispense"),
-            ("Chất lượng", "QC Result, Deviation, CAPA, Sample"), ("Nấu-Lọc-Chiết", "Brew, Ferment, Filter, Bottle"),
-            ("Kho & bao bì", "StockMovement, Pallet, Case"), ("CMMS & năng lượng", "Equipment, Incident, Energy"),
-            ("Historian", "HistorianPoint (UNS tag)"), ("Audit & AI", "AuditLog, Signature, Conversation")]
+    s = blank(prs); heading(s, "Mô hình dữ liệu (~100 lớp)", "12 bounded context")
+    ctxs = [("Auth", "User, Session"), ("Master", "Product, BeerType, FinishedProduct, Material, Supplier, Line"),
+            ("Lệnh nấu/lọc phân cấp", "BrewMasterOrder/Order, FilterMasterOrder/Order"), ("Công thức", "Recipe, Version, Change"),
+            ("Thực thi mẻ", "Batch, PhaseRun, Reading, OEE"), ("Nấu-Lọc-Chiết", "BrewBatch, FermentRecord, FilterRecord, BottleRecord"),
+            ("Chất lượng", "QC Result, Deviation, CAPA, Sample, QcGroup"), ("Kho NVL 2 địa điểm", "MaterialLot, StockMovement, MaterialRequest, StockCount"),
+            ("WMS theo unit", "FinishedGoodsUnit, Shipment, LoadSlip"), ("CMMS & năng lượng", "Equipment, Incident, Energy"),
+            ("Tích hợp CSDL ngoài", "SqlConnection, ImportProfile, custom field"), ("Audit & AI", "AuditLog, Signature, Conversation")]
     for i, (h, d) in enumerate(ctxs):
         col = i % 3; row = i // 3
         l = 0.6 + col * 4.08; t = 1.75 + row * 1.28
@@ -319,10 +319,10 @@ def deck_architecture():
           "Buộc đổi mật khẩu mặc định", "Fallback header chỉ ở dev"], NAVY)
     card(s, 6.75, 1.75, 5.95, 2.3, "2", "RBAC + quyền thao tác",
          ["5 vai trò: operator/supervisor/", "   qa/engineer/admin",
-          "19 quyền (require_perm)", "Admin: toàn quyền"], TEAL)
-    card(s, 0.6, 4.2, 5.95, 2.3, "3", "SoD + data-scoping",
+          "21 quyền (require_perm)", "Admin: toàn quyền"], TEAL)
+    card(s, 0.6, 4.2, 5.95, 2.3, "3", "SoD + data-scoping (4 chiều)",
          ["Soạn ≠ duyệt; ghi QC ≠ release", "Ký ≠ khóa EBR",
-          "Scope theo line / khu vực / loại test"], SEA)
+          "Scope: line / khu vực / loại test /", "   địa điểm kho (cty ↔ phân xưởng)"], SEA)
     card(s, 6.75, 4.2, 5.95, 2.3, "4", "Toàn vẹn (21 CFR Part 11)",
          ["Audit append-only + hash-chain", "verify-chain phát hiện giả mạo",
           "E-signature re-auth + lý do", "EBR khóa → mẻ bất biến"], AMBER)
@@ -333,10 +333,10 @@ def deck_architecture():
          ["X-API-Key scope read/write", "batches · inventory · OEE",
           "energy · quality · trace", "Feed sự kiện (since_seq)",
           "Nhận event ngoài (ghi qua", "   record_audit, không gãy", "   hash-chain)"], TEAL)
-    card(s, 4.73, 1.75, 3.86, 4.6, "B", "Edge & Historian",
-         ["Tag UNS brewery/site/area/", "   device/metric", "ingest qua X-API-Key write",
-          "downsample min/avg/max", "edge_sim mô phỏng gateway",
-          "opcua_edge: client OPC UA", "   thật (Weihenstephan)"], SEA)
+    card(s, 4.73, 1.75, 3.86, 4.6, "B", "CSDL SCADA thật (mới)",
+         ["Kết nối SQL Server ngoài", "   (WinCC…), chỉ SELECT",
+          "1 kết nối nhiều purpose", "Panel Realtime 30K/nước thải",
+          "tự làm mới 15s + tự thử lại", "kết nối lỗi mỗi 15s"], SEA)
     card(s, 8.86, 1.75, 3.86, 4.6, "C", "Barcode / Kiosk",
          ["Tem Code39 + QR (segno)", "/api/scan phân giải mã",
           "lô / mẻ / WO / đơn hàng", "Kiosk cảm ứng cho xưởng",
@@ -370,22 +370,22 @@ def deck_architecture():
             ["Đóng gói", "Docker compose: app FastAPI + PostgreSQL 16"],
             ["Migration", "Alembic upgrade head (prod) · create_all (dev)"],
             ["Backup", "backup.sh / restore.sh + test_restore (verify hash-chain)"],
-            ["CI / Test", "GitHub Actions: ruff + pytest (30/30) + docker build"]]
+            ["CI / Test", "GitHub Actions: ruff + pytest (57 file test) + docker build"]]
     simple_table(s, 0.6, 1.75, 12.1, rows, [0.26, 0.74], rh=0.46, bsize=11)
 
     # 13. Giới hạn
     s = blank(prs); heading(s, "Giới hạn & ranh giới tích hợp thật", "Chủ ý cho MVP")
-    lims = ["Tích hợp thiết bị OT chạy ở dạng mô phỏng edge + client OPC UA demo — production cần trỏ PLC/SCADA thật",
-            "Historian dùng SQLite; production swap TimescaleDB/InfluxDB (điểm cắm đã sẵn)",
+    lims = ["Panel Realtime đã đọc CSDL SCADA THẬT qua WAN (không còn mô phỏng) — mới nối 2 nguồn (30K, nước thải)",
+            "Historian nội bộ (edge OT demo) vẫn mô phỏng — production swap TimescaleDB/InfluxDB (điểm cắm đã sẵn)",
             "Chưa có SSO/OIDC + MFA (cần IdP); HTTPS qua reverse proxy (mẫu nginx sẵn)",
             "availability là kiểm tra tư vấn, chưa giữ chỗ tồn (TOCTOU nếu tạo mẻ đồng thời)",
             "Worker nền in-process; quy mô rất lớn → Celery/RQ + Redis broker",
             "Hồ sơ CSV/IQ-OQ-PQ & UAT theo ca thật thuộc quy trình tại site"]
     for i, lx in enumerate(lims):
-        t = 1.8 + i * 0.82
-        circle(s, 0.6, t, 0.5, AMBER, "!", NAVY, 16)
-        rect(s, 1.3, t, 11.4, 0.66, CARD, rounded=True, line=LINEC, lw=0.6)
-        tb(s, 1.55, t, 11.0, 0.66, [one(lx, 12, INK, line=1.0)], anchor=MSO_ANCHOR.MIDDLE)
+        t = 1.68 + i * 0.72
+        circle(s, 0.6, t, 0.46, AMBER, "!", NAVY, 15)
+        rect(s, 1.3, t, 11.4, 0.6, CARD, rounded=True, line=LINEC, lw=0.6)
+        tb(s, 1.55, t, 11.0, 0.6, [one(lx, 11.5, INK, line=1.0)], anchor=MSO_ANCHOR.MIDDLE)
     footer(s, "Mọi phần mô phỏng đều có điểm tích hợp chuẩn để cắm thiết bị/DB thật về sau")
 
     prs.save("docs/MES-KienTruc.pptx")
@@ -403,14 +403,14 @@ def deck_features():
 
     # 2. Stats
     s = blank(prs); heading(s, "Phạm vi phần mềm", "Một cái nhìn")
-    stat(s, 0.6, 1.9, 2.85, "~31", "router REST", NAVY)
-    stat(s, 3.65, 1.9, 2.85, "~180", "endpoint API", TEAL)
-    stat(s, 6.7, 1.9, 2.85, "~40", "bảng dữ liệu", SEA)
-    stat(s, 9.75, 1.9, 2.85, "28", "tab giao diện", AMBER)
-    stat(s, 0.6, 3.85, 2.85, "23", "service nghiệp vụ", TEAL)
+    stat(s, 0.6, 1.9, 2.85, "32", "router REST", NAVY)
+    stat(s, 3.65, 1.9, 2.85, "~379", "endpoint API", TEAL)
+    stat(s, 6.7, 1.9, 2.85, "~100", "lớp dữ liệu", SEA)
+    stat(s, 9.75, 1.9, 2.85, "27", "nhóm tính năng", AMBER)
+    stat(s, 0.6, 3.85, 2.85, "47", "service nghiệp vụ", TEAL)
     stat(s, 3.65, 3.85, 2.85, "13/13", "phân hệ hardcore", NAVY)
-    stat(s, 6.7, 3.85, 2.85, "30/30", "test tự động", SEA)
-    stat(s, 9.75, 3.85, 2.85, "5", "vai trò + 19 quyền", AMBER)
+    stat(s, 6.7, 3.85, 2.85, "57", "file test", SEA)
+    stat(s, 9.75, 3.85, 2.85, "5", "vai trò + 21 quyền", AMBER)
     tb(s, 0.6, 5.95, 12.1, 0.8,
        [one("Mỗi tính năng đều có endpoint API và quyền yêu cầu rõ ràng — chi tiết trong tài liệu Danh sách Tính năng.",
             14, GREY, i=True, line=1.1)])
@@ -418,8 +418,8 @@ def deck_features():
     # 3. Sản xuất
     s = blank(prs); heading(s, "Phân hệ sản xuất", "Từ lệnh đến mẻ")
     card(s, 0.6, 1.75, 3.86, 4.7, "1", "Lệnh & điều độ",
-         ["Tạo lệnh ERP (PO)", "Work Order ngày/ca/line", "Dispatch phát mẻ",
-          "planned vs actual", "Lập lịch Gantt tối ưu", "CIP + né bảo trì"], NAVY)
+         ["Tạo lệnh ERP (PO)", "Work Order ngày/ca/line", "Lệnh nấu/lọc phân cấp",
+          "   (cha → nhiều lệnh con)", "Hoàn thành theo thể tích", "Lập lịch Gantt tối ưu"], NAVY)
     card(s, 4.73, 1.75, 3.86, 4.7, "2", "Công thức & BOM",
          ["Version + workflow duyệt", "BOM scale theo mẻ", "Dung sai ± %",
           "Kiểm tra tồn trước mẻ", "NVL thay thế", "Yield theo công đoạn",
@@ -441,14 +441,14 @@ def deck_features():
 
     # 5. Kho & logistics
     s = blank(prs); heading(s, "Kho & Logistics", "NVL · thành phẩm · bao bì")
-    card(s, 0.6, 1.75, 3.86, 4.6, "K", "Kho NVL",
-         ["Nhập / xuất / hoàn / sang ngang", "Sổ cái bất biến",
-          "Tồn on-hand", "Thẻ kho (số dư lũy kế)", "Hạn sử dụng (FEFO)",
-          "BC nhập-xuất-tồn"], NAVY, bsize=12.5)
-    card(s, 4.73, 1.75, 3.86, 4.6, "W", "Kho TP (WMS)",
-         ["Đóng pallet (+ case + barcode)", "Vị trí kho (bin/cold/dock)",
-          "Putaway / ship", "% lấp đầy", "Phân giải barcode",
-          "Tem Code39"], TEAL, bsize=12.5)
+    card(s, 0.6, 1.75, 3.86, 4.6, "K", "Kho NVL — 2 địa điểm",
+         ["Kho công ty ↔ Kho phân xưởng", "Đề nghị nhận kho (FIFO)",
+          "Kiểm kê định kỳ + duyệt", "Sổ cái bất biến + hoàn tác",
+          "Cảnh báo tồn tối thiểu", "Lịch sử dùng NVL theo mẻ"], NAVY, bsize=12)
+    card(s, 4.73, 1.75, 3.86, 4.6, "W", "Kho TP (WMS theo unit)",
+         ["FinishedGoodsUnit (thay pallet)", "Cất vị trí / điều chuyển",
+          "Phân rã & gộp theo lô", "Bia cận date + Xuất tự do",
+          "Lệnh đóng hàng (import Excel)", "Xuất kho FIFO theo loại"], TEAL, bsize=12)
     card(s, 8.86, 1.75, 3.86, 4.6, "B", "Bao bì tuần hoàn",
          ["Vỏ chai / két-gông / keg", "Tồn + lưu hành ngoài",
           "Tiền cược (deposit)", "Biến động: nhập/xuất/", "   thu hồi/loại bỏ/kiểm kê",
@@ -491,9 +491,10 @@ def deck_features():
     card(s, 4.73, 1.75, 3.86, 4.6, "↔", "Cổng tích hợp",
          ["API mở /api/v1 (X-API-Key)", "Feed + nhận sự kiện",
           "Quản lý API key (scope)", "Webhook (HMAC secret)"], NAVY, bsize=12.5, hsize=15)
-    card(s, 8.86, 1.75, 3.86, 4.6, "📡", "Edge & Realtime",
-         ["Historian time-series", "Tag UNS + downsample",
-          "Tab Realtime auto 4s", "edge_sim + OPC UA thật"], SEA, bsize=12.5, hsize=14)
+    card(s, 8.86, 1.75, 3.86, 4.6, "📡", "Realtime SCADA thật",
+         ["Đọc trực tiếp CSDL WinCC", "   ngoài (WAN), chỉ SELECT",
+          "Máy chiết 30K + trạm", "   quan trắc nước thải",
+          "Tự làm mới 15s + tự", "   thử lại kết nối lỗi"], SEA, bsize=12, hsize=14)
 
     # 9. Highlight 13/13
     s = blank(prs, NAVY)
@@ -547,7 +548,7 @@ def deck_userguide():
     footer(s, "Đổi mật khẩu & sửa họ tên bất kỳ lúc nào trong tab Hồ sơ")
 
     # 4. Bảng tài khoản
-    s = blank(prs); heading(s, "10 tài khoản demo", "Mật khẩu demo: 123456 · admin: admin123")
+    s = blank(prs); heading(s, "11 tài khoản demo", "Mật khẩu demo: 123456 · admin: admin123")
     rows = [["Tài khoản", "Chức danh", "Vai trò"],
             ["admin", "Quản trị hệ thống", "admin"],
             ["giamdoc", "Giám đốc nhà máy", "supervisor (xem)"],
@@ -556,10 +557,11 @@ def deck_userguide():
             ["vanhanh", "Nhân viên vận hành", "operator"],
             ["kcs", "Nhân viên KCS / QA", "qa"],
             ["kysu", "Kỹ sư công nghệ", "engineer"],
-            ["thukho", "Thủ kho NVL", "operator"],
+            ["thukho", "Thủ kho NVL (Kho công ty)", "operator"],
+            ["thukho_px", "Thủ kho phân xưởng", "operator"],
             ["baotri", "Nhân viên bảo trì", "operator"],
             ["nangluong", "NV quản lý năng lượng", "operator"]]
-    simple_table(s, 0.6, 1.7, 9.0, rows, [0.28, 0.46, 0.26], rh=0.345, bsize=11, hsize=11)
+    simple_table(s, 0.6, 1.7, 9.0, rows, [0.28, 0.46, 0.26], rh=0.32, bsize=10.5, hsize=11)
     rect(s, 9.9, 1.7, 2.8, 3.95, CARD, rounded=True, line=LINEC, lw=0.75)
     tb(s, 10.1, 1.9, 2.45, 3.6,
        [one("Lưu ý", 14, AMBER, b=True, sa=6),
@@ -571,7 +573,7 @@ def deck_userguide():
     s = blank(prs); heading(s, "Vì sao tôi không bấm được nút nào đó?", "4 lớp kiểm soát")
     layers = [("1", "Menu", "Chức danh quyết định tab nào hiện. Tab Hồ sơ luôn có.", NAVY),
               ("2", "Quyền thao tác", "Nút ghi/tạo/duyệt chỉ chạy nếu có quyền — thiếu thì báo 403.", TEAL),
-              ("3", "Phạm vi (scope)", "Chỉ thao tác trên line / khu vực / loại test được phân.", SEA),
+              ("3", "Phạm vi (scope)", "Chỉ thao tác trên line / khu vực / loại test / địa điểm kho được phân.", SEA),
               ("4", "Phân tách (SoD)", "Không tự duyệt việc mình làm: soạn≠duyệt, ghi QC≠release, ký≠khóa.", AMBER)]
     for i, (bd, hd, ds, col) in enumerate(layers):
         t = 1.8 + i * 1.22
@@ -602,8 +604,8 @@ def deck_userguide():
           "Theo dõi tiến độ mẻ", "Mở/đóng deviation",
           "Phê duyệt & KHÓA hồ sơ EBR", "(toàn nhà máy)"], NAVY, bsize=13)
     card(s, 6.75, 1.7, 5.95, 4.8, "T", "Trưởng ca sản xuất",
-         ["Tạo mẻ (kiểm tra tồn trước)", "Chuyển trạng thái ready→running",
-          "Consume / produce / actual", "Chạy phase ISA-88",
+         ["Tạo mẻ (kiểm tra tồn trước)", "Đề nghị nhận kho (Kho phân",
+          "   xưởng ← Kho công ty)", "Consume / produce / actual",
           "Ký điện tử EBR", "Phạm vi: Line Nấu A"], TEAL, bsize=13)
 
     s = blank(prs); heading(s, "Vận hành & KCS", "Thao tác sàn & chất lượng")
@@ -621,10 +623,11 @@ def deck_userguide():
          ["Tạo sản phẩm/vật tư", "Soạn công thức + BOM + ISA-88",
           "→ review → duyệt → hiệu lực", "(không tự duyệt bản mình soạn)",
           "Yield, change-control, NVL", "   thay thế"], TEAL, bsize=13)
-    card(s, 6.75, 1.7, 5.95, 4.8, "W", "Thủ kho NVL",
-         ["Nhập/xuất/hoàn/sang ngang", "Tồn · thẻ kho · hạn dùng",
-          "Đóng pallet thành phẩm (WMS)", "Putaway / ship + in tem",
-          "Ghi biến động bao bì", "Phạm vi: khu vực kho"], NAVY, bsize=13)
+    card(s, 6.75, 1.7, 5.95, 4.8, "W", "Thủ kho NVL (Kho công ty)",
+         ["Nhập/xuất/hoàn/sang ngang", "Duyệt đề nghị nhận kho (FIFO)",
+          "Kiểm kê định kỳ", "Tồn · thẻ kho · hạn dùng",
+          "Chặn server nếu thao tác", "   sang Kho phân xưởng",
+          "(Kho phân xưởng: tài khoản", "   thukho_px, đối xứng)"], NAVY, bsize=12.5)
 
     s = blank(prs); heading(s, "Bảo trì · Năng lượng · Giám đốc · Admin", "Các chức danh khác")
     card(s, 0.6, 1.7, 3.86, 4.8, "🔧", "Bảo trì",
@@ -637,7 +640,8 @@ def deck_userguide():
     card(s, 8.86, 1.7, 3.86, 4.8, "★", "Giám đốc & Admin",
          ["Giám đốc: chỉ xem —", "   KPI, OEE, BC, truy xuất, AI",
           "Admin: quản lý tài khoản,", "   quyền, scope, API key,",
-          "   webhook, audit"], NAVY, bsize=12.5, hsize=15)
+          "   webhook, audit", "Copy quyền: nhân bản cấu hình", "   1 tài khoản sang tài khoản khác"],
+         NAVY, bsize=11.5, hsize=15)
 
     # 11. Quy trình end-to-end
     s = blank(prs); heading(s, "Quy trình end-to-end một mẻ", "Ai làm gì")

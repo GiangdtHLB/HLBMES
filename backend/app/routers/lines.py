@@ -9,8 +9,9 @@ from ..common import new_id
 from ..database import get_db
 from ..errors import NotFoundError, PermissionError_
 from ..models.lines import ProductionLine
-from ..schemas import LineIn
+from ..schemas import LineIn, LineUpdate
 from ..security import User, get_current_user, require_perm
+from ..services import master_data
 
 router = APIRouter(prefix="/api/lines", tags=["lines"])
 
@@ -24,7 +25,9 @@ def list_lines(active_only: bool = False, kind: str = None, db: Session = Depend
     if kind:
         stmt = stmt.where(ProductionLine.kind == kind)
     return [{"line_id": l.line_id, "code": l.code, "name": l.name, "area": l.area,
-             "kind": l.kind, "ideal_rate_per_min": l.ideal_rate_per_min, "active": l.active}
+             "kind": l.kind, "ideal_rate_per_min": l.ideal_rate_per_min,
+             "capacity_uom": l.capacity_uom, "volume": l.volume, "volume_uom": l.volume_uom,
+             "active": l.active}
             for l in db.execute(stmt).scalars().all()]
 
 
@@ -41,6 +44,21 @@ def create_line(payload: LineIn, db: Session = Depends(get_db), user: User = Dep
     return {"line_id": line.line_id, "code": line.code}
 
 
+@router.put("/{line_id}")
+def update_line(line_id: str, payload: LineUpdate, db: Session = Depends(get_db),
+                user: User = Depends(get_current_user)):
+    require_perm(user, "master.manage")
+    line = db.get(ProductionLine, line_id)
+    if not line:
+        raise NotFoundError("Dây chuyền/tank không tồn tại.")
+    data = payload.model_dump(exclude_unset=True)
+    for k, v in data.items():
+        setattr(line, k, v)
+    record_audit(db, entity_type="line", entity_id=line_id, action="update", actor=user, after=data)
+    db.commit()
+    return {"line_id": line.line_id, "code": line.code}
+
+
 @router.post("/{line_id}/toggle")
 def toggle_line(line_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     require_perm(user, "master.manage")
@@ -52,3 +70,8 @@ def toggle_line(line_id: str, db: Session = Depends(get_db), user: User = Depend
                  after={"active": line.active})
     db.commit()
     return {"line_id": line_id, "active": line.active}
+
+
+@router.delete("/{line_id}", status_code=204)
+def delete_line(line_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    master_data.delete_production_line(db, line_id, user)

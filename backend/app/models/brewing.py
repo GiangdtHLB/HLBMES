@@ -9,10 +9,10 @@ mô hình BatchExecution trừu tượng của lõi MES.
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import UnicodeText, Boolean, DateTime, Float, Unicode
+from sqlalchemy import UnicodeText, Boolean, Float, ForeignKey, Integer, Unicode, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
-from ..common import new_id, utcnow
+from ..common import QualityStatus, UTCDateTime, new_id, utcnow
 from ..database import Base
 
 
@@ -22,7 +22,7 @@ class MaterialReceipt(Base):
 
     receipt_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
     mskt: Mapped[str] = mapped_column(Unicode(255), index=True)          # mã số kiểm tra
-    receipt_date: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    receipt_date: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, index=True)
     material_name: Mapped[str] = mapped_column(Unicode(255))
     lot_pm: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)   # số lô PM
     lot_kcs: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)  # số lô KCS
@@ -34,18 +34,205 @@ class MaterialReceipt(Base):
     has_indicators: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
+class BrewMasterOrder(Base):
+    """Lệnh nấu lớn — mẫu giấy thật "LỆNH NẤU BIA KIÊM PHIẾU XUẤT KHO", phần hành chính chung
+    cho cả tờ (Người ra lệnh/Thực hiện/Xuất hàng, căn cứ, thời gian thực hiện, biện pháp an
+    toàn) — chỉ 1 lần cho cả lệnh dù bên trong có nhiều dịch bia. Chứa 1..N "lệnh nấu nhỏ"
+    (BrewOrder, xem master_order_id), mỗi lệnh nhỏ ứng với đúng 1 dịch bia, tự có định mức
+    NVL/sản lượng kế hoạch riêng. In ra 1 tờ gồm tất cả lệnh nhỏ bên trong (xem frontend
+    printBrewOrder), mẫu y hệt FilterMasterOrder/Lệnh lọc."""
+    __tablename__ = "brew_master_order"
+
+    brew_master_order_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
+    order_code: Mapped[str] = mapped_column(Unicode(64), unique=True, index=True)   # Số: 36/PXSXBĐM-T6/2026
+    issued_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)          # I. Người ra lệnh
+    executor_unit: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)      # II.1 Người thực hiện
+    warehouse_keeper: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)   # II.2 Người xuất hàng
+    reference_note: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)  # "Căn cứ theo nghị quyết..."
+    start_date: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+    end_date: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+    safety_note: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)
+    created_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    # Tự suy ra từ các lệnh nhỏ con (xem services/lot_lock.py::_recompute_brew_master_order_lock)
+    # — khóa khi TẤT CẢ lệnh nhỏ đã khóa, tự mở ngay khi có 1 lệnh nhỏ được mở, không có nút riêng.
+    locked: Mapped[bool] = mapped_column(Boolean, default=False)
+    locked_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    locked_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+
+
+class BrewOrder(Base):
+    """Lệnh nấu nhỏ — mẫu như FilterOrder/Lệnh lọc: mỗi lệnh nhỏ ứng với đúng 1 dịch bia, có
+    thể ứng với NHIỀU mã nấu (nhiều tank lên men) — sản lượng thực tế (BrewRecord.volume_hl)
+    cộng dồn qua các mã nấu tới khi lệch trong khoảng ±volume_tolerance_hl so với
+    planned_volume_hl thì lệnh nhỏ hoàn thành, không cho chọn thêm nữa (xem
+    services/brew_order.py::_is_complete, routers/brewing.py::add_brew). 1..N lệnh nhỏ gộp lại
+    dưới 1 "lệnh nấu lớn" (BrewMasterOrder, xem master_order_id) — phần hành chính chung của cả
+    tờ (issued_by/executor_unit/warehouse_keeper/reference_note/start_date/end_date/safety_note)
+    nằm ở đó, không lặp lại ở đây. order_code tự sinh (SUB-...) khi tạo qua lệnh lớn; vẫn dùng
+    được độc lập (master_order_id=None) qua API cũ /brewing/orders."""
+    __tablename__ = "brew_order"
+
+    brew_order_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
+    order_code: Mapped[str] = mapped_column(Unicode(64), unique=True, index=True)   # Số: 36/PXSXBĐM-T6/2026 hoặc SUB-...
+    master_order_id: Mapped[Optional[str]] = mapped_column(ForeignKey("brew_master_order.brew_master_order_id"), nullable=True, index=True)
+    seq: Mapped[int] = mapped_column(Integer, default=1)   # thứ tự "Lệnh nấu nhỏ #N" trong lệnh lớn
+    product_id: Mapped[Optional[str]] = mapped_column(ForeignKey("product.product_id"), nullable=True, index=True)
+    product_desc: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)  # "Bia lon Sapphire Mã số...+ chai..."
+    planned_batch_count: Mapped[int] = mapped_column(Integer, default=1)     # 12 mẻ
+    planned_volume_hl: Mapped[float] = mapped_column(Float, default=0.0)      # kế hoạch (hl) — dùng để scale BOM/mẻ VÀ so với sản lượng nấu thật
+    volume_tolerance_hl: Mapped[float] = mapped_column(Float, default=0.0)    # ±hl để coi lệnh hoàn thành
+    bx_min: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    bx_max: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    tank_lm: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    batch_range_from: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)   # mẻ 265-276
+    batch_range_to: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    created_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    # Khóa lô (xem services/lot_lock.py) — set khi 1 mẻ chiết hạ nguồn bị KCS "Khóa lô", chặn
+    # mọi sửa/xóa/chuyển trạng thái ở lệnh này VÀ (qua guard hiệu lực) ở mọi mã nấu con.
+    locked: Mapped[bool] = mapped_column(Boolean, default=False)
+    locked_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    locked_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+
+
+class BrewOrderMaterialLine(Base):
+    """1 dòng Định mức NVL trong Lệnh nấu — snapshot tồn kho ghi lại LÚC LẬP PHIẾU (không
+    phải tồn sống), đúng tính chất văn bản đã ký/in ra."""
+    __tablename__ = "brew_order_material_line"
+
+    line_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
+    brew_order_id: Mapped[str] = mapped_column(ForeignKey("brew_order.brew_order_id"), index=True)
+    seq: Mapped[int] = mapped_column(Integer, default=0)
+    stt_label: Mapped[Optional[str]] = mapped_column(Unicode(16), nullable=True)   # "1","2.1","A"...
+    is_header: Mapped[bool] = mapped_column(Boolean, default=False)  # dòng nhóm "A Nguyên liệu chính" (không SL)
+    material_id: Mapped[Optional[str]] = mapped_column(ForeignKey("material.material_id"), nullable=True)
+    material_name: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)  # tên tự do nếu chưa có trong Danh mục
+    uom: Mapped[Optional[str]] = mapped_column(Unicode(64), nullable=True)
+    qty_per_batch: Mapped[Optional[float]] = mapped_column(Float, nullable=True)   # Nhu cầu 1 mẻ
+    qty_total: Mapped[Optional[float]] = mapped_column(Float, nullable=True)       # Nhu cầu Tổng mẻ
+    unit_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    stock_company_snapshot: Mapped[Optional[float]] = mapped_column(Float, nullable=True)   # tồn Kho công ty lúc lập phiếu
+    stock_workshop_snapshot: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # tồn Kho phân xưởng lúc lập phiếu
+
+
 class BrewRecord(Base):
     """Thông tin nấu (mẻ dịch nha)."""
     __tablename__ = "brew_record"
 
     brew_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
     brew_code: Mapped[str] = mapped_column(Unicode(64), unique=True, index=True)   # mã nấu
-    brew_date: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    brew_date: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, index=True)
     wort_type: Mapped[str] = mapped_column(Unicode(255))                            # dịch nha
+    product_id: Mapped[Optional[str]] = mapped_column(ForeignKey("product.product_id"), nullable=True, index=True)  # loại bia (chọn chỉ tiêu theo nhóm)
     volume_hl: Mapped[float] = mapped_column(Float, default=0.0)              # SL nấu/hl
     original_extract: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # độ hòa tan nguyên thủy
     plato: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    seq: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # số mẻ (thứ tự trong lô LM)
     note: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)
+    # Bắt buộc ở tầng schema (BrewIn.brew_order_id: str) — để nullable=True ở DB để an toàn
+    # cho dữ liệu/test cũ; add_brew tự kiểm tra tồn tại + chưa bị mã nấu khác dùng.
+    brew_order_id: Mapped[Optional[str]] = mapped_column(ForeignKey("brew_order.brew_order_id"), nullable=True, index=True)
+    locked: Mapped[bool] = mapped_column(Boolean, default=False)
+    locked_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    locked_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+
+
+class BrewBatch(Base):
+    """Một mẻ cụ thể (số mẻ từ hệ thống điều khiển nấu, VD Braumat) thuộc 1 mã nấu —
+    1 mã nấu (BrewRecord) = 1 lần nấu vào 1 tank, có thể gồm nhiều mẻ; mỗi mẻ khai báo
+    nguyên liệu (BrewMaterialUsage) & chỉ tiêu (QualityResult scope_type=brew_batch) riêng."""
+    __tablename__ = "brew_batch"
+    # Số mẻ (VD Braumat) là 1 dãy đếm DUY NHẤT toàn hệ thống (không phải riêng từng mã nấu) —
+    # 2 mã nấu KHÁC NHAU không được dùng chung 1 số mẻ. Dãy số này reset lại từ đầu mỗi năm
+    # (theo năm của started_at) nên khóa duy nhất phải gồm cả batch_year, không chỉ batch_code
+    # không thôi (nếu không, năm sau sẽ không đánh lại số mẻ từ 1 được).
+    __table_args__ = (UniqueConstraint("batch_year", "batch_code", name="uq_brew_batch_year_code"),)
+
+    batch_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
+    brew_id: Mapped[str] = mapped_column(ForeignKey("brew_record.brew_id"), index=True)
+    batch_code: Mapped[str] = mapped_column(Unicode(64), index=True)  # số mẻ, VD "123"
+    batch_year: Mapped[int] = mapped_column(Integer, index=True)  # năm của started_at — phạm vi reset số mẻ
+    seq: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    note: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    # Vận hành tự bấm "Kết thúc" khi xong mẻ — started_at gán tay lúc tạo (mặc định giờ hiện
+    # tại, sửa được), ended_at chỉ set qua endpoint finish (idempotent, không sửa tay).
+    started_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+    ended_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+    locked: Mapped[bool] = mapped_column(Boolean, default=False)
+    locked_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    locked_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+    # Hold/Release theo QA (tài liệu §7.5) — riêng biệt với `locked` (chốt sổ không sửa được
+    # nữa). ON_HOLD chặn sửa/xóa/chuyển bước qua _assert_unlocked() (xem routers/brewing.py)
+    # nhưng vẫn mở khóa lại (unlock/lock) bình thường một khi đã RELEASED. Xem services/quality.py.
+    quality_status: Mapped[str] = mapped_column(Unicode(255), default=QualityStatus.RELEASED.value)
+
+
+class BrewProcessStep(Base):
+    """1 bước công đoạn tự động import từ Step Protocol (Braumat) — 1 dòng cho mỗi bước
+    (VD "RC1 Mash in Rice", "MT2 Heat Up", "WK2 Boiling 1") của 1 mẻ (BrewBatch). Giữ
+    nguyên toàn bộ tham số gốc trong params_json (JSON: {tên tham số: {setpoint, actual}})
+    để không mất dữ liệu — tên tham số PLC tùy công thức/dây chuyền, không cố định trước."""
+    __tablename__ = "brew_process_step"
+
+    step_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
+    batch_id: Mapped[str] = mapped_column(ForeignKey("brew_batch.batch_id"), index=True)
+    unit: Mapped[str] = mapped_column(Unicode(255), index=True)  # VD "RiceCooker", "MashTun 2"
+    step_no: Mapped[int] = mapped_column(Integer)
+    eop: Mapped[Optional[str]] = mapped_column(Unicode(64), nullable=True)
+    name: Mapped[str] = mapped_column(Unicode(255))  # VD "RC1 Mash in Rice"
+    start_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+    end_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+    elapsed_actual: Mapped[Optional[str]] = mapped_column(Unicode(32), nullable=True)  # "00:15:03"
+    params_json: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)
+    imported_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    imported_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+
+
+class BrewProcessLog(Base):
+    """Ghi chép nấu thủ công (khớp biểu mẫu giấy QT-KCS-QT-BM-05) cho 1 mẻ — số liệu KCS
+    đo tay (pH, %Bx, thời gian từng bước) hoặc cân/định lượng thủ công (loại malt, hóa
+    chất), không có trong dữ liệu tự động Braumat (xem BrewProcessStep cho phần tự động).
+    Toàn bộ giá trị "Thực hiện" lưu trong manual_json (xem services/braumat_import.py::
+    FORM_FIELDS cho danh sách field/nhãn đầy đủ) — tránh phải migration mỗi lần thêm field
+    mới, vì biểu mẫu giấy có rất nhiều trường (~100+) và có thể còn chỉnh sửa thêm. Giá trị
+    "Quy định" (spec/mục tiêu) tương ứng nằm ở Product.spec_json (theo dịch bia/công thức),
+    dùng CHUNG một bộ key với manual_json để so sánh Quy định — Thực hiện — Braumat."""
+    __tablename__ = "brew_process_log"
+
+    log_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
+    batch_id: Mapped[str] = mapped_column(ForeignKey("brew_batch.batch_id"), unique=True, index=True)
+    braumat_order_number: Mapped[Optional[str]] = mapped_column(Unicode(64), nullable=True)
+    braumat_batch_number: Mapped[Optional[str]] = mapped_column(Unicode(64), nullable=True)
+    braumat_recipe: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    manual_json: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)
+    note: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)
+    updated_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+
+
+class BrewMaterialUsage(Base):
+    """Nguyên liệu đã dùng cho một mẻ (BrewBatch) cụ thể — lấy thật từ tồn kho Kho phân xưởng
+    (MaterialLot), trừ kho thật qua services/warehouse.py::issue() khi gán, hoàn kho qua
+    undo_issue() khi xóa dòng. receipt_id giữ lại cho các dòng cũ (trước khi kết nối kho thật).
+    lot_date/fifo_ok chụp lại (snapshot) NGAY LÚC GÁN — không tra sống theo lot_id vì sau khi
+    issue() trừ kho, lô có thể hết (quantity=0) hoặc đã bị xóa, so sánh live sẽ sai lệch
+    (mirror MaterialRequestLine.fifo_ok, xem warehouse.py::_is_oldest_workshop_lot)."""
+    __tablename__ = "brew_material_usage"
+
+    usage_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
+    batch_id: Mapped[str] = mapped_column(ForeignKey("brew_batch.batch_id"), index=True)
+    receipt_id: Mapped[Optional[str]] = mapped_column(ForeignKey("material_receipt.receipt_id"), nullable=True)
+    lot_id: Mapped[Optional[str]] = mapped_column(ForeignKey("material_lot.lot_id"), nullable=True, index=True)
+    movement_id: Mapped[Optional[str]] = mapped_column(ForeignKey("stock_movement.movement_id"), nullable=True)
+    material_name: Mapped[str] = mapped_column(Unicode(255))
+    lot_pm: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    lot_date: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+    fifo_ok: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    quantity: Mapped[float] = mapped_column(Float, default=0.0)
+    uom: Mapped[str] = mapped_column(Unicode(255), default="kg")
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
 
 
 class FermentRecord(Base):
@@ -55,16 +242,181 @@ class FermentRecord(Base):
     ferment_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
     lm_code: Mapped[str] = mapped_column(Unicode(64), unique=True, index=True)     # Lô LM
     brew_code: Mapped[Optional[str]] = mapped_column(Unicode(64), index=True)      # mã nấu
-    brew_date: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
-    kt_date: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)  # ngày KT
+    brew_date: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+    kt_date: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)  # ngày KT
     batch_numbers: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)  # số mẻ
     wort_type: Mapped[str] = mapped_column(Unicode(255))                           # dịch nha
+    product_id: Mapped[Optional[str]] = mapped_column(ForeignKey("product.product_id"), nullable=True, index=True)  # loại bia (kế từ mẻ nấu)
     yeast_gen: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)  # đời men
     tank_lm: Mapped[str] = mapped_column(Unicode(255), index=True)                 # Tank LM
     volume_hl: Mapped[float] = mapped_column(Float, default=0.0)             # SL nấu/hl
     on_hand_cct: Mapped[float] = mapped_column(Float, default=0.0)           # đang tồn CCT/hl
     status: Mapped[str] = mapped_column(Unicode(255), default="len_men")          # len_men/cho_loc/da_loc
     ferment_days: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)  # số ngày LM (text)
+    qc_approved: Mapped[bool] = mapped_column(Boolean, default=False)  # KCS đã ký xác nhận tank lên men đạt, đồng ý cho chiết/lọc
+    qc_approved_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    qc_approved_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+    locked: Mapped[bool] = mapped_column(Boolean, default=False)
+    locked_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    locked_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+    quality_status: Mapped[str] = mapped_column(Unicode(255), default=QualityStatus.RELEASED.value)
+
+
+class FermentBrewLink(Base):
+    """Liên kết nhiều mẻ nấu (BrewRecord) vào một lô lên men/tank (FermentRecord) —
+    thay cho việc gõ tay số mẻ vào FermentRecord.batch_numbers."""
+    __tablename__ = "ferment_brew_link"
+
+    link_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
+    ferment_id: Mapped[str] = mapped_column(ForeignKey("ferment_record.ferment_id"), index=True)
+    brew_id: Mapped[str] = mapped_column(ForeignKey("brew_record.brew_id"), index=True)
+
+
+class FermentProcessLog(Base):
+    """1 dòng / lô LM (FermentRecord) — các trường nhập tay ở bảng thông tin đầu (Kiểu men,
+    mật độ B/C/D/E/F/G/J, lưu lượng khí bs, tách men, mốc Hạ phụ...) dồn vào manual_json
+    (giống BrewProcessLog.manual_json) — xem services/ferment_log.py::HEADER_FIELDS."""
+    __tablename__ = "ferment_process_log"
+
+    log_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
+    ferment_id: Mapped[str] = mapped_column(ForeignKey("ferment_record.ferment_id"), unique=True, index=True)
+    manual_json: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)
+    note: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)
+    updated_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    updated_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+
+
+class FermentDailyReading(Base):
+    """1 dòng / 1 ngày theo dõi lên men (bảng dưới cùng biểu mẫu giấy BM 1.11 (06)) — bảng
+    con riêng (không dồn vào JSON) vì cần truy vấn theo thứ tự ngày để vẽ biểu đồ. Mỗi nhóm
+    trường (đo đạc/KCS/trực ca) có audit trail riêng (by/at) — tự động ghi khi có giá trị,
+    KHÔNG nhập tay tên người/giờ (xem services/ferment_log.py::upsert_daily_readings)."""
+    __tablename__ = "ferment_daily_reading"
+
+    reading_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
+    ferment_id: Mapped[str] = mapped_column(ForeignKey("ferment_record.ferment_id"), index=True)
+    day_no: Mapped[int] = mapped_column(Integer)
+    reading_date: Mapped[Optional[str]] = mapped_column(Unicode(32), nullable=True)  # ISO "YYYY-MM-DD"
+    nhiet_do_c: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    do_s: Mapped[Optional[float]] = mapped_column(Float, nullable=True)          # °S (Plato)
+    mat_do_tb: Mapped[Optional[float]] = mapped_column(Float, nullable=True)     # 10^6/ml
+    measured_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    measured_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+    kcs: Mapped[Optional[str]] = mapped_column(Unicode(64), nullable=True)  # "dat"|"khong_dat"
+    kcs_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    kcs_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+    truc_ca: Mapped[Optional[str]] = mapped_column(Unicode(64), nullable=True)
+    truc_ca_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    truc_ca_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+
+    __table_args__ = (UniqueConstraint("ferment_id", "day_no", name="uq_ferment_daily_reading_day"),)
+
+
+class FilterMasterOrder(Base):
+    """Lệnh lọc lớn — số lệnh + ghi chú người lập; chứa 1..N "lệnh lọc nhỏ" (FilterOrder,
+    xem master_order_id bên dưới), mỗi lệnh nhỏ tự chọn phối/không phối + tank riêng + vật
+    tư riêng + thể tích dịch kế hoạch riêng. In ra 1 tờ gồm tất cả lệnh nhỏ bên trong (xem
+    frontend printFilterMasterOrder)."""
+    __tablename__ = "filter_master_order"
+
+    filter_master_order_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
+    order_code: Mapped[str] = mapped_column(Unicode(64), unique=True, index=True)
+    note: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)
+    created_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    locked: Mapped[bool] = mapped_column(Boolean, default=False)
+    locked_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    locked_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+
+
+class FilterOrder(Base):
+    """Lệnh lọc NHỎ — nhóm 1 (không phối) hoặc nhiều (phối) tank lên men lọc chung. Khai báo
+    thể tích dịch lọc KẾ HOẠCH (planned_volume_hl, đã gồm nước bài khí) + sai số cho phép
+    (volume_tolerance_hl) — có thể có NHIỀU bản ghi lọc (FilterRecord, mỗi bản ghi là 1 "mẻ
+    lọc" riêng, tank BBT chọn tự do lúc tạo — xem routers/brewing.py::add_filter); sản lượng
+    (v_beer_hl) của TẤT CẢ mẻ lọc thuộc lệnh được cộng dồn và so với kế hoạch để tính hoàn
+    thành (xem services/filter_order.py::_is_complete). Luôn thuộc về 1 FilterMasterOrder
+    (lệnh lọc lớn) — order_code do hệ thống tự sinh (không hiển thị cho người dùng gõ),
+    seq là thứ tự "Lệnh lọc nhỏ #N" trong lệnh lớn."""
+    __tablename__ = "filter_order"
+
+    filter_order_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
+    order_code: Mapped[str] = mapped_column(Unicode(64), unique=True, index=True)
+    master_order_id: Mapped[Optional[str]] = mapped_column(ForeignKey("filter_master_order.filter_master_order_id"), nullable=True, index=True)
+    seq: Mapped[int] = mapped_column(Integer, default=1)
+    blend_mode: Mapped[str] = mapped_column(Unicode(32), default="khong_phoi")  # khong_phoi/phoi
+    note: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)
+    kcs_lot_no: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)  # Số lô KCS — người lập lệnh tự đánh số tay
+    planned_volume_hl: Mapped[float] = mapped_column(Float, default=0.0)   # Thể tích dịch lọc kế hoạch (đã gồm nước bài khí)
+    volume_tolerance_hl: Mapped[float] = mapped_column(Float, default=0.0)  # Sai số cho phép (±hl) để coi lệnh đã hoàn thành
+    # Loại bia (thương hiệu) — suy tự động từ Dịch bia của (các) tank đã chọn nếu cùng 1
+    # Loại bia; nếu phối nhiều tank khác Loại bia thì người lập phải tự chọn 1 trong số đó
+    # (xem services/filter_order.py::_validate_tanks). FilterRecord/BottleRecord kế thừa
+    # giá trị này — chỉ tiêu Lọc/Chiết tra theo đây, KHÔNG theo product_id cụ thể nữa.
+    beer_type_id: Mapped[Optional[str]] = mapped_column(ForeignKey("beer_type.beer_type_id"), nullable=True, index=True)
+    # Sản phẩm đích (SKU) — tuỳ chọn, khai báo 1 lần khi lập Lệnh lọc vì cùng 1 Loại bia vẫn
+    # có thể cần chỉ tiêu Lọc khác nhau theo hình thức đóng gói đích (VD Legend chai lọc khác
+    # Legend tươi). FilterRecord kế thừa xuống, dùng để tra chỉ tiêu Lọc (xem
+    # qc_catalog.SKU_SCOPED_STAGES) — KHÔNG bắt buộc phải trùng SKU thật chọn ở Chiết sau này.
+    finished_product_id: Mapped[Optional[str]] = mapped_column(ForeignKey("finished_product.finished_product_id"), nullable=True, index=True)
+    created_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    locked: Mapped[bool] = mapped_column(Boolean, default=False)
+    locked_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    locked_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+
+
+class FilterOrderTank(Base):
+    """1 tank NGUỒN tham gia lệnh lọc — 'không phối' đúng 1 dòng, 'phối' >= 2 dòng. Nguồn có
+    thể là tank lên men (tank_type="cct", ferment_id) HOẶC 1 tank thành phẩm/BBT ĐÃ LỌC XONG
+    đang được LỌC LẠI (tank_type="bbt", source_bbt_code=mã tank BBT, source_filter_id=
+    FilterRecord đại diện đang chứa nội dung tank đó — resolve lúc add_filter, để None ở
+    dòng template; reason=lý do lọc lại, bắt buộc khi tank_type="bbt", xem
+    services/filter_order.py::_validate_tanks). filter_id IS NULL = dòng "template" (tạo lúc
+    lập lệnh, đại diện tank nguồn của cả lệnh, dùng để hiển thị cấp lệnh — xem
+    services/filter_order.py::_tank_summaries). filter_id có giá trị = dòng nhân bản RIÊNG
+    cho 1 FilterRecord cụ thể (tạo lúc add_filter, vì 1 lệnh có thể có nhiều bản ghi lọc/"mẻ
+    lọc" cộng dồn tới thể tích kế hoạch) — kết quả lọc (giờ kết thúc/dịch nha lọc/nước bài
+    khí) điền RIÊNG cho từng dòng nhân bản khi vận hành bấm "Kết thúc" (xem
+    finish_filter_tank, trừ tồn vào ferment.on_hand_cct HOẶC source_filter.on_hand_bbt tuỳ
+    tank_type); FilterRecord tổng hợp (sum) các dòng nhân bản CỦA CHÍNH NÓ (filter_id khớp)
+    khi tính sản lượng lọc (xem _sync_filter_aggregate)."""
+    __tablename__ = "filter_order_tank"
+
+    line_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
+    filter_order_id: Mapped[str] = mapped_column(ForeignKey("filter_order.filter_order_id"), index=True)
+    filter_id: Mapped[Optional[str]] = mapped_column(ForeignKey("filter_record.filter_id"), nullable=True, index=True)
+    tank_type: Mapped[str] = mapped_column(Unicode(16), default="cct")  # cct (tank lên men) | bbt (tank thành phẩm — lọc lại)
+    ferment_id: Mapped[Optional[str]] = mapped_column(ForeignKey("ferment_record.ferment_id"), nullable=True, index=True)  # bắt buộc khi tank_type="cct"
+    source_bbt_code: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True, index=True)  # mã tank BBT nguồn — bắt buộc khi tank_type="bbt"
+    source_filter_id: Mapped[Optional[str]] = mapped_column(ForeignKey("filter_record.filter_id"), nullable=True, index=True)  # FilterRecord đại diện của source_bbt_code, resolve lúc add_filter
+    reason: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)  # Lý do lọc lại — bắt buộc khi tank_type="bbt"
+    seq: Mapped[int] = mapped_column(Integer, default=1)         # 1,2,3... thứ tự tank
+    # Kế hoạch dịch lọc RIÊNG của tank này, khai báo lúc lập lệnh nhỏ — FilterOrder.planned_volume_hl
+    # = tổng planned_v_dich_hl của các dòng "template" (filter_id IS NULL). KHÁC với v_dich_hl bên
+    # dưới (thực tế, chỉ có khi vận hành bấm "Kết thúc" — xem finish_filter_tank).
+    planned_v_dich_hl: Mapped[float] = mapped_column(Float, default=0.0)
+    ended_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+    v_dich_hl: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    nuoc_bai_khi_hl: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+
+
+class FilterOrderMaterialLine(Base):
+    """Dòng vật tư dùng cho lệnh lọc (VD: bột trợ lọc/diatomite) — chọn từ Danh mục vật tư,
+    tồn kho công ty/phân xưởng được chụp lại (snapshot) NGAY LÚC LẬP LỆNH, mirror
+    BrewOrderMaterialLine (xem services/warehouse.py::material_fifo_detail)."""
+    __tablename__ = "filter_order_material_line"
+
+    line_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
+    filter_order_id: Mapped[str] = mapped_column(ForeignKey("filter_order.filter_order_id"), index=True)
+    seq: Mapped[int] = mapped_column(Integer, default=0)
+    material_id: Mapped[str] = mapped_column(ForeignKey("material.material_id"), index=True)
+    material_name: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    uom: Mapped[Optional[str]] = mapped_column(Unicode(64), nullable=True)
+    quantity: Mapped[float] = mapped_column(Float, default=0.0)
+    unit_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    stock_company_snapshot: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    stock_workshop_snapshot: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
 
 
 class FilterRecord(Base):
@@ -76,18 +428,85 @@ class FilterRecord(Base):
     brew_code: Mapped[Optional[str]] = mapped_column(Unicode(64), nullable=True)    # mã nấu
     lot_loc: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)      # mã lô lọc
     filter_phoi_code: Mapped[Optional[str]] = mapped_column(Unicode(64), nullable=True)
-    filter_date: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
-    filter_type: Mapped[str] = mapped_column(Unicode(255), default="thuong")        # thuong/phoi/ve_bbt_phoi
+    filter_date: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, index=True)
+    filter_type: Mapped[str] = mapped_column(Unicode(255), default="thuong")        # thuong/phoi/ve_bbt_phoi/loc_lai (server tự set khi có nguồn BBT)
     wort_type: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)    # loại dịch nha lọc
-    from_cct: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)     # lọc từ CCT
+    from_cct: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)     # lọc từ CCT (server tự điền từ lệnh lọc — 1 tank hoặc liệt kê nhiều tank nếu phối)
+    ferment_id: Mapped[Optional[str]] = mapped_column(ForeignKey("ferment_record.ferment_id"), nullable=True, index=True)  # lô LM nguồn — CHỈ có khi không phối (1 tank CCT); phối/nguồn BBT để None, xem FilterOrderTank
+    source_filter_id: Mapped[Optional[str]] = mapped_column(ForeignKey("filter_record.filter_id"), nullable=True, index=True)  # mẻ lọc BBT nguồn khi LỌC LẠI không phối (1 tank BBT); phối nhiều tank để None, xem FilterOrderTank.source_filter_id từng dòng
+    # Lệnh lọc (Lệnh nấu-style: lập trước, chọn 1 lệnh CHƯA DÙNG khi tạo bản ghi lọc) — tank
+    # nguồn (1 hoặc nhiều nếu phối) đến từ FilterOrderTank của lệnh này, không tự chọn tay.
+    filter_order_id: Mapped[Optional[str]] = mapped_column(ForeignKey("filter_order.filter_order_id"), nullable=True, index=True)
     v_dich_hl: Mapped[float] = mapped_column(Float, default=0.0)              # V dịch/hl
-    beer_type: Mapped[str] = mapped_column(Unicode(255))                           # loại bia lọc
+    beer_type: Mapped[str] = mapped_column(Unicode(255))                           # loại bia lọc (tên hiển thị, tự điền từ beer_type_id)
+    beer_type_id: Mapped[Optional[str]] = mapped_column(ForeignKey("beer_type.beer_type_id"), nullable=True, index=True)  # Loại bia — kế thừa từ FilterOrder.beer_type_id, dùng để tra chỉ tiêu Lọc
+    finished_product_id: Mapped[Optional[str]] = mapped_column(ForeignKey("finished_product.finished_product_id"), nullable=True, index=True)  # Sản phẩm đích (SKU) — kế thừa từ FilterOrder.finished_product_id, dùng để tra chỉ tiêu Lọc
+    product_id: Mapped[Optional[str]] = mapped_column(ForeignKey("product.product_id"), nullable=True, index=True)  # dịch bia cụ thể (kế từ tank LM nguồn, chỉ để tham khảo)
+    # V dịch/hl và nước bài khí chưa biết lúc bắt đầu lọc — chỉ điền khi vận hành bấm "Kết
+    # thúc" (xem finish_filter); v_beer_hl = v_dich_hl + nuoc_bai_khi_hl, tự tính không nhập tay.
+    nuoc_bai_khi_hl: Mapped[float] = mapped_column(Float, default=0.0)     # Nước bài khí/hl
     v_beer_hl: Mapped[float] = mapped_column(Float, default=0.0)             # V bia/hl
     to_bbt: Mapped[Optional[str]] = mapped_column(Unicode(255), index=True)        # lọc cho vào (tank BBT)
     status: Mapped[str] = mapped_column(Unicode(255), default="cho_chiet")         # cho_chiet/chiet_1_phan/da_chiet_het
     on_hand_bbt: Mapped[float] = mapped_column(Float, default=0.0)           # đang tồn BBT/hl
     has_indicators: Mapped[bool] = mapped_column(Boolean, default=False)
     has_nvl: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Trạng thái THỰC THI của vận hành (đã lọc xong việc chưa) — khác với `status` ở trên
+    # (suy ra từ tồn BBT, cho biết còn lọc/chiết tiếp được không). filter_date là mốc bắt
+    # đầu sẵn có; ended_at chỉ set qua endpoint finish khi vận hành bấm "Kết thúc".
+    ended_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+    # KCS duyệt mẻ lọc — chỉ ký được khi đã nhập đủ chỉ tiêu lọc bắt buộc (xem approve_filter),
+    # mirror FermentRecord.qc_approved.
+    qc_approved: Mapped[bool] = mapped_column(Boolean, default=False)
+    qc_approved_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    qc_approved_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+    locked: Mapped[bool] = mapped_column(Boolean, default=False)
+    locked_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    locked_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+    quality_status: Mapped[str] = mapped_column(Unicode(255), default=QualityStatus.RELEASED.value)
+
+
+class FilterMaterialUsage(Base):
+    """Nguyên liệu (VD: bột trợ lọc) đã dùng thật cho 1 mẻ lọc (FilterRecord) cụ thể — lấy từ
+    tồn kho Kho phân xưởng (MaterialLot), trừ kho thật qua services/warehouse.py::issue() khi
+    gán, hoàn kho qua undo_issue() khi xóa dòng. Gợi ý số lượng mặc định lấy từ
+    FilterOrderMaterialLine (khai báo lúc lập Lệnh lọc) — xem openFilterMaterialsModal.
+    Mirror BrewMaterialUsage (batch_id -> filter_id), gồm cả lot_date/fifo_ok snapshot."""
+    __tablename__ = "filter_material_usage"
+
+    usage_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
+    filter_id: Mapped[str] = mapped_column(ForeignKey("filter_record.filter_id"), index=True)
+    receipt_id: Mapped[Optional[str]] = mapped_column(ForeignKey("material_receipt.receipt_id"), nullable=True)
+    lot_id: Mapped[Optional[str]] = mapped_column(ForeignKey("material_lot.lot_id"), nullable=True, index=True)
+    movement_id: Mapped[Optional[str]] = mapped_column(ForeignKey("stock_movement.movement_id"), nullable=True)
+    material_name: Mapped[str] = mapped_column(Unicode(255))
+    lot_pm: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    lot_date: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+    fifo_ok: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    quantity: Mapped[float] = mapped_column(Float, default=0.0)
+    uom: Mapped[str] = mapped_column(Unicode(255), default="kg")
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+
+
+class BottleMaterialUsage(Base):
+    """Nguyên liệu (VD: CO2, hóa chất vệ sinh) đã dùng thật cho 1 mẻ chiết (BottleRecord) cụ
+    thể — lấy từ tồn kho Kho phân xưởng (MaterialLot), trừ kho thật qua
+    services/warehouse.py::issue() khi gán, hoàn kho qua undo_issue() khi xóa dòng.
+    Mirror FilterMaterialUsage (filter_id -> bottle_id) — Chiết trước đây không tiêu thụ NVL,
+    nay bổ sung cùng cơ chế NVL + FIFO snapshot như Nấu/Lọc."""
+    __tablename__ = "bottle_material_usage"
+
+    usage_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
+    bottle_id: Mapped[str] = mapped_column(ForeignKey("bottle_record.bottle_id"), index=True)
+    lot_id: Mapped[Optional[str]] = mapped_column(ForeignKey("material_lot.lot_id"), nullable=True, index=True)
+    movement_id: Mapped[Optional[str]] = mapped_column(ForeignKey("stock_movement.movement_id"), nullable=True)
+    material_name: Mapped[str] = mapped_column(Unicode(255))
+    lot_pm: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    lot_date: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+    fifo_ok: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    quantity: Mapped[float] = mapped_column(Float, default=0.0)
+    uom: Mapped[str] = mapped_column(Unicode(255), default="kg")
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
 
 
 class BottleRecord(Base):
@@ -97,8 +516,12 @@ class BottleRecord(Base):
     bottle_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
     bottle_code: Mapped[str] = mapped_column(Unicode(64), unique=True, index=True)  # mã chiết
     filter_code: Mapped[Optional[str]] = mapped_column(Unicode(64), index=True)     # mã lọc
-    bottle_date: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
-    beer_type: Mapped[str] = mapped_column(Unicode(255))                            # loại bia
+    filter_id: Mapped[Optional[str]] = mapped_column(ForeignKey("filter_record.filter_id"), nullable=True, index=True)  # tank BBT nguồn (khớp from_bbt lúc tạo) — dùng để trừ/hoàn on_hand_bbt
+    bottle_date: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, index=True)
+    beer_type: Mapped[str] = mapped_column(Unicode(255))                            # loại bia (tên hiển thị, tự điền từ beer_type_id)
+    beer_type_id: Mapped[Optional[str]] = mapped_column(ForeignKey("beer_type.beer_type_id"), nullable=True, index=True)  # Loại bia — kế thừa từ FilterRecord nguồn, dùng để tra chỉ tiêu Chiết
+    product_id: Mapped[Optional[str]] = mapped_column(ForeignKey("product.product_id"), nullable=True, index=True)  # dịch bia (kế từ tank BBT nguồn)
+    finished_product_id: Mapped[Optional[str]] = mapped_column(ForeignKey("finished_product.finished_product_id"), nullable=True, index=True)  # sản phẩm đóng gói (SKU) — chọn khi chiết
     lot_no: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)       # số lô bia
     v_cap_chiet_hl: Mapped[float] = mapped_column(Float, default=0.0)         # V cấp chiết/hl
     from_bbt: Mapped[Optional[str]] = mapped_column(Unicode(255), index=True)       # chiết từ tank BBT
@@ -108,9 +531,18 @@ class BottleRecord(Base):
     ca3: Mapped[float] = mapped_column(Float, default=0.0)
     stocked: Mapped[bool] = mapped_column(Boolean, default=False)             # đã nhập kho
     approved: Mapped[bool] = mapped_column(Boolean, default=False)            # chiết duyệt
+    approved_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    approved_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
     has_indicators: Mapped[bool] = mapped_column(Boolean, default=False)
     has_nvl: Mapped[bool] = mapped_column(Boolean, default=False)
     note: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)
+    # Trạng thái thực thi (đã chiết xong việc chưa) — bottle_date là mốc bắt đầu sẵn có;
+    # ended_at chỉ set qua endpoint finish khi vận hành bấm "Kết thúc".
+    ended_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+    locked: Mapped[bool] = mapped_column(Boolean, default=False)
+    locked_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    locked_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+    quality_status: Mapped[str] = mapped_column(Unicode(255), default=QualityStatus.RELEASED.value)
 
 
 class StageIndicator(Base):
@@ -126,4 +558,24 @@ class StageIndicator(Base):
     value_text: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
     warning: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
     analyst: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)  # NV PT
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+
+
+class OpsSetting(Base):
+    """Cấu hình vận hành toàn hệ thống (1 dòng duy nhất) — hiện chỉ có 2 ngưỡng dung sai thể
+    tích cho phép "Làm rỗng" tank CCT/BBT khi tank vật lý đã cạn thật nhưng số liệu phần mềm
+    còn lệch một khoảng nhỏ (hao hụt đo đạc/cặn/foam khiến lọc/chiết không bao giờ rút hết
+    theo số liệu) — chặn không cho làm rỗng nếu phần lệch vượt ngưỡng (tránh xoá nhầm sai
+    lệch lớn do lỗi nhập liệu thật). Xem routers/brewing.py::empty_ferment_cct/empty_filter_bbt."""
+    __tablename__ = "ops_setting"
+
+    setting_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
+    empty_cct_tolerance_hl: Mapped[float] = mapped_column(Float, default=2.0)
+    empty_bbt_tolerance_hl: Mapped[float] = mapped_column(Float, default=2.0)
+    # Ngưỡng số ngày tồn kho (báo cáo "Tồn kho theo tuổi") để phân loại mức cảnh báo — số
+    # thực (vd 1.5 ngày) để cho phép cảnh báo sớm hơn 1 ngày tròn. Xem services/wms.py::lot_aging_report.
+    aging_caution_days: Mapped[float] = mapped_column(Float, default=30.0)
+    aging_warning_days: Mapped[float] = mapped_column(Float, default=60.0)
+    aging_critical_days: Mapped[float] = mapped_column(Float, default=90.0)
+    updated_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)

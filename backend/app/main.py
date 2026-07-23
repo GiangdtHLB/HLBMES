@@ -3,8 +3,11 @@
 import time
 import uuid
 from contextlib import asynccontextmanager
+from datetime import datetime as _datetime
+from datetime import timezone as _timezone
 
 from fastapi import FastAPI, Request
+from fastapi.encoders import ENCODERS_BY_TYPE
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -51,6 +54,22 @@ from .routers import (
 
 configure_logging()
 log = get_logger("mes.http")
+
+
+def _encode_utc_datetime(dt: _datetime) -> str:
+    """Mọi timestamp lưu trong hệ thống là UTC (common.utcnow, tài liệu §8.3), nhưng SQLite
+    làm mất tzinfo khi đọc lại (không có kiểu datetime có múi giờ thật) — datetime trả về từ
+    ORM là "naive" dù giá trị thực chất là UTC. Serialize thẳng (isoformat không có hậu tố
+    offset/Z) khiến frontend (new Date(...)) hiểu nhầm là giờ local của trình duyệt thay vì
+    UTC, làm lệch giờ hiển thị đúng bằng độ lệch múi giờ (VD lệch 7 tiếng ở VN — đây là
+    nguyên nhân "thời gian trên web không đúng"). Gắn lại tzinfo=UTC trước khi serialize để
+    mọi client tự quy đổi đúng về giờ địa phương của họ."""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=_timezone.utc)
+    return dt.isoformat()
+
+
+ENCODERS_BY_TYPE[_datetime] = _encode_utc_datetime
 
 
 @asynccontextmanager

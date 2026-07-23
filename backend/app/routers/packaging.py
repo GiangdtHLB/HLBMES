@@ -34,3 +34,8 @@ def move(payload: PackagingMoveIn, db: Session = Depends(get_db),
 def list_moves(pkg_id: str = None, db: Session = Depends(get_db),
                user: User = Depends(get_current_user)):
     return svc.list_moves(db, pkg_id)
+
+
+@router.get("/lot-report")
+def lot_report(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    return svc.lot_report(db)

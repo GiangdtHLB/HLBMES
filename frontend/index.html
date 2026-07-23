@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>MES Bia Hạ Long - Nhà Máy Đông Mai</title>
-  <link rel="stylesheet" href="/styles.css?v=20" />
+  <link rel="stylesheet" href="/styles.css?v=32" />
 </head>
 <body>
   <!-- Màn hình đăng nhập -->
@@ -20,7 +20,7 @@
         <b>Tài khoản demo</b> (mật khẩu <code class="k">123456</code>, admin: <code class="k">admin123</code>):<br>
         <code class="k">admin</code> · <code class="k">giamdoc</code> · <code class="k">quandoc</code> · <code class="k">truongca</code> ·
         <code class="k">vanhanh</code> · <code class="k">kcs</code> · <code class="k">kysu</code> · <code class="k">thukho</code> ·
-        <code class="k">baotri</code> · <code class="k">nangluong</code>
+        <code class="k">thukho_px</code> · <code class="k">baotri</code> · <code class="k">nangluong</code>
       </div>
     </div>
   </div>
@@ -44,26 +44,28 @@
 
   <nav id="nav">
     <button data-view="dashboard" class="active">Tổng quan</button>
+    <button data-view="flowmap">🗺️ Sơ đồ quy trình</button>
     <button data-view="orders">Lệnh SX</button>
-    <button data-view="dispatch">Điều độ</button>
-    <button data-view="schedule">Lập lịch</button>
+    <button data-view="dispatch" class="nav-unused">Điều độ</button>
+    <button data-view="schedule" class="nav-unused">Lập lịch</button>
     <button data-view="recipes">Công thức</button>
-    <button data-view="recipeadv">Công thức+</button>
-    <button data-view="batches">Mẻ sản xuất</button>
-    <button data-view="isa88">ISA-88</button>
-    <button data-view="dispense">Cấp liệu</button>
+    <button data-view="recipeadv" class="nav-unused">Công thức+</button>
+    <button data-view="batches" class="nav-unused">Mẻ sản xuất</button>
+    <button data-view="isa88" class="nav-unused">ISA-88</button>
+    <button data-view="dispense" class="nav-unused">Cấp liệu</button>
     <button data-view="quality">Chất lượng</button>
-    <button data-view="qclab">QC Lab</button>
+    <button data-view="qclab" class="nav-unused">QC Lab</button>
     <button data-view="process">Nấu-Lọc-Chiết</button>
     <button data-view="trace">Truy xuất</button>
-    <button data-view="warehouse">Kho NVL</button>
+    <button data-view="warehouse_kc">Kho công ty</button>
+    <button data-view="warehouse_px">Kho phân xưởng</button>
     <button data-view="wms">Kho TP (WMS)</button>
     <button data-view="packaging">Bao bì</button>
     <button data-view="energy">Năng lượng</button>
     <button data-view="realtime">📡 Realtime</button>
-    <button data-view="oee">OEE/Dừng máy</button>
-    <button data-view="maint">Bảo trì</button>
-    <button data-view="calib">Kiểm định</button>
+    <button data-view="oee" class="nav-unused">OEE/Dừng máy</button>
+    <button data-view="maint" class="nav-unused">Bảo trì</button>
+    <button data-view="calib" class="nav-unused">Kiểm định</button>
     <button data-view="reports">Báo cáo</button>
     <button data-view="ai">🤖 Trợ lý AI</button>
     <button data-view="integration">Tích hợp</button>
@@ -75,6 +77,7 @@
 
   <main>
     <section id="view-dashboard" class="view active"></section>
+    <section id="view-flowmap" class="view"></section>
     <section id="view-orders" class="view"></section>
     <section id="view-dispatch" class="view"></section>
     <section id="view-schedule" class="view"></section>
@@ -87,7 +90,8 @@
     <section id="view-qclab" class="view"></section>
     <section id="view-process" class="view"></section>
     <section id="view-trace" class="view"></section>
-    <section id="view-warehouse" class="view"></section>
+    <section id="view-warehouse_kc" class="view"></section>
+    <section id="view-warehouse_px" class="view"></section>
     <section id="view-wms" class="view"></section>
     <section id="view-packaging" class="view"></section>
     <section id="view-energy" class="view"></section>
@@ -105,10 +109,10 @@
   </main>
   </div>
 
-  <script src="/charts.js?v=20"></script>
+  <script src="/charts.js?v=30"></script>
   <script src="/barcode.js?v=20"></script>
-  <script src="/app.js?v=21"></script>
-  <script src="/views_ext.js?v=20"></script>
+  <script src="/app.js?v=264"></script>
+  <script src="/views_ext.js?v=61"></script>
   <script src="/import_explorer.js?v=22"></script>
 </body>
 </html>

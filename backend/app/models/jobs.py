@@ -7,10 +7,10 @@ worker in-process chạy bằng ThreadPoolExecutor — quy mô lớn thay bằng
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import JSON, DateTime, Integer, Unicode, UnicodeText
+from sqlalchemy import JSON, Integer, Unicode, UnicodeText
 from sqlalchemy.orm import Mapped, mapped_column
 
-from ..common import new_id, utcnow
+from ..common import UTCDateTime, new_id, utcnow
 from ..database import Base
 
 
@@ -25,6 +25,6 @@ class Job(Base):
     error: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)
     progress: Mapped[int] = mapped_column(Integer, default=0)    # 0..100
     created_by: Mapped[Optional[str]] = mapped_column(Unicode(255), index=True, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
-    finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    started_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+    finished_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)

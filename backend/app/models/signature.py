@@ -7,10 +7,10 @@ của hồ sơ mẻ khi khóa (có content_hash để kiểm tra toàn vẹn).""
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import UnicodeText, JSON, DateTime, Integer, Unicode
+from sqlalchemy import UnicodeText, JSON, Integer, Unicode
 from sqlalchemy.orm import Mapped, mapped_column
 
-from ..common import new_id, utcnow
+from ..common import UTCDateTime, new_id, utcnow
 from ..database import Base
 
 
@@ -25,7 +25,7 @@ class Signature(Base):
     role: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
     reason: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)
     content_hash: Mapped[str] = mapped_column(Unicode(128))            # hash hồ sơ tại thời điểm ký
-    signed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    signed_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
 
 
 class EBRSnapshot(Base):
@@ -37,4 +37,4 @@ class EBRSnapshot(Base):
     content_hash: Mapped[str] = mapped_column(Unicode(128))
     content: Mapped[dict] = mapped_column(JSON)                  # hồ sơ đóng băng
     locked_by: Mapped[str] = mapped_column(Unicode(255))
-    locked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    locked_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)

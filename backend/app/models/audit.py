@@ -7,10 +7,10 @@ Ghi: ai, khi nào, hành động, trước/sau, lý do, correlation_id. Bản gh
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import UnicodeText, JSON, DateTime, Integer, Unicode
+from sqlalchemy import UnicodeText, JSON, Integer, Unicode
 from sqlalchemy.orm import Mapped, mapped_column
 
-from ..common import new_id, utcnow
+from ..common import UTCDateTime, new_id, utcnow
 from ..database import Base
 
 
@@ -30,7 +30,7 @@ class AuditLog(Base):
     before: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     after: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     correlation_id: Mapped[Optional[str]] = mapped_column(Unicode(64), nullable=True)
-    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    ts: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, index=True)
     # Chuỗi hash tamper-evident: entry_hash = sha256(prev_hash + nội dung bản ghi).
     prev_hash: Mapped[Optional[str]] = mapped_column(Unicode(128), nullable=True)
     entry_hash: Mapped[Optional[str]] = mapped_column(Unicode(128), nullable=True)

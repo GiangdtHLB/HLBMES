@@ -3,8 +3,8 @@
   "configurations": [
     {
       "name": "mes",
-      "runtimeExecutable": "backend/.venv/bin/python",
-      "runtimeArgs": ["-m", "uvicorn", "app.main:app", "--app-dir", "backend", "--host", "127.0.0.1", "--port", "8077"],
+      "runtimeExecutable": "backend/.venv/Scripts/python.exe",
+      "runtimeArgs": ["-m", "uvicorn", "app.main:app", "--app-dir", "backend", "--host", "0.0.0.0", "--port", "8077"],
       "port": 8077
     }
   ]

@@ -30,6 +30,7 @@ header .spacer { flex: 1; }
   background: var(--panel2); color: var(--text); border: 1px solid var(--border);
   border-radius: 6px; padding: 6px 8px; font-size: 13px;
 }
+input[readonly] { color: var(--muted); cursor: not-allowed; }
 nav { display: flex; gap: 4px; padding: 0 16px; background: var(--panel); border-bottom: 1px solid var(--border); flex-wrap: wrap; }
 nav button {
   background: none; border: none; color: var(--muted); padding: 12px 16px;
@@ -37,7 +38,10 @@ nav button {
 }
 nav button:hover { color: var(--text); }
 nav button.active { color: var(--accent); border-bottom-color: var(--accent); }
-main { padding: 20px; max-width: 1280px; margin: 0 auto; }
+nav button.nav-unused { opacity: .45; }
+nav button.nav-unused:hover { opacity: .75; }
+nav button.nav-unused.active { color: var(--accent); opacity: .75; }
+main { padding: 20px; max-width: 1800px; margin: 0 auto; }
 .view { display: none; }
 .view.active { display: block; }
 .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-bottom: 20px; }
@@ -92,6 +96,7 @@ tr.row-cyan td:nth-child(2) { color: #2dd4bf; }
 .legend b.red{color:var(--red)} .legend b.green{color:var(--green)} .legend b.blue{color:var(--blue)} .legend b.cyan{color:#2dd4bf}
 .tablewrap { overflow-x:auto; }
 .searchbox { width:100%; margin-bottom:10px; }
+.pager-bar { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-top:10px; }
 .chk { color: var(--green); font-weight:700; }
 .chk.no { color: var(--border); }
 .tabs2 { display:flex; gap:0; border-bottom:1px solid var(--border); margin-bottom:14px; }
@@ -108,9 +113,31 @@ tr.row-cyan td:nth-child(2) { color: #2dd4bf; }
 .modal-bg { position:fixed; inset:0; background:rgba(0,0,0,.6); z-index:150; display:flex;
   align-items:flex-start; justify-content:center; padding:30px 16px; overflow-y:auto; }
 .modal { background:var(--panel); border:1px solid var(--border); border-radius:12px;
-  width:920px; max-width:96vw; padding:22px; box-shadow:0 16px 60px rgba(0,0,0,.5); }
+  width:920px; max-width:96vw; padding:22px; box-shadow:0 16px 60px rgba(0,0,0,.5); position:relative; }
 .modal h2 { margin-top:0; }
 .modal .close { float:right; cursor:pointer; color:var(--muted); font-size:20px; }
+.modal-x { position:absolute; top:10px; right:14px; width:26px; height:26px; display:flex;
+  align-items:center; justify-content:center; background:var(--red); color:#fff; border-radius:50%;
+  font-size:16px; font-weight:700; line-height:1; cursor:pointer; z-index:5; }
+.modal-x:hover { opacity:.85; }
+/* Dropdown chọn nhiều bằng tick (thay cho <select multiple> giữ Ctrl) — nổi tự do, kéo được,
+   chỉ đóng bằng nút X đỏ (không tự đóng khi rê chuột qua các dòng). */
+.msdd-panel { position:absolute; z-index:200; background:var(--panel); border:1px solid var(--border);
+  border-radius:8px; box-shadow:0 12px 40px rgba(0,0,0,.5); min-width:260px; max-width:360px; }
+.msdd-head { display:flex; align-items:center; justify-content:space-between; padding:8px 10px;
+  border-bottom:1px solid var(--border); cursor:move; font-size:12px; color:var(--muted); user-select:none; }
+.msdd-x { width:20px; height:20px; display:flex; align-items:center; justify-content:center;
+  background:var(--red); color:#fff; border-radius:50%; font-size:12px; font-weight:700;
+  cursor:pointer; line-height:1; }
+.msdd-x:hover { opacity:.85; }
+.msdd-body { max-height:220px; overflow-y:auto; padding:6px 10px; }
+.msdd-item { display:flex; align-items:center; gap:8px; padding:5px 0; font-size:13px; cursor:pointer; }
+/* Ô nhập gõ-để-tìm thay <select> khi danh sách dài (VD nguyên liệu) — xem wireSearchableSelect() */
+.ss-dd { position:absolute; z-index:200; background:var(--panel); border:1px solid var(--border);
+  border-radius:8px; box-shadow:0 12px 40px rgba(0,0,0,.5); max-height:240px; overflow-y:auto; }
+.ss-item { padding:6px 10px; font-size:13px; cursor:pointer; }
+.ss-item:hover { background:var(--panel2); }
+.ss-empty { padding:6px 10px; font-size:12px; color:var(--muted); }
 .timeline { border-left:2px solid var(--border); margin-left:8px; padding-left:14px; }
 .timeline .ev { margin-bottom:10px; position:relative; }
 .timeline .ev:before { content:""; position:absolute; left:-21px; top:4px; width:9px; height:9px;
@@ -125,11 +152,63 @@ tr.row-cyan td:nth-child(2) { color: #2dd4bf; }
 }
 .toast.err { border-left-color: var(--red); }
 .toast.ok { border-left-color: var(--green); }
+.toast.warn { border-left-color: var(--orange); }
 .tree { font-family: ui-monospace, Menlo, monospace; font-size: 13px; line-height: 1.7; }
 .tree .node { padding-left: 18px; border-left: 1px dashed var(--border); margin-left: 6px; }
 .tree .rel { color: var(--accent2); }
+.qc-pills { font-family: -apple-system, sans-serif; font-size: 11px; margin: 2px 0 4px 24px; display: flex; gap: 8px; flex-wrap: wrap; }
+.qc-pill { padding: 1px 8px; border-radius: 10px; background: var(--panel2, #1c2530); }
+.qc-pill.ok { color: var(--green); }
+.qc-pill.err { color: var(--orange); }
+.qc-pill.muted { color: var(--muted); }
+.nvl-table { font-family: -apple-system, sans-serif; font-size: 12px; margin: 4px 0 8px 24px; width: calc(100% - 24px); }
+.nvl-table th, .nvl-table td { padding: 4px 8px; }
+.nvl-table .qc-pill { font-size: 11px; }
 .detail { display: grid; grid-template-columns: 180px 1fr; gap: 6px 14px; font-size: 13px; }
 .detail dt { color: var(--muted); }
 .split { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 @media (max-width: 800px){ .split { grid-template-columns: 1fr; } }
 code.k { background: var(--panel2); padding: 1px 6px; border-radius: 4px; font-size: 12px; }
+
+/* ---- sơ đồ quy trình (flowmap) ---- */
+.flowlane { display: flex; flex-wrap: wrap; align-items: center; gap: 0; margin: 6px 0 18px; }
+.flownode {
+  background: var(--panel2); border: 1px solid var(--border); border-radius: 10px;
+  padding: 12px 16px; min-width: 168px; max-width: 200px; cursor: pointer;
+  transition: border-color .15s ease, transform .1s ease;
+}
+.flownode:hover, .flownode:focus-visible { border-color: var(--accent); transform: translateY(-2px); }
+.flownode .step { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .6px; }
+.flownode .name { font-size: 14.5px; font-weight: 700; margin-top: 2px; color: var(--text); }
+.flownode .desc { font-size: 11.5px; color: var(--muted); margin-top: 5px; line-height: 1.4; }
+.flownode .count { display: inline-block; margin-top: 7px; font-size: 11px; font-weight: 700; color: var(--accent); }
+.flownode.unused { border-style: dashed; opacity: .6; }
+.flownode.unused:hover, .flownode.unused:focus-visible { border-color: var(--border); transform: none; }
+.flownode .unused-badge {
+  display: inline-block; margin-top: 7px; font-size: 10px; font-weight: 700; color: var(--orange);
+  background: rgba(230,126,34,.14); border: 1px solid var(--orange); border-radius: 6px; padding: 1px 6px;
+}
+.flowarrow { color: var(--muted); font-size: 20px; padding: 0 10px; flex: none; }
+@media (max-width: 760px) {
+  .flowlane { flex-direction: column; align-items: stretch; }
+  .flowarrow { transform: rotate(90deg); align-self: flex-start; margin-left: 20px; padding: 4px 0; }
+  .flownode { max-width: none; }
+}
+.flowtrace {
+  display: flex; align-items: center; gap: 14px; cursor: pointer;
+  background: linear-gradient(90deg, rgba(245,166,35,.12), rgba(23,162,184,.10));
+  border: 1px solid var(--accent2); border-radius: 10px; padding: 14px 18px; margin-top: 4px;
+  transition: border-color .15s ease, transform .1s ease;
+}
+.flowtrace:hover, .flowtrace:focus-visible { border-color: var(--accent); transform: translateY(-1px); }
+.flowtrace-ico { font-size: 26px; flex: none; }
+.flowtrace-title { font-size: 15px; font-weight: 700; color: var(--text); }
+.flowtrace-desc { font-size: 12px; color: var(--muted); margin-top: 3px; line-height: 1.5; max-width: 62ch; }
+.flowchips { display: flex; flex-wrap: wrap; gap: 10px; }
+.flowchip {
+  background: var(--panel2); border: 1px solid var(--border); border-radius: 999px;
+  padding: 8px 16px; font-size: 12.5px; color: var(--text); cursor: pointer;
+  display: flex; align-items: center; gap: 8px;
+}
+.flowchip:hover, .flowchip:focus-visible { border-color: var(--accent2); color: var(--accent2); }
+.flowchip .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent2); flex: none; }

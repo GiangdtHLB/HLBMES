@@ -1,0 +1,563 @@
+"""Danh mục nhóm chỉ tiêu chất lượng NVL + gán cho nguyên liệu (tài liệu §7.4, §7.5).
+
+- QCParameterGroup/QCParameterGroupItem: nhóm chỉ tiêu (vd "Chỉ tiêu Malt Anh (bao)"),
+  admin tạo trước rồi gán chỉ tiêu (QCParameter) vào nhóm.
+- MaterialQcGroup: chỉ nguyên liệu có gán nhóm mới bị cổng nhập kho (services/warehouse.py)
+  bắt buộc khai báo/duyệt chỉ tiêu trước khi được coi là nhập kho nhà máy chính thức.
+"""
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from ..audit import record_audit
+from ..common import Role, new_id, utcnow
+from ..errors import DomainError, NotFoundError
+from ..models.brewing import BottleRecord, BrewBatch, BrewRecord, FermentRecord, FilterRecord
+from ..models.master import BeerType
+from ..models.materials import MaterialLot
+from ..models.materials_ext import MaterialQcGroup
+from ..models.quality import QualityResult
+from ..models.quality_ext import QCParameter, QCParameterGroup, QCParameterGroupItem, StageQcGroup
+from ..security import User, require_perm
+
+
+# ---- Nhóm chỉ tiêu ----
+
+def list_groups(db: Session) -> list[QCParameterGroup]:
+    return db.execute(select(QCParameterGroup).order_by(QCParameterGroup.code)).scalars().all()
+
+
+def create_group(db: Session, payload: dict, user: User) -> QCParameterGroup:
+    require_perm(user, "master.manage")
+    if db.execute(select(QCParameterGroup).where(QCParameterGroup.code == payload["code"])).scalar_one_or_none():
+        raise DomainError(f"Mã nhóm chỉ tiêu '{payload['code']}' đã tồn tại.")
+    g = QCParameterGroup(group_id=new_id(), **payload)
+    db.add(g)
+    record_audit(db, entity_type="qc_parameter_group", entity_id=g.group_id, action="create",
+                 actor=user, after={"code": g.code, "name": g.name})
+    db.commit()
+    db.refresh(g)
+    return g
+
+
+def update_group(db: Session, group_id: str, payload: dict, user: User) -> QCParameterGroup:
+    require_perm(user, "master.manage")
+    g = db.get(QCParameterGroup, group_id)
+    if not g:
+        raise NotFoundError("Nhóm chỉ tiêu không tồn tại.")
+    before = {"code": g.code, "name": g.name, "note": g.note, "active": g.active}
+    for k, v in payload.items():
+        setattr(g, k, v)
+    record_audit(db, entity_type="qc_parameter_group", entity_id=g.group_id, action="update",
+                 actor=user, before=before, after=payload)
+    db.commit()
+    db.refresh(g)
+    return g
+
+
+def delete_group(db: Session, group_id: str, user: User) -> None:
+    """Chỉ xóa được khi nhóm chưa gán cho nguyên liệu (MaterialQcGroup) hay công đoạn sản
+    xuất (StageQcGroup) nào — tránh xóa "mồ côi" một nhóm đang được dùng để cổng nhập kho/
+    duyệt công đoạn. Xóa kèm các chỉ tiêu trong nhóm (QCParameterGroupItem) vì chỉ có ý
+    nghĩa gắn với nhóm này."""
+    require_perm(user, "master.manage")
+    g = db.get(QCParameterGroup, group_id)
+    if not g:
+        raise NotFoundError("Nhóm chỉ tiêu không tồn tại.")
+    mat_links = db.execute(select(MaterialQcGroup).where(
+        MaterialQcGroup.group_id == group_id, MaterialQcGroup.active.is_(True))).scalars().all()
+    stage_links = db.execute(select(StageQcGroup).where(
+        StageQcGroup.group_id == group_id, StageQcGroup.active.is_(True))).scalars().all()
+    if mat_links or stage_links:
+        parts = []
+        if mat_links:
+            parts.append(f"{len(mat_links)} nguyên liệu")
+        if stage_links:
+            parts.append(f"{len(stage_links)} công đoạn sản xuất")
+        raise DomainError(f"Không thể xóa — nhóm chỉ tiêu đang được gán cho {' và '.join(parts)}. Hãy gỡ gán trước.")
+    for item in db.execute(select(QCParameterGroupItem).where(QCParameterGroupItem.group_id == group_id)).scalars().all():
+        db.delete(item)
+    record_audit(db, entity_type="qc_parameter_group", entity_id=group_id, action="delete", actor=user,
+                 before={"code": g.code, "name": g.name})
+    db.delete(g)
+    db.commit()
+
+
+# ---- Chỉ tiêu trong nhóm ----
+
+def _item_out(db: Session, item: QCParameterGroupItem) -> dict:
+    param = db.get(QCParameter, item.param_id)
+    return {
+        "item_id": item.item_id, "group_id": item.group_id, "param_id": item.param_id,
+        "seq": item.seq, "mandatory": item.mandatory,
+        "target_override": item.target_override, "usl_override": item.usl_override,
+        "lsl_override": item.lsl_override,
+        "param_code": param.code if param else None,
+        "param_name": param.name if param else None,
+        "param_unit": param.unit if param else None,
+    }
+
+
+def list_items(db: Session, group_id: str) -> list[dict]:
+    items = db.execute(
+        select(QCParameterGroupItem).where(QCParameterGroupItem.group_id == group_id)
+        .order_by(QCParameterGroupItem.seq)
+    ).scalars().all()
+    return [_item_out(db, it) for it in items]
+
+
+def add_item(db: Session, group_id: str, payload: dict, user: User) -> dict:
+    require_perm(user, "master.manage")
+    if not db.get(QCParameterGroup, group_id):
+        raise NotFoundError("Nhóm chỉ tiêu không tồn tại.")
+    if not db.get(QCParameter, payload["param_id"]):
+        raise NotFoundError("Chỉ tiêu không tồn tại.")
+    item = QCParameterGroupItem(item_id=new_id(), group_id=group_id, **payload)
+    db.add(item)
+    record_audit(db, entity_type="qc_parameter_group_item", entity_id=item.item_id, action="create",
+                 actor=user, after={"group_id": group_id, "param_id": payload["param_id"]})
+    db.commit()
+    db.refresh(item)
+    return _item_out(db, item)
+
+
+def update_item(db: Session, item_id: str, payload: dict, user: User) -> dict:
+    require_perm(user, "master.manage")
+    item = db.get(QCParameterGroupItem, item_id)
+    if not item:
+        raise NotFoundError("Chỉ tiêu trong nhóm không tồn tại.")
+    for k, v in payload.items():
+        setattr(item, k, v)
+    record_audit(db, entity_type="qc_parameter_group_item", entity_id=item.item_id, action="update",
+                 actor=user, after=payload)
+    db.commit()
+    db.refresh(item)
+    return _item_out(db, item)
+
+
+def delete_item(db: Session, item_id: str, user: User) -> None:
+    require_perm(user, "master.manage")
+    item = db.get(QCParameterGroupItem, item_id)
+    if not item:
+        raise NotFoundError("Chỉ tiêu trong nhóm không tồn tại.")
+    db.delete(item)
+    record_audit(db, entity_type="qc_parameter_group_item", entity_id=item_id, action="delete", actor=user)
+    db.commit()
+
+
+# ---- Gán nhóm chỉ tiêu cho nguyên liệu ----
+
+def list_material_groups(db: Session, material_id: str) -> list[dict]:
+    links = db.execute(
+        select(MaterialQcGroup).where(MaterialQcGroup.material_id == material_id,
+                                       MaterialQcGroup.active.is_(True))
+    ).scalars().all()
+    out = []
+    for link in links:
+        g = db.get(QCParameterGroup, link.group_id)
+        out.append({"link_id": link.link_id, "material_id": link.material_id, "group_id": link.group_id,
+                    "mandatory": link.mandatory, "active": link.active,
+                    "group_code": g.code if g else None, "group_name": g.name if g else None})
+    return out
+
+
+def link_material_group(db: Session, material_id: str, payload: dict, user: User) -> dict:
+    require_perm(user, "master.manage")
+    if not db.get(QCParameterGroup, payload["group_id"]):
+        raise NotFoundError("Nhóm chỉ tiêu không tồn tại.")
+    existing = db.execute(
+        select(MaterialQcGroup).where(MaterialQcGroup.material_id == material_id,
+                                       MaterialQcGroup.group_id == payload["group_id"])
+    ).scalar_one_or_none()
+    if existing:
+        existing.mandatory = payload.get("mandatory", True)
+        existing.active = True
+        link = existing
+    else:
+        link = MaterialQcGroup(link_id=new_id(), material_id=material_id, **payload)
+        db.add(link)
+    record_audit(db, entity_type="material_qc_group", entity_id=link.link_id, action="link",
+                 actor=user, after={"material_id": material_id, "group_id": payload["group_id"]})
+    db.commit()
+    db.refresh(link)
+    g = db.get(QCParameterGroup, link.group_id)
+    return {"link_id": link.link_id, "material_id": link.material_id, "group_id": link.group_id,
+            "mandatory": link.mandatory, "active": link.active,
+            "group_code": g.code if g else None, "group_name": g.name if g else None}
+
+
+def unlink_material_group(db: Session, material_id: str, group_id: str, user: User) -> None:
+    require_perm(user, "master.manage")
+    link = db.execute(
+        select(MaterialQcGroup).where(MaterialQcGroup.material_id == material_id,
+                                       MaterialQcGroup.group_id == group_id)
+    ).scalar_one_or_none()
+    if not link:
+        raise NotFoundError("Nguyên liệu chưa gán nhóm chỉ tiêu này.")
+    link.active = False
+    record_audit(db, entity_type="material_qc_group", entity_id=link.link_id, action="unlink", actor=user)
+    db.commit()
+
+
+# ---- Tra cứu dùng chung (cổng nhập kho + release) ----
+
+def required_params_for_material(db: Session, material_id: str, mandatory_only: bool = True) -> list[dict]:
+    """Danh sách chỉ tiêu bắt buộc khai báo cho một nguyên liệu (rỗng nếu không gán nhóm nào)."""
+    if not material_id:
+        return []
+    stmt = (
+        select(QCParameterGroupItem, QCParameter)
+        .join(MaterialQcGroup, MaterialQcGroup.group_id == QCParameterGroupItem.group_id)
+        .join(QCParameter, QCParameter.param_id == QCParameterGroupItem.param_id)
+        .where(MaterialQcGroup.material_id == material_id, MaterialQcGroup.active.is_(True),
+               QCParameter.active.is_(True))
+    )
+    if mandatory_only:
+        stmt = stmt.where(QCParameterGroupItem.mandatory.is_(True))
+    rows = db.execute(stmt.order_by(QCParameterGroupItem.seq)).all()
+    out = []
+    for item, param in rows:
+        out.append({
+            "param_id": param.param_id, "code": param.code, "name": param.name, "unit": param.unit,
+            "target": item.target_override if item.target_override is not None else param.target,
+            "usl": item.usl_override if item.usl_override is not None else param.usl,
+            "lsl": item.lsl_override if item.lsl_override is not None else param.lsl,
+            "mandatory": item.mandatory, "value_type": param.value_type,
+        })
+    return out
+
+
+def lot_qc_status(db: Session, lot: MaterialLot) -> dict:
+    """Trạng thái khai báo/duyệt chỉ tiêu chất lượng của một lô NVL."""
+    required = required_params_for_material(db, lot.material_id, mandatory_only=True)
+    recorded = db.execute(
+        select(QualityResult).where(QualityResult.scope_type == "lot", QualityResult.scope_id == lot.lot_id)
+    ).scalars().all()
+    recorded_codes = {r.parameter for r in recorded}
+    pending = [p["code"] for p in required if p["code"] not in recorded_codes]
+    return {
+        "lot_id": lot.lot_id, "lot_code": lot.lot_code, "status": lot.status,
+        "kcs_lot_no": lot.kcs_lot_no,
+        "required": required,
+        "recorded": [{"parameter": r.parameter, "value": r.value, "status": r.status,
+                      "recorded_by": r.recorded_by, "recorded_at": r.recorded_at} for r in recorded],
+        "pending": pending,
+        "can_release": not pending,
+    }
+
+
+def missing_mandatory_params(db: Session, scope_type: str, scope_id: str) -> list[str]:
+    """Dùng bởi services/quality.py::_assert_releasable — chỉ áp dụng cho scope 'lot'.
+    Chỉ tiêu theo công đoạn sản xuất (mẻ nấu/lên men/lọc/chiết) dùng stage_qc_status() riêng
+    (gọi trực tiếp từ routers/brewing.py) vì cần biết `stage` cụ thể, không chỉ scope_id."""
+    if scope_type != "lot":
+        return []
+    lot = db.get(MaterialLot, scope_id)
+    if not lot:
+        return []
+    return lot_qc_status(db, lot)["pending"]
+
+
+# ---- Gán nhóm chỉ tiêu cho công đoạn sản xuất (mẻ nấu/lên men chính/phụ/lọc/thành phẩm) ----
+# Cùng cơ chế MaterialQcGroup ở trên, nhưng khoá theo (stage, product_id|beer_type_id) —
+# product_id (Dịch bia) dùng cho PRODUCT_SCOPED_STAGES (phân biệt cả độ oP); beer_type_id
+# (Loại bia — thương hiệu, không phân biệt oP) dùng cho các stage còn lại (loc, thanh_pham)
+# vì lọc phối có thể gộp nhiều Dịch bia cùng 1 Loại bia (xem
+# services/filter_order.py::_validate_tanks). Field không thuộc phạm vi stage đó luôn bị
+# server bỏ qua (ép về NULL) khi lưu — tránh gán nhầm cột.
+PRODUCT_SCOPED_STAGES = {"nau", "len_men_chinh", "len_men_phu"}
+# finished_product_id (SKU cụ thể) có ý nghĩa ở "loc" và "thanh_pham" — cùng 1 Loại bia vẫn
+# có thể cần chỉ tiêu Lọc khác nhau theo hình thức đóng gói đích (VD Legend chai lọc khác
+# Legend tươi), khai báo 1 lần ở Lệnh lọc (FilterOrder.finished_product_id) và kế thừa xuống
+# FilterRecord — mirror cách beer_type_id được kế thừa. Các stage còn lại (nau/lên men) ép
+# về NULL vì không có khái niệm SKU ở đó.
+SKU_SCOPED_STAGES = {"loc", "thanh_pham"}
+
+
+def _stage_group_out(db: Session, link: StageQcGroup) -> dict:
+    g = db.get(QCParameterGroup, link.group_id)
+    bt = db.get(BeerType, link.beer_type_id) if link.beer_type_id else None
+    return {"link_id": link.link_id, "stage": link.stage, "product_id": link.product_id,
+            "beer_type_id": link.beer_type_id,
+            "beer_type_code": bt.code if bt else None, "beer_type_name": bt.name if bt else None,
+            "finished_product_id": link.finished_product_id,
+            "group_id": link.group_id, "mandatory": link.mandatory, "active": link.active,
+            "group_code": g.code if g else None, "group_name": g.name if g else None}
+
+
+def list_stage_groups(db: Session, stage: str = None) -> list[dict]:
+    stmt = select(StageQcGroup).where(StageQcGroup.active.is_(True))
+    if stage:
+        stmt = stmt.where(StageQcGroup.stage == stage)
+    links = db.execute(stmt).scalars().all()
+    return [_stage_group_out(db, link) for link in links]
+
+
+def link_stage_group(db: Session, payload: dict, user: User) -> dict:
+    require_perm(user, "master.manage")
+    if not db.get(QCParameterGroup, payload["group_id"]):
+        raise NotFoundError("Nhóm chỉ tiêu không tồn tại.")
+    # product_id (Dịch bia) chỉ có ý nghĩa cho PRODUCT_SCOPED_STAGES; beer_type_id (Loại
+    # bia) chỉ có ý nghĩa cho các stage còn lại — ép field không thuộc phạm vi về NULL,
+    # tránh gán nhầm cột theo đúng stage. finished_product_id (SKU cụ thể) chỉ có ý nghĩa ở
+    # SKU_SCOPED_STAGES (loc, thanh_pham) — các stage khác (nấu/lên men) ép về NULL.
+    is_product_scoped = payload["stage"] in PRODUCT_SCOPED_STAGES
+    product_id = (payload.get("product_id") or None) if is_product_scoped else None
+    beer_type_id = (payload.get("beer_type_id") or None) if not is_product_scoped else None
+    finished_product_id = (payload.get("finished_product_id") or None) if payload["stage"] in SKU_SCOPED_STAGES else None
+    existing = db.execute(
+        select(StageQcGroup).where(StageQcGroup.stage == payload["stage"],
+                                   StageQcGroup.product_id == product_id,
+                                   StageQcGroup.beer_type_id == beer_type_id,
+                                   StageQcGroup.finished_product_id == finished_product_id,
+                                   StageQcGroup.group_id == payload["group_id"])
+    ).scalar_one_or_none()
+    if existing:
+        existing.mandatory = payload.get("mandatory", True)
+        existing.active = True
+        link = existing
+    else:
+        link = StageQcGroup(link_id=new_id(), stage=payload["stage"], product_id=product_id,
+                            beer_type_id=beer_type_id,
+                            finished_product_id=finished_product_id,
+                            group_id=payload["group_id"], mandatory=payload.get("mandatory", True))
+        db.add(link)
+    record_audit(db, entity_type="stage_qc_group", entity_id=link.link_id, action="link",
+                 actor=user, after={"stage": link.stage, "product_id": product_id,
+                                    "beer_type_id": beer_type_id,
+                                    "finished_product_id": finished_product_id, "group_id": payload["group_id"]})
+    db.commit()
+    db.refresh(link)
+    return _stage_group_out(db, link)
+
+
+def update_stage_group(db: Session, link_id: str, payload: dict, user: User) -> dict:
+    require_perm(user, "master.manage")
+    link = db.get(StageQcGroup, link_id)
+    if not link:
+        raise NotFoundError("Gán nhóm chỉ tiêu công đoạn không tồn tại.")
+    if not db.get(QCParameterGroup, payload["group_id"]):
+        raise NotFoundError("Nhóm chỉ tiêu không tồn tại.")
+    # Cùng logic ép field theo stage như link_stage_group — sửa công đoạn cũng phải
+    # scrub lại product_id/beer_type_id/finished_product_id cho khớp phạm vi mới.
+    is_product_scoped = payload["stage"] in PRODUCT_SCOPED_STAGES
+    product_id = (payload.get("product_id") or None) if is_product_scoped else None
+    beer_type_id = (payload.get("beer_type_id") or None) if not is_product_scoped else None
+    finished_product_id = (payload.get("finished_product_id") or None) if payload["stage"] in SKU_SCOPED_STAGES else None
+    dup = db.execute(
+        select(StageQcGroup).where(StageQcGroup.link_id != link_id, StageQcGroup.active.is_(True),
+                                   StageQcGroup.stage == payload["stage"],
+                                   StageQcGroup.product_id == product_id,
+                                   StageQcGroup.beer_type_id == beer_type_id,
+                                   StageQcGroup.finished_product_id == finished_product_id,
+                                   StageQcGroup.group_id == payload["group_id"])
+    ).scalar_one_or_none()
+    if dup:
+        raise DomainError("Đã có gán trùng công đoạn/phạm vi/nhóm chỉ tiêu này.")
+    before = {"stage": link.stage, "product_id": link.product_id, "beer_type_id": link.beer_type_id,
+              "finished_product_id": link.finished_product_id, "group_id": link.group_id,
+              "mandatory": link.mandatory}
+    link.stage = payload["stage"]
+    link.product_id = product_id
+    link.beer_type_id = beer_type_id
+    link.finished_product_id = finished_product_id
+    link.group_id = payload["group_id"]
+    link.mandatory = payload.get("mandatory", True)
+    record_audit(db, entity_type="stage_qc_group", entity_id=link.link_id, action="update",
+                 actor=user, before=before, after={"stage": link.stage, "product_id": product_id,
+                                                   "beer_type_id": beer_type_id,
+                                                   "finished_product_id": finished_product_id,
+                                                   "group_id": link.group_id, "mandatory": link.mandatory})
+    db.commit()
+    db.refresh(link)
+    return _stage_group_out(db, link)
+
+
+def unlink_stage_group(db: Session, link_id: str, user: User) -> None:
+    require_perm(user, "master.manage")
+    link = db.get(StageQcGroup, link_id)
+    if not link:
+        raise NotFoundError("Gán nhóm chỉ tiêu công đoạn không tồn tại.")
+    link.active = False
+    record_audit(db, entity_type="stage_qc_group", entity_id=link.link_id, action="unlink", actor=user)
+    db.commit()
+
+
+def required_params_for_stage(db: Session, stage: str, product_id: str = None,
+                              finished_product_id: str = None, mandatory_only: bool = True,
+                              beer_type_id: str = None) -> list[dict]:
+    """Danh sách chỉ tiêu bắt buộc khai báo cho một công đoạn sản xuất (rỗng nếu chưa gán nhóm nào).
+    Gộp cả nhóm gán riêng cho `product_id` (Dịch bia, chỉ áp dụng PRODUCT_SCOPED_STAGES)
+    hoặc `beer_type_id` (Loại bia, các stage còn lại — VD loc/thanh_pham) / `finished_product_id`
+    (sản phẩm đóng gói, chủ yếu dùng ở stage=thanh_pham) và nhóm áp dụng chung (field đó để
+    NULL trên nhóm).
+
+    Cùng 1 mã chỉ tiêu (QCParameter.code, duy nhất toàn hệ thống) có thể được gán qua NHIỀU
+    nhóm khớp cùng lúc — VD 1 nhóm áp dụng chung (Loại bia, không chọn SKU) và 1 nhóm gán
+    riêng cho đúng 1 SKU (finished_product_id) — mỗi nhóm có thể đặt ngưỡng
+    (target/usl/lsl_override) khác nhau cho cùng mã đó. Nhóm gán CÀNG CỤ THỂ phải THẮNG hoàn
+    toàn (không hiển thị trùng cả 2 dòng cho cùng 1 chỉ tiêu): khớp đúng finished_product_id
+    được ưu tiên cao nhất, sau đó tới khớp đúng product_id/beer_type_id, thấp nhất là nhóm áp
+    dụng chung (mọi field scope đều NULL). Đây cũng chính là nguồn dữ liệu cho mọi báo cáo/
+    trạng thái chỉ tiêu (stage_qc_status, GET /qc-status, hồ sơ điện tử lot_record, tóm tắt QC
+    trong genealogy) — sửa 1 chỗ này áp dụng nhất quán ở mọi nơi."""
+    if not stage:
+        return []
+    stmt = (
+        select(QCParameterGroupItem, QCParameter, StageQcGroup)
+        .join(StageQcGroup, StageQcGroup.group_id == QCParameterGroupItem.group_id)
+        .join(QCParameter, QCParameter.param_id == QCParameterGroupItem.param_id)
+        .where(StageQcGroup.stage == stage, StageQcGroup.active.is_(True), QCParameter.active.is_(True))
+    )
+    if stage in PRODUCT_SCOPED_STAGES:
+        if product_id:
+            stmt = stmt.where((StageQcGroup.product_id == product_id) | (StageQcGroup.product_id.is_(None)))
+        else:
+            stmt = stmt.where(StageQcGroup.product_id.is_(None))
+    else:
+        if beer_type_id:
+            stmt = stmt.where((StageQcGroup.beer_type_id == beer_type_id) | (StageQcGroup.beer_type_id.is_(None)))
+        else:
+            stmt = stmt.where(StageQcGroup.beer_type_id.is_(None))
+    if finished_product_id:
+        stmt = stmt.where((StageQcGroup.finished_product_id == finished_product_id) |
+                          (StageQcGroup.finished_product_id.is_(None)))
+    else:
+        stmt = stmt.where(StageQcGroup.finished_product_id.is_(None))
+    if mandatory_only:
+        stmt = stmt.where(QCParameterGroupItem.mandatory.is_(True))
+    rows = db.execute(stmt.order_by(QCParameterGroupItem.seq)).all()
+    best_by_code: dict[str, dict] = {}
+    for item, param, link in rows:
+        specificity = (1 if link.finished_product_id else 0,
+                      1 if (link.product_id or link.beer_type_id) else 0)
+        current = best_by_code.get(param.code)
+        if current is not None and specificity <= current["_specificity"]:
+            continue
+        best_by_code[param.code] = {
+            "_specificity": specificity, "_seq": item.seq,
+            "param_id": param.param_id, "code": param.code, "name": param.name, "unit": param.unit,
+            "target": item.target_override if item.target_override is not None else param.target,
+            "usl": item.usl_override if item.usl_override is not None else param.usl,
+            "lsl": item.lsl_override if item.lsl_override is not None else param.lsl,
+            "mandatory": item.mandatory, "value_type": param.value_type,
+        }
+    out = sorted(best_by_code.values(), key=lambda p: p["_seq"])
+    for p in out:
+        del p["_specificity"]; del p["_seq"]
+    return out
+
+
+def _evaluate_stage_result(value, lower, upper) -> str:
+    if value is None:
+        return "pending"
+    if lower is not None and value < lower:
+        return "fail"
+    if upper is not None and value > upper:
+        return "fail"
+    return "pass"
+
+
+def record_stage_result(db: Session, stage: str, scope_type: str, scope_id: str, payload: dict, user: User) -> dict:
+    """Ghi 1 giá trị chỉ tiêu công đoạn sản xuất vào QualityResult dùng chung.
+    Không đi qua services/quality.py::record_result vì hàm đó gắn với vòng đời
+    batch/lot (tự động ON_HOLD khi FAIL) — không áp dụng cho bản ghi công đoạn
+    (mẻ nấu/lô LM/lô lọc/mã chiết) vốn không có trạng thái quality_status riêng.
+    Cập nhật đè lên bản ghi cũ nếu đã khai (cùng scope_type/scope_id/parameter) — chỉ tiêu công
+    đoạn là "giá trị hiện tại", không tích lũy lịch sử; tránh 1 lần khai FAIL cũ còn sót lại
+    mãi chặn duyệt dù giá trị mới đã đạt."""
+    value = payload.get("value")
+    lower = payload.get("lower_limit")
+    upper = payload.get("upper_limit")
+    status = _evaluate_stage_result(value, lower, upper)
+    result = db.execute(
+        select(QualityResult).where(QualityResult.scope_type == scope_type, QualityResult.scope_id == scope_id,
+                                    QualityResult.parameter == payload["parameter"])
+    ).scalar_one_or_none()
+    if result:
+        result.value = value
+        result.unit = payload.get("unit")
+        result.lower_limit = lower
+        result.upper_limit = upper
+        result.status = status
+        result.recorded_by = user.username
+        result.recorded_at = utcnow()
+    else:
+        result = QualityResult(
+            result_id=new_id(), sample_id=f"S-{new_id()[:8].upper()}",
+            scope_type=scope_type, scope_id=scope_id, parameter=payload["parameter"],
+            value=value, unit=payload.get("unit"), lower_limit=lower, upper_limit=upper,
+            status=status, recorded_by=user.username,
+        )
+        db.add(result)
+    record_audit(db, entity_type="quality_result", entity_id=result.result_id, action="record",
+                 actor=user, after={"stage": stage, "parameter": result.parameter, "value": value,
+                                    "status": status, "scope": f"{scope_type}:{scope_id}"})
+    db.commit()
+    db.refresh(result)
+    return {"parameter": result.parameter, "value": result.value, "status": result.status,
+            "recorded_by": result.recorded_by, "recorded_at": result.recorded_at}
+
+
+def stage_qc_status(db: Session, stage: str, scope_type: str, scope_id: str, product_id: str = None,
+                    finished_product_id: str = None, beer_type_id: str = None) -> dict:
+    """Trạng thái khai báo chỉ tiêu của một bản ghi công đoạn (mẻ nấu/lô LM/lô lọc/mã chiết)
+    — giá trị đã khai báo lưu ở QualityResult dùng chung (như lot_qc_status)."""
+    required = required_params_for_stage(db, stage, product_id=product_id,
+                                         finished_product_id=finished_product_id, mandatory_only=True,
+                                         beer_type_id=beer_type_id)
+    recorded = db.execute(
+        select(QualityResult).where(QualityResult.scope_type == scope_type, QualityResult.scope_id == scope_id)
+    ).scalars().all()
+    recorded_codes = {r.parameter for r in recorded}
+    required_codes = {p["code"] for p in required}
+    pending = [p["code"] for p in required if p["code"] not in recorded_codes]
+    has_fail = any(r.status == "fail" for r in recorded if r.parameter in required_codes)
+    return {
+        "stage": stage, "scope_type": scope_type, "scope_id": scope_id,
+        "required": required,
+        "recorded": [{"parameter": r.parameter, "value": r.value, "status": r.status,
+                      "recorded_by": r.recorded_by, "recorded_at": r.recorded_at} for r in recorded],
+        "pending": pending,
+        "has_fail": has_fail,
+        "can_release": not pending and not has_fail,
+    }
+
+
+def list_pending_stage_declarations(db: Session) -> list[dict]:
+    """Liệt kê các bản ghi công đoạn sản xuất (mẻ nấu/lô lên men chính+phụ/mẻ lọc/mã chiết)
+    còn thiếu chỉ tiêu chất lượng bắt buộc — cùng vai trò với lot_qc_status (lô NVL) nhưng
+    gộp cả 4 công đoạn thành 1 danh sách cho panel "chờ khai báo" ở tab Chất lượng. Chỉ những
+    bản ghi CÓ nhóm chỉ tiêu bắt buộc gán vào stage đó (required non-empty) mới có thể lọt vào
+    đây — required_params_for_stage trả về rỗng nếu stage/sản phẩm chưa được gán nhóm nào."""
+    out = []
+    brews = {r.brew_id: r for r in db.execute(select(BrewRecord)).scalars().all()}
+    for b in db.execute(select(BrewBatch)).scalars().all():
+        brew = brews.get(b.brew_id)
+        st = stage_qc_status(db, "nau", "brew_batch", b.batch_id, brew.product_id if brew else None)
+        if st["pending"]:
+            out.append({"stage": "nau", "stage_label": "Nấu", "scope_type": "brew_batch", "scope_id": b.batch_id,
+                       "label": f"Mẻ nấu {b.batch_code}" + (f" (mã nấu {brew.brew_code})" if brew else ""),
+                       "pending": st["pending"]})
+    for f in db.execute(select(FermentRecord)).scalars().all():
+        for stage, part_label in (("len_men_chinh", "CT chính"), ("len_men_phu", "CT phụ")):
+            scope_id = f"{f.lm_code}__{stage}"
+            st = stage_qc_status(db, stage, "ferment", scope_id, f.product_id)
+            if st["pending"]:
+                out.append({"stage": stage, "stage_label": f"Lên men — {part_label}", "scope_type": "ferment",
+                           "scope_id": scope_id, "label": f"Lô lên men {f.lm_code} — {part_label}",
+                           "pending": st["pending"]})
+    for r in db.execute(select(FilterRecord)).scalars().all():
+        st = stage_qc_status(db, "loc", "filter", r.filter_code, r.product_id,
+                             beer_type_id=r.beer_type_id, finished_product_id=r.finished_product_id)
+        if st["pending"]:
+            out.append({"stage": "loc", "stage_label": "Lọc", "scope_type": "filter", "scope_id": r.filter_code,
+                       "label": f"Mẻ lọc {r.filter_code}", "pending": st["pending"]})
+    for b in db.execute(select(BottleRecord)).scalars().all():
+        scope_id = f"{b.bottle_code}__thanh_pham"
+        st = stage_qc_status(db, "thanh_pham", "bottle", scope_id, b.product_id,
+                             beer_type_id=b.beer_type_id, finished_product_id=b.finished_product_id)
+        if st["pending"]:
+            out.append({"stage": "thanh_pham", "stage_label": "Chiết", "scope_type": "bottle", "scope_id": scope_id,
+                       "label": f"Mã chiết {b.bottle_code}", "pending": st["pending"]})
+    return out

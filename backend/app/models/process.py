@@ -10,10 +10,10 @@ sẵn có của mẻ (không tạo bảng trùng lặp).
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import UnicodeText, DateTime, Float, ForeignKey, Integer, Unicode
+from sqlalchemy import UnicodeText, Float, ForeignKey, Integer, Unicode
 from sqlalchemy.orm import Mapped, mapped_column
 
-from ..common import new_id, utcnow
+from ..common import UTCDateTime, new_id, utcnow
 from ..database import Base
 
 
@@ -27,7 +27,7 @@ class ChemicalUsage(Base):
     quantity: Mapped[float] = mapped_column(Float)
     uom: Mapped[str] = mapped_column(Unicode(255), default="kg")
     note: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)
-    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    ts: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
 
 
 class YeastLot(Base):
@@ -44,7 +44,7 @@ class YeastLot(Base):
     viability: Mapped[Optional[float]] = mapped_column(Float, nullable=True)   # % sống
     vitality: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     status: Mapped[str] = mapped_column(Unicode(255), default="available")  # available/used/discarded
-    harvest_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    harvest_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
 
 
 class YeastIssue(Base):
@@ -56,4 +56,4 @@ class YeastIssue(Base):
     quantity: Mapped[float] = mapped_column(Float)
     uom: Mapped[str] = mapped_column(Unicode(255), default="L")
     actor: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
-    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    ts: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)

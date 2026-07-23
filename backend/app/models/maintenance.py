@@ -6,10 +6,10 @@ kiểm tra/tu bổ), Calibration (kiểm định/hiệu chuẩn)."""
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import UnicodeText, Date, DateTime, Float, ForeignKey, Integer, Unicode
+from sqlalchemy import UnicodeText, Date, Float, ForeignKey, Integer, Unicode
 from sqlalchemy.orm import Mapped, mapped_column
 
-from ..common import new_id, utcnow
+from ..common import UTCDateTime, new_id, utcnow
 from ..database import Base
 
 
@@ -49,8 +49,8 @@ class Incident(Base):
     downtime_min: Mapped[float] = mapped_column(Float, default=0.0)
     reported_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
     resolution: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)
-    reported_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-    resolved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    reported_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    resolved_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
 
 
 class MaintenancePlan(Base):
@@ -62,7 +62,7 @@ class MaintenancePlan(Base):
     scheduled_date: Mapped[datetime] = mapped_column(Date, index=True)
     status: Mapped[str] = mapped_column(Unicode(255), default="planned")     # planned/done/overdue
     note: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)
-    done_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    done_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
 
 
 class Calibration(Base):

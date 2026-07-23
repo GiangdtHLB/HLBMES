@@ -1,6 +1,6 @@
 """Báo cáo sản xuất — BC định mức NVL (tổng hợp nhiều mẻ)."""
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends
 from sqlalchemy import select
@@ -62,3 +62,87 @@ def material_norm(days: int = 3650, product_id: str = None, db: Session = Depend
     materials.sort(key=lambda x: abs(x["pct"]), reverse=True)
     return {"days": days, "batch_count": len(batch_rows), "materials": materials,
             "batches": batch_rows}
+
+
+# ---- Báo cáo sản lượng chiết (lon) thật từ CSDL SCADA ngoài (SqlConnection.purpose="filling") ----
+@router.get("/filling-bounds")
+def filling_bounds(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    from ..services import filling_external
+    return filling_external.data_bounds(db)
+
+
+@router.get("/filling-realtime")
+def filling_realtime(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """Trạng thái tức thời máy chiết lon 30K (bảng 30K_Realtime, cùng kết nối purpose="filling")."""
+    from ..services import filling_external
+    return filling_external.filling_realtime_status(db)
+
+
+# ---- Trạm quan trắc nước thải Hạ Long (SqlConnection.purpose="wastewater") ----
+@router.get("/wastewater-realtime")
+def wastewater_realtime(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """Snapshot tức thời trạm quan trắc nước thải Hạ Long (bảng QT_Realtime)."""
+    from ..services import wastewater_external
+    return wastewater_external.wastewater_realtime_status(db)
+
+
+@router.get("/filling-report")
+def filling_report(date_from: datetime = None, date_to: datetime = None,
+                   db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    from ..services import filling_external
+    if not date_from or not date_to:
+        # Mặc định: đúng 1 ngày gần nhất có dữ liệu — Ca 1 (06h) của ngày đó tới Ca 3 (06h ngày kế).
+        bounds = filling_external.data_bounds(db)
+        ref_day = datetime.fromisoformat(bounds["max_date"])
+        date_from = date_from or ref_day.replace(hour=filling_external.SHIFT_ANCHOR_HOUR, minute=0, second=0)
+        date_to = date_to or (date_from + timedelta(hours=24))
+    return filling_external.filling_report(db, date_from, date_to)
+
+
+# ---- Báo cáo sản lượng chiết KEG thật từ CSDL SCADA ngoài (SqlConnection.purpose="filling_keg") ----
+@router.get("/keg-bounds")
+def keg_bounds(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    from ..services import keg_external
+    return keg_external.data_bounds(db)
+
+
+@router.get("/keg-report")
+def keg_report(date_from: datetime = None, date_to: datetime = None,
+              db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    from ..services import keg_external
+    if not date_from or not date_to:
+        # Mặc định: ngày hôm qua — Ca 1 (06h) hôm qua tới Ca 3 (06h hôm nay).
+        ref_day = (utcnow() - timedelta(days=1)).replace(hour=6, minute=0, second=0, microsecond=0)
+        date_from = date_from or ref_day
+        date_to = date_to or (date_from + timedelta(hours=24))
+    return keg_external.keg_report(db, date_from, date_to)
+
+
+# ---- Báo cáo trạng thái lô tổng hợp (Nấu/Lên men/Lọc/Chiết) ----
+@router.get("/lo-status")
+def lo_status(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    from ..services import lo_status as lo_status_svc
+    return lo_status_svc.lo_status_report(db)
+
+
+# ---- Tổng hợp cho Tổng quan (dashboard): lệnh/mẻ nấu-lọc-chiết + sản lượng chiết lon/keg ----
+@router.get("/dashboard-summary")
+def dashboard_summary(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    from ..services import dashboard as dashboard_svc
+    return dashboard_svc.production_summary(db)
+
+
+@router.get("/qc-attention-alerts")
+def qc_attention_alerts(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    from ..services import dashboard as dashboard_svc
+    return dashboard_svc.qc_attention_alerts(db)
+
+
+# ---- Báo cáo tồn kho thành phẩm theo tuổi lô (cho khối kinh doanh đẩy nhanh bán hàng) ----
+@router.get("/inventory-aging")
+def inventory_aging(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    from ..services import ops_setting as ops_setting_svc
+    from ..services import wms as wms_svc
+    settings = ops_setting_svc.get_settings(db)
+    return wms_svc.lot_aging_report(db, settings.aging_caution_days, settings.aging_warning_days,
+                                    settings.aging_critical_days)

@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 
 from ..common import new_id
 from ..database import get_db
-from ..errors import NotFoundError
+from ..errors import DomainError, NotFoundError
 from ..models.recipes import Recipe, RecipeVersion
 from ..schemas import (
     ChangeApproveIn,
@@ -32,6 +32,9 @@ def list_recipes(db: Session = Depends(get_db)):
 def create_recipe(payload: RecipeIn, db: Session = Depends(get_db),
                   user: User = Depends(get_current_user)):
     require_perm(user, "recipe.author")
+    if db.execute(select(Recipe).where(Recipe.product_id == payload.product_id)).scalar_one_or_none():
+        raise DomainError("Dịch bia này đã có công thức — mỗi dịch bia chỉ được 1 công thức "
+                           "(tạo version mới trong công thức đã có thay vì tạo công thức khác).")
     r = Recipe(recipe_id=new_id(), **payload.model_dump())
     db.add(r)
     db.commit()

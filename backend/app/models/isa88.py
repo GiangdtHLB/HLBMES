@@ -8,10 +8,10 @@ BatchPhaseRun với trạng thái theo ISA-88 (idle→running→held→complete/
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import UnicodeText, JSON, DateTime, ForeignKey, Integer, Unicode
+from sqlalchemy import UnicodeText, JSON, ForeignKey, Integer, Unicode
 from sqlalchemy.orm import Mapped, mapped_column
 
-from ..common import PhaseState, new_id, utcnow
+from ..common import PhaseState, UTCDateTime, new_id, utcnow
 from ..database import Base
 
 
@@ -28,7 +28,7 @@ class BatchPhaseRun(Base):
     state: Mapped[str] = mapped_column(Unicode(255), default=PhaseState.RUNNING.value, index=True)
     params: Mapped[dict] = mapped_column(JSON, default=dict)   # setpoint snapshot từ procedure
     values: Mapped[dict] = mapped_column(JSON, default=dict)   # actual ghi nhận
-    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-    ended_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    started_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    ended_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
     operator: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
     note: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)

@@ -7,10 +7,10 @@ trường (in_circulation). PackagingMove = nhật ký biến động (nhập/xu
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import UnicodeText, Boolean, DateTime, Float, ForeignKey, Unicode
+from sqlalchemy import UnicodeText, Boolean, Float, ForeignKey, Unicode
 from sqlalchemy.orm import Mapped, mapped_column
 
-from ..common import new_id, utcnow
+from ..common import UTCDateTime, new_id, utcnow
 from ..database import Base
 
 
@@ -27,7 +27,7 @@ class PackagingType(Base):
     on_hand: Mapped[float] = mapped_column(Float, default=0.0)   # tồn trong kho
     in_circulation: Mapped[float] = mapped_column(Float, default=0.0)  # đang lưu hành (ngoài thị trường)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
 
 
 class PackagingMove(Base):
@@ -40,4 +40,4 @@ class PackagingMove(Base):
     ref: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
     note: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)
     by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
-    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    ts: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)

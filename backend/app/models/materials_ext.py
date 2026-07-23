@@ -2,6 +2,8 @@
 
 - Dispense: phiếu cấp liệu cho một mẻ (header), gom các dòng cấp theo lô cụ thể.
 - DispenseLine: một dòng = một lô NVL cấp vào mẻ, gắn với genealogy edge consume.
+- MaterialQcGroup: gán nhóm chỉ tiêu chất lượng (quality_ext.QCParameterGroup) cho một
+  nguyên liệu — chỉ nguyên liệu có gán mới bị cổng nhập kho bắt buộc khai báo/duyệt QC.
 
 Việc trừ tồn lô + tạo genealogy + chặn vượt định mức tái dùng batches.consume_lot.
 """
@@ -9,10 +11,10 @@ Việc trừ tồn lô + tạo genealogy + chặn vượt định mức tái dù
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import UnicodeText, DateTime, Float, ForeignKey, Unicode
+from sqlalchemy import UnicodeText, Float, ForeignKey, Unicode
 from sqlalchemy.orm import Mapped, mapped_column
 
-from ..common import new_id, utcnow
+from ..common import UTCDateTime, new_id, utcnow
 from ..database import Base
 
 
@@ -26,7 +28,7 @@ class Dispense(Base):
     status: Mapped[str] = mapped_column(Unicode(255), default="issued")   # issued (đã trừ tồn)
     note: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)
     created_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
 
 
 class DispenseLine(Base):
@@ -39,4 +41,14 @@ class DispenseLine(Base):
     lot_code: Mapped[Optional[str]] = mapped_column(Unicode(64), nullable=True)
     quantity: Mapped[float] = mapped_column(Float, default=0.0)
     uom: Mapped[str] = mapped_column(Unicode(255), default="kg")
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+
+
+class MaterialQcGroup(Base):
+    __tablename__ = "material_qc_group"
+
+    link_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
+    material_id: Mapped[str] = mapped_column(ForeignKey("material.material_id"), index=True)
+    group_id: Mapped[str] = mapped_column(ForeignKey("qc_parameter_group.group_id"), index=True)
+    mandatory: Mapped[bool] = mapped_column(default=True)
+    active: Mapped[bool] = mapped_column(default=True)

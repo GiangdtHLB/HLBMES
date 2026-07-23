@@ -8,10 +8,10 @@ phân rã 6 big losses. MTBF/MTTR suy ra từ DowntimeEvent + Incident theo thi�
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import UnicodeText, DateTime, Float, ForeignKey, Unicode
+from sqlalchemy import UnicodeText, Float, ForeignKey, Unicode
 from sqlalchemy.orm import Mapped, mapped_column
 
-from ..common import new_id, utcnow
+from ..common import UTCDateTime, new_id, utcnow
 from ..database import Base
 
 
@@ -22,7 +22,7 @@ class DowntimeEvent(Base):
     line: Mapped[str] = mapped_column(Unicode(255), index=True)
     equipment_id: Mapped[Optional[str]] = mapped_column(ForeignKey("equipment.equipment_id"), nullable=True, index=True)
     shift: Mapped[str] = mapped_column(Unicode(255), default="A")
-    shift_date: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    shift_date: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, index=True)
     # Cây lý do: nhóm (thiet_bi/van_hanh/chat_luong/thieu_vat_tu/chuyen_doi) → mã con
     reason_group: Mapped[str] = mapped_column(Unicode(255), index=True)
     reason_code: Mapped[str] = mapped_column(Unicode(64), index=True)
@@ -30,8 +30,8 @@ class DowntimeEvent(Base):
     # Phân loại 6 big losses (availability/performance/quality loss)
     loss_category: Mapped[str] = mapped_column(Unicode(255), default="availability")
     minutes: Mapped[float] = mapped_column(Float, default=0.0)
-    start_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
-    end_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    start_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+    end_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
     note: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)
     recorded_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
-    recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    recorded_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)

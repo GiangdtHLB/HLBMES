@@ -22,9 +22,22 @@ from ..common import (
 )
 from ..errors import DomainError, NotFoundError
 from ..models.batches import BatchExecution
+from ..models.brewing import BottleRecord, BrewBatch, FermentRecord, FilterRecord
 from ..models.materials import MaterialLot
 from ..models.quality import Deviation, QualityResult
 from ..security import User, require_role
+
+# Scope theo công đoạn sản xuất (Nấu/Lên men/Lọc/Chiết) — scope_id là PK thật của bản ghi,
+# KHÁC quy ước scope_id ghép chuỗi (VD "{lm_code}__len_men_phu") mà qc_catalog.py dùng để khai
+# báo chỉ tiêu theo từng công đoạn con; 2 hệ thống dùng chung bảng QualityResult/Deviation
+# nhưng scope_id không bao giờ trùng nhau (PK ngẫu nhiên vs chuỗi ghép có "__") nên không xung
+# đột. Xem routers/quality.py (Hold/Release, Mở deviation) và app.js VIEWS.quality.
+_STAGE_MODELS = {
+    "brew_batch": BrewBatch,
+    "ferment": FermentRecord,
+    "filter": FilterRecord,
+    "bottle": BottleRecord,
+}
 
 
 def _evaluate(value, lower, upper) -> str:
@@ -162,34 +175,57 @@ def transition_deviation(db: Session, deviation_id: str, target: str, user: User
 
 # ---- helpers ----
 
+def _get_scope_obj(db: Session, scope_type: str, scope_id: str):
+    if scope_type == "batch":
+        return db.get(BatchExecution, scope_id)
+    if scope_type == "lot":
+        return db.get(MaterialLot, scope_id)
+    model = _STAGE_MODELS.get(scope_type)
+    if model is None:
+        raise DomainError(f"Phạm vi không hợp lệ: {scope_type}")
+    return db.get(model, scope_id)
+
+
 def _assert_scope_exists(db: Session, scope_type: str, scope_id: str) -> None:
-    obj = db.get(BatchExecution, scope_id) if scope_type == "batch" else db.get(MaterialLot, scope_id)
-    if not obj:
+    if not _get_scope_obj(db, scope_type, scope_id):
         raise NotFoundError(f"{scope_type} '{scope_id}' không tồn tại.")
 
 
 def _set_quality_status(db: Session, scope_type: str, scope_id: str, status: str) -> dict:
-    if scope_type == "batch":
-        obj = db.get(BatchExecution, scope_id)
-        before = {"quality_status": obj.quality_status}
-        obj.quality_status = status
-    else:
-        obj = db.get(MaterialLot, scope_id)
+    obj = _get_scope_obj(db, scope_type, scope_id)
+    if scope_type == "lot":
         before = {"status": obj.status}
         # Lô: ánh xạ quality status sang lot status.
         obj.status = (LotStatus.RELEASED.value if status == QualityStatus.RELEASED.value
                       else LotStatus.ON_HOLD.value if status == QualityStatus.ON_HOLD.value
                       else obj.status)
+    else:
+        before = {"quality_status": obj.quality_status}
+        obj.quality_status = status
     return before
 
 
-def _assert_releasable(db: Session, scope_type: str, scope_id: str) -> None:
+def latest_results_by_param(db: Session, scope_type: str, scope_id: str) -> dict[str, QualityResult]:
+    """Chỉ giữ giá trị MỚI NHẤT đã khai báo cho mỗi chỉ tiêu — khai báo lại 1 chỉ tiêu (sửa giá
+    trị nhập nhầm) không được để giá trị FAIL cũ (đã bị đè) tiếp tục tính là đang treo."""
     results = db.execute(
         select(QualityResult).where(
             QualityResult.scope_type == scope_type, QualityResult.scope_id == scope_id
-        )
+        ).order_by(QualityResult.recorded_at)
     ).scalars().all()
-    fails = [r for r in results if r.status == ResultStatus.FAIL.value]
+    return {r.parameter: r for r in results}
+
+
+def _assert_releasable(db: Session, scope_type: str, scope_id: str) -> None:
+    from . import qc_catalog
+    missing = qc_catalog.missing_mandatory_params(db, scope_type, scope_id)
+    if missing:
+        raise DomainError(
+            f"Không thể release: còn chỉ tiêu bắt buộc chưa khai báo: {', '.join(missing)}."
+        )
+
+    latest_by_param = latest_results_by_param(db, scope_type, scope_id)
+    fails = [r for r in latest_by_param.values() if r.status == ResultStatus.FAIL.value]
     if fails:
         # Còn FAIL: chỉ release được khi mọi deviation liên quan đã CLOSED.
         devs = db.execute(

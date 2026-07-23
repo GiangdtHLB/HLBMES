@@ -23,11 +23,15 @@ def verify(db: Session = Depends(get_db)):
 
 @router.get("", response_model=list[AuditOut])
 def list_audit(entity_id: str = Query(default=None), entity_type: str = Query(default=None),
+               action: str = Query(default=None, description="1 hoặc nhiều action, cách nhau bởi dấu phẩy (VD hold,release)"),
                limit: int = Query(default=200, le=1000), db: Session = Depends(get_db)):
     stmt = select(AuditLog)
     if entity_id:
         stmt = stmt.where(AuditLog.entity_id == entity_id)
     if entity_type:
         stmt = stmt.where(AuditLog.entity_type == entity_type)
+    if action:
+        actions = [a.strip() for a in action.split(",") if a.strip()]
+        stmt = stmt.where(AuditLog.action.in_(actions))
     stmt = stmt.order_by(AuditLog.seq.desc()).limit(limit)
     return db.execute(stmt).scalars().all()

@@ -4,17 +4,114 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from ..database import get_db
-from ..schemas import CapaIn, CapaTransitionIn, SampleIn, SampleTransitionIn
+from ..schemas import (
+    CapaIn,
+    CapaTransitionIn,
+    QcGroupIn,
+    QcGroupItemIn,
+    QcGroupOut,
+    QcParameterIn,
+    QcParameterOut,
+    SampleIn,
+    SampleTransitionIn,
+    StageQcGroupIn,
+)
 from ..security import User, get_current_user
-from ..services import quality_adv as svc
+from ..services import qc_catalog, quality_adv as svc
 
 router = APIRouter(prefix="/api/qc", tags=["quality-adv"])
 
 
-# ---- SPC ----
+# ---- SPC / danh mục chỉ tiêu ----
 @router.get("/parameters")
-def qc_parameters(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    return svc.list_qc_parameters(db)
+def qc_parameters(active_only: bool = True, db: Session = Depends(get_db),
+                  user: User = Depends(get_current_user)):
+    return svc.list_qc_parameters(db, active_only)
+
+
+@router.post("/parameters", response_model=QcParameterOut, status_code=201)
+def create_qc_parameter(payload: QcParameterIn, db: Session = Depends(get_db),
+                        user: User = Depends(get_current_user)):
+    return svc.create_qc_parameter(db, payload.model_dump(), user)
+
+
+@router.put("/parameters/{param_id}", response_model=QcParameterOut)
+def update_qc_parameter(param_id: str, payload: QcParameterIn, db: Session = Depends(get_db),
+                        user: User = Depends(get_current_user)):
+    return svc.update_qc_parameter(db, param_id, payload.model_dump(), user)
+
+
+# ---- Nhóm chỉ tiêu chất lượng NVL ----
+@router.get("/groups", response_model=list[QcGroupOut])
+def list_qc_groups(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    return qc_catalog.list_groups(db)
+
+
+@router.post("/groups", response_model=QcGroupOut, status_code=201)
+def create_qc_group(payload: QcGroupIn, db: Session = Depends(get_db),
+                    user: User = Depends(get_current_user)):
+    return qc_catalog.create_group(db, payload.model_dump(), user)
+
+
+@router.put("/groups/{group_id}", response_model=QcGroupOut)
+def update_qc_group(group_id: str, payload: QcGroupIn, db: Session = Depends(get_db),
+                    user: User = Depends(get_current_user)):
+    return qc_catalog.update_group(db, group_id, payload.model_dump(), user)
+
+
+@router.delete("/groups/{group_id}", status_code=204)
+def delete_qc_group(group_id: str, db: Session = Depends(get_db),
+                    user: User = Depends(get_current_user)):
+    qc_catalog.delete_group(db, group_id, user)
+
+
+@router.get("/groups/{group_id}/items")
+def list_qc_group_items(group_id: str, db: Session = Depends(get_db),
+                        user: User = Depends(get_current_user)):
+    return qc_catalog.list_items(db, group_id)
+
+
+@router.post("/groups/{group_id}/items", status_code=201)
+def add_qc_group_item(group_id: str, payload: QcGroupItemIn, db: Session = Depends(get_db),
+                      user: User = Depends(get_current_user)):
+    return qc_catalog.add_item(db, group_id, payload.model_dump(), user)
+
+
+@router.put("/groups/{group_id}/items/{item_id}")
+def update_qc_group_item(group_id: str, item_id: str, payload: QcGroupItemIn,
+                         db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    return qc_catalog.update_item(db, item_id, payload.model_dump(), user)
+
+
+@router.delete("/groups/{group_id}/items/{item_id}", status_code=204)
+def delete_qc_group_item(group_id: str, item_id: str, db: Session = Depends(get_db),
+                         user: User = Depends(get_current_user)):
+    qc_catalog.delete_item(db, item_id, user)
+
+
+# ---- Gán nhóm chỉ tiêu cho công đoạn sản xuất (mẻ nấu/lên men/lọc/chiết) ----
+@router.get("/stage-groups")
+def list_stage_qc_groups(stage: str = None, db: Session = Depends(get_db),
+                         user: User = Depends(get_current_user)):
+    return qc_catalog.list_stage_groups(db, stage)
+
+
+@router.post("/stage-groups", status_code=201)
+def link_stage_qc_group(payload: StageQcGroupIn, db: Session = Depends(get_db),
+                        user: User = Depends(get_current_user)):
+    return qc_catalog.link_stage_group(db, payload.model_dump(), user)
+
+
+@router.put("/stage-groups/{link_id}")
+def update_stage_qc_group(link_id: str, payload: StageQcGroupIn, db: Session = Depends(get_db),
+                          user: User = Depends(get_current_user)):
+    return qc_catalog.update_stage_group(db, link_id, payload.model_dump(), user)
+
+
+@router.delete("/stage-groups/{link_id}", status_code=204)
+def unlink_stage_qc_group(link_id: str, db: Session = Depends(get_db),
+                          user: User = Depends(get_current_user)):
+    qc_catalog.unlink_stage_group(db, link_id, user)
 
 
 @router.get("/spc")

@@ -8,10 +8,10 @@
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import JSON, DateTime, Float, ForeignKey, Integer, Unicode
+from sqlalchemy import JSON, Float, ForeignKey, Integer, Unicode
 from sqlalchemy.orm import Mapped, mapped_column
 
-from ..common import new_id, utcnow
+from ..common import UTCDateTime, new_id, utcnow
 from ..database import Base
 
 
@@ -24,7 +24,7 @@ class ProcessReading(Base):
     value: Mapped[float] = mapped_column(Float)
     unit: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
     # source/ingest timestamp (tài liệu §8.3) — ở MVP gộp làm một mốc UTC.
-    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    ts: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, index=True)
     quality: Mapped[str] = mapped_column(Unicode(255), default="good")  # good | stale | bad
 
 
@@ -34,7 +34,7 @@ class OEERecord(Base):
     oee_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
     line: Mapped[str] = mapped_column(Unicode(255), index=True)
     shift: Mapped[str] = mapped_column(Unicode(255), default="A")
-    shift_date: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    shift_date: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, index=True)
 
     planned_time_min: Mapped[float] = mapped_column(Float)      # thời gian sản xuất theo kế hoạch
     downtime_min: Mapped[float] = mapped_column(Float, default=0.0)
@@ -42,4 +42,4 @@ class OEERecord(Base):
     total_count: Mapped[int] = mapped_column(Integer, default=0)
     good_count: Mapped[int] = mapped_column(Integer, default=0)
     downtime_reasons: Mapped[list] = mapped_column(JSON, default=list)  # [{reason, minutes}]
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)

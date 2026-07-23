@@ -15,9 +15,16 @@ from ..schemas import (
     ResultOut,
 )
 from ..security import User, get_current_user, require_perm
-from ..services import quality as svc
+from ..services import qc_catalog, quality as svc
 
 router = APIRouter(prefix="/api/quality", tags=["quality"])
+
+
+@router.get("/pending-stage-qc")
+def pending_stage_qc(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """Các bản ghi công đoạn (mẻ nấu/lô lên men/mẻ lọc/mã chiết) còn thiếu chỉ tiêu chất
+    lượng bắt buộc — panel "chờ khai báo" ở tab Chất lượng, tương tự Lô NVL chờ khai báo."""
+    return qc_catalog.list_pending_stage_declarations(db)
 
 
 @router.get("/results", response_model=list[ResultOut])

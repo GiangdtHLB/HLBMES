@@ -27,7 +27,7 @@ from .models.energy import EnergyArea, EnergyGroup, EnergyReading
 from .models.integration import ApiKey
 from .security import hash_password
 from .models.maintenance import Calibration, Equipment, Incident, MaintenancePlan, SparePart
-from .models.master import Material, Product
+from .models.master import BeerType, Material, Product
 from .models.materials import MaterialLot
 from .models.metrics import OEERecord, ProcessReading
 from .models.orders import ProductionOrder
@@ -50,10 +50,19 @@ SUP = User("supervisor1", Role.SUPERVISOR.value)
 OP = User("operator1", Role.OPERATOR.value)
 
 
-def _get_or_create_product(db, code, name, uom="L"):
+def _get_or_create_beer_type(db, code, name):
+    bt = db.execute(select(BeerType).where(BeerType.code == code)).scalar_one_or_none()
+    if not bt:
+        bt = BeerType(beer_type_id=new_id(), code=code, name=name)
+        db.add(bt)
+        db.commit()
+    return bt
+
+
+def _get_or_create_product(db, code, name, uom="L", beer_type_id=None):
     p = db.execute(select(Product).where(Product.code == code)).scalar_one_or_none()
     if not p:
-        p = Product(product_id=new_id(), code=code, name=name, uom=uom)
+        p = Product(product_id=new_id(), code=code, name=name, uom=uom, beer_type_id=beer_type_id)
         db.add(p)
         db.commit()
     return p
@@ -79,7 +88,7 @@ def ensure_admin(db) -> None:
     db.add(AppUser(user_id=new_id(), username="admin", password_hash=hash_password(pw),
                    full_name="Quản trị viên", job_title="Quản trị hệ thống", role="admin",
                    allowed_views="*", permissions="*", scope_lines="*", scope_areas="*",
-                   scope_qc="*", active=True, must_change_password=must_change))
+                   scope_qc="*", scope_warehouse="*", active=True, must_change_password=must_change))
     db.commit()
     if must_change:
         print("⚠️  Đã tạo admin với mật khẩu MẶC ĐỊNH 'admin123' — sẽ buộc đổi khi đăng nhập. "
@@ -100,7 +109,8 @@ def seed():
         return
 
     # --- Master data ---
-    lager = _get_or_create_product(db, "BIA-LAGER", "Bia Lager 4.8%", "L")
+    lager_type = _get_or_create_beer_type(db, "LAGER", "Lager")
+    lager = _get_or_create_product(db, "BIA-LAGER", "Bia Lager 4.8%", "L", beer_type_id=lager_type.beer_type_id)
     malt = _get_or_create_material(db, "MALT-PILS", "Malt Pilsner", "kg", "malt")
     hop = _get_or_create_material(db, "HOP-SAAZ", "Hoa bia Saaz", "kg", "hop")
     yeast = _get_or_create_material(db, "YEAST-L34", "Men Lager W-34/70", "L", "yeast")
@@ -109,18 +119,18 @@ def seed():
 
     # --- Material lots (nguyên liệu đầu vào) ---
     lots = [
-        MaterialLot(lot_id=new_id(), lot_code="MALT-2406-01", material_id=malt.material_id,
+        MaterialLot(lot_id=new_id(), lot_code="MALT-2406-01", lot_year=2024, material_id=malt.material_id,
                     lot_type="material", supplier_lot="SUP-M-991", quantity=5000, uom="kg",
-                    status=LotStatus.AVAILABLE.value, location="Kho A"),
-        MaterialLot(lot_id=new_id(), lot_code="HOP-2406-01", material_id=hop.material_id,
+                    status=LotStatus.AVAILABLE.value, location="Kho công ty"),
+        MaterialLot(lot_id=new_id(), lot_code="HOP-2406-01", lot_year=2024, material_id=hop.material_id,
                     lot_type="material", supplier_lot="SUP-H-220", quantity=80, uom="kg",
-                    status=LotStatus.AVAILABLE.value, location="Kho lạnh"),
-        MaterialLot(lot_id=new_id(), lot_code="YEAST-2406-01", material_id=yeast.material_id,
+                    status=LotStatus.AVAILABLE.value, location="Kho công ty"),
+        MaterialLot(lot_id=new_id(), lot_code="YEAST-2406-01", lot_year=2024, material_id=yeast.material_id,
                     lot_type="material", supplier_lot="SUP-Y-007", quantity=200, uom="L",
-                    status=LotStatus.AVAILABLE.value, location="Lab men"),
-        MaterialLot(lot_id=new_id(), lot_code="MALT-V-2406-01", material_id=malt_alt.material_id,
+                    status=LotStatus.AVAILABLE.value, location="Kho công ty"),
+        MaterialLot(lot_id=new_id(), lot_code="MALT-V-2406-01", lot_year=2024, material_id=malt_alt.material_id,
                     lot_type="material", supplier_lot="SUP-MV-101", quantity=3000, uom="kg",
-                    status=LotStatus.AVAILABLE.value, location="Kho A",
+                    status=LotStatus.AVAILABLE.value, location="Kho công ty",
                     expiry=utcnow() + timedelta(days=180)),
     ]
     db.add_all(lots)
@@ -660,29 +670,25 @@ def _seed_packaging(db) -> None:
 
 
 def _seed_wms(db) -> None:
-    """#P3-4: vị trí kho TP + vài pallet (gồm case) cho lô đóng gói PKG-2406-0001."""
-    from .models.wms import Case, Pallet, WmsLocation
+    """#P3-4: vị trí kho TP + vài vỉ tồn kho (đơn vị độc lập, không pallet) cho lô đóng
+    gói PKG-2406-0001."""
+    from .models.wms import FinishedGoodsUnit, WmsLocation
     locs = [
-        WmsLocation(loc_id=new_id(), code="TP-A1", name="Kho TP - Kệ A1", zone="A", kind="bin", capacity=12),
-        WmsLocation(loc_id=new_id(), code="TP-A2", name="Kho TP - Kệ A2", zone="A", kind="bin", capacity=12),
-        WmsLocation(loc_id=new_id(), code="TP-COLD", name="Kho lạnh TP", zone="COLD", kind="cold", capacity=20),
-        WmsLocation(loc_id=new_id(), code="DOCK-1", name="Bãi xuất hàng", zone="DOCK", kind="dock", capacity=6),
+        WmsLocation(loc_id=new_id(), code="TP-A1", name="Kho TP - Kệ A1", zone="A", kind="bin", capacity=50),
+        WmsLocation(loc_id=new_id(), code="TP-A2", name="Kho TP - Kệ A2", zone="A", kind="bin", capacity=50),
+        WmsLocation(loc_id=new_id(), code="TP-COLD", name="Kho lạnh TP", zone="COLD", kind="cold", capacity=80),
+        WmsLocation(loc_id=new_id(), code="DOCK-1", name="Bãi xuất hàng", zone="DOCK", kind="dock", capacity=20),
     ]
     db.add_all(locs)
     db.commit()
-    # 3 pallet (mỗi 40 case × 24 lon) — 2 đã cất kệ A1/A2, 1 đang building tại dock.
-    plan = [("TP-A1", "stored"), ("TP-A2", "stored"), (None, "building")]
-    for i, (loc_code, status) in enumerate(plan, start=1):
+    # 8 vỉ (24 lon/vỉ) — 5 đã cất kệ A1/A2, 3 chưa cất (chờ vị trí) tại dock.
+    plan = ["TP-A1", "TP-A1", "TP-A2", "TP-A2", "TP-A2", None, None, None]
+    stamp = "260624"
+    for i, loc_code in enumerate(plan, start=1):
         loc = next((l for l in locs if l.code == loc_code), None)
-        stamp = f"2406-{i:02d}"
-        p = Pallet(pallet_id=new_id(), pallet_code=f"PLT-{stamp}", product="BIA-LAGER",
-                   lot_code="PKG-2406-0001", case_count=40, units_per_case=24, status=status,
-                   location_id=loc.loc_id if loc else None, created_by="thukho")
-        db.add(p)
-        db.flush()
-        for j in range(1, 41):
-            db.add(Case(case_id=new_id(), case_code=f"CS-{stamp}-{j:03d}", pallet_id=p.pallet_id,
-                        product="BIA-LAGER", units=24, lot_code="PKG-2406-0001"))
+        db.add(FinishedGoodsUnit(unit_id=new_id(), unit_code=f"VI-{stamp}-{i:04d}", unit_type="vi",
+                                 product_name="BIA-LAGER", lot_code="PKG-2406-0001", quantity=24,
+                                 status="stored", location_id=loc.loc_id if loc else None, created_by="thukho"))
     db.commit()
 
 
@@ -820,42 +826,46 @@ def _seed_users(db) -> None:
     """
     accounts = [
         # username, password, full_name, job_title, role, views, permissions,
-        #   scope_lines, scope_areas, scope_qc  (admin do ensure_admin tạo riêng)
+        #   scope_lines, scope_areas, scope_qc, scope_warehouse  (admin do ensure_admin tạo riêng)
         ("giamdoc", "123456", "Nguyễn Văn Giám", "Giám đốc nhà máy", "supervisor",
          "dashboard,dispatch,schedule,oee,qclab,realtime,ai,trace,energy,wms,packaging,reports,integration,audit", "",  # chỉ xem
-         "*", "*", "*"),
+         "*", "*", "*", "*"),
         ("quandoc", "123456", "Trần Quang Đốc", "Quản đốc phân xưởng", "supervisor",
          "dashboard,master,orders,dispatch,schedule,batches,isa88,dispense,recipeadv,process,realtime,quality,qclab,oee,trace,wms,packaging,reports,ai,audit",
          "master.manage,order.create,wo.manage,wo.dispatch,batch.create,batch.execute,quality.deviation,ebr.sign,ebr.approve",
-         "*", "*", "*"),
+         "*", "*", "*", "*"),
         ("truongca", "123456", "Lê Thị Ca", "Trưởng ca sản xuất", "supervisor",
-         "dashboard,orders,dispatch,schedule,batches,isa88,dispense,process,realtime,oee,reports,ai",
-         "order.create,wo.dispatch,batch.create,batch.execute,ebr.sign",
-         "Nấu A", "nau,len_men,chiet", "*"),
+         "dashboard,orders,dispatch,schedule,batches,isa88,dispense,process,realtime,oee,reports,ai,warehouse_px",
+         "order.create,wo.dispatch,batch.create,batch.execute,ebr.sign,warehouse.request",
+         "Nấu A", "nau,len_men,chiet", "*", "phan_xuong"),
         ("vanhanh", "123456", "Phạm Văn Hành", "Nhân viên vận hành", "operator",
-         "dashboard,batches,isa88,dispense,process,realtime", "batch.execute,ebr.sign",
-         "Nấu A", "nau,len_men", "*"),
+         "dashboard,batches,isa88,dispense,process,realtime,warehouse_px", "batch.execute,ebr.sign,warehouse.request",
+         "Nấu A", "nau,len_men", "*", "phan_xuong"),
         ("kcs", "123456", "Hoàng Thị Kiểm", "Nhân viên KCS / QA", "qa",
          "dashboard,quality,qclab,process,trace,ai", "quality.release,quality.deviation,recipe.approve,ebr.sign,ebr.approve",
-         "*", "*", "Độ đường (°P),pH"),
+         "*", "*", "Độ đường (°P),pH", "*"),
         ("kysu", "123456", "Đỗ Công Kỹ", "Kỹ sư công nghệ", "engineer",
          "dashboard,master,recipes,recipeadv,batches,isa88,qclab,process,realtime,oee,trace,reports,schedule",
          "master.manage,recipe.author,recipe.approve,batch.create,batch.execute,ebr.sign",
-         "*", "*", "*"),
+         "*", "*", "*", "*"),
         ("thukho", "123456", "Vũ Thị Kho", "Thủ kho NVL", "operator",
-         "dashboard,warehouse,wms,packaging,dispense", "warehouse.receive,warehouse.issue",
-         "*", "kho", "*"),
+         "dashboard,warehouse_kc,wms,packaging,dispense", "warehouse.receive,warehouse.issue",
+         "*", "kho", "*", "cong_ty"),
+        ("thukho_px", "123456", "Đặng Thị Xưởng", "Thủ kho phân xưởng", "operator",
+         "dashboard,warehouse_px,dispense", "warehouse.receive,warehouse.issue,warehouse.request",
+         "*", "kho", "*", "phan_xuong"),
         ("baotri", "123456", "Bùi Văn Trì", "Nhân viên bảo trì", "operator",
          "dashboard,maint,calib,oee", "maintenance.manage,calibration.manage",
-         "*", "loc,chiet", "*"),
+         "*", "loc,chiet", "*", "*"),
         ("nangluong", "123456", "Ngô Văn Điện", "NV quản lý năng lượng", "operator",
          "dashboard,energy", "energy.update",
-         "*", "nau,len_men,chiet", "*"),
+         "*", "nau,len_men,chiet", "*", "*"),
     ]
-    for username, pw, full, title, role, views, perms, sl, sa, sq in accounts:
+    for username, pw, full, title, role, views, perms, sl, sa, sq, sw in accounts:
         db.add(AppUser(user_id=new_id(), username=username, password_hash=hash_password(pw),
                        full_name=full, job_title=title, role=role, allowed_views=views,
-                       permissions=perms, scope_lines=sl, scope_areas=sa, scope_qc=sq, active=True))
+                       permissions=perms, scope_lines=sl, scope_areas=sa, scope_qc=sq,
+                       scope_warehouse=sw, active=True))
     db.commit()
     print("Tài khoản: admin/admin123 · giamdoc,quandoc,truongca,vanhanh,kcs,kysu,thukho,baotri,nangluong /123456")
 

@@ -10,10 +10,10 @@
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import JSON, DateTime, Float, ForeignKey, Integer, Unicode, UniqueConstraint
+from sqlalchemy import JSON, Float, ForeignKey, Integer, Unicode, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
-from ..common import RecipeState, new_id, utcnow
+from ..common import RecipeState, UTCDateTime, new_id, utcnow
 from ..database import Base
 
 
@@ -23,7 +23,9 @@ class Recipe(Base):
     recipe_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
     code: Mapped[str] = mapped_column(Unicode(64), unique=True, index=True)
     name: Mapped[str] = mapped_column(Unicode(255))
-    product_id: Mapped[str] = mapped_column(ForeignKey("product.product_id"))
+    # 1 dịch bia = đúng 1 công thức (nhiều version bên trong RecipeVersion) — unique để
+    # services/brew_order.py::_effective_bom() luôn chọn đúng recipe duy nhất của dịch bia.
+    product_id: Mapped[str] = mapped_column(ForeignKey("product.product_id"), unique=True, index=True)
 
 
 class RecipeVersion(Base):
@@ -56,5 +58,5 @@ class RecipeVersion(Base):
 
     created_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
     approved_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
-    approved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    approved_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)

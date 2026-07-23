@@ -18,8 +18,10 @@ from ..database import get_db
 from ..errors import NotFoundError
 from ..models.audit import AuditLog
 from ..models.integration import ApiKey, Webhook
+from ..schemas import SqlConnectionIn
 from ..security import User, get_current_user, require_api_key, require_role
 from ..services import ai_tools
+from ..services import integration_connection as sqlconn_svc
 
 
 class ExternalEventIn(BaseModel):
@@ -176,6 +178,56 @@ def disable_webhook(webhook_id: str, db: Session = Depends(get_db), user: User =
     w.active = False
     db.commit()
     return {"webhook_id": webhook_id, "active": False}
+
+
+# ---------- Khai báo kết nối CSDL SQL bên ngoài (nội bộ, admin) ----------
+@admin.get("/connections")
+def list_sql_connections(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    require_role(user, Role.ADMIN)
+    return [sqlconn_svc.to_out(c) for c in sqlconn_svc.list_connections(db)]
+
+
+@admin.post("/connections", status_code=201)
+def create_sql_connection(payload: SqlConnectionIn, db: Session = Depends(get_db),
+                          user: User = Depends(get_current_user)):
+    require_role(user, Role.ADMIN)
+    c = sqlconn_svc.create_connection(db, payload.model_dump(), user)
+    return sqlconn_svc.to_out(c)
+
+
+@admin.put("/connections/{connection_id}")
+def update_sql_connection(connection_id: str, payload: SqlConnectionIn, db: Session = Depends(get_db),
+                          user: User = Depends(get_current_user)):
+    require_role(user, Role.ADMIN)
+    c = sqlconn_svc.update_connection(db, connection_id, payload.model_dump())
+    return sqlconn_svc.to_out(c)
+
+
+@admin.delete("/connections/{connection_id}", status_code=204)
+def delete_sql_connection(connection_id: str, db: Session = Depends(get_db),
+                          user: User = Depends(get_current_user)):
+    require_role(user, Role.ADMIN)
+    sqlconn_svc.delete_connection(db, connection_id)
+
+
+@admin.post("/connections/{connection_id}/test")
+def test_sql_connection(connection_id: str, db: Session = Depends(get_db),
+                        user: User = Depends(get_current_user)):
+    require_role(user, Role.ADMIN)
+    return sqlconn_svc.test_connection(db, connection_id)
+
+
+@admin.get("/connections/{connection_id}/tables")
+def list_sql_tables(connection_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    require_role(user, Role.ADMIN)
+    return sqlconn_svc.list_tables(db, connection_id)
+
+
+@admin.get("/connections/{connection_id}/preview-table")
+def preview_sql_table(connection_id: str, table: str, limit: int = 5, db: Session = Depends(get_db),
+                      user: User = Depends(get_current_user)):
+    require_role(user, Role.ADMIN)
+    return sqlconn_svc.preview_table(db, connection_id, table, limit)
 
 
 router.include_router(admin)

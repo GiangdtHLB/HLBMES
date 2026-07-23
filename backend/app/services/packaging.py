@@ -10,6 +10,9 @@ from sqlalchemy.orm import Session
 from ..audit import record_audit
 from ..common import new_id, utcnow
 from ..errors import DomainError, NotFoundError
+from ..models.brewing import BottleMaterialUsage, BottleRecord
+from ..models.master import Material, MaterialGroup
+from ..models.materials import MaterialLot
 from ..models.packaging import PackagingMove, PackagingType
 from ..security import User, require_perm
 
@@ -100,6 +103,49 @@ def move(db: Session, pkg_id: str, kind: str, qty: float, user: User,
                                        "qty": qty}, reason=note)
     db.commit()
     return {"pkg_id": pkg_id, "kind": kind, "on_hand": p.on_hand, "in_circulation": p.in_circulation}
+
+
+def lot_report(db: Session) -> list[dict]:
+    """Báo cáo bao bì TIÊU HAO (nắp, thùng carton, tem nhãn...) theo lô — lấy trực tiếp từ
+    Kho NVL (Material/MaterialLot), không khai báo tay như packaging_type. Vật tư thuộc 1
+    Nhóm vật tư đã đánh dấu is_packaging tự động lọt vào đây; nhập kho qua Nhập kho NVL bình
+    thường, xuất dùng cho mẻ chiết qua nút NVL trên dòng Chiết (BottleMaterialUsage) —
+    KHÔNG áp dụng cho vỏ chai/két/keg tuần hoàn (vẫn dùng packaging_type/packaging_move)."""
+    packaging_group_codes = [g.code for g in db.execute(
+        select(MaterialGroup).where(MaterialGroup.is_packaging.is_(True))).scalars().all()]
+    if not packaging_group_codes:
+        return []
+    materials = db.execute(select(Material).where(Material.category.in_(packaging_group_codes))).scalars().all()
+    material_by_id = {m.material_id: m for m in materials}
+    if not material_by_id:
+        return []
+    lots = db.execute(select(MaterialLot).where(MaterialLot.material_id.in_(material_by_id))
+                      .order_by(MaterialLot.created_at.desc())).scalars().all()
+    lot_ids = [l.lot_id for l in lots]
+    usages = db.execute(select(BottleMaterialUsage).where(
+        BottleMaterialUsage.lot_id.in_(lot_ids))).scalars().all() if lot_ids else []
+    bottle_by_id = {b.bottle_id: b for b in db.execute(select(BottleRecord).where(
+        BottleRecord.bottle_id.in_({u.bottle_id for u in usages}))).scalars().all()} if usages else {}
+    usages_by_lot: dict[str, list] = {}
+    for u in usages:
+        b = bottle_by_id.get(u.bottle_id)
+        usages_by_lot.setdefault(u.lot_id, []).append({
+            "bottle_id": u.bottle_id, "bottle_code": b.bottle_code if b else None,
+            "quantity": u.quantity, "uom": u.uom, "used_at": u.created_at,
+        })
+    out = []
+    for l in lots:
+        m = material_by_id.get(l.material_id)
+        lot_usages = usages_by_lot.get(l.lot_id, [])
+        out.append({
+            "lot_id": l.lot_id, "lot_code": l.lot_code, "material_id": l.material_id,
+            "material_code": m.code if m else None, "material_name": m.name if m else None,
+            "quantity": l.quantity, "uom": l.uom, "status": l.status, "location": l.location,
+            "received_at": l.created_at,
+            "last_issued_at": max((u["used_at"] for u in lot_usages), default=None),
+            "usages": lot_usages,
+        })
+    return out
 
 
 def list_moves(db: Session, pkg_id: str = None) -> list:

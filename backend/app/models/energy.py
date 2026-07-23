@@ -5,10 +5,10 @@ Tổng hợp tháng được tính từ reading ngày (không lưu trùng)."""
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import UnicodeText, Date, DateTime, Float, ForeignKey, Unicode, UniqueConstraint
+from sqlalchemy import UnicodeText, Date, Float, ForeignKey, Unicode, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
-from ..common import new_id, utcnow
+from ..common import UTCDateTime, new_id, utcnow
 from ..database import Base
 
 
@@ -39,4 +39,4 @@ class EnergyReading(Base):
     area_id: Mapped[Optional[str]] = mapped_column(ForeignKey("energy_area.area_id"), nullable=True)
     value: Mapped[float] = mapped_column(Float, default=0.0)
     note: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)

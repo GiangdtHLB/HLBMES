@@ -6,10 +6,10 @@ phải text tùy ý. Deviation có workflow và liên kết tới batch/lot."""
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import UnicodeText, DateTime, Float, Unicode
+from sqlalchemy import UnicodeText, Float, Unicode
 from sqlalchemy.orm import Mapped, mapped_column
 
-from ..common import DeviationState, ResultStatus, new_id, utcnow
+from ..common import DeviationState, ResultStatus, UTCDateTime, new_id, utcnow
 from ..database import Base
 
 
@@ -33,7 +33,7 @@ class QualityResult(Base):
 
     recorded_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
     approved_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
-    recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    recorded_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
 
 
 class Deviation(Base):
@@ -50,5 +50,5 @@ class Deviation(Base):
     disposition: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
     opened_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
     approved_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
-    opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-    closed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    opened_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    closed_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)

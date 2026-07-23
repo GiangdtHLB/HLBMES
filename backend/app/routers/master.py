@@ -11,12 +11,157 @@ from ..audit import record_audit
 from ..common import new_id
 from ..database import get_db
 from ..errors import NotFoundError, PermissionError_
-from ..models.master import Material, Product
-from ..schemas import MaterialIn, MaterialOut, ProductIn, ProductOut
+from ..models.brewing import OpsSetting
+from ..models.master import BeerType, FinishedProduct, Material, MaterialGroup, Product
+from ..models.materials import Supplier
+from ..schemas import (BeerTypeIn, BeerTypeOut, FinishedProductIn, FinishedProductOut, MaterialGroupIn,
+    MaterialGroupOut, MaterialIn, MaterialOut, MaterialQcGroupIn, OpsSettingIn, OpsSettingOut,
+    ProductBrewSpecIn, ProductIn, ProductOut, SupplierIn, SupplierOut)
 from ..security import User, get_current_user, require_perm
+from ..services import braumat_import as braumat_svc
+from ..services import master_data, ops_setting as ops_setting_svc
+from ..services import qc_catalog
 
 router = APIRouter(prefix="/api", tags=["master"],
                    dependencies=[Depends(get_current_user)])
+
+
+# ---- Loại bia (thương hiệu — VD Sapphire, gộp nhiều Dịch bia khác độ oP) ----
+@router.get("/beer-types", response_model=list[BeerTypeOut])
+def list_beer_types(db: Session = Depends(get_db)):
+    return db.execute(select(BeerType).order_by(BeerType.code)).scalars().all()
+
+
+@router.post("/beer-types", response_model=BeerTypeOut, status_code=201)
+def create_beer_type(payload: BeerTypeIn, db: Session = Depends(get_db),
+                     user: User = Depends(get_current_user)):
+    require_perm(user, "master.manage")
+    if db.execute(select(BeerType).where(BeerType.code == payload.code)).scalar_one_or_none():
+        raise PermissionError_(f"Mã loại bia '{payload.code}' đã tồn tại.")
+    bt = BeerType(beer_type_id=new_id(), **payload.model_dump())
+    db.add(bt)
+    record_audit(db, entity_type="beer_type", entity_id=bt.beer_type_id, action="create",
+                 actor=user, after={"code": bt.code, "name": bt.name})
+    db.commit()
+    db.refresh(bt)
+    return bt
+
+
+@router.put("/beer-types/{beer_type_id}", response_model=BeerTypeOut)
+def update_beer_type(beer_type_id: str, payload: BeerTypeIn, db: Session = Depends(get_db),
+                     user: User = Depends(get_current_user)):
+    require_perm(user, "master.manage")
+    bt = db.get(BeerType, beer_type_id)
+    if not bt:
+        raise NotFoundError("Loại bia không tồn tại.")
+    before = {"code": bt.code, "name": bt.name, "note": bt.note}
+    bt.code = payload.code
+    bt.name = payload.name
+    bt.note = payload.note
+    record_audit(db, entity_type="beer_type", entity_id=bt.beer_type_id, action="update",
+                 actor=user, before=before, after=payload.model_dump())
+    db.commit()
+    db.refresh(bt)
+    return bt
+
+
+@router.delete("/beer-types/{beer_type_id}", status_code=204)
+def delete_beer_type(beer_type_id: str, db: Session = Depends(get_db),
+                     user: User = Depends(get_current_user)):
+    master_data.delete_beer_type(db, beer_type_id, user)
+
+
+# ---- Nhà cung cấp (danh mục dùng khi nhập kho NVL) ----
+@router.get("/suppliers", response_model=list[SupplierOut])
+def list_suppliers(db: Session = Depends(get_db)):
+    return db.execute(select(Supplier).order_by(Supplier.code)).scalars().all()
+
+
+@router.post("/suppliers", response_model=SupplierOut, status_code=201)
+def create_supplier(payload: SupplierIn, db: Session = Depends(get_db),
+                    user: User = Depends(get_current_user)):
+    require_perm(user, "master.manage")
+    if db.execute(select(Supplier).where(Supplier.code == payload.code)).scalar_one_or_none():
+        raise PermissionError_(f"Mã nhà cung cấp '{payload.code}' đã tồn tại.")
+    sup = Supplier(supplier_id=new_id(), **payload.model_dump())
+    db.add(sup)
+    record_audit(db, entity_type="supplier", entity_id=sup.supplier_id, action="create",
+                 actor=user, after={"code": sup.code, "name": sup.name})
+    db.commit()
+    db.refresh(sup)
+    return sup
+
+
+@router.put("/suppliers/{supplier_id}", response_model=SupplierOut)
+def update_supplier(supplier_id: str, payload: SupplierIn, db: Session = Depends(get_db),
+                    user: User = Depends(get_current_user)):
+    require_perm(user, "master.manage")
+    sup = db.get(Supplier, supplier_id)
+    if not sup:
+        raise NotFoundError("Nhà cung cấp không tồn tại.")
+    before = {"code": sup.code, "name": sup.name}
+    sup.code = payload.code
+    sup.name = payload.name
+    sup.address = payload.address
+    sup.contact = payload.contact
+    sup.note = payload.note
+    record_audit(db, entity_type="supplier", entity_id=sup.supplier_id, action="update",
+                 actor=user, before=before, after=payload.model_dump())
+    db.commit()
+    db.refresh(sup)
+    return sup
+
+
+@router.delete("/suppliers/{supplier_id}", status_code=204)
+def delete_supplier(supplier_id: str, db: Session = Depends(get_db),
+                    user: User = Depends(get_current_user)):
+    master_data.delete_supplier(db, supplier_id, user)
+
+
+# ---- Nhóm vật tư (danh mục "Nhóm" dùng ở panel Vật tư/Nguyên liệu) ----
+@router.get("/material-groups", response_model=list[MaterialGroupOut])
+def list_material_groups(db: Session = Depends(get_db)):
+    return db.execute(select(MaterialGroup).order_by(MaterialGroup.code)).scalars().all()
+
+
+@router.post("/material-groups", response_model=MaterialGroupOut, status_code=201)
+def create_material_group(payload: MaterialGroupIn, db: Session = Depends(get_db),
+                          user: User = Depends(get_current_user)):
+    require_perm(user, "master.manage")
+    if db.execute(select(MaterialGroup).where(MaterialGroup.code == payload.code)).scalar_one_or_none():
+        raise PermissionError_(f"Mã nhóm vật tư '{payload.code}' đã tồn tại.")
+    g = MaterialGroup(group_id=new_id(), **payload.model_dump())
+    db.add(g)
+    record_audit(db, entity_type="material_group", entity_id=g.group_id, action="create",
+                 actor=user, after={"code": g.code, "name": g.name})
+    db.commit()
+    db.refresh(g)
+    return g
+
+
+@router.put("/material-groups/{group_id}", response_model=MaterialGroupOut)
+def update_material_group(group_id: str, payload: MaterialGroupIn, db: Session = Depends(get_db),
+                          user: User = Depends(get_current_user)):
+    require_perm(user, "master.manage")
+    g = db.get(MaterialGroup, group_id)
+    if not g:
+        raise NotFoundError("Nhóm vật tư không tồn tại.")
+    before = {"code": g.code, "name": g.name, "active": g.active, "is_packaging": g.is_packaging}
+    g.code = payload.code
+    g.name = payload.name
+    g.active = payload.active
+    g.is_packaging = payload.is_packaging
+    record_audit(db, entity_type="material_group", entity_id=g.group_id, action="update",
+                 actor=user, before=before, after=payload.model_dump())
+    db.commit()
+    db.refresh(g)
+    return g
+
+
+@router.delete("/material-groups/{group_id}", status_code=204)
+def delete_material_group(group_id: str, db: Session = Depends(get_db),
+                          user: User = Depends(get_current_user)):
+    master_data.delete_material_group(db, group_id, user)
 
 
 # ---- Sản phẩm ----
@@ -47,16 +192,94 @@ def update_product(product_id: str, payload: ProductIn, db: Session = Depends(ge
     p = db.get(Product, product_id)
     if not p:
         raise NotFoundError("Sản phẩm không tồn tại.")
-    before = {"code": p.code, "name": p.name, "uom": p.uom, "description": p.description}
+    before = {"code": p.code, "name": p.name, "uom": p.uom, "description": p.description,
+              "ferment_days_std": p.ferment_days_std, "beer_type_id": p.beer_type_id}
     p.code = payload.code
     p.name = payload.name
     p.uom = payload.uom
     p.description = payload.description
+    p.ferment_days_std = payload.ferment_days_std
+    p.beer_type_id = payload.beer_type_id
     record_audit(db, entity_type="product", entity_id=p.product_id, action="update",
                  actor=user, before=before, after=payload.model_dump())
     db.commit()
     db.refresh(p)
     return p
+
+
+@router.delete("/products/{product_id}", status_code=204)
+def delete_product(product_id: str, db: Session = Depends(get_db),
+                   user: User = Depends(get_current_user)):
+    master_data.delete_product(db, product_id, user)
+
+
+# ---- Quy định công nghệ nấu (Sapphire form QT-KCS-QT-BM-05) theo dịch bia ----
+@router.get("/products/{product_id}/brew-spec")
+def get_product_brew_spec(product_id: str, db: Session = Depends(get_db)):
+    return braumat_svc.get_spec_values(db, product_id)
+
+
+@router.put("/products/{product_id}/brew-spec")
+def update_product_brew_spec(product_id: str, payload: ProductBrewSpecIn, db: Session = Depends(get_db),
+                             user: User = Depends(get_current_user)):
+    before = braumat_svc.get_spec_values(db, product_id)
+    values = braumat_svc.update_spec_values(db, product_id, payload.model_dump(exclude_unset=True), user)
+    record_audit(db, entity_type="product_brew_spec", entity_id=product_id, action="update",
+                 actor=user, before=before, after=values)
+    db.commit()
+    return values
+
+
+# ---- Sản phẩm (thành phẩm/SKU đóng gói) — khác Dịch bia (Product) ở trên ----
+@router.get("/finished-products", response_model=list[FinishedProductOut])
+def list_finished_products(db: Session = Depends(get_db)):
+    return db.execute(select(FinishedProduct).order_by(FinishedProduct.code)).scalars().all()
+
+
+@router.post("/finished-products", response_model=FinishedProductOut, status_code=201)
+def create_finished_product(payload: FinishedProductIn, db: Session = Depends(get_db),
+                            user: User = Depends(get_current_user)):
+    require_perm(user, "master.manage")
+    if db.execute(select(FinishedProduct).where(FinishedProduct.code == payload.code)).scalar_one_or_none():
+        raise PermissionError_(f"Mã sản phẩm '{payload.code}' đã tồn tại.")
+    fp = FinishedProduct(finished_product_id=new_id(), **payload.model_dump())
+    db.add(fp)
+    record_audit(db, entity_type="finished_product", entity_id=fp.finished_product_id, action="create",
+                 actor=user, after={"code": fp.code, "name": fp.name, "uom": fp.uom})
+    db.commit()
+    db.refresh(fp)
+    return fp
+
+
+@router.put("/finished-products/{finished_product_id}", response_model=FinishedProductOut)
+def update_finished_product(finished_product_id: str, payload: FinishedProductIn, db: Session = Depends(get_db),
+                            user: User = Depends(get_current_user)):
+    require_perm(user, "master.manage")
+    fp = db.get(FinishedProduct, finished_product_id)
+    if not fp:
+        raise NotFoundError("Sản phẩm không tồn tại.")
+    before = {"code": fp.code, "name": fp.name, "uom": fp.uom, "product_id": fp.product_id,
+              "unit_type": fp.unit_type, "pack_size": fp.pack_size, "category": fp.category,
+              "description": fp.description}
+    fp.code = payload.code
+    fp.name = payload.name
+    fp.uom = payload.uom
+    fp.product_id = payload.product_id
+    fp.unit_type = payload.unit_type
+    fp.pack_size = payload.pack_size
+    fp.category = payload.category
+    fp.description = payload.description
+    record_audit(db, entity_type="finished_product", entity_id=fp.finished_product_id, action="update",
+                 actor=user, before=before, after=payload.model_dump())
+    db.commit()
+    db.refresh(fp)
+    return fp
+
+
+@router.delete("/finished-products/{finished_product_id}", status_code=204)
+def delete_finished_product(finished_product_id: str, db: Session = Depends(get_db),
+                            user: User = Depends(get_current_user)):
+    master_data.delete_finished_product(db, finished_product_id, user)
 
 
 # ---- Vật tư / nguyên liệu ----
@@ -97,3 +320,44 @@ def update_material(material_id: str, payload: MaterialIn, db: Session = Depends
     db.commit()
     db.refresh(m)
     return m
+
+
+@router.delete("/materials/{material_id}", status_code=204)
+def delete_material(material_id: str, db: Session = Depends(get_db),
+                    user: User = Depends(get_current_user)):
+    master_data.delete_material(db, material_id, user)
+
+
+# ---- Gán nhóm chỉ tiêu chất lượng cho nguyên liệu ----
+@router.get("/materials/{material_id}/qc-groups")
+def list_material_qc_groups(material_id: str, db: Session = Depends(get_db),
+                            user: User = Depends(get_current_user)):
+    return qc_catalog.list_material_groups(db, material_id)
+
+
+@router.post("/materials/{material_id}/qc-groups", status_code=201)
+def link_material_qc_group(material_id: str, payload: MaterialQcGroupIn,
+                           db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    return qc_catalog.link_material_group(db, material_id, payload.model_dump(), user)
+
+
+@router.delete("/materials/{material_id}/qc-groups/{group_id}", status_code=204)
+def unlink_material_qc_group(material_id: str, group_id: str, db: Session = Depends(get_db),
+                             user: User = Depends(get_current_user)):
+    qc_catalog.unlink_material_group(db, material_id, group_id, user)
+
+
+# ---- Cài đặt vận hành (ngưỡng dung sai "Làm rỗng" tank CCT/BBT) ----
+@router.get("/ops-settings", response_model=OpsSettingOut)
+def get_ops_settings(db: Session = Depends(get_db)):
+    return ops_setting_svc.get_settings(db)
+
+
+@router.put("/ops-settings", response_model=OpsSettingOut)
+def update_ops_settings(payload: OpsSettingIn, db: Session = Depends(get_db),
+                        user: User = Depends(get_current_user)):
+    require_perm(user, "master.manage")
+    return ops_setting_svc.update_settings(db, payload.empty_cct_tolerance_hl,
+                                           payload.empty_bbt_tolerance_hl,
+                                           payload.aging_caution_days, payload.aging_warning_days,
+                                           payload.aging_critical_days, user)

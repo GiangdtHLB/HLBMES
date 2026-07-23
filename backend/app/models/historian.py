@@ -8,10 +8,10 @@ qua lớp services/historian.py (interface không đổi).
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import DateTime, Float, Index, Unicode
+from sqlalchemy import Float, Index, Unicode
 from sqlalchemy.orm import Mapped, mapped_column
 
-from ..common import new_id, utcnow
+from ..common import UTCDateTime, new_id, utcnow
 from ..database import Base
 
 
@@ -25,4 +25,4 @@ class HistorianPoint(Base):
     unit: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
     quality: Mapped[str] = mapped_column(Unicode(255), default="good")  # good | bad | stale
     source: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)  # connector/gateway
-    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    ts: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, index=True)

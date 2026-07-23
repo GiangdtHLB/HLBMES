@@ -8,10 +8,10 @@ Production nên thay bằng IdP/SSO + MFA (tài liệu §10.2); đây là MVP n�
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import UnicodeText, Boolean, DateTime, Unicode
+from sqlalchemy import UnicodeText, Boolean, Unicode
 from sqlalchemy.orm import Mapped, mapped_column
 
-from ..common import new_id, utcnow
+from ..common import UTCDateTime, new_id, utcnow
 from ..database import Base
 
 
@@ -30,11 +30,13 @@ class User(Base):
     scope_lines: Mapped[str] = mapped_column(Unicode(255), default="*")
     scope_areas: Mapped[str] = mapped_column(Unicode(255), default="*")
     scope_qc: Mapped[str] = mapped_column(Unicode(255), default="*")
+    # "cong_ty" | "phan_xuong" | "*" — chặn thao tác kho NVL ngoài địa điểm được phân.
+    scope_warehouse: Mapped[str] = mapped_column(Unicode(255), default="*")
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     # Buộc đổi mật khẩu lần đăng nhập đầu (admin tạo bằng mật khẩu mặc định).
     must_change_password: Mapped[bool] = mapped_column(Boolean, default=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-    last_login_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    last_login_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
 
 
 class UserSession(Base):
@@ -44,5 +46,5 @@ class UserSession(Base):
     user_id: Mapped[str] = mapped_column(Unicode(64), index=True)
     username: Mapped[str] = mapped_column(Unicode(255))
     role: Mapped[str] = mapped_column(Unicode(255))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    expires_at: Mapped[datetime] = mapped_column(UTCDateTime(), index=True)

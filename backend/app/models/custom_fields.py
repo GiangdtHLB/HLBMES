@@ -7,10 +7,10 @@ CustomFieldValue: giá trị field động theo từng record (table_name + reco
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import Boolean, DateTime, Unicode, UnicodeText, UniqueConstraint
+from sqlalchemy import Boolean, Unicode, UnicodeText, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
-from ..common import new_id, utcnow
+from ..common import UTCDateTime, new_id, utcnow
 from ..database import Base
 
 
@@ -25,7 +25,7 @@ class CustomFieldDefinition(Base):
     data_type: Mapped[str] = mapped_column(Unicode(16), default="string")  # string|int|float|bool|date
     is_required: Mapped[bool] = mapped_column(Boolean, default=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
 
 
 class CustomFieldValue(Base):
@@ -37,4 +37,4 @@ class CustomFieldValue(Base):
     record_id: Mapped[str] = mapped_column(Unicode(64))
     field_key: Mapped[str] = mapped_column(Unicode(64))
     field_value: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)

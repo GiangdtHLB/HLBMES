@@ -4,10 +4,33 @@ import uuid
 from datetime import datetime, timezone
 from enum import Enum
 
+from sqlalchemy import DateTime
+from sqlalchemy.types import TypeDecorator
+
 
 def utcnow() -> datetime:
     """Mọi timestamp lưu ở UTC (tài liệu §8.3)."""
     return datetime.now(timezone.utc)
+
+
+class UTCDateTime(TypeDecorator):
+    """DateTime(timezone=True) nhưng LUÔN trả về datetime có tzinfo=UTC khi đọc từ CSDL.
+
+    SQLite không có kiểu datetime giữ được offset thật — DateTime(timezone=True) trên SQLite
+    vẫn đọc ra datetime "naive" dù giá trị ghi vào luôn là UTC (qua utcnow() ở trên). Nếu để
+    naive, khi serialize ra JSON (FastAPI/Pydantic) sẽ KHÔNG có hậu tố +00:00/Z, khiến trình
+    duyệt (new Date(...)) hiểu nhầm là giờ local của máy client thay vì UTC — toàn bộ thời
+    gian hiển thị trên web bị lệch đúng bằng độ lệch múi giờ của người dùng (VD lệch 7 tiếng
+    ở VN). Gắn lại tzinfo=UTC ngay tại tầng đọc CSDL để mọi nơi phía trên (API response, ORM,
+    logic Python) luôn thấy datetime aware và tự quy đổi đúng."""
+
+    impl = DateTime(timezone=True)
+    cache_ok = True
+
+    def process_result_value(self, value, dialect):
+        if value is not None and value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value
 
 
 def new_id() -> str:

@@ -26,6 +26,7 @@ class User:
     scope_lines: object = "*"   # line đóng gói / dây chuyền
     scope_areas: object = "*"   # khu vực: nau|len_men|loc|chiet|kho
     scope_qc: object = "*"      # loại test QC được phân (theo tên parameter)
+    scope_warehouse: object = "*"  # địa điểm kho: cong_ty|phan_xuong
     must_change_password: bool = False  # đang dùng mật khẩu mặc định → buộc đổi trước khi thao tác
 
 
@@ -46,6 +47,7 @@ PERMISSION_CATALOG = {
     "ebr.approve": "Phê duyệt & khóa hồ sơ mẻ (EBR)",
     "warehouse.receive": "Nhập kho",
     "warehouse.issue": "Xuất/hoàn/chuyển kho",
+    "warehouse.request": "Đề nghị nhận kho (phân xưởng)",
     "maintenance.manage": "Quản lý bảo trì/sự cố",
     "calibration.manage": "Quản lý kiểm định",
     "energy.update": "Cập nhật số liệu năng lượng",
@@ -152,6 +154,7 @@ def get_current_user(
                         scope_lines=_parse_scope(getattr(u, "scope_lines", "*")),
                         scope_areas=_parse_scope(getattr(u, "scope_areas", "*")),
                         scope_qc=_parse_scope(getattr(u, "scope_qc", "*")),
+                        scope_warehouse=_parse_scope(getattr(u, "scope_warehouse", "*")),
                         must_change_password=must_change)
         finally:
             db.close()
@@ -205,7 +208,11 @@ def require_api_key(write: bool = False):
 
 def enforce_sod(actor_username: Optional[str], current: User, action: str) -> None:
     """Segregation of duties: người thực hiện bước sau không được trùng người
-    thực hiện bước trước (vd: soạn recipe vs duyệt recipe, ghi QC vs release)."""
+    thực hiện bước trước (vd: soạn recipe vs duyệt recipe, ghi QC vs release).
+    Admin được miễn trừ (tài khoản quản trị hệ thống, không tính là vi phạm SoD khi
+    chỉ có một mình admin vận hành — vd giai đoạn triển khai/thử nghiệm)."""
+    if current.role == Role.ADMIN.value:
+        return
     if actor_username and actor_username == current.username:
         raise PermissionError_(
             f"Vi phạm phân tách nhiệm vụ (SoD): '{current.username}' không thể tự "
@@ -228,6 +235,17 @@ SCOPE_AREAS = {
     "kho": "Kho",
 }
 
+# Danh mục địa điểm kho NVL (khớp quy ước location "chứa 'phân xưởng'" trong
+# services/warehouse.py::_is_workshop_location) — Thủ kho công ty chỉ thao tác
+# "cong_ty"; người phân xưởng (Trưởng ca/Vận hành) chỉ thao tác "phan_xuong".
+SCOPE_WAREHOUSE_LOCATIONS = {
+    "cong_ty": "Kho công ty",
+    "phan_xuong": "Kho phân xưởng",
+}
+
+_SCOPE_DIMENSION_ATTR = {"lines": "scope_lines", "areas": "scope_areas", "qc": "scope_qc",
+                        "warehouse": "scope_warehouse"}
+
 
 def _parse_scope(raw) -> object:
     """Chuẩn hóa giá trị scope từ DB (csv|'*') thành '*' hoặc set[str]."""
@@ -249,8 +267,7 @@ def has_scope(user: User, dimension: str, value) -> bool:
     """
     if user.role == Role.ADMIN.value:
         return True
-    scope = getattr(user, {"lines": "scope_lines", "areas": "scope_areas",
-                           "qc": "scope_qc"}.get(dimension, "scope_lines"), "*")
+    scope = getattr(user, _SCOPE_DIMENSION_ATTR.get(dimension, "scope_lines"), "*")
     if scope == "*":
         return True
     if value is None or value == "":
@@ -261,7 +278,8 @@ def has_scope(user: User, dimension: str, value) -> bool:
 def require_scope(user: User, dimension: str, value) -> None:
     """Chặn thao tác ngoài phạm vi (gọi SAU require_perm/require_role)."""
     if not has_scope(user, dimension, value):
-        label = {"lines": "line", "areas": "khu vực", "qc": "loại test"}.get(dimension, dimension)
+        label = {"lines": "line", "areas": "khu vực", "qc": "loại test",
+                 "warehouse": "địa điểm kho"}.get(dimension, dimension)
         raise PermissionError_(
             f"Ngoài phạm vi được phân ({label}='{value}'): tài khoản '{user.username}' "
             f"không có quyền thao tác/xem dữ liệu này."

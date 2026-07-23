@@ -1,0 +1,373 @@
+"""Test danh mục "nơi xuất đến" (ship-to/nhà phân phối) + xuất kho theo phiếu (shipment):
+1) CRUD danh mục ship-to (create/update/delete, xóa chặn khi đã có PHIẾU xuất kho nào
+   từng dùng nó — không chỉ khi unit đã "shipped" hẳn).
+2) create_shipment: bắt buộc ship_to_id + ít nhất 1 unit; mỗi vỉ/keg là 1 đơn vị tồn kho
+   độc lập nguyên vẹn (không xuất một phần 1 vỉ/keg) — 1 phiếu có thể chọn nhiều unit từ
+   nhiều sản phẩm/lô khác nhau cùng lúc.
+3) Bug fix approve_bottle: pack_size phải lấy từ FinishedProduct, không còn hardcode."""
+
+import os
+import tempfile
+import time
+
+_TMP = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+os.environ["MES_DATABASE_URL"] = f"sqlite:///{_TMP.name}"
+os.environ["MES_DEV_HEADER_AUTH"] = "0"
+os.environ["MES_RL_ENABLED"] = "0"
+os.environ["MES_ADMIN_PASSWORD"] = "AdminTest123"
+
+import pytest
+from fastapi.testclient import TestClient
+
+from app.main import app
+from app import seed as seed_mod
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _seeded():
+    seed_mod.seed()
+    yield
+
+
+@pytest.fixture(scope="module")
+def client():
+    return TestClient(app)
+
+
+def _login(client, u, p):
+    r = client.post("/api/auth/login", json={"username": u, "password": p})
+    assert r.status_code == 200, r.text
+    return {"Authorization": "Bearer " + r.json()["token"]}
+
+
+@pytest.fixture(scope="module")
+def admin_h(client):
+    return _login(client, "admin", "AdminTest123")
+
+
+@pytest.fixture(scope="module")
+def vanhanh_h(client):
+    return _login(client, "vanhanh", "123456")
+
+
+@pytest.fixture(scope="module")
+def kcs_h(client):
+    return _login(client, "kcs", "123456")
+
+
+def _a_location(client, admin_h):
+    loc = client.post("/api/wms/locations", headers=admin_h,
+                      json={"code": f"LOC-{str(int(time.time() * 1000))[-8:]}", "name": "Test loc", "capacity": 50})
+    assert loc.status_code == 201, loc.text
+    return loc.json()["loc_id"]
+
+
+def _a_ship_to(client, admin_h, code, name="NPP test"):
+    st = client.post("/api/wms/ship-to", headers=admin_h, json={"code": code, "name": name})
+    assert st.status_code == 201, st.text
+    return st.json()["ship_to_id"]
+
+
+def _a_units(client, admin_h, product, lot_code, count):
+    """Sinh `count` unit độc lập (pack_size=1 -> mỗi lần gọi tương ứng đúng `count` dòng),
+    trả về list unit_id theo thứ tự tạo (cũ nhất trước)."""
+    build = client.post("/api/wms/units", headers=admin_h,
+                        json={"product_name": product, "lot_code": lot_code, "total": count, "pack_size": 1})
+    assert build.status_code == 201, build.text
+    codes = build.json()["unit_codes"]
+    units = client.get("/api/wms/units", headers=admin_h).json()
+    by_code = {u["unit_code"]: u["unit_id"] for u in units}
+    return [by_code[c] for c in codes]
+
+
+def _declare_pending(client, headers, stage, scope_type, scope_id, product_id=None):
+    q = f"/api/brewing/qc-status?stage={stage}&scope_type={scope_type}&scope_id={scope_id}"
+    if product_id:
+        q += f"&product_id={product_id}"
+    status = client.get(q, headers=headers).json()
+    for p in status["required"]:
+        if p["code"] in status["pending"]:
+            lsl = p["lsl"] if p["lsl"] is not None else 0
+            usl = p["usl"] if p["usl"] is not None else lsl + 10
+            r = client.post("/api/brewing/qc-results", headers=headers,
+                            json={"stage": stage, "scope_type": scope_type, "scope_id": scope_id,
+                                  "parameter": p["code"], "value": (lsl + usl) / 2,
+                                  "lower_limit": lsl, "upper_limit": usl})
+            assert r.status_code == 201, r.text
+
+
+def test_ship_to_crud(client, admin_h):
+    ship_to_id = _a_ship_to(client, admin_h, "DIST-01", "NPP Miền Bắc")
+
+    rows = client.get("/api/wms/ship-to", headers=admin_h).json()
+    row = next(r for r in rows if r["ship_to_id"] == ship_to_id)
+    assert row["kind"] == "distributor" and row["active"] is True
+
+    updated = client.put(f"/api/wms/ship-to/{ship_to_id}", headers=admin_h, json={"contact": "0911111111"})
+    assert updated.status_code == 200, updated.text
+    rows2 = client.get("/api/wms/ship-to", headers=admin_h).json()
+    assert next(r for r in rows2 if r["ship_to_id"] == ship_to_id)["contact"] == "0911111111"
+
+    deleted = client.delete(f"/api/wms/ship-to/{ship_to_id}", headers=admin_h)
+    assert deleted.status_code == 204, deleted.text
+    rows3 = client.get("/api/wms/ship-to", headers=admin_h).json()
+    assert not any(r["ship_to_id"] == ship_to_id for r in rows3)
+
+
+def test_create_shipment_requires_ship_to_and_units(client, admin_h):
+    _a_units(client, admin_h, "SHIPTEST-SKU", "LOT-SHIPTEST", 2)
+
+    missing_ship_to = client.post("/api/wms/shipments", headers=admin_h,
+                                  json={"ship_to_id": "",
+                                        "lines": [{"product_name": "SHIPTEST-SKU", "lot_code": "LOT-SHIPTEST",
+                                                  "unit_type": "vi", "quantity": 1}]})
+    assert missing_ship_to.status_code == 409, missing_ship_to.text
+
+    ship_to_id = _a_ship_to(client, admin_h, "DIST-NOLINES")
+    empty_units = client.post("/api/wms/shipments", headers=admin_h, json={"ship_to_id": ship_to_id, "lines": []})
+    assert empty_units.status_code == 409, empty_units.text
+
+
+def test_shipment_marks_units_shipped(client, admin_h):
+    ship_to_id = _a_ship_to(client, admin_h, "DIST-FULL", "NPP Full")
+    unit_ids = _a_units(client, admin_h, "FULL-SKU", "LOT-FULL", 10)
+
+    shipped = client.post("/api/wms/shipments", headers=admin_h,
+                          json={"ship_to_id": ship_to_id,
+                                "lines": [{"product_name": "FULL-SKU", "lot_code": "LOT-FULL",
+                                          "unit_type": "vi", "quantity": 10}]})
+    assert shipped.status_code == 201, shipped.text
+    assert shipped.json()["ship_to_code"] == "DIST-FULL"
+    assert shipped.json()["fifo_ok"] is True  # duy nhất 1 lô của SP này -> luôn đúng FIFO
+
+    units = client.get("/api/wms/units", headers=admin_h).json()
+    for uid in unit_ids:
+        row = next(u for u in units if u["unit_id"] == uid)
+        assert row["status"] == "shipped"
+        assert row["shipped_at"] is not None
+        assert row["ship_to_code"] == "DIST-FULL"
+
+    # Xuất lại (đã hết tồn) phải báo lỗi.
+    twice = client.post("/api/wms/shipments", headers=admin_h,
+                        json={"ship_to_id": ship_to_id,
+                              "lines": [{"product_name": "FULL-SKU", "lot_code": "LOT-FULL",
+                                        "unit_type": "vi", "quantity": 1}]})
+    assert twice.status_code == 409, twice.text
+
+
+def test_partial_shipment_keeps_remaining_units_stored(client, admin_h):
+    ship_to_id = _a_ship_to(client, admin_h, "DIST-PARTIAL", "NPP Partial")
+    unit_ids = _a_units(client, admin_h, "PARTIAL-SKU", "LOT-PARTIAL", 10)
+
+    shipped = client.post("/api/wms/shipments", headers=admin_h,
+                          json={"ship_to_id": ship_to_id,
+                                "lines": [{"product_name": "PARTIAL-SKU", "lot_code": "LOT-PARTIAL",
+                                          "unit_type": "vi", "quantity": 4}]})
+    assert shipped.status_code == 201, shipped.text
+    assert shipped.json()["fifo_ok"] is True
+
+    units = client.get("/api/wms/units", headers=admin_h).json()
+    for uid in unit_ids[:4]:
+        assert next(u for u in units if u["unit_id"] == uid)["status"] == "shipped"
+    for uid in unit_ids[4:]:
+        row = next(u for u in units if u["unit_id"] == uid)
+        assert row["status"] != "shipped"
+        assert row["shipped_at"] is None
+        assert row["ship_to_code"] is None
+
+    # Vẫn tra được nơi xuất đến qua Truy xuôi cho unit đã xuất (lịch sử nằm ở genealogy edge).
+    shipped_unit_code = next(u for u in units if u["unit_id"] == unit_ids[0])["unit_code"]
+    fwd = client.get(f"/api/trace/forward?code={shipped_unit_code}", headers=admin_h)
+    assert fwd.status_code == 200, fwd.text
+    codes = {c["code"] for c in fwd.json().get("children", [])}
+    assert "DIST-PARTIAL" in codes
+
+
+def test_shipment_with_multiple_lot_units(client, admin_h):
+    ship_to_id = _a_ship_to(client, admin_h, "DIST-MULTI", "NPP Multi")
+    units_a = _a_units(client, admin_h, "MULTI-SKU", "LOT-A", 10)
+    units_b = _a_units(client, admin_h, "MULTI-SKU", "LOT-B", 10)
+
+    shipped = client.post("/api/wms/shipments", headers=admin_h,
+                          json={"ship_to_id": ship_to_id,
+                                "lines": [{"product_name": "MULTI-SKU", "lot_code": "LOT-A",
+                                          "unit_type": "vi", "quantity": 6},
+                                         {"product_name": "MULTI-SKU", "lot_code": "LOT-B",
+                                          "unit_type": "vi", "quantity": 3}]})
+    assert shipped.status_code == 201, shipped.text
+    assert len(shipped.json()["units"]) == 9
+    # Lô A (cũ hơn) vẫn còn dư 4 unit sau phiếu này trong khi lô B (mới hơn) cũng bị lấy
+    # -> vi phạm thứ tự FIFO dù chính A cũng có trong phiếu.
+    assert shipped.json()["fifo_ok"] is False
+
+    units = client.get("/api/wms/units", headers=admin_h).json()
+    stored_a = [u for u in units if u["unit_id"] in units_a and u["status"] != "shipped"]
+    stored_b = [u for u in units if u["unit_id"] in units_b and u["status"] != "shipped"]
+    assert len(stored_a) == 4
+    assert len(stored_b) == 7
+
+    history = client.get("/api/wms/shipments", headers=admin_h).json()
+    ship = next(s for s in history if s["ship_to_code"] == "DIST-MULTI")
+    assert ship["unit_count"] == 9
+    assert ship["fifo_ok"] is False
+
+
+def test_shipment_fifo_ok_when_older_lot_fully_exhausted(client, admin_h):
+    ship_to_id = _a_ship_to(client, admin_h, "DIST-FIFOOK", "NPP FifoOk")
+    _a_units(client, admin_h, "FIFOOK-SKU", "LOT-A", 5)
+    _a_units(client, admin_h, "FIFOOK-SKU", "LOT-B", 5)
+
+    # Lấy HẾT lô cũ hơn (A) rồi mới lấy thêm ở lô mới hơn (B) -> đúng FIFO.
+    shipped = client.post("/api/wms/shipments", headers=admin_h,
+                          json={"ship_to_id": ship_to_id,
+                                "lines": [{"product_name": "FIFOOK-SKU", "lot_code": "LOT-A",
+                                          "unit_type": "vi", "quantity": 5},
+                                         {"product_name": "FIFOOK-SKU", "lot_code": "LOT-B",
+                                          "unit_type": "vi", "quantity": 2}]})
+    assert shipped.status_code == 201, shipped.text
+    assert shipped.json()["fifo_ok"] is True
+
+    history = client.get("/api/wms/shipments", headers=admin_h).json()
+    ship = next(s for s in history if s["ship_to_code"] == "DIST-FIFOOK")
+    assert ship["fifo_ok"] is True
+
+
+def test_shipment_fifo_ok_false_when_older_lot_skipped(client, admin_h):
+    ship_to_id = _a_ship_to(client, admin_h, "DIST-FIFOBAD", "NPP FifoBad")
+    _a_units(client, admin_h, "FIFOBAD-SKU", "LOT-A", 5)
+    _a_units(client, admin_h, "FIFOBAD-SKU", "LOT-B", 5)
+
+    # Bỏ qua lô A (cũ hơn) hoàn toàn, chỉ lấy ở B (mới hơn) -> vi phạm FIFO.
+    shipped = client.post("/api/wms/shipments", headers=admin_h,
+                          json={"ship_to_id": ship_to_id,
+                                "lines": [{"product_name": "FIFOBAD-SKU", "lot_code": "LOT-B",
+                                          "unit_type": "vi", "quantity": 2}]})
+    assert shipped.status_code == 201, shipped.text
+    assert shipped.json()["fifo_ok"] is False
+
+    history = client.get("/api/wms/shipments", headers=admin_h).json()
+    ship = next(s for s in history if s["ship_to_code"] == "DIST-FIFOBAD")
+    assert ship["fifo_ok"] is False
+
+
+def test_ship_to_delete_blocked_when_used_by_shipment(client, admin_h):
+    ship_to_id = _a_ship_to(client, admin_h, "DIST-REF")
+    _a_units(client, admin_h, "REF-SKU", "LOT-REF", 5)
+    shipped = client.post("/api/wms/shipments", headers=admin_h,
+                          json={"ship_to_id": ship_to_id,
+                                "lines": [{"product_name": "REF-SKU", "lot_code": "LOT-REF",
+                                          "unit_type": "vi", "quantity": 2}]})
+    assert shipped.status_code == 201, shipped.text
+
+    blocked = client.delete(f"/api/wms/ship-to/{ship_to_id}", headers=admin_h)
+    assert blocked.status_code == 409, blocked.text
+
+
+def test_approve_bottle_uses_finished_product_pack_size(client, admin_h, vanhanh_h, kcs_h):
+    suffix = "UPCFIX01"
+    fp = client.post("/api/finished-products", headers=admin_h,
+                     json={"code": f"SKU-{suffix}", "name": "SKU test 20 lon", "uom": "lon", "pack_size": 20})
+    assert fp.status_code == 201, fp.text
+    fp_id = fp.json()["finished_product_id"]
+
+    bottle_code = f"CH-{suffix}"
+    b = client.post("/api/brewing/bottles", headers=vanhanh_h,
+                    json={"bottle_code": bottle_code, "beer_type": "Bia test", "finished_product_id": fp_id})
+    assert b.status_code == 201, b.text
+    bottle_id = b.json()["bottle_id"]
+    b_fin = client.post(f"/api/brewing/bottles/{bottle_id}/finish", headers=vanhanh_h, json={"ca1": 100})
+    assert b_fin.status_code == 200, b_fin.text
+
+    _declare_pending(client, admin_h, "thanh_pham", "bottle", f"{bottle_code}__thanh_pham")
+    approve = client.post(f"/api/brewing/bottles/{bottle_id}/approve", headers=kcs_h)
+    assert approve.status_code == 200, approve.text
+    # Ca 1/2/3 tính theo VỈ — ca1=100 vỉ đúng khớp 100 dòng, mỗi dòng 20 lon (pack_size).
+    assert approve.json()["count"] == 100
+
+    units = client.get("/api/wms/units", headers=admin_h).json()
+    made = [u for u in units if u["unit_code"] in approve.json()["unit_codes"]]
+    assert len(made) == 100
+    assert all(u["quantity"] == 20 for u in made)
+
+
+def test_shipment_slip_header_fields_persist(client, admin_h):
+    """Các trường in "PHIẾU XUẤT KHO" (Mẫu 02-VT) — người nhận/lái xe/biển số/địa điểm/lý do —
+    phải lưu lại đúng và trả về qua GET /wms/shipments để in lại sau này. Riêng "Xuất tại kho"
+    không còn nhập tay — hệ thống tự suy ra từ vị trí (WmsLocation) đang lưu các vỉ/keg được
+    chọn để xuất (xem services/wms.py::create_shipment)."""
+    ship_to_id = _a_ship_to(client, admin_h, "DIST-SLIP", "NPP Slip")
+    unit_ids = _a_units(client, admin_h, "SLIP-SKU", "LOT-SLIP", 5)
+    loc_id = _a_location(client, admin_h)
+    loc_code = client.get("/api/wms/locations", headers=admin_h).json()
+    loc_code = next(l["code"] for l in loc_code if l["loc_id"] == loc_id)
+    for uid in unit_ids:
+        pa = client.post(f"/api/wms/units/{uid}/putaway", headers=admin_h, json={"loc_id": loc_id})
+        assert pa.status_code == 200, pa.text
+
+    shipped = client.post("/api/wms/shipments", headers=admin_h, json={
+        "ship_to_id": ship_to_id,
+        "lines": [{"product_name": "SLIP-SKU", "lot_code": "LOT-SLIP", "unit_type": "vi", "quantity": 5}],
+        "note": "Giao hàng đại lý", "recipient_name": "Phạm Ngọc Linh",
+        "recipient_dept": "Phòng kinh doanh", "driver_name": "Nguyễn Văn Lái",
+        "vehicle_plate": "14C-123.45",
+        "delivery_place": "Hạ Long",
+    })
+    assert shipped.status_code == 201, shipped.text
+    assert shipped.json()["shipment_id"]
+
+    history = client.get("/api/wms/shipments", headers=admin_h).json()
+    row = next(s for s in history if s["shipment_id"] == shipped.json()["shipment_id"])
+    assert row["note"] == "Giao hàng đại lý"
+    assert row["recipient_name"] == "Phạm Ngọc Linh"
+    assert row["recipient_dept"] == "Phòng kinh doanh"
+    assert row["driver_name"] == "Nguyễn Văn Lái"
+    assert row["vehicle_plate"] == "14C-123.45"
+    assert row["from_location"] == loc_code
+    assert row["delivery_place"] == "Hạ Long"
+
+
+def test_undo_shipment_restores_units_and_blocks_twice(client, admin_h):
+    ship_to_id = _a_ship_to(client, admin_h, "DIST-UNDO", "NPP Undo")
+    unit_ids = _a_units(client, admin_h, "UNDO-SKU", "LOT-UNDO", 5)
+
+    shipped = client.post("/api/wms/shipments", headers=admin_h,
+                          json={"ship_to_id": ship_to_id,
+                                "lines": [{"product_name": "UNDO-SKU", "lot_code": "LOT-UNDO",
+                                          "unit_type": "vi", "quantity": 5}]})
+    assert shipped.status_code == 201, shipped.text
+    shipment_id = shipped.json()["shipment_id"]
+
+    units_after_ship = client.get("/api/wms/units", headers=admin_h).json()
+    for uid in unit_ids:
+        assert next(u for u in units_after_ship if u["unit_id"] == uid)["status"] == "shipped"
+
+    undone = client.post(f"/api/wms/shipments/{shipment_id}/undo", headers=admin_h)
+    assert undone.status_code == 200, undone.text
+    assert undone.json()["restored"] == 5
+
+    units_after_undo = client.get("/api/wms/units", headers=admin_h).json()
+    for uid in unit_ids:
+        row = next(u for u in units_after_undo if u["unit_id"] == uid)
+        assert row["status"] == "stored"
+        assert row["shipped_at"] is None
+
+    # Hoàn tác lần 2 phải báo lỗi (không còn unit nào tham chiếu phiếu này nữa).
+    twice = client.post(f"/api/wms/shipments/{shipment_id}/undo", headers=admin_h)
+    assert twice.status_code == 409, twice.text
+
+    history = client.get("/api/wms/shipments", headers=admin_h).json()
+    row = next(s for s in history if s["shipment_id"] == shipment_id)
+    assert row["unit_count"] == 0
+    assert row["lines"] == []
+
+    # Xuất lại được bình thường sau khi đã hoàn tác (tồn đã về "stored").
+    reshipped = client.post("/api/wms/shipments", headers=admin_h,
+                            json={"ship_to_id": ship_to_id,
+                                  "lines": [{"product_name": "UNDO-SKU", "lot_code": "LOT-UNDO",
+                                            "unit_type": "vi", "quantity": 5}]})
+    assert reshipped.status_code == 201, reshipped.text
+
+
+def test_undo_shipment_not_found(client, admin_h):
+    r = client.post("/api/wms/shipments/does-not-exist/undo", headers=admin_h)
+    assert r.status_code == 404, r.text

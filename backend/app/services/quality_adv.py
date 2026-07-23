@@ -118,11 +118,42 @@ def spc_chart(db: Session, parameter: str, scope_type: str = None) -> dict:
             "in_control": out_of_control == 0, "points": pts}
 
 
-def list_qc_parameters(db: Session) -> list:
-    rows = db.execute(select(QCParameter).where(QCParameter.active == True)  # noqa: E712
-                      .order_by(QCParameter.code)).scalars().all()
-    return [{"code": p.code, "name": p.name, "unit": p.unit, "target": p.target,
-             "usl": p.usl, "lsl": p.lsl, "stage": p.stage} for p in rows]
+def list_qc_parameters(db: Session, active_only: bool = True) -> list:
+    stmt = select(QCParameter).order_by(QCParameter.code)
+    if active_only:
+        stmt = stmt.where(QCParameter.active == True)  # noqa: E712
+    rows = db.execute(stmt).scalars().all()
+    return [{"param_id": p.param_id, "code": p.code, "name": p.name, "unit": p.unit, "target": p.target,
+             "usl": p.usl, "lsl": p.lsl, "stage": p.stage, "method": p.method, "note": p.note,
+             "active": p.active, "value_type": p.value_type} for p in rows]
+
+
+def create_qc_parameter(db: Session, payload: dict, user: User) -> QCParameter:
+    require_perm(user, "master.manage")
+    if db.execute(select(QCParameter).where(QCParameter.code == payload["code"])).scalar_one_or_none():
+        raise DomainError(f"Mã chỉ tiêu '{payload['code']}' đã tồn tại.")
+    p = QCParameter(param_id=new_id(), **payload)
+    db.add(p)
+    record_audit(db, entity_type="qc_parameter", entity_id=p.param_id, action="create",
+                 actor=user, after={"code": p.code, "name": p.name})
+    db.commit()
+    db.refresh(p)
+    return p
+
+
+def update_qc_parameter(db: Session, param_id: str, payload: dict, user: User) -> QCParameter:
+    require_perm(user, "master.manage")
+    p = db.get(QCParameter, param_id)
+    if not p:
+        raise NotFoundError("Chỉ tiêu không tồn tại.")
+    before = {"code": p.code, "name": p.name, "usl": p.usl, "lsl": p.lsl, "active": p.active}
+    for k, v in payload.items():
+        setattr(p, k, v)
+    record_audit(db, entity_type="qc_parameter", entity_id=p.param_id, action="update",
+                 actor=user, before=before, after=payload)
+    db.commit()
+    db.refresh(p)
+    return p
 
 
 # ============================== CAPA ==============================

@@ -203,6 +203,7 @@ def produce_lot(db: Session, batch_id: str, lot_code: str, quantity: float, lot_
     lot = MaterialLot(
         lot_id=new_id(),
         lot_code=lot_code,
+        lot_year=utcnow().year,
         product_id=batch.product_id,
         lot_type=lot_type,
         quantity=quantity,

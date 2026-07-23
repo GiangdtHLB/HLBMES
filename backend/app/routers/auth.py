@@ -44,12 +44,18 @@ class CreateUserIn(BaseModel):
     scope_lines: str = "*"
     scope_areas: str = "*"
     scope_qc: str = "*"
+    scope_warehouse: str = "*"
+
+
+class CopyPermissionsIn(BaseModel):
+    source_username: str
 
 
 class ScopeIn(BaseModel):
     scope_lines: str = "*"   # csv hoặc "*"
     scope_areas: str = "*"
     scope_qc: str = "*"
+    scope_warehouse: str = "*"   # cong_ty|phan_xuong|"*"
 
 
 class ChangePasswordIn(BaseModel):
@@ -70,6 +76,7 @@ def _profile(u: UserModel) -> dict:
             "scope_lines": getattr(u, "scope_lines", "*") or "*",
             "scope_areas": getattr(u, "scope_areas", "*") or "*",
             "scope_qc": getattr(u, "scope_qc", "*") or "*",
+            "scope_warehouse": getattr(u, "scope_warehouse", "*") or "*",
             "must_change_password": bool(getattr(u, "must_change_password", False))}
 
 
@@ -156,6 +163,7 @@ def list_users(db: Session = Depends(get_db), user: User = Depends(get_current_u
              "scope_lines": getattr(u, "scope_lines", "*") or "*",
              "scope_areas": getattr(u, "scope_areas", "*") or "*",
              "scope_qc": getattr(u, "scope_qc", "*") or "*",
+             "scope_warehouse": getattr(u, "scope_warehouse", "*") or "*",
              "active": u.active, "last_login_at": u.last_login_at} for u in rows]
 
 
@@ -171,7 +179,8 @@ def create_user(payload: CreateUserIn, db: Session = Depends(get_db), user: User
                   full_name=payload.full_name, job_title=payload.job_title, role=payload.role,
                   allowed_views=payload.allowed_views, permissions=payload.permissions,
                   scope_lines=payload.scope_lines or "*", scope_areas=payload.scope_areas or "*",
-                  scope_qc=payload.scope_qc or "*", active=True)
+                  scope_qc=payload.scope_qc or "*", scope_warehouse=payload.scope_warehouse or "*",
+                  active=True)
     db.add(u)
     record_audit(db, entity_type="auth", entity_id=u.username, action="create_user", actor=user,
                  after={"role": u.role, "scope_lines": u.scope_lines})
@@ -187,13 +196,51 @@ def set_scope(username: str, payload: ScopeIn, db: Session = Depends(get_db),
     u = db.execute(select(UserModel).where(UserModel.username == username)).scalar_one_or_none()
     if not u:
         raise NotFoundError("Không tìm thấy tài khoản.")
-    before = {"scope_lines": u.scope_lines, "scope_areas": u.scope_areas, "scope_qc": u.scope_qc}
+    before = {"scope_lines": u.scope_lines, "scope_areas": u.scope_areas, "scope_qc": u.scope_qc,
+              "scope_warehouse": getattr(u, "scope_warehouse", "*")}
     u.scope_lines = (payload.scope_lines or "*").strip() or "*"
     u.scope_areas = (payload.scope_areas or "*").strip() or "*"
     u.scope_qc = (payload.scope_qc or "*").strip() or "*"
-    after = {"scope_lines": u.scope_lines, "scope_areas": u.scope_areas, "scope_qc": u.scope_qc}
+    u.scope_warehouse = (payload.scope_warehouse or "*").strip() or "*"
+    after = {"scope_lines": u.scope_lines, "scope_areas": u.scope_areas, "scope_qc": u.scope_qc,
+             "scope_warehouse": u.scope_warehouse}
     record_audit(db, entity_type="auth", entity_id=username, action="set_scope", actor=user,
                  before=before, after=after)
+    db.commit()
+    return {"username": username, **after}
+
+
+@router.post("/users/{username}/copy-permissions")
+def copy_permissions(username: str, payload: CopyPermissionsIn, db: Session = Depends(get_db),
+                     user: User = Depends(get_current_user)):
+    """Copy toàn bộ hồ sơ quyền (vai trò/menu/quyền thao tác/4 chiều phạm vi dữ liệu) từ 1
+    tài khoản nguồn sang tài khoản đích — admin, dùng khi 2 người làm cùng chức danh/vị trí
+    để khỏi phải gán tay lại từng mục. KHÔNG đụng tới danh tính (username/mật khẩu/họ tên/
+    chức danh hiển thị) hay trạng thái active/must_change_password của tài khoản đích."""
+    require_role(user, Role.ADMIN)
+    if payload.source_username == username:
+        raise DomainError("Tài khoản nguồn và đích phải khác nhau.")
+    src = db.execute(select(UserModel).where(UserModel.username == payload.source_username)).scalar_one_or_none()
+    if not src:
+        raise NotFoundError(f"Không tìm thấy tài khoản nguồn '{payload.source_username}'.")
+    dst = db.execute(select(UserModel).where(UserModel.username == username)).scalar_one_or_none()
+    if not dst:
+        raise NotFoundError(f"Không tìm thấy tài khoản đích '{username}'.")
+    before = {"role": dst.role, "allowed_views": dst.allowed_views, "permissions": dst.permissions,
+              "scope_lines": dst.scope_lines, "scope_areas": dst.scope_areas, "scope_qc": dst.scope_qc,
+              "scope_warehouse": getattr(dst, "scope_warehouse", "*")}
+    dst.role = src.role
+    dst.allowed_views = src.allowed_views
+    dst.permissions = src.permissions
+    dst.scope_lines = src.scope_lines
+    dst.scope_areas = src.scope_areas
+    dst.scope_qc = src.scope_qc
+    dst.scope_warehouse = getattr(src, "scope_warehouse", "*")
+    after = {"role": dst.role, "allowed_views": dst.allowed_views, "permissions": dst.permissions,
+             "scope_lines": dst.scope_lines, "scope_areas": dst.scope_areas, "scope_qc": dst.scope_qc,
+             "scope_warehouse": dst.scope_warehouse, "copied_from": src.username}
+    record_audit(db, entity_type="auth", entity_id=username, action="copy_permissions", actor=user,
+                before=before, after=after)
     db.commit()
     return {"username": username, **after}
 
@@ -201,7 +248,7 @@ def set_scope(username: str, payload: ScopeIn, db: Session = Depends(get_db),
 @router.get("/scope-catalog")
 def scope_catalog(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     """Danh mục khu vực + line + loại test QC hiện hữu (cho dropdown UI gán scope)."""
-    from ..security import SCOPE_AREAS
+    from ..security import SCOPE_AREAS, SCOPE_WAREHOUSE_LOCATIONS
     from ..models.workorder import WorkOrder
     from ..models.quality import QualityResult
     from ..models.lines import ProductionLine
@@ -210,7 +257,8 @@ def scope_catalog(db: Session = Depends(get_db), user: User = Depends(get_curren
     lines = sorted(wo_lines | master_lines)   # gộp line từ WO + danh mục dây chuyền
     qc = sorted({p for (p,) in db.execute(select(QualityResult.parameter).distinct()).all() if p})
     return {"areas": [{"key": k, "label": v} for k, v in SCOPE_AREAS.items()],
-            "lines": lines, "qc_params": qc}
+            "lines": lines, "qc_params": qc,
+            "warehouse_locations": [{"key": k, "label": v} for k, v in SCOPE_WAREHOUSE_LOCATIONS.items()]}
 
 
 @router.post("/users/{username}/toggle")

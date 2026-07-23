@@ -13,10 +13,10 @@ từng dòng materials) để bám đúng quy ước 'BOM lưu JSON list[dict]'.
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import UnicodeText, JSON, DateTime, Float, ForeignKey, Integer, Unicode
+from sqlalchemy import UnicodeText, JSON, Float, ForeignKey, Integer, Unicode
 from sqlalchemy.orm import Mapped, mapped_column
 
-from ..common import new_id, utcnow
+from ..common import UTCDateTime, new_id, utcnow
 from ..database import Base
 
 
@@ -35,7 +35,7 @@ class BatchYieldActual(Base):
     expected_pct: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     note: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)
     recorded_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
-    recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    recorded_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
 
 
 class RecipeChange(Base):
@@ -53,5 +53,5 @@ class RecipeChange(Base):
     state: Mapped[str] = mapped_column(Unicode(255), default="open")         # open|approved
     requested_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
     approved_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-    approved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    approved_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)

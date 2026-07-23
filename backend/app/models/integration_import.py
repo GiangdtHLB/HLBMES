@@ -8,10 +8,10 @@ giữ trong raw_payload (JSON) ở tầng integration để sau thiết kế fie
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Integer, Unicode, UnicodeText
+from sqlalchemy import JSON, Boolean, ForeignKey, Integer, Unicode, UnicodeText
 from sqlalchemy.orm import Mapped, mapped_column
 
-from ..common import new_id, utcnow
+from ..common import UTCDateTime, new_id, utcnow
 from ..database import Base
 
 
@@ -27,7 +27,7 @@ class IntegrationMappingProfile(Base):
     key_field: Mapped[str] = mapped_column(Unicode(64), default="code")   # cột upsert (code/external_code)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_by: Mapped[Optional[str]] = mapped_column(Unicode(64), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
 
 
 class IntegrationColumnMapping(Base):
@@ -57,7 +57,7 @@ class IntegrationImportFile(Base):
     sample: Mapped[list] = mapped_column(JSON, default=list)    # preview tối đa 50 dòng
     stored_path: Mapped[Optional[str]] = mapped_column(Unicode(512), nullable=True)
     uploaded_by: Mapped[Optional[str]] = mapped_column(Unicode(64), nullable=True)
-    uploaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    uploaded_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
 
 
 class IntegrationImportRun(Base):
@@ -79,8 +79,8 @@ class IntegrationImportRun(Base):
     duration_ms: Mapped[int] = mapped_column(Integer, default=0)
     summary: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     run_by: Mapped[Optional[str]] = mapped_column(Unicode(64), nullable=True)
-    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-    finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    started_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    finished_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
 
 
 class IntegrationImportError(Base):

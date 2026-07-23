@@ -8,10 +8,10 @@ và planned vs actual (gộp từ các mẻ liên kết).
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import UnicodeText, Date, DateTime, Float, ForeignKey, Integer, Unicode
+from sqlalchemy import UnicodeText, Date, Float, ForeignKey, Integer, Unicode
 from sqlalchemy.orm import Mapped, mapped_column
 
-from ..common import WorkOrderState, new_id, utcnow
+from ..common import UTCDateTime, WorkOrderState, new_id, utcnow
 from ..database import Base
 
 
@@ -34,4 +34,4 @@ class WorkOrder(Base):
     status: Mapped[str] = mapped_column(Unicode(255), default=WorkOrderState.PLANNED.value, index=True)
     note: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)
     created_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)

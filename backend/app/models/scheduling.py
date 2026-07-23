@@ -9,10 +9,10 @@ maintenance giữ nguyên (nhập tay/từ kế hoạch bảo trì).
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import UnicodeText, DateTime, Unicode
+from sqlalchemy import UnicodeText, Unicode
 from sqlalchemy.orm import Mapped, mapped_column
 
-from ..common import new_id, utcnow
+from ..common import UTCDateTime, new_id, utcnow
 from ..database import Base
 
 
@@ -26,7 +26,7 @@ class ScheduleSlot(Base):
     wo_code: Mapped[Optional[str]] = mapped_column(Unicode(64), nullable=True)
     product: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
     status: Mapped[str] = mapped_column(Unicode(255), default="planned")   # planned | material_short
-    start_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
-    end_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    start_at: Mapped[datetime] = mapped_column(UTCDateTime(), index=True)
+    end_at: Mapped[datetime] = mapped_column(UTCDateTime())
     note: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)

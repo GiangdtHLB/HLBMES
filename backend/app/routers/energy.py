@@ -1,6 +1,6 @@
 """Năng lượng hàng ngày/tháng + danh mục."""
 
-from datetime import date
+from datetime import date, datetime, timedelta
 
 from fastapi import APIRouter, Depends
 from sqlalchemy import select
@@ -95,3 +95,55 @@ def daily(group_id: str = None, days: int = 30, db: Session = Depends(get_db)):
 def monthly(year: int = None, db: Session = Depends(get_db)):
     from ..services import derived
     return derived.energy_monthly(db, year)
+
+
+# ---- Báo cáo theo khoảng ngày (tổng/chuỗi/phân theo khu) ----
+@router.get("/report")
+def report(date_from: date = None, date_to: date = None, group_by: str = "day",
+          area_id: str = None, db: Session = Depends(get_db)):
+    from ..services import derived
+    today = date.today()
+    d_from = date_from or (today - timedelta(days=30))
+    d_to = date_to or today
+    return derived.energy_report(db, d_from, d_to, group_by, area_id)
+
+
+# ---- Báo cáo điện (AED) thật từ CSDL SCADA ngoài (SqlConnection.purpose theo nhà máy —
+# xem services/energy_external.py::SITE_PURPOSE) ----
+@router.get("/external-sites")
+def external_sites():
+    """Kèm theo `purpose` (token gán ở SqlConnection.purpose — Tích hợp › Kết nối CSDL) để
+    frontend dựng đúng checkbox "Dùng cho" theo từng nhà máy, tránh gõ tay/nhầm giữa các site."""
+    from ..services import energy_external
+    return [{"site": k, "label": v, "purpose": energy_external.SITE_PURPOSE[k]}
+            for k, v in energy_external.SITE_LABELS.items()]
+
+
+@router.get("/external-bounds")
+def external_bounds(site: str = "hl", db: Session = Depends(get_db)):
+    from ..services import energy_external
+    return energy_external.data_bounds(db, site)
+
+
+@router.get("/external-report")
+def external_report(date_from: datetime = None, date_to: datetime = None, group_by: str = "day",
+                    site: str = "hl", db: Session = Depends(get_db)):
+    from ..services import energy_external
+    if not date_from or not date_to:
+        bounds = energy_external.data_bounds(db, site)
+        date_to = date_to or (datetime.fromisoformat(bounds["max_date"]) + timedelta(hours=23, minutes=59, seconds=59))
+        date_from = date_from or (date_to - timedelta(days=30))
+    return energy_external.electricity_report(db, date_from, date_to, group_by, site)
+
+
+# ---- Điện tiêu thụ theo ca (Ca1/Ca2/Ca3) ----
+@router.get("/external-ca-report")
+def external_ca_report(date_from: datetime = None, date_to: datetime = None,
+                       site: str = "hl", db: Session = Depends(get_db)):
+    from ..services import energy_external
+    if not date_from or not date_to:
+        # Mặc định: ngày hôm qua (hôm nay chưa qua hết ca 3) — Ca 1 (06h) hôm qua tới Ca 3 (06h hôm nay).
+        ref_day = datetime.combine(date.today() - timedelta(days=1), datetime.min.time())
+        date_from = date_from or ref_day.replace(hour=6)
+        date_to = date_to or (date_from + timedelta(hours=24))
+    return energy_external.electricity_ca_report(db, date_from, date_to, site)
