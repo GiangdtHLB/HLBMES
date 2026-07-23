@@ -28,7 +28,7 @@ def upgrade() -> None:
            else "YEAR(COALESCE(started_at, created_at))")   # mssql & mặc định
     op.execute(f"UPDATE brew_batch SET batch_year = {_yr}")
     with op.batch_alter_table('brew_batch', recreate='auto') as batch_op:
-        batch_op.alter_column('batch_year', nullable=False)
+        batch_op.alter_column('batch_year', existing_type=sa.Integer(), nullable=False)
         batch_op.drop_constraint('uq_brew_batch_brew_code', type_='unique')
         batch_op.create_index(op.f('ix_brew_batch_batch_year'), ['batch_year'], unique=False)
         batch_op.create_unique_constraint('uq_brew_batch_year_code', ['batch_year', 'batch_code'])

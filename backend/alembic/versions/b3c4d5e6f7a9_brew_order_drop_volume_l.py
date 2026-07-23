@@ -12,6 +12,8 @@ Create Date: 2026-07-18
 from alembic import op
 import sqlalchemy as sa
 
+from app.alembic_mssql import prep_drop_columns
+
 revision = 'b3c4d5e6f7a9'
 down_revision = '55089ca00c8f'
 branch_labels = None
@@ -19,6 +21,9 @@ depends_on = None
 
 
 def upgrade() -> None:
+    # MSSQL: planned_volume_l được thêm kèm server_default (ràng buộc DF__) nên
+    # DROP COLUMN bị chặn tới khi gỡ default trước (SQLite/Postgres: no-op).
+    prep_drop_columns(op.get_bind(), "brew_order", ("planned_volume_l",))
     op.drop_column('brew_order', 'planned_volume_l')
 
 

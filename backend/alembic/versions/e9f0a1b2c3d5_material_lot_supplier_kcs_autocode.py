@@ -47,7 +47,7 @@ def upgrade() -> None:
            else "YEAR(created_at)")   # mssql & mặc định
     op.execute(f"UPDATE material_lot SET lot_year = {_yr}")
     with op.batch_alter_table('material_lot', recreate='auto') as batch_op:
-        batch_op.alter_column('lot_year', nullable=False)
+        batch_op.alter_column('lot_year', existing_type=sa.Integer(), nullable=False)
         batch_op.drop_index('ix_material_lot_lot_code')
         batch_op.create_index(op.f('ix_material_lot_lot_code'), ['lot_code'], unique=False)
         batch_op.create_index(op.f('ix_material_lot_lot_year'), ['lot_year'], unique=False)
