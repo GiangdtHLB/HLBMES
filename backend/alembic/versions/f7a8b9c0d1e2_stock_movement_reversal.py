@@ -10,6 +10,8 @@ dấu giao dịch gốc đã được hoàn + trỏ tới giao dịch hoàn tư�
 from alembic import op
 import sqlalchemy as sa
 
+from app.alembic_mssql import prep_drop_columns
+
 revision = 'f7a8b9c0d1e2'
 down_revision = 'e6f7a8b9c0d1'
 branch_labels = None
@@ -24,6 +26,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    prep_drop_columns(op.get_bind(), 'stock_movement', ['reversed'])
     with op.batch_alter_table('stock_movement') as batch:
         batch.drop_constraint('fk_stock_movement_reversal_of', type_='foreignkey')
         batch.drop_column('reversal_of')

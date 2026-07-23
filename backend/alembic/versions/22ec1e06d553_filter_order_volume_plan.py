@@ -14,6 +14,8 @@ Create Date: 2026-07-17
 from alembic import op
 import sqlalchemy as sa
 
+from app.alembic_mssql import prep_drop_columns
+
 revision = '22ec1e06d553'
 down_revision = '1e55b05f84fd'
 branch_labels = None
@@ -29,6 +31,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    prep_drop_columns(op.get_bind(), 'filter_order', ['volume_tolerance_hl', 'planned_volume_hl'])
     with op.batch_alter_table('filter_order') as batch_op:
         batch_op.drop_column('volume_tolerance_hl')
         batch_op.drop_column('planned_volume_hl')

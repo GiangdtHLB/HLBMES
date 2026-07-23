@@ -13,7 +13,6 @@ Create Date: 2026-07-16
   brew_material_usage trỏ tới brew_batch.batch_id không bị ảnh hưởng).
 """
 from alembic import op
-import sqlalchemy as sa
 
 revision = 'f8a9b0c1d2e3'
 down_revision = 'e7f8a9b0c1d2'
@@ -22,14 +21,14 @@ depends_on = None
 
 
 def upgrade() -> None:
-    with op.batch_alter_table('brew_batch', recreate='always') as batch_op:
+    with op.batch_alter_table('brew_batch', recreate='auto') as batch_op:
         batch_op.drop_constraint('uq_brew_batch_batch_code', type_='unique')
         batch_op.create_index(op.f('ix_brew_batch_batch_code'), ['batch_code'], unique=False)
         batch_op.create_unique_constraint('uq_brew_batch_brew_code', ['brew_id', 'batch_code'])
 
 
 def downgrade() -> None:
-    with op.batch_alter_table('brew_batch', recreate='always') as batch_op:
+    with op.batch_alter_table('brew_batch', recreate='auto') as batch_op:
         batch_op.drop_constraint('uq_brew_batch_brew_code', type_='unique')
         batch_op.drop_index(op.f('ix_brew_batch_batch_code'))
         batch_op.create_unique_constraint('uq_brew_batch_batch_code', ['batch_code'])

@@ -12,6 +12,8 @@ Create Date: 2026-07-09
 from alembic import op
 import sqlalchemy as sa
 
+from app.alembic_mssql import prep_drop_columns
+
 revision = 'e1f2a3b4c5d6'
 down_revision = 'd1e2f3a4b5c6'
 branch_labels = None
@@ -31,6 +33,7 @@ def upgrade() -> None:
     )
     op.create_index('ix_brew_batch_brew_id', 'brew_batch', ['brew_id'])
 
+    prep_drop_columns(op.get_bind(), 'brew_material_usage', ['brew_id'])
     with op.batch_alter_table('brew_material_usage') as batch_op:
         batch_op.drop_index('ix_brew_material_usage_brew_id')
         batch_op.drop_column('brew_id')
@@ -39,6 +42,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    prep_drop_columns(op.get_bind(), 'brew_material_usage', ['batch_id'])
     with op.batch_alter_table('brew_material_usage') as batch_op:
         batch_op.drop_index('ix_brew_material_usage_batch_id')
         batch_op.drop_column('batch_id')

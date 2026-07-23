@@ -14,12 +14,15 @@ Create Date: 2026-07-17
 from alembic import op
 import sqlalchemy as sa
 
+from app.alembic_mssql import prep_drop_columns
+
 revision = '1e55b05f84fd'
 down_revision = 'c1b364415f50'
 branch_labels = None
 depends_on = None
 
 def upgrade() -> None:
+    prep_drop_columns(op.get_bind(), 'filter_order', ['planned_bbt'])
     with op.batch_alter_table('filter_order') as batch_op:
         batch_op.drop_column('planned_bbt')
 

@@ -12,6 +12,8 @@ Create Date: 2026-07-15
 from alembic import op
 import sqlalchemy as sa
 
+from app.alembic_mssql import prep_drop_columns
+
 revision = 'a2b3c4d5e6f7'
 down_revision = 'f6a7b8c9d0ec'
 branch_labels = None
@@ -29,6 +31,8 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    prep_drop_columns(op.get_bind(), 'shipment', ['delivery_place', 'from_location', 'vehicle_plate',
+                                                   'driver_name', 'recipient_dept', 'recipient_name'])
     with op.batch_alter_table('shipment') as batch_op:
         batch_op.drop_column('delivery_place')
         batch_op.drop_column('from_location')

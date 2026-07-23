@@ -13,6 +13,8 @@ Create Date: 2026-07-09
 from alembic import op
 import sqlalchemy as sa
 
+from app.alembic_mssql import prep_drop_columns
+
 revision = 'a9b0c1d2e3f4'
 down_revision = 'f2a3b4c5d6e7'
 branch_labels = None
@@ -46,9 +48,12 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    conn = op.get_bind()
+    prep_drop_columns(conn, 'stage_qc_group', ['finished_product_id'])
     with op.batch_alter_table('stage_qc_group') as batch_op:
         batch_op.drop_index('ix_stage_qc_group_finished_product_id')
         batch_op.drop_column('finished_product_id')
+    prep_drop_columns(conn, 'bottle_record', ['finished_product_id'])
     with op.batch_alter_table('bottle_record') as batch_op:
         batch_op.drop_index('ix_bottle_record_finished_product_id')
         batch_op.drop_column('finished_product_id')

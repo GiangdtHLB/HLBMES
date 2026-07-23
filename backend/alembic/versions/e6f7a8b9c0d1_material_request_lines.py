@@ -9,10 +9,10 @@ quantity/uom/preferred_lot_id/status/fulfilled_*/reason từ material_request
 (trước đây 1 dòng = 1 phiếu) sang bảng con material_request_line mới (1 phiếu
 = nhiều dòng, mỗi dòng xử lý duyệt/từ chối độc lập vì mỗi vật tư cần chọn lô riêng).
 """
-import uuid
-
 from alembic import op
 import sqlalchemy as sa
+
+from app.alembic_mssql import prep_drop_columns
 
 revision = 'e6f7a8b9c0d1'
 down_revision = 'd5e6f7a8b9c0'
@@ -43,23 +43,27 @@ def upgrade() -> None:
     op.create_index('ix_material_request_line_status', 'material_request_line', ['status'])
 
     # Chuyển dữ liệu cũ (1 dòng = 1 phiếu) thành 1 dòng con của chính phiếu đó,
-    # rồi bỏ các cột dòng-cụ-thể khỏi header. line_id sinh bằng Python (uuid4) —
-    # không dùng randomblob/hex (SQLite-only, fail trên SQL Server).
+    # rồi bỏ các cột dòng-cụ-thể khỏi header (môi trường dev, chưa có dữ liệu thật cần giữ nguyên).
     conn = op.get_bind()
-    rows = conn.execute(sa.text("""
-        SELECT request_id, material_id, quantity, uom, preferred_lot_id,
+    # Sinh id ngẫu nhiên theo từng dialect (randomblob chỉ có ở SQLite; MSSQL dùng NEWID()).
+    _d = conn.dialect.name
+    _idexpr = {
+        "sqlite": "lower(hex(randomblob(16)))",
+        "postgresql": "replace(cast(gen_random_uuid() as text), '-', '')",
+    }.get(_d, "lower(replace(convert(varchar(36), newid()), '-', ''))")  # mssql & mặc định
+    conn.execute(sa.text(f"""
+        INSERT INTO material_request_line
+            (line_id, request_id, seq, material_id, quantity, uom, preferred_lot_id,
+             status, fulfilled_lot_id, fulfilled_qty, fulfilled_by, fulfilled_at, reason)
+        SELECT {_idexpr}, request_id, 0, material_id, quantity, uom, preferred_lot_id,
                status, fulfilled_lot_id, fulfilled_qty, fulfilled_by, fulfilled_at, reason
         FROM material_request
-    """)).mappings().all()
-    for row in rows:
-        conn.execute(sa.text("""
-            INSERT INTO material_request_line
-                (line_id, request_id, seq, material_id, quantity, uom, preferred_lot_id,
-                 status, fulfilled_lot_id, fulfilled_qty, fulfilled_by, fulfilled_at, reason)
-            VALUES
-                (:line_id, :request_id, 0, :material_id, :quantity, :uom, :preferred_lot_id,
-                 :status, :fulfilled_lot_id, :fulfilled_qty, :fulfilled_by, :fulfilled_at, :reason)
-        """), {**row, "line_id": str(uuid.uuid4())})
+    """))
+
+    # MSSQL: DROP COLUMN chặn nếu cột còn FK / DEFAULT phụ thuộc (SQLite recreate tự lo).
+    _dropcols = ("material_id", "quantity", "uom", "preferred_lot_id", "status",
+                 "fulfilled_lot_id", "fulfilled_qty", "fulfilled_by", "fulfilled_at", "reason")
+    prep_drop_columns(conn, "material_request", _dropcols)
 
     with op.batch_alter_table('material_request') as batch:
         batch.drop_index('ix_material_request_material_id')

@@ -7,6 +7,8 @@ Create Date: 2026-07-15
 from alembic import op
 import sqlalchemy as sa
 
+from app.alembic_mssql import prep_drop_columns
+
 revision = '130d08b9e003'
 down_revision = 'b3c4d5e6f7a8'
 branch_labels = None
@@ -21,5 +23,6 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.drop_index(op.f('ix_finished_product_category'), table_name='finished_product')
+    prep_drop_columns(op.get_bind(), 'finished_product', ['category'])
     with op.batch_alter_table('finished_product') as batch_op:
         batch_op.drop_column('category')

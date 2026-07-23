@@ -22,22 +22,12 @@ depends_on = None
 
 def upgrade() -> None:
     op.add_column('brew_batch', sa.Column('batch_year', sa.Integer(), nullable=True))
-    # Backfill batch_year trong Python — tránh strftime() (SQLite-only, fail trên SQL Server).
-    conn = op.get_bind()
-    brew_batch = sa.table(
-        'brew_batch',
-        sa.column('batch_id', sa.Unicode(64)),
-        sa.column('started_at', sa.DateTime(timezone=True)),
-        sa.column('created_at', sa.DateTime(timezone=True)),
-        sa.column('batch_year', sa.Integer()),
-    )
-    rows = conn.execute(sa.select(brew_batch.c.batch_id, brew_batch.c.started_at, brew_batch.c.created_at)).all()
-    for batch_id, started_at, created_at in rows:
-        year = (started_at or created_at).year
-        conn.execute(
-            brew_batch.update().where(brew_batch.c.batch_id == batch_id).values(batch_year=year)
-        )
-    with op.batch_alter_table('brew_batch', recreate='always') as batch_op:
+    _d = op.get_bind().dialect.name
+    _yr = ("CAST(strftime('%Y', COALESCE(started_at, created_at)) AS INTEGER)" if _d == "sqlite"
+           else "EXTRACT(YEAR FROM COALESCE(started_at, created_at))" if _d == "postgresql"
+           else "YEAR(COALESCE(started_at, created_at))")   # mssql & mặc định
+    op.execute(f"UPDATE brew_batch SET batch_year = {_yr}")
+    with op.batch_alter_table('brew_batch', recreate='auto') as batch_op:
         batch_op.alter_column('batch_year', nullable=False)
         batch_op.drop_constraint('uq_brew_batch_brew_code', type_='unique')
         batch_op.create_index(op.f('ix_brew_batch_batch_year'), ['batch_year'], unique=False)
@@ -45,7 +35,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    with op.batch_alter_table('brew_batch', recreate='always') as batch_op:
+    with op.batch_alter_table('brew_batch', recreate='auto') as batch_op:
         batch_op.drop_constraint('uq_brew_batch_year_code', type_='unique')
         batch_op.drop_index(op.f('ix_brew_batch_batch_year'))
         batch_op.create_unique_constraint('uq_brew_batch_brew_code', ['brew_id', 'batch_code'])
