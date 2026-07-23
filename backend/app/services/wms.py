@@ -1,7 +1,7 @@
 """WMS thành phẩm: vị trí + đơn vị tồn kho (vỉ/keg, độc lập — không pallet/case),
 putaway/ship theo vị trí, tồn theo vị trí, phân giải barcode (cho đầu đọc cầm tay / kiosk)."""
 
-from sqlalchemy import and_, case, delete, func, or_, select
+from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.orm import Session
 
 from ..audit import record_audit

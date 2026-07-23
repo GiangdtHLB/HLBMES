@@ -10,7 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..audit import record_audit
-from ..common import Role, new_id, utcnow
+from ..common import new_id, utcnow
 from ..errors import DomainError, NotFoundError
 from ..models.brewing import BottleRecord, BrewBatch, BrewRecord, FermentRecord, FilterRecord
 from ..models.master import BeerType

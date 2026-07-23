@@ -11,7 +11,6 @@ from ..audit import record_audit
 from ..common import new_id
 from ..database import get_db
 from ..errors import NotFoundError, PermissionError_
-from ..models.brewing import OpsSetting
 from ..models.master import BeerType, FinishedProduct, Material, MaterialGroup, Product
 from ..models.materials import Supplier
 from ..schemas import (BeerTypeIn, BeerTypeOut, FinishedProductIn, FinishedProductOut, MaterialGroupIn,

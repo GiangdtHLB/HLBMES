@@ -25,7 +25,7 @@ liệu 1 nhà máy cụ thể):
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import datetime
 
 from sqlalchemy import Date, MetaData, Table, create_engine, func, select
 from sqlalchemy.orm import Session
