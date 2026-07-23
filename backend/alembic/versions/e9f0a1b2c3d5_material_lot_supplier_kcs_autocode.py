@@ -41,10 +41,12 @@ def upgrade() -> None:
     op.add_column('material_lot', sa.Column('supplier_id', sa.Unicode(length=64), nullable=True))
     op.add_column('material_lot', sa.Column('kcs_lot_no', sa.Unicode(length=64), nullable=True))
     op.add_column('material_lot', sa.Column('unit_price', sa.Float(), nullable=True))
-    op.execute("""
-        UPDATE material_lot SET lot_year = CAST(strftime('%Y', created_at) AS INTEGER)
-    """)
-    with op.batch_alter_table('material_lot', recreate='always') as batch_op:
+    _d = op.get_bind().dialect.name
+    _yr = ("CAST(strftime('%Y', created_at) AS INTEGER)" if _d == "sqlite"
+           else "EXTRACT(YEAR FROM created_at)" if _d == "postgresql"
+           else "YEAR(created_at)")   # mssql & mặc định
+    op.execute(f"UPDATE material_lot SET lot_year = {_yr}")
+    with op.batch_alter_table('material_lot', recreate='auto') as batch_op:
         batch_op.alter_column('lot_year', nullable=False)
         batch_op.drop_index('ix_material_lot_lot_code')
         batch_op.create_index(op.f('ix_material_lot_lot_code'), ['lot_code'], unique=False)
@@ -54,7 +56,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    with op.batch_alter_table('material_lot', recreate='always') as batch_op:
+    with op.batch_alter_table('material_lot', recreate='auto') as batch_op:
         batch_op.drop_constraint('fk_material_lot_supplier_id', type_='foreignkey')
         batch_op.drop_constraint('uq_material_lot_year_code', type_='unique')
         batch_op.drop_index(op.f('ix_material_lot_lot_year'))

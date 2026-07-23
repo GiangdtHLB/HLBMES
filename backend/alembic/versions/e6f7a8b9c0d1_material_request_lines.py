@@ -43,14 +43,35 @@ def upgrade() -> None:
     # Chuyển dữ liệu cũ (1 dòng = 1 phiếu) thành 1 dòng con của chính phiếu đó,
     # rồi bỏ các cột dòng-cụ-thể khỏi header (môi trường dev, chưa có dữ liệu thật cần giữ nguyên).
     conn = op.get_bind()
-    conn.execute(sa.text("""
+    # Sinh id ngẫu nhiên theo từng dialect (randomblob chỉ có ở SQLite; MSSQL dùng NEWID()).
+    _d = conn.dialect.name
+    _idexpr = {
+        "sqlite": "lower(hex(randomblob(16)))",
+        "postgresql": "replace(cast(gen_random_uuid() as text), '-', '')",
+    }.get(_d, "lower(replace(convert(varchar(36), newid()), '-', ''))")  # mssql & mặc định
+    conn.execute(sa.text(f"""
         INSERT INTO material_request_line
             (line_id, request_id, seq, material_id, quantity, uom, preferred_lot_id,
              status, fulfilled_lot_id, fulfilled_qty, fulfilled_by, fulfilled_at, reason)
-        SELECT lower(hex(randomblob(16))), request_id, 0, material_id, quantity, uom, preferred_lot_id,
+        SELECT {_idexpr}, request_id, 0, material_id, quantity, uom, preferred_lot_id,
                status, fulfilled_lot_id, fulfilled_qty, fulfilled_by, fulfilled_at, reason
         FROM material_request
     """))
+
+    # MSSQL: DROP COLUMN chặn nếu cột còn FK / DEFAULT phụ thuộc (SQLite recreate tự lo).
+    # Drop FK + DEFAULT constraint trên các cột sắp bỏ trước khi drop_column.
+    if _d == "mssql":
+        _dropcols = ("material_id", "quantity", "uom", "preferred_lot_id", "status",
+                     "fulfilled_lot_id", "fulfilled_qty", "fulfilled_by", "fulfilled_at", "reason")
+        _in = ",".join(f"'{c}'" for c in _dropcols)
+        for _fk in conn.execute(sa.text(
+                "SELECT name FROM sys.foreign_keys WHERE parent_object_id = OBJECT_ID('material_request')")).scalars().all():
+            conn.execute(sa.text(f"ALTER TABLE material_request DROP CONSTRAINT [{_fk}]"))
+        for _dc in conn.execute(sa.text(f"""
+                SELECT dc.name FROM sys.default_constraints dc
+                JOIN sys.columns c ON c.object_id = dc.parent_object_id AND c.column_id = dc.parent_column_id
+                WHERE dc.parent_object_id = OBJECT_ID('material_request') AND c.name IN ({_in})""")).scalars().all():
+            conn.execute(sa.text(f"ALTER TABLE material_request DROP CONSTRAINT [{_dc}]"))
 
     with op.batch_alter_table('material_request') as batch:
         batch.drop_index('ix_material_request_material_id')

@@ -22,14 +22,14 @@ depends_on = None
 
 
 def upgrade() -> None:
-    with op.batch_alter_table('brew_batch', recreate='always') as batch_op:
+    with op.batch_alter_table('brew_batch', recreate='auto') as batch_op:
         batch_op.drop_constraint('uq_brew_batch_batch_code', type_='unique')
         batch_op.create_index(op.f('ix_brew_batch_batch_code'), ['batch_code'], unique=False)
         batch_op.create_unique_constraint('uq_brew_batch_brew_code', ['brew_id', 'batch_code'])
 
 
 def downgrade() -> None:
-    with op.batch_alter_table('brew_batch', recreate='always') as batch_op:
+    with op.batch_alter_table('brew_batch', recreate='auto') as batch_op:
         batch_op.drop_constraint('uq_brew_batch_brew_code', type_='unique')
         batch_op.drop_index(op.f('ix_brew_batch_batch_code'))
         batch_op.create_unique_constraint('uq_brew_batch_batch_code', ['batch_code'])
