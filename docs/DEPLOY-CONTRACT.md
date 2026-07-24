@@ -81,6 +81,12 @@ Không chỉ migration; **code truy vấn** cũng phải chạy trên MSSQL. Đ�
 - Tránh raw SQL đặc thù dialect trong service: `LIMIT`/`OFFSET` thô (MSSQL: `TOP`/`OFFSET
   FETCH` — ưu tiên `.limit()`/`.offset()` của ORM), `strftime`/`randomblob`/`hex()`/`ilike`.
   Dùng `extract("year"/"month", col)` của SQLAlchemy (tự render `DATEPART` trên MSSQL) — OK.
+- **Xóa nhiều bảng (cha có bản con FK)** → 500 `547 conflicted with REFERENCE constraint`.
+  SQLite MẶC ĐỊNH KHÔNG enforce FK nên xóa "chạy" dù sai thứ tự/bỏ sót con; MSSQL enforce
+  chặt. Model ở đây KHÔNG dùng `relationship()` + session `autoflush=False` → SQLAlchemy dồn
+  mọi DELETE vào 1 flush và KHÔNG tự xếp con-trước-cha. Quy tắc khi viết endpoint DELETE:
+  (1) xóa ĐỦ mọi bảng con tham chiếu (tra FK bằng `sys.foreign_keys`), (2) `db.flush()` sau
+  mỗi nhóm con, TRƯỚC khi `db.delete(cha)`. Mẫu: `routers/brewing.py::delete_brew`.
 
 Cách bắt (LÀM CẢ 2, vì bug ẩn ở cả đọc lẫn ghi):
 1. **Smoke GET**: enumerate `/openapi.json`, gọi mọi route không path-param với token admin,
@@ -106,6 +112,8 @@ Chạy hết list này rồi mới push branch — mỗi mục là 1 lỗi thự
 - [ ] `alter_column(nullable=...)` có `existing_type=` (2C); đổi kiểu cột có DEFAULT → mẫu 2D.
 - [ ] `batch_alter_table` dùng `recreate='auto'`, không `'always'` (2E).
 - [ ] Query code: `Column == true()/false()`, KHÔNG `.is_(True/False)` trên Boolean (3b).
+- [ ] Endpoint DELETE: xóa đủ bảng con + `db.flush()` con trước `db.delete(cha)` (3b — MSSQL
+      enforce FK, SQLite thì không).
 - [ ] 1 head duy nhất; không sửa migration đã deploy; không gộp migration (mục 0).
 - [ ] Migration đặt ràng buộc chặt hơn dữ liệu hiện có → ghi rõ trong docstring (mục 3).
 - [ ] Không commit `.env` / `docker-compose.override.yml` / secret (mục 4).
