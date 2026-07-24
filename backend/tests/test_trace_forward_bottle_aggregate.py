@@ -23,9 +23,12 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app import seed as seed_mod
+from sqlalchemy import select
+
 from app.database import SessionLocal
 from app.common import new_id, utcnow
 from app.models.brewing import BottleRecord
+from app.models.master import FinishedProduct
 from app.models.wms import FinishedGoodsUnit, Shipment, ShipToLocation
 from app.services import genealogy
 
@@ -66,12 +69,22 @@ def _build_huge_bottle(db, *, unit_count=300, shipped_count=5):
                         ship_to_id=ship_to.ship_to_id, driver_name="Nguyễn Văn Tài",
                         vehicle_plate="14C-99999", shipment_type="promo", from_location="Kho công ty")
     db.add(shipment)
+
+    # Đăng ký danh mục SKU (pack_size=24, idempotent — hàm này gọi nhiều lần trong module) —
+    # cần thiết để _PACK_DIVISOR_EXPR (genealogy.py) tra đúng, không có SKU sẽ mặc định 1 và
+    # "count" (số vỉ) bị lệch thành quantity thô (VD 120 thay vì 5 vỉ đã xuất).
+    fp = db.execute(select(FinishedProduct).where(FinishedProduct.code == "CSPS330 test")).scalar_one_or_none()
+    if not fp:
+        fp = FinishedProduct(finished_product_id=new_id(), code="CSPS330 test", name="CSPS330 test",
+                             uom="lon", unit_type="vi", pack_size=24)
+        db.add(fp)
     db.flush()
 
     for i in range(unit_count):
         shipped = i < shipped_count
         u = FinishedGoodsUnit(unit_id=new_id(), unit_code=f"VI-HUGE-{bottle_id[:6]}-{i:06d}",
-                              unit_type="vi", product_name="CSPS330 test", lot_code="LOT-HUGE-1",
+                              unit_type="vi", finished_product_id=fp.finished_product_id,
+                              product_name="CSPS330 test", lot_code="LOT-HUGE-1",
                               quantity=24, status="shipped" if shipped else "stored",
                               shipment_id=shipment.shipment_id if shipped else None,
                               ship_to_id=ship_to.ship_to_id if shipped else None,

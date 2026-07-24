@@ -70,7 +70,9 @@ def _stored_units(client, admin_h, product_name, lot_code):
 def test_ca_is_counted_in_vi_not_lon(client, admin_h, vanhanh_h):
     """Ca 1/2/3 tính theo VỈ (đơn vị đóng gói), KHÔNG phải theo lon rời — 1 vỉ = pack_size
     lon (khai báo Danh mục Sản phẩm). Ca1=10 với pack_size=24 phải tạo ĐÚNG 10 vỉ (mỗi vỉ 24
-    lon, tổng 240 lon) — không phải 10 lon rời chia thành ceil(10/24)=1 vỉ lẻ."""
+    lon, tổng 240 lon) — không phải 10 lon rời chia thành ceil(10/24)=1 vỉ lẻ. Từ khi duyệt
+    chiết chỉ tạo 1 dòng/lô (xem docs/WMS-LOT-LEVEL-REDESIGN.md), số vỉ suy ra từ
+    quantity/pack_size chứ không còn bằng số dòng trả về."""
     fp_id, fp_code = _a_finished_product(client, admin_h, "SKU-ADJ-PACKSIZE", pack_size=24)
     bottle = _a_bottle(client, vanhanh_h, "CH-ADJ-PACKSIZE-01", fp_id)
     bottle_id = bottle["bottle_id"]
@@ -83,7 +85,6 @@ def test_ca_is_counted_in_vi_not_lon(client, admin_h, vanhanh_h):
     assert approve.json()["count"] == 10  # đúng 10 VỈ, không phải 1 vỉ lẻ
 
     stored = _stored_units(client, admin_h, fp_code, lot_code)
-    assert len(stored) == 10
     assert sum(u["quantity"] for u in stored) == 240  # 10 vỉ x 24 lon/vỉ
 
     # Sửa Ca xuống 4 vỉ sau khi đã duyệt -> tồn kho phải còn đúng 4 vỉ (96 lon), không phải
@@ -91,7 +92,6 @@ def test_ca_is_counted_in_vi_not_lon(client, admin_h, vanhanh_h):
     fixed = client.post(f"/api/brewing/bottles/{bottle_id}/finish", headers=vanhanh_h, json={"ca1": 4})
     assert fixed.status_code == 200, fixed.text
     stored = _stored_units(client, admin_h, fp_code, lot_code)
-    assert len(stored) == 4
     assert sum(u["quantity"] for u in stored) == 96
 
 

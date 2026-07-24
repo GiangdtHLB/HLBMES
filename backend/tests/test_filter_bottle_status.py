@@ -178,7 +178,8 @@ def test_approve_bottle_creates_wms_units_and_marks_stocked(client, admin_h, van
     unit_codes = ok.json()["unit_codes"]
     assert unit_codes
     # Ca 1/2/3 tính theo VỈ (đơn vị đóng gói), không phải lon rời — ca1+ca2=15 VỈ, pack_size
-    # lấy từ FinishedProduct (mặc định 24 vì không khai báo riêng) -> 15 dòng, mỗi dòng 24 lon.
+    # lấy từ FinishedProduct (mặc định 24 vì không khai báo riêng) -> 1 dòng lô duy nhất
+    # (xem docs/WMS-LOT-LEVEL-REDESIGN.md), quantity = 15*24 = 360 lon.
     assert ok.json()["count"] == 15
     assert ok.json()["unit_type"] == "vi"
 
@@ -187,7 +188,7 @@ def test_approve_bottle_creates_wms_units_and_marks_stocked(client, admin_h, van
     assert set(unit_codes) == new_units
     unit = next(u for u in units if u["unit_code"] == unit_codes[0])
     assert unit["product"] == "SKU-WMS-TEST"
-    assert unit["quantity"] == 24
+    assert unit["quantity"] == 360
 
     rows = client.get("/api/brewing/bottles", headers=admin_h).json()
     row = next(r for r in rows if r["bottle_code"] == bottle_code)

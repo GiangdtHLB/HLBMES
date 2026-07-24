@@ -1797,7 +1797,9 @@ def approve_bottle(bottle_id: str, db: Session = Depends(get_db), user: User = D
     b.approved_at = utcnow()
     b.stocked = True
     db.commit()
-    return {"bottle_id": bottle_id, "approved": True, "unit_type": unit_type, "count": len(units),
+    # count=ca_total (KHÔNG dùng len(units)) — _create_units giờ luôn trả về 1 dòng/lô
+    # (xem docs/WMS-LOT-LEVEL-REDESIGN.md), ca_total mới là số vỉ/keg thật đã nhập kho.
+    return {"bottle_id": bottle_id, "approved": True, "unit_type": unit_type, "count": ca_total,
             "unit_codes": [u.unit_code for u in units], "qc_has_fail": status["has_fail"]}
 
 

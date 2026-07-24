@@ -49,10 +49,29 @@ def thukho_h(client):
     return _login(client, "thukho", "123456")
 
 
+def _ensure_finished_product(client, admin_h, suffix, pack_size, unit_type):
+    """Đăng ký (hoặc tái dùng nếu đã có) danh mục SKU-{suffix} với đúng pack_size — cần thiết
+    để _pack_divisor tra cứu đúng ở CẢ tầng tạo lẫn tầng tiêu thụ sau này (transfer/decompose/
+    free-issue/shipment); nếu không đăng ký, sản phẩm "vô danh" sẽ rơi vào nhánh fallback=1
+    của _pack_divisor, gây lệch quy đổi vỉ<->lon so với pack_size khai báo ở đây."""
+    code = f"SKU-{suffix}"
+    existing = client.get("/api/finished-products", headers=admin_h).json()
+    found = next((fp for fp in existing if fp["code"] == code), None)
+    if found:
+        return found["finished_product_id"]
+    r = client.post("/api/finished-products", headers=admin_h,
+                    json={"code": code, "name": code, "uom": "lon",
+                          "unit_type": unit_type, "pack_size": pack_size})
+    assert r.status_code == 201, r.text
+    return r.json()["finished_product_id"]
+
+
 def _build_units(client, admin_h, suffix, total, pack_size=24, unit_type="vi"):
+    fp_id = _ensure_finished_product(client, admin_h, suffix, pack_size, unit_type)
     r = client.post("/api/wms/units", headers=admin_h,
-                    json={"product_name": f"SKU-{suffix}", "lot_code": f"LOT-{suffix}",
-                          "total": total, "pack_size": pack_size, "unit_type": unit_type})
+                    json={"finished_product_id": fp_id, "product_name": f"SKU-{suffix}",
+                          "lot_code": f"LOT-{suffix}", "total": total, "pack_size": pack_size,
+                          "unit_type": unit_type})
     assert r.status_code == 201, r.text
     return r.json()
 
@@ -117,6 +136,9 @@ def test_transfer_blocks_shipped_unit(client, admin_h):
 
 
 def test_decompose_vi_into_lon_units(client, admin_h):
+    """Phân rã 1 dòng vỉ -> ĐÚNG 1 dòng lon kế thừa nguyên quantity (24), không tách N dòng
+    lon riêng lẻ nữa (xem docs/WMS-LOT-LEVEL-REDESIGN.md — dòng lon giờ có thể đại diện rất
+    nhiều lon rời, không còn luôn là "1 lon/1 dòng" như trước)."""
     built = _build_units(client, admin_h, "DECOMP01", total=24, pack_size=24, unit_type="vi")
     vi = _units_by_codes(client, admin_h, built["unit_codes"])[0]
 
@@ -124,12 +146,11 @@ def test_decompose_vi_into_lon_units(client, admin_h):
     assert res.status_code == 201, res.text
     body = res.json()
     assert body["count"] == 24
-    assert len(body["lon_unit_codes"]) == 24
+    assert len(body["lon_unit_codes"]) == 1
 
     lon_units = _units_by_codes(client, admin_h, body["lon_unit_codes"])
-    assert len(lon_units) == 24
-    assert all(u["unit_type"] == "lon" and u["quantity"] == 1 and u["status"] == "stored" for u in lon_units)
-    assert all(u["created_at"] == lon_units[0]["created_at"] for u in lon_units)
+    assert len(lon_units) == 1
+    assert lon_units[0]["unit_type"] == "lon" and lon_units[0]["quantity"] == 24 and lon_units[0]["status"] == "stored"
 
     vi_after = _units_by_codes(client, admin_h, [vi["unit_code"]])[0]
     assert vi_after["status"] == "decomposed"
@@ -155,10 +176,13 @@ def test_decompose_blocks_keg_and_double_decompose_and_delete(client, admin_h):
 
 
 def test_ship_lon_units_after_decompose(client, admin_h):
+    """Xuất MỘT PHẦN của 1 dòng lon (10/24) -> TÁCH dòng (xem _consume_lot_rows): 1 dòng mới
+    quantity=10 chuyển "shipped", dòng gốc còn lại quantity=14 vẫn "stored" — không còn 24
+    dòng lon riêng lẻ để chọn 10/24 như mô hình cũ."""
     built = _build_units(client, admin_h, "DECOMP03", total=24, pack_size=24, unit_type="vi")
     vi = _units_by_codes(client, admin_h, built["unit_codes"])[0]
     decomposed = client.post(f"/api/wms/units/{vi['unit_id']}/decompose", headers=admin_h).json()
-    lon_units = _units_by_codes(client, admin_h, decomposed["lon_unit_codes"])
+    assert len(decomposed["lon_unit_codes"]) == 1  # 1 dòng lon duy nhất, quantity=24
 
     ship_to = client.post("/api/wms/ship-to", headers=admin_h,
                           json={"code": "DECOMP-ST", "name": "Test ship-to lon", "kind": "distributor"})
@@ -171,12 +195,15 @@ def test_ship_lon_units_after_decompose(client, admin_h):
                                            "unit_type": "lon", "quantity": 10}],
                                  "shipment_type": "promo"})
     assert shipment.status_code == 201, shipment.text
-    assert shipment.json()["fifo_ok"] is True  # 10 lon đầu tiên trong thứ tự sinh ra -> đúng FIFO
+    assert shipment.json()["fifo_ok"] is True  # chỉ có 1 dòng lon -> không có dòng nào cũ hơn bị bỏ qua
 
-    shipped = _units_by_codes(client, admin_h, [u["unit_code"] for u in lon_units[:10]])
-    assert all(u["status"] == "shipped" for u in shipped)
-    remaining = _units_by_codes(client, admin_h, [u["unit_code"] for u in lon_units[10:]])
-    assert all(u["status"] == "stored" for u in remaining)
+    lons_after = [u for u in client.get("/api/wms/units", headers=admin_h).json()
+                  if u["lot_code"] == "LOT-DECOMP03" and u["unit_type"] == "lon"]
+    assert len(lons_after) == 2
+    shipped = [u for u in lons_after if u["status"] == "shipped"]
+    stored = [u for u in lons_after if u["status"] == "stored"]
+    assert len(shipped) == 1 and shipped[0]["quantity"] == 10
+    assert len(stored) == 1 and stored[0]["quantity"] == 14
 
     ships = client.get("/api/wms/shipments", headers=admin_h).json()
     made = next(s for s in ships if s["shipment_id"] == shipment.json()["shipment_id"])
@@ -203,8 +230,10 @@ def test_decompose_batch_by_count(client, admin_h):
     decomposed = [u for u in vis_after if u["status"] == "decomposed"]
     stored = [u for u in vis_after if u["status"] == "stored"]
     assert len(decomposed) == 3 and len(stored) == 2
+    # 3 dòng lon (1 dòng/vỉ phân rã, không tách theo từng lon rời) tổng quantity = 72.
     lons = [u for u in after if u["lot_code"] == "LOT-DECOMPBATCH" and u["unit_type"] == "lon"]
-    assert len(lons) == 72
+    assert len(lons) == 3
+    assert sum(u["quantity"] for u in lons) == 72
 
     # Yêu cầu nhiều hơn số vỉ còn tồn (2) -> phân rã hết 2, trả về đúng số đã xử lý.
     res2 = client.post("/api/wms/units/decompose-batch", headers=admin_h,
@@ -229,7 +258,8 @@ def test_undo_decompose_batch_restores_vi_and_removes_lon(client, admin_h):
 
     before_undo = client.get("/api/wms/units", headers=admin_h).json()
     lons_before = [u for u in before_undo if u["lot_code"] == "LOT-UNDODECOMP" and u["unit_type"] == "lon"]
-    assert len(lons_before) == 48
+    assert len(lons_before) == 2  # 2 dòng lon (1 dòng/vỉ phân rã), tổng quantity = 48
+    assert sum(u["quantity"] for u in lons_before) == 48
 
     undo = client.post(f"/api/wms/units/decompose-batch/{audit_id}/undo", headers=admin_h)
     assert undo.status_code == 200, undo.text
@@ -284,10 +314,14 @@ def test_relocate_batch_places_unplaced_units_by_count(client, admin_h):
     assert ok.status_code == 200, ok.text
     assert ok.json() == {"moved": 2, "to_location": "RELOC-BIG", "requested": 2}
 
-    units = _units_by_codes(client, admin_h, built["unit_codes"])
-    placed = [u for u in units if u["location"] == "RELOC-BIG"]
-    unplaced = [u for u in units if not u["location"]]
-    assert len(placed) == 2 and len(unplaced) == 1
+    # Dòng gốc (72=3 vỉ) bị TÁCH: 2 vỉ (48) đặt vào RELOC-BIG, 1 vỉ (24) còn lại chưa có vị
+    # trí — không còn 3 dòng riêng lẻ để lọc theo built["unit_codes"] như mô hình cũ.
+    lot_units = [u for u in client.get("/api/wms/units", headers=admin_h).json()
+                 if u["lot_code"] == "LOT-RELOC01"]
+    placed = [u for u in lot_units if u["location"] == "RELOC-BIG"]
+    unplaced = [u for u in lot_units if not u["location"]]
+    assert len(placed) == 1 and placed[0]["quantity"] == 48
+    assert len(unplaced) == 1 and unplaced[0]["quantity"] == 24
 
     # Điều chuyển tiếp từ RELOC-BIG sang 1 vị trí khác theo số lượng (không cần chọn từng đơn vị).
     loc_dest = _make_location(client, admin_h, "RELOC-DEST", capacity=10)
