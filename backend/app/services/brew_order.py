@@ -418,7 +418,9 @@ def _delete_children(db: Session, children: list) -> None:
         for l in db.execute(select(BrewOrderMaterialLine).where(
                 BrewOrderMaterialLine.brew_order_id == o.brew_order_id)).scalars().all():
             db.delete(l)
+        db.flush()  # MSSQL enforce FK: material line (con) trước brew_order (cha).
         db.delete(o)
+    db.flush()  # ... và brew_order (con) trước brew_master_order (cha).
 
 
 def create_master_order(db: Session, payload: dict, user) -> BrewMasterOrder:
@@ -567,6 +569,7 @@ def delete_order(db: Session, brew_order_id: str, user) -> None:
     for l in db.execute(select(BrewOrderMaterialLine).where(
             BrewOrderMaterialLine.brew_order_id == brew_order_id)).scalars().all():
         db.delete(l)
+    db.flush()  # MSSQL enforce FK: xóa material line (con) trước brew_order (cha).
     record_audit(db, entity_type="brew_order", entity_id=brew_order_id, action="delete",
                  actor=user, before={"order_code": order.order_code})
     db.delete(order)

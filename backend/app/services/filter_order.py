@@ -446,6 +446,7 @@ def delete_order(db: Session, filter_order_id: str, user) -> None:
     for l in db.execute(select(FilterOrderMaterialLine).where(
             FilterOrderMaterialLine.filter_order_id == filter_order_id)).scalars().all():
         db.delete(l)
+    db.flush()  # MSSQL enforce FK: xóa tank/material line (con) trước filter_order (cha).
     record_audit(db, entity_type="filter_order", entity_id=filter_order_id, action="delete",
                  actor=user, before={"order_code": order.order_code})
     db.delete(order)
@@ -642,7 +643,9 @@ def _delete_children(db: Session, children: list) -> None:
         for l in db.execute(select(FilterOrderMaterialLine).where(
                 FilterOrderMaterialLine.filter_order_id == o.filter_order_id)).scalars().all():
             db.delete(l)
+        db.flush()  # MSSQL enforce FK: tank/material line (con) trước filter_order (cha).
         db.delete(o)
+    db.flush()  # ... và filter_order (con) trước filter_master_order (cha).
 
 
 def create_master_order(db: Session, payload: dict, user) -> FilterMasterOrder:

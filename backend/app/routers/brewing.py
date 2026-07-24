@@ -23,6 +23,7 @@ from ..models.brewing import (
     BrewRecord,
     FermentBrewLink,
     FermentDailyReading,
+    FermentProcessLog,
     FermentRecord,
     FilterMasterOrder,
     FilterMaterialUsage,
@@ -506,6 +507,7 @@ def delete_brew(brew_id: str, db: Session = Depends(get_db), user: User = Depend
         select(FermentBrewLink).where(FermentBrewLink.brew_id == brew_id)).scalars().all()}
     for link in db.execute(select(FermentBrewLink).where(FermentBrewLink.brew_id == brew_id)).scalars().all():
         db.delete(link)
+    db.flush()  # MSSQL enforce FK: xóa hết bản con (link) trước bản cha (brew_record).
     for batch in db.execute(select(BrewBatch).where(BrewBatch.brew_id == brew_id)).scalars().all():
         for u in db.execute(select(BrewMaterialUsage).where(BrewMaterialUsage.batch_id == batch.batch_id)).scalars().all():
             if u.movement_id:
@@ -513,8 +515,14 @@ def delete_brew(brew_id: str, db: Session = Depends(get_db), user: User = Depend
             db.delete(u)
         for r in db.execute(select(QualityResult).where(QualityResult.scope_type == "brew_batch", QualityResult.scope_id == batch.batch_id)).scalars().all():
             db.delete(r)
+        for s in db.execute(select(BrewProcessStep).where(BrewProcessStep.batch_id == batch.batch_id)).scalars().all():
+            db.delete(s)
+        for lg in db.execute(select(BrewProcessLog).where(BrewProcessLog.batch_id == batch.batch_id)).scalars().all():
+            db.delete(lg)
+        db.flush()  # xóa usage/quality_result/process_step/process_log (con) trước brew_batch (cha).
         genealogy.delete_edges_for(db, "brew_batch", batch.batch_id)
         db.delete(batch)
+    db.flush()  # xóa brew_batch (con) trước brew_record (cha).
     genealogy.delete_edges_for(db, "brew", brew_id)
     db.delete(b)
     db.flush()
@@ -534,6 +542,11 @@ def delete_brew(brew_id: str, db: Session = Depends(get_db), user: User = Depend
         for r in db.execute(select(QualityResult).where(QualityResult.scope_type == "ferment",
                             QualityResult.scope_id.in_([f"{f.lm_code}__len_men_chinh", f"{f.lm_code}__len_men_phu"]))).scalars().all():
             db.delete(r)
+        for rd in db.execute(select(FermentDailyReading).where(FermentDailyReading.ferment_id == ferment_id)).scalars().all():
+            db.delete(rd)
+        for lg in db.execute(select(FermentProcessLog).where(FermentProcessLog.ferment_id == ferment_id)).scalars().all():
+            db.delete(lg)
+        db.flush()  # xóa reading/process_log/quality_result (con) trước ferment_record (cha).
         genealogy.delete_edges_for(db, "ferment", ferment_id)
         db.delete(f)
     db.commit()
@@ -653,6 +666,7 @@ def delete_brew_batch(brew_id: str, batch_id: str, db: Session = Depends(get_db)
     log = db.execute(select(BrewProcessLog).where(BrewProcessLog.batch_id == batch_id)).scalar_one_or_none()
     if log:
         db.delete(log)
+    db.flush()  # MSSQL enforce FK: xóa usage/quality_result/process_step/process_log (con) trước brew_batch (cha).
     genealogy.delete_edges_for(db, "brew_batch", batch_id)
     db.delete(batch)
     db.flush()
@@ -932,6 +946,11 @@ def delete_ferment(ferment_id: str, db: Session = Depends(get_db), user: User = 
     for r in db.execute(select(QualityResult).where(QualityResult.scope_type == "ferment",
                         QualityResult.scope_id.in_([f"{f.lm_code}__len_men_chinh", f"{f.lm_code}__len_men_phu"]))).scalars().all():
         db.delete(r)
+    for rd in db.execute(select(FermentDailyReading).where(FermentDailyReading.ferment_id == ferment_id)).scalars().all():
+        db.delete(rd)
+    for lg in db.execute(select(FermentProcessLog).where(FermentProcessLog.ferment_id == ferment_id)).scalars().all():
+        db.delete(lg)
+    db.flush()  # MSSQL enforce FK: xóa link/reading/process_log/quality_result (con) trước ferment_record (cha).
     genealogy.delete_edges_for(db, "ferment", ferment_id)
     db.delete(f)
     db.commit()
