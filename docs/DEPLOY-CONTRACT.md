@@ -24,6 +24,7 @@ alembic upgrade head                          # áp toàn bộ migration mới
 | `sa.Unicode(length=N)` | `sa.String` | MSSQL `VARCHAR` mất dấu tiếng Việt ("QC đạt"→"QC dat") → vỡ hash-chain audit. `Unicode`→`NVARCHAR`. |
 | `sa.UnicodeText` | `sa.Text` | Như trên cho cột dài. |
 | luôn có `length=` cho cột PK/index/unique | `Unicode()` không length | MSSQL không PK/index được `NVARCHAR(MAX)`. |
+| cột thời gian: `sa.DateTime(timezone=True)` | `sa.DateTime()` trần | Model dùng `UTCDateTime` (tz-aware) + app ghi `utcnow()` tz-aware. `DateTime()` trần → MSSQL tạo `DATETIME` (không offset); ghi tz-aware → 500 "Conversion failed converting date/time from character string". `timezone=True` → `DATETIMEOFFSET`. Xem migration `51e5e329b0d1`. |
 
 ## 2. Năm lớp lỗi MSSQL đã gặp & cách xử lý
 
