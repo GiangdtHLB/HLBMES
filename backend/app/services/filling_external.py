@@ -146,7 +146,7 @@ def reliable_at_boundaries(candidates: list, boundaries: list, max_gap_hours: fl
 
 def filling_report(db: Session, date_from: datetime, date_to: datetime) -> dict:
     conn = _get_filling_connection(db)
-    engine = create_engine(sqlconn_svc._build_url(conn), connect_args={"timeout": 20}, pool_pre_ping=False)
+    engine = create_engine(sqlconn_svc._build_url(conn), connect_args={"timeout": 4}, pool_pre_ping=False)
     boundaries = shift_boundaries(date_from, date_to)
     try:
         with sqlconn_svc.safe_query(conn.name):
@@ -243,7 +243,7 @@ def filling_realtime_status(db: Session) -> dict:
     cáo sản lượng theo ca, tính từ 30K_Report) — bảng này chỉ có giá trị tức thời hiện tại,
     không phải chuỗi thời gian, nên không cần LOCF/shift boundary như filling_report()."""
     conn = _get_filling_connection(db)
-    engine = create_engine(sqlconn_svc._build_url(conn), connect_args={"timeout": 10}, pool_pre_ping=False)
+    engine = create_engine(sqlconn_svc._build_url(conn), connect_args={"timeout": 4}, pool_pre_ping=False)
     try:
         with sqlconn_svc.safe_query(conn.name):
             metadata = MetaData()
@@ -275,7 +275,7 @@ def data_bounds(db: Session) -> dict:
     """Ngày nhỏ nhất/lớn nhất thật có trong bảng 30K_Report — dùng làm mặc định khoảng
     ngày báo cáo, vì dữ liệu SCADA export có thể đã dừng từ lâu (không còn cập nhật tới hiện tại)."""
     conn = _get_filling_connection(db)
-    engine = create_engine(sqlconn_svc._build_url(conn), connect_args={"timeout": 15}, pool_pre_ping=False)
+    engine = create_engine(sqlconn_svc._build_url(conn), connect_args={"timeout": 4}, pool_pre_ping=False)
     try:
         with sqlconn_svc.safe_query(conn.name):
             metadata = MetaData()

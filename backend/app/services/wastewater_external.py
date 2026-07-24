@@ -29,7 +29,7 @@ def _get_wastewater_connection(db: Session):
 def wastewater_realtime_status(db: Session) -> dict:
     """Snapshot tức thời trạm quan trắc nước thải Hạ Long — đọc bảng QT_Realtime."""
     conn = _get_wastewater_connection(db)
-    engine = create_engine(sqlconn_svc._build_url(conn), connect_args={"timeout": 10}, pool_pre_ping=False)
+    engine = create_engine(sqlconn_svc._build_url(conn), connect_args={"timeout": 4}, pool_pre_ping=False)
     try:
         with sqlconn_svc.safe_query(conn.name):
             metadata = MetaData()

@@ -129,7 +129,7 @@ def keg_report(db: Session, date_from: datetime, date_to: datetime) -> dict:
     from .filling_external import shift_boundaries
 
     conn = _get_keg_connection(db)
-    engine = create_engine(sqlconn_svc._build_url(conn), connect_args={"timeout": 20}, pool_pre_ping=False)
+    engine = create_engine(sqlconn_svc._build_url(conn), connect_args={"timeout": 4}, pool_pre_ping=False)
     boundaries = shift_boundaries(date_from, date_to)
     try:
         with sqlconn_svc.safe_query(conn.name):
@@ -166,7 +166,7 @@ def data_bounds(db: Session) -> dict:
     from sqlalchemy import func
 
     conn = _get_keg_connection(db)
-    engine = create_engine(sqlconn_svc._build_url(conn), connect_args={"timeout": 15}, pool_pre_ping=False)
+    engine = create_engine(sqlconn_svc._build_url(conn), connect_args={"timeout": 4}, pool_pre_ping=False)
     try:
         with sqlconn_svc.safe_query(conn.name):
             metadata = MetaData()

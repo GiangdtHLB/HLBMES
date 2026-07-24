@@ -83,7 +83,7 @@ def _get_energy_connection(db: Session, site: str = "hl"):
 def electricity_report(db: Session, date_from: datetime, date_to: datetime, group_by: str = "day",
                        site: str = "hl") -> dict:
     conn = _get_energy_connection(db, site)
-    engine = create_engine(sqlconn_svc._build_url(conn), connect_args={"timeout": 20}, pool_pre_ping=False)
+    engine = create_engine(sqlconn_svc._build_url(conn), connect_args={"timeout": 4}, pool_pre_ping=False)
     try:
         with sqlconn_svc.safe_query(conn.name):
             metadata = MetaData()
@@ -175,7 +175,7 @@ def electricity_ca_report(db: Session, date_from: datetime, date_to: datetime, s
     from .filling_external import shift_boundaries
 
     conn = _get_energy_connection(db, site)
-    engine = create_engine(sqlconn_svc._build_url(conn), connect_args={"timeout": 20}, pool_pre_ping=False)
+    engine = create_engine(sqlconn_svc._build_url(conn), connect_args={"timeout": 4}, pool_pre_ping=False)
     boundaries = shift_boundaries(date_from, date_to)
     try:
         with sqlconn_svc.safe_query(conn.name):
@@ -297,7 +297,7 @@ def data_bounds(db: Session, site: str = "hl") -> dict:
     """Ngày nhỏ nhất/lớn nhất thật có trong bảng Energy — dùng làm mặc định khoảng ngày báo
     cáo, vì dữ liệu SCADA export có thể đã dừng từ lâu (không còn cập nhật tới ngày hiện tại)."""
     conn = _get_energy_connection(db, site)
-    engine = create_engine(sqlconn_svc._build_url(conn), connect_args={"timeout": 15}, pool_pre_ping=False)
+    engine = create_engine(sqlconn_svc._build_url(conn), connect_args={"timeout": 4}, pool_pre_ping=False)
     try:
         with sqlconn_svc.safe_query(conn.name):
             metadata = MetaData()
