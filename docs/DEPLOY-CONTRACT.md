@@ -73,12 +73,20 @@ Không chỉ migration; **code truy vấn** cũng phải chạy trên MSSQL. Đ�
   MSSQL chỉ cho `IS NULL` → 500 `Incorrect syntax near '1'`. SQLite/Postgres thì chạy.
   **Dùng `Column == true()` / `== false()`** (`from sqlalchemy import true, false`) → render
   `col = 1`, chạy mọi dialect, sạch ruff E712. KHÔNG dùng `== True` (E712).
+- **Ghi datetime tz-aware vào cột `DATETIME`** → 500 `Conversion failed when converting date
+  and/or time from character string`. Gốc: migration tạo cột bằng `sa.DateTime()` trần (xem
+  mục 1) → MSSQL ra `DATETIME` không nhận offset, trong khi app luôn ghi `utcnow()` tz-aware.
+  Cột thời gian PHẢI `sa.DateTime(timezone=True)` → `DATETIMEOFFSET`. Vỡ ở đường GHI (POST/PUT
+  "Thêm mẻ", "Lưu ngưỡng"…), GET không bắt được.
 - Tránh raw SQL đặc thù dialect trong service: `LIMIT`/`OFFSET` thô (MSSQL: `TOP`/`OFFSET
   FETCH` — ưu tiên `.limit()`/`.offset()` của ORM), `strftime`/`randomblob`/`hex()`/`ilike`.
+  Dùng `extract("year"/"month", col)` của SQLAlchemy (tự render `DATEPART` trên MSSQL) — OK.
 
-Cách bắt: sau khi lên MSSQL, chạy smoke toàn bộ GET endpoint (enumerate `/openapi.json`,
-gọi từng route không path-param với token admin, gom mọi HTTP 500). Đợt vừa rồi quét 143
-endpoint bắt trọn lớp `.is_(True)`.
+Cách bắt (LÀM CẢ 2, vì bug ẩn ở cả đọc lẫn ghi):
+1. **Smoke GET**: enumerate `/openapi.json`, gọi mọi route không path-param với token admin,
+   gom HTTP 500. (Đợt trước quét 143 GET bắt trọn lớp `.is_(True)`.)
+2. **Smoke GHI (POST/PUT)**: với các form chính (tạo mẻ, lưu cài đặt, nhập kho, tạo lệnh…)
+   tạo 1 bản ghi thật trên DB test rồi xoá — lớp datetime→DATETIME CHỈ lộ ở đường ghi.
 
 ## 4. `alembic.ini` / URL
 Mật khẩu SA test **không dùng ký tự đặc biệt** (`% @ ! /`) — ConfigParser của alembic.ini
@@ -87,3 +95,19 @@ nội suy `%` gây lỗi. File `.env`/`docker-compose.override.yml` (chứa secr
 ## 5. Helper dùng chung
 `backend/app/alembic_mssql.py` (KHÔNG đặt trong `alembic/versions/` vì Alembic quét mọi
 `*.py` ở đó như 1 migration). Chứa `prep_drop_columns(conn, table, cols)`.
+
+## 6. CHECKLIST tự kiểm trước khi push (bên phát triển)
+Chạy hết list này rồi mới push branch — mỗi mục là 1 lỗi thực tế đã làm vỡ prod:
+
+- [ ] Cột chuỗi: `Unicode(length=N)` / `UnicodeText`, KHÔNG `String`/`Text` (mục 1).
+- [ ] Cột thời gian: `sa.DateTime(timezone=True)`, KHÔNG `sa.DateTime()` trần (mục 1 + 3b).
+- [ ] Không SQL SQLite-only trong migration: `randomblob`/`strftime`/`hex` → dialect-aware (2A).
+- [ ] `drop_column` cột có FK/DEFAULT → gọi `prep_drop_columns` trước (2B).
+- [ ] `alter_column(nullable=...)` có `existing_type=` (2C); đổi kiểu cột có DEFAULT → mẫu 2D.
+- [ ] `batch_alter_table` dùng `recreate='auto'`, không `'always'` (2E).
+- [ ] Query code: `Column == true()/false()`, KHÔNG `.is_(True/False)` trên Boolean (3b).
+- [ ] 1 head duy nhất; không sửa migration đã deploy; không gộp migration (mục 0).
+- [ ] Migration đặt ràng buộc chặt hơn dữ liệu hiện có → ghi rõ trong docstring (mục 3).
+- [ ] Không commit `.env` / `docker-compose.override.yml` / secret (mục 4).
+- [ ] Nếu chạy được MSSQL: `alembic upgrade <head-prod> → head` + smoke GET & GHI (3b).
+      Nếu KHÔNG có MSSQL: push branch, báo bên vận hành chạy cổng giúp.
