@@ -7150,7 +7150,8 @@ function lineSectionHtml(kind, title, rows, canManage, noPerm) {
       ${capField}
       <button class="btn" id="ln_${p}_add" style="align-self:flex-end">+ Thêm</button>
     </div>` : ""}
-    <div class="tablewrap" style="margin-top:12px"><table>
+    <input class="searchbox" data-tbl="t_lines_${p}" placeholder="Tìm mã/tên..." style="margin-top:10px"/>
+    <div class="tablewrap" style="margin-top:6px"><table id="t_lines_${p}">
       <thead><tr><th>Mã</th><th>Tên</th><th>Khu vực</th><th>${isLine ? "Công suất" : "Thể tích"}</th><th>Trạng thái</th>${canManage ? "<th></th>" : ""}</tr></thead>
       <tbody>${rowsHtml}</tbody>
     </table></div>
@@ -7448,6 +7449,9 @@ VIEWS.master = async function () {
   wirePaginate("t_stagegroups", 10);
   wirePaginate("t_fp", 10);
   wirePaginate("t_suppliers", 10);
+  wirePaginate("t_lines_line", 10);
+  wirePaginate("t_lines_tank", 10);
+  wirePaginate("t_lines_tank_bbt", 10);
   if (canManage) {
     $("pr_add").onclick = () => guard(async () => {
       await POST("/products", { code: $("pr_code").value.trim(), name: $("pr_name").value.trim(),
