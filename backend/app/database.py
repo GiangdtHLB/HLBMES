@@ -15,6 +15,11 @@ def _engine_kwargs(url: str) -> dict:
     - SQLite (dev/test): check_same_thread=False cho uvicorn đa luồng.
     - Postgres / Microsoft SQL Server (prod): pool bền — pre_ping chống kết nối
       chết, recycle định kỳ, pool_size/overflow theo số worker.
+    - SQL Server (pyodbc): fast_executemany=True — dùng executemany thật của ODBC driver thay vì
+      gửi từng INSERT/UPDATE riêng lẻ khi SQLAlchemy phát hiện executemany (bulk insert nhiều
+      dòng cùng lúc); phòng khi vẫn còn chỗ tạo nhiều dòng trong 1 lần (VD migration dữ liệu,
+      import hàng loạt) — không ảnh hưởng luồng ghi 1-dòng bình thường đã được tối ưu ở tầng
+      service (xem docs/WMS-LOT-LEVEL-REDESIGN.md).
     """
     kw: dict = {"future": True}
     if url.startswith("sqlite"):
@@ -25,6 +30,8 @@ def _engine_kwargs(url: str) -> dict:
         kw["pool_size"] = DB_POOL_SIZE
         kw["max_overflow"] = DB_MAX_OVERFLOW
         # SQL Server (pyodbc): cô lập snapshot tốt hơn cho đọc đồng thời nếu DB bật READ_COMMITTED_SNAPSHOT.
+        if url.startswith("mssql"):
+            kw["fast_executemany"] = True
     return kw
 
 

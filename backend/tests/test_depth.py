@@ -254,18 +254,30 @@ def test_scheduler_auto_no_overlap(client):
 
 # ---------------- P3-4: WMS vỉ/keg + barcode ----------------
 def test_wms_unit_lifecycle(client):
+    """Đăng ký SKU riêng (pack_size=24) + vị trí sức chứa lớn riêng cho test này — tránh
+    dùng chung vị trí/sản phẩm với seed._seed_wms (BIA-LAGER không có SKU danh mục nên
+    _pack_divisor sẽ mặc định 1, khiến quantity=240 bị hiểu nhầm thành 240 vỉ thay vì 10)."""
+    admin_h = _login(client, "admin", "AdminTest123")
     h = _login(client, "thukho", "123456")            # warehouse.receive + warehouse.issue
     locs = client.get("/api/wms/locations", headers=h).json()
     assert len(locs) >= 3
+    fp = client.post("/api/finished-products", headers=admin_h,
+                     json={"code": "SKU-DEPTHLC01", "name": "SKU depth lifecycle", "uom": "lon",
+                           "unit_type": "vi", "pack_size": 24})
+    assert fp.status_code == 201, fp.text
+    loc = client.post("/api/wms/locations", headers=admin_h,
+                      json={"code": "DEPTH-LC-01", "name": "Vị trí depth lifecycle", "capacity": 1000})
+    assert loc.status_code == 201, loc.text
     r = client.post("/api/wms/units", headers=h,
-                    json={"product_name": "BIA-LAGER", "lot_code": "PKG-2406-0001",
+                    json={"finished_product_id": fp.json()["finished_product_id"],
+                          "product_name": "SKU-DEPTHLC01", "lot_code": "PKG-DEPTHLC01",
                           "total": 240, "pack_size": 24})
     assert r.status_code == 201
     uid = None
     units = client.get("/api/wms/units", headers=h).json()
     ucode = r.json()["unit_codes"][0]
     uid = next(u["unit_id"] for u in units if u["unit_code"] == ucode)
-    pa = client.post(f"/api/wms/units/{uid}/putaway", headers=h, json={"loc_id": locs[0]["loc_id"]})
+    pa = client.post(f"/api/wms/units/{uid}/putaway", headers=h, json={"loc_id": loc.json()["loc_id"]})
     assert pa.json()["status"] == "stored"
     # barcode vỉ phân giải qua kiosk /api/scan
     sc = client.get("/api/scan", params={"code": ucode}, headers=h).json()

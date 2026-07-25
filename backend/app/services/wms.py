@@ -1,7 +1,8 @@
-"""WMS thành phẩm: vị trí + đơn vị tồn kho (vỉ/keg, độc lập — không pallet/case),
-putaway/ship theo vị trí, tồn theo vị trí, phân giải barcode (cho đầu đọc cầm tay / kiosk)."""
+"""WMS thành phẩm: vị trí + đơn vị tồn kho theo LÔ (không phải theo từng vỉ/keg riêng lẻ —
+xem docs/WMS-LOT-LEVEL-REDESIGN.md), putaway/ship theo vị trí, tồn theo vị trí, phân giải
+barcode (cho đầu đọc cầm tay / kiosk)."""
 
-from sqlalchemy import and_, delete, func, or_, select
+from sqlalchemy import and_, case, delete, func, or_, select, true
 from sqlalchemy.orm import Session
 
 from ..audit import record_audit
@@ -14,6 +15,99 @@ from ..models.materials import GenealogyEdge
 from ..models.wms import FinishedGoodsUnit, NearExpiryEntry, Shipment, ShipToLocation, Vehicle, WmsLocation
 from ..security import User, require_perm, require_role
 from . import genealogy
+
+# Sentinel phân biệt "không lọc theo vị trí" với "lọc theo vị trí = chưa cất" (location_id
+# IS NULL) trong _consume_lot_rows — None tự nó đã có nghĩa hợp lệ (chưa cất) nên không dùng
+# được làm giá trị mặc định "bỏ qua tham số".
+_LOC_UNSET = object()
+
+
+def _pack_divisor(fp: FinishedProduct | None, unit_type: str) -> int:
+    """Quy đổi giữa "count" (đơn vị đóng gói vỉ/keg/lon — tham số vào của mọi API WMS) và
+    "quantity" (SL đơn vị nhỏ lưu trên dòng FinishedGoodsUnit, xem model): 1 count = bao
+    nhiêu quantity. vi: pack_size khai báo ở Danh mục Sản phẩm (FinishedProduct, tra qua
+    finished_product_id). Không có SKU khai báo (finished_product_id NULL — VD "Nhập kho thủ
+    công"/test dùng product_name tự do không qua Danh mục) → mặc định 1 (KHÔNG đoán 24): giá
+    trị pack_size dùng lúc TẠO dòng (payload.pack_size của _create_units) không được lưu lại
+    trên dòng để tra lại ở đây, nên giả định an toàn nhất khi không có SKU là "count = quantity"
+    (không quy đổi), tránh đoán sai đơn vị tồn kho như khi mặc định 24 cho SKU không có thật.
+    keg/lon luôn là 1 (1 keg/1 lon = 1 đơn vị nhỏ, không nhân thêm)."""
+    if unit_type != "vi":
+        return 1
+    return fp.pack_size if fp and fp.pack_size else 1
+
+
+def _pack_divisor_expr(unit_type_col=FinishedGoodsUnit.unit_type, pack_size_col=FinishedProduct.pack_size):
+    """Biểu thức SQL tương đương _pack_divisor() để dùng trong SUM/GROUP BY (đếm số vỉ/keg/lon
+    trực tiếp từ SUM(quantity) mà không cần tải từng dòng — xem list_lot_summaries/summary/...).
+    Cần OUTER JOIN FinishedProduct qua finished_product_id ở câu truy vấn gọi hàm này."""
+    return case((unit_type_col == "vi", func.coalesce(func.nullif(pack_size_col, 0), 1)), else_=1)
+
+
+def _location_used_count(db: Session, loc_id: str, exclude_unit_id: str | None = None) -> float:
+    """Tổng số vỉ/keg/lon quy đổi (SUM(quantity)/pack_size từng dòng qua _pack_divisor_expr,
+    KHÔNG đếm dòng — 1 vị trí có thể chứa lẫn nhiều SKU khác pack_size nhau) đang "stored"
+    tại 1 vị trí kho — dùng để kiểm sức chứa (WmsLocation.capacity)."""
+    stmt = (select(func.sum(FinishedGoodsUnit.quantity / _pack_divisor_expr()))
+            .select_from(FinishedGoodsUnit)
+            .outerjoin(FinishedProduct, FinishedProduct.finished_product_id == FinishedGoodsUnit.finished_product_id)
+            .where(FinishedGoodsUnit.location_id == loc_id, FinishedGoodsUnit.status == "stored"))
+    if exclude_unit_id:
+        stmt = stmt.where(FinishedGoodsUnit.unit_id != exclude_unit_id)
+    return db.execute(stmt).scalar() or 0
+
+
+def _consume_lot_rows(db: Session, *, product_name: str, unit_type: str, status: str,
+                      quantity_needed: float, lot_code: str | None = None,
+                      location_id=_LOC_UNSET, exclude_ids: set | None = None,
+                      near_expiry_only: bool = False) -> tuple[list[FinishedGoodsUnit], float]:
+    """Tiêu thụ FIFO (cũ nhất trước, theo created_at) từ các dòng LÔ khớp tiêu chí tới khi đủ
+    `quantity_needed` (đơn vị = cột quantity, KHÔNG phải số vỉ/keg — caller tự nhân với
+    _pack_divisor() trước khi gọi). Dòng bị lấy TRỌN thì trả nguyên dòng đó; dòng bị lấy MỘT
+    PHẦN thì TÁCH: 1 dòng mới mang đúng phần cần lấy (caller tự mutate status/location_id/
+    shipment_id trên các dòng trả về sau khi hàm này xong), dòng gốc giữ phần dư — thay vì
+    phải chọn/xóa/gộp nguyên dòng có thể đại diện hàng trăm nghìn vỉ đã gộp lại (xem
+    docs/WMS-LOT-LEVEL-REDESIGN.md). Trả về (rows, tổng_quantity_lấy_được) — tổng nhỏ hơn
+    quantity_needed nghĩa là không đủ tồn; caller tự chia lại cho divisor để báo lỗi đúng đơn
+    vị (vỉ/keg/lon) người dùng hiểu, hàm này không tự raise vì không biết đơn vị hiển thị."""
+    stmt = select(FinishedGoodsUnit).where(
+        FinishedGoodsUnit.product_name == product_name,
+        FinishedGoodsUnit.unit_type == unit_type,
+        FinishedGoodsUnit.status == status,
+    )
+    if lot_code:
+        stmt = stmt.where(FinishedGoodsUnit.lot_code == lot_code)
+    if location_id is not _LOC_UNSET:
+        stmt = stmt.where(FinishedGoodsUnit.location_id.is_(None) if location_id is None
+                         else FinishedGoodsUnit.location_id == location_id)
+    if near_expiry_only:
+        stmt = stmt.where(FinishedGoodsUnit.is_near_expiry == true())
+    if exclude_ids:
+        stmt = stmt.where(FinishedGoodsUnit.unit_id.notin_(exclude_ids))
+    stmt = stmt.order_by(FinishedGoodsUnit.created_at)
+
+    remaining = quantity_needed
+    picked: list[FinishedGoodsUnit] = []
+    for row in db.execute(stmt).scalars().all():
+        if remaining <= 1e-9:
+            break
+        if row.quantity <= remaining + 1e-9:
+            picked.append(row)
+            remaining -= row.quantity
+        else:
+            split = FinishedGoodsUnit(
+                unit_id=new_id(), unit_code=f"{row.unit_code}-S{new_id()[:4].upper()}",
+                unit_type=row.unit_type, finished_product_id=row.finished_product_id,
+                product_name=row.product_name, lot_code=row.lot_code, quantity=remaining,
+                status=row.status, location_id=row.location_id, created_by=row.created_by,
+                created_at=row.created_at, is_near_expiry=row.is_near_expiry,
+            )
+            db.add(split)
+            row.quantity -= remaining
+            db.flush()
+            picked.append(split)
+            remaining = 0
+    return picked, quantity_needed - max(remaining, 0)
 
 
 def create_location(db: Session, payload: dict) -> WmsLocation:
@@ -50,11 +144,15 @@ def delete_location(db: Session, loc_id: str) -> None:
 
 def list_locations(db: Session) -> list:
     locs = db.execute(select(WmsLocation).order_by(WmsLocation.code)).scalars().all()
+    # "used" = tổng vỉ/keg/lon quy đổi (SUM(quantity)/pack_size từng dòng), KHÔNG đếm dòng —
+    # 1 dòng giờ có thể đại diện nhiều đơn vị đóng gói (xem docs/WMS-LOT-LEVEL-REDESIGN.md).
     counts = dict(db.execute(
-        select(FinishedGoodsUnit.location_id, func.count(FinishedGoodsUnit.unit_id))
+        select(FinishedGoodsUnit.location_id, func.sum(FinishedGoodsUnit.quantity / _pack_divisor_expr()))
+        .select_from(FinishedGoodsUnit)
+        .outerjoin(FinishedProduct, FinishedProduct.finished_product_id == FinishedGoodsUnit.finished_product_id)
         .where(FinishedGoodsUnit.status == "stored").group_by(FinishedGoodsUnit.location_id)).all())
     return [{"loc_id": l.loc_id, "code": l.code, "name": l.name, "zone": l.zone, "kind": l.kind,
-             "capacity": l.capacity, "active": l.active, "used": counts.get(l.loc_id, 0)} for l in locs]
+             "capacity": l.capacity, "active": l.active, "used": counts.get(l.loc_id, 0) or 0} for l in locs]
 
 
 def create_ship_to(db: Session, payload: dict) -> ShipToLocation:
@@ -137,16 +235,23 @@ def list_vehicles(db: Session) -> list:
 
 
 def summary(db: Session) -> dict:
-    """Tổng hợp toàn kho: số vị trí + sức chứa, tổng vỉ/keg theo trạng thái/loại — dùng
-    COUNT/GROUP BY ở SQL, KHÔNG load từng dòng vào Python (kho có thể có hàng trăm ngàn
-    đơn vị — load hết ra rồi đếm bằng vòng lặp từng chậm tới hàng phút khi 1 lô lớn)."""
+    """Tổng hợp toàn kho: số vị trí + sức chứa, tổng vỉ/keg/lon theo trạng thái/loại — dùng
+    SUM(quantity)/pack_size ở SQL (qua _pack_divisor_expr), KHÔNG đếm dòng và KHÔNG load
+    từng dòng vào Python (kho có thể có hàng trăm ngàn đơn vị gộp vào rất ít dòng — xem
+    docs/WMS-LOT-LEVEL-REDESIGN.md; đếm dòng giờ không còn phản ánh đúng số vỉ/keg/lon)."""
     locs = db.execute(select(WmsLocation)).scalars().all()
     capacity = sum(l.capacity for l in locs)
-    units_total = db.execute(select(func.count(FinishedGoodsUnit.unit_id))).scalar_one()
-    by_status = dict(db.execute(select(FinishedGoodsUnit.status, func.count(FinishedGoodsUnit.unit_id))
-                                .group_by(FinishedGoodsUnit.status)).all())
-    by_type = dict(db.execute(select(FinishedGoodsUnit.unit_type, func.count(FinishedGoodsUnit.unit_id))
-                              .group_by(FinishedGoodsUnit.unit_type)).all())
+    count_expr = func.sum(FinishedGoodsUnit.quantity / _pack_divisor_expr())
+
+    def _joined(*cols):
+        return (select(*cols).select_from(FinishedGoodsUnit)
+                .outerjoin(FinishedProduct, FinishedProduct.finished_product_id == FinishedGoodsUnit.finished_product_id))
+
+    units_total = db.execute(_joined(count_expr)).scalar() or 0
+    by_status = {k: v or 0 for k, v in db.execute(
+        _joined(FinishedGoodsUnit.status, count_expr).group_by(FinishedGoodsUnit.status)).all()}
+    by_type = {k: v or 0 for k, v in db.execute(
+        _joined(FinishedGoodsUnit.unit_type, count_expr).group_by(FinishedGoodsUnit.unit_type)).all()}
     units_stored = by_status.get("stored", 0)
     return {"locations": len(locs), "capacity_units": capacity,
             "units_total": units_total, "units_stored": units_stored,
@@ -155,10 +260,15 @@ def summary(db: Session) -> dict:
 
 
 def list_units(db: Session, status: str = None, unit_type: str = None,
-               product_name: str = None, lot_code: str = None) -> list:
-    """`product_name`/`lot_code` giới hạn về 1 lô cụ thể — BẮT BUỘC dùng khi cần liệt kê
-    từng đơn vị (VD trước khi xóa cả lô), vì không lọc có thể trả về hàng trăm ngàn dòng
-    (xem list_lot_summaries cho hiển thị tổng hợp không cần liệt kê từng dòng)."""
+               product_name: str = None, lot_code: str = None,
+               limit: int = 1000, offset: int = 0) -> list:
+    """`product_name`/`lot_code` giới hạn về 1 lô cụ thể — nên dùng khi cần liệt kê từng dòng
+    của 1 lô cụ thể (VD trước khi xóa cả lô). Có phân trang (limit/offset, mặc định 1000,
+    tối đa 5000) — dù redesign lô=1 dòng đã tự giảm mạnh số dòng/lô (xem
+    docs/WMS-LOT-LEVEL-REDESIGN.md), tổng số dòng TOÀN kho vẫn tăng dần theo số lô tích lũy
+    qua thời gian nên endpoint không lọc vẫn cần chặn không tải hết bảng."""
+    limit = max(1, min(limit or 1000, 5000))
+    offset = max(0, offset or 0)
     stmt = select(FinishedGoodsUnit).order_by(FinishedGoodsUnit.created_at)
     if status:
         stmt = stmt.where(FinishedGoodsUnit.status == status)
@@ -168,6 +278,7 @@ def list_units(db: Session, status: str = None, unit_type: str = None,
         stmt = stmt.where(FinishedGoodsUnit.product_name == product_name)
     if lot_code:
         stmt = stmt.where(FinishedGoodsUnit.lot_code == lot_code)
+    stmt = stmt.limit(limit).offset(offset)
     out = []
     loc_by = {l.loc_id: l for l in db.execute(select(WmsLocation)).scalars().all()}
     ship_to_by = {s.ship_to_id: s for s in db.execute(select(ShipToLocation)).scalars().all()}
@@ -192,36 +303,34 @@ def list_units(db: Session, status: str = None, unit_type: str = None,
 
 
 def _create_units(db: Session, payload: dict, created_by: str, actor: User) -> list[FinishedGoodsUnit]:
-    """Sinh N dòng vỉ/keg — không kiểm tra quyền, dùng nội bộ (vd approve_bottle tự động
-    nhập kho thành phẩm sau khi KCS duyệt chiết, không đi qua quyền warehouse.receive).
-    n = ceil(total / pack_size); dòng cuối lấy phần dư (có thể lẻ), các dòng trước đủ
-    pack_size."""
+    """Sinh 1 dòng LÔ duy nhất (quantity=total) — KHÔNG kiểm tra quyền, dùng nội bộ (vd
+    approve_bottle tự động nhập kho thành phẩm sau khi KCS duyệt chiết, không đi qua quyền
+    warehouse.receive). Trước đây sinh n=ceil(total/pack_size) dòng (1 dòng/vỉ) — 1 lô lớn
+    (VD ca_total=190.000 vỉ) tạo ra hàng trăm nghìn INSERT row-by-row, qua mạng tới SQL
+    Server mất ~1 giờ, Cloudflare cắt ở 100s → nút Duyệt "treo" (xem
+    docs/WMS-LOT-LEVEL-REDESIGN.md). Giờ luôn ĐÚNG 1 INSERT bất kể quy mô lô; `pack_size`
+    không còn dùng để tách dòng ở đây nữa, chỉ còn ý nghĩa ở tầng đọc (xem _pack_divisor) để
+    quy đổi ngược `quantity` (SL đơn vị nhỏ) ra số vỉ/keg hiển thị. Trả về list 1 phần tử để
+    giữ nguyên chữ ký cho các nơi gọi hiện có (vòng lặp `for u in units` tự động chỉ còn 1
+    lần — approve_bottle nhờ vậy cũng tự động chỉ còn 1 cạnh phả hệ thay vì vòng lặp)."""
     total = float(payload.get("total", 0) or 0)
-    pack_size = int(payload.get("pack_size", 1) or 1)
     unit_type = payload.get("unit_type") or "vi"
     if total <= 0:
         raise DomainError("Tổng số lượng phải > 0.")
-    n = max(1, -(-round(total) // pack_size))
     prefix = "KEG" if unit_type == "keg" else "VI"
     stamp = f"{utcnow():%y%m%d}-{new_id()[:4].upper()}"
-    remaining = total
-    created = []
-    for i in range(1, n + 1):
-        qty = pack_size if i < n else remaining - pack_size * (n - 1)
-        u = FinishedGoodsUnit(unit_id=new_id(), unit_code=f"{prefix}-{stamp}-{i:04d}", unit_type=unit_type,
-                              finished_product_id=payload.get("finished_product_id"),
-                              product_name=payload.get("product_name"), lot_code=payload.get("lot_code"),
-                              quantity=qty, status="stored", created_by=created_by, created_at=utcnow())
-        db.add(u)
-        created.append(u)
+    u = FinishedGoodsUnit(unit_id=new_id(), unit_code=f"{prefix}-{stamp}-0001", unit_type=unit_type,
+                         finished_product_id=payload.get("finished_product_id"),
+                         product_name=payload.get("product_name"), lot_code=payload.get("lot_code"),
+                         quantity=total, status="stored", created_by=created_by, created_at=utcnow())
+    db.add(u)
     db.flush()
-    record_audit(db, entity_type="finished_goods_unit", entity_id=created[0].unit_id, action="build", actor=actor,
-                 after={"count": n, "unit_type": unit_type, "total": total, "lot_code": payload.get("lot_code")},
+    record_audit(db, entity_type="finished_goods_unit", entity_id=u.unit_id, action="build", actor=actor,
+                 after={"unit_type": unit_type, "total": total, "lot_code": payload.get("lot_code")},
                  reason=payload.get("reason"))
     db.commit()
-    for u in created:
-        db.refresh(u)
-    return created
+    db.refresh(u)
+    return [u]
 
 
 def build_units(db: Session, payload: dict, user: User) -> list[FinishedGoodsUnit]:
@@ -275,16 +384,19 @@ def create_near_expiry_entry(db: Session, bottle_id: str, quantity: int, declare
         u.is_near_expiry = True
         genealogy.add_edge(db, from_type="bottle", from_id=bottle_id, to_type="finished_goods_unit",
                            to_id=u.unit_id, relation="nhập bia cận date", quantity=u.quantity, uom=u.unit_type)
+    # quantity (tham số hàm, số vỉ/keg khai báo) — KHÔNG dùng len(units): _create_units giờ
+    # luôn trả về 1 dòng/lô (xem docs/WMS-LOT-LEVEL-REDESIGN.md), len(units) không còn phản
+    # ánh đúng số vỉ/keg thật (trước đây 1 dòng=1 vỉ nên len(units) trùng khớp quantity).
     entry = NearExpiryEntry(entry_id=new_id(), direction="in", product_name=product_name, lot_code=lot_code,
-                            unit_type=unit_type, quantity=len(units), declared_at=declared_at,
+                            unit_type=unit_type, quantity=quantity, declared_at=declared_at,
                             bottle_id=bottle_id, note=note, created_by=user.username, created_at=utcnow(),
                             unit_codes=",".join(u.unit_code for u in units))
     db.add(entry)
     record_audit(db, entity_type="near_expiry_entry", entity_id=entry.entry_id, action="create", actor=user,
-                after={"bottle_code": b.bottle_code, "lot_code": lot_code, "count": len(units)})
+                after={"bottle_code": b.bottle_code, "lot_code": lot_code, "count": quantity})
     db.commit()
     return {"entry_id": entry.entry_id, "bottle_code": b.bottle_code, "product_name": product_name,
-            "lot_code": lot_code, "unit_type": unit_type, "count": len(units),
+            "lot_code": lot_code, "unit_type": unit_type, "count": quantity,
             "unit_codes": [u.unit_code for u in units]}
 
 
@@ -303,11 +415,12 @@ def list_near_expiry_entries(db: Session) -> list[dict]:
 
 
 def undo_near_expiry_entry(db: Session, entry_id: str, user: User) -> dict:
-    """Hoàn tác 1 bản khai "Nhập bia cận date" (direction="in"): xoá đúng các vỉ/keg do lần
-    khai báo đó tạo ra (theo unit_codes đã lưu lúc tạo) + gỡ cạnh genealogy liên quan, miễn
-    là các đơn vị đó vẫn còn "stored" (chưa xuất/phân rã/điều chuyển đi nơi khác — phân rã và
-    điều chuyển không đổi status nhưng phân rã xoá hẳn dòng gốc nên sẽ tự nhiên bị chặn ở
-    bước kiểm unit_codes vẫn còn đủ dưới đây)."""
+    """Hoàn tác 1 bản khai "Nhập bia cận date" (direction="in"): xoá đúng (các) dòng lô do lần
+    khai báo đó tạo ra (theo unit_codes đã lưu lúc tạo) + gỡ cạnh genealogy liên quan, miễn là
+    còn NGUYÊN VẸN — chưa bị xuất/phân rã/điều chuyển dù chỉ một phần. Dòng lô giờ có thể đại
+    diện nhiều vỉ/keg gộp lại (xem docs/WMS-LOT-LEVEL-REDESIGN.md) nên không thể chỉ kiểm
+    status=="stored" như trước (tiêu thụ MỘT PHẦN chỉ tách dòng, KHÔNG đổi status của phần
+    còn lại) — phải so tổng quantity còn lại với số vỉ/keg đã khai báo ban đầu (entry.quantity)."""
     require_perm(user, "warehouse.receive")
     entry = db.get(NearExpiryEntry, entry_id)
     if not entry:
@@ -322,10 +435,18 @@ def undo_near_expiry_entry(db: Session, entry_id: str, user: User) -> dict:
     units = db.execute(select(FinishedGoodsUnit).where(
         FinishedGoodsUnit.unit_code.in_(unit_codes))).scalars().all()
     if len(units) != len(unit_codes):
-        raise DomainError("Một số vỉ/keg của bản khai này đã bị xoá/phân rã ở nơi khác, không thể hoàn tác.")
+        raise DomainError("Một số dòng của bản khai này đã bị xoá/phân rã ở nơi khác, không thể hoàn tác.")
     not_stored = [u.unit_code for u in units if u.status != "stored"]
     if not_stored:
         raise DomainError(f"Vỉ/keg đã xuất hoặc không còn trong kho ({', '.join(not_stored)}), không thể hoàn tác.")
+    b = db.get(BottleRecord, entry.bottle_id) if entry.bottle_id else None
+    fp = db.get(FinishedProduct, b.finished_product_id) if b and b.finished_product_id else None
+    divisor = _pack_divisor(fp, entry.unit_type)
+    remaining_count = sum(u.quantity for u in units) / divisor
+    if remaining_count + 1e-6 < entry.quantity:
+        raise DomainError(
+            f"Đã có {entry.quantity - remaining_count:g} {entry.unit_type} rời khỏi lô này (xuất/phân rã/điều "
+            "chuyển một phần) — không thể hoàn tác nguyên vẹn.")
     unit_ids = [u.unit_id for u in units]
     edges = db.execute(select(GenealogyEdge).where(
         GenealogyEdge.from_type == "bottle", GenealogyEdge.from_id == entry.bottle_id,
@@ -336,9 +457,9 @@ def undo_near_expiry_entry(db: Session, entry_id: str, user: User) -> dict:
         db.delete(u)
     entry.reversed = True
     record_audit(db, entity_type="near_expiry_entry", entity_id=entry.entry_id, action="undo", actor=user,
-                before={"count": len(units)}, after={"reversed": True})
+                before={"count": entry.quantity}, after={"reversed": True})
     db.commit()
-    return {"entry_id": entry.entry_id, "removed": len(units)}
+    return {"entry_id": entry.entry_id, "removed": entry.quantity}
 
 
 def adjust_bottle_finish_stock(db: Session, *, finished_product_id: str | None, product_name: str,
@@ -362,11 +483,13 @@ def adjust_bottle_finish_stock(db: Session, *, finished_product_id: str | None, 
         for u in units:
             genealogy.add_edge(db, from_type="bottle", from_id=bottle_id, to_type="finished_goods_unit",
                                to_id=u.unit_id, relation="nhập kho (sửa SL)", quantity=u.quantity, uom=u.unit_type)
+        divisor = _pack_divisor(db.get(FinishedProduct, finished_product_id) if finished_product_id else None, unit_type)
+        created_count = delta_total / divisor
         record_audit(db, entity_type="finished_goods_unit", entity_id=units[0].unit_id, action="adjust_bottle_finish",
                      actor=actor, before={"bottle_id": bottle_id, "delta": delta_total},
-                     after={"created": len(units)})
+                     after={"created": created_count})
         db.commit()
-        return {"created": len(units), "removed": 0}
+        return {"created": created_count, "removed": 0}
 
     need = -delta_total
     candidates = db.execute(select(FinishedGoodsUnit).where(
@@ -399,18 +522,23 @@ def adjust_bottle_finish_stock(db: Session, *, finished_product_id: str | None, 
             GenealogyEdge.to_type == "finished_goods_unit", GenealogyEdge.to_id.in_(chunk))).scalars().all()
         for e in edges:
             db.delete(e)
+    divisor = _pack_divisor(db.get(FinishedProduct, finished_product_id) if finished_product_id else None, unit_type)
+    removed_count = need / divisor
     record_audit(db, entity_type="finished_goods_unit", entity_id=bottle_id, action="adjust_bottle_finish",
                  actor=actor, before={"bottle_id": bottle_id, "delta": delta_total},
-                 after={"removed_units": len(removed_ids), "removed_qty": need})
+                 after={"removed_units": removed_count, "removed_qty": need})
     db.commit()
-    return {"created": 0, "removed": len(removed_ids)}
+    return {"created": 0, "removed": removed_count}
 
 
-def _capacity_ok(db: Session, loc: WmsLocation, exclude_unit: str = None) -> bool:
-    used = db.execute(select(func.count(FinishedGoodsUnit.unit_id)).where(
-        FinishedGoodsUnit.location_id == loc.loc_id, FinishedGoodsUnit.status == "stored",
-        FinishedGoodsUnit.unit_id != (exclude_unit or ""))).scalar() or 0
-    return used < loc.capacity
+def _capacity_ok(db: Session, loc: WmsLocation, unit: FinishedGoodsUnit) -> bool:
+    """Còn đủ chỗ cho TOÀN BỘ số vỉ/keg/lon mà `unit` đại diện hay không (quy đổi qua
+    _pack_divisor — 1 dòng giờ có thể đại diện nhiều đơn vị đóng gói, không còn luôn là "1
+    chỗ" như trước, xem docs/WMS-LOT-LEVEL-REDESIGN.md)."""
+    fp = db.get(FinishedProduct, unit.finished_product_id) if unit.finished_product_id else None
+    own_count = unit.quantity / _pack_divisor(fp, unit.unit_type)
+    used = _location_used_count(db, loc.loc_id, exclude_unit_id=unit.unit_id)
+    return used + own_count <= loc.capacity
 
 
 def putaway(db: Session, unit_id: str, loc_id: str, user: User) -> dict:
@@ -423,7 +551,7 @@ def putaway(db: Session, unit_id: str, loc_id: str, user: User) -> dict:
     loc = db.get(WmsLocation, loc_id)
     if not loc:
         raise NotFoundError("Vị trí không tồn tại.")
-    if not _capacity_ok(db, loc, exclude_unit=unit_id):
+    if not _capacity_ok(db, loc, u):
         raise DomainError(f"Vị trí {loc.code} đã đầy (sức chứa {loc.capacity}).")
     before = {"location": u.location_id, "status": u.status}
     u.location_id = loc.loc_id
@@ -435,8 +563,10 @@ def putaway(db: Session, unit_id: str, loc_id: str, user: User) -> dict:
 
 
 def transfer_units(db: Session, unit_ids: list, to_loc_id: str, user: User) -> dict:
-    """Điều chuyển nội bộ: đổi vị trí hàng loạt cho các vỉ/keg/lon đang tồn kho —
-    vị trí nguồn giảm, vị trí đích tăng (không đổi tổng tồn toàn kho)."""
+    """Điều chuyển nội bộ theo unit_id cụ thể (khác relocate_batch — chọn theo số lượng, xem
+    đó): đổi vị trí cho các dòng lô chỉ định — vị trí nguồn giảm, vị trí đích tăng (không đổi
+    tổng tồn toàn kho). "moved" trả về là tổng số vỉ/keg/lon quy đổi (SUM(quantity)/pack_size
+    từng dòng), KHÔNG phải số dòng — 1 dòng giờ có thể đại diện nhiều đơn vị đóng gói."""
     require_perm(user, "warehouse.issue")
     if not unit_ids:
         raise DomainError("Phải chọn ít nhất 1 đơn vị để điều chuyển.")
@@ -453,52 +583,58 @@ def transfer_units(db: Session, unit_ids: list, to_loc_id: str, user: User) -> d
             raise DomainError(f"{u.unit_code} không ở trạng thái tồn kho (đã xuất/đã phân rã) — không thể điều chuyển.")
         units.append(u)
 
+    fp_cache: dict = {}
+    def _divisor_of(u):
+        if u.finished_product_id not in fp_cache:
+            fp_cache[u.finished_product_id] = db.get(FinishedProduct, u.finished_product_id) if u.finished_product_id else None
+        return _pack_divisor(fp_cache[u.finished_product_id], u.unit_type)
+
     moving_in = [u for u in units if u.location_id != to_loc_id]
     if moving_in:
-        used_at_dest = db.execute(select(func.count(FinishedGoodsUnit.unit_id)).where(
-            FinishedGoodsUnit.location_id == to_loc_id, FinishedGoodsUnit.status == "stored")).scalar() or 0
-        if used_at_dest + len(moving_in) > to_loc.capacity:
+        used_at_dest = _location_used_count(db, to_loc_id)
+        moving_in_count = sum(u.quantity / _divisor_of(u) for u in moving_in)
+        if used_at_dest + moving_in_count > to_loc.capacity:
             raise DomainError(f"Vị trí {to_loc.code} không đủ sức chứa (sức chứa {to_loc.capacity}, "
-                              f"hiện có {used_at_dest}, cần thêm {len(moving_in)}).")
+                              f"hiện có {used_at_dest:g}, cần thêm {moving_in_count:g}).")
 
     loc_by = {l.loc_id: l for l in db.execute(select(WmsLocation)).scalars().all()}
     from_codes = [loc_by[u.location_id].code if u.location_id in loc_by else None for u in units]
     unit_codes = [u.unit_code for u in units]
+    moved_count = sum(u.quantity / _divisor_of(u) for u in units)
     for u in units:
         u.location_id = to_loc_id
     record_audit(db, entity_type="finished_goods_unit", entity_id=new_id(), action="transfer", actor=user,
                  before={"unit_codes": unit_codes, "from_locations": from_codes},
                  after={"unit_codes": unit_codes, "to_location": to_loc.code})
     db.commit()
-    return {"moved": len(units), "to_location": to_loc.code, "unit_codes": unit_codes}
+    return {"moved": moved_count, "to_location": to_loc.code, "unit_codes": unit_codes}
 
 
 def _decompose_one_vi(db: Session, u: FinishedGoodsUnit, actor_username: str) -> list:
-    """Sinh các lon lẻ từ 1 vỉ (nội bộ, không audit/không commit — gọi trong 1 transaction
-    lớn hơn của decompose_unit/decompose_batch). Lon kế thừa created_at của vỉ gốc để FIFO
-    tính đúng theo tuổi bia thật. Đánh dấu vỉ gốc status="decomposed" (không xóa, giữ để
-    truy vết genealogy/audit, loại khỏi mọi truy vấn tồn khả dụng)."""
-    count = max(1, round(u.quantity))
+    """Sinh 1 dòng LON từ 1 dòng VỈ (nội bộ, không audit/không commit — gọi trong transaction
+    lớn hơn của decompose_unit/decompose_batch). quantity vốn đã tính theo SL nhỏ nhất (lon)
+    ngay từ đầu (xem docs/WMS-LOT-LEVEL-REDESIGN.md) nên dòng lon KẾ THỪA NGUYÊN quantity của
+    dòng vỉ nguồn — phân rã không đổi tổng số lon, chỉ đổi unit_type; không cần nhân/chia
+    pack_size ở đây (khác hẳn trước đây khi 1 dòng=1 vỉ, quantity=lon/vỉ, phải sinh
+    round(quantity) dòng lon riêng lẻ). Đánh dấu dòng vỉ gốc status="decomposed" (không xóa,
+    giữ để truy vết genealogy/audit, loại khỏi mọi truy vấn tồn khả dụng). Dòng lon kế thừa
+    created_at của dòng vỉ để FIFO tính đúng theo tuổi bia thật."""
     stamp = f"{utcnow():%y%m%d}-{new_id()[:4].upper()}"
-    lon_units = []
-    for i in range(1, count + 1):
-        lon = FinishedGoodsUnit(unit_id=new_id(), unit_code=f"LON-{stamp}-{i:04d}", unit_type="lon",
-                                finished_product_id=u.finished_product_id, product_name=u.product_name,
-                                lot_code=u.lot_code, quantity=1, status="stored", location_id=u.location_id,
-                                created_by=actor_username, created_at=u.created_at)
-        db.add(lon)
-        lon_units.append(lon)
+    lon = FinishedGoodsUnit(unit_id=new_id(), unit_code=f"LON-{stamp}-0001", unit_type="lon",
+                            finished_product_id=u.finished_product_id, product_name=u.product_name,
+                            lot_code=u.lot_code, quantity=u.quantity, status="stored", location_id=u.location_id,
+                            created_by=actor_username, created_at=u.created_at)
+    db.add(lon)
     db.flush()
     u.status = "decomposed"
-    for lon in lon_units:
-        genealogy.add_edge(db, from_type="finished_goods_unit", from_id=u.unit_id,
-                           to_type="finished_goods_unit", to_id=lon.unit_id, relation="phân rã",
-                           quantity=1, uom="lon")
-    return lon_units
+    genealogy.add_edge(db, from_type="finished_goods_unit", from_id=u.unit_id,
+                       to_type="finished_goods_unit", to_id=lon.unit_id, relation="phân rã",
+                       quantity=lon.quantity, uom="lon")
+    return [lon]
 
 
 def decompose_unit(db: Session, unit_id: str, user: User) -> dict:
-    """Phân rã 1 vỉ cụ thể (theo unit_id) thành các lon lẻ."""
+    """Phân rã 1 dòng vỉ cụ thể (theo unit_id) thành 1 dòng lon."""
     require_perm(user, "warehouse.issue")
     u = db.get(FinishedGoodsUnit, unit_id)
     if not u:
@@ -508,41 +644,47 @@ def decompose_unit(db: Session, unit_id: str, user: User) -> dict:
     if u.status != "stored":
         raise DomainError("Chỉ phân rã được vỉ đang tồn kho (chưa xuất/chưa phân rã).")
 
+    lon_qty = u.quantity
     lon_units = _decompose_one_vi(db, u, user.username)
     record_audit(db, entity_type="finished_goods_unit", entity_id=u.unit_id, action="decompose", actor=user,
                  before={"unit_code": u.unit_code, "quantity": u.quantity,
                          "product_name": u.product_name, "lot_code": u.lot_code},
-                 after={"lon_codes": [l.unit_code for l in lon_units], "count": len(lon_units)})
+                 after={"lon_codes": [l.unit_code for l in lon_units], "count": lon_qty})
     db.commit()
-    return {"source_unit_code": u.unit_code, "count": len(lon_units),
+    return {"source_unit_code": u.unit_code, "count": lon_qty,
             "lon_unit_codes": [l.unit_code for l in lon_units]}
 
 
 def decompose_batch(db: Session, product_name: str, lot_code: str, count: int, user: User) -> dict:
     """Phân rã N vỉ (cũ nhất trước — FIFO) của 1 sản phẩm/lô thành lon — dùng cho kho có
-    hàng trăm ngàn vỉ, không yêu cầu chọn từng vỉ một. Nếu tồn ít hơn N, phân rã hết số
-    hiện có (trả về đúng số đã xử lý để frontend báo nếu thiếu)."""
+    hàng trăm ngàn vỉ dồn vào rất ít dòng (xem docs/WMS-LOT-LEVEL-REDESIGN.md), không yêu
+    cầu chọn từng vỉ một. Nếu tồn ít hơn N, phân rã hết số hiện có (trả về đúng số đã xử lý
+    để frontend báo nếu thiếu)."""
     require_perm(user, "warehouse.issue")
     if count <= 0:
         raise DomainError("Số vỉ cần phân rã phải > 0.")
-    candidates = db.execute(select(FinishedGoodsUnit).where(
-        FinishedGoodsUnit.product_name == product_name, FinishedGoodsUnit.lot_code == lot_code,
-        FinishedGoodsUnit.unit_type == "vi", FinishedGoodsUnit.status == "stored"
-    ).order_by(FinishedGoodsUnit.created_at).limit(count)).scalars().all()
+    fp = db.execute(select(FinishedProduct).where(FinishedProduct.code == product_name)).scalar_one_or_none()
+    divisor = _pack_divisor(fp, "vi")
+    candidates, got = _consume_lot_rows(db, product_name=product_name, unit_type="vi", status="stored",
+                                        quantity_needed=count * divisor, lot_code=lot_code)
     if not candidates:
         raise DomainError("Không còn vỉ nào tồn kho cho sản phẩm/lô này.")
 
+    vi_decomposed = got / divisor
     source_unit_ids = [u.unit_id for u in candidates]
     lon_unit_ids = []
+    lon_created = 0.0
     for u in candidates:
-        lon_unit_ids += [lon.unit_id for lon in _decompose_one_vi(db, u, user.username)]
+        lons = _decompose_one_vi(db, u, user.username)
+        lon_unit_ids += [lon.unit_id for lon in lons]
+        lon_created += sum(lon.quantity for lon in lons)
 
     entry = record_audit(db, entity_type="finished_goods_unit", entity_id=new_id(), action="decompose_batch", actor=user,
                          before={"product_name": product_name, "lot_code": lot_code, "requested": count},
-                         after={"vi_decomposed": len(candidates), "lon_created": len(lon_unit_ids),
+                         after={"vi_decomposed": vi_decomposed, "lon_created": lon_created,
                                 "source_unit_ids": source_unit_ids, "lon_unit_ids": lon_unit_ids})
     db.commit()
-    return {"vi_decomposed": len(candidates), "lon_created": len(lon_unit_ids), "requested": count,
+    return {"vi_decomposed": vi_decomposed, "lon_created": lon_created, "requested": count,
             "audit_id": entry.audit_id}
 
 
@@ -568,8 +710,19 @@ def undo_decompose_batch(db: Session, audit_id: str, user: User) -> dict:
         raise DomainError("Lượt phân rã này thực hiện trước khi hỗ trợ hoàn tác — không thể hoàn tác.")
 
     lons = db.execute(select(FinishedGoodsUnit).where(FinishedGoodsUnit.unit_id.in_(lon_unit_ids))).scalars().all()
+    if len(lons) != len(lon_unit_ids):
+        raise DomainError("Một số lon từ lượt phân rã này đã bị xoá ở nơi khác — không thể hoàn tác.")
     if any(l.status != "stored" for l in lons):
         raise DomainError("Đã có lon xuất kho/sử dụng từ lượt phân rã này — không thể hoàn tác.")
+    # Tiêu thụ MỘT PHẦN (xuất/điều chuyển...) chỉ tách dòng, KHÔNG đổi status của phần còn
+    # lại (xem docs/WMS-LOT-LEVEL-REDESIGN.md) — phải so tổng quantity còn lại với
+    # lon_created đã ghi lúc phân rã mới phát hiện được, không thể chỉ dựa vào status/len.
+    recorded_lon_created = (entry.after or {}).get("lon_created")
+    current_lon_qty = sum(l.quantity for l in lons)
+    if recorded_lon_created is not None and current_lon_qty + 1e-6 < recorded_lon_created:
+        raise DomainError(
+            f"Đã có {recorded_lon_created - current_lon_qty:g} lon rời khỏi lượt phân rã này (xuất/điều chuyển "
+            "một phần) — không thể hoàn tác nguyên vẹn.")
 
     sources = db.execute(select(FinishedGoodsUnit).where(FinishedGoodsUnit.unit_id.in_(source_unit_ids))).scalars().all()
     edges = db.execute(select(GenealogyEdge).where(
@@ -582,13 +735,14 @@ def undo_decompose_batch(db: Session, audit_id: str, user: User) -> dict:
     for s in sources:
         s.status = "stored"
 
+    vi_restored = (entry.after or {}).get("vi_decomposed", len(sources))
     record_audit(db, entity_type="finished_goods_unit", entity_id=entry.entity_id, action="undo_decompose_batch",
                  actor=user, before={"decompose_audit_id": audit_id,
                                      "product_name": (entry.before or {}).get("product_name"),
                                      "lot_code": (entry.before or {}).get("lot_code")},
-                 after={"vi_restored": len(sources), "lon_removed": len(lons)})
+                 after={"vi_restored": vi_restored, "lon_removed": current_lon_qty})
     db.commit()
-    return {"vi_restored": len(sources), "lon_removed": len(lons)}
+    return {"vi_restored": vi_restored, "lon_removed": current_lon_qty}
 
 
 def free_issue_batch(db: Session, product_name: str, lot_code: str | None, unit_type: str,
@@ -604,25 +758,26 @@ def free_issue_batch(db: Session, product_name: str, lot_code: str | None, unit_
         raise DomainError("Phải nhập lý do xuất tự do.")
     if count <= 0:
         raise DomainError("Số lượng xuất phải > 0.")
-    candidates = db.execute(select(FinishedGoodsUnit).where(
-        FinishedGoodsUnit.product_name == product_name, FinishedGoodsUnit.lot_code == lot_code,
-        FinishedGoodsUnit.unit_type == unit_type, FinishedGoodsUnit.status == "stored"
-    ).order_by(FinishedGoodsUnit.created_at).limit(count)).scalars().all()
+    fp = db.execute(select(FinishedProduct).where(FinishedProduct.code == product_name)).scalar_one_or_none()
+    divisor = _pack_divisor(fp, unit_type)
+    candidates, got = _consume_lot_rows(db, product_name=product_name, unit_type=unit_type, status="stored",
+                                        quantity_needed=count * divisor, lot_code=lot_code)
     if not candidates:
         raise DomainError("Không còn đơn vị nào tồn kho cho sản phẩm/lô này.")
 
     for u in candidates:
         u.status = "issued_free"
     unit_ids = [u.unit_id for u in candidates]
+    issued_count = got / divisor
 
     entry = record_audit(db, entity_type="finished_goods_unit", entity_id=new_id(), action="free_issue_batch",
                          actor=user, before={"product_name": product_name, "lot_code": lot_code,
                                              "unit_type": unit_type, "requested": count},
-                         after={"issued": len(candidates), "unit_ids": unit_ids,
+                         after={"issued": issued_count, "unit_ids": unit_ids,
                                 "unit_codes": [u.unit_code for u in candidates]},
                          reason=reason)
     db.commit()
-    return {"issued": len(candidates), "requested": count, "audit_id": entry.audit_id}
+    return {"issued": issued_count, "requested": count, "audit_id": entry.audit_id}
 
 
 def undo_free_issue_batch(db: Session, audit_id: str, user: User) -> dict:
@@ -649,13 +804,14 @@ def undo_free_issue_batch(db: Session, audit_id: str, user: User) -> dict:
 
     for u in units:
         u.status = "stored"
+    restored_count = (entry.after or {}).get("issued", len(units))
     record_audit(db, entity_type="finished_goods_unit", entity_id=entry.entity_id, action="undo_free_issue_batch",
                  actor=user, before={"free_issue_audit_id": audit_id,
                                      "product_name": (entry.before or {}).get("product_name"),
                                      "lot_code": (entry.before or {}).get("lot_code")},
-                 after={"restored": len(units)})
+                 after={"restored": restored_count})
     db.commit()
-    return {"restored": len(units)}
+    return {"restored": restored_count}
 
 
 def list_free_issues(db: Session, limit: int = 200) -> list[dict]:
@@ -694,10 +850,15 @@ def list_lot_summaries(db: Session) -> list:
     {type}_locations: danh sách [{"code","name","count"}] các vị trí kho đang giữ loại đơn vị
     đó của lô này (1 lô/loại vẫn có thể nằm rải rác nhiều vị trí) — "(chưa cất vị trí)" tính
     riêng qua {type}_unplaced, không lẫn vào đây."""
+    # "count" = tổng vỉ/keg/lon quy đổi (SUM(quantity)/pack_size — qua _pack_divisor_expr,
+    # JOIN FinishedProduct), KHÔNG đếm dòng — 1 dòng giờ có thể đại diện nhiều đơn vị đóng
+    # gói (xem docs/WMS-LOT-LEVEL-REDESIGN.md). "qty" (tổng SL nhỏ) không đổi ý nghĩa.
     rows = db.execute(select(FinishedGoodsUnit.product_name, FinishedGoodsUnit.lot_code,
                              FinishedGoodsUnit.unit_type, FinishedGoodsUnit.location_id,
-                             func.count(FinishedGoodsUnit.unit_id),
+                             func.sum(FinishedGoodsUnit.quantity / _pack_divisor_expr()),
                              func.sum(FinishedGoodsUnit.quantity), func.min(FinishedGoodsUnit.created_at))
+                      .select_from(FinishedGoodsUnit)
+                      .outerjoin(FinishedProduct, FinishedProduct.finished_product_id == FinishedGoodsUnit.finished_product_id)
                       .where(FinishedGoodsUnit.status == "stored")
                       .group_by(FinishedGoodsUnit.product_name, FinishedGoodsUnit.lot_code,
                                FinishedGoodsUnit.unit_type, FinishedGoodsUnit.location_id)).all()
@@ -762,10 +923,14 @@ def lot_aging_report(db: Session, caution_days: float = 30.0, warning_days: floa
     từng đơn vị — 1 lô có thể có hàng trăm nghìn vỉ, xem list_lot_summaries). Ngưỡng cảnh báo
     (caution/warning/critical) lấy từ Cài đặt vận hành, mặc định 30/60/90 ngày."""
     buckets = [(critical_days, "critical"), (warning_days, "warning"), (caution_days, "caution")]
+    # "count" = tổng vỉ/keg/lon quy đổi (SUM(quantity)/pack_size), KHÔNG đếm dòng — xem
+    # docs/WMS-LOT-LEVEL-REDESIGN.md.
     rows = db.execute(select(FinishedGoodsUnit.product_name, FinishedGoodsUnit.lot_code,
                              FinishedGoodsUnit.unit_type, FinishedGoodsUnit.location_id,
-                             func.count(FinishedGoodsUnit.unit_id),
+                             func.sum(FinishedGoodsUnit.quantity / _pack_divisor_expr()),
                              func.sum(FinishedGoodsUnit.quantity), func.min(FinishedGoodsUnit.created_at))
+                      .select_from(FinishedGoodsUnit)
+                      .outerjoin(FinishedProduct, FinishedProduct.finished_product_id == FinishedGoodsUnit.finished_product_id)
                       .where(FinishedGoodsUnit.status == "stored")
                       .group_by(FinishedGoodsUnit.product_name, FinishedGoodsUnit.lot_code,
                                FinishedGoodsUnit.unit_type, FinishedGoodsUnit.location_id)).all()
@@ -811,11 +976,13 @@ def list_lot_summaries_by_location(db: Session, loc_id: str) -> list:
     GROUP BY ở SQL thay vì tải hết đơn vị toàn kho về rồi lọc/gộp bằng Python (kho có thể có
     hàng trăm ngàn đơn vị)."""
     rows = db.execute(select(FinishedGoodsUnit.product_name, FinishedGoodsUnit.lot_code,
-                             FinishedGoodsUnit.unit_type, func.count(FinishedGoodsUnit.unit_id))
+                             FinishedGoodsUnit.unit_type, func.sum(FinishedGoodsUnit.quantity / _pack_divisor_expr()))
+                      .select_from(FinishedGoodsUnit)
+                      .outerjoin(FinishedProduct, FinishedProduct.finished_product_id == FinishedGoodsUnit.finished_product_id)
                       .where(FinishedGoodsUnit.status == "stored", FinishedGoodsUnit.location_id == loc_id)
                       .group_by(FinishedGoodsUnit.product_name, FinishedGoodsUnit.lot_code,
                                FinishedGoodsUnit.unit_type)).all()
-    return [{"product_name": product_name, "lot_code": lot_code, "unit_type": unit_type, "count": count}
+    return [{"product_name": product_name, "lot_code": lot_code, "unit_type": unit_type, "count": count or 0}
             for product_name, lot_code, unit_type, count in rows]
 
 
@@ -900,20 +1067,15 @@ def create_shipment(db: Session, ship_to_id: str, lines: list, user: User, heade
             raise DomainError("Mỗi dòng phải có sản phẩm và loại đơn vị.")
         if qty <= 0:
             raise DomainError(f"Số lượng cần xuất cho {product_name} phải > 0.")
-        stmt = select(FinishedGoodsUnit).where(
-            FinishedGoodsUnit.product_name == product_name, FinishedGoodsUnit.unit_type == unit_type,
-            FinishedGoodsUnit.status == "stored")
-        if lot_code:
-            stmt = stmt.where(FinishedGoodsUnit.lot_code == lot_code)
-        if near_expiry_only:
-            stmt = stmt.where(FinishedGoodsUnit.is_near_expiry == True)  # noqa: E712
-        if picked_so_far:
-            stmt = stmt.where(FinishedGoodsUnit.unit_id.notin_(picked_so_far))
-        stmt = stmt.order_by(FinishedGoodsUnit.created_at).limit(qty)
-        candidates = db.execute(stmt).scalars().all()
-        if len(candidates) < qty:
+        fp = db.execute(select(FinishedProduct).where(FinishedProduct.code == product_name)).scalar_one_or_none()
+        divisor = _pack_divisor(fp, unit_type)
+        candidates, got = _consume_lot_rows(
+            db, product_name=product_name, unit_type=unit_type, status="stored",
+            quantity_needed=qty * divisor, lot_code=lot_code, exclude_ids=picked_so_far,
+            near_expiry_only=near_expiry_only)
+        if got + 1e-9 < qty * divisor:
             near_expiry_note = " (bia cận date)" if near_expiry_only else ""
-            raise DomainError(f"{product_name} {lot_code or ''}{near_expiry_note}: chỉ còn {len(candidates)} "
+            raise DomainError(f"{product_name} {lot_code or ''}{near_expiry_note}: chỉ còn {got / divisor:g} "
                               f"đơn vị tồn kho, không đủ {qty} yêu cầu.")
         units.extend(candidates)
         picked_so_far.update(u.unit_id for u in candidates)
@@ -949,7 +1111,14 @@ def create_shipment(db: Session, ship_to_id: str, lines: list, user: User, heade
     db.flush()
 
     out_lines = []
-    near_expiry_groups: dict[tuple, int] = {}
+    near_expiry_groups: dict[tuple, float] = {}
+    fp_cache: dict = {}
+
+    def _divisor_of(u):
+        if u.finished_product_id not in fp_cache:
+            fp_cache[u.finished_product_id] = db.get(FinishedProduct, u.finished_product_id) if u.finished_product_id else None
+        return _pack_divisor(fp_cache[u.finished_product_id], u.unit_type)
+
     for u in units:
         u.status = "shipped"
         u.location_id = None
@@ -960,8 +1129,10 @@ def create_shipment(db: Session, ship_to_id: str, lines: list, user: User, heade
                            to_id=ship_to_id, relation="xuất kho", quantity=u.quantity, uom=u.unit_type)
         out_lines.append({"unit_code": u.unit_code, "product": u.product_name, "lot_code": u.lot_code})
         if u.is_near_expiry:
+            # Đếm theo SL vỉ/keg/lon quy đổi (quantity/pack_size), KHÔNG +1 mỗi dòng — 1 dòng
+            # giờ có thể đại diện nhiều đơn vị đóng gói (xem docs/WMS-LOT-LEVEL-REDESIGN.md).
             key = (u.product_name, u.lot_code, u.unit_type)
-            near_expiry_groups[key] = near_expiry_groups.get(key, 0) + 1
+            near_expiry_groups[key] = near_expiry_groups.get(key, 0) + u.quantity / _divisor_of(u)
 
     # Xuất kho có bao gồm bia cận date — tự động ghi thêm dòng "xuất" vào lịch sử riêng
     # (tách khỏi lịch sử xuất kho thông thường) để tra cứu vòng đời bia cận date đầy đủ.
@@ -981,19 +1152,29 @@ def create_shipment(db: Session, ship_to_id: str, lines: list, user: User, heade
 def list_shipments(db: Session) -> list:
     ships = db.execute(select(Shipment).order_by(Shipment.created_at.desc())).scalars().all()
     ship_to_by = {s.ship_to_id: s for s in db.execute(select(ShipToLocation)).scalars().all()}
+    fp_cache: dict = {}
+
+    def _divisor_of(u):
+        if u.finished_product_id not in fp_cache:
+            fp_cache[u.finished_product_id] = db.get(FinishedProduct, u.finished_product_id) if u.finished_product_id else None
+        return _pack_divisor(fp_cache[u.finished_product_id], u.unit_type)
+
     out = []
     for s in ships:
         units = db.execute(select(FinishedGoodsUnit).where(
             FinishedGoodsUnit.shipment_id == s.shipment_id)).scalars().all()
         # Gom nhóm theo (product, lot_code, unit_type) để in phiếu — thay cho bảng dòng riêng.
+        # "count" = số vỉ/keg/lon quy đổi (quantity/pack_size), KHÔNG đếm dòng (1 dòng giờ có
+        # thể đại diện nhiều đơn vị đóng gói, xem docs/WMS-LOT-LEVEL-REDESIGN.md).
         grouped: dict[tuple, dict] = {}
         for u in units:
             key = (u.product_name, u.lot_code, u.unit_type)
             g = grouped.setdefault(key, {"product": u.product_name, "lot_code": u.lot_code,
-                                         "unit_type": u.unit_type, "count": 0, "quantity": 0.0})
-            g["count"] += 1
+                                         "unit_type": u.unit_type, "count": 0.0, "quantity": 0.0})
+            g["count"] += u.quantity / _divisor_of(u)
             g["quantity"] += u.quantity
         ship_to = ship_to_by.get(s.ship_to_id)
+        unit_count = sum(g["count"] for g in grouped.values())
         out.append({"shipment_id": s.shipment_id, "shipment_code": s.shipment_code,
                     "ship_to_code": ship_to.code if ship_to else None,
                     "ship_to_name": ship_to.name if ship_to else None,
@@ -1003,7 +1184,7 @@ def list_shipments(db: Session) -> list:
                     "note": s.note, "recipient_name": s.recipient_name, "recipient_dept": s.recipient_dept,
                     "driver_name": s.driver_name, "vehicle_plate": s.vehicle_plate,
                     "from_location": s.from_location, "delivery_place": s.delivery_place,
-                    "unit_count": len(units), "lines": list(grouped.values())})
+                    "unit_count": unit_count, "lines": list(grouped.values())})
     return out
 
 
@@ -1022,6 +1203,14 @@ def undo_shipment(db: Session, shipment_id: str, user: User) -> dict:
     if not units:
         raise DomainError("Phiếu này không còn đơn vị nào để hoàn tác (có thể đã hoàn tác trước đó).")
     unit_ids = [u.unit_id for u in units]
+    fp_cache: dict = {}
+
+    def _divisor_of(u):
+        if u.finished_product_id not in fp_cache:
+            fp_cache[u.finished_product_id] = db.get(FinishedProduct, u.finished_product_id) if u.finished_product_id else None
+        return _pack_divisor(fp_cache[u.finished_product_id], u.unit_type)
+
+    restored_count = sum(u.quantity / _divisor_of(u) for u in units)
     for u in units:
         u.status = "stored"
         u.shipped_at = None
@@ -1033,9 +1222,9 @@ def undo_shipment(db: Session, shipment_id: str, user: User) -> dict:
     for e in edges:
         db.delete(e)
     record_audit(db, entity_type="shipment", entity_id=shipment_id, action="undo", actor=user,
-                 before={"unit_count": len(units)}, after={"restored": len(units)})
+                 before={"unit_count": restored_count}, after={"restored": restored_count})
     db.commit()
-    return {"shipment_id": shipment_id, "restored": len(units)}
+    return {"shipment_id": shipment_id, "restored": restored_count}
 
 
 def delete_unit(db: Session, unit_id: str, user: User) -> None:
@@ -1110,13 +1299,25 @@ def resolve(db: Session, code: str) -> dict:
     còn tra theo unit_code (mã nội bộ từng dòng) để tương thích các tem cũ đã in trước đây."""
     lot_units = db.execute(select(FinishedGoodsUnit).where(FinishedGoodsUnit.lot_code == code)).scalars().all()
     if lot_units:
-        by_status = {}
-        by_type = {}
+        # Đếm theo SL vỉ/keg/lon quy đổi (quantity/pack_size), KHÔNG đếm dòng — xem
+        # docs/WMS-LOT-LEVEL-REDESIGN.md. fp_cache tránh tra FinishedProduct lặp lại nhiều lần.
+        fp_cache: dict = {}
+
+        def _divisor_of(u):
+            if u.finished_product_id not in fp_cache:
+                fp_cache[u.finished_product_id] = db.get(FinishedProduct, u.finished_product_id) if u.finished_product_id else None
+            return _pack_divisor(fp_cache[u.finished_product_id], u.unit_type)
+
+        by_status: dict = {}
+        by_type: dict = {}
+        unit_count = 0.0
         for u in lot_units:
-            by_status[u.status] = by_status.get(u.status, 0) + 1
-            by_type[u.unit_type] = by_type.get(u.unit_type, 0) + 1
+            n = u.quantity / _divisor_of(u)
+            by_status[u.status] = by_status.get(u.status, 0) + n
+            by_type[u.unit_type] = by_type.get(u.unit_type, 0) + n
+            unit_count += n
         return {"type": "lot", "lot_code": code, "product": lot_units[0].product_name,
-                "unit_count": len(lot_units), "by_status": by_status, "by_type": by_type}
+                "unit_count": unit_count, "by_status": by_status, "by_type": by_type}
     u = db.execute(select(FinishedGoodsUnit).where(FinishedGoodsUnit.unit_code == code)).scalar_one_or_none()
     if u:
         loc = db.get(WmsLocation, u.location_id) if u.location_id else None
@@ -1130,7 +1331,9 @@ def relocate_batch(db: Session, product_name: str, lot_code: str, unit_type: str
                    from_loc_id: str | None, to_loc_id: str, count: int, user: User) -> dict:
     """Gán/chuyển vị trí cho N đơn vị (cũ nhất trước) của 1 sản phẩm/lô/loại — dùng cho
     "Cất" hàng loạt (from_loc_id=None: đơn vị chưa có vị trí) hoặc điều chuyển hàng loạt
-    theo số lượng thay vì phải chọn từng đơn vị (phù hợp kho có hàng trăm ngàn vỉ)."""
+    theo số lượng thay vì phải chọn từng đơn vị. Dòng lô có thể đại diện hàng trăm nghìn
+    vỉ/keg gộp lại (xem docs/WMS-LOT-LEVEL-REDESIGN.md) nên tiêu thụ qua _consume_lot_rows
+    (tách dòng khi chỉ chuyển MỘT PHẦN của 1 dòng lớn), không còn chọn nguyên dòng như trước."""
     require_perm(user, "warehouse.issue")
     if count <= 0:
         raise DomainError("Số lượng phải > 0.")
@@ -1138,21 +1341,22 @@ def relocate_batch(db: Session, product_name: str, lot_code: str, unit_type: str
     if not to_loc:
         raise NotFoundError("Vị trí đích không tồn tại.")
 
-    where_loc = FinishedGoodsUnit.location_id.is_(None) if not from_loc_id else FinishedGoodsUnit.location_id == from_loc_id
-    candidates = db.execute(select(FinishedGoodsUnit).where(
-        FinishedGoodsUnit.product_name == product_name, FinishedGoodsUnit.lot_code == lot_code,
-        FinishedGoodsUnit.unit_type == unit_type, FinishedGoodsUnit.status == "stored", where_loc
-    ).order_by(FinishedGoodsUnit.created_at).limit(count)).scalars().all()
+    fp = db.execute(select(FinishedProduct).where(FinishedProduct.code == product_name)).scalar_one_or_none()
+    divisor = _pack_divisor(fp, unit_type)
+    candidates, got = _consume_lot_rows(db, product_name=product_name, unit_type=unit_type, status="stored",
+                                        quantity_needed=count * divisor, lot_code=lot_code,
+                                        location_id=from_loc_id)
     if not candidates:
         raise DomainError("Không còn đơn vị nào phù hợp để xử lý.")
+    moved_count = got / divisor
 
     moving_in = [u for u in candidates if u.location_id != to_loc_id]
     if moving_in:
-        used_at_dest = db.execute(select(func.count(FinishedGoodsUnit.unit_id)).where(
-            FinishedGoodsUnit.location_id == to_loc_id, FinishedGoodsUnit.status == "stored")).scalar() or 0
-        if used_at_dest + len(moving_in) > to_loc.capacity:
+        used_at_dest = _location_used_count(db, to_loc_id)
+        moving_in_count = sum(u.quantity for u in moving_in) / divisor
+        if used_at_dest + moving_in_count > to_loc.capacity:
             raise DomainError(f"Vị trí {to_loc.code} không đủ sức chứa (sức chứa {to_loc.capacity}, "
-                              f"hiện có {used_at_dest}, cần thêm {len(moving_in)}).")
+                              f"hiện có {used_at_dest:g}, cần thêm {moving_in_count:g}).")
 
     from_loc = db.get(WmsLocation, from_loc_id) if from_loc_id else None
     for u in candidates:
@@ -1160,6 +1364,6 @@ def relocate_batch(db: Session, product_name: str, lot_code: str, unit_type: str
     record_audit(db, entity_type="finished_goods_unit", entity_id=new_id(), action="relocate_batch", actor=user,
                  before={"product_name": product_name, "lot_code": lot_code, "unit_type": unit_type, "requested": count,
                          "from_location": from_loc.code if from_loc else None},
-                 after={"moved": len(candidates), "to_location": to_loc.code})
+                 after={"moved": moved_count, "to_location": to_loc.code})
     db.commit()
-    return {"moved": len(candidates), "to_location": to_loc.code, "requested": count}
+    return {"moved": moved_count, "to_location": to_loc.code, "requested": count}

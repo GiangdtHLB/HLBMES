@@ -13,16 +13,23 @@ services/wms.py nơi add_edge() được gọi tại từng bước) — nhờ �
 
 from typing import Optional
 
-from sqlalchemy import and_, delete, func, or_, select
+from sqlalchemy import and_, case, delete, func, or_, select
 from sqlalchemy.orm import Session
 
 from ..common import new_id, utcnow
 from ..models.batches import BatchExecution
 from ..models.brewing import BottleRecord, BrewBatch, BrewRecord, FermentRecord, FilterRecord
-from ..models.master import Material
+from ..models.master import FinishedProduct, Material
 from ..models.materials import GenealogyEdge, MaterialLot
 from ..models.wms import FinishedGoodsUnit, ShipToLocation, Shipment
 from . import qc_catalog
+
+# Trùng với services/wms.py::_pack_divisor_expr (không import trực tiếp — wms.py đã import
+# genealogy, import ngược lại sẽ tạo vòng lặp). Quy đổi quantity (SL nhỏ lưu trên dòng) ra số
+# vỉ/keg/lon vật lý: vi chia pack_size (Danh mục Sản phẩm); không có SKU khai báo -> mặc định
+# 1 (KHÔNG đoán 24 — xem lý do ở wms.py::_pack_divisor), keg/lon giữ nguyên.
+_PACK_DIVISOR_EXPR = case(
+    (FinishedGoodsUnit.unit_type == "vi", func.coalesce(func.nullif(FinishedProduct.pack_size, 0), 1)), else_=1)
 
 # node_type -> (Model, tên cột khóa chính, tên cột mã hiển thị) — dùng để LABEL 1 node đã biết
 # type+id (an toàn, tra theo khóa chính, xem _label) VÀ để tra cứu theo mã ở find_node (CHỈ
@@ -227,11 +234,15 @@ def _bottle_forward_groups(db: Session, bottle_id: str) -> list[dict]:
     trăm nghìn lần). Gộp theo (unit_type, status, shipment_id) — mỗi phiếu xuất/mỗi trạng thái
     tồn ra ĐÚNG 1 dòng, kèm ngay thông tin nơi xuất đến/lái xe/ngày giờ/loại xuất qua JOIN
     Shipment + ShipToLocation (không cần đệ quy thêm 1 tầng vào "ship_to")."""
+    # "count" = tổng vỉ/keg/lon quy đổi (SUM(quantity)/pack_size qua _PACK_DIVISOR_EXPR),
+    # KHÔNG đếm dòng — 1 dòng giờ có thể đại diện nhiều đơn vị đóng gói đã gộp lại (xem
+    # docs/WMS-LOT-LEVEL-REDESIGN.md).
     rows = db.execute(
         select(FinishedGoodsUnit.unit_type, FinishedGoodsUnit.status, FinishedGoodsUnit.shipment_id,
-               func.count(FinishedGoodsUnit.unit_id), func.sum(FinishedGoodsUnit.quantity))
+               func.sum(FinishedGoodsUnit.quantity / _PACK_DIVISOR_EXPR), func.sum(FinishedGoodsUnit.quantity))
         .join(GenealogyEdge, and_(GenealogyEdge.to_type == "finished_goods_unit",
                                   GenealogyEdge.to_id == FinishedGoodsUnit.unit_id))
+        .outerjoin(FinishedProduct, FinishedProduct.finished_product_id == FinishedGoodsUnit.finished_product_id)
         .where(GenealogyEdge.from_type == "bottle", GenealogyEdge.from_id == bottle_id)
         .group_by(FinishedGoodsUnit.unit_type, FinishedGoodsUnit.status, FinishedGoodsUnit.shipment_id)
     ).all()
@@ -259,7 +270,7 @@ def _bottle_forward_groups(db: Session, bottle_id: str) -> list[dict]:
         }
         if shp:
             node.update({
-                "code": f"{count} {ut} → {st.code if st else '?'} ({shp.shipment_code})",
+                "code": f"{count:g} {ut} → {st.code if st else '?'} ({shp.shipment_code})",
                 "shipment_code": shp.shipment_code, "shipment_type": shp.shipment_type,
                 "shipped_at": shp.created_at.isoformat() if shp.created_at else None,
                 "driver_name": shp.driver_name, "vehicle_plate": shp.vehicle_plate,
@@ -267,7 +278,7 @@ def _bottle_forward_groups(db: Session, bottle_id: str) -> list[dict]:
                 "ship_to_code": st.code if st else None, "ship_to_name": st.name if st else None,
             })
         else:
-            node["code"] = f"{count} {ut} {status_label.get(status, status)}"
+            node["code"] = f"{count:g} {ut} {status_label.get(status, status)}"
         out.append(node)
     return out
 

@@ -103,8 +103,9 @@ def vehicle_delete(vehicle_id: str, db: Session = Depends(get_db), user: User = 
 
 @router.get("/units")
 def units(status: str = None, unit_type: str = None, product: str = None, lot_code: str = None,
+          limit: int = 1000, offset: int = 0,
           db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    return svc.list_units(db, status, unit_type, product, lot_code)
+    return svc.list_units(db, status, unit_type, product, lot_code, limit, offset)
 
 
 @router.get("/units/by-location")
@@ -122,7 +123,13 @@ def delete_units_by_lot(payload: DeleteByLotIn, db: Session = Depends(get_db),
 def build_units(payload: UnitBuildIn, db: Session = Depends(get_db),
                 user: User = Depends(get_current_user)):
     created = svc.build_units(db, payload.model_dump(), user)
-    return {"count": len(created), "unit_codes": [u.unit_code for u in created]}
+    # count = số vỉ/keg thật (total/pack_size cho "vi"; keg/lon luôn 1 đơn vị = 1 quantity) —
+    # dùng pack_size TỪ PAYLOAD (biết chính xác lúc tạo), KHÔNG dùng len(created) vì
+    # _create_units giờ luôn trả về đúng 1 dòng/lô bất kể total lớn cỡ nào (xem
+    # docs/WMS-LOT-LEVEL-REDESIGN.md).
+    divisor = payload.pack_size if payload.unit_type == "vi" and payload.pack_size else 1
+    count = payload.total / divisor
+    return {"count": count, "unit_codes": [u.unit_code for u in created]}
 
 
 @router.post("/units/{unit_id}/putaway")

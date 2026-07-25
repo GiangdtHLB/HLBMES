@@ -20,6 +20,7 @@ from app import seed as seed_mod
 from app.database import SessionLocal
 from app.common import new_id, utcnow
 from app.models.wms import FinishedGoodsUnit, WmsLocation
+from app.models.master import FinishedProduct
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -52,13 +53,21 @@ def test_inventory_aging_reports_age_days_and_bucket(client, admin_h):
         db.flush()
 
         product_name = f"AGING-TEST-{new_id()[:8]}"
+        # Đăng ký danh mục SKU (pack_size=24) — cần thiết để _pack_divisor tra đúng, không
+        # có SKU sẽ mặc định 1 và "count" (số vỉ) bị lệch thành quantity thô (24 thay vì 1).
+        fp = FinishedProduct(finished_product_id=new_id(), code=product_name, name=product_name,
+                             uom="lon", unit_type="vi", pack_size=24)
+        db.add(fp)
+        db.flush()
         now = utcnow()
         old_unit = FinishedGoodsUnit(unit_id=new_id(), unit_code=f"VI-AGE-OLD-{new_id()[:6]}",
-                                     unit_type="vi", product_name=product_name, lot_code="LOT-AGE-OLD",
+                                     unit_type="vi", finished_product_id=fp.finished_product_id,
+                                     product_name=product_name, lot_code="LOT-AGE-OLD",
                                      quantity=24, status="stored", location_id=loc.loc_id,
                                      created_by="admin", created_at=now - timedelta(days=95))
         new_unit = FinishedGoodsUnit(unit_id=new_id(), unit_code=f"VI-AGE-NEW-{new_id()[:6]}",
-                                     unit_type="vi", product_name=product_name, lot_code="LOT-AGE-NEW",
+                                     unit_type="vi", finished_product_id=fp.finished_product_id,
+                                     product_name=product_name, lot_code="LOT-AGE-NEW",
                                      quantity=24, status="stored", location_id=None,
                                      created_by="admin", created_at=now - timedelta(days=5))
         db.add_all([old_unit, new_unit])

@@ -69,15 +69,24 @@ def _a_ship_to(client, admin_h, code, name="NPP test"):
 
 
 def _a_units(client, admin_h, product, lot_code, count):
-    """Sinh `count` unit độc lập (pack_size=1 -> mỗi lần gọi tương ứng đúng `count` dòng),
-    trả về list unit_id theo thứ tự tạo (cũ nhất trước)."""
+    """Sinh 1 dòng LÔ (product, lot_code) với quantity=`count` (pack_size=1 nên quantity =
+    số vỉ luôn) — dưới mô hình mới (docs/WMS-LOT-LEVEL-REDESIGN.md) build_units chỉ sinh
+    ĐÚNG 1 dòng/lô bất kể count lớn cỡ nào (không còn N dòng độc lập như trước). Trả về
+    unit_id của dòng đó."""
     build = client.post("/api/wms/units", headers=admin_h,
                         json={"product_name": product, "lot_code": lot_code, "total": count, "pack_size": 1})
     assert build.status_code == 201, build.text
-    codes = build.json()["unit_codes"]
+    assert len(build.json()["unit_codes"]) == 1
+    code = build.json()["unit_codes"][0]
     units = client.get("/api/wms/units", headers=admin_h).json()
-    by_code = {u["unit_code"]: u["unit_id"] for u in units}
-    return [by_code[c] for c in codes]
+    return next(u["unit_id"] for u in units if u["unit_code"] == code)
+
+
+def _lot_units(client, admin_h, product, lot_code):
+    """Mọi dòng hiện có của (product, lot_code) — có thể >1 dòng nếu đã bị TÁCH do xuất/điều
+    chuyển MỘT PHẦN (xem services/wms.py::_consume_lot_rows)."""
+    units = client.get("/api/wms/units", headers=admin_h).json()
+    return [u for u in units if u["product"] == product and u["lot_code"] == lot_code]
 
 
 def _declare_pending(client, headers, stage, scope_type, scope_id, product_id=None):
@@ -130,7 +139,7 @@ def test_create_shipment_requires_ship_to_and_units(client, admin_h):
 
 def test_shipment_marks_units_shipped(client, admin_h):
     ship_to_id = _a_ship_to(client, admin_h, "DIST-FULL", "NPP Full")
-    unit_ids = _a_units(client, admin_h, "FULL-SKU", "LOT-FULL", 10)
+    _a_units(client, admin_h, "FULL-SKU", "LOT-FULL", 10)
 
     shipped = client.post("/api/wms/shipments", headers=admin_h,
                           json={"ship_to_id": ship_to_id,
@@ -140,12 +149,13 @@ def test_shipment_marks_units_shipped(client, admin_h):
     assert shipped.json()["ship_to_code"] == "DIST-FULL"
     assert shipped.json()["fifo_ok"] is True  # duy nhất 1 lô của SP này -> luôn đúng FIFO
 
-    units = client.get("/api/wms/units", headers=admin_h).json()
-    for uid in unit_ids:
-        row = next(u for u in units if u["unit_id"] == uid)
-        assert row["status"] == "shipped"
-        assert row["shipped_at"] is not None
-        assert row["ship_to_code"] == "DIST-FULL"
+    # Xuất HẾT (10/10) -> dòng gốc chuyển thẳng "shipped" (không tách dòng — chỉ tách khi xuất
+    # MỘT PHẦN, xem docs/WMS-LOT-LEVEL-REDESIGN.md).
+    rows = _lot_units(client, admin_h, "FULL-SKU", "LOT-FULL")
+    assert len(rows) == 1
+    assert rows[0]["status"] == "shipped"
+    assert rows[0]["shipped_at"] is not None
+    assert rows[0]["ship_to_code"] == "DIST-FULL"
 
     # Xuất lại (đã hết tồn) phải báo lỗi.
     twice = client.post("/api/wms/shipments", headers=admin_h,
@@ -157,7 +167,7 @@ def test_shipment_marks_units_shipped(client, admin_h):
 
 def test_partial_shipment_keeps_remaining_units_stored(client, admin_h):
     ship_to_id = _a_ship_to(client, admin_h, "DIST-PARTIAL", "NPP Partial")
-    unit_ids = _a_units(client, admin_h, "PARTIAL-SKU", "LOT-PARTIAL", 10)
+    _a_units(client, admin_h, "PARTIAL-SKU", "LOT-PARTIAL", 10)
 
     shipped = client.post("/api/wms/shipments", headers=admin_h,
                           json={"ship_to_id": ship_to_id,
@@ -166,17 +176,19 @@ def test_partial_shipment_keeps_remaining_units_stored(client, admin_h):
     assert shipped.status_code == 201, shipped.text
     assert shipped.json()["fifo_ok"] is True
 
-    units = client.get("/api/wms/units", headers=admin_h).json()
-    for uid in unit_ids[:4]:
-        assert next(u for u in units if u["unit_id"] == uid)["status"] == "shipped"
-    for uid in unit_ids[4:]:
-        row = next(u for u in units if u["unit_id"] == uid)
-        assert row["status"] != "shipped"
-        assert row["shipped_at"] is None
-        assert row["ship_to_code"] is None
+    # Xuất MỘT PHẦN (4/10) -> dòng gốc bị TÁCH: 1 dòng mới "shipped" (quantity=4) + dòng gốc
+    # co lại còn "stored" (quantity=6) — không còn N dòng độc lập như trước.
+    rows = _lot_units(client, admin_h, "PARTIAL-SKU", "LOT-PARTIAL")
+    shipped_rows = [r for r in rows if r["status"] == "shipped"]
+    stored_rows = [r for r in rows if r["status"] != "shipped"]
+    assert sum(r["quantity"] for r in shipped_rows) == 4
+    assert sum(r["quantity"] for r in stored_rows) == 6
+    for r in stored_rows:
+        assert r["shipped_at"] is None
+        assert r["ship_to_code"] is None
 
     # Vẫn tra được nơi xuất đến qua Truy xuôi cho unit đã xuất (lịch sử nằm ở genealogy edge).
-    shipped_unit_code = next(u for u in units if u["unit_id"] == unit_ids[0])["unit_code"]
+    shipped_unit_code = shipped_rows[0]["unit_code"]
     fwd = client.get(f"/api/trace/forward?code={shipped_unit_code}", headers=admin_h)
     assert fwd.status_code == 200, fwd.text
     codes = {c["code"] for c in fwd.json().get("children", [])}
@@ -185,8 +197,8 @@ def test_partial_shipment_keeps_remaining_units_stored(client, admin_h):
 
 def test_shipment_with_multiple_lot_units(client, admin_h):
     ship_to_id = _a_ship_to(client, admin_h, "DIST-MULTI", "NPP Multi")
-    units_a = _a_units(client, admin_h, "MULTI-SKU", "LOT-A", 10)
-    units_b = _a_units(client, admin_h, "MULTI-SKU", "LOT-B", 10)
+    _a_units(client, admin_h, "MULTI-SKU", "LOT-A", 10)
+    _a_units(client, admin_h, "MULTI-SKU", "LOT-B", 10)
 
     shipped = client.post("/api/wms/shipments", headers=admin_h,
                           json={"ship_to_id": ship_to_id,
@@ -195,16 +207,14 @@ def test_shipment_with_multiple_lot_units(client, admin_h):
                                          {"product_name": "MULTI-SKU", "lot_code": "LOT-B",
                                           "unit_type": "vi", "quantity": 3}]})
     assert shipped.status_code == 201, shipped.text
-    assert len(shipped.json()["units"]) == 9
-    # Lô A (cũ hơn) vẫn còn dư 4 unit sau phiếu này trong khi lô B (mới hơn) cũng bị lấy
+    # Lô A (cũ hơn) vẫn còn dư 4 vỉ sau phiếu này trong khi lô B (mới hơn) cũng bị lấy
     # -> vi phạm thứ tự FIFO dù chính A cũng có trong phiếu.
     assert shipped.json()["fifo_ok"] is False
 
-    units = client.get("/api/wms/units", headers=admin_h).json()
-    stored_a = [u for u in units if u["unit_id"] in units_a and u["status"] != "shipped"]
-    stored_b = [u for u in units if u["unit_id"] in units_b and u["status"] != "shipped"]
-    assert len(stored_a) == 4
-    assert len(stored_b) == 7
+    rows_a = _lot_units(client, admin_h, "MULTI-SKU", "LOT-A")
+    rows_b = _lot_units(client, admin_h, "MULTI-SKU", "LOT-B")
+    assert sum(r["quantity"] for r in rows_a if r["status"] != "shipped") == 4
+    assert sum(r["quantity"] for r in rows_b if r["status"] != "shipped") == 7
 
     history = client.get("/api/wms/shipments", headers=admin_h).json()
     ship = next(s for s in history if s["ship_to_code"] == "DIST-MULTI")
@@ -281,13 +291,14 @@ def test_approve_bottle_uses_finished_product_pack_size(client, admin_h, vanhanh
     _declare_pending(client, admin_h, "thanh_pham", "bottle", f"{bottle_code}__thanh_pham")
     approve = client.post(f"/api/brewing/bottles/{bottle_id}/approve", headers=kcs_h)
     assert approve.status_code == 200, approve.text
-    # Ca 1/2/3 tính theo VỈ — ca1=100 vỉ đúng khớp 100 dòng, mỗi dòng 20 lon (pack_size).
+    # Ca 1/2/3 tính theo VỈ — ca1=100 vỉ x 20 lon/vỉ (pack_size) = 2000 lon, dồn vào 1 dòng lô
+    # duy nhất (xem docs/WMS-LOT-LEVEL-REDESIGN.md).
     assert approve.json()["count"] == 100
 
     units = client.get("/api/wms/units", headers=admin_h).json()
     made = [u for u in units if u["unit_code"] in approve.json()["unit_codes"]]
-    assert len(made) == 100
-    assert all(u["quantity"] == 20 for u in made)
+    assert len(made) == 1
+    assert made[0]["quantity"] == 2000
 
 
 def test_shipment_slip_header_fields_persist(client, admin_h):
@@ -296,13 +307,12 @@ def test_shipment_slip_header_fields_persist(client, admin_h):
     không còn nhập tay — hệ thống tự suy ra từ vị trí (WmsLocation) đang lưu các vỉ/keg được
     chọn để xuất (xem services/wms.py::create_shipment)."""
     ship_to_id = _a_ship_to(client, admin_h, "DIST-SLIP", "NPP Slip")
-    unit_ids = _a_units(client, admin_h, "SLIP-SKU", "LOT-SLIP", 5)
+    unit_id = _a_units(client, admin_h, "SLIP-SKU", "LOT-SLIP", 5)
     loc_id = _a_location(client, admin_h)
     loc_code = client.get("/api/wms/locations", headers=admin_h).json()
     loc_code = next(l["code"] for l in loc_code if l["loc_id"] == loc_id)
-    for uid in unit_ids:
-        pa = client.post(f"/api/wms/units/{uid}/putaway", headers=admin_h, json={"loc_id": loc_id})
-        assert pa.status_code == 200, pa.text
+    pa = client.post(f"/api/wms/units/{unit_id}/putaway", headers=admin_h, json={"loc_id": loc_id})
+    assert pa.status_code == 200, pa.text
 
     shipped = client.post("/api/wms/shipments", headers=admin_h, json={
         "ship_to_id": ship_to_id,
@@ -328,7 +338,7 @@ def test_shipment_slip_header_fields_persist(client, admin_h):
 
 def test_undo_shipment_restores_units_and_blocks_twice(client, admin_h):
     ship_to_id = _a_ship_to(client, admin_h, "DIST-UNDO", "NPP Undo")
-    unit_ids = _a_units(client, admin_h, "UNDO-SKU", "LOT-UNDO", 5)
+    unit_id = _a_units(client, admin_h, "UNDO-SKU", "LOT-UNDO", 5)
 
     shipped = client.post("/api/wms/shipments", headers=admin_h,
                           json={"ship_to_id": ship_to_id,
@@ -338,18 +348,16 @@ def test_undo_shipment_restores_units_and_blocks_twice(client, admin_h):
     shipment_id = shipped.json()["shipment_id"]
 
     units_after_ship = client.get("/api/wms/units", headers=admin_h).json()
-    for uid in unit_ids:
-        assert next(u for u in units_after_ship if u["unit_id"] == uid)["status"] == "shipped"
+    assert next(u for u in units_after_ship if u["unit_id"] == unit_id)["status"] == "shipped"
 
     undone = client.post(f"/api/wms/shipments/{shipment_id}/undo", headers=admin_h)
     assert undone.status_code == 200, undone.text
     assert undone.json()["restored"] == 5
 
     units_after_undo = client.get("/api/wms/units", headers=admin_h).json()
-    for uid in unit_ids:
-        row = next(u for u in units_after_undo if u["unit_id"] == uid)
-        assert row["status"] == "stored"
-        assert row["shipped_at"] is None
+    row = next(u for u in units_after_undo if u["unit_id"] == unit_id)
+    assert row["status"] == "stored"
+    assert row["shipped_at"] is None
 
     # Hoàn tác lần 2 phải báo lỗi (không còn unit nào tham chiếu phiếu này nữa).
     twice = client.post(f"/api/wms/shipments/{shipment_id}/undo", headers=admin_h)

@@ -77,8 +77,11 @@ def _a_brew_order(client, admin_h, order_code, product_id=None):
     return r.json()["brew_order_id"]
 
 
-def _build_chain(client, admin_h, vanhanh_h, kcs_h, suffix):
-    """Dựng 1 chuỗi Nấu->Lên men->Lọc->Chiết hoàn chỉnh (không pallet), trả về mọi id/code."""
+def _build_chain(client, admin_h, vanhanh_h, kcs_h, suffix, finished_product_id=None):
+    """Dựng 1 chuỗi Nấu->Lên men->Lọc->Chiết hoàn chỉnh (không pallet), trả về mọi id/code.
+    finished_product_id tuỳ chọn — chỉ cần khi test sau đó còn thao tác kho TP theo số lượng
+    quy đổi (xuất/phân rã/điều chuyển), vì _pack_divisor cần tra được pack_size qua SKU đã
+    đăng ký danh mục (không có SKU -> mặc định 1, xem services/wms.py::_pack_divisor)."""
     lm_code = f"LM-{suffix}"
     order_id = _a_brew_order(client, admin_h, f"LN-{suffix}")
     b = client.post("/api/brewing/brews", headers=vanhanh_h,
@@ -112,7 +115,8 @@ def _build_chain(client, admin_h, vanhanh_h, kcs_h, suffix):
 
     bottle_code = f"CH-{suffix}"
     bo = client.post("/api/brewing/bottles", headers=vanhanh_h,
-                     json={"bottle_code": bottle_code, "beer_type": "Bia test", "from_bbt": bbt})
+                     json={"bottle_code": bottle_code, "beer_type": "Bia test", "from_bbt": bbt,
+                           "finished_product_id": finished_product_id})
     assert bo.status_code == 201, bo.text
     bottle_id = bo.json()["bottle_id"]
     bo_fin = client.post(f"/api/brewing/bottles/{bottle_id}/finish", headers=vanhanh_h,
@@ -172,9 +176,20 @@ def test_delete_bottle_blocked_until_units_deleted(client, admin_h, vanhanh_h, k
 
 
 def test_cannot_delete_shipped_unit(client, admin_h, vanhanh_h, kcs_h):
-    chain = _build_chain(client, admin_h, vanhanh_h, kcs_h, "DELGUARD04")
+    """1 dòng lô (xem docs/WMS-LOT-LEVEL-REDESIGN.md) chỉ chuyển hẳn sang status="shipped"
+    khi bị xuất TRỌN VẸN — xuất một phần chỉ tách dòng (phần "stored" còn lại tách sang dòng
+    khác), nên phải xuất ĐÚNG BẰNG số lượng cả lô (ca1=100) để dòng gốc không bị tách. Cần
+    đăng ký SKU (FinishedProduct) trước để _pack_divisor tra đúng pack_size=24 lúc xuất —
+    không có SKU sẽ mặc định 1, khiến "quantity=100" chỉ xuất được 100/2400 lon (một phần)."""
+    fp = client.post("/api/finished-products", headers=admin_h,
+                     json={"code": "SKU-DELGUARD04", "name": "SKU delguard04", "uom": "lon",
+                           "unit_type": "vi", "pack_size": 24})
+    assert fp.status_code == 201, fp.text
+    chain = _build_chain(client, admin_h, vanhanh_h, kcs_h, "DELGUARD04",
+                         finished_product_id=fp.json()["finished_product_id"])
     _declare_pending(client, vanhanh_h, "thanh_pham", "bottle", f"{chain['bottle_code']}__thanh_pham")
     approve = client.post(f"/api/brewing/bottles/{chain['bottle_id']}/approve", headers=kcs_h)
+    assert approve.json()["count"] == 100
     unit_code = approve.json()["unit_codes"][0]
     units = client.get("/api/wms/units", headers=vanhanh_h).json()
     unit = next(u for u in units if u["unit_code"] == unit_code)
@@ -185,7 +200,7 @@ def test_cannot_delete_shipped_unit(client, admin_h, vanhanh_h, kcs_h):
     ship = client.post("/api/wms/shipments", headers=admin_h,
                        json={"ship_to_id": st.json()["ship_to_id"],
                              "lines": [{"product_name": unit["product"], "lot_code": unit["lot_code"],
-                                       "unit_type": unit["unit_type"], "quantity": 1}]})
+                                       "unit_type": unit["unit_type"], "quantity": 100}]})
     assert ship.status_code == 201, ship.text
 
     blocked = client.delete(f"/api/wms/units/{unit_id}", headers=admin_h)
@@ -216,10 +231,17 @@ def test_wms_location_crud(client, admin_h):
 
 
 def test_wms_location_delete_blocked_when_unit_stored(client, admin_h, vanhanh_h):
+    """capacity=5 tính theo SỐ VỈ (không phải lon) — cần đăng ký SKU trước để _pack_divisor
+    tra đúng pack_size=24, nếu không sẽ mặc định 1 và 48 lon bị hiểu nhầm thành 48 vỉ (> 5)."""
+    fp = client.post("/api/finished-products", headers=admin_h,
+                     json={"code": "TEST-SKU-LOC02", "name": "TEST-SKU-LOC02", "uom": "lon",
+                           "unit_type": "vi", "pack_size": 24})
+    assert fp.status_code == 201, fp.text
     loc = client.post("/api/wms/locations", headers=admin_h,
                       json={"code": "TEST-LOC-02", "name": "Vị trí test 2", "capacity": 5}).json()
     build = client.post("/api/wms/units", headers=admin_h,
-                        json={"product_name": "TEST-SKU", "lot_code": "TEST-LOT", "total": 48, "pack_size": 24})
+                        json={"finished_product_id": fp.json()["finished_product_id"],
+                              "product_name": "TEST-SKU-LOC02", "lot_code": "TEST-LOT", "total": 48, "pack_size": 24})
     assert build.status_code == 201, build.text
     unit_code = build.json()["unit_codes"][0]
     units = client.get("/api/wms/units", headers=admin_h).json()
