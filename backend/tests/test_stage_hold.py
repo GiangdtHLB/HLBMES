@@ -50,6 +50,23 @@ def kcs_h(client):
     return _login(client, "kcs", "123456")
 
 
+def _a_brewhouse_line(client, admin_h):
+    """Dây chuyền nấu (ProductionLine.kind="brewhouse") dùng cho test — lấy lại nếu đã có
+    (idempotent), tạo mới nếu chưa có (seed.py không seed sẵn dây chuyền loại brewhouse)."""
+    existing = client.get("/api/lines", headers=admin_h, params={"kind": "brewhouse"}).json()
+    if existing:
+        return existing[0]["line_id"]
+    r = client.post("/api/lines", headers=admin_h,
+                    json={"code": "BREW-TEST-01", "name": "Nhà nấu test", "kind": "brewhouse"})
+    assert r.status_code == 201, r.text
+    return r.json()["line_id"]
+
+
+@pytest.fixture(scope="module")
+def brewhouse_line_id(client, admin_h):
+    return _a_brewhouse_line(client, admin_h)
+
+
 def _a_brew_order(client, admin_h, order_code):
     r = client.post("/api/brewing/orders", headers=admin_h,
                     json={"order_code": order_code, "auto_from_bom": False, "planned_volume_hl": 100})
@@ -60,7 +77,7 @@ def _a_brew_order(client, admin_h, order_code):
 _batch_code_seq = iter(range(1, 10000))  # số mẻ duy nhất TOÀN NHÀ MÁY trong năm — không tái dùng "1"
 
 
-def _setup_stage_chain(client, admin_h, vanhanh_h, suffix):
+def _setup_stage_chain(client, admin_h, vanhanh_h, suffix, line_id):
     """Tạo đủ 1 chuỗi Nấu -> Lên men -> Lọc -> Chiết, trả về dict id của từng công đoạn."""
     order_id = _a_brew_order(client, admin_h, f"LN-{suffix}")
     b = client.post("/api/brewing/brews", headers=vanhanh_h,
@@ -69,7 +86,7 @@ def _setup_stage_chain(client, admin_h, vanhanh_h, suffix):
     assert b.status_code == 201, b.text
     brew_id = b.json()["brew_id"]
     bb = client.post(f"/api/brewing/brews/{brew_id}/batches", headers=vanhanh_h,
-                     json={"batch_code": str(next(_batch_code_seq))})
+                     json={"batch_code": str(next(_batch_code_seq)), "line_id": line_id})
     assert bb.status_code == 201, bb.text
     batch_id = bb.json()["batch_id"]
 
@@ -127,8 +144,8 @@ def _hold(client, headers, scope_type, scope_id, on_hold):
                        json={"scope_type": scope_type, "scope_id": scope_id, "on_hold": on_hold})
 
 
-def test_hold_release_permissions(client, admin_h, vanhanh_h, kcs_h):
-    ids = _setup_stage_chain(client, admin_h, vanhanh_h, "PERM")
+def test_hold_release_permissions(client, admin_h, vanhanh_h, kcs_h, brewhouse_line_id):
+    ids = _setup_stage_chain(client, admin_h, vanhanh_h, "PERM", brewhouse_line_id)
     denied_hold = _hold(client, vanhanh_h, "ferment", ids["ferment_id"], True)
     assert denied_hold.status_code == 403, denied_hold.text
 
@@ -144,8 +161,8 @@ def test_hold_release_permissions(client, admin_h, vanhanh_h, kcs_h):
     assert ok_release.json()["quality_status"] == "released"
 
 
-def test_hold_brew_batch_blocks_finish(client, admin_h, vanhanh_h):
-    ids = _setup_stage_chain(client, admin_h, vanhanh_h, "NAU")
+def test_hold_brew_batch_blocks_finish(client, admin_h, vanhanh_h, brewhouse_line_id):
+    ids = _setup_stage_chain(client, admin_h, vanhanh_h, "NAU", brewhouse_line_id)
     hold = _hold(client, admin_h, "brew_batch", ids["batch_id"], True)
     assert hold.status_code == 200, hold.text
 
@@ -165,8 +182,8 @@ def test_hold_brew_batch_blocks_finish(client, admin_h, vanhanh_h):
     assert row["quality_status"] == "released"
 
 
-def test_hold_ferment_blocks_approve(client, admin_h, vanhanh_h):
-    ids = _setup_stage_chain(client, admin_h, vanhanh_h, "LM")
+def test_hold_ferment_blocks_approve(client, admin_h, vanhanh_h, brewhouse_line_id):
+    ids = _setup_stage_chain(client, admin_h, vanhanh_h, "LM", brewhouse_line_id)
     hold = _hold(client, admin_h, "ferment", ids["ferment_id"], True)
     assert hold.status_code == 200, hold.text
 
@@ -180,8 +197,8 @@ def test_hold_ferment_blocks_approve(client, admin_h, vanhanh_h):
     assert row["quality_status"] == "released"
 
 
-def test_hold_filter_blocks_approve(client, admin_h, vanhanh_h):
-    ids = _setup_stage_chain(client, admin_h, vanhanh_h, "LOC")
+def test_hold_filter_blocks_approve(client, admin_h, vanhanh_h, brewhouse_line_id):
+    ids = _setup_stage_chain(client, admin_h, vanhanh_h, "LOC", brewhouse_line_id)
     hold = _hold(client, admin_h, "filter", ids["filter_id"], True)
     assert hold.status_code == 200, hold.text
 
@@ -195,8 +212,8 @@ def test_hold_filter_blocks_approve(client, admin_h, vanhanh_h):
     assert row["quality_status"] == "released"
 
 
-def test_hold_bottle_blocks_finish(client, admin_h, vanhanh_h):
-    ids = _setup_stage_chain(client, admin_h, vanhanh_h, "CHIET")
+def test_hold_bottle_blocks_finish(client, admin_h, vanhanh_h, brewhouse_line_id):
+    ids = _setup_stage_chain(client, admin_h, vanhanh_h, "CHIET", brewhouse_line_id)
     hold = _hold(client, admin_h, "bottle", ids["bottle_id"], True)
     assert hold.status_code == 200, hold.text
 
@@ -216,8 +233,8 @@ def test_hold_unknown_scope_not_found(client, admin_h):
     assert r.status_code == 404, r.text
 
 
-def test_flat_brew_batches_endpoint_lists_quality_status(client, admin_h, vanhanh_h):
-    ids = _setup_stage_chain(client, admin_h, vanhanh_h, "FLATLIST")
+def test_flat_brew_batches_endpoint_lists_quality_status(client, admin_h, vanhanh_h, brewhouse_line_id):
+    ids = _setup_stage_chain(client, admin_h, vanhanh_h, "FLATLIST", brewhouse_line_id)
     rows = client.get("/api/brewing/brew-batches", headers=admin_h).json()
     row = next(r for r in rows if r["batch_id"] == ids["batch_id"])
     assert row["quality_status"] == "released"

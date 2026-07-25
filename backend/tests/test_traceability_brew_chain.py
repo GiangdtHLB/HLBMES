@@ -52,6 +52,23 @@ def thukho_h(client):
     return _login(client, "thukho", "123456")
 
 
+def _a_brewhouse_line(client, admin_h):
+    """Dây chuyền nấu (ProductionLine.kind="brewhouse") dùng cho test — lấy lại nếu đã có
+    (idempotent), tạo mới nếu chưa có (seed.py không seed sẵn dây chuyền loại brewhouse)."""
+    existing = client.get("/api/lines", headers=admin_h, params={"kind": "brewhouse"}).json()
+    if existing:
+        return existing[0]["line_id"]
+    r = client.post("/api/lines", headers=admin_h,
+                    json={"code": "BREW-TEST-01", "name": "Nhà nấu test", "kind": "brewhouse"})
+    assert r.status_code == 201, r.text
+    return r.json()["line_id"]
+
+
+@pytest.fixture(scope="module")
+def brewhouse_line_id(client, admin_h):
+    return _a_brewhouse_line(client, admin_h)
+
+
 def _declare_pending(client, headers, stage, scope_type, scope_id, product_id=None):
     """Khai báo đạt mọi chỉ tiêu bắt buộc đang "pending" cho scope này — cần thiết vì các
     stage "len_men_phu"/"thanh_pham" dùng chung toàn cục, module test khác (VD
@@ -71,7 +88,7 @@ def _declare_pending(client, headers, stage, scope_type, scope_id, product_id=No
             assert r.status_code == 201, r.text
 
 
-def test_full_chain_traceable_from_lot_to_unit(client, admin_h, vanhanh_h, thukho_h):
+def test_full_chain_traceable_from_lot_to_unit(client, admin_h, vanhanh_h, thukho_h, brewhouse_line_id):
     suffix = "TRACECHAIN01"
 
     # 1) Lô NVL thật trong Kho phân xưởng (điều kiện bắt buộc để dùng cho mẻ nấu).
@@ -97,7 +114,7 @@ def test_full_chain_traceable_from_lot_to_unit(client, admin_h, vanhanh_h, thukh
 
     batch_code = "501"
     batch = client.post(f"/api/brewing/brews/{brew_id}/batches", headers=vanhanh_h,
-                        json={"batch_code": batch_code})
+                        json={"batch_code": batch_code, "line_id": brewhouse_line_id})
     assert batch.status_code == 201, batch.text
     batch_id = batch.json()["batch_id"]
 
@@ -224,7 +241,7 @@ def test_full_chain_traceable_from_lot_to_unit(client, admin_h, vanhanh_h, thukh
     assert bottle_code in recall_codes
 
 
-def test_find_node_prefers_lot_no_over_unrelated_brew_batch_code(client, admin_h, vanhanh_h):
+def test_find_node_prefers_lot_no_over_unrelated_brew_batch_code(client, admin_h, vanhanh_h, brewhouse_line_id):
     """Bug thực tế: BrewBatch.batch_code ("số mẻ", VD "1") chỉ duy nhất TRONG 1 NĂM, không
     duy nhất toàn hệ thống (xem models/brewing.py::BrewBatch) — nếu find_node tra nó ngang
     hàng các mã thật-sự-duy-nhất (brew_code, lm_code, filter_code, bottle_code...) thì gõ
@@ -244,7 +261,7 @@ def test_find_node_prefers_lot_no_over_unrelated_brew_batch_code(client, admin_h
                                    "brew_order_id": decoy_order.json()["brew_order_id"]})
     assert decoy_brew.status_code == 201, decoy_brew.text
     decoy_batch = client.post(f"/api/brewing/brews/{decoy_brew.json()['brew_id']}/batches", headers=vanhanh_h,
-                              json={"batch_code": collision_code})
+                              json={"batch_code": collision_code, "line_id": brewhouse_line_id})
     assert decoy_batch.status_code == 201, decoy_batch.text
 
     # 2) Chuỗi thật (Nấu→Lên men→Lọc→Chiết) — mã chiết đặt "số lô bia" (lot_no) TRÙNG với

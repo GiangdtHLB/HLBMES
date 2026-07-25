@@ -45,10 +45,27 @@ def vanhanh_h(client):
     return _login(client, "vanhanh", "123456")
 
 
+def _a_brewhouse_line(client, admin_h):
+    """Dây chuyền nấu (ProductionLine.kind="brewhouse") dùng cho test — lấy lại nếu đã có
+    (idempotent), tạo mới nếu chưa có (seed.py không seed sẵn dây chuyền loại brewhouse)."""
+    existing = client.get("/api/lines", headers=admin_h, params={"kind": "brewhouse"}).json()
+    if existing:
+        return existing[0]["line_id"]
+    r = client.post("/api/lines", headers=admin_h,
+                    json={"code": "BREW-TEST-01", "name": "Nhà nấu test", "kind": "brewhouse"})
+    assert r.status_code == 201, r.text
+    return r.json()["line_id"]
+
+
+@pytest.fixture(scope="module")
+def brewhouse_line_id(client, admin_h):
+    return _a_brewhouse_line(client, admin_h)
+
+
 _batch_code_seq = itertools.count(650)
 
 
-def _a_brew(client, admin_h, vanhanh_h, suffix, with_batch=True):
+def _a_brew(client, admin_h, vanhanh_h, suffix, line_id, with_batch=True):
     order = client.post("/api/brewing/orders", headers=admin_h,
                         json={"order_code": f"LN-{suffix}", "auto_from_bom": False, "planned_volume_hl": 100})
     assert order.status_code == 201, order.text
@@ -61,24 +78,24 @@ def _a_brew(client, admin_h, vanhanh_h, suffix, with_batch=True):
     batch_id = None
     if with_batch:
         batch = client.post(f"/api/brewing/brews/{brew_id}/batches", headers=vanhanh_h,
-                            json={"batch_code": str(next(_batch_code_seq))})
+                            json={"batch_code": str(next(_batch_code_seq)), "line_id": line_id})
         assert batch.status_code == 201, batch.text
         batch_id = batch.json()["batch_id"]
     return brew_id, batch_id
 
 
-def test_delete_brew_allowed_before_filtered(client, admin_h, vanhanh_h):
-    brew_id, batch_id = _a_brew(client, admin_h, vanhanh_h, "DELOK01")
+def test_delete_brew_allowed_before_filtered(client, admin_h, vanhanh_h, brewhouse_line_id):
+    brew_id, batch_id = _a_brew(client, admin_h, vanhanh_h, "DELOK01", brewhouse_line_id)
     deleted = client.delete(f"/api/brewing/brews/{brew_id}", headers=vanhanh_h)
     assert deleted.status_code == 204, deleted.text
 
 
-def test_delete_brew_also_deletes_orphaned_ferment(client, admin_h, vanhanh_h):
+def test_delete_brew_also_deletes_orphaned_ferment(client, admin_h, vanhanh_h, brewhouse_line_id):
     """Xóa mã nấu phải xóa LUÔN lô lên men liên kết (nếu không còn mã nấu nào khác dùng
     chung tank/lô LM đó) — nếu không, lô lên men bị bỏ mồ côi, chiếm mã lô LM vĩnh viễn
     (không tạo lại được mã nấu mới dùng cùng mã lô LM) và vận hành phải tự tay xóa riêng."""
     suffix = "DELFERM01"
-    brew_id, batch_id = _a_brew(client, admin_h, vanhanh_h, suffix)
+    brew_id, batch_id = _a_brew(client, admin_h, vanhanh_h, suffix, brewhouse_line_id)
     ferments_before = client.get("/api/brewing/ferments", headers=admin_h).json()["items"]
     assert any(f["lm_code"] == f"LM-{suffix}" for f in ferments_before)
 
@@ -132,8 +149,8 @@ def test_delete_brew_keeps_ferment_shared_by_another_brew(client, admin_h, vanha
         "Lô lên men vẫn còn mã nấu B liên kết -> không được xóa"
 
 
-def test_delete_brew_batch_allowed_before_filtered(client, admin_h, vanhanh_h):
-    brew_id, batch_id = _a_brew(client, admin_h, vanhanh_h, "DELOK02")
+def test_delete_brew_batch_allowed_before_filtered(client, admin_h, vanhanh_h, brewhouse_line_id):
+    brew_id, batch_id = _a_brew(client, admin_h, vanhanh_h, "DELOK02", brewhouse_line_id)
     deleted = client.delete(f"/api/brewing/brews/{brew_id}/batches/{batch_id}", headers=vanhanh_h)
     assert deleted.status_code == 204, deleted.text
 
@@ -165,9 +182,9 @@ def _a_filter_order(client, admin_h, order_code, ferment_ids, blend_mode="khong_
     return r.json()["filter_order_id"]
 
 
-def test_delete_brew_blocked_after_filtered(client, admin_h, vanhanh_h):
+def test_delete_brew_blocked_after_filtered(client, admin_h, vanhanh_h, brewhouse_line_id):
     suffix = "DELBLOCK01"
-    brew_id, batch_id = _a_brew(client, admin_h, vanhanh_h, suffix)
+    brew_id, batch_id = _a_brew(client, admin_h, vanhanh_h, suffix, brewhouse_line_id)
     ferment_id = _approve_ferment(client, admin_h, f"LM-{suffix}")
     order_id = _a_filter_order(client, admin_h, f"LOC-{suffix}", [ferment_id])
     f = client.post("/api/brewing/filters", headers=vanhanh_h,

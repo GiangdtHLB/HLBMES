@@ -1079,6 +1079,7 @@ class BrewMasterOrderIn(BaseModel):
 
 class BrewBatchIn(BaseModel):
     batch_code: str   # số mẻ Braumat — bắt buộc số nguyên dương, duy nhất trong năm (xem add_brew_batch)
+    line_id: str      # dây chuyền/nhà nấu (ProductionLine.kind="brewhouse") — bắt buộc, xem add_brew_batch
     seq: Optional[int] = None
     note: Optional[str] = None
     started_at: Optional[datetime] = None   # mặc định giờ hiện tại nếu không truyền (xem add_brew_batch)

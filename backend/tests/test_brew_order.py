@@ -58,6 +58,23 @@ def lager_product_id(client, admin_h):
     return next(p["product_id"] for p in products if p["code"] == "BIA-LAGER")
 
 
+def _a_brewhouse_line(client, admin_h):
+    """Dây chuyền nấu (ProductionLine.kind="brewhouse") dùng cho test — lấy lại nếu đã có
+    (idempotent), tạo mới nếu chưa có (seed.py không seed sẵn dây chuyền loại brewhouse)."""
+    existing = client.get("/api/lines", headers=admin_h, params={"kind": "brewhouse"}).json()
+    if existing:
+        return existing[0]["line_id"]
+    r = client.post("/api/lines", headers=admin_h,
+                    json={"code": "BREW-TEST-01", "name": "Nhà nấu test", "kind": "brewhouse"})
+    assert r.status_code == 201, r.text
+    return r.json()["line_id"]
+
+
+@pytest.fixture(scope="module")
+def brewhouse_line_id(client, admin_h):
+    return _a_brewhouse_line(client, admin_h)
+
+
 def _a_brew_order(client, admin_h, order_code, product_id=None, planned_batch_count=1,
                   planned_volume_hl=100.0, volume_tolerance_hl=0.0,
                   auto_from_bom=False, lines=None):
@@ -71,7 +88,7 @@ def _a_brew_order(client, admin_h, order_code, product_id=None, planned_batch_co
     return r.json()["brew_order_id"]
 
 
-def _set_real_actual_volume(client, admin_h, brew_id, batch_code, volume_hl, finish=True):
+def _set_real_actual_volume(client, admin_h, brew_id, batch_code, volume_hl, line_id, finish=True):
     """Sản lượng nấu THỰC TẾ (dùng để tính actual_volume_hl/is_complete của Lệnh nấu) lấy từ
     "Tổng lượng dịch (hl)" khai báo trong Ghi chép nấu của MẺ, không phải volume_hl nhập tay
     lúc tạo mã nấu — mirror đúng cách vận hành thật (xem services/brew_order.py::
@@ -79,7 +96,7 @@ def _set_real_actual_volume(client, admin_h, brew_id, batch_code, volume_hl, fin
     services/brew_order.py::_all_batches_finished) — mặc định finish=True để mirror vận
     hành thật; truyền finish=False để test riêng nhánh "còn mẻ dở dang"."""
     b = client.post(f"/api/brewing/brews/{brew_id}/batches", headers=admin_h,
-                    json={"batch_code": batch_code})
+                    json={"batch_code": batch_code, "line_id": line_id})
     assert b.status_code == 201, b.text
     batch_id = b.json()["batch_id"]
     p = client.put(f"/api/brewing/brews/{brew_id}/batches/{batch_id}/process-log", headers=admin_h,
@@ -191,14 +208,14 @@ def test_create_order_requires_positive_planned_volume(client, admin_h):
     assert negative_tol.status_code == 409, negative_tol.text
 
 
-def test_order_completes_when_actual_volume_within_tolerance(client, admin_h, vanhanh_h):
+def test_order_completes_when_actual_volume_within_tolerance(client, admin_h, vanhanh_h, brewhouse_line_id):
     order_id = _a_brew_order(client, admin_h, "LN-VOL03", planned_volume_hl=100, volume_tolerance_hl=5)
 
     b1 = client.post("/api/brewing/brews", headers=vanhanh_h,
                      json={"brew_code": "BR-VOL03-A", "wort_type": "Dịch test", "volume_hl": 96,
                            "brew_order_id": order_id})
     assert b1.status_code == 201, b1.text
-    _set_real_actual_volume(client, admin_h, b1.json()["brew_id"], "550", 96)
+    _set_real_actual_volume(client, admin_h, b1.json()["brew_id"], "550", 96, brewhouse_line_id)
 
     detail = client.get(f"/api/brewing/orders/{order_id}", headers=admin_h).json()
     assert detail["actual_volume_hl"] == 96
@@ -211,14 +228,14 @@ def test_order_completes_when_actual_volume_within_tolerance(client, admin_h, va
     assert blocked.status_code == 409, blocked.text
 
 
-def test_multiple_brews_accumulate_volume_independently(client, admin_h, vanhanh_h):
+def test_multiple_brews_accumulate_volume_independently(client, admin_h, vanhanh_h, brewhouse_line_id):
     order_id = _a_brew_order(client, admin_h, "LN-VOL04", planned_volume_hl=100, volume_tolerance_hl=5)
 
     b1 = client.post("/api/brewing/brews", headers=vanhanh_h,
                      json={"brew_code": "BR-VOL04-A", "wort_type": "Dịch test", "volume_hl": 40,
                            "brew_order_id": order_id})
     assert b1.status_code == 201, b1.text
-    _set_real_actual_volume(client, admin_h, b1.json()["brew_id"], "551", 40)
+    _set_real_actual_volume(client, admin_h, b1.json()["brew_id"], "551", 40, brewhouse_line_id)
 
     detail = client.get(f"/api/brewing/orders/{order_id}", headers=admin_h).json()
     assert detail["actual_volume_hl"] == 40
@@ -228,14 +245,14 @@ def test_multiple_brews_accumulate_volume_independently(client, admin_h, vanhanh
                      json={"brew_code": "BR-VOL04-B", "wort_type": "Dịch test", "volume_hl": 55,
                            "brew_order_id": order_id})
     assert b2.status_code == 201, b2.text
-    _set_real_actual_volume(client, admin_h, b2.json()["brew_id"], "552", 55)
+    _set_real_actual_volume(client, admin_h, b2.json()["brew_id"], "552", 55, brewhouse_line_id)
 
     detail2 = client.get(f"/api/brewing/orders/{order_id}", headers=admin_h).json()
     assert detail2["actual_volume_hl"] == 95
     assert detail2["is_complete"] is True
 
 
-def test_order_not_complete_while_any_batch_unfinished(client, admin_h, vanhanh_h):
+def test_order_not_complete_while_any_batch_unfinished(client, admin_h, vanhanh_h, brewhouse_line_id):
     """Sản lượng đã khớp kế hoạch (±sai số) KHÔNG đủ để lệnh hoàn thành — còn mẻ nào chưa
     bấm "Kết thúc" thì lệnh vẫn coi như đang thực hiện; chỉ hoàn thành khi TẤT CẢ mẻ của
     TẤT CẢ mã nấu thuộc lệnh đã kết thúc."""
@@ -245,7 +262,7 @@ def test_order_not_complete_while_any_batch_unfinished(client, admin_h, vanhanh_
                      json={"brew_code": "BR-VOL05-A", "wort_type": "Dịch test", "volume_hl": 98,
                            "brew_order_id": order_id})
     assert b1.status_code == 201, b1.text
-    batch_id = _set_real_actual_volume(client, admin_h, b1.json()["brew_id"], "553", 98, finish=False)
+    batch_id = _set_real_actual_volume(client, admin_h, b1.json()["brew_id"], "553", 98, brewhouse_line_id, finish=False)
 
     detail = client.get(f"/api/brewing/orders/{order_id}", headers=admin_h).json()
     assert detail["actual_volume_hl"] == 98
@@ -264,7 +281,7 @@ def test_order_not_complete_while_any_batch_unfinished(client, admin_h, vanhanh_
     assert detail2["is_complete"] is True, "đủ sản lượng VÀ tất cả mẻ đã kết thúc -> hoàn thành"
 
 
-def test_order_completes_when_actual_volume_exceeds_plan(client, admin_h, vanhanh_h):
+def test_order_completes_when_actual_volume_exceeds_plan(client, admin_h, vanhanh_h, brewhouse_line_id):
     """Vượt kế hoạch (dù vượt xa hơn sai số cho phép) vẫn phải coi là hoàn thành — chỉ chặn
     hoàn thành khi HỤT quá sai số, không còn chặn khi VƯỢT (một chiều, khác hành vi cũ
     ±sai số 2 chiều)."""
@@ -274,14 +291,14 @@ def test_order_completes_when_actual_volume_exceeds_plan(client, admin_h, vanhan
                      json={"brew_code": "BR-VOL06-A", "wort_type": "Dịch test", "volume_hl": 200,
                            "brew_order_id": order_id})
     assert b1.status_code == 201, b1.text
-    _set_real_actual_volume(client, admin_h, b1.json()["brew_id"], "554", 200)
+    _set_real_actual_volume(client, admin_h, b1.json()["brew_id"], "554", 200, brewhouse_line_id)
 
     detail = client.get(f"/api/brewing/orders/{order_id}", headers=admin_h).json()
     assert detail["actual_volume_hl"] == 200
     assert detail["is_complete"] is True, "200hl vượt xa 50hl kế hoạch nhưng vẫn phải hoàn thành"
 
 
-def test_order_not_complete_when_shortfall_exceeds_tolerance(client, admin_h, vanhanh_h):
+def test_order_not_complete_when_shortfall_exceeds_tolerance(client, admin_h, vanhanh_h, brewhouse_line_id):
     """Hụt quá sai số cho phép (dưới kế hoạch - sai số) vẫn phải chặn hoàn thành như cũ."""
     order_id = _a_brew_order(client, admin_h, "LN-VOL07", planned_volume_hl=50, volume_tolerance_hl=5)
 
@@ -289,14 +306,14 @@ def test_order_not_complete_when_shortfall_exceeds_tolerance(client, admin_h, va
                      json={"brew_code": "BR-VOL07-A", "wort_type": "Dịch test", "volume_hl": 40,
                            "brew_order_id": order_id})
     assert b1.status_code == 201, b1.text
-    _set_real_actual_volume(client, admin_h, b1.json()["brew_id"], "555", 40)
+    _set_real_actual_volume(client, admin_h, b1.json()["brew_id"], "555", 40, brewhouse_line_id)
 
     detail = client.get(f"/api/brewing/orders/{order_id}", headers=admin_h).json()
     assert detail["actual_volume_hl"] == 40
     assert detail["is_complete"] is False, "40hl hụt hơn 5hl sai số so với 50hl kế hoạch -> chưa hoàn thành"
 
 
-def test_order_shows_actual_tank_and_batch_range(client, admin_h, vanhanh_h):
+def test_order_shows_actual_tank_and_batch_range(client, admin_h, vanhanh_h, brewhouse_line_id):
     """Danh sách Lệnh nấu phải hiện tank lên men + khoảng số mẻ THỰC TẾ đã nấu (suy ra từ
     lô lên men liên kết + các mẻ đã tạo), không phải tank_lm/batch_range nhập tay lúc lập
     lệnh (thường bỏ trống vì chỉ là dự kiến)."""
@@ -311,7 +328,7 @@ def test_order_shows_actual_tank_and_batch_range(client, admin_h, vanhanh_h):
                            "lm_code": "LM-TANKRANGE-A", "tank_lm": "FV-TR-01", "brew_order_id": order_id})
     assert b1.status_code == 201, b1.text
     batch_a1 = client.post(f"/api/brewing/brews/{b1.json()['brew_id']}/batches", headers=admin_h,
-                           json={"batch_code": "201"})
+                           json={"batch_code": "201", "line_id": brewhouse_line_id})
     assert batch_a1.status_code == 201, batch_a1.text
 
     b2 = client.post("/api/brewing/brews", headers=vanhanh_h,
@@ -319,7 +336,7 @@ def test_order_shows_actual_tank_and_batch_range(client, admin_h, vanhanh_h):
                            "lm_code": "LM-TANKRANGE-B", "tank_lm": "FV-TR-02", "brew_order_id": order_id})
     assert b2.status_code == 201, b2.text
     batch_b1 = client.post(f"/api/brewing/brews/{b2.json()['brew_id']}/batches", headers=admin_h,
-                           json={"batch_code": "202"})
+                           json={"batch_code": "202", "line_id": brewhouse_line_id})
     assert batch_b1.status_code == 201, batch_b1.text
 
     detail = client.get(f"/api/brewing/orders/{order_id}", headers=admin_h).json()

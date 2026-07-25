@@ -52,6 +52,23 @@ def vanhanh_h(client):
     return _login(client, "vanhanh", "123456")
 
 
+def _a_brewhouse_line(client, admin_h):
+    """Dây chuyền nấu (ProductionLine.kind="brewhouse") dùng cho test — lấy lại nếu đã có
+    (idempotent), tạo mới nếu chưa có (seed.py không seed sẵn dây chuyền loại brewhouse)."""
+    existing = client.get("/api/lines", headers=admin_h, params={"kind": "brewhouse"}).json()
+    if existing:
+        return existing[0]["line_id"]
+    r = client.post("/api/lines", headers=admin_h,
+                    json={"code": "BREW-TEST-01", "name": "Nhà nấu test", "kind": "brewhouse"})
+    assert r.status_code == 201, r.text
+    return r.json()["line_id"]
+
+
+@pytest.fixture(scope="module")
+def brewhouse_line_id(client, admin_h):
+    return _a_brewhouse_line(client, admin_h)
+
+
 # ---- Lõi state-machine (dựng tay dữ liệu hàng, khớp cấu trúc thật đã xác thực) ----
 
 def test_parse_row_stream_primary_and_continuation_params():
@@ -151,20 +168,21 @@ def _a_brew_order(client, admin_h, order_code, product_id=None):
     return r.json()["brew_order_id"]
 
 
-def _setup_batch(client, admin_h, brew_code, batch_code):
+def _setup_batch(client, admin_h, brew_code, batch_code, line_id):
     order_id = _a_brew_order(client, admin_h, f"LN-{brew_code}")
     b = client.post("/api/brewing/brews", headers=admin_h,
                     json={"brew_code": brew_code, "wort_type": "Dich test", "volume_hl": 100,
                           "brew_order_id": order_id})
     assert b.status_code == 201, b.text
     brew_id = b.json()["brew_id"]
-    mb = client.post(f"/api/brewing/brews/{brew_id}/batches", headers=admin_h, json={"batch_code": batch_code})
+    mb = client.post(f"/api/brewing/brews/{brew_id}/batches", headers=admin_h,
+                     json={"batch_code": batch_code, "line_id": line_id})
     assert mb.status_code == 201, mb.text
     return brew_id, mb.json()["batch_id"]
 
 
-def test_import_creates_steps_and_get_returns_checkpoints(client, admin_h, monkeypatch):
-    brew_id, batch_id = _setup_batch(client, admin_h, "BR-BRAUMAT-1", "401")
+def test_import_creates_steps_and_get_returns_checkpoints(client, admin_h, monkeypatch, brewhouse_line_id):
+    brew_id, batch_id = _setup_batch(client, admin_h, "BR-BRAUMAT-1", "401", brewhouse_line_id)
     monkeypatch.setattr(bi, "parse_step_protocol_pdf", lambda data: _fake_parsed(batch_number="401"))
 
     resp = client.post(f"/api/brewing/brews/{brew_id}/batches/{batch_id}/process-log/import",
@@ -182,8 +200,8 @@ def test_import_creates_steps_and_get_returns_checkpoints(client, admin_h, monke
     assert data["braumat_recipe"] == "Bia test"
 
 
-def test_reimport_replaces_steps_for_same_unit_not_duplicates(client, admin_h, monkeypatch):
-    brew_id, batch_id = _setup_batch(client, admin_h, "BR-BRAUMAT-2", "402")
+def test_reimport_replaces_steps_for_same_unit_not_duplicates(client, admin_h, monkeypatch, brewhouse_line_id):
+    brew_id, batch_id = _setup_batch(client, admin_h, "BR-BRAUMAT-2", "402", brewhouse_line_id)
     monkeypatch.setattr(bi, "parse_step_protocol_pdf", lambda data: _fake_parsed(batch_number="BATCH-2", n_steps=3))
     r1 = client.post(f"/api/brewing/brews/{brew_id}/batches/{batch_id}/process-log/import",
                      headers=admin_h, files=[("files", ("a.pdf", b"x", "application/pdf"))])
@@ -198,8 +216,8 @@ def test_reimport_replaces_steps_for_same_unit_not_duplicates(client, admin_h, m
     assert len(get_resp.json()["steps"]) == 5, "phải thay thế hoàn toàn, không cộng dồn (2 lần import -> vẫn 5, không phải 8)"
 
 
-def test_import_mismatched_batch_number_warns_but_succeeds(client, admin_h, monkeypatch):
-    brew_id, batch_id = _setup_batch(client, admin_h, "BR-BRAUMAT-3", "403")
+def test_import_mismatched_batch_number_warns_but_succeeds(client, admin_h, monkeypatch, brewhouse_line_id):
+    brew_id, batch_id = _setup_batch(client, admin_h, "BR-BRAUMAT-3", "403", brewhouse_line_id)
     monkeypatch.setattr(bi, "parse_step_protocol_pdf", lambda data: _fake_parsed(batch_number="9999-BRAUMAT"))
     resp = client.post(f"/api/brewing/brews/{brew_id}/batches/{batch_id}/process-log/import",
                        headers=admin_h, files=[("files", ("a.pdf", b"x", "application/pdf"))])
@@ -208,8 +226,8 @@ def test_import_mismatched_batch_number_warns_but_succeeds(client, admin_h, monk
     assert "9999-BRAUMAT" in resp.json()["warning"]
 
 
-def test_import_conflicting_batch_numbers_across_files_rejected(client, admin_h, monkeypatch):
-    brew_id, batch_id = _setup_batch(client, admin_h, "BR-BRAUMAT-4", "404")
+def test_import_conflicting_batch_numbers_across_files_rejected(client, admin_h, monkeypatch, brewhouse_line_id):
+    brew_id, batch_id = _setup_batch(client, admin_h, "BR-BRAUMAT-4", "404", brewhouse_line_id)
     calls = {"n": 0}
 
     def fake_parse(data):
@@ -225,8 +243,8 @@ def test_import_conflicting_batch_numbers_across_files_rejected(client, admin_h,
     assert "khác nhau" in resp.json()["detail"]
 
 
-def test_import_all_files_empty_rejected(client, admin_h, monkeypatch):
-    brew_id, batch_id = _setup_batch(client, admin_h, "BR-BRAUMAT-5", "405")
+def test_import_all_files_empty_rejected(client, admin_h, monkeypatch, brewhouse_line_id):
+    brew_id, batch_id = _setup_batch(client, admin_h, "BR-BRAUMAT-5", "405", brewhouse_line_id)
     monkeypatch.setattr(bi, "parse_step_protocol_pdf", lambda data: {
         "order_number": "00171", "recipe_category": "BrewHouse", "recipe": None,
         "batch_number": None, "units": {},
@@ -236,20 +254,20 @@ def test_import_all_files_empty_rejected(client, admin_h, monkeypatch):
     assert resp.status_code == 409, resp.text
 
 
-def test_import_requires_batch_execute_permission(client, admin_h, monkeypatch):
+def test_import_requires_batch_execute_permission(client, admin_h, monkeypatch, brewhouse_line_id):
     """kcs (quality.release only) không được import — chỉ vanhanh/admin (batch.execute)."""
     kcs_h = _login(client, "kcs", "123456")
-    brew_id, batch_id = _setup_batch(client, admin_h, "BR-BRAUMAT-6", "406")
+    brew_id, batch_id = _setup_batch(client, admin_h, "BR-BRAUMAT-6", "406", brewhouse_line_id)
     monkeypatch.setattr(bi, "parse_step_protocol_pdf", lambda data: _fake_parsed(batch_number="BATCH-6"))
     resp = client.post(f"/api/brewing/brews/{brew_id}/batches/{batch_id}/process-log/import",
                        headers=kcs_h, files=[("files", ("a.pdf", b"x", "application/pdf"))])
     assert resp.status_code == 403, resp.text
 
 
-def test_update_manual_fields(client, admin_h):
+def test_update_manual_fields(client, admin_h, brewhouse_line_id):
     """Ghi chép nấu (Thực hiện) — manual_json chấp nhận bất kỳ key nào trong
     MANUAL_FIELD_KEYS (bao gồm cả các bước nhiệt độ VD rc_step1_nhietdo)."""
-    brew_id, batch_id = _setup_batch(client, admin_h, "BR-BRAUMAT-7", "407")
+    brew_id, batch_id = _setup_batch(client, admin_h, "BR-BRAUMAT-7", "407", brewhouse_line_id)
     resp = client.put(f"/api/brewing/brews/{brew_id}/batches/{batch_id}/process-log", headers=admin_h,
                       json={"rc_ph_nuoc": 7.1, "wk_houb1_hoacao_kg": 2.5, "whp_maturex_pro_added": True,
                             "rc_step1_nhietdo": 71.3, "rc_step1_batdau": "3:20", "note": "ghi chú thử"})
@@ -298,7 +316,7 @@ def test_product_brew_spec_get_update_and_admin_gating(client, admin_h):
     assert get2.json()["rc_nuoc_hl"] == 28
 
 
-def test_process_log_includes_spec_from_brew_product(client, admin_h):
+def test_process_log_includes_spec_from_brew_product(client, admin_h, brewhouse_line_id):
     """GET /process-log phải trả spec (Quy định) tra theo product_id của mã nấu, để FE
     hiện Quy định cạnh Thực hiện — dùng chung 1 bộ key giữa spec_json và manual_json."""
     p = client.post("/api/products", headers=admin_h,
@@ -311,7 +329,8 @@ def test_process_log_includes_spec_from_brew_product(client, admin_h):
                     json={"brew_code": "BR-SPEC-TEST", "wort_type": "Dich test", "volume_hl": 100,
                           "product_id": product_id, "brew_order_id": order_id})
     brew_id = b.json()["brew_id"]
-    mb = client.post(f"/api/brewing/brews/{brew_id}/batches", headers=admin_h, json={"batch_code": "301"})
+    mb = client.post(f"/api/brewing/brews/{brew_id}/batches", headers=admin_h,
+                     json={"batch_code": "301", "line_id": brewhouse_line_id})
     batch_id = mb.json()["batch_id"]
 
     get_resp = client.get(f"/api/brewing/brews/{brew_id}/batches/{batch_id}/process-log", headers=admin_h)
@@ -319,12 +338,12 @@ def test_process_log_includes_spec_from_brew_product(client, admin_h):
     assert get_resp.json()["spec"]["rc_nuoc_hl"] == 28
 
 
-def test_list_process_steps_orders_by_real_process_sequence(client, admin_h, monkeypatch):
+def test_list_process_steps_orders_by_real_process_sequence(client, admin_h, monkeypatch, brewhouse_line_id):
     """GET phải trả steps theo đúng thứ tự dây nấu thật (RiceCooker -> MashTun -> ... ->
     Whirlpool), không phải alphabet (alphabet sẽ đưa MashTun lên trước RiceCooker). Cũng
     xác nhận tên unit kèm số hiệu nồi/dây (VD 'Holding Vessel 01'/'02' — nhà máy có 2 dây
     nấu, mỗi dây 1 nồi trung gian riêng) được giữ nguyên vẹn, không bị cắt/gộp."""
-    brew_id, batch_id = _setup_batch(client, admin_h, "BR-BRAUMAT-9", "409")
+    brew_id, batch_id = _setup_batch(client, admin_h, "BR-BRAUMAT-9", "409", brewhouse_line_id)
 
     def fake_parsed():
         step = lambda: {"step_no": 1, "eop": "1.0", "name": "X", "start": "10.07.26 03:00:00",
@@ -347,8 +366,8 @@ def test_list_process_steps_orders_by_real_process_sequence(client, admin_h, mon
     ]
 
 
-def test_delete_batch_cascades_process_log_and_steps(client, admin_h, monkeypatch):
-    brew_id, batch_id = _setup_batch(client, admin_h, "BR-BRAUMAT-8", "408")
+def test_delete_batch_cascades_process_log_and_steps(client, admin_h, monkeypatch, brewhouse_line_id):
+    brew_id, batch_id = _setup_batch(client, admin_h, "BR-BRAUMAT-8", "408", brewhouse_line_id)
     monkeypatch.setattr(bi, "parse_step_protocol_pdf", lambda data: _fake_parsed(batch_number="BATCH-8"))
     client.post(f"/api/brewing/brews/{brew_id}/batches/{batch_id}/process-log/import",
                headers=admin_h, files=[("files", ("a.pdf", b"x", "application/pdf"))])

@@ -151,6 +151,10 @@ class BrewBatch(Base):
 
     batch_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
     brew_id: Mapped[str] = mapped_column(ForeignKey("brew_record.brew_id"), index=True)
+    # Dây chuyền/nhà nấu (ProductionLine.kind="brewhouse") thực hiện mẻ này — bắt buộc ở tầng
+    # API/UI (BrewBatchIn.line_id không Optional), nullable ở DB để không vỡ dữ liệu mẻ cũ
+    # đã có sẵn trước khi thêm trường này.
+    line_id: Mapped[Optional[str]] = mapped_column(ForeignKey("production_line.line_id"), nullable=True, index=True)
     batch_code: Mapped[str] = mapped_column(Unicode(64), index=True)  # số mẻ, VD "123"
     batch_year: Mapped[int] = mapped_column(Integer, index=True)  # năm của started_at — phạm vi reset số mẻ
     seq: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)

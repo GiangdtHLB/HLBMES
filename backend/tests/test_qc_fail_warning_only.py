@@ -46,6 +46,23 @@ def vanhanh_h(client):
     return _login(client, "vanhanh", "123456")
 
 
+def _a_brewhouse_line(client, admin_h):
+    """Dây chuyền nấu (ProductionLine.kind="brewhouse") dùng cho test — lấy lại nếu đã có
+    (idempotent), tạo mới nếu chưa có (seed.py không seed sẵn dây chuyền loại brewhouse)."""
+    existing = client.get("/api/lines", headers=admin_h, params={"kind": "brewhouse"}).json()
+    if existing:
+        return existing[0]["line_id"]
+    r = client.post("/api/lines", headers=admin_h,
+                    json={"code": "BREW-TEST-01", "name": "Nhà nấu test", "kind": "brewhouse"})
+    assert r.status_code == 201, r.text
+    return r.json()["line_id"]
+
+
+@pytest.fixture(scope="module")
+def brewhouse_line_id(client, admin_h):
+    return _a_brewhouse_line(client, admin_h)
+
+
 def _make_group_with_param(client, admin_h, suffix):
     p = client.post("/api/qc/parameters", headers=admin_h,
                     json={"code": f"CT_{suffix}", "name": f"Chỉ tiêu {suffix}", "lsl": 1, "usl": 10})
@@ -87,7 +104,7 @@ def _declare_fail(client, headers, stage, scope_type, scope_id, code):
     assert r.json()["status"] == "fail"
 
 
-def test_fail_warns_but_does_not_block_full_chain(client, admin_h, vanhanh_h):
+def test_fail_warns_but_does_not_block_full_chain(client, admin_h, vanhanh_h, brewhouse_line_id):
     suffix = "WARNONLY"
     nau_group, nau_code = _make_group_with_param(client, admin_h, f"{suffix}_NAU")
     chinh_group, chinh_code = _make_group_with_param(client, admin_h, f"{suffix}_CHINH")
@@ -115,7 +132,7 @@ def test_fail_warns_but_does_not_block_full_chain(client, admin_h, vanhanh_h):
         brew_id = brew.json()["brew_id"]
 
         batch = client.post(f"/api/brewing/brews/{brew_id}/batches", headers=vanhanh_h,
-                            json={"batch_code": "601"})
+                            json={"batch_code": "601", "line_id": brewhouse_line_id})
         assert batch.status_code == 201, batch.text
         batch_id = batch.json()["batch_id"]
         fin_batch = client.post(f"/api/brewing/brews/{brew_id}/batches/{batch_id}/finish", headers=vanhanh_h)

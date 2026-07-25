@@ -4110,7 +4110,11 @@ async function openCopyMaterialsSuggestModal(brewId, source, target, onDone) {
 
 // ---- Modal: các mẻ thuộc 1 mã nấu — mỗi mẻ có Chỉ tiêu + NVL riêng ----
 async function openBrewBatchesModal(brewId, brewCode, productId, locked = false) {
-  const batches = await GET(`/brewing/brews/${brewId}/batches`);
+  const [batches, allLines] = await Promise.all([
+    GET(`/brewing/brews/${brewId}/batches`), GET("/lines").catch(() => [])]);
+  // Chỉ show dây chuyền NẤU (kind="brewhouse") trong danh mục — khác dây chuyền đóng gói
+  // (kind="line") hay tank lên men (kind="tank"), xem models/lines.py::ProductionLine.kind.
+  const brewLines = allLines.filter(l => l.kind === "brewhouse" && l.active);
   // locked = mã nấu đã bị khóa (Khóa lô) — vẫn cho xem đầy đủ dữ liệu (Chỉ tiêu/+NVL/Ghi
   // chép nấu là các modal xem-là-chính, backend đã tự chặn ghi qua _assert_unlocked), chỉ ẩn
   // các thao tác THUẦN SỬA/XÓA (Kết thúc, Xóa mẻ, + Thêm mẻ, Gợi ý NVL) vì chúng không có giá
@@ -4119,9 +4123,10 @@ async function openBrewBatchesModal(brewId, brewCode, productId, locked = false)
   modal(`<h3>Các mẻ thuộc mã nấu — <code class="k">${esc(brewCode)}</code></h3>
     ${locked ? '<div class="muted" style="margin-bottom:8px">🔒 Mã nấu đã khóa — chỉ xem, không sửa/xóa được.</div>' : ""}
     <div class="tablewrap"><table>
-      <thead><tr><th>Số mẻ</th><th>Mã mẻ</th><th>Bắt đầu</th><th>Kết thúc</th><th>Trạng thái</th><th>Ghi chú</th><th></th></tr></thead>
+      <thead><tr><th>Số mẻ</th><th>Mã mẻ</th><th>Dây chuyền</th><th>Bắt đầu</th><th>Kết thúc</th><th>Trạng thái</th><th>Ghi chú</th><th></th></tr></thead>
       <tbody>${batches.map(b => `<tr>
         <td>${b.seq ?? "—"}</td><td class="code">${holdBadgeHtml(b)}${esc(b.batch_code)}</td>
+        <td class="muted">${esc(b.line_code || "—")}</td>
         <td>${fmt(b.started_at || b.created_at)}</td><td>${fmt(b.ended_at)}</td>
         <td>${badge(b.exec_status === "hoan_thanh" ? "completed" : "in_progress")}${esc(b.exec_status_label)}</td>
         <td class="muted">${esc(b.note || "—")}</td>
@@ -4131,7 +4136,7 @@ async function openBrewBatchesModal(brewId, brewCode, productId, locked = false)
           <button class="btn sm sec" data-processlog="${esc(brewId)}|${esc(b.batch_id)}|${esc(b.batch_code)}">Ghi chép nấu</button>
           ${locked ? "" : `<button class="btn sm ${b.exec_status === "hoan_thanh" ? "sec" : ""}" data-finishbatch="${esc(b.batch_id)}" data-endedat="${esc(b.ended_at || "")}">${b.exec_status === "hoan_thanh" ? "Sửa giờ KT" : "Kết thúc"}</button>
           <button class="btn sm sec" data-delbatch="${esc(b.batch_id)}">Xóa</button>`}
-        </td></tr>`).join("") || `<tr><td colspan=7 class="muted">Chưa có mẻ nào — thêm mẻ bên dưới.</td></tr>`}</tbody>
+        </td></tr>`).join("") || `<tr><td colspan=8 class="muted">Chưa có mẻ nào — thêm mẻ bên dưới.</td></tr>`}</tbody>
     </table></div>
     ${!locked && batches.length > 1 ? `<div class="row" style="margin-top:8px;align-items:end">
       <div class="field"><label>Gợi ý NVL từ mẻ đầu (${esc(batches[0].batch_code)}) cho mẻ</label>
@@ -4142,10 +4147,15 @@ async function openBrewBatchesModal(brewId, brewCode, productId, locked = false)
     ${locked ? "" : `<h4 style="margin-top:14px">+ Thêm mẻ</h4>
     <div class="row">
       <div class="field" style="min-width:220px"><label>Mã mẻ</label><input id="bb_code" type="number" min="1" step="1" placeholder="VD: 123"/></div>
+      <div class="field"><label>Dây chuyền nấu *</label><select id="bb_line">
+        <option value="">-- Chọn dây chuyền --</option>
+        ${brewLines.map(l => `<option value="${esc(l.line_id)}">${esc(l.code)} — ${esc(l.name)}</option>`).join("")}
+      </select></div>
       <div class="field"><label>Giờ bắt đầu</label><input id="bb_started" type="datetime-local" value="${toDTLocal(new Date())}"/></div>
       <div class="field"><label>Ghi chú</label><input id="bb_note" placeholder="(tuỳ chọn)"/></div>
       <button class="btn" id="bb_add" style="align-self:flex-end">Thêm</button>
-    </div>`}`);
+    </div>
+    ${brewLines.length === 0 ? '<div class="muted" style="font-size:12px;margin-top:2px">Chưa có dây chuyền nấu nào trong Danh mục — vào Danh mục › Dây chuyền, thêm dây chuyền loại "Nhà nấu (brewhouse)".</div>' : ""}`}`);
   if ($("bb_add")) $("bb_add").onclick = () => guard(async () => {
     // Chỉ thêm 1 mẻ mỗi lần — trước đây cho nhập nhiều mã mẻ cách nhau bằng dấu phẩy
     // nhưng tất cả sẽ dùng chung 1 giờ bắt đầu (sai thực tế), nên bỏ tạo hàng loạt.
@@ -4153,10 +4163,12 @@ async function openBrewBatchesModal(brewId, brewCode, productId, locked = false)
     // Mã mẻ (số mẻ Braumat) bắt buộc là số nguyên dương, duy nhất trong năm — xem
     // routers/brewing.py::add_brew_batch.
     if (!code || !/^\d+$/.test(code) || parseInt(code, 10) <= 0) throw new Error("Nhập mã mẻ là số nguyên dương (VD: 123).");
+    const line_id = $("bb_line").value;
+    if (!line_id) throw new Error("Chọn dây chuyền nấu.");
     const note = $("bb_note").value.trim() || null;
     const startedRaw = $("bb_started").value;
     const started_at = startedRaw ? new Date(startedRaw).toISOString() : null;
-    await POST(`/brewing/brews/${brewId}/batches`, { batch_code: code, seq: batches.length + 1, note, started_at });
+    await POST(`/brewing/brews/${brewId}/batches`, { batch_code: code, line_id, seq: batches.length + 1, note, started_at });
     toast("Đã thêm mẻ"); render("process"); openBrewBatchesModal(brewId, brewCode, productId, locked);
   });
   document.querySelectorAll("[data-finishbatch]").forEach(b => b.onclick = () => {
@@ -5862,8 +5874,10 @@ VIEWS.process = async function () {
 
   else if (sec === "lenmen") {
     const data = await GET("/brewing/ferments");
-    const stLabel = { len_men: "Đang lên men", loc_mot_phan: "Lọc 1 phần", da_loc_het: "Lọc hết" };
-    const stBadge = { len_men: "running", loc_mot_phan: "due", da_loc_het: "done" };
+    // dang_nau: còn mẻ nấu nào của mã nấu nạp vào tank này chưa "Kết thúc" — chưa thật sự
+    // lên men dù đã có dịch trong tank, xem services/derived.py::ferment_status.
+    const stLabel = { dang_nau: "Đang nấu", len_men: "Đang lên men", loc_mot_phan: "Lọc 1 phần", da_loc_het: "Lọc hết" };
+    const stBadge = { dang_nau: "in_progress", len_men: "running", loc_mot_phan: "due", da_loc_het: "done" };
     const canApproveLm = _hasPerm("quality.release");
     const canLockLot = _hasPerm("quality.release");
     const isAdminLot = CURRENT_USER && CURRENT_USER.role === "admin";

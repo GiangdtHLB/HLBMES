@@ -47,6 +47,23 @@ def vanhanh_h(client):
     return _login(client, "vanhanh", "123456")
 
 
+def _a_brewhouse_line(client, admin_h):
+    """Dây chuyền nấu (ProductionLine.kind="brewhouse") dùng cho test — lấy lại nếu đã có
+    (idempotent), tạo mới nếu chưa có (seed.py không seed sẵn dây chuyền loại brewhouse)."""
+    existing = client.get("/api/lines", headers=admin_h, params={"kind": "brewhouse"}).json()
+    if existing:
+        return existing[0]["line_id"]
+    r = client.post("/api/lines", headers=admin_h,
+                    json={"code": "BREW-TEST-01", "name": "Nhà nấu test", "kind": "brewhouse"})
+    assert r.status_code == 201, r.text
+    return r.json()["line_id"]
+
+
+@pytest.fixture(scope="module")
+def brewhouse_line_id(client, admin_h):
+    return _a_brewhouse_line(client, admin_h)
+
+
 def _declare_pending(client, headers, stage, scope_type, scope_id):
     status = client.get(f"/api/brewing/qc-status?stage={stage}&scope_type={scope_type}&scope_id={scope_id}",
                         headers=headers).json()
@@ -61,7 +78,7 @@ def _declare_pending(client, headers, stage, scope_type, scope_id):
             assert r.status_code == 201, r.text
 
 
-def _build_full_chain(client, admin_h, vanhanh_h, suffix):
+def _build_full_chain(client, admin_h, vanhanh_h, suffix, line_id):
     """Dựng 1 chuỗi đầy đủ Lệnh nấu -> mã nấu -> mẻ (finish+đủ chỉ tiêu) -> lô LM (duyệt) ->
     Lệnh lọc -> mẻ lọc (finish+duyệt) -> mẻ chiết (finish+duyệt) — mọi điều kiện "tự hoàn
     thành" đã đủ cho TỪNG công đoạn, nhưng CHƯA khóa gì cả. Trả về dict id."""
@@ -79,7 +96,7 @@ def _build_full_chain(client, admin_h, vanhanh_h, suffix):
     brew_id = brew.json()["brew_id"]
 
     batch = client.post(f"/api/brewing/brews/{brew_id}/batches", headers=vanhanh_h,
-                        json={"batch_code": str(700 + ord(suffix) - ord("A"))})
+                        json={"batch_code": str(700 + ord(suffix) - ord("A")), "line_id": line_id})
     assert batch.status_code == 201, batch.text
     batch_id = batch.json()["batch_id"]
     fin_batch = client.post(f"/api/brewing/brews/{brew_id}/batches/{batch_id}/finish", headers=vanhanh_h)
@@ -148,8 +165,8 @@ def _filter_master_order_locked(client, admin_h, filter_master_order_id):
     return next(m for m in masters if m["filter_master_order_id"] == filter_master_order_id)["locked"]
 
 
-def test_lock_requires_forward_order_and_own_completion(client, admin_h, vanhanh_h):
-    ids = _build_full_chain(client, admin_h, vanhanh_h, "A")
+def test_lock_requires_forward_order_and_own_completion(client, admin_h, vanhanh_h, brewhouse_line_id):
+    ids = _build_full_chain(client, admin_h, vanhanh_h, "A", brewhouse_line_id)
 
     # Không thể khóa Lên men khi Nấu (mã nấu nguồn) chưa khóa.
     r = client.post(f"/api/brewing/ferments/{ids['ferment_id']}/lock-lot", headers=admin_h)
@@ -192,14 +209,14 @@ def test_lock_requires_forward_order_and_own_completion(client, admin_h, vanhanh
     assert next(b for b in bottles if b["bottle_id"] == ids["bottle_id"])["locked"] is True
 
 
-def test_lock_blocks_mutations_at_locked_stage(client, admin_h, vanhanh_h):
-    ids = _build_full_chain(client, admin_h, vanhanh_h, "B")
+def test_lock_blocks_mutations_at_locked_stage(client, admin_h, vanhanh_h, brewhouse_line_id):
+    ids = _build_full_chain(client, admin_h, vanhanh_h, "B", brewhouse_line_id)
     r = client.post(f"/api/brewing/brews/{ids['brew_id']}/lock-lot", headers=admin_h)
     assert r.status_code == 200, r.text
 
     # Mã nấu đã khóa -> thêm mẻ mới bị chặn.
     add_batch = client.post(f"/api/brewing/brews/{ids['brew_id']}/batches", headers=vanhanh_h,
-                            json={"batch_code": "799"})
+                            json={"batch_code": "799", "line_id": brewhouse_line_id})
     assert add_batch.status_code == 409, add_batch.text
 
     # Lệnh nấu đã tự khóa theo -> xóa bị chặn.
@@ -214,14 +231,14 @@ def test_lock_blocks_mutations_at_locked_stage(client, admin_h, vanhanh_h):
     assert qc.status_code == 201, qc.text
 
 
-def test_lock_requires_permission(client, admin_h, vanhanh_h):
-    ids = _build_full_chain(client, admin_h, vanhanh_h, "C")
+def test_lock_requires_permission(client, admin_h, vanhanh_h, brewhouse_line_id):
+    ids = _build_full_chain(client, admin_h, vanhanh_h, "C", brewhouse_line_id)
     r = client.post(f"/api/brewing/brews/{ids['brew_id']}/lock-lot", headers=vanhanh_h)
     assert r.status_code == 403, r.text
 
 
-def test_unlock_requires_admin_and_reverse_order(client, admin_h, vanhanh_h):
-    ids = _build_full_chain(client, admin_h, vanhanh_h, "D")
+def test_unlock_requires_admin_and_reverse_order(client, admin_h, vanhanh_h, brewhouse_line_id):
+    ids = _build_full_chain(client, admin_h, vanhanh_h, "D", brewhouse_line_id)
     for kind, id_ in (("brews", ids["brew_id"]), ("ferments", ids["ferment_id"]),
                      ("filters", ids["filter_id"]), ("bottles", ids["bottle_id"])):
         r = client.post(f"/api/brewing/{kind}/{id_}/lock-lot", headers=admin_h)
@@ -260,11 +277,11 @@ def test_unlock_requires_admin_and_reverse_order(client, admin_h, vanhanh_h):
     assert fin.status_code == 200, fin.text
 
 
-def test_colors_computed_live_from_real_data_not_manual_flags(client, admin_h, vanhanh_h):
+def test_colors_computed_live_from_real_data_not_manual_flags(client, admin_h, vanhanh_h, brewhouse_line_id):
     """Phần 1 của plan gốc — màu Nấu/Lên men/Lọc/Chiết phải phản ánh dữ liệu nhập qua ĐÚNG
     endpoint thật (POST /qc-results, POST /materials, ...), không phải cột has_indicators/
     has_nvl (đã xác nhận là cờ chết, xem routers/brewing.py::_stage_ok)."""
-    ids = _build_full_chain(client, admin_h, vanhanh_h, "E")
+    ids = _build_full_chain(client, admin_h, vanhanh_h, "E", brewhouse_line_id)
 
     brews = client.get("/api/brewing/brews", headers=admin_h).json()
     brew_row = next(b for b in brews if b["brew_id"] == ids["brew_id"])

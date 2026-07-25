@@ -53,6 +53,23 @@ def lager_product_id(client, admin_h):
     return next(p["product_id"] for p in products if p["code"] == "BIA-LAGER")
 
 
+def _a_brewhouse_line(client, admin_h):
+    """Dây chuyền nấu (ProductionLine.kind="brewhouse") dùng cho test — lấy lại nếu đã có
+    (idempotent), tạo mới nếu chưa có (seed.py không seed sẵn dây chuyền loại brewhouse)."""
+    existing = client.get("/api/lines", headers=admin_h, params={"kind": "brewhouse"}).json()
+    if existing:
+        return existing[0]["line_id"]
+    r = client.post("/api/lines", headers=admin_h,
+                    json={"code": "BREW-TEST-01", "name": "Nhà nấu test", "kind": "brewhouse"})
+    assert r.status_code == 201, r.text
+    return r.json()["line_id"]
+
+
+@pytest.fixture(scope="module")
+def brewhouse_line_id(client, admin_h):
+    return _a_brewhouse_line(client, admin_h)
+
+
 def _child(product_id=None, planned_volume_hl=100.0, volume_tolerance_hl=0.0, lines=None):
     return {"product_id": product_id, "planned_batch_count": 1,
             "planned_volume_hl": planned_volume_hl, "volume_tolerance_hl": volume_tolerance_hl,
@@ -85,11 +102,11 @@ def _a_brew_record(client, vanhanh_h, brew_order_id, suffix, tank_lm=None):
     return r.json()["brew_id"]
 
 
-def _finish_batch_ready_to_lock(client, vanhanh_h, brew_id, batch_code):
+def _finish_batch_ready_to_lock(client, vanhanh_h, brew_id, batch_code, line_id):
     """Tạo 1 mẻ, bấm Kết thúc, khai báo đủ chỉ tiêu bắt buộc "nau" — đủ điều kiện (a) để
     lock_brew (xem services/lot_lock.py::lock_brew)."""
     batch = client.post(f"/api/brewing/brews/{brew_id}/batches", headers=vanhanh_h,
-                        json={"batch_code": batch_code})
+                        json={"batch_code": batch_code, "line_id": line_id})
     assert batch.status_code == 201, batch.text
     batch_id = batch.json()["batch_id"]
     fin = client.post(f"/api/brewing/brews/{brew_id}/batches/{batch_id}/finish", headers=vanhanh_h)
@@ -98,9 +115,9 @@ def _finish_batch_ready_to_lock(client, vanhanh_h, brew_id, batch_code):
     return batch_id
 
 
-def _set_real_actual_volume(client, admin_h, brew_id, batch_code, volume_hl, finish=True):
+def _set_real_actual_volume(client, admin_h, brew_id, batch_code, volume_hl, line_id, finish=True):
     b = client.post(f"/api/brewing/brews/{brew_id}/batches", headers=admin_h,
-                    json={"batch_code": batch_code})
+                    json={"batch_code": batch_code, "line_id": line_id})
     assert b.status_code == 201, b.text
     batch_id = b.json()["batch_id"]
     p = client.put(f"/api/brewing/brews/{brew_id}/batches/{batch_id}/process-log", headers=admin_h,
@@ -172,7 +189,7 @@ def test_create_master_order_duplicate_code_blocked(client, admin_h):
     assert dup.status_code == 409, dup.text
 
 
-def test_executing_one_child_does_not_complete_sibling(client, admin_h, vanhanh_h):
+def test_executing_one_child_does_not_complete_sibling(client, admin_h, vanhanh_h, brewhouse_line_id):
     payload = {"order_code": "LN-LON-EXEC", "children": [
         _child(planned_volume_hl=100), _child(planned_volume_hl=100)]}
     created = client.post("/api/brewing/brew-master-orders", headers=admin_h, json=payload)
@@ -182,7 +199,7 @@ def test_executing_one_child_does_not_complete_sibling(client, admin_h, vanhanh_
     child0_id, child1_id = detail["children"][0]["brew_order_id"], detail["children"][1]["brew_order_id"]
 
     brew0 = _a_brew_record(client, vanhanh_h, child0_id, "BMOEXEC1")
-    _set_real_actual_volume(client, admin_h, brew0, "911", 100)
+    _set_real_actual_volume(client, admin_h, brew0, "911", 100, brewhouse_line_id)
 
     mid = client.get(f"/api/brewing/brew-master-orders/{master_id}", headers=admin_h).json()
     c0, c1 = mid["children"]
@@ -191,7 +208,7 @@ def test_executing_one_child_does_not_complete_sibling(client, admin_h, vanhanh_
     assert mid["is_complete_all"] is False
 
     brew1 = _a_brew_record(client, vanhanh_h, child1_id, "BMOEXEC2")
-    _set_real_actual_volume(client, admin_h, brew1, "912", 100)
+    _set_real_actual_volume(client, admin_h, brew1, "912", 100, brewhouse_line_id)
 
     final = client.get(f"/api/brewing/brew-master-orders/{master_id}", headers=admin_h).json()
     assert final["is_complete_all"] is True
@@ -264,7 +281,7 @@ def test_flat_brew_order_endpoint_still_works_standalone(client, admin_h):
     assert detail["master_order_code"] is None
 
 
-def test_lock_cascade_from_brew_to_master(client, admin_h, vanhanh_h):
+def test_lock_cascade_from_brew_to_master(client, admin_h, vanhanh_h, brewhouse_line_id):
     created = client.post("/api/brewing/brew-master-orders", headers=admin_h,
                           json={"order_code": "LN-LON-LOCK", "children": [_child(), _child()]})
     assert created.status_code == 201, created.text
@@ -273,9 +290,9 @@ def test_lock_cascade_from_brew_to_master(client, admin_h, vanhanh_h):
     child0_id, child1_id = detail["children"][0]["brew_order_id"], detail["children"][1]["brew_order_id"]
 
     brew0 = _a_brew_record(client, vanhanh_h, child0_id, "BMOLOCK1")
-    _finish_batch_ready_to_lock(client, vanhanh_h, brew0, "901")
+    _finish_batch_ready_to_lock(client, vanhanh_h, brew0, "901", brewhouse_line_id)
     brew1 = _a_brew_record(client, vanhanh_h, child1_id, "BMOLOCK2")
-    _finish_batch_ready_to_lock(client, vanhanh_h, brew1, "902")
+    _finish_batch_ready_to_lock(client, vanhanh_h, brew1, "902", brewhouse_line_id)
 
     lock0 = client.post(f"/api/brewing/brews/{brew0}/lock-lot", headers=admin_h)
     assert lock0.status_code == 200, lock0.text

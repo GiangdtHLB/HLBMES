@@ -12,7 +12,7 @@ from ..models.brewing import BottleRecord, BrewBatch, BrewRecord, FermentBrewLin
 from . import derived
 
 NAU_LABEL = {"chua_co_me": "Chưa có mẻ", "dang_thuc_hien": "Đang thực hiện", "hoan_thanh": "Hoàn thành"}
-LEN_MEN_LABEL = {"len_men": "Đang lên men", "loc_mot_phan": "Lọc 1 phần", "da_loc_het": "Lọc hết"}
+LEN_MEN_LABEL = {"dang_nau": "Đang nấu", "len_men": "Đang lên men", "loc_mot_phan": "Lọc 1 phần", "da_loc_het": "Lọc hết"}
 LOC_LABEL = {"chua_loc": "Chưa lọc", "dang_loc": "Đang lọc", "da_ket_thuc": "Đã kết thúc"}
 CHIET_LABEL = {"chua_chiet": "Chưa chiết", "dang_chiet": "Đang chiết", "da_ket_thuc": "Đã kết thúc"}
 

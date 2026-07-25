@@ -51,6 +51,23 @@ def thukho_h(client):
     return _login(client, "thukho", "123456")
 
 
+def _a_brewhouse_line(client, admin_h):
+    """Dây chuyền nấu (ProductionLine.kind="brewhouse") dùng cho test — lấy lại nếu đã có
+    (idempotent), tạo mới nếu chưa có (seed.py không seed sẵn dây chuyền loại brewhouse)."""
+    existing = client.get("/api/lines", headers=admin_h, params={"kind": "brewhouse"}).json()
+    if existing:
+        return existing[0]["line_id"]
+    r = client.post("/api/lines", headers=admin_h,
+                    json={"code": "BREW-TEST-01", "name": "Nhà nấu test", "kind": "brewhouse"})
+    assert r.status_code == 201, r.text
+    return r.json()["line_id"]
+
+
+@pytest.fixture(scope="module")
+def brewhouse_line_id(client, admin_h):
+    return _a_brewhouse_line(client, admin_h)
+
+
 def _declare_pending(client, headers, stage, scope_type, scope_id, product_id=None, beer_type_id=None):
     q = f"/api/brewing/qc-status?stage={stage}&scope_type={scope_type}&scope_id={scope_id}"
     if product_id:
@@ -70,7 +87,7 @@ def _declare_pending(client, headers, stage, scope_type, scope_id, product_id=No
 
 
 @pytest.fixture(scope="module")
-def chain(client, admin_h, vanhanh_h, thukho_h):
+def chain(client, admin_h, vanhanh_h, thukho_h, brewhouse_line_id):
     suffix = "LOTRECORD01"
 
     lot_code = f"LOT-{suffix}"
@@ -94,7 +111,7 @@ def chain(client, admin_h, vanhanh_h, thukho_h):
 
     batch_code = "502"
     batch = client.post(f"/api/brewing/brews/{brew_id}/batches", headers=vanhanh_h,
-                        json={"batch_code": batch_code})
+                        json={"batch_code": batch_code, "line_id": brewhouse_line_id})
     assert batch.status_code == 201, batch.text
     batch_id = batch.json()["batch_id"]
 

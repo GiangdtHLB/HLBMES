@@ -33,6 +33,7 @@ from ..models.brewing import (
     MaterialReceipt,
     StageIndicator,
 )
+from ..models.lines import ProductionLine
 from ..models.master import BeerType, FinishedProduct, Material, Product
 from ..models.materials import GenealogyEdge, MaterialLot
 from ..models.quality import QualityResult
@@ -590,10 +591,16 @@ def list_all_brew_batches(db: Session = Depends(get_db)):
 def list_brew_batches(brew_id: str, db: Session = Depends(get_db)):
     rows = db.execute(select(BrewBatch).where(BrewBatch.brew_id == brew_id)
                       .order_by(BrewBatch.seq, BrewBatch.created_at)).scalars().all()
+    line_ids = {b.line_id for b in rows if b.line_id}
+    lines = {l.line_id: l for l in db.execute(select(ProductionLine).where(
+        ProductionLine.line_id.in_(line_ids))).scalars().all()} if line_ids else {}
     out = []
     for b in rows:
         exec_status = _exec_status(b.ended_at)
+        line = lines.get(b.line_id)
         out.append({"batch_id": b.batch_id, "brew_id": b.brew_id, "batch_code": b.batch_code,
+                    "line_id": b.line_id, "line_code": line.code if line else None,
+                    "line_name": line.name if line else None,
                     "seq": b.seq, "note": b.note, "created_at": b.created_at,
                     "started_at": b.started_at, "ended_at": b.ended_at,
                     "exec_status": exec_status, "exec_status_label": EXEC_STATUS[exec_status],
@@ -609,6 +616,9 @@ def add_brew_batch(brew_id: str, payload: BrewBatchIn, db: Session = Depends(get
     if not brew:
         raise NotFoundError("Bản ghi nấu không tồn tại.")
     _assert_unlocked(brew, order)
+    line = db.get(ProductionLine, payload.line_id)
+    if not line or line.kind != "brewhouse":
+        raise DomainError("Dây chuyền nấu không hợp lệ — phải chọn từ Danh mục dây chuyền (loại: Nhà nấu/brewhouse).")
     data = payload.model_dump()
     if not data.get("started_at"):
         data["started_at"] = utcnow()
@@ -623,6 +633,12 @@ def add_brew_batch(brew_id: str, payload: BrewBatchIn, db: Session = Depends(get
     db.add(batch); db.flush()
     genealogy.add_edge(db, from_type="brew_batch", from_id=batch.batch_id, to_type="brew",
                        to_id=brew_id, relation="mẻ")
+    # Mẻ mới thêm chưa "Kết thúc" — nếu tank lên men trước đó đã coi là nạp đầy (kt_date có
+    # giá trị) thì phải tính lại về rỗng, đưa trạng thái lên men về "đang nấu" cho tới khi mẻ
+    # mới này (và mọi mẻ khác) cũng kết thúc — xem services/derived.py::ferment_status.
+    link = db.execute(select(FermentBrewLink).where(FermentBrewLink.brew_id == brew_id)).scalar_one_or_none()
+    if link:
+        _sync_ferment_kt_date(db, link.ferment_id)
     db.commit(); db.refresh(batch)
     return batch
 

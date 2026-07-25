@@ -19,8 +19,14 @@ from ..models.quality import QualityResult
 
 
 def ferment_status(r: FermentRecord) -> str:
-    """Trạng thái lên men suy ra từ tồn CCT thật (on_hand_cct), không dùng cột status tĩnh:
-    chưa lọc gì (đang lên men) / đã lọc một phần / đã lọc hết (on_hand_cct về 0)."""
+    """Trạng thái lên men suy ra từ dữ liệu thật, không dùng cột status tĩnh:
+    - `kt_date` rỗng (chưa nạp đầy tank — còn mẻ nào của mã nấu nạp vào tank này chưa bấm
+      "Kết thúc", xem routers/brewing.py::_sync_ferment_kt_date) → "đang nấu", CHƯA thật sự
+      lên men dù đã có dịch trong tank.
+    - Từ lúc `kt_date` có giá trị (mẻ cuối đã kết thúc) mới xét theo tồn CCT thật
+      (on_hand_cct): chưa lọc gì (đang lên men) / đã lọc một phần / đã lọc hết (về 0)."""
+    if r.kt_date is None:
+        return "dang_nau"
     if r.on_hand_cct <= 1e-6:
         return "da_loc_het"
     if r.on_hand_cct < r.volume_hl - 1e-6:

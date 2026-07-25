@@ -46,6 +46,23 @@ def vanhanh_h(client):
     return _login(client, "vanhanh", "123456")
 
 
+def _a_brewhouse_line(client, admin_h):
+    """Dây chuyền nấu (ProductionLine.kind="brewhouse") dùng cho test — lấy lại nếu đã có
+    (idempotent), tạo mới nếu chưa có (seed.py không seed sẵn dây chuyền loại brewhouse)."""
+    existing = client.get("/api/lines", headers=admin_h, params={"kind": "brewhouse"}).json()
+    if existing:
+        return existing[0]["line_id"]
+    r = client.post("/api/lines", headers=admin_h,
+                    json={"code": "BREW-TEST-01", "name": "Nhà nấu test", "kind": "brewhouse"})
+    assert r.status_code == 201, r.text
+    return r.json()["line_id"]
+
+
+@pytest.fixture(scope="module")
+def brewhouse_line_id(client, admin_h):
+    return _a_brewhouse_line(client, admin_h)
+
+
 def _a_brew_order(client, admin_h, order_code):
     r = client.post("/api/brewing/orders", headers=admin_h,
                     json={"order_code": order_code, "auto_from_bom": False, "planned_volume_hl": 100})
@@ -63,28 +80,30 @@ def _a_brew(client, admin_h, vanhanh_h, suffix):
     return b.json()["brew_id"]
 
 
-def test_add_brew_batch_started_at_defaults_to_now(client, admin_h, vanhanh_h):
+def test_add_brew_batch_started_at_defaults_to_now(client, admin_h, vanhanh_h, brewhouse_line_id):
     brew_id = _a_brew(client, admin_h, vanhanh_h, "STARTDEFAULT")
     before = datetime.now(timezone.utc)
-    r = client.post(f"/api/brewing/brews/{brew_id}/batches", headers=vanhanh_h, json={"batch_code": "801"})
+    r = client.post(f"/api/brewing/brews/{brew_id}/batches", headers=vanhanh_h,
+                    json={"batch_code": "801", "line_id": brewhouse_line_id})
     assert r.status_code == 201, r.text
     after = datetime.now(timezone.utc)
     started_at = datetime.fromisoformat(r.json()["started_at"])
     assert before - timedelta(seconds=5) <= started_at <= after + timedelta(seconds=5)
 
 
-def test_add_brew_batch_started_at_explicit_is_kept(client, admin_h, vanhanh_h):
+def test_add_brew_batch_started_at_explicit_is_kept(client, admin_h, vanhanh_h, brewhouse_line_id):
     brew_id = _a_brew(client, admin_h, vanhanh_h, "STARTEXPLICIT")
     explicit = "2026-01-15T08:30:00+00:00"
     r = client.post(f"/api/brewing/brews/{brew_id}/batches", headers=vanhanh_h,
-                    json={"batch_code": "802", "started_at": explicit})
+                    json={"batch_code": "802", "started_at": explicit, "line_id": brewhouse_line_id})
     assert r.status_code == 201, r.text
     assert r.json()["started_at"] == explicit
 
 
-def test_finish_brew_batch_requires_chosen_time_and_is_correctable(client, admin_h, vanhanh_h):
+def test_finish_brew_batch_requires_chosen_time_and_is_correctable(client, admin_h, vanhanh_h, brewhouse_line_id):
     brew_id = _a_brew(client, admin_h, vanhanh_h, "FINISHBATCH")
-    r = client.post(f"/api/brewing/brews/{brew_id}/batches", headers=vanhanh_h, json={"batch_code": "803"})
+    r = client.post(f"/api/brewing/brews/{brew_id}/batches", headers=vanhanh_h,
+                    json={"batch_code": "803", "line_id": brewhouse_line_id})
     batch_id = r.json()["batch_id"]
 
     rows = client.get(f"/api/brewing/brews/{brew_id}/batches", headers=admin_h).json()
@@ -109,9 +128,10 @@ def test_finish_brew_batch_requires_chosen_time_and_is_correctable(client, admin
     assert fixed.json()["ended_at"] == corrected
 
 
-def test_finish_brew_batch_defaults_to_now_without_explicit_time(client, admin_h, vanhanh_h):
+def test_finish_brew_batch_defaults_to_now_without_explicit_time(client, admin_h, vanhanh_h, brewhouse_line_id):
     brew_id = _a_brew(client, admin_h, vanhanh_h, "FINISHBATCHNOW")
-    r = client.post(f"/api/brewing/brews/{brew_id}/batches", headers=vanhanh_h, json={"batch_code": "804"})
+    r = client.post(f"/api/brewing/brews/{brew_id}/batches", headers=vanhanh_h,
+                    json={"batch_code": "804", "line_id": brewhouse_line_id})
     batch_id = r.json()["batch_id"]
     before = datetime.now(timezone.utc)
     ok = client.post(f"/api/brewing/brews/{brew_id}/batches/{batch_id}/finish", headers=vanhanh_h)
@@ -238,28 +258,32 @@ def test_finish_bottle_is_correctable(client, admin_h, vanhanh_h):
     assert fixed.json()["ended_at"] == "2026-02-01T09:45:00+00:00"
 
 
-def test_lo_status_report_full_chain(client, admin_h, vanhanh_h):
+def test_lo_status_report_full_chain(client, admin_h, vanhanh_h, brewhouse_line_id):
     brew_id, tank, ferment_id = _setup_ferment(client, admin_h, vanhanh_h, "LOSTATUS")
 
     def _row():
         rows = client.get("/api/reports/lo-status", headers=admin_h).json()
         return next(r for r in rows if r["brew_id"] == brew_id)
 
-    # Chưa có mẻ → "chua_co_me"; đã duyệt lên men nhưng chưa lọc → "chua_loc"/"chua_chiet".
+    # Chưa có mẻ nào → "chua_co_me"; chưa mẻ nào bấm Kết thúc nên lô LM vẫn "đang nấu"
+    # (kt_date rỗng, xem services/derived.py::ferment_status), CHƯA phải "đang lên men".
     row = _row()
     assert row["nau"] == "chua_co_me"
-    assert row["len_men"] == "len_men"
+    assert row["len_men"] == "dang_nau"
     assert row["loc"] == "chua_loc"
     assert row["chiet"] == "chua_chiet"
 
     batch = client.post(f"/api/brewing/brews/{brew_id}/batches", headers=vanhanh_h,
-                        json={"batch_code": "805"}).json()
+                        json={"batch_code": "805", "line_id": brewhouse_line_id}).json()
     row = _row()
     assert row["nau"] == "dang_thuc_hien"
+    assert row["len_men"] == "dang_nau"
 
     client.post(f"/api/brewing/brews/{brew_id}/batches/{batch['batch_id']}/finish", headers=vanhanh_h)
     row = _row()
     assert row["nau"] == "hoan_thanh"
+    # Mẻ duy nhất đã kết thúc → kt_date được set → chuyển sang "đang lên men".
+    assert row["len_men"] == "len_men"
 
     order_id = _a_filter_order(client, admin_h, "LOC-LOSTATUS", [ferment_id])
     f = client.post("/api/brewing/filters", headers=vanhanh_h,
@@ -289,7 +313,7 @@ def test_lo_status_report_full_chain(client, admin_h, vanhanh_h):
     assert row["chiet"] == "da_ket_thuc"
 
 
-def test_ferment_kt_date_blank_until_all_batches_finished(client, admin_h, vanhanh_h):
+def test_ferment_kt_date_blank_until_all_batches_finished(client, admin_h, vanhanh_h, brewhouse_line_id):
     """Ngày KT (nạp đầy tank) không nhập tay — PHẢI để trống chừng nào còn mẻ nào chưa bấm
     "Kết thúc" (tank chưa thật sự đầy); chỉ có giá trị khi TẤT CẢ mẻ đã xong, và giá trị đó
     là giờ kết thúc mẻ CUỐI CÙNG (lớn nhất), cập nhật lại nếu sửa giờ kết thúc sau đó."""
@@ -305,8 +329,10 @@ def test_ferment_kt_date_blank_until_all_batches_finished(client, admin_h, vanha
 
     assert _brew_row()["kt_date"] is None
 
-    b1 = client.post(f"/api/brewing/brews/{brew_id}/batches", headers=vanhanh_h, json={"batch_code": "806"}).json()
-    b2 = client.post(f"/api/brewing/brews/{brew_id}/batches", headers=vanhanh_h, json={"batch_code": "807"}).json()
+    b1 = client.post(f"/api/brewing/brews/{brew_id}/batches", headers=vanhanh_h,
+                     json={"batch_code": "806", "line_id": brewhouse_line_id}).json()
+    b2 = client.post(f"/api/brewing/brews/{brew_id}/batches", headers=vanhanh_h,
+                     json={"batch_code": "807", "line_id": brewhouse_line_id}).json()
 
     # Mẻ 1 xong nhưng mẻ 2 CHƯA — kt_date phải vẫn để trống, không được lấy giờ mẻ 1.
     client.post(f"/api/brewing/brews/{brew_id}/batches/{b1['batch_id']}/finish", headers=vanhanh_h,

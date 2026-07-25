@@ -53,6 +53,23 @@ def kcs_h(client):
     return _login(client, "kcs", "123456")
 
 
+def _a_brewhouse_line(client, admin_h):
+    """Dây chuyền nấu (ProductionLine.kind="brewhouse") dùng cho test — lấy lại nếu đã có
+    (idempotent), tạo mới nếu chưa có (seed.py không seed sẵn dây chuyền loại brewhouse)."""
+    existing = client.get("/api/lines", headers=admin_h, params={"kind": "brewhouse"}).json()
+    if existing:
+        return existing[0]["line_id"]
+    r = client.post("/api/lines", headers=admin_h,
+                    json={"code": "BREW-TEST-01", "name": "Nhà nấu test", "kind": "brewhouse"})
+    assert r.status_code == 201, r.text
+    return r.json()["line_id"]
+
+
+@pytest.fixture(scope="module")
+def brewhouse_line_id(client, admin_h):
+    return _a_brewhouse_line(client, admin_h)
+
+
 def _make_ferment(client, admin_h, vanhanh_h, suffix):
     """Dựng 1 lô LM tối thiểu (Lệnh nấu -> mã nấu với lm_code/tank_lm -> FermentRecord tự
     tạo) — đủ để test Ghi chép lên men, không cần đi hết chuỗi lọc/chiết."""
@@ -205,7 +222,7 @@ def test_locked_ferment_blocks_process_log_edits(client, admin_h, vanhanh_h):
     assert r2.status_code == 409, r2.text
 
 
-def test_auto_header_includes_real_braumat_order_and_batch_number(client, admin_h, vanhanh_h):
+def test_auto_header_includes_real_braumat_order_and_batch_number(client, admin_h, vanhanh_h, brewhouse_line_id):
     """Ghi chép lên men không tự nhập Order Number/Batch Number — lấy THẬT từ dữ liệu Braumat
     đã import ở mẻ nấu nguồn (BrewProcessLog.braumat_order_number/braumat_batch_number), gộp
     qua chuỗi FermentBrewLink -> BrewRecord -> BrewBatch -> BrewProcessLog (xem
@@ -219,7 +236,7 @@ def test_auto_header_includes_real_braumat_order_and_batch_number(client, admin_
                              "brew_order_id": order.json()["brew_order_id"]})
     assert brew.status_code == 201, brew.text
     batch = client.post(f"/api/brewing/brews/{brew.json()['brew_id']}/batches", headers=vanhanh_h,
-                        json={"batch_code": "9001"})
+                        json={"batch_code": "9001", "line_id": brewhouse_line_id})
     assert batch.status_code == 201, batch.text
 
     ferments = client.get("/api/brewing/ferments", headers=admin_h).json()["items"]
