@@ -2845,20 +2845,24 @@ VIEWS.warehouse_kc = async function () {
         ${movementHistoryBlockHtml("tra_ncc")}
       </div>
 
-      <div class="panel"><h2>🏁 Nhập tồn đầu</h2>
-        <div class="muted" style="margin-bottom:6px">Nạp số dư tồn kho ban đầu khi triển khai hệ thống (không qua nhận
-          hàng nhà cung cấp) — chọn đúng vị trí kho cần nạp.</div>
-        <div class="row"><div class="field"><label>Mã lô</label><input id="ob_code" placeholder="MALT-..."/></div>
+      <div class="panel"><h2>🏁 Nhập tồn đầu (kho công ty)</h2>
+        <div class="muted" style="margin-bottom:6px">Nạp số dư tồn kho ban đầu khi triển khai hệ thống (không qua nhận hàng nhà cung cấp).</div>
+        ${isAdminGiao
+          ? `<div class="row"><div class="field"><label>Mã lô</label><input id="ob_code" placeholder="MALT-..."/></div>
           <div class="field" style="position:relative"><label>Vật tư</label>
             <input type="text" id="ob_mat_txt" autocomplete="off" placeholder="Tìm mã/tên nguyên liệu..." value="${esc(matItemsGiao[0]?.label || "")}"/>
             <input type="hidden" id="ob_mat" value="${esc(matItemsGiao[0]?.value || "")}"/></div></div>
         <div class="row"><div class="field"><label>SL</label><input id="ob_qty" type="number" value="500"/></div>
           <div class="field"><label>ĐVT</label><input id="ob_uom" value="${esc(matItemsGiao[0]?.uom || "")}" size="4" readonly title="Lấy tự động từ danh mục nguyên liệu — không sửa được"/></div>
-          <div class="field"><label>Vị trí kho</label><select id="ob_loc">
-            <option value="Kho công ty">Kho công ty</option>
-            <option value="Kho phân xưởng">Kho phân xưởng</option></select></div>
           <div class="field"><label>Hạn dùng</label><input id="ob_exp" type="date"/></div>
-          <button class="btn" id="ob_do">Nhập tồn đầu</button></div></div>
+          <div class="field"><label>Số lô KCS</label><input id="ob_kcs" placeholder="(tuỳ chọn)"/></div>
+          <button class="btn" id="ob_do">Nhập tồn đầu</button></div>
+        <div class="row" style="margin-top:10px;border-top:1px solid var(--border);padding-top:10px">
+          <div class="field" style="flex:1"><label>Hoặc import Excel (cột: Ngày nhập, Mã vật tư, Lô, Số lượng, tuỳ chọn thêm Số lô KCS)</label>
+            <input type="file" id="ob_file" accept=".xlsx"/></div>
+          <button class="btn sec" id="ob_import" style="align-self:flex-end">📥 Import Excel</button></div>`
+          : '<div class="muted">Chỉ tài khoản Admin mới được thực hiện nhập tồn đầu.</div>'}
+      </div>
 
       <div class="panel"><h2>🔬 Lô đang chờ KCS khai báo/duyệt chỉ tiêu chất lượng <span class="muted">(${pending.length})</span></h2>
         <div class="tablewrap"><table>
@@ -2921,12 +2925,32 @@ VIEWS.warehouse_kc = async function () {
       else toast(`Đã nhập kho (mã lô ${res.lot_code})`);
       render("warehouse_kc");
     });
-    $("ob_do").onclick = () => guard(async () => {
+    if ($("ob_do")) $("ob_do").onclick = () => guard(async () => {
       const res = await POST("/warehouse/receive", { lot_code: $("ob_code").value, material_id: $("ob_mat").value,
-        quantity: parseFloat($("ob_qty").value), uom: $("ob_uom").value, location: $("ob_loc").value,
-        expiry: $("ob_exp").value || null, reason: "Nhập tồn đầu" });
+        quantity: parseFloat($("ob_qty").value), uom: $("ob_uom").value, location: "Kho công ty",
+        expiry: $("ob_exp").value || null, kcs_lot_no: $("ob_kcs").value.trim() || null,
+        reason: "Nhập tồn đầu", is_opening_balance: true });
       if (res.status === "on_hold") toast("Đã nhập tồn đầu — lô đang CHỜ khai báo & duyệt chỉ tiêu chất lượng", "err");
-      else toast(`Đã nhập tồn đầu tại ${$("ob_loc").value}`);
+      else toast("Đã nhập tồn đầu tại Kho công ty");
+      render("warehouse_kc");
+    });
+    if ($("ob_import")) $("ob_import").onclick = () => guard(async () => {
+      const f = $("ob_file").files[0];
+      if (!f) throw new Error("Chọn file Excel trước.");
+      const fd = new FormData();
+      fd.append("file", f);
+      fd.append("location", "Kho công ty");
+      const headers = {};
+      if (TOKEN) headers["Authorization"] = "Bearer " + TOKEN;
+      const res = await fetch("/api/warehouse/opening-balance/import", { method: "POST", headers, body: fd });
+      const result = await res.json();
+      if (!res.ok) throw new Error(result && result.detail ? result.detail : "HTTP " + res.status);
+      if (result.failed && result.failed.length) {
+        alert(`Đã nhập ${result.created.length}/${result.total} dòng. ${result.failed.length} dòng lỗi:\n` +
+          result.failed.map(x => `Dòng ${x.row}: ${x.reason}`).join("\n"));
+      } else {
+        toast(`Đã nhập tồn đầu từ Excel: ${result.created.length}/${result.total} dòng`);
+      }
       render("warehouse_kc");
     });
     if ($("xt_do")) $("xt_do").onclick = () => guard(async () => {
@@ -2978,7 +3002,8 @@ VIEWS.warehouse_kc = async function () {
 VIEWS.warehouse_px = async function () {
   const sec = SUB.warehouse_px || "px";
   const sections = [
-    { key: "px", label: "Xem tồn kho" }, { key: "req", label: "Đề nghị nhận kho" },
+    { key: "px", label: "Xem tồn kho" }, { key: "tondau", label: "🏁 Nhập tồn đầu" },
+    { key: "req", label: "Đề nghị nhận kho" },
     { key: "tudo", label: "Xuất tự do" }, { key: "nvlhist", label: "Lịch sử xuất dùng NVL" },
   ];
   let body = "";
@@ -3003,6 +3028,30 @@ VIEWS.warehouse_px = async function () {
           <td><button class="btn sm sec" data-lotqc="${esc(l.lot_id)}">Xem chỉ tiêu</button></td></tr>`).join("") ||
           `<tr><td colspan=7 class="muted">Chưa có lô nào ở kho phân xưởng.</td></tr>`}</tbody>
       </table></div>
+    </div>`;
+  } else if (sec === "tondau") {
+    const mats = await GET("/materials");
+    const matItemsPx = mats.map(m => ({ value: m.material_id, label: `${m.code} — ${m.name}`, uom: m.uom }));
+    const isAdminTondauPx = CURRENT_USER && CURRENT_USER.role === "admin";
+    WH_CACHE.matItemsPx = matItemsPx;
+    body = `<div class="panel"><h2>🏁 Nhập tồn đầu (kho phân xưởng)</h2>
+      <div class="muted" style="margin-bottom:6px">Nạp số dư tồn kho ban đầu khi triển khai hệ thống trực tiếp tại kho phân xưởng
+        (không qua nhận hàng nhà cung cấp hay điều chuyển từ kho công ty).</div>
+      ${isAdminTondauPx
+        ? `<div class="row"><div class="field"><label>Mã lô</label><input id="obpx_code" placeholder="MALT-..."/></div>
+        <div class="field" style="position:relative"><label>Vật tư</label>
+          <input type="text" id="obpx_mat_txt" autocomplete="off" placeholder="Tìm mã/tên nguyên liệu..." value="${esc(matItemsPx[0]?.label || "")}"/>
+          <input type="hidden" id="obpx_mat" value="${esc(matItemsPx[0]?.value || "")}"/></div></div>
+        <div class="row"><div class="field"><label>SL</label><input id="obpx_qty" type="number" value="500"/></div>
+          <div class="field"><label>ĐVT</label><input id="obpx_uom" value="${esc(matItemsPx[0]?.uom || "")}" size="4" readonly title="Lấy tự động từ danh mục nguyên liệu — không sửa được"/></div>
+          <div class="field"><label>Hạn dùng</label><input id="obpx_exp" type="date"/></div>
+          <div class="field"><label>Số lô KCS</label><input id="obpx_kcs" placeholder="(tuỳ chọn)"/></div>
+          <button class="btn" id="obpx_do">Nhập tồn đầu</button></div>
+        <div class="row" style="margin-top:10px;border-top:1px solid var(--border);padding-top:10px">
+          <div class="field" style="flex:1"><label>Hoặc import Excel (cột: Ngày nhập, Mã vật tư, Lô, Số lượng, tuỳ chọn thêm Số lô KCS)</label>
+            <input type="file" id="obpx_file" accept=".xlsx"/></div>
+          <button class="btn sec" id="obpx_import" style="align-self:flex-end">📥 Import Excel</button></div>`
+        : '<div class="muted">Chỉ tài khoản Admin mới được thực hiện nhập tồn đầu.</div>'}
     </div>`;
   } else if (sec === "req") {
     body = await renderRequestsSection();
@@ -3052,6 +3101,37 @@ VIEWS.warehouse_px = async function () {
   wireSubnav("warehouse_px");
   wireSearch();
   document.querySelectorAll("[data-lotqc]").forEach(b => b.onclick = () => openLotQcModal(b.dataset.lotqc, { editable: false }));
+  if (sec === "tondau") {
+    wireSearchableSelect("obpx_mat_txt", "obpx_mat", WH_CACHE.matItemsPx, (item) => { $("obpx_uom").value = item.uom || ""; });
+    if ($("obpx_do")) $("obpx_do").onclick = () => guard(async () => {
+      const res = await POST("/warehouse/receive", { lot_code: $("obpx_code").value, material_id: $("obpx_mat").value,
+        quantity: parseFloat($("obpx_qty").value), uom: $("obpx_uom").value, location: "Kho phân xưởng",
+        expiry: $("obpx_exp").value || null, kcs_lot_no: $("obpx_kcs").value.trim() || null,
+        reason: "Nhập tồn đầu", is_opening_balance: true });
+      if (res.status === "on_hold") toast("Đã nhập tồn đầu — lô đang CHỜ khai báo & duyệt chỉ tiêu chất lượng", "err");
+      else toast("Đã nhập tồn đầu tại Kho phân xưởng");
+      render("warehouse_px");
+    });
+    if ($("obpx_import")) $("obpx_import").onclick = () => guard(async () => {
+      const f = $("obpx_file").files[0];
+      if (!f) throw new Error("Chọn file Excel trước.");
+      const fd = new FormData();
+      fd.append("file", f);
+      fd.append("location", "Kho phân xưởng");
+      const headers = {};
+      if (TOKEN) headers["Authorization"] = "Bearer " + TOKEN;
+      const res = await fetch("/api/warehouse/opening-balance/import", { method: "POST", headers, body: fd });
+      const result = await res.json();
+      if (!res.ok) throw new Error(result && result.detail ? result.detail : "HTTP " + res.status);
+      if (result.failed && result.failed.length) {
+        alert(`Đã nhập ${result.created.length}/${result.total} dòng. ${result.failed.length} dòng lỗi:\n` +
+          result.failed.map(x => `Dòng ${x.row}: ${x.reason}`).join("\n"));
+      } else {
+        toast(`Đã nhập tồn đầu từ Excel: ${result.created.length}/${result.total} dòng`);
+      }
+      render("warehouse_px");
+    });
+  }
   if (sec === "tudo") {
     if ($("xtpx_do")) $("xtpx_do").onclick = () => guard(async () => {
       await POST("/warehouse/issue", { lot_id: $("xtpx_lot").value, quantity: parseFloat($("xtpx_qty").value),
@@ -3770,15 +3850,16 @@ async function openLotQcModal(lotId, { editable = true } = {}) {
       ${editable ? '<button class="btn sec sm" id="lqc_kcslot_save" style="align-self:flex-end">Lưu số lô KCS</button>' : ""}
     </div>
     <div class="tablewrap"><table>
-      <thead><tr><th>Chỉ tiêu</th><th>Min</th><th>Max</th><th>Giá trị đã khai báo</th><th>Kết quả</th><th>Người/Thời gian điền</th>${editable ? "<th>Nhập giá trị mới</th>" : ""}</tr></thead>
+      <thead><tr><th>Chỉ tiêu</th><th>Min</th><th>Max</th><th>Giá trị đã khai báo</th>${st.is_raw_material ? '<th>CA đã khai báo</th>' : ""}<th>Kết quả</th><th>Người/Thời gian điền</th>${editable ? `<th>Nhập giá trị mới</th>${st.is_raw_material ? "<th>Nhập giá trị CA</th>" : ""}` : ""}</tr></thead>
       <tbody>${st.required.map(p => { const r = recordedByParam[p.code]; return `<tr>
         <td>${esc(p.name)}<div class="muted">${esc(p.code)}${p.unit ? " (" + esc(p.unit) + ")" : ""}</div></td>
         <td>${p.value_type === "pass_fail" ? "—" : (p.lsl ?? "—")}</td><td>${p.value_type === "pass_fail" ? "—" : (p.usl ?? "—")}</td>
         <td>${r ? qcValueLabel(p, r.value) : "—"}</td>
+        ${st.is_raw_material ? `<td>${r && r.ca_value != null ? esc(String(r.ca_value)) : "—"}</td>` : ""}
         <td>${r ? badge(r.status) + r.status : '<span class="muted">chưa khai báo</span>'}</td>
         <td>${qcRecordedMetaHtml(r)}</td>
-        ${editable ? `<td>${qcValueInputHtml("lqc-val", p)}</td>` : ""}
-        </tr>`; }).join("") || `<tr><td colspan=${editable ? 7 : 6} class="muted">Nguyên liệu này không có chỉ tiêu bắt buộc.</td></tr>`}</tbody>
+        ${editable ? `<td>${qcValueInputHtml("lqc-val", p)}</td>${st.is_raw_material ? `<td><input type="number" step="any" class="lqc-ca-val" data-code="${esc(p.code)}" style="width:110px" title="Giá trị in trên bao bì nhà cung cấp — chỉ tham khảo, không tính pass/fail"/></td>` : ""}` : ""}
+        </tr>`; }).join("") || `<tr><td colspan=${editable ? (st.is_raw_material ? 9 : 7) : (st.is_raw_material ? 7 : 6)} class="muted">Nguyên liệu này không có chỉ tiêu bắt buộc.</td></tr>`}</tbody>
     </table></div>
     ${editable ? `<button class="btn" id="lqc_submit" style="margin-top:12px">Lưu giá trị đã nhập</button>
     ${canRelease ? `<button class="btn sec" id="lqc_release" style="margin-top:12px" ${st.can_release ? "" : "disabled"}>
@@ -3793,10 +3874,14 @@ async function openLotQcModal(lotId, { editable = true } = {}) {
   $("lqc_submit").onclick = () => guard(async () => {
     const inputs = Array.from(document.querySelectorAll(".lqc-val")).filter(i => i.value !== "");
     if (!inputs.length) throw new Error("Chưa nhập giá trị nào.");
+    const caByCode = Object.fromEntries(Array.from(document.querySelectorAll(".lqc-ca-val"))
+      .map(i => [i.dataset.code, i.value]));
     for (const inp of inputs) {
+      const caVal = caByCode[inp.dataset.code];
       await POST("/quality/results", {
         scope_type: "lot", scope_id: lotId, parameter: inp.dataset.code,
         value: parseFloat(inp.value),
+        ca_value: caVal ? parseFloat(caVal) : null,
         lower_limit: inp.dataset.lsl === "" ? null : parseFloat(inp.dataset.lsl),
         upper_limit: inp.dataset.usl === "" ? null : parseFloat(inp.dataset.usl),
       });
@@ -7268,26 +7353,28 @@ VIEWS.master = async function () {
       </div>
 
       <div class="panel"><h2>🏷️ Nhóm vật tư <span class="muted">(${materialGroups.length})</span></h2>
-        <div class="muted" style="margin-bottom:6px">Nhóm phân loại vật tư (malt/gạo/hoa bia/men/...) — chọn ở panel Vật tư/Nguyên liệu bên cạnh. Đánh dấu "Bao bì tiêu hao" để vật tư thuộc nhóm đó tự động xuất hiện ở báo cáo lô bao bì (tab Bao bì) — không áp dụng cho vỏ chai/két/keg tuần hoàn.</div>
+        <div class="muted" style="margin-bottom:6px">Nhóm phân loại vật tư (malt/gạo/hoa bia/men/...) — chọn ở panel Vật tư/Nguyên liệu bên cạnh. Đánh dấu "Bao bì tiêu hao" để vật tư thuộc nhóm đó tự động xuất hiện ở báo cáo lô bao bì (tab Bao bì) — không áp dụng cho vỏ chai/két/keg tuần hoàn. Đánh dấu "Nguyên liệu (chính/phụ)" để khi khai báo chỉ tiêu chất lượng (Kho NVL) hiện thêm cột "Giá trị CA" (giá trị in trên bao bì NCC) bên cạnh giá trị nhà máy tự đo.</div>
         ${noPerm}
         ${canManage ? `<div class="row">
           <div class="field"><label>Mã nhóm</label><input id="mg_code" placeholder="malt"/></div>
           <div class="field"><label>Tên nhóm</label><input id="mg_name" placeholder="Malt"/></div>
           <div class="field"><label><input type="checkbox" id="mg_packaging"/> Bao bì tiêu hao</label></div>
+          <div class="field"><label><input type="checkbox" id="mg_rawmat"/> Nguyên liệu (chính/phụ)</label></div>
           <button class="btn" id="mg_add" style="align-self:flex-end">+ Tạo nhóm</button>
         </div>` : ""}
         <input class="searchbox" data-tbl="t_matgroups" placeholder="Tìm mã/tên nhóm vật tư..." style="margin-top:10px"/>
         <div class="tablewrap" style="margin-top:6px"><table id="t_matgroups">
-          <thead><tr><th>Mã</th><th>Tên</th><th>Trạng thái</th><th>Bao bì?</th>${canManage ? "<th></th>" : ""}</tr></thead>
+          <thead><tr><th>Mã</th><th>Tên</th><th>Trạng thái</th><th>Bao bì?</th><th>Nguyên liệu?</th>${canManage ? "<th></th>" : ""}</tr></thead>
           <tbody>${materialGroups.map(g => `<tr>
             <td><code class="k">${esc(g.code)}</code></td><td>${esc(g.name)}</td>
             <td>${g.active ? '<span style="color:var(--green)">Đang dùng</span>' : '<span class="muted">Đã ẩn</span>'}</td>
             <td>${g.is_packaging ? '<span style="color:var(--accent)">📦 Bao bì</span>' : '<span class="muted">—</span>'}</td>
+            <td>${g.is_raw_material ? '<span style="color:var(--accent)">🌾 Nguyên liệu</span>' : '<span class="muted">—</span>'}</td>
             ${canManage ? `<td style="white-space:nowrap">
               <button class="btn sm sec" data-emg="${esc(g.group_id)}">Sửa</button>
               <button class="btn sm sec" data-mgdel="${esc(g.group_id)}">Xóa</button>
             </td>` : ""}</tr>`).join("") ||
-            `<tr><td colspan="${canManage ? 5 : 4}" class="muted">Chưa có Nhóm vật tư nào.</td></tr>`}</tbody>
+            `<tr><td colspan="${canManage ? 6 : 5}" class="muted">Chưa có Nhóm vật tư nào.</td></tr>`}</tbody>
         </table></div>
       </div>
 
@@ -7535,7 +7622,8 @@ VIEWS.master = async function () {
     if ($("mg_add")) $("mg_add").onclick = () => guard(async () => {
       const code = $("mg_code").value.trim(), name = $("mg_name").value.trim();
       if (!code || !name) throw new Error("Nhập đủ Mã nhóm và Tên nhóm.");
-      await POST("/material-groups", { code, name, is_packaging: $("mg_packaging").checked });
+      await POST("/material-groups", { code, name, is_packaging: $("mg_packaging").checked,
+        is_raw_material: $("mg_rawmat").checked });
       toast("Đã tạo nhóm vật tư"); render("master");
     });
     document.querySelectorAll("[data-emg]").forEach(b => b.onclick = () => {
@@ -7545,11 +7633,12 @@ VIEWS.master = async function () {
         <div class="field" style="margin-top:8px"><label>Tên</label><input id="emg_name" value="${esc(g.name)}"/></div>
         <div class="field" style="margin-top:8px"><label><input type="checkbox" id="emg_active" ${g.active ? "checked" : ""}/> Đang dùng (hiện trong danh sách chọn khi tạo vật tư)</label></div>
         <div class="field" style="margin-top:8px"><label><input type="checkbox" id="emg_packaging" ${g.is_packaging ? "checked" : ""}/> Bao bì tiêu hao (hiện ở báo cáo lô bao bì, tab Bao bì)</label></div>
+        <div class="field" style="margin-top:8px"><label><input type="checkbox" id="emg_rawmat" ${g.is_raw_material ? "checked" : ""}/> Nguyên liệu (chính/phụ) — hiện cột "Giá trị CA" khi khai báo chỉ tiêu chất lượng</label></div>
         <button class="btn" id="emg_save" style="margin-top:12px">Lưu</button>`);
       $("emg_save").onclick = () => guard(async () => {
         await PUT(`/material-groups/${g.group_id}`, { code: $("emg_code").value.trim(),
           name: $("emg_name").value.trim(), active: $("emg_active").checked,
-          is_packaging: $("emg_packaging").checked });
+          is_packaging: $("emg_packaging").checked, is_raw_material: $("emg_rawmat").checked });
         closeModal(); toast("Đã cập nhật"); render("master");
       });
     });

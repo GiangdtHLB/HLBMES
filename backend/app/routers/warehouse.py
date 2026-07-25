@@ -1,6 +1,6 @@
 """Kho NVL nhà máy."""
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, File, Form, UploadFile
 from sqlalchemy.orm import Session
 
 from ..common import Role
@@ -33,6 +33,13 @@ router = APIRouter(prefix="/api/warehouse", tags=["warehouse"],
 def receive(payload: ReceiptIn, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     require_perm(user, "warehouse.receive")
     return svc.receive(db, payload.model_dump(), user)
+
+
+@router.post("/opening-balance/import")
+async def import_opening_balance(file: UploadFile = File(...), location: str = Form("Kho công ty"),
+                                 db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    content = await file.read()
+    return svc.import_opening_balance_materials(db, content, location, user)
 
 
 @router.post("/return")

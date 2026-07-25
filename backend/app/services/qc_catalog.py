@@ -13,7 +13,7 @@ from ..audit import record_audit
 from ..common import new_id, utcnow
 from ..errors import DomainError, NotFoundError
 from ..models.brewing import BottleRecord, BrewBatch, BrewRecord, FermentRecord, FilterRecord
-from ..models.master import BeerType
+from ..models.master import BeerType, Material, MaterialGroup
 from ..models.materials import MaterialLot
 from ..models.materials_ext import MaterialQcGroup
 from ..models.quality import QualityResult
@@ -271,11 +271,19 @@ def lot_qc_status(db: Session, lot: MaterialLot) -> dict:
     ).scalars().all()
     recorded_codes = {r.parameter for r in recorded}
     pending = [p["code"] for p in required if p["code"] not in recorded_codes]
+    # Nhóm vật tư đánh dấu is_raw_material -> modal khai báo (openLotQcModal) hiện thêm cột
+    # "Giá trị CA" (giá trị in trên bao bì NCC, khác giá trị nhà máy tự đo) — chỉ áp dụng cho
+    # nguyên liệu chính/phụ, không áp dụng bao bì/vật tư khác.
+    is_raw_material = False
+    material = db.get(Material, lot.material_id) if lot.material_id else None
+    if material and material.category:
+        group = db.execute(select(MaterialGroup).where(MaterialGroup.code == material.category)).scalar_one_or_none()
+        is_raw_material = bool(group and group.is_raw_material)
     return {
         "lot_id": lot.lot_id, "lot_code": lot.lot_code, "status": lot.status,
-        "kcs_lot_no": lot.kcs_lot_no,
+        "kcs_lot_no": lot.kcs_lot_no, "is_raw_material": is_raw_material,
         "required": required,
-        "recorded": [{"parameter": r.parameter, "value": r.value, "status": r.status,
+        "recorded": [{"parameter": r.parameter, "value": r.value, "ca_value": r.ca_value, "status": r.status,
                       "recorded_by": r.recorded_by, "recorded_at": r.recorded_at} for r in recorded],
         "pending": pending,
         "can_release": not pending,

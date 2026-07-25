@@ -132,6 +132,13 @@ def build_units(payload: UnitBuildIn, db: Session = Depends(get_db),
     return {"count": count, "unit_codes": [u.unit_code for u in created]}
 
 
+@router.post("/units/opening-balance/import", status_code=201)
+async def import_units_opening_balance(file: UploadFile = File(...), db: Session = Depends(get_db),
+                                       user: User = Depends(get_current_user)):
+    content = await file.read()
+    return svc.import_opening_balance_units(db, content, user)
+
+
 @router.post("/units/{unit_id}/putaway")
 def putaway(unit_id: str, payload: PutawayIn, db: Session = Depends(get_db),
             user: User = Depends(get_current_user)):

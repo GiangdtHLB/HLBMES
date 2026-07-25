@@ -610,3 +610,50 @@ def test_copy_qc_group_items(client, admin_h):
     same = client.post(f"/api/qc/groups/{dst['group_id']}/items/copy", headers=admin_h,
                        json={"source_group_id": dst["group_id"]})
     assert same.status_code == 409, same.text
+
+
+def test_opening_balance_receive_requires_admin(client, admin_h, thukho_h):
+    mat_id = _create_material(client, admin_h, "OB-NVL-TEST")
+
+    denied = client.post("/api/warehouse/receive", headers=thukho_h,
+                         json={"material_id": mat_id, "quantity": 100, "uom": "kg",
+                               "location": "Kho công ty", "is_opening_balance": True})
+    assert denied.status_code == 403, denied.text
+
+    ok = client.post("/api/warehouse/receive", headers=admin_h,
+                     json={"material_id": mat_id, "quantity": 100, "uom": "kg",
+                           "location": "Kho phân xưởng", "is_opening_balance": True})
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["status"] == "available"
+
+    # Nhập kho thường (không đánh dấu tồn đầu) vẫn mở cho thủ kho như trước.
+    normal = client.post("/api/warehouse/receive", headers=thukho_h,
+                         json={"material_id": mat_id, "quantity": 50, "uom": "kg",
+                               "location": "Kho công ty"})
+    assert normal.status_code == 200, normal.text
+
+
+def test_opening_balance_wms_build_units_requires_admin(client, admin_h, thukho_h):
+    fp = client.post("/api/finished-products", headers=admin_h,
+                     json={"code": "OB-FP-TEST", "name": "Test tồn đầu TP", "uom": "lon",
+                           "unit_type": "vi", "pack_size": 24})
+    assert fp.status_code == 201, fp.text
+    fp_id = fp.json()["finished_product_id"]
+
+    denied = client.post("/api/wms/units", headers=thukho_h,
+                         json={"finished_product_id": fp_id, "product_name": "OB-FP-TEST",
+                               "lot_code": "OB-LOT-01", "total": 240, "pack_size": 24,
+                               "unit_type": "vi", "is_opening_balance": True})
+    assert denied.status_code == 403, denied.text
+
+    ok = client.post("/api/wms/units", headers=admin_h,
+                     json={"finished_product_id": fp_id, "product_name": "OB-FP-TEST",
+                           "lot_code": "OB-LOT-01", "total": 240, "pack_size": 24,
+                           "unit_type": "vi", "is_opening_balance": True})
+    assert ok.status_code == 201, ok.text
+
+    # Nhập kho thủ công thường (không đánh dấu tồn đầu) vẫn mở cho ai có quyền warehouse.receive.
+    normal = client.post("/api/wms/units", headers=thukho_h,
+                        json={"finished_product_id": fp_id, "product_name": "OB-FP-TEST",
+                              "lot_code": "OB-LOT-02", "total": 48, "pack_size": 24, "unit_type": "vi"})
+    assert normal.status_code == 201, normal.text

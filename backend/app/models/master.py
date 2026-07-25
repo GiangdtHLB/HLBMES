@@ -78,6 +78,10 @@ class MaterialGroup(Base):
     # nhóm này sẽ tự động xuất hiện ở báo cáo lô bao bì (tab Bao bì), tách biệt với vỏ
     # chai/két/keg tuần hoàn (packaging_type/packaging_move — tài sản đặt cọc, không tiêu hao).
     is_packaging: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Đánh dấu nhóm này là nguyên liệu (chính/phụ) — vật tư thuộc nhóm này khi khai báo chỉ
+    # tiêu chất lượng (openLotQcModal) sẽ hiện thêm cột "Giá trị CA" (giá trị in trên bao bì
+    # nhà cung cấp) bên cạnh giá trị nhà máy tự đo, để phân biệt phục vụ báo cáo sau này.
+    is_raw_material: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 class Material(Base):

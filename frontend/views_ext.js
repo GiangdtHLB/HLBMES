@@ -784,6 +784,7 @@
       const card = (val, label, sub) => `<div class="card"><div class="n">${val}</div><div class="l">${label}</div>${sub ? `<div class="muted" style="font-size:11px;margin-top:2px">${sub}</div>` : ""}</div>`;
       const byStatus = Object.entries(sm.by_status || {}).map(([k, v]) => `${esc(k)}: <b>${v}</b>`).join(" · ") || "—";
       const byType = Object.entries(sm.by_type || {}).map(([k, v]) => `${k === "keg" ? "Keg" : k === "lon" ? "Lon" : "Vỉ"}: <b>${v}</b>`).join(" · ") || "—";
+      const isAdminWms = CURRENT_USER && CURRENT_USER.role === "admin";
       body = `
         ${panel("📊 Tổng quan kho thành phẩm", `
           <div class="cards" style="margin-bottom:10px">
@@ -794,7 +795,7 @@
           <div style="height:14px;background:var(--panel2);border-radius:7px;overflow:hidden" title="Mức lấp đầy ${sm.fill_pct ?? 0}%">
             <div style="height:100%;width:${Math.min(sm.fill_pct || 0, 100)}%;background:${(sm.fill_pct || 0) >= 90 ? "#e74c3c" : "#3498db"}"></div>
           </div>`)}
-        ${panel("📦 Nhập kho thủ công / Tồn đầu", `
+        ${panel("📦 Nhập kho thủ công", `
           <div class="row">
             <div class="field"><label>Sản phẩm</label>
               <input id="wu_prod_q" placeholder="Tìm sản phẩm..." style="width:220px;margin-bottom:2px"/>
@@ -802,10 +803,28 @@
             <div class="field"><label>Lô TP</label><input id="wu_lot" value="PKG-2406-0001" style="width:150px"/></div>
             <div class="field"><label>Tổng SL nhỏ</label><input id="wu_total" value="240" style="width:90px"/></div>
             <div class="field"><label>SL/1 đơn vị</label><input id="wu_pack" value="24" style="width:80px"/></div>
-            <div class="field" style="align-self:flex-end"><label><input type="checkbox" id="wu_ob"/> Là nhập tồn đầu</label></div>
+            <div class="field"><label>Vị trí kho</label><select id="wu_loc" style="width:160px"><option value="">(chưa cất)</option>${locOpt}</select></div>
             <div class="field" style="align-self:flex-end"><button class="btn" id="wu_build">+ Nhập kho</button></div>
           </div>
-          <div class="muted" style="font-size:12px;margin-top:4px">Loại đơn vị (vỉ/keg) và SL/1 đơn vị tự điền theo sản phẩm — quản lý ở Danh mục › Sản phẩm. Số dòng vỉ/keg sinh ra = Tổng SL nhỏ ÷ SL/1 đơn vị (dòng cuối có thể lẻ). Tick "Là nhập tồn đầu" khi dùng form này để nạp số dư ban đầu (không qua chiết) — giúp phân biệt trong lịch sử.</div>`)}
+          <div class="muted" style="font-size:12px;margin-top:4px">Loại đơn vị (vỉ/keg) và SL/1 đơn vị tự điền theo sản phẩm — quản lý ở Danh mục › Sản phẩm. Số dòng vỉ/keg sinh ra = Tổng SL nhỏ ÷ SL/1 đơn vị (dòng cuối có thể lẻ). Bỏ trống Vị trí kho -> "chưa cất", gán sau ở tab Cất vào vị trí.</div>`)}
+        ${panel("🏁 Nhập tồn đầu", isAdminWms ? `
+          <div class="row">
+            <div class="field"><label>Sản phẩm</label>
+              <input id="wob_prod_q" placeholder="Tìm sản phẩm..." style="width:220px;margin-bottom:2px"/>
+              <select id="wob_prod" style="width:220px"><option value="">(chọn sản phẩm)</option>${fpOpt}</select></div>
+            <div class="field"><label>Lô TP</label><input id="wob_lot" value="PKG-2406-0001" style="width:150px"/></div>
+            <div class="field"><label>Tổng SL nhỏ</label><input id="wob_total" value="240" style="width:90px"/></div>
+            <div class="field"><label>SL/1 đơn vị</label><input id="wob_pack" value="24" style="width:80px"/></div>
+            <div class="field"><label>Vị trí kho</label><select id="wob_loc" style="width:160px"><option value="">(chưa cất)</option>${locOpt}</select></div>
+            <div class="field" style="align-self:flex-end"><button class="btn" id="wob_build">+ Nhập tồn đầu</button></div>
+          </div>
+          <div class="muted" style="font-size:12px;margin-top:4px">Nạp số dư tồn kho thành phẩm ban đầu khi triển khai hệ thống (không qua chiết thật) — giúp phân biệt trong lịch sử.</div>
+          <div class="row" style="margin-top:10px;border-top:1px solid var(--border);padding-top:10px">
+            <div class="field" style="flex:1"><label>Hoặc import Excel (cột: Ngày nhập, Mã sản phẩm, Lô, Số lượng, tuỳ chọn thêm Vị trí)</label>
+              <input type="file" id="wob_file" accept=".xlsx"/></div>
+            <button class="btn sec" id="wob_import" style="align-self:flex-end">📥 Import Excel</button>
+          </div>`
+          : '<div class="muted">Chỉ tài khoản Admin mới được thực hiện nhập tồn đầu.</div>')}
         ${panel("🟦 Vỉ/Keg tồn kho", `<div id="pl_box" class="muted">Đang tải…</div>`)}
         ${panel("🔨 Lịch sử phân rã", `<input class="searchbox" data-tbl="t_dp_history" placeholder="Tìm theo sản phẩm, lô, người..."/><div id="dp_history" class="muted">Đang tải…</div>`)}
       `;
@@ -1175,8 +1194,40 @@
         await POST("/wms/units", { finished_product_id: $("wu_prod").value, product_name: opt.dataset.code,
           lot_code: $("wu_lot").value, total: num("wu_total") || 0,
           pack_size: num("wu_pack") || 24, unit_type: opt.dataset.unittype || "vi",
-          reason: $("wu_ob").checked ? "Nhập tồn đầu" : null });
+          loc_id: $("wu_loc").value || null, reason: "Nhập kho thủ công" });
         toast("Đã nhập kho (kèm mã vạch từng vỉ/keg)"); render("wms");
+      });
+      wireSelectSearch("wob_prod", "wob_prod_q");
+      if ($("wob_prod")) $("wob_prod").onchange = () => {
+        const opt = $("wob_prod").selectedOptions[0];
+        if (opt && opt.dataset.pack) $("wob_pack").value = opt.dataset.pack;
+      };
+      if ($("wob_build")) $("wob_build").onclick = () => guard(async () => {
+        if (!$("wob_prod").value) { toast("Chọn sản phẩm", "err"); return; }
+        const opt = $("wob_prod").selectedOptions[0];
+        await POST("/wms/units", { finished_product_id: $("wob_prod").value, product_name: opt.dataset.code,
+          lot_code: $("wob_lot").value, total: num("wob_total") || 0,
+          pack_size: num("wob_pack") || 24, unit_type: opt.dataset.unittype || "vi",
+          loc_id: $("wob_loc").value || null, reason: "Nhập tồn đầu", is_opening_balance: true });
+        toast("Đã nhập tồn đầu (kèm mã vạch từng vỉ/keg)"); render("wms");
+      });
+      if ($("wob_import")) $("wob_import").onclick = () => guard(async () => {
+        const f = $("wob_file").files[0];
+        if (!f) throw new Error("Chọn file Excel trước.");
+        const fd = new FormData();
+        fd.append("file", f);
+        const headers = {};
+        if (TOKEN) headers["Authorization"] = "Bearer " + TOKEN;
+        const res = await fetch("/api/wms/units/opening-balance/import", { method: "POST", headers, body: fd });
+        const result = await res.json();
+        if (!res.ok) throw new Error(result && result.detail ? result.detail : "HTTP " + res.status);
+        if (result.failed && result.failed.length) {
+          alert(`Đã nhập ${result.created.length}/${result.total} dòng. ${result.failed.length} dòng lỗi:\n` +
+            result.failed.map(x => `Dòng ${x.row}: ${x.reason}`).join("\n"));
+        } else {
+          toast(`Đã nhập tồn đầu từ Excel: ${result.created.length}/${result.total} dòng`);
+        }
+        render("wms");
       });
       GET("/audit?entity_type=finished_goods_unit").then(entries => {
         const rows = entries.filter(e => e.action === "decompose_batch");

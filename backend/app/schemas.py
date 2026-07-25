@@ -29,6 +29,7 @@ class MaterialGroupIn(BaseModel):
     name: str
     active: bool = True
     is_packaging: bool = False
+    is_raw_material: bool = False
 
 
 class MaterialGroupOut(ORMModel):
@@ -37,6 +38,7 @@ class MaterialGroupOut(ORMModel):
     name: str
     active: bool
     is_packaging: bool
+    is_raw_material: bool
 
 
 class LotKcsUpdateIn(BaseModel):
@@ -356,7 +358,10 @@ class UnitBuildIn(BaseModel):
     total: float = 0            # tổng SL nhỏ (lon/keg) cần nhập — số dòng vỉ/keg tự tính từ pack_size
     pack_size: int = 24
     unit_type: str = "vi"        # vi | keg
+    loc_id: Optional[str] = None  # bỏ trống -> chưa cất (xem "Cất vào vị trí"); nếu chọn, kiểm tra sức chứa
     reason: Optional[str] = None  # VD "Nhập tồn đầu" — gắn vào audit để lọc lại lịch sử
+    received_at: Optional[str] = None  # bỏ trống -> hiện tại; giới hạn 15 ngày trừ khi is_opening_balance, xem _create_units()
+    is_opening_balance: bool = False  # true -> chỉ admin được thực hiện, xem build_units()
 
 
 class PutawayIn(BaseModel):
@@ -580,6 +585,7 @@ class ResultIn(BaseModel):
     method: Optional[str] = None
     instrument: Optional[str] = None
     value: Optional[float] = None
+    ca_value: Optional[float] = None  # giá trị in trên bao bì/CA của NCC — chỉ tham khảo, không tính vào pass/fail
     unit: Optional[str] = None
     lower_limit: Optional[float] = None
     upper_limit: Optional[float] = None
@@ -594,6 +600,7 @@ class ResultOut(ORMModel):
     method: Optional[str] = None
     instrument: Optional[str] = None
     value: Optional[float] = None
+    ca_value: Optional[float] = None
     unit: Optional[str] = None
     lower_limit: Optional[float] = None
     upper_limit: Optional[float] = None
@@ -741,11 +748,13 @@ class ReceiptIn(BaseModel):
     supplier_lot: Optional[str] = None
     supplier_id: Optional[str] = None
     unit_price: Optional[float] = None
+    kcs_lot_no: Optional[str] = None  # số lô KCS — chỉ áp dụng khi tạo lô MỚI, xem receive()
     expiry: Optional[datetime] = None
     received_at: Optional[datetime] = None  # bỏ trống -> hiện tại; giới hạn trong 15 ngày gần nhất, xem receive()
     location: str = "Kho công ty"
     reason: Optional[str] = None
     ref_doc: Optional[str] = None
+    is_opening_balance: bool = False  # true -> chỉ admin được thực hiện, xem receive()
 
 
 class IssueIn(BaseModel):

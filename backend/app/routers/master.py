@@ -145,11 +145,13 @@ def update_material_group(group_id: str, payload: MaterialGroupIn, db: Session =
     g = db.get(MaterialGroup, group_id)
     if not g:
         raise NotFoundError("Nhóm vật tư không tồn tại.")
-    before = {"code": g.code, "name": g.name, "active": g.active, "is_packaging": g.is_packaging}
+    before = {"code": g.code, "name": g.name, "active": g.active, "is_packaging": g.is_packaging,
+              "is_raw_material": g.is_raw_material}
     g.code = payload.code
     g.name = payload.name
     g.active = payload.active
     g.is_packaging = payload.is_packaging
+    g.is_raw_material = payload.is_raw_material
     record_audit(db, entity_type="material_group", entity_id=g.group_id, action="update",
                  actor=user, before=before, after=payload.model_dump())
     db.commit()

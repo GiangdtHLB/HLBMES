@@ -72,6 +72,7 @@ def record_result(db: Session, payload: dict, user: User) -> QualityResult:
         method=payload.get("method"),
         instrument=payload.get("instrument"),
         value=value,
+        ca_value=payload.get("ca_value"),
         unit=payload.get("unit"),
         lower_limit=lower,
         upper_limit=upper,
@@ -86,8 +87,8 @@ def record_result(db: Session, payload: dict, user: User) -> QualityResult:
         _set_quality_status(db, scope_type, scope_id, QualityStatus.ON_HOLD.value)
 
     record_audit(db, entity_type="quality_result", entity_id=result.result_id, action="record",
-                 actor=user, after={"parameter": result.parameter, "value": value, "status": status,
-                                    "scope": f"{scope_type}:{scope_id}"})
+                 actor=user, after={"parameter": result.parameter, "value": value, "ca_value": result.ca_value,
+                                    "status": status, "scope": f"{scope_type}:{scope_id}"})
     db.commit()
     db.refresh(result)
     return result

@@ -26,6 +26,9 @@ class QualityResult(Base):
     method: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
     instrument: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
     value: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    # Giá trị in trên bao bì/CA của nhà cung cấp — khác `value` (nhà máy tự đo); chỉ mang tính
+    # tham khảo/báo cáo, KHÔNG dùng để tính `status` (pass/fail vẫn chỉ theo `value` vs limit).
+    ca_value: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     unit: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
     lower_limit: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     upper_limit: Mapped[Optional[float]] = mapped_column(Float, nullable=True)

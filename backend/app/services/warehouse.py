@@ -15,6 +15,7 @@ from ..models.master import Material
 from ..models.materials import GenealogyEdge, MaterialLot
 from ..models.warehouse import MaterialRequest, MaterialRequestLine, StockCount, StockCountLine, StockMovement
 from ..security import User, has_scope, require_perm, require_role, require_scope
+from .opening_balance_import import parse_opening_balance_sheet
 from .qc_catalog import required_params_for_material
 
 
@@ -55,6 +56,10 @@ def _next_lot_code(db: Session, year: int) -> str:
 def receive(db: Session, payload: dict, user: User) -> dict:
     """Nhập kho: tạo lô mới hoặc cộng vào lô hiện có (cùng vật tư + cùng mã lô)."""
     require_role(user, Role.OPERATOR, Role.SUPERVISOR)
+    if payload.get("is_opening_balance"):
+        # Nhập tồn đầu (nạp số dư ban đầu khi triển khai hệ thống, không qua nhận hàng NCC
+        # thật) — CHỈ ADMIN, khác nhập kho thường vốn mở cho thủ kho (Role.OPERATOR trở lên).
+        require_role(user, Role.ADMIN)
     qty = float(payload["quantity"])
     if qty <= 0:
         raise DomainError("Số lượng nhập phải > 0.")
@@ -66,7 +71,9 @@ def receive(db: Session, payload: dict, user: User) -> dict:
             received_dt = received_dt.replace(tzinfo=now.tzinfo)
         if received_dt > now:
             raise DomainError("Ngày nhập không được sau thời điểm hiện tại.")
-        if received_dt < now - timedelta(days=15):
+        # Tồn đầu (nạp số dư ban đầu khi triển khai hệ thống) hợp lệ với ngày rất xa trong quá
+        # khứ — giới hạn 15 ngày chỉ áp dụng cho nhập kho thường (tránh gõ nhầm ngày).
+        if not payload.get("is_opening_balance") and received_dt < now - timedelta(days=15):
             raise DomainError("Ngày nhập không được quá 15 ngày trước thời điểm hiện tại.")
     else:
         received_dt = now
@@ -95,7 +102,7 @@ def receive(db: Session, payload: dict, user: User) -> dict:
         lot = MaterialLot(lot_id=new_id(), lot_code=lot_code or _next_lot_code(db, year), lot_year=year,
                           material_id=material_id, lot_type=payload.get("lot_type", "material"),
                           supplier_lot=payload.get("supplier_lot"), supplier_id=payload.get("supplier_id"),
-                          unit_price=payload.get("unit_price"),
+                          unit_price=payload.get("unit_price"), kcs_lot_no=payload.get("kcs_lot_no"),
                           quantity=qty, uom=payload.get("uom", "kg"), status=LotStatus.AVAILABLE.value,
                           expiry=datetime.fromisoformat(expiry) if isinstance(expiry, str) else expiry,
                           location=payload.get("location", "Kho công ty"), created_at=received_dt)
@@ -112,6 +119,38 @@ def receive(db: Session, payload: dict, user: User) -> dict:
     db.commit()
     return {"lot_id": lot.lot_id, "lot_code": lot.lot_code, "on_hand": lot.quantity, "uom": lot.uom,
             "status": lot.status}
+
+
+def import_opening_balance_materials(db: Session, content: bytes, location: str, user: User) -> dict:
+    """Import Excel hàng loạt tồn đầu kho NVL (Kho công ty/Kho phân xưởng) — CHỈ ADMIN. Mẫu 4
+    cột bắt buộc: NGÀY NHẬP, MÃ VẬT TƯ, LÔ, SỐ LƯỢNG + 1 cột tuỳ chọn SỐ LÔ KCS (có thể bỏ
+    trống). Mỗi dòng hợp lệ gọi lại receive() với is_opening_balance=True để tái dùng toàn bộ
+    nghiệp vụ (sinh mã lô nếu để trống, hold chờ KCS nếu vật tư có chỉ tiêu bắt buộc, ghi
+    StockMovement/audit) — receive() tự commit từng dòng nên 1 dòng lỗi không làm mất các dòng
+    đã nhập thành công trước đó."""
+    require_role(user, Role.ADMIN)
+    rows = parse_opening_balance_sheet(content, "MÃ VẬT TƯ", optional_headers={"kcs_lot_no": "SỐ LÔ KCS"})
+    created, failed = [], []
+    for r in rows:
+        if r["error"]:
+            failed.append({"row": r["row"], "reason": r["error"]})
+            continue
+        material = db.execute(select(Material).where(Material.code == r["ma"])).scalar_one_or_none()
+        if not material:
+            failed.append({"row": r["row"], "reason": f"Không tìm thấy vật tư mã '{r['ma']}'."})
+            continue
+        try:
+            result = receive(db, {
+                "material_id": material.material_id, "quantity": r["so_luong"], "uom": material.uom,
+                "location": location, "lot_code": r["lo"] or None, "kcs_lot_no": r["kcs_lot_no"],
+                "received_at": r["ngay_nhap"].isoformat() if r["ngay_nhap"] else None,
+                "reason": "Nhập tồn đầu (import Excel)", "is_opening_balance": True,
+            }, user)
+        except DomainError as e:
+            failed.append({"row": r["row"], "reason": str(e)})
+            continue
+        created.append({"row": r["row"], "material_code": material.code, **result})
+    return {"created": created, "failed": failed, "total": len(rows)}
 
 
 def return_stock(db: Session, lot_id: str, quantity: float, user: User, reason: str = None) -> dict:

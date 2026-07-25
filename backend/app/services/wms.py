@@ -2,6 +2,8 @@
 xem docs/WMS-LOT-LEVEL-REDESIGN.md), putaway/ship theo vị trí, tồn theo vị trí, phân giải
 barcode (cho đầu đọc cầm tay / kiosk)."""
 
+from datetime import datetime, timedelta
+
 from sqlalchemy import and_, case, delete, func, or_, select, true
 from sqlalchemy.orm import Session
 
@@ -15,6 +17,7 @@ from ..models.materials import GenealogyEdge
 from ..models.wms import FinishedGoodsUnit, NearExpiryEntry, Shipment, ShipToLocation, Vehicle, WmsLocation
 from ..security import User, require_perm, require_role
 from . import genealogy
+from .opening_balance_import import parse_opening_balance_sheet
 
 # Sentinel phân biệt "không lọc theo vị trí" với "lọc theo vị trí = chưa cất" (location_id
 # IS NULL) trong _consume_lot_rows — None tự nó đã có nghĩa hợp lệ (chưa cất) nên không dùng
@@ -317,12 +320,35 @@ def _create_units(db: Session, payload: dict, created_by: str, actor: User) -> l
     unit_type = payload.get("unit_type") or "vi"
     if total <= 0:
         raise DomainError("Tổng số lượng phải > 0.")
+    now = utcnow()
+    received_at = payload.get("received_at")
+    if received_at:
+        received_dt = datetime.fromisoformat(received_at) if isinstance(received_at, str) else received_at
+        if received_dt.tzinfo is None:
+            received_dt = received_dt.replace(tzinfo=now.tzinfo)
+        if received_dt > now:
+            raise DomainError("Ngày nhập không được sau thời điểm hiện tại.")
+        # Tồn đầu hợp lệ với ngày rất xa trong quá khứ — giới hạn 15 ngày chỉ áp dụng cho nhập
+        # kho thủ công thường (tránh gõ nhầm ngày), xem receive() cho cùng quy tắc bên kho NVL.
+        if not payload.get("is_opening_balance") and received_dt < now - timedelta(days=15):
+            raise DomainError("Ngày nhập không được quá 15 ngày trước thời điểm hiện tại.")
+    else:
+        received_dt = now
+    loc_id = payload.get("loc_id") or None
+    loc = None
+    if loc_id:
+        loc = db.get(WmsLocation, loc_id)
+        if not loc:
+            raise NotFoundError("Vị trí không tồn tại.")
     prefix = "KEG" if unit_type == "keg" else "VI"
-    stamp = f"{utcnow():%y%m%d}-{new_id()[:4].upper()}"
+    stamp = f"{now:%y%m%d}-{new_id()[:4].upper()}"
     u = FinishedGoodsUnit(unit_id=new_id(), unit_code=f"{prefix}-{stamp}-0001", unit_type=unit_type,
                          finished_product_id=payload.get("finished_product_id"),
                          product_name=payload.get("product_name"), lot_code=payload.get("lot_code"),
-                         quantity=total, status="stored", created_by=created_by, created_at=utcnow())
+                         quantity=total, status="stored", created_by=created_by, created_at=received_dt,
+                         location_id=loc_id)
+    if loc and not _capacity_ok(db, loc, u):
+        raise DomainError(f"Vị trí {loc.code} đã đầy (sức chứa {loc.capacity}).")
     db.add(u)
     db.flush()
     record_audit(db, entity_type="finished_goods_unit", entity_id=u.unit_id, action="build", actor=actor,
@@ -335,7 +361,52 @@ def _create_units(db: Session, payload: dict, created_by: str, actor: User) -> l
 
 def build_units(db: Session, payload: dict, user: User) -> list[FinishedGoodsUnit]:
     require_perm(user, "warehouse.receive")
+    if payload.get("is_opening_balance"):
+        # Nhập tồn đầu kho thành phẩm — CHỈ ADMIN, khác nhập kho thủ công thường (mở cho ai có
+        # quyền warehouse.receive) vì đây là thao tác chỉnh số liệu gốc, không qua chiết thật.
+        require_role(user, Role.ADMIN)
     return _create_units(db, payload, user.username, user)
+
+
+def import_opening_balance_units(db: Session, content: bytes, user: User) -> dict:
+    """Import Excel hàng loạt tồn đầu kho thành phẩm (WMS) — CHỈ ADMIN. Mẫu 4 cột bắt buộc:
+    NGÀY NHẬP, MÃ SẢN PHẨM, LÔ, SỐ LƯỢNG (pack_size/unit_type tự lấy theo danh mục Sản phẩm,
+    Excel không cần khai lại) + 1 cột tuỳ chọn VỊ TRÍ (mã vị trí kho, có thể bỏ trống -> chưa
+    cất, dùng "Cất vào vị trí" sau). Mỗi dòng hợp lệ gọi lại build_units() với
+    is_opening_balance=True — build_units()/_create_units() tự commit từng dòng nên 1 dòng lỗi
+    không làm mất các dòng đã nhập thành công trước đó."""
+    require_role(user, Role.ADMIN)
+    rows = parse_opening_balance_sheet(content, "MÃ SẢN PHẨM", optional_headers={"vi_tri": "VỊ TRÍ"})
+    created, failed = [], []
+    for r in rows:
+        if r["error"]:
+            failed.append({"row": r["row"], "reason": r["error"]})
+            continue
+        fp = db.execute(select(FinishedProduct).where(FinishedProduct.code == r["ma"])).scalar_one_or_none()
+        if not fp:
+            failed.append({"row": r["row"], "reason": f"Không tìm thấy sản phẩm mã '{r['ma']}'."})
+            continue
+        loc_id = None
+        if r["vi_tri"]:
+            loc = db.execute(select(WmsLocation).where(WmsLocation.code == r["vi_tri"])).scalar_one_or_none()
+            if not loc:
+                failed.append({"row": r["row"], "reason": f"Không tìm thấy vị trí kho mã '{r['vi_tri']}'."})
+                continue
+            loc_id = loc.loc_id
+        try:
+            units = build_units(db, {
+                "finished_product_id": fp.finished_product_id, "product_name": fp.code,
+                "lot_code": r["lo"] or None, "total": r["so_luong"], "pack_size": fp.pack_size,
+                "unit_type": fp.unit_type, "loc_id": loc_id,
+                "received_at": r["ngay_nhap"].isoformat() if r["ngay_nhap"] else None,
+                "reason": "Nhập tồn đầu (import Excel)", "is_opening_balance": True,
+            }, user)
+        except DomainError as e:
+            failed.append({"row": r["row"], "reason": str(e)})
+            continue
+        created.append({"row": r["row"], "product_code": fp.code, "unit_code": units[0].unit_code,
+                        "quantity": units[0].quantity})
+    return {"created": created, "failed": failed, "total": len(rows)}
 
 
 # ---- Nhập bia cận date: tự nhận lô chiết theo ngày giờ khai báo + lịch sử riêng ----
