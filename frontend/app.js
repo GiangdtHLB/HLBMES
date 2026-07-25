@@ -442,27 +442,32 @@ VIEWS.dashboard = async function () {
   const qcFailItems = alerts ? alerts.items.filter(it => it.fail_param_count > 0) : [];
   const holdItems = alerts ? alerts.items.filter(it => it.reasons.includes("on_hold")) : [];
   const devItems = alerts ? alerts.items.filter(it => it.reasons.includes("deviation")) : [];
-  const miniAlertPanel = (title, icon, items, emptyText, extraCol) => `
+  const MINI_ALERT_LIMIT = 5;
+  const miniAlertPanel = (title, icon, items, emptyText, extraCol, key) => {
+    const moreCount = items.length - MINI_ALERT_LIMIT;
+    return `
     <div class="panel" style="flex:1;min-width:280px;margin-bottom:0">
       <h2>${icon} ${title} ${items.length ? `<span class="muted">(${items.length})</span>` : ""}</h2>
       ${items.length ? `<div class="tablewrap" style="max-height:240px;overflow:auto"><table>
         <thead><tr><th>Lô/Phạm vi</th><th>Vật tư</th><th>SL</th><th>${extraCol.label}</th></tr></thead>
-        <tbody>${items.map(it => `<tr style="cursor:pointer" data-goto="flowmap" tabindex="0" role="button">
+        <tbody>${items.map((it, i) => `<tr style="cursor:pointer${i >= MINI_ALERT_LIMIT ? ";display:none" : ""}" class="${i >= MINI_ALERT_LIMIT ? `miniextra-${key}` : ""}" data-goto="flowmap" tabindex="0" role="button">
           <td>${esc(it.lot_code || it.scope_id)}</td>
           <td class="muted">${esc(it.material_code || "—")}</td>
           <td>${it.quantity != null ? it.quantity.toLocaleString("vi-VN") + " " + esc(it.uom || "") : "—"}</td>
           <td>${extraCol.render(it)}</td>
-        </tr>`).join("")}</tbody></table></div>`
+        </tr>`).join("")}</tbody></table></div>
+        ${moreCount > 0 ? `<button type="button" class="btn sm sec" data-minimore="${key}" data-minimorecount="${moreCount}" style="margin-top:8px">Xem thêm (${moreCount})</button>` : ""}`
         : `<div class="muted">${emptyText}</div>`}
     </div>`;
+  };
   const alertsHtml = alerts ? `
     <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:stretch;margin-bottom:16px">
       ${miniAlertPanel("Cảnh báo QC", "🚨", qcFailItems, "Không có chỉ tiêu QC nào đang fail.",
-        { label: "Chỉ tiêu fail", render: it => `<b style="color:var(--red)">${it.fail_param_count}</b>` })}
+        { label: "Chỉ tiêu fail", render: it => `<b style="color:var(--red)">${it.fail_param_count}</b>` }, "qc")}
       ${miniAlertPanel("Hold / Release", "🔒", holdItems, "Không có lô nào đang giữ.",
-        { label: "Trạng thái", render: () => `<span class="badge on_hold">${REASON_LABEL.on_hold}</span>` })}
+        { label: "Trạng thái", render: () => `<span class="badge on_hold">${REASON_LABEL.on_hold}</span>` }, "hold")}
       ${miniAlertPanel("Deviation", "📋", devItems, "Không có deviation nào đang mở.",
-        { label: "Số lượng mở", render: it => `<span class="badge on_hold">${it.deviation_count}</span>` })}
+        { label: "Số lượng mở", render: it => `<span class="badge on_hold">${it.deviation_count}</span>` }, "dev")}
     </div>` : "";
   // Tank đang lên men theo số ngày lên men so ngày quy định — 2 dạng xem (thanh liên tục + lưới ô
   // màu), nhóm theo loại dịch bia rồi sắp theo số ngày quá hạn giảm dần trong từng nhóm. Chỉ lấy
@@ -608,6 +613,16 @@ VIEWS.dashboard = async function () {
 
   document.querySelectorAll("#view-dashboard [data-goto]").forEach(el => {
     el.onclick = () => gotoView(el.dataset.goto, el.dataset.gotosub || null);
+  });
+  document.querySelectorAll("#view-dashboard [data-minimore]").forEach(btn => {
+    btn.onclick = (ev) => {
+      ev.stopPropagation();
+      const key = btn.dataset.minimore;
+      const rows = document.querySelectorAll(`#view-dashboard .miniextra-${key}`);
+      const expanding = rows[0] && rows[0].style.display === "none";
+      rows.forEach(r => r.style.display = expanding ? "" : "none");
+      btn.textContent = expanding ? "Thu gọn" : `Xem thêm (${btn.dataset.minimorecount})`;
+    };
   });
   document.querySelectorAll("#view-dashboard [data-fermqc]").forEach(el => {
     el.onclick = () => {
