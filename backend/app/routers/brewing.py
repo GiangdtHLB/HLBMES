@@ -73,6 +73,7 @@ from ..services import lot_lock as lot_lock_svc
 from ..services import lot_record as lot_record_svc
 from ..services import ops_setting as ops_setting_svc
 from ..services import qc_catalog
+from ..services import quality
 from ..services import warehouse as warehouse_svc
 from ..services import wms as wms_svc
 
@@ -865,6 +866,16 @@ def list_ferments(db: Session = Depends(get_db)):
         chinh_ok = _stage_ok(db, "len_men_chinh", "ferment", f"{r.lm_code}__len_men_chinh", r.product_id)
         phu_ok = _stage_ok(db, "len_men_phu", "ferment", f"{r.lm_code}__len_men_phu", r.product_id)
         color = "blue" if (chinh_ok and phu_ok) else "red"
+        # Số chỉ tiêu CT chính + CT phụ đang FAIL (giá trị MỚI NHẤT theo từng chỉ tiêu) — dùng cho
+        # badge cảnh báo ở biểu đồ Dashboard, tái dùng đúng helper latest_results_by_param đã có
+        # (services/quality.py) thay vì viết lại logic khử trùng lặp/lấy-mới-nhất.
+        qc_fail_count = sum(
+            1 for res in quality.latest_results_by_param(db, "ferment", f"{r.lm_code}__len_men_chinh").values()
+            if res.status == "fail"
+        ) + sum(
+            1 for res in quality.latest_results_by_param(db, "ferment", f"{r.lm_code}__len_men_phu").values()
+            if res.status == "fail"
+        )
         items.append({"ferment_id": r.ferment_id, "lm_code": r.lm_code, "brew_code": r.brew_code,
                       "color": color,
                       "brew_date": r.brew_date, "kt_date": r.kt_date, "batch_numbers": r.batch_numbers,
@@ -881,7 +892,7 @@ def list_ferments(db: Session = Depends(get_db)):
                       "qc_approved": r.qc_approved, "qc_approved_by": r.qc_approved_by,
                       "qc_approved_at": r.qc_approved_at,
                       "locked": r.locked, "locked_by": r.locked_by,
-                      "quality_status": r.quality_status})
+                      "quality_status": r.quality_status, "qc_fail_count": qc_fail_count})
     return {"items": items, "total_brew_hl": round(total_brew, 1), "total_cct_hl": round(total_cct, 1)}
 
 

@@ -321,10 +321,10 @@ function switchView(view) {
 // ================= DASHBOARD =================
 VIEWS.dashboard = async function () {
   const safe = async (p) => { try { return await GET(p); } catch (e) { return null; } };
-  const [batches, audit, prodSummary, agingRows, expiryRows, agingOpsRaw, alerts] = await Promise.all([
+  const [batches, audit, prodSummary, agingRows, expiryRows, agingOpsRaw, alerts, fermentsRaw] = await Promise.all([
     GET("/batches"), GET("/audit?limit=10"), safe("/reports/dashboard-summary"),
     safe("/reports/inventory-aging"), safe("/warehouse/expiry?warn_days=14"), safe("/ops-settings"),
-    safe("/reports/qc-attention-alerts"),
+    safe("/reports/qc-attention-alerts"), safe("/brewing/ferments"),
   ]);
   const agingOps = agingOpsRaw || { aging_caution_days: 30, aging_warning_days: 60, aging_critical_days: 90 };
 
@@ -464,6 +464,78 @@ VIEWS.dashboard = async function () {
       ${miniAlertPanel("Deviation", "📋", devItems, "Không có deviation nào đang mở.",
         { label: "Số lượng mở", render: it => `<span class="badge on_hold">${it.deviation_count}</span>` })}
     </div>` : "";
+  // Tank đang lên men theo số ngày lên men so ngày quy định — 2 dạng xem (thanh liên tục + lưới ô
+  // màu), nhóm theo loại dịch bia rồi sắp theo số ngày quá hạn giảm dần trong từng nhóm. Chỉ lấy
+  // tank đang thật sự lên men (status="len_men", xem services/derived.py::ferment_status) và có
+  // khai báo ngày lên men chuẩn (ferment_days_std) — thiếu 1 trong 2 thì không xét được quá/còn hạn.
+  const FERMENT_STAGE_BG = { accent: "#2c3e50", success: "#14402a", warning: "#4a3410", danger: "#4a1d18" };
+  const FERMENT_STAGE_FG = { accent: "var(--blue)", success: "var(--green)", warning: "var(--orange)", danger: "var(--red)" };
+  const FERMENT_STAGE_LABEL = { accent: "Đang lên men", success: "Sắp đủ ngày", warning: "Đã đủ ngày", danger: "Quá hạn" };
+  const FERMENT_STAGE_ORDER = ["accent", "success", "warning", "danger"];
+  const fermentTankItems = ((fermentsRaw && fermentsRaw.items) || [])
+    .filter(r => r.status === "len_men" && r.kt_date && r.ferment_days_std)
+    .map(r => {
+      const days = Math.floor(Math.max(0, new Date() - new Date(r.kt_date)) / 86400000);
+      const std = r.ferment_days_std;
+      const over = days - std;
+      const ratio = days / std;
+      const stage = over > 2 ? "danger" : over >= 0 ? "warning" : ratio >= 0.8 ? "success" : "accent";
+      return { tank: r.tank_lm, product: r.wort_type || "—", days, std, over, stage, qcFail: r.qc_fail_count || 0,
+               lmCode: r.lm_code, productId: r.product_id };
+    })
+    .sort((a, b) => {
+      const p = a.product.localeCompare(b.product, "vi");
+      return p !== 0 ? p : b.over - a.over;
+    });
+  const fermentQcBadge = (n, extraStyle = "", lmCode = null, productId = null) => n > 0
+    ? `<span ${lmCode ? `data-fermqc="${esc(lmCode)}|${esc(productId || "")}"` : ""}
+        title="${n} chỉ tiêu CT chính/phụ đang fail${lmCode ? " — bấm để xem chi tiết" : ""}"
+        style="display:inline-flex;align-items:center;justify-content:center;
+        width:15px;height:15px;border-radius:50%;background:var(--red);color:#fff;font-size:9px;font-weight:700;
+        ${lmCode ? "cursor:pointer" : ""};${extraStyle}">${n}</span>`
+    : "";
+  // Chèn tiêu đề nhóm (tên loại dịch) mỗi khi đổi sang dịch bia khác trong danh sách đã sắp xếp.
+  const fermentGroupHead = (product, isFirst) => `<div style="font-size:12px;font-weight:700;color:#cdd9e3;
+    margin:${isFirst ? "0" : "12px"} 0 6px;padding-top:${isFirst ? "0" : "8px"};${isFirst ? "" : "border-top:1px solid #2b3a47"}">${esc(product)}</div>`;
+  const fermentBarScaleMax = Math.max(1, ...fermentTankItems.map(it => Math.max(it.days, it.std)));
+  let fermentBarHtml = "", fermentGridHtml = "", lastFermentProduct = null, gridOpen = false;
+  fermentTankItems.forEach(it => {
+    if (it.product !== lastFermentProduct) {
+      fermentBarHtml += fermentGroupHead(it.product, lastFermentProduct === null);
+      if (gridOpen) fermentGridHtml += `</div>`;
+      fermentGridHtml += fermentGroupHead(it.product, lastFermentProduct === null)
+        + `<div style="display:grid;grid-template-columns:repeat(auto-fill, minmax(84px, 1fr));gap:8px">`;
+      gridOpen = true;
+      lastFermentProduct = it.product;
+    }
+    const basePct = Math.min(it.days, it.std) / fermentBarScaleMax * 100;
+    const overPct = Math.max(it.over, 0) / fermentBarScaleMax * 100;
+    const label = it.over > 0 ? `Quá ${it.over} ngày` : `Còn ${Math.abs(it.over)} ngày`;
+    fermentBarHtml += `<div style="display:grid;grid-template-columns:82px 1fr 88px;align-items:center;gap:10px;padding:5px 0">
+      <div style="font-size:13px;font-weight:700">${esc(it.tank)}${fermentQcBadge(it.qcFail, "margin-left:5px;vertical-align:2px", it.lmCode, it.productId)}</div>
+      <div style="position:relative;height:20px;background:#1e2a36;border-radius:3px;overflow:hidden;display:flex">
+        <div style="width:${basePct}%;height:100%;background:var(--blue)"></div>
+        <div style="width:${overPct}%;height:100%;background:var(--red)"></div>
+        <div style="position:absolute;inset:0;display:flex;align-items:center;padding-left:8px;font-size:11px;color:#fff;font-weight:700">${it.days}/${it.std} ngày</div>
+      </div>
+      <div style="font-size:12px;font-weight:700;color:${it.over > 0 ? "var(--red)" : "#8aa0b2"}">${label}</div>
+    </div>`;
+    fermentGridHtml += `<div style="position:relative;background:${FERMENT_STAGE_BG[it.stage]};border-radius:6px;padding:6px 8px;text-align:center">
+      ${fermentQcBadge(it.qcFail, "position:absolute;top:-6px;right:-6px", it.lmCode, it.productId)}
+      <div style="font-size:12px;font-weight:700;color:${FERMENT_STAGE_FG[it.stage]}">${esc(it.tank)}</div>
+      <div style="font-size:10px;color:#8aa0b2">${it.days}/${it.std} ngày</div>
+    </div>`;
+  });
+  if (gridOpen) fermentGridHtml += `</div>`;
+  if (!fermentTankItems.length) {
+    fermentBarHtml = '<div class="muted">Không có tank nào đang lên men.</div>';
+    fermentGridHtml = fermentBarHtml;
+  }
+  const fermentLegendHtml = FERMENT_STAGE_ORDER.map(s => `
+    <span style="display:inline-flex;align-items:center;gap:6px;margin-right:14px;font-size:11px;color:#8aa0b2">
+      <span style="width:9px;height:9px;border-radius:2px;background:${FERMENT_STAGE_FG[s]};display:inline-block"></span>${FERMENT_STAGE_LABEL[s]}</span>`).join("")
+    + `<span style="display:inline-flex;align-items:center;gap:6px;font-size:11px;color:#8aa0b2">${fermentQcBadge(1)} Số chỉ tiêu CT chính/phụ đang fail</span>`;
+
   // Mặc định NGÀY HÔM QUA (giờ máy client) — giống hệt quy ước ở Báo cáo > Chiết (lon)/(keg):
   // hôm nay chưa qua hết ca 3 nên chưa có đủ dữ liệu để tính trọn 3 ca.
   const dbYesterday = new Date(); dbYesterday.setDate(dbYesterday.getDate() - 1);
@@ -517,11 +589,31 @@ VIEWS.dashboard = async function () {
       </div>
       <div id="db_dien_data"><div class="muted">⏳ Đang tải dữ liệu SCADA...</div></div>
     </div>
+    <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:stretch;margin-bottom:16px">
+      <div class="panel" style="flex:1;min-width:320px;margin-bottom:0">
+        <h2>🍺 Tank đang lên men theo số ngày (so ngày quy định)</h2>
+        <div class="muted" style="margin-bottom:8px">Nhóm theo dịch bia, sắp theo số ngày quá hạn — xem đầy đủ tại <button class="btn sm sec" data-goto="process" data-gotosub="lenmen" style="padding:1px 8px">Nấu-Lọc-Chiết › Lên men</button></div>
+        <div style="margin-bottom:8px">${fermentLegendHtml}</div>
+        ${fermentBarHtml}
+      </div>
+      <div class="panel" style="flex:1;min-width:320px;margin-bottom:0">
+        <h2>🧊 Tank đang lên men theo giai đoạn (lưới)</h2>
+        <div class="muted" style="margin-bottom:8px">Mỗi ô = 1 tank, tô màu theo giai đoạn số ngày lên men so ngày quy định.</div>
+        <div style="margin-bottom:8px">${fermentLegendHtml}</div>
+        ${fermentGridHtml}
+      </div>
+    </div>
     <div class="panel"><h2>Audit gần đây</h2>${tableAudit(audit)}</div>
     <div class="panel"><h2>Mẻ gần đây</h2>${tableBatches(batches.slice(0, 8))}</div>`;
 
   document.querySelectorAll("#view-dashboard [data-goto]").forEach(el => {
     el.onclick = () => gotoView(el.dataset.goto, el.dataset.gotosub || null);
+  });
+  document.querySelectorAll("#view-dashboard [data-fermqc]").forEach(el => {
+    el.onclick = () => {
+      const [lm, pid] = el.dataset.fermqc.split("|");
+      openFermentQcFailModal(lm, pid || null);
+    };
   });
   $("db_chiet_apply").onclick = () => {
     SUB.dashboard_chiet_date = $("db_chiet_date").value;
@@ -3756,6 +3848,39 @@ async function openStageQcModal(stage, scopeType, scopeId, opts) {
     if (curView) render(curView);
     openStageQcModal(stage, scopeType, scopeId, opts);
   });
+}
+
+// Popup nhỏ xem chi tiết chỉ tiêu đang FAIL của 1 tank lên men (bấm vào badge đỏ ở biểu đồ
+// Dashboard) — chỉ đọc, không cho sửa ở đây (sửa giá trị vẫn làm qua nút CT chính/CT phụ ở
+// tab Lên men, xem openStageQcModal). Gộp cả 2 giai đoạn CT chính + CT phụ vì badge đếm cả hai.
+async function openFermentQcFailModal(lmCode, productId) {
+  const stages = [["len_men_chinh", "CT chính"], ["len_men_phu", "CT phụ"]];
+  const results = await Promise.all(stages.map(([stage]) => {
+    const qs = `stage=${encodeURIComponent(stage)}&scope_type=ferment&scope_id=${encodeURIComponent(lmCode + "__" + stage)}`
+      + (productId ? `&product_id=${encodeURIComponent(productId)}` : "");
+    return GET(`/brewing/qc-status?${qs}`);
+  }));
+  const rows = [];
+  stages.forEach(([stage, label], i) => {
+    const st = results[i];
+    const recordedByParam = Object.fromEntries(st.recorded.map(r => [r.parameter, r]));
+    st.required.forEach(p => {
+      const r = recordedByParam[p.code];
+      if (r && r.status === "fail") rows.push({ label, p, r });
+    });
+  });
+  modal(`<h3>Chỉ tiêu đang vượt giới hạn — tank <code class="k">${esc(lmCode)}</code></h3>
+    <div class="tablewrap"><table>
+      <thead><tr><th>Giai đoạn</th><th>Chỉ tiêu</th><th>Min</th><th>Max</th><th>Giá trị</th><th>Người/Thời gian điền</th></tr></thead>
+      <tbody>${rows.length ? rows.map(x => `<tr>
+        <td>${esc(x.label)}</td>
+        <td>${esc(x.p.name)}<div class="muted">${esc(x.p.code)}${x.p.unit ? " (" + esc(x.p.unit) + ")" : ""}</div></td>
+        <td>${x.p.value_type === "pass_fail" ? "—" : (x.p.lsl ?? "—")}</td>
+        <td>${x.p.value_type === "pass_fail" ? "—" : (x.p.usl ?? "—")}</td>
+        <td style="color:var(--red);font-weight:700">${qcValueLabel(x.p, x.r.value)}</td>
+        <td>${qcRecordedMetaHtml(x.r)}</td>
+        </tr>`).join("") : `<tr><td colspan=6 class="muted">Không có chỉ tiêu nào đang fail.</td></tr>`}</tbody>
+    </table></div>`);
 }
 
 // Chú thích "đã dùng đúng lô cũ nhất (FIFO) tại Kho phân xưởng chưa" — chụp lại (snapshot)
