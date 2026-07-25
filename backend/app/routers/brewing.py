@@ -58,6 +58,7 @@ from ..schemas import (
     FinishFilterTankIn,
     FinishIn,
     MaterialReceiptIn,
+    QcSampleIn,
     StageIndicatorIn,
     StageQcResultIn,
 )
@@ -1855,6 +1856,22 @@ def brewing_qc_status(stage: str, scope_type: str, scope_id: str, product_id: st
                       finished_product_id: str = None, beer_type_id: str = None, db: Session = Depends(get_db)):
     return qc_catalog.stage_qc_status(db, stage, scope_type, scope_id, product_id,
                                       finished_product_id, beer_type_id)
+
+
+@router.post("/qc-samples", status_code=201)
+def add_qc_sample(payload: QcSampleIn, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """Ghi 1 lần lấy mẫu (nhiều chỉ tiêu cùng lúc) cho CT chính/CT phụ lên men — xem
+    qc_catalog.record_qc_sample. LUÔN thêm bản ghi mới, không ghi đè lần trước."""
+    require_perm(user, "batch.execute")
+    _assert_stage_scope_unlocked(db, payload.scope_type, payload.scope_id)
+    return qc_catalog.record_qc_sample(db, payload.stage, payload.scope_type, payload.scope_id,
+                                       payload.sampled_at, [r.model_dump() for r in payload.results], user)
+
+
+@router.get("/qc-samples")
+def get_qc_samples(scope_type: str, scope_id: str, db: Session = Depends(get_db)):
+    """Lịch sử các lần lấy mẫu (mới nhất trước) cho 1 scope — xem qc_catalog.list_qc_samples."""
+    return {"items": qc_catalog.list_qc_samples(db, scope_type, scope_id)}
 
 
 @router.get("/lot-record")

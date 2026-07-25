@@ -6,7 +6,7 @@
 - Deviation có workflow chuẩn.
 """
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..audit import record_audit
@@ -207,11 +207,16 @@ def _set_quality_status(db: Session, scope_type: str, scope_id: str, status: str
 
 def latest_results_by_param(db: Session, scope_type: str, scope_id: str) -> dict[str, QualityResult]:
     """Chỉ giữ giá trị MỚI NHẤT đã khai báo cho mỗi chỉ tiêu — khai báo lại 1 chỉ tiêu (sửa giá
-    trị nhập nhầm) không được để giá trị FAIL cũ (đã bị đè) tiếp tục tính là đang treo."""
+    trị nhập nhầm) không được để giá trị FAIL cũ (đã bị đè) tiếp tục tính là đang treo.
+    Sắp theo coalesce(sampled_at, recorded_at): các stage lấy mẫu NHIỀU LẦN (len_men_chinh/
+    len_men_phu, xem qc_catalog.record_qc_sample) có nhiều dòng/chỉ tiêu với sampled_at do
+    người dùng khai (có thể lùi ngày) — phải chọn đúng theo mốc lấy mẫu THỰC TẾ, không phải
+    thứ tự lưu vào DB. Mọi nơi khác chỉ có 1 dòng/chỉ tiêu (ghi đè tại chỗ) và sampled_at luôn
+    NULL nên coalesce rơi về recorded_at y hệt hành vi cũ."""
     results = db.execute(
         select(QualityResult).where(
             QualityResult.scope_type == scope_type, QualityResult.scope_id == scope_id
-        ).order_by(QualityResult.recorded_at)
+        ).order_by(func.coalesce(QualityResult.sampled_at, QualityResult.recorded_at))
     ).scalars().all()
     return {r.parameter: r for r in results}
 

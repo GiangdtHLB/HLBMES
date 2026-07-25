@@ -34,6 +34,11 @@ class QualityResult(Base):
     recorded_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
     approved_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
     recorded_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    # Mốc ngày giờ LẤY MẪU do người dùng khai báo (có thể lùi lại nếu ghi trễ) — khác
+    # recorded_at (mốc HỆ THỐNG lưu bản ghi). Chỉ dùng cho các stage lấy mẫu NHIỀU LẦN
+    # (len_men_chinh/len_men_phu, xem qc_catalog.MULTI_SAMPLE_STAGES) — NULL ở mọi nơi khác,
+    # nơi mỗi (scope, parameter) chỉ có đúng 1 dòng "giá trị hiện tại" (ghi đè tại chỗ).
+    sampled_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
 
 
 class Deviation(Base):

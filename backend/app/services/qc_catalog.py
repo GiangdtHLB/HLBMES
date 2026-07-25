@@ -502,26 +502,94 @@ def record_stage_result(db: Session, stage: str, scope_type: str, scope_id: str,
 def stage_qc_status(db: Session, stage: str, scope_type: str, scope_id: str, product_id: str = None,
                     finished_product_id: str = None, beer_type_id: str = None) -> dict:
     """Trạng thái khai báo chỉ tiêu của một bản ghi công đoạn (mẻ nấu/lô LM/lô lọc/mã chiết)
-    — giá trị đã khai báo lưu ở QualityResult dùng chung (như lot_qc_status)."""
+    — giá trị đã khai báo lưu ở QualityResult dùng chung (như lot_qc_status).
+    Dùng latest_results_by_param (thay vì đọc thẳng mọi dòng) để CHỈ tính theo giá trị MỚI
+    NHẤT/chỉ tiêu — bắt buộc với các stage lấy mẫu nhiều lần (len_men_chinh/len_men_phu,
+    xem MULTI_SAMPLE_STAGES/record_qc_sample) vốn có NHIỀU dòng lịch sử cho cùng 1 chỉ tiêu;
+    nếu không dedup, 1 lần FAIL cũ (đã đo lại PASS) sẽ chặn duyệt mãi mãi. Với các stage khác
+    (chỉ có đúng 1 dòng/chỉ tiêu, ghi đè tại chỗ) hành vi không đổi."""
+    from . import quality
     required = required_params_for_stage(db, stage, product_id=product_id,
                                          finished_product_id=finished_product_id, mandatory_only=True,
                                          beer_type_id=beer_type_id)
-    recorded = db.execute(
-        select(QualityResult).where(QualityResult.scope_type == scope_type, QualityResult.scope_id == scope_id)
-    ).scalars().all()
-    recorded_codes = {r.parameter for r in recorded}
+    latest_by_param = quality.latest_results_by_param(db, scope_type, scope_id)
     required_codes = {p["code"] for p in required}
-    pending = [p["code"] for p in required if p["code"] not in recorded_codes]
-    has_fail = any(r.status == "fail" for r in recorded if r.parameter in required_codes)
+    pending = [p["code"] for p in required if p["code"] not in latest_by_param]
+    has_fail = any(r.status == "fail" for code, r in latest_by_param.items() if code in required_codes)
     return {
         "stage": stage, "scope_type": scope_type, "scope_id": scope_id,
         "required": required,
         "recorded": [{"parameter": r.parameter, "value": r.value, "status": r.status,
-                      "recorded_by": r.recorded_by, "recorded_at": r.recorded_at} for r in recorded],
+                      "recorded_by": r.recorded_by, "recorded_at": r.recorded_at}
+                     for r in latest_by_param.values()],
         "pending": pending,
         "has_fail": has_fail,
         "can_release": not pending and not has_fail,
     }
+
+
+# ---- Lấy mẫu nhiều lần (lần 1/lần 2/...) cho CT chính/CT phụ lên men ----
+# Khác record_stage_result (ghi đè tại chỗ, "giá trị hiện tại") — mỗi lần gọi LUÔN thêm dòng
+# mới (không sửa/xóa dòng cũ), cùng 1 sample_id cho mọi chỉ tiêu khai trong CÙNG 1 lần lấy
+# mẫu. Quyết định ĐẠT/FAIL để duyệt (stage_qc_status/qc_fail_count) vẫn chỉ theo giá trị MỚI
+# NHẤT (xem latest_results_by_param) — lịch sử chỉ để xem lại, không dùng để chặn duyệt.
+MULTI_SAMPLE_STAGES = {"len_men_chinh", "len_men_phu"}
+
+
+def record_qc_sample(db: Session, stage: str, scope_type: str, scope_id: str,
+                     sampled_at, results: list[dict], user: User) -> dict:
+    """Ghi 1 LẦN lấy mẫu (nhiều chỉ tiêu cùng lúc, cùng 1 mốc ngày giờ) — luôn INSERT dòng
+    mới, không tìm/ghi đè dòng cũ (khác record_stage_result)."""
+    if stage not in MULTI_SAMPLE_STAGES:
+        raise DomainError(f"Stage '{stage}' không hỗ trợ lấy mẫu nhiều lần.")
+    if not results:
+        raise DomainError("Chưa nhập giá trị chỉ tiêu nào.")
+    sample_id = new_id()
+    when = sampled_at or utcnow()
+    rows = []
+    for item in results:
+        value = item.get("value")
+        lower, upper = item.get("lower_limit"), item.get("upper_limit")
+        status = _evaluate_stage_result(value, lower, upper)
+        row = QualityResult(
+            result_id=new_id(), sample_id=sample_id, scope_type=scope_type, scope_id=scope_id,
+            parameter=item["parameter"], value=value, unit=item.get("unit"),
+            lower_limit=lower, upper_limit=upper, status=status,
+            recorded_by=user.username, sampled_at=when,
+        )
+        db.add(row)
+        rows.append(row)
+    record_audit(db, entity_type="quality_result", entity_id=sample_id, action="record_sample",
+                actor=user, after={"stage": stage, "scope": f"{scope_type}:{scope_id}",
+                                   "sampled_at": when.isoformat(),
+                                   "results": [{"parameter": r["parameter"], "value": r.get("value")}
+                                              for r in results]})
+    db.commit()
+    for row in rows:
+        db.refresh(row)
+    return {"sample_id": sample_id, "sampled_at": when,
+            "results": [{"parameter": r.parameter, "value": r.value, "status": r.status} for r in rows]}
+
+
+def list_qc_samples(db: Session, scope_type: str, scope_id: str) -> list[dict]:
+    """Lịch sử các lần lấy mẫu (mới nhất trước) cho 1 stage/scope — gộp theo sample_id.
+    Tên/ĐVT chỉ tiêu tra theo QCParameter.code hiện tại (giới hạn min/max lấy từ chính dòng
+    đã lưu — đúng ngưỡng áp dụng LÚC ghi, không lấy ngưỡng hiện tại có thể đã đổi)."""
+    rows = db.execute(
+        select(QualityResult).where(QualityResult.scope_type == scope_type, QualityResult.scope_id == scope_id)
+    ).scalars().all()
+    params_by_code = {p.code: p for p in db.execute(select(QCParameter)).scalars().all()}
+    sessions: dict[str, dict] = {}
+    for r in rows:
+        eff_time = r.sampled_at or r.recorded_at
+        s = sessions.setdefault(r.sample_id, {"sample_id": r.sample_id, "sampled_at": eff_time,
+                                              "recorded_by": r.recorded_by, "results": []})
+        p = params_by_code.get(r.parameter)
+        s["results"].append({
+            "parameter": r.parameter, "name": p.name if p else r.parameter, "unit": r.unit,
+            "value": r.value, "status": r.status, "lower_limit": r.lower_limit, "upper_limit": r.upper_limit,
+        })
+    return sorted(sessions.values(), key=lambda s: s["sampled_at"], reverse=True)
 
 
 def list_pending_stage_declarations(db: Session) -> list[dict]:
