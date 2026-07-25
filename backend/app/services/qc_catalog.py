@@ -121,6 +121,42 @@ def add_item(db: Session, group_id: str, payload: dict, user: User) -> dict:
     return _item_out(db, item)
 
 
+def copy_items(db: Session, target_group_id: str, source_group_id: str, user: User) -> list[dict]:
+    """Copy toàn bộ chỉ tiêu (kèm min/max/bắt buộc riêng của nhóm nguồn) sang nhóm đích —
+    chỉ cho phép khi nhóm đích đang RỖNG (chưa có chỉ tiêu nào), tránh copy chồng lên dữ liệu
+    đã cấu hình sẵn của nhóm đích."""
+    require_perm(user, "master.manage")
+    if not db.get(QCParameterGroup, target_group_id):
+        raise NotFoundError("Nhóm chỉ tiêu đích không tồn tại.")
+    source = db.get(QCParameterGroup, source_group_id)
+    if not source:
+        raise NotFoundError("Nhóm chỉ tiêu nguồn không tồn tại.")
+    if source_group_id == target_group_id:
+        raise DomainError("Nhóm nguồn và nhóm đích phải khác nhau.")
+
+    target_has_items = db.execute(
+        select(QCParameterGroupItem.item_id).where(QCParameterGroupItem.group_id == target_group_id).limit(1)
+    ).first()
+    if target_has_items:
+        raise DomainError("Nhóm đích đã có chỉ tiêu — chỉ có thể copy vào nhóm đang rỗng.")
+    source_items = db.execute(
+        select(QCParameterGroupItem).where(QCParameterGroupItem.group_id == source_group_id)
+        .order_by(QCParameterGroupItem.seq)
+    ).scalars().all()
+
+    for it in source_items:
+        new_item = QCParameterGroupItem(
+            item_id=new_id(), group_id=target_group_id, param_id=it.param_id, seq=it.seq,
+            mandatory=it.mandatory, target_override=it.target_override,
+            usl_override=it.usl_override, lsl_override=it.lsl_override,
+        )
+        db.add(new_item)
+    record_audit(db, entity_type="qc_parameter_group", entity_id=target_group_id, action="copy_items",
+                 actor=user, after={"source_group_id": source_group_id, "copied": len(source_items)})
+    db.commit()
+    return list_items(db, target_group_id)
+
+
 def update_item(db: Session, item_id: str, payload: dict, user: User) -> dict:
     require_perm(user, "master.manage")
     item = db.get(QCParameterGroupItem, item_id)

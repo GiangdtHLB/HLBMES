@@ -569,3 +569,44 @@ def test_list_movements_filters_by_type_and_mode(client, admin_h, thukho_h):
     assert any(m["lot_id"] == lot_id for m in tu_do_only)
     receipts_only = client.get("/api/warehouse/movements?movement_type=receipt", headers=thukho_h).json()
     assert not any(m["lot_id"] == lot_id and m["movement_type"] != "receipt" for m in receipts_only)
+
+
+def test_copy_qc_group_items(client, admin_h):
+    p1 = client.post("/api/qc/parameters", headers=admin_h,
+                     json={"code": "COPY_P1", "name": "Chỉ tiêu 1", "unit": "%"})
+    p2 = client.post("/api/qc/parameters", headers=admin_h,
+                     json={"code": "COPY_P2", "name": "Chỉ tiêu 2", "unit": "%"})
+    p1_id, p2_id = p1.json()["param_id"], p2.json()["param_id"]
+
+    src = client.post("/api/qc/groups", headers=admin_h,
+                      json={"code": "GRP-COPY-SRC", "name": "Nhóm nguồn"}).json()
+    dst = client.post("/api/qc/groups", headers=admin_h,
+                      json={"code": "GRP-COPY-DST", "name": "Nhóm đích"}).json()
+
+    client.post(f"/api/qc/groups/{src['group_id']}/items", headers=admin_h,
+               json={"param_id": p1_id, "mandatory": True, "lsl_override": 1, "usl_override": 5})
+    client.post(f"/api/qc/groups/{src['group_id']}/items", headers=admin_h,
+               json={"param_id": p2_id, "mandatory": False})
+
+    # Nhóm đích đang rỗng -> copy thành công, giữ nguyên min/max/bắt buộc của nhóm nguồn.
+    r = client.post(f"/api/qc/groups/{dst['group_id']}/items/copy", headers=admin_h,
+                    json={"source_group_id": src["group_id"]})
+    assert r.status_code == 200, r.text
+    items = r.json()
+    assert len(items) == 2
+    p1_item = next(it for it in items if it["param_id"] == p1_id)
+    p2_item = next(it for it in items if it["param_id"] == p2_id)
+    assert p1_item["usl_override"] == 5
+    assert p2_item["mandatory"] is False
+    assert p2_item["lsl_override"] is None
+
+    # Nhóm đích giờ đã có chỉ tiêu -> copy lần nữa (kể cả từ nhóm khác) phải bị chặn.
+    src2 = client.post("/api/qc/groups", headers=admin_h,
+                       json={"code": "GRP-COPY-SRC2", "name": "Nhóm nguồn 2"}).json()
+    blocked = client.post(f"/api/qc/groups/{dst['group_id']}/items/copy", headers=admin_h,
+                          json={"source_group_id": src2["group_id"]})
+    assert blocked.status_code == 409, blocked.text
+
+    same = client.post(f"/api/qc/groups/{dst['group_id']}/items/copy", headers=admin_h,
+                       json={"source_group_id": dst["group_id"]})
+    assert same.status_code == 409, same.text

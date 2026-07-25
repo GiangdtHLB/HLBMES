@@ -1404,6 +1404,10 @@ class QcGroupItemOut(ORMModel):
     param_unit: Optional[str] = None
 
 
+class QcGroupCopyItemsIn(BaseModel):
+    source_group_id: str = Field(min_length=1)
+
+
 class MaterialQcGroupIn(BaseModel):
     group_id: str
     mandatory: bool = True

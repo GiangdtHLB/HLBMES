@@ -7,6 +7,7 @@ from ..database import get_db
 from ..schemas import (
     CapaIn,
     CapaTransitionIn,
+    QcGroupCopyItemsIn,
     QcGroupIn,
     QcGroupItemIn,
     QcGroupOut,
@@ -87,6 +88,12 @@ def update_qc_group_item(group_id: str, item_id: str, payload: QcGroupItemIn,
 def delete_qc_group_item(group_id: str, item_id: str, db: Session = Depends(get_db),
                          user: User = Depends(get_current_user)):
     qc_catalog.delete_item(db, item_id, user)
+
+
+@router.post("/groups/{group_id}/items/copy")
+def copy_qc_group_items(group_id: str, payload: QcGroupCopyItemsIn, db: Session = Depends(get_db),
+                        user: User = Depends(get_current_user)):
+    return qc_catalog.copy_items(db, group_id, payload.source_group_id, user)
 
 
 # ---- Gán nhóm chỉ tiêu cho công đoạn sản xuất (mẻ nấu/lên men/lọc/chiết) ----

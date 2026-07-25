@@ -7853,7 +7853,16 @@ VIEWS.master = async function () {
         <div class="field"><label>Bắt buộc</label><input id="qgi_mandatory" type="checkbox" checked/></div>
         <button class="btn" id="qgi_add" style="align-self:flex-end">Thêm</button>
       </div>
-      <div class="muted" style="margin-top:10px">Chưa thấy chỉ tiêu cần dùng? Tạo mới ở panel "📋 Danh mục chỉ tiêu chất lượng" (phía trên bảng Nhóm chỉ tiêu), rồi quay lại đây để thêm vào nhóm.</div>`);
+      <div class="muted" style="margin-top:10px">Chưa thấy chỉ tiêu cần dùng? Tạo mới ở panel "📋 Danh mục chỉ tiêu chất lượng" (phía trên bảng Nhóm chỉ tiêu), rồi quay lại đây để thêm vào nhóm.</div>
+      <h4 style="margin-top:14px">↪ Copy chỉ tiêu từ nhóm khác</h4>
+      ${items.length ? `<div class="muted">Nhóm này đã có chỉ tiêu — chỉ có thể copy vào nhóm đang rỗng. Xóa hết chỉ tiêu hiện tại (bảng phía trên) nếu muốn copy nguyên bộ từ nhóm khác.</div>` : `<div class="row">
+        <div class="field" style="min-width:220px"><label>Nhóm nguồn</label><select id="qgi_copysrc">${
+          qcGroups.filter(g => g.group_id !== group.group_id)
+            .map(g => `<option value="${esc(g.group_id)}">${esc(g.code)} — ${esc(g.name)}</option>`).join("") ||
+          "<option value=''>(không có nhóm nào khác)</option>"}</select></div>
+        <button class="btn sec" id="qgi_copy" style="align-self:flex-end">Copy vào nhóm này</button>
+      </div>
+      <div class="muted" style="margin-top:6px">Copy toàn bộ chỉ tiêu (kèm Min/Max/Bắt buộc) từ nhóm nguồn sang nhóm "${esc(group.name)}".</div>`}`);
 
     $("qgi_add").onclick = () => guard(async () => {
       const paramId = $("qgi_param").value;
@@ -7864,6 +7873,12 @@ VIEWS.master = async function () {
         usl_override: $("qgi_usl").value === "" ? null : parseFloat($("qgi_usl").value),
       });
       toast("Đã thêm chỉ tiêu vào nhóm"); openQcGroupItemsModal(group);
+    });
+    if ($("qgi_copy")) $("qgi_copy").onclick = () => guard(async () => {
+      const sourceGroupId = $("qgi_copysrc").value;
+      if (!sourceGroupId) throw new Error("Chưa có nhóm nguồn để copy.");
+      await POST(`/qc/groups/${group.group_id}/items/copy`, { source_group_id: sourceGroupId });
+      toast("Đã copy chỉ tiêu vào nhóm"); openQcGroupItemsModal(group);
     });
     document.querySelectorAll("[data-saveitem]").forEach(b => b.onclick = () => guard(async () => {
       const itemId = b.dataset.saveitem;
