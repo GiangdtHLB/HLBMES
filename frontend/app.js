@@ -3953,34 +3953,106 @@ async function openStageQcModal(stage, scopeType, scopeId, opts) {
 // Popup nhỏ xem chi tiết chỉ tiêu đang FAIL của 1 tank lên men (bấm vào badge đỏ ở biểu đồ
 // Dashboard) — chỉ đọc, không cho sửa ở đây (sửa giá trị vẫn làm qua nút CT chính/CT phụ ở
 // tab Lên men, xem openStageQcModal). Gộp cả 2 giai đoạn CT chính + CT phụ vì badge đếm cả hai.
-async function openFermentQcFailModal(lmCode, productId) {
+async function openFermentQcFailModal(lmCode) {
   const stages = [["len_men_chinh", "CT chính"], ["len_men_phu", "CT phụ"]];
-  const results = await Promise.all(stages.map(([stage]) => {
-    const qs = `stage=${encodeURIComponent(stage)}&scope_type=ferment&scope_id=${encodeURIComponent(lmCode + "__" + stage)}`
-      + (productId ? `&product_id=${encodeURIComponent(productId)}` : "");
-    return GET(`/brewing/qc-status?${qs}`);
-  }));
+  const histories = await Promise.all(stages.map(([stage]) =>
+    GET(`/brewing/qc-samples?scope_type=ferment&scope_id=${encodeURIComponent(lmCode + "__" + stage)}`)));
+  // Hiện TẤT CẢ lần lấy mẫu bị FAIL trong toàn bộ lịch sử (không chỉ lần mới nhất) — khác
+  // trạng thái ĐẠT/FAIL dùng để duyệt (luôn chỉ theo lần mới nhất, xem qc_catalog.stage_qc_status)
+  // — ở đây là xem lại/soát vết, nên liệt kê đủ mọi lần từng vượt giới hạn kèm ngày lấy mẫu.
   const rows = [];
   stages.forEach(([stage, label], i) => {
-    const st = results[i];
-    const recordedByParam = Object.fromEntries(st.recorded.map(r => [r.parameter, r]));
-    st.required.forEach(p => {
-      const r = recordedByParam[p.code];
-      if (r && r.status === "fail") rows.push({ label, p, r });
+    (histories[i].items || []).forEach(session => {
+      session.results.forEach(r => {
+        if (r.status === "fail") rows.push({ label, sampledAt: session.sampled_at, recordedBy: session.recorded_by, r });
+      });
     });
   });
-  modal(`<h3>Chỉ tiêu đang vượt giới hạn — tank <code class="k">${esc(lmCode)}</code></h3>
+  rows.sort((a, b) => new Date(b.sampledAt) - new Date(a.sampledAt));
+  modal(`<h3>Lịch sử chỉ tiêu vượt giới hạn — tank <code class="k">${esc(lmCode)}</code></h3>
     <div class="tablewrap"><table>
-      <thead><tr><th>Giai đoạn</th><th>Chỉ tiêu</th><th>Min</th><th>Max</th><th>Giá trị</th><th>Người/Thời gian điền</th></tr></thead>
+      <thead><tr><th>Ngày giờ lấy mẫu</th><th>Giai đoạn</th><th>Chỉ tiêu</th><th>Min</th><th>Max</th><th>Giá trị</th><th>Người ghi</th></tr></thead>
       <tbody>${rows.length ? rows.map(x => `<tr>
+        <td>${fmt(x.sampledAt)}</td>
         <td>${esc(x.label)}</td>
-        <td>${esc(x.p.name)}<div class="muted">${esc(x.p.code)}${x.p.unit ? " (" + esc(x.p.unit) + ")" : ""}</div></td>
-        <td>${x.p.value_type === "pass_fail" ? "—" : (x.p.lsl ?? "—")}</td>
-        <td>${x.p.value_type === "pass_fail" ? "—" : (x.p.usl ?? "—")}</td>
-        <td style="color:var(--red);font-weight:700">${qcValueLabel(x.p, x.r.value)}</td>
-        <td>${qcRecordedMetaHtml(x.r)}</td>
-        </tr>`).join("") : `<tr><td colspan=6 class="muted">Không có chỉ tiêu nào đang fail.</td></tr>`}</tbody>
+        <td>${esc(x.r.name)}<div class="muted">${esc(x.r.parameter)}${x.r.unit ? " (" + esc(x.r.unit) + ")" : ""}</div></td>
+        <td>${x.r.lower_limit ?? "—"}</td>
+        <td>${x.r.upper_limit ?? "—"}</td>
+        <td style="color:var(--red);font-weight:700">${x.r.value ?? "—"}</td>
+        <td>${esc(x.recordedBy || "—")}</td>
+        </tr>`).join("") : `<tr><td colspan=7 class="muted">Không có chỉ tiêu nào đang fail.</td></tr>`}</tbody>
     </table></div>`);
+}
+
+// Lấy mẫu NHIỀU LẦN cho CT chính/CT phụ lên men (lần 1 ngày giờ X, lần 2 ngày giờ Y...) —
+// khác openStageQcModal (1 giá trị hiện tại, ghi đè) dùng cho Nấu/Lọc/Chiết: mỗi lần lưu ở
+// đây LUÔN thêm 1 bản ghi mới (POST /brewing/qc-samples), giữ nguyên lịch sử để xem lại.
+// ĐẠT/FAIL để duyệt vẫn chỉ tính theo lần MỚI NHẤT (xem qc_catalog.stage_qc_status).
+async function openFermentQcSampleModal(stage, scopeType, scopeId, productId) {
+  const label = stage === "len_men_chinh" ? "CT chính" : "CT phụ";
+  const lmCode = scopeId.split("__")[0];
+  const qs = `stage=${encodeURIComponent(stage)}&scope_type=${encodeURIComponent(scopeType)}&scope_id=${encodeURIComponent(scopeId)}`
+    + (productId ? `&product_id=${encodeURIComponent(productId)}` : "");
+  const [status, history] = await Promise.all([
+    GET(`/brewing/qc-status?${qs}`),
+    GET(`/brewing/qc-samples?scope_type=${encodeURIComponent(scopeType)}&scope_id=${encodeURIComponent(scopeId)}`),
+  ]);
+
+  const formRows = status.required.map(p => `<tr>
+      <td>${esc(p.name)}<div class="muted">${esc(p.code)}${p.unit ? " (" + esc(p.unit) + ")" : ""}</div></td>
+      <td>${p.value_type === "pass_fail" ? "—" : (p.lsl ?? "—")}</td>
+      <td>${p.value_type === "pass_fail" ? "—" : (p.usl ?? "—")}</td>
+      <td>${qcValueInputHtml("sqc-sample-val", p)}</td>
+      </tr>`).join("")
+    || `<tr><td colspan=4 class="muted">Chưa gán nhóm chỉ tiêu nào cho công đoạn này (gán ở tab Danh mục).</td></tr>`;
+
+  const historyHtml = history.items.length ? history.items.map(s => `
+    <div style="margin-bottom:14px;padding:10px 12px;background:var(--panel2);border:1px solid var(--border);border-radius:8px">
+      <div style="font-weight:700;margin-bottom:6px">${fmt(s.sampled_at)} <span class="muted" style="font-weight:400">— ${esc(s.recorded_by || "—")}</span></div>
+      <table style="width:100%">
+        <thead><tr><th>Chỉ tiêu</th><th>Min</th><th>Max</th><th>Giá trị</th><th>Kết quả</th></tr></thead>
+        <tbody>${s.results.map(r => `<tr>
+          <td>${esc(r.name)}${r.unit ? ` <span class="muted">(${esc(r.unit)})</span>` : ""}</td>
+          <td>${r.lower_limit ?? "—"}</td><td>${r.upper_limit ?? "—"}</td>
+          <td>${qcValueLabel({ value_type: "numeric" }, r.value)}</td>
+          <td>${badge(r.status)}${r.status}</td>
+          </tr>`).join("")}</tbody>
+      </table>
+    </div>`).join("") : `<div class="muted">Chưa có lần lấy mẫu nào.</div>`;
+
+  modal(`<h3>${esc(label)} — tank <code class="k">${esc(lmCode)}</code></h3>
+    <div class="muted" style="margin-bottom:8px">${status.can_release ? '<span style="color:var(--green)">✓ Đã đủ chỉ tiêu bắt buộc (theo lần lấy mẫu mới nhất)</span>' :
+      status.pending.length ? `⚠ Còn thiếu: ${status.pending.map(esc).join(", ")}` :
+      status.required.length ? '<span style="color:var(--red)">✗ Có chỉ tiêu bắt buộc không đạt (FAIL) — theo lần mới nhất</span>' : ""}</div>
+    <h4 style="margin:14px 0 8px">Thêm lần lấy mẫu mới</h4>
+    <div class="field" style="margin-bottom:10px"><label>Ngày giờ lấy mẫu</label>
+      <input type="datetime-local" id="sqc_sample_when" value="${toDTLocal(new Date())}"/></div>
+    <div class="tablewrap"><table>
+      <thead><tr><th>Chỉ tiêu</th><th>Min</th><th>Max</th><th>Giá trị đo được</th></tr></thead>
+      <tbody>${formRows}</tbody>
+    </table></div>
+    ${status.required.length ? `<button class="btn" id="sqc_sample_submit" style="margin-top:12px">Lưu lần lấy mẫu</button>` : ""}
+    <h4 style="margin:18px 0 8px">Lịch sử các lần lấy mẫu</h4>
+    ${historyHtml}`);
+
+  if ($("sqc_sample_submit")) $("sqc_sample_submit").onclick = () => guard(async () => {
+    const inputs = Array.from(document.querySelectorAll(".sqc-sample-val")).filter(i => i.value !== "");
+    if (!inputs.length) throw new Error("Chưa nhập giá trị nào.");
+    const whenLocal = $("sqc_sample_when").value;
+    await POST("/brewing/qc-samples", {
+      stage, scope_type: scopeType, scope_id: scopeId,
+      sampled_at: whenLocal ? new Date(whenLocal).toISOString() : null,
+      results: inputs.map(inp => ({
+        parameter: inp.dataset.code, value: parseFloat(inp.value),
+        lower_limit: inp.dataset.lsl === "" ? null : parseFloat(inp.dataset.lsl),
+        upper_limit: inp.dataset.usl === "" ? null : parseFloat(inp.dataset.usl),
+      })),
+    });
+    toast("Đã lưu lần lấy mẫu");
+    const curView = document.querySelector("#nav button.active")?.dataset.view;
+    if (curView) render(curView);
+    openFermentQcSampleModal(stage, scopeType, scopeId, productId);
+  });
 }
 
 // Chú thích "đã dùng đúng lô cũ nhất (FIFO) tại Kho phân xưởng chưa" — chụp lại (snapshot)
@@ -4404,6 +4476,10 @@ async function openBrewBatchesModal(brewId, brewCode, productId, locked = false)
   });
   document.querySelectorAll("[data-stageqc]").forEach(b => b.onclick = () => {
     const [stage, scopeType, scopeId, pid, fpid, displayOverride, beerTypeId] = b.dataset.stageqc.split("|");
+    if (MULTI_SAMPLE_STAGES.includes(stage)) {
+      openFermentQcSampleModal(stage, scopeType, scopeId, pid || null);
+      return;
+    }
     openStageQcModal(stage, scopeType, scopeId, { productId: pid || null, finishedProductId: fpid || null,
       beerTypeId: beerTypeId || null, displayId: displayOverride || scopeId.split("__")[0] });
   });
@@ -6468,6 +6544,10 @@ VIEWS.process = async function () {
   });
   document.querySelectorAll("[data-stageqc]").forEach(b => b.onclick = () => {
     const [stage, scopeType, scopeId, productId, finishedProductId, displayOverride, beerTypeId] = b.dataset.stageqc.split("|");
+    if (MULTI_SAMPLE_STAGES.includes(stage)) {
+      openFermentQcSampleModal(stage, scopeType, scopeId, productId || null);
+      return;
+    }
     openStageQcModal(stage, scopeType, scopeId, { productId: productId || null, finishedProductId: finishedProductId || null,
       beerTypeId: beerTypeId || null, displayId: displayOverride || scopeId.split("__")[0] });
   });
@@ -7258,6 +7338,9 @@ function lineSectionHtml(kind, title, rows, canManage, noPerm) {
   </div>`;
 }
 const PRODUCT_SCOPED_STAGES = ["nau", "len_men_chinh", "len_men_phu"];
+// CT chính/CT phụ lên men lấy mẫu NHIỀU LẦN (lần 1/lần 2/...) thay vì khai 1 giá trị hiện tại
+// như các stage khác — xem openFermentQcSampleModal + backend qc_catalog.MULTI_SAMPLE_STAGES.
+const MULTI_SAMPLE_STAGES = ["len_men_chinh", "len_men_phu"];
 // Sản phẩm (SKU) chỉ có ý nghĩa ở "loc" và "thanh_pham" — mirror qc_catalog.SKU_SCOPED_STAGES.
 const SKU_SCOPED_STAGES = ["loc", "thanh_pham"];
 VIEWS.master = async function () {

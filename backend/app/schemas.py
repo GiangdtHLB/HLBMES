@@ -1456,6 +1456,24 @@ class StageQcResultIn(BaseModel):
     upper_limit: Optional[float] = None
 
 
+class QcSampleResultIn(BaseModel):
+    parameter: str = Field(min_length=1)
+    value: Optional[float] = None
+    unit: Optional[str] = None
+    lower_limit: Optional[float] = None
+    upper_limit: Optional[float] = None
+
+
+class QcSampleIn(BaseModel):
+    # Lấy mẫu NHIỀU LẦN (lần 1/lần 2/...) — chỉ hỗ trợ len_men_chinh/len_men_phu, xem
+    # qc_catalog.MULTI_SAMPLE_STAGES. Mỗi lần gọi LUÔN thêm 1 bản ghi mới (không ghi đè).
+    stage: str = Field(min_length=1)
+    scope_type: str = Field(min_length=1)
+    scope_id: str = Field(min_length=1)
+    sampled_at: Optional[datetime] = None   # ngày giờ lấy mẫu do người dùng khai — mặc định "bây giờ"
+    results: list[QcSampleResultIn] = Field(min_length=1)
+
+
 # ---- Audit ----
 class AuditOut(ORMModel):
     audit_id: str
