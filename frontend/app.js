@@ -1612,6 +1612,7 @@ VIEWS.recipes = async function () {
     const vs = await GET(`/recipes/${r.recipe_id}/versions`);
     versionsHtml += `<div class="panel"><h2>${esc(r.code)} — ${esc(r.name)} ${badge(prodName(r.product_id))}</h2>
       <button class="btn sm" data-newver="${r.recipe_id}">+ Tạo version (BOM)</button>
+      <button class="btn sm sec" data-rdel="${esc(r.recipe_id)}" data-rcode="${esc(r.code)}">🗑 Xóa công thức</button>
       <div class="tablewrap"><table><thead><tr><th>Ver</th><th>Trạng thái</th><th>Quy mô chuẩn</th><th>Dòng BOM</th><th>Tham số</th><th>QC</th><th>Soạn</th><th>Duyệt</th><th>Hành động</th></tr></thead>
       <tbody>${vs.map(v => recipeVerRow(r, v)).join("")}</tbody></table></div></div>`;
   }
@@ -1630,6 +1631,11 @@ VIEWS.recipes = async function () {
     toast("Đã tạo công thức"); render("recipes");
   });
   document.querySelectorAll("[data-newver]").forEach(b => b.onclick = () => newVersionForm(b.dataset.newver));
+  document.querySelectorAll("[data-rdel]").forEach(b => b.onclick = () => guard(async () => {
+    if (!confirm(`Xóa công thức ${b.dataset.rcode}? Chỉ xóa được nếu chưa có work order/mẻ sản xuất nào dùng. Không thể hoàn tác.`)) return;
+    await DELETE(`/recipes/${b.dataset.rdel}`);
+    toast("Đã xóa công thức"); render("recipes");
+  }));
   document.querySelectorAll("[data-vdetail]").forEach(b => b.onclick = () => showVersion(b.dataset.vdetail));
   document.querySelectorAll("[data-vtrans]").forEach(b => b.onclick = () => {
     const t = b.dataset.vtrans, vid = b.dataset.vid;
@@ -2143,8 +2149,8 @@ async function openEBR(batchId) {
 
 // ================= QUALITY =================
 VIEWS.quality = async function () {
-  const [results, devs, batches, lots, qcParams, brewBatches, fermentsData, filtersData, bottlesData, holdHistory, pendingStageQc] = await Promise.all([
-    GET("/quality/results"), GET("/quality/deviations"), GET("/batches"), GET("/lots"),
+  const [results, devs, batches, lots, materials, qcParams, brewBatches, fermentsData, filtersData, bottlesData, holdHistory, pendingStageQc] = await Promise.all([
+    GET("/quality/results"), GET("/quality/deviations"), GET("/batches"), GET("/lots"), GET("/materials"),
     GET("/qc/parameters?active_only=false").catch(() => []),
     GET("/brewing/brew-batches").catch(() => []),
     GET("/brewing/ferments").catch(() => ({ items: [] })),
@@ -2171,6 +2177,7 @@ VIEWS.quality = async function () {
       lots.map(l => `<option value="lot:${l.lot_id}">lô ${esc(l.lot_code)}</option>`).join("")}</optgroup>`;
   const batchById = Object.fromEntries(batches.map(b => [b.batch_id, b]));
   const lotById = Object.fromEntries(lots.map(l => [l.lot_id, l]));
+  const matById = Object.fromEntries(materials.map(m => [m.material_id, m]));
   const paramByCode = Object.fromEntries(qcParams.map(p => [p.code, p]));
   const fermentByLm = Object.fromEntries(ferments.map(f => [f.lm_code, f]));
   const filterByCode = Object.fromEntries(filtersData.map(f => [f.filter_code, f]));
@@ -2201,12 +2208,15 @@ VIEWS.quality = async function () {
     <div class="panel"><h2>🔬 Lô NVL chờ khai báo/duyệt chỉ tiêu chất lượng <span class="muted">(${pendingQc.length})</span></h2>
       <div class="muted" style="margin-bottom:6px">Nguyên liệu nhập kho có gán nhóm chỉ tiêu bắt buộc sẽ nằm ở đây cho tới khi KCS khai báo đủ &amp; duyệt.</div>
       <div class="tablewrap"><table>
-        <thead><tr><th>Lô</th><th>SL</th><th>Vị trí</th><th></th></tr></thead>
+        <thead><tr><th>Lô</th><th>Mã NVL</th><th>Tên NVL</th><th>SL</th><th>Vị trí</th><th>Ngày nhập</th><th></th></tr></thead>
         <tbody>${pendingQc.map(l => `<tr>
           <td><code class="k">${esc(l.lot_code)}</code>${badge("on_hold")}</td>
+          <td class="muted">${esc(matById[l.material_id] ? matById[l.material_id].code : "")}</td>
+          <td>${esc(matById[l.material_id] ? matById[l.material_id].name : "")}</td>
           <td>${l.quantity} ${l.uom}</td><td class="muted">${esc(l.location || "")}</td>
+          <td class="muted">${fmt(l.created_at)}</td>
           <td><button class="btn sm" data-qclot="${esc(l.lot_id)}">Khai báo / Duyệt</button></td></tr>`).join("") ||
-          '<tr><td colspan=4 class="muted">Không có lô nào đang chờ.</td></tr>'}</tbody>
+          '<tr><td colspan=7 class="muted">Không có lô nào đang chờ.</td></tr>'}</tbody>
       </table></div>
     </div>
     <div class="panel"><h2>🧪 Công đoạn chờ khai báo chỉ tiêu chất lượng <span class="muted">(${pendingStageQc.length})</span></h2>

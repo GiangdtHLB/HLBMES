@@ -17,6 +17,7 @@ from ..schemas import (
     TransitionIn,
 )
 from ..security import User, get_current_user, require_perm
+from ..services import master_data
 from ..services import recipes as svc
 
 router = APIRouter(prefix="/api/recipes", tags=["recipes"],
@@ -40,6 +41,11 @@ def create_recipe(payload: RecipeIn, db: Session = Depends(get_db),
     db.commit()
     db.refresh(r)
     return r
+
+
+@router.delete("/{recipe_id}", status_code=204)
+def delete_recipe(recipe_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    master_data.delete_recipe(db, recipe_id, user)
 
 
 @router.get("/{recipe_id}/versions", response_model=list[RecipeVersionOut])

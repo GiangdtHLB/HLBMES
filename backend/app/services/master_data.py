@@ -3,6 +3,7 @@ mã đó đã được tham chiếu ở bất kỳ đâu (kể cả lịch sử,
 dữ liệu gốc ảnh hưởng truy xuất nguồn gốc một khi đã có bản ghi trỏ tới (mirror
 qc_catalog.py::delete_group và wms.py::delete_ship_to)."""
 
+from sqlalchemy import delete as sa_delete
 from sqlalchemy import func, select, true
 from sqlalchemy.orm import Session
 
@@ -19,7 +20,7 @@ from ..models.metrics import OEERecord
 from ..models.oee_ext import DowntimeEvent
 from ..models.orders import ProductionOrder
 from ..models.quality_ext import StageQcGroup
-from ..models.recipes import Recipe
+from ..models.recipes import Recipe, RecipeVersion
 from ..models.scheduling import ScheduleSlot
 from ..models.warehouse import MaterialRequestLine, StockMovement
 from ..models.wms import FinishedGoodsUnit
@@ -165,6 +166,30 @@ def delete_finished_product(db: Session, finished_product_id: str, user: User) -
     record_audit(db, entity_type="finished_product", entity_id=fp.finished_product_id, action="delete",
                  actor=user, before={"code": fp.code, "name": fp.name})
     db.delete(fp)
+    db.commit()
+
+
+def delete_recipe(db: Session, recipe_id: str, user: User) -> None:
+    """Xóa công thức + toàn bộ version bên trong — chỉ khi KHÔNG version nào đã từng được
+    dùng (work order hoặc mẻ sản xuất tham chiếu recipe_version_id), vì batch SNAPSHOT dữ liệu
+    version lúc release nên xóa version đã dùng sẽ mất khả năng tra cứu tại sao mẻ đó chạy theo
+    thông số nào (tài liệu §4.2, §7.2 — models/recipes.py)."""
+    require_perm(user, "master.manage")
+    r = db.get(Recipe, recipe_id)
+    if not r:
+        raise NotFoundError("Công thức không tồn tại.")
+    version_ids = db.execute(select(RecipeVersion.version_id).where(
+        RecipeVersion.recipe_id == recipe_id)).scalars().all()
+    checks = [
+        ("work order", select(func.count(WorkOrder.wo_id)).where(WorkOrder.recipe_version_id.in_(version_ids))),
+        ("mẻ sản xuất (module cũ)", select(func.count(BatchExecution.batch_id)).where(
+            BatchExecution.recipe_version_id.in_(version_ids))),
+    ]
+    _block_if_used(_used_by(db, checks), "Công thức", r.code)
+    record_audit(db, entity_type="recipe", entity_id=r.recipe_id, action="delete",
+                 actor=user, before={"code": r.code, "name": r.name, "versions": len(version_ids)})
+    db.execute(sa_delete(RecipeVersion).where(RecipeVersion.recipe_id == recipe_id))
+    db.delete(r)
     db.commit()
 
 
