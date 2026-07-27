@@ -918,6 +918,9 @@ def list_lot_summaries(db: Session) -> list:
     bottle_codes: mã chiết (BottleRecord.bottle_code) đã sinh ra lot_code này — tra qua
     BottleRecord.lot_no == lot_code (thường 1:1, nhưng liệt kê hết phòng khi trùng số lô bia
     thủ công) — chỉ để hiển thị tham khảo, KHÔNG dùng để gom nhóm/FIFO (vẫn theo lot_code).
+    bottle_date: thời điểm chiết SỚM NHẤT của lô (BottleRecord.bottle_date) — cho picker
+    "Cất vào vị trí" biết lô mới nhập kho được chiết từ lúc nào.
+    lines: danh sách dây chuyền (BottleRecord.line) đã chiết ra lô này — cùng mục đích trên.
     {type}_locations: danh sách [{"code","name","count"}] các vị trí kho đang giữ loại đơn vị
     đó của lô này (1 lô/loại vẫn có thể nằm rải rác nhiều vị trí) — "(chưa cất vị trí)" tính
     riêng qua {type}_unplaced, không lẫn vào đây.
@@ -938,10 +941,20 @@ def list_lot_summaries(db: Session) -> list:
                       .where(FinishedGoodsUnit.status == "stored")
                       .group_by(FinishedGoodsUnit.product_name, FinishedGoodsUnit.lot_code,
                                FinishedGoodsUnit.unit_type, FinishedGoodsUnit.location_id)).all()
+    # bottle_date/line: thời gian chiết + dây chuyền đã chiết ra lô này — tra qua BottleRecord
+    # (lot_no == lot_code, xem ghi chú ở docstring) để hiển thị ở picker "Cất vào vị trí" (biết
+    # lô mới nhập kho được chiết lúc nào, từ dây chuyền nào trước khi cất vào vị trí kho thật).
     bottle_codes_by_lot: dict[str, list] = {}
-    for lot_no, bottle_code in db.execute(select(BottleRecord.lot_no, BottleRecord.bottle_code)
-                                          .where(BottleRecord.lot_no.isnot(None))).all():
+    bottle_date_by_lot: dict[str, datetime] = {}
+    lines_by_lot: dict[str, set] = {}
+    for lot_no, bottle_code, bottle_date, line in db.execute(
+            select(BottleRecord.lot_no, BottleRecord.bottle_code, BottleRecord.bottle_date, BottleRecord.line)
+            .where(BottleRecord.lot_no.isnot(None))).all():
         bottle_codes_by_lot.setdefault(lot_no, []).append(bottle_code)
+        if bottle_date and (lot_no not in bottle_date_by_lot or bottle_date < bottle_date_by_lot[lot_no]):
+            bottle_date_by_lot[lot_no] = bottle_date
+        if line:
+            lines_by_lot.setdefault(lot_no, set()).add(line)
     loc_meta_by_id = {l.loc_id: (l.code, l.name) for l in db.execute(select(WmsLocation)).scalars().all()}
     grouped: dict[tuple, dict] = {}
     oldest_by_type: dict[tuple, object] = {}
@@ -950,6 +963,8 @@ def list_lot_summaries(db: Session) -> list:
         key = (product_name, lot_code)
         g = grouped.setdefault(key, {"product_name": product_name, "lot_code": lot_code,
                                      "bottle_codes": bottle_codes_by_lot.get(lot_code, []),
+                                     "bottle_date": bottle_date_by_lot.get(lot_code).isoformat() if bottle_date_by_lot.get(lot_code) else None,
+                                     "lines": sorted(lines_by_lot.get(lot_code, [])),
                                      "vi_count": 0, "vi_qty": 0.0, "vi_unplaced": 0, "vi_near_expiry_count": 0.0,
                                      "keg_count": 0, "keg_qty": 0.0, "keg_unplaced": 0, "keg_near_expiry_count": 0.0,
                                      "lon_count": 0, "lon_qty": 0.0, "lon_unplaced": 0, "lon_near_expiry_count": 0.0})

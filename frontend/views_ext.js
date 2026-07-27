@@ -1534,16 +1534,20 @@
         ["vi", "keg", "lon"].forEach(t => {
           if (g[`${t}_unplaced`] > 0) cvRows.push({
             product: g.product_name, lot_code: g.lot_code, unit_type: t, unplaced: g[`${t}_unplaced`],
+            bottle_date: g.bottle_date, lines: g.lines || [],
           });
         });
       });
       $("cv_pick").innerHTML = cvRows.length ? `
         <div class="tablewrap" style="margin-top:6px"><table>
-        <thead><tr><th></th><th>SP</th><th>Lô</th><th>Loại</th><th>Chưa cất</th><th>SL cần cất</th></tr></thead>
+        <thead><tr><th></th><th>SP</th><th>Lô</th><th>Loại</th><th>Thời gian chiết</th><th>Dây chuyền</th><th>Chưa cất</th><th>SL cần cất</th></tr></thead>
         <tbody>${cvRows.map((g, i) => `<tr data-cvgroup="${i}">
           <td><input class="cv_pick" type="checkbox"/></td>
           <td>${esc(fpLabel(g.product))}</td><td>${esc(g.lot_code || "")}</td>
-          <td>${unitTypeLabelCv(g.unit_type)}</td><td>${g.unplaced}</td>
+          <td>${unitTypeLabelCv(g.unit_type)}</td>
+          <td class="muted">${g.bottle_date ? fmt(g.bottle_date) : "—"}</td>
+          <td class="muted">${esc(g.lines.join(", ") || "—")}</td>
+          <td>${g.unplaced}</td>
           <td><input class="cv_qty" type="number" min="1" max="${g.unplaced}" value="${g.unplaced}" style="width:80px"/></td></tr>`).join("")}</tbody></table></div>
         <div class="row" style="margin-top:10px"><button class="btn" id="cv_submit">Cất</button></div>`
         : `<div class="muted">Không còn vỉ/keg/lon nào chưa cất vị trí.</div>`;
