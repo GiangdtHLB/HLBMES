@@ -43,6 +43,7 @@ PERMISSION_CATALOG = {
     "recipe.approve": "Duyệt/ban hành công thức",
     "quality.release": "Release chất lượng (QC)",
     "quality.deviation": "Mở/xử lý deviation",
+    "production.release_to_wms": "Duyệt lô chiết nhập kho thành phẩm (Giám đốc/Phó GĐ Sản xuất)",
     "ebr.sign": "Ký điện tử hồ sơ mẻ (EBR)",
     "ebr.approve": "Phê duyệt & khóa hồ sơ mẻ (EBR)",
     "warehouse.receive": "Nhập kho",

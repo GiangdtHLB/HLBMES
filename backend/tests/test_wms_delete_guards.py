@@ -154,7 +154,9 @@ def test_delete_ferment_blocked_while_filter_references_it(client, admin_h, vanh
 def test_delete_bottle_blocked_until_units_deleted(client, admin_h, vanhanh_h, kcs_h):
     chain = _build_chain(client, admin_h, vanhanh_h, kcs_h, "DELGUARD03")
     _declare_pending(client, vanhanh_h, "thanh_pham", "bottle", f"{chain['bottle_code']}__thanh_pham")
-    approve = client.post(f"/api/brewing/bottles/{chain['bottle_id']}/approve", headers=kcs_h)
+    # Duyệt nhập kho thành phẩm nay thuộc quyền Giám đốc/Phó GĐ Sản xuất (production.release_to_wms),
+    # tách khỏi quality.release của KCS — dùng admin_h (bypass mọi permission) thay vì kcs_h ở đây.
+    approve = client.post(f"/api/brewing/bottles/{chain['bottle_id']}/approve", headers=admin_h)
     assert approve.status_code == 200, approve.text
     unit_codes = approve.json()["unit_codes"]
 
@@ -188,7 +190,9 @@ def test_cannot_delete_shipped_unit(client, admin_h, vanhanh_h, kcs_h):
     chain = _build_chain(client, admin_h, vanhanh_h, kcs_h, "DELGUARD04",
                          finished_product_id=fp.json()["finished_product_id"])
     _declare_pending(client, vanhanh_h, "thanh_pham", "bottle", f"{chain['bottle_code']}__thanh_pham")
-    approve = client.post(f"/api/brewing/bottles/{chain['bottle_id']}/approve", headers=kcs_h)
+    # Duyệt nhập kho thành phẩm nay thuộc quyền Giám đốc/Phó GĐ Sản xuất (production.release_to_wms),
+    # tách khỏi quality.release của KCS — dùng admin_h (bypass mọi permission) thay vì kcs_h ở đây.
+    approve = client.post(f"/api/brewing/bottles/{chain['bottle_id']}/approve", headers=admin_h)
     assert approve.json()["count"] == 100
     unit_code = approve.json()["unit_codes"][0]
     units = client.get("/api/wms/units", headers=vanhanh_h).json()

@@ -81,7 +81,9 @@ def _approve_bottle_with_output(client, admin_h, vanhanh_h, kcs_h, suffix, fp_pa
     fin = client.post(f"/api/brewing/bottles/{bottle_id}/finish", headers=vanhanh_h, json={"ca1": ca1})
     assert fin.status_code == 200, fin.text
     _declare_pending(client, admin_h, "thanh_pham", "bottle", f"{bottle_code}__thanh_pham")
-    approve = client.post(f"/api/brewing/bottles/{bottle_id}/approve", headers=kcs_h)
+    # Duyệt nhập kho thành phẩm nay thuộc quyền Giám đốc/Phó GĐ Sản xuất (production.release_to_wms),
+    # tách khỏi quality.release của KCS — dùng admin_h (bypass mọi permission) thay vì kcs_h ở đây.
+    approve = client.post(f"/api/brewing/bottles/{bottle_id}/approve", headers=admin_h)
     assert approve.status_code == 200, approve.text
     return bottle_id, approve.json()
 

@@ -289,7 +289,9 @@ def test_approve_bottle_uses_finished_product_pack_size(client, admin_h, vanhanh
     assert b_fin.status_code == 200, b_fin.text
 
     _declare_pending(client, admin_h, "thanh_pham", "bottle", f"{bottle_code}__thanh_pham")
-    approve = client.post(f"/api/brewing/bottles/{bottle_id}/approve", headers=kcs_h)
+    # Duyệt nhập kho thành phẩm nay thuộc quyền Giám đốc/Phó GĐ Sản xuất (production.release_to_wms),
+    # tách khỏi quality.release của KCS — dùng admin_h (bypass mọi permission) thay vì kcs_h ở đây.
+    approve = client.post(f"/api/brewing/bottles/{bottle_id}/approve", headers=admin_h)
     assert approve.status_code == 200, approve.text
     # Ca 1/2/3 tính theo VỈ — ca1=100 vỉ x 20 lon/vỉ (pack_size) = 2000 lon, dồn vào 1 dòng lô
     # duy nhất (xem docs/WMS-LOT-LEVEL-REDESIGN.md).
