@@ -444,7 +444,7 @@ xychart-beta
 
 ## 12. Kho thành phẩm (WMS)
 
-**Mục đích:** quản lý theo **đơn vị thành phẩm** (lon/keg/vỉ — không gộp theo pallet cứng như bản cũ).
+**Mục đích:** quản lý theo **LÔ thành phẩm** (lon/keg/vỉ — không gộp theo pallet cứng như bản cũ). Thao tác trên màn hình (xem/xuất/phân rã/điều chuyển) không đổi; đằng sau, mỗi lô chỉ cần 1 dòng dữ liệu (thay vì 1 dòng/vỉ trước đây) để duyệt chiết không bị treo với lô sản lượng lớn.
 
 **Ai dùng:** thủ kho thành phẩm.
 

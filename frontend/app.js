@@ -2471,6 +2471,13 @@ function qcStatusTable(status) {
 }
 
 const periodLine = (start, end) => `<div class="muted" style="font-size:12px">🕒 Bắt đầu: ${start ? fmt(start) : "—"} — Kết thúc: ${end ? fmt(end) : "đang thực hiện"}</div>`;
+function cipLinksHtml(cip) {
+  if (!cip || !cip.length) return '<div class="muted" style="font-size:12px">Chưa gắn CIP nào.</div>';
+  return `<table><thead><tr><th>Mã CIP</th><th>Thiết bị</th><th>Thời gian</th><th>Kết quả</th></tr></thead>
+    <tbody>${cip.map(c => `<tr><td class="code">${esc(c.cip_code)}</td><td>${esc(c.equipment_name || "—")}</td>
+      <td class="muted">${fmt(c.started_at)}</td>
+      <td>${c.result === "dat" ? '<span class="qc-pill ok">Đạt</span>' : c.result === "khong_dat" ? '<span class="qc-pill err">Không đạt</span>' : '<span class="qc-pill muted">Chờ nghiệm thu</span>'}</td></tr>`).join("")}</tbody></table>`;
+}
 function renderLotRecord(data, opts = {}) {
   const title = opts.title || `📄 Hồ sơ điện tử — ${esc(data.root.code)}`;
   const showLots = opts.showLots !== false;
@@ -2492,6 +2499,7 @@ function renderLotRecord(data, opts = {}) {
           <td>${m.quantity}</td><td>${esc(m.uom)}</td></tr>`).join("") ||
           '<tr><td colspan=6 class="muted">Chưa khai báo NVL.</td></tr>'}</tbody></table>
       <h4>Chỉ tiêu Nấu</h4>${qcStatusTable(b.qc)}
+      <h4>CIP liên quan</h4>${cipLinksHtml(b.cip)}
       <h4>Ghi chép nấu (đầy đủ)</h4>
       ${BF_SECTIONS.map(sec => `<div style="margin-bottom:10px"><b>${esc(sec.title)}</b>
         ${_bfPrintSectionBody(sec, b.process_log)}</div>`).join("")}
@@ -2503,6 +2511,7 @@ function renderLotRecord(data, opts = {}) {
       ${periodLine(f.started_at, f.ended_at)}
       <h4>Lên men chính</h4>${qcStatusTable(f.qc.len_men_chinh)}
       <h4>Lên men phụ</h4>${qcStatusTable(f.qc.len_men_phu)}
+      <h4>CIP liên quan</h4>${cipLinksHtml(f.cip)}
       <h4>Biểu đồ theo dõi lên men</h4>
       ${(f.readings && f.readings.length) ? _flChartHtml(f.readings) : '<div class="muted">Chưa có số liệu ghi chép hàng ngày.</div>'}
     </div>`).join("") || `<div class="muted">Không có lô lên men nào trong chuỗi này.</div>`;
@@ -2513,6 +2522,7 @@ function renderLotRecord(data, opts = {}) {
       ${periodLine(f.started_at, f.ended_at)}
       ${f.is_refilter ? `<div class="muted" style="color:var(--red)">⚠ Lọc lại từ tank BBT <b>${esc(f.refilter_source_bbt_code)}</b> — lý do: ${esc(f.refilter_reason || "—")}</div>` : ""}
       ${qcStatusTable(f.qc)}
+      <h4>CIP liên quan</h4>${cipLinksHtml(f.cip)}
       <h4>Nguyên vật liệu lọc</h4>
       <table><thead><tr><th>Nguyên liệu</th><th>Lô PM</th><th>Ngày lô</th><th>FIFO</th><th>SL</th><th>ĐVT</th></tr></thead>
         <tbody>${(f.materials || []).map(m => `<tr><td>${esc(m.material_name)}</td><td>${esc(m.lot_pm || "")}</td>
@@ -2532,6 +2542,7 @@ function renderLotRecord(data, opts = {}) {
           <td>${m.quantity}</td><td>${esc(m.uom)}</td></tr>`).join("") ||
           '<tr><td colspan=6 class="muted">Chưa ghi nguyên liệu nào.</td></tr>'}</tbody></table>
       <h4>Thành phẩm</h4>${qcStatusTable(b.qc.thanh_pham)}
+      <h4>CIP liên quan</h4>${cipLinksHtml(b.cip)}
     </div>`).join("") || `<div class="muted">Không có bản ghi chiết nào trong chuỗi này.</div>`;
 
   let n = 1;
@@ -4441,6 +4452,7 @@ async function openBrewBatchesModal(brewId, brewCode, productId, locked = false)
           <button class="btn sm sec" data-stageqc="nau|brew_batch|${esc(b.batch_id)}|${esc(productId || "")}||${esc(b.batch_code)}">Chỉ tiêu</button>
           <button class="btn sm sec" data-nvl="${esc(brewId)}|${esc(b.batch_id)}|${esc(b.batch_code)}">+ NVL</button>
           <button class="btn sm sec" data-processlog="${esc(brewId)}|${esc(b.batch_id)}|${esc(b.batch_code)}">Ghi chép nấu</button>
+          <button class="btn sm sec" data-cip="brew_batch|${esc(b.batch_id)}|${esc(b.batch_code)}">CIP</button>
           ${locked ? "" : `<button class="btn sm ${b.exec_status === "hoan_thanh" ? "sec" : ""}" data-finishbatch="${esc(b.batch_id)}" data-endedat="${esc(b.ended_at || "")}">${b.exec_status === "hoan_thanh" ? "Sửa giờ KT" : "Kết thúc"}</button>
           <button class="btn sm sec" data-delbatch="${esc(b.batch_id)}">Xóa</button>`}
         </td></tr>`).join("") || `<tr><td colspan=8 class="muted">Chưa có mẻ nào — thêm mẻ bên dưới.</td></tr>`}</tbody>
@@ -4506,6 +4518,10 @@ async function openBrewBatchesModal(brewId, brewCode, productId, locked = false)
   document.querySelectorAll("[data-processlog]").forEach(b => b.onclick = () => {
     const [bId, batchId, batchCode] = b.dataset.processlog.split("|");
     openBrewProcessLogModal(bId, batchId, batchCode);
+  });
+  document.querySelectorAll("[data-cip]").forEach(b => b.onclick = () => {
+    const [scopeType, scopeId, label] = b.dataset.cip.split("|");
+    window.openCipLinkModal(scopeType, scopeId, label);
   });
   document.querySelectorAll("[data-delbatch]").forEach(b => b.onclick = () => guard(async () => {
     if (!confirm("Xóa mẻ này? Không thể hoàn tác.")) return;
@@ -6165,19 +6181,19 @@ VIEWS.process = async function () {
       </div></div>
       <div class="panel"><h2>Thông tin nấu <span class="muted">(${rows.length})</span></h2>
       <input class="searchbox" data-tbl="t_nau" placeholder="Enter text to search..."/>
-      <div class="tablewrap"><table id="t_nau"><thead><tr><th>Mã nấu</th><th>Lệnh nấu</th><th>Ngày nấu</th><th>Dịch nha</th><th>SL kế hoạch/hl</th><th>SL thực tế/hl</th>
-        <th>Lô LM</th><th>Tank</th><th>Ngày KT (nạp đầy tank)</th><th>Số mẻ</th><th></th><th>Khóa lô</th></tr></thead>
+      <div class="tablewrap"><table id="t_nau"><thead><tr><th>Mã nấu</th><th>Khóa lô</th><th>Lệnh nấu</th><th>Ngày nấu</th><th>Dịch nha</th><th>SL kế hoạch/hl</th><th>SL thực tế/hl</th>
+        <th>Lô LM</th><th>Tank</th><th>Ngày KT (nạp đầy tank)</th><th>Số mẻ</th><th></th></tr></thead>
       <tbody>${rows.map(b => `<tr class="row-${b.color}"><td class="code">${esc(b.brew_code)}</td>
+        <td style="white-space:nowrap">${b.locked
+            ? (isAdminLot ? `<button class="btn sm sec" data-unlocklot="brew|${esc(b.brew_id)}">Mở khóa</button>` : '<span class="muted">—</span>')
+            : (canLockLot ? `<button class="btn sm" data-locklot="brew|${esc(b.brew_id)}">Khóa lô</button>` : '<span class="muted">—</span>')}</td>
         <td class="muted">${esc(b.brew_order_code || "—")}</td><td>${fmt(b.brew_date)}</td>
         <td>${esc(b.wort_type)}</td><td>${b.volume_hl}</td>
         <td class="muted" title="Tổng &quot;Tổng lượng dịch&quot; (Ghi chép nấu) cộng dồn qua các mẻ">${b.actual_volume_hl ?? "—"}</td>
         <td class="muted">${esc(b.lm_code || "—")}</td><td class="muted">${esc(b.tank_lm || "—")}</td>
         <td class="muted">${b.kt_date ? fmt(b.kt_date) : "—"}</td><td class="muted">${b.batch_count}</td>
         <td style="white-space:nowrap"><button class="btn sm" data-brewbatches="${esc(b.brew_id)}|${esc(b.brew_code)}|${esc(b.product_id || "")}|${b.locked ? "1" : "0"}">Mẻ (${b.batch_count})</button>
-          ${b.locked ? "" : `<button class="btn sm sec" data-delrec="brew|${esc(b.brew_id)}">Xóa</button>`}</td>
-        <td style="white-space:nowrap">${b.locked
-            ? (isAdminLot ? `<button class="btn sm sec" data-unlocklot="brew|${esc(b.brew_id)}">Mở khóa</button>` : '<span class="muted">—</span>')
-            : (canLockLot ? `<button class="btn sm" data-locklot="brew|${esc(b.brew_id)}">Khóa lô</button>` : '<span class="muted">—</span>')}</td></tr>`).join("")}</tbody></table></div>
+          ${b.locked ? "" : `<button class="btn sm sec" data-delrec="brew|${esc(b.brew_id)}">Xóa</button>`}</td></tr>`).join("")}</tbody></table></div>
       <div class="legend">Bấm "Mẻ" để khai báo/xem các mẻ cụ thể của mã nấu này. Chú thích màu:
         <b class="red">Đỏ</b>: Có mẻ thiếu chỉ tiêu bắt buộc, hoặc đã nhập đủ nhưng có chỉ tiêu FAIL (ngoài khoảng min-max) — <b class="green">Xanh lá</b>: Đủ chỉ tiêu (không FAIL) nhưng có mẻ chưa nhập NVL —
         <b class="blue">Xanh dương</b>: Tất cả mẻ đầy đủ.</div></div>`;
@@ -6213,14 +6229,15 @@ VIEWS.process = async function () {
         Tab này chỉ dùng để xem &amp; khai báo chỉ tiêu lên men chính/phụ. Số ngày lên men chuẩn khai báo theo loại bia ở Danh mục —
         sau khi đủ ngày, KCS ký duyệt "tank lên men đạt" mới được tạo bản ghi Lọc từ tank đó.</div>
       <input class="searchbox" data-tbl="t_lm" placeholder="Enter text to search..."/>
-      <div class="tablewrap"><table id="t_lm"><thead><tr><th>Duyệt</th><th>Chỉ tiêu</th><th>Lô LM</th><th>Mã nấu</th><th>Ngày nấu</th><th>Ngày KT</th><th>Số ngày đã lên men</th><th>Số mẻ</th>
-        <th>Dịch nha</th><th>Đời men</th><th>Tank LM</th><th>SL nấu/hl</th><th>Đang tồn CCT/hl</th><th>Trạng thái</th><th>Sẵn sàng chiết</th><th></th><th>Khóa lô</th></tr></thead>
+      <div class="tablewrap"><table id="t_lm"><thead><tr><th>Duyệt</th><th>Khóa lô</th><th>Lô LM</th><th>Mã nấu</th><th>Ngày nấu</th><th>Ngày KT</th><th>Số ngày đã lên men</th><th>Số mẻ</th>
+        <th>Dịch nha</th><th>Đời men</th><th>Tank LM</th><th>SL nấu/hl</th><th>Đang tồn CCT/hl</th><th>Trạng thái</th><th>Sẵn sàng chiết</th><th></th><th>Chỉ tiêu</th></tr></thead>
       <tbody>${data.items.map(r => `<tr class="row-${r.color}">
         <td style="white-space:nowrap">${r.locked ? lockBadgeHtml(r) : (r.qc_approved
             ? `<span style="color:var(--green)">✓ ${esc(r.qc_approved_by || "")}</span><div class="muted">${fmt(r.qc_approved_at)}</div>`
             : (canApproveLm ? `<button class="btn sm" data-lmapprove="${esc(r.ferment_id)}">Duyệt LM (KCS)</button>` : '<span class="muted">—</span>'))}</td>
-        <td style="white-space:nowrap"><button class="btn sm sec" data-stageqc="len_men_chinh|ferment|${esc(r.lm_code)}__len_men_chinh|${esc(r.product_id || "")}">CT chính</button>
-          <button class="btn sm sec" data-stageqc="len_men_phu|ferment|${esc(r.lm_code)}__len_men_phu|${esc(r.product_id || "")}">CT phụ</button></td>
+        <td style="white-space:nowrap">${r.locked
+            ? (isAdminLot ? `<button class="btn sm sec" data-unlocklot="ferment|${esc(r.ferment_id)}">Mở khóa</button>` : '<span class="muted">—</span>')
+            : (canLockLot ? `<button class="btn sm" data-locklot="ferment|${esc(r.ferment_id)}">Khóa lô</button>` : '<span class="muted">—</span>')}</td>
         <td>${holdBadgeHtml(r)}${esc(r.lm_code)}</td><td>${esc(r.brew_code || "")}</td><td>${fmt(r.brew_date)}</td>
         <td>${fmt(r.kt_date)}</td><td>${daysFermentedCell(r)}</td><td class="muted">${esc(r.batch_numbers || "")}</td><td>${esc(r.wort_type)}</td>
         <td class="muted">${esc(r.yeast_gen || "")}</td><td>${esc(r.tank_lm)}</td><td>${r.volume_hl.toLocaleString("vi-VN")}</td>
@@ -6228,9 +6245,9 @@ VIEWS.process = async function () {
         <td>${readyBadge(r)}</td>
         <td style="white-space:nowrap"><button class="btn sm sec" data-fermentlog="${esc(r.ferment_id)}|${esc(r.lm_code)}">Ghi chép LM</button>
           ${r.locked ? "" : `<button class="btn sm sec" data-delrec="ferment|${esc(r.ferment_id)}">Xóa</button>`}</td>
-        <td style="white-space:nowrap">${r.locked
-            ? (isAdminLot ? `<button class="btn sm sec" data-unlocklot="ferment|${esc(r.ferment_id)}">Mở khóa</button>` : '<span class="muted">—</span>')
-            : (canLockLot ? `<button class="btn sm" data-locklot="ferment|${esc(r.ferment_id)}">Khóa lô</button>` : '<span class="muted">—</span>')}</td></tr>`).join("")}
+        <td style="white-space:nowrap"><button class="btn sm sec" data-stageqc="len_men_chinh|ferment|${esc(r.lm_code)}__len_men_chinh|${esc(r.product_id || "")}">CT chính</button>
+          <button class="btn sm sec" data-stageqc="len_men_phu|ferment|${esc(r.lm_code)}__len_men_phu|${esc(r.product_id || "")}">CT phụ</button>
+          <button class="btn sm sec" data-cip="ferment|${esc(r.ferment_id)}|${esc(r.lm_code)}" title="Gắn CIP liên quan">CIP</button></td></tr>`).join("")}
       <tr style="font-weight:700"><td colspan=10 style="text-align:right">Tổng cộng:</td><td>${data.total_brew_hl.toLocaleString("vi-VN")}</td><td>${data.total_cct_hl.toLocaleString("vi-VN")}</td><td colspan=4></td></tr></tbody></table></div>
       <div class="legend">Chú thích: <b class="red">Đỏ</b>: Thiếu chỉ tiêu bắt buộc, hoặc đã đủ nhưng có chỉ tiêu FAIL — <b class="blue">Xanh dương</b>: Đầy đủ, không FAIL</div></div>`;
   }
@@ -6277,9 +6294,9 @@ VIEWS.process = async function () {
       </div></div>
       <div class="panel"><h2>Thông tin lọc <span class="muted">(${rows.length})</span></h2>
       <input class="searchbox" data-tbl="t_loc" placeholder="Enter text to search..."/>
-      <div class="tablewrap"><table id="t_loc"><thead><tr><th>Duyệt KCS</th><th>Chỉ tiêu</th><th>Mã lọc</th><th>Lệnh lọc</th><th>Mã nấu</th><th>Ngày lọc</th>
+      <div class="tablewrap"><table id="t_loc"><thead><tr><th>Duyệt KCS</th><th>Khóa lô</th><th>Mã lọc</th><th>Lệnh lọc</th><th>Mã nấu</th><th>Ngày lọc</th>
         <th>Loại dịch nha lọc</th><th>Lọc từ CCT</th><th>V dịch/hl</th><th>Nước bài khí/hl</th><th>Loại bia lọc</th><th>Sản phẩm</th><th>V Bia/hl</th><th>Lọc cho vào</th>
-        <th>Trạng thái</th><th>Đang tồn BBT/hl</th><th>Kết thúc</th><th>TH thực tế</th><th></th><th></th><th>Khóa lô</th></tr></thead>
+        <th>Trạng thái</th><th>Đang tồn BBT/hl</th><th>Kết thúc</th><th>TH thực tế</th><th></th><th>Chỉ tiêu</th></tr></thead>
       <tbody>${rows.map(r => { const tankCount = ordersById[r.filter_order_id]?.tanks?.length || 0;
         const ord = ordersById[r.filter_order_id];
         const lenhLocText = ord && ord.master_order_code ? `${esc(ord.master_order_code)}${ord.seq ? ` (nhỏ #${ord.seq})` : ""}` : "—";
@@ -6287,7 +6304,9 @@ VIEWS.process = async function () {
         <td style="white-space:nowrap">${r.locked ? lockBadgeHtml(r) : (r.qc_approved ? `<span style="color:var(--green)">✓ ${esc(r.qc_approved_by || "")}</span><div class="muted">${fmt(r.qc_approved_at)}</div>`
           : (r.exec_status !== "hoan_thanh") ? `<span class="muted" title="Chỉ duyệt được khi đã lọc xong (kết thúc hết các tank)">— (đang lọc)</span>`
           : (canApproveFilter ? `<button class="btn sm" data-filterapprove="${esc(r.filter_id)}">Duyệt KCS</button>` : '<span class="muted">—</span>'))}</td>
-        <td><button class="btn sm sec" data-stageqc="loc|filter|${esc(r.filter_code)}|${esc(r.product_id || "")}|${esc(r.finished_product_id || "")}|${""}|${esc(r.beer_type_id || "")}">Chỉ tiêu</button></td><td class="code">${holdBadgeHtml(r)}${esc(r.filter_code)}</td>
+        <td style="white-space:nowrap">${r.locked
+            ? (isAdminLot ? `<button class="btn sm sec" data-unlocklot="filter|${esc(r.filter_id)}">Mở khóa</button>` : '<span class="muted">—</span>')
+            : (canLockLot ? `<button class="btn sm" data-locklot="filter|${esc(r.filter_id)}">Khóa lô</button>` : '<span class="muted">—</span>')}</td><td class="code">${holdBadgeHtml(r)}${esc(r.filter_code)}</td>
         <td class="muted">${lenhLocText}</td><td>${esc(r.brew_code || "")}</td>
         <td>${fmt(r.filter_date)}</td><td>${esc(r.wort_type || "")}</td><td>${esc(r.from_cct || "")}</td><td>${r.v_dich_hl > 0 ? r.v_dich_hl : "—"}</td>
         <td>${r.nuoc_bai_khi_hl > 0 ? r.nuoc_bai_khi_hl : "—"}</td>
@@ -6297,11 +6316,10 @@ VIEWS.process = async function () {
         <td>${fmt(r.ended_at)}</td>
         <td>${badge(r.exec_status === "hoan_thanh" ? "completed" : "in_progress")}${esc(r.exec_status_label)}
           <button class="btn sm" data-filtertanks="${esc(r.filter_id)}" data-filterbbt="${r.on_hand_bbt || 0}" style="margin-left:6px">Tank (${tankCount})</button></td>
-        <td><button class="btn sm sec" data-nvlloc="${esc(r.filter_id)}|${esc(r.filter_order_id || "")}|${esc(r.filter_code)}">NVL lọc</button></td>
-        <td>${r.locked ? '<span class="muted">—</span>' : `<button class="btn sm sec" data-delrec="filter|${esc(r.filter_id)}">Xóa</button>`}</td>
-        <td style="white-space:nowrap">${r.locked
-            ? (isAdminLot ? `<button class="btn sm sec" data-unlocklot="filter|${esc(r.filter_id)}">Mở khóa</button>` : '<span class="muted">—</span>')
-            : (canLockLot ? `<button class="btn sm" data-locklot="filter|${esc(r.filter_id)}">Khóa lô</button>` : '<span class="muted">—</span>')}</td></tr>`; }).join("")}</tbody></table></div>
+        <td><button class="btn sm sec" data-nvlloc="${esc(r.filter_id)}|${esc(r.filter_order_id || "")}|${esc(r.filter_code)}">NVL lọc</button>
+          ${r.locked ? "" : `<button class="btn sm sec" data-delrec="filter|${esc(r.filter_id)}">Xóa</button>`}</td>
+        <td style="white-space:nowrap"><button class="btn sm sec" data-stageqc="loc|filter|${esc(r.filter_code)}|${esc(r.product_id || "")}|${esc(r.finished_product_id || "")}|${""}|${esc(r.beer_type_id || "")}">Chỉ tiêu</button>
+          <button class="btn sm sec" data-cip="filter|${esc(r.filter_id)}|${esc(r.filter_code)}" title="Gắn CIP liên quan">CIP</button></td></tr>`; }).join("")}</tbody></table></div>
       <div class="legend">Chú thích: <b class="red">Đỏ</b>: Thiếu chỉ tiêu bắt buộc, hoặc đã đủ nhưng có chỉ tiêu FAIL — <b class="green">Xanh lá</b>: Đủ chỉ tiêu (không FAIL) nhưng chưa nhập NVL — <b class="blue">Xanh dương</b>: Đầy đủ, không FAIL — <b class="cyan">Xanh nhạt</b>: Lọc vào BBT phối</div></div>`;
   }
 
@@ -6334,11 +6352,13 @@ VIEWS.process = async function () {
       </div></div>
       <div class="panel"><h2>Thông tin chiết <span class="muted">(${rows.length})</span></h2>
       <input class="searchbox" data-tbl="t_chiet" placeholder="Enter text to search..."/>
-      <div class="tablewrap"><table id="t_chiet"><thead><tr><th>Duyệt</th><th>Chỉ tiêu</th><th>Mã chiết</th><th>Mã lọc</th><th>Ngày chiết</th><th>Loại bia</th><th>Sản phẩm</th>
+      <div class="tablewrap"><table id="t_chiet"><thead><tr><th>Duyệt</th><th>Khóa lô</th><th>Mã chiết</th><th>Mã lọc</th><th>Ngày chiết</th><th>Loại bia</th><th>Sản phẩm</th>
         <th>Số lô bia</th><th>V cấp chiết/hl</th><th>Chiết từ Tank BBT</th><th>SL ca 1</th><th>SL ca 2</th><th>SL ca 3</th>
-        <th>Tổng Cộng</th><th>Đã nhập kho</th><th>Chiết duyệt</th><th>Ngày giờ kết thúc</th><th>TH thực tế</th><th></th><th></th><th>Khóa lô</th></tr></thead>
+        <th>Tổng Cộng</th><th>Đã nhập kho</th><th>Chiết duyệt</th><th>Ngày giờ kết thúc</th><th>TH thực tế</th><th></th><th>Chỉ tiêu</th></tr></thead>
       <tbody>${rows.map(b => `<tr class="row-${b.color}"><td style="white-space:nowrap">${b.locked ? lockBadgeHtml(b) : (b.approved ? `<span style="color:var(--green)">✓ ${esc(b.approved_by || "")}</span><div class="muted">${fmt(b.approved_at)}</div>` : `<a href="#" data-approve="${b.bottle_id}" style="color:var(--accent)">Duyệt</a>`)}</td>
-        <td style="white-space:nowrap"><button class="btn sm sec" data-stageqc="thanh_pham|bottle|${esc(b.bottle_code)}__thanh_pham|${esc(b.product_id || "")}|${esc(b.finished_product_id || "")}|${""}|${esc(b.beer_type_id || "")}">Thành phẩm</button></td>
+        <td style="white-space:nowrap">${b.locked
+            ? (isAdminLot ? `<button class="btn sm sec" data-unlocklot="bottle|${esc(b.bottle_id)}">Mở khóa</button>` : '<span class="muted">—</span>')
+            : (canLockLot ? `<button class="btn sm" data-locklot="bottle|${esc(b.bottle_id)}">Khóa lô</button>` : '<span class="muted">—</span>')}</td>
         <td class="code">${holdBadgeHtml(b)}${esc(b.bottle_code)}</td><td>${esc(b.filter_code || "")}</td><td>${fmt(b.bottle_date)}</td><td>${esc(b.beer_type)}</td>
         <td class="muted">${b.finished_product_code ? `${esc(b.finished_product_code)} — ${esc(b.finished_product_name || "")}` : "—"}</td>
         <td>${esc(b.lot_no || "")}</td><td>${b.v_cap_chiet_hl}</td><td>${esc(b.from_bbt || "")}</td>
@@ -6353,11 +6373,10 @@ VIEWS.process = async function () {
           ${!b.locked && b.filter_id && (b.source_filter_on_hand_bbt || 0) > 0 ? `<button class="btn sm sec" data-emptybbtchiet="${esc(b.filter_id)}"
             title="Buộc tồn BBT (${b.source_filter_on_hand_bbt} hl) của tank nguồn về 0 khi tank vật lý đã chiết cạn thật nhưng số liệu còn lệch"
             style="margin-left:6px">Làm rỗng tank</button>` : ""}</td>
-        <td><button class="btn sm sec" data-nvlchiet="${esc(b.bottle_id)}|${esc(b.bottle_code)}">NVL chiết</button></td>
-        <td>${b.locked ? '<span class="muted">—</span>' : `<button class="btn sm sec" data-delrec="bottle|${esc(b.bottle_id)}">Xóa</button>`}</td>
-        <td style="white-space:nowrap">${b.locked
-            ? (isAdminLot ? `<button class="btn sm sec" data-unlocklot="bottle|${esc(b.bottle_id)}">Mở khóa</button>` : '<span class="muted">—</span>')
-            : (canLockLot ? `<button class="btn sm" data-locklot="bottle|${esc(b.bottle_id)}">Khóa lô</button>` : '<span class="muted">—</span>')}</td></tr>`).join("")}</tbody></table></div>
+        <td><button class="btn sm sec" data-nvlchiet="${esc(b.bottle_id)}|${esc(b.bottle_code)}">NVL chiết</button>
+          ${b.locked ? "" : `<button class="btn sm sec" data-delrec="bottle|${esc(b.bottle_id)}">Xóa</button>`}</td>
+        <td style="white-space:nowrap"><button class="btn sm sec" data-stageqc="thanh_pham|bottle|${esc(b.bottle_code)}__thanh_pham|${esc(b.product_id || "")}|${esc(b.finished_product_id || "")}|${""}|${esc(b.beer_type_id || "")}">Thành phẩm</button>
+          <button class="btn sm sec" data-cip="bottle|${esc(b.bottle_id)}|${esc(b.bottle_code)}" title="Gắn CIP liên quan">CIP</button></td></tr>`).join("")}</tbody></table></div>
       <div class="legend">Chú thích: <b class="red">Đỏ</b>: Thiếu chỉ tiêu bắt buộc, hoặc đã đủ nhưng có chỉ tiêu FAIL — <b class="blue">Xanh dương</b>: Đầy đủ, không FAIL</div></div>`;
   }
 
@@ -6610,6 +6629,10 @@ VIEWS.process = async function () {
   document.querySelectorAll("[data-nvlchiet]").forEach(b => b.onclick = () => {
     const [bId, bCode] = b.dataset.nvlchiet.split("|");
     openBottleMaterialsModal(bId, bCode);
+  });
+  document.querySelectorAll("[data-cip]").forEach(b => b.onclick = () => {
+    const [scopeType, scopeId, label] = b.dataset.cip.split("|");
+    window.openCipLinkModal(scopeType, scopeId, label);
   });
   // Khóa lô theo từng công đoạn — Nấu/Lên men/Lọc/Chiết mỗi bảng có nút riêng (xem
   // services/lot_lock.py) — KCS khóa xuôi (chặn nếu công đoạn nguồn chưa khóa), chỉ admin
@@ -7319,17 +7342,20 @@ function lineSectionHtml(kind, title, rows, canManage, noPerm) {
        <div class="field"><label>Đơn vị công suất</label><input id="ln_${p}_rate_uom" placeholder="lon/phút" style="width:110px"/></div>`
     : `<div class="field"><label>Thể tích</label><input id="ln_${p}_vol" type="number" placeholder="VD: 200" style="width:100px"/></div>
        <div class="field"><label>Đơn vị thể tích</label><input id="ln_${p}_vol_uom" value="hl" style="width:90px"/></div>`;
+  const idField = isLine
+    ? `<div class="field"><label>Mã nhận dạng</label><input id="ln_${p}_idcode" placeholder="VD: L03" style="width:100px"/></div>` : "";
   const rowsHtml = rows.map(l => `<tr>
       <td><code class="k">${esc(l.code)}</code></td><td>${esc(l.name)}</td>
       <td>${esc(l.area || "—")}</td>
       <td>${isLine ? (l.ideal_rate_per_min ? l.ideal_rate_per_min + (l.capacity_uom ? " " + esc(l.capacity_uom) : "/phút") : "—")
                    : (l.volume ? l.volume + " " + esc(l.volume_uom || "") : "—")}</td>
+      ${isLine ? `<td>${l.identification_code ? `<code class="k">${esc(l.identification_code)}</code>` : "—"}</td>` : ""}
       <td>${badge(l.active ? "available" : "obsolete")}${l.active ? "hoạt động" : "ngừng"}</td>
       ${canManage ? `<td style="white-space:nowrap">
         <button class="btn sm sec" data-ledit="${p}|${esc(l.line_id)}">Sửa</button>
         <button class="btn sm sec" data-ltoggle="${esc(l.line_id)}">${l.active ? "Ngừng" : "Bật lại"}</button>
         <button class="btn sm sec" data-ldel="${esc(l.line_id)}">Xóa</button></td>` : ""}</tr>`).join("")
-    || `<tr><td colspan="${canManage ? 6 : 5}" class="muted">Chưa có mục nào.</td></tr>`;
+    || `<tr><td colspan="${(isLine ? 6 : 5) + (canManage ? 1 : 0)}" class="muted">Chưa có mục nào.</td></tr>`;
   return `<div class="panel"><h2>${title} <span class="muted">(${rows.length})</span></h2>
     ${noPerm}
     ${canManage ? `<div class="row">
@@ -7338,11 +7364,13 @@ function lineSectionHtml(kind, title, rows, canManage, noPerm) {
       ${kindPicker}
       <div class="field"><label>Khu vực</label><input id="ln_${p}_area" style="width:90px"/></div>
       ${capField}
+      ${idField}
       <button class="btn" id="ln_${p}_add" style="align-self:flex-end">+ Thêm</button>
     </div>` : ""}
+    ${isLine ? `<div class="muted" style="margin-top:6px">Mã nhận dạng — in/dập trên bao bì thực tế, giúp truy vết ngoài thị trường sản phẩm được chiết ở dây chuyền nào.</div>` : ""}
     <input class="searchbox" data-tbl="t_lines_${p}" placeholder="Tìm mã/tên..." style="margin-top:10px"/>
     <div class="tablewrap" style="margin-top:6px"><table id="t_lines_${p}">
-      <thead><tr><th>Mã</th><th>Tên</th><th>Khu vực</th><th>${isLine ? "Công suất" : "Thể tích"}</th><th>Trạng thái</th>${canManage ? "<th></th>" : ""}</tr></thead>
+      <thead><tr><th>Mã</th><th>Tên</th><th>Khu vực</th><th>${isLine ? "Công suất" : "Thể tích"}</th>${isLine ? "<th>Mã nhận dạng</th>" : ""}<th>Trạng thái</th>${canManage ? "<th></th>" : ""}</tr></thead>
       <tbody>${rowsHtml}</tbody>
     </table></div>
   </div>`;
@@ -7631,6 +7659,10 @@ VIEWS.master = async function () {
         <div class="field"><label>Ngưỡng làm rỗng BBT (hl)</label><input id="ops_bbt_tol" type="number" step="any" value="${opsSettings.empty_bbt_tolerance_hl}" ${canManage ? "" : "disabled"}/></div>
         ${canManage ? `<button class="btn" id="ops_save" style="align-self:flex-end">Lưu</button>` : ""}
       </div>
+      <div class="muted" style="margin:10px 0 6px">Mã nhận dạng nhà máy — in/dập trên bao bì thực tế, giúp truy vết ngoài thị trường sản phẩm được chiết từ nhà máy nào.</div>
+      <div class="row">
+        <div class="field"><label>Mã nhà máy</label><input id="ops_factory_code" value="${esc(opsSettings.factory_code || "")}" placeholder="VD: DM01" style="width:120px" ${canManage ? "" : "disabled"}/></div>
+      </div>
       ${opsSettings.updated_by ? `<div class="muted" style="font-size:12px;margin-top:6px">Cập nhật lần cuối: ${esc(opsSettings.updated_by)} · ${fmt(opsSettings.updated_at)}</div>` : ""}
     </div>`;
 
@@ -7667,6 +7699,7 @@ VIEWS.master = async function () {
         aging_caution_days: opsSettings.aging_caution_days ?? 30,
         aging_warning_days: opsSettings.aging_warning_days ?? 60,
         aging_critical_days: opsSettings.aging_critical_days ?? 90,
+        factory_code: $("ops_factory_code").value.trim() || null,
       });
       toast("Đã lưu cài đặt vận hành"); render("master");
     });
@@ -7750,7 +7783,8 @@ VIEWS.master = async function () {
       await POST("/lines", { code: $("ln_line_code").value.trim(), name: $("ln_line_name").value.trim(),
         kind: $("ln_line_kind").value, area: $("ln_line_area").value.trim() || null,
         ideal_rate_per_min: parseFloat($("ln_line_rate").value) || 0,
-        capacity_uom: $("ln_line_rate_uom").value.trim() || null });
+        capacity_uom: $("ln_line_rate_uom").value.trim() || null,
+        identification_code: $("ln_line_idcode").value.trim() || null });
       toast("Đã thêm dây chuyền"); render("master");
     });
     ["tank", "tank_bbt"].forEach(k => {
@@ -7780,7 +7814,8 @@ VIEWS.master = async function () {
         <div class="field" style="margin-top:8px"><label>Khu vực</label><input id="le_area" value="${esc(l.area || "")}"/></div>
         ${isLine ? `
         <div class="field" style="margin-top:8px"><label>Công suất</label><input id="le_rate" type="number" value="${l.ideal_rate_per_min ?? ""}"/></div>
-        <div class="field" style="margin-top:8px"><label>Đơn vị công suất</label><input id="le_rate_uom" value="${esc(l.capacity_uom || "")}"/></div>` : `
+        <div class="field" style="margin-top:8px"><label>Đơn vị công suất</label><input id="le_rate_uom" value="${esc(l.capacity_uom || "")}"/></div>
+        <div class="field" style="margin-top:8px"><label>Mã nhận dạng</label><input id="le_idcode" value="${esc(l.identification_code || "")}" placeholder="VD: L03"/></div>` : `
         <div class="field" style="margin-top:8px"><label>Thể tích</label><input id="le_vol" type="number" value="${l.volume ?? ""}"/></div>
         <div class="field" style="margin-top:8px"><label>Đơn vị thể tích</label><input id="le_vol_uom" value="${esc(l.volume_uom || "")}"/></div>`}
         <button class="btn" id="le_save" style="margin-top:12px">Lưu</button>`);
@@ -7789,6 +7824,7 @@ VIEWS.master = async function () {
         if (isLine) {
           payload.ideal_rate_per_min = parseFloat($("le_rate").value) || 0;
           payload.capacity_uom = $("le_rate_uom").value.trim() || null;
+          payload.identification_code = $("le_idcode").value.trim() || null;
         } else {
           payload.volume = parseFloat($("le_vol").value) || null;
           payload.volume_uom = $("le_vol_uom").value.trim() || null;

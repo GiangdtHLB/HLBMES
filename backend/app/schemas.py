@@ -51,6 +51,7 @@ class OpsSettingIn(BaseModel):
     aging_caution_days: float = 30.0
     aging_warning_days: float = 60.0
     aging_critical_days: float = 90.0
+    factory_code: Optional[str] = None
 
 
 class OpsSettingOut(ORMModel):
@@ -60,6 +61,7 @@ class OpsSettingOut(ORMModel):
     aging_caution_days: float
     aging_warning_days: float
     aging_critical_days: float
+    factory_code: Optional[str] = None
     updated_by: Optional[str] = None
     updated_at: datetime
 
@@ -495,6 +497,7 @@ class LineIn(BaseModel):
     capacity_uom: Optional[str] = None   # đơn vị công suất (kind="line"), VD "lon/phút"
     volume: Optional[float] = None       # thể tích (kind="tank"/"tank_bbt")
     volume_uom: Optional[str] = None     # đơn vị thể tích, VD "hl"
+    identification_code: Optional[str] = None  # mã nhận dạng dây chuyền (kind="line")
 
 
 class LineUpdate(BaseModel):
@@ -504,6 +507,7 @@ class LineUpdate(BaseModel):
     capacity_uom: Optional[str] = None
     volume: Optional[float] = None
     volume_uom: Optional[str] = None
+    identification_code: Optional[str] = None
 
 
 # ---- Bao bì tuần hoàn ----
@@ -1472,6 +1476,115 @@ class QcSampleIn(BaseModel):
     scope_id: str = Field(min_length=1)
     sampled_at: Optional[datetime] = None   # ngày giờ lấy mẫu do người dùng khai — mặc định "bây giờ"
     results: list[QcSampleResultIn] = Field(min_length=1)
+
+
+# ---- CIP (vệ sinh thiết bị) ----
+class CipStepIn(BaseModel):
+    # Bảng bước linh hoạt — thêm/bớt dòng tự do, không hard-code theo từng loại biểu mẫu.
+    # 4 trường đầu là TIÊU CHUẨN (khai báo 1 lần ở Khai báo biểu mẫu, khoá khi tạo bản ghi
+    # CIP thật). 4 trường *_actual là THỰC TẾ — người vận hành tự nhập khi thực hiện.
+    step_no: Optional[str] = None
+    content: str = ""
+    time_spec: Optional[str] = None
+    temp: Optional[str] = None
+    concentration: Optional[str] = None
+    check_result: Optional[str] = None
+    time_actual: Optional[str] = None
+    temp_actual: Optional[str] = None
+    conc_actual: Optional[str] = None
+    check_actual: Optional[str] = None
+    performed_by: Optional[str] = None
+    note: Optional[str] = None
+
+
+class CipFormTypeIn(BaseModel):
+    code: str = Field(min_length=1)
+    name: str = Field(min_length=1)
+    area: str = Field(min_length=1)  # nau | len_men | loc | chiet | kho_tp
+    kind: str = "full"  # full | light (vd tráng nước DAW)
+    # Đơn vị của từng cột thông số — khai báo 1 lần cho cả biểu mẫu (khớp đúng cột giấy gốc).
+    time_unit: str = "phút"
+    temp_unit: str = "°C"
+    conc_unit: str = "%"
+    # Bảng bước MẪU khai báo trước theo đúng biểu mẫu giấy gốc — khi tạo 1 lần CIP mới,
+    # chọn form_type sẽ tự điền bảng bước từ đây (vẫn sửa/thêm/bớt được, không khoá cứng).
+    default_steps: list[CipStepIn] = []
+
+
+class CipFormTypeOut(ORMModel):
+    form_type_id: str
+    code: str
+    name: str
+    area: str
+    kind: str
+    time_unit: str
+    temp_unit: str
+    conc_unit: str
+    default_steps: list
+    active: bool
+
+
+class CipEquipmentIn(BaseModel):
+    code: str = Field(min_length=1)
+    name: str = Field(min_length=1)
+    area: str = Field(min_length=1)
+    production_line_id: Optional[str] = None
+
+
+class CipEquipmentOut(ORMModel):
+    equipment_id: str
+    code: str
+    name: str
+    area: str
+    production_line_id: Optional[str] = None
+    active: bool
+
+
+class CipRecordIn(BaseModel):
+    form_type_id: str = Field(min_length=1)
+    equipment_id: str = Field(min_length=1)
+    batch_number: str = Field(min_length=1)  # đối chiếu Batch Number bên Braumat
+    order_number: str = Field(min_length=1)  # đối chiếu Order Number bên Braumat
+    shift: Optional[str] = None
+    started_at: datetime
+    ended_at: Optional[datetime] = None
+    performed_by: Optional[str] = None
+    duty_officer: Optional[str] = None
+    steps: list[CipStepIn] = []
+    note: Optional[str] = None
+
+
+class CipApproveIn(BaseModel):
+    result: str = Field(min_length=1)  # dat | khong_dat
+    checked_by: str = Field(min_length=1)
+    note: Optional[str] = None
+
+
+class CipRecordOut(ORMModel):
+    cip_id: str
+    cip_code: str
+    form_type_id: str
+    equipment_id: str
+    batch_number: str
+    order_number: str
+    shift: Optional[str] = None
+    started_at: datetime
+    ended_at: Optional[datetime] = None
+    performed_by: Optional[str] = None
+    duty_officer: Optional[str] = None
+    steps: list
+    result: Optional[str] = None
+    note: Optional[str] = None
+    checked_by: Optional[str] = None
+    approved_at: Optional[datetime] = None
+    created_by: Optional[str] = None
+    created_at: datetime
+
+
+class CipLinkIn(BaseModel):
+    scope_type: str = Field(min_length=1)
+    scope_id: str = Field(min_length=1)
+    cip_ids: list[str] = Field(min_length=1)
 
 
 # ---- Audit ----

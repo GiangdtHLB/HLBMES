@@ -581,5 +581,8 @@ class OpsSetting(Base):
     aging_caution_days: Mapped[float] = mapped_column(Float, default=30.0)
     aging_warning_days: Mapped[float] = mapped_column(Float, default=60.0)
     aging_critical_days: Mapped[float] = mapped_column(Float, default=90.0)
+    # Mã nhận dạng nhà máy — khai báo ở Danh mục cùng "Cài đặt vận hành", giúp truy vết ngoài
+    # thị trường sản phẩm được chiết từ nhà máy nào (hữu ích khi hệ thống mở rộng nhiều nhà máy).
+    factory_code: Mapped[Optional[str]] = mapped_column(Unicode(32), nullable=True)
     updated_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)

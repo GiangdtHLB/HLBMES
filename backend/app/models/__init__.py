@@ -7,6 +7,7 @@ master, orders, recipes, batches, materials, quality, audit.
 from .audit import AuditLog
 from .auth import User, UserSession
 from .batches import BatchExecution
+from .cip import CipEquipment, CipFormType, CipLink, CipRecord
 from .brewing import (
     BottleRecord,
     BrewBatch,
@@ -60,6 +61,10 @@ from .custom_fields import CustomFieldDefinition, CustomFieldValue  # noqa: F401
 __all__ = [
     "AuditLog",
     "BatchExecution",
+    "CipEquipment",
+    "CipFormType",
+    "CipLink",
+    "CipRecord",
     "BottleRecord",
     "BrewBatch",
     "BrewMaterialUsage",

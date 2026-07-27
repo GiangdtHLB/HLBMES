@@ -15,6 +15,7 @@ from ..models.brewing import (
 from ..models.master import FinishedProduct, Material, Product
 from ..models.materials import MaterialLot
 from . import braumat_import as braumat_svc
+from . import cip as cip_svc
 from . import ferment_log as ferment_log_svc
 from . import genealogy, qc_catalog
 
@@ -77,6 +78,7 @@ def _brew_batch_detail(db: Session, batch_id: str) -> dict:
                        "quantity": m.quantity, "uom": m.uom} for m in materials],
         "qc": qc_catalog.stage_qc_status(db, "nau", "brew_batch", batch.batch_id,
                                          brew.product_id if brew else None),
+        "cip": cip_svc.links_for(db, "brew_batch", batch.batch_id),
         "process_log": {
             "braumat_order_number": log.braumat_order_number, "braumat_recipe": log.braumat_recipe,
             "note": log.note, "updated_by": log.updated_by, "updated_at": log.updated_at,
@@ -110,6 +112,7 @@ def _ferment_detail(db: Session, ferment_id: str) -> dict:
         "brew_code": f.brew_code, "volume_hl": f.volume_hl, "on_hand_cct": f.on_hand_cct,
         "status": f.status, "qc_approved": f.qc_approved, "qc_approved_by": f.qc_approved_by,
         "qc_approved_at": f.qc_approved_at, "qc": qc,
+        "cip": cip_svc.links_for(db, "ferment", f.ferment_id),
         "started_at": f.brew_date, "ended_at": f.kt_date,
         # Biểu đồ theo dõi lên men (nhiệt độ/°S/mật độ tb theo ngày) — cùng nguồn dữ liệu với
         # "Ghi chép" (GET /brewing/ferments/{id}/process-log), chỉ lấy phần vẽ biểu đồ cần.
@@ -142,6 +145,7 @@ def _filter_detail(db: Session, filter_id: str) -> dict:
         "started_at": f.filter_date, "ended_at": f.ended_at,
         "qc": qc_catalog.stage_qc_status(db, "loc", "filter", f.filter_code, beer_type_id=f.beer_type_id,
                                          finished_product_id=f.finished_product_id),
+        "cip": cip_svc.links_for(db, "filter", f.filter_id),
         "is_refilter": bbt_line is not None,
         "refilter_source_bbt_code": bbt_line.source_bbt_code if bbt_line else None,
         "refilter_reason": bbt_line.reason if bbt_line else None,
@@ -169,6 +173,7 @@ def _bottle_detail(db: Session, bottle_id: str) -> dict:
         "stocked": b.stocked, "approved": b.approved,
         "started_at": b.bottle_date, "ended_at": b.ended_at,
         "qc": qc,
+        "cip": cip_svc.links_for(db, "bottle", b.bottle_id),
         "materials": [{"material_name": m.material_name, "lot_pm": m.lot_pm,
                       "lot_date": m.lot_date, "fifo_ok": m.fifo_ok,
                       "quantity": m.quantity, "uom": m.uom} for m in materials],

@@ -26,6 +26,10 @@ class ProductionLine(Base):
     # Công suất (kind="line") — hiển thị/khai báo ở Danh mục "Dây chuyền sản xuất", tách
     # riêng khỏi ideal_rate_per_min (dùng cho tính OEE) để không ràng buộc đơn vị cố định.
     capacity_uom: Mapped[Optional[str]] = mapped_column(Unicode(64), nullable=True)  # VD "lon/phút"
+    # Mã nhận dạng dây chuyền (kind="line") — in/dập trên bao bì thực tế, KHÁC với `code` (mã
+    # nội bộ chỉ dùng tham chiếu trong hệ thống) — giúp truy vết ngoài thị trường sản phẩm
+    # được chiết ở dây chuyền nào.
+    identification_code: Mapped[Optional[str]] = mapped_column(Unicode(32), nullable=True)
     # Thể tích (kind="tank"/"tank_bbt") — hiển thị/khai báo ở Danh mục "Tank lên men"/"Tank thành phẩm".
     volume: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     volume_uom: Mapped[Optional[str]] = mapped_column(Unicode(64), nullable=True)  # VD "hl"

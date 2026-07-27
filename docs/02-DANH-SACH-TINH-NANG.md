@@ -277,8 +277,8 @@
 
 ---
 
-## 15. Kho thành phẩm (WMS theo unit) & bao bì tuần hoàn
-**WMS** (`/api/wms`) — theo dõi **từng đơn vị thành phẩm** (`FinishedGoodsUnit`, thay Pallet/Case cũ):
+## 15. Kho thành phẩm (WMS theo LÔ) & bao bì tuần hoàn
+**WMS** (`/api/wms`) — quản lý theo **LÔ** (`FinishedGoodsUnit`, thay Pallet/Case cũ; thiết kế lại 2026-07 từ "1 dòng/vỉ" sang "1 dòng/lô" để duyệt chiết không treo với lô sản lượng lớn — xem `docs/WMS-LOT-LEVEL-REDESIGN.md`): 1 dòng đại diện cả lô (`quantity` = tổng SL nhỏ), xuất/phân rã/điều chuyển/xuất tự do một phần chỉ tách dòng theo FIFO, không phải chọn/xóa từng vỉ:
 | Tính năng | Endpoint | Quyền |
 |---|---|---|
 | Tóm tắt WMS (theo vị trí, % lấp đầy) | `GET /api/wms/summary` | ✅ |

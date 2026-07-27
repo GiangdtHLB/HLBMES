@@ -54,6 +54,7 @@ PERMISSION_CATALOG = {
     "user.manage": "Quản trị tài khoản",
     "integration.manage": "Quản trị API key/webhook",
     "integration.import": "Import dữ liệu từ file ngoài (CSV/Excel)",
+    "cip.manage": "Khai báo/thao tác vệ sinh CIP",
 }
 
 

@@ -251,6 +251,7 @@ def seed():
     _seed_downtime(db)
     _seed_dispense(db, batch.batch_id, [malt, hop, yeast])
     _seed_lines(db)
+    _seed_cip(db)
     _seed_packaging(db)
     _seed_schedule(db)
     _seed_wms(db)
@@ -652,6 +653,238 @@ def _seed_lines(db) -> None:
     db.commit()
 
 
+def _st(no, content, time=None, temp=None, conc=None, check=None, note=None):
+    """1 dòng trong bảng bước MẪU — trích đúng cột "Quy định" (thông số chuẩn) từ biểu mẫu
+    giấy gốc, KHÔNG lấy cột "Thực hiện/Bắt đầu/Kết thúc" (để trống cho người vận hành điền
+    lúc thực hiện thật)."""
+    return {"step_no": str(no), "content": content, "time_spec": time, "temp": temp,
+            "concentration": conc, "check_result": check, "performed_by": None, "note": note}
+
+
+def _seed_cip(db) -> None:
+    """CIP (vệ sinh thiết bị) — 21 loại biểu mẫu giấy THẬT đang dùng tại nhà máy (mã/tên/bảng
+    bước mẫu trích nguyên văn từ 17 file Word QT-KCS-QT-BM gốc — không phải mã tự đặt).
+    area khớp vocabulary scope_type CIP (nau|len_men|loc|chiet) để suggest_for_scope() lọc
+    đúng theo công đoạn thực tế — không nhất thiết khớp cách phân thư mục giấy gốc (VD: CIP
+    dây chuyền chiết keg vốn nằm chung thư mục với hệ lọc trên giấy, nhưng ở đây xếp area=chiet
+    vì đó là thiết bị của công đoạn Chiết)."""
+    from .models.cip import CipEquipment, CipFormType
+    from .models.lines import ProductionLine
+
+    form_types = [
+        ("2.1.2/2025/QT-KCS-QT-BM-01", "THEO DÕI VỆ SINH TANK LÊN MEN - ĐÔNG MAI (CIP FULL)", "len_men", [
+            _st(1, "Thu hồi CO2"),
+            _st(2, "Kết nối với hệ CIP theo sơ đồ — mở van xả men khoảng 20%, kiểm tra áp suất cấp đỉnh tank khi chạy bước 3"),
+            _st(3, "Phun/ngưng xút lần 1 (xả bỏ)", time="150s – nghỉ 480s", temp="Môi trường", conc="2,0-2,2%"),
+            _st(4, "Phun/ngưng xút lần 2 (xả bỏ)", time="120s – nghỉ 480s", temp="Môi trường", conc="2,0-2,2%"),
+            _st(5, "Phun/ngưng xút/nước lần 3 (xả bỏ)", time="90s (xút) – 30s (nước) – nghỉ 480s", temp="Môi trường", conc="2,0-2,2%"),
+            _st(6, "Rửa xút bằng nước", time="120s – nghỉ 60s (4-5 lần)", temp="Môi trường", check="Test Phenol (Đ/KĐ)"),
+            _st(7, "Làm đầy axit", note="Độ dẫn điện cuối đường ống = 4mS"),
+            _st(8, "Phun Axit – thu hồi", time="180s – nghỉ 120s (10 lần)", temp="Môi trường", conc="1,9-2,0%"),
+            _st(9, "Nước đẩy axit", note="Đẩy hết axit trong ống CIP cấp và hồi về bồn chứa — độ dẫn = 3mS"),
+            _st(10, "Rửa axit", time="120s – nghỉ 60s (3-4 lần)", temp="Môi trường", check="Test Metyl da cam (Đ/KĐ)"),
+            _st(11, "Khử trùng", time="1800s", temp="Môi trường"),
+        ]),
+        ("2.1.5/2025/QT-KCS-QT-BM-01", "THEO DÕI VỆ SINH HỆ LỌC VI SINH (ĐÔNG MAI)", "loc", [
+            _st(2, "VS thô, KT độ kín bằng nước vô trùng", time="5÷10 phút", temp="Môi trường", check="Test Phenol (Đ/KĐ)"),
+            _st(3, "VS bằng nước nóng", time="5÷10 phút", temp="75÷80°C"),
+            _st(4, "VS bằng dd hóa chất", time="30 phút", temp="65÷70°C", conc="1,0÷1,5%"),
+            _st(5, "VS bằng nước nóng", time="Sạch", temp="75÷80°C"),
+            _st(6, "Thanh trùng bằng nước nóng", time="30 phút", temp="85÷90°C"),
+            _st(7, "Rửa bằng nước vô trùng", time="5÷10 phút", temp="Môi trường", note="Xả"),
+            _st(8, "Kiểm tra độ nguyên vẹn của màng lọc", time="15 phút", check="∆P ≤ 90mbar (theo tc ncc)"),
+            _st(9, "CO2 nén tạo áp", note="0,8 bar"),
+        ]),
+        ("2.1.5/2025/QT-KCS-QT-BM-02", "THEO DÕI VỆ SINH DÂY CHUYỀN CHIẾT KEG (20 LÍT) (ĐÔNG MAI)", "chiet", [
+            _st(2, "VS thô, KT độ kín bằng nước vô trùng", time="5÷10 phút", temp="Môi trường"),
+            _st(3, "VS bằng nước nóng", time="5÷10 phút", temp="70÷75°C"),
+            _st(4, "VS bằng dd hóa chất", time="30 phút", temp="65÷70°C", conc="1,0÷1,5%"),
+            _st(5, "VS bằng nước nóng", time="Sạch", temp="75÷80°C"),
+            _st(6, "Thanh trùng bằng nước nóng", time="30 phút", temp="85÷90°C"),
+            _st(7, "Khí đuổi nước", note="Sạch"),
+        ]),
+        ("2.1.5/2025/QT-KCS-QT-BM-03", "THEO DÕI VỆ SINH DÂY CHUYỀN CHIẾT KEG (20 LÍT) (ĐÔNG MAI) — CIP SÂU", "chiet", [
+            _st(2, "VS thô, KT độ kín bằng nước vô trùng", time="5÷10 phút", temp="Môi trường"),
+            _st(3, "VS bằng nước nóng", time="5÷10 phút", temp="65÷70°C"),
+            _st(4, "VS bằng dd hóa chất (xút + SU560)", time="60 phút", temp="77±1°C", conc="2,5÷3% + SU560 0,2kg/1kg xút", note="Lưu lượng 165÷170 hl/h"),
+            _st(5, "VS bằng nước nóng", time="Sạch", temp="65÷70°C"),
+            _st(6, "VS bằng dd hóa chất (axit)", time="30 phút", temp="43÷47°C", conc="2,0÷2,5%", note="Lưu lượng 165÷170 hl/h"),
+            _st(7, "VS bằng nước thường", time="Sạch", temp="Môi trường"),
+            _st(8, "Tiệt trùng bằng hóa chất PAA", time="30 phút", temp="Môi trường", conc="0,4%", note="Lưu lượng 165÷170 hl/h"),
+            _st(9, "Nước nóng đuổi", time="10 phút", temp="65÷70°C"),
+            _st(10, "Thanh trùng bằng nước nóng", time="30 phút", temp="88÷90°C", note="Lưu lượng 165÷170 hl/h"),
+        ]),
+        ("2.2.2/2025-QT-KCS-QT-BM-02", "THEO DÕI VỆ SINH TANK THÀNH PHẨM ĐÔNG MAI (VỆ SINH BẰNG XÚT)", "chiet", [
+            _st(1, "Xả khí", note="2 lần"),
+            _st(3, "VS thô, KT độ kín bằng nước vô trùng", time="1÷2 phút", temp="Môi trường"),
+            _st(4, "VS bằng nước nóng", time="5 phút", temp="70÷75°C"),
+            _st(5, "VS bằng dd hóa chất", time="90 phút", temp="65÷70°C", conc="2,5÷3%"),
+            _st(6, "VS bằng nước nóng", time="Sạch", temp="70÷75°C"),
+            _st(7, "VS bằng nước vô trùng", temp="Môi trường", note="Kết quả theo nhiệt độ nước"),
+            _st(8, "Khử trùng", time="30 phút", temp="Môi trường", conc="0,3-0,4%"),
+        ]),
+        ("2.2.2/2025-QT-KCS-QT-BM-01", "THEO DÕI VỆ SINH TANK THÀNH PHẨM ĐÔNG MAI (VỆ SINH BẰNG AXIT)", "chiet", [
+            _st(1, "Xả khí", note="2 lần"),
+            _st(3, "VS thô, KT độ kín bằng nước vô trùng", time="10÷15 phút", temp="Môi trường"),
+            _st(5, "VS bằng dd hóa chất", time="90 phút", temp="Môi trường", conc="1,9÷2,0%"),
+            _st(7, "VS bằng nước vô trùng", time="Sạch", temp="Môi trường"),
+            _st(8, "Khử trùng", time="30 phút", temp="Môi trường", conc="0,3-0,4%"),
+        ]),
+        ("2.3.2/2025-QT-KCS-QT-BM-01", "THEO DÕI VỆ SINH TANK CHỨA MEN SỮA ĐÔNG MAI (VỆ SINH BẰNG XÚT)", "len_men", [
+            _st(2, "VS thô, KT độ kín bằng nước vô trùng", time="5÷10 phút", temp="Môi trường"),
+            _st(4, "VS bằng dd hóa chất xút", time="20-5-20 phút", temp="65÷70°C", conc="2,0÷3,0%"),
+            _st(5, "VS bằng nước vô trùng", time="Sạch", temp="Môi trường"),
+            _st(6, "Khử trùng", time="30 phút", temp="Môi trường", conc="0,3÷0,4%"),
+        ]),
+        ("2.3.2/2025-QT-KCS-QT-BM-02", "THEO DÕI VỆ SINH TANK CHỨA MEN SỮA ĐÔNG MAI (VỆ SINH BẰNG AXIT)", "len_men", [
+            _st(1, "Xả khí"),
+            _st(3, "VS thô, KT độ kín bằng nước vô trùng", time="5÷10 phút", temp="Môi trường"),
+            _st(4, "VS bằng dd hóa chất Axít", time="60 phút", temp="Môi trường", conc="1,9÷2,0%"),
+            _st(5, "VS bằng nước vô trùng", time="Sạch", temp="Môi trường"),
+            _st(6, "Khử trùng", time="30 phút", temp="Môi trường", conc="0,3÷0,4%"),
+        ]),
+        ("2.3.2/2025-QT-BM-KCS-BM-03", "THEO DÕI VỆ SINH ĐƯỜNG ỐNG CẤP MEN ĐÔNG MAI (VỆ SINH BẰNG XÚT)", "len_men", [
+            _st(2, "VS thô, KT độ kín bằng nước vô trùng", time="1÷2 phút", temp="Môi trường"),
+            _st(3, "VS bằng nước nóng", time="1÷2 phút", temp="70÷75°C"),
+            _st(4, "VS bằng dd hóa chất xút", time="20-5-20 phút", temp="65÷70°C", conc="2,5÷3%"),
+            _st(5, "VS bằng nước nóng", time="Sạch", temp="70÷75°C"),
+            _st(6, "VS bằng nước vô trùng", temp="Môi trường", note="Kết quả theo nhiệt độ nước"),
+            _st(7, "Khử trùng", time="30 phút", temp="Môi trường", conc="0,3÷0,4%"),
+        ]),
+        ("2.3.2/2025-QT-KCS-QT-BM-04", "THEO DÕI VỆ SINH ĐƯỜNG ỐNG THU MEN ĐÔNG MAI (VỆ SINH BẰNG XÚT)", "len_men", [
+            _st(2, "VS thô, KT độ kín bằng nước vô trùng", time="1÷2 phút", temp="Môi trường"),
+            _st(3, "VS bằng nước nóng", time="1÷2 phút", temp="70÷75°C"),
+            _st(4, "VS bằng dd hóa chất xút", time="20-5-20 phút", temp="65÷70°C", conc="2,5÷3%"),
+            _st(5, "VS bằng nước nóng", time="Sạch", temp="70÷75°C"),
+            _st(6, "VS bằng nước vô trùng", temp="Môi trường", note="Kết quả theo nhiệt độ nước"),
+            _st(7, "Khử trùng", time="30 phút", temp="Môi trường", conc="0,3÷0,4%"),
+        ]),
+        ("2.4.2/2025-QT-KCS-QT-BM-01(01)", "THEO DÕI VỆ SINH HỆ THỐNG NẤU ĐÔNG MAI: NỒI GẠO, NỒI MALT, NỒI TRUNG GIAN", "nau", [
+            _st(2, "VS thô, KT độ kín bằng nước nóng", time="1÷2 phút", temp="70÷75°C"),
+            _st(3, "VS bằng dd hóa chất", time="30/60 phút", temp="65÷70°C", conc="2,5÷3%", note="Bổ sung hóa chất tẩy cặn vào khi CIP nồi gạo và nồi malt"),
+            _st(4, "VS bằng nước nóng", time="Sạch", temp="70÷75°C"),
+        ]),
+        ("2.4.2/2025-QT-KCS-QT-BM-01(02)", "THEO DÕI VỆ SINH HỆ THỐNG NẤU ĐÔNG MAI: NỒI LỌC, NỒI SÔI HOA, NỒI LẮNG XOÁY", "nau", [
+            _st(2, "VS thô, KT độ kín bằng nước nóng", time="1÷2 phút", temp="70÷75°C"),
+            _st(3, "VS bằng dd hóa chất tại nồi", time="30/45 phút", temp="65÷70°C", conc="2,5÷3%"),
+            _st("3b", "VS bằng dd hóa chất tại hệ thống", time="60/120 phút", temp="65÷70°C", conc="2,5÷3%", note="Hóa chất tẩy cặn được bổ sung vào khi CIP nồi sôi hoa"),
+            _st(4, "VS bằng nước nóng", time="Sạch", temp="70÷75°C"),
+        ]),
+        ("2.4.2/2025-QT-KCS-QT-BM-02", "THEO DÕI VỆ SINH MÁY HẠ NHIỆT ĐỘ, ĐƯỜNG ỐNG CHUYỂN DỊCH ĐÔNG MAI", "nau", [
+            _st(2, "VS bằng nước nóng, KT độ kín", time="1÷2 phút", temp="70÷75°C"),
+            _st(3, "VS bằng dd hóa chất", time="20-5-20 phút", temp="65÷70°C", conc="2,5÷3%"),
+            _st(4, "VS bằng nước nóng", time="Sạch", temp="70÷75°C",
+               note="Trước khi sản xuất hệ thống được VS CIP; cứ sau 6-7 mẻ thiết bị được VS CIP 01 lần"),
+        ]),
+        ("2.4.2/2025-QT-KCS-QT-BM-03", "THEO DÕI VỆ SINH MÁY NGHIỀN MALT ĐÔNG MAI", "nau", [
+            _st(2, "VS bằng nước nóng, KT độ kín", time="1÷2 phút", temp="70÷75°C"),
+            _st(3, "VS bằng dd hóa chất", time="30 phút", temp="65÷70°C", conc="2,5÷3%"),
+            _st(4, "VS bằng nước nóng", time="Sạch", temp="70÷75°C"),
+        ]),
+        ("2.4.2/2025-QT-KCS-QT-BM-04", "THEO DÕI VỆ SINH TANK CHỨA NƯỚC NÓNG/NƯỚC THƯỜNG/NƯỚC LẠNH ĐÔNG MAI", "nau", [
+            _st(2, "VS thô, KT độ kín bằng nước nóng", time="1÷2 phút", temp="70÷75°C"),
+            _st(3, "VS bằng dd hóa chất", time="30 phút", temp="65÷70°C", conc="2,5÷3%"),
+            _st(4, "VS bằng nước nóng", time="Sạch", temp="70÷75°C"),
+            _st(5, "VS bằng nước vô trùng", temp="Môi trường", note="Kết quả theo nhiệt độ nước — định kỳ thực hiện VS CIP 01 năm/01 lần"),
+        ]),
+        ("2.6.2/2025-QT-KCS-QT-BM-01", "VỆ SINH MÁY CHIẾT CHAI, ĐƯỜNG ỐNG DẪN BIA ĐI CHIẾT", "chiet", [
+            _st(1, "VS thô, KT độ kín bằng nước vô trùng", time="1÷2 phút", temp="Môi trường"),
+            _st(2, "VS bằng nước nóng", time="1÷2 phút", temp="70÷75°C"),
+            _st(3, "VS bằng dd hóa chất (NaOH)", time="30 phút", temp="65÷70°C", conc="2,5÷3%", note="Bổ sung trợ xút: 1,0kg xút tương ứng 0,2kg SU560/Stabilon WT/reencon cp"),
+            _st(4, "VS bằng nước nóng", time="Sạch", temp="70÷75°C"),
+            _st(5, "VS bằng nước vô trùng", temp="Môi trường", note="Kết quả theo nhiệt độ nước"),
+            _st(6, "VS bằng nước DA (2-5°C)", note="Kết quả theo nhiệt độ nước"),
+            _st(7, "Đuổi nước bằng khí/CO2", note="Hết nước"),
+        ]),
+        ("2.6.6/2025/QT-KCS-QT-BM-01", "THEO DÕI VỆ SINH MÁY CHIẾT LON, ĐƯỜNG ỐNG DẪN BIA ĐI CHIẾT DÂY CHUYỀN KHS", "chiet", [
+            _st(2, "VS thô bằng nước vô trùng", time="5÷10 phút", temp="Môi trường"),
+            _st(3, "VS bằng nước nóng", time="5÷10 phút", temp="75÷80°C"),
+            _st(4, "Đuổi nước bằng khí", note="Hết nước"),
+            _st(5, "VS bằng dung dịch hóa chất (NaOH)", time="45 phút", temp="75÷80°C", conc="2,5÷3,0%", note="Lưu lượng 200÷240 hl/h"),
+            _st(6, "VS bằng nước nóng", time="Sạch", temp="75÷80°C"),
+            _st(7, "Lắp túi lọc bia", check="Kín, không xì hở"),
+            _st(8, "VS bằng nước nóng", time="5÷10 phút", temp="75÷80°C"),
+            _st(9, "VS bằng nước vô trùng", note="Kết quả theo nhiệt độ nước"),
+            _st(10, "VS bằng nước DA (20÷10°C)", conc="2÷10", note="Kết quả theo nhiệt độ nước"),
+            _st(11, "Đuổi nước bằng khí", note="Hết nước"),
+        ]),
+        ("2.5.3.1/2025/QT-KCS-QT-BM-01", "THEO DÕI VỆ SINH HỆ KHỬ KHÍ", "loc", [
+            _st(1, "VS thô, KT độ kín bằng nước vô trùng", time="5÷10 phút", temp="Môi trường", note="Xả"),
+            _st(2, "VS bằng nước nóng", time="5÷10 phút", temp="75÷80°C", note="Xả"),
+            _st(3, "VS bằng dd hóa chất (NaOH)", time="30 phút", temp="80÷85°C", conc="2,5÷3,0%", note="Tuần hoàn"),
+            _st(4, "VS bằng nước nóng", time="5÷10 phút", temp="75÷80°C"),
+            _st(5, "VS bằng dd hóa chất (H3PO4)", time="15 phút", temp="Môi trường", conc="1,0÷2,0%", note="Tuần hoàn"),
+            _st(6, "VS bằng nước nóng", time="Sạch", note="Xả"),
+            _st(7, "VS bằng nước vô trùng", time="5÷10 phút", temp="Môi trường", check="Test Phenol/Metyl (Đ/KĐ)",
+               note="Xả — lưu lượng vệ sinh chung 200÷240 hl/h"),
+        ]),
+        ("2.5.3.1/2025/QT-KCS-QT-BM-02", "THEO DÕI VỆ SINH TANK CHỨA NƯỚC DA ĐÔNG MAI", "loc", [
+            _st(1, "VS thô, KT độ kín bằng nước vô trùng", time="5÷10 phút", temp="Môi trường", note="Xả"),
+            _st(2, "VS bằng nước nóng", time="5÷10 phút", temp="75÷80°C", note="Xả"),
+            _st(3, "VS bằng dd hóa chất (NaOH)", time="30 phút", temp="80÷85°C", conc="2,5÷3,0%", note="Tuần hoàn"),
+            _st(4, "VS bằng nước nóng", time="5÷10 phút", temp="75÷80°C"),
+            _st(5, "VS bằng dd hóa chất (H3PO4)", time="15 phút", temp="Môi trường", conc="1,0÷2,0%", note="Tuần hoàn"),
+            _st(6, "VS bằng nước nóng", time="Sạch", note="Xả"),
+            _st(7, "VS bằng nước vô trùng", time="5÷10 phút", temp="Môi trường", check="Test Phenol (Đ/KĐ)",
+               note="Xả — lưu lượng vệ sinh chung 200÷240 hl/h"),
+        ]),
+        ("2.1.6/2025/QT-KCS-QT-BM-01", "THEO DÕI VỆ SINH LỌC KG, LỌC TRAP FILLER, TANK ĐỆM BIA SAU LỌC, CARBAMIX", "loc", [
+            _st(1, "VS thô, KT độ kín bằng nước vô trùng", time="5÷10 phút", temp="Môi trường", note="Xả"),
+            _st(2, "VS bằng nước nóng", time="5÷10 phút", temp="75÷80°C", note="Xả"),
+            _st(3, "VS bằng dd hóa chất (NaOH + SU560/Purexol 2VN)", time="30 phút", temp="80÷85°C", conc="NaOH 2,5÷3,0% + SU560/Purexol 0,5÷1,5%", note="Tuần hoàn"),
+            _st(4, "VS bằng nước nóng", time="Sạch", temp="75÷80°C"),
+            _st(5, "Rửa bằng nước vô trùng", time="5÷10 phút", temp="Môi trường", check="Test Phenol (Đ/KĐ)",
+               note="Xả — lưu lượng vệ sinh chung 200÷240 hl/h"),
+        ]),
+        ("2.1.6/2025/QT-KCS-QT-BM-02", "THEO DÕI VỆ SINH ĐƯỜNG ỐNG LỌC (ĐÔNG MAI)", "loc", [
+            _st(1, "VS thô, KT độ kín bằng nước vô trùng", time="5÷10 phút", temp="Môi trường", note="Xả"),
+            _st(2, "VS bằng nước nóng", time="5÷10 phút", temp="75÷80°C", note="Xả"),
+            _st(3, "VS bằng dd hóa chất (NaOH)", time="30 phút", temp="80÷85°C", conc="2,5÷3,0%", note="Tuần hoàn"),
+            _st(4, "VS bằng nước nóng", time="Sạch", temp="75÷80°C"),
+            _st(5, "Rửa bằng nước vô trùng", time="5÷10 phút", temp="Môi trường", check="Test Phenol (Đ/KĐ)",
+               note="Xả — lưu lượng vệ sinh chung 200÷240 hl/h"),
+        ]),
+    ]
+    # Đơn vị thời gian thực tế trên giấy khác nhau theo biểu mẫu — mặc định "phút", riêng tank
+    # lên men (CIP full) ghi bằng giây trên biểu mẫu gốc.
+    time_unit_overrides = {"2.1.2/2025/QT-KCS-QT-BM-01": "giây"}
+    for entry in form_types:
+        code, name, area, steps = entry[:4]
+        db.add(CipFormType(form_type_id=new_id(), code=code, name=name, area=area, kind="full",
+                           time_unit=time_unit_overrides.get(code, "phút"), temp_unit="°C", conc_unit="%",
+                           default_steps=steps, active=True))
+
+    fv_lines = {l.code: l.line_id for l in
+                db.execute(select(ProductionLine).where(ProductionLine.code.like("FV-0%"))).scalars().all()}
+
+    equipment = [
+        ("EQ-NAU-01", "Nồi gạo/nồi malt/nồi trung gian", "nau", None),
+        ("EQ-NAU-02", "Nồi lọc/nồi sôi hoa/thùng lắng xoáy", "nau", None),
+        ("EQ-NAU-03", "Máy hạ nhiệt nhanh + đường ống chuyển dịch", "nau", None),
+        ("EQ-NAU-04", "Máy nghiền malt", "nau", None),
+        ("EQ-NAU-05", "Tank nước nóng/thường/lạnh", "nau", None),
+        ("EQ-LM-05", "Tank men sữa (giống men)", "len_men", None),
+        ("EQ-LM-06", "Đường ống cấp men", "len_men", None),
+        ("EQ-LM-07", "Đường ống thu men", "len_men", None),
+        ("EQ-LOC-01", "Hệ lọc vi sinh", "loc", None),
+        ("EQ-LOC-02", "Lọc KG/trap filler/tank đệm/carbamix", "loc", None),
+        ("EQ-LOC-03", "Đường ống lọc", "loc", None),
+        ("EQ-LOC-04", "Hệ khử khí", "loc", None),
+        ("EQ-LOC-05", "Tank chứa nước DA", "loc", None),
+        ("EQ-CHIET-01", "Máy chiết chai + đường ống", "chiet", None),
+        ("EQ-CHIET-02", "Máy chiết lon KHS + đường ống", "chiet", None),
+        ("EQ-CHIET-03", "Dây chuyền chiết keg 20L", "chiet", None),
+        ("EQ-CHIET-04", "Tank thành phẩm (BBT)", "chiet", None),
+    ] + [
+        (f"EQ-LM-TANK-{code}", f"Tank lên men {code}", "len_men", line_id)
+        for code, line_id in fv_lines.items()
+    ]
+    for code, name, area, line_id in equipment:
+        db.add(CipEquipment(equipment_id=new_id(), code=code, name=name, area=area,
+                            production_line_id=line_id, active=True))
+    db.commit()
+
+
 def _seed_packaging(db) -> None:
     """#D: bao bì tuần hoàn — vỏ chai / két-gông / keg inox."""
     from .models.packaging import PackagingType
@@ -836,25 +1069,25 @@ def _seed_users(db) -> None:
         # username, password, full_name, job_title, role, views, permissions,
         #   scope_lines, scope_areas, scope_qc, scope_warehouse  (admin do ensure_admin tạo riêng)
         ("giamdoc", "123456", "Nguyễn Văn Giám", "Giám đốc nhà máy", "supervisor",
-         "dashboard,dispatch,schedule,oee,qclab,realtime,ai,trace,energy,wms,packaging,reports,integration,audit", "",  # chỉ xem
+         "dashboard,dispatch,schedule,oee,qclab,realtime,ai,trace,energy,wms,packaging,reports,integration,audit,cip", "",  # chỉ xem
          "*", "*", "*", "*"),
         ("quandoc", "123456", "Trần Quang Đốc", "Quản đốc phân xưởng", "supervisor",
-         "dashboard,master,orders,dispatch,schedule,batches,isa88,dispense,recipeadv,process,realtime,quality,qclab,oee,trace,wms,packaging,reports,ai,audit",
-         "master.manage,order.create,wo.manage,wo.dispatch,batch.create,batch.execute,quality.deviation,ebr.sign,ebr.approve",
+         "dashboard,master,orders,dispatch,schedule,batches,isa88,dispense,recipeadv,process,realtime,quality,qclab,oee,trace,wms,packaging,reports,ai,audit,cip",
+         "master.manage,order.create,wo.manage,wo.dispatch,batch.create,batch.execute,quality.deviation,ebr.sign,ebr.approve,cip.manage",
          "*", "*", "*", "*"),
         ("truongca", "123456", "Lê Thị Ca", "Trưởng ca sản xuất", "supervisor",
-         "dashboard,orders,dispatch,schedule,batches,isa88,dispense,process,realtime,oee,reports,ai,warehouse_px",
-         "order.create,wo.dispatch,batch.create,batch.execute,ebr.sign,warehouse.request",
+         "dashboard,orders,dispatch,schedule,batches,isa88,dispense,process,realtime,oee,reports,ai,warehouse_px,cip",
+         "order.create,wo.dispatch,batch.create,batch.execute,ebr.sign,warehouse.request,cip.manage",
          "Nấu A", "nau,len_men,chiet", "*", "phan_xuong"),
         ("vanhanh", "123456", "Phạm Văn Hành", "Nhân viên vận hành", "operator",
-         "dashboard,batches,isa88,dispense,process,realtime,warehouse_px", "batch.execute,ebr.sign,warehouse.request",
+         "dashboard,batches,isa88,dispense,process,realtime,warehouse_px,cip", "batch.execute,ebr.sign,warehouse.request,cip.manage",
          "Nấu A", "nau,len_men", "*", "phan_xuong"),
         ("kcs", "123456", "Hoàng Thị Kiểm", "Nhân viên KCS / QA", "qa",
-         "dashboard,quality,qclab,process,trace,ai", "quality.release,quality.deviation,recipe.approve,ebr.sign,ebr.approve",
+         "dashboard,quality,qclab,process,trace,ai,cip", "quality.release,quality.deviation,recipe.approve,ebr.sign,ebr.approve",
          "*", "*", "Độ đường (°P),pH", "*"),
         ("kysu", "123456", "Đỗ Công Kỹ", "Kỹ sư công nghệ", "engineer",
-         "dashboard,master,recipes,recipeadv,batches,isa88,qclab,process,realtime,oee,trace,reports,schedule",
-         "master.manage,recipe.author,recipe.approve,batch.create,batch.execute,ebr.sign",
+         "dashboard,master,recipes,recipeadv,batches,isa88,qclab,process,realtime,oee,trace,reports,schedule,cip",
+         "master.manage,recipe.author,recipe.approve,batch.create,batch.execute,ebr.sign,cip.manage",
          "*", "*", "*", "*"),
         ("thukho", "123456", "Vũ Thị Kho", "Thủ kho NVL", "operator",
          "dashboard,warehouse_kc,wms,packaging,dispense", "warehouse.receive,warehouse.issue",
@@ -863,7 +1096,7 @@ def _seed_users(db) -> None:
          "dashboard,warehouse_px,dispense", "warehouse.receive,warehouse.issue,warehouse.request",
          "*", "kho", "*", "phan_xuong"),
         ("baotri", "123456", "Bùi Văn Trì", "Nhân viên bảo trì", "operator",
-         "dashboard,maint,calib,oee", "maintenance.manage,calibration.manage",
+         "dashboard,maint,calib,oee,cip", "maintenance.manage,calibration.manage,cip.manage",
          "*", "loc,chiet", "*", "*"),
         ("nangluong", "123456", "Ngô Văn Điện", "NV quản lý năng lượng", "operator",
          "dashboard,energy", "energy.update",

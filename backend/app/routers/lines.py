@@ -27,7 +27,7 @@ def list_lines(active_only: bool = False, kind: str = None, db: Session = Depend
     return [{"line_id": l.line_id, "code": l.code, "name": l.name, "area": l.area,
              "kind": l.kind, "ideal_rate_per_min": l.ideal_rate_per_min,
              "capacity_uom": l.capacity_uom, "volume": l.volume, "volume_uom": l.volume_uom,
-             "active": l.active}
+             "identification_code": l.identification_code, "active": l.active}
             for l in db.execute(stmt).scalars().all()]
 
 
