@@ -361,4 +361,4 @@ def update_ops_settings(payload: OpsSettingIn, db: Session = Depends(get_db),
     return ops_setting_svc.update_settings(db, payload.empty_cct_tolerance_hl,
                                            payload.empty_bbt_tolerance_hl,
                                            payload.aging_caution_days, payload.aging_warning_days,
-                                           payload.aging_critical_days, user)
+                                           payload.aging_critical_days, user, payload.factory_code)

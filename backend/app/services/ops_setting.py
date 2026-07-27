@@ -23,13 +23,14 @@ def get_settings(db: Session) -> OpsSetting:
 
 def update_settings(db: Session, empty_cct_tolerance_hl: float, empty_bbt_tolerance_hl: float,
                     aging_caution_days: float, aging_warning_days: float, aging_critical_days: float,
-                    user: User) -> OpsSetting:
+                    user: User, factory_code: str = None) -> OpsSetting:
     s = get_settings(db)
     s.empty_cct_tolerance_hl = empty_cct_tolerance_hl
     s.empty_bbt_tolerance_hl = empty_bbt_tolerance_hl
     s.aging_caution_days = aging_caution_days
     s.aging_warning_days = aging_warning_days
     s.aging_critical_days = aging_critical_days
+    s.factory_code = factory_code
     s.updated_by = user.username
     s.updated_at = utcnow()
     db.commit()

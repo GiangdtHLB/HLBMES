@@ -169,7 +169,7 @@ def build_cover(document, title, subtitle):
     for _ in range(6):
         document.add_paragraph()
     for line in ("Tài liệu hướng dẫn nội bộ", "Phiên bản phần mềm: 0.1.0-mvp",
-                 "Ngày phát hành: 23/06/2026", "Ngày cập nhật: 23/07/2026"):
+                 "Ngày phát hành: 23/06/2026", "Ngày cập nhật: 25/07/2026"):
         p = document.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.CENTER
         r = p.add_run(line); r.font.size = Pt(10.5); r.font.color.rgb = GREY
 

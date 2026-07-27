@@ -231,7 +231,7 @@ MES/
 | Bảng | Mục đích |
 |---|---|
 | `wms_location` (**WmsLocation**) | Vị trí kho thành phẩm |
-| `finished_goods_unit` (**FinishedGoodsUnit**) | **Đơn vị thành phẩm** (thay thế hoàn toàn Pallet/Case/ShipmentLine cũ) — theo dõi từng đơn vị/lô, `is_near_expiry`, phân rã (decompose)/gộp (relocate) theo lô |
+| `finished_goods_unit` (**FinishedGoodsUnit**) | **Đơn vị LÔ thành phẩm** (thay thế hoàn toàn Pallet/Case/ShipmentLine cũ) — thiết kế lại theo LÔ (2026-07): mỗi dòng đại diện **1 lô** (không còn 1 dòng/vỉ), `quantity` = tổng SL nhỏ (lon/keg) của cả lô, nên duyệt chiết luôn ra ĐÚNG 1 dòng bất kể quy mô (fix scale-bomb: lô 190.000 vỉ trước đây tạo ~190.000 dòng, treo nút Duyệt trên SQL Server). Xuất/phân rã (decompose)/điều chuyển (relocate)/xuất tự do MỘT PHẦN sẽ **tách dòng** theo FIFO (`_consume_lot_rows`) — dòng mới mang đúng phần đã xử lý, dòng gốc giữ phần dư — thay vì chọn/xóa từng vỉ; `pack_size` (khai báo ở Danh mục Sản phẩm) chỉ dùng ở tầng đọc để quy đổi `quantity` ra số vỉ/keg hiển thị. Còn `is_near_expiry` cho bia cận date. Xem `docs/WMS-LOT-LEVEL-REDESIGN.md`. |
 | `near_expiry_entry` (**NearExpiryEntry**) | Bia cận date nhập thủ công (không qua Chiết bình thường) |
 | `ship_to_location` (**ShipToLocation**) | Danh mục nơi xuất đến |
 | `vehicle` (**Vehicle**) | Danh mục phương tiện vận chuyển |

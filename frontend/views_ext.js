@@ -6,7 +6,7 @@
 //   recipeadv (#3) · dispense (#6) · qclab (#7) · oee (#8)
 // ============================================================================
 (function () {
-  ["recipeadv", "dispense", "qclab", "oee", "isa88", "schedule", "wms", "packaging"].forEach(v => { if (!ALL_VIEWS.includes(v)) ALL_VIEWS.push(v); });
+  ["recipeadv", "dispense", "qclab", "oee", "isa88", "schedule", "wms", "packaging", "cip"].forEach(v => { if (!ALL_VIEWS.includes(v)) ALL_VIEWS.push(v); });
 
   let XK_CART = [];   // {product_name, lot_code, unit_type, quantity} — Xuất kho: nhiều dòng, gửi 1 lần
 
@@ -182,12 +182,15 @@
   function printLoadSlip(s) {
     const dash = (v) => (v === null || v === undefined || v === "" ? "" : esc(String(v)));
     const { fixedRows, extra } = matchLoadSlipLines(s.lines);
-    const fixedHtml = fixedRows.map((g, i) => `<tr>
+    // Chỉ in dòng có số lượng thật — hàng hóa cố định nào không xuất trong phiếu này thì bỏ
+    // hẳn khỏi bảng in (không để dòng trống), giữ nguyên nội dung Mô tả cho các dòng còn lại.
+    const keptFixed = fixedRows.filter(g => g.qty != null);
+    const fixedHtml = keptFixed.map((g, i) => `<tr>
       <td style="text-align:center">${i + 1}</td><td>${esc(g.label)}</td>
-      <td style="text-align:center">${g.qty != null ? g.qty : ""}</td><td style="text-align:center">${esc(g.dvt)}</td>
+      <td style="text-align:center">${g.qty}</td><td style="text-align:center">${esc(g.dvt)}</td>
       <td>${esc(g.mota)}</td><td>${dash(g.note)}</td></tr>`).join("");
     const extraHtml = extra.map((l, i) => `<tr>
-      <td style="text-align:center">${fixedRows.length + i + 1}</td><td>${dash(l.product_name)}</td>
+      <td style="text-align:center">${keptFixed.length + i + 1}</td><td>${dash(l.product_name)}</td>
       <td style="text-align:center">${l.quantity}</td><td style="text-align:center">${dash(l.uom)}</td>
       <td>${l.is_promo ? "Khuyến mại — hàng lẻ, chưa đủ vỉ/thùng" : ""}</td><td>${dash(l.note)}</td></tr>`).join("");
     const html = bienBanBanGiaoHtml({
@@ -218,12 +221,15 @@
     const linesForMatch = (shipment.lines || []).map((l, i) =>
       ({ line_id: i, product_name: nameByCode[l.product] || l.product, quantity: l.count }));
     const { fixedRows, extra } = matchLoadSlipLines(linesForMatch);
-    const fixedHtml = fixedRows.map((g, i) => `<tr>
+    // Chỉ in dòng có số lượng thật — hàng hóa cố định nào không xuất trong phiếu này thì bỏ
+    // hẳn khỏi bảng in (không để dòng trống), giữ nguyên nội dung Mô tả cho các dòng còn lại.
+    const keptFixed = fixedRows.filter(g => g.qty != null);
+    const fixedHtml = keptFixed.map((g, i) => `<tr>
       <td style="text-align:center">${i + 1}</td><td>${esc(g.label)}</td>
-      <td style="text-align:center">${g.qty != null ? g.qty : ""}</td><td style="text-align:center">${esc(g.dvt)}</td>
+      <td style="text-align:center">${g.qty}</td><td style="text-align:center">${esc(g.dvt)}</td>
       <td>${esc(g.mota)}</td><td>${dash(g.note)}</td></tr>`).join("");
     const extraHtml = extra.map((l, i) => `<tr>
-      <td style="text-align:center">${fixedRows.length + i + 1}</td><td>${dash(l.product_name)}</td>
+      <td style="text-align:center">${keptFixed.length + i + 1}</td><td>${dash(l.product_name)}</td>
       <td style="text-align:center">${l.quantity}</td><td></td><td></td><td></td></tr>`).join("");
     const html = bienBanBanGiaoHtml({
       code: shipment.shipment_code, dateObj: new Date(shipment.created_at),
@@ -759,6 +765,12 @@
       if (g.unplaced > 0) parts.push(`chưa cất×${g.unplaced}`);
       return parts.join(", ") || "—";
     }
+    // Chỉ liệt kê các vị trí ĐÃ CẤT thật (không gồm "chưa cất") — dùng cho giỏ Xuất kho vì
+    // hàng chưa cất không còn được phép chọn xuất (xem renderLots sellable/exclude_unplaced).
+    function placedLocationLabel(g) {
+      const parts = (g.locations || []).map(l => l.name ? `${esc(l.code || "?")} - ${esc(l.name)}` : esc(l.code || "?"));
+      return parts.join(", ") || "—";
+    }
     const sec = SUB.wms || "kho";
     const sections = [{ key: "kho", label: "Kho TP" }, { key: "xuatkho", label: "Xuất kho" },
       { key: "dieuchuyen", label: "🔀 Điều chuyển" },
@@ -1270,7 +1282,8 @@
             const count = g[`${t}_count`];
             if (count) rows.push({ product_name: g.product_name, lot_code: g.lot_code, unit_type: t, count,
                                    fifo_ok: g[`${t}_fifo_ok`], oldest_at: g[`${t}_oldest_at`], bottle_codes: g.bottle_codes,
-                                   locations: g[`${t}_locations`] || [], unplaced: g[`${t}_unplaced`] || 0 });
+                                   locations: g[`${t}_locations`] || [], unplaced: g[`${t}_unplaced`] || 0,
+                                   near_expiry_count: g[`${t}_near_expiry_count`] || 0 });
           });
         });
         // Ưu tiên tên sản phẩm trước, trong cùng sản phẩm thì lô/loại cũ nhất (FIFO) lên trước
@@ -1280,32 +1293,44 @@
         return rows;
       }
 
+      // Chỉ hàng ĐÃ CẤT vào 1 vị trí kho cụ thể mới được phép chọn xuất — hàng "chưa cất"
+      // (unplaced) vẫn hiển thị để người dùng biết mà đi cất trước, nhưng không tính vào SL
+      // được phép chọn (khớp exclude_unplaced ở backend create_shipment).
+      function sellableOf(r) { return Math.max(0, r.count - (r.unplaced || 0)); }
+
       function renderLots() {
         const rows = filteredLotRows();
         $("xk_lots").innerHTML = rows.length ? `<div class="tablewrap" style="margin-top:10px"><table>
           <thead><tr><th>Sản phẩm</th><th>Lô</th><th>Mã chiết</th><th>Loại</th><th>Tồn</th><th>Vị trí kho</th><th>FIFO</th><th>SL cần xuất</th><th>Loại xuất</th><th>Cận date</th><th></th></tr></thead>
-          <tbody>${rows.map((r, i) => `<tr>
+          <tbody>${rows.map((r, i) => { const sellable = sellableOf(r); const neAvailable = (r.near_expiry_count || 0) > 0; return `<tr>
             <td>${esc(fpLabel(r.product_name))}</td><td>${esc(r.lot_code || "")}</td>
             <td class="muted">${esc((r.bottle_codes || []).join(", ") || "—")}</td>
             <td>${UNIT_LABEL[r.unit_type]}</td><td>${r.count}</td>
             <td class="muted">${locationCell(r)}</td>
             <td>${r.fifo_ok ? '<span class="badge available">✓ FIFO</span>' : '<span class="badge on_hold">⚠ Không phải lô cũ nhất</span>'}</td>
-            <td><input type="number" min="1" max="${r.count}" value="${r.count}" style="width:80px" data-xk-qty="${i}"/></td>
+            <td><input type="number" min="1" max="${sellable}" value="${sellable}" style="width:80px" data-xk-qty="${i}" ${sellable > 0 ? "" : "disabled"}
+              title="${sellable > 0 ? "" : "Chưa cất vào vị trí kho — không thể xuất"}"/></td>
             <td><select data-xk-type="${i}">${XK_TYPE_OPTIONS}</select></td>
-            <td title="Chỉ chọn vỉ/keg từ Nhập bia cận date"><input type="checkbox" data-xk-ne="${i}"/></td>
-            <td><button class="btn sm" data-xk-add="${i}">+ Thêm</button></td></tr>`).join("")}</tbody></table></div>`
+            <td title="${neAvailable ? "Chỉ chọn vỉ/keg từ Nhập bia cận date" : "Lô/loại này chưa có bia cận date nào được khai báo"}">
+              <input type="checkbox" data-xk-ne="${i}" ${neAvailable ? "" : "disabled"}/></td>
+            <td><button class="btn sm" data-xk-add="${i}">+ Thêm</button></td></tr>`; }).join("")}</tbody></table></div>`
           : `<div class="muted" style="margin-top:10px">Không còn lô nào tồn kho khớp bộ lọc.</div>`;
         rows.forEach((r, i) => {
           const btn = document.querySelector(`[data-xk-add="${i}"]`);
           if (!btn) return;
           btn.onclick = () => {
+            const sellable = sellableOf(r);
+            if (sellable <= 0) { toast("Lô/loại này chưa được cất vào vị trí kho nào — không thể chọn xuất. Hãy cất hàng vào vị trí trước.", "err"); return; }
             const qty = parseInt(document.querySelector(`[data-xk-qty="${i}"]`).value, 10) || 0;
             if (qty <= 0) { toast("Nhập số lượng > 0", "err"); return; }
-            if (qty > r.count) { toast(`Chỉ còn ${r.count} tồn kho cho dòng này`, "err"); return; }
-            const shipment_type = document.querySelector(`[data-xk-type="${i}"]`).value;
+            if (qty > sellable) { toast(`Chỉ có ${sellable} đã cất vào vị trí kho (còn ${r.unplaced} chưa cất, không thể chọn xuất phần chưa cất)`, "err"); return; }
             const near_expiry_only = document.querySelector(`[data-xk-ne="${i}"]`).checked;
+            if (near_expiry_only && !((r.near_expiry_count || 0) > 0)) { toast("Lô/loại này chưa có bia cận date nào được khai báo.", "err"); return; }
+            if (near_expiry_only && qty > r.near_expiry_count) { toast(`Chỉ còn ${r.near_expiry_count} bia cận date cho lô/loại này`, "err"); return; }
+            const shipment_type = document.querySelector(`[data-xk-type="${i}"]`).value;
             XK_CART.push({ product_name: r.product_name, lot_code: r.lot_code, unit_type: r.unit_type,
-                          quantity: qty, shipment_type, near_expiry_only, fifo_ok: r.fifo_ok });
+                          quantity: qty, shipment_type, near_expiry_only, fifo_ok: r.fifo_ok,
+                          location_label: placedLocationLabel(r) });
             renderCart();
             toast(`Đã thêm ${qty} ${UNIT_LABEL[r.unit_type]} vào phiếu${near_expiry_only ? " (chỉ bia cận date)" : ""}`);
           };
@@ -1319,17 +1344,21 @@
         lots.forEach(g => {
           if (g.product_name !== productName) return;
           const count = g[`${unitType}_count`];
-          if (count) out.push({ lot_code: g.lot_code, count, fifo_ok: g[`${unitType}_fifo_ok`] });
+          const unplaced = g[`${unitType}_unplaced`] || 0;
+          if (count) out.push({ lot_code: g.lot_code, count, fifo_ok: g[`${unitType}_fifo_ok`], unplaced,
+                                sellable: Math.max(0, count - unplaced),
+                                locations: g[`${unitType}_locations`] || [] });
         });
         return out;
       }
 
       function renderCart() {
         $("xk_cart").innerHTML = XK_CART.length ? `<div class="tablewrap"><table>
-          <thead><tr><th>Sản phẩm</th><th>Lô</th><th>Loại</th><th>SL</th><th>FIFO</th><th>Loại xuất</th><th>Cận date</th><th></th></tr></thead>
+          <thead><tr><th>Sản phẩm</th><th>Lô</th><th>Vị trí kho</th><th>Loại</th><th>SL</th><th>FIFO</th><th>Loại xuất</th><th>Cận date</th><th></th></tr></thead>
           <tbody>${XK_CART.map((c, i) => { const lotOpts = lotOptionsFor(c.product_name, c.unit_type); return `<tr><td>${esc(fpLabel(c.product_name))}</td>
-            <td>${lotOpts.length ? `<select data-xk-lot="${i}">${lotOpts.map(o => `<option value="${esc(o.lot_code || "")}" ${o.lot_code === c.lot_code ? "selected" : ""}>${esc(o.lot_code || "(không lô)")} — còn ${o.count}${o.fifo_ok ? " · FIFO" : ""}</option>`).join("")}</select>`
+            <td>${lotOpts.length ? `<select data-xk-lot="${i}">${lotOpts.map(o => `<option value="${esc(o.lot_code || "")}" ${o.lot_code === c.lot_code ? "selected" : ""}>${esc(o.lot_code || "(không lô)")} — còn ${o.sellable}${o.fifo_ok ? " · FIFO" : ""}</option>`).join("")}</select>`
               : esc(c.lot_code || "")}</td>
+            <td class="muted">${esc(c.location_label || "—")}</td>
             <td>${UNIT_LABEL[c.unit_type]}</td><td>${c.quantity}</td>
             <td>${c.fifo_ok ? '<span class="badge available">✓ FIFO</span>' : '<span class="badge on_hold">⚠ Không phải lô cũ nhất</span>'}</td>
             <td><span class="badge ${c.shipment_type === "promo" ? "planned" : c.shipment_type === "return" ? "on_hold" : "available"}">${shipmentTypeLabel(c.shipment_type)}</span></td>
@@ -1350,9 +1379,10 @@
           const chosen = lotOptionsFor(c.product_name, c.unit_type).find(o => o.lot_code === sel.value);
           c.lot_code = sel.value || null;
           c.fifo_ok = chosen ? chosen.fifo_ok : false;
-          if (chosen && c.quantity > chosen.count) {
-            toast(`Lô ${chosen.lot_code || ""} chỉ còn ${chosen.count} — đã giảm SL cho khớp`, "err");
-            c.quantity = chosen.count;
+          c.location_label = chosen ? placedLocationLabel(chosen) : "—";
+          if (chosen && c.quantity > chosen.sellable) {
+            toast(`Lô ${chosen.lot_code || ""} chỉ có ${chosen.sellable} đã cất vào vị trí kho — đã giảm SL cho khớp`, "err");
+            c.quantity = chosen.sellable;
           }
           renderCart();
         });
@@ -1398,8 +1428,9 @@
       $("xk_search").oninput = renderLots;
       GET("/wms/shipments").then(ships => {
         $("xk_history").innerHTML = ships.length ? `<div class="tablewrap"><table id="t_xk_history">
-          <thead><tr><th>Mã phiếu</th><th>Nơi xuất đến</th><th>Thời gian</th><th>Người xuất</th><th>FIFO</th><th>Loại xuất</th><th>Chi tiết</th><th></th></tr></thead>
+          <thead><tr><th>Mã phiếu</th><th>Từ kho</th><th>Nơi xuất đến</th><th>Thời gian</th><th>Người xuất</th><th>FIFO</th><th>Loại xuất</th><th>Chi tiết</th><th></th></tr></thead>
           <tbody>${ships.map((s, i) => { const undone = s.unit_count === 0; return `<tr><td><code class="k">${esc(s.shipment_code)}</code></td>
+            <td class="muted">${esc(s.from_location || "—")}</td>
             <td>${esc(s.ship_to_name || s.ship_to_code || "—")}</td><td class="muted">${fmt(s.created_at)}</td>
             <td class="muted">${esc(s.created_by || "—")}</td>
             <td>${undone ? '<span class="badge obsolete">Đã hoàn tác</span>' : s.fifo_ok ? '<span class="badge available">✓ Đúng FIFO</span>' : '<span class="badge on_hold">⚠ Không đúng FIFO</span>'}</td>
@@ -1415,12 +1446,14 @@
         document.querySelectorAll("[data-viewship]").forEach(b => b.onclick = () => {
           const s = ships[parseInt(b.dataset.viewship, 10)];
           modal(`<h3>Sản phẩm trong phiếu — ${esc(s.shipment_code)}</h3>
+            <div class="muted" style="margin-bottom:6px">Xuất từ kho: <b>${esc(s.from_location || "—")}</b></div>
             <div class="tablewrap"><table>
-              <thead><tr><th>Sản phẩm</th><th>Lô</th><th>Loại</th><th>SL</th><th>Loại xuất</th></tr></thead>
+              <thead><tr><th>Sản phẩm</th><th>Lô</th><th>Loại</th><th>SL</th><th>Loại xuất</th><th>Cận date</th></tr></thead>
               <tbody>${s.lines.map(l => `<tr><td>${esc(fpLabel(l.product))}</td><td>${esc(l.lot_code || "—")}</td>
                 <td>${UNIT_LABEL[l.unit_type] || esc(l.unit_type)}</td><td>${l.count}</td>
-                <td><span class="badge ${s.shipment_type === "promo" ? "planned" : s.shipment_type === "return" ? "on_hold" : "available"}">${shipmentTypeLabel(s.shipment_type)}</span></td></tr>`).join("") ||
-                '<tr><td colspan=5 class="muted">Không còn dòng nào (đã hoàn tác).</td></tr>'}</tbody>
+                <td><span class="badge ${s.shipment_type === "promo" ? "planned" : s.shipment_type === "return" ? "on_hold" : "available"}">${shipmentTypeLabel(s.shipment_type)}</span></td>
+                <td>${l.near_expiry ? '<span class="badge on_hold">🕒 Cận date</span>' : '<span class="muted">—</span>'}</td></tr>`).join("") ||
+                '<tr><td colspan=6 class="muted">Không còn dòng nào (đã hoàn tác).</td></tr>'}</tbody>
             </table></div>`);
         });
         document.querySelectorAll("[data-undoship]").forEach(b => b.onclick = () => guard(async () => {
@@ -1631,6 +1664,7 @@
           aging_caution_days: parseFloat($("ag_caution").value) || 30,
           aging_warning_days: parseFloat($("ag_warning").value) || 60,
           aging_critical_days: parseFloat($("ag_critical").value) || 90,
+          factory_code: current.factory_code || null,
         });
         toast("Đã lưu ngưỡng cảnh báo tuổi lô"); render("wms");
       });
@@ -1847,6 +1881,480 @@
         const r = await POST("/packaging/move", { pkg_id: $("mv_pkg").value, kind: $("mv_kind").value,
           qty: num("mv_qty") || 0, ref: $("mv_ref").value || null, note: $("mv_note").value || null });
         toast(`Đã ghi · tồn ${fmtN(r.on_hand)} · lưu hành ${fmtN(r.in_circulation)}`); render("packaging");
+      });
+    }
+  };
+
+  // ======================================================================
+  // CIP (vệ sinh thiết bị) — Danh mục loại biểu mẫu/thiết bị + Khai báo (bước
+  // linh hoạt dạng bảng, thêm/bớt tự do) + Lịch sử/nghiệm thu. Gắn CIP với mẻ/lô
+  // sản xuất luôn làm TAY từ phía mẻ/lô (xem openCipLinkModal, gọi từ app.js) —
+  // suggest_for_scope() chỉ gợi ý theo thiết bị+khu vực, không tự động gán.
+  // ======================================================================
+  const CIP_AREA_LABEL = { nau: "Nấu", len_men: "Lên men", loc: "Lọc", chiet: "Chiết/Kho TP" };
+  const cipResultBadge = (result) => result === "dat" ? badge("available") + "Đạt"
+    : result === "khong_dat" ? badge("critical") + "Không đạt" : badge("planned") + "Chờ nghiệm thu";
+  let CIP_MAU_FT = null; // form_type_id đang chọn ở tab "Khai báo biểu mẫu" — giữ khi render lại
+
+  // Bảng bước dùng chung cho cả "Khai báo biểu mẫu" (sửa bảng MẪU) và "Khai báo CIP" (nhập 1
+  // lần CIP thật, tự điền từ bảng mẫu của loại biểu mẫu đã chọn) — cùng 1 cơ chế thêm/bớt dòng.
+  function cipStepRowHtml(seq, step) {
+    step = step || {};
+    return `<td><input data-step-no value="${esc(step.step_no != null ? step.step_no : seq)}" style="width:44px"/></td>
+      <td><input data-step-content value="${esc(step.content || "")}" style="width:100%"/></td>
+      <td><input data-step-time value="${esc(step.time_spec || "")}" style="width:90px"/></td>
+      <td><input data-step-temp value="${esc(step.temp || "")}" style="width:70px"/></td>
+      <td><input data-step-conc value="${esc(step.concentration || "")}" style="width:70px"/></td>
+      <td><input data-step-result value="${esc(step.check_result || "")}" style="width:80px"/></td>
+      <td><input data-step-by value="${esc(step.performed_by || "")}" style="width:110px"/></td>
+      <td><input data-step-note value="${esc(step.note || "")}" style="width:110px"/></td>
+      <td><button class="btn sm sec" data-step-del>✕</button></td>`;
+  }
+  function cipAddStepRow(tbodyId, seqRef, step) {
+    seqRef.n++;
+    const tr = document.createElement("tr");
+    tr.innerHTML = cipStepRowHtml(seqRef.n, step);
+    $(tbodyId).appendChild(tr);
+    tr.querySelector("[data-step-del]").onclick = () => tr.remove();
+  }
+  function cipFillSteps(tbodyId, seqRef, steps) {
+    $(tbodyId).innerHTML = "";
+    seqRef.n = 0;
+    (steps && steps.length ? steps : [null]).forEach(s => cipAddStepRow(tbodyId, seqRef, s));
+  }
+  function cipCollectSteps(tbodyId) {
+    return Array.from(document.querySelectorAll(`#${tbodyId} tr`)).map(tr => ({
+      step_no: tr.querySelector("[data-step-no]").value || null,
+      content: tr.querySelector("[data-step-content]").value || "",
+      time_spec: tr.querySelector("[data-step-time]").value || null,
+      temp: tr.querySelector("[data-step-temp]").value || null,
+      concentration: tr.querySelector("[data-step-conc]").value || null,
+      check_result: tr.querySelector("[data-step-result]").value || null,
+      performed_by: tr.querySelector("[data-step-by]").value || null,
+      note: tr.querySelector("[data-step-note]").value || null,
+    })).filter(s => s.content || s.time_spec || s.temp || s.concentration || s.check_result || s.note);
+  }
+
+  // Bảng bước dùng RIÊNG cho "Khai báo CIP" (tạo 1 lần CIP thật) — TIÊU CHUẨN (4 cột đầu)
+  // khoá — chép nguyên từ bảng mẫu, chỉ sửa được ở "Khai báo biểu mẫu"; THỰC TẾ là 4 cột
+  // người vận hành tự nhập khi thực hiện (được gõ tự do, kể cả %).
+  // Cột TC (tiêu chuẩn) hiển thị dạng text tự xuống dòng thay vì input hẹp — tránh bị cắt bớt
+  // khi giá trị dài (VD "150s – nghỉ 30s – lặp 3 lần"); vẫn giữ input ẩn để cipRecordCollectSteps
+  // đọc đúng giá trị khi submit (giá trị TC không đổi trong màn Khai báo CIP, chỉ đổi ở Khai báo
+  // biểu mẫu), value hiển thị cho người dùng xem đầy đủ nội dung tiêu chuẩn.
+  function _cipSpecCell(dataAttr, value) {
+    return `<td style="min-width:130px">
+      <input type="hidden" ${dataAttr} value="${esc(value || "")}"/>
+      <div class="muted" style="white-space:normal;word-break:break-word;line-height:1.3" title="Tiêu chuẩn — sửa ở Khai báo biểu mẫu">${esc(value || "—")}</div>
+    </td>`;
+  }
+  function cipRecordStepRowHtml(seq, step) {
+    step = step || {};
+    return `<td><input data-step-no value="${esc(step.step_no != null ? step.step_no : seq)}" style="width:44px"/></td>
+      <td><input data-step-content value="${esc(step.content || "")}" style="width:160px"/></td>
+      ${_cipSpecCell("data-step-time", step.time_spec)}
+      ${_cipSpecCell("data-step-temp", step.temp)}
+      ${_cipSpecCell("data-step-conc", step.concentration)}
+      ${_cipSpecCell("data-step-check", step.check_result)}
+      <td><input data-step-time-actual value="${esc(step.time_actual || "")}" style="width:90px"/></td>
+      <td><input data-step-temp-actual value="${esc(step.temp_actual || "")}" style="width:80px"/></td>
+      <td><input data-step-conc-actual value="${esc(step.conc_actual || "")}" style="width:80px"/></td>
+      <td><input data-step-check-actual value="${esc(step.check_actual || "")}" style="width:100px"/></td>
+      <td><input data-step-by value="${esc(step.performed_by || "")}" style="width:110px"/></td>
+      <td><input data-step-note value="${esc(step.note || "")}" style="width:110px"/></td>
+      <td><button class="btn sm sec" data-step-del>✕</button></td>`;
+  }
+  function cipRecordAddStepRow(tbodyId, seqRef, step) {
+    seqRef.n++;
+    const tr = document.createElement("tr");
+    tr.innerHTML = cipRecordStepRowHtml(seqRef.n, step);
+    $(tbodyId).appendChild(tr);
+    tr.querySelector("[data-step-del]").onclick = () => tr.remove();
+  }
+  function cipRecordFillSteps(tbodyId, seqRef, steps) {
+    $(tbodyId).innerHTML = "";
+    seqRef.n = 0;
+    (steps && steps.length ? steps : [null]).forEach(s => cipRecordAddStepRow(tbodyId, seqRef, s));
+  }
+  function cipRecordCollectSteps(tbodyId) {
+    return Array.from(document.querySelectorAll(`#${tbodyId} tr`)).map(tr => ({
+      step_no: tr.querySelector("[data-step-no]").value || null,
+      content: tr.querySelector("[data-step-content]").value || "",
+      time_spec: tr.querySelector("[data-step-time]").value || null,
+      temp: tr.querySelector("[data-step-temp]").value || null,
+      concentration: tr.querySelector("[data-step-conc]").value || null,
+      check_result: tr.querySelector("[data-step-check]").value || null,
+      time_actual: tr.querySelector("[data-step-time-actual]").value || null,
+      temp_actual: tr.querySelector("[data-step-temp-actual]").value || null,
+      conc_actual: tr.querySelector("[data-step-conc-actual]").value || null,
+      check_actual: tr.querySelector("[data-step-check-actual]").value || null,
+      performed_by: tr.querySelector("[data-step-by]").value || null,
+      note: tr.querySelector("[data-step-note]").value || null,
+    })).filter(s => s.content || s.time_spec || s.temp || s.concentration || s.check_result
+                 || s.time_actual || s.temp_actual || s.conc_actual || s.check_actual || s.note);
+  }
+
+  async function openCipDetailModal(cipId) {
+    const [r, formTypes, equipment] = await Promise.all([
+      GET(`/cip/records/${cipId}`), GET("/cip/form-types"), GET("/cip/equipment")]);
+    const ft = formTypes.find(f => f.form_type_id === r.form_type_id);
+    const eq = equipment.find(e => e.equipment_id === r.equipment_id);
+    const stepRows = (r.steps || []).map(s => `<tr><td>${esc(s.step_no || "")}</td><td>${esc(s.content || "")}</td>
+      <td class="muted">${esc(s.time_spec || "")}</td><td class="muted">${esc(s.temp || "")}</td><td class="muted">${esc(s.concentration || "")}</td><td class="muted">${esc(s.check_result || "")}</td>
+      <td>${esc(s.time_actual || "")}</td><td>${esc(s.temp_actual || "")}</td><td>${esc(s.conc_actual || "")}</td><td>${esc(s.check_actual || "")}</td>
+      <td>${esc(s.performed_by || "")}</td><td>${esc(s.note || "")}</td></tr>`).join("");
+    modal(`<h3>CIP <code class="k">${esc(r.cip_code)}</code></h3>
+      <div class="muted" style="margin-bottom:4px">Batch Number <b>${esc(r.batch_number || "—")}</b> · Order Number <b>${esc(r.order_number || "—")}</b></div>
+      <div class="muted" style="margin-bottom:8px">Bắt đầu ${fmt(r.started_at)}${r.ended_at ? " · Kết thúc " + fmt(r.ended_at) : ""}
+        ${r.performed_by ? " · Người thực hiện " + esc(r.performed_by) : ""}${r.duty_officer ? " · Trực ca " + esc(r.duty_officer) : ""}</div>
+      <div class="tablewrap"><table><thead><tr><th>Bước</th><th>Nội dung</th>
+        <th>TC: Thời gian</th><th>TC: Nhiệt độ</th><th>TC: Nồng độ</th><th>TC: Kết quả</th>
+        <th>TH: Thời gian</th><th>TH: Nhiệt độ</th><th>TH: Nồng độ</th><th>TH: Kết quả</th>
+        <th>Người làm</th><th>Ghi chú</th></tr></thead>
+        <tbody>${stepRows || '<tr><td colspan="12" class="muted">Không có bước.</td></tr>'}</tbody></table></div>
+      ${r.note ? `<div class="muted" style="margin-top:8px">Ghi chú: ${esc(r.note)}</div>` : ""}
+      ${r.result ? `<div style="margin-top:8px">${cipResultBadge(r.result)} · KCS ${esc(r.checked_by || "")} · ${fmt(r.approved_at)}</div>` : ""}
+      <button class="btn sm sec" id="cip_print_btn" style="margin-top:10px">🖨️ In biểu mẫu</button>`);
+    $("cip_print_btn").onclick = () => printCipRecord(r, ft, eq);
+  }
+
+  // In biểu mẫu CIP — 1 lần vệ sinh, so sánh Tiêu chuẩn (TC, khoá theo mẫu) vs Thực tế (TH).
+  function printCipRecord(r, ft, eq) {
+    const dash = (v) => (v === null || v === undefined || v === "" ? "—" : esc(String(v)));
+    const timeUnit = (ft && ft.time_unit) || "phút", tempUnit = (ft && ft.temp_unit) || "°C", concUnit = (ft && ft.conc_unit) || "%";
+    const stepRows = (r.steps || []).map(s => `<tr>
+      <td>${dash(s.step_no)}</td><td style="text-align:left">${dash(s.content)}</td>
+      <td>${dash(s.time_spec)}</td><td>${dash(s.temp)}</td><td>${dash(s.concentration)}</td><td>${dash(s.check_result)}</td>
+      <td>${dash(s.time_actual)}</td><td>${dash(s.temp_actual)}</td><td>${dash(s.conc_actual)}</td><td>${dash(s.check_actual)}</td>
+      <td>${dash(s.performed_by)}</td><td>${dash(s.note)}</td></tr>`).join("");
+    const html = `<!doctype html><html><head><meta charset="utf-8"/><title>CIP — ${esc(r.cip_code)}</title>
+      <style>
+        @page { size: A4 landscape; margin: 10mm; }
+        * { box-sizing: border-box; }
+        body{font-family:Arial,Helvetica,sans-serif;color:#000;background:#fff;margin:0;font-size:11.5px;line-height:1.3}
+        h2{font-size:15px;margin:6px 0 10px;text-align:center;font-weight:700;text-transform:uppercase}
+        .pf-header{display:flex;justify-content:space-between;margin-bottom:6px;font-size:11px}
+        .pf-header .right{text-align:center}
+        .pf-meta{margin-bottom:8px}
+        .pf-meta div{margin-bottom:2px}
+        table.pf-tbl{border-collapse:collapse;width:100%;margin-bottom:6px}
+        table.pf-tbl th, table.pf-tbl td{border:1px solid #000;padding:3px 5px;text-align:center;font-size:10.5px}
+        table.pf-tbl th{background:#eee;font-weight:700}
+        .pf-sign{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:30px;text-align:center;font-size:11px}
+        .pf-sign b{display:block;margin-bottom:2px}
+        .pf-sign span{display:block;color:#555;margin-bottom:40px}
+      </style></head><body>
+      <div class="pf-header">
+        <div><b>CÔNG TY CP BIA &amp; NGK ĐÔNG MAI</b><br/>Pxsx bia ĐM<br/>Số: ${dash(r.cip_code)}</div>
+        <div class="right"><b>CỘNG HÒA XÃ HỘI CHỦ NGHĨA VIỆT NAM</b><br/>Độc lập – Tự do – Hạnh phúc</div>
+      </div>
+      <h2>BIÊN BẢN VỆ SINH THIẾT BỊ (CIP)${ft ? " — " + esc(ft.code) : ""}</h2>
+      <div class="pf-meta">
+        <div>Batch Number: <b>${dash(r.batch_number)}</b> &nbsp; Order Number: <b>${dash(r.order_number)}</b></div>
+        <div>Loại biểu mẫu: <b>${dash(ft && ft.name)}</b> &nbsp; Thiết bị: <b>${dash(eq && (eq.code + " — " + eq.name))}</b></div>
+        <div>Ca làm việc: ${dash(r.shift)} &nbsp; Bắt đầu: ${r.started_at ? fmt(r.started_at) : "......."} &nbsp; Kết thúc: ${r.ended_at ? fmt(r.ended_at) : "......."}</div>
+        <div>Người thực hiện: ${dash(r.performed_by)} &nbsp; Người trực ca: ${dash(r.duty_officer)}</div>
+      </div>
+      <table class="pf-tbl"><thead>
+        <tr><th rowspan=2>Bước</th><th rowspan=2>Nội dung</th>
+          <th colspan=4>Tiêu chuẩn</th><th colspan=4>Thực tế</th><th rowspan=2>Người làm</th><th rowspan=2>Ghi chú</th></tr>
+        <tr><th>T.gian (${esc(timeUnit)})</th><th>N.độ (${esc(tempUnit)})</th><th>N.độ dd (${esc(concUnit)})</th><th>Kết quả</th>
+          <th>T.gian (${esc(timeUnit)})</th><th>N.độ (${esc(tempUnit)})</th><th>N.độ dd (${esc(concUnit)})</th><th>Kết quả</th></tr>
+      </thead>
+      <tbody>${stepRows || '<tr><td colspan=12>—</td></tr>'}</tbody></table>
+      ${r.note ? `<div>Ghi chú chung: ${dash(r.note)}</div>` : ""}
+      <div style="margin-top:8px">Kết quả nghiệm thu: <b>${r.result === "dat" ? "ĐẠT" : r.result === "khong_dat" ? "KHÔNG ĐẠT" : "......."}</b></div>
+      <div class="pf-sign">
+        <div><b>Người thực hiện</b><span>${dash(r.performed_by)}<br/>(Ký, ghi rõ họ tên)</span></div>
+        <div><b>Người trực ca</b><span>${dash(r.duty_officer)}<br/>(Ký, ghi rõ họ tên)</span></div>
+        <div><b>KCS nghiệm thu</b><span>${dash(r.checked_by)}<br/>(Ký, ghi rõ họ tên)</span></div>
+      </div>
+      </body></html>`;
+    const w = window.open("", "_blank");
+    if (!w) { toast("Trình duyệt chặn cửa sổ in — vui lòng cho phép popup.", "err"); return; }
+    w.document.write(html);
+    w.document.close();
+    w.focus();
+    setTimeout(() => w.print(), 300);
+  }
+
+  function openCipApproveModal(cipId) {
+    modal(`<h3>Nghiệm thu CIP</h3>
+      <div class="field"><label>Kết quả</label><select id="ap_result"><option value="dat">Đạt</option><option value="khong_dat">Không đạt</option></select></div>
+      <div class="field"><label>Người kiểm tra (KCS)</label><input id="ap_checked_by" value="${esc((CURRENT_USER && (CURRENT_USER.full_name || CURRENT_USER.username)) || "")}"/></div>
+      <div class="field"><label>Ghi chú</label><input id="ap_note"/></div>
+      <button class="btn" id="ap_go" style="margin-top:8px">Xác nhận nghiệm thu</button>`);
+    $("ap_go").onclick = () => guard(async () => {
+      if (!$("ap_checked_by").value) { toast("Nhập người kiểm tra", "err"); return; }
+      await POST(`/cip/records/${cipId}/approve`, { result: $("ap_result").value,
+        checked_by: $("ap_checked_by").value, note: $("ap_note").value || null });
+      closeModal(); toast("Đã nghiệm thu CIP"); render("cip");
+    });
+  }
+
+  // Gọi từ app.js (data-cip="scopeType|scopeId|label" trên dòng mẻ nấu/lô LM/mẻ lọc/mã chiết) —
+  // "gán ngược": người dùng luôn tự chọn/xác nhận, server chỉ gợi ý theo thiết bị+khu vực.
+  window.openCipLinkModal = async function (scopeType, scopeId, label) {
+    const [suggestions, linked] = await Promise.all([
+      GET(`/cip/suggest?scope_type=${encodeURIComponent(scopeType)}&scope_id=${encodeURIComponent(scopeId)}`),
+      GET(`/cip/links?scope_type=${encodeURIComponent(scopeType)}&scope_id=${encodeURIComponent(scopeId)}`),
+    ]);
+    const linkedIds = new Set(linked.map(l => l.cip_id));
+    const groups = suggestions.map(g => {
+      const rows = g.records.map(r => {
+        const isLinked = linkedIds.has(r.cip_id);
+        return `<label style="display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px solid var(--border);flex-wrap:wrap">
+          <input type="checkbox" data-cip-check value="${esc(r.cip_id)}" ${isLinked ? "checked disabled" : ""}/>
+          <code class="k">${esc(r.cip_code)}</code>
+          <span class="muted">Batch ${esc(r.batch_number || "—")} · Order ${esc(r.order_number || "—")}</span>
+          <span class="muted">${fmt(r.started_at)} → ${r.ended_at ? fmt(r.ended_at) : "(chưa kết thúc)"}</span>
+          ${cipResultBadge(r.result)}
+          <span class="muted" style="margin-left:auto">đã gắn cho ${r.linked_count} mẻ/lô</span>
+        </label>`;
+      }).join("") || '<div class="muted" style="padding:4px 0">Chưa có lần CIP nào cho thiết bị này.</div>';
+      return `<div style="margin-bottom:12px"><b>${esc(g.equipment_code)}</b> — ${esc(g.equipment_name)}<div style="margin-top:4px">${rows}</div></div>`;
+    }).join("") || '<div class="muted">Không có thiết bị CIP phù hợp cho công đoạn này — khai báo ở Danh mục CIP trước.</div>';
+    const currentRows = linked.map(l => `<tr><td><code class="k">${esc(l.cip_code)}</code></td>
+      <td class="muted">${esc(l.equipment_name || "")}</td>
+      <td class="muted">Batch ${esc(l.batch_number || "—")} · Order ${esc(l.order_number || "—")}</td>
+      <td class="muted">${fmt(l.started_at)} → ${l.ended_at ? fmt(l.ended_at) : "(chưa kết thúc)"}</td>
+      <td><button class="btn sm sec" data-cip-unlink="${l.link_id}">Hủy gắn</button></td></tr>`).join("");
+    modal(`<h3>Gắn CIP liên quan — ${esc(label)}</h3>
+      ${linked.length ? `<div class="muted" style="margin-bottom:4px">Đã gắn (${linked.length}):</div>
+        <div class="tablewrap" style="margin-bottom:12px"><table><tbody>${currentRows}</tbody></table></div>` : ""}
+      <div class="muted" style="margin-bottom:8px">Chọn (các) lần CIP tương ứng đã thực hiện cho mẻ/lô này — theo thiết bị, thời gian gần nhất trước. Bạn tự xác nhận đúng lần nào, hệ thống không tự gán:</div>
+      <div style="max-height:50vh;overflow:auto">${groups}</div>
+      <button class="btn" id="cip_link_save" style="margin-top:10px">Lưu gắn kết</button>`);
+    document.querySelectorAll("[data-cip-unlink]").forEach(b => b.onclick = () => guard(async () => {
+      await DELETE(`/cip/links/${b.dataset.cipUnlink}`);
+      toast("Đã hủy gắn"); closeModal(); window.openCipLinkModal(scopeType, scopeId, label);
+    }));
+    $("cip_link_save").onclick = () => guard(async () => {
+      const ids = Array.from(document.querySelectorAll("[data-cip-check]:not(:disabled):checked")).map(c => c.value);
+      if (!ids.length) { toast("Chưa chọn lần CIP nào mới", "err"); return; }
+      await POST("/cip/links", { scope_type: scopeType, scope_id: scopeId, cip_ids: ids });
+      toast("Đã gắn CIP"); closeModal();
+    });
+  };
+
+  VIEWS.cip = async function () {
+    const sec = SUB.cip || "mau";
+    const sections = [{ key: "mau", label: "📐 Khai báo biểu mẫu" }, { key: "khaibao", label: "📝 Khai báo CIP" },
+      { key: "lichsu", label: "📜 Lịch sử CIP" }, { key: "danhmuc", label: "Danh mục" }];
+    const root = $("view-cip");
+    const canManage = hasPerm("cip.manage");
+    const canApprove = hasPerm("quality.release");
+    const [formTypes, equipment] = await Promise.all([GET("/cip/form-types"), GET("/cip/equipment")]);
+    let body = "";
+
+    if (sec === "mau") {
+      if (!CIP_MAU_FT || !formTypes.some(f => f.form_type_id === CIP_MAU_FT)) {
+        CIP_MAU_FT = formTypes.length ? formTypes[0].form_type_id : null;
+      }
+      const ft = formTypes.find(f => f.form_type_id === CIP_MAU_FT);
+      const ftOpt = formTypes.map(f => `<option value="${esc(f.form_type_id)}" ${f.form_type_id === CIP_MAU_FT ? "selected" : ""}>${esc(f.code)} — ${esc(f.name)}</option>`).join("");
+      body = !canManage ? '<div class="muted">Bạn không có quyền khai báo biểu mẫu CIP.</div>'
+        : !ft ? '<div class="muted">Chưa có loại biểu mẫu nào — thêm ở tab Danh mục trước.</div>'
+        : panel("📐 Khai báo biểu mẫu — bảng bước MẪU", `
+        <div class="muted" style="margin-bottom:8px">Khai báo trước bảng bước theo ĐÚNG biểu mẫu giấy gốc cho từng loại — khi khai báo 1 lần CIP mới ở tab "Khai báo CIP", chọn đúng loại biểu mẫu sẽ tự điền bảng bước từ đây (vẫn sửa/thêm/bớt tự do được, không khoá cứng).</div>
+        <div class="row">
+          <div class="field" style="flex:1">
+            <label>Loại biểu mẫu</label>
+            <input id="mau_ft_q" placeholder="Tìm theo mã/tên..." style="width:100%;margin-bottom:2px"/>
+            <select id="mau_ft" style="width:100%">${ftOpt}</select>
+          </div>
+        </div>
+        <div class="row">
+          <div class="field"><label>Đơn vị thời gian</label><select id="mau_time_unit">
+            ${["giây", "phút", "giờ"].map(u => `<option value="${u}" ${ft.time_unit === u ? "selected" : ""}>${u}</option>`).join("")}</select></div>
+          <div class="field"><label>Đơn vị nhiệt độ</label><input id="mau_temp_unit" value="${esc(ft.temp_unit)}" style="width:80px"/></div>
+          <div class="field"><label>Đơn vị nồng độ</label><input id="mau_conc_unit" value="${esc(ft.conc_unit)}" style="width:80px"/></div>
+        </div>
+        <div class="tablewrap" style="margin-top:8px"><table id="mau_steps_tbl">
+          <thead><tr><th style="width:50px">Bước</th><th>Nội dung</th><th style="width:100px">Thời gian (${esc(ft.time_unit)})</th>
+            <th style="width:80px">Nhiệt độ (${esc(ft.temp_unit)})</th><th style="width:80px">Nồng độ (${esc(ft.conc_unit)})</th><th style="width:110px">Phương pháp kiểm tra</th>
+            <th style="width:120px">Người làm</th><th style="width:120px">Ghi chú</th><th style="width:36px"></th></tr></thead>
+          <tbody id="mau_steps_body"></tbody></table></div>
+        <button class="btn sm sec" id="mau_step_add" style="margin-top:6px">+ Thêm bước</button>
+        <div class="row" style="margin-top:10px"><button class="btn" id="mau_save">Lưu bảng bước mẫu (tiêu chuẩn)</button></div>`);
+    } else if (sec === "khaibao") {
+      const ftOpt = formTypes.map(f => `<option value="${esc(f.form_type_id)}" data-area="${esc(f.area)}">${esc(f.code)} — ${esc(f.name)}</option>`).join("");
+      const eqOpt = equipment.map(e => `<option value="${esc(e.equipment_id)}" data-area="${esc(e.area)}">${esc(e.code)} — ${esc(e.name)}</option>`).join("");
+      body = !canManage ? '<div class="muted">Bạn không có quyền khai báo CIP.</div>' : panel("📝 Khai báo CIP mới", `
+        <div class="row">
+          <div class="field"><label>Khu vực</label><select id="cip_area">
+            <option value="">(tất cả)</option>
+            ${Object.entries(CIP_AREA_LABEL).map(([k, v]) => `<option value="${k}">${v}</option>`).join("")}
+          </select></div>
+          <div class="field" style="flex:1"><label>Loại biểu mẫu</label>
+            <input id="cip_ft_q" placeholder="Tìm theo mã/tên..." style="width:100%;margin-bottom:2px"/>
+            <select id="cip_ft" style="width:100%">${ftOpt}</select></div>
+          <div class="field" style="flex:1"><label>Thiết bị</label>
+            <input id="cip_eq_q" placeholder="Tìm theo mã/tên..." style="width:100%;margin-bottom:2px"/>
+            <select id="cip_eq" style="width:100%">${eqOpt}</select></div>
+        </div>
+        <div class="row">
+          <div class="field"><label>Batch Number *</label><input id="cip_batch" placeholder="Batch Number (Braumat)" style="width:150px"/></div>
+          <div class="field"><label>Order Number *</label><input id="cip_order" placeholder="Order Number (Braumat)" style="width:150px"/></div>
+        </div>
+        <div class="row">
+          <div class="field"><label>Ca làm việc</label><select id="cip_shift" style="width:100px">
+            <option value="">(chọn ca)</option><option value="Ca 1">Ca 1</option><option value="Ca 2">Ca 2</option><option value="Ca 3">Ca 3</option>
+          </select></div>
+          <div class="field"><label>Bắt đầu</label><input id="cip_start" type="datetime-local" value="${toDTLocal(new Date())}"/></div>
+          <div class="field"><label>Kết thúc</label><input id="cip_end" type="datetime-local"/></div>
+          <div class="field"><label>Người thực hiện</label><input id="cip_by" style="width:150px"/></div>
+          <div class="field"><label>Người trực ca</label><input id="cip_duty" style="width:150px"/></div>
+        </div>
+        <div class="muted" style="margin:6px 0 2px">Cột "TC" = tiêu chuẩn (khoá, sửa ở Khai báo biểu mẫu) — cột "TH" = thực tế, tự nhập khi thực hiện (gõ tự do, kể cả %):</div>
+        <div class="tablewrap"><table id="cip_steps_tbl">
+          <thead><tr><th style="width:50px">Bước</th><th>Nội dung</th>
+            <th style="width:90px">TC: Thời gian</th><th style="width:80px">TC: Nhiệt độ</th><th style="width:80px">TC: Nồng độ</th><th style="width:100px">TC: Kết quả</th>
+            <th style="width:90px">TH: Thời gian</th><th style="width:80px">TH: Nhiệt độ</th><th style="width:80px">TH: Nồng độ</th><th style="width:100px">TH: Kết quả</th>
+            <th style="width:110px">Người làm</th><th style="width:110px">Ghi chú</th><th style="width:36px"></th></tr></thead>
+          <tbody id="cip_steps_body"></tbody></table></div>
+        <div class="row" style="margin-top:10px">
+          <div class="field" style="flex:1"><label>Ghi chú chung</label><input id="cip_note" style="width:100%"/></div>
+          <div class="field" style="align-self:flex-end"><button class="btn" id="cip_submit">Khai báo CIP</button></div>
+        </div>`);
+    } else if (sec === "lichsu") {
+      const records = await GET("/cip/records");
+      const rows = records.map(r => `<tr>
+        <td><code class="k">${esc(r.cip_code)}</code></td>
+        <td>${esc(r.batch_number || "—")}</td>
+        <td>${esc(r.order_number || "—")}</td>
+        <td>${esc(r.form_type_name || "—")}</td>
+        <td>${esc(r.equipment_name || "—")}</td>
+        <td class="muted">${fmt(r.started_at)}</td>
+        <td class="muted">${r.ended_at ? fmt(r.ended_at) : "—"}</td>
+        <td>${esc(r.performed_by || "—")}</td>
+        <td>${cipResultBadge(r.result)}</td>
+        <td style="text-align:right">${r.linked_count}</td>
+        <td><button class="btn sm sec" data-cip-view="${r.cip_id}">Xem</button>
+          ${canApprove && !r.result ? ` <button class="btn sm" data-cip-approve="${r.cip_id}">Nghiệm thu</button>` : ""}</td>
+      </tr>`).join("");
+      body = panel(`📜 Lịch sử CIP <span class="muted">(${records.length})</span>`, `
+        <input class="searchbox" data-tbl="t_cip_hist" placeholder="Tìm mã CIP/batch/order/thiết bị/biểu mẫu..."/>
+        <div class="tablewrap"><table id="t_cip_hist">
+          <thead><tr><th>Mã CIP</th><th>Batch</th><th>Order</th><th>Biểu mẫu</th><th>Thiết bị</th><th>Bắt đầu</th><th>Kết thúc</th>
+            <th>Người thực hiện</th><th>Kết quả</th><th style="text-align:right">Đã gắn</th><th></th></tr></thead>
+          <tbody>${rows || '<tr><td colspan="11" class="muted">Chưa có bản ghi CIP.</td></tr>'}</tbody></table></div>`);
+    } else if (sec === "danhmuc") {
+      const lines = canManage ? await GET("/lines") : [];
+      const ftRows = formTypes.map(f => `<tr><td><code class="k">${esc(f.code)}</code></td><td>${esc(f.name)}</td>
+        <td>${esc(CIP_AREA_LABEL[f.area] || f.area)}</td><td class="muted">${esc(f.kind)}</td>
+        <td>${f.active ? badge("available") + "Dùng" : badge("obsolete") + "Ngừng"}</td>
+        ${canManage ? `<td><button class="btn sm sec" data-ft-del="${f.form_type_id}">Xóa</button></td>` : "<td></td>"}</tr>`).join("");
+      const eqRows = equipment.map(e => `<tr><td><code class="k">${esc(e.code)}</code></td><td>${esc(e.name)}</td>
+        <td>${esc(CIP_AREA_LABEL[e.area] || e.area)}</td>
+        <td class="muted">${e.production_line_id ? "Gắn tank/dây chuyền cụ thể" : "Dùng chung"}</td>
+        <td>${e.active ? badge("available") + "Dùng" : badge("obsolete") + "Ngừng"}</td>
+        ${canManage ? `<td><button class="btn sm sec" data-eq-del="${e.equipment_id}">Xóa</button></td>` : "<td></td>"}</tr>`).join("");
+      body = `
+        ${panel(`📋 Loại biểu mẫu CIP <span class="muted">(${formTypes.length})</span>`, `
+          <div class="tablewrap"><table><thead><tr><th>Mã</th><th>Tên</th><th>Khu vực</th><th>Loại</th><th>Trạng thái</th><th></th></tr></thead>
+            <tbody>${ftRows || '<tr><td colspan="6" class="muted">Chưa có loại biểu mẫu.</td></tr>'}</tbody></table></div>
+          ${canManage ? `<div class="row" style="margin-top:10px">
+            <div class="field"><label>Mã</label><input id="ft_code" placeholder="QT-KCS-QT-BM-22" style="width:170px"/></div>
+            <div class="field"><label>Tên</label><input id="ft_name" style="width:260px"/></div>
+            <div class="field"><label>Khu vực</label><select id="ft_area">${Object.entries(CIP_AREA_LABEL).map(([k, v]) => `<option value="${k}">${v}</option>`).join("")}</select></div>
+            <div class="field"><label>Loại</label><select id="ft_kind"><option value="full">Đầy đủ</option><option value="light">Nhẹ (vd tráng nước)</option></select></div>
+            <div class="field" style="align-self:flex-end"><button class="btn" id="ft_add">Thêm</button></div>
+          </div>` : ""}`)}
+        ${panel(`🛠️ Thiết bị CIP <span class="muted">(${equipment.length})</span>`, `
+          <div class="tablewrap"><table><thead><tr><th>Mã</th><th>Tên</th><th>Khu vực</th><th>Loại gắn</th><th>Trạng thái</th><th></th></tr></thead>
+            <tbody>${eqRows || '<tr><td colspan="6" class="muted">Chưa có thiết bị.</td></tr>'}</tbody></table></div>
+          ${canManage ? `<div class="row" style="margin-top:10px">
+            <div class="field"><label>Mã</label><input id="eq_code" placeholder="EQ-..." style="width:150px"/></div>
+            <div class="field"><label>Tên</label><input id="eq_name" style="width:220px"/></div>
+            <div class="field"><label>Khu vực</label><select id="eq_area">${Object.entries(CIP_AREA_LABEL).map(([k, v]) => `<option value="${k}">${v}</option>`).join("")}</select></div>
+            <div class="field"><label>Gắn tank/dây chuyền (tùy chọn)</label><select id="eq_line"><option value="">(dùng chung — luôn hiện)</option>${lines.map(l => `<option value="${esc(l.line_id)}">${esc(l.code)} — ${esc(l.name)}</option>`).join("")}</select></div>
+            <div class="field" style="align-self:flex-end"><button class="btn" id="eq_add">Thêm</button></div>
+          </div>` : ""}`)}
+      `;
+    }
+
+    root.innerHTML = subnav("cip", sections, sec) + body;
+    wireSubnav("cip");
+    wireSearch();
+    wirePaginate("t_cip_hist", 15);
+
+    if (sec === "mau" && canManage) {
+      const seqRef = { n: 0 };
+      const ft = formTypes.find(f => f.form_type_id === CIP_MAU_FT);
+      cipFillSteps("mau_steps_body", seqRef, ft ? ft.default_steps : []);
+      $("mau_step_add").onclick = () => cipAddStepRow("mau_steps_body", seqRef, null);
+      wireSelectSearch("mau_ft", "mau_ft_q");
+      $("mau_ft").onchange = () => { CIP_MAU_FT = $("mau_ft").value; render("cip"); };
+      $("mau_save").onclick = () => guard(async () => {
+        const steps = cipCollectSteps("mau_steps_body");
+        await PUT(`/cip/form-types/${ft.form_type_id}`, {
+          code: ft.code, name: ft.name, area: ft.area, kind: ft.kind,
+          time_unit: $("mau_time_unit").value, temp_unit: $("mau_temp_unit").value, conc_unit: $("mau_conc_unit").value,
+          default_steps: steps,
+        });
+        toast("Đã lưu bảng bước mẫu"); render("cip");
+      });
+    } else if (sec === "khaibao" && canManage) {
+      const seqRef = { n: 0 };
+      const fillFromFormType = () => {
+        const ft = formTypes.find(f => f.form_type_id === $("cip_ft").value);
+        cipRecordFillSteps("cip_steps_body", seqRef, ft ? ft.default_steps : []);
+      };
+      fillFromFormType();
+      $("cip_ft").onchange = fillFromFormType;
+      const applyFilter = () => {
+        const area = $("cip_area").value;
+        const ftQ = ($("cip_ft_q").value || "").toLowerCase();
+        const eqQ = ($("cip_eq_q").value || "").toLowerCase();
+        document.querySelectorAll("#cip_ft option").forEach(o => o.hidden =
+          (!!area && o.dataset.area !== area) || (!!ftQ && !o.textContent.toLowerCase().includes(ftQ)));
+        document.querySelectorAll("#cip_eq option").forEach(o => o.hidden =
+          (!!area && o.dataset.area !== area) || (!!eqQ && !o.textContent.toLowerCase().includes(eqQ)));
+      };
+      $("cip_area").onchange = applyFilter;
+      $("cip_ft_q").oninput = applyFilter;
+      $("cip_eq_q").oninput = applyFilter;
+      $("cip_submit").onclick = () => guard(async () => {
+        if (!$("cip_ft").value || !$("cip_eq").value) { toast("Chọn loại biểu mẫu và thiết bị", "err"); return; }
+        if (!$("cip_batch").value.trim() || !$("cip_order").value.trim()) { toast("Nhập Batch Number và Order Number (bắt buộc)", "err"); return; }
+        if (!$("cip_start").value) { toast("Nhập thời gian bắt đầu", "err"); return; }
+        const steps = cipRecordCollectSteps("cip_steps_body");
+        await POST("/cip/records", {
+          form_type_id: $("cip_ft").value, equipment_id: $("cip_eq").value,
+          batch_number: $("cip_batch").value.trim(), order_number: $("cip_order").value.trim(),
+          shift: $("cip_shift").value || null,
+          started_at: $("cip_start").value, ended_at: $("cip_end").value || null,
+          performed_by: $("cip_by").value || null, duty_officer: $("cip_duty").value || null,
+          steps, note: $("cip_note").value || null,
+        });
+        toast("Đã khai báo CIP"); render("cip");
+      });
+    } else if (sec === "lichsu") {
+      document.querySelectorAll("[data-cip-view]").forEach(b => b.onclick = () => openCipDetailModal(b.dataset.cipView));
+      document.querySelectorAll("[data-cip-approve]").forEach(b => b.onclick = () => openCipApproveModal(b.dataset.cipApprove));
+    } else if (sec === "danhmuc" && canManage) {
+      document.querySelectorAll("[data-ft-del]").forEach(b => b.onclick = () => guard(async () => {
+        if (!confirm("Xóa loại biểu mẫu này? Không thể hoàn tác.")) return;
+        await DELETE(`/cip/form-types/${b.dataset.ftDel}`);
+        toast("Đã xóa"); render("cip");
+      }));
+      document.querySelectorAll("[data-eq-del]").forEach(b => b.onclick = () => guard(async () => {
+        if (!confirm("Xóa thiết bị này? Không thể hoàn tác.")) return;
+        await DELETE(`/cip/equipment/${b.dataset.eqDel}`);
+        toast("Đã xóa"); render("cip");
+      }));
+      $("ft_add").onclick = () => guard(async () => {
+        if (!$("ft_code").value || !$("ft_name").value) { toast("Nhập mã và tên", "err"); return; }
+        await POST("/cip/form-types", { code: $("ft_code").value, name: $("ft_name").value,
+          area: $("ft_area").value, kind: $("ft_kind").value });
+        toast("Đã thêm loại biểu mẫu"); render("cip");
+      });
+      $("eq_add").onclick = () => guard(async () => {
+        if (!$("eq_code").value || !$("eq_name").value) { toast("Nhập mã và tên", "err"); return; }
+        await POST("/cip/equipment", { code: $("eq_code").value, name: $("eq_name").value,
+          area: $("eq_area").value, production_line_id: $("eq_line").value || null });
+        toast("Đã thêm thiết bị"); render("cip");
       });
     }
   };

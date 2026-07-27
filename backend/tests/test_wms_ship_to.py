@@ -332,7 +332,7 @@ def test_shipment_slip_header_fields_persist(client, admin_h):
     assert row["recipient_dept"] == "Phòng kinh doanh"
     assert row["driver_name"] == "Nguyễn Văn Lái"
     assert row["vehicle_plate"] == "14C-123.45"
-    assert row["from_location"] == loc_code
+    assert row["from_location"] == f"{loc_code} - Test loc"
     assert row["delivery_place"] == "Hạ Long"
 
 

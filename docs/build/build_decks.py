@@ -117,7 +117,7 @@ def title_slide(prs, kicker, title, subtitle):
     tb(s, 0.92, 4.35, 11, 0.6, [one(subtitle, 19, ICE)])
     rect(s, 0.95, 5.25, 2.6, 0.06, TEAL)
     tb(s, 0.9, 6.6, 11, 0.4,
-       [one(kicker + "  ·  Phiên bản 0.1.0-mvp  ·  Cập nhật 23/07/2026", 12, ICE)])
+       [one(kicker + "  ·  Phiên bản 0.1.0-mvp  ·  Cập nhật 25/07/2026", 12, ICE)])
     return s
 
 
@@ -271,7 +271,7 @@ def deck_architecture():
             ("Lệnh nấu/lọc phân cấp", "BrewMasterOrder/Order, FilterMasterOrder/Order"), ("Công thức", "Recipe, Version, Change"),
             ("Thực thi mẻ", "Batch, PhaseRun, Reading, OEE"), ("Nấu-Lọc-Chiết", "BrewBatch, FermentRecord, FilterRecord, BottleRecord"),
             ("Chất lượng", "QC Result, Deviation, CAPA, Sample, QcGroup"), ("Kho NVL 2 địa điểm", "MaterialLot, StockMovement, MaterialRequest, StockCount"),
-            ("WMS theo unit", "FinishedGoodsUnit, Shipment, LoadSlip"), ("CMMS & năng lượng", "Equipment, Incident, Energy"),
+            ("WMS theo LÔ", "FinishedGoodsUnit (1 dòng/lô), Shipment, LoadSlip"), ("CMMS & năng lượng", "Equipment, Incident, Energy"),
             ("Tích hợp CSDL ngoài", "SqlConnection, ImportProfile, custom field"), ("Audit & AI", "AuditLog, Signature, Conversation")]
     for i, (h, d) in enumerate(ctxs):
         col = i % 3; row = i // 3
@@ -445,8 +445,8 @@ def deck_features():
          ["Kho công ty ↔ Kho phân xưởng", "Đề nghị nhận kho (FIFO)",
           "Kiểm kê định kỳ + duyệt", "Sổ cái bất biến + hoàn tác",
           "Cảnh báo tồn tối thiểu", "Lịch sử dùng NVL theo mẻ"], NAVY, bsize=12)
-    card(s, 4.73, 1.75, 3.86, 4.6, "W", "Kho TP (WMS theo unit)",
-         ["FinishedGoodsUnit (thay pallet)", "Cất vị trí / điều chuyển",
+    card(s, 4.73, 1.75, 3.86, 4.6, "W", "Kho TP (WMS theo LÔ)",
+         ["1 dòng/lô — không còn 1 dòng/vỉ", "Cất vị trí / điều chuyển",
           "Phân rã & gộp theo lô", "Bia cận date + Xuất tự do",
           "Lệnh đóng hàng (import Excel)", "Xuất kho FIFO theo loại"], TEAL, bsize=12)
     card(s, 8.86, 1.75, 3.86, 4.6, "B", "Bao bì tuần hoàn",
@@ -653,7 +653,7 @@ def deck_userguide():
             ["7", "KCS", "Ghi QC; xử lý deviation nếu FAIL"],
             ["8-9", "Vận hành / KCS", "Produce lô → RELEASE (hết FAIL)"],
             ["10-12", "Vận hành / Quản đốc", "completed → ký EBR → khóa → closed"],
-            ["13", "Thủ kho", "Đóng pallet, putaway, in tem"]]
+            ["13", "Thủ kho", "Nhập kho theo lô, cất vị trí, in tem"]]
     simple_table(s, 0.6, 1.7, 12.1, rows, [0.12, 0.30, 0.58], rh=0.43, bsize=11)
 
     # 12. Kiosk

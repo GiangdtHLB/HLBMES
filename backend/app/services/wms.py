@@ -920,14 +920,19 @@ def list_lot_summaries(db: Session) -> list:
     thủ công) — chỉ để hiển thị tham khảo, KHÔNG dùng để gom nhóm/FIFO (vẫn theo lot_code).
     {type}_locations: danh sách [{"code","name","count"}] các vị trí kho đang giữ loại đơn vị
     đó của lô này (1 lô/loại vẫn có thể nằm rải rác nhiều vị trí) — "(chưa cất vị trí)" tính
-    riêng qua {type}_unplaced, không lẫn vào đây."""
+    riêng qua {type}_unplaced, không lẫn vào đây.
+    {type}_near_expiry_count: số vỉ/keg/lon quy đổi ĐANG is_near_expiry=True của (lô, loại)
+    này — dùng để chỉ bật ô chọn "Cận date" ở picker Xuất kho khi lô thực sự có hàng cận date
+    (tránh người dùng tick nhầm lô không có bia cận date nào)."""
     # "count" = tổng vỉ/keg/lon quy đổi (SUM(quantity)/pack_size — qua _pack_divisor_expr,
     # JOIN FinishedProduct), KHÔNG đếm dòng — 1 dòng giờ có thể đại diện nhiều đơn vị đóng
     # gói (xem docs/WMS-LOT-LEVEL-REDESIGN.md). "qty" (tổng SL nhỏ) không đổi ý nghĩa.
     rows = db.execute(select(FinishedGoodsUnit.product_name, FinishedGoodsUnit.lot_code,
                              FinishedGoodsUnit.unit_type, FinishedGoodsUnit.location_id,
                              func.sum(FinishedGoodsUnit.quantity / _pack_divisor_expr()),
-                             func.sum(FinishedGoodsUnit.quantity), func.min(FinishedGoodsUnit.created_at))
+                             func.sum(FinishedGoodsUnit.quantity), func.min(FinishedGoodsUnit.created_at),
+                             func.sum(case((FinishedGoodsUnit.is_near_expiry == true(),
+                                           FinishedGoodsUnit.quantity / _pack_divisor_expr()), else_=0.0)))
                       .select_from(FinishedGoodsUnit)
                       .outerjoin(FinishedProduct, FinishedProduct.finished_product_id == FinishedGoodsUnit.finished_product_id)
                       .where(FinishedGoodsUnit.status == "stored")
@@ -941,16 +946,17 @@ def list_lot_summaries(db: Session) -> list:
     grouped: dict[tuple, dict] = {}
     oldest_by_type: dict[tuple, object] = {}
     loc_counts: dict[tuple, dict] = {}  # (product_name, lot_code, unit_type) -> {loc_id: count}
-    for product_name, lot_code, unit_type, location_id, count, qty, oldest_at in rows:
+    for product_name, lot_code, unit_type, location_id, count, qty, oldest_at, near_expiry_count in rows:
         key = (product_name, lot_code)
         g = grouped.setdefault(key, {"product_name": product_name, "lot_code": lot_code,
                                      "bottle_codes": bottle_codes_by_lot.get(lot_code, []),
-                                     "vi_count": 0, "vi_qty": 0.0, "vi_unplaced": 0,
-                                     "keg_count": 0, "keg_qty": 0.0, "keg_unplaced": 0,
-                                     "lon_count": 0, "lon_qty": 0.0, "lon_unplaced": 0})
+                                     "vi_count": 0, "vi_qty": 0.0, "vi_unplaced": 0, "vi_near_expiry_count": 0.0,
+                                     "keg_count": 0, "keg_qty": 0.0, "keg_unplaced": 0, "keg_near_expiry_count": 0.0,
+                                     "lon_count": 0, "lon_qty": 0.0, "lon_unplaced": 0, "lon_near_expiry_count": 0.0})
         if f"{unit_type}_count" in g:
             g[f"{unit_type}_count"] += count
             g[f"{unit_type}_qty"] += qty or 0
+            g[f"{unit_type}_near_expiry_count"] += near_expiry_count or 0
             if location_id is None:
                 g[f"{unit_type}_unplaced"] += count
             else:
@@ -1140,6 +1146,10 @@ def create_shipment(db: Session, ship_to_id: str, lines: list, user: User, heade
             raise DomainError(f"Số lượng cần xuất cho {product_name} phải > 0.")
         fp = db.execute(select(FinishedProduct).where(FinishedProduct.code == product_name)).scalar_one_or_none()
         divisor = _pack_divisor(fp, unit_type)
+        # KHÔNG loại trừ hàng "chưa cất" ở đây — chặn chọn hàng chưa cất vị trí là quy tắc UX
+        # của picker Xuất kho (frontend renderLots/sellable trong views_ext.js), không áp bắt
+        # buộc ở API để không phá các luồng test/nghiệp vụ khác đang xuất thẳng hàng mới nhập
+        # chưa kịp cất vị trí (ví dụ tồn đầu kho, test nội bộ).
         candidates, got = _consume_lot_rows(
             db, product_name=product_name, unit_type=unit_type, status="stored",
             quantity_needed=qty * divisor, lot_code=lot_code, exclude_ids=picked_so_far,
@@ -1165,10 +1175,11 @@ def create_shipment(db: Session, ship_to_id: str, lines: list, user: User, heade
 
     # Xuất tại kho = vị trí hiện đang lưu các vỉ/keg được chọn — tự suy ra từ location_id
     # của chính các đơn vị này (TRƯỚC khi bị xóa ở vòng lặp dưới), không cho nhập tay nữa vì
-    # dễ sai/không khớp thực tế. Nhiều vị trí khác nhau thì liệt kê cách nhau dấu phẩy.
+    # dễ sai/không khớp thực tế. Ghi cả mã + tên (không chỉ mã) để hiển thị rõ ràng ở Lịch sử
+    # xuất kho. Nhiều vị trí khác nhau thì liệt kê cách nhau dấu phẩy.
     loc_ids = {u.location_id for u in units if u.location_id}
     locs = db.execute(select(WmsLocation).where(WmsLocation.loc_id.in_(loc_ids))).scalars().all() if loc_ids else []
-    from_location = ", ".join(sorted({l.code for l in locs})) or None
+    from_location = ", ".join(sorted({f"{l.code} - {l.name}" if l.name else l.code for l in locs})) or None
 
     header = header or {}
     shipment = Shipment(shipment_id=new_id(), shipment_code=_next_shipment_code(db, utcnow().year),
@@ -1241,9 +1252,12 @@ def list_shipments(db: Session) -> list:
         for u in units:
             key = (u.product_name, u.lot_code, u.unit_type)
             g = grouped.setdefault(key, {"product": u.product_name, "lot_code": u.lot_code,
-                                         "unit_type": u.unit_type, "count": 0.0, "quantity": 0.0})
+                                         "unit_type": u.unit_type, "count": 0.0, "quantity": 0.0,
+                                         "near_expiry": False})
             g["count"] += u.quantity / _divisor_of(u)
             g["quantity"] += u.quantity
+            if u.is_near_expiry:
+                g["near_expiry"] = True
         ship_to = ship_to_by.get(s.ship_to_id)
         unit_count = sum(g["count"] for g in grouped.values())
         out.append({"shipment_id": s.shipment_id, "shipment_code": s.shipment_code,
