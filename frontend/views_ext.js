@@ -1902,13 +1902,21 @@
 
   // Bảng bước dùng chung cho cả "Khai báo biểu mẫu" (sửa bảng MẪU) và "Khai báo CIP" (nhập 1
   // lần CIP thật, tự điền từ bảng mẫu của loại biểu mẫu đã chọn) — cùng 1 cơ chế thêm/bớt dòng.
+  // Ô "Không áp dụng" (N/A) cho từng cột Thời gian/Nhiệt độ/Nồng độ ở Khai báo biểu mẫu —
+  // tick N/A khi bước này không có tiêu chí đó (vd VS thô không kiểm tra nồng độ hoá chất);
+  // khi na=true, ô Thực tế tương ứng ở Khai báo CIP sẽ bị khoá thay vì để trống cho gõ tự do.
+  function _cipMauCell(valueAttr, value, naAttr, na, width) {
+    return `<td><input ${valueAttr} value="${esc(value || "")}" style="width:${width}"/>
+      <label class="muted" style="font-size:10px;white-space:nowrap;display:block;margin-top:2px">
+        <input type="checkbox" ${naAttr} ${na ? "checked" : ""} style="width:auto;vertical-align:middle"/> N/A</label></td>`;
+  }
   function cipStepRowHtml(seq, step) {
     step = step || {};
     return `<td><input data-step-no value="${esc(step.step_no != null ? step.step_no : seq)}" style="width:44px"/></td>
       <td><input data-step-content value="${esc(step.content || "")}" style="width:100%"/></td>
-      <td><input data-step-time value="${esc(step.time_spec || "")}" style="width:90px"/></td>
-      <td><input data-step-temp value="${esc(step.temp || "")}" style="width:70px"/></td>
-      <td><input data-step-conc value="${esc(step.concentration || "")}" style="width:70px"/></td>
+      ${_cipMauCell("data-step-time", step.time_spec, "data-step-time-na", step.time_na, "80px")}
+      ${_cipMauCell("data-step-temp", step.temp, "data-step-temp-na", step.temp_na, "65px")}
+      ${_cipMauCell("data-step-conc", step.concentration, "data-step-conc-na", step.conc_na, "65px")}
       <td><input data-step-result value="${esc(step.check_result || "")}" style="width:80px"/></td>
       <td><input data-step-by value="${esc(step.performed_by || "")}" style="width:110px"/></td>
       <td><input data-step-note value="${esc(step.note || "")}" style="width:110px"/></td>
@@ -1933,10 +1941,14 @@
       time_spec: tr.querySelector("[data-step-time]").value || null,
       temp: tr.querySelector("[data-step-temp]").value || null,
       concentration: tr.querySelector("[data-step-conc]").value || null,
+      time_na: tr.querySelector("[data-step-time-na]").checked,
+      temp_na: tr.querySelector("[data-step-temp-na]").checked,
+      conc_na: tr.querySelector("[data-step-conc-na]").checked,
       check_result: tr.querySelector("[data-step-result]").value || null,
       performed_by: tr.querySelector("[data-step-by]").value || null,
       note: tr.querySelector("[data-step-note]").value || null,
-    })).filter(s => s.content || s.time_spec || s.temp || s.concentration || s.check_result || s.note);
+    })).filter(s => s.content || s.time_spec || s.temp || s.concentration || s.check_result || s.note
+                 || s.time_na || s.temp_na || s.conc_na);
   }
 
   // Bảng bước dùng RIÊNG cho "Khai báo CIP" (tạo 1 lần CIP thật) — TIÊU CHUẨN (4 cột đầu)
@@ -1946,24 +1958,35 @@
   // khi giá trị dài (VD "150s – nghỉ 30s – lặp 3 lần"); vẫn giữ input ẩn để cipRecordCollectSteps
   // đọc đúng giá trị khi submit (giá trị TC không đổi trong màn Khai báo CIP, chỉ đổi ở Khai báo
   // biểu mẫu), value hiển thị cho người dùng xem đầy đủ nội dung tiêu chuẩn.
-  function _cipSpecCell(dataAttr, value) {
+  function _cipSpecCell(dataAttr, value, naAttr, na) {
     return `<td style="min-width:130px">
       <input type="hidden" ${dataAttr} value="${esc(value || "")}"/>
+      ${naAttr ? `<input type="hidden" ${naAttr} value="${na ? "1" : "0"}"/>` : ""}
       <div class="muted" style="white-space:normal;word-break:break-word;line-height:1.3" title="Tiêu chuẩn — sửa ở Khai báo biểu mẫu">${esc(value || "—")}</div>
     </td>`;
+  }
+  // Ô Thực tế (TH) — khoá lại (disabled, hiện "—") khi bước này được đánh dấu N/A ở Khai báo
+  // biểu mẫu cho đúng cột đó, tránh vận hành gõ số liệu vào cột không áp dụng.
+  function _cipActualCell(dataAttr, value, na, width) {
+    return `<td><input ${dataAttr} value="${na ? "" : esc(value || "")}" style="width:${width}"
+      ${na ? 'disabled placeholder="—"' : ""}/></td>`;
   }
   function cipRecordStepRowHtml(seq, step) {
     step = step || {};
     return `<td><input data-step-no value="${esc(step.step_no != null ? step.step_no : seq)}" style="width:44px"/></td>
       <td><input data-step-content value="${esc(step.content || "")}" style="width:160px"/></td>
-      ${_cipSpecCell("data-step-time", step.time_spec)}
-      ${_cipSpecCell("data-step-temp", step.temp)}
-      ${_cipSpecCell("data-step-conc", step.concentration)}
+      ${_cipSpecCell("data-step-time", step.time_spec, "data-step-time-na", step.time_na)}
+      ${_cipSpecCell("data-step-temp", step.temp, "data-step-temp-na", step.temp_na)}
+      ${_cipSpecCell("data-step-conc", step.concentration, "data-step-conc-na", step.conc_na)}
       ${_cipSpecCell("data-step-check", step.check_result)}
-      <td><input data-step-time-actual value="${esc(step.time_actual || "")}" style="width:90px"/></td>
-      <td><input data-step-temp-actual value="${esc(step.temp_actual || "")}" style="width:80px"/></td>
-      <td><input data-step-conc-actual value="${esc(step.conc_actual || "")}" style="width:80px"/></td>
-      <td><input data-step-check-actual value="${esc(step.check_actual || "")}" style="width:100px"/></td>
+      ${_cipActualCell("data-step-time-actual", step.time_actual, step.time_na, "90px")}
+      ${_cipActualCell("data-step-temp-actual", step.temp_actual, step.temp_na, "80px")}
+      ${_cipActualCell("data-step-conc-actual", step.conc_actual, step.conc_na, "80px")}
+      <td><select data-step-check-actual style="width:100px">
+        <option value="">— chọn —</option>
+        <option value="Đạt" ${step.check_actual === "Đạt" ? "selected" : ""}>Đạt</option>
+        <option value="Không đạt" ${step.check_actual === "Không đạt" ? "selected" : ""}>Không đạt</option>
+      </select></td>
       <td><input data-step-by value="${esc(step.performed_by || "")}" style="width:110px"/></td>
       <td><input data-step-note value="${esc(step.note || "")}" style="width:110px"/></td>
       <td><button class="btn sm sec" data-step-del>✕</button></td>`;
@@ -1987,6 +2010,9 @@
       time_spec: tr.querySelector("[data-step-time]").value || null,
       temp: tr.querySelector("[data-step-temp]").value || null,
       concentration: tr.querySelector("[data-step-conc]").value || null,
+      time_na: tr.querySelector("[data-step-time-na]").value === "1",
+      temp_na: tr.querySelector("[data-step-temp-na]").value === "1",
+      conc_na: tr.querySelector("[data-step-conc-na]").value === "1",
       check_result: tr.querySelector("[data-step-check]").value || null,
       time_actual: tr.querySelector("[data-step-time-actual]").value || null,
       temp_actual: tr.querySelector("[data-step-temp-actual]").value || null,

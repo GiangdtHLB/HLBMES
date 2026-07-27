@@ -1068,39 +1068,54 @@ def _seed_users(db) -> None:
     accounts = [
         # username, password, full_name, job_title, role, views, permissions,
         #   scope_lines, scope_areas, scope_qc, scope_warehouse  (admin do ensure_admin tạo riêng)
-        ("giamdoc", "123456", "Nguyễn Văn Giám", "Giám đốc nhà máy", "supervisor",
-         "dashboard,dispatch,schedule,oee,qclab,realtime,ai,trace,energy,wms,packaging,reports,integration,audit,cip", "",  # chỉ xem
-         "*", "*", "*", "*"),
+        #
+        # Danh sách tài khoản đã được rút gọn để khớp đúng sơ đồ tổ chức thật
+        # (01/2026/SĐTC-BHL) — bỏ các chức danh không có trong sơ đồ (giamdoc "chỉ xem" chung,
+        # truongca, thukho_px, baotri, nangluong: không phải chức danh riêng trong sơ đồ, hoặc
+        # trùng vai trò với tài khoản khác). Giữ lại "kysu" dù không nằm trong bảng đề xuất ban
+        # đầu — nó ứng với "Phòng Kỹ thuật, Công nghệ và Cải tiến Sản xuất" có thật trong sơ đồ
+        # (dưới Giám đốc SX-KT), và là tài khoản demo duy nhất giữ recipe.author — xóa hẳn sẽ
+        # không còn ai soạn được công thức trong dữ liệu mẫu.
         ("quandoc", "123456", "Trần Quang Đốc", "Quản đốc phân xưởng", "supervisor",
          "dashboard,master,orders,dispatch,schedule,batches,isa88,dispense,recipeadv,process,realtime,quality,qclab,oee,trace,wms,packaging,reports,ai,audit,cip",
          "master.manage,order.create,wo.manage,wo.dispatch,batch.create,batch.execute,quality.deviation,ebr.sign,ebr.approve,cip.manage",
          "*", "*", "*", "*"),
-        ("truongca", "123456", "Lê Thị Ca", "Trưởng ca sản xuất", "supervisor",
-         "dashboard,orders,dispatch,schedule,batches,isa88,dispense,process,realtime,oee,reports,ai,warehouse_px,cip",
-         "order.create,wo.dispatch,batch.create,batch.execute,ebr.sign,warehouse.request,cip.manage",
-         "Nấu A", "nau,len_men,chiet", "*", "phan_xuong"),
+        # Phó Quản đốc kiêm trực ca — người ký khóa số liệu hàng ngày ở phân xưởng (thay cho
+        # "truongca" cũ, không có trong sơ đồ thật; đúng chức danh sơ đồ là "Phó Quản đốc kiêm
+        # trực ca" dưới Quản đốc, xem Phân xưởng Sản xuất Đông Mai).
+        ("phoquandoc", "123456", "Lê Thị Trực", "Phó Quản đốc phân xưởng (trực ca)", "supervisor",
+         "dashboard,batches,isa88,dispense,process,realtime,quality,oee,trace,wms,packaging,reports,ai,cip",
+         "batch.execute,ebr.sign,ebr.approve,quality.deviation,cip.manage",
+         "*", "*", "*", "*"),
         ("vanhanh", "123456", "Phạm Văn Hành", "Nhân viên vận hành", "operator",
          "dashboard,batches,isa88,dispense,process,realtime,warehouse_px,cip", "batch.execute,ebr.sign,warehouse.request,cip.manage",
          "Nấu A", "nau,len_men", "*", "phan_xuong"),
         ("kcs", "123456", "Hoàng Thị Kiểm", "Nhân viên KCS / QA", "qa",
          "dashboard,quality,qclab,process,trace,ai,cip", "quality.release,quality.deviation,recipe.approve,ebr.sign,ebr.approve",
          "*", "*", "Độ đường (°P),pH", "*"),
-        ("kysu", "123456", "Đỗ Công Kỹ", "Kỹ sư công nghệ", "engineer",
+        ("kysu", "123456", "Khuất Bích Phượng", "Kỹ sư - Phòng Kỹ thuật, Công nghệ và Cải tiến Sản xuất", "engineer",
          "dashboard,master,recipes,recipeadv,batches,isa88,qclab,process,realtime,oee,trace,reports,schedule,cip",
          "master.manage,recipe.author,recipe.approve,batch.create,batch.execute,ebr.sign,cip.manage",
          "*", "*", "*", "*"),
         ("thukho", "123456", "Vũ Thị Kho", "Thủ kho NVL", "operator",
          "dashboard,warehouse_kc,wms,packaging,dispense", "warehouse.receive,warehouse.issue",
          "*", "kho", "*", "cong_ty"),
-        ("thukho_px", "123456", "Đặng Thị Xưởng", "Thủ kho phân xưởng", "operator",
-         "dashboard,warehouse_px,dispense", "warehouse.receive,warehouse.issue,warehouse.request",
-         "*", "kho", "*", "phan_xuong"),
-        ("baotri", "123456", "Bùi Văn Trì", "Nhân viên bảo trì", "operator",
-         "dashboard,maint,calib,oee,cip", "maintenance.manage,calibration.manage,cip.manage",
-         "*", "loc,chiet", "*", "*"),
-        ("nangluong", "123456", "Ngô Văn Điện", "NV quản lý năng lượng", "operator",
-         "dashboard,energy", "energy.update",
-         "*", "nau,len_men,chiet", "*", "*"),
+        # Theo sơ đồ tổ chức thật (01/2026/SĐTC-BHL): Trưởng phòng KCS khóa chỉ tiêu + tạo
+        # Lệnh lọc (khác với NV KCS chỉ nhập/duyệt kết quả theo chỉ tiêu được gán).
+        ("kcs_truongphong", "123456", "Trịnh Thị Trưởng", "Trưởng phòng KCS", "qa",
+         "dashboard,orders,quality,qclab,process,trace,ai,cip",
+         "quality.release,quality.deviation,recipe.approve,ebr.sign,ebr.approve,order.create",
+         "*", "*", "*", "*"),
+        # Giám đốc/Phó GĐ Sản xuất - Kỹ thuật: duyệt lô chiết cho nhập kho thành phẩm — tách
+        # khỏi quyền quality.release của KCS (KCS nhập/khóa chỉ tiêu, GĐ SX quyết định nhập kho).
+        ("giamdoc_sx", "123456", "Đoàn Sản Xuất", "Giám đốc Sản xuất - Kỹ thuật", "supervisor",
+         "dashboard,process,quality,trace,reports,ai",
+         "production.release_to_wms",
+         "*", "*", "*", "*"),
+        # Trung tâm Điều hành: quản lý kho thành phẩm (xuất kho, điều chuyển, nhập bia cận date...).
+        ("ttdh_thukhotp", "123456", "Mai Thị Vận", "NV Trung tâm Điều hành - Thủ kho TP", "operator",
+         "dashboard,wms,packaging", "warehouse.receive,warehouse.issue",
+         "*", "kho", "*", "*"),
     ]
     for username, pw, full, title, role, views, perms, sl, sa, sq, sw in accounts:
         db.add(AppUser(user_id=new_id(), username=username, password_hash=hash_password(pw),
@@ -1108,7 +1123,8 @@ def _seed_users(db) -> None:
                        permissions=perms, scope_lines=sl, scope_areas=sa, scope_qc=sq,
                        scope_warehouse=sw, active=True))
     db.commit()
-    print("Tài khoản: admin/admin123 · giamdoc,quandoc,truongca,vanhanh,kcs,kysu,thukho,baotri,nangluong /123456")
+    print("Tài khoản: admin/admin123 · quandoc,phoquandoc,vanhanh,kcs,kysu,thukho,"
+          "kcs_truongphong,giamdoc_sx,ttdh_thukhotp /123456")
 
 
 if __name__ == "__main__":

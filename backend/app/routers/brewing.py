@@ -1786,11 +1786,14 @@ def finish_bottle(bottle_id: str, payload: FinishBottleIn = FinishBottleIn(), db
 
 @router.post("/bottles/{bottle_id}/approve")
 def approve_bottle(bottle_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    """KCS ký duyệt chiết đạt — sau khi duyệt, hàng được tự động nhập kho thành phẩm theo
-    vỉ/keg (không còn pallet, xem services/wms.py::_create_units — mỗi dòng đúng 1 vỉ/keg,
-    dòng cuối có thể lẻ), đánh dấu b.stocked. Yêu cầu đã khai báo đủ chỉ tiêu thành phẩm bắt
-    buộc; chỉ tiêu FAIL (vượt giới hạn) không còn chặn duyệt, chỉ cảnh báo (qc_has_fail)."""
-    require_perm(user, "quality.release")
+    """Giám đốc/Phó GĐ Sản xuất - Kỹ thuật duyệt lô chiết nhập kho thành phẩm — sau khi duyệt,
+    hàng được tự động nhập kho thành phẩm theo vỉ/keg (không còn pallet, xem
+    services/wms.py::_create_units — mỗi dòng đúng 1 vỉ/keg, dòng cuối có thể lẻ), đánh dấu
+    b.stocked. Yêu cầu đã khai báo đủ chỉ tiêu thành phẩm bắt buộc (KCS đã nhập/khóa); chỉ tiêu
+    FAIL (vượt giới hạn) không còn chặn duyệt, chỉ cảnh báo (qc_has_fail). Quyền duyệt tách khỏi
+    quality.release (KCS) theo đúng sơ đồ tổ chức thật: KCS nhập/khóa chỉ tiêu, còn quyết định
+    cho nhập kho thành phẩm hay không thuộc Giám đốc/Phó GĐ Sản xuất."""
+    require_perm(user, "production.release_to_wms")
     b = db.get(BottleRecord, bottle_id)
     if not b:
         raise NotFoundError("Bản ghi chiết không tồn tại.")

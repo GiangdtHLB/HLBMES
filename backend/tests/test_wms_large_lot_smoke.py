@@ -104,7 +104,9 @@ def test_190k_lot_write_path_smoke(client, admin_h, vanhanh_h, kcs_h):
     _declare_pending(client, admin_h, "thanh_pham", "bottle", f"{bottle_code}__thanh_pham")
 
     t0 = time.perf_counter()
-    approve = client.post(f"/api/brewing/bottles/{bottle_id}/approve", headers=kcs_h)
+    # Duyệt nhập kho thành phẩm nay thuộc quyền Giám đốc/Phó GĐ Sản xuất (production.release_to_wms),
+    # tách khỏi quality.release của KCS — dùng admin_h (bypass mọi permission) thay vì kcs_h ở đây.
+    approve = client.post(f"/api/brewing/bottles/{bottle_id}/approve", headers=admin_h)
     elapsed = time.perf_counter() - t0
     assert approve.status_code == 200, approve.text
     assert elapsed < 5, (f"Duyệt chiết lô {CA_TOTAL} vỉ mất {elapsed:.2f}s — phải O(1) theo quy mô lô "

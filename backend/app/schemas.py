@@ -1488,6 +1488,12 @@ class CipStepIn(BaseModel):
     time_spec: Optional[str] = None
     temp: Optional[str] = None
     concentration: Optional[str] = None
+    # Đánh dấu cột không áp dụng cho bước này (vd VS thô không có tiêu chí nồng độ) — phân
+    # biệt với "áp dụng nhưng chưa điền" (time_spec/temp/concentration = null). Khai báo ở
+    # Khai báo biểu mẫu, khoá ô Thực tế tương ứng ở Khai báo CIP khi True.
+    time_na: bool = False
+    temp_na: bool = False
+    conc_na: bool = False
     check_result: Optional[str] = None
     time_actual: Optional[str] = None
     temp_actual: Optional[str] = None
