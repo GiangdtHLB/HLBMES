@@ -110,7 +110,8 @@ def _setup_stage_chain(client, admin_h, vanhanh_h, suffix, line_id):
     # _assert_unlocked vẫn chạy TRƯỚC check "đã duyệt" trong approve_filter.
     tanks = client.get(f"/api/brewing/filters/{filter_id}/tanks", headers=admin_h).json()
     fin = client.post(f"/api/brewing/filters/{filter_id}/tanks/{tanks[0]['line_id']}/finish", headers=vanhanh_h,
-                      json={"v_dich_hl": 90, "nuoc_bai_khi_hl": 10})
+                      json={"v_dich_hl": 90, "nuoc_bai_khi_hl": 10,
+                            "batch_number": f"B-{suffix}", "order_number": f"O-{suffix}", "batch_seq_no": "1"})
     assert fin.status_code == 200, fin.text
     _declare_pending(client, vanhanh_h, "loc", "filter", f"FL-{suffix}")
     approve_f = client.post(f"/api/brewing/filters/{filter_id}/approve", headers=admin_h)

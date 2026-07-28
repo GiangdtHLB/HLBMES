@@ -2274,12 +2274,14 @@
       const ftRows = formTypes.map(f => `<tr><td><code class="k">${esc(f.code)}</code></td><td>${esc(f.name)}</td>
         <td>${esc(CIP_AREA_LABEL[f.area] || f.area)}</td><td class="muted">${esc(f.kind)}</td>
         <td>${f.active ? badge("available") + "Dùng" : badge("obsolete") + "Ngừng"}</td>
-        ${canManage ? `<td><button class="btn sm sec" data-ft-del="${f.form_type_id}">Xóa</button></td>` : "<td></td>"}</tr>`).join("");
+        ${canManage ? `<td style="white-space:nowrap"><button class="btn sm sec" data-ft-edit="${f.form_type_id}">Sửa</button>
+          <button class="btn sm sec" data-ft-del="${f.form_type_id}">Xóa</button></td>` : "<td></td>"}</tr>`).join("");
       const eqRows = equipment.map(e => `<tr><td><code class="k">${esc(e.code)}</code></td><td>${esc(e.name)}</td>
         <td>${esc(CIP_AREA_LABEL[e.area] || e.area)}</td>
         <td class="muted">${e.production_line_id ? "Gắn tank/dây chuyền cụ thể" : "Dùng chung"}</td>
         <td>${e.active ? badge("available") + "Dùng" : badge("obsolete") + "Ngừng"}</td>
-        ${canManage ? `<td><button class="btn sm sec" data-eq-del="${e.equipment_id}">Xóa</button></td>` : "<td></td>"}</tr>`).join("");
+        ${canManage ? `<td style="white-space:nowrap"><button class="btn sm sec" data-eq-edit="${e.equipment_id}">Sửa</button>
+          <button class="btn sm sec" data-eq-del="${e.equipment_id}">Xóa</button></td>` : "<td></td>"}</tr>`).join("");
       body = `
         ${panel(`📋 Loại biểu mẫu CIP <span class="muted">(${formTypes.length})</span>`, `
           <div class="tablewrap"><table><thead><tr><th>Mã</th><th>Tên</th><th>Khu vực</th><th>Loại</th><th>Trạng thái</th><th></th></tr></thead>
@@ -2373,6 +2375,45 @@
         if (!confirm("Xóa thiết bị này? Không thể hoàn tác.")) return;
         await DELETE(`/cip/equipment/${b.dataset.eqDel}`);
         toast("Đã xóa"); render("cip");
+      }));
+      document.querySelectorAll("[data-ft-edit]").forEach(b => b.onclick = () => {
+        const f = formTypes.find(x => x.form_type_id === b.dataset.ftEdit);
+        modal(`<h3>Sửa loại biểu mẫu CIP</h3>
+          <div class="field"><label>Mã</label><input id="ft_e_code" value="${esc(f.code)}"/></div>
+          <div class="field" style="margin-top:8px"><label>Tên</label><input id="ft_e_name" value="${esc(f.name)}"/></div>
+          <div class="field" style="margin-top:8px"><label>Khu vực</label><select id="ft_e_area">${Object.entries(CIP_AREA_LABEL).map(([k, v]) => `<option value="${k}" ${k === f.area ? "selected" : ""}>${v}</option>`).join("")}</select></div>
+          <div class="field" style="margin-top:8px"><label>Loại</label><select id="ft_e_kind">
+            <option value="full" ${f.kind === "full" ? "selected" : ""}>Đầy đủ</option>
+            <option value="light" ${f.kind === "light" ? "selected" : ""}>Nhẹ (vd tráng nước)</option></select></div>
+          <button class="btn" id="ft_e_save" style="margin-top:12px">Lưu</button>`);
+        $("ft_e_save").onclick = () => guard(async () => {
+          if (!$("ft_e_code").value || !$("ft_e_name").value) { toast("Nhập mã và tên", "err"); return; }
+          await PUT(`/cip/form-types/${f.form_type_id}`, {
+            code: $("ft_e_code").value, name: $("ft_e_name").value, area: $("ft_e_area").value, kind: $("ft_e_kind").value,
+            time_unit: f.time_unit, temp_unit: f.temp_unit, conc_unit: f.conc_unit, default_steps: f.default_steps || [],
+          });
+          closeModal(); toast("Đã lưu"); render("cip");
+        });
+      });
+      document.querySelectorAll("[data-eq-edit]").forEach(b => b.onclick = () => guard(async () => {
+        const e = equipment.find(x => x.equipment_id === b.dataset.eqEdit);
+        const lines = await GET("/lines");
+        modal(`<h3>Sửa thiết bị CIP</h3>
+          <div class="field"><label>Mã</label><input id="eq_e_code" value="${esc(e.code)}"/></div>
+          <div class="field" style="margin-top:8px"><label>Tên</label><input id="eq_e_name" value="${esc(e.name)}"/></div>
+          <div class="field" style="margin-top:8px"><label>Khu vực</label><select id="eq_e_area">${Object.entries(CIP_AREA_LABEL).map(([k, v]) => `<option value="${k}" ${k === e.area ? "selected" : ""}>${v}</option>`).join("")}</select></div>
+          <div class="field" style="margin-top:8px"><label>Gắn tank/dây chuyền (tùy chọn)</label><select id="eq_e_line">
+            <option value="">(dùng chung — luôn hiện)</option>
+            ${lines.map(l => `<option value="${esc(l.line_id)}" ${l.line_id === e.production_line_id ? "selected" : ""}>${esc(l.code)} — ${esc(l.name)}</option>`).join("")}</select></div>
+          <button class="btn" id="eq_e_save" style="margin-top:12px">Lưu</button>`);
+        $("eq_e_save").onclick = () => guard(async () => {
+          if (!$("eq_e_code").value || !$("eq_e_name").value) { toast("Nhập mã và tên", "err"); return; }
+          await PUT(`/cip/equipment/${e.equipment_id}`, {
+            code: $("eq_e_code").value, name: $("eq_e_name").value, area: $("eq_e_area").value,
+            production_line_id: $("eq_e_line").value || null,
+          });
+          closeModal(); toast("Đã lưu"); render("cip");
+        });
       }));
       $("ft_add").onclick = () => guard(async () => {
         if (!$("ft_code").value || !$("ft_name").value) { toast("Nhập mã và tên", "err"); return; }

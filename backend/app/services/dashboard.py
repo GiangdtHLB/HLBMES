@@ -142,3 +142,23 @@ def qc_attention_alerts(db: Session) -> dict:
 
     out = sorted(items.values(), key=lambda i: (i["opened_at"] is None, i["opened_at"]))
     return {"items": out, "total": len(out)}
+
+
+def low_yield_filter_alerts(db: Session, days: int = 5, limit: int = 5) -> dict:
+    """Cảnh báo sản lượng lọc thấp cho Dashboard: lấy báo cáo "Theo mẻ lọc số"
+    (filter_yield_report_svc.filter_line_yield_report, xem tab Báo cáo › Sản lượng lọc) trong
+    N ngày gần nhất (mặc định 5, tính theo `ended_at` — thời điểm kết thúc mẻ lọc), chỉ giữ các
+    dòng classification="thap" (dưới ngưỡng Thấp cấu hình ở Cài đặt vận hành), sắp theo V bia
+    thấp nhất lên trước (mẻ hụt sản lượng nặng nhất đáng chú ý nhất), giới hạn top N dòng —
+    mirror qc_attention_alerts (widget cảnh báo gọn trên Dashboard, xem đầy đủ ở tab Báo cáo)."""
+    from . import filter_yield_report as filter_yield_svc
+    from . import ops_setting as ops_setting_svc
+    settings = ops_setting_svc.get_settings(db)
+    date_to = utcnow()
+    date_from = date_to - timedelta(days=days)
+    report = filter_yield_svc.filter_line_yield_report(
+        db, date_from, date_to, settings.filter_line_yield_low_l, settings.filter_line_yield_high_l)
+    low_items = sorted((it for it in report["items"] if it["classification"] == "thap"),
+                       key=lambda it: it["v_l"])
+    return {"items": low_items[:limit], "total": len(low_items),
+            "date_from": report["date_from"], "date_to": report["date_to"], "low_l": report["low_l"]}

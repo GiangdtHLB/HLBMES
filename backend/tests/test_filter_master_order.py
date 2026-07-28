@@ -180,7 +180,8 @@ def test_executing_one_child_does_not_complete_sibling(client, admin_h, vanhanh_
     filter_id = filt.json()["filter_id"]
     tanks = client.get(f"/api/brewing/filters/{filter_id}/tanks", headers=admin_h).json()
     fin = client.post(f"/api/brewing/filters/{filter_id}/tanks/{tanks[0]['line_id']}/finish", headers=vanhanh_h,
-                      json={"v_dich_hl": 100, "nuoc_bai_khi_hl": 0})
+                      json={"v_dich_hl": 100, "nuoc_bai_khi_hl": 0,
+                            "batch_number": "B-FMOEXEC1", "order_number": "O-FMOEXEC1", "batch_seq_no": "1"})
     assert fin.status_code == 200, fin.text
 
     mid = client.get(f"/api/brewing/filter-master-orders/{master_id}", headers=admin_h).json()
@@ -196,7 +197,8 @@ def test_executing_one_child_does_not_complete_sibling(client, admin_h, vanhanh_
     filter_id2 = filt2.json()["filter_id"]
     tanks2 = client.get(f"/api/brewing/filters/{filter_id2}/tanks", headers=admin_h).json()
     fin2 = client.post(f"/api/brewing/filters/{filter_id2}/tanks/{tanks2[0]['line_id']}/finish", headers=vanhanh_h,
-                       json={"v_dich_hl": 100, "nuoc_bai_khi_hl": 0})
+                       json={"v_dich_hl": 100, "nuoc_bai_khi_hl": 0,
+                             "batch_number": "B-FMOEXEC2", "order_number": "O-FMOEXEC2", "batch_seq_no": "1"})
     assert fin2.status_code == 200, fin2.text
 
     final = client.get(f"/api/brewing/filter-master-orders/{master_id}", headers=admin_h).json()

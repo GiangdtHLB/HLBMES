@@ -348,7 +348,8 @@ def test_approve_filter_blocked_until_stage_qc_satisfied(client, admin_h, vanhan
     # phải "Kết thúc" tank TRƯỚC khi duyệt KCS.
     tanks = client.get(f"/api/brewing/filters/{filter_id}/tanks", headers=admin_h).json()
     fin = client.post(f"/api/brewing/filters/{filter_id}/tanks/{tanks[0]['line_id']}/finish",
-                      headers=vanhanh_h, json={"v_dich_hl": 100, "nuoc_bai_khi_hl": 0})
+                      headers=vanhanh_h, json={"v_dich_hl": 100, "nuoc_bai_khi_hl": 0,
+                                                "batch_number": "B-TEST-APPROVE", "order_number": "O-TEST-APPROVE", "batch_seq_no": "1"})
     assert fin.status_code == 200, fin.text
 
     ok = client.post(f"/api/brewing/filters/{filter_id}/approve", headers=admin_h)

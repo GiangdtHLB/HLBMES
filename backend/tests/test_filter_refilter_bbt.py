@@ -103,7 +103,8 @@ def _finished_bbt_tank(client, admin_h, vanhanh_h, suffix, volume_hl=100.0):
     filter_id = f.json()["filter_id"]
     tanks = client.get(f"/api/brewing/filters/{filter_id}/tanks", headers=admin_h).json()
     fin = client.post(f"/api/brewing/filters/{filter_id}/tanks/{tanks[0]['line_id']}/finish",
-                      headers=vanhanh_h, json={"v_dich_hl": volume_hl, "nuoc_bai_khi_hl": 0})
+                      headers=vanhanh_h, json={"v_dich_hl": volume_hl, "nuoc_bai_khi_hl": 0,
+                                                "batch_number": f"B-{suffix}", "order_number": f"O-{suffix}", "batch_seq_no": "1"})
     assert fin.status_code == 200, fin.text
     _declare_pending(client, vanhanh_h, "loc", "filter", f"FL-{suffix}")
     approve = client.post(f"/api/brewing/filters/{filter_id}/approve", headers=admin_h)
@@ -256,7 +257,8 @@ def test_finish_filter_tank_and_delete_symmetric_on_hand_bbt_for_refilter_source
     tanks = client.get(f"/api/brewing/filters/{filter_id}/tanks", headers=admin_h).json()
     line_id = tanks[0]["line_id"]
     fin = client.post(f"/api/brewing/filters/{filter_id}/tanks/{line_id}/finish", headers=vanhanh_h,
-                      json={"v_dich_hl": 60, "nuoc_bai_khi_hl": 0})
+                      json={"v_dich_hl": 60, "nuoc_bai_khi_hl": 0,
+                            "batch_number": "B-ONHAND-REFILTER", "order_number": "O-ONHAND-REFILTER", "batch_seq_no": "1"})
     assert fin.status_code == 200, fin.text
 
     source_after_finish = next(r for r in client.get("/api/brewing/filters", headers=admin_h).json()

@@ -99,7 +99,9 @@ class CipRecord(Base):
 
 class CipLink(Base):
     """Gắn tay 1 CipRecord với 1 mẻ/lô sản xuất cụ thể — scope_type dùng đúng vocabulary đã có
-    ở Hold/Deviation (services/quality.py): brew_batch | ferment | filter | bottle."""
+    ở Hold/Deviation (services/quality.py): brew_batch | ferment | filter | bottle. Thêm
+    bbt_tank (không có ở Hold/Deviation) — scope_id là mã TANK BBT VẬT LÝ, không phải 1
+    FilterRecord cụ thể, vì CIP tank thành phẩm thuộc về cả tank (nhiều mẻ lọc dùng chung)."""
     __tablename__ = "cip_link"
     __table_args__ = (UniqueConstraint("cip_id", "scope_type", "scope_id", name="uq_cip_link"),)
 

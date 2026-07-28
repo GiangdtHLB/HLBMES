@@ -83,7 +83,7 @@ router = APIRouter(prefix="/api/brewing", tags=["brewing"],
                    dependencies=[Depends(get_current_user)])
 
 # Trạng thái lọc/chiết hiển thị
-FILTER_STATUS = {"dang_loc": "Đang lọc", "cho_chiet": "Chờ chiết", "chiet_1_phan": "Đang chiết", "da_chiet_het": "Đã chiết hết"}
+FILTER_STATUS = {"dang_loc": "Đang lọc", "cho_duyet": "Chờ duyệt", "cho_chiet": "Chờ chiết", "chiet_1_phan": "Đang chiết", "da_chiet_het": "Đã chiết hết"}
 EXEC_STATUS = {"dang_thuc_hien": "Đang thực hiện", "hoan_thanh": "Hoàn thành"}
 
 
@@ -1040,6 +1040,35 @@ def list_filters(db: Session = Depends(get_db)):
     finished_products = {fp.finished_product_id: fp for fp in db.execute(select(FinishedProduct)).scalars().all()}
     nvl_filter_ids = {row[0] for row in db.execute(select(FilterMaterialUsage.filter_id).distinct()).all()}
     filter_orders = {o.filter_order_id: o for o in db.execute(select(FilterOrder)).scalars().all()}
+    # Dịch bia (Product) của TỪNG tank nguồn — 1 mẻ lọc "phối" gộp >=2 tank nguồn khác dịch bia,
+    # FilterRecord.product_id chỉ tham khảo 1 tank nên không đủ; lấy riêng theo thứ tự tank (seq)
+    # để hiển thị "dịch tank 1 + dịch tank 2..." ở bảng "Thông tin lọc" (xem VIEWS.process sec=loc).
+    filter_ids = [r.filter_id for r in rows]
+    tank_lines = db.execute(select(FilterOrderTank).where(FilterOrderTank.filter_id.in_(filter_ids))
+                            .order_by(FilterOrderTank.seq)).scalars().all() if filter_ids else []
+    lines_by_filter: dict[str, list] = {}
+    for l in tank_lines:
+        lines_by_filter.setdefault(l.filter_id, []).append(l)
+    ferment_ids = {l.ferment_id for l in tank_lines if l.ferment_id}
+    ferments_by_id = {f.ferment_id: f for f in db.execute(
+        select(FermentRecord).where(FermentRecord.ferment_id.in_(ferment_ids))).scalars().all()} if ferment_ids else {}
+    source_filter_ids = {l.source_filter_id for l in tank_lines if l.source_filter_id}
+    source_filters_by_id = {f.filter_id: f for f in db.execute(
+        select(FilterRecord).where(FilterRecord.filter_id.in_(source_filter_ids))).scalars().all()} if source_filter_ids else {}
+
+    def _source_products(filter_id: str) -> list:
+        out_codes = []
+        for l in lines_by_filter.get(filter_id, []):
+            pid = None
+            if l.tank_type == "bbt":
+                src = source_filters_by_id.get(l.source_filter_id)
+                pid = src.product_id if src else None
+            else:
+                ferment = ferments_by_id.get(l.ferment_id)
+                pid = ferment.product_id if ferment else None
+            out_codes.append(products[pid].code if pid in products else None)
+        return out_codes
+
     out = []
     for r in rows:
         order = filter_orders.get(r.filter_order_id)
@@ -1070,7 +1099,8 @@ def list_filters(db: Session = Depends(get_db)):
                     "ended_at": r.ended_at, "exec_status": exec_status, "exec_status_label": EXEC_STATUS[exec_status],
                     "qc_approved": r.qc_approved, "qc_approved_by": r.qc_approved_by, "qc_approved_at": r.qc_approved_at,
                     "locked": r.locked or bool(order and order.locked), "locked_by": r.locked_by or (order.locked_by if order else None),
-                    "quality_status": r.quality_status})
+                    "batch_number": r.batch_number, "order_number": r.order_number,
+                    "quality_status": r.quality_status, "source_products": _source_products(r.filter_id)})
     return out
 
 
@@ -1130,14 +1160,19 @@ def add_filter(payload: FilterIn, db: Session = Depends(get_db),
                user: User = Depends(get_current_user)):
     """Tank nguồn không tự chọn tay — bắt buộc chọn 1 Lệnh lọc (xem filter_order_svc);
     product_id/wort_type/brew_code/from_cct tự điền từ tank(s) của lệnh đó (không phối: 1
-    tank; phối: nhiều tank, from_cct liệt kê tên các tank). Tank BBT (to_bbt) chọn tự do CHỈ ở
-    mẻ lọc đầu tiên của 1 lệnh — mẻ sau của cùng lệnh tự động dùng lại đúng tank đó (không cho
-    đổi); mẻ đầu phải qua kiểm tra tank chưa bị 1 lệnh nhỏ KHÁC giữ (xem
-    filter_order_svc._bbt_target_blocked_by), tránh 2 lệnh nhỏ khác nhau vô tình cùng đổ vào 1
-    tank vật lý. 1 lệnh có thể có NHIỀU bản ghi lọc ("mẻ lọc") — sản lượng (v_beer_hl) của tất
-    cả mẻ lọc cộng dồn lại và so với thể tích kế hoạch (FilterOrder.planned_volume_hl) ±sai số
-    cho phép; khi đã đạt (is_complete) thì không tạo thêm được nữa (xem
-    filter_order_svc._is_complete)."""
+    tank; phối: nhiều tank, from_cct liệt kê tên các tank). Tank BBT (to_bbt): mẻ lọc ĐẦU TIÊN
+    của 1 lệnh chọn tự do; mẻ SAU của cùng lệnh CHỈ được đổi sang tank khác nếu mẻ gần nhất đã
+    "kết thúc" (ended_at) — còn dở dang thì bắt buộc dùng lại đúng tank đó (không cho đổi giữa
+    chừng). Lý do: 1 tank BBT có thể quá bé so với 1 mẻ lọc thật, phải tách sang tank khác giữa
+    chừng — batch_number/order_number của mẻ trước được tự kế thừa sang bản ghi mới (cùng 1 mẻ
+    giấy, chỉ khác tank chứa, có thể sửa lại ở "Kết thúc" nếu thực ra là mẻ khác). Mọi lượt
+    chọn tank (mẻ đầu, hoặc mẻ sau khi tank trước đã kết thúc) đều qua kiểm tra tank chưa được
+    KCS duyệt (xem filter_order_svc._bbt_target_blocked_by) — nhiều Lệnh lọc KHÁC NHAU được
+    phép cùng đổ vào 1 tank vật lý (thể tích cộng dồn) MIỄN chưa có mẻ nào trong tank được
+    duyệt KCS; sau khi duyệt, tank khoá lại chỉ còn chờ chiết ra. 1 lệnh có thể có NHIỀU bản
+    ghi lọc ("mẻ lọc") — sản lượng (v_beer_hl) của tất cả mẻ lọc cộng dồn lại và so với thể
+    tích kế hoạch (FilterOrder.planned_volume_hl) ±sai số cho phép; khi đã đạt (is_complete)
+    thì không tạo thêm được nữa (xem filter_order_svc._is_complete)."""
     require_perm(user, "batch.execute")
     data = payload.model_dump()
     filter_order_id = data.pop("filter_order_id")
@@ -1147,24 +1182,30 @@ def add_filter(payload: FilterIn, db: Session = Depends(get_db),
     _assert_unlocked(order, db.get(FilterMasterOrder, order.master_order_id) if order.master_order_id else None)
 
     existing_records = db.execute(select(FilterRecord).where(
-        FilterRecord.filter_order_id == filter_order_id)).scalars().all()
+        FilterRecord.filter_order_id == filter_order_id).order_by(FilterRecord.filter_date)).scalars().all()
     record_summaries = [{"v_beer_hl": r.v_beer_hl, "ended_at": r.ended_at} for r in existing_records]
     if filter_order_svc._is_complete(record_summaries, order.planned_volume_hl, order.volume_tolerance_hl):
         raise DomainError("Lệnh lọc này đã hoàn thành (đủ thể tích kế hoạch) — không thể thêm mẻ lọc mới.")
 
-    # Khoá 1 lệnh nhỏ = 1 tank BBT đích: mẻ lọc sau của CÙNG lệnh phải vào ĐÚNG tank đã dùng ở
-    # mẻ đầu (không cho đổi tank giữa chừng); mẻ lọc ĐẦU TIÊN của lệnh thì tank chọn tự do
-    # nhưng phải kiểm tra chưa bị 1 lệnh nhỏ KHÁC giữ (xem filter_order_svc._bbt_target_blocked_by
-    # — tránh 2 lệnh nhỏ khác nhau vô tình cùng đổ vào 1 tank vật lý).
-    if existing_records:
-        data["to_bbt"] = existing_records[0].to_bbt
+    last = existing_records[-1] if existing_records else None
+    if last and last.ended_at is None:
+        # Mẻ gần nhất của lệnh này còn đang lọc dở dang — bắt buộc tiếp tục đúng tank đó, bỏ
+        # qua to_bbt client gửi lên (không cho đổi tank giữa chừng khi tank chưa kết thúc).
+        data["to_bbt"] = last.to_bbt
+        data["batch_number"] = last.batch_number
+        data["order_number"] = last.order_number
     else:
+        # Mẻ ĐẦU TIÊN của lệnh, HOẶC mẻ gần nhất đã kết thúc (tank cũ đầy/xong, tràn sang tank
+        # khác) — tank chọn tự do, qua kiểm tra chưa được KCS duyệt.
         chosen_to_bbt = data.get("to_bbt")
         if not chosen_to_bbt:
             raise DomainError("Chọn Tank BBT trước khi thêm mẻ lọc.")
-        blocked_reason = filter_order_svc._bbt_target_blocked_by(db, chosen_to_bbt, exclude_order_id=filter_order_id)
+        blocked_reason = filter_order_svc._bbt_target_blocked_by(db, chosen_to_bbt)
         if blocked_reason:
             raise DomainError(blocked_reason)
+        if last:
+            data["batch_number"] = last.batch_number
+            data["order_number"] = last.order_number
 
     tank_lines = db.execute(select(FilterOrderTank).where(
         FilterOrderTank.filter_order_id == filter_order_id,
@@ -1283,6 +1324,8 @@ def list_filter_tanks(filter_id: str, db: Session = Depends(get_db)):
                         "tank_lm": None, "lm_code": None, "source_bbt_code": l.source_bbt_code,
                         "reason": l.reason, "seq": l.seq,
                         "ended_at": l.ended_at, "v_dich_hl": l.v_dich_hl, "nuoc_bai_khi_hl": l.nuoc_bai_khi_hl,
+                        "batch_number": f.batch_number, "order_number": f.order_number,
+                        "batch_seq_no": l.batch_seq_no, "is_final_batch": l.is_final_batch,
                         "exec_status": exec_status, "exec_status_label": EXEC_STATUS[exec_status]})
         else:
             ferment = db.get(FermentRecord, l.ferment_id)
@@ -1290,8 +1333,29 @@ def list_filter_tanks(filter_id: str, db: Session = Depends(get_db)):
                         "tank_lm": ferment.tank_lm if ferment else None, "lm_code": ferment.lm_code if ferment else None,
                         "source_bbt_code": None, "reason": None, "seq": l.seq,
                         "ended_at": l.ended_at, "v_dich_hl": l.v_dich_hl, "nuoc_bai_khi_hl": l.nuoc_bai_khi_hl,
+                        "batch_number": f.batch_number, "order_number": f.order_number,
+                        "batch_seq_no": l.batch_seq_no, "is_final_batch": l.is_final_batch,
                         "exec_status": exec_status, "exec_status_label": EXEC_STATUS[exec_status]})
     return out
+
+
+@router.post("/filters/{filter_id}/tanks/{line_id}/toggle-final")
+def toggle_final_batch(filter_id: str, line_id: str, db: Session = Depends(get_db),
+                       user: User = Depends(get_current_user)):
+    """Đảo cờ is_final_batch cho 1 dòng "mẻ lọc số" — đánh dấu/bỏ đánh dấu đây là đợt rút CUỐI
+    của 1 mẻ lọc thật (thường sản lượng thấp một cách bình thường do "vét" tank) để báo cáo sản
+    lượng theo mẻ lọc số (xem filter_line_yield_report) loại dòng này khỏi phân loại Thấp/Cao."""
+    require_perm(user, "batch.execute")
+    f = db.get(FilterRecord, filter_id)
+    if not f:
+        raise NotFoundError("Bản ghi lọc không tồn tại.")
+    _assert_unlocked(f, *_filter_order_chain(db, f.filter_order_id))
+    line = db.get(FilterOrderTank, line_id)
+    if not line or line.filter_id != f.filter_id:
+        raise NotFoundError("Dòng mẻ không tồn tại trong bản ghi lọc này.")
+    line.is_final_batch = not line.is_final_batch
+    db.commit()
+    return {"line_id": line.line_id, "is_final_batch": line.is_final_batch}
 
 
 @router.get("/bbt-tanks")
@@ -1313,8 +1377,13 @@ def finish_filter_tank(filter_id: str, line_id: str, payload: FinishFilterTankIn
                        db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     """Vận hành chọn tay giờ kết thúc CHO 1 TANK trong lệnh lọc (không phối chỉ có 1 dòng;
     phối có nhiều dòng, kết thúc riêng từng dòng) — gọi lại được nhiều lần để sửa giờ/số liệu
-    nếu bấm nhầm. Sau khi cập nhật dòng, tổng hợp lại FilterRecord (xem
-    _sync_filter_aggregate)."""
+    nếu bấm nhầm. Bắt buộc kèm batch_number/order_number (khớp phiếu giấy) mỗi lần gọi — ghi
+    lên cả FilterRecord (không phải riêng dòng tank). batch_number/order_number/batch_seq_no
+    ĐỀU KHÔNG kiểm tra trùng — thực tế vận hành có thể lặp lại số mẻ/số lệnh giấy giữa các lệnh
+    lọc khác nhau (VD reset số theo ca/ngày); báo cáo sản lượng theo mẻ lọc số (xem
+    services/filter_yield_report.py::filter_line_yield_report) tự gộp các dòng cùng bộ 3 giá
+    trị này lại thành 1 mẻ thật khi tính sản lượng, nên không cần chặn trùng ở đây nữa. Sau khi
+    cập nhật dòng, tổng hợp lại FilterRecord (xem _sync_filter_aggregate)."""
     require_perm(user, "batch.execute")
     f = db.get(FilterRecord, filter_id)
     if not f:
@@ -1323,6 +1392,14 @@ def finish_filter_tank(filter_id: str, line_id: str, payload: FinishFilterTankIn
     line = db.get(FilterOrderTank, line_id)
     if not line or line.filter_id != f.filter_id:
         raise NotFoundError("Dòng tank không tồn tại trong bản ghi lọc này.")
+    batch_number = (payload.batch_number or "").strip()
+    order_number = (payload.order_number or "").strip()
+    batch_seq_no = (payload.batch_seq_no or "").strip()
+    if not batch_number or not order_number or not batch_seq_no:
+        raise DomainError("Nhập Mẻ lọc số, Số mẻ (batch number) và Số lệnh (order number) trước khi kết thúc mẻ lọc.")
+    f.batch_number = batch_number
+    f.order_number = order_number
+    line.batch_seq_no = batch_seq_no
     line.ended_at = payload.ended_at or utcnow()
     if payload.v_dich_hl is not None or payload.nuoc_bai_khi_hl is not None:
         old_v_dich = line.v_dich_hl or 0.0
@@ -1342,6 +1419,84 @@ def finish_filter_tank(filter_id: str, line_id: str, payload: FinishFilterTankIn
     _sync_filter_aggregate(db, f)
     db.commit(); db.refresh(f)
     return f
+
+
+@router.post("/filters/{filter_id}/tanks/{line_id}/add-batch")
+def add_filter_tank_batch(filter_id: str, line_id: str, db: Session = Depends(get_db),
+                          user: User = Depends(get_current_user)):
+    """Thêm 1 mẻ kéo dịch MỚI cho CÙNG 1 tank nguồn (tank lên men hoặc BBT lọc lại) đã có
+    trong bản ghi lọc này — dùng khi 1 tank nguồn được rút dịch thành nhiều đợt (VD tạm dừng
+    giữa chừng, tách phiếu giấy theo đợt). Dòng mới nhân bản nguyên tank nguồn (ferment_id
+    hoặc source_bbt_code/source_filter_id/reason) của dòng gốc, chưa có kết quả — chờ "Kết
+    thúc" riêng (xem finish_filter_tank). Chỉ cho phép khi dòng MỚI NHẤT của CÙNG tank này đã
+    kết thúc (ended_at) — không thể có 2 đợt rút dịch cùng lúc từ 1 tank vật lý. Sau khi thêm,
+    tổng hợp lại FilterRecord (xem _sync_filter_aggregate) — ended_at của cả bản ghi tự động
+    về rỗng cho tới khi dòng mới này cũng kết thúc."""
+    require_perm(user, "batch.execute")
+    f = db.get(FilterRecord, filter_id)
+    if not f:
+        raise NotFoundError("Bản ghi lọc không tồn tại.")
+    _assert_unlocked(f, *_filter_order_chain(db, f.filter_order_id))
+    line = db.get(FilterOrderTank, line_id)
+    if not line or line.filter_id != f.filter_id:
+        raise NotFoundError("Dòng tank không tồn tại trong bản ghi lọc này.")
+    all_lines = db.execute(select(FilterOrderTank).where(
+        FilterOrderTank.filter_id == filter_id)).scalars().all()
+    same_tank = [l for l in all_lines if (
+        l.tank_type == "cct" and l.ferment_id == line.ferment_id) or (
+        l.tank_type == "bbt" and l.source_bbt_code == line.source_bbt_code)]
+    latest = max(same_tank, key=lambda l: l.seq)
+    if latest.ended_at is None:
+        raise DomainError("Mẻ trước của tank này chưa kết thúc — kết thúc trước khi thêm mẻ mới.")
+    max_seq = max((l.seq for l in all_lines), default=0)
+    new_line = FilterOrderTank(line_id=new_id(), filter_order_id=line.filter_order_id, filter_id=filter_id,
+                               tank_type=line.tank_type, ferment_id=line.ferment_id,
+                               source_bbt_code=line.source_bbt_code, source_filter_id=line.source_filter_id,
+                               reason=line.reason, seq=max_seq + 1)
+    db.add(new_line); db.flush()
+    _sync_filter_aggregate(db, f)
+    db.commit()
+    return {"line_id": new_line.line_id}
+
+
+@router.delete("/filters/{filter_id}/tanks/{line_id}", status_code=204)
+def delete_filter_tank_batch(filter_id: str, line_id: str, db: Session = Depends(get_db),
+                             user: User = Depends(get_current_user)):
+    """Xóa 1 dòng "mẻ" (1 đợt rút dịch riêng — xem add_filter_tank_batch) khỏi bản ghi lọc,
+    KHÔNG xóa cả bản ghi lọc (dùng data-delrec/delete_filter cho việc đó). Hoàn tác tồn về
+    tank nguồn (ferment.on_hand_cct hoặc source_filter.on_hand_bbt) nếu dòng đã ghi nhận thể
+    tích — mirror phần xóa từng dòng trong delete_filter. Chặn nếu đây là dòng CUỐI CÙNG của
+    bản ghi (1 mẻ lọc luôn phải có ít nhất 1 tank nguồn) hoặc nếu Chiết đã lấy nhiều hơn mức
+    tồn sẽ còn lại sau khi xóa (tránh tồn âm)."""
+    require_perm(user, "batch.execute")
+    f = db.get(FilterRecord, filter_id)
+    if not f:
+        raise NotFoundError("Bản ghi lọc không tồn tại.")
+    _assert_unlocked(f, *_filter_order_chain(db, f.filter_order_id))
+    line = db.get(FilterOrderTank, line_id)
+    if not line or line.filter_id != f.filter_id:
+        raise NotFoundError("Dòng mẻ không tồn tại trong bản ghi lọc này.")
+    all_lines = db.execute(select(FilterOrderTank).where(
+        FilterOrderTank.filter_id == filter_id)).scalars().all()
+    if len(all_lines) <= 1:
+        raise DomainError("Đây là dòng mẻ duy nhất của bản ghi lọc này — xóa cả mẻ lọc (nút Xóa) nếu muốn bỏ hẳn.")
+    consumed_bbt = (f.v_beer_hl or 0.0) - (f.on_hand_bbt or 0.0)
+    remaining_after = sum((l.v_dich_hl or 0.0) + (l.nuoc_bai_khi_hl or 0.0) for l in all_lines if l.line_id != line_id)
+    if consumed_bbt > remaining_after + 1e-6:
+        raise DomainError("Không thể xóa — Chiết đã lấy nhiều hơn mức tồn sẽ còn lại sau khi xóa mẻ này.")
+    if line.v_dich_hl:
+        if line.tank_type == "bbt":
+            source = db.get(FilterRecord, line.source_filter_id) if line.source_filter_id else None
+            if source:
+                source.on_hand_bbt += line.v_dich_hl
+        else:
+            ferment = db.get(FermentRecord, line.ferment_id)
+            if ferment:
+                ferment.on_hand_cct += line.v_dich_hl
+    db.delete(line)
+    db.flush()
+    _sync_filter_aggregate(db, f)
+    db.commit()
 
 
 @router.post("/ferments/{ferment_id}/empty-cct")
@@ -1371,18 +1526,21 @@ def empty_ferment_cct(ferment_id: str, db: Session = Depends(get_db), user: User
     return f
 
 
-@router.post("/filters/{filter_id}/empty-bbt")
-def empty_filter_bbt(filter_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    """Buộc tồn BBT (tank thành phẩm chờ chiết) của 1 lô lọc về 0 khi tank vật lý đã cạn thật
-    nhưng số liệu phần mềm còn lệch một khoảng nhỏ (chiết không bao giờ rút hết theo số liệu,
-    làm lô lọc kẹt mãi ở trạng thái "chiết 1 phần") — cùng cơ chế ngưỡng dung sai như
-    empty_ferment_cct, dùng ngưỡng BBT riêng."""
+@router.post("/bbt-tanks/{code}/empty")
+def empty_bbt_tank(code: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """Buộc tồn CẢ TANK BBT VẬT LÝ về 0 khi tank đã chiết cạn thật nhưng số liệu phần mềm còn
+    lệch một khoảng nhỏ (chiết không bao giờ rút hết theo số liệu) — tính theo TANK (cộng dồn
+    on_hand_bbt của MỌI mẻ lọc cùng to_bbt, so ngưỡng trên TỔNG, rồi zero từng mẻ), không phải
+    theo 1 mẻ lọc cụ thể — vì nhiều mẻ lọc có thể cùng chia sẻ 1 tank vật lý (xem
+    filter_order_svc.available_bbt_tanks). Cùng cơ chế ngưỡng dung sai như empty_ferment_cct,
+    dùng ngưỡng BBT riêng."""
     require_perm(user, "batch.execute")
-    f = db.get(FilterRecord, filter_id)
-    if not f:
-        raise NotFoundError("Bản ghi lọc không tồn tại.")
-    _assert_unlocked(f, *_filter_order_chain(db, f.filter_order_id))
-    residual = f.on_hand_bbt or 0.0
+    recs = db.execute(select(FilterRecord).where(FilterRecord.to_bbt == code)).scalars().all()
+    if not recs:
+        raise NotFoundError(f"Không có mẻ lọc nào trong tank BBT {code}.")
+    for f in recs:
+        _assert_unlocked(f, *_filter_order_chain(db, f.filter_order_id))
+    residual = sum(f.on_hand_bbt or 0.0 for f in recs)
     if residual <= 0:
         raise DomainError("Tank BBT đã hết tồn — không cần làm rỗng.")
     settings = ops_setting_svc.get_settings(db)
@@ -1390,11 +1548,12 @@ def empty_filter_bbt(filter_id: str, db: Session = Depends(get_db), user: User =
         raise DomainError(
             f"Tồn BBT còn {residual:g} hl, vượt ngưỡng cho phép làm rỗng ({settings.empty_bbt_tolerance_hl:g} hl) "
             "— kiểm tra lại số liệu chiết trước khi làm rỗng, hoặc chỉnh ngưỡng ở Danh mục nếu chắc chắn đúng.")
-    record_audit(db, entity_type="filter_record", entity_id=f.filter_id, action="empty_bbt", actor=user,
+    record_audit(db, entity_type="bbt_tank", entity_id=code, action="empty_bbt", actor=user,
                  before={"on_hand_bbt": residual}, after={"on_hand_bbt": 0.0})
-    f.on_hand_bbt = 0.0
-    db.commit(); db.refresh(f)
-    return f
+    for f in recs:
+        f.on_hand_bbt = 0.0
+    db.commit()
+    return {"to_bbt": code, "on_hand_bbt": 0.0}
 
 
 # ===== Nguyên liệu dùng cho 1 mẻ lọc cụ thể =====

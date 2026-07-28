@@ -403,6 +403,15 @@ class FilterOrderTank(Base):
     ended_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
     v_dich_hl: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     nuoc_bai_khi_hl: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    # "Mẻ lọc số" — vận hành tự điền tay lúc "Kết thúc" (KHÔNG tự sinh/tăng dần), đếm theo dòng
+    # rút dịch (khác batch_number/order_number thuộc FilterRecord) — CHO PHÉP TRÙNG giữa các mẻ
+    # lọc/lệnh lọc khác nhau (không có kiểm tra unique như batch_number/order_number).
+    batch_seq_no: Mapped[Optional[str]] = mapped_column(Unicode(64), nullable=True)
+    # Vận hành tự đánh dấu (nút riêng, không phải lúc "Kết thúc") khi dòng này là ĐỢT RÚT CUỐI
+    # của 1 mẻ lọc thật (thường là phần "vét" tank còn ít dịch, sản lượng thấp một cách bình
+    # thường) — báo cáo sản lượng theo mẻ lọc số (services/filter_yield_report.py) loại các
+    # dòng/nhóm này khỏi phân loại Thấp/Cao để không báo động giả cho phần vét cuối.
+    is_final_batch: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 class FilterOrderMaterialLine(Base):
@@ -468,6 +477,17 @@ class FilterRecord(Base):
     locked_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
     locked_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
     quality_status: Mapped[str] = mapped_column(Unicode(255), default=QualityStatus.RELEASED.value)
+    # Số mẻ/số lệnh do vận hành tự gõ tay (khớp phiếu giấy thực tế của nhà máy) — bắt buộc
+    # nhập khi bấm "Kết thúc" (xem finish_filter_tank). Khác với filter_code (mã hệ thống tự
+    # sinh) và FilterOrder.order_code (số lệnh lọc lớn/nhỏ trong hệ thống) — 2 trường này chỉ
+    # để đối chiếu với chứng từ giấy. KHÔNG unique — CHO PHÉP TRÙNG cả trong cùng filter_order_id
+    # lẫn giữa các filter_order_id KHÁC NHAU (thực tế số mẻ/số lệnh giấy có thể lặp lại giữa các
+    # lệnh lọc, VD reset theo ca/ngày) — không kiểm tra trùng ở tầng ứng dụng nữa (xem
+    # finish_filter_tank). Báo cáo sản lượng theo mẻ lọc số tự gộp các dòng cùng bộ 3 giá trị
+    # (batch_number, order_number, batch_seq_no) lại thành 1 mẻ thật khi tính sản lượng (xem
+    # services/filter_yield_report.py::filter_line_yield_report).
+    batch_number: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True, index=True)
+    order_number: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True, index=True)
 
 
 class FilterMaterialUsage(Base):
@@ -581,6 +601,19 @@ class OpsSetting(Base):
     aging_caution_days: Mapped[float] = mapped_column(Float, default=30.0)
     aging_warning_days: Mapped[float] = mapped_column(Float, default=60.0)
     aging_critical_days: Mapped[float] = mapped_column(Float, default=90.0)
+    # Ngưỡng sản lượng (hl) để phân loại 1 mẻ lọc ĐÃ KẾT THÚC là Thấp/Bình thường/Cao — so
+    # trực tiếp trên v_beer_hl của FilterRecord (không so với kế hoạch/lệnh lọc), dùng cho
+    # báo cáo sản lượng lọc theo mẻ (xem services/filter_yield_report.py). <= low = Thấp
+    # (cảnh báo); > low và <= high = Bình thường; > high = Cao.
+    filter_yield_low_hl: Mapped[float] = mapped_column(Float, default=50.0)
+    filter_yield_high_hl: Mapped[float] = mapped_column(Float, default=150.0)
+    # Ngưỡng sản lượng (LÍT — khác đơn vị với 2 ngưỡng trên vì quy mô nhỏ hơn nhiều) để phân
+    # loại từng DÒNG "mẻ lọc số" (1 đợt rút dịch/FilterOrderTank.batch_seq_no, đã kết thúc)
+    # là Thấp/Bình thường/Cao — so trên (v_dich_hl + nuoc_bai_khi_hl) * 100 của riêng dòng đó
+    # (không phải tổng cả FilterRecord). Dùng cho báo cáo "Theo mẻ lọc số" (xem
+    # services/filter_yield_report.py::filter_line_yield_report). Cùng quy ước <=/> như trên.
+    filter_line_yield_low_l: Mapped[float] = mapped_column(Float, default=500.0)
+    filter_line_yield_high_l: Mapped[float] = mapped_column(Float, default=2000.0)
     # Mã nhận dạng nhà máy — khai báo ở Danh mục cùng "Cài đặt vận hành", giúp truy vết ngoài
     # thị trường sản phẩm được chiết từ nhà máy nào (hữu ích khi hệ thống mở rộng nhiều nhà máy).
     factory_code: Mapped[Optional[str]] = mapped_column(Unicode(32), nullable=True)

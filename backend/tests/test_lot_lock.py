@@ -128,7 +128,8 @@ def _build_full_chain(client, admin_h, vanhanh_h, suffix, line_id):
     filter_id = filt.json()["filter_id"]
     tanks = client.get(f"/api/brewing/filters/{filter_id}/tanks", headers=admin_h).json()
     fin_filt = client.post(f"/api/brewing/filters/{filter_id}/tanks/{tanks[0]['line_id']}/finish",
-                           headers=vanhanh_h, json={"v_dich_hl": 100, "nuoc_bai_khi_hl": 0})
+                           headers=vanhanh_h, json={"v_dich_hl": 100, "nuoc_bai_khi_hl": 0,
+                                                     "batch_number": f"B-LOCK-{suffix}", "order_number": f"O-LOCK-{suffix}", "batch_seq_no": "1"})
     assert fin_filt.status_code == 200, fin_filt.text
     _declare_pending(client, vanhanh_h, "loc", "filter", f"FL-LOCK-{suffix}")
     approve_filt = client.post(f"/api/brewing/filters/{filter_id}/approve", headers=admin_h)

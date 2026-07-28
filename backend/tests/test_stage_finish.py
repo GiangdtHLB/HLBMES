@@ -178,17 +178,20 @@ def test_finish_filter_is_correctable(client, admin_h, vanhanh_h):
     assert row["exec_status"] == "dang_thuc_hien"
 
     ok = client.post(f"/api/brewing/filters/{filter_id}/tanks/{line_id}/finish", headers=vanhanh_h,
-                     json={"ended_at": "2026-02-01T09:00:00+00:00", "v_dich_hl": 100, "nuoc_bai_khi_hl": 0})
+                     json={"ended_at": "2026-02-01T09:00:00+00:00", "v_dich_hl": 100, "nuoc_bai_khi_hl": 0,
+                           "batch_number": "B-FINISH-01", "order_number": "O-FINISH-01", "batch_seq_no": "1"})
     assert ok.status_code == 200, ok.text
 
     rows = client.get("/api/brewing/filters", headers=admin_h).json()
     row = next(r for r in rows if r["filter_code"] == "FL-FINISH-01")
     assert row["exec_status"] == "hoan_thanh"
-    # trạng thái suy ra từ tồn kho (status) không đổi vì on_hand_bbt vẫn còn — 2 khái niệm độc lập.
-    assert row["status"] == "cho_chiet"
+    # trạng thái suy ra từ tồn kho (status) — chưa Duyệt KCS nên phải là "chờ duyệt", KHÔNG
+    # phải "chờ chiết" (chưa được phép chiết cho tới khi KCS duyệt, xem derived.filter_status).
+    assert row["status"] == "cho_duyet"
 
     fixed = client.post(f"/api/brewing/filters/{filter_id}/tanks/{line_id}/finish", headers=vanhanh_h,
-                        json={"ended_at": "2026-02-01T09:45:00+00:00"})
+                        json={"ended_at": "2026-02-01T09:45:00+00:00",
+                              "batch_number": "B-FINISH-01", "order_number": "O-FINISH-01", "batch_seq_no": "1"})
     assert fixed.status_code == 200, fixed.text
     assert fixed.json()["ended_at"] == "2026-02-01T09:45:00+00:00"
 
@@ -217,7 +220,8 @@ def test_filter_volumes_deferred_to_finish_and_auto_computed(client, admin_h, va
     assert row["status"] == "dang_loc"  # chưa bấm Kết thúc — không được báo "chờ chiết" (dễ hiểu nhầm là đã lọc xong)
 
     ok = client.post(f"/api/brewing/filters/{filter_id}/tanks/{line_id}/finish", headers=vanhanh_h,
-                     json={"ended_at": "2026-02-05T09:00:00+00:00", "v_dich_hl": 90, "nuoc_bai_khi_hl": 10})
+                     json={"ended_at": "2026-02-05T09:00:00+00:00", "v_dich_hl": 90, "nuoc_bai_khi_hl": 10,
+                           "batch_number": "B-VOL-01", "order_number": "O-VOL-01", "batch_seq_no": "1"})
     assert ok.status_code == 200, ok.text
     assert ok.json()["v_dich_hl"] == 90
     assert ok.json()["nuoc_bai_khi_hl"] == 10
@@ -230,7 +234,8 @@ def test_filter_volumes_deferred_to_finish_and_auto_computed(client, admin_h, va
 
     # Sửa lại số liệu (bấm nhầm) — chênh lệch phải áp dụng đúng, không cộng dồn sai.
     fixed = client.post(f"/api/brewing/filters/{filter_id}/tanks/{line_id}/finish", headers=vanhanh_h,
-                        json={"ended_at": "2026-02-05T09:00:00+00:00", "v_dich_hl": 80, "nuoc_bai_khi_hl": 20})
+                        json={"ended_at": "2026-02-05T09:00:00+00:00", "v_dich_hl": 80, "nuoc_bai_khi_hl": 20,
+                              "batch_number": "B-VOL-01", "order_number": "O-VOL-01", "batch_seq_no": "1"})
     assert fixed.status_code == 200, fixed.text
     assert fixed.json()["v_beer_hl"] == 100
     assert fixed.json()["on_hand_bbt"] == 100
@@ -295,7 +300,8 @@ def test_lo_status_report_full_chain(client, admin_h, vanhanh_h, brewhouse_line_
 
     line_id = _first_tank_line_id(client, admin_h, f["filter_id"])
     client.post(f"/api/brewing/filters/{f['filter_id']}/tanks/{line_id}/finish", headers=vanhanh_h,
-               json={"v_dich_hl": 100, "nuoc_bai_khi_hl": 0})
+               json={"v_dich_hl": 100, "nuoc_bai_khi_hl": 0,
+                     "batch_number": "B-LOSTATUS-01", "order_number": "O-LOSTATUS-01", "batch_seq_no": "1"})
     row = _row()
     assert row["loc"] == "da_ket_thuc"
 
