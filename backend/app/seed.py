@@ -95,10 +95,34 @@ def ensure_admin(db) -> None:
               "Đặt MES_ADMIN_PASSWORD để dùng mật khẩu riêng (không buộc đổi).")
 
 
+def ensure_unit_types(db) -> None:
+    """Luôn đảm bảo có đủ 3 loại đơn vị tồn kho hệ thống (vi/keg/lon) trong Danh mục Loại đơn
+    vị tồn kho — bắt buộc phải có ngay từ đầu để services/wms.py::_pack_divisor tính đúng
+    (dữ liệu cấu trúc lõi, không phải dữ liệu demo, xem migration 1f8a7f187deb cho môi trường
+    dùng alembic upgrade thay vì create_all() + seed()/init_db() như ở đây)."""
+    from .models.master import UnitTypeCatalog
+    existing = {ut.code for ut in db.execute(select(UnitTypeCatalog)).scalars().all()}
+    defaults = [
+        ("vi", "Vỉ", True, True),
+        ("keg", "Keg", False, True),
+        ("lon", "Lon (phân rã)", False, False),
+    ]
+    added = False
+    for code, name, divide, selectable in defaults:
+        if code in existing:
+            continue
+        db.add(UnitTypeCatalog(unit_type_id=new_id(), code=code, name=name,
+                               divide_by_pack_size=divide, selectable=selectable, active=True))
+        added = True
+    if added:
+        db.commit()
+
+
 def seed():
     init_db()
     db = SessionLocal()
     ensure_admin(db)
+    ensure_unit_types(db)
     if not SEED_DEMO:
         print("MES_SEED_DEMO=0 → chỉ tạo admin, KHÔNG seed tài khoản/API key/dữ liệu demo (an toàn cho production).")
         db.close()

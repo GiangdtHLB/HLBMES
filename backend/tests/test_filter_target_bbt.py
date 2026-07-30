@@ -282,3 +282,50 @@ def test_tank_free_again_after_fully_chiet_het(client, admin_h, vanhanh_h):
     now_ok = client.post("/api/brewing/filters", headers=vanhanh_h,
                         json={"filter_code": "FL-TGT-B4", "filter_order_id": order2, "to_bbt": bbt_code})
     assert now_ok.status_code == 201, now_ok.text
+
+
+def test_add_filter_blocked_after_chiet_started(client, admin_h, vanhanh_h):
+    """Lô ĐÃ BẮT ĐẦU CHIẾT (có mẻ chiết tham chiếu 1 trong các mẻ lọc của lệnh) thì không cho
+    thêm mẻ lọc mới nữa — chỉ được thêm khi lệnh còn ở trạng thái Đang lọc (chưa mẻ nào bị lấy
+    đi chiết). Xem services/filter_order.py::_chiet_started, routers/brewing.py::add_filter."""
+    order1 = _a_filter_order(client, admin_h, vanhanh_h, "TGT-CHIET1", planned_v_dich_hl=100)
+    bbt_code = "BBT-TGT-CHIET-1"
+    f1 = client.post("/api/brewing/filters", headers=vanhanh_h,
+                     json={"filter_code": "FL-TGT-CHIET1", "filter_order_id": order1, "to_bbt": bbt_code})
+    assert f1.status_code == 201, f1.text
+    filter_id = f1.json()["filter_id"]
+    tanks = client.get(f"/api/brewing/filters/{filter_id}/tanks", headers=admin_h).json()
+    fin = client.post(f"/api/brewing/filters/{filter_id}/tanks/{tanks[0]['line_id']}/finish",
+                      headers=vanhanh_h, json={"v_dich_hl": 30, "nuoc_bai_khi_hl": 0,
+                                                "batch_number": "B-TGT-CHIET1", "order_number": "O-TGT-CHIET1",
+                                                "batch_seq_no": "1"})
+    assert fin.status_code == 200, fin.text
+    _declare_pending(client, vanhanh_h, "loc", "filter", "FL-TGT-CHIET1")
+    approve = client.post(f"/api/brewing/filters/{filter_id}/approve", headers=admin_h)
+    assert approve.status_code == 200, approve.text
+
+    # Còn "đang lọc" (chưa mẻ nào bị lấy đi chiết) — vẫn được thêm mẻ lọc mới cho CÙNG lệnh
+    # này (dùng tank khác vì tank đầu đã KCS duyệt/khoá).
+    still_ok = client.post("/api/brewing/filters", headers=vanhanh_h,
+                          json={"filter_code": "FL-TGT-CHIET1-2", "filter_order_id": order1,
+                                "to_bbt": "BBT-TGT-CHIET-2"})
+    assert still_ok.status_code == 201, still_ok.text
+
+    orders_before = client.get("/api/brewing/filter-orders", headers=admin_h).json()
+    assert next(o for o in orders_before if o["filter_order_id"] == order1)["chiet_started"] is False
+
+    # Bắt đầu chiết từ tank đầu — lệnh giờ chuyển sang "đang chiết".
+    bottle = client.post("/api/brewing/bottles", headers=vanhanh_h,
+                         json={"bottle_code": "CH-TGT-CHIET1", "from_bbt": bbt_code})
+    assert bottle.status_code == 201, bottle.text
+
+    blocked = client.post("/api/brewing/filters", headers=vanhanh_h,
+                         json={"filter_code": "FL-TGT-CHIET1-3", "filter_order_id": order1,
+                               "to_bbt": "BBT-TGT-CHIET-3"})
+    assert blocked.status_code == 409, blocked.text
+    assert "đã bắt đầu chiết" in blocked.json()["detail"]
+
+    orders_after = client.get("/api/brewing/filter-orders", headers=admin_h).json()
+    assert next(o for o in orders_after if o["filter_order_id"] == order1)["chiet_started"] is True
+    detail = client.get(f"/api/brewing/filter-orders/{order1}", headers=admin_h).json()
+    assert detail["chiet_started"] is True

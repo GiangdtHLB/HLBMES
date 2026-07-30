@@ -216,6 +216,25 @@ def test_delete_recipe_blocked_by_work_order(client, admin_h):
     assert "work order" in d.json()["detail"]
 
 
+def test_delete_recipe_blocked_by_brew_order(client, admin_h):
+    # Lệnh nấu (BrewOrder) hiện tại KHÔNG lưu recipe_version_id (tự tra BOM hiệu lực theo
+    # product_id lúc lập lệnh — xem services/brew_order.py::_effective_bom) nên phải chặn theo
+    # product_id của công thức, không chỉ theo work order/mẻ sản xuất (module cũ).
+    p_id = _a_product(client, admin_h, "PR-RCPDEL-04")
+    r = client.post("/api/recipes", headers=admin_h,
+                    json={"code": "REC-DEL-04", "name": "REC-DEL-04", "product_id": p_id})
+    assert r.status_code == 201, r.text
+    recipe_id = r.json()["recipe_id"]
+    bo = client.post("/api/brewing/orders", headers=admin_h,
+                     json={"order_code": "LN-RCPDEL-04", "product_id": p_id,
+                           "auto_from_bom": False, "planned_volume_hl": 100})
+    assert bo.status_code == 201, bo.text
+
+    d = client.delete(f"/api/recipes/{recipe_id}", headers=admin_h)
+    assert d.status_code == 409, d.text
+    assert "lệnh nấu" in d.json()["detail"]
+
+
 # ---- Yêu cầu quyền master.manage ----
 
 def test_delete_requires_master_manage_permission(client, admin_h, vanhanh_h):

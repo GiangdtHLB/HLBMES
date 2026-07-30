@@ -24,6 +24,23 @@ class BeerTypeOut(ORMModel):
     note: Optional[str] = None
 
 
+class UnitTypeCatalogIn(BaseModel):
+    code: str
+    name: str
+    divide_by_pack_size: bool = False
+    selectable: bool = True
+    active: bool = True
+
+
+class UnitTypeCatalogOut(ORMModel):
+    unit_type_id: str
+    code: str
+    name: str
+    divide_by_pack_size: bool
+    selectable: bool
+    active: bool
+
+
 class MaterialGroupIn(BaseModel):
     code: str
     name: str
@@ -390,7 +407,11 @@ class UnitDeleteIn(BaseModel):
 class DecomposeBatchIn(BaseModel):
     product_name: str
     lot_code: Optional[str] = None
-    count: int
+    # float chứ không phải int — lô đã bị chia lẻ một phần (VD sau relocate/decompose trước
+    # đó) hoàn toàn có thể còn tồn dạng số lẻ (VD 0.625 vỉ); int sẽ làm FastAPI trả 422 ngay
+    # cả khi người dùng nhập ĐÚNG số tối đa hiển thị trên UI (xem cùng lỗi ở RelocateBatchIn/
+    # FreeIssueBatchIn bên dưới).
+    count: float
 
 
 class DeleteByLotIn(BaseModel):
@@ -405,14 +426,14 @@ class RelocateBatchIn(BaseModel):
     unit_type: str
     from_loc_id: Optional[str] = None
     to_loc_id: str
-    count: int
+    count: float
 
 
 class FreeIssueBatchIn(BaseModel):
     product_name: str
     lot_code: Optional[str] = None
     unit_type: str
-    count: int
+    count: float
     reason: str
 
 

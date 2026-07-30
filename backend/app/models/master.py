@@ -24,6 +24,26 @@ class BeerType(Base):
     note: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)
 
 
+class UnitTypeCatalog(Base):
+    """Danh mục Loại đơn vị tồn kho (WMS thành phẩm) — Vỉ/Keg mặc định + loại tự khai báo
+    thêm (VD "Thùng"). Mỗi loại khai báo cách quy đổi "count" (số đơn vị đóng gói, tham số
+    vào của mọi API WMS) sang "quantity" (SL đơn vị nhỏ lưu trên FinishedGoodsUnit) — xem
+    services/wms.py::_pack_divisor: divide_by_pack_size=True (giống Vỉ) → quantity =
+    count * FinishedProduct.pack_size; False (giống Keg) → quantity = count (1:1, không
+    nhân pack_size). selectable=False dành cho loại hệ thống tự sinh (VD "lon" khi phân rã
+    vỉ — xem services/wms.py::_decompose_one_vi), không cho chọn khi khai báo SKU mới ở
+    Danh mục Sản phẩm dù vẫn cần có mặt trong danh mục để tra tên hiển thị."""
+
+    __tablename__ = "unit_type_catalog"
+
+    unit_type_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
+    code: Mapped[str] = mapped_column(Unicode(32), unique=True, index=True)  # "vi"|"keg"|"lon"|tự đặt thêm
+    name: Mapped[str] = mapped_column(Unicode(64))  # Nhãn hiển thị, VD "Vỉ", "Keg", "Thùng"
+    divide_by_pack_size: Mapped[bool] = mapped_column(Boolean, default=False)
+    selectable: Mapped[bool] = mapped_column(Boolean, default=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
 class Product(Base):
     """Dịch bia (công thức/loại bia đang chạy qua nấu→lên men→lọc) — KHÔNG phải sản
     phẩm đóng gói cuối cùng, xem FinishedProduct."""

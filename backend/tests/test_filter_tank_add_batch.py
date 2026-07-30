@@ -84,6 +84,20 @@ def _get_filter(client, admin_h, filter_id):
     return next(f for f in items if f["filter_id"] == filter_id)
 
 
+def _declare_pending(client, headers, stage, scope_type, scope_id):
+    status = client.get(f"/api/brewing/qc-status?stage={stage}&scope_type={scope_type}&scope_id={scope_id}",
+                        headers=headers).json()
+    for p in status["required"]:
+        if p["code"] in status["pending"]:
+            lsl = p["lsl"] if p["lsl"] is not None else 0
+            usl = p["usl"] if p["usl"] is not None else lsl + 10
+            r = client.post("/api/brewing/qc-results", headers=headers,
+                            json={"stage": stage, "scope_type": scope_type, "scope_id": scope_id,
+                                  "parameter": p["code"], "value": (lsl + usl) / 2,
+                                  "lower_limit": lsl, "upper_limit": usl})
+            assert r.status_code == 201, r.text
+
+
 def test_add_batch_blocked_while_previous_line_unfinished(client, admin_h, vanhanh_h):
     order_id = _a_filter_order(client, admin_h, vanhanh_h, "ADDB-1")
     r = client.post("/api/brewing/filters", headers=vanhanh_h,
@@ -202,3 +216,69 @@ def test_delete_batch_line_reverses_stock_and_recomputes(client, admin_h, vanhan
     f_final = _get_filter(client, admin_h, filter_id)
     assert f_final["v_dich_hl"] == pytest.approx(5)
     assert f_final["nuoc_bai_khi_hl"] == pytest.approx(0.5)
+
+
+def test_finish_requires_v_dich_hl_greater_than_zero(client, admin_h, vanhanh_h):
+    """Mẻ lọc kết thúc phải có Dịch nha lọc > 0 — không cho lưu mẻ rỗng (dữ liệu rác)."""
+    order_id = _a_filter_order(client, admin_h, vanhanh_h, "VDICH0-1")
+    r = client.post("/api/brewing/filters", headers=vanhanh_h,
+                    json={"filter_code": "FL-VDICH0-1", "filter_order_id": order_id, "to_bbt": "BBT-VDICH0-1"})
+    assert r.status_code == 201, r.text
+    filter_id = r.json()["filter_id"]
+    tanks = client.get(f"/api/brewing/filters/{filter_id}/tanks", headers=admin_h).json()
+    line_id = tanks[0]["line_id"]
+
+    blocked = client.post(f"/api/brewing/filters/{filter_id}/tanks/{line_id}/finish", headers=vanhanh_h,
+                          json={"v_dich_hl": 0, "nuoc_bai_khi_hl": 0,
+                                "batch_number": "B-VDICH0-1", "order_number": "O-VDICH0-1", "batch_seq_no": "1"})
+    assert blocked.status_code == 409, blocked.text
+    assert "Dịch nha lọc" in blocked.json()["detail"]
+
+    # Không gửi v_dich_hl (None) khi dòng CHƯA từng có giá trị nào -> vẫn coi là 0, vẫn chặn.
+    blocked2 = client.post(f"/api/brewing/filters/{filter_id}/tanks/{line_id}/finish", headers=vanhanh_h,
+                           json={"batch_number": "B-VDICH0-1", "order_number": "O-VDICH0-1", "batch_seq_no": "1"})
+    assert blocked2.status_code == 409, blocked2.text
+
+    ok = client.post(f"/api/brewing/filters/{filter_id}/tanks/{line_id}/finish", headers=vanhanh_h,
+                     json={"v_dich_hl": 10, "nuoc_bai_khi_hl": 0,
+                           "batch_number": "B-VDICH0-1", "order_number": "O-VDICH0-1", "batch_seq_no": "1"})
+    assert ok.status_code == 200, ok.text
+
+
+def test_add_batch_blocked_after_chiet_started(client, admin_h, vanhanh_h):
+    """Cùng quy tắc với add_filter — lệnh lọc đã bắt đầu chiết thì không cho "+ Thêm mẻ" nữa
+    cho tank BBT nào của lệnh đó, kể cả tank khác tank vừa được chiết."""
+    order_id = _a_filter_order(client, admin_h, vanhanh_h, "CHIETADD-1")
+    bbt_code = "BBT-CHIETADD-1"
+    r = client.post("/api/brewing/filters", headers=vanhanh_h,
+                    json={"filter_code": "FL-CHIETADD-1", "filter_order_id": order_id, "to_bbt": bbt_code})
+    assert r.status_code == 201, r.text
+    filter_id = r.json()["filter_id"]
+    tanks = client.get(f"/api/brewing/filters/{filter_id}/tanks", headers=admin_h).json()
+    line_id = tanks[0]["line_id"]
+
+    fin = client.post(f"/api/brewing/filters/{filter_id}/tanks/{line_id}/finish", headers=vanhanh_h,
+                      json={"v_dich_hl": 30, "nuoc_bai_khi_hl": 0,
+                            "batch_number": "B-CHIETADD-1", "order_number": "O-CHIETADD-1", "batch_seq_no": "1"})
+    assert fin.status_code == 200, fin.text
+
+    # Còn "đang lọc" (chưa chiết) — thêm mẻ vẫn được phép.
+    still_ok = client.post(f"/api/brewing/filters/{filter_id}/tanks/{line_id}/add-batch", headers=vanhanh_h)
+    assert still_ok.status_code == 200, still_ok.text
+    line2 = still_ok.json()["line_id"]
+    fin2 = client.post(f"/api/brewing/filters/{filter_id}/tanks/{line2}/finish", headers=vanhanh_h,
+                       json={"v_dich_hl": 20, "nuoc_bai_khi_hl": 0,
+                             "batch_number": "B-CHIETADD-1", "order_number": "O-CHIETADD-1", "batch_seq_no": "1"})
+    assert fin2.status_code == 200, fin2.text
+
+    _declare_pending(client, vanhanh_h, "loc", "filter", "FL-CHIETADD-1")
+    approve = client.post(f"/api/brewing/filters/{filter_id}/approve", headers=admin_h)
+    assert approve.status_code == 200, approve.text
+
+    bottle = client.post("/api/brewing/bottles", headers=vanhanh_h,
+                         json={"bottle_code": "CH-CHIETADD-1", "from_bbt": bbt_code})
+    assert bottle.status_code == 201, bottle.text
+
+    blocked = client.post(f"/api/brewing/filters/{filter_id}/tanks/{line2}/add-batch", headers=vanhanh_h)
+    assert blocked.status_code == 409, blocked.text
+    assert "đã bắt đầu chiết" in blocked.json()["detail"]
