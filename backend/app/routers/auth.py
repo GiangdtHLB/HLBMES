@@ -305,8 +305,15 @@ def scope_catalog(db: Session = Depends(get_db), user: User = Depends(get_curren
     line_names = dict(db.execute(select(ProductionLine.code, ProductionLine.name)).all())
     lines = [{"key": c, "label": f"{c} — {line_names[c]}" if line_names.get(c) and line_names[c] != c else c}
               for c in line_codes]
-    qc_codes = sorted({p for (p,) in db.execute(select(QualityResult.parameter).distinct()).all() if p})
-    qc_names = dict(db.execute(select(QCParameter.code, QCParameter.name)).all())
+    # Nguồn chính là Danh mục chỉ tiêu chất lượng (QCParameter) — trước đây chỉ lấy
+    # QualityResult.parameter (chỉ tiêu ĐÃ TỪNG được ghi kết quả) nên phần lớn Danh mục (chỉ
+    # ghi nhận demo/test 1 vài chỉ tiêu) không hiện ra được ở đây dù đã khai báo đầy đủ. Gộp
+    # thêm parameter cũ trong QualityResult không còn trong Danh mục (đổi mã/xóa) để không làm
+    # mất scope đã gán cho tài khoản từ trước.
+    from sqlalchemy import true
+    qc_names = dict(db.execute(select(QCParameter.code, QCParameter.name).where(QCParameter.active == true())).all())
+    legacy_qc_codes = {p for (p,) in db.execute(select(QualityResult.parameter).distinct()).all() if p}
+    qc_codes = sorted(set(qc_names) | legacy_qc_codes)
     qc_params = [{"key": c, "label": f"{c} — {qc_names[c]}" if qc_names.get(c) and qc_names[c] != c else c}
                   for c in qc_codes]
     return {"areas": [{"key": k, "label": v} for k, v in SCOPE_AREAS.items()],

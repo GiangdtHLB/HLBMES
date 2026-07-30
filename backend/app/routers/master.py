@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from ..audit import record_audit
 from ..common import new_id
 from ..database import get_db
-from ..errors import NotFoundError, PermissionError_
+from ..errors import DomainError, NotFoundError, PermissionError_
 from ..models.master import BeerType, FinishedProduct, Material, MaterialGroup, Product, UnitTypeCatalog
 from ..models.materials import Supplier
 from ..schemas import (BeerTypeIn, BeerTypeOut, FinishedProductIn, FinishedProductOut, MaterialGroupIn,
@@ -282,6 +282,16 @@ def update_product_brew_spec(product_id: str, payload: ProductBrewSpecIn, db: Se
 
 
 # ---- Sản phẩm (thành phẩm/SKU đóng gói) — khác Dịch bia (Product) ở trên ----
+def _assert_unit_type_exists(db: Session, code: str) -> None:
+    # Chặn gán cho SKU 1 mã KHÔNG có trong Danh mục Loại đơn vị tồn kho — nếu không, mọi lô
+    # nhập kho thủ công/tồn đầu sau này của SKU đó sẽ mang unit_type lạ, không khớp code nào ở
+    # _pack_divisor/_divide_by_pack_codes (services/wms.py) và bị đếm sai tồn kho hàng loạt mà
+    # không có cảnh báo nào cho tới khi phát hiện trên số liệu thật.
+    if not db.execute(select(UnitTypeCatalog.unit_type_id)
+                      .where(UnitTypeCatalog.code == code)).first():
+        raise DomainError(f"Loại đơn vị '{code}' không có trong Danh mục Loại đơn vị tồn kho.")
+
+
 @router.get("/finished-products", response_model=list[FinishedProductOut])
 def list_finished_products(db: Session = Depends(get_db)):
     return db.execute(select(FinishedProduct).order_by(FinishedProduct.code)).scalars().all()
@@ -293,6 +303,7 @@ def create_finished_product(payload: FinishedProductIn, db: Session = Depends(ge
     require_perm(user, "master.manage")
     if db.execute(select(FinishedProduct).where(FinishedProduct.code == payload.code)).scalar_one_or_none():
         raise PermissionError_(f"Mã sản phẩm '{payload.code}' đã tồn tại.")
+    _assert_unit_type_exists(db, payload.unit_type)
     fp = FinishedProduct(finished_product_id=new_id(), **payload.model_dump())
     db.add(fp)
     record_audit(db, entity_type="finished_product", entity_id=fp.finished_product_id, action="create",
@@ -309,6 +320,7 @@ def update_finished_product(finished_product_id: str, payload: FinishedProductIn
     fp = db.get(FinishedProduct, finished_product_id)
     if not fp:
         raise NotFoundError("Sản phẩm không tồn tại.")
+    _assert_unit_type_exists(db, payload.unit_type)
     before = {"code": fp.code, "name": fp.name, "uom": fp.uom, "product_id": fp.product_id,
               "unit_type": fp.unit_type, "pack_size": fp.pack_size, "category": fp.category,
               "description": fp.description}
