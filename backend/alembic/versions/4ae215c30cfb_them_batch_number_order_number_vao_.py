@@ -22,8 +22,8 @@ depends_on = None
 def upgrade() -> None:
     op.add_column('filter_record', sa.Column('batch_number', sa.Unicode(255), nullable=True))
     op.add_column('filter_record', sa.Column('order_number', sa.Unicode(255), nullable=True))
-    op.create_index('ix_filter_record_batch_number', 'filter_record', ['batch_number'], unique=True)
-    op.create_index('ix_filter_record_order_number', 'filter_record', ['order_number'], unique=True)
+    op.create_index('ix_filter_record_batch_number', 'filter_record', ['batch_number'], unique=False)
+    op.create_index('ix_filter_record_order_number', 'filter_record', ['order_number'], unique=False)
 
 
 def downgrade() -> None:
