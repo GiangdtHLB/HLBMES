@@ -755,6 +755,7 @@ VIEWS.dashboard = async function () {
       openFermentQcFailModal(lm, pid || null);
     };
   });
+  wireAuditDetail();
   $("db_chiet_apply").onclick = () => {
     SUB.dashboard_chiet_date = $("db_chiet_date").value;
     loadDashboardChiet();
@@ -2779,15 +2780,136 @@ VIEWS.audit = async function () {
   const load = () => guard(async () => {
     const q = $("au_entity").value ? "?entity_id=" + encodeURIComponent($("au_entity").value) : "?limit=200";
     $("au_table").innerHTML = tableAudit(await GET("/audit" + q), "t_audit");
-    wireSearch(); wirePaginate("t_audit", 10);
+    wireSearch(); wirePaginate("t_audit", 10); wireAuditDetail("t_audit");
   });
   $("au_load").onclick = load; load();
 };
+// Nhãn tiếng Việt cho Audit trail — entity_type/action là mã kỹ thuật cố định trong code (không
+// đổi được vì đã ghi vào các dòng audit cũ), nên dịch sang tiếng Việt CHỈ ở tầng hiển thị. Không
+// bao phủ hết mọi entity_type/action có thể xuất hiện (danh mục sinh động theo code, xem
+// backend record_audit call sites) — phần không có trong dict sẽ tự "làm đẹp" (thay _ bằng khoảng
+// trắng, viết hoa chữ đầu) thay vì hiện mã thô khó đọc.
+const AUDIT_ENTITY_LABELS = {
+  finished_goods_unit: "Đơn vị kho thành phẩm", near_expiry_entry: "Bia cận date", shipment: "Phiếu xuất kho",
+  batch: "Mẻ sản xuất", lot: "Lô", brew_order: "Lệnh nấu", brew_master_order: "Lệnh nấu (gộp)",
+  filter_order: "Lệnh lọc", filter_master_order: "Lệnh lọc (gộp)", ferment_record: "Lô lên men",
+  bbt_tank: "Tank BBT", work_order: "Lệnh sản xuất (WO)", yeast_lot: "Lô men giống",
+  recipe_version: "Phiên bản công thức", packaging: "Bao bì", downtime: "Dừng máy", order: "Lệnh SX",
+  schedule: "Lịch sản xuất", quality_result: "Kết quả QC", brew_batch: "Mẻ nấu", ferment: "Lô lên men",
+  filter: "Mẻ lọc", bottle: "Mẻ chiết", deviation: "Deviation (sai lệch)", capa: "CAPA",
+  sample: "Mẫu QC", qc_parameter: "Chỉ tiêu QC", qc_parameter_group: "Nhóm chỉ tiêu QC",
+  qc_parameter_group_item: "Chỉ tiêu trong nhóm", material_qc_group: "Gán nhóm chỉ tiêu NVL",
+  stage_qc_group: "Gán nhóm chỉ tiêu công đoạn", cip_form_type: "Loại biểu mẫu CIP",
+  cip_equipment: "Thiết bị CIP", cip_record: "Biên bản CIP", material_request: "Đề nghị nhận kho",
+  material_request_line: "Dòng đề nghị nhận kho", stock_movement: "Phiếu xuất/nhập kho NVL",
+  stock_count: "Phiếu kiểm kê", auth: "Tài khoản", role_template: "Mẫu chức danh", beer_type: "Loại bia",
+  unit_type_catalog: "Loại đơn vị tồn kho", supplier: "Nhà cung cấp", material_group: "Nhóm vật tư",
+  product: "Dịch bia", product_brew_spec: "Thông số nấu sản phẩm", finished_product: "Sản phẩm (SKU)",
+  material: "Vật tư/NVL", recipe: "Công thức", line: "Dây chuyền", incident: "Sự cố bảo trì",
+  ship_to_location: "Nơi xuất đến",
+};
+const AUDIT_ACTION_LABELS = {
+  build: "Tạo/nhập kho", putaway: "Cất vào vị trí", transfer: "Điều chuyển", decompose: "Phân rã 1 đơn vị",
+  decompose_batch: "Phân rã theo số lượng", undo_decompose_batch: "Hoàn tác phân rã",
+  free_issue_batch: "Xuất tự do", undo_free_issue_batch: "Hoàn tác xuất tự do",
+  adjust_bottle_finish: "Điều chỉnh khi kết thúc chiết", relocate_batch: "Cất vào vị trí (theo lô)",
+  delete: "Xóa", delete_by_lot: "Xóa theo lô", create: "Tạo mới", undo: "Hoàn tác", update: "Cập nhật",
+  record_actual: "Ghi nhận thực tế", consume_lot: "Tiêu thụ lô NVL", produce: "Ghi nhận sản lượng",
+  ebr_sign: "Ký hồ sơ lô (EBR)", ebr_lock: "Khóa hồ sơ lô (EBR)", record_yield: "Ghi nhận hiệu suất",
+  empty_cct: "Xả rỗng tank CCT", empty_bbt: "Xả rỗng tank BBT", dispatch: "Điều độ",
+  harvest: "Thu hoạch men", issue: "Xuất dùng", update_draft: "Cập nhật bản nháp", record: "Ghi nhận",
+  record_sample: "Ghi nhận mẫu", auto_schedule: "Tự động lập lịch", hold: "Giữ lô", release: "Nhả lô",
+  open: "Mở", register: "Đăng ký", copy_items: "Sao chép chỉ tiêu", link: "Gán", unlink: "Gỡ gán",
+  approve: "Duyệt", receipt: "Nhập kho", return: "Trả hàng", cancel: "Hủy phiếu",
+  fulfill: "Xuất theo đề nghị", undo_fulfill: "Hoàn tác xuất theo đề nghị", reject: "Từ chối",
+  undo_issue: "Hoàn tác xuất kho", post: "Ghi sổ (post)", login: "Đăng nhập",
+  login_failed: "Đăng nhập thất bại", logout: "Đăng xuất", change_password: "Đổi mật khẩu",
+  create_user: "Tạo tài khoản", set_scope: "Gán phạm vi quyền", copy_permissions: "Sao chép quyền",
+  edit_user: "Sửa tài khoản", resolve: "Xử lý xong",
+};
+const AUDIT_ACTION_PREFIX_LABELS = { transition: "Chuyển trạng thái", isa88: "ISA-88", move: "Di chuyển", sample: "Lấy mẫu" };
+const AUDIT_FIELD_LABELS = {
+  product_name: "Sản phẩm", lot_code: "Mã lô", unit_type: "Loại đơn vị", quantity: "Số lượng",
+  requested: "Số lượng yêu cầu", count: "Số lượng", status: "Trạng thái", location: "Vị trí",
+  from_location: "Vị trí nguồn", to_location: "Vị trí đích", unit_code: "Mã đơn vị",
+  unit_codes: "Mã đơn vị", reason: "Lý do", vi_decomposed: "Số đã phân rã", lon_created: "Số lon sinh ra",
+  source_unit_ids: "Đơn vị nguồn", lon_unit_ids: "Đơn vị lon sinh ra", material_code: "Mã vật tư",
+  material_id: "Vật tư", supplier_id: "Nhà cung cấp", supplier_code: "Mã nhà cung cấp",
+  unit_price: "Đơn giá", kcs_lot_no: "Số lô KCS", batch_code: "Số mẻ", batch_number: "Số mẻ",
+  order_number: "Số lệnh", brew_order_id: "Lệnh nấu", filter_order_id: "Lệnh lọc",
+  ferment_id: "Lô lên men", filter_id: "Mẻ lọc", bottle_id: "Mẻ chiết", product_id: "Dịch bia",
+  finished_product_id: "Sản phẩm", volume_hl: "Thể tích (hl)", v_beer_hl: "Thể tích bia (hl)",
+  planned_volume_hl: "Thể tích kế hoạch (hl)", value: "Giá trị", result: "Kết quả",
+  param_id: "Chỉ tiêu", parameter_id: "Chỉ tiêu", username: "Tài khoản", role: "Vai trò",
+  name: "Tên", code: "Mã", active: "Đang dùng", divide_by_pack_size: "Chia theo pack",
+  selectable: "Cho chọn", ship_to_code: "Mã nơi xuất đến", ship_to_name: "Nơi xuất đến",
+  pack_size: "SL/1 đơn vị", uom: "ĐVT", category: "Nhóm", description: "Mô tả",
+};
+function auditPrettify(k) {
+  return k ? String(k).replace(/_/g, " ").replace(/^./, c => c.toUpperCase()) : "";
+}
+function auditEntityLabel(t) { return AUDIT_ENTITY_LABELS[t] || auditPrettify(t); }
+function auditActionLabel(a) {
+  if (AUDIT_ACTION_LABELS[a]) return AUDIT_ACTION_LABELS[a];
+  const idx = (a || "").indexOf(":");
+  if (idx > -1) {
+    const prefixLabel = AUDIT_ACTION_PREFIX_LABELS[a.slice(0, idx)];
+    if (prefixLabel) return `${prefixLabel}: ${auditPrettify(a.slice(idx + 1))}`;
+  }
+  return auditPrettify(a);
+}
+function auditFieldLabel(k) { return AUDIT_FIELD_LABELS[k] || auditPrettify(k); }
+function auditFmtVal(v) {
+  if (v === null || v === undefined || v === "") return "—";
+  if (typeof v === "object") return esc(JSON.stringify(v));
+  return esc(String(v));
+}
+const AUDIT_ROW_STORE = {};
+function showAuditDetail(row) {
+  const before = row.before || {}, after = row.after || {};
+  const keys = Array.from(new Set([...Object.keys(before), ...Object.keys(after)]));
+  const diffRows = keys.map(k => {
+    const bv = before[k], av = after[k];
+    const changed = JSON.stringify(bv) !== JSON.stringify(av);
+    return `<tr>
+      <td>${esc(auditFieldLabel(k))} <span class="muted" style="font-size:11px">(${esc(k)})</span></td>
+      <td class="muted">${auditFmtVal(bv)}</td>
+      <td class="muted" style="text-align:center">${changed ? "→" : ""}</td>
+      <td${changed ? ' style="font-weight:700"' : ' class="muted"'}>${auditFmtVal(av)}</td>
+    </tr>`;
+  }).join("") || `<tr><td colspan=4 class="muted">Không có dữ liệu trước/sau cho dòng này.</td></tr>`;
+  modal(`
+    <h2 style="margin-bottom:4px">${esc(auditEntityLabel(row.entity_type))} — ${esc(auditActionLabel(row.action))}</h2>
+    <div class="muted" style="margin-bottom:12px;line-height:1.7">
+      Mã đối tượng: <code class="k">${esc(row.entity_id)}</code><br>
+      Người: ${esc(row.actor)} (${esc(row.actor_role || "—")}) · Lúc: ${fmt(row.ts)}
+      ${row.reason ? `<br>Lý do: ${esc(row.reason)}` : ""}
+      ${row.correlation_id ? `<br>Mã liên kết: <code class="k">${esc(row.correlation_id)}</code>` : ""}
+    </div>
+    <table><thead><tr><th>Trường</th><th>Trước</th><th></th><th>Sau</th></tr></thead>
+      <tbody>${diffRows}</tbody></table>
+    <div class="muted" style="margin-top:10px;font-size:11px">
+      Mã kỹ thuật gốc: đối tượng <code>${esc(row.entity_type)}</code> · hành động <code>${esc(row.action)}</code>
+    </div>`);
+}
+function wireAuditDetail(tableId) {
+  const key = tableId || "_default";
+  document.querySelectorAll(`[data-auditdetail="${key}"]`).forEach(btn => {
+    btn.onclick = () => showAuditDetail(AUDIT_ROW_STORE[key][parseInt(btn.dataset.idx, 10)]);
+  });
+}
 function tableAudit(rows, tableId) {
-  return `<table${tableId ? ` id="${tableId}"` : ""}><thead><tr><th>#</th><th>Đối tượng</th><th>Hành động</th><th>Người</th><th>Vai trò</th><th>Lúc</th></tr></thead>
-    <tbody>${rows.map(r => `<tr><td class="muted">${r.seq}</td><td>${esc(r.entity_type)}</td>
-      <td>${esc(r.action)}</td><td>${esc(r.actor)}</td><td class="muted">${esc(r.actor_role || "")}</td>
-      <td class="muted">${fmt(r.ts)}</td></tr>`).join("") || '<tr><td colspan=6 class="muted">Trống</td></tr>'}</tbody></table>`;
+  const key = tableId || "_default";
+  AUDIT_ROW_STORE[key] = rows;
+  return `<table${tableId ? ` id="${tableId}"` : ""}><thead><tr><th>#</th><th>Đối tượng</th><th>Hành động</th><th>Người</th><th>Vai trò</th><th>Lúc</th><th></th></tr></thead>
+    <tbody>${rows.map((r, i) => `<tr>
+      <td class="muted">${r.seq}</td>
+      <td>${esc(auditEntityLabel(r.entity_type))} <span class="muted" style="font-size:11px">(${esc(r.entity_type)})</span></td>
+      <td>${esc(auditActionLabel(r.action))} <span class="muted" style="font-size:11px">(${esc(r.action)})</span></td>
+      <td>${esc(r.actor)}</td><td class="muted">${esc(r.actor_role || "")}</td>
+      <td class="muted">${fmt(r.ts)}</td>
+      <td><button class="btn sm sec" data-auditdetail="${key}" data-idx="${i}">Xem</button></td>
+    </tr>`).join("") || '<tr><td colspan=7 class="muted">Trống</td></tr>'}</tbody></table>`;
 }
 
 // ================= helpers cho module mới =================
