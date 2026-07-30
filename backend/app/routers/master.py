@@ -11,11 +11,11 @@ from ..audit import record_audit
 from ..common import new_id
 from ..database import get_db
 from ..errors import NotFoundError, PermissionError_
-from ..models.master import BeerType, FinishedProduct, Material, MaterialGroup, Product
+from ..models.master import BeerType, FinishedProduct, Material, MaterialGroup, Product, UnitTypeCatalog
 from ..models.materials import Supplier
 from ..schemas import (BeerTypeIn, BeerTypeOut, FinishedProductIn, FinishedProductOut, MaterialGroupIn,
     MaterialGroupOut, MaterialIn, MaterialOut, MaterialQcGroupIn, OpsSettingIn, OpsSettingOut,
-    ProductBrewSpecIn, ProductIn, ProductOut, SupplierIn, SupplierOut)
+    ProductBrewSpecIn, ProductIn, ProductOut, SupplierIn, SupplierOut, UnitTypeCatalogIn, UnitTypeCatalogOut)
 from ..security import User, get_current_user, require_perm
 from ..services import braumat_import as braumat_svc
 from ..services import master_data, ops_setting as ops_setting_svc
@@ -68,6 +68,56 @@ def update_beer_type(beer_type_id: str, payload: BeerTypeIn, db: Session = Depen
 def delete_beer_type(beer_type_id: str, db: Session = Depends(get_db),
                      user: User = Depends(get_current_user)):
     master_data.delete_beer_type(db, beer_type_id, user)
+
+
+# ---- Loại đơn vị tồn kho (WMS thành phẩm — Vỉ/Keg mặc định + tự khai báo thêm) ----
+@router.get("/unit-types", response_model=list[UnitTypeCatalogOut])
+def list_unit_types(db: Session = Depends(get_db)):
+    return db.execute(select(UnitTypeCatalog).order_by(UnitTypeCatalog.code)).scalars().all()
+
+
+@router.post("/unit-types", response_model=UnitTypeCatalogOut, status_code=201)
+def create_unit_type(payload: UnitTypeCatalogIn, db: Session = Depends(get_db),
+                     user: User = Depends(get_current_user)):
+    require_perm(user, "master.manage")
+    if db.execute(select(UnitTypeCatalog).where(UnitTypeCatalog.code == payload.code)).scalar_one_or_none():
+        raise PermissionError_(f"Mã loại đơn vị '{payload.code}' đã tồn tại.")
+    ut = UnitTypeCatalog(unit_type_id=new_id(), **payload.model_dump())
+    db.add(ut)
+    record_audit(db, entity_type="unit_type_catalog", entity_id=ut.unit_type_id, action="create",
+                 actor=user, after={"code": ut.code, "name": ut.name})
+    db.commit()
+    db.refresh(ut)
+    return ut
+
+
+@router.put("/unit-types/{unit_type_id}", response_model=UnitTypeCatalogOut)
+def update_unit_type(unit_type_id: str, payload: UnitTypeCatalogIn, db: Session = Depends(get_db),
+                     user: User = Depends(get_current_user)):
+    require_perm(user, "master.manage")
+    ut = db.get(UnitTypeCatalog, unit_type_id)
+    if not ut:
+        raise NotFoundError("Loại đơn vị tồn kho không tồn tại.")
+    if ut.code in master_data._SYSTEM_UNIT_TYPE_CODES and payload.code != ut.code:
+        # Nhiều nơi trong services/wms.py so sánh trực tiếp chuỗi "vi"/"keg"/"lon" (VD
+        # _decompose_one_vi luôn sinh unit_type="lon") — đổi mã sẽ làm lệch khỏi hành vi cứng
+        # đó, có thể xóa/tạo nhầm loại. Vẫn cho sửa tên hiển thị/cờ quy đổi/trạng thái bình thường.
+        raise PermissionError_(f"Không thể đổi mã của loại hệ thống '{ut.code}' — chỉ được sửa tên/cờ quy đổi.")
+    before = {"code": ut.code, "name": ut.name, "divide_by_pack_size": ut.divide_by_pack_size,
+             "selectable": ut.selectable, "active": ut.active}
+    for k, v in payload.model_dump().items():
+        setattr(ut, k, v)
+    record_audit(db, entity_type="unit_type_catalog", entity_id=ut.unit_type_id, action="update",
+                 actor=user, before=before, after=payload.model_dump())
+    db.commit()
+    db.refresh(ut)
+    return ut
+
+
+@router.delete("/unit-types/{unit_type_id}", status_code=204)
+def delete_unit_type(unit_type_id: str, db: Session = Depends(get_db),
+                     user: User = Depends(get_current_user)):
+    master_data.delete_unit_type(db, unit_type_id, user)
 
 
 # ---- Nhà cung cấp (danh mục dùng khi nhập kho NVL) ----

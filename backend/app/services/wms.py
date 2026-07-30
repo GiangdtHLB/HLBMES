@@ -2,6 +2,7 @@
 xem docs/WMS-LOT-LEVEL-REDESIGN.md), putaway/ship theo vị trí, tồn theo vị trí, phân giải
 barcode (cho đầu đọc cầm tay / kiosk)."""
 
+import re
 from datetime import datetime, timedelta
 
 from sqlalchemy import and_, case, delete, func, or_, select, true
@@ -12,7 +13,7 @@ from ..common import Role, new_id, utcnow
 from ..errors import DomainError, NotFoundError
 from ..models.audit import AuditLog
 from ..models.brewing import BottleRecord
-from ..models.master import FinishedProduct
+from ..models.master import FinishedProduct, UnitTypeCatalog
 from ..models.materials import GenealogyEdge
 from ..models.wms import FinishedGoodsUnit, NearExpiryEntry, Shipment, ShipToLocation, Vehicle, WmsLocation
 from ..security import User, require_perm, require_role
@@ -25,33 +26,46 @@ from .opening_balance_import import parse_opening_balance_sheet
 _LOC_UNSET = object()
 
 
-def _pack_divisor(fp: FinishedProduct | None, unit_type: str) -> int:
-    """Quy đổi giữa "count" (đơn vị đóng gói vỉ/keg/lon — tham số vào của mọi API WMS) và
+def _divide_by_pack_codes(db: Session) -> frozenset[str]:
+    """Tập hợp mã unit_type "chia theo pack_size" (giống Vỉ) tra từ Danh mục Loại đơn vị tồn
+    kho (UnitTypeCatalog.divide_by_pack_size) — phần còn lại (giống Keg/Lon) luôn quy đổi 1:1.
+    Gọi 1 LẦN ở đầu mỗi hàm nghiệp vụ rồi truyền xuống _pack_divisor/_pack_divisor_expr (bảng
+    này rất nhỏ nhưng gọi lặp lại trong vòng lặp per-unit sẽ thành N+1 khi xử lý hàng trăm
+    nghìn dòng — xem docs/WMS-LOT-LEVEL-REDESIGN.md)."""
+    codes = db.execute(select(UnitTypeCatalog.code)
+                       .where(UnitTypeCatalog.divide_by_pack_size == true())).scalars().all()
+    return frozenset(codes) or frozenset({"vi"})
+
+
+def _pack_divisor(fp: FinishedProduct | None, unit_type: str, divide_codes: frozenset[str]) -> int:
+    """Quy đổi giữa "count" (đơn vị đóng gói vỉ/keg/lon/... — tham số vào của mọi API WMS) và
     "quantity" (SL đơn vị nhỏ lưu trên dòng FinishedGoodsUnit, xem model): 1 count = bao
-    nhiêu quantity. vi: pack_size khai báo ở Danh mục Sản phẩm (FinishedProduct, tra qua
-    finished_product_id). Không có SKU khai báo (finished_product_id NULL — VD "Nhập kho thủ
-    công"/test dùng product_name tự do không qua Danh mục) → mặc định 1 (KHÔNG đoán 24): giá
-    trị pack_size dùng lúc TẠO dòng (payload.pack_size của _create_units) không được lưu lại
-    trên dòng để tra lại ở đây, nên giả định an toàn nhất khi không có SKU là "count = quantity"
-    (không quy đổi), tránh đoán sai đơn vị tồn kho như khi mặc định 24 cho SKU không có thật.
-    keg/lon luôn là 1 (1 keg/1 lon = 1 đơn vị nhỏ, không nhân thêm)."""
-    if unit_type != "vi":
+    nhiêu quantity. Loại "chia theo pack_size" (giống Vỉ, xem divide_codes/UnitTypeCatalog):
+    pack_size khai báo ở Danh mục Sản phẩm (FinishedProduct, tra qua finished_product_id).
+    Không có SKU khai báo (finished_product_id NULL — VD "Nhập kho thủ công"/test dùng
+    product_name tự do không qua Danh mục) → mặc định 1 (KHÔNG đoán 24): giá trị pack_size
+    dùng lúc TẠO dòng (payload.pack_size của _create_units) không được lưu lại trên dòng để
+    tra lại ở đây, nên giả định an toàn nhất khi không có SKU là "count = quantity" (không quy
+    đổi), tránh đoán sai đơn vị tồn kho như khi mặc định 24 cho SKU không có thật. Loại còn lại
+    (giống Keg/Lon) luôn là 1 (1 keg/1 lon = 1 đơn vị nhỏ, không nhân thêm)."""
+    if unit_type not in divide_codes:
         return 1
     return fp.pack_size if fp and fp.pack_size else 1
 
 
-def _pack_divisor_expr(unit_type_col=FinishedGoodsUnit.unit_type, pack_size_col=FinishedProduct.pack_size):
+def _pack_divisor_expr(divide_codes: frozenset[str], unit_type_col=FinishedGoodsUnit.unit_type,
+                       pack_size_col=FinishedProduct.pack_size):
     """Biểu thức SQL tương đương _pack_divisor() để dùng trong SUM/GROUP BY (đếm số vỉ/keg/lon
     trực tiếp từ SUM(quantity) mà không cần tải từng dòng — xem list_lot_summaries/summary/...).
     Cần OUTER JOIN FinishedProduct qua finished_product_id ở câu truy vấn gọi hàm này."""
-    return case((unit_type_col == "vi", func.coalesce(func.nullif(pack_size_col, 0), 1)), else_=1)
+    return case((unit_type_col.in_(divide_codes), func.coalesce(func.nullif(pack_size_col, 0), 1)), else_=1)
 
 
 def _location_used_count(db: Session, loc_id: str, exclude_unit_id: str | None = None) -> float:
     """Tổng số vỉ/keg/lon quy đổi (SUM(quantity)/pack_size từng dòng qua _pack_divisor_expr,
     KHÔNG đếm dòng — 1 vị trí có thể chứa lẫn nhiều SKU khác pack_size nhau) đang "stored"
     tại 1 vị trí kho — dùng để kiểm sức chứa (WmsLocation.capacity)."""
-    stmt = (select(func.sum(FinishedGoodsUnit.quantity / _pack_divisor_expr()))
+    stmt = (select(func.sum(FinishedGoodsUnit.quantity / _pack_divisor_expr(_divide_by_pack_codes(db))))
             .select_from(FinishedGoodsUnit)
             .outerjoin(FinishedProduct, FinishedProduct.finished_product_id == FinishedGoodsUnit.finished_product_id)
             .where(FinishedGoodsUnit.location_id == loc_id, FinishedGoodsUnit.status == "stored"))
@@ -150,7 +164,7 @@ def list_locations(db: Session) -> list:
     # "used" = tổng vỉ/keg/lon quy đổi (SUM(quantity)/pack_size từng dòng), KHÔNG đếm dòng —
     # 1 dòng giờ có thể đại diện nhiều đơn vị đóng gói (xem docs/WMS-LOT-LEVEL-REDESIGN.md).
     counts = dict(db.execute(
-        select(FinishedGoodsUnit.location_id, func.sum(FinishedGoodsUnit.quantity / _pack_divisor_expr()))
+        select(FinishedGoodsUnit.location_id, func.sum(FinishedGoodsUnit.quantity / _pack_divisor_expr(_divide_by_pack_codes(db))))
         .select_from(FinishedGoodsUnit)
         .outerjoin(FinishedProduct, FinishedProduct.finished_product_id == FinishedGoodsUnit.finished_product_id)
         .where(FinishedGoodsUnit.status == "stored").group_by(FinishedGoodsUnit.location_id)).all())
@@ -241,21 +255,28 @@ def summary(db: Session) -> dict:
     """Tổng hợp toàn kho: số vị trí + sức chứa, tổng vỉ/keg/lon theo trạng thái/loại — dùng
     SUM(quantity)/pack_size ở SQL (qua _pack_divisor_expr), KHÔNG đếm dòng và KHÔNG load
     từng dòng vào Python (kho có thể có hàng trăm ngàn đơn vị gộp vào rất ít dòng — xem
-    docs/WMS-LOT-LEVEL-REDESIGN.md; đếm dòng giờ không còn phản ánh đúng số vỉ/keg/lon)."""
+    docs/WMS-LOT-LEVEL-REDESIGN.md; đếm dòng giờ không còn phản ánh đúng số vỉ/keg/lon).
+    units_total/by_type CHỈ tính dòng status=stored (tồn thật đang ở kho) — nếu gộp cả
+    decomposed/shipped/issued_free vào đây, tổng sẽ không bao giờ về số nguyên sau khi xuất tự
+    do 1 phần lẻ (dòng đó đổi status chứ không mất đi, cộng dồn mãi vào "Vỉ" dù đã xuất hết).
+    by_status vẫn liệt kê đủ mọi trạng thái (kể cả lịch sử) vì bản thân nó dùng để xem phân bổ
+    theo trạng thái, không phải "tồn hiện có"."""
     locs = db.execute(select(WmsLocation)).scalars().all()
     capacity = sum(l.capacity for l in locs)
-    count_expr = func.sum(FinishedGoodsUnit.quantity / _pack_divisor_expr())
+    count_expr = func.sum(FinishedGoodsUnit.quantity / _pack_divisor_expr(_divide_by_pack_codes(db)))
 
-    def _joined(*cols):
-        return (select(*cols).select_from(FinishedGoodsUnit)
-                .outerjoin(FinishedProduct, FinishedProduct.finished_product_id == FinishedGoodsUnit.finished_product_id))
+    def _joined(*cols, stored_only=False):
+        q = (select(*cols).select_from(FinishedGoodsUnit)
+             .outerjoin(FinishedProduct, FinishedProduct.finished_product_id == FinishedGoodsUnit.finished_product_id))
+        return q.where(FinishedGoodsUnit.status == "stored") if stored_only else q
 
-    units_total = db.execute(_joined(count_expr)).scalar() or 0
     by_status = {k: v or 0 for k, v in db.execute(
         _joined(FinishedGoodsUnit.status, count_expr).group_by(FinishedGoodsUnit.status)).all()}
-    by_type = {k: v or 0 for k, v in db.execute(
-        _joined(FinishedGoodsUnit.unit_type, count_expr).group_by(FinishedGoodsUnit.unit_type)).all()}
-    units_stored = by_status.get("stored", 0)
+    by_type = {k: round(v or 0, 2) for k, v in db.execute(
+        _joined(FinishedGoodsUnit.unit_type, count_expr, stored_only=True)
+        .group_by(FinishedGoodsUnit.unit_type)).all()}
+    units_stored = round(by_status.get("stored", 0), 2)
+    units_total = round(sum(by_type.values()), 2)
     return {"locations": len(locs), "capacity_units": capacity,
             "units_total": units_total, "units_stored": units_stored,
             "fill_pct": round(units_stored / capacity * 100, 1) if capacity else 0.0,
@@ -340,7 +361,7 @@ def _create_units(db: Session, payload: dict, created_by: str, actor: User) -> l
         loc = db.get(WmsLocation, loc_id)
         if not loc:
             raise NotFoundError("Vị trí không tồn tại.")
-    prefix = "KEG" if unit_type == "keg" else "VI"
+    prefix = unit_type.upper() if unit_type else "VI"
     stamp = f"{now:%y%m%d}-{new_id()[:4].upper()}"
     u = FinishedGoodsUnit(unit_id=new_id(), unit_code=f"{prefix}-{stamp}-0001", unit_type=unit_type,
                          finished_product_id=payload.get("finished_product_id"),
@@ -512,7 +533,7 @@ def undo_near_expiry_entry(db: Session, entry_id: str, user: User) -> dict:
         raise DomainError(f"Vỉ/keg đã xuất hoặc không còn trong kho ({', '.join(not_stored)}), không thể hoàn tác.")
     b = db.get(BottleRecord, entry.bottle_id) if entry.bottle_id else None
     fp = db.get(FinishedProduct, b.finished_product_id) if b and b.finished_product_id else None
-    divisor = _pack_divisor(fp, entry.unit_type)
+    divisor = _pack_divisor(fp, entry.unit_type, _divide_by_pack_codes(db))
     remaining_count = sum(u.quantity for u in units) / divisor
     if remaining_count + 1e-6 < entry.quantity:
         raise DomainError(
@@ -554,7 +575,8 @@ def adjust_bottle_finish_stock(db: Session, *, finished_product_id: str | None, 
         for u in units:
             genealogy.add_edge(db, from_type="bottle", from_id=bottle_id, to_type="finished_goods_unit",
                                to_id=u.unit_id, relation="nhập kho (sửa SL)", quantity=u.quantity, uom=u.unit_type)
-        divisor = _pack_divisor(db.get(FinishedProduct, finished_product_id) if finished_product_id else None, unit_type)
+        divisor = _pack_divisor(db.get(FinishedProduct, finished_product_id) if finished_product_id else None,
+                                unit_type, _divide_by_pack_codes(db))
         created_count = delta_total / divisor
         record_audit(db, entity_type="finished_goods_unit", entity_id=units[0].unit_id, action="adjust_bottle_finish",
                      actor=actor, before={"bottle_id": bottle_id, "delta": delta_total},
@@ -593,7 +615,8 @@ def adjust_bottle_finish_stock(db: Session, *, finished_product_id: str | None, 
             GenealogyEdge.to_type == "finished_goods_unit", GenealogyEdge.to_id.in_(chunk))).scalars().all()
         for e in edges:
             db.delete(e)
-    divisor = _pack_divisor(db.get(FinishedProduct, finished_product_id) if finished_product_id else None, unit_type)
+    divisor = _pack_divisor(db.get(FinishedProduct, finished_product_id) if finished_product_id else None,
+                            unit_type, _divide_by_pack_codes(db))
     removed_count = need / divisor
     record_audit(db, entity_type="finished_goods_unit", entity_id=bottle_id, action="adjust_bottle_finish",
                  actor=actor, before={"bottle_id": bottle_id, "delta": delta_total},
@@ -607,7 +630,7 @@ def _capacity_ok(db: Session, loc: WmsLocation, unit: FinishedGoodsUnit) -> bool
     _pack_divisor — 1 dòng giờ có thể đại diện nhiều đơn vị đóng gói, không còn luôn là "1
     chỗ" như trước, xem docs/WMS-LOT-LEVEL-REDESIGN.md)."""
     fp = db.get(FinishedProduct, unit.finished_product_id) if unit.finished_product_id else None
-    own_count = unit.quantity / _pack_divisor(fp, unit.unit_type)
+    own_count = unit.quantity / _pack_divisor(fp, unit.unit_type, _divide_by_pack_codes(db))
     used = _location_used_count(db, loc.loc_id, exclude_unit_id=unit.unit_id)
     return used + own_count <= loc.capacity
 
@@ -655,10 +678,11 @@ def transfer_units(db: Session, unit_ids: list, to_loc_id: str, user: User) -> d
         units.append(u)
 
     fp_cache: dict = {}
+    divide_codes = _divide_by_pack_codes(db)
     def _divisor_of(u):
         if u.finished_product_id not in fp_cache:
             fp_cache[u.finished_product_id] = db.get(FinishedProduct, u.finished_product_id) if u.finished_product_id else None
-        return _pack_divisor(fp_cache[u.finished_product_id], u.unit_type)
+        return _pack_divisor(fp_cache[u.finished_product_id], u.unit_type, divide_codes)
 
     moving_in = [u for u in units if u.location_id != to_loc_id]
     if moving_in:
@@ -735,7 +759,7 @@ def decompose_batch(db: Session, product_name: str, lot_code: str, count: int, u
     if count <= 0:
         raise DomainError("Số vỉ cần phân rã phải > 0.")
     fp = db.execute(select(FinishedProduct).where(FinishedProduct.code == product_name)).scalar_one_or_none()
-    divisor = _pack_divisor(fp, "vi")
+    divisor = _pack_divisor(fp, "vi", _divide_by_pack_codes(db))
     candidates, got = _consume_lot_rows(db, product_name=product_name, unit_type="vi", status="stored",
                                         quantity_needed=count * divisor, lot_code=lot_code)
     if not candidates:
@@ -830,7 +854,7 @@ def free_issue_batch(db: Session, product_name: str, lot_code: str | None, unit_
     if count <= 0:
         raise DomainError("Số lượng xuất phải > 0.")
     fp = db.execute(select(FinishedProduct).where(FinishedProduct.code == product_name)).scalar_one_or_none()
-    divisor = _pack_divisor(fp, unit_type)
+    divisor = _pack_divisor(fp, unit_type, _divide_by_pack_codes(db))
     candidates, got = _consume_lot_rows(db, product_name=product_name, unit_type=unit_type, status="stored",
                                         quantity_needed=count * divisor, lot_code=lot_code)
     if not candidates:
@@ -930,12 +954,13 @@ def list_lot_summaries(db: Session) -> list:
     # "count" = tổng vỉ/keg/lon quy đổi (SUM(quantity)/pack_size — qua _pack_divisor_expr,
     # JOIN FinishedProduct), KHÔNG đếm dòng — 1 dòng giờ có thể đại diện nhiều đơn vị đóng
     # gói (xem docs/WMS-LOT-LEVEL-REDESIGN.md). "qty" (tổng SL nhỏ) không đổi ý nghĩa.
+    divide_codes = _divide_by_pack_codes(db)
     rows = db.execute(select(FinishedGoodsUnit.product_name, FinishedGoodsUnit.lot_code,
                              FinishedGoodsUnit.unit_type, FinishedGoodsUnit.location_id,
-                             func.sum(FinishedGoodsUnit.quantity / _pack_divisor_expr()),
+                             func.sum(FinishedGoodsUnit.quantity / _pack_divisor_expr(divide_codes)),
                              func.sum(FinishedGoodsUnit.quantity), func.min(FinishedGoodsUnit.created_at),
                              func.sum(case((FinishedGoodsUnit.is_near_expiry == true(),
-                                           FinishedGoodsUnit.quantity / _pack_divisor_expr()), else_=0.0)))
+                                           FinishedGoodsUnit.quantity / _pack_divisor_expr(divide_codes)), else_=0.0)))
                       .select_from(FinishedGoodsUnit)
                       .outerjoin(FinishedProduct, FinishedProduct.finished_product_id == FinishedGoodsUnit.finished_product_id)
                       .where(FinishedGoodsUnit.status == "stored")
@@ -959,33 +984,41 @@ def list_lot_summaries(db: Session) -> list:
     grouped: dict[tuple, dict] = {}
     oldest_by_type: dict[tuple, object] = {}
     loc_counts: dict[tuple, dict] = {}  # (product_name, lot_code, unit_type) -> {loc_id: count}
+    # types_by_key: theo dõi ĐÚNG các loại đơn vị thực sự xuất hiện ở mỗi (sản phẩm, lô) — trước
+    # đây hardcode 3 loại (vi/keg/lon) nên bất kỳ loại tự khai báo nào khác ở Danh mục "Loại đơn
+    # vị tồn kho" (VD "lốc", "két") đều bị ĐẾM RỖNG ở đây, khiến cả lô đó biến mất khỏi bảng Kho
+    # TP/picker Xuất kho/Cất vào vị trí dù tồn kho thật vẫn còn (không chỉ sai nhãn như "lon").
+    types_by_key: dict[tuple, set] = {}
     for product_name, lot_code, unit_type, location_id, count, qty, oldest_at, near_expiry_count in rows:
         key = (product_name, lot_code)
         g = grouped.setdefault(key, {"product_name": product_name, "lot_code": lot_code,
                                      "bottle_codes": bottle_codes_by_lot.get(lot_code, []),
                                      "bottle_date": bottle_date_by_lot.get(lot_code).isoformat() if bottle_date_by_lot.get(lot_code) else None,
-                                     "lines": sorted(lines_by_lot.get(lot_code, [])),
-                                     "vi_count": 0, "vi_qty": 0.0, "vi_unplaced": 0, "vi_near_expiry_count": 0.0,
-                                     "keg_count": 0, "keg_qty": 0.0, "keg_unplaced": 0, "keg_near_expiry_count": 0.0,
-                                     "lon_count": 0, "lon_qty": 0.0, "lon_unplaced": 0, "lon_near_expiry_count": 0.0})
-        if f"{unit_type}_count" in g:
-            g[f"{unit_type}_count"] += count
-            g[f"{unit_type}_qty"] += qty or 0
-            g[f"{unit_type}_near_expiry_count"] += near_expiry_count or 0
-            if location_id is None:
-                g[f"{unit_type}_unplaced"] += count
-            else:
-                lc = loc_counts.setdefault((product_name, lot_code, unit_type), {})
-                lc[location_id] = lc.get(location_id, 0) + count
-            prev_oldest = g.get(f"{unit_type}_oldest_at")
-            if prev_oldest is None or (oldest_at and oldest_at < prev_oldest):
-                g[f"{unit_type}_oldest_at"] = oldest_at
+                                     "lines": sorted(lines_by_lot.get(lot_code, []))})
+        types_by_key.setdefault(key, set()).add(unit_type)
+        g.setdefault(f"{unit_type}_count", 0)
+        g.setdefault(f"{unit_type}_qty", 0.0)
+        g.setdefault(f"{unit_type}_unplaced", 0)
+        g.setdefault(f"{unit_type}_near_expiry_count", 0.0)
+        g[f"{unit_type}_count"] += count
+        g[f"{unit_type}_qty"] += qty or 0
+        g[f"{unit_type}_near_expiry_count"] += near_expiry_count or 0
+        if location_id is None:
+            g[f"{unit_type}_unplaced"] += count
+        else:
+            lc = loc_counts.setdefault((product_name, lot_code, unit_type), {})
+            lc[location_id] = lc.get(location_id, 0) + count
+        prev_oldest = g.get(f"{unit_type}_oldest_at")
+        if prev_oldest is None or (oldest_at and oldest_at < prev_oldest):
+            g[f"{unit_type}_oldest_at"] = oldest_at
         type_key = (product_name, unit_type)
         if type_key not in oldest_by_type or (oldest_at and oldest_at < oldest_by_type[type_key]):
             oldest_by_type[type_key] = oldest_at
-    for g in grouped.values():
-        g["has_lon"] = g["lon_count"] > 0
-        for t in ("vi", "keg", "lon"):
+    for key, g in grouped.items():
+        types = sorted(types_by_key.get(key, ()))
+        g["unit_types"] = types
+        g["has_lon"] = g.get("lon_count", 0) > 0
+        for t in types:
             oldest_at = g.pop(f"{t}_oldest_at", None)
             if g[f"{t}_count"] > 0:
                 g[f"{t}_fifo_ok"] = oldest_at == oldest_by_type.get((g["product_name"], t))
@@ -1019,7 +1052,7 @@ def lot_aging_report(db: Session, caution_days: float = 30.0, warning_days: floa
     # docs/WMS-LOT-LEVEL-REDESIGN.md.
     rows = db.execute(select(FinishedGoodsUnit.product_name, FinishedGoodsUnit.lot_code,
                              FinishedGoodsUnit.unit_type, FinishedGoodsUnit.location_id,
-                             func.sum(FinishedGoodsUnit.quantity / _pack_divisor_expr()),
+                             func.sum(FinishedGoodsUnit.quantity / _pack_divisor_expr(_divide_by_pack_codes(db))),
                              func.sum(FinishedGoodsUnit.quantity), func.min(FinishedGoodsUnit.created_at))
                       .select_from(FinishedGoodsUnit)
                       .outerjoin(FinishedProduct, FinishedProduct.finished_product_id == FinishedGoodsUnit.finished_product_id)
@@ -1062,13 +1095,174 @@ def lot_aging_report(db: Session, caution_days: float = 30.0, warning_days: floa
     return sorted(out, key=lambda g: -(g["age_days"] or 0))
 
 
+# ---- Báo cáo xuất thành phẩm theo ca (Ca 1/2/3, cùng khung giờ với báo cáo Năng lượng) ----
+
+_ML_RE = re.compile(r"(\d+(?:[.,]\d+)?)\s*ml", re.IGNORECASE)
+_L_RE = re.compile(r"(\d+(?:[.,]\d+)?)\s*l(?:ít|it)?\b", re.IGNORECASE)
+
+
+def _resolve_liters_per_unit(display_name: str | None) -> float | None:
+    """Suy thể tích (lít) của 1 đơn vị nhỏ (1 lon/chai hoặc 1 keg) từ TÊN HIỂN THỊ SKU
+    (FinishedProduct.name, vd "Bia lon Sapphire 330ml", "Bia tươi Legend 20L") — không có cột
+    thể tích riêng trong Danh mục Sản phẩm, nhưng mọi SKU thật đều đặt tên kèm dung tích. Trả
+    None nếu không khớp mẫu ml/L nào — dòng đó bị loại khỏi tổng lít và liệt kê ở
+    unmatched_products (xem finished_goods_shift_report) để người dùng biết cần sửa tên SKU,
+    KHÔNG đoán bừa một con số sai."""
+    if not display_name:
+        return None
+    m = _ML_RE.search(display_name)
+    if m:
+        return float(m.group(1).replace(",", ".")) / 1000
+    m = _L_RE.search(display_name)
+    if m:
+        return float(m.group(1).replace(",", "."))
+    return None
+
+
+_SHIFT_VN_OFFSET = timedelta(hours=7)  # shipped_at lưu UTC (xem UTCDateTime) — ca 1/2/3 tính
+# theo giờ VN (dashboard.py::VN_OFFSET dùng cùng quy ước), phải quy đổi trước khi lấy .hour/
+# .date() nếu không mốc 0h-6h59 giờ VN (= 17h-23h59 UTC hôm trước) sẽ bị tính nhầm sang Ca 2.
+
+
+def _bucket_shift(dt: datetime) -> tuple[str, int]:
+    """Quy đổi 1 mốc thời gian BẤT KỲ (FinishedGoodsUnit.shipped_at, lưu UTC) về (ngày, ca) —
+    Ca 1: 06h-14h, Ca 2: 14h-22h, Ca 3: 22h-06h hôm sau giờ VN, tính về NGÀY BẮT ĐẦU ca (giống
+    quy ước keg_external.aggregate_keg_values). Khác filling_external.ca_number(): hàm đó chỉ
+    đúng cho mốc ranh giới cố định (06h/14h/22h đúng giờ), còn hàm này phân loại mốc lẻ bất kỳ
+    trong ngày (shipped_at là thời điểm xuất thật, không phải mốc lấy mẫu SCADA)."""
+    local = dt + _SHIFT_VN_OFFSET
+    h = local.hour
+    if 6 <= h < 14:
+        return local.date().isoformat(), 1
+    if 14 <= h < 22:
+        return local.date().isoformat(), 2
+    if h >= 22:
+        return local.date().isoformat(), 3
+    return (local.date() - timedelta(days=1)).isoformat(), 3
+
+
+_CA_HOUR_OFFSETS = {1: (6, 14), 2: (14, 22), 3: (22, 30)}  # giờ lệch so với 00h của "ngày" bucket (ca3 kết thúc 06h hôm sau = 30h)
+
+
+def finished_goods_shift_report(db: Session, date_from: datetime, date_to: datetime) -> dict:
+    """Báo cáo Xuất thành phẩm theo ca — tổng LÍT xuất kho trong khoảng [date_from, date_to),
+    quy đổi từ FinishedGoodsUnit.quantity (SL lon/chai/keg xuất) x thể tích/đơn vị suy ra từ
+    tên SKU (1 lon 330ml=0.33L, 1 keg 20L/30L=20/30L — _resolve_liters_per_unit). Nguồn dữ
+    liệu là DB nội bộ (không phải SCADA ngoài như filling/keg/energy) nên không có khái niệm
+    "khoảng trống dữ liệu" — mỗi vỉ/keg là 1 sự kiện xuất thật, cộng dồn trực tiếp theo
+    (ngày, ca) suy từ shipped_at."""
+    rows = db.execute(
+        select(FinishedGoodsUnit.quantity, FinishedGoodsUnit.shipped_at,
+               FinishedGoodsUnit.product_name, FinishedProduct.name, FinishedProduct.category,
+               FinishedGoodsUnit.unit_type, FinishedProduct.pack_size)
+        .select_from(FinishedGoodsUnit)
+        .outerjoin(FinishedProduct, FinishedProduct.finished_product_id == FinishedGoodsUnit.finished_product_id)
+        .where(FinishedGoodsUnit.status == "shipped",
+               FinishedGoodsUnit.shipped_at.isnot(None),
+               FinishedGoodsUnit.shipped_at >= date_from,
+               FinishedGoodsUnit.shipped_at < date_to)
+    ).all()
+
+    # by_sku: báo cáo xuất theo TỪNG SKU cụ thể (số lượng thật theo đơn vị đóng gói — vỉ/keg/lon,
+    # KHÔNG quy đổi lít) — khác with by_category/by_day ở trên vốn tính bằng lít cho báo cáo theo
+    # ca. divide_codes/ut_names tra 1 lần (không lặp trong vòng for, xem _divide_by_pack_codes).
+    divide_codes = _divide_by_pack_codes(db)
+    ut_names = dict(db.execute(select(UnitTypeCatalog.code, UnitTypeCatalog.name)).all())
+
+    def _unit_noun(unit_type: str, display_name: str | None) -> str:
+        # unit_type "lon" là mã dùng chung cho MỌI đơn vị nhỏ đã phân rã (có thể là lon HOẶC
+        # chai vật lý) — suy danh từ đúng từ tên SKU, cùng cách views_ext.js::smallUnitNoun làm
+        # ở các bảng WMS khác (xem ghi chú tại genealogy.py::_bottle_forward_groups).
+        if unit_type == "lon":
+            t = (display_name or "").lower()
+            if "chai" in t:
+                return "chai"
+            if "keg" in t:
+                return "keg"
+            if "lon" in t:
+                return "lon"
+            return "lẻ"
+        return ut_names.get(unit_type, unit_type)
+
+    day_ca: dict[str, dict[int, float]] = {}
+    cat_agg: dict[str, dict[int, float]] = {}
+    unmatched: dict[str, dict] = {}
+    sku_agg: dict[tuple, dict] = {}
+    total_liters = 0.0
+
+    for qty, shipped_at, sku_code, sku_name, category, unit_type, pack_size in rows:
+        divisor = (pack_size or 1) if unit_type in divide_codes else 1
+        sku_key = (sku_code, unit_type)
+        s = sku_agg.setdefault(sku_key, {
+            "product_name": sku_code, "display_name": sku_name or sku_code or "(không tên)",
+            "category": category or "Khác", "unit_type": unit_type,
+            "unit_label": _unit_noun(unit_type, sku_name), "count": 0.0, "quantity": 0.0})
+        s["count"] += (qty or 0) / divisor
+        s["quantity"] += qty or 0
+
+        lpu = _resolve_liters_per_unit(sku_name)
+        if lpu is None:
+            label = sku_name or sku_code or "(không tên)"
+            u = unmatched.setdefault(label, {"product_name": label, "units": 0.0})
+            u["units"] += qty or 0
+            continue
+        liters = (qty or 0) * lpu
+        total_liters += liters
+        d, ca = _bucket_shift(shipped_at)
+        day_ca.setdefault(d, {1: 0.0, 2: 0.0, 3: 0.0})[ca] += liters
+        cat = category or "Khác"
+        cat_agg.setdefault(cat, {1: 0.0, 2: 0.0, 3: 0.0})[ca] += liters
+
+    by_day = [{"date": d, "ca1": round(v[1]), "ca2": round(v[2]), "ca3": round(v[3])}
+              for d, v in sorted(day_ca.items())]
+
+    by_ca_agg = {1: 0.0, 2: 0.0, 3: 0.0}
+    for v in day_ca.values():
+        for ca in (1, 2, 3):
+            by_ca_agg[ca] += v[ca]
+    by_ca = [{"ca": ca, "label": f"Ca {ca}", "liters": round(v)} for ca, v in sorted(by_ca_agg.items())]
+
+    by_category = [{"category": cat, "ca1": round(v[1]), "ca2": round(v[2]), "ca3": round(v[3]),
+                    "total": round(sum(v.values()))} for cat, v in sorted(cat_agg.items())]
+
+    shifts = []
+    for d, v in sorted(day_ca.items()):
+        base = datetime.fromisoformat(d)
+        for ca in (1, 2, 3):
+            h0, h1 = _CA_HOUR_OFFSETS[ca]
+            shifts.append({"date": d, "ca": ca,
+                          "start": (base + timedelta(hours=h0)).isoformat(),
+                          "end": (base + timedelta(hours=h1)).isoformat(),
+                          "liters": round(v[ca])})
+
+    # Làm tròn count/quantity hiển thị (giữ 2 chữ số thập phân — count có thể lẻ do lô đã bị
+    # phân rã/điều chuyển một phần, xem list_lot_summaries) + tổng theo TỪNG danh từ đơn vị
+    # (không cộng gộp vỉ với keg thành 1 số vô nghĩa — mỗi danh từ 1 dòng tổng riêng).
+    for s in sku_agg.values():
+        s["count"] = round(s["count"], 2)
+        s["quantity"] = round(s["quantity"], 2)
+    by_sku = sorted(sku_agg.values(), key=lambda s: (s["category"], s["display_name"]))
+    unit_totals_map: dict[str, float] = {}
+    for s in by_sku:
+        unit_totals_map[s["unit_label"]] = unit_totals_map.get(s["unit_label"], 0.0) + s["count"]
+    unit_totals = [{"unit_label": lbl, "total_count": round(v, 2)}
+                   for lbl, v in sorted(unit_totals_map.items())]
+
+    return {
+        "total_liters": round(total_liters),
+        "by_ca": by_ca, "by_day": by_day, "by_category": by_category, "shifts": shifts,
+        "unmatched_products": sorted(unmatched.values(), key=lambda u: -u["units"]),
+        "by_sku": by_sku, "unit_totals": unit_totals,
+    }
+
+
 def list_lot_summaries_by_location(db: Session, loc_id: str) -> list:
     """Tổng hợp tồn "stored" theo (sản phẩm, lô, loại đơn vị) tại RIÊNG 1 vị trí kho — dùng
     cho picker Điều chuyển nội bộ (chọn vị trí nguồn rồi xem có gì để chuyển), tính bằng
     GROUP BY ở SQL thay vì tải hết đơn vị toàn kho về rồi lọc/gộp bằng Python (kho có thể có
     hàng trăm ngàn đơn vị)."""
     rows = db.execute(select(FinishedGoodsUnit.product_name, FinishedGoodsUnit.lot_code,
-                             FinishedGoodsUnit.unit_type, func.sum(FinishedGoodsUnit.quantity / _pack_divisor_expr()))
+                             FinishedGoodsUnit.unit_type, func.sum(FinishedGoodsUnit.quantity / _pack_divisor_expr(_divide_by_pack_codes(db))))
                       .select_from(FinishedGoodsUnit)
                       .outerjoin(FinishedProduct, FinishedProduct.finished_product_id == FinishedGoodsUnit.finished_product_id)
                       .where(FinishedGoodsUnit.status == "stored", FinishedGoodsUnit.location_id == loc_id)
@@ -1147,6 +1341,7 @@ def create_shipment(db: Session, ship_to_id: str, lines: list, user: User, heade
     if not lines:
         raise DomainError("Phải chọn ít nhất 1 dòng sản phẩm để xuất.")
 
+    divide_codes = _divide_by_pack_codes(db)
     units = []
     picked_so_far = set()
     for line in lines:
@@ -1160,7 +1355,7 @@ def create_shipment(db: Session, ship_to_id: str, lines: list, user: User, heade
         if qty <= 0:
             raise DomainError(f"Số lượng cần xuất cho {product_name} phải > 0.")
         fp = db.execute(select(FinishedProduct).where(FinishedProduct.code == product_name)).scalar_one_or_none()
-        divisor = _pack_divisor(fp, unit_type)
+        divisor = _pack_divisor(fp, unit_type, divide_codes)
         # KHÔNG loại trừ hàng "chưa cất" ở đây — chặn chọn hàng chưa cất vị trí là quy tắc UX
         # của picker Xuất kho (frontend renderLots/sellable trong views_ext.js), không áp bắt
         # buộc ở API để không phá các luồng test/nghiệp vụ khác đang xuất thẳng hàng mới nhập
@@ -1214,7 +1409,7 @@ def create_shipment(db: Session, ship_to_id: str, lines: list, user: User, heade
     def _divisor_of(u):
         if u.finished_product_id not in fp_cache:
             fp_cache[u.finished_product_id] = db.get(FinishedProduct, u.finished_product_id) if u.finished_product_id else None
-        return _pack_divisor(fp_cache[u.finished_product_id], u.unit_type)
+        return _pack_divisor(fp_cache[u.finished_product_id], u.unit_type, divide_codes)
 
     for u in units:
         u.status = "shipped"
@@ -1250,11 +1445,12 @@ def list_shipments(db: Session) -> list:
     ships = db.execute(select(Shipment).order_by(Shipment.created_at.desc())).scalars().all()
     ship_to_by = {s.ship_to_id: s for s in db.execute(select(ShipToLocation)).scalars().all()}
     fp_cache: dict = {}
+    divide_codes = _divide_by_pack_codes(db)
 
     def _divisor_of(u):
         if u.finished_product_id not in fp_cache:
             fp_cache[u.finished_product_id] = db.get(FinishedProduct, u.finished_product_id) if u.finished_product_id else None
-        return _pack_divisor(fp_cache[u.finished_product_id], u.unit_type)
+        return _pack_divisor(fp_cache[u.finished_product_id], u.unit_type, divide_codes)
 
     out = []
     for s in ships:
@@ -1304,11 +1500,12 @@ def undo_shipment(db: Session, shipment_id: str, user: User) -> dict:
         raise DomainError("Phiếu này không còn đơn vị nào để hoàn tác (có thể đã hoàn tác trước đó).")
     unit_ids = [u.unit_id for u in units]
     fp_cache: dict = {}
+    divide_codes = _divide_by_pack_codes(db)
 
     def _divisor_of(u):
         if u.finished_product_id not in fp_cache:
             fp_cache[u.finished_product_id] = db.get(FinishedProduct, u.finished_product_id) if u.finished_product_id else None
-        return _pack_divisor(fp_cache[u.finished_product_id], u.unit_type)
+        return _pack_divisor(fp_cache[u.finished_product_id], u.unit_type, divide_codes)
 
     restored_count = sum(u.quantity / _divisor_of(u) for u in units)
     for u in units:
@@ -1402,11 +1599,12 @@ def resolve(db: Session, code: str) -> dict:
         # Đếm theo SL vỉ/keg/lon quy đổi (quantity/pack_size), KHÔNG đếm dòng — xem
         # docs/WMS-LOT-LEVEL-REDESIGN.md. fp_cache tránh tra FinishedProduct lặp lại nhiều lần.
         fp_cache: dict = {}
+        divide_codes = _divide_by_pack_codes(db)
 
         def _divisor_of(u):
             if u.finished_product_id not in fp_cache:
                 fp_cache[u.finished_product_id] = db.get(FinishedProduct, u.finished_product_id) if u.finished_product_id else None
-            return _pack_divisor(fp_cache[u.finished_product_id], u.unit_type)
+            return _pack_divisor(fp_cache[u.finished_product_id], u.unit_type, divide_codes)
 
         by_status: dict = {}
         by_type: dict = {}
@@ -1442,7 +1640,7 @@ def relocate_batch(db: Session, product_name: str, lot_code: str, unit_type: str
         raise NotFoundError("Vị trí đích không tồn tại.")
 
     fp = db.execute(select(FinishedProduct).where(FinishedProduct.code == product_name)).scalar_one_or_none()
-    divisor = _pack_divisor(fp, unit_type)
+    divisor = _pack_divisor(fp, unit_type, _divide_by_pack_codes(db))
     candidates, got = _consume_lot_rows(db, product_name=product_name, unit_type=unit_type, status="stored",
                                         quantity_needed=count * divisor, lot_code=lot_code,
                                         location_id=from_loc_id)

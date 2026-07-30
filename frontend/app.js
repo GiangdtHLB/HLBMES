@@ -13,7 +13,11 @@ async function api(path, opts = {}) {
   }
   const text = await res.text();
   const data = text ? JSON.parse(text) : null;
-  if (!res.ok) throw new Error(data && data.detail ? data.detail : "HTTP " + res.status);
+  // Lỗi 422 validate của FastAPI trả detail dạng MẢNG object Pydantic ({loc,msg,type}), không
+  // phải chuỗi — new Error(mảng) sẽ ép kiểu thành "[object Object]" vô nghĩa hiện lên toast.
+  if (!res.ok) throw new Error(data && data.detail
+    ? (Array.isArray(data.detail) ? data.detail.map(d => (d && d.msg) ? d.msg : JSON.stringify(d)).join("; ") : data.detail)
+    : "HTTP " + res.status);
   return data;
 }
 const GET = (p) => api(p);
@@ -28,7 +32,11 @@ async function POST_FILES(path, files) {
   const res = await fetch("/api" + path, { method: "POST", headers, body: fd });
   const text = await res.text();
   const data = text ? JSON.parse(text) : null;
-  if (!res.ok) throw new Error(data && data.detail ? data.detail : "HTTP " + res.status);
+  // Lỗi 422 validate của FastAPI trả detail dạng MẢNG object Pydantic ({loc,msg,type}), không
+  // phải chuỗi — new Error(mảng) sẽ ép kiểu thành "[object Object]" vô nghĩa hiện lên toast.
+  if (!res.ok) throw new Error(data && data.detail
+    ? (Array.isArray(data.detail) ? data.detail.map(d => (d && d.msg) ? d.msg : JSON.stringify(d)).join("; ") : data.detail)
+    : "HTTP " + res.status);
   return data;
 }
 
@@ -220,13 +228,17 @@ function openFinishTimeModal(title, currentEndedAt, onSubmit) {
 // Kết thúc lọc CHO 1 TANK (lọc phối kết thúc riêng từng tank rồi cộng dồn) — Dịch nha
 // lọc/Sản lượng lọc không bắt buộc lúc tạo, điền ở đây kèm Nước bài khí; Sản lượng lọc
 // (V Bia/hl) tự tính = Dịch nha lọc + Nước bài khí (không nhập tay).
-function openFinishFilterModal(title, currentEndedAt, currentVDich, currentBaiKhi, currentBatchNumber, currentOrderNumber, currentBatchSeqNo, onSubmit) {
+function openFinishFilterModal(title, currentEndedAt, currentVDich, currentBaiKhi, currentBatchNumber, currentOrderNumber, currentBatchSeqNo, suggestedSeqNo, usedSeqNos, onSubmit) {
   const defaultVal = toDTLocal(currentEndedAt ? new Date(currentEndedAt) : new Date());
+  // Gợi ý "Mẻ lọc số" kế tiếp (chỉ khi chưa có giá trị đã lưu — sửa lại mẻ cũ vẫn giữ nguyên số
+  // đã ghi) — vận hành có thể sửa tay, không khoá cứng vì số này KHÔNG bắt buộc phải tăng dần
+  // (xem services/filter_order.py::next_batch_seq_no).
+  const seqValue = currentBatchSeqNo || suggestedSeqNo || "";
   modal(`<h3>${esc(title)}</h3>
     <div class="row">
       <div class="field"><label>Số mẻ (Batch number Brewmax) *</label><input id="ff_batch" value="${esc(currentBatchNumber || "")}"/></div>
       <div class="field"><label>Số lệnh (Order number Brewmax) *</label><input id="ff_order" value="${esc(currentOrderNumber || "")}"/></div>
-      <div class="field"><label>Mẻ lọc số *</label><input id="ff_seqno" value="${esc(currentBatchSeqNo || "")}"/></div>
+      <div class="field"><label>Mẻ lọc số * <span class="muted" style="font-weight:400">(gợi ý: ${esc(suggestedSeqNo || "1")})</span></label><input id="ff_seqno" value="${esc(seqValue)}"/></div>
     </div>
     <div class="field" style="margin-top:8px"><label>Giờ kết thúc</label><input id="ff_time" type="datetime-local" value="${defaultVal}"/></div>
     <div class="row" style="margin-top:8px">
@@ -248,6 +260,14 @@ function openFinishFilterModal(title, currentEndedAt, currentVDich, currentBaiKh
     const orderNumber = $("ff_order").value.trim();
     const batchSeqNo = $("ff_seqno").value.trim();
     if (!batchNumber || !orderNumber || !batchSeqNo) throw new Error("Nhập Mẻ lọc số, Số mẻ (Batch number Brewmax) và Số lệnh (Order number Brewmax).");
+    const vDich = parseFloat($("ff_dich").value) || 0;
+    if (vDich <= 0) throw new Error("Dịch nha lọc (hl) phải lớn hơn 0 mới được kết thúc mẻ lọc.");
+    // batch_seq_no KHÔNG chặn trùng ở BE (thực tế có thể trùng hợp lệ giữa các lệnh lọc khác
+    // nhau) — chỉ hỏi lại ở đây để bắt lỗi gõ nhầm (nhập lại đúng số mẻ trước trong CÙNG lệnh
+    // lọc này) trước khi lưu.
+    if (batchSeqNo !== (currentBatchSeqNo || "") && (usedSeqNos || []).includes(batchSeqNo)) {
+      if (!confirm(`Mẻ lọc số "${batchSeqNo}" đã dùng trong lệnh lọc này trước đó. Mẻ này có phải là mẻ lọc trùng với mẻ trước không? Bấm OK để vẫn lưu.`)) return;
+    }
     await onSubmit({
       ended_at: new Date(raw).toISOString(),
       v_dich_hl: parseFloat($("ff_dich").value) || 0,
@@ -331,16 +351,18 @@ async function openFilterTanksModal(filterId, onHandBbt) {
       <thead><tr><th>Kết thúc</th><th>Trạng thái</th><th>Dịch nha lọc (hl)</th><th>Nước bài khí (hl)</th><th>Batch number Brewmax</th><th>Order number Brewmax</th><th>Mẻ lọc số</th><th></th></tr></thead>
       <tbody>${groups.map(groupHtml).join("") || `<tr><td colspan=8 class="muted">Không có tank nào.</td></tr>`}</tbody>
     </table></div>`);
-  document.querySelectorAll("[data-finishtank]").forEach(b => b.onclick = () => {
+  document.querySelectorAll("[data-finishtank]").forEach(b => b.onclick = () => guard(async () => {
     const lineId = b.dataset.finishtank;
+    const suggest = await GET(`/brewing/next-batch-seq-no?exclude_line_id=${encodeURIComponent(lineId)}`);
     openFinishFilterModal("Kết thúc mẻ — " + b.dataset.tanklabel,
       b.dataset.endedat || null, parseFloat(b.dataset.vdich) || 0, parseFloat(b.dataset.baikhi) || 0,
       b.dataset.batchnumber || "", b.dataset.ordernumber || "", b.dataset.batchseqno || "",
+      suggest.next_batch_seq_no, suggest.used_batch_seq_nos || [],
       async (payload) => {
         await POST(`/brewing/filters/${filterId}/tanks/${lineId}/finish`, payload);
         toast("Đã lưu kết quả lọc"); openFilterTanksModal(filterId, onHandBbt); render("process");
       });
-  });
+  }));
   document.querySelectorAll("[data-addbatch]").forEach(b => b.onclick = () => guard(async () => {
     await POST(`/brewing/filters/${filterId}/tanks/${b.dataset.addbatch}/add-batch`, {});
     toast("Đã thêm mẻ mới cho tank này — bấm \"Kết thúc\" khi rút dịch xong");
@@ -2716,7 +2738,7 @@ function renderTree(tree, title) {
     if (n.type === "shipment_group" || n.type === "stock_group") {
       return `<div class="node">${TRACE_NODE_ICON[n.type]}
       <span class="muted" style="font-size:11px">${esc(TRACE_NODE_LABEL[n.type])}</span>
-      <b>${n.count} ${n.unit_type === "keg" ? "keg" : n.unit_type === "lon" ? "lon" : "vỉ"}</b>
+      <b>${n.count} ${esc(n.unit_type_label || (n.unit_type === "keg" ? "keg" : n.unit_type === "lon" ? "lon" : "vỉ"))}</b>
       <span class="muted">(tổng ${n.quantity})</span>
       ${n.type === "shipment_group" ? `
         <div class="muted" style="font-size:12px;margin-top:2px">
@@ -6381,7 +6403,10 @@ VIEWS.process = async function () {
     const canLockLot = _hasPerm("quality.release");
     const isAdminLot = CURRENT_USER && CURRENT_USER.role === "admin";
     const ordersById = Object.fromEntries(filterOrders.map(o => [o.filter_order_id, o]));
-    const availableOrders = filterOrders.filter(o => !o.is_complete);
+    // Đã bắt đầu chiết (có mẻ chiết tham chiếu tới 1 trong các mẻ lọc của lệnh) thì không cho
+    // thêm mẻ lọc mới nữa — chỉ được thêm khi lệnh còn "Đang lọc" (xem
+    // filter_order_svc._chiet_started, chặn tương ứng ở routers/brewing.py::add_filter).
+    const availableOrders = filterOrders.filter(o => !o.is_complete && !o.chiet_started);
     // Nhóm các "lệnh lọc nhỏ" CHƯA hoàn thành theo "lệnh lọc lớn" (master_order_id) — chọn
     // theo 2 bước: chọn Lệnh lọc (lớn) rồi chọn đúng Lệnh lọc nhỏ bên trong để thực hiện lọc.
     const mastersMap = new Map();
@@ -7226,7 +7251,7 @@ VIEWS.reports = async function () {
   const sec = SUB.reports || "material";
   const sections = [{ key: "material", label: "Định mức NVL" }, { key: "filling", label: "Chiết (lon)" },
     { key: "keg", label: "Chiết (keg)" }, { key: "lostatus", label: "Trạng thái lô" },
-    { key: "yield", label: "Sản lượng lọc" }];
+    { key: "yield", label: "Sản lượng lọc" }, { key: "fgship", label: "Xuất TP theo ca" }];
   let body = "";
 
   if (sec === "material") {
@@ -7377,6 +7402,24 @@ VIEWS.reports = async function () {
           <td>${it.v_dich_l}</td><td>${it.v_daw_l}</td><td>${it.v_l}</td>
           <td>${badge(yBadge[it.classification])}${esc(yLabel[it.classification])}</td></tr>`).join("") ||
           '<tr><td colspan=12 class="muted">Chưa có mẻ lọc số nào kết thúc trong kỳ này.</td></tr>'}</tbody></table></div></div>`;
+  } else if (sec === "fgship") {
+    // Giống hệt Chiết (lon)/(keg): hiện khung màn hình NGAY, mặc định NGÀY HÔM QUA (giờ máy client).
+    const gYesterday = new Date(); gYesterday.setDate(gYesterday.getDate() - 1);
+    const gMode = SUB.fgship_mode || "day";
+    const gDate = SUB.fgship_date || toISODateLocal(gYesterday);
+    const gMonth = SUB.fgship_month || toISODateLocal(gYesterday).slice(0, 7);
+    SUB.fgship_mode = gMode; SUB.fgship_date = gDate; SUB.fgship_month = gMonth;
+    body = `<div class="panel"><h2>🚚 Xuất thành phẩm theo ca</h2>
+      <div class="muted" style="margin-bottom:8px">Tổng lít xuất kho (kho TP/WMS), quy đổi từ số lon/chai/keg đã xuất theo dung tích ghi trong tên SKU (VD 330ml=0.33L, 20L/30L=20/30L). Chọn 1 ngày để xem 3 ca của ngày đó, hoặc chọn cả tháng để xem theo từng ngày trong tháng.</div>
+      <div class="row">
+        <div class="field"><label>Xem theo</label><select id="gp_mode">
+          <option value="day" ${gMode === "day" ? "selected" : ""}>Ngày cụ thể</option>
+          <option value="month" ${gMode === "month" ? "selected" : ""}>Cả tháng</option></select></div>
+        <div class="field" id="gp_day_field" style="${gMode === "month" ? "display:none" : ""}"><label>Ngày</label><input id="gp_date" type="date" value="${gDate}"/></div>
+        <div class="field" id="gp_month_field" style="${gMode === "day" ? "display:none" : ""}"><label>Tháng</label><input id="gp_month" type="month" value="${gMonth}"/></div>
+        <button class="btn" id="gp_apply">Xem báo cáo</button>
+      </div></div>
+      <div id="gp_data"><div class="panel muted">⏳ Đang tải dữ liệu...</div></div>`;
   }
 
   $("view-reports").innerHTML = subnav("reports", sections, sec) + body;
@@ -7424,6 +7467,20 @@ VIEWS.reports = async function () {
       render("reports");
     };
     loadKegData();
+  }
+  if (sec === "fgship") {
+    $("gp_mode").onchange = () => {
+      const isMonth = $("gp_mode").value === "month";
+      $("gp_day_field").style.display = isMonth ? "none" : "";
+      $("gp_month_field").style.display = isMonth ? "" : "none";
+    };
+    $("gp_apply").onclick = () => {
+      SUB.fgship_mode = $("gp_mode").value;
+      SUB.fgship_date = $("gp_date").value;
+      SUB.fgship_month = $("gp_month").value;
+      render("reports");
+    };
+    loadFinishedGoodsShiftData();
   }
 };
 
@@ -7555,6 +7612,84 @@ async function loadKegData() {
   }
 }
 
+// Tải báo cáo xuất thành phẩm theo ca (DB nội bộ WMS, không phải SCADA ngoài — không có khái
+// niệm "khoảng trống dữ liệu" như filling/keg) SAU khi khung màn hình đã hiện.
+async function loadFinishedGoodsShiftData() {
+  const stillHere = () => $("view-reports").classList.contains("active") && $("gp_data");
+  try {
+    let dateFrom, dateTo;
+    if (SUB.fgship_mode === "month") {
+      const [y, m] = SUB.fgship_month.split("-").map(Number);
+      dateFrom = toDTLocal(new Date(y, m - 1, 1, 6, 0, 0));
+      dateTo = toDTLocal(new Date(y, m, 1, 6, 0, 0));
+    } else {
+      const start = new Date(SUB.fgship_date + "T06:00:00");
+      const end = new Date(start); end.setDate(end.getDate() + 1);
+      dateFrom = toDTLocal(start); dateTo = toDTLocal(end);
+    }
+
+    const rpt = await GET(`/reports/finished-goods-shift-report?date_from=${encodeURIComponent(dateFrom)}&date_to=${encodeURIComponent(dateTo)}`);
+    if (!stillHere()) return;
+    const caColors = ["#3498db", "#f5a623", "#9b59b6"];
+    const dayLabels = rpt.by_day.map(d => d.date.slice(5));
+    const barSeries = [
+      { label: "Ca 1 (06h-14h)", color: caColors[0], values: rpt.by_day.map(d => d.ca1) },
+      { label: "Ca 2 (14h-22h)", color: caColors[1], values: rpt.by_day.map(d => d.ca2) },
+      { label: "Ca 3 (22h-06h)", color: caColors[2], values: rpt.by_day.map(d => d.ca3) },
+    ];
+    const pieItems = rpt.by_ca.map((c, i) => ({ label: c.label, value: c.liters, color: caColors[i] }));
+
+    $("gp_data").innerHTML = `<div class="muted" style="margin-bottom:8px">📅 Đang xem dữ liệu từ <b>${fmt(rpt.date_from)}</b> đến <b>${fmt(rpt.date_to)}</b></div>
+      ${rpt.unmatched_products.length ? `<div style="color:var(--orange,#f5a623);margin-bottom:8px">⚠ ${rpt.unmatched_products.length} SKU không suy được dung tích từ tên (thiếu "ml"/"L" trong tên sản phẩm) — chưa tính vào tổng lít: ${rpt.unmatched_products.map(u => `${esc(u.product_name)} (${u.units.toLocaleString("vi-VN")} đơn vị)`).join(", ")}. Sửa tên SKU ở Danh mục › Sản phẩm để báo cáo tính đúng.</div>` : ""}
+      <div class="row" style="gap:10px;flex-wrap:wrap">
+        <div class="panel" style="flex:1;min-width:180px">
+          <div class="muted" style="font-size:12px">TỔNG LÍT XUẤT</div>
+          <div style="font-size:26px;font-weight:700;color:#2ecc71">${rpt.total_liters.toLocaleString("vi-VN")} <span style="font-size:14px;font-weight:400">lít</span></div>
+        </div>
+        ${rpt.by_ca.map((c, i) => `<div class="panel" style="flex:1;min-width:160px">
+          <div class="muted" style="font-size:12px">${esc(c.label.toUpperCase())}</div>
+          <div style="font-size:22px;font-weight:700;color:${caColors[i]}">${c.liters.toLocaleString("vi-VN")} <span style="font-size:13px;font-weight:400">lít</span></div>
+        </div>`).join("")}
+      </div>
+      <div class="split">
+        <div class="panel"><h2>Tỉ lệ theo ca</h2>${pieItems.some(p => p.value > 0) ? CH.pie(pieItems) : '<div class="muted">Không có dữ liệu.</div>'}</div>
+        <div class="panel"><h2>Theo ngày — từng ca</h2>${dayLabels.length ? CH.groupedN(dayLabels, barSeries) : '<div class="muted">Không có dữ liệu.</div>'}</div>
+      </div>
+      <div class="panel"><h2>Theo loại bia</h2>
+        <div class="muted" style="margin-bottom:8px">Lít xuất theo từng loại (Bia chai/Bia lon/Bia hơi/Bia tươi...), chia theo ca.</div>
+        ${rpt.by_category.some(c => c.total > 0) ? CH.groupedN(rpt.by_category.map(c => c.category), [
+          { label: "Ca 1 (06h-14h)", color: caColors[0], values: rpt.by_category.map(c => c.ca1) },
+          { label: "Ca 2 (14h-22h)", color: caColors[1], values: rpt.by_category.map(c => c.ca2) },
+          { label: "Ca 3 (22h-06h)", color: caColors[2], values: rpt.by_category.map(c => c.ca3) },
+        ]) : '<div class="muted">Không có dữ liệu.</div>'}
+        <div class="tablewrap" style="margin-top:12px"><table><thead><tr><th>Loại bia</th><th>Ca 1</th><th>Ca 2</th><th>Ca 3</th><th>Tổng (lít)</th></tr></thead>
+        <tbody>${rpt.by_category.map(c => `<tr><td>${esc(c.category)}</td>
+          <td>${c.ca1.toLocaleString("vi-VN")}</td><td>${c.ca2.toLocaleString("vi-VN")}</td><td>${c.ca3.toLocaleString("vi-VN")}</td>
+          <td><b>${c.total.toLocaleString("vi-VN")}</b></td></tr>`).join("") ||
+          '<tr><td colspan=5 class="muted">Không có dữ liệu.</td></tr>'}</tbody></table></div></div>
+      <div class="panel"><h2>Xuất theo từng SKU</h2>
+        <div class="muted" style="margin-bottom:8px">Số lượng xuất theo từng mã sản phẩm (SKU) cụ thể — đơn vị tính theo loại đơn vị tồn kho của SKU đó (vỉ/keg/lon/...), không quy đổi lít.</div>
+        <div class="tablewrap"><table><thead><tr><th>SKU</th><th>Nhóm</th><th>Loại ĐVT</th><th>Số lượng</th><th>Tổng SL nhỏ</th></tr></thead>
+        <tbody>${(rpt.by_sku || []).map(s => `<tr><td>${esc(s.display_name)}</td><td class="muted">${esc(s.category)}</td>
+          <td>${esc(s.unit_label)}</td><td><b>${s.count.toLocaleString("vi-VN")}</b></td>
+          <td class="muted">${s.quantity.toLocaleString("vi-VN")}</td></tr>`).join("") ||
+          '<tr><td colspan=5 class="muted">Không có dữ liệu.</td></tr>'}</tbody>
+        ${(rpt.unit_totals || []).length ? `<tfoot><tr>
+          <td colspan=3 style="text-align:right"><b>Tổng theo loại ĐVT</b></td>
+          <td colspan=2>${rpt.unit_totals.map(u => `<b>${u.total_count.toLocaleString("vi-VN")}</b> ${esc(u.unit_label)}`).join(" · ")}</td>
+        </tr></tfoot>` : ""}</table></div></div>
+      <div class="panel"><h2>Chi tiết theo ca</h2>
+        <div class="tablewrap"><table><thead><tr><th>Ngày</th><th>Ca</th><th>Bắt đầu</th><th>Kết thúc</th><th>Lít</th></tr></thead>
+        <tbody>${rpt.shifts.map(s => `<tr><td>${fmt(s.date)}</td><td>Ca ${s.ca}</td>
+          <td class="muted">${new Date(s.start).toLocaleString("vi-VN")}</td><td class="muted">${new Date(s.end).toLocaleString("vi-VN")}</td>
+          <td>${s.liters.toLocaleString("vi-VN")}</td></tr>`).join("") ||
+          '<tr><td colspan=5 class="muted">Không có dữ liệu.</td></tr>'}</tbody></table></div></div>`;
+  } catch (e) {
+    if (!stillHere()) return;
+    $("gp_data").innerHTML = `<div class="panel muted">Chưa xem được báo cáo xuất thành phẩm: ${esc(e.message)}</div>`;
+  }
+}
+
 // ================= QUẢN TRỊ TÀI KHOẢN (admin) =================
 const ROLE_DESC = { operator: "Vận hành (ghi nhận)", supervisor: "Trưởng ca/Quản đốc",
   qa: "QA/KCS (release)", engineer: "Kỹ sư (recipe)", admin: "Quản trị" };
@@ -7616,12 +7751,17 @@ const MULTI_SAMPLE_STAGES = ["len_men_chinh", "len_men_phu"];
 // Sản phẩm (SKU) chỉ có ý nghĩa ở "loc" và "thanh_pham" — mirror qc_catalog.SKU_SCOPED_STAGES.
 const SKU_SCOPED_STAGES = ["loc", "thanh_pham"];
 VIEWS.master = async function () {
-  const [products, finishedProducts, materials, plines, qcParams, qcGroups, stageGroups, beerTypes, suppliers, materialGroups, opsSettings] = await Promise.all([
+  const [products, finishedProducts, materials, plines, qcParams, qcGroups, stageGroups, beerTypes, suppliers, materialGroups, opsSettings, unitTypes] = await Promise.all([
     GET("/products"), GET("/finished-products").catch(() => []), GET("/materials"), GET("/lines").catch(() => []),
     GET("/qc/parameters?active_only=false").catch(() => []),
     GET("/qc/groups").catch(() => []), GET("/qc/stage-groups").catch(() => []), GET("/beer-types").catch(() => []),
     GET("/suppliers").catch(() => []), GET("/material-groups").catch(() => []),
-    GET("/ops-settings").catch(() => ({ empty_cct_tolerance_hl: 2, empty_bbt_tolerance_hl: 2 }))]);
+    GET("/ops-settings").catch(() => ({ empty_cct_tolerance_hl: 2, empty_bbt_tolerance_hl: 2 })),
+    GET("/unit-types").catch(() => [])]);
+  // Chỉ hiện loại "selectable" (bỏ "lon" — hệ thống tự sinh khi phân rã vỉ, xem services/wms.py)
+  // khi khai báo SKU mới; nhưng vẫn hiện đủ mọi loại (kể cả không selectable) khi sửa 1 SKU đã
+  // lỡ mang mã đó, để không xóa mất lựa chọn hiện tại khỏi dropdown.
+  const selectableUnitTypes = unitTypes.filter(ut => ut.selectable && ut.active);
   const canManage = CURRENT_USER && (CURRENT_USER.permissions === "*" ||
     (Array.isArray(CURRENT_USER.permissions) && CURRENT_USER.permissions.includes("master.manage")));
   const noPerm = canManage ? "" :
@@ -7765,7 +7905,7 @@ VIEWS.master = async function () {
         <div class="field"><label>Mã sản phẩm</label><input id="fp_code" placeholder="SKU-LON-330"/></div>
         <div class="field"><label>Tên sản phẩm</label><input id="fp_name" placeholder="Lon 330ml"/></div>
         <div class="field"><label>ĐVT</label><input id="fp_uom" value="lon" style="width:80px"/></div>
-        <div class="field"><label>Loại đơn vị tồn kho</label><select id="fp_unittype"><option value="vi">Vỉ</option><option value="keg">Keg</option></select></div>
+        <div class="field"><label>Loại đơn vị tồn kho</label><select id="fp_unittype">${selectableUnitTypes.map(ut => `<option value="${esc(ut.code)}">${esc(ut.name)}</option>`).join("")}</select></div>
         <div class="field"><label>SL/1 đơn vị</label><input id="fp_pack" type="number" value="24" style="width:80px"/></div>
         <div class="field"><label>Loại sản phẩm</label><select id="fp_cat"><option value="">(không chọn)</option>${fpCats.map(c => `<option>${esc(c)}</option>`).join("")}</select></div>
         <div class="field"><label>Dịch bia gốc (tuỳ chọn)</label><select id="fp_product"><option value="">(không chọn)</option>${products.map(p => `<option value="${p.product_id}">${esc(p.code)}</option>`).join("")}</select></div>
@@ -7778,7 +7918,7 @@ VIEWS.master = async function () {
         <thead><tr><th>Mã</th><th>Tên</th><th>ĐVT</th><th>Loại đơn vị</th><th>SL/1 đơn vị</th><th>Loại sản phẩm</th><th>Dịch bia gốc</th><th>Mô tả</th>${canManage ? "<th></th>" : ""}</tr></thead>
         <tbody>${finishedProducts.map(fp => { const prod = products.find(p => p.product_id === fp.product_id); return `<tr>
           <td><code class="k">${esc(fp.code)}</code></td><td>${esc(fp.name)}</td><td>${esc(fp.uom)}</td>
-          <td>${fp.unit_type === "keg" ? "Keg" : "Vỉ"}</td>
+          <td>${esc((unitTypes.find(ut => ut.code === fp.unit_type) || {}).name || fp.unit_type)}</td>
           <td>${fp.pack_size}</td>
           <td class="muted">${esc(fp.category || "—")}</td>
           <td class="muted">${prod ? esc(prod.code) : "—"}</td>
@@ -7788,6 +7928,31 @@ VIEWS.master = async function () {
             <button class="btn sm sec" data-efpdel="${esc(fp.finished_product_id)}">Xóa</button>
           </td>` : ""}</tr>`; }).join("") ||
           `<tr><td colspan="${canManage ? 9 : 8}" class="muted">Chưa có sản phẩm nào.</td></tr>`}</tbody>
+      </table></div>
+    </div>
+
+    <div class="panel"><h2>📐 Loại đơn vị tồn kho <span class="muted">(${unitTypes.length})</span></h2>
+      <div class="muted" style="margin-bottom:6px">Cách quy đổi số lượng đóng gói (dùng ở Sản phẩm bên trên và mọi thao tác Kho TP): "Chia theo SL/1 đơn vị" giống Vỉ (VD Thùng chứa nhiều vỉ), hoặc không chia — giống Keg (1 đơn vị = 1, không nhân thêm).</div>
+      ${noPerm}
+      ${canManage ? `<div class="row">
+        <div class="field"><label>Mã</label><input id="ut_code" placeholder="thung" style="width:100px"/></div>
+        <div class="field"><label>Tên hiển thị</label><input id="ut_name" placeholder="Thùng"/></div>
+        <div class="field"><label>Cách quy đổi</label><select id="ut_divide">
+          <option value="0">Không chia (giống Keg — 1 đơn vị = 1)</option>
+          <option value="1">Chia theo SL/1 đơn vị (giống Vỉ)</option></select></div>
+        <button class="btn" id="ut_add" style="align-self:flex-end">+ Tạo loại đơn vị</button>
+      </div>` : ""}
+      <div class="tablewrap" style="margin-top:10px"><table id="t_unittypes">
+        <thead><tr><th>Mã</th><th>Tên hiển thị</th><th>Cách quy đổi</th><th>Hiện khi khai báo SKU</th>${canManage ? "<th></th>" : ""}</tr></thead>
+        <tbody>${unitTypes.map(ut => `<tr>
+          <td><code class="k">${esc(ut.code)}</code></td><td>${esc(ut.name)}</td>
+          <td class="muted">${ut.divide_by_pack_size ? "Chia theo SL/1 đơn vị" : "Không chia (1:1)"}</td>
+          <td class="muted">${ut.selectable ? "Có" : "Không (hệ thống tự sinh)"}</td>
+          ${canManage ? `<td style="white-space:nowrap">
+            <button class="btn sm sec" data-eut="${esc(ut.unit_type_id)}">Sửa</button>
+            <button class="btn sm sec" data-utdel="${esc(ut.unit_type_id)}">Xóa</button>
+          </td>` : ""}</tr>`).join("") ||
+          `<tr><td colspan="${canManage ? 5 : 4}" class="muted">Chưa có loại đơn vị nào.</td></tr>`}</tbody>
       </table></div>
     </div>
 
@@ -7972,6 +8137,35 @@ VIEWS.master = async function () {
       await DELETE(`/beer-types/${b.dataset.btdel}`);
       toast("Đã xóa Loại bia"); render("master");
     }));
+    if ($("ut_add")) $("ut_add").onclick = () => guard(async () => {
+      await POST("/unit-types", { code: $("ut_code").value.trim(), name: $("ut_name").value.trim(),
+        divide_by_pack_size: $("ut_divide").value === "1", selectable: true, active: true });
+      toast("Đã tạo loại đơn vị"); render("master");
+    });
+    document.querySelectorAll("[data-eut]").forEach(b => b.onclick = () => {
+      const ut = unitTypes.find(x => x.unit_type_id === b.dataset.eut);
+      modal(`<h3>Sửa loại đơn vị tồn kho</h3>
+        <div class="field"><label>Mã</label><input id="eut_code" value="${esc(ut.code)}"/></div>
+        <div class="field" style="margin-top:8px"><label>Tên hiển thị</label><input id="eut_name" value="${esc(ut.name)}"/></div>
+        <div class="field" style="margin-top:8px"><label>Cách quy đổi</label><select id="eut_divide">
+          <option value="0" ${!ut.divide_by_pack_size ? "selected" : ""}>Không chia (giống Keg — 1 đơn vị = 1)</option>
+          <option value="1" ${ut.divide_by_pack_size ? "selected" : ""}>Chia theo SL/1 đơn vị (giống Vỉ)</option></select></div>
+        <div class="field" style="margin-top:8px"><label>Hiện khi khai báo SKU mới</label><select id="eut_selectable">
+          <option value="1" ${ut.selectable ? "selected" : ""}>Có</option>
+          <option value="0" ${!ut.selectable ? "selected" : ""}>Không</option></select></div>
+        <button class="btn" id="eut_save" style="margin-top:12px">Lưu</button>`);
+      $("eut_save").onclick = () => guard(async () => {
+        await PUT(`/unit-types/${ut.unit_type_id}`, { code: $("eut_code").value.trim(),
+          name: $("eut_name").value.trim(), divide_by_pack_size: $("eut_divide").value === "1",
+          selectable: $("eut_selectable").value === "1", active: true });
+        closeModal(); toast("Đã cập nhật"); render("master");
+      });
+    });
+    document.querySelectorAll("[data-utdel]").forEach(b => b.onclick = () => guard(async () => {
+      if (!confirm("Xóa loại đơn vị tồn kho này? Không thể hoàn tác.")) return;
+      await DELETE(`/unit-types/${b.dataset.utdel}`);
+      toast("Đã xóa loại đơn vị"); render("master");
+    }));
     if ($("sp_add")) $("sp_add").onclick = () => guard(async () => {
       await POST("/suppliers", { code: $("sp_code").value.trim(), name: $("sp_name").value.trim(),
         address: $("sp_address").value.trim() || null, contact: $("sp_contact").value.trim() || null });
@@ -8125,8 +8319,8 @@ VIEWS.master = async function () {
         <div class="field" style="margin-top:8px"><label>Tên</label><input id="efp_name" value="${esc(fp.name)}"/></div>
         <div class="field" style="margin-top:8px"><label>ĐVT</label><input id="efp_uom" value="${esc(fp.uom)}"/></div>
         <div class="field" style="margin-top:8px"><label>Loại đơn vị tồn kho</label><select id="efp_unittype">
-          <option value="vi" ${fp.unit_type === "vi" ? "selected" : ""}>Vỉ</option>
-          <option value="keg" ${fp.unit_type === "keg" ? "selected" : ""}>Keg</option></select></div>
+          ${unitTypes.filter(ut => (ut.selectable && ut.active) || ut.code === fp.unit_type).map(ut =>
+            `<option value="${esc(ut.code)}" ${ut.code === fp.unit_type ? "selected" : ""}>${esc(ut.name)}</option>`).join("")}</select></div>
         <div class="field" style="margin-top:8px"><label>SL/1 đơn vị</label><input id="efp_pack" type="number" value="${fp.pack_size}"/></div>
         <div class="field" style="margin-top:8px"><label>Loại sản phẩm</label><select id="efp_cat"><option value="">(không chọn)</option>${fpCats.map(c => `<option ${c === fp.category ? "selected" : ""}>${esc(c)}</option>`).join("")}</select></div>
         <div class="field" style="margin-top:8px"><label>Dịch bia gốc</label><select id="efp_product"><option value="">(không chọn)</option>${products.map(p => `<option value="${p.product_id}" ${p.product_id === fp.product_id ? "selected" : ""}>${esc(p.code)}</option>`).join("")}</select></div>

@@ -15,7 +15,8 @@ from ..audit import record_audit
 from ..common import new_id, utcnow
 from ..errors import DomainError, NotFoundError
 from ..models.brewing import (
-    FermentRecord, FilterMasterOrder, FilterOrder, FilterOrderMaterialLine, FilterOrderTank, FilterRecord,
+    BottleRecord, FermentRecord, FilterMasterOrder, FilterOrder, FilterOrderMaterialLine, FilterOrderTank,
+    FilterRecord,
 )
 from ..models.master import BeerType, FinishedProduct, Material, Product
 from . import warehouse as warehouse_svc
@@ -367,6 +368,22 @@ def _is_complete(records: list, planned_volume_hl: float, tolerance_hl: float) -
     return all(r["ended_at"] is not None for r in records)
 
 
+def _chiet_started(db: Session, filter_order_id: str) -> bool:
+    """Lệnh đã bắt đầu chiết khi có ít nhất 1 BottleRecord tham chiếu filter_id của MỘT trong
+    các mẻ lọc (FilterRecord) thuộc lệnh này (xem BottleRecord.filter_id, gán trong
+    routers/brewing.py::add_bottle khi chiết chọn tank BBT nguồn) — mirror khái niệm
+    "dang_chiet"/"da_ket_thuc" của lo_status.py nhưng scope theo 1 FilterOrder thay vì cả mã
+    nấu. Dùng để chặn tạo thêm mẻ lọc mới ở routers/brewing.py::add_filter — theo yêu cầu
+    nghiệp vụ: lô ĐANG CHIẾT rồi thì không cho thêm mẻ lọc nữa, chỉ được thêm khi còn ĐANG LỌC
+    (chưa có mẻ nào bị lấy đi chiết)."""
+    filter_ids = db.execute(select(FilterRecord.filter_id).where(
+        FilterRecord.filter_order_id == filter_order_id)).scalars().all()
+    if not filter_ids:
+        return False
+    return db.execute(select(BottleRecord.bottle_id).where(
+        BottleRecord.filter_id.in_(filter_ids))).first() is not None
+
+
 def list_orders(db: Session) -> list:
     orders = db.execute(select(FilterOrder).order_by(FilterOrder.created_at.desc())).scalars().all()
     products = {p.product_id: p for p in db.execute(select(Product)).scalars().all()}
@@ -396,6 +413,7 @@ def list_orders(db: Session) -> list:
             "actual_volume_hl": _actual_volume_hl(records),
             "is_executed": len(records) > 0,
             "is_complete": _is_complete(records, o.planned_volume_hl, o.volume_tolerance_hl),
+            "chiet_started": _chiet_started(db, o.filter_order_id),
             "locked": o.locked, "locked_by": o.locked_by,
         })
     return out
@@ -431,6 +449,7 @@ def get_order(db: Session, filter_order_id: str) -> dict:
         "actual_volume_hl": _actual_volume_hl(records),
         "is_executed": len(records) > 0,
         "is_complete": _is_complete(records, order.planned_volume_hl, order.volume_tolerance_hl),
+        "chiet_started": _chiet_started(db, filter_order_id),
         "locked": order.locked, "locked_by": order.locked_by,
     }
 
@@ -476,6 +495,7 @@ def _child_summary(db: Session, order: FilterOrder, products: dict) -> dict:
         "actual_volume_hl": _actual_volume_hl(records),
         "is_executed": len(records) > 0,
         "is_complete": _is_complete(records, order.planned_volume_hl, order.volume_tolerance_hl),
+        "chiet_started": _chiet_started(db, order.filter_order_id),
         "locked": order.locked, "locked_by": order.locked_by,
     }
 
@@ -767,3 +787,23 @@ def delete_master_order(db: Session, filter_master_order_id: str, user) -> None:
                  actor=user, before={"order_code": master.order_code, "children": len(children)})
     db.delete(master)
     db.commit()
+
+
+def next_batch_seq_no(db: Session, exclude_line_id: str = None) -> dict:
+    """Gợi ý "Mẻ lọc số" kế tiếp + danh sách số đã dùng — quét TOÀN BỘ các lô lọc trong hệ
+    thống (không giới hạn theo 1 lệnh lọc), lấy số lớn nhất đang có rồi +1, vì "Mẻ lọc số" vận
+    hành thực tế đánh số chạy chung cho toàn nhà máy chứ không reset riêng theo từng lệnh lọc.
+    batch_seq_no KHÔNG kiểm tra trùng ở tầng ứng dụng (xem FilterOrderTank.batch_seq_no, cho
+    phép trùng cả trong cùng lệnh lẫn giữa các lệnh khác nhau, vì phiếu giấy thực tế có thể lặp
+    số theo ca/ngày, và filter_yield_report còn CHỦ ĐỘNG gộp các dòng cùng batch_number/
+    order_number/batch_seq_no thành 1 mẻ thật). Hàm này chỉ hỗ trợ UX (gợi ý số tiếp theo + hỏi
+    lại nếu trùng), KHÔNG chặn lưu — exclude_line_id để không tự báo trùng với chính dòng đang
+    sửa."""
+    rows = db.execute(select(FilterOrderTank.line_id, FilterOrderTank.batch_seq_no).where(
+        FilterOrderTank.filter_id.isnot(None),
+        FilterOrderTank.batch_seq_no.isnot(None),
+    )).all()
+    used = sorted({no for line_id, no in rows if no and line_id != exclude_line_id})
+    numeric = [int(no) for no in used if no.isdigit()]
+    next_no = str(max(numeric) + 1) if numeric else "1"
+    return {"next_batch_seq_no": next_no, "used_batch_seq_nos": used}

@@ -239,12 +239,14 @@ def _bottle_forward_groups(db: Session, bottle_id: str) -> list[dict]:
     # docs/WMS-LOT-LEVEL-REDESIGN.md).
     rows = db.execute(
         select(FinishedGoodsUnit.unit_type, FinishedGoodsUnit.status, FinishedGoodsUnit.shipment_id,
-               func.sum(FinishedGoodsUnit.quantity / _PACK_DIVISOR_EXPR), func.sum(FinishedGoodsUnit.quantity))
+               func.sum(FinishedGoodsUnit.quantity / _PACK_DIVISOR_EXPR), func.sum(FinishedGoodsUnit.quantity),
+               FinishedProduct.name, FinishedProduct.code)
         .join(GenealogyEdge, and_(GenealogyEdge.to_type == "finished_goods_unit",
                                   GenealogyEdge.to_id == FinishedGoodsUnit.unit_id))
         .outerjoin(FinishedProduct, FinishedProduct.finished_product_id == FinishedGoodsUnit.finished_product_id)
         .where(GenealogyEdge.from_type == "bottle", GenealogyEdge.from_id == bottle_id)
-        .group_by(FinishedGoodsUnit.unit_type, FinishedGoodsUnit.status, FinishedGoodsUnit.shipment_id)
+        .group_by(FinishedGoodsUnit.unit_type, FinishedGoodsUnit.status, FinishedGoodsUnit.shipment_id,
+                  FinishedProduct.name, FinishedProduct.code)
     ).all()
     shipment_ids = [r[2] for r in rows if r[2]]
     shipments = {s.shipment_id: s for s in db.execute(
@@ -255,18 +257,36 @@ def _bottle_forward_groups(db: Session, bottle_id: str) -> list[dict]:
         ship_to_by_id = {s.ship_to_id: s for s in db.execute(
             select(ShipToLocation).where(ShipToLocation.ship_to_id.in_(ship_to_ids))).scalars().all()}
 
-    unit_type_label = {"vi": "vỉ", "keg": "keg", "lon": "lon"}
+    def _small_unit_noun(product_text: str | None) -> str:
+        # unit_type "lon" là mã hệ thống DÙNG CHUNG cho MỌI đơn vị nhỏ đã phân rã (lon HOẶC
+        # chai HOẶC đơn vị lẻ khác), không phải luôn là lon vật lý — suy ra danh từ đúng từ
+        # tên/mã sản phẩm, cùng cách views_ext.js::smallUnitNoun làm ở các bảng WMS khác.
+        t = (product_text or "").lower()
+        if "chai" in t:
+            return "chai"
+        if "keg" in t:
+            return "keg"
+        if "lon" in t:
+            return "lon"
+        return "sl nhỏ"
+
     status_label = {"stored": "còn tồn kho", "shipped": "đã xuất", "decomposed": "đã phân rã"}
     out = []
-    for unit_type, status, shipment_id, count, qty in rows:
-        ut = unit_type_label.get(unit_type, unit_type)
+    for unit_type, status, shipment_id, count, qty, fp_name, fp_code in rows:
+        product_text = f"{fp_code or ''} {fp_name or ''}"
+        if unit_type == "lon":
+            ut = _small_unit_noun(product_text)
+        elif unit_type == "keg":
+            ut = "keg"
+        else:
+            ut = "vỉ"
         shp = shipments.get(shipment_id) if shipment_id else None
         st = ship_to_by_id.get(shp.ship_to_id) if shp else None
         node = {
             "type": "shipment_group" if shp else "stock_group",
             "id": f"{bottle_id}:{unit_type}:{status}:{shipment_id or 'none'}",
-            "count": count, "quantity": qty, "unit_type": unit_type, "unit_status": status,
-            "children": [], "qc": [], "period": None,
+            "count": count, "quantity": qty, "unit_type": unit_type, "unit_type_label": ut,
+            "unit_status": status, "children": [], "qc": [], "period": None,
         }
         if shp:
             node.update({

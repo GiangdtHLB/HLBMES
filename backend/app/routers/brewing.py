@@ -278,6 +278,14 @@ def delete_filter_order(filter_order_id: str, db: Session = Depends(get_db),
     filter_order_svc.delete_order(db, filter_order_id, user)
 
 
+@router.get("/next-batch-seq-no")
+def get_next_batch_seq_no(exclude_line_id: str = None, db: Session = Depends(get_db)):
+    """Gợi ý "Mẻ lọc số" kế tiếp cho modal Kết thúc mẻ (quét toàn bộ lô lọc trong hệ thống,
+    KHÔNG giới hạn theo 1 lệnh lọc) + danh sách số đã dùng để frontend hỏi xác nhận khi vận
+    hành gõ trùng — xem filter_order_svc.next_batch_seq_no."""
+    return filter_order_svc.next_batch_seq_no(db, exclude_line_id)
+
+
 # ===== Lệnh lọc LỚN (chứa nhiều "lệnh lọc nhỏ" — mỗi lệnh nhỏ là 1 FilterOrder ở trên) =====
 @router.get("/filter-master-orders")
 def list_filter_master_orders(db: Session = Depends(get_db)):
@@ -1172,7 +1180,9 @@ def add_filter(payload: FilterIn, db: Session = Depends(get_db),
     duyệt KCS; sau khi duyệt, tank khoá lại chỉ còn chờ chiết ra. 1 lệnh có thể có NHIỀU bản
     ghi lọc ("mẻ lọc") — sản lượng (v_beer_hl) của tất cả mẻ lọc cộng dồn lại và so với thể
     tích kế hoạch (FilterOrder.planned_volume_hl) ±sai số cho phép; khi đã đạt (is_complete)
-    thì không tạo thêm được nữa (xem filter_order_svc._is_complete)."""
+    thì không tạo thêm được nữa (xem filter_order_svc._is_complete). Đã bắt đầu chiết (có
+    BottleRecord tham chiếu 1 trong các mẻ lọc của lệnh) thì cũng không cho thêm mẻ lọc mới nữa
+    — chỉ được thêm khi lệnh còn ở trạng thái Đang lọc (xem filter_order_svc._chiet_started)."""
     require_perm(user, "batch.execute")
     data = payload.model_dump()
     filter_order_id = data.pop("filter_order_id")
@@ -1186,6 +1196,8 @@ def add_filter(payload: FilterIn, db: Session = Depends(get_db),
     record_summaries = [{"v_beer_hl": r.v_beer_hl, "ended_at": r.ended_at} for r in existing_records]
     if filter_order_svc._is_complete(record_summaries, order.planned_volume_hl, order.volume_tolerance_hl):
         raise DomainError("Lệnh lọc này đã hoàn thành (đủ thể tích kế hoạch) — không thể thêm mẻ lọc mới.")
+    if filter_order_svc._chiet_started(db, filter_order_id):
+        raise DomainError("Lệnh lọc này đã bắt đầu chiết — chỉ được thêm mẻ lọc khi lệnh còn ở trạng thái Đang lọc.")
 
     last = existing_records[-1] if existing_records else None
     if last and last.ended_at is None:
@@ -1382,8 +1394,10 @@ def finish_filter_tank(filter_id: str, line_id: str, payload: FinishFilterTankIn
     ĐỀU KHÔNG kiểm tra trùng — thực tế vận hành có thể lặp lại số mẻ/số lệnh giấy giữa các lệnh
     lọc khác nhau (VD reset số theo ca/ngày); báo cáo sản lượng theo mẻ lọc số (xem
     services/filter_yield_report.py::filter_line_yield_report) tự gộp các dòng cùng bộ 3 giá
-    trị này lại thành 1 mẻ thật khi tính sản lượng, nên không cần chặn trùng ở đây nữa. Sau khi
-    cập nhật dòng, tổng hợp lại FilterRecord (xem _sync_filter_aggregate)."""
+    trị này lại thành 1 mẻ thật khi tính sản lượng, nên không cần chặn trùng ở đây nữa. Dịch nha
+    lọc (v_dich_hl) BẮT BUỘC > 0 mỗi lần gọi (kể cả gọi lại để sửa giờ/số liệu) — mẻ lọc kết
+    thúc luôn phải có sản lượng thật, không cho lưu mẻ rỗng. Sau khi cập nhật dòng, tổng hợp lại
+    FilterRecord (xem _sync_filter_aggregate)."""
     require_perm(user, "batch.execute")
     f = db.get(FilterRecord, filter_id)
     if not f:
@@ -1397,24 +1411,27 @@ def finish_filter_tank(filter_id: str, line_id: str, payload: FinishFilterTankIn
     batch_seq_no = (payload.batch_seq_no or "").strip()
     if not batch_number or not order_number or not batch_seq_no:
         raise DomainError("Nhập Mẻ lọc số, Số mẻ (batch number) và Số lệnh (order number) trước khi kết thúc mẻ lọc.")
+    old_v_dich = line.v_dich_hl or 0.0
+    new_v_dich = payload.v_dich_hl if payload.v_dich_hl is not None else old_v_dich
+    new_bai_khi = payload.nuoc_bai_khi_hl if payload.nuoc_bai_khi_hl is not None else (line.nuoc_bai_khi_hl or 0.0)
+    # Mỗi mẻ lọc "kết thúc" đại diện 1 đợt rút dịch thật — Dịch nha lọc = 0 nghĩa là chưa thật
+    # sự rút dịch gì, không nên đóng mẻ (dữ liệu rác), nên bắt buộc > 0 mỗi lần kết thúc/sửa.
+    if new_v_dich <= 0:
+        raise DomainError("Dịch nha lọc (hl) phải lớn hơn 0 mới được kết thúc mẻ lọc.")
     f.batch_number = batch_number
     f.order_number = order_number
     line.batch_seq_no = batch_seq_no
     line.ended_at = payload.ended_at or utcnow()
-    if payload.v_dich_hl is not None or payload.nuoc_bai_khi_hl is not None:
-        old_v_dich = line.v_dich_hl or 0.0
-        new_v_dich = payload.v_dich_hl if payload.v_dich_hl is not None else old_v_dich
-        new_bai_khi = payload.nuoc_bai_khi_hl if payload.nuoc_bai_khi_hl is not None else (line.nuoc_bai_khi_hl or 0.0)
-        if line.tank_type == "bbt":
-            source = db.get(FilterRecord, line.source_filter_id) if line.source_filter_id else None
-            if source:
-                source.on_hand_bbt -= (new_v_dich - old_v_dich)
-        else:
-            ferment = db.get(FermentRecord, line.ferment_id)
-            if ferment:
-                ferment.on_hand_cct -= (new_v_dich - old_v_dich)
-        line.v_dich_hl = new_v_dich
-        line.nuoc_bai_khi_hl = new_bai_khi
+    if line.tank_type == "bbt":
+        source = db.get(FilterRecord, line.source_filter_id) if line.source_filter_id else None
+        if source:
+            source.on_hand_bbt -= (new_v_dich - old_v_dich)
+    else:
+        ferment = db.get(FermentRecord, line.ferment_id)
+        if ferment:
+            ferment.on_hand_cct -= (new_v_dich - old_v_dich)
+    line.v_dich_hl = new_v_dich
+    line.nuoc_bai_khi_hl = new_bai_khi
     db.flush()
     _sync_filter_aggregate(db, f)
     db.commit(); db.refresh(f)
@@ -1429,7 +1446,9 @@ def add_filter_tank_batch(filter_id: str, line_id: str, db: Session = Depends(ge
     giữa chừng, tách phiếu giấy theo đợt). Dòng mới nhân bản nguyên tank nguồn (ferment_id
     hoặc source_bbt_code/source_filter_id/reason) của dòng gốc, chưa có kết quả — chờ "Kết
     thúc" riêng (xem finish_filter_tank). Chỉ cho phép khi dòng MỚI NHẤT của CÙNG tank này đã
-    kết thúc (ended_at) — không thể có 2 đợt rút dịch cùng lúc từ 1 tank vật lý. Sau khi thêm,
+    kết thúc (ended_at) — không thể có 2 đợt rút dịch cùng lúc từ 1 tank vật lý. Cũng chặn nếu
+    lệnh lọc (filter_order) của dòng này đã bắt đầu chiết (xem filter_order_svc._chiet_started,
+    cùng quy tắc với add_filter) — chỉ thêm mẻ được khi lệnh còn Đang lọc. Sau khi thêm,
     tổng hợp lại FilterRecord (xem _sync_filter_aggregate) — ended_at của cả bản ghi tự động
     về rỗng cho tới khi dòng mới này cũng kết thúc."""
     require_perm(user, "batch.execute")
@@ -1440,6 +1459,8 @@ def add_filter_tank_batch(filter_id: str, line_id: str, db: Session = Depends(ge
     line = db.get(FilterOrderTank, line_id)
     if not line or line.filter_id != f.filter_id:
         raise NotFoundError("Dòng tank không tồn tại trong bản ghi lọc này.")
+    if filter_order_svc._chiet_started(db, line.filter_order_id):
+        raise DomainError("Lệnh lọc này đã bắt đầu chiết — chỉ được thêm mẻ lọc khi lệnh còn ở trạng thái Đang lọc.")
     all_lines = db.execute(select(FilterOrderTank).where(
         FilterOrderTank.filter_id == filter_id)).scalars().all()
     same_tank = [l for l in all_lines if (

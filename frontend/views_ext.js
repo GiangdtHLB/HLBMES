@@ -780,28 +780,49 @@
       { key: "dm", label: "Danh mục vị trí kho" }, { key: "shipto", label: "Danh mục nơi xuất đến" },
       { key: "vehicles", label: "Danh mục lái xe" }];
     const root = $("view-wms");
-    const [locs, shipTos, finishedProducts, vehicles] = await Promise.all([
+    const [locs, shipTos, finishedProducts, vehicles, unitTypes] = await Promise.all([
       GET("/wms/locations"), GET("/wms/ship-to"), GET("/finished-products").catch(() => []),
-      GET("/wms/vehicles").catch(() => [])]);
+      GET("/wms/vehicles").catch(() => []), GET("/unit-types").catch(() => [])]);
+    const utByCode = Object.fromEntries(unitTypes.map(ut => [ut.code, ut]));
     // FinishedGoodsUnit.product_name lưu mã SKU (VD "FLGN200"), không phải tên — tra thêm tên
     // để hiển thị "Mã — Tên" cho dễ nhận biết, chỉ dùng ở lớp hiển thị (mọi key gom nhóm/FIFO/
     // payload gửi server vẫn giữ nguyên product_name = mã, không đổi).
     const fpByCode = Object.fromEntries(finishedProducts.map(fp => [fp.code, fp]));
     const fpLabel = (code) => { const fp = fpByCode[code]; return fp ? `${code} — ${fp.name}` : (code || ""); };
+    // "lon" là mã hệ thống dùng chung cho MỌI đơn vị phân rã rời (không riêng lon nhôm) — tra
+    // theo tên sản phẩm để hiển thị đúng danh từ thực tế (Lon/Chai/Keg), tránh hiển thị "Lon"
+    // sai cho bia chai/keg đã phân rã hoặc nhập lẻ. Dùng chung cho mọi bảng hiển thị unit_type.
+    const smallUnitNoun = (prodText) => {
+      const t = (prodText || "").toLowerCase();
+      if (t.includes("lon")) return "Lon";
+      if (t.includes("chai")) return "Chai";
+      if (t.includes("keg")) return "Keg";
+      return "SL nhỏ";
+    };
+    const unitTypeLabel = (g) => {
+      if (g.unit_type === "lon") return smallUnitNoun(fpLabel(g.product));
+      const ut = utByCode[g.unit_type];
+      return ut ? ut.name : (g.unit_type === "keg" ? "Keg" : "Vỉ");
+    };
     let body = "";
     if (sec === "kho") {
       const sm = await GET("/wms/summary");
       const locOpt = locs.map(l => `<option value="${esc(l.loc_id)}">${esc(l.code)} (${l.used}/${l.capacity})</option>`).join("");
       const fpOpt = finishedProducts.map(fp => `<option value="${esc(fp.finished_product_id)}" data-code="${esc(fp.code)}" data-pack="${fp.pack_size}" data-unittype="${esc(fp.unit_type)}">${esc(fp.code)} — ${esc(fp.name)}</option>`).join("");
       const card = (val, label, sub) => `<div class="card"><div class="n">${val}</div><div class="l">${label}</div>${sub ? `<div class="muted" style="font-size:11px;margin-top:2px">${sub}</div>` : ""}</div>`;
-      const byStatus = Object.entries(sm.by_status || {}).map(([k, v]) => `${esc(k)}: <b>${v}</b>`).join(" · ") || "—";
-      const byType = Object.entries(sm.by_type || {}).map(([k, v]) => `${k === "keg" ? "Keg" : k === "lon" ? "Lon" : "Vỉ"}: <b>${v}</b>`).join(" · ") || "—";
+      const fmtN = (v) => (v || 0).toLocaleString("vi-VN", { maximumFractionDigits: 2 });
+      const byStatus = Object.entries(sm.by_status || {}).map(([k, v]) => `${esc(k)}: <b>${fmtN(v)}</b>`).join(" · ") || "—";
+      // "lon" gộp NHIỀU sản phẩm khác nhau (có thể vừa lon vừa chai đã phân rã) — không có 1
+      // danh từ vật lý đúng cho MỌI sản phẩm trong tổng này, nên dùng nhãn trung lập "Lẻ". Các
+      // loại khác (vi/keg/loc/ket/...) tra tên thật từ danh mục loại đơn vị thay vì hardcode
+      // 3 nhánh — nếu không thì mọi loại ngoài keg/lon đều bị gộp nhầm chung nhãn "Vỉ".
+      const byType = Object.entries(sm.by_type || {}).map(([k, v]) => `${k === "lon" ? "Lẻ" : (utByCode[k] ? utByCode[k].name : k)}: <b>${fmtN(v)}</b>`).join(" · ") || "—";
       const isAdminWms = CURRENT_USER && CURRENT_USER.role === "admin";
       body = `
         ${panel("📊 Tổng quan kho thành phẩm", `
           <div class="cards" style="margin-bottom:10px">
-            ${card(sm.units_total, "Tổng vỉ/keg", byType)}
-            ${card(sm.units_stored, "Đang lưu kho", byStatus)}
+            ${card(fmtN(sm.units_total), "Tổng vỉ/keg", byType)}
+            ${card(fmtN(sm.units_stored), "Đang lưu kho", byStatus)}
             ${card((sm.fill_pct ?? 0) + "%", "Mức lấp đầy", `${sm.locations} vị trí, sức chứa ${sm.capacity_units}`)}
           </div>
           <div style="height:14px;background:var(--panel2);border-radius:7px;overflow:hidden" title="Mức lấp đầy ${sm.fill_pct ?? 0}%">
@@ -813,20 +834,28 @@
               <input id="wu_prod_q" placeholder="Tìm sản phẩm..." style="width:220px;margin-bottom:2px"/>
               <select id="wu_prod" style="width:220px"><option value="">(chọn sản phẩm)</option>${fpOpt}</select></div>
             <div class="field"><label>Lô TP</label><input id="wu_lot" value="PKG-2406-0001" style="width:150px"/></div>
-            <div class="field"><label>Tổng SL nhỏ</label><input id="wu_total" value="240" style="width:90px"/></div>
-            <div class="field"><label>SL/1 đơn vị</label><input id="wu_pack" value="24" style="width:80px"/></div>
+            <div class="field" id="wu_lonmode_wrap" style="align-self:flex-end">
+              <label style="display:flex;align-items:center;gap:4px;cursor:pointer;white-space:nowrap">
+                <input type="checkbox" id="wu_lonmode"/> Nhập lẻ (bỏ qua vỉ)</label></div>
+            <div class="field" id="wu_total_wrap"><label id="wu_total_label">Số Lon</label><input id="wu_total" value="240" style="width:90px"/></div>
+            <div class="field" id="wu_count_wrap"><label id="wu_count_label">Số Vỉ</label><input id="wu_count" type="number" value="10" style="width:80px"/></div>
+            <div class="field"><label>SL/1 đơn vị</label><input id="wu_pack" value="24" style="width:80px" readonly title="Lấy tự động từ Danh mục Sản phẩm — không sửa được"/></div>
             <div class="field"><label>Vị trí kho</label><select id="wu_loc" style="width:160px"><option value="">(chưa cất)</option>${locOpt}</select></div>
             <div class="field" style="align-self:flex-end"><button class="btn" id="wu_build">+ Nhập kho</button></div>
           </div>
-          <div class="muted" style="font-size:12px;margin-top:4px">Loại đơn vị (vỉ/keg) và SL/1 đơn vị tự điền theo sản phẩm — quản lý ở Danh mục › Sản phẩm. Số dòng vỉ/keg sinh ra = Tổng SL nhỏ ÷ SL/1 đơn vị (dòng cuối có thể lẻ). Bỏ trống Vị trí kho -> "chưa cất", gán sau ở tab Cất vào vị trí.</div>`)}
+          <div class="muted" style="font-size:12px;margin-top:4px">Loại đơn vị (vỉ/keg) và SL/1 đơn vị tự điền theo sản phẩm — quản lý ở Danh mục › Sản phẩm. Nhập lon hoặc nhập vỉ đều được — 2 ô tự quy đổi theo nhau. Tick "Nhập lẻ" nếu chỉ có lon rời (không đủ vỉ) — tồn kho sẽ lưu thẳng theo Lon, không quy đổi ra vỉ. Bỏ trống Vị trí kho -> "chưa cất", gán sau ở tab Cất vào vị trí.</div>`)}
         ${panel("🏁 Nhập tồn đầu", isAdminWms ? `
           <div class="row">
             <div class="field"><label>Sản phẩm</label>
               <input id="wob_prod_q" placeholder="Tìm sản phẩm..." style="width:220px;margin-bottom:2px"/>
               <select id="wob_prod" style="width:220px"><option value="">(chọn sản phẩm)</option>${fpOpt}</select></div>
             <div class="field"><label>Lô TP</label><input id="wob_lot" value="PKG-2406-0001" style="width:150px"/></div>
-            <div class="field"><label>Tổng SL nhỏ</label><input id="wob_total" value="240" style="width:90px"/></div>
-            <div class="field"><label>SL/1 đơn vị</label><input id="wob_pack" value="24" style="width:80px"/></div>
+            <div class="field" id="wob_lonmode_wrap" style="align-self:flex-end">
+              <label style="display:flex;align-items:center;gap:4px;cursor:pointer;white-space:nowrap">
+                <input type="checkbox" id="wob_lonmode"/> Nhập lẻ (bỏ qua vỉ)</label></div>
+            <div class="field" id="wob_total_wrap"><label id="wob_total_label">Số Lon</label><input id="wob_total" value="240" style="width:90px"/></div>
+            <div class="field" id="wob_count_wrap"><label id="wob_count_label">Số Vỉ</label><input id="wob_count" type="number" value="10" style="width:80px"/></div>
+            <div class="field"><label>SL/1 đơn vị</label><input id="wob_pack" value="24" style="width:80px" readonly title="Lấy tự động từ Danh mục Sản phẩm — không sửa được"/></div>
             <div class="field"><label>Vị trí kho</label><select id="wob_loc" style="width:160px"><option value="">(chưa cất)</option>${locOpt}</select></div>
             <div class="field" style="align-self:flex-end"><button class="btn" id="wob_build">+ Nhập tồn đầu</button></div>
           </div>
@@ -1127,7 +1156,9 @@
       const lotSummaries = await GET("/wms/units/by-lot");
       const groupRows = [];
       lotSummaries.forEach(g => {
-        ["vi", "keg", "lon"].forEach(t => {
+        // unit_types: danh sách loại đơn vị THẬT SỰ có ở lô này (backend trả theo dữ liệu thực,
+        // không hardcode vi/keg/lon nữa) — nếu thiếu (dữ liệu cũ) mới fallback 3 loại mặc định.
+        (g.unit_types || ["vi", "keg", "lon"]).forEach(t => {
           if (g[`${t}_count`] > 0) groupRows.push({
             product: g.product_name, lot_code: g.lot_code, bottle_codes: g.bottle_codes,
             unit_type: t, count: g[`${t}_count`], qty: g[`${t}_qty`], unplaced: g[`${t}_unplaced`] || 0,
@@ -1137,7 +1168,7 @@
       });
       function openUnitGroupModal(g0) {
         const canDecompose = g0.unit_type === "vi";
-        modal(`<h3>${g0.unit_type === "keg" ? "Keg" : g0.unit_type === "lon" ? "Lon" : "Vỉ"} — ${esc(fpLabel(g0.product))} ${esc(g0.lot_code || "")}</h3>
+        modal(`<h3>${unitTypeLabel(g0)} — ${esc(fpLabel(g0.product))} ${esc(g0.lot_code || "")}</h3>
           <div class="muted" style="margin-bottom:10px">${badge("available")}stored ·
             Tổng <b>${g0.count}</b> đơn vị · Tổng SL nhỏ <b>${g0.qty}</b></div>
           <div class="row" style="margin-bottom:12px"><button class="btn sec" id="ugm_label">🖨️ Tem lô (${esc(g0.lot_code || g0.product || "")})</button>
@@ -1181,7 +1212,7 @@
           <tbody>${rows.map((g, i) => `<tr>
             <td>${esc(fpLabel(g.product))}</td><td>${esc(g.lot_code || "")}</td>
             <td class="muted">${esc((g.bottle_codes || []).join(", ") || "—")}</td>
-            <td>${g.unit_type === "keg" ? "Keg" : g.unit_type === "lon" ? "Lon" : "Vỉ"}</td>
+            <td>${unitTypeLabel(g)}</td>
             <td>${g.count}</td><td>${g.qty}</td>
             <td>${badge("available")}stored</td>
             <td class="muted">${locationCell(g)}</td>
@@ -1195,17 +1226,70 @@
         wirePaginate("t_units", 10);
       }
       renderUnits(groupRows);
+      const productDivides = (prefix) => {
+        const prodEl = $(`${prefix}_prod`);
+        const opt = prodEl && prodEl.selectedOptions[0];
+        const unitType = opt && opt.value ? (opt.dataset.unittype || "vi") : "vi";
+        const ut = utByCode[unitType];
+        return ut ? ut.divide_by_pack_size : unitType === "vi";
+      };
+      const buildDivisor = (prefix) => {
+        const prodEl = $(`${prefix}_prod`);
+        const opt = prodEl && prodEl.selectedOptions[0];
+        const unitType = opt && opt.value ? (opt.dataset.unittype || "vi") : "vi";
+        const ut = utByCode[unitType];
+        const pack = num(`${prefix}_pack`) || 1;
+        const divides = productDivides(prefix);
+        const lonModeEl = $(`${prefix}_lonmode`);
+        const lonMode = divides && !!(lonModeEl && lonModeEl.checked);
+        const packLabel = `Số ${ut ? ut.name : (unitType === "keg" ? "Keg" : "Vỉ")}`;
+        const smallLabel = divides ? `Số ${smallUnitNoun(opt && opt.textContent)}` : packLabel;
+        return { divisor: lonMode ? 1 : (divides ? pack : 1), divides, lonMode, packLabel, smallLabel };
+      };
+      const updateBuildLabels = (prefix) => {
+        const { divides, lonMode, packLabel, smallLabel } = buildDivisor(prefix);
+        const countLabelEl = $(`${prefix}_count_label`);
+        const totalLabelEl = $(`${prefix}_total_label`);
+        const totalWrapEl = $(`${prefix}_total_wrap`);
+        const countWrapEl = $(`${prefix}_count_wrap`);
+        const lonModeWrapEl = $(`${prefix}_lonmode_wrap`);
+        if (countLabelEl) countLabelEl.textContent = packLabel;
+        if (totalLabelEl) totalLabelEl.textContent = smallLabel;
+        // Số SL nhỏ chỉ cần hiện khi "Nhập lẻ" bật (nhập trực tiếp theo lon/đơn vị nhỏ) — bình
+        // thường chỉ cần nhập Số Vỉ, SL nhỏ tự quy đổi ngầm nên không cần chiếm chỗ trên form.
+        if (totalWrapEl) totalWrapEl.style.display = lonMode ? "" : "none";
+        if (countWrapEl) countWrapEl.style.display = lonMode ? "none" : "";
+        if (lonModeWrapEl) lonModeWrapEl.style.display = divides ? "" : "none";
+      };
+      const syncBuildFromCount = (prefix) => {
+        const { divisor } = buildDivisor(prefix);
+        const count = num(`${prefix}_count`) || 0;
+        $(`${prefix}_total`).value = Math.round(count * divisor * 100) / 100;
+        updateBuildLabels(prefix);
+      };
+      const syncBuildFromTotal = (prefix) => {
+        const { divisor } = buildDivisor(prefix);
+        const total = num(`${prefix}_total`) || 0;
+        $(`${prefix}_count`).value = Math.round((total / divisor) * 10000) / 10000;
+        updateBuildLabels(prefix);
+      };
       wireSelectSearch("wu_prod", "wu_prod_q");
       if ($("wu_prod")) $("wu_prod").onchange = () => {
         const opt = $("wu_prod").selectedOptions[0];
         if (opt && opt.dataset.pack) $("wu_pack").value = opt.dataset.pack;
+        if (!productDivides("wu") && $("wu_lonmode")) $("wu_lonmode").checked = false;
+        syncBuildFromCount("wu");
       };
+      if ($("wu_count")) $("wu_count").oninput = () => syncBuildFromCount("wu");
+      if ($("wu_total")) $("wu_total").oninput = () => syncBuildFromTotal("wu");
+      if ($("wu_lonmode")) $("wu_lonmode").onchange = () => syncBuildFromTotal("wu");
       if ($("wu_build")) $("wu_build").onclick = () => guard(async () => {
         if (!$("wu_prod").value) { toast("Chọn sản phẩm", "err"); return; }
         const opt = $("wu_prod").selectedOptions[0];
+        const { lonMode } = buildDivisor("wu");
         await POST("/wms/units", { finished_product_id: $("wu_prod").value, product_name: opt.dataset.code,
           lot_code: $("wu_lot").value, total: num("wu_total") || 0,
-          pack_size: num("wu_pack") || 24, unit_type: opt.dataset.unittype || "vi",
+          pack_size: lonMode ? 1 : (num("wu_pack") || 24), unit_type: lonMode ? "lon" : (opt.dataset.unittype || "vi"),
           loc_id: $("wu_loc").value || null, reason: "Nhập kho thủ công" });
         toast("Đã nhập kho (kèm mã vạch từng vỉ/keg)"); render("wms");
       });
@@ -1213,13 +1297,24 @@
       if ($("wob_prod")) $("wob_prod").onchange = () => {
         const opt = $("wob_prod").selectedOptions[0];
         if (opt && opt.dataset.pack) $("wob_pack").value = opt.dataset.pack;
+        if (!productDivides("wob") && $("wob_lonmode")) $("wob_lonmode").checked = false;
+        syncBuildFromCount("wob");
       };
+      if ($("wob_count")) $("wob_count").oninput = () => syncBuildFromCount("wob");
+      if ($("wob_total")) $("wob_total").oninput = () => syncBuildFromTotal("wob");
+      if ($("wob_lonmode")) $("wob_lonmode").onchange = () => syncBuildFromTotal("wob");
+      // Ẩn/hiện ô Số SL nhỏ/Số Vỉ chỉ được set trong các handler onchange/oninput ở trên — nếu
+      // không gọi ngay 1 lần ở đây, lúc mới vào trang (chưa bấm gì) cả 2 ô đều hiện mặc định
+      // theo HTML gốc, chỉ ẩn đúng sau khi người dùng tương tác lần đầu (chọn SP/gõ số lượng).
+      updateBuildLabels("wu");
+      updateBuildLabels("wob");
       if ($("wob_build")) $("wob_build").onclick = () => guard(async () => {
         if (!$("wob_prod").value) { toast("Chọn sản phẩm", "err"); return; }
         const opt = $("wob_prod").selectedOptions[0];
+        const { lonMode } = buildDivisor("wob");
         await POST("/wms/units", { finished_product_id: $("wob_prod").value, product_name: opt.dataset.code,
           lot_code: $("wob_lot").value, total: num("wob_total") || 0,
-          pack_size: num("wob_pack") || 24, unit_type: opt.dataset.unittype || "vi",
+          pack_size: lonMode ? 1 : (num("wob_pack") || 24), unit_type: lonMode ? "lon" : (opt.dataset.unittype || "vi"),
           loc_id: $("wob_loc").value || null, reason: "Nhập tồn đầu", is_opening_balance: true });
         toast("Đã nhập tồn đầu (kèm mã vạch từng vỉ/keg)"); render("wms");
       });
@@ -1266,7 +1361,6 @@
       }).catch(() => { $("dp_history").innerHTML = `<div class="muted">Không tải được lịch sử.</div>`; });
     } else if (sec === "xuatkho") {
       const lots = await GET("/wms/units/by-lot");
-      const UNIT_LABEL = { vi: "Vỉ", keg: "Keg", lon: "Lon" };
       const shipmentTypeLabel = (t) => t === "promo" ? "Khuyến mại" : t === "return" ? "Đổi trả" : "Thường";
       const XK_TYPE_OPTIONS = `<option value=""></option><option value="promo">Khuyến mại</option><option value="return">Đổi trả</option>`;
 
@@ -1278,7 +1372,7 @@
           if (filter === "has_lon" && !g.has_lon) return;
           if (filter === "no_lon" && g.has_lon) return;
           if (search && !`${g.product_name || ""} ${g.lot_code || ""}`.toLowerCase().includes(search)) return;
-          ["vi", "keg", "lon"].forEach(t => {
+          (g.unit_types || ["vi", "keg", "lon"]).forEach(t => {
             const count = g[`${t}_count`];
             if (count) rows.push({ product_name: g.product_name, lot_code: g.lot_code, unit_type: t, count,
                                    fifo_ok: g[`${t}_fifo_ok`], oldest_at: g[`${t}_oldest_at`], bottle_codes: g.bottle_codes,
@@ -1305,7 +1399,7 @@
           <tbody>${rows.map((r, i) => { const sellable = sellableOf(r); const neAvailable = (r.near_expiry_count || 0) > 0; return `<tr>
             <td>${esc(fpLabel(r.product_name))}</td><td>${esc(r.lot_code || "")}</td>
             <td class="muted">${esc((r.bottle_codes || []).join(", ") || "—")}</td>
-            <td>${UNIT_LABEL[r.unit_type]}</td><td>${r.count}</td>
+            <td>${unitTypeLabel({ product: r.product_name, unit_type: r.unit_type })}</td><td>${r.count}</td>
             <td class="muted">${locationCell(r)}</td>
             <td>${r.fifo_ok ? '<span class="badge available">✓ FIFO</span>' : '<span class="badge on_hold">⚠ Không phải lô cũ nhất</span>'}</td>
             <td><input type="number" min="1" max="${sellable}" value="${sellable}" style="width:80px" data-xk-qty="${i}" ${sellable > 0 ? "" : "disabled"}
@@ -1332,7 +1426,7 @@
                           quantity: qty, shipment_type, near_expiry_only, fifo_ok: r.fifo_ok,
                           location_label: placedLocationLabel(r) });
             renderCart();
-            toast(`Đã thêm ${qty} ${UNIT_LABEL[r.unit_type]} vào phiếu${near_expiry_only ? " (chỉ bia cận date)" : ""}`);
+            toast(`Đã thêm ${qty} ${unitTypeLabel({ product: r.product_name, unit_type: r.unit_type }).toLowerCase()} vào phiếu${near_expiry_only ? " (chỉ bia cận date)" : ""}`);
           };
         });
       }
@@ -1359,7 +1453,7 @@
             <td>${lotOpts.length ? `<select data-xk-lot="${i}">${lotOpts.map(o => `<option value="${esc(o.lot_code || "")}" ${o.lot_code === c.lot_code ? "selected" : ""}>${esc(o.lot_code || "(không lô)")} — còn ${o.sellable}${o.fifo_ok ? " · FIFO" : ""}</option>`).join("")}</select>`
               : esc(c.lot_code || "")}</td>
             <td class="muted">${esc(c.location_label || "—")}</td>
-            <td>${UNIT_LABEL[c.unit_type]}</td><td>${c.quantity}</td>
+            <td>${unitTypeLabel({ product: c.product_name, unit_type: c.unit_type })}</td><td>${c.quantity}</td>
             <td>${c.fifo_ok ? '<span class="badge available">✓ FIFO</span>' : '<span class="badge on_hold">⚠ Không phải lô cũ nhất</span>'}</td>
             <td><span class="badge ${c.shipment_type === "promo" ? "planned" : c.shipment_type === "return" ? "on_hold" : "available"}">${shipmentTypeLabel(c.shipment_type)}</span></td>
             <td>${c.near_expiry_only ? '<span class="badge on_hold">🕒 Cận date</span>' : '<span class="muted">—</span>'}</td>
@@ -1435,7 +1529,7 @@
             <td class="muted">${esc(s.created_by || "—")}</td>
             <td>${undone ? '<span class="badge obsolete">Đã hoàn tác</span>' : s.fifo_ok ? '<span class="badge available">✓ Đúng FIFO</span>' : '<span class="badge on_hold">⚠ Không đúng FIFO</span>'}</td>
             <td><span class="badge ${s.shipment_type === "promo" ? "planned" : s.shipment_type === "return" ? "on_hold" : "available"}">${shipmentTypeLabel(s.shipment_type)}</span></td>
-            <td class="muted">${s.lines.map(l => `${esc(fpLabel(l.product))} ${esc(l.lot_code || "")}: ${l.count} ${l.unit_type === "keg" ? "keg" : l.unit_type === "lon" ? "lon" : "vỉ"}`).join("; ")}</td>
+            <td class="muted">${s.lines.map(l => `${esc(fpLabel(l.product))} ${esc(l.lot_code || "")}: ${l.count} ${unitTypeLabel(l).toLowerCase()}`).join("; ")}</td>
             <td style="white-space:nowrap"><button class="btn sm sec" data-viewship="${i}">Xem</button>
               <button class="btn sm sec" data-printship="${i}">🖨️ In phiếu</button>
               ${undone ? "" : `<button class="btn sm sec" data-undoship="${i}">Hoàn tác</button>`}</td></tr>`; }).join("")}</tbody></table></div>`
@@ -1450,7 +1544,7 @@
             <div class="tablewrap"><table>
               <thead><tr><th>Sản phẩm</th><th>Lô</th><th>Loại</th><th>SL</th><th>Loại xuất</th><th>Cận date</th></tr></thead>
               <tbody>${s.lines.map(l => `<tr><td>${esc(fpLabel(l.product))}</td><td>${esc(l.lot_code || "—")}</td>
-                <td>${UNIT_LABEL[l.unit_type] || esc(l.unit_type)}</td><td>${l.count}</td>
+                <td>${unitTypeLabel(l)}</td><td>${l.count}</td>
                 <td><span class="badge ${s.shipment_type === "promo" ? "planned" : s.shipment_type === "return" ? "on_hold" : "available"}">${shipmentTypeLabel(s.shipment_type)}</span></td>
                 <td>${l.near_expiry ? '<span class="badge on_hold">🕒 Cận date</span>' : '<span class="muted">—</span>'}</td></tr>`).join("") ||
                 '<tr><td colspan=6 class="muted">Không còn dòng nào (đã hoàn tác).</td></tr>'}</tbody>
@@ -1464,7 +1558,6 @@
         }));
       }).catch(() => { $("xk_history").innerHTML = `<div class="muted">Không tải được lịch sử.</div>`; });
     } else if (sec === "dieuchuyen") {
-      const unitTypeLabel = (t) => t === "keg" ? "Keg" : t === "lon" ? "Lon" : "Vỉ";
       let dcGroups = [];
       async function renderDcPick() {
         const fromId = $("dc_from").value;
@@ -1482,7 +1575,7 @@
           <tbody>${dcGroups.map((g, i) => `<tr data-dcgroup="${i}">
             <td><input class="dc_pick" type="checkbox"/></td>
             <td>${esc(fpLabel(g.product))}</td><td>${esc(g.lot_code || "")}</td>
-            <td>${unitTypeLabel(g.unit_type)}</td><td>${g.count}</td>
+            <td>${unitTypeLabel(g)}</td><td>${g.count}</td>
             <td><input class="dc_qty" type="number" min="1" max="${g.count}" value="${g.count}" style="width:80px"/></td></tr>`).join("") ||
             '<tr><td colspan=6 class="muted">Vị trí này không có vỉ/keg/lon nào đang tồn.</td></tr>'}</tbody></table></div>
           <div class="row" style="margin-top:10px"><button class="btn" id="dc_submit">Điều chuyển</button></div>`;
@@ -1527,11 +1620,10 @@
         wireSearch(); wirePaginate("t_dc_history", 10);
       }).catch(() => { $("dc_history").innerHTML = `<div class="muted">Không tải được lịch sử.</div>`; });
     } else if (sec === "capvao") {
-      const unitTypeLabelCv = (t) => t === "keg" ? "Keg" : t === "lon" ? "Lon" : "Vỉ";
       const lotSummariesCv = await GET("/wms/units/by-lot");
       const cvRows = [];
       lotSummariesCv.forEach(g => {
-        ["vi", "keg", "lon"].forEach(t => {
+        (g.unit_types || ["vi", "keg", "lon"]).forEach(t => {
           if (g[`${t}_unplaced`] > 0) cvRows.push({
             product: g.product_name, lot_code: g.lot_code, unit_type: t, unplaced: g[`${t}_unplaced`],
             bottle_date: g.bottle_date, lines: g.lines || [],
@@ -1544,7 +1636,7 @@
         <tbody>${cvRows.map((g, i) => `<tr data-cvgroup="${i}">
           <td><input class="cv_pick" type="checkbox"/></td>
           <td>${esc(fpLabel(g.product))}</td><td>${esc(g.lot_code || "")}</td>
-          <td>${unitTypeLabelCv(g.unit_type)}</td>
+          <td>${unitTypeLabel(g)}</td>
           <td class="muted">${g.bottle_date ? fmt(g.bottle_date) : "—"}</td>
           <td class="muted">${esc(g.lines.join(", ") || "—")}</td>
           <td>${g.unplaced}</td>
@@ -1574,41 +1666,43 @@
       }
     } else if (sec === "tudo") {
       const isAdminTudo = CURRENT_USER && CURRENT_USER.role === "admin";
-      const unitTypeLabelFi = (t) => t === "keg" ? "keg" : t === "lon" ? "lon" : "vỉ";
       if (isAdminTudo && $("fi_pick")) {
         const lotSummariesFi = await GET("/wms/units/by-lot");
         const fiRows = [];
         lotSummariesFi.forEach(g => {
-          ["vi", "keg", "lon"].forEach(t => {
+          (g.unit_types || ["vi", "keg", "lon"]).forEach(t => {
             if (g[`${t}_count`] > 0) fiRows.push({
               product: g.product_name, lot_code: g.lot_code, unit_type: t, count: g[`${t}_count`],
             });
           });
         });
-        const fiOpt = fiRows.map((g, i) => `<option value="${i}">${esc(fpLabel(g.product))} — ${esc(g.lot_code || "(không lô)")} (${g.count} ${unitTypeLabelFi(g.unit_type)})</option>`).join("");
+        const fiOpt = fiRows.map((g, i) => `<option value="${i}">${esc(fpLabel(g.product))} — ${esc(g.lot_code || "(không lô)")} (${g.count} ${unitTypeLabel(g).toLowerCase()})</option>`).join("");
         $("fi_pick").innerHTML = fiRows.length ? `
           <div class="row">
             <div class="field" style="flex:1"><label>Chọn lô cần xuất</label><select id="fi_group">${fiOpt}</select></div>
-            <div class="field"><label>Số lượng</label><input id="fi_qty" type="number" min="1" value="1" style="width:100px"/></div>
+            <div class="field"><label>Số lượng</label><input id="fi_qty" type="number" min="0.01" step="any" value="1" style="width:100px"/></div>
           </div>
           <div class="row"><div class="field" style="flex:1"><label>Lý do (bắt buộc)</label><input id="fi_reason" placeholder="VD: hàng hỏng, hủy do kiểm tra chất lượng..."/></div>
             <button class="btn sec" id="fi_do" style="align-self:flex-end">Xuất tự do</button></div>`
           : `<div class="muted">Kho thành phẩm chưa có tồn kho khả dụng.</div>`;
         if ($("fi_group")) {
+          // parseInt cắt cụt số thập phân — lô đã bị phân rã 1 phần thường có count lẻ (VD 0.625
+          // vỉ), dùng parseInt sẽ luôn ra 0 và báo sai "số lượng không hợp lệ". Dùng parseFloat +
+          // dung sai nhỏ (số dấu phẩy động có thể lệch vài phần tỷ khi so sánh bằng g.count).
           const syncMax = () => {
             const g = fiRows[parseInt($("fi_group").value, 10)];
             $("fi_qty").max = g.count;
-            if (parseInt($("fi_qty").value, 10) > g.count) $("fi_qty").value = g.count;
+            if (parseFloat($("fi_qty").value) > g.count) $("fi_qty").value = g.count;
           };
           $("fi_group").onchange = syncMax;
           syncMax();
           $("fi_do").onclick = () => guard(async () => {
             const g = fiRows[parseInt($("fi_group").value, 10)];
-            const qty = parseInt($("fi_qty").value, 10) || 0;
+            const qty = parseFloat($("fi_qty").value) || 0;
             const reason = $("fi_reason").value.trim();
-            if (qty <= 0 || qty > g.count) { toast(`Số lượng không hợp lệ (tối đa ${g.count})`, "err"); return; }
+            if (qty <= 0 || qty > g.count + 1e-9) { toast(`Số lượng không hợp lệ (tối đa ${g.count})`, "err"); return; }
             if (!reason) { toast("Phải nhập lý do xuất tự do", "err"); return; }
-            if (!confirm(`Xuất tự do ${qty} ${unitTypeLabelFi(g.unit_type)} (cũ nhất trước) của ${g.product || ""} ${g.lot_code || ""}?`)) return;
+            if (!confirm(`Xuất tự do ${qty} ${unitTypeLabel(g).toLowerCase()} (cũ nhất trước) của ${g.product || ""} ${g.lot_code || ""}?`)) return;
             const res = await POST("/wms/units/free-issue", { product_name: g.product, lot_code: g.lot_code,
               unit_type: g.unit_type, count: qty, reason });
             toast(`Đã xuất tự do ${res.issued} đơn vị`
@@ -1623,7 +1717,7 @@
             <th>Thời gian</th><th>Người</th><th></th></tr></thead>
           <tbody>${rows.map(e => `<tr><td>${esc(fpLabel(e.product_name))}</td>
             <td class="muted">${esc(e.lot_code || "")}</td>
-            <td>${e.unit_type === "keg" ? "Keg" : e.unit_type === "lon" ? "Lon" : "Vỉ"}</td>
+            <td>${unitTypeLabel({ product: e.product_name, unit_type: e.unit_type })}</td>
             <td>${e.requested ?? ""}</td><td>${e.issued ?? ""}</td>
             <td class="muted">${esc(e.reason || "")}</td>
             <td class="muted">${fmt(e.ts)}</td><td class="muted">${esc(e.actor || "")}</td>

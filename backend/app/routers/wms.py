@@ -123,11 +123,11 @@ def delete_units_by_lot(payload: DeleteByLotIn, db: Session = Depends(get_db),
 def build_units(payload: UnitBuildIn, db: Session = Depends(get_db),
                 user: User = Depends(get_current_user)):
     created = svc.build_units(db, payload.model_dump(), user)
-    # count = số vỉ/keg thật (total/pack_size cho "vi"; keg/lon luôn 1 đơn vị = 1 quantity) —
-    # dùng pack_size TỪ PAYLOAD (biết chính xác lúc tạo), KHÔNG dùng len(created) vì
-    # _create_units giờ luôn trả về đúng 1 dòng/lô bất kể total lớn cỡ nào (xem
-    # docs/WMS-LOT-LEVEL-REDESIGN.md).
-    divisor = payload.pack_size if payload.unit_type == "vi" and payload.pack_size else 1
+    # count = số vỉ/keg/... thật (total/pack_size cho loại "chia theo pack_size" — xem Danh mục
+    # Loại đơn vị tồn kho; loại còn lại luôn 1 đơn vị = 1 quantity) — dùng pack_size TỪ PAYLOAD
+    # (biết chính xác lúc tạo), KHÔNG dùng len(created) vì _create_units giờ luôn trả về đúng
+    # 1 dòng/lô bất kể total lớn cỡ nào (xem docs/WMS-LOT-LEVEL-REDESIGN.md).
+    divisor = payload.pack_size if payload.unit_type in svc._divide_by_pack_codes(db) and payload.pack_size else 1
     count = payload.total / divisor
     return {"count": count, "unit_codes": [u.unit_code for u in created]}
 

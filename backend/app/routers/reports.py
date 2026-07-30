@@ -138,6 +138,21 @@ def qc_attention_alerts(db: Session = Depends(get_db), user: User = Depends(get_
     return dashboard_svc.qc_attention_alerts(db)
 
 
+# ---- Báo cáo xuất thành phẩm theo ca (Ca 1/2/3, giống Năng lượng) ----
+@router.get("/finished-goods-shift-report")
+def finished_goods_shift_report(date_from: datetime = None, date_to: datetime = None,
+                                db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    from ..services import wms as wms_svc
+    if not date_from or not date_to:
+        # Mặc định: ngày hôm qua — Ca 1 (06h) hôm qua tới Ca 3 (06h hôm nay), giống keg_report.
+        ref_day = (utcnow() - timedelta(days=1)).replace(hour=6, minute=0, second=0, microsecond=0)
+        date_from = date_from or ref_day
+        date_to = date_to or (date_from + timedelta(hours=24))
+    result = wms_svc.finished_goods_shift_report(db, date_from, date_to)
+    result.update({"date_from": date_from.isoformat(), "date_to": date_to.isoformat()})
+    return result
+
+
 @router.get("/low-yield-filter-alerts")
 def low_yield_filter_alerts(days: int = 5, limit: int = 5, db: Session = Depends(get_db),
                             user: User = Depends(get_current_user)):

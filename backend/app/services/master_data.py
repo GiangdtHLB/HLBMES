@@ -13,7 +13,7 @@ from ..models.brewing import (BottleRecord, BrewOrder, BrewOrderMaterialLine, Br
     FilterOrder, FilterOrderMaterialLine, FilterOrderTank, FilterRecord)
 from ..models.batches import BatchExecution
 from ..models.lines import ProductionLine
-from ..models.master import BeerType, FinishedProduct, Material, MaterialGroup, Product
+from ..models.master import BeerType, FinishedProduct, Material, MaterialGroup, Product, UnitTypeCatalog
 from ..models.materials import MaterialLot, Supplier
 from ..models.materials_ext import MaterialQcGroup
 from ..models.metrics import OEERecord
@@ -61,6 +61,34 @@ def delete_beer_type(db: Session, beer_type_id: str, user: User) -> None:
     record_audit(db, entity_type="beer_type", entity_id=bt.beer_type_id, action="delete",
                  actor=user, before={"code": bt.code, "name": bt.name})
     db.delete(bt)
+    db.commit()
+
+
+# Mã hệ thống bắt buộc phải luôn tồn tại trong Danh mục Loại đơn vị tồn kho (seed sẵn ở
+# migration 1f8a7f187deb) — cấm xóa dù không còn dùng, vì code (không phải nhiều nơi trong
+# services/wms.py hardcode so sánh trực tiếp "vi"/"keg"/"lon" (VD _decompose_one_vi luôn sinh
+# unit_type="lon"), xóa mất dòng danh mục sẽ chỉ mất tên hiển thị chứ không tắt được hành vi đó
+# — dễ gây hiểu lầm "đã xóa được loại vi/keg/lon" trong khi code vẫn phụ thuộc cứng vào chúng.
+_SYSTEM_UNIT_TYPE_CODES = {"vi", "keg", "lon"}
+
+
+def delete_unit_type(db: Session, unit_type_id: str, user: User) -> None:
+    require_perm(user, "master.manage")
+    ut = db.get(UnitTypeCatalog, unit_type_id)
+    if not ut:
+        raise NotFoundError("Loại đơn vị tồn kho không tồn tại.")
+    if ut.code in _SYSTEM_UNIT_TYPE_CODES:
+        raise DomainError(f"'{ut.name}' ({ut.code}) là loại hệ thống bắt buộc — không thể xóa.")
+    checks = [
+        ("sản phẩm (SKU)", select(func.count(FinishedProduct.finished_product_id)).where(
+            FinishedProduct.unit_type == ut.code)),
+        ("vỉ/keg/lon trong kho", select(func.count(FinishedGoodsUnit.unit_id)).where(
+            FinishedGoodsUnit.unit_type == ut.code)),
+    ]
+    _block_if_used(_used_by(db, checks), "Loại đơn vị tồn kho", ut.code)
+    record_audit(db, entity_type="unit_type_catalog", entity_id=ut.unit_type_id, action="delete",
+                 actor=user, before={"code": ut.code, "name": ut.name})
+    db.delete(ut)
     db.commit()
 
 
@@ -173,7 +201,12 @@ def delete_recipe(db: Session, recipe_id: str, user: User) -> None:
     """Xóa công thức + toàn bộ version bên trong — chỉ khi KHÔNG version nào đã từng được
     dùng (work order hoặc mẻ sản xuất tham chiếu recipe_version_id), vì batch SNAPSHOT dữ liệu
     version lúc release nên xóa version đã dùng sẽ mất khả năng tra cứu tại sao mẻ đó chạy theo
-    thông số nào (tài liệu §4.2, §7.2 — models/recipes.py)."""
+    thông số nào (tài liệu §4.2, §7.2 — models/recipes.py). Lệnh nấu (BrewOrder) hiện KHÔNG lưu
+    recipe_version_id (tự tra BOM hiệu lực theo Product.product_id lúc lập lệnh rồi snapshot
+    ngay vào BrewOrderMaterialLine — xem services/brew_order.py::_effective_bom), nên phải chặn
+    riêng theo product_id của công thức: 1 dịch bia đã được chọn cho lệnh nấu nào rồi thì công
+    thức (BOM) của dịch bia đó coi như đang dùng, không cho xóa (mirror delete_product chặn
+    theo product_id, chiều ngược lại)."""
     require_perm(user, "master.manage")
     r = db.get(Recipe, recipe_id)
     if not r:
@@ -181,6 +214,7 @@ def delete_recipe(db: Session, recipe_id: str, user: User) -> None:
     version_ids = db.execute(select(RecipeVersion.version_id).where(
         RecipeVersion.recipe_id == recipe_id)).scalars().all()
     checks = [
+        ("lệnh nấu", select(func.count(BrewOrder.brew_order_id)).where(BrewOrder.product_id == r.product_id)),
         ("work order", select(func.count(WorkOrder.wo_id)).where(WorkOrder.recipe_version_id.in_(version_ids))),
         ("mẻ sản xuất (module cũ)", select(func.count(BatchExecution.batch_id)).where(
             BatchExecution.recipe_version_id.in_(version_ids))),
