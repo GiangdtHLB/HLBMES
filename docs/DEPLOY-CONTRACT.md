@@ -66,6 +66,24 @@ công thức cùng 1 product → xử lý dữ liệu (không sửa migration, k
 báo bên vận hành, thống nhất cách làm sạch/tách dữ liệu **trước** khi áp migration.
 Nếu migration mới đặt ràng buộc chặt hơn dữ liệu hiện có, ghi rõ trong mô tả migration.
 
+**3.1 — UNIQUE index trên cột NULLABLE (gặp 30/07, migration 4ae215c30cfb).**
+SQL Server coi NHIỀU NULL trong UNIQUE index là TRÙNG nhau → chỉ cho phép ĐÚNG 1 dòng NULL.
+Thêm cột nullable mới rồi tạo UNIQUE index → mọi dòng cũ đều NULL → nếu bảng có ≥2 dòng thì
+`CREATE UNIQUE INDEX` vỡ: `duplicate key ... value is (<NULL>)`. (SQLite/Postgres cho nhiều
+NULL nên test SQLite vẫn PASS — đúng loại "SQLite pass ≠ MSSQL pass".) Gate DB rỗng cũng
+không bắt (0 dòng). Thực tế: prod có 3 mẻ lọc → `ix_filter_record_batch_number` unique vỡ.
+- Nếu KHÔNG cần unique → tạo `unique=False` ngay từ đầu (đừng tạo unique rồi migration sau
+  gỡ về non-unique — bước unique trung gian vẫn phải chạy nên vẫn vỡ).
+- Nếu THẬT SỰ cần unique → backfill giá trị cho mọi dòng cũ TRƯỚC, hoặc dùng filtered index
+  của MSSQL để chỉ ép unique trên dòng NOT NULL:
+  ```python
+  op.create_index('ix_...', 'tbl', ['col'], unique=True,
+                  mssql_where=sa.text('col IS NOT NULL'))
+  ```
+
+**Cách gate của bên vận hành:** không chỉ DB rỗng — **seed dữ liệu giống prod** (≥2 dòng ở
+bảng bị đụng) rồi mới `alembic upgrade head`, để bắt đúng lớp lỗi này.
+
 ## 3b. Lỗi dialect TẦNG ỨNG DỤNG (query runtime — gate migration KHÔNG bắt được)
 Không chỉ migration; **code truy vấn** cũng phải chạy trên MSSQL. Đã gặp:
 
@@ -116,6 +134,8 @@ Chạy hết list này rồi mới push branch — mỗi mục là 1 lỗi thự
       enforce FK, SQLite thì không).
 - [ ] 1 head duy nhất; không sửa migration đã deploy; không gộp migration (mục 0).
 - [ ] Migration đặt ràng buộc chặt hơn dữ liệu hiện có → ghi rõ trong docstring (mục 3).
+- [ ] KHÔNG tạo UNIQUE index trên cột nullable có dòng cũ NULL (≥2 dòng vỡ trên MSSQL) —
+      dùng unique=False, backfill trước, hoặc filtered index mssql_where (mục 3.1).
 - [ ] Không commit `.env` / `docker-compose.override.yml` / secret (mục 4).
 - [ ] Nếu chạy được MSSQL: `alembic upgrade <head-prod> → head` + smoke GET & GHI (3b).
       Nếu KHÔNG có MSSQL: push branch, báo bên vận hành chạy cổng giúp.
