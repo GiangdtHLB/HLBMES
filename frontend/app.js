@@ -2828,6 +2828,32 @@ const AUDIT_ACTION_LABELS = {
   edit_user: "Sửa tài khoản", resolve: "Xử lý xong",
 };
 const AUDIT_ACTION_PREFIX_LABELS = { transition: "Chuyển trạng thái", isa88: "ISA-88", move: "Di chuyển", sample: "Lấy mẫu" };
+// entity_type -> module trên thanh menu chính (đúng tên hiện trên nav, xem index.html) — để biết
+// 1 dòng audit thuộc module nào khi entity_type/action không tự nói lên điều đó. "lot" và
+// "stock_movement"/"material_request*"/"stock_count" mặc định gắn "Kho công ty" vì đó là nơi
+// receive/issue/transfer NVL chính (services/warehouse.py) — không phân biệt được Kho phân xưởng
+// ở tầng hiển thị vì audit không lưu location.
+const AUDIT_MODULE_MAP = {
+  finished_goods_unit: "Kho TP (WMS)", near_expiry_entry: "Kho TP (WMS)", shipment: "Kho TP (WMS)",
+  ship_to_location: "Kho TP (WMS)",
+  batch: "Nấu-Lọc-Chiết", ferment_record: "Nấu-Lọc-Chiết", bbt_tank: "Nấu-Lọc-Chiết", yeast_lot: "Nấu-Lọc-Chiết",
+  brew_order: "Lệnh SX", brew_master_order: "Lệnh SX", filter_order: "Lệnh SX", filter_master_order: "Lệnh SX",
+  order: "Lệnh SX", work_order: "Điều độ",
+  recipe_version: "Công thức", packaging: "Bao bì", downtime: "OEE/Dừng máy", schedule: "Lập lịch",
+  quality_result: "Chất lượng", brew_batch: "Chất lượng", ferment: "Chất lượng", filter: "Chất lượng",
+  bottle: "Chất lượng", qc_parameter: "Chất lượng", qc_parameter_group: "Chất lượng",
+  qc_parameter_group_item: "Chất lượng", material_qc_group: "Chất lượng", stage_qc_group: "Chất lượng",
+  deviation: "QC Lab", capa: "QC Lab", sample: "QC Lab",
+  cip_form_type: "CIP", cip_equipment: "CIP", cip_record: "CIP",
+  lot: "Kho công ty", material_request: "Kho công ty", material_request_line: "Kho công ty",
+  stock_movement: "Kho công ty", stock_count: "Kho công ty",
+  auth: "Tài khoản", role_template: "Tài khoản",
+  beer_type: "Danh mục", unit_type_catalog: "Danh mục", supplier: "Danh mục", material_group: "Danh mục",
+  product: "Danh mục", product_brew_spec: "Danh mục", finished_product: "Danh mục", material: "Danh mục",
+  recipe: "Danh mục", line: "Danh mục",
+  incident: "Bảo trì",
+};
+function auditModuleLabel(entityType) { return AUDIT_MODULE_MAP[entityType] || "—"; }
 const AUDIT_FIELD_LABELS = {
   product_name: "Sản phẩm", lot_code: "Mã lô", unit_type: "Loại đơn vị", quantity: "Số lượng",
   requested: "Số lượng yêu cầu", count: "Số lượng", status: "Trạng thái", location: "Vị trí",
@@ -2878,9 +2904,11 @@ function showAuditDetail(row) {
       <td${changed ? ' style="font-weight:700"' : ' class="muted"'}>${auditFmtVal(av)}</td>
     </tr>`;
   }).join("") || `<tr><td colspan=4 class="muted">Không có dữ liệu trước/sau cho dòng này.</td></tr>`;
+  const modLabel = auditModuleLabel(row.entity_type);
   modal(`
     <h2 style="margin-bottom:4px">${esc(auditEntityLabel(row.entity_type))} — ${esc(auditActionLabel(row.action))}</h2>
     <div class="muted" style="margin-bottom:12px;line-height:1.7">
+      ${modLabel !== "—" ? `Module: <b>${esc(modLabel)}</b><br>` : ""}
       Mã đối tượng: <code class="k">${esc(row.entity_id)}</code><br>
       Người: ${esc(row.actor)} (${esc(row.actor_role || "—")}) · Lúc: ${fmt(row.ts)}
       ${row.reason ? `<br>Lý do: ${esc(row.reason)}` : ""}
@@ -2901,15 +2929,16 @@ function wireAuditDetail(tableId) {
 function tableAudit(rows, tableId) {
   const key = tableId || "_default";
   AUDIT_ROW_STORE[key] = rows;
-  return `<table${tableId ? ` id="${tableId}"` : ""}><thead><tr><th>#</th><th>Đối tượng</th><th>Hành động</th><th>Người</th><th>Vai trò</th><th>Lúc</th><th></th></tr></thead>
+  return `<table${tableId ? ` id="${tableId}"` : ""}><thead><tr><th>Module</th><th>#</th><th>Đối tượng</th><th>Hành động</th><th>Người</th><th>Vai trò</th><th>Lúc</th><th></th></tr></thead>
     <tbody>${rows.map((r, i) => `<tr>
+      <td>${esc(auditModuleLabel(r.entity_type))}</td>
       <td class="muted">${r.seq}</td>
       <td>${esc(auditEntityLabel(r.entity_type))} <span class="muted" style="font-size:11px">(${esc(r.entity_type)})</span></td>
       <td>${esc(auditActionLabel(r.action))} <span class="muted" style="font-size:11px">(${esc(r.action)})</span></td>
       <td>${esc(r.actor)}</td><td class="muted">${esc(r.actor_role || "")}</td>
       <td class="muted">${fmt(r.ts)}</td>
       <td><button class="btn sm sec" data-auditdetail="${key}" data-idx="${i}">Xem</button></td>
-    </tr>`).join("") || '<tr><td colspan=7 class="muted">Trống</td></tr>'}</tbody></table>`;
+    </tr>`).join("") || '<tr><td colspan=8 class="muted">Trống</td></tr>'}</tbody></table>`;
 }
 
 // ================= helpers cho module mới =================
