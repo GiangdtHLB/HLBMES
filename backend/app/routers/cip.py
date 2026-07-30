@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends
 from ..database import get_db
 from ..schemas import (
     CipApproveIn,
+    CipCopyStepsIn,
     CipEquipmentIn,
     CipEquipmentOut,
     CipFormTypeIn,
@@ -45,6 +46,12 @@ def update_form_type(form_type_id: str, payload: CipFormTypeIn, db: Session = De
 def delete_form_type(form_type_id: str, db: Session = Depends(get_db),
                      user: User = Depends(get_current_user)):
     svc.delete_form_type(db, form_type_id, user)
+
+
+@router.post("/form-types/{form_type_id}/copy-steps", response_model=CipFormTypeOut)
+def copy_default_steps(form_type_id: str, payload: CipCopyStepsIn, db: Session = Depends(get_db),
+                       user: User = Depends(get_current_user)):
+    return svc.copy_default_steps(db, form_type_id, payload.target_form_type_id, user)
 
 
 # ---- Danh mục thiết bị ----

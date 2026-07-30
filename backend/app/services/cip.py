@@ -56,6 +56,30 @@ def update_form_type(db: Session, form_type_id: str, payload: dict, user: User) 
     return ft
 
 
+def copy_default_steps(db: Session, form_type_id: str, target_form_type_id: str, user: User) -> CipFormType:
+    """Copy nguyên bảng bước MẪU (default_steps + đơn vị thời gian/nhiệt độ/nồng độ) từ 1
+    loại biểu mẫu sang loại KHÁC — CHỈ cho phép khi biểu mẫu đích đang trống (chưa khai báo
+    bước nào), để không đè mất bảng bước đã khai báo sẵn của biểu mẫu đó."""
+    require_perm(user, "master.manage")
+    if form_type_id == target_form_type_id:
+        raise DomainError("Biểu mẫu nguồn và biểu mẫu đích phải khác nhau.")
+    src = db.get(CipFormType, form_type_id)
+    if not src:
+        raise NotFoundError("Loại biểu mẫu nguồn không tồn tại.")
+    dst = db.get(CipFormType, target_form_type_id)
+    if not dst:
+        raise NotFoundError("Loại biểu mẫu đích không tồn tại.")
+    if dst.default_steps:
+        raise DomainError(f"Biểu mẫu '{dst.code}' đã có bảng bước — chỉ copy được sang biểu mẫu đang trống.")
+    dst.time_unit = src.time_unit
+    dst.temp_unit = src.temp_unit
+    dst.conc_unit = src.conc_unit
+    dst.default_steps = [dict(s) for s in src.default_steps]
+    db.commit()
+    db.refresh(dst)
+    return dst
+
+
 def delete_form_type(db: Session, form_type_id: str, user: User) -> None:
     require_perm(user, "master.manage")
     ft = db.get(CipFormType, form_type_id)

@@ -104,6 +104,38 @@ def test_form_type_template_steps_editable(client, admin_h):
     assert refetched["default_steps"][0]["content"] == "Bước test sửa mẫu"
 
 
+def test_copy_default_steps_only_when_target_empty(client, admin_h):
+    """Copy bảng bước mẫu (default_steps + đơn vị) từ 1 biểu mẫu sang biểu mẫu KHÁC — chỉ
+    cho phép khi đích đang trống; nếu đích đã có bước thì phải chặn (409), không được đè mất."""
+    src = _form_type(client, admin_h, "2.1.2/2025/QT-KCS-QT-BM-01")  # có sẵn 11 bước (seed)
+
+    empty = client.post("/api/cip/form-types", headers=admin_h,
+                        json={"code": "QT-COPY-TEST-01", "name": "Biểu mẫu test copy (trống)",
+                              "area": "nau", "kind": "full"})
+    assert empty.status_code == 201, empty.text
+    target_id = empty.json()["form_type_id"]
+    assert empty.json()["default_steps"] == []
+
+    copied = client.post(f"/api/cip/form-types/{src['form_type_id']}/copy-steps", headers=admin_h,
+                         json={"target_form_type_id": target_id})
+    assert copied.status_code == 200, copied.text
+    assert len(copied.json()["default_steps"]) == len(src["default_steps"])
+    assert copied.json()["default_steps"][0]["content"] == src["default_steps"][0]["content"]
+    assert copied.json()["time_unit"] == src["time_unit"]
+
+    # Copy lần 2 sang chính biểu mẫu đích đó (giờ đã có bước) -> phải bị chặn.
+    other_src = _form_type(client, admin_h, "2.4.2/2025-QT-KCS-QT-BM-03")
+    blocked = client.post(f"/api/cip/form-types/{other_src['form_type_id']}/copy-steps", headers=admin_h,
+                          json={"target_form_type_id": target_id})
+    assert blocked.status_code == 409, blocked.text
+    assert "đang trống" in blocked.json()["detail"]
+
+    # Copy sang chính nó -> chặn.
+    self_copy = client.post(f"/api/cip/form-types/{src['form_type_id']}/copy-steps", headers=admin_h,
+                            json={"target_form_type_id": src["form_type_id"]})
+    assert self_copy.status_code == 409, self_copy.text
+
+
 def test_cip_manage_permission_gates_record_creation(client, vanhanh_h, thukho_h, admin_h):
     ft = _form_type(client, admin_h, "2.4.2/2025-QT-KCS-QT-BM-01(01)")
     eq = _equipment(client, admin_h, "EQ-NAU-01")

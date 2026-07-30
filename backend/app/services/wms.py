@@ -705,15 +705,20 @@ def transfer_units(db: Session, unit_ids: list, to_loc_id: str, user: User) -> d
     return {"moved": moved_count, "to_location": to_loc.code, "unit_codes": unit_codes}
 
 
-def _decompose_one_vi(db: Session, u: FinishedGoodsUnit, actor_username: str) -> list:
-    """Sinh 1 dòng LON từ 1 dòng VỈ (nội bộ, không audit/không commit — gọi trong transaction
-    lớn hơn của decompose_unit/decompose_batch). quantity vốn đã tính theo SL nhỏ nhất (lon)
-    ngay từ đầu (xem docs/WMS-LOT-LEVEL-REDESIGN.md) nên dòng lon KẾ THỪA NGUYÊN quantity của
-    dòng vỉ nguồn — phân rã không đổi tổng số lon, chỉ đổi unit_type; không cần nhân/chia
-    pack_size ở đây (khác hẳn trước đây khi 1 dòng=1 vỉ, quantity=lon/vỉ, phải sinh
-    round(quantity) dòng lon riêng lẻ). Đánh dấu dòng vỉ gốc status="decomposed" (không xóa,
-    giữ để truy vết genealogy/audit, loại khỏi mọi truy vấn tồn khả dụng). Dòng lon kế thừa
-    created_at của dòng vỉ để FIFO tính đúng theo tuổi bia thật."""
+def _decompose_one_pack_unit(db: Session, u: FinishedGoodsUnit, actor_username: str) -> list:
+    """Sinh 1 dòng LON từ 1 dòng đơn vị ĐÓNG GÓI bất kỳ (Vỉ, Két, Lốc... — bất kỳ loại nào có
+    divide_by_pack_size=True trong Danh mục Loại đơn vị tồn kho, xem decompose_unit/
+    decompose_batch; KHÔNG còn giới hạn riêng "vỉ" như tên hàm cũ). unit_type đích luôn là mã
+    hệ thống dùng chung "lon" (không phải luôn lon vật lý — suy danh từ hiển thị thật từ tên
+    sản phẩm ở tầng đọc, xem genealogy.py::_small_unit_noun/wms.py::_unit_noun/
+    views_ext.js::smallUnitNoun — KHÔNG đổi ở đây để không phá vỡ mọi chỗ đang lọc theo
+    unit_type=="lon"). quantity vốn đã tính theo SL nhỏ nhất ngay từ đầu (xem
+    docs/WMS-LOT-LEVEL-REDESIGN.md) nên dòng lon KẾ THỪA NGUYÊN quantity của dòng nguồn — phân
+    rã không đổi tổng số lon, chỉ đổi unit_type; không cần nhân/chia pack_size ở đây (khác hẳn
+    trước đây khi 1 dòng=1 vỉ, quantity=lon/vỉ, phải sinh round(quantity) dòng lon riêng lẻ).
+    Đánh dấu dòng nguồn status="decomposed" (không xóa, giữ để truy vết genealogy/audit, loại
+    khỏi mọi truy vấn tồn khả dụng). Dòng lon kế thừa created_at của dòng nguồn để FIFO tính
+    đúng theo tuổi bia thật."""
     stamp = f"{utcnow():%y%m%d}-{new_id()[:4].upper()}"
     lon = FinishedGoodsUnit(unit_id=new_id(), unit_code=f"LON-{stamp}-0001", unit_type="lon",
                             finished_product_id=u.finished_product_id, product_name=u.product_name,
@@ -729,18 +734,20 @@ def _decompose_one_vi(db: Session, u: FinishedGoodsUnit, actor_username: str) ->
 
 
 def decompose_unit(db: Session, unit_id: str, user: User) -> dict:
-    """Phân rã 1 dòng vỉ cụ thể (theo unit_id) thành 1 dòng lon."""
+    """Phân rã 1 dòng đơn vị đóng gói cụ thể (theo unit_id) thành 1 dòng lon — cho phép với
+    BẤT KỲ loại đơn vị nào có divide_by_pack_size=True trong Danh mục Loại đơn vị tồn kho
+    (Vỉ, Két, Lốc...), không còn giới hạn cứng riêng "vỉ"."""
     require_perm(user, "warehouse.issue")
     u = db.get(FinishedGoodsUnit, unit_id)
     if not u:
-        raise NotFoundError("Vỉ không tồn tại.")
-    if u.unit_type != "vi":
-        raise DomainError("Chỉ có thể phân rã đơn vị loại vỉ.")
+        raise NotFoundError("Đơn vị không tồn tại.")
+    if u.unit_type not in _divide_by_pack_codes(db):
+        raise DomainError("Chỉ có thể phân rã loại đơn vị đóng gói (xem Danh mục Loại đơn vị tồn kho).")
     if u.status != "stored":
-        raise DomainError("Chỉ phân rã được vỉ đang tồn kho (chưa xuất/chưa phân rã).")
+        raise DomainError("Chỉ phân rã được đơn vị đang tồn kho (chưa xuất/chưa phân rã).")
 
     lon_qty = u.quantity
-    lon_units = _decompose_one_vi(db, u, user.username)
+    lon_units = _decompose_one_pack_unit(db, u, user.username)
     record_audit(db, entity_type="finished_goods_unit", entity_id=u.unit_id, action="decompose", actor=user,
                  before={"unit_code": u.unit_code, "quantity": u.quantity,
                          "product_name": u.product_name, "lot_code": u.lot_code},
@@ -750,32 +757,37 @@ def decompose_unit(db: Session, unit_id: str, user: User) -> dict:
             "lon_unit_codes": [l.unit_code for l in lon_units]}
 
 
-def decompose_batch(db: Session, product_name: str, lot_code: str, count: int, user: User) -> dict:
-    """Phân rã N vỉ (cũ nhất trước — FIFO) của 1 sản phẩm/lô thành lon — dùng cho kho có
-    hàng trăm ngàn vỉ dồn vào rất ít dòng (xem docs/WMS-LOT-LEVEL-REDESIGN.md), không yêu
-    cầu chọn từng vỉ một. Nếu tồn ít hơn N, phân rã hết số hiện có (trả về đúng số đã xử lý
-    để frontend báo nếu thiếu)."""
+def decompose_batch(db: Session, product_name: str, lot_code: str, unit_type: str, count: int, user: User) -> dict:
+    """Phân rã N đơn vị đóng gói (Vỉ/Két/Lốc..., cũ nhất trước — FIFO) của 1 sản phẩm/lô thành
+    lon — dùng cho kho có hàng trăm ngàn đơn vị dồn vào rất ít dòng (xem
+    docs/WMS-LOT-LEVEL-REDESIGN.md), không yêu cầu chọn từng đơn vị một. unit_type PHẢI là
+    loại có divide_by_pack_size=True trong Danh mục Loại đơn vị tồn kho — 1 lô có thể đồng
+    thời tồn nhiều loại đơn vị khác nhau (VD vừa Két vừa Chai lẻ) nên không được đoán ngầm,
+    phải chỉ rõ loại nào cần phân rã. Nếu tồn ít hơn N, phân rã hết số hiện có (trả về đúng số
+    đã xử lý để frontend báo nếu thiếu)."""
     require_perm(user, "warehouse.issue")
     if count <= 0:
-        raise DomainError("Số vỉ cần phân rã phải > 0.")
+        raise DomainError("Số lượng cần phân rã phải > 0.")
+    if unit_type not in _divide_by_pack_codes(db):
+        raise DomainError("Chỉ có thể phân rã loại đơn vị đóng gói (xem Danh mục Loại đơn vị tồn kho).")
     fp = db.execute(select(FinishedProduct).where(FinishedProduct.code == product_name)).scalar_one_or_none()
-    divisor = _pack_divisor(fp, "vi", _divide_by_pack_codes(db))
-    candidates, got = _consume_lot_rows(db, product_name=product_name, unit_type="vi", status="stored",
+    divisor = _pack_divisor(fp, unit_type, _divide_by_pack_codes(db))
+    candidates, got = _consume_lot_rows(db, product_name=product_name, unit_type=unit_type, status="stored",
                                         quantity_needed=count * divisor, lot_code=lot_code)
     if not candidates:
-        raise DomainError("Không còn vỉ nào tồn kho cho sản phẩm/lô này.")
+        raise DomainError("Không còn đơn vị nào tồn kho cho sản phẩm/lô/loại này.")
 
     vi_decomposed = got / divisor
     source_unit_ids = [u.unit_id for u in candidates]
     lon_unit_ids = []
     lon_created = 0.0
     for u in candidates:
-        lons = _decompose_one_vi(db, u, user.username)
+        lons = _decompose_one_pack_unit(db, u, user.username)
         lon_unit_ids += [lon.unit_id for lon in lons]
         lon_created += sum(lon.quantity for lon in lons)
 
     entry = record_audit(db, entity_type="finished_goods_unit", entity_id=new_id(), action="decompose_batch", actor=user,
-                         before={"product_name": product_name, "lot_code": lot_code, "requested": count},
+                         before={"product_name": product_name, "lot_code": lot_code, "unit_type": unit_type, "requested": count},
                          after={"vi_decomposed": vi_decomposed, "lon_created": lon_created,
                                 "source_unit_ids": source_unit_ids, "lon_unit_ids": lon_unit_ids})
     db.commit()

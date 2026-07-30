@@ -1167,15 +1167,19 @@
         });
       });
       function openUnitGroupModal(g0) {
-        const canDecompose = g0.unit_type === "vi";
+        // Phân rã áp dụng cho MỌI loại đơn vị đóng gói (không riêng "vi") — đọc cờ
+        // divide_by_pack_size từ Danh mục Loại đơn vị tồn kho thay vì hardcode 1 mã cố định
+        // (xem services/wms.py::decompose_batch).
+        const ut0 = utByCode[g0.unit_type];
+        const canDecompose = g0.unit_type === "vi" || !!(ut0 && ut0.divide_by_pack_size);
         modal(`<h3>${unitTypeLabel(g0)} — ${esc(fpLabel(g0.product))} ${esc(g0.lot_code || "")}</h3>
           <div class="muted" style="margin-bottom:10px">${badge("available")}stored ·
             Tổng <b>${g0.count}</b> đơn vị · Tổng SL nhỏ <b>${g0.qty}</b></div>
           <div class="row" style="margin-bottom:12px"><button class="btn sec" id="ugm_label">🖨️ Tem lô (${esc(g0.lot_code || g0.product || "")})</button>
             <button class="btn sec" id="ugm_del" style="color:var(--red)">🗑️ Xóa lô đã nhập</button></div>
           ${canDecompose ? `<div class="panel" style="margin-bottom:12px"><h3 style="font-size:14px">🔨 Phân rã theo số lượng</h3>
-            <div class="muted" style="font-size:12px;margin-bottom:6px">Chọn số vỉ cần phân rã tại lô này (cũ nhất phân rã trước) — không cần chọn từng vỉ, phù hợp cả khi tồn hàng trăm ngàn vỉ.</div>
-            <div class="row"><div class="field"><label>Số vỉ cần phân rã (tối đa ${g0.count})</label>
+            <div class="muted" style="font-size:12px;margin-bottom:6px">Chọn số ${esc(unitTypeLabel(g0).toLowerCase())} cần phân rã tại lô này (cũ nhất phân rã trước) — không cần chọn từng đơn vị, phù hợp cả khi tồn hàng trăm ngàn đơn vị.</div>
+            <div class="row"><div class="field"><label>Số ${esc(unitTypeLabel(g0).toLowerCase())} cần phân rã (tối đa ${g0.count})</label>
               <input id="dpq_count" type="number" min="1" max="${g0.count}" value="${g0.count}" style="width:110px"/></div>
               <button class="btn" id="dpq_do" style="align-self:flex-end">Phân rã</button></div></div>` : ""}`);
 
@@ -1193,13 +1197,14 @@
         if (canDecompose) {
           $("dpq_do").onclick = () => guard(async () => {
             const count = parseInt($("dpq_count").value, 10) || 0;
-            if (count <= 0) { toast("Nhập số vỉ cần phân rã", "err"); return; }
-            if (!confirm(`Phân rã ${count} vỉ (cũ nhất trước) của ${g0.product || ""} ${g0.lot_code || ""} thành lon? Không thể hoàn tác.`)) return;
+            const noun = unitTypeLabel(g0).toLowerCase();
+            if (count <= 0) { toast(`Nhập số ${noun} cần phân rã`, "err"); return; }
+            if (!confirm(`Phân rã ${count} ${noun} (cũ nhất trước) của ${g0.product || ""} ${g0.lot_code || ""} thành lon? Không thể hoàn tác.`)) return;
             const res = await POST("/wms/units/decompose-batch",
-              { product_name: g0.product, lot_code: g0.lot_code, count });
+              { product_name: g0.product, lot_code: g0.lot_code, unit_type: g0.unit_type, count });
             closeModal();
-            toast(`Đã phân rã ${res.vi_decomposed} vỉ thành ${res.lon_created} lon`
-              + (res.vi_decomposed < res.requested ? ` (chỉ còn ${res.vi_decomposed} vỉ tồn kho, ít hơn ${res.requested} yêu cầu)` : ""));
+            toast(`Đã phân rã ${res.vi_decomposed} ${noun} thành ${res.lon_created} lon`
+              + (res.vi_decomposed < res.requested ? ` (chỉ còn ${res.vi_decomposed} ${noun} tồn kho, ít hơn ${res.requested} yêu cầu)` : ""));
             render("wms");
           });
         }
@@ -2300,7 +2305,10 @@
             <th style="width:120px">Người làm</th><th style="width:120px">Ghi chú</th><th style="width:36px"></th></tr></thead>
           <tbody id="mau_steps_body"></tbody></table></div>
         <button class="btn sm sec" id="mau_step_add" style="margin-top:6px">+ Thêm bước</button>
-        <div class="row" style="margin-top:10px"><button class="btn" id="mau_save">Lưu bảng bước mẫu (tiêu chuẩn)</button></div>`);
+        <div class="row" style="margin-top:10px">
+          <button class="btn" id="mau_save">Lưu bảng bước mẫu (tiêu chuẩn)</button>
+          <button class="btn sec" id="mau_copy">📋 Copy sang biểu mẫu khác</button>
+        </div>`);
     } else if (sec === "khaibao") {
       const ftOpt = formTypes.map(f => `<option value="${esc(f.form_type_id)}" data-area="${esc(f.area)}">${esc(f.code)} — ${esc(f.name)}</option>`).join("");
       const eqOpt = equipment.map(e => `<option value="${esc(e.equipment_id)}" data-area="${esc(e.area)}">${esc(e.code)} — ${esc(e.name)}</option>`).join("");
@@ -2421,6 +2429,28 @@
         });
         toast("Đã lưu bảng bước mẫu"); render("cip");
       });
+      $("mau_copy").onclick = () => {
+        const others = formTypes.filter(f => f.form_type_id !== ft.form_type_id);
+        const emptyOthers = others.filter(f => !f.default_steps.length);
+        if (!others.length) { toast("Chưa có biểu mẫu nào khác để copy sang.", "err"); return; }
+        const opts = others.map(f => `<option value="${esc(f.form_type_id)}" ${f.default_steps.length ? "disabled" : ""}>
+          ${esc(f.code)} — ${esc(f.name)}${f.default_steps.length ? " (đã có bước — không copy được)" : " (trống)"}</option>`).join("");
+        modal(`
+          <h3>📋 Copy bảng bước sang biểu mẫu khác</h3>
+          <div class="muted" style="margin-bottom:8px">Chép nguyên bảng bước + đơn vị thời gian/nhiệt độ/nồng độ từ
+            <b>${esc(ft.code)}</b> sang 1 biểu mẫu KHÁC — chỉ thực hiện được khi biểu mẫu đích đang TRỐNG (chưa khai báo bước nào).</div>
+          ${!emptyOthers.length ? '<div class="muted" style="color:var(--red)">Mọi biểu mẫu khác đều đã có bảng bước — không còn biểu mẫu trống để copy sang.</div>'
+            : `<div class="field"><label>Biểu mẫu đích</label><select id="copy_target" style="width:100%">${opts}</select></div>
+          <div class="row" style="margin-top:12px"><button class="btn" id="copy_confirm">Copy</button></div>`}`);
+        if (emptyOthers.length) {
+          $("copy_target").value = emptyOthers[0].form_type_id;
+          $("copy_confirm").onclick = () => guard(async () => {
+            await POST(`/cip/form-types/${ft.form_type_id}/copy-steps`, { target_form_type_id: $("copy_target").value });
+            toast("Đã copy bảng bước"); closeModal();
+            CIP_MAU_FT = $("copy_target").value; render("cip");
+          });
+        }
+      };
     } else if (sec === "khaibao" && canManage) {
       const seqRef = { n: 0 };
       const fillFromFormType = () => {

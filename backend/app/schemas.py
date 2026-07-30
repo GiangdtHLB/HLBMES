@@ -407,6 +407,11 @@ class UnitDeleteIn(BaseModel):
 class DecomposeBatchIn(BaseModel):
     product_name: str
     lot_code: Optional[str] = None
+    # Loại đơn vị NGUỒN đem phân rã — mặc định "vi" để tương thích ngược, nhưng PHẢI là loại
+    # có divide_by_pack_size=True trong Danh mục Loại đơn vị tồn kho (Vỉ, Két, Lốc...), xem
+    # services/wms.py::decompose_batch. Không mặc định cứng "vi" ở tầng service vì 1 lô có thể
+    # đồng thời có nhiều loại đơn vị (VD vừa Két vừa Chai) — phải chọn rõ loại nào.
+    unit_type: str = "vi"
     # float chứ không phải int — lô đã bị chia lẻ một phần (VD sau relocate/decompose trước
     # đó) hoàn toàn có thể còn tồn dạng số lẻ (VD 0.625 vỉ); int sẽ làm FastAPI trả 422 ngay
     # cả khi người dùng nhập ĐÚNG số tối đa hiển thị trên UI (xem cùng lỗi ở RelocateBatchIn/
@@ -1550,6 +1555,10 @@ class CipFormTypeIn(BaseModel):
     # Bảng bước MẪU khai báo trước theo đúng biểu mẫu giấy gốc — khi tạo 1 lần CIP mới,
     # chọn form_type sẽ tự điền bảng bước từ đây (vẫn sửa/thêm/bớt được, không khoá cứng).
     default_steps: list[CipStepIn] = []
+
+
+class CipCopyStepsIn(BaseModel):
+    target_form_type_id: str = Field(min_length=1)
 
 
 class CipFormTypeOut(ORMModel):
