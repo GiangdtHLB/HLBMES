@@ -1,7 +1,7 @@
 """quality_result.sampled_at — mốc ngày giờ lấy mẫu (nhiều lần) cho CT chính/CT phụ lên men
 
 Revision ID: e644f098d750
-Revises: d1e2f3a4b5c7
+Revises: e2f3a4b5c6d8
 Create Date: 2026-07-25
 
 Cho phép 1 chỉ tiêu có NHIỀU dòng kết quả theo thời gian (lần 1, lần 2, lần 3...) thay vì
@@ -15,7 +15,7 @@ from alembic import op
 import sqlalchemy as sa
 
 revision = 'e644f098d750'
-down_revision = 'd1e2f3a4b5c7'
+down_revision = 'e2f3a4b5c6d8'
 branch_labels = None
 depends_on = None
 
