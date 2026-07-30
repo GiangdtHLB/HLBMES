@@ -138,6 +138,13 @@ def qc_attention_alerts(db: Session = Depends(get_db), user: User = Depends(get_
     return dashboard_svc.qc_attention_alerts(db)
 
 
+@router.get("/low-yield-filter-alerts")
+def low_yield_filter_alerts(days: int = 5, limit: int = 5, db: Session = Depends(get_db),
+                            user: User = Depends(get_current_user)):
+    from ..services import dashboard as dashboard_svc
+    return dashboard_svc.low_yield_filter_alerts(db, days, limit)
+
+
 # ---- Báo cáo tồn kho thành phẩm theo tuổi lô (cho khối kinh doanh đẩy nhanh bán hàng) ----
 @router.get("/inventory-aging")
 def inventory_aging(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
@@ -146,3 +153,33 @@ def inventory_aging(db: Session = Depends(get_db), user: User = Depends(get_curr
     settings = ops_setting_svc.get_settings(db)
     return wms_svc.lot_aging_report(db, settings.aging_caution_days, settings.aging_warning_days,
                                     settings.aging_critical_days)
+
+
+# ---- Báo cáo sản lượng lọc theo mẻ (Thấp/Bình thường/Cao so với ngưỡng OpsSetting) ----
+@router.get("/filter-yield-report")
+def filter_yield_report(date_from: datetime = None, date_to: datetime = None, group_by: str = "day",
+                        db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    from ..services import filter_yield_report as filter_yield_svc
+    from ..services import ops_setting as ops_setting_svc
+    if not date_from or not date_to:
+        # Mặc định: 90 ngày gần nhất.
+        date_to = date_to or utcnow()
+        date_from = date_from or (date_to - timedelta(days=90))
+    settings = ops_setting_svc.get_settings(db)
+    return filter_yield_svc.filter_yield_report(db, date_from, date_to, settings.filter_yield_low_hl,
+                                                settings.filter_yield_high_hl, group_by)
+
+
+# ---- Báo cáo sản lượng lọc theo TỪNG DÒNG "mẻ lọc số" (kèm truy vết tank LM/mẻ nấu nguồn) ----
+@router.get("/filter-line-yield-report")
+def filter_line_yield_report(date_from: datetime = None, date_to: datetime = None,
+                             db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    from ..services import filter_yield_report as filter_yield_svc
+    from ..services import ops_setting as ops_setting_svc
+    if not date_from or not date_to:
+        date_to = date_to or utcnow()
+        date_from = date_from or (date_to - timedelta(days=90))
+    settings = ops_setting_svc.get_settings(db)
+    return filter_yield_svc.filter_line_yield_report(db, date_from, date_to,
+                                                     settings.filter_line_yield_low_l,
+                                                     settings.filter_line_yield_high_l)

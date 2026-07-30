@@ -39,9 +39,14 @@ def filter_status(r: FilterRecord) -> str:
     chưa chiết chút nào / đang chiết (chưa hết) / đã chiết hết (on_hand_bbt về 0). ended_at
     (toàn bản ghi) chỉ có khi TẤT CẢ tank của bản ghi đã bấm "Kết thúc" (xem
     routers/brewing.py::_sync_filter_aggregate) — trong lúc đó phải coi là "đang lọc", KHÔNG
-    phải "chờ chiết" (dễ hiểu nhầm là đã lọc xong, chỉ còn chờ đem đi chiết)."""
+    phải "chờ chiết" (dễ hiểu nhầm là đã lọc xong, chỉ còn chờ đem đi chiết). Sau khi lọc xong
+    nhưng CHƯA được KCS duyệt (qc_approved) phải coi là "chờ duyệt" — chưa cho phép chiết (xem
+    filter_order_svc.available_bbt_tanks gate any_qc_approved) nên không được hiện "chờ chiết"
+    (dễ hiểu nhầm là đã sẵn sàng đem đi chiết)."""
     if r.ended_at is None:
         return "dang_loc"
+    if not r.qc_approved:
+        return "cho_duyet"
     if r.v_beer_hl <= 1e-6:
         return "cho_chiet"
     if r.on_hand_bbt <= 1e-6:

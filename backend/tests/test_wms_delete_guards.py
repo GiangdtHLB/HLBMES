@@ -107,7 +107,8 @@ def _build_chain(client, admin_h, vanhanh_h, kcs_h, suffix, finished_product_id=
     filter_id = f.json()["filter_id"]
     filter_tanks = client.get(f"/api/brewing/filters/{filter_id}/tanks", headers=admin_h).json()
     fin = client.post(f"/api/brewing/filters/{filter_id}/tanks/{filter_tanks[0]['line_id']}/finish",
-                      headers=vanhanh_h, json={"v_dich_hl": 100, "nuoc_bai_khi_hl": 0})
+                      headers=vanhanh_h, json={"v_dich_hl": 100, "nuoc_bai_khi_hl": 0,
+                                                "batch_number": f"B-{suffix}", "order_number": f"O-{suffix}", "batch_seq_no": "1"})
     assert fin.status_code == 200, fin.text
     _declare_pending(client, vanhanh_h, "loc", "filter", filter_code)
     approve_filter = client.post(f"/api/brewing/filters/{filter_id}/approve", headers=kcs_h)

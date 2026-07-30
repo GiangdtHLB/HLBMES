@@ -288,7 +288,8 @@ def test_khong_phoi_finish_updates_record_and_deducts_on_hand_cct(client, admin_
     line_id = tanks[0]["line_id"]
 
     fin = client.post(f"/api/brewing/filters/{filter_id}/tanks/{line_id}/finish", headers=vanhanh_h,
-                      json={"v_dich_hl": 90, "nuoc_bai_khi_hl": 10})
+                      json={"v_dich_hl": 90, "nuoc_bai_khi_hl": 10,
+                            "batch_number": "B-KPFIN01", "order_number": "O-KPFIN01", "batch_seq_no": "1"})
     assert fin.status_code == 200, fin.text
     assert fin.json()["v_dich_hl"] == 90
     assert fin.json()["nuoc_bai_khi_hl"] == 10
@@ -321,7 +322,8 @@ def test_phoi_two_tanks_finish_separately_then_aggregate(client, admin_h, vanhan
 
     # Kết thúc tank 1 — bản ghi tổng CHƯA hoàn thành (tank 2 chưa xong), số liệu chỉ phản ánh tank 1.
     fin1 = client.post(f"/api/brewing/filters/{filter_id}/tanks/{line1['line_id']}/finish", headers=vanhanh_h,
-                       json={"v_dich_hl": 60, "nuoc_bai_khi_hl": 0})
+                       json={"v_dich_hl": 60, "nuoc_bai_khi_hl": 0,
+                             "batch_number": "B-PHFIN01", "order_number": "O-PHFIN01", "batch_seq_no": "1"})
     assert fin1.status_code == 200, fin1.text
     assert fin1.json()["ended_at"] is None
     assert fin1.json()["v_dich_hl"] == 60
@@ -333,7 +335,8 @@ def test_phoi_two_tanks_finish_separately_then_aggregate(client, admin_h, vanhan
 
     # Kết thúc tank 2 — giờ tổng đúng bằng tổng 2 tank, bản ghi hoàn thành.
     fin2 = client.post(f"/api/brewing/filters/{filter_id}/tanks/{line2['line_id']}/finish", headers=vanhanh_h,
-                       json={"v_dich_hl": 40, "nuoc_bai_khi_hl": 0})
+                       json={"v_dich_hl": 40, "nuoc_bai_khi_hl": 0,
+                             "batch_number": "B-PHFIN01", "order_number": "O-PHFIN01", "batch_seq_no": "1"})
     assert fin2.status_code == 200, fin2.text
     assert fin2.json()["ended_at"] is not None
     assert fin2.json()["v_dich_hl"] == 100
@@ -346,7 +349,8 @@ def test_phoi_two_tanks_finish_separately_then_aggregate(client, admin_h, vanhan
 
     # Sửa lại số liệu tank 1 (bấm nhầm) — tổng cập nhật đúng theo delta, không cộng dồn sai.
     fixed = client.post(f"/api/brewing/filters/{filter_id}/tanks/{line1['line_id']}/finish", headers=vanhanh_h,
-                        json={"v_dich_hl": 50, "nuoc_bai_khi_hl": 0})
+                        json={"v_dich_hl": 50, "nuoc_bai_khi_hl": 0,
+                              "batch_number": "B-PHFIN01", "order_number": "O-PHFIN01", "batch_seq_no": "1"})
     assert fixed.status_code == 200, fixed.text
     assert fixed.json()["v_dich_hl"] == 90
     assert fixed.json()["v_beer_hl"] == 90
@@ -406,7 +410,8 @@ def test_lo_status_reflects_phoi_filter(client, admin_h, vanhanh_h, lager_produc
     tanks = client.get(f"/api/brewing/filters/{filt['filter_id']}/tanks", headers=admin_h).json()
     for t in tanks:
         client.post(f"/api/brewing/filters/{filt['filter_id']}/tanks/{t['line_id']}/finish", headers=vanhanh_h,
-                   json={"v_dich_hl": 50, "nuoc_bai_khi_hl": 0})
+                   json={"v_dich_hl": 50, "nuoc_bai_khi_hl": 0,
+                         "batch_number": "B-PHLOS01", "order_number": "O-PHLOS01", "batch_seq_no": "1"})
     assert _row(brew1["brew_id"])["loc"] == "da_ket_thuc"
     assert _row(brew2["brew_id"])["loc"] == "da_ket_thuc"
 
@@ -589,7 +594,8 @@ def test_order_completes_when_actual_volume_within_tolerance(client, admin_h, va
 
     tanks = client.get(f"/api/brewing/filters/{filter_id}/tanks", headers=admin_h).json()
     fin = client.post(f"/api/brewing/filters/{filter_id}/tanks/{tanks[0]['line_id']}/finish",
-                      headers=vanhanh_h, json={"v_dich_hl": 91, "nuoc_bai_khi_hl": 5})
+                      headers=vanhanh_h, json={"v_dich_hl": 91, "nuoc_bai_khi_hl": 5,
+                                                "batch_number": "B-VOL04", "order_number": "O-VOL04", "batch_seq_no": "1"})
     assert fin.status_code == 200, fin.text
     assert fin.json()["v_beer_hl"] == 96
 
@@ -623,7 +629,8 @@ def test_multiple_batches_accumulate_volume_independently(client, admin_h, vanha
     filter_id_a = r1.json()["filter_id"]
     tanks_a = client.get(f"/api/brewing/filters/{filter_id_a}/tanks", headers=admin_h).json()
     fin_a = client.post(f"/api/brewing/filters/{filter_id_a}/tanks/{tanks_a[0]['line_id']}/finish",
-                        headers=vanhanh_h, json={"v_dich_hl": 35, "nuoc_bai_khi_hl": 5})
+                        headers=vanhanh_h, json={"v_dich_hl": 35, "nuoc_bai_khi_hl": 5,
+                                                  "batch_number": "B-VOL05-A", "order_number": "O-VOL05-A", "batch_seq_no": "1"})
     assert fin_a.status_code == 200, fin_a.text
     assert fin_a.json()["v_beer_hl"] == 40
 
@@ -642,7 +649,8 @@ def test_multiple_batches_accumulate_volume_independently(client, admin_h, vanha
     tanks_b = client.get(f"/api/brewing/filters/{filter_id_b}/tanks", headers=admin_h).json()
     assert tanks_a[0]["line_id"] != tanks_b[0]["line_id"], "mỗi mẻ lọc phải có dòng Kết thúc riêng"
     fin_b = client.post(f"/api/brewing/filters/{filter_id_b}/tanks/{tanks_b[0]['line_id']}/finish",
-                        headers=vanhanh_h, json={"v_dich_hl": 50, "nuoc_bai_khi_hl": 5})
+                        headers=vanhanh_h, json={"v_dich_hl": 50, "nuoc_bai_khi_hl": 5,
+                                                  "batch_number": "B-VOL05-B", "order_number": "O-VOL05-B", "batch_seq_no": "1"})
     assert fin_b.status_code == 200, fin_b.text
     assert fin_b.json()["v_beer_hl"] == 55, "mẻ B độc lập, không cộng nhầm số của mẻ A"
 

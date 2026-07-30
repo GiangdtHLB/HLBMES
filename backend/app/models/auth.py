@@ -39,6 +39,27 @@ class User(Base):
     last_login_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
 
 
+class RoleTemplate(Base):
+    """Mẫu chức danh — admin tự khai báo (tên chức danh + vai trò hệ thống + menu/quyền/phạm
+    vi mặc định) để chọn nhanh khi tạo tài khoản mới, không cần soạn tay từng trường. Vai trò
+    hệ thống (role) vẫn phải là 1 trong 5 giá trị Role enum vì đó là thứ backend dùng để chặn
+    quyền (require_role) — mẫu chức danh chỉ là lớp đặt tên/đóng gói bên trên, không thay thế
+    cơ chế phân quyền theo Role."""
+    __tablename__ = "role_template"
+
+    role_template_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
+    name: Mapped[str] = mapped_column(Unicode(255))                # tên chức danh, vd "Trưởng ca trực"
+    role: Mapped[str] = mapped_column(Unicode(255))                # vai trò hệ thống (Role enum)
+    allowed_views: Mapped[str] = mapped_column(UnicodeText, default="dashboard")
+    permissions: Mapped[str] = mapped_column(UnicodeText, default="")
+    scope_lines: Mapped[str] = mapped_column(Unicode(255), default="*")
+    scope_areas: Mapped[str] = mapped_column(Unicode(255), default="*")
+    scope_qc: Mapped[str] = mapped_column(Unicode(255), default="*")
+    scope_warehouse: Mapped[str] = mapped_column(Unicode(255), default="*")
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+
+
 class UserSession(Base):
     __tablename__ = "user_session"
 

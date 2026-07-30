@@ -104,7 +104,8 @@ def _a_filter_with_bbt(client, admin_h, vanhanh_h, suffix, v_dich_hl, nuoc_bai_k
     filter_id = f.json()["filter_id"]
     tanks = client.get(f"/api/brewing/filters/{filter_id}/tanks", headers=admin_h).json()
     fin = client.post(f"/api/brewing/filters/{filter_id}/tanks/{tanks[0]['line_id']}/finish", headers=vanhanh_h,
-                      json={"v_dich_hl": v_dich_hl, "nuoc_bai_khi_hl": nuoc_bai_khi_hl})
+                      json={"v_dich_hl": v_dich_hl, "nuoc_bai_khi_hl": nuoc_bai_khi_hl,
+                            "batch_number": f"B-{suffix}", "order_number": f"O-{suffix}", "batch_seq_no": "1"})
     assert fin.status_code == 200, fin.text
     _declare_pending(client, vanhanh_h, "loc", "filter", f"FL-{suffix}")
     approve = client.post(f"/api/brewing/filters/{filter_id}/approve", headers=admin_h)
@@ -159,7 +160,8 @@ def test_empty_ferment_cct_succeeds_within_tolerance(client, admin_h, vanhanh_h)
     tanks = client.get(f"/api/brewing/filters/{filter_id}/tanks", headers=admin_h).json()
     # Lọc 99 hl (còn dư 1 hl trong CCT, trong ngưỡng mặc định 2 hl) -> cạn thật do hao hụt.
     fin = client.post(f"/api/brewing/filters/{filter_id}/tanks/{tanks[0]['line_id']}/finish", headers=vanhanh_h,
-                      json={"v_dich_hl": 99, "nuoc_bai_khi_hl": 0})
+                      json={"v_dich_hl": 99, "nuoc_bai_khi_hl": 0,
+                            "batch_number": "B-EMPTYCCT-OK", "order_number": "O-EMPTYCCT-OK", "batch_seq_no": "1"})
     assert fin.status_code == 200, fin.text
     assert _ferment_on_hand_cct(client, admin_h, ferment_id) == 1
 
@@ -172,17 +174,17 @@ def test_empty_ferment_cct_succeeds_within_tolerance(client, admin_h, vanhanh_h)
     assert already_empty.status_code == 409, already_empty.text
 
 
-def test_empty_filter_bbt_blocked_if_residual_exceeds_tolerance(client, admin_h, vanhanh_h):
+def test_empty_bbt_tank_blocked_if_residual_exceeds_tolerance(client, admin_h, vanhanh_h):
     filter_id, _ = _a_filter_with_bbt(client, admin_h, vanhanh_h, "EMPTYBBT-BLOCK", 90, 10)
     rows = client.get("/api/brewing/filters", headers=admin_h).json()
     row = next(r for r in rows if r["filter_id"] == filter_id)
     assert row["on_hand_bbt"] == 100  # chưa chiết gì -> vượt xa ngưỡng mặc định 2 hl
 
-    blocked = client.post(f"/api/brewing/filters/{filter_id}/empty-bbt", headers=vanhanh_h)
+    blocked = client.post("/api/brewing/bbt-tanks/BBT-EMPTYBBT-BLOCK/empty", headers=vanhanh_h)
     assert blocked.status_code == 409, blocked.text
 
 
-def test_empty_filter_bbt_succeeds_within_tolerance(client, admin_h, vanhanh_h):
+def test_empty_bbt_tank_succeeds_within_tolerance(client, admin_h, vanhanh_h):
     filter_id, _ = _a_filter_with_bbt(client, admin_h, vanhanh_h, "EMPTYBBT-OK", 90, 10)
     bottle_code = "CH-EMPTYBBT-OK"
     b = client.post("/api/brewing/bottles", headers=vanhanh_h,
@@ -197,9 +199,54 @@ def test_empty_filter_bbt_succeeds_within_tolerance(client, admin_h, vanhanh_h):
     row = next(r for r in rows if r["filter_id"] == filter_id)
     assert row["on_hand_bbt"] == 1
 
-    ok = client.post(f"/api/brewing/filters/{filter_id}/empty-bbt", headers=vanhanh_h)
+    ok = client.post("/api/brewing/bbt-tanks/BBT-EMPTYBBT-OK/empty", headers=vanhanh_h)
     assert ok.status_code == 200, ok.text
-    assert ok.json()["on_hand_bbt"] == 0
+    assert ok.json() == {"to_bbt": "BBT-EMPTYBBT-OK", "on_hand_bbt": 0.0}
 
-    already_empty = client.post(f"/api/brewing/filters/{filter_id}/empty-bbt", headers=vanhanh_h)
+    already_empty = client.post("/api/brewing/bbt-tanks/BBT-EMPTYBBT-OK/empty", headers=vanhanh_h)
     assert already_empty.status_code == 409, already_empty.text
+
+
+def test_empty_bbt_tank_aggregates_multiple_filter_records_sharing_tank(client, admin_h, vanhanh_h):
+    """1 tank BBT vật lý dùng chung bởi nhiều mẻ lọc (CHƯA duyệt KCS mẻ nào — mới được phép
+    cùng đổ vào 1 tank, xem _bbt_target_blocked_by) — làm rỗng phải cộng dồn on_hand_bbt của
+    TẤT CẢ các mẻ cùng to_bbt, không chỉ 1 mẻ."""
+    ferment_id_1 = _setup_ferment(client, admin_h, vanhanh_h, "EMPTYBBT-SHARE-1")
+    order_id_1 = _a_filter_order(client, admin_h, "LOC-EMPTYBBT-SHARE-1", [ferment_id_1])
+    f1 = client.post("/api/brewing/filters", headers=vanhanh_h,
+                     json={"filter_code": "FL-EMPTYBBT-SHARE-1", "beer_type": "Bia test",
+                           "filter_order_id": order_id_1, "to_bbt": "BBT-EMPTYBBT-SHARE"})
+    assert f1.status_code == 201, f1.text
+    filter_id_1 = f1.json()["filter_id"]
+    tanks_1 = client.get(f"/api/brewing/filters/{filter_id_1}/tanks", headers=admin_h).json()
+    fin_1 = client.post(f"/api/brewing/filters/{filter_id_1}/tanks/{tanks_1[0]['line_id']}/finish", headers=vanhanh_h,
+                        json={"v_dich_hl": 0.6, "nuoc_bai_khi_hl": 0,
+                              "batch_number": "B-EMPTYBBT-SHARE-1", "order_number": "O-EMPTYBBT-SHARE-1", "batch_seq_no": "1"})
+    assert fin_1.status_code == 200, fin_1.text
+
+    ferment_id_2 = _setup_ferment(client, admin_h, vanhanh_h, "EMPTYBBT-SHARE-2")
+    order_id_2 = _a_filter_order(client, admin_h, "LOC-EMPTYBBT-SHARE-2", [ferment_id_2])
+    f2 = client.post("/api/brewing/filters", headers=vanhanh_h,
+                     json={"filter_code": "FL-EMPTYBBT-SHARE-2", "beer_type": "Bia test",
+                           "filter_order_id": order_id_2, "to_bbt": "BBT-EMPTYBBT-SHARE"})
+    assert f2.status_code == 201, f2.text
+    filter_id_2 = f2.json()["filter_id"]
+    tanks_2 = client.get(f"/api/brewing/filters/{filter_id_2}/tanks", headers=admin_h).json()
+    fin_2 = client.post(f"/api/brewing/filters/{filter_id_2}/tanks/{tanks_2[0]['line_id']}/finish", headers=vanhanh_h,
+                        json={"v_dich_hl": 0.6, "nuoc_bai_khi_hl": 0,
+                              "batch_number": "B-EMPTYBBT-SHARE-2", "order_number": "O-EMPTYBBT-SHARE-2", "batch_seq_no": "1"})
+    assert fin_2.status_code == 200, fin_2.text
+
+    rows = client.get("/api/brewing/filters", headers=admin_h).json()
+    row_1 = next(r for r in rows if r["filter_id"] == filter_id_1)
+    row_2 = next(r for r in rows if r["filter_id"] == filter_id_2)
+    assert row_1["on_hand_bbt"] == 0.6
+    assert row_2["on_hand_bbt"] == 0.6
+    # Tổng 1.2 hl -> trong ngưỡng mặc định 2 hl, cho phép làm rỗng cả 2 cùng lúc.
+
+    ok = client.post("/api/brewing/bbt-tanks/BBT-EMPTYBBT-SHARE/empty", headers=vanhanh_h)
+    assert ok.status_code == 200, ok.text
+
+    rows_after = client.get("/api/brewing/filters", headers=admin_h).json()
+    assert next(r for r in rows_after if r["filter_id"] == filter_id_1)["on_hand_bbt"] == 0
+    assert next(r for r in rows_after if r["filter_id"] == filter_id_2)["on_hand_bbt"] == 0

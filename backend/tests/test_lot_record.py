@@ -138,7 +138,8 @@ def chain(client, admin_h, vanhanh_h, thukho_h, brewhouse_line_id):
     filter_id = f.json()["filter_id"]
     filter_tanks = client.get(f"/api/brewing/filters/{filter_id}/tanks", headers=admin_h).json()
     fin = client.post(f"/api/brewing/filters/{filter_id}/tanks/{filter_tanks[0]['line_id']}/finish",
-                      headers=vanhanh_h, json={"v_dich_hl": 100, "nuoc_bai_khi_hl": 0})
+                      headers=vanhanh_h, json={"v_dich_hl": 100, "nuoc_bai_khi_hl": 0,
+                                                "batch_number": f"B-{suffix}", "order_number": f"O-{suffix}", "batch_seq_no": "1"})
     assert fin.status_code == 200, fin.text
     approve_f = client.post(f"/api/brewing/filters/{filter_id}/approve", headers=admin_h)
     assert approve_f.status_code == 200, approve_f.text
@@ -190,6 +191,21 @@ def test_lot_record_by_bottle_code(client, admin_h, chain):
 
     assert len(data["filters"]) == 1 and data["filters"][0]["filter_code"] == chain["filter_code"]
     assert data["filters"][0]["started_at"] is not None
+    # "Mẻ lọc nhỏ"/"mẻ lọc số" (FilterOrderTank, từng đợt rút dịch) phải liệt kê đầy đủ trong
+    # hồ sơ điện tử, không chỉ tổng hợp cấp "mẻ lọc to" (FilterRecord) — xem lot_record.py::
+    # _filter_detail. chain fixture finish() đúng 1 dòng batch_seq_no="1", v_dich_hl=100.
+    suffix = "LOTRECORD01"
+    tank_lines = data["filters"][0]["tank_lines"]
+    assert len(tank_lines) == 1
+    assert tank_lines[0]["batch_seq_no"] == "1"
+    assert tank_lines[0]["v_dich_hl"] == 100
+    assert tank_lines[0]["v_beer_hl"] == 100
+    assert tank_lines[0]["tank_lm"] == f"T-{suffix}"
+    assert tank_lines[0]["brew_code"] == chain["brew_code"]
+    assert tank_lines[0]["ended_at"] is not None
+    assert tank_lines[0]["is_final_batch"] is False
+    assert data["filters"][0]["batch_number"] == f"B-{suffix}"
+    assert data["filters"][0]["order_number"] == f"O-{suffix}"
 
     assert len(data["bottles"]) == 1
     bottle = data["bottles"][0]
@@ -328,7 +344,8 @@ def test_lot_record_filter_and_bottle_qc_scoped_by_beer_type(client, admin_h, va
     filter_id = f.json()["filter_id"]
     filter_tanks = client.get(f"/api/brewing/filters/{filter_id}/tanks", headers=admin_h).json()
     fin = client.post(f"/api/brewing/filters/{filter_id}/tanks/{filter_tanks[0]['line_id']}/finish",
-                      headers=vanhanh_h, json={"v_dich_hl": 100, "nuoc_bai_khi_hl": 0})
+                      headers=vanhanh_h, json={"v_dich_hl": 100, "nuoc_bai_khi_hl": 0,
+                                                "batch_number": f"B-{suffix}", "order_number": f"O-{suffix}", "batch_seq_no": "1"})
     assert fin.status_code == 200, fin.text
     # Duyệt mẻ lọc để tank BBT đủ điều kiện chiết (eligible_for_chiet đòi qc_approved) —
     # khai chỉ tiêu Lọc trước khi duyệt, nên required (không phải pending) là nơi chứng

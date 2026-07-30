@@ -11,7 +11,7 @@ from ..audit import record_audit
 from ..common import Role, new_id, utcnow
 from ..database import get_db
 from ..errors import DomainError, NotFoundError, PermissionError_
-from ..models.auth import User as UserModel, UserSession
+from ..models.auth import RoleTemplate, User as UserModel, UserSession
 from ..security import (
     PERMISSION_CATALOG,
     User,
@@ -51,11 +51,30 @@ class CopyPermissionsIn(BaseModel):
     source_username: str
 
 
+class EditUserIn(BaseModel):
+    full_name: str
+    job_title: str
+    role: str
+    allowed_views: str
+    permissions: str = ""
+
+
 class ScopeIn(BaseModel):
     scope_lines: str = "*"   # csv hoặc "*"
     scope_areas: str = "*"
     scope_qc: str = "*"
     scope_warehouse: str = "*"   # cong_ty|phan_xuong|"*"
+
+
+class RoleTemplateIn(BaseModel):
+    name: str
+    role: str
+    allowed_views: str = "dashboard"
+    permissions: str = ""
+    scope_lines: str = "*"
+    scope_areas: str = "*"
+    scope_qc: str = "*"
+    scope_warehouse: str = "*"
 
 
 class ChangePasswordIn(BaseModel):
@@ -245,19 +264,53 @@ def copy_permissions(username: str, payload: CopyPermissionsIn, db: Session = De
     return {"username": username, **after}
 
 
+@router.put("/users/{username}")
+def edit_user(username: str, payload: EditUserIn, db: Session = Depends(get_db),
+              user: User = Depends(get_current_user)):
+    """Sửa trực tiếp họ tên/chức danh/vai trò/menu/quyền thao tác của 1 tài khoản đã tồn tại —
+    admin. Không đụng tới mật khẩu, trạng thái active hay 4 chiều phạm vi dữ liệu (đã có
+    endpoint riêng /scope)."""
+    require_role(user, Role.ADMIN)
+    if payload.role not in {r.value for r in Role}:
+        raise PermissionError_(f"Vai trò không hợp lệ: {payload.role}")
+    u = db.execute(select(UserModel).where(UserModel.username == username)).scalar_one_or_none()
+    if not u:
+        raise NotFoundError("Không tìm thấy tài khoản.")
+    before = {"full_name": u.full_name, "job_title": u.job_title, "role": u.role,
+              "allowed_views": u.allowed_views, "permissions": u.permissions}
+    u.full_name = payload.full_name
+    u.job_title = payload.job_title
+    u.role = payload.role
+    u.allowed_views = payload.allowed_views
+    u.permissions = payload.permissions
+    after = {"full_name": u.full_name, "job_title": u.job_title, "role": u.role,
+             "allowed_views": u.allowed_views, "permissions": u.permissions}
+    record_audit(db, entity_type="auth", entity_id=username, action="edit_user", actor=user,
+                 before=before, after=after)
+    db.commit()
+    return {"username": username, **after}
+
+
 @router.get("/scope-catalog")
 def scope_catalog(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     """Danh mục khu vực + line + loại test QC hiện hữu (cho dropdown UI gán scope)."""
     from ..security import SCOPE_AREAS, SCOPE_WAREHOUSE_LOCATIONS
     from ..models.workorder import WorkOrder
     from ..models.quality import QualityResult
+    from ..models.quality_ext import QCParameter
     from ..models.lines import ProductionLine
     wo_lines = {l for (l,) in db.execute(select(WorkOrder.line).distinct()).all() if l}
     master_lines = {l for (l,) in db.execute(select(ProductionLine.code)).all() if l}
-    lines = sorted(wo_lines | master_lines)   # gộp line từ WO + danh mục dây chuyền
-    qc = sorted({p for (p,) in db.execute(select(QualityResult.parameter).distinct()).all() if p})
+    line_codes = sorted(wo_lines | master_lines)   # gộp line từ WO + danh mục dây chuyền
+    line_names = dict(db.execute(select(ProductionLine.code, ProductionLine.name)).all())
+    lines = [{"key": c, "label": f"{c} — {line_names[c]}" if line_names.get(c) and line_names[c] != c else c}
+              for c in line_codes]
+    qc_codes = sorted({p for (p,) in db.execute(select(QualityResult.parameter).distinct()).all() if p})
+    qc_names = dict(db.execute(select(QCParameter.code, QCParameter.name)).all())
+    qc_params = [{"key": c, "label": f"{c} — {qc_names[c]}" if qc_names.get(c) and qc_names[c] != c else c}
+                  for c in qc_codes]
     return {"areas": [{"key": k, "label": v} for k, v in SCOPE_AREAS.items()],
-            "lines": lines, "qc_params": qc,
+            "lines": lines, "qc_params": qc_params,
             "warehouse_locations": [{"key": k, "label": v} for k, v in SCOPE_WAREHOUSE_LOCATIONS.items()]}
 
 
@@ -270,3 +323,79 @@ def toggle_user(username: str, db: Session = Depends(get_db), user: User = Depen
     u.active = not u.active
     db.commit()
     return {"username": username, "active": u.active}
+
+
+# ---- Mẫu chức danh (Role Templates) ----
+# Admin tự khai báo tên chức danh + vai trò hệ thống + menu/quyền/phạm vi mặc định để chọn
+# nhanh khi tạo tài khoản mới, không cần soạn tay từng trường mỗi lần. KHÔNG thay thế Role
+# enum (vẫn dùng để require_role() chặn quyền ở backend) — chỉ là lớp đóng gói/đặt tên.
+
+def _role_template_out(t: RoleTemplate) -> dict:
+    return {"role_template_id": t.role_template_id, "name": t.name, "role": t.role,
+            "allowed_views": t.allowed_views, "permissions": t.permissions,
+            "scope_lines": t.scope_lines, "scope_areas": t.scope_areas,
+            "scope_qc": t.scope_qc, "scope_warehouse": t.scope_warehouse, "active": t.active}
+
+
+@router.get("/role-templates")
+def list_role_templates(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    require_role(user, Role.ADMIN)
+    rows = db.execute(select(RoleTemplate).order_by(RoleTemplate.name)).scalars().all()
+    return [_role_template_out(t) for t in rows]
+
+
+@router.post("/role-templates", status_code=201)
+def create_role_template(payload: RoleTemplateIn, db: Session = Depends(get_db),
+                          user: User = Depends(get_current_user)):
+    require_role(user, Role.ADMIN)
+    if payload.role not in {r.value for r in Role}:
+        raise PermissionError_(f"Vai trò không hợp lệ: {payload.role}")
+    if not payload.name.strip():
+        raise DomainError("Tên chức danh không được để trống.")
+    t = RoleTemplate(role_template_id=new_id(), name=payload.name.strip(), role=payload.role,
+                      allowed_views=payload.allowed_views or "dashboard", permissions=payload.permissions or "",
+                      scope_lines=payload.scope_lines or "*", scope_areas=payload.scope_areas or "*",
+                      scope_qc=payload.scope_qc or "*", scope_warehouse=payload.scope_warehouse or "*",
+                      active=True)
+    db.add(t)
+    record_audit(db, entity_type="role_template", entity_id=t.role_template_id, action="create",
+                 actor=user, after={"name": t.name, "role": t.role})
+    db.commit()
+    return _role_template_out(t)
+
+
+@router.put("/role-templates/{role_template_id}")
+def update_role_template(role_template_id: str, payload: RoleTemplateIn, db: Session = Depends(get_db),
+                          user: User = Depends(get_current_user)):
+    require_role(user, Role.ADMIN)
+    if payload.role not in {r.value for r in Role}:
+        raise PermissionError_(f"Vai trò không hợp lệ: {payload.role}")
+    t = db.get(RoleTemplate, role_template_id)
+    if not t:
+        raise NotFoundError("Không tìm thấy mẫu chức danh.")
+    before = _role_template_out(t)
+    t.name = payload.name.strip() or t.name
+    t.role = payload.role
+    t.allowed_views = payload.allowed_views or "dashboard"
+    t.permissions = payload.permissions or ""
+    t.scope_lines = payload.scope_lines or "*"
+    t.scope_areas = payload.scope_areas or "*"
+    t.scope_qc = payload.scope_qc or "*"
+    t.scope_warehouse = payload.scope_warehouse or "*"
+    record_audit(db, entity_type="role_template", entity_id=t.role_template_id, action="update",
+                 actor=user, before=before, after=_role_template_out(t))
+    db.commit()
+    return _role_template_out(t)
+
+
+@router.delete("/role-templates/{role_template_id}", status_code=204)
+def delete_role_template(role_template_id: str, db: Session = Depends(get_db),
+                          user: User = Depends(get_current_user)):
+    require_role(user, Role.ADMIN)
+    t = db.get(RoleTemplate, role_template_id)
+    if not t:
+        raise NotFoundError("Không tìm thấy mẫu chức danh.")
+    record_audit(db, entity_type="role_template", entity_id=t.role_template_id, action="delete",
+                 actor=user, before={"name": t.name, "role": t.role})
+    db.delete(t)
+    db.commit()

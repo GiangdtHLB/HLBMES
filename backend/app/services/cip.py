@@ -15,8 +15,10 @@ from ..models.lines import ProductionLine
 from ..security import User, require_perm
 
 # Khu vực áp dụng cho từng loại scope (mẻ nấu/lô lên men/mẻ lọc/mẻ chiết) — cùng vocabulary
-# scope_type đã dùng cho Hold/Deviation (xem services/quality.py).
-_AREA_BY_SCOPE = {"brew_batch": "nau", "ferment": "len_men", "filter": "loc", "bottle": "chiet"}
+# scope_type đã dùng cho Hold/Deviation (xem services/quality.py). "bbt_tank" là khu vực Lọc
+# nhưng gắn theo TANK BBT VẬT LÝ (scope_id = mã tank, vd "BBT03") thay vì 1 mẻ lọc cụ thể —
+# dùng cho CIP tank thành phẩm (nhiều mẻ lọc có thể cùng dùng 1 tank, CIP thuộc về tank).
+_AREA_BY_SCOPE = {"brew_batch": "nau", "ferment": "len_men", "filter": "loc", "bottle": "chiet", "bbt_tank": "loc"}
 
 
 # ---- Danh mục loại biểu mẫu ----
@@ -271,6 +273,8 @@ def _codes_for_scope(db: Session, scope_type: str, scope_id: str) -> set:
                 codes.add(b.from_bbt)
             if b.line:
                 codes.add(b.line)
+    elif scope_type == "bbt_tank":
+        codes.add(scope_id)  # scope_id CHÍNH LÀ mã tank BBT — không tra qua bảng nào cả
     return codes
 
 

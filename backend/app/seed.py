@@ -21,7 +21,7 @@ from .models.brewing import (
     MaterialReceipt,
     StageIndicator,
 )
-from .models.auth import User as AppUser
+from .models.auth import RoleTemplate, User as AppUser
 from .models.batches import BatchExecution
 from .models.energy import EnergyArea, EnergyGroup, EnergyReading
 from .models.integration import ApiKey
@@ -268,6 +268,7 @@ def seed():
     from .services import historian as hist_svc
     hist_svc.backfill(db, hours=6, step_min=5)   # 6h dữ liệu sensor mô phỏng
     _seed_users(db)
+    _seed_role_templates(db)
     db.commit()
 
     db.close()
@@ -1125,6 +1126,51 @@ def _seed_users(db) -> None:
     db.commit()
     print("Tài khoản: admin/admin123 · quandoc,phoquandoc,vanhanh,kcs,kysu,thukho,"
           "kcs_truongphong,giamdoc_sx,ttdh_thukhotp /123456")
+
+
+def _seed_role_templates(db) -> None:
+    """Mẫu chức danh khớp đúng 9 tài khoản theo sơ đồ tổ chức thật (xem _seed_users) —
+    admin có thể chọn nhanh khi tạo tài khoản mới thay vì soạn tay từng trường."""
+    templates = [
+        # name, role, allowed_views, permissions, scope_lines, scope_areas, scope_qc, scope_warehouse
+        ("Quản đốc phân xưởng", "supervisor",
+         "dashboard,master,orders,dispatch,schedule,batches,isa88,dispense,recipeadv,process,realtime,quality,qclab,oee,trace,wms,packaging,reports,ai,audit,cip",
+         "master.manage,order.create,wo.manage,wo.dispatch,batch.create,batch.execute,quality.deviation,ebr.sign,ebr.approve,cip.manage",
+         "*", "*", "*", "*"),
+        ("Phó Quản đốc phân xưởng (trực ca)", "supervisor",
+         "dashboard,batches,isa88,dispense,process,realtime,quality,oee,trace,wms,packaging,reports,ai,cip",
+         "batch.execute,ebr.sign,ebr.approve,quality.deviation,cip.manage",
+         "*", "*", "*", "*"),
+        ("Nhân viên vận hành", "operator",
+         "dashboard,batches,isa88,dispense,process,realtime,warehouse_px,cip", "batch.execute,ebr.sign,warehouse.request,cip.manage",
+         "Nấu A", "nau,len_men", "*", "phan_xuong"),
+        ("Nhân viên KCS / QA", "qa",
+         "dashboard,quality,qclab,process,trace,ai,cip", "quality.release,quality.deviation,recipe.approve,ebr.sign,ebr.approve",
+         "*", "*", "Độ đường (°P),pH", "*"),
+        ("Kỹ sư - Phòng Kỹ thuật, Công nghệ và Cải tiến Sản xuất", "engineer",
+         "dashboard,master,recipes,recipeadv,batches,isa88,qclab,process,realtime,oee,trace,reports,schedule,cip",
+         "master.manage,recipe.author,recipe.approve,batch.create,batch.execute,ebr.sign,cip.manage",
+         "*", "*", "*", "*"),
+        ("Thủ kho NVL", "operator",
+         "dashboard,warehouse_kc,wms,packaging,dispense", "warehouse.receive,warehouse.issue",
+         "*", "kho", "*", "cong_ty"),
+        ("Trưởng phòng KCS", "qa",
+         "dashboard,orders,quality,qclab,process,trace,ai,cip",
+         "quality.release,quality.deviation,recipe.approve,ebr.sign,ebr.approve,order.create",
+         "*", "*", "*", "*"),
+        ("Giám đốc Sản xuất - Kỹ thuật", "supervisor",
+         "dashboard,process,quality,trace,reports,ai",
+         "production.release_to_wms",
+         "*", "*", "*", "*"),
+        ("NV Trung tâm Điều hành - Thủ kho TP", "operator",
+         "dashboard,wms,packaging", "warehouse.receive,warehouse.issue",
+         "*", "kho", "*", "*"),
+    ]
+    for name, role, views, perms, sl, sa, sq, sw in templates:
+        db.add(RoleTemplate(role_template_id=new_id(), name=name, role=role, allowed_views=views,
+                             permissions=perms, scope_lines=sl, scope_areas=sa, scope_qc=sq,
+                             scope_warehouse=sw, active=True))
+    db.commit()
 
 
 if __name__ == "__main__":

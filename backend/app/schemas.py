@@ -51,6 +51,10 @@ class OpsSettingIn(BaseModel):
     aging_caution_days: float = 30.0
     aging_warning_days: float = 60.0
     aging_critical_days: float = 90.0
+    filter_yield_low_hl: float = 50.0
+    filter_yield_high_hl: float = 150.0
+    filter_line_yield_low_l: float = 500.0
+    filter_line_yield_high_l: float = 2000.0
     factory_code: Optional[str] = None
 
 
@@ -61,6 +65,10 @@ class OpsSettingOut(ORMModel):
     aging_caution_days: float
     aging_warning_days: float
     aging_critical_days: float
+    filter_yield_low_hl: float
+    filter_yield_high_hl: float
+    filter_line_yield_low_l: float
+    filter_line_yield_high_l: float
     factory_code: Optional[str] = None
     updated_by: Optional[str] = None
     updated_at: datetime
@@ -1115,9 +1123,15 @@ class FinishIn(BaseModel):
 class FinishFilterTankIn(FinishIn):
     """Kết thúc lọc CHO 1 TANK trong lệnh lọc (không phối chỉ có 1 tank/dòng; phối có nhiều
     dòng, kết thúc riêng từng dòng) — Dịch nha lọc + Nước bài khí của dòng đó điền lúc này;
-    FilterRecord tổng hợp (sum) các dòng để ra Sản lượng lọc (xem _sync_filter_aggregate)."""
+    FilterRecord tổng hợp (sum) các dòng để ra Sản lượng lọc (xem _sync_filter_aggregate).
+    batch_number/order_number bắt buộc mỗi lần gọi (xem finish_filter_tank) — thuộc về cả
+    FilterRecord (không phải riêng dòng tank này), gọi lại nhiều lần với cùng giá trị để sửa
+    giờ/số liệu không bị coi là trùng."""
     v_dich_hl: Optional[float] = None
     nuoc_bai_khi_hl: Optional[float] = None
+    batch_number: Optional[str] = None
+    order_number: Optional[str] = None
+    batch_seq_no: Optional[str] = None
 
 
 class FinishBottleIn(FinishIn):

@@ -86,7 +86,8 @@ def test_filter_status_transitions_with_real_on_hand_bbt(client, admin_h, vanhan
     assert f.status_code == 201, f.text
     tanks = client.get(f"/api/brewing/filters/{f.json()['filter_id']}/tanks", headers=admin_h).json()
     fin = client.post(f"/api/brewing/filters/{f.json()['filter_id']}/tanks/{tanks[0]['line_id']}/finish",
-                      headers=vanhanh_h, json={"v_dich_hl": 100, "nuoc_bai_khi_hl": 0})
+                      headers=vanhanh_h, json={"v_dich_hl": 100, "nuoc_bai_khi_hl": 0,
+                                                "batch_number": "B-STATUS-01", "order_number": "O-STATUS-01", "batch_seq_no": "1"})
     assert fin.status_code == 200, fin.text
     approve_f = client.post(f"/api/brewing/filters/{f.json()['filter_id']}/approve", headers=admin_h)
     assert approve_f.status_code == 200, approve_f.text

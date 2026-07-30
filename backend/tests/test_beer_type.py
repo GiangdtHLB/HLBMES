@@ -240,7 +240,8 @@ def test_beer_type_inherits_through_filter_and_bottle_and_scopes_qc_across_produ
     # phải "Kết thúc" tank TRƯỚC khi duyệt KCS.
     tanks_13 = client.get(f"/api/brewing/filters/{filter_id_13}/tanks", headers=admin_h).json()
     fin_13 = client.post(f"/api/brewing/filters/{filter_id_13}/tanks/{tanks_13[0]['line_id']}/finish",
-                         headers=vanhanh_h, json={"v_dich_hl": 100, "nuoc_bai_khi_hl": 0})
+                         headers=vanhanh_h, json={"v_dich_hl": 100, "nuoc_bai_khi_hl": 0,
+                                                   "batch_number": "B-BT13", "order_number": "O-BT13", "batch_seq_no": "1"})
     assert fin_13.status_code == 200, fin_13.text
     approve_13_ok = client.post(f"/api/brewing/filters/{filter_id_13}/approve", headers=admin_h)
     assert approve_13_ok.status_code == 200, approve_13_ok.text

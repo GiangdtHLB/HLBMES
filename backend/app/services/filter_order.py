@@ -343,7 +343,8 @@ def _record_summaries(db: Session, filter_order_id: str) -> list:
     records = db.execute(select(FilterRecord).where(
         FilterRecord.filter_order_id == filter_order_id).order_by(FilterRecord.filter_date)).scalars().all()
     return [{"filter_id": r.filter_id, "filter_code": r.filter_code, "to_bbt": r.to_bbt,
-            "v_beer_hl": r.v_beer_hl, "ended_at": r.ended_at} for r in records]
+            "v_beer_hl": r.v_beer_hl, "ended_at": r.ended_at,
+            "batch_number": r.batch_number, "order_number": r.order_number} for r in records]
 
 
 def _actual_volume_hl(records: list) -> float:
@@ -486,28 +487,31 @@ def _bbt_tank_on_hand(db: Session, source_bbt_code: str) -> float:
         select(FilterRecord).where(FilterRecord.to_bbt == source_bbt_code)).scalars().all())
 
 
-def _bbt_target_blocked_by(db: Session, code: str, exclude_order_id: str = None) -> Optional[str]:
-    """Lý do chặn (string) nếu tank BBT `code` đang bị 1 Lệnh lọc nhỏ (FilterOrder) KHÁC giữ
-    — dùng khi chọn tank ĐÍCH lúc tạo MẺ LỌC ĐẦU TIÊN của 1 lệnh (xem routers/brewing.py::
-    add_filter). Khác `_bbt_reserved_volume` (giữ chỗ cho tank BBT làm NGUỒN lọc lại, tính từ
-    lúc lập lệnh) — hàm này chặn tank làm ĐÍCH lọc vào, tính tại thời điểm tạo mẻ lọc thật,
-    dựa trên FilterRecord.to_bbt đã ghi (không cần cột/field mới trên FilterOrder). Bị giữ
-    khi: (1) tank còn dịch (on_hand_bbt>0) thuộc 1 lệnh khác chưa chiết hết, HOẶC (2) có mẻ
-    lọc thuộc 1 lệnh khác CHƯA lọc xong (is_complete) đã từng ghi vào tank này — kể cả khi
-    on_hand hiện tại bằng 0 (lệnh đó có thể chưa lọc xong nhưng đã bị chiết một phần)."""
-    on_hand = _bbt_tank_on_hand(db, code)
+def _bbt_target_blocked_by(db: Session, code: str) -> Optional[str]:
+    """Lý do chặn (string) nếu tank BBT `code` KHÔNG THỂ nhận thêm mẻ lọc mới đổ vào — dùng khi
+    chọn tank ĐÍCH lúc tạo MẺ LỌC ĐẦU TIÊN của 1 lệnh, HOẶC khi 1 lệnh đã có mẻ trước nhưng mẻ
+    gần nhất của lệnh đó đã "kết thúc" (ended_at) và vận hành muốn đổi sang tank khác (tank cũ
+    bé, lọc tràn sang tank mới — xem routers/brewing.py::add_filter).
+
+    Nhiều Lệnh lọc KHÁC NHAU được phép cùng đổ vào 1 tank vật lý (thể tích cộng dồn — xem
+    available_bbt_tanks) MIỄN LÀ chưa có mẻ lọc nào trong tank được KCS duyệt: vận hành nhà
+    máy chủ động dùng chung 1 tank BBT cho nhiều mẻ lọc/nhiều lệnh trước khi khoá lại bằng
+    duyệt KCS. Bị chặn khi: (1) tank ĐANG có mẻ lọc chưa "kết thúc" (ended_at rỗng) — về mặt
+    vật lý không thể vừa rót mẻ này vừa cho mẻ khác (của bất kỳ lệnh nào) vào cùng lúc, phải
+    đợi mẻ đang dở kết thúc trước; HOẶC (2) tank còn dịch (tổng on_hand_bbt của mọi mẻ cùng
+    to_bbt > 0) VÀ có ít nhất 1 mẻ lọc trong tank đã được KCS duyệt (qc_approved) — từ lúc đó
+    tank coi như đã khoá, chỉ còn chờ chiết ra, không nhận thêm mẻ lọc mới. Tank đã chiết hết
+    (tổng on_hand_bbt = 0) luôn tự do trở lại, bất kể lịch sử duyệt trước đó."""
     recs = db.execute(select(FilterRecord).where(FilterRecord.to_bbt == code)).scalars().all()
-    owner_ids = {r.filter_order_id for r in recs if r.filter_order_id and r.filter_order_id != exclude_order_id}
-    if on_hand > 1e-6 and owner_ids:
-        other = db.get(FilterOrder, next(iter(owner_ids)))
-        return (f"Tank BBT {code} còn {round(on_hand, 3)} hl thuộc Lệnh lọc nhỏ "
-                f"'{other.order_code if other else '?'}' chưa chiết hết.")
-    for oid in owner_ids:
-        other = db.get(FilterOrder, oid)
-        if not other:
-            continue
-        if not _is_complete(_record_summaries(db, oid), other.planned_volume_hl, other.volume_tolerance_hl):
-            return f"Tank BBT {code} đang được Lệnh lọc nhỏ '{other.order_code}' sử dụng, chưa lọc xong."
+    if not recs:
+        return None
+    if any(r.ended_at is None for r in recs):
+        return f"Tank BBT {code} đang có mẻ lọc chưa kết thúc — chờ kết thúc mẻ đó trước khi thêm mẻ mới vào tank này."
+    on_hand = sum(r.on_hand_bbt for r in recs)
+    if on_hand <= 1e-6:
+        return None
+    if any(r.qc_approved for r in recs):
+        return f"Tank BBT {code} đã được KCS duyệt — không thể lọc thêm vào, chỉ có thể chiết ra."
     return None
 
 
@@ -550,12 +554,14 @@ def available_bbt_tanks(db: Session) -> list:
     for code, recs in by_code.items():
         on_hand = round(sum(r.on_hand_bbt for r in recs), 3)
         all_qc = all(r.qc_approved for r in recs)
+        any_qc = any(r.qc_approved for r in recs)
         all_fin = all(r.ended_at is not None for r in recs)
         rep = max(recs, key=lambda r: r.filter_date)
         reserved = round(_bbt_reserved_volume(db, code), 3)
         finished_product = db.get(FinishedProduct, rep.finished_product_id) if rep.finished_product_id else None
         out.append({
-            "to_bbt": code, "on_hand_bbt": on_hand, "all_qc_approved": all_qc, "all_finished": all_fin,
+            "to_bbt": code, "on_hand_bbt": on_hand, "all_qc_approved": all_qc, "any_qc_approved": any_qc,
+            "all_finished": all_fin,
             "beer_type_id": rep.beer_type_id, "beer_type": rep.beer_type, "product_id": rep.product_id,
             "finished_product_id": rep.finished_product_id,
             "finished_product_code": finished_product.code if finished_product else None,

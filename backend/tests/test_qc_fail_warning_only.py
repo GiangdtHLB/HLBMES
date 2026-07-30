@@ -178,7 +178,8 @@ def test_fail_warns_but_does_not_block_full_chain(client, admin_h, vanhanh_h, br
         filter_id = filt.json()["filter_id"]
         tanks = client.get(f"/api/brewing/filters/{filter_id}/tanks", headers=admin_h).json()
         fin_filt = client.post(f"/api/brewing/filters/{filter_id}/tanks/{tanks[0]['line_id']}/finish",
-                               headers=vanhanh_h, json={"v_dich_hl": 100, "nuoc_bai_khi_hl": 0})
+                               headers=vanhanh_h, json={"v_dich_hl": 100, "nuoc_bai_khi_hl": 0,
+                                                         "batch_number": f"B-{suffix}", "order_number": f"O-{suffix}", "batch_seq_no": "1"})
         assert fin_filt.status_code == 200, fin_filt.text
 
         # FAIL ở lọc — Duyệt KCS lọc vẫn phải THÀNH CÔNG.

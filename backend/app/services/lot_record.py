@@ -125,11 +125,30 @@ def _filter_detail(db: Session, filter_id: str) -> dict:
     f = db.get(FilterRecord, filter_id)
     if not f:
         return None
+    # "Mẻ lọc to" (FilterRecord) có thể gồm NHIỀU "mẻ lọc nhỏ"/"mẻ lọc số" (FilterOrderTank,
+    # 1 dòng = 1 đợt rút dịch riêng từ 1 tank nguồn — xem models/brewing.py::FilterOrderTank) —
+    # hồ sơ điện tử phải liệt kê ĐẦY ĐỦ từng dòng (không chỉ tổng hợp cấp bản ghi) để truy xuất
+    # đúng tank nguồn/thời điểm kết thúc/sản lượng của TỪNG đợt rút, không chỉ tổng cả mẻ lọc.
+    lines = db.execute(select(FilterOrderTank).where(FilterOrderTank.filter_id == filter_id)
+                       .order_by(FilterOrderTank.seq)).scalars().all()
+    ferment_ids = {l.ferment_id for l in lines if l.ferment_id}
+    ferments_by_id = {fm.ferment_id: fm for fm in db.execute(
+        select(FermentRecord).where(FermentRecord.ferment_id.in_(ferment_ids))).scalars().all()} if ferment_ids else {}
+    tank_lines = []
+    for l in lines:
+        ferment = ferments_by_id.get(l.ferment_id) if l.ferment_id else None
+        v_beer_hl = (l.v_dich_hl + (l.nuoc_bai_khi_hl or 0.0)) if l.v_dich_hl is not None else None
+        tank_lines.append({
+            "line_id": l.line_id, "seq": l.seq, "batch_seq_no": l.batch_seq_no, "tank_type": l.tank_type,
+            "tank_lm": ferment.tank_lm if ferment else None, "brew_code": ferment.brew_code if ferment else None,
+            "source_bbt_code": l.source_bbt_code, "reason": l.reason,
+            "v_dich_hl": l.v_dich_hl, "nuoc_bai_khi_hl": l.nuoc_bai_khi_hl, "v_beer_hl": v_beer_hl,
+            "ended_at": l.ended_at, "is_final_batch": l.is_final_batch,
+        })
     # "Lọc lại" — mẻ này có nguồn là 1 tank BBT đã lọc xong trước đó (xem
     # FilterOrderTank.tank_type="bbt"/source_bbt_code/reason, routers/brewing.py::add_filter) —
     # hồ sơ điện tử phải thể hiện rõ để truy xuất nguồn gốc.
-    bbt_line = db.execute(select(FilterOrderTank).where(
-        FilterOrderTank.filter_id == filter_id, FilterOrderTank.tank_type == "bbt")).scalars().first()
+    bbt_line = next((l for l in lines if l.tank_type == "bbt"), None)
     materials = db.execute(select(FilterMaterialUsage).where(FilterMaterialUsage.filter_id == filter_id)
                            .order_by(FilterMaterialUsage.created_at)).scalars().all()
     filter_order = db.get(FilterOrder, f.filter_order_id) if f.filter_order_id else None
@@ -140,6 +159,7 @@ def _filter_detail(db: Session, filter_id: str) -> dict:
         "filter_order_code": filter_order.order_code if filter_order else None,
         "filter_master_order_code": master_order.order_code if master_order else None,
         "lot_loc": f.lot_loc, "filter_date": f.filter_date, "from_cct": f.from_cct,
+        "batch_number": f.batch_number, "order_number": f.order_number,
         "v_dich_hl": f.v_dich_hl, "beer_type": f.beer_type, "v_beer_hl": f.v_beer_hl,
         "to_bbt": f.to_bbt, "status": f.status,
         "started_at": f.filter_date, "ended_at": f.ended_at,
@@ -149,6 +169,7 @@ def _filter_detail(db: Session, filter_id: str) -> dict:
         "is_refilter": bbt_line is not None,
         "refilter_source_bbt_code": bbt_line.source_bbt_code if bbt_line else None,
         "refilter_reason": bbt_line.reason if bbt_line else None,
+        "tank_lines": tank_lines,
         "materials": [{"material_name": m.material_name, "lot_pm": m.lot_pm,
                       "lot_date": m.lot_date, "fifo_ok": m.fifo_ok,
                       "quantity": m.quantity, "uom": m.uom} for m in materials],
