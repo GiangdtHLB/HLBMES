@@ -8086,7 +8086,7 @@ VIEWS.master = async function () {
       <div class="muted" style="margin-bottom:6px">Cách quy đổi số lượng đóng gói (dùng ở Sản phẩm bên trên và mọi thao tác Kho TP): "Chia theo SL/1 đơn vị" giống Vỉ (VD Thùng chứa nhiều vỉ), hoặc không chia — giống Keg (1 đơn vị = 1, không nhân thêm).</div>
       ${noPerm}
       ${canManage ? `<div class="row">
-        <div class="field"><label>Mã</label><input id="ut_code" placeholder="thung" style="width:100px"/></div>
+        <div class="field"><label>Mã</label><input id="ut_code" placeholder="thung" style="width:100px" title="Chữ thường a-z, số, gạch dưới — KHÔNG dấu tiếng Việt (VD: thung, két). Tên tiếng Việt có dấu nhập ở ô Tên hiển thị."/></div>
         <div class="field"><label>Tên hiển thị</label><input id="ut_name" placeholder="Thùng"/></div>
         <div class="field"><label>Cách quy đổi</label><select id="ut_divide">
           <option value="0">Không chia (giống Keg — 1 đơn vị = 1)</option>
@@ -8289,7 +8289,7 @@ VIEWS.master = async function () {
       toast("Đã xóa Loại bia"); render("master");
     }));
     if ($("ut_add")) $("ut_add").onclick = () => guard(async () => {
-      await POST("/unit-types", { code: $("ut_code").value.trim(), name: $("ut_name").value.trim(),
+      await POST("/unit-types", { code: $("ut_code").value.trim().toLowerCase(), name: $("ut_name").value.trim(),
         divide_by_pack_size: $("ut_divide").value === "1", selectable: true, active: true });
       toast("Đã tạo loại đơn vị"); render("master");
     });
@@ -8306,7 +8306,7 @@ VIEWS.master = async function () {
           <option value="0" ${!ut.selectable ? "selected" : ""}>Không</option></select></div>
         <button class="btn" id="eut_save" style="margin-top:12px">Lưu</button>`);
       $("eut_save").onclick = () => guard(async () => {
-        await PUT(`/unit-types/${ut.unit_type_id}`, { code: $("eut_code").value.trim(),
+        await PUT(`/unit-types/${ut.unit_type_id}`, { code: $("eut_code").value.trim().toLowerCase(),
           name: $("eut_name").value.trim(), divide_by_pack_size: $("eut_divide").value === "1",
           selectable: $("eut_selectable").value === "1", active: true });
         closeModal(); toast("Đã cập nhật"); render("master");

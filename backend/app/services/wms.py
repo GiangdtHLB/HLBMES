@@ -339,6 +339,13 @@ def _create_units(db: Session, payload: dict, created_by: str, actor: User) -> l
     lần — approve_bottle nhờ vậy cũng tự động chỉ còn 1 cạnh phả hệ thay vì vòng lặp)."""
     total = float(payload.get("total", 0) or 0)
     unit_type = payload.get("unit_type") or "vi"
+    # Phòng thủ: unit_type ghi MỚI vào 1 dòng tồn kho phải khớp CHÍNH XÁC 1 mã đang có trong
+    # Danh mục Loại đơn vị tồn kho — mọi logic đọc lại (_pack_divisor/_divide_by_pack_codes) so
+    # khớp theo chuỗi, 1 mã lạ (VD do gán sai ở Danh mục Sản phẩm) sẽ lặng lẽ không được nhận
+    # diện là "chia theo pack_size" và đếm sai tồn kho hàng loạt mà không có lỗi nào báo trước.
+    if not db.execute(select(UnitTypeCatalog.unit_type_id)
+                      .where(UnitTypeCatalog.code == unit_type)).first():
+        raise DomainError(f"Loại đơn vị '{unit_type}' không có trong Danh mục Loại đơn vị tồn kho.")
     if total <= 0:
         raise DomainError("Tổng số lượng phải > 0.")
     now = utcnow()

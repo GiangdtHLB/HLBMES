@@ -1,9 +1,12 @@
 """Pydantic schema cho request/response (OpenAPI tự sinh — tài liệu §9.3)."""
 
+import re
 from datetime import date, datetime
 from typing import Any, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+_UNIT_TYPE_CODE_RE = re.compile(r"^[a-z0-9_-]+$")
 
 
 class ORMModel(BaseModel):
@@ -30,6 +33,24 @@ class UnitTypeCatalogIn(BaseModel):
     divide_by_pack_size: bool = False
     selectable: bool = True
     active: bool = True
+
+    @field_validator("code")
+    @classmethod
+    def _normalize_code(cls, v: str) -> str:
+        # Mã là khóa tra cứu logic nghiệp vụ (_pack_divisor/_divide_by_pack_codes so khớp CHÍNH
+        # XÁC theo chuỗi) — cho gõ tiếng Việt có dấu ('Vỉ') vào đây sẽ tạo ra 1 mã khác hẳn mã
+        # chuẩn ('vi') mà không có gì báo lỗi, làm vỡ toàn bộ quy đổi pack_size cho SKU trỏ vào
+        # mã lạ đó (xem báo cáo lỗi 'Nhập kho thủ công' 2026-07). Tự hạ chữ thường cho tiện gõ
+        # (VD "VI" -> "vi"), nhưng chặn hẳn dấu tiếng Việt/khoảng trắng — người dùng phải sửa lại
+        # đúng ô "Mã", không để hệ thống đoán/slugify sai ý.
+        v = v.strip().lower()
+        if not v or not _UNIT_TYPE_CODE_RE.match(v):
+            raise ValueError(
+                "Mã loại đơn vị chỉ được dùng chữ thường a-z, số 0-9, gạch dưới/gạch ngang, "
+                "không dấu, không khoảng trắng (VD: vi, keg, thung). Tên tiếng Việt có dấu nhập "
+                "ở ô 'Tên hiển thị'."
+            )
+        return v
 
 
 class UnitTypeCatalogOut(ORMModel):
