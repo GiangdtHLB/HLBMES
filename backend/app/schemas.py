@@ -1552,6 +1552,10 @@ class CipFormTypeIn(BaseModel):
     default_steps: list[CipStepIn] = []
 
 
+class CipCopyStepsIn(BaseModel):
+    target_form_type_id: str = Field(min_length=1)
+
+
 class CipFormTypeOut(ORMModel):
     form_type_id: str
     code: str

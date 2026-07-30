@@ -2300,7 +2300,10 @@
             <th style="width:120px">Người làm</th><th style="width:120px">Ghi chú</th><th style="width:36px"></th></tr></thead>
           <tbody id="mau_steps_body"></tbody></table></div>
         <button class="btn sm sec" id="mau_step_add" style="margin-top:6px">+ Thêm bước</button>
-        <div class="row" style="margin-top:10px"><button class="btn" id="mau_save">Lưu bảng bước mẫu (tiêu chuẩn)</button></div>`);
+        <div class="row" style="margin-top:10px">
+          <button class="btn" id="mau_save">Lưu bảng bước mẫu (tiêu chuẩn)</button>
+          <button class="btn sec" id="mau_copy">📋 Copy sang biểu mẫu khác</button>
+        </div>`);
     } else if (sec === "khaibao") {
       const ftOpt = formTypes.map(f => `<option value="${esc(f.form_type_id)}" data-area="${esc(f.area)}">${esc(f.code)} — ${esc(f.name)}</option>`).join("");
       const eqOpt = equipment.map(e => `<option value="${esc(e.equipment_id)}" data-area="${esc(e.area)}">${esc(e.code)} — ${esc(e.name)}</option>`).join("");
@@ -2421,6 +2424,28 @@
         });
         toast("Đã lưu bảng bước mẫu"); render("cip");
       });
+      $("mau_copy").onclick = () => {
+        const others = formTypes.filter(f => f.form_type_id !== ft.form_type_id);
+        const emptyOthers = others.filter(f => !f.default_steps.length);
+        if (!others.length) { toast("Chưa có biểu mẫu nào khác để copy sang.", "err"); return; }
+        const opts = others.map(f => `<option value="${esc(f.form_type_id)}" ${f.default_steps.length ? "disabled" : ""}>
+          ${esc(f.code)} — ${esc(f.name)}${f.default_steps.length ? " (đã có bước — không copy được)" : " (trống)"}</option>`).join("");
+        modal(`
+          <h3>📋 Copy bảng bước sang biểu mẫu khác</h3>
+          <div class="muted" style="margin-bottom:8px">Chép nguyên bảng bước + đơn vị thời gian/nhiệt độ/nồng độ từ
+            <b>${esc(ft.code)}</b> sang 1 biểu mẫu KHÁC — chỉ thực hiện được khi biểu mẫu đích đang TRỐNG (chưa khai báo bước nào).</div>
+          ${!emptyOthers.length ? '<div class="muted" style="color:var(--red)">Mọi biểu mẫu khác đều đã có bảng bước — không còn biểu mẫu trống để copy sang.</div>'
+            : `<div class="field"><label>Biểu mẫu đích</label><select id="copy_target" style="width:100%">${opts}</select></div>
+          <div class="row" style="margin-top:12px"><button class="btn" id="copy_confirm">Copy</button></div>`}`);
+        if (emptyOthers.length) {
+          $("copy_target").value = emptyOthers[0].form_type_id;
+          $("copy_confirm").onclick = () => guard(async () => {
+            await POST(`/cip/form-types/${ft.form_type_id}/copy-steps`, { target_form_type_id: $("copy_target").value });
+            toast("Đã copy bảng bước"); closeModal();
+            CIP_MAU_FT = $("copy_target").value; render("cip");
+          });
+        }
+      };
     } else if (sec === "khaibao" && canManage) {
       const seqRef = { n: 0 };
       const fillFromFormType = () => {
