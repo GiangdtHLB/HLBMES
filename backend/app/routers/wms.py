@@ -170,7 +170,7 @@ def decompose_unit(unit_id: str, db: Session = Depends(get_db), user: User = Dep
 @router.post("/units/decompose-batch", status_code=201)
 def decompose_batch(payload: DecomposeBatchIn, db: Session = Depends(get_db),
                     user: User = Depends(get_current_user)):
-    return svc.decompose_batch(db, payload.product_name, payload.lot_code, payload.count, user)
+    return svc.decompose_batch(db, payload.product_name, payload.lot_code, payload.unit_type, payload.count, user)
 
 
 @router.post("/units/decompose-batch/{audit_id}/undo")

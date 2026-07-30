@@ -175,6 +175,43 @@ def test_decompose_blocks_keg_and_double_decompose_and_delete(client, admin_h):
     assert del_res.status_code == 409, del_res.text
 
 
+def test_decompose_works_for_custom_divide_by_pack_unit_type(client, admin_h):
+    """Bug thật gặp trong Kho TP: khai báo 1 loại đơn vị MỚI trong Danh mục "Loại đơn vị tồn
+    kho" (VD "ket") với divide_by_pack_size=True — trước fix, Phân rã chỉ nhận biết cứng loại
+    "vi" nên loại tự khai báo này không phân rã được dù Danh mục nói nó chia-theo-pack giống
+    Vỉ. Xác nhận cả decompose_unit (1 dòng) lẫn decompose_batch (theo số lượng) đều hoạt động
+    với loại tự khai báo, và loại KHÔNG chia-theo-pack (selectable nhưng divide=False) vẫn bị
+    chặn như "keg"."""
+    ket_type = client.post("/api/unit-types", headers=admin_h,
+                          json={"code": "ket", "name": "Két", "divide_by_pack_size": True, "selectable": True})
+    assert ket_type.status_code == 201, ket_type.text
+
+    # 2 dòng riêng (mỗi lần build 1 dòng, giống pattern test_decompose_batch_by_count) — 1 dòng
+    # dùng cho decompose_unit, 1 dòng dùng cho decompose_batch.
+    _build_units(client, admin_h, "DECOMPKET", total=24, pack_size=24, unit_type="ket")
+    _build_units(client, admin_h, "DECOMPKET", total=24, pack_size=24, unit_type="ket")
+    all_units = client.get("/api/wms/units", headers=admin_h).json()
+    units = [u for u in all_units if u["lot_code"] == "LOT-DECOMPKET" and u["unit_type"] == "ket"]
+    assert len(units) == 2
+
+    # decompose_unit (1 dòng cụ thể) — trước fix sẽ 409 "Chỉ có thể phân rã đơn vị loại vỉ."
+    single = client.post(f"/api/wms/units/{units[0]['unit_id']}/decompose", headers=admin_h)
+    assert single.status_code == 201, single.text
+    assert single.json()["count"] == 24
+
+    # decompose_batch (theo số lượng, không unit_type trong payload -> phải TỰ chặn vì mặc
+    # định "vi" không khớp lô đang toàn "ket", không được ngầm hiểu nhầm sang lô khác.
+    wrong_type = client.post("/api/wms/units/decompose-batch", headers=admin_h,
+                             json={"product_name": "SKU-DECOMPKET", "lot_code": "LOT-DECOMPKET", "count": 1})
+    assert wrong_type.status_code == 409, wrong_type.text
+
+    batch = client.post("/api/wms/units/decompose-batch", headers=admin_h,
+                        json={"product_name": "SKU-DECOMPKET", "lot_code": "LOT-DECOMPKET",
+                              "unit_type": "ket", "count": 1})
+    assert batch.status_code == 201, batch.text
+    assert batch.json()["vi_decomposed"] == 1 and batch.json()["lon_created"] == 24
+
+
 def test_ship_lon_units_after_decompose(client, admin_h):
     """Xuất MỘT PHẦN của 1 dòng lon (10/24) -> TÁCH dòng (xem _consume_lot_rows): 1 dòng mới
     quantity=10 chuyển "shipped", dòng gốc còn lại quantity=14 vẫn "stored" — không còn 24
