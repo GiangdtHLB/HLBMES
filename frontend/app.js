@@ -687,6 +687,20 @@ VIEWS.dashboard = async function () {
     </div>
     <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:stretch;margin-bottom:16px">
       <div class="panel" style="flex:1;min-width:320px;margin-bottom:0">
+        <h2>🍺 Tank đang lên men theo số ngày (so ngày quy định)</h2>
+        <div class="muted" style="margin-bottom:8px">Nhóm theo dịch bia, sắp theo số ngày quá hạn — xem đầy đủ tại <button class="btn sm sec" data-goto="process" data-gotosub="lenmen" style="padding:1px 8px">Nấu-Lọc-Chiết › Lên men</button></div>
+        <div style="margin-bottom:8px">${fermentLegendHtml}</div>
+        ${fermentBarHtml}
+      </div>
+      <div class="panel" style="flex:1;min-width:320px;margin-bottom:0">
+        <h2>🧊 Tank đang lên men theo giai đoạn (lưới)</h2>
+        <div class="muted" style="margin-bottom:8px">Mỗi ô = 1 tank, tô màu theo giai đoạn số ngày lên men so ngày quy định.</div>
+        <div style="margin-bottom:8px">${fermentLegendHtml}</div>
+        ${fermentGridHtml}
+      </div>
+    </div>
+    <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:stretch;margin-bottom:16px">
+      <div class="panel" style="flex:1;min-width:320px;margin-bottom:0">
         <h2>📦 Tồn kho thành phẩm cần chú ý (theo tuổi lô)</h2>
         <div class="muted" style="margin-bottom:8px">Các lô từ mức 🟡 Chú ý trở lên — xem đầy đủ tại <button class="btn sm sec" data-goto="wms" data-gotosub="aging" style="padding:1px 8px">Kho TP › Tồn kho theo tuổi</button></div>
         <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:12px;padding:10px 12px;background:var(--panel2);border:1px solid var(--border);border-radius:10px">${agingKpiHtml}</div>
@@ -718,20 +732,6 @@ VIEWS.dashboard = async function () {
         <button class="btn" id="db_dien_apply">Xem</button>
       </div>
       <div id="db_dien_data"><div class="muted">⏳ Đang tải dữ liệu SCADA...</div></div>
-    </div>
-    <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:stretch;margin-bottom:16px">
-      <div class="panel" style="flex:1;min-width:320px;margin-bottom:0">
-        <h2>🍺 Tank đang lên men theo số ngày (so ngày quy định)</h2>
-        <div class="muted" style="margin-bottom:8px">Nhóm theo dịch bia, sắp theo số ngày quá hạn — xem đầy đủ tại <button class="btn sm sec" data-goto="process" data-gotosub="lenmen" style="padding:1px 8px">Nấu-Lọc-Chiết › Lên men</button></div>
-        <div style="margin-bottom:8px">${fermentLegendHtml}</div>
-        ${fermentBarHtml}
-      </div>
-      <div class="panel" style="flex:1;min-width:320px;margin-bottom:0">
-        <h2>🧊 Tank đang lên men theo giai đoạn (lưới)</h2>
-        <div class="muted" style="margin-bottom:8px">Mỗi ô = 1 tank, tô màu theo giai đoạn số ngày lên men so ngày quy định.</div>
-        <div style="margin-bottom:8px">${fermentLegendHtml}</div>
-        ${fermentGridHtml}
-      </div>
     </div>
     <div class="panel"><h2>Audit gần đây</h2>${tableAudit(audit)}</div>
     <div class="panel"><h2>Mẻ gần đây</h2>${tableBatches(batches.slice(0, 8))}</div>`;
