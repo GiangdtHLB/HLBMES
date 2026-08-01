@@ -45,9 +45,9 @@ def upgrade() -> None:
         sa.Column('is_active', sa.Boolean(), nullable=False, server_default=sa.false()),
         sa.Column('locked', sa.Boolean(), nullable=False, server_default=sa.false()),
         sa.Column('locked_by', sa.Unicode(255), nullable=True),
-        sa.Column('locked_at', sa.DateTime(), nullable=True),
+        sa.Column('locked_at', sa.DateTime(timezone=True), nullable=True),
         sa.Column('created_by', sa.Unicode(255), nullable=True),
-        sa.Column('created_at', sa.DateTime(), nullable=False),
+        sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
     )
     op.create_index('ix_formula_code', 'formula', ['code'], unique=True)
     op.create_index('ix_formula_product_id', 'formula', ['product_id'])
@@ -61,7 +61,7 @@ def upgrade() -> None:
         sa.Column('action', sa.Unicode(32), nullable=False),
         sa.Column('note', sa.UnicodeText(), nullable=True),
         sa.Column('changed_by', sa.Unicode(255), nullable=False),
-        sa.Column('changed_at', sa.DateTime(), nullable=False),
+        sa.Column('changed_at', sa.DateTime(timezone=True), nullable=False),
     )
     op.create_index('ix_formula_activation_log_formula_id', 'formula_activation_log', ['formula_id'])
     op.create_index('ix_formula_activation_log_product_id', 'formula_activation_log', ['product_id'])
@@ -80,7 +80,7 @@ def _migrate_old_recipe_versions() -> None:
         sa.column('version_no', sa.Integer()), sa.column('state', sa.Unicode(255)),
         sa.column('base_qty', sa.Float()), sa.column('base_uom', sa.Unicode(255)),
         sa.column('materials', sa.JSON()), sa.column('created_by', sa.Unicode(255)),
-        sa.column('created_at', sa.DateTime()))
+        sa.column('created_at', sa.DateTime(timezone=True)))
 
     recipes = {r.recipe_id: (r.code, r.product_id) for r in bind.execute(sa.select(recipe_t)).fetchall()}
     versions = bind.execute(sa.select(version_t)).fetchall()
@@ -103,12 +103,12 @@ def _migrate_old_recipe_versions() -> None:
         sa.column('base_qty', sa.Float()), sa.column('base_uom', sa.Unicode(255)),
         sa.column('materials', sa.JSON()), sa.column('is_active', sa.Boolean()),
         sa.column('locked', sa.Boolean()), sa.column('created_by', sa.Unicode(255)),
-        sa.column('created_at', sa.DateTime()))
+        sa.column('created_at', sa.DateTime(timezone=True)))
     log_t = sa.table(
         'formula_activation_log', sa.column('log_id', sa.Unicode(64)),
         sa.column('formula_id', sa.Unicode(64)), sa.column('product_id', sa.Unicode(64)),
         sa.column('action', sa.Unicode(32)), sa.column('note', sa.UnicodeText()),
-        sa.column('changed_by', sa.Unicode(255)), sa.column('changed_at', sa.DateTime()))
+        sa.column('changed_by', sa.Unicode(255)), sa.column('changed_at', sa.DateTime(timezone=True)))
 
     formula_rows, log_rows = [], []
     for v in versions:

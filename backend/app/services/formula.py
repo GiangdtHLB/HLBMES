@@ -159,6 +159,12 @@ def delete_formula(db: Session, formula_id: str, user: User) -> None:
         raise DomainError("Công thức đã bị khóa — không thể xóa.")
     record_audit(db, entity_type="formula", entity_id=f.formula_id, action="delete", actor=user,
                  before={"code": f.code, "product_id": f.product_id})
+    # MSSQL enforce FK: xóa lịch sử kích hoạt (con) trước khi xóa formula (cha) — SQLite bỏ qua
+    # FK nên chạy được, MSSQL thì chặn (DEPLOY-CONTRACT §E).
+    for log in db.execute(select(FormulaActivationLog).where(
+            FormulaActivationLog.formula_id == formula_id)).scalars().all():
+        db.delete(log)
+    db.flush()
     db.delete(f)
     db.commit()
 
