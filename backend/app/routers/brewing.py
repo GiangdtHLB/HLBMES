@@ -1,14 +1,14 @@
 """Nấu-Lọc-Chiết chi tiết: nguyên liệu, nấu, lên men, lọc, chiết, chỉ tiêu, cảnh báo."""
 
 
-from fastapi import APIRouter, Depends, File, UploadFile
+from fastapi import APIRouter, Depends, File, Query, UploadFile
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from datetime import timedelta
 
 from ..audit import record_audit
-from ..common import Role, new_id, utcnow
+from ..common import Role, new_id, resolve_years, utcnow
 from ..database import get_db
 from ..errors import DomainError, NotFoundError, PermissionError_
 from ..models.brewing import (
@@ -62,7 +62,7 @@ from ..schemas import (
     StageIndicatorIn,
     StageQcResultIn,
 )
-from ..security import User, get_current_user, require_perm
+from ..security import User, get_current_user, require_any_perm, require_perm
 from ..services import braumat_import as braumat_svc
 from ..services import brew_order as brew_order_svc
 from ..services import dashboard as dashboard_svc
@@ -85,6 +85,17 @@ router = APIRouter(prefix="/api/brewing", tags=["brewing"],
 # Trạng thái lọc/chiết hiển thị
 FILTER_STATUS = {"dang_loc": "Đang lọc", "cho_duyet": "Chờ duyệt", "cho_chiet": "Chờ chiết", "chiet_1_phan": "Đang chiết", "da_chiet_het": "Đã chiết hết"}
 EXEC_STATUS = {"dang_thuc_hien": "Đang thực hiện", "hoan_thanh": "Hoàn thành"}
+
+
+def _years_or_current(years) -> list:
+    """Áp mặc định năm hiện tại cho 6 màn hình lọc-theo-năm (Thông tin nấu/lên men/lọc/chiết,
+    Lệnh nấu, Lệnh lọc) khi người dùng chưa chọn năm nào — resolve_years() tự nó KHÔNG áp mặc
+    định (trả None) vì còn được services/dashboard.py::production_summary dùng lại để đếm
+    TOÀN BỘ lịch sử, không giới hạn năm."""
+    try:
+        return resolve_years(years) or [utcnow().year]
+    except ValueError as e:
+        raise DomainError(str(e))
 
 
 def _exec_status(ended_at) -> str:
@@ -169,8 +180,11 @@ def list_brew_orders(db: Session = Depends(get_db)):
 def preview_brew_order_bom(product_id: str = None, planned_batch_count: int = 1, planned_volume_hl: float = 0.0,
                            db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     """Xem trước bảng định mức NVL (tự nạp từ Công thức) + tồn kho hiện tại — TRƯỚC khi tạo
-    lệnh nấu thật, để biết ngay có đủ NVL hay không (nút "Xem NVL" ở form Tạo Lệnh nấu)."""
-    require_perm(user, "order.create")
+    lệnh nấu thật, để biết ngay có đủ NVL hay không (nút "Xem NVL" ở form Tạo Lệnh nấu). Cũng
+    dùng làm gợi ý NVL/mẻ trong modal "+ NVL" khi lệnh nấu chưa có định mức riêng từng dòng
+    (openBrewMaterialsModal) — người thao tác mẻ (batch.execute) không nhất thiết có quyền
+    order.create nên chấp nhận cả 2 quyền, không chỉ order.create."""
+    require_any_perm(user, ["order.create", "batch.execute"])
     return brew_order_svc.preview_bom_lines(db, product_id, planned_batch_count, planned_volume_hl)
 
 
@@ -206,8 +220,8 @@ def delete_brew_order(brew_order_id: str, db: Session = Depends(get_db),
 
 # ===== Lệnh nấu LỚN (chứa nhiều "lệnh nấu nhỏ" — mỗi lệnh nhỏ là 1 BrewOrder ở trên) =====
 @router.get("/brew-master-orders")
-def list_brew_master_orders(db: Session = Depends(get_db)):
-    return brew_order_svc.list_master_orders(db)
+def list_brew_master_orders(years: list[int] = Query(None), db: Session = Depends(get_db)):
+    return brew_order_svc.list_master_orders(db, _years_or_current(years))
 
 
 @router.post("/brew-master-orders", status_code=201)
@@ -288,8 +302,8 @@ def get_next_batch_seq_no(exclude_line_id: str = None, db: Session = Depends(get
 
 # ===== Lệnh lọc LỚN (chứa nhiều "lệnh lọc nhỏ" — mỗi lệnh nhỏ là 1 FilterOrder ở trên) =====
 @router.get("/filter-master-orders")
-def list_filter_master_orders(db: Session = Depends(get_db)):
-    return filter_order_svc.list_master_orders(db)
+def list_filter_master_orders(years: list[int] = Query(None), db: Session = Depends(get_db)):
+    return filter_order_svc.list_master_orders(db, _years_or_current(years))
 
 
 @router.post("/filter-master-orders", status_code=201)
@@ -365,8 +379,10 @@ def delete_material(receipt_id: str, db: Session = Depends(get_db), user: User =
 
 # ===== Thông tin nấu =====
 @router.get("/brews")
-def list_brews(db: Session = Depends(get_db)):
-    rows = db.execute(select(BrewRecord).order_by(BrewRecord.brew_date.desc())).scalars().all()
+def list_brews(years: list[int] = Query(None), db: Session = Depends(get_db)):
+    years = _years_or_current(years)
+    rows = db.execute(select(BrewRecord).where(BrewRecord.brew_year.in_(years))
+                      .order_by(BrewRecord.brew_date.desc())).scalars().all()
     links = db.execute(select(FermentBrewLink)).scalars().all()
     ferment_id_by_brew = {link.brew_id: link.ferment_id for link in links}
     ferments = {f.ferment_id: f for f in db.execute(select(FermentRecord)).scalars().all()}
@@ -441,11 +457,14 @@ def add_brew(payload: BrewIn, db: Session = Depends(get_db),
     # lệnh nấu của nó (nếu không, gợi ý NVL/BOM theo dịch bia ở lệnh nấu sẽ sai với mã nấu thật).
     if order.product_id:
         data["product_id"] = order.product_id
+    brew_year = (data.get("brew_date") or utcnow()).year
+    data["brew_year"] = brew_year
     if lm_code:
         if not tank_lm:
             raise DomainError("Chọn Tank lên men.")
-        if db.execute(select(FermentRecord).where(FermentRecord.lm_code == lm_code)).scalar_one_or_none():
-            raise DomainError(f"Mã lô LM '{lm_code}' đã tồn tại.")
+        if db.execute(select(FermentRecord).where(FermentRecord.lm_code == lm_code,
+                      FermentRecord.ferment_year == brew_year)).scalar_one_or_none():
+            raise DomainError(f"Mã lô LM '{lm_code}' đã tồn tại trong năm {brew_year}.")
     b = BrewRecord(brew_id=new_id(), **data)
     db.add(b)
     db.flush()
@@ -454,6 +473,7 @@ def add_brew(payload: BrewIn, db: Session = Depends(get_db),
         # kt_date (ngày nạp đầy tank) không nhập tay — tự tính bằng _sync_ferment_kt_date khi
         # mẻ cuối cùng trong tank được bấm "Kết thúc" (xem finish_brew_batch).
         ferment = FermentRecord(ferment_id=new_id(), lm_code=lm_code, brew_code=b.brew_code,
+                                ferment_year=brew_year,
                                 brew_date=b.brew_date, wort_type=b.wort_type,
                                 product_id=b.product_id, yeast_gen=yeast_gen, tank_lm=tank_lm,
                                 volume_hl=b.volume_hl, on_hand_cct=b.volume_hl, status="len_men")
@@ -850,8 +870,10 @@ def delete_brew_material(brew_id: str, batch_id: str, usage_id: str, db: Session
 
 # ===== Thông tin lên men =====
 @router.get("/ferments")
-def list_ferments(db: Session = Depends(get_db)):
-    rows = db.execute(select(FermentRecord).order_by(FermentRecord.brew_date.desc())).scalars().all()
+def list_ferments(years: list[int] = Query(None), db: Session = Depends(get_db)):
+    years = _years_or_current(years)
+    rows = db.execute(select(FermentRecord).where(FermentRecord.ferment_year.in_(years))
+                      .order_by(FermentRecord.brew_date.desc())).scalars().all()
     total_brew = sum(r.volume_hl for r in rows)
     total_cct = sum(r.on_hand_cct for r in rows)
     links = db.execute(select(FermentBrewLink)).scalars().all()
@@ -952,6 +974,11 @@ def add_ferment(payload: FermentIn, db: Session = Depends(get_db),
     brew_ids = data.pop("brew_ids", [])
     for brew_id in brew_ids:
         _assert_unlocked(*_brew_and_order(db, brew_id))
+    ferment_year = (data.get("brew_date") or utcnow()).year
+    if db.execute(select(FermentRecord).where(FermentRecord.lm_code == data["lm_code"],
+                  FermentRecord.ferment_year == ferment_year)).scalar_one_or_none():
+        raise DomainError(f"Mã lô LM '{data['lm_code']}' đã tồn tại trong năm {ferment_year}.")
+    data["ferment_year"] = ferment_year
     f = FermentRecord(ferment_id=new_id(), **data)
     if not f.on_hand_cct:
         f.on_hand_cct = f.volume_hl
@@ -1042,8 +1069,10 @@ def update_ferment_daily_readings(ferment_id: str, payload: FermentDailyReadings
 
 # ===== Thông tin lọc =====
 @router.get("/filters")
-def list_filters(db: Session = Depends(get_db)):
-    rows = db.execute(select(FilterRecord).order_by(FilterRecord.filter_date.desc())).scalars().all()
+def list_filters(years: list[int] = Query(None), db: Session = Depends(get_db)):
+    years = _years_or_current(years)
+    rows = db.execute(select(FilterRecord).where(FilterRecord.filter_year.in_(years))
+                      .order_by(FilterRecord.filter_date.desc())).scalars().all()
     products = {p.product_id: p for p in db.execute(select(Product)).scalars().all()}
     finished_products = {fp.finished_product_id: fp for fp in db.execute(select(FinishedProduct)).scalars().all()}
     nvl_filter_ids = {row[0] for row in db.execute(select(FilterMaterialUsage.filter_id).distinct()).all()}
@@ -1278,6 +1307,12 @@ def add_filter(payload: FilterIn, db: Session = Depends(get_db),
         data["filter_type"] = "loc_lai"
     if not data.get("wort_type"):
         data["wort_type"] = first.wort_type
+
+    filter_year = (data.get("filter_date") or utcnow()).year
+    if db.execute(select(FilterRecord).where(FilterRecord.filter_code == data["filter_code"],
+                  FilterRecord.filter_year == filter_year)).scalar_one_or_none():
+        raise DomainError(f"Mã lọc '{data['filter_code']}' đã tồn tại trong năm {filter_year}.")
+    data["filter_year"] = filter_year
 
     f = FilterRecord(filter_id=new_id(), filter_order_id=filter_order_id, **data)
     db.add(f); db.flush()
@@ -1715,8 +1750,10 @@ def delete_filter(filter_id: str, db: Session = Depends(get_db), user: User = De
 
 # ===== Thông tin chiết =====
 @router.get("/bottles")
-def list_bottles(db: Session = Depends(get_db)):
-    rows = db.execute(select(BottleRecord).order_by(BottleRecord.bottle_date.desc())).scalars().all()
+def list_bottles(years: list[int] = Query(None), db: Session = Depends(get_db)):
+    years = _years_or_current(years)
+    rows = db.execute(select(BottleRecord).where(BottleRecord.bottle_year.in_(years))
+                      .order_by(BottleRecord.bottle_date.desc())).scalars().all()
     products = {p.product_id: p for p in db.execute(select(Product)).scalars().all()}
     finished_products = {fp.finished_product_id: fp for fp in db.execute(select(FinishedProduct)).scalars().all()}
     source_filters = {f.filter_id: f for f in db.execute(select(FilterRecord)).scalars().all()}
@@ -1785,6 +1822,11 @@ def add_bottle(payload: BottleIn, db: Session = Depends(get_db),
                 data["beer_type"] = source_filter.beer_type
     if not data.get("beer_type"):
         data["beer_type"] = ""
+    bottle_year = (data.get("bottle_date") or utcnow()).year
+    if db.execute(select(BottleRecord).where(BottleRecord.bottle_code == data["bottle_code"],
+                  BottleRecord.bottle_year == bottle_year)).scalar_one_or_none():
+        raise DomainError(f"Mã chiết '{data['bottle_code']}' đã tồn tại trong năm {bottle_year}.")
+    data["bottle_year"] = bottle_year
     b = BottleRecord(bottle_id=new_id(), **data)
     db.add(b)
     if source_filter:

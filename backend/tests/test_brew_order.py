@@ -117,9 +117,10 @@ def test_create_order_auto_from_bom(client, admin_h, lager_product_id):
     assert set(lines.keys()) >= {"Malt Pilsner", "Hoa bia Saaz", "Men Lager W-34/70"}
 
     malt = lines["Malt Pilsner"]
-    # 1776hl = 177600 lít; volume/mẻ = 177600/12 = 14800; factor = 14800/50000 = 0.296; 1200*0.296 = 355.2/mẻ
-    assert malt["qty_per_batch"] == pytest.approx(355.2, abs=0.01)
-    assert malt["qty_total"] == pytest.approx(355.2 * 12, abs=0.1)
+    # Công thức khai báo NVL cho ĐÚNG 1 mẻ (1200 kg) — planned_volume_hl không scale nữa,
+    # chỉ planned_batch_count nhân trực tiếp vào tổng nhu cầu.
+    assert malt["qty_per_batch"] == pytest.approx(1200)
+    assert malt["qty_total"] == pytest.approx(1200 * 12)
     # Snapshot tồn phải được ghi lại (không None) vì Malt Pilsner có material_id thật.
     assert malt["stock_company_snapshot"] is not None or malt["stock_workshop_snapshot"] is not None
 
@@ -136,8 +137,8 @@ def test_bom_preview_matches_created_order_without_creating_it(client, admin_h, 
     assert set(lines.keys()) >= {"Malt Pilsner", "Hoa bia Saaz", "Men Lager W-34/70"}
 
     malt = lines["Malt Pilsner"]
-    assert malt["qty_per_batch"] == pytest.approx(355.2, abs=0.01)
-    assert malt["qty_total"] == pytest.approx(355.2 * 12, abs=0.1)
+    assert malt["qty_per_batch"] == pytest.approx(1200)
+    assert malt["qty_total"] == pytest.approx(1200 * 12)
     assert malt["material_id"]
     assert isinstance(malt["shortage"], bool)
     assert malt["stock_company_snapshot"] is not None or malt["stock_workshop_snapshot"] is not None
@@ -147,12 +148,14 @@ def test_bom_preview_matches_created_order_without_creating_it(client, admin_h, 
 
 
 def test_bom_preview_flags_shortage_for_huge_batch(client, admin_h, lager_product_id):
+    """planned_volume_hl không còn ảnh hưởng nhu cầu NVL — số mẻ kế hoạch cực lớn mới
+    khiến tổng nhu cầu vượt tồn kho (Nhu cầu Tổng mẻ = Nhu cầu 1 mẻ x Số mẻ kế hoạch)."""
     preview = client.get("/api/brewing/orders/bom-preview", headers=admin_h,
-                        params={"product_id": lager_product_id, "planned_batch_count": 1,
-                               "planned_volume_hl": 999999})
+                        params={"product_id": lager_product_id, "planned_batch_count": 999999,
+                               "planned_volume_hl": 100})
     assert preview.status_code == 200, preview.text
     lines = [l for l in preview.json() if not l["is_header"]]
-    assert any(l["shortage"] for l in lines), "Định mức cực lớn phải bị đánh dấu thiếu tồn"
+    assert any(l["shortage"] for l in lines), "Số mẻ kế hoạch cực lớn phải bị đánh dấu thiếu tồn"
 
 
 def test_create_order_manual_lines(client, admin_h):

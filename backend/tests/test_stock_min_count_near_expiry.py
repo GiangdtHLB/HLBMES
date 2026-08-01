@@ -243,125 +243,100 @@ def _a_finished_product(client, admin_h, code):
     return fp.json()["finished_product_id"]
 
 
-def _approved_bottle(client, admin_h, vanhanh_h, code, ca1=5):
-    fp_id = _a_finished_product(client, admin_h, f"SKU-{code}")
-    b = client.post("/api/brewing/bottles", headers=vanhanh_h,
-                    json={"bottle_code": code, "beer_type": "Bia test", "finished_product_id": fp_id})
-    assert b.status_code == 201, b.text
-    bottle = b.json()
-    fin = client.post(f"/api/brewing/bottles/{bottle['bottle_id']}/finish", headers=vanhanh_h,
-                      json={"ca1": ca1})
-    assert fin.status_code == 200, fin.text
-
-    # Khai báo hết mọi chỉ tiêu bắt buộc (thành phẩm) đang áp dụng — khi chạy CHUNG cả bộ test
-    # (không chỉ riêng file này), có thể đã có nhóm chỉ tiêu bắt buộc TOÀN CỤC (không giới hạn
-    # theo finished_product_id/beer_type_id) do file khác khai báo trước đó (module-scoped DB
-    # dùng chung trong 1 lượt chạy pytest); mirror cách các test khác (VD test_stage_qc.py) đã
-    # xử lý — GET qc-status rồi POST qc-results cho từng chỉ tiêu còn thiếu trước khi duyệt.
-    scope_id = f"{code}__thanh_pham"
-    status = client.get("/api/brewing/qc-status", headers=vanhanh_h,
-                        params={"stage": "thanh_pham", "scope_type": "bottle", "scope_id": scope_id,
-                               "finished_product_id": fp_id}).json()
-    for p in status.get("required", []):
-        rec = client.post("/api/brewing/qc-results", headers=vanhanh_h,
-                          json={"stage": "thanh_pham", "scope_type": "bottle", "scope_id": scope_id,
-                                "parameter": p["code"], "value": 5,
-                                "lower_limit": p["lsl"] or 1, "upper_limit": p["usl"] or 10})
-        assert rec.status_code == 201, rec.text
-
-    ap = client.post(f"/api/brewing/bottles/{bottle['bottle_id']}/approve", headers=admin_h)
-    assert ap.status_code == 200, ap.text
-    return bottle
-
-
-def test_near_expiry_lookup_finds_bottle_by_datetime(client, admin_h, vanhanh_h):
-    bottle = _approved_bottle(client, admin_h, vanhanh_h, "NE-LOOKUP-01")
-    found = client.post("/api/wms/near-expiry/lookup", headers=admin_h,
-                        json={"declared_at": bottle["bottle_date"]})
-    assert found.status_code == 200, found.text
-    candidates = found.json()
-    assert any(c["bottle_id"] == bottle["bottle_id"] for c in candidates)
-
-
-def test_near_expiry_lookup_no_match_far_in_past(client, admin_h):
-    found = client.post("/api/wms/near-expiry/lookup", headers=admin_h,
-                        json={"declared_at": "2000-01-01T00:00:00Z"})
-    assert found.status_code == 200, found.text
-    assert found.json() == []
-
-
-def test_near_expiry_entry_and_shipment_filter_roundtrip(client, admin_h, vanhanh_h):
-    bottle = _approved_bottle(client, admin_h, vanhanh_h, "NE-ROUND-01", ca1=5)
-
-    entry = client.post("/api/wms/near-expiry", headers=admin_h,
-                        json={"bottle_id": bottle["bottle_id"], "quantity": 3,
-                              "declared_at": bottle["bottle_date"]})
+def _declare_near_expiry(client, admin_h, fp_id, quantity, location_id=None, note=None):
+    payload = {"finished_product_id": fp_id, "quantity": quantity}
+    if location_id is not None:
+        payload["location_id"] = location_id
+    if note is not None:
+        payload["note"] = note
+    entry = client.post("/api/wms/near-expiry", headers=admin_h, json=payload)
     assert entry.status_code == 201, entry.text
-    body = entry.json()
+    return entry.json()
+
+
+def test_near_expiry_declare_rejects_nonpositive_quantity(client, admin_h):
+    fp_id = _a_finished_product(client, admin_h, "SKU-NE-ZEROQTY")
+    bad = client.post("/api/wms/near-expiry", headers=admin_h,
+                      json={"finished_product_id": fp_id, "quantity": 0})
+    assert bad.status_code == 409, bad.text
+
+
+def test_near_expiry_declare_generates_dedicated_lot_and_shipment_roundtrip(client, admin_h):
+    """Khai báo trực tiếp Sản phẩm + Số lượng (không cần chọn lô chiết gốc) phải tự sinh 1 lô
+    cận date riêng, tách biệt khỏi mọi lô sản xuất thật."""
+    fp_id = _a_finished_product(client, admin_h, "SKU-NE-ROUND")
+    body = _declare_near_expiry(client, admin_h, fp_id, 3, note="Khai báo test")
     assert body["count"] == 3
     product_name, lot_code = body["product_name"], body["lot_code"]
+    assert lot_code  # tự sinh, không trống
 
     hist = client.get("/api/wms/near-expiry", headers=admin_h).json()
     in_entries = [h for h in hist if h["direction"] == "in" and h["lot_code"] == lot_code]
-    assert len(in_entries) == 1 and in_entries[0]["quantity"] == 3
+    assert len(in_entries) == 1
+    assert in_entries[0]["quantity"] == 3
+    assert in_entries[0]["finished_product_id"] == fp_id
+    assert in_entries[0]["note"] == "Khai báo test"
 
     ship_to = client.post("/api/wms/ship-to", headers=admin_h,
                           json={"code": "DIST-NE-ROUND", "name": "NPP test cận date"})
     assert ship_to.status_code == 201, ship_to.text
 
-    # Xuất đúng 3 (đúng bằng số lượng cận date hiện có) với near_expiry_only=True phải thành công.
+    # Xuất một phần (2/3) với near_expiry_only=True phải thành công (cho phép xuất một phần lô).
     shipped = client.post("/api/wms/shipments", headers=admin_h,
                           json={"ship_to_id": ship_to.json()["ship_to_id"],
                                 "lines": [{"product_name": product_name, "lot_code": lot_code,
-                                          "unit_type": "vi", "quantity": 3, "near_expiry_only": True}]})
+                                          "unit_type": "vi", "quantity": 2, "near_expiry_only": True}]})
     assert shipped.status_code == 201, shipped.text
 
     hist2 = client.get("/api/wms/near-expiry", headers=admin_h).json()
     out_entries = [h for h in hist2 if h["direction"] == "out" and h["lot_code"] == lot_code]
-    assert len(out_entries) == 1 and out_entries[0]["quantity"] == 3
+    assert len(out_entries) == 1 and out_entries[0]["quantity"] == 2
     assert out_entries[0]["shipment_code"] == shipped.json()["shipment_code"]
 
-    # Không còn vỉ cận date nào nữa -> xuất tiếp near_expiry_only phải báo lỗi rõ ràng.
+    # Xuất tiếp phần còn lại (1) vẫn còn cận date -> thành công (phần còn lại của lô).
     shipped2 = client.post("/api/wms/shipments", headers=admin_h,
                            json={"ship_to_id": ship_to.json()["ship_to_id"],
                                  "lines": [{"product_name": product_name, "lot_code": lot_code,
                                            "unit_type": "vi", "quantity": 1, "near_expiry_only": True}]})
-    assert shipped2.status_code == 409
-    assert "cận date" in shipped2.json()["detail"]
+    assert shipped2.status_code == 201, shipped2.text
+
+    # Không còn vỉ cận date nào nữa -> xuất tiếp near_expiry_only phải báo lỗi rõ ràng.
+    shipped3 = client.post("/api/wms/shipments", headers=admin_h,
+                           json={"ship_to_id": ship_to.json()["ship_to_id"],
+                                 "lines": [{"product_name": product_name, "lot_code": lot_code,
+                                           "unit_type": "vi", "quantity": 1, "near_expiry_only": True}]})
+    assert shipped3.status_code == 409
+    assert "cận date" in shipped3.json()["detail"]
 
 
-def test_near_expiry_shipment_without_flag_ignores_near_expiry_tag(client, admin_h, vanhanh_h):
-    """Xuất KHÔNG tick near_expiry_only vẫn có thể lấy trúng đơn vị cận date (FIFO thường) —
-    chỉ khi đó phiếu xuất mới tự động ghi vào lịch sử cận date (direction=out)."""
-    bottle = _approved_bottle(client, admin_h, vanhanh_h, "NE-NOFLAG-01", ca1=2)
-    entry = client.post("/api/wms/near-expiry", headers=admin_h,
-                        json={"bottle_id": bottle["bottle_id"], "quantity": 2,
-                              "declared_at": bottle["bottle_date"]})
-    assert entry.status_code == 201, entry.text
-    product_name, lot_code = entry.json()["product_name"], entry.json()["lot_code"]
+def test_near_expiry_lot_never_merges_with_regular_stock(client, admin_h):
+    """Yêu cầu cốt lõi: lô cận date PHẢI hiện thành dòng RIÊNG ở Xuất kho, không gộp chung với
+    tồn thường của cùng 1 sản phẩm — vì lot_code tự sinh không bao giờ trùng lô sản xuất thật."""
+    fp_id = _a_finished_product(client, admin_h, "SKU-NE-SEPARATE")
+    fp = client.get("/api/finished-products", headers=admin_h).json()
+    code = next(f["code"] for f in fp if f["finished_product_id"] == fp_id)
 
-    ship_to = client.post("/api/wms/ship-to", headers=admin_h,
-                          json={"code": "DIST-NE-NOFLAG", "name": "NPP test 2"})
-    assert ship_to.status_code == 201, ship_to.text
-    # Tổng tồn = 2 (mẻ chiết) + 2 (cận date) = 4; xuất cả 4 không lọc cận date.
-    shipped = client.post("/api/wms/shipments", headers=admin_h,
-                          json={"ship_to_id": ship_to.json()["ship_to_id"],
-                                "lines": [{"product_name": product_name, "lot_code": lot_code,
-                                          "unit_type": "vi", "quantity": 4}]})
-    assert shipped.status_code == 201, shipped.text
+    regular_lot = "LOT-REGULAR-SEPARATE"
+    built = client.post("/api/wms/units", headers=admin_h,
+                        json={"finished_product_id": fp_id, "product_name": code,
+                              "lot_code": regular_lot, "total": 5, "pack_size": 1,
+                              "unit_type": "vi", "reason": "Nhập kho thủ công"})
+    assert built.status_code == 201, built.text
 
-    hist = client.get("/api/wms/near-expiry", headers=admin_h).json()
-    out_entries = [h for h in hist if h["direction"] == "out" and h["lot_code"] == lot_code]
-    assert len(out_entries) == 1 and out_entries[0]["quantity"] == 2  # chỉ 2 đơn vị cận date trong lô này
+    ne_body = _declare_near_expiry(client, admin_h, fp_id, 3)
+    assert ne_body["lot_code"] != regular_lot
+
+    by_lot = client.get("/api/wms/units/by-lot", headers=admin_h).json()
+    lots_for_product = {g["lot_code"] for g in by_lot if g["product_name"] == code}
+    assert regular_lot in lots_for_product
+    assert ne_body["lot_code"] in lots_for_product
+    assert len(lots_for_product) == 2  # 2 dòng riêng biệt, không gộp
 
 
-def test_near_expiry_undo_removes_units(client, admin_h, vanhanh_h):
-    bottle = _approved_bottle(client, admin_h, vanhanh_h, "NE-UNDO-01", ca1=3)
-    entry = client.post("/api/wms/near-expiry", headers=admin_h,
-                        json={"bottle_id": bottle["bottle_id"], "quantity": 2,
-                              "declared_at": bottle["bottle_date"]})
-    assert entry.status_code == 201, entry.text
-    product_name, lot_code = entry.json()["product_name"], entry.json()["lot_code"]
+def test_near_expiry_undo_removes_units(client, admin_h):
+    fp_id = _a_finished_product(client, admin_h, "SKU-NE-UNDO")
+    body = _declare_near_expiry(client, admin_h, fp_id, 2)
+    lot_code, product_name = body["lot_code"], body["product_name"]
 
     hist = client.get("/api/wms/near-expiry", headers=admin_h).json()
     row = next(h for h in hist if h["direction"] == "in" and h["lot_code"] == lot_code)
@@ -392,13 +367,10 @@ def test_near_expiry_undo_removes_units(client, admin_h, vanhanh_h):
     assert redo.status_code == 409
 
 
-def test_near_expiry_undo_blocked_after_shipped(client, admin_h, vanhanh_h):
-    bottle = _approved_bottle(client, admin_h, vanhanh_h, "NE-UNDO-SHIPPED-01", ca1=1)
-    entry = client.post("/api/wms/near-expiry", headers=admin_h,
-                        json={"bottle_id": bottle["bottle_id"], "quantity": 1,
-                              "declared_at": bottle["bottle_date"]})
-    assert entry.status_code == 201, entry.text
-    product_name, lot_code = entry.json()["product_name"], entry.json()["lot_code"]
+def test_near_expiry_undo_blocked_after_shipped(client, admin_h):
+    fp_id = _a_finished_product(client, admin_h, "SKU-NE-UNDO-SHIPPED")
+    body = _declare_near_expiry(client, admin_h, fp_id, 1)
+    lot_code, product_name = body["lot_code"], body["product_name"]
 
     ship_to = client.post("/api/wms/ship-to", headers=admin_h,
                           json={"code": "DIST-NE-UNDO-SHIPPED", "name": "NPP test undo shipped"})
@@ -416,13 +388,10 @@ def test_near_expiry_undo_blocked_after_shipped(client, admin_h, vanhanh_h):
     assert "xuất" in undo.json()["detail"]
 
 
-def test_near_expiry_undo_rejects_out_direction(client, admin_h, vanhanh_h):
-    bottle = _approved_bottle(client, admin_h, vanhanh_h, "NE-UNDO-OUTDIR-01", ca1=1)
-    entry = client.post("/api/wms/near-expiry", headers=admin_h,
-                        json={"bottle_id": bottle["bottle_id"], "quantity": 1,
-                              "declared_at": bottle["bottle_date"]})
-    assert entry.status_code == 201, entry.text
-    product_name, lot_code = entry.json()["product_name"], entry.json()["lot_code"]
+def test_near_expiry_undo_rejects_out_direction(client, admin_h):
+    fp_id = _a_finished_product(client, admin_h, "SKU-NE-UNDO-OUTDIR")
+    body = _declare_near_expiry(client, admin_h, fp_id, 1)
+    lot_code, product_name = body["lot_code"], body["product_name"]
 
     ship_to = client.post("/api/wms/ship-to", headers=admin_h,
                           json={"code": "DIST-NE-UNDO-OUTDIR", "name": "NPP test undo outdir"})

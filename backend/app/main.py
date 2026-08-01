@@ -27,6 +27,7 @@ from .routers import (
     dispense,
     downtime,
     energy,
+    formula,
     gateway,
     historian,
     import_explorer,
@@ -152,7 +153,7 @@ async def _perm(_: Request, exc: PermissionError_):
 
 
 # ---- Routers ----
-for r in (auth, master, orders, workorders, recipes, batches, materials, dispense, quality,
+for r in (auth, master, orders, workorders, recipes, formula, batches, materials, dispense, quality,
           quality_adv, traceability, performance, downtime, warehouse, energy, maintenance,
           process, brewing, reports, historian, scan, schedule, ai, jobs, isa88, wms,
           label, lines, packaging, import_explorer, gateway, audit, cip):

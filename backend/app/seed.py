@@ -33,6 +33,7 @@ from .models.metrics import OEERecord, ProcessReading
 from .models.orders import ProductionOrder
 from .models.process import ChemicalUsage, YeastIssue, YeastLot
 from .models.recipes import Recipe, RecipeVersion
+from .models.formula import Formula
 from .models.recipe_ext import BatchYieldActual, RecipeChange
 from .models.quality_ext import CAPA, QCParameter, Sample
 from .models.quality import QualityResult
@@ -43,6 +44,7 @@ from .security import User
 from .services import batches as batch_svc
 from .services import quality as qual_svc
 from .services import recipes as recipe_svc
+from .services import formula as formula_svc
 
 ENG = User("engineer1", Role.ENGINEER.value)
 QA = User("qa1", Role.QA.value)
@@ -219,6 +221,27 @@ def seed():
     recipe_svc.transition(db, rv.version_id, "review", ENG)
     recipe_svc.transition(db, rv.version_id, "approved", QA)   # QA duyệt (SoD: khác người soạn)
     recipe_svc.transition(db, rv.version_id, "effective", ENG)
+
+    # --- Formula (mô hình mới thay Recipe/RecipeVersion — xem models/formula.py) ---
+    # Recipe/RecipeVersion ở trên giữ nguyên cho Công thức+ (nav-unused) cũ; Lệnh nấu
+    # (services/brew_order.py::_effective_bom) chỉ đọc Formula, nên seed cũng phải tạo +
+    # kích hoạt 1 Formula cho BIA-LAGER — nếu không, DB seed mới (test/dev từ trống) sẽ
+    # không có Formula nào cho product này dù Recipe cũ đã "effective" (2 mô hình độc lập,
+    # migration chỉ tự chuyển đổi dữ liệu recipe_version ĐÃ CÓ SẴN lúc chạy alembic, không
+    # áp dụng cho dữ liệu seed() tạo ra sau đó).
+    lager_formula = db.execute(select(Formula).where(Formula.code == "REC-LAGER-V1")).scalar_one_or_none()
+    if not lager_formula:
+        lager_formula = formula_svc.create_formula(db, {
+            "code": "REC-LAGER-V1", "product_id": lager.product_id,
+            "note": "Seed demo — mirror của REC-LAGER (RecipeVersion cũ) cho Lệnh nấu tự nạp NVL.",
+            "base_qty": 50000, "base_uom": "L",
+            "materials": [
+                {"material_code": "MALT-PILS", "qty": 1200, "uom": "kg"},
+                {"material_code": "HOP-SAAZ", "qty": 15, "uom": "kg"},
+                {"material_code": "YEAST-L34", "qty": 50, "uom": "L"},
+            ],
+        }, ENG)
+        formula_svc.activate_formula(db, lager_formula.formula_id, ENG)
 
     # --- Production order ---
     order = ProductionOrder(order_id=new_id(), order_code="PO-2406-1001",
@@ -555,7 +578,9 @@ def _seed_brewing(db) -> None:
     for i in range(10):
         wort = worts[i % 3]
         full = i not in (2, 5)  # mẻ 2 và 5 thiếu OE/Plato
-        db.add(BrewRecord(brew_id=new_id(), brew_code=f"412{40 + i}", brew_date=H(10 - i, 6),
+        brew_date = H(10 - i, 6)
+        db.add(BrewRecord(brew_id=new_id(), brew_code=f"412{40 + i}", brew_date=brew_date,
+                          brew_year=brew_date.year,
                           wort_type=wort, volume_hl=round(890 + (i % 3) * 450 + i * 5, 1),
                           original_extract=(14.0 if full else None) if i % 3 == 0 else (13.0 if full else None),
                           plato=(14.2 if full else None)))
@@ -565,8 +590,9 @@ def _seed_brewing(db) -> None:
     for i in range(8):
         wort = worts[i % 3]
         vol = round(896 + (i % 3) * 450 + i * 3, 1)
+        ferment_brew_date = H(2 + i, 4)
         db.add(FermentRecord(ferment_id=new_id(), lm_code=f"{145 - i}", brew_code=f"412{50 - i}",
-                             brew_date=H(2 + i, 4), kt_date=H(1 + i),
+                             brew_date=ferment_brew_date, ferment_year=ferment_brew_date.year, kt_date=H(1 + i),
                              batch_numbers=",".join(str(1423 - i * 6 - j) for j in range(3)) + ",...",
                              wort_type=wort, yeast_gen="Men Khác", tank_lm=tanks_lm[i],
                              volume_hl=vol, on_hand_cct=vol, status="len_men",
@@ -583,8 +609,9 @@ def _seed_brewing(db) -> None:
         v_beer = round(228 + i * 12, 1)
         on_hand = 0 if statuses[i] == "da_chiet_het" else (v_beer if statuses[i] == "cho_chiet" else round(v_beer * 0.5, 1))
         has_ind = i not in (0, 3)
+        filter_date = H(i, 3)
         db.add(FilterRecord(filter_id=new_id(), filter_code=f"839{42 - i}", brew_code=f"412{27 - (i % 5)}",
-                            lot_loc=f"{700 - i}", filter_date=H(i, 3), filter_type="thuong",
+                            lot_loc=f"{700 - i}", filter_date=filter_date, filter_year=filter_date.year, filter_type="thuong",
                             wort_type=wort, from_cct=cct[i], v_dich_hl=v_dich,
                             beer_type=beers[wort], v_beer_hl=v_beer, to_bbt=bbt[i],
                             status=statuses[i], on_hand_bbt=on_hand, has_indicators=has_ind, has_nvl=has_ind))
@@ -600,8 +627,9 @@ def _seed_brewing(db) -> None:
     for i in range(10):
         c1, c2, c3 = ca_data[i]
         stocked = i >= 4
+        bottle_date = H(i // 2, (i % 2) * 5)
         db.add(BottleRecord(bottle_id=new_id(), bottle_code=f"935{35 - i}", filter_code=f"839{42 - i}",
-                            bottle_date=H(i // 2, (i % 2) * 5), beer_type=bbeers[i], lot_no=f"{697 - (i % 6)}",
+                            bottle_date=bottle_date, bottle_year=bottle_date.year, beer_type=bbeers[i], lot_no=f"{697 - (i % 6)}",
                             v_cap_chiet_hl=round(21 + i * 35, 1), from_bbt=bbt[i], line=blines[i],
                             ca1=c1, ca2=c2, ca3=c3, stocked=stocked, approved=stocked,
                             has_indicators=stocked, has_nvl=stocked))

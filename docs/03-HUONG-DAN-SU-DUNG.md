@@ -3,6 +3,8 @@
 **Nhà máy Đông Mai — Hệ thống điều hành sản xuất (Manufacturing Execution System)**
 
 > Phiên bản phần mềm: `0.1.0-mvp` · Tài liệu cập nhật: **22/07/2026** (bản chạy lại buổi chiều), biên soạn bằng cách lấy trực tiếp dữ liệu và thao tác thật trên máy chủ đang chạy tại thời điểm này (không phải bản đề xuất/kế hoạch, không phải mô tả chung chung). Mỗi mục đều có: mục đích, ai dùng, các bước thao tác cụ thể (đúng tên trường/nút bấm thật), số liệu thật minh hoạ, và ở những chỗ phần mềm có vẽ biểu đồ, tài liệu vẽ lại đúng biểu đồ đó dạng Mermaid (`xychart-beta`) ngay từ số liệu thật — không phải ảnh chụp màn hình tĩnh. Mermaid hiển thị trực tiếp trên GitHub/GitLab và VS Code (cần bật extension Markdown Preview Mermaid Support); nếu trình xem không hỗ trợ, bảng số liệu ngay bên dưới mỗi biểu đồ vẫn đọc được bình thường.
+>
+> **Bổ sung sau ngày 22/07/2026** (mục 1 — danh sách tài khoản đúng theo sơ đồ tổ chức thật; mục 9.3 — trạng thái "Chờ duyệt" của mẻ lọc + cho phép trùng Batch/Order Number; mục 14 — toàn bộ phân hệ **CIP** mới; mục 21.1 — Danh mục Loại đơn vị tồn kho; mục 23 — nút **Xem** chi tiết audit): các mục này biên soạn từ đúng mã nguồn/cấu hình đang chạy (không chạy lại máy chủ để chụp số liệu thời điểm biên soạn), nên không kèm bảng "Dữ liệu thật hiện tại" như các mục cũ — các bước/tên trường/nút bấm vẫn đúng 100% với bản đang chạy.
 
 ---
 
@@ -21,16 +23,17 @@
 11. [Kho NVL](#11-kho-nvl)
 12. [Kho thành phẩm (WMS)](#12-kho-thành-phẩm-wms)
 13. [Bao bì](#13-bao-bì)
-14. [Năng lượng](#14-năng-lượng)
-15. [OEE / Dừng máy](#15-oee--dừng-máy)
-16. [Bảo trì / Kiểm định](#16-bảo-trì--kiểm-định)
-17. [Báo cáo](#17-báo-cáo)
-18. [Trợ lý AI](#18-trợ-lý-ai)
-19. [Tích hợp (API/Webhook/Kết nối CSDL)](#19-tích-hợp-apiwebhookkết-nối-csdl)
-20. [Danh mục (Master data)](#20-danh-mục-master-data)
-21. [Tài khoản & phân quyền](#21-tài-khoản--phân-quyền)
-22. [Audit — nhật ký hệ thống](#22-audit--nhật-ký-hệ-thống)
-23. [Hồ sơ cá nhân](#23-hồ-sơ-cá-nhân)
+14. [CIP — Vệ sinh thiết bị](#14-cip--vệ-sinh-thiết-bị)
+15. [Năng lượng](#15-năng-lượng)
+16. [OEE / Dừng máy](#16-oee--dừng-máy)
+17. [Bảo trì / Kiểm định](#17-bảo-trì--kiểm-định)
+18. [Báo cáo](#18-báo-cáo)
+19. [Trợ lý AI](#19-trợ-lý-ai)
+20. [Tích hợp (API/Webhook/Kết nối CSDL)](#20-tích-hợp-apiwebhookkết-nối-csdl)
+21. [Danh mục (Master data)](#21-danh-mục-master-data)
+22. [Tài khoản & phân quyền](#22-tài-khoản--phân-quyền)
+23. [Audit — nhật ký hệ thống](#23-audit--nhật-ký-hệ-thống)
+24. [Hồ sơ cá nhân](#24-hồ-sơ-cá-nhân)
 
 ---
 
@@ -44,21 +47,20 @@
 3. Hệ thống lưu token phiên vào trình duyệt — không cần đăng nhập lại cho tới khi bấm **Đăng xuất** (góc trên phải).
 4. Muốn dùng trên tablet/màn hình cảm ứng ngoài xưởng: bấm **📱 Kiosk** (cạnh nút Đăng xuất) để mở giao diện rút gọn, tối ưu thao tác chạm.
 
-**11 tài khoản demo đang có trên hệ thống** (mật khẩu mặc định `123456`, riêng `admin` là `admin123`):
+**10 tài khoản demo đang có trên hệ thống** (mật khẩu mặc định `123456`, riêng `admin` là `admin123`) — danh sách đã rút gọn để khớp đúng sơ đồ tổ chức thật của nhà máy (không còn các chức danh "giám đốc nhà máy chung chung", "trưởng ca", "thủ kho phân xưởng", "bảo trì", "năng lượng" như trước — các việc đó đã gộp vào đúng chức danh thật bên dưới):
 
 | Tài khoản | Vai trò (role) | Chức danh hiển thị | Dùng cho phần nào |
 |---|---|---|---|
 | `admin` | admin | Quản trị hệ thống | Toàn quyền, quản lý Tài khoản/Tích hợp |
-| `giangdt` | admin | **Tổng giám đốc** | Xem toàn bộ báo cáo, không thao tác vận hành |
-| `giamdoc` | supervisor | Giám đốc nhà máy | Duyệt kiểm kê, xem báo cáo tổng hợp |
-| `quandoc` | supervisor | Quản đốc phân xưởng | Điều độ, duyệt kiểm kê |
-| `truongca` | supervisor | Trưởng ca sản xuất | Lập lịch, theo dõi ca |
-| `kcs` | qa | Nhân viên KCS / QA | Khai báo/duyệt QC, release lô |
-| `kysu` | engineer | Kỹ sư công nghệ | Công thức, cấu hình chỉ tiêu QC |
-| `vanhanh` | operator | Nhân viên vận hành | Nấu/Lên men/Lọc/Chiết hàng ngày |
+| `quandoc` | supervisor | Quản đốc phân xưởng | Điều độ, duyệt kiểm kê, khai báo Danh mục, CIP |
+| `phoquandoc` | supervisor | **Phó Quản đốc phân xưởng (trực ca)** — mới | Ký duyệt/khóa hồ sơ mẻ hàng ngày theo ca, CIP |
+| `vanhanh` | operator | Nhân viên vận hành | Nấu/Lên men/Lọc/Chiết hàng ngày, khai báo CIP |
+| `kcs` | qa | Nhân viên KCS / QA | Khai báo/duyệt QC, release lô, nghiệm thu CIP |
+| `kysu` | engineer | Kỹ sư — Phòng Kỹ thuật, Công nghệ và Cải tiến Sản xuất | Công thức (soạn), cấu hình chỉ tiêu QC |
 | `thukho` | operator | Thủ kho NVL | Nhập/xuất/kiểm kê Kho NVL |
-| `baotri` | operator | Nhân viên bảo trì | Ghi sự cố, kế hoạch bảo trì |
-| `nangluong` | operator | NV quản lý năng lượng | Cập nhật/xem báo cáo năng lượng |
+| `kcs_truongphong` | qa | Trưởng phòng KCS | Khóa chỉ tiêu, tạo Lệnh lọc, duyệt QC |
+| `giamdoc_sx` | supervisor | Giám đốc Sản xuất - Kỹ thuật | **Người duy nhất** duyệt lô chiết cho nhập Kho thành phẩm |
+| `ttdh_thukhotp` | operator | NV Trung tâm Điều hành - Thủ kho TP | Quản lý Kho TP (WMS): xuất kho, điều chuyển, cất vị trí |
 
 ---
 
@@ -274,7 +276,10 @@ Bảng Nấu gom nhóm các mẻ theo lô lên men (tank đích) để dễ theo
 2. Chọn **Lệnh lọc con** (mục 4.2) — tank nguồn (CCT hoặc BBT tái lọc) tự gợi ý theo lệnh đã chọn.
 3. Chỉ các tank đã **Duyệt LM** mới xuất hiện trong danh sách chọn.
 4. Theo dõi thể tích dịch còn lại từng tank ngay trên bảng.
-5. KCS bấm **Duyệt KCS** sau khi lọc đạt — tank chưa duyệt sẽ bị chặn khỏi danh sách chọn ở bước Chiết.
+5. Khi rút dịch xong 1 tank: bấm **Kết thúc** trên dòng tank đó, nhập **Mẻ lọc số**, **Số mẻ (Batch Number)**, **Số lệnh (Order Number)** đúng theo phiếu giấy và **Dịch nha lọc (hl)** (bắt buộc > 0). Số mẻ/số lệnh **được phép trùng** giữa các lệnh lọc khác nhau (ví dụ khi nhà máy reset số theo ca/ngày) — hệ thống không còn báo lỗi trùng, báo cáo sản lượng tự gộp đúng theo bộ 3 giá trị này khi tính mẻ lọc thật.
+6. KCS bấm **Duyệt KCS** sau khi lọc đạt — tank chưa duyệt sẽ bị chặn khỏi danh sách chọn ở bước Chiết.
+
+**Trạng thái 1 dòng lọc hiển thị trên bảng** (tự suy ra từ tồn BBT thật, không phải cột cố định): **Đang lọc** (chưa bấm Kết thúc) → **Chờ duyệt** (đã Kết thúc nhưng KCS chưa Duyệt KCS — CHƯA được đem đi chiết dù đã rút hết dịch) → **Chờ chiết** (đã Duyệt KCS, chưa chiết giọt nào) → **Đang chiết** (đã chiết một phần) → **Đã chiết hết** (tồn BBT về 0).
 
 ### 9.4 Chiết
 
@@ -396,7 +401,7 @@ Sổ ghi chép **thật** — phân biệt với Xuất tự do ở trên — li
 
 ### 11.5 📉 Tồn tối thiểu
 
-Biểu đồ cột các vật tư đang dưới ngưỡng tồn tối thiểu đã cấu hình (cấu hình ngưỡng ở Danh mục Vật tư, mục 20), kèm bảng chi tiết mức thiếu hụt. Dữ liệu thật hiện chỉ có **1 vật tư** dưới ngưỡng — LOWSTOCK01, tồn 15kg trong khi ngưỡng tối thiểu là 100kg (thiếu hụt 85kg):
+Biểu đồ cột các vật tư đang dưới ngưỡng tồn tối thiểu đã cấu hình (cấu hình ngưỡng ở Danh mục Vật tư, mục 21), kèm bảng chi tiết mức thiếu hụt. Dữ liệu thật hiện chỉ có **1 vật tư** dưới ngưỡng — LOWSTOCK01, tồn 15kg trong khi ngưỡng tối thiểu là 100kg (thiếu hụt 85kg):
 
 ```mermaid
 xychart-beta
@@ -436,7 +441,7 @@ xychart-beta
 | MALT-PILS · KCS01 | Kho phân xưởng | Sắp hết | còn 8 |
 | MALT-VIENNA · MALT-V-2406-01 | Kho công ty | Bình thường | còn 166 |
 
-**Ví dụ audit thật của thao tác Kiểm kê định kỳ vừa thực hiện** (xem seq #591-592 trong Audit, mục 22): chốt phiếu KK-260722-EE2D (lệch 8kg lô MALT-2406-01: hệ thống 3802kg → thực tế 3810kg) → hoàn tác (trả về 3802kg).
+**Ví dụ audit thật của thao tác Kiểm kê định kỳ vừa thực hiện** (xem seq #591-592 trong Audit, mục 23): chốt phiếu KK-260722-EE2D (lệch 8kg lô MALT-2406-01: hệ thống 3802kg → thực tế 3810kg) → hoàn tác (trả về 3802kg).
 
 *(1 nhà cung cấp đã khai báo trong hệ thống.)*
 
@@ -514,7 +519,62 @@ Khai báo lô-chiết cận hạn sử dụng — hệ thống tự tra cứu l�
 
 ---
 
-## 14. Năng lượng
+## 14. CIP — Vệ sinh thiết bị
+
+**Mục đích:** ghi nhận đúng theo biểu mẫu giấy gốc của nhà máy mọi lần vệ sinh (CIP) thiết bị/tank — so sánh Tiêu chuẩn (TC) với Thực tế (TH) từng bước, KCS nghiệm thu Đạt/Không đạt, và tra ngược lại được "tank/thiết bị này đã vệ sinh lần nào trước khi chạy mẻ này".
+
+**Ai dùng:** vận hành/quản đốc/kỹ sư (khai báo — quyền `cip.manage`), KCS/người có quyền `quality.release` (nghiệm thu).
+
+**4 sub-tab (thứ tự trên thanh menu con):** 📐 Khai báo biểu mẫu · 📝 Khai báo CIP · 📜 Lịch sử CIP · Danh mục. Vì Danh mục là nơi khai báo nền, nên làm theo thứ tự dưới đây khi dùng lần đầu: **Danh mục → Khai báo biểu mẫu → Khai báo CIP**.
+
+### 14.1 Danh mục
+
+Khai báo 2 danh mục nền của CIP — làm trước tiên khi mới dùng phân hệ này:
+
+1. **Loại biểu mẫu CIP** — mỗi loại tương ứng 1 mẫu biểu giấy gốc của nhà máy (hệ thống có sẵn 21 mẫu đúng mã QT-KCS-QT-BM-xx đang dùng thật). Muốn thêm loại mới: nhập **Mã** (đúng mã biểu mẫu giấy, ví dụ `QT-KCS-QT-BM-22`), **Tên**, chọn **Khu vực** (Nấu / Lên men / Lọc / Chiết-Kho TP), chọn **Loại**: "Đầy đủ" (CIP full — vệ sinh toàn bộ chu trình xút/axit/khử trùng) hoặc "Nhẹ (vd tráng nước)" (CIP light — chỉ tráng nước, dùng xen kẽ giữa các lần CIP đầy đủ, ví dụ ở tank thành phẩm), bấm **Thêm**.
+2. Sau khi tạo, vào tab **Khai báo biểu mẫu** (mục 14.2) để soạn **đúng đơn vị thời gian/nhiệt độ/nồng độ cho loại biểu mẫu đó** — các mẫu khác nhau dùng đơn vị khác nhau (ví dụ tank lên men tính thời gian bằng **giây**, phần lớn mẫu khác tính bằng **phút**), nên phải chọn đúng ngay từ khi khai báo, tránh sai lệch khi ghi số liệu thật sau này.
+3. **Thiết bị CIP** — nhập **Mã** (ví dụ `EQ-...`), **Tên**, chọn **Khu vực**, và mục **Gắn tank/dây chuyền** — chỉ chọn 1 tank/dây chuyền cụ thể nếu thiết bị đó CHỈ dùng để vệ sinh riêng 1 tank/dây chuyền; để trống ("dùng chung — luôn hiện") nếu là thiết bị/hệ CIP dùng chung cho nhiều tank (ví dụ hệ đường ống CIP trung tâm).
+4. Mỗi dòng Loại biểu mẫu/Thiết bị đều có nút **Sửa**/**Xóa**.
+
+### 14.2 Khai báo biểu mẫu (bảng bước TIÊU CHUẨN)
+
+Soạn trước bảng bước chuẩn cho 1 loại biểu mẫu — khi khai báo 1 lần CIP thật ở mục 14.3, chọn đúng loại biểu mẫu sẽ tự điền bảng bước từ đây (vẫn sửa/thêm/bớt tự do được, không khoá cứng):
+
+1. Chọn **Loại biểu mẫu** cần soạn (gõ vào ô tìm để lọc nhanh theo mã/tên nếu danh sách dài).
+2. Kiểm tra/sửa **Đơn vị thời gian** (giây/phút/giờ), **Đơn vị nhiệt độ**, **Đơn vị nồng độ** — đúng cho từng loại biểu mẫu (xem lưu ý ở mục 14.1).
+3. Với mỗi dòng bước: nhập **Nội dung**, **Thời gian**, **Nhiệt độ**, **Nồng độ**, **Phương pháp kiểm tra** (kết quả yêu cầu), **Người làm**, **Ghi chú**. Ô nào không cần ghi số (ví dụ bước vệ sinh thô không kiểm tra nồng độ hóa chất) thì tick **N/A** thay vì để trống hoặc gõ số không đúng thực tế.
+4. Bấm **+ Thêm bước** để thêm dòng, bấm **Lưu bảng bước mẫu (tiêu chuẩn)** khi xong.
+5. Muốn dùng lại đúng bảng bước này cho 1 loại biểu mẫu khác: bấm **📋 Copy sang biểu mẫu khác**, chọn biểu mẫu đích trong danh sách rồi bấm **Copy**. **Lưu ý:** chỉ copy được sang biểu mẫu đích đang **hoàn toàn trống** (chưa soạn bước nào) — biểu mẫu đích đã có sẵn bước sẽ bị vô hiệu hoá trong danh sách chọn, để tránh ghi đè nhầm lên dữ liệu đã soạn.
+
+### 14.3 Khai báo CIP (1 lần vệ sinh thật)
+
+Ghi nhận 1 lần vệ sinh thiết bị thật đã/đang thực hiện:
+
+1. Chọn **Khu vực** (lọc nhanh danh sách), **Loại biểu mẫu** và **Thiết bị** — cột "TC" (tiêu chuẩn) tự điền theo bảng bước mẫu của loại biểu mẫu đã chọn và **không sửa được ở đây** (sửa tiêu chuẩn phải quay lại mục 14.2).
+2. Nhập bắt buộc **Batch Number** và **Order Number** — đúng mã lệnh/mẻ đang chạy trên Braumat mà lần CIP này phục vụ.
+3. Chọn **Ca làm việc**, nhập **Bắt đầu**/**Kết thúc**, **Người thực hiện**, **Người trực ca**.
+4. Với mỗi dòng bước, nhập cột **"TH" (thực tế)**: Thời gian/Nhiệt độ/Nồng độ/Kết quả đo được thật, cùng Người làm/Ghi chú — gõ tự do (kể cả ghi tỷ lệ %). Có thể **thêm/bớt dòng** so với bảng tiêu chuẩn nếu thực tế phát sinh khác (ví dụ phải lặp lại 1 bước).
+5. Nhập **Ghi chú chung** nếu cần, bấm **Khai báo CIP** để lưu.
+6. Sau khi lưu, sang tab **Lịch sử CIP** (mục 14.4) để nghiệm thu Đạt/Không đạt.
+
+### 14.4 Lịch sử CIP & in báo cáo
+
+1. Tab **Lịch sử CIP** liệt kê mọi lần CIP đã khai báo — có ô tìm theo mã CIP/batch/order/thiết bị/biểu mẫu.
+2. Bấm **Xem** trên 1 dòng để mở lại toàn bộ bảng bước Tiêu chuẩn/Thực tế của lần CIP đó, rồi bấm **🖨️ In biểu mẫu** để in đúng layout **BIÊN BẢN VỆ SINH THIẾT BỊ (CIP)** giấy của nhà máy — so sánh song song cột Tiêu chuẩn và Thực tế, có đủ 3 chữ ký Người thực hiện/Người trực ca/KCS nghiệm thu.
+3. Người có quyền `quality.release` bấm **Nghiệm thu** (chỉ hiện khi lần CIP đó chưa có kết quả) — chọn **Đạt**/**Không đạt**, nhập **Người kiểm tra (KCS)**, ghi chú nếu cần, bấm **Xác nhận nghiệm thu**.
+
+### 14.5 Gắn CIP với mẻ/lô sản xuất
+
+Dùng khi cần truy vết "tank/thiết bị này đã vệ sinh lần nào trước khi chạy mẻ này":
+
+1. Từ màn hình **Nấu — Lọc — Chiết** (mục 9) — trên dòng mẻ nấu, lô lên men (tank CCT), mẻ lọc (tank BBT) hoặc mã chiết — bấm nút **CIP** (tooltip "Gắn CIP liên quan").
+2. Hệ thống tự gợi ý các lần CIP đã khai báo cho đúng thiết bị của dòng đó, mới nhất trước — tick chọn (các) lần CIP đúng, bấm **Lưu gắn kết**. Hệ thống chỉ gợi ý, người dùng luôn tự xác nhận đúng lần nào (không tự động gán).
+3. Có thể bấm **Hủy gắn** trên 1 lần CIP đã gắn nhầm.
+4. CIP đã gắn sẽ tự hiện trong mục **"CIP liên quan"** ở khối chi tiết mẻ/lô, và trong **📄 Hồ sơ điện tử** (mục 10) của cả chuỗi mẻ đó.
+
+---
+
+## 15. Năng lượng
 
 **Mục đích:** theo dõi điện tiêu thụ thực tế lấy trực tiếp từ SCADA, không cần nhập tay.
 
@@ -544,7 +604,7 @@ Theo trạm biến áp: Trạm 560 KVA — 3.841.446 kWh · Trạm 320 KVA — 2
 
 ---
 
-## 15. OEE / Dừng máy
+## 16. OEE / Dừng máy
 
 **Mục đích:** đo hiệu suất thiết bị tổng thể (Overall Equipment Effectiveness) và lý do dừng máy theo dây chuyền.
 
@@ -554,13 +614,13 @@ Theo trạm biến áp: Trạm 560 KVA — 3.841.446 kWh · Trạm 320 KVA — 2
 
 ---
 
-## 16. Bảo trì / Kiểm định
+## 17. Bảo trì / Kiểm định
 
 **Mục đích:** quản lý sự cố thiết bị, kế hoạch bảo trì định kỳ, và lịch kiểm định thiết bị đo lường.
 
 **Ai dùng:** nhân viên bảo trì.
 
-### 16.1 Bảo trì
+### 17.1 Bảo trì
 
 **Các bước ghi sự cố:**
 1. Sub-tab **Sự cố**, bấm **Thêm sự cố** — chọn thiết bị (từ **DM thiết bị**), mô tả sự cố, mức độ.
@@ -570,7 +630,7 @@ Theo trạm biến áp: Trạm 560 KVA — 3.841.446 kWh · Trạm 320 KVA — 2
 
 **Dữ liệu thật hiện tại:** 2 sự cố, 3 kế hoạch bảo trì đang có trong hệ thống.
 
-### 16.2 Kiểm định
+### 17.2 Kiểm định
 
 Lịch kiểm định thiết bị đo lường — bấm **Thêm** để khai báo thiết bị + chu kỳ kiểm định; hệ thống tự cảnh báo khi sắp/đã quá hạn.
 
@@ -578,13 +638,13 @@ Lịch kiểm định thiết bị đo lường — bấm **Thêm** để khai b
 
 ---
 
-## 17. Báo cáo
+## 18. Báo cáo
 
 **Mục đích:** trung tâm báo cáo tổng hợp phục vụ đối chiếu định mức, sản lượng thực tế, và tiến độ lô.
 
 **4 sub-tab:** Định mức NVL · Chiết (lon) · Chiết (keg) · Trạng thái lô.
 
-### 17.1 Định mức NVL
+### 18.1 Định mức NVL
 
 **Các bước:**
 1. Sub-tab **Định mức NVL**, chọn kỳ (30/90/365 ngày hoặc Tất cả).
@@ -606,17 +666,17 @@ xychart-beta
     bar [-50, -50, -50]
 ```
 
-### 17.2 Chiết (lon) / Chiết (keg)
+### 18.2 Chiết (lon) / Chiết (keg)
 
 Sản lượng dây chuyền thực tế theo ca, lấy từ hệ 30K_Report (lon, Đông Mai) hoặc Donggoi (keg, Hạ Long) thật — không nhập tay.
 
-### 17.3 Trạng thái lô
+### 18.3 Trạng thái lô
 
 Theo dõi tiến độ từng lô qua 4 công đoạn Nấu/Lên men/Lọc/Chiết trên cùng 1 dòng (xem bảng thật ở mục 9, cuối phần Nấu-Lọc-Chiết).
 
 ---
 
-## 18. Trợ lý AI
+## 19. Trợ lý AI
 
 **Mục đích:** tra cứu nhanh (lô, tồn kho, trạng thái mẻ...) qua hội thoại, không thay thế thao tác thủ công.
 
@@ -626,7 +686,7 @@ Trợ lý có quyền **đọc** dữ liệu hệ thống để trả lời, nh�
 
 ---
 
-## 19. Tích hợp (API/Webhook/Kết nối CSDL)
+## 20. Tích hợp (API/Webhook/Kết nối CSDL)
 
 **Mục đích:** kết nối MES với hệ thống ngoài (ERP/BI/SCADA) mà không cần nhập tay lại dữ liệu.
 
@@ -634,31 +694,39 @@ Trợ lý có quyền **đọc** dữ liệu hệ thống để trả lời, nh�
 
 Đúng **3 sub-tab** thật: Cổng API & Webhook · 📥 Tích hợp dữ liệu (Import) · 🗄️ Kết nối CSDL.
 
-### 19.1 Cổng API & Webhook
+### 20.1 Cổng API & Webhook
 
 **Các bước tạo API key:** bấm **Tạo key**, chọn scope đọc (`read`)/ghi (`write`), lưu — key hiện 1 lần duy nhất. Phần mềm ngoài gọi qua header `X-API-Key` vào `/api/v1` (ví dụ `GET /api/v1/ping` kiểm tra key, `GET /api/v1/production/batches` xem trạng thái mẻ). Bấm **Khoá** để vô hiệu hoá key khi không dùng nữa. Mục **Đăng ký** Webhook để đẩy sự kiện ra hệ thống ngoài khi có thay đổi.
 
-### 19.2 📥 Tích hợp dữ liệu (Import)
+### 20.2 📥 Tích hợp dữ liệu (Import)
 
 Import Mapping Explorer — khai báo custom field động, ánh xạ cột dữ liệu ngoài vào hệ thống khi nhập liệu hàng loạt.
 
-### 19.3 🗄️ Kết nối CSDL
+### 20.3 🗄️ Kết nối CSDL
 
 **Các bước:** bấm tạo kết nối mới, nhập thông tin SQL Server/MySQL ngoài (ví dụ hệ SCADA Energy, 30K_Report, Donggoi), gán **"Dùng cho"** mục đích cụ thể (điện Hạ Long, sản lượng lon...). Bấm **Test kết nối** để xác nhận, **Xem bảng** để xem trước dữ liệu mẫu trước khi dùng, **Sửa**/**Xoá** khi cần thay đổi.
 
 ---
 
-## 20. Danh mục (Master data)
+## 21. Danh mục (Master data)
 
 **Mục đích:** toàn bộ dữ liệu nền của nhà máy — nơi cấu hình 1 lần, dùng lại ở mọi phân hệ khác.
 
 **Ai dùng:** quyền `master.manage` để ghi (thường là kỹ sư/admin).
 
-Các danh mục: Sản phẩm (Dịch bia) · Sản phẩm thành phẩm (SKU đóng gói) · Loại bia · Vật tư/Nguyên liệu (kèm **Tồn tối thiểu**) · Nhóm chỉ tiêu chất lượng NVL/công đoạn · Dây chuyền & Tank · Nhà cung cấp · Nơi xuất đến.
+Các danh mục: Sản phẩm (Dịch bia) · Sản phẩm thành phẩm (SKU đóng gói) · **Loại đơn vị tồn kho** · Loại bia · Vật tư/Nguyên liệu (kèm **Tồn tối thiểu**) · Nhóm chỉ tiêu chất lượng NVL/công đoạn · Dây chuyền & Tank · Nhà cung cấp · Nơi xuất đến.
 
 **Các bước chung cho mọi danh mục:** bấm **Tạo mới**, điền form, lưu. Mỗi dòng có nút **Sửa**/**Xóa** — xóa có kiểm tra ràng buộc (không cho xóa nếu đang được tham chiếu bởi công thức/lô/mẻ khác).
 
 Riêng **Nhóm chỉ tiêu chất lượng**: bấm vào 1 nhóm để xem **Chỉ tiêu trong nhóm**, bấm **Ngừng**/**Xóa gán** để bỏ 1 chỉ tiêu khỏi nhóm, hoặc gán thêm rồi **Lưu**. Riêng **Sản phẩm**: có thêm mục **Quy định nấu** để cấu hình biểu mẫu Ghi chép nấu riêng cho sản phẩm đó.
+
+### 21.1 Loại đơn vị tồn kho (dùng cho Kho TP/WMS)
+
+Ngoài 3 loại có sẵn (vỉ, keg, lon), khai báo thêm loại đơn vị đóng gói mới khi nhà máy cần quản lý 1 hình thức đóng gói khác (ví dụ Thùng chứa nhiều vỉ):
+
+1. Ở panel **📐 Loại đơn vị tồn kho**, nhập **Mã** và **Tên hiển thị**, chọn **Cách quy đổi**: "Chia theo SL/1 đơn vị" (giống Vỉ — 1 đơn vị gồm nhiều lon/chai bên trong, dùng khi Phân rã) hoặc "Không chia" (giống Keg — 1 đơn vị luôn = 1, không nhân thêm).
+2. Bấm **+ Tạo loại đơn vị**. Loại đơn vị mới sẽ xuất hiện trong ô **Loại đơn vị tồn kho** khi khai báo Sản phẩm thành phẩm (SKU) ở panel bên trên.
+3. **Lưu ý quan trọng:** Mã phải viết **chữ thường, không dấu tiếng Việt** (chỉ a-z, số, gạch dưới — ví dụ `thung`, `ket`; tên tiếng Việt có dấu nhập ở ô Tên hiển thị riêng). Đây từng là nguyên nhân 1 lỗi thật đã sửa: khai báo mã viết hoa/có dấu kiểu "Vỉ" thay vì "vi" khiến hệ thống không nhận diện đúng khi phân rã đơn vị ở Kho TP (mục 12.3) — nay đã vá, nhưng vẫn phải tuân thủ quy tắc mã viết thường khi tạo mới.
 
 **Dữ liệu thật hiện tại:**
 
@@ -672,7 +740,7 @@ Riêng **Nhóm chỉ tiêu chất lượng**: bấm vào 1 nhóm để xem **Ch�
 
 ---
 
-## 21. Tài khoản & phân quyền
+## 22. Tài khoản & phân quyền
 
 **Mục đích:** kiểm soát ai được làm gì trên hệ thống.
 
@@ -687,26 +755,32 @@ Riêng **Nhóm chỉ tiêu chất lượng**: bấm vào 1 nhóm để xem **Ch�
 
 ---
 
-## 22. Audit — nhật ký hệ thống
+## 23. Audit — nhật ký hệ thống
 
 **Mục đích:** bằng chứng tuân thủ khi có thanh tra hoặc điều tra sự cố — ghi lại **mọi** thao tác thay đổi dữ liệu quan trọng: ai, làm gì, trên đối tượng nào, lúc nào. **Append-only** — không sửa/xoá được.
 
-**Các bước tra cứu:** vào **Audit**, dùng **‹ Trước / Sau ›** để lật trang theo thời gian, bấm **Tải** để xuất file.
+**Ai dùng:** dùng để tra soát khi có thắc mắc kiểu "ai đã đổi X lúc nào" — chủ yếu quản đốc/kỹ sư/admin.
+
+**Các bước tra cứu:**
+1. Vào **Audit** — bảng lịch sử toàn hệ thống hiện ngay, mỗi dòng gồm cột **Module** (phân hệ trên thanh menu mà dòng audit này thuộc về, ví dụ "Kho TP (WMS)", "CIP", "Chất lượng"...), **#** (số thứ tự tăng dần, không lặp lại), **Đối tượng**, **Hành động**, **Người**, **Vai trò**, **Lúc**.
+2. Gõ vào ô tìm kiếm **"Tìm theo đối tượng, hành động, người, vai trò..."** để lọc nhanh (ví dụ gõ tên 1 nhân viên để xem mọi thao tác người đó đã làm).
+3. Muốn tra đúng 1 đối tượng cụ thể (ví dụ 1 mã lô): nhập mã đó vào ô **"Lọc theo entity_id"** rồi bấm **Tải**.
+4. Bấm **Xem** trên 1 dòng bất kỳ — hệ thống mở hộp thoại tiêu đề "**<Đối tượng> — <Hành động>**", hiện Module, Mã đối tượng, Người thực hiện · Lúc, rồi đến bảng **Trường | Trước | Sau**: chỉ những trường thực sự đổi giá trị mới có mũi tên **→** và in đậm cột Sau — tên trường hiện bằng tiếng Việt dễ hiểu (không phải tên cột kỹ thuật trong CSDL), dùng ngay để trả lời "ai đã đổi X lúc nào, từ giá trị gì sang giá trị gì".
 
 **Ví dụ 6 bản ghi audit thật gần nhất** (đều actor `admin`, role `admin`, phản ánh đúng loạt thao tác Cất vào vị trí/Kiểm kê vừa kiểm thử trong ngày):
 
-| Seq | Đối tượng | Hành động | Lúc (UTC) |
-|---|---|---|---|
-| 595 | auth (admin) | login | 13:29:41 22/7/2026 |
-| 594 | auth (admin) | login | 13:29:29 |
-| 593 | finished_goods_unit | relocate_batch — chuyển 1 keg FLGN200 lô 1 vào vị trí KH01 | 13:22:33 |
-| 592 | stock_count (KK-260722-EE2D) | undo — trả lại MALT-2406-01: 3802 | 13:21:04 |
-| 591 | stock_count (KK-260722-EE2D) | post — lệch MALT-2406-01: 3802→3810 (+8) | 13:20:53 |
-| 590 | auth (admin) | login | 13:18:08 |
+| Module | Seq | Đối tượng | Hành động | Lúc (UTC) |
+|---|---|---|---|---|
+| Tài khoản | 595 | auth (admin) | login | 13:29:41 22/7/2026 |
+| Tài khoản | 594 | auth (admin) | login | 13:29:29 |
+| Kho TP (WMS) | 593 | finished_goods_unit | relocate_batch — chuyển 1 keg FLGN200 lô 1 vào vị trí KH01 | 13:22:33 |
+| Kho công ty | 592 | stock_count (KK-260722-EE2D) | undo — trả lại MALT-2406-01: 3802 | 13:21:04 |
+| Kho công ty | 591 | stock_count (KK-260722-EE2D) | post — lệch MALT-2406-01: 3802→3810 (+8) | 13:20:53 |
+| Tài khoản | 590 | auth (admin) | login | 13:18:08 |
 
 ---
 
-## 23. Hồ sơ cá nhân
+## 24. Hồ sơ cá nhân
 
 **Mục đích:** mỗi tài khoản tự quản lý thông tin cá nhân của mình.
 

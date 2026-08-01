@@ -5,7 +5,7 @@
 > Tham chiếu blueprint nội bộ `MES-ARCH-002` (*MES-Nha-may-Bia-Kien-truc-Chuan-V2.0*).
 
 **Phiên bản phần mềm:** `0.1.0-mvp` · **Tên ứng dụng:** `MES Bia Hạ Long - Nhà Máy Đông Mai`
-**Ngày phát hành:** 23/06/2026 · **Ngày cập nhật:** 23/07/2026
+**Ngày phát hành:** 23/06/2026 · **Ngày cập nhật:** 31/07/2026
 
 ---
 
@@ -45,15 +45,16 @@ MES này điều phối toàn bộ vòng đời sản xuất bia: **Lệnh sản
 │  ánh xạ lỗi nghiệp vụ → HTTP (404 / 409 / 403)                        │
 └───────────────┬──────────────────────────────────────────────────────┘
 ┌───────────────▼──────────────────────────────────────────────────────┐
-│  ROUTERS (REST endpoints) — 32 router, ~379 endpoint                  │
+│  ROUTERS (REST endpoints) — 33 router, ~397 endpoint                  │
 │  auth · orders · workorders · recipes · batches · dispense · quality  │
 │  quality_adv · traceability · performance · downtime · warehouse      │
 │  energy · maintenance · process · brewing · reports · historian       │
 │  scan · schedule · ai · jobs · isa88 · wms · label · lines            │
 │  packaging · gateway · audit · master · materials · import_explorer   │
+│  cip                                                                  │
 └───────────────┬──────────────────────────────────────────────────────┘
 ┌───────────────▼──────────────────────────────────────────────────────┐
-│  SERVICES (quy tắc nghiệp vụ) — 47 module                              │
+│  SERVICES (quy tắc nghiệp vụ) — 48 module                              │
 │  batches · recipes · workorders · isa88 · genealogy · bom · dispense  │
 │  warehouse · quality · quality_adv · qc_catalog · ebr · yield_calc    │
 │  downtime · performance · scheduler · historian · wms · packaging     │
@@ -61,10 +62,10 @@ MES này điều phối toàn bộ vòng đời sản xuất bia: **Lệnh sản
 │  ferment_log · braumat_import · dashboard · lo_status · ops_setting   │
 │  master_data · integration_connection · energy_external · filling_… │
 │  keg_external · wastewater_external · import_mapping/parser/runner/… │
-│  custom_fields · ai · ai_tools · conversations · jobs · derived       │
+│  custom_fields · ai · ai_tools · conversations · jobs · derived · cip │
 └───────────────┬──────────────────────────────────────────────────────┘
 ┌───────────────▼──────────────────────────────────────────────────────┐
-│  MODELS (SQLAlchemy ORM) — ~100 lớp / 31 file theo bounded context     │
+│  MODELS (SQLAlchemy ORM) — ~104 lớp / 32 file theo bounded context     │
 └───────────────┬──────────────────────────────────────────────────────┘
 ┌───────────────▼──────────────────────────────────────────────────────┐
 │  DATABASE   SQLite (dev)  │  PostgreSQL 16 (prod) — Alembic migration  │
@@ -113,14 +114,14 @@ MES này điều phối toàn bộ vòng đời sản xuất bia: **Lệnh sản
 MES/
 ├── backend/
 │   ├── app/
-│   │   ├── main.py            # FastAPI app: mount 32 router + UI, middleware, ánh xạ lỗi→HTTP
+│   │   ├── main.py            # FastAPI app: mount 33 router + UI, middleware, ánh xạ lỗi→HTTP
 │   │   ├── config.py / database.py / common.py / security.py / audit.py
 │   │   ├── errors.py / logging_config.py / ratelimit.py / metrics_prom.py
 │   │   ├── seed.py            # dữ liệu mẫu + 10 tài khoản demo theo chức danh
 │   │   ├── edge_sim.py / opcua_edge.py
-│   │   ├── models/            # ORM theo bounded context (~100 lớp / 31 file)
-│   │   ├── services/          # quy tắc nghiệp vụ (47 module)
-│   │   └── routers/           # REST endpoints (32 router, ~379 endpoint)
+│   │   ├── models/            # ORM theo bounded context (~104 lớp / 32 file)
+│   │   ├── services/          # quy tắc nghiệp vụ (48 module)
+│   │   └── routers/           # REST endpoints (33 router, ~397 endpoint)
 │   ├── alembic/versions/       # ~90 migration
 │   ├── tests/                  # pytest: 55 file
 │   ├── requirements.txt
@@ -139,7 +140,7 @@ MES/
 
 ## 5. Mô hình dữ liệu (bounded context → bảng)
 
-~100 lớp ORM, nhóm theo bounded context. Mỗi bảng dưới đây thuộc một file trong `app/models/`.
+~104 lớp ORM, nhóm theo bounded context. Mỗi bảng dưới đây thuộc một file trong `app/models/`.
 
 ### 5.1 Xác thực & phân quyền (`auth.py`)
 | Bảng | Mục đích |
@@ -167,7 +168,7 @@ MES/
 | `schedule_slot` (**ScheduleSlot**) | Khối thời gian chiếm tài nguyên (tank/line): production/cip/maintenance, start/end |
 | `brew_master_order` / `brew_order` (**BrewMasterOrder/BrewOrder**) | **Lệnh nấu** phân cấp: 1 lệnh cha (SP, tổng SL kế hoạch) → nhiều lệnh con (mã nấu riêng); hoàn thành theo `planned_volume_hl ± tolerance` |
 | `brew_order_material_line` | Dòng NVL kế hoạch của lệnh nấu (preview/sửa số lượng trước khi nấu) |
-| `filter_master_order` / `filter_order` / `filter_order_tank` (**FilterMasterOrder/FilterOrder/FilterOrderTank**) | **Lệnh lọc** phân cấp tương tự Lệnh nấu; mỗi lệnh con gồm N tank nguồn (CCT hoặc BBT tái lọc) với thể tích kế hoạch riêng từng tank |
+| `filter_master_order` / `filter_order` / `filter_order_tank` (**FilterMasterOrder/FilterOrder/FilterOrderTank**) | **Lệnh lọc** phân cấp tương tự Lệnh nấu; mỗi lệnh con gồm N tank nguồn (CCT hoặc BBT tái lọc) với thể tích kế hoạch riêng từng tank. `batch_number`/`order_number` **được phép trùng** giữa các lệnh lọc khác nhau (trước bị chặn unique) — mỗi dòng "mẻ lọc số" nhận diện qua bộ 3 `(batch_number, order_number, batch_seq_no)`; cờ `is_final_batch` đánh dấu đợt rút CUỐI để loại khỏi phân loại Thấp/Cao sản lượng (`services/filter_yield_report.py`) |
 | `filter_order_material_line` | Dòng NVL kế hoạch của lệnh lọc (hoá chất lọc…) |
 
 ### 5.4 Công thức (`recipes.py`, `recipe_ext.py`)
@@ -227,9 +228,10 @@ MES/
 | `downtime_event` (`oee_ext.py`) | Sự kiện dừng máy |
 | `energy_group`, `energy_area`, `energy_reading` (`energy.py`) | Năng lượng nội bộ (nhập tay theo ngày) |
 
-### 5.10 Kho thành phẩm (WMS — 8 lớp) & bao bì tuần hoàn (`wms.py`, `packaging.py`)
+### 5.10 Kho thành phẩm (WMS — 9 lớp) & bao bì tuần hoàn (`wms.py`, `packaging.py`, `master.py`)
 | Bảng | Mục đích |
 |---|---|
+| `unit_type_catalog` (**UnitTypeCatalog**, `master.py`) | **Danh mục Loại đơn vị tồn kho** — thay hardcode chuỗi "vi"/"keg"/"lon" trước đây: `code` (khoá tra cứu logic, PHẢI chữ thường không dấu — regex `^[a-z0-9_-]+$`, tự hạ chữ thường khi gõ hoa), `name` (nhãn hiển thị có dấu), `divide_by_pack_size` (bool — loại này có chia `quantity` theo `pack_size` khi quy đổi ra số đơn vị đóng gói hay không, giống "vi"), `selectable` (ẩn khỏi lựa chọn khi khai báo SKU mới — vd "lon" do hệ thống tự sinh khi phân rã, không cho chọn tay), `active`. `services/wms.py` (`_pack_divisor`/`_pack_divisor_expr`), `services/genealogy.py`, `routers/wms.py` đọc theo danh mục này; CRUD tại `/api/unit-types` (`master.py`). **Fix lỗi gốc**: trước đây ô "Mã" khi tạo danh mục là input tự do không validate — gõ nhầm tên có dấu ("Vỉ") vào ô Mã (đáng lẽ gõ ở ô Tên) tạo ra `code` lạ khác "vi", khiến SKU gán loại đó không được `_pack_divisor` chia theo `pack_size` → đếm sai tồn (vd lô 100.000 vỉ bị đếm nguyên thay vì chia 24). Nay `UnitTypeCatalogIn.code` validate + tự hạ chữ thường ở tầng schema, đồng thời `FinishedProduct.unit_type` khi tạo/sửa SKU và `_create_units` (build_units + import tồn đầu Excel) đều đối chiếu lại danh mục trước khi ghi. |
 | `wms_location` (**WmsLocation**) | Vị trí kho thành phẩm |
 | `finished_goods_unit` (**FinishedGoodsUnit**) | **Đơn vị LÔ thành phẩm** (thay thế hoàn toàn Pallet/Case/ShipmentLine cũ) — thiết kế lại theo LÔ (2026-07): mỗi dòng đại diện **1 lô** (không còn 1 dòng/vỉ), `quantity` = tổng SL nhỏ (lon/keg) của cả lô, nên duyệt chiết luôn ra ĐÚNG 1 dòng bất kể quy mô (fix scale-bomb: lô 190.000 vỉ trước đây tạo ~190.000 dòng, treo nút Duyệt trên SQL Server). Xuất/phân rã (decompose)/điều chuyển (relocate)/xuất tự do MỘT PHẦN sẽ **tách dòng** theo FIFO (`_consume_lot_rows`) — dòng mới mang đúng phần đã xử lý, dòng gốc giữ phần dư — thay vì chọn/xóa từng vỉ; `pack_size` (khai báo ở Danh mục Sản phẩm) chỉ dùng ở tầng đọc để quy đổi `quantity` ra số vỉ/keg hiển thị. Còn `is_near_expiry` cho bia cận date. Xem `docs/WMS-LOT-LEVEL-REDESIGN.md`. |
 | `near_expiry_entry` (**NearExpiryEntry**) | Bia cận date nhập thủ công (không qua Chiết bình thường) |
@@ -258,6 +260,22 @@ MES/
 | `esignature`, `ebr_snapshot` (`signature.py`) | Chữ ký điện tử (21 CFR Part 11) + snapshot EBR |
 | `ai_conversation`, `ai_message` (`ai_memory.py`) | Bộ nhớ hội thoại AI theo user |
 | `job` (`jobs.py`) | Tác vụ nền |
+
+### 5.14 Vệ sinh thiết bị — CIP (`cip.py`, `services/cip.py`)
+Theo dõi vệ sinh CIP (Cleaning-In-Place) — nguồn gốc **21 loại biểu mẫu giấy thật** của nhà máy (mã `QT-KCS-QT-BM-xx`), seed sẵn trong `seed.py`. Thiết kế linh hoạt vì các mẫu giấy có số cột/loại thông số khác nhau — không hard-code theo từng loại biểu mẫu.
+
+| Bảng | Mục đích |
+|---|---|
+| `cip_form_type` (**CipFormType**) | Danh mục LOẠI biểu mẫu: `code` (unique, vd `"2.1.2/2025/QT-KCS-QT-BM-01"`), `name`, `area` (nau\|len_men\|loc\|chiet\|kho_tp), `kind` (full\|light — vd tank thành phẩm xen kẽ CIP đầy đủ và tráng nước nhẹ), `time_unit`/`temp_unit`/`conc_unit` (khai báo đơn vị 1 lần/biểu mẫu vì khác nhau giữa các mẫu giấy gốc — vd "giây" ở tank lên men, "phút" ở hầu hết mẫu khác), `default_steps` (JSON — bảng bước MẪU khoá "Tiêu chuẩn/Quy định", sao chép sang mỗi `CipRecord` mới), `active` |
+| `cip_equipment` (**CipEquipment**) | Danh mục thiết bị vệ sinh: `code`/`name`/`area`, `production_line_id` FK optional tới `production_line` (gắn đúng 1 tank/dây chuyền nếu có, để lọc gợi ý theo mã thiết bị thực tế; để trống với thiết bị dùng chung như đường ống/máy nghiền) |
+| `cip_record` (**CipRecord**) | 1 lần vệ sinh: `cip_code` (auto `"CIP-2026-00001"`), `form_type_id`/`equipment_id` FK, `batch_number`/`order_number` bắt buộc (đối chiếu ngược Batch/Order Number Braumat — cùng khái niệm dùng ở Ghi chép nấu/Lên men), `shift`, `started_at`/`ended_at`, `performed_by`, `duty_officer`, `steps` (JSON linh hoạt — mỗi dòng có 4 trường TIÊU CHUẨN khoá copy từ `default_steps` + 4 trường `*_actual` THỰC TẾ người vận hành tự nhập), `result` (dat\|khong_dat), `note`, `checked_by` (KCS nghiệm thu), `approved_at` |
+| `cip_link` (**CipLink**, unique trên `cip_id+scope_type+scope_id`) | Gắn TAY (không tự suy đoán) 1 `CipRecord` với mẻ/lô — cùng vocabulary `scope_type` đã dùng ở Hold/Deviation trong `services/quality.py` (brew_batch\|ferment\|filter\|bottle), cộng thêm `bbt_tank` (không có ở Hold/Deviation — vì CIP tank thành phẩm thuộc về cả TANK vật lý, không phải 1 `FilterRecord` cụ thể, do nhiều mẻ lọc dùng chung tank) |
+
+**Quyền:** `cip.manage` (permission mới trong `PERMISSION_CATALOG` — xem §8.3, tổng permission catalog hiện có **23 mục**).
+
+**Endpoints chính** (`routers/cip.py`, prefix `/api/cip`): `GET/POST /form-types`, `PUT/DELETE /form-types/{id}`, `POST /form-types/{id}/copy-steps` (copy bảng bước mẫu từ 1 form-type sang form-type khác, **chỉ khi đích đang có bảng bước rỗng** — tránh ghi đè nhầm, chặn 409 nếu đích không trống hoặc trùng nguồn), `GET/POST /equipment`, `PUT/DELETE /equipment/{id}`, `GET/POST /records`, `GET/PUT /records/{cip_id}`, `POST /records/{cip_id}/approve`, `GET /suggest` (gợi ý form-type/equipment theo scope), `GET/POST/DELETE /links`.
+
+**Frontend** (`views_ext.js`): module CIP có 3 tab — "Danh mục" (form-types + equipment), "Khai báo biểu mẫu" (soạn bảng bước mẫu Tiêu chuẩn cho từng loại biểu mẫu, có ô N/A cho time/temp/conc khi bước đó không cần ghi; nút "Copy sang biểu mẫu khác"), "Khai báo CIP" (tạo 1 lần vệ sinh mới — chọn form-type tự điền bảng Tiêu chuẩn khoá, nhập cột Thực tế bên cạnh; trường "TH:Kết quả" là dropdown Đạt/Không đạt). Nút "Gắn CIP liên quan" (`app.js`) gắn vào 4 loại thực thể: mẻ nấu, mẻ lên men, mẻ lọc, mẻ chiết. Có báo cáo/in xem Tiêu chuẩn vs Thực tế. CIP link cũng được đưa vào Hồ sơ điện tử (`services/lot_record.py` aggregator) và vào Audit trail.
 
 ---
 
@@ -315,12 +333,14 @@ Lệnh nấu (cha, SP + SL kế hoạch hl) → N lệnh nấu con (mã nấu ri
       → NVL từng mẻ trừ tồn thật (Kho phân xưởng, FIFO theo lô)
       → Kết thúc mẻ → Lên men (lô LM, tank CCT) → Duyệt LM (KCS, theo số ngày lên men chuẩn)
 Lệnh lọc (cha) → N lệnh lọc con → mỗi lệnh con N tank nguồn (CCT hoặc BBT tái lọc)
-   → Lọc vào BBT theo thể tích kế hoạch từng tank → Duyệt Lọc (KCS)
+   → Lọc vào BBT theo thể tích kế hoạch từng tank → mẻ lọc kết thúc chuyển trạng thái
+     **"Chờ duyệt"** (trước gọi "Chờ chiết") → Duyệt Lọc (KCS)
 Chiết (theo ca 1/2/3, nhiều dây chuyền, gắn SKU thành phẩm) → Kết thúc mẻ (nhập ca1/2/3 thật)
    → Duyệt Chiết (quality.release) → tự sinh N FinishedGoodsUnit vào WMS
 WMS: Cất vào vị trí / Điều chuyển / Phân rã theo lô / Xuất kho (cart FIFO, theo Lệnh đóng hàng
    hoặc thủ công) / Xuất tự do (admin) → Shipment (có loại xuất, kiểm tra FIFO)
 ```
+> **Lọc — mẻ lọc nhỏ độc lập**: cho phép trùng `batch_number`/`order_number` giữa các lệnh lọc khác nhau; báo cáo sản lượng gộp theo `(batch_number, order_number, batch_seq_no)`; `is_final_batch` loại "mẻ cuối" khỏi phân loại Thấp/Cao sản lượng. **Hồ sơ điện tử** (`services/lot_record.py`) liệt kê đầy đủ từng "mẻ lọc số" (tank nguồn, thể tích, thời điểm kết thúc) dưới mỗi mẻ lọc, không chỉ tổng hợp cấp bản ghi.
 
 ### 7.3 Luồng Kho NVL 2 địa điểm
 ```
@@ -354,26 +374,32 @@ Kiểm kê định kỳ độc lập ở mỗi địa điểm (location filter r
 ### 8.2 RBAC — 5 vai trò *thực thi* (enforcement) + chức danh hiển thị
 Tầng kiểm tra quyền (`require_role`, `common.py:180`) chỉ biết **đúng 5 giá trị**: `operator` · `supervisor` · `qa` · `engineer` · `admin`. Admin bỏ qua mọi `require_perm`/`require_role`/`require_scope` (vẫn bị ràng buộc SoD).
 
-Các "chức danh" tài khoản demo (Giám đốc, Quản đốc, Trưởng ca, Vận hành, KCS, Kỹ sư, Thủ kho, Bảo trì, Năng lượng…) **không phải vai trò thứ 6+** — mỗi tài khoản chỉ ánh xạ vào 1 trong 5 vai trò trên, rồi được cấp **`permissions` (CSV quyền cụ thể)** + **`allowed_views` (CSV menu)** + **scope** riêng theo từng người (xem `seed.py::_seed_users`):
+Các "chức danh" tài khoản demo (Quản đốc, Phó Quản đốc, Vận hành, KCS, Kỹ sư, Thủ kho, Trưởng phòng KCS, Giám đốc SX-KT, Thủ kho TP…) **không phải vai trò thứ 6+** — mỗi tài khoản chỉ ánh xạ vào 1 trong 5 vai trò trên, rồi được cấp **`permissions` (CSV quyền cụ thể)** + **`allowed_views` (CSV menu)** + **scope** riêng theo từng người (xem `seed.py::_seed_users`).
 
-| Tài khoản (chức danh) | `role` enforcement | Quyền warehouse.* | Menu kho được thấy |
+**Roster hiện tại căn cứ đúng sơ đồ tổ chức thật 01/2026/SĐTC-BHL** (thay cho bảng đề xuất cũ) — đã bỏ các chức danh không có riêng trong sơ đồ hoặc trùng vai trò với tài khoản khác: `giamdoc` (chỉ xem chung), `truongca`, `thukho_px`, `baotri`, `nangluong`:
+
+| Tài khoản (chức danh) | `role` enforcement | Quyền chính (`permissions`) | `scope_warehouse` |
 |---|---|---|---|
-| `admin` | admin | * (toàn quyền) | tất cả |
-| `giamdoc` (Giám đốc) | supervisor | *(không có — chỉ xem)* | không menu kho ghi |
-| `quandoc` (Quản đốc PX) | supervisor | *(không có)* | không |
-| `truongca` (Trưởng ca SX) | supervisor | `warehouse.request` | Kho phân xưởng |
-| `vanhanh` (Vận hành) | operator | `warehouse.request` | Kho phân xưởng |
-| `thukho` (Thủ kho NVL) | operator | `warehouse.receive`, `warehouse.issue` | Kho công ty |
-| `thukho_px` (Thủ kho phân xưởng) | operator | `warehouse.receive`, `warehouse.issue`, `warehouse.request` | Kho phân xưởng |
-| `kcs`, `kysu`, `baotri`, `nangluong` | qa/engineer/operator/operator | *(không có)* | không |
+| `admin` | admin | * (toàn quyền, tạo riêng bởi `ensure_admin`, không trong bảng accounts) | * |
+| `quandoc` (Quản đốc phân xưởng) | supervisor | master.manage, order.create, wo.manage, wo.dispatch, batch.create, batch.execute, quality.deviation, ebr.sign, ebr.approve, cip.manage | * |
+| `phoquandoc` (Phó Quản đốc phân xưởng — trực ca) | supervisor | batch.execute, ebr.sign, ebr.approve, quality.deviation, cip.manage. Tài khoản MỚI, thay `truongca` cũ (không có chức danh riêng trong sơ đồ thật) | * |
+| `vanhanh` (Nhân viên vận hành) | operator | batch.execute, ebr.sign, warehouse.request, cip.manage | phan_xuong |
+| `kcs` (Nhân viên KCS/QA) | qa | quality.release, quality.deviation, recipe.approve, ebr.sign, ebr.approve | * |
+| `kysu` (Kỹ sư — P. Kỹ thuật, Công nghệ và Cải tiến Sản xuất) | engineer | master.manage, recipe.author, recipe.approve, batch.create, batch.execute, ebr.sign, cip.manage — tài khoản demo **DUY NHẤT** giữ `recipe.author` | * |
+| `thukho` (Thủ kho NVL) | operator | warehouse.receive, warehouse.issue | cong_ty |
+| `kcs_truongphong` (Trưởng phòng KCS) | qa | quality.release, quality.deviation, recipe.approve, ebr.sign, ebr.approve, **order.create** — khác NV KCS: Trưởng phòng KCS khóa chỉ tiêu VÀ tạo Lệnh lọc, NV KCS chỉ nhập/duyệt theo chỉ tiêu được gán | * |
+| `giamdoc_sx` (Giám đốc Sản xuất - Kỹ thuật) | supervisor | **production.release_to_wms** (quyền MỚI, tách khỏi `quality.release` — KCS nhập/khóa chỉ tiêu, Giám đốc SX-KT quyết định duyệt lô chiết cho nhập kho thành phẩm; enforced trong `approve_bottle`, `routers/brewing.py`) | * |
+| `ttdh_thukhotp` (NV Trung tâm Điều hành - Thủ kho TP) | operator | warehouse.receive, warehouse.issue (quản lý kho thành phẩm: xuất kho, điều chuyển, nhập bia cận date) | * |
 
-> `truongca`/`vanhanh` chỉ có `warehouse.request` (tạo đề nghị nhận kho) — **không** có `warehouse.receive`/`issue`, nên không tự nhập/xuất trực tiếp tại Kho phân xưởng được; `thukho_px` là tài khoản thao tác trực tiếp tương ứng phía phân xưởng (đối xứng với `thukho` phía công ty), phân biệt bằng **`scope_warehouse`** (§8.5/§8.7), không phải bằng permission riêng.
+> `vanhanh` chỉ có `warehouse.request` (tạo đề nghị nhận kho) — **không** có `warehouse.receive`/`issue`, nên không tự nhập/xuất trực tiếp NVL tại Kho phân xưởng được. Roster hiện không còn tài khoản "Thủ kho phân xưởng" riêng (đã bỏ `thukho_px`, không có trong sơ đồ thật) — chỉ `thukho` (Kho công ty NVL) và `ttdh_thukhotp` (Kho thành phẩm) có `warehouse.receive`/`issue`, phân biệt bằng **`scope_warehouse`** (§8.5/§8.7), không phải bằng permission riêng.
 
 ### 8.2b Copy quyền giữa tài khoản (admin)
 `POST /api/auth/users/{username}/copy-permissions {source_username}` — ghi đè toàn bộ `role` + `allowed_views` + `permissions` + cả 4 chiều scope (`scope_lines`/`scope_areas`/`scope_qc`/`scope_warehouse`) của tài khoản đích bằng đúng cấu hình tài khoản nguồn; không đụng danh tính (username/mật khẩu/họ tên/chức danh) hay `active`/`must_change_password`. Dùng khi 2 người cùng chức danh cần cấu hình quyền giống hệt nhau, khỏi gán tay từng mục. *(admin)*; audit `action=copy_permissions` (before/after đầy đủ).
 
-### 8.3 Catalog quyền thao tác (permission) — 21 quyền, áp ở tầng router/service (`require_perm`)
-`master.manage` · `order.create` · `wo.manage` · `wo.dispatch` · `batch.create` · `batch.execute` · `recipe.author` · `recipe.approve` · `quality.release` · `quality.deviation` · `ebr.sign` · `ebr.approve` · `warehouse.receive` · `warehouse.issue` · `warehouse.request` · `maintenance.manage` · `calibration.manage` · `energy.update` · `user.manage` · `integration.manage` · `integration.import`.
+### 8.3 Catalog quyền thao tác (permission) — 23 quyền, áp ở tầng router/service (`require_perm`)
+`master.manage` · `order.create` · `wo.manage` · `wo.dispatch` · `batch.create` · `batch.execute` · `recipe.author` · `recipe.approve` · `quality.release` · `quality.deviation` · `production.release_to_wms` · `ebr.sign` · `ebr.approve` · `warehouse.receive` · `warehouse.issue` · `warehouse.request` · `maintenance.manage` · `calibration.manage` · `energy.update` · `user.manage` · `integration.manage` · `integration.import` · `cip.manage`.
+
+Hai quyền mới thêm so với bản trước (21 quyền): `production.release_to_wms` (Giám đốc/Phó GĐ Sản xuất - Kỹ thuật duyệt lô chiết nhập kho thành phẩm, tách khỏi `quality.release`) và `cip.manage` (khai báo/thao tác vệ sinh CIP — xem §5.14).
 
 ### 8.4 Segregation of Duties (SoD) — `enforce_sod`
 Soạn recipe ≠ Duyệt recipe · Ghi kết quả QC ≠ Release QC · Ký EBR ≠ Phê duyệt/khóa EBR.
@@ -381,12 +407,14 @@ Soạn recipe ≠ Duyệt recipe · Ghi kết quả QC ≠ Release QC · Ký EBR
 ### 8.5 Data-scoping (phân quyền theo dữ liệu) — `require_scope` / `filter_by_scope`
 - **`scope_lines`** — dây chuyền: lọc Work Order & Batch.
 - **`scope_areas`** — khu vực `nau/len_men/loc/chiet/kho` (giá trị `kho` là **một khu vực duy nhất**, không tách công ty/phân xưởng).
-- **`scope_qc`** — loại test QC: chặn KCS ghi parameter ngoài phạm vi.
+- **`scope_qc`** — loại test QC: chặn KCS ghi parameter ngoài phạm vi. Danh sách "Loại chỉ tiêu QC" trong scope-picker (khi phân quyền tài khoản) nay lấy từ **Danh mục chỉ tiêu** (`QCParameter`, `active=True`) thay vì chỉ liệt kê chỉ tiêu ĐÃ có kết quả ghi nhận trong `QualityResult` — tránh thiếu chỉ tiêu mới chưa ai ghi kết quả (gộp thêm mã cũ trong `QualityResult` không còn trong Danh mục để không mất scope đã gán cho tài khoản từ trước).
 - **`scope_warehouse`** — địa điểm kho NVL: `"cong_ty"` | `"phan_xuong"` | `"*"` — chặn thao tác kho ngoài địa điểm được phân (chi tiết §8.7).
 > Bản ghi cũ chưa gắn scope (null) **không bị khóa**.
 
 ### 8.6 Audit bất biến & chữ ký điện tử (21 CFR Part 11)
 `record_audit` tuần tự hóa (khóa tiến trình/DB); `seq` UNIQUE; `GET /api/audit/verify-chain` kiểm tra hash-chain; e-signature yêu cầu nhập lại mật khẩu + lý do + hash nội dung.
+
+Tab Audit trail (frontend) nay thêm **cột "Module" đầu bảng** — ánh xạ `entity_type` → tên module trên thanh menu chính (VD `finished_goods_unit` → "Kho TP (WMS)", `cip_record` → "CIP", `finished_product` → "Danh mục") để biết 1 dòng audit thuộc phân hệ nào mà không cần đoán qua mã kỹ thuật. Nút **"Xem chi tiết"** mở modal so sánh **diff trước/sau theo từng trường**, dịch `entity_type`/`action`/tên trường sang tiếng Việt (kèm mã gốc để đối chiếu, tự "làm đẹp" field lạ chưa có trong từ điển) — thay vì chỉ hiện JSON thô như trước.
 
 ### 8.7 Kho công ty vs Kho phân xưởng — địa điểm kho enforce ở tầng server (`scope_warehouse`)
 Ranh giới địa điểm kho **được enforce ở server**, không chỉ ở menu UI, qua chiều data-scoping thứ 4 `User.scope_warehouse` (§8.5):
@@ -396,7 +424,7 @@ Ranh giới địa điểm kho **được enforce ở server**, không chỉ ở
 - **`transfer()` (chuyển kho, đụng 2 địa điểm)** — `_assert_transfer_scope(user, loc_from, loc_to)`: cho phép nếu user có `scope_warehouse` khớp **ít nhất 1 trong 2 đầu** (nguồn hoặc đích), chỉ chặn khi không khớp đầu nào. Đây là quy tắc cố ý: Thủ kho công ty (`cong_ty`) vẫn cần duyệt/hoàn tác "Đề nghị nhận kho" — luồng này luôn có 1 đầu là Kho công ty — nhưng không được dùng tài khoản đó để bắc cầu chuyển thẳng giữa 2 vị trí đều thuộc Kho phân xưởng.
 - **Các endpoint gọi gián tiếp qua `transfer()`/`issue()`/`return_stock()`** (`fulfill_request_line`, `fulfill_all_lines`, `undo_fulfill_line`, `transfer_to_company`, `return_to_supplier`, `undo_issue`…) thừa hưởng nguyên vẹn kiểm tra trên, không cần thêm guard riêng.
 - **Admin bỏ qua mọi kiểm tra `scope_warehouse`** (như mọi chiều scope khác) — dùng cho fixture/test hoặc thao tác vượt phạm vi khi thật sự cần.
-- **Tài khoản demo**: `thukho` → `scope_warehouse="cong_ty"`; `thukho_px`, `truongca`, `vanhanh` → `"phan_xuong"`; các tài khoản còn lại → `"*"` (không giới hạn, vì không thao tác kho trực tiếp).
+- **Tài khoản demo**: `thukho` → `scope_warehouse="cong_ty"`; `vanhanh` → `"phan_xuong"`; các tài khoản còn lại (`quandoc`, `phoquandoc`, `kcs`, `kysu`, `kcs_truongphong`, `giamdoc_sx`, `ttdh_thukhotp`) → `"*"` (không giới hạn — `ttdh_thukhotp` thao tác kho thành phẩm/WMS, không phải kho NVL công ty/phân xưởng nên không dùng chiều scope này).
 - **"Xuất tự do"** (miễn phí, không qua phiếu) vẫn khoá **admin-only** riêng (`require_role(ADMIN)`) ở cả 2 màn hình — độc lập với `scope_warehouse`.
 
 ---

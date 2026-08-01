@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>MES Bia Hạ Long - Nhà Máy Đông Mai</title>
-  <link rel="stylesheet" href="/styles.css?v=32" />
+  <link rel="stylesheet" href="/styles.css?v=52" />
 </head>
 <body>
   <!-- Màn hình đăng nhập -->
@@ -26,56 +26,60 @@
   </div>
 
   <div id="app" style="display:none">
-  <header>
-    <div>
-      <h1>🍺 MES Bia Hạ Long</h1>
-      <div class="sub">Nhà Máy Đông Mai — Hệ thống điều hành sản xuất (MES)</div>
-    </div>
-    <div class="spacer"></div>
-    <div class="userbox">
-      <div style="text-align:right">
-        <div id="u_name" style="font-weight:700"></div>
-        <div id="u_title" class="muted" style="font-size:12px"></div>
-      </div>
-      <a class="btn sec sm" href="/kiosk.html" title="Giao diện kiosk/tablet cho xưởng" style="text-decoration:none">📱 Kiosk</a>
-      <button class="btn sec sm" id="logout">Đăng xuất</button>
-    </div>
-  </header>
-
   <nav id="nav">
-    <button data-view="dashboard" class="active">Tổng quan</button>
-    <button data-view="flowmap">🗺️ Sơ đồ quy trình</button>
-    <button data-view="orders">Lệnh SX</button>
-    <button data-view="dispatch" class="nav-unused">Điều độ</button>
-    <button data-view="schedule" class="nav-unused">Lập lịch</button>
-    <button data-view="recipes">Công thức</button>
-    <button data-view="recipeadv" class="nav-unused">Công thức+</button>
-    <button data-view="batches" class="nav-unused">Mẻ sản xuất</button>
-    <button data-view="isa88" class="nav-unused">ISA-88</button>
-    <button data-view="dispense" class="nav-unused">Cấp liệu</button>
-    <button data-view="quality">Chất lượng</button>
-    <button data-view="qclab" class="nav-unused">QC Lab</button>
-    <button data-view="process">Nấu-Lọc-Chiết</button>
-    <button data-view="trace">Truy xuất</button>
-    <button data-view="warehouse_kc">Kho công ty</button>
-    <button data-view="warehouse_px">Kho phân xưởng</button>
-    <button data-view="wms">Kho TP (WMS)</button>
-    <button data-view="packaging">Bao bì</button>
-    <button data-view="cip">🧼 CIP</button>
-    <button data-view="energy">Năng lượng</button>
-    <button data-view="realtime">📡 Realtime</button>
-    <button data-view="oee" class="nav-unused">OEE/Dừng máy</button>
-    <button data-view="maint" class="nav-unused">Bảo trì</button>
-    <button data-view="calib" class="nav-unused">Kiểm định</button>
-    <button data-view="reports">Báo cáo</button>
-    <button data-view="ai">🤖 Trợ lý AI</button>
-    <button data-view="integration">Tích hợp</button>
-    <button data-view="master">Danh mục</button>
-    <button data-view="users">Tài khoản</button>
-    <button data-view="audit">Audit</button>
-    <button data-view="profile">Hồ sơ</button>
+    <div class="nav-brand">
+      <div class="nav-brand-logo">🍺</div>
+      <div>
+        <div class="nav-brand-title">MES Bia Hạ Long</div>
+        <div class="nav-brand-sub">Nhà máy Đông Mai</div>
+      </div>
+    </div>
+    <div class="nav-scroll">
+      <button data-view="dashboard" class="active">📊 Tổng quan</button>
+      <button data-view="flowmap">🗺️ Sơ đồ quy trình</button>
+      <button data-view="warehouse_kc">🏢 Kho công ty</button>
+      <button data-view="orders">📋 Lệnh SX</button>
+      <button data-view="dispatch" class="nav-unused">Điều độ</button>
+      <button data-view="batches" class="nav-unused">Mẻ sản xuất</button>
+      <button data-view="dispense" class="nav-unused">Cấp liệu</button>
+      <button data-view="process">🍺 Nấu-Lọc-Chiết</button>
+      <button data-view="quality">✅ Chất lượng</button>
+      <button data-view="wms">📦 Kho TP (WMS)</button>
+      <button data-view="trace">🔍 Truy xuất</button>
+      <button data-view="recipes">🧪 Công thức</button>
+      <button data-view="recipeadv" class="nav-unused">Công thức+</button>
+      <button data-view="isa88" class="nav-unused">ISA-88</button>
+      <button data-view="schedule" class="nav-unused">Lập lịch</button>
+      <button data-view="packaging">📦 Bao bì</button>
+      <button data-view="warehouse_px">🏗️ Kho phân xưởng</button>
+      <button data-view="qclab" class="nav-unused">QC Lab</button>
+      <button data-view="cip">🧼 CIP</button>
+      <button data-view="energy">⚡ Năng lượng</button>
+      <button data-view="realtime">📡 Realtime</button>
+      <button data-view="oee" class="nav-unused">OEE/Dừng máy</button>
+      <button data-view="maint" class="nav-unused">Bảo trì</button>
+      <button data-view="calib" class="nav-unused">Kiểm định</button>
+      <button data-view="reports">📈 Báo cáo</button>
+      <button data-view="ai">🤖 Trợ lý AI</button>
+      <button data-view="integration">🔌 Tích hợp</button>
+      <button data-view="master">🗂️ Danh mục</button>
+      <button data-view="users">👤 Tài khoản</button>
+      <button data-view="audit">🛡️ Audit</button>
+      <button data-view="profile">👤 Hồ sơ</button>
+    </div>
+    <div class="nav-foot">
+      <a class="nav-foot-link" href="/kiosk.html" title="Giao diện kiosk/tablet cho xưởng">📱 Kiosk</a>
+      <div class="nav-user">
+        <div>
+          <div id="u_name" class="nav-user-name"></div>
+          <div id="u_title" class="nav-user-title"></div>
+        </div>
+        <button class="btn sec sm" id="logout">Đăng xuất</button>
+      </div>
+    </div>
   </nav>
 
+  <div class="app-main">
   <main>
     <section id="view-dashboard" class="view active"></section>
     <section id="view-flowmap" class="view"></section>
@@ -110,11 +114,12 @@
     <section id="view-profile" class="view"></section>
   </main>
   </div>
+  </div>
 
-  <script src="/charts.js?v=30"></script>
+  <script src="/charts.js?v=33"></script>
   <script src="/barcode.js?v=20"></script>
-  <script src="/app.js?v=323"></script>
-  <script src="/views_ext.js?v=93"></script>
+  <script src="/app.js?v=338"></script>
+  <script src="/views_ext.js?v=99"></script>
   <script src="/import_explorer.js?v=22"></script>
 </body>
 </html>
