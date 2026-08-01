@@ -12,7 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..audit import record_audit
-from ..common import new_id, utcnow
+from ..common import new_id, resolve_years, utcnow
 from ..errors import DomainError, NotFoundError
 from ..models.brewing import (
     BottleRecord, FermentRecord, FilterMasterOrder, FilterOrder, FilterOrderMaterialLine, FilterOrderTank,
@@ -155,7 +155,7 @@ def _validate_tank_plans(tanks_in: list) -> None:
             raise DomainError("Mỗi tank lên men phải khai báo thể tích dịch lọc kế hoạch (phải lớn hơn 0).")
 
 
-def _insert_sub_order(db: Session, master_order_id, seq: int, order_code: str, blend_mode: str,
+def _insert_sub_order(db: Session, master_order_id, seq: int, order_code: str, order_year: int, blend_mode: str,
                        note, kcs_lot_no, planned_volume_hl: float, volume_tolerance_hl: float,
                        sources: list, material_lines: list, user,
                        beer_type_id: str = None, finished_product_id: str = None) -> FilterOrder:
@@ -164,7 +164,8 @@ def _insert_sub_order(db: Session, master_order_id, seq: int, order_code: str, b
     đã chuẩn hoá từ `_validate_tanks` (mỗi phần tử thêm key "planned_v_dich_hl" trước khi
     gọi hàm này). Dùng chung bởi create_order (lệnh lọc phẳng cũ, master_order_id=None) và
     create_master_order/update_master_order (nhiều lệnh nhỏ trong 1 lệnh lớn)."""
-    order = FilterOrder(filter_order_id=new_id(), order_code=order_code, master_order_id=master_order_id,
+    order = FilterOrder(filter_order_id=new_id(), order_code=order_code, order_year=order_year,
+                        master_order_id=master_order_id,
                         seq=seq, blend_mode=blend_mode, note=note, kcs_lot_no=kcs_lot_no,
                         planned_volume_hl=planned_volume_hl, volume_tolerance_hl=volume_tolerance_hl,
                         beer_type_id=beer_type_id, finished_product_id=finished_product_id,
@@ -208,7 +209,13 @@ def create_order(db: Session, payload: dict, user) -> FilterOrder:
     material_lines = _validate_material_lines(db, lines_in)
     _validate_volume_plan(payload.get("planned_volume_hl"), payload.get("volume_tolerance_hl"))
 
-    order = _insert_sub_order(db, None, 1, payload["order_code"], blend_mode,
+    order_code = payload["order_code"]
+    order_year = utcnow().year
+    if db.execute(select(FilterOrder).where(FilterOrder.order_code == order_code,
+                  FilterOrder.order_year == order_year)).first():
+        raise DomainError(f"Số lệnh '{order_code}' đã tồn tại trong năm {order_year}.")
+
+    order = _insert_sub_order(db, None, 1, order_code, order_year, blend_mode,
                               payload.get("note"), payload.get("kcs_lot_no"),
                               payload.get("planned_volume_hl", 0.0), payload.get("volume_tolerance_hl", 0.0),
                               sources, material_lines, user, beer_type_id=beer_type_id,
@@ -237,8 +244,9 @@ def update_order(db: Session, filter_order_id: str, payload: dict, user) -> Filt
     new_code = payload.get("order_code")
 
     if new_code != order.order_code and db.execute(
-            select(FilterOrder).where(FilterOrder.order_code == new_code)).first():
-        raise DomainError(f"Số lệnh '{new_code}' đã tồn tại.")
+            select(FilterOrder).where(FilterOrder.order_code == new_code,
+                    FilterOrder.order_year == order.order_year)).first():
+        raise DomainError(f"Số lệnh '{new_code}' đã tồn tại trong năm {order.order_year}.")
 
     tanks_in = [{"tank_type": "cct", "ferment_id": fid} for fid in tank_ferment_ids]
     sources, beer_type_id = _validate_tanks(db, blend_mode, tanks_in, payload.get("beer_type_id"))
@@ -649,10 +657,10 @@ def _validate_children(db: Session, children_in: list, exclude_order_ids: set = 
     return validated
 
 
-def _insert_children(db: Session, master_order_id: str, validated: list, user) -> list:
+def _insert_children(db: Session, master_order_id: str, order_year: int, validated: list, user) -> list:
     orders = []
     for seq, (child, sources, material_lines, planned_volume_hl, beer_type_id, finished_product_id) in enumerate(validated, start=1):
-        order = _insert_sub_order(db, master_order_id, seq, f"SUB-{new_id()[:12]}",
+        order = _insert_sub_order(db, master_order_id, seq, f"SUB-{new_id()[:12]}", order_year,
                                   child.get("blend_mode", "khong_phoi"), None, child.get("kcs_lot_no"),
                                   planned_volume_hl, child.get("volume_tolerance_hl", 0.0),
                                   sources, material_lines, user, beer_type_id=beer_type_id,
@@ -676,15 +684,17 @@ def _delete_children(db: Session, children: list) -> None:
 
 def create_master_order(db: Session, payload: dict, user) -> FilterMasterOrder:
     order_code = payload["order_code"]
-    if db.execute(select(FilterMasterOrder).where(FilterMasterOrder.order_code == order_code)).first():
-        raise DomainError(f"Số lệnh '{order_code}' đã tồn tại.")
+    order_year = utcnow().year
+    if db.execute(select(FilterMasterOrder).where(FilterMasterOrder.order_code == order_code,
+                  FilterMasterOrder.order_year == order_year)).first():
+        raise DomainError(f"Số lệnh '{order_code}' đã tồn tại trong năm {order_year}.")
     validated = _validate_children(db, payload.get("children") or [])
 
-    master = FilterMasterOrder(filter_master_order_id=new_id(), order_code=order_code,
+    master = FilterMasterOrder(filter_master_order_id=new_id(), order_code=order_code, order_year=order_year,
                                note=payload.get("note"), created_by=user.username, created_at=utcnow())
     db.add(master)
     db.flush()
-    orders = _insert_children(db, master.filter_master_order_id, validated, user)
+    orders = _insert_children(db, master.filter_master_order_id, master.order_year, validated, user)
 
     record_audit(db, entity_type="filter_master_order", entity_id=master.filter_master_order_id, action="create",
                  actor=user, after={"order_code": master.order_code, "children": len(orders)})
@@ -693,8 +703,12 @@ def create_master_order(db: Session, payload: dict, user) -> FilterMasterOrder:
     return master
 
 
-def list_master_orders(db: Session) -> list:
-    masters = db.execute(select(FilterMasterOrder).order_by(FilterMasterOrder.created_at.desc())).scalars().all()
+def list_master_orders(db: Session, years=None) -> list:
+    years = resolve_years(years)
+    stmt = select(FilterMasterOrder)
+    if years:
+        stmt = stmt.where(FilterMasterOrder.order_year.in_(years))
+    masters = db.execute(stmt.order_by(FilterMasterOrder.created_at.desc())).scalars().all()
     products = {p.product_id: p for p in db.execute(select(Product)).scalars().all()}
     out = []
     for m in masters:
@@ -753,8 +767,9 @@ def update_master_order(db: Session, filter_master_order_id: str, payload: dict,
 
     order_code = payload["order_code"]
     if order_code != master.order_code and db.execute(
-            select(FilterMasterOrder).where(FilterMasterOrder.order_code == order_code)).first():
-        raise DomainError(f"Số lệnh '{order_code}' đã tồn tại.")
+            select(FilterMasterOrder).where(FilterMasterOrder.order_code == order_code,
+                    FilterMasterOrder.order_year == master.order_year)).first():
+        raise DomainError(f"Số lệnh '{order_code}' đã tồn tại trong năm {master.order_year}.")
 
     validated = _validate_children(db, payload.get("children") or [],
                                    exclude_order_ids={o.filter_order_id for o in old_children})
@@ -764,7 +779,7 @@ def update_master_order(db: Session, filter_master_order_id: str, payload: dict,
 
     master.order_code = order_code
     master.note = payload.get("note")
-    orders = _insert_children(db, master.filter_master_order_id, validated, user)
+    orders = _insert_children(db, master.filter_master_order_id, master.order_year, validated, user)
 
     record_audit(db, entity_type="filter_master_order", entity_id=master.filter_master_order_id, action="update",
                  actor=user, after={"order_code": master.order_code, "children": len(orders)})

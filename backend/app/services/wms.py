@@ -5,7 +5,7 @@ barcode (cho đầu đọc cầm tay / kiosk)."""
 import re
 from datetime import datetime, timedelta
 
-from sqlalchemy import and_, case, delete, func, or_, select, true
+from sqlalchemy import and_, case, delete, false, func, or_, select, true
 from sqlalchemy.orm import Session
 
 from ..audit import record_audit
@@ -15,7 +15,7 @@ from ..models.audit import AuditLog
 from ..models.brewing import BottleRecord
 from ..models.master import FinishedProduct, UnitTypeCatalog
 from ..models.materials import GenealogyEdge
-from ..models.wms import FinishedGoodsUnit, NearExpiryEntry, Shipment, ShipToLocation, Vehicle, WmsLocation
+from ..models.wms import ConsignedEntry, FinishedGoodsUnit, NearExpiryEntry, Shipment, ShipToLocation, Vehicle, WmsLocation
 from ..security import User, require_perm, require_role
 from . import genealogy
 from .opening_balance_import import parse_opening_balance_sheet
@@ -77,7 +77,7 @@ def _location_used_count(db: Session, loc_id: str, exclude_unit_id: str | None =
 def _consume_lot_rows(db: Session, *, product_name: str, unit_type: str, status: str,
                       quantity_needed: float, lot_code: str | None = None,
                       location_id=_LOC_UNSET, exclude_ids: set | None = None,
-                      near_expiry_only: bool = False) -> tuple[list[FinishedGoodsUnit], float]:
+                      near_expiry_only: bool = False, consigned_only: bool = False) -> tuple[list[FinishedGoodsUnit], float]:
     """Tiêu thụ FIFO (cũ nhất trước, theo created_at) từ các dòng LÔ khớp tiêu chí tới khi đủ
     `quantity_needed` (đơn vị = cột quantity, KHÔNG phải số vỉ/keg — caller tự nhân với
     _pack_divisor() trước khi gọi). Dòng bị lấy TRỌN thì trả nguyên dòng đó; dòng bị lấy MỘT
@@ -99,6 +99,8 @@ def _consume_lot_rows(db: Session, *, product_name: str, unit_type: str, status:
                          else FinishedGoodsUnit.location_id == location_id)
     if near_expiry_only:
         stmt = stmt.where(FinishedGoodsUnit.is_near_expiry == true())
+    if consigned_only:
+        stmt = stmt.where(FinishedGoodsUnit.is_consigned == true())
     if exclude_ids:
         stmt = stmt.where(FinishedGoodsUnit.unit_id.notin_(exclude_ids))
     stmt = stmt.order_by(FinishedGoodsUnit.created_at)
@@ -118,6 +120,7 @@ def _consume_lot_rows(db: Session, *, product_name: str, unit_type: str, status:
                 product_name=row.product_name, lot_code=row.lot_code, quantity=remaining,
                 status=row.status, location_id=row.location_id, created_by=row.created_by,
                 created_at=row.created_at, is_near_expiry=row.is_near_expiry,
+                is_consigned=row.is_consigned,
             )
             db.add(split)
             row.quantity -= remaining
@@ -437,64 +440,60 @@ def import_opening_balance_units(db: Session, content: bytes, user: User) -> dic
     return {"created": created, "failed": failed, "total": len(rows)}
 
 
-# ---- Nhập bia cận date: tự nhận lô chiết theo ngày giờ khai báo + lịch sử riêng ----
+# ---- Nhập bia cận date: khai báo trực tiếp theo Sản phẩm + SL + Vị trí, sinh lô riêng ----
 
-def find_bottle_for_datetime(db: Session, declared_at) -> list[dict]:
-    """Tìm (các) lô chiết mà khoảng thời gian thực hiện (bottle_date .. ended_at, hoặc chỉ
-    bottle_date nếu chưa "Kết thúc") chứa thời điểm khai báo — dùng để tự nhận lô chiết/lô
-    trong kho thành phẩm khi khai báo "Nhập bia cận date". Chỉ xét mẻ chiết đã duyệt KCS
-    (approved=True) vì chỉ mẻ đã duyệt mới thực sự có lô trong kho thành phẩm."""
-    candidates = db.execute(select(BottleRecord).where(
-        BottleRecord.approved == True, BottleRecord.bottle_date <= declared_at,  # noqa: E712
-        or_(BottleRecord.ended_at.is_(None), BottleRecord.ended_at >= declared_at),
-    ).order_by(BottleRecord.bottle_date.desc())).scalars().all()
-    out = []
-    for b in candidates:
-        fp = db.get(FinishedProduct, b.finished_product_id) if b.finished_product_id else None
-        out.append({"bottle_id": b.bottle_id, "bottle_code": b.bottle_code,
-                    "product_name": fp.code if fp else b.beer_type, "lot_code": b.lot_no or b.bottle_code,
-                    "finished_product_id": b.finished_product_id,
-                    "unit_type": fp.unit_type if fp else "vi", "pack_size": fp.pack_size if fp else 24,
-                    "bottle_date": b.bottle_date, "ended_at": b.ended_at})
-    return out
+def _gen_candate_lot_code(db: Session) -> str:
+    """Sinh mã lô cận date DUY NHẤT, không trùng với lô sản xuất thật nào — cố ý KHÔNG tái sử
+    dụng lot_code của lô chiết gốc (khác trước đây, xem create_near_expiry_entry): thực tế tồn
+    cận date thường là gộp từ nhiều lô sản xuất khác nhau, không thể quy về đúng 1 lô — tự sinh
+    riêng để list_lot_summaries (nhóm theo product_name+lot_code) tách nó thành 1 DÒNG RIÊNG
+    trong Xuất kho thay vì gộp lẫn vào tồn thường của SKU đó."""
+    for _ in range(5):
+        code = f"CD{utcnow():%y%m%d}-{new_id()[:6].upper()}"
+        exists = db.execute(select(FinishedGoodsUnit.unit_id)
+                            .where(FinishedGoodsUnit.lot_code == code)).first()
+        if not exists:
+            return code
+    raise DomainError("Không sinh được mã lô cận date, thử lại.")
 
 
-def create_near_expiry_entry(db: Session, bottle_id: str, quantity: int, declared_at, user: User,
-                             note: str = None) -> dict:
-    """Khai báo "Nhập bia cận date": tăng tồn kho thành phẩm công ty (tạo vỉ/keg mới, tương
-    tự Nhập kho thủ công) nhưng đánh dấu is_near_expiry=True + ghi 1 dòng lịch sử riêng
-    (NearExpiryEntry, direction="in") tách biệt khỏi lịch sử nhập kho thông thường."""
+def create_near_expiry_entry(db: Session, finished_product_id: str, quantity: int,
+                             location_id: str | None, user: User, note: str = None) -> dict:
+    """Khai báo "Nhập bia cận date": chỉ cần chọn Sản phẩm + Số lượng + Vị trí kho nhận (KHÔNG
+    còn tự nhận lô chiết theo ngày giờ — xem docstring NearExpiryEntry) — tăng tồn kho thành
+    phẩm công ty (tạo 1 dòng lô MỚI, tự sinh lot_code riêng qua _gen_candate_lot_code) đánh dấu
+    is_near_expiry=True + ghi 1 dòng lịch sử riêng (NearExpiryEntry, direction="in") tách biệt
+    khỏi lịch sử nhập kho thông thường."""
     require_perm(user, "warehouse.receive")
-    b = db.get(BottleRecord, bottle_id)
-    if not b:
-        raise NotFoundError("Không tìm thấy lô chiết tương ứng.")
+    fp = db.get(FinishedProduct, finished_product_id)
+    if not fp:
+        raise NotFoundError("Không tìm thấy sản phẩm tương ứng.")
     if quantity <= 0:
         raise DomainError("Số lượng phải > 0.")
-    fp = db.get(FinishedProduct, b.finished_product_id) if b.finished_product_id else None
-    unit_type = fp.unit_type if fp else "vi"
-    pack_size = fp.pack_size if fp else 24
-    product_name = fp.code if fp else b.beer_type
-    lot_code = b.lot_no or b.bottle_code
+    unit_type = fp.unit_type or "vi"
+    pack_size = fp.pack_size or 1
+    product_name = fp.code
+    lot_code = _gen_candate_lot_code(db)
     units = _create_units(db, {
-        "finished_product_id": b.finished_product_id, "product_name": product_name,
+        "finished_product_id": finished_product_id, "product_name": product_name,
         "lot_code": lot_code, "total": quantity * pack_size, "pack_size": pack_size, "unit_type": unit_type,
+        "loc_id": location_id,
     }, created_by=user.username, actor=user)
     for u in units:
         u.is_near_expiry = True
-        genealogy.add_edge(db, from_type="bottle", from_id=bottle_id, to_type="finished_goods_unit",
-                           to_id=u.unit_id, relation="nhập bia cận date", quantity=u.quantity, uom=u.unit_type)
     # quantity (tham số hàm, số vỉ/keg khai báo) — KHÔNG dùng len(units): _create_units giờ
     # luôn trả về 1 dòng/lô (xem docs/WMS-LOT-LEVEL-REDESIGN.md), len(units) không còn phản
     # ánh đúng số vỉ/keg thật (trước đây 1 dòng=1 vỉ nên len(units) trùng khớp quantity).
-    entry = NearExpiryEntry(entry_id=new_id(), direction="in", product_name=product_name, lot_code=lot_code,
-                            unit_type=unit_type, quantity=quantity, declared_at=declared_at,
-                            bottle_id=bottle_id, note=note, created_by=user.username, created_at=utcnow(),
+    entry = NearExpiryEntry(entry_id=new_id(), direction="in", finished_product_id=finished_product_id,
+                            product_name=product_name, lot_code=lot_code, unit_type=unit_type,
+                            quantity=quantity, location_id=location_id, declared_at=utcnow(),
+                            note=note, created_by=user.username, created_at=utcnow(),
                             unit_codes=",".join(u.unit_code for u in units))
     db.add(entry)
     record_audit(db, entity_type="near_expiry_entry", entity_id=entry.entry_id, action="create", actor=user,
-                after={"bottle_code": b.bottle_code, "lot_code": lot_code, "count": quantity})
+                after={"product_name": product_name, "lot_code": lot_code, "count": quantity})
     db.commit()
-    return {"entry_id": entry.entry_id, "bottle_code": b.bottle_code, "product_name": product_name,
+    return {"entry_id": entry.entry_id, "product_name": product_name,
             "lot_code": lot_code, "unit_type": unit_type, "count": quantity,
             "unit_codes": [u.unit_code for u in units]}
 
@@ -504,8 +503,11 @@ def list_near_expiry_entries(db: Session) -> list[dict]:
     out = []
     for e in entries:
         shipment = db.get(Shipment, e.shipment_id) if e.shipment_id else None
-        out.append({"entry_id": e.entry_id, "direction": e.direction, "product_name": e.product_name,
+        loc = db.get(WmsLocation, e.location_id) if e.location_id else None
+        out.append({"entry_id": e.entry_id, "direction": e.direction,
+                    "finished_product_id": e.finished_product_id, "product_name": e.product_name,
                     "lot_code": e.lot_code, "unit_type": e.unit_type, "quantity": e.quantity,
+                    "location_code": loc.code if loc else None,
                     "declared_at": e.declared_at, "shipment_code": shipment.shipment_code if shipment else None,
                     "note": e.note, "created_by": e.created_by, "created_at": e.created_at,
                     "reversed": e.reversed,
@@ -538,8 +540,12 @@ def undo_near_expiry_entry(db: Session, entry_id: str, user: User) -> dict:
     not_stored = [u.unit_code for u in units if u.status != "stored"]
     if not_stored:
         raise DomainError(f"Vỉ/keg đã xuất hoặc không còn trong kho ({', '.join(not_stored)}), không thể hoàn tác.")
-    b = db.get(BottleRecord, entry.bottle_id) if entry.bottle_id else None
-    fp = db.get(FinishedProduct, b.finished_product_id) if b and b.finished_product_id else None
+    if entry.finished_product_id:
+        fp = db.get(FinishedProduct, entry.finished_product_id)
+    else:
+        # Bản khai cũ (trước khi bỏ tự nhận lô chiết) — chỉ còn tra qua bottle_id.
+        b = db.get(BottleRecord, entry.bottle_id) if entry.bottle_id else None
+        fp = db.get(FinishedProduct, b.finished_product_id) if b and b.finished_product_id else None
     divisor = _pack_divisor(fp, entry.unit_type, _divide_by_pack_codes(db))
     remaining_count = sum(u.quantity for u in units) / divisor
     if remaining_count + 1e-6 < entry.quantity:
@@ -556,6 +562,115 @@ def undo_near_expiry_entry(db: Session, entry_id: str, user: User) -> dict:
         db.delete(u)
     entry.reversed = True
     record_audit(db, entity_type="near_expiry_entry", entity_id=entry.entry_id, action="undo", actor=user,
+                before={"count": entry.quantity}, after={"reversed": True})
+    db.commit()
+    return {"entry_id": entry.entry_id, "removed": entry.quantity}
+
+
+# ---- Nhập bia gửi: mirror y hệt bia cận date, khác ở chỗ được ưu tiên xuất TRƯỚC cả cận
+# date (xem sort trong VIEWS.wms xuatkho) và bị TRỪ khỏi báo cáo xuất theo ca/ngày (xem
+# finished_goods_shift_report) — vì đây là phần bia ĐÃ tính vào lượt xuất buổi sáng (phiếu
+# gốc), xuất lại lần 2 sẽ bị đếm trùng nếu không trừ. ----
+
+def _gen_consigned_lot_code(db: Session) -> str:
+    """Sinh mã lô bia gửi DUY NHẤT — mirror _gen_candate_lot_code, đổi tiền tố GUI để phân
+    biệt trực quan với lô cận date (CD) và lô sản xuất thật."""
+    for _ in range(5):
+        code = f"GUI{utcnow():%y%m%d}-{new_id()[:6].upper()}"
+        exists = db.execute(select(FinishedGoodsUnit.unit_id)
+                            .where(FinishedGoodsUnit.lot_code == code)).first()
+        if not exists:
+            return code
+    raise DomainError("Không sinh được mã lô bia gửi, thử lại.")
+
+
+def create_consigned_entry(db: Session, finished_product_id: str, quantity: int,
+                           location_id: str | None, user: User, note: str = None) -> dict:
+    """Khai báo "Nhập bia gửi": xe đã xuất phiếu đi giao trong ngày nhưng giao không hết,
+    mang phần dư về gửi lại kho — mirror y hệt create_near_expiry_entry (Sản phẩm + Số lượng
+    + Vị trí kho nhận trực tiếp, tự sinh lot_code riêng qua _gen_consigned_lot_code, đánh dấu
+    is_consigned=True) + ghi 1 dòng lịch sử riêng (ConsignedEntry, direction="in")."""
+    require_perm(user, "warehouse.receive")
+    fp = db.get(FinishedProduct, finished_product_id)
+    if not fp:
+        raise NotFoundError("Không tìm thấy sản phẩm tương ứng.")
+    if quantity <= 0:
+        raise DomainError("Số lượng phải > 0.")
+    unit_type = fp.unit_type or "vi"
+    pack_size = fp.pack_size or 1
+    product_name = fp.code
+    lot_code = _gen_consigned_lot_code(db)
+    units = _create_units(db, {
+        "finished_product_id": finished_product_id, "product_name": product_name,
+        "lot_code": lot_code, "total": quantity * pack_size, "pack_size": pack_size, "unit_type": unit_type,
+        "loc_id": location_id,
+    }, created_by=user.username, actor=user)
+    for u in units:
+        u.is_consigned = True
+    entry = ConsignedEntry(entry_id=new_id(), direction="in", finished_product_id=finished_product_id,
+                           product_name=product_name, lot_code=lot_code, unit_type=unit_type,
+                           quantity=quantity, location_id=location_id, declared_at=utcnow(),
+                           note=note, created_by=user.username, created_at=utcnow(),
+                           unit_codes=",".join(u.unit_code for u in units))
+    db.add(entry)
+    record_audit(db, entity_type="consigned_entry", entity_id=entry.entry_id, action="create", actor=user,
+                after={"product_name": product_name, "lot_code": lot_code, "count": quantity})
+    db.commit()
+    return {"entry_id": entry.entry_id, "product_name": product_name,
+            "lot_code": lot_code, "unit_type": unit_type, "count": quantity,
+            "unit_codes": [u.unit_code for u in units]}
+
+
+def list_consigned_entries(db: Session) -> list[dict]:
+    entries = db.execute(select(ConsignedEntry).order_by(ConsignedEntry.created_at.desc())).scalars().all()
+    out = []
+    for e in entries:
+        shipment = db.get(Shipment, e.shipment_id) if e.shipment_id else None
+        loc = db.get(WmsLocation, e.location_id) if e.location_id else None
+        out.append({"entry_id": e.entry_id, "direction": e.direction,
+                    "finished_product_id": e.finished_product_id, "product_name": e.product_name,
+                    "lot_code": e.lot_code, "unit_type": e.unit_type, "quantity": e.quantity,
+                    "location_code": loc.code if loc else None,
+                    "declared_at": e.declared_at, "shipment_code": shipment.shipment_code if shipment else None,
+                    "note": e.note, "created_by": e.created_by, "created_at": e.created_at,
+                    "reversed": e.reversed,
+                    "can_undo": e.direction == "in" and not e.reversed and bool(e.unit_codes)})
+    return out
+
+
+def undo_consigned_entry(db: Session, entry_id: str, user: User) -> dict:
+    """Hoàn tác 1 bản khai "Nhập bia gửi" (direction="in") — mirror undo_near_expiry_entry,
+    đơn giản hơn vì mọi bản khai bia gửi đều mới (luôn có finished_product_id, không có
+    đường tương thích ngược qua bottle_id như bia cận date)."""
+    require_perm(user, "warehouse.receive")
+    entry = db.get(ConsignedEntry, entry_id)
+    if not entry:
+        raise NotFoundError("Không tìm thấy bản khai.")
+    if entry.direction != "in":
+        raise DomainError("Chỉ có thể hoàn tác bản khai \"Nhập bia gửi\" (không áp dụng cho dòng tự động khi xuất kho).")
+    if entry.reversed:
+        raise DomainError("Bản khai này đã được hoàn tác trước đó.")
+    if not entry.unit_codes:
+        raise DomainError("Bản khai này không có dữ liệu vỉ/keg để hoàn tác.")
+    unit_codes = entry.unit_codes.split(",")
+    units = db.execute(select(FinishedGoodsUnit).where(
+        FinishedGoodsUnit.unit_code.in_(unit_codes))).scalars().all()
+    if len(units) != len(unit_codes):
+        raise DomainError("Một số dòng của bản khai này đã bị xoá/phân rã ở nơi khác, không thể hoàn tác.")
+    not_stored = [u.unit_code for u in units if u.status != "stored"]
+    if not_stored:
+        raise DomainError(f"Vỉ/keg đã xuất hoặc không còn trong kho ({', '.join(not_stored)}), không thể hoàn tác.")
+    fp = db.get(FinishedProduct, entry.finished_product_id) if entry.finished_product_id else None
+    divisor = _pack_divisor(fp, entry.unit_type, _divide_by_pack_codes(db))
+    remaining_count = sum(u.quantity for u in units) / divisor
+    if remaining_count + 1e-6 < entry.quantity:
+        raise DomainError(
+            f"Đã có {entry.quantity - remaining_count:g} {entry.unit_type} rời khỏi lô này (xuất/phân rã/điều "
+            "chuyển một phần) — không thể hoàn tác nguyên vẹn.")
+    for u in units:
+        db.delete(u)
+    entry.reversed = True
+    record_audit(db, entity_type="consigned_entry", entity_id=entry.entry_id, action="undo", actor=user,
                 before={"count": entry.quantity}, after={"reversed": True})
     db.commit()
     return {"entry_id": entry.entry_id, "removed": entry.quantity}
@@ -969,7 +1084,8 @@ def list_lot_summaries(db: Session) -> list:
     riêng qua {type}_unplaced, không lẫn vào đây.
     {type}_near_expiry_count: số vỉ/keg/lon quy đổi ĐANG is_near_expiry=True của (lô, loại)
     này — dùng để chỉ bật ô chọn "Cận date" ở picker Xuất kho khi lô thực sự có hàng cận date
-    (tránh người dùng tick nhầm lô không có bia cận date nào)."""
+    (tránh người dùng tick nhầm lô không có bia cận date nào).
+    {type}_consigned_count: tương tự nhưng cho is_consigned=True (bia gửi) — mirror y hệt."""
     # "count" = tổng vỉ/keg/lon quy đổi (SUM(quantity)/pack_size — qua _pack_divisor_expr,
     # JOIN FinishedProduct), KHÔNG đếm dòng — 1 dòng giờ có thể đại diện nhiều đơn vị đóng
     # gói (xem docs/WMS-LOT-LEVEL-REDESIGN.md). "qty" (tổng SL nhỏ) không đổi ý nghĩa.
@@ -979,6 +1095,8 @@ def list_lot_summaries(db: Session) -> list:
                              func.sum(FinishedGoodsUnit.quantity / _pack_divisor_expr(divide_codes)),
                              func.sum(FinishedGoodsUnit.quantity), func.min(FinishedGoodsUnit.created_at),
                              func.sum(case((FinishedGoodsUnit.is_near_expiry == true(),
+                                           FinishedGoodsUnit.quantity / _pack_divisor_expr(divide_codes)), else_=0.0)),
+                             func.sum(case((FinishedGoodsUnit.is_consigned == true(),
                                            FinishedGoodsUnit.quantity / _pack_divisor_expr(divide_codes)), else_=0.0)))
                       .select_from(FinishedGoodsUnit)
                       .outerjoin(FinishedProduct, FinishedProduct.finished_product_id == FinishedGoodsUnit.finished_product_id)
@@ -1008,7 +1126,7 @@ def list_lot_summaries(db: Session) -> list:
     # vị tồn kho" (VD "lốc", "két") đều bị ĐẾM RỖNG ở đây, khiến cả lô đó biến mất khỏi bảng Kho
     # TP/picker Xuất kho/Cất vào vị trí dù tồn kho thật vẫn còn (không chỉ sai nhãn như "lon").
     types_by_key: dict[tuple, set] = {}
-    for product_name, lot_code, unit_type, location_id, count, qty, oldest_at, near_expiry_count in rows:
+    for product_name, lot_code, unit_type, location_id, count, qty, oldest_at, near_expiry_count, consigned_count in rows:
         key = (product_name, lot_code)
         g = grouped.setdefault(key, {"product_name": product_name, "lot_code": lot_code,
                                      "bottle_codes": bottle_codes_by_lot.get(lot_code, []),
@@ -1019,9 +1137,11 @@ def list_lot_summaries(db: Session) -> list:
         g.setdefault(f"{unit_type}_qty", 0.0)
         g.setdefault(f"{unit_type}_unplaced", 0)
         g.setdefault(f"{unit_type}_near_expiry_count", 0.0)
+        g.setdefault(f"{unit_type}_consigned_count", 0.0)
         g[f"{unit_type}_count"] += count
         g[f"{unit_type}_qty"] += qty or 0
         g[f"{unit_type}_near_expiry_count"] += near_expiry_count or 0
+        g[f"{unit_type}_consigned_count"] += consigned_count or 0
         if location_id is None:
             g[f"{unit_type}_unplaced"] += count
         else:
@@ -1169,7 +1289,11 @@ def finished_goods_shift_report(db: Session, date_from: datetime, date_to: datet
     tên SKU (1 lon 330ml=0.33L, 1 keg 20L/30L=20/30L — _resolve_liters_per_unit). Nguồn dữ
     liệu là DB nội bộ (không phải SCADA ngoài như filling/keg/energy) nên không có khái niệm
     "khoảng trống dữ liệu" — mỗi vỉ/keg là 1 sự kiện xuất thật, cộng dồn trực tiếp theo
-    (ngày, ca) suy từ shipped_at."""
+    (ngày, ca) suy từ shipped_at.
+    LOẠI TRỪ is_consigned=True (bia gửi): xe đã xuất phiếu gốc buổi sáng (đã tính vào lượt
+    xuất/lượng lít của phiếu đó), phần dư mang về gửi rồi xuất lại lần 2 nếu tính tiếp sẽ bị
+    đếm trùng lượng lít đã xuất — xem docstring ConsignedEntry. Bia cận date (is_near_expiry)
+    KHÔNG bị trừ vì không phải xuất trùng của cùng 1 chuyến."""
     rows = db.execute(
         select(FinishedGoodsUnit.quantity, FinishedGoodsUnit.shipped_at,
                FinishedGoodsUnit.product_name, FinishedProduct.name, FinishedProduct.category,
@@ -1179,7 +1303,8 @@ def finished_goods_shift_report(db: Session, date_from: datetime, date_to: datet
         .where(FinishedGoodsUnit.status == "shipped",
                FinishedGoodsUnit.shipped_at.isnot(None),
                FinishedGoodsUnit.shipped_at >= date_from,
-               FinishedGoodsUnit.shipped_at < date_to)
+               FinishedGoodsUnit.shipped_at < date_to,
+               FinishedGoodsUnit.is_consigned == false())
     ).all()
 
     # by_sku: báo cáo xuất theo TỪNG SKU cụ thể (số lượng thật theo đơn vị đóng gói — vỉ/keg/lon,
@@ -1273,6 +1398,125 @@ def finished_goods_shift_report(db: Session, date_from: datetime, date_to: datet
         "unmatched_products": sorted(unmatched.values(), key=lambda u: -u["units"]),
         "by_sku": by_sku, "unit_totals": unit_totals,
     }
+
+
+def shipment_classification_report(db: Session, date_from: datetime, date_to: datetime,
+                                    group_by: str = "day") -> dict:
+    """Báo cáo lượng bia khuyến mại / đổi trả / cận date / gửi theo ngày hoặc tháng — 4 chỉ
+    số ĐỘC LẬP, KHÔNG loại trừ nhau (1 đơn vị xuất có thể vừa khuyến mại vừa cận date, ví dụ)
+    tính trên FinishedGoodsUnit đã status="shipped" trong kỳ [date_from, date_to):
+    - promo/return: Shipment.shipment_type của phiếu xuất chứa đơn vị đó.
+    - near_expiry/consigned: cờ is_near_expiry/is_consigned của chính đơn vị đó (không phụ
+      thuộc phiếu xuất là loại gì — 1 phiếu "Thường" vẫn có thể chứa bia cận date/gửi).
+    Số liệu tính bằng "count" (vỉ/keg/lon quy đổi qua pack_size — như list_lot_summaries),
+    KHÔNG quy đổi lít (khác finished_goods_shift_report) vì đây là báo cáo tổng số lượng theo
+    phân loại, không phải sản lượng ca. group_by="day" bucket theo ngày giờ VN (dùng chung
+    _bucket_shift để nhất quán với báo cáo Xuất TP theo ca — không lệch UTC quanh nửa đêm),
+    "month" cắt ngắn về "YYYY-MM" từ cùng mốc ngày đó."""
+    if group_by not in ("day", "month"):
+        raise DomainError("group_by phải là 'day' hoặc 'month'.")
+    divide_codes = _divide_by_pack_codes(db)
+    rows = db.execute(
+        select(FinishedGoodsUnit.quantity, FinishedGoodsUnit.shipped_at, FinishedGoodsUnit.unit_type,
+               FinishedProduct.pack_size, Shipment.shipment_type,
+               FinishedGoodsUnit.is_near_expiry, FinishedGoodsUnit.is_consigned)
+        .select_from(FinishedGoodsUnit)
+        .outerjoin(FinishedProduct, FinishedProduct.finished_product_id == FinishedGoodsUnit.finished_product_id)
+        .outerjoin(Shipment, Shipment.shipment_id == FinishedGoodsUnit.shipment_id)
+        .where(FinishedGoodsUnit.status == "shipped", FinishedGoodsUnit.shipped_at.isnot(None),
+               FinishedGoodsUnit.shipped_at >= date_from, FinishedGoodsUnit.shipped_at < date_to)
+    ).all()
+
+    buckets: dict[str, dict] = {}
+    for qty, shipped_at, unit_type, pack_size, shipment_type, is_near_expiry, is_consigned in rows:
+        divisor = (pack_size or 1) if unit_type in divide_codes else 1
+        count = (qty or 0) / divisor
+        day_key, _ca = _bucket_shift(shipped_at)
+        key = day_key[:7] if group_by == "month" else day_key
+        b = buckets.setdefault(key, {"period": key, "promo": 0.0, "return": 0.0,
+                                     "near_expiry": 0.0, "consigned": 0.0})
+        if shipment_type == "promo":
+            b["promo"] += count
+        elif shipment_type == "return":
+            b["return"] += count
+        if is_near_expiry:
+            b["near_expiry"] += count
+        if is_consigned:
+            b["consigned"] += count
+    rows_out = sorted(buckets.values(), key=lambda r: r["period"])
+    for r in rows_out:
+        for k in ("promo", "return", "near_expiry", "consigned"):
+            r[k] = round(r[k], 2)
+    return {"group_by": group_by, "rows": rows_out}
+
+
+def shipment_net_liters_report(db: Session, date_from: datetime, date_to: datetime) -> dict:
+    """Báo cáo tổng lít xuất theo (ngày, loại bia) trong 1 khoảng thời gian tùy chọn [date_from,
+    date_to) — khác finished_goods_shift_report (chia theo CA, đã loại bia gửi khỏi tổng ngay
+    từ đầu) ở chỗ báo cáo này giữ TỔNG LÍT GỘP (gồm cả bia gửi) rồi hiện riêng 2 cột cận
+    date/gửi để người xem thấy rõ cấu thành, và tự trừ ở cột cuối: Thực xuất = Tổng lít - Gửi
+    (KHÔNG trừ cận date, vì cận date không phải xuất trùng của cùng 1 chuyến — xem docstring
+    ConsignedEntry/finished_goods_shift_report). Quy đổi lít theo tên SKU giống
+    finished_goods_shift_report (_resolve_liters_per_unit); SKU không suy được dung tích bị
+    loại khỏi tổng, liệt kê ở unmatched_products."""
+    rows = db.execute(
+        select(FinishedGoodsUnit.quantity, FinishedGoodsUnit.shipped_at, FinishedProduct.name,
+               FinishedProduct.category, FinishedGoodsUnit.is_near_expiry, FinishedGoodsUnit.is_consigned)
+        .select_from(FinishedGoodsUnit)
+        .outerjoin(FinishedProduct, FinishedProduct.finished_product_id == FinishedGoodsUnit.finished_product_id)
+        .where(FinishedGoodsUnit.status == "shipped", FinishedGoodsUnit.shipped_at.isnot(None),
+               FinishedGoodsUnit.shipped_at >= date_from, FinishedGoodsUnit.shipped_at < date_to)
+    ).all()
+
+    # Cộng dồn bằng float thô (chưa làm tròn) ở cả 3 tầng (theo ngày+loại bia / theo ngày /
+    # tổng toàn kỳ) TỪ CÙNG NGUỒN — không cộng lại các số đã làm tròn ở tầng dưới, tránh lệch
+    # do làm tròn nhiều lần (mỗi tầng làm tròn 1 lần duy nhất ở bước cuối, xem _finish).
+    buckets: dict[tuple, dict] = {}
+    day_totals: dict[str, dict] = {}
+    grand = {"total_liters": 0.0, "near_expiry_liters": 0.0, "consigned_liters": 0.0}
+    unmatched: dict[str, dict] = {}
+
+    for qty, shipped_at, sku_name, category, is_near_expiry, is_consigned in rows:
+        lpu = _resolve_liters_per_unit(sku_name)
+        if lpu is None:
+            label = sku_name or "(không tên)"
+            u = unmatched.setdefault(label, {"product_name": label, "units": 0.0})
+            u["units"] += qty or 0
+            continue
+        liters = (qty or 0) * lpu
+        day_key, _ca = _bucket_shift(shipped_at)
+        cat = category or "Khác"
+
+        b = buckets.setdefault((day_key, cat), {"date": day_key, "category": cat,
+                                                "total_liters": 0.0, "near_expiry_liters": 0.0,
+                                                "consigned_liters": 0.0})
+        d = day_totals.setdefault(day_key, {"date": day_key, "total_liters": 0.0,
+                                            "near_expiry_liters": 0.0, "consigned_liters": 0.0})
+        b["total_liters"] += liters
+        d["total_liters"] += liters
+        grand["total_liters"] += liters
+        if is_near_expiry:
+            b["near_expiry_liters"] += liters
+            d["near_expiry_liters"] += liters
+            grand["near_expiry_liters"] += liters
+        if is_consigned:
+            b["consigned_liters"] += liters
+            d["consigned_liters"] += liters
+            grand["consigned_liters"] += liters
+
+    def _finish(r: dict) -> dict:
+        r["total_liters"] = round(r["total_liters"])
+        r["near_expiry_liters"] = round(r["near_expiry_liters"])
+        r["consigned_liters"] = round(r["consigned_liters"])
+        r["net_liters"] = r["total_liters"] - r["consigned_liters"]
+        return r
+
+    rows_out = sorted((_finish(b) for b in buckets.values()), key=lambda r: (r["date"], r["category"]))
+    by_day = sorted((_finish(d) for d in day_totals.values()), key=lambda r: r["date"])
+    totals = _finish(grand)
+
+    return {"rows": rows_out, "by_day": by_day, "totals": totals,
+            "unmatched_products": sorted(unmatched.values(), key=lambda u: -u["units"])}
 
 
 def list_lot_summaries_by_location(db: Session, loc_id: str) -> list:
@@ -1369,10 +1613,13 @@ def create_shipment(db: Session, ship_to_id: str, lines: list, user: User, heade
         lot_code = line.get("lot_code")
         qty = int(line.get("quantity") or 0)
         near_expiry_only = bool(line.get("near_expiry_only"))
+        consigned_only = bool(line.get("consigned_only"))
         if not product_name or not unit_type:
             raise DomainError("Mỗi dòng phải có sản phẩm và loại đơn vị.")
         if qty <= 0:
             raise DomainError(f"Số lượng cần xuất cho {product_name} phải > 0.")
+        if near_expiry_only and consigned_only:
+            raise DomainError(f"{product_name}: 1 dòng chỉ được chọn 1 trong 2 — bia cận date HOẶC bia gửi.")
         fp = db.execute(select(FinishedProduct).where(FinishedProduct.code == product_name)).scalar_one_or_none()
         divisor = _pack_divisor(fp, unit_type, divide_codes)
         # KHÔNG loại trừ hàng "chưa cất" ở đây — chặn chọn hàng chưa cất vị trí là quy tắc UX
@@ -1382,10 +1629,10 @@ def create_shipment(db: Session, ship_to_id: str, lines: list, user: User, heade
         candidates, got = _consume_lot_rows(
             db, product_name=product_name, unit_type=unit_type, status="stored",
             quantity_needed=qty * divisor, lot_code=lot_code, exclude_ids=picked_so_far,
-            near_expiry_only=near_expiry_only)
+            near_expiry_only=near_expiry_only, consigned_only=consigned_only)
         if got + 1e-9 < qty * divisor:
-            near_expiry_note = " (bia cận date)" if near_expiry_only else ""
-            raise DomainError(f"{product_name} {lot_code or ''}{near_expiry_note}: chỉ còn {got / divisor:g} "
+            special_note = " (bia cận date)" if near_expiry_only else " (bia gửi)" if consigned_only else ""
+            raise DomainError(f"{product_name} {lot_code or ''}{special_note}: chỉ còn {got / divisor:g} "
                               f"đơn vị tồn kho, không đủ {qty} yêu cầu.")
         units.extend(candidates)
         picked_so_far.update(u.unit_id for u in candidates)
@@ -1423,6 +1670,7 @@ def create_shipment(db: Session, ship_to_id: str, lines: list, user: User, heade
 
     out_lines = []
     near_expiry_groups: dict[tuple, float] = {}
+    consigned_groups: dict[tuple, float] = {}
     fp_cache: dict = {}
 
     def _divisor_of(u):
@@ -1444,6 +1692,9 @@ def create_shipment(db: Session, ship_to_id: str, lines: list, user: User, heade
             # giờ có thể đại diện nhiều đơn vị đóng gói (xem docs/WMS-LOT-LEVEL-REDESIGN.md).
             key = (u.product_name, u.lot_code, u.unit_type)
             near_expiry_groups[key] = near_expiry_groups.get(key, 0) + u.quantity / _divisor_of(u)
+        if u.is_consigned:
+            key = (u.product_name, u.lot_code, u.unit_type)
+            consigned_groups[key] = consigned_groups.get(key, 0) + u.quantity / _divisor_of(u)
 
     # Xuất kho có bao gồm bia cận date — tự động ghi thêm dòng "xuất" vào lịch sử riêng
     # (tách khỏi lịch sử xuất kho thông thường) để tra cứu vòng đời bia cận date đầy đủ.
@@ -1451,6 +1702,11 @@ def create_shipment(db: Session, ship_to_id: str, lines: list, user: User, heade
         db.add(NearExpiryEntry(entry_id=new_id(), direction="out", product_name=product_name, lot_code=lot_code,
                                unit_type=unit_type, quantity=count, shipment_id=shipment.shipment_id,
                                created_by=user.username, created_at=utcnow()))
+    # Tương tự cho bia gửi — mirror y hệt near_expiry_groups ở trên.
+    for (product_name, lot_code, unit_type), count in consigned_groups.items():
+        db.add(ConsignedEntry(entry_id=new_id(), direction="out", product_name=product_name, lot_code=lot_code,
+                              unit_type=unit_type, quantity=count, shipment_id=shipment.shipment_id,
+                              created_by=user.username, created_at=utcnow()))
 
     record_audit(db, entity_type="shipment", entity_id=shipment.shipment_id, action="create", actor=user,
                  after={"shipment_code": shipment.shipment_code, "ship_to": ship_to.code,
@@ -1483,11 +1739,13 @@ def list_shipments(db: Session) -> list:
             key = (u.product_name, u.lot_code, u.unit_type)
             g = grouped.setdefault(key, {"product": u.product_name, "lot_code": u.lot_code,
                                          "unit_type": u.unit_type, "count": 0.0, "quantity": 0.0,
-                                         "near_expiry": False})
+                                         "near_expiry": False, "consigned": False})
             g["count"] += u.quantity / _divisor_of(u)
             g["quantity"] += u.quantity
             if u.is_near_expiry:
                 g["near_expiry"] = True
+            if u.is_consigned:
+                g["consigned"] = True
         ship_to = ship_to_by.get(s.ship_to_id)
         unit_count = sum(g["count"] for g in grouped.values())
         out.append({"shipment_id": s.shipment_id, "shipment_code": s.shipment_code,

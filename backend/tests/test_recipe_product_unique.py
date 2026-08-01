@@ -61,27 +61,18 @@ def test_second_recipe_for_same_product_rejected(client, admin_h):
 
 
 def test_brew_order_auto_loads_bom_for_products_own_recipe(client, admin_h):
-    """Kiểm tra brew_order.build_lines_from_bom lấy đúng recipe hiệu lực của dịch bia,
-    không lẫn với recipe của dịch bia khác (mô phỏng đúng bug đã gặp)."""
+    """Kiểm tra brew_order.build_lines_from_bom lấy đúng công thức (Formula) đang hiệu lực
+    của dịch bia, không lẫn với công thức của dịch bia khác (mô phỏng đúng bug đã gặp ở
+    RecipeVersion.state='effective' không loại trừ nhau — xem services/formula.py)."""
     product_id = _a_product(client, admin_h, "BOMCHK")
 
-    r = client.post("/api/recipes", headers=admin_h,
-                    json={"code": "REC-BOMCHK", "name": "BOM check", "product_id": product_id})
-    assert r.status_code == 201, r.text
-    recipe_id = r.json()["recipe_id"]
-    v = client.post(f"/api/recipes/{recipe_id}/versions", headers=admin_h,
-                    json={"base_qty": 1000, "base_uom": "L",
-                          "materials": [{"material_code": "MALT-PILS", "qty": 20, "uom": "kg", "tol_pct": 0}]})
-    assert v.status_code == 201, v.text
-    version_id = v.json()["version_id"]
-    assert client.post(f"/api/recipes/versions/{version_id}/transition", headers=admin_h,
-                       json={"target": "review"}).status_code == 200
-    approved = client.post(f"/api/recipes/versions/{version_id}/transition", headers=admin_h,
-                           json={"target": "approved"})
-    assert approved.status_code == 200, approved.text
-    effective = client.post(f"/api/recipes/versions/{version_id}/transition", headers=admin_h,
-                            json={"target": "effective"})
-    assert effective.status_code == 200, effective.text
+    f = client.post("/api/formulas", headers=admin_h,
+                    json={"code": "CT-BOMCHK", "product_id": product_id, "base_qty": 1000, "base_uom": "L",
+                          "materials": [{"material_code": "MALT-PILS", "qty": 20, "uom": "kg"}]})
+    assert f.status_code == 201, f.text
+    formula_id = f.json()["formula_id"]
+    act = client.post(f"/api/formulas/{formula_id}/activate", headers=admin_h)
+    assert act.status_code == 200, act.text
 
     order = client.post("/api/brewing/orders", headers=admin_h,
                         json={"order_code": "LN-BOMCHK", "product_id": product_id,
@@ -89,8 +80,35 @@ def test_brew_order_auto_loads_bom_for_products_own_recipe(client, admin_h):
                               "auto_from_bom": True})
     assert order.status_code == 201, order.text
     detail = client.get(f"/api/brewing/orders/{order.json()['brew_order_id']}", headers=admin_h).json()
-    assert detail["lines"], "Lệnh nấu phải tự nạp được định mức NVL từ Công thức hiệu lực của dịch bia"
+    assert detail["lines"], "Lệnh nấu phải tự nạp được định mức NVL từ Công thức đang hiệu lực của dịch bia"
     line = detail["lines"][0]
     assert line["material_id"]
     assert "MALT" in line["material_name"].upper()
     assert line["qty_total"] == pytest.approx(40)
+
+
+def test_bom_qty_not_scaled_by_planned_volume_hl(client, admin_h):
+    """Công thức khai báo định mức CHO ĐÚNG 1 MẺ — Nhu cầu 1 mẻ phải bằng nguyên văn số
+    lượng khai báo trong công thức (KHÔNG scale theo planned_volume_hl/base_qty), Nhu cầu
+    Tổng mẻ = Nhu cầu 1 mẻ x Số mẻ kế hoạch. Trước đây bị scale sai theo tỉ lệ thể tích,
+    ra số lượng/mẻ ảo (vd 0.444 kg) không khớp công thức thật."""
+    product_id = _a_product(client, admin_h, "NOSCALE")
+
+    f = client.post("/api/formulas", headers=admin_h,
+                    json={"code": "CT-NOSCALE", "product_id": product_id, "base_qty": 1000, "base_uom": "L",
+                          "materials": [{"material_code": "MALT-PILS", "qty": 15, "uom": "kg"}]})
+    assert f.status_code == 201, f.text
+    act = client.post(f"/api/formulas/{f.json()['formula_id']}/activate", headers=admin_h)
+    assert act.status_code == 200, act.text
+
+    for planned_volume_hl in (5, 111, 1000):
+        order = client.post("/api/brewing/orders", headers=admin_h,
+                            json={"order_code": f"LN-NOSCALE-{planned_volume_hl}", "product_id": product_id,
+                                  "planned_batch_count": 3, "planned_volume_hl": planned_volume_hl,
+                                  "auto_from_bom": True})
+        assert order.status_code == 201, order.text
+        detail = client.get(f"/api/brewing/orders/{order.json()['brew_order_id']}", headers=admin_h).json()
+        line = detail["lines"][0]
+        assert line["qty_per_batch"] == pytest.approx(15), (
+            f"Nhu cầu 1 mẻ phải luôn = 15 (nguyên văn BOM), không phụ thuộc planned_volume_hl={planned_volume_hl}")
+        assert line["qty_total"] == pytest.approx(45), "Nhu cầu Tổng mẻ = 15 x 3 mẻ = 45"

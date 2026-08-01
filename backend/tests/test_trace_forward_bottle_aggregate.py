@@ -11,6 +11,7 @@ Dưới ngưỡng vẫn đệ quy đầy đủ (giữ nguyên mã từng vỉ/ke
 import os
 import tempfile
 import time
+from datetime import datetime
 
 _TMP = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
 os.environ["MES_DATABASE_URL"] = f"sqlite:///{_TMP.name}"
@@ -61,6 +62,7 @@ def _build_huge_bottle(db, *, unit_count=300, shipped_count=5):
     không phải dựng lại toàn bộ chuỗi Nấu->Lên men->Lọc->Chiết chỉ để test 1 hàm gộp nhóm."""
     bottle_id = new_id()
     db.add(BottleRecord(bottle_id=bottle_id, bottle_code=f"CH-HUGE-{bottle_id[:8]}",
+                        bottle_year=datetime.utcnow().year,
                         beer_type="Bia test", approved=True))
 
     ship_to = ShipToLocation(ship_to_id=new_id(), code=f"NPP-HUGE-{bottle_id[:8]}", name="NPP Test Huge")

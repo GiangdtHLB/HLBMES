@@ -141,6 +141,42 @@ def test_finished_goods_shift_report_converts_and_buckets(client, admin_h):
     assert unmatched["units"] == 7
 
 
+def test_finished_goods_shift_report_excludes_consigned_units(client, admin_h):
+    """is_consigned=True (bia gửi xuất lại lần 2) phải bị LOẠI hoàn toàn khỏi báo cáo — lượng
+    này đã được tính vào phiếu xuất gốc buổi sáng, tính tiếp sẽ đếm trùng. is_near_expiry
+    (bia cận date) thì KHÔNG loại — xem docstring finished_goods_shift_report/ConsignedEntry."""
+    db = SessionLocal()
+    try:
+        suffix = new_id()[:8]
+        fp = FinishedProduct(finished_product_id=new_id(), code=f"FGSHIP-GUI-{suffix}",
+                             name="Bia lon Sapphire 330ml", uom="lon", unit_type="vi",
+                             pack_size=24, category="Bia lon")
+        db.add(fp)
+        db.flush()
+
+        day = "2026-06-16"
+        ca1_time = datetime.fromisoformat(day + "T01:00:00")  # 08h00 VN -> Ca 1
+
+        normal = _mk_unit(db, fp=fp, qty=50, shipped_at=ca1_time)
+        consigned = _mk_unit(db, fp=fp, qty=30, shipped_at=ca1_time)
+        consigned.is_consigned = True
+        near_expiry = _mk_unit(db, fp=fp, qty=20, shipped_at=ca1_time)
+        near_expiry.is_near_expiry = True
+        db.commit()
+    finally:
+        db.close()
+
+    date_from = day + "T00:00:00"
+    date_to = day + "T23:59:59.999999"
+    r = client.get(
+        f"/api/reports/finished-goods-shift-report?date_from={date_from}&date_to={date_to}",
+        headers=admin_h)
+    assert r.status_code == 200, r.text
+    rpt = r.json()
+    # (50 thường + 20 cận date) x 0.33L = 23.1L, làm tròn 23 — 30 bia gửi KHÔNG được cộng vào.
+    assert rpt["total_liters"] == 23
+
+
 def test_finished_goods_shift_report_direct_service_call_empty_range():
     db = SessionLocal()
     try:

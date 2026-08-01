@@ -38,6 +38,25 @@ def new_id() -> str:
     return str(uuid.uuid4())
 
 
+def resolve_years(years):
+    """Chuẩn hoá tham số lọc năm cho các list-endpoint mã/số hiệu theo năm (mã nấu, lệnh
+    nấu, lô lên men, lệnh lọc, mã lọc, mã chiết) — cho phép chọn 1 năm hoặc 2 năm LIÊN TIẾP.
+    Trả về None (KHÔNG lọc) khi không truyền gì — dùng cho các nơi cần dữ liệu MỌI năm (VD
+    services/dashboard.py::production_summary đếm tổng toàn hệ thống). Router của 6 màn hình
+    "Thông tin nấu/lên men/lọc/chiết, Lệnh nấu, Lệnh lọc" tự áp mặc định năm hiện tại khi
+    người dùng chưa chọn năm nào (xem routers/brewing.py) — KHÔNG áp mặc định ở đây để không
+    làm sai lệch các nơi gọi nội bộ cần toàn bộ lịch sử. Raise ValueError (router bọc lại
+    thành DomainError) nếu truyền 2 năm không liên tiếp hoặc quá 2 năm."""
+    if not years:
+        return None
+    years = sorted(set(int(y) for y in years))
+    if len(years) > 2:
+        raise ValueError("Chỉ được chọn tối đa 2 năm liên tiếp.")
+    if len(years) == 2 and years[1] - years[0] != 1:
+        raise ValueError("2 năm được chọn phải liên tiếp nhau.")
+    return years
+
+
 class BatchState(str, Enum):
     """State machine thực thi mẻ (tài liệu §7.1)."""
 

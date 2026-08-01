@@ -4,8 +4,8 @@ from fastapi import APIRouter, Depends, File, UploadFile
 from sqlalchemy.orm import Session
 
 from ..database import get_db
-from ..schemas import (DecomposeBatchIn, DeleteByLotIn, FreeIssueBatchIn, LoadSlipHeaderUpdate, NearExpiryEntryIn,
-                       NearExpiryLookupIn, PutawayIn, RelocateBatchIn, ShipmentIn, ShipToIn, ShipToUpdate,
+from ..schemas import (ConsignedEntryIn, DecomposeBatchIn, DeleteByLotIn, FreeIssueBatchIn, LoadSlipHeaderUpdate,
+                       NearExpiryEntryIn, PutawayIn, RelocateBatchIn, ShipmentIn, ShipToIn, ShipToUpdate,
                        UnitBuildIn, UnitDeleteIn, UnitTransferIn, VehicleIn, VehicleUpdate, WmsLocationIn,
                        WmsLocationUpdate)
 from ..security import User, get_current_user, require_perm
@@ -227,17 +227,11 @@ def undo_shipment(shipment_id: str, db: Session = Depends(get_db), user: User = 
 
 
 # ---- Nhập bia cận date ----
-@router.post("/near-expiry/lookup")
-def lookup_near_expiry_bottle(payload: NearExpiryLookupIn, db: Session = Depends(get_db),
-                              user: User = Depends(get_current_user)):
-    return svc.find_bottle_for_datetime(db, payload.declared_at)
-
-
 @router.post("/near-expiry", status_code=201)
 def create_near_expiry(payload: NearExpiryEntryIn, db: Session = Depends(get_db),
                        user: User = Depends(get_current_user)):
-    return svc.create_near_expiry_entry(db, payload.bottle_id, payload.quantity, payload.declared_at,
-                                        user, payload.note)
+    return svc.create_near_expiry_entry(db, payload.finished_product_id, payload.quantity,
+                                        payload.location_id, user, payload.note)
 
 
 @router.get("/near-expiry")
@@ -248,6 +242,24 @@ def list_near_expiry(db: Session = Depends(get_db), user: User = Depends(get_cur
 @router.post("/near-expiry/{entry_id}/undo")
 def undo_near_expiry(entry_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     return svc.undo_near_expiry_entry(db, entry_id, user)
+
+
+# ---- Nhập bia gửi ----
+@router.post("/consigned", status_code=201)
+def create_consigned(payload: ConsignedEntryIn, db: Session = Depends(get_db),
+                     user: User = Depends(get_current_user)):
+    return svc.create_consigned_entry(db, payload.finished_product_id, payload.quantity,
+                                      payload.location_id, user, payload.note)
+
+
+@router.get("/consigned")
+def list_consigned(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    return svc.list_consigned_entries(db)
+
+
+@router.post("/consigned/{entry_id}/undo")
+def undo_consigned(entry_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    return svc.undo_consigned_entry(db, entry_id, user)
 
 
 @router.post("/load-slips/import", status_code=201)

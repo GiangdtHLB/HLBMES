@@ -53,6 +53,11 @@ class FinishedGoodsUnit(Base):
     # Đánh dấu vỉ/keg này đến từ "Nhập bia cận date" (xem NearExpiryEntry) — cho phép Xuất
     # kho lọc riêng để xuất đúng lô cận date khi cần, tách biệt khỏi FIFO mặc định.
     is_near_expiry: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    # Đánh dấu vỉ/keg này đến từ "Nhập bia gửi" (xem ConsignedEntry) — bia đã xuất phiếu
+    # trong ngày nhưng xe giao không hết, mang về gửi lại kho (KHÔNG phải cận date, KHÔNG
+    # phải đổi trả nhà phân phối) — tách riêng khỏi FIFO mặc định như is_near_expiry, và
+    # được ưu tiên xuất TRƯỚC cả bia cận date (xem VIEWS.wms sort trong xuatkho).
+    is_consigned: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
 
 
 class ShipToLocation(Base):
@@ -112,20 +117,26 @@ class Shipment(Base):
 class NearExpiryEntry(Base):
     """Lịch sử riêng cho "Nhập bia cận date" — bia đã xuất/tồn lâu, cận hạn, được nhập lại
     (tăng tồn kho công ty) và tách theo dõi riêng khỏi lịch sử nhập/xuất thông thường.
-    direction="in": lúc khai báo nhập lại (tự nhận lô chiết theo ngày giờ khai báo, xem
-    services/wms.py::find_bottle_for_datetime). direction="out": tự động ghi thêm 1 dòng khi
-    1 phiếu xuất kho (Shipment) có chọn "chỉ xuất bia cận date" — cùng is_near_expiry=True
-    trên các FinishedGoodsUnit liên quan."""
+    direction="in": khai báo Sản phẩm + SL + Vị trí nhận trực tiếp (KHÔNG còn tự nhận lô chiết
+    theo ngày giờ — thực tế tồn cận date thường gộp từ nhiều lô khác nhau nên không thể quy về
+    đúng 1 lô chiết gốc); mỗi lần khai báo tự sinh 1 lot_code CẬN DATE RIÊNG (xem
+    services/wms.py::_gen_candate_lot_code) để không bị gộp chung dòng với tồn thường của SKU
+    đó ở Xuất kho (list_lot_summaries nhóm theo (product_name, lot_code)). direction="out": tự
+    động ghi thêm 1 dòng khi 1 phiếu xuất kho (Shipment) có chọn "chỉ xuất bia cận date" — cùng
+    is_near_expiry=True trên các FinishedGoodsUnit liên quan. bottle_id giữ lại CHỈ để tương
+    thích các bản khai cũ (tạo trước khi đổi cách khai báo này) — bản khai mới luôn NULL."""
     __tablename__ = "near_expiry_entry"
 
     entry_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
     direction: Mapped[str] = mapped_column(Unicode(16), index=True)  # in | out
+    finished_product_id: Mapped[Optional[str]] = mapped_column(ForeignKey("finished_product.finished_product_id"), nullable=True, index=True)
     product_name: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
     lot_code: Mapped[Optional[str]] = mapped_column(Unicode(64), nullable=True)
     unit_type: Mapped[str] = mapped_column(Unicode(16))  # vi | keg
     quantity: Mapped[int] = mapped_column(Integer)  # số vỉ/keg
+    location_id: Mapped[Optional[str]] = mapped_column(ForeignKey("wms_location.loc_id"), nullable=True, index=True)  # vị trí nhận (chỉ có ở direction="in")
     declared_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)  # ngày giờ khai báo (chỉ có ở direction="in")
-    bottle_id: Mapped[Optional[str]] = mapped_column(ForeignKey("bottle_record.bottle_id"), nullable=True, index=True)  # lô chiết tự nhận
+    bottle_id: Mapped[Optional[str]] = mapped_column(ForeignKey("bottle_record.bottle_id"), nullable=True, index=True)  # lô chiết tự nhận — chỉ bản khai cũ
     shipment_id: Mapped[Optional[str]] = mapped_column(ForeignKey("shipment.shipment_id"), nullable=True, index=True)  # phiếu xuất (chỉ có ở direction="out")
     note: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)
     created_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
@@ -133,6 +144,39 @@ class NearExpiryEntry(Base):
     # unit_code các vỉ/keg do chính lần khai báo direction="in" này tạo ra (nối bằng dấu phẩy)
     # — cho phép Hoàn tác xoá đúng các đơn vị đó, không đụng tới đơn vị của lần khai báo khác
     # dùng chung bottle_id/lot_code. Chỉ có ở direction="in".
+    unit_codes: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)
+    reversed: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class ConsignedEntry(Base):
+    """Lịch sử riêng cho "Nhập bia gửi" — mirror y hệt NearExpiryEntry nhưng cho trường hợp
+    KHÁC: xe đã xuất phiếu đi giao trong ngày nhưng giao không hết, mang phần dư về GỬI lại
+    kho (không phải bia cận date, không phải đổi trả nhà phân phối). direction="in": khai
+    báo Sản phẩm + SL + Vị trí nhận trực tiếp, tự sinh 1 lot_code GỬI RIÊNG (xem
+    services/wms.py::_gen_consigned_lot_code) để không gộp chung dòng với tồn thường của SKU
+    đó ở Xuất kho. direction="out": tự động ghi thêm 1 dòng khi 1 phiếu xuất kho (Shipment)
+    có chọn "chỉ xuất bia gửi" — cùng is_consigned=True trên các FinishedGoodsUnit liên quan.
+    Khác NearExpiryEntry ở chỗ: khi tính báo cáo xuất theo ca/ngày (finished_goods_shift_report),
+    lượng xuất từ lô GỬI phải bị TRỪ ra khỏi tổng xuất trong kỳ — vì lô này thực chất là phần
+    bia đã được tính vào lượt xuất buổi sáng (phiếu gốc), xuất lại lần 2 sẽ bị đếm trùng nếu
+    không trừ. Bia cận date thì KHÔNG trừ vì không phải xuất trùng của cùng 1 chuyến."""
+    __tablename__ = "consigned_entry"
+
+    entry_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
+    direction: Mapped[str] = mapped_column(Unicode(16), index=True)  # in | out
+    finished_product_id: Mapped[Optional[str]] = mapped_column(ForeignKey("finished_product.finished_product_id"), nullable=True, index=True)
+    product_name: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    lot_code: Mapped[Optional[str]] = mapped_column(Unicode(64), nullable=True)
+    unit_type: Mapped[str] = mapped_column(Unicode(16))  # vi | keg
+    quantity: Mapped[int] = mapped_column(Integer)  # số vỉ/keg
+    location_id: Mapped[Optional[str]] = mapped_column(ForeignKey("wms_location.loc_id"), nullable=True, index=True)  # vị trí nhận — chỉ có ở direction="in"
+    declared_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)  # ngày giờ khai báo — chỉ có ở direction="in"
+    shipment_id: Mapped[Optional[str]] = mapped_column(ForeignKey("shipment.shipment_id"), nullable=True, index=True)  # phiếu xuất — chỉ có ở direction="out"
+    note: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)
+    created_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    # unit_code các vỉ/keg do chính lần khai báo direction="in" này tạo ra (nối bằng dấu phẩy)
+    # — cho phép Hoàn tác xoá đúng các đơn vị đó. Chỉ có ở direction="in".
     unit_codes: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)
     reversed: Mapped[bool] = mapped_column(Boolean, default=False)
 

@@ -2,16 +2,19 @@
 chỉ giữ phần LỆNH (định mức NVL dự kiến), không lặp lại phần phiếu xuất kho thật (đã có
 qua BrewMaterialUsage/warehouse_svc.issue() ở từng mẻ, xem routers/brewing.py::add_brew_material).
 
-Định mức NVL có thể tự nạp từ Công thức (BOM) hiệu lực của dịch bia — tái dùng
-services/bom.py::factor_for(), không viết lại logic scale. Snapshot tồn kho công ty/phân
+Định mức NVL tự nạp từ Công thức (BOM) hiệu lực của dịch bia. Công thức khai báo định mức
+CHO ĐÚNG 1 MẺ (không phải theo 1 quy mô thể tích trừu tượng rồi scale ngược) — Nhu cầu 1 mẻ
+= NGUYÊN VĂN số lượng khai báo trong công thức, Nhu cầu Tổng mẻ = Nhu cầu 1 mẻ x Số mẻ kế
+hoạch (xem build_lines_from_bom; KHÔNG dùng planned_volume_hl để scale — trường đó chỉ mang
+tính kế hoạch/báo cáo sản lượng, độc lập với định mức NVL). Snapshot tồn kho công ty/phân
 xưởng được ghi lại NGAY LÚC LẬP PHIẾU (không phải tồn sống) — đúng tính chất văn bản đã
 ký/in ra, để về sau xem lại vẫn đúng số liệu tại thời điểm đó."""
 
-from sqlalchemy import select
+from sqlalchemy import select, true
 from sqlalchemy.orm import Session
 
 from ..audit import record_audit
-from ..common import new_id, utcnow
+from ..common import new_id, resolve_years, utcnow
 from ..errors import DomainError, NotFoundError
 from ..models.brewing import (
     BrewBatch,
@@ -23,21 +26,20 @@ from ..models.brewing import (
     FermentBrewLink,
     FermentRecord,
 )
+from ..models.formula import Formula
 from ..models.master import Material, Product
-from ..models.recipes import Recipe, RecipeVersion
-from . import bom as bom_svc
 from . import braumat_import as braumat_svc
 from . import warehouse as warehouse_svc
 
 
 def _effective_bom(db: Session, product_id: str):
+    """Công thức đang hiệu lực của dịch bia — tối đa 1 dòng vì services/formula.py::
+    activate_formula đảm bảo chỉ 1 formula/product được is_active=True tại 1 thời điểm
+    (khác bug cũ ở RecipeVersion.state='effective' không có ràng buộc loại trừ)."""
     if not product_id:
         return None
-    recipe = db.execute(select(Recipe).where(Recipe.product_id == product_id)).scalars().first()
-    if not recipe:
-        return None
-    return db.execute(select(RecipeVersion).where(
-        RecipeVersion.recipe_id == recipe.recipe_id, RecipeVersion.state == "effective")).scalars().first()
+    return db.execute(select(Formula).where(
+        Formula.product_id == product_id, Formula.is_active == true())).scalars().first()
 
 
 def _stock_snapshot(db: Session) -> tuple[dict, dict]:
@@ -48,21 +50,19 @@ def _stock_snapshot(db: Session) -> tuple[dict, dict]:
 
 
 def build_lines_from_bom(db: Session, product_id: str, planned_batch_count: int, planned_volume_hl: float) -> list:
-    """Nạp Định mức từ Công thức hiệu lực của dịch bia, scale theo thể tích/mẻ (khớp cách
-    tờ giấy tính: Nhu cầu 1 mẻ x Tổng mẻ = Nhu cầu Tổng mẻ). Công thức (BOM) tính theo lít
-    trong khi sản lượng kế hoạch lưu theo hl — quy đổi 1 hl = 100 lít ngay tại đây."""
-    rv = _effective_bom(db, product_id)
-    if not rv:
+    """Nạp Định mức từ Công thức hiệu lực của dịch bia — công thức khai báo định mức CHO
+    ĐÚNG 1 MẺ, nên Nhu cầu 1 mẻ = nguyên văn số lượng trong công thức (KHÔNG scale theo
+    planned_volume_hl — tham số này chỉ giữ lại cho tương thích chữ ký hàm/router, không
+    dùng trong phép tính), Nhu cầu Tổng mẻ = Nhu cầu 1 mẻ x Số mẻ kế hoạch."""
+    formula = _effective_bom(db, product_id)
+    if not formula:
         return []
-    planned_volume_l = (planned_volume_hl or 0) * 100
-    volume_per_batch = (planned_volume_l / planned_batch_count) if planned_batch_count else 0
-    factor = bom_svc.factor_for({"base_qty": rv.base_qty, "base_uom": rv.base_uom}, volume_per_batch)
     materials_by_code = {m.code: m for m in db.execute(select(Material)).scalars().all()}
     out = []
-    for i, m in enumerate(rv.materials or []):
+    for i, m in enumerate(formula.materials or []):
         code = m.get("material_code")
         mat = materials_by_code.get(code)
-        qty_per_batch = round((m.get("qty", 0) or 0) * factor, 3)
+        qty_per_batch = round(m.get("qty", 0) or 0, 3)
         out.append({
             "seq": i, "stt_label": str(i + 1), "is_header": False,
             "material_id": mat.material_id if mat else None,
@@ -109,7 +109,7 @@ def _validate_volume_plan(planned_volume_hl, tolerance_hl) -> None:
         raise DomainError("Sai số cho phép không được âm.")
 
 
-def _insert_sub_order(db: Session, master_order_id, seq: int, order_code: str, payload: dict, user) -> BrewOrder:
+def _insert_sub_order(db: Session, master_order_id, seq: int, order_code: str, order_year: int, payload: dict, user) -> BrewOrder:
     """Tạo 1 dòng BrewOrder ("lệnh nấu nhỏ") + định mức NVL — KHÔNG validate (caller đã
     validate), KHÔNG commit (caller tự quyết định điểm commit). Dùng chung bởi create_order
     (lệnh nấu phẳng cũ, master_order_id=None) và create_master_order/update_master_order
@@ -118,7 +118,8 @@ def _insert_sub_order(db: Session, master_order_id, seq: int, order_code: str, p
     lines_in = payload.pop("lines", None) or []
     auto_from_bom = payload.pop("auto_from_bom", True)
 
-    order = BrewOrder(brew_order_id=new_id(), order_code=order_code, master_order_id=master_order_id,
+    order = BrewOrder(brew_order_id=new_id(), order_code=order_code, order_year=order_year,
+                      master_order_id=master_order_id,
                       seq=seq, created_by=user.username, created_at=utcnow(), **payload)
     db.add(order)
     db.flush()
@@ -146,9 +147,13 @@ def _insert_sub_order(db: Session, master_order_id, seq: int, order_code: str, p
 def create_order(db: Session, payload: dict, user) -> BrewOrder:
     payload = dict(payload)
     order_code = payload.pop("order_code")
+    order_year = utcnow().year
+    if db.execute(select(BrewOrder).where(BrewOrder.order_code == order_code,
+                  BrewOrder.order_year == order_year)).first():
+        raise DomainError(f"Số lệnh '{order_code}' đã tồn tại trong năm {order_year}.")
     _validate_volume_plan(payload.get("planned_volume_hl"), payload.get("volume_tolerance_hl"))
 
-    order = _insert_sub_order(db, None, 1, order_code, payload, user)
+    order = _insert_sub_order(db, None, 1, order_code, order_year, payload, user)
 
     record_audit(db, entity_type="brew_order", entity_id=order.brew_order_id, action="create",
                  actor=user, after={"order_code": order.order_code})
@@ -172,8 +177,9 @@ def update_order(db: Session, brew_order_id: str, payload: dict, user) -> BrewOr
     auto_from_bom = payload.pop("auto_from_bom", True)
     new_code = payload.get("order_code")
     if new_code != order.order_code and db.execute(
-            select(BrewOrder).where(BrewOrder.order_code == new_code)).first():
-        raise DomainError(f"Số lệnh '{new_code}' đã tồn tại.")
+            select(BrewOrder).where(BrewOrder.order_code == new_code,
+                    BrewOrder.order_year == order.order_year)).first():
+        raise DomainError(f"Số lệnh '{new_code}' đã tồn tại trong năm {order.order_year}.")
     _validate_volume_plan(payload.get("planned_volume_hl"), payload.get("volume_tolerance_hl"))
 
     for l in db.execute(select(BrewOrderMaterialLine).where(
@@ -405,10 +411,10 @@ def _validate_children(db: Session, children_in: list) -> list:
     return validated
 
 
-def _insert_children(db: Session, master_order_id: str, validated: list, user) -> list:
+def _insert_children(db: Session, master_order_id: str, order_year: int, validated: list, user) -> list:
     orders = []
     for seq, child in enumerate(validated, start=1):
-        order = _insert_sub_order(db, master_order_id, seq, f"SUB-{new_id()[:12]}", child, user)
+        order = _insert_sub_order(db, master_order_id, seq, f"SUB-{new_id()[:12]}", order_year, child, user)
         orders.append(order)
     return orders
 
@@ -425,11 +431,13 @@ def _delete_children(db: Session, children: list) -> None:
 
 def create_master_order(db: Session, payload: dict, user) -> BrewMasterOrder:
     order_code = payload["order_code"]
-    if db.execute(select(BrewMasterOrder).where(BrewMasterOrder.order_code == order_code)).first():
-        raise DomainError(f"Số lệnh '{order_code}' đã tồn tại.")
+    order_year = utcnow().year
+    if db.execute(select(BrewMasterOrder).where(BrewMasterOrder.order_code == order_code,
+                  BrewMasterOrder.order_year == order_year)).first():
+        raise DomainError(f"Số lệnh '{order_code}' đã tồn tại trong năm {order_year}.")
     validated = _validate_children(db, payload.get("children") or [])
 
-    master = BrewMasterOrder(brew_master_order_id=new_id(), order_code=order_code,
+    master = BrewMasterOrder(brew_master_order_id=new_id(), order_code=order_code, order_year=order_year,
                              issued_by=payload.get("issued_by"), executor_unit=payload.get("executor_unit"),
                              warehouse_keeper=payload.get("warehouse_keeper"),
                              reference_note=payload.get("reference_note"),
@@ -438,7 +446,7 @@ def create_master_order(db: Session, payload: dict, user) -> BrewMasterOrder:
                              created_by=user.username, created_at=utcnow())
     db.add(master)
     db.flush()
-    orders = _insert_children(db, master.brew_master_order_id, validated, user)
+    orders = _insert_children(db, master.brew_master_order_id, master.order_year, validated, user)
 
     record_audit(db, entity_type="brew_master_order", entity_id=master.brew_master_order_id, action="create",
                  actor=user, after={"order_code": master.order_code, "children": len(orders)})
@@ -447,8 +455,12 @@ def create_master_order(db: Session, payload: dict, user) -> BrewMasterOrder:
     return master
 
 
-def list_master_orders(db: Session) -> list:
-    masters = db.execute(select(BrewMasterOrder).order_by(BrewMasterOrder.created_at.desc())).scalars().all()
+def list_master_orders(db: Session, years=None) -> list:
+    years = resolve_years(years)
+    stmt = select(BrewMasterOrder)
+    if years:
+        stmt = stmt.where(BrewMasterOrder.order_year.in_(years))
+    masters = db.execute(stmt.order_by(BrewMasterOrder.created_at.desc())).scalars().all()
     products = {p.product_id: p for p in db.execute(select(Product)).scalars().all()}
     out = []
     for m in masters:
@@ -519,8 +531,9 @@ def update_master_order(db: Session, brew_master_order_id: str, payload: dict, u
 
     order_code = payload["order_code"]
     if order_code != master.order_code and db.execute(
-            select(BrewMasterOrder).where(BrewMasterOrder.order_code == order_code)).first():
-        raise DomainError(f"Số lệnh '{order_code}' đã tồn tại.")
+            select(BrewMasterOrder).where(BrewMasterOrder.order_code == order_code,
+                    BrewMasterOrder.order_year == master.order_year)).first():
+        raise DomainError(f"Số lệnh '{order_code}' đã tồn tại trong năm {master.order_year}.")
 
     validated = _validate_children(db, payload.get("children") or [])
 
@@ -535,7 +548,7 @@ def update_master_order(db: Session, brew_master_order_id: str, payload: dict, u
     master.start_date = payload.get("start_date")
     master.end_date = payload.get("end_date")
     master.safety_note = payload.get("safety_note")
-    orders = _insert_children(db, master.brew_master_order_id, validated, user)
+    orders = _insert_children(db, master.brew_master_order_id, master.order_year, validated, user)
 
     record_audit(db, entity_type="brew_master_order", entity_id=master.brew_master_order_id, action="update",
                  actor=user, after={"order_code": master.order_code, "children": len(orders)})

@@ -153,6 +153,36 @@ def finished_goods_shift_report(date_from: datetime = None, date_to: datetime = 
     return result
 
 
+# ---- Báo cáo lượng bia khuyến mại/đổi trả/cận date/gửi theo ngày hoặc tháng ----
+@router.get("/shipment-classification-report")
+def shipment_classification_report(date_from: datetime = None, date_to: datetime = None,
+                                    group_by: str = "day", db: Session = Depends(get_db),
+                                    user: User = Depends(get_current_user)):
+    from ..services import wms as wms_svc
+    if not date_from or not date_to:
+        ref_day = (utcnow() - timedelta(days=30)).replace(hour=6, minute=0, second=0, microsecond=0)
+        date_from = date_from or ref_day
+        date_to = date_to or utcnow()
+    result = wms_svc.shipment_classification_report(db, date_from, date_to, group_by)
+    result.update({"date_from": date_from.isoformat(), "date_to": date_to.isoformat()})
+    return result
+
+
+# ---- Báo cáo tổng lít xuất theo (ngày, loại bia) trong 1 kỳ tùy chọn — trong đó gồm bao
+# nhiêu cận date/gửi, cột cuối tự trừ bia gửi ra khỏi tổng (Thực xuất = Tổng lít - Gửi) ----
+@router.get("/shipment-net-liters-report")
+def shipment_net_liters_report(date_from: datetime = None, date_to: datetime = None,
+                               db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    from ..services import wms as wms_svc
+    if not date_from or not date_to:
+        ref_day = (utcnow() - timedelta(days=30)).replace(hour=6, minute=0, second=0, microsecond=0)
+        date_from = date_from or ref_day
+        date_to = date_to or utcnow()
+    result = wms_svc.shipment_net_liters_report(db, date_from, date_to)
+    result.update({"date_from": date_from.isoformat(), "date_to": date_to.isoformat()})
+    return result
+
+
 @router.get("/low-yield-filter-alerts")
 def low_yield_filter_alerts(days: int = 5, limit: int = 5, db: Session = Depends(get_db),
                             user: User = Depends(get_current_user)):

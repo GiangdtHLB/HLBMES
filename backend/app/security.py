@@ -72,6 +72,21 @@ def require_perm(user: User, perm: str) -> None:
         )
 
 
+def require_any_perm(user: User, perms: list[str]) -> None:
+    """Cho qua nếu user có ÍT NHẤT 1 trong các quyền liệt kê — dùng khi 1 endpoint đọc dữ
+    liệu (không sửa) hữu ích cho nhiều chức danh khác nhau, mỗi chức danh chỉ cần 1 quyền
+    liên quan là đủ (VD: xem gợi ý định mức NVL hữu ích cho cả người lập lệnh lẫn người
+    thao tác mẻ — 2 quyền khác nhau, order.create và batch.execute)."""
+    if user.role == Role.ADMIN.value or user.permissions == "*":
+        return
+    if user.permissions and any(p in user.permissions for p in perms):
+        return
+    labels = ", ".join(PERMISSION_CATALOG.get(p, p) for p in perms)
+    raise PermissionError_(
+        f"Chức danh của '{user.username}' không có quyền: {labels}."
+    )
+
+
 # ---- Mật khẩu (pbkdf2 — stdlib, không cần thư viện ngoài) ----
 def hash_password(pw: str, salt: Optional[str] = None) -> str:
     salt = salt or secrets.token_hex(16)

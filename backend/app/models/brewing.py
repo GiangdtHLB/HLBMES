@@ -42,9 +42,13 @@ class BrewMasterOrder(Base):
     NVL/sản lượng kế hoạch riêng. In ra 1 tờ gồm tất cả lệnh nhỏ bên trong (xem frontend
     printBrewOrder), mẫu y hệt FilterMasterOrder/Lệnh lọc."""
     __tablename__ = "brew_master_order"
+    # order_code chỉ duy nhất TRONG 1 năm (order_year = năm created_at, snapshot lúc tạo) —
+    # sang năm khác được đánh lại từ đầu, đúng quy ước đánh số trên giấy tờ thật.
+    __table_args__ = (UniqueConstraint("order_year", "order_code", name="uq_brew_master_order_year_code"),)
 
     brew_master_order_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
-    order_code: Mapped[str] = mapped_column(Unicode(64), unique=True, index=True)   # Số: 36/PXSXBĐM-T6/2026
+    order_code: Mapped[str] = mapped_column(Unicode(64), index=True)   # Số: 36/PXSXBĐM-T6/2026
+    order_year: Mapped[int] = mapped_column(Integer, index=True)
     issued_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)          # I. Người ra lệnh
     executor_unit: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)      # II.1 Người thực hiện
     warehouse_keeper: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)   # II.2 Người xuất hàng
@@ -72,9 +76,13 @@ class BrewOrder(Base):
     nằm ở đó, không lặp lại ở đây. order_code tự sinh (SUB-...) khi tạo qua lệnh lớn; vẫn dùng
     được độc lập (master_order_id=None) qua API cũ /brewing/orders."""
     __tablename__ = "brew_order"
+    # order_code chỉ duy nhất TRONG 1 năm — xem BrewMasterOrder.order_year (lệnh nhỏ trong 1
+    # lệnh lớn luôn kế thừa order_year của lệnh lớn; lệnh nhỏ độc lập tự tính = năm created_at).
+    __table_args__ = (UniqueConstraint("order_year", "order_code", name="uq_brew_order_year_code"),)
 
     brew_order_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
-    order_code: Mapped[str] = mapped_column(Unicode(64), unique=True, index=True)   # Số: 36/PXSXBĐM-T6/2026 hoặc SUB-...
+    order_code: Mapped[str] = mapped_column(Unicode(64), index=True)   # Số: 36/PXSXBĐM-T6/2026 hoặc SUB-...
+    order_year: Mapped[int] = mapped_column(Integer, index=True)
     master_order_id: Mapped[Optional[str]] = mapped_column(ForeignKey("brew_master_order.brew_master_order_id"), nullable=True, index=True)
     seq: Mapped[int] = mapped_column(Integer, default=1)   # thứ tự "Lệnh nấu nhỏ #N" trong lệnh lớn
     product_id: Mapped[Optional[str]] = mapped_column(ForeignKey("product.product_id"), nullable=True, index=True)
@@ -119,9 +127,12 @@ class BrewOrderMaterialLine(Base):
 class BrewRecord(Base):
     """Thông tin nấu (mẻ dịch nha)."""
     __tablename__ = "brew_record"
+    # brew_code chỉ duy nhất TRONG 1 năm (brew_year = năm brew_date, snapshot lúc tạo).
+    __table_args__ = (UniqueConstraint("brew_year", "brew_code", name="uq_brew_record_year_code"),)
 
     brew_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
-    brew_code: Mapped[str] = mapped_column(Unicode(64), unique=True, index=True)   # mã nấu
+    brew_code: Mapped[str] = mapped_column(Unicode(64), index=True)   # mã nấu
+    brew_year: Mapped[int] = mapped_column(Integer, index=True)
     brew_date: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, index=True)
     wort_type: Mapped[str] = mapped_column(Unicode(255))                            # dịch nha
     product_id: Mapped[Optional[str]] = mapped_column(ForeignKey("product.product_id"), nullable=True, index=True)  # loại bia (chọn chỉ tiêu theo nhóm)
@@ -242,9 +253,13 @@ class BrewMaterialUsage(Base):
 class FermentRecord(Base):
     """Thông tin quá trình lên men (lô LM trong tank)."""
     __tablename__ = "ferment_record"
+    # lm_code chỉ duy nhất TRONG 1 năm (ferment_year = năm brew_date, hoặc năm tạo nếu
+    # brew_date để trống — API /ferments độc lập không bắt buộc brew_date).
+    __table_args__ = (UniqueConstraint("ferment_year", "lm_code", name="uq_ferment_record_year_code"),)
 
     ferment_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
-    lm_code: Mapped[str] = mapped_column(Unicode(64), unique=True, index=True)     # Lô LM
+    lm_code: Mapped[str] = mapped_column(Unicode(64), index=True)     # Lô LM
+    ferment_year: Mapped[int] = mapped_column(Integer, index=True)
     brew_code: Mapped[Optional[str]] = mapped_column(Unicode(64), index=True)      # mã nấu
     brew_date: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
     kt_date: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)  # ngày KT
@@ -322,9 +337,12 @@ class FilterMasterOrder(Base):
     tư riêng + thể tích dịch kế hoạch riêng. In ra 1 tờ gồm tất cả lệnh nhỏ bên trong (xem
     frontend printFilterMasterOrder)."""
     __tablename__ = "filter_master_order"
+    # order_code chỉ duy nhất TRONG 1 năm — mirror BrewMasterOrder.order_year.
+    __table_args__ = (UniqueConstraint("order_year", "order_code", name="uq_filter_master_order_year_code"),)
 
     filter_master_order_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
-    order_code: Mapped[str] = mapped_column(Unicode(64), unique=True, index=True)
+    order_code: Mapped[str] = mapped_column(Unicode(64), index=True)
+    order_year: Mapped[int] = mapped_column(Integer, index=True)
     note: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)
     created_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
@@ -343,9 +361,12 @@ class FilterOrder(Base):
     (lệnh lọc lớn) — order_code do hệ thống tự sinh (không hiển thị cho người dùng gõ),
     seq là thứ tự "Lệnh lọc nhỏ #N" trong lệnh lớn."""
     __tablename__ = "filter_order"
+    # order_code chỉ duy nhất TRONG 1 năm — mirror BrewOrder.order_year.
+    __table_args__ = (UniqueConstraint("order_year", "order_code", name="uq_filter_order_year_code"),)
 
     filter_order_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
-    order_code: Mapped[str] = mapped_column(Unicode(64), unique=True, index=True)
+    order_code: Mapped[str] = mapped_column(Unicode(64), index=True)
+    order_year: Mapped[int] = mapped_column(Integer, index=True)
     master_order_id: Mapped[Optional[str]] = mapped_column(ForeignKey("filter_master_order.filter_master_order_id"), nullable=True, index=True)
     seq: Mapped[int] = mapped_column(Integer, default=1)
     blend_mode: Mapped[str] = mapped_column(Unicode(32), default="khong_phoi")  # khong_phoi/phoi
@@ -435,9 +456,12 @@ class FilterOrderMaterialLine(Base):
 class FilterRecord(Base):
     """Thông tin lọc (từ tank LM vào tank BBT)."""
     __tablename__ = "filter_record"
+    # filter_code chỉ duy nhất TRONG 1 năm (filter_year = năm filter_date, snapshot lúc tạo).
+    __table_args__ = (UniqueConstraint("filter_year", "filter_code", name="uq_filter_record_year_code"),)
 
     filter_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
-    filter_code: Mapped[str] = mapped_column(Unicode(64), unique=True, index=True)  # mã lọc
+    filter_code: Mapped[str] = mapped_column(Unicode(64), index=True)  # mã lọc
+    filter_year: Mapped[int] = mapped_column(Integer, index=True)
     brew_code: Mapped[Optional[str]] = mapped_column(Unicode(64), nullable=True)    # mã nấu
     lot_loc: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)      # mã lô lọc
     filter_phoi_code: Mapped[Optional[str]] = mapped_column(Unicode(64), nullable=True)
@@ -536,9 +560,12 @@ class BottleMaterialUsage(Base):
 class BottleRecord(Base):
     """Thông tin chiết (từ tank BBT ra dây chuyền theo ca)."""
     __tablename__ = "bottle_record"
+    # bottle_code chỉ duy nhất TRONG 1 năm (bottle_year = năm bottle_date, snapshot lúc tạo).
+    __table_args__ = (UniqueConstraint("bottle_year", "bottle_code", name="uq_bottle_record_year_code"),)
 
     bottle_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
-    bottle_code: Mapped[str] = mapped_column(Unicode(64), unique=True, index=True)  # mã chiết
+    bottle_code: Mapped[str] = mapped_column(Unicode(64), index=True)  # mã chiết
+    bottle_year: Mapped[int] = mapped_column(Integer, index=True)
     filter_code: Mapped[Optional[str]] = mapped_column(Unicode(64), index=True)     # mã lọc
     filter_id: Mapped[Optional[str]] = mapped_column(ForeignKey("filter_record.filter_id"), nullable=True, index=True)  # tank BBT nguồn (khớp from_bbt lúc tạo) — dùng để trừ/hoàn on_hand_bbt
     bottle_date: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, index=True)

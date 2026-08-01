@@ -22,12 +22,12 @@ const CH = {
     return `<svg viewBox="0 0 ${W} ${H}" width="100%" style="display:block">
       <defs><linearGradient id="${gid}" x1="0" y1="0" x2="0" y2="1">
         <stop offset="0%" stop-color="${color}" stop-opacity="0.35"/><stop offset="100%" stop-color="${color}" stop-opacity="0"/></linearGradient></defs>
-      <line x1="${pad.l}" y1="${pad.t}" x2="${pad.l}" y2="${H - pad.b}" stroke="#2b3a47"/>
-      <line x1="${pad.l}" y1="${H - pad.b}" x2="${W - pad.r}" y2="${H - pad.b}" stroke="#2b3a47"/>
-      <text x="4" y="${py(ymax) + 4}" fill="#8aa0b2" font-size="11">${ymax.toFixed(1)}</text>
-      <text x="4" y="${py(ymin) + 4}" fill="#8aa0b2" font-size="11">${ymin.toFixed(1)}</text>
-      <text x="${pad.l}" y="${H - 6}" fill="#8aa0b2" font-size="11">${fmtT(xmin)}</text>
-      <text x="${W - pad.r}" y="${H - 6}" fill="#8aa0b2" font-size="11" text-anchor="end">${fmtT(xmax)}</text>
+      <line x1="${pad.l}" y1="${pad.t}" x2="${pad.l}" y2="${H - pad.b}" stroke="var(--border)"/>
+      <line x1="${pad.l}" y1="${H - pad.b}" x2="${W - pad.r}" y2="${H - pad.b}" stroke="var(--border)"/>
+      <text x="4" y="${py(ymax) + 4}" fill="var(--muted)" font-size="11">${ymax.toFixed(1)}</text>
+      <text x="4" y="${py(ymin) + 4}" fill="var(--muted)" font-size="11">${ymin.toFixed(1)}</text>
+      <text x="${pad.l}" y="${H - 6}" fill="var(--muted)" font-size="11">${fmtT(xmin)}</text>
+      <text x="${W - pad.r}" y="${H - 6}" fill="var(--muted)" font-size="11" text-anchor="end">${fmtT(xmax)}</text>
       <polygon points="${area}" fill="url(#${gid})"/>
       <polyline points="${pts}" fill="none" stroke="${color}" stroke-width="2"/>
       <text x="${W - pad.r}" y="${pad.t + 12}" fill="${color}" font-size="12" text-anchor="end" font-weight="700">${label} ${unit}</text>
@@ -40,12 +40,12 @@ const CH = {
     const color = p >= 0.85 ? "#2ecc71" : p >= 0.65 ? "#f5a623" : "#e74c3c";
     const cx = size / 2;
     return `<svg viewBox="0 0 ${size} ${size}" width="${size}" height="${size}">
-      <circle cx="${cx}" cy="${cx}" r="${r}" fill="none" stroke="#2b3a47" stroke-width="10"/>
+      <circle cx="${cx}" cy="${cx}" r="${r}" fill="none" stroke="var(--border)" stroke-width="10"/>
       <circle cx="${cx}" cy="${cx}" r="${r}" fill="none" stroke="${color}" stroke-width="10"
         stroke-dasharray="${c.toFixed(1)}" stroke-dashoffset="${off.toFixed(1)}"
         stroke-linecap="round" transform="rotate(-90 ${cx} ${cx})"/>
-      <text x="${cx}" y="${cx - 2}" fill="#e6edf3" font-size="22" font-weight="700" text-anchor="middle">${(p * 100).toFixed(1)}%</text>
-      <text x="${cx}" y="${cx + 18}" fill="#8aa0b2" font-size="11" text-anchor="middle">${label}</text>
+      <text x="${cx}" y="${cx - 2}" fill="var(--text)" font-size="22" font-weight="700" text-anchor="middle">${(p * 100).toFixed(1)}%</text>
+      <text x="${cx}" y="${cx + 18}" fill="var(--muted)" font-size="11" text-anchor="middle">${label}</text>
     </svg>`;
   },
   // Thanh ngang cho các thành phần (A/P/Q hoặc phân bố trạng thái).
@@ -55,8 +55,8 @@ const CH = {
       const w = (i.value / max) * 100;
       const col = i.color || "#17a2b8";
       const disp = i.disp || (i.pct ? (i.value * 100).toFixed(1) + "%" : i.value);
-      return `<div><div style="display:flex;justify-content:space-between;font-size:12px;color:#8aa0b2"><span>${esc(i.label)}</span><span>${esc(String(disp))}</span></div>
-        <div style="background:#1e2a36;border-radius:4px;height:10px;overflow:hidden"><div style="width:${w}%;height:100%;background:${col}"></div></div></div>`;
+      return `<div><div style="display:flex;justify-content:space-between;font-size:12px;color:var(--muted)"><span>${esc(i.label)}</span><span>${esc(String(disp))}</span></div>
+        <div style="background:var(--panel2);border-radius:4px;height:10px;overflow:hidden"><div style="width:${w}%;height:100%;background:${col}"></div></div></div>`;
     }).join("")}</div>`;
   },
   // Thanh ngang có trục số (gridline + tick) và đầu thanh bo tròn — dùng cho báo cáo dạng
@@ -65,34 +65,42 @@ const CH = {
   // có thể so trực quan với các mốc ngưỡng vẽ trên cùng trục.
   agingBars(items, { max, height, axisLabel = "" } = {}) {
     if (!items || !items.length) return '<div class="muted">Không có dữ liệu.</div>';
-    const rowH = 34, barH = 14;
+    // Nhãn từng dòng nằm trên 1 hàng riêng phía trên thanh (không còn ở cột trái cố định) — để
+    // tên dài (VD "Bia chai Classic 330ml · lô OBLIVE-FPTEST-01") không bị cắt cụt ở mép trái SVG.
+    const rowH = 40, barH = 14, labelH = 16;
     const W = 700;
     // pad.b cần đủ chỗ cho CẢ hàng số tick (~14px) LẪN hàng tiêu đề trục bên dưới nó (~14px) khi
     // có axisLabel — nếu chỉ chừa 1 hàng, tiêu đề trục sẽ đè lên số tick ở giữa trục.
-    const pad = { l: 150, r: 100, t: 8, b: axisLabel ? 40 : 24 };
+    const pad = { l: 16, r: 100, t: 8, b: axisLabel ? 40 : 24 };
     const H = height || (pad.t + items.length * rowH + pad.b);
     const plotW = W - pad.l - pad.r;
-    const m = Math.max(max || 0, ...items.map(i => i.value || 0), 10);
+    // Nếu người gọi truyền `max` cố định (VD so với ngưỡng cảnh báo) thì DÙNG ĐÚNG giá trị đó —
+    // không trộn thêm giá trị thật của từng thanh vào, nếu không 1 lô lỗi dữ liệu/test cũ có giá
+    // trị hàng nghìn sẽ kéo dãn cả trục (thanh vượt quá `m` vẫn hiện đủ dài nhờ Math.min bên dưới).
+    // Chỉ tự co giãn theo dữ liệu khi người gọi KHÔNG truyền max (VD báo cáo tồn tối thiểu).
+    const m = max != null ? Math.max(max, 1e-9) : Math.max(...items.map(i => i.value || 0), 10);
     const x = (v) => pad.l + Math.max(0, Math.min(v, m)) / m * plotW;
     const nTicks = 10;
     const step = m / nTicks;
     const ticks = Array.from({ length: nTicks + 1 }, (_, i) => i * step);
     const tickY = H - pad.b + 14;
-    const gridlines = ticks.map(t => `<line x1="${x(t).toFixed(1)}" y1="${pad.t}" x2="${x(t).toFixed(1)}" y2="${(H - pad.b).toFixed(1)}" stroke="#2b3a47" stroke-width="1"/>
-      <text x="${x(t).toFixed(1)}" y="${tickY.toFixed(1)}" fill="#8aa0b2" font-size="10" text-anchor="middle">${Math.round(t)}</text>`).join("");
+    const gridlines = ticks.map(t => `<line x1="${x(t).toFixed(1)}" y1="${pad.t}" x2="${x(t).toFixed(1)}" y2="${(H - pad.b).toFixed(1)}" stroke="var(--border)" stroke-width="1"/>
+      <text x="${x(t).toFixed(1)}" y="${tickY.toFixed(1)}" fill="var(--muted)" font-size="10" text-anchor="middle">${Math.round(t)}</text>`).join("");
     const bars = items.map((it, i) => {
-      const y = pad.t + i * rowH + (rowH - barH) / 2;
+      const rowTop = pad.t + i * rowH;
+      const labelY = rowTop + 11;
+      const y = rowTop + labelH + (rowH - labelH - barH) / 2;
       const bw = Math.max(x(it.value) - pad.l, 0);
       const col = it.color || "#17a2b8";
       const disp = it.disp != null ? it.disp : it.value;
-      return `<text x="${(pad.l - 10).toFixed(1)}" y="${(y + barH / 2 + 4).toFixed(1)}" fill="#cdd9e3" font-size="12" text-anchor="end">${esc(String(it.label))}</text>
+      return `<text x="${pad.l.toFixed(1)}" y="${labelY.toFixed(1)}" fill="var(--text)" font-size="12" text-anchor="start">${esc(String(it.label))}</text>
         <rect x="${pad.l.toFixed(1)}" y="${y.toFixed(1)}" width="${bw.toFixed(1)}" height="${barH}" rx="${barH / 2}" fill="${col}"/>
-        <text x="${(pad.l + bw + 8).toFixed(1)}" y="${(y + barH / 2 + 4).toFixed(1)}" fill="#cdd9e3" font-size="12">${esc(String(disp))}</text>`;
+        <text x="${(pad.l + bw + 8).toFixed(1)}" y="${(y + barH / 2 + 4).toFixed(1)}" fill="var(--text)" font-size="12">${esc(String(disp))}</text>`;
     }).join("");
     return `<svg viewBox="0 0 ${W} ${H}" width="100%" style="display:block">
       ${gridlines}
       ${bars}
-      ${axisLabel ? `<text x="${(pad.l + plotW / 2).toFixed(1)}" y="${(H - 6).toFixed(1)}" fill="#8aa0b2" font-size="11" text-anchor="middle">${esc(axisLabel)}</text>` : ""}
+      ${axisLabel ? `<text x="${(pad.l + plotW / 2).toFixed(1)}" y="${(H - 6).toFixed(1)}" fill="var(--muted)" font-size="11" text-anchor="middle">${esc(axisLabel)}</text>` : ""}
     </svg>`;
   },
   // Thanh ngang lệch 2 phía quanh mốc 0, có trục số + tick — dùng cho báo cáo dạng "còn hạn/quá
@@ -121,8 +129,8 @@ const CH = {
     const gridlines = ticks.map(t => {
       const isZero = Math.abs(t) < 1e-9;
       const xt = x(t);
-      return `<line x1="${xt.toFixed(1)}" y1="${pad.t}" x2="${xt.toFixed(1)}" y2="${(H - pad.b).toFixed(1)}" stroke="${isZero ? "#5a6c7c" : "#2b3a47"}" stroke-width="${isZero ? 1.5 : 1}"/>
-        <text x="${xt.toFixed(1)}" y="${tickY.toFixed(1)}" fill="#8aa0b2" font-size="10" text-anchor="middle">${Math.round(t)}</text>`;
+      return `<line x1="${xt.toFixed(1)}" y1="${pad.t}" x2="${xt.toFixed(1)}" y2="${(H - pad.b).toFixed(1)}" stroke="${isZero ? "var(--muted)" : "var(--border)"}" stroke-width="${isZero ? 1.5 : 1}"/>
+        <text x="${xt.toFixed(1)}" y="${tickY.toFixed(1)}" fill="var(--muted)" font-size="10" text-anchor="middle">${Math.round(t)}</text>`;
     }).join("");
     const bars = items.map((it, i) => {
       const rowTop = pad.t + i * rowH;
@@ -134,14 +142,14 @@ const CH = {
       const disp = it.disp != null ? it.disp : it.value;
       const labelX = v < 0 ? x0 - 8 : x1 + 8;
       const anchor = v < 0 ? "end" : "start";
-      return `<text x="4" y="${labelY.toFixed(1)}" fill="#cdd9e3" font-size="12" text-anchor="start">${esc(String(it.label))}</text>
+      return `<text x="4" y="${labelY.toFixed(1)}" fill="var(--text)" font-size="12" text-anchor="start">${esc(String(it.label))}</text>
         <rect x="${x0.toFixed(1)}" y="${y.toFixed(1)}" width="${(x1 - x0).toFixed(1)}" height="${barH}" rx="${barH / 2}" fill="${col}"/>
-        <text x="${labelX.toFixed(1)}" y="${(y + barH / 2 + 4).toFixed(1)}" fill="#cdd9e3" font-size="12" text-anchor="${anchor}">${esc(String(disp))}</text>`;
+        <text x="${labelX.toFixed(1)}" y="${(y + barH / 2 + 4).toFixed(1)}" fill="var(--text)" font-size="12" text-anchor="${anchor}">${esc(String(disp))}</text>`;
     }).join("");
     return `<svg viewBox="0 0 ${W} ${H}" width="100%" style="display:block">
       ${gridlines}
       ${bars}
-      ${axisLabel ? `<text x="${cx.toFixed(1)}" y="${(H - 6).toFixed(1)}" fill="#8aa0b2" font-size="11" text-anchor="middle">${esc(axisLabel)}</text>` : ""}
+      ${axisLabel ? `<text x="${cx.toFixed(1)}" y="${(H - 6).toFixed(1)}" fill="var(--muted)" font-size="11" text-anchor="middle">${esc(axisLabel)}</text>` : ""}
     </svg>`;
   },
   // Cột đứng: items=[{label,value,color?}]
@@ -154,12 +162,12 @@ const CH = {
       const h = (it.value / max) * (H - pad.t - pad.b);
       const x = pad.l + i * bw + bw * 0.15, w = bw * 0.7, y = H - pad.b - h;
       return `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${w.toFixed(1)}" height="${Math.max(h,0).toFixed(1)}" rx="2" fill="${it.color || color}"/>
-        <text x="${(x + w / 2).toFixed(1)}" y="${(y - 3).toFixed(1)}" fill="#cdd9e3" font-size="10" text-anchor="middle">${typeof it.value === "number" ? (it.value >= 1000 ? (it.value / 1000).toFixed(1) + "k" : it.value) : it.value}</text>
-        <text x="${(x + w / 2).toFixed(1)}" y="${H - pad.b + 13}" fill="#8aa0b2" font-size="10" text-anchor="middle">${esc(String(it.label).slice(0, 8))}</text>`;
+        <text x="${(x + w / 2).toFixed(1)}" y="${(y - 3).toFixed(1)}" fill="var(--text)" font-size="10" text-anchor="middle">${typeof it.value === "number" ? (it.value >= 1000 ? (it.value / 1000).toFixed(1) + "k" : it.value) : it.value}</text>
+        <text x="${(x + w / 2).toFixed(1)}" y="${H - pad.b + 13}" fill="var(--muted)" font-size="10" text-anchor="middle">${esc(String(it.label).slice(0, 8))}</text>`;
     }).join("");
     return `<svg viewBox="0 0 ${W} ${H}" width="100%" style="display:block">
-      <line x1="${pad.l}" y1="${H - pad.b}" x2="${W - pad.r}" y2="${H - pad.b}" stroke="#2b3a47"/>
-      <text x="4" y="${pad.t + 8}" fill="#8aa0b2" font-size="10">${max >= 1000 ? (max / 1000).toFixed(1) + "k" : Math.round(max)} ${esc(unit)}</text>${bars}</svg>`;
+      <line x1="${pad.l}" y1="${H - pad.b}" x2="${W - pad.r}" y2="${H - pad.b}" stroke="var(--border)"/>
+      <text x="4" y="${pad.t + 8}" fill="var(--muted)" font-size="10">${max >= 1000 ? (max / 1000).toFixed(1) + "k" : Math.round(max)} ${esc(unit)}</text>${bars}</svg>`;
   },
   // Cột nhóm 2 series (vd định mức vs thực tế): items=[{label,a,b}]
   grouped(items, { labelA = "A", labelB = "B", colorA = "#3498db", colorB = "#f5a623", height = 160 } = {}) {
@@ -174,19 +182,19 @@ const CH = {
       const ya = H - pad.b - norm(it.a), yb = H - pad.b - norm(it.b);
       return `<rect x="${(x0 + gw * 0.15).toFixed(1)}" y="${ya.toFixed(1)}" width="${bw.toFixed(1)}" height="${Math.max(norm(it.a),0).toFixed(1)}" fill="${colorA}"/>
         <rect x="${(x0 + gw * 0.15 + bw + 3).toFixed(1)}" y="${yb.toFixed(1)}" width="${bw.toFixed(1)}" height="${Math.max(norm(it.b),0).toFixed(1)}" fill="${colorB}"/>
-        <text x="${(x0 + gw / 2).toFixed(1)}" y="${H - pad.b + 13}" fill="#8aa0b2" font-size="10" text-anchor="middle">${esc(String(it.label).slice(0, 9))}</text>`;
+        <text x="${(x0 + gw / 2).toFixed(1)}" y="${H - pad.b + 13}" fill="var(--muted)" font-size="10" text-anchor="middle">${esc(String(it.label).slice(0, 9))}</text>`;
     }).join("");
     return `<svg viewBox="0 0 ${W} ${H}" width="100%" style="display:block">
-      <line x1="${pad.l}" y1="${H - pad.b}" x2="${W - pad.r}" y2="${H - pad.b}" stroke="#2b3a47"/>
-      <rect x="${pad.l}" y="2" width="9" height="9" fill="${colorA}"/><text x="${pad.l + 13}" y="10" fill="#8aa0b2" font-size="10">${esc(labelA)}</text>
-      <rect x="${pad.l + 70}" y="2" width="9" height="9" fill="${colorB}"/><text x="${pad.l + 83}" y="10" fill="#8aa0b2" font-size="10">${esc(labelB)}</text>${g}</svg>`;
+      <line x1="${pad.l}" y1="${H - pad.b}" x2="${W - pad.r}" y2="${H - pad.b}" stroke="var(--border)"/>
+      <rect x="${pad.l}" y="2" width="9" height="9" fill="${colorA}"/><text x="${pad.l + 13}" y="10" fill="var(--muted)" font-size="10">${esc(labelA)}</text>
+      <rect x="${pad.l + 70}" y="2" width="9" height="9" fill="${colorB}"/><text x="${pad.l + 83}" y="10" fill="var(--muted)" font-size="10">${esc(labelB)}</text>${g}</svg>`;
   },
   // Cột nhóm N series (vd nhiều nhóm chỉ tiêu năng lượng theo kỳ):
   // categories=[label,...], series=[{label,color,values:[v theo từng category]}]
   groupedN(categories, series, { height = 180, unit = "" } = {}) {
     if (!categories || !categories.length || !series || !series.length) return '<div class="muted">Không có dữ liệu.</div>';
     const W = Math.max(560, categories.length * 60), H = height, pad = { l: 44, r: 8, t: 22, b: 40 };
-    const PAL = ["#3498db", "#f5a623", "#2ecc71", "#e74c3c", "#9b59b6", "#1abc9c", "#e67e22", "#8aa0b2"];
+    const PAL = ["#3498db", "#f5a623", "#2ecc71", "#e74c3c", "#9b59b6", "#1abc9c", "#e67e22", "var(--muted)"];
     const max = Math.max(...series.flatMap(s => s.values), 1e-9);
     const gw = (W - pad.l - pad.r) / categories.length;
     const n = series.length;
@@ -200,17 +208,17 @@ const CH = {
         const x = x0 + si * bw, h = Math.max(norm(v), 0), y = H - pad.b - h;
         const col = s.color || PAL[si % PAL.length];
         return `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${(bw * 0.88).toFixed(1)}" height="${h.toFixed(1)}" fill="${col}"/>
-          <text x="${(x + bw * 0.44).toFixed(1)}" y="${(y - 2).toFixed(1)}" fill="#cdd9e3" font-size="8" text-anchor="middle">${fmtV(v)}</text>`;
+          <text x="${(x + bw * 0.44).toFixed(1)}" y="${(y - 2).toFixed(1)}" fill="var(--text)" font-size="8" text-anchor="middle">${fmtV(v)}</text>`;
       }).join("");
-      return `${rects}<text x="${(x0 + (gw * 0.8) / 2).toFixed(1)}" y="${H - pad.b + 13}" fill="#8aa0b2" font-size="10" text-anchor="middle">${esc(String(cat).slice(0, 9))}</text>`;
+      return `${rects}<text x="${(x0 + (gw * 0.8) / 2).toFixed(1)}" y="${H - pad.b + 13}" fill="var(--muted)" font-size="10" text-anchor="middle">${esc(String(cat).slice(0, 9))}</text>`;
     }).join("");
-    const legend = series.map((s, si) => `<span style="display:inline-flex;align-items:center;gap:4px;margin-right:12px;font-size:11px;color:#8aa0b2">
+    const legend = series.map((s, si) => `<span style="display:inline-flex;align-items:center;gap:4px;margin-right:12px;font-size:11px;color:var(--muted)">
       <span style="width:9px;height:9px;border-radius:2px;background:${s.color || PAL[si % PAL.length]};display:inline-block"></span>${esc(s.label)}</span>`).join("");
     return `<div>
       <div style="margin-bottom:4px">${legend}</div>
       <svg viewBox="0 0 ${W} ${H}" width="100%" style="display:block">
-        <text x="4" y="${pad.t - 6}" fill="#8aa0b2" font-size="10">${max >= 1000 ? (max / 1000).toFixed(1) + "k" : Math.round(max)} ${esc(unit)}</text>
-        <line x1="${pad.l}" y1="${H - pad.b}" x2="${W - pad.r}" y2="${H - pad.b}" stroke="#2b3a47"/>${bars}
+        <text x="4" y="${pad.t - 6}" fill="var(--muted)" font-size="10">${max >= 1000 ? (max / 1000).toFixed(1) + "k" : Math.round(max)} ${esc(unit)}</text>
+        <line x1="${pad.l}" y1="${H - pad.b}" x2="${W - pad.r}" y2="${H - pad.b}" stroke="var(--border)"/>${bars}
       </svg></div>`;
   },
   // Nhiều đường trên cùng 1 trục (vd nhiều nhóm chỉ tiêu năng lượng theo thời gian):
@@ -218,7 +226,7 @@ const CH = {
   lineMulti(series, { height = 180, unit = "" } = {}) {
     if (!series || !series.length || !series.some(s => s.points && s.points.length)) return '<div class="muted">Không có dữ liệu.</div>';
     const W = 620, H = height, pad = { l: 44, r: 12, t: 22, b: 24 };
-    const PAL = ["#3498db", "#f5a623", "#2ecc71", "#e74c3c", "#9b59b6", "#1abc9c", "#e67e22", "#8aa0b2"];
+    const PAL = ["#3498db", "#f5a623", "#2ecc71", "#e74c3c", "#9b59b6", "#1abc9c", "#e67e22", "var(--muted)"];
     const xcats = series.find(s => s.points && s.points.length).points.map(p => p.x);
     const allVals = series.flatMap(s => (s.points || []).map(p => p.value));
     let ymin = Math.min(...allVals, 0), ymax = Math.max(...allVals, 1e-9);
@@ -231,18 +239,18 @@ const CH = {
       const pts = (s.points || []).map((p, i) => `${px(i).toFixed(1)},${py(p.value).toFixed(1)}`).join(" ");
       return `<polyline points="${pts}" fill="none" stroke="${col}" stroke-width="2"/>`;
     }).join("");
-    const legend = series.map((s, si) => `<span style="display:inline-flex;align-items:center;gap:4px;margin-right:12px;font-size:11px;color:#8aa0b2">
+    const legend = series.map((s, si) => `<span style="display:inline-flex;align-items:center;gap:4px;margin-right:12px;font-size:11px;color:var(--muted)">
       <span style="width:9px;height:9px;border-radius:2px;background:${s.color || PAL[si % PAL.length]};display:inline-block"></span>${esc(s.label)}</span>`).join("");
     const fmtX = (i) => String(xcats[i] ?? "").slice(5);
     return `<div>
       <div style="margin-bottom:4px">${legend}</div>
       <svg viewBox="0 0 ${W} ${H}" width="100%" style="display:block">
-        <line x1="${pad.l}" y1="${pad.t}" x2="${pad.l}" y2="${H - pad.b}" stroke="#2b3a47"/>
-        <line x1="${pad.l}" y1="${H - pad.b}" x2="${W - pad.r}" y2="${H - pad.b}" stroke="#2b3a47"/>
-        <text x="4" y="${py(ymax) + 4}" fill="#8aa0b2" font-size="10">${ymax.toFixed(1)} ${esc(unit)}</text>
-        <text x="4" y="${py(ymin) + 4}" fill="#8aa0b2" font-size="10">${ymin.toFixed(1)}</text>
-        <text x="${pad.l}" y="${H - 6}" fill="#8aa0b2" font-size="10">${fmtX(0)}</text>
-        <text x="${W - pad.r}" y="${H - 6}" fill="#8aa0b2" font-size="10" text-anchor="end">${fmtX(xcats.length - 1)}</text>
+        <line x1="${pad.l}" y1="${pad.t}" x2="${pad.l}" y2="${H - pad.b}" stroke="var(--border)"/>
+        <line x1="${pad.l}" y1="${H - pad.b}" x2="${W - pad.r}" y2="${H - pad.b}" stroke="var(--border)"/>
+        <text x="4" y="${py(ymax) + 4}" fill="var(--muted)" font-size="10">${ymax.toFixed(1)} ${esc(unit)}</text>
+        <text x="4" y="${py(ymin) + 4}" fill="var(--muted)" font-size="10">${ymin.toFixed(1)}</text>
+        <text x="${pad.l}" y="${H - 6}" fill="var(--muted)" font-size="10">${fmtX(0)}</text>
+        <text x="${W - pad.r}" y="${H - 6}" fill="var(--muted)" font-size="10" text-anchor="end">${fmtX(xcats.length - 1)}</text>
         ${lines}
       </svg></div>`;
   },
@@ -286,21 +294,21 @@ const CH = {
     }).join("");
     const linesLeft = drawLines(leftSeries, PAL_L, pyL, null);
     const linesRight = drawLines(rightSeries, PAL_R, pyR, "4,3");
-    const legendOf = (list, PAL) => (list || []).map((s, si) => `<span style="display:inline-flex;align-items:center;gap:4px;margin-right:12px;font-size:11px;color:#8aa0b2">
+    const legendOf = (list, PAL) => (list || []).map((s, si) => `<span style="display:inline-flex;align-items:center;gap:4px;margin-right:12px;font-size:11px;color:var(--muted)">
       <span style="width:9px;height:9px;border-radius:2px;background:${s.color || PAL[si % PAL.length]};display:inline-block"></span>${esc(s.label)}</span>`).join("");
     const fmtX = (i) => (xLabels && xLabels[i] != null) ? String(xLabels[i]) : String(i + 1);
     return `<div>
       <div style="margin-bottom:4px">${legendOf(leftSeries, PAL_L)}${legendOf(rightSeries, PAL_R)}</div>
       <svg viewBox="0 0 ${W} ${H}" width="100%" style="display:block">
-        <line x1="${pad.l}" y1="${pad.t}" x2="${pad.l}" y2="${H - pad.b}" stroke="#2b3a47"/>
-        <line x1="${W - pad.r}" y1="${pad.t}" x2="${W - pad.r}" y2="${H - pad.b}" stroke="#2b3a47"/>
-        <line x1="${pad.l}" y1="${H - pad.b}" x2="${W - pad.r}" y2="${H - pad.b}" stroke="#2b3a47"/>
-        <text x="4" y="${pyL(lymax) + 4}" fill="#8aa0b2" font-size="10">${lymax.toFixed(1)}</text>
-        <text x="4" y="${pyL(lymin) + 4}" fill="#8aa0b2" font-size="10">${lymin.toFixed(1)}</text>
-        <text x="${W - pad.r + 3}" y="${pyR(rymax) + 4}" fill="#8aa0b2" font-size="10">${rymax.toFixed(1)}</text>
-        <text x="${W - pad.r + 3}" y="${pyR(rymin) + 4}" fill="#8aa0b2" font-size="10">${rymin.toFixed(1)}</text>
-        <text x="${pad.l}" y="${H - 6}" fill="#8aa0b2" font-size="10">${esc(fmtX(0))}</text>
-        <text x="${W - pad.r}" y="${H - 6}" fill="#8aa0b2" font-size="10" text-anchor="end">${esc(fmtX(n - 1))}</text>
+        <line x1="${pad.l}" y1="${pad.t}" x2="${pad.l}" y2="${H - pad.b}" stroke="var(--border)"/>
+        <line x1="${W - pad.r}" y1="${pad.t}" x2="${W - pad.r}" y2="${H - pad.b}" stroke="var(--border)"/>
+        <line x1="${pad.l}" y1="${H - pad.b}" x2="${W - pad.r}" y2="${H - pad.b}" stroke="var(--border)"/>
+        <text x="4" y="${pyL(lymax) + 4}" fill="var(--muted)" font-size="10">${lymax.toFixed(1)}</text>
+        <text x="4" y="${pyL(lymin) + 4}" fill="var(--muted)" font-size="10">${lymin.toFixed(1)}</text>
+        <text x="${W - pad.r + 3}" y="${pyR(rymax) + 4}" fill="var(--muted)" font-size="10">${rymax.toFixed(1)}</text>
+        <text x="${W - pad.r + 3}" y="${pyR(rymin) + 4}" fill="var(--muted)" font-size="10">${rymin.toFixed(1)}</text>
+        <text x="${pad.l}" y="${H - 6}" fill="var(--muted)" font-size="10">${esc(fmtX(0))}</text>
+        <text x="${W - pad.r}" y="${H - 6}" fill="var(--muted)" font-size="10" text-anchor="end">${esc(fmtX(n - 1))}</text>
         ${linesLeft}${linesRight}
       </svg></div>`;
   },
@@ -308,7 +316,7 @@ const CH = {
   pie(items, { size = 170, donut = true, showPercent = true } = {}) {
     const total = items.reduce((s, i) => s + i.value, 0) || 1;
     const cx = size / 2, cy = size / 2, r = size / 2 - 6, ri = donut ? r * 0.58 : 0;
-    const PAL = ["#f5a623", "#3498db", "#2ecc71", "#e74c3c", "#9b59b6", "#1abc9c", "#e67e22", "#8aa0b2"];
+    const PAL = ["#f5a623", "#3498db", "#2ecc71", "#e74c3c", "#9b59b6", "#1abc9c", "#e67e22", "var(--muted)"];
     let ang = -Math.PI / 2, segs = "", labels = "";
     items.forEach((it, i) => {
       const frac = it.value / total, a2 = ang + frac * 2 * Math.PI;
@@ -327,7 +335,7 @@ const CH = {
       ang = a2;
     });
     const totalLabel = total.toLocaleString("vi-VN", { maximumFractionDigits: 2 });
-    const hole = donut ? `<circle cx="${cx}" cy="${cy}" r="${ri}" fill="#17212b"/><text x="${cx}" y="${cy + 4}" fill="#e6edf3" font-size="15" font-weight="700" text-anchor="middle">${totalLabel}</text>` : "";
+    const hole = donut ? `<circle cx="${cx}" cy="${cy}" r="${ri}" fill="var(--panel)"/><text x="${cx}" y="${cy + 4}" fill="var(--text)" font-size="15" font-weight="700" text-anchor="middle">${totalLabel}</text>` : "";
     const legend = items.map((it, i) => `<div style="display:flex;align-items:center;gap:6px;font-size:12px;margin:2px 0">
       <span style="width:10px;height:10px;border-radius:2px;background:${it.color || PAL[i % PAL.length]}"></span>${esc(it.label)} <span class="muted">(${it.value}${showPercent ? ", " + Math.round((it.value / total) * 100) + "%" : ""})</span></div>`).join("");
     return `<div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap">

@@ -3,7 +3,7 @@
 > Liệt kê đầy đủ các tính năng *đã hiện thực trong mã nguồn*, nhóm theo phân hệ.
 > Mỗi tính năng kèm endpoint API và quyền yêu cầu (nếu có). Phiên bản: `0.1.0-mvp`.
 
-**Ngày phát hành:** 23/06/2026 · **Ngày cập nhật:** 23/07/2026
+**Ngày phát hành:** 23/06/2026 · **Ngày cập nhật:** 31/07/2026
 
 **Quy ước cột "Quyền":** ✅ = đăng nhập là đủ · *(permission)* = cần quyền thao tác cụ thể · *(role)* = cần vai trò · *(X-API-Key)* = cho phần mềm ngoài.
 
@@ -31,12 +31,13 @@
 19. [Tích hợp CSDL SCADA ngoài & Realtime thật](#19-tích-hợp-csdl-scada-ngoài--realtime-thật)
 20. [Import dữ liệu ngoài & trường tùy biến](#20-import-dữ-liệu-ngoài--trường-tùy-biến)
 21. [Lập lịch sản xuất tối ưu](#21-lập-lịch-sản-xuất-tối-ưu)
-22. [Báo cáo](#22-báo-cáo)
-23. [Trợ lý AI & tác vụ nền](#23-trợ-lý-ai--tác-vụ-nền)
-24. [Cổng tích hợp & API mở](#24-cổng-tích-hợp--api-mở)
-25. [Barcode / QR / Kiosk xưởng](#25-barcode--qr--kiosk-xưởng)
-26. [Audit & toàn vẹn dữ liệu](#26-audit--toàn-vẹn-dữ-liệu)
-27. [Hệ thống & vận hành](#27-hệ-thống--vận-hành)
+22. [CIP — Vệ sinh thiết bị (Cleaning-In-Place)](#22-cip--vệ-sinh-thiết-bị-cleaning-in-place)
+23. [Báo cáo](#23-báo-cáo)
+24. [Trợ lý AI & tác vụ nền](#24-trợ-lý-ai--tác-vụ-nền)
+25. [Cổng tích hợp & API mở](#25-cổng-tích-hợp--api-mở)
+26. [Barcode / QR / Kiosk xưởng](#26-barcode--qr--kiosk-xưởng)
+27. [Audit & toàn vẹn dữ liệu](#27-audit--toàn-vẹn-dữ-liệu)
+28. [Hệ thống & vận hành](#28-hệ-thống--vận-hành)
 
 ---
 
@@ -47,14 +48,14 @@
 | Đăng xuất (xóa phiên) | `POST /api/auth/logout` | ✅ |
 | Xem / cập nhật hồ sơ cá nhân | `GET/PUT /api/auth/me` | ✅ |
 | Đổi mật khẩu (verify cũ, ≥6 ký tự) | `POST /api/auth/change-password` | ✅ |
-| Xem catalog quyền (21 quyền) | `GET /api/auth/permissions` | ✅ |
+| Xem catalog quyền (23 quyền) | `GET /api/auth/permissions` | ✅ |
 | Liệt kê / tạo tài khoản (role/menu/quyền/scope) | `GET/POST /api/auth/users` | *(admin)* |
 | Gán phạm vi dữ liệu (line/khu vực/loại test/địa điểm kho) | `PUT /api/auth/users/{username}/scope` | *(admin)* |
-| Danh mục scope (line/khu vực/QC/địa điểm kho) | `GET /api/auth/scope-catalog` | ✅ |
+| Danh mục scope (line/khu vực/QC/địa điểm kho) — danh sách "Loại chỉ tiêu QC" lấy từ **Danh mục chỉ tiêu** (`QCParameter` catalog), không chỉ chỉ tiêu đã có kết quả ghi nhận | `GET /api/auth/scope-catalog` | ✅ |
 | Khóa / mở tài khoản | `POST /api/auth/users/{username}/toggle` | *(admin)* |
 | Copy toàn bộ quyền/scope từ 1 tài khoản sang tài khoản khác | `POST /api/auth/users/{username}/copy-permissions` | *(admin)* |
 
-**Đặc tính:** 5 vai trò thực thi (operator/supervisor/qa/engineer/admin) · 10 tài khoản demo theo **chức danh nhà máy** (Giám đốc/Quản đốc/Trưởng ca/Vận hành/KCS/Kỹ sư/Thủ kho NVL/Thủ kho phân xưởng/Bảo trì/Năng lượng), mỗi tài khoản gán `permissions`+`allowed_views`+scope riêng · 21 quyền thao tác · SoD (soạn≠duyệt, ghi QC≠release, ký≠khóa EBR) · **data-scoping 4 chiều** (line/khu vực/loại QC/**địa điểm kho** — chiều thứ 4 chặn thao tác kho ngoài Kho công ty hoặc Kho phân xưởng ở tầng server, xem mục 14) · **copy quyền** giữa 2 tài khoản (admin, ghi đè toàn bộ role/menu/quyền/4 chiều scope) · buộc đổi mật khẩu mặc định lần đầu · phiên 12h.
+**Đặc tính:** 5 vai trò thực thi (operator/supervisor/qa/engineer/admin) · 9 tài khoản demo theo **chức danh nhà máy** đúng sơ đồ tổ chức thật 01/2026/SĐTC-BHL — Quản đốc phân xưởng/**Phó Quản đốc phân xưởng (trực ca)**/Vận hành/KCS/Kỹ sư (Phòng KTCN&CTSX)/Thủ kho NVL/Trưởng phòng KCS/Giám đốc Sản xuất-Kỹ thuật/NV Trung tâm Điều hành-Thủ kho TP (cộng `admin`), mỗi tài khoản gán `permissions`+`allowed_views`+scope riêng · 23 quyền thao tác (2 quyền mới: `production.release_to_wms` — tách riêng khỏi `quality.release`, chỉ Giám đốc SX-KT có, để duyệt lô chiết nhập kho TP; `cip.manage`) · SoD (soạn≠duyệt, ghi QC≠release, ký≠khóa EBR) · **data-scoping 4 chiều** (line/khu vực/loại QC/**địa điểm kho** — chiều thứ 4 chặn thao tác kho ngoài Kho công ty hoặc Kho phân xưởng ở tầng server, xem mục 14) · **copy quyền** giữa 2 tài khoản (admin, ghi đè toàn bộ role/menu/quyền/4 chiều scope) · buộc đổi mật khẩu mặc định lần đầu · phiên 12h.
 
 ---
 
@@ -207,6 +208,7 @@
 | Xả hết tank CCT | `POST /api/brewing/ferments/{id}/empty-cct` | ✅ |
 | Lọc (CCT/BBT tái lọc → BBT, nhiều tank/lệnh) | `GET/POST/DELETE /api/brewing/filters[/{id}]`, `/filters/{id}/tanks`, `/bbt-tanks`, `/ferment-tanks` | đọc công khai, ghi ✅ |
 | Kết thúc từng tank lọc | `POST /api/brewing/filters/{id}/tanks/{line_id}/finish` | ✅ |
+| Cờ "Xác nhận mẻ lọc cuối" (loại trừ dòng "vét" tank khỏi phân loại sản lượng Thấp/Cao) | `POST /api/brewing/filters/{id}/tanks/{line_id}/toggle-final` | ✅ |
 | Duyệt Lọc (KCS) | `POST /api/brewing/filters/{id}/approve` | *(quality.release)* |
 | NVL/hoá chất tiêu thụ theo mẻ lọc | `GET/POST/PUT/DELETE /api/brewing/filters/{id}/materials[/{usage_id}]` | ✅ |
 | Xả hết BBT | `POST /api/brewing/filters/{id}/empty-bbt` | ✅ |
@@ -224,7 +226,7 @@
 | Hóa chất theo công đoạn | `GET/POST /api/process/chemicals` | đọc |
 | Thu hồi men + xuất men cho mẻ | `GET/POST /api/process/yeast`, `/yeast/{id}/issue`, `/yeast/issues` | ✅ để ghi |
 
-**Đặc tính:** màu trạng thái theo dữ liệu thật (không hardcode); **khóa lô (`locked`)** độc lập với trạng thái nghiệp vụ, chặn sửa/xóa/tiêu thụ trên cả 4 công đoạn; NVL từng mẻ nấu/lọc/chiết trừ tồn thật (Kho phân xưởng) qua `warehouse.issue()`, hoàn tác được khi xóa dòng.
+**Đặc tính:** màu trạng thái theo dữ liệu thật (không hardcode); **khóa lô (`locked`)** độc lập với trạng thái nghiệp vụ, chặn sửa/xóa/tiêu thụ trên cả 4 công đoạn; NVL từng mẻ nấu/lọc/chiết trừ tồn thật (Kho phân xưởng) qua `warehouse.issue()`, hoàn tác được khi xóa dòng; trạng thái mẻ lọc thêm **"Chờ duyệt"** (`cho_duyet`, trước "Chờ chiết") khi mẻ lọc đã kết thúc (`ended_at`) nhưng KCS chưa duyệt QC; cho phép **trùng Batch/Order Number** giữa các lệnh lọc khác nhau — báo cáo gộp theo bộ 3 `batch_number`+`order_number`+`batch_seq_no`.
 
 ---
 
@@ -236,7 +238,7 @@
 | Recall simulation (lô bị ảnh hưởng + thời gian) | `GET /api/trace/recall?code=` | đọc công khai |
 | Hồ sơ lô điện tử (in được) — tổng hợp toàn bộ công đoạn 1 lô | `GET /api/brewing/lot-record` (UI: nút "Hồ sơ điện tử" tại Truy xuất) | ✅ |
 
-**Đặc tính:** dựng trên đồ thị genealogy có hướng; cây node (icon type + relation + quantity); recall đo số lô ảnh hưởng + thời gian; hồ sơ lô gộp cả bản ghi Braumat import + biểu mẫu thủ công + chữ ký KCS từng công đoạn để in trực tiếp.
+**Đặc tính:** dựng trên đồ thị genealogy có hướng; cây node (icon type + relation + quantity); recall đo số lô ảnh hưởng + thời gian; hồ sơ lô gộp cả bản ghi Braumat import + biểu mẫu thủ công + chữ ký KCS từng công đoạn để in trực tiếp; dưới mỗi mẻ lọc, hồ sơ điện tử liệt kê đầy đủ từng **"mẻ lọc số"** riêng lẻ (tank nguồn, thể tích, thời điểm kết thúc) — không chỉ tổng hợp cấp bản ghi.
 
 ---
 
@@ -273,7 +275,7 @@
 
 **Đặc tính:** sổ cái `stock_movement` bất biến (`location_from`/`location_to` là **chuỗi tự do**, không phải enum) + hỗ trợ hoàn tác (`reversed`/`reversal_of`); thẻ kho có số dư lũy kế; cảnh báo hạn dùng + tồn tối thiểu.
 
-> ✅ **Phân quyền theo địa điểm — enforce ở tầng server** (`scope_warehouse`, chiều data-scoping thứ 4 — §8.5/§8.7 tài liệu Kiến trúc): mỗi tài khoản có `scope_warehouse` = `"cong_ty"` | `"phan_xuong"` | `"*"`; mọi thao tác 1 địa điểm (`receive`/`return`/`issue`/kiểm kê) bị chặn 403 nếu `location` ngoài phạm vi; `transfer` (đụng 2 địa điểm) cho qua nếu khớp **ít nhất 1 đầu**. Tài khoản demo: `thukho` → Kho công ty; `thukho_px` (Thủ kho phân xưởng, mới), `truongca`, `vanhanh` → Kho phân xưởng — `truongca`/`vanhanh` chỉ có `warehouse.request` (tạo đề nghị), **`thukho_px`** mới là tài khoản thao tác trực tiếp (nhập/xuất) phía phân xưởng. Ranh giới menu (`allowed_views`) vẫn giữ nguyên, nay chỉ là lớp UI phụ trợ cho lớp chặn server này.
+> ✅ **Phân quyền theo địa điểm — enforce ở tầng server** (`scope_warehouse`, chiều data-scoping thứ 4 — §8.5/§8.7 tài liệu Kiến trúc): mỗi tài khoản có `scope_warehouse` = `"cong_ty"` | `"phan_xuong"` | `"*"`; mọi thao tác 1 địa điểm (`receive`/`return`/`issue`/kiểm kê) bị chặn 403 nếu `location` ngoài phạm vi; `transfer` (đụng 2 địa điểm) cho qua nếu khớp **ít nhất 1 đầu**. Tài khoản demo: `thukho` → Kho công ty (nhập/xuất trực tiếp); `vanhanh` → Kho phân xưởng nhưng chỉ có `warehouse.request` (tạo đề nghị nhận kho, xem mục 14) — theo sơ đồ tổ chức thật 01/2026/SĐTC-BHL không còn chức danh "Thủ kho phân xưởng" riêng, thao tác nhập/xuất trực tiếp phía phân xưởng vẫn nằm ở tầng phân quyền `scope_warehouse="phan_xuong"` (chưa gán cho tài khoản demo nào). Ranh giới menu (`allowed_views`) vẫn giữ nguyên, nay chỉ là lớp UI phụ trợ cho lớp chặn server này.
 
 ---
 
@@ -295,6 +297,11 @@
 | Lệnh đóng hàng: import Excel, xem/sửa, in | `POST /api/wms/load-slips/import`, `GET/PUT/DELETE /load-slips[/{id}]` | ✅ |
 | Phân giải barcode unit | `GET /api/wms/resolve` | ✅ |
 
+**Loại đơn vị tồn kho** (`/api/unit-types` — thay hoàn toàn việc hardcode 3 loại vi/keg/lon, cho phép khai báo loại đơn vị đóng gói tuỳ ý):
+| Tính năng | Endpoint | Quyền |
+|---|---|---|
+| Danh mục Loại đơn vị tồn kho (mã, tên, cấu hình `divide_by_pack_size`, chọn được/không, hoạt động) | `GET/POST/PUT/DELETE /api/unit-types[/{id}]` | ✅ đọc, *(master.manage)* ghi |
+
 **Bao bì tuần hoàn** (`/api/packaging`):
 | Tính năng | Endpoint | Quyền |
 |---|---|---|
@@ -303,7 +310,7 @@
 | Ghi biến động (nhập/xuất/thu hồi/loại bỏ/kiểm kê) + lịch sử | `POST /api/packaging/move`, `GET /moves` | ✅ |
 | Báo cáo theo lô | `GET /api/packaging/lot-report` | ✅ |
 
-**Đặc tính:** đơn vị thành phẩm gắn trực tiếp lô sản xuất (truy xuất tới tận mẻ chiết); FIFO kiểm tra khi xuất (`fifo_ok`); phân rã/gộp theo lô (không thao tác từng unit lẻ); Xuất tự do admin-only ở cả Kho TP lẫn 2 kho NVL dùng chung 1 luật server.
+**Đặc tính:** đơn vị thành phẩm gắn trực tiếp lô sản xuất (truy xuất tới tận mẻ chiết); FIFO kiểm tra khi xuất (`fifo_ok`); phân rã/gộp theo lô (không thao tác từng unit lẻ); Xuất tự do admin-only ở cả Kho TP lẫn 2 kho NVL dùng chung 1 luật server; mã Loại đơn vị tồn kho bắt buộc viết thường không dấu (`^[a-z0-9_-]+$`) — chặn lỗi nhập "Vỉ" thay vì "vi" khiến phân rã sai loại.
 
 ---
 
@@ -394,11 +401,29 @@
 | Liệt kê xung đột | `GET /api/schedule/conflicts` | ✅ |
 | Tự lập lịch (greedy earliest-fit + CIP + né bảo trì + check NVL) | `POST /api/schedule/auto` | *(wo.dispatch)* |
 
-**Đặc tính:** xếp WO lên tank/line không chồng lấn; CIP bắt buộc giữa mẻ; phát hiện xung đột & thiếu NVL; Gantt SVG.
+**Đặc tính:** xếp WO lên tank/line không chồng lấn; CIP bắt buộc giữa mẻ (xem mục 22); phát hiện xung đột & thiếu NVL; Gantt SVG.
 
 ---
 
-## 22. Báo cáo
+## 22. CIP — Vệ sinh thiết bị (Cleaning-In-Place)
+*(prefix `/api/cip` — số hoá mẫu giấy KCS thật, đối chiếu cột Tiêu chuẩn ↔ Thực tế cho từng lần vệ sinh thiết bị)*
+
+| Tính năng | Endpoint | Quyền |
+|---|---|---|
+| Loại biểu mẫu CIP — danh mục (mã QT-KCS-QT-BM-xx, khu vực nấu/lên men/lọc/chiết/kho TP, loại **full**/**light**, đơn vị time/temp/conc khai báo riêng từng mẫu — **21 mẫu giấy thật** seed sẵn) | `GET/POST /api/cip/form-types`, `PUT/DELETE /form-types/{id}` | ✅ đọc, *(master.manage)* ghi |
+| Tab **"Khai báo biểu mẫu"** — soạn bảng bước MẪU (cột Tiêu chuẩn/Quy định) cho từng loại biểu mẫu, cờ **N/A** cho time/temp/conc khi bước không cần ghi giá trị đó | UI (`form-types`) | *(master.manage)* |
+| Copy bảng bước mẫu sang loại biểu mẫu khác (chỉ copy khi đích đang rỗng, tránh ghi đè nhầm) | `POST /api/cip/form-types/{id}/copy-steps` | *(master.manage)* |
+| Thiết bị CIP — danh mục (gắn 1 tank/dây chuyền cụ thể trong Danh mục sản xuất để tự lọc gợi ý, hoặc để trống cho thiết bị dùng chung) | `GET/POST /api/cip/equipment`, `PUT/DELETE /equipment/{id}` | ✅ đọc, *(master.manage)* ghi |
+| Tab **"Khai báo CIP"** — tạo 1 lần vệ sinh: chọn loại biểu mẫu tự điền cột Tiêu chuẩn (khoá, chỉ sửa được ở Khai báo biểu mẫu), nhập cột **Thực tế** song song (4 trường `*_actual`), thêm/bớt dòng tự do (21 mẫu có số cột khác nhau); Batch/Order Number bắt buộc để đối chiếu ngược Braumat; Kết quả là dropdown **Đạt/Không đạt** | `GET/POST /api/cip/records`, `GET/PUT /records/{id}` | ✅ đọc, *(cip.manage)* ghi |
+| Duyệt CIP | `POST /api/cip/records/{id}/approve` | *(quality.release)* |
+| Gợi ý thiết bị CIP theo phạm vi (mẻ nấu/lên men/lọc/chiết/tank BBT) | `GET /api/cip/suggest` | ✅ |
+| Nút **"Gắn CIP liên quan"** — gắn tay 1 CipRecord vào 1 phạm vi cụ thể trên 4 loại thực thể (mẻ nấu/mẻ lên men/mẻ lọc/mẻ chiết), hoặc thẳng vào tank BBT vật lý (không phải 1 mẻ lọc lẻ, vì CIP tank thành phẩm dùng chung cho nhiều mẻ) | `GET/POST/DELETE /api/cip/links[/{id}]` | ✅ đọc, *(cip.manage)* ghi |
+
+**Đặc tính:** báo cáo/in xem cột Tiêu chuẩn vs Thực tế song song; CIP xuất hiện trong **Hồ sơ điện tử** (mục 12/13) và **Audit trail** (mục 27); quyền `cip.manage` riêng cho tạo/sửa/gắn bản ghi CIP, còn danh mục (loại biểu mẫu/thiết bị) dùng `master.manage` và duyệt dùng lại `quality.release`.
+
+---
+
+## 23. Báo cáo
 | Tính năng | Endpoint | Quyền |
 |---|---|---|
 | BC định mức NVL (gộp nhiều mẻ, 30/90/365 ngày) | `GET /api/reports/material-norm` | ✅ |
@@ -408,12 +433,13 @@
 | Cảnh báo QC cần xử lý (lô hold / deviation mở / chỉ tiêu fail) | `GET /api/reports/qc-attention-alerts` | ✅ |
 | Tồn kho thành phẩm theo tuổi lô | `GET /api/reports/inventory-aging` | ✅ |
 | Tồn dưới mức tối thiểu (NVL) | `GET /api/warehouse/low-stock` | ✅ |
+| Widget Dashboard "Sản lượng lọc thấp" (chọn số ngày gần nhất) | `GET /api/reports/low-yield-filter-alerts?days=&limit=` | ✅ |
 
 **Đặc tính:** gộp định mức(scale) ↔ thực tế theo vật tư qua nhiều mẻ; dashboard tổng hợp trực quan có biểu đồ; cảnh báo QC gộp 3 nguồn (hold/deviation/fail) tránh trùng lặp 1 lô nhiều dòng.
 
 ---
 
-## 23. Trợ lý AI & tác vụ nền
+## 24. Trợ lý AI & tác vụ nền
 | Tính năng | Endpoint | Quyền |
 |---|---|---|
 | Trạng thái LLM + danh sách tool | `GET /api/ai/status` | công khai |
@@ -427,7 +453,7 @@
 
 ---
 
-## 24. Cổng tích hợp & API mở
+## 25. Cổng tích hợp & API mở
 | Tính năng | Endpoint | Quyền |
 |---|---|---|
 | Ping / batches / inventory / oee / energy / quality alerts / traceability | `GET /api/v1/*` | *(X-API-Key read)* |
@@ -440,7 +466,7 @@
 
 ---
 
-## 25. Barcode / QR / Kiosk xưởng
+## 26. Barcode / QR / Kiosk xưởng
 | Tính năng | Endpoint / nơi dùng | Quyền |
 |---|---|---|
 | Sinh QR (SVG) cho tem | `GET /api/label/qr` | ✅ |
@@ -452,17 +478,18 @@
 
 ---
 
-## 26. Audit & toàn vẹn dữ liệu
+## 27. Audit & toàn vẹn dữ liệu
 | Tính năng | Endpoint | Quyền |
 |---|---|---|
-| Liệt kê audit log (lọc entity) | `GET /api/audit` | đọc |
+| Liệt kê audit log (lọc entity) — thêm cột **Module** đầu bảng, suy ra phân hệ trực tiếp từ `entity_type` (frontend) | `GET /api/audit` | đọc |
 | Kiểm tra toàn vẹn hash-chain | `GET /api/audit/verify-chain` | đọc |
+| Xem chi tiết audit — modal hiện **diff trước/sau theo từng trường, nhãn tiếng Việt**, thay vì JSON thô | UI (nút "Xem" trên mỗi dòng audit) | đọc |
 
 **Đặc tính:** append-only (không có API sửa/xóa); `entry_hash = sha256(prev_hash + nội dung)`; `seq` UNIQUE chống race.
 
 ---
 
-## 27. Hệ thống & vận hành
+## 28. Hệ thống & vận hành
 | Tính năng | Endpoint / cơ chế |
 |---|---|
 | Health/readiness (kiểm tra DB) | `GET /api/health` |

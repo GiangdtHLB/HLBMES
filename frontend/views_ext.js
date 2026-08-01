@@ -705,13 +705,13 @@
     const day = 86400000;
     for (let t = Math.ceil(from / day) * day; t <= to; t += day) {
       const xx = x(t);
-      svg += `<line x1="${xx.toFixed(1)}" y1="${padT - 4}" x2="${xx.toFixed(1)}" y2="${H - 4}" stroke="#2b3a47" stroke-dasharray="2 3"/>
-        <text x="${(xx + 2).toFixed(1)}" y="14" fill="#8aa0b2" font-size="9">${new Date(t).toLocaleDateString("vi-VN", { day: "2-digit", month: "2-digit" })}</text>`;
+      svg += `<line x1="${xx.toFixed(1)}" y1="${padT - 4}" x2="${xx.toFixed(1)}" y2="${H - 4}" stroke="var(--border)" stroke-dasharray="2 3"/>
+        <text x="${(xx + 2).toFixed(1)}" y="14" fill="var(--muted)" font-size="9">${new Date(t).toLocaleDateString("vi-VN", { day: "2-digit", month: "2-digit" })}</text>`;
     }
     res.forEach((r, i) => {
       const y = padT + i * laneH;
-      svg += `<text x="6" y="${y + 18}" fill="#cdd9e3" font-size="11">${esc(r)}</text>
-        <line x1="${padL}" y1="${y + laneH - 1}" x2="${W - 12}" y2="${y + laneH - 1}" stroke="#2b3a47"/>`;
+      svg += `<text x="6" y="${y + 18}" fill="var(--text)" font-size="11">${esc(r)}</text>
+        <line x1="${padL}" y1="${y + laneH - 1}" x2="${W - 12}" y2="${y + laneH - 1}" stroke="var(--border)"/>`;
       (board.lanes[r] || []).forEach(s => {
         const x1 = x(s.start_at), w = Math.max(x(s.end_at) - x1, 3);
         const col = s.status === "material_short" ? "#c0392b" : (KIND[s.kind] || "#7f8c8d");
@@ -776,7 +776,7 @@
       { key: "dieuchuyen", label: "🔀 Điều chuyển" },
       { key: "capvao", label: "🚚 Cất vào vị trí" }, { key: "tudo", label: "🚫 Xuất tự do" },
       { key: "lenhdonghang", label: "Lệnh đóng hàng" }, { key: "aging", label: "📦 Tồn kho theo tuổi" },
-      { key: "canexpiry", label: "🕒 Bia cận date" },
+      { key: "canexpiry", label: "🕒 Bia cận date" }, { key: "consigned", label: "🎁 Bia gửi" },
       { key: "dm", label: "Danh mục vị trí kho" }, { key: "shipto", label: "Danh mục nơi xuất đến" },
       { key: "vehicles", label: "Danh mục lái xe" }];
     const root = $("view-wms");
@@ -1071,16 +1071,40 @@
           <div class="field" style="align-self:flex-end"><button class="btn" id="vh_add">+ Thêm xe</button></div>
         </div></div>`;
     } else if (sec === "canexpiry") {
+      const ceFpOpt = finishedProducts.map(fp => `<option value="${esc(fp.finished_product_id)}" data-code="${esc(fp.code)}">${esc(fp.code)} — ${esc(fp.name)}</option>`).join("");
+      const ceLocOpt = locs.map(l => `<option value="${esc(l.loc_id)}">${esc(l.code)} (${l.used}/${l.capacity})</option>`).join("");
       body = `<div class="panel"><h2>🕒 Nhập bia cận date</h2>
-        <div class="muted" style="margin-bottom:8px">Khai báo bia gần hết hạn được nhập lại kho (tăng tồn kho công ty như nhập kho thủ công) — hệ thống tự tìm lô chiết theo ngày giờ khai báo và tự nhận lô trong kho thành phẩm. Lịch sử nhập/xuất bia cận date được tách riêng khỏi Xuất kho thông thường (xem bảng bên dưới); khi Xuất kho tick "Chỉ bia cận date" cho 1 dòng, lượt xuất đó cũng tự động ghi vào lịch sử này.</div>
-        <div class="row">
-          <div class="field"><label>Ngày giờ khai báo</label><input type="datetime-local" id="ce_dt"/></div>
-          <button class="btn" id="ce_lookup" style="align-self:flex-end">Tìm lô chiết</button>
+        <div class="muted" style="margin-bottom:8px">Khai báo trực tiếp Sản phẩm + Số lượng bia gần hết hạn được nhập lại kho (tăng tồn kho công ty) — không cần chọn lô chiết gốc, vì tồn cận date thực tế thường gộp từ nhiều lô khác nhau. Hệ thống tự sinh 1 lô cận date riêng cho mỗi lần khai báo — luôn hiện thành dòng riêng ở Xuất kho (không gộp chung với tồn thường của sản phẩm) và được ưu tiên xuất trước. Lịch sử nhập/xuất bia cận date được tách riêng khỏi Xuất kho thông thường (xem bảng bên dưới); khi Xuất kho tick "Chỉ bia cận date" cho 1 dòng, lượt xuất đó cũng tự động ghi vào lịch sử này.</div>
+        <div class="row" style="flex-wrap:wrap">
+          <div class="field"><label>Sản phẩm</label>
+            <input id="ce_prod_q" placeholder="Tìm sản phẩm..." style="width:220px;margin-bottom:2px"/>
+            <select id="ce_prod" style="width:220px"><option value="">(chọn sản phẩm)</option>${ceFpOpt}</select></div>
+          <div class="field"><label>Số lượng</label><input id="ce_qty" type="number" min="1" style="width:100px"/></div>
+          <div class="field"><label>Vị trí kho nhận</label><select id="ce_loc" style="width:180px"><option value="">(chưa cất)</option>${ceLocOpt}</select></div>
+          <div class="field" style="flex:1;min-width:160px"><label>Ghi chú</label><input id="ce_note" placeholder="Tùy chọn"/></div>
+          <div class="field" style="align-self:flex-end"><button class="btn" id="ce_submit">+ Nhập bia cận date</button></div>
         </div>
-        <div id="ce_result" style="margin-top:10px"></div>
         <h3 style="margin-top:20px">Lịch sử bia cận date</h3>
         <input class="searchbox" data-tbl="t_ce_hist" placeholder="Tìm theo sản phẩm/lô..." style="margin-bottom:8px"/>
         <div id="ce_hist"><div class="muted">Đang tải…</div></div>
+      </div>`;
+    } else if (sec === "consigned") {
+      const gsFpOpt = finishedProducts.map(fp => `<option value="${esc(fp.finished_product_id)}" data-code="${esc(fp.code)}">${esc(fp.code)} — ${esc(fp.name)}</option>`).join("");
+      const gsLocOpt = locs.map(l => `<option value="${esc(l.loc_id)}">${esc(l.code)} (${l.used}/${l.capacity})</option>`).join("");
+      body = `<div class="panel"><h2>🎁 Nhập bia gửi</h2>
+        <div class="muted" style="margin-bottom:8px">Dùng khi xe đã xuất phiếu đi giao trong ngày nhưng giao không hết, mang phần dư về GỬI lại kho (khác bia cận date, khác đổi trả nhà phân phối). Khai báo trực tiếp Sản phẩm + Số lượng — hệ thống tự sinh 1 lô gửi riêng cho mỗi lần khai báo, luôn hiện thành dòng riêng ở Xuất kho và được ưu tiên xuất TRƯỚC cả bia cận date. Lịch sử nhập/xuất bia gửi được tách riêng khỏi Xuất kho thông thường; khi Xuất kho tick "Chỉ bia gửi" cho 1 dòng, lượt xuất đó tự động ghi vào lịch sử này. Lưu ý: lượng xuất lại này KHÔNG tính vào báo cáo "Xuất TP theo ca" (đã tính vào phiếu xuất gốc buổi sáng, tránh đếm trùng).</div>
+        <div class="row" style="flex-wrap:wrap">
+          <div class="field"><label>Sản phẩm</label>
+            <input id="gs_prod_q" placeholder="Tìm sản phẩm..." style="width:220px;margin-bottom:2px"/>
+            <select id="gs_prod" style="width:220px"><option value="">(chọn sản phẩm)</option>${gsFpOpt}</select></div>
+          <div class="field"><label>Số lượng</label><input id="gs_qty" type="number" min="1" style="width:100px"/></div>
+          <div class="field"><label>Vị trí kho nhận</label><select id="gs_loc" style="width:180px"><option value="">(chưa cất)</option>${gsLocOpt}</select></div>
+          <div class="field" style="flex:1;min-width:160px"><label>Ghi chú</label><input id="gs_note" placeholder="Tùy chọn"/></div>
+          <div class="field" style="align-self:flex-end"><button class="btn" id="gs_submit">+ Nhập bia gửi</button></div>
+        </div>
+        <h3 style="margin-top:20px">Lịch sử bia gửi</h3>
+        <input class="searchbox" data-tbl="t_gs_hist" placeholder="Tìm theo sản phẩm/lô..." style="margin-bottom:8px"/>
+        <div id="gs_hist"><div class="muted">Đang tải…</div></div>
       </div>`;
     }
     root.innerHTML = subnav("wms", sections, sec) + body;
@@ -1092,45 +1116,24 @@
     if (sec === "lenhdonghang") { wirePaginate("t_loadslip_hl", 10); wirePaginate("t_loadslip_dm", 10); }
 
     if (sec === "canexpiry") {
-      let ceCandidates = [];
-      let ceDeclaredAt = null;
-      $("ce_lookup").onclick = () => guard(async () => {
-        const dtVal = $("ce_dt").value;
-        if (!dtVal) { toast("Chọn ngày giờ khai báo", "err"); return; }
-        ceDeclaredAt = new Date(dtVal).toISOString();
-        ceCandidates = await POST("/wms/near-expiry/lookup", { declared_at: ceDeclaredAt });
-        if (!ceCandidates.length) {
-          $("ce_result").innerHTML = `<div class="muted">Không tìm thấy lô chiết nào đang hoạt động tại thời điểm này.</div>`;
-          return;
-        }
-        $("ce_result").innerHTML = `<div class="tablewrap"><table>
-          <thead><tr><th>Mã chiết</th><th>Sản phẩm</th><th>Lô</th><th>Bắt đầu</th><th>Kết thúc</th><th>Loại ĐV</th><th>SL nhập lại</th><th></th></tr></thead>
-          <tbody>${ceCandidates.map((c, i) => `<tr>
-            <td><code class="k">${esc(c.bottle_code)}</code></td>
-            <td>${esc(fpLabel(c.product_name))}</td><td class="muted">${esc(c.lot_code || "")}</td>
-            <td class="muted">${fmt(c.bottle_date)}</td><td class="muted">${c.ended_at ? fmt(c.ended_at) : "Chưa kết thúc"}</td>
-            <td>${c.unit_type === "keg" ? "Keg" : "Vỉ"}</td>
-            <td><input type="number" min="1" value="1" style="width:80px" data-ce-qty="${i}"/></td>
-            <td><button class="btn sm" data-ce-confirm="${i}">Xác nhận nhập</button></td></tr>`).join("")}</tbody></table></div>`;
-        ceCandidates.forEach((c, i) => {
-          const btn = document.querySelector(`[data-ce-confirm="${i}"]`);
-          if (!btn) return;
-          btn.onclick = () => guard(async () => {
-            const qty = parseInt(document.querySelector(`[data-ce-qty="${i}"]`).value, 10) || 0;
-            if (qty <= 0) { toast("Nhập số lượng > 0", "err"); return; }
-            await POST("/wms/near-expiry", { bottle_id: c.bottle_id, quantity: qty, declared_at: ceDeclaredAt });
-            toast(`Đã nhập ${qty} ${c.unit_type === "keg" ? "keg" : "vỉ"} bia cận date`);
-            render("wms");
-          });
-        });
+      wireSelectSearch("ce_prod", "ce_prod_q");
+      $("ce_submit").onclick = () => guard(async () => {
+        if (!$("ce_prod").value) { toast("Chọn sản phẩm", "err"); return; }
+        const qty = parseInt($("ce_qty").value, 10) || 0;
+        if (qty <= 0) { toast("Nhập số lượng > 0", "err"); return; }
+        const res = await POST("/wms/near-expiry", { finished_product_id: $("ce_prod").value, quantity: qty,
+          location_id: $("ce_loc").value || null, note: $("ce_note").value || null });
+        toast(`Đã nhập ${qty} ${res.unit_type === "keg" ? "keg" : "vỉ"} bia cận date — lô riêng ${res.lot_code}`);
+        render("wms");
       });
       GET("/wms/near-expiry").then(entries => {
         $("ce_hist").innerHTML = entries.length ? `<div class="tablewrap"><table id="t_ce_hist">
-          <thead><tr><th>Chiều</th><th>Sản phẩm</th><th>Lô</th><th>Loại ĐV</th><th>SL</th><th>Ngày khai báo</th><th>Phiếu xuất</th><th>Ghi chú</th><th>Người tạo</th><th>Thời gian</th><th></th></tr></thead>
+          <thead><tr><th>Chiều</th><th>Sản phẩm</th><th>Lô</th><th>Loại ĐV</th><th>SL</th><th>Vị trí</th><th>Ngày khai báo</th><th>Phiếu xuất</th><th>Ghi chú</th><th>Người tạo</th><th>Thời gian</th><th></th></tr></thead>
           <tbody>${entries.map(e => `<tr>
             <td>${e.direction === "in" ? '<span class="badge available">Nhập</span>' : '<span class="badge on_hold">Xuất</span>'}</td>
             <td>${esc(fpLabel(e.product_name))}</td><td class="muted">${esc(e.lot_code || "")}</td>
             <td>${e.unit_type === "keg" ? "Keg" : "Vỉ"}</td><td>${e.quantity}</td>
+            <td class="muted">${esc(e.location_code || "—")}</td>
             <td class="muted">${e.declared_at ? fmt(e.declared_at) : "—"}</td>
             <td class="muted">${esc(e.shipment_code || "—")}</td>
             <td class="muted">${esc(e.note || "")}</td>
@@ -1146,6 +1149,42 @@
           render("wms");
         }));
       }).catch(() => { $("ce_hist").innerHTML = `<div class="muted">Không tải được lịch sử.</div>`; });
+    }
+
+    if (sec === "consigned") {
+      wireSelectSearch("gs_prod", "gs_prod_q");
+      $("gs_submit").onclick = () => guard(async () => {
+        if (!$("gs_prod").value) { toast("Chọn sản phẩm", "err"); return; }
+        const qty = parseInt($("gs_qty").value, 10) || 0;
+        if (qty <= 0) { toast("Nhập số lượng > 0", "err"); return; }
+        const res = await POST("/wms/consigned", { finished_product_id: $("gs_prod").value, quantity: qty,
+          location_id: $("gs_loc").value || null, note: $("gs_note").value || null });
+        toast(`Đã nhập ${qty} ${res.unit_type === "keg" ? "keg" : "vỉ"} bia gửi — lô riêng ${res.lot_code}`);
+        render("wms");
+      });
+      GET("/wms/consigned").then(entries => {
+        $("gs_hist").innerHTML = entries.length ? `<div class="tablewrap"><table id="t_gs_hist">
+          <thead><tr><th>Chiều</th><th>Sản phẩm</th><th>Lô</th><th>Loại ĐV</th><th>SL</th><th>Vị trí</th><th>Ngày khai báo</th><th>Phiếu xuất</th><th>Ghi chú</th><th>Người tạo</th><th>Thời gian</th><th></th></tr></thead>
+          <tbody>${entries.map(e => `<tr>
+            <td>${e.direction === "in" ? '<span class="badge available">Nhập</span>' : '<span class="badge on_hold">Xuất</span>'}</td>
+            <td>${esc(fpLabel(e.product_name))}</td><td class="muted">${esc(e.lot_code || "")}</td>
+            <td>${e.unit_type === "keg" ? "Keg" : "Vỉ"}</td><td>${e.quantity}</td>
+            <td class="muted">${esc(e.location_code || "—")}</td>
+            <td class="muted">${e.declared_at ? fmt(e.declared_at) : "—"}</td>
+            <td class="muted">${esc(e.shipment_code || "—")}</td>
+            <td class="muted">${esc(e.note || "")}</td>
+            <td class="muted">${esc(e.created_by || "")}</td><td class="muted">${fmt(e.created_at)}</td>
+            <td>${e.reversed ? '<span class="muted">Đã hoàn tác</span>' :
+                  e.can_undo ? `<button class="btn sm sec" data-undo-gs="${esc(e.entry_id)}">Hoàn tác</button>` : ""}</td></tr>`).join("")}</tbody></table></div>`
+          : `<div class="muted">Chưa có lịch sử bia gửi nào.</div>`;
+        wireSearch(); wirePaginate("t_gs_hist", 10);
+        document.querySelectorAll("[data-undo-gs]").forEach(b => b.onclick = () => guard(async () => {
+          if (!confirm("Hoàn tác bản khai \"Nhập bia gửi\" này? Các vỉ/keg vừa nhập lại sẽ bị xoá khỏi tồn kho.")) return;
+          await POST(`/wms/consigned/${b.dataset.undoGs}/undo`);
+          toast("Đã hoàn tác bản khai bia gửi");
+          render("wms");
+        }));
+      }).catch(() => { $("gs_hist").innerHTML = `<div class="muted">Không tải được lịch sử.</div>`; });
     }
 
     if (sec === "kho") {
@@ -1382,12 +1421,17 @@
             if (count) rows.push({ product_name: g.product_name, lot_code: g.lot_code, unit_type: t, count,
                                    fifo_ok: g[`${t}_fifo_ok`], oldest_at: g[`${t}_oldest_at`], bottle_codes: g.bottle_codes,
                                    locations: g[`${t}_locations`] || [], unplaced: g[`${t}_unplaced`] || 0,
-                                   near_expiry_count: g[`${t}_near_expiry_count`] || 0 });
+                                   near_expiry_count: g[`${t}_near_expiry_count`] || 0,
+                                   consigned_count: g[`${t}_consigned_count`] || 0 });
           });
         });
-        // Ưu tiên tên sản phẩm trước, trong cùng sản phẩm thì lô/loại cũ nhất (FIFO) lên trước
-        // — giúp người xuất dễ tìm và luôn thấy dòng nào nên chọn trước.
-        rows.sort((a, b) => (a.product_name || "").localeCompare(b.product_name || "") ||
+        // Lô có bia GỬI lên đầu bảng TRƯỚC CẢ cận date (xe đã xuất phiếu buổi sáng giao không
+        // hết, mang về gửi — cần xuất lại sớm nhất); sau đó tới lô có bia CẬN DATE; trong cùng
+        // nhóm mới sắp theo tên sản phẩm, rồi tới lô/loại cũ nhất (FIFO) — giúp người xuất dễ
+        // tìm và luôn thấy dòng nào nên chọn trước.
+        rows.sort((a, b) => (((b.consigned_count || 0) > 0 ? 1 : 0) - ((a.consigned_count || 0) > 0 ? 1 : 0)) ||
+          (((b.near_expiry_count || 0) > 0 ? 1 : 0) - ((a.near_expiry_count || 0) > 0 ? 1 : 0)) ||
+          (a.product_name || "").localeCompare(b.product_name || "") ||
           new Date(a.oldest_at || 0) - new Date(b.oldest_at || 0));
         return rows;
       }
@@ -1400,8 +1444,12 @@
       function renderLots() {
         const rows = filteredLotRows();
         $("xk_lots").innerHTML = rows.length ? `<div class="tablewrap" style="margin-top:10px"><table>
-          <thead><tr><th>Sản phẩm</th><th>Lô</th><th>Mã chiết</th><th>Loại</th><th>Tồn</th><th>Vị trí kho</th><th>FIFO</th><th>SL cần xuất</th><th>Loại xuất</th><th>Cận date</th><th></th></tr></thead>
-          <tbody>${rows.map((r, i) => { const sellable = sellableOf(r); const neAvailable = (r.near_expiry_count || 0) > 0; return `<tr>
+          <thead><tr><th>Sản phẩm</th><th>Lô</th><th>Mã chiết</th><th>Loại</th><th>Tồn</th><th>Vị trí kho</th><th>FIFO</th><th>SL cần xuất</th><th>Loại xuất</th><th>Bia gửi</th><th>Cận date</th><th></th></tr></thead>
+          <tbody>${rows.map((r, i) => { const sellable = sellableOf(r); const neAvailable = (r.near_expiry_count || 0) > 0;
+            const neFull = neAvailable && r.count === r.near_expiry_count;
+            const gsAvailable = (r.consigned_count || 0) > 0;
+            const gsFull = gsAvailable && r.count === r.consigned_count;
+            return `<tr${gsFull ? ' class="row-cyan"' : neFull ? ' class="row-cyan"' : ""}>
             <td>${esc(fpLabel(r.product_name))}</td><td>${esc(r.lot_code || "")}</td>
             <td class="muted">${esc((r.bottle_codes || []).join(", ") || "—")}</td>
             <td>${unitTypeLabel({ product: r.product_name, unit_type: r.unit_type })}</td><td>${r.count}</td>
@@ -1410,8 +1458,10 @@
             <td><input type="number" min="1" max="${sellable}" value="${sellable}" style="width:80px" data-xk-qty="${i}" ${sellable > 0 ? "" : "disabled"}
               title="${sellable > 0 ? "" : "Chưa cất vào vị trí kho — không thể xuất"}"/></td>
             <td><select data-xk-type="${i}">${XK_TYPE_OPTIONS}</select></td>
-            <td title="${neAvailable ? "Chỉ chọn vỉ/keg từ Nhập bia cận date" : "Lô/loại này chưa có bia cận date nào được khai báo"}">
-              <input type="checkbox" data-xk-ne="${i}" ${neAvailable ? "" : "disabled"}/></td>
+            <td title="${gsFull ? "Toàn bộ lô này là bia gửi — luôn xuất là bia gửi" : gsAvailable ? "Chỉ chọn vỉ/keg từ Nhập bia gửi" : "Lô/loại này chưa có bia gửi nào được khai báo"}">
+              ${gsFull ? '<span class="badge on_hold">🎁 Bia gửi</span>' : `<input type="checkbox" data-xk-gs="${i}" ${gsAvailable ? "" : "disabled"}/>`}</td>
+            <td title="${neFull ? "Toàn bộ lô này là bia cận date — luôn xuất là bia cận date" : neAvailable ? "Chỉ chọn vỉ/keg từ Nhập bia cận date" : "Lô/loại này chưa có bia cận date nào được khai báo"}">
+              ${neFull ? '<span class="badge on_hold">🕒 Cận date</span>' : `<input type="checkbox" data-xk-ne="${i}" ${neAvailable ? "" : "disabled"}/>`}</td>
             <td><button class="btn sm" data-xk-add="${i}">+ Thêm</button></td></tr>`; }).join("")}</tbody></table></div>`
           : `<div class="muted" style="margin-top:10px">Không còn lô nào tồn kho khớp bộ lọc.</div>`;
         rows.forEach((r, i) => {
@@ -1423,15 +1473,23 @@
             const qty = parseInt(document.querySelector(`[data-xk-qty="${i}"]`).value, 10) || 0;
             if (qty <= 0) { toast("Nhập số lượng > 0", "err"); return; }
             if (qty > sellable) { toast(`Chỉ có ${sellable} đã cất vào vị trí kho (còn ${r.unplaced} chưa cất, không thể chọn xuất phần chưa cất)`, "err"); return; }
-            const near_expiry_only = document.querySelector(`[data-xk-ne="${i}"]`).checked;
+            const neFull = (r.near_expiry_count || 0) > 0 && r.count === r.near_expiry_count;
+            const neCheckbox = document.querySelector(`[data-xk-ne="${i}"]`);
+            const near_expiry_only = neFull || (neCheckbox ? neCheckbox.checked : false);
+            const gsFull = (r.consigned_count || 0) > 0 && r.count === r.consigned_count;
+            const gsCheckbox = document.querySelector(`[data-xk-gs="${i}"]`);
+            const consigned_only = gsFull || (gsCheckbox ? gsCheckbox.checked : false);
+            if (near_expiry_only && consigned_only) { toast("Chỉ được chọn 1 trong 2 — bia cận date HOẶC bia gửi.", "err"); return; }
             if (near_expiry_only && !((r.near_expiry_count || 0) > 0)) { toast("Lô/loại này chưa có bia cận date nào được khai báo.", "err"); return; }
             if (near_expiry_only && qty > r.near_expiry_count) { toast(`Chỉ còn ${r.near_expiry_count} bia cận date cho lô/loại này`, "err"); return; }
+            if (consigned_only && !((r.consigned_count || 0) > 0)) { toast("Lô/loại này chưa có bia gửi nào được khai báo.", "err"); return; }
+            if (consigned_only && qty > r.consigned_count) { toast(`Chỉ còn ${r.consigned_count} bia gửi cho lô/loại này`, "err"); return; }
             const shipment_type = document.querySelector(`[data-xk-type="${i}"]`).value;
             XK_CART.push({ product_name: r.product_name, lot_code: r.lot_code, unit_type: r.unit_type,
-                          quantity: qty, shipment_type, near_expiry_only, fifo_ok: r.fifo_ok,
+                          quantity: qty, shipment_type, near_expiry_only, consigned_only, fifo_ok: r.fifo_ok,
                           location_label: placedLocationLabel(r) });
             renderCart();
-            toast(`Đã thêm ${qty} ${unitTypeLabel({ product: r.product_name, unit_type: r.unit_type }).toLowerCase()} vào phiếu${near_expiry_only ? " (chỉ bia cận date)" : ""}`);
+            toast(`Đã thêm ${qty} ${unitTypeLabel({ product: r.product_name, unit_type: r.unit_type }).toLowerCase()} vào phiếu${consigned_only ? " (chỉ bia gửi)" : near_expiry_only ? " (chỉ bia cận date)" : ""}`);
           };
         });
       }
@@ -1453,15 +1511,16 @@
 
       function renderCart() {
         $("xk_cart").innerHTML = XK_CART.length ? `<div class="tablewrap"><table>
-          <thead><tr><th>Sản phẩm</th><th>Lô</th><th>Vị trí kho</th><th>Loại</th><th>SL</th><th>FIFO</th><th>Loại xuất</th><th>Cận date</th><th></th></tr></thead>
+          <thead><tr><th>Sản phẩm</th><th>Lô</th><th>Vị trí kho</th><th>Loại</th><th>SL</th><th>FIFO</th><th>Lý do (nếu không đúng FIFO)</th><th>Loại xuất</th><th>Bia gửi/Cận date</th><th></th></tr></thead>
           <tbody>${XK_CART.map((c, i) => { const lotOpts = lotOptionsFor(c.product_name, c.unit_type); return `<tr><td>${esc(fpLabel(c.product_name))}</td>
             <td>${lotOpts.length ? `<select data-xk-lot="${i}">${lotOpts.map(o => `<option value="${esc(o.lot_code || "")}" ${o.lot_code === c.lot_code ? "selected" : ""}>${esc(o.lot_code || "(không lô)")} — còn ${o.sellable}${o.fifo_ok ? " · FIFO" : ""}</option>`).join("")}</select>`
               : esc(c.lot_code || "")}</td>
             <td class="muted">${esc(c.location_label || "—")}</td>
             <td>${unitTypeLabel({ product: c.product_name, unit_type: c.unit_type })}</td><td>${c.quantity}</td>
             <td>${c.fifo_ok ? '<span class="badge available">✓ FIFO</span>' : '<span class="badge on_hold">⚠ Không phải lô cũ nhất</span>'}</td>
+            <td>${c.fifo_ok ? '<span class="muted">—</span>' : `<input data-xk-reason="${i}" placeholder="Bắt buộc nhập lý do" value="${esc(c.fifo_reason || "")}" style="width:180px;border-color:var(--red)"/>`}</td>
             <td><span class="badge ${c.shipment_type === "promo" ? "planned" : c.shipment_type === "return" ? "on_hold" : "available"}">${shipmentTypeLabel(c.shipment_type)}</span></td>
-            <td>${c.near_expiry_only ? '<span class="badge on_hold">🕒 Cận date</span>' : '<span class="muted">—</span>'}</td>
+            <td>${c.consigned_only ? '<span class="badge on_hold">🎁 Bia gửi</span>' : c.near_expiry_only ? '<span class="badge on_hold">🕒 Cận date</span>' : '<span class="muted">—</span>'}</td>
             <td><button class="btn sm sec" data-xk-del="${i}">Xoá</button></td></tr>`; }).join("")}</tbody></table></div>
           <div class="row" style="margin-top:10px;align-items:center">
             <div class="muted">Tổng: <b>${XK_CART.length}</b> dòng</div>
@@ -1472,12 +1531,16 @@
           XK_CART.splice(parseInt(b.dataset.xkDel, 10), 1);
           renderCart();
         });
+        document.querySelectorAll("[data-xk-reason]").forEach(inp => inp.oninput = () => {
+          XK_CART[parseInt(inp.dataset.xkReason, 10)].fifo_reason = inp.value;
+        });
         document.querySelectorAll("[data-xk-lot]").forEach(sel => sel.onchange = () => {
           const idx = parseInt(sel.dataset.xkLot, 10);
           const c = XK_CART[idx];
           const chosen = lotOptionsFor(c.product_name, c.unit_type).find(o => o.lot_code === sel.value);
           c.lot_code = sel.value || null;
           c.fifo_ok = chosen ? chosen.fifo_ok : false;
+          if (c.fifo_ok) c.fifo_reason = null;
           c.location_label = chosen ? placedLocationLabel(chosen) : "—";
           if (chosen && c.quantity > chosen.sellable) {
             toast(`Lô ${chosen.lot_code || ""} chỉ có ${chosen.sellable} đã cất vào vị trí kho — đã giảm SL cho khớp`, "err");
@@ -1488,6 +1551,13 @@
         if ($("xk_submit")) $("xk_submit").onclick = () => guard(async () => {
           if (!$("xk_shipto").value) { toast("Chọn nơi xuất đến", "err"); return; }
           if (!XK_CART.length) { toast("Chưa có dòng nào trong phiếu", "err"); return; }
+          // Dòng nào lấy lô không đúng FIFO (không phải lô cũ nhất) bắt buộc phải giải trình lý
+          // do trước khi được phép tạo phiếu — tránh xuất sai FIFO mà không ai biết vì sao.
+          const missingReason = XK_CART.find(c => !c.fifo_ok && !(c.fifo_reason || "").trim());
+          if (missingReason) {
+            toast(`Dòng ${fpLabel(missingReason.product_name)} — lô ${missingReason.lot_code || "(không lô)"} không đúng FIFO: phải nhập lý do trước khi tạo phiếu`, "err");
+            return;
+          }
           // Mỗi dòng trong giỏ có thể mang 1 Loại xuất riêng (thường/khuyến mại/đổi trả) —
           // Shipment chỉ lưu 1 loại/phiếu, nên gom các dòng cùng loại thành 1 phiếu, tạo lần
           // lượt 1..N phiếu nếu giỏ có nhiều loại khác nhau.
@@ -1500,11 +1570,17 @@
           let created = 0, anyFifoBad = false;
           for (const t of Object.keys(groups)) {
             const lines = groups[t];
+            // Gộp lý do của các dòng không đúng FIFO trong phiếu này vào note của Shipment —
+            // note vốn đã có sẵn ở model/schema (Lý do xuất kho) nhưng Xuất kho chưa dùng tới.
+            const fifoNotes = lines.filter(c => !c.fifo_ok)
+              .map(c => `${fpLabel(c.product_name)} lô ${c.lot_code || "(không lô)"}: ${c.fifo_reason.trim()}`);
             const res = await POST("/wms/shipments", {
               ship_to_id: $("xk_shipto").value,
               lines: lines.map(c => ({ product_name: c.product_name, lot_code: c.lot_code,
                                        unit_type: c.unit_type, quantity: c.quantity,
-                                       near_expiry_only: c.near_expiry_only || false })),
+                                       near_expiry_only: c.near_expiry_only || false,
+                                       consigned_only: c.consigned_only || false })),
+              note: fifoNotes.length ? `Xuất không đúng FIFO — ${fifoNotes.join("; ")}` : null,
               recipient_name: shipTo ? shipTo.name : null,
               driver_name: vehicle ? (vehicle.driver_name || vehicle.driver_short_name) : null,
               vehicle_plate: vehicle ? vehicle.plate : null,
@@ -1547,11 +1623,11 @@
           modal(`<h3>Sản phẩm trong phiếu — ${esc(s.shipment_code)}</h3>
             <div class="muted" style="margin-bottom:6px">Xuất từ kho: <b>${esc(s.from_location || "—")}</b></div>
             <div class="tablewrap"><table>
-              <thead><tr><th>Sản phẩm</th><th>Lô</th><th>Loại</th><th>SL</th><th>Loại xuất</th><th>Cận date</th></tr></thead>
+              <thead><tr><th>Sản phẩm</th><th>Lô</th><th>Loại</th><th>SL</th><th>Loại xuất</th><th>Bia gửi/Cận date</th></tr></thead>
               <tbody>${s.lines.map(l => `<tr><td>${esc(fpLabel(l.product))}</td><td>${esc(l.lot_code || "—")}</td>
                 <td>${unitTypeLabel(l)}</td><td>${l.count}</td>
                 <td><span class="badge ${s.shipment_type === "promo" ? "planned" : s.shipment_type === "return" ? "on_hold" : "available"}">${shipmentTypeLabel(s.shipment_type)}</span></td>
-                <td>${l.near_expiry ? '<span class="badge on_hold">🕒 Cận date</span>' : '<span class="muted">—</span>'}</td></tr>`).join("") ||
+                <td>${l.consigned ? '<span class="badge on_hold">🎁 Bia gửi</span>' : l.near_expiry ? '<span class="badge on_hold">🕒 Cận date</span>' : '<span class="muted">—</span>'}</td></tr>`).join("") ||
                 '<tr><td colspan=6 class="muted">Không còn dòng nào (đã hoàn tác).</td></tr>'}</tbody>
             </table></div>`);
         });
@@ -2223,7 +2299,7 @@
 
   // Gọi từ app.js (data-cip="scopeType|scopeId|label" trên dòng mẻ nấu/lô LM/mẻ lọc/mã chiết) —
   // "gán ngược": người dùng luôn tự chọn/xác nhận, server chỉ gợi ý theo thiết bị+khu vực.
-  window.openCipLinkModal = async function (scopeType, scopeId, label) {
+  window.openCipLinkModal = async function (scopeType, scopeId, label, onBack) {
     const [suggestions, linked] = await Promise.all([
       GET(`/cip/suggest?scope_type=${encodeURIComponent(scopeType)}&scope_id=${encodeURIComponent(scopeId)}`),
       GET(`/cip/links?scope_type=${encodeURIComponent(scopeType)}&scope_id=${encodeURIComponent(scopeId)}`),
@@ -2253,10 +2329,10 @@
         <div class="tablewrap" style="margin-bottom:12px"><table><tbody>${currentRows}</tbody></table></div>` : ""}
       <div class="muted" style="margin-bottom:8px">Chọn (các) lần CIP tương ứng đã thực hiện cho mẻ/lô này — theo thiết bị, thời gian gần nhất trước. Bạn tự xác nhận đúng lần nào, hệ thống không tự gán:</div>
       <div style="max-height:50vh;overflow:auto">${groups}</div>
-      <button class="btn" id="cip_link_save" style="margin-top:10px">Lưu gắn kết</button>`);
+      <button class="btn" id="cip_link_save" style="margin-top:10px">Lưu gắn kết</button>`, onBack);
     document.querySelectorAll("[data-cip-unlink]").forEach(b => b.onclick = () => guard(async () => {
       await DELETE(`/cip/links/${b.dataset.cipUnlink}`);
-      toast("Đã hủy gắn"); closeModal(); window.openCipLinkModal(scopeType, scopeId, label);
+      toast("Đã hủy gắn"); closeModal(); window.openCipLinkModal(scopeType, scopeId, label, onBack);
     }));
     $("cip_link_save").onclick = () => guard(async () => {
       const ids = Array.from(document.querySelectorAll("[data-cip-check]:not(:disabled):checked")).map(c => c.value);

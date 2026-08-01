@@ -278,6 +278,48 @@ class RecipeVersionOut(ORMModel):
     created_at: datetime
 
 
+# ---- Formula (Công thức NVL mới — thay Recipe/RecipeVersion, xem models/formula.py) ----
+class FormulaMaterialLineIn(BaseModel):
+    material_code: str
+    qty: float
+    uom: str
+
+
+class FormulaIn(BaseModel):
+    code: str
+    product_id: str
+    note: Optional[str] = None
+    base_qty: float = 0.0
+    base_uom: str = "L"
+    materials: list[FormulaMaterialLineIn] = []
+
+
+class FormulaOut(ORMModel):
+    formula_id: str
+    code: str
+    product_id: str
+    note: Optional[str] = None
+    base_qty: float = 0.0
+    base_uom: str = "L"
+    materials: list
+    is_active: bool
+    locked: bool
+    locked_by: Optional[str] = None
+    locked_at: Optional[datetime] = None
+    created_by: Optional[str] = None
+    created_at: datetime
+
+
+class FormulaActivationLogOut(ORMModel):
+    log_id: str
+    formula_id: str
+    product_id: str
+    action: str
+    note: Optional[str] = None
+    changed_by: str
+    changed_at: datetime
+
+
 class TransitionIn(BaseModel):
     target: str
     reason: Optional[str] = None
@@ -469,6 +511,7 @@ class ShipmentLineIn(BaseModel):
     unit_type: str
     quantity: int
     near_expiry_only: bool = False  # chỉ chọn vỉ/keg từ "Nhập bia cận date" (is_near_expiry=True)
+    consigned_only: bool = False    # chỉ chọn vỉ/keg từ "Nhập bia gửi" (is_consigned=True)
 
 
 class ShipmentIn(BaseModel):
@@ -484,14 +527,17 @@ class ShipmentIn(BaseModel):
     shipment_type: str = "normal"                # normal | promo | return — nhãn phân loại, không đổi luồng tồn kho
 
 
-class NearExpiryLookupIn(BaseModel):
-    declared_at: datetime  # ngày giờ khai báo — phần mềm tự tìm lô chiết chứa mốc này
-
-
 class NearExpiryEntryIn(BaseModel):
-    bottle_id: str
+    finished_product_id: str
     quantity: int
-    declared_at: datetime
+    location_id: Optional[str] = None  # vị trí kho nhận — bỏ trống nếu chưa cất
+    note: Optional[str] = None
+
+
+class ConsignedEntryIn(BaseModel):
+    finished_product_id: str
+    quantity: int
+    location_id: Optional[str] = None  # vị trí kho nhận — bỏ trống nếu chưa cất
     note: Optional[str] = None
 
 
