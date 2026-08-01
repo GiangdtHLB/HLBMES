@@ -182,6 +182,30 @@ function initCheckboxMultiSelect(container, items, initialSelected) {
   return { getSelected: () => [...selected] };
 }
 
+// Ô tìm nhanh phía trên 1 <select multiple> dài (VD chọn vật tư thành viên Nhóm vật tư thay
+// thế) — ẩn bớt <option> không khớp từ khóa, KHÔNG đụng tới lựa chọn hiện có (option.hidden
+// không làm mất selected).
+function wireMultiSelectFilter(searchEl, selectEl) {
+  if (!searchEl || !selectEl) return;
+  searchEl.addEventListener("input", () => {
+    const q = searchEl.value.trim().toLowerCase();
+    [...selectEl.options].forEach(o => { o.hidden = !!q && !o.textContent.toLowerCase().includes(q); });
+  });
+}
+
+// Dòng phụ hiện tồn TỪNG mã thành viên của 1 dòng NVL khai theo Nhóm vật tư thay thế (VD
+// "Malt Úc" = Malt Úc rời + Malt Úc bao) — để người lập Lệnh nấu thấy đúng nhóm gồm những
+// mã nào và mã nào đang thực sự còn tồn, không chỉ số tổng cộng dồn của cả nhóm. colspanLeft/
+// colspanRight canh dòng phụ thẳng cột với bảng chính (STT+Tên NVL ở bên trái, Tồn CT/PX ở
+// giữa, phần còn lại bên phải để trống).
+function bomMemberRowsHtml(l, colspanLeft, colspanRight) {
+  if (!l.member_breakdown || !l.member_breakdown.length) return "";
+  return l.member_breakdown.map(mb => `<tr class="muted" style="font-size:12px" title="Tồn kho hiện tại (không phải lúc lập phiếu)">
+    <td colspan="${colspanLeft}" style="padding-left:24px">↳ ${esc(mb.material_code || "")} — ${esc(mb.material_name || "")}</td>
+    <td>${mb.stock_company} <span style="font-size:10px">(hiện tại)</span></td><td>${mb.stock_workshop} <span style="font-size:10px">(hiện tại)</span></td>
+    <td colspan="${colspanRight}"></td></tr>`).join("");
+}
+
 // Ô nhập gõ-để-tìm thay cho <select> khi danh sách dài (VD nguyên liệu trong Nhập kho) —
 // txtId: input text hiển thị nhãn đã chọn; hiddenId: input hidden giữ giá trị thật (id) để
 // code đọc giá trị ở nơi khác ($(hiddenId).value) không phải đổi gì. items: [{value, label}].
@@ -1096,10 +1120,11 @@ VIEWS.orders = async function () {
 
   else if (sec === "lenhloc") {
     const ynLf = YEARS.lenhloc;
-    const [masters, fermentsData, materialsLf, bbtTanksLf, finishedProductsLf] = await Promise.all([
+    const [masters, fermentsData, materialsLf, bbtTanksLf, finishedProductsLf, materialGroupsLf, materialAltGroupsLf] = await Promise.all([
       GET("/brewing/filter-master-orders" + (ynLf ? "?" + ynLf.map(y => "years=" + y).join("&") : "")),
       GET("/brewing/ferments"), GET("/materials"),
-      GET("/brewing/bbt-tanks").catch(() => []), GET("/finished-products")]);
+      GET("/brewing/bbt-tanks").catch(() => []), GET("/finished-products"),
+      GET("/material-groups"), GET("/material-alt-groups")]);
     // Tank đã lọc hết (on_hand_cct về 0 hoặc âm — derived.ferment_status trả "da_loc_het")
     // không còn dịch để lọc thêm nữa, dù đã KCS duyệt cũng không hiện ra để chọn lại.
     approvedTanksLf = fermentsData.items.filter(f => f.qc_approved && f.status !== "da_loc_het");
@@ -1109,6 +1134,8 @@ VIEWS.orders = async function () {
     availableBbtTanksLf = bbtTanksLf.filter(t => t.eligible_for_refilter_source);
     CACHE.materialsLf = materialsLf;
     CACHE.finishedProductsLf = finishedProductsLf;
+    CACHE.materialGroupsLf = materialGroupsLf;
+    CACHE.materialAltGroupsLf = materialAltGroupsLf;
     body = `<div class="panel"><h2>Tạo Lệnh lọc</h2>
       <div class="muted" style="margin-bottom:6px">1 Lệnh lọc (số lệnh) có thể chứa nhiều "Lệnh lọc nhỏ" bên trong — mỗi lệnh nhỏ tự chọn
         <b>Không phối</b> (1 tank lên men) hoặc <b>Phối</b> (2+ tank, phải cùng 1 dịch bia), tự có vật tư riêng, tự khai báo thể tích dịch kế hoạch
@@ -1222,9 +1249,9 @@ VIEWS.orders = async function () {
             <td>${esc(l.stt_label || "")}</td><td>${esc(l.material_name || "—")}</td><td>${esc(l.uom || "")}</td>
             <td>${l.qty_per_batch ?? "—"}</td><td>${l.qty_total ?? "—"}</td>
             <td>${l.stock_company_snapshot ?? "—"}</td><td>${l.stock_workshop_snapshot ?? "—"}</td>
-            <td>${l.material_id
+            <td>${!l.is_header
               ? (l.shortage ? '<span class="badge on_hold">⚠ Thiếu</span>' : '<span class="badge available">✓ Đủ</span>')
-              : '<span class="muted">—</span>'}</td></tr>`).join("")}</tbody></table></div></div>`;
+              : '<span class="muted">—</span>'}</td></tr>${bomMemberRowsHtml(l, 5, 1)}`).join("")}</tbody></table></div></div>`;
       }));
       document.querySelectorAll("[data-lnchildrm]").forEach(b => b.onclick = () => {
         lnChildren.splice(parseInt(b.dataset.lnchildrm, 10), 1); renderLnChildren();
@@ -1385,8 +1412,35 @@ VIEWS.orders = async function () {
       }
       return `Còn khả dụng để lọc lại: <b>${t.remaining_hl.toLocaleString("vi-VN")} hl</b>`;
     };
-    const materialOptsLf = (selected) => `<option value="">(chọn vật tư)</option>` + (CACHE.materialsLf || []).map(m =>
-      `<option value="${esc(m.material_id)}" ${m.material_id === selected ? "selected" : ""}>${esc(m.code)} — ${esc(m.name)}</option>`).join("");
+    // Vật tư sử dụng trong Lệnh lọc — mirror fmMaterialSearchItems/fmMaterialLabel (Công
+    // thức): tìm-để-lọc thay vì <select> liệt kê hết (hàng trăm mã, đa số không phải NVL);
+    // danh sách CHỈ lấy vật tư thuộc Nhóm vật tư được đánh dấu "Nguyên liệu (chính/phụ)"
+    // (MaterialGroup.is_raw_material), cộng thêm lựa chọn Nhóm vật tư thay thế (Malt Úc rời/
+    // bao...). Value dùng material_id (khác Công thức dùng material_code) vì
+    // FilterOrderMaterialLineIn vốn nhận material_id trực tiếp.
+    const lfMaterialSearchItems = () => {
+      const rawGroupCodes = new Set((CACHE.materialGroupsLf || []).filter(g => g.is_raw_material).map(g => g.code));
+      const matItems = (CACHE.materialsLf || []).filter(m => rawGroupCodes.has(m.category))
+        .map(m => ({ value: m.material_id, label: `${m.code} — ${m.name}` }));
+      const groupItems = (CACHE.materialAltGroupsLf || []).filter(g => g.active)
+        .map(g => ({ value: `grp:${g.code}`, label: `${g.name} (nhóm vật tư thay thế)` }));
+      return [...matItems, ...groupItems];
+    };
+    const lfMaterialLabel = (materialId, groupCode) => {
+      if (groupCode) {
+        const g = (CACHE.materialAltGroupsLf || []).find(x => x.code === groupCode);
+        return g ? `${g.name} (nhóm vật tư thay thế)` : groupCode;
+      }
+      if (materialId) {
+        const m = (CACHE.materialsLf || []).find(x => x.material_id === materialId);
+        return m ? `${m.code} — ${m.name}` : materialId;
+      }
+      return "";
+    };
+    const lfGroupMembers = (groupCode) => {
+      const g = (CACHE.materialAltGroupsLf || []).find(x => x.code === groupCode);
+      return g ? (g.member_material_ids || []) : [];
+    };
     // Nhắc lại rõ tồn CCT còn lại của tank vừa chọn (sau khi trừ phần các lệnh nhỏ phía trên
     // đã đặt) — để người dùng nhập đúng thể tích dịch lọc kế hoạch, không vượt quá số thật sự
     // còn lại của tank.
@@ -1503,39 +1557,89 @@ VIEWS.orders = async function () {
           const fifo = l.fifo;
           const showFifo = fifo && l.quantity;
           const short = showFifo && fifo.stock_total < parseFloat(l.quantity);
+          const value = l.altGroupCode ? `grp:${l.altGroupCode}` : (l.material_id || "");
+          const label = lfMaterialLabel(l.material_id, l.altGroupCode);
           return `<div class="row" style="align-items:flex-end;flex-wrap:wrap;border-bottom:1px solid var(--border);padding-bottom:8px;margin-bottom:8px">
-            <div class="field"><label>Vật tư</label><select class="lfc_mat" data-ci="${ci}" data-li="${li}">${materialOptsLf(l.material_id)}</select></div>
+            <div class="field"><label>Vật tư</label>
+              <input type="text" class="lfc_mat_txt" data-ci="${ci}" data-li="${li}" value="${esc(label)}" placeholder="Gõ để tìm vật tư/nhóm..." autocomplete="off" style="min-width:220px"/>
+              <input type="hidden" class="lfc_mat" data-ci="${ci}" data-li="${li}" value="${esc(value)}"/></div>
             <div class="field"><label>Số lượng cần</label><input class="lfc_matqty" data-ci="${ci}" data-li="${li}" type="number" value="${l.quantity ?? ""}" style="width:110px"/></div>
             <button class="btn sm sec" data-lfc-matrm data-ci="${ci}" data-li="${li}">Xóa dòng</button>
-            ${!showFifo && l.material_id ? `<div class="muted" style="flex-basis:100%;font-size:13px;margin-top:4px">Nhập số lượng cần để xem tồn kho + lô FIFO.</div>` : ""}
+            ${!showFifo && value ? `<div class="muted" style="flex-basis:100%;font-size:13px;margin-top:4px">Nhập số lượng cần để xem tồn kho + lô FIFO.</div>` : ""}
             ${showFifo ? `<div style="flex-basis:100%;font-size:13px;margin-top:4px">
               Kho công ty: <b>${fifo.stock_company}</b> · Kho phân xưởng: <b>${fifo.stock_workshop}</b> ·
               Tổng: <b>${fifo.stock_total}</b>
               ${short ? `<span style="color:var(--red)"> — ⚠ Thiếu (cần ${l.quantity})</span>` : `<span style="color:var(--green)"> — Đủ</span>`}
-              ${fifo.lots.length ? `<div class="tablewrap" style="margin-top:4px"><table><thead><tr><th>Lô (FIFO)</th><th>Kho</th><th>SL</th><th>Ngày nhập</th></tr></thead>
+              ${l.altGroupCode ? `<div class="tablewrap" style="margin-top:4px"><table><thead><tr><th>Mã thành viên</th><th>Kho công ty</th><th>Kho phân xưởng</th></tr></thead>
+                <tbody>${(fifo.memberBreakdown || []).map(mb => `<tr><td class="code">${esc(mb.label)}</td><td>${mb.stock_company}</td><td>${mb.stock_workshop}</td></tr>`).join("")}</tbody></table></div>`
+                : (fifo.lots.length ? `<div class="tablewrap" style="margin-top:4px"><table><thead><tr><th>Lô (FIFO)</th><th>Kho</th><th>SL</th><th>Ngày nhập</th></tr></thead>
                 <tbody>${fifo.lots.map(lo => `<tr><td class="code">${esc(lo.lot_code)}</td><td class="muted">${esc(lo.location || "—")}</td>
                   <td>${lo.quantity}</td><td class="muted">${fmt(lo.received_at)}</td></tr>`).join("")}</tbody></table></div>`
-                : `<div class="muted">Không còn lô nào.</div>`}
+                : `<div class="muted">Không còn lô nào.</div>`)}
             </div>` : ""}
           </div>`;
         }).join("") || `<div class="muted">Chưa có dòng vật tư nào.</div>`}
         <button class="btn sec" data-lfc-mataddrow data-ci="${ci}">+ Thêm vật tư</button></div>`;
       box.querySelector("[data-lfc-mataddrow]").onclick = () => {
-        lfChildren[ci].materialLines.push({ material_id: "", quantity: "", fifo: null }); renderLfChildMaterials(ci);
+        lfChildren[ci].materialLines.push({ material_id: "", altGroupCode: "", quantity: "", fifo: null }); renderLfChildMaterials(ci);
       };
       box.querySelectorAll("[data-lfc-matrm]").forEach(b => b.onclick = () => {
         lfChildren[ci].materialLines.splice(parseInt(b.dataset.li, 10), 1); renderLfChildMaterials(ci);
       });
       const refreshFifo = async (li) => {
         const l = lfChildren[ci].materialLines[li];
-        if (!l.material_id) { l.fifo = null; renderLfChildMaterials(ci); return; }
-        l.fifo = await GET(`/warehouse/materials/${l.material_id}/fifo`);
+        if (l.altGroupCode) {
+          const memberIds = lfGroupMembers(l.altGroupCode);
+          const details = await Promise.all(memberIds.map(mid => GET(`/warehouse/materials/${mid}/fifo`)));
+          const round3 = (n) => Math.round(n * 1000) / 1000;
+          const company = details.reduce((s, d) => s + d.stock_company, 0);
+          const workshop = details.reduce((s, d) => s + d.stock_workshop, 0);
+          l.fifo = { stock_company: round3(company), stock_workshop: round3(workshop), stock_total: round3(company + workshop),
+            lots: [], memberBreakdown: memberIds.map((mid, i) => ({ label: lfMaterialLabel(mid, null), stock_company: details[i].stock_company, stock_workshop: details[i].stock_workshop })) };
+        } else if (l.material_id) {
+          l.fifo = await GET(`/warehouse/materials/${l.material_id}/fifo`);
+        } else {
+          l.fifo = null;
+        }
         renderLfChildMaterials(ci);
       };
-      box.querySelectorAll(".lfc_mat").forEach(sel => sel.onchange = () => {
-        const li = parseInt(sel.dataset.li, 10);
-        lfChildren[ci].materialLines[li].material_id = sel.value;
-        refreshFifo(li);
+      box.querySelectorAll(".lfc_mat_txt").forEach(txt => {
+        const li = parseInt(txt.dataset.li, 10);
+        const hidden = txt.nextElementSibling;
+        let panel = null;
+        const closePanel = () => { if (panel) { panel.remove(); panel = null; } };
+        const openPanel = (query) => {
+          closePanel();
+          const items = lfMaterialSearchItems();
+          const q = (query || "").trim().toLowerCase();
+          const matches = (q ? items.filter(i => i.label.toLowerCase().includes(q)) : items).slice(0, 50);
+          const rect = txt.getBoundingClientRect();
+          panel = el(`<div class="ss-dd" style="top:${rect.bottom + window.scrollY + 2}px; left:${rect.left + window.scrollX}px; width:${Math.max(rect.width, 260)}px">
+            ${matches.map(i => `<div class="ss-item" data-v="${esc(i.value)}">${esc(i.label)}</div>`).join("") ||
+              '<div class="ss-empty">Không tìm thấy.</div>'}</div>`);
+          document.body.appendChild(panel);
+          panel.querySelectorAll(".ss-item").forEach(row => {
+            row.onmousedown = (e) => {
+              e.preventDefault();
+              const item = items.find(i => i.value === row.dataset.v);
+              if (item) {
+                hidden.value = item.value; txt.value = item.label;
+                if (item.value.startsWith("grp:")) {
+                  lfChildren[ci].materialLines[li].altGroupCode = item.value.slice(4);
+                  lfChildren[ci].materialLines[li].material_id = "";
+                } else {
+                  lfChildren[ci].materialLines[li].material_id = item.value;
+                  lfChildren[ci].materialLines[li].altGroupCode = "";
+                }
+                refreshFifo(li);
+              }
+              closePanel();
+            };
+          });
+        };
+        txt.addEventListener("focus", () => { txt.select(); openPanel(""); });
+        txt.addEventListener("input", () => openPanel(txt.value));
+        txt.addEventListener("blur", () => setTimeout(closePanel, 150));
       });
       box.querySelectorAll(".lfc_matqty").forEach(inp => inp.onchange = () => {
         const li = parseInt(inp.dataset.li, 10);
@@ -1604,8 +1708,8 @@ VIEWS.orders = async function () {
         const { list: btCandidates, missing: btMissing } = lfChildBeerTypeCandidates(ci);
         if (btMissing) throw new Error(`Lệnh lọc nhỏ #${ci + 1}: có tank chưa được gán Loại bia — vào Danh mục Dịch bia để gán trước.`);
         if (btCandidates.length > 1 && !c.beerTypeId) throw new Error(`Lệnh lọc nhỏ #${ci + 1}: các tank thuộc nhiều Loại bia khác nhau — chọn 1 Loại bia.`);
-        const lines = c.materialLines.filter(l => l.material_id && l.quantity)
-          .map(l => ({ material_id: l.material_id, quantity: l.quantity }));
+        const lines = c.materialLines.filter(l => (l.material_id || l.altGroupCode) && l.quantity)
+          .map(l => l.altGroupCode ? { alt_group_code: l.altGroupCode, quantity: l.quantity } : { material_id: l.material_id, quantity: l.quantity });
         return {
           blend_mode: c.blendMode,
           tanks: tanks.map(t => t.tankType === "bbt"
@@ -1645,7 +1749,7 @@ VIEWS.orders = async function () {
           sourceBbtCode: t.source_bbt_code || "", reason: t.reason || "",
           vol: t.planned_v_dich_hl || "",
         })),
-        materialLines: c.lines.map(l => ({ material_id: l.material_id, quantity: l.quantity, fifo: null })),
+        materialLines: c.lines.map(l => ({ material_id: l.material_id, altGroupCode: l.material_group_code || "", quantity: l.quantity, fifo: null })),
         tolerance: c.volume_tolerance_hl || 0, kcsLotNo: c.kcs_lot_no || "",
         beerTypeId: c.beer_type_id || "", finishedProductId: c.finished_product_id || "",
       }));
@@ -1753,8 +1857,11 @@ function woRow(w) {
 // 1 công thức được "hiệu lực" tại 1 thời điểm — Lệnh nấu luôn nạp NVL theo công thức đó (xem
 // services/formula.py::activate_formula + services/brew_order.py::_effective_bom).
 VIEWS.recipes = async function () {
-  const [products, materials, formulas] = await Promise.all([GET("/products"), GET("/materials"), GET("/formulas")]);
-  CACHE.products = products; CACHE.materials = materials;
+  const [products, materials, formulas, materialAltGroups, materialGroups] = await Promise.all([
+    GET("/products"), GET("/materials"), GET("/formulas"), GET("/material-alt-groups").catch(() => []),
+    GET("/material-groups").catch(() => [])]);
+  CACHE.products = products; CACHE.materials = materials; CACHE.materialAltGroups = materialAltGroups;
+  CACHE.materialGroups = materialGroups;
   const byProduct = {};
   for (const f of formulas) (byProduct[f.product_id] = byProduct[f.product_id] || []).push(f);
 
@@ -1823,16 +1930,44 @@ async function loadFormulaActivationLog(productId) {
   }
 }
 
-// ---- Editor dòng NVL (đơn giản: material_code/qty/uom — không có dung sai, khác BOM cũ) ----
-function fmMatOptions(sel) {
-  const opts = (CACHE.materials || []).map(m =>
-    `<option value="${esc(m.code)}" data-uom="${esc(m.uom)}" ${m.code === sel ? "selected" : ""}>${esc(m.code)} — ${esc(m.name)}</option>`).join("");
-  return `<option value="" ${sel ? "" : "selected"}>(chọn vật tư)</option>` + opts;
+// ---- Editor dòng NVL (material_code/qty/uom HOẶC alt_group_code/qty/uom — không có dung
+// sai, khác BOM cũ). Ô chọn vật tư là input gõ-để-tìm (không phải <select> dài — danh mục
+// vật tư có hàng trăm mã, phần lớn là bao bì/phụ liệu không liên quan tới công thức nấu),
+// value thật giữ trong input hidden kế bên, phân biệt bằng tiền tố "grp:" cho dòng nhóm vật
+// tư thay thế (VD "Malt Úc" = rời + bao — xem models/master.py::MaterialAltGroup);
+// collectFmBom tách lại đúng field khi gửi lên server.
+//
+// Danh sách vật tư cụ thể để tìm CHỈ lấy trong Nhóm vật tư được đánh dấu "Nguyên liệu (chính/
+// phụ)" (MaterialGroup.is_raw_material — xem Danh mục › Nhóm vật tư) — tránh lẫn bao bì/nhãn/
+// hóa chất vào công thức nấu. Vật tư đang chọn sẵn ở 1 dòng có sẵn LUÔN được hiển thị đúng dù
+// không (còn) thuộc nhóm nguyên liệu, để không mất/vỡ dữ liệu dòng cũ (mirror quy ước đã dùng
+// ở unit-type catalog: selectableUnitTypes lọc lúc tạo mới, nhưng vẫn hiện đủ khi sửa). ----
+function fmMaterialSearchItems() {
+  const rawGroupCodes = new Set((CACHE.materialGroups || []).filter(g => g.is_raw_material).map(g => g.code));
+  const matItems = (CACHE.materials || []).filter(m => rawGroupCodes.has(m.category))
+    .map(m => ({ value: m.code, label: `${m.code} — ${m.name}`, uom: m.uom }));
+  const groupItems = (CACHE.materialAltGroups || []).filter(g => g.active)
+    .map(g => ({ value: `grp:${g.code}`, label: `${g.name} (nhóm vật tư thay thế)`, uom: null }));
+  return [...matItems, ...groupItems];
+}
+function fmMaterialLabel(materialCode, groupCode) {
+  if (groupCode) {
+    const g = (CACHE.materialAltGroups || []).find(x => x.code === groupCode);
+    return g ? `${g.name} (nhóm vật tư thay thế)` : groupCode;
+  }
+  if (materialCode) {
+    const m = (CACHE.materials || []).find(x => x.code === materialCode);
+    return m ? `${m.code} — ${m.name}` : materialCode;
+  }
+  return "";
 }
 function fmBomRowHTML(line) {
   line = line || {};
+  const value = line.alt_group_code ? `grp:${line.alt_group_code}` : (line.material_code || "");
+  const label = fmMaterialLabel(line.material_code, line.alt_group_code);
   return `<tr class="fm-bomrow">
-    <td><select class="fbm-mat" style="min-width:200px">${fmMatOptions(line.material_code)}</select></td>
+    <td><input type="text" class="fbm-mat-txt" value="${esc(label)}" placeholder="Gõ để tìm vật tư/nhóm..." autocomplete="off" style="min-width:220px"/>
+      <input type="hidden" class="fbm-mat" value="${esc(value)}"/></td>
     <td><input class="fbm-qty" type="number" step="any" value="${line.qty ?? ""}" style="width:110px"/></td>
     <td><input class="fbm-uom" value="${esc(line.uom || "")}" size="5"/></td>
     <td><button class="btn sm sec fbm-del" type="button">×</button></td></tr>`;
@@ -1845,16 +1980,49 @@ function wireFmBomEditor(scope) {
 }
 function wireFmBomRows(scope) {
   scope.querySelectorAll(".fbm-del").forEach(b => b.onclick = () => { b.closest("tr").remove(); });
-  scope.querySelectorAll(".fbm-mat").forEach(s => s.onchange = () => {
-    s.closest("tr").querySelector(".fbm-uom").value = s.options[s.selectedIndex].dataset.uom || "";
+  scope.querySelectorAll(".fbm-mat-txt").forEach(txt => {
+    if (txt.dataset.wired) return;
+    txt.dataset.wired = "1";
+    const hidden = txt.nextElementSibling;
+    let panel = null;
+    const closePanel = () => { if (panel) { panel.remove(); panel = null; } };
+    const openPanel = (query) => {
+      closePanel();
+      const items = fmMaterialSearchItems();
+      const q = (query || "").trim().toLowerCase();
+      const matches = (q ? items.filter(i => i.label.toLowerCase().includes(q)) : items).slice(0, 50);
+      const rect = txt.getBoundingClientRect();
+      panel = el(`<div class="ss-dd" style="top:${rect.bottom + window.scrollY + 2}px; left:${rect.left + window.scrollX}px; width:${Math.max(rect.width, 260)}px">
+        ${matches.map(i => `<div class="ss-item" data-v="${esc(i.value)}">${esc(i.label)}</div>`).join("") ||
+          '<div class="ss-empty">Không tìm thấy.</div>'}</div>`);
+      document.body.appendChild(panel);
+      // mousedown (không phải click) để chạy trước sự kiện blur của ô nhập, mirror wireSearchableSelect.
+      panel.querySelectorAll(".ss-item").forEach(row => {
+        row.onmousedown = (e) => {
+          e.preventDefault();
+          const item = items.find(i => i.value === row.dataset.v);
+          if (item) {
+            hidden.value = item.value; txt.value = item.label;
+            // Nhóm vật tư thay thế không có ĐVT cố định riêng (uom=null) — để nguyên ĐVT
+            // người dùng đã nhập, chỉ tự điền khi chọn 1 vật tư cụ thể.
+            if (item.uom) txt.closest("tr").querySelector(".fbm-uom").value = item.uom;
+          }
+          closePanel();
+        };
+      });
+    };
+    txt.addEventListener("focus", () => { txt.select(); openPanel(""); });
+    txt.addEventListener("input", () => openPanel(txt.value));
+    txt.addEventListener("blur", () => setTimeout(closePanel, 150));
   });
 }
 function collectFmBom(scope) {
-  return [...scope.querySelectorAll(".fm-bomrow")].map(tr => ({
-    material_code: tr.querySelector(".fbm-mat").value,
-    qty: parseFloat(tr.querySelector(".fbm-qty").value) || 0,
-    uom: tr.querySelector(".fbm-uom").value,
-  })).filter(l => l.material_code && l.qty > 0);
+  return [...scope.querySelectorAll(".fm-bomrow")].map(tr => {
+    const val = tr.querySelector(".fbm-mat").value;
+    const qty = parseFloat(tr.querySelector(".fbm-qty").value) || 0;
+    const uom = tr.querySelector(".fbm-uom").value;
+    return val.startsWith("grp:") ? { alt_group_code: val.slice(4), qty, uom } : { material_code: val, qty, uom };
+  }).filter(l => (l.material_code || l.alt_group_code) && l.qty > 0);
 }
 function fmFormHTML(f) {
   f = f || {};
@@ -1918,8 +2086,15 @@ function wireFormulaPanels(products) {
     modal(`<h3>📋 Nguyên vật liệu — ${esc(f.code)}</h3>
       <div class="muted" style="margin-bottom:8px">${esc(f.note || "")}</div>
       <table><thead><tr><th>Vật tư</th><th>Số lượng</th><th>ĐVT</th></tr></thead>
-      <tbody>${(f.materials || []).map(m => `<tr><td><code class="k">${esc(m.material_code)}</code></td>
-        <td>${m.qty}</td><td>${esc(m.uom || "")}</td></tr>`).join("") ||
+      <tbody>${(f.materials || []).map(m => {
+        if (m.alt_group_code) {
+          const grp = (CACHE.materialAltGroups || []).find(g => g.code === m.alt_group_code);
+          return `<tr><td>${esc(grp ? grp.name : m.alt_group_code)} <span class="muted">(nhóm vật tư thay thế)</span></td>
+            <td>${m.qty}</td><td>${esc(m.uom || "")}</td></tr>`;
+        }
+        return `<tr><td><code class="k">${esc(m.material_code)}</code></td>
+        <td>${m.qty}</td><td>${esc(m.uom || "")}</td></tr>`;
+      }).join("") ||
         '<tr><td colspan=3 class="muted">Chưa khai báo NVL.</td></tr>'}</tbody></table>`);
   });
   document.querySelectorAll("[data-fm-edit]").forEach(b => b.onclick = () => guard(async () => {
@@ -4339,23 +4514,29 @@ async function openBrewMaterialsModal(brewId, batchId, batchCode, onBack) {
 
   // Gợi ý số lượng NVL/mẻ — lấy từ Định mức của Lệnh nấu (mã nấu này thuộc về), đã tự
   // chia đều cho số mẻ khai báo lúc lập lệnh (BrewOrderMaterialLine.qty_per_batch).
-  // Chỉ là gợi ý — số thực tế dùng vẫn ghi ở ô SL riêng, sửa tự do được.
+  // Chỉ là gợi ý — số thực tế dùng vẫn ghi ở ô SL riêng, sửa tự do được. Dòng khai theo Nhóm
+  // vật tư thay thế (VD "Malt Úc") không có material_id cụ thể — thêm TỪNG material_id thành
+  // viên vào sugByMaterialId (cùng gợi ý qty_per_batch) để bảng gợi ý bên dưới tự hiện đủ mọi
+  // mã cụ thể (rời/bao) đang có tồn Kho phân xưởng, thủ kho chọn lô nào cũng được.
   let sugByMaterialId = {};
+  const addBomLinesToSug = (lines) => {
+    for (const l of lines || []) {
+      if (l.is_header || l.qty_per_batch == null) continue;
+      if (l.material_id) { sugByMaterialId[l.material_id] = l.qty_per_batch; continue; }
+      for (const mid of l.member_material_ids || []) sugByMaterialId[mid] = l.qty_per_batch;
+    }
+  };
   const brew = brews.find(b => b.brew_id === brewId);
   if (brew && brew.brew_order_id) {
     try {
       const order = await GET(`/brewing/orders/${brew.brew_order_id}`);
-      sugByMaterialId = Object.fromEntries(
-        (order.lines || []).filter(l => !l.is_header && l.material_id && l.qty_per_batch != null)
-          .map(l => [l.material_id, l.qty_per_batch]));
+      addBomLinesToSug(order.lines);
       // Lệnh nấu chưa lưu định mức riêng từng dòng (VD lệnh nấu cũ/tạo tay không qua auto-BOM)
       // — tính lại gợi ý trực tiếp từ Công thức (BOM) của dịch bia, dùng ĐÚNG planned_batch_count/
       // planned_volume_hl đã lưu ở lệnh để ra cùng 1 số/mẻ như khi lệnh có định mức sẵn.
       if (!Object.keys(sugByMaterialId).length && order.product_id && order.planned_batch_count) {
         const preview = await GET(`/brewing/orders/bom-preview?product_id=${encodeURIComponent(order.product_id)}&planned_batch_count=${order.planned_batch_count}&planned_volume_hl=${order.planned_volume_hl || 0}`);
-        sugByMaterialId = Object.fromEntries(
-          (preview || []).filter(l => !l.is_header && l.material_id && l.qty_per_batch != null)
-            .map(l => [l.material_id, l.qty_per_batch]));
+        addBomLinesToSug(preview);
       }
     } catch (e) { /* không có lệnh nấu/định mức/công thức — bỏ qua gợi ý */ }
   }
@@ -5463,7 +5644,7 @@ async function openBrewMasterOrderModal(masterId) {
           : `<tr class="${l.shortage ? "row-red" : ""}"><td>${esc(l.stt_label || "")}</td><td>${esc(l.material_name || "—")}</td>
             <td>${esc(l.uom || "")}</td><td>${l.qty_per_batch ?? "—"}</td><td>${l.qty_total ?? "—"}</td>
             <td>${l.stock_company_snapshot ?? "—"}</td><td>${l.stock_workshop_snapshot ?? "—"}</td>
-            <td>${l.unit_price ?? "—"}</td><td>${l.shortage ? `<span style="color:var(--red)">⚠ Thiếu</span>` : (l.material_id ? `<span style="color:var(--green)">Đủ</span>` : "")}</td></tr>`).join("") ||
+            <td>${l.unit_price ?? "—"}</td><td>${l.shortage ? `<span style="color:var(--red)">⚠ Thiếu</span>` : `<span style="color:var(--green)">Đủ</span>`}</td></tr>${bomMemberRowsHtml(l, 5, 2)}`).join("") ||
           `<tr><td colspan=9 class="muted">Chưa có dòng NVL.</td></tr>`}</tbody></table></div>
     </div>`;
     }).join("")}`);
@@ -5502,9 +5683,9 @@ async function openFilterMasterOrderModal(masterId) {
       <div class="tablewrap" style="max-height:30vh"><table>
         <thead><tr><th>Tên vật tư</th><th>ĐVT</th><th>Số lượng</th>
           <th>Tồn Kho công ty (lúc lập)</th><th>Tồn Kho phân xưởng (lúc lập)</th><th>Đơn giá</th></tr></thead>
-        <tbody>${c.lines.map(l => `<tr><td>${esc(l.material_name || "—")}</td><td>${esc(l.uom || "")}</td>
+        <tbody>${c.lines.map(l => `<tr><td>${esc(l.material_name || "—")}${l.material_group_code ? ' <span class="muted">(nhóm vật tư thay thế)</span>' : ""}</td><td>${esc(l.uom || "")}</td>
           <td>${l.quantity}</td><td>${l.stock_company_snapshot ?? "—"}</td>
-          <td>${l.stock_workshop_snapshot ?? "—"}</td><td>${l.unit_price ?? "—"}</td></tr>`).join("") ||
+          <td>${l.stock_workshop_snapshot ?? "—"}</td><td>${l.unit_price ?? "—"}</td></tr>${bomMemberRowsHtml(l, 3, 1)}`).join("") ||
           `<tr><td colspan=6 class="muted">Chưa có dòng vật tư.</td></tr>`}</tbody></table></div>
     </div>`).join("")}`);
 }
@@ -8072,13 +8253,13 @@ const MULTI_SAMPLE_STAGES = ["len_men_chinh", "len_men_phu"];
 // Sản phẩm (SKU) chỉ có ý nghĩa ở "loc" và "thanh_pham" — mirror qc_catalog.SKU_SCOPED_STAGES.
 const SKU_SCOPED_STAGES = ["loc", "thanh_pham"];
 VIEWS.master = async function () {
-  const [products, finishedProducts, materials, plines, qcParams, qcGroups, stageGroups, beerTypes, suppliers, materialGroups, opsSettings, unitTypes] = await Promise.all([
+  const [products, finishedProducts, materials, plines, qcParams, qcGroups, stageGroups, beerTypes, suppliers, materialGroups, opsSettings, unitTypes, materialAltGroups] = await Promise.all([
     GET("/products"), GET("/finished-products").catch(() => []), GET("/materials"), GET("/lines").catch(() => []),
     GET("/qc/parameters?active_only=false").catch(() => []),
     GET("/qc/groups").catch(() => []), GET("/qc/stage-groups").catch(() => []), GET("/beer-types").catch(() => []),
     GET("/suppliers").catch(() => []), GET("/material-groups").catch(() => []),
     GET("/ops-settings").catch(() => ({ empty_cct_tolerance_hl: 2, empty_bbt_tolerance_hl: 2 })),
-    GET("/unit-types").catch(() => [])]);
+    GET("/unit-types").catch(() => []), GET("/material-alt-groups").catch(() => [])]);
   // Chỉ hiện loại "selectable" (bỏ "lon" — hệ thống tự sinh khi phân rã vỉ, xem services/wms.py)
   // khi khai báo SKU mới; nhưng vẫn hiện đủ mọi loại (kể cả không selectable) khi sửa 1 SKU đã
   // lỡ mang mã đó, để không xóa mất lựa chọn hiện tại khỏi dropdown.
@@ -8191,6 +8372,37 @@ VIEWS.master = async function () {
               <button class="btn sm sec" data-mgdel="${esc(g.group_id)}">Xóa</button>
             </td>` : ""}</tr>`).join("") ||
             `<tr><td colspan="${canManage ? 6 : 5}" class="muted">Chưa có Nhóm vật tư nào.</td></tr>`}</tbody>
+        </table></div>
+      </div>
+
+      <div class="panel"><h2>🔀 Nhóm vật tư thay thế <span class="muted">(${materialAltGroups.length})</span></h2>
+        <div class="muted" style="margin-bottom:6px">Nhiều mã vật tư CÙNG BẢN CHẤT, khác quy cách đóng gói/nhà cung cấp (VD "Malt Úc" gồm Malt Úc rời + Malt Úc bao). Công thức có thể khai NHÓM này thay vì 1 mã cụ thể — thủ kho tự chọn mã cụ thể lúc xuất kho thật, tùy tồn kho lúc đó.</div>
+        ${noPerm}
+        ${canManage ? `<div class="row">
+          <div class="field"><label>Mã nhóm</label><input id="mag_code" placeholder="MALT-UC"/></div>
+          <div class="field"><label>Tên nhóm</label><input id="mag_name" placeholder="Malt Úc"/></div>
+        </div>
+        <div class="field" style="margin-top:8px"><label>Vật tư thành viên (giữ Ctrl/Cmd để chọn nhiều)</label>
+          <input type="text" id="mag_members_search" placeholder="Tìm theo mã/tên vật tư..." style="width:100%;margin-bottom:4px"/>
+          <select id="mag_members" multiple size="6" style="width:100%">${materials.map(m => `<option value="${esc(m.material_id)}">${esc(m.code)} — ${esc(m.name)}</option>`).join("")}</select>
+        </div>
+        <button class="btn" id="mag_add" style="margin-top:10px">+ Tạo nhóm</button>` : ""}
+        <input class="searchbox" data-tbl="t_matgroups_alt" placeholder="Tìm mã/tên nhóm..." style="margin-top:10px"/>
+        <div class="tablewrap" style="margin-top:6px"><table id="t_matgroups_alt">
+          <thead><tr><th>Mã</th><th>Tên</th><th>Thành viên</th><th>Trạng thái</th>${canManage ? "<th></th>" : ""}</tr></thead>
+          <tbody>${materialAltGroups.map(g => {
+            const memberNames = (g.member_material_ids || []).map(mid => {
+              const m = materials.find(x => x.material_id === mid); return m ? `${m.code} — ${m.name}` : mid;
+            }).join(", ");
+            return `<tr>
+            <td><code class="k">${esc(g.code)}</code></td><td>${esc(g.name)}</td>
+            <td class="muted">${esc(memberNames || "—")}</td>
+            <td>${g.active ? '<span style="color:var(--green)">Đang dùng</span>' : '<span class="muted">Đã ẩn</span>'}</td>
+            ${canManage ? `<td style="white-space:nowrap">
+              <button class="btn sm sec" data-emag="${esc(g.group_id)}">Sửa</button>
+              <button class="btn sm sec" data-magdel="${esc(g.group_id)}">Xóa</button>
+            </td>` : ""}</tr>`; }).join("") ||
+            `<tr><td colspan="${canManage ? 5 : 4}" class="muted">Chưa có nhóm vật tư thay thế nào.</td></tr>`}</tbody>
         </table></div>
       </div>
 
@@ -8538,6 +8750,40 @@ VIEWS.master = async function () {
       if (!confirm("Xóa nhóm vật tư này? Không thể hoàn tác.")) return;
       await DELETE(`/material-groups/${b.dataset.mgdel}`);
       toast("Đã xóa nhóm vật tư"); render("master");
+    }));
+    wireMultiSelectFilter($("mag_members_search"), $("mag_members"));
+    if ($("mag_add")) $("mag_add").onclick = () => guard(async () => {
+      const code = $("mag_code").value.trim(), name = $("mag_name").value.trim();
+      const members = [...$("mag_members").selectedOptions].map(o => o.value);
+      if (!code || !name) throw new Error("Nhập đủ Mã nhóm và Tên nhóm.");
+      if (!members.length) throw new Error("Chọn ít nhất 1 vật tư thành viên.");
+      await POST("/material-alt-groups", { code, name, member_material_ids: members });
+      toast("Đã tạo nhóm vật tư thay thế"); render("master");
+    });
+    document.querySelectorAll("[data-emag]").forEach(b => b.onclick = () => {
+      const g = materialAltGroups.find(x => x.group_id === b.dataset.emag);
+      modal(`<h3>Sửa nhóm vật tư thay thế</h3>
+        <div class="field"><label>Mã</label><input id="emag_code" value="${esc(g.code)}"/></div>
+        <div class="field" style="margin-top:8px"><label>Tên</label><input id="emag_name" value="${esc(g.name)}"/></div>
+        <div class="field" style="margin-top:8px"><label>Vật tư thành viên (giữ Ctrl/Cmd để chọn nhiều)</label>
+          <input type="text" id="emag_members_search" placeholder="Tìm theo mã/tên vật tư..." style="width:100%;margin-bottom:4px"/>
+          <select id="emag_members" multiple size="6" style="width:100%">${materials.map(m => `<option value="${esc(m.material_id)}" ${(g.member_material_ids || []).includes(m.material_id) ? "selected" : ""}>${esc(m.code)} — ${esc(m.name)}</option>`).join("")}</select>
+        </div>
+        <div class="field" style="margin-top:8px"><label><input type="checkbox" id="emag_active" ${g.active ? "checked" : ""}/> Đang dùng (hiện trong danh sách chọn khi khai công thức)</label></div>
+        <button class="btn" id="emag_save" style="margin-top:12px">Lưu</button>`);
+      wireMultiSelectFilter($("emag_members_search"), $("emag_members"));
+      $("emag_save").onclick = () => guard(async () => {
+        const members = [...$("emag_members").selectedOptions].map(o => o.value);
+        if (!members.length) throw new Error("Chọn ít nhất 1 vật tư thành viên.");
+        await PUT(`/material-alt-groups/${g.group_id}`, { code: $("emag_code").value.trim(),
+          name: $("emag_name").value.trim(), member_material_ids: members, active: $("emag_active").checked });
+        closeModal(); toast("Đã cập nhật"); render("master");
+      });
+    });
+    document.querySelectorAll("[data-magdel]").forEach(b => b.onclick = () => guard(async () => {
+      if (!confirm("Xóa nhóm vật tư thay thế này? Không thể hoàn tác.")) return;
+      await DELETE(`/material-alt-groups/${b.dataset.magdel}`);
+      toast("Đã xóa nhóm vật tư thay thế"); render("master");
     }));
     $("mt_add").onclick = () => guard(async () => {
       await POST("/materials", { code: $("mt_code").value.trim(), name: $("mt_name").value.trim(),

@@ -8,7 +8,7 @@ LỆNH và CHẶN tạo lệnh nếu thiếu (khác Lệnh nấu chỉ cảnh b�
 
 from typing import Optional
 
-from sqlalchemy import select
+from sqlalchemy import select, true
 from sqlalchemy.orm import Session
 
 from ..audit import record_audit
@@ -18,7 +18,7 @@ from ..models.brewing import (
     BottleRecord, FermentRecord, FilterMasterOrder, FilterOrder, FilterOrderMaterialLine, FilterOrderTank,
     FilterRecord,
 )
-from ..models.master import BeerType, FinishedProduct, Material, Product
+from ..models.master import BeerType, FinishedProduct, Material, MaterialAltGroup, Product
 from . import warehouse as warehouse_svc
 
 
@@ -104,24 +104,86 @@ def _validate_tanks(db: Session, blend_mode: str, tanks_in: list, beer_type_id: 
     return sources, resolved_beer_type_id
 
 
+def _resolve_group_members(db: Session, group_code: str | None) -> list:
+    """Tra danh sách material_id thành viên của 1 Nhóm vật tư thay thế — trả rỗng nếu nhóm
+    không tồn tại/đã ngừng hoạt động. KHÔNG lưu cứng vào FilterOrderMaterialLine vì nhóm có
+    thể đổi thành viên sau khi lệnh đã lập (mirror services/brew_order.py cùng tên hàm)."""
+    if not group_code:
+        return []
+    g = db.execute(select(MaterialAltGroup).where(
+        MaterialAltGroup.code == group_code, MaterialAltGroup.active == true())).scalars().first()
+    return list(g.member_material_ids or []) if g else []
+
+
+def _member_breakdown(db: Session, member_ids: list) -> list:
+    """Tồn kho TỪNG mã thành viên của 1 dòng Nhóm vật tư thay thế (tính LIVE, không snapshot)
+    — để người lập lệnh thấy đúng nhóm gồm mã nào và mã nào đang thực sự còn hàng."""
+    out = []
+    for mid in member_ids:
+        mat = db.get(Material, mid)
+        d = warehouse_svc.material_fifo_detail(db, mid)
+        out.append({"material_id": mid, "material_code": mat.code if mat else None,
+                    "material_name": mat.name if mat else mid,
+                    "stock_company": d["stock_company"], "stock_workshop": d["stock_workshop"]})
+    return out
+
+
 def _validate_material_lines(db: Session, lines_in: list) -> list:
     """Kiểm tra đủ vật tư TRƯỚC khi tạo/sửa bất kỳ bản ghi nào — thiếu tồn (tổng 2 kho) thì
-    chặn hẳn, không cho lập/sửa lệnh (khác Lệnh nấu chỉ cảnh báo rồi vẫn cho lưu)."""
+    chặn hẳn, không cho lập/sửa lệnh (khác Lệnh nấu chỉ cảnh báo rồi vẫn cho lưu). 1 dòng có
+    thể khai theo `alt_group_code` (Nhóm vật tư thay thế) thay vì `material_id` cụ thể — tồn
+    kiểm tra CỘNG DỒN qua mọi mã thành viên (xem _resolve_group_members)."""
     material_lines = []
     for line in lines_in:
+        quantity = line["quantity"]
+        group_code = line.get("alt_group_code")
+        if group_code:
+            group = db.execute(select(MaterialAltGroup).where(
+                MaterialAltGroup.code == group_code, MaterialAltGroup.active == true())).scalars().first()
+            if not group:
+                raise NotFoundError(f"Nhóm vật tư thay thế '{group_code}' không tồn tại hoặc đã ngừng hoạt động.")
+            member_ids = list(group.member_material_ids or [])
+            if not member_ids:
+                raise DomainError(f"Nhóm vật tư thay thế '{group.name}' chưa có vật tư thành viên.")
+            company = sum(warehouse_svc.material_fifo_detail(db, mid)["stock_company"] for mid in member_ids)
+            workshop = sum(warehouse_svc.material_fifo_detail(db, mid)["stock_workshop"] for mid in member_ids)
+            if quantity > company + workshop:
+                raise DomainError(
+                    f"Nhóm vật tư '{group.name}' không đủ tồn kho: cần {quantity}, hiện có {round(company + workshop, 3)} "
+                    f"(Kho công ty {round(company, 3)} + Kho phân xưởng {round(workshop, 3)}).")
+            material_lines.append({"material": None, "group": group, "quantity": quantity,
+                                   "unit_price": line.get("unit_price"),
+                                   "stock_company": round(company, 3), "stock_workshop": round(workshop, 3)})
+            continue
         material_id = line["material_id"]
         mat = db.get(Material, material_id)
         if not mat:
             raise NotFoundError(f"Vật tư '{material_id}' không tồn tại.")
         detail = warehouse_svc.material_fifo_detail(db, material_id)
-        quantity = line["quantity"]
         if quantity > detail["stock_total"]:
             raise DomainError(
                 f"Vật tư '{mat.name}' không đủ tồn kho: cần {quantity}, hiện có {detail['stock_total']} "
                 f"(Kho công ty {detail['stock_company']} + Kho phân xưởng {detail['stock_workshop']}).")
-        material_lines.append({"material": mat, "quantity": quantity, "unit_price": line.get("unit_price"),
+        material_lines.append({"material": mat, "group": None, "quantity": quantity, "unit_price": line.get("unit_price"),
                                "stock_company": detail["stock_company"], "stock_workshop": detail["stock_workshop"]})
     return material_lines
+
+
+def _material_line_row(filter_order_id: str, seq: int, ml: dict) -> FilterOrderMaterialLine:
+    """Dựng 1 FilterOrderMaterialLine từ dict đã validate (_validate_material_lines) — dùng
+    chung cho create_order/update_order, tách riêng vì dòng Nhóm vật tư thay thế không có
+    `material` (material_id=None, lưu material_group_code thay vào)."""
+    if ml.get("group"):
+        return FilterOrderMaterialLine(
+            line_id=new_id(), filter_order_id=filter_order_id, seq=seq,
+            material_id=None, material_name=ml["group"].name, material_group_code=ml["group"].code,
+            uom=None, quantity=ml["quantity"], unit_price=ml["unit_price"],
+            stock_company_snapshot=ml["stock_company"], stock_workshop_snapshot=ml["stock_workshop"])
+    return FilterOrderMaterialLine(
+        line_id=new_id(), filter_order_id=filter_order_id, seq=seq,
+        material_id=ml["material"].material_id, material_name=ml["material"].name,
+        uom=ml["material"].uom, quantity=ml["quantity"], unit_price=ml["unit_price"],
+        stock_company_snapshot=ml["stock_company"], stock_workshop_snapshot=ml["stock_workshop"])
 
 
 def _validate_finished_product(db: Session, finished_product_id: str = None) -> Optional[str]:
@@ -184,11 +246,7 @@ def _insert_sub_order(db: Session, master_order_id, seq: int, order_code: str, o
                                    planned_v_dich_hl=s.get("planned_v_dich_hl", 0.0)))
 
     for i, ml in enumerate(material_lines):
-        db.add(FilterOrderMaterialLine(
-            line_id=new_id(), filter_order_id=order.filter_order_id, seq=i,
-            material_id=ml["material"].material_id, material_name=ml["material"].name,
-            uom=ml["material"].uom, quantity=ml["quantity"], unit_price=ml["unit_price"],
-            stock_company_snapshot=ml["stock_company"], stock_workshop_snapshot=ml["stock_workshop"]))
+        db.add(_material_line_row(order.filter_order_id, i, ml))
     return order
 
 
@@ -278,11 +336,7 @@ def update_order(db: Session, filter_order_id: str, payload: dict, user) -> Filt
                                tank_type="cct", ferment_id=s["ferment"].ferment_id, seq=i + 1))
 
     for i, ml in enumerate(material_lines):
-        db.add(FilterOrderMaterialLine(
-            line_id=new_id(), filter_order_id=order.filter_order_id, seq=i,
-            material_id=ml["material"].material_id, material_name=ml["material"].name,
-            uom=ml["material"].uom, quantity=ml["quantity"], unit_price=ml["unit_price"],
-            stock_company_snapshot=ml["stock_company"], stock_workshop_snapshot=ml["stock_workshop"]))
+        db.add(_material_line_row(order.filter_order_id, i, ml))
 
     record_audit(db, entity_type="filter_order", entity_id=order.filter_order_id, action="update",
                  actor=user, after={"order_code": order.order_code, "tanks": len(sources), "materials": len(material_lines)})
@@ -292,12 +346,22 @@ def update_order(db: Session, filter_order_id: str, payload: dict, user) -> Filt
 
 
 def _material_line_summaries(db: Session, filter_order_id: str) -> list:
+    """`stock_company_snapshot`/`stock_workshop_snapshot` là tồn LÚC LẬP PHIẾU (đúng tính
+    chất văn bản đã ký/in); `member_breakdown` (chỉ có ở dòng Nhóm vật tư thay thế) là tồn
+    TỪNG mã thành viên tính LIVE — nhóm có thể đổi thành viên/tồn sau khi lệnh đã lập, xem
+    _resolve_group_members/_member_breakdown."""
     lines = db.execute(select(FilterOrderMaterialLine).where(
         FilterOrderMaterialLine.filter_order_id == filter_order_id).order_by(FilterOrderMaterialLine.seq)).scalars().all()
-    return [{"line_id": l.line_id, "material_id": l.material_id, "material_name": l.material_name,
-            "uom": l.uom, "quantity": l.quantity, "unit_price": l.unit_price,
-            "stock_company_snapshot": l.stock_company_snapshot,
-            "stock_workshop_snapshot": l.stock_workshop_snapshot} for l in lines]
+    out = []
+    for l in lines:
+        member_ids = _resolve_group_members(db, l.material_group_code)
+        out.append({"line_id": l.line_id, "material_id": l.material_id, "material_name": l.material_name,
+                    "material_group_code": l.material_group_code,
+                    "member_breakdown": _member_breakdown(db, member_ids) if member_ids else [],
+                    "uom": l.uom, "quantity": l.quantity, "unit_price": l.unit_price,
+                    "stock_company_snapshot": l.stock_company_snapshot,
+                    "stock_workshop_snapshot": l.stock_workshop_snapshot})
+    return out
 
 
 def _tank_summaries(db: Session, filter_order_id: str) -> list:
