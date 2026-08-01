@@ -748,9 +748,18 @@ def return_to_supplier(db: Session, lot_id: str, quantity: float, user: User, re
     return issue(db, lot_id, quantity, user, mode="tra_ncc", reason=reason)
 
 
-def undo_issue(db: Session, movement_id: str, user: User) -> dict:
+def undo_issue(db: Session, movement_id: str, user: User, strict: bool = True) -> dict:
     """Hoàn lại 1 giao dịch xuất tự do (mode="tu_do") — không áp dụng cho trả NCC (hàng đã rời
-    kho thật sự). Chặn hoàn 2 lần bằng cờ `reversed`."""
+    kho thật sự). Chặn hoàn 2 lần bằng cờ `reversed`.
+
+    `strict=False` (dùng khi xóa theo tầng — xóa mẻ nấu/lọc/chiết kéo theo xóa từng dòng NVL
+    đã dùng): nếu giao dịch ĐÃ được hoàn trước đó rồi thì coi là xong việc, trả về luôn thay vì
+    báo lỗi — tránh chặn cứng không xóa được nếu 1 lần xóa trước đó bị lỗi dở dang giữa chừng
+    (VD lỗi ở dòng NVL thứ 2 nhưng dòng thứ 1 đã hoàn kho + commit xong — services/warehouse.py::
+    undo_issue tự commit riêng nên khi retry sẽ gặp lại dòng đã hoàn). Giữ `strict=True` (mặc
+    định) cho nút "Hoàn tác" thao tác tay của người dùng (routers/warehouse.py::undo_issue) và
+    luồng SỬA số lượng NVL (update_brew_material và tương đương Lọc/Chiết) — ở 2 chỗ đó gặp lại
+    giao dịch đã hoàn thật sự là bất thường, cần báo cho người dùng biết."""
     require_role(user, Role.OPERATOR, Role.SUPERVISOR)
     mv = db.get(StockMovement, movement_id)
     if not mv:
@@ -758,6 +767,8 @@ def undo_issue(db: Session, movement_id: str, user: User) -> dict:
     if mv.movement_type != "issue" or mv.mode != "tu_do":
         raise DomainError("Chỉ hoàn lại được giao dịch xuất tự do (không áp dụng cho trả NCC/xuất theo đề nghị).")
     if mv.reversed:
+        if not strict:
+            return {"movement_id": mv.movement_id, "already_reversed": True}
         raise DomainError("Giao dịch này đã được hoàn lại trước đó.")
     result = return_stock(db, mv.lot_id, mv.quantity, user, reason=f"Hoàn lại xuất tự do (giao dịch {mv.movement_id})")
     mv.reversed = True

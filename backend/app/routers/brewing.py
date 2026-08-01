@@ -542,7 +542,7 @@ def delete_brew(brew_id: str, db: Session = Depends(get_db), user: User = Depend
     for batch in db.execute(select(BrewBatch).where(BrewBatch.brew_id == brew_id)).scalars().all():
         for u in db.execute(select(BrewMaterialUsage).where(BrewMaterialUsage.batch_id == batch.batch_id)).scalars().all():
             if u.movement_id:
-                warehouse_svc.undo_issue(db, u.movement_id, user)
+                warehouse_svc.undo_issue(db, u.movement_id, user, strict=False)
             db.delete(u)
         for r in db.execute(select(QualityResult).where(QualityResult.scope_type == "brew_batch", QualityResult.scope_id == batch.batch_id)).scalars().all():
             db.delete(r)
@@ -703,7 +703,7 @@ def delete_brew_batch(brew_id: str, batch_id: str, db: Session = Depends(get_db)
         raise DomainError(f"Mã nấu của mẻ '{batch.batch_code}' đã được lọc — không thể xóa (ảnh hưởng truy xuất nguồn gốc).")
     for u in db.execute(select(BrewMaterialUsage).where(BrewMaterialUsage.batch_id == batch_id)).scalars().all():
         if u.movement_id:
-            warehouse_svc.undo_issue(db, u.movement_id, user)
+            warehouse_svc.undo_issue(db, u.movement_id, user, strict=False)
         db.delete(u)
     for r in db.execute(select(QualityResult).where(QualityResult.scope_type == "brew_batch", QualityResult.scope_id == batch.batch_id)).scalars().all():
         db.delete(r)
@@ -863,7 +863,7 @@ def delete_brew_material(brew_id: str, batch_id: str, usage_id: str, db: Session
         raise NotFoundError("Dòng nguyên liệu không tồn tại.")
     _assert_unlocked(db.get(BrewBatch, batch_id), *_brew_and_order(db, brew_id))
     if u.movement_id:
-        warehouse_svc.undo_issue(db, u.movement_id, user)
+        warehouse_svc.undo_issue(db, u.movement_id, user, strict=False)
     db.delete(u)
     db.commit()
 
@@ -1709,7 +1709,7 @@ def delete_filter_material(filter_id: str, usage_id: str, db: Session = Depends(
     f = db.get(FilterRecord, filter_id)
     _assert_unlocked(f, *_filter_order_chain(db, f.filter_order_id if f else None))
     if u.movement_id:
-        warehouse_svc.undo_issue(db, u.movement_id, user)
+        warehouse_svc.undo_issue(db, u.movement_id, user, strict=False)
     db.delete(u)
     db.commit()
 
@@ -1725,7 +1725,7 @@ def delete_filter(filter_id: str, db: Session = Depends(get_db), user: User = De
         raise DomainError("Đã có bản ghi chiết lấy từ lô lọc này — xóa bản ghi chiết trước khi xóa lọc.")
     for u in db.execute(select(FilterMaterialUsage).where(FilterMaterialUsage.filter_id == filter_id)).scalars().all():
         if u.movement_id:
-            warehouse_svc.undo_issue(db, u.movement_id, user)
+            warehouse_svc.undo_issue(db, u.movement_id, user, strict=False)
         db.delete(u)
     lines = db.execute(select(FilterOrderTank).where(FilterOrderTank.filter_id == filter_id)).scalars().all()
     for line in lines:
@@ -1863,7 +1863,7 @@ def delete_bottle(bottle_id: str, db: Session = Depends(get_db), user: User = De
         db.delete(r)
     for u in db.execute(select(BottleMaterialUsage).where(BottleMaterialUsage.bottle_id == bottle_id)).scalars().all():
         if u.movement_id:
-            warehouse_svc.undo_issue(db, u.movement_id, user)
+            warehouse_svc.undo_issue(db, u.movement_id, user, strict=False)
         db.delete(u)
     genealogy.delete_edges_for(db, "bottle", bottle_id)
     db.delete(b)
@@ -1956,7 +1956,7 @@ def delete_bottle_material(bottle_id: str, usage_id: str, db: Session = Depends(
         raise NotFoundError("Dòng nguyên liệu không tồn tại.")
     _assert_unlocked(db.get(BottleRecord, bottle_id))
     if u.movement_id:
-        warehouse_svc.undo_issue(db, u.movement_id, user)
+        warehouse_svc.undo_issue(db, u.movement_id, user, strict=False)
     db.delete(u)
     db.commit()
 
