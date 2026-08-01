@@ -230,6 +230,13 @@ def _assert_releasable(db: Session, scope_type: str, scope_id: str) -> None:
             f"Không thể release: còn chỉ tiêu bắt buộc chưa khai báo: {', '.join(missing)}."
         )
 
+    if scope_type == "lot":
+        # Tạm thời (theo yêu cầu 2026-08-01): duyệt chỉ tiêu NVL không chặn khi có chỉ tiêu
+        # FAIL — màn hình Kho NVL không có luồng mở/đóng deviation cho lô NVL nên yêu cầu
+        # "mọi FAIL phải có deviation CLOSED" bên dưới sẽ chặn cứng không lối ra. Chỉ cần
+        # khai báo đủ chỉ tiêu bắt buộc (đã kiểm tra ở trên) là cho duyệt qua.
+        return
+
     latest_by_param = latest_results_by_param(db, scope_type, scope_id)
     fails = [r for r in latest_by_param.values() if r.status == ResultStatus.FAIL.value]
     if fails:

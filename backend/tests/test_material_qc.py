@@ -145,6 +145,42 @@ def test_receive_with_mandatory_group_holds_then_release_flow(client, admin_h, t
     assert xfer_ok.json()["location"] == "Kho phân xưởng"
 
 
+def test_release_lot_allowed_even_with_fail_result(client, admin_h, thukho_h, kcs_h):
+    """Tạm thời (2026-08-01): duyệt lô NVL không bị chặn bởi chỉ tiêu FAIL — màn hình Kho
+    NVL chưa có luồng mở/đóng deviation cho lô, nên vẫn giữ đúng yêu cầu "khai báo đủ chỉ
+    tiêu bắt buộc" nhưng bỏ điều kiện phải hết FAIL (mirror test_receive_with_mandatory_group_
+    holds_then_release_flow, khác ở chỗ khai giá trị NGOÀI khoảng min/max)."""
+    mat_id = _create_material(client, admin_h, "QCT-MALTFAIL")
+    p = client.post("/api/qc/parameters", headers=admin_h,
+                    json={"code": "DO_AM_FAIL_TEST", "name": "Độ ẩm", "unit": "%", "lsl": 3, "usl": 6})
+    param_id = p.json()["param_id"]
+    g = client.post("/api/qc/groups", headers=admin_h,
+                    json={"code": "GRP-MALTFAIL-TEST", "name": "Chỉ tiêu Malt fail test"})
+    group_id = g.json()["group_id"]
+    client.post(f"/api/qc/groups/{group_id}/items", headers=admin_h,
+               json={"param_id": param_id, "mandatory": True})
+    client.post(f"/api/materials/{mat_id}/qc-groups", headers=admin_h,
+               json={"group_id": group_id, "mandatory": True})
+
+    rc = client.post("/api/warehouse/receive", headers=thukho_h,
+                     json={"lot_code": "LOT-MALTFAIL-01", "material_id": mat_id, "quantity": 500, "uom": "kg"})
+    lot_id = rc.json()["lot_id"]
+
+    # Khai báo giá trị NGOÀI khoảng min/max → status "fail".
+    rec = client.post("/api/quality/results", headers=thukho_h,
+                      json={"scope_type": "lot", "scope_id": lot_id, "parameter": "DO_AM_FAIL_TEST",
+                            "value": 20, "lower_limit": 3, "upper_limit": 6})
+    assert rec.status_code == 201, rec.text
+    assert rec.json()["status"] == "fail"
+
+    # Đã khai báo đủ chỉ tiêu bắt buộc (dù fail) → KCS vẫn duyệt được, không bị chặn bởi
+    # yêu cầu deviation CLOSED.
+    rel_ok = client.post("/api/quality/hold", headers=kcs_h,
+                         json={"scope_type": "lot", "scope_id": lot_id, "on_hold": False})
+    assert rel_ok.status_code == 200, rel_ok.text
+    assert rel_ok.json()["quality_status"] == "released"
+
+
 def test_material_request_permission_required(client, thukho_h):
     # thủ kho không có quyền warehouse.request → không tạo được đề nghị.
     r = client.post("/api/warehouse/requests", headers=thukho_h,
@@ -657,3 +693,28 @@ def test_opening_balance_wms_build_units_requires_admin(client, admin_h, thukho_
                         json={"finished_product_id": fp_id, "product_name": "OB-FP-TEST",
                               "lot_code": "OB-LOT-02", "total": 48, "pack_size": 24, "unit_type": "vi"})
     assert normal.status_code == 201, normal.text
+
+
+def test_delete_qc_parameter_ok_when_unused(client, admin_h):
+    p = client.post("/api/qc/parameters", headers=admin_h,
+                    json={"code": "DELPARAM-UNUSED", "name": "Chỉ tiêu chưa gán", "unit": "%"})
+    assert p.status_code == 201, p.text
+    param_id = p.json()["param_id"]
+    r = client.delete(f"/api/qc/parameters/{param_id}", headers=admin_h)
+    assert r.status_code == 204, r.text
+    assert not any(x["param_id"] == param_id for x in client.get("/api/qc/parameters?active_only=false", headers=admin_h).json())
+
+
+def test_delete_qc_parameter_blocked_when_assigned_to_group(client, admin_h):
+    p = client.post("/api/qc/parameters", headers=admin_h,
+                    json={"code": "DELPARAM-USED", "name": "Chỉ tiêu đã gán", "unit": "%"})
+    param_id = p.json()["param_id"]
+    g = client.post("/api/qc/groups", headers=admin_h,
+                    json={"code": "DELPARAM-GRP", "name": "Nhóm test xóa chỉ tiêu"})
+    group_id = g.json()["group_id"]
+    it = client.post(f"/api/qc/groups/{group_id}/items", headers=admin_h,
+                     json={"param_id": param_id, "mandatory": True})
+    assert it.status_code == 201, it.text
+
+    r = client.delete(f"/api/qc/parameters/{param_id}", headers=admin_h)
+    assert r.status_code == 409, r.text

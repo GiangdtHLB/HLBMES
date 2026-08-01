@@ -3316,16 +3316,17 @@ VIEWS.warehouse_kc = async function () {
       <div class="muted" style="margin-bottom:6px">Toàn bộ lô đang nằm ở kho công ty, sắp xếp nhập trước hiện trước (FIFO) để ưu tiên xuất/chuyển.</div>
       <input class="searchbox" data-tbl="t_kc" placeholder="Tìm mã lô/vật tư..." style="margin-bottom:8px"/>
       <div class="tablewrap"><table id="t_kc">
-        <thead><tr><th>Lô</th><th>Vật tư</th><th>SL</th><th>Ngày giờ nhập</th><th>Vị trí</th><th>Trạng thái</th><th></th></tr></thead>
+        <thead><tr><th>Lô</th><th>Vật tư</th><th>Tên vật tư</th><th>SL</th><th>Ngày giờ nhập</th><th>Vị trí</th><th>Trạng thái</th><th></th></tr></thead>
         <tbody>${rows.map(l => `<tr>
           <td><code class="k">${esc(l.lot_code)}</code></td>
           <td class="muted">${esc(matById[l.material_id] ? matById[l.material_id].code : l.material_id || "—")}</td>
+          <td>${esc(matById[l.material_id] ? matById[l.material_id].name : "—")}</td>
           <td>${l.quantity} ${l.uom}</td>
           <td class="muted">${fmt(l.created_at)}</td>
           <td class="muted">${esc(l.location || "")}</td>
           <td>${badge(l.status)}</td>
           <td><button class="btn sm sec" data-lotqc="${esc(l.lot_id)}">Xem chỉ tiêu</button></td></tr>`).join("") ||
-          `<tr><td colspan=7 class="muted">Chưa có lô nào ở kho công ty.</td></tr>`}</tbody>
+          `<tr><td colspan=8 class="muted">Chưa có lô nào ở kho công ty.</td></tr>`}</tbody>
       </table></div>
     </div>`;
   } else if (sec === "kk") {
@@ -8511,7 +8512,8 @@ VIEWS.master = async function () {
           <td class="muted">${esc(p.unit || "—")}</td><td class="muted">${esc(p.method || "—")}</td>
           <td>${badge(p.active ? "available" : "obsolete")}${p.active ? "hoạt động" : "ngừng"}</td>
           ${canManage ? `<td style="white-space:nowrap"><button class="btn sm sec" data-qpedit="${esc(p.param_id)}">Sửa</button>
-            <button class="btn sm sec" data-qptoggle="${esc(p.param_id)}">${p.active ? "Ngừng" : "Kích hoạt"}</button></td>` : ""}</tr>`).join("") ||
+            <button class="btn sm sec" data-qptoggle="${esc(p.param_id)}">${p.active ? "Ngừng" : "Kích hoạt"}</button>
+            <button class="btn sm sec" data-qpdel="${esc(p.param_id)}">Xóa</button></td>` : ""}</tr>`).join("") ||
           `<tr><td colspan="${canManage ? 7 : 6}" class="muted">Chưa có chỉ tiêu nào.</td></tr>`}</tbody>
       </table></div>
     </div>
@@ -8963,6 +8965,11 @@ VIEWS.master = async function () {
         target: p.target, usl: p.usl, lsl: p.lsl, stage: p.stage, method: p.method, note: p.note,
         value_type: p.value_type, active: !p.active });
       toast(p.active ? "Đã ngừng chỉ tiêu" : "Đã kích hoạt lại chỉ tiêu"); render("master");
+    }));
+    document.querySelectorAll("[data-qpdel]").forEach(b => b.onclick = () => guard(async () => {
+      if (!confirm("Xóa chỉ tiêu này? Chỉ xóa được khi chưa gán vào nhóm chỉ tiêu nào. Không thể hoàn tác.")) return;
+      await DELETE(`/qc/parameters/${b.dataset.qpdel}`);
+      toast("Đã xóa chỉ tiêu"); render("master");
     }));
 
     $("qg_add").onclick = () => guard(async () => {
