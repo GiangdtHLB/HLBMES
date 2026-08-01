@@ -170,6 +170,24 @@ def list_movements(movement_type: str = None, mode: str = None, limit: int = 200
     return svc.list_movements(db, movement_type, mode, limit)
 
 
+# ---- Xóa lịch sử (chỉ admin) — dọn dẹp sổ nhập/xuất tự do/xuất theo đề nghị, dữ liệu vận
+# hành thật (lô/tồn kho/NVL đã dùng cho mẻ) không bị đụng tới. Vẫn ghi audit bình thường.
+@router.delete("/movements/free-issue-history")
+def delete_free_issue_history(workshop: bool = False, db: Session = Depends(get_db),
+                              user: User = Depends(get_current_user)):
+    return svc.delete_free_issue_history(db, workshop, user)
+
+
+@router.delete("/movements/receipt-history")
+def delete_receipt_history(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    return svc.delete_receipt_history(db, user)
+
+
+@router.delete("/requests-history")
+def delete_request_history(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    return svc.delete_request_history(db, user)
+
+
 @router.get("/workshop-usage-history")
 def workshop_usage_history(limit: int = 200, db: Session = Depends(get_db)):
     return svc.workshop_usage_history(db, limit)

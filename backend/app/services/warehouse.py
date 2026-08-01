@@ -779,6 +779,84 @@ def undo_issue(db: Session, movement_id: str, user: User, strict: bool = True) -
     return result
 
 
+def delete_free_issue_history(db: Session, workshop: bool, user: User) -> dict:
+    """Xóa lịch sử Xuất tự do (Kho phân xưởng nếu workshop=True, Kho công ty nếu False) —
+    CHỈ ADMIN. Chỉ xóa các giao dịch xuất tự do THẬT SỰ tự do (không gắn với NVL đã dùng cho
+    mẻ nấu/lọc/chiết) — những dòng đó cũng dùng chung mode="tu_do" (xem add_brew_material/
+    add_filter_material/add_bottle_material) nhưng đang bị brew_material_usage/
+    filter_material_usage/bottle_material_usage.movement_id tham chiếu, PHẢI giữ nguyên để
+    không làm mất dấu vết NVL đã dùng thật cho sản xuất."""
+    require_role(user, Role.ADMIN)
+    used_ids = set()
+    for cls in (BrewMaterialUsage, FilterMaterialUsage, BottleMaterialUsage):
+        used_ids.update(row[0] for row in db.execute(
+            select(cls.movement_id).where(cls.movement_id.isnot(None))).all())
+    rows = db.execute(select(StockMovement).where(
+        StockMovement.movement_type == "issue", StockMovement.mode == "tu_do")).scalars().all()
+    target = [m for m in rows if m.movement_id not in used_ids
+              and _is_workshop_location(m.location_from) == workshop]
+    ids = {m.movement_id for m in target}
+    if ids:
+        # Xóa giao dịch "Hoàn lại" trỏ ngược (reversal_of) tới các dòng này trước — tự tham
+        # chiếu nên phải xóa con trước cha.
+        for r in db.execute(select(StockMovement).where(StockMovement.reversal_of.in_(ids))).scalars().all():
+            db.delete(r)
+        db.flush()
+        for m in target:
+            db.delete(m)
+    record_audit(db, entity_type="stock_movement", entity_id="bulk", action="delete_free_issue_history",
+                 actor=user, after={"scope": "phan_xuong" if workshop else "cong_ty", "count": len(target)})
+    db.commit()
+    return {"deleted": len(target)}
+
+
+def delete_receipt_history(db: Session, user: User) -> dict:
+    """Xóa lịch sử Nhập kho (Kho công ty) — CHỈ ADMIN. Chỉ xóa bản ghi sổ nhập
+    (StockMovement movement_type="receipt"), KHÔNG đụng lô/tồn kho hiện tại — các lô đã tạo
+    từ những lần nhập đó vẫn còn nguyên trong material_lot, chỉ mất dòng lịch sử ghi lại
+    giao dịch nhập đó."""
+    require_role(user, Role.ADMIN)
+    rows = db.execute(select(StockMovement).where(StockMovement.movement_type == "receipt")).scalars().all()
+    count = len(rows)
+    for m in rows:
+        db.delete(m)
+    record_audit(db, entity_type="stock_movement", entity_id="bulk", action="delete_receipt_history",
+                 actor=user, after={"count": count})
+    db.commit()
+    return {"deleted": count}
+
+
+def delete_request_history(db: Session, user: User) -> dict:
+    """Xóa "Sổ xuất theo đề nghị" (các phiếu đề nghị nhận kho ĐÃ xử lý xong hết — không còn
+    dòng nào ở trạng thái pending) — CHỈ ADMIN. Xóa phiếu + dòng + giao dịch StockMovement
+    (mode="xuat_theo_de_nghi") gắn với phiếu đó. KHÔNG đụng phiếu còn dòng đang chờ xử lý
+    (những phiếu đó vẫn hiện ở khối "đang chờ", không phải lịch sử)."""
+    require_role(user, Role.ADMIN)
+    all_requests = db.execute(select(MaterialRequest)).scalars().all()
+    done = []
+    for req in all_requests:
+        lines = db.execute(select(MaterialRequestLine).where(
+            MaterialRequestLine.request_id == req.request_id)).scalars().all()
+        if lines and not any(l.status == "pending" for l in lines):
+            done.append((req, lines))
+    codes = [req.request_code for req, _ in done]
+    if codes:
+        xtdn = db.execute(select(StockMovement).where(StockMovement.mode == "xuat_theo_de_nghi")).scalars().all()
+        for m in xtdn:
+            if m.reason and any(m.reason.startswith(f"Xuất theo đề nghị {code}") for code in codes):
+                db.delete(m)
+        db.flush()
+        for req, lines in done:
+            for l in lines:
+                db.delete(l)
+            db.flush()
+            db.delete(req)
+    record_audit(db, entity_type="material_request", entity_id="bulk", action="delete_request_history",
+                 actor=user, after={"count": len(done)})
+    db.commit()
+    return {"deleted": len(done)}
+
+
 def list_movements(db: Session, movement_type: str = None, mode: str = None, limit: int = 200) -> list[StockMovement]:
     """Sổ giao dịch kho — dùng chung cho lịch sử xuất tự do / điều chuyển / trả NCC / xuất theo đề nghị."""
     stmt = select(StockMovement).order_by(StockMovement.ts.desc()).limit(limit)

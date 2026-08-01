@@ -3075,7 +3075,7 @@ function wireSubnav(view) {
 }
 async function lotOptions(db, onlyAvailable) {
   const lots = await GET("/lots");
-  return lots.filter(l => !onlyAvailable || l.status === "available")
+  return lots.filter(l => l.quantity > 0 && (!onlyAvailable || l.status === "available"))
     .sort((a, b) => new Date(a.created_at) - new Date(b.created_at))   // FIFO: nhập trước hiện trước
     .map(l => `<option value="${l.lot_id}">${esc(l.lot_code)} (${l.quantity}${l.uom}, nhập ${fmt(l.created_at)})${l.status === "on_hold" ? " — CHỜ DUYỆT QC" : ""}</option>`).join("");
 }
@@ -3215,7 +3215,7 @@ VIEWS.warehouse_kc = async function () {
         <td class="muted">${esc(m.actor || "")}</td></tr>`;
     }).join("") || `<tr><td colspan="8" class="muted">Chưa có phiếu nhập kho nào.</td></tr>`;
     body = `<div class="split">
-      <div class="panel"><h2>Nhập kho</h2>
+      <div class="panel"><h2>Nhập kho ${isAdminGiao ? `<button class="btn sm sec" id="rc_delhist" style="color:var(--red);font-size:12px;font-weight:normal">🗑️ Xóa lịch sử</button>` : ""}</h2>
         <div class="row"><div class="field"><label>Ngày nhập</label><input id="rc_dt" type="datetime-local" value="${toDTLocal(new Date())}" max="${toDTLocal(new Date())}" min="${toDTLocal(new Date(Date.now() - 15 * 86400000))}"/></div>
           <div class="field" style="position:relative"><label>Nguyên liệu</label>
             <input type="text" id="rc_mat_txt" autocomplete="off" placeholder="Tìm mã/tên nguyên liệu..." value="${esc(matItemsGiao[0]?.label || "")}"/>
@@ -3357,6 +3357,12 @@ VIEWS.warehouse_kc = async function () {
         expiry: $("rc_exp").value || null, reason: $("rc_note").value.trim() || "Nhập kho" });
       if (res.status === "on_hold") toast(`Đã nhập kho (mã lô ${res.lot_code}) — lô đang CHỜ khai báo & duyệt chỉ tiêu chất lượng`, "err");
       else toast(`Đã nhập kho (mã lô ${res.lot_code})`);
+      render("warehouse_kc");
+    });
+    if ($("rc_delhist")) $("rc_delhist").onclick = () => guard(async () => {
+      if (!confirm("Xóa TOÀN BỘ lịch sử nhập kho? Lô/tồn kho hiện tại KHÔNG bị đụng tới, chỉ mất bảng ghi lịch sử nhập. Không thể hoàn tác.")) return;
+      const res = await DELETE("/warehouse/movements/receipt-history");
+      toast(`Đã xóa ${res.deleted} dòng lịch sử nhập kho`);
       render("warehouse_kc");
     });
     if ($("ob_do")) $("ob_do").onclick = () => guard(async () => {
@@ -3735,18 +3741,32 @@ const WH_HIST_UNDO = { tu_do: true, tu_do_px: true, dieu_chuyen: false, tra_ncc:
 // "tu_do" (Kho công ty) và "tu_do_px" (Kho phân xưởng) dùng chung 1 endpoint/mode ở backend
 // (StockMovement.mode="tu_do"), chỉ khác view nào gọi render() lại sau khi Hoàn tác.
 const WH_HIST_VIEW = { tu_do: "warehouse_kc", tu_do_px: "warehouse_px" };
+// Nút "Xóa lịch sử" (chỉ admin) — mỗi key trỏ tới 1 endpoint xóa riêng ở backend (xem
+// services/warehouse.py::delete_free_issue_history/delete_request_history). Chỉ xóa được
+// dữ liệu THẬT SỰ là lịch sử (không đụng NVL đã dùng cho mẻ sản xuất/phiếu còn đang chờ).
+const WH_HIST_DELETE = {
+  tu_do: { url: "/warehouse/movements/free-issue-history?workshop=false",
+    confirm: "Xóa TOÀN BỘ lịch sử xuất tự do (Kho công ty)? Các dòng NVL đã dùng thật cho mẻ nấu/lọc/chiết sẽ được giữ lại, không mất. Không thể hoàn tác." },
+  tu_do_px: { url: "/warehouse/movements/free-issue-history?workshop=true",
+    confirm: "Xóa TOÀN BỘ lịch sử xuất tự do (Kho phân xưởng)? Các dòng NVL đã dùng thật cho mẻ nấu/lọc/chiết sẽ được giữ lại, không mất. Không thể hoàn tác." },
+  xuat_theo_de_nghi: { url: "/warehouse/requests-history",
+    confirm: "Xóa TOÀN BỘ sổ xuất theo đề nghị đã xử lý xong? Phiếu còn dòng đang chờ sẽ không bị ảnh hưởng. Không thể hoàn tác." },
+};
 
 // "xuat_theo_de_nghi" hiển thị dạng thẻ phiếu accordion — giống hệt "Đề nghị nhận kho"
 // (requestBlockHtml/requestLineRowHtml) thay vì bảng giao dịch phẳng, để mỗi dòng đã xuất
 // có nút "Hoàn tác" ngay tại chỗ (dùng chung undo_fulfill_line, không phải undo-issue chung).
 function movementHistoryBlockHtml(key) {
   const all = WH_CACHE[key] || [];
+  const isAdmin = CURRENT_USER && CURRENT_USER.role === "admin";
+  const delBtn = isAdmin && WH_HIST_DELETE[key]
+    ? ` <button class="btn sm sec" data-delhist="${key}" style="color:var(--red)">🗑️ Xóa lịch sử</button>` : "";
   if (key === "xuat_theo_de_nghi") {
     const visible = all.slice(0, WH_HIST_VISIBLE[key] || WH_HIST_PAGE);
     const moreBtn = all.length > visible.length
       ? `<button class="btn sm sec" data-loadmorehist="${key}" style="margin-top:6px">Tải thêm (còn ${all.length - visible.length})</button>` : "";
     return `<div id="wh_hist_${key}" style="margin-top:14px">
-      <h4>${esc(WH_HIST_TITLE[key])} <span class="muted">(${visible.length}/${all.length} phiếu)</span></h4>
+      <h4>${esc(WH_HIST_TITLE[key])} <span class="muted">(${visible.length}/${all.length} phiếu)</span>${delBtn}</h4>
       ${visible.map(r => requestBlockHtml(r, WH_CACHE.matById, WH_CACHE.lotById, WH_CACHE.canFulfill, false, WH_CACHE.allLots)).join("") ||
         '<div class="muted">Chưa có phiếu nào đã xuất.</div>'}
       ${moreBtn}
@@ -3758,7 +3778,7 @@ function movementHistoryBlockHtml(key) {
   const moreBtn = all.length > visible.length
     ? `<button class="btn sm sec" data-loadmorehist="${key}" style="margin-top:6px">Tải thêm (còn ${all.length - visible.length})</button>` : "";
   return `<div class="tablewrap" id="wh_hist_${key}" style="margin-top:14px">
-    <h4>${esc(WH_HIST_TITLE[key])} <span class="muted">(${visible.length}/${all.length})</span></h4>
+    <h4>${esc(WH_HIST_TITLE[key])} <span class="muted">(${visible.length}/${all.length})</span>${delBtn}</h4>
     <table>
       <thead><tr><th>Thời gian</th><th>Vật tư</th><th>Lô</th><th>SL</th><th>Từ → Đến</th><th>Lý do</th><th>Người thực hiện</th>${showUndo ? "<th></th>" : ""}</tr></thead>
       <tbody>${visible.map(m => movementRowHtml(m, WH_CACHE.matById, showUndo)).join("") ||
@@ -3771,6 +3791,13 @@ function movementHistoryBlockHtml(key) {
 function wireMovementHistoryBlock(key) {
   const btn = document.querySelector(`[data-loadmorehist="${key}"]`);
   if (btn) btn.onclick = () => { WH_HIST_VISIBLE[key] = (WH_HIST_VISIBLE[key] || WH_HIST_PAGE) + WH_HIST_PAGE; refreshMovementHistoryBlock(key); };
+  const delBtn = document.querySelector(`#wh_hist_${key} [data-delhist]`);
+  if (delBtn) delBtn.onclick = () => guard(async () => {
+    if (!confirm(WH_HIST_DELETE[key].confirm)) return;
+    const res = await DELETE(WH_HIST_DELETE[key].url);
+    toast(`Đã xóa ${res.deleted} dòng lịch sử`);
+    render(WH_HIST_VIEW[key] || "warehouse_kc");
+  });
   if (key === "xuat_theo_de_nghi") { wireRequestBlockActions(); return; }
   if (WH_HIST_UNDO[key]) {
     document.querySelectorAll(`#wh_hist_${key} [data-undoissue]`).forEach(b => b.onclick = () => guard(async () => {
