@@ -468,6 +468,52 @@ def test_material_fifo_endpoint_sorted_oldest_first(client, admin_h):
     assert received == sorted(received)
 
 
+def test_create_order_with_alt_group_material_line_sums_members(client, admin_h, vanhanh_h):
+    """Dòng vật tư khai theo Nhóm vật tư thay thế (alt_group_code) — tồn kiểm tra CỘNG DỒN
+    qua mọi mã thành viên, snapshot lưu lại đúng tổng, material_id=None +
+    material_group_code lưu đúng mã nhóm (mirror test_brew_order alt-group tests)."""
+    ferment_id = _setup_ferment(client, admin_h, vanhanh_h, "FO-GRP01")
+    m1 = _a_material_with_stock(client, admin_h, "MAT-FOGRP01A", qty_company=3, qty_workshop=2)
+    m2 = _a_material_with_stock(client, admin_h, "MAT-FOGRP01B", qty_company=1, qty_workshop=4)
+    g = client.post("/api/material-alt-groups", headers=admin_h,
+                    json={"code": "GRP-FO01", "name": "Nhóm test FO01", "member_material_ids": [m1, m2]})
+    assert g.status_code == 201, g.text
+
+    r = _a_filter_order(client, admin_h, "LOC-GRP01", [ferment_id],
+                        lines=[{"alt_group_code": "GRP-FO01", "quantity": 8}])
+    assert r.status_code == 201, r.text
+    order_id = r.json()["filter_order_id"]
+
+    detail = client.get(f"/api/brewing/filter-orders/{order_id}", headers=admin_h).json()
+    line = detail["lines"][0]
+    assert line["material_id"] is None
+    assert line["material_group_code"] == "GRP-FO01"
+    assert line["stock_company_snapshot"] == 4
+    assert line["stock_workshop_snapshot"] == 6
+    assert len(line["member_breakdown"]) == 2
+    assert {mb["material_id"] for mb in line["member_breakdown"]} == {m1, m2}
+
+
+def test_create_order_with_alt_group_insufficient_total_is_blocked(client, admin_h, vanhanh_h):
+    ferment_id = _setup_ferment(client, admin_h, vanhanh_h, "FO-GRP02")
+    m1 = _a_material_with_stock(client, admin_h, "MAT-FOGRP02A", qty_company=1, qty_workshop=1)
+    m2 = _a_material_with_stock(client, admin_h, "MAT-FOGRP02B", qty_company=1, qty_workshop=1)
+    g = client.post("/api/material-alt-groups", headers=admin_h,
+                    json={"code": "GRP-FO02", "name": "Nhóm test FO02", "member_material_ids": [m1, m2]})
+    assert g.status_code == 201, g.text
+
+    r = _a_filter_order(client, admin_h, "LOC-GRP02", [ferment_id],
+                        lines=[{"alt_group_code": "GRP-FO02", "quantity": 999}])
+    assert r.status_code == 409, r.text
+
+
+def test_create_order_with_unknown_alt_group_rejected(client, admin_h, vanhanh_h):
+    ferment_id = _setup_ferment(client, admin_h, vanhanh_h, "FO-GRP03")
+    r = _a_filter_order(client, admin_h, "LOC-GRP03", [ferment_id],
+                        lines=[{"alt_group_code": "GRP-NOPE", "quantity": 1}])
+    assert r.status_code == 404, r.text
+
+
 def test_delete_order_cleans_up_material_lines(client, admin_h, vanhanh_h):
     ferment_id = _setup_ferment(client, admin_h, vanhanh_h, "FO-MAT04")
     material_id = _a_material_with_stock(client, admin_h, "MAT-FO04", qty_company=10)

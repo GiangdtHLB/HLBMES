@@ -4,14 +4,14 @@ Quy tắc cốt lõi: CHỈ ĐÚNG 1 formula/product được is_active=True t�
 ở đây (activate_formula), KHÔNG dựa vào DB constraint. services/brew_order.py::_effective_bom
 tin tưởng bất biến này để chọn công thức hiệu lực mà không cần ORDER BY."""
 
-from sqlalchemy import select
+from sqlalchemy import select, true
 from sqlalchemy.orm import Session
 
 from ..audit import record_audit
 from ..common import utcnow
 from ..errors import DomainError, NotFoundError
 from ..models.formula import Formula, FormulaActivationLog
-from ..models.master import Material, Product
+from ..models.master import Material, MaterialAltGroup, Product
 from ..security import User, require_perm
 
 _MANAGE_PERM = "recipe.author"  # 1 quyền dùng chung cho mọi thao tác — "người quản lý công thức"
@@ -20,14 +20,34 @@ _MANAGE_PERM = "recipe.author"  # 1 quyền dùng chung cho mọi thao tác — 
 def _validate_materials(db: Session, materials: list) -> None:
     if not materials:
         raise DomainError("Công thức phải có ít nhất 1 dòng nguyên vật liệu.")
-    codes = {m.get("material_code") for m in materials}
-    found = {c for c, in db.execute(select(Material.code).where(Material.code.in_(codes))).all()}
-    missing = codes - found
-    if missing:
-        raise DomainError(f"Mã NVL không tồn tại: {', '.join(sorted(missing))}.")
+    # Mỗi dòng khai ĐÚNG 1 trong material_code (vật tư cụ thể) HOẶC alt_group_code (nhóm vật
+    # tư thay thế, VD "Malt Úc" gồm rời/bao — xem models/master.py::MaterialAltGroup).
     for m in materials:
+        material_code, alt_group_code = m.get("material_code"), m.get("alt_group_code")
+        if bool(material_code) == bool(alt_group_code):
+            raise DomainError("Mỗi dòng NVL phải khai đúng 1 trong Mã vật tư hoặc Nhóm vật tư thay thế.")
         if not (m.get("qty") or 0) > 0:
-            raise DomainError(f"NVL '{m.get('material_code')}': số lượng phải > 0.")
+            raise DomainError(f"NVL '{material_code or alt_group_code}': số lượng phải > 0.")
+
+    codes = {m["material_code"] for m in materials if m.get("material_code")}
+    if codes:
+        found = {c for c, in db.execute(select(Material.code).where(Material.code.in_(codes))).all()}
+        missing = codes - found
+        if missing:
+            raise DomainError(f"Mã NVL không tồn tại: {', '.join(sorted(missing))}.")
+
+    group_codes = {m["alt_group_code"] for m in materials if m.get("alt_group_code")}
+    if group_codes:
+        groups = db.execute(select(MaterialAltGroup).where(MaterialAltGroup.code.in_(group_codes))).scalars().all()
+        found_groups = {g.code: g for g in groups}
+        missing_groups = group_codes - found_groups.keys()
+        if missing_groups:
+            raise DomainError(f"Nhóm vật tư thay thế không tồn tại: {', '.join(sorted(missing_groups))}.")
+        for code, g in found_groups.items():
+            if not g.active:
+                raise DomainError(f"Nhóm vật tư thay thế '{code}' đã ngừng hoạt động.")
+            if not g.member_material_ids:
+                raise DomainError(f"Nhóm vật tư thay thế '{code}' chưa có vật tư thành viên nào.")
 
 
 def create_formula(db: Session, payload: dict, user: User) -> Formula:
@@ -96,7 +116,7 @@ def activate_formula(db: Session, formula_id: str, user: User) -> Formula:
         raise DomainError("Công thức này đang hiệu lực rồi.")
     now = utcnow()
     prev = db.execute(select(Formula).where(
-        Formula.product_id == f.product_id, Formula.is_active == True, Formula.formula_id != formula_id  # noqa: E712
+        Formula.product_id == f.product_id, Formula.is_active == true(), Formula.formula_id != formula_id
     )).scalars().first()
     if prev:
         prev.is_active = False

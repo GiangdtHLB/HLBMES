@@ -3,7 +3,7 @@ ta giữ bản sao có version/effective date (tài liệu §5.2, §8.1)."""
 
 from typing import Optional
 
-from sqlalchemy import Boolean, Float, ForeignKey, Integer, UnicodeText, Unicode
+from sqlalchemy import JSON, Boolean, Float, ForeignKey, Integer, UnicodeText, Unicode
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ..common import new_id
@@ -102,6 +102,28 @@ class MaterialGroup(Base):
     # tiêu chất lượng (openLotQcModal) sẽ hiện thêm cột "Giá trị CA" (giá trị in trên bao bì
     # nhà cung cấp) bên cạnh giá trị nhà máy tự đo, để phân biệt phục vụ báo cáo sau này.
     is_raw_material: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class MaterialAltGroup(Base):
+    """Nhóm vật tư thay thế (VD "Malt Úc" gồm 2 mã cụ thể: Malt Úc rời + Malt Úc bao — cùng
+    bản chất, khác quy cách đóng gói/nhà cung cấp). KHÁC với MaterialGroup ở trên — đó là
+    phân loại rộng (malt/gạo/hoa bia...) dùng cho QC/bao bì, còn nhóm này là tập hợp các mã
+    vật tư CỤ THỂ có thể dùng thay thế cho nhau.
+
+    Công thức (Formula.materials) có thể khai 1 dòng NVL bằng NHÓM này (alt_group_code) thay
+    vì 1 material_code cụ thể — nghĩa là "cần 825kg Malt Úc", không quan tâm rời hay bao.
+    Việc chọn mã cụ thể nào để xuất kho vẫn do thủ kho quyết định lúc xuất thật (xem
+    services/brew_order.py::_resolve_group_members, frontend openBrewMaterialsModal) — nơi
+    xuất kho thật (services/warehouse.py::issue) vốn đã cho chọn tự do bất kỳ vật tư nào,
+    nhóm này chỉ ảnh hưởng tầng khai báo/gợi ý, không đổi gì ở tầng xuất kho."""
+
+    __tablename__ = "material_alt_group"
+
+    group_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
+    code: Mapped[str] = mapped_column(Unicode(64), unique=True, index=True)
+    name: Mapped[str] = mapped_column(Unicode(255))
+    member_material_ids: Mapped[list] = mapped_column(JSON, default=list)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
 class Material(Base):

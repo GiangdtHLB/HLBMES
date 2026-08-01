@@ -27,7 +27,7 @@ from ..models.brewing import (
     FermentRecord,
 )
 from ..models.formula import Formula
-from ..models.master import Material, Product
+from ..models.master import Material, MaterialAltGroup, Product
 from . import braumat_import as braumat_svc
 from . import warehouse as warehouse_svc
 
@@ -42,6 +42,19 @@ def _effective_bom(db: Session, product_id: str):
         Formula.product_id == product_id, Formula.is_active == true())).scalars().first()
 
 
+def _resolve_group_members(db: Session, group_code: str | None) -> list:
+    """Tra danh sách material_id thành viên của 1 Nhóm vật tư thay thế (VD "Malt Úc" = rời +
+    bao) — trả rỗng nếu nhóm không tồn tại/đã ngừng hoạt động. KHÔNG lưu cứng danh sách này
+    vào BrewOrderMaterialLine vì nhóm có thể đổi thành viên sau khi lệnh đã lập — chỉ ảnh
+    hưởng gợi ý hiển thị lúc ghi NVL thực tế (openBrewMaterialsModal), không ảnh hưởng số
+    liệu định mức/tồn kho đã snapshot lúc lập lệnh."""
+    if not group_code:
+        return []
+    g = db.execute(select(MaterialAltGroup).where(
+        MaterialAltGroup.code == group_code, MaterialAltGroup.active == true())).scalars().first()
+    return list(g.member_material_ids or []) if g else []
+
+
 def _stock_snapshot(db: Session) -> tuple[dict, dict]:
     """Trả 2 dict {material_id: on_hand} — 1 lần gọi cho cả lệnh, tránh N+1 query."""
     company = {r["material_id"]: r["on_hand"] for r in warehouse_svc.stock_on_hand(db, "Kho công ty")}
@@ -53,40 +66,98 @@ def build_lines_from_bom(db: Session, product_id: str, planned_batch_count: int,
     """Nạp Định mức từ Công thức hiệu lực của dịch bia — công thức khai báo định mức CHO
     ĐÚNG 1 MẺ, nên Nhu cầu 1 mẻ = nguyên văn số lượng trong công thức (KHÔNG scale theo
     planned_volume_hl — tham số này chỉ giữ lại cho tương thích chữ ký hàm/router, không
-    dùng trong phép tính), Nhu cầu Tổng mẻ = Nhu cầu 1 mẻ x Số mẻ kế hoạch."""
+    dùng trong phép tính), Nhu cầu Tổng mẻ = Nhu cầu 1 mẻ x Số mẻ kế hoạch.
+
+    Dòng khai theo Nhóm vật tư thay thế (alt_group_code, VD "Malt Úc") không có material_id
+    cụ thể — material_name = tên nhóm, kèm member_material_ids để _annotate_stock cộng dồn
+    tồn kho qua mọi mã thành viên và để thủ kho được gợi ý đúng mọi mã lúc ghi NVL thực tế
+    (xem _resolve_group_members, frontend openBrewMaterialsModal)."""
     formula = _effective_bom(db, product_id)
     if not formula:
         return []
     materials_by_code = {m.code: m for m in db.execute(select(Material)).scalars().all()}
+    groups_by_code = {g.code: g for g in db.execute(select(MaterialAltGroup)).scalars().all()}
     out = []
     for i, m in enumerate(formula.materials or []):
+        qty_per_batch = round(m.get("qty", 0) or 0, 3)
+        qty_total = round(qty_per_batch * planned_batch_count, 3)
+        group_code = m.get("alt_group_code")
+        if group_code:
+            group = groups_by_code.get(group_code)
+            out.append({
+                "seq": i, "stt_label": str(i + 1), "is_header": False,
+                "material_id": None,
+                "material_name": group.name if group else group_code,
+                "material_group_code": group_code,
+                "member_material_ids": list(group.member_material_ids or []) if group else [],
+                "uom": m.get("uom"),
+                "qty_per_batch": qty_per_batch,
+                "qty_total": qty_total,
+            })
+            continue
         code = m.get("material_code")
         mat = materials_by_code.get(code)
-        qty_per_batch = round(m.get("qty", 0) or 0, 3)
         out.append({
             "seq": i, "stt_label": str(i + 1), "is_header": False,
             "material_id": mat.material_id if mat else None,
             "material_name": mat.name if mat else code,
             "uom": m.get("uom"),
             "qty_per_batch": qty_per_batch,
-            "qty_total": round(qty_per_batch * planned_batch_count, 3),
+            "qty_total": qty_total,
         })
     return out
 
 
-def _annotate_stock(lines: list, company_stock: dict, workshop_stock: dict) -> list:
+def _line_stock(l: dict, company_stock: dict, workshop_stock: dict) -> tuple:
+    """Tồn công ty/phân xưởng cho 1 dòng NVL — dòng nhóm vật tư thay thế (member_material_ids
+    không rỗng) cộng dồn qua MỌI mã thành viên; dòng thường tra theo material_id đơn lẻ."""
+    member_ids = l.get("member_material_ids") or []
+    if member_ids:
+        company = sum(company_stock.get(mid, 0) or 0 for mid in member_ids)
+        workshop = sum(workshop_stock.get(mid, 0) or 0 for mid in member_ids)
+        return company, workshop
+    material_id = l.get("material_id")
+    return company_stock.get(material_id, 0) or 0, workshop_stock.get(material_id, 0) or 0
+
+
+def _materials_by_id(db: Session) -> dict:
+    return {m.material_id: m for m in db.execute(select(Material)).scalars().all()}
+
+
+def _member_breakdown(member_ids: list, company_stock: dict, workshop_stock: dict, materials_by_id: dict) -> list:
+    """Tồn kho TỪNG mã thành viên của 1 dòng Nhóm vật tư thay thế — để người lập lệnh thấy
+    ngay nhóm gồm đúng những mã nào và mã nào đang thực sự có tồn (VD "Malt Úc" gồm Malt Úc
+    rời + Malt Úc bao, chỉ 1 trong 2 đang còn hàng), không chỉ số tổng cộng dồn."""
+    out = []
+    for mid in member_ids or []:
+        mat = materials_by_id.get(mid)
+        out.append({
+            "material_id": mid, "material_code": mat.code if mat else None,
+            "material_name": mat.name if mat else mid,
+            "stock_company": company_stock.get(mid, 0) or 0,
+            "stock_workshop": workshop_stock.get(mid, 0) or 0,
+        })
+    return out
+
+
+def _annotate_stock(lines: list, company_stock: dict, workshop_stock: dict, materials_by_id: dict | None = None) -> list:
     """Gắn tồn kho công ty/phân xưởng + cờ "shortage" (thiếu tồn) vào từng dòng NVL — dùng
-    chung cho preview (trước khi tạo lệnh) và get_order (đã tạo, đọc lại snapshot đã lưu)."""
+    chung cho preview (trước khi tạo lệnh) và get_order (đã tạo, đọc lại snapshot đã lưu).
+    Dòng Nhóm vật tư thay thế còn kèm member_breakdown (tồn riêng từng mã thành viên) khi có
+    materials_by_id — bắt buộc để hiện đúng tên vật tư, không chỉ material_id."""
     out = []
     for l in lines:
-        material_id = l.get("material_id")
-        company = company_stock.get(material_id, 0) or 0
-        workshop = workshop_stock.get(material_id, 0) or 0
+        has_target = bool(l.get("material_id") or l.get("member_material_ids"))
+        company, workshop = _line_stock(l, company_stock, workshop_stock)
         qty_total = l.get("qty_total")
         shortage = (not l.get("is_header")) and qty_total is not None and qty_total > (company + workshop)
-        out.append({**l, "stock_company_snapshot": company if material_id else None,
-                    "stock_workshop_snapshot": workshop if material_id else None,
-                    "unit_price": l.get("unit_price"), "shortage": shortage})
+        member_ids = l.get("member_material_ids") or []
+        member_breakdown = (_member_breakdown(member_ids, company_stock, workshop_stock, materials_by_id)
+                             if member_ids and materials_by_id is not None else [])
+        out.append({**l, "stock_company_snapshot": company if has_target else None,
+                    "stock_workshop_snapshot": workshop if has_target else None,
+                    "unit_price": l.get("unit_price"), "shortage": shortage,
+                    "member_breakdown": member_breakdown})
     return out
 
 
@@ -96,7 +167,7 @@ def preview_bom_lines(db: Session, product_id: str, planned_batch_count: int, pl
     xong rồi mới xem (xem routers/brewing.py::preview_brew_order_bom)."""
     lines = build_lines_from_bom(db, product_id, planned_batch_count, planned_volume_hl)
     company_stock, workshop_stock = _stock_snapshot(db)
-    return _annotate_stock(lines, company_stock, workshop_stock)
+    return _annotate_stock(lines, company_stock, workshop_stock, _materials_by_id(db))
 
 
 def _validate_volume_plan(planned_volume_hl, tolerance_hl) -> None:
@@ -132,14 +203,17 @@ def _insert_sub_order(db: Session, master_order_id, seq: int, order_code: str, o
     company_stock, workshop_stock = _stock_snapshot(db)
     for i, line in enumerate(lines):
         material_id = line.get("material_id")
+        has_target = bool(material_id or line.get("member_material_ids"))
+        company, workshop = _line_stock(line, company_stock, workshop_stock)
         db.add(BrewOrderMaterialLine(
             line_id=new_id(), brew_order_id=order.brew_order_id, seq=line.get("seq", i),
             stt_label=line.get("stt_label"), is_header=line.get("is_header", False),
             material_id=material_id, material_name=line.get("material_name"), uom=line.get("uom"),
+            material_group_code=line.get("material_group_code"),
             qty_per_batch=line.get("qty_per_batch"), qty_total=line.get("qty_total"),
             unit_price=line.get("unit_price"),
-            stock_company_snapshot=company_stock.get(material_id) if material_id else None,
-            stock_workshop_snapshot=workshop_stock.get(material_id) if material_id else None,
+            stock_company_snapshot=company if has_target else None,
+            stock_workshop_snapshot=workshop if has_target else None,
         ))
     return order
 
@@ -198,14 +272,17 @@ def update_order(db: Session, brew_order_id: str, payload: dict, user) -> BrewOr
     company_stock, workshop_stock = _stock_snapshot(db)
     for i, line in enumerate(lines):
         material_id = line.get("material_id")
+        has_target = bool(material_id or line.get("member_material_ids"))
+        company, workshop = _line_stock(line, company_stock, workshop_stock)
         db.add(BrewOrderMaterialLine(
             line_id=new_id(), brew_order_id=order.brew_order_id, seq=line.get("seq", i),
             stt_label=line.get("stt_label"), is_header=line.get("is_header", False),
             material_id=material_id, material_name=line.get("material_name"), uom=line.get("uom"),
+            material_group_code=line.get("material_group_code"),
             qty_per_batch=line.get("qty_per_batch"), qty_total=line.get("qty_total"),
             unit_price=line.get("unit_price"),
-            stock_company_snapshot=company_stock.get(material_id) if material_id else None,
-            stock_workshop_snapshot=workshop_stock.get(material_id) if material_id else None,
+            stock_company_snapshot=company if has_target else None,
+            stock_workshop_snapshot=workshop if has_target else None,
         ))
 
     record_audit(db, entity_type="brew_order", entity_id=order.brew_order_id, action="update",
@@ -337,14 +414,23 @@ def get_order(db: Session, brew_order_id: str) -> dict:
     prod = db.get(Product, order.product_id) if order.product_id else None
     master = db.get(BrewMasterOrder, order.master_order_id) if order.master_order_id else None
 
+    # Tồn kho TỪNG mã thành viên hiện tại (KHÔNG snapshot — nhóm có thể đổi tồn/thành viên
+    # sau khi lệnh đã lập, nên hiện số sống để thủ kho biết thực tế đang còn mã nào).
+    live_company_stock, live_workshop_stock = _stock_snapshot(db)
+    materials_by_id = _materials_by_id(db)
+
     line_out = []
     for l in lines:
         company = l.stock_company_snapshot or 0
         workshop = l.stock_workshop_snapshot or 0
         shortage = (not l.is_header) and l.qty_total is not None and l.qty_total > (company + workshop)
+        member_ids = _resolve_group_members(db, l.material_group_code)
         line_out.append({
             "line_id": l.line_id, "seq": l.seq, "stt_label": l.stt_label, "is_header": l.is_header,
             "material_id": l.material_id, "material_name": l.material_name, "uom": l.uom,
+            "material_group_code": l.material_group_code,
+            "member_material_ids": member_ids,
+            "member_breakdown": _member_breakdown(member_ids, live_company_stock, live_workshop_stock, materials_by_id),
             "qty_per_batch": l.qty_per_batch, "qty_total": l.qty_total, "unit_price": l.unit_price,
             "stock_company_snapshot": l.stock_company_snapshot,
             "stock_workshop_snapshot": l.stock_workshop_snapshot, "shortage": shortage,
@@ -490,16 +576,26 @@ def get_master_order(db: Session, brew_master_order_id: str) -> dict:
     products = {p.product_id: p for p in db.execute(select(Product)).scalars().all()}
     children_rows = db.execute(select(BrewOrder).where(
         BrewOrder.master_order_id == brew_master_order_id).order_by(BrewOrder.seq)).scalars().all()
+    # Tồn kho TỪNG mã thành viên hiện tại (KHÔNG snapshot — xem get_order cùng lý do).
+    live_company_stock, live_workshop_stock = _stock_snapshot(db)
+    materials_by_id = _materials_by_id(db)
     children = []
     for o in children_rows:
         summary = _child_summary(db, o, products)
-        summary["lines"] = [{
-            "line_id": l.line_id, "seq": l.seq, "stt_label": l.stt_label, "is_header": l.is_header,
-            "material_id": l.material_id, "material_name": l.material_name, "uom": l.uom,
-            "qty_per_batch": l.qty_per_batch, "qty_total": l.qty_total, "unit_price": l.unit_price,
-            "stock_company_snapshot": l.stock_company_snapshot, "stock_workshop_snapshot": l.stock_workshop_snapshot,
-        } for l in db.execute(select(BrewOrderMaterialLine).where(
-            BrewOrderMaterialLine.brew_order_id == o.brew_order_id).order_by(BrewOrderMaterialLine.seq)).scalars().all()]
+        child_lines = []
+        for l in db.execute(select(BrewOrderMaterialLine).where(
+                BrewOrderMaterialLine.brew_order_id == o.brew_order_id).order_by(BrewOrderMaterialLine.seq)).scalars().all():
+            member_ids = _resolve_group_members(db, l.material_group_code)
+            child_lines.append({
+                "line_id": l.line_id, "seq": l.seq, "stt_label": l.stt_label, "is_header": l.is_header,
+                "material_id": l.material_id, "material_name": l.material_name, "uom": l.uom,
+                "material_group_code": l.material_group_code,
+                "member_material_ids": member_ids,
+                "member_breakdown": _member_breakdown(member_ids, live_company_stock, live_workshop_stock, materials_by_id),
+                "qty_per_batch": l.qty_per_batch, "qty_total": l.qty_total, "unit_price": l.unit_price,
+                "stock_company_snapshot": l.stock_company_snapshot, "stock_workshop_snapshot": l.stock_workshop_snapshot,
+            })
+        summary["lines"] = child_lines
         children.append(summary)
     return {
         "brew_master_order_id": m.brew_master_order_id, "order_code": m.order_code,

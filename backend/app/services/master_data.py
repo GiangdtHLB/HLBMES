@@ -13,7 +13,8 @@ from ..models.brewing import (BottleRecord, BrewOrder, BrewOrderMaterialLine, Br
     FilterOrder, FilterOrderMaterialLine, FilterOrderTank, FilterRecord)
 from ..models.batches import BatchExecution
 from ..models.lines import ProductionLine
-from ..models.master import BeerType, FinishedProduct, Material, MaterialGroup, Product, UnitTypeCatalog
+from ..models.formula import Formula
+from ..models.master import BeerType, FinishedProduct, Material, MaterialAltGroup, MaterialGroup, Product, UnitTypeCatalog
 from ..models.materials import MaterialLot, Supplier
 from ..models.materials_ext import MaterialQcGroup
 from ..models.metrics import OEERecord
@@ -103,6 +104,27 @@ def delete_material_group(db: Session, group_id: str, user: User) -> None:
     _block_if_used(_used_by(db, checks), "Nhóm vật tư", g.code)
     record_audit(db, entity_type="material_group", entity_id=g.group_id, action="delete",
                  actor=user, before={"code": g.code, "name": g.name})
+    db.delete(g)
+    db.commit()
+
+
+def delete_material_alt_group(db: Session, group_id: str, user: User) -> None:
+    """Chặn xóa nếu còn Công thức nào khai dòng NVL theo nhóm này (Formula.materials là JSON
+    nên phải quét Python, không thể COUNT bằng SQL như các hàm xóa khác ở trên)."""
+    require_perm(user, "master.manage")
+    g = db.get(MaterialAltGroup, group_id)
+    if not g:
+        raise NotFoundError("Nhóm vật tư thay thế không tồn tại.")
+    used_by_formulas = [
+        f.code for f in db.execute(select(Formula)).scalars().all()
+        if any((m or {}).get("alt_group_code") == g.code for m in (f.materials or []))
+    ]
+    if used_by_formulas:
+        raise DomainError(
+            f"Không thể xóa Nhóm vật tư thay thế '{g.code}' — đang được dùng trong công thức "
+            f"{', '.join(used_by_formulas)}. Hãy sửa các công thức đó trước.")
+    record_audit(db, entity_type="material_alt_group", entity_id=g.group_id, action="delete",
+                 actor=user, before={"code": g.code, "name": g.name, "member_material_ids": g.member_material_ids})
     db.delete(g)
     db.commit()
 

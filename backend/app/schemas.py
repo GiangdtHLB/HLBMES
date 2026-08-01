@@ -79,6 +79,21 @@ class MaterialGroupOut(ORMModel):
     is_raw_material: bool
 
 
+class MaterialAltGroupIn(BaseModel):
+    code: str
+    name: str
+    member_material_ids: list[str] = []
+    active: bool = True
+
+
+class MaterialAltGroupOut(ORMModel):
+    group_id: str
+    code: str
+    name: str
+    member_material_ids: list
+    active: bool
+
+
 class LotKcsUpdateIn(BaseModel):
     kcs_lot_no: Optional[str] = None
 
@@ -280,7 +295,11 @@ class RecipeVersionOut(ORMModel):
 
 # ---- Formula (Công thức NVL mới — thay Recipe/RecipeVersion, xem models/formula.py) ----
 class FormulaMaterialLineIn(BaseModel):
-    material_code: str
+    # Đúng 1 trong 2 field — vật tư cụ thể HOẶC nhóm vật tư thay thế (validate ở
+    # services/formula.py::_validate_materials, không validate ở đây để giữ thông báo lỗi
+    # tiếng Việt rõ ràng theo đúng quy ước sẵn có của module này).
+    material_code: Optional[str] = None
+    alt_group_code: Optional[str] = None
     qty: float
     uom: str
 
@@ -1237,9 +1256,11 @@ class FinishBottleIn(FinishIn):
 
 
 class FilterOrderMaterialLineIn(BaseModel):
-    """1 dòng vật tư (VD: bột trợ lọc) dùng cho lệnh lọc — chọn từ Danh mục vật tư, số lượng
-    cần được kiểm tra ngay lúc lập lệnh (xem services/filter_order.py::create_order)."""
-    material_id: str
+    """1 dòng vật tư (VD: bột trợ lọc) dùng cho lệnh lọc — chọn từ Danh mục vật tư HOẶC 1
+    Nhóm vật tư thay thế (alt_group_code, đúng 1 trong 2 — validate ở service), số lượng cần
+    được kiểm tra ngay lúc lập lệnh (xem services/filter_order.py::create_order)."""
+    material_id: Optional[str] = None
+    alt_group_code: Optional[str] = None
     quantity: float
     unit_price: Optional[float] = None
 

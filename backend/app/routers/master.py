@@ -11,11 +11,12 @@ from ..audit import record_audit
 from ..common import new_id
 from ..database import get_db
 from ..errors import DomainError, NotFoundError, PermissionError_
-from ..models.master import BeerType, FinishedProduct, Material, MaterialGroup, Product, UnitTypeCatalog
+from ..models.master import BeerType, FinishedProduct, Material, MaterialAltGroup, MaterialGroup, Product, UnitTypeCatalog
 from ..models.materials import Supplier
-from ..schemas import (BeerTypeIn, BeerTypeOut, FinishedProductIn, FinishedProductOut, MaterialGroupIn,
-    MaterialGroupOut, MaterialIn, MaterialOut, MaterialQcGroupIn, OpsSettingIn, OpsSettingOut,
-    ProductBrewSpecIn, ProductIn, ProductOut, SupplierIn, SupplierOut, UnitTypeCatalogIn, UnitTypeCatalogOut)
+from ..schemas import (BeerTypeIn, BeerTypeOut, FinishedProductIn, FinishedProductOut, MaterialAltGroupIn,
+    MaterialAltGroupOut, MaterialGroupIn, MaterialGroupOut, MaterialIn, MaterialOut, MaterialQcGroupIn,
+    OpsSettingIn, OpsSettingOut, ProductBrewSpecIn, ProductIn, ProductOut, SupplierIn, SupplierOut,
+    UnitTypeCatalogIn, UnitTypeCatalogOut)
 from ..security import User, get_current_user, require_perm
 from ..services import braumat_import as braumat_svc
 from ..services import master_data, ops_setting as ops_setting_svc
@@ -213,6 +214,60 @@ def update_material_group(group_id: str, payload: MaterialGroupIn, db: Session =
 def delete_material_group(group_id: str, db: Session = Depends(get_db),
                           user: User = Depends(get_current_user)):
     master_data.delete_material_group(db, group_id, user)
+
+
+# ---- Nhóm vật tư thay thế (VD "Malt Úc" = Malt Úc rời + Malt Úc bao) — khác Nhóm vật tư ở
+# trên (đó là phân loại malt/gạo/hoa bia cho QC/bao bì); nhóm này là tập mã vật tư CỤ THỂ có
+# thể dùng thay thế cho nhau, tham chiếu từ Formula.materials (xem services/formula.py). ----
+@router.get("/material-alt-groups", response_model=list[MaterialAltGroupOut])
+def list_material_alt_groups(db: Session = Depends(get_db)):
+    return db.execute(select(MaterialAltGroup).order_by(MaterialAltGroup.code)).scalars().all()
+
+
+@router.post("/material-alt-groups", response_model=MaterialAltGroupOut, status_code=201)
+def create_material_alt_group(payload: MaterialAltGroupIn, db: Session = Depends(get_db),
+                              user: User = Depends(get_current_user)):
+    require_perm(user, "master.manage")
+    if db.execute(select(MaterialAltGroup).where(MaterialAltGroup.code == payload.code)).scalar_one_or_none():
+        raise DomainError(f"Mã nhóm vật tư thay thế '{payload.code}' đã tồn tại.")
+    if not payload.member_material_ids:
+        raise DomainError("Nhóm vật tư thay thế phải có ít nhất 1 vật tư thành viên.")
+    g = MaterialAltGroup(group_id=new_id(), **payload.model_dump())
+    db.add(g)
+    record_audit(db, entity_type="material_alt_group", entity_id=g.group_id, action="create",
+                 actor=user, after={"code": g.code, "name": g.name, "member_material_ids": g.member_material_ids})
+    db.commit()
+    db.refresh(g)
+    return g
+
+
+@router.put("/material-alt-groups/{group_id}", response_model=MaterialAltGroupOut)
+def update_material_alt_group(group_id: str, payload: MaterialAltGroupIn, db: Session = Depends(get_db),
+                              user: User = Depends(get_current_user)):
+    require_perm(user, "master.manage")
+    g = db.get(MaterialAltGroup, group_id)
+    if not g:
+        raise NotFoundError("Nhóm vật tư thay thế không tồn tại.")
+    if payload.code != g.code and db.execute(
+            select(MaterialAltGroup).where(MaterialAltGroup.code == payload.code)).scalar_one_or_none():
+        raise DomainError(f"Mã nhóm vật tư thay thế '{payload.code}' đã tồn tại.")
+    if not payload.member_material_ids:
+        raise DomainError("Nhóm vật tư thay thế phải có ít nhất 1 vật tư thành viên.")
+    before = {"code": g.code, "name": g.name, "member_material_ids": g.member_material_ids, "active": g.active}
+    g.code, g.name = payload.code, payload.name
+    g.member_material_ids = payload.member_material_ids
+    g.active = payload.active
+    record_audit(db, entity_type="material_alt_group", entity_id=g.group_id, action="update",
+                 actor=user, before=before, after=payload.model_dump())
+    db.commit()
+    db.refresh(g)
+    return g
+
+
+@router.delete("/material-alt-groups/{group_id}", status_code=204)
+def delete_material_alt_group(group_id: str, db: Session = Depends(get_db),
+                              user: User = Depends(get_current_user)):
+    master_data.delete_material_alt_group(db, group_id, user)
 
 
 # ---- Sản phẩm ----

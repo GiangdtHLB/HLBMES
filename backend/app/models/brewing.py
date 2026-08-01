@@ -116,6 +116,10 @@ class BrewOrderMaterialLine(Base):
     is_header: Mapped[bool] = mapped_column(Boolean, default=False)  # dòng nhóm "A Nguyên liệu chính" (không SL)
     material_id: Mapped[Optional[str]] = mapped_column(ForeignKey("material.material_id"), nullable=True)
     material_name: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)  # tên tự do nếu chưa có trong Danh mục
+    # Set khi dòng này khai theo Nhóm vật tư thay thế (MaterialAltGroup.code) thay vì 1
+    # material_id cụ thể — material_id/material_name ở trên vẫn để None/tên nhóm tương ứng.
+    # Xem services/brew_order.py::_resolve_group_members.
+    material_group_code: Mapped[Optional[str]] = mapped_column(Unicode(64), nullable=True)
     uom: Mapped[Optional[str]] = mapped_column(Unicode(64), nullable=True)
     qty_per_batch: Mapped[Optional[float]] = mapped_column(Float, nullable=True)   # Nhu cầu 1 mẻ
     qty_total: Mapped[Optional[float]] = mapped_column(Float, nullable=True)       # Nhu cầu Tổng mẻ
@@ -438,14 +442,17 @@ class FilterOrderTank(Base):
 class FilterOrderMaterialLine(Base):
     """Dòng vật tư dùng cho lệnh lọc (VD: bột trợ lọc/diatomite) — chọn từ Danh mục vật tư,
     tồn kho công ty/phân xưởng được chụp lại (snapshot) NGAY LÚC LẬP LỆNH, mirror
-    BrewOrderMaterialLine (xem services/warehouse.py::material_fifo_detail)."""
+    BrewOrderMaterialLine (xem services/warehouse.py::material_fifo_detail). Có thể khai theo
+    Nhóm vật tư thay thế (material_group_code) thay vì 1 material_id cụ thể — xem
+    services/filter_order.py::_resolve_group_members."""
     __tablename__ = "filter_order_material_line"
 
     line_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
     filter_order_id: Mapped[str] = mapped_column(ForeignKey("filter_order.filter_order_id"), index=True)
     seq: Mapped[int] = mapped_column(Integer, default=0)
-    material_id: Mapped[str] = mapped_column(ForeignKey("material.material_id"), index=True)
+    material_id: Mapped[Optional[str]] = mapped_column(ForeignKey("material.material_id"), nullable=True, index=True)
     material_name: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    material_group_code: Mapped[Optional[str]] = mapped_column(Unicode(64), nullable=True)
     uom: Mapped[Optional[str]] = mapped_column(Unicode(64), nullable=True)
     quantity: Mapped[float] = mapped_column(Float, default=0.0)
     unit_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
