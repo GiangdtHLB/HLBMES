@@ -186,6 +186,27 @@ def test_delete_blocked_while_active(client, admin_h):
     assert delete2.status_code == 204, delete2.text
 
 
+def test_delete_cascades_activation_log(client, admin_h):
+    """Xóa công thức phải xóa luôn các dòng FormulaActivationLog tham chiếu (FK formula_id)
+    trước khi xóa formula cha — trên SQL Server, FK được enforce nên xóa cha trước sẽ vỡ
+    'conflicted with REFERENCE constraint' (bug thực tế đã gặp — SQLite tắt FK nên
+    không lộ ra ở đây, phải assert trực tiếp không còn dòng log mồ côi)."""
+    product_id = _a_product(client, admin_h)
+    f = _a_formula(client, admin_h, product_id)
+    client.post(f"/api/formulas/{f['formula_id']}/activate", headers=admin_h)
+    client.post(f"/api/formulas/{f['formula_id']}/deactivate", headers=admin_h)
+
+    log_before = client.get(f"/api/formulas/activation-log?product_id={product_id}", headers=admin_h).json()
+    assert any(x["formula_id"] == f["formula_id"] for x in log_before)
+
+    delete = client.delete(f"/api/formulas/{f['formula_id']}", headers=admin_h)
+    assert delete.status_code == 204, delete.text
+
+    log_after = client.get(f"/api/formulas/activation-log?product_id={product_id}", headers=admin_h).json()
+    assert not any(x["formula_id"] == f["formula_id"] for x in log_after), (
+        "Vẫn còn dòng lịch sử kích hoạt mồ côi sau khi xóa công thức")
+
+
 def test_mutations_require_recipe_author_permission(client, admin_h):
     product_id = _a_product(client, admin_h)
     # tài khoản demo 'thukho' không có quyền recipe.author (theo seed.py)

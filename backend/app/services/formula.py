@@ -4,7 +4,7 @@ Quy tắc cốt lõi: CHỈ ĐÚNG 1 formula/product được is_active=True t�
 ở đây (activate_formula), KHÔNG dựa vào DB constraint. services/brew_order.py::_effective_bom
 tin tưởng bất biến này để chọn công thức hiệu lực mà không cần ORDER BY."""
 
-from sqlalchemy import select
+from sqlalchemy import select, true
 from sqlalchemy.orm import Session
 
 from ..audit import record_audit
@@ -96,7 +96,7 @@ def activate_formula(db: Session, formula_id: str, user: User) -> Formula:
         raise DomainError("Công thức này đang hiệu lực rồi.")
     now = utcnow()
     prev = db.execute(select(Formula).where(
-        Formula.product_id == f.product_id, Formula.is_active == True, Formula.formula_id != formula_id  # noqa: E712
+        Formula.product_id == f.product_id, Formula.is_active == true(), Formula.formula_id != formula_id
     )).scalars().first()
     if prev:
         prev.is_active = False
