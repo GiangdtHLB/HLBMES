@@ -109,6 +109,9 @@ def _finish_batch_ready_to_lock(client, vanhanh_h, brew_id, batch_code, line_id)
                         json={"batch_code": batch_code, "line_id": line_id})
     assert batch.status_code == 201, batch.text
     batch_id = batch.json()["batch_id"]
+    pl = client.put(f"/api/brewing/brews/{brew_id}/batches/{batch_id}/process-log", headers=vanhanh_h,
+                   json={"whp_tong_luong_dich_hl": 100})
+    assert pl.status_code == 200, pl.text
     fin = client.post(f"/api/brewing/brews/{brew_id}/batches/{batch_id}/finish", headers=vanhanh_h)
     assert fin.status_code == 200, fin.text
     _declare_pending(client, vanhanh_h, "nau", "brew_batch", batch_id)

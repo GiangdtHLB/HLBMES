@@ -222,6 +222,8 @@ def test_beer_type_inherits_through_filter_and_bottle_and_scopes_qc_across_produ
 
     filter_id_13, filter_code_13 = _run_one_ferment("BT-QC13", p13)
     filter_id_14, filter_code_14 = _run_one_ferment("BT-QC14", p14)
+    filter_year_13 = client.get("/api/brewing/filters", headers=admin_h).json()
+    filter_year_13 = next(r["filter_year"] for r in filter_year_13 if r["filter_id"] == filter_id_13)
 
     # Chỉ tiêu Lọc gán theo Loại bia áp dụng cho CẢ HAI mẻ lọc dù khác Dịch bia (oP).
     for fcode in (filter_code_13, filter_code_14):
@@ -233,7 +235,8 @@ def test_beer_type_inherits_through_filter_and_bottle_and_scopes_qc_across_produ
     assert approve_13_blocked.status_code == 409, approve_13_blocked.text
 
     rec = client.post("/api/brewing/qc-results", headers=vanhanh_h,
-                      json={"stage": "loc", "scope_type": "filter", "scope_id": filter_code_13,
+                      json={"stage": "loc", "scope_type": "filter",
+                            "scope_id": f"{filter_year_13}-{filter_code_13}",
                             "parameter": loc_code, "value": 5, "lower_limit": 1, "upper_limit": 10})
     assert rec.status_code == 201, rec.text
     # approve_filter yêu cầu đã kết thúc hết tank (xem routers/brewing.py::approve_filter) —

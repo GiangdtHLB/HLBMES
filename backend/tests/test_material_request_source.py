@@ -234,7 +234,16 @@ def test_fulfill_line_snapshots_fifo_ok_false_when_older_lot_skipped(client, adm
     listed = client.get("/api/warehouse/requests", headers=thukho_h).json()
     row = next(x for x in listed if x["request_id"] == req["request_id"])
     assert row["lines"][0]["fifo_ok"] is False
-    assert row["lines"][0]["fulfilled_lot_id"] == newer_lot
+    # Xuất 10/50 (một phần) — transfer() tách lô mới mang đúng 10 sang Kho phân xưởng (xem
+    # services/warehouse.py::transfer split-lot), nên fulfilled_lot_id KHÔNG còn bằng newer_lot
+    # gốc nữa; xác nhận đúng nguồn (newer_lot, không phải older_lot) qua tồn còn lại của nó.
+    fulfilled_lot_id = row["lines"][0]["fulfilled_lot_id"]
+    assert fulfilled_lot_id != newer_lot
+    lots = client.get("/api/lots", headers=thukho_h).json()
+    fulfilled_lot = next(l for l in lots if l["lot_id"] == fulfilled_lot_id)
+    assert fulfilled_lot["quantity"] == 10
+    remaining_newer = next(l for l in lots if l["lot_id"] == newer_lot)
+    assert remaining_newer["quantity"] == 40
 
 
 def test_undo_fulfill_resets_fifo_ok_to_none(client, admin_h, thukho_h, vanhanh_h):
@@ -268,4 +277,12 @@ def test_fulfill_all_lines_snapshots_fifo_ok(client, admin_h, thukho_h, vanhanh_
     listed = client.get("/api/warehouse/requests", headers=thukho_h).json()
     row = next(x for x in listed if x["request_id"] == req["request_id"])
     assert row["lines"][0]["fifo_ok"] is True
-    assert row["lines"][0]["fulfilled_lot_id"] == lot_id
+    # SL xin (10) < SL lô gốc (50) -> transfer() tách lô mới ở đích (xem services/warehouse.py
+    # ::transfer partial-split, task #803) — fulfilled_lot_id là lô TÁCH, không còn là lot_id gốc.
+    fulfilled_lot_id = row["lines"][0]["fulfilled_lot_id"]
+    assert fulfilled_lot_id != lot_id
+    lots = client.get("/api/lots", headers=thukho_h).json()
+    fulfilled_lot = next(l for l in lots if l["lot_id"] == fulfilled_lot_id)
+    assert fulfilled_lot["quantity"] == 10
+    original_lot = next(l for l in lots if l["lot_id"] == lot_id)
+    assert original_lot["quantity"] == 40

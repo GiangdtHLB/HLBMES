@@ -72,7 +72,9 @@ def test_bottle_shows_pending_then_disappears_after_declare(client, admin_h, van
                     json={"bottle_code": bottle_code, "beer_type": "Bia test"})
     assert b.status_code == 201, b.text
 
-    scope_id = f"{bottle_code}__thanh_pham"
+    # bottle_code chỉ duy nhất TRONG 1 năm — scope_id thật (qc_catalog.bottle_scope_id) phải
+    # kèm năm.
+    scope_id = f"{b.json()['bottle_year']}-{bottle_code}__thanh_pham"
     pending = client.get("/api/quality/pending-stage-qc", headers=admin_h).json()
     row = next(p for p in pending if p["scope_type"] == "bottle" and p["scope_id"] == scope_id)
     assert row["stage"] == "thanh_pham"

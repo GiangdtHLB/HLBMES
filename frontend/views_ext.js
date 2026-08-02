@@ -115,7 +115,7 @@
         && !gNot.some(k => l._n.includes(k))
         && (gAny.length === 0 || gAny.some(k => l._n.includes(k))));
       if (hit) used.add(hit.line_id);
-      return { ...g, qty: hit ? hit.quantity : null, note: hit ? hit.note : null };
+      return { ...g, qty: hit ? hit.quantity : null, note: hit ? hit.note : null, matched: hit || null };
     });
     const extra = norm.filter(l => !used.has(l.line_id));
     return { fixedRows, extra };
@@ -219,7 +219,21 @@
     } catch (e) { /* vẫn in được — chỉ thiếu tên đầy đủ, dùng tạm mã SKU */ }
     const dash = (v) => (v === null || v === undefined || v === "" ? "" : esc(String(v)));
     const linesForMatch = (shipment.lines || []).map((l, i) =>
-      ({ line_id: i, product_name: nameByCode[l.product] || l.product, quantity: l.count }));
+      ({ line_id: i, product_name: nameByCode[l.product] || l.product, quantity: l.count,
+         consigned: l.consigned, near_expiry: l.near_expiry }));
+    // Ghi chú theo loại xuất: bia gửi/khuyến mại/đổi trả cần ghi rõ trên biên bản giấy để bên
+    // nhận đối chiếu đúng bản chất lô hàng; RIÊNG bia cận date thì KHÔNG ghi gì thêm (theo yêu
+    // cầu người dùng — hàng cận date bàn giao như hàng thường, không cần lộ thông tin này ra
+    // biên bản). shipment_type ("promo"/"return") áp dụng cho CẢ phiếu; near_expiry/consigned
+    // là cờ RIÊNG TỪNG DÒNG (xem services/wms.py::list_shipments).
+    const lineNoteFor = (l) => {
+      if (!l || l.near_expiry) return null;
+      const parts = [];
+      if (l.consigned) parts.push("Bia gửi");
+      if (shipment.shipment_type === "promo") parts.push("Bia khuyến mại");
+      else if (shipment.shipment_type === "return") parts.push("Bia đổi trả");
+      return parts.join(" · ") || null;
+    };
     const { fixedRows, extra } = matchLoadSlipLines(linesForMatch);
     // Chỉ in dòng có số lượng thật — hàng hóa cố định nào không xuất trong phiếu này thì bỏ
     // hẳn khỏi bảng in (không để dòng trống), giữ nguyên nội dung Mô tả cho các dòng còn lại.
@@ -227,10 +241,10 @@
     const fixedHtml = keptFixed.map((g, i) => `<tr>
       <td style="text-align:center">${i + 1}</td><td>${esc(g.label)}</td>
       <td style="text-align:center">${g.qty}</td><td style="text-align:center">${esc(g.dvt)}</td>
-      <td>${esc(g.mota)}</td><td>${dash(g.note)}</td></tr>`).join("");
+      <td>${esc(g.mota)}</td><td>${dash(lineNoteFor(g.matched))}</td></tr>`).join("");
     const extraHtml = extra.map((l, i) => `<tr>
       <td style="text-align:center">${keptFixed.length + i + 1}</td><td>${dash(l.product_name)}</td>
-      <td style="text-align:center">${l.quantity}</td><td></td><td></td><td></td></tr>`).join("");
+      <td style="text-align:center">${l.quantity}</td><td></td><td></td><td>${dash(lineNoteFor(l))}</td></tr>`).join("");
     const html = bienBanBanGiaoHtml({
       code: shipment.shipment_code, dateObj: new Date(shipment.created_at),
       destination: shipment.ship_to_name || shipment.ship_to_address || shipment.delivery_place,
@@ -833,7 +847,6 @@
             <div class="field"><label>Sản phẩm</label>
               <input id="wu_prod_q" placeholder="Tìm sản phẩm..." style="width:220px;margin-bottom:2px"/>
               <select id="wu_prod" style="width:220px"><option value="">(chọn sản phẩm)</option>${fpOpt}</select></div>
-            <div class="field"><label>Lô TP</label><input id="wu_lot" value="PKG-2406-0001" style="width:150px"/></div>
             <div class="field" id="wu_lonmode_wrap" style="align-self:flex-end">
               <label style="display:flex;align-items:center;gap:4px;cursor:pointer;white-space:nowrap">
                 <input type="checkbox" id="wu_lonmode"/> Nhập lẻ (bỏ qua vỉ)</label></div>
@@ -843,7 +856,7 @@
             <div class="field"><label>Vị trí kho</label><select id="wu_loc" style="width:160px"><option value="">(chưa cất)</option>${locOpt}</select></div>
             <div class="field" style="align-self:flex-end"><button class="btn" id="wu_build">+ Nhập kho</button></div>
           </div>
-          <div class="muted" style="font-size:12px;margin-top:4px">Loại đơn vị (vỉ/keg) và SL/1 đơn vị tự điền theo sản phẩm — quản lý ở Danh mục › Sản phẩm. Nhập lon hoặc nhập vỉ đều được — 2 ô tự quy đổi theo nhau. Tick "Nhập lẻ" nếu chỉ có lon rời (không đủ vỉ) — tồn kho sẽ lưu thẳng theo Lon, không quy đổi ra vỉ. Bỏ trống Vị trí kho -> "chưa cất", gán sau ở tab Cất vào vị trí.</div>`)}
+          <div class="muted" style="font-size:12px;margin-top:4px">Lô TP do hệ thống tự sinh (không nhập tay). Loại đơn vị (vỉ/keg) và SL/1 đơn vị tự điền theo sản phẩm — quản lý ở Danh mục › Sản phẩm. Nhập lon hoặc nhập vỉ đều được — 2 ô tự quy đổi theo nhau. Tick "Nhập lẻ" nếu chỉ có lon rời (không đủ vỉ) — tồn kho sẽ lưu thẳng theo Lon, không quy đổi ra vỉ. Bỏ trống Vị trí kho -> "chưa cất", gán sau ở tab Cất vào vị trí. Sau khi nhập, cần Trưởng bộ phận kho duyệt trước khi được xuất kho.</div>`)}
         ${panel("🏁 Nhập tồn đầu", isAdminWms ? `
           <div class="row">
             <div class="field"><label>Sản phẩm</label>
@@ -1116,6 +1129,8 @@
     if (sec === "lenhdonghang") { wirePaginate("t_loadslip_hl", 10); wirePaginate("t_loadslip_dm", 10); }
 
     if (sec === "canexpiry") {
+      const canApproveCe = _hasPerm("wms.confirm_receipt");
+      const canEditCe = _hasPerm("warehouse.receive");
       wireSelectSearch("ce_prod", "ce_prod_q");
       $("ce_submit").onclick = () => guard(async () => {
         if (!$("ce_prod").value) { toast("Chọn sản phẩm", "err"); return; }
@@ -1123,12 +1138,12 @@
         if (qty <= 0) { toast("Nhập số lượng > 0", "err"); return; }
         const res = await POST("/wms/near-expiry", { finished_product_id: $("ce_prod").value, quantity: qty,
           location_id: $("ce_loc").value || null, note: $("ce_note").value || null });
-        toast(`Đã nhập ${qty} ${res.unit_type === "keg" ? "keg" : "vỉ"} bia cận date — lô riêng ${res.lot_code}`);
+        toast(`Đã khai báo ${qty} ${res.unit_type === "keg" ? "keg" : "vỉ"} bia cận date — lô riêng ${res.lot_code} (chờ Trưởng bộ phận kho duyệt trước khi tăng tồn kho)`);
         render("wms");
       });
       GET("/wms/near-expiry").then(entries => {
         $("ce_hist").innerHTML = entries.length ? `<div class="tablewrap"><table id="t_ce_hist">
-          <thead><tr><th>Chiều</th><th>Sản phẩm</th><th>Lô</th><th>Loại ĐV</th><th>SL</th><th>Vị trí</th><th>Ngày khai báo</th><th>Phiếu xuất</th><th>Ghi chú</th><th>Người tạo</th><th>Thời gian</th><th></th></tr></thead>
+          <thead><tr><th>Chiều</th><th>Sản phẩm</th><th>Lô</th><th>Loại ĐV</th><th>SL</th><th>Vị trí</th><th>Ngày khai báo</th><th>Phiếu xuất</th><th>Ghi chú</th><th>Người tạo</th><th>Thời gian</th><th>Duyệt</th><th></th></tr></thead>
           <tbody>${entries.map(e => `<tr>
             <td>${e.direction === "in" ? '<span class="badge available">Nhập</span>' : '<span class="badge on_hold">Xuất</span>'}</td>
             <td>${esc(fpLabel(e.product_name))}</td><td class="muted">${esc(e.lot_code || "")}</td>
@@ -1138,20 +1153,51 @@
             <td class="muted">${esc(e.shipment_code || "—")}</td>
             <td class="muted">${esc(e.note || "")}</td>
             <td class="muted">${esc(e.created_by || "")}</td><td class="muted">${fmt(e.created_at)}</td>
-            <td>${e.reversed ? '<span class="muted">Đã hoàn tác</span>' :
-                  e.can_undo ? `<button class="btn sm sec" data-undo-ce="${esc(e.entry_id)}">Hoàn tác</button>` : ""}</td></tr>`).join("")}</tbody></table></div>`
+            <td>${e.direction !== "in" ? "" : e.approved_by ? `<span class="badge available">✓ ${esc(e.approved_by)}</span>` : '<span class="muted">Chờ duyệt</span>'}</td>
+            <td style="white-space:nowrap">${e.reversed ? '<span class="muted">Đã hoàn tác</span>' : `
+                  ${e.can_edit && canEditCe ? `<button class="btn sm sec" data-edit-ce="${esc(e.entry_id)}">Sửa</button>` : ""}
+                  ${e.can_approve && canApproveCe ? `<button class="btn sm" data-approve-ce="${esc(e.entry_id)}">Duyệt</button>` : ""}
+                  ${e.can_undo ? `<button class="btn sm sec" data-undo-ce="${esc(e.entry_id)}">Hoàn tác</button>` : ""}`}</td></tr>`).join("")}</tbody></table></div>`
           : `<div class="muted">Chưa có lịch sử bia cận date nào.</div>`;
         wireSearch(); wirePaginate("t_ce_hist", 10);
         document.querySelectorAll("[data-undo-ce]").forEach(b => b.onclick = () => guard(async () => {
-          if (!confirm("Hoàn tác bản khai \"Nhập bia cận date\" này? Các vỉ/keg vừa nhập lại sẽ bị xoá khỏi tồn kho.")) return;
+          if (!confirm("Hoàn tác bản khai \"Nhập bia cận date\" này?")) return;
           await POST(`/wms/near-expiry/${b.dataset.undoCe}/undo`);
           toast("Đã hoàn tác bản khai bia cận date");
           render("wms");
         }));
+        document.querySelectorAll("[data-approve-ce]").forEach(b => b.onclick = () => guard(async () => {
+          if (!confirm("Duyệt bản khai \"Nhập bia cận date\" này? Sau khi duyệt, tồn kho sẽ tăng ngay và KHÔNG thể sửa/hoàn tác được nữa.")) return;
+          await POST(`/wms/near-expiry/${b.dataset.approveCe}/approve`);
+          toast("Đã duyệt — tồn kho đã tăng");
+          render("wms");
+        }));
+        document.querySelectorAll("[data-edit-ce]").forEach(b => b.onclick = () => {
+          const e = entries.find(x => x.entry_id === b.dataset.editCe);
+          if (!e) return;
+          modal(`<h3>Sửa bản khai bia cận date — lô ${esc(e.lot_code || "")}</h3>
+            <div class="row"><div class="field"><label>Sản phẩm</label>
+              <select id="ece_prod">${finishedProducts.map(fp => `<option value="${esc(fp.finished_product_id)}">${esc(fp.code)} — ${esc(fp.name)}</option>`).join("")}</select></div></div>
+            <div class="row"><div class="field"><label>Số lượng</label><input id="ece_qty" type="number" min="1" value="${e.quantity}"/></div>
+              <div class="field"><label>Vị trí kho nhận</label><select id="ece_loc"><option value="">(chưa cất)</option>${locs.map(l => `<option value="${esc(l.loc_id)}">${esc(l.code)} (${l.used}/${l.capacity})</option>`).join("")}</select></div></div>
+            <div class="row"><div class="field" style="flex:1"><label>Ghi chú</label><input id="ece_note" value="${esc(e.note || "")}"/></div>
+              <button class="btn" id="ece_save" style="align-self:flex-end">Lưu</button></div>`);
+          if ($("ece_prod")) $("ece_prod").value = e.finished_product_id || "";
+          if ($("ece_loc") && e.location_code) { const o = [...$("ece_loc").options].find(op => op.textContent.startsWith(e.location_code)); if (o) $("ece_loc").value = o.value; }
+          $("ece_save").onclick = () => guard(async () => {
+            const qty = parseInt($("ece_qty").value, 10) || 0;
+            if (qty <= 0) { toast("Nhập số lượng > 0", "err"); return; }
+            await PUT(`/wms/near-expiry/${e.entry_id}`, { finished_product_id: $("ece_prod").value || null,
+              quantity: qty, location_id: $("ece_loc").value || null, note: $("ece_note").value || null });
+            toast("Đã lưu"); closeModal(); render("wms");
+          });
+        });
       }).catch(() => { $("ce_hist").innerHTML = `<div class="muted">Không tải được lịch sử.</div>`; });
     }
 
     if (sec === "consigned") {
+      const canApproveGs = _hasPerm("wms.confirm_receipt");
+      const canEditGs = _hasPerm("warehouse.receive");
       wireSelectSearch("gs_prod", "gs_prod_q");
       $("gs_submit").onclick = () => guard(async () => {
         if (!$("gs_prod").value) { toast("Chọn sản phẩm", "err"); return; }
@@ -1159,12 +1205,12 @@
         if (qty <= 0) { toast("Nhập số lượng > 0", "err"); return; }
         const res = await POST("/wms/consigned", { finished_product_id: $("gs_prod").value, quantity: qty,
           location_id: $("gs_loc").value || null, note: $("gs_note").value || null });
-        toast(`Đã nhập ${qty} ${res.unit_type === "keg" ? "keg" : "vỉ"} bia gửi — lô riêng ${res.lot_code}`);
+        toast(`Đã khai báo ${qty} ${res.unit_type === "keg" ? "keg" : "vỉ"} bia gửi — lô riêng ${res.lot_code} (chờ Trưởng bộ phận kho duyệt trước khi tăng tồn kho)`);
         render("wms");
       });
       GET("/wms/consigned").then(entries => {
         $("gs_hist").innerHTML = entries.length ? `<div class="tablewrap"><table id="t_gs_hist">
-          <thead><tr><th>Chiều</th><th>Sản phẩm</th><th>Lô</th><th>Loại ĐV</th><th>SL</th><th>Vị trí</th><th>Ngày khai báo</th><th>Phiếu xuất</th><th>Ghi chú</th><th>Người tạo</th><th>Thời gian</th><th></th></tr></thead>
+          <thead><tr><th>Chiều</th><th>Sản phẩm</th><th>Lô</th><th>Loại ĐV</th><th>SL</th><th>Vị trí</th><th>Ngày khai báo</th><th>Phiếu xuất</th><th>Ghi chú</th><th>Người tạo</th><th>Thời gian</th><th>Duyệt</th><th></th></tr></thead>
           <tbody>${entries.map(e => `<tr>
             <td>${e.direction === "in" ? '<span class="badge available">Nhập</span>' : '<span class="badge on_hold">Xuất</span>'}</td>
             <td>${esc(fpLabel(e.product_name))}</td><td class="muted">${esc(e.lot_code || "")}</td>
@@ -1174,16 +1220,45 @@
             <td class="muted">${esc(e.shipment_code || "—")}</td>
             <td class="muted">${esc(e.note || "")}</td>
             <td class="muted">${esc(e.created_by || "")}</td><td class="muted">${fmt(e.created_at)}</td>
-            <td>${e.reversed ? '<span class="muted">Đã hoàn tác</span>' :
-                  e.can_undo ? `<button class="btn sm sec" data-undo-gs="${esc(e.entry_id)}">Hoàn tác</button>` : ""}</td></tr>`).join("")}</tbody></table></div>`
+            <td>${e.direction !== "in" ? "" : e.approved_by ? `<span class="badge available">✓ ${esc(e.approved_by)}</span>` : '<span class="muted">Chờ duyệt</span>'}</td>
+            <td style="white-space:nowrap">${e.reversed ? '<span class="muted">Đã hoàn tác</span>' : `
+                  ${e.can_edit && canEditGs ? `<button class="btn sm sec" data-edit-gs="${esc(e.entry_id)}">Sửa</button>` : ""}
+                  ${e.can_approve && canApproveGs ? `<button class="btn sm" data-approve-gs="${esc(e.entry_id)}">Duyệt</button>` : ""}
+                  ${e.can_undo ? `<button class="btn sm sec" data-undo-gs="${esc(e.entry_id)}">Hoàn tác</button>` : ""}`}</td></tr>`).join("")}</tbody></table></div>`
           : `<div class="muted">Chưa có lịch sử bia gửi nào.</div>`;
         wireSearch(); wirePaginate("t_gs_hist", 10);
         document.querySelectorAll("[data-undo-gs]").forEach(b => b.onclick = () => guard(async () => {
-          if (!confirm("Hoàn tác bản khai \"Nhập bia gửi\" này? Các vỉ/keg vừa nhập lại sẽ bị xoá khỏi tồn kho.")) return;
+          if (!confirm("Hoàn tác bản khai \"Nhập bia gửi\" này?")) return;
           await POST(`/wms/consigned/${b.dataset.undoGs}/undo`);
           toast("Đã hoàn tác bản khai bia gửi");
           render("wms");
         }));
+        document.querySelectorAll("[data-approve-gs]").forEach(b => b.onclick = () => guard(async () => {
+          if (!confirm("Duyệt bản khai \"Nhập bia gửi\" này? Sau khi duyệt, tồn kho sẽ tăng ngay và KHÔNG thể sửa/hoàn tác được nữa.")) return;
+          await POST(`/wms/consigned/${b.dataset.approveGs}/approve`);
+          toast("Đã duyệt — tồn kho đã tăng");
+          render("wms");
+        }));
+        document.querySelectorAll("[data-edit-gs]").forEach(b => b.onclick = () => {
+          const e = entries.find(x => x.entry_id === b.dataset.editGs);
+          if (!e) return;
+          modal(`<h3>Sửa bản khai bia gửi — lô ${esc(e.lot_code || "")}</h3>
+            <div class="row"><div class="field"><label>Sản phẩm</label>
+              <select id="egs_prod">${finishedProducts.map(fp => `<option value="${esc(fp.finished_product_id)}">${esc(fp.code)} — ${esc(fp.name)}</option>`).join("")}</select></div></div>
+            <div class="row"><div class="field"><label>Số lượng</label><input id="egs_qty" type="number" min="1" value="${e.quantity}"/></div>
+              <div class="field"><label>Vị trí kho nhận</label><select id="egs_loc"><option value="">(chưa cất)</option>${locs.map(l => `<option value="${esc(l.loc_id)}">${esc(l.code)} (${l.used}/${l.capacity})</option>`).join("")}</select></div></div>
+            <div class="row"><div class="field" style="flex:1"><label>Ghi chú</label><input id="egs_note" value="${esc(e.note || "")}"/></div>
+              <button class="btn" id="egs_save" style="align-self:flex-end">Lưu</button></div>`);
+          if ($("egs_prod")) $("egs_prod").value = e.finished_product_id || "";
+          if ($("egs_loc") && e.location_code) { const o = [...$("egs_loc").options].find(op => op.textContent.startsWith(e.location_code)); if (o) $("egs_loc").value = o.value; }
+          $("egs_save").onclick = () => guard(async () => {
+            const qty = parseInt($("egs_qty").value, 10) || 0;
+            if (qty <= 0) { toast("Nhập số lượng > 0", "err"); return; }
+            await PUT(`/wms/consigned/${e.entry_id}`, { finished_product_id: $("egs_prod").value || null,
+              quantity: qty, location_id: $("egs_loc").value || null, note: $("egs_note").value || null });
+            toast("Đã lưu"); closeModal(); render("wms");
+          });
+        });
       }).catch(() => { $("gs_hist").innerHTML = `<div class="muted">Không tải được lịch sử.</div>`; });
     }
 
@@ -1202,6 +1277,7 @@
             product: g.product_name, lot_code: g.lot_code, bottle_codes: g.bottle_codes,
             unit_type: t, count: g[`${t}_count`], qty: g[`${t}_qty`], unplaced: g[`${t}_unplaced`] || 0,
             oldest_at: g[`${t}_oldest_at`], locations: g[`${t}_locations`] || [],
+            pending: g[`${t}_pending_count`] || 0, confirmed: g[`${t}_confirmed_count`] || 0,
           });
         });
       });
@@ -1248,12 +1324,16 @@
           });
         }
       }
+      const canConfirmReceipt = _hasPerm("wms.confirm_receipt");
       function renderUnits(rows) {
         $("pl_box").innerHTML = `<input class="searchbox" data-tbl="t_units" placeholder="Tìm theo sản phẩm, lô..."/>
           <div class="tablewrap"><table id="t_units">
           <thead><tr><th>SP</th><th>Lô</th><th>Mã chiết</th><th>Loại</th><th>Số lượng</th><th>Tổng SL nhỏ</th><th>Trạng thái</th>
-            <th>Vị trí kho</th><th>Nhập sớm nhất</th><th></th></tr></thead>
-          <tbody>${rows.map((g, i) => `<tr>
+            <th>Vị trí kho</th><th>Nhập sớm nhất</th><th>Duyệt nhập kho</th><th></th></tr></thead>
+          <tbody>${rows.map((g, i) => { const confirmCell = g.pending > 0
+              ? (canConfirmReceipt ? `<button class="btn sm sec" data-confirmreceipt="${i}">Duyệt</button>` : '<span class="muted">Chờ duyệt</span>')
+              : g.confirmed > 0 ? '<span class="badge available">✓ đã duyệt</span>' : '<span class="muted">—</span>';
+            return `<tr>
             <td>${esc(fpLabel(g.product))}</td><td>${esc(g.lot_code || "")}</td>
             <td class="muted">${esc((g.bottle_codes || []).join(", ") || "—")}</td>
             <td>${unitTypeLabel(g)}</td>
@@ -1261,11 +1341,19 @@
             <td>${badge("available")}stored</td>
             <td class="muted">${locationCell(g)}</td>
             <td class="muted">${fmt(g.oldest_at)}</td>
-            <td><button class="btn sm sec" data-viewgroup="${i}">Xem</button></td></tr>`).join("") ||
-            '<tr><td colspan=10 class="muted">Chưa có vỉ/keg nào trong kho.</td></tr>'}</tbody></table></div>`;
+            <td>${confirmCell}</td>
+            <td><button class="btn sm sec" data-viewgroup="${i}">Xem</button></td></tr>`; }).join("") ||
+            '<tr><td colspan=11 class="muted">Chưa có vỉ/keg nào trong kho.</td></tr>'}</tbody></table></div>`;
         document.querySelectorAll("[data-viewgroup]").forEach(b => b.onclick = () => {
           openUnitGroupModal(rows[parseInt(b.dataset.viewgroup, 10)]);
         });
+        document.querySelectorAll("[data-confirmreceipt]").forEach(b => b.onclick = () => guard(async () => {
+          const g = rows[parseInt(b.dataset.confirmreceipt, 10)];
+          if (!confirm(`Duyệt nhập kho cho ${g.product || ""} ${g.lot_code || ""}? Sau khi duyệt, lô này không thể xóa được nữa — với lô "Nhập kho thủ công" còn được phép xuất kho.`)) return;
+          const res = await POST("/wms/units/confirm-receipt-by-lot",
+            { product_name: g.product, lot_code: g.lot_code, unit_type: g.unit_type });
+          toast(`Đã duyệt nhập kho cho ${res.confirmed} dòng`); render("wms");
+        }));
         wireSearch();
         wirePaginate("t_units", 10);
       }
@@ -1332,7 +1420,7 @@
         const opt = $("wu_prod").selectedOptions[0];
         const { lonMode } = buildDivisor("wu");
         await POST("/wms/units", { finished_product_id: $("wu_prod").value, product_name: opt.dataset.code,
-          lot_code: $("wu_lot").value, total: num("wu_total") || 0,
+          total: num("wu_total") || 0,
           pack_size: lonMode ? 1 : (num("wu_pack") || 24), unit_type: lonMode ? "lon" : (opt.dataset.unittype || "vi"),
           loc_id: $("wu_loc").value || null, reason: "Nhập kho thủ công" });
         toast("Đã nhập kho (kèm mã vạch từng vỉ/keg)"); render("wms");
@@ -1602,22 +1690,54 @@
       $("xk_lotfilter").onchange = renderLots;
       $("xk_search").oninput = renderLots;
       GET("/wms/shipments").then(ships => {
+        const isAdminXk = CURRENT_USER && CURRENT_USER.role === "admin";
+        const canConfirmShip = _hasPerm("wms.confirm_shipment");
+        // Sửa thông tin đầu phiếu (người nhận/lái xe/biển số/địa điểm/lý do) chỉ khi CHƯA duyệt —
+        // sau khi Trưởng bộ phận kho "Duyệt" (confirmed_by), phiếu coi như chốt, không sửa được nữa.
+        const canEditShip = _hasPerm("warehouse.issue");
         $("xk_history").innerHTML = ships.length ? `<div class="tablewrap"><table id="t_xk_history">
-          <thead><tr><th>Mã phiếu</th><th>Từ kho</th><th>Nơi xuất đến</th><th>Thời gian</th><th>Người xuất</th><th>FIFO</th><th>Loại xuất</th><th>Chi tiết</th><th></th></tr></thead>
-          <tbody>${ships.map((s, i) => { const undone = s.unit_count === 0; return `<tr><td><code class="k">${esc(s.shipment_code)}</code></td>
+          <thead><tr><th>Mã phiếu</th><th>Từ kho</th><th>Nơi xuất đến</th><th>Thời gian</th><th>Người xuất</th><th>FIFO</th><th>Loại xuất</th><th>Chi tiết</th><th>Duyệt</th><th></th></tr></thead>
+          <tbody>${ships.map((s, i) => { const undone = s.unit_count === 0;
+            const confirmCell = s.confirmed_by ? `<span class="badge available">✓ ${esc(s.confirmed_by)}</span>` :
+              canConfirmShip && !undone ? `<button class="btn sm sec" data-confirmship="${i}">Duyệt</button>` :
+              '<span class="muted">Chưa duyệt</span>';
+            const canUndoShip = !undone && (!s.confirmed_by || isAdminXk);
+            return `<tr><td><code class="k">${esc(s.shipment_code)}</code></td>
             <td class="muted">${esc(s.from_location || "—")}</td>
             <td>${esc(s.ship_to_name || s.ship_to_code || "—")}</td><td class="muted">${fmt(s.created_at)}</td>
             <td class="muted">${esc(s.created_by || "—")}</td>
             <td>${undone ? '<span class="badge obsolete">Đã hoàn tác</span>' : s.fifo_ok ? '<span class="badge available">✓ Đúng FIFO</span>' : '<span class="badge on_hold">⚠ Không đúng FIFO</span>'}</td>
             <td><span class="badge ${s.shipment_type === "promo" ? "planned" : s.shipment_type === "return" ? "on_hold" : "available"}">${shipmentTypeLabel(s.shipment_type)}</span></td>
             <td class="muted">${s.lines.map(l => `${esc(fpLabel(l.product))} ${esc(l.lot_code || "")}: ${l.count} ${unitTypeLabel(l).toLowerCase()}`).join("; ")}</td>
+            <td style="white-space:nowrap">${confirmCell}</td>
             <td style="white-space:nowrap"><button class="btn sm sec" data-viewship="${i}">Xem</button>
-              <button class="btn sm sec" data-printship="${i}">🖨️ In phiếu</button>
-              ${undone ? "" : `<button class="btn sm sec" data-undoship="${i}">Hoàn tác</button>`}</td></tr>`; }).join("")}</tbody></table></div>`
+              ${s.confirmed_by ? `<button class="btn sm sec" data-printship="${i}">🖨️ In phiếu</button>` : ""}
+              ${canEditShip && !s.confirmed_by ? `<button class="btn sm sec" data-editship="${i}">Sửa</button>` : ""}
+              ${canUndoShip ? `<button class="btn sm sec" data-undoship="${i}">Hoàn tác</button>` : ""}</td></tr>`; }).join("")}</tbody></table></div>`
           : `<div class="muted">Chưa có phiếu xuất kho nào.</div>`;
         wireSearch(); wirePaginate("t_xk_history", 10);
         document.querySelectorAll("[data-printship]").forEach(b => b.onclick = () => guard(() =>
           printShipmentHandoverSlip(ships[parseInt(b.dataset.printship, 10)])));
+        document.querySelectorAll("[data-editship]").forEach(b => b.onclick = () => {
+          const s = ships[parseInt(b.dataset.editship, 10)];
+          modal(`<h3>Sửa thông tin phiếu — ${esc(s.shipment_code)}</h3>
+            <div class="row"><div class="field" style="flex:1"><label>Người nhận hàng</label><input id="es_recipient" value="${esc(s.recipient_name || "")}"/></div>
+              <div class="field" style="flex:1"><label>Địa chỉ (bộ phận)</label><input id="es_dept" value="${esc(s.recipient_dept || "")}"/></div></div>
+            <div class="row"><div class="field" style="flex:1"><label>Lái xe</label><input id="es_driver" value="${esc(s.driver_name || "")}"/></div>
+              <div class="field" style="flex:1"><label>Biển số xe</label><input id="es_plate" value="${esc(s.vehicle_plate || "")}"/></div></div>
+            <div class="row"><div class="field" style="flex:1"><label>Xuất tại kho (ngăn lô)</label><input id="es_from" value="${esc(s.from_location || "")}"/></div>
+              <div class="field" style="flex:1"><label>Địa điểm giao</label><input id="es_place" value="${esc(s.delivery_place || "")}"/></div></div>
+            <div class="field"><label>Lý do xuất kho</label><input id="es_note" value="${esc(s.note || "")}"/></div>
+            <button class="btn" id="es_save">Lưu</button>`);
+          $("es_save").onclick = () => guard(async () => {
+            await PUT(`/wms/shipments/${s.shipment_id}`, {
+              recipient_name: $("es_recipient").value, recipient_dept: $("es_dept").value,
+              driver_name: $("es_driver").value, vehicle_plate: $("es_plate").value,
+              from_location: $("es_from").value, delivery_place: $("es_place").value,
+              note: $("es_note").value });
+            toast("Đã lưu"); closeModal(); render("wms");
+          });
+        });
         document.querySelectorAll("[data-viewship]").forEach(b => b.onclick = () => {
           const s = ships[parseInt(b.dataset.viewship, 10)];
           modal(`<h3>Sản phẩm trong phiếu — ${esc(s.shipment_code)}</h3>
@@ -1631,6 +1751,12 @@
                 '<tr><td colspan=6 class="muted">Không còn dòng nào (đã hoàn tác).</td></tr>'}</tbody>
             </table></div>`);
         });
+        document.querySelectorAll("[data-confirmship]").forEach(b => b.onclick = () => guard(async () => {
+          const s = ships[parseInt(b.dataset.confirmship, 10)];
+          if (!confirm(`Duyệt phiếu xuất kho ${s.shipment_code}? Sau khi duyệt, chỉ ADMIN mới "Hoàn tác" được nữa.`)) return;
+          await POST(`/wms/shipments/${s.shipment_id}/confirm`, {});
+          toast("Đã duyệt phiếu xuất kho"); render("wms");
+        }));
         document.querySelectorAll("[data-undoship]").forEach(b => b.onclick = () => guard(async () => {
           const s = ships[parseInt(b.dataset.undoship, 10)];
           if (!confirm(`Hoàn tác phiếu xuất kho ${s.shipment_code}? Toàn bộ vỉ/keg/lon trong phiếu sẽ trả lại tồn kho (chưa xếp vị trí).`)) return;

@@ -326,7 +326,8 @@ def test_lot_record_filter_and_bottle_qc_scoped_by_beer_type(client, admin_h, va
     assert b.status_code == 201, b.text
     ferments = client.get("/api/brewing/ferments", headers=admin_h).json()["items"]
     ferment = next(f for f in ferments if f["lm_code"] == f"LM-{suffix}")
-    _declare_pending(client, admin_h, "len_men_phu", "ferment", f"{ferment['lm_code']}__len_men_phu")
+    _declare_pending(client, admin_h, "len_men_phu", "ferment",
+                     f"{ferment['ferment_year']}-{ferment['lm_code']}__len_men_phu")
     approve_ferment = client.post(f"/api/brewing/ferments/{ferment['ferment_id']}/approve", headers=admin_h)
     assert approve_ferment.status_code == 200, approve_ferment.text
 
@@ -350,7 +351,8 @@ def test_lot_record_filter_and_bottle_qc_scoped_by_beer_type(client, admin_h, va
     # Duyệt mẻ lọc để tank BBT đủ điều kiện chiết (eligible_for_chiet đòi qc_approved) —
     # khai chỉ tiêu Lọc trước khi duyệt, nên required (không phải pending) là nơi chứng
     # minh việc tra theo beer_type_id (nhóm vẫn match dù đã khai xong).
-    _declare_pending(client, admin_h, "loc", "filter", filter_code, beer_type_id=bt_id)
+    _declare_pending(client, admin_h, "loc", "filter", f"{f.json()['filter_year']}-{filter_code}",
+                     beer_type_id=bt_id)
     approve_f = client.post(f"/api/brewing/filters/{filter_id}/approve", headers=admin_h)
     assert approve_f.status_code == 200, approve_f.text
 

@@ -141,6 +141,10 @@ def test_delete_filter_blocked_while_bottle_references_it(client, admin_h, vanha
 
 
 def test_delete_ferment_blocked_while_filter_references_it(client, admin_h, vanhanh_h, kcs_h):
+    """_build_chain duyệt KCS lô lên men (Duyệt LM) trước khi lọc — xóa bị chặn vì còn mẻ lọc
+    tham chiếu; SAU KHI gỡ bỏ mẻ lọc/mẻ chiết, xóa vẫn tiếp tục bị chặn vì lô LM đã duyệt KCS
+    (xem routers/brewing.py::delete_ferment — "đã duyệt KCS" chặn vĩnh viễn, không phải chỉ
+    tạm thời vì còn tham chiếu hạ lưu)."""
     chain = _build_chain(client, admin_h, vanhanh_h, kcs_h, "DELGUARD02")
     blocked = client.delete(f"/api/brewing/ferments/{chain['ferment_id']}", headers=vanhanh_h)
     assert blocked.status_code == 409, blocked.text
@@ -148,8 +152,9 @@ def test_delete_ferment_blocked_while_filter_references_it(client, admin_h, vanh
 
     client.delete(f"/api/brewing/bottles/{chain['bottle_id']}", headers=vanhanh_h)
     client.delete(f"/api/brewing/filters/{chain['filter_id']}", headers=vanhanh_h)
-    ok = client.delete(f"/api/brewing/ferments/{chain['ferment_id']}", headers=vanhanh_h)
-    assert ok.status_code == 204, ok.text
+    still_blocked = client.delete(f"/api/brewing/ferments/{chain['ferment_id']}", headers=vanhanh_h)
+    assert still_blocked.status_code == 409, still_blocked.text
+    assert "duyệt kcs" in still_blocked.json()["detail"].lower()
 
 
 def test_delete_bottle_blocked_until_units_deleted(client, admin_h, vanhanh_h, kcs_h):

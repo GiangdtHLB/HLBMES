@@ -607,6 +607,22 @@ def _bbt_target_blocked_by(db: Session, code: str) -> Optional[str]:
     return None
 
 
+def _bbt_mix_warning(db: Session, code: str, beer_type_id: Optional[str]) -> Optional[str]:
+    """Cảnh báo (KHÔNG chặn — khác _bbt_target_blocked_by) nếu tank BBT `code` đang còn dịch
+    (on_hand_bbt > 0) của 1 Loại bia KHÁC với Loại bia sắp lọc vào — vận hành vẫn được phép đổ
+    chung (thể tích cộng dồn, xem available_bbt_tanks) nhưng cần biết để tránh trộn lẫn nhầm
+    loại bia thật sự khác nhau khi chưa có chỉ tiêu bắt buộc nào chặn việc này lại."""
+    if not beer_type_id:
+        return None
+    recs = db.execute(select(FilterRecord).where(FilterRecord.to_bbt == code)).scalars().all()
+    other_types = {r.beer_type_id for r in recs if r.beer_type_id and r.beer_type_id != beer_type_id and r.on_hand_bbt > 1e-6}
+    if not other_types:
+        return None
+    names = [bt.name for bt in (db.get(BeerType, bid) for bid in other_types) if bt]
+    return (f"⚠ Tank BBT {code} đang còn dịch của Loại bia khác ({', '.join(names) or 'không rõ'}) — "
+            "kiểm tra kỹ để tránh trộn lẫn nhầm loại bia.")
+
+
 def _bbt_reserved_volume(db: Session, source_bbt_code: str, exclude_order_ids: set = None) -> float:
     """Tổng thể tích đang bị các Lệnh lọc lọc-lại CHƯA HOÀN THÀNH 'giữ chỗ' trên 1 tank BBT
     vật lý — chỉ tính dòng TEMPLATE (filter_id IS NULL, đại diện kế hoạch của cả lệnh) của

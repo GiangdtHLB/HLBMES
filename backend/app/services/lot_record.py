@@ -104,7 +104,8 @@ def _ferment_detail(db: Session, ferment_id: str) -> dict:
     f = db.get(FermentRecord, ferment_id)
     if not f:
         return None
-    qc = {stage: qc_catalog.stage_qc_status(db, stage, "ferment", f"{f.lm_code}__{stage}", f.product_id)
+    qc = {stage: qc_catalog.stage_qc_status(
+              db, stage, "ferment", qc_catalog.ferment_scope_id(f.lm_code, f.ferment_year, stage), f.product_id)
           for stage in ("len_men_chinh", "len_men_phu")}
     readings = ferment_log_svc.get_daily_readings(db, ferment_id)
     return {
@@ -163,7 +164,9 @@ def _filter_detail(db: Session, filter_id: str) -> dict:
         "v_dich_hl": f.v_dich_hl, "beer_type": f.beer_type, "v_beer_hl": f.v_beer_hl,
         "to_bbt": f.to_bbt, "status": f.status,
         "started_at": f.filter_date, "ended_at": f.ended_at,
-        "qc": qc_catalog.stage_qc_status(db, "loc", "filter", f.filter_code, beer_type_id=f.beer_type_id,
+        "qc": qc_catalog.stage_qc_status(db, "loc", "filter",
+                                         qc_catalog.filter_scope_id(f.filter_code, f.filter_year),
+                                         beer_type_id=f.beer_type_id,
                                          finished_product_id=f.finished_product_id),
         "cip": cip_svc.links_for(db, "filter", f.filter_id),
         "is_refilter": bbt_line is not None,
@@ -181,8 +184,9 @@ def _bottle_detail(db: Session, bottle_id: str) -> dict:
     if not b:
         return None
     fp = db.get(FinishedProduct, b.finished_product_id) if b.finished_product_id else None
-    qc = {"thanh_pham": qc_catalog.stage_qc_status(db, "thanh_pham", "bottle", f"{b.bottle_code}__thanh_pham",
-                                                   finished_product_id=b.finished_product_id, beer_type_id=b.beer_type_id)}
+    qc = {"thanh_pham": qc_catalog.stage_qc_status(
+              db, "thanh_pham", "bottle", qc_catalog.bottle_scope_id(b.bottle_code, b.bottle_year),
+              finished_product_id=b.finished_product_id, beer_type_id=b.beer_type_id)}
     materials = db.execute(select(BottleMaterialUsage).where(BottleMaterialUsage.bottle_id == bottle_id)
                            .order_by(BottleMaterialUsage.created_at)).scalars().all()
     return {

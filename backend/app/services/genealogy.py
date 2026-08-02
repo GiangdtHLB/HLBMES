@@ -140,21 +140,25 @@ def _qc_summary(db: Session, node_type: str, node_id: str) -> list:
             return []
         out = []
         for stage, label in (("len_men_chinh", "Lên men chính"), ("len_men_phu", "Lên men phụ")):
-            st = qc_catalog.stage_qc_status(db, stage, "ferment", f"{f.lm_code}__{stage}", f.product_id)
+            st = qc_catalog.stage_qc_status(db, stage, "ferment",
+                                            qc_catalog.ferment_scope_id(f.lm_code, f.ferment_year, stage),
+                                            f.product_id)
             out.append(_trim_qc(stage, label, st))
         return out
     if node_type == "filter":
         f = db.get(FilterRecord, node_id)
         if not f:
             return []
-        st = qc_catalog.stage_qc_status(db, "loc", "filter", f.filter_code, f.product_id,
+        st = qc_catalog.stage_qc_status(db, "loc", "filter",
+                                        qc_catalog.filter_scope_id(f.filter_code, f.filter_year), f.product_id,
                                         finished_product_id=f.finished_product_id, beer_type_id=f.beer_type_id)
         return [_trim_qc("loc", "Lọc", st)]
     if node_type == "bottle":
         b = db.get(BottleRecord, node_id)
         if not b:
             return []
-        st = qc_catalog.stage_qc_status(db, "thanh_pham", "bottle", f"{b.bottle_code}__thanh_pham",
+        st = qc_catalog.stage_qc_status(db, "thanh_pham", "bottle",
+                                        qc_catalog.bottle_scope_id(b.bottle_code, b.bottle_year),
                                         b.product_id, finished_product_id=b.finished_product_id,
                                         beer_type_id=b.beer_type_id)
         return [_trim_qc("thanh_pham", "Thành phẩm", st)]

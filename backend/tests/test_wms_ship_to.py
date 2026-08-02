@@ -55,6 +55,16 @@ def kcs_h(client):
     return _login(client, "kcs", "123456")
 
 
+@pytest.fixture(scope="module")
+def thukho_h(client):
+    return _login(client, "thukho", "123456")
+
+
+@pytest.fixture(scope="module")
+def truongkho_tp_h(client):
+    return _login(client, "truongkho_tp", "123456")
+
+
 def _a_location(client, admin_h):
     loc = client.post("/api/wms/locations", headers=admin_h,
                       json={"code": f"LOC-{str(int(time.time() * 1000))[-8:]}", "name": "Test loc", "capacity": 50})
@@ -71,13 +81,20 @@ def _a_ship_to(client, admin_h, code, name="NPP test"):
 def _a_units(client, admin_h, product, lot_code, count):
     """Sinh 1 dòng LÔ (product, lot_code) với quantity=`count` (pack_size=1 nên quantity =
     số vỉ luôn) — dưới mô hình mới (docs/WMS-LOT-LEVEL-REDESIGN.md) build_units chỉ sinh
-    ĐÚNG 1 dòng/lô bất kể count lớn cỡ nào (không còn N dòng độc lập như trước). Trả về
-    unit_id của dòng đó."""
+    ĐÚNG 1 dòng/lô bất kể count lớn cỡ nào (không còn N dòng độc lập như trước). "Nhập kho thủ
+    công" (build_units không is_opening_balance) giờ cần Trưởng bộ phận kho duyệt trước khi
+    xuất được (source="manual", xem _consume_lot_rows(block_pending_manual=True)) — helper này
+    tự động duyệt luôn ngay sau khi tạo để các test khác (xuất/điều chuyển/phân rã...) không bị
+    chặn oan, vì mục đích của helper chỉ là dựng sẵn tồn kho, không phải test bước duyệt đó
+    (bước duyệt có test riêng, xem test_wms_receipt_approve.py)."""
     build = client.post("/api/wms/units", headers=admin_h,
                         json={"product_name": product, "lot_code": lot_code, "total": count, "pack_size": 1})
     assert build.status_code == 201, build.text
     assert len(build.json()["unit_codes"]) == 1
     code = build.json()["unit_codes"][0]
+    confirm = client.post("/api/wms/units/confirm-receipt-by-lot", headers=admin_h,
+                          json={"product_name": product, "lot_code": lot_code, "unit_type": "vi"})
+    assert confirm.status_code == 200, confirm.text
     units = client.get("/api/wms/units", headers=admin_h).json()
     return next(u["unit_id"] for u in units if u["unit_code"] == code)
 
@@ -381,3 +398,39 @@ def test_undo_shipment_restores_units_and_blocks_twice(client, admin_h):
 def test_undo_shipment_not_found(client, admin_h):
     r = client.post("/api/wms/shipments/does-not-exist/undo", headers=admin_h)
     assert r.status_code == 404, r.text
+
+
+def test_confirm_shipment_blocks_undo_except_admin(client, admin_h, thukho_h, truongkho_tp_h):
+    ship_to_id = _a_ship_to(client, admin_h, "DIST-CONFIRM", "NPP Confirm")
+    _a_units(client, admin_h, "CONFIRM-SKU", "LOT-CONFIRM", 5)
+
+    shipped = client.post("/api/wms/shipments", headers=admin_h,
+                          json={"ship_to_id": ship_to_id,
+                                "lines": [{"product_name": "CONFIRM-SKU", "lot_code": "LOT-CONFIRM",
+                                          "unit_type": "vi", "quantity": 5}]})
+    assert shipped.status_code == 201, shipped.text
+    shipment_id = shipped.json()["shipment_id"]
+
+    # trước khi xác nhận, thủ kho vẫn hoàn tác được bình thường
+    denied_confirm = client.post(f"/api/wms/shipments/{shipment_id}/confirm", headers=thukho_h)
+    assert denied_confirm.status_code == 403, denied_confirm.text
+
+    confirm = client.post(f"/api/wms/shipments/{shipment_id}/confirm", headers=truongkho_tp_h)
+    assert confirm.status_code == 200, confirm.text
+    assert confirm.json()["confirmed_by"] == "truongkho_tp"
+
+    # xác nhận 2 lần phải báo lỗi
+    twice = client.post(f"/api/wms/shipments/{shipment_id}/confirm", headers=truongkho_tp_h)
+    assert twice.status_code == 409, twice.text
+
+    history = client.get("/api/wms/shipments", headers=admin_h).json()
+    row = next(s for s in history if s["shipment_id"] == shipment_id)
+    assert row["confirmed_by"] == "truongkho_tp"
+
+    # đã xác nhận — không phải admin thì không hoàn tác được nữa
+    denied_undo = client.post(f"/api/wms/shipments/{shipment_id}/undo", headers=thukho_h)
+    assert denied_undo.status_code == 403, denied_undo.text
+
+    undo = client.post(f"/api/wms/shipments/{shipment_id}/undo", headers=admin_h)
+    assert undo.status_code == 200, undo.text
+    assert undo.json()["restored"] == 5

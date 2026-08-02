@@ -79,6 +79,11 @@ class FinishedProduct(Base):
     pack_size: Mapped[int] = mapped_column(Integer, default=24)  # Lon/vỉ (vi) hoặc 1 (keg)
     category: Mapped[Optional[str]] = mapped_column(Unicode(64), nullable=True, index=True)  # Bia chai|Bia lon|Bia hơi|Bia tươi...
     description: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)
+    # Dung tích 1 đơn vị đóng gói cuối cùng (lít) — VD 0.33 (lon 330ml), 20/30/50 (keg) — dùng
+    # để đối chiếu V cấp chiết (hl, đo ở tank BBT) với SL ca1+ca2+ca3 (đếm vỉ/keg cuối line) lúc
+    # "Kết thúc chiết" (xem routers/brewing.py::finish_bottle); để trống = bỏ qua đối chiếu
+    # (SKU cũ chưa khai báo, không ép buộc backfill ngay).
+    unit_volume_l: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
 
 
 class MaterialGroup(Base):

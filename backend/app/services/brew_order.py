@@ -19,6 +19,7 @@ from ..errors import DomainError, NotFoundError
 from ..models.brewing import (
     BrewBatch,
     BrewMasterOrder,
+    BrewMaterialUsage,
     BrewOrder,
     BrewOrderMaterialLine,
     BrewProcessLog,
@@ -28,6 +29,7 @@ from ..models.brewing import (
 )
 from ..models.formula import Formula
 from ..models.master import Material, MaterialAltGroup, Product
+from ..models.materials import MaterialLot
 from . import braumat_import as braumat_svc
 from . import warehouse as warehouse_svc
 
@@ -124,10 +126,38 @@ def _materials_by_id(db: Session) -> dict:
     return {m.material_id: m for m in db.execute(select(Material)).scalars().all()}
 
 
-def _member_breakdown(member_ids: list, company_stock: dict, workshop_stock: dict, materials_by_id: dict) -> list:
+def _actual_usage_by_material(db: Session, brew_ids: list) -> dict:
+    """Tổng NVL thực tế đã dùng (BrewMaterialUsage), gộp theo material_id thật — đối chiếu
+    với Nhu cầu Tổng mẻ của dòng Nhóm vật tư thay thế (mỗi mẻ có thể lấy đúng mã khác nhau
+    trong cùng nhóm, VD mẻ 1 dùng Malt Úc rời, mẻ 2 dùng Malt Úc bao — dòng gộp chỉ có 1 con
+    số Nhu cầu Tổng mẻ, không tự tách theo mã đã dùng thật nếu không tra lại usage). Resolve
+    material_id qua `lot_id` (MaterialLot.material_id) — dòng cũ trước khi nối kho thật
+    (không có lot_id) không đối chiếu được theo mã cụ thể nên bỏ qua, không đoán mò."""
+    if not brew_ids:
+        return {}
+    batch_ids = db.execute(select(BrewBatch.batch_id).where(BrewBatch.brew_id.in_(brew_ids))).scalars().all()
+    if not batch_ids:
+        return {}
+    usages = db.execute(select(BrewMaterialUsage).where(BrewMaterialUsage.batch_id.in_(batch_ids))).scalars().all()
+    lot_ids = [u.lot_id for u in usages if u.lot_id]
+    material_by_lot = dict(db.execute(select(MaterialLot.lot_id, MaterialLot.material_id)
+                                      .where(MaterialLot.lot_id.in_(lot_ids))).all()) if lot_ids else {}
+    out: dict[str, float] = {}
+    for u in usages:
+        mid = material_by_lot.get(u.lot_id) if u.lot_id else None
+        if not mid:
+            continue
+        out[mid] = out.get(mid, 0.0) + u.quantity
+    return out
+
+
+def _member_breakdown(member_ids: list, company_stock: dict, workshop_stock: dict, materials_by_id: dict,
+                      actual_usage: dict | None = None) -> list:
     """Tồn kho TỪNG mã thành viên của 1 dòng Nhóm vật tư thay thế — để người lập lệnh thấy
     ngay nhóm gồm đúng những mã nào và mã nào đang thực sự có tồn (VD "Malt Úc" gồm Malt Úc
-    rời + Malt Úc bao, chỉ 1 trong 2 đang còn hàng), không chỉ số tổng cộng dồn."""
+    rời + Malt Úc bao, chỉ 1 trong 2 đang còn hàng), không chỉ số tổng cộng dồn. `actual_used`
+    (khi truyền `actual_usage`) là tổng đã dùng THẬT của đúng mã đó qua mọi mẻ của lệnh — để
+    đối chiếu với Nhu cầu Tổng mẻ của dòng gộp."""
     out = []
     for mid in member_ids or []:
         mat = materials_by_id.get(mid)
@@ -136,6 +166,7 @@ def _member_breakdown(member_ids: list, company_stock: dict, workshop_stock: dic
             "material_name": mat.name if mat else mid,
             "stock_company": company_stock.get(mid, 0) or 0,
             "stock_workshop": workshop_stock.get(mid, 0) or 0,
+            **({"actual_used": actual_usage.get(mid, 0) or 0} if actual_usage is not None else {}),
         })
     return out
 
@@ -418,6 +449,7 @@ def get_order(db: Session, brew_order_id: str) -> dict:
     # sau khi lệnh đã lập, nên hiện số sống để thủ kho biết thực tế đang còn mã nào).
     live_company_stock, live_workshop_stock = _stock_snapshot(db)
     materials_by_id = _materials_by_id(db)
+    actual_usage = _actual_usage_by_material(db, [r["brew_id"] for r in records])
 
     line_out = []
     for l in lines:
@@ -430,7 +462,8 @@ def get_order(db: Session, brew_order_id: str) -> dict:
             "material_id": l.material_id, "material_name": l.material_name, "uom": l.uom,
             "material_group_code": l.material_group_code,
             "member_material_ids": member_ids,
-            "member_breakdown": _member_breakdown(member_ids, live_company_stock, live_workshop_stock, materials_by_id),
+            "member_breakdown": _member_breakdown(member_ids, live_company_stock, live_workshop_stock,
+                                                  materials_by_id, actual_usage if l.material_group_code else None),
             "qty_per_batch": l.qty_per_batch, "qty_total": l.qty_total, "unit_price": l.unit_price,
             "stock_company_snapshot": l.stock_company_snapshot,
             "stock_workshop_snapshot": l.stock_workshop_snapshot, "shortage": shortage,

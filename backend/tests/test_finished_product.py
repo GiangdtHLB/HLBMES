@@ -97,18 +97,22 @@ def test_approve_bottle_scoped_by_finished_product(client, admin_h, vanhanh_h):
                     json={"bottle_code": bottle_code, "beer_type": "Bia test", "finished_product_id": fp_id})
     assert b.status_code == 201, b.text
     bottle_id = b.json()["bottle_id"]
+    bottle_year = b.json()["bottle_year"]
     b_fin = client.post(f"/api/brewing/bottles/{bottle_id}/finish", headers=vanhanh_h, json={"ca1": 10})
     assert b_fin.status_code == 200, b_fin.text
 
+    # bottle_code chỉ duy nhất TRONG 1 năm — scope_id thật (qc_catalog.bottle_scope_id) phải
+    # kèm năm để khớp đúng bản ghi approve_bottle tra cứu.
+    bottle_scope_id = f"{bottle_year}-{bottle_code}__thanh_pham"
     st = client.get(f"/api/brewing/qc-status?stage=thanh_pham&scope_type=bottle&"
-                    f"scope_id={bottle_code}__thanh_pham&finished_product_id={fp_id}", headers=admin_h).json()
+                    f"scope_id={bottle_scope_id}&finished_product_id={fp_id}", headers=admin_h).json()
     assert code in st["pending"]
 
     blocked = client.post(f"/api/brewing/bottles/{bottle_id}/approve", headers=admin_h)
     assert blocked.status_code == 409, blocked.text
 
     rec = client.post("/api/brewing/qc-results", headers=vanhanh_h,
-                      json={"stage": "thanh_pham", "scope_type": "bottle", "scope_id": f"{bottle_code}__thanh_pham",
+                      json={"stage": "thanh_pham", "scope_type": "bottle", "scope_id": bottle_scope_id,
                             "parameter": code, "value": 5, "lower_limit": 1, "upper_limit": 10})
     assert rec.status_code == 201, rec.text
 

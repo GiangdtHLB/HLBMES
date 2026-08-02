@@ -163,12 +163,28 @@ def _as_dt(v):
     return datetime.fromisoformat(v) if isinstance(v, str) else v
 
 
+def _assert_bbt_tank_empty(db: Session, equipment: CipEquipment) -> None:
+    """Chặn khai báo CIP cho thiết bị gắn 1 tank BBT (thành phẩm) vật lý còn tồn dịch — vệ sinh
+    tank khi còn bia trong đó là vô nghĩa/nguy hiểm; phải chiết/làm rỗng tank trước."""
+    if not equipment.production_line_id:
+        return
+    line = db.get(ProductionLine, equipment.production_line_id)
+    if not line or line.kind != "tank_bbt":
+        return
+    on_hand = sum(r.on_hand_bbt for r in db.execute(
+        select(FilterRecord).where(FilterRecord.to_bbt == line.code)).scalars().all())
+    if on_hand > 1e-6:
+        raise DomainError(f"Tank BBT '{line.code}' còn tồn {on_hand:g} hl — không thể CIP khi tank chưa rỗng.")
+
+
 def create_record(db: Session, payload: dict, user: User) -> CipRecord:
     require_perm(user, "cip.manage")
     if not db.get(CipFormType, payload["form_type_id"]):
         raise NotFoundError("Loại biểu mẫu CIP không tồn tại.")
-    if not db.get(CipEquipment, payload["equipment_id"]):
+    equipment = db.get(CipEquipment, payload["equipment_id"])
+    if not equipment:
         raise NotFoundError("Thiết bị CIP không tồn tại.")
+    _assert_bbt_tank_empty(db, equipment)
     started_at = _as_dt(payload["started_at"])
     rec = CipRecord(cip_id=new_id(), cip_code=_next_cip_code(db, started_at.year), cip_year=started_at.year,
                     form_type_id=payload["form_type_id"], equipment_id=payload["equipment_id"],
@@ -191,6 +207,11 @@ def update_record(db: Session, cip_id: str, payload: dict, user: User) -> CipRec
     rec = db.get(CipRecord, cip_id)
     if not rec:
         raise NotFoundError("Bản ghi CIP không tồn tại.")
+    if payload["equipment_id"] != rec.equipment_id:
+        equipment = db.get(CipEquipment, payload["equipment_id"])
+        if not equipment:
+            raise NotFoundError("Thiết bị CIP không tồn tại.")
+        _assert_bbt_tank_empty(db, equipment)
     rec.form_type_id = payload["form_type_id"]
     rec.equipment_id = payload["equipment_id"]
     rec.batch_number = payload["batch_number"]

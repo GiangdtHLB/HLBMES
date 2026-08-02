@@ -159,7 +159,9 @@ def lock_ferment(db: Session, ferment_id: str, user: User) -> FermentRecord:
         raise DomainError("Phải khóa Nấu (mã nấu nguồn) trước khi khóa Lên men.")
     if not ferment.qc_approved:
         raise DomainError("Lô LM chưa được duyệt (Duyệt LM) — không thể khóa.")
-    if not _stage_ok(db, "len_men_chinh", "ferment", f"{ferment.lm_code}__len_men_chinh", ferment.product_id):
+    if not _stage_ok(db, "len_men_chinh", "ferment",
+                     qc_catalog.ferment_scope_id(ferment.lm_code, ferment.ferment_year, "len_men_chinh"),
+                     ferment.product_id):
         raise DomainError("Chưa đủ chỉ tiêu lên men chính bắt buộc.")
     _lock(ferment, user)
     db.commit()

@@ -58,6 +58,19 @@ class FinishedGoodsUnit(Base):
     # phải đổi trả nhà phân phối) — tách riêng khỏi FIFO mặc định như is_near_expiry, và
     # được ưu tiên xuất TRƯỚC cả bia cận date (xem VIEWS.wms sort trong xuatkho).
     is_consigned: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    # Nguồn gốc dòng nhập kho: "chiet" (tự động sau khi duyệt chiết, xem routers/brewing.py::
+    # approve_bottle), "manual" ("Nhập kho thủ công" thường, không phải tồn đầu — xem
+    # services/wms.py::build_units) hay NULL (tồn đầu/import/near-expiry/consigned/dữ liệu cũ).
+    # Cả "chiet" lẫn "manual" đều cần Trưởng bộ phận kho duyệt nhập kho (received_confirmed_by/
+    # at, quyền wms.confirm_receipt, xem confirm_receipt_by_lot) — sau khi duyệt, không xóa
+    # được nữa (delete_unit/delete_units/delete_units_by_criteria). Riêng "manual" còn bị chặn
+    # XUẤT (create_shipment) tới khi duyệt (xem _consume_lot_rows(block_pending_manual=True)) —
+    # "chiet" thì không chặn xuất (chỉ chặn xóa), giữ nguyên hành vi cũ để không phá luồng
+    # duyệt chiết → xuất ngay đã có sẵn nhiều nơi dùng. Tồn đầu (is_opening_balance) tự động
+    # được coi là đã duyệt ngay lúc tạo (_create_units) vì đã yêu cầu quyền ADMIN riêng.
+    source: Mapped[Optional[str]] = mapped_column(Unicode(32), nullable=True, index=True)
+    received_confirmed_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    received_confirmed_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
 
 
 class ShipToLocation(Base):
@@ -112,6 +125,10 @@ class Shipment(Base):
     vehicle_plate: Mapped[Optional[str]] = mapped_column(Unicode(64), nullable=True)     # Biển số xe
     from_location: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)    # Xuất tại kho (ngăn lô)
     delivery_place: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)   # Địa điểm
+    # Trưởng bộ phận kho xác nhận (quyền wms.confirm_shipment) — sau khi xác nhận, chỉ ADMIN
+    # mới "Hoàn tác" được (xem services/wms.py::confirm_shipment/undo_shipment).
+    confirmed_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    confirmed_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
 
 
 class NearExpiryEntry(Base):
@@ -119,12 +136,18 @@ class NearExpiryEntry(Base):
     (tăng tồn kho công ty) và tách theo dõi riêng khỏi lịch sử nhập/xuất thông thường.
     direction="in": khai báo Sản phẩm + SL + Vị trí nhận trực tiếp (KHÔNG còn tự nhận lô chiết
     theo ngày giờ — thực tế tồn cận date thường gộp từ nhiều lô khác nhau nên không thể quy về
-    đúng 1 lô chiết gốc); mỗi lần khai báo tự sinh 1 lot_code CẬN DATE RIÊNG (xem
-    services/wms.py::_gen_candate_lot_code) để không bị gộp chung dòng với tồn thường của SKU
-    đó ở Xuất kho (list_lot_summaries nhóm theo (product_name, lot_code)). direction="out": tự
-    động ghi thêm 1 dòng khi 1 phiếu xuất kho (Shipment) có chọn "chỉ xuất bia cận date" — cùng
-    is_near_expiry=True trên các FinishedGoodsUnit liên quan. bottle_id giữ lại CHỈ để tương
-    thích các bản khai cũ (tạo trước khi đổi cách khai báo này) — bản khai mới luôn NULL."""
+    đúng 1 lô chiết gốc). Từ khi có duyệt (approved_by/at): khai báo CHƯA tăng tồn kho ngay —
+    chỉ giữ lot_code đã sinh sẵn (qua services/wms.py::_gen_candate_lot_code) làm chỗ đứng;
+    Trưởng bộ phận kho (quyền wms.confirm_receipt) bấm "Duyệt" (services/wms.py::
+    approve_near_expiry_entry) mới thực sự tạo FinishedGoodsUnit (is_near_expiry=True) và tăng
+    tồn kho — lúc đó unit_codes mới được ghi. Trước khi duyệt: còn sửa được (quantity/vị trí/
+    ghi chú, xem update_near_expiry_entry) và hủy được (undo_near_expiry_entry chỉ đánh dấu
+    reversed, chưa có đơn vị nào để xoá). Sau khi duyệt: khoá hẳn — không sửa, không hoàn tác
+    được nữa (mirror StockCount.approved_by, xem services/warehouse.py::approve_count).
+    direction="out": tự động ghi thêm 1 dòng khi 1 phiếu xuất kho (Shipment) có chọn "chỉ xuất
+    bia cận date" — cùng is_near_expiry=True trên các FinishedGoodsUnit liên quan, không qua
+    bước duyệt (đã là hàng thật đang xuất). bottle_id giữ lại CHỈ để tương thích các bản khai cũ
+    (tạo trước khi đổi cách khai báo này) — bản khai mới luôn NULL."""
     __tablename__ = "near_expiry_entry"
 
     entry_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
@@ -141,11 +164,14 @@ class NearExpiryEntry(Base):
     note: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)
     created_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
-    # unit_code các vỉ/keg do chính lần khai báo direction="in" này tạo ra (nối bằng dấu phẩy)
-    # — cho phép Hoàn tác xoá đúng các đơn vị đó, không đụng tới đơn vị của lần khai báo khác
-    # dùng chung bottle_id/lot_code. Chỉ có ở direction="in".
+    # unit_code các vỉ/keg do chính lần khai báo direction="in" này tạo ra (nối bằng dấu phẩy),
+    # chỉ được ghi lúc DUYỆT (không còn ghi ngay lúc tạo) — chỉ có ở direction="in".
     unit_codes: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)
     reversed: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Trưởng bộ phận kho duyệt (quyền wms.confirm_receipt) — trước khi duyệt, khai báo CHƯA
+    # tăng tồn kho (chỉ có ở direction="in"). Sau khi duyệt: khoá, không sửa/hoàn tác được nữa.
+    approved_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    approved_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
 
 
 class ConsignedEntry(Base):
@@ -159,7 +185,9 @@ class ConsignedEntry(Base):
     Khác NearExpiryEntry ở chỗ: khi tính báo cáo xuất theo ca/ngày (finished_goods_shift_report),
     lượng xuất từ lô GỬI phải bị TRỪ ra khỏi tổng xuất trong kỳ — vì lô này thực chất là phần
     bia đã được tính vào lượt xuất buổi sáng (phiếu gốc), xuất lại lần 2 sẽ bị đếm trùng nếu
-    không trừ. Bia cận date thì KHÔNG trừ vì không phải xuất trùng của cùng 1 chuyến."""
+    không trừ. Bia cận date thì KHÔNG trừ vì không phải xuất trùng của cùng 1 chuyến.
+    Cũng qua duyệt Trưởng bộ phận kho như NearExpiryEntry (xem approved_by/at ở đó và
+    services/wms.py::approve_consigned_entry) — khai báo CHƯA tăng tồn kho tới khi duyệt."""
     __tablename__ = "consigned_entry"
 
     entry_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
@@ -175,10 +203,12 @@ class ConsignedEntry(Base):
     note: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)
     created_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
-    # unit_code các vỉ/keg do chính lần khai báo direction="in" này tạo ra (nối bằng dấu phẩy)
-    # — cho phép Hoàn tác xoá đúng các đơn vị đó. Chỉ có ở direction="in".
+    # unit_code các vỉ/keg do chính lần khai báo direction="in" này tạo ra (nối bằng dấu phẩy),
+    # chỉ được ghi lúc DUYỆT. Chỉ có ở direction="in".
     unit_codes: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)
     reversed: Mapped[bool] = mapped_column(Boolean, default=False)
+    approved_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    approved_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
 
 
 class LoadSlip(Base):

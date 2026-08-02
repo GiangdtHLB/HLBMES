@@ -12,6 +12,7 @@ from ..errors import DomainError, NotFoundError
 from ..models.brewing import (BottleRecord, BrewOrder, BrewOrderMaterialLine, BrewRecord, FermentRecord,
     FilterOrder, FilterOrderMaterialLine, FilterOrderTank, FilterRecord)
 from ..models.batches import BatchExecution
+from ..models.cip import CipEquipment
 from ..models.lines import ProductionLine
 from ..models.formula import Formula
 from ..models.master import BeerType, FinishedProduct, Material, MaterialAltGroup, MaterialGroup, Product, UnitTypeCatalog
@@ -23,7 +24,7 @@ from ..models.orders import ProductionOrder
 from ..models.quality_ext import StageQcGroup
 from ..models.recipes import Recipe, RecipeVersion
 from ..models.scheduling import ScheduleSlot
-from ..models.warehouse import MaterialRequestLine, StockMovement
+from ..models.warehouse import FactoryLocation, MaterialRequestLine, StockMovement
 from ..models.wms import FinishedGoodsUnit
 from ..models.workorder import WorkOrder
 from ..security import User, require_perm
@@ -141,6 +142,22 @@ def delete_supplier(db: Session, supplier_id: str, user: User) -> None:
     record_audit(db, entity_type="supplier", entity_id=sup.supplier_id, action="delete",
                  actor=user, before={"code": sup.code, "name": sup.name})
     db.delete(sup)
+    db.commit()
+
+
+def delete_factory_location(db: Session, factory_id: str, user: User) -> None:
+    require_perm(user, "master.manage")
+    fl = db.get(FactoryLocation, factory_id)
+    if not fl:
+        raise NotFoundError("Nhà máy không tồn tại.")
+    checks = [
+        ("giao dịch điều chuyển", select(func.count(StockMovement.movement_id)).where(
+            StockMovement.destination_factory_id == factory_id)),
+    ]
+    _block_if_used(_used_by(db, checks), "Nhà máy", fl.code)
+    record_audit(db, entity_type="factory_location", entity_id=fl.factory_id, action="delete",
+                 actor=user, before={"code": fl.code, "name": fl.name})
+    db.delete(fl)
     db.commit()
 
 
@@ -270,6 +287,8 @@ def delete_production_line(db: Session, line_id: str, user: User) -> None:
         ("mẻ chiết (từ BBT)", select(func.count(BottleRecord.bottle_id)).where(BottleRecord.from_bbt == code)),
         ("tank BBT nguồn lọc lại", select(func.count(FilterOrderTank.line_id)).where(
             FilterOrderTank.source_bbt_code == code)),
+        ("thiết bị CIP gắn tank/dây chuyền này", select(func.count(CipEquipment.equipment_id)).where(
+            CipEquipment.production_line_id == line_id)),
     ]
     _block_if_used(_used_by(db, checks), "Dây chuyền/tank", code)
     record_audit(db, entity_type="line", entity_id=line.line_id, action="delete",

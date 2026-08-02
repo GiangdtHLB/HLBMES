@@ -182,6 +182,33 @@ def _a_filter_order(client, admin_h, order_code, ferment_ids, blend_mode="khong_
     return r.json()["filter_order_id"]
 
 
+def test_delete_brew_blocked_when_ferment_approved(client, admin_h, vanhanh_h, brewhouse_line_id):
+    """Lô lên men đã được Duyệt LM (KCS) — dù CHƯA có mẻ lọc nào lấy từ nó — vẫn không được
+    xóa theo khi xóa mã nấu cha (trước đây chỉ chặn theo _brew_already_filtered, bỏ sót
+    trường hợp đã duyệt KCS nhưng chưa kịp lọc)."""
+    suffix = "DELBLOCKAPPROVED01"
+    brew_id, batch_id = _a_brew(client, admin_h, vanhanh_h, suffix, brewhouse_line_id)
+    _approve_ferment(client, admin_h, f"LM-{suffix}")
+
+    blocked = client.delete(f"/api/brewing/brews/{brew_id}", headers=vanhanh_h)
+    assert blocked.status_code == 409, blocked.text
+    assert "duyệt KCS" in blocked.json()["detail"]
+
+    ferments = client.get("/api/brewing/ferments", headers=admin_h).json()["items"]
+    assert any(f["lm_code"] == f"LM-{suffix}" for f in ferments), \
+        "Lô lên men đã duyệt phải còn nguyên, không bị xóa mất theo mã nấu"
+
+
+def test_delete_ferment_blocked_when_approved(client, admin_h, vanhanh_h, brewhouse_line_id):
+    suffix = "DELFERMBLOCKAPPROVED01"
+    brew_id, batch_id = _a_brew(client, admin_h, vanhanh_h, suffix, brewhouse_line_id)
+    ferment_id = _approve_ferment(client, admin_h, f"LM-{suffix}")
+
+    blocked = client.delete(f"/api/brewing/ferments/{ferment_id}", headers=vanhanh_h)
+    assert blocked.status_code == 409, blocked.text
+    assert "duyệt KCS" in blocked.json()["detail"]
+
+
 def test_delete_brew_blocked_after_filtered(client, admin_h, vanhanh_h, brewhouse_line_id):
     suffix = "DELBLOCK01"
     brew_id, batch_id = _a_brew(client, admin_h, vanhanh_h, suffix, brewhouse_line_id)

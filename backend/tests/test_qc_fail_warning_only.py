@@ -135,6 +135,9 @@ def test_fail_warns_but_does_not_block_full_chain(client, admin_h, vanhanh_h, br
                             json={"batch_code": "601", "line_id": brewhouse_line_id})
         assert batch.status_code == 201, batch.text
         batch_id = batch.json()["batch_id"]
+        pl = client.put(f"/api/brewing/brews/{brew_id}/batches/{batch_id}/process-log", headers=admin_h,
+                       json={"whp_tong_luong_dich_hl": 100})
+        assert pl.status_code == 200, pl.text
         fin_batch = client.post(f"/api/brewing/brews/{brew_id}/batches/{batch_id}/finish", headers=vanhanh_h)
         assert fin_batch.status_code == 200, fin_batch.text
 
@@ -145,8 +148,14 @@ def test_fail_warns_but_does_not_block_full_chain(client, admin_h, vanhanh_h, br
         ferment = next(f for f in ferments if f["lm_code"] == f"LM-{suffix}")
         ferment_id = ferment["ferment_id"]
 
-        # FAIL ở lên men phụ — Duyệt LM vẫn phải THÀNH CÔNG (chỉ cảnh báo qua qc_has_fail).
-        _declare_fail(client, vanhanh_h, "len_men_phu", "ferment", f"LM-{suffix}__len_men_phu", phu_code)
+        # FAIL ở lên men chính + phụ — Duyệt LM vẫn phải THÀNH CÔNG (chỉ cảnh báo qua
+        # qc_has_fail) — cả 2 nhóm chỉ tiêu đều phải được khai báo trước (dù pass hay fail)
+        # để không bị chặn ở bước "còn thiếu chỉ tiêu bắt buộc" (xem approve_ferment).
+        # lm_code chỉ duy nhất TRONG 1 năm — scope_id thật (qc_catalog.ferment_scope_id) phải
+        # kèm năm.
+        fy = ferment["ferment_year"]
+        _declare_fail(client, vanhanh_h, "len_men_chinh", "ferment", f"{fy}-LM-{suffix}__len_men_chinh", chinh_code)
+        _declare_fail(client, vanhanh_h, "len_men_phu", "ferment", f"{fy}-LM-{suffix}__len_men_phu", phu_code)
         approve_ferment = client.post(f"/api/brewing/ferments/{ferment_id}/approve", headers=admin_h)
         assert approve_ferment.status_code == 200, approve_ferment.text
         assert approve_ferment.json()["qc_approved"] is True
@@ -157,7 +166,6 @@ def test_fail_warns_but_does_not_block_full_chain(client, admin_h, vanhanh_h, br
         assert lock_brew.status_code == 200, lock_brew.text
 
         # FAIL ở lên men chính vẫn phải khóa được lô LM.
-        _declare_fail(client, vanhanh_h, "len_men_chinh", "ferment", f"LM-{suffix}__len_men_chinh", chinh_code)
         lock_ferment = client.post(f"/api/brewing/ferments/{ferment_id}/lock-lot", headers=admin_h)
         assert lock_ferment.status_code == 200, lock_ferment.text
 
@@ -183,7 +191,9 @@ def test_fail_warns_but_does_not_block_full_chain(client, admin_h, vanhanh_h, br
         assert fin_filt.status_code == 200, fin_filt.text
 
         # FAIL ở lọc — Duyệt KCS lọc vẫn phải THÀNH CÔNG.
-        _declare_fail(client, vanhanh_h, "loc", "filter", f"FL-{suffix}", loc_code)
+        # filter_code chỉ duy nhất TRONG 1 năm — scope_id thật (qc_catalog.filter_scope_id)
+        # phải kèm năm.
+        _declare_fail(client, vanhanh_h, "loc", "filter", f"{filt.json()['filter_year']}-FL-{suffix}", loc_code)
         approve_filt = client.post(f"/api/brewing/filters/{filter_id}/approve", headers=admin_h)
         assert approve_filt.status_code == 200, approve_filt.text
         assert approve_filt.json()["qc_has_fail"] is True
@@ -197,7 +207,10 @@ def test_fail_warns_but_does_not_block_full_chain(client, admin_h, vanhanh_h, br
         assert fin_bottle.status_code == 200, fin_bottle.text
 
         # FAIL ở thành phẩm — Duyệt chiết vẫn phải THÀNH CÔNG (vẫn nhập kho thành phẩm).
-        _declare_fail(client, vanhanh_h, "thanh_pham", "bottle", f"CH-{suffix}__thanh_pham", tp_code)
+        # bottle_code chỉ duy nhất TRONG 1 năm — scope_id thật (qc_catalog.bottle_scope_id)
+        # phải kèm năm.
+        by = bottle.json()["bottle_year"]
+        _declare_fail(client, vanhanh_h, "thanh_pham", "bottle", f"{by}-CH-{suffix}__thanh_pham", tp_code)
         approve_bottle = client.post(f"/api/brewing/bottles/{bottle_id}/approve", headers=admin_h)
         assert approve_bottle.status_code == 200, approve_bottle.text
         assert approve_bottle.json()["qc_has_fail"] is True

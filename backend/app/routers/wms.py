@@ -4,10 +4,10 @@ from fastapi import APIRouter, Depends, File, UploadFile
 from sqlalchemy.orm import Session
 
 from ..database import get_db
-from ..schemas import (ConsignedEntryIn, DecomposeBatchIn, DeleteByLotIn, FreeIssueBatchIn, LoadSlipHeaderUpdate,
-                       NearExpiryEntryIn, PutawayIn, RelocateBatchIn, ShipmentIn, ShipToIn, ShipToUpdate,
-                       UnitBuildIn, UnitDeleteIn, UnitTransferIn, VehicleIn, VehicleUpdate, WmsLocationIn,
-                       WmsLocationUpdate)
+from ..schemas import (ConsignedEntryIn, ConsignedEntryUpdate, DecomposeBatchIn, DeleteByLotIn, FreeIssueBatchIn,
+                       LoadSlipHeaderUpdate, NearExpiryEntryIn, NearExpiryEntryUpdate, PutawayIn, RelocateBatchIn,
+                       ShipmentIn, ShipmentUpdate, ShipToIn, ShipToUpdate, UnitBuildIn, UnitDeleteIn, UnitTransferIn,
+                       VehicleIn, VehicleUpdate, WmsLocationIn, WmsLocationUpdate)
 from ..security import User, get_current_user, require_perm
 from ..services import load_slip as load_slip_svc
 from ..services import wms as svc
@@ -119,6 +119,12 @@ def delete_units_by_lot(payload: DeleteByLotIn, db: Session = Depends(get_db),
     return svc.delete_units_by_criteria(db, payload.product_name, payload.lot_code, payload.unit_type, user)
 
 
+@router.post("/units/confirm-receipt-by-lot")
+def confirm_receipt_by_lot(payload: DeleteByLotIn, db: Session = Depends(get_db),
+                           user: User = Depends(get_current_user)):
+    return svc.confirm_receipt_by_lot(db, payload.product_name, payload.lot_code, payload.unit_type, user)
+
+
 @router.post("/units", status_code=201)
 def build_units(payload: UnitBuildIn, db: Session = Depends(get_db),
                 user: User = Depends(get_current_user)):
@@ -209,8 +215,9 @@ def units_by_lot(db: Session = Depends(get_db), user: User = Depends(get_current
 
 
 @router.get("/shipments")
-def shipments(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    return svc.list_shipments(db)
+def shipments(limit: int = 200, offset: int = 0, db: Session = Depends(get_db),
+             user: User = Depends(get_current_user)):
+    return svc.list_shipments(db, limit, offset)
 
 
 @router.post("/shipments", status_code=201)
@@ -221,9 +228,19 @@ def create_shipment(payload: ShipmentIn, db: Session = Depends(get_db), user: Us
     return svc.create_shipment(db, payload.ship_to_id, lines, user, header=header)
 
 
+@router.put("/shipments/{shipment_id}")
+def update_shipment(shipment_id: str, payload: ShipmentUpdate, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    return svc.update_shipment(db, shipment_id, payload.model_dump(exclude_unset=True), user)
+
+
 @router.post("/shipments/{shipment_id}/undo")
 def undo_shipment(shipment_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     return svc.undo_shipment(db, shipment_id, user)
+
+
+@router.post("/shipments/{shipment_id}/confirm")
+def confirm_shipment(shipment_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    return svc.confirm_shipment(db, shipment_id, user)
 
 
 # ---- Nhập bia cận date ----
@@ -237,6 +254,17 @@ def create_near_expiry(payload: NearExpiryEntryIn, db: Session = Depends(get_db)
 @router.get("/near-expiry")
 def list_near_expiry(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     return svc.list_near_expiry_entries(db)
+
+
+@router.put("/near-expiry/{entry_id}")
+def update_near_expiry(entry_id: str, payload: NearExpiryEntryUpdate, db: Session = Depends(get_db),
+                       user: User = Depends(get_current_user)):
+    return svc.update_near_expiry_entry(db, entry_id, payload.model_dump(exclude_unset=True), user)
+
+
+@router.post("/near-expiry/{entry_id}/approve")
+def approve_near_expiry(entry_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    return svc.approve_near_expiry_entry(db, entry_id, user)
 
 
 @router.post("/near-expiry/{entry_id}/undo")
@@ -255,6 +283,17 @@ def create_consigned(payload: ConsignedEntryIn, db: Session = Depends(get_db),
 @router.get("/consigned")
 def list_consigned(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     return svc.list_consigned_entries(db)
+
+
+@router.put("/consigned/{entry_id}")
+def update_consigned(entry_id: str, payload: ConsignedEntryUpdate, db: Session = Depends(get_db),
+                     user: User = Depends(get_current_user)):
+    return svc.update_consigned_entry(db, entry_id, payload.model_dump(exclude_unset=True), user)
+
+
+@router.post("/consigned/{entry_id}/approve")
+def approve_consigned(entry_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    return svc.approve_consigned_entry(db, entry_id, user)
 
 
 @router.post("/consigned/{entry_id}/undo")

@@ -48,7 +48,7 @@ def set_hold(payload: HoldIn, db: Session = Depends(get_db),
     if not payload.on_hold:
         require_perm(user, "quality.release")
     return svc.set_hold(db, payload.scope_type, payload.scope_id, payload.on_hold,
-                        user, payload.reason)
+                        user, payload.reason, payload.parameter)
 
 
 @router.get("/deviations", response_model=list[DeviationOut])

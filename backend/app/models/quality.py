@@ -60,3 +60,8 @@ class Deviation(Base):
     approved_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
     opened_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
     closed_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+    # Mã chỉ tiêu (QualityResult.parameter) liên quan tới deviation này, người mở TỰ CHỌN từ
+    # danh sách chỉ tiêu đã khai báo/fail của scope — nhiều mã nối bằng dấu phẩy. Cho phép
+    # người xem Deviation biết NGAY vì sao mở mà không phải đoán qua reason tự do (xem
+    # frontend/app.js::VIEWS.quality — panel "Chỉ tiêu của phạm vi này").
+    parameter: Mapped[Optional[str]] = mapped_column(Unicode(500), nullable=True)

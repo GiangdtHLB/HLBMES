@@ -20,7 +20,7 @@ EXECUTED_STATES = {"running", "held", "completed", "closed"}
 
 
 @router.get("/material-norm")
-def material_norm(days: int = 3650, product_id: str = None, db: Session = Depends(get_db),
+def material_norm(days: int = 90, product_id: str = None, db: Session = Depends(get_db),
                   user: User = Depends(get_current_user)):
     """BC định mức NVL: gộp định mức (đã scale) ↔ thực tế tiêu thụ theo vật tư qua nhiều mẻ."""
     since = utcnow() - timedelta(days=days)
@@ -120,9 +120,9 @@ def keg_report(date_from: datetime = None, date_to: datetime = None,
 
 # ---- Báo cáo trạng thái lô tổng hợp (Nấu/Lên men/Lọc/Chiết) ----
 @router.get("/lo-status")
-def lo_status(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+def lo_status(days: int = 180, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     from ..services import lo_status as lo_status_svc
-    return lo_status_svc.lo_status_report(db)
+    return lo_status_svc.lo_status_report(db, days=days)
 
 
 # ---- Tổng hợp cho Tổng quan (dashboard): lệnh/mẻ nấu-lọc-chiết + sản lượng chiết lon/keg ----
@@ -188,6 +188,12 @@ def low_yield_filter_alerts(days: int = 5, limit: int = 5, db: Session = Depends
                             user: User = Depends(get_current_user)):
     from ..services import dashboard as dashboard_svc
     return dashboard_svc.low_yield_filter_alerts(db, days, limit)
+
+
+@router.get("/bottled-not-approved")
+def bottled_not_approved(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    from ..services import dashboard as dashboard_svc
+    return dashboard_svc.bottled_not_approved_report(db)
 
 
 # ---- Báo cáo tồn kho thành phẩm theo tuổi lô (cho khối kinh doanh đẩy nhanh bán hàng) ----

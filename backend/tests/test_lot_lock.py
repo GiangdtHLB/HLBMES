@@ -99,6 +99,9 @@ def _build_full_chain(client, admin_h, vanhanh_h, suffix, line_id):
                         json={"batch_code": str(700 + ord(suffix) - ord("A")), "line_id": line_id})
     assert batch.status_code == 201, batch.text
     batch_id = batch.json()["batch_id"]
+    pl = client.put(f"/api/brewing/brews/{brew_id}/batches/{batch_id}/process-log", headers=admin_h,
+                   json={"whp_tong_luong_dich_hl": 100})
+    assert pl.status_code == 200, pl.text
     fin_batch = client.post(f"/api/brewing/brews/{brew_id}/batches/{batch_id}/finish", headers=vanhanh_h)
     assert fin_batch.status_code == 200, fin_batch.text
     _declare_pending(client, vanhanh_h, "nau", "brew_batch", batch_id)
