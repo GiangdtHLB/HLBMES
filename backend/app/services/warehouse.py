@@ -15,8 +15,8 @@ from ..models.brewing import (BottleMaterialUsage, BottleRecord, BrewBatch, Brew
 from ..models.master import Material
 from ..models.materials import GenealogyEdge, MaterialLot
 from ..models.quality import Deviation, QualityResult
-from ..models.warehouse import (FactoryLocation, MaterialRequest, MaterialRequestLine, StockCount,
-                                StockCountLine, StockMovement, TransferPxRequest)
+from ..models.warehouse import (FactoryLocation, MaterialRequest, MaterialRequestLine, SangNgangRequest,
+                                StockCount, StockCountLine, StockMovement, TransferPxRequest)
 from ..security import User, has_scope, require_perm, require_role, require_scope
 from .opening_balance_import import parse_opening_balance_sheet
 from .qc_catalog import required_params_for_material
@@ -341,8 +341,9 @@ def approve_transfer_to_factory(db: Session, movement_id: str, user: User) -> di
 def transfer(db: Session, lot_id: str, quantity: float, location_to: str, user: User,
              reason: str = None, mode: str = "sang_ngang", request_id: str = None,
              request_line_id: str = None) -> dict:
-    """Chuyển vị trí (không đổi tổng tồn). `mode` phân biệt nguồn gốc giao dịch trong lịch sử:
-    "xuat_theo_de_nghi" (công ty→phân xưởng qua đề nghị) | "dieu_chuyen" (phân xưởng→công ty thủ công).
+    """Chuyển vị trí (không đổi tổng tồn) — entrypoint công khai, đòi `warehouse.issue`. `mode`
+    phân biệt nguồn gốc giao dịch trong lịch sử: "xuat_theo_de_nghi" (công ty→phân xưởng qua đề
+    nghị) | "dieu_chuyen" (phân xưởng→công ty thủ công).
 
     Nếu `quantity` bằng đúng tồn của lô thì đổi vị trí NGUYÊN lô đó; nếu nhỏ hơn, TÁCH một lô
     mới tại `location_to` mang đúng `quantity` (giữ nguyên lô gốc ở vị trí cũ với phần còn lại,
@@ -350,6 +351,15 @@ def transfer(db: Session, lot_id: str, quantity: float, location_to: str, user: 
     NGUYÊN LÔ bất kể `quantity` truyền vào, khiến sổ sách ghi sai số lượng đã chuyển khi người
     dùng chỉ định chuyển một phần lô."""
     require_perm(user, "warehouse.issue")
+    return _transfer_lot(db, lot_id, quantity, location_to, user, reason, mode, request_id, request_line_id)
+
+
+def _transfer_lot(db: Session, lot_id: str, quantity: float, location_to: str, user: User,
+                  reason: str = None, mode: str = "sang_ngang", request_id: str = None,
+                  request_line_id: str = None) -> dict:
+    """Logic chuyển vị trí thực sự, KHÔNG kiểm tra `warehouse.issue` — dùng cho các nơi đã tự
+    xác thực quyền theo cách khác (vd approve_sang_ngang/undo_sang_ngang: thủ kho phân xưởng
+    duyệt qua `warehouse.request` + phạm vi kho, không phải người cầm quyền "xuất kho" chung)."""
     lot = _lot(db, lot_id)
     _assert_transfer_scope(user, lot.location, location_to)
     if lot.status == LotStatus.ON_HOLD.value:
@@ -430,27 +440,48 @@ def _location_filter_clause(location_filter: str):
 
 
 def stock_on_hand(db: Session, location: str = None) -> list[dict]:
-    """Xem tồn kho: tổng tồn KHẢ DỤNG theo vật tư (lọc theo kho nếu truyền `location`) — loại
-    trừ lô đang HOLD (chờ khai báo/duyệt chỉ tiêu chất lượng) hoặc SCRAPPED (đã hỏng/trả NCC),
-    vì 2 loại này không thể xuất/chuyển được (issue()/transfer() đều chặn) nên không nên tính
-    là tồn "khả dụng" — trước đây gộp chung khiến số tồn hiển thị cao hơn thực tế dùng được."""
+    """Xem tồn kho theo vật tư (lọc theo kho nếu truyền `location`).
+
+    `on_hand` (dùng để so `stock_min`/cảnh báo thiếu hụt) chỉ tính lô KHẢ DỤNG (available/
+    released) — loại trừ lô đang HOLD (chờ khai báo/duyệt chỉ tiêu chất lượng) hoặc SCRAPPED
+    (đã hỏng/trả NCC), vì 2 loại này không thể xuất/chuyển được (issue()/transfer() đều chặn)
+    nên không nên tính là tồn "khả dụng" — trước đây gộp chung khiến số tồn hiển thị cao hơn
+    thực tế dùng được.
+
+    `pending_qc` = tổng SL đang ở lô HOLD (đã nhập kho vật lý nhưng chưa qua QC) và
+    `actual_total` = on_hand + pending_qc — tổng SL thực tế đang nằm trong kho (kể cả lô chưa
+    qua QC), phục vụ đối chiếu kiểm kê thực tế, tách biệt với con số "khả dụng để xuất/chuyển"."""
     stmt = (
-        select(MaterialLot.material_id, func.sum(MaterialLot.quantity), MaterialLot.uom)
+        select(MaterialLot.material_id, MaterialLot.status, func.sum(MaterialLot.quantity), MaterialLot.uom)
         .where(MaterialLot.material_id.isnot(None),
-              MaterialLot.status.in_([LotStatus.AVAILABLE.value, LotStatus.RELEASED.value]))
+              MaterialLot.status.in_([LotStatus.AVAILABLE.value, LotStatus.RELEASED.value,
+                                       LotStatus.ON_HOLD.value]))
     )
     clause = _location_filter_clause(location)
     if clause is not None:
         stmt = stmt.where(clause)
-    rows = db.execute(stmt.group_by(MaterialLot.material_id, MaterialLot.uom)).all()
+    rows = db.execute(stmt.group_by(MaterialLot.material_id, MaterialLot.status, MaterialLot.uom)).all()
+    if not rows:
+        return []
+    agg = {}
+    for material_id, status, total, uom in rows:
+        a = agg.setdefault(material_id, {"uom": uom, "available": 0.0, "pending_qc": 0.0})
+        if status == LotStatus.ON_HOLD.value:
+            a["pending_qc"] += total or 0
+        else:
+            a["available"] += total or 0
+    mats = {m.material_id: m for m in db.execute(
+        select(Material).where(Material.material_id.in_(agg.keys()))).scalars().all()}
     out = []
-    for material_id, total, uom in rows:
-        mat = db.get(Material, material_id)
-        on_hand = round(total or 0, 3)
+    for material_id, a in agg.items():
+        mat = mats.get(material_id)
+        on_hand = round(a["available"], 3)
+        pending_qc = round(a["pending_qc"], 3)
         stock_min = mat.stock_min if mat else None
         out.append({"material_id": material_id, "material_code": mat.code if mat else material_id,
                     "material_name": mat.name if mat else "", "on_hand": on_hand,
-                    "uom": uom, "category": mat.category if mat else None,
+                    "actual_total": round(on_hand + pending_qc, 3), "pending_qc": pending_qc,
+                    "uom": a["uom"], "category": mat.category if mat else None,
                     "stock_min": stock_min, "low_stock": stock_min is not None and on_hand < stock_min})
     return sorted(out, key=lambda x: x["material_code"])
 
@@ -531,28 +562,67 @@ def expiry_report(db: Session, warn_days: int = 30) -> list[dict]:
     return out
 
 
-def inventory_report(db: Session, days: int = 30, location: str = None) -> list[dict]:
-    """BC nhập-xuất-tồn trong kỳ: tổng nhập, tổng xuất, tồn hiện tại theo vật tư
-    (lọc theo kho nếu truyền `location`: nhập tính theo location_to, xuất theo location_from)."""
-    since = utcnow() - timedelta(days=days)
+def inventory_report(db: Session, days: int = 30, location: str = None,
+                     date_from: datetime = None, date_to: datetime = None) -> list[dict]:
+    """BC nhập-xuất-tồn trong kỳ: tổng nhập, tổng xuất, tồn hiện tại theo vật tư (lọc theo kho
+    nếu truyền `location`: nhập tính theo location_to, xuất theo location_from). Khoảng thời
+    gian ưu tiên `date_from`/`date_to` nếu truyền, ngược lại dùng `days` gần nhất tính tới hiện tại.
+
+    Vật tư được liệt kê là HỢP của (1) vật tư còn tồn tại kho được lọc và (2) vật tư có giao
+    dịch trong kỳ — trước đây chỉ lấy theo (1) nên vật tư nhập rồi chuyển hết đi trong kỳ (VD
+    "Xuất sang ngang": nhập vào Kho công ty rồi chuyển thẳng sang Kho phân xưởng luôn) không còn
+    tồn tại Kho công ty nên biến mất khỏi báo cáo dù có phát sinh nhập/xuất thật trong kỳ."""
+    since = date_from or (utcnow() - timedelta(days=days))
+    until = date_to
     on_hand = {r["material_id"]: r for r in stock_on_hand(db, location)}
-    moves = db.execute(select(StockMovement).where(StockMovement.ts >= since)).scalars().all()
+    stmt = select(StockMovement).where(StockMovement.ts >= since)
+    if until:
+        stmt = stmt.where(StockMovement.ts <= until)
+    moves = db.execute(stmt).scalars().all()
     workshop = _is_workshop_location(location) if location else None
     agg = {}
     for m in moves:
+        if m.material_id is None:
+            continue
+        # Chỉ chạm vào `agg` (kể cả setdefault) SAU KHI đã xác định giao dịch thực sự thuộc kho
+        # đang lọc — nếu setdefault chạy trước rồi mới `continue` khi không khớp kho, vật tư vẫn
+        # để lại 1 dòng agg toàn số 0, khiến `mat_ids` (hợp với on_hand) lẫn cả vật tư không hề
+        # có giao dịch nào ở kho này (bug thực tế: vật tư chỉ nhập ở Kho công ty vẫn xuất hiện
+        # trong báo cáo lọc theo Kho phân xưởng với các cột đều = 0).
+        if m.movement_type == "transfer":
+            # Chuyển kho không đổi tổng tồn toàn nhà máy nên chỉ có ý nghĩa khi báo cáo đã lọc
+            # theo 1 kho cụ thể — khi đó "chuyển ra khỏi kho này" tính như xuất, "chuyển vào kho
+            # này" tính như nhập (VD "Xuất sang ngang"/"Điều chuyển": tăng tồn kho đích, giảm tồn
+            # kho nguồn), y hệt cách receipt/issue thường đã lọc theo location_to/location_from.
+            if not location:
+                continue
+            if _is_workshop_location(m.location_to) == workshop:
+                agg.setdefault(m.material_id, {"receipt": 0.0, "issue": 0.0, "return": 0.0})["receipt"] += m.quantity
+            elif _is_workshop_location(m.location_from) == workshop:
+                agg.setdefault(m.material_id, {"receipt": 0.0, "issue": 0.0, "return": 0.0})["issue"] += m.quantity
+            continue
         if location:
             loc = m.location_to if m.movement_type in ("receipt", "return") else m.location_from
             if _is_workshop_location(loc) != workshop:
                 continue
-        a = agg.setdefault(m.material_id, {"receipt": 0.0, "issue": 0.0, "return": 0.0})
-        if m.movement_type in a:
-            a[m.movement_type] += m.quantity
+        if m.movement_type in ("receipt", "issue", "return"):
+            agg.setdefault(m.material_id, {"receipt": 0.0, "issue": 0.0, "return": 0.0})[m.movement_type] += m.quantity
+    mat_ids = set(on_hand) | set(agg)
+    mats = {mt.material_id: mt for mt in db.execute(
+        select(Material).where(Material.material_id.in_(mat_ids))).scalars().all()} if mat_ids else {}
     out = []
-    for mid, oh in on_hand.items():
+    for mid in mat_ids:
+        oh = on_hand.get(mid)
+        if oh is None:
+            mat = mats.get(mid)
+            oh = {"material_id": mid, "material_code": mat.code if mat else mid,
+                  "material_name": mat.name if mat else "", "on_hand": 0.0, "actual_total": 0.0,
+                  "pending_qc": 0.0, "uom": mat.uom if mat else "", "category": mat.category if mat else None,
+                  "stock_min": None, "low_stock": False}
         a = agg.get(mid, {"receipt": 0.0, "issue": 0.0, "return": 0.0})
         out.append({**oh, "received": round(a["receipt"] + a["return"], 3),
                     "issued": round(a["issue"], 3)})
-    return out
+    return sorted(out, key=lambda x: x["material_code"])
 
 
 def _lot(db, lot_id):
@@ -1060,6 +1130,123 @@ def undo_transfer_px_request(db: Session, request_id: str, user: User) -> dict:
     db.commit()
     db.refresh(req)
     return _transfer_px_request_dict(req)
+
+
+def _sang_ngang_dict(req: SangNgangRequest) -> dict:
+    return {"request_id": req.request_id, "request_code": req.request_code, "lot_id": req.lot_id,
+            "quantity": req.quantity, "uom": req.uom, "reason": req.reason, "status": req.status,
+            "movement_id": req.movement_id, "reversed": req.reversed,
+            "created_by": req.created_by, "created_at": req.created_at,
+            "approved_by": req.approved_by, "approved_at": req.approved_at,
+            "rejected_by": req.rejected_by, "rejected_at": req.rejected_at,
+            "reject_reason": req.reject_reason}
+
+
+def _get_sang_ngang(db, request_id) -> SangNgangRequest:
+    req = db.get(SangNgangRequest, request_id)
+    if not req:
+        raise NotFoundError("Đề nghị xuất sang ngang không tồn tại.")
+    return req
+
+
+def create_sang_ngang(db: Session, payload: dict, user: User) -> dict:
+    """Thủ kho công ty khai báo "Xuất sang ngang": hàng về CẬP KHO CÔNG TY (gọi receive() y hệt
+    Nhập kho thường — tăng tồn công ty, ghi StockMovement type=receipt, HOLD nếu vật tư có chỉ
+    tiêu bắt buộc) rồi tạo đề nghị này — CHƯA chuyển vị trí lô, chỉ khi Thủ kho phân xưởng duyệt
+    mới thật sự sang Kho phân xưởng (xem approve_sang_ngang)."""
+    payload = dict(payload)
+    payload["location"] = "Kho công ty"
+    receipt = receive(db, payload, user)
+    req = SangNgangRequest(request_id=new_id(), request_code=f"SNG-{utcnow():%Y%m%d}-{new_id()[:5].upper()}",
+                          lot_id=receipt["lot_id"], quantity=float(payload["quantity"]),
+                          uom=payload.get("uom", "kg"), reason=payload.get("reason"),
+                          status="pending", created_by=user.username, created_at=utcnow())
+    db.add(req)
+    record_audit(db, entity_type="sang_ngang_request", entity_id=req.request_id, action="create",
+                actor=user, after={"lot_id": receipt["lot_id"], "quantity": payload["quantity"]})
+    db.commit()
+    db.refresh(req)
+    return _sang_ngang_dict(req)
+
+
+def list_sang_ngang_requests(db: Session, status: str = None, limit: int = 500,
+                             offset: int = 0) -> list[dict]:
+    limit = max(1, min(limit or 500, 2000))
+    offset = max(0, offset or 0)
+    stmt = select(SangNgangRequest).order_by(SangNgangRequest.created_at.desc()).limit(limit).offset(offset)
+    if status:
+        stmt = stmt.where(SangNgangRequest.status == status)
+    rows = db.execute(stmt).scalars().all()
+    return [_sang_ngang_dict(r) for r in rows]
+
+
+def approve_sang_ngang(db: Session, request_id: str, user: User) -> dict:
+    """Thủ kho phân xưởng duyệt — lúc này MỚI thật sự chuyển lô (giảm tồn Kho công ty, tăng tồn
+    Kho phân xưởng) qua transfer(). Chốt bằng _assert_location_scope("Kho phân xưởng") để người
+    tạo đề nghị (Kho công ty) KHÔNG tự duyệt được đề nghị của chính mình (maker-checker). Nếu vật
+    tư có chỉ tiêu chất lượng bắt buộc và lô vẫn đang HOLD (chưa qua KCS), chặn duyệt."""
+    require_perm(user, "warehouse.request")
+    _assert_location_scope(user, "Kho phân xưởng")
+    req = _get_sang_ngang(db, request_id)
+    if req.status != "pending":
+        raise DomainError(f"Đề nghị {req.request_code} đã được xử lý (trạng thái: {req.status}).")
+    lot = _lot(db, req.lot_id)
+    if _is_workshop_location(lot.location):
+        raise DomainError(f"Lô {lot.lot_code} hiện không còn ở Kho công ty — có thể đã được "
+                          "xử lý bởi thao tác khác.")
+    if lot.status == LotStatus.ON_HOLD.value:
+        raise DomainError(f"Lô {lot.lot_code} đang chờ KCS khai báo/duyệt chỉ tiêu chất lượng — "
+                          "chưa thể nhận vào Kho phân xưởng.")
+    result = _transfer_lot(db, req.lot_id, req.quantity, "Kho phân xưởng", user, reason=req.reason,
+                           mode="sang_ngang")
+    req.movement_id = result["movement_id"]
+    req.status = "approved"
+    req.approved_by = user.username
+    req.approved_at = utcnow()
+    req.reversed = False
+    record_audit(db, entity_type="sang_ngang_request", entity_id=req.request_id, action="approve", actor=user)
+    db.commit()
+    db.refresh(req)
+    return _sang_ngang_dict(req)
+
+
+def reject_sang_ngang(db: Session, request_id: str, user: User, reason: str = None) -> dict:
+    require_perm(user, "warehouse.request")
+    _assert_location_scope(user, "Kho phân xưởng")
+    req = _get_sang_ngang(db, request_id)
+    if req.status != "pending":
+        raise DomainError(f"Đề nghị {req.request_code} đã được xử lý (trạng thái: {req.status}).")
+    req.status = "rejected"
+    req.rejected_by = user.username
+    req.rejected_at = utcnow()
+    req.reject_reason = reason
+    record_audit(db, entity_type="sang_ngang_request", entity_id=req.request_id, action="reject",
+                actor=user, after={"reason": reason})
+    db.commit()
+    db.refresh(req)
+    return _sang_ngang_dict(req)
+
+
+def undo_sang_ngang(db: Session, request_id: str, user: User) -> dict:
+    """Hoàn tác đề nghị ĐÃ duyệt — trả lô về lại Kho công ty VÀ đưa phiếu về lại "pending" để
+    thủ kho phân xưởng xử lý lại — CHỈ ADMIN (mirror undo_transfer_px_request)."""
+    req = _get_sang_ngang(db, request_id)
+    if req.status != "approved":
+        raise DomainError(f"Chỉ hoàn tác được đề nghị đã duyệt (trạng thái hiện tại: {req.status}).")
+    require_role(user, Role.ADMIN)
+    mv = db.get(StockMovement, req.movement_id) if req.movement_id else None
+    lot_id_to_revert = mv.lot_id if mv else req.lot_id
+    _transfer_lot(db, lot_id_to_revert, req.quantity, "Kho công ty", user,
+                 reason=f"Hoàn tác xuất sang ngang {req.request_code}", mode="sang_ngang")
+    req.status = "pending"
+    req.approved_by = None
+    req.approved_at = None
+    req.movement_id = None
+    req.reversed = True
+    record_audit(db, entity_type="sang_ngang_request", entity_id=req.request_id, action="undo", actor=user)
+    db.commit()
+    db.refresh(req)
+    return _sang_ngang_dict(req)
 
 
 def return_to_supplier(db: Session, lot_id: str, quantity: float, user: User, reason: str) -> dict:

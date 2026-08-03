@@ -495,6 +495,12 @@ def delete_material(material_id: str, db: Session = Depends(get_db),
     master_data.delete_material(db, material_id, user)
 
 
+# ---- Danh sách material_id có chỉ tiêu bắt buộc (ẩn nút "Xem chỉ tiêu" cho NVL không cần) ----
+@router.get("/materials/qc-required")
+def materials_with_required_qc(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    return qc_catalog.materials_with_required_qc(db)
+
+
 # ---- Gán nhóm chỉ tiêu chất lượng cho nguyên liệu ----
 @router.get("/materials/{material_id}/qc-groups")
 def list_material_qc_groups(material_id: str, db: Session = Depends(get_db),

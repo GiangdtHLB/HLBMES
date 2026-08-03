@@ -1,5 +1,7 @@
 """Kho NVL nhà máy."""
 
+from datetime import datetime
+
 from fastapi import APIRouter, Depends, File, Form, UploadFile
 from sqlalchemy.orm import Session
 
@@ -18,6 +20,8 @@ from ..schemas import (
     RequestRejectIn,
     ReturnIn,
     ReturnToSupplierIn,
+    SangNgangRejectIn,
+    SangNgangRequestOut,
     SourceMaterialLineOut,
     StockCountCreateIn,
     StockCountLinesIn,
@@ -93,8 +97,9 @@ def expiry(warn_days: int = 30, db: Session = Depends(get_db)):
 
 
 @router.get("/report")
-def report(days: int = 30, location: str = None, db: Session = Depends(get_db)):
-    return svc.inventory_report(db, days, location)
+def report(days: int = 30, location: str = None, date_from: datetime = None,
+          date_to: datetime = None, db: Session = Depends(get_db)):
+    return svc.inventory_report(db, days, location, date_from, date_to)
 
 
 # ---- Đề nghị nhận kho ----
@@ -176,6 +181,38 @@ def reject_transfer_px_request(request_id: str, payload: TransferPxRejectIn, db:
 def undo_transfer_px_request(request_id: str, db: Session = Depends(get_db),
                              user: User = Depends(get_current_user)):
     return svc.undo_transfer_px_request(db, request_id, user)
+
+
+# ---- Xuất sang ngang: hàng cập Kho công ty nhưng đích thực sự là Kho phân xưởng ----
+@router.post("/sang-ngang", response_model=SangNgangRequestOut, status_code=201)
+def create_sang_ngang(payload: ReceiptIn, db: Session = Depends(get_db),
+                      user: User = Depends(get_current_user)):
+    require_perm(user, "warehouse.receive")
+    return svc.create_sang_ngang(db, payload.model_dump(), user)
+
+
+@router.get("/sang-ngang", response_model=list[SangNgangRequestOut])
+def list_sang_ngang(status: str = None, limit: int = 500, offset: int = 0,
+                    db: Session = Depends(get_db)):
+    return svc.list_sang_ngang_requests(db, status, limit, offset)
+
+
+@router.post("/sang-ngang/{request_id}/approve", response_model=SangNgangRequestOut)
+def approve_sang_ngang(request_id: str, db: Session = Depends(get_db),
+                       user: User = Depends(get_current_user)):
+    return svc.approve_sang_ngang(db, request_id, user)
+
+
+@router.post("/sang-ngang/{request_id}/reject", response_model=SangNgangRequestOut)
+def reject_sang_ngang(request_id: str, payload: SangNgangRejectIn, db: Session = Depends(get_db),
+                      user: User = Depends(get_current_user)):
+    return svc.reject_sang_ngang(db, request_id, user, payload.reason)
+
+
+@router.post("/sang-ngang/{request_id}/undo", response_model=SangNgangRequestOut)
+def undo_sang_ngang(request_id: str, db: Session = Depends(get_db),
+                    user: User = Depends(get_current_user)):
+    return svc.undo_sang_ngang(db, request_id, user)
 
 
 # ---- Điều chuyển kho công ty, chiều 2: Kho công ty → Nhà máy khác (xuất ngay, duyệt sau) ----

@@ -13,7 +13,7 @@ from ..models.brewing import BottleRecord, BrewBatch, BrewRecord, FermentRecord,
 from ..models.lines import ProductionLine
 from ..models.master import FinishedProduct, Material
 from ..models.materials import MaterialLot
-from ..models.quality import Deviation
+from ..models.quality import Deviation, QualityResult
 from ..models.quality_ext import QCParameter
 from . import brew_order as brew_order_svc
 from . import derived
@@ -201,6 +201,29 @@ def qc_attention_alerts(db: Session) -> dict:
         items[key]["reasons"].append("deviation")
         items[key]["deviation_count"] = dev_counts[key]
         items[key]["opened_at"] = dev_earliest[key]
+
+    # Lô NVL đã được duyệt (RELEASED) dù còn chỉ tiêu FAIL — từ 2026-08-01 duyệt NVL không còn
+    # bị chặn bởi FAIL (xem quality.py::_assert_releasable) nên các lô này rời khỏi on_hold, và
+    # NVL không dùng luồng deviation (xem comment ở _assert_releasable) nên cũng không có Deviation
+    # mở kèm theo — 2 khối trên vì vậy bỏ sót các lô này dù vẫn còn chỉ tiêu FAIL cần chú ý.
+    fail_lot_ids = db.execute(
+        select(QualityResult.scope_id).where(QualityResult.scope_type == "lot").distinct()
+    ).scalars().all()
+    for lot_id in fail_lot_ids:
+        key = f"lot:{lot_id}"
+        if key in items:
+            continue
+        lot = db.get(MaterialLot, lot_id)
+        if not lot or lot.quantity <= 0:
+            continue
+        latest_by_param = quality_svc.latest_results_by_param(db, "lot", lot_id)
+        if not any(r.status == ResultStatus.FAIL.value for r in latest_by_param.values()):
+            continue
+        items[key] = {"scope_type": "lot", "scope_id": lot_id, "lot_code": lot.lot_code,
+                      "scope_code": lot.lot_code, "scope_label": _scope_label("lot", lot.lot_code, lot_id),
+                      "material_code": mat_by_id[lot.material_id].code if lot.material_id in mat_by_id else None,
+                      "quantity": lot.quantity, "uom": lot.uom, "parent_label": None,
+                      "reasons": ["qc_fail"], "deviation_count": 0, "opened_at": None}
 
     param_name_by_code = {p.code: p.name for p in db.execute(select(QCParameter)).scalars().all()}
     for key, item in items.items():
