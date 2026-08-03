@@ -587,8 +587,9 @@ VIEWS.dashboard = async function () {
   // (parent_label từ BE, VD "Lô nấu BR-260801") — kèm TÊN các chỉ tiêu đang fail (fail_params,
   // VD "Độ đục, Plato") thay vì chỉ đếm số lượng ở cột "Chỉ tiêu fail", để biết ngay đang fail gì.
   const miniAlertDetail = (it) => {
+    const matLabel = it.material_name ? `${esc(it.material_code || "")} ${esc(it.material_name)}`.trim() : esc(it.material_code || "—");
     const base = it.scope_type === "lot"
-      ? `${esc(it.material_code || "—")}${it.quantity != null ? ` · ${it.quantity.toLocaleString("vi-VN")} ${esc(it.uom || "")}` : ""}`
+      ? `${matLabel}${it.quantity != null ? ` · ${it.quantity.toLocaleString("vi-VN")} ${esc(it.uom || "")}` : ""}`
       : (it.parent_label ? esc(it.parent_label) : "");
     const failNames = (it.fail_params && it.fail_params.length) ? esc(it.fail_params.join(", ")) : "";
     if (base && failNames) return `${base}<br><span style="color:var(--red)">${failNames}</span>`;
@@ -599,7 +600,7 @@ VIEWS.dashboard = async function () {
     return `
     <div class="panel" style="flex:1;min-width:280px;margin-bottom:0">
       <h2>${icon} ${title} ${items.length ? `<span class="muted">(${items.length})</span>` : ""}</h2>
-      ${items.length ? `<div class="tablewrap" style="max-height:240px;overflow:auto"><table>
+      ${items.length ? `<div class="tablewrap" style="max-height:240px;overflow:auto"><table style="font-size:12px">
         <thead><tr><th>Lô/Phạm vi</th><th>Chi tiết</th><th>${extraCol.label}</th></tr></thead>
         <tbody>${items.map((it, i) => { const kind = key === "hold" ? "hold" : key === "dev" ? "dev" : (it.reasons.includes("on_hold") ? "hold" : "dev");
           return `<tr style="cursor:pointer${i >= MINI_ALERT_LIMIT ? ";display:none" : ""}" class="${i >= MINI_ALERT_LIMIT ? `miniextra-${key}` : ""}" data-goto="quality" data-scope="${esc(it.scope_type)}:${esc(it.scope_id)}" data-scopekind="${kind}" tabindex="0" role="button">
@@ -4289,7 +4290,7 @@ function movementRowHtml(m, matById, showUndo) {
     `<td><button class="btn sm sec" data-undoissue="${esc(m.movement_id)}">Hoàn lại</button></td>`;
   return `<tr>
     <td class="muted">${fmt(m.ts)}</td>
-    <td>${esc(mat ? mat.code : m.material_id || "—")}</td>
+    <td>${mat ? `<code class="k">${esc(mat.code)}</code> ${esc(mat.name)}` : esc(m.material_id || "—")}</td>
     <td class="muted">${esc(m.lot_code || "")}</td>
     <td>${m.quantity} ${esc(m.uom)}</td>
     <td class="muted">${esc(m.location_from || "—")} → ${esc(m.location_to || "—")}</td>
@@ -4391,7 +4392,7 @@ function factoryTransferRowHtml(m) {
     `<td><button class="btn sm sec" data-undoissue="${esc(m.movement_id)}">Hoàn lại</button></td>`;
   return `<tr>
     <td class="muted">${fmt(m.ts)}</td>
-    <td>${esc(mat ? mat.code : m.material_id || "—")}</td>
+    <td>${mat ? `<code class="k">${esc(mat.code)}</code> ${esc(mat.name)}` : esc(m.material_id || "—")}</td>
     <td class="muted">${esc(m.lot_code || "")}</td>
     <td>${m.quantity} ${esc(m.uom)}</td>
     <td class="muted">${esc(factory ? factory.name : m.destination_factory_id || "—")}</td>

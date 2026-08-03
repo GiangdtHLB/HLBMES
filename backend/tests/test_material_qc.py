@@ -181,6 +181,48 @@ def test_release_lot_allowed_even_with_fail_result(client, admin_h, thukho_h, kc
     assert rel_ok.json()["quality_status"] == "released"
 
 
+def test_delete_receipt_row_blocked_by_qc_or_usage(client, admin_h, thukho_h):
+    """Nút "Xóa" từng dòng trong lịch sử Nhập kho (DELETE /warehouse/movements/{id}) — chỉ
+    xóa được khi lô CHƯA có chỉ tiêu chất lượng nào khai báo (QualityResult) VÀ chưa bị dùng
+    (xuất/chuyển). Khác với "Xóa lịch sử" (bulk), nút này thật sự hủy lô nếu đủ điều kiện."""
+    mat_id = _create_material(client, admin_h, "DELRC-QC")
+
+    # Case 1: chưa khai báo QC, chưa dùng -> xóa OK, lô bị xóa luôn (lượt receipt duy nhất).
+    rc1 = client.post("/api/warehouse/receive", headers=thukho_h,
+                      json={"lot_code": "LOT-DELRC-01", "material_id": mat_id, "quantity": 100, "uom": "kg"})
+    assert rc1.status_code == 200, rc1.text
+    lot1 = rc1.json()["lot_id"]
+    mv1 = next(m for m in client.get("/api/warehouse/movements?movement_type=receipt",
+                                     headers=thukho_h).json() if m["lot_id"] == lot1)
+    del1 = client.delete(f"/api/warehouse/movements/{mv1['movement_id']}", headers=thukho_h)
+    assert del1.status_code == 200, del1.text
+    assert del1.json()["lot_deleted"] is True
+
+    # Case 2: đã khai báo 1 chỉ tiêu (dù chưa duyệt, dù chưa dùng) -> chặn xóa.
+    rc2 = client.post("/api/warehouse/receive", headers=thukho_h,
+                      json={"lot_code": "LOT-DELRC-02", "material_id": mat_id, "quantity": 100, "uom": "kg"})
+    lot2 = rc2.json()["lot_id"]
+    rec = client.post("/api/quality/results", headers=thukho_h,
+                      json={"scope_type": "lot", "scope_id": lot2, "parameter": "ANY_PARAM", "value": 1})
+    assert rec.status_code == 201, rec.text
+    mv2 = next(m for m in client.get("/api/warehouse/movements?movement_type=receipt",
+                                     headers=thukho_h).json() if m["lot_id"] == lot2)
+    del2 = client.delete(f"/api/warehouse/movements/{mv2['movement_id']}", headers=thukho_h)
+    assert del2.status_code == 409, del2.text
+
+    # Case 3: chưa khai báo QC nhưng đã dùng (transfer) -> vẫn chặn xóa như trước.
+    rc3 = client.post("/api/warehouse/receive", headers=thukho_h,
+                      json={"lot_code": "LOT-DELRC-03", "material_id": mat_id, "quantity": 100, "uom": "kg"})
+    lot3 = rc3.json()["lot_id"]
+    xfer = client.post("/api/warehouse/transfer", headers=thukho_h,
+                       json={"lot_id": lot3, "quantity": 100, "location_to": "Kho phân xưởng"})
+    assert xfer.status_code == 200, xfer.text
+    mv3 = next(m for m in client.get("/api/warehouse/movements?movement_type=receipt",
+                                     headers=thukho_h).json() if m["lot_id"] == lot3)
+    del3 = client.delete(f"/api/warehouse/movements/{mv3['movement_id']}", headers=thukho_h)
+    assert del3.status_code == 409, del3.text
+
+
 def test_material_request_permission_required(client, thukho_h):
     # thủ kho không có quyền warehouse.request → không tạo được đề nghị.
     r = client.post("/api/warehouse/requests", headers=thukho_h,
