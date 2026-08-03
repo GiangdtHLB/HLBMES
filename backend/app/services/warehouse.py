@@ -204,6 +204,7 @@ def delete_receipt(db: Session, movement_id: str, user: User) -> dict:
     record_audit(db, entity_type="stock_movement", entity_id=mv.movement_id, action="delete_receipt",
                  actor=user, before={"quantity": mv.quantity, "lot_code": lot.lot_code})
     db.delete(mv)
+    db.flush()  # MSSQL enforce FK: xóa stock_movement (con) TRƯỚC material_lot (cha) — autoflush=False
     lot_deleted = False
     if remaining_receipts == 0:
         db.delete(lot)

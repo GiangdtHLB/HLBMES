@@ -4,7 +4,7 @@ dashboard lấy trực tiếp từ báo cáo SCADA thật (services/filling_exte
 keg_external.py) — không tính lại ở đây."""
 from datetime import timedelta
 
-from sqlalchemy import select
+from sqlalchemy import false, select
 from sqlalchemy.orm import Session
 
 from ..common import DeviationState, LotStatus, QualityStatus, ResultStatus, utcnow
@@ -270,7 +270,7 @@ def bottled_not_approved_report(db: Session) -> dict:
     lọc riêng cho khoảng trống này nên dễ bị bỏ sót, hàng chiết xong nằm chờ vô thời hạn mà
     không ai để ý."""
     rows = db.execute(select(BottleRecord).where(
-        BottleRecord.ended_at.isnot(None), BottleRecord.approved.is_(False)
+        BottleRecord.ended_at.isnot(None), BottleRecord.approved == false()
     ).order_by(BottleRecord.ended_at)).scalars().all()
     products = {p.finished_product_id: p for p in db.execute(select(FinishedProduct)).scalars().all()}
     now = utcnow()
