@@ -10,7 +10,7 @@ from sqlalchemy import select, true
 from sqlalchemy.orm import Session
 
 from ..audit import record_audit
-from ..common import new_id, utcnow
+from ..common import ResultStatus, new_id, utcnow
 from ..errors import DomainError, NotFoundError
 from ..models.brewing import BottleRecord, BrewBatch, BrewRecord, FermentRecord, FilterRecord
 from ..models.master import BeerType, Material, MaterialGroup
@@ -278,14 +278,41 @@ def required_params_for_material(db: Session, material_id: str, mandatory_only: 
     return out
 
 
+def materials_with_required_qc(db: Session) -> list[str]:
+    """material_id nào có >=1 chỉ tiêu bắt buộc (dùng để ẩn nút "Xem chỉ tiêu" ở các bảng
+    danh sách lô cho nguyên liệu không gán nhóm chỉ tiêu nào — tránh N+1 gọi qc-status/lô)."""
+    rows = db.execute(
+        select(MaterialQcGroup.material_id)
+        .join(QCParameterGroupItem, QCParameterGroupItem.group_id == MaterialQcGroup.group_id)
+        .join(QCParameter, QCParameter.param_id == QCParameterGroupItem.param_id)
+        .where(MaterialQcGroup.active == true(), QCParameterGroupItem.mandatory == true(),
+               QCParameter.active == true())
+        .distinct()
+    ).scalars().all()
+    return list(rows)
+
+
 def lot_qc_status(db: Session, lot: MaterialLot) -> dict:
     """Trạng thái khai báo/duyệt chỉ tiêu chất lượng của một lô NVL."""
     required = required_params_for_material(db, lot.material_id, mandatory_only=True)
     recorded = db.execute(
         select(QualityResult).where(QualityResult.scope_type == "lot", QualityResult.scope_id == lot.lot_id)
+        .order_by(QualityResult.recorded_at)
     ).scalars().all()
-    recorded_codes = {r.parameter for r in recorded}
-    pending = [p["code"] for p in required if p["code"] not in recorded_codes]
+    # Bản ghi MỚI NHẤT theo từng chỉ tiêu (ORDER BY recorded_at ASC rồi ghi đè tại chỗ — dict
+    # giữ giá trị của lần lặp SAU CÙNG) — nhất quán với cách frontend (openLotQcModal) dùng
+    # Object.fromEntries trên cùng mảng `recorded` để tính "giá trị hiện tại" của mỗi chỉ tiêu.
+    latest_by_param = {}
+    for r in recorded:
+        latest_by_param[r.parameter] = r
+    # "Đã khai báo" (không còn pending, đủ điều kiện release) phải có KẾT QUẢ THỰC (pass/fail)
+    # — bản ghi chỉ có CA nhưng chưa từng đo giá trị thật (status=pending, value=None; xem
+    # openLotQcModal cho phép lưu riêng CA không cần đo lại NẾU chỉ tiêu đó đã có giá trị đo
+    # từ trước) KHÔNG được tính là đã khai báo, tránh cho duyệt lô khi chỉ tiêu bắt buộc chưa
+    # từng có giá trị đo thực tế nào.
+    pending = [p["code"] for p in required
+              if latest_by_param.get(p["code"]) is None
+              or latest_by_param[p["code"]].status == ResultStatus.PENDING.value]
     # Nhóm vật tư đánh dấu is_raw_material -> modal khai báo (openLotQcModal) hiện thêm cột
     # "Giá trị CA" (giá trị in trên bao bì NCC, khác giá trị nhà máy tự đo) — chỉ áp dụng cho
     # nguyên liệu chính/phụ, không áp dụng bao bì/vật tư khác.

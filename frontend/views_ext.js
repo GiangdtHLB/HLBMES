@@ -1531,7 +1531,7 @@
 
       function renderLots() {
         const rows = filteredLotRows();
-        $("xk_lots").innerHTML = rows.length ? `<div class="tablewrap" style="margin-top:10px"><table>
+        $("xk_lots").innerHTML = rows.length ? `<div class="tablewrap" style="margin-top:10px"><table id="t_xk_lots">
           <thead><tr><th>Sản phẩm</th><th>Lô</th><th>Mã chiết</th><th>Loại</th><th>Tồn</th><th>Vị trí kho</th><th>FIFO</th><th>SL cần xuất</th><th>Loại xuất</th><th>Bia gửi</th><th>Cận date</th><th></th></tr></thead>
           <tbody>${rows.map((r, i) => { const sellable = sellableOf(r); const neAvailable = (r.near_expiry_count || 0) > 0;
             const neFull = neAvailable && r.count === r.near_expiry_count;
@@ -1552,6 +1552,7 @@
               ${neFull ? '<span class="badge on_hold">🕒 Cận date</span>' : `<input type="checkbox" data-xk-ne="${i}" ${neAvailable ? "" : "disabled"}/>`}</td>
             <td><button class="btn sm" data-xk-add="${i}">+ Thêm</button></td></tr>`; }).join("")}</tbody></table></div>`
           : `<div class="muted" style="margin-top:10px">Không còn lô nào tồn kho khớp bộ lọc.</div>`;
+        wirePaginate("t_xk_lots", 10);
         rows.forEach((r, i) => {
           const btn = document.querySelector(`[data-xk-add="${i}"]`);
           if (!btn) return;
@@ -1777,7 +1778,7 @@
         dcGroups = groups.map(g => ({ product: g.product_name, lot_code: g.lot_code, unit_type: g.unit_type, count: g.count }))
           .sort((a, b) => (a.lot_code || "").localeCompare(b.lot_code || ""));
         $("dc_pick").innerHTML = `
-          <div class="tablewrap" style="margin-top:6px"><table>
+          <div class="tablewrap" style="margin-top:6px"><table id="t_dc_pick">
           <thead><tr><th></th><th>SP</th><th>Lô</th><th>Loại</th><th>Tổng SL</th><th>SL chuyển</th></tr></thead>
           <tbody>${dcGroups.map((g, i) => `<tr data-dcgroup="${i}">
             <td><input class="dc_pick" type="checkbox"/></td>
@@ -1786,6 +1787,7 @@
             <td><input class="dc_qty" type="number" min="1" max="${g.count}" value="${g.count}" style="width:80px"/></td></tr>`).join("") ||
             '<tr><td colspan=6 class="muted">Vị trí này không có vỉ/keg/lon nào đang tồn.</td></tr>'}</tbody></table></div>
           <div class="row" style="margin-top:10px"><button class="btn" id="dc_submit">Điều chuyển</button></div>`;
+        wirePaginate("t_dc_pick", 10);
         if (!dcGroups.length) return;
         $("dc_submit").onclick = () => guard(async () => {
           const toId = $("dc_to").value;
@@ -1838,7 +1840,7 @@
         });
       });
       $("cv_pick").innerHTML = cvRows.length ? `
-        <div class="tablewrap" style="margin-top:6px"><table>
+        <div class="tablewrap" style="margin-top:6px"><table id="t_cv_pick">
         <thead><tr><th></th><th>SP</th><th>Lô</th><th>Loại</th><th>Thời gian chiết</th><th>Dây chuyền</th><th>Chưa cất</th><th>SL cần cất</th></tr></thead>
         <tbody>${cvRows.map((g, i) => `<tr data-cvgroup="${i}">
           <td><input class="cv_pick" type="checkbox"/></td>
@@ -1850,6 +1852,7 @@
           <td><input class="cv_qty" type="number" min="1" max="${g.unplaced}" value="${g.unplaced}" style="width:80px"/></td></tr>`).join("")}</tbody></table></div>
         <div class="row" style="margin-top:10px"><button class="btn" id="cv_submit">Cất</button></div>`
         : `<div class="muted">Không còn vỉ/keg/lon nào chưa cất vị trí.</div>`;
+      wirePaginate("t_cv_pick", 10);
       if ($("cv_submit")) {
         $("cv_submit").onclick = () => guard(async () => {
           const toId = $("cv_to").value;

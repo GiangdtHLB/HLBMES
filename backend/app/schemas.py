@@ -1046,6 +1046,29 @@ class TransferPxRequestOut(ORMModel):
     reject_reason: Optional[str] = None
 
 
+class SangNgangRejectIn(BaseModel):
+    reason: Optional[str] = None
+
+
+class SangNgangRequestOut(ORMModel):
+    request_id: str
+    request_code: str
+    lot_id: str
+    quantity: float
+    uom: str
+    reason: Optional[str] = None
+    status: str
+    movement_id: Optional[str] = None
+    reversed: bool
+    created_by: Optional[str] = None
+    created_at: datetime
+    approved_by: Optional[str] = None
+    approved_at: Optional[datetime] = None
+    rejected_by: Optional[str] = None
+    rejected_at: Optional[datetime] = None
+    reject_reason: Optional[str] = None
+
+
 class TransferToFactoryIn(BaseModel):
     lot_id: str
     quantity: float

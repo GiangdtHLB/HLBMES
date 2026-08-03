@@ -3348,7 +3348,7 @@ VIEWS.warehouse_kc = async function () {
       <div class="row" style="margin-bottom:8px"><div class="field"><label>Kho</label>${tonLocSelectHtml("ton_loc", tonLoc)}</div></div>
       ${lowCount ? `<div class="muted" style="color:var(--red);margin-bottom:8px">⚠ ${lowCount} vật tư đang dưới tồn tối thiểu.</div>` : ""}
       <input class="searchbox" data-tbl="t_ton" placeholder="Tìm mã/tên vật tư..." style="margin-bottom:8px"/>
-      <div class="tablewrap"><table id="t_ton"><thead><tr><th>Mã VT</th><th>Tên</th><th>Nhóm</th><th>Mã lô</th><th>Tồn</th><th>ĐVT</th><th>Tồn tối thiểu</th></tr></thead>
+      <div class="tablewrap"><table id="t_ton"><thead><tr><th>Mã VT</th><th>Tên</th><th>Nhóm</th><th>Mã lô</th><th>Tổng tồn thực tế</th><th>Đang chờ QC</th><th>Tồn khả dụng</th><th>ĐVT</th><th>Tồn tối thiểu</th></tr></thead>
       <tbody>${stock.map(s => { const matLots = (lotsByMaterial[s.material_id] || [])
           .sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
         const shown = matLots.slice(0, LOT_CELL_MAX);
@@ -3358,15 +3358,20 @@ VIEWS.warehouse_kc = async function () {
         return `<tr${s.low_stock ? ' style="background:color-mix(in srgb, var(--red) 10%, transparent)"' : ""}><td><code class="k">${esc(s.material_code)}</code></td><td>${esc(s.material_name)}</td>
         <td class="muted">${esc(s.category || "")}</td>
         <td class="muted">${lotCell || "—"}</td>
+        <td>${s.actual_total}</td>
+        <td class="muted">${s.pending_qc > 0 ? s.pending_qc : "—"}</td>
         <td>${s.on_hand}${s.low_stock ? ' <span style="color:var(--red)" title="Dưới tồn tối thiểu">⚠</span>' : ""}</td><td>${s.uom}</td>
         <td class="muted">${s.stock_min ?? "—"}</td></tr>`; }).join("") ||
-        '<tr><td colspan=7 class="muted">Không có tồn kho.</td></tr>'}</tbody></table></div></div>`;
+        '<tr><td colspan=9 class="muted">Không có tồn kho.</td></tr>'}</tbody></table></div></div>`;
   } else if (sec === "the") {
     const mats = await GET("/materials");
-    const opts = mats.map(m => `<option value="${m.material_id}">${esc(m.code)} — ${esc(m.name)}</option>`).join("");
+    const wcItems = mats.map(m => ({ value: m.material_id, label: `${m.code} — ${m.name}`, uom: m.uom }));
+    WH_CACHE.matItemsThe = wcItems;
     body = `<div class="panel"><h2>Thẻ kho</h2>
-      <div class="row"><div class="field"><label>Vật tư</label><select id="wc_mat">${opts}</select></div>
-        <button class="btn" id="wc_load">Xem thẻ</button></div>
+      <div class="row"><div class="field" style="position:relative"><label>Vật tư</label>
+          <input type="text" id="wc_mat_txt" autocomplete="off" placeholder="Tìm mã/tên nguyên liệu..." value="${esc(wcItems[0]?.label || "")}"/>
+          <input type="hidden" id="wc_mat" value="${esc(wcItems[0]?.value || "")}"/></div>
+        <button class="btn" id="wc_load" style="align-self:flex-end">Xem thẻ</button></div>
       <div id="wc_table"><div class="muted">Chọn vật tư.</div></div></div>`;
   } else if (sec === "han") {
     const exp = await GET("/warehouse/expiry");
@@ -3376,20 +3381,37 @@ VIEWS.warehouse_kc = async function () {
         <td><code class="k">${esc(e.lot_code)}</code></td><td>${e.quantity} ${e.uom}</td>
         <td class="muted">${fmt(e.expiry)}</td><td>${e.days_left}</td><td>${badge(e.status)}</td><td class="muted">${esc(e.location || "")}</td></tr>`).join("") || '<tr><td colspan=7 class="muted">Không có lô có hạn dùng.</td></tr>'}</tbody></table></div>`;
   } else if (sec === "bc") {
-    const rep = await GET("/warehouse/report?days=60&location=" + encodeURIComponent("Kho công ty"));
-    body = `<div class="panel"><h2>Báo cáo nhập-xuất-tồn (60 ngày) — Kho công ty</h2>
-      <table><thead><tr><th>Mã VT</th><th>Tên</th><th>Nhập</th><th>Xuất</th><th>Tồn cuối</th><th>ĐVT</th></tr></thead>
+    // Mặc định khung 60 ngày gần nhất, cho chọn lại từ-đến ngày — persist lựa chọn trong SUB
+    // giống các báo cáo khác (mirror sec === "netship" ở VIEWS.reports).
+    const bcToday = new Date();
+    const bcFrom60 = new Date(bcToday); bcFrom60.setDate(bcFrom60.getDate() - 60);
+    const bcDateFrom = SUB.bc_date_from || toISODateLocal(bcFrom60);
+    const bcDateTo = SUB.bc_date_to || toISODateLocal(bcToday);
+    SUB.bc_date_from = bcDateFrom; SUB.bc_date_to = bcDateTo;
+    const bcStart = new Date(bcDateFrom + "T00:00:00");
+    const bcEnd = new Date(bcDateTo + "T00:00:00"); bcEnd.setDate(bcEnd.getDate() + 1);
+    const bcQ = `date_from=${encodeURIComponent(toDTLocal(bcStart))}&date_to=${encodeURIComponent(toDTLocal(bcEnd))}&location=${encodeURIComponent("Kho công ty")}`;
+    const rep = await GET(`/warehouse/report?${bcQ}`);
+    body = `<div class="panel"><h2>Báo cáo nhập-xuất-tồn — Kho công ty <span class="muted">(${esc(bcDateFrom)} → ${esc(bcDateTo)})</span></h2>
+      <div class="row">
+        <div class="field"><label>Từ ngày</label><input id="bc_from" type="date" value="${bcDateFrom}"/></div>
+        <div class="field"><label>Đến ngày</label><input id="bc_to" type="date" value="${bcDateTo}"/></div>
+        <button class="btn" id="bc_apply" style="align-self:flex-end">Xem báo cáo</button>
+      </div>
+      <input class="searchbox" data-tbl="t_bcrep" placeholder="Tìm theo mã/tên vật tư..."/>
+      <div class="tablewrap"><table id="t_bcrep"><thead><tr><th>Mã VT</th><th>Tên</th><th>Nhập</th><th>Xuất</th><th>Tồn cuối</th><th>ĐVT</th></tr></thead>
       <tbody>${rep.map(r => `<tr><td><code class="k">${esc(r.material_code)}</code></td><td>${esc(r.material_name)}</td>
         <td style="color:var(--green)">${r.received}</td><td style="color:var(--orange)">${r.issued}</td>
-        <td>${r.on_hand}</td><td>${r.uom}</td></tr>`).join("") || '<tr><td colspan=6 class="muted">Không có dữ liệu.</td></tr>'}</tbody></table></div>`;
+        <td>${r.on_hand}</td><td>${r.uom}</td></tr>`).join("") || '<tr><td colspan=6 class="muted">Không có dữ liệu.</td></tr>'}</tbody></table></div></div>`;
   } else if (sec === "giao") {
-    const [lotsAvail, mats, allLots, allRequestsFull, freeIssues, pxRequests, factoryLocationsGiao, factoryTransfers, supplierReturns, suppliers, receipts] = await Promise.all([
+    const [lotsAvail, mats, allLots, allRequestsFull, freeIssues, pxRequests, factoryLocationsGiao, factoryTransfers, supplierReturns, suppliers, receipts, sangNgangRequests, qcReqIdsGiao] = await Promise.all([
       lotOptions(null, false), GET("/materials"), GET("/lots"), GET("/warehouse/requests"),
       GET("/warehouse/movements?movement_type=issue&mode=tu_do"),
       GET("/warehouse/transfer-px-requests"), GET("/factory-locations").catch(() => []),
       GET("/warehouse/movements?movement_type=issue&mode=dieu_chuyen_nha_may"),
       GET("/warehouse/movements?movement_type=issue&mode=tra_ncc"),
       GET("/suppliers"), GET("/warehouse/movements?movement_type=receipt"),
+      GET("/warehouse/sang-ngang"), GET("/materials/qc-required"),
     ]);
     // Giống hệt cách "Đề nghị nhận kho" tách pending/done: 1 phiếu còn dòng pending nào thì vẫn
     // nằm ở khối "đang chờ" (dù có dòng đã xuất khác) — chỉ rơi xuống "Sổ xuất theo đề nghị" khi
@@ -3415,6 +3437,10 @@ VIEWS.warehouse_kc = async function () {
     const activeFactoryOpts = factoryLocationsGiao.filter(f => f.active)
       .map(f => `<option value="${f.factory_id}">${esc(f.code)} — ${esc(f.name)}</option>`).join("") ||
       `<option value="">(chưa có nhà máy nào trong danh mục)</option>`;
+    const qcReqSetGiao = new Set(qcReqIdsGiao);
+    const sngPending = sangNgangRequests.filter(r => r.status === "pending").sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+    const sngDone = sangNgangRequests.filter(r => r.status !== "pending").sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+    const canCreateSangNgang = _hasPerm("warehouse.receive");
     // Mỗi lần vào lại tab "giao" (kể cả sau 1 thao tác) là 1 lượt xem mới — reset về trang đầu
     // (10 dòng) cho gọn; dữ liệu mới nhất (nếu vừa thao tác) luôn nằm trong 10 dòng đầu.
     WH_CACHE.matById = matByIdGiao;
@@ -3475,6 +3501,37 @@ VIEWS.warehouse_kc = async function () {
         <div class="tablewrap" style="margin-top:6px"><table id="rc_hist">
           <thead><tr><th>Ngày nhập</th><th>Mã lô</th><th>Số lô KCS</th><th>Nguyên liệu</th><th>Số lượng</th><th>Nhà cung cấp</th><th>Diễn giải</th><th>Người nhập</th><th></th></tr></thead>
           <tbody>${receiptRows}</tbody>
+        </table></div>
+      </div>
+
+      <div class="panel"><h2>Xuất sang ngang <span class="muted">(${sngPending.length} đang chờ phân xưởng duyệt)</span></h2>
+        <div class="muted" style="margin-bottom:6px">Vật tư về thẳng kho phân xưởng nhưng khai báo Ở ĐÂY — hệ thống vẫn ghi tăng tồn
+          Kho công ty (như Nhập kho thường) rồi tạo đề nghị xuất ngay sang Kho phân xưởng. Thủ kho phân xưởng duyệt (tab Kho phân xưởng
+          → Xuất sang ngang) thì lô mới thật sự chuyển. Nếu vật tư có chỉ tiêu chất lượng bắt buộc, phải qua KCS duyệt trước khi phân
+          xưởng duyệt được.</div>
+        ${canCreateSangNgang
+          ? `<div class="row"><div class="field" style="position:relative"><label>Nguyên liệu</label>
+            <input type="text" id="sng_mat_txt" autocomplete="off" placeholder="Tìm mã/tên nguyên liệu..." value="${esc(matItemsGiao[0]?.label || "")}"/>
+            <input type="hidden" id="sng_mat" value="${esc(matItemsGiao[0]?.value || "")}"/></div>
+          <div class="field"><label>Nhà CC</label><select id="sng_supplier">${supplierOpts}</select></div></div>
+        <div class="row"><div class="field"><label>Số lượng</label><input id="sng_qty" type="number" value="500"/></div>
+          <div class="field"><label>ĐVT</label><input id="sng_uom" value="${esc(matItemsGiao[0]?.uom || "")}" size="4" readonly title="Lấy tự động từ danh mục nguyên liệu — không sửa được"/></div>
+          <div class="field"><label>Đơn giá</label><input id="sng_price" type="number" placeholder="(tuỳ chọn)"/></div>
+          <div class="field"><label>Hạn dùng</label><input id="sng_exp" type="date"/></div></div>
+        <div class="row"><div class="field" style="flex:1"><label>Diễn giải</label><input id="sng_note" placeholder="(tuỳ chọn)"/></div>
+          <button class="btn" id="sng_do" style="align-self:flex-end">Xuất sang ngang</button></div>`
+          : '<div class="muted">Bạn không có quyền tạo Xuất sang ngang.</div>'}
+        <h4 style="margin-top:14px">Đang chờ phân xưởng duyệt <span class="muted">(${sngPending.length})</span></h4>
+        <div class="tablewrap"><table>
+          <thead><tr><th>Ngày tạo</th><th>Số đề nghị</th><th>Mã VT</th><th>Tên vật tư</th><th>Lô</th><th>SL</th><th>Trạng thái QC</th></tr></thead>
+          <tbody>${sngPending.map(r => sangNgangKcRowHtml(r, matByIdGiao, lotByIdGiao, qcReqSetGiao)).join("") ||
+            `<tr><td colspan=7 class="muted">Không có đề nghị nào đang chờ.</td></tr>`}</tbody>
+        </table></div>
+        <h4 style="margin-top:14px">Lịch sử đã xử lý <span class="muted">(${sngDone.length})</span></h4>
+        <div class="tablewrap"><table>
+          <thead><tr><th>Ngày tạo</th><th>Số đề nghị</th><th>Mã VT</th><th>Tên vật tư</th><th>Lô</th><th>SL</th><th>Trạng thái</th><th>Người xử lý</th></tr></thead>
+          <tbody>${sngDone.map(r => sangNgangHistoryRowHtml(r, matByIdGiao, lotByIdGiao)).join("") ||
+            `<tr><td colspan=8 class="muted">Chưa có đề nghị nào đã xử lý.</td></tr>`}</tbody>
         </table></div>
       </div>
 
@@ -3570,8 +3627,9 @@ VIEWS.warehouse_kc = async function () {
         </table></div>
       </div></div>`;
   } else if (sec === "kc") {
-    const [allLots, mats] = await Promise.all([GET("/lots"), GET("/materials")]);
+    const [allLots, mats, qcReqIds] = await Promise.all([GET("/lots"), GET("/materials"), GET("/materials/qc-required")]);
     const matById = Object.fromEntries(mats.map(m => [m.material_id, m]));
+    const qcReqSet = new Set(qcReqIds);
     const rows = allLots.filter(l => !/phân xưởng/i.test(l.location || "") && l.quantity > 0)
       .sort((a, b) => new Date(a.created_at) - new Date(b.created_at));   // FIFO: nhập trước hiện trước
     body = `<div class="panel"><h2>Danh sách lô kho công ty <span class="muted">(${rows.length})</span></h2>
@@ -3587,7 +3645,7 @@ VIEWS.warehouse_kc = async function () {
           <td class="muted">${fmt(l.created_at)}</td>
           <td class="muted">${esc(l.location || "")}</td>
           <td>${badge(l.status)}</td>
-          <td><button class="btn sm sec" data-lotqc="${esc(l.lot_id)}">Xem chỉ tiêu</button></td></tr>`).join("") ||
+          <td>${qcReqSet.has(l.material_id) ? `<button class="btn sm sec" data-lotqc="${esc(l.lot_id)}">Xem chỉ tiêu</button>` : ""}</td></tr>`).join("") ||
           `<tr><td colspan=8 class="muted">Chưa có lô nào ở kho công ty.</td></tr>`}</tbody>
       </table></div>
     </div>`;
@@ -3599,17 +3657,46 @@ VIEWS.warehouse_kc = async function () {
   $("view-warehouse_kc").innerHTML = subnav("warehouse_kc", sections, sec) + body;
   wireSubnav("warehouse_kc");
   wireSearch();
-  if (sec === "the") $("wc_load").onclick = () => guard(async () => {
+  if (sec === "the") {
+    wireSearchableSelect("wc_mat_txt", "wc_mat", WH_CACHE.matItemsThe);
+    $("wc_load").onclick = () => guard(async () => {
     const card = await GET("/warehouse/card?material_id=" + $("wc_mat").value);
     $("wc_table").innerHTML = `<table><thead><tr><th>Thời gian</th><th>Loại</th><th>Lô</th><th>Nhập</th><th>Xuất</th><th>Tồn</th><th>Lý do</th></tr></thead>
       <tbody>${card.map(c => `<tr><td class="muted">${fmt(c.ts)}</td><td>${badge(c.type === "receipt" ? "available" : c.type === "issue" ? "on_hold" : "planned")}${c.type}</td>
         <td>${esc(c.lot_code || "")}</td><td style="color:var(--green)">${c.in || ""}</td><td style="color:var(--orange)">${c.out || ""}</td>
         <td><b>${c.balance}</b> ${c.uom}</td><td class="muted">${esc(c.reason || "")}</td></tr>`).join("") || '<tr><td colspan=7 class="muted">Chưa có giao dịch.</td></tr>'}</tbody></table>`;
-  });
+    });
+  }
+  if (sec === "ton") wirePaginate("t_ton", 10);
+  if (sec === "kc") {
+    // Mặc định hiện lô nhập GẦN NHẤT trước (cột "Ngày giờ nhập", đảo chiều) để đỡ phải kéo dài
+    // — vẫn giữ đúng dữ liệu FIFO nhập-trước-hiện-trước bên dưới, người dùng bấm lại tiêu đề cột
+    // là quay về đúng thứ tự FIFO (nhập trước lên đầu) khi cần chọn lô ưu tiên xuất/chuyển.
+    if (!_pagerState.t_kc) _pagerState.t_kc = { page: 1, pageSize: 10, sortCol: 4, sortDir: -1 };
+    wirePaginate("t_kc", 10);
+  }
+  if (sec === "min") wirePaginate("t_lowstock", 10);
+  if (sec === "bc") {
+    wirePaginate("t_bcrep", 10);
+    $("bc_apply").onclick = () => {
+      SUB.bc_date_from = $("bc_from").value;
+      SUB.bc_date_to = $("bc_to").value;
+      render("warehouse_kc");
+    };
+  }
   if (sec === "giao") {
     wirePaginate("rc_hist", 10);
     wireSearchableSelect("rc_mat_txt", "rc_mat", WH_CACHE.matItems, (item) => { $("rc_uom").value = item.uom || ""; });
     wireSearchableSelect("ob_mat_txt", "ob_mat", WH_CACHE.matItems, (item) => { $("ob_uom").value = item.uom || ""; });
+    if ($("sng_mat_txt")) wireSearchableSelect("sng_mat_txt", "sng_mat", WH_CACHE.matItems, (item) => { $("sng_uom").value = item.uom || ""; });
+    if ($("sng_do")) $("sng_do").onclick = () => guard(async () => {
+      const res = await POST("/warehouse/sang-ngang", { material_id: $("sng_mat").value,
+        supplier_id: $("sng_supplier").value || null, unit_price: $("sng_price").value ? parseFloat($("sng_price").value) : null,
+        quantity: parseFloat($("sng_qty").value), uom: $("sng_uom").value,
+        expiry: $("sng_exp").value || null, reason: $("sng_note").value.trim() || "Xuất sang ngang" });
+      toast(`Đã tạo đề nghị xuất sang ngang (số ${res.request_code}) — chờ phân xưởng duyệt`);
+      render("warehouse_kc");
+    });
     $("rc_do").onclick = () => guard(async () => {
       const rcDtRaw = $("rc_dt").value;
       if (!rcDtRaw) throw new Error("Chọn ngày nhập.");
@@ -3770,6 +3857,10 @@ async function renderStockCountSection(location) {
 }
 
 function wireStockCountSection(viewName) {
+  // Mặc định phiếu kiểm kê mới tạo GẦN NHẤT lên đầu (cột "Ngày tạo", đảo chiều) — đỡ phải kéo
+  // dài khi đã có nhiều phiếu qua nhiều đợt, bấm lại tiêu đề cột để đổi chiều nếu cần.
+  if (!_pagerState.t_kk) _pagerState.t_kk = { page: 1, pageSize: 10, sortCol: 5, sortDir: -1 };
+  wirePaginate("t_kk", 10);
   $("kk_create").onclick = () => guard(async () => {
     await POST("/warehouse/counts", { location: $("kk_create").dataset.location,
       start_date: $("kk_start").value || null, end_date: $("kk_end").value || null,
@@ -3795,6 +3886,7 @@ VIEWS.warehouse_px = async function () {
   const sections = [
     { key: "px", label: "Xem tồn kho" }, { key: "tondau", label: "🏁 Nhập tồn đầu" },
     { key: "req", label: "Đề nghị nhận kho" }, { key: "dieuchuyen", label: "Điều chuyển về Kho công ty" },
+    { key: "sangngang", label: "Xuất sang ngang" },
     { key: "tudo", label: "Xuất tự do" }, { key: "nvlhist", label: "Lịch sử xuất dùng NVL" },
     { key: "kk", label: "Kiểm kê định kỳ" },
   ];
@@ -3888,6 +3980,69 @@ VIEWS.warehouse_px = async function () {
         <tbody>${pxRows}</tbody>
       </table></div>
     </div>`;
+  } else if (sec === "sangngang") {
+    const [allLots, mats, sangNgangRequestsPx, qcReqIdsPx] = await Promise.all([GET("/lots"), GET("/materials"),
+      GET("/warehouse/sang-ngang"), GET("/materials/qc-required")]);
+    const matById = Object.fromEntries(mats.map(m => [m.material_id, m]));
+    const lotByIdPx = Object.fromEntries(allLots.map(l => [l.lot_id, l]));
+    const qcReqSetPx = new Set(qcReqIdsPx);
+    const isAdminSngPx = CURRENT_USER && CURRENT_USER.role === "admin";
+    const canApproveSangNgang = _hasPerm("warehouse.request");
+    WH_CACHE.matById = matById;
+    WH_CACHE.lotById = lotByIdPx;
+    const sngPendingPx = sangNgangRequestsPx.filter(r => r.status === "pending").sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+    const sngDonePx = sangNgangRequestsPx.filter(r => r.status !== "pending").sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+    const sngPendingRows = sngPendingPx.map(r => {
+      const lot = lotByIdPx[r.lot_id];
+      const mat = lot ? matById[lot.material_id] : null;
+      const qcBlocked = lot && qcReqSetPx.has(lot.material_id) && lot.status === "on_hold";
+      return `<tr>
+        <td class="muted">${fmt(r.created_at)}</td>
+        <td><code class="k">${esc(r.request_code)}</code></td>
+        <td>${esc(mat ? mat.code : "—")}</td>
+        <td>${esc(mat ? mat.name : "—")}</td>
+        <td class="muted">${esc(lot ? lot.lot_code : "")}</td>
+        <td>${r.quantity} ${esc(r.uom)}</td>
+        <td class="muted">${esc(r.created_by || "")}</td>
+        <td>${sangNgangQcBadge(r, lotByIdPx, qcReqSetPx)}</td>
+        ${canApproveSangNgang ? `<td style="white-space:nowrap">
+          <button class="btn sm" data-sngapprove="${esc(r.request_id)}" ${qcBlocked ? "disabled title=\"Đang chờ KCS duyệt chỉ tiêu chất lượng\"" : ""}>Duyệt</button>
+          <button class="btn sm sec" data-sngreject="${esc(r.request_id)}">Từ chối</button></td>` : ""}</tr>`;
+    }).join("") || `<tr><td colspan="${canApproveSangNgang ? 9 : 8}" class="muted">Không có đề nghị nào đang chờ.</td></tr>`;
+    const sngDoneRows = sngDonePx.map(r => {
+      const lot = lotByIdPx[r.lot_id];
+      const mat = lot ? matById[lot.material_id] : null;
+      const processedBy = r.status === "approved" ? r.approved_by : r.rejected_by;
+      let actionCell = "";
+      if (isAdminSngPx && r.status === "approved") {
+        actionCell = r.reversed ? `<td class="muted">Đã hoàn tác</td>`
+          : `<td><button class="btn sm sec" data-sngundo="${esc(r.request_id)}">Hoàn tác</button></td>`;
+      } else if (isAdminSngPx) actionCell = "<td></td>";
+      return `<tr>
+        <td class="muted">${fmt(r.created_at)}</td>
+        <td><code class="k">${esc(r.request_code)}</code></td>
+        <td>${esc(mat ? mat.code : "—")}</td>
+        <td>${esc(mat ? mat.name : "—")}</td>
+        <td class="muted">${esc(lot ? lot.lot_code : "")}</td>
+        <td>${r.quantity} ${esc(r.uom)}</td>
+        <td>${badge(r.status)}</td>
+        <td class="muted">${esc(processedBy || "")}</td>
+        ${actionCell}</tr>`;
+    }).join("") || `<tr><td colspan="${isAdminSngPx ? 9 : 8}" class="muted">Chưa có đề nghị nào đã xử lý.</td></tr>`;
+    body = `<div class="panel"><h2>Xuất sang ngang <span class="muted">(${sngPendingPx.length} đang chờ duyệt)</span></h2>
+      <div class="muted" style="margin-bottom:6px">Vật tư do Kho công ty khai báo "Xuất sang ngang" (đã tăng tồn Kho công ty) — bấm "Duyệt"
+        để thật sự nhận vào Kho phân xưởng. Nếu vật tư có chỉ tiêu chất lượng bắt buộc, phải chờ KCS duyệt xong (hết "Đang chờ KCS duyệt")
+        mới duyệt được.</div>
+      <div class="tablewrap"><table>
+        <thead><tr><th>Ngày tạo</th><th>Số đề nghị</th><th>Mã VT</th><th>Tên vật tư</th><th>Lô</th><th>SL</th><th>Người tạo</th><th>Trạng thái QC</th>${canApproveSangNgang ? "<th></th>" : ""}</tr></thead>
+        <tbody>${sngPendingRows}</tbody>
+      </table></div>
+      <h4 style="margin-top:14px">Lịch sử đã xử lý <span class="muted">(${sngDonePx.length})</span></h4>
+      <div class="tablewrap"><table>
+        <thead><tr><th>Ngày tạo</th><th>Số đề nghị</th><th>Mã VT</th><th>Tên vật tư</th><th>Lô</th><th>SL</th><th>Trạng thái</th><th>Người xử lý</th>${isAdminSngPx ? "<th></th>" : ""}</tr></thead>
+        <tbody>${sngDoneRows}</tbody>
+      </table></div>
+    </div>`;
   } else if (sec === "tudo") {
     const [allLots, mats, freeIssuesAll] = await Promise.all([GET("/lots"), GET("/materials"),
       GET("/warehouse/movements?movement_type=issue&mode=tu_do")]);
@@ -3937,7 +4092,14 @@ VIEWS.warehouse_px = async function () {
   wireSearch();
   document.querySelectorAll("[data-lotqc]").forEach(b => b.onclick = () => openLotQcModal(b.dataset.lotqc, { editable: false }));
   if (sec === "kk") wireStockCountSection("warehouse_px");
-  if (sec === "px") $("px_loc").onchange = () => { TON_LOC.warehouse_px = $("px_loc").value; render("warehouse_px"); };
+  if (sec === "px") {
+    $("px_loc").onchange = () => { TON_LOC.warehouse_px = $("px_loc").value; render("warehouse_px"); };
+    // Mặc định hiện lô nhập GẦN NHẤT trước (cột "Ngày giờ nhập", đảo chiều) — mirror đúng cách
+    // làm ở "Danh sách lô (FIFO)" bên Kho công ty, bấm lại tiêu đề cột để quay về thứ tự FIFO
+    // (nhập trước lên đầu) khi cần chọn lô ưu tiên dùng/chuyển.
+    if (!_pagerState.t_px) _pagerState.t_px = { page: 1, pageSize: 10, sortCol: 3, sortDir: -1 };
+    wirePaginate("t_px", 10);
+  }
   if (sec === "tondau") {
     wireSearchableSelect("obpx_mat_txt", "obpx_mat", WH_CACHE.matItemsPx, (item) => { $("obpx_uom").value = item.uom || ""; });
     if ($("obpx_do")) $("obpx_do").onclick = () => guard(async () => {
@@ -3978,6 +4140,23 @@ VIEWS.warehouse_px = async function () {
       toast("Đã gửi đề nghị điều chuyển"); render("warehouse_px");
     });
   }
+  if (sec === "sangngang") {
+    document.querySelectorAll("[data-sngapprove]").forEach(b => b.onclick = () => guard(async () => {
+      if (!confirm("Duyệt đề nghị xuất sang ngang này? Lô sẽ thật sự chuyển vào Kho phân xưởng ngay.")) return;
+      await POST(`/warehouse/sang-ngang/${b.dataset.sngapprove}/approve`, {});
+      toast("Đã duyệt — lô đã về Kho phân xưởng"); render("warehouse_px");
+    }));
+    document.querySelectorAll("[data-sngreject]").forEach(b => b.onclick = () => guard(async () => {
+      const reason = prompt("Lý do từ chối (tuỳ chọn):") || null;
+      await POST(`/warehouse/sang-ngang/${b.dataset.sngreject}/reject`, { reason });
+      toast("Đã từ chối đề nghị"); render("warehouse_px");
+    }));
+    document.querySelectorAll("[data-sngundo]").forEach(b => b.onclick = () => guard(async () => {
+      if (!confirm("Hoàn tác đề nghị đã duyệt này? Lô sẽ trả về lại Kho công ty.")) return;
+      await POST(`/warehouse/sang-ngang/${b.dataset.sngundo}/undo`, {});
+      toast("Đã hoàn tác xuất sang ngang"); render("warehouse_px");
+    }));
+  }
   if (sec === "tudo") {
     if ($("xtpx_do")) $("xtpx_do").onclick = () => guard(async () => {
       await POST("/warehouse/issue", { lot_id: $("xtpx_lot").value, quantity: parseFloat($("xtpx_qty").value),
@@ -4003,12 +4182,7 @@ VIEWS.warehouse_px = async function () {
       toast(`Đã thêm vào đề nghị (${REQUEST_CART.length} dòng) — xem ở bảng phía trên`);
       refreshCartPanel();
     });
-    if ($("stk_search")) $("stk_search").oninput = () => {
-      const q = $("stk_search").value.trim().toLowerCase();
-      document.querySelectorAll("#stk_table tbody tr[data-search]").forEach(tr => {
-        tr.style.display = tr.dataset.search.includes(q) ? "" : "none";
-      });
-    };
+    wirePaginate("stk_table", 10);
   }
 };
 
@@ -4147,6 +4321,43 @@ function transferPxRequestHistoryRowHtml(r, matById, lotById, isAdmin) {
     <td>${badge(r.status)}</td>
     <td class="muted">${esc(processedBy || "")}</td>
     ${actionCell}</tr>`;
+}
+
+// ---- Xuất sang ngang: hàng cập Kho công ty nhưng đích thực sự là Kho phân xưởng ----
+function sangNgangQcBadge(r, lotById, qcReqSet) {
+  const lot = lotById[r.lot_id];
+  if (!lot || !qcReqSet.has(lot.material_id)) return "";
+  return lot.status === "on_hold"
+    ? `<span class="badge on_hold">Đang chờ KCS duyệt</span>`
+    : `<span class="badge approved">KCS đã duyệt</span>`;
+}
+
+function sangNgangKcRowHtml(r, matById, lotById, qcReqSet) {
+  const lot = lotById[r.lot_id];
+  const mat = lot ? matById[lot.material_id] : null;
+  return `<tr>
+    <td class="muted">${fmt(r.created_at)}</td>
+    <td><code class="k">${esc(r.request_code)}</code></td>
+    <td>${esc(mat ? mat.code : "—")}</td>
+    <td>${esc(mat ? mat.name : "—")}</td>
+    <td class="muted">${esc(lot ? lot.lot_code : "")}</td>
+    <td>${r.quantity} ${esc(r.uom)}</td>
+    <td>${sangNgangQcBadge(r, lotById, qcReqSet)}</td></tr>`;
+}
+
+function sangNgangHistoryRowHtml(r, matById, lotById) {
+  const lot = lotById[r.lot_id];
+  const mat = lot ? matById[lot.material_id] : null;
+  const processedBy = r.status === "approved" ? r.approved_by : r.rejected_by;
+  return `<tr>
+    <td class="muted">${fmt(r.created_at)}</td>
+    <td><code class="k">${esc(r.request_code)}</code></td>
+    <td>${esc(mat ? mat.code : "—")}</td>
+    <td>${esc(mat ? mat.name : "—")}</td>
+    <td class="muted">${esc(lot ? lot.lot_code : "")}</td>
+    <td>${r.quantity} ${esc(r.uom)}</td>
+    <td>${badge(r.status)}${r.reversed ? ' <span class="muted" style="font-size:11px">(đã hoàn tác)</span>' : ""}</td>
+    <td class="muted">${esc(processedBy || "")}</td></tr>`;
 }
 
 // ---- Điều chuyển kho công ty, chiều 2: Kho công ty → Nhà máy khác (xuất ngay, duyệt sau) ----
@@ -4715,10 +4926,10 @@ async function renderRequestsSection() {
   const stockBrowser = !canRequest ? "" : `<div class="panel"><h2>Tồn kho công ty <span class="muted">(${stockRows.length})</span></h2>
     <div class="muted" style="margin-bottom:6px">Nhập số lượng muốn nhận rồi bấm "+ Thêm" để đưa vào đề nghị phía trên — có thể thêm nhiều dòng liên tiếp.
       Chỉ chọn vật tư + số lượng — lô cụ thể do thủ kho Kho công ty quyết định lúc duyệt.</div>
-    <div class="row" style="margin-bottom:6px"><div class="field" style="flex:1"><label>Tìm vật tư</label><input id="stk_search" placeholder="Gõ mã/tên vật tư..."/></div></div>
+    <div class="row" style="margin-bottom:6px"><div class="field" style="flex:1"><label>Tìm vật tư</label><input class="searchbox" data-tbl="stk_table" placeholder="Gõ mã/tên vật tư..."/></div></div>
     <div class="tablewrap"><table id="stk_table">
       <thead><tr><th>Vật tư</th><th>Tổng tồn</th><th>Số lô</th><th>SL muốn nhận</th><th></th></tr></thead>
-      <tbody>${stockRows.map(r => { const mat = REQ_CACHE.matById[r.material_id]; return `<tr data-search="${esc((mat ? mat.code + " " + mat.name : r.material_id).toLowerCase())}">
+      <tbody>${stockRows.map(r => { const mat = REQ_CACHE.matById[r.material_id]; return `<tr>
         <td>${esc(mat ? `${mat.code} — ${mat.name}` : r.material_id)}</td>
         <td>${r.quantity} ${esc(r.uom)}</td>
         <td class="muted">${r.lotCount}</td>
@@ -4789,16 +5000,26 @@ async function openLotQcModal(lotId, { editable = true } = {}) {
     toast("Đã lưu số lô KCS");
   });
   $("lqc_submit").onclick = () => guard(async () => {
-    const inputs = Array.from(document.querySelectorAll(".lqc-val")).filter(i => i.value !== "");
-    if (!inputs.length) throw new Error("Chưa nhập giá trị nào.");
+    // Mỗi dòng (1 chỉ tiêu) chỉ cần điền MỘT trong hai ô — "Nhập giá trị mới" hoặc "Nhập giá
+    // trị CA" — là đủ để lưu, KHÔNG bắt buộc luôn cả 2 (VD: chỉ bổ sung CA cho chỉ tiêu đã
+    // pass/fail từ trước, không cần đo lại). Ô còn lại bỏ trống thì lấy lại giá trị đã lưu lần
+    // trước (nếu có) để không làm mất dữ liệu cũ hay đổi status pass/fail ngoài ý muốn. Chỉ
+    // nhập CA mà chỉ tiêu đó CHƯA TỪNG có giá trị đo (chưa khai báo lần nào) thì bỏ qua — không
+    // tạo bản ghi value=null/status=pending, tránh bị tính nhầm là "đã khai báo" khi duyệt lô
+    // (xem lot_qc_status ở qc_catalog.py).
     const caByCode = Object.fromEntries(Array.from(document.querySelectorAll(".lqc-ca-val"))
       .map(i => [i.dataset.code, i.value]));
-    for (const inp of inputs) {
-      const caVal = caByCode[inp.dataset.code];
+    const rows = Array.from(document.querySelectorAll(".lqc-val")).map(inp => {
+      const code = inp.dataset.code;
+      const caRaw = caByCode[code];
+      return { inp, code, hasVal: inp.value !== "", hasCa: caRaw !== undefined && caRaw !== "", caRaw, prev: recordedByParam[code] };
+    }).filter(r => r.hasVal || (r.hasCa && r.prev));
+    if (!rows.length) throw new Error("Chưa nhập giá trị nào.");
+    for (const { inp, code, hasVal, hasCa, caRaw, prev } of rows) {
       await POST("/quality/results", {
-        scope_type: "lot", scope_id: lotId, parameter: inp.dataset.code,
-        value: parseFloat(inp.value),
-        ca_value: caVal ? parseFloat(caVal) : null,
+        scope_type: "lot", scope_id: lotId, parameter: code,
+        value: hasVal ? parseFloat(inp.value) : (prev ? prev.value : null),
+        ca_value: hasCa ? parseFloat(caRaw) : (prev ? prev.ca_value : null),
         lower_limit: inp.dataset.lsl === "" ? null : parseFloat(inp.dataset.lsl),
         upper_limit: inp.dataset.usl === "" ? null : parseFloat(inp.dataset.usl),
       });
@@ -7020,14 +7241,57 @@ function wireSearch() {
 const _pagerState = {};
 // Phân trang cho bảng dài (danh mục hàng chục/hàng trăm dòng) — kèm ô tìm kiếm
 // .searchbox[data-tbl="<tableId>"] nếu có, để tránh phải kéo chuột qua toàn bộ danh sách.
+// Xác định kiểu dữ liệu của 1 cột (để sắp xếp đúng — số/ngày giờ so bằng giá trị thực,
+// không phải so chuỗi) bằng cách lấy mẫu đa số ô không rỗng trong cột đó khớp mẫu nào.
+// KHỚP với 2 định dạng ngày giờ duy nhất đang dùng trong app (xem hàm `fmt()` ở đầu file).
+function _sortColType(texts) {
+  const nonEmpty = texts.map(t => (t || "").trim()).filter(t => t && t !== "—");
+  if (!nonEmpty.length) return "string";
+  const dtRe = /^\d{1,2}:\d{1,2}:\d{1,2}\s+\d{1,2}\/\d{1,2}\/\d{4}$/;
+  const dRe = /^\d{1,2}\/\d{1,2}\/\d{4}$/;
+  const numRe = /^-?\d+(?:[.,]\d+)?(?:\s|$)/;
+  const ratio = (re) => nonEmpty.filter(t => re.test(t)).length / nonEmpty.length;
+  if (ratio(dtRe) >= 0.8) return "datetime";
+  if (ratio(dRe) >= 0.8) return "date";
+  if (ratio(numRe) >= 0.8) return "number";
+  return "string";
+}
+// Chuyển 1 ô về giá trị so sánh được theo kiểu cột đã xác định — trả về null cho ô rỗng/"—"
+// để luôn đẩy xuống CUỐI danh sách bất kể đang sắp xếp tăng hay giảm (giống Windows Explorer).
+function _sortCellValue(type, raw) {
+  const t = (raw || "").trim();
+  if (!t || t === "—") return null;
+  if (type === "datetime" || type === "date") {
+    const m = t.match(type === "datetime"
+      ? /^(\d{1,2}):(\d{1,2}):(\d{1,2})\s+(\d{1,2})\/(\d{1,2})\/(\d{4})$/
+      : /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+    if (!m) return null;
+    const n = m.slice(1).map(Number);
+    return type === "datetime" ? new Date(n[5], n[4] - 1, n[3], n[0], n[1], n[2]).getTime()
+                                : new Date(n[2], n[1] - 1, n[0]).getTime();
+  }
+  if (type === "number") {
+    const m = t.match(/^-?\d+(?:[.,](\d+))?/);
+    return m ? parseFloat(m[0].replace(",", ".")) : null;
+  }
+  return t.toLowerCase();
+}
+function _sortCompare(a, b, type, dir) {
+  if (a == null && b == null) return 0;
+  if (a == null) return 1;   // ô rỗng luôn ở cuối
+  if (b == null) return -1;
+  if (type === "string") return dir * a.localeCompare(b, "vi");
+  return dir * (a < b ? -1 : a > b ? 1 : 0);
+}
 function wirePaginate(tableId, defaultPageSize = 10) {
   const table = document.getElementById(tableId);
   if (!table) return;
   table.dataset.paginated = "1";
   const tbody = table.querySelector("tbody");
-  const allRows = Array.from(tbody.children);
+  let allRows = Array.from(tbody.children);
   const searchInput = document.querySelector(`.searchbox[data-tbl="${tableId}"]`);
-  const state = _pagerState[tableId] || { page: 1, pageSize: defaultPageSize };
+  const state = _pagerState[tableId] || { page: 1, pageSize: defaultPageSize, sortCol: null, sortDir: 1 };
+  if (state.sortCol === undefined) { state.sortCol = null; state.sortDir = 1; }
   _pagerState[tableId] = state;
 
   let bar = table.nextElementSibling;
@@ -7044,6 +7308,50 @@ function wirePaginate(tableId, defaultPageSize = 10) {
       .map(f => f.tagName === "SELECT" ? (f.selectedOptions[0]?.textContent || "") : f.value).join(" ");
     return (tr.textContent + " " + fieldVals).toLowerCase();
   }
+  function cellText(tr, idx) {
+    const cell = tr.children[idx];
+    if (!cell) return "";
+    const field = cell.querySelector("input, select");
+    if (field) return field.tagName === "SELECT" ? (field.selectedOptions[0]?.textContent || "") : field.value;
+    return cell.textContent || "";
+  }
+  // Sắp xếp kiểu bấm vào tiêu đề cột như Windows Explorer — bấm lần 1 tăng dần, bấm lại đảo
+  // chiều. Sắp xếp TOÀN BỘ allRows (không chỉ trang đang xem) rồi mới lọc/cắt trang ở apply(),
+  // và di chuyển thẳng <tr> trong DOM (KHÔNG render lại) để giữ nguyên input đang gõ dở trên
+  // các bảng danh mục cho sửa trực tiếp.
+  function sortRows() {
+    if (state.sortCol == null) return;
+    const idx = state.sortCol;
+    const type = _sortColType(allRows.map(tr => cellText(tr, idx)));
+    const withVal = allRows.map(tr => [tr, _sortCellValue(type, cellText(tr, idx))]);
+    withVal.sort((a, b) => _sortCompare(a[1], b[1], type, state.sortDir));
+    allRows = withVal.map(p => p[0]);
+    allRows.forEach(tr => tbody.appendChild(tr));
+  }
+  function wireSortHeaders() {
+    const headRow = table.querySelector("thead tr");
+    if (!headRow) return;
+    // Bảng tiêu đề nhiều dòng/gộp ô (colspan/rowspan, VD ma trận CIP, dữ liệu thô Braumat) thì
+    // chỉ số cột không khớp 1-1 với dữ liệu — bỏ qua, không bật sắp xếp để tránh sai lệch.
+    const complex = Array.from(headRow.children).some(th => th.colSpan > 1 || th.rowSpan > 1);
+    if (complex) return;
+    Array.from(headRow.children).forEach((th, idx) => {
+      th.querySelector(".sort-ind")?.remove();
+      if (!th.textContent.trim()) return; // cột trống (nút thao tác) không cho sắp xếp
+      th.classList.add("sortable-th");
+      if (idx === state.sortCol) th.insertAdjacentHTML("beforeend", `<span class="sort-ind">${state.sortDir === 1 ? "▲" : "▼"}</span>`);
+      th.onclick = () => {
+        if (state.sortCol === idx) state.sortDir = -state.sortDir;
+        else { state.sortCol = idx; state.sortDir = 1; }
+        state.page = 1;
+        sortRows();
+        wireSortHeaders();
+        apply();
+      };
+    });
+  }
+  sortRows();
+  wireSortHeaders();
 
   function apply() {
     const q = (searchInput?.value || "").toLowerCase();
@@ -7327,7 +7635,8 @@ VIEWS.process = async function () {
       </div></div>
       <h2 style="margin:16px 0 8px">Thông tin lọc <span class="muted">(${bbtTanksLoc.length} tank · ${rows.length} mẻ)</span></h2>
       ${yearFilterControl("loc", ynLoc)}
-      <div class="tablewrap"><table>
+      <input class="searchbox" data-tbl="t_loc" placeholder="Enter text to search..."/>
+      <div class="tablewrap"><table id="t_loc">
         <thead><tr><th>Tank BBT</th><th>Loại bia</th><th>Dịch bia</th><th>Duyệt KCS</th><th>Khóa lô</th><th>Mã lọc</th><th>Lệnh lọc</th><th>Ngày lọc</th><th>V dịch/hl</th><th>Nước bài khí/hl</th>
           <th>V Bia/hl</th><th>Đang tồn/hl</th><th>Trạng thái</th><th>Kết thúc</th><th>TH thực tế</th><th></th><th>Chỉ tiêu</th><th>Tank</th></tr></thead>
         <tbody>${rowsHtmlLoc}</tbody>
@@ -7444,6 +7753,10 @@ VIEWS.process = async function () {
 
   $("view-process").innerHTML = subnav("process", sections, sec) + body;
   wireSubnav("process"); wireSearch();
+  wirePaginate("t_nau", 10);
+  wirePaginate("t_lm", 10);
+  wirePaginate("t_loc", 10);
+  wirePaginate("t_chiet", 10);
   if (sec === "nau") wireYearFilter("nau", "process");
   if (sec === "lenmen") wireYearFilter("lenmen", "process");
   if (sec === "loc") wireYearFilter("loc", "process");
@@ -9166,6 +9479,9 @@ VIEWS.master = async function () {
   wirePaginate("t_stagegroups", 10);
   wirePaginate("t_fp", 10);
   wirePaginate("t_suppliers", 10);
+  wirePaginate("t_matgroups_alt", 10);
+  wirePaginate("t_factorylocs", 10);
+  wirePaginate("t_unittypes", 10);
   wirePaginate("t_lines_line", 10);
   wirePaginate("t_lines_tank", 10);
   wirePaginate("t_lines_tank_bbt", 10);
@@ -9843,7 +10159,7 @@ VIEWS.users = async function () {
       <div style="background:var(--panel2);border:1px solid var(--border);border-radius:8px;padding:10px;max-height:220px;overflow-y:auto">${permBoxesHtml("rt_perm", new Set())}</div>
       <button class="btn" id="rt_add" style="margin-top:12px">Thêm mẫu chức danh</button>
     </div>`;
-  wireSearch(); wirePaginate("t_users", 10);
+  wireSearch(); wirePaginate("t_users", 10); wirePaginate("t_rtpl", 10);
   wireScopeFields("nu"); wireScopeFields("rt");
   $("nu_tpl").onchange = () => {
     const t = rtpls.find(x => x.role_template_id === $("nu_tpl").value);
