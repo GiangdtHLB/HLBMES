@@ -121,6 +121,10 @@ def _assert_stage_scope_unlocked(db, scope_type: str, scope_id: str) -> None:
         batch = db.get(BrewBatch, scope_id)
         if batch:
             _assert_unlocked(batch, *_brew_and_order(db, batch.brew_id))
+    elif scope_type == "brew":
+        b, order = _brew_and_order(db, scope_id)
+        if b:
+            _assert_unlocked(b, order)
     elif scope_type == "ferment":
         f = db.execute(select(FermentRecord).where(FermentRecord.lm_code == scope_id.split("__")[0])).scalar_one_or_none()
         _assert_unlocked(f)
@@ -465,6 +469,13 @@ def add_brew(payload: BrewIn, db: Session = Depends(get_db),
         if db.execute(select(FermentRecord).where(FermentRecord.lm_code == lm_code,
                       FermentRecord.ferment_year == brew_year)).scalar_one_or_none():
             raise DomainError(f"Mã lô LM '{lm_code}' đã tồn tại trong năm {brew_year}.")
+        # tank_lm phải đang TRỐNG — trước đây chỉ chặn trùng lm_code, không chặn trùng tank vật
+        # lý, nên 2 lô lên men (2 lm_code) khác nhau vẫn có thể cùng trỏ 1 tank cùng lúc (chỉ
+        # gợi ý "tank trống" ở dropdown frontend, không tự chặn ở backend — xem
+        # dashboard.available_ferment_tanks, cùng logic occupied dùng ở đây).
+        occupying = db.execute(select(FermentRecord).where(FermentRecord.tank_lm == tank_lm)).scalars().all()
+        if any(derived.ferment_status(f) != "da_loc_het" for f in occupying):
+            raise DomainError(f"Tank '{tank_lm}' đang có lô lên men khác chưa lọc hết — chọn tank khác.")
     b = BrewRecord(brew_id=new_id(), **data)
     db.add(b)
     db.flush()
@@ -536,13 +547,26 @@ def delete_brew(brew_id: str, db: Session = Depends(get_db), user: User = Depend
         raise DomainError(f"Mã nấu '{b.brew_code}' đã được lọc — không thể xóa (ảnh hưởng truy xuất nguồn gốc).")
     ferment_ids_to_sync = {link.ferment_id for link in db.execute(
         select(FermentBrewLink).where(FermentBrewLink.brew_id == brew_id)).scalars().all()}
+    # Xóa mã nấu mặc định kéo theo xóa lô lên men của nó (lô LM được tạo tự động từ mã nấu) —
+    # nhưng nếu lô LM đó đã được KCS duyệt (Duyệt LM) và sắp bị xóa THẬT SỰ (không còn mã nấu
+    # nào khác cùng tham chiếu), phải chặn cả việc xóa mã nấu, không được âm thầm xóa mất lô
+    # LM đã duyệt (đang lọc/đã lọc/đã khóa đã được _brew_already_filtered/_assert_unlocked ở
+    # trên chặn rồi thông qua ràng buộc lock phải theo thứ tự Nấu trước Lên men).
+    for ferment_id in ferment_ids_to_sync:
+        other_links = db.execute(select(FermentBrewLink).where(
+            FermentBrewLink.ferment_id == ferment_id, FermentBrewLink.brew_id != brew_id)).first()
+        if other_links:
+            continue
+        f = db.get(FermentRecord, ferment_id)
+        if f and f.qc_approved:
+            raise DomainError(f"Lô LM '{f.lm_code}' đã được duyệt KCS (Duyệt LM) — không thể xóa mã nấu.")
     for link in db.execute(select(FermentBrewLink).where(FermentBrewLink.brew_id == brew_id)).scalars().all():
         db.delete(link)
     db.flush()  # MSSQL enforce FK: xóa hết bản con (link) trước bản cha (brew_record).
     for batch in db.execute(select(BrewBatch).where(BrewBatch.brew_id == brew_id)).scalars().all():
         for u in db.execute(select(BrewMaterialUsage).where(BrewMaterialUsage.batch_id == batch.batch_id)).scalars().all():
             if u.movement_id:
-                warehouse_svc.undo_issue(db, u.movement_id, user)
+                warehouse_svc.undo_issue(db, u.movement_id, user, strict=False, skip_perm_check=True)
             db.delete(u)
         for r in db.execute(select(QualityResult).where(QualityResult.scope_type == "brew_batch", QualityResult.scope_id == batch.batch_id)).scalars().all():
             db.delete(r)
@@ -571,7 +595,9 @@ def delete_brew(brew_id: str, db: Session = Depends(get_db), user: User = Depend
         if not f:
             continue
         for r in db.execute(select(QualityResult).where(QualityResult.scope_type == "ferment",
-                            QualityResult.scope_id.in_([f"{f.lm_code}__len_men_chinh", f"{f.lm_code}__len_men_phu"]))).scalars().all():
+                            QualityResult.scope_id.in_([
+                                qc_catalog.ferment_scope_id(f.lm_code, f.ferment_year, "len_men_chinh"),
+                                qc_catalog.ferment_scope_id(f.lm_code, f.ferment_year, "len_men_phu")]))).scalars().all():
             db.delete(r)
         for rd in db.execute(select(FermentDailyReading).where(FermentDailyReading.ferment_id == ferment_id)).scalars().all():
             db.delete(rd)
@@ -676,12 +702,19 @@ def add_brew_batch(brew_id: str, payload: BrewBatchIn, db: Session = Depends(get
 @router.post("/brews/{brew_id}/batches/{batch_id}/finish")
 def finish_brew_batch(brew_id: str, batch_id: str, payload: FinishIn = FinishIn(),
                       db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    """Vận hành chọn tay giờ kết thúc mẻ — gọi lại được nhiều lần để sửa giờ nếu bấm nhầm."""
+    """Vận hành chọn tay giờ kết thúc mẻ — gọi lại được nhiều lần để sửa giờ nếu bấm nhầm.
+    Bắt buộc đã khai báo "Tổng lượng dịch (hl)" > 0 ở Ghi chép nấu trước khi kết thúc — nếu
+    không, sản lượng thực tế của Lệnh nấu (_real_actual_by_brew) sẽ luôn tính ra 0 cho mẻ này
+    dù đã bấm kết thúc, khiến Lệnh nấu không bao giờ "hoàn thành" được (xem brew_order.py)."""
     require_perm(user, "batch.execute")
     batch = db.get(BrewBatch, batch_id)
     if not batch or batch.brew_id != brew_id:
         raise NotFoundError("Mẻ không tồn tại.")
     _assert_unlocked(batch, *_brew_and_order(db, brew_id))
+    log = braumat_svc.get_or_create_process_log(db, batch_id)
+    v = braumat_svc.get_manual_values(log).get("whp_tong_luong_dich_hl")
+    if v is None or float(v) <= 0:
+        raise DomainError("Phải khai báo \"Tổng lượng dịch (hl)\" > 0 ở Ghi chép nấu trước khi kết thúc mẻ.")
     batch.ended_at = payload.ended_at or utcnow()
     db.flush()
     link = db.execute(select(FermentBrewLink).where(FermentBrewLink.brew_id == brew_id)).scalar_one_or_none()
@@ -703,7 +736,7 @@ def delete_brew_batch(brew_id: str, batch_id: str, db: Session = Depends(get_db)
         raise DomainError(f"Mã nấu của mẻ '{batch.batch_code}' đã được lọc — không thể xóa (ảnh hưởng truy xuất nguồn gốc).")
     for u in db.execute(select(BrewMaterialUsage).where(BrewMaterialUsage.batch_id == batch_id)).scalars().all():
         if u.movement_id:
-            warehouse_svc.undo_issue(db, u.movement_id, user)
+            warehouse_svc.undo_issue(db, u.movement_id, user, strict=False, skip_perm_check=True)
         db.delete(u)
     for r in db.execute(select(QualityResult).where(QualityResult.scope_type == "brew_batch", QualityResult.scope_id == batch.batch_id)).scalars().all():
         db.delete(r)
@@ -804,7 +837,7 @@ def add_brew_material(brew_id: str, batch_id: str, payload: BrewMaterialUsageIn,
         data["fifo_ok"] = warehouse_svc.is_oldest_workshop_lot(db, lot.material_id, lot_id)
         data["uom"] = lot.uom
         result = warehouse_svc.issue(db, lot_id, data["quantity"], user, mode="tu_do",
-                                     reason=f"Dùng cho mẻ nấu {batch.batch_code}", ref_doc=batch.batch_code)
+                                     reason=f"Dùng cho mẻ nấu {batch.batch_code}", ref_doc=batch.batch_code, skip_perm_check=True)
         data["lot_id"] = lot_id
         data["movement_id"] = result["movement_id"]
     else:
@@ -839,13 +872,13 @@ def update_brew_material(brew_id: str, batch_id: str, usage_id: str, payload: Br
         raise DomainError("Chọn nguyên liệu hoặc nhập tên nguyên liệu.")
     new_qty = data.get("quantity")
     if u.lot_id and u.movement_id and new_qty != u.quantity:
-        warehouse_svc.undo_issue(db, u.movement_id, user)
+        warehouse_svc.undo_issue(db, u.movement_id, user, skip_perm_check=True)
         batch = db.get(BrewBatch, batch_id)
         lot = db.get(MaterialLot, u.lot_id)
         if lot:
             u.fifo_ok = warehouse_svc.is_oldest_workshop_lot(db, lot.material_id, u.lot_id)
         result = warehouse_svc.issue(db, u.lot_id, new_qty, user, mode="tu_do",
-                                     reason=f"Dùng cho mẻ nấu {batch.batch_code} (sửa số lượng)", ref_doc=batch.batch_code)
+                                     reason=f"Dùng cho mẻ nấu {batch.batch_code} (sửa số lượng)", ref_doc=batch.batch_code, skip_perm_check=True)
         u.movement_id = result["movement_id"]
     for k, v in data.items():
         if k not in ("receipt_id", "lot_id") or v:
@@ -863,7 +896,7 @@ def delete_brew_material(brew_id: str, batch_id: str, usage_id: str, db: Session
         raise NotFoundError("Dòng nguyên liệu không tồn tại.")
     _assert_unlocked(db.get(BrewBatch, batch_id), *_brew_and_order(db, brew_id))
     if u.movement_id:
-        warehouse_svc.undo_issue(db, u.movement_id, user)
+        warehouse_svc.undo_issue(db, u.movement_id, user, strict=False, skip_perm_check=True)
     db.delete(u)
     db.commit()
 
@@ -888,26 +921,35 @@ def list_ferments(years: list[int] = Query(None), db: Session = Depends(get_db))
         beer_type = beer_types.get(prod.beer_type_id) if prod and prod.beer_type_id else None
         ready_date = None
         days_elapsed = None
-        if r.brew_date:
-            days_elapsed = (utcnow().replace(tzinfo=None) - r.brew_date.replace(tzinfo=None)).days
+        # Đếm ngày lên men từ kt_date (tank thực sự đầy — mẻ CUỐI của mã nấu kết thúc), KHÔNG
+        # phải brew_date (ngày tạo mã nấu, thường là mẻ ĐẦU) — với lệnh nấu nhiều mẻ kéo dài
+        # nhiều ngày, dùng brew_date sẽ báo ready_date/days_elapsed sớm hơn thực tế đúng bằng
+        # khoảng cách giữa mẻ đầu và mẻ cuối. Tank chưa đầy hết (kt_date chưa có) thì tạm dùng
+        # brew_date để vẫn hiện được số ngày đã trôi qua (ước tính, sẽ tự đúng khi kt_date có).
+        ferment_start = r.kt_date or r.brew_date
+        if ferment_start:
+            days_elapsed = (utcnow().replace(tzinfo=None) - ferment_start.replace(tzinfo=None)).days
             if prod and prod.ferment_days_std:
-                ready_date = r.brew_date + timedelta(days=prod.ferment_days_std)
+                ready_date = ferment_start + timedelta(days=prod.ferment_days_std)
         # Lên men không có khái niệm NVL riêng (men/nguyên liệu tính ở Nấu) — chỉ 2 màu theo
         # chỉ tiêu CT chính + CT phụ (khớp đúng scope 2 nút app.js:4150-4151).
-        chinh_ok = _stage_ok(db, "len_men_chinh", "ferment", f"{r.lm_code}__len_men_chinh", r.product_id)
-        phu_ok = _stage_ok(db, "len_men_phu", "ferment", f"{r.lm_code}__len_men_phu", r.product_id)
+        chinh_scope_id = qc_catalog.ferment_scope_id(r.lm_code, r.ferment_year, "len_men_chinh")
+        phu_scope_id = qc_catalog.ferment_scope_id(r.lm_code, r.ferment_year, "len_men_phu")
+        chinh_ok = _stage_ok(db, "len_men_chinh", "ferment", chinh_scope_id, r.product_id)
+        phu_ok = _stage_ok(db, "len_men_phu", "ferment", phu_scope_id, r.product_id)
         color = "blue" if (chinh_ok and phu_ok) else "red"
         # Số chỉ tiêu CT chính + CT phụ đang FAIL (giá trị MỚI NHẤT theo từng chỉ tiêu) — dùng cho
         # badge cảnh báo ở biểu đồ Dashboard, tái dùng đúng helper latest_results_by_param đã có
         # (services/quality.py) thay vì viết lại logic khử trùng lặp/lấy-mới-nhất.
         qc_fail_count = sum(
-            1 for res in quality.latest_results_by_param(db, "ferment", f"{r.lm_code}__len_men_chinh").values()
+            1 for res in quality.latest_results_by_param(db, "ferment", chinh_scope_id).values()
             if res.status == "fail"
         ) + sum(
-            1 for res in quality.latest_results_by_param(db, "ferment", f"{r.lm_code}__len_men_phu").values()
+            1 for res in quality.latest_results_by_param(db, "ferment", phu_scope_id).values()
             if res.status == "fail"
         )
-        items.append({"ferment_id": r.ferment_id, "lm_code": r.lm_code, "brew_code": r.brew_code,
+        items.append({"ferment_id": r.ferment_id, "lm_code": r.lm_code, "ferment_year": r.ferment_year,
+                      "brew_code": r.brew_code,
                       "color": color,
                       "brew_date": r.brew_date, "kt_date": r.kt_date, "batch_numbers": r.batch_numbers,
                       "brew_ids": brews_by_ferment.get(r.ferment_id, []),
@@ -930,22 +972,34 @@ def list_ferments(years: list[int] = Query(None), db: Session = Depends(get_db))
 @router.post("/ferments/{ferment_id}/approve")
 def approve_ferment(ferment_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     """KCS ký xác nhận tank lên men đạt, đồng ý cho chiết — gate cho việc tạo bản ghi
-    lọc từ tank này (xem add_filter). Yêu cầu đã khai báo đủ chỉ tiêu lên men phụ bắt buộc
-    trước khi ký; chỉ tiêu FAIL (vượt giới hạn) không còn chặn duyệt, chỉ cảnh báo
-    (qc_has_fail trong response) — KCS tự quyết định dựa trên cảnh báo đó."""
+    lọc từ tank này (xem add_filter). Yêu cầu đã khai báo đủ chỉ tiêu lên men CHÍNH lẫn PHỤ
+    bắt buộc trước khi ký (trước đây chỉ gate theo CT phụ — CT chính chỉ bị chặn rất muộn ở
+    bước Khóa Lên men, tức là SAU KHI Lọc/Chiết có thể đã xảy ra); chỉ tiêu FAIL (vượt giới
+    hạn) không còn chặn duyệt, chỉ cảnh báo (qc_has_fail trong response) — KCS tự quyết định
+    dựa trên cảnh báo đó."""
     require_perm(user, "quality.release")
     f = db.get(FermentRecord, ferment_id)
     if not f:
         raise NotFoundError("Bản ghi lên men không tồn tại.")
     _assert_unlocked(f)
-    status = qc_catalog.stage_qc_status(db, "len_men_phu", "ferment", f"{f.lm_code}__len_men_phu", f.product_id)
+    if f.qc_approved:
+        raise DomainError("Lô lên men này đã được duyệt trước đó.")
+    status_chinh = qc_catalog.stage_qc_status(
+        db, "len_men_chinh", "ferment", qc_catalog.ferment_scope_id(f.lm_code, f.ferment_year, "len_men_chinh"),
+        f.product_id)
+    if status_chinh["pending"]:
+        raise DomainError(f"Còn thiếu chỉ tiêu bắt buộc (lên men chính): {', '.join(status_chinh['pending'])}.")
+    status = qc_catalog.stage_qc_status(
+        db, "len_men_phu", "ferment", qc_catalog.ferment_scope_id(f.lm_code, f.ferment_year, "len_men_phu"),
+        f.product_id)
     if status["pending"]:
         raise DomainError(f"Còn thiếu chỉ tiêu bắt buộc (lên men phụ): {', '.join(status['pending'])}.")
     f.qc_approved = True
     f.qc_approved_by = user.username
     f.qc_approved_at = utcnow()
     db.commit()
-    return {"ferment_id": ferment_id, "qc_approved": True, "qc_has_fail": status["has_fail"]}
+    return {"ferment_id": ferment_id, "qc_approved": True,
+            "qc_has_fail": status["has_fail"] or status_chinh["has_fail"]}
 
 
 @router.post("/ferments/{ferment_id}/lock-lot")
@@ -974,6 +1028,16 @@ def add_ferment(payload: FermentIn, db: Session = Depends(get_db),
     brew_ids = data.pop("brew_ids", [])
     for brew_id in brew_ids:
         _assert_unlocked(*_brew_and_order(db, brew_id))
+    # Chặn 1 mã nấu bị gán vào 2 lô Lên men khác nhau — trước đây endpoint này không kiểm tra,
+    # có thể tạo ra 2 FermentRecord cùng "sở hữu" 1 mã nấu, làm sai lệch tồn CCT (on_hand_cct)
+    # và truy xuất nguồn gốc (genealogy) vì mã nấu chỉ nên thuộc đúng 1 lô lên men.
+    if brew_ids:
+        existing_links = db.execute(select(FermentBrewLink).where(
+            FermentBrewLink.brew_id.in_(brew_ids))).scalars().all()
+        if existing_links:
+            brew = db.get(BrewRecord, existing_links[0].brew_id)
+            raise DomainError(
+                f"Mã nấu '{brew.brew_code if brew else existing_links[0].brew_id}' đã thuộc về 1 lô lên men khác.")
     ferment_year = (data.get("brew_date") or utcnow()).year
     if db.execute(select(FermentRecord).where(FermentRecord.lm_code == data["lm_code"],
                   FermentRecord.ferment_year == ferment_year)).scalar_one_or_none():
@@ -1004,10 +1068,14 @@ def delete_ferment(ferment_id: str, db: Session = Depends(get_db), user: User = 
     filter_order_ids = _filter_order_ids_for_ferments(db, [ferment_id])
     if filter_order_ids and db.execute(select(FilterRecord).where(FilterRecord.filter_order_id.in_(filter_order_ids))).first():
         raise DomainError("Đã có bản ghi lọc lấy từ lô lên men này — xóa bản ghi lọc trước khi xóa lên men.")
+    if f.qc_approved:
+        raise DomainError(f"Lô LM '{f.lm_code}' đã được duyệt KCS (Duyệt LM) — không thể xóa.")
     for link in db.execute(select(FermentBrewLink).where(FermentBrewLink.ferment_id == ferment_id)).scalars().all():
         db.delete(link)
     for r in db.execute(select(QualityResult).where(QualityResult.scope_type == "ferment",
-                        QualityResult.scope_id.in_([f"{f.lm_code}__len_men_chinh", f"{f.lm_code}__len_men_phu"]))).scalars().all():
+                        QualityResult.scope_id.in_([
+                            qc_catalog.ferment_scope_id(f.lm_code, f.ferment_year, "len_men_chinh"),
+                            qc_catalog.ferment_scope_id(f.lm_code, f.ferment_year, "len_men_phu")]))).scalars().all():
         db.delete(r)
     for rd in db.execute(select(FermentDailyReading).where(FermentDailyReading.ferment_id == ferment_id)).scalars().all():
         db.delete(rd)
@@ -1111,7 +1179,8 @@ def list_filters(years: list[int] = Query(None), db: Session = Depends(get_db)):
         order = filter_orders.get(r.filter_order_id)
         if r.filter_type == "ve_bbt_phoi":
             color = "cyan"
-        elif not _stage_ok(db, "loc", "filter", r.filter_code, r.product_id, beer_type_id=r.beer_type_id,
+        elif not _stage_ok(db, "loc", "filter", qc_catalog.filter_scope_id(r.filter_code, r.filter_year),
+                           r.product_id, beer_type_id=r.beer_type_id,
                            finished_product_id=r.finished_product_id):
             color = "red"
         elif r.filter_id not in nvl_filter_ids:
@@ -1120,7 +1189,8 @@ def list_filters(years: list[int] = Query(None), db: Session = Depends(get_db)):
             color = "blue"
         status = derived.filter_status(r)
         exec_status = _exec_status(r.ended_at)
-        out.append({"filter_id": r.filter_id, "filter_code": r.filter_code, "brew_code": r.brew_code,
+        out.append({"filter_id": r.filter_id, "filter_code": r.filter_code, "filter_year": r.filter_year,
+                    "brew_code": r.brew_code,
                     "filter_order_id": r.filter_order_id,
                     "lot_loc": r.lot_loc, "filter_phoi_code": r.filter_phoi_code, "filter_date": r.filter_date,
                     "filter_type": r.filter_type, "wort_type": r.wort_type, "from_cct": r.from_cct,
@@ -1155,8 +1225,8 @@ def approve_filter(filter_id: str, db: Session = Depends(get_db), user: User = D
         raise DomainError("Mẻ lọc này đã được duyệt.")
     if f.ended_at is None:
         raise DomainError("Mẻ lọc đang lọc (chưa kết thúc hết các tank) — chỉ duyệt KCS khi đã lọc xong.")
-    status = qc_catalog.stage_qc_status(db, "loc", "filter", f.filter_code, beer_type_id=f.beer_type_id,
-                                        finished_product_id=f.finished_product_id)
+    status = qc_catalog.stage_qc_status(db, "loc", "filter", qc_catalog.filter_scope_id(f.filter_code, f.filter_year),
+                                        beer_type_id=f.beer_type_id, finished_product_id=f.finished_product_id)
     if status["pending"]:
         raise DomainError(f"Còn thiếu chỉ tiêu bắt buộc (lọc): {', '.join(status['pending'])}.")
     f.qc_approved = True
@@ -1228,6 +1298,7 @@ def add_filter(payload: FilterIn, db: Session = Depends(get_db),
     if filter_order_svc._chiet_started(db, filter_order_id):
         raise DomainError("Lệnh lọc này đã bắt đầu chiết — chỉ được thêm mẻ lọc khi lệnh còn ở trạng thái Đang lọc.")
 
+    mix_warning = None
     last = existing_records[-1] if existing_records else None
     if last and last.ended_at is None:
         # Mẻ gần nhất của lệnh này còn đang lọc dở dang — bắt buộc tiếp tục đúng tank đó, bỏ
@@ -1244,6 +1315,7 @@ def add_filter(payload: FilterIn, db: Session = Depends(get_db),
         blocked_reason = filter_order_svc._bbt_target_blocked_by(db, chosen_to_bbt)
         if blocked_reason:
             raise DomainError(blocked_reason)
+        mix_warning = filter_order_svc._bbt_mix_warning(db, chosen_to_bbt, order.beer_type_id)
         if last:
             data["batch_number"] = last.batch_number
             data["order_number"] = last.order_number
@@ -1330,6 +1402,7 @@ def add_filter(payload: FilterIn, db: Session = Depends(get_db),
         genealogy.add_edge(db, from_type="filter", from_id=src.filter_id, to_type="filter",
                            to_id=f.filter_id, relation="lọc lại")
     db.commit(); db.refresh(f)
+    f.mix_warning = mix_warning
     return f
 
 
@@ -1647,7 +1720,7 @@ def add_filter_material(filter_id: str, payload: FilterMaterialUsageIn, db: Sess
         data["fifo_ok"] = warehouse_svc.is_oldest_workshop_lot(db, lot.material_id, lot_id)
         data["uom"] = lot.uom
         result = warehouse_svc.issue(db, lot_id, data["quantity"], user, mode="tu_do",
-                                     reason=f"Dùng cho mẻ lọc {f.filter_code}", ref_doc=f.filter_code)
+                                     reason=f"Dùng cho mẻ lọc {f.filter_code}", ref_doc=f.filter_code, skip_perm_check=True)
         data["lot_id"] = lot_id
         data["movement_id"] = result["movement_id"]
     else:
@@ -1684,13 +1757,13 @@ def update_filter_material(filter_id: str, usage_id: str, payload: FilterMateria
         raise DomainError("Chọn nguyên liệu hoặc nhập tên nguyên liệu.")
     new_qty = data.get("quantity")
     if u.lot_id and u.movement_id and new_qty != u.quantity:
-        warehouse_svc.undo_issue(db, u.movement_id, user)
+        warehouse_svc.undo_issue(db, u.movement_id, user, skip_perm_check=True)
         f = db.get(FilterRecord, filter_id)
         lot = db.get(MaterialLot, u.lot_id)
         if lot:
             u.fifo_ok = warehouse_svc.is_oldest_workshop_lot(db, lot.material_id, u.lot_id)
         result = warehouse_svc.issue(db, u.lot_id, new_qty, user, mode="tu_do",
-                                     reason=f"Dùng cho mẻ lọc {f.filter_code} (sửa số lượng)", ref_doc=f.filter_code)
+                                     reason=f"Dùng cho mẻ lọc {f.filter_code} (sửa số lượng)", ref_doc=f.filter_code, skip_perm_check=True)
         u.movement_id = result["movement_id"]
     for k, v in data.items():
         if k not in ("receipt_id", "lot_id") or v:
@@ -1709,7 +1782,7 @@ def delete_filter_material(filter_id: str, usage_id: str, db: Session = Depends(
     f = db.get(FilterRecord, filter_id)
     _assert_unlocked(f, *_filter_order_chain(db, f.filter_order_id if f else None))
     if u.movement_id:
-        warehouse_svc.undo_issue(db, u.movement_id, user)
+        warehouse_svc.undo_issue(db, u.movement_id, user, strict=False, skip_perm_check=True)
     db.delete(u)
     db.commit()
 
@@ -1725,7 +1798,7 @@ def delete_filter(filter_id: str, db: Session = Depends(get_db), user: User = De
         raise DomainError("Đã có bản ghi chiết lấy từ lô lọc này — xóa bản ghi chiết trước khi xóa lọc.")
     for u in db.execute(select(FilterMaterialUsage).where(FilterMaterialUsage.filter_id == filter_id)).scalars().all():
         if u.movement_id:
-            warehouse_svc.undo_issue(db, u.movement_id, user)
+            warehouse_svc.undo_issue(db, u.movement_id, user, strict=False, skip_perm_check=True)
         db.delete(u)
     lines = db.execute(select(FilterOrderTank).where(FilterOrderTank.filter_id == filter_id)).scalars().all()
     for line in lines:
@@ -1741,7 +1814,9 @@ def delete_filter(filter_id: str, db: Session = Depends(get_db), user: User = De
         # Dòng nhân bản riêng của bản ghi này — xóa hẳn (không phải template dùng chung cấp
         # lệnh), tank BBT của bản ghi này lại "trống" vì không còn FilterRecord nào dùng nữa.
         db.delete(line)
-    for r in db.execute(select(QualityResult).where(QualityResult.scope_type == "filter", QualityResult.scope_id == f.filter_code)).scalars().all():
+    for r in db.execute(select(QualityResult).where(
+            QualityResult.scope_type == "filter",
+            QualityResult.scope_id == qc_catalog.filter_scope_id(f.filter_code, f.filter_year))).scalars().all():
         db.delete(r)
     genealogy.delete_edges_for(db, "filter", filter_id)
     db.delete(f)
@@ -1762,12 +1837,13 @@ def list_bottles(years: list[int] = Query(None), db: Session = Depends(get_db)):
         total = b.ca1 + b.ca2 + b.ca3
         # Chiết không tiêu thụ NVL (khác Nấu/Lọc) — chỉ 1 chốt chỉ tiêu Thành phẩm (đã gộp
         # "Sau chiết" vào đây, xem nút "Thành phẩm" app.js), đủ chỉ tiêu mới xanh dương.
-        tp_ok = _stage_ok(db, "thanh_pham", "bottle", f"{b.bottle_code}__thanh_pham", b.product_id,
-                          finished_product_id=b.finished_product_id, beer_type_id=b.beer_type_id)
+        tp_ok = _stage_ok(db, "thanh_pham", "bottle", qc_catalog.bottle_scope_id(b.bottle_code, b.bottle_year),
+                          b.product_id, finished_product_id=b.finished_product_id, beer_type_id=b.beer_type_id)
         color = "blue" if tp_ok else "red"
         exec_status = _exec_status(b.ended_at)
         source_filter = source_filters.get(b.filter_id)
-        out.append({"bottle_id": b.bottle_id, "bottle_code": b.bottle_code, "filter_code": b.filter_code,
+        out.append({"bottle_id": b.bottle_id, "bottle_code": b.bottle_code, "bottle_year": b.bottle_year,
+                    "filter_code": b.filter_code,
                     "filter_id": b.filter_id,
                     "source_filter_on_hand_bbt": source_filter.on_hand_bbt if source_filter else None,
                     "bottle_date": b.bottle_date, "beer_type": b.beer_type, "beer_type_id": b.beer_type_id, "lot_no": b.lot_no,
@@ -1859,11 +1935,12 @@ def delete_bottle(bottle_id: str, db: Session = Depends(get_db), user: User = De
         if f:
             f.on_hand_bbt += b.v_cap_chiet_hl
     for r in db.execute(select(QualityResult).where(QualityResult.scope_type == "bottle",
-                        QualityResult.scope_id.in_([f"{b.bottle_code}__chiet", f"{b.bottle_code}__thanh_pham"]))).scalars().all():
+                        QualityResult.scope_id.in_([f"{b.bottle_code}__chiet", f"{b.bottle_code}__thanh_pham",
+                                                    qc_catalog.bottle_scope_id(b.bottle_code, b.bottle_year)]))).scalars().all():
         db.delete(r)
     for u in db.execute(select(BottleMaterialUsage).where(BottleMaterialUsage.bottle_id == bottle_id)).scalars().all():
         if u.movement_id:
-            warehouse_svc.undo_issue(db, u.movement_id, user)
+            warehouse_svc.undo_issue(db, u.movement_id, user, strict=False, skip_perm_check=True)
         db.delete(u)
     genealogy.delete_edges_for(db, "bottle", bottle_id)
     db.delete(b)
@@ -1904,7 +1981,7 @@ def add_bottle_material(bottle_id: str, payload: BottleMaterialUsageIn, db: Sess
         data["fifo_ok"] = warehouse_svc.is_oldest_workshop_lot(db, lot.material_id, lot_id)
         data["uom"] = lot.uom
         result = warehouse_svc.issue(db, lot_id, data["quantity"], user, mode="tu_do",
-                                     reason=f"Dùng cho mẻ chiết {b.bottle_code}", ref_doc=b.bottle_code)
+                                     reason=f"Dùng cho mẻ chiết {b.bottle_code}", ref_doc=b.bottle_code, skip_perm_check=True)
         data["lot_id"] = lot_id
         data["movement_id"] = result["movement_id"]
     elif not data.get("material_name"):
@@ -1933,12 +2010,12 @@ def update_bottle_material(bottle_id: str, usage_id: str, payload: BottleMateria
         raise DomainError("Chọn nguyên liệu hoặc nhập tên nguyên liệu.")
     new_qty = data.get("quantity")
     if u.lot_id and u.movement_id and new_qty != u.quantity:
-        warehouse_svc.undo_issue(db, u.movement_id, user)
+        warehouse_svc.undo_issue(db, u.movement_id, user, skip_perm_check=True)
         lot = db.get(MaterialLot, u.lot_id)
         if lot:
             u.fifo_ok = warehouse_svc.is_oldest_workshop_lot(db, lot.material_id, u.lot_id)
         result = warehouse_svc.issue(db, u.lot_id, new_qty, user, mode="tu_do",
-                                     reason=f"Dùng cho mẻ chiết {b.bottle_code} (sửa số lượng)", ref_doc=b.bottle_code)
+                                     reason=f"Dùng cho mẻ chiết {b.bottle_code} (sửa số lượng)", ref_doc=b.bottle_code, skip_perm_check=True)
         u.movement_id = result["movement_id"]
     for k, v in data.items():
         if k != "lot_id" or v:
@@ -1956,7 +2033,7 @@ def delete_bottle_material(bottle_id: str, usage_id: str, db: Session = Depends(
         raise NotFoundError("Dòng nguyên liệu không tồn tại.")
     _assert_unlocked(db.get(BottleRecord, bottle_id))
     if u.movement_id:
-        warehouse_svc.undo_issue(db, u.movement_id, user)
+        warehouse_svc.undo_issue(db, u.movement_id, user, strict=False, skip_perm_check=True)
     db.delete(u)
     db.commit()
 
@@ -1992,8 +2069,25 @@ def finish_bottle(bottle_id: str, payload: FinishBottleIn = FinishBottleIn(), db
     if payload.ca3 is not None:
         b.ca3 = payload.ca3
     new_total = b.ca1 + b.ca2 + b.ca3
+    finished_product = db.get(FinishedProduct, b.finished_product_id) if b.finished_product_id else None
+    # Đối chiếu V cấp chiết (hl, đo ở tank BBT) với SL ca1+ca2+ca3 (đếm vỉ/keg cuối line) — 2 số
+    # trước đây nhập tay ĐỘC LẬP, không đối chiếu gì, nên sai lệch giữa chúng khiến tồn BBT giảm
+    # đúng nhưng số vỉ/keg thật nhập kho lại sai. Chỉ đối chiếu được nếu SKU đã khai báo
+    # unit_volume_l (dung tích 1 lon/keg, lít) — SKU cũ chưa khai báo thì bỏ qua, không ép buộc.
+    if finished_product and finished_product.unit_volume_l and b.v_cap_chiet_hl and new_total > 0:
+        per_pack_unit = finished_product.unit_volume_l * (
+            finished_product.pack_size if finished_product.unit_type == "vi" else 1)
+        expected_units = (b.v_cap_chiet_hl * 100) / per_pack_unit if per_pack_unit else 0
+        if expected_units and abs(new_total - expected_units) / expected_units > 0.1:
+            if not (payload.mismatch_reason or "").strip():
+                raise DomainError(
+                    f"SL ca1+ca2+ca3 ({new_total:g} {finished_product.unit_type}) lệch quá 10% so với "
+                    f"V cấp chiết quy đổi ({expected_units:.1f} {finished_product.unit_type}) — nhập lý do "
+                    "sai lệch (mismatch_reason) để xác nhận vẫn tiếp tục.")
+            record_audit(db, entity_type="bottle_record", entity_id=b.bottle_id, action="finish_ca_mismatch",
+                        actor=user, after={"ca_total": new_total, "expected_units": round(expected_units, 1)},
+                        reason=payload.mismatch_reason)
     if b.approved and new_total != old_total:
-        finished_product = db.get(FinishedProduct, b.finished_product_id) if b.finished_product_id else None
         pack_size = finished_product.pack_size if finished_product else 24
         unit_type = finished_product.unit_type if finished_product else "vi"
         product_name = finished_product.code if finished_product else b.beer_type
@@ -2022,7 +2116,8 @@ def approve_bottle(bottle_id: str, db: Session = Depends(get_db), user: User = D
     _assert_unlocked(b)
     if b.approved:
         raise DomainError("Bản ghi chiết này đã được duyệt.")
-    status = qc_catalog.stage_qc_status(db, "thanh_pham", "bottle", f"{b.bottle_code}__thanh_pham",
+    status = qc_catalog.stage_qc_status(db, "thanh_pham", "bottle",
+                                        qc_catalog.bottle_scope_id(b.bottle_code, b.bottle_year),
                                         finished_product_id=b.finished_product_id, beer_type_id=b.beer_type_id)
     if status["pending"]:
         raise DomainError(f"Còn thiếu chỉ tiêu bắt buộc (thành phẩm): {', '.join(status['pending'])}.")
@@ -2040,7 +2135,7 @@ def approve_bottle(bottle_id: str, db: Session = Depends(get_db), user: User = D
     units = wms_svc._create_units(db, {
         "finished_product_id": b.finished_product_id, "product_name": product_name,
         "lot_code": b.lot_no or b.bottle_code, "total": ca_total * pack_size, "pack_size": pack_size,
-        "unit_type": unit_type,
+        "unit_type": unit_type, "source": "chiet",
     }, created_by=user.username, actor=user)
     for u in units:
         genealogy.add_edge(db, from_type="bottle", from_id=bottle_id, to_type="finished_goods_unit",

@@ -42,6 +42,12 @@ def update_qc_parameter(param_id: str, payload: QcParameterIn, db: Session = Dep
     return svc.update_qc_parameter(db, param_id, payload.model_dump(), user)
 
 
+@router.delete("/parameters/{param_id}", status_code=204)
+def delete_qc_parameter(param_id: str, db: Session = Depends(get_db),
+                        user: User = Depends(get_current_user)):
+    svc.delete_qc_parameter(db, param_id, user)
+
+
 # ---- Nhóm chỉ tiêu chất lượng NVL ----
 @router.get("/groups", response_model=list[QcGroupOut])
 def list_qc_groups(db: Session = Depends(get_db), user: User = Depends(get_current_user)):

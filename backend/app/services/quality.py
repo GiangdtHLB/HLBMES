@@ -95,8 +95,10 @@ def record_result(db: Session, payload: dict, user: User) -> QualityResult:
 
 
 def set_hold(db: Session, scope_type: str, scope_id: str, on_hold: bool, user: User,
-             reason: str = None) -> dict:
-    """Đặt/huỷ hold. Release (huỷ hold) phải do QA và không còn FAIL treo."""
+             reason: str = None, parameter: str = None) -> dict:
+    """Đặt/huỷ hold. Release (huỷ hold) phải do QA và không còn FAIL treo. `parameter` (mã chỉ
+    tiêu người dùng chọn từ panel "Chỉ tiêu của phạm vi này") không có cột riêng trên model —
+    lưu vào audit log để hiện lại ở Lịch sử Hold/Release (xem frontend/app.js::holdHistory)."""
     _assert_scope_exists(db, scope_type, scope_id)
     if on_hold:
         require_role(user, Role.QA, Role.SUPERVISOR)
@@ -110,7 +112,7 @@ def set_hold(db: Session, scope_type: str, scope_id: str, on_hold: bool, user: U
     before = _set_quality_status(db, scope_type, scope_id, new_status)
     record_audit(db, entity_type=scope_type, entity_id=scope_id,
                  action="release" if not on_hold else "hold", actor=user,
-                 before=before, after={"quality_status": new_status}, reason=reason)
+                 before=before, after={"quality_status": new_status, "parameter": parameter}, reason=reason)
     db.commit()
     return {"scope_type": scope_type, "scope_id": scope_id, "quality_status": new_status}
 
@@ -127,6 +129,7 @@ def open_deviation(db: Session, payload: dict, user: User) -> Deviation:
         scope_id=scope_id,
         severity=payload.get("severity", "minor"),
         reason=payload["reason"],
+        parameter=payload.get("parameter"),
         state=DeviationState.OPEN.value,
         opened_by=user.username,
         opened_at=utcnow(),
@@ -134,7 +137,8 @@ def open_deviation(db: Session, payload: dict, user: User) -> Deviation:
     db.add(dev)
     _set_quality_status(db, scope_type, scope_id, QualityStatus.ON_HOLD.value)
     record_audit(db, entity_type="deviation", entity_id=dev.deviation_id, action="open",
-                 actor=user, after={"code": dev.deviation_code, "scope": f"{scope_type}:{scope_id}"})
+                 actor=user, after={"code": dev.deviation_code, "scope": f"{scope_type}:{scope_id}",
+                                    "parameter": dev.parameter})
     db.commit()
     db.refresh(dev)
     return dev
@@ -203,7 +207,28 @@ def _set_quality_status(db: Session, scope_type: str, scope_id: str, status: str
     else:
         before = {"quality_status": obj.quality_status}
         obj.quality_status = status
+    if status == QualityStatus.ON_HOLD.value:
+        _cascade_hold_siblings(db, scope_type, obj)
     return before
+
+
+# Hold 1 mẻ nấu (brew_batch) hoặc mẻ lọc (filter) phải kéo cả lô nấu (BrewRecord)/lô lọc
+# (FilterOrder) chứa nó vào diện hold — người vận hành mở khóa lô lọc/lô nấu và thấy MỌI mẻ
+# trong đó đang bị giữ, không chỉ mẻ vừa fail. CHỈ áp dụng chiều hold: release 1 mẻ KHÔNG tự
+# release cả lô — mỗi mẻ anh chị em vẫn phải tự qua được _assert_releasable của chính nó (an
+# toàn hơn, tránh 1 lần release vô tình mở khóa luôn các mẻ khác còn FAIL treo).
+def _cascade_hold_siblings(db: Session, scope_type: str, obj) -> None:
+    if scope_type == "brew_batch":
+        siblings = db.execute(select(BrewBatch).where(
+            BrewBatch.brew_id == obj.brew_id, BrewBatch.batch_id != obj.batch_id)).scalars().all()
+    elif scope_type == "filter" and obj.filter_order_id:
+        siblings = db.execute(select(FilterRecord).where(
+            FilterRecord.filter_order_id == obj.filter_order_id,
+            FilterRecord.filter_id != obj.filter_id)).scalars().all()
+    else:
+        return
+    for sib in siblings:
+        sib.quality_status = QualityStatus.ON_HOLD.value
 
 
 def latest_results_by_param(db: Session, scope_type: str, scope_id: str) -> dict[str, QualityResult]:
@@ -229,6 +254,13 @@ def _assert_releasable(db: Session, scope_type: str, scope_id: str) -> None:
         raise DomainError(
             f"Không thể release: còn chỉ tiêu bắt buộc chưa khai báo: {', '.join(missing)}."
         )
+
+    if scope_type == "lot":
+        # Tạm thời (theo yêu cầu 2026-08-01): duyệt chỉ tiêu NVL không chặn khi có chỉ tiêu
+        # FAIL — màn hình Kho NVL không có luồng mở/đóng deviation cho lô NVL nên yêu cầu
+        # "mọi FAIL phải có deviation CLOSED" bên dưới sẽ chặn cứng không lối ra. Chỉ cần
+        # khai báo đủ chỉ tiêu bắt buộc (đã kiểm tra ở trên) là cho duyệt qua.
+        return
 
     latest_by_param = latest_results_by_param(db, scope_type, scope_id)
     fails = [r for r in latest_by_param.values() if r.status == ResultStatus.FAIL.value]

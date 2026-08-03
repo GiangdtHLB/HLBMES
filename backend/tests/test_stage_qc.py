@@ -325,6 +325,9 @@ def test_approve_filter_blocked_until_stage_qc_satisfied(client, admin_h, vanhan
                           "filter_order_id": filter_order_id, "to_bbt": f"BBT-{filter_code}"})
     assert f.status_code == 201, f.text
     filter_id = f.json()["filter_id"]
+    # filter_code chỉ duy nhất TRONG 1 năm — scope_id thật (qc_catalog.filter_scope_id) phải kèm
+    # năm để khớp đúng bản ghi approve_filter tra cứu, không lẫn với mã trùng ở năm khác.
+    filter_scope_id = f"{f.json()['filter_year']}-{filter_code}"
 
     # KCS ký duyệt (quyền quality.release) — vanhanh (operator) không có quyền này.
     forbidden = client.post(f"/api/brewing/filters/{filter_id}/approve", headers=vanhanh_h)
@@ -335,11 +338,11 @@ def test_approve_filter_blocked_until_stage_qc_satisfied(client, admin_h, vanhan
 
     # Khai báo hết TẤT CẢ chỉ tiêu bắt buộc hiện có cho stage "loc" (nhóm này cộng dồn với
     # LOCTEST/FAILTEST khai báo ở các test trước trong cùng file/DB module-scoped).
-    st = client.get(f"/api/brewing/qc-status?stage=loc&scope_type=filter&scope_id={filter_code}",
+    st = client.get(f"/api/brewing/qc-status?stage=loc&scope_type=filter&scope_id={filter_scope_id}",
                     headers=vanhanh_h).json()
     for p in st["required"]:
         rec = client.post("/api/brewing/qc-results", headers=vanhanh_h,
-                          json={"stage": "loc", "scope_type": "filter", "scope_id": filter_code,
+                          json={"stage": "loc", "scope_type": "filter", "scope_id": filter_scope_id,
                                 "parameter": p["code"], "value": 5,
                                 "lower_limit": p["lsl"] or 1, "upper_limit": p["usl"] or 10})
         assert rec.status_code == 201, rec.text
@@ -375,6 +378,7 @@ def test_approve_bottle_blocked_until_stage_qc_satisfied(client, admin_h, vanhan
                     json={"bottle_code": bottle_code, "beer_type": "Bia test"})
     assert b.status_code == 201, b.text
     bottle_id = b.json()["bottle_id"]
+    bottle_year = b.json()["bottle_year"]
     b_fin = client.post(f"/api/brewing/bottles/{bottle_id}/finish", headers=vanhanh_h, json={"ca1": 10})
     assert b_fin.status_code == 200, b_fin.text
 
@@ -385,8 +389,11 @@ def test_approve_bottle_blocked_until_stage_qc_satisfied(client, admin_h, vanhan
     blocked = client.post(f"/api/brewing/bottles/{bottle_id}/approve", headers=admin_h)
     assert blocked.status_code == 409, blocked.text
 
+    # bottle_code chỉ duy nhất TRONG 1 năm — scope_id thật (qc_catalog.bottle_scope_id) phải
+    # kèm năm để khớp đúng bản ghi approve_bottle tra cứu.
     rec = client.post("/api/brewing/qc-results", headers=vanhanh_h,
-                      json={"stage": "thanh_pham", "scope_type": "bottle", "scope_id": f"{bottle_code}__thanh_pham",
+                      json={"stage": "thanh_pham", "scope_type": "bottle",
+                            "scope_id": f"{bottle_year}-{bottle_code}__thanh_pham",
                             "parameter": code, "value": 5, "lower_limit": 1, "upper_limit": 10})
     assert rec.status_code == 201, rec.text
 
@@ -524,6 +531,56 @@ def test_qc_group_delete_blocked_when_linked_to_stage(client, admin_h):
 
     groups = client.get("/api/qc/groups", headers=admin_h).json()
     assert not any(g["group_id"] == group_id for g in groups)
+
+
+def test_nuoc_nau_stage_universal_scope_not_beer_type_scoped(client, admin_h):
+    """"nuoc_nau" (chỉ tiêu nước nấu bia) dùng chung cho MỌI dịch bia/loại bia — không nằm
+    trong PRODUCT_SCOPED_STAGES lẫn BEER_TYPE_SCOPED_STAGES, nên server phải LUÔN ép cả
+    product_id lẫn beer_type_id về NULL kể cả khi client cố tình gửi kèm (phòng trường hợp
+    gán nhầm phạm vi làm mất tính "áp dụng chung" của nhóm)."""
+    bt = client.post("/api/beer-types", headers=admin_h, json={"code": "NUOCNAUBT", "name": "Loại bia test nước nấu"})
+    assert bt.status_code == 201, bt.text
+    beer_type_id = bt.json()["beer_type_id"]
+    prod = client.post("/api/products", headers=admin_h,
+                       json={"code": "DICHBIA-NUOCNAU", "name": "Dịch bia test nước nấu", "uom": "L"})
+    assert prod.status_code == 201, prod.text
+    product_id = prod.json()["product_id"]
+
+    group_id, code = _make_group_with_param(client, admin_h, "NUOCNAU")
+    # Cố tình gửi kèm product_id/beer_type_id — server phải bỏ qua cả 2, lưu NULL.
+    link = client.post("/api/qc/stage-groups", headers=admin_h,
+                       json={"stage": "nuoc_nau", "group_id": group_id,
+                             "product_id": product_id, "beer_type_id": beer_type_id, "mandatory": True})
+    assert link.status_code == 201, link.text
+    assert link.json()["product_id"] is None
+    assert link.json()["beer_type_id"] is None
+
+    # Sửa cũng phải scrub lại đúng như vậy.
+    upd = client.put(f"/api/qc/stage-groups/{link.json()['link_id']}", headers=admin_h,
+                     json={"stage": "nuoc_nau", "group_id": group_id,
+                           "product_id": product_id, "beer_type_id": beer_type_id, "mandatory": True})
+    assert upd.status_code == 200, upd.text
+    assert upd.json()["product_id"] is None
+    assert upd.json()["beer_type_id"] is None
+
+    # Áp dụng cho CẢ LÔ NẤU (mã nấu/BrewRecord) — 1 khai báo dùng chung cho mọi mẻ bên trong,
+    # không truyền product_id vẫn thấy chỉ tiêu (khác PRODUCT_SCOPED_STAGES).
+    st1 = client.get("/api/brewing/qc-status?stage=nuoc_nau&scope_type=brew&scope_id=BR-NUOCNAU-01",
+                     headers=admin_h).json()
+    assert st1["pending"] == [code]
+
+    rec = client.post("/api/brewing/qc-results", headers=admin_h,
+                      json={"stage": "nuoc_nau", "scope_type": "brew", "scope_id": "BR-NUOCNAU-01",
+                            "parameter": code, "value": 5, "lower_limit": 1, "upper_limit": 10})
+    assert rec.status_code == 201, rec.text
+    assert rec.json()["status"] == "pass"
+
+    st2 = client.get("/api/brewing/qc-status?stage=nuoc_nau&scope_type=brew&scope_id=BR-NUOCNAU-01",
+                     headers=admin_h).json()
+    assert st2["pending"] == []
+    assert st2["can_release"] is True
+
+    client.delete(f"/api/qc/stage-groups/{link.json()['link_id']}", headers=admin_h)
 
 
 def test_qc_group_delete_blocked_when_linked_to_material(client, admin_h):

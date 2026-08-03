@@ -51,6 +51,11 @@ def vanhanh_h(client):
     return _login(client, "vanhanh", "123456")
 
 
+@pytest.fixture(scope="module")
+def quandoc_h(client):
+    return _login(client, "quandoc", "123456")
+
+
 def _create_material(client, admin_h, code, stock_min=None):
     payload = {"code": code, "name": f"Vật tư {code}", "uom": "kg", "category": "other"}
     if stock_min is not None:
@@ -156,6 +161,25 @@ def test_cycle_count_no_variance_creates_no_adjust_movement(client, admin_h, thu
     assert not any(m["lot_id"] == lot_id for m in moves)
 
 
+def test_vanhanh_can_count_workshop_but_not_company_warehouse(client, admin_h, thukho_h, vanhanh_h):
+    """Kiểm kê định kỳ tách theo kho: vanhanh (Kho phân xưởng, scope_warehouse="phan_xuong")
+    được tự tạo/kiểm kê phiếu CHO KHO PHÂN XƯỞNG (không cần nhờ thukho), nhưng vẫn bị chặn nếu
+    cố tạo phiếu cho Kho công ty — _assert_location_scope (services/warehouse.py) khoá theo
+    scope_warehouse của user, warehouse.receive chỉ mở khoá HÀNH ĐỘNG, không mở khoá ĐỊA ĐIỂM."""
+    mat_id = _create_material(client, admin_h, "KK-PX-MAT")
+    rc = client.post("/api/warehouse/receive", headers=admin_h,
+                     json={"lot_code": "KK-PX-LOT", "material_id": mat_id, "quantity": 20, "uom": "kg",
+                           "location": "Kho phân xưởng"})
+    assert rc.status_code == 200, rc.text
+
+    ok = client.post("/api/warehouse/counts", headers=vanhanh_h, json={"location": "Kho phân xưởng"})
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["location"] == "Kho phân xưởng"
+
+    denied = client.post("/api/warehouse/counts", headers=vanhanh_h, json={"location": "Kho công ty"})
+    assert denied.status_code == 403, denied.text
+
+
 def _posted_count_with_variance(client, admin_h, thukho_h, tag, on_hand=100, counted=92):
     mat_id = _create_material(client, admin_h, f"KK-MAT-{tag}")
     rc = client.post("/api/warehouse/receive", headers=thukho_h,
@@ -187,6 +211,45 @@ def test_stock_count_approve_requires_supervisor_role_or_above(client, admin_h, 
 
     twice = client.post(f"/api/warehouse/counts/{count_id}/approve", headers=admin_h)
     assert twice.status_code == 409, twice.text
+
+
+def test_stock_count_approve_gated_by_configurable_permission(client, admin_h, thukho_h, quandoc_h):
+    """Duyệt kiểm kê giờ gate theo quyền warehouse.count_approve (admin có thể cấp/thu hồi qua
+    Tài khoản) thay vì role cứng — quandoc (Quản đốc phân xưởng sản xuất) được seed sẵn quyền
+    này nên duyệt được, dù không phải admin; thukho (không có quyền) vẫn bị chặn."""
+    count_id, mat_id, lot_id = _posted_count_with_variance(client, admin_h, thukho_h, "APPR-CONFIGPERM")
+
+    denied = client.post(f"/api/warehouse/counts/{count_id}/approve", headers=thukho_h)
+    assert denied.status_code == 403, denied.text
+
+    ok = client.post(f"/api/warehouse/counts/{count_id}/approve", headers=quandoc_h)
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["approved_by"] == "quandoc"
+
+
+def test_stock_count_create_with_period_dates(client, admin_h, thukho_h):
+    """Ngày bắt đầu/kết thúc kỳ kiểm kê (khai báo tay) khác created_at/posted_at (mốc thao
+    tác hệ thống) — round-trip qua create_count/list_counts/get_count."""
+    mat_id = _create_material(client, admin_h, "KK-PERIOD-MAT")
+    rc = client.post("/api/warehouse/receive", headers=thukho_h,
+                     json={"lot_code": "KK-PERIOD-LOT", "material_id": mat_id, "quantity": 10, "uom": "kg"})
+    assert rc.status_code == 200, rc.text
+
+    created = client.post("/api/warehouse/counts", headers=admin_h,
+                          json={"start_date": "2026-08-01T00:00:00Z", "end_date": "2026-08-02T00:00:00Z"})
+    assert created.status_code == 200, created.text
+    body = created.json()
+    assert body["start_date"] is not None
+    assert body["end_date"] is not None
+
+    fetched = client.get(f"/api/warehouse/counts/{body['count_id']}", headers=admin_h).json()
+    assert fetched["start_date"] is not None
+    assert fetched["end_date"] is not None
+
+    listed = client.get("/api/warehouse/counts", headers=admin_h).json()
+    row = next(c for c in listed if c["count_id"] == body["count_id"])
+    assert row["start_date"] is not None
+    assert row["end_date"] is not None
 
 
 def test_stock_count_undo_restores_quantity_and_reopens_draft(client, admin_h, thukho_h):
@@ -254,6 +317,12 @@ def _declare_near_expiry(client, admin_h, fp_id, quantity, location_id=None, not
     return entry.json()
 
 
+def _approve_near_expiry(client, admin_h, entry_id):
+    r = client.post(f"/api/wms/near-expiry/{entry_id}/approve", headers=admin_h)
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
 def test_near_expiry_declare_rejects_nonpositive_quantity(client, admin_h):
     fp_id = _a_finished_product(client, admin_h, "SKU-NE-ZEROQTY")
     bad = client.post("/api/wms/near-expiry", headers=admin_h,
@@ -261,14 +330,51 @@ def test_near_expiry_declare_rejects_nonpositive_quantity(client, admin_h):
     assert bad.status_code == 409, bad.text
 
 
-def test_near_expiry_declare_generates_dedicated_lot_and_shipment_roundtrip(client, admin_h):
-    """Khai báo trực tiếp Sản phẩm + Số lượng (không cần chọn lô chiết gốc) phải tự sinh 1 lô
-    cận date riêng, tách biệt khỏi mọi lô sản xuất thật."""
-    fp_id = _a_finished_product(client, admin_h, "SKU-NE-ROUND")
+def test_near_expiry_declare_pending_then_approve_increases_stock(client, admin_h):
+    """Khai báo (direction="in") CHƯA tăng tồn kho ngay — chỉ ghi bản khai chờ duyệt (đã tự
+    sinh sẵn lot_code riêng). Trưởng bộ phận kho duyệt (approve) mới thực sự tạo tồn kho."""
+    fp_id = _a_finished_product(client, admin_h, "SKU-NE-PENDING")
     body = _declare_near_expiry(client, admin_h, fp_id, 3, note="Khai báo test")
     assert body["count"] == 3
-    product_name, lot_code = body["product_name"], body["lot_code"]
+    lot_code = body["lot_code"]
     assert lot_code  # tự sinh, không trống
+
+    hist = client.get("/api/wms/near-expiry", headers=admin_h).json()
+    row = next(h for h in hist if h["direction"] == "in" and h["lot_code"] == lot_code)
+    assert row["quantity"] == 3
+    assert row["finished_product_id"] == fp_id
+    assert row["note"] == "Khai báo test"
+    assert row["approved_by"] is None
+    assert row["can_edit"] is True and row["can_approve"] is True and row["can_undo"] is True
+
+    # Chưa duyệt -> chưa có tồn kho thật (không xuất hiện ở by-lot).
+    by_lot = client.get("/api/wms/units/by-lot", headers=admin_h).json()
+    assert not any(g["lot_code"] == lot_code for g in by_lot)
+
+    approved = _approve_near_expiry(client, admin_h, row["entry_id"])
+    assert approved["count"] == 3
+
+    hist2 = client.get("/api/wms/near-expiry", headers=admin_h).json()
+    row2 = next(h for h in hist2 if h["entry_id"] == row["entry_id"])
+    assert row2["approved_by"] == "admin"
+    assert row2["can_edit"] is False and row2["can_approve"] is False and row2["can_undo"] is False
+
+    # Đã duyệt -> giờ mới có tồn kho thật, không sửa/hoàn tác được nữa.
+    edit_after = client.put(f"/api/wms/near-expiry/{row['entry_id']}", headers=admin_h, json={"quantity": 5})
+    assert edit_after.status_code == 409
+    undo_after = client.post(f"/api/wms/near-expiry/{row['entry_id']}/undo", headers=admin_h)
+    assert undo_after.status_code == 409
+
+
+def test_near_expiry_declare_generates_dedicated_lot_and_shipment_roundtrip(client, admin_h):
+    """Khai báo trực tiếp Sản phẩm + Số lượng (không cần chọn lô chiết gốc) phải tự sinh 1 lô
+    cận date riêng, tách biệt khỏi mọi lô sản xuất thật — sau khi duyệt mới xuất được."""
+    fp_id = _a_finished_product(client, admin_h, "SKU-NE-ROUND")
+    body = _declare_near_expiry(client, admin_h, fp_id, 3, note="Khai báo test")
+    product_name, lot_code = body["product_name"], body["lot_code"]
+    hist0 = client.get("/api/wms/near-expiry", headers=admin_h).json()
+    entry_id = next(h["entry_id"] for h in hist0 if h["direction"] == "in" and h["lot_code"] == lot_code)
+    _approve_near_expiry(client, admin_h, entry_id)
 
     hist = client.get("/api/wms/near-expiry", headers=admin_h).json()
     in_entries = [h for h in hist if h["direction"] == "in" and h["lot_code"] == lot_code]
@@ -325,6 +431,9 @@ def test_near_expiry_lot_never_merges_with_regular_stock(client, admin_h):
 
     ne_body = _declare_near_expiry(client, admin_h, fp_id, 3)
     assert ne_body["lot_code"] != regular_lot
+    hist0 = client.get("/api/wms/near-expiry", headers=admin_h).json()
+    entry_id = next(h["entry_id"] for h in hist0 if h["direction"] == "in" and h["lot_code"] == ne_body["lot_code"])
+    _approve_near_expiry(client, admin_h, entry_id)
 
     by_lot = client.get("/api/wms/units/by-lot", headers=admin_h).json()
     lots_for_product = {g["lot_code"] for g in by_lot if g["product_name"] == code}
@@ -333,10 +442,12 @@ def test_near_expiry_lot_never_merges_with_regular_stock(client, admin_h):
     assert len(lots_for_product) == 2  # 2 dòng riêng biệt, không gộp
 
 
-def test_near_expiry_undo_removes_units(client, admin_h):
+def test_near_expiry_undo_removes_pending_declaration(client, admin_h):
+    """Hủy CHỈ áp dụng khi đang chờ duyệt — vì lúc đó chưa có FinishedGoodsUnit nào được tạo,
+    hủy chỉ đơn giản đánh dấu reversed (không có gì để xoá khỏi tồn kho)."""
     fp_id = _a_finished_product(client, admin_h, "SKU-NE-UNDO")
     body = _declare_near_expiry(client, admin_h, fp_id, 2)
-    lot_code, product_name = body["lot_code"], body["product_name"]
+    lot_code = body["lot_code"]
 
     hist = client.get("/api/wms/near-expiry", headers=admin_h).json()
     row = next(h for h in hist if h["direction"] == "in" and h["lot_code"] == lot_code)
@@ -345,53 +456,41 @@ def test_near_expiry_undo_removes_units(client, admin_h):
 
     undo = client.post(f"/api/wms/near-expiry/{row['entry_id']}/undo", headers=admin_h)
     assert undo.status_code == 200, undo.text
-    assert undo.json()["removed"] == 2
 
     hist2 = client.get("/api/wms/near-expiry", headers=admin_h).json()
     row2 = next(h for h in hist2 if h["entry_id"] == row["entry_id"])
     assert row2["reversed"] is True
     assert row2["can_undo"] is False
 
-    # Không còn vỉ cận date nào (đã bị xoá) -> xuất near_expiry_only phải báo lỗi.
-    ship_to = client.post("/api/wms/ship-to", headers=admin_h,
-                          json={"code": "DIST-NE-UNDO", "name": "NPP test undo"})
-    assert ship_to.status_code == 201, ship_to.text
-    shipped = client.post("/api/wms/shipments", headers=admin_h,
-                          json={"ship_to_id": ship_to.json()["ship_to_id"],
-                                "lines": [{"product_name": product_name, "lot_code": lot_code,
-                                          "unit_type": "vi", "quantity": 1, "near_expiry_only": True}]})
-    assert shipped.status_code == 409
+    # Đã hủy -> không duyệt được nữa.
+    approve_after_undo = client.post(f"/api/wms/near-expiry/{row['entry_id']}/approve", headers=admin_h)
+    assert approve_after_undo.status_code == 409
 
     # Hoàn tác lần 2 phải báo lỗi (đã hoàn tác trước đó).
     redo = client.post(f"/api/wms/near-expiry/{row['entry_id']}/undo", headers=admin_h)
     assert redo.status_code == 409
 
 
-def test_near_expiry_undo_blocked_after_shipped(client, admin_h):
-    fp_id = _a_finished_product(client, admin_h, "SKU-NE-UNDO-SHIPPED")
+def test_near_expiry_undo_blocked_after_approved(client, admin_h):
+    fp_id = _a_finished_product(client, admin_h, "SKU-NE-UNDO-APPROVED")
     body = _declare_near_expiry(client, admin_h, fp_id, 1)
-    lot_code, product_name = body["lot_code"], body["product_name"]
-
-    ship_to = client.post("/api/wms/ship-to", headers=admin_h,
-                          json={"code": "DIST-NE-UNDO-SHIPPED", "name": "NPP test undo shipped"})
-    assert ship_to.status_code == 201, ship_to.text
-    shipped = client.post("/api/wms/shipments", headers=admin_h,
-                          json={"ship_to_id": ship_to.json()["ship_to_id"],
-                                "lines": [{"product_name": product_name, "lot_code": lot_code,
-                                          "unit_type": "vi", "quantity": 1, "near_expiry_only": True}]})
-    assert shipped.status_code == 201, shipped.text
-
+    lot_code = body["lot_code"]
     hist = client.get("/api/wms/near-expiry", headers=admin_h).json()
     row = next(h for h in hist if h["direction"] == "in" and h["lot_code"] == lot_code)
+    _approve_near_expiry(client, admin_h, row["entry_id"])
+
     undo = client.post(f"/api/wms/near-expiry/{row['entry_id']}/undo", headers=admin_h)
     assert undo.status_code == 409
-    assert "xuất" in undo.json()["detail"]
+    assert "duyệt" in undo.json()["detail"]
 
 
 def test_near_expiry_undo_rejects_out_direction(client, admin_h):
     fp_id = _a_finished_product(client, admin_h, "SKU-NE-UNDO-OUTDIR")
     body = _declare_near_expiry(client, admin_h, fp_id, 1)
     lot_code, product_name = body["lot_code"], body["product_name"]
+    hist0 = client.get("/api/wms/near-expiry", headers=admin_h).json()
+    entry_id = next(h["entry_id"] for h in hist0 if h["direction"] == "in" and h["lot_code"] == lot_code)
+    _approve_near_expiry(client, admin_h, entry_id)
 
     ship_to = client.post("/api/wms/ship-to", headers=admin_h,
                           json={"code": "DIST-NE-UNDO-OUTDIR", "name": "NPP test undo outdir"})

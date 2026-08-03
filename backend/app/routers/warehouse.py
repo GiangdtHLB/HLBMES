@@ -12,6 +12,7 @@ from ..schemas import (
     MaterialRequestIn,
     MaterialRequestOut,
     ReceiptIn,
+    ReceiptUpdateIn,
     RequestFulfillAllIn,
     RequestFulfillIn,
     RequestRejectIn,
@@ -22,7 +23,10 @@ from ..schemas import (
     StockCountLinesIn,
     StockMovementOut,
     TransferIn,
-    TransferToCompanyIn,
+    TransferPxRejectIn,
+    TransferPxRequestIn,
+    TransferPxRequestOut,
+    TransferToFactoryIn,
 )
 
 router = APIRouter(prefix="/api/warehouse", tags=["warehouse"],
@@ -108,9 +112,9 @@ def create_request(payload: MaterialRequestIn, db: Session = Depends(get_db),
 
 
 @router.get("/requests", response_model=list[MaterialRequestOut])
-def list_requests(status: str = None, db: Session = Depends(get_db),
+def list_requests(status: str = None, limit: int = 500, offset: int = 0, db: Session = Depends(get_db),
                   user: User = Depends(get_current_user)):
-    return svc.list_requests(db, status)
+    return svc.list_requests(db, status, limit, offset)
 
 
 @router.post("/requests/{request_id}/lines/{line_id}/fulfill")
@@ -143,14 +147,52 @@ def undo_fulfill_line(request_id: str, line_id: str, db: Session = Depends(get_d
     return svc.undo_fulfill_line(db, request_id, line_id, user)
 
 
-# ---- Xuất tự do / Điều chuyển / Trả nhà cung cấp ----
-@router.post("/transfer-to-company")
-def transfer_to_company(payload: TransferToCompanyIn, db: Session = Depends(get_db),
+# ---- Điều chuyển kho công ty, chiều 1: Kho phân xưởng → Kho công ty (duyệt trước khi chuyển) ----
+@router.post("/transfer-px-requests", response_model=TransferPxRequestOut, status_code=201)
+def create_transfer_px_request(payload: TransferPxRequestIn, db: Session = Depends(get_db),
+                               user: User = Depends(get_current_user)):
+    return svc.create_transfer_px_request(db, payload.lot_id, payload.quantity, user, payload.reason)
+
+
+@router.get("/transfer-px-requests", response_model=list[TransferPxRequestOut])
+def list_transfer_px_requests(status: str = None, limit: int = 500, offset: int = 0,
+                              db: Session = Depends(get_db)):
+    return svc.list_transfer_px_requests(db, status, limit, offset)
+
+
+@router.post("/transfer-px-requests/{request_id}/approve", response_model=TransferPxRequestOut)
+def approve_transfer_px_request(request_id: str, db: Session = Depends(get_db),
+                                user: User = Depends(get_current_user)):
+    return svc.approve_transfer_px_request(db, request_id, user)
+
+
+@router.post("/transfer-px-requests/{request_id}/reject", response_model=TransferPxRequestOut)
+def reject_transfer_px_request(request_id: str, payload: TransferPxRejectIn, db: Session = Depends(get_db),
+                               user: User = Depends(get_current_user)):
+    return svc.reject_transfer_px_request(db, request_id, user, payload.reason)
+
+
+@router.post("/transfer-px-requests/{request_id}/undo", response_model=TransferPxRequestOut)
+def undo_transfer_px_request(request_id: str, db: Session = Depends(get_db),
+                             user: User = Depends(get_current_user)):
+    return svc.undo_transfer_px_request(db, request_id, user)
+
+
+# ---- Điều chuyển kho công ty, chiều 2: Kho công ty → Nhà máy khác (xuất ngay, duyệt sau) ----
+@router.post("/transfer-to-factory")
+def transfer_to_factory(payload: TransferToFactoryIn, db: Session = Depends(get_db),
                         user: User = Depends(get_current_user)):
-    require_perm(user, "warehouse.issue")
-    return svc.transfer_to_company(db, payload.lot_id, payload.quantity, user, payload.reason)
+    return svc.transfer_to_factory(db, payload.lot_id, payload.quantity, payload.factory_id,
+                                   user, payload.reason)
 
 
+@router.post("/movements/{movement_id}/approve-factory")
+def approve_transfer_to_factory(movement_id: str, db: Session = Depends(get_db),
+                                user: User = Depends(get_current_user)):
+    return svc.approve_transfer_to_factory(db, movement_id, user)
+
+
+# ---- Xuất tự do / Trả nhà cung cấp ----
 @router.post("/return-to-supplier")
 def return_to_supplier(payload: ReturnToSupplierIn, db: Session = Depends(get_db),
                        user: User = Depends(get_current_user)):
@@ -165,9 +207,42 @@ def undo_issue(movement_id: str, db: Session = Depends(get_db), user: User = Dep
 
 
 @router.get("/movements", response_model=list[StockMovementOut])
-def list_movements(movement_type: str = None, mode: str = None, limit: int = 200,
+def list_movements(movement_type: str = None, mode: str = None, limit: int = 200, offset: int = 0,
                    db: Session = Depends(get_db)):
-    return svc.list_movements(db, movement_type, mode, limit)
+    return svc.list_movements(db, movement_type, mode, limit, offset)
+
+
+# ---- Xóa lịch sử (chỉ admin) — dọn dẹp sổ nhập/xuất tự do/xuất theo đề nghị, dữ liệu vận
+# hành thật (lô/tồn kho/NVL đã dùng cho mẻ) không bị đụng tới. Vẫn ghi audit bình thường.
+@router.delete("/movements/free-issue-history")
+def delete_free_issue_history(workshop: bool = False, db: Session = Depends(get_db),
+                              user: User = Depends(get_current_user)):
+    return svc.delete_free_issue_history(db, workshop, user)
+
+
+@router.delete("/movements/receipt-history")
+def delete_receipt_history(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    return svc.delete_receipt_history(db, user)
+
+
+# ---- Sửa/xóa 1 lượt nhập kho cụ thể — CHỈ khi lô liên quan chưa bị xuất/chuyển/tiêu thụ (xem
+# services/warehouse.py::update_receipt/delete_receipt). Đăng ký SAU các route tĩnh
+# /movements/receipt-history, /movements/free-issue-history ở trên — FastAPI khớp route theo
+# đúng thứ tự khai báo, nếu đặt {movement_id} trước sẽ "nuốt" mất các route tĩnh đó.
+@router.put("/movements/{movement_id}")
+def update_receipt(movement_id: str, payload: ReceiptUpdateIn, db: Session = Depends(get_db),
+                   user: User = Depends(get_current_user)):
+    return svc.update_receipt(db, movement_id, payload.model_dump(exclude_unset=True), user)
+
+
+@router.delete("/movements/{movement_id}")
+def delete_receipt(movement_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    return svc.delete_receipt(db, movement_id, user)
+
+
+@router.delete("/requests-history")
+def delete_request_history(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    return svc.delete_request_history(db, user)
 
 
 @router.get("/workshop-usage-history")
@@ -179,7 +254,8 @@ def workshop_usage_history(limit: int = 200, db: Session = Depends(get_db)):
 @router.post("/counts")
 def create_count(payload: StockCountCreateIn, db: Session = Depends(get_db),
                  user: User = Depends(get_current_user)):
-    return svc.create_count(db, payload.location, user, payload.note)
+    return svc.create_count(db, payload.location, user, payload.note,
+                            payload.start_date, payload.end_date)
 
 
 @router.get("/counts")

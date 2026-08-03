@@ -145,6 +145,42 @@ def test_receive_with_mandatory_group_holds_then_release_flow(client, admin_h, t
     assert xfer_ok.json()["location"] == "Kho phân xưởng"
 
 
+def test_release_lot_allowed_even_with_fail_result(client, admin_h, thukho_h, kcs_h):
+    """Tạm thời (2026-08-01): duyệt lô NVL không bị chặn bởi chỉ tiêu FAIL — màn hình Kho
+    NVL chưa có luồng mở/đóng deviation cho lô, nên vẫn giữ đúng yêu cầu "khai báo đủ chỉ
+    tiêu bắt buộc" nhưng bỏ điều kiện phải hết FAIL (mirror test_receive_with_mandatory_group_
+    holds_then_release_flow, khác ở chỗ khai giá trị NGOÀI khoảng min/max)."""
+    mat_id = _create_material(client, admin_h, "QCT-MALTFAIL")
+    p = client.post("/api/qc/parameters", headers=admin_h,
+                    json={"code": "DO_AM_FAIL_TEST", "name": "Độ ẩm", "unit": "%", "lsl": 3, "usl": 6})
+    param_id = p.json()["param_id"]
+    g = client.post("/api/qc/groups", headers=admin_h,
+                    json={"code": "GRP-MALTFAIL-TEST", "name": "Chỉ tiêu Malt fail test"})
+    group_id = g.json()["group_id"]
+    client.post(f"/api/qc/groups/{group_id}/items", headers=admin_h,
+               json={"param_id": param_id, "mandatory": True})
+    client.post(f"/api/materials/{mat_id}/qc-groups", headers=admin_h,
+               json={"group_id": group_id, "mandatory": True})
+
+    rc = client.post("/api/warehouse/receive", headers=thukho_h,
+                     json={"lot_code": "LOT-MALTFAIL-01", "material_id": mat_id, "quantity": 500, "uom": "kg"})
+    lot_id = rc.json()["lot_id"]
+
+    # Khai báo giá trị NGOÀI khoảng min/max → status "fail".
+    rec = client.post("/api/quality/results", headers=thukho_h,
+                      json={"scope_type": "lot", "scope_id": lot_id, "parameter": "DO_AM_FAIL_TEST",
+                            "value": 20, "lower_limit": 3, "upper_limit": 6})
+    assert rec.status_code == 201, rec.text
+    assert rec.json()["status"] == "fail"
+
+    # Đã khai báo đủ chỉ tiêu bắt buộc (dù fail) → KCS vẫn duyệt được, không bị chặn bởi
+    # yêu cầu deviation CLOSED.
+    rel_ok = client.post("/api/quality/hold", headers=kcs_h,
+                         json={"scope_type": "lot", "scope_id": lot_id, "on_hold": False})
+    assert rel_ok.status_code == 200, rel_ok.text
+    assert rel_ok.json()["quality_status"] == "released"
+
+
 def test_material_request_permission_required(client, thukho_h):
     # thủ kho không có quyền warehouse.request → không tạo được đề nghị.
     r = client.post("/api/warehouse/requests", headers=thukho_h,
@@ -188,17 +224,24 @@ def test_material_request_multi_line_fulfill_flow(client, admin_h, thukho_h, van
     assert ful_a.status_code == 200, ful_a.text
     assert ful_a.json()["location"] == "Kho phân xưởng"
 
-    lot_after = client.get("/api/lots", headers=thukho_h).json()
-    lot_row = next(l for l in lot_after if l["lot_id"] == lot_a)
-    assert lot_row["location"] == "Kho phân xưởng"
-    assert lot_row["quantity"] == 200   # transfer không đổi tổng tồn của lô
-
     # Dòng B vẫn đang pending, độc lập với dòng A đã fulfilled.
     after_a = next(r for r in client.get("/api/warehouse/requests", headers=thukho_h).json()
                    if r["request_id"] == request_id)
     statuses = {l["line_id"]: l["status"] for l in after_a["lines"]}
     assert statuses[line_a["line_id"]] == "fulfilled"
     assert statuses[line_b["line_id"]] == "pending"
+
+    # Xuất 50/200 (một phần) — transfer() tách lô mới mang đúng 50 sang Kho phân xưởng, lô gốc
+    # còn lại 150 vẫn ở Kho công ty (xem services/warehouse.py::transfer split-lot).
+    fulfilled_lot_id = next(l for l in after_a["lines"] if l["line_id"] == line_a["line_id"])["fulfilled_lot_id"]
+    assert fulfilled_lot_id != lot_a
+    lot_after = client.get("/api/lots", headers=thukho_h).json()
+    fulfilled_lot = next(l for l in lot_after if l["lot_id"] == fulfilled_lot_id)
+    assert fulfilled_lot["location"] == "Kho phân xưởng"
+    assert fulfilled_lot["quantity"] == 50
+    original_lot = next(l for l in lot_after if l["lot_id"] == lot_a)
+    assert original_lot["location"] == "Kho công ty"
+    assert original_lot["quantity"] == 150
 
     # Xử lý lại dòng đã fulfilled → 409.
     again = client.post(f"/api/warehouse/requests/{request_id}/lines/{line_a['line_id']}/fulfill",
@@ -245,14 +288,11 @@ def test_material_request_fulfill_blocked_on_hold(client, admin_h, thukho_h, van
     lot_id = rc.json()["lot_id"]
     assert rc.json()["status"] == "on_hold"
 
+    # Tồn "đủ để tạo phiếu" giờ loại trừ lô đang HOLD (xem services/warehouse.py::stock_on_hand)
+    # — lô duy nhất đang hold nên phiếu bị chặn ngay từ lúc TẠO, không cần đợi tới lúc duyệt.
     req = client.post("/api/warehouse/requests", headers=vanhanh_h,
                       json={"lines": [{"material_id": mat_id, "quantity": 10}]})
-    request_id = req.json()["request_id"]
-    line_id = req.json()["lines"][0]["line_id"]
-
-    ful = client.post(f"/api/warehouse/requests/{request_id}/lines/{line_id}/fulfill", headers=thukho_h,
-                      json={"lot_id": lot_id, "quantity": 10})
-    assert ful.status_code == 409, ful.text
+    assert req.status_code == 409, req.text
 
 
 def test_inventory_report_location_filter(client, admin_h, thukho_h):
@@ -310,36 +350,37 @@ def test_material_request_fulfill_all(client, admin_h, thukho_h, vanhanh_h):
                 if r["request_id"] == request_id)
     assert all(l["status"] == "fulfilled" for l in after["lines"])
 
+    # Xuất 1 phần (30/90, 15/40) — transfer() tách lô mới cho đúng phần đã fulfilled, lô gốc
+    # (LOT-REQALL-A/B) vẫn ở Kho công ty với phần dư (xem services/warehouse.py::transfer).
     lots = client.get("/api/lots", headers=thukho_h).json()
-    lot_a = next(l for l in lots if l["lot_code"] == "LOT-REQALL-A")
-    lot_b = next(l for l in lots if l["lot_code"] == "LOT-REQALL-B")
-    assert lot_a["location"] == "Kho phân xưởng"
-    assert lot_b["location"] == "Kho phân xưởng"
+    for line in after["lines"]:
+        fulfilled_lot = next(l for l in lots if l["lot_id"] == line["fulfilled_lot_id"])
+        assert fulfilled_lot["location"] == "Kho phân xưởng"
 
 
-def test_material_request_fulfill_all_skips_on_hold_line(client, admin_h, thukho_h, vanhanh_h):
+def test_material_request_fulfill_all_skips_on_hold_line(client, admin_h, thukho_h, vanhanh_h, kcs_h):
     mat_ok = _create_material(client, admin_h, "REQALL-OK")
     mat_hold = _create_material(client, admin_h, "REQALL-HOLD")
     client.post("/api/warehouse/receive", headers=thukho_h,
                json={"lot_code": "LOT-REQALL-OK", "material_id": mat_ok, "quantity": 50, "uom": "kg"})
-
-    p = client.post("/api/qc/parameters", headers=admin_h,
-                    json={"code": "CT_FULFILLALL_HOLD", "name": "Chỉ tiêu test"})
-    g = client.post("/api/qc/groups", headers=admin_h, json={"code": "GRP-FULFILLALL-HOLD", "name": "Nhóm test"})
-    group_id = g.json()["group_id"]
-    client.post(f"/api/qc/groups/{group_id}/items", headers=admin_h,
-               json={"param_id": p.json()["param_id"], "mandatory": True})
-    client.post(f"/api/materials/{mat_hold}/qc-groups", headers=admin_h,
-               json={"group_id": group_id, "mandatory": True})
-    client.post("/api/warehouse/receive", headers=thukho_h,
-               json={"lot_code": "LOT-REQALL-HOLD", "material_id": mat_hold, "quantity": 20, "uom": "kg"})
+    # Nhận kho TRƯỚC khi gán nhóm chỉ tiêu bắt buộc — lô available ngay (không hold), đủ tồn để
+    # TẠO phiếu (xem stock_on_hand loại trừ HOLD, task #805) — hold được áp dụng SAU đó để test
+    # đúng nhánh "fulfill-all bỏ qua dòng đang hold", tách biệt khỏi check tồn lúc tạo phiếu.
+    rc_hold = client.post("/api/warehouse/receive", headers=thukho_h,
+                          json={"lot_code": "LOT-REQALL-HOLD", "material_id": mat_hold, "quantity": 20, "uom": "kg"})
+    lot_hold_id = rc_hold.json()["lot_id"]
 
     req = client.post("/api/warehouse/requests", headers=vanhanh_h,
                       json={"lines": [
                           {"material_id": mat_ok, "quantity": 10, "uom": "kg"},
                           {"material_id": mat_hold, "quantity": 5, "uom": "kg"},
                       ]})
+    assert req.status_code == 201, req.text
     request_id = req.json()["request_id"]
+
+    hold_it = client.post("/api/quality/hold", headers=kcs_h,
+                          json={"scope_type": "lot", "scope_id": lot_hold_id, "on_hold": True})
+    assert hold_it.status_code == 200, hold_it.text
 
     ful = client.post(f"/api/warehouse/requests/{request_id}/fulfill-all", headers=thukho_h, json={})
     assert ful.status_code == 200, ful.text
@@ -398,15 +439,24 @@ def test_undo_fulfill_line_success(client, admin_h, thukho_h, vanhanh_h):
     ful = client.post(f"/api/warehouse/requests/{request_id}/lines/{line_id}/fulfill",
                       headers=thukho_h, json={"lot_id": lot_id, "quantity": 20})
     assert ful.status_code == 200, ful.text
+    # Xuất 20/50 (một phần) — transfer() tách lô mới mang đúng 20 sang Kho phân xưởng, lô gốc
+    # còn lại 30 vẫn ở Kho công ty (xem services/warehouse.py::transfer split-lot).
+    fulfilled_lot_id = next(l for l in client.get("/api/warehouse/requests", headers=thukho_h).json()
+                           if l["request_id"] == request_id)["lines"][0]["fulfilled_lot_id"]
+    assert fulfilled_lot_id != lot_id
 
     undo = client.post(f"/api/warehouse/requests/{request_id}/lines/{line_id}/undo-fulfill", headers=thukho_h)
     assert undo.status_code == 200, undo.text
     assert undo.json()["status"] == "pending"
 
+    # Hoàn tác trả lô tách (20) về lại Kho công ty — KHÔNG gộp ngược vào lô gốc (transfer()
+    # không tự gộp lô), nên giờ có 2 lô riêng cùng ở Kho công ty, tổng vẫn đúng 50.
     lots = client.get("/api/lots", headers=thukho_h).json()
-    lot_row = next(l for l in lots if l["lot_id"] == lot_id)
-    assert lot_row["location"] == "Kho công ty"
-    assert lot_row["quantity"] == 50
+    original_lot = next(l for l in lots if l["lot_id"] == lot_id)
+    returned_lot = next(l for l in lots if l["lot_id"] == fulfilled_lot_id)
+    assert original_lot["location"] == "Kho công ty"
+    assert returned_lot["location"] == "Kho công ty"
+    assert original_lot["quantity"] + returned_lot["quantity"] == 50
 
 
 def test_undo_fulfill_line_blocked_when_consumed(client, admin_h, thukho_h, vanhanh_h):
@@ -421,12 +471,16 @@ def test_undo_fulfill_line_blocked_when_consumed(client, admin_h, thukho_h, vanh
     ful = client.post(f"/api/warehouse/requests/{request_id}/lines/{line_id}/fulfill",
                       headers=thukho_h, json={"lot_id": lot_id, "quantity": 20})
     assert ful.status_code == 200, ful.text
+    # Lô THẬT đã fulfilled là lô tách (xuất 1 phần 20/50), không phải lot_id gốc — xem
+    # services/warehouse.py::transfer split-lot + fulfill_request_line lưu result["lot_id"].
+    fulfilled_lot_id = next(l for l in client.get("/api/warehouse/requests", headers=thukho_h).json()
+                           if l["request_id"] == request_id)["lines"][0]["fulfilled_lot_id"]
 
     # Giả lập lô đã được dùng cho mẻ sản xuất (genealogy consume edge) — tái dùng bảng
     # có sẵn thay vì dựng toàn bộ pipeline work-order/recipe/batch chỉ để test cờ chặn.
     db = SessionLocal()
     try:
-        db.add(GenealogyEdge(from_type="lot", from_id=lot_id, to_type="batch", to_id="fake-batch",
+        db.add(GenealogyEdge(from_type="lot", from_id=fulfilled_lot_id, to_type="batch", to_id="fake-batch",
                              relation="consume", quantity=20, uom="kg"))
         db.commit()
     finally:
@@ -436,17 +490,17 @@ def test_undo_fulfill_line_blocked_when_consumed(client, admin_h, thukho_h, vanh
     assert undo.status_code == 409, undo.text
 
 
-def test_transfer_to_company_blocked_when_not_at_workshop(client, admin_h, thukho_h):
+def test_transfer_px_request_blocked_when_not_at_workshop(client, admin_h, thukho_h, vanhanh_h):
     mat_id = _create_material(client, admin_h, "DC-BLOCK")
     rc = client.post("/api/warehouse/receive", headers=thukho_h,
                      json={"lot_code": "LOT-DC-BLOCK", "material_id": mat_id, "quantity": 30, "uom": "kg"})
     lot_id = rc.json()["lot_id"]
-    r = client.post("/api/warehouse/transfer-to-company", headers=thukho_h,
+    r = client.post("/api/warehouse/transfer-px-requests", headers=vanhanh_h,
                     json={"lot_id": lot_id, "quantity": 30})
     assert r.status_code == 409, r.text
 
 
-def test_transfer_to_company_ok(client, admin_h, thukho_h):
+def test_transfer_px_request_approve_ok(client, admin_h, thukho_h, vanhanh_h):
     mat_id = _create_material(client, admin_h, "DC-OK")
     rc = client.post("/api/warehouse/receive", headers=thukho_h,
                      json={"lot_code": "LOT-DC-OK", "material_id": mat_id, "quantity": 30, "uom": "kg"})
@@ -454,13 +508,26 @@ def test_transfer_to_company_ok(client, admin_h, thukho_h):
     client.post("/api/warehouse/transfer", headers=thukho_h,
                json={"lot_id": lot_id, "quantity": 30, "location_to": "Kho phân xưởng"})
 
-    r = client.post("/api/warehouse/transfer-to-company", headers=thukho_h,
-                    json={"lot_id": lot_id, "quantity": 30, "reason": "Nhận thừa"})
+    req = client.post("/api/warehouse/transfer-px-requests", headers=vanhanh_h,
+                      json={"lot_id": lot_id, "quantity": 30, "reason": "Nhận thừa"})
+    assert req.status_code == 201, req.text
+    request_id = req.json()["request_id"]
+    assert req.json()["status"] == "pending"
+
+    # thủ kho công ty duyệt — lúc này mới thật sự chuyển kho
+    r = client.post(f"/api/warehouse/transfer-px-requests/{request_id}/approve", headers=thukho_h)
     assert r.status_code == 200, r.text
-    assert r.json()["location"] == "Kho công ty"
+    assert r.json()["status"] == "approved"
 
     hist = client.get("/api/warehouse/movements?movement_type=transfer&mode=dieu_chuyen", headers=thukho_h).json()
     assert any(m["lot_id"] == lot_id for m in hist)
+
+    # sau khi duyệt, chỉ ADMIN mới hoàn tác được
+    undo_denied = client.post(f"/api/warehouse/transfer-px-requests/{request_id}/undo", headers=thukho_h)
+    assert undo_denied.status_code == 403, undo_denied.text
+    undo = client.post(f"/api/warehouse/transfer-px-requests/{request_id}/undo", headers=admin_h)
+    assert undo.status_code == 200, undo.text
+    assert undo.json()["reversed"] is True
 
 
 def test_return_to_supplier_requires_reason(client, admin_h, thukho_h):
@@ -657,3 +724,28 @@ def test_opening_balance_wms_build_units_requires_admin(client, admin_h, thukho_
                         json={"finished_product_id": fp_id, "product_name": "OB-FP-TEST",
                               "lot_code": "OB-LOT-02", "total": 48, "pack_size": 24, "unit_type": "vi"})
     assert normal.status_code == 201, normal.text
+
+
+def test_delete_qc_parameter_ok_when_unused(client, admin_h):
+    p = client.post("/api/qc/parameters", headers=admin_h,
+                    json={"code": "DELPARAM-UNUSED", "name": "Chỉ tiêu chưa gán", "unit": "%"})
+    assert p.status_code == 201, p.text
+    param_id = p.json()["param_id"]
+    r = client.delete(f"/api/qc/parameters/{param_id}", headers=admin_h)
+    assert r.status_code == 204, r.text
+    assert not any(x["param_id"] == param_id for x in client.get("/api/qc/parameters?active_only=false", headers=admin_h).json())
+
+
+def test_delete_qc_parameter_blocked_when_assigned_to_group(client, admin_h):
+    p = client.post("/api/qc/parameters", headers=admin_h,
+                    json={"code": "DELPARAM-USED", "name": "Chỉ tiêu đã gán", "unit": "%"})
+    param_id = p.json()["param_id"]
+    g = client.post("/api/qc/groups", headers=admin_h,
+                    json={"code": "DELPARAM-GRP", "name": "Nhóm test xóa chỉ tiêu"})
+    group_id = g.json()["group_id"]
+    it = client.post(f"/api/qc/groups/{group_id}/items", headers=admin_h,
+                     json={"param_id": param_id, "mandatory": True})
+    assert it.status_code == 201, it.text
+
+    r = client.delete(f"/api/qc/parameters/{param_id}", headers=admin_h)
+    assert r.status_code == 409, r.text

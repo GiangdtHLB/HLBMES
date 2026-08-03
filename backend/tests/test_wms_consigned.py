@@ -61,6 +61,23 @@ def _declare_consigned(client, admin_h, fp_id, quantity, location_id=None, note=
     return entry.json()
 
 
+def _approve_consigned(client, admin_h, entry_id):
+    r = client.post(f"/api/wms/consigned/{entry_id}/approve", headers=admin_h)
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def _declare_and_approve_consigned(client, admin_h, fp_id, quantity, location_id=None, note=None):
+    """Khai báo CHƯA tăng tồn kho ngay (xem NearExpiryEntry/ConsignedEntry.approved_by) — hầu
+    hết các test dưới đây chỉ quan tâm tới hành vi SAU khi đã có tồn kho thật, nên helper này
+    khai báo + duyệt luôn 1 lượt (mirror _declare_consigned nhưng approve ngay)."""
+    body = _declare_consigned(client, admin_h, fp_id, quantity, location_id, note)
+    hist = client.get("/api/wms/consigned", headers=admin_h).json()
+    entry_id = next(h["entry_id"] for h in hist if h["direction"] == "in" and h["lot_code"] == body["lot_code"])
+    _approve_consigned(client, admin_h, entry_id)
+    return body
+
+
 def test_consigned_declare_rejects_nonpositive_quantity(client, admin_h):
     fp_id = _a_finished_product(client, admin_h, "SKU-GS-ZEROQTY")
     bad = client.post("/api/wms/consigned", headers=admin_h,
@@ -68,9 +85,35 @@ def test_consigned_declare_rejects_nonpositive_quantity(client, admin_h):
     assert bad.status_code == 409, bad.text
 
 
+def test_consigned_declare_pending_then_approve_increases_stock(client, admin_h):
+    """Khai báo (direction="in") CHƯA tăng tồn kho ngay — chỉ ghi bản khai chờ duyệt. Trưởng bộ
+    phận kho duyệt mới thực sự tạo tồn kho; sau khi duyệt thì khoá, không sửa/hoàn tác được."""
+    fp_id = _a_finished_product(client, admin_h, "SKU-GS-PENDING")
+    body = _declare_consigned(client, admin_h, fp_id, 4)
+    lot_code = body["lot_code"]
+    hist = client.get("/api/wms/consigned", headers=admin_h).json()
+    row = next(h for h in hist if h["direction"] == "in" and h["lot_code"] == lot_code)
+    assert row["approved_by"] is None
+    assert row["can_edit"] is True and row["can_approve"] is True and row["can_undo"] is True
+
+    by_lot = client.get("/api/wms/units/by-lot", headers=admin_h).json()
+    assert not any(g["lot_code"] == lot_code for g in by_lot)
+
+    _approve_consigned(client, admin_h, row["entry_id"])
+    hist2 = client.get("/api/wms/consigned", headers=admin_h).json()
+    row2 = next(h for h in hist2 if h["entry_id"] == row["entry_id"])
+    assert row2["approved_by"] == "admin"
+    assert row2["can_edit"] is False and row2["can_approve"] is False and row2["can_undo"] is False
+
+    edit_after = client.put(f"/api/wms/consigned/{row['entry_id']}", headers=admin_h, json={"quantity": 9})
+    assert edit_after.status_code == 409
+    undo_after = client.post(f"/api/wms/consigned/{row['entry_id']}/undo", headers=admin_h)
+    assert undo_after.status_code == 409
+
+
 def test_consigned_declare_generates_dedicated_lot_and_shipment_roundtrip(client, admin_h):
     fp_id = _a_finished_product(client, admin_h, "SKU-GS-ROUND")
-    body = _declare_consigned(client, admin_h, fp_id, 4, note="Xe giao không hết, mang về gửi")
+    body = _declare_and_approve_consigned(client, admin_h, fp_id, 4, note="Xe giao không hết, mang về gửi")
     assert body["count"] == 4
     product_name, lot_code = body["product_name"], body["lot_code"]
     assert lot_code.startswith("GUI")
@@ -118,7 +161,7 @@ def test_consigned_lot_never_merges_with_regular_stock(client, admin_h):
                               "unit_type": "vi", "reason": "Nhập kho thủ công"})
     assert built.status_code == 201, built.text
 
-    gs_body = _declare_consigned(client, admin_h, fp_id, 3)
+    gs_body = _declare_and_approve_consigned(client, admin_h, fp_id, 3)
     assert gs_body["lot_code"] != regular_lot
 
     by_lot = client.get("/api/wms/units/by-lot", headers=admin_h).json()
@@ -135,7 +178,11 @@ def test_consigned_prioritized_ahead_of_near_expiry_in_lot_summaries(client, adm
     ne_entry = client.post("/api/wms/near-expiry", headers=admin_h,
                            json={"finished_product_id": fp_id, "quantity": 2})
     assert ne_entry.status_code == 201, ne_entry.text
-    gs_body = _declare_consigned(client, admin_h, fp_id, 2)
+    ne_hist = client.get("/api/wms/near-expiry", headers=admin_h).json()
+    ne_row = next(h for h in ne_hist if h["direction"] == "in" and h["lot_code"] == ne_entry.json()["lot_code"])
+    approve_ne = client.post(f"/api/wms/near-expiry/{ne_row['entry_id']}/approve", headers=admin_h)
+    assert approve_ne.status_code == 200, approve_ne.text
+    gs_body = _declare_and_approve_consigned(client, admin_h, fp_id, 2)
 
     by_lot = client.get("/api/wms/units/by-lot", headers=admin_h).json()
     ne_group = next(g for g in by_lot if g["lot_code"] == ne_entry.json()["lot_code"])
@@ -146,10 +193,12 @@ def test_consigned_prioritized_ahead_of_near_expiry_in_lot_summaries(client, adm
     assert gs_group.get("vi_near_expiry_count", 0) == 0
 
 
-def test_consigned_undo_removes_units(client, admin_h):
+def test_consigned_undo_removes_pending_declaration(client, admin_h):
+    """Hủy CHỈ áp dụng khi đang chờ duyệt — chưa có FinishedGoodsUnit nào được tạo, hủy chỉ
+    đánh dấu reversed (mirror test_near_expiry_undo_removes_pending_declaration)."""
     fp_id = _a_finished_product(client, admin_h, "SKU-GS-UNDO")
     body = _declare_consigned(client, admin_h, fp_id, 2)
-    lot_code, product_name = body["lot_code"], body["product_name"]
+    lot_code = body["lot_code"]
 
     hist = client.get("/api/wms/consigned", headers=admin_h).json()
     row = next(h for h in hist if h["direction"] == "in" and h["lot_code"] == lot_code)
@@ -158,50 +207,35 @@ def test_consigned_undo_removes_units(client, admin_h):
 
     undo = client.post(f"/api/wms/consigned/{row['entry_id']}/undo", headers=admin_h)
     assert undo.status_code == 200, undo.text
-    assert undo.json()["removed"] == 2
 
     hist2 = client.get("/api/wms/consigned", headers=admin_h).json()
     row2 = next(h for h in hist2 if h["entry_id"] == row["entry_id"])
     assert row2["reversed"] is True
     assert row2["can_undo"] is False
 
-    ship_to = client.post("/api/wms/ship-to", headers=admin_h,
-                          json={"code": "DIST-GS-UNDO", "name": "NPP test undo"})
-    assert ship_to.status_code == 201, ship_to.text
-    shipped = client.post("/api/wms/shipments", headers=admin_h,
-                          json={"ship_to_id": ship_to.json()["ship_to_id"],
-                                "lines": [{"product_name": product_name, "lot_code": lot_code,
-                                          "unit_type": "vi", "quantity": 1, "consigned_only": True}]})
-    assert shipped.status_code == 409
+    approve_after_undo = client.post(f"/api/wms/consigned/{row['entry_id']}/approve", headers=admin_h)
+    assert approve_after_undo.status_code == 409
 
     redo = client.post(f"/api/wms/consigned/{row['entry_id']}/undo", headers=admin_h)
     assert redo.status_code == 409
 
 
-def test_consigned_undo_blocked_after_shipped(client, admin_h):
-    fp_id = _a_finished_product(client, admin_h, "SKU-GS-UNDO-SHIPPED")
+def test_consigned_undo_blocked_after_approved(client, admin_h):
+    fp_id = _a_finished_product(client, admin_h, "SKU-GS-UNDO-APPROVED")
     body = _declare_consigned(client, admin_h, fp_id, 1)
-    lot_code, product_name = body["lot_code"], body["product_name"]
-
-    ship_to = client.post("/api/wms/ship-to", headers=admin_h,
-                          json={"code": "DIST-GS-UNDO-SHIPPED", "name": "NPP test undo shipped"})
-    assert ship_to.status_code == 201, ship_to.text
-    shipped = client.post("/api/wms/shipments", headers=admin_h,
-                          json={"ship_to_id": ship_to.json()["ship_to_id"],
-                                "lines": [{"product_name": product_name, "lot_code": lot_code,
-                                          "unit_type": "vi", "quantity": 1, "consigned_only": True}]})
-    assert shipped.status_code == 201, shipped.text
-
+    lot_code = body["lot_code"]
     hist = client.get("/api/wms/consigned", headers=admin_h).json()
     row = next(h for h in hist if h["direction"] == "in" and h["lot_code"] == lot_code)
+    _approve_consigned(client, admin_h, row["entry_id"])
+
     undo = client.post(f"/api/wms/consigned/{row['entry_id']}/undo", headers=admin_h)
     assert undo.status_code == 409
-    assert "xuất" in undo.json()["detail"]
+    assert "duyệt" in undo.json()["detail"]
 
 
 def test_consigned_undo_rejects_out_direction(client, admin_h):
     fp_id = _a_finished_product(client, admin_h, "SKU-GS-UNDO-OUTDIR")
-    body = _declare_consigned(client, admin_h, fp_id, 1)
+    body = _declare_and_approve_consigned(client, admin_h, fp_id, 1)
     lot_code, product_name = body["lot_code"], body["product_name"]
 
     ship_to = client.post("/api/wms/ship-to", headers=admin_h,
@@ -222,7 +256,7 @@ def test_consigned_undo_rejects_out_direction(client, admin_h):
 
 def test_shipment_line_rejects_both_near_expiry_and_consigned_flags(client, admin_h):
     fp_id = _a_finished_product(client, admin_h, "SKU-GS-BOTHFLAGS")
-    body = _declare_consigned(client, admin_h, fp_id, 1)
+    body = _declare_and_approve_consigned(client, admin_h, fp_id, 1)
     lot_code, product_name = body["lot_code"], body["product_name"]
 
     ship_to = client.post("/api/wms/ship-to", headers=admin_h,

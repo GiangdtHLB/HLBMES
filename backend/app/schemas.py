@@ -173,6 +173,7 @@ class FinishedProductIn(BaseModel):
     pack_size: int = 24                 # Lon/vỉ (vi) hoặc 1 (keg)
     category: Optional[str] = None     # Bia chai|Bia lon|Bia hơi|Bia tươi...
     description: Optional[str] = None
+    unit_volume_l: Optional[float] = None   # dung tích 1 đơn vị đóng gói (lít) — để đối chiếu lúc kết thúc chiết
 
 
 class FinishedProductOut(ORMModel):
@@ -185,6 +186,7 @@ class FinishedProductOut(ORMModel):
     pack_size: int
     category: Optional[str] = None
     description: Optional[str] = None
+    unit_volume_l: Optional[float] = None
 
 
 class MaterialIn(BaseModel):
@@ -546,6 +548,19 @@ class ShipmentIn(BaseModel):
     shipment_type: str = "normal"                # normal | promo | return — nhãn phân loại, không đổi luồng tồn kho
 
 
+class ShipmentUpdate(BaseModel):
+    """Sửa thông tin đầu phiếu xuất kho — chỉ các trường mô tả (không có ship_to_id/lines,
+    không đụng tới số liệu tồn kho). Chặn sửa nếu phiếu đã được duyệt (confirmed_by)."""
+    note: Optional[str] = None
+    recipient_name: Optional[str] = None
+    recipient_dept: Optional[str] = None
+    driver_name: Optional[str] = None
+    vehicle_plate: Optional[str] = None
+    from_location: Optional[str] = None
+    delivery_place: Optional[str] = None
+    shipment_type: Optional[str] = None
+
+
 class NearExpiryEntryIn(BaseModel):
     finished_product_id: str
     quantity: int
@@ -553,10 +568,26 @@ class NearExpiryEntryIn(BaseModel):
     note: Optional[str] = None
 
 
+class NearExpiryEntryUpdate(BaseModel):
+    """Sửa bản khai "Nhập bia cận date" đang chờ duyệt — mọi trường tuỳ chọn (chỉ trường
+    được gửi mới bị ghi đè, xem services/wms.py::update_near_expiry_entry)."""
+    finished_product_id: Optional[str] = None
+    quantity: Optional[int] = None
+    location_id: Optional[str] = None
+    note: Optional[str] = None
+
+
 class ConsignedEntryIn(BaseModel):
     finished_product_id: str
     quantity: int
     location_id: Optional[str] = None  # vị trí kho nhận — bỏ trống nếu chưa cất
+    note: Optional[str] = None
+
+
+class ConsignedEntryUpdate(BaseModel):
+    finished_product_id: Optional[str] = None
+    quantity: Optional[int] = None
+    location_id: Optional[str] = None
     note: Optional[str] = None
 
 
@@ -739,6 +770,7 @@ class HoldIn(BaseModel):
     scope_id: str
     on_hold: bool
     reason: Optional[str] = None
+    parameter: Optional[str] = None
 
 
 class DeviationIn(BaseModel):
@@ -746,6 +778,7 @@ class DeviationIn(BaseModel):
     scope_id: str
     severity: str = "minor"
     reason: str
+    parameter: Optional[str] = None
 
 
 class DeviationOut(ORMModel):
@@ -762,6 +795,7 @@ class DeviationOut(ORMModel):
     approved_by: Optional[str] = None
     opened_at: datetime
     closed_at: Optional[datetime] = None
+    parameter: Optional[str] = None
 
 
 class DeviationTransitionIn(BaseModel):
@@ -881,6 +915,18 @@ class ReceiptIn(BaseModel):
     is_opening_balance: bool = False  # true -> chỉ admin được thực hiện, xem receive()
 
 
+class ReceiptUpdateIn(BaseModel):
+    """Sửa 1 lượt nhập kho đã ghi — CHỈ áp dụng khi lô CHƯA bị xuất/chuyển/tiêu thụ (xem
+    services/warehouse.py::update_receipt). Mọi field đều tuỳ chọn — chỉ field nào được gửi
+    lên mới bị ghi đè (None nghĩa là "không đổi", KHÁC với xóa giá trị hiện có)."""
+    quantity: Optional[float] = None
+    supplier_id: Optional[str] = None
+    unit_price: Optional[float] = None
+    kcs_lot_no: Optional[str] = None
+    expiry: Optional[datetime] = None
+    reason: Optional[str] = None
+
+
 class IssueIn(BaseModel):
     lot_id: str
     quantity: float
@@ -971,10 +1017,57 @@ class RequestFulfillAllIn(BaseModel):
     location_to: str = "Kho phân xưởng"
 
 
-class TransferToCompanyIn(BaseModel):
+class TransferPxRequestIn(BaseModel):
     lot_id: str
     quantity: float
     reason: Optional[str] = None
+
+
+class TransferPxRejectIn(BaseModel):
+    reason: Optional[str] = None
+
+
+class TransferPxRequestOut(ORMModel):
+    request_id: str
+    request_code: str
+    lot_id: str
+    quantity: float
+    uom: str
+    reason: Optional[str] = None
+    status: str
+    movement_id: Optional[str] = None
+    reversed: bool
+    created_by: Optional[str] = None
+    created_at: datetime
+    approved_by: Optional[str] = None
+    approved_at: Optional[datetime] = None
+    rejected_by: Optional[str] = None
+    rejected_at: Optional[datetime] = None
+    reject_reason: Optional[str] = None
+
+
+class TransferToFactoryIn(BaseModel):
+    lot_id: str
+    quantity: float
+    factory_id: str
+    reason: Optional[str] = None
+
+
+class FactoryLocationIn(BaseModel):
+    code: str
+    name: str
+    address: Optional[str] = None
+    contact: Optional[str] = None
+    active: bool = True
+
+
+class FactoryLocationOut(ORMModel):
+    factory_id: str
+    code: str
+    name: str
+    address: Optional[str] = None
+    contact: Optional[str] = None
+    active: bool
 
 
 class ReturnToSupplierIn(BaseModel):
@@ -1000,11 +1093,16 @@ class StockMovementOut(ORMModel):
     ts: datetime
     reversed: bool
     reversal_of: Optional[str] = None
+    destination_factory_id: Optional[str] = None
+    approved_by: Optional[str] = None
+    approved_at: Optional[datetime] = None
 
 
 # ---- Kiểm kê định kỳ (cycle count) ----
 class StockCountCreateIn(BaseModel):
     location: Optional[str] = None  # lọc theo Kho công ty/phân xưởng — None = toàn bộ
+    start_date: Optional[datetime] = None  # ngày bắt đầu kiểm kê (khai báo tay, khác created_at)
+    end_date: Optional[datetime] = None  # ngày kết thúc kiểm kê (khai báo tay, khác posted_at)
     note: Optional[str] = None
 
 
@@ -1248,11 +1346,14 @@ class FinishFilterTankIn(FinishIn):
 
 class FinishBottleIn(FinishIn):
     """Kết thúc chiết — Ca 1/2/3 + V cấp chiết/hl không bắt buộc lúc tạo, điền lúc bấm
-    "Kết thúc" (mirror FinishFilterTankIn/finish_filter_tank)."""
+    "Kết thúc" (mirror FinishFilterTankIn/finish_filter_tank). `mismatch_reason` bắt buộc nếu
+    SL ca1+ca2+ca3 (quy đổi ra hl qua FinishedProduct.unit_volume_l) lệch quá nhiều so với
+    V cấp chiết/hl đã nhập — xem routers/brewing.py::finish_bottle."""
     v_cap_chiet_hl: Optional[float] = None
     ca1: Optional[float] = None
     ca2: Optional[float] = None
     ca3: Optional[float] = None
+    mismatch_reason: Optional[str] = None
 
 
 class FilterOrderMaterialLineIn(BaseModel):

@@ -1129,9 +1129,13 @@ def _seed_users(db) -> None:
         # đầu — nó ứng với "Phòng Kỹ thuật, Công nghệ và Cải tiến Sản xuất" có thật trong sơ đồ
         # (dưới Giám đốc SX-KT), và là tài khoản demo duy nhất giữ recipe.author — xóa hẳn sẽ
         # không còn ai soạn được công thức trong dữ liệu mẫu.
+        # warehouse.count_approve: Quản đốc phân xưởng sản xuất duyệt phiếu kiểm kê định kỳ
+        # (Kho công ty lẫn Kho phân xưởng) — trước đây gate cứng theo role supervisor/qa/
+        # engineer/admin, không cấu hình được qua Tài khoản (xem services/warehouse.py
+        # ::approve_count).
         ("quandoc", "123456", "Trần Quang Đốc", "Quản đốc phân xưởng", "supervisor",
-         "dashboard,master,orders,dispatch,schedule,batches,isa88,dispense,recipeadv,process,realtime,quality,qclab,oee,trace,wms,packaging,reports,ai,audit,cip",
-         "master.manage,order.create,wo.manage,wo.dispatch,batch.create,batch.execute,quality.deviation,ebr.sign,ebr.approve,cip.manage",
+         "dashboard,master,orders,dispatch,schedule,batches,isa88,dispense,recipeadv,process,realtime,quality,qclab,oee,trace,wms,warehouse_kc,warehouse_px,packaging,reports,ai,audit,cip",
+         "master.manage,order.create,wo.manage,wo.dispatch,batch.create,batch.execute,quality.deviation,ebr.sign,ebr.approve,cip.manage,warehouse.count_approve",
          "*", "*", "*", "*"),
         # Phó Quản đốc kiêm trực ca — người ký khóa số liệu hàng ngày ở phân xưởng (thay cho
         # "truongca" cũ, không có trong sơ đồ thật; đúng chức danh sơ đồ là "Phó Quản đốc kiêm
@@ -1140,8 +1144,12 @@ def _seed_users(db) -> None:
          "dashboard,batches,isa88,dispense,process,realtime,quality,oee,trace,wms,packaging,reports,ai,cip",
          "batch.execute,ebr.sign,ebr.approve,quality.deviation,cip.manage",
          "*", "*", "*", "*"),
+        # warehouse.receive: cho phép tự tạo/duyệt/hoàn tác phiếu Kiểm kê định kỳ TẠI Kho phân
+        # xưởng — _assert_location_scope (services/warehouse.py) vẫn chặn không cho đụng tới Kho
+        # công ty vì scope_warehouse="phan_xuong" (không phải "*"), nên không mở rộng quyền nhận
+        # hàng ở Kho công ty.
         ("vanhanh", "123456", "Phạm Văn Hành", "Nhân viên vận hành", "operator",
-         "dashboard,batches,isa88,dispense,process,realtime,warehouse_px,cip", "batch.execute,ebr.sign,warehouse.request,cip.manage",
+         "dashboard,batches,isa88,dispense,process,realtime,warehouse_px,cip", "batch.execute,ebr.sign,warehouse.request,warehouse.receive,cip.manage",
          "Nấu A", "nau,len_men", "*", "phan_xuong"),
         ("kcs", "123456", "Hoàng Thị Kiểm", "Nhân viên KCS / QA", "qa",
          "dashboard,quality,qclab,process,trace,ai,cip", "quality.release,quality.deviation,recipe.approve,ebr.sign,ebr.approve",
@@ -1169,6 +1177,17 @@ def _seed_users(db) -> None:
         ("ttdh_thukhotp", "123456", "Mai Thị Vận", "NV Trung tâm Điều hành - Thủ kho TP", "operator",
          "dashboard,wms,packaging", "warehouse.receive,warehouse.issue",
          "*", "kho", "*", "*"),
+        # Trưởng phòng Kế hoạch: duyệt điều chuyển Kho công ty → Nhà máy khác — sau khi duyệt
+        # chỉ ADMIN mới hoàn tác được (xem services/warehouse.py::approve_transfer_to_factory).
+        ("truongphong_kh", "123456", "Ngô Thị Kế Hoạch", "Trưởng phòng Kế hoạch", "supervisor",
+         "dashboard,warehouse_kc,reports", "warehouse.transfer_approve_factory",
+         "*", "*", "*", "cong_ty"),
+        # Trưởng bộ phận Kho thành phẩm: xác nhận phiếu xuất kho thành phẩm + duyệt nhập kho từ
+        # chiết — sau khi xác nhận/duyệt, chỉ ADMIN mới hoàn tác/xóa được (xem
+        # services/wms.py::confirm_shipment/undo_shipment, confirm_receipt_by_lot).
+        ("truongkho_tp", "123456", "Bùi Thị Trưởng Kho", "Trưởng bộ phận Kho thành phẩm", "supervisor",
+         "dashboard,wms,reports", "wms.confirm_shipment,wms.confirm_receipt",
+         "*", "*", "*", "*"),
     ]
     for username, pw, full, title, role, views, perms, sl, sa, sq, sw in accounts:
         db.add(AppUser(user_id=new_id(), username=username, password_hash=hash_password(pw),
@@ -1177,11 +1196,11 @@ def _seed_users(db) -> None:
                        scope_warehouse=sw, active=True))
     db.commit()
     print("Tài khoản: admin/admin123 · quandoc,phoquandoc,vanhanh,kcs,kysu,thukho,"
-          "kcs_truongphong,giamdoc_sx,ttdh_thukhotp /123456")
+          "kcs_truongphong,giamdoc_sx,ttdh_thukhotp,truongphong_kh,truongkho_tp /123456")
 
 
 def _seed_role_templates(db) -> None:
-    """Mẫu chức danh khớp đúng 9 tài khoản theo sơ đồ tổ chức thật (xem _seed_users) —
+    """Mẫu chức danh khớp đúng các tài khoản theo sơ đồ tổ chức thật (xem _seed_users) —
     admin có thể chọn nhanh khi tạo tài khoản mới thay vì soạn tay từng trường."""
     templates = [
         # name, role, allowed_views, permissions, scope_lines, scope_areas, scope_qc, scope_warehouse
@@ -1194,7 +1213,7 @@ def _seed_role_templates(db) -> None:
          "batch.execute,ebr.sign,ebr.approve,quality.deviation,cip.manage",
          "*", "*", "*", "*"),
         ("Nhân viên vận hành", "operator",
-         "dashboard,batches,isa88,dispense,process,realtime,warehouse_px,cip", "batch.execute,ebr.sign,warehouse.request,cip.manage",
+         "dashboard,batches,isa88,dispense,process,realtime,warehouse_px,cip", "batch.execute,ebr.sign,warehouse.request,warehouse.receive,cip.manage",
          "Nấu A", "nau,len_men", "*", "phan_xuong"),
         ("Nhân viên KCS / QA", "qa",
          "dashboard,quality,qclab,process,trace,ai,cip", "quality.release,quality.deviation,recipe.approve,ebr.sign,ebr.approve",
@@ -1217,6 +1236,12 @@ def _seed_role_templates(db) -> None:
         ("NV Trung tâm Điều hành - Thủ kho TP", "operator",
          "dashboard,wms,packaging", "warehouse.receive,warehouse.issue",
          "*", "kho", "*", "*"),
+        ("Trưởng phòng Kế hoạch", "supervisor",
+         "dashboard,warehouse_kc,reports", "warehouse.transfer_approve_factory",
+         "*", "*", "*", "cong_ty"),
+        ("Trưởng bộ phận Kho thành phẩm", "supervisor",
+         "dashboard,wms,reports", "wms.confirm_shipment,wms.confirm_receipt",
+         "*", "*", "*", "*"),
     ]
     for name, role, views, perms, sl, sa, sq, sw in templates:
         db.add(RoleTemplate(role_template_id=new_id(), name=name, role=role, allowed_views=views,

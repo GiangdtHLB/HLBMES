@@ -15,7 +15,7 @@ from ..common import Role, new_id, utcnow
 from ..errors import DomainError, NotFoundError
 from ..models.batches import BatchExecution
 from ..models.quality import Deviation, QualityResult
-from ..models.quality_ext import CAPA, QCParameter, Sample
+from ..models.quality_ext import CAPA, QCParameter, QCParameterGroupItem, Sample
 from ..security import User, require_perm, require_role
 
 # Workflow CAPA
@@ -154,6 +154,24 @@ def update_qc_parameter(db: Session, param_id: str, payload: dict, user: User) -
     db.commit()
     db.refresh(p)
     return p
+
+
+def delete_qc_parameter(db: Session, param_id: str, user: User) -> None:
+    """Chỉ xóa được khi chỉ tiêu CHƯA được gán vào bất kỳ Nhóm chỉ tiêu nào
+    (QCParameterGroupItem) — tránh xóa "mồ côi" 1 chỉ tiêu đang dùng để cổng nhập kho/duyệt
+    công đoạn qua nhóm chứa nó."""
+    require_perm(user, "master.manage")
+    p = db.get(QCParameter, param_id)
+    if not p:
+        raise NotFoundError("Chỉ tiêu không tồn tại.")
+    used = db.execute(select(QCParameterGroupItem).where(
+        QCParameterGroupItem.param_id == param_id)).first()
+    if used:
+        raise DomainError(f"Không thể xóa — chỉ tiêu '{p.code}' đang được gán vào ít nhất 1 nhóm chỉ tiêu. Hãy gỡ gán trước.")
+    record_audit(db, entity_type="qc_parameter", entity_id=param_id, action="delete", actor=user,
+                 before={"code": p.code, "name": p.name})
+    db.delete(p)
+    db.commit()
 
 
 # ============================== CAPA ==============================

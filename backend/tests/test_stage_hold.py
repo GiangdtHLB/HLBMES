@@ -123,7 +123,8 @@ def _setup_stage_chain(client, admin_h, vanhanh_h, suffix, line_id):
     bottle_id = bt.json()["bottle_id"]
 
     return {"batch_id": batch_id, "brew_id": brew_id, "ferment_id": ferment_id,
-            "filter_id": filter_id, "bottle_id": bottle_id}
+            "filter_id": filter_id, "bottle_id": bottle_id,
+            "filter_order_id": fo.json()["filter_order_id"]}
 
 
 def _declare_pending(client, headers, stage, scope_type, scope_id):
@@ -174,6 +175,9 @@ def test_hold_brew_batch_blocks_finish(client, admin_h, vanhanh_h, brewhouse_lin
 
     release = _hold(client, admin_h, "brew_batch", ids["batch_id"], False)
     assert release.status_code == 200, release.text
+    p = client.put(f"/api/brewing/brews/{ids['brew_id']}/batches/{ids['batch_id']}/process-log",
+                  headers=admin_h, json={"whp_tong_luong_dich_hl": 100})
+    assert p.status_code == 200, p.text
     ok = client.post(f"/api/brewing/brews/{ids['brew_id']}/batches/{ids['batch_id']}/finish",
                      headers=vanhanh_h, json={})
     assert ok.status_code == 200, ok.text
@@ -240,3 +244,100 @@ def test_flat_brew_batches_endpoint_lists_quality_status(client, admin_h, vanhan
     row = next(r for r in rows if r["batch_id"] == ids["batch_id"])
     assert row["quality_status"] == "released"
     assert row["brew_code"] == "BR-FLATLIST"
+
+
+def test_hold_brew_batch_cascades_to_sibling_batches(client, admin_h, vanhanh_h, brewhouse_line_id):
+    """Hold 1 mẻ nấu phải kéo TẤT CẢ mẻ khác cùng lô nấu (BrewRecord) vào diện hold — nhưng
+    release 1 mẻ KHÔNG tự release lại các mẻ anh chị em (xem services/quality.py
+    ::_cascade_hold_siblings)."""
+    ids = _setup_stage_chain(client, admin_h, vanhanh_h, "CASCADENAU", brewhouse_line_id)
+    bb2 = client.post(f"/api/brewing/brews/{ids['brew_id']}/batches", headers=vanhanh_h,
+                      json={"batch_code": str(next(_batch_code_seq)), "line_id": brewhouse_line_id})
+    assert bb2.status_code == 201, bb2.text
+    batch2_id = bb2.json()["batch_id"]
+
+    hold = _hold(client, admin_h, "brew_batch", ids["batch_id"], True)
+    assert hold.status_code == 200, hold.text
+
+    rows = client.get(f"/api/brewing/brews/{ids['brew_id']}/batches", headers=admin_h).json()
+    row1 = next(r for r in rows if r["batch_id"] == ids["batch_id"])
+    row2 = next(r for r in rows if r["batch_id"] == batch2_id)
+    assert row1["quality_status"] == "on_hold"
+    assert row2["quality_status"] == "on_hold"  # cascade sang mẻ 2 dù không hold trực tiếp
+
+    release = _hold(client, admin_h, "brew_batch", ids["batch_id"], False)
+    assert release.status_code == 200, release.text
+    rows = client.get(f"/api/brewing/brews/{ids['brew_id']}/batches", headers=admin_h).json()
+    row1 = next(r for r in rows if r["batch_id"] == ids["batch_id"])
+    row2 = next(r for r in rows if r["batch_id"] == batch2_id)
+    assert row1["quality_status"] == "released"
+    assert row2["quality_status"] == "on_hold"  # release KHÔNG cascade — mẻ 2 vẫn giữ
+
+
+def test_hold_filter_cascades_to_sibling_filters(client, admin_h, vanhanh_h, brewhouse_line_id):
+    """Hold 1 mẻ lọc phải kéo TẤT CẢ mẻ lọc khác cùng lô lọc (FilterOrder) vào diện hold —
+    release 1 mẻ KHÔNG tự release lại các mẻ anh chị em. Chỉ cần 2 FilterRecord cùng
+    filter_order_id (KHÔNG đi hết chuỗi tới Chiết như _setup_stage_chain — lệnh lọc đã bắt
+    đầu chiết thì không thêm được mẻ lọc mới, xem add_filter guard)."""
+    order_id = _a_brew_order(client, admin_h, "LN-CASCADELOC")
+    b = client.post("/api/brewing/brews", headers=vanhanh_h,
+                    json={"brew_code": "BR-CASCADELOC", "wort_type": "Dịch test", "volume_hl": 100,
+                          "lm_code": "LM-CASCADELOC", "tank_lm": "T-CASCADELOC", "brew_order_id": order_id})
+    assert b.status_code == 201, b.text
+    ferments = client.get("/api/brewing/ferments", headers=admin_h).json()["items"]
+    ferment_id = next(f for f in ferments if f["lm_code"] == "LM-CASCADELOC")["ferment_id"]
+    approve_lm = client.post(f"/api/brewing/ferments/{ferment_id}/approve", headers=admin_h)
+    assert approve_lm.status_code == 200, approve_lm.text
+
+    fo = client.post("/api/brewing/filter-orders", headers=admin_h,
+                     json={"order_code": "LOC-CASCADELOC", "blend_mode": "khong_phoi",
+                           "tank_ferment_ids": [ferment_id], "planned_volume_hl": 1000})
+    assert fo.status_code == 201, fo.text
+    filter_order_id = fo.json()["filter_order_id"]
+    f1 = client.post("/api/brewing/filters", headers=vanhanh_h,
+                     json={"filter_code": "FL-CASCADELOC-1", "beer_type": "Bia test",
+                           "filter_order_id": filter_order_id, "to_bbt": "BBT-CASCADELOC-1"})
+    assert f1.status_code == 201, f1.text
+    filter1_id = f1.json()["filter_id"]
+    f2 = client.post("/api/brewing/filters", headers=vanhanh_h,
+                     json={"filter_code": "FL-CASCADELOC-2", "beer_type": "Bia test",
+                           "filter_order_id": filter_order_id, "to_bbt": "BBT-CASCADELOC-2"})
+    assert f2.status_code == 201, f2.text
+    filter2_id = f2.json()["filter_id"]
+
+    hold = _hold(client, admin_h, "filter", filter1_id, True)
+    assert hold.status_code == 200, hold.text
+
+    rows = client.get("/api/brewing/filters", headers=admin_h).json()
+    row1 = next(r for r in rows if r["filter_id"] == filter1_id)
+    row2 = next(r for r in rows if r["filter_id"] == filter2_id)
+    assert row1["quality_status"] == "on_hold"
+    assert row2["quality_status"] == "on_hold"  # cascade sang mẻ lọc 2 dù không hold trực tiếp
+
+    release = _hold(client, admin_h, "filter", filter1_id, False)
+    assert release.status_code == 200, release.text
+    rows = client.get("/api/brewing/filters", headers=admin_h).json()
+    row1 = next(r for r in rows if r["filter_id"] == filter1_id)
+    row2 = next(r for r in rows if r["filter_id"] == filter2_id)
+    assert row1["quality_status"] == "released"
+    assert row2["quality_status"] == "on_hold"  # release KHÔNG cascade — mẻ lọc 2 vẫn giữ
+
+
+def test_stage_hold_appears_in_dashboard_qc_attention_alerts(client, admin_h, vanhanh_h, brewhouse_line_id):
+    """Hold trực tiếp 1 mẻ nấu (KHÔNG kèm deviation mở) phải hiện trong Dashboard "Hold/Release"
+    (services/dashboard.py::qc_attention_alerts) — trước đây reason "on_hold" chỉ được suy ra từ
+    MaterialLot.status hoặc gián tiếp qua Deviation trùng scope, nên hold trực tiếp qua
+    quality_status trên brew_batch/ferment/filter/bottle không hề lộ ra ở đây dù đã ghi nhận
+    đúng trong Lịch sử Hold/Release."""
+    ids = _setup_stage_chain(client, admin_h, vanhanh_h, "DASHHOLD", brewhouse_line_id)
+    hold = _hold(client, admin_h, "brew_batch", ids["batch_id"], True)
+    assert hold.status_code == 200, hold.text
+
+    alerts = client.get("/api/reports/qc-attention-alerts", headers=admin_h).json()
+    item = next(i for i in alerts["items"]
+                if i["scope_type"] == "brew_batch" and i["scope_id"] == ids["batch_id"])
+    assert "on_hold" in item["reasons"]
+    assert item["deviation_count"] == 0
+    assert item["parent_label"] == "Lô nấu BR-DASHHOLD"
+
+    _hold(client, admin_h, "brew_batch", ids["batch_id"], False)

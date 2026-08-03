@@ -77,7 +77,8 @@ def _location_used_count(db: Session, loc_id: str, exclude_unit_id: str | None =
 def _consume_lot_rows(db: Session, *, product_name: str, unit_type: str, status: str,
                       quantity_needed: float, lot_code: str | None = None,
                       location_id=_LOC_UNSET, exclude_ids: set | None = None,
-                      near_expiry_only: bool = False, consigned_only: bool = False) -> tuple[list[FinishedGoodsUnit], float]:
+                      near_expiry_only: bool = False, consigned_only: bool = False,
+                      block_pending_manual: bool = False) -> tuple[list[FinishedGoodsUnit], float]:
     """Tiêu thụ FIFO (cũ nhất trước, theo created_at) từ các dòng LÔ khớp tiêu chí tới khi đủ
     `quantity_needed` (đơn vị = cột quantity, KHÔNG phải số vỉ/keg — caller tự nhân với
     _pack_divisor() trước khi gọi). Dòng bị lấy TRỌN thì trả nguyên dòng đó; dòng bị lấy MỘT
@@ -101,6 +102,13 @@ def _consume_lot_rows(db: Session, *, product_name: str, unit_type: str, status:
         stmt = stmt.where(FinishedGoodsUnit.is_near_expiry == true())
     if consigned_only:
         stmt = stmt.where(FinishedGoodsUnit.is_consigned == true())
+    if block_pending_manual:
+        # "Nhập kho thủ công" (source="manual") chưa được Trưởng bộ phận kho duyệt
+        # (received_confirmed_by IS NULL) thì KHÔNG được chọn để xuất — xem docstring
+        # FinishedGoodsUnit.source. Các nguồn khác (chiet/None/near_expiry/consigned...) không
+        # bị ảnh hưởng, giữ nguyên hành vi xuất-ngay đã có.
+        stmt = stmt.where(or_(FinishedGoodsUnit.source.is_(None), FinishedGoodsUnit.source != "manual",
+                              FinishedGoodsUnit.received_confirmed_by.isnot(None)))
     if exclude_ids:
         stmt = stmt.where(FinishedGoodsUnit.unit_id.notin_(exclude_ids))
     stmt = stmt.order_by(FinishedGoodsUnit.created_at)
@@ -377,7 +385,13 @@ def _create_units(db: Session, payload: dict, created_by: str, actor: User) -> l
                          finished_product_id=payload.get("finished_product_id"),
                          product_name=payload.get("product_name"), lot_code=payload.get("lot_code"),
                          quantity=total, status="stored", created_by=created_by, created_at=received_dt,
-                         location_id=loc_id)
+                         location_id=loc_id, source=payload.get("source"))
+    if payload.get("is_opening_balance"):
+        # Tồn đầu đã yêu cầu quyền ADMIN riêng (xem build_units) — coi như tự động "duyệt nhập
+        # kho" ngay lúc tạo, không bắt qua thêm bước Trưởng bộ phận kho duyệt nữa (khác
+        # source="manual", xem docstring FinishedGoodsUnit.source).
+        u.received_confirmed_by = created_by
+        u.received_confirmed_at = now
     if loc and not _capacity_ok(db, loc, u):
         raise DomainError(f"Vị trí {loc.code} đã đầy (sức chứa {loc.capacity}).")
     db.add(u)
@@ -390,12 +404,38 @@ def _create_units(db: Session, payload: dict, created_by: str, actor: User) -> l
     return [u]
 
 
+def _next_wms_lot_code(db: Session, year: int) -> str:
+    """Mã lô TP tự sinh cho "Nhập kho thủ công" (mirror services/warehouse.py::_next_lot_code
+    cho Kho công ty NVL) — người dùng không tự gõ tay nữa, tránh trùng/nhầm lô. Tăng dần theo
+    năm, năm sau đánh lại từ 1; kiểm tra trùng với MỌI lot_code đã có trong finished_goods_unit
+    (kể cả từ chiết/tồn đầu/import/near-expiry/consigned), không chỉ lô cùng năm."""
+    count = db.execute(select(func.count()).select_from(FinishedGoodsUnit)
+                       .where(FinishedGoodsUnit.lot_code.like(f"{year}-%"))).scalar_one()
+    while True:
+        count += 1
+        code = f"{year}-{count:05d}"
+        exists = db.execute(select(FinishedGoodsUnit.unit_id)
+                            .where(FinishedGoodsUnit.lot_code == code)).first()
+        if not exists:
+            return code
+
+
 def build_units(db: Session, payload: dict, user: User) -> list[FinishedGoodsUnit]:
     require_perm(user, "warehouse.receive")
     if payload.get("is_opening_balance"):
         # Nhập tồn đầu kho thành phẩm — CHỈ ADMIN, khác nhập kho thủ công thường (mở cho ai có
         # quyền warehouse.receive) vì đây là thao tác chỉnh số liệu gốc, không qua chiết thật.
         require_role(user, Role.ADMIN)
+    else:
+        # Nhập kho thủ công thường — Lô TP tự sinh nếu người gọi KHÔNG tự truyền lot_code (giao
+        # diện "Nhập kho thủ công" đã bỏ hẳn ô nhập tay, xem _next_wms_lot_code); vẫn cho phép
+        # truyền lot_code tường minh (import Excel/nội bộ/test fixture cần mã cố định) — không
+        # ép ghi đè. Luôn đánh dấu source="manual" để bắt qua bước Trưởng bộ phận kho duyệt
+        # trước khi xuất được (xem confirm_receipt_by_lot + create_shipment/_consume_lot_rows).
+        payload = dict(payload)
+        if not payload.get("lot_code"):
+            payload["lot_code"] = _next_wms_lot_code(db, utcnow().year)
+        payload["source"] = "manual"
     return _create_units(db, payload, user.username, user)
 
 
@@ -460,10 +500,10 @@ def _gen_candate_lot_code(db: Session) -> str:
 def create_near_expiry_entry(db: Session, finished_product_id: str, quantity: int,
                              location_id: str | None, user: User, note: str = None) -> dict:
     """Khai báo "Nhập bia cận date": chỉ cần chọn Sản phẩm + Số lượng + Vị trí kho nhận (KHÔNG
-    còn tự nhận lô chiết theo ngày giờ — xem docstring NearExpiryEntry) — tăng tồn kho thành
-    phẩm công ty (tạo 1 dòng lô MỚI, tự sinh lot_code riêng qua _gen_candate_lot_code) đánh dấu
-    is_near_expiry=True + ghi 1 dòng lịch sử riêng (NearExpiryEntry, direction="in") tách biệt
-    khỏi lịch sử nhập kho thông thường."""
+    còn tự nhận lô chiết theo ngày giờ — xem docstring NearExpiryEntry). CHƯA tăng tồn kho —
+    chỉ tự sinh sẵn 1 lot_code riêng (_gen_candate_lot_code) và ghi bản khai chờ duyệt
+    (approved_by=None). Trưởng bộ phận kho duyệt (approve_near_expiry_entry) mới thực sự tạo
+    FinishedGoodsUnit + tăng tồn kho."""
     require_perm(user, "warehouse.receive")
     fp = db.get(FinishedProduct, finished_product_id)
     if not fp:
@@ -471,31 +511,85 @@ def create_near_expiry_entry(db: Session, finished_product_id: str, quantity: in
     if quantity <= 0:
         raise DomainError("Số lượng phải > 0.")
     unit_type = fp.unit_type or "vi"
-    pack_size = fp.pack_size or 1
     product_name = fp.code
     lot_code = _gen_candate_lot_code(db)
-    units = _create_units(db, {
-        "finished_product_id": finished_product_id, "product_name": product_name,
-        "lot_code": lot_code, "total": quantity * pack_size, "pack_size": pack_size, "unit_type": unit_type,
-        "loc_id": location_id,
-    }, created_by=user.username, actor=user)
-    for u in units:
-        u.is_near_expiry = True
-    # quantity (tham số hàm, số vỉ/keg khai báo) — KHÔNG dùng len(units): _create_units giờ
-    # luôn trả về 1 dòng/lô (xem docs/WMS-LOT-LEVEL-REDESIGN.md), len(units) không còn phản
-    # ánh đúng số vỉ/keg thật (trước đây 1 dòng=1 vỉ nên len(units) trùng khớp quantity).
     entry = NearExpiryEntry(entry_id=new_id(), direction="in", finished_product_id=finished_product_id,
                             product_name=product_name, lot_code=lot_code, unit_type=unit_type,
                             quantity=quantity, location_id=location_id, declared_at=utcnow(),
-                            note=note, created_by=user.username, created_at=utcnow(),
-                            unit_codes=",".join(u.unit_code for u in units))
+                            note=note, created_by=user.username, created_at=utcnow())
     db.add(entry)
     record_audit(db, entity_type="near_expiry_entry", entity_id=entry.entry_id, action="create", actor=user,
                 after={"product_name": product_name, "lot_code": lot_code, "count": quantity})
     db.commit()
-    return {"entry_id": entry.entry_id, "product_name": product_name,
-            "lot_code": lot_code, "unit_type": unit_type, "count": quantity,
-            "unit_codes": [u.unit_code for u in units]}
+    return {"entry_id": entry.entry_id, "product_name": product_name, "lot_code": lot_code,
+            "unit_type": unit_type, "count": quantity}
+
+
+def update_near_expiry_entry(db: Session, entry_id: str, payload: dict, user: User) -> dict:
+    """Sửa 1 bản khai "Nhập bia cận date" ĐANG CHỜ DUYỆT — cho sửa toàn bộ (sản phẩm/số lượng/
+    vị trí/ghi chú) vì chưa có FinishedGoodsUnit nào được tạo (an toàn tuyệt đối). Chặn nếu đã
+    duyệt (approved_by) hoặc đã hoàn tác."""
+    require_perm(user, "warehouse.receive")
+    entry = db.get(NearExpiryEntry, entry_id)
+    if not entry or entry.direction != "in":
+        raise NotFoundError("Không tìm thấy bản khai.")
+    if entry.reversed:
+        raise DomainError("Bản khai này đã bị hủy — không thể sửa.")
+    if entry.approved_by:
+        raise DomainError("Bản khai này đã được duyệt — không thể sửa.")
+    if payload.get("finished_product_id") and payload["finished_product_id"] != entry.finished_product_id:
+        fp = db.get(FinishedProduct, payload["finished_product_id"])
+        if not fp:
+            raise NotFoundError("Không tìm thấy sản phẩm tương ứng.")
+        entry.finished_product_id = fp.finished_product_id
+        entry.product_name = fp.code
+        entry.unit_type = fp.unit_type or "vi"
+    if payload.get("quantity") is not None:
+        if payload["quantity"] <= 0:
+            raise DomainError("Số lượng phải > 0.")
+        entry.quantity = payload["quantity"]
+    if "location_id" in payload:
+        entry.location_id = payload["location_id"]
+    if "note" in payload:
+        entry.note = payload["note"]
+    record_audit(db, entity_type="near_expiry_entry", entity_id=entry.entry_id, action="update", actor=user,
+                after={"product_name": entry.product_name, "count": entry.quantity})
+    db.commit()
+    return {"entry_id": entry.entry_id}
+
+
+def approve_near_expiry_entry(db: Session, entry_id: str, user: User) -> dict:
+    """Trưởng bộ phận kho duyệt 1 bản khai "Nhập bia cận date" đang chờ — LÚC NÀY mới thực sự
+    tạo FinishedGoodsUnit (is_near_expiry=True, coi như đã "duyệt nhập kho" luôn vì chính hành
+    động duyệt tạo ra dòng tồn kho) và tăng tồn kho công ty. Sau khi duyệt: khoá hẳn — không
+    sửa/hoàn tác được nữa (mirror services/warehouse.py::approve_count)."""
+    require_perm(user, "wms.confirm_receipt")
+    entry = db.get(NearExpiryEntry, entry_id)
+    if not entry or entry.direction != "in":
+        raise NotFoundError("Không tìm thấy bản khai.")
+    if entry.reversed:
+        raise DomainError("Bản khai này đã bị hủy — không thể duyệt.")
+    if entry.approved_by:
+        raise DomainError("Bản khai này đã được duyệt trước đó.")
+    fp = db.get(FinishedProduct, entry.finished_product_id) if entry.finished_product_id else None
+    pack_size = (fp.pack_size or 1) if fp else 1
+    units = _create_units(db, {
+        "finished_product_id": entry.finished_product_id, "product_name": entry.product_name,
+        "lot_code": entry.lot_code, "total": entry.quantity * pack_size, "pack_size": pack_size,
+        "unit_type": entry.unit_type, "loc_id": entry.location_id,
+    }, created_by=entry.created_by or user.username, actor=user)
+    now = utcnow()
+    for u in units:
+        u.is_near_expiry = True
+        u.received_confirmed_by = user.username
+        u.received_confirmed_at = now
+    entry.unit_codes = ",".join(u.unit_code for u in units)
+    entry.approved_by = user.username
+    entry.approved_at = now
+    record_audit(db, entity_type="near_expiry_entry", entity_id=entry.entry_id, action="approve", actor=user,
+                after={"product_name": entry.product_name, "lot_code": entry.lot_code, "count": entry.quantity})
+    db.commit()
+    return {"entry_id": entry.entry_id, "count": entry.quantity, "unit_codes": [u.unit_code for u in units]}
 
 
 def list_near_expiry_entries(db: Session) -> list[dict]:
@@ -504,67 +598,38 @@ def list_near_expiry_entries(db: Session) -> list[dict]:
     for e in entries:
         shipment = db.get(Shipment, e.shipment_id) if e.shipment_id else None
         loc = db.get(WmsLocation, e.location_id) if e.location_id else None
+        pending = e.direction == "in" and not e.reversed and not e.approved_by
         out.append({"entry_id": e.entry_id, "direction": e.direction,
                     "finished_product_id": e.finished_product_id, "product_name": e.product_name,
                     "lot_code": e.lot_code, "unit_type": e.unit_type, "quantity": e.quantity,
                     "location_code": loc.code if loc else None,
                     "declared_at": e.declared_at, "shipment_code": shipment.shipment_code if shipment else None,
                     "note": e.note, "created_by": e.created_by, "created_at": e.created_at,
-                    "reversed": e.reversed,
-                    "can_undo": e.direction == "in" and not e.reversed and bool(e.unit_codes)})
+                    "reversed": e.reversed, "approved_by": e.approved_by, "approved_at": e.approved_at,
+                    "can_edit": pending, "can_approve": pending, "can_undo": pending})
     return out
 
 
 def undo_near_expiry_entry(db: Session, entry_id: str, user: User) -> dict:
-    """Hoàn tác 1 bản khai "Nhập bia cận date" (direction="in"): xoá đúng (các) dòng lô do lần
-    khai báo đó tạo ra (theo unit_codes đã lưu lúc tạo) + gỡ cạnh genealogy liên quan, miễn là
-    còn NGUYÊN VẸN — chưa bị xuất/phân rã/điều chuyển dù chỉ một phần. Dòng lô giờ có thể đại
-    diện nhiều vỉ/keg gộp lại (xem docs/WMS-LOT-LEVEL-REDESIGN.md) nên không thể chỉ kiểm
-    status=="stored" như trước (tiêu thụ MỘT PHẦN chỉ tách dòng, KHÔNG đổi status của phần
-    còn lại) — phải so tổng quantity còn lại với số vỉ/keg đã khai báo ban đầu (entry.quantity)."""
+    """Hủy 1 bản khai "Nhập bia cận date" (direction="in") ĐANG CHỜ DUYỆT — chỉ đánh dấu
+    reversed, KHÔNG có FinishedGoodsUnit nào để xoá (chưa tăng tồn kho, xem
+    create_near_expiry_entry). Chặn nếu đã duyệt — duyệt là mốc khóa cuối cùng, không hoàn tác
+    được nữa (mirror services/warehouse.py::approve_count/undo_count)."""
     require_perm(user, "warehouse.receive")
     entry = db.get(NearExpiryEntry, entry_id)
     if not entry:
         raise NotFoundError("Không tìm thấy bản khai.")
     if entry.direction != "in":
-        raise DomainError("Chỉ có thể hoàn tác bản khai \"Nhập bia cận date\" (không áp dụng cho dòng tự động khi xuất kho).")
+        raise DomainError("Chỉ có thể hủy bản khai \"Nhập bia cận date\" (không áp dụng cho dòng tự động khi xuất kho).")
     if entry.reversed:
-        raise DomainError("Bản khai này đã được hoàn tác trước đó.")
-    if not entry.unit_codes:
-        raise DomainError("Bản khai này không có dữ liệu vỉ/keg để hoàn tác (được tạo trước khi có tính năng này).")
-    unit_codes = entry.unit_codes.split(",")
-    units = db.execute(select(FinishedGoodsUnit).where(
-        FinishedGoodsUnit.unit_code.in_(unit_codes))).scalars().all()
-    if len(units) != len(unit_codes):
-        raise DomainError("Một số dòng của bản khai này đã bị xoá/phân rã ở nơi khác, không thể hoàn tác.")
-    not_stored = [u.unit_code for u in units if u.status != "stored"]
-    if not_stored:
-        raise DomainError(f"Vỉ/keg đã xuất hoặc không còn trong kho ({', '.join(not_stored)}), không thể hoàn tác.")
-    if entry.finished_product_id:
-        fp = db.get(FinishedProduct, entry.finished_product_id)
-    else:
-        # Bản khai cũ (trước khi bỏ tự nhận lô chiết) — chỉ còn tra qua bottle_id.
-        b = db.get(BottleRecord, entry.bottle_id) if entry.bottle_id else None
-        fp = db.get(FinishedProduct, b.finished_product_id) if b and b.finished_product_id else None
-    divisor = _pack_divisor(fp, entry.unit_type, _divide_by_pack_codes(db))
-    remaining_count = sum(u.quantity for u in units) / divisor
-    if remaining_count + 1e-6 < entry.quantity:
-        raise DomainError(
-            f"Đã có {entry.quantity - remaining_count:g} {entry.unit_type} rời khỏi lô này (xuất/phân rã/điều "
-            "chuyển một phần) — không thể hoàn tác nguyên vẹn.")
-    unit_ids = [u.unit_id for u in units]
-    edges = db.execute(select(GenealogyEdge).where(
-        GenealogyEdge.from_type == "bottle", GenealogyEdge.from_id == entry.bottle_id,
-        GenealogyEdge.to_type == "finished_goods_unit", GenealogyEdge.to_id.in_(unit_ids))).scalars().all()
-    for e in edges:
-        db.delete(e)
-    for u in units:
-        db.delete(u)
+        raise DomainError("Bản khai này đã được hủy trước đó.")
+    if entry.approved_by:
+        raise DomainError("Bản khai này đã được duyệt — không thể hủy.")
     entry.reversed = True
     record_audit(db, entity_type="near_expiry_entry", entity_id=entry.entry_id, action="undo", actor=user,
                 before={"count": entry.quantity}, after={"reversed": True})
     db.commit()
-    return {"entry_id": entry.entry_id, "removed": entry.quantity}
+    return {"entry_id": entry.entry_id}
 
 
 # ---- Nhập bia gửi: mirror y hệt bia cận date, khác ở chỗ được ưu tiên xuất TRƯỚC cả cận
@@ -589,7 +654,8 @@ def create_consigned_entry(db: Session, finished_product_id: str, quantity: int,
     """Khai báo "Nhập bia gửi": xe đã xuất phiếu đi giao trong ngày nhưng giao không hết,
     mang phần dư về gửi lại kho — mirror y hệt create_near_expiry_entry (Sản phẩm + Số lượng
     + Vị trí kho nhận trực tiếp, tự sinh lot_code riêng qua _gen_consigned_lot_code, đánh dấu
-    is_consigned=True) + ghi 1 dòng lịch sử riêng (ConsignedEntry, direction="in")."""
+    is_consigned=True) + ghi 1 dòng lịch sử riêng (ConsignedEntry, direction="in"). CHƯA tăng
+    tồn kho tới khi duyệt (mirror create_near_expiry_entry) — xem approve_consigned_entry."""
     require_perm(user, "warehouse.receive")
     fp = db.get(FinishedProduct, finished_product_id)
     if not fp:
@@ -597,28 +663,82 @@ def create_consigned_entry(db: Session, finished_product_id: str, quantity: int,
     if quantity <= 0:
         raise DomainError("Số lượng phải > 0.")
     unit_type = fp.unit_type or "vi"
-    pack_size = fp.pack_size or 1
     product_name = fp.code
     lot_code = _gen_consigned_lot_code(db)
-    units = _create_units(db, {
-        "finished_product_id": finished_product_id, "product_name": product_name,
-        "lot_code": lot_code, "total": quantity * pack_size, "pack_size": pack_size, "unit_type": unit_type,
-        "loc_id": location_id,
-    }, created_by=user.username, actor=user)
-    for u in units:
-        u.is_consigned = True
     entry = ConsignedEntry(entry_id=new_id(), direction="in", finished_product_id=finished_product_id,
                            product_name=product_name, lot_code=lot_code, unit_type=unit_type,
                            quantity=quantity, location_id=location_id, declared_at=utcnow(),
-                           note=note, created_by=user.username, created_at=utcnow(),
-                           unit_codes=",".join(u.unit_code for u in units))
+                           note=note, created_by=user.username, created_at=utcnow())
     db.add(entry)
     record_audit(db, entity_type="consigned_entry", entity_id=entry.entry_id, action="create", actor=user,
                 after={"product_name": product_name, "lot_code": lot_code, "count": quantity})
     db.commit()
-    return {"entry_id": entry.entry_id, "product_name": product_name,
-            "lot_code": lot_code, "unit_type": unit_type, "count": quantity,
-            "unit_codes": [u.unit_code for u in units]}
+    return {"entry_id": entry.entry_id, "product_name": product_name, "lot_code": lot_code,
+            "unit_type": unit_type, "count": quantity}
+
+
+def update_consigned_entry(db: Session, entry_id: str, payload: dict, user: User) -> dict:
+    """Sửa 1 bản khai "Nhập bia gửi" ĐANG CHỜ DUYỆT — mirror update_near_expiry_entry."""
+    require_perm(user, "warehouse.receive")
+    entry = db.get(ConsignedEntry, entry_id)
+    if not entry or entry.direction != "in":
+        raise NotFoundError("Không tìm thấy bản khai.")
+    if entry.reversed:
+        raise DomainError("Bản khai này đã bị hủy — không thể sửa.")
+    if entry.approved_by:
+        raise DomainError("Bản khai này đã được duyệt — không thể sửa.")
+    if payload.get("finished_product_id") and payload["finished_product_id"] != entry.finished_product_id:
+        fp = db.get(FinishedProduct, payload["finished_product_id"])
+        if not fp:
+            raise NotFoundError("Không tìm thấy sản phẩm tương ứng.")
+        entry.finished_product_id = fp.finished_product_id
+        entry.product_name = fp.code
+        entry.unit_type = fp.unit_type or "vi"
+    if payload.get("quantity") is not None:
+        if payload["quantity"] <= 0:
+            raise DomainError("Số lượng phải > 0.")
+        entry.quantity = payload["quantity"]
+    if "location_id" in payload:
+        entry.location_id = payload["location_id"]
+    if "note" in payload:
+        entry.note = payload["note"]
+    record_audit(db, entity_type="consigned_entry", entity_id=entry.entry_id, action="update", actor=user,
+                after={"product_name": entry.product_name, "count": entry.quantity})
+    db.commit()
+    return {"entry_id": entry.entry_id}
+
+
+def approve_consigned_entry(db: Session, entry_id: str, user: User) -> dict:
+    """Trưởng bộ phận kho duyệt 1 bản khai "Nhập bia gửi" đang chờ — mirror
+    approve_near_expiry_entry (LÚC NÀY mới tạo FinishedGoodsUnit + tăng tồn kho; sau khi duyệt
+    khoá hẳn, không sửa/hoàn tác được nữa)."""
+    require_perm(user, "wms.confirm_receipt")
+    entry = db.get(ConsignedEntry, entry_id)
+    if not entry or entry.direction != "in":
+        raise NotFoundError("Không tìm thấy bản khai.")
+    if entry.reversed:
+        raise DomainError("Bản khai này đã bị hủy — không thể duyệt.")
+    if entry.approved_by:
+        raise DomainError("Bản khai này đã được duyệt trước đó.")
+    fp = db.get(FinishedProduct, entry.finished_product_id) if entry.finished_product_id else None
+    pack_size = (fp.pack_size or 1) if fp else 1
+    units = _create_units(db, {
+        "finished_product_id": entry.finished_product_id, "product_name": entry.product_name,
+        "lot_code": entry.lot_code, "total": entry.quantity * pack_size, "pack_size": pack_size,
+        "unit_type": entry.unit_type, "loc_id": entry.location_id,
+    }, created_by=entry.created_by or user.username, actor=user)
+    now = utcnow()
+    for u in units:
+        u.is_consigned = True
+        u.received_confirmed_by = user.username
+        u.received_confirmed_at = now
+    entry.unit_codes = ",".join(u.unit_code for u in units)
+    entry.approved_by = user.username
+    entry.approved_at = now
+    record_audit(db, entity_type="consigned_entry", entity_id=entry.entry_id, action="approve", actor=user,
+                after={"product_name": entry.product_name, "lot_code": entry.lot_code, "count": entry.quantity})
+    db.commit()
+    return {"entry_id": entry.entry_id, "count": entry.quantity, "unit_codes": [u.unit_code for u in units]}
 
 
 def list_consigned_entries(db: Session) -> list[dict]:
@@ -627,53 +747,37 @@ def list_consigned_entries(db: Session) -> list[dict]:
     for e in entries:
         shipment = db.get(Shipment, e.shipment_id) if e.shipment_id else None
         loc = db.get(WmsLocation, e.location_id) if e.location_id else None
+        pending = e.direction == "in" and not e.reversed and not e.approved_by
         out.append({"entry_id": e.entry_id, "direction": e.direction,
                     "finished_product_id": e.finished_product_id, "product_name": e.product_name,
                     "lot_code": e.lot_code, "unit_type": e.unit_type, "quantity": e.quantity,
                     "location_code": loc.code if loc else None,
                     "declared_at": e.declared_at, "shipment_code": shipment.shipment_code if shipment else None,
                     "note": e.note, "created_by": e.created_by, "created_at": e.created_at,
-                    "reversed": e.reversed,
-                    "can_undo": e.direction == "in" and not e.reversed and bool(e.unit_codes)})
+                    "reversed": e.reversed, "approved_by": e.approved_by, "approved_at": e.approved_at,
+                    "can_edit": pending, "can_approve": pending, "can_undo": pending})
     return out
 
 
 def undo_consigned_entry(db: Session, entry_id: str, user: User) -> dict:
-    """Hoàn tác 1 bản khai "Nhập bia gửi" (direction="in") — mirror undo_near_expiry_entry,
-    đơn giản hơn vì mọi bản khai bia gửi đều mới (luôn có finished_product_id, không có
-    đường tương thích ngược qua bottle_id như bia cận date)."""
+    """Hủy 1 bản khai "Nhập bia gửi" (direction="in") ĐANG CHỜ DUYỆT — mirror
+    undo_near_expiry_entry (chỉ đánh dấu reversed, chưa có FinishedGoodsUnit nào để xoá; chặn
+    nếu đã duyệt)."""
     require_perm(user, "warehouse.receive")
     entry = db.get(ConsignedEntry, entry_id)
     if not entry:
         raise NotFoundError("Không tìm thấy bản khai.")
     if entry.direction != "in":
-        raise DomainError("Chỉ có thể hoàn tác bản khai \"Nhập bia gửi\" (không áp dụng cho dòng tự động khi xuất kho).")
+        raise DomainError("Chỉ có thể hủy bản khai \"Nhập bia gửi\" (không áp dụng cho dòng tự động khi xuất kho).")
     if entry.reversed:
-        raise DomainError("Bản khai này đã được hoàn tác trước đó.")
-    if not entry.unit_codes:
-        raise DomainError("Bản khai này không có dữ liệu vỉ/keg để hoàn tác.")
-    unit_codes = entry.unit_codes.split(",")
-    units = db.execute(select(FinishedGoodsUnit).where(
-        FinishedGoodsUnit.unit_code.in_(unit_codes))).scalars().all()
-    if len(units) != len(unit_codes):
-        raise DomainError("Một số dòng của bản khai này đã bị xoá/phân rã ở nơi khác, không thể hoàn tác.")
-    not_stored = [u.unit_code for u in units if u.status != "stored"]
-    if not_stored:
-        raise DomainError(f"Vỉ/keg đã xuất hoặc không còn trong kho ({', '.join(not_stored)}), không thể hoàn tác.")
-    fp = db.get(FinishedProduct, entry.finished_product_id) if entry.finished_product_id else None
-    divisor = _pack_divisor(fp, entry.unit_type, _divide_by_pack_codes(db))
-    remaining_count = sum(u.quantity for u in units) / divisor
-    if remaining_count + 1e-6 < entry.quantity:
-        raise DomainError(
-            f"Đã có {entry.quantity - remaining_count:g} {entry.unit_type} rời khỏi lô này (xuất/phân rã/điều "
-            "chuyển một phần) — không thể hoàn tác nguyên vẹn.")
-    for u in units:
-        db.delete(u)
+        raise DomainError("Bản khai này đã được hủy trước đó.")
+    if entry.approved_by:
+        raise DomainError("Bản khai này đã được duyệt — không thể hủy.")
     entry.reversed = True
     record_audit(db, entity_type="consigned_entry", entity_id=entry.entry_id, action="undo", actor=user,
                 before={"count": entry.quantity}, after={"reversed": True})
     db.commit()
-    return {"entry_id": entry.entry_id, "removed": entry.quantity}
+    return {"entry_id": entry.entry_id}
 
 
 def adjust_bottle_finish_stock(db: Session, *, finished_product_id: str | None, product_name: str,
@@ -895,9 +999,11 @@ def decompose_batch(db: Session, product_name: str, lot_code: str, unit_type: st
     fp = db.execute(select(FinishedProduct).where(FinishedProduct.code == product_name)).scalar_one_or_none()
     divisor = _pack_divisor(fp, unit_type, _divide_by_pack_codes(db))
     candidates, got = _consume_lot_rows(db, product_name=product_name, unit_type=unit_type, status="stored",
-                                        quantity_needed=count * divisor, lot_code=lot_code)
+                                        quantity_needed=count * divisor, lot_code=lot_code,
+                                        block_pending_manual=True)
     if not candidates:
-        raise DomainError("Không còn đơn vị nào tồn kho cho sản phẩm/lô/loại này.")
+        raise DomainError("Không còn đơn vị nào tồn kho cho sản phẩm/lô/loại này (hoặc chỉ còn lô "
+                          "nhập tay chưa được duyệt nhập kho).")
 
     vi_decomposed = got / divisor
     source_unit_ids = [u.unit_id for u in candidates]
@@ -990,9 +1096,11 @@ def free_issue_batch(db: Session, product_name: str, lot_code: str | None, unit_
     fp = db.execute(select(FinishedProduct).where(FinishedProduct.code == product_name)).scalar_one_or_none()
     divisor = _pack_divisor(fp, unit_type, _divide_by_pack_codes(db))
     candidates, got = _consume_lot_rows(db, product_name=product_name, unit_type=unit_type, status="stored",
-                                        quantity_needed=count * divisor, lot_code=lot_code)
+                                        quantity_needed=count * divisor, lot_code=lot_code,
+                                        block_pending_manual=True)
     if not candidates:
-        raise DomainError("Không còn đơn vị nào tồn kho cho sản phẩm/lô này.")
+        raise DomainError("Không còn đơn vị nào tồn kho cho sản phẩm/lô này (hoặc chỉ còn lô nhập "
+                          "tay chưa được duyệt nhập kho).")
 
     for u in candidates:
         u.status = "issued_free"
@@ -1085,7 +1193,10 @@ def list_lot_summaries(db: Session) -> list:
     {type}_near_expiry_count: số vỉ/keg/lon quy đổi ĐANG is_near_expiry=True của (lô, loại)
     này — dùng để chỉ bật ô chọn "Cận date" ở picker Xuất kho khi lô thực sự có hàng cận date
     (tránh người dùng tick nhầm lô không có bia cận date nào).
-    {type}_consigned_count: tương tự nhưng cho is_consigned=True (bia gửi) — mirror y hệt."""
+    {type}_consigned_count: tương tự nhưng cho is_consigned=True (bia gửi) — mirror y hệt.
+    {type}_pending_count/{type}_confirmed_count: số vỉ/keg/lon quy đổi đang chờ/đã được Trưởng
+    bộ phận kho duyệt nhập kho (nguồn "chiet" hoặc "manual" — xem docstring
+    FinishedGoodsUnit.source), dùng cho cột "Duyệt nhập kho" ở bảng Kho TP."""
     # "count" = tổng vỉ/keg/lon quy đổi (SUM(quantity)/pack_size — qua _pack_divisor_expr,
     # JOIN FinishedProduct), KHÔNG đếm dòng — 1 dòng giờ có thể đại diện nhiều đơn vị đóng
     # gói (xem docs/WMS-LOT-LEVEL-REDESIGN.md). "qty" (tổng SL nhỏ) không đổi ý nghĩa.
@@ -1097,6 +1208,12 @@ def list_lot_summaries(db: Session) -> list:
                              func.sum(case((FinishedGoodsUnit.is_near_expiry == true(),
                                            FinishedGoodsUnit.quantity / _pack_divisor_expr(divide_codes)), else_=0.0)),
                              func.sum(case((FinishedGoodsUnit.is_consigned == true(),
+                                           FinishedGoodsUnit.quantity / _pack_divisor_expr(divide_codes)), else_=0.0)),
+                             func.sum(case((and_(FinishedGoodsUnit.source.in_(("chiet", "manual")),
+                                                FinishedGoodsUnit.received_confirmed_by.is_(None)),
+                                           FinishedGoodsUnit.quantity / _pack_divisor_expr(divide_codes)), else_=0.0)),
+                             func.sum(case((and_(FinishedGoodsUnit.source.in_(("chiet", "manual")),
+                                                FinishedGoodsUnit.received_confirmed_by.isnot(None)),
                                            FinishedGoodsUnit.quantity / _pack_divisor_expr(divide_codes)), else_=0.0)))
                       .select_from(FinishedGoodsUnit)
                       .outerjoin(FinishedProduct, FinishedProduct.finished_product_id == FinishedGoodsUnit.finished_product_id)
@@ -1126,7 +1243,8 @@ def list_lot_summaries(db: Session) -> list:
     # vị tồn kho" (VD "lốc", "két") đều bị ĐẾM RỖNG ở đây, khiến cả lô đó biến mất khỏi bảng Kho
     # TP/picker Xuất kho/Cất vào vị trí dù tồn kho thật vẫn còn (không chỉ sai nhãn như "lon").
     types_by_key: dict[tuple, set] = {}
-    for product_name, lot_code, unit_type, location_id, count, qty, oldest_at, near_expiry_count, consigned_count in rows:
+    for (product_name, lot_code, unit_type, location_id, count, qty, oldest_at, near_expiry_count,
+         consigned_count, pending_count, confirmed_count) in rows:
         key = (product_name, lot_code)
         g = grouped.setdefault(key, {"product_name": product_name, "lot_code": lot_code,
                                      "bottle_codes": bottle_codes_by_lot.get(lot_code, []),
@@ -1138,10 +1256,14 @@ def list_lot_summaries(db: Session) -> list:
         g.setdefault(f"{unit_type}_unplaced", 0)
         g.setdefault(f"{unit_type}_near_expiry_count", 0.0)
         g.setdefault(f"{unit_type}_consigned_count", 0.0)
+        g.setdefault(f"{unit_type}_pending_count", 0.0)
+        g.setdefault(f"{unit_type}_confirmed_count", 0.0)
         g[f"{unit_type}_count"] += count
         g[f"{unit_type}_qty"] += qty or 0
         g[f"{unit_type}_near_expiry_count"] += near_expiry_count or 0
         g[f"{unit_type}_consigned_count"] += consigned_count or 0
+        g[f"{unit_type}_pending_count"] += pending_count or 0
+        g[f"{unit_type}_confirmed_count"] += confirmed_count or 0
         if location_id is None:
             g[f"{unit_type}_unplaced"] += count
         else:
@@ -1535,6 +1657,33 @@ def list_lot_summaries_by_location(db: Session, loc_id: str) -> list:
             for product_name, lot_code, unit_type, count in rows]
 
 
+def confirm_receipt_by_lot(db: Session, product_name: str, lot_code: str | None, unit_type: str,
+                           user: User) -> dict:
+    """Trưởng bộ phận kho duyệt nhập kho cho 1 lô đến từ chiết (source="chiet") HOẶC nhập tay
+    thủ công (source="manual") — chỉ khoá lại (đánh dấu đã duyệt), KHÔNG đổi số liệu tồn kho.
+    Sau khi duyệt: delete_unit/delete_units/delete_units_by_criteria chặn xóa các dòng này
+    (mirror confirm_shipment); riêng lô "manual" còn được MỞ khoá xuất (create_shipment, xem
+    _consume_lot_rows(block_pending_manual=True)) — lô "chiet" xuất được ngay từ đầu, duyệt chỉ
+    ảnh hưởng tới xóa. Lô tồn đầu/near-expiry/consigned tự động đã "duyệt" từ lúc tạo, không
+    còn khớp WHERE received_confirmed_by IS NULL nên không xuất hiện ở đây nữa."""
+    require_perm(user, "wms.confirm_receipt")
+    rows = db.execute(select(FinishedGoodsUnit).where(
+        FinishedGoodsUnit.product_name == product_name, FinishedGoodsUnit.lot_code == lot_code,
+        FinishedGoodsUnit.unit_type == unit_type, FinishedGoodsUnit.status == "stored",
+        FinishedGoodsUnit.source.in_(("chiet", "manual")), FinishedGoodsUnit.received_confirmed_by.is_(None))).scalars().all()
+    if not rows:
+        raise DomainError("Không có lô nào đang chờ duyệt khớp tiêu chí này.")
+    now = utcnow()
+    for u in rows:
+        u.received_confirmed_by = user.username
+        u.received_confirmed_at = now
+    record_audit(db, entity_type="finished_goods_unit", entity_id=rows[0].unit_id, action="confirm_receipt",
+                 actor=user, after={"product_name": product_name, "lot_code": lot_code,
+                                    "unit_type": unit_type, "confirmed": len(rows)})
+    db.commit()
+    return {"confirmed": len(rows)}
+
+
 def delete_units_by_criteria(db: Session, product_name: str, lot_code: str | None, unit_type: str,
                              user: User) -> dict:
     """Xóa CẢ LÔ vỉ/keg theo (sản phẩm, lô, loại) thay vì theo danh sách unit_id — tránh phải
@@ -1543,6 +1692,13 @@ def delete_units_by_criteria(db: Session, product_name: str, lot_code: str | Non
     tiêu chí lọc status='stored' nên tự động không bị đụng tới — không cần kiểm tra riêng
     từng dòng như delete_units)."""
     require_perm(user, "warehouse.issue")
+    confirmed_count = db.execute(select(func.count()).select_from(FinishedGoodsUnit).where(
+        FinishedGoodsUnit.product_name == product_name, FinishedGoodsUnit.lot_code == lot_code,
+        FinishedGoodsUnit.unit_type == unit_type, FinishedGoodsUnit.status == "stored",
+        FinishedGoodsUnit.source.in_(("chiet", "manual")),
+        FinishedGoodsUnit.received_confirmed_by.isnot(None))).scalar_one()
+    if confirmed_count:
+        raise DomainError("Lô này đã được Trưởng bộ phận kho duyệt nhập kho — không thể xóa.")
     ids = [row[0] for row in db.execute(select(FinishedGoodsUnit.unit_id).where(
         FinishedGoodsUnit.product_name == product_name, FinishedGoodsUnit.lot_code == lot_code,
         FinishedGoodsUnit.unit_type == unit_type, FinishedGoodsUnit.status == "stored")).all()]
@@ -1629,11 +1785,23 @@ def create_shipment(db: Session, ship_to_id: str, lines: list, user: User, heade
         candidates, got = _consume_lot_rows(
             db, product_name=product_name, unit_type=unit_type, status="stored",
             quantity_needed=qty * divisor, lot_code=lot_code, exclude_ids=picked_so_far,
-            near_expiry_only=near_expiry_only, consigned_only=consigned_only)
+            near_expiry_only=near_expiry_only, consigned_only=consigned_only, block_pending_manual=True)
         if got + 1e-9 < qty * divisor:
             special_note = " (bia cận date)" if near_expiry_only else " (bia gửi)" if consigned_only else ""
+            # Gợi ý lý do thiếu hàng khi thực ra còn "Nhập kho thủ công" đang chờ Trưởng bộ phận
+            # kho duyệt (chưa xuất được, xem _consume_lot_rows(block_pending_manual=True)) — tránh
+            # người dùng tưởng nhầm là kho thật sự hết hàng.
+            pending_stmt = select(func.sum(FinishedGoodsUnit.quantity)).where(
+                FinishedGoodsUnit.product_name == product_name, FinishedGoodsUnit.unit_type == unit_type,
+                FinishedGoodsUnit.status == "stored", FinishedGoodsUnit.source == "manual",
+                FinishedGoodsUnit.received_confirmed_by.is_(None))
+            if lot_code:
+                pending_stmt = pending_stmt.where(FinishedGoodsUnit.lot_code == lot_code)
+            pending = db.execute(pending_stmt).scalar() or 0
+            pending_note = (f" (còn {pending / divisor:g} đang chờ Trưởng bộ phận kho duyệt nhập kho)"
+                            if pending else "")
             raise DomainError(f"{product_name} {lot_code or ''}{special_note}: chỉ còn {got / divisor:g} "
-                              f"đơn vị tồn kho, không đủ {qty} yêu cầu.")
+                              f"đơn vị tồn kho, không đủ {qty} yêu cầu.{pending_note}")
         units.extend(candidates)
         picked_so_far.update(u.unit_id for u in candidates)
 
@@ -1716,8 +1884,14 @@ def create_shipment(db: Session, ship_to_id: str, lines: list, user: User, heade
             "ship_to_code": ship_to.code, "fifo_ok": fifo_ok, "units": out_lines}
 
 
-def list_shipments(db: Session) -> list:
-    ships = db.execute(select(Shipment).order_by(Shipment.created_at.desc())).scalars().all()
+def list_shipments(db: Session, limit: int = 200, offset: int = 0) -> list:
+    """Có phân trang (limit tối đa 2000, offset) — số phiếu xuất kho tăng dần vô hạn theo thời
+    gian. Nạp 1 LẦN toàn bộ FinishedGoodsUnit của các phiếu trong trang hiện tại rồi nhóm theo
+    shipment_id trong Python, thay vì mỗi phiếu 1 query riêng (N+1) như trước."""
+    limit = max(1, min(limit or 200, 2000))
+    offset = max(0, offset or 0)
+    ships = db.execute(select(Shipment).order_by(Shipment.created_at.desc())
+                      .limit(limit).offset(offset)).scalars().all()
     ship_to_by = {s.ship_to_id: s for s in db.execute(select(ShipToLocation)).scalars().all()}
     fp_cache: dict = {}
     divide_codes = _divide_by_pack_codes(db)
@@ -1727,10 +1901,16 @@ def list_shipments(db: Session) -> list:
             fp_cache[u.finished_product_id] = db.get(FinishedProduct, u.finished_product_id) if u.finished_product_id else None
         return _pack_divisor(fp_cache[u.finished_product_id], u.unit_type, divide_codes)
 
+    shipment_ids = [s.shipment_id for s in ships]
+    units_by_shipment: dict[str, list] = {}
+    if shipment_ids:
+        for u in db.execute(select(FinishedGoodsUnit).where(
+                FinishedGoodsUnit.shipment_id.in_(shipment_ids))).scalars().all():
+            units_by_shipment.setdefault(u.shipment_id, []).append(u)
+
     out = []
     for s in ships:
-        units = db.execute(select(FinishedGoodsUnit).where(
-            FinishedGoodsUnit.shipment_id == s.shipment_id)).scalars().all()
+        units = units_by_shipment.get(s.shipment_id, [])
         # Gom nhóm theo (product, lot_code, unit_type) để in phiếu — thay cho bảng dòng riêng.
         # "count" = số vỉ/keg/lon quy đổi (quantity/pack_size), KHÔNG đếm dòng (1 dòng giờ có
         # thể đại diện nhiều đơn vị đóng gói, xem docs/WMS-LOT-LEVEL-REDESIGN.md).
@@ -1757,8 +1937,51 @@ def list_shipments(db: Session) -> list:
                     "note": s.note, "recipient_name": s.recipient_name, "recipient_dept": s.recipient_dept,
                     "driver_name": s.driver_name, "vehicle_plate": s.vehicle_plate,
                     "from_location": s.from_location, "delivery_place": s.delivery_place,
+                    "confirmed_by": s.confirmed_by, "confirmed_at": s.confirmed_at,
                     "unit_count": unit_count, "lines": list(grouped.values())})
     return out
+
+
+def confirm_shipment(db: Session, shipment_id: str, user: User) -> dict:
+    """Trưởng bộ phận kho xác nhận phiếu xuất kho — chỉ khoá lại (đánh dấu đã xác nhận), KHÔNG
+    đổi số liệu tồn kho. Sau khi xác nhận, undo_shipment() khoá lại — chỉ ADMIN mới "Hoàn tác"
+    được nữa."""
+    require_perm(user, "wms.confirm_shipment")
+    shipment = db.get(Shipment, shipment_id)
+    if not shipment:
+        raise NotFoundError("Phiếu xuất kho không tồn tại.")
+    if shipment.confirmed_by:
+        raise DomainError("Phiếu này đã được xác nhận trước đó.")
+    shipment.confirmed_by = user.username
+    shipment.confirmed_at = utcnow()
+    record_audit(db, entity_type="shipment", entity_id=shipment.shipment_id, action="confirm", actor=user)
+    db.commit()
+    return {"shipment_id": shipment.shipment_id, "confirmed_by": shipment.confirmed_by,
+            "confirmed_at": shipment.confirmed_at}
+
+
+_SHIPMENT_EDITABLE_FIELDS = ("note", "recipient_name", "recipient_dept", "driver_name",
+                             "vehicle_plate", "from_location", "delivery_place", "shipment_type")
+
+
+def update_shipment(db: Session, shipment_id: str, payload: dict, user: User) -> dict:
+    """Sửa thông tin đầu phiếu xuất kho (người nhận, lái xe, biển số, địa điểm, lý do...) — chỉ
+    các trường mô tả, KHÔNG đụng tới số liệu tồn kho/dòng hàng. Chặn sửa sau khi đã "Duyệt"
+    (confirmed_by) — lúc đó phiếu coi như chốt, chỉ còn Hoàn tác (ADMIN) mới đổi được."""
+    require_perm(user, "warehouse.issue")
+    shipment = db.get(Shipment, shipment_id)
+    if not shipment:
+        raise NotFoundError("Phiếu xuất kho không tồn tại.")
+    if shipment.confirmed_by:
+        raise DomainError("Phiếu đã được duyệt — không thể sửa nữa.")
+    before = {f: getattr(shipment, f) for f in _SHIPMENT_EDITABLE_FIELDS}
+    for field in _SHIPMENT_EDITABLE_FIELDS:
+        if field in payload:
+            setattr(shipment, field, payload[field])
+    record_audit(db, entity_type="shipment", entity_id=shipment.shipment_id, action="update",
+                 actor=user, before=before, after={f: getattr(shipment, f) for f in _SHIPMENT_EDITABLE_FIELDS})
+    db.commit()
+    return {"shipment_id": shipment.shipment_id}
 
 
 def undo_shipment(db: Session, shipment_id: str, user: User) -> dict:
@@ -1766,11 +1989,15 @@ def undo_shipment(db: Session, shipment_id: str, user: User) -> dict:
     xuất đến). Không giữ lại location_id gốc (đã bị xóa lúc xuất) — hàng về kho coi như chưa
     xếp vị trí, xếp lại thủ công (Điều chuyển) nếu cần. Không xóa phiếu (giữ làm lịch sử) —
     idempotent tự nhiên: sau khi hoàn tác, truy vấn theo shipment_id không còn ra unit nào
-    nên gọi lại sẽ báo lỗi thay vì hoàn tác lần 2."""
+    nên gọi lại sẽ báo lỗi thay vì hoàn tác lần 2.
+
+    Nếu Trưởng bộ phận kho đã xác nhận (confirmed_by), CHỈ ADMIN mới được hoàn tác."""
     require_perm(user, "warehouse.issue")
     shipment = db.get(Shipment, shipment_id)
     if not shipment:
         raise NotFoundError("Phiếu xuất kho không tồn tại.")
+    if shipment.confirmed_by:
+        require_role(user, Role.ADMIN)
     units = db.execute(select(FinishedGoodsUnit).where(
         FinishedGoodsUnit.shipment_id == shipment_id)).scalars().all()
     if not units:
@@ -1815,6 +2042,8 @@ def delete_unit(db: Session, unit_id: str, user: User) -> None:
         raise DomainError("Đã xuất kho — không thể xóa.")
     if u.status == "decomposed":
         raise DomainError("Đã phân rã thành lon — không thể xóa (còn lon con phụ thuộc).")
+    if u.source in ("chiet", "manual") and u.received_confirmed_by:
+        raise DomainError("Đã được Trưởng bộ phận kho duyệt nhập kho — không thể xóa.")
     for e in db.execute(select(GenealogyEdge).where(or_(
             and_(GenealogyEdge.to_type == "finished_goods_unit", GenealogyEdge.to_id == unit_id),
             and_(GenealogyEdge.from_type == "finished_goods_unit", GenealogyEdge.from_id == unit_id)))).scalars().all():
@@ -1847,6 +2076,8 @@ def delete_units(db: Session, unit_ids: list[str], user: User) -> dict:
             raise DomainError(f"{u.unit_code} đã xuất kho — không thể xóa.")
         if u.status == "decomposed":
             raise DomainError(f"{u.unit_code} đã phân rã thành lon — không thể xóa (còn lon con phụ thuộc).")
+        if u.source in ("chiet", "manual") and u.received_confirmed_by:
+            raise DomainError(f"{u.unit_code} đã được Trưởng bộ phận kho duyệt nhập kho — không thể xóa.")
         units.append(u)
     bottles_reset = set()
     for u in units:
@@ -1920,9 +2151,10 @@ def relocate_batch(db: Session, product_name: str, lot_code: str, unit_type: str
     divisor = _pack_divisor(fp, unit_type, _divide_by_pack_codes(db))
     candidates, got = _consume_lot_rows(db, product_name=product_name, unit_type=unit_type, status="stored",
                                         quantity_needed=count * divisor, lot_code=lot_code,
-                                        location_id=from_loc_id)
+                                        location_id=from_loc_id, block_pending_manual=True)
     if not candidates:
-        raise DomainError("Không còn đơn vị nào phù hợp để xử lý.")
+        raise DomainError("Không còn đơn vị nào phù hợp để xử lý (hoặc chỉ còn lô nhập tay chưa "
+                          "được duyệt nhập kho).")
     moved_count = got / divisor
 
     moving_in = [u for u in candidates if u.location_id != to_loc_id]

@@ -21,6 +21,21 @@ from ..models.quality_ext import QCParameter, QCParameterGroup, QCParameterGroup
 from ..security import User, require_perm
 
 
+# lm_code/filter_code/bottle_code chỉ duy nhất TRONG 1 năm (xem UniqueConstraint trên từng
+# model) — scope_id ghép chuỗi cho QualityResult/Deviation PHẢI mang theo năm, nếu không 2 lô
+# khác năm trùng mã (VD "LM-01" của 2026 và 2027) sẽ lẫn lộn kết quả QC của nhau.
+def ferment_scope_id(lm_code: str, ferment_year: int, stage: str) -> str:
+    return f"{ferment_year}-{lm_code}__{stage}"
+
+
+def filter_scope_id(filter_code: str, filter_year: int) -> str:
+    return f"{filter_year}-{filter_code}"
+
+
+def bottle_scope_id(bottle_code: str, bottle_year: int) -> str:
+    return f"{bottle_year}-{bottle_code}__thanh_pham"
+
+
 # ---- Nhóm chỉ tiêu ----
 
 def list_groups(db: Session) -> list[QCParameterGroup]:
@@ -302,19 +317,24 @@ def missing_mandatory_params(db: Session, scope_type: str, scope_id: str) -> lis
     return lot_qc_status(db, lot)["pending"]
 
 
-# ---- Gán nhóm chỉ tiêu cho công đoạn sản xuất (mẻ nấu/lên men chính/phụ/lọc/thành phẩm) ----
+# ---- Gán nhóm chỉ tiêu cho công đoạn sản xuất (mẻ nấu/lên men chính/phụ/lọc/thành phẩm/
+# nước nấu bia) ----
 # Cùng cơ chế MaterialQcGroup ở trên, nhưng khoá theo (stage, product_id|beer_type_id) —
 # product_id (Dịch bia) dùng cho PRODUCT_SCOPED_STAGES (phân biệt cả độ oP); beer_type_id
-# (Loại bia — thương hiệu, không phân biệt oP) dùng cho các stage còn lại (loc, thanh_pham)
-# vì lọc phối có thể gộp nhiều Dịch bia cùng 1 Loại bia (xem
+# (Loại bia — thương hiệu, không phân biệt oP) dùng cho BEER_TYPE_SCOPED_STAGES (loc,
+# thanh_pham) vì lọc phối có thể gộp nhiều Dịch bia cùng 1 Loại bia (xem
 # services/filter_order.py::_validate_tanks). Field không thuộc phạm vi stage đó luôn bị
-# server bỏ qua (ép về NULL) khi lưu — tránh gán nhầm cột.
+# server bỏ qua (ép về NULL) khi lưu — tránh gán nhầm cột. Stage KHÔNG thuộc cả 2 tập này
+# (VD "nuoc_nau" — chỉ tiêu nước nấu bia, dùng chung cho mọi loại bia) luôn có cả product_id
+# lẫn beer_type_id = NULL — nhóm gán cho stage đó áp dụng cho MỌI mẻ nấu, không phân biệt
+# dịch bia/loại bia.
 PRODUCT_SCOPED_STAGES = {"nau", "len_men_chinh", "len_men_phu"}
+BEER_TYPE_SCOPED_STAGES = {"loc", "thanh_pham"}
 # finished_product_id (SKU cụ thể) có ý nghĩa ở "loc" và "thanh_pham" — cùng 1 Loại bia vẫn
 # có thể cần chỉ tiêu Lọc khác nhau theo hình thức đóng gói đích (VD Legend chai lọc khác
 # Legend tươi), khai báo 1 lần ở Lệnh lọc (FilterOrder.finished_product_id) và kế thừa xuống
-# FilterRecord — mirror cách beer_type_id được kế thừa. Các stage còn lại (nau/lên men) ép
-# về NULL vì không có khái niệm SKU ở đó.
+# FilterRecord — mirror cách beer_type_id được kế thừa. Các stage còn lại (nau/lên men/nước
+# nấu) ép về NULL vì không có khái niệm SKU ở đó.
 SKU_SCOPED_STAGES = {"loc", "thanh_pham"}
 
 
@@ -342,12 +362,14 @@ def link_stage_group(db: Session, payload: dict, user: User) -> dict:
     if not db.get(QCParameterGroup, payload["group_id"]):
         raise NotFoundError("Nhóm chỉ tiêu không tồn tại.")
     # product_id (Dịch bia) chỉ có ý nghĩa cho PRODUCT_SCOPED_STAGES; beer_type_id (Loại
-    # bia) chỉ có ý nghĩa cho các stage còn lại — ép field không thuộc phạm vi về NULL,
-    # tránh gán nhầm cột theo đúng stage. finished_product_id (SKU cụ thể) chỉ có ý nghĩa ở
-    # SKU_SCOPED_STAGES (loc, thanh_pham) — các stage khác (nấu/lên men) ép về NULL.
+    # bia) chỉ có ý nghĩa cho BEER_TYPE_SCOPED_STAGES — ép field không thuộc phạm vi về NULL,
+    # tránh gán nhầm cột theo đúng stage. Stage ngoài cả 2 tập (VD "nuoc_nau") luôn có cả 2
+    # cột NULL = áp dụng chung cho mọi dịch bia/loại bia. finished_product_id (SKU cụ thể)
+    # chỉ có ý nghĩa ở SKU_SCOPED_STAGES (loc, thanh_pham) — các stage khác ép về NULL.
     is_product_scoped = payload["stage"] in PRODUCT_SCOPED_STAGES
+    is_beer_type_scoped = payload["stage"] in BEER_TYPE_SCOPED_STAGES
     product_id = (payload.get("product_id") or None) if is_product_scoped else None
-    beer_type_id = (payload.get("beer_type_id") or None) if not is_product_scoped else None
+    beer_type_id = (payload.get("beer_type_id") or None) if is_beer_type_scoped else None
     finished_product_id = (payload.get("finished_product_id") or None) if payload["stage"] in SKU_SCOPED_STAGES else None
     existing = db.execute(
         select(StageQcGroup).where(StageQcGroup.stage == payload["stage"],
@@ -385,8 +407,9 @@ def update_stage_group(db: Session, link_id: str, payload: dict, user: User) -> 
     # Cùng logic ép field theo stage như link_stage_group — sửa công đoạn cũng phải
     # scrub lại product_id/beer_type_id/finished_product_id cho khớp phạm vi mới.
     is_product_scoped = payload["stage"] in PRODUCT_SCOPED_STAGES
+    is_beer_type_scoped = payload["stage"] in BEER_TYPE_SCOPED_STAGES
     product_id = (payload.get("product_id") or None) if is_product_scoped else None
-    beer_type_id = (payload.get("beer_type_id") or None) if not is_product_scoped else None
+    beer_type_id = (payload.get("beer_type_id") or None) if is_beer_type_scoped else None
     finished_product_id = (payload.get("finished_product_id") or None) if payload["stage"] in SKU_SCOPED_STAGES else None
     dup = db.execute(
         select(StageQcGroup).where(StageQcGroup.link_id != link_id, StageQcGroup.active == true(),
@@ -651,22 +674,32 @@ def list_pending_stage_declarations(db: Session) -> list[dict]:
             out.append({"stage": "nau", "stage_label": "Nấu", "scope_type": "brew_batch", "scope_id": b.batch_id,
                        "label": f"Mẻ nấu {b.batch_code}" + (f" (mã nấu {brew.brew_code})" if brew else ""),
                        "pending": st["pending"]})
+    # Nước nấu bia: 1 khai báo cho CẢ lô nấu (mã nấu/BrewRecord), không phải theo từng mẻ —
+    # dùng chung cho mọi dịch bia nên KHÔNG truyền product_id (required_params_for_stage chỉ
+    # khớp nhóm chỉ tiêu áp dụng chung, xem BEER_TYPE_SCOPED_STAGES ở trên).
+    for brew in brews.values():
+        st_water = stage_qc_status(db, "nuoc_nau", "brew", brew.brew_id)
+        if st_water["pending"]:
+            out.append({"stage": "nuoc_nau", "stage_label": "Nước nấu bia", "scope_type": "brew",
+                       "scope_id": brew.brew_id, "label": f"Mã nấu {brew.brew_code} — Nước nấu",
+                       "pending": st_water["pending"]})
     for f in db.execute(select(FermentRecord)).scalars().all():
         for stage, part_label in (("len_men_chinh", "CT chính"), ("len_men_phu", "CT phụ")):
-            scope_id = f"{f.lm_code}__{stage}"
+            scope_id = ferment_scope_id(f.lm_code, f.ferment_year, stage)
             st = stage_qc_status(db, stage, "ferment", scope_id, f.product_id)
             if st["pending"]:
                 out.append({"stage": stage, "stage_label": f"Lên men — {part_label}", "scope_type": "ferment",
                            "scope_id": scope_id, "label": f"Lô lên men {f.lm_code} — {part_label}",
                            "pending": st["pending"]})
     for r in db.execute(select(FilterRecord)).scalars().all():
-        st = stage_qc_status(db, "loc", "filter", r.filter_code, r.product_id,
+        scope_id = filter_scope_id(r.filter_code, r.filter_year)
+        st = stage_qc_status(db, "loc", "filter", scope_id, r.product_id,
                              beer_type_id=r.beer_type_id, finished_product_id=r.finished_product_id)
         if st["pending"]:
-            out.append({"stage": "loc", "stage_label": "Lọc", "scope_type": "filter", "scope_id": r.filter_code,
+            out.append({"stage": "loc", "stage_label": "Lọc", "scope_type": "filter", "scope_id": scope_id,
                        "label": f"Mẻ lọc {r.filter_code}", "pending": st["pending"]})
     for b in db.execute(select(BottleRecord)).scalars().all():
-        scope_id = f"{b.bottle_code}__thanh_pham"
+        scope_id = bottle_scope_id(b.bottle_code, b.bottle_year)
         st = stage_qc_status(db, "thanh_pham", "bottle", scope_id, b.product_id,
                              beer_type_id=b.beer_type_id, finished_product_id=b.finished_product_id)
         if st["pending"]:

@@ -11,7 +11,7 @@ xưởng tạo có thể gồm NHIỀU dòng vật tư khác nhau (line). Thủ 
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import UnicodeText, Float, ForeignKey, Unicode
+from sqlalchemy import Boolean, UnicodeText, Float, ForeignKey, Unicode
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ..common import UTCDateTime, new_id, utcnow
@@ -31,7 +31,7 @@ class StockMovement(Base):
     uom: Mapped[str] = mapped_column(Unicode(255), default="kg")
     location_from: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
     location_to: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
-    mode: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)  # tu_do|tra_ncc|xuat_theo_de_nghi|dieu_chuyen
+    mode: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)  # tu_do|tra_ncc|xuat_theo_de_nghi|dieu_chuyen|dieu_chuyen_nha_may
     reason: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)
     ref_doc: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
     actor: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
@@ -39,6 +39,56 @@ class StockMovement(Base):
     # "Hoàn lại" xuất tự do (không áp dụng cho trả NCC): đánh dấu đã hoàn + trỏ tới giao dịch hoàn.
     reversed: Mapped[bool] = mapped_column(default=False)
     reversal_of: Mapped[Optional[str]] = mapped_column(ForeignKey("stock_movement.movement_id"), nullable=True)
+    # Chỉ dùng cho mode="dieu_chuyen_nha_may" (Điều chuyển Kho công ty → Nhà máy khác) — các
+    # mode khác luôn NULL. destination_factory_id = nhà máy đích; approved_by/approved_at =
+    # Trưởng phòng Kế hoạch đã duyệt (xem services/warehouse.py::approve_transfer_to_factory).
+    # Một khi đã duyệt, undo_issue() khoá lại — chỉ ADMIN mới "Hoàn lại" được nữa.
+    destination_factory_id: Mapped[Optional[str]] = mapped_column(ForeignKey("factory_location.factory_id"), nullable=True)
+    approved_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    approved_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+    # Chỉ có giá trị khi giao dịch phát sinh từ 1 dòng Đề nghị nhận kho (fulfill_request_line/
+    # fulfill_all_lines) — liên kết trực tiếp bằng khóa ngoại thay vì so khớp chuỗi văn bản
+    # `reason` (xem delete_request_history) vốn dễ vỡ nếu định dạng lý do từng bị sửa tay.
+    request_id: Mapped[Optional[str]] = mapped_column(ForeignKey("material_request.request_id"), nullable=True, index=True)
+    request_line_id: Mapped[Optional[str]] = mapped_column(ForeignKey("material_request_line.line_id"), nullable=True)
+
+
+class FactoryLocation(Base):
+    """Danh mục nhà máy khác — đích của Điều chuyển Kho công ty → Nhà máy khác (khác nơi xuất
+    đến của WMS/ShipToLocation, vốn dành cho nhà phân phối thành phẩm)."""
+    __tablename__ = "factory_location"
+
+    factory_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
+    code: Mapped[str] = mapped_column(Unicode(64), unique=True, index=True)
+    name: Mapped[str] = mapped_column(Unicode(255))
+    address: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    contact: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class TransferPxRequest(Base):
+    """Đề nghị điều chuyển Kho phân xưởng → Kho công ty — CHƯA động tồn kho lúc tạo, chỉ khi
+    Thủ kho công ty duyệt (approve_transfer_px_request) mới thật sự gọi transfer() dịch chuyển
+    lô. status: pending -> approved | rejected. Sau khi approved, `reversed=True` đánh dấu ADMIN
+    đã hoàn tác (xem undo_transfer_px_request) — chỉ admin mới hoàn tác được sau khi đã duyệt."""
+    __tablename__ = "transfer_px_request"
+
+    request_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
+    request_code: Mapped[str] = mapped_column(Unicode(64), unique=True, index=True)
+    lot_id: Mapped[str] = mapped_column(ForeignKey("material_lot.lot_id"), index=True)
+    quantity: Mapped[float] = mapped_column(Float)
+    uom: Mapped[str] = mapped_column(Unicode(255), default="kg")
+    reason: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)
+    status: Mapped[str] = mapped_column(Unicode(255), default="pending", index=True)  # pending|approved|rejected
+    movement_id: Mapped[Optional[str]] = mapped_column(ForeignKey("stock_movement.movement_id"), nullable=True)
+    reversed: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    approved_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    approved_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+    rejected_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    rejected_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+    reject_reason: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)
 
 
 class MaterialRequest(Base):
@@ -97,6 +147,10 @@ class StockCount(Base):
     count_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
     count_code: Mapped[str] = mapped_column(Unicode(64), unique=True, index=True)
     location: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)  # lọc theo Kho công ty/phân xưởng, giống MaterialLot.location
+    # Kỳ kiểm kê thực tế (ngày bắt đầu/kết thúc đếm tại kho) — khác với created_at/posted_at
+    # (mốc thao tác trên hệ thống), khai báo tay lúc tạo phiếu, có thể sửa khi còn draft.
+    start_date: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+    end_date: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
     note: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)
     status: Mapped[str] = mapped_column(Unicode(255), default="draft", index=True)  # draft -> posted
     created_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)

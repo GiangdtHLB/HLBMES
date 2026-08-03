@@ -13,10 +13,11 @@ from ..database import get_db
 from ..errors import DomainError, NotFoundError, PermissionError_
 from ..models.master import BeerType, FinishedProduct, Material, MaterialAltGroup, MaterialGroup, Product, UnitTypeCatalog
 from ..models.materials import Supplier
-from ..schemas import (BeerTypeIn, BeerTypeOut, FinishedProductIn, FinishedProductOut, MaterialAltGroupIn,
-    MaterialAltGroupOut, MaterialGroupIn, MaterialGroupOut, MaterialIn, MaterialOut, MaterialQcGroupIn,
-    OpsSettingIn, OpsSettingOut, ProductBrewSpecIn, ProductIn, ProductOut, SupplierIn, SupplierOut,
-    UnitTypeCatalogIn, UnitTypeCatalogOut)
+from ..models.warehouse import FactoryLocation
+from ..schemas import (BeerTypeIn, BeerTypeOut, FactoryLocationIn, FactoryLocationOut, FinishedProductIn,
+    FinishedProductOut, MaterialAltGroupIn, MaterialAltGroupOut, MaterialGroupIn, MaterialGroupOut,
+    MaterialIn, MaterialOut, MaterialQcGroupIn, OpsSettingIn, OpsSettingOut, ProductBrewSpecIn, ProductIn,
+    ProductOut, SupplierIn, SupplierOut, UnitTypeCatalogIn, UnitTypeCatalogOut)
 from ..security import User, get_current_user, require_perm
 from ..services import braumat_import as braumat_svc
 from ..services import master_data, ops_setting as ops_setting_svc
@@ -166,6 +167,53 @@ def update_supplier(supplier_id: str, payload: SupplierIn, db: Session = Depends
 def delete_supplier(supplier_id: str, db: Session = Depends(get_db),
                     user: User = Depends(get_current_user)):
     master_data.delete_supplier(db, supplier_id, user)
+
+
+# ---- Nhà máy khác (danh mục đích của Điều chuyển Kho công ty → Nhà máy khác) ----
+@router.get("/factory-locations", response_model=list[FactoryLocationOut])
+def list_factory_locations(db: Session = Depends(get_db)):
+    return db.execute(select(FactoryLocation).order_by(FactoryLocation.code)).scalars().all()
+
+
+@router.post("/factory-locations", response_model=FactoryLocationOut, status_code=201)
+def create_factory_location(payload: FactoryLocationIn, db: Session = Depends(get_db),
+                            user: User = Depends(get_current_user)):
+    require_perm(user, "master.manage")
+    if db.execute(select(FactoryLocation).where(FactoryLocation.code == payload.code)).scalar_one_or_none():
+        raise PermissionError_(f"Mã nhà máy '{payload.code}' đã tồn tại.")
+    fl = FactoryLocation(factory_id=new_id(), **payload.model_dump())
+    db.add(fl)
+    record_audit(db, entity_type="factory_location", entity_id=fl.factory_id, action="create",
+                 actor=user, after={"code": fl.code, "name": fl.name})
+    db.commit()
+    db.refresh(fl)
+    return fl
+
+
+@router.put("/factory-locations/{factory_id}", response_model=FactoryLocationOut)
+def update_factory_location(factory_id: str, payload: FactoryLocationIn, db: Session = Depends(get_db),
+                            user: User = Depends(get_current_user)):
+    require_perm(user, "master.manage")
+    fl = db.get(FactoryLocation, factory_id)
+    if not fl:
+        raise NotFoundError("Nhà máy không tồn tại.")
+    before = {"code": fl.code, "name": fl.name}
+    fl.code = payload.code
+    fl.name = payload.name
+    fl.address = payload.address
+    fl.contact = payload.contact
+    fl.active = payload.active
+    record_audit(db, entity_type="factory_location", entity_id=fl.factory_id, action="update",
+                 actor=user, before=before, after=payload.model_dump())
+    db.commit()
+    db.refresh(fl)
+    return fl
+
+
+@router.delete("/factory-locations/{factory_id}", status_code=204)
+def delete_factory_location(factory_id: str, db: Session = Depends(get_db),
+                            user: User = Depends(get_current_user)):
+    master_data.delete_factory_location(db, factory_id, user)
 
 
 # ---- Nhóm vật tư (danh mục "Nhóm" dùng ở panel Vật tư/Nguyên liệu) ----
@@ -387,6 +435,7 @@ def update_finished_product(finished_product_id: str, payload: FinishedProductIn
     fp.pack_size = payload.pack_size
     fp.category = payload.category
     fp.description = payload.description
+    fp.unit_volume_l = payload.unit_volume_l
     record_audit(db, entity_type="finished_product", entity_id=fp.finished_product_id, action="update",
                  actor=user, before=before, after=payload.model_dump())
     db.commit()

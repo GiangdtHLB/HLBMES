@@ -80,6 +80,14 @@ def _a_brew(client, admin_h, vanhanh_h, suffix):
     return b.json()["brew_id"]
 
 
+def _declare_luong_dich(client, admin_h, brew_id, batch_id, volume_hl=100):
+    """"Tổng lượng dịch (hl)" ở Ghi chép nấu > 0 — bắt buộc khai báo trước khi mẻ được phép
+    "Kết thúc" (xem routers/brewing.py::finish_brew_batch)."""
+    p = client.put(f"/api/brewing/brews/{brew_id}/batches/{batch_id}/process-log", headers=admin_h,
+                   json={"whp_tong_luong_dich_hl": volume_hl})
+    assert p.status_code == 200, p.text
+
+
 def test_add_brew_batch_started_at_defaults_to_now(client, admin_h, vanhanh_h, brewhouse_line_id):
     brew_id = _a_brew(client, admin_h, vanhanh_h, "STARTDEFAULT")
     before = datetime.now(timezone.utc)
@@ -110,6 +118,7 @@ def test_finish_brew_batch_requires_chosen_time_and_is_correctable(client, admin
     assert rows[0]["exec_status"] == "dang_thuc_hien"
     assert rows[0]["ended_at"] is None
 
+    _declare_luong_dich(client, admin_h, brew_id, batch_id)
     chosen = "2026-02-01T10:00:00+00:00"
     ok = client.post(f"/api/brewing/brews/{brew_id}/batches/{batch_id}/finish", headers=vanhanh_h,
                      json={"ended_at": chosen})
@@ -133,6 +142,7 @@ def test_finish_brew_batch_defaults_to_now_without_explicit_time(client, admin_h
     r = client.post(f"/api/brewing/brews/{brew_id}/batches", headers=vanhanh_h,
                     json={"batch_code": "804", "line_id": brewhouse_line_id})
     batch_id = r.json()["batch_id"]
+    _declare_luong_dich(client, admin_h, brew_id, batch_id)
     before = datetime.now(timezone.utc)
     ok = client.post(f"/api/brewing/brews/{brew_id}/batches/{batch_id}/finish", headers=vanhanh_h)
     assert ok.status_code == 200, ok.text
@@ -284,6 +294,7 @@ def test_lo_status_report_full_chain(client, admin_h, vanhanh_h, brewhouse_line_
     assert row["nau"] == "dang_thuc_hien"
     assert row["len_men"] == "dang_nau"
 
+    _declare_luong_dich(client, admin_h, brew_id, batch["batch_id"])
     client.post(f"/api/brewing/brews/{brew_id}/batches/{batch['batch_id']}/finish", headers=vanhanh_h)
     row = _row()
     assert row["nau"] == "hoan_thanh"
@@ -339,6 +350,9 @@ def test_ferment_kt_date_blank_until_all_batches_finished(client, admin_h, vanha
                      json={"batch_code": "806", "line_id": brewhouse_line_id}).json()
     b2 = client.post(f"/api/brewing/brews/{brew_id}/batches", headers=vanhanh_h,
                      json={"batch_code": "807", "line_id": brewhouse_line_id}).json()
+
+    _declare_luong_dich(client, admin_h, brew_id, b1["batch_id"])
+    _declare_luong_dich(client, admin_h, brew_id, b2["batch_id"])
 
     # Mẻ 1 xong nhưng mẻ 2 CHƯA — kt_date phải vẫn để trống, không được lấy giờ mẻ 1.
     client.post(f"/api/brewing/brews/{brew_id}/batches/{b1['batch_id']}/finish", headers=vanhanh_h,

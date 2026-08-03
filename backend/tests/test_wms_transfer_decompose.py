@@ -73,6 +73,12 @@ def _build_units(client, admin_h, suffix, total, pack_size=24, unit_type="vi"):
                           "lot_code": f"LOT-{suffix}", "total": total, "pack_size": pack_size,
                           "unit_type": unit_type})
     assert r.status_code == 201, r.text
+    # "Nhập kho thủ công" (build_units không is_opening_balance) giờ cần Trưởng bộ phận kho
+    # duyệt trước khi xuất được (source="manual") — tự duyệt luôn để không chặn oan các test
+    # khác (helper này chỉ để dựng sẵn tồn kho, không phải test bước duyệt).
+    confirm = client.post("/api/wms/units/confirm-receipt-by-lot", headers=admin_h,
+                          json={"product_name": f"SKU-{suffix}", "lot_code": f"LOT-{suffix}", "unit_type": unit_type})
+    assert confirm.status_code == 200, confirm.text
     return r.json()
 
 

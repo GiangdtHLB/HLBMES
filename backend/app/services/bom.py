@@ -20,6 +20,17 @@ def material_code_for_lot(db: Session, lot) -> str:
     return lot.lot_code if lot else "?"
 
 
+def _material_codes_for_lots(db: Session, lots: list) -> dict:
+    """Tra mã vật tư cho nhiều lô cùng lúc bằng 1 câu IN(...) thay vì 1 `db.get(Material, ...)`
+    riêng cho từng lô (N+1) — dùng khi gộp nhiều mẻ/nhiều lô như báo cáo định mức NVL."""
+    material_ids = list({l.material_id for l in lots if l.material_id})
+    code_by_material_id = {m.material_id: m.code for m in (db.execute(
+        select(Material).where(Material.material_id.in_(material_ids))).scalars().all()
+        if material_ids else [])}
+    return {l.lot_id: (code_by_material_id.get(l.material_id, l.material_id) if l.material_id
+                       else l.lot_code) for l in lots}
+
+
 def factor_for(snapshot: dict, planned_qty: float) -> float:
     if planned_qty is None or planned_qty <= 0:
         raise DomainError("SL kế hoạch (planned_qty) phải > 0 để scale định mức BOM.")
@@ -32,10 +43,14 @@ def actual_consumed(db: Session, batch_id: str) -> dict:
     edges = db.execute(select(GenealogyEdge).where(
         GenealogyEdge.to_type == "batch", GenealogyEdge.to_id == batch_id,
         GenealogyEdge.relation == "consume")).scalars().all()
+    if not edges:
+        return {}
+    lot_ids = list({e.from_id for e in edges})
+    lots = db.execute(select(MaterialLot).where(MaterialLot.lot_id.in_(lot_ids))).scalars().all()
+    code_by_lot_id = _material_codes_for_lots(db, lots)
     out = {}
     for e in edges:
-        lot = db.get(MaterialLot, e.from_id)
-        code = material_code_for_lot(db, lot)
+        code = code_by_lot_id.get(e.from_id, "?")
         out[code] = out.get(code, 0.0) + (e.quantity or 0.0)
     return out
 
@@ -84,10 +99,12 @@ def stock_available(db: Session) -> dict:
     lots = db.execute(select(MaterialLot).where(
         MaterialLot.status == LotStatus.AVAILABLE.value,
         MaterialLot.material_id.isnot(None))).scalars().all()
+    if not lots:
+        return {}
+    code_by_lot_id = _material_codes_for_lots(db, lots)
     out = {}
     for l in lots:
-        m = db.get(Material, l.material_id)
-        code = m.code if m else l.material_id
+        code = code_by_lot_id[l.lot_id]
         out[code] = out.get(code, 0.0) + l.quantity
     return out
 

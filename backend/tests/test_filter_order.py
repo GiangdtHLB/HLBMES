@@ -364,6 +364,10 @@ def test_phoi_two_tanks_finish_separately_then_aggregate(client, admin_h, vanhan
 
 
 def test_brew_and_ferment_delete_blocked_for_phoi_sourced_filter(client, admin_h, vanhanh_h, lager_product_id):
+    """_setup_ferment mặc định duyệt KCS (Duyệt LM) luôn — nên NGOÀI lý do "còn mẻ lọc tham
+    chiếu" (gỡ được bằng cách xóa mẻ lọc trước), lô LM còn bị chặn xóa VĨNH VIỄN vì đã duyệt
+    KCS (xem routers/brewing.py::delete_ferment — "đã duyệt KCS" không tự gỡ theo trạng thái
+    hạ lưu như trước đây)."""
     f1 = _setup_ferment(client, admin_h, vanhanh_h, "FO-PHDEL01A", product_id=lager_product_id)
     f2 = _setup_ferment(client, admin_h, vanhanh_h, "FO-PHDEL01B", product_id=lager_product_id)
     order_id = _a_filter_order(client, admin_h, "LOC-PHDEL01", [f1, f2], blend_mode="phoi").json()["filter_order_id"]
@@ -382,8 +386,9 @@ def test_brew_and_ferment_delete_blocked_for_phoi_sourced_filter(client, admin_h
 
     ok = client.delete(f"/api/brewing/filters/{filt.json()['filter_id']}", headers=vanhanh_h)
     assert ok.status_code == 204, ok.text
-    allowed_ferment = client.delete(f"/api/brewing/ferments/{f2}", headers=vanhanh_h)
-    assert allowed_ferment.status_code == 204, allowed_ferment.text
+    still_blocked_ferment = client.delete(f"/api/brewing/ferments/{f2}", headers=vanhanh_h)
+    assert still_blocked_ferment.status_code == 409, still_blocked_ferment.text
+    assert "duyệt kcs" in still_blocked_ferment.json()["detail"].lower()
 
 
 def test_lo_status_reflects_phoi_filter(client, admin_h, vanhanh_h, lager_product_id):
