@@ -3,7 +3,6 @@
 from datetime import datetime, timedelta
 from typing import Optional
 
-from sqlalchemy import delete as sa_delete
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -177,10 +176,12 @@ def update_receipt(db: Session, movement_id: str, payload: dict, user: User) -> 
 
 
 def delete_receipt(db: Session, movement_id: str, user: User) -> dict:
-    """Xóa 1 lượt nhập kho — CHỈ khi lô CHƯA bị dùng. Trừ đúng số lượng của lượt này khỏi tồn
-    lô; nếu đây là lượt receipt DUY NHẤT của lô (không còn receipt nào khác), xóa luôn
-    MaterialLot + mọi QualityResult/Deviation đã khai báo cho lô này (coi như hủy hẳn lượt
-    nhập, không để lại dữ liệu QC mồ côi trỏ tới 1 lô không còn tồn tại)."""
+    """Xóa 1 lượt nhập kho — CHỈ khi lô CHƯA bị dùng và CHƯA khai báo/duyệt chỉ tiêu chất lượng
+    nào (còn QualityResult hoặc Deviation trỏ tới lô là chặn hẳn, không cascade xóa theo —
+    dữ liệu QC đã ghi nhận thì lượt nhập tạo ra lô đó không còn được coi là "nhập nhầm" nữa).
+    Nếu qua được cả 2 điều kiện, trừ đúng số lượng của lượt này khỏi tồn lô; nếu đây là lượt
+    receipt DUY NHẤT của lô (không còn receipt nào khác), xóa luôn MaterialLot (chắc chắn
+    không còn QC nào tham chiếu tới, vừa kiểm tra ở trên)."""
     require_perm(user, "warehouse.receive")
     mv = db.get(StockMovement, movement_id)
     if not mv or mv.movement_type != "receipt":
@@ -190,6 +191,12 @@ def delete_receipt(db: Session, movement_id: str, user: User) -> dict:
         raise NotFoundError("Lô không tồn tại.")
     if _lot_used(db, lot.lot_id):
         raise DomainError(f"Lô {lot.lot_code} đã được sử dụng (xuất/chuyển/tiêu thụ) — không thể xóa nhập kho.")
+    has_qc = db.execute(select(func.count()).select_from(QualityResult).where(
+        QualityResult.scope_type == "lot", QualityResult.scope_id == lot.lot_id)).scalar_one() > 0
+    has_dev = db.execute(select(func.count()).select_from(Deviation).where(
+        Deviation.scope_type == "lot", Deviation.scope_id == lot.lot_id)).scalar_one() > 0
+    if has_qc or has_dev:
+        raise DomainError(f"Lô {lot.lot_code} đã được khai báo/duyệt chỉ tiêu chất lượng — không thể xóa nhập kho.")
     lot.quantity -= mv.quantity
     remaining_receipts = db.execute(select(func.count()).select_from(StockMovement).where(
         StockMovement.lot_id == lot.lot_id, StockMovement.movement_type == "receipt",
@@ -197,12 +204,9 @@ def delete_receipt(db: Session, movement_id: str, user: User) -> dict:
     record_audit(db, entity_type="stock_movement", entity_id=mv.movement_id, action="delete_receipt",
                  actor=user, before={"quantity": mv.quantity, "lot_code": lot.lot_code})
     db.delete(mv)
+    db.flush()  # MSSQL enforce FK: xóa stock_movement (con) TRƯỚC material_lot (cha) — autoflush=False
     lot_deleted = False
     if remaining_receipts == 0:
-        db.execute(sa_delete(QualityResult).where(
-            QualityResult.scope_type == "lot", QualityResult.scope_id == lot.lot_id))
-        db.execute(sa_delete(Deviation).where(
-            Deviation.scope_type == "lot", Deviation.scope_id == lot.lot_id))
         db.delete(lot)
         lot_deleted = True
     db.commit()

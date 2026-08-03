@@ -587,8 +587,9 @@ VIEWS.dashboard = async function () {
   // (parent_label từ BE, VD "Lô nấu BR-260801") — kèm TÊN các chỉ tiêu đang fail (fail_params,
   // VD "Độ đục, Plato") thay vì chỉ đếm số lượng ở cột "Chỉ tiêu fail", để biết ngay đang fail gì.
   const miniAlertDetail = (it) => {
+    const matLabel = it.material_name ? `${esc(it.material_code || "")} ${esc(it.material_name)}`.trim() : esc(it.material_code || "—");
     const base = it.scope_type === "lot"
-      ? `${esc(it.material_code || "—")}${it.quantity != null ? ` · ${it.quantity.toLocaleString("vi-VN")} ${esc(it.uom || "")}` : ""}`
+      ? `${matLabel}${it.quantity != null ? ` · ${it.quantity.toLocaleString("vi-VN")} ${esc(it.uom || "")}` : ""}`
       : (it.parent_label ? esc(it.parent_label) : "");
     const failNames = (it.fail_params && it.fail_params.length) ? esc(it.fail_params.join(", ")) : "";
     if (base && failNames) return `${base}<br><span style="color:var(--red)">${failNames}</span>`;
@@ -599,7 +600,7 @@ VIEWS.dashboard = async function () {
     return `
     <div class="panel" style="flex:1;min-width:280px;margin-bottom:0">
       <h2>${icon} ${title} ${items.length ? `<span class="muted">(${items.length})</span>` : ""}</h2>
-      ${items.length ? `<div class="tablewrap" style="max-height:240px;overflow:auto"><table>
+      ${items.length ? `<div class="tablewrap" style="max-height:240px;overflow:auto"><table style="font-size:12px">
         <thead><tr><th>Lô/Phạm vi</th><th>Chi tiết</th><th>${extraCol.label}</th></tr></thead>
         <tbody>${items.map((it, i) => { const kind = key === "hold" ? "hold" : key === "dev" ? "dev" : (it.reasons.includes("on_hold") ? "hold" : "dev");
           return `<tr style="cursor:pointer${i >= MINI_ALERT_LIMIT ? ";display:none" : ""}" class="${i >= MINI_ALERT_LIMIT ? `miniextra-${key}` : ""}" data-goto="quality" data-scope="${esc(it.scope_type)}:${esc(it.scope_id)}" data-scopekind="${kind}" tabindex="0" role="button">
@@ -1915,7 +1916,7 @@ VIEWS.recipes = async function () {
   $("view-recipes").innerHTML = panels ||
     '<div class="panel muted">Chưa có dịch bia nào — khai báo ở Danh mục › Dịch bia trước.</div>';
   wireFormulaPanels(products);
-  for (const p of products) loadFormulaActivationLog(p.product_id);
+  for (const p of products) { loadFormulaActivationLog(p.product_id); wirePaginate(`t_formulas_${p.product_id}`, 10); }
 };
 
 function renderFormulaProductPanel(p, list) {
@@ -1923,7 +1924,7 @@ function renderFormulaProductPanel(p, list) {
   return `<div class="panel"><h2>${esc(p.code)} — ${esc(p.name)}</h2>
     <button class="btn sm" data-fm-new="${p.product_id}">+ Tạo công thức mới</button>
     <div id="fm_form_${p.product_id}"></div>
-    <div class="tablewrap" style="margin-top:10px"><table><thead><tr>
+    <div class="tablewrap" style="margin-top:10px"><table id="t_formulas_${p.product_id}"><thead><tr>
       <th>Mã</th><th>Ghi chú</th><th>Ngày tạo</th><th>Quy mô chuẩn</th><th>Dòng NVL</th>
       <th>Người tạo</th><th>Hiệu lực</th><th>Khóa</th><th>Hành động</th></tr></thead>
     <tbody>${list.map(formulaRowHtml).join("") ||
@@ -2511,7 +2512,8 @@ VIEWS.quality = async function () {
   $("view-quality").innerHTML = `
     <div class="panel"><h2>🔬 Lô NVL chờ khai báo/duyệt chỉ tiêu chất lượng <span class="muted">(${pendingQc.length})</span></h2>
       <div class="muted" style="margin-bottom:6px">Nguyên liệu nhập kho có gán nhóm chỉ tiêu bắt buộc sẽ nằm ở đây cho tới khi KCS khai báo đủ &amp; duyệt.</div>
-      <div class="tablewrap"><table>
+      <input class="searchbox" data-tbl="t_qcpendinglots" placeholder="Tìm theo mã lô, mã/tên NVL..."/>
+      <div class="tablewrap"><table id="t_qcpendinglots">
         <thead><tr><th>Lô</th><th>Mã NVL</th><th>Tên NVL</th><th>SL</th><th>Vị trí</th><th>Ngày nhập</th><th></th></tr></thead>
         <tbody>${pendingQc.map(l => `<tr>
           <td><code class="k">${esc(l.lot_code)}</code>${badge("on_hold")}</td>
@@ -2525,7 +2527,8 @@ VIEWS.quality = async function () {
     </div>
     <div class="panel"><h2>🧪 Công đoạn chờ khai báo chỉ tiêu chất lượng <span class="muted">(${pendingStageQc.length})</span></h2>
       <div class="muted" style="margin-bottom:6px">Mẻ nấu/lô lên men/mẻ lọc/mã chiết có gán nhóm chỉ tiêu bắt buộc nhưng chưa khai báo đủ sẽ nằm ở đây — bấm "Khai báo" để chuyển tới đúng công đoạn.</div>
-      <div class="tablewrap"><table>
+      <input class="searchbox" data-tbl="t_stageqcpending" placeholder="Tìm theo công đoạn, mẻ/lô..."/>
+      <div class="tablewrap"><table id="t_stageqcpending">
         <thead><tr><th>Công đoạn</th><th>Mẻ/lô</th><th>Chỉ tiêu còn thiếu</th><th></th></tr></thead>
         <tbody>${pendingStageQc.map(p => `<tr>
           <td>${esc(p.stage_label)}</td>
@@ -2588,7 +2591,8 @@ VIEWS.quality = async function () {
         <td><button type="button" class="btn sm sec" data-qcdetail="${gi}">Xem chi tiết</button></td></tr>`).join("") ||
         '<tr><td colspan=6 class="muted">Chưa có kết quả QC nào.</td></tr>'}</tbody></table></div></div>
     <div class="panel"><h2>Deviations <span class="muted">(${openDevs.length} đang mở)</span></h2>
-      <table><thead><tr><th>Mã</th><th>Mức</th><th>Lý do</th><th>Chỉ tiêu không đạt</th><th>Trạng thái</th><th>Hành động</th></tr></thead>
+      <input class="searchbox" data-tbl="t_deviations" placeholder="Tìm theo mã, lý do..."/>
+      <table id="t_deviations"><thead><tr><th>Mã</th><th>Mức</th><th>Lý do</th><th>Chỉ tiêu không đạt</th><th>Trạng thái</th><th>Hành động</th></tr></thead>
       <tbody>${openDevs.map(d => devRow(d, scopeKeyToFailParams[`${d.scope_type}:${d.scope_id}`])).join("") ||
         '<tr><td colspan=6 class="muted">Không còn deviation nào đang mở.</td></tr>'}</tbody></table></div>`;
   const parseScope = (v) => { const [t, i] = v.split(":"); return { scope_type: t, scope_id: i }; };
@@ -2718,6 +2722,9 @@ VIEWS.quality = async function () {
   });
   wirePaginate("t_qcresults", 10);
   wirePaginate("t_holdrelease", 10);
+  wirePaginate("t_qcpendinglots", 10);
+  wirePaginate("t_stageqcpending", 10);
+  wirePaginate("t_deviations", 10);
 };
 // Gộp kết quả QC theo mẻ/lô nguồn (scope_type/scope_id) — sắp theo nhóm để các dòng cùng
 // 1 mẻ/lô đứng cạnh nhau thay vì xen lẫn theo thời gian ghi như trước. Đồng thời dịch mã
@@ -3376,7 +3383,8 @@ VIEWS.warehouse_kc = async function () {
   } else if (sec === "han") {
     const exp = await GET("/warehouse/expiry");
     body = `<div class="panel"><h2>Hạn sử dụng</h2>
-      <table><thead><tr><th>Vật tư</th><th>Lô</th><th>SL</th><th>Hạn</th><th>Còn (ngày)</th><th>Trạng thái</th><th>Vị trí</th></tr></thead>
+      <input class="searchbox" data-tbl="t_expiry" placeholder="Tìm theo mã/tên vật tư, mã lô..."/>
+      <table id="t_expiry"><thead><tr><th>Vật tư</th><th>Lô</th><th>SL</th><th>Hạn</th><th>Còn (ngày)</th><th>Trạng thái</th><th>Vị trí</th></tr></thead>
       <tbody>${exp.map(e => `<tr><td>${e.material_code ? `<code class="k">${esc(e.material_code)}</code> ${esc(e.material_name || "")}` : "—"}</td>
         <td><code class="k">${esc(e.lot_code)}</code></td><td>${e.quantity} ${e.uom}</td>
         <td class="muted">${fmt(e.expiry)}</td><td>${e.days_left}</td><td>${badge(e.status)}</td><td class="muted">${esc(e.location || "")}</td></tr>`).join("") || '<tr><td colspan=7 class="muted">Không có lô có hạn dùng.</td></tr>'}</tbody></table></div>`;
@@ -3522,13 +3530,13 @@ VIEWS.warehouse_kc = async function () {
           <button class="btn" id="sng_do" style="align-self:flex-end">Xuất sang ngang</button></div>`
           : '<div class="muted">Bạn không có quyền tạo Xuất sang ngang.</div>'}
         <h4 style="margin-top:14px">Đang chờ phân xưởng duyệt <span class="muted">(${sngPending.length})</span></h4>
-        <div class="tablewrap"><table>
+        <div class="tablewrap"><table id="t_sng_pending">
           <thead><tr><th>Ngày tạo</th><th>Số đề nghị</th><th>Mã VT</th><th>Tên vật tư</th><th>Lô</th><th>SL</th><th>Trạng thái QC</th></tr></thead>
           <tbody>${sngPending.map(r => sangNgangKcRowHtml(r, matByIdGiao, lotByIdGiao, qcReqSetGiao)).join("") ||
             `<tr><td colspan=7 class="muted">Không có đề nghị nào đang chờ.</td></tr>`}</tbody>
         </table></div>
         <h4 style="margin-top:14px">Lịch sử đã xử lý <span class="muted">(${sngDone.length})</span></h4>
-        <div class="tablewrap"><table>
+        <div class="tablewrap"><table id="t_sng_done">
           <thead><tr><th>Ngày tạo</th><th>Số đề nghị</th><th>Mã VT</th><th>Tên vật tư</th><th>Lô</th><th>SL</th><th>Trạng thái</th><th>Người xử lý</th></tr></thead>
           <tbody>${sngDone.map(r => sangNgangHistoryRowHtml(r, matByIdGiao, lotByIdGiao)).join("") ||
             `<tr><td colspan=8 class="muted">Chưa có đề nghị nào đã xử lý.</td></tr>`}</tbody>
@@ -3562,13 +3570,13 @@ VIEWS.warehouse_kc = async function () {
       <div class="panel"><h2>Đề nghị điều chuyển Phân xưởng → Công ty <span class="muted">(${pxPending.length} đang chờ duyệt)</span></h2>
         <div class="muted" style="margin-bottom:6px">Thủ kho phân xưởng gửi đề nghị (tab Kho phân xưởng → Điều chuyển về Kho công ty) — chưa
           động tồn kho, chỉ khi duyệt ở đây lệnh mới thật sự chuyển. Sau khi duyệt, chỉ ADMIN mới "Hoàn tác" được.</div>
-        <div class="tablewrap"><table>
+        <div class="tablewrap"><table id="t_pxpending">
           <thead><tr><th>Ngày tạo</th><th>Số đề nghị</th><th>Vật tư</th><th>Lô</th><th>SL</th><th>Lý do</th><th>Người tạo</th>${canApproveTransferPx ? "<th></th>" : ""}</tr></thead>
           <tbody>${pxPending.map(r => transferPxRequestRowHtml(r, matByIdGiao, lotByIdGiao, canApproveTransferPx, isAdminGiao)).join("") ||
             `<tr><td colspan="${canApproveTransferPx ? 8 : 7}" class="muted">Không có đề nghị nào đang chờ.</td></tr>`}</tbody>
         </table></div>
         <h4 style="margin-top:14px">Lịch sử đề nghị đã xử lý <span class="muted">(${pxDone.length})</span></h4>
-        <div class="tablewrap"><table>
+        <div class="tablewrap"><table id="t_pxdone">
           <thead><tr><th>Ngày tạo</th><th>Số đề nghị</th><th>Vật tư</th><th>Lô</th><th>SL</th><th>Lý do</th><th>Trạng thái</th><th>Người xử lý</th>${isAdminGiao ? "<th></th>" : ""}</tr></thead>
           <tbody>${pxDone.map(r => transferPxRequestHistoryRowHtml(r, matByIdGiao, lotByIdGiao, isAdminGiao)).join("") ||
             `<tr><td colspan="${isAdminGiao ? 8 : 7}" class="muted">Chưa có đề nghị nào đã xử lý.</td></tr>`}</tbody>
@@ -3617,7 +3625,7 @@ VIEWS.warehouse_kc = async function () {
       </div>
 
       <div class="panel"><h2>🔬 Lô đang chờ KCS khai báo/duyệt chỉ tiêu chất lượng <span class="muted">(${pending.length})</span></h2>
-        <div class="tablewrap"><table>
+        <div class="tablewrap"><table id="t_giaoqcpending">
           <thead><tr><th>Lô</th><th>SL</th><th>Vị trí</th><th></th></tr></thead>
           <tbody>${pending.map(l => `<tr>
             <td><code class="k">${esc(l.lot_code)}</code>${badge("on_hold")}</td>
@@ -3661,12 +3669,15 @@ VIEWS.warehouse_kc = async function () {
     wireSearchableSelect("wc_mat_txt", "wc_mat", WH_CACHE.matItemsThe);
     $("wc_load").onclick = () => guard(async () => {
     const card = await GET("/warehouse/card?material_id=" + $("wc_mat").value);
-    $("wc_table").innerHTML = `<table><thead><tr><th>Thời gian</th><th>Loại</th><th>Lô</th><th>Nhập</th><th>Xuất</th><th>Tồn</th><th>Lý do</th></tr></thead>
+    $("wc_table").innerHTML = `<table id="t_wc_card"><thead><tr><th>Thời gian</th><th>Loại</th><th>Lô</th><th>Nhập</th><th>Xuất</th><th>Tồn</th><th>Lý do</th></tr></thead>
       <tbody>${card.map(c => `<tr><td class="muted">${fmt(c.ts)}</td><td>${badge(c.type === "receipt" ? "available" : c.type === "issue" ? "on_hold" : "planned")}${c.type}</td>
         <td>${esc(c.lot_code || "")}</td><td style="color:var(--green)">${c.in || ""}</td><td style="color:var(--orange)">${c.out || ""}</td>
         <td><b>${c.balance}</b> ${c.uom}</td><td class="muted">${esc(c.reason || "")}</td></tr>`).join("") || '<tr><td colspan=7 class="muted">Chưa có giao dịch.</td></tr>'}</tbody></table>`;
+      if (!_pagerState.t_wc_card) _pagerState.t_wc_card = { page: 1, pageSize: 10, sortCol: 0, sortDir: -1 };
+      wirePaginate("t_wc_card", 10);
     });
   }
+  if (sec === "han") wirePaginate("t_expiry", 10);
   if (sec === "ton") wirePaginate("t_ton", 10);
   if (sec === "kc") {
     // Mặc định hiện lô nhập GẦN NHẤT trước (cột "Ngày giờ nhập", đảo chiều) để đỡ phải kéo dài
@@ -3686,6 +3697,11 @@ VIEWS.warehouse_kc = async function () {
   }
   if (sec === "giao") {
     wirePaginate("rc_hist", 10);
+    wirePaginate("t_sng_pending", 10);
+    wirePaginate("t_sng_done", 10);
+    wirePaginate("t_pxpending", 10);
+    wirePaginate("t_pxdone", 10);
+    wirePaginate("t_giaoqcpending", 10);
     wireSearchableSelect("rc_mat_txt", "rc_mat", WH_CACHE.matItems, (item) => { $("rc_uom").value = item.uom || ""; });
     wireSearchableSelect("ob_mat_txt", "ob_mat", WH_CACHE.matItems, (item) => { $("ob_uom").value = item.uom || ""; });
     if ($("sng_mat_txt")) wireSearchableSelect("sng_mat_txt", "sng_mat", WH_CACHE.matItems, (item) => { $("sng_uom").value = item.uom || ""; });
@@ -4033,12 +4049,12 @@ VIEWS.warehouse_px = async function () {
       <div class="muted" style="margin-bottom:6px">Vật tư do Kho công ty khai báo "Xuất sang ngang" (đã tăng tồn Kho công ty) — bấm "Duyệt"
         để thật sự nhận vào Kho phân xưởng. Nếu vật tư có chỉ tiêu chất lượng bắt buộc, phải chờ KCS duyệt xong (hết "Đang chờ KCS duyệt")
         mới duyệt được.</div>
-      <div class="tablewrap"><table>
+      <div class="tablewrap"><table id="t_sng_pending_px">
         <thead><tr><th>Ngày tạo</th><th>Số đề nghị</th><th>Mã VT</th><th>Tên vật tư</th><th>Lô</th><th>SL</th><th>Người tạo</th><th>Trạng thái QC</th>${canApproveSangNgang ? "<th></th>" : ""}</tr></thead>
         <tbody>${sngPendingRows}</tbody>
       </table></div>
       <h4 style="margin-top:14px">Lịch sử đã xử lý <span class="muted">(${sngDonePx.length})</span></h4>
-      <div class="tablewrap"><table>
+      <div class="tablewrap"><table id="t_sng_done_px">
         <thead><tr><th>Ngày tạo</th><th>Số đề nghị</th><th>Mã VT</th><th>Tên vật tư</th><th>Lô</th><th>SL</th><th>Trạng thái</th><th>Người xử lý</th>${isAdminSngPx ? "<th></th>" : ""}</tr></thead>
         <tbody>${sngDoneRows}</tbody>
       </table></div>
@@ -4141,6 +4157,8 @@ VIEWS.warehouse_px = async function () {
     });
   }
   if (sec === "sangngang") {
+    wirePaginate("t_sng_pending_px", 10);
+    wirePaginate("t_sng_done_px", 10);
     document.querySelectorAll("[data-sngapprove]").forEach(b => b.onclick = () => guard(async () => {
       if (!confirm("Duyệt đề nghị xuất sang ngang này? Lô sẽ thật sự chuyển vào Kho phân xưởng ngay.")) return;
       await POST(`/warehouse/sang-ngang/${b.dataset.sngapprove}/approve`, {});
@@ -4272,7 +4290,7 @@ function movementRowHtml(m, matById, showUndo) {
     `<td><button class="btn sm sec" data-undoissue="${esc(m.movement_id)}">Hoàn lại</button></td>`;
   return `<tr>
     <td class="muted">${fmt(m.ts)}</td>
-    <td>${esc(mat ? mat.code : m.material_id || "—")}</td>
+    <td>${mat ? `<code class="k">${esc(mat.code)}</code> ${esc(mat.name)}` : esc(m.material_id || "—")}</td>
     <td class="muted">${esc(m.lot_code || "")}</td>
     <td>${m.quantity} ${esc(m.uom)}</td>
     <td class="muted">${esc(m.location_from || "—")} → ${esc(m.location_to || "—")}</td>
@@ -4374,7 +4392,7 @@ function factoryTransferRowHtml(m) {
     `<td><button class="btn sm sec" data-undoissue="${esc(m.movement_id)}">Hoàn lại</button></td>`;
   return `<tr>
     <td class="muted">${fmt(m.ts)}</td>
-    <td>${esc(mat ? mat.code : m.material_id || "—")}</td>
+    <td>${mat ? `<code class="k">${esc(mat.code)}</code> ${esc(mat.name)}` : esc(m.material_id || "—")}</td>
     <td class="muted">${esc(m.lot_code || "")}</td>
     <td>${m.quantity} ${esc(m.uom)}</td>
     <td class="muted">${esc(factory ? factory.name : m.destination_factory_id || "—")}</td>
@@ -7101,11 +7119,12 @@ async function loadElecCaReport(site) {
         <div class="panel"><h2>Theo ngày — từng ca</h2>${dayLabels.length ? CH.groupedN(dayLabels, barSeries) : '<div class="muted">Không có dữ liệu.</div>'}</div>
       </div>
       <div class="panel"><h2>Chi tiết theo ca</h2>
-        <div class="tablewrap"><table><thead><tr><th>Ngày</th><th>Ca</th><th>Bắt đầu</th><th>Kết thúc</th><th>Điện (kWh)</th></tr></thead>
+        <div class="tablewrap"><table id="t_elecca_${site}"><thead><tr><th>Ngày</th><th>Ca</th><th>Bắt đầu</th><th>Kết thúc</th><th>Điện (kWh)</th></tr></thead>
         <tbody>${rpt.shifts.map(s => `<tr><td>${fmt(s.date)}</td><td>Ca ${s.ca}${s.data_gap ? ' ⚠' : ""}</td>
           <td class="muted">${new Date(s.start).toLocaleString("vi-VN")}</td><td class="muted">${new Date(s.end).toLocaleString("vi-VN")}</td>
           <td${s.data_gap ? ' title="1+ hệ thống bị khoảng trống dữ liệu trong ca này — số có thể thiếu"' : ""}>${s.value.toLocaleString("vi-VN")}</td></tr>`).join("") ||
           '<tr><td colspan=5 class="muted">Không có dữ liệu.</td></tr>'}</tbody></table></div></div>`;
+    wirePaginate(`t_elecca_${site}`, 10);
   } catch (e) {
     if (!stillHere()) return;
     $("elec_ca_data").innerHTML = `<div class="panel muted">Chưa xem được điện theo ca: ${esc(e.message)}</div>`;
@@ -7157,19 +7176,22 @@ VIEWS.maint = async function () {
       <div class="row"><div class="field"><label>Mã</label><input id="eq_code"/></div><div class="field"><label>Tên</label><input id="eq_name"/></div>
         <div class="field"><label>Loại</label><input id="eq_type"/></div><div class="field"><label>Hệ thống</label><input id="eq_sys"/></div>
         <button class="btn sm" id="eq_add">+ Thêm</button></div>
-      <table><thead><tr><th>Mã</th><th>Tên</th><th>Loại</th><th>Hệ thống</th><th>Vị trí</th><th>Trạng thái</th></tr></thead>
+      <input class="searchbox" data-tbl="t_equipment" placeholder="Tìm theo mã, tên, loại, hệ thống..."/>
+      <table id="t_equipment"><thead><tr><th>Mã</th><th>Tên</th><th>Loại</th><th>Hệ thống</th><th>Vị trí</th><th>Trạng thái</th></tr></thead>
       <tbody>${eqs.map(e => `<tr><td><code class="k">${esc(e.code)}</code></td><td>${esc(e.name)}</td><td class="muted">${esc(e.eq_type || "")}</td>
         <td class="muted">${esc(e.system || "")}</td><td class="muted">${esc(e.location || "")}</td><td>${badge(e.status)}</td></tr>`).join("")}</tbody></table></div>`;
   } else if (sec === "parts") {
     const parts = await GET("/maint/parts");
     body = `<div class="panel"><h2>Danh mục phụ tùng</h2>
-      <table><thead><tr><th>Mã</th><th>Tên</th><th>Tồn</th><th>Tồn min</th><th>Cảnh báo</th></tr></thead>
+      <input class="searchbox" data-tbl="t_parts" placeholder="Tìm theo mã, tên..."/>
+      <table id="t_parts"><thead><tr><th>Mã</th><th>Tên</th><th>Tồn</th><th>Tồn min</th><th>Cảnh báo</th></tr></thead>
       <tbody>${parts.map(p => `<tr><td><code class="k">${esc(p.code)}</code></td><td>${esc(p.name)}</td><td>${p.stock} ${p.uom}</td>
         <td>${p.stock_min}</td><td>${p.below_min ? badge("overdue") + "Dưới mức min" : badge("ok") + "OK"}</td></tr>`).join("")}</tbody></table></div>`;
   }
   $("view-maint").innerHTML = subnav("maint", sections, sec) + body;
   wireSubnav("maint"); wireSearch();
   wirePaginate("t_incidents", 10); wirePaginate("t_plans", 10);
+  wirePaginate("t_equipment", 10); wirePaginate("t_parts", 10);
   if (sec === "incidents") {
     $("ic_add").onclick = () => guard(async () => { await POST("/maint/incidents", { equipment_id: $("ic_eq").value, title: $("ic_title").value, severity: $("ic_sev").value }); toast("Đã thêm sự cố"); render("maint"); });
     document.querySelectorAll("[data-resolve]").forEach(b => b.onclick = () => guard(async () => {
@@ -7413,7 +7435,8 @@ VIEWS.process = async function () {
     body = `<div class="panel"><h2>Tồn kho NVL theo kho <span class="muted">(${stock.length})</span></h2>
       <div class="muted" style="margin-bottom:6px">Tồn kho thật từ hệ thống Kho NVL — nguyên liệu phân bổ vào mẻ nấu (nút "+NVL" ở tab Nấu) lấy từ <b>Kho phân xưởng</b>.</div>
       <div class="row" style="margin-bottom:8px"><div class="field"><label>Kho</label><select id="nl_loc">${whOpts}</select></div></div>
-      <div class="tablewrap"><table><thead><tr><th>Mã VT</th><th>Tên</th><th>Nhóm</th><th>Mã lô</th><th>Tồn</th><th>ĐVT</th></tr></thead>
+      <input class="searchbox" data-tbl="t_nlstock" placeholder="Tìm theo mã/tên vật tư..."/>
+      <div class="tablewrap"><table id="t_nlstock"><thead><tr><th>Mã VT</th><th>Tên</th><th>Nhóm</th><th>Mã lô</th><th>Tồn</th><th>ĐVT</th></tr></thead>
       <tbody>${stock.map(s => { const matLots = (lotsByMaterial[s.material_id] || [])
           .sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
         const shown = matLots.slice(0, NL_LOT_CELL_MAX);
@@ -7727,7 +7750,8 @@ VIEWS.process = async function () {
         <div class="field"><label>ĐVT</label><input id="ch_uom" value="kg" size="4"/></div>
         <button class="btn" id="ch_add">Ghi</button></div></div>
       <div class="panel"><h2>Lịch sử sử dụng hóa chất</h2>
-      <table><thead><tr><th>Thời gian</th><th>Công đoạn</th><th>Hóa chất</th><th>SL</th><th>Ghi chú</th></tr></thead>
+      <input class="searchbox" data-tbl="t_chemhist" placeholder="Tìm theo công đoạn, hóa chất..."/>
+      <table id="t_chemhist"><thead><tr><th>Thời gian</th><th>Công đoạn</th><th>Hóa chất</th><th>SL</th><th>Ghi chú</th></tr></thead>
       <tbody>${chems.map(c => `<tr><td class="muted">${fmt(c.ts)}</td><td>${esc(stageLabel[c.stage] || c.stage)}</td>
         <td>${esc(c.chemical)}</td><td>${c.quantity} ${esc(c.uom)}</td><td class="muted">${esc(c.note || "")}</td></tr>`).join("")}</tbody></table></div>`;
   }
@@ -7738,7 +7762,8 @@ VIEWS.process = async function () {
     const yopts = yeast.filter(y => y.status === "available").map(y => `<option value="${y.yeast_lot_id}">${esc(y.code)} (${y.quantity}${y.uom})</option>`).join("");
     body = `<div class="split">
       <div class="panel"><h2>Lô men thu hồi</h2>
-        <table><thead><tr><th>Mã</th><th>Chủng</th><th>Đời</th><th>SL</th><th>Sống %</th><th>Trạng thái</th></tr></thead>
+        <input class="searchbox" data-tbl="t_yeastlot" placeholder="Tìm theo mã, chủng..."/>
+        <table id="t_yeastlot"><thead><tr><th>Mã</th><th>Chủng</th><th>Đời</th><th>SL</th><th>Sống %</th><th>Trạng thái</th></tr></thead>
         <tbody>${yeast.map(y => `<tr><td><code class="k">${esc(y.code)}</code></td><td>${esc(y.strain)}</td><td>${y.generation}</td>
           <td>${y.quantity} ${y.uom}</td><td>${y.viability ?? "—"}</td><td>${badge(y.status === "available" ? "available" : "obsolete")}${y.status}</td></tr>`).join("")}</tbody></table></div>
       <div class="panel"><h2>Xuất men thu hồi</h2>
@@ -7747,12 +7772,16 @@ VIEWS.process = async function () {
           <div class="field"><label>SL</label><input id="ye_qty" type="number" value="20"/></div>
           <button class="btn" id="ye_issue">Xuất men</button></div>
         <h3>Lịch sử xuất men</h3>
-        <table><thead><tr><th>Thời gian</th><th>Lô men</th><th>Mẻ</th><th>SL</th></tr></thead>
+        <table id="t_yeastissue"><thead><tr><th>Thời gian</th><th>Lô men</th><th>Mẻ</th><th>SL</th></tr></thead>
         <tbody>${issues.map(i => `<tr><td class="muted">${fmt(i.ts)}</td><td>${esc(i.yeast_code)}</td><td>${esc(i.batch || "—")}</td><td>${i.quantity} ${i.uom}</td></tr>`).join("") || '<tr><td colspan=4 class="muted">Chưa có.</td></tr>'}</tbody></table></div></div>`;
   }
 
   $("view-process").innerHTML = subnav("process", sections, sec) + body;
   wireSubnav("process"); wireSearch();
+  wirePaginate("t_nlstock", 10);
+  wirePaginate("t_chemhist", 10);
+  wirePaginate("t_yeastlot", 10);
+  wirePaginate("t_yeastissue", 10);
   wirePaginate("t_nau", 10);
   wirePaginate("t_lm", 10);
   wirePaginate("t_loc", 10);
@@ -8808,11 +8837,12 @@ async function loadFillingData() {
         <div class="panel"><h2>Theo ngày — từng ca</h2>${dayLabels.length ? CH.groupedN(dayLabels, barSeries) : '<div class="muted">Không có dữ liệu.</div>'}</div>
       </div>
       <div class="panel"><h2>Chi tiết theo ca</h2>
-        <div class="tablewrap"><table><thead><tr><th>Ngày</th><th>Ca</th><th>Bắt đầu</th><th>Kết thúc</th><th>Số lon</th></tr></thead>
+        <div class="tablewrap"><table id="t_fillingca"><thead><tr><th>Ngày</th><th>Ca</th><th>Bắt đầu</th><th>Kết thúc</th><th>Số lon</th></tr></thead>
         <tbody>${rpt.shifts.map(s => `<tr><td>${fmt(s.date)}</td><td>Ca ${s.ca}</td>
           <td class="muted">${new Date(s.start).toLocaleString("vi-VN")}</td><td class="muted">${new Date(s.end).toLocaleString("vi-VN")}</td>
           <td${s.data_gap ? ' class="muted" title="Thiếu dữ liệu — khoảng trống lớn trong CSDL nguồn"' : ""}>${s.cans != null ? s.cans.toLocaleString("vi-VN") : "— ⚠"}</td></tr>`).join("") ||
           '<tr><td colspan=5 class="muted">Không có dữ liệu.</td></tr>'}</tbody></table></div></div>`;
+    wirePaginate("t_fillingca", 10);
   } catch (e) {
     if (!stillHere()) return;
     $("fp_data").innerHTML = `<div class="panel muted">Chưa xem được sản lượng chiết: ${esc(e.message)}
@@ -8866,7 +8896,7 @@ async function loadKegData() {
         <div class="panel"><h2>Theo ngày — từng ca</h2>${dayLabels.length ? CH.groupedN(dayLabels, barSeries) : '<div class="muted">Không có dữ liệu.</div>'}</div>
       </div>
       <div class="panel"><h2>Chi tiết theo ca</h2>
-        <div class="tablewrap"><table><thead><tr><th>Ngày</th><th>Ca</th><th>Bắt đầu</th><th>Kết thúc</th><th>Số keg</th></tr></thead>
+        <div class="tablewrap"><table id="t_kegca"><thead><tr><th>Ngày</th><th>Ca</th><th>Bắt đầu</th><th>Kết thúc</th><th>Số keg</th></tr></thead>
         <tbody>${rpt.shifts.map(s => `<tr><td>${fmt(s.date)}</td><td>Ca ${s.ca}</td>
           <td class="muted">${new Date(s.start).toLocaleString("vi-VN")}</td><td class="muted">${new Date(s.end).toLocaleString("vi-VN")}</td>
           <td${s.data_gap ? ' class="muted" title="Thiếu dữ liệu — khoảng trống lớn trong CSDL nguồn"' : ""}>${s.kegs != null ? s.kegs.toLocaleString("vi-VN") : "— ⚠"}</td></tr>`).join("") ||
@@ -8883,6 +8913,7 @@ async function loadKegData() {
           <td>${l.ca1.toLocaleString("vi-VN")}</td><td>${l.ca2.toLocaleString("vi-VN")}</td><td>${l.ca3.toLocaleString("vi-VN")}</td>
           <td><b>${l.total.toLocaleString("vi-VN")}</b></td></tr>`).join("") ||
           '<tr><td colspan=5 class="muted">Không có dữ liệu.</td></tr>'}</tbody></table></div></div>`;
+    wirePaginate("t_kegca", 10);
   } catch (e) {
     if (!stillHere()) return;
     $("kp_data").innerHTML = `<div class="panel muted">Chưa xem được sản lượng chiết keg: ${esc(e.message)}
@@ -8948,7 +8979,7 @@ async function loadFinishedGoodsShiftData() {
           '<tr><td colspan=5 class="muted">Không có dữ liệu.</td></tr>'}</tbody></table></div></div>
       <div class="panel"><h2>Xuất theo từng SKU</h2>
         <div class="muted" style="margin-bottom:8px">Số lượng xuất theo từng mã sản phẩm (SKU) cụ thể — đơn vị tính theo loại đơn vị tồn kho của SKU đó (vỉ/keg/lon/...), không quy đổi lít.</div>
-        <div class="tablewrap"><table><thead><tr><th>SKU</th><th>Nhóm</th><th>Loại ĐVT</th><th>Số lượng</th><th>Tổng SL nhỏ</th></tr></thead>
+        <div class="tablewrap"><table id="t_gp_sku"><thead><tr><th>SKU</th><th>Nhóm</th><th>Loại ĐVT</th><th>Số lượng</th><th>Tổng SL nhỏ</th></tr></thead>
         <tbody>${(rpt.by_sku || []).map(s => `<tr><td>${esc(s.display_name)}</td><td class="muted">${esc(s.category)}</td>
           <td>${esc(s.unit_label)}</td><td><b>${s.count.toLocaleString("vi-VN")}</b></td>
           <td class="muted">${s.quantity.toLocaleString("vi-VN")}</td></tr>`).join("") ||
@@ -8958,11 +8989,13 @@ async function loadFinishedGoodsShiftData() {
           <td colspan=2>${rpt.unit_totals.map(u => `<b>${u.total_count.toLocaleString("vi-VN")}</b> ${esc(u.unit_label)}`).join(" · ")}</td>
         </tr></tfoot>` : ""}</table></div></div>
       <div class="panel"><h2>Chi tiết theo ca</h2>
-        <div class="tablewrap"><table><thead><tr><th>Ngày</th><th>Ca</th><th>Bắt đầu</th><th>Kết thúc</th><th>Lít</th></tr></thead>
+        <div class="tablewrap"><table id="t_gp_ca"><thead><tr><th>Ngày</th><th>Ca</th><th>Bắt đầu</th><th>Kết thúc</th><th>Lít</th></tr></thead>
         <tbody>${rpt.shifts.map(s => `<tr><td>${fmt(s.date)}</td><td>Ca ${s.ca}</td>
           <td class="muted">${new Date(s.start).toLocaleString("vi-VN")}</td><td class="muted">${new Date(s.end).toLocaleString("vi-VN")}</td>
           <td>${s.liters.toLocaleString("vi-VN")}</td></tr>`).join("") ||
           '<tr><td colspan=5 class="muted">Không có dữ liệu.</td></tr>'}</tbody></table></div></div>`;
+    wirePaginate("t_gp_sku", 10);
+    wirePaginate("t_gp_ca", 10);
   } catch (e) {
     if (!stillHere()) return;
     $("gp_data").innerHTML = `<div class="panel muted">Chưa xem được báo cáo xuất thành phẩm: ${esc(e.message)}</div>`;
@@ -9005,11 +9038,12 @@ async function loadShipmentClassificationData() {
       </div>
       <div class="panel"><h2>Theo ngày</h2>
         ${dayLabels.length ? CH.groupedN(dayLabels, barSeries) : '<div class="muted">Không có dữ liệu.</div>'}
-        <div class="tablewrap" style="margin-top:12px"><table><thead><tr><th>Ngày</th><th>Khuyến mại</th><th>Đổi trả</th><th>Cận date</th><th>Gửi</th></tr></thead>
+        <div class="tablewrap" style="margin-top:12px"><table id="t_pl_days"><thead><tr><th>Ngày</th><th>Khuyến mại</th><th>Đổi trả</th><th>Cận date</th><th>Gửi</th></tr></thead>
         <tbody>${rows.map(r => `<tr><td>${fmt(r.period)}</td>
           <td>${(r.promo || 0).toLocaleString("vi-VN")}</td><td>${(r.return || 0).toLocaleString("vi-VN")}</td>
           <td>${(r.near_expiry || 0).toLocaleString("vi-VN")}</td><td>${(r.consigned || 0).toLocaleString("vi-VN")}</td></tr>`).join("") ||
           '<tr><td colspan=5 class="muted">Không có dữ liệu.</td></tr>'}</tbody></table></div></div>`;
+    wirePaginate("t_pl_days", 10);
   } catch (e) {
     if (!stillHere()) return;
     $("pl_data").innerHTML = `<div class="panel muted">Chưa xem được báo cáo: ${esc(e.message)}</div>`;
