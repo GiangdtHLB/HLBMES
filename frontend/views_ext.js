@@ -1007,7 +1007,8 @@
         `<option value="${k}" ${k === sel ? "selected" : ""}>${k}</option>`).join("");
       body = `<div class="panel"><h2>📍 Danh mục vị trí kho thành phẩm</h2>
         <div class="muted" style="margin-bottom:8px">Vị trí đang chứa vỉ/keg (Sử dụng > 0) không xóa được — hãy chuyển/xuất hết trước.</div>
-        <div class="tablewrap"><table><thead><tr><th>Mã</th><th>Tên</th><th>Khu</th><th>Loại</th><th>Sức chứa</th><th>Sử dụng</th><th>Hoạt động</th><th></th></tr></thead>
+        <input class="searchbox" data-tbl="t_wmsloc" placeholder="Tìm theo mã, tên, khu..."/>
+        <div class="tablewrap"><table id="t_wmsloc"><thead><tr><th>Mã</th><th>Tên</th><th>Khu</th><th>Loại</th><th>Sức chứa</th><th>Sử dụng</th><th>Hoạt động</th><th></th></tr></thead>
         <tbody>${locs.map(l => `<tr data-loc-row="${esc(l.loc_id)}">
           <td><input class="wl_code" value="${esc(l.code)}" style="width:90px"/></td>
           <td><input class="wl_name" value="${esc(l.name)}" style="width:160px"/></td>
@@ -1977,6 +1978,7 @@
         toast("Đã lưu ngưỡng cảnh báo tuổi lô"); render("wms");
       });
     } else if (sec === "dm") {
+      wirePaginate("t_wmsloc", 10);
       document.querySelectorAll("[data-loc-save]").forEach(b => b.onclick = () => guard(async () => {
         const tr = b.closest("tr");
         await PUT(`/wms/locations/${b.dataset.locSave}`, {
@@ -2122,7 +2124,8 @@
           <thead><tr><th>Mã lô</th><th>Vật tư</th><th>Tồn kho</th><th>Vị trí</th><th>Ngày nhập</th><th>Đã dùng cho mẻ chiết</th><th>Ngày xuất gần nhất</th></tr></thead>
           <tbody>${lotRows || '<tr><td colspan="7" class="muted">Chưa có lô bao bì tiêu hao nào — khai báo vật tư thuộc Nhóm "Bao bì tiêu hao" rồi nhập kho ở Kho NVL.</td></tr>'}</tbody></table></div>`)}
       ${panel("📋 Danh mục loại bao bì", `
-        <div class="tablewrap"><table>
+        <input class="searchbox" data-tbl="t_pkgtype" placeholder="Tìm theo mã, tên, nhóm..."/>
+        <div class="tablewrap"><table id="t_pkgtype">
           <thead><tr><th>Mã</th><th>Tên</th><th>Nhóm</th><th>Vật liệu</th>
             <th style="text-align:right">Tồn kho</th><th style="text-align:right">Lưu hành</th>
             <th style="text-align:right">Tổng</th><th style="text-align:right">Đặt cọc</th><th>Trạng thái</th></tr></thead>
@@ -2165,6 +2168,7 @@
     wireSearch();
     wirePaginate("t_pkg_lot", 10);
     wirePaginate("t_pkg_moves", 10);
+    wirePaginate("t_pkgtype", 10);
 
     if (canManage) $("pk_add").onclick = () => guard(async () => {
       await POST("/packaging", { code: $("pk_code").value, name: $("pk_name").value,
@@ -2591,7 +2595,7 @@
           <button class="btn sm sec" data-eq-del="${e.equipment_id}">Xóa</button></td>` : "<td></td>"}</tr>`).join("");
       body = `
         ${panel(`📋 Loại biểu mẫu CIP <span class="muted">(${formTypes.length})</span>`, `
-          <div class="tablewrap"><table><thead><tr><th>Mã</th><th>Tên</th><th>Khu vực</th><th>Loại</th><th>Trạng thái</th><th></th></tr></thead>
+          <div class="tablewrap"><table id="t_ciptypes"><thead><tr><th>Mã</th><th>Tên</th><th>Khu vực</th><th>Loại</th><th>Trạng thái</th><th></th></tr></thead>
             <tbody>${ftRows || '<tr><td colspan="6" class="muted">Chưa có loại biểu mẫu.</td></tr>'}</tbody></table></div>
           ${canManage ? `<div class="row" style="margin-top:10px">
             <div class="field"><label>Mã</label><input id="ft_code" placeholder="QT-KCS-QT-BM-22" style="width:170px"/></div>
@@ -2601,7 +2605,7 @@
             <div class="field" style="align-self:flex-end"><button class="btn" id="ft_add">Thêm</button></div>
           </div>` : ""}`)}
         ${panel(`🛠️ Thiết bị CIP <span class="muted">(${equipment.length})</span>`, `
-          <div class="tablewrap"><table><thead><tr><th>Mã</th><th>Tên</th><th>Khu vực</th><th>Loại gắn</th><th>Trạng thái</th><th></th></tr></thead>
+          <div class="tablewrap"><table id="t_cipequip"><thead><tr><th>Mã</th><th>Tên</th><th>Khu vực</th><th>Loại gắn</th><th>Trạng thái</th><th></th></tr></thead>
             <tbody>${eqRows || '<tr><td colspan="6" class="muted">Chưa có thiết bị.</td></tr>'}</tbody></table></div>
           ${canManage ? `<div class="row" style="margin-top:10px">
             <div class="field"><label>Mã</label><input id="eq_code" placeholder="EQ-..." style="width:150px"/></div>
@@ -2617,6 +2621,8 @@
     wireSubnav("cip");
     wireSearch();
     wirePaginate("t_cip_hist", 15);
+    wirePaginate("t_ciptypes", 10);
+    wirePaginate("t_cipequip", 10);
 
     if (sec === "mau" && canManage) {
       const seqRef = { n: 0 };
