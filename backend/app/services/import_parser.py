@@ -5,6 +5,7 @@
 """
 
 import csv
+import datetime as _dt
 import io
 from typing import Tuple
 
@@ -23,7 +24,13 @@ def _norm(v):
         return ""
     if isinstance(v, str):
         return v.strip()
-    return v
+    # Ô Excel có thể trả datetime/date/time (openpyxl) — KHÔNG JSON-serializable, làm vỡ lúc
+    # lưu sample/columns vào cột JSON (integration_import_file) → 500. Quy về chuỗi ISO.
+    if isinstance(v, (_dt.datetime, _dt.date, _dt.time)):
+        return v.isoformat()
+    if isinstance(v, (int, float, bool)):
+        return v
+    return str(v)
 
 
 def parse_csv(data: bytes) -> Tuple[list, list]:
