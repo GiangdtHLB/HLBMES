@@ -791,11 +791,14 @@
       { key: "capvao", label: "🚚 Cất vào vị trí" }, { key: "tudo", label: "🚫 Xuất tự do" },
       { key: "lenhdonghang", label: "Lệnh đóng hàng" }, { key: "aging", label: "📦 Tồn kho theo tuổi" },
       { key: "canexpiry", label: "🕒 Bia cận date" }, { key: "consigned", label: "🎁 Bia gửi" },
-      { key: "dm", label: "Danh mục vị trí kho" }, { key: "shipto", label: "Danh mục nơi xuất đến" },
+      { key: "dm", label: "Danh mục vị trí kho" },
       { key: "vehicles", label: "Danh mục lái xe" }];
     const root = $("view-wms");
+    // "Nơi xuất đến" dùng chung danh mục Nhà cung cấp (không còn catalog ship_to_location riêng —
+    // xem models/wms.py, migration 9a0b1c2d3e4f_ship_to_supplier_merge) — biến `shipTos` giữ tên cũ
+    // để đỡ đổi các chỗ dùng bên dưới, nhưng nguồn dữ liệu giờ là /api/suppliers.
     const [locs, shipTos, finishedProducts, vehicles, unitTypes] = await Promise.all([
-      GET("/wms/locations"), GET("/wms/ship-to"), GET("/finished-products").catch(() => []),
+      GET("/wms/locations"), GET("/suppliers"), GET("/finished-products").catch(() => []),
       GET("/wms/vehicles").catch(() => []), GET("/unit-types").catch(() => [])]);
     const utByCode = Object.fromEntries(unitTypes.map(ut => [ut.code, ut]));
     // FinishedGoodsUnit.product_name lưu mã SKU (VD "FLGN200"), không phải tên — tra thêm tên
@@ -883,7 +886,7 @@
         ${panel("🔨 Lịch sử phân rã", `<input class="searchbox" data-tbl="t_dp_history" placeholder="Tìm theo sản phẩm, lô, người..."/><div id="dp_history" class="muted">Đang tải…</div>`)}
       `;
     } else if (sec === "xuatkho") {
-      const shipToOpt = shipTos.filter(s => s.active).map(s => `<option value="${esc(s.ship_to_id)}">${esc(s.code)} — ${esc(s.name)}</option>`).join("");
+      const shipToOpt = shipTos.filter(s => s.active).map(s => `<option value="${esc(s.supplier_id)}">${esc(s.code)} — ${esc(s.name)}</option>`).join("");
       const activeVehicles = vehicles.filter(v => v.active);
       const driverOpt = activeVehicles.map(v =>
         `<option value="${esc(v.vehicle_id)}">${esc(v.driver_name || v.driver_short_name || "(chưa rõ tên)")} — ${esc(v.plate)}</option>`).join("");
@@ -1029,32 +1032,6 @@
           <div class="field"><label>Sức chứa</label><input id="wl_new_capacity" type="number" value="10" style="width:60px"/></div>
           <div class="field" style="align-self:flex-end"><button class="btn" id="wl_add">+ Thêm vị trí</button></div>
         </div></div>`;
-    } else if (sec === "shipto") {
-      const kindOpt = (sel) => ["distributor", "retailer", "export", "other"].map(k =>
-        `<option value="${k}" ${k === sel ? "selected" : ""}>${k}</option>`).join("");
-      body = `<div class="panel"><h2>🏬 Danh mục nơi xuất đến <span class="muted">(${shipTos.length})</span></h2>
-        <div class="muted" style="margin-bottom:8px">Nơi xuất đến đã có vỉ/keg từng xuất tới không xóa được (dùng cho truy xuất/thu hồi).</div>
-        <input class="searchbox" data-tbl="t_shipto" placeholder="Tìm theo mã, tên, địa chỉ, liên hệ..."/>
-        <div class="tablewrap"><table id="t_shipto"><thead><tr><th>Mã</th><th>Tên</th><th>Loại</th><th>Địa chỉ</th><th>Liên hệ</th><th>Hoạt động</th><th></th></tr></thead>
-        <tbody>${shipTos.map(s => `<tr data-shipto-row="${esc(s.ship_to_id)}">
-          <td><input class="st_code" value="${esc(s.code)}" style="width:90px"/></td>
-          <td><input class="st_name" value="${esc(s.name)}" style="width:180px"/></td>
-          <td><select class="st_kind">${kindOpt(s.kind)}</select></td>
-          <td><input class="st_address" value="${esc(s.address || "")}" style="width:200px"/></td>
-          <td><input class="st_contact" value="${esc(s.contact || "")}" style="width:140px"/></td>
-          <td><input class="st_active" type="checkbox" ${s.active ? "checked" : ""}/></td>
-          <td style="white-space:nowrap">
-            <button class="btn sm" data-shipto-save="${esc(s.ship_to_id)}">Lưu</button>
-            <button class="btn sm sec" data-shipto-del="${esc(s.ship_to_id)}">Xóa</button>
-          </td></tr>`).join("") || '<tr><td colspan=7 class="muted">Chưa có nơi xuất đến nào.</td></tr>'}</tbody></table></div>
-        <div class="row" style="margin-top:12px;flex-wrap:wrap">
-          <div class="field"><label>Mã</label><input id="st_new_code" style="width:90px"/></div>
-          <div class="field"><label>Tên</label><input id="st_new_name" style="width:180px"/></div>
-          <div class="field"><label>Loại</label><select id="st_new_kind">${kindOpt("distributor")}</select></div>
-          <div class="field"><label>Địa chỉ</label><input id="st_new_address" style="width:200px"/></div>
-          <div class="field"><label>Liên hệ</label><input id="st_new_contact" style="width:140px"/></div>
-          <div class="field" style="align-self:flex-end"><button class="btn" id="st_add">+ Thêm nơi xuất đến</button></div>
-        </div></div>`;
     } else if (sec === "vehicles") {
       body = `<div class="panel"><h2>🚚 Danh mục lái xe <span class="muted">(${vehicles.length})</span></h2>
         <div class="muted" style="margin-bottom:8px">Biển số xe kèm lái xe/tải trọng/số pallet chở được — tra cứu nhanh khi lập Lệnh đóng hàng hoặc Phiếu xuất kho.</div>
@@ -1124,7 +1101,6 @@
     root.innerHTML = subnav("wms", sections, sec) + body;
     wireSubnav("wms");
     wireSearch();
-    if (sec === "shipto") wirePaginate("t_shipto", 10);
     if (sec === "vehicles") wirePaginate("t_vehicle", 10);
     if (sec === "aging") wirePaginate("t_aging", 20);
     if (sec === "lenhdonghang") { wirePaginate("t_loadslip_hl", 10); wirePaginate("t_loadslip_dm", 10); }
@@ -1653,7 +1629,7 @@
           // lượt 1..N phiếu nếu giỏ có nhiều loại khác nhau.
           const groups = {};
           XK_CART.forEach(c => { (groups[c.shipment_type || ""] = groups[c.shipment_type || ""] || []).push(c); });
-          const shipTo = shipTos.find(s => s.ship_to_id === $("xk_shipto").value);
+          const shipTo = shipTos.find(s => s.supplier_id === $("xk_shipto").value);
           // Lái xe/biển số chọn từ Danh mục lái xe (không gõ tay) — tự điền cả 2 vào phiếu in
           // từ cùng 1 dòng danh mục, tránh gõ sai/lệch giữa tên lái xe và biển số thật.
           const vehicle = vehicles.find(v => v.vehicle_id === $("xk_driver").value);
@@ -2002,31 +1978,6 @@
           zone: $("wl_new_zone").value || null, kind: $("wl_new_kind").value,
           capacity: num("wl_new_capacity") || 10 });
         toast("Đã thêm vị trí"); render("wms");
-      });
-    } else if (sec === "shipto") {
-      document.querySelectorAll("[data-shipto-save]").forEach(b => b.onclick = () => guard(async () => {
-        const tr = b.closest("tr");
-        await PUT(`/wms/ship-to/${b.dataset.shiptoSave}`, {
-          code: tr.querySelector(".st_code").value,
-          name: tr.querySelector(".st_name").value,
-          kind: tr.querySelector(".st_kind").value,
-          address: tr.querySelector(".st_address").value || null,
-          contact: tr.querySelector(".st_contact").value || null,
-          active: tr.querySelector(".st_active").checked,
-        });
-        toast("Đã lưu nơi xuất đến"); render("wms");
-      }));
-      document.querySelectorAll("[data-shipto-del]").forEach(b => b.onclick = () => guard(async () => {
-        if (!confirm("Xóa nơi xuất đến này? Không thể hoàn tác.")) return;
-        await DELETE(`/wms/ship-to/${b.dataset.shiptoDel}`);
-        toast("Đã xóa nơi xuất đến"); render("wms");
-      }));
-      $("st_add").onclick = () => guard(async () => {
-        if (!$("st_new_code").value || !$("st_new_name").value) { toast("Nhập mã và tên nơi xuất đến", "err"); return; }
-        await POST("/wms/ship-to", { code: $("st_new_code").value, name: $("st_new_name").value,
-          kind: $("st_new_kind").value, address: $("st_new_address").value || null,
-          contact: $("st_new_contact").value || null });
-        toast("Đã thêm nơi xuất đến"); render("wms");
       });
     } else if (sec === "vehicles") {
       document.querySelectorAll("[data-vehicle-save]").forEach(b => b.onclick = () => guard(async () => {

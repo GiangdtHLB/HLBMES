@@ -1,10 +1,12 @@
-"""Test danh mục "nơi xuất đến" (ship-to/nhà phân phối) + xuất kho theo phiếu (shipment):
-1) CRUD danh mục ship-to (create/update/delete, xóa chặn khi đã có PHIẾU xuất kho nào
-   từng dùng nó — không chỉ khi unit đã "shipped" hẳn).
-2) create_shipment: bắt buộc ship_to_id + ít nhất 1 unit; mỗi vỉ/keg là 1 đơn vị tồn kho
-   độc lập nguyên vẹn (không xuất một phần 1 vỉ/keg) — 1 phiếu có thể chọn nhiều unit từ
-   nhiều sản phẩm/lô khác nhau cùng lúc.
-3) Bug fix approve_bottle: pack_size phải lấy từ FinishedProduct, không còn hardcode."""
+"""Test xuất kho theo phiếu (shipment), "nơi xuất đến" nay dùng chung danh mục Nhà cung cấp
+(Supplier) — không còn catalog ship_to_location riêng (xem models/wms.py, migration
+9a0b1c2d3e4f_ship_to_supplier_merge):
+1) create_shipment: bắt buộc ship_to_id (= supplier_id) + ít nhất 1 unit; mỗi vỉ/keg là 1 đơn
+   vị tồn kho độc lập nguyên vẹn (không xuất một phần 1 vỉ/keg) — 1 phiếu có thể chọn nhiều
+   unit từ nhiều sản phẩm/lô khác nhau cùng lúc. Xóa Supplier bị chặn nếu đã có phiếu xuất kho
+   nào từng dùng nó (xem services/master_data.py::delete_supplier) — CRUD Supplier chung đã có
+   test riêng ở test_lot_auto_code.py, ở đây chỉ test guard xóa khi đã dùng làm ship_to.
+2) Bug fix approve_bottle: pack_size phải lấy từ FinishedProduct, không còn hardcode."""
 
 import os
 import tempfile
@@ -73,9 +75,10 @@ def _a_location(client, admin_h):
 
 
 def _a_ship_to(client, admin_h, code, name="NPP test"):
-    st = client.post("/api/wms/ship-to", headers=admin_h, json={"code": code, "name": name})
+    """Nơi xuất đến nay dùng chung danh mục Nhà cung cấp (Supplier) — xem module docstring."""
+    st = client.post("/api/suppliers", headers=admin_h, json={"code": code, "name": name})
     assert st.status_code == 201, st.text
-    return st.json()["ship_to_id"]
+    return st.json()["supplier_id"]
 
 
 def _a_units(client, admin_h, product, lot_code, count):
@@ -120,24 +123,6 @@ def _declare_pending(client, headers, stage, scope_type, scope_id, product_id=No
                                   "parameter": p["code"], "value": (lsl + usl) / 2,
                                   "lower_limit": lsl, "upper_limit": usl})
             assert r.status_code == 201, r.text
-
-
-def test_ship_to_crud(client, admin_h):
-    ship_to_id = _a_ship_to(client, admin_h, "DIST-01", "NPP Miền Bắc")
-
-    rows = client.get("/api/wms/ship-to", headers=admin_h).json()
-    row = next(r for r in rows if r["ship_to_id"] == ship_to_id)
-    assert row["kind"] == "distributor" and row["active"] is True
-
-    updated = client.put(f"/api/wms/ship-to/{ship_to_id}", headers=admin_h, json={"contact": "0911111111"})
-    assert updated.status_code == 200, updated.text
-    rows2 = client.get("/api/wms/ship-to", headers=admin_h).json()
-    assert next(r for r in rows2 if r["ship_to_id"] == ship_to_id)["contact"] == "0911111111"
-
-    deleted = client.delete(f"/api/wms/ship-to/{ship_to_id}", headers=admin_h)
-    assert deleted.status_code == 204, deleted.text
-    rows3 = client.get("/api/wms/ship-to", headers=admin_h).json()
-    assert not any(r["ship_to_id"] == ship_to_id for r in rows3)
 
 
 def test_create_shipment_requires_ship_to_and_units(client, admin_h):
@@ -286,7 +271,7 @@ def test_ship_to_delete_blocked_when_used_by_shipment(client, admin_h):
                                           "unit_type": "vi", "quantity": 2}]})
     assert shipped.status_code == 201, shipped.text
 
-    blocked = client.delete(f"/api/wms/ship-to/{ship_to_id}", headers=admin_h)
+    blocked = client.delete(f"/api/suppliers/{ship_to_id}", headers=admin_h)
     assert blocked.status_code == 409, blocked.text
 
 

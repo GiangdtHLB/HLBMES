@@ -123,11 +123,11 @@ def test_190k_lot_write_path_smoke(client, admin_h, vanhanh_h, kcs_h):
     assert lot_units[0]["quantity"] == LON_TOTAL
 
     # ---- Xuất MỘT PHẦN (5.000/190.000 vỉ) ----
-    ship_to = client.post("/api/wms/ship-to", headers=admin_h,
+    ship_to = client.post("/api/suppliers", headers=admin_h,
                           json={"code": "SMOKE-ST", "name": "NPP smoke test"})
     assert ship_to.status_code == 201, ship_to.text
     ship = client.post("/api/wms/shipments", headers=admin_h,
-                       json={"ship_to_id": ship_to.json()["ship_to_id"],
+                       json={"ship_to_id": ship_to.json()["supplier_id"],
                              "lines": [{"product_name": "SKU-SMOKE190K", "lot_code": lot_code,
                                        "unit_type": "vi", "quantity": 5_000}]})
     assert ship.status_code == 201, ship.text

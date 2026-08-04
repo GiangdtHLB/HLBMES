@@ -191,14 +191,14 @@ def test_delete_units_batch_blocked_if_shipped(client, admin_h, vanhanh_h, kcs_h
     unit_ids = [u["unit_id"] for u in units if u["unit_code"] in result["unit_codes"]]
     assert len(unit_ids) == 1
 
-    ship_to = client.post("/api/wms/ship-to", headers=admin_h,
+    ship_to = client.post("/api/suppliers", headers=admin_h,
                           json={"code": "DIST-BATCH02", "name": "NPP batch test"})
     assert ship_to.status_code == 201, ship_to.text
     product_name = next(u["product"] for u in units if u["unit_id"] == unit_ids[0])
     lot_code = next(u["lot_code"] for u in units if u["unit_id"] == unit_ids[0])
     # Xuất HẾT 2 vỉ (toàn bộ lô) -> dòng gốc chuyển thẳng sang "shipped" (không tách dòng).
     shipped = client.post("/api/wms/shipments", headers=admin_h,
-                          json={"ship_to_id": ship_to.json()["ship_to_id"],
+                          json={"ship_to_id": ship_to.json()["supplier_id"],
                                 "lines": [{"product_name": product_name, "lot_code": lot_code,
                                           "unit_type": "vi", "quantity": 2}]})
     assert shipped.status_code == 201, shipped.text

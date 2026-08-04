@@ -18,7 +18,7 @@ WHITELIST = {
     "product", "material", "equipment", "production_line", "packaging_type",
     "energy_group", "energy_area", "qc_parameter", "spare_part", "wms_location",
     "beer_type", "material_group", "supplier", "finished_product",
-    "qc_parameter_group", "ship_to_location", "wms_vehicle",
+    "qc_parameter_group", "wms_vehicle",
 }
 
 # Cấm tuyệt đối (kể cả khi có người cố truyền tên bảng).
@@ -40,10 +40,9 @@ TABLE_DESC = {
     "wms_location": "Vị trí kho thành phẩm (WMS)",
     "beer_type": "Loại bia (thương hiệu, VD Sapphire/Legend)",
     "material_group": "Nhóm vật tư (malt/gạo/hoa bia/men/...)",
-    "supplier": "Nhà cung cấp nguyên vật liệu",
+    "supplier": "Nhà cung cấp nguyên vật liệu (cũng dùng làm nơi xuất đến của Kho thành phẩm)",
     "finished_product": "Sản phẩm thành phẩm (SKU đóng gói: chai/lon/keg)",
     "qc_parameter_group": "Nhóm chỉ tiêu chất lượng (chỉ tạo nhóm — gán chỉ tiêu vào nhóm vẫn làm qua UI)",
-    "ship_to_location": "Nơi xuất đến (nhà phân phối/đại lý)",
     "wms_vehicle": "Xe/lái xe vận chuyển hàng",
 }
 

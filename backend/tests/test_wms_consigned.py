@@ -124,13 +124,13 @@ def test_consigned_declare_generates_dedicated_lot_and_shipment_roundtrip(client
     assert in_entries[0]["quantity"] == 4
     assert in_entries[0]["finished_product_id"] == fp_id
 
-    ship_to = client.post("/api/wms/ship-to", headers=admin_h,
+    ship_to = client.post("/api/suppliers", headers=admin_h,
                           json={"code": "DIST-GS-ROUND", "name": "NPP test bia gửi"})
     assert ship_to.status_code == 201, ship_to.text
 
     # Xuất một phần (3/4) với consigned_only=True phải thành công (cho phép xuất một phần lô).
     shipped = client.post("/api/wms/shipments", headers=admin_h,
-                          json={"ship_to_id": ship_to.json()["ship_to_id"],
+                          json={"ship_to_id": ship_to.json()["supplier_id"],
                                 "lines": [{"product_name": product_name, "lot_code": lot_code,
                                           "unit_type": "vi", "quantity": 3, "consigned_only": True}]})
     assert shipped.status_code == 201, shipped.text
@@ -142,7 +142,7 @@ def test_consigned_declare_generates_dedicated_lot_and_shipment_roundtrip(client
 
     # Không còn bia gửi nào nữa (chỉ còn 1) -> xuất 2 với consigned_only phải báo lỗi rõ ràng.
     shipped2 = client.post("/api/wms/shipments", headers=admin_h,
-                           json={"ship_to_id": ship_to.json()["ship_to_id"],
+                           json={"ship_to_id": ship_to.json()["supplier_id"],
                                  "lines": [{"product_name": product_name, "lot_code": lot_code,
                                            "unit_type": "vi", "quantity": 2, "consigned_only": True}]})
     assert shipped2.status_code == 409
@@ -238,11 +238,11 @@ def test_consigned_undo_rejects_out_direction(client, admin_h):
     body = _declare_and_approve_consigned(client, admin_h, fp_id, 1)
     lot_code, product_name = body["lot_code"], body["product_name"]
 
-    ship_to = client.post("/api/wms/ship-to", headers=admin_h,
+    ship_to = client.post("/api/suppliers", headers=admin_h,
                           json={"code": "DIST-GS-UNDO-OUTDIR", "name": "NPP test undo outdir"})
     assert ship_to.status_code == 201, ship_to.text
     shipped = client.post("/api/wms/shipments", headers=admin_h,
-                          json={"ship_to_id": ship_to.json()["ship_to_id"],
+                          json={"ship_to_id": ship_to.json()["supplier_id"],
                                 "lines": [{"product_name": product_name, "lot_code": lot_code,
                                           "unit_type": "vi", "quantity": 1, "consigned_only": True}]})
     assert shipped.status_code == 201, shipped.text
@@ -259,11 +259,11 @@ def test_shipment_line_rejects_both_near_expiry_and_consigned_flags(client, admi
     body = _declare_and_approve_consigned(client, admin_h, fp_id, 1)
     lot_code, product_name = body["lot_code"], body["product_name"]
 
-    ship_to = client.post("/api/wms/ship-to", headers=admin_h,
+    ship_to = client.post("/api/suppliers", headers=admin_h,
                           json={"code": "DIST-GS-BOTHFLAGS", "name": "NPP test both flags"})
     assert ship_to.status_code == 201, ship_to.text
     shipped = client.post("/api/wms/shipments", headers=admin_h,
-                          json={"ship_to_id": ship_to.json()["ship_to_id"],
+                          json={"ship_to_id": ship_to.json()["supplier_id"],
                                 "lines": [{"product_name": product_name, "lot_code": lot_code,
                                           "unit_type": "vi", "quantity": 1,
                                           "near_expiry_only": True, "consigned_only": True}]})

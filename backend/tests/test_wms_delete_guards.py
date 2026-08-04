@@ -205,10 +205,10 @@ def test_cannot_delete_shipped_unit(client, admin_h, vanhanh_h, kcs_h):
     unit = next(u for u in units if u["unit_code"] == unit_code)
     unit_id = unit["unit_id"]
 
-    st = client.post("/api/wms/ship-to", headers=admin_h, json={"code": "DIST-DELGUARD", "name": "NPP test"})
+    st = client.post("/api/suppliers", headers=admin_h, json={"code": "DIST-DELGUARD", "name": "NPP test"})
     assert st.status_code == 201, st.text
     ship = client.post("/api/wms/shipments", headers=admin_h,
-                       json={"ship_to_id": st.json()["ship_to_id"],
+                       json={"ship_to_id": st.json()["supplier_id"],
                              "lines": [{"product_name": unit["product"], "lot_code": unit["lot_code"],
                                        "unit_type": unit["unit_type"], "quantity": 100}]})
     assert ship.status_code == 201, ship.text

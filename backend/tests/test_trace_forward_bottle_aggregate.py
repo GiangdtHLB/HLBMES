@@ -30,7 +30,8 @@ from app.database import SessionLocal
 from app.common import new_id, utcnow
 from app.models.brewing import BottleRecord
 from app.models.master import FinishedProduct
-from app.models.wms import FinishedGoodsUnit, Shipment, ShipToLocation
+from app.models.wms import FinishedGoodsUnit, Shipment
+from app.models.materials import Supplier
 from app.services import genealogy
 
 
@@ -65,10 +66,10 @@ def _build_huge_bottle(db, *, unit_count=300, shipped_count=5):
                         bottle_year=datetime.utcnow().year,
                         beer_type="Bia test", approved=True))
 
-    ship_to = ShipToLocation(ship_to_id=new_id(), code=f"NPP-HUGE-{bottle_id[:8]}", name="NPP Test Huge")
+    ship_to = Supplier(supplier_id=new_id(), code=f"NPP-HUGE-{bottle_id[:8]}", name="NPP Test Huge")
     db.add(ship_to)
     shipment = Shipment(shipment_id=new_id(), shipment_code=f"SHP-HUGE-{bottle_id[:8]}",
-                        ship_to_id=ship_to.ship_to_id, driver_name="Nguyễn Văn Tài",
+                        ship_to_id=ship_to.supplier_id, driver_name="Nguyễn Văn Tài",
                         vehicle_plate="14C-99999", shipment_type="promo", from_location="Kho công ty")
     db.add(shipment)
 
@@ -89,7 +90,7 @@ def _build_huge_bottle(db, *, unit_count=300, shipped_count=5):
                               product_name="CSPS330 test", lot_code="LOT-HUGE-1",
                               quantity=24, status="shipped" if shipped else "stored",
                               shipment_id=shipment.shipment_id if shipped else None,
-                              ship_to_id=ship_to.ship_to_id if shipped else None,
+                              ship_to_id=ship_to.supplier_id if shipped else None,
                               created_by="admin", created_at=utcnow())
         db.add(u)
         db.flush()

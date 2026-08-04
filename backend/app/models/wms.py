@@ -49,7 +49,7 @@ class FinishedGoodsUnit(Base):
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)  # mốc FIFO
     shipped_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
     shipment_id: Mapped[Optional[str]] = mapped_column(ForeignKey("shipment.shipment_id"), nullable=True, index=True)
-    ship_to_id: Mapped[Optional[str]] = mapped_column(ForeignKey("ship_to_location.ship_to_id"), nullable=True, index=True)
+    ship_to_id: Mapped[Optional[str]] = mapped_column(ForeignKey("supplier.supplier_id"), nullable=True, index=True)
     # Đánh dấu vỉ/keg này đến từ "Nhập bia cận date" (xem NearExpiryEntry) — cho phép Xuất
     # kho lọc riêng để xuất đúng lô cận date khi cần, tách biệt khỏi FIFO mặc định.
     is_near_expiry: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
@@ -71,20 +71,6 @@ class FinishedGoodsUnit(Base):
     source: Mapped[Optional[str]] = mapped_column(Unicode(32), nullable=True, index=True)
     received_confirmed_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
     received_confirmed_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
-
-
-class ShipToLocation(Base):
-    """Danh mục nơi xuất đến (thường là nhà phân phối) — gắn vào từng vỉ/keg lúc xuất kho
-    để truy xuất/thu hồi biết lô nào đã đi đâu (xem genealogy.NODE_REGISTRY["ship_to"])."""
-    __tablename__ = "ship_to_location"
-
-    ship_to_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
-    code: Mapped[str] = mapped_column(Unicode(64), unique=True, index=True)
-    name: Mapped[str] = mapped_column(Unicode(255))
-    kind: Mapped[str] = mapped_column(Unicode(255), default="distributor")  # distributor|retailer|export|other
-    address: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
-    contact: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
-    active: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
 class Vehicle(Base):
@@ -112,7 +98,7 @@ class Shipment(Base):
 
     shipment_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
     shipment_code: Mapped[str] = mapped_column(Unicode(64), unique=True, index=True)
-    ship_to_id: Mapped[str] = mapped_column(ForeignKey("ship_to_location.ship_to_id"), index=True)
+    ship_to_id: Mapped[str] = mapped_column(ForeignKey("supplier.supplier_id"), index=True)
     created_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
     note: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)  # Lý do xuất kho

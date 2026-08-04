@@ -14,8 +14,8 @@ from ..errors import DomainError, NotFoundError
 from ..models.audit import AuditLog
 from ..models.brewing import BottleRecord
 from ..models.master import FinishedProduct, UnitTypeCatalog
-from ..models.materials import GenealogyEdge
-from ..models.wms import ConsignedEntry, FinishedGoodsUnit, NearExpiryEntry, Shipment, ShipToLocation, Vehicle, WmsLocation
+from ..models.materials import GenealogyEdge, Supplier
+from ..models.wms import ConsignedEntry, FinishedGoodsUnit, NearExpiryEntry, Shipment, Vehicle, WmsLocation
 from ..security import User, require_perm, require_role
 from . import genealogy
 from .opening_balance_import import parse_opening_balance_sheet
@@ -183,47 +183,6 @@ def list_locations(db: Session) -> list:
              "capacity": l.capacity, "active": l.active, "used": counts.get(l.loc_id, 0) or 0} for l in locs]
 
 
-def create_ship_to(db: Session, payload: dict) -> ShipToLocation:
-    st = ShipToLocation(ship_to_id=new_id(), **payload)
-    db.add(st)
-    db.commit()
-    db.refresh(st)
-    return st
-
-
-def update_ship_to(db: Session, ship_to_id: str, payload: dict) -> ShipToLocation:
-    st = db.get(ShipToLocation, ship_to_id)
-    if not st:
-        raise NotFoundError("Nơi xuất đến không tồn tại.")
-    for k, v in payload.items():
-        if v is not None:
-            setattr(st, k, v)
-    db.commit()
-    db.refresh(st)
-    return st
-
-
-def delete_ship_to(db: Session, ship_to_id: str) -> None:
-    """Chặn xóa nếu đã có phiếu xuất kho nào TỪNG dùng nơi này — khác delete_location (chặn
-    theo đang chứa), ở đây phải chặn theo lịch sử vì đây là dữ liệu truy xuất/thu hồi, không
-    được để genealogy edge/Shipment trỏ tới bản ghi đã bị xóa."""
-    st = db.get(ShipToLocation, ship_to_id)
-    if not st:
-        raise NotFoundError("Nơi xuất đến không tồn tại.")
-    used = db.execute(select(func.count(Shipment.shipment_id)).where(
-        Shipment.ship_to_id == ship_to_id)).scalar() or 0
-    if used:
-        raise DomainError(f"Đã có {used} phiếu xuất kho từng dùng {st.code} — không thể xóa (ảnh hưởng truy xuất/thu hồi).")
-    db.delete(st)
-    db.commit()
-
-
-def list_ship_to(db: Session) -> list:
-    rows = db.execute(select(ShipToLocation).order_by(ShipToLocation.code)).scalars().all()
-    return [{"ship_to_id": s.ship_to_id, "code": s.code, "name": s.name, "kind": s.kind,
-             "address": s.address, "contact": s.contact, "active": s.active} for s in rows]
-
-
 def create_vehicle(db: Session, payload: dict) -> Vehicle:
     if db.execute(select(Vehicle).where(Vehicle.plate == payload["plate"])).scalar_one_or_none():
         raise DomainError(f"Biển số '{payload['plate']}' đã tồn tại.")
@@ -316,7 +275,7 @@ def list_units(db: Session, status: str = None, unit_type: str = None,
     stmt = stmt.limit(limit).offset(offset)
     out = []
     loc_by = {l.loc_id: l for l in db.execute(select(WmsLocation)).scalars().all()}
-    ship_to_by = {s.ship_to_id: s for s in db.execute(select(ShipToLocation)).scalars().all()}
+    ship_to_by = {s.supplier_id: s for s in db.execute(select(Supplier)).scalars().all()}
     bottle_codes_by_lot: dict[str, list] = {}
     for lot_no, bottle_code in db.execute(select(BottleRecord.lot_no, BottleRecord.bottle_code)
                                           .where(BottleRecord.lot_no.isnot(None))).all():
@@ -1754,7 +1713,7 @@ def create_shipment(db: Session, ship_to_id: str, lines: list, user: User, heade
     require_perm(user, "warehouse.issue")
     if not ship_to_id:
         raise DomainError("Phải chọn nơi xuất đến.")
-    ship_to = db.get(ShipToLocation, ship_to_id)
+    ship_to = db.get(Supplier, ship_to_id)
     if not ship_to:
         raise NotFoundError("Nơi xuất đến không tồn tại.")
     if not lines:
@@ -1892,7 +1851,7 @@ def list_shipments(db: Session, limit: int = 200, offset: int = 0) -> list:
     offset = max(0, offset or 0)
     ships = db.execute(select(Shipment).order_by(Shipment.created_at.desc())
                       .limit(limit).offset(offset)).scalars().all()
-    ship_to_by = {s.ship_to_id: s for s in db.execute(select(ShipToLocation)).scalars().all()}
+    ship_to_by = {s.supplier_id: s for s in db.execute(select(Supplier)).scalars().all()}
     fp_cache: dict = {}
     divide_codes = _divide_by_pack_codes(db)
 

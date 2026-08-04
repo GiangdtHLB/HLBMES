@@ -1,7 +1,7 @@
 """Xóa danh mục gốc (Loại bia/Dịch bia/Vật tư/Sản phẩm thành phẩm/Dây chuyền-Tank) — chặn nếu
 mã đó đã được tham chiếu ở bất kỳ đâu (kể cả lịch sử, không chỉ bản ghi đang active), vì đây là
 dữ liệu gốc ảnh hưởng truy xuất nguồn gốc một khi đã có bản ghi trỏ tới (mirror
-qc_catalog.py::delete_group và wms.py::delete_ship_to)."""
+qc_catalog.py::delete_group)."""
 
 from sqlalchemy import delete as sa_delete
 from sqlalchemy import func, select, true
@@ -25,7 +25,7 @@ from ..models.quality_ext import StageQcGroup
 from ..models.recipes import Recipe, RecipeVersion
 from ..models.scheduling import ScheduleSlot
 from ..models.warehouse import FactoryLocation, MaterialRequestLine, StockMovement
-from ..models.wms import FinishedGoodsUnit
+from ..models.wms import FinishedGoodsUnit, Shipment
 from ..models.workorder import WorkOrder
 from ..security import User, require_perm
 
@@ -137,6 +137,10 @@ def delete_supplier(db: Session, supplier_id: str, user: User) -> None:
         raise NotFoundError("Nhà cung cấp không tồn tại.")
     checks = [
         ("lô NVL", select(func.count(MaterialLot.lot_id)).where(MaterialLot.supplier_id == supplier_id)),
+        # Nhà cung cấp giờ dùng chung làm "nơi xuất đến" của Kho thành phẩm (ShipToLocation cũ
+        # đã gộp vào đây) — chặn xóa nếu đã có phiếu xuất kho nào từng dùng, không được để
+        # genealogy edge/Shipment trỏ tới bản ghi đã bị xóa.
+        ("phiếu xuất kho", select(func.count(Shipment.shipment_id)).where(Shipment.ship_to_id == supplier_id)),
     ]
     _block_if_used(_used_by(db, checks), "Nhà cung cấp", sup.code)
     record_audit(db, entity_type="supplier", entity_id=sup.supplier_id, action="delete",

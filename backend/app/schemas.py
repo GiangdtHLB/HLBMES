@@ -600,23 +600,6 @@ class LoadSlipHeaderUpdate(BaseModel):
     recipient_unit: Optional[str] = None
 
 
-class ShipToIn(BaseModel):
-    code: str
-    name: str
-    kind: str = "distributor"
-    address: Optional[str] = None
-    contact: Optional[str] = None
-
-
-class ShipToUpdate(BaseModel):
-    code: Optional[str] = None
-    name: Optional[str] = None
-    kind: Optional[str] = None
-    address: Optional[str] = None
-    contact: Optional[str] = None
-    active: Optional[bool] = None
-
-
 class VehicleIn(BaseModel):
     plate: str
     driver_name: Optional[str] = None
