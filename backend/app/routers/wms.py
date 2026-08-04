@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 from ..database import get_db
 from ..schemas import (ConsignedEntryIn, ConsignedEntryUpdate, DecomposeBatchIn, DeleteByLotIn, FreeIssueBatchIn,
                        LoadSlipHeaderUpdate, NearExpiryEntryIn, NearExpiryEntryUpdate, PutawayIn, RelocateBatchIn,
-                       ShipmentIn, ShipmentUpdate, ShipToIn, ShipToUpdate, UnitBuildIn, UnitDeleteIn, UnitTransferIn,
+                       ShipmentIn, ShipmentUpdate, UnitBuildIn, UnitDeleteIn, UnitTransferIn,
                        VehicleIn, VehicleUpdate, WmsLocationIn, WmsLocationUpdate)
 from ..security import User, get_current_user, require_perm
 from ..services import load_slip as load_slip_svc
@@ -45,33 +45,6 @@ def update_location(loc_id: str, payload: WmsLocationUpdate, db: Session = Depen
 def delete_location(loc_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     require_perm(user, "warehouse.receive")
     svc.delete_location(db, loc_id)
-
-
-@router.get("/ship-to")
-def ship_to_list(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    return svc.list_ship_to(db)
-
-
-@router.post("/ship-to", status_code=201)
-def ship_to_create(payload: ShipToIn, db: Session = Depends(get_db),
-                   user: User = Depends(get_current_user)):
-    require_perm(user, "warehouse.receive")
-    st = svc.create_ship_to(db, payload.model_dump())
-    return {"ship_to_id": st.ship_to_id, "code": st.code}
-
-
-@router.put("/ship-to/{ship_to_id}")
-def ship_to_update(ship_to_id: str, payload: ShipToUpdate, db: Session = Depends(get_db),
-                   user: User = Depends(get_current_user)):
-    require_perm(user, "warehouse.receive")
-    st = svc.update_ship_to(db, ship_to_id, payload.model_dump(exclude_unset=True))
-    return {"ship_to_id": st.ship_to_id, "code": st.code}
-
-
-@router.delete("/ship-to/{ship_to_id}", status_code=204)
-def ship_to_delete(ship_to_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    require_perm(user, "warehouse.receive")
-    svc.delete_ship_to(db, ship_to_id)
 
 
 @router.get("/vehicles")

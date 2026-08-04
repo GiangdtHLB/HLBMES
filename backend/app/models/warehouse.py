@@ -55,7 +55,7 @@ class StockMovement(Base):
 
 class FactoryLocation(Base):
     """Danh mục nhà máy khác — đích của Điều chuyển Kho công ty → Nhà máy khác (khác nơi xuất
-    đến của WMS/ShipToLocation, vốn dành cho nhà phân phối thành phẩm)."""
+    đến của WMS/Supplier, vốn dành cho nhà phân phối thành phẩm)."""
     __tablename__ = "factory_location"
 
     factory_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)

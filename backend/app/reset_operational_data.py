@@ -7,7 +7,7 @@ nguồn gốc dùng chung toàn hệ thống (GenealogyEdge).
 
 KHÔNG xóa (giữ nguyên theo yêu cầu + quyết định 2026-08-01):
   - Toàn bộ Danh mục: Material/Product/BeerType/FinishedProduct/MaterialGroup/
-    MaterialAltGroup/Supplier/WmsLocation/ShipToLocation/Vehicle/UnitTypeCatalog/
+    MaterialAltGroup/Supplier (cũng là nơi xuất đến của Kho TP)/WmsLocation/Vehicle/UnitTypeCatalog/
     Formula/Recipe/RecipeVersion/QCParameter*/StageQcGroup/CipFormType/CipEquipment/
     ProductionLine/User/...
   - audit_log (nhật ký thao tác — có chuỗi hash, xóa sẽ vỡ chuỗi + mất lịch sử

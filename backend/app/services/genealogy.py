@@ -20,8 +20,8 @@ from ..common import new_id, utcnow
 from ..models.batches import BatchExecution
 from ..models.brewing import BottleRecord, BrewBatch, BrewRecord, FermentRecord, FilterRecord
 from ..models.master import FinishedProduct, Material
-from ..models.materials import GenealogyEdge, MaterialLot
-from ..models.wms import FinishedGoodsUnit, ShipToLocation, Shipment
+from ..models.materials import GenealogyEdge, MaterialLot, Supplier
+from ..models.wms import FinishedGoodsUnit, Shipment
 from . import qc_catalog
 
 # Trùng với services/wms.py::_pack_divisor_expr (không import trực tiếp — wms.py đã import
@@ -44,7 +44,7 @@ NODE_REGISTRY = {
     "filter": (FilterRecord, "filter_id", "filter_code"),
     "bottle": (BottleRecord, "bottle_id", "bottle_code"),
     "finished_goods_unit": (FinishedGoodsUnit, "unit_id", "unit_code"),
-    "ship_to": (ShipToLocation, "ship_to_id", "code"),  # nơi xuất đến — điểm cuối truy xuôi/recall
+    "ship_to": (Supplier, "supplier_id", "code"),  # nơi xuất đến (dùng chung danh mục Nhà cung cấp) — điểm cuối truy xuôi/recall
 }
 
 # Thứ tự tra mã DUY NHẤT trong find_node (tier 1) — TOÀN BỘ NODE_REGISTRY trừ "brew_batch":
@@ -237,7 +237,7 @@ def _bottle_forward_groups(db: Session, bottle_id: str) -> list[dict]:
     loại node khác (fan-out vài chục) sẽ treo server nhiều phút/giờ (N+1 query + đệ quy hàng
     trăm nghìn lần). Gộp theo (unit_type, status, shipment_id) — mỗi phiếu xuất/mỗi trạng thái
     tồn ra ĐÚNG 1 dòng, kèm ngay thông tin nơi xuất đến/lái xe/ngày giờ/loại xuất qua JOIN
-    Shipment + ShipToLocation (không cần đệ quy thêm 1 tầng vào "ship_to")."""
+    Shipment + Supplier (không cần đệ quy thêm 1 tầng vào "ship_to")."""
     # "count" = tổng vỉ/keg/lon quy đổi (SUM(quantity)/pack_size qua _PACK_DIVISOR_EXPR),
     # KHÔNG đếm dòng — 1 dòng giờ có thể đại diện nhiều đơn vị đóng gói đã gộp lại (xem
     # docs/WMS-LOT-LEVEL-REDESIGN.md).
@@ -258,8 +258,8 @@ def _bottle_forward_groups(db: Session, bottle_id: str) -> list[dict]:
     ship_to_by_id = {}
     if shipments:
         ship_to_ids = [s.ship_to_id for s in shipments.values()]
-        ship_to_by_id = {s.ship_to_id: s for s in db.execute(
-            select(ShipToLocation).where(ShipToLocation.ship_to_id.in_(ship_to_ids))).scalars().all()}
+        ship_to_by_id = {s.supplier_id: s for s in db.execute(
+            select(Supplier).where(Supplier.supplier_id.in_(ship_to_ids))).scalars().all()}
 
     def _small_unit_noun(product_text: str | None) -> str:
         # unit_type "lon" là mã hệ thống DÙNG CHUNG cho MỌI đơn vị nhỏ đã phân rã (lon HOẶC

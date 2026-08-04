@@ -1267,10 +1267,33 @@ VIEWS.orders = async function () {
             <div class="field"><label>Sai số cho phép (±hl)</label><input class="lnc_voltol" data-ci="${ci}" type="number" value="${c.tolerance}"/></div>
           </div>
           <div class="row"><button class="btn sec" data-lnc-preview="${ci}" style="align-self:flex-end">📋 Xem NVL (đủ/thiếu tồn)</button></div>
+          <div class="lnc_forminfo" data-ci="${ci}"></div>
           <div class="lnc_preview" data-ci="${ci}"></div>
         </div>`).join("");
 
-      document.querySelectorAll(".lnc_wort").forEach(sel => sel.onchange = () => { lnChildren[parseInt(sel.dataset.ci, 10)].productId = sel.value; });
+      async function renderLnFormInfo(ci) {
+        const box = document.querySelector(`.lnc_forminfo[data-ci="${ci}"]`);
+        if (!box) return;
+        const productId = lnChildren[ci].productId;
+        if (!productId) { box.innerHTML = ""; return; }
+        box.innerHTML = `<div class="muted" style="margin-top:6px">Đang tải công thức đang dùng...</div>`;
+        try {
+          const formulas = await GET(`/formulas?product_id=${encodeURIComponent(productId)}`);
+          if (lnChildren[ci].productId !== productId) return; // đã đổi Dịch bia khác trong lúc chờ — bỏ kết quả cũ
+          const active = (formulas || []).find(f => f.is_active);
+          box.innerHTML = !active
+            ? `<div class="muted" style="margin-top:6px">Dịch bia này chưa có Công thức đang dùng.</div>`
+            : `<div class="muted" style="margin-top:6px">Công thức đang dùng: <code class="k">${esc(active.code)}</code>
+                · Quy mô chuẩn: ${active.base_qty} ${esc(active.base_uom)}${active.note ? ` · ${esc(active.note)}` : ""}</div>`;
+        } catch (e) { box.innerHTML = ""; }
+      }
+
+      document.querySelectorAll(".lnc_wort").forEach(sel => sel.onchange = () => {
+        const ci = parseInt(sel.dataset.ci, 10);
+        lnChildren[ci].productId = sel.value;
+        renderLnFormInfo(ci);
+      });
+      lnChildren.forEach((c, ci) => { if (c.productId) renderLnFormInfo(ci); });
       document.querySelectorAll(".lnc_batches").forEach(inp => inp.onchange = () => { lnChildren[parseInt(inp.dataset.ci, 10)].batchCount = inp.value; });
       document.querySelectorAll(".lnc_volplan").forEach(inp => inp.onchange = () => { lnChildren[parseInt(inp.dataset.ci, 10)].plannedVol = inp.value; });
       document.querySelectorAll(".lnc_voltol").forEach(inp => inp.onchange = () => { lnChildren[parseInt(inp.dataset.ci, 10)].tolerance = inp.value; });
@@ -3433,8 +3456,7 @@ VIEWS.warehouse_kc = async function () {
     const matByIdGiao = Object.fromEntries(mats.map(m => [m.material_id, m]));
     const lotByIdGiao = Object.fromEntries(allLots.map(l => [l.lot_id, l]));
     const supplierByIdGiao = Object.fromEntries(suppliers.map(s => [s.supplier_id, s]));
-    const supplierOpts = `<option value="">(không chọn)</option>` +
-      suppliers.map(s => `<option value="${s.supplier_id}">${esc(s.code)} — ${esc(s.name)}</option>`).join("");
+    const supplierItemsGiao = suppliers.map(s => ({ value: s.supplier_id, label: `${s.code} — ${s.name}` }));
     const pending = allLots.filter(l => l.status === "on_hold");
     const canFulfillGiao = _hasPerm("warehouse.issue");
     const isAdminGiao = CURRENT_USER && CURRENT_USER.role === "admin";
@@ -3462,7 +3484,7 @@ VIEWS.warehouse_kc = async function () {
     WH_CACHE.allLots = allLots;
     WH_CACHE.canFulfill = canFulfillGiao;
     WH_CACHE.receipts = receipts;
-    WH_CACHE.supplierOpts = supplierOpts;
+    WH_CACHE.supplierItems = supplierItemsGiao;
     Object.keys(WH_HIST_VISIBLE).forEach(k => { WH_HIST_VISIBLE[k] = WH_HIST_PAGE; });
     const pxPending = pxRequests.filter(r => r.status === "pending").sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
     const pxDone = pxRequests.filter(r => r.status !== "pending").sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
@@ -3497,7 +3519,9 @@ VIEWS.warehouse_kc = async function () {
           <div class="field" style="position:relative"><label>Nguyên liệu</label>
             <input type="text" id="rc_mat_txt" autocomplete="off" placeholder="Tìm mã/tên nguyên liệu..." value="${esc(matItemsGiao[0]?.label || "")}"/>
             <input type="hidden" id="rc_mat" value="${esc(matItemsGiao[0]?.value || "")}"/></div>
-          <div class="field"><label>Nhà CC</label><select id="rc_supplier">${supplierOpts}</select></div></div>
+          <div class="field" style="position:relative"><label>Nhà CC</label>
+            <input type="text" id="rc_supplier_txt" autocomplete="off" placeholder="Tìm nhà cung cấp..."/>
+            <input type="hidden" id="rc_supplier"/></div></div>
         <div class="row"><div class="field"><label>Số lượng</label><input id="rc_qty" type="number" value="500"/></div>
           <div class="field"><label>ĐVT</label><input id="rc_uom" value="${esc(matItemsGiao[0]?.uom || "")}" size="4" readonly title="Lấy tự động từ danh mục nguyên liệu — không sửa được"/></div>
           <div class="field"><label>Đơn giá</label><input id="rc_price" type="number" placeholder="(tuỳ chọn)"/></div>
@@ -3521,7 +3545,9 @@ VIEWS.warehouse_kc = async function () {
           ? `<div class="row"><div class="field" style="position:relative"><label>Nguyên liệu</label>
             <input type="text" id="sng_mat_txt" autocomplete="off" placeholder="Tìm mã/tên nguyên liệu..." value="${esc(matItemsGiao[0]?.label || "")}"/>
             <input type="hidden" id="sng_mat" value="${esc(matItemsGiao[0]?.value || "")}"/></div>
-          <div class="field"><label>Nhà CC</label><select id="sng_supplier">${supplierOpts}</select></div></div>
+          <div class="field" style="position:relative"><label>Nhà CC</label>
+            <input type="text" id="sng_supplier_txt" autocomplete="off" placeholder="Tìm nhà cung cấp..."/>
+            <input type="hidden" id="sng_supplier"/></div></div>
         <div class="row"><div class="field"><label>Số lượng</label><input id="sng_qty" type="number" value="500"/></div>
           <div class="field"><label>ĐVT</label><input id="sng_uom" value="${esc(matItemsGiao[0]?.uom || "")}" size="4" readonly title="Lấy tự động từ danh mục nguyên liệu — không sửa được"/></div>
           <div class="field"><label>Đơn giá</label><input id="sng_price" type="number" placeholder="(tuỳ chọn)"/></div>
@@ -3704,7 +3730,9 @@ VIEWS.warehouse_kc = async function () {
     wirePaginate("t_giaoqcpending", 10);
     wireSearchableSelect("rc_mat_txt", "rc_mat", WH_CACHE.matItems, (item) => { $("rc_uom").value = item.uom || ""; });
     wireSearchableSelect("ob_mat_txt", "ob_mat", WH_CACHE.matItems, (item) => { $("ob_uom").value = item.uom || ""; });
+    wireSearchableSelect("rc_supplier_txt", "rc_supplier", WH_CACHE.supplierItems);
     if ($("sng_mat_txt")) wireSearchableSelect("sng_mat_txt", "sng_mat", WH_CACHE.matItems, (item) => { $("sng_uom").value = item.uom || ""; });
+    if ($("sng_supplier_txt")) wireSearchableSelect("sng_supplier_txt", "sng_supplier", WH_CACHE.supplierItems);
     if ($("sng_do")) $("sng_do").onclick = () => guard(async () => {
       const res = await POST("/warehouse/sang-ngang", { material_id: $("sng_mat").value,
         supplier_id: $("sng_supplier").value || null, unit_price: $("sng_price").value ? parseFloat($("sng_price").value) : null,
@@ -3738,13 +3766,19 @@ VIEWS.warehouse_kc = async function () {
         <div class="muted" style="margin-bottom:10px">Chỉ sửa được khi lô CHƯA xuất/chuyển/tiêu thụ — nếu đã dùng, lưu sẽ báo lỗi.</div>
         <div class="row"><div class="field"><label>Số lượng</label><input id="erc_qty" type="number" value="${m.quantity}"/></div>
           <div class="field"><label>ĐVT</label><input value="${esc(m.uom)}" size="4" readonly/></div></div>
-        <div class="row"><div class="field"><label>Nhà CC</label><select id="erc_supplier">${WH_CACHE.supplierOpts}</select></div>
+        <div class="row"><div class="field" style="position:relative"><label>Nhà CC</label>
+            <input type="text" id="erc_supplier_txt" autocomplete="off" placeholder="Tìm nhà cung cấp..."/>
+            <input type="hidden" id="erc_supplier"/></div>
           <div class="field"><label>Đơn giá</label><input id="erc_price" type="number" value="${lot && lot.unit_price != null ? lot.unit_price : ""}" placeholder="(tuỳ chọn)"/></div></div>
         <div class="row"><div class="field"><label>Số lô KCS</label><input id="erc_kcs" value="${esc(lot && lot.kcs_lot_no || "")}"/></div>
           <div class="field"><label>Hạn dùng</label><input id="erc_exp" type="date" value="${lot && lot.expiry ? lot.expiry.slice(0, 10) : ""}"/></div></div>
         <div class="row"><div class="field" style="flex:1"><label>Diễn giải</label><input id="erc_note" value="${esc(m.reason || "")}"/></div>
           <button class="btn" id="erc_save" style="align-self:flex-end">Lưu</button></div>`);
-      if (lot && lot.supplier_id) $("erc_supplier").value = lot.supplier_id;
+      wireSearchableSelect("erc_supplier_txt", "erc_supplier", WH_CACHE.supplierItems);
+      if (lot && lot.supplier_id) {
+        const item = WH_CACHE.supplierItems.find(i => i.value === lot.supplier_id);
+        if (item) { $("erc_supplier").value = item.value; $("erc_supplier_txt").value = item.label; }
+      }
       $("erc_save").onclick = () => guard(async () => {
         await PUT(`/warehouse/movements/${m.movement_id}`, {
           quantity: parseFloat($("erc_qty").value), supplier_id: $("erc_supplier").value || null,

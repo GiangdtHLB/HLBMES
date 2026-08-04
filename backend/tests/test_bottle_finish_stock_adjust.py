@@ -170,11 +170,11 @@ def test_edit_ca_after_approve_blocked_if_already_shipped(client, admin_h, vanha
     approve = client.post(f"/api/brewing/bottles/{bottle_id}/approve", headers=admin_h)
     assert approve.status_code == 200, approve.text
 
-    ship_to = client.post("/api/wms/ship-to", headers=admin_h,
+    ship_to = client.post("/api/suppliers", headers=admin_h,
                           json={"code": "DIST-ADJ-BLOCK", "name": "NPP test"})
     assert ship_to.status_code == 201, ship_to.text
     shipped = client.post("/api/wms/shipments", headers=admin_h,
-                          json={"ship_to_id": ship_to.json()["ship_to_id"],
+                          json={"ship_to_id": ship_to.json()["supplier_id"],
                                 "lines": [{"product_name": fp_code, "lot_code": lot_code,
                                           "unit_type": "vi", "quantity": 3}]})
     assert shipped.status_code == 201, shipped.text

@@ -125,10 +125,10 @@ def test_transfer_blocks_shipped_unit(client, admin_h):
     built = _build_units(client, admin_h, "TXFER02", total=24, pack_size=24, unit_type="vi")
     unit = _units_by_codes(client, admin_h, built["unit_codes"])[0]
 
-    ship_to = client.post("/api/wms/ship-to", headers=admin_h,
-                          json={"code": "TXFER-ST", "name": "Test ship-to", "kind": "distributor"})
+    ship_to = client.post("/api/suppliers", headers=admin_h,
+                          json={"code": "TXFER-ST", "name": "Test ship-to"})
     assert ship_to.status_code == 201, ship_to.text
-    ship_to_id = ship_to.json()["ship_to_id"]
+    ship_to_id = ship_to.json()["supplier_id"]
     shipped = client.post("/api/wms/shipments", headers=admin_h,
                           json={"ship_to_id": ship_to_id,
                                 "lines": [{"product_name": "SKU-TXFER02", "lot_code": "LOT-TXFER02",
@@ -227,10 +227,10 @@ def test_ship_lon_units_after_decompose(client, admin_h):
     decomposed = client.post(f"/api/wms/units/{vi['unit_id']}/decompose", headers=admin_h).json()
     assert len(decomposed["lon_unit_codes"]) == 1  # 1 dòng lon duy nhất, quantity=24
 
-    ship_to = client.post("/api/wms/ship-to", headers=admin_h,
-                          json={"code": "DECOMP-ST", "name": "Test ship-to lon", "kind": "distributor"})
+    ship_to = client.post("/api/suppliers", headers=admin_h,
+                          json={"code": "DECOMP-ST", "name": "Test ship-to lon"})
     assert ship_to.status_code == 201, ship_to.text
-    ship_to_id = ship_to.json()["ship_to_id"]
+    ship_to_id = ship_to.json()["supplier_id"]
 
     shipment = client.post("/api/wms/shipments", headers=admin_h,
                            json={"ship_to_id": ship_to_id,
@@ -326,11 +326,11 @@ def test_undo_decompose_batch_blocked_if_lon_shipped(client, admin_h):
     assert res.status_code == 201, res.text
     audit_id = res.json()["audit_id"]
 
-    ship_to = client.post("/api/wms/ship-to", headers=admin_h,
-                          json={"code": "UNDOSHIP-ST", "name": "Test undo ship-to", "kind": "distributor"})
+    ship_to = client.post("/api/suppliers", headers=admin_h,
+                          json={"code": "UNDOSHIP-ST", "name": "Test undo ship-to"})
     assert ship_to.status_code == 201, ship_to.text
     shipment = client.post("/api/wms/shipments", headers=admin_h,
-                           json={"ship_to_id": ship_to.json()["ship_to_id"],
+                           json={"ship_to_id": ship_to.json()["supplier_id"],
                                  "lines": [{"product_name": "SKU-UNDOSHIP", "lot_code": "LOT-UNDOSHIP",
                                            "unit_type": "lon", "quantity": 1}]})
     assert shipment.status_code == 201, shipment.text

@@ -20,8 +20,9 @@ from app.main import app
 from app import seed as seed_mod
 from app.database import SessionLocal
 from app.common import new_id
-from app.models.wms import FinishedGoodsUnit, Shipment, ShipToLocation
+from app.models.wms import FinishedGoodsUnit, Shipment
 from app.models.master import FinishedProduct
+from app.models.materials import Supplier
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -53,14 +54,14 @@ def test_shipment_classification_report_buckets_independently(client, admin_h):
         fp = FinishedProduct(finished_product_id=new_id(), code=f"SCR-{suffix}",
                              name="Bia lon test SCR", uom="lon", unit_type="vi",
                              pack_size=1, category="Bia lon")
-        ship_to = ShipToLocation(ship_to_id=new_id(), code=f"SCR-DIST-{suffix}", name="NPP test SCR")
+        ship_to = Supplier(supplier_id=new_id(), code=f"SCR-DIST-{suffix}", name="NPP test SCR")
         db.add(ship_to)
         db.flush()
 
         promo_ship = Shipment(shipment_id=new_id(), shipment_code=f"SCR-PROMO-{suffix}",
-                              ship_to_id=ship_to.ship_to_id, shipment_type="promo", created_by="admin")
+                              ship_to_id=ship_to.supplier_id, shipment_type="promo", created_by="admin")
         return_ship = Shipment(shipment_id=new_id(), shipment_code=f"SCR-RETURN-{suffix}",
-                               ship_to_id=ship_to.ship_to_id, shipment_type="return", created_by="admin")
+                               ship_to_id=ship_to.supplier_id, shipment_type="return", created_by="admin")
         db.add_all([promo_ship, return_ship])
         db.flush()
 

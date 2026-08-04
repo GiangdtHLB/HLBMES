@@ -383,13 +383,13 @@ def test_near_expiry_declare_generates_dedicated_lot_and_shipment_roundtrip(clie
     assert in_entries[0]["finished_product_id"] == fp_id
     assert in_entries[0]["note"] == "Khai báo test"
 
-    ship_to = client.post("/api/wms/ship-to", headers=admin_h,
+    ship_to = client.post("/api/suppliers", headers=admin_h,
                           json={"code": "DIST-NE-ROUND", "name": "NPP test cận date"})
     assert ship_to.status_code == 201, ship_to.text
 
     # Xuất một phần (2/3) với near_expiry_only=True phải thành công (cho phép xuất một phần lô).
     shipped = client.post("/api/wms/shipments", headers=admin_h,
-                          json={"ship_to_id": ship_to.json()["ship_to_id"],
+                          json={"ship_to_id": ship_to.json()["supplier_id"],
                                 "lines": [{"product_name": product_name, "lot_code": lot_code,
                                           "unit_type": "vi", "quantity": 2, "near_expiry_only": True}]})
     assert shipped.status_code == 201, shipped.text
@@ -401,14 +401,14 @@ def test_near_expiry_declare_generates_dedicated_lot_and_shipment_roundtrip(clie
 
     # Xuất tiếp phần còn lại (1) vẫn còn cận date -> thành công (phần còn lại của lô).
     shipped2 = client.post("/api/wms/shipments", headers=admin_h,
-                           json={"ship_to_id": ship_to.json()["ship_to_id"],
+                           json={"ship_to_id": ship_to.json()["supplier_id"],
                                  "lines": [{"product_name": product_name, "lot_code": lot_code,
                                            "unit_type": "vi", "quantity": 1, "near_expiry_only": True}]})
     assert shipped2.status_code == 201, shipped2.text
 
     # Không còn vỉ cận date nào nữa -> xuất tiếp near_expiry_only phải báo lỗi rõ ràng.
     shipped3 = client.post("/api/wms/shipments", headers=admin_h,
-                           json={"ship_to_id": ship_to.json()["ship_to_id"],
+                           json={"ship_to_id": ship_to.json()["supplier_id"],
                                  "lines": [{"product_name": product_name, "lot_code": lot_code,
                                            "unit_type": "vi", "quantity": 1, "near_expiry_only": True}]})
     assert shipped3.status_code == 409
@@ -492,11 +492,11 @@ def test_near_expiry_undo_rejects_out_direction(client, admin_h):
     entry_id = next(h["entry_id"] for h in hist0 if h["direction"] == "in" and h["lot_code"] == lot_code)
     _approve_near_expiry(client, admin_h, entry_id)
 
-    ship_to = client.post("/api/wms/ship-to", headers=admin_h,
+    ship_to = client.post("/api/suppliers", headers=admin_h,
                           json={"code": "DIST-NE-UNDO-OUTDIR", "name": "NPP test undo outdir"})
     assert ship_to.status_code == 201, ship_to.text
     shipped = client.post("/api/wms/shipments", headers=admin_h,
-                          json={"ship_to_id": ship_to.json()["ship_to_id"],
+                          json={"ship_to_id": ship_to.json()["supplier_id"],
                                 "lines": [{"product_name": product_name, "lot_code": lot_code,
                                           "unit_type": "vi", "quantity": 1, "near_expiry_only": True}]})
     assert shipped.status_code == 201, shipped.text
