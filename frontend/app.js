@@ -2159,7 +2159,8 @@ function wireFormulaPanels(products) {
           return `<tr><td>${esc(grp ? grp.name : m.alt_group_code)} <span class="muted">(nhóm vật tư thay thế)</span></td>
             <td>${m.qty}</td><td>${esc(m.uom || "")}</td></tr>`;
         }
-        return `<tr><td><code class="k">${esc(m.material_code)}</code></td>
+        const mat = (CACHE.materials || []).find(x => x.code === m.material_code);
+        return `<tr><td><code class="k">${esc(m.material_code)}</code> ${esc(mat ? mat.name : "")}</td>
         <td>${m.qty}</td><td>${esc(m.uom || "")}</td></tr>`;
       }).join("") ||
         '<tr><td colspan=3 class="muted">Chưa khai báo NVL.</td></tr>'}</tbody></table>`);
@@ -10385,7 +10386,7 @@ function applyMenu() {
   const views = CURRENT_USER.views;
   const allowed = views === "*" ? null : new Set(views);
   let first = null;
-  document.querySelectorAll("#nav button").forEach(b => {
+  document.querySelectorAll("#nav button[data-view]").forEach(b => {
     const ok = !allowed || allowed.has(b.dataset.view) || b.dataset.view === "profile" || b.dataset.view === "flowmap";
     b.style.display = ok ? "" : "none";
     if (ok && b.dataset.view !== "profile" && !first) first = b;
