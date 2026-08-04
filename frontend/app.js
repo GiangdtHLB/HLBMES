@@ -10385,7 +10385,7 @@ function applyMenu() {
   const views = CURRENT_USER.views;
   const allowed = views === "*" ? null : new Set(views);
   let first = null;
-  document.querySelectorAll("#nav button").forEach(b => {
+  document.querySelectorAll("#nav button[data-view]").forEach(b => {
     const ok = !allowed || allowed.has(b.dataset.view) || b.dataset.view === "profile" || b.dataset.view === "flowmap";
     b.style.display = ok ? "" : "none";
     if (ok && b.dataset.view !== "profile" && !first) first = b;
