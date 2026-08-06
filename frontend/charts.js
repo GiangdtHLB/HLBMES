@@ -191,11 +191,11 @@ const CH = {
   },
   // Cột nhóm N series (vd nhiều nhóm chỉ tiêu năng lượng theo kỳ):
   // categories=[label,...], series=[{label,color,values:[v theo từng category]}]
-  groupedN(categories, series, { height = 180, unit = "" } = {}) {
+  groupedN(categories, series, { height = 180, unit = "", target = 0 } = {}) {
     if (!categories || !categories.length || !series || !series.length) return '<div class="muted">Không có dữ liệu.</div>';
     const W = Math.max(560, categories.length * 60), H = height, pad = { l: 44, r: 8, t: 22, b: 40 };
     const PAL = ["#3498db", "#f5a623", "#2ecc71", "#e74c3c", "#9b59b6", "#1abc9c", "#e67e22", "var(--muted)"];
-    const max = Math.max(...series.flatMap(s => s.values), 1e-9);
+    const max = Math.max(...series.flatMap(s => s.values), target || 0, 1e-9);
     const gw = (W - pad.l - pad.r) / categories.length;
     const n = series.length;
     const bw = (gw * 0.8) / n;
@@ -207,18 +207,31 @@ const CH = {
         const v = s.values[ci] || 0;
         const x = x0 + si * bw, h = Math.max(norm(v), 0), y = H - pad.b - h;
         const col = s.color || PAL[si % PAL.length];
+        // Số hiển thị trên cột tô màu cảnh báo nếu CHÍNH ca đó dưới target — cảnh báo đúng
+        // vào cột thiếu, không phải cả ngày (khác nhãn ngày ở dưới, luôn giữ màu trung tính).
+        const belowTarget = target > 0 && v < target;
+        const valColor = belowTarget ? "var(--orange,#f5a623)" : "var(--text)";
         return `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${(bw * 0.88).toFixed(1)}" height="${h.toFixed(1)}" fill="${col}"/>
-          <text x="${(x + bw * 0.44).toFixed(1)}" y="${(y - 2).toFixed(1)}" fill="var(--text)" font-size="8" text-anchor="middle">${fmtV(v)}</text>`;
+          <text x="${(x + bw * 0.44).toFixed(1)}" y="${(y - 2).toFixed(1)}" fill="${valColor}" font-size="8" font-weight="${belowTarget ? "700" : "400"}" text-anchor="middle">${fmtV(v)}</text>`;
       }).join("");
       return `${rects}<text x="${(x0 + (gw * 0.8) / 2).toFixed(1)}" y="${H - pad.b + 13}" fill="var(--muted)" font-size="10" text-anchor="middle">${esc(String(cat).slice(0, 9))}</text>`;
     }).join("");
     const legend = series.map((s, si) => `<span style="display:inline-flex;align-items:center;gap:4px;margin-right:12px;font-size:11px;color:var(--muted)">
       <span style="width:9px;height:9px;border-radius:2px;background:${s.color || PAL[si % PAL.length]};display:inline-block"></span>${esc(s.label)}</span>`).join("");
+    // Target/ca (đường ngang tham chiếu) — người dùng tự đặt mục tiêu mong muốn cho 1 ca,
+    // vẽ ngang trục Y để so trực quan với từng cột (xem loadDashboardChiet trong app.js).
+    const targetY = target > 0 ? H - pad.b - norm(target) : null;
+    // Nhãn đặt DƯỚI đường target (không phải trên) + cỡ chữ nhỏ hơn — đặt trên dễ đè lên chữ
+    // "xxk lon" (mức tối đa trục Y) khi target gần mức tối đa; kẹp trong vùng vẽ để không đè
+    // xuống nhãn ngày ở đáy biểu đồ.
+    const targetLabelY = targetY != null ? Math.min(targetY + 11, H - pad.b - 3) : null;
+    const targetLine = targetY != null ? `<line x1="${pad.l}" y1="${targetY.toFixed(1)}" x2="${W - pad.r}" y2="${targetY.toFixed(1)}" stroke="var(--red,#e74c3c)" stroke-width="1.5" stroke-dasharray="5,3"/>
+      <text x="4" y="${targetLabelY.toFixed(1)}" fill="var(--red,#e74c3c)" font-size="8" text-anchor="start">Target ${fmtV(target)}</text>` : "";
     return `<div>
       <div style="margin-bottom:4px">${legend}</div>
       <svg viewBox="0 0 ${W} ${H}" width="100%" style="display:block">
         <text x="4" y="${pad.t - 6}" fill="var(--muted)" font-size="10">${max >= 1000 ? (max / 1000).toFixed(1) + "k" : Math.round(max)} ${esc(unit)}</text>
-        <line x1="${pad.l}" y1="${H - pad.b}" x2="${W - pad.r}" y2="${H - pad.b}" stroke="var(--border)"/>${bars}
+        <line x1="${pad.l}" y1="${H - pad.b}" x2="${W - pad.r}" y2="${H - pad.b}" stroke="var(--border)"/>${bars}${targetLine}
       </svg></div>`;
   },
   // Nhiều đường trên cùng 1 trục (vd nhiều nhóm chỉ tiêu năng lượng theo thời gian):

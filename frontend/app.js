@@ -859,6 +859,17 @@ function lastNDates(endDateStr, n) {
   return out;
 }
 
+// Target/ca do người dùng tự đặt cho biểu đồ sản lượng chiết theo ca ở Dashboard — lưu trình
+// duyệt (localStorage, không phải cấu hình chung của nhà máy) vì đây chỉ là đường tham chiếu
+// hiển thị cho riêng người xem, không ảnh hưởng số liệu/logic nghiệp vụ nào khác.
+function chietTarget(key) {
+  return parseFloat(localStorage.getItem("mes_chiet_target_" + key)) || 0;
+}
+function setChietTarget(key, value) {
+  if (value > 0) localStorage.setItem("mes_chiet_target_" + key, String(value));
+  else localStorage.removeItem("mes_chiet_target_" + key);
+}
+
 // Tải sản lượng chiết lon (NM Đông Mai) + keg (NM Hạ Long) cho 5 ngày gần nhất (kết thúc tại
 // ngày chọn) trên dashboard — dùng đúng /reports/filling-report và /reports/keg-report (CSDL
 // SCADA thật) như tab Báo cáo > Chiết (lon)/(keg), KHÔNG dùng số liệu MES nội bộ (BottleRecord)
@@ -888,7 +899,8 @@ async function loadDashboardChiet() {
   const dayLabels = days.map(d => new Date(d + "T00:00:00").toLocaleDateString("vi-VN", { day: "2-digit", month: "2-digit" }));
 
   const frameStyle = "background:var(--panel2);border:1px solid var(--border);border-radius:10px;padding:12px 14px";
-  const block = (title, plantNote, unit, results) => {
+  // key = "lon"/"keg" — dùng để lưu/đọc target riêng từng dây chuyền (xem chietTarget).
+  const block = (key, title, plantNote, unit, results) => {
     if (results.every(r => !r.ok)) {
       const lastErr = results.find(r => !r.ok);
       return `<div style="${frameStyle}">
@@ -903,19 +915,42 @@ async function loadDashboardChiet() {
     }));
     const grandTotal = series.reduce((s, ser) => s + ser.values.reduce((a, b) => a + b, 0), 0);
     return `<div style="${frameStyle}">
-      <div style="font-size:16px;font-weight:700;margin-bottom:2px">${title}</div>
-      <div class="muted" style="font-size:12px;margin-bottom:6px">${esc(plantNote)}</div>
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;flex-wrap:wrap">
+        <div>
+          <div style="font-size:16px;font-weight:700;margin-bottom:2px">${title}</div>
+          <div class="muted" style="font-size:12px;margin-bottom:6px">${esc(plantNote)}</div>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px">
+          <label class="muted" style="font-size:12px;white-space:nowrap">Target/ca (${esc(unit)})</label>
+          <input type="number" min="0" step="1" data-chiet-target="${key}" value="${chietTarget(key) || ""}" style="width:90px" placeholder="—"/>
+        </div>
+      </div>
       ${anyGap ? `<div style="color:var(--orange,#f5a623);font-size:12px;margin-bottom:6px">⚠ Có khoảng trống dữ liệu trong CSDL nguồn ở 1+ ngày/ca.</div>` : ""}
       <div class="muted" style="font-size:12px;margin-bottom:4px">Tổng 5 ngày: <b style="color:var(--green)">${grandTotal.toLocaleString("vi-VN")} ${esc(unit)}</b></div>
-      ${CH.groupedN(dayLabels, series, { unit, height: 130 })}
+      <div data-chiet-chart="${key}">${CH.groupedN(dayLabels, series, { unit, height: 130, target: chietTarget(key) })}</div>
     </div>`;
   };
 
   $("db_chiet_data").innerHTML = `<div style="display:flex;gap:14px;flex-wrap:wrap;align-items:stretch">
-    <div style="flex:1;min-width:280px">${block("🥫 Dây chuyền 30.000 lon/giờ", "NM Đông Mai", "lon", lonDays)}</div>
-    <div style="flex:1;min-width:280px">${block("🛢️ Dây chuyền 400 keg/giờ", "NM Hạ Long", "keg", kegDays)}</div>
+    <div style="flex:1;min-width:280px">${block("lon", "🥫 Dây chuyền 30.000 lon/giờ", "NM Đông Mai", "lon", lonDays)}</div>
+    <div style="flex:1;min-width:280px">${block("keg", "🛢️ Dây chuyền 400 keg/giờ", "NM Hạ Long", "keg", kegDays)}</div>
   </div>`;
   document.querySelectorAll("#db_chiet_data [data-goto-intg]").forEach(b => b.onclick = () => gotoView("integration", "dbconn"));
+  // Đổi target chỉ vẽ lại đúng SVG của dây chuyền đó (dùng lại series đã tải, không gọi lại API).
+  document.querySelectorAll("#db_chiet_data [data-chiet-target]").forEach(inp => {
+    inp.onchange = () => {
+      const key = inp.dataset.chietTarget;
+      setChietTarget(key, parseFloat(inp.value) || 0);
+      const results = key === "lon" ? lonDays : kegDays;
+      const unit = key === "lon" ? "lon" : "keg";
+      const series = [1, 2, 3].map((ca, i) => ({
+        label: `Ca ${ca}`, color: caColors[i],
+        values: results.map(r => r.ok ? ((r.rpt.by_ca.find(c => c.ca === ca) || {}).value || 0) : 0),
+      }));
+      const chartEl = document.querySelector(`#db_chiet_data [data-chiet-chart="${key}"]`);
+      if (chartEl) chartEl.innerHTML = CH.groupedN(dayLabels, series, { unit, height: 130, target: chietTarget(key) });
+    };
+  });
 }
 
 // Tải điện tiêu thụ theo ca (Ca1/Ca2/Ca3) cho Nhà máy Hạ Long trên dashboard, 5 ngày gần nhất
