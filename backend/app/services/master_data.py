@@ -109,6 +109,36 @@ def delete_material_group(db: Session, group_id: str, user: User) -> None:
     db.commit()
 
 
+def group_unit_options(db: Session, member_material_ids: list[str]) -> list[str]:
+    """Giao của các đơn vị mà MỌI thành viên đều khai được — mỗi vật tư khai được đơn vị chính
+    (uom) và, nếu có, đơn vị phụ (alt_uom). Đây là danh sách hợp lệ để chọn làm 'đơn vị của
+    nhóm' (MaterialAltGroup.unit) — dùng cả ở validate lúc tạo/sửa nhóm và ở màn hình chọn
+    đơn vị nhóm trên frontend."""
+    members = [db.get(Material, mid) for mid in member_material_ids]
+    members = [m for m in members if m]
+    if not members:
+        return []
+    common = None
+    for m in members:
+        opts = {m.uom} | ({m.alt_uom} if m.alt_uom else set())
+        common = opts if common is None else (common & opts)
+    return sorted(common or set())
+
+
+def validate_alt_group_unit(db: Session, member_material_ids: list[str], unit: str) -> None:
+    """Bắt buộc mọi thành viên nhóm vật tư thay thế phải cùng đơn vị (chính hoặc phụ), và đơn
+    vị của nhóm phải là 1 trong số đơn vị chung đó — nếu không, tồn kho của các thành viên
+    không thể cộng chung để so với số lượng cần dùng của công thức/lệnh (xem
+    services/brew_order.py::_line_stock, services/filter_order.py::_validate_material_lines)."""
+    options = group_unit_options(db, member_material_ids)
+    if not options:
+        raise DomainError(
+            "Các vật tư thành viên không có đơn vị chung (đơn vị chính hoặc đơn vị phụ) — "
+            "không thể tạo nhóm vật tư thay thế. Khai báo đơn vị phụ ở Danh mục Vật tư nếu cần.")
+    if unit not in options:
+        raise DomainError(f"Đơn vị của nhóm phải là 1 trong: {', '.join(options)}.")
+
+
 def delete_material_alt_group(db: Session, group_id: str, user: User) -> None:
     """Chặn xóa nếu còn Công thức nào khai dòng NVL theo nhóm này (Formula.materials là JSON
     nên phải quét Python, không thể COUNT bằng SQL như các hàm xóa khác ở trên)."""

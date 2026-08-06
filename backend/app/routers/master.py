@@ -280,6 +280,7 @@ def create_material_alt_group(payload: MaterialAltGroupIn, db: Session = Depends
         raise DomainError(f"Mã nhóm vật tư thay thế '{payload.code}' đã tồn tại.")
     if not payload.member_material_ids:
         raise DomainError("Nhóm vật tư thay thế phải có ít nhất 1 vật tư thành viên.")
+    master_data.validate_alt_group_unit(db, payload.member_material_ids, payload.unit)
     g = MaterialAltGroup(group_id=new_id(), **payload.model_dump())
     db.add(g)
     record_audit(db, entity_type="material_alt_group", entity_id=g.group_id, action="create",
@@ -301,9 +302,12 @@ def update_material_alt_group(group_id: str, payload: MaterialAltGroupIn, db: Se
         raise DomainError(f"Mã nhóm vật tư thay thế '{payload.code}' đã tồn tại.")
     if not payload.member_material_ids:
         raise DomainError("Nhóm vật tư thay thế phải có ít nhất 1 vật tư thành viên.")
-    before = {"code": g.code, "name": g.name, "member_material_ids": g.member_material_ids, "active": g.active}
+    master_data.validate_alt_group_unit(db, payload.member_material_ids, payload.unit)
+    before = {"code": g.code, "name": g.name, "member_material_ids": g.member_material_ids,
+              "unit": g.unit, "active": g.active}
     g.code, g.name = payload.code, payload.name
     g.member_material_ids = payload.member_material_ids
+    g.unit = payload.unit
     g.active = payload.active
     record_audit(db, entity_type="material_alt_group", entity_id=g.group_id, action="update",
                  actor=user, before=before, after=payload.model_dump())
@@ -477,11 +481,15 @@ def update_material(material_id: str, payload: MaterialIn, db: Session = Depends
     m = db.get(Material, material_id)
     if not m:
         raise NotFoundError("Vật tư không tồn tại.")
-    before = {"code": m.code, "name": m.name, "uom": m.uom, "category": m.category}
+    before = {"code": m.code, "name": m.name, "uom": m.uom, "category": m.category,
+              "stock_min": m.stock_min, "alt_uom": m.alt_uom, "alt_uom_ratio": m.alt_uom_ratio}
     m.code = payload.code
     m.name = payload.name
     m.uom = payload.uom
     m.category = payload.category
+    m.stock_min = payload.stock_min
+    m.alt_uom = payload.alt_uom
+    m.alt_uom_ratio = payload.alt_uom_ratio
     record_audit(db, entity_type="material", entity_id=m.material_id, action="update",
                  actor=user, before=before, after=payload.model_dump())
     db.commit()

@@ -90,6 +90,8 @@ button.btn {
 button.btn:hover { filter: brightness(1.1); }
 button.btn.sec { background: var(--panel2); color: var(--text); border: 1px solid var(--border); }
 button.btn.sm { padding: 4px 9px; font-size: 12px; }
+button.btn:disabled { background: var(--panel2); color: var(--muted); border: 1px solid var(--border); cursor: not-allowed; filter: none; }
+button.btn:disabled:hover { filter: none; }
 .badge { display: inline-block; padding: 2px 9px; border-radius: 20px; font-size: 11px; font-weight: 600; }
 .badge.planned, .badge.draft, .badge.pending { background: #2b3a47; color: var(--muted); }
 .badge.ready, .badge.review { background: #2c3e50; color: var(--blue); }
@@ -145,6 +147,9 @@ tr.row-cyan td:nth-child(2) { color: #2dd4bf; }
   align-items:flex-start; justify-content:center; padding:30px 16px; overflow-y:auto; }
 .modal { background:var(--panel); border:1px solid var(--border); border-radius:12px;
   width:920px; max-width:96vw; padding:22px; box-shadow:0 16px 60px rgba(0,0,0,.5); position:relative; }
+/* Modal rộng hơn cho các bảng nhiều cột (VD Nguyên liệu dùng cho mẻ có thêm cột Cảnh báo) —
+   xem modal(html, onBack, wide) trong app.js. */
+.modal.modal-wide { width:1320px; }
 .modal h2 { margin-top:0; }
 .modal .close { float:right; cursor:pointer; color:var(--muted); font-size:20px; }
 .modal-x { position:absolute; top:10px; right:14px; width:26px; height:26px; display:flex;

@@ -688,8 +688,13 @@ def _aggregate_source_material_lines(db: Session, source_type: str, source_id: s
     """Nhu cầu NVL của 1 Lệnh nấu/Lệnh lọc lớn, gộp theo vật tư (cộng dồn nếu 1 vật tư xuất
     hiện nhiều dòng/nhiều lệnh nhỏ) — dùng để tự động điền sẵn phiếu đề nghị nhận kho, mirror
     dữ liệu định mức đã có sẵn ở BrewOrderMaterialLine/FilterOrderMaterialLine (không tính lại
-    từ công thức, dùng đúng con số đã "chốt" lúc lập lệnh)."""
+    từ công thức, dùng đúng con số đã "chốt" lúc lập lệnh).
+
+    Dòng khai theo Nhóm vật tư thay thế (material_id=None, xem models/master.py::MaterialAltGroup)
+    KHÔNG được tự chọn hộ 1 mã cụ thể — trả về riêng (is_group=True kèm member_material_ids) để
+    router/frontend cảnh báo thủ kho tự chọn mã và số lượng, thay vì âm thầm bỏ qua dòng này."""
     agg: dict[str, dict] = {}
+    group_agg: dict[str, dict] = {}
 
     def _add(material_id: str, material_name: str, uom: str, qty: float) -> None:
         if not material_id or not qty:
@@ -698,19 +703,36 @@ def _aggregate_source_material_lines(db: Session, source_type: str, source_id: s
                                          "uom": uom, "quantity": 0.0})
         a["quantity"] += qty
 
+    def _add_group(group_code: str, group_name: str, member_ids: list, uom: str, qty: float) -> None:
+        if not group_code or not qty:
+            return
+        a = group_agg.setdefault(group_code, {"group_code": group_code, "material_name": group_name,
+                                              "member_material_ids": set(), "uom": uom, "quantity": 0.0})
+        a["member_material_ids"].update(member_ids or [])
+        a["quantity"] += qty
+
     if source_type == "brew_order":
         from . import brew_order as brew_order_svc
         order = brew_order_svc.get_order(db, source_id)
         for l in order["lines"]:
-            if l["is_header"] or not l["material_id"]:
+            if l["is_header"]:
                 continue
-            _add(l["material_id"], l["material_name"], l["uom"], l["qty_total"] or 0.0)
+            if l["material_id"]:
+                _add(l["material_id"], l["material_name"], l["uom"], l["qty_total"] or 0.0)
+            elif l.get("material_group_code"):
+                _add_group(l["material_group_code"], l["material_name"], l.get("member_material_ids"),
+                           l["uom"], l["qty_total"] or 0.0)
     elif source_type == "filter_master_order":
         from . import filter_order as filter_order_svc
         master = filter_order_svc.get_master_order(db, source_id)
         for child in master["children"]:
             for l in child["lines"]:
-                _add(l["material_id"], l["material_name"], l["uom"], l["quantity"] or 0.0)
+                if l["material_id"]:
+                    _add(l["material_id"], l["material_name"], l["uom"], l["quantity"] or 0.0)
+                elif l.get("material_group_code"):
+                    member_ids = [m["material_id"] for m in l.get("member_breakdown") or []]
+                    _add_group(l["material_group_code"], l["material_name"], member_ids,
+                               l["uom"], l["quantity"] or 0.0)
     else:
         raise DomainError(f"Loại nguồn '{source_type}' không hợp lệ (chỉ nhận brew_order|filter_master_order).")
 
@@ -721,8 +743,13 @@ def _aggregate_source_material_lines(db: Session, source_type: str, source_id: s
                     "material_code": mat.code if mat else None,
                     "material_name": (mat.name if mat else None) or a["material_name"],
                     "uom": a["uom"] or (mat.uom if mat else "kg"),
-                    "quantity": round(a["quantity"], 3)})
-    return sorted(out, key=lambda x: x["material_code"] or "")
+                    "quantity": round(a["quantity"], 3), "is_group": False, "group_code": None,
+                    "member_material_ids": []})
+    for a in group_agg.values():
+        out.append({"material_id": None, "material_code": None, "material_name": a["material_name"],
+                    "uom": a["uom"] or "kg", "quantity": round(a["quantity"], 3), "is_group": True,
+                    "group_code": a["group_code"], "member_material_ids": sorted(a["member_material_ids"])})
+    return sorted(out, key=lambda x: x["material_code"] or x["material_name"] or "")
 
 
 def preview_source_materials(db: Session, source_type: str, source_id: str) -> list[dict]:

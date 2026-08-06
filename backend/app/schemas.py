@@ -83,6 +83,7 @@ class MaterialAltGroupIn(BaseModel):
     code: str
     name: str
     member_material_ids: list[str] = []
+    unit: str
     active: bool = True
 
 
@@ -91,6 +92,7 @@ class MaterialAltGroupOut(ORMModel):
     code: str
     name: str
     member_material_ids: list
+    unit: Optional[str] = None
     active: bool
 
 
@@ -195,6 +197,8 @@ class MaterialIn(BaseModel):
     uom: str = "kg"
     category: Optional[str] = None
     stock_min: Optional[float] = None
+    alt_uom: Optional[str] = None
+    alt_uom_ratio: Optional[float] = None
 
 
 class MaterialOut(ORMModel):
@@ -204,6 +208,8 @@ class MaterialOut(ORMModel):
     uom: str
     category: Optional[str] = None
     stock_min: Optional[float] = None
+    alt_uom: Optional[str] = None
+    alt_uom_ratio: Optional[float] = None
 
 
 # ---- Orders ----
@@ -978,12 +984,17 @@ class MaterialRequestOut(ORMModel):
 
 class SourceMaterialLineOut(BaseModel):
     """1 dòng nhu cầu NVL xem trước từ Lệnh nấu/Lệnh lọc lớn — dùng để tự động điền sẵn
-    phiếu đề nghị nhận kho (xem services/warehouse.py::preview_source_materials)."""
-    material_id: str
+    phiếu đề nghị nhận kho (xem services/warehouse.py::preview_source_materials). Dòng
+    Nhóm vật tư thay thế có is_group=True, material_id=None — frontend không tự nạp thẳng
+    vào giỏ, phải cảnh báo thủ kho tự chọn 1 mã cụ thể trong member_material_ids."""
+    material_id: Optional[str] = None
     material_code: Optional[str] = None
     material_name: Optional[str] = None
     uom: str
     quantity: float
+    is_group: bool = False
+    group_code: Optional[str] = None
+    member_material_ids: list[str] = []
 
 
 class RequestFulfillIn(BaseModel):

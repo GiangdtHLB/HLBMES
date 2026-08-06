@@ -129,6 +129,12 @@ class MaterialAltGroup(Base):
     name: Mapped[str] = mapped_column(Unicode(255))
     member_material_ids: Mapped[list] = mapped_column(JSON, default=list)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Đơn vị của nhóm — mọi thành viên phải khai được đơn vị này (bằng uom chính hoặc alt_uom
+    # của chính vật tư đó, xem services/master_data.py::_group_unit_options); dùng để quy đổi
+    # tồn kho từng thành viên về cùng 1 đơn vị trước khi cộng (xem services/brew_order.py::
+    # _line_stock, services/filter_order.py::_validate_material_lines) — không còn cộng thô
+    # số lượng khác đơn vị với nhau. Nullable chỉ để migrate dữ liệu cũ; router luôn bắt buộc.
+    unit: Mapped[Optional[str]] = mapped_column(Unicode(64), nullable=True)
 
 
 class Material(Base):
@@ -142,3 +148,9 @@ class Material(Base):
     # Ngưỡng tồn tối thiểu (reorder point) — vượt dưới mức này thì stock_on_hand/inventory_report
     # trả về low_stock=True để cảnh báo. NULL = chưa khai báo ngưỡng, không cảnh báo.
     stock_min: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    # Đơn vị phụ tuỳ chọn (VD "kg" cho vật tư có uom chính là "Lon") + tỷ lệ quy đổi: 1 uom
+    # chính = alt_uom_ratio đơn vị phụ (VD 2 nghĩa là 1 Lon = 2kg). Chỉ dùng để cho phép nhập/
+    # xuất theo đơn vị phụ ở 1 số màn hình (frontend tự quy đổi về uom chính trước khi gọi API,
+    # xem app.js altUomConvert) — không đổi cách lưu trữ/tính tồn kho (luôn theo uom chính).
+    alt_uom: Mapped[Optional[str]] = mapped_column(Unicode(64), nullable=True)
+    alt_uom_ratio: Mapped[Optional[float]] = mapped_column(Float, nullable=True)

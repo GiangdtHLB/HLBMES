@@ -31,10 +31,17 @@ def _validate_materials(db: Session, materials: list) -> None:
 
     codes = {m["material_code"] for m in materials if m.get("material_code")}
     if codes:
-        found = {c for c, in db.execute(select(Material.code).where(Material.code.in_(codes))).all()}
-        missing = codes - found
+        found_materials = {mat.code: mat for mat in
+                            db.execute(select(Material).where(Material.code.in_(codes))).scalars().all()}
+        missing = codes - found_materials.keys()
         if missing:
             raise DomainError(f"Mã NVL không tồn tại: {', '.join(sorted(missing))}.")
+        # Dòng khai theo mã cụ thể luôn dùng ĐÚNG đơn vị chính đã đăng ký ở Danh mục Vật tư —
+        # không cho tự nhập uom khác (mirror quy tắc dòng theo nhóm bên dưới).
+        for m in materials:
+            code = m.get("material_code")
+            if code:
+                m["uom"] = found_materials[code].uom
 
     group_codes = {m["alt_group_code"] for m in materials if m.get("alt_group_code")}
     if group_codes:
@@ -48,6 +55,13 @@ def _validate_materials(db: Session, materials: list) -> None:
                 raise DomainError(f"Nhóm vật tư thay thế '{code}' đã ngừng hoạt động.")
             if not g.member_material_ids:
                 raise DomainError(f"Nhóm vật tư thay thế '{code}' chưa có vật tư thành viên nào.")
+        # Dòng khai theo nhóm luôn dùng ĐÚNG đơn vị đã đăng ký của nhóm (MaterialAltGroup.unit) —
+        # không cho tự nhập uom khác, để _line_stock quy đổi tồn từng thành viên về đúng 1 đơn vị
+        # trước khi cộng dồn (xem services/brew_order.py::_convert_member_qty).
+        for m in materials:
+            group_code = m.get("alt_group_code")
+            if group_code:
+                m["uom"] = found_groups[group_code].unit
 
 
 def create_formula(db: Session, payload: dict, user: User) -> Formula:

@@ -70,9 +70,9 @@ def lager_product_id(client, admin_h):
     return next(p["product_id"] for p in products if p["code"] == "BIA-LAGER")
 
 
-def _a_alt_group(client, admin_h, member_ids, code=None, name=None):
+def _a_alt_group(client, admin_h, member_ids, code=None, name=None, unit="kg"):
     payload = {"code": code or f"ALTGRP-{new_id()[:8]}", "name": name or "Malt test",
-               "member_material_ids": member_ids}
+               "member_material_ids": member_ids, "unit": unit}
     r = client.post("/api/material-alt-groups", headers=admin_h, json=payload)
     assert r.status_code == 201, r.text
     return r.json()
@@ -83,20 +83,22 @@ def _a_alt_group(client, admin_h, member_ids, code=None, name=None):
 def test_create_alt_group_rejects_duplicate_code(client, admin_h, malt_pils_id, malt_vienna_id):
     g = _a_alt_group(client, admin_h, [malt_pils_id, malt_vienna_id], code="ALTGRP-DUPCHECK")
     dup = client.post("/api/material-alt-groups", headers=admin_h,
-                      json={"code": "ALTGRP-DUPCHECK", "name": "Khác", "member_material_ids": [malt_pils_id]})
+                      json={"code": "ALTGRP-DUPCHECK", "name": "Khác", "unit": "kg",
+                            "member_material_ids": [malt_pils_id]})
     assert dup.status_code == 409, dup.text
 
 
 def test_create_alt_group_rejects_no_members(client, admin_h):
     r = client.post("/api/material-alt-groups", headers=admin_h,
-                    json={"code": f"ALTGRP-{new_id()[:8]}", "name": "Rỗng", "member_material_ids": []})
+                    json={"code": f"ALTGRP-{new_id()[:8]}", "name": "Rỗng", "unit": "kg",
+                          "member_material_ids": []})
     assert r.status_code == 409, r.text
 
 
 def test_update_alt_group(client, admin_h, malt_pils_id, malt_vienna_id):
     g = _a_alt_group(client, admin_h, [malt_pils_id])
     upd = client.put(f"/api/material-alt-groups/{g['group_id']}", headers=admin_h,
-                     json={"code": g["code"], "name": "Đã sửa",
+                     json={"code": g["code"], "name": "Đã sửa", "unit": "kg",
                            "member_material_ids": [malt_pils_id, malt_vienna_id], "active": True})
     assert upd.status_code == 200, upd.text
     assert upd.json()["name"] == "Đã sửa"
@@ -160,7 +162,8 @@ def test_formula_rejects_unknown_or_inactive_alt_group(client, admin_h, malt_pil
 
     g = _a_alt_group(client, admin_h, [malt_pils_id])
     client.put(f"/api/material-alt-groups/{g['group_id']}", headers=admin_h,
-              json={"code": g["code"], "name": g["name"], "member_material_ids": [malt_pils_id], "active": False})
+              json={"code": g["code"], "name": g["name"], "unit": "kg",
+                    "member_material_ids": [malt_pils_id], "active": False})
     inactive = client.post("/api/formulas", headers=admin_h,
                            json={"code": f"CT-{new_id()[:8]}", "product_id": lager_product_id,
                                  "base_qty": 1000, "base_uom": "L",

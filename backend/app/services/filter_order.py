@@ -128,6 +128,16 @@ def _member_breakdown(db: Session, member_ids: list) -> list:
     return out
 
 
+def _convert_member_qty(mat, target_unit: str | None, qty: float) -> float:
+    """Quy đổi tồn kho (lưu theo uom chính của vật tư) về đơn vị của nhóm vật tư thay thế
+    (MaterialAltGroup.unit) trước khi cộng dồn — mirror services/brew_order.py::_convert_member_qty."""
+    if not mat or not target_unit or mat.uom == target_unit:
+        return qty
+    if mat.alt_uom == target_unit and mat.alt_uom_ratio:
+        return qty * mat.alt_uom_ratio
+    return qty
+
+
 def _validate_material_lines(db: Session, lines_in: list) -> list:
     """Kiểm tra đủ vật tư TRƯỚC khi tạo/sửa bất kỳ bản ghi nào — thiếu tồn (tổng 2 kho) thì
     chặn hẳn, không cho lập/sửa lệnh (khác Lệnh nấu chỉ cảnh báo rồi vẫn cho lưu). 1 dòng có
@@ -145,8 +155,13 @@ def _validate_material_lines(db: Session, lines_in: list) -> list:
             member_ids = list(group.member_material_ids or [])
             if not member_ids:
                 raise DomainError(f"Nhóm vật tư thay thế '{group.name}' chưa có vật tư thành viên.")
-            company = sum(warehouse_svc.material_fifo_detail(db, mid)["stock_company"] for mid in member_ids)
-            workshop = sum(warehouse_svc.material_fifo_detail(db, mid)["stock_workshop"] for mid in member_ids)
+            members_by_id = {mid: db.get(Material, mid) for mid in member_ids}
+            company = sum(_convert_member_qty(members_by_id[mid], group.unit,
+                                              warehouse_svc.material_fifo_detail(db, mid)["stock_company"])
+                         for mid in member_ids)
+            workshop = sum(_convert_member_qty(members_by_id[mid], group.unit,
+                                               warehouse_svc.material_fifo_detail(db, mid)["stock_workshop"])
+                          for mid in member_ids)
             if quantity > company + workshop:
                 raise DomainError(
                     f"Nhóm vật tư '{group.name}' không đủ tồn kho: cần {quantity}, hiện có {round(company + workshop, 3)} "
@@ -177,7 +192,7 @@ def _material_line_row(filter_order_id: str, seq: int, ml: dict) -> FilterOrderM
         return FilterOrderMaterialLine(
             line_id=new_id(), filter_order_id=filter_order_id, seq=seq,
             material_id=None, material_name=ml["group"].name, material_group_code=ml["group"].code,
-            uom=None, quantity=ml["quantity"], unit_price=ml["unit_price"],
+            uom=ml["group"].unit, quantity=ml["quantity"], unit_price=ml["unit_price"],
             stock_company_snapshot=ml["stock_company"], stock_workshop_snapshot=ml["stock_workshop"])
     return FilterOrderMaterialLine(
         line_id=new_id(), filter_order_id=filter_order_id, seq=seq,
