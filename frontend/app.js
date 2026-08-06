@@ -122,10 +122,10 @@ function passwordPolicyMsg(pw, username) {
 // onBack (tuỳ chọn): modal này được mở TỪ 1 modal danh sách khác (vd Chỉ tiêu/+NVL/Ghi chép
 // nấu/CIP mở từ "Các mẻ thuộc mã nấu") — hiện thêm nút "‹ Quay lại" gọi lại đúng modal cha
 // (thường là render lại modal danh sách đó, không phải chỉ đóng) thay vì chỉ có nút ✕ đóng hẳn.
-function modal(html, onBack) {
+function modal(html, onBack, wide) {
   closeModal();
   const backBtn = onBack ? `<span class="modal-back" title="Quay lại">‹ Quay lại</span>` : "";
-  const bg = el(`<div class="modal-bg" id="modalbg"><div class="modal">${backBtn}<span class="modal-x" title="Đóng">✕</span>${html}</div></div>`);
+  const bg = el(`<div class="modal-bg" id="modalbg"><div class="modal${wide ? " modal-wide" : ""}">${backBtn}<span class="modal-x" title="Đóng">✕</span>${html}</div></div>`);
   bg.onclick = (e) => { if (e.target === bg) closeModal(); };
   bg.querySelector(".modal-x").onclick = () => closeModal();
   if (onBack) bg.querySelector(".modal-back").onclick = () => onBack();
@@ -2014,7 +2014,7 @@ function fmMaterialSearchItems() {
   const matItems = (CACHE.materials || []).filter(m => rawGroupCodes.has(m.category))
     .map(m => ({ value: m.code, label: `${m.code} — ${m.name}`, uom: m.uom }));
   const groupItems = (CACHE.materialAltGroups || []).filter(g => g.active)
-    .map(g => ({ value: `grp:${g.code}`, label: `${g.name} (nhóm vật tư thay thế)`, uom: null }));
+    .map(g => ({ value: `grp:${g.code}`, label: `${g.name} (nhóm vật tư thay thế)`, uom: g.unit || null }));
   return [...matItems, ...groupItems];
 }
 function fmMaterialLabel(materialCode, groupCode) {
@@ -2036,7 +2036,7 @@ function fmBomRowHTML(line) {
     <td><input type="text" class="fbm-mat-txt" value="${esc(label)}" placeholder="Gõ để tìm vật tư/nhóm..." autocomplete="off" style="min-width:220px"/>
       <input type="hidden" class="fbm-mat" value="${esc(value)}"/></td>
     <td><input class="fbm-qty" type="number" step="any" value="${line.qty ?? ""}" style="width:110px"/></td>
-    <td><input class="fbm-uom" value="${esc(line.uom || "")}" size="5"/></td>
+    <td><input class="fbm-uom" value="${esc(line.uom || "")}" size="5" readonly title="ĐVT lấy mặc định từ Danh mục Vật tư/Nhóm vật tư thay thế — không sửa được ở đây"/></td>
     <td><button class="btn sm sec fbm-del" type="button">×</button></td></tr>`;
 }
 function wireFmBomEditor(scope) {
@@ -2070,9 +2070,9 @@ function wireFmBomRows(scope) {
           const item = items.find(i => i.value === row.dataset.v);
           if (item) {
             hidden.value = item.value; txt.value = item.label;
-            // Nhóm vật tư thay thế không có ĐVT cố định riêng (uom=null) — để nguyên ĐVT
-            // người dùng đã nhập, chỉ tự điền khi chọn 1 vật tư cụ thể.
-            if (item.uom) txt.closest("tr").querySelector(".fbm-uom").value = item.uom;
+            // ĐVT luôn lấy từ đơn vị đã đăng ký của vật tư/nhóm — ô readonly, người dùng
+            // không tự nhập (server cũng ép lại uom này khi lưu, xem services/formula.py).
+            txt.closest("tr").querySelector(".fbm-uom").value = item.uom || "";
           }
           closePanel();
         };
@@ -3324,10 +3324,72 @@ function wireSubnav(view) {
   });
 }
 async function lotOptions(db, onlyAvailable) {
-  const lots = await GET("/lots");
+  const [lots, mats] = await Promise.all([GET("/lots"), GET("/materials")]);
+  const matById = Object.fromEntries(mats.map(m => [m.material_id, m]));
   return lots.filter(l => l.quantity > 0 && (!onlyAvailable || l.status === "available"))
     .sort((a, b) => new Date(a.created_at) - new Date(b.created_at))   // FIFO: nhập trước hiện trước
-    .map(l => `<option value="${l.lot_id}">${esc(l.lot_code)} (${l.quantity}${l.uom}, nhập ${fmt(l.created_at)})${l.status === "on_hold" ? " — CHỜ DUYỆT QC" : ""}</option>`).join("");
+    .map(l => {
+      const m = matById[l.material_id];
+      return `<option value="${l.lot_id}" data-material="${esc(l.material_id || "")}">${esc(l.lot_code)}${m ? " — " + esc(m.name) : ""} (${l.quantity}${l.uom}, nhập ${fmt(l.created_at)})${l.status === "on_hold" ? " — CHỜ DUYỆT QC" : ""}</option>`;
+    }).join("");
+}
+
+// Đơn vị phụ (VD Lon->kg): vật tư khai báo alt_uom+alt_uom_ratio (1 uom chính = alt_uom_ratio
+// đơn vị phụ) cho phép người dùng xuất/nhập theo 1 trong 2 đơn vị ở 1 số màn hình xuất/kiểm kê.
+// Luôn quy đổi về uom chính (altUomToBaseQty) trước khi gọi API — kho vẫn chỉ lưu theo uom chính.
+function altUomFieldHtml(mat, attrs, width) {
+  const w = width || 70;
+  const a = /=/.test(attrs) ? attrs : `id="${attrs}"`;   // cho phép truyền id đơn giản hoặc attrs đầy đủ (class/data-*)
+  if (mat && mat.alt_uom && mat.alt_uom_ratio) {
+    return `<select ${a} style="width:${w}px">
+      <option value="${esc(mat.uom)}">${esc(mat.uom)}</option>
+      <option value="${esc(mat.alt_uom)}">${esc(mat.alt_uom)}</option>
+    </select>`;
+  }
+  if (mat) return `<input ${a} value="${esc(mat.uom)}" readonly style="width:${w}px;background:var(--bg2,#f2f2f2)"/>`;
+  return `<input ${a} value="kg" style="width:${w}px"/>`;
+}
+function altUomToBaseQty(mat, qty, chosenUom) {
+  if (mat && mat.alt_uom && mat.alt_uom_ratio && chosenUom === mat.alt_uom) return qty / mat.alt_uom_ratio;
+  return qty;
+}
+// Giao của các đơn vị (uom chính + alt_uom nếu có) mà MỌI vật tư trong memberIds đều khai
+// được — dùng để hiện ô "Đơn vị nhóm" khi tạo/sửa Nhóm vật tư thay thế (mirror backend
+// services/master_data.py::group_unit_options — giữ 2 bên tính giống nhau).
+function groupUnitOptions(materialsById, memberIds) {
+  let common = null;
+  for (const mid of memberIds) {
+    const m = materialsById[mid];
+    if (!m) continue;
+    const opts = new Set([m.uom]); if (m.alt_uom) opts.add(m.alt_uom);
+    common = common === null ? opts : new Set([...common].filter(u => opts.has(u)));
+  }
+  return common ? [...common].sort() : [];
+}
+function groupUnitSelectHtml(options, selected) {
+  if (!options.length) return `<option value="">(không có đơn vị chung)</option>`;
+  return options.map(u => `<option value="${esc(u)}" ${u === selected ? "selected" : ""}>${esc(u)}</option>`).join("");
+}
+// Gắn 1 ô ĐVT (select/input, xem altUomFieldHtml) cạnh 1 <select> chọn Lô — tự cập nhật khi
+// đổi lô (mỗi <option data-material> từ lotOptions()) dựa vào bảng vật tư đã cache (matById).
+function wireLotAltUom(lotSelectId, wrapId, matById) {
+  const wrap = document.getElementById(wrapId);
+  const sel = document.getElementById(lotSelectId);
+  if (!wrap || !sel) return;
+  const refresh = () => {
+    const opt = sel.selectedOptions[0];
+    const mat = opt ? (matById || WH_CACHE.matById || {})[opt.dataset.material] : null;
+    wrap.innerHTML = altUomFieldHtml(mat, wrapId + "_sel");
+  };
+  sel.onchange = refresh;
+  refresh();
+}
+function lotAltUomQty(lotSelectId, wrapId, qty, matById) {
+  const sel = document.getElementById(lotSelectId);
+  const opt = sel ? sel.selectedOptions[0] : null;
+  const mat = opt ? (matById || WH_CACHE.matById || {})[opt.dataset.material] : null;
+  const uomSel = document.getElementById(wrapId + "_sel");
+  return altUomToBaseQty(mat, qty, uomSel ? uomSel.value : (mat ? mat.uom : null));
 }
 
 // ================= KHO NVL =================
@@ -3375,25 +3437,30 @@ VIEWS.warehouse_kc = async function () {
       (lotsByMaterial[l.material_id] = lotsByMaterial[l.material_id] || []).push(l);
     });
     const lowCount = stock.filter(s => s.low_stock).length;
+    const matByIdTon = Object.fromEntries((CACHE.materials || []).map(m => [m.material_id, m]));
     body = `<div class="panel"><h2>Tồn kho hiện tại — ${esc(tonLoc || "Tất cả")}</h2>
       <div class="row" style="margin-bottom:8px"><div class="field"><label>Kho</label>${tonLocSelectHtml("ton_loc", tonLoc)}</div></div>
       ${lowCount ? `<div class="muted" style="color:var(--red);margin-bottom:8px">⚠ ${lowCount} vật tư đang dưới tồn tối thiểu.</div>` : ""}
       <input class="searchbox" data-tbl="t_ton" placeholder="Tìm mã/tên vật tư..." style="margin-bottom:8px"/>
-      <div class="tablewrap"><table id="t_ton"><thead><tr><th>Mã VT</th><th>Tên</th><th>Nhóm</th><th>Mã lô</th><th>Tổng tồn thực tế</th><th>Đang chờ QC</th><th>Tồn khả dụng</th><th>ĐVT</th><th>Tồn tối thiểu</th></tr></thead>
+      <div class="tablewrap"><table id="t_ton"><thead><tr><th>Mã VT</th><th>Tên</th><th>Nhóm</th><th>Mã lô</th><th>Tổng tồn thực tế</th><th>Đang chờ QC</th><th>Tồn khả dụng</th><th>ĐVT</th><th>Quy đổi</th><th>Tồn tối thiểu</th></tr></thead>
       <tbody>${stock.map(s => { const matLots = (lotsByMaterial[s.material_id] || [])
           .sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
         const shown = matLots.slice(0, LOT_CELL_MAX);
         const rest = matLots.length - shown.length;
         const lotCell = shown.map(lotChip).join(", ") +
           (rest > 0 ? ` <button type="button" class="btn sm sec" data-viewlots="${esc(s.material_id)}" data-matlabel="${esc(s.material_code)} — ${esc(s.material_name)}">+${rest} lô khác</button>` : "");
+        const matTon = matByIdTon[s.material_id];
+        const altDisp = matTon && matTon.alt_uom && matTon.alt_uom_ratio
+          ? `${(s.on_hand * matTon.alt_uom_ratio).toFixed(2)} ${esc(matTon.alt_uom)}` : "—";
         return `<tr${s.low_stock ? ' style="background:color-mix(in srgb, var(--red) 10%, transparent)"' : ""}><td><code class="k">${esc(s.material_code)}</code></td><td>${esc(s.material_name)}</td>
         <td class="muted">${esc(s.category || "")}</td>
         <td class="muted">${lotCell || "—"}</td>
         <td>${s.actual_total}</td>
         <td class="muted">${s.pending_qc > 0 ? s.pending_qc : "—"}</td>
         <td>${s.on_hand}${s.low_stock ? ' <span style="color:var(--red)" title="Dưới tồn tối thiểu">⚠</span>' : ""}</td><td>${s.uom}</td>
+        <td class="muted">${altDisp}</td>
         <td class="muted">${s.stock_min ?? "—"}</td></tr>`; }).join("") ||
-        '<tr><td colspan=9 class="muted">Không có tồn kho.</td></tr>'}</tbody></table></div></div>`;
+        '<tr><td colspan=10 class="muted">Không có tồn kho.</td></tr>'}</tbody></table></div></div>`;
   } else if (sec === "the") {
     const mats = await GET("/materials");
     const wcItems = mats.map(m => ({ value: m.material_id, label: `${m.code} — ${m.name}`, uom: m.uom }));
@@ -3550,7 +3617,7 @@ VIEWS.warehouse_kc = async function () {
             <input type="text" id="sng_supplier_txt" autocomplete="off" placeholder="Tìm nhà cung cấp..."/>
             <input type="hidden" id="sng_supplier"/></div></div>
         <div class="row"><div class="field"><label>Số lượng</label><input id="sng_qty" type="number" value="500"/></div>
-          <div class="field"><label>ĐVT</label><input id="sng_uom" value="${esc(matItemsGiao[0]?.uom || "")}" size="4" readonly title="Lấy tự động từ danh mục nguyên liệu — không sửa được"/></div>
+          <div class="field"><label>ĐVT</label><span id="sng_uom_wrap">${altUomFieldHtml(matByIdGiao[matItemsGiao[0]?.value], "sng_uom", 60)}</span></div>
           <div class="field"><label>Đơn giá</label><input id="sng_price" type="number" placeholder="(tuỳ chọn)"/></div>
           <div class="field"><label>Hạn dùng</label><input id="sng_exp" type="date"/></div></div>
         <div class="row"><div class="field" style="flex:1"><label>Diễn giải</label><input id="sng_note" placeholder="(tuỳ chọn)"/></div>
@@ -3588,6 +3655,7 @@ VIEWS.warehouse_kc = async function () {
         ${isAdminGiao
           ? `<div class="row"><div class="field"><label>Lô</label><select id="xt_lot">${lotsAvail}</select></div>
           <div class="field"><label>SL</label><input id="xt_qty" type="number" value="50"/></div>
+          <div class="field"><label>ĐVT</label><span id="xt_uom"></span></div>
           <div class="field" style="flex:1"><label>Lý do (tuỳ chọn)</label><input id="xt_reason" placeholder="(tuỳ chọn)"/></div>
           <button class="btn sec" id="xt_do" style="align-self:flex-end">Xuất tự do</button></div>`
           : '<div class="muted">Chỉ tài khoản Admin mới được thực hiện xuất tự do.</div>'}
@@ -3732,12 +3800,16 @@ VIEWS.warehouse_kc = async function () {
     wireSearchableSelect("rc_mat_txt", "rc_mat", WH_CACHE.matItems, (item) => { $("rc_uom").value = item.uom || ""; });
     wireSearchableSelect("ob_mat_txt", "ob_mat", WH_CACHE.matItems, (item) => { $("ob_uom").value = item.uom || ""; });
     wireSearchableSelect("rc_supplier_txt", "rc_supplier", WH_CACHE.supplierItems);
-    if ($("sng_mat_txt")) wireSearchableSelect("sng_mat_txt", "sng_mat", WH_CACHE.matItems, (item) => { $("sng_uom").value = item.uom || ""; });
+    if ($("sng_mat_txt")) wireSearchableSelect("sng_mat_txt", "sng_mat", WH_CACHE.matItems, (item) => {
+      $("sng_uom_wrap").innerHTML = altUomFieldHtml(matByIdGiao[item.value], "sng_uom", 60);
+    });
     if ($("sng_supplier_txt")) wireSearchableSelect("sng_supplier_txt", "sng_supplier", WH_CACHE.supplierItems);
     if ($("sng_do")) $("sng_do").onclick = () => guard(async () => {
+      const sngMat = matByIdGiao[$("sng_mat").value];
+      const sngQty = altUomToBaseQty(sngMat, parseFloat($("sng_qty").value), $("sng_uom").value);
       const res = await POST("/warehouse/sang-ngang", { material_id: $("sng_mat").value,
         supplier_id: $("sng_supplier").value || null, unit_price: $("sng_price").value ? parseFloat($("sng_price").value) : null,
-        quantity: parseFloat($("sng_qty").value), uom: $("sng_uom").value,
+        quantity: sngQty, uom: sngMat ? sngMat.uom : $("sng_uom").value,
         expiry: $("sng_exp").value || null, reason: $("sng_note").value.trim() || "Xuất sang ngang" });
       toast(`Đã tạo đề nghị xuất sang ngang (số ${res.request_code}) — chờ phân xưởng duyệt`);
       render("warehouse_kc");
@@ -3824,8 +3896,10 @@ VIEWS.warehouse_kc = async function () {
       }
       render("warehouse_kc");
     });
+    if ($("xt_lot")) wireLotAltUom("xt_lot", "xt_uom");
     if ($("xt_do")) $("xt_do").onclick = () => guard(async () => {
-      await POST("/warehouse/issue", { lot_id: $("xt_lot").value, quantity: parseFloat($("xt_qty").value),
+      const qty = lotAltUomQty("xt_lot", "xt_uom", parseFloat($("xt_qty").value));
+      await POST("/warehouse/issue", { lot_id: $("xt_lot").value, quantity: qty,
         mode: "tu_do", reason: $("xt_reason").value.trim() || null });
       toast("Đã xuất tự do"); render("warehouse_kc");
     });
@@ -4101,7 +4175,7 @@ VIEWS.warehouse_px = async function () {
     const isAdminPx = CURRENT_USER && CURRENT_USER.role === "admin";
     const workshopLotOpts = allLots.filter(l => l.quantity > 0 && /phân xưởng/i.test(l.location || ""))
       .sort((a, b) => new Date(a.created_at) - new Date(b.created_at))
-      .map(l => `<option value="${l.lot_id}">${esc(l.lot_code)} (${l.quantity}${l.uom}, nhập ${fmt(l.created_at)})${l.status === "on_hold" ? " — CHỜ DUYỆT QC" : ""}</option>`).join("") ||
+      .map(l => `<option value="${l.lot_id}" data-material="${esc(l.material_id || "")}">${esc(l.lot_code)} (${l.quantity}${l.uom}, nhập ${fmt(l.created_at)})${l.status === "on_hold" ? " — CHỜ DUYỆT QC" : ""}</option>`).join("") ||
       `<option value="">(không có lô nào ở kho phân xưởng)</option>`;
     WH_CACHE.matById = matById;
     WH_CACHE.tu_do_px = freeIssuesAll.filter(m => /phân xưởng/i.test(m.location_from || ""));
@@ -4111,6 +4185,7 @@ VIEWS.warehouse_px = async function () {
       ${isAdminPx
         ? `<div class="row"><div class="field"><label>Lô</label><select id="xtpx_lot">${workshopLotOpts}</select></div>
         <div class="field"><label>SL</label><input id="xtpx_qty" type="number" value="50"/></div>
+        <div class="field"><label>ĐVT</label><span id="xtpx_uom"></span></div>
         <div class="field" style="flex:1"><label>Lý do (tuỳ chọn)</label><input id="xtpx_reason" placeholder="(tuỳ chọn)"/></div>
         <button class="btn sec" id="xtpx_do" style="align-self:flex-end">Xuất tự do</button></div>`
         : '<div class="muted">Chỉ tài khoản Admin mới được thực hiện xuất tự do.</div>'}
@@ -4211,8 +4286,10 @@ VIEWS.warehouse_px = async function () {
     }));
   }
   if (sec === "tudo") {
+    if ($("xtpx_lot")) wireLotAltUom("xtpx_lot", "xtpx_uom", matById);
     if ($("xtpx_do")) $("xtpx_do").onclick = () => guard(async () => {
-      await POST("/warehouse/issue", { lot_id: $("xtpx_lot").value, quantity: parseFloat($("xtpx_qty").value),
+      const qty = lotAltUomQty("xtpx_lot", "xtpx_uom", parseFloat($("xtpx_qty").value), matById);
+      await POST("/warehouse/issue", { lot_id: $("xtpx_lot").value, quantity: qty,
         mode: "tu_do", reason: $("xtpx_reason").value.trim() || null });
       toast("Đã xuất tự do"); render("warehouse_px");
     });
@@ -4280,19 +4357,21 @@ async function renderLowStockSection() {
 async function openStockCountModal(countId) {
   const c = await GET(`/warehouse/counts/${countId}`);
   const isDraft = c.status === "draft";
+  const matByIdKk = Object.fromEntries((CACHE.materials || []).map(m => [m.material_id, m]));
   modal(`<h3>Phiếu kiểm kê ${esc(c.count_code)} <span class="muted">(${esc(c.location || "Toàn bộ")})</span></h3>
     <div class="muted" style="margin-bottom:8px">${isDraft
       ? "Điền số lượng đếm thực tế cho từng lô, bấm Lưu số liệu, rồi Chốt phiếu để tự động điều chỉnh lệch."
       : `Đã chốt bởi ${esc(c.posted_by || "")} lúc ${fmt(c.posted_at)}.${c.approved_by ? ` Đã duyệt bởi ${esc(c.approved_by)} lúc ${fmt(c.approved_at)}.` : ""}`}</div>
     <div class="tablewrap"><table>
-      <thead><tr><th>Vật tư</th><th>Lô</th><th>Vị trí</th><th>Tồn hệ thống</th><th>Đếm thực tế</th><th>Lệch</th></tr></thead>
-      <tbody>${c.lines.map(l => `<tr data-lineid="${esc(l.line_id)}">
+      <thead><tr><th>Vật tư</th><th>Lô</th><th>Vị trí</th><th>Tồn hệ thống</th><th>Đếm thực tế</th><th>ĐVT</th><th>Lệch</th></tr></thead>
+      <tbody>${c.lines.map(l => `<tr data-lineid="${esc(l.line_id)}" data-material="${esc(l.material_id || "")}">
         <td>${esc(l.material_code || l.material_id)}</td>
         <td class="muted">${esc(l.lot_code || "")}</td>
         <td class="muted">${esc(l.location || "")}</td>
         <td>${l.system_qty} ${esc(l.uom)}</td>
         <td>${isDraft ? `<input type="number" step="0.01" class="kkl_counted" style="width:90px" value="${l.counted_qty ?? ""}"/>`
           : (l.counted_qty ?? "—")}</td>
+        <td>${isDraft ? altUomFieldHtml(matByIdKk[l.material_id], `class="kkl_uom"`, 60) : esc(l.uom)}</td>
         <td class="muted">${l.variance == null ? "—" : (l.variance > 0 ? "+" : "") + l.variance}</td>
         </tr>`).join("")}</tbody>
     </table></div>
@@ -4302,10 +4381,13 @@ async function openStockCountModal(countId) {
     </div>` : ""}`);
   if (isDraft) {
     $("kk_save").onclick = () => guard(async () => {
-      const lines = Array.from(document.querySelectorAll("[data-lineid]")).map(tr => ({
-        line_id: tr.dataset.lineid,
-        counted_qty: tr.querySelector(".kkl_counted").value === "" ? null : parseFloat(tr.querySelector(".kkl_counted").value),
-      }));
+      const lines = Array.from(document.querySelectorAll("[data-lineid]")).map(tr => {
+        const raw = tr.querySelector(".kkl_counted").value;
+        const mat = matByIdKk[tr.dataset.material];
+        const uomSel = tr.querySelector(".kkl_uom");
+        return { line_id: tr.dataset.lineid,
+          counted_qty: raw === "" ? null : altUomToBaseQty(mat, parseFloat(raw), uomSel ? uomSel.value : null) };
+      });
       await PUT(`/warehouse/counts/${countId}/lines`, { lines });
       toast("Đã lưu số liệu đếm"); closeModal(); openStockCountModal(countId);
     });
@@ -4498,9 +4580,11 @@ function movementHistoryBlockHtml(key) {
   const cols = 7 + (showUndo ? 1 : 0);
   const moreBtn = all.length > visible.length
     ? `<button class="btn sm sec" data-loadmorehist="${key}" style="margin-top:6px">Tải thêm (còn ${all.length - visible.length})</button>` : "";
+  const tblId = `wh_histtbl_${key}`;
   return `<div class="tablewrap" id="wh_hist_${key}" style="margin-top:14px">
     <h4>${esc(WH_HIST_TITLE[key])} <span class="muted">(${visible.length}/${all.length})</span>${delBtn}</h4>
-    <table>
+    <input class="searchbox" data-tbl="${tblId}" placeholder="Tìm mã lô/vật tư/người thực hiện..." style="margin-bottom:6px"/>
+    <table id="${tblId}">
       <thead><tr><th>Thời gian</th><th>Vật tư</th><th>Lô</th><th>SL</th><th>Từ → Đến</th><th>Lý do</th><th>Người thực hiện</th>${showUndo ? "<th></th>" : ""}</tr></thead>
       <tbody>${visible.map(m => movementRowHtml(m, WH_CACHE.matById, showUndo)).join("") ||
         `<tr><td colspan=${cols} class="muted">Chưa có giao dịch nào.</td></tr>`}</tbody>
@@ -4510,6 +4594,7 @@ function movementHistoryBlockHtml(key) {
 }
 
 function wireMovementHistoryBlock(key) {
+  wireSearch();
   const btn = document.querySelector(`[data-loadmorehist="${key}"]`);
   if (btn) btn.onclick = () => { WH_HIST_VISIBLE[key] = (WH_HIST_VISIBLE[key] || WH_HIST_PAGE) + WH_HIST_PAGE; refreshMovementHistoryBlock(key); };
   const delBtn = document.querySelector(`#wh_hist_${key} [data-delhist]`);
@@ -4580,7 +4665,11 @@ function holdBadgeHtml(row) {
     : "";
 }
 
-let REQUEST_CART = [];   // {material_id, material_code, lot_id, lot_code, quantity, uom} — nhiều dòng, gửi 1 lần
+let REQUEST_CART = [];   // {material_id, material_code, lot_id, lot_code, quantity, uom,
+                          //  group_code?, group_name?, group_members?} — nhiều dòng, gửi 1 lần.
+                          // group_code/group_name/group_members chỉ có ở dòng được "Nạp vật tư từ lệnh"
+                          // đưa lên từ 1 Nhóm vật tư thay thế — mỗi mã thành viên thành 1 dòng riêng,
+                          // thủ kho tự xoá bớt chỉ giữ đúng 1 mã muốn xuất (xem cartPanelHtml).
 let REQUEST_SOURCE = null;   // {type: "brew_order"|"filter_master_order", id, label} — tuỳ chọn, chỉ để tham chiếu/báo cáo
 
 const REQ_STATUS_BADGE = { pending: "on_hold", fulfilled: "available", rejected: "obsolete", cancelled: "obsolete" };
@@ -4592,6 +4681,30 @@ function fifoOldestLot(materialId, allLots) {
     .sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
   return candidates[0] || null;
 }
+// Tồn kho THỰC TẾ khả dụng tại Kho công ty của 1 vật tư — chỉ tính lô status "available"/
+// "released" (mirror LotStatus ở backend/app/common.py + services/warehouse.py::material_fifo_detail),
+// KHÔNG tính lô đang "on_hold" (chờ QC duyệt) hay đã consumed/scrapped — đây là số thực sự có thể
+// xuất ngay, dùng để chặn tạo đề nghị vượt quá tồn (xem wireCartPanel::rq_submit/rq_add).
+function materialAvailableCompanyQty(materialId, allLots) {
+  return allLots.filter(l => l.material_id === materialId && !/phân xưởng/i.test(l.location || "") &&
+      (l.status === "available" || l.status === "released"))
+    .reduce((sum, l) => sum + l.quantity, 0);
+}
+// Tồn đang chờ QC duyệt (status "on_hold") tại Kho công ty — CHƯA được tính vào tồn khả dụng ở
+// trên, chỉ hiển thị để thủ kho/người đề nghị biết vì sao tồn thực tế thấp hơn tổng nhập kho.
+function materialPendingQcCompanyQty(materialId, allLots) {
+  return allLots.filter(l => l.material_id === materialId && !/phân xưởng/i.test(l.location || "") &&
+      l.status === "on_hold")
+    .reduce((sum, l) => sum + l.quantity, 0);
+}
+// Tồn đang có sẵn tại Kho phân xưởng — chỉ để THAM KHẢO (biết xưởng còn sẵn bao nhiêu trước khi
+// xin thêm từ Kho công ty), KHÔNG dùng để chặn số lượng đề nghị (việc đó vẫn dựa vào tồn Kho
+// công ty, xem materialAvailableCompanyQty).
+function materialWorkshopQty(materialId, allLots) {
+  return allLots.filter(l => l.material_id === materialId && /phân xưởng/i.test(l.location || "") &&
+      (l.status === "available" || l.status === "released"))
+    .reduce((sum, l) => sum + l.quantity, 0);
+}
 
 function requestFifoBadgeHtml(materialId, lotId, allLots) {
   if (!lotId) return '<span class="muted">(chưa chọn — theo FIFO lúc xuất)</span>';
@@ -4601,6 +4714,56 @@ function requestFifoBadgeHtml(materialId, lotId, allLots) {
   return (oldest && oldest.lot_id === lotId)
     ? '<span class="badge available">✓ Lô cũ nhất (FIFO)</span>'
     : `<span class="badge on_hold" title="Còn lô cũ hơn: ${esc(oldest ? oldest.lot_code : "")} (${oldest ? fmt(oldest.created_at) : ""})">⚠ Không phải lô cũ nhất</span>`;
+}
+// So sánh FIFO GIỮA CÁC MÃ THÀNH VIÊN của 1 Nhóm vật tư thay thế (khác requestFifoBadgeHtml —
+// hàm đó so 1 mã với chính nó qua các lô; hàm này so NHIỀU MÃ khác nhau với nhau) — dùng khi
+// "Nạp vật tư từ lệnh" đưa thẳng từng mã thành viên lên giỏ, để thủ kho biết ngay mã nào đang
+// tồn lâu nhất mà không phải tự tra từng mã (xem wireCartPanel::rq_srcload).
+// Mã thành viên đang có lô nhập sớm nhất trong 1 Nhóm vật tư thay thế (null nếu cả nhóm
+// không còn tồn Kho công ty) — dùng chung cho cả hiển thị badge và cảnh báo lúc gửi đề nghị
+// (xem groupMemberFifoBadgeHtml + wireCartPanel::rq_submit).
+function groupFifoBestMaterialId(memberIds, allLots) {
+  const withStock = (memberIds || []).map(mid => ({ mid, oldest: fifoOldestLot(mid, allLots) })).filter(x => x.oldest);
+  if (!withStock.length) return null;
+  withStock.sort((a, b) => new Date(a.oldest.created_at) - new Date(b.oldest.created_at));
+  return withStock[0].mid;
+}
+// Toàn bộ mã thành viên của 1 Nhóm vật tư thay thế, sắp theo FIFO (cũ nhất trước) — mã không
+// còn tồn Kho công ty (không có lô nào) rơi xuống cuối. Dùng để tự động phân bổ số lượng cần
+// lấy khi "Nạp vật tư từ lệnh": lấy hết khả dụng của mã cũ nhất trước, thiếu bao nhiêu mới sang
+// mã cũ thứ 2, 3... (xem wireCartPanel::rq_srcload).
+function sortGroupMembersFifo(memberIds, allLots) {
+  return (memberIds || []).map(mid => ({ mid, oldest: fifoOldestLot(mid, allLots) }))
+    .sort((a, b) => {
+      if (a.oldest && b.oldest) return new Date(a.oldest.created_at) - new Date(b.oldest.created_at);
+      if (a.oldest) return -1;
+      if (b.oldest) return 1;
+      return 0;
+    }).map(x => x.mid);
+}
+// Mã thành viên nào trong nhóm đang bị "bỏ qua FIFO" — tức còn tồn khả dụng CHƯA dùng hết ở 1 mã
+// cũ hơn, nhưng giỏ hàng vẫn đang lấy số lượng > 0 ở 1 mã kém FIFO hơn. Duyệt theo đúng thứ tự
+// FIFO của cả nhóm, không chỉ so với "mã tốt nhất" — vì cách lấy tự động (rq_srcload) có thể hợp
+// lệ dùng CẢ mã cũ nhất VÀ mã cũ thứ 2 cùng lúc khi mã cũ nhất không đủ tồn (xem rq_submit).
+function groupSkippedFifoMaterialIds(memberIds, cartEntriesForGroup, allLots) {
+  const skipped = new Set();
+  let earlierHasUnusedStock = false;
+  for (const mid of sortGroupMembersFifo(memberIds, allLots)) {
+    const rowQty = cartEntriesForGroup.filter(c => c.material_id === mid).reduce((s, c) => s + c.quantity, 0);
+    if (rowQty > 0 && earlierHasUnusedStock) skipped.add(mid);
+    if (materialAvailableCompanyQty(mid, allLots) - rowQty > 1e-9) earlierHasUnusedStock = true;
+  }
+  return skipped;
+}
+
+function groupMemberFifoBadgeHtml(materialId, memberIds, allLots) {
+  const best = groupFifoBestMaterialId(memberIds, allLots);
+  if (!best) return '<span class="muted">(chưa có tồn Kho công ty)</span>';
+  if (best === materialId) {
+    return '<span class="badge available" title="Trong nhóm, mã này đang có lô nhập sớm nhất">✓ Tồn cũ nhất trong nhóm (FIFO)</span>';
+  }
+  const bestMat = REQ_CACHE.matById[best];
+  return `<span class="badge on_hold" title="Mã ${esc(bestMat ? bestMat.code : best)} đang có lô cũ hơn">⚠ Còn mã khác cũ hơn trong nhóm</span>`;
 }
 // Danh sách lô khả dụng của 1 vật tư tại Kho công ty, sắp theo FIFO (cũ nhất trước) — dùng để
 // dựng <select> chọn lô ngay trong bảng dòng đề nghị (đỡ phải mở modal riêng cho từng dòng).
@@ -4753,21 +4916,38 @@ function cartPanelHtml() {
   if (!REQ_CACHE.canRequest) return "";
   const cartRows = REQUEST_CART.map((c, i) => {
     const lot = c.lot_id ? REQ_CACHE.lots.find(l => l.lot_id === c.lot_id) : null;
-    return `<tr>
+    const fifoCell = c.group_code
+      ? groupMemberFifoBadgeHtml(c.material_id, c.group_members, REQ_CACHE.lots)
+      : requestFifoBadgeHtml(c.material_id, c.lot_id, REQ_CACHE.lots);
+    const available = materialAvailableCompanyQty(c.material_id, REQ_CACHE.lots);
+    const pendingQc = materialPendingQcCompanyQty(c.material_id, REQ_CACHE.lots);
+    const workshopQty = materialWorkshopQty(c.material_id, REQ_CACHE.lots);
+    const insufficient = c.quantity > available;
+    const slCell = c.locked
+      ? `<span class="muted" title="Mã cũ hơn (FIFO) trong nhóm đã đủ định mức theo lệnh — mã này không cần lấy">0 ${esc(c.uom)} — đã đủ từ mã cũ hơn</span>`
+      : `<input type="number" min="0" step="any" value="${c.quantity}" data-cartqty="${i}" style="width:80px"/> ${esc(c.uom)}`;
+    return `<tr${c.locked ? ' style="opacity:.6"' : ""}>
     <td>${esc(c.material_code)}</td>
+    <td>${c.group_code ? `<span class="badge on_hold" title="1 trong các mã thuộc Nhóm vật tư thay thế &quot;${esc(c.group_name)}&quot; — các mã trong nhóm dùng thay thế nhau, số lượng mỗi mã đã tự phân bổ theo FIFO">⚠️ Nhóm: ${esc(c.group_name)}</span>` : '<span class="muted">—</span>'}</td>
+    <td class="${insufficient ? "" : "muted"}"${insufficient ? ` style="color:var(--red)" title="Không đủ tồn thực tế để xuất số lượng đang đề nghị"` : ""}>${available} ${esc(c.uom)}</td>
+    <td class="muted">${pendingQc > 0 ? `${pendingQc} ${esc(c.uom)}` : "—"}</td>
+    <td class="muted" title="Tồn đang có sẵn tại Kho phân xưởng — chỉ để tham khảo, không tính vào giới hạn số lượng đề nghị">${workshopQty > 0 ? `${workshopQty} ${esc(c.uom)}` : "—"}</td>
     <td class="muted">${c.lot_code ? esc(c.lot_code) : "(để thủ kho chọn theo FIFO)"}</td>
     <td class="muted">${lot ? fmt(lot.created_at) : "—"}</td>
-    <td>${requestFifoBadgeHtml(c.material_id, c.lot_id, REQ_CACHE.lots)}</td>
-    <td>${c.quantity} ${esc(c.uom)}</td>
+    <td>${fifoCell}</td>
+    <td class="muted">${c.order_label ? esc(c.order_label) : "—"}</td>
+    <td class="muted">${c.qty_per_order != null ? `${c.qty_per_order} ${esc(c.uom)}` : "—"}</td>
+    <td>${slCell}</td>
     <td><button class="btn sm sec" data-cartdel="${i}">Xoá</button></td></tr>`;
   }).join("");
   return `<div class="panel" id="rq_form_panel">
     <h2>Tạo đề nghị nhận kho ${REQUEST_CART.length ? `<span class="muted">(${REQUEST_CART.length} dòng)</span>` : ""}</h2>
     <div class="muted" style="margin-bottom:6px">Thêm nhiều dòng (nhiều vật tư khác nhau) rồi gửi 1 lần — chọn nhanh
       từ bảng "Tồn kho công ty" ở cuối trang, hoặc thêm thủ công bên dưới. Chỉ chọn vật tư + số lượng — lô cụ thể
-      xuất từ đâu do thủ kho Kho công ty quyết định lúc duyệt phiếu (mặc định theo FIFO).</div>
+      xuất từ đâu do thủ kho Kho công ty quyết định lúc duyệt phiếu (mặc định theo FIFO). Dòng nạp từ Nhóm vật tư
+      thay thế có SL = 0 (đã đủ từ mã cũ hơn trong nhóm) sẽ KHÔNG được tạo trong phiếu lúc gửi.</div>
     ${REQUEST_CART.length ? `<div class="tablewrap"><table>
-      <thead><tr><th>Vật tư</th><th>Lô</th><th>Ngày nhập</th><th>FIFO</th><th>SL</th><th></th></tr></thead>
+      <thead><tr><th>Vật tư</th><th>Cảnh báo</th><th>Tồn kho công ty thực tế</th><th>Đang chờ QC duyệt</th><th>Tồn kho phân xưởng</th><th>Lô</th><th>Ngày nhập</th><th>FIFO</th><th>Lệnh</th><th>SL theo lệnh</th><th>SL</th><th></th></tr></thead>
       <tbody>${cartRows}</tbody>
     </table></div>` : '<div class="muted" style="margin:8px 0">Chưa có dòng nào trong đề nghị.</div>'}
     <h4 style="margin-top:14px">Nạp vật tư từ Lệnh nấu / Lệnh lọc (tuỳ chọn)</h4>
@@ -4786,15 +4966,17 @@ function cartPanelHtml() {
       <button class="btn sm sec" id="rq_srcclear">Bỏ gắn</button></div>` : ""}
     <h4 style="margin-top:14px">+ Thêm dòng thủ công</h4>
     <div class="row">
-      <div class="field"><label>Vật tư</label><select id="rq_mat">${REQ_CACHE.matOpts}</select></div>
+      <div class="field"><label>Vật tư</label>
+        <input id="rq_mat_q" placeholder="Tìm nhanh (gõ mã/tên vật tư)..." style="margin-bottom:2px"/>
+        <select id="rq_mat">${REQ_CACHE.matOpts}</select></div>
       <div class="field"><label>SL</label><input id="rq_qty" type="number" value="50"/></div>
-      <div class="field"><label>ĐVT</label><input id="rq_uom" value="kg" size="4"/></div>
+      <div class="field"><label>ĐVT</label><span id="rq_uom_wrap"></span></div>
       <button class="btn sec" id="rq_add" style="align-self:flex-end">+ Thêm dòng</button>
     </div>
     <div class="row" style="margin-top:10px">
       <div class="field" style="flex:1"><label>Ghi chú chung (tuỳ chọn)</label><input id="rq_note" placeholder="(tuỳ chọn)"/></div>
-      <button class="btn" id="rq_submit" style="align-self:flex-end" ${REQUEST_CART.length ? "" : "disabled"}>
-        Gửi đề nghị (${REQUEST_CART.length} dòng)</button>
+      <button class="btn" id="rq_submit" style="align-self:flex-end" ${REQUEST_CART.some(c => c.quantity > 0) ? "" : "disabled"}>
+        Gửi đề nghị (${REQUEST_CART.filter(c => c.quantity > 0).length} dòng)</button>
     </div>
   </div>`;
 }
@@ -4830,48 +5012,127 @@ function wireCartPanel() {
     if (!type || !id) return;
     const lines = await GET(`/warehouse/requests/source-preview?source_type=${type}&source_id=${id}`);
     if (!lines.length) { toast("Lệnh này không có dòng vật tư nào.", "err"); return; }
-    for (const l of lines) {
-      REQUEST_CART.push({ material_id: l.material_id, material_code: l.material_code || l.material_id,
-        lot_id: null, lot_code: null, quantity: l.quantity, uom: l.uom || "kg" });
-    }
+    const groupLines = lines.filter(l => l.is_group);
+    const normalLines = lines.filter(l => !l.is_group);
     const orderCode = $("rq_srcorder").options[$("rq_srcorder").selectedIndex].textContent;
-    REQUEST_SOURCE = { type, id, label: (type === "brew_order" ? "Lệnh nấu " : "Lệnh lọc ") + orderCode };
+    const orderLabel = (type === "brew_order" ? "Lệnh nấu " : "Lệnh lọc ") + orderCode;
+    for (const l of normalLines) {
+      REQUEST_CART.push({ material_id: l.material_id, material_code: l.material_code || l.material_id,
+        lot_id: null, lot_code: null, quantity: l.quantity, uom: l.uom || "kg",
+        order_label: orderLabel, qty_per_order: l.quantity });
+    }
+    // Dòng Nhóm vật tư thay thế (material_id=null) — đưa THẲNG từng mã thành viên lên giỏ (mỗi mã
+    // 1 dòng), nhưng KHÔNG để trống SL chờ thủ kho tự xoá bớt như trước: tự động lấy hết tồn khả
+    // dụng của mã đang cũ nhất (FIFO) trước, thiếu bao nhiêu mới sang mã cũ thứ 2, 3... — mã nào
+    // không cần lấy (vì mã cũ hơn đã đủ định mức) mặc định về 0 và khoá lại (xem cartPanelHtml).
+    // Chỉ dòng có SL > 0 mới thực sự được tạo trong phiếu lúc "Gửi đề nghị" (xem rq_submit).
+    let addedMemberRows = 0, lockedMemberRows = 0;
+    for (const l of groupLines) {
+      const members = l.member_material_ids || [];
+      const sortedMembers = sortGroupMembersFifo(members, REQ_CACHE.lots);
+      let remaining = l.quantity;
+      for (const mid of sortedMembers) {
+        const available = materialAvailableCompanyQty(mid, REQ_CACHE.lots);
+        const take = Math.min(remaining, available);
+        const m = REQ_CACHE.matById[mid];
+        REQUEST_CART.push({ material_id: mid, material_code: m ? m.code : mid,
+          lot_id: null, lot_code: null, quantity: take, uom: l.uom || "kg",
+          group_code: l.group_code, group_name: l.material_name, group_members: members,
+          order_label: orderLabel, qty_per_order: l.quantity, locked: take <= 0 });
+        remaining -= take;
+        addedMemberRows++;
+        if (take <= 0) lockedMemberRows++;
+      }
+    }
+    REQUEST_SOURCE = { type, id, label: orderLabel };
     refreshCartPanel();
-    toast(`Đã nạp ${lines.length} dòng vật tư từ ${REQUEST_SOURCE.label}`);
+    toast(groupLines.length
+      ? `Đã nạp ${normalLines.length} dòng vật tư — còn ${groupLines.length} Nhóm vật tư thay thế đã tự phân bổ ` +
+        `${addedMemberRows - lockedMemberRows}/${addedMemberRows} mã thành viên theo FIFO (mã còn lại về 0, khoá lại)`
+      : `Đã nạp ${lines.length} dòng vật tư từ ${REQUEST_SOURCE.label}`,
+      groupLines.length ? "warn" : undefined);
   });
   if ($("rq_srcclear")) $("rq_srcclear").onclick = () => { REQUEST_SOURCE = null; refreshCartPanel(); };
+  const refreshRqUom = () => {
+    $("rq_uom_wrap").innerHTML = altUomFieldHtml(REQ_CACHE.matById[$("rq_mat").value], "rq_uom", 60);
+  };
+  $("rq_mat").onchange = refreshRqUom;
+  refreshRqUom();
+  wireSelectSearch("rq_mat", "rq_mat_q");
   $("rq_add").onclick = () => guard(async () => {
-    const qty = parseFloat($("rq_qty").value);
-    if (!qty || qty <= 0) throw new Error("Số lượng phải > 0.");
     const matId = $("rq_mat").value;
     const mat = REQ_CACHE.matById[matId];
-    const onHand = REQ_CACHE.lots.filter(l => l.material_id === matId && !/phân xưởng/i.test(l.location || ""))
-      .reduce((sum, l) => sum + l.quantity, 0);
+    const qty = altUomToBaseQty(mat, parseFloat($("rq_qty").value), $("rq_uom").value);
+    if (!qty || qty <= 0) throw new Error("Số lượng phải > 0.");
+    const onHand = materialAvailableCompanyQty(matId, REQ_CACHE.lots);
     if (qty > onHand) throw new Error(
-      `Số lượng đề nghị (${qty}) vượt quá tồn kho công ty hiện có của ${mat ? mat.code : matId} (${onHand}).`);
+      `Số lượng đề nghị (${qty}) vượt quá tồn kho CÔNG TY THỰC TẾ (đã trừ hàng đang chờ QC duyệt) của ` +
+      `${mat ? mat.code : matId} (${onHand}).`);
     // Người đề nghị (phân xưởng) chỉ chọn vật tư + số lượng — KHÔNG chọn lô/ngày nhập cụ thể,
     // để thủ kho Kho công ty tự quyết định xuất lô nào (mặc định FIFO) lúc duyệt phiếu.
     REQUEST_CART.push({ material_id: matId, material_code: mat ? mat.code : matId,
       lot_id: null, lot_code: null,
-      quantity: qty, uom: $("rq_uom").value.trim() || "kg" });
+      quantity: qty, uom: mat ? mat.uom : ($("rq_uom").value.trim() || "kg") });
     refreshCartPanel();
   });
   document.querySelectorAll("[data-cartdel]").forEach(b => b.onclick = () => {
     REQUEST_CART.splice(parseInt(b.dataset.cartdel, 10), 1);
     refreshCartPanel();
   });
+  // Cho sửa SL trực tiếp trên dòng (kể cả dòng vừa nạp từ lệnh/nhóm) — chặn vượt tồn Kho công
+  // ty hiện có, giống điều kiện lúc "+ Thêm dòng thủ công" ở rq_add bên dưới.
+  document.querySelectorAll("[data-cartqty]").forEach(inp => inp.onchange = () => guard(async () => {
+    const i = parseInt(inp.dataset.cartqty, 10);
+    const c = REQUEST_CART[i];
+    const qty = parseFloat(inp.value);
+    if (!qty || qty <= 0) throw new Error("Số lượng phải > 0.");
+    const onHand = materialAvailableCompanyQty(c.material_id, REQ_CACHE.lots);
+    if (qty > onHand) throw new Error(
+      `Số lượng (${qty}) vượt quá tồn kho CÔNG TY THỰC TẾ (đã trừ hàng đang chờ QC duyệt) của ${c.material_code} (${onHand}).`);
+    c.quantity = qty;
+    refreshCartPanel();
+  }));
   $("rq_submit").onclick = () => guard(async () => {
     if (!REQUEST_CART.length) throw new Error("Chưa có dòng nào trong đề nghị.");
+    // Dòng SL=0 (mã trong Nhóm vật tư thay thế đã đủ định mức từ mã cũ hơn, tự khoá lại lúc nạp
+    // từ lệnh) KHÔNG được tạo trong phiếu — chỉ gửi các dòng thực sự có số lượng > 0.
+    const submitRows = REQUEST_CART.filter(c => c.quantity > 0);
+    if (!submitRows.length) throw new Error("Không có dòng nào có số lượng > 0 để gửi đề nghị.");
+    // Chặn hẳn (không hỏi lại) nếu SL đang đề nghị vượt quá tồn kho THỰC TẾ (đã trừ hàng đang
+    // chờ QC duyệt) — không cho tạo phiếu xin nhiều hơn số thực sự có thể xuất ngay.
+    const overStockRows = submitRows.filter(c => c.quantity > materialAvailableCompanyQty(c.material_id, REQ_CACHE.lots));
+    if (overStockRows.length) {
+      const detail = overStockRows.map(c => `${c.material_code} (cần ${c.quantity}, tồn thực tế ` +
+        `${materialAvailableCompanyQty(c.material_id, REQ_CACHE.lots)} ${c.uom})`).join("; ");
+      throw new Error(`Không đủ tồn kho công ty thực tế để tạo đề nghị: ${detail}. Giảm số lượng hoặc chờ hàng hết QC.`);
+    }
+    // Dòng thuộc Nhóm vật tư thay thế mà SL > 0 nhưng còn mã cũ hơn trong nhóm CHƯA dùng hết tồn
+    // — nghĩa là đã bỏ qua FIFO (thường do sửa tay sau khi nạp từ lệnh) — hỏi xác nhận trước khi
+    // cho gửi. Không tính các mã "đã đủ từ mã cũ hơn" (SL=0, không nằm trong submitRows).
+    const groupCodesSeen = new Set();
+    const skippedFifoRows = [];
+    for (const c of submitRows) {
+      if (!c.group_code || groupCodesSeen.has(c.group_code)) continue;
+      groupCodesSeen.add(c.group_code);
+      const groupCartEntries = REQUEST_CART.filter(x => x.group_code === c.group_code);
+      const skipped = groupSkippedFifoMaterialIds(c.group_members, groupCartEntries, REQ_CACHE.lots);
+      for (const g of groupCartEntries) if (g.quantity > 0 && skipped.has(g.material_id)) skippedFifoRows.push(g);
+    }
+    if (skippedFifoRows.length) {
+      const names = skippedFifoRows.map(c => esc(c.material_code)).join(", ");
+      if (!confirm(`Mã ${names} không phải mã đang tồn cũ nhất còn khả dụng trong Nhóm vật tư thay thế của nó ` +
+                   `(không đảm bảo FIFO). Bạn có chắc chắn muốn gửi đề nghị với mã này không?`)) return;
+    }
     const note = $("rq_note").value.trim() || null;
     // 1 phiếu duy nhất gồm nhiều dòng vật tư — KHÔNG tách thành nhiều phiếu riêng.
     const res = await POST("/warehouse/requests", {
-      lines: REQUEST_CART.map(c => ({ material_id: c.material_id, quantity: c.quantity,
+      lines: submitRows.map(c => ({ material_id: c.material_id, quantity: c.quantity,
         uom: c.uom, preferred_lot_id: c.lot_id })),
       note,
       source_type: REQUEST_SOURCE ? REQUEST_SOURCE.type : null,
       source_id: REQUEST_SOURCE ? REQUEST_SOURCE.id : null,
     });
-    toast(`Đã gửi phiếu ${res.request_code} (${REQUEST_CART.length} dòng)`);
+    toast(`Đã gửi phiếu ${res.request_code} (${submitRows.length} dòng)`);
     REQUEST_CART = [];
     REQUEST_SOURCE = null;
     render("warehouse_px");
@@ -5268,10 +5529,76 @@ function sortLotsFifo(lotsArr) {
 
 // ---- Modal: nguyên liệu đã dùng cho 1 mẻ cụ thể (thuộc 1 mã nấu) — lấy thật từ tồn kho Kho phân xưởng ----
 async function openBrewMaterialsModal(brewId, batchId, batchCode, onBack) {
-  const [usage, lots, materials, brews] = await Promise.all([
+  const [usage, lots, materials, brews, altGroups] = await Promise.all([
     GET(`/brewing/brews/${brewId}/batches/${batchId}/materials`), GET("/lots"), GET("/materials"),
-    GET("/brewing/brews").catch(() => [])]);
+    GET("/brewing/brews").catch(() => []), GET("/material-alt-groups").catch(() => [])]);
   const matById = Object.fromEntries(materials.map(m => [m.material_id, m]));
+  const lotById = Object.fromEntries(lots.map(l => [l.lot_id, l]));
+  const matForUsage = (u) => { const lot = u.lot_id ? lotById[u.lot_id] : null; return lot ? matById[lot.material_id] : null; };
+  // Mã vật tư -> Nhóm vật tư thay thế chứa nó (nếu có) — dùng để: (1) cảnh báo khi mẻ này đã
+  // ghi nhận >1 mã KHÁC nhau cùng 1 nhóm (thường là do nhầm, nên chỉ dùng 1 mã thay thế cho
+  // nhóm đó), (2) ép ĐVT của các mã thuộc nhóm phải theo đúng MaterialAltGroup.unit (không cho
+  // tự chọn uom/alt_uom riêng của từng mã) để tồn kho các mã trong nhóm cộng được với nhau,
+  // (3) hỏi xác nhận trước khi thêm 1 mã KHÁC trong cùng nhóm vào mẻ đã có mã đó rồi.
+  const altGroupByMaterialId = {};
+  for (const g of altGroups) for (const mid of g.member_material_ids || []) altGroupByMaterialId[mid] = g;
+  const groupForcedUomHtml = (mat, attrs) => {
+    const grp = mat ? altGroupByMaterialId[mat.material_id] : null;
+    if (grp && grp.unit) {
+      const a = /=/.test(attrs) ? attrs : `id="${attrs}"`;
+      return `<input ${a} value="${esc(grp.unit)}" readonly title="Bắt buộc theo đơn vị của Nhóm vật tư thay thế &quot;${esc(grp.name)}&quot;" style="width:60px;background:var(--bg2,#f2f2f2)"/>`;
+    }
+    return altUomFieldHtml(mat, attrs, 60);
+  };
+  // Số lượng đã LƯU (BrewMaterialUsage.quantity) luôn ở đơn vị GỐC (mat.uom) của vật tư — khi ép
+  // hiển thị ĐVT theo đơn vị NHÓM (groupForcedUomHtml, có thể là mat.alt_uom, VD "kg" khi
+  // mat.uom="lon") phải quy đổi lại số hiển thị cho khớp, nếu không số trên màn hình (đơn vị
+  // gốc) sẽ bị đọc nhầm thành đơn vị nhóm — đây là lỗi cụ thể người dùng vừa báo (0.8 thay vì 4).
+  const groupForcedDisplayQty = (mat, baseQty) => {
+    const grp = mat ? altGroupByMaterialId[mat.material_id] : null;
+    if (grp && grp.unit && grp.unit === mat.alt_uom && mat.alt_uom_ratio) return baseQty * mat.alt_uom_ratio;
+    return baseQty;
+  };
+  // Lô cũ nhất trong Kho phân xưởng TÍNH CHUNG CẢ NHÓM vật tư thay thế (so giữa các mã thành
+  // viên với nhau, giống hệt cách "Đề nghị nhận kho" đang so — xem groupFifoBestMaterialId) —
+  // KHÁC workshopLots vốn chỉ sort trong phạm vi 1 mã. Vì workshopLots đã sort theo (material_id,
+  // created_at) nên .find() theo từng mid trả ngay lô cũ nhất của riêng mã đó.
+  const groupOldestWorkshopLot = (memberIds) => {
+    let best = null;
+    for (const mid of memberIds || []) {
+      const l = workshopLots.find(l => l.material_id === mid);
+      if (l && (!best || new Date(l.created_at) < new Date(best.created_at))) best = l;
+    }
+    return best;
+  };
+  // Badge FIFO cho 1 dòng gợi ý BOM: nếu mã thuộc Nhóm vật tư thay thế, phải so với lô cũ nhất
+  // CỦA CẢ NHÓM (không chỉ so với các lô khác của riêng mã đó) — mã không thuộc nhóm thì vẫn so
+  // trong phạm vi riêng mã như trước.
+  const bomRowFifoHtml = (mid, matLots, chosenLotId) => {
+    const grp = altGroupByMaterialId[mid];
+    if (grp) {
+      const groupBest = groupOldestWorkshopLot(grp.member_material_ids);
+      if (groupBest && chosenLotId === groupBest.lot_id) return '<span class="badge available">✓ Lô cũ nhất (FIFO)</span>';
+      const bestMat = groupBest ? matById[groupBest.material_id] : null;
+      return `<span class="badge on_hold" title="Còn lô cũ hơn ở mã ${esc(bestMat ? bestMat.code : "")} trong nhóm: ${esc(groupBest ? groupBest.lot_code : "")} (${groupBest ? fmt(groupBest.created_at) : ""})">⚠ Còn mã khác cũ hơn trong nhóm</span>`;
+    }
+    if (!matLots.length) return '<span class="muted">—</span>';
+    return matLots[0].lot_id === chosenLotId
+      ? '<span class="badge available">✓ Lô cũ nhất (FIFO)</span>'
+      : `<span class="badge on_hold" title="Còn lô cũ hơn: ${esc(matLots[0].lot_code)} (${fmt(matLots[0].created_at)})">⚠ Không phải lô cũ nhất</span>`;
+  };
+  // Mã khác (nếu có) trong CÙNG nhóm với `mat` đã được ghi nhận (Lưu thành công) cho mẻ này —
+  // dùng để cảnh báo cột "Cảnh báo" của dòng đã ghi nhận, và để hỏi xác nhận lúc thêm dòng mới.
+  const otherGroupMemberInUsage = (mat) => {
+    if (!mat) return null;
+    const grp = altGroupByMaterialId[mat.material_id];
+    if (!grp) return null;
+    for (const u2 of usage) {
+      const m2 = matForUsage(u2);
+      if (m2 && m2.material_id !== mat.material_id && grp.member_material_ids.includes(m2.material_id)) return m2;
+    }
+    return null;
+  };
 
   // Gợi ý số lượng NVL/mẻ — lấy từ Định mức của Lệnh nấu (mã nấu này thuộc về), đã tự
   // chia đều cho số mẻ khai báo lúc lập lệnh (BrewOrderMaterialLine.qty_per_batch).
@@ -5315,36 +5642,45 @@ async function openBrewMaterialsModal(brewId, batchId, batchCode, onBack) {
   modal(`<h3>Nguyên liệu dùng cho mẻ — <code class="k">${esc(batchCode)}</code></h3>
     <div class="muted" style="margin-bottom:8px">Nguyên liệu phân bổ vào mẻ nấu lấy từ tồn kho <b>Kho phân xưởng</b> — chọn lô sẽ trừ tồn kho thật ngay. Danh sách lô bên dưới đã sắp theo FIFO (cũ nhất trước) trong từng vật tư.</div>
     <div class="tablewrap"><table>
-      <thead><tr><th>Nguyên liệu</th><th>Số lô PM</th><th>Ngày lô</th><th>FIFO</th><th>Số lượng</th><th>ĐVT</th><th></th></tr></thead>
-      <tbody>${usage.map(u => `<tr>
-        <td>${esc(u.material_name)}</td><td class="muted">${esc(u.lot_pm || "—")}</td>
+      <thead><tr><th>Nguyên liệu</th><th>Cảnh báo</th><th>Số lô PM</th><th>Ngày lô</th><th>FIFO</th><th>Số lượng</th><th>ĐVT</th><th></th></tr></thead>
+      <tbody>${usage.map(u => {
+        const otherMember = otherGroupMemberInUsage(matForUsage(u));
+        return `<tr>
+        <td>${esc(u.material_name)}</td>
+        <td>${otherMember ? `<span class="badge on_hold" title="Mã ${esc(otherMember.code)} cũng thuộc Nhóm vật tư thay thế này đã được ghi nhận cho mẻ — 2 mã dùng thay thế nhau, thường chỉ nên giữ 1 mã">⚠️ Nhóm: ${esc(altGroupByMaterialId[matForUsage(u).material_id].name)}</span>` : '<span class="muted">—</span>'}</td>
+        <td class="muted">${esc(u.lot_pm || "—")}</td>
         <td class="muted">${u.lot_date ? fmt(u.lot_date) : "—"}</td>
         <td>${fifoBadgeHtml(u.fifo_ok)}</td>
-        <td><input type="number" step="any" class="bmu-edit-qty" data-usage="${esc(u.usage_id)}" value="${u.quantity}" style="width:90px"/></td>
-        <td><input class="bmu-edit-uom" data-usage="${esc(u.usage_id)}" value="${esc(u.uom)}" style="width:60px"/></td>
+        <td><input type="number" step="any" class="bmu-edit-qty" data-usage="${esc(u.usage_id)}" value="${groupForcedDisplayQty(matForUsage(u), u.quantity)}" style="width:90px"/></td>
+        <td>${groupForcedUomHtml(matForUsage(u), `class="bmu-edit-uom" data-usage="${esc(u.usage_id)}"`)}</td>
         <td style="white-space:nowrap">
           <button class="btn sm sec" data-saveusage="${esc(u.usage_id)}" data-name="${esc(u.material_name)}" data-lot="${esc(u.lot_pm || "")}" data-receipt="${esc(u.receipt_id || "")}" data-lotid="${esc(u.lot_id || "")}">Lưu</button>
           <button class="btn sm sec" data-delusage="${esc(u.usage_id)}">Xóa</button>
-        </td></tr>`).join("") ||
-        `<tr><td colspan=7 class="muted">Chưa ghi nguyên liệu nào cho mẻ này.</td></tr>`}</tbody>
+        </td></tr>`;
+      }).join("") ||
+        `<tr><td colspan=8 class="muted">Chưa ghi nguyên liệu nào cho mẻ này.</td></tr>`}</tbody>
     </table></div>
     ${bomMaterialIds.size ? `<h4 style="margin-top:14px">Nguyên liệu gợi ý từ Lệnh nấu (theo định mức)</h4>
     <div class="muted" style="font-size:12px;margin-bottom:6px">Hiện sẵn từng nguyên liệu trong định mức — lô đã chọn theo FIFO (cũ nhất trước), đổi sang lô khác nếu muốn. SL đã điền theo gợi ý định mức/mẻ, sửa lại theo thực tế dùng rồi bấm Thêm cho từng dòng.</div>
     <div class="tablewrap"><table>
-      <thead><tr><th>Nguyên liệu</th><th>Chọn lô (Kho phân xưởng)</th><th>Gợi ý</th><th>SL thực tế</th><th>ĐVT</th><th></th></tr></thead>
+      <thead><tr><th>Nguyên liệu</th><th>Cảnh báo</th><th>Chọn lô (Kho phân xưởng)</th><th>Tồn kho PX thực tế</th><th>FIFO</th><th>Gợi ý</th><th>SL thực tế</th><th>ĐVT</th><th></th></tr></thead>
       <tbody>${[...bomMaterialIds].map(mid => {
         const mat = matById[mid];
         const matLots = workshopLots.filter(l => l.material_id === mid);
         const sug = sugByMaterialId[mid];
         const rowOpts = matLots.map((l, i) => `<option value="${esc(l.lot_id)}" data-uom="${esc(l.uom)}" ${i === 0 ? "selected" : ""}>lô ${esc(l.lot_code)} (còn ${l.quantity}${l.uom}, nhập ${fmt(l.created_at)})</option>`).join("");
-        const defUom = matLots[0] ? matLots[0].uom : "kg";
-        return `<tr>
+        const firstLot = matLots[0];
+        const grp = altGroupByMaterialId[mid];
+        return `<tr data-bomrow="${esc(mid)}">
           <td>${esc(mat ? mat.name : mid)}</td>
-          <td>${matLots.length ? `<select class="bmu-row-lot" data-material="${esc(mid)}">${rowOpts}</select>` : `<span class="muted">Chưa có tồn Kho phân xưởng</span>`}</td>
+          <td>${grp ? `<span class="badge on_hold" title="Thuộc Nhóm vật tư thay thế &quot;${esc(grp.name)}&quot; — các mã trong nhóm dùng thay thế nhau, phải so FIFO giữa các mã trong nhóm trước khi chọn lô">⚠️ Nhóm: ${esc(grp.name)}</span>` : '<span class="muted">—</span>'}</td>
+          <td>${matLots.length ? `<select class="bmu-row-lot" data-material="${esc(mid)}">${rowOpts}</select>` : `<span style="color:var(--red)" title="Chưa chuyển vật tư này sang Kho phân xưởng — không thể ghi nhận dùng cho mẻ khi chưa có tồn">⚠ Chưa có tồn Kho phân xưởng</span>`}</td>
+          <td class="bmu-row-stock">${firstLot ? `${firstLot.quantity} ${esc(firstLot.uom)}` : '<span style="color:var(--red)">0</span>'}</td>
+          <td class="bmu-row-fifo">${bomRowFifoHtml(mid, matLots, firstLot ? firstLot.lot_id : null)}</td>
           <td class="muted">${sug != null ? sug : "—"}</td>
           <td><input type="number" step="any" class="bmu-row-qty" value="${sug != null ? sug : 0}" style="width:90px" ${matLots.length ? "" : "disabled"}/></td>
-          <td><input class="bmu-row-uom" value="${esc(defUom)}" style="width:60px" ${matLots.length ? "" : "disabled"}/></td>
-          <td><button class="btn sm" data-bomadd="${esc(mid)}" data-name="${esc(mat ? mat.name : mid)}" ${matLots.length ? "" : "disabled"}>Thêm</button></td>
+          <td>${groupForcedUomHtml(mat, `class="bmu-row-uom"`)}</td>
+          <td><button class="btn sm" data-bomadd="${esc(mid)}" data-name="${esc(mat ? mat.name : mid)}" ${matLots.length ? "" : `disabled title="Chưa có tồn Kho phân xưởng — không thể thêm"`}>Thêm</button></td>
         </tr>`;
       }).join("")}</tbody>
     </table></div>` : ""}
@@ -5358,20 +5694,53 @@ async function openBrewMaterialsModal(brewId, batchId, batchCode, onBack) {
       <div class="field"><label>Hoặc tên tự do</label><input id="bmu_name" placeholder="(nếu không chọn ở trên)"/></div>
       <div class="field"><label>Gợi ý (định mức/mẻ)</label><input id="bmu_qty_sug" value="—" disabled style="width:100px;opacity:.7"/></div>
       <div class="field"><label>SL thực tế</label><input id="bmu_qty" type="number" value="0"/></div>
-      <div class="field"><label>ĐVT</label><input id="bmu_uom" value="kg" size="4"/></div>
+      <div class="field"><label>ĐVT</label><span id="bmu_uom_wrap"></span></div>
       <button class="btn" id="bmu_add" style="align-self:flex-end">Thêm</button>
-    </div>`, onBack);
+    </div>`, onBack, true);
+  // Đổi lô đã chọn ở dòng gợi ý BOM → cập nhật lại cột "Tồn kho PX thực tế" + "FIFO" theo đúng
+  // lô đang chọn (không phải luôn là lô đầu tiên) — dùng chung dữ liệu matLots đã lọc theo mã.
+  document.querySelectorAll(".bmu-row-lot").forEach(sel => {
+    const mid = sel.dataset.material;
+    const matLots = workshopLots.filter(l => l.material_id === mid);
+    sel.onchange = () => {
+      const row = sel.closest("tr");
+      const chosen = matLots.find(l => l.lot_id === sel.value);
+      row.querySelector(".bmu-row-stock").textContent = chosen ? `${chosen.quantity} ${chosen.uom}` : "0";
+      row.querySelector(".bmu-row-fifo").innerHTML = bomRowFifoHtml(mid, matLots, sel.value);
+    };
+  });
   document.querySelectorAll("[data-bomadd]").forEach(b => b.onclick = () => guard(async () => {
     const row = b.closest("tr");
     const lotSel = row.querySelector(".bmu-row-lot");
-    const lotId = lotSel ? lotSel.value : null;
-    const qty = parseFloat(row.querySelector(".bmu-row-qty").value);
+    const mat = matById[b.dataset.bomadd];
+    if (!lotSel) throw new Error(`${mat ? mat.name : b.dataset.bomadd} chưa có tồn Kho phân xưởng — không thể ghi nhận dùng cho mẻ.`);
+    const lotId = lotSel.value;
+    const uomVal = row.querySelector(".bmu-row-uom").value.trim() || "kg";
+    const qty = altUomToBaseQty(mat, parseFloat(row.querySelector(".bmu-row-qty").value), uomVal);
     if (!qty || qty <= 0) throw new Error("Số lượng phải > 0.");
-    const uom = row.querySelector(".bmu-row-uom").value.trim() || "kg";
+    // Lô cụ thể của Kho phân xưởng đã chọn — SL dùng KHÔNG được vượt tồn thật của đúng lô đó.
+    const matLots = workshopLots.filter(l => l.material_id === b.dataset.bomadd);
+    const chosenLot = matLots.find(l => l.lot_id === lotId);
+    if (chosenLot && qty > chosenLot.quantity) throw new Error(
+      `Số lượng (${qty}${mat ? mat.uom : ""}) vượt quá tồn kho phân xưởng thực tế của lô đã chọn ` +
+      `(${chosenLot.quantity}${chosenLot.uom}).`);
+    // Mẻ đã ghi nhận 1 mã khác cùng Nhóm vật tư thay thế với mã đang thêm — 2 mã này dùng thay
+    // thế nhau, thêm cả 2 vào cùng 1 mẻ thường là nhầm nên hỏi xác nhận trước.
+    const otherMember = otherGroupMemberInUsage(mat);
+    if (otherMember) {
+      const grp = altGroupByMaterialId[mat.material_id];
+      if (!confirm(`Mẻ này đã ghi nhận mã ${otherMember.code} thuộc Nhóm vật tư thay thế "${grp.name}". ` +
+                   `Bạn có chắc chắn muốn thêm thêm mã ${mat ? mat.code : b.dataset.bomadd} (cùng nhóm) vào mẻ này không?`)) return;
+    }
     await POST(`/brewing/brews/${brewId}/batches/${batchId}/materials`, {
-      lot_id: lotId, material_name: lotId ? null : b.dataset.name, quantity: qty, uom });
+      lot_id: lotId, material_name: lotId ? null : b.dataset.name, quantity: qty, uom: mat ? mat.uom : uomVal });
     toast("Đã thêm nguyên liệu cho mẻ" + (lotId ? " — đã trừ tồn Kho phân xưởng" : "")); openBrewMaterialsModal(brewId, batchId, batchCode, onBack);
   }));
+  const refreshBmuUom = () => {
+    const opt = $("bmu_lot").selectedOptions[0];
+    const materialId = opt ? opt.dataset.material : "";
+    $("bmu_uom_wrap").innerHTML = groupForcedUomHtml(materialId ? matById[materialId] : null, "bmu_uom");
+  };
   $("bmu_lot").onchange = () => {
     const opt = $("bmu_lot").selectedOptions[0];
     const materialId = opt ? opt.dataset.material : "";
@@ -5380,25 +5749,42 @@ async function openBrewMaterialsModal(brewId, batchId, batchCode, onBack) {
     if (sug != null && (!$("bmu_qty").value || parseFloat($("bmu_qty").value) === 0)) {
       $("bmu_qty").value = sug;
     }
+    refreshBmuUom();
   };
+  refreshBmuUom();
   $("bmu_add").onclick = () => guard(async () => {
     const lotId = $("bmu_lot").value || null;
     const name = $("bmu_name").value.trim() || null;
     if (!lotId && !name) throw new Error("Chọn nguyên liệu từ tồn kho Kho phân xưởng, hoặc nhập tên tự do.");
-    const qty = parseFloat($("bmu_qty").value);
+    const lotOpt = $("bmu_lot").selectedOptions[0];
+    const mat = lotOpt && lotOpt.dataset.material ? matById[lotOpt.dataset.material] : null;
+    const qty = altUomToBaseQty(mat, parseFloat($("bmu_qty").value), $("bmu_uom").value);
     if (!qty || qty <= 0) throw new Error("Số lượng phải > 0.");
+    if (lotId) {
+      const chosenLot = workshopLotsAll.find(l => l.lot_id === lotId);
+      if (chosenLot && qty > chosenLot.quantity) throw new Error(
+        `Số lượng (${qty}${mat ? mat.uom : ""}) vượt quá tồn kho phân xưởng thực tế của lô đã chọn ` +
+        `(${chosenLot.quantity}${chosenLot.uom}).`);
+    }
+    const otherMember = otherGroupMemberInUsage(mat);
+    if (otherMember) {
+      const grp = altGroupByMaterialId[mat.material_id];
+      if (!confirm(`Mẻ này đã ghi nhận mã ${otherMember.code} thuộc Nhóm vật tư thay thế "${grp.name}". ` +
+                   `Bạn có chắc chắn muốn thêm thêm mã ${mat.code} (cùng nhóm) vào mẻ này không?`)) return;
+    }
     await POST(`/brewing/brews/${brewId}/batches/${batchId}/materials`, {
-      lot_id: lotId, material_name: name, quantity: qty, uom: $("bmu_uom").value.trim() || "kg" });
+      lot_id: lotId, material_name: name, quantity: qty, uom: mat ? mat.uom : ($("bmu_uom").value.trim() || "kg") });
     toast("Đã thêm nguyên liệu cho mẻ" + (lotId ? " — đã trừ tồn Kho phân xưởng" : "")); openBrewMaterialsModal(brewId, batchId, batchCode, onBack);
   });
   document.querySelectorAll("[data-saveusage]").forEach(b => b.onclick = () => guard(async () => {
     const usageId = b.dataset.saveusage;
-    const qty = parseFloat(document.querySelector(`.bmu-edit-qty[data-usage="${usageId}"]`).value);
-    const uom = document.querySelector(`.bmu-edit-uom[data-usage="${usageId}"]`).value.trim() || "kg";
+    const mat = b.dataset.lotid ? (lotById[b.dataset.lotid] ? matById[lotById[b.dataset.lotid].material_id] : null) : null;
+    const uomVal = document.querySelector(`.bmu-edit-uom[data-usage="${usageId}"]`).value.trim() || "kg";
+    const qty = altUomToBaseQty(mat, parseFloat(document.querySelector(`.bmu-edit-qty[data-usage="${usageId}"]`).value), uomVal);
     if (!qty || qty <= 0) throw new Error("Số lượng phải > 0.");
     await PUT(`/brewing/brews/${brewId}/batches/${batchId}/materials/${usageId}`, {
       lot_id: b.dataset.lotid || null, receipt_id: b.dataset.receipt || null, material_name: b.dataset.name,
-      lot_pm: b.dataset.lot || null, quantity: qty, uom });
+      lot_pm: b.dataset.lot || null, quantity: qty, uom: mat ? mat.uom : uomVal });
     toast("Đã lưu"); openBrewMaterialsModal(brewId, batchId, batchCode, onBack);
   }));
   document.querySelectorAll("[data-delusage]").forEach(b => b.onclick = () => guard(async () => {
@@ -5413,6 +5799,8 @@ async function openFilterMaterialsModal(filterId, filterOrderId, filterCode) {
   const [usage, lots, materials] = await Promise.all([
     GET(`/brewing/filters/${filterId}/materials`), GET("/lots"), GET("/materials")]);
   const matById = Object.fromEntries(materials.map(m => [m.material_id, m]));
+  const lotById = Object.fromEntries(lots.map(l => [l.lot_id, l]));
+  const matForUsage = (u) => { const lot = u.lot_id ? lotById[u.lot_id] : null; return lot ? matById[lot.material_id] : null; };
 
   // Gợi ý số lượng NVL — lấy từ dòng vật tư đã khai báo lúc lập Lệnh lọc
   // (FilterOrderMaterialLine.quantity, không chia theo mẻ vì lệnh không có qty_per_batch).
@@ -5448,7 +5836,7 @@ async function openFilterMaterialsModal(filterId, filterOrderId, filterCode) {
         <td class="muted">${u.lot_date ? fmt(u.lot_date) : "—"}</td>
         <td>${fifoBadgeHtml(u.fifo_ok)}</td>
         <td><input type="number" step="any" class="fmu-edit-qty" data-usage="${esc(u.usage_id)}" value="${u.quantity}" style="width:90px"/></td>
-        <td><input class="fmu-edit-uom" data-usage="${esc(u.usage_id)}" value="${esc(u.uom)}" style="width:60px"/></td>
+        <td>${altUomFieldHtml(matForUsage(u), `class="fmu-edit-uom" data-usage="${esc(u.usage_id)}"`, 60)}</td>
         <td style="white-space:nowrap">
           <button class="btn sm sec" data-savefusage="${esc(u.usage_id)}" data-name="${esc(u.material_name)}" data-lot="${esc(u.lot_pm || "")}" data-receipt="${esc(u.receipt_id || "")}" data-lotid="${esc(u.lot_id || "")}">Lưu</button>
           <button class="btn sm sec" data-delfusage="${esc(u.usage_id)}">Xóa</button>
@@ -5464,13 +5852,12 @@ async function openFilterMaterialsModal(filterId, filterOrderId, filterCode) {
         const matLots = workshopLots.filter(l => l.material_id === mid);
         const sug = sugByMaterialId[mid];
         const rowOpts = matLots.map((l, i) => `<option value="${esc(l.lot_id)}" data-uom="${esc(l.uom)}" ${i === 0 ? "selected" : ""}>lô ${esc(l.lot_code)} (còn ${l.quantity}${l.uom}, nhập ${fmt(l.created_at)})</option>`).join("");
-        const defUom = matLots[0] ? matLots[0].uom : "kg";
         return `<tr>
           <td>${esc(mat ? mat.name : mid)}</td>
           <td>${matLots.length ? `<select class="fmu-row-lot">${rowOpts}</select>` : `<span class="muted">Chưa có tồn Kho phân xưởng</span>`}</td>
           <td class="muted">${sug != null ? sug : "—"}</td>
           <td><input type="number" step="any" class="fmu-row-qty" value="${sug != null ? sug : 0}" style="width:90px" ${matLots.length ? "" : "disabled"}/></td>
-          <td><input class="fmu-row-uom" value="${esc(defUom)}" style="width:60px" ${matLots.length ? "" : "disabled"}/></td>
+          <td>${altUomFieldHtml(mat, `class="fmu-row-uom"${matLots.length ? "" : " disabled"}`, 60)}</td>
           <td><button class="btn sm" data-fmadd="${esc(mid)}" ${matLots.length ? "" : "disabled"}>Thêm</button></td>
         </tr>`;
       }).join("")}</tbody>
@@ -5481,19 +5868,25 @@ async function openFilterMaterialsModal(filterId, filterOrderId, filterCode) {
       <div class="field"><label>Hoặc tên tự do</label><input id="fmu_name" placeholder="(nếu không chọn ở trên)"/></div>
       <div class="field"><label>Gợi ý (Lệnh lọc)</label><input id="fmu_qty_sug" value="—" disabled style="width:100px;opacity:.7"/></div>
       <div class="field"><label>SL thực tế</label><input id="fmu_qty" type="number" value="0"/></div>
-      <div class="field"><label>ĐVT</label><input id="fmu_uom" value="kg" size="4"/></div>
+      <div class="field"><label>ĐVT</label><span id="fmu_uom_wrap"></span></div>
       <button class="btn" id="fmu_add" style="align-self:flex-end">Thêm</button>
     </div>`}`);
   document.querySelectorAll("[data-fmadd]").forEach(b => b.onclick = () => guard(async () => {
     const row = b.closest("tr");
     const lotSel = row.querySelector(".fmu-row-lot");
     const lotId = lotSel ? lotSel.value : null;
-    const qty = parseFloat(row.querySelector(".fmu-row-qty").value);
+    const mat = matById[b.dataset.fmadd];
+    const uomVal = row.querySelector(".fmu-row-uom").value.trim() || "kg";
+    const qty = altUomToBaseQty(mat, parseFloat(row.querySelector(".fmu-row-qty").value), uomVal);
     if (!qty || qty <= 0) throw new Error("Số lượng phải > 0.");
-    const uom = row.querySelector(".fmu-row-uom").value.trim() || "kg";
-    await POST(`/brewing/filters/${filterId}/materials`, { lot_id: lotId, material_name: null, quantity: qty, uom });
+    await POST(`/brewing/filters/${filterId}/materials`, { lot_id: lotId, material_name: null, quantity: qty, uom: mat ? mat.uom : uomVal });
     toast("Đã thêm nguyên liệu cho mẻ lọc" + (lotId ? " — đã trừ tồn Kho phân xưởng" : "")); openFilterMaterialsModal(filterId, filterOrderId, filterCode);
   }));
+  const refreshFmuUom = () => {
+    const opt = $("fmu_lot").selectedOptions[0];
+    const materialId = opt ? opt.dataset.material : "";
+    $("fmu_uom_wrap").innerHTML = altUomFieldHtml(materialId ? matById[materialId] : null, "fmu_uom", 60);
+  };
   if ($("fmu_lot")) $("fmu_lot").onchange = () => {
     const opt = $("fmu_lot").selectedOptions[0];
     const materialId = opt ? opt.dataset.material : "";
@@ -5502,25 +5895,30 @@ async function openFilterMaterialsModal(filterId, filterOrderId, filterCode) {
     if (sug != null && (!$("fmu_qty").value || parseFloat($("fmu_qty").value) === 0)) {
       $("fmu_qty").value = sug;
     }
+    refreshFmuUom();
   };
+  if ($("fmu_lot")) refreshFmuUom();
   if ($("fmu_add")) $("fmu_add").onclick = () => guard(async () => {
     const lotId = $("fmu_lot").value || null;
     const name = bomMaterialIds.size ? null : ($("fmu_name")?.value.trim() || null);
     if (!lotId && !name) throw new Error("Chọn nguyên liệu từ tồn kho Kho phân xưởng" + (bomMaterialIds.size ? " (đúng vật tư của Lệnh lọc)." : ", hoặc nhập tên tự do."));
-    const qty = parseFloat($("fmu_qty").value);
+    const lotOpt = $("fmu_lot").selectedOptions[0];
+    const mat = lotOpt && lotOpt.dataset.material ? matById[lotOpt.dataset.material] : null;
+    const qty = altUomToBaseQty(mat, parseFloat($("fmu_qty").value), $("fmu_uom").value);
     if (!qty || qty <= 0) throw new Error("Số lượng phải > 0.");
     await POST(`/brewing/filters/${filterId}/materials`, {
-      lot_id: lotId, material_name: name, quantity: qty, uom: $("fmu_uom").value.trim() || "kg" });
+      lot_id: lotId, material_name: name, quantity: qty, uom: mat ? mat.uom : ($("fmu_uom").value.trim() || "kg") });
     toast("Đã thêm nguyên liệu cho mẻ lọc" + (lotId ? " — đã trừ tồn Kho phân xưởng" : "")); openFilterMaterialsModal(filterId, filterOrderId, filterCode);
   });
   document.querySelectorAll("[data-savefusage]").forEach(b => b.onclick = () => guard(async () => {
     const usageId = b.dataset.savefusage;
-    const qty = parseFloat(document.querySelector(`.fmu-edit-qty[data-usage="${usageId}"]`).value);
-    const uom = document.querySelector(`.fmu-edit-uom[data-usage="${usageId}"]`).value.trim() || "kg";
+    const mat = b.dataset.lotid ? (lotById[b.dataset.lotid] ? matById[lotById[b.dataset.lotid].material_id] : null) : null;
+    const uomVal = document.querySelector(`.fmu-edit-uom[data-usage="${usageId}"]`).value.trim() || "kg";
+    const qty = altUomToBaseQty(mat, parseFloat(document.querySelector(`.fmu-edit-qty[data-usage="${usageId}"]`).value), uomVal);
     if (!qty || qty <= 0) throw new Error("Số lượng phải > 0.");
     await PUT(`/brewing/filters/${filterId}/materials/${usageId}`, {
       lot_id: b.dataset.lotid || null, receipt_id: b.dataset.receipt || null, material_name: b.dataset.name,
-      lot_pm: b.dataset.lot || null, quantity: qty, uom });
+      lot_pm: b.dataset.lot || null, quantity: qty, uom: mat ? mat.uom : uomVal });
     toast("Đã lưu"); openFilterMaterialsModal(filterId, filterOrderId, filterCode);
   }));
   document.querySelectorAll("[data-delfusage]").forEach(b => b.onclick = () => guard(async () => {
@@ -8503,28 +8901,41 @@ VIEWS.reports = async function () {
 
   if (sec === "material") {
     const days = SUB.reports_days || 90;
-    const rep = await GET("/reports/material-norm?days=" + days);
-    body = `<div class="panel"><h2>BC định mức nguyên vật liệu <span class="muted">(${rep.batch_count} mẻ)</span></h2>
+    const tolPct = SUB.reports_tol || 5;
+    const rep = await GET(`/reports/material-norm?days=${days}&tol_pct=${tolPct}`);
+    const normModuleBlock = (title, hint, data, showNorm) => `
+      <div class="panel"><h2>${title} <span class="muted">(${data.order_count != null ? data.order_count + " lệnh" : data.record_count + " mẻ chiết"})</span></h2>
+      <div class="muted" style="margin-bottom:8px">${hint}</div>
+      <input class="searchbox" data-tbl="${data._tid}" placeholder="Tìm theo tên vật tư, trạng thái..."/>
+      <div class="tablewrap"><table id="${data._tid}"><thead><tr><th>Vật tư</th>${showNorm ? "<th>Số lệnh</th>" : ""}
+        ${showNorm ? "<th>Định mức</th>" : ""}<th>Thực tế</th>${showNorm ? "<th>Chênh</th><th>%</th>" : ""}<th>ĐVT</th>${showNorm ? "<th>Trạng thái</th>" : ""}</tr></thead>
+      <tbody>${data.materials.map(m => `<tr class="${showNorm ? `row-${{dat:"blue",vuot:"red",thieu:"green"}[m.status] || ""}` : ""}">
+        <td>${esc(m.material_name || "")}</td>${showNorm ? `<td>${m.orders}</td>` : ""}
+        ${showNorm ? `<td>${m.planned.toLocaleString("vi-VN")}</td>` : ""}<td>${m.actual.toLocaleString("vi-VN")}</td>
+        ${showNorm ? `<td style="color:${m.diff > 0 ? "var(--red)" : m.diff < 0 ? "var(--orange)" : "var(--muted)"}">${m.diff > 0 ? "+" : ""}${m.diff.toLocaleString("vi-VN")}</td><td>${m.pct}%</td>` : ""}
+        <td>${esc(m.uom || "")}</td>
+        ${showNorm ? `<td>${badge((normStatus[m.status] || ["planned", m.status])[0])}${(normStatus[m.status] || ["", m.status])[1]}</td>` : ""}</tr>`).join("") ||
+        `<tr><td colspan=${showNorm ? 7 : 3} class="muted">Chưa có dữ liệu.</td></tr>`}</tbody></table></div>
+      ${data.orders ? `<h3 style="margin-top:14px">Theo lệnh</h3>
+      <input class="searchbox" data-tbl="${data._tid}_o" placeholder="Tìm theo số lệnh, trạng thái..."/>
+      <div class="tablewrap"><table id="${data._tid}_o"><thead><tr><th>Số lệnh</th><th>Tổng định mức</th><th>Tổng thực tế</th><th>Chênh</th><th>%</th><th>Trạng thái</th></tr></thead>
+      <tbody>${data.orders.map(o => `<tr class="row-${{dat:"blue",vuot:"red",thieu:"green"}[o.status] || ""}">
+        <td class="code">${esc(o.order_code)}</td><td>${o.planned_total.toLocaleString("vi-VN")}</td><td>${o.actual_total.toLocaleString("vi-VN")}</td>
+        <td style="color:${o.diff > 0 ? "var(--red)" : o.diff < 0 ? "var(--orange)" : "var(--muted)"}">${o.diff > 0 ? "+" : ""}${o.diff.toLocaleString("vi-VN")}</td><td>${o.pct}%</td>
+        <td>${badge((normStatus[o.status] || ["planned", o.status])[0])}${(normStatus[o.status] || ["", o.status])[1]}</td></tr>`).join("") ||
+        '<tr><td colspan=6 class="muted">—</td></tr>'}</tbody></table></div>` : ""}
+      </div>`;
+    rep.nau._tid = "t_norm_nau"; rep.loc._tid = "t_norm_loc"; rep.chiet._tid = "t_norm_chiet";
+    body = `<div class="panel">
       <div class="row"><div class="field"><label>Kỳ (ngày gần đây)</label>
         <select id="rp_days"><option value="30">30 ngày</option><option value="90" ${days == 90 ? "selected" : ""}>90 ngày</option><option value="365">365 ngày</option><option value="3650">Tất cả</option></select></div>
+        <div class="field"><label>Ngưỡng đạt (±%)</label><input id="rp_tol" type="number" step="0.5" min="0" value="${tolPct}" style="width:90px"/></div>
       </div>
-      <h3>Tổng hợp theo vật tư (định mức scale ↔ thực tế)</h3>
-      <input class="searchbox" data-tbl="t_matnorm" placeholder="Tìm theo mã vật tư, trạng thái..."/>
-      <div class="tablewrap"><table id="t_matnorm"><thead><tr><th>Vật tư</th><th>Số mẻ</th><th>Định mức</th><th>Thực tế</th><th>Chênh</th><th>%</th><th>ĐVT</th><th>Trạng thái</th></tr></thead>
-      <tbody>${rep.materials.map(m => `<tr class="row-${{dat:"blue",vuot:"red",thieu:"green"}[m.status] || ""}">
-        <td><code class="k">${esc(m.material_code)}</code></td><td>${m.batches}</td>
-        <td>${m.planned.toLocaleString("vi-VN")}</td><td>${m.actual.toLocaleString("vi-VN")}</td>
-        <td style="color:${m.diff > 0 ? "var(--red)" : m.diff < 0 ? "var(--orange)" : "var(--muted)"}">${m.diff > 0 ? "+" : ""}${m.diff.toLocaleString("vi-VN")}</td>
-        <td>${m.pct}%</td><td>${esc(m.uom || "")}</td>
-        <td>${badge((normStatus[m.status] || ["planned", m.status])[0])}${(normStatus[m.status] || ["", m.status])[1]}</td></tr>`).join("") || '<tr><td colspan=8 class="muted">Chưa có dữ liệu.</td></tr>'}</tbody></table></div>
-      <h3>Theo mẻ</h3>
-      <input class="searchbox" data-tbl="t_matnorm_batch" placeholder="Tìm theo mã mẻ, trạng thái..."/>
-      <div class="tablewrap"><table id="t_matnorm_batch"><thead><tr><th>Mã mẻ</th><th>Trạng thái</th><th>SL kế hoạch</th><th>Tổng định mức</th><th>Tổng thực tế</th></tr></thead>
-      <tbody>${rep.batches.map(b => `<tr><td><code class="k">${esc(b.batch_code)}</code></td><td>${badge(b.state)}</td>
-        <td>${b.planned_qty.toLocaleString("vi-VN")} ${esc(b.uom)}</td><td>${b.planned_total.toLocaleString("vi-VN")}</td>
-        <td>${b.actual_total.toLocaleString("vi-VN")}</td></tr>`).join("") || '<tr><td colspan=5 class="muted">—</td></tr>'}</tbody></table></div>
-      <div class="muted" style="margin-top:8px">Định mức = BOM của từng mẻ đã scale theo SL kế hoạch; thực tế = tiêu thụ thật (genealogy). Ngưỡng đạt: ±5%.</div>
-    </div>`;
+      <div class="muted">Đối chiếu định mức (đã chốt lúc lập Lệnh nấu/Lệnh lọc) ↔ thực tế tiêu thụ, theo đúng 3 khâu SX: Nấu, Lọc, Chiết. Chiết chưa có định mức đóng gói theo SKU nên chỉ hiện thực tế đã dùng.</div>
+    </div>
+    ${normModuleBlock("🍺 Nấu", "Định mức = BrewOrderMaterialLine (đã chốt lúc lập Lệnh nấu); thực tế = NVL đã ghi cho các mẻ (BrewMaterialUsage), cộng dồn qua mọi mã thành viên nếu là Nhóm vật tư thay thế.", rep.nau, true)}
+    ${normModuleBlock("🧪 Lọc", "Định mức = FilterOrderMaterialLine (VD bột trợ lọc/diatomite); thực tế = NVL đã ghi cho các mẻ lọc (FilterMaterialUsage).", rep.loc, true)}
+    ${normModuleBlock("📦 Chiết", "Chiết chưa có định mức đóng gói theo SKU — chỉ hiện thực tế đã dùng (CO2, hóa chất vệ sinh, nắp/lon...).", rep.chiet, false)}`;
   } else if (sec === "filling") {
     // Hiện khung màn hình NGAY (không đợi CSDL SCADA ngoài) — dữ liệu tải bất đồng bộ sau,
     // đổ vào #fp_data khi xong, tránh cảm giác "bấm vào tab rất lâu mới thấy gì".
@@ -8760,10 +9171,11 @@ VIEWS.reports = async function () {
       render("reports");
     };
   }
-  if (sec === "material") { wirePaginate("t_matnorm", 10); wirePaginate("t_matnorm_batch", 10); }
   if (sec === "material") {
+    ["t_norm_nau", "t_norm_nau_o", "t_norm_loc", "t_norm_loc_o", "t_norm_chiet"].forEach(id => wirePaginate(id, 10));
     $("rp_days").value = String(SUB.reports_days || 90);
     $("rp_days").onchange = () => { SUB.reports_days = parseInt($("rp_days").value); render("reports"); };
+    $("rp_tol").onchange = () => { SUB.reports_tol = parseFloat($("rp_tol").value) || 5; render("reports"); };
   }
   if (sec === "lostatus") {
     $("lst_days").value = String(SUB.lostatus_days || 180);
@@ -9231,6 +9643,10 @@ VIEWS.master = async function () {
             "<option value=''>(chưa có nhóm — khai báo ở panel Nhóm vật tư)</option>"}</select></div>
           <div class="field"><label>Tồn tối thiểu</label><input id="mt_stockmin" type="number" step="0.01" placeholder="(tuỳ chọn)" style="width:110px"/></div>
         </div>
+        <div class="row" style="margin-top:8px">
+          <div class="field"><label>Đơn vị phụ <span class="muted">(tuỳ chọn)</span></label><input id="mt_altuom" placeholder="VD: kg" style="width:90px"/></div>
+          <div class="field"><label>Tỷ lệ quy đổi <span class="muted">(1 ĐVT = ? đơn vị phụ)</span></label><input id="mt_altratio" type="number" step="0.0001" placeholder="VD: 2" style="width:110px"/></div>
+        </div>
         <button class="btn" id="mt_add" style="margin-top:10px">+ Tạo vật tư</button>` : ""}
         <input class="searchbox" data-tbl="t_materials" placeholder="Tìm mã/tên vật tư..." style="margin-top:10px"/>
         <div class="tablewrap" style="margin-top:6px"><table id="t_materials">
@@ -9284,10 +9700,13 @@ VIEWS.master = async function () {
           <input type="text" id="mag_members_search" placeholder="Tìm theo mã/tên vật tư..." style="width:100%;margin-bottom:4px"/>
           <select id="mag_members" multiple size="6" style="width:100%">${materials.map(m => `<option value="${esc(m.material_id)}">${esc(m.code)} — ${esc(m.name)}</option>`).join("")}</select>
         </div>
+        <div class="field" style="margin-top:8px;max-width:260px"><label>Đơn vị nhóm <span class="muted">(mọi thành viên phải khai được đơn vị này)</span></label>
+          <select id="mag_unit"><option value="">(chọn thành viên trước)</option></select>
+        </div>
         <button class="btn" id="mag_add" style="margin-top:10px">+ Tạo nhóm</button>` : ""}
         <input class="searchbox" data-tbl="t_matgroups_alt" placeholder="Tìm mã/tên nhóm..." style="margin-top:10px"/>
         <div class="tablewrap" style="margin-top:6px"><table id="t_matgroups_alt">
-          <thead><tr><th>Mã</th><th>Tên</th><th>Thành viên</th><th>Trạng thái</th>${canManage ? "<th></th>" : ""}</tr></thead>
+          <thead><tr><th>Mã</th><th>Tên</th><th>Thành viên</th><th>ĐVT nhóm</th><th>Trạng thái</th>${canManage ? "<th></th>" : ""}</tr></thead>
           <tbody>${materialAltGroups.map(g => {
             const memberNames = (g.member_material_ids || []).map(mid => {
               const m = materials.find(x => x.material_id === mid); return m ? `${m.code} — ${m.name}` : mid;
@@ -9295,12 +9714,13 @@ VIEWS.master = async function () {
             return `<tr>
             <td><code class="k">${esc(g.code)}</code></td><td>${esc(g.name)}</td>
             <td class="muted">${esc(memberNames || "—")}</td>
+            <td>${esc(g.unit || "—")}</td>
             <td>${g.active ? '<span style="color:var(--green)">Đang dùng</span>' : '<span class="muted">Đã ẩn</span>'}</td>
             ${canManage ? `<td style="white-space:nowrap">
               <button class="btn sm sec" data-emag="${esc(g.group_id)}">Sửa</button>
               <button class="btn sm sec" data-magdel="${esc(g.group_id)}">Xóa</button>
             </td>` : ""}</tr>`; }).join("") ||
-            `<tr><td colspan="${canManage ? 5 : 4}" class="muted">Chưa có nhóm vật tư thay thế nào.</td></tr>`}</tbody>
+            `<tr><td colspan="${canManage ? 6 : 5}" class="muted">Chưa có nhóm vật tư thay thế nào.</td></tr>`}</tbody>
         </table></div>
       </div>
 
@@ -9708,12 +10128,21 @@ VIEWS.master = async function () {
       toast("Đã xóa nhóm vật tư"); render("master");
     }));
     wireMultiSelectFilter($("mag_members_search"), $("mag_members"));
+    const matByIdMag = Object.fromEntries(materials.map(m => [m.material_id, m]));
+    const refreshMagUnit = () => {
+      const members = [...$("mag_members").selectedOptions].map(o => o.value);
+      const opts = groupUnitOptions(matByIdMag, members);
+      $("mag_unit").innerHTML = groupUnitSelectHtml(opts, $("mag_unit").value);
+    };
+    if ($("mag_members")) { $("mag_members").onchange = refreshMagUnit; refreshMagUnit(); }
     if ($("mag_add")) $("mag_add").onclick = () => guard(async () => {
       const code = $("mag_code").value.trim(), name = $("mag_name").value.trim();
       const members = [...$("mag_members").selectedOptions].map(o => o.value);
+      const unit = $("mag_unit").value;
       if (!code || !name) throw new Error("Nhập đủ Mã nhóm và Tên nhóm.");
       if (!members.length) throw new Error("Chọn ít nhất 1 vật tư thành viên.");
-      await POST("/material-alt-groups", { code, name, member_material_ids: members });
+      if (!unit) throw new Error("Các vật tư thành viên không có đơn vị chung (đơn vị chính hoặc đơn vị phụ) — không thể tạo nhóm. Kiểm tra Đơn vị phụ ở Danh mục Vật tư nếu cần.");
+      await POST("/material-alt-groups", { code, name, member_material_ids: members, unit });
       toast("Đã tạo nhóm vật tư thay thế"); render("master");
     });
     document.querySelectorAll("[data-emag]").forEach(b => b.onclick = () => {
@@ -9725,14 +10154,27 @@ VIEWS.master = async function () {
           <input type="text" id="emag_members_search" placeholder="Tìm theo mã/tên vật tư..." style="width:100%;margin-bottom:4px"/>
           <select id="emag_members" multiple size="6" style="width:100%">${materials.map(m => `<option value="${esc(m.material_id)}" ${(g.member_material_ids || []).includes(m.material_id) ? "selected" : ""}>${esc(m.code)} — ${esc(m.name)}</option>`).join("")}</select>
         </div>
+        <div class="field" style="margin-top:8px;max-width:260px"><label>Đơn vị nhóm <span class="muted">(mọi thành viên phải khai được đơn vị này)</span></label>
+          <select id="emag_unit"></select>
+        </div>
         <div class="field" style="margin-top:8px"><label><input type="checkbox" id="emag_active" ${g.active ? "checked" : ""}/> Đang dùng (hiện trong danh sách chọn khi khai công thức)</label></div>
         <button class="btn" id="emag_save" style="margin-top:12px">Lưu</button>`);
       wireMultiSelectFilter($("emag_members_search"), $("emag_members"));
+      const matByIdEmag = Object.fromEntries(materials.map(m => [m.material_id, m]));
+      const refreshEmagUnit = () => {
+        const members = [...$("emag_members").selectedOptions].map(o => o.value);
+        const opts = groupUnitOptions(matByIdEmag, members);
+        $("emag_unit").innerHTML = groupUnitSelectHtml(opts, g.unit);
+      };
+      $("emag_members").onchange = refreshEmagUnit;
+      refreshEmagUnit();
       $("emag_save").onclick = () => guard(async () => {
         const members = [...$("emag_members").selectedOptions].map(o => o.value);
+        const unit = $("emag_unit").value;
         if (!members.length) throw new Error("Chọn ít nhất 1 vật tư thành viên.");
+        if (!unit) throw new Error("Các vật tư thành viên không có đơn vị chung (đơn vị chính hoặc đơn vị phụ) — không thể lưu. Kiểm tra Đơn vị phụ ở Danh mục Vật tư nếu cần.");
         await PUT(`/material-alt-groups/${g.group_id}`, { code: $("emag_code").value.trim(),
-          name: $("emag_name").value.trim(), member_material_ids: members, active: $("emag_active").checked });
+          name: $("emag_name").value.trim(), member_material_ids: members, unit, active: $("emag_active").checked });
         closeModal(); toast("Đã cập nhật"); render("master");
       });
     });
@@ -9744,7 +10186,9 @@ VIEWS.master = async function () {
     $("mt_add").onclick = () => guard(async () => {
       await POST("/materials", { code: $("mt_code").value.trim(), name: $("mt_name").value.trim(),
         uom: $("mt_uom").value.trim() || "kg", category: $("mt_cat").value,
-        stock_min: $("mt_stockmin").value === "" ? null : parseFloat($("mt_stockmin").value) });
+        stock_min: $("mt_stockmin").value === "" ? null : parseFloat($("mt_stockmin").value),
+        alt_uom: $("mt_altuom").value.trim() || null,
+        alt_uom_ratio: $("mt_altratio").value === "" ? null : parseFloat($("mt_altratio").value) });
       toast("Đã tạo vật tư"); render("master");
     });
     if ($("ln_line_add")) $("ln_line_add").onclick = () => guard(async () => {
@@ -9875,11 +10319,17 @@ VIEWS.master = async function () {
         <div class="field" style="margin-top:8px"><label>Nhóm</label><select id="em_cat">${materialGroups.map(g => `<option value="${esc(g.code)}" ${g.code === m.category ? "selected" : ""}>${esc(g.name)}${g.active ? "" : " (đã ẩn)"}</option>`).join("") ||
           "<option value=''>(chưa có nhóm)</option>"}</select></div>
         <div class="field" style="margin-top:8px"><label>Tồn tối thiểu</label><input id="em_stockmin" type="number" step="0.01" value="${m.stock_min ?? ""}" placeholder="(tuỳ chọn)"/></div>
+        <div class="row" style="margin-top:8px">
+          <div class="field"><label>Đơn vị phụ <span class="muted">(tuỳ chọn)</span></label><input id="em_altuom" value="${esc(m.alt_uom || "")}" placeholder="VD: kg" style="width:90px"/></div>
+          <div class="field"><label>Tỷ lệ quy đổi <span class="muted">(1 ${esc(m.uom)} = ? đơn vị phụ)</span></label><input id="em_altratio" type="number" step="0.0001" value="${m.alt_uom_ratio ?? ""}" placeholder="VD: 2" style="width:110px"/></div>
+        </div>
         <button class="btn" id="em_save" style="margin-top:12px">Lưu</button>`);
       $("em_save").onclick = () => guard(async () => {
         await PUT(`/materials/${m.material_id}`, { code: $("em_code").value.trim(), name: $("em_name").value.trim(),
           uom: $("em_uom").value.trim(), category: $("em_cat").value || null,
-          stock_min: $("em_stockmin").value === "" ? null : parseFloat($("em_stockmin").value) });
+          stock_min: $("em_stockmin").value === "" ? null : parseFloat($("em_stockmin").value),
+          alt_uom: $("em_altuom").value.trim() || null,
+          alt_uom_ratio: $("em_altratio").value === "" ? null : parseFloat($("em_altratio").value) });
         closeModal(); toast("Đã cập nhật"); render("master");
       });
     });

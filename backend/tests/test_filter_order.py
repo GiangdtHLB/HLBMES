@@ -481,7 +481,8 @@ def test_create_order_with_alt_group_material_line_sums_members(client, admin_h,
     m1 = _a_material_with_stock(client, admin_h, "MAT-FOGRP01A", qty_company=3, qty_workshop=2)
     m2 = _a_material_with_stock(client, admin_h, "MAT-FOGRP01B", qty_company=1, qty_workshop=4)
     g = client.post("/api/material-alt-groups", headers=admin_h,
-                    json={"code": "GRP-FO01", "name": "Nhóm test FO01", "member_material_ids": [m1, m2]})
+                    json={"code": "GRP-FO01", "name": "Nhóm test FO01", "unit": "kg",
+                          "member_material_ids": [m1, m2]})
     assert g.status_code == 201, g.text
 
     r = _a_filter_order(client, admin_h, "LOC-GRP01", [ferment_id],
@@ -504,7 +505,8 @@ def test_create_order_with_alt_group_insufficient_total_is_blocked(client, admin
     m1 = _a_material_with_stock(client, admin_h, "MAT-FOGRP02A", qty_company=1, qty_workshop=1)
     m2 = _a_material_with_stock(client, admin_h, "MAT-FOGRP02B", qty_company=1, qty_workshop=1)
     g = client.post("/api/material-alt-groups", headers=admin_h,
-                    json={"code": "GRP-FO02", "name": "Nhóm test FO02", "member_material_ids": [m1, m2]})
+                    json={"code": "GRP-FO02", "name": "Nhóm test FO02", "unit": "kg",
+                          "member_material_ids": [m1, m2]})
     assert g.status_code == 201, g.text
 
     r = _a_filter_order(client, admin_h, "LOC-GRP02", [ferment_id],

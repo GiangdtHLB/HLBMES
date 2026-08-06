@@ -141,6 +141,74 @@ def test_preview_source_materials_filter_master_order_sums_across_children(clien
     assert lines[0]["quantity"] == 6   # 3 + 3 gộp từ 2 lệnh nhỏ
 
 
+def test_preview_source_materials_brew_order_surfaces_group_line_instead_of_dropping(client, admin_h):
+    """Regression: dòng NVL khai theo Nhóm vật tư thay thế (alt_group_code, material_id=None)
+    từng bị BỎ QUA HOÀN TOÀN ở đây (services/warehouse.py::_aggregate_source_material_lines)
+    vì code cũ chặn `not l["material_id"]` — giờ phải trả về riêng với is_group=True kèm
+    member_material_ids, để frontend cảnh báo thủ kho tự chọn mã cụ thể."""
+    m1 = _create_material(client, admin_h, "SRC-GRP-MAT-1")
+    m2 = _create_material(client, admin_h, "SRC-GRP-MAT-2")
+    g = client.post("/api/material-alt-groups", headers=admin_h, json={
+        "code": "SRC-ALTGRP-01", "name": "Nhóm test nạp lệnh", "unit": "kg",
+        "member_material_ids": [m1, m2]}).json()
+
+    products = client.get("/api/products", headers=admin_h).json()
+    product_id = next(p["product_id"] for p in products if p["code"] == "BIA-LAGER")
+    formula = client.post("/api/formulas", headers=admin_h, json={
+        "code": "CT-SRCGRP01", "product_id": product_id, "base_qty": 1000, "base_uom": "L",
+        "materials": [{"alt_group_code": g["code"], "qty": 500, "uom": "kg"}]}).json()
+    assert client.post(f"/api/formulas/{formula['formula_id']}/activate", headers=admin_h).status_code == 200
+
+    order = client.post("/api/brewing/orders", headers=admin_h, json={
+        "order_code": "LN-SRCGRP01", "product_id": product_id,
+        "planned_batch_count": 1, "planned_volume_hl": 100, "volume_tolerance_hl": 0,
+        "auto_from_bom": True, "lines": [],
+    })
+    assert order.status_code == 201, order.text
+    order_id = order.json()["brew_order_id"]
+
+    r = client.get("/api/warehouse/requests/source-preview", headers=admin_h,
+                   params={"source_type": "brew_order", "source_id": order_id})
+    assert r.status_code == 200, r.text
+    lines = r.json()
+    group_line = next(l for l in lines if l["is_group"])
+    assert group_line["material_id"] is None
+    assert group_line["group_code"] == g["code"]
+    assert set(group_line["member_material_ids"]) == {m1, m2}
+    assert group_line["quantity"] == 500
+
+
+def test_preview_source_materials_filter_master_order_surfaces_group_line(client, admin_h, thukho_h, vanhanh_h):
+    m1 = _create_material(client, admin_h, "SRC-FGRP-MAT-1")
+    m2 = _create_material(client, admin_h, "SRC-FGRP-MAT-2")
+    _receive(client, thukho_h, "LOT-SRCFGRP-01", m1, 20)
+    g = client.post("/api/material-alt-groups", headers=admin_h, json={
+        "code": "SRC-FALTGRP-01", "name": "Nhóm test lọc", "unit": "kg",
+        "member_material_ids": [m1, m2]}).json()
+
+    f1 = _setup_ferment(client, admin_h, vanhanh_h, "FGRP-A")
+    f2 = _setup_ferment(client, admin_h, vanhanh_h, "FGRP-B")
+    payload = {"order_code": "LOC-FGRP01", "children": [
+        {"blend_mode": "khong_phoi", "tanks": [{"ferment_id": f1, "planned_v_dich_hl": 50}],
+         "volume_tolerance_hl": 0, "lines": [{"alt_group_code": g["code"], "quantity": 3}]},
+        {"blend_mode": "khong_phoi", "tanks": [{"ferment_id": f2, "planned_v_dich_hl": 50}],
+         "volume_tolerance_hl": 0, "lines": [{"alt_group_code": g["code"], "quantity": 3}]},
+    ]}
+    r = client.post("/api/brewing/filter-master-orders", headers=admin_h, json=payload)
+    assert r.status_code == 201, r.text
+    master_id = r.json()["filter_master_order_id"]
+
+    r2 = client.get("/api/warehouse/requests/source-preview", headers=admin_h,
+                    params={"source_type": "filter_master_order", "source_id": master_id})
+    assert r2.status_code == 200, r2.text
+    lines = r2.json()
+    group_line = next(l for l in lines if l["is_group"])
+    assert group_line["material_id"] is None
+    assert group_line["group_code"] == g["code"]
+    assert set(group_line["member_material_ids"]) == {m1, m2}
+    assert group_line["quantity"] == 6   # 3 + 3 gộp từ 2 lệnh nhỏ
+
+
 def test_preview_source_materials_invalid_type_rejected(client, admin_h):
     r = client.get("/api/warehouse/requests/source-preview", headers=admin_h,
                    params={"source_type": "bogus", "source_id": "x"})

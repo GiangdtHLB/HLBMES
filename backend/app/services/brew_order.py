@@ -110,13 +110,33 @@ def build_lines_from_bom(db: Session, product_id: str, planned_batch_count: int,
     return out
 
 
-def _line_stock(l: dict, company_stock: dict, workshop_stock: dict) -> tuple:
+def _convert_member_qty(mat, target_unit: str | None, qty: float) -> float:
+    """Quy đổi tồn kho (lưu theo uom chính của vật tư) về đơn vị của nhóm vật tư thay thế
+    (MaterialAltGroup.unit) trước khi cộng dồn với các thành viên khác — nếu không, cộng thô
+    số lượng khác đơn vị (VD kg + Lon) sẽ ra kết quả vô nghĩa. validate_alt_group_unit đã bắt
+    buộc mọi thành viên khai được target_unit (bằng uom chính hoặc alt_uom) lúc tạo/sửa nhóm."""
+    if not mat or not target_unit or mat.uom == target_unit:
+        return qty
+    if mat.alt_uom == target_unit and mat.alt_uom_ratio:
+        return qty * mat.alt_uom_ratio
+    return qty
+
+
+def _line_stock(l: dict, company_stock: dict, workshop_stock: dict, materials_by_id: dict | None = None) -> tuple:
     """Tồn công ty/phân xưởng cho 1 dòng NVL — dòng nhóm vật tư thay thế (member_material_ids
-    không rỗng) cộng dồn qua MỌI mã thành viên; dòng thường tra theo material_id đơn lẻ."""
+    không rỗng) cộng dồn qua MỌI mã thành viên, quy đổi về đơn vị của nhóm (l["uom"]) trước khi
+    cộng nếu có materials_by_id; dòng thường tra theo material_id đơn lẻ."""
     member_ids = l.get("member_material_ids") or []
     if member_ids:
-        company = sum(company_stock.get(mid, 0) or 0 for mid in member_ids)
-        workshop = sum(workshop_stock.get(mid, 0) or 0 for mid in member_ids)
+        target_unit = l.get("uom")
+        if materials_by_id:
+            company = sum(_convert_member_qty(materials_by_id.get(mid), target_unit, company_stock.get(mid, 0) or 0)
+                          for mid in member_ids)
+            workshop = sum(_convert_member_qty(materials_by_id.get(mid), target_unit, workshop_stock.get(mid, 0) or 0)
+                          for mid in member_ids)
+        else:
+            company = sum(company_stock.get(mid, 0) or 0 for mid in member_ids)
+            workshop = sum(workshop_stock.get(mid, 0) or 0 for mid in member_ids)
         return company, workshop
     material_id = l.get("material_id")
     return company_stock.get(material_id, 0) or 0, workshop_stock.get(material_id, 0) or 0
@@ -179,7 +199,7 @@ def _annotate_stock(lines: list, company_stock: dict, workshop_stock: dict, mate
     out = []
     for l in lines:
         has_target = bool(l.get("material_id") or l.get("member_material_ids"))
-        company, workshop = _line_stock(l, company_stock, workshop_stock)
+        company, workshop = _line_stock(l, company_stock, workshop_stock, materials_by_id)
         qty_total = l.get("qty_total")
         shortage = (not l.get("is_header")) and qty_total is not None and qty_total > (company + workshop)
         member_ids = l.get("member_material_ids") or []
@@ -232,10 +252,11 @@ def _insert_sub_order(db: Session, master_order_id, seq: int, order_code: str, o
     )
 
     company_stock, workshop_stock = _stock_snapshot(db)
+    materials_by_id = _materials_by_id(db)
     for i, line in enumerate(lines):
         material_id = line.get("material_id")
         has_target = bool(material_id or line.get("member_material_ids"))
-        company, workshop = _line_stock(line, company_stock, workshop_stock)
+        company, workshop = _line_stock(line, company_stock, workshop_stock, materials_by_id)
         db.add(BrewOrderMaterialLine(
             line_id=new_id(), brew_order_id=order.brew_order_id, seq=line.get("seq", i),
             stt_label=line.get("stt_label"), is_header=line.get("is_header", False),
@@ -301,10 +322,11 @@ def update_order(db: Session, brew_order_id: str, payload: dict, user) -> BrewOr
     )
 
     company_stock, workshop_stock = _stock_snapshot(db)
+    materials_by_id = _materials_by_id(db)
     for i, line in enumerate(lines):
         material_id = line.get("material_id")
         has_target = bool(material_id or line.get("member_material_ids"))
-        company, workshop = _line_stock(line, company_stock, workshop_stock)
+        company, workshop = _line_stock(line, company_stock, workshop_stock, materials_by_id)
         db.add(BrewOrderMaterialLine(
             line_id=new_id(), brew_order_id=order.brew_order_id, seq=line.get("seq", i),
             stt_label=line.get("stt_label"), is_header=line.get("is_header", False),
