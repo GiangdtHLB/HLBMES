@@ -130,9 +130,12 @@ def test_units_import_requires_admin(client, admin_h, thukho_h):
 
 def test_units_import_creates_units_and_reports_row_errors(client, admin_h):
     fp = _create_finished_product(client, admin_h, "OBX-FP-B")
-    content = _sheet(_FP_HEADERS, [
-        ["2020-01-15", "OBX-FP-B", "OBX-FPLOT-02", 240],
-        ["2020-01-16", "OBX-FP-KHONGTON", "OBX-FPLOT-03", 24],
+    loc = client.post("/api/wms/locations", headers=admin_h,
+                      json={"code": "OBX-LOC-B", "name": "Kệ test OBX-FP-B", "capacity": 100})
+    assert loc.status_code == 201, loc.text
+    content = _sheet(_FP_HEADERS + ["VỊ TRÍ"], [
+        ["2020-01-15", "OBX-FP-B", "OBX-FPLOT-02", 240, "OBX-LOC-B"],
+        ["2020-01-16", "OBX-FP-KHONGTON", "OBX-FPLOT-03", 24, "OBX-LOC-B"],
     ])
     r = client.post("/api/wms/units/opening-balance/import", headers=admin_h,
                     files={"file": ("ob.xlsx", content,
@@ -181,9 +184,10 @@ def test_material_import_optional_kcs_lot_no_column(client, admin_h):
     assert lot2["kcs_lot_no"] is None
 
 
-def test_units_import_optional_location_column(client, admin_h):
-    """Cột VỊ TRÍ là tuỳ chọn — mã hợp lệ thì gán vị trí ngay lúc tạo, mã không tồn tại báo lỗi
-    dòng đó (không hỏng các dòng khác), để trống thì đơn vị ở trạng thái "chưa cất" như cũ."""
+def test_units_import_location_column_is_mandatory(client, admin_h):
+    """Cột VỊ TRÍ nay là BẮT BUỘC (mirror build_units — không còn "chưa cất" cho luồng nhập tồn
+    đầu): mã hợp lệ thì gán vị trí ngay lúc tạo, mã không tồn tại hoặc để trống đều báo lỗi
+    riêng dòng đó (không hỏng các dòng khác)."""
     fp = _create_finished_product(client, admin_h, "OBX-FP-LOC")
     loc = client.post("/api/wms/locations", headers=admin_h,
                       json={"code": "OBX-LOC-01", "name": "Kệ test vị trí", "capacity": 100})
@@ -198,15 +202,16 @@ def test_units_import_optional_location_column(client, admin_h):
                                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")})
     assert r.status_code == 201, r.text
     result = r.json()
-    assert len(result["created"]) == 2
-    assert len(result["failed"]) == 1
-    assert "OBX-LOC-KHONGTON" in result["failed"][0]["reason"]
+    assert len(result["created"]) == 1
+    assert len(result["failed"]) == 2
+    reasons = " ".join(f["reason"] for f in result["failed"])
+    assert "OBX-LOC-KHONGTON" in reasons
+    assert "vị trí" in reasons.lower()
 
     units = client.get("/api/wms/units", headers=admin_h, params={"product": "OBX-FP-LOC"}).json()
     u1 = next(u for u in units if u["lot_code"] == "OBX-FPLOC-LOT-01")
-    u3 = next(u for u in units if u["lot_code"] == "OBX-FPLOC-LOT-03")
     assert u1["location"] == "OBX-LOC-01"
-    assert u3["location"] is None
+    assert not any(u["lot_code"] in ("OBX-FPLOC-LOT-02", "OBX-FPLOC-LOT-03") for u in units)
 
 
 def test_build_units_blocks_when_location_over_capacity(client, admin_h):

@@ -68,19 +68,20 @@ def test_shipment_classification_report_buckets_independently(client, admin_h):
         day = "2026-06-17"
         t = datetime.fromisoformat(day + "T01:00:00")  # 08h VN -> Ca 1, cùng "ngày" bucket
 
-        def _u(qty, shipment=None, near_expiry=False, consigned=False):
+        def _u(qty, shipment=None, line_type=None, near_expiry=False, consigned=False):
             u = FinishedGoodsUnit(unit_id=new_id(), unit_code=f"U-{new_id()[:8]}", unit_type="vi",
                                   finished_product_id=fp.finished_product_id, product_name=fp.code,
                                   quantity=qty, status="shipped", shipped_at=t, created_by="admin",
                                   shipment_id=shipment.shipment_id if shipment else None,
+                                  shipment_line_type=line_type,
                                   is_near_expiry=near_expiry, is_consigned=consigned)
             db.add(u)
             return u
 
-        _u(10, shipment=promo_ship)                 # promo
-        _u(5, shipment=return_ship)                  # return
-        _u(7, near_expiry=True)                      # cận date, phiếu thường (không set)
-        _u(3, consigned=True)                        # gửi, phiếu thường
+        _u(10, shipment=promo_ship, line_type="promo")     # promo
+        _u(5, shipment=return_ship, line_type="return")    # return
+        _u(7, near_expiry=True)                      # cận date, dòng thường (không set)
+        _u(3, consigned=True)                        # gửi, dòng thường
         db.commit()
     finally:
         db.close()

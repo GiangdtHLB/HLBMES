@@ -143,6 +143,42 @@ def shipment_net_liters_report(date_from: datetime = None, date_to: datetime = N
     return result
 
 
+# ---- Báo cáo lượt xe & tải trọng / tổng hợp bia gửi / định mức nhiên liệu ----
+def _default_report_range(date_from, date_to, days=30):
+    if not date_from or not date_to:
+        ref_day = (utcnow() - timedelta(days=days)).replace(hour=6, minute=0, second=0, microsecond=0)
+        date_from = date_from or ref_day
+        date_to = date_to or utcnow()
+    return date_from, date_to
+
+
+@router.get("/vehicle-trip-report")
+def vehicle_trip_report(date_from: datetime = None, date_to: datetime = None,
+                        db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    from ..services import wms as wms_svc
+    date_from, date_to = _default_report_range(date_from, date_to)
+    return {"date_from": date_from.isoformat(), "date_to": date_to.isoformat(),
+            "rows": wms_svc.vehicle_trip_report(db, date_from, date_to)}
+
+
+@router.get("/consigned-summary-report")
+def consigned_summary_report(date_from: datetime = None, date_to: datetime = None,
+                             db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    from ..services import wms as wms_svc
+    date_from, date_to = _default_report_range(date_from, date_to)
+    return {"date_from": date_from.isoformat(), "date_to": date_to.isoformat(),
+            "rows": wms_svc.consigned_summary_report(db, date_from, date_to)}
+
+
+@router.get("/fuel-efficiency-report")
+def fuel_efficiency_report(date_from: datetime = None, date_to: datetime = None,
+                           db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    from ..services import wms as wms_svc
+    date_from, date_to = _default_report_range(date_from, date_to)
+    return {"date_from": date_from.isoformat(), "date_to": date_to.isoformat(),
+            "rows": wms_svc.fuel_efficiency_report(db, date_from, date_to)}
+
+
 @router.get("/low-yield-filter-alerts")
 def low_yield_filter_alerts(days: int = 5, limit: int = 5, db: Session = Depends(get_db),
                             user: User = Depends(get_current_user)):

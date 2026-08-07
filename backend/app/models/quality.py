@@ -26,6 +26,9 @@ class QualityResult(Base):
     method: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
     instrument: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
     value: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    # Giá trị dạng chữ — chỉ dùng khi QCParameter.value_type == "text" (ghi chú tự do, không so
+    # target/USL/LSL, không tính pass/fail). NULL ở mọi chỉ tiêu số/đạt-không đạt.
+    value_text: Mapped[Optional[str]] = mapped_column(Unicode(1000), nullable=True)
     # Giá trị in trên bao bì/CA của nhà cung cấp — khác `value` (nhà máy tự đo); chỉ mang tính
     # tham khảo/báo cáo, KHÔNG dùng để tính `status` (pass/fail vẫn chỉ theo `value` vs limit).
     ca_value: Mapped[Optional[float]] = mapped_column(Float, nullable=True)

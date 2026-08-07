@@ -84,6 +84,14 @@ class FinishedProduct(Base):
     # "Kết thúc chiết" (xem routers/brewing.py::finish_bottle); để trống = bỏ qua đối chiếu
     # (SKU cũ chưa khai báo, không ép buộc backfill ngay).
     unit_volume_l: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    # Khối lượng (kg) — dùng để tính tải trọng hàng/chuyến xe (xem services/wms.py::
+    # _line_weight_kg, vehicle_trip_report). weight_primary_kg = khối lượng 1 đơn vị đóng gói
+    # CHÍNH của SKU này (1 vỉ NGUYÊN cả bao bì nếu unit_type="vi", hoặc 1 keg nếu unit_type=
+    # "keg") — khác unit_volume_l (dung tích LON đơn lẻ), vì vỉ nguyên còn có khối lượng bao
+    # bì/dây co ngoài N lon. weight_single_kg = khối lượng 1 lon/chai lẻ — chỉ có ý nghĩa với
+    # SKU unit_type="vi" khi bị phân rã (xem decompose_unit/decompose_batch, unit_type="lon").
+    weight_primary_kg: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    weight_single_kg: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
 
 
 class MaterialGroup(Base):

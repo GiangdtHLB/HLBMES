@@ -6,8 +6,9 @@ from sqlalchemy.orm import Session
 from ..database import get_db
 from ..schemas import (ConsignedEntryIn, ConsignedEntryUpdate, DecomposeBatchIn, DeleteByLotIn, FreeIssueBatchIn,
                        LoadSlipHeaderUpdate, NearExpiryEntryIn, NearExpiryEntryUpdate, PutawayIn, RelocateBatchIn,
-                       ShipmentIn, ShipmentUpdate, UnitBuildIn, UnitDeleteIn, UnitTransferIn,
-                       VehicleIn, VehicleUpdate, WmsLocationIn, WmsLocationUpdate)
+                       ShipmentIn, ShipmentTripIn, ShipmentUpdate, UnitBuildIn, UnitDeleteIn, UnitTransferIn,
+                       VehicleIn, VehicleUpdate, WmsLocationIn, WmsLocationUpdate, WmsTransferIn, WmsTransferTripIn,
+                       WmsTransferUpdate, WmsWarehouseIn, WmsWarehouseUpdate)
 from ..security import User, get_current_user, require_perm
 from ..services import load_slip as load_slip_svc
 from ..services import wms as svc
@@ -18,6 +19,33 @@ router = APIRouter(prefix="/api/wms", tags=["wms"])
 @router.get("/summary")
 def summary(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     return svc.summary(db)
+
+
+@router.get("/warehouses")
+def warehouses(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    return svc.list_warehouses(db)
+
+
+@router.post("/warehouses", status_code=201)
+def create_warehouse(payload: WmsWarehouseIn, db: Session = Depends(get_db),
+                     user: User = Depends(get_current_user)):
+    require_perm(user, "warehouse.receive")
+    wh = svc.create_warehouse(db, payload.model_dump())
+    return {"warehouse_id": wh.warehouse_id, "code": wh.code}
+
+
+@router.put("/warehouses/{warehouse_id}")
+def update_warehouse(warehouse_id: str, payload: WmsWarehouseUpdate, db: Session = Depends(get_db),
+                     user: User = Depends(get_current_user)):
+    require_perm(user, "warehouse.receive")
+    wh = svc.update_warehouse(db, warehouse_id, payload.model_dump(exclude_unset=True))
+    return {"warehouse_id": wh.warehouse_id, "code": wh.code}
+
+
+@router.delete("/warehouses/{warehouse_id}", status_code=204)
+def delete_warehouse(warehouse_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    require_perm(user, "warehouse.receive")
+    svc.delete_warehouse(db, warehouse_id)
 
 
 @router.get("/locations")
@@ -52,12 +80,17 @@ def vehicle_list(db: Session = Depends(get_db), user: User = Depends(get_current
     return svc.list_vehicles(db)
 
 
+@router.get("/vehicles/consigned-eligible")
+def vehicle_list_consigned_eligible(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    return svc.consigned_eligible_vehicles(db)
+
+
 @router.post("/vehicles", status_code=201)
 def vehicle_create(payload: VehicleIn, db: Session = Depends(get_db),
                    user: User = Depends(get_current_user)):
     require_perm(user, "warehouse.receive")
     v = svc.create_vehicle(db, payload.model_dump())
-    return {"vehicle_id": v.vehicle_id, "plate": v.plate}
+    return {"vehicle_id": v.vehicle_id, "vehicle_code": v.vehicle_code, "plate": v.plate}
 
 
 @router.put("/vehicles/{vehicle_id}")
@@ -65,7 +98,7 @@ def vehicle_update(vehicle_id: str, payload: VehicleUpdate, db: Session = Depend
                    user: User = Depends(get_current_user)):
     require_perm(user, "warehouse.receive")
     v = svc.update_vehicle(db, vehicle_id, payload.model_dump(exclude_unset=True))
-    return {"vehicle_id": v.vehicle_id, "plate": v.plate}
+    return {"vehicle_id": v.vehicle_id, "vehicle_code": v.vehicle_code, "plate": v.plate}
 
 
 @router.delete("/vehicles/{vehicle_id}", status_code=204)
@@ -196,7 +229,7 @@ def shipments(limit: int = 200, offset: int = 0, db: Session = Depends(get_db),
 @router.post("/shipments", status_code=201)
 def create_shipment(payload: ShipmentIn, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     header = payload.model_dump(include={"note", "recipient_name", "recipient_dept", "driver_name",
-                                          "vehicle_plate", "from_location", "delivery_place", "shipment_type"})
+                                          "vehicle_plate", "vehicle_id", "from_location", "delivery_place"})
     lines = [l.model_dump() for l in payload.lines]
     return svc.create_shipment(db, payload.ship_to_id, lines, user, header=header)
 
@@ -214,6 +247,48 @@ def undo_shipment(shipment_id: str, db: Session = Depends(get_db), user: User = 
 @router.post("/shipments/{shipment_id}/confirm")
 def confirm_shipment(shipment_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     return svc.confirm_shipment(db, shipment_id, user)
+
+
+@router.post("/shipments/{shipment_id}/trip")
+def update_shipment_trip(shipment_id: str, payload: ShipmentTripIn, db: Session = Depends(get_db),
+                         user: User = Depends(get_current_user)):
+    return svc.update_shipment_trip(db, shipment_id, payload.km, payload.fuel_liters, user)
+
+
+# ---- Điều chuyển nội bộ — mirror /shipments nhưng đích là 1 WmsLocation, không giảm tồn kho ----
+@router.get("/transfers")
+def transfers(limit: int = 200, offset: int = 0, db: Session = Depends(get_db),
+             user: User = Depends(get_current_user)):
+    return svc.list_transfers(db, limit, offset)
+
+
+@router.post("/transfers", status_code=201)
+def create_transfer(payload: WmsTransferIn, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    header = payload.model_dump(include={"note", "driver_name", "vehicle_plate", "vehicle_id"})
+    lines = [l.model_dump() for l in payload.lines]
+    return svc.create_transfer(db, payload.to_location_id, lines, user, header=header)
+
+
+@router.put("/transfers/{transfer_id}")
+def update_transfer(transfer_id: str, payload: WmsTransferUpdate, db: Session = Depends(get_db),
+                    user: User = Depends(get_current_user)):
+    return svc.update_transfer(db, transfer_id, payload.model_dump(exclude_unset=True), user)
+
+
+@router.post("/transfers/{transfer_id}/undo")
+def undo_transfer(transfer_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    return svc.undo_transfer(db, transfer_id, user)
+
+
+@router.post("/transfers/{transfer_id}/confirm")
+def confirm_transfer(transfer_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    return svc.confirm_transfer(db, transfer_id, user)
+
+
+@router.post("/transfers/{transfer_id}/trip")
+def update_transfer_trip(transfer_id: str, payload: WmsTransferTripIn, db: Session = Depends(get_db),
+                         user: User = Depends(get_current_user)):
+    return svc.update_transfer_trip(db, transfer_id, payload.km, payload.fuel_liters, user)
 
 
 # ---- Nhập bia cận date ----
@@ -250,7 +325,7 @@ def undo_near_expiry(entry_id: str, db: Session = Depends(get_db), user: User = 
 def create_consigned(payload: ConsignedEntryIn, db: Session = Depends(get_db),
                      user: User = Depends(get_current_user)):
     return svc.create_consigned_entry(db, payload.finished_product_id, payload.quantity,
-                                      payload.location_id, user, payload.note)
+                                      payload.location_id, payload.vehicle_id, user, payload.note)
 
 
 @router.get("/consigned")

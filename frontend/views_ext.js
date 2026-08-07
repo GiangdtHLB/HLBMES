@@ -9,6 +9,7 @@
   ["recipeadv", "dispense", "qclab", "oee", "isa88", "schedule", "wms", "packaging", "cip"].forEach(v => { if (!ALL_VIEWS.includes(v)) ALL_VIEWS.push(v); });
 
   let XK_CART = [];   // {product_name, lot_code, unit_type, quantity} — Xuất kho: nhiều dòng, gửi 1 lần
+  let DC_CART = [];   // {product_name, lot_code, unit_type, quantity} — Điều chuyển: mirror XK_CART
 
   const num = (id) => { const x = $(id).value; return x === "" ? null : parseFloat(x); };
   const opt = (arr, val, lab, sel) => arr.map(o =>
@@ -220,18 +221,18 @@
     const dash = (v) => (v === null || v === undefined || v === "" ? "" : esc(String(v)));
     const linesForMatch = (shipment.lines || []).map((l, i) =>
       ({ line_id: i, product_name: nameByCode[l.product] || l.product, quantity: l.count,
-         consigned: l.consigned, near_expiry: l.near_expiry }));
+         consigned: l.consigned, near_expiry: l.near_expiry, type: l.type }));
     // Ghi chú theo loại xuất: bia gửi/khuyến mại/đổi trả cần ghi rõ trên biên bản giấy để bên
     // nhận đối chiếu đúng bản chất lô hàng; RIÊNG bia cận date thì KHÔNG ghi gì thêm (theo yêu
     // cầu người dùng — hàng cận date bàn giao như hàng thường, không cần lộ thông tin này ra
-    // biên bản). shipment_type ("promo"/"return") áp dụng cho CẢ phiếu; near_expiry/consigned
-    // là cờ RIÊNG TỪNG DÒNG (xem services/wms.py::list_shipments).
+    // biên bản). "Loại xuất" (promo/return) giờ RIÊNG TỪNG DÒNG, giống near_expiry/consigned
+    // (xem services/wms.py::list_shipments, FinishedGoodsUnit.shipment_line_type).
     const lineNoteFor = (l) => {
       if (!l || l.near_expiry) return null;
       const parts = [];
       if (l.consigned) parts.push("Bia gửi");
-      if (shipment.shipment_type === "promo") parts.push("Bia khuyến mại");
-      else if (shipment.shipment_type === "return") parts.push("Bia đổi trả");
+      if (l.type === "promo") parts.push("Bia khuyến mại");
+      else if (l.type === "return") parts.push("Bia đổi trả");
       return parts.join(" · ") || null;
     };
     const { fixedRows, extra } = matchLoadSlipLines(linesForMatch);
@@ -253,6 +254,37 @@
       // đến (đã hiện riêng ở dòng "Nơi xuất đến" phía trên) — recipient_name/dept vẫn có thể
       // là NPP/khách hàng nên không dùng ở khối ký nhận này nữa.
       recipient: { name: shipment.driver_name, title: "Lái xe", unit: shipment.vehicle_plate, dept: null },
+      recipientUnitLabel: "Biển số xe",
+      rowsHtml: fixedHtml + extraHtml,
+    });
+    openPrintWindow(html);
+  }
+
+  // ---------- Điều chuyển nội bộ (WmsTransfer) → cùng mẫu Biên bản bàn giao hàng hóa, đích là
+  // 1 vị trí kho (không phải nhà phân phối) — mirror printShipmentHandoverSlip ----------
+  async function printTransferHandoverSlip(transfer) {
+    let nameByCode = {};
+    try {
+      const fps = await GET("/finished-products");
+      nameByCode = Object.fromEntries(fps.map(p => [p.code, p.name]));
+    } catch (e) { /* vẫn in được — chỉ thiếu tên đầy đủ, dùng tạm mã SKU */ }
+    const dash = (v) => (v === null || v === undefined || v === "" ? "" : esc(String(v)));
+    const linesForMatch = (transfer.lines || []).map((l, i) =>
+      ({ line_id: i, product_name: nameByCode[l.product] || l.product, quantity: l.count }));
+    const { fixedRows, extra } = matchLoadSlipLines(linesForMatch);
+    const keptFixed = fixedRows.filter(g => g.qty != null);
+    const fixedHtml = keptFixed.map((g, i) => `<tr>
+      <td style="text-align:center">${i + 1}</td><td>${esc(g.label)}</td>
+      <td style="text-align:center">${g.qty}</td><td style="text-align:center">${esc(g.dvt)}</td>
+      <td>${esc(g.mota)}</td><td></td></tr>`).join("");
+    const extraHtml = extra.map((l, i) => `<tr>
+      <td style="text-align:center">${keptFixed.length + i + 1}</td><td>${dash(l.product_name)}</td>
+      <td style="text-align:center">${l.quantity}</td><td></td><td></td><td></td></tr>`).join("");
+    const html = bienBanBanGiaoHtml({
+      code: transfer.transfer_code, dateObj: new Date(transfer.created_at),
+      destination: transfer.to_location_name || transfer.to_location_code,
+      issuer: { name: null, title: null, dept: "Kho thành phẩm" },
+      recipient: { name: transfer.driver_name, title: "Lái xe", unit: transfer.vehicle_plate, dept: null },
       recipientUnitLabel: "Biển số xe",
       rowsHtml: fixedHtml + extraHtml,
     });
@@ -774,15 +806,18 @@
   // #P3-4 — WMS kho thành phẩm (vỉ/keg + barcode)
   // ======================================================================
   VIEWS.wms = async function () {
+    // "[mã kho] mã vị trí - tên vị trí" — hiện cả kho thành phẩm lẫn vị trí trong kho đó.
+    const locWhPrefix = (l) => l.warehouse_name ? `[${esc(l.warehouse_name)}] ` : "";
+    const locZoneSuffix = (l) => l.zone ? ` - Khu ${esc(l.zone)}` : "";
     function locationCell(g) {
-      const parts = (g.locations || []).map(l => l.name ? `${esc(l.code || "?")} - ${esc(l.name)}` : esc(l.code || "?"));
+      const parts = (g.locations || []).map(l => `${locWhPrefix(l)}${l.name ? `${esc(l.code || "?")} - ${esc(l.name)}` : esc(l.code || "?")}${locZoneSuffix(l)}`);
       if (g.unplaced > 0) parts.push(`chưa cất×${g.unplaced}`);
       return parts.join(", ") || "—";
     }
     // Chỉ liệt kê các vị trí ĐÃ CẤT thật (không gồm "chưa cất") — dùng cho giỏ Xuất kho vì
     // hàng chưa cất không còn được phép chọn xuất (xem renderLots sellable/exclude_unplaced).
     function placedLocationLabel(g) {
-      const parts = (g.locations || []).map(l => l.name ? `${esc(l.code || "?")} - ${esc(l.name)}` : esc(l.code || "?"));
+      const parts = (g.locations || []).map(l => `${locWhPrefix(l)}${l.name ? `${esc(l.code || "?")} - ${esc(l.name)}` : esc(l.code || "?")}${locZoneSuffix(l)}`);
       return parts.join(", ") || "—";
     }
     const sec = SUB.wms || "kho";
@@ -791,15 +826,21 @@
       { key: "capvao", label: "🚚 Cất vào vị trí" }, { key: "tudo", label: "🚫 Xuất tự do" },
       { key: "lenhdonghang", label: "Lệnh đóng hàng" }, { key: "aging", label: "📦 Tồn kho theo tuổi" },
       { key: "canexpiry", label: "🕒 Bia cận date" }, { key: "consigned", label: "🎁 Bia gửi" },
+      { key: "khodm", label: "🏭 Danh mục kho thành phẩm" },
       { key: "dm", label: "Danh mục vị trí kho" },
       { key: "vehicles", label: "Danh mục lái xe" }];
     const root = $("view-wms");
     // "Nơi xuất đến" dùng chung danh mục Nhà cung cấp (không còn catalog ship_to_location riêng —
     // xem models/wms.py, migration 9a0b1c2d3e4f_ship_to_supplier_merge) — biến `shipTos` giữ tên cũ
     // để đỡ đổi các chỗ dùng bên dưới, nhưng nguồn dữ liệu giờ là /api/suppliers.
-    const [locs, shipTos, finishedProducts, vehicles, unitTypes] = await Promise.all([
+    const [locs, shipTos, finishedProducts, vehicles, unitTypes, gsEligible, warehouses] = await Promise.all([
       GET("/wms/locations"), GET("/suppliers"), GET("/finished-products").catch(() => []),
-      GET("/wms/vehicles").catch(() => []), GET("/unit-types").catch(() => [])]);
+      GET("/wms/vehicles").catch(() => []), GET("/unit-types").catch(() => []),
+      GET("/wms/vehicles/consigned-eligible").catch(() => []),
+      GET("/wms/warehouses").catch(() => [])]);
+    // "Kho thành phẩm" (WmsWarehouse) là cấp cha mới của vị trí kho — 1 kho có nhiều vị trí.
+    // Nhãn hiển thị ưu tiên "[mã kho] mã vị trí - tên vị trí" để biết ngay lô đang ở kho nào.
+    const whLabel = (l) => `${l.warehouse_name ? `[${esc(l.warehouse_name)}] ` : ""}${esc(l.code)}${l.name ? ` - ${esc(l.name)}` : ""}`;
     const utByCode = Object.fromEntries(unitTypes.map(ut => [ut.code, ut]));
     // FinishedGoodsUnit.product_name lưu mã SKU (VD "FLGN200"), không phải tên — tra thêm tên
     // để hiển thị "Mã — Tên" cho dễ nhận biết, chỉ dùng ở lớp hiển thị (mọi key gom nhóm/FIFO/
@@ -824,7 +865,7 @@
     let body = "";
     if (sec === "kho") {
       const sm = await GET("/wms/summary");
-      const locOpt = locs.map(l => `<option value="${esc(l.loc_id)}">${esc(l.code)} (${l.used}/${l.capacity})</option>`).join("");
+      const locOpt = locs.map(l => `<option value="${esc(l.loc_id)}">${whLabel(l)} (${l.used}/${l.capacity})</option>`).join("");
       const fpOpt = finishedProducts.map(fp => `<option value="${esc(fp.finished_product_id)}" data-code="${esc(fp.code)}" data-pack="${fp.pack_size}" data-unittype="${esc(fp.unit_type)}">${esc(fp.code)} — ${esc(fp.name)}</option>`).join("");
       const card = (val, label, sub) => `<div class="card"><div class="n">${val}</div><div class="l">${label}</div>${sub ? `<div class="muted" style="font-size:11px;margin-top:2px">${sub}</div>` : ""}</div>`;
       const fmtN = (v) => (v || 0).toLocaleString("vi-VN", { maximumFractionDigits: 2 });
@@ -856,10 +897,10 @@
             <div class="field" id="wu_total_wrap"><label id="wu_total_label">Số Lon</label><input id="wu_total" value="240" style="width:90px"/></div>
             <div class="field" id="wu_count_wrap"><label id="wu_count_label">Số Vỉ</label><input id="wu_count" type="number" value="10" style="width:80px"/></div>
             <div class="field"><label>SL/1 đơn vị</label><input id="wu_pack" value="24" style="width:80px" readonly title="Lấy tự động từ Danh mục Sản phẩm — không sửa được"/></div>
-            <div class="field"><label>Vị trí kho</label><select id="wu_loc" style="width:160px"><option value="">(chưa cất)</option>${locOpt}</select></div>
+            <div class="field"><label>Vị trí kho</label><select id="wu_loc" style="width:160px"><option value="">(chọn vị trí)</option>${locOpt}</select></div>
             <div class="field" style="align-self:flex-end"><button class="btn" id="wu_build">+ Nhập kho</button></div>
           </div>
-          <div class="muted" style="font-size:12px;margin-top:4px">Lô TP do hệ thống tự sinh (không nhập tay). Loại đơn vị (vỉ/keg) và SL/1 đơn vị tự điền theo sản phẩm — quản lý ở Danh mục › Sản phẩm. Nhập lon hoặc nhập vỉ đều được — 2 ô tự quy đổi theo nhau. Tick "Nhập lẻ" nếu chỉ có lon rời (không đủ vỉ) — tồn kho sẽ lưu thẳng theo Lon, không quy đổi ra vỉ. Bỏ trống Vị trí kho -> "chưa cất", gán sau ở tab Cất vào vị trí. Sau khi nhập, cần Trưởng bộ phận kho duyệt trước khi được xuất kho.</div>`)}
+          <div class="muted" style="font-size:12px;margin-top:4px">Lô TP do hệ thống tự sinh (không nhập tay). Loại đơn vị (vỉ/keg) và SL/1 đơn vị tự điền theo sản phẩm — quản lý ở Danh mục › Sản phẩm. Nhập lon hoặc nhập vỉ đều được — 2 ô tự quy đổi theo nhau. Tick "Nhập lẻ" nếu chỉ có lon rời (không đủ vỉ) — tồn kho sẽ lưu thẳng theo Lon, không quy đổi ra vỉ. Bắt buộc chọn Vị trí kho trước khi nhập. Sau khi nhập, cần Trưởng bộ phận kho duyệt trước khi được xuất kho.</div>`)}
         ${panel("🏁 Nhập tồn đầu", isAdminWms ? `
           <div class="row">
             <div class="field"><label>Sản phẩm</label>
@@ -872,12 +913,12 @@
             <div class="field" id="wob_total_wrap"><label id="wob_total_label">Số Lon</label><input id="wob_total" value="240" style="width:90px"/></div>
             <div class="field" id="wob_count_wrap"><label id="wob_count_label">Số Vỉ</label><input id="wob_count" type="number" value="10" style="width:80px"/></div>
             <div class="field"><label>SL/1 đơn vị</label><input id="wob_pack" value="24" style="width:80px" readonly title="Lấy tự động từ Danh mục Sản phẩm — không sửa được"/></div>
-            <div class="field"><label>Vị trí kho</label><select id="wob_loc" style="width:160px"><option value="">(chưa cất)</option>${locOpt}</select></div>
+            <div class="field"><label>Vị trí kho</label><select id="wob_loc" style="width:160px"><option value="">(chọn vị trí)</option>${locOpt}</select></div>
             <div class="field" style="align-self:flex-end"><button class="btn" id="wob_build">+ Nhập tồn đầu</button></div>
           </div>
-          <div class="muted" style="font-size:12px;margin-top:4px">Nạp số dư tồn kho thành phẩm ban đầu khi triển khai hệ thống (không qua chiết thật) — giúp phân biệt trong lịch sử.</div>
+          <div class="muted" style="font-size:12px;margin-top:4px">Nạp số dư tồn kho thành phẩm ban đầu khi triển khai hệ thống (không qua chiết thật) — giúp phân biệt trong lịch sử. Bắt buộc chọn Vị trí kho trước khi nhập.</div>
           <div class="row" style="margin-top:10px;border-top:1px solid var(--border);padding-top:10px">
-            <div class="field" style="flex:1"><label>Hoặc import Excel (cột: Ngày nhập, Mã sản phẩm, Lô, Số lượng, tuỳ chọn thêm Vị trí)</label>
+            <div class="field" style="flex:1"><label>Hoặc import Excel (cột: Ngày nhập, Mã sản phẩm, Lô, Số lượng, Vị trí — bắt buộc)</label>
               <input type="file" id="wob_file" accept=".xlsx"/></div>
             <button class="btn sec" id="wob_import" style="align-self:flex-end">📥 Import Excel</button>
           </div>`
@@ -911,18 +952,30 @@
       </div>
       <div class="panel"><h2>Lịch sử xuất kho</h2><input class="searchbox" data-tbl="t_xk_history" placeholder="Tìm theo mã phiếu, nơi xuất đến, người xuất..."/><div id="xk_history" class="muted">Đang tải…</div></div>`;
     } else if (sec === "dieuchuyen") {
-      const locOpt2 = locs.map(l => `<option value="${esc(l.loc_id)}">${esc(l.code)} — ${esc(l.name)} (${l.used}/${l.capacity})</option>`).join("");
+      const locOptDc = locs.map(l => `<option value="${esc(l.loc_id)}">${whLabel(l)} (${l.used}/${l.capacity})</option>`).join("");
+      const activeVehiclesDc = vehicles.filter(v => v.active);
+      const driverOptDc = activeVehiclesDc.map(v =>
+        `<option value="${esc(v.vehicle_id)}">${esc(v.driver_name || v.driver_short_name || "(chưa rõ tên)")} — ${esc(v.plate)}</option>`).join("");
       body = `<div class="panel"><h2>🔀 Điều chuyển nội bộ</h2>
-        <div class="muted" style="margin-bottom:8px">Chuyển vỉ/keg/lon từ 1 vị trí kho sang vị trí khác — vị trí nguồn giảm, vị trí đích tăng (không đổi tổng tồn kho thành phẩm).</div>
+        <div class="muted" style="margin-bottom:8px">Y hệt Xuất kho — chọn vị trí đích, sau đó thêm từng dòng sản phẩm/lô/loại đơn vị + số lượng cần chuyển vào "Sản phẩm đã chọn" (thêm được nhiều lô/sản phẩm khác nhau trong cùng 1 phiếu), rồi bấm "Tạo phiếu điều chuyển". Hệ thống tự chọn đúng vỉ/keg/lon cũ nhất (FIFO) trong mỗi lô. Khác Xuất kho: KHÔNG làm giảm tổng tồn kho công ty (chỉ đổi vị trí) và giữ nguyên lô/mã chiết để truy xuất nguồn gốc không đứt.</div>
         <div class="row">
-          <div class="field"><label>Vị trí nguồn</label><select id="dc_from"><option value="">(chọn vị trí nguồn)</option>${locOpt2}</select></div>
-          <div class="field"><label>Vị trí đích</label><select id="dc_to"><option value="">(chọn vị trí đích)</option>${locOpt2}</select></div>
+          <div class="field"><label>Vị trí đích</label>
+            <select id="dc_to"><option value="">(chọn vị trí đích)</option>${locOptDc}</select></div>
+          <div class="field"><label>Lọc lô</label><select id="dc_lotfilter">
+            <option value="">(tất cả lô)</option>
+            <option value="has_lon">Lô có lon phân rã</option>
+            <option value="no_lon">Lô không có lon phân rã</option></select></div>
+          <div class="field" style="flex:1"><label>Tìm sản phẩm/lô</label><input id="dc_search" placeholder="Gõ để lọc…"/></div>
+          <div class="field"><label>Nhân viên lái xe</label>
+            <input id="dc_driver_q" placeholder="Tìm lái xe/biển số..." style="margin-bottom:2px"/>
+            <select id="dc_driver"><option value="">(chưa chọn — xem Danh mục lái xe nếu chưa có)</option>${driverOptDc}</select></div>
         </div>
-        <div id="dc_pick" class="muted" style="margin-top:10px">Chọn vị trí nguồn ở trên để xem các vỉ/keg/lon đang tồn tại đó.</div>
+        <div id="dc_lots"></div>
+        <div class="panel" style="margin-top:10px"><h3 style="font-size:14px">🛒 Sản phẩm đã chọn</h3><div id="dc_cart"></div></div>
       </div>
-      <div class="panel"><h2>Lịch sử điều chuyển</h2><input class="searchbox" data-tbl="t_dc_history" placeholder="Tìm theo sản phẩm, lô, vị trí, người..."/><div id="dc_history" class="muted">Đang tải…</div></div>`;
+      <div class="panel"><h2>Lịch sử điều chuyển</h2><input class="searchbox" data-tbl="t_dc_history" placeholder="Tìm theo mã phiếu, vị trí đích, người tạo..."/><div id="dc_history" class="muted">Đang tải…</div></div>`;
     } else if (sec === "capvao") {
-      const locOpt3 = locs.map(l => `<option value="${esc(l.loc_id)}">${esc(l.code)} — ${esc(l.name)} (${l.used}/${l.capacity})</option>`).join("");
+      const locOpt3 = locs.map(l => `<option value="${esc(l.loc_id)}">${whLabel(l)} (${l.used}/${l.capacity})</option>`).join("");
       body = `<div class="panel"><h2>🚚 Cất vào vị trí</h2>
         <div class="muted" style="margin-bottom:8px">Gán vị trí kho cho các vỉ/keg/lon CHƯA có vị trí (mới nhập kho) — chọn vị trí đích rồi tick các dòng
           sản phẩm/lô cần cất, không cần chọn từng đơn vị.</div>
@@ -976,7 +1029,7 @@
       const bucketColor = { critical: "var(--red)", warning: "var(--orange)", caution: "#e0c341", ok: "var(--green)" };
       const unitLabel = { vi: "Vỉ", keg: "Keg", lon: "Lon" };
       const agLocCell = (r) => {
-        const parts = (r.locations || []).map(l => `${esc(l.code || "?")}×${l.count}`);
+        const parts = (r.locations || []).map(l => `${locWhPrefix(l)}${esc(l.code || "?")}×${l.count}`);
         if (r.unplaced > 0) parts.push(`chưa cất×${r.unplaced}`);
         return parts.join(", ") || "—";
       };
@@ -1005,16 +1058,40 @@
             </tr>`).join("") || '<tr><td colspan=8 class="muted">Kho thành phẩm chưa có tồn.</td></tr>'}</tbody>
         </table></div>
       </div>`;
+    } else if (sec === "khodm") {
+      body = `<div class="panel"><h2>🏭 Danh mục kho thành phẩm <span class="muted">(${warehouses.length})</span></h2>
+        <div class="muted" style="margin-bottom:8px">Kho thành phẩm là cấp cha của "Vị trí kho" — 1 kho có nhiều vị trí. Kho đang có vị trí (Số vị trí > 0) không xóa được.</div>
+        <div class="tablewrap"><table id="t_wh"><thead><tr><th>Mã</th><th>Tên</th><th>Địa chỉ</th><th>Số vị trí</th><th>Hoạt động</th><th></th></tr></thead>
+        <tbody>${warehouses.map(w => `<tr data-wh-row="${esc(w.warehouse_id)}">
+          <td><input class="wh_code" value="${esc(w.code)}" style="width:100px"/></td>
+          <td><input class="wh_name" value="${esc(w.name)}" style="width:180px"/></td>
+          <td><input class="wh_addr" value="${esc(w.address || "")}" style="width:200px"/></td>
+          <td>${w.location_count}</td>
+          <td><input class="wh_active" type="checkbox" ${w.active ? "checked" : ""}/></td>
+          <td style="white-space:nowrap">
+            <button class="btn sm" data-wh-save="${esc(w.warehouse_id)}">Lưu</button>
+            <button class="btn sm sec" data-wh-del="${esc(w.warehouse_id)}" ${w.location_count > 0 ? "disabled title=\"Đang có vị trí — không xóa được\"" : ""}>Xóa</button>
+          </td></tr>`).join("") || '<tr><td colspan=6 class="muted">Chưa có kho thành phẩm nào.</td></tr>'}</tbody></table></div>
+        <div class="row" style="margin-top:12px;flex-wrap:wrap">
+          <div class="field"><label>Mã</label><input id="wh_new_code" style="width:100px"/></div>
+          <div class="field"><label>Tên</label><input id="wh_new_name" style="width:180px"/></div>
+          <div class="field"><label>Địa chỉ</label><input id="wh_new_addr" style="width:200px"/></div>
+          <div class="field" style="align-self:flex-end"><button class="btn" id="wh_add">+ Thêm kho</button></div>
+        </div></div>`;
     } else if (sec === "dm") {
+      const kindLabel = { bin: "Kệ/ô chứa", staging: "Khu tập kết tạm", cold: "Kho lạnh", dock: "Bãi xuất/nhập hàng" };
       const kindOpt = (sel) => ["bin", "staging", "cold", "dock"].map(k =>
-        `<option value="${k}" ${k === sel ? "selected" : ""}>${k}</option>`).join("");
+        `<option value="${k}" ${k === sel ? "selected" : ""}>${kindLabel[k]}</option>`).join("");
+      const whOpt = (sel) => `<option value="">(không có kho)</option>` + warehouses.map(w =>
+        `<option value="${esc(w.warehouse_id)}" ${w.warehouse_id === sel ? "selected" : ""}>${esc(w.code)} — ${esc(w.name)}</option>`).join("");
       body = `<div class="panel"><h2>📍 Danh mục vị trí kho thành phẩm</h2>
-        <div class="muted" style="margin-bottom:8px">Vị trí đang chứa vỉ/keg (Sử dụng > 0) không xóa được — hãy chuyển/xuất hết trước.</div>
+        <div class="muted" style="margin-bottom:8px">Vị trí đang chứa vỉ/keg (Sử dụng > 0) không xóa được — hãy chuyển/xuất hết trước. Chọn "Kho thành phẩm" để biết lô đang ở kho nào (xem tab 🏭 Danh mục kho thành phẩm).</div>
         <input class="searchbox" data-tbl="t_wmsloc" placeholder="Tìm theo mã, tên, khu..."/>
-        <div class="tablewrap"><table id="t_wmsloc"><thead><tr><th>Mã</th><th>Tên</th><th>Khu</th><th>Loại</th><th>Sức chứa</th><th>Sử dụng</th><th>Hoạt động</th><th></th></tr></thead>
+        <div class="tablewrap"><table id="t_wmsloc"><thead><tr><th>Mã</th><th>Tên</th><th>Kho thành phẩm</th><th>Khu</th><th>Loại</th><th>Sức chứa</th><th>Sử dụng</th><th>Hoạt động</th><th></th></tr></thead>
         <tbody>${locs.map(l => `<tr data-loc-row="${esc(l.loc_id)}">
           <td><input class="wl_code" value="${esc(l.code)}" style="width:90px"/></td>
           <td><input class="wl_name" value="${esc(l.name)}" style="width:160px"/></td>
+          <td><select class="wl_wh" style="width:160px">${whOpt(l.warehouse_id)}</select></td>
           <td><input class="wl_zone" value="${esc(l.zone || "")}" style="width:60px"/></td>
           <td><select class="wl_kind">${kindOpt(l.kind)}</select></td>
           <td><input class="wl_capacity" type="number" value="${l.capacity}" style="width:60px"/></td>
@@ -1023,10 +1100,11 @@
           <td style="white-space:nowrap">
             <button class="btn sm" data-loc-save="${esc(l.loc_id)}">Lưu</button>
             <button class="btn sm sec" data-loc-del="${esc(l.loc_id)}" ${l.used > 0 ? "disabled title=\"Đang có vỉ/keg — không xóa được\"" : ""}>Xóa</button>
-          </td></tr>`).join("") || '<tr><td colspan=8 class="muted">Chưa có vị trí nào.</td></tr>'}</tbody></table></div>
+          </td></tr>`).join("") || '<tr><td colspan=9 class="muted">Chưa có vị trí nào.</td></tr>'}</tbody></table></div>
         <div class="row" style="margin-top:12px;flex-wrap:wrap">
           <div class="field"><label>Mã</label><input id="wl_new_code" style="width:90px"/></div>
           <div class="field"><label>Tên</label><input id="wl_new_name" style="width:160px"/></div>
+          <div class="field"><label>Kho thành phẩm</label><select id="wl_new_wh" style="width:160px">${whOpt("")}</select></div>
           <div class="field"><label>Khu</label><input id="wl_new_zone" style="width:60px"/></div>
           <div class="field"><label>Loại</label><select id="wl_new_kind">${kindOpt("bin")}</select></div>
           <div class="field"><label>Sức chứa</label><input id="wl_new_capacity" type="number" value="10" style="width:60px"/></div>
@@ -1036,9 +1114,10 @@
       body = `<div class="panel"><h2>🚚 Danh mục lái xe <span class="muted">(${vehicles.length})</span></h2>
         <div class="muted" style="margin-bottom:8px">Biển số xe kèm lái xe/tải trọng/số pallet chở được — tra cứu nhanh khi lập Lệnh đóng hàng hoặc Phiếu xuất kho.</div>
         <input class="searchbox" data-tbl="t_vehicle" placeholder="Tìm theo biển số, tên lái xe, tổ đội..."/>
-        <div class="tablewrap"><table id="t_vehicle"><thead><tr><th>Biển số</th><th>Họ và tên lái xe</th><th>Tên lái xe</th>
+        <div class="tablewrap"><table id="t_vehicle"><thead><tr><th>Mã xe</th><th>Biển số</th><th>Họ và tên lái xe</th><th>Tên lái xe</th>
           <th>Khối lượng (kg)</th><th>Pallet</th><th>Số ĐT</th><th>Tổ đội</th><th>Hoạt động</th><th></th></tr></thead>
         <tbody>${vehicles.map(v => `<tr data-vehicle-row="${esc(v.vehicle_id)}">
+          <td class="muted"><code class="k">${esc(v.vehicle_code || "—")}</code></td>
           <td><input class="vh_plate" value="${esc(v.plate)}" style="width:100px"/></td>
           <td><input class="vh_driver" value="${esc(v.driver_name || "")}" style="width:180px"/></td>
           <td><input class="vh_short" value="${esc(v.driver_short_name || "")}" style="width:100px"/></td>
@@ -1050,7 +1129,7 @@
           <td style="white-space:nowrap">
             <button class="btn sm" data-vehicle-save="${esc(v.vehicle_id)}">Lưu</button>
             <button class="btn sm sec" data-vehicle-del="${esc(v.vehicle_id)}">Xóa</button>
-          </td></tr>`).join("") || '<tr><td colspan=9 class="muted">Chưa có xe nào.</td></tr>'}</tbody></table></div>
+          </td></tr>`).join("") || '<tr><td colspan=10 class="muted">Chưa có xe nào.</td></tr>'}</tbody></table></div>
         <div class="row" style="margin-top:12px;flex-wrap:wrap">
           <div class="field"><label>Biển số</label><input id="vh_new_plate" style="width:100px"/></div>
           <div class="field"><label>Họ và tên lái xe</label><input id="vh_new_driver" style="width:180px"/></div>
@@ -1063,7 +1142,7 @@
         </div></div>`;
     } else if (sec === "canexpiry") {
       const ceFpOpt = finishedProducts.map(fp => `<option value="${esc(fp.finished_product_id)}" data-code="${esc(fp.code)}">${esc(fp.code)} — ${esc(fp.name)}</option>`).join("");
-      const ceLocOpt = locs.map(l => `<option value="${esc(l.loc_id)}">${esc(l.code)} (${l.used}/${l.capacity})</option>`).join("");
+      const ceLocOpt = locs.map(l => `<option value="${esc(l.loc_id)}">${whLabel(l)} (${l.used}/${l.capacity})</option>`).join("");
       body = `<div class="panel"><h2>🕒 Nhập bia cận date</h2>
         <div class="muted" style="margin-bottom:8px">Khai báo trực tiếp Sản phẩm + Số lượng bia gần hết hạn được nhập lại kho (tăng tồn kho công ty) — không cần chọn lô chiết gốc, vì tồn cận date thực tế thường gộp từ nhiều lô khác nhau. Hệ thống tự sinh 1 lô cận date riêng cho mỗi lần khai báo — luôn hiện thành dòng riêng ở Xuất kho (không gộp chung với tồn thường của sản phẩm) và được ưu tiên xuất trước. Lịch sử nhập/xuất bia cận date được tách riêng khỏi Xuất kho thông thường (xem bảng bên dưới); khi Xuất kho tick "Chỉ bia cận date" cho 1 dòng, lượt xuất đó cũng tự động ghi vào lịch sử này.</div>
         <div class="row" style="flex-wrap:wrap">
@@ -1080,19 +1159,31 @@
         <div id="ce_hist"><div class="muted">Đang tải…</div></div>
       </div>`;
     } else if (sec === "consigned") {
-      const gsFpOpt = finishedProducts.map(fp => `<option value="${esc(fp.finished_product_id)}" data-code="${esc(fp.code)}">${esc(fp.code)} — ${esc(fp.name)}</option>`).join("");
-      const gsLocOpt = locs.map(l => `<option value="${esc(l.loc_id)}">${esc(l.code)} (${l.used}/${l.capacity})</option>`).join("");
+      const gsLocOpt = locs.map(l => `<option value="${esc(l.loc_id)}">${whLabel(l)} (${l.used}/${l.capacity})</option>`).join("");
+      // Chỉ cho chọn xe có phiếu xuất kho trong khoảng [Ca 2 ngày hôm trước 14h VN, hiện tại] —
+      // khớp yêu cầu chặn khai khống bia gửi không đúng chuyến xe/sản phẩm/số lượng đã xuất
+      // thật (xem services/wms.py::consigned_eligible_vehicles + _consigned_available_qty).
+      // `gsEligible` được fetch cùng đợt với locs/finishedProducts/vehicles ở đầu hàm — dùng
+      // biến scope ngoài để khối wire (if (sec === "consigned") { ... } phía dưới, tách khỏi
+      // khối render này) cũng đọc được, tránh ReferenceError.
+      const gsVehicleOpt = gsEligible.map(v =>
+        `<option value="${esc(v.vehicle_id)}">${esc(v.plate)} — ${esc(v.driver_name || v.driver_short_name || "(chưa rõ tên)")}</option>`).join("");
       body = `<div class="panel"><h2>🎁 Nhập bia gửi</h2>
-        <div class="muted" style="margin-bottom:8px">Dùng khi xe đã xuất phiếu đi giao trong ngày nhưng giao không hết, mang phần dư về GỬI lại kho (khác bia cận date, khác đổi trả nhà phân phối). Khai báo trực tiếp Sản phẩm + Số lượng — hệ thống tự sinh 1 lô gửi riêng cho mỗi lần khai báo, luôn hiện thành dòng riêng ở Xuất kho và được ưu tiên xuất TRƯỚC cả bia cận date. Lịch sử nhập/xuất bia gửi được tách riêng khỏi Xuất kho thông thường; khi Xuất kho tick "Chỉ bia gửi" cho 1 dòng, lượt xuất đó tự động ghi vào lịch sử này. Lưu ý: lượng xuất lại này KHÔNG tính vào báo cáo "Xuất TP theo ca" (đã tính vào phiếu xuất gốc buổi sáng, tránh đếm trùng).</div>
+        <div class="muted" style="margin-bottom:8px">Dùng khi xe đã xuất phiếu đi giao trong ngày nhưng giao không hết, mang phần dư về GỬI lại kho (khác bia cận date, khác đổi trả nhà phân phối). Khai báo trực tiếp Sản phẩm + Số lượng + Biển số xe đã mang về — hệ thống tự sinh 1 lô gửi riêng cho mỗi lần khai báo, luôn hiện thành dòng riêng ở Xuất kho và được ưu tiên xuất TRƯỚC cả bia cận date. Lịch sử nhập/xuất bia gửi được tách riêng khỏi Xuất kho thông thường; khi Xuất kho tick "Chỉ bia gửi" cho 1 dòng, lượt xuất đó tự động ghi vào lịch sử này. Lưu ý: lượng xuất lại này KHÔNG tính vào báo cáo "Xuất TP theo ca" (đã tính vào phiếu xuất gốc buổi sáng, tránh đếm trùng).
+        <br>Chỉ hiện xe có phiếu xuất kho từ 14h Ca 2 ngày hôm trước đến hiện tại; chọn xe xong hệ thống chỉ cho chọn đúng (những) sản phẩm xe đó đã xuất, và số lượng nhập gửi không được vượt số lượng còn lại có thể nhận gửi.</div>
         <div class="row" style="flex-wrap:wrap">
+          <div class="field"><label>Biển số xe mang về</label>
+            <input id="gs_vehicle_q" placeholder="Tìm xe/biển số..." style="width:200px;margin-bottom:2px"/>
+            <select id="gs_vehicle" style="width:200px"><option value="">(chọn xe)</option>${gsVehicleOpt}</select></div>
           <div class="field"><label>Sản phẩm</label>
-            <input id="gs_prod_q" placeholder="Tìm sản phẩm..." style="width:220px;margin-bottom:2px"/>
-            <select id="gs_prod" style="width:220px"><option value="">(chọn sản phẩm)</option>${gsFpOpt}</select></div>
-          <div class="field"><label>Số lượng</label><input id="gs_qty" type="number" min="1" style="width:100px"/></div>
-          <div class="field"><label>Vị trí kho nhận</label><select id="gs_loc" style="width:180px"><option value="">(chưa cất)</option>${gsLocOpt}</select></div>
+            <select id="gs_prod" style="width:220px" disabled><option value="">(chọn xe trước)</option></select></div>
+          <div class="field"><label>Số lượng</label><input id="gs_qty" type="number" min="1" style="width:100px" disabled/>
+            <div class="muted" id="gs_qty_hint" style="font-size:11px"></div></div>
+          <div class="field"><label>Vị trí kho nhận</label><select id="gs_loc" style="width:180px"><option value="">(chọn vị trí)</option>${gsLocOpt}</select></div>
           <div class="field" style="flex:1;min-width:160px"><label>Ghi chú</label><input id="gs_note" placeholder="Tùy chọn"/></div>
           <div class="field" style="align-self:flex-end"><button class="btn" id="gs_submit">+ Nhập bia gửi</button></div>
         </div>
+        ${gsEligible.length ? "" : '<div class="muted" style="margin-top:6px">⚠ Không có xe nào có phiếu xuất kho trong khoảng cho phép (từ 14h Ca 2 ngày hôm trước đến hiện tại) — chưa thể khai báo bia gửi.</div>'}
         <h3 style="margin-top:20px">Lịch sử bia gửi</h3>
         <input class="searchbox" data-tbl="t_gs_hist" placeholder="Tìm theo sản phẩm/lô..." style="margin-bottom:8px"/>
         <div id="gs_hist"><div class="muted">Đang tải…</div></div>
@@ -1175,24 +1266,54 @@
     if (sec === "consigned") {
       const canApproveGs = _hasPerm("wms.confirm_receipt");
       const canEditGs = _hasPerm("warehouse.receive");
-      wireSelectSearch("gs_prod", "gs_prod_q");
+      wireSelectSearch("gs_vehicle", "gs_vehicle_q");
+      const gsRemainingOf = (fpid) => {
+        const v = gsEligible.find(x => x.vehicle_id === $("gs_vehicle").value);
+        const p = v && v.products.find(x => x.finished_product_id === fpid);
+        return p ? p.remaining : 0;
+      };
+      $("gs_vehicle").onchange = () => {
+        const v = gsEligible.find(x => x.vehicle_id === $("gs_vehicle").value);
+        const prodSel = $("gs_prod"); const qtyInp = $("gs_qty");
+        if (!v || !v.products.length) {
+          prodSel.innerHTML = '<option value="">(chọn xe trước)</option>'; prodSel.disabled = true;
+          qtyInp.disabled = true; qtyInp.value = ""; $("gs_qty_hint").textContent = "";
+          return;
+        }
+        prodSel.innerHTML = '<option value="">(chọn sản phẩm)</option>' + v.products
+          .filter(p => p.remaining > 0)
+          .map(p => `<option value="${esc(p.finished_product_id)}">${esc(fpLabel(p.code))} — còn ${p.remaining} ${p.unit_type === "keg" ? "keg" : "vỉ"}</option>`).join("");
+        prodSel.disabled = false; qtyInp.disabled = true; qtyInp.value = ""; $("gs_qty_hint").textContent = "";
+      };
+      $("gs_prod").onchange = () => {
+        const remaining = gsRemainingOf($("gs_prod").value);
+        const qtyInp = $("gs_qty");
+        qtyInp.disabled = !$("gs_prod").value;
+        qtyInp.max = remaining || "";
+        $("gs_qty_hint").textContent = $("gs_prod").value ? `Tối đa ${remaining} (số lượng xe đã xuất còn lại có thể nhận gửi)` : "";
+      };
       $("gs_submit").onclick = () => guard(async () => {
+        if (!$("gs_vehicle").value) { toast("Chọn biển số xe đã mang bia gửi về", "err"); return; }
         if (!$("gs_prod").value) { toast("Chọn sản phẩm", "err"); return; }
         const qty = parseInt($("gs_qty").value, 10) || 0;
         if (qty <= 0) { toast("Nhập số lượng > 0", "err"); return; }
+        const remaining = gsRemainingOf($("gs_prod").value);
+        if (qty > remaining) { toast(`Số lượng vượt quá số xe đã xuất còn lại có thể nhận gửi (tối đa ${remaining})`, "err"); return; }
+        if (!$("gs_loc").value) { toast("Chọn vị trí kho nhận", "err"); return; }
         const res = await POST("/wms/consigned", { finished_product_id: $("gs_prod").value, quantity: qty,
-          location_id: $("gs_loc").value || null, note: $("gs_note").value || null });
+          location_id: $("gs_loc").value, vehicle_id: $("gs_vehicle").value, note: $("gs_note").value || null });
         toast(`Đã khai báo ${qty} ${res.unit_type === "keg" ? "keg" : "vỉ"} bia gửi — lô riêng ${res.lot_code} (chờ Trưởng bộ phận kho duyệt trước khi tăng tồn kho)`);
         render("wms");
       });
       GET("/wms/consigned").then(entries => {
         $("gs_hist").innerHTML = entries.length ? `<div class="tablewrap"><table id="t_gs_hist">
-          <thead><tr><th>Chiều</th><th>Sản phẩm</th><th>Lô</th><th>Loại ĐV</th><th>SL</th><th>Vị trí</th><th>Ngày khai báo</th><th>Phiếu xuất</th><th>Ghi chú</th><th>Người tạo</th><th>Thời gian</th><th>Duyệt</th><th></th></tr></thead>
+          <thead><tr><th>Chiều</th><th>Sản phẩm</th><th>Lô</th><th>Loại ĐV</th><th>SL</th><th>Vị trí</th><th>Xe gửi</th><th>Ngày khai báo</th><th>Phiếu xuất</th><th>Ghi chú</th><th>Người tạo</th><th>Thời gian</th><th>Duyệt</th><th></th></tr></thead>
           <tbody>${entries.map(e => `<tr>
             <td>${e.direction === "in" ? '<span class="badge available">Nhập</span>' : '<span class="badge on_hold">Xuất</span>'}</td>
             <td>${esc(fpLabel(e.product_name))}</td><td class="muted">${esc(e.lot_code || "")}</td>
             <td>${e.unit_type === "keg" ? "Keg" : "Vỉ"}</td><td>${e.quantity}</td>
             <td class="muted">${esc(e.location_code || "—")}</td>
+            <td class="muted">${esc(e.vehicle_plate || "—")}</td>
             <td class="muted">${e.declared_at ? fmt(e.declared_at) : "—"}</td>
             <td class="muted">${esc(e.shipment_code || "—")}</td>
             <td class="muted">${esc(e.note || "")}</td>
@@ -1394,12 +1515,13 @@
       if ($("wu_lonmode")) $("wu_lonmode").onchange = () => syncBuildFromTotal("wu");
       if ($("wu_build")) $("wu_build").onclick = () => guard(async () => {
         if (!$("wu_prod").value) { toast("Chọn sản phẩm", "err"); return; }
+        if (!$("wu_loc").value) { toast("Chọn vị trí kho trước khi nhập", "err"); return; }
         const opt = $("wu_prod").selectedOptions[0];
         const { lonMode } = buildDivisor("wu");
         await POST("/wms/units", { finished_product_id: $("wu_prod").value, product_name: opt.dataset.code,
           total: num("wu_total") || 0,
           pack_size: lonMode ? 1 : (num("wu_pack") || 24), unit_type: lonMode ? "lon" : (opt.dataset.unittype || "vi"),
-          loc_id: $("wu_loc").value || null, reason: "Nhập kho thủ công" });
+          loc_id: $("wu_loc").value, reason: "Nhập kho thủ công" });
         toast("Đã nhập kho (kèm mã vạch từng vỉ/keg)"); render("wms");
       });
       wireSelectSearch("wob_prod", "wob_prod_q");
@@ -1419,12 +1541,13 @@
       updateBuildLabels("wob");
       if ($("wob_build")) $("wob_build").onclick = () => guard(async () => {
         if (!$("wob_prod").value) { toast("Chọn sản phẩm", "err"); return; }
+        if (!$("wob_loc").value) { toast("Chọn vị trí kho trước khi nhập", "err"); return; }
         const opt = $("wob_prod").selectedOptions[0];
         const { lonMode } = buildDivisor("wob");
         await POST("/wms/units", { finished_product_id: $("wob_prod").value, product_name: opt.dataset.code,
           lot_code: $("wob_lot").value, total: num("wob_total") || 0,
           pack_size: lonMode ? 1 : (num("wob_pack") || 24), unit_type: lonMode ? "lon" : (opt.dataset.unittype || "vi"),
-          loc_id: $("wob_loc").value || null, reason: "Nhập tồn đầu", is_opening_balance: true });
+          loc_id: $("wob_loc").value, reason: "Nhập tồn đầu", is_opening_balance: true });
         toast("Đã nhập tồn đầu (kèm mã vạch từng vỉ/keg)"); render("wms");
       });
       if ($("wob_import")) $("wob_import").onclick = () => guard(async () => {
@@ -1487,7 +1610,8 @@
                                    fifo_ok: g[`${t}_fifo_ok`], oldest_at: g[`${t}_oldest_at`], bottle_codes: g.bottle_codes,
                                    locations: g[`${t}_locations`] || [], unplaced: g[`${t}_unplaced`] || 0,
                                    near_expiry_count: g[`${t}_near_expiry_count`] || 0,
-                                   consigned_count: g[`${t}_consigned_count`] || 0 });
+                                   consigned_count: g[`${t}_consigned_count`] || 0,
+                                   consigned_vehicle_plate: g.consigned_vehicle_plate });
           });
         });
         // Lô có bia GỬI lên đầu bảng TRƯỚC CẢ cận date (xe đã xuất phiếu buổi sáng giao không
@@ -1509,7 +1633,7 @@
       function renderLots() {
         const rows = filteredLotRows();
         $("xk_lots").innerHTML = rows.length ? `<div class="tablewrap" style="margin-top:10px"><table id="t_xk_lots">
-          <thead><tr><th>Sản phẩm</th><th>Lô</th><th>Mã chiết</th><th>Loại</th><th>Tồn</th><th>Vị trí kho</th><th>FIFO</th><th>SL cần xuất</th><th>Loại xuất</th><th>Bia gửi</th><th>Cận date</th><th></th></tr></thead>
+          <thead><tr><th>Sản phẩm</th><th>Lô</th><th>Mã chiết</th><th>Loại</th><th>Tồn</th><th>Vị trí kho</th><th>FIFO</th><th>Biển số xe gửi</th><th>SL cần xuất</th><th>Loại xuất</th><th>Bia gửi</th><th>Cận date</th><th></th></tr></thead>
           <tbody>${rows.map((r, i) => { const sellable = sellableOf(r); const neAvailable = (r.near_expiry_count || 0) > 0;
             const neFull = neAvailable && r.count === r.near_expiry_count;
             const gsAvailable = (r.consigned_count || 0) > 0;
@@ -1520,6 +1644,7 @@
             <td>${unitTypeLabel({ product: r.product_name, unit_type: r.unit_type })}</td><td>${r.count}</td>
             <td class="muted">${locationCell(r)}</td>
             <td>${r.fifo_ok ? '<span class="badge available">✓ FIFO</span>' : '<span class="badge on_hold">⚠ Không phải lô cũ nhất</span>'}</td>
+            <td class="muted">${gsAvailable ? esc(r.consigned_vehicle_plate || "—") : "—"}</td>
             <td><input type="number" min="1" max="${sellable}" value="${sellable}" style="width:80px" data-xk-qty="${i}" ${sellable > 0 ? "" : "disabled"}
               title="${sellable > 0 ? "" : "Chưa cất vào vị trí kho — không thể xuất"}"/></td>
             <td><select data-xk-type="${i}">${XK_TYPE_OPTIONS}</select></td>
@@ -1625,38 +1750,32 @@
             return;
           }
           // Mỗi dòng trong giỏ có thể mang 1 Loại xuất riêng (thường/khuyến mại/đổi trả) —
-          // Shipment chỉ lưu 1 loại/phiếu, nên gom các dòng cùng loại thành 1 phiếu, tạo lần
-          // lượt 1..N phiếu nếu giỏ có nhiều loại khác nhau.
-          const groups = {};
-          XK_CART.forEach(c => { (groups[c.shipment_type || ""] = groups[c.shipment_type || ""] || []).push(c); });
+          // giờ TẤT CẢ dòng cùng 1 nơi xuất đến gộp vào ĐÚNG 1 phiếu duy nhất (Loại xuất lưu
+          // riêng từng dòng ở backend, xem FinishedGoodsUnit.shipment_line_type), không tách
+          // nhiều phiếu theo loại như trước nữa.
           const shipTo = shipTos.find(s => s.supplier_id === $("xk_shipto").value);
           // Lái xe/biển số chọn từ Danh mục lái xe (không gõ tay) — tự điền cả 2 vào phiếu in
           // từ cùng 1 dòng danh mục, tránh gõ sai/lệch giữa tên lái xe và biển số thật.
           const vehicle = vehicles.find(v => v.vehicle_id === $("xk_driver").value);
-          let created = 0, anyFifoBad = false;
-          for (const t of Object.keys(groups)) {
-            const lines = groups[t];
-            // Gộp lý do của các dòng không đúng FIFO trong phiếu này vào note của Shipment —
-            // note vốn đã có sẵn ở model/schema (Lý do xuất kho) nhưng Xuất kho chưa dùng tới.
-            const fifoNotes = lines.filter(c => !c.fifo_ok)
-              .map(c => `${fpLabel(c.product_name)} lô ${c.lot_code || "(không lô)"}: ${c.fifo_reason.trim()}`);
-            const res = await POST("/wms/shipments", {
-              ship_to_id: $("xk_shipto").value,
-              lines: lines.map(c => ({ product_name: c.product_name, lot_code: c.lot_code,
+          // Gộp lý do của các dòng không đúng FIFO vào note của Shipment — note vốn đã có sẵn
+          // ở model/schema (Lý do xuất kho) nhưng Xuất kho chưa dùng tới.
+          const fifoNotes = XK_CART.filter(c => !c.fifo_ok)
+            .map(c => `${fpLabel(c.product_name)} lô ${c.lot_code || "(không lô)"}: ${c.fifo_reason.trim()}`);
+          const res = await POST("/wms/shipments", {
+            ship_to_id: $("xk_shipto").value,
+            lines: XK_CART.map(c => ({ product_name: c.product_name, lot_code: c.lot_code,
                                        unit_type: c.unit_type, quantity: c.quantity,
                                        near_expiry_only: c.near_expiry_only || false,
-                                       consigned_only: c.consigned_only || false })),
-              note: fifoNotes.length ? `Xuất không đúng FIFO — ${fifoNotes.join("; ")}` : null,
-              recipient_name: shipTo ? shipTo.name : null,
-              driver_name: vehicle ? (vehicle.driver_name || vehicle.driver_short_name) : null,
-              vehicle_plate: vehicle ? vehicle.plate : null,
-              shipment_type: t });
-            if (!res.fifo_ok) anyFifoBad = true;
-            created++;
-            XK_CART = XK_CART.filter(c => !lines.includes(c));
-            renderCart();
-          }
-          toast(`Đã tạo ${created} phiếu xuất kho${anyFifoBad ? " (⚠ có phiếu không đúng FIFO)" : ""}`);
+                                       consigned_only: c.consigned_only || false,
+                                       shipment_type: c.shipment_type || "normal" })),
+            note: fifoNotes.length ? `Xuất không đúng FIFO — ${fifoNotes.join("; ")}` : null,
+            recipient_name: shipTo ? shipTo.name : null,
+            driver_name: vehicle ? (vehicle.driver_name || vehicle.driver_short_name) : null,
+            vehicle_plate: vehicle ? vehicle.plate : null,
+            vehicle_id: vehicle ? vehicle.vehicle_id : null });
+          XK_CART = [];
+          renderCart();
+          toast(`Đã tạo phiếu xuất kho ${res.shipment_code}${!res.fifo_ok ? " (⚠ không đúng FIFO)" : ""}`);
           render("wms");
         });
       }
@@ -1674,18 +1793,21 @@
         // sau khi Trưởng bộ phận kho "Duyệt" (confirmed_by), phiếu coi như chốt, không sửa được nữa.
         const canEditShip = _hasPerm("warehouse.issue");
         $("xk_history").innerHTML = ships.length ? `<div class="tablewrap"><table id="t_xk_history">
-          <thead><tr><th>Mã phiếu</th><th>Từ kho</th><th>Nơi xuất đến</th><th>Thời gian</th><th>Người xuất</th><th>FIFO</th><th>Loại xuất</th><th>Chi tiết</th><th>Duyệt</th><th></th></tr></thead>
+          <thead><tr><th>Mã phiếu</th><th>Từ kho</th><th>Nơi xuất đến</th><th>Thời gian</th><th>Người xuất</th><th>FIFO</th><th>Biển số xe</th><th>Km</th><th>Lít xăng</th><th>Chi tiết</th><th>Duyệt</th><th></th></tr></thead>
           <tbody>${ships.map((s, i) => { const undone = s.unit_count === 0;
-            const confirmCell = s.confirmed_by ? `<span class="badge available">✓ ${esc(s.confirmed_by)}</span>` :
+            const confirmCell = s.confirmed_by ? `<span class="badge available">✓ ${esc(s.confirmed_by)}</span><div class="muted" style="font-size:11px">${fmt(s.confirmed_at)}</div>` :
               canConfirmShip && !undone ? `<button class="btn sm sec" data-confirmship="${i}">Duyệt</button>` :
               '<span class="muted">Chưa duyệt</span>';
             const canUndoShip = !undone && (!s.confirmed_by || isAdminXk);
+            const tripEditable = s.confirmed_by && !undone;
             return `<tr><td><code class="k">${esc(s.shipment_code)}</code></td>
             <td class="muted">${esc(s.from_location || "—")}</td>
             <td>${esc(s.ship_to_name || s.ship_to_code || "—")}</td><td class="muted">${fmt(s.created_at)}</td>
             <td class="muted">${esc(s.created_by || "—")}</td>
             <td>${undone ? '<span class="badge obsolete">Đã hoàn tác</span>' : s.fifo_ok ? '<span class="badge available">✓ Đúng FIFO</span>' : '<span class="badge on_hold">⚠ Không đúng FIFO</span>'}</td>
-            <td><span class="badge ${s.shipment_type === "promo" ? "planned" : s.shipment_type === "return" ? "on_hold" : "available"}">${shipmentTypeLabel(s.shipment_type)}</span></td>
+            <td class="muted">${esc(s.vehicle_plate || "—")}</td>
+            <td>${tripEditable ? `<input type="number" min="0" step="0.1" value="${s.km != null ? s.km : ""}" style="width:70px" data-xk-km="${i}"/>` : '<span class="muted">—</span>'}</td>
+            <td>${tripEditable ? `<input type="number" min="0" step="0.1" value="${s.fuel_liters != null ? s.fuel_liters : ""}" style="width:70px" data-xk-fuel="${i}"/> <button class="btn sm sec" data-savetrip="${i}">Lưu</button>` : '<span class="muted">—</span>'}</td>
             <td class="muted">${s.lines.map(l => `${esc(fpLabel(l.product))} ${esc(l.lot_code || "")}: ${l.count} ${unitTypeLabel(l).toLowerCase()}`).join("; ")}</td>
             <td style="white-space:nowrap">${confirmCell}</td>
             <td style="white-space:nowrap"><button class="btn sm sec" data-viewship="${i}">Xem</button>
@@ -1694,6 +1816,16 @@
               ${canUndoShip ? `<button class="btn sm sec" data-undoship="${i}">Hoàn tác</button>` : ""}</td></tr>`; }).join("")}</tbody></table></div>`
           : `<div class="muted">Chưa có phiếu xuất kho nào.</div>`;
         wireSearch(); wirePaginate("t_xk_history", 10);
+        document.querySelectorAll("[data-savetrip]").forEach(b => b.onclick = () => guard(async () => {
+          const i = parseInt(b.dataset.savetrip, 10);
+          const s = ships[i];
+          const kmVal = document.querySelector(`[data-xk-km="${i}"]`).value;
+          const fuelVal = document.querySelector(`[data-xk-fuel="${i}"]`).value;
+          await POST(`/wms/shipments/${s.shipment_id}/trip`, {
+            km: kmVal === "" ? null : parseFloat(kmVal),
+            fuel_liters: fuelVal === "" ? null : parseFloat(fuelVal) });
+          toast("Đã lưu km/lít xăng"); render("wms");
+        }));
         document.querySelectorAll("[data-printship]").forEach(b => b.onclick = () => guard(() =>
           printShipmentHandoverSlip(ships[parseInt(b.dataset.printship, 10)])));
         document.querySelectorAll("[data-editship]").forEach(b => b.onclick = () => {
@@ -1724,7 +1856,7 @@
               <thead><tr><th>Sản phẩm</th><th>Lô</th><th>Loại</th><th>SL</th><th>Loại xuất</th><th>Bia gửi/Cận date</th></tr></thead>
               <tbody>${s.lines.map(l => `<tr><td>${esc(fpLabel(l.product))}</td><td>${esc(l.lot_code || "—")}</td>
                 <td>${unitTypeLabel(l)}</td><td>${l.count}</td>
-                <td><span class="badge ${s.shipment_type === "promo" ? "planned" : s.shipment_type === "return" ? "on_hold" : "available"}">${shipmentTypeLabel(s.shipment_type)}</span></td>
+                <td><span class="badge ${l.type === "promo" ? "planned" : l.type === "return" ? "on_hold" : "available"}">${shipmentTypeLabel(l.type)}</span></td>
                 <td>${l.consigned ? '<span class="badge on_hold">🎁 Bia gửi</span>' : l.near_expiry ? '<span class="badge on_hold">🕒 Cận date</span>' : '<span class="muted">—</span>'}</td></tr>`).join("") ||
                 '<tr><td colspan=6 class="muted">Không còn dòng nào (đã hoàn tác).</td></tr>'}</tbody>
             </table></div>`);
@@ -1743,67 +1875,257 @@
         }));
       }).catch(() => { $("xk_history").innerHTML = `<div class="muted">Không tải được lịch sử.</div>`; });
     } else if (sec === "dieuchuyen") {
-      let dcGroups = [];
-      async function renderDcPick() {
-        const fromId = $("dc_from").value;
-        if (!fromId) { $("dc_pick").innerHTML = `<div class="muted">Chọn vị trí nguồn ở trên để xem các vỉ/keg/lon đang tồn tại đó.</div>`; return; }
-        // Gộp theo (sản phẩm, lô, loại) ở SQL (GROUP BY theo vị trí) — 1 lô cùng sản phẩm có
-        // thể có hàng trăm ngàn vỉ/keg/lon, tải hết đơn vị toàn kho về rồi lọc/gộp bằng
-        // JavaScript sẽ rất chậm; chỉ hiện tổng SL, nhập số lượng cần chuyển, hệ thống tự
-        // lấy đúng N đơn vị cũ nhất (FIFO) qua relocate-batch thay vì phải tick từng đơn vị.
-        const groups = await GET(`/wms/units/by-location?loc_id=${encodeURIComponent(fromId)}`);
-        dcGroups = groups.map(g => ({ product: g.product_name, lot_code: g.lot_code, unit_type: g.unit_type, count: g.count }))
-          .sort((a, b) => (a.lot_code || "").localeCompare(b.lot_code || ""));
-        $("dc_pick").innerHTML = `
-          <div class="tablewrap" style="margin-top:6px"><table id="t_dc_pick">
-          <thead><tr><th></th><th>SP</th><th>Lô</th><th>Loại</th><th>Tổng SL</th><th>SL chuyển</th></tr></thead>
-          <tbody>${dcGroups.map((g, i) => `<tr data-dcgroup="${i}">
-            <td><input class="dc_pick" type="checkbox"/></td>
-            <td>${esc(fpLabel(g.product))}</td><td>${esc(g.lot_code || "")}</td>
-            <td>${unitTypeLabel(g)}</td><td>${g.count}</td>
-            <td><input class="dc_qty" type="number" min="1" max="${g.count}" value="${g.count}" style="width:80px"/></td></tr>`).join("") ||
-            '<tr><td colspan=6 class="muted">Vị trí này không có vỉ/keg/lon nào đang tồn.</td></tr>'}</tbody></table></div>
-          <div class="row" style="margin-top:10px"><button class="btn" id="dc_submit">Điều chuyển</button></div>`;
-        wirePaginate("t_dc_pick", 10);
-        if (!dcGroups.length) return;
-        $("dc_submit").onclick = () => guard(async () => {
-          const toId = $("dc_to").value;
-          if (!toId) { toast("Chọn vị trí đích", "err"); return; }
-          if (toId === fromId) { toast("Vị trí đích phải khác vị trí nguồn", "err"); return; }
-          const picked = Array.from(document.querySelectorAll("[data-dcgroup]"))
-            .filter(tr => tr.querySelector(".dc_pick").checked)
-            .map(tr => ({ g: dcGroups[parseInt(tr.dataset.dcgroup, 10)], qty: parseInt(tr.querySelector(".dc_qty").value, 10) || 0 }));
-          if (!picked.length) { toast("Chọn ít nhất 1 dòng để điều chuyển", "err"); return; }
-          for (const { g, qty } of picked) {
-            if (qty <= 0 || qty > g.count) throw new Error(`Số lượng chuyển của lô "${g.lot_code || g.product}" không hợp lệ (tối đa ${g.count}).`);
-          }
-          for (const { g, qty } of picked) {
-            await POST("/wms/units/relocate-batch", {
-              product_name: g.product, lot_code: g.lot_code || null, unit_type: g.unit_type,
-              from_loc_id: fromId, to_loc_id: toId, count: qty,
+      // Mirror y hệt sec === "xuatkho" ở trên (picker/cart/lịch sử) — chỉ khác đích là 1
+      // WmsLocation (không phải nhà phân phối) và KHÔNG có Loại xuất/Bia gửi/Cận date (không có
+      // ý nghĩa cho luồng nội bộ — 2 cờ is_near_expiry/is_consigned trên đơn vị vẫn giữ nguyên
+      // qua điều chuyển, không cần lọc/đánh dấu riêng ở đây).
+      const dcLots = await GET("/wms/units/by-lot");
+
+      // Mỗi dòng picker giờ ứng với ĐÚNG 1 (sản phẩm, lô, loại đơn vị, VỊ TRÍ KHO) — không gộp
+      // nhiều vị trí vào 1 dòng như trước (locationCell) nữa, vì FIFO điều chuyển phải lấy đúng
+      // đơn vị đang ở vị trí NGUỒN hiển thị trên dòng đó (xem location_id truyền xuống
+      // create_transfer), không lẫn qua vị trí khác cùng lô — 1 lô nằm ở 2 kho phải hiện 2 dòng
+      // riêng, giữ nguyên lot_code ở cả hai để truy xuất nguồn gốc không đứt. Khi đã chọn vị
+      // trí đích, ẨN LUÔN các dòng đang ở đúng vị trí đó (điều chuyển về chính nó là vô nghĩa).
+      function filteredDcLotRows() {
+        const filter = $("dc_lotfilter").value;
+        const search = $("dc_search").value.trim().toLowerCase();
+        const destId = $("dc_to").value;
+        const rows = [];
+        dcLots.forEach(g => {
+          if (filter === "has_lon" && !g.has_lon) return;
+          if (filter === "no_lon" && g.has_lon) return;
+          if (search && !`${g.product_name || ""} ${g.lot_code || ""}`.toLowerCase().includes(search)) return;
+          (g.unit_types || ["vi", "keg", "lon"]).forEach(t => {
+            (g[`${t}_locations`] || []).forEach(loc => {
+              if (!loc.count) return;
+              if (destId && loc.loc_id === destId) return;
+              rows.push({ product_name: g.product_name, lot_code: g.lot_code, unit_type: t,
+                         count: loc.count, total_count: g[`${t}_count`] || 0,
+                         loc_id: loc.loc_id, loc_code: loc.code, loc_name: loc.name, loc_zone: loc.zone,
+                         loc_warehouse_name: loc.warehouse_name,
+                         fifo_ok: g[`${t}_fifo_ok`], oldest_at: g[`${t}_oldest_at`], bottle_codes: g.bottle_codes,
+                         near_expiry_count: g[`${t}_near_expiry_count`] || 0,
+                         consigned_count: g[`${t}_consigned_count`] || 0,
+                         consigned_vehicle_plate: g.consigned_vehicle_plate });
             });
-          }
-          const total = picked.reduce((s, x) => s + x.qty, 0);
-          toast(`Đã điều chuyển ${total} đơn vị`); render("wms");
+          });
+        });
+        // Cùng thứ tự ưu tiên như Xuất kho: bia gửi trước, rồi cận date, rồi tên SP, rồi FIFO cũ
+        // nhất — để người điều chuyển thấy ngay dòng nào nên xử lý trước (mirror filteredLotRows).
+        rows.sort((a, b) => (((b.consigned_count || 0) > 0 ? 1 : 0) - ((a.consigned_count || 0) > 0 ? 1 : 0)) ||
+          (((b.near_expiry_count || 0) > 0 ? 1 : 0) - ((a.near_expiry_count || 0) > 0 ? 1 : 0)) ||
+          (a.product_name || "").localeCompare(b.product_name || "") ||
+          new Date(a.oldest_at || 0) - new Date(b.oldest_at || 0));
+        return rows;
+      }
+
+      function renderDcLots() {
+        const rows = filteredDcLotRows();
+        const destChosen = !!$("dc_to").value;
+        $("dc_lots").innerHTML = rows.length ? `<div class="tablewrap" style="margin-top:10px"><table id="t_dc_lots">
+          <thead><tr><th>Sản phẩm</th><th>Lô</th><th>Mã chiết</th><th>Loại</th><th>Tồn</th><th>Vị trí kho</th><th>FIFO</th><th>Bia gửi/Cận date</th><th>SL cần chuyển</th><th></th></tr></thead>
+          <tbody>${rows.map((r, i) => { const neAvailable = (r.near_expiry_count || 0) > 0;
+            const neFull = neAvailable && r.total_count === r.near_expiry_count;
+            const gsAvailable = (r.consigned_count || 0) > 0;
+            const gsFull = gsAvailable && r.total_count === r.consigned_count;
+            return `<tr${gsFull || neFull ? ' class="row-cyan"' : ""}>
+            <td>${esc(fpLabel(r.product_name))}</td><td>${esc(r.lot_code || "")}</td>
+            <td class="muted">${esc((r.bottle_codes || []).join(", ") || "—")}</td>
+            <td>${unitTypeLabel({ product: r.product_name, unit_type: r.unit_type })}</td><td>${r.count}</td>
+            <td class="muted">${r.loc_warehouse_name ? `[${esc(r.loc_warehouse_name)}] ` : ""}${esc(r.loc_name ? `${r.loc_code} - ${r.loc_name}` : (r.loc_code || "—"))}${r.loc_zone ? ` - Khu ${esc(r.loc_zone)}` : ""}</td>
+            <td>${r.fifo_ok ? '<span class="badge available">✓ FIFO</span>' : '<span class="badge on_hold">⚠ Không phải lô cũ nhất</span>'}</td>
+            <td>${gsFull ? '<span class="badge on_hold">🎁 Bia gửi</span>' : neFull ? '<span class="badge on_hold">🕒 Cận date</span>' :
+              gsAvailable ? '<span class="muted">🎁 một phần</span>' : neAvailable ? '<span class="muted">🕒 một phần</span>' : '<span class="muted">—</span>'}</td>
+            <td><input type="number" min="1" max="${r.count}" value="${r.count}" style="width:80px" data-dc-qty="${i}"/></td>
+            <td><button class="btn sm" data-dc-add="${i}">+ Thêm</button></td></tr>`; }).join("")}</tbody></table></div>`
+          : `<div class="muted" style="margin-top:10px">${destChosen ? "Không còn lô nào ở vị trí khác vị trí đích khớp bộ lọc." : "Không còn lô nào tồn kho khớp bộ lọc."}</div>`;
+        wirePaginate("t_dc_lots", 10);
+        rows.forEach((r, i) => {
+          const btn = document.querySelector(`[data-dc-add="${i}"]`);
+          if (!btn) return;
+          btn.onclick = () => {
+            const qty = parseInt(document.querySelector(`[data-dc-qty="${i}"]`).value, 10) || 0;
+            if (qty <= 0) { toast("Nhập số lượng > 0", "err"); return; }
+            if (qty > r.count) { toast(`Chỉ có ${r.count} tại vị trí ${r.loc_code}`, "err"); return; }
+            DC_CART.push({ product_name: r.product_name, lot_code: r.lot_code, unit_type: r.unit_type,
+                          quantity: qty, fifo_ok: r.fifo_ok, location_id: r.loc_id,
+                          location_label: r.loc_name ? `${r.loc_code} - ${r.loc_name}` : r.loc_code });
+            renderDcCart();
+            toast(`Đã thêm ${qty} ${unitTypeLabel({ product: r.product_name, unit_type: r.unit_type }).toLowerCase()} vào phiếu điều chuyển`);
+          };
         });
       }
-      $("dc_from").onchange = renderDcPick;
-      $("dc_to").onchange = renderDcPick;
-      GET("/audit?entity_type=finished_goods_unit").then(entries => {
-        const rows = entries.filter(e => e.action === "relocate_batch" || e.action === "transfer");
-        $("dc_history").innerHTML = rows.length ? `<div class="tablewrap"><table id="t_dc_history">
-          <thead><tr><th>Thời gian</th><th>Người</th><th>SP / Lô</th><th>Số lượng</th><th>Từ vị trí</th><th>Đến vị trí</th></tr></thead>
-          <tbody>${rows.map(e => e.action === "relocate_batch" ? `<tr><td class="muted">${fmt(e.ts)}</td><td class="muted">${esc(e.actor || "")}</td>
-            <td class="muted">${esc(fpLabel(e.before?.product_name))} ${esc(e.before?.lot_code || "")}</td>
-            <td>${e.after?.moved ?? "—"}</td>
-            <td class="muted">${esc(e.before?.from_location || "—")}</td>
-            <td>${esc(e.after?.to_location || "—")}</td></tr>` : `<tr><td class="muted">${fmt(e.ts)}</td><td class="muted">${esc(e.actor || "")}</td>
-            <td class="muted">—</td>
-            <td>${(e.after?.unit_codes || []).length}</td>
-            <td class="muted">${esc([...new Set(e.before?.from_locations || [])].filter(Boolean).join(", ") || "—")}</td>
-            <td>${esc(e.after?.to_location || "—")}</td></tr>`).join("")}</tbody></table></div>`
-          : `<div class="muted">Chưa có lượt điều chuyển nào.</div>`;
+
+      // Cùng nguyên tắc split-theo-vị-trí như filteredDcLotRows — đổi lô trong giỏ cũng phải
+      // chọn đúng 1 vị trí nguồn, không gộp.
+      function dcLotOptionsFor(productName, unitType) {
+        const destId = $("dc_to").value;
+        const out = [];
+        dcLots.forEach(g => {
+          if (g.product_name !== productName) return;
+          (g[`${unitType}_locations`] || []).forEach(loc => {
+            if (!loc.count) return;
+            if (destId && loc.loc_id === destId) return;
+            out.push({ lot_code: g.lot_code, count: loc.count, fifo_ok: g[`${unitType}_fifo_ok`],
+                      loc_id: loc.loc_id, loc_code: loc.code, loc_name: loc.name });
+          });
+        });
+        return out;
+      }
+
+      function renderDcCart() {
+        $("dc_cart").innerHTML = DC_CART.length ? `<div class="tablewrap"><table>
+          <thead><tr><th>Sản phẩm</th><th>Lô</th><th>Vị trí kho</th><th>Loại</th><th>SL</th><th>FIFO</th><th>Lý do (nếu không đúng FIFO)</th><th></th></tr></thead>
+          <tbody>${DC_CART.map((c, i) => { const lotOpts = dcLotOptionsFor(c.product_name, c.unit_type); return `<tr><td>${esc(fpLabel(c.product_name))}</td>
+            <td>${lotOpts.length ? `<select data-dc-lot="${i}">${lotOpts.map(o => `<option value="${esc(o.lot_code || "")}|${esc(o.loc_id || "")}" ${o.lot_code === c.lot_code && o.loc_id === c.location_id ? "selected" : ""}>${esc(o.lot_code || "(không lô)")} (${esc(o.loc_code || "?")}) — còn ${o.count}${o.fifo_ok ? " · FIFO" : ""}</option>`).join("")}</select>`
+              : esc(c.lot_code || "")}</td>
+            <td class="muted">${esc(c.location_label || "—")}</td>
+            <td>${unitTypeLabel({ product: c.product_name, unit_type: c.unit_type })}</td><td>${c.quantity}</td>
+            <td>${c.fifo_ok ? '<span class="badge available">✓ FIFO</span>' : '<span class="badge on_hold">⚠ Không phải lô cũ nhất</span>'}</td>
+            <td>${c.fifo_ok ? '<span class="muted">—</span>' : `<input data-dc-reason="${i}" placeholder="Bắt buộc nhập lý do" value="${esc(c.fifo_reason || "")}" style="width:180px;border-color:var(--red)"/>`}</td>
+            <td><button class="btn sm sec" data-dc-del="${i}">Xoá</button></td></tr>`; }).join("")}</tbody></table></div>
+          <div class="row" style="margin-top:10px;align-items:center">
+            <div class="muted">Tổng: <b>${DC_CART.length}</b> dòng</div>
+            <button class="btn" id="dc_submit" style="align-self:flex-end;margin-left:auto">Tạo phiếu điều chuyển</button>
+          </div>`
+          : `<div class="muted">Chưa có dòng nào — thêm sản phẩm/lô ở bảng trên.</div>`;
+        document.querySelectorAll("[data-dc-del]").forEach(b => b.onclick = () => {
+          DC_CART.splice(parseInt(b.dataset.dcDel, 10), 1);
+          renderDcCart();
+        });
+        document.querySelectorAll("[data-dc-reason]").forEach(inp => inp.oninput = () => {
+          DC_CART[parseInt(inp.dataset.dcReason, 10)].fifo_reason = inp.value;
+        });
+        document.querySelectorAll("[data-dc-lot]").forEach(sel => sel.onchange = () => {
+          const idx = parseInt(sel.dataset.dcLot, 10);
+          const c = DC_CART[idx];
+          const [lotCode, locId] = sel.value.split("|");
+          const chosen = dcLotOptionsFor(c.product_name, c.unit_type).find(o => (o.lot_code || "") === lotCode && (o.loc_id || "") === locId);
+          c.lot_code = lotCode || null;
+          c.location_id = locId || null;
+          c.fifo_ok = chosen ? chosen.fifo_ok : false;
+          if (c.fifo_ok) c.fifo_reason = null;
+          c.location_label = chosen ? (chosen.loc_name ? `${chosen.loc_code} - ${chosen.loc_name}` : chosen.loc_code) : "—";
+          if (chosen && c.quantity > chosen.count) {
+            toast(`Lô ${chosen.lot_code || ""} tại ${chosen.loc_code} chỉ còn ${chosen.count} — đã giảm SL cho khớp`, "err");
+            c.quantity = chosen.count;
+          }
+          renderDcCart();
+        });
+        if ($("dc_submit")) $("dc_submit").onclick = () => guard(async () => {
+          if (!$("dc_to").value) { toast("Chọn vị trí đích", "err"); return; }
+          if (!DC_CART.length) { toast("Chưa có dòng nào trong phiếu", "err"); return; }
+          if (DC_CART.some(c => c.location_id === $("dc_to").value)) {
+            toast("Có dòng đang ở đúng vị trí đích — không thể điều chuyển, hãy xoá dòng đó hoặc đổi vị trí đích", "err");
+            return;
+          }
+          const missingReason = DC_CART.find(c => !c.fifo_ok && !(c.fifo_reason || "").trim());
+          if (missingReason) {
+            toast(`Dòng ${fpLabel(missingReason.product_name)} — lô ${missingReason.lot_code || "(không lô)"} không đúng FIFO: phải nhập lý do trước khi tạo phiếu`, "err");
+            return;
+          }
+          const vehicleDc = vehicles.find(v => v.vehicle_id === $("dc_driver").value);
+          const fifoNotesDc = DC_CART.filter(c => !c.fifo_ok)
+            .map(c => `${fpLabel(c.product_name)} lô ${c.lot_code || "(không lô)"}: ${c.fifo_reason.trim()}`);
+          const res = await POST("/wms/transfers", {
+            to_location_id: $("dc_to").value,
+            lines: DC_CART.map(c => ({ product_name: c.product_name, lot_code: c.lot_code,
+                                       unit_type: c.unit_type, quantity: c.quantity, location_id: c.location_id })),
+            note: fifoNotesDc.length ? `Điều chuyển không đúng FIFO — ${fifoNotesDc.join("; ")}` : null,
+            driver_name: vehicleDc ? (vehicleDc.driver_name || vehicleDc.driver_short_name) : null,
+            vehicle_plate: vehicleDc ? vehicleDc.plate : null,
+            vehicle_id: vehicleDc ? vehicleDc.vehicle_id : null });
+          DC_CART = [];
+          renderDcCart();
+          toast(`Đã tạo phiếu điều chuyển ${res.transfer_code}${!res.fifo_ok ? " (⚠ không đúng FIFO)" : ""}`);
+          render("wms");
+        });
+      }
+
+      renderDcLots();
+      renderDcCart();
+      wireSelectSearch("dc_driver", "dc_driver_q");
+      $("dc_to").onchange = renderDcLots;
+      $("dc_lotfilter").onchange = renderDcLots;
+      $("dc_search").oninput = renderDcLots;
+      GET("/wms/transfers").then(transfers => {
+        const isAdminDc = CURRENT_USER && CURRENT_USER.role === "admin";
+        const canConfirmDc = _hasPerm("wms.confirm_shipment");
+        const canEditDc = _hasPerm("warehouse.issue");
+        $("dc_history").innerHTML = transfers.length ? `<div class="tablewrap"><table id="t_dc_history">
+          <thead><tr><th>Mã phiếu</th><th>Từ kho</th><th>Đến vị trí</th><th>Thời gian</th><th>Người tạo</th><th>FIFO</th><th>Biển số xe</th><th>Km</th><th>Lít xăng</th><th>Chi tiết</th><th>Duyệt</th><th></th></tr></thead>
+          <tbody>${transfers.map((t, i) => { const undone = t.unit_count === 0;
+            const confirmCellDc = t.confirmed_by ? `<span class="badge available">✓ ${esc(t.confirmed_by)}</span><div class="muted" style="font-size:11px">${fmt(t.confirmed_at)}</div>` :
+              canConfirmDc && !undone ? `<button class="btn sm sec" data-confirmdc="${i}">Duyệt</button>` :
+              '<span class="muted">Chưa duyệt</span>';
+            const canUndoDc = !undone && (!t.confirmed_by || isAdminDc);
+            const tripEditableDc = t.confirmed_by && !undone;
+            return `<tr><td><code class="k">${esc(t.transfer_code)}</code></td>
+            <td class="muted">${esc(t.from_location || "—")}</td>
+            <td>${esc(t.to_location_name || t.to_location_code || "—")}</td><td class="muted">${fmt(t.created_at)}</td>
+            <td class="muted">${esc(t.created_by || "—")}</td>
+            <td>${undone ? '<span class="badge obsolete">Đã hoàn tác</span>' : t.fifo_ok ? '<span class="badge available">✓ Đúng FIFO</span>' : '<span class="badge on_hold">⚠ Không đúng FIFO</span>'}</td>
+            <td class="muted">${esc(t.vehicle_plate || "—")}</td>
+            <td>${tripEditableDc ? `<input type="number" min="0" step="0.1" value="${t.km != null ? t.km : ""}" style="width:70px" data-dc-km="${i}"/>` : '<span class="muted">—</span>'}</td>
+            <td>${tripEditableDc ? `<input type="number" min="0" step="0.1" value="${t.fuel_liters != null ? t.fuel_liters : ""}" style="width:70px" data-dc-fuel="${i}"/> <button class="btn sm sec" data-savedctrip="${i}">Lưu</button>` : '<span class="muted">—</span>'}</td>
+            <td class="muted">${t.lines.map(l => `${esc(fpLabel(l.product))} ${esc(l.lot_code || "")}: ${l.count} ${unitTypeLabel(l).toLowerCase()}`).join("; ")}</td>
+            <td style="white-space:nowrap">${confirmCellDc}</td>
+            <td style="white-space:nowrap"><button class="btn sm sec" data-viewdc="${i}">Xem</button>
+              ${t.confirmed_by ? `<button class="btn sm sec" data-printdc="${i}">🖨️ In phiếu</button>` : ""}
+              ${canEditDc && !t.confirmed_by ? `<button class="btn sm sec" data-editdc="${i}">Sửa</button>` : ""}
+              ${canUndoDc ? `<button class="btn sm sec" data-undodc="${i}">Hoàn tác</button>` : ""}</td></tr>`; }).join("")}</tbody></table></div>`
+          : `<div class="muted">Chưa có phiếu điều chuyển nào.</div>`;
         wireSearch(); wirePaginate("t_dc_history", 10);
+        document.querySelectorAll("[data-savedctrip]").forEach(b => b.onclick = () => guard(async () => {
+          const i = parseInt(b.dataset.savedctrip, 10);
+          const t = transfers[i];
+          const kmVal = document.querySelector(`[data-dc-km="${i}"]`).value;
+          const fuelVal = document.querySelector(`[data-dc-fuel="${i}"]`).value;
+          await POST(`/wms/transfers/${t.transfer_id}/trip`, {
+            km: kmVal === "" ? null : parseFloat(kmVal),
+            fuel_liters: fuelVal === "" ? null : parseFloat(fuelVal) });
+          toast("Đã lưu km/lít xăng"); render("wms");
+        }));
+        document.querySelectorAll("[data-printdc]").forEach(b => b.onclick = () => guard(() =>
+          printTransferHandoverSlip(transfers[parseInt(b.dataset.printdc, 10)])));
+        document.querySelectorAll("[data-editdc]").forEach(b => b.onclick = () => {
+          const t = transfers[parseInt(b.dataset.editdc, 10)];
+          modal(`<h3>Sửa thông tin phiếu — ${esc(t.transfer_code)}</h3>
+            <div class="row"><div class="field" style="flex:1"><label>Lái xe</label><input id="edc_driver" value="${esc(t.driver_name || "")}"/></div>
+              <div class="field" style="flex:1"><label>Biển số xe</label><input id="edc_plate" value="${esc(t.vehicle_plate || "")}"/></div></div>
+            <div class="field"><label>Ghi chú</label><input id="edc_note" value="${esc(t.note || "")}"/></div>
+            <button class="btn" id="edc_save">Lưu</button>`);
+          $("edc_save").onclick = () => guard(async () => {
+            await PUT(`/wms/transfers/${t.transfer_id}`, {
+              driver_name: $("edc_driver").value, vehicle_plate: $("edc_plate").value,
+              note: $("edc_note").value });
+            toast("Đã lưu"); closeModal(); render("wms");
+          });
+        });
+        document.querySelectorAll("[data-viewdc]").forEach(b => b.onclick = () => {
+          const t = transfers[parseInt(b.dataset.viewdc, 10)];
+          modal(`<h3>Sản phẩm trong phiếu — ${esc(t.transfer_code)}</h3>
+            <div class="muted" style="margin-bottom:6px">Điều chuyển từ kho: <b>${esc(t.from_location || "—")}</b></div>
+            <div class="tablewrap"><table>
+              <thead><tr><th>Sản phẩm</th><th>Lô</th><th>Loại</th><th>SL</th></tr></thead>
+              <tbody>${t.lines.map(l => `<tr><td>${esc(fpLabel(l.product))}</td><td>${esc(l.lot_code || "—")}</td>
+                <td>${unitTypeLabel(l)}</td><td>${l.count}</td></tr>`).join("") ||
+                '<tr><td colspan=4 class="muted">Không còn dòng nào (đã hoàn tác).</td></tr>'}</tbody>
+            </table></div>`);
+        });
+        document.querySelectorAll("[data-confirmdc]").forEach(b => b.onclick = () => guard(async () => {
+          const t = transfers[parseInt(b.dataset.confirmdc, 10)];
+          if (!confirm(`Duyệt phiếu điều chuyển ${t.transfer_code}? Sau khi duyệt, chỉ ADMIN mới "Hoàn tác" được nữa.`)) return;
+          await POST(`/wms/transfers/${t.transfer_id}/confirm`, {});
+          toast("Đã duyệt phiếu điều chuyển"); render("wms");
+        }));
+        document.querySelectorAll("[data-undodc]").forEach(b => b.onclick = () => guard(async () => {
+          const t = transfers[parseInt(b.dataset.undodc, 10)];
+          if (!confirm(`Hoàn tác phiếu điều chuyển ${t.transfer_code}? Các vỉ/keg/lon trong phiếu sẽ trả về đúng vị trí trước khi chuyển.`)) return;
+          const res = await POST(`/wms/transfers/${t.transfer_id}/undo`, {});
+          toast(`Đã hoàn tác — khôi phục ${res.restored} đơn vị${res.skipped ? ` (bỏ qua ${res.skipped} đơn vị đã bị thao tác khác thay đổi)` : ""}`); render("wms");
+        }));
       }).catch(() => { $("dc_history").innerHTML = `<div class="muted">Không tải được lịch sử.</div>`; });
     } else if (sec === "capvao") {
       const lotSummariesCv = await GET("/wms/units/by-lot");
@@ -1953,6 +2275,28 @@
         });
         toast("Đã lưu ngưỡng cảnh báo tuổi lô"); render("wms");
       });
+    } else if (sec === "khodm") {
+      document.querySelectorAll("[data-wh-save]").forEach(b => b.onclick = () => guard(async () => {
+        const tr = b.closest("tr");
+        await PUT(`/wms/warehouses/${b.dataset.whSave}`, {
+          code: tr.querySelector(".wh_code").value,
+          name: tr.querySelector(".wh_name").value,
+          address: tr.querySelector(".wh_addr").value || null,
+          active: tr.querySelector(".wh_active").checked,
+        });
+        toast("Đã lưu kho"); render("wms");
+      }));
+      document.querySelectorAll("[data-wh-del]").forEach(b => b.onclick = () => guard(async () => {
+        if (!confirm("Xóa kho này? Không thể hoàn tác.")) return;
+        await DELETE(`/wms/warehouses/${b.dataset.whDel}`);
+        toast("Đã xóa kho"); render("wms");
+      }));
+      $("wh_add").onclick = () => guard(async () => {
+        if (!$("wh_new_code").value || !$("wh_new_name").value) { toast("Nhập mã và tên kho", "err"); return; }
+        await POST("/wms/warehouses", { code: $("wh_new_code").value, name: $("wh_new_name").value,
+          address: $("wh_new_addr").value || null });
+        toast("Đã thêm kho"); render("wms");
+      });
     } else if (sec === "dm") {
       wirePaginate("t_wmsloc", 10);
       document.querySelectorAll("[data-loc-save]").forEach(b => b.onclick = () => guard(async () => {
@@ -1960,6 +2304,7 @@
         await PUT(`/wms/locations/${b.dataset.locSave}`, {
           code: tr.querySelector(".wl_code").value,
           name: tr.querySelector(".wl_name").value,
+          warehouse_id: tr.querySelector(".wl_wh").value || null,
           zone: tr.querySelector(".wl_zone").value || null,
           kind: tr.querySelector(".wl_kind").value,
           capacity: parseInt(tr.querySelector(".wl_capacity").value) || 1,
@@ -1974,7 +2319,9 @@
       }));
       $("wl_add").onclick = () => guard(async () => {
         if (!$("wl_new_code").value || !$("wl_new_name").value) { toast("Nhập mã và tên vị trí", "err"); return; }
+        if (!$("wl_new_wh").value) { toast("Vui lòng chọn kho thành phẩm cho vị trí mới", "err"); return; }
         await POST("/wms/locations", { code: $("wl_new_code").value, name: $("wl_new_name").value,
+          warehouse_id: $("wl_new_wh").value || null,
           zone: $("wl_new_zone").value || null, kind: $("wl_new_kind").value,
           capacity: num("wl_new_capacity") || 10 });
         toast("Đã thêm vị trí"); render("wms");

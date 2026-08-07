@@ -422,11 +422,15 @@ def test_near_expiry_lot_never_merges_with_regular_stock(client, admin_h):
     fp = client.get("/api/finished-products", headers=admin_h).json()
     code = next(f["code"] for f in fp if f["finished_product_id"] == fp_id)
 
+    loc = client.post("/api/wms/locations", headers=admin_h,
+                      json={"code": "NE-SEPARATE-LOC", "name": "Vị trí test near-expiry", "capacity": 100})
+    assert loc.status_code == 201, loc.text
     regular_lot = "LOT-REGULAR-SEPARATE"
     built = client.post("/api/wms/units", headers=admin_h,
                         json={"finished_product_id": fp_id, "product_name": code,
                               "lot_code": regular_lot, "total": 5, "pack_size": 1,
-                              "unit_type": "vi", "reason": "Nhập kho thủ công"})
+                              "unit_type": "vi", "reason": "Nhập kho thủ công",
+                              "loc_id": loc.json()["loc_id"]})
     assert built.status_code == 201, built.text
 
     ne_body = _declare_near_expiry(client, admin_h, fp_id, 3)

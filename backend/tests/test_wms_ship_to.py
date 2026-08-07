@@ -74,6 +74,22 @@ def _a_location(client, admin_h):
     return loc.json()["loc_id"]
 
 
+_DEFAULT_LOC_ID = None
+
+
+def _a_default_loc(client, admin_h):
+    """Vị trí kho mặc định dùng chung cho các test không quan tâm tới vị trí cụ thể — build_units
+    nay bắt buộc chọn vị trí ngay lúc nhập (không còn "chưa cất" cho luồng thủ công)."""
+    global _DEFAULT_LOC_ID
+    if _DEFAULT_LOC_ID is None:
+        loc = client.post("/api/wms/locations", headers=admin_h,
+                          json={"code": "LOC-SHIPTO-DEFAULT", "name": "Vị trí mặc định test ship_to",
+                                "capacity": 1_000_000})
+        assert loc.status_code == 201, loc.text
+        _DEFAULT_LOC_ID = loc.json()["loc_id"]
+    return _DEFAULT_LOC_ID
+
+
 def _a_ship_to(client, admin_h, code, name="NPP test"):
     """Nơi xuất đến nay dùng chung danh mục Nhà cung cấp (Supplier) — xem module docstring."""
     st = client.post("/api/suppliers", headers=admin_h, json={"code": code, "name": name})
@@ -91,7 +107,8 @@ def _a_units(client, admin_h, product, lot_code, count):
     chặn oan, vì mục đích của helper chỉ là dựng sẵn tồn kho, không phải test bước duyệt đó
     (bước duyệt có test riêng, xem test_wms_receipt_approve.py)."""
     build = client.post("/api/wms/units", headers=admin_h,
-                        json={"product_name": product, "lot_code": lot_code, "total": count, "pack_size": 1})
+                        json={"product_name": product, "lot_code": lot_code, "total": count, "pack_size": 1,
+                              "loc_id": _a_default_loc(client, admin_h)})
     assert build.status_code == 201, build.text
     assert len(build.json()["unit_codes"]) == 1
     code = build.json()["unit_codes"][0]

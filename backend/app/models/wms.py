@@ -16,6 +16,21 @@ from ..common import UTCDateTime, new_id, utcnow
 from ..database import Base
 
 
+class WmsWarehouse(Base):
+    """Kho thành phẩm (VD "Kho Đông Mai", "Kho Hạ Long") — cấp cha của WmsLocation. Mỗi kho
+    chứa nhiều vị trí (WmsLocation.warehouse_id) — tách riêng để biết 1 lô đang nằm ở KHO nào,
+    VỊ TRÍ nào trong kho đó, thay vì chỉ có 1 cấp "vị trí" phẳng như trước (xem migration
+    d8f3a1c2b4e6_wms_warehouse.py — mỗi vị trí hiện có tự động được nâng cấp thành 1 kho cùng
+    mã/tên để không đổi dữ liệu cũ, người dùng khai báo thêm vị trí mới trong kho đó sau)."""
+    __tablename__ = "wms_warehouse"
+
+    warehouse_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
+    code: Mapped[str] = mapped_column(Unicode(64), unique=True, index=True)
+    name: Mapped[str] = mapped_column(Unicode(255))
+    address: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
 class WmsLocation(Base):
     __tablename__ = "wms_location"
 
@@ -26,6 +41,9 @@ class WmsLocation(Base):
     kind: Mapped[str] = mapped_column(Unicode(255), default="bin")     # bin | staging | cold | dock
     capacity: Mapped[int] = mapped_column(Integer, default=10)   # số vỉ/keg tối đa
     active: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Kho thành phẩm cha — nullable để không phá các nơi tạo vị trí qua API cũ (test/import)
+    # chưa kịp gửi trường này, nhưng UI luôn bắt chọn khi khai báo vị trí mới (xem VIEWS.wms).
+    warehouse_id: Mapped[Optional[str]] = mapped_column(ForeignKey("wms_warehouse.warehouse_id"), nullable=True, index=True)
 
 
 class FinishedGoodsUnit(Base):
@@ -71,6 +89,18 @@ class FinishedGoodsUnit(Base):
     source: Mapped[Optional[str]] = mapped_column(Unicode(32), nullable=True, index=True)
     received_confirmed_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
     received_confirmed_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+    # "Loại xuất" (normal/promo/return) của CHÍNH dòng này tại thời điểm xuất — riêng từng
+    # đơn vị, KHÔNG còn dùng chung 1 giá trị cho cả Shipment (1 phiếu xuất cho 1 nhà phân phối
+    # có thể gồm nhiều sản phẩm với loại xuất khác nhau). NULL nếu chưa xuất hoặc dữ liệu cũ
+    # trước khi có field này — coi như "normal". Shipment.shipment_type vẫn giữ nguyên cột cũ,
+    # nay chỉ còn ý nghĩa tóm tắt (giống nhau -> giá trị đó, khác nhau -> "mixed").
+    shipment_line_type: Mapped[Optional[str]] = mapped_column(Unicode(32), nullable=True, index=True)
+    # Phiếu điều chuyển nội bộ GẦN NHẤT đã chạm vào dòng này (xem WmsTransfer/create_transfer) —
+    # mirror shipment_id nhưng KHÔNG đổi status (điều chuyển không làm giảm tồn kho, đơn vị vẫn
+    # "stored" và có thể bị 1 thao tác khác (điều chuyển/xuất kho) chạm vào tiếp sau đó, lúc này
+    # trường này bị ghi đè/xóa — dùng để undo_transfer() phát hiện đơn vị đã bị "chạm" bởi thao
+    # tác khác từ sau khi phiếu này tạo, tránh hoàn tác sai vị trí).
+    transfer_id: Mapped[Optional[str]] = mapped_column(ForeignKey("wms_transfer.transfer_id"), nullable=True, index=True)
 
 
 class Vehicle(Base):
@@ -79,6 +109,10 @@ class Vehicle(Base):
     __tablename__ = "wms_vehicle"
 
     vehicle_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
+    # Mã cố định do hệ thống tự sinh ("XE0001", ...) — biển số có thể đổi (đổi biển số, xe
+    # khác thay xe cũ...) nhưng mã này không đổi, dùng làm liên kết ổn định cho báo cáo
+    # lượt xe (xem services/wms.py::_gen_vehicle_code, vehicle_trip_report).
+    vehicle_code: Mapped[str] = mapped_column(Unicode(32), unique=True, index=True)
     plate: Mapped[str] = mapped_column(Unicode(32), unique=True, index=True)
     driver_name: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
     driver_short_name: Mapped[Optional[str]] = mapped_column(Unicode(64), nullable=True)
@@ -111,10 +145,63 @@ class Shipment(Base):
     vehicle_plate: Mapped[Optional[str]] = mapped_column(Unicode(64), nullable=True)     # Biển số xe
     from_location: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)    # Xuất tại kho (ngăn lô)
     delivery_place: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)   # Địa điểm
+    # Liên kết ổn định tới Danh mục lái xe (Vehicle) — driver_name/vehicle_plate ở trên vẫn
+    # giữ nguyên dạng text để in phiếu/lịch sử, vehicle_id dùng cho báo cáo lượt xe/tải trọng
+    # (vehicle_trip_report) vì không đổi theo biển số như 2 cột text kia.
+    vehicle_id: Mapped[Optional[str]] = mapped_column(ForeignKey("wms_vehicle.vehicle_id"), nullable=True, index=True)
+    # Km và số lít xăng của chuyến — chỉ điền được sau khi phiếu đã Duyệt (confirmed_by), xem
+    # services/wms.py::update_shipment_trip. Dùng cho báo cáo định mức nhiên liệu.
+    km: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    fuel_liters: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     # Trưởng bộ phận kho xác nhận (quyền wms.confirm_shipment) — sau khi xác nhận, chỉ ADMIN
     # mới "Hoàn tác" được (xem services/wms.py::confirm_shipment/undo_shipment).
     confirmed_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
     confirmed_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+
+
+class WmsTransfer(Base):
+    """1 phiếu điều chuyển nội bộ — mirror y hệt Shipment (chọn theo sản phẩm/lô/loại đơn vị/số
+    lượng, hệ thống tự chọn FIFO cũ nhất, có xe/lái xe/km/lít xăng, Duyệt/Hoàn tác, in phiếu,
+    lịch sử riêng) NHƯNG đích là 1 WmsLocation (không phải Supplier/ship_to) và KHÔNG làm giảm
+    tổng tồn kho toàn công ty: create_transfer() chỉ đổi FinishedGoodsUnit.location_id, KHÔNG
+    đổi status, KHÔNG tạo genealogy edge ra ngoài, KHÔNG đụng lot_code — giữ nguyên mã chiết để
+    truy xuất nguồn gốc không đứt (xem services/wms.py::create_transfer). Vị trí TRƯỚC khi
+    chuyển của mỗi đơn vị ghi ở WmsTransferLine.from_location_id để Hoàn tác trả đúng lại (khác
+    Shipment — Xuất kho luôn xóa location_id nên undo_shipment không trả lại được vị trí gốc)."""
+    __tablename__ = "wms_transfer"
+
+    transfer_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
+    transfer_code: Mapped[str] = mapped_column(Unicode(64), unique=True, index=True)
+    to_location_id: Mapped[str] = mapped_column(ForeignKey("wms_location.loc_id"), index=True)
+    created_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    note: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    fifo_ok: Mapped[bool] = mapped_column(Boolean, default=True)
+    driver_name: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    vehicle_plate: Mapped[Optional[str]] = mapped_column(Unicode(64), nullable=True)
+    vehicle_id: Mapped[Optional[str]] = mapped_column(ForeignKey("wms_vehicle.vehicle_id"), nullable=True, index=True)
+    # Vị trí xuất phát — tự suy ra từ location_id của các đơn vị được chọn TRƯỚC khi chuyển,
+    # mirror Shipment.from_location (có thể gồm nhiều vị trí khác nhau, cách nhau dấu phẩy).
+    from_location: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    km: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    fuel_liters: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    confirmed_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    confirmed_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+
+
+class WmsTransferLine(Base):
+    """1 dòng trong phiếu điều chuyển — CHỈ ghi vị trí TRƯỚC khi chuyển của 1 FinishedGoodsUnit
+    cụ thể (from_location_id), để undo_transfer() trả đúng lại. Không chép lại product/lot/
+    quantity — đã có sẵn trên chính FinishedGoodsUnit qua unit_id, tránh lệch dữ liệu nếu đơn vị
+    bị tách dòng (_consume_lot_rows) sau đó. Giữ lại NGUYÊN VẸN sau khi hoàn tác (không xóa) —
+    coi như lịch sử; undo_transfer() gọi lại lần 2 sẽ thấy transfer_id trên FinishedGoodsUnit đã
+    bị xóa/đổi khác nên tự nhiên báo "không còn gì để hoàn tác", không cần cờ riêng."""
+    __tablename__ = "wms_transfer_line"
+
+    line_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
+    transfer_id: Mapped[str] = mapped_column(ForeignKey("wms_transfer.transfer_id"), index=True)
+    unit_id: Mapped[str] = mapped_column(ForeignKey("finished_goods_unit.unit_id"), index=True)
+    from_location_id: Mapped[Optional[str]] = mapped_column(ForeignKey("wms_location.loc_id"), nullable=True)
 
 
 class NearExpiryEntry(Base):
@@ -185,6 +272,10 @@ class ConsignedEntry(Base):
     quantity: Mapped[int] = mapped_column(Integer)  # số vỉ/keg
     location_id: Mapped[Optional[str]] = mapped_column(ForeignKey("wms_location.loc_id"), nullable=True, index=True)  # vị trí nhận — chỉ có ở direction="in"
     declared_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)  # ngày giờ khai báo — chỉ có ở direction="in"
+    # Xe đã mang bia gửi này về — bắt buộc ở tầng service/schema cho direction="in" (xem
+    # create_consigned_entry), nullable ở DB vì dòng direction="out" do hệ thống tự tạo trong
+    # create_shipment không có xe. Dùng để hiện "xe đã gửi" ở picker Xuất kho.
+    vehicle_id: Mapped[Optional[str]] = mapped_column(ForeignKey("wms_vehicle.vehicle_id"), nullable=True, index=True)
     shipment_id: Mapped[Optional[str]] = mapped_column(ForeignKey("shipment.shipment_id"), nullable=True, index=True)  # phiếu xuất — chỉ có ở direction="out"
     note: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)
     created_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
