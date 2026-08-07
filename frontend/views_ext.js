@@ -840,7 +840,7 @@
       GET("/wms/warehouses").catch(() => [])]);
     // "Kho thành phẩm" (WmsWarehouse) là cấp cha mới của vị trí kho — 1 kho có nhiều vị trí.
     // Nhãn hiển thị ưu tiên "[mã kho] mã vị trí - tên vị trí" để biết ngay lô đang ở kho nào.
-    const whLabel = (l) => `${l.warehouse_name ? `[${esc(l.warehouse_name)}] ` : ""}${esc(l.code)}${l.name ? ` - ${esc(l.name)}` : ""}`;
+    const whLabel = (l) => `${l.warehouse_name ? `[${esc(l.warehouse_name)}] ` : ""}${esc(l.code)}${l.name ? ` - ${esc(l.name)}` : ""}${locZoneSuffix(l)}`;
     const utByCode = Object.fromEntries(unitTypes.map(ut => [ut.code, ut]));
     // FinishedGoodsUnit.product_name lưu mã SKU (VD "FLGN200"), không phải tên — tra thêm tên
     // để hiển thị "Mã — Tên" cho dễ nhận biết, chỉ dùng ở lớp hiển thị (mọi key gom nhóm/FIFO/
@@ -891,6 +891,7 @@
             <div class="field"><label>Sản phẩm</label>
               <input id="wu_prod_q" placeholder="Tìm sản phẩm..." style="width:220px;margin-bottom:2px"/>
               <select id="wu_prod" style="width:220px"><option value="">(chọn sản phẩm)</option>${fpOpt}</select></div>
+            <div class="field"><label>Lô TP</label><input id="wu_lot" placeholder="để trống = tự sinh" style="width:150px"/></div>
             <div class="field" id="wu_lonmode_wrap" style="align-self:flex-end">
               <label style="display:flex;align-items:center;gap:4px;cursor:pointer;white-space:nowrap">
                 <input type="checkbox" id="wu_lonmode"/> Nhập lẻ (bỏ qua vỉ)</label></div>
@@ -900,7 +901,7 @@
             <div class="field"><label>Vị trí kho</label><select id="wu_loc" style="width:160px"><option value="">(chọn vị trí)</option>${locOpt}</select></div>
             <div class="field" style="align-self:flex-end"><button class="btn" id="wu_build">+ Nhập kho</button></div>
           </div>
-          <div class="muted" style="font-size:12px;margin-top:4px">Lô TP do hệ thống tự sinh (không nhập tay). Loại đơn vị (vỉ/keg) và SL/1 đơn vị tự điền theo sản phẩm — quản lý ở Danh mục › Sản phẩm. Nhập lon hoặc nhập vỉ đều được — 2 ô tự quy đổi theo nhau. Tick "Nhập lẻ" nếu chỉ có lon rời (không đủ vỉ) — tồn kho sẽ lưu thẳng theo Lon, không quy đổi ra vỉ. Bắt buộc chọn Vị trí kho trước khi nhập. Sau khi nhập, cần Trưởng bộ phận kho duyệt trước khi được xuất kho.</div>`)}
+          <div class="muted" style="font-size:12px;margin-top:4px">Để trống Lô TP để hệ thống tự sinh mã tăng dần theo năm, hoặc tự nhập mã lô riêng. Loại đơn vị (vỉ/keg) và SL/1 đơn vị tự điền theo sản phẩm — quản lý ở Danh mục › Sản phẩm. Nhập lon hoặc nhập vỉ đều được — 2 ô tự quy đổi theo nhau. Tick "Nhập lẻ" nếu chỉ có lon rời (không đủ vỉ) — tồn kho sẽ lưu thẳng theo Lon, không quy đổi ra vỉ. Bắt buộc chọn Vị trí kho trước khi nhập. Sau khi nhập, cần Trưởng bộ phận kho duyệt trước khi được xuất kho.</div>`)}
         ${panel("🏁 Nhập tồn đầu", isAdminWms ? `
           <div class="row">
             <div class="field"><label>Sản phẩm</label>
@@ -1519,7 +1520,7 @@
         const opt = $("wu_prod").selectedOptions[0];
         const { lonMode } = buildDivisor("wu");
         await POST("/wms/units", { finished_product_id: $("wu_prod").value, product_name: opt.dataset.code,
-          total: num("wu_total") || 0,
+          lot_code: $("wu_lot").value.trim() || undefined, total: num("wu_total") || 0,
           pack_size: lonMode ? 1 : (num("wu_pack") || 24), unit_type: lonMode ? "lon" : (opt.dataset.unittype || "vi"),
           loc_id: $("wu_loc").value, reason: "Nhập kho thủ công" });
         toast("Đã nhập kho (kèm mã vạch từng vỉ/keg)"); render("wms");

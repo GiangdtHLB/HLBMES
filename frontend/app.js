@@ -9992,14 +9992,14 @@ VIEWS.master = async function () {
       </div>` : ""}
       <input class="searchbox" data-tbl="t_qcgroups" placeholder="Tìm mã/tên nhóm chỉ tiêu..." style="margin-top:10px"/>
       <div class="tablewrap" style="margin-top:8px"><table id="t_qcgroups">
-        <thead><tr><th>Mã</th><th>Tên</th><th>Ghi chú</th><th>Trạng thái</th>${canManage ? "<th></th>" : ""}</tr></thead>
+        <thead><tr><th>Mã</th><th>Tên</th><th>Ghi chú</th><th>Trạng thái</th><th></th></tr></thead>
         <tbody>${qcGroups.map(g => `<tr>
           <td><code class="k">${esc(g.code)}</code></td><td>${esc(g.name)}</td>
           <td class="muted">${esc(g.note || "—")}</td>
           <td>${badge(g.active ? "available" : "obsolete")}${g.active ? "hoạt động" : "ngừng"}</td>
-          ${canManage ? `<td style="white-space:nowrap"><button class="btn sm sec" data-qgi="${esc(g.group_id)}">Chỉ tiêu trong nhóm</button>
-            <button class="btn sm sec" data-qgedit="${esc(g.group_id)}">Sửa</button>
-            <button class="btn sm sec" data-qgdel="${esc(g.group_id)}">Xóa</button></td>` : ""}</tr>`).join("")}</tbody>
+          <td style="white-space:nowrap"><button class="btn sm sec" data-qgi="${esc(g.group_id)}">Chỉ tiêu trong nhóm</button>
+            ${canManage ? `<button class="btn sm sec" data-qgedit="${esc(g.group_id)}">Sửa</button>
+            <button class="btn sm sec" data-qgdel="${esc(g.group_id)}">Xóa</button>` : ""}</td></tr>`).join("")}</tbody>
       </table></div>
     </div>
 
@@ -10092,8 +10092,14 @@ VIEWS.master = async function () {
   wirePaginate("t_lines_line", 10);
   wirePaginate("t_lines_tank", 10);
   wirePaginate("t_lines_tank_bbt", 10);
+  // Xem chỉ tiêu trong nhóm là hành động chỉ-đọc — luôn cho phép bấm dù không có quyền
+  // master.manage (khối if (canManage) dưới đây chỉ chứa các hành động tạo/sửa/xóa).
+  document.querySelectorAll("[data-qgi]").forEach(b => b.onclick = () => {
+    const g = qcGroups.find(x => x.group_id === b.dataset.qgi);
+    openQcGroupItemsModal(g);
+  });
   if (canManage) {
-    $("pr_add").onclick = () => guard(async () => {
+    if ($("pr_add")) $("pr_add").onclick = () => guard(async () => {
       await POST("/products", { code: $("pr_code").value.trim(), name: $("pr_name").value.trim(),
         uom: $("pr_uom").value.trim() || "L", description: $("pr_desc").value.trim() || null,
         ferment_days_std: $("pr_ferment_days").value === "" ? null : parseInt($("pr_ferment_days").value, 10),
@@ -10301,7 +10307,7 @@ VIEWS.master = async function () {
       await DELETE(`/material-alt-groups/${b.dataset.magdel}`);
       toast("Đã xóa nhóm vật tư thay thế"); render("master");
     }));
-    $("mt_add").onclick = () => guard(async () => {
+    if ($("mt_add")) $("mt_add").onclick = () => guard(async () => {
       await POST("/materials", { code: $("mt_code").value.trim(), name: $("mt_name").value.trim(),
         uom: $("mt_uom").value.trim() || "kg", category: $("mt_cat").value,
         stock_min: $("mt_stockmin").value === "" ? null : parseFloat($("mt_stockmin").value),
@@ -10504,17 +10510,13 @@ VIEWS.master = async function () {
       toast("Đã xóa chỉ tiêu"); render("master");
     }));
 
-    $("qg_add").onclick = () => guard(async () => {
+    if ($("qg_add")) $("qg_add").onclick = () => guard(async () => {
       const code = $("qg_code").value.trim(), name = $("qg_name").value.trim();
       if (!code || !name) throw new Error("Nhập đủ Mã nhóm và Tên nhóm.");
       await POST("/qc/groups", { code, name, note: $("qg_note").value.trim() || null });
       toast("Đã tạo nhóm chỉ tiêu"); render("master");
     });
 
-    document.querySelectorAll("[data-qgi]").forEach(b => b.onclick = () => {
-      const g = qcGroups.find(x => x.group_id === b.dataset.qgi);
-      openQcGroupItemsModal(g);
-    });
     document.querySelectorAll("[data-qgedit]").forEach(b => b.onclick = () => {
       const g = qcGroups.find(x => x.group_id === b.dataset.qgedit);
       modal(`<h3>Sửa nhóm chỉ tiêu</h3>
@@ -10625,19 +10627,22 @@ VIEWS.master = async function () {
     const params = allParams.filter(p => !p.stage);
     const paramOpts = params.map(p => `<option value="${esc(p.param_id)}">${esc(p.code)} — ${esc(p.name)}${p.unit ? " (" + esc(p.unit) + ")" : ""}</option>`).join("");
     modal(`<h3>Chỉ tiêu trong nhóm — ${esc(group.name)}</h3>
+      ${canManage ? "" : `<div class="muted" style="margin-bottom:8px">Bạn chỉ có quyền xem (cần quyền <code class="k">master.manage</code> để thêm/sửa/xóa chỉ tiêu trong nhóm).</div>`}
       <div class="tablewrap"><table>
-        <thead><tr><th>Mã CT</th><th>Tên</th><th>ĐVT</th><th>Min</th><th>Max</th><th>Bắt buộc</th><th></th></tr></thead>
+        <thead><tr><th>Mã CT</th><th>Tên</th><th>ĐVT</th><th>Min</th><th>Max</th><th>Bắt buộc</th>${canManage ? "<th></th>" : ""}</tr></thead>
         <tbody>${items.map(it => `<tr>
           <td><code class="k">${esc(it.param_code || "—")}</code></td><td>${esc(it.param_name || "—")}</td>
           <td>${esc(it.param_unit || "—")}</td>
-          <td><input type="number" step="any" class="qgi-lsl-edit" data-item="${esc(it.item_id)}" value="${it.lsl_override ?? ""}" style="width:85px"/></td>
+          ${canManage ? `<td><input type="number" step="any" class="qgi-lsl-edit" data-item="${esc(it.item_id)}" value="${it.lsl_override ?? ""}" style="width:85px"/></td>
           <td><input type="number" step="any" class="qgi-usl-edit" data-item="${esc(it.item_id)}" value="${it.usl_override ?? ""}" style="width:85px"/></td>
           <td><input type="checkbox" class="qgi-mand-edit" data-item="${esc(it.item_id)}" ${it.mandatory ? "checked" : ""}/></td>
           <td style="white-space:nowrap"><button class="btn sm sec" data-saveitem="${esc(it.item_id)}">Lưu</button>
-            <button class="btn sm sec" data-delitem="${esc(it.item_id)}">Xóa</button></td></tr>`).join("") ||
-          `<tr><td colspan="7" class="muted">Chưa có chỉ tiêu nào trong nhóm.</td></tr>`}</tbody>
+            <button class="btn sm sec" data-delitem="${esc(it.item_id)}">Xóa</button></td>` : `<td>${it.lsl_override ?? "—"}</td>
+          <td>${it.usl_override ?? "—"}</td>
+          <td>${it.mandatory ? "Có" : "Không"}</td>`}</tr>`).join("") ||
+          `<tr><td colspan="${canManage ? 7 : 6}" class="muted">Chưa có chỉ tiêu nào trong nhóm.</td></tr>`}</tbody>
       </table></div>
-      <h4 style="margin-top:14px">+ Thêm chỉ tiêu vào nhóm</h4>
+      ${canManage ? `<h4 style="margin-top:14px">+ Thêm chỉ tiêu vào nhóm</h4>
       <div class="row">
         <div class="field" style="min-width:220px"><label>Chỉ tiêu</label><select id="qgi_param">${paramOpts || "<option value=''>(chưa có chỉ tiêu nào — tạo ở Danh mục chỉ tiêu chất lượng)</option>"}</select></div>
         <div class="field"><label>Min (LSL)</label><input id="qgi_lsl" type="number" step="any" style="width:90px"/></div>
@@ -10654,8 +10659,9 @@ VIEWS.master = async function () {
           "<option value=''>(không có nhóm nào khác)</option>"}</select></div>
         <button class="btn sec" id="qgi_copy" style="align-self:flex-end">Copy vào nhóm này</button>
       </div>
-      <div class="muted" style="margin-top:6px">Copy toàn bộ chỉ tiêu (kèm Min/Max/Bắt buộc) từ nhóm nguồn sang nhóm "${esc(group.name)}".</div>`}`);
+      <div class="muted" style="margin-top:6px">Copy toàn bộ chỉ tiêu (kèm Min/Max/Bắt buộc) từ nhóm nguồn sang nhóm "${esc(group.name)}".</div>`}` : ""}`);
 
+    if (!canManage) return;
     $("qgi_add").onclick = () => guard(async () => {
       const paramId = $("qgi_param").value;
       if (!paramId) throw new Error("Chưa có chỉ tiêu để thêm — tạo chỉ tiêu mới trước.");
