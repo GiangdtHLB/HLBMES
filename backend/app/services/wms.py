@@ -1599,6 +1599,44 @@ def list_lot_summaries(db: Session) -> list:
     return sorted(grouped.values(), key=lambda g: (g["product_name"] or "", g["lot_code"] or ""))
 
 
+def warehouse_floor_map(db: Session, warehouse_id: str) -> list[dict]:
+    """Sơ đồ kho vật lý: TỪNG vị trí kho thuộc 1 kho thành phẩm, kèm các (sản phẩm, lô, loại
+    đơn vị) đang lưu ở đó và cờ sẵn sàng FIFO — TÍNH RIÊNG trong phạm vi kho này. Khác với
+    {type}_fifo_ok của list_lot_summaries (tính "cũ nhất" trên TOÀN hệ thống, xuyên mọi kho):
+    ở đây "cũ nhất" chỉ so trong các vị trí thuộc CHÍNH warehouse_id truyền vào — 1 lô có thể
+    chưa tới lượt FIFO toàn hệ thống (kho khác còn lô cũ hơn) nhưng vẫn là lô cũ nhất TRONG kho
+    đang xem, nên vẫn nên xuất trước khi thao tác trong phạm vi kho đó."""
+    divide_codes = _divide_by_pack_codes(db)
+    locs = list(db.execute(select(WmsLocation).where(WmsLocation.warehouse_id == warehouse_id)
+                           .order_by(WmsLocation.code)).scalars().all())
+    if not locs:
+        return []
+    loc_ids = [l.loc_id for l in locs]
+    rows = db.execute(select(FinishedGoodsUnit.location_id, FinishedGoodsUnit.product_name,
+                             FinishedGoodsUnit.lot_code, FinishedGoodsUnit.unit_type,
+                             func.sum(FinishedGoodsUnit.quantity / _pack_divisor_expr(divide_codes)),
+                             func.min(FinishedGoodsUnit.created_at))
+                      .select_from(FinishedGoodsUnit)
+                      .outerjoin(FinishedProduct, FinishedProduct.finished_product_id == FinishedGoodsUnit.finished_product_id)
+                      .where(FinishedGoodsUnit.status == "stored", FinishedGoodsUnit.location_id.in_(loc_ids))
+                      .group_by(FinishedGoodsUnit.location_id, FinishedGoodsUnit.product_name,
+                               FinishedGoodsUnit.lot_code, FinishedGoodsUnit.unit_type)).all()
+    # oldest_by_type: "cũ nhất" CHỈ so trong phạm vi warehouse_id này (không lẫn kho khác).
+    oldest_by_type: dict[tuple, object] = {}
+    for _, product_name, _lot_code, unit_type, _count, oldest_at in rows:
+        key = (product_name, unit_type)
+        if key not in oldest_by_type or (oldest_at and oldest_at < oldest_by_type[key]):
+            oldest_by_type[key] = oldest_at
+    lots_by_loc: dict[str, list] = {l.loc_id: [] for l in locs}
+    for location_id, product_name, lot_code, unit_type, count, oldest_at in rows:
+        lots_by_loc[location_id].append({
+            "product_name": product_name, "lot_code": lot_code, "unit_type": unit_type,
+            "count": count or 0, "oldest_at": oldest_at.isoformat() if oldest_at else None,
+            "fifo_ready": oldest_at == oldest_by_type.get((product_name, unit_type))})
+    return [{"loc_id": l.loc_id, "code": l.code, "name": l.name, "zone": l.zone,
+             "capacity": l.capacity, "lots": lots_by_loc[l.loc_id]} for l in locs]
+
+
 # Ngưỡng mặc định (số ngày tồn kho kể từ đơn vị nhập sớm nhất trong nhóm) để tô màu cảnh báo ở
 # báo cáo tồn kho theo tuổi — khối kinh doanh dùng để biết lô nào cần đẩy bán gấp. Có thể chỉnh
 # qua Cài đặt vận hành (OpsSetting.aging_*_days), xem lot_aging_report().
@@ -2205,6 +2243,9 @@ def create_shipment(db: Session, ship_to_id: str, lines: list, user: User, heade
         near_expiry_only = bool(line.get("near_expiry_only"))
         consigned_only = bool(line.get("consigned_only"))
         shipment_type_line = line.get("shipment_type") or "normal"
+        # Chọn đúng 1 vị trí cụ thể để xuất (picker Xuất kho tách lô nhiều vị trí thành dòng
+        # con theo vị trí) — bỏ trống thì giữ hành vi cũ (FIFO tự do trong lô/kho xuất).
+        line_location_id = line.get("location_id") or None
         if not product_name or not unit_type:
             raise DomainError("Mỗi dòng phải có sản phẩm và loại đơn vị.")
         if qty <= 0:
@@ -2221,7 +2262,8 @@ def create_shipment(db: Session, ship_to_id: str, lines: list, user: User, heade
             db, product_name=product_name, unit_type=unit_type, status="stored",
             quantity_needed=qty * divisor, lot_code=lot_code, exclude_ids=picked_so_far,
             near_expiry_only=near_expiry_only, consigned_only=consigned_only, block_pending_manual=True,
-            warehouse_id=warehouse_id)
+            warehouse_id=warehouse_id,
+            **({"location_id": line_location_id} if line_location_id else {}))
         if got + 1e-9 < qty * divisor:
             special_note = " (bia cận date)" if near_expiry_only else " (bia gửi)" if consigned_only else ""
             # Gợi ý lý do thiếu hàng khi thực ra còn "Nhập kho thủ công" đang chờ Trưởng bộ phận

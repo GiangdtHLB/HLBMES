@@ -3,6 +3,7 @@
 from fastapi import APIRouter, Depends, File, UploadFile
 from sqlalchemy.orm import Session
 
+from ..common import Role
 from ..database import get_db
 from ..schemas import (ConsignedEntryIn, ConsignedEntryUpdate, DecomposeBatchIn, DeleteByLotIn,
                        FactoryImportEntryIn, FactoryImportEntryUpdate, FreeIssueBatchIn,
@@ -10,7 +11,7 @@ from ..schemas import (ConsignedEntryIn, ConsignedEntryUpdate, DecomposeBatchIn,
                        ShipmentIn, ShipmentTripIn, ShipmentUpdate, UnitBuildIn, UnitDeleteIn, UnitTransferIn,
                        VehicleIn, VehicleUpdate, WmsLocationIn, WmsLocationUpdate, WmsTransferIn, WmsTransferTripIn,
                        WmsTransferUpdate, WmsWarehouseIn, WmsWarehouseUpdate)
-from ..security import User, get_current_user, require_perm
+from ..security import User, get_current_user, require_perm, require_role
 from ..services import load_slip as load_slip_svc
 from ..services import wms as svc
 
@@ -27,10 +28,16 @@ def warehouses(db: Session = Depends(get_db), user: User = Depends(get_current_u
     return svc.list_warehouses(db)
 
 
+@router.get("/warehouses/{warehouse_id}/floor-map")
+def warehouse_floor_map(warehouse_id: str, db: Session = Depends(get_db),
+                        user: User = Depends(get_current_user)):
+    return svc.warehouse_floor_map(db, warehouse_id)
+
+
 @router.post("/warehouses", status_code=201)
 def create_warehouse(payload: WmsWarehouseIn, db: Session = Depends(get_db),
                      user: User = Depends(get_current_user)):
-    require_perm(user, "warehouse.receive")
+    require_role(user, Role.ADMIN)
     wh = svc.create_warehouse(db, payload.model_dump())
     return {"warehouse_id": wh.warehouse_id, "code": wh.code}
 
@@ -38,14 +45,14 @@ def create_warehouse(payload: WmsWarehouseIn, db: Session = Depends(get_db),
 @router.put("/warehouses/{warehouse_id}")
 def update_warehouse(warehouse_id: str, payload: WmsWarehouseUpdate, db: Session = Depends(get_db),
                      user: User = Depends(get_current_user)):
-    require_perm(user, "warehouse.receive")
+    require_role(user, Role.ADMIN)
     wh = svc.update_warehouse(db, warehouse_id, payload.model_dump(exclude_unset=True))
     return {"warehouse_id": wh.warehouse_id, "code": wh.code}
 
 
 @router.delete("/warehouses/{warehouse_id}", status_code=204)
 def delete_warehouse(warehouse_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    require_perm(user, "warehouse.receive")
+    require_role(user, Role.ADMIN)
     svc.delete_warehouse(db, warehouse_id)
 
 
@@ -57,7 +64,7 @@ def locations(db: Session = Depends(get_db), user: User = Depends(get_current_us
 @router.post("/locations", status_code=201)
 def create_location(payload: WmsLocationIn, db: Session = Depends(get_db),
                     user: User = Depends(get_current_user)):
-    require_perm(user, "warehouse.receive")
+    require_role(user, Role.ADMIN)
     loc = svc.create_location(db, payload.model_dump())
     return {"loc_id": loc.loc_id, "code": loc.code}
 
@@ -65,14 +72,14 @@ def create_location(payload: WmsLocationIn, db: Session = Depends(get_db),
 @router.put("/locations/{loc_id}")
 def update_location(loc_id: str, payload: WmsLocationUpdate, db: Session = Depends(get_db),
                     user: User = Depends(get_current_user)):
-    require_perm(user, "warehouse.receive")
+    require_role(user, Role.ADMIN)
     loc = svc.update_location(db, loc_id, payload.model_dump(exclude_unset=True))
     return {"loc_id": loc.loc_id, "code": loc.code}
 
 
 @router.delete("/locations/{loc_id}", status_code=204)
 def delete_location(loc_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    require_perm(user, "warehouse.receive")
+    require_role(user, Role.ADMIN)
     svc.delete_location(db, loc_id)
 
 
@@ -89,7 +96,7 @@ def vehicle_list_consigned_eligible(db: Session = Depends(get_db), user: User = 
 @router.post("/vehicles", status_code=201)
 def vehicle_create(payload: VehicleIn, db: Session = Depends(get_db),
                    user: User = Depends(get_current_user)):
-    require_perm(user, "warehouse.receive")
+    require_role(user, Role.ADMIN)
     v = svc.create_vehicle(db, payload.model_dump())
     return {"vehicle_id": v.vehicle_id, "vehicle_code": v.vehicle_code, "plate": v.plate}
 
@@ -97,14 +104,14 @@ def vehicle_create(payload: VehicleIn, db: Session = Depends(get_db),
 @router.put("/vehicles/{vehicle_id}")
 def vehicle_update(vehicle_id: str, payload: VehicleUpdate, db: Session = Depends(get_db),
                    user: User = Depends(get_current_user)):
-    require_perm(user, "warehouse.receive")
+    require_role(user, Role.ADMIN)
     v = svc.update_vehicle(db, vehicle_id, payload.model_dump(exclude_unset=True))
     return {"vehicle_id": v.vehicle_id, "vehicle_code": v.vehicle_code, "plate": v.plate}
 
 
 @router.delete("/vehicles/{vehicle_id}", status_code=204)
 def vehicle_delete(vehicle_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    require_perm(user, "warehouse.receive")
+    require_role(user, Role.ADMIN)
     svc.delete_vehicle(db, vehicle_id)
 
 
