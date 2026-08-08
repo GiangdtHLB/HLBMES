@@ -2047,9 +2047,9 @@ async function loadFormulaActivationLog(productId) {
 function fmMaterialSearchItems() {
   const rawGroupCodes = new Set((CACHE.materialGroups || []).filter(g => g.is_raw_material).map(g => g.code));
   const matItems = (CACHE.materials || []).filter(m => rawGroupCodes.has(m.category))
-    .map(m => ({ value: m.code, label: `${m.code} — ${m.name}`, uom: m.uom }));
+    .map(m => ({ value: m.code, label: `${m.code} — ${m.name}`, uom: m.uom, mat: m }));
   const groupItems = (CACHE.materialAltGroups || []).filter(g => g.active)
-    .map(g => ({ value: `grp:${g.code}`, label: `${g.name} (nhóm vật tư thay thế)`, uom: g.unit || null }));
+    .map(g => ({ value: `grp:${g.code}`, label: `${g.name} (nhóm vật tư thay thế)`, uom: g.unit || null, isGroup: true }));
   return [...matItems, ...groupItems];
 }
 function fmMaterialLabel(materialCode, groupCode) {
@@ -2063,15 +2063,26 @@ function fmMaterialLabel(materialCode, groupCode) {
   }
   return "";
 }
+function fmBomRowUomHTML(mat, isGroup, groupUom) {
+  // Dòng theo nhóm vật tư thay thế: ĐVT luôn khoá theo nhóm (xem services/formula.py) — không
+  // đổi sang đơn vị phụ ở đây. Dòng theo 1 mã vật tư cụ thể: cho chọn Đơn vị chính/Đơn vị phụ
+  // (nếu vật tư có khai alt_uom+alt_uom_ratio ở Danh mục Vật tư) — mirror altUomFieldHtml đang
+  // dùng ở Kho NVL; số lượng luôn quy đổi về đơn vị chính trước khi gửi (collectFmBom).
+  if (isGroup) {
+    return `<input class="fbm-uom" value="${esc(groupUom || "")}" size="5" readonly title="ĐVT lấy theo Nhóm vật tư thay thế — không sửa được ở đây"/>`;
+  }
+  return altUomFieldHtml(mat, `class="fbm-uom"`, 90);
+}
 function fmBomRowHTML(line) {
   line = line || {};
   const value = line.alt_group_code ? `grp:${line.alt_group_code}` : (line.material_code || "");
   const label = fmMaterialLabel(line.material_code, line.alt_group_code);
+  const mat = line.material_code ? (CACHE.materials || []).find(m => m.code === line.material_code) : null;
   return `<tr class="fm-bomrow">
     <td><input type="text" class="fbm-mat-txt" value="${esc(label)}" placeholder="Gõ để tìm vật tư/nhóm..." autocomplete="off" style="min-width:220px"/>
       <input type="hidden" class="fbm-mat" value="${esc(value)}"/></td>
     <td><input class="fbm-qty" type="number" step="any" value="${line.qty ?? ""}" style="width:110px"/></td>
-    <td><input class="fbm-uom" value="${esc(line.uom || "")}" size="5" readonly title="ĐVT lấy mặc định từ Danh mục Vật tư/Nhóm vật tư thay thế — không sửa được ở đây"/></td>
+    <td class="fbm-uom-cell">${fmBomRowUomHTML(mat, !!line.alt_group_code, line.uom)}</td>
     <td><button class="btn sm sec fbm-del" type="button">×</button></td></tr>`;
 }
 function wireFmBomEditor(scope) {
@@ -2105,9 +2116,10 @@ function wireFmBomRows(scope) {
           const item = items.find(i => i.value === row.dataset.v);
           if (item) {
             hidden.value = item.value; txt.value = item.label;
-            // ĐVT luôn lấy từ đơn vị đã đăng ký của vật tư/nhóm — ô readonly, người dùng
-            // không tự nhập (server cũng ép lại uom này khi lưu, xem services/formula.py).
-            txt.closest("tr").querySelector(".fbm-uom").value = item.uom || "";
+            // Đổi vật tư/nhóm -> render lại ô ĐVT đúng loại (select đơn vị chính/phụ cho vật tư
+            // cụ thể có alt_uom, hoặc input readonly cho dòng nhóm) — xem fmBomRowUomHTML.
+            const uomCell = txt.closest("tr").querySelector(".fbm-uom-cell");
+            uomCell.innerHTML = fmBomRowUomHTML(item.mat, !!item.isGroup, item.uom);
           }
           closePanel();
         };
@@ -2121,9 +2133,14 @@ function wireFmBomRows(scope) {
 function collectFmBom(scope) {
   return [...scope.querySelectorAll(".fm-bomrow")].map(tr => {
     const val = tr.querySelector(".fbm-mat").value;
-    const qty = parseFloat(tr.querySelector(".fbm-qty").value) || 0;
-    const uom = tr.querySelector(".fbm-uom").value;
-    return val.startsWith("grp:") ? { alt_group_code: val.slice(4), qty, uom } : { material_code: val, qty, uom };
+    const qtyRaw = parseFloat(tr.querySelector(".fbm-qty").value) || 0;
+    const chosenUom = tr.querySelector(".fbm-uom").value;
+    if (val.startsWith("grp:")) return { alt_group_code: val.slice(4), qty: qtyRaw, uom: chosenUom };
+    // Nếu người dùng chọn đơn vị phụ (VD "bao") để nhập, quy đổi về đơn vị chính trước khi gửi
+    // — server luôn lưu/scale BOM theo đơn vị chính của vật tư (services/formula.py).
+    const mat = (CACHE.materials || []).find(m => m.code === val);
+    const qty = altUomToBaseQty(mat, qtyRaw, chosenUom);
+    return { material_code: val, qty, uom: mat ? mat.uom : chosenUom };
   }).filter(l => (l.material_code || l.alt_group_code) && l.qty > 0);
 }
 function fmFormHTML(f) {
