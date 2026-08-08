@@ -563,6 +563,10 @@ class ShipmentLineIn(BaseModel):
     # normal | promo | return — RIÊNG TỪNG DÒNG (1 phiếu có thể gồm nhiều sản phẩm với loại
     # xuất khác nhau, cùng 1 nhà phân phối) — xem FinishedGoodsUnit.shipment_line_type.
     shipment_type: str = "normal"
+    # Chọn đúng 1 VỊ TRÍ cụ thể để xuất (thay vì để hệ thống tự FIFO trên mọi vị trí của lô) —
+    # dùng khi picker Xuất kho tách 1 lô có nhiều vị trí thành các dòng con theo vị trí (xem
+    # views_ext.js renderLots). Để trống = giữ hành vi cũ (FIFO tự do trong lô/kho xuất).
+    location_id: Optional[str] = None
 
 
 class ShipmentIn(BaseModel):

@@ -78,12 +78,15 @@ def test_vehicle_plate_must_be_unique(client, admin_h):
     assert dup.status_code == 409, dup.text
 
 
-def test_vehicle_create_requires_warehouse_receive_perm(client, thukho_h, kcs_h):
-    ok = client.post("/api/wms/vehicles", headers=thukho_h, json={"plate": "14H77777"})
-    assert ok.status_code == 201, ok.text
+def test_vehicle_create_requires_admin(client, thukho_h, kcs_h):
+    # Danh mục lái xe đã chuyển vào Danh mục (Master) và khóa CHỈ ADMIN được tạo/sửa/xóa (xem
+    # routers/wms.py: require_role(user, Role.ADMIN)) — thủ kho (vốn có warehouse.receive)
+    # không còn được tạo, giống hệt kcs.
+    denied_thukho = client.post("/api/wms/vehicles", headers=thukho_h, json={"plate": "14H77777"})
+    assert denied_thukho.status_code == 403, denied_thukho.text
 
-    denied = client.post("/api/wms/vehicles", headers=kcs_h, json={"plate": "14H66666"})
-    assert denied.status_code == 403, denied.text
+    denied_kcs = client.post("/api/wms/vehicles", headers=kcs_h, json={"plate": "14H66666"})
+    assert denied_kcs.status_code == 403, denied_kcs.text
 
 
 def test_vehicle_list_is_public_to_any_authenticated_user(client, kcs_h):
