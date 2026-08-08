@@ -821,12 +821,12 @@
       return parts.join(", ") || "—";
     }
     const sec = SUB.wms || "kho";
-    const sections = [{ key: "kho", label: "Kho TP" }, { key: "xuatkho", label: "Xuất kho" },
+    const sections = [{ key: "factoryimport", label: "🏭 Nhập từ nhà máy khác" },
+      { key: "kho", label: "Kho TP" }, { key: "xuatkho", label: "Xuất kho" },
       { key: "dieuchuyen", label: "🔀 Điều chuyển" },
       { key: "capvao", label: "🚚 Cất vào vị trí" }, { key: "tudo", label: "🚫 Xuất tự do" },
       { key: "lenhdonghang", label: "Lệnh đóng hàng" }, { key: "aging", label: "📦 Tồn kho theo tuổi" },
       { key: "canexpiry", label: "🕒 Bia cận date" }, { key: "consigned", label: "🎁 Bia gửi" },
-      { key: "factoryimport", label: "🏭 Nhập từ nhà máy khác" },
       { key: "khodm", label: "🏭 Danh mục kho thành phẩm" },
       { key: "dm", label: "Danh mục vị trí kho" },
       { key: "vehicles", label: "Danh mục lái xe" }];
