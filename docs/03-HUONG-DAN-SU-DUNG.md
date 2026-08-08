@@ -16,7 +16,7 @@
 4. [Lệnh sản xuất (Lệnh nấu / Lệnh lọc)](#4-lệnh-sản-xuất-lệnh-nấu--lệnh-lọc)
 5. [Điều độ (Work Order)](#5-điều-độ-work-order)
 6. [Lập lịch sản xuất](#6-lập-lịch-sản-xuất)
-7. [Công thức (Recipe/BOM)](#7-công-thức-recipebom)
+7. [Công thức (Formula/BOM)](#7-công-thức-formulabom)
 8. [Chất lượng (QC) & QC Lab](#8-chất-lượng-qc--qc-lab)
 9. [Nấu — Lọc — Chiết (công đoạn sản xuất chính)](#9-nấu--lọc--chiết-công-đoạn-sản-xuất-chính)
 10. [Truy xuất nguồn gốc](#10-truy-xuất-nguồn-gốc)
@@ -47,7 +47,7 @@
 3. Hệ thống lưu token phiên vào trình duyệt — không cần đăng nhập lại cho tới khi bấm **Đăng xuất** (góc trên phải).
 4. Muốn dùng trên tablet/màn hình cảm ứng ngoài xưởng: bấm **📱 Kiosk** (cạnh nút Đăng xuất) để mở giao diện rút gọn, tối ưu thao tác chạm.
 
-**10 tài khoản demo đang có trên hệ thống** (mật khẩu mặc định `123456`, riêng `admin` là `admin123`) — danh sách đã rút gọn để khớp đúng sơ đồ tổ chức thật của nhà máy (không còn các chức danh "giám đốc nhà máy chung chung", "trưởng ca", "thủ kho phân xưởng", "bảo trì", "năng lượng" như trước — các việc đó đã gộp vào đúng chức danh thật bên dưới):
+**12 tài khoản demo đang có trên hệ thống** (mật khẩu mặc định `123456`, riêng `admin` là `admin123`) — danh sách đã rút gọn để khớp đúng sơ đồ tổ chức thật của nhà máy (không còn các chức danh "giám đốc nhà máy chung chung", "trưởng ca", "thủ kho phân xưởng", "bảo trì", "năng lượng" như trước — các việc đó đã gộp vào đúng chức danh thật bên dưới):
 
 | Tài khoản | Vai trò (role) | Chức danh hiển thị | Dùng cho phần nào |
 |---|---|---|---|
@@ -61,6 +61,8 @@
 | `kcs_truongphong` | qa | Trưởng phòng KCS | Khóa chỉ tiêu, tạo Lệnh lọc, duyệt QC |
 | `giamdoc_sx` | supervisor | Giám đốc Sản xuất - Kỹ thuật | **Người duy nhất** duyệt lô chiết cho nhập Kho thành phẩm |
 | `ttdh_thukhotp` | operator | NV Trung tâm Điều hành - Thủ kho TP | Quản lý Kho TP (WMS): xuất kho, điều chuyển, cất vị trí |
+| `truongphong_kh` | supervisor | Trưởng phòng Kế hoạch | Duyệt điều chuyển Kho công ty → Nhà máy khác |
+| `truongkho_tp` | supervisor | Trưởng bộ phận Kho thành phẩm | Xác nhận phiếu xuất kho TP + duyệt nhập kho từ chiết |
 
 ---
 
@@ -70,17 +72,19 @@
 
 **Ai dùng:** tất cả tài khoản — đây là màn hình mặc định sau đăng nhập.
 
-### 2.1 Ba panel cảnh báo QC (đầu trang)
+### 2.1 Năm panel cảnh báo (đầu trang)
 
-Trước đây là 1 bảng gộp, nay tách 3 góc nhìn trên cùng 1 nguồn dữ liệu — 1 lô có thể xuất hiện ở nhiều panel nếu thoả nhiều điều kiện:
+Trước đây là 1 bảng gộp, nay tách nhiều góc nhìn — 3 panel đầu dùng cùng 1 nguồn dữ liệu QC (1 lô có thể xuất hiện ở nhiều panel nếu thoả nhiều điều kiện), cộng thêm 2 panel cảnh báo vận hành mới:
 
 | Panel | Điều kiện lọc | Cột hiển thị | Dữ liệu thật (22/07/2026) |
 |---|---|---|---|
 | 🚨 Cảnh báo QC | Có ≥1 chỉ tiêu QC đang **fail** | Lô/Phạm vi, Vật tư, SL, Chỉ tiêu fail | QCDEMO-LOT-01 — 1 chỉ tiêu fail |
 | 🔒 Hold/Release | `MaterialLot.status = on_hold` | Lô/Phạm vi, Vật tư, SL, Trạng thái | QCDEMO-LOT-01 — Đang giữ |
 | 📋 Deviation | Có deviation đang **mở** | Lô/Phạm vi, Vật tư, SL, Số lượng mở | Không có deviation nào đang mở |
+| 📉 Sản lượng lọc thấp | Mẻ lọc dưới ngưỡng "Thấp" (Cài đặt vận hành, mục 21) trong N ngày gần nhất (chọn 3/5/7/14/30 ngày) | Mã lọc, Mẻ lọc số, Loại dịch bia, V bia (lít), Phân loại | — |
+| ⏳ Đã chiết chưa duyệt | Mẻ chiết đã **Kết thúc chiết** nhưng Giám đốc Sản xuất - Kỹ thuật chưa **Duyệt** nhập Kho TP | Mã chiết, Sản phẩm, Loại bia, Chờ (giờ) | — |
 
-Mỗi panel tự ẩn nội dung, hiện dòng "Không có ... nào" khi rỗng. Bấm 1 dòng bất kỳ để nhảy tới Sơ đồ quy trình liên quan.
+Mỗi panel tự ẩn nội dung, hiện dòng "Không có ... nào" khi rỗng. Bấm 1 dòng bất kỳ trong 3 panel QC đầu để nhảy tới Chất lượng; bấm dòng ở 2 panel sau để nhảy thẳng tới đúng sub-tab Lọc/Chiết trong Nấu-Lọc-Chiết.
 
 ### 2.2 Lệnh & mẻ sản xuất (6 ô số liệu)
 
@@ -95,9 +99,18 @@ Mỗi panel tự ẩn nội dung, hiện dòng "Không có ... nào" khi rỗng.
 
 Bấm vào 1 ô để nhảy thẳng tới đúng sub-tab liên quan (ví dụ bấm "Mẻ nấu" mở thẳng tab Nấu trong Nấu-Lọc-Chiết).
 
-### 2.3 Hai biểu đồ cảnh báo tồn kho
+### 2.3 Hai biểu đồ tank đang lên men
 
-- **📦 Tồn kho thành phẩm cần chú ý (theo tuổi lô)** — biểu đồ cột, 3 ngưỡng màu Chú ý (≥0.7 ngày)/Cảnh báo (≥0.9 ngày)/Nghiêm trọng (≥30 ngày). Dữ liệu thật: 0 lô mức Chú ý, **27 keg + 46 lon + 300.048 vỉ** ở mức Cảnh báo (FLGN200 lô 1: 27 keg/1,43 ngày; CSPS330 lô 2: 46 lon + 300.048 vỉ/1,24 ngày), 0 lô Nghiêm trọng. Bấm nút **Kho TP › Tồn kho theo tuổi** để xem đầy đủ (biểu đồ giống hệt, xem mục 12.5).
+Ngay dưới 6 ô số liệu, 2 panel cạnh nhau cùng dữ liệu tank đang lên men (nhóm theo dịch bia, sắp theo số ngày quá hạn giảm dần trong từng nhóm), 4 mức màu theo số ngày lên men thật so ngày lên men chuẩn (Đang lên men/Sắp đủ ngày/Đã đủ ngày/Quá hạn) — có chấm đỏ số chỉ tiêu CT chính/phụ đang fail trên tank đó, bấm vào chấm để xem chi tiết:
+
+- **🍺 Theo số ngày (thanh ngang)** — mỗi dòng 1 tank, thanh thể hiện số ngày đã lên men/số ngày chuẩn.
+- **🧊 Theo giai đoạn (lưới ô màu)** — mỗi ô = 1 tank, tô màu theo giai đoạn.
+
+Bấm nút **Nấu-Lọc-Chiết › Lên men** ở đầu panel để xem đầy đủ tại mục 9.2.
+
+### 2.4 Hai biểu đồ cảnh báo tồn kho
+
+- **📦 Tồn kho thành phẩm cần chú ý (theo tuổi lô)** — biểu đồ cột, 3 ngưỡng màu Chú ý (≥0.7 ngày)/Cảnh báo (≥0.9 ngày)/Nghiêm trọng (≥30 ngày). Dữ liệu thật: 0 lô mức Chú ý, **27 keg + 46 lon + 300.048 vỉ** ở mức Cảnh báo (FLGN200 lô 1: 27 keg/1,43 ngày; CSPS330 lô 2: 46 lon + 300.048 vỉ/1,24 ngày), 0 lô Nghiêm trọng. Bấm nút **Kho TP › Tồn kho theo tuổi** để xem đầy đủ (biểu đồ giống hệt, xem mục 12.8).
 
   ```mermaid
   xychart-beta
@@ -117,14 +130,14 @@ Bấm vào 1 ô để nhảy thẳng tới đúng sub-tab liên quan (ví dụ b
       bar [-13, -6, -1, 0, 7, 7, 8]
   ```
 
-### 2.4 Số liệu SCADA thật (không giả lập)
+### 2.5 Số liệu SCADA thật (không giả lập)
 
 - **🍺 Sản lượng chiết 5 ngày gần nhất** — Bia lon: nhà máy Đông Mai (nguồn `30K_Report`); Bia keg: nhà máy Hạ Long (nguồn `Donggoi`). Mỗi ngày 3 cột Ca 1/2/3.
 - **⚡ Điện tiêu thụ 5 ngày gần nhất** — nguồn bảng Energy/NameSys qua kết nối CSDL gán "Dùng cho: Năng lượng — Hạ Long".
 
-### 2.5 Audit gần đây & Mẻ gần đây
+### 2.6 Audit gần đây & Mẻ gần đây
 
-2 bảng cuối trang. Dữ liệu thật audit gần nhất (seq #590-595): 2 lượt `login` của `admin`, xen giữa là `relocate_batch` (chuyển 1 keg FLGN200 lô 1 vào vị trí KH01 — đúng thao tác Cất vào vị trí mới thêm, mục 12.3), và `post`/`undo` của `stock_count` KK-260722-EE2D (lệch MALT-2406-01: 3802↔3810kg) — đúng chuỗi thao tác kiểm kê vừa kiểm thử trước đó trong ngày.
+2 bảng cuối trang. Dữ liệu thật audit gần nhất (seq #590-595): 2 lượt `login` của `admin`, xen giữa là `relocate_batch` (chuyển 1 keg FLGN200 lô 1 vào vị trí KH01 — đúng thao tác Cất vào vị trí mới thêm, mục 12.5), và `post`/`undo` của `stock_count` KK-260722-EE2D (lệch MALT-2406-01: 3802↔3810kg) — đúng chuỗi thao tác kiểm kê vừa kiểm thử trước đó trong ngày.
 
 ---
 
@@ -132,7 +145,7 @@ Bấm vào 1 ô để nhảy thẳng tới đúng sub-tab liên quan (ví dụ b
 
 **Mục đích:** giúp nhân viên mới hoặc khách tham quan hiểu luồng nghiệp vụ trong vài phút.
 
-Sơ đồ SVG trực quan hoá toàn bộ chuỗi: NVL → Nấu → Lên men → Lọc → Chiết → Kho TP → Xuất kho, cùng banner truy xuất nhanh (nhập mã lô ngay trên sơ đồ để nhảy tới Truy xuất nguồn gốc).
+Sơ đồ dạng chuỗi khối bấm được (không phải ảnh SVG tĩnh) gồm **13 bước** theo đúng thứ tự thực hiện: Kho NVL → Lệnh SX (kèm số lệnh nấu/lọc thật) → Điều độ → Mẻ sản xuất → Cấp liệu → Mẻ nấu → Lên men chính → Lên men phụ → Lọc → Chiết → Thành phẩm → Chất lượng (kèm số lô đang HOLD nếu có) → Kho TP (WMS). Bấm vào 1 khối để mở thẳng đúng tab/sub-tab nghiệp vụ tương ứng; các bước "Điều độ" và "Mẻ sản xuất" hiện gắn nhãn **"Tạm thời chưa dùng"** vì quy trình thật hiện tạo mẻ trực tiếp ở Nấu-Lọc-Chiết. Dưới chuỗi chính là khối riêng **🔎 Truy xuất nguồn gốc** (bấm để mở, không có ô nhập mã lô ngay trên sơ đồ) và hàng chip dữ liệu nền: Công thức, Công thức+, ISA-88, Lập lịch, Bao bì.
 
 ---
 
@@ -142,24 +155,33 @@ Sơ đồ SVG trực quan hoá toàn bộ chuỗi: NVL → Nấu → Lên men �
 
 **Ai dùng:** trưởng ca/quản đốc (tạo lệnh), vận hành (chọn lệnh khi tạo mẻ ở mục 9).
 
+**3 sub-tab:** Lệnh nấu · Lệnh lọc · Lệnh SX (ERP).
+
 ### 4.1 Lệnh nấu (Brew Master Order)
 
 **Các bước tạo:**
 1. Vào **Lệnh SX**, chọn sub-tab **Lệnh nấu**.
-2. Bấm **Tạo Lệnh nấu**, nhập: Sản phẩm, Sản lượng kế hoạch (hl), Dung sai (%).
-3. Lưu — hệ thống tạo lệnh lớn (master), có thể thêm nhiều **lệnh nấu con** bên dưới cùng 1 lệnh lớn.
-4. Khi tạo mẻ nấu (mục 9.1), bắt buộc chọn Lệnh nấu này — mỗi mẻ chạy xong tự cộng dồn vào % hoàn thành của lệnh (theo thể tích thực tế/kế hoạch), không giới hạn cứng số lần nấu.
-5. Bấm **In** để xuất biểu mẫu giấy đúng layout thực tế nhà máy.
+2. Nhập thông tin lệnh lớn: **Số lệnh** (VD `36/PXSXBĐM-T6/2026`), Người ra lệnh, Đơn vị thực hiện, Thủ kho, Căn cứ, Thời gian bắt đầu/kết thúc, Biện pháp an toàn.
+3. Bấm **+ Thêm lệnh nấu nhỏ** để thêm 1 hoặc nhiều **lệnh nấu nhỏ** vào cùng lệnh lớn — mỗi lệnh nhỏ chọn **Dịch bia**, nhập **Số mẻ kế hoạch**, **Sản lượng nấu kế hoạch (hl)**, **Sai số cho phép (±hl)**. Bấm **📋 Xem NVL (đủ/thiếu tồn)** để xem trước định mức NVL đã scale theo Công thức đang dùng (nạp tự động theo Dịch bia đã chọn, hiện cả tồn Kho công ty và Kho phân xưởng).
+4. Bấm **Tạo lệnh nấu** — hệ thống tạo lệnh lớn (master) gồm các lệnh nhỏ bên trong.
+5. Khi tạo mẻ nấu (mục 9.1), bắt buộc chọn đúng 1 lệnh nấu nhỏ **chưa hoàn thành** — mỗi mẻ chạy xong tự cộng dồn vào % hoàn thành của lệnh nhỏ đó (theo thể tích thực tế/kế hoạch, ±sai số cho phép), tới khi đạt thì lệnh nhỏ không chọn được nữa.
+6. Bấm **Xem** để xem chi tiết, **🖨️ In** để xuất biểu mẫu giấy đúng layout thực tế nhà máy (in chung 1 tờ gồm tất cả lệnh nhỏ). **Sửa**/**Xóa** chỉ hiện khi lệnh **chưa có mẻ nấu nào thực hiện**.
 
-Lệnh tự khoá khi toàn bộ lệnh con bên dưới đã khoá — không có nút khoá riêng ở cấp lệnh lớn.
+Lệnh tự khoá khi toàn bộ lệnh nhỏ bên dưới đã hoàn thành — không có nút khoá riêng ở cấp lệnh lớn.
 
 ### 4.2 Lệnh lọc (Filter Master Order → Filter Order)
 
 **Các bước tạo:**
-1. Sub-tab **Lệnh lọc**, bấm **Tạo Lệnh lọc lớn**.
-2. Trong lệnh lớn, thêm nhiều **lệnh lọc con**, mỗi lệnh con chọn: tank nguồn (CCT lên men hoặc BBT tái lọc), thể tích kế hoạch riêng cho tank đó.
-3. Hệ thống tự kiểm tra chống cam kết vượt tồn giữa các lệnh con anh em cùng dùng 1 tank nguồn — không cho tạo nếu tổng thể tích kế hoạch vượt tồn thật của tank.
-4. Khi tạo mẻ lọc (mục 9.3), chọn đúng Lệnh lọc con này.
+1. Sub-tab **Lệnh lọc**, nhập **Số lệnh** + **Ghi chú** (tuỳ chọn), bấm **+ Thêm lệnh lọc nhỏ** để thêm 1 hoặc nhiều **lệnh lọc nhỏ**.
+2. Mỗi lệnh lọc nhỏ chọn chế độ **Không phối** (1 tank nguồn) hoặc **Phối** (2+ tank, phải cùng 1 dịch bia) — mỗi tank chọn nguồn là **Tank lên men** (CCT đã Duyệt LM) hoặc **Tank thành phẩm (BBT) — lọc lại** (bắt buộc nhập **Lý do lọc lại**), và **Thể tích dịch lọc KH (hl)** riêng cho từng tank. Hệ thống hiện ngay lượng CCT/BBT còn khả dụng sau khi trừ phần các lệnh nhỏ phía trên đã đặt trước, chống cam kết vượt tồn thật của tank.
+3. **Loại bia** của lệnh nhỏ tự suy ra từ dịch bia của (các) tank đã chọn; nếu các tank thuộc nhiều Loại bia khác nhau, hệ thống bắt buộc tự chọn 1 Loại bia cho lệnh nhỏ.
+4. Có thể khai báo thêm **Vật tư sử dụng** (tuỳ chọn, ví dụ bột trợ lọc Diatomite) — gõ để tìm vật tư hoặc Nhóm vật tư thay thế, nhập Số lượng cần để xem ngay tồn FIFO Kho công ty/Kho phân xưởng (và cảnh báo thiếu nếu vượt tồn).
+5. Nhập **Số lô KCS**, chọn **Sản phẩm** đích (tuỳ chọn — kế thừa xuống mẻ lọc thật khi thực hiện).
+6. Bấm **Tạo lệnh lọc**. Khi tạo mẻ lọc (mục 9.3), chọn đúng Lệnh lọc nhỏ này để thực hiện — sản lượng cộng dồn tới khi đạt thể tích kế hoạch (±sai số) thì không chọn được nữa.
+
+### 4.3 Lệnh SX (ERP)
+
+Sub-tab đơn giản, độc lập với Lệnh nấu/Lệnh lọc — dùng khi cần lệnh sản xuất tổng quát chưa gắn chi tiết dịch bia/tank: nhập **Mã lệnh**, chọn **Sản phẩm**, **SL kế hoạch**, **ĐVT**, **Ưu tiên**, bấm **Tạo lệnh**. Xem lại ở bảng **Danh sách lệnh** (có tìm kiếm).
 
 **Dữ liệu thật hiện tại:** 1 Lệnh nấu, 2 Lệnh lọc — cả 3 đều đã hoàn thành 100%.
 
@@ -169,14 +191,16 @@ Lệnh tự khoá khi toàn bộ lệnh con bên dưới đã khoá — không c
 
 **Mục đích:** lập kế hoạch ngày/ca/dây chuyền tách bạch với thực tế chạy, rồi phát sinh mẻ đúng công thức đã duyệt (tránh nhập tay sai).
 
-**Ai dùng:** trưởng ca (tạo/chốt Work Order — quyền `wo.manage`).
+**Ai dùng:** trưởng ca (tạo/điều hành Work Order — quyền `wo.manage`; phát mẻ — quyền `wo.dispatch`).
+
+> Ghi chú: đây là cơ chế Work Order dựa trên **Lệnh SX (ERP)** + **Recipe version** kiểu cũ, tách biệt với Lệnh nấu/Lệnh lọc (mục 4) đang dùng thật hàng ngày — trên Sơ đồ quy trình (mục 3), 2 bước "Điều độ" và "Mẻ sản xuất" hiện gắn nhãn **"Tạm thời chưa dùng"** vì quy trình thật hiện tạo mẻ trực tiếp ở Nấu-Lọc-Chiết (mục 9) theo Lệnh nấu/Lệnh lọc, không đi qua Work Order.
 
 **Các bước:**
-1. Vào **Điều độ**, bấm **Tạo lệnh (wo.manage)** — chọn ngày, ca, dây chuyền, sản phẩm, số lượng kế hoạch.
-2. Bấm **Chốt** để khoá kế hoạch (không cho sửa số lượng nữa).
-3. Bấm **⮞ Phát mẻ** để tự động tạo mẻ nấu/lọc/chiết theo đúng công thức đã duyệt của sản phẩm — không cần vào Nấu-Lọc-Chiết tạo tay.
-4. Bấm **Phát hành** để công bố Work Order cho ca sản xuất.
-5. Nếu cần huỷ trước khi phát mẻ: bấm **Hủy**.
+1. Vào **Điều độ**, bấm **Tạo lệnh (wo.manage)** — chọn **Lệnh ERP (PO)**, **Recipe version** (chỉ hiện version đã `effective` của sản phẩm thuộc PO đó), SL kế hoạch (mặc định theo PO), Dây chuyền, Ca, Ngày, Ưu tiên.
+2. Lệnh mới tạo ở trạng thái **Lập KH** (planned) — bấm **Phát hành** để chuyển sang **Đã phát hành** (released), công bố cho ca sản xuất; hoặc bấm **Hủy** nếu không cần nữa.
+3. Khi đã **Đã phát hành** (hoặc **Đang chạy**): bấm **⮞ Phát mẻ** để tự động tạo mẻ theo đúng Work Order + Recipe version đã chọn — nếu thiếu tồn kho, hệ thống báo lỗi và hỏi xác nhận **"Vẫn phát mẻ (ghi nhận thiếu)?"** trước khi cho phát mẻ thiếu tồn.
+4. Khi lệnh đã **Hoàn thành**, bấm **Chốt** để khoá vĩnh viễn — không còn chuyển trạng thái được nữa.
+5. Cột **% HT** = tổng SL thực tế các mẻ thuộc lệnh / SL kế hoạch.
 
 **Dữ liệu thật hiện tại:** 8 Work Order đang có trong hệ thống.
 
@@ -189,29 +213,37 @@ Lệnh tự khoá khi toàn bộ lệnh con bên dưới đã khoá — không c
 **Ai dùng:** trưởng ca.
 
 **Các bước:**
-1. Vào **Lập lịch**, xem lịch dạng lane theo từng tank (ví dụ FV-01, FV-02, FV-03, FV-04).
-2. Mỗi lane hiện các khối: `production` (mẻ sản xuất, gắn mã Work Order + sản phẩm), `cip` (vệ sinh giữa mẻ), `maintenance` (bảo trì).
+1. Vào **Lập lịch**, nhập **Số ngày** hiển thị (mặc định 12), xem lịch dạng lane theo từng tank (ví dụ FV-01, FV-02, FV-03, FV-04).
+2. Mỗi lane hiện các khối màu theo 4 loại: 🟦 `production` (mẻ sản xuất, gắn mã Work Order + sản phẩm), 🟧 `cip` (vệ sinh giữa mẻ), 🟥 `maintenance` (bảo trì), 🔴 **Thiếu NVL** (khối sản xuất tô đỏ đậm riêng khi thiếu tồn theo BOM — đưa chuột vào khối để xem tooltip chi tiết).
 3. Bấm **⚙️ Tự lập lịch tối ưu** để hệ thống tự sắp xếp thứ tự tối ưu, tự chèn khối CIP giữa 2 mẻ liên tiếp trên cùng 1 tank.
+4. Panel **⚠️ Xung đột & cảnh báo** bên dưới tự liệt kê 2 loại vấn đề nếu có: lịch **chồng lấn** trên cùng 1 tank/dây chuyền, và Work Order **thiếu NVL** theo BOM — hiện "Không có xung đột — lịch khả thi" khi lịch sạch.
 
 **Dữ liệu thật hiện tại (ví dụ tank FV-01):** WO-2406-002 (BIA-LAGER, planned, 22/7 → 24/7) → CIP giữa mẻ (24/7, 4 giờ) → WO-2406-007 (BIA-LAGER, planned, 24/7 → 26/7). Tank FV-02 có khối bảo trì "Bảo trì van đáy FV-02" (11/7, 12 giờ) xen giữa các mẻ sản xuất.
 
 ---
 
-## 7. Công thức (Recipe/BOM)
+## 7. Công thức (Formula/BOM)
 
-**Mục đích:** quản lý công thức sản xuất có kiểm soát thay đổi (change control) và định mức NVL tự động scale theo sản lượng.
+**Mục đích:** quản lý định mức NVL (BOM) theo từng dịch bia, tự động scale theo sản lượng — mô hình mới **Formula**, thay cho Recipe/RecipeVersion version-hóa 6 trạng thái trước đây (mỗi lần đổi định mức = tạo 1 công thức MỚI, không sửa/thêm version vào công thức cũ).
 
-**Ai dùng:** kỹ sư công nghệ (soạn — quyền `recipe.author`), người duyệt khác kỹ sư (quyền `recipe.approve` — Segregation of Duties).
+**Ai dùng:** quyền `recipe.author` — dùng CHUNG cho mọi thao tác (tạo/sửa/kích hoạt/khóa/xóa), không còn tách riêng người soạn/người duyệt (Segregation of Duties cũ đã bỏ ở mô hình này).
+
+Màn hình liệt kê **1 panel/dịch bia** (Sản phẩm) — mỗi panel có bảng công thức riêng + lịch sử kích hoạt riêng.
 
 **Các bước tạo công thức mới:**
-1. Vào **Công thức**, bấm **Tạo** — nhập tên công thức gắn với 1 Sản phẩm.
-2. Mở công thức, bấm tạo **phiên bản** mới (version) ở trạng thái `draft`.
-3. Soạn BOM: thêm dòng `{mã vật tư, số lượng, ĐVT, dung sai %}` theo `base_qty` (sản lượng gốc dùng để tính định mức).
-4. Chuyển trạng thái theo vòng đời: **→ review** → (người duyệt khác) **→ hiệu lực** (effective) — có thể **⏸ Tạm ngưng** hoặc **⏹ Ngừng dùng** (obsolete) khi cần thay bằng phiên bản mới.
-5. Mọi thay đổi khi duyệt đều yêu cầu **e-signature** (xác nhận lại mật khẩu + lý do).
-6. Dùng **Xem diff** (ở sub-tab Công thức+) để so sánh 2 phiên bản bất kỳ trước khi duyệt thay đổi.
+1. Vào **Công thức**, ở panel của đúng Dịch bia cần soạn, bấm **+ Tạo công thức mới**.
+2. Nhập **Mã công thức**, **Quy mô mẻ chuẩn** + **ĐVT** (`base_qty`/`base_uom` — sản lượng gốc dùng để tính định mức), **Ghi chú**.
+3. Soạn **Nguyên vật liệu**: bấm **+ Thêm dòng NVL** — ô Vật tư là kiểu **gõ để tìm** (không phải danh sách sổ xuống dài), chỉ gợi ý vật tư thuộc Nhóm vật tư được đánh dấu "Nguyên liệu"; có thể chọn 1 **Nhóm vật tư thay thế** (mục 21) thay cho 1 mã vật tư cụ thể khi nhiều mã tương đương nhau có thể dùng thay nhau. Không còn cột dung sai % (đã bỏ so với BOM/RecipeVersion cũ) — ĐVT tự khoá theo vật tư/nhóm đã chọn, không sửa tay.
+4. Bấm **Tạo công thức** để lưu — công thức mới lưu ở trạng thái **chưa hiệu lực** (chưa activate), không tự thay công thức đang dùng.
+5. Bấm **Kích hoạt** để đưa công thức này thành công thức **đang hiệu lực** của dịch bia — hệ thống tự **Ngừng hiệu lực** công thức đang hiệu lực cũ (chỉ 1 công thức/dịch bia được hiệu lực tại 1 thời điểm); bấm **Ngừng hiệu lực** để tắt mà chưa cần công thức khác thay ngay.
+6. Bấm **🔒 Khóa** khi công thức đã ổn định để chặn sửa vĩnh viễn (bấm **🔓 Mở khóa** để mở lại); **🗑 Xóa** chỉ hiện với công thức **chưa hiệu lực và chưa khóa**.
+7. Bấm **Xem NVL** để xem lại toàn bộ dòng định mức của 1 công thức bất kỳ (không cần vào chế độ sửa).
 
-Khi tạo mẻ nấu (mục 9.1) hoặc Lệnh nấu (mục 4.1), BOM tự động **scale theo sản lượng kế hoạch** = định mức × (SL kế hoạch / base_qty), rồi **chụp snapshot bất biến** vào mẻ — sửa công thức sau này không ảnh hưởng ngược mẻ đã chạy.
+Bên dưới bảng công thức của mỗi dịch bia có bảng **Lịch sử kích hoạt** (FormulaActivationLog) — 3 lần gần nhất: thời gian, hành động (🟢 Kích hoạt/⚪ Ngừng hiệu lực), công thức, người thực hiện, ghi chú.
+
+Khi tạo mẻ nấu (mục 9.1) hoặc Lệnh nấu (mục 4.1), BOM tự động **scale theo sản lượng kế hoạch** = định mức × (SL kế hoạch / base_qty), rồi **chụp snapshot bất biến** vào mẻ — sửa/kích hoạt công thức khác sau này không ảnh hưởng ngược mẻ đã chạy.
+
+> Ghi chú: nav còn 1 mục **"Công thức+"** (dimmed trên thanh menu) mang các công cụ cũ (Hiệu suất theo công đoạn, Kiểm soát thay đổi công thức/change-control, Ký duyệt e-signature, Kiểm tra tồn & nguyên liệu thay thế) — các công cụ này vẫn thao tác trên mô hình **Recipe/RecipeVersion cũ** (`/api/recipes`), giữ lại riêng để không mất lịch sử change-control/e-signature cũ, **không liên quan tới dữ liệu Công thức (Formula) đang dùng thật ở mục 7 này**.
 
 **Dữ liệu thật hiện tại:** 3 công thức đang có trong hệ thống.
 
@@ -225,20 +257,26 @@ Khi tạo mẻ nấu (mục 9.1) hoặc Lệnh nấu (mục 4.1), BOM tự độ
 
 ### 8.1 Chất lượng — khai báo/duyệt
 
+Đầu trang có 2 panel "chờ xử lý" luôn hiện trước để không bị bỏ sót: **🔬 Lô NVL chờ khai báo/duyệt chỉ tiêu chất lượng** (lô NVL nhập kho có gán nhóm chỉ tiêu bắt buộc, bấm **Khai báo / Duyệt** trên dòng lô) và **🧪 Công đoạn chờ khai báo chỉ tiêu chất lượng** (mẻ nấu/lô lên men/mẻ lọc/mã chiết có gán nhóm chỉ tiêu bắt buộc nhưng chưa khai báo đủ — cột "Chỉ tiêu còn thiếu" liệt kê rõ tên chỉ tiêu, bấm **Khai báo** để nhảy thẳng tới đúng công đoạn).
+
 **Các bước ghi kết quả 1 chỉ tiêu:**
-1. Vào **Chất lượng**, chọn đối tượng cần kiểm (ví dụ "Lô lên men 1 — CT chính", "Lô NVL KCS02"...).
-2. Bấm **Khai báo / Duyệt**, nhập kết quả từng chỉ tiêu trong nhóm chỉ tiêu QC đã gán sẵn cho vật tư/công đoạn/sản phẩm đó — pass hoặc fail.
+1. Vào **Chất lượng**, chọn đối tượng cần kiểm ở 1 trong 2 panel chờ xử lý trên, hoặc xử lý trực tiếp ở đúng công đoạn (Nấu/Lên men/Lọc/Chiết trong mục 9, hoặc Kho NVL mục 11).
+2. Nhập kết quả từng chỉ tiêu trong nhóm chỉ tiêu QC đã gán sẵn cho vật tư/công đoạn/sản phẩm đó — pass hoặc fail.
 3. Nếu có chỉ tiêu fail: lô/phạm vi **tự động chuyển on_hold**, xuất hiện ngay trên Dashboard (mục 2.1).
-4. Người có quyền `quality.release` xem lại, bấm **HOLD (qa/supervisor)** để giữ thêm hoặc **RELEASE (qa)** để giải phóng khi đã xử lý xong (ví dụ đóng deviation).
-5. Nếu cần mở deviation (điều tra sự cố chất lượng): bấm **Mở** deviation, gắn vào đúng lô/phạm vi — deviation mở sẽ tự động giữ lô luôn (không cần bấm hold riêng), và xuất hiện ở panel Deviation trên Dashboard cho tới khi đóng.
+4. Ở panel **Hold / Release**: chọn **Phạm vi** cần thao tác (gõ để tìm nhanh — dropdown tách 2 nhóm "⚠ Đang FAIL chỉ tiêu" và "Không FAIL", quét cả 6 loại phạm vi Mẻ SX/Nấu/Lên men/Lọc/Chiết/NVL), hệ thống hiện ngay chỉ tiêu đã khai báo của phạm vi đó. Bấm **HOLD (qa/supervisor)** để giữ thêm — **bắt buộc nhập Lý do HOLD**; hoặc **RELEASE (qa)** để giải phóng khi đã xử lý xong (ví dụ đóng deviation) — **bắt buộc nhập Lý do RELEASE**, và bị chặn nếu phạm vi còn chỉ tiêu FAIL chưa đóng deviation. Cả 2 thao tác đều lưu vào **Lịch sử Hold/Release** bên dưới (có tìm kiếm).
+5. Nếu cần mở deviation (điều tra sự cố chất lượng): mục **Mở deviation**, chọn Phạm vi, chọn **Mức** (minor/major/critical), nhập **Lý do**, bấm **Mở** — deviation mở sẽ tự động giữ lô luôn (không cần bấm hold riêng), và xuất hiện ở panel Deviation trên Dashboard cho tới khi đóng.
+6. Bảng **Kết quả QC gần đây** gộp theo mẻ/lô nguồn (1 dòng/công đoạn, không lặp theo từng chỉ tiêu) — bấm **Xem chi tiết** để xem từng chỉ tiêu. Bảng **Deviations** liệt kê deviation đang mở, kèm cột Chỉ tiêu không đạt liên quan.
 
 **Dữ liệu thật hiện tại:** 3 deviation đang có trong hệ thống (0 đang mở tại thời điểm biên soạn — panel Deviation trên Dashboard đang trống).
 
-### 8.2 QC Lab — CAPA & LIMS
+### 8.2 QC Lab — SPC, CAPA & LIMS
 
-Theo dõi **độc lập** với luồng hold ở trên (không tự động giữ lô):
-1. **CAPA** (Corrective/Preventive Action) — ghi hành động khắc phục/phòng ngừa cho sự cố lặp lại, xem **Chi tiết** từng CAPA, đánh dấu **Hoàn thành** khi xử lý xong.
-2. **Mẫu LIMS** — quản lý mẫu gửi phòng thí nghiệm, bấm **Xuất COA** (Certificate of Analysis) khi có kết quả.
+Theo dõi **độc lập** với luồng hold ở mục 8.1 (không tự động giữ lô). **4 khối:**
+
+1. **📈 SPC — Biểu đồ kiểm soát** — chọn 1 **Chỉ tiêu**, hệ thống vẽ control chart (UCL/LCL, đường trung tâm) từ các kết quả QC đã ghi, kèm n/Mean/σ/UCL/LCL và năng lực quá trình **Cp/Cpk**, badge "trong kiểm soát" hoặc số điểm vi phạm nếu có.
+2. **🛠️ CAPA** (Corrective/Preventive Action) — bấm **+ Mở CAPA** (nhập Tiêu đề, chọn Loại: Khắc phục/Phòng ngừa) để ghi hành động khắc phục/phòng ngừa cho sự cố lặp lại. Bấm **Chi tiết** từng CAPA để xem/nhập **Nguyên nhân gốc**, **Kế hoạch hành động**, **Hiệu lực (verification)**, rồi bấm nút chuyển trạng thái theo đúng 4 bước vòng đời: `open → investigation → action → verification → closed` (nút hiện đúng bước kế tiếp, không nhảy cóc).
+3. **📄 COA** (Certificate of Analysis) — chọn **Mẻ**, bấm **Xuất COA** — hiện toàn bộ chỉ tiêu/giá trị/giới hạn/kết quả pass-fail của mẻ đó kèm kết luận tổng **PASS/FAIL**, cảnh báo riêng nếu còn **thiếu chỉ tiêu bắt buộc**.
+4. **🧫 LIMS — Phiếu mẫu** — chọn Mẻ + Công đoạn, bấm **+ Đăng ký mẫu** để tạo phiếu mẫu gửi phòng thí nghiệm; bấm **Bắt đầu test**/**Hoàn thành** trên từng dòng mẫu để chuyển trạng thái (registered → in_test → completed).
 
 **Nguyên tắc quan trọng:** người ghi kết quả QC ≠ người release lô (Segregation of Duties, chuẩn GMP).
 
@@ -250,44 +288,52 @@ Theo dõi **độc lập** với luồng hold ở trên (không tự động gi�
 
 **Ai dùng:** nhân viên vận hành (tạo/kết thúc mẻ), KCS (duyệt các cổng chặn QC), kỹ sư (theo dõi).
 
+### 9.0 Nguyên liệu
+
+Sub-tab đầu tiên — bảng tồn kho NVL **theo kho** (chọn Kho công ty/Kho phân xưởng/Tất cả), mỗi mã vật tư hiện kèm các mã lô còn tồn (badge "CHỜ QC" nếu lô đang on_hold), dùng để tra nhanh tồn trước khi cấp liệu cho mẻ — nguyên liệu phân bổ vào mẻ nấu (nút **+ NVL**, xem mục 9.1) luôn lấy từ **Kho phân xưởng**.
+
 ### 9.1 Nấu
 
-**Các bước tạo 1 mẻ nấu:**
-1. Sub-tab **Nấu**, bấm **Tạo mẻ**.
-2. Chọn **Lệnh nấu** (bắt buộc, xem mục 4.1), nhập mã nấu + số mẻ, chọn **tank lên men đích**.
-3. Hệ thống hiện BOM đã scale — bấm **Kiểm tra tồn** để xác nhận đủ NVL trước khi lưu.
-4. NVL được trừ kho tự động (qua Kho phân xưởng) khi lưu mẻ.
-5. Trong lúc nấu: mở modal mẻ, vào **Ghi chép nấu** — nhập tay hoặc **import PDF Braumat** (upload file PDF máy xuất ra, hệ thống tự parse toàn bộ log nhiệt độ/thời gian theo đúng biểu mẫu giấy QT-KCS-QT-BM-05, không cần chép tay).
-6. Khi xong: bấm **Kết thúc**, nhập giờ kết thúc thật (không tự động lấy giờ hệ thống).
+**Các bước tạo 1 mã nấu + mẻ:**
+1. Sub-tab **Nấu**, ở panel **Thêm thông tin nấu**: chọn **Lệnh nấu** rồi chọn đúng **Lệnh nấu nhỏ** (chưa hoàn thành, xem mục 4.1) — **Dịch bia** tự lấy theo lệnh nhỏ đã chọn (chỉ sửa tay khi lệnh nhỏ chưa gắn dịch bia). Nhập **Mã nấu**, **Ngày nấu**, **SL nấu/hl**, chọn **Tank lên men** (chỉ hiện tank đang trống) + **Men sử dụng**, bấm **Thêm** — tạo 1 "mã nấu" (1 lần nấu vào 1 tank).
+2. Bấm nút **Mẻ (N)** trên dòng mã nấu vừa tạo để mở modal các mẻ cụ thể bên trong — bấm **+ Thêm mẻ**, nhập **Mã mẻ** (số mẻ Braumat, số nguyên dương duy nhất trong năm, VD 123), chọn **Dây chuyền nấu**, **Giờ bắt đầu**, Ghi chú.
+3. Trên mỗi dòng mẻ: bấm **+ NVL** để ghi nhận NVL đã dùng (gợi ý theo BOM công thức + FIFO lô còn tồn ở Kho phân xưởng, tự cảnh báo nếu chọn lô không phải lô cũ nhất; từ mẻ thứ 2 trở đi có thể bấm **Xem gợi ý** để copy nhanh danh sách NVL từ mẻ đầu). Bấm **Ghi chép nấu** để nhập checkpoint nhiệt độ/thời gian theo biểu mẫu QT-KCS-QT-BM-05, hoặc **Import Step Protocol (PDF, có thể chọn nhiều file)** — hệ thống tự parse log Braumat, xem lại ở tab con "Dữ liệu Braumat đã import" (có thể **Xuất CSV**), bấm **🖨️ In biểu mẫu** để in.
+4. Khi xong: bấm **Kết thúc** trên dòng mẻ, nhập giờ kết thúc thật (không tự động lấy giờ hệ thống).
+5. Người có quyền `quality.release` bấm **Khóa lô** trên dòng mã nấu khi hồ sơ đã hoàn tất, chặn sửa/xóa ngược; admin có thể **Mở khóa** lại khi cần.
 
-Bảng Nấu gom nhóm các mẻ theo lô lên men (tank đích) để dễ theo dõi.
+Bảng Nấu tô màu theo trạng thái chỉ tiêu: Đỏ = thiếu chỉ tiêu bắt buộc hoặc có chỉ tiêu FAIL, Xanh lá = đủ chỉ tiêu nhưng còn mẻ chưa nhập NVL, Xanh dương = tất cả mẻ đầy đủ.
 
 ### 9.2 Lên men
 
+Tank & lô LM được gán ngay lúc tạo mã nấu (mục 9.1) — 1 tank có thể nhận nhiều mẻ nấu; tab này chỉ dùng để xem và khai báo chỉ tiêu lên men, không tạo mới lô LM ở đây. Bảng hiện: Ngày nấu/Ngày KT, **Số ngày đã lên men** (dạng ngày.giờ.phút / số ngày chuẩn), Đang tồn CCT/hl, Trạng thái (Đang nấu/Đang lên men/Lọc 1 phần/Lọc hết), và cột **Sẵn sàng chiết** báo "Đủ N ngày — chờ KCS duyệt" khi đã tới hạn.
+
 **Các bước:**
-1. Sub-tab **Lên men**, chọn tank đang có dịch.
-2. Nhập nhật ký đo hàng ngày (nhiệt độ, độ Plato...) — mỗi lần sửa đều ghi audit (ai sửa, lúc nào, giá trị cũ/mới).
-3. Khi đã đủ ngày lên men chuẩn và chỉ tiêu QC lên men đạt: KCS bấm **Duyệt LM (KCS)** — đây là cổng chặn bắt buộc, chưa duyệt thì không được phép lọc.
+1. Sub-tab **Lên men**, trên dòng tank đang có dịch, bấm **Ghi chép LM** để mở biểu mẫu **BM 1.11 (06)** — nhập bảng thông tin đầu + **bảng theo ngày** (nhiệt độ/°S/mật độ tế bào) + các mốc **"Hạ phụ"**; hệ thống tự vẽ biểu đồ theo dõi lên men từ số liệu đã nhập. Import Braumat cho lên men hiện **chưa hỗ trợ** (chưa có định dạng mẫu). Có thể bấm **🖨️ In biểu mẫu**.
+2. Khai báo chỉ tiêu QC lên men qua 2 nút riêng trên mỗi dòng: **CT chính** và **CT phụ** (2 nhóm chỉ tiêu độc lập).
+3. Khi đã đủ ngày lên men chuẩn và chỉ tiêu QC lên men đạt: KCS (quyền `quality.release`) bấm **Duyệt LM (KCS)** — đây là cổng chặn bắt buộc, chưa duyệt thì tank không xuất hiện trong danh sách chọn tank nguồn ở Lệnh lọc (mục 4.2) lẫn tạo mẻ lọc (mục 9.3).
+4. Có thể bấm **CIP** trên dòng để gắn liên kết các lần vệ sinh tank này (mục 14.5), hoặc **Làm rỗng tank** để buộc tồn CCT về 0 khi tank vật lý đã lọc cạn thật nhưng số liệu hệ thống còn lệch.
+5. Người có quyền `quality.release` bấm **Khóa lô** khi hồ sơ đã hoàn tất.
 
 ### 9.3 Lọc
 
 **Các bước tạo 1 mẻ lọc:**
-1. Sub-tab **Lọc**, bấm **Tạo mẻ**.
-2. Chọn **Lệnh lọc con** (mục 4.2) — tank nguồn (CCT hoặc BBT tái lọc) tự gợi ý theo lệnh đã chọn.
-3. Chỉ các tank đã **Duyệt LM** mới xuất hiện trong danh sách chọn.
-4. Theo dõi thể tích dịch còn lại từng tank ngay trên bảng.
-5. Khi rút dịch xong 1 tank: bấm **Kết thúc** trên dòng tank đó, nhập **Mẻ lọc số**, **Số mẻ (Batch Number)**, **Số lệnh (Order Number)** đúng theo phiếu giấy và **Dịch nha lọc (hl)** (bắt buộc > 0). Số mẻ/số lệnh **được phép trùng** giữa các lệnh lọc khác nhau (ví dụ khi nhà máy reset số theo ca/ngày) — hệ thống không còn báo lỗi trùng, báo cáo sản lượng tự gộp đúng theo bộ 3 giá trị này khi tính mẻ lọc thật.
-6. KCS bấm **Duyệt KCS** sau khi lọc đạt — tank chưa duyệt sẽ bị chặn khỏi danh sách chọn ở bước Chiết.
+1. Sub-tab **Lọc**, panel **Thêm thông tin lọc (Lọc thường)** dùng để thêm mẻ vào tank BBT **MỚI** (chưa có mẻ nào) — tank BBT đã có mẻ thì bấm nút **Tank (N)** trên dòng mẻ đó rồi **+ Thêm mẻ** trong đó (tự dùng lại đúng tank nguồn của mẻ, không chọn lại).
+2. Chọn **Lệnh lọc** rồi **Lệnh lọc nhỏ** (mục 4.2, chưa dùng hết) — tank nguồn (CCT hoặc BBT tái lọc) kế thừa từ lệnh nhỏ đã chọn, không chọn lại ở đây; **Loại bia** tự hiện theo lệnh nhỏ. Chọn **Cho vào Tank BBT** (tank đích) — chỉ hiện tank BBT đang trống (không bị lệnh khác chiếm dụng hoặc còn dịch đã qua duyệt KCS). Bấm **Thêm** — mã lô lọc tự sinh; **Dịch nha lọc**/**Nước bài khí** chưa cần điền ngay, điền khi bấm "Kết thúc" từng tank.
+3. Chỉ các tank lên men đã **Duyệt LM** (mục 9.2) mới xuất hiện trong danh sách chọn làm tank nguồn.
+4. Theo dõi thể tích dịch còn lại từng tank (cột "Đang tồn/hl") ngay trên bảng.
+5. Khi rút dịch xong 1 tank: bấm **Kết thúc** trên dòng tank đó, nhập **Mẻ lọc số**, **Số mẻ (Batch number Brewmax)**, **Số lệnh (Order number Brewmax)** đúng theo phiếu giấy, **Dịch nha lọc (hl)** (bắt buộc > 0) và **Nước bài khí (hl)** — **V Bia/hl** tự tính = Dịch nha lọc + Nước bài khí, không nhập tay. Số mẻ/số lệnh **được phép trùng** giữa các lệnh lọc khác nhau (ví dụ khi nhà máy reset số theo ca/ngày) — hệ thống không còn báo lỗi trùng (chỉ hỏi lại xác nhận nếu "Mẻ lọc số" trùng với 1 mẻ khác TRONG CÙNG lệnh lọc, để bắt lỗi gõ nhầm), báo cáo sản lượng tự gộp đúng theo bộ 3 giá trị này khi tính mẻ lọc thật.
+6. KCS bấm **Duyệt KCS** sau khi lọc đạt (chỉ hiện khi tank đã lọc xong — kết thúc hết các tank nguồn của mẻ đó) — tank chưa duyệt sẽ bị chặn khỏi danh sách chọn ở bước Chiết.
+7. Có thể bấm **Chỉ tiêu** để khai báo chỉ tiêu QC sau lọc, **CIP** để gắn liên kết vệ sinh tank (mục 14.5), **Làm rỗng tank** khi số liệu tồn BBT lệch với tank vật lý đã chiết cạn, và **Khóa lô** (quyền `quality.release`) khi hồ sơ hoàn tất.
 
 **Trạng thái 1 dòng lọc hiển thị trên bảng** (tự suy ra từ tồn BBT thật, không phải cột cố định): **Đang lọc** (chưa bấm Kết thúc) → **Chờ duyệt** (đã Kết thúc nhưng KCS chưa Duyệt KCS — CHƯA được đem đi chiết dù đã rút hết dịch) → **Chờ chiết** (đã Duyệt KCS, chưa chiết giọt nào) → **Đang chiết** (đã chiết một phần) → **Đã chiết hết** (tồn BBT về 0).
 
 ### 9.4 Chiết
 
 **Các bước:**
-1. Sub-tab **Chiết**, bấm **Tạo mẻ**.
-2. Chọn **Dây chuyền** + **Sản phẩm** (cả 2 bắt buộc) + tank BBT (chỉ hiện tank đã Duyệt KCS ở bước Lọc).
-3. Khi kết thúc ca chiết: bấm **Kết thúc chiết**, nhập ca1/ca2/ca3 + thể tích thật.
-4. Người có quyền `quality.release` bấm **Duyệt** — hệ thống tự động sinh ra các **đơn vị thành phẩm** (lon/keg/vỉ) vào Kho TP (mục 12), không cần nhập tay số lượng.
+1. Sub-tab **Chiết**, panel **Thêm thông tin chiết** — chọn **Chiết từ tank BBT** (chỉ hiện tank đã lọc xong hết + Duyệt KCS ở bước Lọc, và không đang bị chọn làm nguồn "lọc lại" của lệnh lọc khác) — **Loại bia** tự hiện theo tank đã chọn.
+2. Chọn **Sản phẩm** (bắt buộc) và tick chọn **Dây chuyền** (chọn kiểu tick-nhiều-ô, ít nhất 1 dây chuyền) + **Ngày giờ chiết**, bấm **Thêm** — mã chiết tự sinh (`CH-...`); V cấp chiết/hl và SL ca 1/2/3 chưa cần điền ngay.
+3. Khi kết thúc ca chiết: bấm **Kết thúc chiết**, nhập giờ kết thúc + SL ca 1/ca 2/ca 3 + V cấp chiết (hl) thật.
+4. Người có quyền `quality.release` bấm **Duyệt** — hệ thống tự động sinh ra các **đơn vị thành phẩm** (lon/keg/vỉ) vào Kho TP (mục 12), không cần nhập tay số lượng; nếu còn chỉ tiêu thành phẩm chưa đạt, hệ thống vẫn cho duyệt nhưng cảnh báo rõ "còn chỉ tiêu thành phẩm KHÔNG ĐẠT" để tiếp tục theo dõi.
 
 **Khoá lô (Lock):** sau khi hoàn tất và QC đạt, KCS bấm khoá để chặn sửa đổi ngược — dữ liệu hồ sơ mẻ trở thành bất biến phục vụ audit/truy xuất.
 
@@ -336,7 +382,7 @@ Báo cáo theo tháng/năm liệt kê mẻ **chưa nhập đủ chỉ tiêu** �
 3. Bấm **Truy xuôi xuất ↓** — xem lô này đã đi tới đâu (xuất cho ai).
 4. Bấm **Truy xuôi theo nấu ↓** để xem toàn bộ nhánh phát sinh từ 1 mã nấu cụ thể.
 5. Dùng **Recall simulation** để mô phỏng phạm vi ảnh hưởng nếu phải thu hồi lô này (không thực sự thực hiện thu hồi).
-6. Bấm **📄 Hồ sơ điện tử** để gộp toàn bộ log quy trình + kết quả QC của cả chuỗi mẻ thành 1 hồ sơ in được.
+6. Bấm **📄 Hồ sơ điện tử** để gộp toàn bộ log quy trình + kết quả QC của cả chuỗi mẻ (NVL → Mẻ nấu → Lên men → Lọc → Chiết) thành 1 hồ sơ in được — mỗi mẻ nấu/lô lên men/mã lọc/mã chiết đều kèm khối **"CIP liên quan"** (các lần vệ sinh đã gắn ở mục 14.5) ngay trong hồ sơ.
 
 ---
 
@@ -348,7 +394,7 @@ Báo cáo theo tháng/năm liệt kê mẻ **chưa nhập đủ chỉ tiêu** �
 
 **Kho công ty — 8 sub-tab:** Xem tồn kho · Thẻ kho · Hạn sử dụng · BC nhập-xuất-tồn · Nhập / Xuất / Hoàn / Sang ngang · Danh sách lô (FIFO) · Kiểm kê định kỳ · 📉 Tồn tối thiểu.
 
-**Kho phân xưởng — 4 sub-tab:** Xem tồn kho · Đề nghị nhận kho · Xuất tự do · Lịch sử xuất dùng NVL.
+**Kho phân xưởng — 8 sub-tab:** Xem tồn kho · 🏁 Nhập tồn đầu · Đề nghị nhận kho · Điều chuyển về Kho công ty · Xuất sang ngang · Xuất tự do · Lịch sử xuất dùng NVL · Kiểm kê định kỳ.
 
 ### 11.1 Nhập kho
 
@@ -360,7 +406,7 @@ Báo cáo theo tháng/năm liệt kê mẻ **chưa nhập đủ chỉ tiêu** �
 
 ### 11.2 Xuất/Hoàn/Sang ngang (Kho công ty)
 
-Tương tự Nhập kho, chọn đúng nghiệp vụ (xuất dùng sản xuất / hoàn trả nhà cung cấp / điều chuyển nội bộ 2 kho / **Xuất tự do — chỉ admin**), mỗi thao tác đều có nút **Hoàn tác** riêng. Lịch sử "Xuất tự do" ở đây chỉ hiện các lượt xuất tự do phát sinh từ Kho công ty — xem mục 11.3b để xuất tự do phía Kho phân xưởng.
+Tương tự Nhập kho, chọn đúng nghiệp vụ (xuất dùng sản xuất / hoàn trả nhà cung cấp / điều chuyển nội bộ 2 kho / **Xuất tự do — chỉ admin**), mỗi thao tác đều có nút **Hoàn tác** riêng. Lịch sử "Xuất tự do" ở đây chỉ hiện các lượt xuất tự do phát sinh từ Kho công ty — xem mục 11.3d để xuất tự do phía Kho phân xưởng.
 
 ### 11.3 Đề nghị nhận kho (Kho phân xưởng)
 
@@ -370,13 +416,25 @@ Tương tự Nhập kho, chọn đúng nghiệp vụ (xuất dùng sản xuất 
 3. Có thể huỷ phiếu hoặc hoàn tác từng dòng đã cấp nếu cấp nhầm.
 4. Có ô tìm kiếm để lọc nhanh lịch sử phiếu theo mã lô/vật tư.
 
-### 11.3b Xuất tự do (Kho phân xưởng)
+### 11.3a 🏁 Nhập tồn đầu (Kho phân xưởng)
 
-Tách riêng khỏi Xuất tự do của Kho công ty (mục 11.2) để phân biệt đúng nơi phát sinh — **chỉ admin** được xuất, lý do xuất là bắt buộc.
+Nạp số dư tồn kho ban đầu khi triển khai hệ thống trực tiếp tại Kho phân xưởng (không qua nhận hàng nhà cung cấp hay Đề nghị nhận kho) — **chỉ admin** được thực hiện. Nhập từng dòng (Mã lô, Vật tư, SL, ĐVT tự lấy theo vật tư, Hạn dùng, Số lô KCS tuỳ chọn) hoặc **📥 Import Excel** nhiều dòng cùng lúc (cột: Ngày nhập, Mã vật tư, Lô, Số lượng, tuỳ chọn thêm Số lô KCS).
 
-**Các bước:** sub-tab **Xuất tự do**, chọn vật tư + lô + số lượng, nhập lý do (bắt buộc), bấm **Xuất**. Xem lại ở bảng **Lịch sử xuất tự do** bên dưới (có tìm kiếm).
+### 11.3b Điều chuyển về Kho công ty
 
-### 11.3c Lịch sử xuất dùng NVL (Kho phân xưởng)
+Ngược hướng với Đề nghị nhận kho (mục 11.3) — gửi đề nghị chuyển 1 lô đang ở Kho phân xưởng **về lại** Kho công ty: chọn Lô (đang ở kho phân xưởng, chưa on_hold) + SL + Lý do (tuỳ chọn), bấm **Gửi đề nghị** (quyền `warehouse.request`) — chưa động tồn kho ngay, chỉ khi **Thủ kho Kho công ty duyệt** mới thật sự chuyển. Xem lại ở bảng lịch sử (có tìm kiếm).
+
+### 11.3c Xuất sang ngang
+
+Nhận vào Kho phân xưởng phần vật tư Kho công ty đã khai báo "Xuất sang ngang" (Kho công ty đã tăng tồn ngay lúc khai báo, xem mục 11.2) — người có quyền `warehouse.request` bấm **Duyệt** trên từng đề nghị đang chờ để thật sự nhận vào Kho phân xưởng, hoặc **Từ chối**; nếu vật tư có chỉ tiêu chất lượng bắt buộc, nút Duyệt bị khoá cho tới khi KCS duyệt xong. Admin có thể **Hoàn tác** đề nghị đã duyệt. Có bảng **Lịch sử đã xử lý** riêng bên dưới.
+
+### 11.3d Xuất tự do (Kho phân xưởng)
+
+Xuất không theo phiếu đề nghị (dùng nội bộ, thử nghiệm...) trực tiếp từ lô đang ở Kho phân xưởng — tách riêng khỏi Xuất tự do của Kho công ty (mục 11.2) để phân biệt đúng nơi phát sinh — **chỉ admin** được xuất, **Lý do là tuỳ chọn** (không bắt buộc, khác Xuất tự do ở Kho TP/WMS mục 12.6).
+
+**Các bước:** sub-tab **Xuất tự do**, chọn Lô (lô đang "CHỜ DUYỆT QC" sẽ bị chặn xuất) + SL + Lý do (tuỳ chọn), bấm **Xuất tự do**. Xem lại ở bảng lịch sử bên dưới (có tìm kiếm, có thể **Hoàn lại** nếu xuất nhầm — vật tư trở về đúng lô).
+
+### 11.3e Lịch sử xuất dùng NVL (Kho phân xưởng)
 
 Sổ ghi chép **thật** — phân biệt với Xuất tự do ở trên — liệt kê từng lần NVL được **tiêu thụ cho sản xuất** (không phải xuất thủ công): mỗi dòng gồm công đoạn (Nấu/Lọc/Chiết), tên mẻ, mã lô NVL, số lượng, người thao tác. Có ô tìm kiếm.
 
@@ -390,7 +448,11 @@ Sổ ghi chép **thật** — phân biệt với Xuất tự do ở trên — li
 | Nấu | Mẻ 4 (mã nấu 1) | Malt Anh (bao) | KCS03 | 0,48 kg | admin |
 | Nấu | Mẻ 2 (mã nấu 2) | Men Lager W-34/70 | YEAST-2406-01 | 0,12 L | admin |
 
-### 11.4 Kiểm kê định kỳ
+### 11.3f Kiểm kê định kỳ (Kho phân xưởng)
+
+Y hệt quy trình Kiểm kê định kỳ ở mục 11.4 (Tạo phiếu → Xem/Nhập số liệu → Chốt → Duyệt/Hoàn tác) nhưng chạy riêng cho phạm vi Kho phân xưởng — 2 kho có phiếu kiểm kê độc lập, không gộp chung 1 phiếu.
+
+### 11.4 Kiểm kê định kỳ (Kho công ty)
 
 **Các bước đầy đủ:**
 1. Tab **Kiểm kê định kỳ**, bấm **Tạo phiếu** — hệ thống chụp snapshot tồn hệ thống hiện tại của toàn bộ (hoặc theo 1 kho).
@@ -451,71 +513,82 @@ xychart-beta
 
 **Mục đích:** quản lý theo **LÔ thành phẩm** (lon/keg/vỉ — không gộp theo pallet cứng như bản cũ). Thao tác trên màn hình (xem/xuất/phân rã/điều chuyển) không đổi; đằng sau, mỗi lô chỉ cần 1 dòng dữ liệu (thay vì 1 dòng/vỉ trước đây) để duyệt chiết không bị treo với lô sản lượng lớn.
 
-**Ai dùng:** thủ kho thành phẩm.
+**Ai dùng:** thủ kho thành phẩm / Trưởng bộ phận kho (duyệt phiếu).
 
-**11 sub-tab:** Kho TP · Xuất kho · 🔀 Điều chuyển · 🚚 Cất vào vị trí · 🚫 Xuất tự do · Lệnh đóng hàng · 📦 Tồn kho theo tuổi · 🕒 Bia cận date · Danh mục vị trí kho · Danh mục nơi xuất đến · Danh mục lái xe.
+**13 sub-tab (theo đúng thứ tự hiện tại):** 🏭 Nhập từ nhà máy khác · Kho TP · Xuất kho · 🔀 Điều chuyển · 🚚 Cất vào vị trí · 🚫 Xuất tự do · Lệnh đóng hàng · 📦 Tồn kho theo tuổi · 🕒 Bia cận date · 🎁 Bia gửi · 🏭 Danh mục kho thành phẩm · Danh mục vị trí kho · Danh mục lái xe.
 
-### 12.1 Kho TP (tab mặc định)
+> Ghi chú: "Danh mục nơi xuất đến" không còn là danh mục riêng — nơi xuất đến giờ chọn trực tiếp từ Danh mục Nhà cung cấp (mục 21) ngay trên form Xuất kho.
+
+### 12.1 🏭 Nhập từ nhà máy khác
+
+Dùng khi bia thực tế **KHÔNG** do nhà máy đang chạy hệ thống này (Đông Mai) sản xuất, mà nhận từ 1 nhà máy khác (chọn trong Danh mục Nhà máy — mục 21) để lưu/bán tiếp qua kho này. Khai báo Sản phẩm + Số lượng + Vị trí kho nhận + Nhà máy nguồn — bản khai **chưa** tăng tồn kho ngay, chỉ ghi chờ duyệt; sau khi **Trưởng bộ phận kho duyệt**, tồn kho tăng và lô này được xử lý **HOÀN TOÀN giống bia thường** ở mọi khâu sau đó (không ưu tiên xuất, không tách dòng riêng ở Xuất kho/Điều chuyển, dùng chung số lô tự sinh với Nhập kho thủ công). Nhà máy nguồn chỉ là **dấu hiệu ghi lại nguồn gốc**, dành cho báo cáo riêng sau này (chưa có báo cáo). Trước khi duyệt có thể **Sửa**/ **Hoàn tác**; sau khi duyệt thì khoá hẳn.
+
+### 12.2 Kho TP (tab mặc định)
 
 Đầu tab hiện **📊 Tổng quan kho thành phẩm** — tổng số đơn vị, đang lưu kho/đã phân rã/đã xuất, % mức lấp đầy theo sức chứa vị trí kho. Bên dưới là bảng tồn nhóm theo sản phẩm + lô, xem chi tiết từng đơn vị.
 
-**Nhập tồn đầu thủ công:** chọn Sản phẩm từ danh sách (ví dụ BCLN330 — Bia chai Classic 330ml, BLGN330 — Bia chai Legend 330ml...), nhập số lượng + lô, lưu.
+**Nhập tồn đầu thủ công:** chọn Sản phẩm từ danh sách (ví dụ BCLN330 — Bia chai Classic 330ml, BLGN330 — Bia chai Legend 330ml...), nhập số lượng + lô + vị trí kho, lưu — hoặc nạp file Excel tồn đầu cho nhiều dòng cùng lúc.
 
-### 12.2 Xuất kho
+### 12.3 Xuất kho
 
 **Các bước:**
-1. Tab **Xuất kho** — thêm dòng vào giỏ hàng: chọn sản phẩm + lô + loại xuất.
-2. Hệ thống tự báo **FIFO đúng/sai** ngay trên từng dòng (dựa vào lô cũ nhất còn tồn).
-3. Điền header: người nhận/tài xế/xe/nơi đến.
-4. Bấm **Xuất kho** để hoàn tất — in ra biên bản giao nhận.
+1. Tab **Xuất kho** — thêm dòng vào giỏ hàng: chọn sản phẩm + lô + loại xuất (có thể tick "Chỉ bia gửi"/"Chỉ cận date" theo dòng).
+2. Hệ thống tự báo **FIFO đúng/sai** ngay trên từng dòng (dựa vào lô cũ nhất còn tồn); lô là **bia gửi** hiện badge kèm biển số xe đã gửi, ưu tiên xuất trước cả bia cận date.
+3. Điền header: người nhận/tài xế/xe (chọn từ Danh mục lái xe)/nơi đến.
+4. Bấm **Xuất kho** để hoàn tất — chờ **Trưởng bộ phận kho Duyệt**, sau đó có thể nhập thêm **Km / Lít xăng** thực tế của chuyến ngay trên dòng lịch sử, và **In phiếu**.
 
-### 12.3 🔀 Điều chuyển
+### 12.4 🔀 Điều chuyển
 
-Chuyển đơn vị **đã có vị trí** giữa các vị trí kho nội bộ (khác với Cất vào vị trí ở mục 12.3b — dành cho đơn vị *chưa* có vị trí). Kèm chức năng **Phân rã** — tách 1 batch đơn vị (ví dụ 1 vỉ) thành các đơn vị nhỏ hơn khi cần bán lẻ/đóng gói lại.
+Chuyển đơn vị **đã có vị trí** sang **vị trí khác trong 1 kho khác** (khác với Cất vào vị trí ở mục 12.5 — dành cho chuyển vị trí *trong cùng 1 kho*, và khác Xuất kho vì **không làm giảm** tổng tồn kho công ty, chỉ đổi chỗ). Giao diện dạng giỏ hàng y hệt Xuất kho: chọn vị trí đích + lọc lô, thêm từng dòng sản phẩm/lô/vị trí nguồn vào giỏ (mỗi dòng ứng với đúng 1 vị trí nguồn — 1 lô nằm ở 2 kho sẽ hiện 2 dòng riêng), rồi **Tạo phiếu điều chuyển**. Sau khi **Trưởng bộ phận kho Duyệt**, có thể nhập **Km/Lít xăng** (nếu có xe chở) và **In phiếu**; có thể **Sửa** khi chưa duyệt, **Hoàn tác** theo quyền.
 
-### 12.3b 🚚 Cất vào vị trí
+### 12.5 🚚 Cất vào vị trí
 
-Trước đây nằm trong modal của từng nhóm lô, nay tách thành 1 sub-tab riêng vì thao tác này áp dụng cho toàn kho, không gắn với 1 lô cụ thể. Hệ thống tự liệt kê mọi đơn vị **chưa cất vị trí** (mới nhập tồn đầu hoặc mới chiết xong), chọn dòng cần cất + số lượng + vị trí đích, bấm **Cất vào vị trí**.
+**2 khối trong cùng 1 tab:**
+- **Cất vào vị trí** — gán vị trí kho cho các vỉ/keg/lon **CHƯA có vị trí** (mới nhập tồn đầu, mới chiết xong, hoặc mới duyệt "Nhập từ nhà máy khác"). Chọn vị trí đích rồi tick các dòng sản phẩm/lô cần cất, không cần chọn từng đơn vị.
+- **🔁 Chuyển vị trí trong kho** — chuyển hàng **ĐÃ CẤT** sang vị trí khác (ví dụ từ khu 1 sang khu 2, từ kệ này sang kệ khác) — chỉ chuyển được **trong cùng 1 kho thành phẩm**; muốn chuyển sang kho khác thì dùng tab "🔀 Điều chuyển" (mục 12.4).
 
-### 12.3c 🚫 Xuất tự do
+### 12.6 🚫 Xuất tự do
 
-Cũng tách thành sub-tab riêng (trước đây nằm trong modal nhóm lô) — **chỉ admin** được xuất, cho phép chọn đúng lô muốn xuất, và **lý do xuất là bắt buộc** (không nhập lý do sẽ không xuất được, kể cả khi đã chọn xong lô/số lượng). Xem lại lịch sử ở bảng bên dưới (có tìm kiếm + nút **Hoàn tác**).
+Xuất không qua phiếu xuất kho (hao hụt nội bộ/hủy hàng/kiểm tra chất lượng) — **chỉ admin** được xuất, chọn đúng lô muốn xuất (lấy đơn vị cũ nhất theo FIFO trước), và **lý do xuất là bắt buộc** (không nhập lý do sẽ không xuất được, kể cả khi đã chọn xong lô/số lượng). Xem lại lịch sử ở bảng bên dưới (có tìm kiếm + nút **Hoàn tác**).
 
-**Dữ liệu thật (lịch sử gần nhất):** 2 lượt xuất tự do đã thực hiện trong ngày, cả 2 đều đã **Hoàn tác** — 1 keg FLGN200 lô 1 ("Kiem tra xac minh tinh nang") và 1 vỉ CSPS330 lô 2 ("Verify wms free issue").
-
-### 12.4 Lệnh đóng hàng
+### 12.7 Lệnh đóng hàng
 
 Nạp file Excel biên bản bàn giao hàng hoá theo xe (đúng mẫu bộ phận đóng gói xuất ra), hệ thống parse tự động, in lại đúng mẫu giấy **BIÊN BẢN BÀN GIAO HÀNG HÓA**.
 
-### 12.5 📦 Tồn kho theo tuổi
+### 12.8 📦 Tồn kho theo tuổi
 
-Bản đầy đủ của biểu đồ rút gọn đã thấy trên Dashboard (mục 2.3) — cùng nguồn dữ liệu, cùng 3 ngưỡng màu:
+Bản đầy đủ của biểu đồ rút gọn đã thấy trên Dashboard (mục 2.3) — cùng nguồn dữ liệu, cùng 3 ngưỡng màu cảnh báo theo số ngày tồn kho.
 
-```mermaid
-xychart-beta
-    title "Tồn kho thành phẩm theo tuổi (ngày)"
-    x-axis ["FLGN200 lô 1 (keg, 27đv)", "CSPS330 lô 2 (lon, 46đv)", "CSPS330 lô 2 (vỉ, 300.048đv)"]
-    y-axis "Số ngày tồn kho" 0 --> 2
-    bar [1.43, 1.24, 1.24]
-```
+### 12.9 🕒 Bia cận date
 
-### 12.6 🕒 Bia cận date
+Khai báo lô-chiết cận hạn sử dụng — hệ thống tự tra cứu lô-chiết liên quan và ghi log chờ duyệt; sau khi duyệt, khi xuất kho có bộ lọc riêng ("Chỉ cận date") để ưu tiên xuất các lô này trước (First-Expired-First-Out) — nhưng vẫn xếp sau bia gửi.
 
-Khai báo lô-chiết cận hạn sử dụng — hệ thống tự tra cứu lô-chiết liên quan và ghi log; khi xuất kho có bộ lọc riêng để ưu tiên xuất các lô này trước (First-Expired-First-Out).
+### 12.10 🎁 Bia gửi
 
-### 12.7 Danh mục vị trí kho / nơi xuất đến / lái xe
+Dùng khi xe đã xuất phiếu đi giao trong ngày nhưng giao không hết, mang phần dư về **GỬI lại kho** (khác bia cận date, khác đổi trả nhà phân phối). Khai báo trực tiếp Sản phẩm + Số lượng + **Biển số xe đã mang về** (chỉ hiện xe có phiếu xuất kho trong khoảng từ 14h Ca 2 ngày hôm trước đến hiện tại; chọn xe xong hệ thống chỉ cho chọn đúng sản phẩm xe đó đã xuất và số lượng không vượt số còn lại có thể nhận gửi) + Vị trí kho nhận. Hệ thống tự sinh 1 lô gửi riêng, luôn hiện thành dòng riêng ở Xuất kho và được **ưu tiên xuất trước cả bia cận date**. Lượng xuất lại này **không** tính vào báo cáo "Xuất TP theo ca" (đã tính vào phiếu xuất gốc, tránh đếm trùng).
 
-3 danh mục nền phục vụ vận hành kho và xuất hàng — mỗi bảng có Sửa/Xóa.
+### 12.11 🏭 Danh mục kho thành phẩm / Danh mục vị trí kho / Danh mục lái xe
 
-**Dữ liệu thật hiện tại:** 300.132 đơn vị thành phẩm — 300.121 đang lưu kho, 9 đã xuất, 2 đã phân rã; mức lấp đầy **14,7%** trên 3 vị trí kho, sức chứa 2.040.000 đơn vị.
+3 danh mục nền phục vụ vận hành kho và xuất hàng — mỗi bảng có Sửa/Xóa:
+- **Danh mục kho thành phẩm** — cấp cha của "Vị trí kho" (1 kho có nhiều vị trí); kho đang có vị trí không xóa được.
+- **Danh mục vị trí kho** — vị trí đang chứa hàng (Sử dụng > 0) không xóa được; mỗi vị trí thuộc 1 kho thành phẩm + có Khu riêng.
+- **Danh mục lái xe** — mỗi xe có 1 **Mã xe** cố định tự sinh (không đổi theo biển số, dùng để liên kết lịch sử dù xe đổi biển số) + Biển số + Tên lái xe + Khối lượng tải (kg, dùng cho báo cáo tải trọng ở mục 18.9).
 
 ---
 
 ## 13. Bao bì
 
-**Mục đích:** theo dõi tiêu hao vật tư bao bì tuyến (nắp, nhãn, thùng carton...) gắn với các mẻ chiết.
+**Mục đích:** theo dõi 2 loại bao bì khác hẳn nhau trên cùng 1 màn hình — **bao bì tuần hoàn** (vỏ chai/két/keg, có đặt cọc, luân chuyển tồn kho ↔ lưu hành ngoài thị trường) và **bao bì tiêu hao** (nắp, thùng carton, tem nhãn... dùng 1 lần, quản lý qua Kho NVL).
 
-**Các bước:** vào **Bao bì**, bấm **Khai báo** để ghi tiêu hao 1 loại vật tư bao bì cho 1 mẻ chiết, bấm **Ghi** để lưu. Xem lịch sử biến động có phân trang/tìm kiếm, dùng **‹ Trước / Sau ›** để lật trang.
+**Ai dùng:** quyền `master.manage` để khai báo loại bao bì mới, quyền `warehouse.issue` để ghi biến động.
+
+**Các khối trên màn hình:**
+1. **📊 Tổng quan bao bì tuần hoàn** — thẻ số liệu theo nhóm (vỏ chai/két/keg...), mỗi thẻ hiện tổng Tồn kho + Đang lưu hành.
+2. **📦 Bao bì tiêu hao theo lô (từ Kho NVL)** — nắp/thùng carton/tem nhãn nhập kho qua **Kho NVL › Nhập kho** (mục 11.1) như vật tư thường, tự động hiện ở đây nếu vật tư thuộc Nhóm vật tư đánh dấu **"Bao bì tiêu hao"** (Danh mục › Nhóm vật tư). Xuất dùng cho mẻ chiết thực hiện qua nút **NVL chiết** trên dòng Chiết (mục 9.4) — **không khai báo tiêu hao trực tiếp ở màn Bao bì này**.
+3. **📋 Danh mục loại bao bì** — bảng vỏ chai/két/keg tuần hoàn: Mã, Tên, Nhóm, Vật liệu, Tồn kho, Lưu hành, Tổng, Đặt cọc, Trạng thái (đang dùng/ngừng).
+4. **➕ Khai báo loại bao bì mới** — nhập Mã, Tên, Nhóm, Vật liệu, Dung tích (L), Đặt cọc (đ), Tồn kho đầu, Đang lưu hành, bấm **Khai báo**.
+5. **🔄 Ghi biến động bao bì** — chọn Loại bao bì + loại **Biến động** (Nhập/Xuất theo hàng đi/Thu hồi khách trả/Loại bỏ hỏng-thanh lý/Kiểm kê đặt lại số), nhập Số lượng + Chứng từ + Ghi chú, bấm **Ghi**.
+6. **📜 Lịch sử biến động** (100 gần nhất) — có tìm kiếm + phân trang **‹ Trước / Sau ›**.
 
 ---
 
@@ -585,10 +658,11 @@ Dùng khi cần truy vết "tank/thiết bị này đã vệ sinh lần nào tr�
 **Các bước xem báo cáo:**
 1. Sub-tab **Báo cáo NL - Hạ Long** — dữ liệu điện (AED) lấy trực tiếp từ SCADA Energy/NameSys thật qua kết nối CSDL gán "Dùng cho: Năng lượng — Hạ Long".
 2. Chọn **Từ ngày giờ** / **Đến ngày giờ**, chọn nhóm theo **Ngày** hoặc **Tháng**, bấm **Xem báo cáo**.
-3. **Báo cáo NL - Đông Mai** — tương tự, dự phòng cho nhà máy Đông Mai (sẽ có dữ liệu khi gắn kết nối CSDL tương ứng).
-4. **Biểu đồ ngày / Tổng hợp tháng** — trực quan hoá nhanh theo ngày hoặc gộp theo tháng.
-5. **Cập nhật số liệu** — nhập tay khi khu vực chưa có kết nối SCADA.
-6. **Danh mục** — khai báo khu vực/điểm đo năng lượng.
+3. Bên dưới còn khối riêng **⚡ Điện theo ca** (Ca 1 06h-14h / Ca 2 14h-22h / Ca 3 22h-06h hôm sau) — chọn xem theo **Ngày cụ thể** (3 ca của 1 ngày) hoặc **Cả tháng** (theo từng ngày trong tháng), bấm **Xem báo cáo ca**; nếu nguồn SCADA không có đúng bản ghi tại giờ ranh giới ca, hệ thống lấy bản ghi gần nhất TRƯỚC mốc đó.
+4. **Báo cáo NL - Đông Mai** — tương tự (cả báo cáo theo khoảng thời gian và theo ca), dự phòng cho nhà máy Đông Mai (sẽ có dữ liệu khi gắn kết nối CSDL tương ứng).
+5. **Biểu đồ ngày / Tổng hợp tháng** — trực quan hoá nhanh theo ngày hoặc gộp theo tháng.
+6. **Cập nhật số liệu** — nhập tay khi khu vực chưa có kết nối SCADA.
+7. **Danh mục** — khai báo khu vực/điểm đo năng lượng.
 
 **Dữ liệu thật hiện tại:** tổng điện tiêu thụ 30 ngày gần nhất (22/6 → 22/7/2026) qua kết nối `CSDL_NL_HL` — **6.821.505 kWh** theo hệ thống, **6.864.575 kWh** theo trạm biến áp. Phân theo khu vực (biểu đồ dưới), Hệ lạnh chiếm tỷ trọng lớn nhất.
 
@@ -606,9 +680,16 @@ Theo trạm biến áp: Trạm 560 KVA — 3.841.446 kWh · Trạm 320 KVA — 2
 
 ## 16. OEE / Dừng máy
 
-**Mục đích:** đo hiệu suất thiết bị tổng thể (Overall Equipment Effectiveness) và lý do dừng máy theo dây chuyền.
+**Mục đích:** đo hiệu suất thiết bị tổng thể (Overall Equipment Effectiveness) và phân tích lý do dừng máy theo dây chuyền — 1 màn hình duy nhất, không chia sub-tab, gồm 6 khối:
 
-**Các bước ghi nhận:** vào **OEE/Dừng máy**, bấm **Ghi OEE** — chọn dây chuyền, nhập thời gian chạy/dừng + lý do dừng, bấm **Ghi** để lưu.
+1. **⚙️ OEE đóng gói** — 1 biểu đồ donut/dây chuyền·ca đã ghi, kèm % Availability/Performance/Quality (A/P/Q).
+2. **📝 Nhập OEE theo ca** — chọn **Dây chuyền** (tốc độ lý tưởng tự điền theo dây chuyền đã khai báo ở Danh mục) + **Ca**, nhập **TG kế hoạch (phút)**, **Dừng (phút)**, **Tốc độ lý tưởng**, **Tổng SP**, **SP đạt**, bấm **Ghi OEE**.
+3. **⏱️ Ghi sự kiện dừng máy (reason-tree)** — tách riêng khỏi khối OEE trên: chọn Line + **Nhóm lý do** (đổi Nhóm sẽ đổi luôn danh sách **Lý do** con tương ứng) + số **Phút** + Ca, bấm **Ghi**.
+4. **📊 Pareto thời gian dừng theo lý do** — biểu đồ cột + bảng %/% tích lũy/số lần theo từng lý do dừng đã ghi.
+5. **🥧 Phân rã 6 big losses** — 2 biểu đồ tròn cạnh nhau: theo nhóm lý do lớn và theo nhóm chi tiết.
+6. **🔧 MTBF/MTTR theo thiết bị** — bảng số lần hỏng, MTBF (giờ), MTTR (phút), % khả dụng, phút dừng, tính trong cửa sổ N ngày gần nhất.
+
+Thêm/ngừng dây chuyền đóng gói ở Danh mục (mục 21) — chưa có dây chuyền thì không ghi được OEE/dừng máy.
 
 **Dữ liệu thật hiện tại:** 3 bản ghi OEE đang có trong hệ thống.
 
@@ -623,16 +704,16 @@ Theo trạm biến áp: Trạm 560 KVA — 3.841.446 kWh · Trạm 320 KVA — 2
 ### 17.1 Bảo trì
 
 **Các bước ghi sự cố:**
-1. Sub-tab **Sự cố**, bấm **Thêm sự cố** — chọn thiết bị (từ **DM thiết bị**), mô tả sự cố, mức độ.
-2. Khi xử lý xong: bấm **Xử lý xong** trên dòng sự cố tương ứng.
-3. Sub-tab **Kế hoạch bảo trì** — lập lịch bảo trì định kỳ theo thiết bị (xuất hiện luôn trên Lập lịch sản xuất, mục 6, dạng khối `maintenance` xen giữa các mẻ).
-4. **DM phụ tùng** — danh mục phụ tùng thay thế dùng khi xử lý sự cố.
+1. Sub-tab **Sự cố**, bấm **Thêm sự cố** — chọn **Thiết bị** (từ **DM thiết bị**), nhập **Tiêu đề**, chọn **Mức** (minor/major/critical).
+2. Khi xử lý xong: bấm **Xử lý xong** trên dòng sự cố tương ứng — hệ thống hỏi thêm số phút dừng máy để ghi nhận.
+3. Sub-tab **Kế hoạch bảo trì** — chọn Thiết bị + Loại (Bảo trì/Kiểm tra/Tu bổ) + Ngày + Ghi chú, bấm **Thêm**; bấm **Hoàn thành** khi đã thực hiện xong. Kế hoạch này xuất hiện luôn trên Lập lịch sản xuất (mục 6), dạng khối `maintenance` xen giữa các mẻ.
+4. **DM phụ tùng** — danh mục phụ tùng thay thế dùng khi xử lý sự cố, kèm cột Tồn/Tồn min/Cảnh báo (báo "Dưới mức min" khi cần bổ sung).
 
 **Dữ liệu thật hiện tại:** 2 sự cố, 3 kế hoạch bảo trì đang có trong hệ thống.
 
 ### 17.2 Kiểm định
 
-Lịch kiểm định thiết bị đo lường — bấm **Thêm** để khai báo thiết bị + chu kỳ kiểm định; hệ thống tự cảnh báo khi sắp/đã quá hạn.
+Lịch kiểm định/hiệu chuẩn thiết bị đo lường — bấm **Thêm**, nhập **Tên**, chọn **Loại** (Hiệu chuẩn TBĐ/Van an toàn/Nguồn phóng xạ/TB YCNNVAT), chọn **Thiết bị** gắn kèm (tuỳ chọn), nhập **Hạn kiểm định** — bảng tự tính cột **Còn (ngày)** và cảnh báo trạng thái khi sắp/đã quá hạn (không có ô khai báo chu kỳ lặp lại, mỗi lần đến hạn thêm 1 dòng mới).
 
 **Dữ liệu thật hiện tại:** 3 thiết bị đang theo dõi lịch kiểm định.
 
@@ -642,7 +723,7 @@ Lịch kiểm định thiết bị đo lường — bấm **Thêm** để khai b
 
 **Mục đích:** trung tâm báo cáo tổng hợp phục vụ đối chiếu định mức, sản lượng thực tế, và tiến độ lô.
 
-**4 sub-tab:** Định mức NVL · Chiết (lon) · Chiết (keg) · Trạng thái lô.
+**9 sub-tab:** Định mức NVL · Chiết (lon) · Chiết (keg) · Trạng thái lô · Sản lượng lọc · Xuất TP theo ca · KM/Đổi trả/Cận date/Gửi · Xuất ròng theo kỳ · 🚚 Xe & bia gửi.
 
 ### 18.1 Định mức NVL
 
@@ -674,13 +755,38 @@ Sản lượng dây chuyền thực tế theo ca, lấy từ hệ 30K_Report (lo
 
 Theo dõi tiến độ từng lô qua 4 công đoạn Nấu/Lên men/Lọc/Chiết trên cùng 1 dòng (xem bảng thật ở mục 9, cuối phần Nấu-Lọc-Chiết).
 
+### 18.4 Sản lượng lọc
+
+Sản lượng thực tế theo từng **mẻ lọc số** (gộp theo batch_number/order_number, loại trừ các lần refilter không phải mẻ cuối) đối chiếu 2 ngưỡng cảnh báo (thấp/cao) khai báo ở **Cài đặt vận hành** (mục 21) — theo cả cấp Lệnh lọc (tổng hợp) và cấp Dây chuyền (chi tiết lít, có nguồn gốc lô).
+
+### 18.5 Xuất TP theo ca
+
+Quy đổi số lượng đã xuất kho thật (vỉ/keg/lon) sang **lít bia** theo ca sản xuất (Ca 1/2/3, Ca 3 chạy qua nửa đêm), có bảng chi tiết theo từng SKU. **Không** tính lại phần bia gửi xuất lại (tránh đếm trùng với phiếu xuất gốc).
+
+### 18.6 KM/Đổi trả/Cận date/Gửi
+
+Báo cáo tổng hợp riêng cho hàng khuyến mại (KM), đổi trả nhà phân phối, bia cận date và bia gửi — tách biệt khỏi luồng xuất kho thông thường để không lẫn vào doanh số bán hàng chính.
+
+### 18.7 Xuất ròng theo kỳ
+
+Tổng lít bia xuất ròng (đã trừ hàng gửi/trả) trong 1 khoảng thời gian tùy chọn (từ ngày → đến ngày).
+
+### 18.8 🚚 Xe & bia gửi
+
+3 khối báo cáo dùng chung dữ liệu **Mã xe** (Danh mục lái xe) và **Bia gửi**:
+- **Lượt xe & tải trọng** — số lượt mỗi xe đã chở, tổng kg (tính từ khối lượng khai báo trên SKU), số lượt vượt tải trọng cho phép của xe.
+- **Tổng hợp bia gửi** — tổng số lượng đã nhận gửi theo sản phẩm/loại đơn vị, số lần nhập.
+- **Định mức nhiên liệu** — lít xăng/lít bia và km/lít xăng theo từng chuyến (chỉ tính được với chuyến đã nhập Km + Lít xăng ở Lịch sử xuất kho/Điều chuyển — xem mục 12.3/12.4).
+
 ---
 
 ## 19. Trợ lý AI
 
-**Mục đích:** tra cứu nhanh (lô, tồn kho, trạng thái mẻ...) qua hội thoại, không thay thế thao tác thủ công.
+**Mục đích:** tra cứu nhanh (lô, tồn kho, trạng thái mẻ...) qua hội thoại, không thay thế thao tác thủ công. Màn hình chia 2 panel.
 
-**Các bước:** vào **🤖 Trợ lý AI**, bấm **Mới** để tạo hội thoại mới, gõ câu hỏi rồi bấm **Gửi**. Xem **📋 Báo cáo nền** cho các tác vụ chạy ngầm. Bấm **Xoá** để xoá hội thoại cũ.
+**Panel trái — hội thoại:** vào **🤖 Trợ lý AI**, bấm **Mới** để tạo hội thoại mới, gõ câu hỏi (ví dụ: tồn kho, OEE, cảnh báo, mẻ, kiểm định, sự cố, năng lượng, truy xuất...) rồi bấm **Gửi** (trả lời stream theo từng chữ, có gắn nhãn 🔧 tên công cụ nếu trợ lý có tra dữ liệu để trả lời). Chọn lại 1 hội thoại cũ trong ô **Hội thoại** (lưu trên máy chủ, còn nguyên khi tải lại/đổi máy) hoặc bấm **Xoá** để xoá hội thoại đang chọn. Badge đầu trang hiện **Claude \<model\>** khi đã bật LLM thật, hoặc **Engine luật (offline)** khi chưa cấu hình `ANTHROPIC_API_KEY`.
+
+**Panel phải — 🔧 AI vận hành (cảnh báo & đề xuất):** 3 ô số liệu Cao/Trung bình/Thấp theo mức độ nghiêm trọng, kèm bảng chi tiết (Mức, Miền, Phát hiện, Đề xuất) — các cảnh báo AI tự quét ra từ dữ liệu vận hành hiện tại (không cần hỏi). Bấm **📋 Báo cáo nền** để chạy 1 tác vụ nền tổng hợp báo cáo AI, tự cập nhật trạng thái/% tiến độ tới khi xong.
 
 Trợ lý có quyền **đọc** dữ liệu hệ thống để trả lời, nhưng **không tự thực hiện thao tác sản xuất** — mọi hành động ghi dữ liệu vẫn phải do người dùng bấm nút thực hiện (nguyên tắc human-in-the-loop).
 
@@ -696,7 +802,7 @@ Trợ lý có quyền **đọc** dữ liệu hệ thống để trả lời, nh�
 
 ### 20.1 Cổng API & Webhook
 
-**Các bước tạo API key:** bấm **Tạo key**, chọn scope đọc (`read`)/ghi (`write`), lưu — key hiện 1 lần duy nhất. Phần mềm ngoài gọi qua header `X-API-Key` vào `/api/v1` (ví dụ `GET /api/v1/ping` kiểm tra key, `GET /api/v1/production/batches` xem trạng thái mẻ). Bấm **Khoá** để vô hiệu hoá key khi không dùng nữa. Mục **Đăng ký** Webhook để đẩy sự kiện ra hệ thống ngoài khi có thay đổi.
+**Các bước tạo API key:** bấm **Tạo key**, chọn scope đọc (`read`)/ghi (`read,write`), lưu — key hiện 1 lần duy nhất. Phần mềm ngoài gọi qua header `X-API-Key` vào `/api/v1` (ví dụ `GET /api/v1/ping` kiểm tra key, `GET /api/v1/production/batches` xem trạng thái mẻ, còn có `/inventory`, `/oee`, `/energy`, `/quality/alerts`, `/traceability`, `/events`...). Bấm **Khoá** để vô hiệu hoá key khi không dùng nữa. Mục **Đăng ký** Webhook để đẩy sự kiện ra hệ thống ngoài khi có thay đổi. Cùng tab còn có panel **AI Agent — Tool Manifest** (chỉ xem) liệt kê toàn bộ tool mà AI agent/MCP ngoài có thể khám phá và gọi qua cổng này.
 
 ### 20.2 📥 Tích hợp dữ liệu (Import)
 
@@ -714,11 +820,19 @@ Import Mapping Explorer — khai báo custom field động, ánh xạ cột dữ
 
 **Ai dùng:** quyền `master.manage` để ghi (thường là kỹ sư/admin).
 
-Các danh mục: Sản phẩm (Dịch bia) · Sản phẩm thành phẩm (SKU đóng gói) · **Loại đơn vị tồn kho** · Loại bia · Vật tư/Nguyên liệu (kèm **Tồn tối thiểu**) · Nhóm chỉ tiêu chất lượng NVL/công đoạn · Dây chuyền & Tank · Nhà cung cấp · Nơi xuất đến.
+Toàn bộ danh mục hiện ra trên **1 màn hình** (không chia sub-tab), gồm các panel — theo đúng thứ tự hiển thị:
+
+**Sản phẩm & vật tư:** 🍺 Dịch bia (gán **Loại bia** tuỳ chọn để chỉ tiêu Lọc/Chiết áp dụng chung mọi độ oP cùng thương hiệu; có thêm mục **Quy định nấu** để cấu hình biểu mẫu Ghi chép nấu riêng) · 🏷️ Loại bia · 📦 Vật tư/Nguyên liệu (kèm **Tồn tối thiểu**) · 🏷️ Nhóm vật tư (đánh dấu "Nguyên liệu chính/phụ" cho Công thức, hoặc "Bao bì tiêu hao" cho mục 13) · 🔀 Nhóm vật tư thay thế (dùng ở Công thức mục 7, Lệnh lọc mục 4.2, Đề nghị nhận kho mục 11.3) · 🚚 Nhà cung cấp · 🏭 Nhà máy khác (dùng cho Điều chuyển Kho công ty→Nhà máy khác VÀ "Nhập từ nhà máy khác" ở WMS mục 12.1 — **"Danh mục nơi xuất đến" không còn là danh mục riêng**, nơi xuất đến giờ chọn trực tiếp từ Nhà cung cấp ngay trên form Xuất kho) · 🍾 Sản phẩm (thành phẩm — SKU đóng gói) · **📐 Loại đơn vị tồn kho** (mục 21.1).
+
+**Chỉ tiêu chất lượng:** 📋 Danh mục chỉ tiêu chất lượng (từng chỉ tiêu đơn lẻ — mã, tên, ĐVT, giới hạn) · 🧪 Nhóm chỉ tiêu chất lượng (gộp nhiều chỉ tiêu áp dụng cho 1 vật tư/NVL) · 🍺 Nhóm chỉ tiêu theo công đoạn sản xuất (gộp chỉ tiêu áp dụng cho Nấu/Lên men/Lọc/Chiết/Thành phẩm).
+
+**Dây chuyền & tank:** 🏭 Dây chuyền sản xuất · 🛢️ Tank lên men · 🧪 Tank thành phẩm (BBT).
+
+**Vận hành:** ⚙️ Cài đặt vận hành — gồm: Ngưỡng làm rỗng CCT/BBT (hl, dùng cho nút "Làm rỗng tank" ở mục 9.2/9.3, chặn nếu số lệch vượt ngưỡng); Ngưỡng sản lượng Thấp/Cao (hl, phân loại 1 mẻ lọc trên Báo cáo › Sản lượng lọc, mục 18.4) và Ngưỡng mẻ lọc số Thấp/Cao (lít, phân loại từng đợt rút dịch riêng — khác quy mô với cặp ngưỡng hl ở trên); Mã nhà máy (in/dập trên bao bì thật, phục vụ truy vết ngoài thị trường).
 
 **Các bước chung cho mọi danh mục:** bấm **Tạo mới**, điền form, lưu. Mỗi dòng có nút **Sửa**/**Xóa** — xóa có kiểm tra ràng buộc (không cho xóa nếu đang được tham chiếu bởi công thức/lô/mẻ khác).
 
-Riêng **Nhóm chỉ tiêu chất lượng**: bấm vào 1 nhóm để xem **Chỉ tiêu trong nhóm**, bấm **Ngừng**/**Xóa gán** để bỏ 1 chỉ tiêu khỏi nhóm, hoặc gán thêm rồi **Lưu**. Riêng **Sản phẩm**: có thêm mục **Quy định nấu** để cấu hình biểu mẫu Ghi chép nấu riêng cho sản phẩm đó.
+Riêng **Nhóm chỉ tiêu chất lượng**: bấm vào 1 nhóm để xem **Chỉ tiêu trong nhóm**, bấm **Ngừng**/**Xóa gán** để bỏ 1 chỉ tiêu khỏi nhóm, hoặc gán thêm rồi **Lưu**.
 
 ### 21.1 Loại đơn vị tồn kho (dùng cho Kho TP/WMS)
 
@@ -726,7 +840,7 @@ Ngoài 3 loại có sẵn (vỉ, keg, lon), khai báo thêm loại đơn vị đ
 
 1. Ở panel **📐 Loại đơn vị tồn kho**, nhập **Mã** và **Tên hiển thị**, chọn **Cách quy đổi**: "Chia theo SL/1 đơn vị" (giống Vỉ — 1 đơn vị gồm nhiều lon/chai bên trong, dùng khi Phân rã) hoặc "Không chia" (giống Keg — 1 đơn vị luôn = 1, không nhân thêm).
 2. Bấm **+ Tạo loại đơn vị**. Loại đơn vị mới sẽ xuất hiện trong ô **Loại đơn vị tồn kho** khi khai báo Sản phẩm thành phẩm (SKU) ở panel bên trên.
-3. **Lưu ý quan trọng:** Mã phải viết **chữ thường, không dấu tiếng Việt** (chỉ a-z, số, gạch dưới — ví dụ `thung`, `ket`; tên tiếng Việt có dấu nhập ở ô Tên hiển thị riêng). Đây từng là nguyên nhân 1 lỗi thật đã sửa: khai báo mã viết hoa/có dấu kiểu "Vỉ" thay vì "vi" khiến hệ thống không nhận diện đúng khi phân rã đơn vị ở Kho TP (mục 12.3) — nay đã vá, nhưng vẫn phải tuân thủ quy tắc mã viết thường khi tạo mới.
+3. **Lưu ý quan trọng:** Mã phải viết **chữ thường, không dấu tiếng Việt** (chỉ a-z, số, gạch dưới — ví dụ `thung`, `ket`; tên tiếng Việt có dấu nhập ở ô Tên hiển thị riêng). Đây từng là nguyên nhân 1 lỗi thật đã sửa: khai báo mã viết hoa/có dấu kiểu "Vỉ" thay vì "vi" khiến hệ thống không nhận diện đúng khi phân rã đơn vị ở Kho TP (mục 12.2) — nay đã vá, nhưng vẫn phải tuân thủ quy tắc mã viết thường khi tạo mới.
 
 **Dữ liệu thật hiện tại:**
 
@@ -746,12 +860,21 @@ Ngoài 3 loại có sẵn (vỉ, keg, lon), khai báo thêm loại đơn vị đ
 
 **Ai dùng:** chỉ admin.
 
-5 vai trò cố định: `operator`, `supervisor`, `qa`, `engineer`, `admin`. Mỗi tài khoản còn có **quyền thao tác** (permission) dạng danh sách riêng (ví dụ `warehouse.receive`, `quality.release`, `wo.manage`, `recipe.approve`) độc lập với vai trò.
+5 vai trò cố định: `operator`, `supervisor`, `qa`, `engineer`, `admin`. Mỗi tài khoản còn có **ma trận quyền thao tác** (permission, tick từng quyền cụ thể như `warehouse.receive`, `quality.release`, `wo.manage`, `recipe.author`...) và **menu được phép** (danh sách view, hoặc `*` = tất cả) độc lập với vai trò.
 
 **Các bước tạo tài khoản mới:**
-1. Vào **Tài khoản**, bấm **Tạo tài khoản** — nhập tên đăng nhập, họ tên, vai trò, chức danh.
-2. Bấm **Phạm vi** để gán phạm vi dữ liệu (line/khu vực/loại QC được thao tác) — ví dụ chỉ cho thao tác trên 1 dây chuyền cụ thể.
-3. Bấm **Khoá** để tạm khoá tài khoản khi nhân viên nghỉ, không cần xoá.
+1. Vào **Tài khoản**, có thể chọn **Áp dụng mẫu chức danh** (xem cuối mục) để tự điền sẵn vai trò/menu/quyền/phạm vi, hoặc điền tay: Đăng nhập, Mật khẩu (≥ 8 ký tự, gồm chữ và số), Họ tên, Chức danh, Vai trò, Menu được phép.
+2. Ở khối **Phạm vi dữ liệu (data-scoping)**: tick "Toàn bộ" hoặc chọn cụ thể theo **4 chiều** — Line, Khu vực, Loại test QC, Địa điểm kho.
+3. Ở khối **Quyền thao tác (ma trận quyền)**: tick từng quyền cụ thể cho tài khoản (bảng checkbox đầy đủ danh mục quyền của hệ thống).
+4. Bấm **Tạo tài khoản**.
+
+**Quản lý tài khoản đã tạo** (bảng Danh sách tài khoản):
+- **Sửa quyền** — mở lại đúng Họ tên/Chức danh/Vai trò/Menu/ma trận quyền để sửa (không đổi mật khẩu/phạm vi ở đây).
+- **Phạm vi** — sửa riêng 4 chiều phạm vi dữ liệu.
+- **Copy quyền** — chọn 1 tài khoản nguồn, copy TOÀN BỘ vai trò/menu/quyền/4 chiều phạm vi sang tài khoản đích (ghi đè hoàn toàn, không hợp nhất) — dùng khi 2 người cùng chức danh.
+- **Khoá/Mở** — tạm khoá tài khoản khi nhân viên nghỉ, không cần xoá (không tự khoá được tài khoản đang đăng nhập).
+
+**Mẫu chức danh:** khai báo trước 1 bộ vai trò + menu + ma trận quyền + phạm vi mặc định gắn với 1 tên chức danh (ví dụ "Trưởng ca trực"), để áp dụng nhanh khi tạo tài khoản mới ở bước 1 thay vì soạn tay từng trường — có đầy đủ **Sửa**/**Xóa** (xoá mẫu không ảnh hưởng tài khoản đã tạo trước đó bằng mẫu này).
 
 ---
 
@@ -782,9 +905,9 @@ Ngoài 3 loại có sẵn (vỉ, keg, lon), khai báo thêm loại đơn vị đ
 
 ## 24. Hồ sơ cá nhân
 
-**Mục đích:** mỗi tài khoản tự quản lý thông tin cá nhân của mình.
+**Mục đích:** mỗi tài khoản tự quản lý thông tin cá nhân của mình, tự xem lại quyền/phạm vi đang được cấp.
 
-**Các bước:** vào **Hồ sơ**, sửa họ tên rồi bấm **Lưu**; hoặc bấm **Đổi mật khẩu** — nhập mật khẩu cũ + mật khẩu mới để đổi (bắt buộc đổi mật khẩu mặc định trong lần đăng nhập đầu tiên).
+**Các bước:** vào **Hồ sơ**, panel **Thông tin cá nhân** hiện Đăng nhập, sửa **Họ tên** rồi bấm **Lưu**, cùng các thông tin chỉ xem: Chức danh, Vai trò, **Quyền được cấp** (danh sách permission cụ thể hoặc "Toàn quyền"), và 4 chiều **Phạm vi** (line/khu vực/loại test/kho — mục 22). Panel **Đổi mật khẩu** — nhập Mật khẩu hiện tại + Mật khẩu mới + Nhập lại, bấm **Đổi mật khẩu** (mật khẩu mạnh: tối thiểu 8 ký tự, gồm cả chữ và số, không chứa tên đăng nhập). Bắt buộc đổi mật khẩu mặc định trong lần đăng nhập đầu tiên — hiện modal chặn không cho bỏ qua tới khi đặt mật khẩu mới hợp lệ.
 
 ---
 
