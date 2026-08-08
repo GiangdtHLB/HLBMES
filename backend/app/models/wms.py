@@ -76,6 +76,12 @@ class FinishedGoodsUnit(Base):
     # phải đổi trả nhà phân phối) — tách riêng khỏi FIFO mặc định như is_near_expiry, và
     # được ưu tiên xuất TRƯỚC cả bia cận date (xem VIEWS.wms sort trong xuatkho).
     is_consigned: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    # Đánh dấu vỉ/keg này thực chất do 1 NHÀ MÁY KHÁC (không phải nhà máy đang chạy hệ thống
+    # này) sản xuất, chỉ nhập lại vào kho này để lưu/xuất tiếp (xem FactoryImportEntry) — khác
+    # is_near_expiry/is_consigned ở chỗ KHÔNG có xử lý đặc biệt gì ở Xuất kho/điều chuyển/báo
+    # cáo (chọn lô/loại/FIFO như hàng thường) — cờ này CHỈ để nhận biết nguồn gốc và dành cho
+    # báo cáo riêng sau này (chưa làm).
+    is_factory_import: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     # Nguồn gốc dòng nhập kho: "chiet" (tự động sau khi duyệt chiết, xem routers/brewing.py::
     # approve_bottle), "manual" ("Nhập kho thủ công" thường, không phải tồn đầu — xem
     # services/wms.py::build_units) hay NULL (tồn đầu/import/near-expiry/consigned/dữ liệu cũ).
@@ -282,6 +288,42 @@ class ConsignedEntry(Base):
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
     # unit_code các vỉ/keg do chính lần khai báo direction="in" này tạo ra (nối bằng dấu phẩy),
     # chỉ được ghi lúc DUYỆT. Chỉ có ở direction="in".
+    unit_codes: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)
+    reversed: Mapped[bool] = mapped_column(Boolean, default=False)
+    approved_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    approved_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+
+
+class FactoryImportEntry(Base):
+    """Lịch sử riêng cho "Nhập từ nhà máy khác" — bia KHÔNG do nhà máy đang chạy hệ thống này
+    sản xuất, mà nhận từ 1 nhà máy khác (Danh mục Nhà máy, xem models/warehouse.py::
+    FactoryLocation — cùng danh mục dùng cho Điều chuyển Kho công ty → Nhà máy khác) để lưu/bán
+    tiếp qua kho này. Chỉ có 1 chiều "in" (không có "out" tự động như ConsignedEntry — bia này
+    xuất/điều chuyển như hàng thường, không cần trừ trùng gì ở báo cáo). Mirror NearExpiryEntry
+    về vòng đời khai báo (chưa tăng tồn kho ngay — Trưởng bộ phận kho duyệt qua
+    approve_factory_import_entry mới tạo FinishedGoodsUnit is_factory_import=True + tăng tồn
+    kho; trước khi duyệt còn sửa/hủy được, sau khi duyệt khoá hẳn) NHƯNG khác ở việc factory_id
+    là bắt buộc (đây chính là "dấu hiệu" nhận biết nguồn gốc — bắt buộc để không khai báo thiếu
+    thông tin xuất xứ) và KHÔNG có bất kỳ xử lý đặc biệt gì ở Xuất kho/Điều chuyển/FIFO/báo cáo
+    theo ca sau khi đã duyệt — is_factory_import chỉ để dành cho 1 báo cáo riêng sau này
+    (chưa làm)."""
+    __tablename__ = "factory_import_entry"
+
+    entry_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
+    finished_product_id: Mapped[Optional[str]] = mapped_column(ForeignKey("finished_product.finished_product_id"), nullable=True, index=True)
+    product_name: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    lot_code: Mapped[Optional[str]] = mapped_column(Unicode(64), nullable=True)
+    unit_type: Mapped[str] = mapped_column(Unicode(16))  # vi | keg
+    quantity: Mapped[int] = mapped_column(Integer)  # số vỉ/keg
+    location_id: Mapped[Optional[str]] = mapped_column(ForeignKey("wms_location.loc_id"), nullable=True, index=True)  # vị trí nhận — bắt buộc ở tầng service
+    # Nhà máy nguồn (Danh mục Nhà máy) — bắt buộc, đây là "dấu hiệu" chính để nhận biết bia này
+    # không do nhà máy đang chạy hệ thống này sản xuất.
+    factory_id: Mapped[Optional[str]] = mapped_column(ForeignKey("factory_location.factory_id"), nullable=True, index=True)
+    declared_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+    note: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)
+    created_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    # unit_code các vỉ/keg do lần khai báo này tạo ra (nối bằng dấu phẩy), chỉ ghi lúc DUYỆT.
     unit_codes: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)
     reversed: Mapped[bool] = mapped_column(Boolean, default=False)
     approved_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)

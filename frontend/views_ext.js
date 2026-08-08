@@ -826,6 +826,7 @@
       { key: "capvao", label: "🚚 Cất vào vị trí" }, { key: "tudo", label: "🚫 Xuất tự do" },
       { key: "lenhdonghang", label: "Lệnh đóng hàng" }, { key: "aging", label: "📦 Tồn kho theo tuổi" },
       { key: "canexpiry", label: "🕒 Bia cận date" }, { key: "consigned", label: "🎁 Bia gửi" },
+      { key: "factoryimport", label: "🏭 Nhập từ nhà máy khác" },
       { key: "khodm", label: "🏭 Danh mục kho thành phẩm" },
       { key: "dm", label: "Danh mục vị trí kho" },
       { key: "vehicles", label: "Danh mục lái xe" }];
@@ -833,11 +834,12 @@
     // "Nơi xuất đến" dùng chung danh mục Nhà cung cấp (không còn catalog ship_to_location riêng —
     // xem models/wms.py, migration 9a0b1c2d3e4f_ship_to_supplier_merge) — biến `shipTos` giữ tên cũ
     // để đỡ đổi các chỗ dùng bên dưới, nhưng nguồn dữ liệu giờ là /api/suppliers.
-    const [locs, shipTos, finishedProducts, vehicles, unitTypes, gsEligible, warehouses] = await Promise.all([
+    const [locs, shipTos, finishedProducts, vehicles, unitTypes, gsEligible, warehouses, factoryLocations] = await Promise.all([
       GET("/wms/locations"), GET("/suppliers"), GET("/finished-products").catch(() => []),
       GET("/wms/vehicles").catch(() => []), GET("/unit-types").catch(() => []),
       GET("/wms/vehicles/consigned-eligible").catch(() => []),
-      GET("/wms/warehouses").catch(() => [])]);
+      GET("/wms/warehouses").catch(() => []),
+      GET("/factory-locations").catch(() => [])]);
     // "Kho thành phẩm" (WmsWarehouse) là cấp cha mới của vị trí kho — 1 kho có nhiều vị trí.
     // Nhãn hiển thị ưu tiên "[mã kho] mã vị trí - tên vị trí" để biết ngay lô đang ở kho nào.
     const whLabel = (l) => `${l.warehouse_name ? `[${esc(l.warehouse_name)}] ` : ""}${esc(l.code)}${l.name ? ` - ${esc(l.name)}` : ""}${locZoneSuffix(l)}`;
@@ -1195,6 +1197,30 @@
         <input class="searchbox" data-tbl="t_gs_hist" placeholder="Tìm theo sản phẩm/lô..." style="margin-bottom:8px"/>
         <div id="gs_hist"><div class="muted">Đang tải…</div></div>
       </div>`;
+    } else if (sec === "factoryimport") {
+      const nmkFpOpt = finishedProducts.map(fp => `<option value="${esc(fp.finished_product_id)}" data-code="${esc(fp.code)}">${esc(fp.code)} — ${esc(fp.name)}</option>`).join("");
+      const nmkLocOpt = locs.map(l => `<option value="${esc(l.loc_id)}">${whLabel(l)} (${l.used}/${l.capacity})</option>`).join("");
+      const nmkFactoryOpt = factoryLocations.filter(f => f.active).map(f => `<option value="${esc(f.factory_id)}">${esc(f.code)} — ${esc(f.name)}</option>`).join("");
+      body = `<div class="panel"><h2>🏭 Nhập từ nhà máy khác</h2>
+        <div class="muted" style="margin-bottom:8px">Dùng khi bia thực tế KHÔNG do nhà máy đang chạy hệ thống này sản xuất, mà nhận từ 1 nhà máy khác
+          (Danh mục Nhà máy) để lưu/bán tiếp qua kho này. Khai báo Sản phẩm + Số lượng + Vị trí kho nhận + Nhà máy nguồn — sau khi Trưởng bộ phận kho
+          duyệt, tồn kho tăng và lô này được xử lý HOÀN TOÀN giống bia thường (không ưu tiên xuất, không tách dòng riêng ở Xuất kho/Điều chuyển) —
+          Nhà máy nguồn chỉ là dấu hiệu ghi lại để nhận biết xuất xứ, dành cho báo cáo riêng sau này.</div>
+        <div class="row" style="flex-wrap:wrap">
+          <div class="field"><label>Sản phẩm</label>
+            <input id="nmk_prod_q" placeholder="Tìm sản phẩm..." style="width:220px;margin-bottom:2px"/>
+            <select id="nmk_prod" style="width:220px"><option value="">(chọn sản phẩm)</option>${nmkFpOpt}</select></div>
+          <div class="field"><label>Số lượng</label><input id="nmk_qty" type="number" min="1" style="width:100px"/></div>
+          <div class="field"><label>Vị trí kho nhận</label><select id="nmk_loc" style="width:180px"><option value="">(chọn vị trí)</option>${nmkLocOpt}</select></div>
+          <div class="field"><label>Nhà máy nguồn</label><select id="nmk_factory" style="width:200px"><option value="">(chọn nhà máy)</option>${nmkFactoryOpt}</select></div>
+          <div class="field" style="flex:1;min-width:160px"><label>Ghi chú</label><input id="nmk_note" placeholder="Tùy chọn"/></div>
+          <div class="field" style="align-self:flex-end"><button class="btn" id="nmk_submit">+ Nhập từ nhà máy khác</button></div>
+        </div>
+        ${factoryLocations.length ? "" : '<div class="muted" style="margin-top:6px">⚠ Chưa có nhà máy nào trong Danh mục Nhà máy — khai báo ở đó trước.</div>'}
+        <h3 style="margin-top:20px">Lịch sử nhập từ nhà máy khác</h3>
+        <input class="searchbox" data-tbl="t_nmk_hist" placeholder="Tìm theo sản phẩm/lô..." style="margin-bottom:8px"/>
+        <div id="nmk_hist"><div class="muted">Đang tải…</div></div>
+      </div>`;
     }
     root.innerHTML = subnav("wms", sections, sec) + body;
     wireSubnav("wms");
@@ -1365,6 +1391,77 @@
           });
         });
       }).catch(() => { $("gs_hist").innerHTML = `<div class="muted">Không tải được lịch sử.</div>`; });
+    }
+
+    if (sec === "factoryimport") {
+      const canApproveNmk = _hasPerm("wms.confirm_receipt");
+      const canEditNmk = _hasPerm("warehouse.receive");
+      wireSelectSearch("nmk_prod", "nmk_prod_q");
+      if ($("nmk_submit")) $("nmk_submit").onclick = () => guard(async () => {
+        if (!$("nmk_prod").value) { toast("Chọn sản phẩm", "err"); return; }
+        const qty = parseInt($("nmk_qty").value, 10) || 0;
+        if (qty <= 0) { toast("Nhập số lượng > 0", "err"); return; }
+        if (!$("nmk_loc").value) { toast("Chọn vị trí kho nhận", "err"); return; }
+        if (!$("nmk_factory").value) { toast("Chọn nhà máy nguồn", "err"); return; }
+        const res = await POST("/wms/factory-import", { finished_product_id: $("nmk_prod").value, quantity: qty,
+          location_id: $("nmk_loc").value, factory_id: $("nmk_factory").value, note: $("nmk_note").value || null });
+        toast(`Đã khai báo ${qty} ${res.unit_type === "keg" ? "keg" : "vỉ"} nhập từ nhà máy khác (chờ Trưởng bộ phận kho duyệt trước khi tăng tồn kho)`);
+        render("wms");
+      });
+      GET("/wms/factory-import").then(entries => {
+        $("nmk_hist").innerHTML = entries.length ? `<div class="tablewrap"><table id="t_nmk_hist">
+          <thead><tr><th>Sản phẩm</th><th>Lô</th><th>Loại ĐV</th><th>SL</th><th>Vị trí</th><th>Nhà máy nguồn</th><th>Ngày khai báo</th><th>Ghi chú</th><th>Người tạo</th><th>Thời gian</th><th>Duyệt</th><th></th></tr></thead>
+          <tbody>${entries.map(e => `<tr>
+            <td>${esc(fpLabel(e.product_name))}</td><td class="muted">${esc(e.lot_code || "—")}</td>
+            <td>${e.unit_type === "keg" ? "Keg" : "Vỉ"}</td><td>${e.quantity}</td>
+            <td class="muted">${e.location_code ? `${locWhPrefix({warehouse_name: e.warehouse_name})}${e.location_name ? `${esc(e.location_code)} - ${esc(e.location_name)}` : esc(e.location_code)}${locZoneSuffix({zone: e.location_zone})}` : "—"}</td>
+            <td class="muted">${esc(e.factory_name || "—")}</td>
+            <td class="muted">${e.declared_at ? fmt(e.declared_at) : "—"}</td>
+            <td class="muted">${esc(e.note || "")}</td>
+            <td class="muted">${esc(e.created_by || "")}</td><td class="muted">${fmt(e.created_at)}</td>
+            <td>${e.approved_by ? `<span class="badge available">✓ ${esc(e.approved_by)}</span>` : '<span class="muted">Chờ duyệt</span>'}</td>
+            <td style="white-space:nowrap">${e.reversed ? '<span class="muted">Đã hoàn tác</span>' : `
+                  ${e.can_edit && canEditNmk ? `<button class="btn sm sec" data-edit-nmk="${esc(e.entry_id)}">Sửa</button>` : ""}
+                  ${e.can_approve && canApproveNmk ? `<button class="btn sm" data-approve-nmk="${esc(e.entry_id)}">Duyệt</button>` : ""}
+                  ${e.can_undo ? `<button class="btn sm sec" data-undo-nmk="${esc(e.entry_id)}">Hoàn tác</button>` : ""}`}</td></tr>`).join("")}</tbody></table></div>`
+          : `<div class="muted">Chưa có lịch sử nhập từ nhà máy khác nào.</div>`;
+        wireSearch(); wirePaginate("t_nmk_hist", 10);
+        document.querySelectorAll("[data-undo-nmk]").forEach(b => b.onclick = () => guard(async () => {
+          if (!confirm("Hoàn tác bản khai \"Nhập từ nhà máy khác\" này?")) return;
+          await POST(`/wms/factory-import/${b.dataset.undoNmk}/undo`);
+          toast("Đã hoàn tác bản khai");
+          render("wms");
+        }));
+        document.querySelectorAll("[data-approve-nmk]").forEach(b => b.onclick = () => guard(async () => {
+          if (!confirm("Duyệt bản khai \"Nhập từ nhà máy khác\" này? Sau khi duyệt, tồn kho sẽ tăng ngay và KHÔNG thể sửa/hoàn tác được nữa.")) return;
+          await POST(`/wms/factory-import/${b.dataset.approveNmk}/approve`);
+          toast("Đã duyệt — tồn kho đã tăng");
+          render("wms");
+        }));
+        document.querySelectorAll("[data-edit-nmk]").forEach(b => b.onclick = () => {
+          const e = entries.find(x => x.entry_id === b.dataset.editNmk);
+          if (!e) return;
+          modal(`<h3>Sửa bản khai nhập từ nhà máy khác</h3>
+            <div class="row"><div class="field"><label>Sản phẩm</label>
+              <select id="enmk_prod">${finishedProducts.map(fp => `<option value="${esc(fp.finished_product_id)}">${esc(fp.code)} — ${esc(fp.name)}</option>`).join("")}</select></div></div>
+            <div class="row"><div class="field"><label>Số lượng</label><input id="enmk_qty" type="number" min="1" value="${e.quantity}"/></div>
+              <div class="field"><label>Vị trí kho nhận</label><select id="enmk_loc">${locs.map(l => `<option value="${esc(l.loc_id)}">${esc(l.code)} (${l.used}/${l.capacity})</option>`).join("")}</select></div></div>
+            <div class="row"><div class="field"><label>Nhà máy nguồn</label><select id="enmk_factory">${factoryLocations.map(f => `<option value="${esc(f.factory_id)}">${esc(f.code)} — ${esc(f.name)}</option>`).join("")}</select></div></div>
+            <div class="row"><div class="field" style="flex:1"><label>Ghi chú</label><input id="enmk_note" value="${esc(e.note || "")}"/></div>
+              <button class="btn" id="enmk_save" style="align-self:flex-end">Lưu</button></div>`);
+          if ($("enmk_prod")) $("enmk_prod").value = e.finished_product_id || "";
+          if ($("enmk_loc") && e.location_code) { const o = [...$("enmk_loc").options].find(op => op.textContent.startsWith(e.location_code)); if (o) $("enmk_loc").value = o.value; }
+          if ($("enmk_factory")) $("enmk_factory").value = e.factory_id || "";
+          $("enmk_save").onclick = () => guard(async () => {
+            const qty = parseInt($("enmk_qty").value, 10) || 0;
+            if (qty <= 0) { toast("Nhập số lượng > 0", "err"); return; }
+            await PUT(`/wms/factory-import/${e.entry_id}`, { finished_product_id: $("enmk_prod").value || null,
+              quantity: qty, location_id: $("enmk_loc").value || null, factory_id: $("enmk_factory").value || null,
+              note: $("enmk_note").value || null });
+            toast("Đã lưu"); closeModal(); render("wms");
+          });
+        });
+      }).catch(() => { $("nmk_hist").innerHTML = `<div class="muted">Không tải được lịch sử.</div>`; });
     }
 
     if (sec === "kho") {

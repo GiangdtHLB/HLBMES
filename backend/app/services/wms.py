@@ -15,8 +15,9 @@ from ..models.audit import AuditLog
 from ..models.brewing import BottleRecord
 from ..models.master import FinishedProduct, UnitTypeCatalog
 from ..models.materials import GenealogyEdge, Supplier
-from ..models.wms import (ConsignedEntry, FinishedGoodsUnit, NearExpiryEntry, Shipment, Vehicle,
-                          WmsLocation, WmsTransfer, WmsTransferLine, WmsWarehouse)
+from ..models.warehouse import FactoryLocation
+from ..models.wms import (ConsignedEntry, FactoryImportEntry, FinishedGoodsUnit, NearExpiryEntry, Shipment,
+                          Vehicle, WmsLocation, WmsTransfer, WmsTransferLine, WmsWarehouse)
 from ..security import User, require_perm, require_role
 from . import genealogy
 from .opening_balance_import import parse_opening_balance_sheet
@@ -855,6 +856,150 @@ def undo_consigned_entry(db: Session, entry_id: str, user: User) -> dict:
         raise DomainError("Bản khai này đã được duyệt — không thể hủy.")
     entry.reversed = True
     record_audit(db, entity_type="consigned_entry", entity_id=entry.entry_id, action="undo", actor=user,
+                before={"count": entry.quantity}, after={"reversed": True})
+    db.commit()
+    return {"entry_id": entry.entry_id}
+
+
+# ---- Nhập từ nhà máy khác: mirror bia cận date (khai báo -> duyệt mới tăng tồn kho) nhưng
+# KHÔNG có xử lý đặc biệt gì sau khi duyệt (không ưu tiên xuất, không trừ báo cáo) — cờ
+# is_factory_import trên đơn vị chỉ để dành cho báo cáo riêng sau này. ----
+
+def create_factory_import_entry(db: Session, finished_product_id: str, quantity: int,
+                                location_id: str, factory_id: str, user: User, note: str = None) -> dict:
+    """Khai báo "Nhập từ nhà máy khác": Sản phẩm + Số lượng + Vị trí kho nhận + Nhà máy nguồn
+    (Danh mục Nhà máy) đều bắt buộc — factory_id là "dấu hiệu" để biết bia này không do nhà máy
+    đang chạy hệ thống này sản xuất. CHƯA tăng tồn kho — chỉ ghi bản khai chờ duyệt, xem
+    approve_factory_import_entry."""
+    require_perm(user, "warehouse.receive")
+    fp = db.get(FinishedProduct, finished_product_id)
+    if not fp:
+        raise NotFoundError("Không tìm thấy sản phẩm tương ứng.")
+    if quantity <= 0:
+        raise DomainError("Số lượng phải > 0.")
+    if not location_id or not db.get(WmsLocation, location_id):
+        raise DomainError("Vui lòng chọn vị trí kho nhận.")
+    if not factory_id or not db.get(FactoryLocation, factory_id):
+        raise DomainError("Vui lòng chọn nhà máy nguồn.")
+    unit_type = fp.unit_type or "vi"
+    product_name = fp.code
+    entry = FactoryImportEntry(entry_id=new_id(), finished_product_id=finished_product_id,
+                               product_name=product_name, unit_type=unit_type, quantity=quantity,
+                               location_id=location_id, factory_id=factory_id, declared_at=utcnow(),
+                               note=note, created_by=user.username, created_at=utcnow())
+    db.add(entry)
+    record_audit(db, entity_type="factory_import_entry", entity_id=entry.entry_id, action="create", actor=user,
+                after={"product_name": product_name, "count": quantity, "factory_id": factory_id})
+    db.commit()
+    return {"entry_id": entry.entry_id, "product_name": product_name, "unit_type": unit_type, "count": quantity}
+
+
+def update_factory_import_entry(db: Session, entry_id: str, payload: dict, user: User) -> dict:
+    """Sửa 1 bản khai "Nhập từ nhà máy khác" ĐANG CHỜ DUYỆT — mirror update_near_expiry_entry."""
+    require_perm(user, "warehouse.receive")
+    entry = db.get(FactoryImportEntry, entry_id)
+    if not entry:
+        raise NotFoundError("Không tìm thấy bản khai.")
+    if entry.reversed:
+        raise DomainError("Bản khai này đã bị hủy — không thể sửa.")
+    if entry.approved_by:
+        raise DomainError("Bản khai này đã được duyệt — không thể sửa.")
+    if payload.get("finished_product_id") and payload["finished_product_id"] != entry.finished_product_id:
+        fp = db.get(FinishedProduct, payload["finished_product_id"])
+        if not fp:
+            raise NotFoundError("Không tìm thấy sản phẩm tương ứng.")
+        entry.finished_product_id = fp.finished_product_id
+        entry.product_name = fp.code
+        entry.unit_type = fp.unit_type or "vi"
+    if payload.get("quantity") is not None:
+        if payload["quantity"] <= 0:
+            raise DomainError("Số lượng phải > 0.")
+        entry.quantity = payload["quantity"]
+    if payload.get("location_id"):
+        if not db.get(WmsLocation, payload["location_id"]):
+            raise NotFoundError("Không tìm thấy vị trí kho tương ứng.")
+        entry.location_id = payload["location_id"]
+    if payload.get("factory_id"):
+        if not db.get(FactoryLocation, payload["factory_id"]):
+            raise NotFoundError("Không tìm thấy nhà máy tương ứng.")
+        entry.factory_id = payload["factory_id"]
+    if "note" in payload:
+        entry.note = payload["note"]
+    record_audit(db, entity_type="factory_import_entry", entity_id=entry.entry_id, action="update", actor=user,
+                after={"product_name": entry.product_name, "count": entry.quantity})
+    db.commit()
+    return {"entry_id": entry.entry_id}
+
+
+def approve_factory_import_entry(db: Session, entry_id: str, user: User) -> dict:
+    """Trưởng bộ phận kho duyệt 1 bản khai "Nhập từ nhà máy khác" đang chờ — mirror
+    approve_near_expiry_entry (LÚC NÀY mới tạo FinishedGoodsUnit is_factory_import=True + tăng
+    tồn kho; sau khi duyệt khoá hẳn). Lô tự sinh theo năm như "Nhập kho thủ công" thường (xem
+    _next_wms_lot_code) — sau khi vào kho, đơn vị này KHÔNG khác gì hàng thường (không lô riêng
+    như bia gửi/cận date) vì không cần tách dòng ở Xuất kho."""
+    require_perm(user, "wms.confirm_receipt")
+    entry = db.get(FactoryImportEntry, entry_id)
+    if not entry:
+        raise NotFoundError("Không tìm thấy bản khai.")
+    if entry.reversed:
+        raise DomainError("Bản khai này đã bị hủy — không thể duyệt.")
+    if entry.approved_by:
+        raise DomainError("Bản khai này đã được duyệt trước đó.")
+    fp = db.get(FinishedProduct, entry.finished_product_id) if entry.finished_product_id else None
+    pack_size = (fp.pack_size or 1) if fp else 1
+    lot_code = _next_wms_lot_code(db, utcnow().year)
+    units = _create_units(db, {
+        "finished_product_id": entry.finished_product_id, "product_name": entry.product_name,
+        "lot_code": lot_code, "total": entry.quantity * pack_size, "pack_size": pack_size,
+        "unit_type": entry.unit_type, "loc_id": entry.location_id,
+    }, created_by=entry.created_by or user.username, actor=user)
+    now = utcnow()
+    for u in units:
+        u.is_factory_import = True
+        u.received_confirmed_by = user.username
+        u.received_confirmed_at = now
+    entry.lot_code = lot_code
+    entry.unit_codes = ",".join(u.unit_code for u in units)
+    entry.approved_by = user.username
+    entry.approved_at = now
+    record_audit(db, entity_type="factory_import_entry", entity_id=entry.entry_id, action="approve", actor=user,
+                after={"product_name": entry.product_name, "lot_code": lot_code, "count": entry.quantity})
+    db.commit()
+    return {"entry_id": entry.entry_id, "count": entry.quantity, "unit_codes": [u.unit_code for u in units]}
+
+
+def list_factory_import_entries(db: Session) -> list[dict]:
+    entries = db.execute(select(FactoryImportEntry).order_by(FactoryImportEntry.created_at.desc())).scalars().all()
+    out = []
+    for e in entries:
+        loc = db.get(WmsLocation, e.location_id) if e.location_id else None
+        wh = db.get(WmsWarehouse, loc.warehouse_id) if loc and loc.warehouse_id else None
+        factory = db.get(FactoryLocation, e.factory_id) if e.factory_id else None
+        pending = not e.reversed and not e.approved_by
+        out.append({"entry_id": e.entry_id, "finished_product_id": e.finished_product_id,
+                    "product_name": e.product_name, "lot_code": e.lot_code, "unit_type": e.unit_type,
+                    "quantity": e.quantity, "location_code": loc.code if loc else None,
+                    "location_name": loc.name if loc else None, "location_zone": loc.zone if loc else None,
+                    "warehouse_name": wh.name if wh else None,
+                    "factory_id": e.factory_id, "factory_name": factory.name if factory else None,
+                    "declared_at": e.declared_at, "note": e.note, "created_by": e.created_by,
+                    "created_at": e.created_at, "reversed": e.reversed, "approved_by": e.approved_by,
+                    "approved_at": e.approved_at, "can_edit": pending, "can_approve": pending, "can_undo": pending})
+    return out
+
+
+def undo_factory_import_entry(db: Session, entry_id: str, user: User) -> dict:
+    """Hủy 1 bản khai "Nhập từ nhà máy khác" ĐANG CHỜ DUYỆT — mirror undo_near_expiry_entry."""
+    require_perm(user, "warehouse.receive")
+    entry = db.get(FactoryImportEntry, entry_id)
+    if not entry:
+        raise NotFoundError("Không tìm thấy bản khai.")
+    if entry.reversed:
+        raise DomainError("Bản khai này đã được hủy trước đó.")
+    if entry.approved_by:
+        raise DomainError("Bản khai này đã được duyệt — không thể hủy.")
+    entry.reversed = True
+    record_audit(db, entity_type="factory_import_entry", entity_id=entry.entry_id, action="undo", actor=user,
                 before={"count": entry.quantity}, after={"reversed": True})
     db.commit()
     return {"entry_id": entry.entry_id}

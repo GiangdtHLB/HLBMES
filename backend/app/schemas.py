@@ -663,6 +663,22 @@ class ConsignedEntryUpdate(BaseModel):
     note: Optional[str] = None
 
 
+class FactoryImportEntryIn(BaseModel):
+    finished_product_id: str
+    quantity: int
+    location_id: str  # vị trí kho nhận — bắt buộc, không cho "chưa cất"
+    factory_id: str    # nhà máy nguồn (Danh mục Nhà máy) — bắt buộc, dấu hiệu nhận biết nguồn gốc
+    note: Optional[str] = None
+
+
+class FactoryImportEntryUpdate(BaseModel):
+    finished_product_id: Optional[str] = None
+    quantity: Optional[int] = None
+    location_id: Optional[str] = None
+    factory_id: Optional[str] = None
+    note: Optional[str] = None
+
+
 class ShipmentTripIn(BaseModel):
     """Km và số lít xăng của 1 chuyến xuất — chỉ điền được sau khi phiếu đã Duyệt (xem
     services/wms.py::update_shipment_trip)."""

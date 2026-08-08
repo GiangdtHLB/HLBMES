@@ -4,7 +4,8 @@ from fastapi import APIRouter, Depends, File, UploadFile
 from sqlalchemy.orm import Session
 
 from ..database import get_db
-from ..schemas import (ConsignedEntryIn, ConsignedEntryUpdate, DecomposeBatchIn, DeleteByLotIn, FreeIssueBatchIn,
+from ..schemas import (ConsignedEntryIn, ConsignedEntryUpdate, DecomposeBatchIn, DeleteByLotIn,
+                       FactoryImportEntryIn, FactoryImportEntryUpdate, FreeIssueBatchIn,
                        LoadSlipHeaderUpdate, NearExpiryEntryIn, NearExpiryEntryUpdate, PutawayIn, RelocateBatchIn,
                        ShipmentIn, ShipmentTripIn, ShipmentUpdate, UnitBuildIn, UnitDeleteIn, UnitTransferIn,
                        VehicleIn, VehicleUpdate, WmsLocationIn, WmsLocationUpdate, WmsTransferIn, WmsTransferTripIn,
@@ -347,6 +348,35 @@ def approve_consigned(entry_id: str, db: Session = Depends(get_db), user: User =
 @router.post("/consigned/{entry_id}/undo")
 def undo_consigned(entry_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     return svc.undo_consigned_entry(db, entry_id, user)
+
+
+# ---- Nhập từ nhà máy khác ----
+@router.post("/factory-import", status_code=201)
+def create_factory_import(payload: FactoryImportEntryIn, db: Session = Depends(get_db),
+                          user: User = Depends(get_current_user)):
+    return svc.create_factory_import_entry(db, payload.finished_product_id, payload.quantity,
+                                           payload.location_id, payload.factory_id, user, payload.note)
+
+
+@router.get("/factory-import")
+def list_factory_import(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    return svc.list_factory_import_entries(db)
+
+
+@router.put("/factory-import/{entry_id}")
+def update_factory_import(entry_id: str, payload: FactoryImportEntryUpdate, db: Session = Depends(get_db),
+                          user: User = Depends(get_current_user)):
+    return svc.update_factory_import_entry(db, entry_id, payload.model_dump(exclude_unset=True), user)
+
+
+@router.post("/factory-import/{entry_id}/approve")
+def approve_factory_import(entry_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    return svc.approve_factory_import_entry(db, entry_id, user)
+
+
+@router.post("/factory-import/{entry_id}/undo")
+def undo_factory_import(entry_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    return svc.undo_factory_import_entry(db, entry_id, user)
 
 
 @router.post("/load-slips/import", status_code=201)
