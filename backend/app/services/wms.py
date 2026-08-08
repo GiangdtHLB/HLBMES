@@ -1775,7 +1775,7 @@ def consigned_eligible_vehicles(db: Session) -> list[dict]:
     already: dict[tuple, float] = {}
     for vehicle_id, fpid, total in db.execute(select(
             ConsignedEntry.vehicle_id, ConsignedEntry.finished_product_id, func.sum(ConsignedEntry.quantity))
-            .where(ConsignedEntry.direction == "in", ConsignedEntry.reversed.is_(False),
+            .where(ConsignedEntry.direction == "in", ConsignedEntry.reversed == false(),
                    ConsignedEntry.vehicle_id.in_(by_vehicle.keys()),
                    ConsignedEntry.declared_at >= window_start)
             .group_by(ConsignedEntry.vehicle_id, ConsignedEntry.finished_product_id)).all():
@@ -1816,7 +1816,7 @@ def _consigned_available_qty(db: Session, vehicle_id: str, finished_product_id: 
     fp = db.get(FinishedProduct, finished_product_id)
     shipped_count = sum(u.quantity / _pack_divisor(fp, u.unit_type, divide_codes) for u in units)
     already_q = select(func.sum(ConsignedEntry.quantity)).where(
-        ConsignedEntry.direction == "in", ConsignedEntry.reversed.is_(False),
+        ConsignedEntry.direction == "in", ConsignedEntry.reversed == false(),
         ConsignedEntry.vehicle_id == vehicle_id, ConsignedEntry.finished_product_id == finished_product_id,
         ConsignedEntry.declared_at >= window_start)
     if exclude_entry_id:
@@ -2991,7 +2991,7 @@ def consigned_summary_report(db: Session, date_from: datetime, date_to: datetime
     [date_from, date_to) theo declared_at, gộp theo (sản phẩm, loại đơn vị)."""
     rows = db.execute(select(ConsignedEntry.product_name, ConsignedEntry.unit_type,
                              func.sum(ConsignedEntry.quantity), func.count())
-                      .where(ConsignedEntry.direction == "in", ConsignedEntry.reversed.is_(False),
+                      .where(ConsignedEntry.direction == "in", ConsignedEntry.reversed == false(),
                              ConsignedEntry.declared_at.isnot(None),
                              ConsignedEntry.declared_at >= date_from, ConsignedEntry.declared_at < date_to)
                       .group_by(ConsignedEntry.product_name, ConsignedEntry.unit_type)).all()
