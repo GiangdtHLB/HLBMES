@@ -4688,6 +4688,37 @@ function _hasPerm(perm) {
     (Array.isArray(CURRENT_USER.permissions) && CURRENT_USER.permissions.includes(perm)));
 }
 
+// Lọc danh sách Kho thành phẩm (WMS) theo phạm vi được phân của user hiện tại
+// (CURRENT_USER.wms_warehouse_scope — admin/"*" = không lọc) — dùng cho mọi picker chọn kho
+// (Xuất kho/Điều chuyển/Cất vào vị trí/Nhập kho) để tránh chọn nhầm kho ngoài phạm vi (BE vẫn tự
+// chặn nếu ai đó cố gọi thẳng API, xem services/wms.py::_assert_wh_scope).
+function myAllowedWarehouses(allWarehouses) {
+  const scope = CURRENT_USER && CURRENT_USER.wms_warehouse_scope;
+  if (!CURRENT_USER || CURRENT_USER.role === "admin" || !scope || scope === "*") return allWarehouses;
+  const allowed = new Set(String(scope).split(",").map(s => s.trim()).filter(Boolean));
+  return allWarehouses.filter(w => allowed.has(w.code));
+}
+function isWhScopeRestricted() {
+  const scope = CURRENT_USER && CURRENT_USER.wms_warehouse_scope;
+  return !!(CURRENT_USER && CURRENT_USER.role !== "admin" && scope && scope !== "*");
+}
+// Mirror myAllowedWarehouses nhưng lọc trực tiếp danh sách WmsLocation (GET /wms/locations) theo
+// warehouse_code — dùng cho các picker chọn THẲNG vị trí (Nhập kho/Cất vào vị trí/Điều chuyển).
+function myAllowedLocations(allLocations) {
+  const scope = CURRENT_USER && CURRENT_USER.wms_warehouse_scope;
+  if (!CURRENT_USER || CURRENT_USER.role === "admin" || !scope || scope === "*") return allLocations;
+  const allowed = new Set(String(scope).split(",").map(s => s.trim()).filter(Boolean));
+  return allLocations.filter(l => allowed.has(l.warehouse_code));
+}
+// Kiểm tra 1 mã kho (warehouse_code) đơn lẻ có nằm trong phạm vi được phân hay không — dùng khi
+// lọc theo từng dòng thay vì cả mảng (VD picker Điều chuyển lấy warehouse_code từ vị trí lô hàng).
+function isWarehouseAllowed(warehouseCode) {
+  const scope = CURRENT_USER && CURRENT_USER.wms_warehouse_scope;
+  if (!CURRENT_USER || CURRENT_USER.role === "admin" || !scope || scope === "*") return true;
+  const allowed = new Set(String(scope).split(",").map(s => s.trim()).filter(Boolean));
+  return allowed.has(warehouseCode);
+}
+
 // Tìm kiếm cho danh sách thẻ (card) như phiếu đề nghị nhận kho — khác wireSearch()/.searchbox
 // (chỉ chạy được trên <table><tbody><tr>), ở đây lọc trực tiếp theo thuộc tính data-search
 // gắn sẵn trên từng thẻ (xem requestBlockHtml).
@@ -10752,7 +10783,7 @@ VIEWS.users = async function () {
   }
   const [users, pcat, scat, rtpls] = await Promise.all([
     GET("/auth/users"), GET("/auth/permissions"),
-    GET("/auth/scope-catalog").catch(() => ({ areas: [], lines: [], qc_params: [], warehouse_locations: [] })),
+    GET("/auth/scope-catalog").catch(() => ({ areas: [], lines: [], qc_params: [], warehouse_locations: [], wms_warehouses: [] })),
     GET("/auth/role-templates").catch(() => [])]);
   const roleOpts = Object.keys(ROLE_DESC).map(r => `<option value="${r}">${r} — ${ROLE_DESC[r]}</option>`).join("");
   const permBoxesHtml = (cls, checkedSet) => `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:8px 18px">${pcat.catalog.map(p =>
@@ -10763,12 +10794,15 @@ VIEWS.users = async function () {
       <div class="field" style="color:var(--text)"><label>Line</label>${scopePickerHtml(`${prefix}_lines`, scat.lines, current ? current.scope_lines : "*")}</div>
       <div class="field" style="color:var(--text)"><label>Khu vực</label>${scopePickerHtml(`${prefix}_areas`, scat.areas, current ? current.scope_areas : "*")}</div>
       <div class="field" style="color:var(--text)"><label>Loại test QC</label>${scopePickerHtml(`${prefix}_qc`, scat.qc_params, current ? current.scope_qc : "*")}</div>
-      <div class="field" style="color:var(--text)"><label>Địa điểm kho</label>${scopePickerHtml(`${prefix}_wh`, scat.warehouse_locations, current ? current.scope_warehouse : "*")}</div>
+      <div class="field" style="color:var(--text)"><label>Địa điểm kho (NVL)</label>${scopePickerHtml(`${prefix}_wh`, scat.warehouse_locations, current ? current.scope_warehouse : "*")}</div>
+      <div class="field" style="color:var(--text)"><label>Kho thành phẩm (WMS)</label>${scopePickerHtml(`${prefix}_wmswh`, scat.wms_warehouses, current ? current.wms_warehouse_scope : "*")}
+        <div class="muted" style="font-size:11px">Chặn Xuất kho/Điều chuyển/Nhập kho/Cất vào vị trí ngoài kho được chọn — khác "Địa điểm kho" (chỉ áp dụng kho NVL công ty/phân xưởng)</div></div>
     </div>`;
-  const wireScopeFields = (prefix) => ["lines", "areas", "qc", "wh"].forEach(d => wireScopePicker(`${prefix}_${d}`));
+  const wireScopeFields = (prefix) => ["lines", "areas", "qc", "wh", "wmswh"].forEach(d => wireScopePicker(`${prefix}_${d}`));
   const readScopeFields = (prefix) => ({
     scope_lines: readScopePicker(`${prefix}_lines`), scope_areas: readScopePicker(`${prefix}_areas`),
-    scope_qc: readScopePicker(`${prefix}_qc`), scope_warehouse: readScopePicker(`${prefix}_wh`) });
+    scope_qc: readScopePicker(`${prefix}_qc`), scope_warehouse: readScopePicker(`${prefix}_wh`),
+    wms_warehouse_scope: readScopePicker(`${prefix}_wmswh`) });
   $("view-users").innerHTML = `
     <div class="panel"><h2>Tạo tài khoản</h2>
       <div class="field"><label>Áp dụng mẫu chức danh (tuỳ chọn)</label>
@@ -10837,6 +10871,7 @@ VIEWS.users = async function () {
     document.querySelectorAll(".nu_perm").forEach(c => c.checked = permSet.has(c.value));
     setScopePicker("nu_lines", t.scope_lines); setScopePicker("nu_areas", t.scope_areas);
     setScopePicker("nu_qc", t.scope_qc); setScopePicker("nu_wh", t.scope_warehouse);
+    setScopePicker("nu_wmswh", t.wms_warehouse_scope);
   };
   $("nu_add").onclick = () => guard(async () => {
     const weak = passwordPolicyMsg($("nu_pass").value, $("nu_user").value);

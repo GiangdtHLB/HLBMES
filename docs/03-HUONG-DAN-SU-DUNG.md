@@ -680,18 +680,18 @@ Theo trạm biến áp: Trạm 560 KVA — 3.841.446 kWh · Trạm 320 KVA — 2
 
 ## 16. OEE / Dừng máy
 
-**Mục đích:** đo hiệu suất thiết bị tổng thể (Overall Equipment Effectiveness) và phân tích lý do dừng máy theo dây chuyền — 1 màn hình duy nhất, không chia sub-tab, gồm 6 khối:
+> **⚠️ Màn hình chưa hoạt động.** Tab **OEE/Dừng máy** đã có nút trên thanh điều hướng (`data-view="oee"`, class `nav-unused`) nhưng **chưa được lập trình** — bấm vào không hiển thị gì (không có `VIEWS.oee` trong `frontend/app.js`, section tương ứng trong `frontend/index.html` đang để trống; lỗi bị nuốt âm thầm, không có thông báo rõ ràng cho người dùng). Phần dưới đây mô tả **dữ liệu và tính năng đã có ở backend**, không phải các bước thao tác trên UI — vì UI này chưa tồn tại.
 
-1. **⚙️ OEE đóng gói** — 1 biểu đồ donut/dây chuyền·ca đã ghi, kèm % Availability/Performance/Quality (A/P/Q).
-2. **📝 Nhập OEE theo ca** — chọn **Dây chuyền** (tốc độ lý tưởng tự điền theo dây chuyền đã khai báo ở Danh mục) + **Ca**, nhập **TG kế hoạch (phút)**, **Dừng (phút)**, **Tốc độ lý tưởng**, **Tổng SP**, **SP đạt**, bấm **Ghi OEE**.
-3. **⏱️ Ghi sự kiện dừng máy (reason-tree)** — tách riêng khỏi khối OEE trên: chọn Line + **Nhóm lý do** (đổi Nhóm sẽ đổi luôn danh sách **Lý do** con tương ứng) + số **Phút** + Ca, bấm **Ghi**.
-4. **📊 Pareto thời gian dừng theo lý do** — biểu đồ cột + bảng %/% tích lũy/số lần theo từng lý do dừng đã ghi.
-5. **🥧 Phân rã 6 big losses** — 2 biểu đồ tròn cạnh nhau: theo nhóm lý do lớn và theo nhóm chi tiết.
-6. **🔧 MTBF/MTTR theo thiết bị** — bảng số lần hỏng, MTBF (giờ), MTTR (phút), % khả dụng, phút dừng, tính trong cửa sổ N ngày gần nhất.
+**Backend đã xây (chưa có màn hình sử dụng):**
 
-Thêm/ngừng dây chuyền đóng gói ở Danh mục (mục 21) — chưa có dây chuyền thì không ghi được OEE/dừng máy.
+- **Model:** `OEERecord` (bản ghi OEE theo dây chuyền/ca — availability/performance/quality) và `DowntimeEvent` (sự kiện dừng máy theo lý do).
+- **Tính OEE:** service `compute_oee` — tính % Availability/Performance/Quality từ 1 bản ghi OEE.
+- **Cây lý do dừng máy (reason-tree):** hằng số `REASON_TREE` hardcode trong `backend/app/services/downtime.py`, dùng **chung 1 cây cho mọi dây chuyền** (chưa phân theo loại dây chuyền/thiết bị).
+- **Pareto thời gian dừng** — service `pareto()`: xếp hạng giảm dần theo phút dừng cho từng lý do, kèm %/% tích lũy/số lần.
+- **Phân rã big losses** — service `big_losses()`: gộp theo `loss_category`, thực tế chỉ có **3 nhóm** (availability/performance/quality), không phải "6 big losses" theo đúng nghĩa TPM.
+- **MTBF/MTTR** — service `mtbf_mttr()`: số lần hỏng, MTBF (giờ), MTTR (phút), % khả dụng theo thiết bị, tính trong cửa sổ N ngày gần nhất (dựa trên `Incident` + `DowntimeEvent`).
 
-**Dữ liệu thật hiện tại:** 3 bản ghi OEE đang có trong hệ thống.
+Các dữ liệu/logic trên hiện chỉ truy cập được qua API backend hoặc DB trực tiếp — chưa có cách nào nhập OEE theo ca hoặc ghi sự kiện dừng máy từ giao diện người dùng.
 
 ---
 

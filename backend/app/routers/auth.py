@@ -45,6 +45,7 @@ class CreateUserIn(BaseModel):
     scope_areas: str = "*"
     scope_qc: str = "*"
     scope_warehouse: str = "*"
+    wms_warehouse_scope: str = "*"
 
 
 class CopyPermissionsIn(BaseModel):
@@ -64,6 +65,7 @@ class ScopeIn(BaseModel):
     scope_areas: str = "*"
     scope_qc: str = "*"
     scope_warehouse: str = "*"   # cong_ty|phan_xuong|"*"
+    wms_warehouse_scope: str = "*"   # csv mã Kho thành phẩm (WMS) hoặc "*"
 
 
 class RoleTemplateIn(BaseModel):
@@ -75,6 +77,7 @@ class RoleTemplateIn(BaseModel):
     scope_areas: str = "*"
     scope_qc: str = "*"
     scope_warehouse: str = "*"
+    wms_warehouse_scope: str = "*"
 
 
 class ChangePasswordIn(BaseModel):
@@ -96,6 +99,7 @@ def _profile(u: UserModel) -> dict:
             "scope_areas": getattr(u, "scope_areas", "*") or "*",
             "scope_qc": getattr(u, "scope_qc", "*") or "*",
             "scope_warehouse": getattr(u, "scope_warehouse", "*") or "*",
+            "wms_warehouse_scope": getattr(u, "wms_warehouse_scope", "*") or "*",
             "must_change_password": bool(getattr(u, "must_change_password", False))}
 
 
@@ -183,6 +187,7 @@ def list_users(db: Session = Depends(get_db), user: User = Depends(get_current_u
              "scope_areas": getattr(u, "scope_areas", "*") or "*",
              "scope_qc": getattr(u, "scope_qc", "*") or "*",
              "scope_warehouse": getattr(u, "scope_warehouse", "*") or "*",
+             "wms_warehouse_scope": getattr(u, "wms_warehouse_scope", "*") or "*",
              "active": u.active, "last_login_at": u.last_login_at} for u in rows]
 
 
@@ -199,7 +204,7 @@ def create_user(payload: CreateUserIn, db: Session = Depends(get_db), user: User
                   allowed_views=payload.allowed_views, permissions=payload.permissions,
                   scope_lines=payload.scope_lines or "*", scope_areas=payload.scope_areas or "*",
                   scope_qc=payload.scope_qc or "*", scope_warehouse=payload.scope_warehouse or "*",
-                  active=True)
+                  wms_warehouse_scope=payload.wms_warehouse_scope or "*", active=True)
     db.add(u)
     record_audit(db, entity_type="auth", entity_id=u.username, action="create_user", actor=user,
                  after={"role": u.role, "scope_lines": u.scope_lines})
@@ -216,13 +221,15 @@ def set_scope(username: str, payload: ScopeIn, db: Session = Depends(get_db),
     if not u:
         raise NotFoundError("Không tìm thấy tài khoản.")
     before = {"scope_lines": u.scope_lines, "scope_areas": u.scope_areas, "scope_qc": u.scope_qc,
-              "scope_warehouse": getattr(u, "scope_warehouse", "*")}
+              "scope_warehouse": getattr(u, "scope_warehouse", "*"),
+              "wms_warehouse_scope": getattr(u, "wms_warehouse_scope", "*")}
     u.scope_lines = (payload.scope_lines or "*").strip() or "*"
     u.scope_areas = (payload.scope_areas or "*").strip() or "*"
     u.scope_qc = (payload.scope_qc or "*").strip() or "*"
     u.scope_warehouse = (payload.scope_warehouse or "*").strip() or "*"
+    u.wms_warehouse_scope = (payload.wms_warehouse_scope or "*").strip() or "*"
     after = {"scope_lines": u.scope_lines, "scope_areas": u.scope_areas, "scope_qc": u.scope_qc,
-             "scope_warehouse": u.scope_warehouse}
+             "scope_warehouse": u.scope_warehouse, "wms_warehouse_scope": u.wms_warehouse_scope}
     record_audit(db, entity_type="auth", entity_id=username, action="set_scope", actor=user,
                  before=before, after=after)
     db.commit()
@@ -247,7 +254,8 @@ def copy_permissions(username: str, payload: CopyPermissionsIn, db: Session = De
         raise NotFoundError(f"Không tìm thấy tài khoản đích '{username}'.")
     before = {"role": dst.role, "allowed_views": dst.allowed_views, "permissions": dst.permissions,
               "scope_lines": dst.scope_lines, "scope_areas": dst.scope_areas, "scope_qc": dst.scope_qc,
-              "scope_warehouse": getattr(dst, "scope_warehouse", "*")}
+              "scope_warehouse": getattr(dst, "scope_warehouse", "*"),
+              "wms_warehouse_scope": getattr(dst, "wms_warehouse_scope", "*")}
     dst.role = src.role
     dst.allowed_views = src.allowed_views
     dst.permissions = src.permissions
@@ -255,9 +263,11 @@ def copy_permissions(username: str, payload: CopyPermissionsIn, db: Session = De
     dst.scope_areas = src.scope_areas
     dst.scope_qc = src.scope_qc
     dst.scope_warehouse = getattr(src, "scope_warehouse", "*")
+    dst.wms_warehouse_scope = getattr(src, "wms_warehouse_scope", "*")
     after = {"role": dst.role, "allowed_views": dst.allowed_views, "permissions": dst.permissions,
              "scope_lines": dst.scope_lines, "scope_areas": dst.scope_areas, "scope_qc": dst.scope_qc,
-             "scope_warehouse": dst.scope_warehouse, "copied_from": src.username}
+             "scope_warehouse": dst.scope_warehouse, "wms_warehouse_scope": dst.wms_warehouse_scope,
+             "copied_from": src.username}
     record_audit(db, entity_type="auth", entity_id=username, action="copy_permissions", actor=user,
                 before=before, after=after)
     db.commit()
@@ -299,6 +309,7 @@ def scope_catalog(db: Session = Depends(get_db), user: User = Depends(get_curren
     from ..models.quality import QualityResult
     from ..models.quality_ext import QCParameter
     from ..models.lines import ProductionLine
+    from ..models.wms import WmsWarehouse
     wo_lines = {l for (l,) in db.execute(select(WorkOrder.line).distinct()).all() if l}
     master_lines = {l for (l,) in db.execute(select(ProductionLine.code)).all() if l}
     line_codes = sorted(wo_lines | master_lines)   # gộp line từ WO + danh mục dây chuyền
@@ -316,9 +327,12 @@ def scope_catalog(db: Session = Depends(get_db), user: User = Depends(get_curren
     qc_codes = sorted(set(qc_names) | legacy_qc_codes)
     qc_params = [{"key": c, "label": f"{c} — {qc_names[c]}" if qc_names.get(c) and qc_names[c] != c else c}
                   for c in qc_codes]
+    wms_warehouses = [{"key": w.code, "label": w.name} for w in
+                       db.execute(select(WmsWarehouse).order_by(WmsWarehouse.code)).scalars().all()]
     return {"areas": [{"key": k, "label": v} for k, v in SCOPE_AREAS.items()],
             "lines": lines, "qc_params": qc_params,
-            "warehouse_locations": [{"key": k, "label": v} for k, v in SCOPE_WAREHOUSE_LOCATIONS.items()]}
+            "warehouse_locations": [{"key": k, "label": v} for k, v in SCOPE_WAREHOUSE_LOCATIONS.items()],
+            "wms_warehouses": wms_warehouses}
 
 
 @router.post("/users/{username}/toggle")
@@ -341,7 +355,8 @@ def _role_template_out(t: RoleTemplate) -> dict:
     return {"role_template_id": t.role_template_id, "name": t.name, "role": t.role,
             "allowed_views": t.allowed_views, "permissions": t.permissions,
             "scope_lines": t.scope_lines, "scope_areas": t.scope_areas,
-            "scope_qc": t.scope_qc, "scope_warehouse": t.scope_warehouse, "active": t.active}
+            "scope_qc": t.scope_qc, "scope_warehouse": t.scope_warehouse,
+            "wms_warehouse_scope": getattr(t, "wms_warehouse_scope", "*") or "*", "active": t.active}
 
 
 @router.get("/role-templates")
@@ -363,7 +378,7 @@ def create_role_template(payload: RoleTemplateIn, db: Session = Depends(get_db),
                       allowed_views=payload.allowed_views or "dashboard", permissions=payload.permissions or "",
                       scope_lines=payload.scope_lines or "*", scope_areas=payload.scope_areas or "*",
                       scope_qc=payload.scope_qc or "*", scope_warehouse=payload.scope_warehouse or "*",
-                      active=True)
+                      wms_warehouse_scope=payload.wms_warehouse_scope or "*", active=True)
     db.add(t)
     record_audit(db, entity_type="role_template", entity_id=t.role_template_id, action="create",
                  actor=user, after={"name": t.name, "role": t.role})
@@ -389,6 +404,7 @@ def update_role_template(role_template_id: str, payload: RoleTemplateIn, db: Ses
     t.scope_areas = payload.scope_areas or "*"
     t.scope_qc = payload.scope_qc or "*"
     t.scope_warehouse = payload.scope_warehouse or "*"
+    t.wms_warehouse_scope = payload.wms_warehouse_scope or "*"
     record_audit(db, entity_type="role_template", entity_id=t.role_template_id, action="update",
                  actor=user, before=before, after=_role_template_out(t))
     db.commit()

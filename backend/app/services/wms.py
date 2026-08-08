@@ -18,7 +18,7 @@ from ..models.materials import GenealogyEdge, Supplier
 from ..models.warehouse import FactoryLocation
 from ..models.wms import (ConsignedEntry, FactoryImportEntry, FinishedGoodsUnit, NearExpiryEntry, Shipment,
                           Vehicle, WmsLocation, WmsTransfer, WmsTransferLine, WmsWarehouse)
-from ..security import User, require_perm, require_role
+from ..security import User, require_perm, require_role, require_scope
 from . import genealogy
 from .opening_balance_import import parse_opening_balance_sheet
 
@@ -89,6 +89,37 @@ def _liters_per_unit(fp: FinishedProduct | None) -> float | None:
     return _resolve_liters_per_unit(fp.name if fp else None)
 
 
+def _assert_wh_scope(db: Session, user: User, warehouse_id: str | None) -> None:
+    """Chặn thao tác tại 1 Kho thành phẩm (WmsWarehouse) ngoài phạm vi được phân
+    (`User.wms_warehouse_scope`: csv mã kho hoặc "*") — dùng cho mọi hành động chỉ định RÕ 1
+    kho (nhập/cất/điều chuyển đến/đi, xuất kho). warehouse_id rỗng/None (chưa xác định được kho,
+    vd đơn vị chưa cất vị trí) không bị chặn, theo đúng quy ước các chiều scope khác."""
+    if not warehouse_id:
+        return
+    wh = db.get(WmsWarehouse, warehouse_id)
+    require_scope(user, "wms_warehouse", wh.code if wh else warehouse_id)
+
+
+def _assert_loc_scope(db: Session, user: User, loc_id: str | None) -> None:
+    """Mirror _assert_wh_scope nhưng nhận thẳng loc_id (WmsLocation) — tự tra ra kho chứa vị
+    trí đó rồi chặn theo scope, dùng ở mọi nơi người dùng chọn 1 vị trí kho cụ thể."""
+    if not loc_id:
+        return
+    loc = db.get(WmsLocation, loc_id)
+    if loc:
+        _assert_wh_scope(db, user, loc.warehouse_id)
+
+
+def _wh_scope_restricted(user: User) -> bool:
+    """True nếu user bị giới hạn kho thành phẩm (khác "*", và không phải admin — admin luôn bỏ
+    qua data-scoping, xem security.has_scope) — dùng để BẮT BUỘC chọn kho/vị trí tường minh ở
+    các luồng trước đây cho phép bỏ trống (FIFO tự do toàn công ty), vì bỏ trống sẽ khiến hệ
+    thống tự chọn xuyên qua kho ngoài phạm vi mà không có gì để chặn."""
+    if user.role == Role.ADMIN.value:
+        return False
+    return getattr(user, "scope_wms_warehouse", "*") != "*"
+
+
 def _location_used_count(db: Session, loc_id: str, exclude_unit_id: str | None = None) -> float:
     """Tổng số vỉ/keg/lon quy đổi (SUM(quantity)/pack_size từng dòng qua _pack_divisor_expr,
     KHÔNG đếm dòng — 1 vị trí có thể chứa lẫn nhiều SKU khác pack_size nhau) đang "stored"
@@ -106,7 +137,8 @@ def _consume_lot_rows(db: Session, *, product_name: str, unit_type: str, status:
                       quantity_needed: float, lot_code: str | None = None,
                       location_id=_LOC_UNSET, exclude_ids: set | None = None,
                       near_expiry_only: bool = False, consigned_only: bool = False,
-                      block_pending_manual: bool = False) -> tuple[list[FinishedGoodsUnit], float]:
+                      block_pending_manual: bool = False, warehouse_id: str | None = None
+                      ) -> tuple[list[FinishedGoodsUnit], float]:
     """Tiêu thụ FIFO (cũ nhất trước, theo created_at) từ các dòng LÔ khớp tiêu chí tới khi đủ
     `quantity_needed` (đơn vị = cột quantity, KHÔNG phải số vỉ/keg — caller tự nhân với
     _pack_divisor() trước khi gọi). Dòng bị lấy TRỌN thì trả nguyên dòng đó; dòng bị lấy MỘT
@@ -126,6 +158,12 @@ def _consume_lot_rows(db: Session, *, product_name: str, unit_type: str, status:
     if location_id is not _LOC_UNSET:
         stmt = stmt.where(FinishedGoodsUnit.location_id.is_(None) if location_id is None
                          else FinishedGoodsUnit.location_id == location_id)
+    if warehouse_id:
+        # Giới hạn FIFO trong 1 Kho thành phẩm — dùng khi Xuất kho/Xuất tự do chỉ định "Kho
+        # xuất" (vd tài khoản bị giới hạn kho, xem _assert_wh_scope) — KHÔNG lọc bằng
+        # location_id đơn lẻ vì 1 kho có nhiều vị trí.
+        stmt = stmt.where(FinishedGoodsUnit.location_id.in_(
+            select(WmsLocation.loc_id).where(WmsLocation.warehouse_id == warehouse_id)))
     if near_expiry_only:
         stmt = stmt.where(FinishedGoodsUnit.is_near_expiry == true())
     if consigned_only:
@@ -387,6 +425,24 @@ def list_units(db: Session, status: str = None, unit_type: str = None,
     return out
 
 
+def _parse_received_at(received_at, now: datetime, skip_cap: bool = False) -> datetime:
+    """Chuẩn hoá + validate "Ngày nhập" do người dùng nhập tay — dùng chung cho nhập kho thủ
+    công/tồn đầu (_create_units) và khai báo nhập từ nhà máy khác
+    (create_factory_import_entry/update_factory_import_entry)."""
+    if not received_at:
+        return now
+    received_dt = datetime.fromisoformat(received_at) if isinstance(received_at, str) else received_at
+    if received_dt.tzinfo is None:
+        received_dt = received_dt.replace(tzinfo=now.tzinfo)
+    if received_dt > now:
+        raise DomainError("Ngày nhập không được sau thời điểm hiện tại.")
+    # Tồn đầu hợp lệ với ngày rất xa trong quá khứ — giới hạn 15 ngày chỉ áp dụng cho nhập
+    # kho thủ công thường (tránh gõ nhầm ngày), xem receive() cho cùng quy tắc bên kho NVL.
+    if not skip_cap and received_dt < now - timedelta(days=15):
+        raise DomainError("Ngày nhập không được quá 15 ngày trước thời điểm hiện tại.")
+    return received_dt
+
+
 def _create_units(db: Session, payload: dict, created_by: str, actor: User) -> list[FinishedGoodsUnit]:
     """Sinh 1 dòng LÔ duy nhất (quantity=total) — KHÔNG kiểm tra quyền, dùng nội bộ (vd
     approve_bottle tự động nhập kho thành phẩm sau khi KCS duyệt chiết, không đi qua quyền
@@ -410,19 +466,8 @@ def _create_units(db: Session, payload: dict, created_by: str, actor: User) -> l
     if total <= 0:
         raise DomainError("Tổng số lượng phải > 0.")
     now = utcnow()
-    received_at = payload.get("received_at")
-    if received_at:
-        received_dt = datetime.fromisoformat(received_at) if isinstance(received_at, str) else received_at
-        if received_dt.tzinfo is None:
-            received_dt = received_dt.replace(tzinfo=now.tzinfo)
-        if received_dt > now:
-            raise DomainError("Ngày nhập không được sau thời điểm hiện tại.")
-        # Tồn đầu hợp lệ với ngày rất xa trong quá khứ — giới hạn 15 ngày chỉ áp dụng cho nhập
-        # kho thủ công thường (tránh gõ nhầm ngày), xem receive() cho cùng quy tắc bên kho NVL.
-        if not payload.get("is_opening_balance") and received_dt < now - timedelta(days=15):
-            raise DomainError("Ngày nhập không được quá 15 ngày trước thời điểm hiện tại.")
-    else:
-        received_dt = now
+    received_dt = _parse_received_at(payload.get("received_at"), now,
+                                     skip_cap=bool(payload.get("is_opening_balance") or payload.get("skip_date_cap")))
     loc_id = payload.get("loc_id") or None
     loc = None
     if loc_id:
@@ -477,6 +522,7 @@ def build_units(db: Session, payload: dict, user: User) -> list[FinishedGoodsUni
     # nơi để trống vẫn hợp lệ vì có tab "Cất vào vị trí" xử lý riêng sau).
     if not payload.get("loc_id"):
         raise DomainError("Vui lòng chọn vị trí kho trước khi nhập.")
+    _assert_loc_scope(db, user, payload["loc_id"])
     if payload.get("is_opening_balance"):
         # Nhập tồn đầu kho thành phẩm — CHỈ ADMIN, khác nhập kho thủ công thường (mở cho ai có
         # quyền warehouse.receive) vì đây là thao tác chỉnh số liệu gốc, không qua chiết thật.
@@ -866,11 +912,14 @@ def undo_consigned_entry(db: Session, entry_id: str, user: User) -> dict:
 # is_factory_import trên đơn vị chỉ để dành cho báo cáo riêng sau này. ----
 
 def create_factory_import_entry(db: Session, finished_product_id: str, quantity: int,
-                                location_id: str, factory_id: str, user: User, note: str = None) -> dict:
+                                location_id: str, factory_id: str, user: User, note: str = None,
+                                received_at: str = None) -> dict:
     """Khai báo "Nhập từ nhà máy khác": Sản phẩm + Số lượng + Vị trí kho nhận + Nhà máy nguồn
     (Danh mục Nhà máy) đều bắt buộc — factory_id là "dấu hiệu" để biết bia này không do nhà máy
     đang chạy hệ thống này sản xuất. CHƯA tăng tồn kho — chỉ ghi bản khai chờ duyệt, xem
-    approve_factory_import_entry."""
+    approve_factory_import_entry. received_at ("Ngày nhập") lưu vào declared_at — mặc định thời
+    điểm khai báo nếu để trống; đây cũng là ngày sẽ gán cho FinishedGoodsUnit.created_at lúc
+    duyệt (xem approve_factory_import_entry), không phải thời điểm bấm Duyệt."""
     require_perm(user, "warehouse.receive")
     fp = db.get(FinishedProduct, finished_product_id)
     if not fp:
@@ -879,14 +928,17 @@ def create_factory_import_entry(db: Session, finished_product_id: str, quantity:
         raise DomainError("Số lượng phải > 0.")
     if not location_id or not db.get(WmsLocation, location_id):
         raise DomainError("Vui lòng chọn vị trí kho nhận.")
+    _assert_loc_scope(db, user, location_id)
     if not factory_id or not db.get(FactoryLocation, factory_id):
         raise DomainError("Vui lòng chọn nhà máy nguồn.")
     unit_type = fp.unit_type or "vi"
     product_name = fp.code
+    now = utcnow()
+    declared_at = _parse_received_at(received_at, now)
     entry = FactoryImportEntry(entry_id=new_id(), finished_product_id=finished_product_id,
                                product_name=product_name, unit_type=unit_type, quantity=quantity,
-                               location_id=location_id, factory_id=factory_id, declared_at=utcnow(),
-                               note=note, created_by=user.username, created_at=utcnow())
+                               location_id=location_id, factory_id=factory_id, declared_at=declared_at,
+                               note=note, created_by=user.username, created_at=now)
     db.add(entry)
     record_audit(db, entity_type="factory_import_entry", entity_id=entry.entry_id, action="create", actor=user,
                 after={"product_name": product_name, "count": quantity, "factory_id": factory_id})
@@ -918,6 +970,7 @@ def update_factory_import_entry(db: Session, entry_id: str, payload: dict, user:
     if payload.get("location_id"):
         if not db.get(WmsLocation, payload["location_id"]):
             raise NotFoundError("Không tìm thấy vị trí kho tương ứng.")
+        _assert_loc_scope(db, user, payload["location_id"])
         entry.location_id = payload["location_id"]
     if payload.get("factory_id"):
         if not db.get(FactoryLocation, payload["factory_id"]):
@@ -925,6 +978,8 @@ def update_factory_import_entry(db: Session, entry_id: str, payload: dict, user:
         entry.factory_id = payload["factory_id"]
     if "note" in payload:
         entry.note = payload["note"]
+    if payload.get("received_at"):
+        entry.declared_at = _parse_received_at(payload["received_at"], utcnow())
     record_audit(db, entity_type="factory_import_entry", entity_id=entry.entry_id, action="update", actor=user,
                 after={"product_name": entry.product_name, "count": entry.quantity})
     db.commit()
@@ -952,6 +1007,10 @@ def approve_factory_import_entry(db: Session, entry_id: str, user: User) -> dict
         "finished_product_id": entry.finished_product_id, "product_name": entry.product_name,
         "lot_code": lot_code, "total": entry.quantity * pack_size, "pack_size": pack_size,
         "unit_type": entry.unit_type, "loc_id": entry.location_id,
+        # declared_at = "Ngày nhập" người dùng khai báo, có thể đã lùi quá 15 ngày so với lúc
+        # bấm Duyệt (Trưởng bộ phận kho có thể duyệt trễ) — đã validate ở lúc khai báo rồi nên
+        # bỏ qua cap 15 ngày ở đây (skip_date_cap), không phải is_opening_balance thật.
+        "received_at": entry.declared_at, "skip_date_cap": True,
     }, created_by=entry.created_by or user.username, actor=user)
     now = utcnow()
     for u in units:
@@ -1096,6 +1155,7 @@ def putaway(db: Session, unit_id: str, loc_id: str, user: User) -> dict:
     loc = db.get(WmsLocation, loc_id)
     if not loc:
         raise NotFoundError("Vị trí không tồn tại.")
+    _assert_wh_scope(db, user, loc.warehouse_id)
     if not _capacity_ok(db, loc, u):
         raise DomainError(f"Vị trí {loc.code} đã đầy (sức chứa {loc.capacity}).")
     before = {"location": u.location_id, "status": u.status}
@@ -1573,20 +1633,30 @@ def lot_aging_report(db: Session, caution_days: float = 30.0, warning_days: floa
     fp_name_by_code = {fp.code: fp.name for fp in db.execute(select(FinishedProduct)).scalars().all()}
     now = utcnow()
     grouped: dict[tuple, dict] = {}
+    # Gộp thêm theo warehouse_id (không chỉ product+lot+loại đơn vị) — cùng 1 lô nằm ở 2 KHO
+    # THÀNH PHẨM khác nhau phải ra 2 dòng riêng (tồn kho vật lý tách biệt thật sự), còn rải nhiều
+    # VỊ TRÍ trong CÙNG 1 kho vẫn gộp 1 dòng (mảng "locations" liệt kê chi tiết từng vị trí) —
+    # mirror cách list_lot_summaries/renderUnits (Kho TP) đã tách theo kho ở frontend.
     for product_name, lot_code, unit_type, location_id, count, qty, oldest_at in rows:
-        key = (product_name, lot_code, unit_type)
+        if location_id is None:
+            loc_code, warehouse_id = None, None
+        else:
+            loc_code, warehouse_id = loc_meta_by_id_ag.get(location_id, (None, None))
+        key = (product_name, lot_code, unit_type, warehouse_id)
+        wh_ag = wh_by_id_ag.get(warehouse_id)
         g = grouped.setdefault(key, {"product_name": product_name,
                                      "product_display_name": fp_name_by_code.get(product_name, product_name),
                                      "lot_code": lot_code,
                                      "unit_type": unit_type, "count": 0, "quantity": 0.0,
+                                     "warehouse_id": warehouse_id,
+                                     "warehouse_code": wh_ag.code if wh_ag else None,
+                                     "warehouse_name": wh_ag.name if wh_ag else None,
                                      "oldest_at": None, "locations": [], "unplaced": 0})
         g["count"] += count
         g["quantity"] += qty or 0
         if location_id is None:
             g["unplaced"] += count
         else:
-            loc_code, wh_id = loc_meta_by_id_ag.get(location_id, (None, None))
-            wh_ag = wh_by_id_ag.get(wh_id)
             g["locations"].append({"code": loc_code, "count": count,
                                    "warehouse_code": wh_ag.code if wh_ag else None})
         if g["oldest_at"] is None or (oldest_at and oldest_at < g["oldest_at"]):
@@ -2095,12 +2165,16 @@ def _next_shipment_code(db: Session, year: int) -> str:
     return f"{max_seq + 1:03d}{suffix}"
 
 
-def create_shipment(db: Session, ship_to_id: str, lines: list, user: User, header: dict | None = None) -> dict:
+def create_shipment(db: Session, ship_to_id: str, lines: list, user: User, header: dict | None = None,
+                    warehouse_id: str | None = None) -> dict:
     """Xuất kho — mỗi dòng chọn (sản phẩm, lô, loại đơn vị, số lượng); hệ thống tự chọn
     đúng số vỉ/keg/lon cũ nhất (FIFO) trong lô đó, không cần liệt kê/chọn từng đơn vị (kho
     có thể có hàng trăm ngàn vỉ). Không đủ tồn cho 1 dòng thì báo lỗi rõ ràng (không xuất
     thiếu âm thầm). FIFO check: nếu unit được chọn trong khi còn unit CÙNG SẢN PHẨM cũ hơn
-    (created_at sớm hơn) mà KHÔNG nằm trong danh sách đang xuất, coi là vi phạm FIFO."""
+    (created_at sớm hơn) mà KHÔNG nằm trong danh sách đang xuất, coi là vi phạm FIFO.
+    warehouse_id ("Kho xuất"): giới hạn FIFO trong 1 Kho thành phẩm — BẮT BUỘC nếu tài khoản
+    bị giới hạn kho (xem _wh_scope_restricted), tuỳ chọn nếu không (mặc định FIFO tự do toàn
+    công ty như trước)."""
     require_perm(user, "warehouse.issue")
     if not ship_to_id:
         raise DomainError("Phải chọn nơi xuất đến.")
@@ -2109,6 +2183,10 @@ def create_shipment(db: Session, ship_to_id: str, lines: list, user: User, heade
         raise NotFoundError("Nơi xuất đến không tồn tại.")
     if not lines:
         raise DomainError("Phải chọn ít nhất 1 dòng sản phẩm để xuất.")
+    if warehouse_id:
+        _assert_wh_scope(db, user, warehouse_id)
+    elif _wh_scope_restricted(user):
+        raise DomainError("Vui lòng chọn kho xuất (tài khoản bị giới hạn kho thành phẩm).")
 
     divide_codes = _divide_by_pack_codes(db)
     units = []
@@ -2142,7 +2220,8 @@ def create_shipment(db: Session, ship_to_id: str, lines: list, user: User, heade
         candidates, got = _consume_lot_rows(
             db, product_name=product_name, unit_type=unit_type, status="stored",
             quantity_needed=qty * divisor, lot_code=lot_code, exclude_ids=picked_so_far,
-            near_expiry_only=near_expiry_only, consigned_only=consigned_only, block_pending_manual=True)
+            near_expiry_only=near_expiry_only, consigned_only=consigned_only, block_pending_manual=True,
+            warehouse_id=warehouse_id)
         if got + 1e-9 < qty * divisor:
             special_note = " (bia cận date)" if near_expiry_only else " (bia gửi)" if consigned_only else ""
             # Gợi ý lý do thiếu hàng khi thực ra còn "Nhập kho thủ công" đang chờ Trưởng bộ phận
@@ -2538,6 +2617,7 @@ def relocate_batch(db: Session, product_name: str, lot_code: str, unit_type: str
     to_loc = db.get(WmsLocation, to_loc_id)
     if not to_loc:
         raise NotFoundError("Vị trí đích không tồn tại.")
+    _assert_wh_scope(db, user, to_loc.warehouse_id)
     if from_loc_id:
         # Chỉ chặn khi có vị trí nguồn thật (đang cất) — hàng "chưa cất" (from_loc_id=None) chưa
         # thuộc kho nào nên không có gì để so sánh, vẫn cho cất vào bất kỳ kho nào như trước.
@@ -2602,9 +2682,11 @@ def create_transfer(db: Session, to_location_id: str, lines: list, user: User, h
     to_loc = db.get(WmsLocation, to_location_id)
     if not to_loc:
         raise NotFoundError("Vị trí đích không tồn tại.")
+    _assert_wh_scope(db, user, to_loc.warehouse_id)
     if not lines:
         raise DomainError("Phải chọn ít nhất 1 dòng sản phẩm để điều chuyển.")
 
+    restricted = _wh_scope_restricted(user)
     divide_codes = _divide_by_pack_codes(db)
     units: list[FinishedGoodsUnit] = []
     picked_so_far: set = set()
@@ -2617,6 +2699,12 @@ def create_transfer(db: Session, to_location_id: str, lines: list, user: User, h
             raise DomainError("Mỗi dòng phải có sản phẩm và loại đơn vị.")
         if qty <= 0:
             raise DomainError(f"Số lượng cần chuyển cho {product_name} phải > 0.")
+        # Người dùng bị giới hạn kho thành phẩm bắt buộc phải chọn vị trí nguồn tường minh —
+        # bỏ trống sẽ khiến FIFO tự do trên toàn công ty, xuyên qua kho ngoài phạm vi.
+        if restricted and not line.get("location_id"):
+            raise DomainError(f"{product_name}: vui lòng chọn vị trí kho nguồn (tài khoản bị giới hạn kho thành phẩm).")
+        if line.get("location_id"):
+            _assert_loc_scope(db, user, line["location_id"])
         fp = db.execute(select(FinishedProduct).where(FinishedProduct.code == product_name)).scalar_one_or_none()
         divisor = _pack_divisor(fp, unit_type, divide_codes)
         # location_id: giữ FIFO trong đúng vị trí kho NGUỒN người dùng chọn ở picker — nếu

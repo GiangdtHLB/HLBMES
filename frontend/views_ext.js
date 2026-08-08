@@ -213,27 +213,29 @@
   // /finished-products để lấy tên tiếng Việt làm căn cứ khớp từ khóa vào 15 dòng cố định
   // (matchLoadSlipLines vốn khớp theo product_name, xem LOADSLIP_FIXED_GOODS ở trên).
   async function printShipmentHandoverSlip(shipment) {
-    let nameByCode = {};
+    let nameByCode = {}, utNameByCode = {};
     try {
       const fps = await GET("/finished-products");
       nameByCode = Object.fromEntries(fps.map(p => [p.code, p.name]));
     } catch (e) { /* vẫn in được — chỉ thiếu tên đầy đủ, dùng tạm mã SKU */ }
+    try {
+      const uts = await GET("/unit-types");
+      utNameByCode = Object.fromEntries(uts.map(u => [u.code, u.name]));
+    } catch (e) { /* vẫn in được — chỉ thiếu tên loại đơn vị cho dòng ngoài danh mục cố định */ }
     const dash = (v) => (v === null || v === undefined || v === "" ? "" : esc(String(v)));
     const linesForMatch = (shipment.lines || []).map((l, i) =>
       ({ line_id: i, product_name: nameByCode[l.product] || l.product, quantity: l.count,
-         consigned: l.consigned, near_expiry: l.near_expiry, type: l.type }));
-    // Ghi chú theo loại xuất: bia gửi/khuyến mại/đổi trả cần ghi rõ trên biên bản giấy để bên
-    // nhận đối chiếu đúng bản chất lô hàng; RIÊNG bia cận date thì KHÔNG ghi gì thêm (theo yêu
-    // cầu người dùng — hàng cận date bàn giao như hàng thường, không cần lộ thông tin này ra
-    // biên bản). "Loại xuất" (promo/return) giờ RIÊNG TỪNG DÒNG, giống near_expiry/consigned
-    // (xem services/wms.py::list_shipments, FinishedGoodsUnit.shipment_line_type).
+         consigned: l.consigned, near_expiry: l.near_expiry, type: l.type, unit_type: l.unit_type }));
+    // Ghi chú theo loại xuất: CHỈ ghi khi là khuyến mại/xuất tặng/đổi trả — đây là những lô cần
+    // bên nhận đối chiếu đúng bản chất để không tính vào công nợ/đơn hàng thường. Bia cận date
+    // VÀ bia gửi thì KHÔNG ghi gì thêm (theo yêu cầu người dùng — bàn giao như hàng thường,
+    // không cần lộ 2 thông tin nội bộ này ra biên bản giấy). "Loại xuất" (promo/return) RIÊNG
+    // TỪNG DÒNG (xem services/wms.py::list_shipments, FinishedGoodsUnit.shipment_line_type).
     const lineNoteFor = (l) => {
       if (!l || l.near_expiry) return null;
-      const parts = [];
-      if (l.consigned) parts.push("Bia gửi");
-      if (l.type === "promo") parts.push("Bia khuyến mại");
-      else if (l.type === "return") parts.push("Bia đổi trả");
-      return parts.join(" · ") || null;
+      if (l.type === "promo") return "Bia khuyến mại";
+      if (l.type === "return") return "Bia đổi trả";
+      return null;
     };
     const { fixedRows, extra } = matchLoadSlipLines(linesForMatch);
     // Chỉ in dòng có số lượng thật — hàng hóa cố định nào không xuất trong phiếu này thì bỏ
@@ -245,7 +247,9 @@
       <td>${esc(g.mota)}</td><td>${dash(lineNoteFor(g.matched))}</td></tr>`).join("");
     const extraHtml = extra.map((l, i) => `<tr>
       <td style="text-align:center">${keptFixed.length + i + 1}</td><td>${dash(l.product_name)}</td>
-      <td style="text-align:center">${l.quantity}</td><td></td><td></td><td>${dash(lineNoteFor(l))}</td></tr>`).join("");
+      <td style="text-align:center">${l.quantity}</td>
+      <td style="text-align:center">${dash(utNameByCode[l.unit_type] || l.unit_type)}</td>
+      <td></td><td>${dash(lineNoteFor(l))}</td></tr>`).join("");
     const html = bienBanBanGiaoHtml({
       code: shipment.shipment_code, dateObj: new Date(shipment.created_at),
       destination: shipment.ship_to_name || shipment.ship_to_address || shipment.delivery_place,
@@ -263,14 +267,18 @@
   // ---------- Điều chuyển nội bộ (WmsTransfer) → cùng mẫu Biên bản bàn giao hàng hóa, đích là
   // 1 vị trí kho (không phải nhà phân phối) — mirror printShipmentHandoverSlip ----------
   async function printTransferHandoverSlip(transfer) {
-    let nameByCode = {};
+    let nameByCode = {}, utNameByCode = {};
     try {
       const fps = await GET("/finished-products");
       nameByCode = Object.fromEntries(fps.map(p => [p.code, p.name]));
     } catch (e) { /* vẫn in được — chỉ thiếu tên đầy đủ, dùng tạm mã SKU */ }
+    try {
+      const uts = await GET("/unit-types");
+      utNameByCode = Object.fromEntries(uts.map(u => [u.code, u.name]));
+    } catch (e) { /* vẫn in được — chỉ thiếu tên loại đơn vị cho dòng ngoài danh mục cố định */ }
     const dash = (v) => (v === null || v === undefined || v === "" ? "" : esc(String(v)));
     const linesForMatch = (transfer.lines || []).map((l, i) =>
-      ({ line_id: i, product_name: nameByCode[l.product] || l.product, quantity: l.count }));
+      ({ line_id: i, product_name: nameByCode[l.product] || l.product, quantity: l.count, unit_type: l.unit_type }));
     const { fixedRows, extra } = matchLoadSlipLines(linesForMatch);
     const keptFixed = fixedRows.filter(g => g.qty != null);
     const fixedHtml = keptFixed.map((g, i) => `<tr>
@@ -279,7 +287,9 @@
       <td>${esc(g.mota)}</td><td></td></tr>`).join("");
     const extraHtml = extra.map((l, i) => `<tr>
       <td style="text-align:center">${keptFixed.length + i + 1}</td><td>${dash(l.product_name)}</td>
-      <td style="text-align:center">${l.quantity}</td><td></td><td></td><td></td></tr>`).join("");
+      <td style="text-align:center">${l.quantity}</td>
+      <td style="text-align:center">${dash(utNameByCode[l.unit_type] || l.unit_type)}</td>
+      <td></td><td></td></tr>`).join("");
     const html = bienBanBanGiaoHtml({
       code: transfer.transfer_code, dateObj: new Date(transfer.created_at),
       destination: transfer.to_location_name || transfer.to_location_code,
@@ -867,7 +877,7 @@
     let body = "";
     if (sec === "kho") {
       const sm = await GET("/wms/summary");
-      const locOpt = locs.map(l => `<option value="${esc(l.loc_id)}">${whLabel(l)} (${l.used}/${l.capacity})</option>`).join("");
+      const locOpt = myAllowedLocations(locs).map(l => `<option value="${esc(l.loc_id)}">${whLabel(l)} (${l.used}/${l.capacity})</option>`).join("");
       const fpOpt = finishedProducts.map(fp => `<option value="${esc(fp.finished_product_id)}" data-code="${esc(fp.code)}" data-pack="${fp.pack_size}" data-unittype="${esc(fp.unit_type)}">${esc(fp.code)} — ${esc(fp.name)}</option>`).join("");
       const card = (val, label, sub) => `<div class="card"><div class="n">${val}</div><div class="l">${label}</div>${sub ? `<div class="muted" style="font-size:11px;margin-top:2px">${sub}</div>` : ""}</div>`;
       const fmtN = (v) => (v || 0).toLocaleString("vi-VN", { maximumFractionDigits: 2 });
@@ -894,6 +904,7 @@
               <input id="wu_prod_q" placeholder="Tìm sản phẩm..." style="width:220px;margin-bottom:2px"/>
               <select id="wu_prod" style="width:220px"><option value="">(chọn sản phẩm)</option>${fpOpt}</select></div>
             <div class="field"><label>Lô TP</label><input id="wu_lot" placeholder="để trống = tự sinh" style="width:150px"/></div>
+            <div class="field"><label>Ngày nhập</label><input id="wu_received_at" type="datetime-local" value="${toDTLocal(new Date())}" style="width:180px"/></div>
             <div class="field" id="wu_lonmode_wrap" style="align-self:flex-end">
               <label style="display:flex;align-items:center;gap:4px;cursor:pointer;white-space:nowrap">
                 <input type="checkbox" id="wu_lonmode"/> Nhập lẻ (bỏ qua vỉ)</label></div>
@@ -910,6 +921,7 @@
               <input id="wob_prod_q" placeholder="Tìm sản phẩm..." style="width:220px;margin-bottom:2px"/>
               <select id="wob_prod" style="width:220px"><option value="">(chọn sản phẩm)</option>${fpOpt}</select></div>
             <div class="field"><label>Lô TP</label><input id="wob_lot" value="PKG-2406-0001" style="width:150px"/></div>
+            <div class="field"><label>Ngày nhập</label><input id="wob_received_at" type="datetime-local" value="${toDTLocal(new Date())}" style="width:180px"/></div>
             <div class="field" id="wob_lonmode_wrap" style="align-self:flex-end">
               <label style="display:flex;align-items:center;gap:4px;cursor:pointer;white-space:nowrap">
                 <input type="checkbox" id="wob_lonmode"/> Nhập lẻ (bỏ qua vỉ)</label></div>
@@ -934,9 +946,18 @@
       const activeVehicles = vehicles.filter(v => v.active);
       const driverOpt = activeVehicles.map(v =>
         `<option value="${esc(v.vehicle_id)}">${esc(v.driver_name || v.driver_short_name || "(chưa rõ tên)")} — ${esc(v.plate)}</option>`).join("");
+      // "Kho xuất": tài khoản bị giới hạn kho thành phẩm (wms_warehouse_scope) BẮT BUỘC chọn 1
+      // kho cụ thể trước khi được xem/chọn lô (BE cũng tự chặn nếu thiếu, xem
+      // services/wms.py::create_shipment) — tài khoản không bị giới hạn có thêm lựa chọn
+      // "(Tất cả kho — FIFO toàn công ty)" để giữ nguyên hành vi cũ.
+      const myWh = myAllowedWarehouses(warehouses);
+      const whRestricted = isWhScopeRestricted();
+      const xkWhOpt = myWh.map(w => `<option value="${esc(w.code)}">${esc(w.name)}</option>`).join("");
       body = `<div class="panel"><h2>🚚 Xuất kho</h2>
         <div class="muted" style="margin-bottom:8px">Chọn nơi xuất đến, sau đó thêm từng dòng sản phẩm/lô/loại đơn vị + số lượng cần xuất vào "Sản phẩm đã chọn" (thêm được nhiều lô/sản phẩm khác nhau trong cùng 1 phiếu), rồi bấm "Tạo phiếu xuất kho". Hệ thống tự chọn đúng vỉ/keg/lon cũ nhất (FIFO) trong mỗi lô — không cần liệt kê/chọn từng đơn vị.</div>
         <div class="row">
+          <div class="field"><label>Kho xuất${whRestricted ? " (bắt buộc)" : ""}</label>
+            <select id="xk_wh">${whRestricted ? "" : '<option value="">(Tất cả kho — FIFO toàn công ty)</option>'}${xkWhOpt}</select></div>
           <div class="field"><label>Nơi xuất đến</label>
             <input id="xk_shipto_q" placeholder="Tìm nơi xuất đến..." style="margin-bottom:2px"/>
             <select id="xk_shipto"><option value="">(chọn nơi xuất đến)</option>${shipToOpt}</select></div>
@@ -949,13 +970,13 @@
             <input id="xk_driver_q" placeholder="Tìm lái xe/biển số..." style="margin-bottom:2px"/>
             <select id="xk_driver"><option value="">(chưa chọn — xem Danh mục lái xe nếu chưa có)</option>${driverOpt}</select></div>
         </div>
-        <div class="muted" style="margin-top:-4px;margin-bottom:8px">Người nhận hàng trên phiếu in sẽ lấy theo tên "Nơi xuất đến" đã chọn; lái xe/biển số lấy theo Danh mục lái xe đã chọn ở trên.</div>
+        <div class="muted" style="margin-top:-4px;margin-bottom:8px">Người nhận hàng trên phiếu in sẽ lấy theo tên "Nơi xuất đến" đã chọn; lái xe/biển số lấy theo Danh mục lái xe đã chọn ở trên. Chọn "Kho xuất" để chỉ xem/xuất hàng đang cất tại đúng kho đó — tránh chọn nhầm lô đang ở kho khác.</div>
         <div id="xk_lots"></div>
         <div class="panel" style="margin-top:10px"><h3 style="font-size:14px">🛒 Sản phẩm đã chọn</h3><div id="xk_cart"></div></div>
       </div>
       <div class="panel"><h2>Lịch sử xuất kho</h2><input class="searchbox" data-tbl="t_xk_history" placeholder="Tìm theo mã phiếu, nơi xuất đến, người xuất..."/><div id="xk_history" class="muted">Đang tải…</div></div>`;
     } else if (sec === "dieuchuyen") {
-      const locOptDc = locs.map(l => `<option value="${esc(l.loc_id)}">${whLabel(l)} (${l.used}/${l.capacity})</option>`).join("");
+      const locOptDc = myAllowedLocations(locs).map(l => `<option value="${esc(l.loc_id)}">${whLabel(l)} (${l.used}/${l.capacity})</option>`).join("");
       const activeVehiclesDc = vehicles.filter(v => v.active);
       const driverOptDc = activeVehiclesDc.map(v =>
         `<option value="${esc(v.vehicle_id)}">${esc(v.driver_name || v.driver_short_name || "(chưa rõ tên)")} — ${esc(v.plate)}</option>`).join("");
@@ -978,7 +999,7 @@
       </div>
       <div class="panel"><h2>Lịch sử điều chuyển</h2><input class="searchbox" data-tbl="t_dc_history" placeholder="Tìm theo mã phiếu, vị trí đích, người tạo..."/><div id="dc_history" class="muted">Đang tải…</div></div>`;
     } else if (sec === "capvao") {
-      const locOpt3 = locs.map(l => `<option value="${esc(l.loc_id)}">${whLabel(l)} (${l.used}/${l.capacity})</option>`).join("");
+      const locOpt3 = myAllowedLocations(locs).map(l => `<option value="${esc(l.loc_id)}">${whLabel(l)} (${l.used}/${l.capacity})</option>`).join("");
       body = `<div class="panel"><h2>🚚 Cất vào vị trí</h2>
         <div class="muted" style="margin-bottom:8px">Gán vị trí kho cho các vỉ/keg/lon CHƯA có vị trí (mới nhập kho) — chọn vị trí đích rồi tick các dòng
           sản phẩm/lô cần cất, không cần chọn từng đơn vị.</div>
@@ -1037,10 +1058,20 @@
         caution: `🟡 >${agingOps.aging_caution_days} ngày`, ok: "🟢 Bình thường" };
       const bucketColor = { critical: "var(--red)", warning: "var(--orange)", caution: "#e0c341", ok: "var(--green)" };
       const unitLabel = { vi: "Vỉ", keg: "Keg", lon: "Lon" };
+      // Mỗi dòng backend (lot_aging_report) giờ đã tách riêng theo KHO THÀNH PHẨM (warehouse_id)
+      // — cùng 1 lô ở 2 kho khác nhau ra 2 dòng riêng; trong CÙNG 1 kho mà rải nhiều vị trí thì
+      // gói trong <details> để bấm mở rộng xem từng vị trí, mirror whUnitsLocationCell (Kho TP).
       const agLocCell = (r) => {
-        const parts = (r.locations || []).map(l => `${locWhPrefix(l)}${esc(l.code || "?")}×${l.count}`);
-        if (r.unplaced > 0) parts.push(`chưa cất×${r.unplaced}`);
-        return parts.join(", ") || "—";
+        if (r.unplaced > 0 && !r.locations.length) return `<span class="muted">(chưa cất vị trí) ×${r.unplaced}</span>`;
+        const whLabel = r.warehouse_name ? `${locWhPrefix({ warehouse_name: r.warehouse_name })}` : "";
+        if (r.locations.length <= 1) {
+          const l = r.locations[0];
+          return `${whLabel}${l ? `${esc(l.code || "?")}×${l.count}` : "—"}`;
+        }
+        return `<details><summary style="cursor:pointer;display:inline">${whLabel}${r.locations.length} vị trí</summary>
+          <table style="margin-top:4px;font-size:12px"><tbody>${r.locations.map(l =>
+            `<tr><td>${esc(l.code || "?")}</td><td style="padding-left:8px">${l.count}</td></tr>`).join("")}
+          </tbody></table></details>`;
       };
       body = `<div class="panel"><h2>📦 Tồn kho thành phẩm theo tuổi lô <span class="muted">(${rows.length} dòng)</span></h2>
         <div class="muted" style="margin-bottom:8px">Mỗi dòng là 1 (sản phẩm, lô, loại đơn vị) còn tồn kho — số ngày tồn tính từ đơn vị nhập sớm nhất trong nhóm.
@@ -1151,7 +1182,7 @@
         </div></div>`;
     } else if (sec === "canexpiry") {
       const ceFpOpt = finishedProducts.map(fp => `<option value="${esc(fp.finished_product_id)}" data-code="${esc(fp.code)}">${esc(fp.code)} — ${esc(fp.name)}</option>`).join("");
-      const ceLocOpt = locs.map(l => `<option value="${esc(l.loc_id)}">${whLabel(l)} (${l.used}/${l.capacity})</option>`).join("");
+      const ceLocOpt = myAllowedLocations(locs).map(l => `<option value="${esc(l.loc_id)}">${whLabel(l)} (${l.used}/${l.capacity})</option>`).join("");
       body = `<div class="panel"><h2>🕒 Nhập bia cận date</h2>
         <div class="muted" style="margin-bottom:8px">Khai báo trực tiếp Sản phẩm + Số lượng bia gần hết hạn được nhập lại kho (tăng tồn kho công ty) — không cần chọn lô chiết gốc, vì tồn cận date thực tế thường gộp từ nhiều lô khác nhau. Hệ thống tự sinh 1 lô cận date riêng cho mỗi lần khai báo — luôn hiện thành dòng riêng ở Xuất kho (không gộp chung với tồn thường của sản phẩm) và được ưu tiên xuất trước. Lịch sử nhập/xuất bia cận date được tách riêng khỏi Xuất kho thông thường (xem bảng bên dưới); khi Xuất kho tick "Chỉ bia cận date" cho 1 dòng, lượt xuất đó cũng tự động ghi vào lịch sử này.</div>
         <div class="row" style="flex-wrap:wrap">
@@ -1168,7 +1199,7 @@
         <div id="ce_hist"><div class="muted">Đang tải…</div></div>
       </div>`;
     } else if (sec === "consigned") {
-      const gsLocOpt = locs.map(l => `<option value="${esc(l.loc_id)}">${whLabel(l)} (${l.used}/${l.capacity})</option>`).join("");
+      const gsLocOpt = myAllowedLocations(locs).map(l => `<option value="${esc(l.loc_id)}">${whLabel(l)} (${l.used}/${l.capacity})</option>`).join("");
       // Chỉ cho chọn xe có phiếu xuất kho trong khoảng [Ca 2 ngày hôm trước 14h VN, hiện tại] —
       // khớp yêu cầu chặn khai khống bia gửi không đúng chuyến xe/sản phẩm/số lượng đã xuất
       // thật (xem services/wms.py::consigned_eligible_vehicles + _consigned_available_qty).
@@ -1199,7 +1230,7 @@
       </div>`;
     } else if (sec === "factoryimport") {
       const nmkFpOpt = finishedProducts.map(fp => `<option value="${esc(fp.finished_product_id)}" data-code="${esc(fp.code)}">${esc(fp.code)} — ${esc(fp.name)}</option>`).join("");
-      const nmkLocOpt = locs.map(l => `<option value="${esc(l.loc_id)}">${whLabel(l)} (${l.used}/${l.capacity})</option>`).join("");
+      const nmkLocOpt = myAllowedLocations(locs).map(l => `<option value="${esc(l.loc_id)}">${whLabel(l)} (${l.used}/${l.capacity})</option>`).join("");
       const nmkFactoryOpt = factoryLocations.filter(f => f.active).map(f => `<option value="${esc(f.factory_id)}">${esc(f.code)} — ${esc(f.name)}</option>`).join("");
       body = `<div class="panel"><h2>🏭 Nhập từ nhà máy khác</h2>
         <div class="muted" style="margin-bottom:8px">Dùng khi bia thực tế KHÔNG do nhà máy đang chạy hệ thống này sản xuất, mà nhận từ 1 nhà máy khác
@@ -1211,6 +1242,7 @@
             <input id="nmk_prod_q" placeholder="Tìm sản phẩm..." style="width:220px;margin-bottom:2px"/>
             <select id="nmk_prod" style="width:220px"><option value="">(chọn sản phẩm)</option>${nmkFpOpt}</select></div>
           <div class="field"><label>Số lượng</label><input id="nmk_qty" type="number" min="1" style="width:100px"/></div>
+          <div class="field"><label>Ngày nhập</label><input id="nmk_received_at" type="datetime-local" value="${toDTLocal(new Date())}" style="width:180px"/></div>
           <div class="field"><label>Vị trí kho nhận</label><select id="nmk_loc" style="width:180px"><option value="">(chọn vị trí)</option>${nmkLocOpt}</select></div>
           <div class="field"><label>Nhà máy nguồn</label><select id="nmk_factory" style="width:200px"><option value="">(chọn nhà máy)</option>${nmkFactoryOpt}</select></div>
           <div class="field" style="flex:1;min-width:160px"><label>Ghi chú</label><input id="nmk_note" placeholder="Tùy chọn"/></div>
@@ -1280,7 +1312,7 @@
             <div class="row"><div class="field"><label>Sản phẩm</label>
               <select id="ece_prod">${finishedProducts.map(fp => `<option value="${esc(fp.finished_product_id)}">${esc(fp.code)} — ${esc(fp.name)}</option>`).join("")}</select></div></div>
             <div class="row"><div class="field"><label>Số lượng</label><input id="ece_qty" type="number" min="1" value="${e.quantity}"/></div>
-              <div class="field"><label>Vị trí kho nhận</label><select id="ece_loc"><option value="">(chưa cất)</option>${locs.map(l => `<option value="${esc(l.loc_id)}">${esc(l.code)} (${l.used}/${l.capacity})</option>`).join("")}</select></div></div>
+              <div class="field"><label>Vị trí kho nhận</label><select id="ece_loc"><option value="">(chưa cất)</option>${myAllowedLocations(locs).map(l => `<option value="${esc(l.loc_id)}">${esc(l.code)} (${l.used}/${l.capacity})</option>`).join("")}</select></div></div>
             <div class="row"><div class="field" style="flex:1"><label>Ghi chú</label><input id="ece_note" value="${esc(e.note || "")}"/></div>
               <button class="btn" id="ece_save" style="align-self:flex-end">Lưu</button></div>`);
           if ($("ece_prod")) $("ece_prod").value = e.finished_product_id || "";
@@ -1377,7 +1409,7 @@
             <div class="row"><div class="field"><label>Sản phẩm</label>
               <select id="egs_prod">${finishedProducts.map(fp => `<option value="${esc(fp.finished_product_id)}">${esc(fp.code)} — ${esc(fp.name)}</option>`).join("")}</select></div></div>
             <div class="row"><div class="field"><label>Số lượng</label><input id="egs_qty" type="number" min="1" value="${e.quantity}"/></div>
-              <div class="field"><label>Vị trí kho nhận</label><select id="egs_loc"><option value="">(chưa cất)</option>${locs.map(l => `<option value="${esc(l.loc_id)}">${esc(l.code)} (${l.used}/${l.capacity})</option>`).join("")}</select></div></div>
+              <div class="field"><label>Vị trí kho nhận</label><select id="egs_loc"><option value="">(chưa cất)</option>${myAllowedLocations(locs).map(l => `<option value="${esc(l.loc_id)}">${esc(l.code)} (${l.used}/${l.capacity})</option>`).join("")}</select></div></div>
             <div class="row"><div class="field" style="flex:1"><label>Ghi chú</label><input id="egs_note" value="${esc(e.note || "")}"/></div>
               <button class="btn" id="egs_save" style="align-self:flex-end">Lưu</button></div>`);
           if ($("egs_prod")) $("egs_prod").value = e.finished_product_id || "";
@@ -1404,13 +1436,14 @@
         if (!$("nmk_loc").value) { toast("Chọn vị trí kho nhận", "err"); return; }
         if (!$("nmk_factory").value) { toast("Chọn nhà máy nguồn", "err"); return; }
         const res = await POST("/wms/factory-import", { finished_product_id: $("nmk_prod").value, quantity: qty,
-          location_id: $("nmk_loc").value, factory_id: $("nmk_factory").value, note: $("nmk_note").value || null });
+          location_id: $("nmk_loc").value, factory_id: $("nmk_factory").value, note: $("nmk_note").value || null,
+          received_at: $("nmk_received_at").value || undefined });
         toast(`Đã khai báo ${qty} ${res.unit_type === "keg" ? "keg" : "vỉ"} nhập từ nhà máy khác (chờ Trưởng bộ phận kho duyệt trước khi tăng tồn kho)`);
         render("wms");
       });
       GET("/wms/factory-import").then(entries => {
         $("nmk_hist").innerHTML = entries.length ? `<div class="tablewrap"><table id="t_nmk_hist">
-          <thead><tr><th>Sản phẩm</th><th>Lô</th><th>Loại ĐV</th><th>SL</th><th>Vị trí</th><th>Nhà máy nguồn</th><th>Ngày khai báo</th><th>Ghi chú</th><th>Người tạo</th><th>Thời gian</th><th>Duyệt</th><th></th></tr></thead>
+          <thead><tr><th>Sản phẩm</th><th>Lô</th><th>Loại ĐV</th><th>SL</th><th>Vị trí</th><th>Nhà máy nguồn</th><th>Ngày nhập</th><th>Ghi chú</th><th>Người tạo</th><th>Thời gian</th><th>Duyệt</th><th></th></tr></thead>
           <tbody>${entries.map(e => `<tr>
             <td>${esc(fpLabel(e.product_name))}</td><td class="muted">${esc(e.lot_code || "—")}</td>
             <td>${e.unit_type === "keg" ? "Keg" : "Vỉ"}</td><td>${e.quantity}</td>
@@ -1445,7 +1478,8 @@
             <div class="row"><div class="field"><label>Sản phẩm</label>
               <select id="enmk_prod">${finishedProducts.map(fp => `<option value="${esc(fp.finished_product_id)}">${esc(fp.code)} — ${esc(fp.name)}</option>`).join("")}</select></div></div>
             <div class="row"><div class="field"><label>Số lượng</label><input id="enmk_qty" type="number" min="1" value="${e.quantity}"/></div>
-              <div class="field"><label>Vị trí kho nhận</label><select id="enmk_loc">${locs.map(l => `<option value="${esc(l.loc_id)}">${esc(l.code)} (${l.used}/${l.capacity})</option>`).join("")}</select></div></div>
+              <div class="field"><label>Ngày nhập</label><input id="enmk_received_at" type="datetime-local" value="${e.declared_at ? toDTLocal(new Date(e.declared_at)) : ""}"/></div>
+              <div class="field"><label>Vị trí kho nhận</label><select id="enmk_loc">${myAllowedLocations(locs).map(l => `<option value="${esc(l.loc_id)}">${esc(l.code)} (${l.used}/${l.capacity})</option>`).join("")}</select></div></div>
             <div class="row"><div class="field"><label>Nhà máy nguồn</label><select id="enmk_factory">${factoryLocations.map(f => `<option value="${esc(f.factory_id)}">${esc(f.code)} — ${esc(f.name)}</option>`).join("")}</select></div></div>
             <div class="row"><div class="field" style="flex:1"><label>Ghi chú</label><input id="enmk_note" value="${esc(e.note || "")}"/></div>
               <button class="btn" id="enmk_save" style="align-self:flex-end">Lưu</button></div>`);
@@ -1457,7 +1491,7 @@
             if (qty <= 0) { toast("Nhập số lượng > 0", "err"); return; }
             await PUT(`/wms/factory-import/${e.entry_id}`, { finished_product_id: $("enmk_prod").value || null,
               quantity: qty, location_id: $("enmk_loc").value || null, factory_id: $("enmk_factory").value || null,
-              note: $("enmk_note").value || null });
+              note: $("enmk_note").value || null, received_at: $("enmk_received_at").value || undefined });
             toast("Đã lưu"); closeModal(); render("wms");
           });
         });
@@ -1475,12 +1509,43 @@
         // unit_types: danh sách loại đơn vị THẬT SỰ có ở lô này (backend trả theo dữ liệu thực,
         // không hardcode vi/keg/lon nữa) — nếu thiếu (dữ liệu cũ) mới fallback 3 loại mặc định.
         (g.unit_types || ["vi", "keg", "lon"]).forEach(t => {
-          if (g[`${t}_count`] > 0) groupRows.push({
-            product: g.product_name, lot_code: g.lot_code, bottle_codes: g.bottle_codes,
-            unit_type: t, count: g[`${t}_count`], qty: g[`${t}_qty`], unplaced: g[`${t}_unplaced`] || 0,
-            oldest_at: g[`${t}_oldest_at`], locations: g[`${t}_locations`] || [],
-            pending: g[`${t}_pending_count`] || 0, confirmed: g[`${t}_confirmed_count`] || 0,
+          const totalCount = g[`${t}_count`] || 0;
+          if (totalCount <= 0) return;
+          const totalQty = g[`${t}_qty`] || 0;
+          const unplaced = g[`${t}_unplaced`] || 0;
+          const totalPending = g[`${t}_pending_count`] || 0, totalConfirmed = g[`${t}_confirmed_count`] || 0;
+          // Cùng 1 lô nằm ở 2 KHO THÀNH PHẨM khác nhau phải hiện thành 2 DÒNG riêng (tồn kho vật
+          // lý thực sự tách biệt) — gộp theo warehouse_id trước khi tạo dòng. Trong cùng 1 kho mà
+          // rải nhiều VỊ TRÍ thì vẫn 1 dòng, chỉ mở rộng xem chi tiết qua <details> ở ô "Vị trí kho"
+          // (renderUnits) — không tách dòng vì vẫn là cùng 1 lô vật lý trong cùng 1 kho.
+          const byWh = new Map();
+          (g[`${t}_locations`] || []).forEach(l => {
+            const whKey = l.warehouse_id || "";
+            if (!byWh.has(whKey)) byWh.set(whKey, { warehouse_id: l.warehouse_id,
+              warehouse_name: l.warehouse_name, locations: [], count: 0 });
+            const b = byWh.get(whKey);
+            b.locations.push(l);
+            b.count += l.count;
           });
+          const perUnitQty = totalCount > 0 ? totalQty / totalCount : 0;
+          const pushRow = (whBucket) => {
+            const count = whBucket ? whBucket.count : unplaced;
+            groupRows.push({
+              product: g.product_name, lot_code: g.lot_code, bottle_codes: g.bottle_codes, unit_type: t,
+              count, qty: Math.round(count * perUnitQty),
+              warehouse_id: whBucket ? whBucket.warehouse_id : null,
+              warehouse_name: whBucket ? whBucket.warehouse_name : null,
+              locations: whBucket ? whBucket.locations : [], unplaced: whBucket ? 0 : unplaced,
+              oldest_at: g[`${t}_oldest_at`],
+              // pending/confirmed KHÔNG tách được theo kho (backend chỉ lưu tổng theo lô+loại,
+              // không theo từng vị trí) — hiện tổng toàn lô trên mọi dòng tách kho, mirror cách
+              // dieuchuyen picker đã làm khi tách theo vị trí (xem filteredDcLotRows).
+              pending: totalPending, confirmed: totalConfirmed,
+              total_count: totalCount, total_qty: totalQty,
+            });
+          };
+          byWh.forEach(pushRow);
+          if (unplaced > 0) pushRow(null);
         });
       });
       function openUnitGroupModal(g0) {
@@ -1489,20 +1554,30 @@
         // (xem services/wms.py::decompose_batch).
         const ut0 = utByCode[g0.unit_type];
         const canDecompose = g0.unit_type === "vi" || !!(ut0 && ut0.divide_by_pack_size);
+        // Lô này còn tồn ở kho/vị trí khác nữa (dòng đang xem chỉ là 1 phần đã tách theo kho ở
+        // bảng Kho TP) — Xóa/Phân rã dưới đây vẫn thao tác trên TOÀN BỘ lô ở MỌI kho (backend
+        // delete-by-lot/decompose-batch chỉ lọc theo product+lot+loại đơn vị, không theo vị trí/
+        // kho) nên phải cảnh báo rõ, tránh hiểu nhầm chỉ ảnh hưởng riêng dòng/kho đang xem.
+        const spansMultipleWh = g0.total_count != null && g0.total_count !== g0.count;
+        const spanWarning = spansMultipleWh
+          ? `<div class="muted" style="color:var(--accent);margin-bottom:10px">⚠ Lô này còn tồn ở kho/vị trí khác nữa (tổng toàn bộ lô ${g0.total_count} đơn vị, dòng đang xem chỉ ${g0.count}) — các thao tác dưới đây áp dụng cho TOÀN BỘ lô ở MỌI kho, không chỉ riêng dòng này.</div>`
+          : "";
         modal(`<h3>${unitTypeLabel(g0)} — ${esc(fpLabel(g0.product))} ${esc(g0.lot_code || "")}</h3>
           <div class="muted" style="margin-bottom:10px">${badge("available")}stored ·
             Tổng <b>${g0.count}</b> đơn vị · Tổng SL nhỏ <b>${g0.qty}</b></div>
+          ${spanWarning}
           <div class="row" style="margin-bottom:12px"><button class="btn sec" id="ugm_label">🖨️ Tem lô (${esc(g0.lot_code || g0.product || "")})</button>
             <button class="btn sec" id="ugm_del" style="color:var(--red)">🗑️ Xóa lô đã nhập</button></div>
           ${canDecompose ? `<div class="panel" style="margin-bottom:12px"><h3 style="font-size:14px">🔨 Phân rã theo số lượng</h3>
             <div class="muted" style="font-size:12px;margin-bottom:6px">Chọn số ${esc(unitTypeLabel(g0).toLowerCase())} cần phân rã tại lô này (cũ nhất phân rã trước) — không cần chọn từng đơn vị, phù hợp cả khi tồn hàng trăm ngàn đơn vị.</div>
-            <div class="row"><div class="field"><label>Số ${esc(unitTypeLabel(g0).toLowerCase())} cần phân rã (tối đa ${g0.count})</label>
-              <input id="dpq_count" type="number" min="1" max="${g0.count}" value="${g0.count}" style="width:110px"/></div>
+            <div class="row"><div class="field"><label>Số ${esc(unitTypeLabel(g0).toLowerCase())} cần phân rã (tối đa ${g0.total_count ?? g0.count})</label>
+              <input id="dpq_count" type="number" min="1" max="${g0.total_count ?? g0.count}" value="${g0.total_count ?? g0.count}" style="width:110px"/></div>
               <button class="btn" id="dpq_do" style="align-self:flex-end">Phân rã</button></div></div>` : ""}`);
 
         $("ugm_label").onclick = () => labelModal(g0.lot_code || g0.product || "");
         $("ugm_del").onclick = () => guard(async () => {
-          if (!confirm(`Xóa toàn bộ ${g0.count} đơn vị đã nhập kho của ${g0.product || ""} ${g0.lot_code || ""}? `
+          if (!confirm(`Xóa toàn bộ ${g0.total_count ?? g0.count} đơn vị đã nhập kho của ${g0.product || ""} ${g0.lot_code || ""}`
+            + (spansMultipleWh ? ` (ở TẤT CẢ các kho, không chỉ riêng kho đang xem)` : "") + `? `
             + `Bản ghi Chiết nguồn sẽ được mở lại (bỏ duyệt KCS) để có thể sửa/duyệt lại. Không thể hoàn tác.`)) return;
           const res = await POST("/wms/units/delete-by-lot",
             { product_name: g0.product, lot_code: g0.lot_code, unit_type: g0.unit_type });
@@ -1516,7 +1591,8 @@
             const count = parseInt($("dpq_count").value, 10) || 0;
             const noun = unitTypeLabel(g0).toLowerCase();
             if (count <= 0) { toast(`Nhập số ${noun} cần phân rã`, "err"); return; }
-            if (!confirm(`Phân rã ${count} ${noun} (cũ nhất trước) của ${g0.product || ""} ${g0.lot_code || ""} thành lon? Không thể hoàn tác.`)) return;
+            if (!confirm(`Phân rã ${count} ${noun} (cũ nhất trước) của ${g0.product || ""} ${g0.lot_code || ""}`
+              + (spansMultipleWh ? ` — lấy từ CẢ lô ở mọi kho, không chỉ riêng kho đang xem` : "") + ` thành lon? Không thể hoàn tác.`)) return;
             const res = await POST("/wms/units/decompose-batch",
               { product_name: g0.product, lot_code: g0.lot_code, unit_type: g0.unit_type, count });
             closeModal();
@@ -1527,6 +1603,23 @@
         }
       }
       const canConfirmReceipt = _hasPerm("wms.confirm_receipt");
+      // Ô "Vị trí kho" cho bảng Kho TP — mỗi dòng ở đây đã được tách riêng theo KHO (xem
+      // groupRows ở trên) nên chỉ còn vị trí trong CÙNG 1 kho; nếu kho đó rải nhiều vị trí,
+      // gói trong <details> để bấm mở rộng xem từng vị trí + số lượng (không tách thành <tr>
+      // riêng vì wirePaginate/sort coi mỗi <tr> con của tbody là 1 dòng độc lập — thêm <tr> phụ
+      // sẽ vỡ phân trang/sắp xếp).
+      function whUnitsLocationCell(g) {
+        if (g.warehouse_id === null) return `<span class="muted">(chưa cất vị trí) ×${g.unplaced}</span>`;
+        const whLabel = locWhPrefix({ warehouse_name: g.warehouse_name });
+        if (g.locations.length <= 1) {
+          const l = g.locations[0];
+          return `${whLabel}${l ? `${esc(l.code || "?")}${l.name ? " - " + esc(l.name) : ""}${locZoneSuffix(l)}` : "—"}`;
+        }
+        return `<details><summary style="cursor:pointer;display:inline">${whLabel}${g.locations.length} vị trí</summary>
+          <table style="margin-top:4px;font-size:12px"><tbody>${g.locations.map(l =>
+            `<tr><td>${esc(l.code || "?")}${l.name ? " - " + esc(l.name) : ""}${locZoneSuffix(l)}</td><td style="padding-left:8px">${l.count}</td></tr>`).join("")}
+          </tbody></table></details>`;
+      }
       function renderUnits(rows) {
         $("pl_box").innerHTML = `<input class="searchbox" data-tbl="t_units" placeholder="Tìm theo sản phẩm, lô..."/>
           <div class="tablewrap"><table id="t_units">
@@ -1541,7 +1634,7 @@
             <td>${unitTypeLabel(g)}</td>
             <td>${g.count}</td><td>${g.qty}</td>
             <td>${badge("available")}stored</td>
-            <td class="muted">${locationCell(g)}</td>
+            <td class="muted">${whUnitsLocationCell(g)}</td>
             <td class="muted">${fmt(g.oldest_at)}</td>
             <td>${confirmCell}</td>
             <td><button class="btn sm sec" data-viewgroup="${i}">Xem</button></td></tr>`; }).join("") ||
@@ -1551,7 +1644,11 @@
         });
         document.querySelectorAll("[data-confirmreceipt]").forEach(b => b.onclick = () => guard(async () => {
           const g = rows[parseInt(b.dataset.confirmreceipt, 10)];
-          if (!confirm(`Duyệt nhập kho cho ${g.product || ""} ${g.lot_code || ""}? Sau khi duyệt, lô này không thể xóa được nữa — với lô "Nhập kho thủ công" còn được phép xuất kho.`)) return;
+          // Duyệt nhập kho thao tác trên TOÀN BỘ lô+loại đơn vị (mọi kho), không riêng dòng đã
+          // tách theo kho ở bảng này — xem ghi chú tương tự ở openUnitGroupModal.
+          const warn = g.total_count != null && g.total_count !== g.count
+            ? ` (áp dụng cho TOÀN BỘ lô ở mọi kho, tổng ${g.total_count} đơn vị — không chỉ riêng dòng này)` : "";
+          if (!confirm(`Duyệt nhập kho cho ${g.product || ""} ${g.lot_code || ""}${warn}? Sau khi duyệt, lô này không thể xóa được nữa — với lô "Nhập kho thủ công" còn được phép xuất kho.`)) return;
           const res = await POST("/wms/units/confirm-receipt-by-lot",
             { product_name: g.product, lot_code: g.lot_code, unit_type: g.unit_type });
           toast(`Đã duyệt nhập kho cho ${res.confirmed} dòng`); render("wms");
@@ -1625,7 +1722,8 @@
         await POST("/wms/units", { finished_product_id: $("wu_prod").value, product_name: opt.dataset.code,
           lot_code: $("wu_lot").value.trim() || undefined, total: num("wu_total") || 0,
           pack_size: lonMode ? 1 : (num("wu_pack") || 24), unit_type: lonMode ? "lon" : (opt.dataset.unittype || "vi"),
-          loc_id: $("wu_loc").value, reason: "Nhập kho thủ công" });
+          loc_id: $("wu_loc").value, reason: "Nhập kho thủ công",
+          received_at: $("wu_received_at").value || undefined });
         toast("Đã nhập kho (kèm mã vạch từng vỉ/keg)"); render("wms");
       });
       wireSelectSearch("wob_prod", "wob_prod_q");
@@ -1651,7 +1749,8 @@
         await POST("/wms/units", { finished_product_id: $("wob_prod").value, product_name: opt.dataset.code,
           lot_code: $("wob_lot").value, total: num("wob_total") || 0,
           pack_size: lonMode ? 1 : (num("wob_pack") || 24), unit_type: lonMode ? "lon" : (opt.dataset.unittype || "vi"),
-          loc_id: $("wob_loc").value, reason: "Nhập tồn đầu", is_opening_balance: true });
+          loc_id: $("wob_loc").value, reason: "Nhập tồn đầu", is_opening_balance: true,
+          received_at: $("wob_received_at").value || undefined });
         toast("Đã nhập tồn đầu (kèm mã vạch từng vỉ/keg)"); render("wms");
       });
       if ($("wob_import")) $("wob_import").onclick = () => guard(async () => {
@@ -1703,16 +1802,26 @@
       function filteredLotRows() {
         const filter = $("xk_lotfilter").value;
         const search = $("xk_search").value.trim().toLowerCase();
+        const whFilter = $("xk_wh") ? $("xk_wh").value : "";
         const rows = [];
         lots.forEach(g => {
           if (filter === "has_lon" && !g.has_lon) return;
           if (filter === "no_lon" && g.has_lon) return;
           if (search && !`${g.product_name || ""} ${g.lot_code || ""}`.toLowerCase().includes(search)) return;
           (g.unit_types || ["vi", "keg", "lon"]).forEach(t => {
-            const count = g[`${t}_count`];
+            let locations = g[`${t}_locations`] || [];
+            let unplaced = g[`${t}_unplaced`] || 0;
+            let count = g[`${t}_count`];
+            // Đã chọn "Kho xuất" cụ thể — chỉ tính hàng ĐANG CẤT ĐÚNG kho đó (hàng "chưa cất" bỏ
+            // qua vì chưa xác định được thuộc kho nào, xem docstring _assert_wh_scope).
+            if (whFilter) {
+              locations = locations.filter(l => l.warehouse_code === whFilter);
+              count = locations.reduce((s, l) => s + (l.count || 0), 0);
+              unplaced = 0;
+            }
             if (count) rows.push({ product_name: g.product_name, lot_code: g.lot_code, unit_type: t, count,
                                    fifo_ok: g[`${t}_fifo_ok`], oldest_at: g[`${t}_oldest_at`], bottle_codes: g.bottle_codes,
-                                   locations: g[`${t}_locations`] || [], unplaced: g[`${t}_unplaced`] || 0,
+                                   locations, unplaced,
                                    near_expiry_count: g[`${t}_near_expiry_count`] || 0,
                                    consigned_count: g[`${t}_consigned_count`] || 0,
                                    consigned_vehicle_plate: g.consigned_vehicle_plate });
@@ -1844,6 +1953,7 @@
           renderCart();
         });
         if ($("xk_submit")) $("xk_submit").onclick = () => guard(async () => {
+          if (whRestricted && !$("xk_wh").value) { toast("Vui lòng chọn Kho xuất (tài khoản bị giới hạn kho thành phẩm)", "err"); return; }
           if (!$("xk_shipto").value) { toast("Chọn nơi xuất đến", "err"); return; }
           if (!XK_CART.length) { toast("Chưa có dòng nào trong phiếu", "err"); return; }
           // Dòng nào lấy lô không đúng FIFO (không phải lô cũ nhất) bắt buộc phải giải trình lý
@@ -1867,6 +1977,7 @@
             .map(c => `${fpLabel(c.product_name)} lô ${c.lot_code || "(không lô)"}: ${c.fifo_reason.trim()}`);
           const res = await POST("/wms/shipments", {
             ship_to_id: $("xk_shipto").value,
+            warehouse_id: $("xk_wh").value || null,
             lines: XK_CART.map(c => ({ product_name: c.product_name, lot_code: c.lot_code,
                                        unit_type: c.unit_type, quantity: c.quantity,
                                        near_expiry_only: c.near_expiry_only || false,
@@ -1890,6 +2001,7 @@
       wireSelectSearch("xk_driver", "xk_driver_q");
       $("xk_lotfilter").onchange = renderLots;
       $("xk_search").oninput = renderLots;
+      $("xk_wh").onchange = () => { XK_CART = []; renderLots(); renderCart(); };
       GET("/wms/shipments").then(ships => {
         const isAdminXk = CURRENT_USER && CURRENT_USER.role === "admin";
         const canConfirmShip = _hasPerm("wms.confirm_shipment");
@@ -1908,7 +2020,8 @@
             <td class="muted">${esc(s.from_location || "—")}</td>
             <td>${esc(s.ship_to_name || s.ship_to_code || "—")}</td><td class="muted">${fmt(s.created_at)}</td>
             <td class="muted">${esc(s.created_by || "—")}</td>
-            <td>${undone ? '<span class="badge obsolete">Đã hoàn tác</span>' : s.fifo_ok ? '<span class="badge available">✓ Đúng FIFO</span>' : '<span class="badge on_hold">⚠ Không đúng FIFO</span>'}</td>
+            <td>${undone ? '<span class="badge obsolete">Đã hoàn tác</span>' : s.fifo_ok ? '<span class="badge available">✓ Đúng FIFO</span>' :
+              `<span class="badge on_hold">⚠ Không đúng FIFO</span>${s.note ? `<div class="muted" style="font-size:11px;max-width:220px;white-space:normal">${esc(s.note)}</div>` : ""}`}</td>
             <td class="muted">${esc(s.vehicle_plate || "—")}</td>
             <td>${tripEditable ? `<input type="number" min="0" step="0.1" value="${s.km != null ? s.km : ""}" style="width:70px" data-xk-km="${i}"/>` : '<span class="muted">—</span>'}</td>
             <td>${tripEditable ? `<input type="number" min="0" step="0.1" value="${s.fuel_liters != null ? s.fuel_liters : ""}" style="width:70px" data-xk-fuel="${i}"/> <button class="btn sm sec" data-savetrip="${i}">Lưu</button>` : '<span class="muted">—</span>'}</td>
@@ -2004,6 +2117,7 @@
             (g[`${t}_locations`] || []).forEach(loc => {
               if (!loc.count) return;
               if (destId && loc.loc_id === destId) return;
+              if (!isWarehouseAllowed(loc.warehouse_code)) return;
               rows.push({ product_name: g.product_name, lot_code: g.lot_code, unit_type: t,
                          count: loc.count, total_count: g[`${t}_count`] || 0,
                          loc_id: loc.loc_id, loc_code: loc.code, loc_name: loc.name, loc_zone: loc.zone,
@@ -2169,7 +2283,8 @@
             <td class="muted">${esc(t.from_location || "—")}</td>
             <td>${esc(t.to_location_name || t.to_location_code || "—")}</td><td class="muted">${fmt(t.created_at)}</td>
             <td class="muted">${esc(t.created_by || "—")}</td>
-            <td>${undone ? '<span class="badge obsolete">Đã hoàn tác</span>' : t.fifo_ok ? '<span class="badge available">✓ Đúng FIFO</span>' : '<span class="badge on_hold">⚠ Không đúng FIFO</span>'}</td>
+            <td>${undone ? '<span class="badge obsolete">Đã hoàn tác</span>' : t.fifo_ok ? '<span class="badge available">✓ Đúng FIFO</span>' :
+              `<span class="badge on_hold">⚠ Không đúng FIFO</span>${t.note ? `<div class="muted" style="font-size:11px;max-width:220px;white-space:normal">${esc(t.note)}</div>` : ""}`}</td>
             <td class="muted">${esc(t.vehicle_plate || "—")}</td>
             <td>${tripEditableDc ? `<input type="number" min="0" step="0.1" value="${t.km != null ? t.km : ""}" style="width:70px" data-dc-km="${i}"/>` : '<span class="muted">—</span>'}</td>
             <td>${tripEditableDc ? `<input type="number" min="0" step="0.1" value="${t.fuel_liters != null ? t.fuel_liters : ""}" style="width:70px" data-dc-fuel="${i}"/> <button class="btn sm sec" data-savedctrip="${i}">Lưu</button>` : '<span class="muted">—</span>'}</td>

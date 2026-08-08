@@ -32,6 +32,9 @@ class User(Base):
     scope_qc: Mapped[str] = mapped_column(Unicode(255), default="*")
     # "cong_ty" | "phan_xuong" | "*" — chặn thao tác kho NVL ngoài địa điểm được phân.
     scope_warehouse: Mapped[str] = mapped_column(Unicode(255), default="*")
+    # csv mã Kho thành phẩm (WmsWarehouse.code, vd "KH01,KH02") hoặc "*" — chặn thao tác kho TP
+    # (WMS) ngoài kho được phân, khác hẳn scope_warehouse (chỉ cong_ty/phan_xuong cho kho NVL).
+    wms_warehouse_scope: Mapped[str] = mapped_column(Unicode(255), default="*")
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     # Buộc đổi mật khẩu lần đăng nhập đầu (admin tạo bằng mật khẩu mặc định).
     must_change_password: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -56,6 +59,7 @@ class RoleTemplate(Base):
     scope_areas: Mapped[str] = mapped_column(Unicode(255), default="*")
     scope_qc: Mapped[str] = mapped_column(Unicode(255), default="*")
     scope_warehouse: Mapped[str] = mapped_column(Unicode(255), default="*")
+    wms_warehouse_scope: Mapped[str] = mapped_column(Unicode(255), default="*")
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
 
