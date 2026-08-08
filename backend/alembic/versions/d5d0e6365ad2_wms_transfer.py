@@ -41,8 +41,8 @@ _FGU_BEFORE = sa.Table(
     sa.Column('status', sa.Unicode(length=255), nullable=False, server_default='stored', index=True),
     sa.Column('location_id', sa.Unicode(length=64), sa.ForeignKey('wms_location.loc_id'), nullable=True, index=True),
     sa.Column('created_by', sa.Unicode(length=255), nullable=True),
-    sa.Column('created_at', sa.DateTime(), nullable=False),
-    sa.Column('shipped_at', sa.DateTime(), nullable=True),
+    sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('shipped_at', sa.DateTime(timezone=True), nullable=True),
     sa.Column('shipment_id', sa.Unicode(length=64), sa.ForeignKey('shipment.shipment_id'), nullable=True, index=True),
     sa.Column('ship_to_id', sa.Unicode(length=64),
               sa.ForeignKey('supplier.supplier_id', name='fk_finished_goods_unit_ship_to_id_supplier'),
@@ -51,7 +51,7 @@ _FGU_BEFORE = sa.Table(
     sa.Column('is_consigned', sa.Boolean(), nullable=False, server_default=sa.false(), index=True),
     sa.Column('source', sa.Unicode(length=32), nullable=True, index=True),
     sa.Column('received_confirmed_by', sa.Unicode(length=255), nullable=True),
-    sa.Column('received_confirmed_at', sa.DateTime(), nullable=True),
+    sa.Column('received_confirmed_at', sa.DateTime(timezone=True), nullable=True),
     sa.Column('shipment_line_type', sa.Unicode(length=32), nullable=True, index=True),
 )
 
@@ -63,7 +63,7 @@ def upgrade() -> None:
         sa.Column('transfer_code', sa.Unicode(length=64), nullable=False),
         sa.Column('to_location_id', sa.Unicode(length=64), sa.ForeignKey('wms_location.loc_id'), nullable=False),
         sa.Column('created_by', sa.Unicode(length=255), nullable=True),
-        sa.Column('created_at', sa.DateTime(), nullable=False),
+        sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
         sa.Column('note', sa.Unicode(length=255), nullable=True),
         sa.Column('fifo_ok', sa.Boolean(), nullable=False, server_default=sa.true()),
         sa.Column('driver_name', sa.Unicode(length=255), nullable=True),
@@ -73,7 +73,7 @@ def upgrade() -> None:
         sa.Column('km', sa.Float(), nullable=True),
         sa.Column('fuel_liters', sa.Float(), nullable=True),
         sa.Column('confirmed_by', sa.Unicode(length=255), nullable=True),
-        sa.Column('confirmed_at', sa.DateTime(), nullable=True),
+        sa.Column('confirmed_at', sa.DateTime(timezone=True), nullable=True),
         sa.PrimaryKeyConstraint('transfer_id'),
     )
     op.create_index('ix_wms_transfer_transfer_code', 'wms_transfer', ['transfer_code'], unique=True)
