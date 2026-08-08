@@ -3069,7 +3069,7 @@ const TRACE_NODE_LABEL = {
   finished_goods_unit: "Đơn vị TP", ship_to: "Nơi xuất",
   shipment_group: "Đã xuất", stock_group: "Còn tồn kho",
 };
-const SHIPMENT_TYPE_LABEL = { promo: "Khuyến mại", return: "Đổi trả", normal: "Thường" };
+const SHIPMENT_TYPE_LABEL = { promo: "Khuyến mại", return: "Đổi trả", normal: "Thường", mixed: "Nhiều loại" };
 function qcPill(q) {
   let text, cls;
   if (q.required_count === 0) { text = "không có chỉ tiêu"; cls = "muted"; }
@@ -5297,7 +5297,8 @@ async function renderRequestsSection() {
 // Chỉ tiêu Đạt/Không đạt được ghi qua nguyên cơ chế so sánh numeric có sẵn (value/lower/upper),
 // không sửa logic đánh giá — quy ước value=1 (Đạt) hoặc 0 (Không đạt), lower=upper=1 để
 // _evaluate()/_evaluate_stage_result() so value==upper==lower ra PASS, khác ra FAIL.
-function qcValueLabel(p, value) {
+function qcValueLabel(p, value, valueText) {
+  if (p.value_type === "text") return valueText ? esc(String(valueText)) : "—";
   if (p.value_type === "pass_fail") return value === 1 ? "Đạt" : value === 0 ? "Không đạt" : esc(String(value));
   return esc(String(value));
 }
@@ -5305,6 +5306,11 @@ function qcValueInputHtml(cls, p) {
   if (p.value_type === "pass_fail") {
     return `<select class="${cls}" data-code="${esc(p.code)}" data-lsl="1" data-usl="1" style="width:130px">
       <option value="">— chọn —</option><option value="1">Đạt</option><option value="0">Không đạt</option></select>`;
+  }
+  // Chỉ tiêu kiểu "text" — người vận hành nhập ghi chú tự do, không so target/USL/LSL, không
+  // tính pass/fail (đánh dấu data-text để submit handler gửi value_text thay vì value số).
+  if (p.value_type === "text") {
+    return `<input type="text" class="${cls}" data-code="${esc(p.code)}" data-text="1" style="width:180px"/>`;
   }
   return `<input type="number" step="any" class="${cls}" data-code="${esc(p.code)}" data-lsl="${p.lsl ?? ""}" data-usl="${p.usl ?? ""}" style="width:110px"/>`;
 }
@@ -5330,8 +5336,8 @@ async function openLotQcModal(lotId, { editable = true } = {}) {
       <thead><tr><th>Chỉ tiêu</th><th>Min</th><th>Max</th><th>Giá trị đã khai báo</th>${st.is_raw_material ? '<th>CA đã khai báo</th>' : ""}<th>Kết quả</th><th>Người/Thời gian điền</th>${editable ? `<th>Nhập giá trị mới</th>${st.is_raw_material ? "<th>Nhập giá trị CA</th>" : ""}` : ""}</tr></thead>
       <tbody>${st.required.map(p => { const r = recordedByParam[p.code]; return `<tr>
         <td>${esc(p.name)}<div class="muted">${esc(p.code)}${p.unit ? " (" + esc(p.unit) + ")" : ""}</div></td>
-        <td>${p.value_type === "pass_fail" ? "—" : (p.lsl ?? "—")}</td><td>${p.value_type === "pass_fail" ? "—" : (p.usl ?? "—")}</td>
-        <td>${r ? qcValueLabel(p, r.value) : "—"}</td>
+        <td>${p.value_type !== "numeric" ? "—" : (p.lsl ?? "—")}</td><td>${p.value_type !== "numeric" ? "—" : (p.usl ?? "—")}</td>
+        <td>${r ? qcValueLabel(p, r.value, r.value_text) : "—"}</td>
         ${st.is_raw_material ? `<td>${r && r.ca_value != null ? esc(String(r.ca_value)) : "—"}</td>` : ""}
         <td>${r ? badge(r.status) + r.status : '<span class="muted">chưa khai báo</span>'}</td>
         <td>${qcRecordedMetaHtml(r)}</td>
@@ -5365,12 +5371,16 @@ async function openLotQcModal(lotId, { editable = true } = {}) {
     }).filter(r => r.hasVal || (r.hasCa && r.prev));
     if (!rows.length) throw new Error("Chưa nhập giá trị nào.");
     for (const { inp, code, hasVal, hasCa, caRaw, prev } of rows) {
+      // Chỉ tiêu kiểu "text" (data-text) — gửi value_text, không so target/USL/LSL, không
+      // parseFloat (xem qcValueInputHtml).
+      const isText = inp.dataset.text === "1";
       await POST("/quality/results", {
         scope_type: "lot", scope_id: lotId, parameter: code,
-        value: hasVal ? parseFloat(inp.value) : (prev ? prev.value : null),
+        value: isText ? null : (hasVal ? parseFloat(inp.value) : (prev ? prev.value : null)),
+        value_text: isText ? (hasVal ? inp.value : (prev ? prev.value_text : null)) : null,
         ca_value: hasCa ? parseFloat(caRaw) : (prev ? prev.ca_value : null),
-        lower_limit: inp.dataset.lsl === "" ? null : parseFloat(inp.dataset.lsl),
-        upper_limit: inp.dataset.usl === "" ? null : parseFloat(inp.dataset.usl),
+        lower_limit: isText ? null : (inp.dataset.lsl === "" ? null : parseFloat(inp.dataset.lsl)),
+        upper_limit: isText ? null : (inp.dataset.usl === "" ? null : parseFloat(inp.dataset.usl)),
       });
     }
     toast("Đã lưu chỉ tiêu"); openLotQcModal(lotId, { editable });
@@ -5407,8 +5417,8 @@ async function openStageQcModal(stage, scopeType, scopeId, opts, onBack) {
       <thead><tr><th>Chỉ tiêu</th><th>Min</th><th>Max</th><th>Giá trị đã khai báo</th><th>Kết quả</th><th>Người/Thời gian điền</th><th>Nhập giá trị mới</th></tr></thead>
       <tbody>${st.required.map(p => { const r = recordedByParam[p.code]; return `<tr>
         <td>${esc(p.name)}<div class="muted">${esc(p.code)}${p.unit ? " (" + esc(p.unit) + ")" : ""}</div></td>
-        <td>${p.value_type === "pass_fail" ? "—" : (p.lsl ?? "—")}</td><td>${p.value_type === "pass_fail" ? "—" : (p.usl ?? "—")}</td>
-        <td>${r ? qcValueLabel(p, r.value) : "—"}</td>
+        <td>${p.value_type !== "numeric" ? "—" : (p.lsl ?? "—")}</td><td>${p.value_type !== "numeric" ? "—" : (p.usl ?? "—")}</td>
+        <td>${r ? qcValueLabel(p, r.value, r.value_text) : "—"}</td>
         <td>${r ? badge(r.status) + r.status : '<span class="muted">chưa khai báo</span>'}</td>
         <td>${qcRecordedMetaHtml(r)}</td>
         <td>${qcValueInputHtml("sqc-val", p)}</td>
@@ -5422,11 +5432,13 @@ async function openStageQcModal(stage, scopeType, scopeId, opts, onBack) {
     const inputs = Array.from(document.querySelectorAll(".sqc-val")).filter(i => i.value !== "");
     if (!inputs.length) throw new Error("Chưa nhập giá trị nào.");
     for (const inp of inputs) {
+      const isText = inp.dataset.text === "1";
       await POST("/brewing/qc-results", {
         stage, scope_type: scopeType, scope_id: scopeId, parameter: inp.dataset.code,
-        value: parseFloat(inp.value),
-        lower_limit: inp.dataset.lsl === "" ? null : parseFloat(inp.dataset.lsl),
-        upper_limit: inp.dataset.usl === "" ? null : parseFloat(inp.dataset.usl),
+        value: isText ? null : parseFloat(inp.value),
+        value_text: isText ? inp.value : null,
+        lower_limit: isText ? null : (inp.dataset.lsl === "" ? null : parseFloat(inp.dataset.lsl)),
+        upper_limit: isText ? null : (inp.dataset.usl === "" ? null : parseFloat(inp.dataset.usl)),
       });
     }
     toast("Đã lưu chỉ tiêu");
@@ -5490,8 +5502,8 @@ async function openFermentQcSampleModal(stage, scopeType, scopeId, productId, on
 
   const formRows = status.required.map(p => `<tr>
       <td>${esc(p.name)}<div class="muted">${esc(p.code)}${p.unit ? " (" + esc(p.unit) + ")" : ""}</div></td>
-      <td>${p.value_type === "pass_fail" ? "—" : (p.lsl ?? "—")}</td>
-      <td>${p.value_type === "pass_fail" ? "—" : (p.usl ?? "—")}</td>
+      <td>${p.value_type !== "numeric" ? "—" : (p.lsl ?? "—")}</td>
+      <td>${p.value_type !== "numeric" ? "—" : (p.usl ?? "—")}</td>
       <td>${qcValueInputHtml("sqc-sample-val", p)}</td>
       </tr>`).join("")
     || `<tr><td colspan=4 class="muted">Chưa gán nhóm chỉ tiêu nào cho công đoạn này (gán ở tab Danh mục).</td></tr>`;
@@ -5503,8 +5515,8 @@ async function openFermentQcSampleModal(stage, scopeType, scopeId, productId, on
         <thead><tr><th>Chỉ tiêu</th><th>Min</th><th>Max</th><th>Giá trị</th><th>Kết quả</th></tr></thead>
         <tbody>${s.results.map(r => `<tr>
           <td>${esc(r.name)}${r.unit ? ` <span class="muted">(${esc(r.unit)})</span>` : ""}</td>
-          <td>${r.lower_limit ?? "—"}</td><td>${r.upper_limit ?? "—"}</td>
-          <td>${qcValueLabel({ value_type: "numeric" }, r.value)}</td>
+          <td>${r.value_type !== "numeric" ? "—" : (r.lower_limit ?? "—")}</td><td>${r.value_type !== "numeric" ? "—" : (r.upper_limit ?? "—")}</td>
+          <td>${qcValueLabel({ value_type: r.value_type || "numeric" }, r.value, r.value_text)}</td>
           <td>${badge(r.status)}${r.status}</td>
           </tr>`).join("")}</tbody>
       </table>
@@ -5532,11 +5544,16 @@ async function openFermentQcSampleModal(stage, scopeType, scopeId, productId, on
     await POST("/brewing/qc-samples", {
       stage, scope_type: scopeType, scope_id: scopeId,
       sampled_at: whenLocal ? new Date(whenLocal).toISOString() : null,
-      results: inputs.map(inp => ({
-        parameter: inp.dataset.code, value: parseFloat(inp.value),
-        lower_limit: inp.dataset.lsl === "" ? null : parseFloat(inp.dataset.lsl),
-        upper_limit: inp.dataset.usl === "" ? null : parseFloat(inp.dataset.usl),
-      })),
+      results: inputs.map(inp => {
+        const isText = inp.dataset.text === "1";
+        return {
+          parameter: inp.dataset.code,
+          value: isText ? null : parseFloat(inp.value),
+          value_text: isText ? inp.value : null,
+          lower_limit: isText ? null : (inp.dataset.lsl === "" ? null : parseFloat(inp.dataset.lsl)),
+          upper_limit: isText ? null : (inp.dataset.usl === "" ? null : parseFloat(inp.dataset.usl)),
+        };
+      }),
     });
     toast("Đã lưu lần lấy mẫu");
     const curView = document.querySelector("#nav button.active")?.dataset.view;
@@ -7149,7 +7166,8 @@ async function printWarehouseIssueSlip(shipment) {
     date: new Date(shipment.created_at),
     recipient_name: shipment.recipient_name,
     recipient_dept: shipment.recipient_dept,
-    type_label: shipment.shipment_type === "promo" ? "Khuyến mại" : shipment.shipment_type === "return" ? "Đổi trả" : "Bán hàng thường",
+    type_label: shipment.shipment_type === "promo" ? "Khuyến mại" : shipment.shipment_type === "return" ? "Đổi trả" :
+      shipment.shipment_type === "mixed" ? "Nhiều loại (xem chi tiết dòng)" : "Bán hàng thường",
     note: shipment.note,
     driver_name: shipment.driver_name,
     vehicle_plate: shipment.vehicle_plate,
@@ -8931,7 +8949,8 @@ VIEWS.reports = async function () {
   const sections = [{ key: "material", label: "Định mức NVL" }, { key: "filling", label: "Chiết (lon)" },
     { key: "keg", label: "Chiết (keg)" }, { key: "lostatus", label: "Trạng thái lô" },
     { key: "yield", label: "Sản lượng lọc" }, { key: "fgship", label: "Xuất TP theo ca" },
-    { key: "phanloai", label: "KM/Đổi trả/Cận date/Gửi" }, { key: "netship", label: "Xuất ròng theo kỳ" }];
+    { key: "phanloai", label: "KM/Đổi trả/Cận date/Gửi" }, { key: "netship", label: "Xuất ròng theo kỳ" },
+    { key: "vehiclegs", label: "🚚 Xe & bia gửi" }];
   let body = "";
 
   if (sec === "material") {
@@ -9183,6 +9202,55 @@ VIEWS.reports = async function () {
           <td><b>${r.net_liters}</b></td></tr>`).join("") ||
           '<tr><td colspan=6 class="muted">Không có dữ liệu xuất trong kỳ này.</td></tr>'}</tbody></table></div></div>
       ${nsrep.unmatched_products.length ? `<div class="panel muted">⚠️ ${nsrep.unmatched_products.length} SKU không suy được dung tích (tên không có ml/L) nên bị loại khỏi tổng lít: ${nsrep.unmatched_products.map(u => esc(u.product_name)).join(", ")}</div>` : ""}`;
+  } else if (sec === "vehiclegs") {
+    // 3 báo cáo: lượt xe & tải trọng (Shipment.vehicle_id, created_at), tổng hợp bia gửi
+    // (ConsignedEntry direction="in", declared_at), định mức nhiên liệu (Shipment.km/fuel_liters,
+    // confirmed_at) — mirror khung từ-đến ngày của "Xuất ròng theo kỳ" (sec === "netship").
+    const vgToday = new Date();
+    const vgFrom30 = new Date(vgToday); vgFrom30.setDate(vgFrom30.getDate() - 30);
+    const vgDateFrom = SUB.vehiclegs_date_from || toISODateLocal(vgFrom30);
+    const vgDateTo = SUB.vehiclegs_date_to || toISODateLocal(vgToday);
+    SUB.vehiclegs_date_from = vgDateFrom; SUB.vehiclegs_date_to = vgDateTo;
+    const vgStart = new Date(vgDateFrom + "T06:00:00");
+    const vgEnd = new Date(vgDateTo + "T06:00:00"); vgEnd.setDate(vgEnd.getDate() + 1);
+    const vgQ = `date_from=${encodeURIComponent(toDTLocal(vgStart))}&date_to=${encodeURIComponent(toDTLocal(vgEnd))}`;
+    const [vgTrip, vgConsigned, vgFuel] = await Promise.all([
+      GET(`/reports/vehicle-trip-report?${vgQ}`), GET(`/reports/consigned-summary-report?${vgQ}`),
+      GET(`/reports/fuel-efficiency-report?${vgQ}`)]);
+    body = `<div class="panel"><h2>🚚 Xe & bia gửi <span class="muted">(${esc(vgDateFrom)} → ${esc(vgDateTo)})</span></h2>
+      <div class="muted" style="margin-bottom:8px">3 báo cáo: (1) số lượt mỗi xe đã chở đi + tổng tải trọng so với khối lượng cho phép (chỉ tính phiếu xuất kho đã gắn xe từ Danh mục lái xe); (2) tổng bia gửi đã nhận về trong kỳ; (3) định mức lít xăng/lít bia + km/lít xăng (chỉ tính phiếu đã duyệt VÀ đã điền km + lít xăng).</div>
+      <div class="row">
+        <div class="field"><label>Từ ngày</label><input id="vg_from" type="date" value="${vgDateFrom}"/></div>
+        <div class="field"><label>Đến ngày</label><input id="vg_to" type="date" value="${vgDateTo}"/></div>
+        <button class="btn" id="vg_apply" style="align-self:flex-end">Xem báo cáo</button>
+      </div></div>
+      <div class="panel"><h2>Lượt xe & tải trọng <span class="muted">(${vgTrip.rows.length} xe)</span></h2>
+        <input class="searchbox" data-tbl="t_vg_trip" placeholder="Tìm theo mã xe, biển số, lái xe..."/>
+        <div class="tablewrap"><table id="t_vg_trip"><thead><tr><th>Mã xe</th><th>Biển số</th><th>Lái xe</th>
+          <th>KL cho phép (kg)</th><th>Số lượt</th><th>Tổng kg</th><th>TB tấn/lượt</th><th>Số lượt vượt tải</th></tr></thead>
+        <tbody>${vgTrip.rows.map(r => `<tr>
+          <td><code class="k">${esc(r.vehicle_code || "—")}</code></td><td>${esc(r.plate || "—")}</td>
+          <td class="muted">${esc(r.driver_name || "—")}</td>
+          <td class="muted">${r.capacity_kg != null ? r.capacity_kg.toLocaleString("vi-VN") : "—"}</td>
+          <td>${r.trip_count}</td><td>${r.total_kg.toLocaleString("vi-VN")}</td><td>${r.avg_tons_per_trip}</td>
+          <td style="color:${r.over_capacity_trip_count > 0 ? "var(--red)" : "var(--muted)"}">${r.over_capacity_trip_count}</td></tr>`).join("") ||
+          '<tr><td colspan=8 class="muted">Không có phiếu xuất kho nào gắn xe trong kỳ này.</td></tr>'}</tbody></table></div></div>
+      <div class="panel"><h2>Tổng hợp bia gửi <span class="muted">(${vgConsigned.rows.length} dòng)</span></h2>
+        <input class="searchbox" data-tbl="t_vg_consigned" placeholder="Tìm theo sản phẩm..."/>
+        <div class="tablewrap"><table id="t_vg_consigned"><thead><tr><th>Sản phẩm</th><th>Loại ĐV</th><th>Tổng SL</th><th>Số lần nhập</th></tr></thead>
+        <tbody>${vgConsigned.rows.map(r => `<tr><td>${esc(r.product_name)}</td>
+          <td>${r.unit_type === "keg" ? "Keg" : "Vỉ"}</td><td>${r.total_quantity}</td><td>${r.entry_count}</td></tr>`).join("") ||
+          '<tr><td colspan=4 class="muted">Không có bia gửi nào được nhập trong kỳ này.</td></tr>'}</tbody></table></div></div>
+      <div class="panel"><h2>Định mức nhiên liệu <span class="muted">(${vgFuel.rows.length} phiếu)</span></h2>
+        <input class="searchbox" data-tbl="t_vg_fuel" placeholder="Tìm theo mã phiếu, biển số..."/>
+        <div class="tablewrap"><table id="t_vg_fuel"><thead><tr><th>Phiếu</th><th>Mã xe</th><th>Biển số</th><th>Lái xe</th>
+          <th>Km</th><th>Lít xăng</th><th>Lít bia</th><th>Lít xăng/lít bia</th><th>Km/lít xăng</th></tr></thead>
+        <tbody>${vgFuel.rows.map(r => `<tr><td><code class="k">${esc(r.shipment_code)}</code></td>
+          <td class="muted">${esc(r.vehicle_code || "—")}</td><td>${esc(r.plate || "—")}</td>
+          <td class="muted">${esc(r.driver_name || "—")}</td><td>${r.km}</td><td>${r.fuel_liters}</td>
+          <td>${r.liters_beer}</td><td>${r.l_fuel_per_l_beer != null ? r.l_fuel_per_l_beer : "—"}</td>
+          <td>${r.km_per_l_fuel != null ? r.km_per_l_fuel : "—"}</td></tr>`).join("") ||
+          '<tr><td colspan=9 class="muted">Chưa có phiếu nào đã duyệt VÀ đã điền km + lít xăng trong kỳ này.</td></tr>'}</tbody></table></div></div>`;
   }
 
   $("view-reports").innerHTML = subnav("reports", sections, sec) + body;
@@ -9203,6 +9271,16 @@ VIEWS.reports = async function () {
     $("ns_apply").onclick = () => {
       SUB.netship_date_from = $("ns_from").value;
       SUB.netship_date_to = $("ns_to").value;
+      render("reports");
+    };
+  }
+  if (sec === "vehiclegs") {
+    wirePaginate("t_vg_trip", 20);
+    wirePaginate("t_vg_consigned", 20);
+    wirePaginate("t_vg_fuel", 20);
+    $("vg_apply").onclick = () => {
+      SUB.vehiclegs_date_from = $("vg_from").value;
+      SUB.vehiclegs_date_to = $("vg_to").value;
       render("reports");
     };
   }
@@ -9821,18 +9899,22 @@ VIEWS.master = async function () {
         <div class="field"><label>Dung tích/1 đơn vị (lít)</label><input id="fp_volumel" type="number" step="0.01" placeholder="VD 0.33" style="width:100px"/></div>
         <div class="field"><label>Loại sản phẩm</label><select id="fp_cat"><option value="">(không chọn)</option>${fpCats.map(c => `<option>${esc(c)}</option>`).join("")}</select></div>
         <div class="field"><label>Dịch bia gốc (tuỳ chọn)</label><select id="fp_product"><option value="">(không chọn)</option>${products.map(p => `<option value="${p.product_id}">${esc(p.code)}</option>`).join("")}</select></div>
+        <div class="field"><label>Khối lượng/1 đơn vị (vỉ hoặc keg) (kg)</label><input id="fp_weightcase" type="number" step="0.01" placeholder="VD 9.6" style="width:120px"/></div>
+        <div class="field"><label>Khối lượng/1 lon-chai (kg)</label><input id="fp_weightunit" type="number" step="0.01" placeholder="VD 0.4" style="width:110px"/></div>
       </div>
-      <div class="muted" style="font-size:12px;margin-top:4px">Vỉ: SL/1 đơn vị = số lon/vỉ (VD 24). Keg: mỗi keg tự nó là 1 đơn vị (SL/1 đơn vị = 1). Dung tích/1 đơn vị dùng để đối chiếu Ca1+Ca2+Ca3 với V cấp chiết lúc "Kết thúc chiết" — để trống thì bỏ qua đối chiếu.
+      <div class="muted" style="font-size:12px;margin-top:4px">Vỉ: SL/1 đơn vị = số lon/vỉ (VD 24). Keg: mỗi keg tự nó là 1 đơn vị (SL/1 đơn vị = 1). Dung tích/1 đơn vị dùng để đối chiếu Ca1+Ca2+Ca3 với V cấp chiết lúc "Kết thúc chiết" — để trống thì bỏ qua đối chiếu. Khối lượng dùng cho báo cáo tải trọng xe (Báo cáo → Xe & bia gửi): "Khối lượng/1 đơn vị" = 1 vỉ HOẶC 1 keg nguyên; "Khối lượng/1 lon-chai" chỉ áp dụng khi SKU vỉ bị phân rã thành lon/chai lẻ.
       <div class="field" style="margin-top:6px"><label>Mô tả</label><input id="fp_desc" placeholder="(tuỳ chọn)" style="width:100%"/></div>
       <button class="btn" id="fp_add" style="margin-top:10px">+ Tạo sản phẩm</button>` : ""}
       <input class="searchbox" data-tbl="t_fp" placeholder="Tìm theo mã, tên, loại sản phẩm..." style="margin-top:10px"/>
       <div class="tablewrap" style="margin-top:12px"><table id="t_fp">
-        <thead><tr><th>Mã</th><th>Tên</th><th>ĐVT</th><th>Loại đơn vị</th><th>SL/1 đơn vị</th><th>Dung tích/1 đơn vị (l)</th><th>Loại sản phẩm</th><th>Dịch bia gốc</th><th>Mô tả</th>${canManage ? "<th></th>" : ""}</tr></thead>
+        <thead><tr><th>Mã</th><th>Tên</th><th>ĐVT</th><th>Loại đơn vị</th><th>SL/1 đơn vị</th><th>Dung tích/1 đơn vị (l)</th><th>KL/1 vỉ-keg (kg)</th><th>KL/1 lon-chai (kg)</th><th>Loại sản phẩm</th><th>Dịch bia gốc</th><th>Mô tả</th>${canManage ? "<th></th>" : ""}</tr></thead>
         <tbody>${finishedProducts.map(fp => { const prod = products.find(p => p.product_id === fp.product_id); return `<tr>
           <td><code class="k">${esc(fp.code)}</code></td><td>${esc(fp.name)}</td><td>${esc(fp.uom)}</td>
           <td>${esc((unitTypes.find(ut => ut.code === fp.unit_type) || {}).name || fp.unit_type)}</td>
           <td>${fp.pack_size}</td>
           <td class="muted">${fp.unit_volume_l != null ? fp.unit_volume_l : "—"}</td>
+          <td class="muted">${fp.weight_primary_kg != null ? fp.weight_primary_kg : "—"}</td>
+          <td class="muted">${fp.weight_single_kg != null ? fp.weight_single_kg : "—"}</td>
           <td class="muted">${esc(fp.category || "—")}</td>
           <td class="muted">${prod ? esc(prod.code) : "—"}</td>
           <td class="muted">${esc(fp.description || "—")}</td>
@@ -9877,7 +9959,8 @@ VIEWS.master = async function () {
         <div class="field"><label>Tên chỉ tiêu</label><input id="qp_name" placeholder="Độ ẩm"/></div>
         <div class="field"><label>Kiểu ghi nhận</label><select id="qp_value_type">
           <option value="numeric">Nhập số (so target/USL/LSL)</option>
-          <option value="pass_fail">Đạt / Không đạt</option></select></div>
+          <option value="pass_fail">Đạt / Không đạt</option>
+          <option value="text">Nhập text (không so sánh)</option></select></div>
         <div class="field"><label>ĐVT</label><input id="qp_unit" placeholder="%" style="width:80px"/></div>
         <div class="field"><label>Phương pháp thử</label><input id="qp_method" placeholder="(tuỳ chọn)"/></div>
         <button class="btn" id="qp_add" style="align-self:flex-end">+ Tạo chỉ tiêu</button>
@@ -9887,7 +9970,7 @@ VIEWS.master = async function () {
         <thead><tr><th>Mã CT</th><th>Tên</th><th>Kiểu</th><th>ĐVT</th><th>Phương pháp thử</th><th>Trạng thái</th>${canManage ? "<th></th>" : ""}</tr></thead>
         <tbody>${qcParams.map(p => `<tr>
           <td><code class="k">${esc(p.code)}</code></td><td>${esc(p.name)}</td>
-          <td class="muted">${p.value_type === "pass_fail" ? "Đạt/Không đạt" : "Số"}</td>
+          <td class="muted">${p.value_type === "pass_fail" ? "Đạt/Không đạt" : p.value_type === "text" ? "Text" : "Số"}</td>
           <td class="muted">${esc(p.unit || "—")}</td><td class="muted">${esc(p.method || "—")}</td>
           <td>${badge(p.active ? "available" : "obsolete")}${p.active ? "hoạt động" : "ngừng"}</td>
           ${canManage ? `<td style="white-space:nowrap"><button class="btn sm sec" data-qpedit="${esc(p.param_id)}">Sửa</button>
@@ -9909,14 +9992,14 @@ VIEWS.master = async function () {
       </div>` : ""}
       <input class="searchbox" data-tbl="t_qcgroups" placeholder="Tìm mã/tên nhóm chỉ tiêu..." style="margin-top:10px"/>
       <div class="tablewrap" style="margin-top:8px"><table id="t_qcgroups">
-        <thead><tr><th>Mã</th><th>Tên</th><th>Ghi chú</th><th>Trạng thái</th>${canManage ? "<th></th>" : ""}</tr></thead>
+        <thead><tr><th>Mã</th><th>Tên</th><th>Ghi chú</th><th>Trạng thái</th><th></th></tr></thead>
         <tbody>${qcGroups.map(g => `<tr>
           <td><code class="k">${esc(g.code)}</code></td><td>${esc(g.name)}</td>
           <td class="muted">${esc(g.note || "—")}</td>
           <td>${badge(g.active ? "available" : "obsolete")}${g.active ? "hoạt động" : "ngừng"}</td>
-          ${canManage ? `<td style="white-space:nowrap"><button class="btn sm sec" data-qgi="${esc(g.group_id)}">Chỉ tiêu trong nhóm</button>
-            <button class="btn sm sec" data-qgedit="${esc(g.group_id)}">Sửa</button>
-            <button class="btn sm sec" data-qgdel="${esc(g.group_id)}">Xóa</button></td>` : ""}</tr>`).join("")}</tbody>
+          <td style="white-space:nowrap"><button class="btn sm sec" data-qgi="${esc(g.group_id)}">Chỉ tiêu trong nhóm</button>
+            ${canManage ? `<button class="btn sm sec" data-qgedit="${esc(g.group_id)}">Sửa</button>
+            <button class="btn sm sec" data-qgdel="${esc(g.group_id)}">Xóa</button>` : ""}</td></tr>`).join("")}</tbody>
       </table></div>
     </div>
 
@@ -10009,8 +10092,14 @@ VIEWS.master = async function () {
   wirePaginate("t_lines_line", 10);
   wirePaginate("t_lines_tank", 10);
   wirePaginate("t_lines_tank_bbt", 10);
+  // Xem chỉ tiêu trong nhóm là hành động chỉ-đọc — luôn cho phép bấm dù không có quyền
+  // master.manage (khối if (canManage) dưới đây chỉ chứa các hành động tạo/sửa/xóa).
+  document.querySelectorAll("[data-qgi]").forEach(b => b.onclick = () => {
+    const g = qcGroups.find(x => x.group_id === b.dataset.qgi);
+    openQcGroupItemsModal(g);
+  });
   if (canManage) {
-    $("pr_add").onclick = () => guard(async () => {
+    if ($("pr_add")) $("pr_add").onclick = () => guard(async () => {
       await POST("/products", { code: $("pr_code").value.trim(), name: $("pr_name").value.trim(),
         uom: $("pr_uom").value.trim() || "L", description: $("pr_desc").value.trim() || null,
         ferment_days_std: $("pr_ferment_days").value === "" ? null : parseInt($("pr_ferment_days").value, 10),
@@ -10218,7 +10307,7 @@ VIEWS.master = async function () {
       await DELETE(`/material-alt-groups/${b.dataset.magdel}`);
       toast("Đã xóa nhóm vật tư thay thế"); render("master");
     }));
-    $("mt_add").onclick = () => guard(async () => {
+    if ($("mt_add")) $("mt_add").onclick = () => guard(async () => {
       await POST("/materials", { code: $("mt_code").value.trim(), name: $("mt_name").value.trim(),
         uom: $("mt_uom").value.trim() || "kg", category: $("mt_cat").value,
         stock_min: $("mt_stockmin").value === "" ? null : parseFloat($("mt_stockmin").value),
@@ -10312,7 +10401,9 @@ VIEWS.master = async function () {
         uom: $("fp_uom").value.trim() || "L", product_id: $("fp_product").value || null,
         unit_type: $("fp_unittype").value, pack_size: parseInt($("fp_pack").value, 10) || 24,
         unit_volume_l: $("fp_volumel").value === "" ? null : parseFloat($("fp_volumel").value),
-        category: $("fp_cat").value || null, description: $("fp_desc").value.trim() || null });
+        category: $("fp_cat").value || null, description: $("fp_desc").value.trim() || null,
+        weight_primary_kg: $("fp_weightcase").value === "" ? null : parseFloat($("fp_weightcase").value),
+        weight_single_kg: $("fp_weightunit").value === "" ? null : parseFloat($("fp_weightunit").value) });
       toast("Đã tạo sản phẩm"); render("master");
     });
     document.querySelectorAll("[data-efp]").forEach(b => b.onclick = () => {
@@ -10328,6 +10419,8 @@ VIEWS.master = async function () {
         <div class="field" style="margin-top:8px"><label>Dung tích/1 đơn vị (lít)</label><input id="efp_volumel" type="number" step="0.01" placeholder="VD 0.33" value="${fp.unit_volume_l != null ? fp.unit_volume_l : ""}"/></div>
         <div class="field" style="margin-top:8px"><label>Loại sản phẩm</label><select id="efp_cat"><option value="">(không chọn)</option>${fpCats.map(c => `<option ${c === fp.category ? "selected" : ""}>${esc(c)}</option>`).join("")}</select></div>
         <div class="field" style="margin-top:8px"><label>Dịch bia gốc</label><select id="efp_product"><option value="">(không chọn)</option>${products.map(p => `<option value="${p.product_id}" ${p.product_id === fp.product_id ? "selected" : ""}>${esc(p.code)}</option>`).join("")}</select></div>
+        <div class="field" style="margin-top:8px"><label>Khối lượng/1 đơn vị (vỉ hoặc keg) (kg)</label><input id="efp_weightcase" type="number" step="0.01" value="${fp.weight_primary_kg != null ? fp.weight_primary_kg : ""}"/></div>
+        <div class="field" style="margin-top:8px"><label>Khối lượng/1 lon-chai (kg)</label><input id="efp_weightunit" type="number" step="0.01" value="${fp.weight_single_kg != null ? fp.weight_single_kg : ""}"/></div>
         <div class="field" style="margin-top:8px"><label>Mô tả</label><input id="efp_desc" value="${esc(fp.description || "")}"/></div>
         <button class="btn" id="efp_save" style="margin-top:12px">Lưu</button>`);
       $("efp_save").onclick = () => guard(async () => {
@@ -10336,7 +10429,9 @@ VIEWS.master = async function () {
           product_id: $("efp_product").value || null, unit_type: $("efp_unittype").value,
           pack_size: parseInt($("efp_pack").value, 10) || 24,
           unit_volume_l: $("efp_volumel").value === "" ? null : parseFloat($("efp_volumel").value),
-          category: $("efp_cat").value || null, description: $("efp_desc").value.trim() || null });
+          category: $("efp_cat").value || null, description: $("efp_desc").value.trim() || null,
+          weight_primary_kg: $("efp_weightcase").value === "" ? null : parseFloat($("efp_weightcase").value),
+          weight_single_kg: $("efp_weightunit").value === "" ? null : parseFloat($("efp_weightunit").value) });
         closeModal(); toast("Đã cập nhật"); render("master");
       });
     });
@@ -10387,8 +10482,9 @@ VIEWS.master = async function () {
         <div class="field"><label>Mã CT</label><input id="qpe_code" value="${esc(p.code)}"/></div>
         <div class="field" style="margin-top:8px"><label>Tên chỉ tiêu</label><input id="qpe_name" value="${esc(p.name)}"/></div>
         <div class="field" style="margin-top:8px"><label>Kiểu ghi nhận</label><select id="qpe_value_type">
-          <option value="numeric" ${p.value_type !== "pass_fail" ? "selected" : ""}>Nhập số (so target/USL/LSL)</option>
-          <option value="pass_fail" ${p.value_type === "pass_fail" ? "selected" : ""}>Đạt / Không đạt</option></select></div>
+          <option value="numeric" ${p.value_type !== "pass_fail" && p.value_type !== "text" ? "selected" : ""}>Nhập số (so target/USL/LSL)</option>
+          <option value="pass_fail" ${p.value_type === "pass_fail" ? "selected" : ""}>Đạt / Không đạt</option>
+          <option value="text" ${p.value_type === "text" ? "selected" : ""}>Nhập text (không so sánh)</option></select></div>
         <div class="field" style="margin-top:8px"><label>ĐVT</label><input id="qpe_unit" value="${esc(p.unit || "")}"/></div>
         <div class="field" style="margin-top:8px"><label>Phương pháp thử</label><input id="qpe_method" value="${esc(p.method || "")}"/></div>
         <button class="btn" id="qpe_save" style="margin-top:12px">Lưu</button>`);
@@ -10414,17 +10510,13 @@ VIEWS.master = async function () {
       toast("Đã xóa chỉ tiêu"); render("master");
     }));
 
-    $("qg_add").onclick = () => guard(async () => {
+    if ($("qg_add")) $("qg_add").onclick = () => guard(async () => {
       const code = $("qg_code").value.trim(), name = $("qg_name").value.trim();
       if (!code || !name) throw new Error("Nhập đủ Mã nhóm và Tên nhóm.");
       await POST("/qc/groups", { code, name, note: $("qg_note").value.trim() || null });
       toast("Đã tạo nhóm chỉ tiêu"); render("master");
     });
 
-    document.querySelectorAll("[data-qgi]").forEach(b => b.onclick = () => {
-      const g = qcGroups.find(x => x.group_id === b.dataset.qgi);
-      openQcGroupItemsModal(g);
-    });
     document.querySelectorAll("[data-qgedit]").forEach(b => b.onclick = () => {
       const g = qcGroups.find(x => x.group_id === b.dataset.qgedit);
       modal(`<h3>Sửa nhóm chỉ tiêu</h3>
@@ -10535,19 +10627,22 @@ VIEWS.master = async function () {
     const params = allParams.filter(p => !p.stage);
     const paramOpts = params.map(p => `<option value="${esc(p.param_id)}">${esc(p.code)} — ${esc(p.name)}${p.unit ? " (" + esc(p.unit) + ")" : ""}</option>`).join("");
     modal(`<h3>Chỉ tiêu trong nhóm — ${esc(group.name)}</h3>
+      ${canManage ? "" : `<div class="muted" style="margin-bottom:8px">Bạn chỉ có quyền xem (cần quyền <code class="k">master.manage</code> để thêm/sửa/xóa chỉ tiêu trong nhóm).</div>`}
       <div class="tablewrap"><table>
-        <thead><tr><th>Mã CT</th><th>Tên</th><th>ĐVT</th><th>Min</th><th>Max</th><th>Bắt buộc</th><th></th></tr></thead>
+        <thead><tr><th>Mã CT</th><th>Tên</th><th>ĐVT</th><th>Min</th><th>Max</th><th>Bắt buộc</th>${canManage ? "<th></th>" : ""}</tr></thead>
         <tbody>${items.map(it => `<tr>
           <td><code class="k">${esc(it.param_code || "—")}</code></td><td>${esc(it.param_name || "—")}</td>
           <td>${esc(it.param_unit || "—")}</td>
-          <td><input type="number" step="any" class="qgi-lsl-edit" data-item="${esc(it.item_id)}" value="${it.lsl_override ?? ""}" style="width:85px"/></td>
+          ${canManage ? `<td><input type="number" step="any" class="qgi-lsl-edit" data-item="${esc(it.item_id)}" value="${it.lsl_override ?? ""}" style="width:85px"/></td>
           <td><input type="number" step="any" class="qgi-usl-edit" data-item="${esc(it.item_id)}" value="${it.usl_override ?? ""}" style="width:85px"/></td>
           <td><input type="checkbox" class="qgi-mand-edit" data-item="${esc(it.item_id)}" ${it.mandatory ? "checked" : ""}/></td>
           <td style="white-space:nowrap"><button class="btn sm sec" data-saveitem="${esc(it.item_id)}">Lưu</button>
-            <button class="btn sm sec" data-delitem="${esc(it.item_id)}">Xóa</button></td></tr>`).join("") ||
-          `<tr><td colspan="7" class="muted">Chưa có chỉ tiêu nào trong nhóm.</td></tr>`}</tbody>
+            <button class="btn sm sec" data-delitem="${esc(it.item_id)}">Xóa</button></td>` : `<td>${it.lsl_override ?? "—"}</td>
+          <td>${it.usl_override ?? "—"}</td>
+          <td>${it.mandatory ? "Có" : "Không"}</td>`}</tr>`).join("") ||
+          `<tr><td colspan="${canManage ? 7 : 6}" class="muted">Chưa có chỉ tiêu nào trong nhóm.</td></tr>`}</tbody>
       </table></div>
-      <h4 style="margin-top:14px">+ Thêm chỉ tiêu vào nhóm</h4>
+      ${canManage ? `<h4 style="margin-top:14px">+ Thêm chỉ tiêu vào nhóm</h4>
       <div class="row">
         <div class="field" style="min-width:220px"><label>Chỉ tiêu</label><select id="qgi_param">${paramOpts || "<option value=''>(chưa có chỉ tiêu nào — tạo ở Danh mục chỉ tiêu chất lượng)</option>"}</select></div>
         <div class="field"><label>Min (LSL)</label><input id="qgi_lsl" type="number" step="any" style="width:90px"/></div>
@@ -10564,8 +10659,9 @@ VIEWS.master = async function () {
           "<option value=''>(không có nhóm nào khác)</option>"}</select></div>
         <button class="btn sec" id="qgi_copy" style="align-self:flex-end">Copy vào nhóm này</button>
       </div>
-      <div class="muted" style="margin-top:6px">Copy toàn bộ chỉ tiêu (kèm Min/Max/Bắt buộc) từ nhóm nguồn sang nhóm "${esc(group.name)}".</div>`}`);
+      <div class="muted" style="margin-top:6px">Copy toàn bộ chỉ tiêu (kèm Min/Max/Bắt buộc) từ nhóm nguồn sang nhóm "${esc(group.name)}".</div>`}` : ""}`);
 
+    if (!canManage) return;
     $("qgi_add").onclick = () => guard(async () => {
       const paramId = $("qgi_param").value;
       if (!paramId) throw new Error("Chưa có chỉ tiêu để thêm — tạo chỉ tiêu mới trước.");

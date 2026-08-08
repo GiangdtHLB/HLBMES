@@ -60,9 +60,16 @@ def record_result(db: Session, payload: dict, user: User) -> QualityResult:
     _assert_scope_exists(db, scope_type, scope_id)
 
     value = payload.get("value")
+    value_text = payload.get("value_text")
     lower = payload.get("lower_limit")
     upper = payload.get("upper_limit")
-    status = _evaluate(value, lower, upper)
+    # Chỉ tiêu kiểu "text" (value_text có nội dung) — ghi chú tự do, không so target/USL/LSL,
+    # không tính pass/fail (khác hẳn numeric/pass_fail — xem QCParameter.value_type).
+    if value_text:
+        status = ResultStatus.PASS.value
+        value, lower, upper = None, None, None
+    else:
+        status = _evaluate(value, lower, upper)
     result = QualityResult(
         result_id=new_id(),
         sample_id=payload.get("sample_id") or f"S-{new_id()[:8].upper()}",
@@ -72,6 +79,7 @@ def record_result(db: Session, payload: dict, user: User) -> QualityResult:
         method=payload.get("method"),
         instrument=payload.get("instrument"),
         value=value,
+        value_text=value_text,
         ca_value=payload.get("ca_value"),
         unit=payload.get("unit"),
         lower_limit=lower,

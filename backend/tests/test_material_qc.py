@@ -748,23 +748,28 @@ def test_opening_balance_wms_build_units_requires_admin(client, admin_h, thukho_
                            "unit_type": "vi", "pack_size": 24})
     assert fp.status_code == 201, fp.text
     fp_id = fp.json()["finished_product_id"]
+    loc = client.post("/api/wms/locations", headers=admin_h,
+                      json={"code": "OB-LOC-01", "name": "Vị trí tồn đầu test", "capacity": 1000})
+    assert loc.status_code == 201, loc.text
+    loc_id = loc.json()["loc_id"]
 
     denied = client.post("/api/wms/units", headers=thukho_h,
                          json={"finished_product_id": fp_id, "product_name": "OB-FP-TEST",
                                "lot_code": "OB-LOT-01", "total": 240, "pack_size": 24,
-                               "unit_type": "vi", "is_opening_balance": True})
+                               "unit_type": "vi", "is_opening_balance": True, "loc_id": loc_id})
     assert denied.status_code == 403, denied.text
 
     ok = client.post("/api/wms/units", headers=admin_h,
                      json={"finished_product_id": fp_id, "product_name": "OB-FP-TEST",
                            "lot_code": "OB-LOT-01", "total": 240, "pack_size": 24,
-                           "unit_type": "vi", "is_opening_balance": True})
+                           "unit_type": "vi", "is_opening_balance": True, "loc_id": loc_id})
     assert ok.status_code == 201, ok.text
 
     # Nhập kho thủ công thường (không đánh dấu tồn đầu) vẫn mở cho ai có quyền warehouse.receive.
     normal = client.post("/api/wms/units", headers=thukho_h,
                         json={"finished_product_id": fp_id, "product_name": "OB-FP-TEST",
-                              "lot_code": "OB-LOT-02", "total": 48, "pack_size": 24, "unit_type": "vi"})
+                              "lot_code": "OB-LOT-02", "total": 48, "pack_size": 24, "unit_type": "vi",
+                              "loc_id": loc_id})
     assert normal.status_code == 201, normal.text
 
 

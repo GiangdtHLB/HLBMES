@@ -251,7 +251,8 @@ def test_wms_location_delete_blocked_when_unit_stored(client, admin_h, vanhanh_h
                       json={"code": "TEST-LOC-02", "name": "Vị trí test 2", "capacity": 5}).json()
     build = client.post("/api/wms/units", headers=admin_h,
                         json={"finished_product_id": fp.json()["finished_product_id"],
-                              "product_name": "TEST-SKU-LOC02", "lot_code": "TEST-LOT", "total": 48, "pack_size": 24})
+                              "product_name": "TEST-SKU-LOC02", "lot_code": "TEST-LOT", "total": 48, "pack_size": 24,
+                              "loc_id": loc["loc_id"]})
     assert build.status_code == 201, build.text
     unit_code = build.json()["unit_codes"][0]
     units = client.get("/api/wms/units", headers=admin_h).json()

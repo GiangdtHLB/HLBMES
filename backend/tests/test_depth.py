@@ -271,7 +271,7 @@ def test_wms_unit_lifecycle(client):
     r = client.post("/api/wms/units", headers=h,
                     json={"finished_product_id": fp.json()["finished_product_id"],
                           "product_name": "SKU-DEPTHLC01", "lot_code": "PKG-DEPTHLC01",
-                          "total": 240, "pack_size": 24})
+                          "total": 240, "pack_size": 24, "loc_id": loc.json()["loc_id"]})
     assert r.status_code == 201
     uid = None
     units = client.get("/api/wms/units", headers=h).json()

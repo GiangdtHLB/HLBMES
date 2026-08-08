@@ -113,8 +113,9 @@ def _a_filter_master_order_with_lines(client, admin_h, vanhanh_h, suffix, mat_id
     return r.json()["filter_master_order_id"]
 
 
-def test_preview_source_materials_brew_order_skips_header_row(client, admin_h):
+def test_preview_source_materials_brew_order_skips_header_row(client, admin_h, thukho_h):
     mat_id = _create_material(client, admin_h, "SRC-BREW-MAT")
+    _receive(client, thukho_h, "LOT-SRCPRE-01", mat_id, 50)
     order_id = _a_brew_order_with_lines(client, admin_h, "LN-SRCPRE01", mat_id, qty_total=12.5)
 
     r = client.get("/api/warehouse/requests/source-preview", headers=admin_h,
@@ -141,13 +142,14 @@ def test_preview_source_materials_filter_master_order_sums_across_children(clien
     assert lines[0]["quantity"] == 6   # 3 + 3 gộp từ 2 lệnh nhỏ
 
 
-def test_preview_source_materials_brew_order_surfaces_group_line_instead_of_dropping(client, admin_h):
+def test_preview_source_materials_brew_order_surfaces_group_line_instead_of_dropping(client, admin_h, thukho_h):
     """Regression: dòng NVL khai theo Nhóm vật tư thay thế (alt_group_code, material_id=None)
     từng bị BỎ QUA HOÀN TOÀN ở đây (services/warehouse.py::_aggregate_source_material_lines)
     vì code cũ chặn `not l["material_id"]` — giờ phải trả về riêng với is_group=True kèm
     member_material_ids, để frontend cảnh báo thủ kho tự chọn mã cụ thể."""
     m1 = _create_material(client, admin_h, "SRC-GRP-MAT-1")
     m2 = _create_material(client, admin_h, "SRC-GRP-MAT-2")
+    _receive(client, thukho_h, "LOT-SRCGRP-01", m1, 500)
     g = client.post("/api/material-alt-groups", headers=admin_h, json={
         "code": "SRC-ALTGRP-01", "name": "Nhóm test nạp lệnh", "unit": "kg",
         "member_material_ids": [m1, m2]}).json()
@@ -223,8 +225,8 @@ def test_preview_source_materials_not_found(client, admin_h):
 
 def test_create_request_with_source_stores_and_shows_label(client, admin_h, thukho_h, vanhanh_h):
     mat_id = _create_material(client, admin_h, "SRC-CREATE-MAT")
-    order_id = _a_brew_order_with_lines(client, admin_h, "LN-SRCCREATE01", mat_id, qty_total=5)
     _receive(client, thukho_h, "LOT-SRCCREATE-01", mat_id, 50)
+    order_id = _a_brew_order_with_lines(client, admin_h, "LN-SRCCREATE01", mat_id, qty_total=5)
 
     r = client.post("/api/warehouse/requests", headers=vanhanh_h, json={
         "lines": [{"material_id": mat_id, "quantity": 5, "uom": "kg"}],

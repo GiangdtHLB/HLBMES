@@ -176,6 +176,8 @@ class FinishedProductIn(BaseModel):
     category: Optional[str] = None     # Bia chai|Bia lon|Bia hơi|Bia tươi...
     description: Optional[str] = None
     unit_volume_l: Optional[float] = None   # dung tích 1 đơn vị đóng gói (lít) — để đối chiếu lúc kết thúc chiết
+    weight_primary_kg: Optional[float] = None   # khối lượng (kg) 1 vỉ/keg NGUYÊN (đơn vị đóng gói chính)
+    weight_single_kg: Optional[float] = None    # khối lượng (kg) 1 lon/chai lẻ (sau khi phân rã)
 
 
 class FinishedProductOut(ORMModel):
@@ -189,6 +191,8 @@ class FinishedProductOut(ORMModel):
     category: Optional[str] = None
     description: Optional[str] = None
     unit_volume_l: Optional[float] = None
+    weight_primary_kg: Optional[float] = None
+    weight_single_kg: Optional[float] = None
 
 
 class MaterialIn(BaseModel):
@@ -451,12 +455,28 @@ class AutoScheduleIn(BaseModel):
 
 
 # ---- WMS ----
+class WmsWarehouseIn(BaseModel):
+    code: str
+    name: str
+    address: Optional[str] = None
+
+
+class WmsWarehouseUpdate(BaseModel):
+    code: Optional[str] = None
+    name: Optional[str] = None
+    address: Optional[str] = None
+    active: Optional[bool] = None
+
+
 class WmsLocationIn(BaseModel):
     code: str
     name: str
     zone: Optional[str] = None
     kind: str = "bin"
     capacity: int = 10
+    # Kho thành phẩm cha — optional ở schema để không phá các API call cũ (test/import) chưa
+    # gửi trường này, nhưng UI (Danh mục vị trí kho) luôn bắt chọn khi khai báo vị trí mới.
+    warehouse_id: Optional[str] = None
 
 
 class WmsLocationUpdate(BaseModel):
@@ -466,6 +486,7 @@ class WmsLocationUpdate(BaseModel):
     kind: Optional[str] = None
     capacity: Optional[int] = None
     active: Optional[bool] = None
+    warehouse_id: Optional[str] = None
 
 
 class UnitBuildIn(BaseModel):
@@ -539,6 +560,9 @@ class ShipmentLineIn(BaseModel):
     quantity: int
     near_expiry_only: bool = False  # chỉ chọn vỉ/keg từ "Nhập bia cận date" (is_near_expiry=True)
     consigned_only: bool = False    # chỉ chọn vỉ/keg từ "Nhập bia gửi" (is_consigned=True)
+    # normal | promo | return — RIÊNG TỪNG DÒNG (1 phiếu có thể gồm nhiều sản phẩm với loại
+    # xuất khác nhau, cùng 1 nhà phân phối) — xem FinishedGoodsUnit.shipment_line_type.
+    shipment_type: str = "normal"
 
 
 class ShipmentIn(BaseModel):
@@ -549,9 +573,9 @@ class ShipmentIn(BaseModel):
     recipient_dept: Optional[str] = None        # Địa chỉ (bộ phận)
     driver_name: Optional[str] = None           # Lái xe
     vehicle_plate: Optional[str] = None         # Biển số xe
+    vehicle_id: Optional[str] = None            # Liên kết ổn định tới Danh mục lái xe (báo cáo lượt xe)
     from_location: Optional[str] = None         # Xuất tại kho (ngăn lô)
     delivery_place: Optional[str] = None        # Địa điểm
-    shipment_type: str = "normal"                # normal | promo | return — nhãn phân loại, không đổi luồng tồn kho
 
 
 class ShipmentUpdate(BaseModel):
@@ -565,6 +589,46 @@ class ShipmentUpdate(BaseModel):
     from_location: Optional[str] = None
     delivery_place: Optional[str] = None
     shipment_type: Optional[str] = None
+
+
+class WmsTransferLineIn(BaseModel):
+    """1 dòng trong phiếu điều chuyển nội bộ kho thành phẩm — mirror ShipmentLineIn nhưng KHÔNG
+    có near_expiry_only/consigned_only/shipment_type (không có ý nghĩa cho luồng nội bộ, xem
+    services/wms.py::create_transfer). Tên có tiền tố "Wms" để tránh trùng TransferIn (điều
+    chuyển NVL Kho phân xưởng<->Kho công ty, xem services/warehouse.py) đã có sẵn ở dưới."""
+    product_name: str
+    lot_code: Optional[str] = None
+    unit_type: str
+    quantity: int
+    # Vị trí kho NGUỒN của dòng này — frontend luôn gửi (đã tách picker theo từng vị trí) để
+    # FIFO chỉ lấy đúng đơn vị đang ở vị trí đó, không lẫn qua vị trí khác cùng lô (xem
+    # services/wms.py::create_transfer). Optional ở schema để không phá request cũ.
+    location_id: Optional[str] = None
+
+
+class WmsTransferIn(BaseModel):
+    to_location_id: str
+    lines: list[WmsTransferLineIn]
+    note: Optional[str] = None
+    driver_name: Optional[str] = None
+    vehicle_plate: Optional[str] = None
+    vehicle_id: Optional[str] = None
+
+
+class WmsTransferUpdate(BaseModel):
+    """Sửa thông tin đầu phiếu điều chuyển — mirror ShipmentUpdate, KHÔNG có to_location_id/lines
+    (đổi vị trí đích/dòng hàng sau khi đã chuyển thật là vô nghĩa — phải Hoàn tác + lập phiếu
+    mới). Chặn sửa nếu phiếu đã được duyệt (confirmed_by)."""
+    note: Optional[str] = None
+    driver_name: Optional[str] = None
+    vehicle_plate: Optional[str] = None
+
+
+class WmsTransferTripIn(BaseModel):
+    """Km và số lít xăng của 1 chuyến điều chuyển — mirror ShipmentTripIn, chỉ điền được sau khi
+    phiếu đã Duyệt (xem services/wms.py::update_transfer_trip)."""
+    km: Optional[float] = None
+    fuel_liters: Optional[float] = None
 
 
 class NearExpiryEntryIn(BaseModel):
@@ -586,7 +650,8 @@ class NearExpiryEntryUpdate(BaseModel):
 class ConsignedEntryIn(BaseModel):
     finished_product_id: str
     quantity: int
-    location_id: Optional[str] = None  # vị trí kho nhận — bỏ trống nếu chưa cất
+    location_id: str  # vị trí kho nhận — bắt buộc, không cho "chưa cất"
+    vehicle_id: str    # biển số xe đã mang bia gửi về — bắt buộc
     note: Optional[str] = None
 
 
@@ -594,7 +659,31 @@ class ConsignedEntryUpdate(BaseModel):
     finished_product_id: Optional[str] = None
     quantity: Optional[int] = None
     location_id: Optional[str] = None
+    vehicle_id: Optional[str] = None
     note: Optional[str] = None
+
+
+class FactoryImportEntryIn(BaseModel):
+    finished_product_id: str
+    quantity: int
+    location_id: str  # vị trí kho nhận — bắt buộc, không cho "chưa cất"
+    factory_id: str    # nhà máy nguồn (Danh mục Nhà máy) — bắt buộc, dấu hiệu nhận biết nguồn gốc
+    note: Optional[str] = None
+
+
+class FactoryImportEntryUpdate(BaseModel):
+    finished_product_id: Optional[str] = None
+    quantity: Optional[int] = None
+    location_id: Optional[str] = None
+    factory_id: Optional[str] = None
+    note: Optional[str] = None
+
+
+class ShipmentTripIn(BaseModel):
+    """Km và số lít xăng của 1 chuyến xuất — chỉ điền được sau khi phiếu đã Duyệt (xem
+    services/wms.py::update_shipment_trip)."""
+    km: Optional[float] = None
+    fuel_liters: Optional[float] = None
 
 
 class LoadSlipHeaderUpdate(BaseModel):
@@ -729,6 +818,7 @@ class ResultIn(BaseModel):
     method: Optional[str] = None
     instrument: Optional[str] = None
     value: Optional[float] = None
+    value_text: Optional[str] = None  # chỉ tiêu kiểu "text" — ghi chú tự do, không so target/USL/LSL
     ca_value: Optional[float] = None  # giá trị in trên bao bì/CA của NCC — chỉ tham khảo, không tính vào pass/fail
     unit: Optional[str] = None
     lower_limit: Optional[float] = None
@@ -744,6 +834,7 @@ class ResultOut(ORMModel):
     method: Optional[str] = None
     instrument: Optional[str] = None
     value: Optional[float] = None
+    value_text: Optional[str] = None
     ca_value: Optional[float] = None
     unit: Optional[str] = None
     lower_limit: Optional[float] = None
@@ -1701,6 +1792,7 @@ class StageQcResultIn(BaseModel):
     scope_id: str = Field(min_length=1)
     parameter: str = Field(min_length=1)
     value: Optional[float] = None
+    value_text: Optional[str] = None
     unit: Optional[str] = None
     lower_limit: Optional[float] = None
     upper_limit: Optional[float] = None
@@ -1709,6 +1801,7 @@ class StageQcResultIn(BaseModel):
 class QcSampleResultIn(BaseModel):
     parameter: str = Field(min_length=1)
     value: Optional[float] = None
+    value_text: Optional[str] = None
     unit: Optional[str] = None
     lower_limit: Optional[float] = None
     upper_limit: Optional[float] = None

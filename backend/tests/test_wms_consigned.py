@@ -50,10 +50,65 @@ def _a_finished_product(client, admin_h, code):
     return fp.json()["finished_product_id"]
 
 
-def _declare_consigned(client, admin_h, fp_id, quantity, location_id=None, note=None):
-    payload = {"finished_product_id": fp_id, "quantity": quantity}
-    if location_id is not None:
-        payload["location_id"] = location_id
+_DEFAULT_LOC_ID = None
+_DEFAULT_VEHICLE_ID = None
+
+
+def _default_gs_loc(client, admin_h):
+    """Vị trí kho nhận mặc định cho các test không quan tâm tới vị trí cụ thể — location_id giờ
+    bắt buộc khi khai báo bia gửi (không còn "chưa cất")."""
+    global _DEFAULT_LOC_ID
+    if _DEFAULT_LOC_ID is None:
+        r = client.post("/api/wms/locations", headers=admin_h,
+                        json={"code": "LOC-GS-DEFAULT", "name": "Vị trí test bia gửi", "capacity": 1000})
+        assert r.status_code == 201, r.text
+        _DEFAULT_LOC_ID = r.json()["loc_id"]
+    return _DEFAULT_LOC_ID
+
+
+def _default_gs_vehicle(client, admin_h):
+    """Xe mặc định cho các test không quan tâm tới xe cụ thể — vehicle_id giờ bắt buộc khi khai
+    báo bia gửi."""
+    global _DEFAULT_VEHICLE_ID
+    if _DEFAULT_VEHICLE_ID is None:
+        r = client.post("/api/wms/vehicles", headers=admin_h, json={"plate": "GS-DEFAULT-01"})
+        assert r.status_code == 201, r.text
+        _DEFAULT_VEHICLE_ID = r.json()["vehicle_id"]
+    return _DEFAULT_VEHICLE_ID
+
+
+def _ship_for_vehicle(client, admin_h, fp_id, code, quantity, vehicle_id):
+    """Tạo 1 lô tồn kho thủ công + xuất hết qua `vehicle_id` để xe đó đủ điều kiện khai báo bia
+    gửi cho đúng (xe, sản phẩm, số lượng) này — create_consigned_entry giờ bắt buộc phải có
+    Shipment thật của xe chứa sản phẩm này trong khoảng [14h Ca 2 ngày hôm trước, hiện tại]."""
+    lot_code = f"LOT-SHIP-{code}-{quantity}"
+    built = client.post("/api/wms/units", headers=admin_h,
+                        json={"finished_product_id": fp_id, "product_name": code,
+                              "lot_code": lot_code, "total": quantity, "pack_size": 1,
+                              "unit_type": "vi", "reason": "Nhập kho thủ công",
+                              "loc_id": _default_gs_loc(client, admin_h)})
+    assert built.status_code == 201, built.text
+    confirm = client.post("/api/wms/units/confirm-receipt-by-lot", headers=admin_h,
+                          json={"product_name": code, "lot_code": lot_code, "unit_type": "vi"})
+    assert confirm.status_code == 200, confirm.text
+    ship_to = client.post("/api/suppliers", headers=admin_h,
+                          json={"code": f"DIST-SHIP-{code}", "name": f"NPP {code}"})
+    assert ship_to.status_code == 201, ship_to.text
+    shipped = client.post("/api/wms/shipments", headers=admin_h,
+                          json={"ship_to_id": ship_to.json()["supplier_id"],
+                                "lines": [{"product_name": code, "lot_code": lot_code,
+                                          "unit_type": "vi", "quantity": quantity}],
+                                "vehicle_id": vehicle_id})
+    assert shipped.status_code == 201, shipped.text
+
+
+def _declare_consigned(client, admin_h, fp_id, quantity, location_id=None, note=None, vehicle_id=None, code=None):
+    vehicle_id = vehicle_id or _default_gs_vehicle(client, admin_h)
+    if code:
+        _ship_for_vehicle(client, admin_h, fp_id, code, quantity, vehicle_id)
+    payload = {"finished_product_id": fp_id, "quantity": quantity,
+              "location_id": location_id or _default_gs_loc(client, admin_h),
+              "vehicle_id": vehicle_id}
     if note is not None:
         payload["note"] = note
     entry = client.post("/api/wms/consigned", headers=admin_h, json=payload)
@@ -67,11 +122,11 @@ def _approve_consigned(client, admin_h, entry_id):
     return r.json()
 
 
-def _declare_and_approve_consigned(client, admin_h, fp_id, quantity, location_id=None, note=None):
+def _declare_and_approve_consigned(client, admin_h, fp_id, quantity, location_id=None, note=None, code=None):
     """Khai báo CHƯA tăng tồn kho ngay (xem NearExpiryEntry/ConsignedEntry.approved_by) — hầu
     hết các test dưới đây chỉ quan tâm tới hành vi SAU khi đã có tồn kho thật, nên helper này
     khai báo + duyệt luôn 1 lượt (mirror _declare_consigned nhưng approve ngay)."""
-    body = _declare_consigned(client, admin_h, fp_id, quantity, location_id, note)
+    body = _declare_consigned(client, admin_h, fp_id, quantity, location_id, note, code=code)
     hist = client.get("/api/wms/consigned", headers=admin_h).json()
     entry_id = next(h["entry_id"] for h in hist if h["direction"] == "in" and h["lot_code"] == body["lot_code"])
     _approve_consigned(client, admin_h, entry_id)
@@ -81,15 +136,31 @@ def _declare_and_approve_consigned(client, admin_h, fp_id, quantity, location_id
 def test_consigned_declare_rejects_nonpositive_quantity(client, admin_h):
     fp_id = _a_finished_product(client, admin_h, "SKU-GS-ZEROQTY")
     bad = client.post("/api/wms/consigned", headers=admin_h,
-                      json={"finished_product_id": fp_id, "quantity": 0})
+                      json={"finished_product_id": fp_id, "quantity": 0,
+                            "location_id": _default_gs_loc(client, admin_h),
+                            "vehicle_id": _default_gs_vehicle(client, admin_h)})
     assert bad.status_code == 409, bad.text
+
+
+def test_consigned_declare_requires_vehicle_and_location(client, admin_h):
+    """Bia gửi bắt buộc chọn xe + vị trí kho nhận — thiếu 1 trong 2 thì Pydantic trả 422
+    (field required), không cho lọt xuống service."""
+    fp_id = _a_finished_product(client, admin_h, "SKU-GS-REQUIRED")
+    missing_vehicle = client.post("/api/wms/consigned", headers=admin_h,
+                                  json={"finished_product_id": fp_id, "quantity": 1,
+                                        "location_id": _default_gs_loc(client, admin_h)})
+    assert missing_vehicle.status_code == 422, missing_vehicle.text
+    missing_loc = client.post("/api/wms/consigned", headers=admin_h,
+                              json={"finished_product_id": fp_id, "quantity": 1,
+                                    "vehicle_id": _default_gs_vehicle(client, admin_h)})
+    assert missing_loc.status_code == 422, missing_loc.text
 
 
 def test_consigned_declare_pending_then_approve_increases_stock(client, admin_h):
     """Khai báo (direction="in") CHƯA tăng tồn kho ngay — chỉ ghi bản khai chờ duyệt. Trưởng bộ
     phận kho duyệt mới thực sự tạo tồn kho; sau khi duyệt thì khoá, không sửa/hoàn tác được."""
     fp_id = _a_finished_product(client, admin_h, "SKU-GS-PENDING")
-    body = _declare_consigned(client, admin_h, fp_id, 4)
+    body = _declare_consigned(client, admin_h, fp_id, 4, code="SKU-GS-PENDING")
     lot_code = body["lot_code"]
     hist = client.get("/api/wms/consigned", headers=admin_h).json()
     row = next(h for h in hist if h["direction"] == "in" and h["lot_code"] == lot_code)
@@ -113,7 +184,8 @@ def test_consigned_declare_pending_then_approve_increases_stock(client, admin_h)
 
 def test_consigned_declare_generates_dedicated_lot_and_shipment_roundtrip(client, admin_h):
     fp_id = _a_finished_product(client, admin_h, "SKU-GS-ROUND")
-    body = _declare_and_approve_consigned(client, admin_h, fp_id, 4, note="Xe giao không hết, mang về gửi")
+    body = _declare_and_approve_consigned(client, admin_h, fp_id, 4, note="Xe giao không hết, mang về gửi",
+                                          code="SKU-GS-ROUND")
     assert body["count"] == 4
     product_name, lot_code = body["product_name"], body["lot_code"]
     assert lot_code.startswith("GUI")
@@ -158,10 +230,11 @@ def test_consigned_lot_never_merges_with_regular_stock(client, admin_h):
     built = client.post("/api/wms/units", headers=admin_h,
                         json={"finished_product_id": fp_id, "product_name": code,
                               "lot_code": regular_lot, "total": 5, "pack_size": 1,
-                              "unit_type": "vi", "reason": "Nhập kho thủ công"})
+                              "unit_type": "vi", "reason": "Nhập kho thủ công",
+                              "loc_id": _default_gs_loc(client, admin_h)})
     assert built.status_code == 201, built.text
 
-    gs_body = _declare_and_approve_consigned(client, admin_h, fp_id, 3)
+    gs_body = _declare_and_approve_consigned(client, admin_h, fp_id, 3, code=code)
     assert gs_body["lot_code"] != regular_lot
 
     by_lot = client.get("/api/wms/units/by-lot", headers=admin_h).json()
@@ -182,7 +255,7 @@ def test_consigned_prioritized_ahead_of_near_expiry_in_lot_summaries(client, adm
     ne_row = next(h for h in ne_hist if h["direction"] == "in" and h["lot_code"] == ne_entry.json()["lot_code"])
     approve_ne = client.post(f"/api/wms/near-expiry/{ne_row['entry_id']}/approve", headers=admin_h)
     assert approve_ne.status_code == 200, approve_ne.text
-    gs_body = _declare_and_approve_consigned(client, admin_h, fp_id, 2)
+    gs_body = _declare_and_approve_consigned(client, admin_h, fp_id, 2, code="SKU-GS-VS-NE")
 
     by_lot = client.get("/api/wms/units/by-lot", headers=admin_h).json()
     ne_group = next(g for g in by_lot if g["lot_code"] == ne_entry.json()["lot_code"])
@@ -197,7 +270,7 @@ def test_consigned_undo_removes_pending_declaration(client, admin_h):
     """Hủy CHỈ áp dụng khi đang chờ duyệt — chưa có FinishedGoodsUnit nào được tạo, hủy chỉ
     đánh dấu reversed (mirror test_near_expiry_undo_removes_pending_declaration)."""
     fp_id = _a_finished_product(client, admin_h, "SKU-GS-UNDO")
-    body = _declare_consigned(client, admin_h, fp_id, 2)
+    body = _declare_consigned(client, admin_h, fp_id, 2, code="SKU-GS-UNDO")
     lot_code = body["lot_code"]
 
     hist = client.get("/api/wms/consigned", headers=admin_h).json()
@@ -222,7 +295,7 @@ def test_consigned_undo_removes_pending_declaration(client, admin_h):
 
 def test_consigned_undo_blocked_after_approved(client, admin_h):
     fp_id = _a_finished_product(client, admin_h, "SKU-GS-UNDO-APPROVED")
-    body = _declare_consigned(client, admin_h, fp_id, 1)
+    body = _declare_consigned(client, admin_h, fp_id, 1, code="SKU-GS-UNDO-APPROVED")
     lot_code = body["lot_code"]
     hist = client.get("/api/wms/consigned", headers=admin_h).json()
     row = next(h for h in hist if h["direction"] == "in" and h["lot_code"] == lot_code)
@@ -235,7 +308,7 @@ def test_consigned_undo_blocked_after_approved(client, admin_h):
 
 def test_consigned_undo_rejects_out_direction(client, admin_h):
     fp_id = _a_finished_product(client, admin_h, "SKU-GS-UNDO-OUTDIR")
-    body = _declare_and_approve_consigned(client, admin_h, fp_id, 1)
+    body = _declare_and_approve_consigned(client, admin_h, fp_id, 1, code="SKU-GS-UNDO-OUTDIR")
     lot_code, product_name = body["lot_code"], body["product_name"]
 
     ship_to = client.post("/api/suppliers", headers=admin_h,
@@ -256,7 +329,7 @@ def test_consigned_undo_rejects_out_direction(client, admin_h):
 
 def test_shipment_line_rejects_both_near_expiry_and_consigned_flags(client, admin_h):
     fp_id = _a_finished_product(client, admin_h, "SKU-GS-BOTHFLAGS")
-    body = _declare_and_approve_consigned(client, admin_h, fp_id, 1)
+    body = _declare_and_approve_consigned(client, admin_h, fp_id, 1, code="SKU-GS-BOTHFLAGS")
     lot_code, product_name = body["lot_code"], body["product_name"]
 
     ship_to = client.post("/api/suppliers", headers=admin_h,

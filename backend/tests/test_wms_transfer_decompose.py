@@ -66,12 +66,28 @@ def _ensure_finished_product(client, admin_h, suffix, pack_size, unit_type):
     return r.json()["finished_product_id"]
 
 
-def _build_units(client, admin_h, suffix, total, pack_size=24, unit_type="vi"):
+_DEFAULT_LOC_ID = None
+
+
+def _default_loc(client, admin_h):
+    """Vị trí kho mặc định cho các test không quan tâm tới vị trí cụ thể — build_units nay bắt
+    buộc chọn vị trí ngay lúc nhập (không còn "chưa cất" cho luồng thủ công)."""
+    global _DEFAULT_LOC_ID
+    if _DEFAULT_LOC_ID is None:
+        r = client.post("/api/wms/locations", headers=admin_h,
+                        json={"code": "TXDECOMP-DEFAULT-LOC", "name": "Vị trí mặc định test transfer/decompose",
+                              "capacity": 1_000_000})
+        assert r.status_code == 201, r.text
+        _DEFAULT_LOC_ID = r.json()["loc_id"]
+    return _DEFAULT_LOC_ID
+
+
+def _build_units(client, admin_h, suffix, total, pack_size=24, unit_type="vi", loc_id=None):
     fp_id = _ensure_finished_product(client, admin_h, suffix, pack_size, unit_type)
     r = client.post("/api/wms/units", headers=admin_h,
                     json={"finished_product_id": fp_id, "product_name": f"SKU-{suffix}",
                           "lot_code": f"LOT-{suffix}", "total": total, "pack_size": pack_size,
-                          "unit_type": unit_type})
+                          "unit_type": unit_type, "loc_id": loc_id or _default_loc(client, admin_h)})
     assert r.status_code == 201, r.text
     # "Nhập kho thủ công" (build_units không is_opening_balance) giờ cần Trưởng bộ phận kho
     # duyệt trước khi xuất được (source="manual") — tự duyệt luôn để không chặn oan các test
@@ -235,8 +251,7 @@ def test_ship_lon_units_after_decompose(client, admin_h):
     shipment = client.post("/api/wms/shipments", headers=admin_h,
                            json={"ship_to_id": ship_to_id,
                                  "lines": [{"product_name": "SKU-DECOMP03", "lot_code": "LOT-DECOMP03",
-                                           "unit_type": "lon", "quantity": 10}],
-                                 "shipment_type": "promo"})
+                                           "unit_type": "lon", "quantity": 10, "shipment_type": "promo"}]})
     assert shipment.status_code == 201, shipment.text
     assert shipment.json()["fifo_ok"] is True  # chỉ có 1 dòng lon -> không có dòng nào cũ hơn bị bỏ qua
 
@@ -339,32 +354,39 @@ def test_undo_decompose_batch_blocked_if_lon_shipped(client, admin_h):
     assert blocked.status_code == 409, blocked.text
 
 
-def test_relocate_batch_places_unplaced_units_by_count(client, admin_h):
-    built = _build_units(client, admin_h, "RELOC01", total=72, pack_size=24, unit_type="vi")
-    assert built["count"] == 3  # 3 vỉ, chưa có vị trí (mới build)
+def test_relocate_batch_places_units_from_one_location_by_count(client, admin_h):
+    """Trước đây build_units cho phép để trống vị trí ("chưa cất") và test này dựng fixture qua
+    from_loc_id=None; build_units nay LUÔN bắt buộc chọn vị trí ngay lúc nhập (xem
+    services/wms.py::build_units), nên fixture ở đây dựng qua 1 vị trí "staging" tạm rồi relocate
+    TỪ vị trí đó — vẫn kiểm đúng hành vi cốt lõi của relocate_batch (tách dòng theo số lượng,
+    chặn khi đích thiếu sức chứa). Hành vi from_loc_id=None (cất đơn vị "chưa cất" từ luồng
+    duyệt chiết tự động) vẫn còn được test riêng ở test_wms_large_lot_smoke.py."""
+    staging = _make_location(client, admin_h, "RELOC-STAGING", capacity=100)
+    built = _build_units(client, admin_h, "RELOC01", total=72, pack_size=24, unit_type="vi", loc_id=staging)
+    assert built["count"] == 3  # 3 vỉ, đã cất tạm ở vị trí staging
     loc_small = _make_location(client, admin_h, "RELOC-SMALL", capacity=2)
     loc_big = _make_location(client, admin_h, "RELOC-BIG", capacity=10)
 
-    # Đích chỉ chứa 2 trong khi yêu cầu cất cả 3 -> chặn.
+    # Đích chỉ chứa 2 trong khi yêu cầu chuyển cả 3 -> chặn.
     blocked = client.post("/api/wms/units/relocate-batch", headers=admin_h,
                           json={"product_name": "SKU-RELOC01", "lot_code": "LOT-RELOC01", "unit_type": "vi",
-                                "from_loc_id": None, "to_loc_id": loc_small, "count": 3})
+                                "from_loc_id": staging, "to_loc_id": loc_small, "count": 3})
     assert blocked.status_code == 409, blocked.text
 
     ok = client.post("/api/wms/units/relocate-batch", headers=admin_h,
                      json={"product_name": "SKU-RELOC01", "lot_code": "LOT-RELOC01", "unit_type": "vi",
-                           "from_loc_id": None, "to_loc_id": loc_big, "count": 2})
+                           "from_loc_id": staging, "to_loc_id": loc_big, "count": 2})
     assert ok.status_code == 200, ok.text
     assert ok.json() == {"moved": 2, "to_location": "RELOC-BIG", "requested": 2}
 
-    # Dòng gốc (72=3 vỉ) bị TÁCH: 2 vỉ (48) đặt vào RELOC-BIG, 1 vỉ (24) còn lại chưa có vị
-    # trí — không còn 3 dòng riêng lẻ để lọc theo built["unit_codes"] như mô hình cũ.
+    # Dòng gốc (72=3 vỉ) bị TÁCH: 2 vỉ (48) chuyển sang RELOC-BIG, 1 vỉ (24) còn lại vẫn ở
+    # staging — không còn 3 dòng riêng lẻ để lọc theo built["unit_codes"] như mô hình cũ.
     lot_units = [u for u in client.get("/api/wms/units", headers=admin_h).json()
                  if u["lot_code"] == "LOT-RELOC01"]
     placed = [u for u in lot_units if u["location"] == "RELOC-BIG"]
-    unplaced = [u for u in lot_units if not u["location"]]
+    remaining = [u for u in lot_units if u["location"] == "RELOC-STAGING"]
     assert len(placed) == 1 and placed[0]["quantity"] == 48
-    assert len(unplaced) == 1 and unplaced[0]["quantity"] == 24
+    assert len(remaining) == 1 and remaining[0]["quantity"] == 24
 
     # Điều chuyển tiếp từ RELOC-BIG sang 1 vị trí khác theo số lượng (không cần chọn từng đơn vị).
     loc_dest = _make_location(client, admin_h, "RELOC-DEST", capacity=10)
@@ -373,6 +395,39 @@ def test_relocate_batch_places_unplaced_units_by_count(client, admin_h):
                               "from_loc_id": loc_big, "to_loc_id": loc_dest, "count": 1})
     assert moved.status_code == 200, moved.text
     assert moved.json()["moved"] == 1
+
+
+def test_relocate_batch_blocks_cross_warehouse_move(client, admin_h):
+    """Chuyển vị trí (from_loc_id có giá trị thật, không phải "chưa cất") chỉ được phép trong
+    CÙNG 1 kho thành phẩm — chuyển sang vị trí thuộc kho khác phải bị chặn (409), chuyển sang
+    vị trí khác trong CÙNG kho vẫn hoạt động bình thường."""
+    wh_a = client.post("/api/wms/warehouses", headers=admin_h,
+                       json={"code": "RELOC-WHA", "name": "Kho A test relocate"}).json()["warehouse_id"]
+    wh_b = client.post("/api/wms/warehouses", headers=admin_h,
+                       json={"code": "RELOC-WHB", "name": "Kho B test relocate"}).json()["warehouse_id"]
+    loc_a1 = client.post("/api/wms/locations", headers=admin_h,
+                         json={"code": "RELOC-WHA-1", "name": "Khu 1", "capacity": 10,
+                               "warehouse_id": wh_a}).json()["loc_id"]
+    loc_a2 = client.post("/api/wms/locations", headers=admin_h,
+                         json={"code": "RELOC-WHA-2", "name": "Khu 2", "capacity": 10,
+                               "warehouse_id": wh_a}).json()["loc_id"]
+    loc_b1 = client.post("/api/wms/locations", headers=admin_h,
+                         json={"code": "RELOC-WHB-1", "name": "Khu 1 kho B", "capacity": 10,
+                               "warehouse_id": wh_b}).json()["loc_id"]
+
+    _build_units(client, admin_h, "RELOCWH01", total=24, pack_size=24, unit_type="vi", loc_id=loc_a1)
+
+    blocked = client.post("/api/wms/units/relocate-batch", headers=admin_h,
+                          json={"product_name": "SKU-RELOCWH01", "lot_code": "LOT-RELOCWH01", "unit_type": "vi",
+                                "from_loc_id": loc_a1, "to_loc_id": loc_b1, "count": 1})
+    assert blocked.status_code == 409, blocked.text
+    assert "cùng 1 kho" in blocked.json()["detail"]
+
+    ok = client.post("/api/wms/units/relocate-batch", headers=admin_h,
+                     json={"product_name": "SKU-RELOCWH01", "lot_code": "LOT-RELOCWH01", "unit_type": "vi",
+                           "from_loc_id": loc_a1, "to_loc_id": loc_a2, "count": 1})
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["moved"] == 1
 
 
 def test_resolve_by_lot_code_returns_aggregate(client, admin_h):

@@ -82,7 +82,7 @@ def test_inventory_aging_reports_age_days_and_bucket(client, admin_h):
     assert old_row["age_days"] >= 95
     assert old_row["age_bucket"] == "critical"
     assert old_row["count"] == 1
-    assert old_row["locations"] == [{"code": loc.code, "count": 1}]
+    assert old_row["locations"] == [{"code": loc.code, "count": 1, "warehouse_code": None}]
     assert old_row["unplaced"] == 0
 
     assert new_row["age_days"] <= 6

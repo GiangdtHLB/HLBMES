@@ -221,6 +221,27 @@ def preview_bom_lines(db: Session, product_id: str, planned_batch_count: int, pl
     return _annotate_stock(lines, company_stock, workshop_stock, _materials_by_id(db))
 
 
+def _assert_no_shortage(lines: list, company_stock: dict, workshop_stock: dict, materials_by_id: dict) -> None:
+    """Chặn hẳn việc lập/sửa Lệnh nấu nếu có dòng NVL thiếu tồn (tổng 2 kho) — mirror
+    filter_order.py::_validate_material_lines. Trước đây Lệnh nấu chỉ CẢNH BÁO (cờ shortage
+    của _annotate_stock, hiển thị ở preview) rồi vẫn cho lưu; theo yêu cầu, giờ thiếu tồn thì
+    không cho tạo/sửa lệnh, giống Lệnh lọc."""
+    shortages = []
+    for l in lines:
+        if l.get("is_header"):
+            continue
+        qty_total = l.get("qty_total")
+        if qty_total is None:
+            continue
+        company, workshop = _line_stock(l, company_stock, workshop_stock, materials_by_id)
+        if qty_total > company + workshop:
+            shortages.append(
+                f"{l.get('material_name')}: cần {qty_total}, hiện có {round(company + workshop, 3)} "
+                f"(Kho công ty {round(company, 3)} + Kho phân xưởng {round(workshop, 3)})")
+    if shortages:
+        raise DomainError("Không đủ tồn kho để lập lệnh nấu — " + "; ".join(shortages) + ".")
+
+
 def _validate_volume_plan(planned_volume_hl, tolerance_hl) -> None:
     """Sản lượng nấu kế hoạch (hl) bắt buộc phải > 0 — nếu để 0/None, logic hoàn thành
     (thực tế >= kế hoạch - sai số) sẽ coi lệnh "hoàn thành ngay từ đầu" khi thực tế
@@ -240,19 +261,21 @@ def _insert_sub_order(db: Session, master_order_id, seq: int, order_code: str, o
     lines_in = payload.pop("lines", None) or []
     auto_from_bom = payload.pop("auto_from_bom", True)
 
+    lines = lines_in if lines_in else (
+        build_lines_from_bom(db, payload.get("product_id"), payload.get("planned_batch_count"),
+                             payload.get("planned_volume_hl"))
+        if auto_from_bom and payload.get("product_id") else []
+    )
+    company_stock, workshop_stock = _stock_snapshot(db)
+    materials_by_id = _materials_by_id(db)
+    _assert_no_shortage(lines, company_stock, workshop_stock, materials_by_id)
+
     order = BrewOrder(brew_order_id=new_id(), order_code=order_code, order_year=order_year,
                       master_order_id=master_order_id,
                       seq=seq, created_by=user.username, created_at=utcnow(), **payload)
     db.add(order)
     db.flush()
 
-    lines = lines_in if lines_in else (
-        build_lines_from_bom(db, order.product_id, order.planned_batch_count, order.planned_volume_hl)
-        if auto_from_bom and order.product_id else []
-    )
-
-    company_stock, workshop_stock = _stock_snapshot(db)
-    materials_by_id = _materials_by_id(db)
     for i, line in enumerate(lines):
         material_id = line.get("material_id")
         has_target = bool(material_id or line.get("member_material_ids"))
@@ -308,6 +331,15 @@ def update_order(db: Session, brew_order_id: str, payload: dict, user) -> BrewOr
         raise DomainError(f"Số lệnh '{new_code}' đã tồn tại trong năm {order.order_year}.")
     _validate_volume_plan(payload.get("planned_volume_hl"), payload.get("volume_tolerance_hl"))
 
+    lines = lines_in if lines_in else (
+        build_lines_from_bom(db, payload.get("product_id"), payload.get("planned_batch_count"),
+                             payload.get("planned_volume_hl"))
+        if auto_from_bom and payload.get("product_id") else []
+    )
+    company_stock, workshop_stock = _stock_snapshot(db)
+    materials_by_id = _materials_by_id(db)
+    _assert_no_shortage(lines, company_stock, workshop_stock, materials_by_id)
+
     for l in db.execute(select(BrewOrderMaterialLine).where(
             BrewOrderMaterialLine.brew_order_id == brew_order_id)).scalars().all():
         db.delete(l)
@@ -316,13 +348,6 @@ def update_order(db: Session, brew_order_id: str, payload: dict, user) -> BrewOr
     for field, value in payload.items():
         setattr(order, field, value)
 
-    lines = lines_in if lines_in else (
-        build_lines_from_bom(db, order.product_id, order.planned_batch_count, order.planned_volume_hl)
-        if auto_from_bom and order.product_id else []
-    )
-
-    company_stock, workshop_stock = _stock_snapshot(db)
-    materials_by_id = _materials_by_id(db)
     for i, line in enumerate(lines):
         material_id = line.get("material_id")
         has_target = bool(material_id or line.get("member_material_ids"))

@@ -15,7 +15,9 @@ from ..models.audit import AuditLog
 from ..models.brewing import BottleRecord
 from ..models.master import FinishedProduct, UnitTypeCatalog
 from ..models.materials import GenealogyEdge, Supplier
-from ..models.wms import ConsignedEntry, FinishedGoodsUnit, NearExpiryEntry, Shipment, Vehicle, WmsLocation
+from ..models.warehouse import FactoryLocation
+from ..models.wms import (ConsignedEntry, FactoryImportEntry, FinishedGoodsUnit, NearExpiryEntry, Shipment,
+                          Vehicle, WmsLocation, WmsTransfer, WmsTransferLine, WmsWarehouse)
 from ..security import User, require_perm, require_role
 from . import genealogy
 from .opening_balance_import import parse_opening_balance_sheet
@@ -59,6 +61,32 @@ def _pack_divisor_expr(divide_codes: frozenset[str], unit_type_col=FinishedGoods
     trực tiếp từ SUM(quantity) mà không cần tải từng dòng — xem list_lot_summaries/summary/...).
     Cần OUTER JOIN FinishedProduct qua finished_product_id ở câu truy vấn gọi hàm này."""
     return case((unit_type_col.in_(divide_codes), func.coalesce(func.nullif(pack_size_col, 0), 1)), else_=1)
+
+
+def _line_weight_kg(fp: FinishedProduct | None, unit_type: str, quantity: float,
+                    divide_codes: frozenset[str]) -> float:
+    """Khối lượng (kg) của 1 dòng FinishedGoodsUnit — dùng cho báo cáo tải trọng chuyến xe
+    (vehicle_trip_report). `quantity` luôn ở đơn vị nhỏ nhất (xem _pack_divisor); chia lại
+    cho divisor để ra số đơn vị đóng gói vật lý thật (số vỉ/keg/lon), rồi nhân khối lượng
+    tương ứng: chưa phân rã (unit_type == fp.unit_type — dòng "vi" của SKU vi, hoặc "keg" của
+    SKU keg) dùng weight_primary_kg (1 vỉ/keg NGUYÊN); đã phân rã (VD "lon" từ SKU "vi") dùng
+    weight_single_kg (1 lon/chai lẻ). Không có SKU hoặc chưa khai báo khối lượng → 0."""
+    if not fp:
+        return 0.0
+    divisor = _pack_divisor(fp, unit_type, divide_codes)
+    primary_count = (quantity or 0) / divisor
+    if unit_type == fp.unit_type:
+        return primary_count * (fp.weight_primary_kg or 0)
+    return primary_count * (fp.weight_single_kg or 0)
+
+
+def _liters_per_unit(fp: FinishedProduct | None) -> float | None:
+    """Lít/1 đơn vị nhỏ nhất (lon/chai/keg) — ưu tiên FinishedProduct.unit_volume_l đã khai
+    báo (VD 0.33 cho lon 330ml), fallback về parse tên SKU (_resolve_liters_per_unit) cho SKU
+    cũ chưa khai báo field này."""
+    if fp and fp.unit_volume_l:
+        return fp.unit_volume_l
+    return _resolve_liters_per_unit(fp.name if fp else None)
 
 
 def _location_used_count(db: Session, loc_id: str, exclude_unit_id: str | None = None) -> float:
@@ -138,6 +166,49 @@ def _consume_lot_rows(db: Session, *, product_name: str, unit_type: str, status:
     return picked, quantity_needed - max(remaining, 0)
 
 
+def create_warehouse(db: Session, payload: dict) -> WmsWarehouse:
+    if db.execute(select(WmsWarehouse).where(WmsWarehouse.code == payload.get("code"))).scalar_one_or_none():
+        raise DomainError(f"Mã kho '{payload.get('code')}' đã tồn tại.")
+    wh = WmsWarehouse(warehouse_id=new_id(), **payload)
+    db.add(wh)
+    db.commit()
+    db.refresh(wh)
+    return wh
+
+
+def update_warehouse(db: Session, warehouse_id: str, payload: dict) -> WmsWarehouse:
+    wh = db.get(WmsWarehouse, warehouse_id)
+    if not wh:
+        raise NotFoundError("Kho thành phẩm không tồn tại.")
+    for k, v in payload.items():
+        if v is not None:
+            setattr(wh, k, v)
+    db.commit()
+    db.refresh(wh)
+    return wh
+
+
+def delete_warehouse(db: Session, warehouse_id: str) -> None:
+    wh = db.get(WmsWarehouse, warehouse_id)
+    if not wh:
+        raise NotFoundError("Kho thành phẩm không tồn tại.")
+    used = db.execute(select(func.count(WmsLocation.loc_id))
+                      .where(WmsLocation.warehouse_id == warehouse_id)).scalar() or 0
+    if used:
+        raise DomainError(f"Kho {wh.code} còn {used} vị trí — không thể xóa.")
+    db.delete(wh)
+    db.commit()
+
+
+def list_warehouses(db: Session) -> list:
+    rows = db.execute(select(WmsWarehouse).order_by(WmsWarehouse.code)).scalars().all()
+    loc_counts = dict(db.execute(
+        select(WmsLocation.warehouse_id, func.count(WmsLocation.loc_id))
+        .group_by(WmsLocation.warehouse_id)).all())
+    return [{"warehouse_id": w.warehouse_id, "code": w.code, "name": w.name, "address": w.address,
+             "active": w.active, "location_count": loc_counts.get(w.warehouse_id, 0) or 0} for w in rows]
+
+
 def create_location(db: Session, payload: dict) -> WmsLocation:
     loc = WmsLocation(loc_id=new_id(), **payload)
     db.add(loc)
@@ -179,14 +250,30 @@ def list_locations(db: Session) -> list:
         .select_from(FinishedGoodsUnit)
         .outerjoin(FinishedProduct, FinishedProduct.finished_product_id == FinishedGoodsUnit.finished_product_id)
         .where(FinishedGoodsUnit.status == "stored").group_by(FinishedGoodsUnit.location_id)).all())
+    wh_by_id = {w.warehouse_id: w for w in db.execute(select(WmsWarehouse)).scalars().all()}
     return [{"loc_id": l.loc_id, "code": l.code, "name": l.name, "zone": l.zone, "kind": l.kind,
-             "capacity": l.capacity, "active": l.active, "used": counts.get(l.loc_id, 0) or 0} for l in locs]
+             "capacity": l.capacity, "active": l.active, "used": counts.get(l.loc_id, 0) or 0,
+             "warehouse_id": l.warehouse_id,
+             "warehouse_code": wh_by_id[l.warehouse_id].code if l.warehouse_id in wh_by_id else None,
+             "warehouse_name": wh_by_id[l.warehouse_id].name if l.warehouse_id in wh_by_id else None}
+            for l in locs]
+
+
+def _gen_vehicle_code(db: Session) -> str:
+    """Mã xe cố định tăng dần ("XE0001", ...) — không đổi theo biển số, dùng làm liên kết ổn
+    định cho báo cáo lượt xe (xem models/wms.py::Vehicle.vehicle_code)."""
+    count = db.execute(select(func.count()).select_from(Vehicle)).scalar_one()
+    while True:
+        count += 1
+        code = f"XE{count:04d}"
+        if not db.execute(select(Vehicle.vehicle_id).where(Vehicle.vehicle_code == code)).first():
+            return code
 
 
 def create_vehicle(db: Session, payload: dict) -> Vehicle:
     if db.execute(select(Vehicle).where(Vehicle.plate == payload["plate"])).scalar_one_or_none():
         raise DomainError(f"Biển số '{payload['plate']}' đã tồn tại.")
-    v = Vehicle(vehicle_id=new_id(), **payload)
+    v = Vehicle(vehicle_id=new_id(), vehicle_code=_gen_vehicle_code(db), **payload)
     db.add(v)
     db.commit()
     db.refresh(v)
@@ -215,7 +302,8 @@ def delete_vehicle(db: Session, vehicle_id: str) -> None:
 
 def list_vehicles(db: Session) -> list:
     rows = db.execute(select(Vehicle).order_by(Vehicle.plate)).scalars().all()
-    return [{"vehicle_id": v.vehicle_id, "plate": v.plate, "driver_name": v.driver_name,
+    return [{"vehicle_id": v.vehicle_id, "vehicle_code": v.vehicle_code, "plate": v.plate,
+             "driver_name": v.driver_name,
              "driver_short_name": v.driver_short_name, "capacity_kg": v.capacity_kg,
              "pallet_capacity": v.pallet_capacity, "phone": v.phone, "team": v.team,
              "active": v.active} for v in rows]
@@ -275,6 +363,7 @@ def list_units(db: Session, status: str = None, unit_type: str = None,
     stmt = stmt.limit(limit).offset(offset)
     out = []
     loc_by = {l.loc_id: l for l in db.execute(select(WmsLocation)).scalars().all()}
+    wh_by_id = {w.warehouse_id: w for w in db.execute(select(WmsWarehouse)).scalars().all()}
     ship_to_by = {s.supplier_id: s for s in db.execute(select(Supplier)).scalars().all()}
     bottle_codes_by_lot: dict[str, list] = {}
     for lot_no, bottle_code in db.execute(select(BottleRecord.lot_no, BottleRecord.bottle_code)
@@ -282,6 +371,7 @@ def list_units(db: Session, status: str = None, unit_type: str = None,
         bottle_codes_by_lot.setdefault(lot_no, []).append(bottle_code)
     for u in db.execute(stmt).scalars().all():
         loc = loc_by.get(u.location_id)
+        wh = wh_by_id.get(loc.warehouse_id) if loc else None
         ship_to = ship_to_by.get(u.ship_to_id)
         # bottle_code: mã chiết đã sinh ra lô này — chỉ để hiển thị tham khảo (VD Kho TP), KHÔNG
         # dùng để gom nhóm/FIFO (vẫn theo lot_code = số lô bia, xem list_lot_summaries).
@@ -290,6 +380,7 @@ def list_units(db: Session, status: str = None, unit_type: str = None,
                     "lot_code": u.lot_code, "bottle_codes": bottle_codes_by_lot.get(u.lot_code, []),
                     "quantity": u.quantity, "status": u.status,
                     "location": loc.code if loc else None,
+                    "warehouse_code": wh.code if wh else None, "warehouse_name": wh.name if wh else None,
                     "created_at": u.created_at, "shipped_at": u.shipped_at,
                     "ship_to_code": ship_to.code if ship_to else None,
                     "ship_to_name": ship_to.name if ship_to else None})
@@ -381,6 +472,11 @@ def _next_wms_lot_code(db: Session, year: int) -> str:
 
 def build_units(db: Session, payload: dict, user: User) -> list[FinishedGoodsUnit]:
     require_perm(user, "warehouse.receive")
+    # Nhập kho thủ công VÀ Nhập tồn đầu đều bắt buộc chọn vị trí kho ngay lúc nhập — không còn
+    # cho phép "(chưa cất)" ở 2 luồng này (khác với đơn vị tạo tự động sau khi duyệt chiết,
+    # nơi để trống vẫn hợp lệ vì có tab "Cất vào vị trí" xử lý riêng sau).
+    if not payload.get("loc_id"):
+        raise DomainError("Vui lòng chọn vị trí kho trước khi nhập.")
     if payload.get("is_opening_balance"):
         # Nhập tồn đầu kho thành phẩm — CHỈ ADMIN, khác nhập kho thủ công thường (mở cho ai có
         # quyền warehouse.receive) vì đây là thao tác chỉnh số liệu gốc, không qua chiết thật.
@@ -401,10 +497,10 @@ def build_units(db: Session, payload: dict, user: User) -> list[FinishedGoodsUni
 def import_opening_balance_units(db: Session, content: bytes, user: User) -> dict:
     """Import Excel hàng loạt tồn đầu kho thành phẩm (WMS) — CHỈ ADMIN. Mẫu 4 cột bắt buộc:
     NGÀY NHẬP, MÃ SẢN PHẨM, LÔ, SỐ LƯỢNG (pack_size/unit_type tự lấy theo danh mục Sản phẩm,
-    Excel không cần khai lại) + 1 cột tuỳ chọn VỊ TRÍ (mã vị trí kho, có thể bỏ trống -> chưa
-    cất, dùng "Cất vào vị trí" sau). Mỗi dòng hợp lệ gọi lại build_units() với
-    is_opening_balance=True — build_units()/_create_units() tự commit từng dòng nên 1 dòng lỗi
-    không làm mất các dòng đã nhập thành công trước đó."""
+    Excel không cần khai lại) + cột VỊ TRÍ (mã vị trí kho — BẮT BUỘC, xem build_units()). Mỗi
+    dòng hợp lệ gọi lại build_units() với is_opening_balance=True — build_units()/_create_units()
+    tự commit từng dòng nên 1 dòng lỗi (kể cả thiếu vị trí) không làm mất các dòng đã nhập
+    thành công trước đó, chỉ báo lỗi riêng dòng đó trong "failed"."""
     require_role(user, Role.ADMIN)
     rows = parse_opening_balance_sheet(content, "MÃ SẢN PHẨM", optional_headers={"vi_tri": "VỊ TRÍ"})
     created, failed = [], []
@@ -609,24 +705,41 @@ def _gen_consigned_lot_code(db: Session) -> str:
 
 
 def create_consigned_entry(db: Session, finished_product_id: str, quantity: int,
-                           location_id: str | None, user: User, note: str = None) -> dict:
+                           location_id: str, vehicle_id: str, user: User, note: str = None) -> dict:
     """Khai báo "Nhập bia gửi": xe đã xuất phiếu đi giao trong ngày nhưng giao không hết,
     mang phần dư về gửi lại kho — mirror y hệt create_near_expiry_entry (Sản phẩm + Số lượng
     + Vị trí kho nhận trực tiếp, tự sinh lot_code riêng qua _gen_consigned_lot_code, đánh dấu
     is_consigned=True) + ghi 1 dòng lịch sử riêng (ConsignedEntry, direction="in"). CHƯA tăng
-    tồn kho tới khi duyệt (mirror create_near_expiry_entry) — xem approve_consigned_entry."""
+    tồn kho tới khi duyệt (mirror create_near_expiry_entry) — xem approve_consigned_entry.
+    Khác NearExpiryEntry: BẮT BUỘC vị trí kho nhận (không cho "chưa cất") và bắt buộc biển số
+    xe đã mang bia về — dùng để hiện "xe đã gửi" ở picker Xuất kho (xem list_lot_summaries).
+    Số lượng khai + sản phẩm PHẢI khớp với chính phiếu xuất kho của xe đó trong khoảng [Ca 2
+    ngày hôm trước 14h VN, hiện tại] — xem _consigned_available_qty; chặn khai khống/vượt số
+    lượng thực tế đã xuất."""
     require_perm(user, "warehouse.receive")
     fp = db.get(FinishedProduct, finished_product_id)
     if not fp:
         raise NotFoundError("Không tìm thấy sản phẩm tương ứng.")
     if quantity <= 0:
         raise DomainError("Số lượng phải > 0.")
+    if not location_id or not db.get(WmsLocation, location_id):
+        raise DomainError("Vui lòng chọn vị trí kho nhận trước khi nhập bia gửi.")
+    if not vehicle_id or not db.get(Vehicle, vehicle_id):
+        raise DomainError("Vui lòng chọn biển số xe.")
+    available = _consigned_available_qty(db, vehicle_id, finished_product_id)
+    if available <= 0:
+        raise DomainError("Xe này không có phiếu xuất kho chứa sản phẩm này trong khoảng cho phép "
+                          "(từ 14h Ca 2 ngày hôm trước đến hiện tại) — không thể nhập bia gửi.")
+    if quantity > available:
+        raise DomainError(f"Số lượng bia gửi ({quantity}) vượt quá số lượng xe đã xuất cho sản phẩm "
+                          f"này còn lại có thể nhận gửi ({available:g}) trong khoảng cho phép.")
     unit_type = fp.unit_type or "vi"
     product_name = fp.code
     lot_code = _gen_consigned_lot_code(db)
     entry = ConsignedEntry(entry_id=new_id(), direction="in", finished_product_id=finished_product_id,
                            product_name=product_name, lot_code=lot_code, unit_type=unit_type,
-                           quantity=quantity, location_id=location_id, declared_at=utcnow(),
+                           quantity=quantity, location_id=location_id, vehicle_id=vehicle_id,
+                           declared_at=utcnow(),
                            note=note, created_by=user.username, created_at=utcnow())
     db.add(entry)
     record_audit(db, entity_type="consigned_entry", entity_id=entry.entry_id, action="create", actor=user,
@@ -661,6 +774,12 @@ def update_consigned_entry(db: Session, entry_id: str, payload: dict, user: User
         entry.location_id = payload["location_id"]
     if "note" in payload:
         entry.note = payload["note"]
+    if entry.vehicle_id:
+        available = _consigned_available_qty(db, entry.vehicle_id, entry.finished_product_id,
+                                              exclude_entry_id=entry.entry_id)
+        if entry.quantity > available:
+            raise DomainError(f"Số lượng bia gửi ({entry.quantity}) vượt quá số lượng xe đã xuất cho "
+                              f"sản phẩm này còn lại có thể nhận gửi ({available:g}) trong khoảng cho phép.")
     record_audit(db, entity_type="consigned_entry", entity_id=entry.entry_id, action="update", actor=user,
                 after={"product_name": entry.product_name, "count": entry.quantity})
     db.commit()
@@ -706,11 +825,14 @@ def list_consigned_entries(db: Session) -> list[dict]:
     for e in entries:
         shipment = db.get(Shipment, e.shipment_id) if e.shipment_id else None
         loc = db.get(WmsLocation, e.location_id) if e.location_id else None
+        vehicle = db.get(Vehicle, e.vehicle_id) if e.vehicle_id else None
         pending = e.direction == "in" and not e.reversed and not e.approved_by
         out.append({"entry_id": e.entry_id, "direction": e.direction,
                     "finished_product_id": e.finished_product_id, "product_name": e.product_name,
                     "lot_code": e.lot_code, "unit_type": e.unit_type, "quantity": e.quantity,
                     "location_code": loc.code if loc else None,
+                    "vehicle_plate": vehicle.plate if vehicle else None,
+                    "vehicle_code": vehicle.vehicle_code if vehicle else None,
                     "declared_at": e.declared_at, "shipment_code": shipment.shipment_code if shipment else None,
                     "note": e.note, "created_by": e.created_by, "created_at": e.created_at,
                     "reversed": e.reversed, "approved_by": e.approved_by, "approved_at": e.approved_at,
@@ -734,6 +856,150 @@ def undo_consigned_entry(db: Session, entry_id: str, user: User) -> dict:
         raise DomainError("Bản khai này đã được duyệt — không thể hủy.")
     entry.reversed = True
     record_audit(db, entity_type="consigned_entry", entity_id=entry.entry_id, action="undo", actor=user,
+                before={"count": entry.quantity}, after={"reversed": True})
+    db.commit()
+    return {"entry_id": entry.entry_id}
+
+
+# ---- Nhập từ nhà máy khác: mirror bia cận date (khai báo -> duyệt mới tăng tồn kho) nhưng
+# KHÔNG có xử lý đặc biệt gì sau khi duyệt (không ưu tiên xuất, không trừ báo cáo) — cờ
+# is_factory_import trên đơn vị chỉ để dành cho báo cáo riêng sau này. ----
+
+def create_factory_import_entry(db: Session, finished_product_id: str, quantity: int,
+                                location_id: str, factory_id: str, user: User, note: str = None) -> dict:
+    """Khai báo "Nhập từ nhà máy khác": Sản phẩm + Số lượng + Vị trí kho nhận + Nhà máy nguồn
+    (Danh mục Nhà máy) đều bắt buộc — factory_id là "dấu hiệu" để biết bia này không do nhà máy
+    đang chạy hệ thống này sản xuất. CHƯA tăng tồn kho — chỉ ghi bản khai chờ duyệt, xem
+    approve_factory_import_entry."""
+    require_perm(user, "warehouse.receive")
+    fp = db.get(FinishedProduct, finished_product_id)
+    if not fp:
+        raise NotFoundError("Không tìm thấy sản phẩm tương ứng.")
+    if quantity <= 0:
+        raise DomainError("Số lượng phải > 0.")
+    if not location_id or not db.get(WmsLocation, location_id):
+        raise DomainError("Vui lòng chọn vị trí kho nhận.")
+    if not factory_id or not db.get(FactoryLocation, factory_id):
+        raise DomainError("Vui lòng chọn nhà máy nguồn.")
+    unit_type = fp.unit_type or "vi"
+    product_name = fp.code
+    entry = FactoryImportEntry(entry_id=new_id(), finished_product_id=finished_product_id,
+                               product_name=product_name, unit_type=unit_type, quantity=quantity,
+                               location_id=location_id, factory_id=factory_id, declared_at=utcnow(),
+                               note=note, created_by=user.username, created_at=utcnow())
+    db.add(entry)
+    record_audit(db, entity_type="factory_import_entry", entity_id=entry.entry_id, action="create", actor=user,
+                after={"product_name": product_name, "count": quantity, "factory_id": factory_id})
+    db.commit()
+    return {"entry_id": entry.entry_id, "product_name": product_name, "unit_type": unit_type, "count": quantity}
+
+
+def update_factory_import_entry(db: Session, entry_id: str, payload: dict, user: User) -> dict:
+    """Sửa 1 bản khai "Nhập từ nhà máy khác" ĐANG CHỜ DUYỆT — mirror update_near_expiry_entry."""
+    require_perm(user, "warehouse.receive")
+    entry = db.get(FactoryImportEntry, entry_id)
+    if not entry:
+        raise NotFoundError("Không tìm thấy bản khai.")
+    if entry.reversed:
+        raise DomainError("Bản khai này đã bị hủy — không thể sửa.")
+    if entry.approved_by:
+        raise DomainError("Bản khai này đã được duyệt — không thể sửa.")
+    if payload.get("finished_product_id") and payload["finished_product_id"] != entry.finished_product_id:
+        fp = db.get(FinishedProduct, payload["finished_product_id"])
+        if not fp:
+            raise NotFoundError("Không tìm thấy sản phẩm tương ứng.")
+        entry.finished_product_id = fp.finished_product_id
+        entry.product_name = fp.code
+        entry.unit_type = fp.unit_type or "vi"
+    if payload.get("quantity") is not None:
+        if payload["quantity"] <= 0:
+            raise DomainError("Số lượng phải > 0.")
+        entry.quantity = payload["quantity"]
+    if payload.get("location_id"):
+        if not db.get(WmsLocation, payload["location_id"]):
+            raise NotFoundError("Không tìm thấy vị trí kho tương ứng.")
+        entry.location_id = payload["location_id"]
+    if payload.get("factory_id"):
+        if not db.get(FactoryLocation, payload["factory_id"]):
+            raise NotFoundError("Không tìm thấy nhà máy tương ứng.")
+        entry.factory_id = payload["factory_id"]
+    if "note" in payload:
+        entry.note = payload["note"]
+    record_audit(db, entity_type="factory_import_entry", entity_id=entry.entry_id, action="update", actor=user,
+                after={"product_name": entry.product_name, "count": entry.quantity})
+    db.commit()
+    return {"entry_id": entry.entry_id}
+
+
+def approve_factory_import_entry(db: Session, entry_id: str, user: User) -> dict:
+    """Trưởng bộ phận kho duyệt 1 bản khai "Nhập từ nhà máy khác" đang chờ — mirror
+    approve_near_expiry_entry (LÚC NÀY mới tạo FinishedGoodsUnit is_factory_import=True + tăng
+    tồn kho; sau khi duyệt khoá hẳn). Lô tự sinh theo năm như "Nhập kho thủ công" thường (xem
+    _next_wms_lot_code) — sau khi vào kho, đơn vị này KHÔNG khác gì hàng thường (không lô riêng
+    như bia gửi/cận date) vì không cần tách dòng ở Xuất kho."""
+    require_perm(user, "wms.confirm_receipt")
+    entry = db.get(FactoryImportEntry, entry_id)
+    if not entry:
+        raise NotFoundError("Không tìm thấy bản khai.")
+    if entry.reversed:
+        raise DomainError("Bản khai này đã bị hủy — không thể duyệt.")
+    if entry.approved_by:
+        raise DomainError("Bản khai này đã được duyệt trước đó.")
+    fp = db.get(FinishedProduct, entry.finished_product_id) if entry.finished_product_id else None
+    pack_size = (fp.pack_size or 1) if fp else 1
+    lot_code = _next_wms_lot_code(db, utcnow().year)
+    units = _create_units(db, {
+        "finished_product_id": entry.finished_product_id, "product_name": entry.product_name,
+        "lot_code": lot_code, "total": entry.quantity * pack_size, "pack_size": pack_size,
+        "unit_type": entry.unit_type, "loc_id": entry.location_id,
+    }, created_by=entry.created_by or user.username, actor=user)
+    now = utcnow()
+    for u in units:
+        u.is_factory_import = True
+        u.received_confirmed_by = user.username
+        u.received_confirmed_at = now
+    entry.lot_code = lot_code
+    entry.unit_codes = ",".join(u.unit_code for u in units)
+    entry.approved_by = user.username
+    entry.approved_at = now
+    record_audit(db, entity_type="factory_import_entry", entity_id=entry.entry_id, action="approve", actor=user,
+                after={"product_name": entry.product_name, "lot_code": lot_code, "count": entry.quantity})
+    db.commit()
+    return {"entry_id": entry.entry_id, "count": entry.quantity, "unit_codes": [u.unit_code for u in units]}
+
+
+def list_factory_import_entries(db: Session) -> list[dict]:
+    entries = db.execute(select(FactoryImportEntry).order_by(FactoryImportEntry.created_at.desc())).scalars().all()
+    out = []
+    for e in entries:
+        loc = db.get(WmsLocation, e.location_id) if e.location_id else None
+        wh = db.get(WmsWarehouse, loc.warehouse_id) if loc and loc.warehouse_id else None
+        factory = db.get(FactoryLocation, e.factory_id) if e.factory_id else None
+        pending = not e.reversed and not e.approved_by
+        out.append({"entry_id": e.entry_id, "finished_product_id": e.finished_product_id,
+                    "product_name": e.product_name, "lot_code": e.lot_code, "unit_type": e.unit_type,
+                    "quantity": e.quantity, "location_code": loc.code if loc else None,
+                    "location_name": loc.name if loc else None, "location_zone": loc.zone if loc else None,
+                    "warehouse_name": wh.name if wh else None,
+                    "factory_id": e.factory_id, "factory_name": factory.name if factory else None,
+                    "declared_at": e.declared_at, "note": e.note, "created_by": e.created_by,
+                    "created_at": e.created_at, "reversed": e.reversed, "approved_by": e.approved_by,
+                    "approved_at": e.approved_at, "can_edit": pending, "can_approve": pending, "can_undo": pending})
+    return out
+
+
+def undo_factory_import_entry(db: Session, entry_id: str, user: User) -> dict:
+    """Hủy 1 bản khai "Nhập từ nhà máy khác" ĐANG CHỜ DUYỆT — mirror undo_near_expiry_entry."""
+    require_perm(user, "warehouse.receive")
+    entry = db.get(FactoryImportEntry, entry_id)
+    if not entry:
+        raise NotFoundError("Không tìm thấy bản khai.")
+    if entry.reversed:
+        raise DomainError("Bản khai này đã được hủy trước đó.")
+    if entry.approved_by:
+        raise DomainError("Bản khai này đã được duyệt — không thể hủy.")
+    entry.reversed = True
+    record_audit(db, entity_type="factory_import_entry", entity_id=entry.entry_id, action="undo", actor=user,
                 before={"count": entry.quantity}, after={"reversed": True})
     db.commit()
     return {"entry_id": entry.entry_id}
@@ -1193,7 +1459,18 @@ def list_lot_summaries(db: Session) -> list:
             bottle_date_by_lot[lot_no] = bottle_date
         if line:
             lines_by_lot.setdefault(lot_no, set()).add(line)
-    loc_meta_by_id = {l.loc_id: (l.code, l.name) for l in db.execute(select(WmsLocation)).scalars().all()}
+    wh_by_id = {w.warehouse_id: w for w in db.execute(select(WmsWarehouse)).scalars().all()}
+    loc_meta_by_id = {l.loc_id: (l.code, l.name, l.warehouse_id, l.zone)
+                      for l in db.execute(select(WmsLocation)).scalars().all()}
+    # vehicle_by_lot: xe đã mang bia gửi về, tra qua ConsignedEntry(direction="in").lot_code —
+    # dùng để hiện "xe đã gửi" ở picker Xuất kho khi chọn hàng bia gửi (is_consigned).
+    vehicle_by_id = {v.vehicle_id: v for v in db.execute(select(Vehicle)).scalars().all()}
+    vehicle_by_lot: dict[str, Vehicle] = {}
+    for lot_code, vehicle_id in db.execute(
+            select(ConsignedEntry.lot_code, ConsignedEntry.vehicle_id)
+            .where(ConsignedEntry.direction == "in", ConsignedEntry.vehicle_id.isnot(None))).all():
+        if lot_code and vehicle_id in vehicle_by_id:
+            vehicle_by_lot[lot_code] = vehicle_by_id[vehicle_id]
     grouped: dict[tuple, dict] = {}
     oldest_by_type: dict[tuple, object] = {}
     loc_counts: dict[tuple, dict] = {}  # (product_name, lot_code, unit_type) -> {loc_id: count}
@@ -1205,10 +1482,13 @@ def list_lot_summaries(db: Session) -> list:
     for (product_name, lot_code, unit_type, location_id, count, qty, oldest_at, near_expiry_count,
          consigned_count, pending_count, confirmed_count) in rows:
         key = (product_name, lot_code)
+        consigned_vehicle = vehicle_by_lot.get(lot_code)
         g = grouped.setdefault(key, {"product_name": product_name, "lot_code": lot_code,
                                      "bottle_codes": bottle_codes_by_lot.get(lot_code, []),
                                      "bottle_date": bottle_date_by_lot.get(lot_code).isoformat() if bottle_date_by_lot.get(lot_code) else None,
-                                     "lines": sorted(lines_by_lot.get(lot_code, []))})
+                                     "lines": sorted(lines_by_lot.get(lot_code, [])),
+                                     "consigned_vehicle_plate": consigned_vehicle.plate if consigned_vehicle else None,
+                                     "consigned_vehicle_code": consigned_vehicle.vehicle_code if consigned_vehicle else None})
         types_by_key.setdefault(key, set()).add(unit_type)
         g.setdefault(f"{unit_type}_count", 0)
         g.setdefault(f"{unit_type}_qty", 0.0)
@@ -1247,9 +1527,14 @@ def list_lot_summaries(db: Session) -> list:
                 g[f"{t}_fifo_ok"] = None
                 g[f"{t}_oldest_at"] = None
             lc = loc_counts.get((g["product_name"], g["lot_code"], t), {})
-            g[f"{t}_locations"] = sorted(({"code": loc_meta_by_id.get(loc_id, (loc_id, None))[0],
-                                           "name": loc_meta_by_id.get(loc_id, (loc_id, None))[1],
-                                           "count": cnt} for loc_id, cnt in lc.items()),
+
+            def _loc_entry(loc_id, cnt):
+                code, name, wh_id, zone = loc_meta_by_id.get(loc_id, (loc_id, None, None, None))
+                wh = wh_by_id.get(wh_id)
+                return {"loc_id": loc_id, "code": code, "name": name, "zone": zone, "count": cnt,
+                       "warehouse_id": wh_id, "warehouse_code": wh.code if wh else None,
+                       "warehouse_name": wh.name if wh else None}
+            g[f"{t}_locations"] = sorted((_loc_entry(loc_id, cnt) for loc_id, cnt in lc.items()),
                                          key=lambda x: -x["count"])
     return sorted(grouped.values(), key=lambda g: (g["product_name"] or "", g["lot_code"] or ""))
 
@@ -1279,7 +1564,9 @@ def lot_aging_report(db: Session, caution_days: float = 30.0, warning_days: floa
                       .where(FinishedGoodsUnit.status == "stored")
                       .group_by(FinishedGoodsUnit.product_name, FinishedGoodsUnit.lot_code,
                                FinishedGoodsUnit.unit_type, FinishedGoodsUnit.location_id)).all()
-    loc_code_by_id = {l.loc_id: l.code for l in db.execute(select(WmsLocation)).scalars().all()}
+    wh_by_id_ag = {w.warehouse_id: w for w in db.execute(select(WmsWarehouse)).scalars().all()}
+    loc_meta_by_id_ag = {l.loc_id: (l.code, l.warehouse_id)
+                        for l in db.execute(select(WmsLocation)).scalars().all()}
     # FinishedGoodsUnit.product_name thực ra lưu MÃ SKU (vd "FLGN200"), không phải tên hiển thị —
     # tra thêm bảng finished_product để lấy đúng tên tiếng Việt (vd "Bia tươi Legend 20L") cho
     # báo cáo/Dashboard hiển thị, không đổi tên cột product_name (đã dùng khắp module này làm khoá).
@@ -1298,7 +1585,10 @@ def lot_aging_report(db: Session, caution_days: float = 30.0, warning_days: floa
         if location_id is None:
             g["unplaced"] += count
         else:
-            g["locations"].append({"code": loc_code_by_id.get(location_id), "count": count})
+            loc_code, wh_id = loc_meta_by_id_ag.get(location_id, (None, None))
+            wh_ag = wh_by_id_ag.get(wh_id)
+            g["locations"].append({"code": loc_code, "count": count,
+                                   "warehouse_code": wh_ag.code if wh_ag else None})
         if g["oldest_at"] is None or (oldest_at and oldest_at < g["oldest_at"]):
             g["oldest_at"] = oldest_at
     out = []
@@ -1362,6 +1652,107 @@ def _bucket_shift(dt: datetime) -> tuple[str, int]:
 
 
 _CA_HOUR_OFFSETS = {1: (6, 14), 2: (14, 22), 3: (22, 30)}  # giờ lệch so với 00h của "ngày" bucket (ca3 kết thúc 06h hôm sau = 30h)
+
+
+def _consigned_window_start(now: datetime) -> datetime:
+    """Mốc bắt đầu cho phép chọn xe/validate số lượng ở "Nhập bia gửi": 14h00 giờ VN (đầu Ca 2)
+    của NGÀY HÔM TRƯỚC so với `now` — VD now là 06/08 bất kỳ giờ nào thì mốc là 05/08 14:00 VN.
+    Trả về UTC (trừ lại _SHIFT_VN_OFFSET) để so sánh trực tiếp với Shipment.created_at."""
+    vn_now = now + _SHIFT_VN_OFFSET
+    ca2_prev_day_local = (vn_now - timedelta(days=1)).replace(hour=14, minute=0, second=0, microsecond=0)
+    return ca2_prev_day_local - _SHIFT_VN_OFFSET
+
+
+def consigned_eligible_vehicles(db: Session) -> list[dict]:
+    """Xe đủ điều kiện chọn ở "Nhập bia gửi": có phiếu xuất kho (Shipment.vehicle_id) tạo trong
+    khoảng [Ca 2 ngày hôm trước 14h VN, hiện tại] — xem _consigned_window_start. Kèm danh sách
+    (sản phẩm, số lượng đã xuất quy đổi vỉ/keg) của xe đó trong khoảng này, để frontend chỉ cho
+    chọn đúng sản phẩm đã xuất và hiện số lượng tối đa được nhập gửi lại — validate thật ở
+    create_consigned_entry (_consigned_available_qty), đây chỉ phục vụ hiển thị/lọc UI."""
+    now = utcnow()
+    window_start = _consigned_window_start(now)
+    ships = db.execute(select(Shipment).where(
+        Shipment.vehicle_id.isnot(None), Shipment.created_at >= window_start,
+        Shipment.created_at <= now)).scalars().all()
+    if not ships:
+        return []
+    shipment_ids = [s.shipment_id for s in ships]
+    vehicle_by_shipment = {s.shipment_id: s.vehicle_id for s in ships}
+    units = db.execute(select(FinishedGoodsUnit).where(
+        FinishedGoodsUnit.shipment_id.in_(shipment_ids))).scalars().all()
+    divide_codes = _divide_by_pack_codes(db)
+    fp_cache: dict = {}
+
+    def _fp_of(fpid):
+        if fpid not in fp_cache:
+            fp_cache[fpid] = db.get(FinishedProduct, fpid) if fpid else None
+        return fp_cache[fpid]
+
+    by_vehicle: dict[str, dict[str, dict]] = {}
+    for u in units:
+        vehicle_id = vehicle_by_shipment.get(u.shipment_id)
+        if not vehicle_id or not u.finished_product_id:
+            continue
+        fp = _fp_of(u.finished_product_id)
+        divisor = _pack_divisor(fp, u.unit_type, divide_codes)
+        prod_map = by_vehicle.setdefault(vehicle_id, {})
+        entry = prod_map.setdefault(u.finished_product_id, {
+            "finished_product_id": u.finished_product_id,
+            "code": fp.code if fp else u.product_name, "shipped_count": 0.0, "unit_type": u.unit_type})
+        entry["shipped_count"] += u.quantity / divisor
+    if not by_vehicle:
+        return []
+    already: dict[tuple, float] = {}
+    for vehicle_id, fpid, total in db.execute(select(
+            ConsignedEntry.vehicle_id, ConsignedEntry.finished_product_id, func.sum(ConsignedEntry.quantity))
+            .where(ConsignedEntry.direction == "in", ConsignedEntry.reversed == false(),
+                   ConsignedEntry.vehicle_id.in_(by_vehicle.keys()),
+                   ConsignedEntry.declared_at >= window_start)
+            .group_by(ConsignedEntry.vehicle_id, ConsignedEntry.finished_product_id)).all():
+        already[(vehicle_id, fpid)] = total or 0.0
+    out = []
+    for v in db.execute(select(Vehicle).where(Vehicle.vehicle_id.in_(by_vehicle.keys()))).scalars().all():
+        products = []
+        for p in by_vehicle[v.vehicle_id].values():
+            remaining = p["shipped_count"] - already.get((v.vehicle_id, p["finished_product_id"]), 0.0)
+            products.append({**p, "shipped_count": round(p["shipped_count"], 3),
+                             "remaining": round(max(remaining, 0.0), 3)})
+        out.append({"vehicle_id": v.vehicle_id, "vehicle_code": v.vehicle_code, "plate": v.plate,
+                    "driver_name": v.driver_name, "driver_short_name": v.driver_short_name,
+                    "active": v.active, "products": products})
+    return sorted(out, key=lambda r: r["plate"])
+
+
+def _consigned_available_qty(db: Session, vehicle_id: str, finished_product_id: str,
+                             exclude_entry_id: str = None) -> float:
+    """Số lượng (quy đổi vỉ/keg) còn được phép nhập bia gửi cho (xe, sản phẩm) này = tổng đã
+    xuất trong khoảng [Ca 2 ngày hôm trước 14h VN, hiện tại] (Shipment.vehicle_id + FinishedGoodsUnit
+    cùng finished_product_id) TRỪ tổng đã khai báo "Nhập bia gửi" trước đó cho đúng cặp (xe, sản
+    phẩm) trong cùng khoảng — chặn khai 2 lần vượt quá thực tế đã xuất. `exclude_entry_id` dùng
+    khi SỬA 1 bản khai đã có (không tự trừ chính nó)."""
+    now = utcnow()
+    window_start = _consigned_window_start(now)
+    shipment_ids = db.execute(select(Shipment.shipment_id).where(
+        Shipment.vehicle_id == vehicle_id, Shipment.created_at >= window_start,
+        Shipment.created_at <= now)).scalars().all()
+    if not shipment_ids:
+        return 0.0
+    units = db.execute(select(FinishedGoodsUnit).where(
+        FinishedGoodsUnit.shipment_id.in_(shipment_ids),
+        FinishedGoodsUnit.finished_product_id == finished_product_id)).scalars().all()
+    if not units:
+        return 0.0
+    divide_codes = _divide_by_pack_codes(db)
+    fp = db.get(FinishedProduct, finished_product_id)
+    shipped_count = sum(u.quantity / _pack_divisor(fp, u.unit_type, divide_codes) for u in units)
+    already_q = select(func.sum(ConsignedEntry.quantity)).where(
+        ConsignedEntry.direction == "in", ConsignedEntry.reversed == false(),
+        ConsignedEntry.vehicle_id == vehicle_id, ConsignedEntry.finished_product_id == finished_product_id,
+        ConsignedEntry.declared_at >= window_start)
+    if exclude_entry_id:
+        already_q = already_q.where(ConsignedEntry.entry_id != exclude_entry_id)
+    already_declared = db.execute(already_q).scalar() or 0.0
+    return max(shipped_count - already_declared, 0.0)
 
 
 def finished_goods_shift_report(db: Session, date_from: datetime, date_to: datetime) -> dict:
@@ -1486,9 +1877,10 @@ def shipment_classification_report(db: Session, date_from: datetime, date_to: da
     """Báo cáo lượng bia khuyến mại / đổi trả / cận date / gửi theo ngày hoặc tháng — 4 chỉ
     số ĐỘC LẬP, KHÔNG loại trừ nhau (1 đơn vị xuất có thể vừa khuyến mại vừa cận date, ví dụ)
     tính trên FinishedGoodsUnit đã status="shipped" trong kỳ [date_from, date_to):
-    - promo/return: Shipment.shipment_type của phiếu xuất chứa đơn vị đó.
+    - promo/return: FinishedGoodsUnit.shipment_line_type CỦA CHÍNH đơn vị đó (1 phiếu xuất giờ
+      có thể gồm nhiều dòng với Loại xuất khác nhau, xem create_shipment).
     - near_expiry/consigned: cờ is_near_expiry/is_consigned của chính đơn vị đó (không phụ
-      thuộc phiếu xuất là loại gì — 1 phiếu "Thường" vẫn có thể chứa bia cận date/gửi).
+      thuộc dòng xuất là loại gì — 1 dòng "Thường" vẫn có thể là bia cận date/gửi).
     Số liệu tính bằng "count" (vỉ/keg/lon quy đổi qua pack_size — như list_lot_summaries),
     KHÔNG quy đổi lít (khác finished_goods_shift_report) vì đây là báo cáo tổng số lượng theo
     phân loại, không phải sản lượng ca. group_by="day" bucket theo ngày giờ VN (dùng chung
@@ -1499,26 +1891,25 @@ def shipment_classification_report(db: Session, date_from: datetime, date_to: da
     divide_codes = _divide_by_pack_codes(db)
     rows = db.execute(
         select(FinishedGoodsUnit.quantity, FinishedGoodsUnit.shipped_at, FinishedGoodsUnit.unit_type,
-               FinishedProduct.pack_size, Shipment.shipment_type,
+               FinishedProduct.pack_size, FinishedGoodsUnit.shipment_line_type,
                FinishedGoodsUnit.is_near_expiry, FinishedGoodsUnit.is_consigned)
         .select_from(FinishedGoodsUnit)
         .outerjoin(FinishedProduct, FinishedProduct.finished_product_id == FinishedGoodsUnit.finished_product_id)
-        .outerjoin(Shipment, Shipment.shipment_id == FinishedGoodsUnit.shipment_id)
         .where(FinishedGoodsUnit.status == "shipped", FinishedGoodsUnit.shipped_at.isnot(None),
                FinishedGoodsUnit.shipped_at >= date_from, FinishedGoodsUnit.shipped_at < date_to)
     ).all()
 
     buckets: dict[str, dict] = {}
-    for qty, shipped_at, unit_type, pack_size, shipment_type, is_near_expiry, is_consigned in rows:
+    for qty, shipped_at, unit_type, pack_size, shipment_line_type, is_near_expiry, is_consigned in rows:
         divisor = (pack_size or 1) if unit_type in divide_codes else 1
         count = (qty or 0) / divisor
         day_key, _ca = _bucket_shift(shipped_at)
         key = day_key[:7] if group_by == "month" else day_key
         b = buckets.setdefault(key, {"period": key, "promo": 0.0, "return": 0.0,
                                      "near_expiry": 0.0, "consigned": 0.0})
-        if shipment_type == "promo":
+        if shipment_line_type == "promo":
             b["promo"] += count
-        elif shipment_type == "return":
+        elif shipment_line_type == "return":
             b["return"] += count
         if is_near_expiry:
             b["near_expiry"] += count
@@ -1722,6 +2113,12 @@ def create_shipment(db: Session, ship_to_id: str, lines: list, user: User, heade
     divide_codes = _divide_by_pack_codes(db)
     units = []
     picked_so_far = set()
+    # 1 phiếu (Shipment) giờ có thể gồm nhiều dòng với "Loại xuất" khác nhau (VD 1 dòng thường
+    # + 1 dòng khuyến mại, cùng 1 nhà phân phối) — lưu type CỦA TỪNG DÒNG lên chính đơn vị được
+    # chọn cho dòng đó (FinishedGoodsUnit.shipment_line_type), KHÔNG còn dùng 1 giá trị chung
+    # cho cả Shipment (xem docstring model + list_shipments/shipment_classification_report).
+    unit_line_type: dict[str, str] = {}
+    line_types_used: set[str] = set()
     for line in lines:
         product_name = line.get("product_name")
         unit_type = line.get("unit_type")
@@ -1729,6 +2126,7 @@ def create_shipment(db: Session, ship_to_id: str, lines: list, user: User, heade
         qty = int(line.get("quantity") or 0)
         near_expiry_only = bool(line.get("near_expiry_only"))
         consigned_only = bool(line.get("consigned_only"))
+        shipment_type_line = line.get("shipment_type") or "normal"
         if not product_name or not unit_type:
             raise DomainError("Mỗi dòng phải có sản phẩm và loại đơn vị.")
         if qty <= 0:
@@ -1763,6 +2161,9 @@ def create_shipment(db: Session, ship_to_id: str, lines: list, user: User, heade
                               f"đơn vị tồn kho, không đủ {qty} yêu cầu.{pending_note}")
         units.extend(candidates)
         picked_so_far.update(u.unit_id for u in candidates)
+        line_types_used.add(shipment_type_line)
+        for u in candidates:
+            unit_line_type[u.unit_id] = shipment_type_line
 
     picked_ids = picked_so_far
     fifo_ok = True
@@ -1785,13 +2186,20 @@ def create_shipment(db: Session, ship_to_id: str, lines: list, user: User, heade
     from_location = ", ".join(sorted({f"{l.code} - {l.name}" if l.name else l.code for l in locs})) or None
 
     header = header or {}
+    # Shipment.shipment_type (cột cũ) nay chỉ còn ý nghĩa TÓM TẮT cho cả phiếu — giống nhau ở
+    # mọi dòng thì giữ giá trị đó (in phiếu/lịch sử cũ vẫn đọc đúng), khác nhau thì "mixed" (UI
+    # hiện "Loại xuất" thật theo TỪNG DÒNG, xem list_shipments/shipment_line_type ở trên).
+    header_shipment_type = (next(iter(line_types_used)) if len(line_types_used) == 1
+                            else "mixed" if line_types_used else "normal")
     shipment = Shipment(shipment_id=new_id(), shipment_code=_next_shipment_code(db, utcnow().year),
                         ship_to_id=ship_to_id, created_by=user.username, created_at=utcnow(),
                         fifo_ok=fifo_ok, note=header.get("note"),
                         recipient_name=header.get("recipient_name"), recipient_dept=header.get("recipient_dept"),
                         driver_name=header.get("driver_name"), vehicle_plate=header.get("vehicle_plate"),
+                        vehicle_id=header.get("vehicle_id") if header.get("vehicle_id") and
+                                  db.get(Vehicle, header.get("vehicle_id")) else None,
                         from_location=from_location, delivery_place=header.get("delivery_place"),
-                        shipment_type=header.get("shipment_type") or "normal")
+                        shipment_type=header_shipment_type)
     db.add(shipment)
     db.flush()
 
@@ -1811,6 +2219,7 @@ def create_shipment(db: Session, ship_to_id: str, lines: list, user: User, heade
         u.shipped_at = utcnow()
         u.shipment_id = shipment.shipment_id
         u.ship_to_id = ship_to_id
+        u.shipment_line_type = unit_line_type.get(u.unit_id, "normal")
         genealogy.add_edge(db, from_type="finished_goods_unit", from_id=u.unit_id, to_type="ship_to",
                            to_id=ship_to_id, relation="xuất kho", quantity=u.quantity, uom=u.unit_type)
         out_lines.append({"unit_code": u.unit_code, "product": u.product_name, "lot_code": u.lot_code})
@@ -1852,6 +2261,7 @@ def list_shipments(db: Session, limit: int = 200, offset: int = 0) -> list:
     ships = db.execute(select(Shipment).order_by(Shipment.created_at.desc())
                       .limit(limit).offset(offset)).scalars().all()
     ship_to_by = {s.supplier_id: s for s in db.execute(select(Supplier)).scalars().all()}
+    vehicle_by_id = {v.vehicle_id: v for v in db.execute(select(Vehicle)).scalars().all()}
     fp_cache: dict = {}
     divide_codes = _divide_by_pack_codes(db)
 
@@ -1875,10 +2285,11 @@ def list_shipments(db: Session, limit: int = 200, offset: int = 0) -> list:
         # thể đại diện nhiều đơn vị đóng gói, xem docs/WMS-LOT-LEVEL-REDESIGN.md).
         grouped: dict[tuple, dict] = {}
         for u in units:
-            key = (u.product_name, u.lot_code, u.unit_type)
+            line_type = u.shipment_line_type or "normal"
+            key = (u.product_name, u.lot_code, u.unit_type, line_type)
             g = grouped.setdefault(key, {"product": u.product_name, "lot_code": u.lot_code,
                                          "unit_type": u.unit_type, "count": 0.0, "quantity": 0.0,
-                                         "near_expiry": False, "consigned": False})
+                                         "near_expiry": False, "consigned": False, "type": line_type})
             g["count"] += u.quantity / _divisor_of(u)
             g["quantity"] += u.quantity
             if u.is_near_expiry:
@@ -1886,6 +2297,7 @@ def list_shipments(db: Session, limit: int = 200, offset: int = 0) -> list:
             if u.is_consigned:
                 g["consigned"] = True
         ship_to = ship_to_by.get(s.ship_to_id)
+        vehicle = vehicle_by_id.get(s.vehicle_id) if s.vehicle_id else None
         unit_count = sum(g["count"] for g in grouped.values())
         out.append({"shipment_id": s.shipment_id, "shipment_code": s.shipment_code,
                     "ship_to_code": ship_to.code if ship_to else None,
@@ -1895,6 +2307,8 @@ def list_shipments(db: Session, limit: int = 200, offset: int = 0) -> list:
                     "shipment_type": s.shipment_type,
                     "note": s.note, "recipient_name": s.recipient_name, "recipient_dept": s.recipient_dept,
                     "driver_name": s.driver_name, "vehicle_plate": s.vehicle_plate,
+                    "vehicle_code": vehicle.vehicle_code if vehicle else None,
+                    "km": s.km, "fuel_liters": s.fuel_liters,
                     "from_location": s.from_location, "delivery_place": s.delivery_place,
                     "confirmed_by": s.confirmed_by, "confirmed_at": s.confirmed_at,
                     "unit_count": unit_count, "lines": list(grouped.values())})
@@ -1917,6 +2331,25 @@ def confirm_shipment(db: Session, shipment_id: str, user: User) -> dict:
     db.commit()
     return {"shipment_id": shipment.shipment_id, "confirmed_by": shipment.confirmed_by,
             "confirmed_at": shipment.confirmed_at}
+
+
+def update_shipment_trip(db: Session, shipment_id: str, km: float | None, fuel_liters: float | None,
+                         user: User) -> dict:
+    """Điền km/lít xăng của 1 chuyến xuất — chỉ cho phép SAU KHI phiếu đã Duyệt (confirmed_by),
+    vì trước đó chuyến chưa thực sự khởi hành. Cho sửa lại nhiều lần (không khoá), dùng cho báo
+    cáo định mức nhiên liệu (xem fuel_efficiency_report)."""
+    require_perm(user, "warehouse.issue")
+    shipment = db.get(Shipment, shipment_id)
+    if not shipment:
+        raise NotFoundError("Phiếu xuất kho không tồn tại.")
+    if not shipment.confirmed_by:
+        raise DomainError("Chỉ được điền km/lít xăng sau khi phiếu đã được duyệt.")
+    shipment.km = km
+    shipment.fuel_liters = fuel_liters
+    record_audit(db, entity_type="shipment", entity_id=shipment.shipment_id, action="update_trip", actor=user,
+                after={"km": km, "fuel_liters": fuel_liters})
+    db.commit()
+    return {"shipment_id": shipment.shipment_id, "km": shipment.km, "fuel_liters": shipment.fuel_liters}
 
 
 _SHIPMENT_EDITABLE_FIELDS = ("note", "recipient_name", "recipient_dept", "driver_name",
@@ -2105,6 +2538,12 @@ def relocate_batch(db: Session, product_name: str, lot_code: str, unit_type: str
     to_loc = db.get(WmsLocation, to_loc_id)
     if not to_loc:
         raise NotFoundError("Vị trí đích không tồn tại.")
+    if from_loc_id:
+        # Chỉ chặn khi có vị trí nguồn thật (đang cất) — hàng "chưa cất" (from_loc_id=None) chưa
+        # thuộc kho nào nên không có gì để so sánh, vẫn cho cất vào bất kỳ kho nào như trước.
+        from_loc_check = db.get(WmsLocation, from_loc_id)
+        if from_loc_check and from_loc_check.warehouse_id != to_loc.warehouse_id:
+            raise DomainError("Chỉ được chuyển vị trí trong cùng 1 kho thành phẩm — chọn vị trí đích cùng kho với vị trí nguồn.")
 
     fp = db.execute(select(FinishedProduct).where(FinishedProduct.code == product_name)).scalar_one_or_none()
     divisor = _pack_divisor(fp, unit_type, _divide_by_pack_codes(db))
@@ -2133,3 +2572,378 @@ def relocate_batch(db: Session, product_name: str, lot_code: str, unit_type: str
                  after={"moved": moved_count, "to_location": to_loc.code})
     db.commit()
     return {"moved": moved_count, "to_location": to_loc.code, "requested": count}
+
+
+def _next_transfer_code(db: Session, year: int) -> str:
+    """Số phiếu điều chuyển — mirror _next_shipment_code nhưng dãy số RIÊNG cho WmsTransfer."""
+    suffix = f"/{year}/DC-BHL"
+    existing = db.execute(select(WmsTransfer.transfer_code)
+                         .where(WmsTransfer.transfer_code.like(f"%{suffix}"))).scalars().all()
+    max_seq = 0
+    for code in existing:
+        try:
+            max_seq = max(max_seq, int(code.split("/")[0]))
+        except (ValueError, IndexError):
+            pass
+    return f"{max_seq + 1:03d}{suffix}"
+
+
+def create_transfer(db: Session, to_location_id: str, lines: list, user: User, header: dict | None = None) -> dict:
+    """Điều chuyển nội bộ — mirror y hệt create_shipment (chọn theo sản phẩm/lô/loại đơn vị/số
+    lượng, hệ thống tự chọn FIFO cũ nhất, kiểm tra vi phạm FIFO, có thể kèm xe/lái xe) NHƯNG đích
+    là 1 WmsLocation (không phải Supplier/ship_to) và KHÔNG làm giảm tổng tồn kho toàn công ty:
+    CHỈ đổi FinishedGoodsUnit.location_id (giữ status="stored"), KHÔNG tạo genealogy edge ra
+    ngoài, KHÔNG đụng lot_code — giữ nguyên mã chiết để truy xuất nguồn gốc không đứt. Không có
+    near_expiry_only/consigned_only/shipment_type (không có ý nghĩa cho luồng nội bộ — các cờ
+    is_near_expiry/is_consigned trên đơn vị vẫn giữ nguyên nguyên vẹn qua lần điều chuyển)."""
+    require_perm(user, "warehouse.issue")
+    if not to_location_id:
+        raise DomainError("Phải chọn vị trí đích.")
+    to_loc = db.get(WmsLocation, to_location_id)
+    if not to_loc:
+        raise NotFoundError("Vị trí đích không tồn tại.")
+    if not lines:
+        raise DomainError("Phải chọn ít nhất 1 dòng sản phẩm để điều chuyển.")
+
+    divide_codes = _divide_by_pack_codes(db)
+    units: list[FinishedGoodsUnit] = []
+    picked_so_far: set = set()
+    for line in lines:
+        product_name = line.get("product_name")
+        unit_type = line.get("unit_type")
+        lot_code = line.get("lot_code")
+        qty = int(line.get("quantity") or 0)
+        if not product_name or not unit_type:
+            raise DomainError("Mỗi dòng phải có sản phẩm và loại đơn vị.")
+        if qty <= 0:
+            raise DomainError(f"Số lượng cần chuyển cho {product_name} phải > 0.")
+        fp = db.execute(select(FinishedProduct).where(FinishedProduct.code == product_name)).scalar_one_or_none()
+        divisor = _pack_divisor(fp, unit_type, divide_codes)
+        # location_id: giữ FIFO trong đúng vị trí kho NGUỒN người dùng chọn ở picker — nếu
+        # không truyền (request cũ) thì giữ hành vi cũ, FIFO tự do trên toàn công ty.
+        line_location_id = line.get("location_id") or _LOC_UNSET
+        candidates, got = _consume_lot_rows(
+            db, product_name=product_name, unit_type=unit_type, status="stored",
+            quantity_needed=qty * divisor, lot_code=lot_code, location_id=line_location_id,
+            exclude_ids=picked_so_far, block_pending_manual=True)
+        if got + 1e-9 < qty * divisor:
+            raise DomainError(f"{product_name} {lot_code or ''}: chỉ còn {got / divisor:g} đơn vị "
+                              f"tồn kho, không đủ {qty} yêu cầu.")
+        units.extend(candidates)
+        picked_so_far.update(u.unit_id for u in candidates)
+
+    picked_ids = picked_so_far
+    fifo_ok = True
+    for u in units:
+        if not u.product_name:
+            continue
+        older = db.execute(select(FinishedGoodsUnit).where(
+            FinishedGoodsUnit.product_name == u.product_name, FinishedGoodsUnit.status == "stored",
+            FinishedGoodsUnit.unit_id != u.unit_id, FinishedGoodsUnit.created_at < u.created_at)).scalars().all()
+        if any(o.unit_id not in picked_ids for o in older):
+            fifo_ok = False
+            break
+
+    # Vị trí xuất phát — tự suy ra từ location_id của các đơn vị được chọn TRƯỚC khi chuyển
+    # (giống Shipment.from_location), CHƯA đổi gì ở bước này.
+    loc_ids = {u.location_id for u in units if u.location_id}
+    locs = db.execute(select(WmsLocation).where(WmsLocation.loc_id.in_(loc_ids))).scalars().all() if loc_ids else []
+    from_location = ", ".join(sorted({f"{l.code} - {l.name}" if l.name else l.code for l in locs})) or None
+
+    # Kiểm sức chứa đích — chỉ tính các đơn vị THỰC SỰ đổi vị trí (loại trừ đơn vị đã sẵn ở
+    # đích nếu người dùng lỡ chọn trùng — mirror transfer_units/relocate_batch).
+    fp_cache: dict = {}
+
+    def _divisor_of(u):
+        if u.finished_product_id not in fp_cache:
+            fp_cache[u.finished_product_id] = db.get(FinishedProduct, u.finished_product_id) if u.finished_product_id else None
+        return _pack_divisor(fp_cache[u.finished_product_id], u.unit_type, divide_codes)
+
+    moving_in = [u for u in units if u.location_id != to_location_id]
+    if moving_in:
+        used_at_dest = _location_used_count(db, to_location_id)
+        moving_in_count = sum(u.quantity / _divisor_of(u) for u in moving_in)
+        if used_at_dest + moving_in_count > to_loc.capacity:
+            raise DomainError(f"Vị trí {to_loc.code} không đủ sức chứa (sức chứa {to_loc.capacity}, "
+                              f"hiện có {used_at_dest:g}, cần thêm {moving_in_count:g}).")
+
+    header = header or {}
+    transfer = WmsTransfer(transfer_id=new_id(), transfer_code=_next_transfer_code(db, utcnow().year),
+                           to_location_id=to_location_id, created_by=user.username, created_at=utcnow(),
+                           fifo_ok=fifo_ok, note=header.get("note"), driver_name=header.get("driver_name"),
+                           vehicle_plate=header.get("vehicle_plate"),
+                           vehicle_id=header.get("vehicle_id") if header.get("vehicle_id") and
+                                     db.get(Vehicle, header.get("vehicle_id")) else None,
+                           from_location=from_location)
+    db.add(transfer)
+    db.flush()
+
+    out_lines = []
+    for u in units:
+        db.add(WmsTransferLine(line_id=new_id(), transfer_id=transfer.transfer_id, unit_id=u.unit_id,
+                               from_location_id=u.location_id))
+        u.location_id = to_location_id
+        u.transfer_id = transfer.transfer_id
+        out_lines.append({"unit_code": u.unit_code, "product": u.product_name, "lot_code": u.lot_code})
+
+    record_audit(db, entity_type="wms_transfer", entity_id=transfer.transfer_id, action="create", actor=user,
+                after={"transfer_code": transfer.transfer_code, "to_location": to_loc.code,
+                       "units": out_lines, "fifo_ok": fifo_ok})
+    db.commit()
+    return {"transfer_id": transfer.transfer_id, "transfer_code": transfer.transfer_code,
+            "to_location_code": to_loc.code, "fifo_ok": fifo_ok, "units": out_lines}
+
+
+def list_transfers(db: Session, limit: int = 200, offset: int = 0) -> list:
+    """Mirror list_shipments — có phân trang, nạp 1 LẦN toàn bộ FinishedGoodsUnit của các phiếu
+    trong trang hiện tại rồi nhóm theo transfer_id trong Python (không N+1)."""
+    limit = max(1, min(limit or 200, 2000))
+    offset = max(0, offset or 0)
+    transfers = db.execute(select(WmsTransfer).order_by(WmsTransfer.created_at.desc())
+                           .limit(limit).offset(offset)).scalars().all()
+    loc_by_id = {l.loc_id: l for l in db.execute(select(WmsLocation)).scalars().all()}
+    vehicle_by_id = {v.vehicle_id: v for v in db.execute(select(Vehicle)).scalars().all()}
+    fp_cache: dict = {}
+    divide_codes = _divide_by_pack_codes(db)
+
+    def _divisor_of(u):
+        if u.finished_product_id not in fp_cache:
+            fp_cache[u.finished_product_id] = db.get(FinishedProduct, u.finished_product_id) if u.finished_product_id else None
+        return _pack_divisor(fp_cache[u.finished_product_id], u.unit_type, divide_codes)
+
+    transfer_ids = [t.transfer_id for t in transfers]
+    units_by_transfer: dict[str, list] = {}
+    if transfer_ids:
+        for u in db.execute(select(FinishedGoodsUnit).where(
+                FinishedGoodsUnit.transfer_id.in_(transfer_ids))).scalars().all():
+            units_by_transfer.setdefault(u.transfer_id, []).append(u)
+
+    out = []
+    for t in transfers:
+        units = units_by_transfer.get(t.transfer_id, [])
+        grouped: dict[tuple, dict] = {}
+        for u in units:
+            key = (u.product_name, u.lot_code, u.unit_type)
+            g = grouped.setdefault(key, {"product": u.product_name, "lot_code": u.lot_code,
+                                         "unit_type": u.unit_type, "count": 0.0, "quantity": 0.0})
+            g["count"] += u.quantity / _divisor_of(u)
+            g["quantity"] += u.quantity
+        to_loc = loc_by_id.get(t.to_location_id)
+        vehicle = vehicle_by_id.get(t.vehicle_id) if t.vehicle_id else None
+        unit_count = sum(g["count"] for g in grouped.values())
+        out.append({"transfer_id": t.transfer_id, "transfer_code": t.transfer_code,
+                    "to_location_code": to_loc.code if to_loc else None,
+                    "to_location_name": to_loc.name if to_loc else None,
+                    "created_by": t.created_by, "created_at": t.created_at, "fifo_ok": t.fifo_ok,
+                    "note": t.note, "driver_name": t.driver_name, "vehicle_plate": t.vehicle_plate,
+                    "vehicle_code": vehicle.vehicle_code if vehicle else None,
+                    "km": t.km, "fuel_liters": t.fuel_liters, "from_location": t.from_location,
+                    "confirmed_by": t.confirmed_by, "confirmed_at": t.confirmed_at,
+                    "unit_count": unit_count, "lines": list(grouped.values())})
+    return out
+
+
+def confirm_transfer(db: Session, transfer_id: str, user: User) -> dict:
+    """Trưởng bộ phận kho xác nhận phiếu điều chuyển — mirror confirm_shipment, dùng LẠI quyền
+    wms.confirm_shipment (không tách quyền riêng vì cùng người duyệt/cùng ý nghĩa "chốt phiếu
+    kho"). Chỉ khoá lại, KHÔNG đổi số liệu tồn kho (đã đổi ngay lúc create_transfer)."""
+    require_perm(user, "wms.confirm_shipment")
+    transfer = db.get(WmsTransfer, transfer_id)
+    if not transfer:
+        raise NotFoundError("Phiếu điều chuyển không tồn tại.")
+    if transfer.confirmed_by:
+        raise DomainError("Phiếu này đã được xác nhận trước đó.")
+    transfer.confirmed_by = user.username
+    transfer.confirmed_at = utcnow()
+    record_audit(db, entity_type="wms_transfer", entity_id=transfer.transfer_id, action="confirm", actor=user)
+    db.commit()
+    return {"transfer_id": transfer.transfer_id, "confirmed_by": transfer.confirmed_by,
+            "confirmed_at": transfer.confirmed_at}
+
+
+def update_transfer_trip(db: Session, transfer_id: str, km: float | None, fuel_liters: float | None,
+                         user: User) -> dict:
+    """Điền km/lít xăng của 1 chuyến điều chuyển — mirror update_shipment_trip, chỉ cho phép SAU
+    KHI phiếu đã Duyệt. Cho sửa lại nhiều lần (không khoá)."""
+    require_perm(user, "warehouse.issue")
+    transfer = db.get(WmsTransfer, transfer_id)
+    if not transfer:
+        raise NotFoundError("Phiếu điều chuyển không tồn tại.")
+    if not transfer.confirmed_by:
+        raise DomainError("Chỉ được điền km/lít xăng sau khi phiếu đã được duyệt.")
+    transfer.km = km
+    transfer.fuel_liters = fuel_liters
+    record_audit(db, entity_type="wms_transfer", entity_id=transfer.transfer_id, action="update_trip", actor=user,
+                after={"km": km, "fuel_liters": fuel_liters})
+    db.commit()
+    return {"transfer_id": transfer.transfer_id, "km": transfer.km, "fuel_liters": transfer.fuel_liters}
+
+
+_TRANSFER_EDITABLE_FIELDS = ("note", "driver_name", "vehicle_plate")
+
+
+def update_transfer(db: Session, transfer_id: str, payload: dict, user: User) -> dict:
+    """Sửa thông tin đầu phiếu điều chuyển (ghi chú/lái xe/biển số) — mirror update_shipment,
+    KHÔNG cho sửa vị trí đích (đổi vị trí đích sau khi đã chọn/chuyển thật là vô nghĩa, phải Hoàn
+    tác + lập phiếu mới). Chặn sửa sau khi đã "Duyệt"."""
+    require_perm(user, "warehouse.issue")
+    transfer = db.get(WmsTransfer, transfer_id)
+    if not transfer:
+        raise NotFoundError("Phiếu điều chuyển không tồn tại.")
+    if transfer.confirmed_by:
+        raise DomainError("Phiếu đã được duyệt — không thể sửa nữa.")
+    before = {f: getattr(transfer, f) for f in _TRANSFER_EDITABLE_FIELDS}
+    for field in _TRANSFER_EDITABLE_FIELDS:
+        if field in payload:
+            setattr(transfer, field, payload[field])
+    record_audit(db, entity_type="wms_transfer", entity_id=transfer.transfer_id, action="update",
+                actor=user, before=before, after={f: getattr(transfer, f) for f in _TRANSFER_EDITABLE_FIELDS})
+    db.commit()
+    return {"transfer_id": transfer.transfer_id}
+
+
+def undo_transfer(db: Session, transfer_id: str, user: User) -> dict:
+    """Hoàn tác 1 phiếu điều chuyển — trả các vỉ/keg/lon về ĐÚNG vị trí TRƯỚC khi chuyển (ghi ở
+    WmsTransferLine.from_location_id lúc tạo phiếu) — khác undo_shipment (Xuất kho luôn xóa
+    location_id nên không có vị trí gốc để trả). CHỈ trả lại đơn vị mà transfer_id hiện tại vẫn
+    còn khớp ĐÚNG phiếu này (FinishedGoodsUnit.transfer_id == transfer_id) — đơn vị đã bị 1 thao
+    tác khác (điều chuyển/xuất kho khác) "chạm" vào sau đó thì bỏ qua, không trả về (không còn
+    đúng nguyên trạng để hoàn tác an toàn); trả kèm "skipped" để người dùng biết có phần không
+    hoàn tác được. Không xóa WmsTransferLine (giữ làm lịch sử) — gọi lại lần 2 tự nhiên báo
+    "không còn gì để hoàn tác" vì mọi đơn vị đã có transfer_id khác/None."""
+    require_perm(user, "warehouse.issue")
+    transfer = db.get(WmsTransfer, transfer_id)
+    if not transfer:
+        raise NotFoundError("Phiếu điều chuyển không tồn tại.")
+    if transfer.confirmed_by:
+        require_role(user, Role.ADMIN)
+    lines = db.execute(select(WmsTransferLine).where(WmsTransferLine.transfer_id == transfer_id)).scalars().all()
+    if not lines:
+        raise DomainError("Phiếu này không có dòng nào để hoàn tác.")
+
+    fp_cache: dict = {}
+    divide_codes = _divide_by_pack_codes(db)
+
+    def _divisor_of(u):
+        if u.finished_product_id not in fp_cache:
+            fp_cache[u.finished_product_id] = db.get(FinishedProduct, u.finished_product_id) if u.finished_product_id else None
+        return _pack_divisor(fp_cache[u.finished_product_id], u.unit_type, divide_codes)
+
+    restored_count = 0.0
+    skipped = 0
+    for line in lines:
+        u = db.get(FinishedGoodsUnit, line.unit_id)
+        if not u or u.transfer_id != transfer_id:
+            skipped += 1
+            continue
+        u.location_id = line.from_location_id
+        u.transfer_id = None
+        restored_count += u.quantity / _divisor_of(u)
+    if restored_count == 0:
+        raise DomainError("Phiếu này không còn đơn vị nào để hoàn tác (có thể đã hoàn tác trước đó, "
+                          "hoặc toàn bộ đơn vị đã bị 1 thao tác khác thay đổi sau đó).")
+    record_audit(db, entity_type="wms_transfer", entity_id=transfer_id, action="undo", actor=user,
+                before={"unit_count": restored_count}, after={"restored": restored_count, "skipped": skipped})
+    db.commit()
+    return {"transfer_id": transfer_id, "restored": restored_count, "skipped": skipped}
+
+
+# ---- Báo cáo lượt xe & tải trọng / tổng hợp bia gửi / định mức nhiên liệu ----
+
+def vehicle_trip_report(db: Session, date_from: datetime, date_to: datetime) -> list[dict]:
+    """Số lượt mỗi xe đã chở đi (1 phiếu xuất kho = 1 lượt) + tổng tải trọng (kg, tính qua
+    _line_weight_kg) trong [date_from, date_to) theo Shipment.created_at. So sánh với
+    Vehicle.capacity_kg để đếm số lượt vượt tải (chỉ tính khi xe đã khai báo capacity_kg).
+    Chỉ tính các phiếu đã gắn vehicle_id (chọn xe từ Danh mục lái xe lúc tạo phiếu) — phiếu cũ/
+    gõ tay biển số không qua danh mục sẽ không xuất hiện ở đây."""
+    divide_codes = _divide_by_pack_codes(db)
+    ships = db.execute(select(Shipment).where(
+        Shipment.vehicle_id.isnot(None), Shipment.created_at >= date_from,
+        Shipment.created_at < date_to)).scalars().all()
+    shipment_ids = [s.shipment_id for s in ships]
+    units_by_shipment: dict[str, list] = {}
+    if shipment_ids:
+        for u in db.execute(select(FinishedGoodsUnit).where(
+                FinishedGoodsUnit.shipment_id.in_(shipment_ids))).scalars().all():
+            units_by_shipment.setdefault(u.shipment_id, []).append(u)
+    fp_cache: dict = {}
+
+    def _fp_of(finished_product_id):
+        if finished_product_id not in fp_cache:
+            fp_cache[finished_product_id] = db.get(FinishedProduct, finished_product_id) if finished_product_id else None
+        return fp_cache[finished_product_id]
+
+    by_vehicle: dict[str, dict] = {}
+    for s in ships:
+        trip_kg = sum(_line_weight_kg(_fp_of(u.finished_product_id), u.unit_type, u.quantity, divide_codes)
+                      for u in units_by_shipment.get(s.shipment_id, []))
+        acc = by_vehicle.setdefault(s.vehicle_id, {"trip_count": 0, "total_kg": 0.0, "over_capacity_trip_count": 0})
+        acc["trip_count"] += 1
+        acc["total_kg"] += trip_kg
+        vehicle = db.get(Vehicle, s.vehicle_id)
+        if vehicle and vehicle.capacity_kg and trip_kg > vehicle.capacity_kg:
+            acc["over_capacity_trip_count"] += 1
+
+    out = []
+    for vehicle_id, acc in by_vehicle.items():
+        vehicle = db.get(Vehicle, vehicle_id)
+        out.append({"vehicle_id": vehicle_id, "vehicle_code": vehicle.vehicle_code if vehicle else None,
+                    "plate": vehicle.plate if vehicle else None,
+                    "driver_name": vehicle.driver_name if vehicle else None,
+                    "capacity_kg": vehicle.capacity_kg if vehicle else None,
+                    "trip_count": acc["trip_count"], "total_kg": round(acc["total_kg"], 2),
+                    "avg_kg_per_trip": round(acc["total_kg"] / acc["trip_count"], 2),
+                    "avg_tons_per_trip": round(acc["total_kg"] / acc["trip_count"] / 1000, 3),
+                    "over_capacity_trip_count": acc["over_capacity_trip_count"]})
+    return sorted(out, key=lambda r: -r["trip_count"])
+
+
+def consigned_summary_report(db: Session, date_from: datetime, date_to: datetime) -> list[dict]:
+    """Tổng hợp số lượng bia gửi đã nhận về (ConsignedEntry direction="in") trong khoảng
+    [date_from, date_to) theo declared_at, gộp theo (sản phẩm, loại đơn vị)."""
+    rows = db.execute(select(ConsignedEntry.product_name, ConsignedEntry.unit_type,
+                             func.sum(ConsignedEntry.quantity), func.count())
+                      .where(ConsignedEntry.direction == "in", ConsignedEntry.reversed == false(),
+                             ConsignedEntry.declared_at.isnot(None),
+                             ConsignedEntry.declared_at >= date_from, ConsignedEntry.declared_at < date_to)
+                      .group_by(ConsignedEntry.product_name, ConsignedEntry.unit_type)).all()
+    return [{"product_name": product_name, "unit_type": unit_type,
+            "total_quantity": total_quantity or 0, "entry_count": entry_count}
+            for product_name, unit_type, total_quantity, entry_count in rows]
+
+
+def fuel_efficiency_report(db: Session, date_from: datetime, date_to: datetime) -> list[dict]:
+    """Định mức nhiên liệu mỗi chuyến xuất đã điền đủ km + lít xăng (update_shipment_trip),
+    trong [date_from, date_to) theo Shipment.confirmed_at (chỉ có km/fuel sau khi duyệt).
+    lít bia = tổng SL đơn vị nhỏ x lít/đơn vị (_liters_per_unit) của mọi FinishedGoodsUnit
+    thuộc phiếu đó. Bỏ qua chia-0 (liters_beer/fuel_liters = 0) — trả None cho tỉ lệ đó."""
+    ships = db.execute(select(Shipment).where(
+        Shipment.vehicle_id.isnot(None), Shipment.km.isnot(None), Shipment.fuel_liters.isnot(None),
+        Shipment.confirmed_at.isnot(None), Shipment.confirmed_at >= date_from,
+        Shipment.confirmed_at < date_to)).scalars().all()
+    shipment_ids = [s.shipment_id for s in ships]
+    units_by_shipment: dict[str, list] = {}
+    if shipment_ids:
+        for u in db.execute(select(FinishedGoodsUnit).where(
+                FinishedGoodsUnit.shipment_id.in_(shipment_ids))).scalars().all():
+            units_by_shipment.setdefault(u.shipment_id, []).append(u)
+    fp_cache: dict = {}
+
+    def _fp_of(finished_product_id):
+        if finished_product_id not in fp_cache:
+            fp_cache[finished_product_id] = db.get(FinishedProduct, finished_product_id) if finished_product_id else None
+        return fp_cache[finished_product_id]
+
+    out = []
+    for s in ships:
+        liters_beer = sum((u.quantity or 0) * (_liters_per_unit(_fp_of(u.finished_product_id)) or 0)
+                          for u in units_by_shipment.get(s.shipment_id, []))
+        vehicle = db.get(Vehicle, s.vehicle_id)
+        out.append({"shipment_code": s.shipment_code,
+                    "vehicle_code": vehicle.vehicle_code if vehicle else None,
+                    "plate": vehicle.plate if vehicle else None,
+                    "driver_name": vehicle.driver_name if vehicle else None,
+                    "km": s.km, "fuel_liters": s.fuel_liters, "liters_beer": round(liters_beer, 2),
+                    "l_fuel_per_l_beer": round(s.fuel_liters / liters_beer, 4) if liters_beer else None,
+                    "km_per_l_fuel": round(s.km / s.fuel_liters, 2) if s.fuel_liters else None})
+    return sorted(out, key=lambda r: r["shipment_code"])

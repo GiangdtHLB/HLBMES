@@ -7,7 +7,7 @@ chỉ giữ phần LỆNH:
    men), sản lượng thực tế (volume_hl) cộng dồn tới khi lệch trong khoảng ±sai số so với kế
    hoạch (planned_volume_hl) thì lệnh hoàn thành, không cho thêm mã nấu mới (mirror Lệnh lọc).
 4) Xóa lệnh bị chặn khi đã thực hiện (có ít nhất 1 mã nấu, bất kể đã hoàn thành hay chưa).
-5) get_order tính đúng cờ "shortage" (thiếu tồn) theo snapshot đã lưu."""
+5) Thiếu tồn (tổng 2 kho) thì chặn hẳn việc tạo/sửa lệnh (không cho lưu), mirror Lệnh lọc."""
 
 import os
 import tempfile
@@ -109,10 +109,13 @@ def _set_real_actual_volume(client, admin_h, brew_id, batch_code, volume_hl, lin
 
 
 def test_create_order_auto_from_bom(client, admin_h, lager_product_id):
+    # 3 mẻ là số lớn nhất còn NẰM TRONG tồn kho seed sẵn cho cả 3 NVL (Men Lager W-34/70 chỉ
+    # đủ đúng 3 mẻ: 50kg/mẻ x 3 = 150kg = đúng tồn) — dùng số này để lệnh còn tạo được (đủ
+    # tồn), xem test_create_order_blocked_when_shortage cho trường hợp ngược lại.
     order_id = _a_brew_order(client, admin_h, "LN-BOM01", product_id=lager_product_id,
-                             planned_batch_count=12, planned_volume_hl=1776, auto_from_bom=True)
+                             planned_batch_count=3, planned_volume_hl=444, auto_from_bom=True)
     detail = client.get(f"/api/brewing/orders/{order_id}", headers=admin_h).json()
-    assert detail["planned_batch_count"] == 12
+    assert detail["planned_batch_count"] == 3
     lines = {l["material_name"]: l for l in detail["lines"] if not l["is_header"]}
     assert set(lines.keys()) >= {"Malt Pilsner", "Hoa bia Saaz", "Men Lager W-34/70"}
 
@@ -120,7 +123,7 @@ def test_create_order_auto_from_bom(client, admin_h, lager_product_id):
     # Công thức khai báo NVL cho ĐÚNG 1 mẻ (1200 kg) — planned_volume_hl không scale nữa,
     # chỉ planned_batch_count nhân trực tiếp vào tổng nhu cầu.
     assert malt["qty_per_batch"] == pytest.approx(1200)
-    assert malt["qty_total"] == pytest.approx(1200 * 12)
+    assert malt["qty_total"] == pytest.approx(1200 * 3)
     # Snapshot tồn phải được ghi lại (không None) vì Malt Pilsner có material_id thật.
     assert malt["stock_company_snapshot"] is not None or malt["stock_workshop_snapshot"] is not None
 
@@ -419,15 +422,20 @@ def test_update_order_blocked_once_executed(client, admin_h, vanhanh_h, lager_pr
     assert blocked.status_code == 409, blocked.text
 
 
-def test_get_order_shortage_flag(client, admin_h):
-    order_id = _a_brew_order(client, admin_h, "LN-SHORT01", auto_from_bom=False, lines=[
-        {"material_name": "Vật tư không đủ", "uom": "kg", "qty_total": 999999999},
-        {"material_name": "Vật tư đủ (không gán kho)", "uom": "kg", "qty_total": 1},
-    ])
-    detail = client.get(f"/api/brewing/orders/{order_id}", headers=admin_h).json()
-    over = next(l for l in detail["lines"] if l["material_name"] == "Vật tư không đủ")
-    under = next(l for l in detail["lines"] if l["material_name"] == "Vật tư đủ (không gán kho)")
-    assert over["shortage"] is True
-    # Không có material_id -> không snapshot được tồn -> qty_total > 0 vẫn coi là shortage
-    # theo đúng ngưỡng (0 + 0 = 0 < qty_total).
-    assert under["shortage"] is True
+def test_create_order_blocked_when_shortage(client, admin_h):
+    """Thiếu tồn (tổng 2 kho) thì CHẶN HẲN việc tạo lệnh nấu, không cho lưu bất kỳ dòng nào —
+    khác trước đây (chỉ cảnh báo cờ "shortage" ở preview/get_order rồi vẫn cho lưu), mirror
+    Lệnh lọc (xem services/brew_order.py::_assert_no_shortage)."""
+    before = client.get("/api/brewing/orders", headers=admin_h).json()
+    r = client.post("/api/brewing/orders", headers=admin_h, json={
+        "order_code": "LN-SHORT01", "product_id": None,
+        "planned_batch_count": 1, "planned_volume_hl": 100.0, "volume_tolerance_hl": 0.0,
+        "auto_from_bom": False, "lines": [
+            {"material_name": "Vật tư không đủ", "uom": "kg", "qty_total": 999999999},
+            {"material_name": "Vật tư đủ (không gán kho)", "uom": "kg", "qty_total": 1},
+        ],
+    })
+    assert r.status_code == 409, r.text
+    assert "Vật tư không đủ" in r.text
+    after = client.get("/api/brewing/orders", headers=admin_h).json()
+    assert len(after) == len(before), "Lệnh thiếu tồn bị chặn thì không được tạo ra bất kỳ lệnh nào"

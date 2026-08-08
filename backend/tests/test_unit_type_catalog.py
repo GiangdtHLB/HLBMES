@@ -131,11 +131,14 @@ def test_custom_divide_type_scales_by_pack_size_like_vi(client, admin_h):
                            "uom": "thùng", "unit_type": "thungcustom", "pack_size": 6})
     assert fp.status_code == 201, fp.text
     fp_id = fp.json()["finished_product_id"]
+    loc = client.post("/api/wms/locations", headers=admin_h,
+                      json={"code": "LOC-THUNG-CUSTOM", "name": "Vị trí thùng custom", "capacity": 100})
+    assert loc.status_code == 201, loc.text
 
     built = client.post("/api/wms/units", headers=admin_h,
                         json={"finished_product_id": fp_id, "product_name": "SKU-THUNG-CUSTOM",
                               "lot_code": "LOT-THUNG-01", "total": 18, "pack_size": 6,
-                              "unit_type": "thungcustom"})
+                              "unit_type": "thungcustom", "loc_id": loc.json()["loc_id"]})
     assert built.status_code == 201, built.text
     assert built.json()["count"] == 3  # 18 (SL nhỏ) / 6 (pack_size) = 3 "thùng" — như Vỉ
     unit_code = built.json()["unit_codes"][0]
@@ -155,12 +158,17 @@ def test_custom_divide_type_scales_by_pack_size_like_vi(client, admin_h):
     row = next(g for g in by_lot if g["product_name"] == "SKU-THUNG-CUSTOM" and g["lot_code"] == "LOT-THUNG-01")
     assert "thungcustom" in row["unit_types"]
     assert row["thungcustom_count"] == 3
-    assert row["thungcustom_unplaced"] == 3
+    assert row["thungcustom_unplaced"] == 0
+    assert row["thungcustom_locations"] and row["thungcustom_locations"][0]["count"] == 3
 
 
 def test_regression_vi_keg_unchanged_behavior(client, admin_h):
     """Hồi quy: vi/keg vẫn quy đổi đúng như trước sau khi _pack_divisor chuyển sang tra danh
     mục động thay vì so sánh chuỗi "vi" hardcode."""
+    loc = client.post("/api/wms/locations", headers=admin_h,
+                      json={"code": "LOC-REG-VIKEG", "name": "Vị trí hồi quy vi/keg", "capacity": 1000})
+    assert loc.status_code == 201, loc.text
+    loc_id = loc.json()["loc_id"]
     fp_vi = client.post("/api/finished-products", headers=admin_h,
                         json={"code": "SKU-REG-VI", "name": "SKU hồi quy vỉ", "uom": "lon",
                               "unit_type": "vi", "pack_size": 24})
@@ -168,7 +176,7 @@ def test_regression_vi_keg_unchanged_behavior(client, admin_h):
     built_vi = client.post("/api/wms/units", headers=admin_h,
                            json={"finished_product_id": fp_vi.json()["finished_product_id"],
                                  "product_name": "SKU-REG-VI", "lot_code": "LOT-REG-VI",
-                                 "total": 2400, "pack_size": 24, "unit_type": "vi"})
+                                 "total": 2400, "pack_size": 24, "unit_type": "vi", "loc_id": loc_id})
     assert built_vi.status_code == 201, built_vi.text
     assert built_vi.json()["count"] == 100  # 2400 lon / 24 lon/vỉ = 100 vỉ
     units = client.get("/api/wms/units", headers=admin_h).json()
@@ -183,7 +191,7 @@ def test_regression_vi_keg_unchanged_behavior(client, admin_h):
     built_keg = client.post("/api/wms/units", headers=admin_h,
                             json={"finished_product_id": fp_keg.json()["finished_product_id"],
                                   "product_name": "SKU-REG-KEG", "lot_code": "LOT-REG-KEG",
-                                  "total": 5, "pack_size": 1, "unit_type": "keg"})
+                                  "total": 5, "pack_size": 1, "unit_type": "keg", "loc_id": loc_id})
     assert built_keg.status_code == 201, built_keg.text
     assert built_keg.json()["count"] == 5  # keg không nhân pack_size
     units2 = client.get("/api/wms/units", headers=admin_h).json()

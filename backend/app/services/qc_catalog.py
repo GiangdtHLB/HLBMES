@@ -325,7 +325,8 @@ def lot_qc_status(db: Session, lot: MaterialLot) -> dict:
         "lot_id": lot.lot_id, "lot_code": lot.lot_code, "status": lot.status,
         "kcs_lot_no": lot.kcs_lot_no, "is_raw_material": is_raw_material,
         "required": required,
-        "recorded": [{"parameter": r.parameter, "value": r.value, "ca_value": r.ca_value, "status": r.status,
+        "recorded": [{"parameter": r.parameter, "value": r.value, "value_text": r.value_text,
+                      "ca_value": r.ca_value, "status": r.status,
                       "recorded_by": r.recorded_by, "recorded_at": r.recorded_at} for r in recorded],
         "pending": pending,
         "can_release": not pending,
@@ -561,15 +562,23 @@ def record_stage_result(db: Session, stage: str, scope_type: str, scope_id: str,
     đoạn là "giá trị hiện tại", không tích lũy lịch sử; tránh 1 lần khai FAIL cũ còn sót lại
     mãi chặn duyệt dù giá trị mới đã đạt."""
     value = payload.get("value")
+    value_text = payload.get("value_text")
     lower = payload.get("lower_limit")
     upper = payload.get("upper_limit")
-    status = _evaluate_stage_result(value, lower, upper)
+    # Chỉ tiêu kiểu "text" — ghi chú tự do, không so target/USL/LSL, không tính pass/fail
+    # (xem cùng quy ước ở services/quality.py::record_result).
+    if value_text:
+        status = "pass"
+        value, lower, upper = None, None, None
+    else:
+        status = _evaluate_stage_result(value, lower, upper)
     result = db.execute(
         select(QualityResult).where(QualityResult.scope_type == scope_type, QualityResult.scope_id == scope_id,
                                     QualityResult.parameter == payload["parameter"])
     ).scalar_one_or_none()
     if result:
         result.value = value
+        result.value_text = value_text
         result.unit = payload.get("unit")
         result.lower_limit = lower
         result.upper_limit = upper
@@ -580,7 +589,8 @@ def record_stage_result(db: Session, stage: str, scope_type: str, scope_id: str,
         result = QualityResult(
             result_id=new_id(), sample_id=f"S-{new_id()[:8].upper()}",
             scope_type=scope_type, scope_id=scope_id, parameter=payload["parameter"],
-            value=value, unit=payload.get("unit"), lower_limit=lower, upper_limit=upper,
+            value=value, value_text=value_text, unit=payload.get("unit"),
+            lower_limit=lower, upper_limit=upper,
             status=status, recorded_by=user.username,
         )
         db.add(result)
@@ -589,8 +599,8 @@ def record_stage_result(db: Session, stage: str, scope_type: str, scope_id: str,
                                     "status": status, "scope": f"{scope_type}:{scope_id}"})
     db.commit()
     db.refresh(result)
-    return {"parameter": result.parameter, "value": result.value, "status": result.status,
-            "recorded_by": result.recorded_by, "recorded_at": result.recorded_at}
+    return {"parameter": result.parameter, "value": result.value, "value_text": result.value_text,
+            "status": result.status, "recorded_by": result.recorded_by, "recorded_at": result.recorded_at}
 
 
 def stage_qc_status(db: Session, stage: str, scope_type: str, scope_id: str, product_id: str = None,
@@ -613,7 +623,7 @@ def stage_qc_status(db: Session, stage: str, scope_type: str, scope_id: str, pro
     return {
         "stage": stage, "scope_type": scope_type, "scope_id": scope_id,
         "required": required,
-        "recorded": [{"parameter": r.parameter, "value": r.value, "status": r.status,
+        "recorded": [{"parameter": r.parameter, "value": r.value, "value_text": r.value_text, "status": r.status,
                       "recorded_by": r.recorded_by, "recorded_at": r.recorded_at}
                      for r in latest_by_param.values()],
         "pending": pending,
@@ -643,11 +653,15 @@ def record_qc_sample(db: Session, stage: str, scope_type: str, scope_id: str,
     rows = []
     for item in results:
         value = item.get("value")
+        value_text = item.get("value_text")
         lower, upper = item.get("lower_limit"), item.get("upper_limit")
-        status = _evaluate_stage_result(value, lower, upper)
+        if value_text:
+            status, value, lower, upper = "pass", None, None, None
+        else:
+            status = _evaluate_stage_result(value, lower, upper)
         row = QualityResult(
             result_id=new_id(), sample_id=sample_id, scope_type=scope_type, scope_id=scope_id,
-            parameter=item["parameter"], value=value, unit=item.get("unit"),
+            parameter=item["parameter"], value=value, value_text=value_text, unit=item.get("unit"),
             lower_limit=lower, upper_limit=upper, status=status,
             recorded_by=user.username, sampled_at=when,
         )
@@ -662,7 +676,8 @@ def record_qc_sample(db: Session, stage: str, scope_type: str, scope_id: str,
     for row in rows:
         db.refresh(row)
     return {"sample_id": sample_id, "sampled_at": when,
-            "results": [{"parameter": r.parameter, "value": r.value, "status": r.status} for r in rows]}
+            "results": [{"parameter": r.parameter, "value": r.value, "value_text": r.value_text,
+                        "status": r.status} for r in rows]}
 
 
 def list_qc_samples(db: Session, scope_type: str, scope_id: str) -> list[dict]:
@@ -681,7 +696,9 @@ def list_qc_samples(db: Session, scope_type: str, scope_id: str) -> list[dict]:
         p = params_by_code.get(r.parameter)
         s["results"].append({
             "parameter": r.parameter, "name": p.name if p else r.parameter, "unit": r.unit,
-            "value": r.value, "status": r.status, "lower_limit": r.lower_limit, "upper_limit": r.upper_limit,
+            "value_type": p.value_type if p else "numeric",
+            "value": r.value, "value_text": r.value_text, "status": r.status,
+            "lower_limit": r.lower_limit, "upper_limit": r.upper_limit,
         })
     return sorted(sessions.values(), key=lambda s: s["sampled_at"], reverse=True)
 

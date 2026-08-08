@@ -110,9 +110,13 @@ def test_approve_bottle_creates_one_row_regardless_of_ca_count(client, admin_h, 
 def test_build_units_manual_entry_creates_one_row(client, admin_h):
     """"Nhập kho thủ công" (POST /wms/units) cũng chỉ sinh 1 dòng/lô (dùng chung _create_units
     với duyệt chiết) — pack_size chỉ còn ý nghĩa quy đổi ở tầng đọc, không tách dòng nữa."""
+    loc = client.post("/api/wms/locations", headers=admin_h,
+                      json={"code": "LOC-MANUALPARTIAL", "name": "Vị trí manual partial", "capacity": 100})
+    assert loc.status_code == 201, loc.text
     build = client.post("/api/wms/units", headers=admin_h,
                         json={"product_name": "SKU-MANUALPARTIAL", "lot_code": "LOT-MANUALPARTIAL",
-                              "total": 100, "pack_size": 24, "unit_type": "vi"})
+                              "total": 100, "pack_size": 24, "unit_type": "vi",
+                              "loc_id": loc.json()["loc_id"]})
     assert build.status_code == 201, build.text
     assert len(build.json()["unit_codes"]) == 1
     units = client.get("/api/wms/units", headers=admin_h).json()
