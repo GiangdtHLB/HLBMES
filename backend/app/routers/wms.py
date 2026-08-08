@@ -232,7 +232,8 @@ def create_shipment(payload: ShipmentIn, db: Session = Depends(get_db), user: Us
     header = payload.model_dump(include={"note", "recipient_name", "recipient_dept", "driver_name",
                                           "vehicle_plate", "vehicle_id", "from_location", "delivery_place"})
     lines = [l.model_dump() for l in payload.lines]
-    return svc.create_shipment(db, payload.ship_to_id, lines, user, header=header)
+    return svc.create_shipment(db, payload.ship_to_id, lines, user, header=header,
+                               warehouse_id=payload.warehouse_id)
 
 
 @router.put("/shipments/{shipment_id}")
@@ -355,7 +356,8 @@ def undo_consigned(entry_id: str, db: Session = Depends(get_db), user: User = De
 def create_factory_import(payload: FactoryImportEntryIn, db: Session = Depends(get_db),
                           user: User = Depends(get_current_user)):
     return svc.create_factory_import_entry(db, payload.finished_product_id, payload.quantity,
-                                           payload.location_id, payload.factory_id, user, payload.note)
+                                           payload.location_id, payload.factory_id, user, payload.note,
+                                           payload.received_at)
 
 
 @router.get("/factory-import")

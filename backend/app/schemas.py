@@ -568,6 +568,7 @@ class ShipmentLineIn(BaseModel):
 class ShipmentIn(BaseModel):
     ship_to_id: str
     lines: list[ShipmentLineIn]
+    warehouse_id: Optional[str] = None          # Kho xuất — bắt buộc nếu tài khoản bị giới hạn kho TP
     note: Optional[str] = None                 # Lý do xuất kho
     recipient_name: Optional[str] = None        # Họ tên người nhận hàng
     recipient_dept: Optional[str] = None        # Địa chỉ (bộ phận)
@@ -669,6 +670,7 @@ class FactoryImportEntryIn(BaseModel):
     location_id: str  # vị trí kho nhận — bắt buộc, không cho "chưa cất"
     factory_id: str    # nhà máy nguồn (Danh mục Nhà máy) — bắt buộc, dấu hiệu nhận biết nguồn gốc
     note: Optional[str] = None
+    received_at: Optional[str] = None  # Ngày nhập — để trống = thời điểm khai báo
 
 
 class FactoryImportEntryUpdate(BaseModel):
@@ -677,6 +679,7 @@ class FactoryImportEntryUpdate(BaseModel):
     location_id: Optional[str] = None
     factory_id: Optional[str] = None
     note: Optional[str] = None
+    received_at: Optional[str] = None
 
 
 class ShipmentTripIn(BaseModel):

@@ -27,6 +27,7 @@ class User:
     scope_areas: object = "*"   # khu vực: nau|len_men|loc|chiet|kho
     scope_qc: object = "*"      # loại test QC được phân (theo tên parameter)
     scope_warehouse: object = "*"  # địa điểm kho: cong_ty|phan_xuong
+    scope_wms_warehouse: object = "*"  # mã Kho thành phẩm (WMS) được phân, vd {"KH01"}
     must_change_password: bool = False  # đang dùng mật khẩu mặc định → buộc đổi trước khi thao tác
 
 
@@ -176,6 +177,7 @@ def get_current_user(
                         scope_areas=_parse_scope(getattr(u, "scope_areas", "*")),
                         scope_qc=_parse_scope(getattr(u, "scope_qc", "*")),
                         scope_warehouse=_parse_scope(getattr(u, "scope_warehouse", "*")),
+                        scope_wms_warehouse=_parse_scope(getattr(u, "wms_warehouse_scope", "*")),
                         must_change_password=must_change)
         finally:
             db.close()
@@ -265,7 +267,7 @@ SCOPE_WAREHOUSE_LOCATIONS = {
 }
 
 _SCOPE_DIMENSION_ATTR = {"lines": "scope_lines", "areas": "scope_areas", "qc": "scope_qc",
-                        "warehouse": "scope_warehouse"}
+                        "warehouse": "scope_warehouse", "wms_warehouse": "scope_wms_warehouse"}
 
 
 def _parse_scope(raw) -> object:
@@ -300,7 +302,7 @@ def require_scope(user: User, dimension: str, value) -> None:
     """Chặn thao tác ngoài phạm vi (gọi SAU require_perm/require_role)."""
     if not has_scope(user, dimension, value):
         label = {"lines": "line", "areas": "khu vực", "qc": "loại test",
-                 "warehouse": "địa điểm kho"}.get(dimension, dimension)
+                 "warehouse": "địa điểm kho", "wms_warehouse": "kho thành phẩm"}.get(dimension, dimension)
         raise PermissionError_(
             f"Ngoài phạm vi được phân ({label}='{value}'): tài khoản '{user.username}' "
             f"không có quyền thao tác/xem dữ liệu này."
