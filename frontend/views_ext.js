@@ -1061,33 +1061,33 @@
       // Mỗi dòng backend (lot_aging_report) giờ đã tách riêng theo KHO THÀNH PHẨM (warehouse_id)
       // — cùng 1 lô ở 2 kho khác nhau ra 2 dòng riêng; trong CÙNG 1 kho mà rải nhiều vị trí thì
       // gói trong <details> để bấm mở rộng xem từng vị trí, mirror whUnitsLocationCell (Kho TP).
+      const agLocLabel = (l) => `${esc(l.name ? `${l.code || "?"} - ${l.name}` : (l.code || "?"))}${locZoneSuffix(l)}`;
       const agLocCell = (r) => {
         if (r.unplaced > 0 && !r.locations.length) return `<span class="muted">(chưa cất vị trí) ×${r.unplaced}</span>`;
         const whLabel = r.warehouse_name ? `${locWhPrefix({ warehouse_name: r.warehouse_name })}` : "";
         if (r.locations.length <= 1) {
           const l = r.locations[0];
-          return `${whLabel}${l ? `${esc(l.code || "?")}×${l.count}` : "—"}`;
+          return `${whLabel}${l ? `${agLocLabel(l)}×${l.count}` : "—"}`;
         }
         return `<details><summary style="cursor:pointer;display:inline">${whLabel}${r.locations.length} vị trí</summary>
           <table style="margin-top:4px;font-size:12px"><tbody>${r.locations.map(l =>
-            `<tr><td>${esc(l.code || "?")}</td><td style="padding-left:8px">${l.count}</td></tr>`).join("")}
+            `<tr><td>${agLocLabel(l)}</td><td style="padding-left:8px">${l.count}</td></tr>`).join("")}
           </tbody></table></details>`;
       };
-      body = `<div class="panel"><h2>📦 Tồn kho thành phẩm theo tuổi lô <span class="muted">(${rows.length} dòng)</span></h2>
-        <div class="muted" style="margin-bottom:8px">Mỗi dòng là 1 (sản phẩm, lô, loại đơn vị) còn tồn kho — số ngày tồn tính từ đơn vị nhập sớm nhất trong nhóm.
-          Dùng để báo khối kinh doanh đẩy nhanh tiến độ bán các lô tồn lâu. Sắp xếp giảm dần theo số ngày tồn (lô cũ nhất lên đầu).</div>
-        <div class="row" style="align-items:flex-end;gap:12px;margin-bottom:10px;padding:10px;border:1px solid var(--border);border-radius:8px">
-          <div class="field"><label>🟡 Chú ý từ (ngày)</label><input id="ag_caution" type="number" min="0" step="any" style="width:90px" value="${agingOps.aging_caution_days}" ${canManageAging ? "" : "disabled"}/></div>
-          <div class="field"><label>⚠ Cảnh báo từ (ngày)</label><input id="ag_warning" type="number" min="0" step="any" style="width:90px" value="${agingOps.aging_warning_days}" ${canManageAging ? "" : "disabled"}/></div>
-          <div class="field"><label>⛔ Nghiêm trọng từ (ngày)</label><input id="ag_critical" type="number" min="0" step="any" style="width:90px" value="${agingOps.aging_critical_days}" ${canManageAging ? "" : "disabled"}/></div>
-          ${canManageAging ? `<button class="btn sec sm" id="ag_save">Lưu ngưỡng</button>` : ""}
-          ${!canManageAging ? `<div class="muted" style="font-size:12px">Cần quyền <code class="k">master.manage</code> để đổi ngưỡng.</div>` : ""}
-        </div>
-        <input class="searchbox" data-tbl="t_aging" placeholder="Tìm theo sản phẩm/lô..."/>
-        <div class="tablewrap" style="margin-top:6px"><table id="t_aging">
+      // Tách theo Kho thành phẩm (warehouse_id) thành từng khối riêng — mỗi kho 1 bảng độc lập
+      // (search/phân trang riêng), thay vì 1 bảng chung lẫn lộn nhiều kho.
+      const whBuckets = warehouses.map(w => ({ id: w.warehouse_id, label: `${esc(w.code)} — ${esc(w.name)}`, rows: [] }));
+      const whBucketById = Object.fromEntries(whBuckets.map(b => [b.id, b]));
+      const unknownBucket = { id: "__unknown", label: "Chưa xác định kho", rows: [] };
+      rows.forEach(r => (whBucketById[r.warehouse_id] || unknownBucket).rows.push(r));
+      if (unknownBucket.rows.length) whBuckets.push(unknownBucket);
+      const agTableId = (i) => `t_aging_${i}`;
+      const agTable = (bucket, i) => `<div class="panel"><h2>📦 ${bucket.label} <span class="muted">(${bucket.rows.length} dòng)</span></h2>
+        <input class="searchbox" data-tbl="${agTableId(i)}" placeholder="Tìm theo sản phẩm/lô..."/>
+        <div class="tablewrap" style="margin-top:6px"><table id="${agTableId(i)}">
           <thead><tr><th>Sản phẩm</th><th>Lô</th><th>Loại</th><th>Số lượng</th><th>Vị trí kho</th>
             <th>Ngày nhập sớm nhất</th><th>Số ngày tồn</th><th>Mức cảnh báo</th></tr></thead>
-          <tbody>${rows.map(r => `<tr>
+          <tbody>${bucket.rows.map(r => `<tr>
             <td>${esc(r.product_name || "—")}</td><td>${esc(r.lot_code || "—")}</td>
             <td>${unitLabel[r.unit_type] || esc(r.unit_type)}</td>
             <td>${r.count} <span class="muted">(${r.quantity})</span></td>
@@ -1095,9 +1095,21 @@
             <td class="muted">${r.received_at ? fmt(r.received_at) : "—"}</td>
             <td style="font-weight:600">${r.age_days ?? "—"}</td>
             <td style="color:${bucketColor[r.age_bucket] || "var(--muted)"}">${bucketLabel[r.age_bucket] || r.age_bucket}</td>
-            </tr>`).join("") || '<tr><td colspan=8 class="muted">Kho thành phẩm chưa có tồn.</td></tr>'}</tbody>
+            </tr>`).join("") || '<tr><td colspan=8 class="muted">Kho này chưa có tồn.</td></tr>'}</tbody>
         </table></div>
       </div>`;
+      body = `<div class="panel"><h2>📦 Tồn kho thành phẩm theo tuổi lô <span class="muted">(${rows.length} dòng)</span></h2>
+        <div class="muted" style="margin-bottom:8px">Mỗi dòng là 1 (sản phẩm, lô, loại đơn vị) còn tồn kho — số ngày tồn tính từ đơn vị nhập sớm nhất trong nhóm.
+          Dùng để báo khối kinh doanh đẩy nhanh tiến độ bán các lô tồn lâu. Sắp xếp giảm dần theo số ngày tồn (lô cũ nhất lên đầu).
+          Chia riêng theo từng kho thành phẩm bên dưới.</div>
+        <div class="row" style="align-items:flex-end;gap:12px;margin-bottom:10px;padding:10px;border:1px solid var(--border);border-radius:8px">
+          <div class="field"><label>🟡 Chú ý từ (ngày)</label><input id="ag_caution" type="number" min="0" step="any" style="width:90px" value="${agingOps.aging_caution_days}" ${canManageAging ? "" : "disabled"}/></div>
+          <div class="field"><label>⚠ Cảnh báo từ (ngày)</label><input id="ag_warning" type="number" min="0" step="any" style="width:90px" value="${agingOps.aging_warning_days}" ${canManageAging ? "" : "disabled"}/></div>
+          <div class="field"><label>⛔ Nghiêm trọng từ (ngày)</label><input id="ag_critical" type="number" min="0" step="any" style="width:90px" value="${agingOps.aging_critical_days}" ${canManageAging ? "" : "disabled"}/></div>
+          ${canManageAging ? `<button class="btn sec sm" id="ag_save">Lưu ngưỡng</button>` : ""}
+          ${!canManageAging ? `<div class="muted" style="font-size:12px">Cần quyền <code class="k">master.manage</code> để đổi ngưỡng.</div>` : ""}
+        </div>
+      </div>` + whBuckets.map((b, i) => agTable(b, i)).join("");
     } else if (sec === "khodm") {
       body = `<div class="panel"><h2>🏭 Danh mục kho thành phẩm <span class="muted">(${warehouses.length})</span></h2>
         <div class="muted" style="margin-bottom:8px">Kho thành phẩm là cấp cha của "Vị trí kho" — 1 kho có nhiều vị trí. Kho đang có vị trí (Số vị trí > 0) không xóa được.</div>
@@ -1258,7 +1270,7 @@
     wireSubnav("wms");
     wireSearch();
     if (sec === "vehicles") wirePaginate("t_vehicle", 10);
-    if (sec === "aging") wirePaginate("t_aging", 20);
+    if (sec === "aging") root.querySelectorAll('table[id^="t_aging_"]').forEach(t => wirePaginate(t.id, 20));
     if (sec === "lenhdonghang") { wirePaginate("t_loadslip_hl", 10); wirePaginate("t_loadslip_dm", 10); }
 
     if (sec === "canexpiry") {
@@ -1437,7 +1449,7 @@
         if (!$("nmk_factory").value) { toast("Chọn nhà máy nguồn", "err"); return; }
         const res = await POST("/wms/factory-import", { finished_product_id: $("nmk_prod").value, quantity: qty,
           location_id: $("nmk_loc").value, factory_id: $("nmk_factory").value, note: $("nmk_note").value || null,
-          received_at: $("nmk_received_at").value || undefined });
+          received_at: $("nmk_received_at").value ? new Date($("nmk_received_at").value).toISOString() : undefined });
         toast(`Đã khai báo ${qty} ${res.unit_type === "keg" ? "keg" : "vỉ"} nhập từ nhà máy khác (chờ Trưởng bộ phận kho duyệt trước khi tăng tồn kho)`);
         render("wms");
       });
@@ -1491,7 +1503,7 @@
             if (qty <= 0) { toast("Nhập số lượng > 0", "err"); return; }
             await PUT(`/wms/factory-import/${e.entry_id}`, { finished_product_id: $("enmk_prod").value || null,
               quantity: qty, location_id: $("enmk_loc").value || null, factory_id: $("enmk_factory").value || null,
-              note: $("enmk_note").value || null, received_at: $("enmk_received_at").value || undefined });
+              note: $("enmk_note").value || null, received_at: $("enmk_received_at").value ? new Date($("enmk_received_at").value).toISOString() : undefined });
             toast("Đã lưu"); closeModal(); render("wms");
           });
         });
@@ -1620,25 +1632,70 @@
             `<tr><td>${esc(l.code || "?")}${l.name ? " - " + esc(l.name) : ""}${locZoneSuffix(l)}</td><td style="padding-left:8px">${l.count}</td></tr>`).join("")}
           </tbody></table></details>`;
       }
+      function unitConfirmCell(g, i) {
+        return g.pending > 0
+          ? (canConfirmReceipt ? `<button class="btn sm sec" data-confirmreceipt="${i}">Duyệt</button>` : '<span class="muted">Chờ duyệt</span>')
+          : g.confirmed > 0 ? '<span class="badge available">✓ đã duyệt</span>' : '<span class="muted">—</span>';
+      }
+      // 1 LÔ = 1 <tr> cha (bắt buộc, KHÔNG được tách <tr> con riêng — wirePaginate/sort coi mỗi
+      // <tr> trong tbody là 1 dòng độc lập, xem ghi chú ở whUnitsLocationCell) — nếu lô này có
+      // nhiều hơn 1 (loại đơn vị, kho) thì gói TOÀN BỘ chi tiết (loại/SL/vị trí/duyệt/xem từng
+      // dòng) vào 1 <details> trong ô "Vị trí kho", mirror đúng cách whUnitsLocationCell đã làm
+      // cho riêng chiều vị trí — giờ mở rộng thêm chiều loại đơn vị.
       function renderUnits(rows) {
+        const lotGroups = [];
+        const byLotKey = new Map();
+        rows.forEach((g, i) => {
+          const key = `${g.product} ${g.lot_code}`;
+          let grp = byLotKey.get(key);
+          if (!grp) { grp = { product: g.product, lot_code: g.lot_code, items: [] }; byLotKey.set(key, grp); lotGroups.push(grp); }
+          grp.items.push({ g, i });
+        });
+        const rowsHtml = lotGroups.map(lg => {
+          const items = lg.items;
+          if (items.length === 1) {
+            const { g, i } = items[0];
+            return `<tr>
+              <td>${esc(fpLabel(g.product))}</td><td>${esc(g.lot_code || "")}</td>
+              <td class="muted">${esc((g.bottle_codes || []).join(", ") || "—")}</td>
+              <td>${unitTypeLabel(g)}</td>
+              <td>${g.count}</td><td>${g.qty}</td>
+              <td>${badge("available")}stored</td>
+              <td class="muted">${whUnitsLocationCell(g)}</td>
+              <td class="muted">${fmt(g.oldest_at)}</td>
+              <td>${unitConfirmCell(g, i)}</td>
+              <td><button class="btn sm sec" data-viewgroup="${i}">Xem</button></td></tr>`;
+          }
+          // Nhiều (loại, kho) cho CÙNG 1 lô (VD vừa còn Két vừa đã phân rã lẻ Chai, hoặc cùng lô
+          // nằm ở 2 kho thành phẩm) — trước đây mỗi tổ hợp ra HẲN 1 dòng riêng khiến 1 lô vật lý
+          // duy nhất trông như nhiều lô khác nhau. Giờ gộp về 1 dòng cha, liệt kê từng tổ hợp
+          // (loại/SL/vị trí/duyệt/xem riêng) trong bảng con thu gọn được.
+          const totalQty = items.reduce((s, it) => s + (it.g.qty || 0), 0);
+          const oldestAt = items.reduce((min, it) => (!min || (it.g.oldest_at && it.g.oldest_at < min)) ? it.g.oldest_at : min, null);
+          const typesLabel = [...new Set(items.map(it => unitTypeLabel(it.g)))].join(", ");
+          const detailRows = items.map(it => `<tr>
+            <td style="padding:2px 10px 2px 0">${unitTypeLabel(it.g)}</td>
+            <td style="padding:2px 10px">${it.g.count} <span class="muted">(${it.g.qty} lẻ)</span></td>
+            <td style="padding:2px 10px">${whUnitsLocationCell(it.g)}</td>
+            <td style="padding:2px 10px">${unitConfirmCell(it.g, it.i)}</td>
+            <td style="padding:2px 0"><button class="btn sm sec" data-viewgroup="${it.i}">Xem</button></td></tr>`).join("");
+          return `<tr>
+            <td>${esc(fpLabel(lg.product))}</td><td>${esc(lg.lot_code || "")}</td>
+            <td class="muted">${esc((items[0].g.bottle_codes || []).join(", ") || "—")}</td>
+            <td>${esc(typesLabel)}</td>
+            <td class="muted">—</td><td>${totalQty}</td>
+            <td>${badge("available")}stored</td>
+            <td class="muted"><details><summary style="cursor:pointer">${items.length} loại/vị trí</summary>
+              <table style="margin-top:4px;font-size:12px"><tbody>${detailRows}</tbody></table></details></td>
+            <td class="muted">${fmt(oldestAt)}</td>
+            <td class="muted">— (xem trong chi tiết)</td>
+            <td></td></tr>`;
+        }).join("") || '<tr><td colspan=11 class="muted">Chưa có vỉ/keg nào trong kho.</td></tr>';
         $("pl_box").innerHTML = `<input class="searchbox" data-tbl="t_units" placeholder="Tìm theo sản phẩm, lô..."/>
           <div class="tablewrap"><table id="t_units">
           <thead><tr><th>SP</th><th>Lô</th><th>Mã chiết</th><th>Loại</th><th>Số lượng</th><th>Tổng SL nhỏ</th><th>Trạng thái</th>
             <th>Vị trí kho</th><th>Nhập sớm nhất</th><th>Duyệt nhập kho</th><th></th></tr></thead>
-          <tbody>${rows.map((g, i) => { const confirmCell = g.pending > 0
-              ? (canConfirmReceipt ? `<button class="btn sm sec" data-confirmreceipt="${i}">Duyệt</button>` : '<span class="muted">Chờ duyệt</span>')
-              : g.confirmed > 0 ? '<span class="badge available">✓ đã duyệt</span>' : '<span class="muted">—</span>';
-            return `<tr>
-            <td>${esc(fpLabel(g.product))}</td><td>${esc(g.lot_code || "")}</td>
-            <td class="muted">${esc((g.bottle_codes || []).join(", ") || "—")}</td>
-            <td>${unitTypeLabel(g)}</td>
-            <td>${g.count}</td><td>${g.qty}</td>
-            <td>${badge("available")}stored</td>
-            <td class="muted">${whUnitsLocationCell(g)}</td>
-            <td class="muted">${fmt(g.oldest_at)}</td>
-            <td>${confirmCell}</td>
-            <td><button class="btn sm sec" data-viewgroup="${i}">Xem</button></td></tr>`; }).join("") ||
-            '<tr><td colspan=11 class="muted">Chưa có vỉ/keg nào trong kho.</td></tr>'}</tbody></table></div>`;
+          <tbody>${rowsHtml}</tbody></table></div>`;
         document.querySelectorAll("[data-viewgroup]").forEach(b => b.onclick = () => {
           openUnitGroupModal(rows[parseInt(b.dataset.viewgroup, 10)]);
         });
@@ -1723,7 +1780,7 @@
           lot_code: $("wu_lot").value.trim() || undefined, total: num("wu_total") || 0,
           pack_size: lonMode ? 1 : (num("wu_pack") || 24), unit_type: lonMode ? "lon" : (opt.dataset.unittype || "vi"),
           loc_id: $("wu_loc").value, reason: "Nhập kho thủ công",
-          received_at: $("wu_received_at").value || undefined });
+          received_at: $("wu_received_at").value ? new Date($("wu_received_at").value).toISOString() : undefined });
         toast("Đã nhập kho (kèm mã vạch từng vỉ/keg)"); render("wms");
       });
       wireSelectSearch("wob_prod", "wob_prod_q");
@@ -1750,7 +1807,7 @@
           lot_code: $("wob_lot").value, total: num("wob_total") || 0,
           pack_size: lonMode ? 1 : (num("wob_pack") || 24), unit_type: lonMode ? "lon" : (opt.dataset.unittype || "vi"),
           loc_id: $("wob_loc").value, reason: "Nhập tồn đầu", is_opening_balance: true,
-          received_at: $("wob_received_at").value || undefined });
+          received_at: $("wob_received_at").value ? new Date($("wob_received_at").value).toISOString() : undefined });
         toast("Đã nhập tồn đầu (kèm mã vạch từng vỉ/keg)"); render("wms");
       });
       if ($("wob_import")) $("wob_import").onclick = () => guard(async () => {
@@ -3256,7 +3313,8 @@
           form_type_id: $("cip_ft").value, equipment_id: $("cip_eq").value,
           batch_number: $("cip_batch").value.trim(), order_number: $("cip_order").value.trim(),
           shift: $("cip_shift").value || null,
-          started_at: $("cip_start").value, ended_at: $("cip_end").value || null,
+          started_at: new Date($("cip_start").value).toISOString(),
+          ended_at: $("cip_end").value ? new Date($("cip_end").value).toISOString() : null,
           performed_by: $("cip_by").value || null, duty_officer: $("cip_duty").value || null,
           steps, note: $("cip_note").value || null,
         });

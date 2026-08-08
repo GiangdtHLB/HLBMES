@@ -1625,7 +1625,7 @@ def lot_aging_report(db: Session, caution_days: float = 30.0, warning_days: floa
                       .group_by(FinishedGoodsUnit.product_name, FinishedGoodsUnit.lot_code,
                                FinishedGoodsUnit.unit_type, FinishedGoodsUnit.location_id)).all()
     wh_by_id_ag = {w.warehouse_id: w for w in db.execute(select(WmsWarehouse)).scalars().all()}
-    loc_meta_by_id_ag = {l.loc_id: (l.code, l.warehouse_id)
+    loc_meta_by_id_ag = {l.loc_id: (l.code, l.name, l.zone, l.warehouse_id)
                         for l in db.execute(select(WmsLocation)).scalars().all()}
     # FinishedGoodsUnit.product_name thực ra lưu MÃ SKU (vd "FLGN200"), không phải tên hiển thị —
     # tra thêm bảng finished_product để lấy đúng tên tiếng Việt (vd "Bia tươi Legend 20L") cho
@@ -1639,9 +1639,9 @@ def lot_aging_report(db: Session, caution_days: float = 30.0, warning_days: floa
     # mirror cách list_lot_summaries/renderUnits (Kho TP) đã tách theo kho ở frontend.
     for product_name, lot_code, unit_type, location_id, count, qty, oldest_at in rows:
         if location_id is None:
-            loc_code, warehouse_id = None, None
+            loc_code, loc_name, loc_zone, warehouse_id = None, None, None, None
         else:
-            loc_code, warehouse_id = loc_meta_by_id_ag.get(location_id, (None, None))
+            loc_code, loc_name, loc_zone, warehouse_id = loc_meta_by_id_ag.get(location_id, (None, None, None, None))
         key = (product_name, lot_code, unit_type, warehouse_id)
         wh_ag = wh_by_id_ag.get(warehouse_id)
         g = grouped.setdefault(key, {"product_name": product_name,
@@ -1657,7 +1657,7 @@ def lot_aging_report(db: Session, caution_days: float = 30.0, warning_days: floa
         if location_id is None:
             g["unplaced"] += count
         else:
-            g["locations"].append({"code": loc_code, "count": count,
+            g["locations"].append({"code": loc_code, "name": loc_name, "zone": loc_zone, "count": count,
                                    "warehouse_code": wh_ag.code if wh_ag else None})
         if g["oldest_at"] is None or (oldest_at and oldest_at < g["oldest_at"]):
             g["oldest_at"] = oldest_at
