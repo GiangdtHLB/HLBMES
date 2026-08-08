@@ -982,6 +982,12 @@
           sản phẩm/lô cần cất, không cần chọn từng đơn vị.</div>
         <div class="row"><div class="field"><label>Vị trí đích</label><select id="cv_to"><option value="">(chọn vị trí đích)</option>${locOpt3}</select></div></div>
         <div id="cv_pick" class="muted" style="margin-top:10px">Đang tải danh sách chưa cất vị trí…</div>
+      </div>
+      <div class="panel"><h2>🔁 Chuyển vị trí trong kho</h2>
+        <div class="muted" style="margin-bottom:8px">Chuyển hàng ĐÃ CẤT sang vị trí khác (VD từ khu 1 sang khu 2, từ kệ này sang kệ khác) — chỉ
+          chuyển được trong CÙNG 1 kho thành phẩm, không chuyển sang kho khác (dùng tab "🔀 Điều chuyển" cho việc đó).</div>
+        <div class="row"><div class="field"><label>Vị trí nguồn</label><select id="cvm_from"><option value="">(chọn vị trí nguồn)</option>${locOpt3}</select></div></div>
+        <div id="cvm_pick" class="muted" style="margin-top:10px">Chọn vị trí nguồn để xem tồn kho ở đó.</div>
       </div>`;
     } else if (sec === "tudo") {
       const isAdminTudo = CURRENT_USER && CURRENT_USER.role === "admin";
@@ -2172,6 +2178,54 @@
           }
           const total = picked.reduce((s, x) => s + x.qty, 0);
           toast(`Đã cất ${total} đơn vị`); render("wms");
+        });
+      }
+      if ($("cvm_from")) {
+        const locById = Object.fromEntries(locs.map(l => [l.loc_id, l]));
+        $("cvm_from").onchange = () => guard(async () => {
+          const fromId = $("cvm_from").value;
+          if (!fromId) { $("cvm_pick").innerHTML = `<div class="muted">Chọn vị trí nguồn để xem tồn kho ở đó.</div>`; return; }
+          const fromLoc = locById[fromId];
+          const rows = (await GET(`/wms/units/by-location?loc_id=${fromId}`))
+            .map(r => ({ product: r.product_name, lot_code: r.lot_code, unit_type: r.unit_type, count: r.count }))
+            .filter(r => r.count > 0);
+          const destOpt = locs.filter(l => l.loc_id !== fromId && l.warehouse_id === fromLoc.warehouse_id)
+            .map(l => `<option value="${esc(l.loc_id)}">${whLabel(l)} (${l.used}/${l.capacity})</option>`).join("");
+          $("cvm_pick").innerHTML = rows.length ? `
+            <div class="row"><div class="field"><label>Vị trí đích (cùng kho ${esc(fromLoc.warehouse_name || "")})</label>
+              <select id="cvm_to"><option value="">(chọn vị trí đích)</option>${destOpt}</select></div></div>
+            <div class="tablewrap" style="margin-top:6px"><table id="t_cvm_pick">
+            <thead><tr><th></th><th>SP</th><th>Lô</th><th>Loại</th><th>Đang có</th><th>SL cần chuyển</th></tr></thead>
+            <tbody>${rows.map((g, i) => `<tr data-cvmrow="${i}">
+              <td><input class="cvm_pick" type="checkbox"/></td>
+              <td>${esc(fpLabel(g.product))}</td><td>${esc(g.lot_code || "")}</td>
+              <td>${unitTypeLabel(g)}</td>
+              <td>${g.count}</td>
+              <td><input class="cvm_qty" type="number" min="0.01" step="any" max="${g.count}" value="${g.count}" style="width:80px"/></td></tr>`).join("")}</tbody></table></div>
+            <div class="row" style="margin-top:10px"><button class="btn" id="cvm_submit">Chuyển</button></div>`
+            : `<div class="muted">Vị trí này không còn tồn kho nào.</div>`;
+          wirePaginate("t_cvm_pick", 10);
+          if ($("cvm_submit")) {
+            $("cvm_submit").onclick = () => guard(async () => {
+              const toId = $("cvm_to").value;
+              if (!toId) { toast("Chọn vị trí đích", "err"); return; }
+              const picked = Array.from(document.querySelectorAll("[data-cvmrow]"))
+                .filter(tr => tr.querySelector(".cvm_pick").checked)
+                .map(tr => ({ g: rows[parseInt(tr.dataset.cvmrow, 10)], qty: parseFloat(tr.querySelector(".cvm_qty").value) || 0 }));
+              if (!picked.length) { toast("Chọn ít nhất 1 dòng để chuyển", "err"); return; }
+              for (const { g, qty } of picked) {
+                if (qty <= 0 || qty > g.count + 1e-9) throw new Error(`Số lượng chuyển của lô "${g.lot_code || g.product}" không hợp lệ (tối đa ${g.count}).`);
+              }
+              for (const { g, qty } of picked) {
+                await POST("/wms/units/relocate-batch", {
+                  product_name: g.product, lot_code: g.lot_code || null, unit_type: g.unit_type,
+                  from_loc_id: fromId, to_loc_id: toId, count: qty,
+                });
+              }
+              const total = picked.reduce((s, x) => s + x.qty, 0);
+              toast(`Đã chuyển ${total} đơn vị`); render("wms");
+            });
+          }
         });
       }
     } else if (sec === "tudo") {

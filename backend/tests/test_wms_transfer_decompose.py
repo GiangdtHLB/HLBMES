@@ -397,6 +397,39 @@ def test_relocate_batch_places_units_from_one_location_by_count(client, admin_h)
     assert moved.json()["moved"] == 1
 
 
+def test_relocate_batch_blocks_cross_warehouse_move(client, admin_h):
+    """Chuyển vị trí (from_loc_id có giá trị thật, không phải "chưa cất") chỉ được phép trong
+    CÙNG 1 kho thành phẩm — chuyển sang vị trí thuộc kho khác phải bị chặn (409), chuyển sang
+    vị trí khác trong CÙNG kho vẫn hoạt động bình thường."""
+    wh_a = client.post("/api/wms/warehouses", headers=admin_h,
+                       json={"code": "RELOC-WHA", "name": "Kho A test relocate"}).json()["warehouse_id"]
+    wh_b = client.post("/api/wms/warehouses", headers=admin_h,
+                       json={"code": "RELOC-WHB", "name": "Kho B test relocate"}).json()["warehouse_id"]
+    loc_a1 = client.post("/api/wms/locations", headers=admin_h,
+                         json={"code": "RELOC-WHA-1", "name": "Khu 1", "capacity": 10,
+                               "warehouse_id": wh_a}).json()["loc_id"]
+    loc_a2 = client.post("/api/wms/locations", headers=admin_h,
+                         json={"code": "RELOC-WHA-2", "name": "Khu 2", "capacity": 10,
+                               "warehouse_id": wh_a}).json()["loc_id"]
+    loc_b1 = client.post("/api/wms/locations", headers=admin_h,
+                         json={"code": "RELOC-WHB-1", "name": "Khu 1 kho B", "capacity": 10,
+                               "warehouse_id": wh_b}).json()["loc_id"]
+
+    _build_units(client, admin_h, "RELOCWH01", total=24, pack_size=24, unit_type="vi", loc_id=loc_a1)
+
+    blocked = client.post("/api/wms/units/relocate-batch", headers=admin_h,
+                          json={"product_name": "SKU-RELOCWH01", "lot_code": "LOT-RELOCWH01", "unit_type": "vi",
+                                "from_loc_id": loc_a1, "to_loc_id": loc_b1, "count": 1})
+    assert blocked.status_code == 409, blocked.text
+    assert "cùng 1 kho" in blocked.json()["detail"]
+
+    ok = client.post("/api/wms/units/relocate-batch", headers=admin_h,
+                     json={"product_name": "SKU-RELOCWH01", "lot_code": "LOT-RELOCWH01", "unit_type": "vi",
+                           "from_loc_id": loc_a1, "to_loc_id": loc_a2, "count": 1})
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["moved"] == 1
+
+
 def test_resolve_by_lot_code_returns_aggregate(client, admin_h):
     built = _build_units(client, admin_h, "RESOLVE01", total=48, pack_size=24, unit_type="vi")
     assert built["count"] == 2

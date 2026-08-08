@@ -2393,6 +2393,12 @@ def relocate_batch(db: Session, product_name: str, lot_code: str, unit_type: str
     to_loc = db.get(WmsLocation, to_loc_id)
     if not to_loc:
         raise NotFoundError("Vị trí đích không tồn tại.")
+    if from_loc_id:
+        # Chỉ chặn khi có vị trí nguồn thật (đang cất) — hàng "chưa cất" (from_loc_id=None) chưa
+        # thuộc kho nào nên không có gì để so sánh, vẫn cho cất vào bất kỳ kho nào như trước.
+        from_loc_check = db.get(WmsLocation, from_loc_id)
+        if from_loc_check and from_loc_check.warehouse_id != to_loc.warehouse_id:
+            raise DomainError("Chỉ được chuyển vị trí trong cùng 1 kho thành phẩm — chọn vị trí đích cùng kho với vị trí nguồn.")
 
     fp = db.execute(select(FinishedProduct).where(FinishedProduct.code == product_name)).scalar_one_or_none()
     divisor = _pack_divisor(fp, unit_type, _divide_by_pack_codes(db))
