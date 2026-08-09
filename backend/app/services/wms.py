@@ -110,6 +110,36 @@ def _assert_loc_scope(db: Session, user: User, loc_id: str | None) -> None:
         _assert_wh_scope(db, user, loc.warehouse_id)
 
 
+def _assert_transfer_wh_scope(db: Session, user: User, transfer) -> None:
+    """Chặn thao tác trên 1 WmsTransfer ngoài phạm vi kho được phân — suy kho từ
+    to_location_id (LUÔN có giá trị, không như Shipment.warehouse_id có thể rỗng ở phiếu cũ)."""
+    loc = db.get(WmsLocation, transfer.to_location_id)
+    _assert_wh_scope(db, user, loc.warehouse_id if loc else None)
+
+
+def _disallowed_location_ids(db: Session, user: User | None) -> set | None:
+    """Trả None nếu KHÔNG cần lọc (admin, không có user — vd job nội bộ, hoặc scope="*"),
+    ngược lại trả tập loc_id thuộc kho NGOÀI phạm vi được phân — dùng để loại các dòng đó khỏi
+    API liệt kê toàn kho (list_units/list_lot_summaries/resolve...). Dòng có location_id NULL
+    (chưa rõ thuộc kho nào) LUÔN được giữ lại — theo đúng quy ước "chưa xác định -> không khóa
+    cứng" đã dùng ở has_scope/_assert_wh_scope, KHÔNG tự loại vì có thể là hàng của chính kho
+    mình chưa kịp cất vị trí."""
+    if user is None or user.role == Role.ADMIN.value or getattr(user, "scope_wms_warehouse", "*") == "*":
+        return None
+    allowed_codes = user.scope_wms_warehouse
+    return set(db.execute(
+        select(WmsLocation.loc_id).join(WmsWarehouse, WmsWarehouse.warehouse_id == WmsLocation.warehouse_id)
+        .where(WmsWarehouse.code.notin_(allowed_codes))).scalars().all())
+
+
+def _filter_loc_scope(stmt, loc_col, disallowed: set | None):
+    """Thêm điều kiện loại các dòng có `loc_col` thuộc `disallowed` (giữ nguyên dòng loc_col
+    IS NULL — xem docstring _disallowed_location_ids) vào 1 câu SELECT đã có sẵn."""
+    if not disallowed:
+        return stmt
+    return stmt.where(or_(loc_col.is_(None), loc_col.notin_(disallowed)))
+
+
 def _wh_scope_restricted(user: User) -> bool:
     """True nếu user bị giới hạn kho thành phẩm (khác "*", và không phải admin — admin luôn bỏ
     qua data-scoping, xem security.has_scope) — dùng để BẮT BUỘC chọn kho/vị trí tường minh ở
@@ -178,6 +208,13 @@ def _consume_lot_rows(db: Session, *, product_name: str, unit_type: str, status:
     if exclude_ids:
         stmt = stmt.where(FinishedGoodsUnit.unit_id.notin_(exclude_ids))
     stmt = stmt.order_by(FinishedGoodsUnit.created_at)
+    # KHÓA từng dòng được chọn (SELECT ... FOR UPDATE — trên MSSQL dịch thành hint
+    # WITH (UPDLOCK, ROWLOCK), SQLite bỏ qua vì tự khóa toàn CSDL khi ghi) tới khi transaction
+    # này commit/rollback — chặn "lost update": 2 giao dịch cùng đọc thấy quantity=100, cùng
+    # tính "còn dư 20" rồi cùng ghi đè, làm tồn kho hụt so với thực tế (đã xảy ra thật khi 2
+    # phiếu xuất/điều chuyển động cùng lúc vào đúng 1 dòng lô). Giao dịch thứ 2 giờ phải ĐỢI tới
+    # khi giao dịch thứ 1 commit rồi mới đọc được quantity mới nhất, không còn đọc số cũ.
+    stmt = stmt.with_for_update()
 
     remaining = quantity_needed
     picked: list[FinishedGoodsUnit] = []
@@ -267,6 +304,28 @@ def update_location(db: Session, loc_id: str, payload: dict) -> WmsLocation:
     return loc
 
 
+def set_location_layout(db: Session, loc_id: str, row: int | None, col: int | None) -> WmsLocation:
+    """Gán/gỡ tọa độ hàng-cột trên "Bố cục kho" (khác update_location() — hàm đó bỏ qua field
+    None nên không gỡ được vị trí khỏi lưới, ở đây None luôn được ghi để cho phép gỡ)."""
+    loc = db.get(WmsLocation, loc_id)
+    if not loc:
+        raise NotFoundError("Vị trí không tồn tại.")
+    if (row is None) != (col is None):
+        raise DomainError("Phải xếp đủ cả hàng và cột, hoặc để trống cả hai để gỡ khỏi bố cục.")
+    if row is not None and (row < 0 or col < 0):
+        raise DomainError("Hàng/cột không được âm.")
+    if row is not None:
+        clash = db.execute(select(WmsLocation).where(
+            WmsLocation.warehouse_id == loc.warehouse_id, WmsLocation.layout_row == row,
+            WmsLocation.layout_col == col, WmsLocation.loc_id != loc_id)).scalar_one_or_none()
+        if clash:
+            raise DomainError(f"Ô (hàng {row}, cột {col}) đã có vị trí '{clash.code}' — chọn ô khác.")
+    loc.layout_row, loc.layout_col = row, col
+    db.commit()
+    db.refresh(loc)
+    return loc
+
+
 def delete_location(db: Session, loc_id: str) -> None:
     loc = db.get(WmsLocation, loc_id)
     if not loc:
@@ -293,7 +352,8 @@ def list_locations(db: Session) -> list:
              "capacity": l.capacity, "active": l.active, "used": counts.get(l.loc_id, 0) or 0,
              "warehouse_id": l.warehouse_id,
              "warehouse_code": wh_by_id[l.warehouse_id].code if l.warehouse_id in wh_by_id else None,
-             "warehouse_name": wh_by_id[l.warehouse_id].name if l.warehouse_id in wh_by_id else None}
+             "warehouse_name": wh_by_id[l.warehouse_id].name if l.warehouse_id in wh_by_id else None,
+             "layout_row": l.layout_row, "layout_col": l.layout_col}
             for l in locs]
 
 
@@ -381,12 +441,14 @@ def summary(db: Session) -> dict:
 
 def list_units(db: Session, status: str = None, unit_type: str = None,
                product_name: str = None, lot_code: str = None,
-               limit: int = 1000, offset: int = 0) -> list:
+               limit: int = 1000, offset: int = 0, user: User | None = None) -> list:
     """`product_name`/`lot_code` giới hạn về 1 lô cụ thể — nên dùng khi cần liệt kê từng dòng
     của 1 lô cụ thể (VD trước khi xóa cả lô). Có phân trang (limit/offset, mặc định 1000,
     tối đa 5000) — dù redesign lô=1 dòng đã tự giảm mạnh số dòng/lô (xem
     docs/WMS-LOT-LEVEL-REDESIGN.md), tổng số dòng TOÀN kho vẫn tăng dần theo số lô tích lũy
-    qua thời gian nên endpoint không lọc vẫn cần chặn không tải hết bảng."""
+    qua thời gian nên endpoint không lọc vẫn cần chặn không tải hết bảng. `user` dùng để loại
+    dòng thuộc kho ngoài phạm vi (xem _disallowed_location_ids) — tài khoản bị giới hạn 1 kho
+    thành phẩm trước đây xem được TOÀN BỘ tồn kho mọi kho khác qua API này."""
     limit = max(1, min(limit or 1000, 5000))
     offset = max(0, offset or 0)
     stmt = select(FinishedGoodsUnit).order_by(FinishedGoodsUnit.created_at)
@@ -398,6 +460,7 @@ def list_units(db: Session, status: str = None, unit_type: str = None,
         stmt = stmt.where(FinishedGoodsUnit.product_name == product_name)
     if lot_code:
         stmt = stmt.where(FinishedGoodsUnit.lot_code == lot_code)
+    stmt = _filter_loc_scope(stmt, FinishedGoodsUnit.location_id, _disallowed_location_ids(db, user))
     stmt = stmt.limit(limit).offset(offset)
     out = []
     loc_by = {l.loc_id: l for l in db.execute(select(WmsLocation)).scalars().all()}
@@ -693,8 +756,10 @@ def approve_near_expiry_entry(db: Session, entry_id: str, user: User) -> dict:
     return {"entry_id": entry.entry_id, "count": entry.quantity, "unit_codes": [u.unit_code for u in units]}
 
 
-def list_near_expiry_entries(db: Session) -> list[dict]:
-    entries = db.execute(select(NearExpiryEntry).order_by(NearExpiryEntry.created_at.desc())).scalars().all()
+def list_near_expiry_entries(db: Session, user: User | None = None) -> list[dict]:
+    stmt = _filter_loc_scope(select(NearExpiryEntry), NearExpiryEntry.location_id,
+                             _disallowed_location_ids(db, user)).order_by(NearExpiryEntry.created_at.desc())
+    entries = db.execute(stmt).scalars().all()
     out = []
     for e in entries:
         shipment = db.get(Shipment, e.shipment_id) if e.shipment_id else None
@@ -865,8 +930,10 @@ def approve_consigned_entry(db: Session, entry_id: str, user: User) -> dict:
     return {"entry_id": entry.entry_id, "count": entry.quantity, "unit_codes": [u.unit_code for u in units]}
 
 
-def list_consigned_entries(db: Session) -> list[dict]:
-    entries = db.execute(select(ConsignedEntry).order_by(ConsignedEntry.created_at.desc())).scalars().all()
+def list_consigned_entries(db: Session, user: User | None = None) -> list[dict]:
+    stmt = _filter_loc_scope(select(ConsignedEntry), ConsignedEntry.location_id,
+                             _disallowed_location_ids(db, user)).order_by(ConsignedEntry.created_at.desc())
+    entries = db.execute(stmt).scalars().all()
     out = []
     for e in entries:
         shipment = db.get(Shipment, e.shipment_id) if e.shipment_id else None
@@ -1027,8 +1094,10 @@ def approve_factory_import_entry(db: Session, entry_id: str, user: User) -> dict
     return {"entry_id": entry.entry_id, "count": entry.quantity, "unit_codes": [u.unit_code for u in units]}
 
 
-def list_factory_import_entries(db: Session) -> list[dict]:
-    entries = db.execute(select(FactoryImportEntry).order_by(FactoryImportEntry.created_at.desc())).scalars().all()
+def list_factory_import_entries(db: Session, user: User | None = None) -> list[dict]:
+    stmt = _filter_loc_scope(select(FactoryImportEntry), FactoryImportEntry.location_id,
+                             _disallowed_location_ids(db, user)).order_by(FactoryImportEntry.created_at.desc())
+    entries = db.execute(stmt).scalars().all()
     out = []
     for e in entries:
         loc = db.get(WmsLocation, e.location_id) if e.location_id else None
@@ -1178,6 +1247,7 @@ def transfer_units(db: Session, unit_ids: list, to_loc_id: str, user: User) -> d
     to_loc = db.get(WmsLocation, to_loc_id)
     if not to_loc:
         raise NotFoundError("Vị trí đích không tồn tại.")
+    _assert_wh_scope(db, user, to_loc.warehouse_id)
 
     units = []
     for unit_id in unit_ids:
@@ -1186,6 +1256,7 @@ def transfer_units(db: Session, unit_ids: list, to_loc_id: str, user: User) -> d
             raise NotFoundError("Vỉ/keg/lon không tồn tại.")
         if u.status != "stored":
             raise DomainError(f"{u.unit_code} không ở trạng thái tồn kho (đã xuất/đã phân rã) — không thể điều chuyển.")
+        _assert_loc_scope(db, user, u.location_id)
         units.append(u)
 
     fp_cache: dict = {}
@@ -1252,6 +1323,7 @@ def decompose_unit(db: Session, unit_id: str, user: User) -> dict:
     u = db.get(FinishedGoodsUnit, unit_id)
     if not u:
         raise NotFoundError("Đơn vị không tồn tại.")
+    _assert_loc_scope(db, user, u.location_id)
     if u.unit_type not in _divide_by_pack_codes(db):
         raise DomainError("Chỉ có thể phân rã loại đơn vị đóng gói (xem Danh mục Loại đơn vị tồn kho).")
     if u.status != "stored":
@@ -1268,24 +1340,31 @@ def decompose_unit(db: Session, unit_id: str, user: User) -> dict:
             "lon_unit_codes": [l.unit_code for l in lon_units]}
 
 
-def decompose_batch(db: Session, product_name: str, lot_code: str, unit_type: str, count: int, user: User) -> dict:
+def decompose_batch(db: Session, product_name: str, lot_code: str, unit_type: str, count: int, user: User,
+                    warehouse_id: str | None = None) -> dict:
     """Phân rã N đơn vị đóng gói (Vỉ/Két/Lốc..., cũ nhất trước — FIFO) của 1 sản phẩm/lô thành
     lon — dùng cho kho có hàng trăm ngàn đơn vị dồn vào rất ít dòng (xem
     docs/WMS-LOT-LEVEL-REDESIGN.md), không yêu cầu chọn từng đơn vị một. unit_type PHẢI là
     loại có divide_by_pack_size=True trong Danh mục Loại đơn vị tồn kho — 1 lô có thể đồng
     thời tồn nhiều loại đơn vị khác nhau (VD vừa Két vừa Chai lẻ) nên không được đoán ngầm,
     phải chỉ rõ loại nào cần phân rã. Nếu tồn ít hơn N, phân rã hết số hiện có (trả về đúng số
-    đã xử lý để frontend báo nếu thiếu)."""
+    đã xử lý để frontend báo nếu thiếu). warehouse_id: mirror create_shipment — BẮT BUỘC nếu
+    tài khoản bị giới hạn kho thành phẩm (xem _wh_scope_restricted), tránh phân rã xuyên qua
+    kho ngoài phạm vi khi thao tác theo (sản phẩm, lô) không chỉ định vị trí cụ thể."""
     require_perm(user, "warehouse.issue")
     if count <= 0:
         raise DomainError("Số lượng cần phân rã phải > 0.")
     if unit_type not in _divide_by_pack_codes(db):
         raise DomainError("Chỉ có thể phân rã loại đơn vị đóng gói (xem Danh mục Loại đơn vị tồn kho).")
+    if warehouse_id:
+        _assert_wh_scope(db, user, warehouse_id)
+    elif _wh_scope_restricted(user):
+        raise DomainError("Vui lòng chọn kho (tài khoản bị giới hạn kho thành phẩm).")
     fp = db.execute(select(FinishedProduct).where(FinishedProduct.code == product_name)).scalar_one_or_none()
     divisor = _pack_divisor(fp, unit_type, _divide_by_pack_codes(db))
     candidates, got = _consume_lot_rows(db, product_name=product_name, unit_type=unit_type, status="stored",
                                         quantity_needed=count * divisor, lot_code=lot_code,
-                                        block_pending_manual=True)
+                                        block_pending_manual=True, warehouse_id=warehouse_id)
     if not candidates:
         raise DomainError("Không còn đơn vị nào tồn kho cho sản phẩm/lô/loại này (hoặc chỉ còn lô "
                           "nhập tay chưa được duyệt nhập kho).")
@@ -1459,9 +1538,10 @@ def list_free_issues(db: Session, limit: int = 200) -> list[dict]:
     return rows[:limit]
 
 
-def list_lot_summaries(db: Session) -> list:
+def list_lot_summaries(db: Session, user: User | None = None) -> list:
     """Tổng hợp tồn kho theo (sản phẩm, lô) — mỗi dòng gộp số lượng vỉ/keg/lon, dùng cho
-    picker Xuất kho (không liệt kê từng đơn vị — kho có thể có hàng trăm ngàn vỉ).
+    picker Xuất kho (không liệt kê từng đơn vị — kho có thể có hàng trăm ngàn vỉ). `user` loại
+    dòng thuộc kho ngoài phạm vi được phân (xem _disallowed_location_ids).
     has_lon: lô này đã từng phân rã ra lon lẻ (còn tồn) hay chưa — dùng cho bộ lọc.
     {type}_fifo_ok: lô này có phải lô CŨ NHẤT còn tồn của (sản phẩm, loại đơn vị) này
     không — để người dùng thấy ngay có nên chọn lô này trước hay không, đúng thứ tự FIFO
@@ -1486,7 +1566,7 @@ def list_lot_summaries(db: Session) -> list:
     # JOIN FinishedProduct), KHÔNG đếm dòng — 1 dòng giờ có thể đại diện nhiều đơn vị đóng
     # gói (xem docs/WMS-LOT-LEVEL-REDESIGN.md). "qty" (tổng SL nhỏ) không đổi ý nghĩa.
     divide_codes = _divide_by_pack_codes(db)
-    rows = db.execute(select(FinishedGoodsUnit.product_name, FinishedGoodsUnit.lot_code,
+    lot_summary_stmt = (select(FinishedGoodsUnit.product_name, FinishedGoodsUnit.lot_code,
                              FinishedGoodsUnit.unit_type, FinishedGoodsUnit.location_id,
                              func.sum(FinishedGoodsUnit.quantity / _pack_divisor_expr(divide_codes)),
                              func.sum(FinishedGoodsUnit.quantity), func.min(FinishedGoodsUnit.created_at),
@@ -1504,7 +1584,10 @@ def list_lot_summaries(db: Session) -> list:
                       .outerjoin(FinishedProduct, FinishedProduct.finished_product_id == FinishedGoodsUnit.finished_product_id)
                       .where(FinishedGoodsUnit.status == "stored")
                       .group_by(FinishedGoodsUnit.product_name, FinishedGoodsUnit.lot_code,
-                               FinishedGoodsUnit.unit_type, FinishedGoodsUnit.location_id)).all()
+                               FinishedGoodsUnit.unit_type, FinishedGoodsUnit.location_id))
+    lot_summary_stmt = _filter_loc_scope(lot_summary_stmt, FinishedGoodsUnit.location_id,
+                                         _disallowed_location_ids(db, user))
+    rows = db.execute(lot_summary_stmt).all()
     # bottle_date/line: thời gian chiết + dây chuyền đã chiết ra lô này — tra qua BottleRecord
     # (lot_no == lot_code, xem ghi chú ở docstring) để hiển thị ở picker "Cất vào vị trí" (biết
     # lô mới nhập kho được chiết lúc nào, từ dây chuyền nào trước khi cất vào vị trí kho thật).
@@ -1599,13 +1682,14 @@ def list_lot_summaries(db: Session) -> list:
     return sorted(grouped.values(), key=lambda g: (g["product_name"] or "", g["lot_code"] or ""))
 
 
-def warehouse_floor_map(db: Session, warehouse_id: str) -> list[dict]:
+def warehouse_floor_map(db: Session, warehouse_id: str, user: User) -> list[dict]:
     """Sơ đồ kho vật lý: TỪNG vị trí kho thuộc 1 kho thành phẩm, kèm các (sản phẩm, lô, loại
     đơn vị) đang lưu ở đó và cờ sẵn sàng FIFO — TÍNH RIÊNG trong phạm vi kho này. Khác với
     {type}_fifo_ok của list_lot_summaries (tính "cũ nhất" trên TOÀN hệ thống, xuyên mọi kho):
     ở đây "cũ nhất" chỉ so trong các vị trí thuộc CHÍNH warehouse_id truyền vào — 1 lô có thể
     chưa tới lượt FIFO toàn hệ thống (kho khác còn lô cũ hơn) nhưng vẫn là lô cũ nhất TRONG kho
     đang xem, nên vẫn nên xuất trước khi thao tác trong phạm vi kho đó."""
+    _assert_wh_scope(db, user, warehouse_id)
     divide_codes = _divide_by_pack_codes(db)
     locs = list(db.execute(select(WmsLocation).where(WmsLocation.warehouse_id == warehouse_id)
                            .order_by(WmsLocation.code)).scalars().all())
@@ -1634,7 +1718,8 @@ def warehouse_floor_map(db: Session, warehouse_id: str) -> list[dict]:
             "count": count or 0, "oldest_at": oldest_at.isoformat() if oldest_at else None,
             "fifo_ready": oldest_at == oldest_by_type.get((product_name, unit_type))})
     return [{"loc_id": l.loc_id, "code": l.code, "name": l.name, "zone": l.zone,
-             "capacity": l.capacity, "lots": lots_by_loc[l.loc_id]} for l in locs]
+             "capacity": l.capacity, "layout_row": l.layout_row, "layout_col": l.layout_col,
+             "lots": lots_by_loc[l.loc_id]} for l in locs]
 
 
 # Ngưỡng mặc định (số ngày tồn kho kể từ đơn vị nhập sớm nhất trong nhóm) để tô màu cảnh báo ở
@@ -2099,11 +2184,12 @@ def shipment_net_liters_report(db: Session, date_from: datetime, date_to: dateti
             "unmatched_products": sorted(unmatched.values(), key=lambda u: -u["units"])}
 
 
-def list_lot_summaries_by_location(db: Session, loc_id: str) -> list:
+def list_lot_summaries_by_location(db: Session, loc_id: str, user: User) -> list:
     """Tổng hợp tồn "stored" theo (sản phẩm, lô, loại đơn vị) tại RIÊNG 1 vị trí kho — dùng
     cho picker Điều chuyển nội bộ (chọn vị trí nguồn rồi xem có gì để chuyển), tính bằng
     GROUP BY ở SQL thay vì tải hết đơn vị toàn kho về rồi lọc/gộp bằng Python (kho có thể có
     hàng trăm ngàn đơn vị)."""
+    _assert_loc_scope(db, user, loc_id)
     rows = db.execute(select(FinishedGoodsUnit.product_name, FinishedGoodsUnit.lot_code,
                              FinishedGoodsUnit.unit_type, func.sum(FinishedGoodsUnit.quantity / _pack_divisor_expr(_divide_by_pack_codes(db))))
                       .select_from(FinishedGoodsUnit)
@@ -2116,19 +2202,28 @@ def list_lot_summaries_by_location(db: Session, loc_id: str) -> list:
 
 
 def confirm_receipt_by_lot(db: Session, product_name: str, lot_code: str | None, unit_type: str,
-                           user: User) -> dict:
+                           user: User, warehouse_id: str | None = None) -> dict:
     """Trưởng bộ phận kho duyệt nhập kho cho 1 lô đến từ chiết (source="chiet") HOẶC nhập tay
     thủ công (source="manual") — chỉ khoá lại (đánh dấu đã duyệt), KHÔNG đổi số liệu tồn kho.
     Sau khi duyệt: delete_unit/delete_units/delete_units_by_criteria chặn xóa các dòng này
     (mirror confirm_shipment); riêng lô "manual" còn được MỞ khoá xuất (create_shipment, xem
     _consume_lot_rows(block_pending_manual=True)) — lô "chiet" xuất được ngay từ đầu, duyệt chỉ
     ảnh hưởng tới xóa. Lô tồn đầu/near-expiry/consigned tự động đã "duyệt" từ lúc tạo, không
-    còn khớp WHERE received_confirmed_by IS NULL nên không xuất hiện ở đây nữa."""
+    còn khớp WHERE received_confirmed_by IS NULL nên không xuất hiện ở đây nữa. warehouse_id:
+    mirror create_shipment — BẮT BUỘC nếu tài khoản bị giới hạn kho thành phẩm."""
     require_perm(user, "wms.confirm_receipt")
-    rows = db.execute(select(FinishedGoodsUnit).where(
+    if warehouse_id:
+        _assert_wh_scope(db, user, warehouse_id)
+    elif _wh_scope_restricted(user):
+        raise DomainError("Vui lòng chọn kho (tài khoản bị giới hạn kho thành phẩm).")
+    stmt = select(FinishedGoodsUnit).where(
         FinishedGoodsUnit.product_name == product_name, FinishedGoodsUnit.lot_code == lot_code,
         FinishedGoodsUnit.unit_type == unit_type, FinishedGoodsUnit.status == "stored",
-        FinishedGoodsUnit.source.in_(("chiet", "manual")), FinishedGoodsUnit.received_confirmed_by.is_(None))).scalars().all()
+        FinishedGoodsUnit.source.in_(("chiet", "manual")), FinishedGoodsUnit.received_confirmed_by.is_(None))
+    if warehouse_id:
+        stmt = stmt.where(FinishedGoodsUnit.location_id.in_(
+            select(WmsLocation.loc_id).where(WmsLocation.warehouse_id == warehouse_id)))
+    rows = db.execute(stmt).scalars().all()
     if not rows:
         raise DomainError("Không có lô nào đang chờ duyệt khớp tiêu chí này.")
     now = utcnow()
@@ -2143,23 +2238,30 @@ def confirm_receipt_by_lot(db: Session, product_name: str, lot_code: str | None,
 
 
 def delete_units_by_criteria(db: Session, product_name: str, lot_code: str | None, unit_type: str,
-                             user: User) -> dict:
+                             user: User, warehouse_id: str | None = None) -> dict:
     """Xóa CẢ LÔ vỉ/keg theo (sản phẩm, lô, loại) thay vì theo danh sách unit_id — tránh phải
     tải/gửi hàng trăm ngàn unit_id qua mạng (xem delete_units cho trường hợp chọn từng đơn
     vị cụ thể). CHỈ xóa các dòng đang "stored" (đã xuất/phân rã thì lô này không còn khớp
     tiêu chí lọc status='stored' nên tự động không bị đụng tới — không cần kiểm tra riêng
-    từng dòng như delete_units)."""
+    từng dòng như delete_units). warehouse_id: mirror create_shipment — BẮT BUỘC nếu tài khoản
+    bị giới hạn kho thành phẩm, tránh xóa lô nằm ở kho ngoài phạm vi."""
     require_perm(user, "warehouse.issue")
+    if warehouse_id:
+        _assert_wh_scope(db, user, warehouse_id)
+    elif _wh_scope_restricted(user):
+        raise DomainError("Vui lòng chọn kho (tài khoản bị giới hạn kho thành phẩm).")
+    loc_filter = (FinishedGoodsUnit.location_id.in_(
+        select(WmsLocation.loc_id).where(WmsLocation.warehouse_id == warehouse_id)),) if warehouse_id else ()
     confirmed_count = db.execute(select(func.count()).select_from(FinishedGoodsUnit).where(
         FinishedGoodsUnit.product_name == product_name, FinishedGoodsUnit.lot_code == lot_code,
         FinishedGoodsUnit.unit_type == unit_type, FinishedGoodsUnit.status == "stored",
         FinishedGoodsUnit.source.in_(("chiet", "manual")),
-        FinishedGoodsUnit.received_confirmed_by.isnot(None))).scalar_one()
+        FinishedGoodsUnit.received_confirmed_by.isnot(None), *loc_filter)).scalar_one()
     if confirmed_count:
         raise DomainError("Lô này đã được Trưởng bộ phận kho duyệt nhập kho — không thể xóa.")
     ids = [row[0] for row in db.execute(select(FinishedGoodsUnit.unit_id).where(
         FinishedGoodsUnit.product_name == product_name, FinishedGoodsUnit.lot_code == lot_code,
-        FinishedGoodsUnit.unit_type == unit_type, FinishedGoodsUnit.status == "stored")).all()]
+        FinishedGoodsUnit.unit_type == unit_type, FinishedGoodsUnit.status == "stored", *loc_filter)).all()]
     if not ids:
         raise DomainError("Không tìm thấy vỉ/keg nào khớp lô này để xóa.")
     bottles_reset = set()
@@ -2320,7 +2422,7 @@ def create_shipment(db: Session, ship_to_id: str, lines: list, user: User, heade
                         vehicle_id=header.get("vehicle_id") if header.get("vehicle_id") and
                                   db.get(Vehicle, header.get("vehicle_id")) else None,
                         from_location=from_location, delivery_place=header.get("delivery_place"),
-                        shipment_type=header_shipment_type)
+                        shipment_type=header_shipment_type, warehouse_id=warehouse_id)
     db.add(shipment)
     db.flush()
 
@@ -2373,14 +2475,23 @@ def create_shipment(db: Session, ship_to_id: str, lines: list, user: User, heade
             "ship_to_code": ship_to.code, "fifo_ok": fifo_ok, "units": out_lines}
 
 
-def list_shipments(db: Session, limit: int = 200, offset: int = 0) -> list:
+def list_shipments(db: Session, limit: int = 200, offset: int = 0, user: User | None = None) -> list:
     """Có phân trang (limit tối đa 2000, offset) — số phiếu xuất kho tăng dần vô hạn theo thời
     gian. Nạp 1 LẦN toàn bộ FinishedGoodsUnit của các phiếu trong trang hiện tại rồi nhóm theo
-    shipment_id trong Python, thay vì mỗi phiếu 1 query riêng (N+1) như trước."""
+    shipment_id trong Python, thay vì mỗi phiếu 1 query riêng (N+1) như trước.
+    Tài khoản bị giới hạn kho (wms_warehouse_scope) chỉ thấy phiếu của kho mình — phiếu cũ
+    chưa có warehouse_id (tạo trước khi có tính năng này) LUÔN hiện, theo đúng quy ước "chưa rõ
+    -> không khóa cứng" (xem _assert_wh_scope)."""
     limit = max(1, min(limit or 200, 2000))
     offset = max(0, offset or 0)
-    ships = db.execute(select(Shipment).order_by(Shipment.created_at.desc())
-                      .limit(limit).offset(offset)).scalars().all()
+    stmt = select(Shipment).order_by(Shipment.created_at.desc())
+    if user is not None and user.role != Role.ADMIN.value and getattr(user, "scope_wms_warehouse", "*") != "*":
+        allowed_codes = user.scope_wms_warehouse
+        disallowed_wh = set(db.execute(
+            select(WmsWarehouse.warehouse_id).where(WmsWarehouse.code.notin_(allowed_codes))).scalars().all())
+        if disallowed_wh:
+            stmt = stmt.where(or_(Shipment.warehouse_id.is_(None), Shipment.warehouse_id.notin_(disallowed_wh)))
+    ships = db.execute(stmt.limit(limit).offset(offset)).scalars().all()
     ship_to_by = {s.supplier_id: s for s in db.execute(select(Supplier)).scalars().all()}
     vehicle_by_id = {v.vehicle_id: v for v in db.execute(select(Vehicle)).scalars().all()}
     fp_cache: dict = {}
@@ -2444,6 +2555,8 @@ def confirm_shipment(db: Session, shipment_id: str, user: User) -> dict:
     shipment = db.get(Shipment, shipment_id)
     if not shipment:
         raise NotFoundError("Phiếu xuất kho không tồn tại.")
+    if shipment.warehouse_id:
+        _assert_wh_scope(db, user, shipment.warehouse_id)
     if shipment.confirmed_by:
         raise DomainError("Phiếu này đã được xác nhận trước đó.")
     shipment.confirmed_by = user.username
@@ -2463,6 +2576,8 @@ def update_shipment_trip(db: Session, shipment_id: str, km: float | None, fuel_l
     shipment = db.get(Shipment, shipment_id)
     if not shipment:
         raise NotFoundError("Phiếu xuất kho không tồn tại.")
+    if shipment.warehouse_id:
+        _assert_wh_scope(db, user, shipment.warehouse_id)
     if not shipment.confirmed_by:
         raise DomainError("Chỉ được điền km/lít xăng sau khi phiếu đã được duyệt.")
     shipment.km = km
@@ -2485,6 +2600,8 @@ def update_shipment(db: Session, shipment_id: str, payload: dict, user: User) ->
     shipment = db.get(Shipment, shipment_id)
     if not shipment:
         raise NotFoundError("Phiếu xuất kho không tồn tại.")
+    if shipment.warehouse_id:
+        _assert_wh_scope(db, user, shipment.warehouse_id)
     if shipment.confirmed_by:
         raise DomainError("Phiếu đã được duyệt — không thể sửa nữa.")
     before = {f: getattr(shipment, f) for f in _SHIPMENT_EDITABLE_FIELDS}
@@ -2509,6 +2626,8 @@ def undo_shipment(db: Session, shipment_id: str, user: User) -> dict:
     shipment = db.get(Shipment, shipment_id)
     if not shipment:
         raise NotFoundError("Phiếu xuất kho không tồn tại.")
+    if shipment.warehouse_id:
+        _assert_wh_scope(db, user, shipment.warehouse_id)
     if shipment.confirmed_by:
         require_role(user, Role.ADMIN)
     units = db.execute(select(FinishedGoodsUnit).where(
@@ -2551,6 +2670,7 @@ def delete_unit(db: Session, unit_id: str, user: User) -> None:
     u = db.get(FinishedGoodsUnit, unit_id)
     if not u:
         raise NotFoundError("Vỉ/keg không tồn tại.")
+    _assert_loc_scope(db, user, u.location_id)
     if u.status == "shipped":
         raise DomainError("Đã xuất kho — không thể xóa.")
     if u.status == "decomposed":
@@ -2585,6 +2705,7 @@ def delete_units(db: Session, unit_ids: list[str], user: User) -> dict:
         u = db.get(FinishedGoodsUnit, unit_id)
         if not u:
             raise NotFoundError("Vỉ/keg không tồn tại.")
+        _assert_loc_scope(db, user, u.location_id)
         if u.status == "shipped":
             raise DomainError(f"{u.unit_code} đã xuất kho — không thể xóa.")
         if u.status == "decomposed":
@@ -2611,11 +2732,16 @@ def delete_units(db: Session, unit_ids: list[str], user: User) -> dict:
     return {"deleted": len(units), "bottles_reset": sorted(bottles_reset)}
 
 
-def resolve(db: Session, code: str) -> dict:
+def resolve(db: Session, code: str, user: User | None = None) -> dict:
     """Phân giải barcode (cho kiosk/đầu đọc) — mã vạch/QR in theo LÔ (không in riêng từng
     vỉ), nên trước tiên tra theo lot_code (tổng hợp số lượng theo trạng thái/loại); chỉ
-    còn tra theo unit_code (mã nội bộ từng dòng) để tương thích các tem cũ đã in trước đây."""
-    lot_units = db.execute(select(FinishedGoodsUnit).where(FinishedGoodsUnit.lot_code == code)).scalars().all()
+    còn tra theo unit_code (mã nội bộ từng dòng) để tương thích các tem cũ đã in trước đây.
+    `user` loại các dòng thuộc kho ngoài phạm vi khỏi cả 2 nhánh tra cứu (xem
+    _disallowed_location_ids) — tránh lộ tồn kho/vị trí của kho khác qua quét mã."""
+    disallowed = _disallowed_location_ids(db, user)
+    lot_stmt = _filter_loc_scope(select(FinishedGoodsUnit).where(FinishedGoodsUnit.lot_code == code),
+                                 FinishedGoodsUnit.location_id, disallowed)
+    lot_units = db.execute(lot_stmt).scalars().all()
     if lot_units:
         # Đếm theo SL vỉ/keg/lon quy đổi (quantity/pack_size), KHÔNG đếm dòng — xem
         # docs/WMS-LOT-LEVEL-REDESIGN.md. fp_cache tránh tra FinishedProduct lặp lại nhiều lần.
@@ -2638,6 +2764,8 @@ def resolve(db: Session, code: str) -> dict:
         return {"type": "lot", "lot_code": code, "product": lot_units[0].product_name,
                 "unit_count": unit_count, "by_status": by_status, "by_type": by_type}
     u = db.execute(select(FinishedGoodsUnit).where(FinishedGoodsUnit.unit_code == code)).scalar_one_or_none()
+    if u and disallowed and u.location_id in disallowed:
+        u = None
     if u:
         loc = db.get(WmsLocation, u.location_id) if u.location_id else None
         return {"type": "finished_goods_unit", "unit_code": u.unit_code, "unit_type": u.unit_type,
@@ -2824,13 +2952,23 @@ def create_transfer(db: Session, to_location_id: str, lines: list, user: User, h
             "to_location_code": to_loc.code, "fifo_ok": fifo_ok, "units": out_lines}
 
 
-def list_transfers(db: Session, limit: int = 200, offset: int = 0) -> list:
+def list_transfers(db: Session, limit: int = 200, offset: int = 0, user: User | None = None) -> list:
     """Mirror list_shipments — có phân trang, nạp 1 LẦN toàn bộ FinishedGoodsUnit của các phiếu
-    trong trang hiện tại rồi nhóm theo transfer_id trong Python (không N+1)."""
+    trong trang hiện tại rồi nhóm theo transfer_id trong Python (không N+1).
+    Tài khoản bị giới hạn kho chỉ thấy phiếu có vị trí ĐÍCH (to_location_id) thuộc kho mình —
+    to_location_id LUÔN có giá trị (không như Shipment) nên suy trực tiếp qua join, không cần
+    cột warehouse_id riêng."""
     limit = max(1, min(limit or 200, 2000))
     offset = max(0, offset or 0)
-    transfers = db.execute(select(WmsTransfer).order_by(WmsTransfer.created_at.desc())
-                           .limit(limit).offset(offset)).scalars().all()
+    stmt = select(WmsTransfer).order_by(WmsTransfer.created_at.desc())
+    if user is not None and user.role != Role.ADMIN.value and getattr(user, "scope_wms_warehouse", "*") != "*":
+        allowed_codes = user.scope_wms_warehouse
+        disallowed_wh = set(db.execute(
+            select(WmsWarehouse.warehouse_id).where(WmsWarehouse.code.notin_(allowed_codes))).scalars().all())
+        if disallowed_wh:
+            stmt = stmt.where(WmsTransfer.to_location_id.in_(
+                select(WmsLocation.loc_id).where(WmsLocation.warehouse_id.notin_(disallowed_wh))))
+    transfers = db.execute(stmt.limit(limit).offset(offset)).scalars().all()
     loc_by_id = {l.loc_id: l for l in db.execute(select(WmsLocation)).scalars().all()}
     vehicle_by_id = {v.vehicle_id: v for v in db.execute(select(Vehicle)).scalars().all()}
     fp_cache: dict = {}
@@ -2881,6 +3019,7 @@ def confirm_transfer(db: Session, transfer_id: str, user: User) -> dict:
     transfer = db.get(WmsTransfer, transfer_id)
     if not transfer:
         raise NotFoundError("Phiếu điều chuyển không tồn tại.")
+    _assert_transfer_wh_scope(db, user, transfer)
     if transfer.confirmed_by:
         raise DomainError("Phiếu này đã được xác nhận trước đó.")
     transfer.confirmed_by = user.username
@@ -2899,6 +3038,7 @@ def update_transfer_trip(db: Session, transfer_id: str, km: float | None, fuel_l
     transfer = db.get(WmsTransfer, transfer_id)
     if not transfer:
         raise NotFoundError("Phiếu điều chuyển không tồn tại.")
+    _assert_transfer_wh_scope(db, user, transfer)
     if not transfer.confirmed_by:
         raise DomainError("Chỉ được điền km/lít xăng sau khi phiếu đã được duyệt.")
     transfer.km = km
@@ -2920,6 +3060,7 @@ def update_transfer(db: Session, transfer_id: str, payload: dict, user: User) ->
     transfer = db.get(WmsTransfer, transfer_id)
     if not transfer:
         raise NotFoundError("Phiếu điều chuyển không tồn tại.")
+    _assert_transfer_wh_scope(db, user, transfer)
     if transfer.confirmed_by:
         raise DomainError("Phiếu đã được duyệt — không thể sửa nữa.")
     before = {f: getattr(transfer, f) for f in _TRANSFER_EDITABLE_FIELDS}
@@ -2945,6 +3086,7 @@ def undo_transfer(db: Session, transfer_id: str, user: User) -> dict:
     transfer = db.get(WmsTransfer, transfer_id)
     if not transfer:
         raise NotFoundError("Phiếu điều chuyển không tồn tại.")
+    _assert_transfer_wh_scope(db, user, transfer)
     if transfer.confirmed_by:
         require_role(user, Role.ADMIN)
     lines = db.execute(select(WmsTransferLine).where(WmsTransferLine.transfer_id == transfer_id)).scalars().all()

@@ -489,6 +489,13 @@ class WmsLocationUpdate(BaseModel):
     warehouse_id: Optional[str] = None
 
 
+class WmsLocationLayoutIn(BaseModel):
+    # None = chưa xếp bố cục (gỡ khỏi sơ đồ) — khác WmsLocationUpdate, ở đây None LUÔN được áp
+    # dụng (không bị bỏ qua) để cho phép gỡ vị trí ra khỏi lưới.
+    row: Optional[int] = None
+    col: Optional[int] = None
+
+
 class UnitBuildIn(BaseModel):
     finished_product_id: Optional[str] = None
     product_name: Optional[str] = None
@@ -528,12 +535,18 @@ class DecomposeBatchIn(BaseModel):
     # cả khi người dùng nhập ĐÚNG số tối đa hiển thị trên UI (xem cùng lỗi ở RelocateBatchIn/
     # FreeIssueBatchIn bên dưới).
     count: float
+    # Giới hạn phân rã trong 1 Kho thành phẩm — BẮT BUỘC nếu tài khoản bị giới hạn kho
+    # (xem services/wms.py::_wh_scope_restricted), mirror ShipmentIn.warehouse_id.
+    warehouse_id: Optional[str] = None
 
 
 class DeleteByLotIn(BaseModel):
     product_name: str
     lot_code: Optional[str] = None
     unit_type: str
+    # Dùng cho cả confirm_receipt_by_lot (Duyệt nhập kho theo lô) và delete_units_by_criteria
+    # (Xóa theo lô) — BẮT BUỘC nếu tài khoản bị giới hạn kho, mirror DecomposeBatchIn.
+    warehouse_id: Optional[str] = None
 
 
 class RelocateBatchIn(BaseModel):
@@ -950,18 +963,85 @@ class OEEIn(BaseModel):
     ideal_rate_per_min: float
     total_count: int = 0
     good_count: int = 0
+    # Nhập tách SP tốt/SP lỗi (đúng cách file OPI gốc nhập "SẢN PHẨM TỐT"/"SẢN PHẨM LỖI" riêng
+    # biệt) — khi có, total_count tự tính = good_count + reject_count (bỏ qua total_count nhập
+    # tay để tránh lệch số).
+    reject_count: Optional[int] = None
     downtime_reasons: list[dict] = []
 
 
 class DowntimeIn(BaseModel):
     line: str
-    reason_group: str
-    reason_code: str
-    minutes: float = 0.0
+    reason_catalog_id: str
     equipment_id: Optional[str] = None
     shift: str = "A"
     shift_date: Optional[datetime] = None
+    # Dừng từ/đến (tự tính phút) — hoặc nhập thẳng minutes nếu không rõ giờ chính xác.
+    from_time: Optional[datetime] = None
+    to_time: Optional[datetime] = None
+    minutes: float = 0.0
+    error_code: Optional[str] = None  # chỉ dùng khi lý do thuộc nhóm Breakdown
     note: Optional[str] = None
+
+
+class OeeReasonCatalogIn(BaseModel):
+    line_code: Optional[str] = None
+    category: str
+    sub_code: str
+    sub_label: str
+    machine_position: Optional[str] = None
+    target_pct: float = 0.0
+    active: bool = True
+    sort_order: int = 0
+
+
+class OeeReasonCatalogUpdate(BaseModel):
+    sub_label: Optional[str] = None
+    target_pct: Optional[float] = None
+    machine_position: Optional[str] = None
+    active: Optional[bool] = None
+    sort_order: Optional[int] = None
+
+
+class OeeRcfaIn(BaseModel):
+    line_code: str
+    machine: str
+    part: Optional[str] = None
+    stop_at: Optional[datetime] = None
+    duration_min: float = 0.0
+    failure_function: Optional[str] = None
+    prior_signs: Optional[str] = None
+    technician: Optional[str] = None
+    repair_min: Optional[float] = None
+    wait_min: Optional[float] = None
+    description: Optional[str] = None
+    replaced_parts: list[str] = []
+    working_principle: Optional[str] = None
+    failure_mechanism: Optional[str] = None
+    analyst: Optional[str] = None
+    factor: Optional[str] = None
+    five_whys: list[dict] = []
+    category_4m1e: Optional[str] = None
+    corrective_action: Optional[str] = None
+    preventive_action: Optional[str] = None
+    executor: Optional[str] = None
+    complete_date: Optional[datetime] = None
+    checker: Optional[str] = None
+    downtime_event_id: Optional[str] = None   # gắn ngược vào sự kiện dừng máy khi tạo
+
+
+class OeeRcfaRecheckIn(BaseModel):
+    week_offset: int
+    checked: bool
+    note: Optional[str] = None
+
+
+class OeeMinorStopTallyIn(BaseModel):
+    reason_id: str
+    iso_year: int
+    iso_week: int
+    shift: str
+    count: int = 0
 
 
 class OEEOut(BaseModel):

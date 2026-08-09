@@ -9414,6 +9414,55 @@ const BEER_TYPE_SCOPED_STAGES = ["loc", "thanh_pham"];
 const MULTI_SAMPLE_STAGES = ["len_men_chinh", "len_men_phu"];
 // Sản phẩm (SKU) chỉ có ý nghĩa ở "loc" và "thanh_pham" — mirror qc_catalog.SKU_SCOPED_STAGES.
 const SKU_SCOPED_STAGES = ["loc", "thanh_pham"];
+// "Bố cục kho" — admin tự xếp vị trí lên lưới hàng/cột (khác sơ đồ vẽ cứng D01-D21 cũ, mã vị
+// trí thật trên server vd "DM.K01" không theo quy luật nào để tự suy ra vị trí vẽ). Biến module
+// để giữ trạng thái đang chọn kho/đang "cầm" 1 vị trí xuyên suốt các lần render("master") lại
+// (mỗi lần gọi VIEWS.master() là 1 hàm mới, không tự nhớ state cục bộ).
+let WMS_LAYOUT_WH = null;
+let WMS_LAYOUT_PICK = null;
+let WMS_LAYOUT_EXTRA_ROWS = 0;
+let WMS_LAYOUT_EXTRA_COLS = 0;
+function renderWmsLayoutGrid(wh, locsInWh, whOptionsHtml) {
+  const placed = locsInWh.filter(l => l.layout_row != null && l.layout_col != null);
+  const unplaced = locsInWh.filter(l => l.layout_row == null || l.layout_col == null);
+  const maxRow = placed.reduce((m, l) => Math.max(m, l.layout_row), -1);
+  const maxCol = placed.reduce((m, l) => Math.max(m, l.layout_col), -1);
+  const rows = Math.max(maxRow + 2, 5) + WMS_LAYOUT_EXTRA_ROWS;
+  const cols = Math.max(maxCol + 2, 6) + WMS_LAYOUT_EXTRA_COLS;
+  const byCell = {};
+  placed.forEach(l => { byCell[`${l.layout_row}:${l.layout_col}`] = l; });
+  const pickedLoc = WMS_LAYOUT_PICK ? locsInWh.find(l => l.loc_id === WMS_LAYOUT_PICK) : null;
+  let grid = `<div class="tablewrap"><table style="border-collapse:separate;border-spacing:4px">`;
+  for (let r = 0; r < rows; r++) {
+    grid += "<tr>";
+    for (let c = 0; c < cols; c++) {
+      const loc = byCell[`${r}:${c}`];
+      if (loc) {
+        grid += `<td><div class="panel" data-layout-cell="${r}:${c}" data-layout-loc="${esc(loc.loc_id)}"
+          style="min-width:90px;padding:6px;text-align:center;cursor:pointer;${loc.loc_id === WMS_LAYOUT_PICK ? "outline:2px solid var(--accent)" : ""}"
+          title="Bấm để nhấc ra khỏi ô, xếp lại chỗ khác">
+          <div style="font-weight:600;font-size:12px">${esc(loc.code)}</div>
+          <div class="muted" style="font-size:11px">${esc(loc.name)}</div>
+          <button class="btn sm sec" data-layout-unplace="${esc(loc.loc_id)}" style="margin-top:4px;padding:0 6px">Gỡ</button>
+        </div></td>`;
+      } else {
+        grid += `<td><div data-layout-cell="${r}:${c}" style="min-width:90px;min-height:52px;border:1px dashed var(--border);border-radius:6px;cursor:pointer"
+          title="${pickedLoc ? "Bấm để đặt '" + esc(pickedLoc.code) + "' vào đây" : "Chọn 1 vị trí ở danh sách bên trên trước"}"></div></td>`;
+      }
+    }
+    grid += "</tr>";
+  }
+  grid += "</table></div>";
+  return `<div class="row" style="align-items:flex-end;flex-wrap:wrap;margin-bottom:8px">
+      <div class="field"><label>Kho thành phẩm</label><select id="wlo_wh">${whOptionsHtml}</select></div>
+      <button class="btn sec" id="wlo_addrow">+ Hàng</button>
+      <button class="btn sec" id="wlo_addcol">+ Cột</button>
+    </div>
+    <div class="muted" style="margin-bottom:8px">Bấm chọn 1 vị trí ${unplaced.length ? "chưa xếp" : "đã xếp (để dời)"} bên dưới, rồi bấm vào 1 ô trống trên lưới để đặt vào đó — lưới sẽ vẽ lại đúng như vậy trên "Sơ đồ kho".</div>
+    <div style="margin-bottom:10px">${unplaced.length ? unplaced.map(l => `<button class="btn sm ${l.loc_id === WMS_LAYOUT_PICK ? "" : "sec"}" data-layout-pick="${esc(l.loc_id)}" style="margin:2px">${esc(l.code)} — ${esc(l.name)}</button>`).join("")
+      : `<span class="muted">Mọi vị trí trong kho này đã được xếp bố cục.</span>`}</div>
+    ${grid}`;
+}
 VIEWS.master = async function () {
   const [products, finishedProducts, materials, plines, qcParams, qcGroups, stageGroups, beerTypes, suppliers, materialGroups, opsSettings, unitTypes, materialAltGroups, factoryLocations, wmsWarehouses, wmsLocations, wmsVehicles] = await Promise.all([
     GET("/products"), GET("/finished-products").catch(() => []), GET("/materials"), GET("/lines").catch(() => []),
@@ -9696,6 +9745,18 @@ VIEWS.master = async function () {
         <div class="field" style="align-self:flex-end"><button class="btn" id="wl_add">+ Thêm vị trí</button></div>
       </div>` : ""}
     </div>
+
+    ${isAdminWmsCatalog && wmsWarehouses.length ? (() => {
+      if (!WMS_LAYOUT_WH || !wmsWarehouses.some(w => w.warehouse_id === WMS_LAYOUT_WH)) WMS_LAYOUT_WH = wmsWarehouses[0].warehouse_id;
+      const locsInWh = wmsLocations.filter(l => l.warehouse_id === WMS_LAYOUT_WH);
+      const whOptionsHtml = wmsWarehouses.map(w => `<option value="${esc(w.warehouse_id)}" ${w.warehouse_id === WMS_LAYOUT_WH ? "selected" : ""}>${esc(w.code)} — ${esc(w.name)}</option>`).join("");
+      return `<div class="panel"><h2>🗺️ Bố cục kho</h2>
+        <div class="muted" style="margin-bottom:8px">Tự xếp vị trí lên lưới hàng/cột đúng theo mặt bằng thật ngoài kho — "Sơ đồ kho" (tab Kho TP) chỉ vẽ lại đúng bố cục đã xếp ở đây, không đoán theo mã vị trí.</div>
+        ${locsInWh.length ? renderWmsLayoutGrid(WMS_LAYOUT_WH, locsInWh, whOptionsHtml)
+          : `<div class="row" style="margin-bottom:8px"><div class="field"><label>Kho thành phẩm</label><select id="wlo_wh">${whOptionsHtml}</select></div></div>
+          <div class="muted">Kho này chưa có vị trí nào — thêm ở bảng "Vị trí kho thành phẩm" phía trên trước.</div>`}
+      </div>`;
+    })() : ""}
 
     <div class="panel"><h2>🚚 Lái xe <span class="muted">(${wmsVehicles.length})</span></h2>
       <div class="muted" style="margin-bottom:8px">Biển số xe kèm lái xe/tải trọng/số pallet chở được — tra cứu nhanh khi lập Lệnh đóng hàng hoặc Phiếu xuất kho. Chuyển từ Kho TP (WMS) sang đây — chỉ Admin mới tạo/sửa/xóa.</div>
@@ -10519,6 +10580,39 @@ VIEWS.master = async function () {
         capacity: num("wl_new_capacity") || 10 });
       toast("Đã thêm vị trí"); render("master");
     });
+    if ($("wlo_wh")) {
+      $("wlo_wh").onchange = () => {
+        WMS_LAYOUT_WH = $("wlo_wh").value; WMS_LAYOUT_PICK = null;
+        WMS_LAYOUT_EXTRA_ROWS = 0; WMS_LAYOUT_EXTRA_COLS = 0; render("master");
+      };
+      if ($("wlo_addrow")) $("wlo_addrow").onclick = () => { WMS_LAYOUT_EXTRA_ROWS++; render("master"); };
+      if ($("wlo_addcol")) $("wlo_addcol").onclick = () => { WMS_LAYOUT_EXTRA_COLS++; render("master"); };
+      document.querySelectorAll("[data-layout-pick]").forEach(b => b.onclick = () => {
+        WMS_LAYOUT_PICK = b.dataset.layoutPick === WMS_LAYOUT_PICK ? null : b.dataset.layoutPick;
+        render("master");
+      });
+      document.querySelectorAll("[data-layout-unplace]").forEach(b => b.onclick = (e) => guard(async () => {
+        e.stopPropagation();
+        await PUT(`/wms/locations/${b.dataset.layoutUnplace}/layout`, { row: null, col: null });
+        if (WMS_LAYOUT_PICK === b.dataset.layoutUnplace) WMS_LAYOUT_PICK = null;
+        toast("Đã gỡ khỏi bố cục"); render("master");
+      }));
+      document.querySelectorAll("[data-layout-cell]").forEach(td => td.onclick = (e) => guard(async () => {
+        if (e.target.closest("[data-layout-unplace]")) return;   // nút Gỡ tự xử lý riêng
+        const occupiedLocId = td.dataset.layoutLoc;
+        if (occupiedLocId) {
+          // Bấm vào ô đã có vị trí (không phải nút Gỡ) → chọn/bỏ chọn để chuẩn bị dời đi nơi khác.
+          WMS_LAYOUT_PICK = occupiedLocId === WMS_LAYOUT_PICK ? null : occupiedLocId;
+          render("master");
+          return;
+        }
+        if (!WMS_LAYOUT_PICK) { toast("Chọn 1 vị trí ở danh sách bên trên trước", "err"); return; }
+        const [row, col] = td.dataset.layoutCell.split(":").map(Number);
+        await PUT(`/wms/locations/${WMS_LAYOUT_PICK}/layout`, { row, col });
+        WMS_LAYOUT_PICK = null;
+        toast("Đã xếp vào bố cục"); render("master");
+      }));
+    }
     document.querySelectorAll("[data-vehicle-save]").forEach(b => b.onclick = () => guard(async () => {
       const tr = b.closest("tr");
       await PUT(`/wms/vehicles/${b.dataset.vehicleSave}`, {
