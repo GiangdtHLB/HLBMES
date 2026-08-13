@@ -45,6 +45,8 @@ PERMISSION_CATALOG = {
     "quality.release": "Release chất lượng (QC)",
     "quality.deviation": "Mở/xử lý deviation",
     "production.release_to_wms": "Duyệt lô chiết nhập kho thành phẩm (Giám đốc/Phó GĐ Sản xuất)",
+    "quality.capa_approve_kcs": "Duyệt CAPA — bước Trưởng phòng KCS",
+    "quality.capa_approve_director": "Duyệt CAPA — bước Giám đốc/Phó GĐ Sản xuất - Kỹ thuật",
     "ebr.sign": "Ký điện tử hồ sơ mẻ (EBR)",
     "ebr.approve": "Phê duyệt & khóa hồ sơ mẻ (EBR)",
     "warehouse.receive": "Nhập kho",

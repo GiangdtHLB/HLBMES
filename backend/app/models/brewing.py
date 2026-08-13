@@ -86,6 +86,11 @@ class BrewOrder(Base):
     master_order_id: Mapped[Optional[str]] = mapped_column(ForeignKey("brew_master_order.brew_master_order_id"), nullable=True, index=True)
     seq: Mapped[int] = mapped_column(Integer, default=1)   # thứ tự "Lệnh nấu nhỏ #N" trong lệnh lớn
     product_id: Mapped[Optional[str]] = mapped_column(ForeignKey("product.product_id"), nullable=True, index=True)
+    # Công thức (BOM) người lập lệnh CHỌN dùng cho lệnh nhỏ này — nhiều công thức/dịch bia có
+    # thể cùng hiệu lực (xem services/formula.py), không còn tự suy ra "công thức hiệu lực duy
+    # nhất" như trước. Nullable vì lệnh cũ trước khi có field này không cần backfill (BOM đã
+    # snapshot cứng trong BrewOrderMaterialLine).
+    formula_id: Mapped[Optional[str]] = mapped_column(ForeignKey("formula.formula_id"), nullable=True, index=True)
     product_desc: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)  # "Bia lon Sapphire Mã số...+ chai..."
     planned_batch_count: Mapped[int] = mapped_column(Integer, default=1)     # 12 mẻ
     planned_volume_hl: Mapped[float] = mapped_column(Float, default=0.0)      # kế hoạch (hl) — dùng để scale BOM/mẻ VÀ so với sản lượng nấu thật
@@ -648,6 +653,18 @@ class OpsSetting(Base):
     # services/filter_yield_report.py::filter_line_yield_report). Cùng quy ước <=/> như trên.
     filter_line_yield_low_l: Mapped[float] = mapped_column(Float, default=500.0)
     filter_line_yield_high_l: Mapped[float] = mapped_column(Float, default=2000.0)
+    # Ngưỡng số ngày tồn dự kiến (= tồn thực tế / lượng xuất TB 7 ngày) để đề xuất "Đóng bổ
+    # sung" trên báo cáo NXT kho thành phẩm — áp dụng chung mọi SKU, không phải/SKU (giống 2
+    # cặp ngưỡng sản lượng lọc ở trên). Xem services/wms.py::finished_goods_stock_inout_report.
+    # Cũng dùng làm biên Vàng/Xanh cho màu cột "Số ngày tồn dự kiến" trên báo cáo đó — dưới
+    # fg_days_of_stock_critical_days = Đỏ, dưới finished_goods_restock_days = Vàng, còn lại
+    # = Xanh (xem frontend/views_ext.js::fsDaysBadge).
+    finished_goods_restock_days: Mapped[float] = mapped_column(Float, default=7.0)
+    fg_days_of_stock_critical_days: Mapped[float] = mapped_column(Float, default=3.0)
+    # Ngưỡng màu cho cột "Số ngày lưu kho" (từ ngày sản xuất gần nhất tới hiện tại) trên báo
+    # cáo NXT kho thành phẩm — chỉ 2 mức: trên ngưỡng này = Vàng (tồn lâu, cần lưu ý xuất trước),
+    # bằng/dưới = Xanh. Không có mức Đỏ riêng cho cột này.
+    fg_days_in_stock_warning_days: Mapped[float] = mapped_column(Float, default=30.0)
     # Mã nhận dạng nhà máy — khai báo ở Danh mục cùng "Cài đặt vận hành", giúp truy vết ngoài
     # thị trường sản phẩm được chiết từ nhà máy nào (hữu ích khi hệ thống mở rộng nhiều nhà máy).
     factory_code: Mapped[Optional[str]] = mapped_column(Unicode(32), nullable=True)

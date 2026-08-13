@@ -6,7 +6,7 @@ phải text tùy ý. Deviation có workflow và liên kết tới batch/lot."""
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import UnicodeText, Float, Unicode
+from sqlalchemy import Date, UnicodeText, Float, Unicode
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ..common import DeviationState, ResultStatus, UTCDateTime, new_id, utcnow
@@ -68,3 +68,7 @@ class Deviation(Base):
     # người xem Deviation biết NGAY vì sao mở mà không phải đoán qua reason tự do (xem
     # frontend/app.js::VIEWS.quality — panel "Chỉ tiêu của phạm vi này").
     parameter: Mapped[Optional[str]] = mapped_column(Unicode(500), nullable=True)
+    # Hạn xử lý (nhập tay lúc mở, không tự tính theo severity) + ghi chú đóng bắt buộc khi
+    # transition sang closed — xem services/quality.py::transition_deviation nhánh CLOSED.
+    due_date: Mapped[Optional[datetime]] = mapped_column(Date, nullable=True)
+    close_note: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)

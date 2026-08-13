@@ -94,7 +94,9 @@ def test_multiple_formulas_allowed_per_product(client, admin_h):
     assert not f1["is_active"] and not f2["is_active"]
 
 
-def test_activate_deactivates_previous_active_and_logs_history(client, admin_h):
+def test_activate_does_not_deactivate_previous_active(client, admin_h):
+    """Nhiều công thức/dịch bia có thể cùng hiệu lực đồng thời — kích hoạt 1 công thức
+    KHÔNG còn tự ngừng hiệu lực công thức khác của cùng dịch bia (khác quy tắc cũ)."""
     product_id = _a_product(client, admin_h)
     f1 = _a_formula(client, admin_h, product_id)
     f2 = _a_formula(client, admin_h, product_id)
@@ -108,12 +110,12 @@ def test_activate_deactivates_previous_active_and_logs_history(client, admin_h):
     assert act2.json()["is_active"] is True
 
     f1_after = client.get(f"/api/formulas/{f1['formula_id']}", headers=admin_h).json()
-    assert f1_after["is_active"] is False, "f1 phải tự động ngừng hiệu lực khi f2 được kích hoạt"
+    assert f1_after["is_active"] is True, "f1 KHÔNG còn tự ngừng hiệu lực khi f2 được kích hoạt"
 
     log = client.get(f"/api/formulas/activation-log?product_id={product_id}", headers=admin_h).json()
     actions_by_formula = [(x["formula_id"], x["action"]) for x in log]
     assert (f1["formula_id"], "activate") in actions_by_formula
-    assert (f1["formula_id"], "deactivate") in actions_by_formula
+    assert (f1["formula_id"], "deactivate") not in actions_by_formula
     assert (f2["formula_id"], "activate") in actions_by_formula
     for entry in log:
         assert entry["changed_by"] == "admin"

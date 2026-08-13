@@ -14,7 +14,7 @@ from ..models.lines import ProductionLine
 from ..models.master import FinishedProduct, Material
 from ..models.materials import MaterialLot
 from ..models.quality import Deviation, QualityResult
-from ..models.quality_ext import QCParameter
+from ..models.quality_ext import CAPA, QCParameter
 from . import brew_order as brew_order_svc
 from . import derived
 from . import filter_order as filter_order_svc
@@ -261,6 +261,44 @@ def low_yield_filter_alerts(db: Session, days: int = 5, limit: int = 5) -> dict:
                        key=lambda it: it["v_l"])
     return {"items": low_items[:limit], "total": len(low_items),
             "date_from": report["date_from"], "date_to": report["date_to"], "low_l": report["low_l"]}
+
+
+def overdue_action_alerts(db: Session) -> dict:
+    """Cảnh báo Deviation/CAPA quá hạn xử lý cho Dashboard: gộp Deviation và CAPA đang mở
+    (state != closed) có `due_date` đã qua thành 1 danh sách, sắp theo số ngày quá hạn giảm dần
+    (nặng nhất lên đầu) — mirror qc_attention_alerts/low_yield_filter_alerts (widget cảnh báo
+    gọn trên Dashboard). Deviation/CAPA chưa đặt due_date hoặc chưa quá hạn không xuất hiện."""
+    today = _local_date(utcnow())
+    items = []
+
+    devs = db.execute(select(Deviation).where(
+        Deviation.due_date.isnot(None), Deviation.state != DeviationState.CLOSED.value
+    )).scalars().all()
+    for d in devs:
+        due = d.due_date.date() if hasattr(d.due_date, "date") else d.due_date
+        if due >= today:
+            continue
+        items.append({
+            "kind": "deviation", "code": d.deviation_code, "title": d.reason,
+            "severity": d.severity, "state": d.state, "due_date": d.due_date,
+            "days_overdue": (today - due).days, "opened_by": d.opened_by,
+        })
+
+    capas = db.execute(select(CAPA).where(
+        CAPA.due_date.isnot(None), CAPA.state != "closed"
+    )).scalars().all()
+    for c in capas:
+        due = c.due_date.date() if hasattr(c.due_date, "date") else c.due_date
+        if due >= today:
+            continue
+        items.append({
+            "kind": "capa", "code": c.capa_code, "title": c.title,
+            "severity": c.severity, "state": c.state, "due_date": c.due_date,
+            "days_overdue": (today - due).days, "opened_by": c.opened_by,
+        })
+
+    items.sort(key=lambda it: it["days_overdue"], reverse=True)
+    return {"items": items, "total": len(items)}
 
 
 def bottled_not_approved_report(db: Session) -> dict:

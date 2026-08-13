@@ -11,13 +11,15 @@ from ..audit import record_audit
 from ..common import new_id
 from ..database import get_db
 from ..errors import DomainError, NotFoundError, PermissionError_
-from ..models.master import BeerType, FinishedProduct, Material, MaterialAltGroup, MaterialGroup, Product, UnitTypeCatalog
+from ..models.master import (BeerType, FinishedProduct, FinishedProductGroup, FinishedProductMonthlyPlan,
+    Material, MaterialAltGroup, MaterialGroup, Product, UnitTypeCatalog)
 from ..models.materials import Supplier
 from ..models.warehouse import FactoryLocation
-from ..schemas import (BeerTypeIn, BeerTypeOut, FactoryLocationIn, FactoryLocationOut, FinishedProductIn,
-    FinishedProductOut, MaterialAltGroupIn, MaterialAltGroupOut, MaterialGroupIn, MaterialGroupOut,
-    MaterialIn, MaterialOut, MaterialQcGroupIn, OpsSettingIn, OpsSettingOut, ProductBrewSpecIn, ProductIn,
-    ProductOut, SupplierIn, SupplierOut, UnitTypeCatalogIn, UnitTypeCatalogOut)
+from ..schemas import (BeerTypeIn, BeerTypeOut, FactoryLocationIn, FactoryLocationOut,
+    FinishedProductGroupIn, FinishedProductGroupOut, FinishedProductIn, FinishedProductMonthlyPlanOut,
+    FinishedProductOut, MaterialAltGroupIn, MaterialAltGroupOut, MaterialGroupIn,
+    MaterialGroupOut, MaterialIn, MaterialOut, MaterialQcGroupIn, MonthlyPlanRowIn, OpsSettingIn, OpsSettingOut,
+    ProductBrewSpecIn, ProductIn, ProductOut, SupplierIn, SupplierOut, UnitTypeCatalogIn, UnitTypeCatalogOut)
 from ..security import User, get_current_user, require_perm
 from ..services import braumat_import as braumat_svc
 from ..services import master_data, ops_setting as ops_setting_svc
@@ -447,10 +449,118 @@ def update_finished_product(finished_product_id: str, payload: FinishedProductIn
     return fp
 
 
+def _fp_monthly_plan_out(fp: FinishedProduct, plan_rows: dict[int, FinishedProductMonthlyPlan]) -> dict:
+    months = [{"month": m,
+               "initial_qty": plan_rows[m].initial_qty if m in plan_rows else None,
+               "adjusted_qty": plan_rows[m].adjusted_qty if m in plan_rows else None,
+               "expected_production_qty": plan_rows[m].expected_production_qty if m in plan_rows else None}
+              for m in range(1, 13)]
+    return {"finished_product_id": fp.finished_product_id, "code": fp.code, "name": fp.name,
+            "category": fp.category, "months": months}
+
+
+@router.get("/finished-products/monthly-plan", response_model=list[FinishedProductMonthlyPlanOut])
+def list_monthly_plan(year: int, db: Session = Depends(get_db)):
+    products = db.execute(select(FinishedProduct).order_by(FinishedProduct.name)).scalars().all()
+    plan_rows = db.execute(select(FinishedProductMonthlyPlan)
+                           .where(FinishedProductMonthlyPlan.year == year)).scalars().all()
+    by_fp: dict[str, dict[int, FinishedProductMonthlyPlan]] = {}
+    for p in plan_rows:
+        by_fp.setdefault(p.finished_product_id, {})[p.month] = p
+    return [_fp_monthly_plan_out(fp, by_fp.get(fp.finished_product_id, {})) for fp in products]
+
+
+@router.put("/finished-products/{finished_product_id}/monthly-plan", response_model=FinishedProductMonthlyPlanOut)
+def update_monthly_plan(finished_product_id: str, payload: MonthlyPlanRowIn, db: Session = Depends(get_db),
+                        user: User = Depends(get_current_user)):
+    require_perm(user, "master.manage")
+    fp = db.get(FinishedProduct, finished_product_id)
+    if not fp:
+        raise NotFoundError("Sản phẩm không tồn tại.")
+    plan_rows: dict[int, FinishedProductMonthlyPlan] = {}
+    for cell in payload.cells:
+        if not (1 <= cell.month <= 12):
+            raise DomainError(f"Tháng không hợp lệ: {cell.month}")
+        row = db.execute(select(FinishedProductMonthlyPlan).where(
+            FinishedProductMonthlyPlan.finished_product_id == finished_product_id,
+            FinishedProductMonthlyPlan.year == payload.year,
+            FinishedProductMonthlyPlan.month == cell.month)).scalar_one_or_none()
+        if not row:
+            row = FinishedProductMonthlyPlan(finished_product_id=finished_product_id,
+                                             year=payload.year, month=cell.month)
+            db.add(row)
+        row.initial_qty = cell.initial_qty
+        row.adjusted_qty = cell.adjusted_qty
+        row.expected_production_qty = cell.expected_production_qty
+        plan_rows[cell.month] = row
+    record_audit(db, entity_type="finished_product_monthly_plan", entity_id=finished_product_id, action="update",
+                 actor=user, after=payload.model_dump())
+    db.commit()
+    return _fp_monthly_plan_out(fp, plan_rows)
+
+
 @router.delete("/finished-products/{finished_product_id}", status_code=204)
 def delete_finished_product(finished_product_id: str, db: Session = Depends(get_db),
                             user: User = Depends(get_current_user)):
     master_data.delete_finished_product(db, finished_product_id, user)
+
+
+def _fpg_out(g: FinishedProductGroup) -> dict:
+    return {"group_id": g.group_id, "name": g.name,
+            "product_ids": [p for p in (g.product_ids or "").split(",") if p],
+            "created_by": g.created_by, "created_at": g.created_at}
+
+
+@router.get("/finished-product-groups", response_model=list[FinishedProductGroupOut])
+def list_finished_product_groups(db: Session = Depends(get_db)):
+    rows = db.execute(select(FinishedProductGroup).order_by(FinishedProductGroup.name)).scalars().all()
+    return [_fpg_out(g) for g in rows]
+
+
+@router.post("/finished-product-groups", response_model=FinishedProductGroupOut, status_code=201)
+def create_finished_product_group(payload: FinishedProductGroupIn, db: Session = Depends(get_db),
+                                  user: User = Depends(get_current_user)):
+    require_perm(user, "master.manage")
+    if db.execute(select(FinishedProductGroup).where(FinishedProductGroup.name == payload.name)).scalar_one_or_none():
+        raise DomainError(f"Nhóm sản phẩm '{payload.name}' đã tồn tại.")
+    g = FinishedProductGroup(group_id=new_id(), name=payload.name,
+                             product_ids=",".join(payload.product_ids), created_by=user.username)
+    db.add(g)
+    record_audit(db, entity_type="finished_product_group", entity_id=g.group_id, action="create",
+                 actor=user, after={"name": g.name, "product_ids": g.product_ids})
+    db.commit()
+    db.refresh(g)
+    return _fpg_out(g)
+
+
+@router.put("/finished-product-groups/{group_id}", response_model=FinishedProductGroupOut)
+def update_finished_product_group(group_id: str, payload: FinishedProductGroupIn, db: Session = Depends(get_db),
+                                  user: User = Depends(get_current_user)):
+    require_perm(user, "master.manage")
+    g = db.get(FinishedProductGroup, group_id)
+    if not g:
+        raise NotFoundError("Nhóm sản phẩm không tồn tại.")
+    before = {"name": g.name, "product_ids": g.product_ids}
+    g.name = payload.name
+    g.product_ids = ",".join(payload.product_ids)
+    record_audit(db, entity_type="finished_product_group", entity_id=g.group_id, action="update",
+                 actor=user, before=before, after={"name": g.name, "product_ids": g.product_ids})
+    db.commit()
+    db.refresh(g)
+    return _fpg_out(g)
+
+
+@router.delete("/finished-product-groups/{group_id}", status_code=204)
+def delete_finished_product_group(group_id: str, db: Session = Depends(get_db),
+                                  user: User = Depends(get_current_user)):
+    require_perm(user, "master.manage")
+    g = db.get(FinishedProductGroup, group_id)
+    if not g:
+        raise NotFoundError("Nhóm sản phẩm không tồn tại.")
+    record_audit(db, entity_type="finished_product_group", entity_id=group_id, action="delete",
+                 actor=user, before={"name": g.name})
+    db.delete(g)
+    db.commit()
 
 
 # ---- Vật tư / nguyên liệu ----
@@ -543,4 +653,7 @@ def update_ops_settings(payload: OpsSettingIn, db: Session = Depends(get_db),
                                            payload.aging_caution_days, payload.aging_warning_days,
                                            payload.aging_critical_days, user, payload.factory_code,
                                            payload.filter_yield_low_hl, payload.filter_yield_high_hl,
-                                           payload.filter_line_yield_low_l, payload.filter_line_yield_high_l)
+                                           payload.filter_line_yield_low_l, payload.filter_line_yield_high_l,
+                                           payload.finished_goods_restock_days,
+                                           payload.fg_days_of_stock_critical_days,
+                                           payload.fg_days_in_stock_warning_days)

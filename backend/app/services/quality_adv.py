@@ -5,6 +5,7 @@ SPC dùng biểu đồ cá thể I-MR: sigma ước lượng = MR-bar / 1.128 (c
 fallback độ lệch chuẩn mẫu khi không đủ điểm. Cp/Cpk tính theo USL/LSL của QCParameter.
 """
 
+from pathlib import Path
 from statistics import mean, pstdev
 
 from sqlalchemy import select
@@ -12,18 +13,25 @@ from sqlalchemy.orm import Session
 
 from ..audit import record_audit
 from ..common import Role, new_id, utcnow
+from ..config import BASE_DIR
 from ..errors import DomainError, NotFoundError
 from ..models.batches import BatchExecution
 from ..models.quality import Deviation, QualityResult
-from ..models.quality_ext import CAPA, QCParameter, QCParameterGroupItem, Sample
+from ..models.quality_ext import CAPA, CapaAttachment, QCParameter, QCParameterGroupItem, Sample
 from ..security import User, require_perm, require_role
 
-# Workflow CAPA
+CAPA_UPLOAD_DIR = BASE_DIR / "uploads" / "capa"
+
+# Workflow CAPA — 2 bước duyệt tuần tự bắt buộc trước khi đóng: kcs_approval (đã qua
+# verification, chờ Trưởng phòng KCS duyệt) -> director_approval (đã qua KCS duyệt, chờ
+# Giám đốc/Phó GĐ Sản xuất - Kỹ thuật duyệt) -> closed (đã qua Giám đốc duyệt).
 CAPA_TRANSITIONS = {
     "open": {"investigation"},
     "investigation": {"action"},
     "action": {"verification"},
-    "verification": {"closed"},
+    "verification": {"kcs_approval"},
+    "kcs_approval": {"director_approval"},
+    "director_approval": {"closed"},
     "closed": set(),
 }
 
@@ -184,6 +192,7 @@ def open_capa(db: Session, payload: dict, user: User) -> CAPA:
     capa = CAPA(capa_id=new_id(),
                 capa_code=f"CAPA-{utcnow():%Y%m%d}-{new_id()[:5].upper()}",
                 deviation_id=payload.get("deviation_id"),
+                scope_type=payload.get("scope_type"), scope_id=payload.get("scope_id"),
                 title=payload["title"], capa_type=payload.get("capa_type", "corrective"),
                 severity=payload.get("severity", "minor"), state="open",
                 root_cause=payload.get("root_cause"), action_plan=payload.get("action_plan"),
@@ -204,19 +213,49 @@ def transition_capa(db: Session, capa_id: str, target: str, user: User, payload:
     if target not in CAPA_TRANSITIONS.get(capa.state, set()):
         raise DomainError(f"Không thể chuyển CAPA từ {capa.state} sang {target}.")
     payload = payload or {}
-    if target in ("verification", "closed"):
-        require_role(user, Role.QA, Role.SUPERVISOR)
     if payload.get("root_cause"):
         capa.root_cause = payload["root_cause"]
     if payload.get("action_plan"):
         capa.action_plan = payload["action_plan"]
     if payload.get("effectiveness"):
         capa.effectiveness = payload["effectiveness"]
-    if target == "closed":
+
+    if target == "kcs_approval":
+        # Verification xong -> chờ Trưởng phòng KCS duyệt. Do người làm verification thực
+        # hiện (không phải KCS), giữ role gate cũ (QA/SUPERVISOR) — bắt buộc đủ hiệu lực.
+        require_role(user, Role.QA, Role.SUPERVISOR)
+        missing = []
         if not (capa.root_cause and capa.action_plan):
-            raise DomainError("Phải có root cause + action plan trước khi đóng CAPA.")
+            missing.append("root cause + action plan")
+        if not capa.effectiveness:
+            missing.append("effectiveness")
+        if not payload.get("effectiveness_checked_at"):
+            missing.append("ngày kiểm tra hiệu lực")
+        if missing:
+            raise DomainError("Thiếu trước khi chuyển sang chờ duyệt: " + ", ".join(missing) + ".")
+        capa.effectiveness_checked_at = payload["effectiveness_checked_at"]
+    elif target == "director_approval":
+        # Trưởng phòng KCS duyệt — bắt buộc có nhận xét riêng (không chỉ bấm duyệt suông),
+        # cùng mức bắt buộc với close_note ở bước Giám đốc.
+        require_perm(user, "quality.capa_approve_kcs")
+        if not payload.get("kcs_approval_note"):
+            raise DomainError("Thiếu trước khi duyệt: nhận xét của Trưởng phòng KCS.")
+        capa.kcs_approval_note = payload["kcs_approval_note"]
+        capa.kcs_approved_by = user.username
+        capa.kcs_approved_at = utcnow()
+    elif target == "closed":
+        # Giám đốc/Phó GĐ Sản xuất - Kỹ thuật duyệt (= quyết định đóng CAPA).
+        require_perm(user, "quality.capa_approve_director")
+        if not payload.get("close_note"):
+            raise DomainError("Thiếu trước khi đóng CAPA: ghi chú đóng.")
+        if user.username == capa.opened_by and user.role != Role.ADMIN.value:
+            raise DomainError("Người đóng phải khác người mở CAPA.")
+        capa.close_note = payload["close_note"]
+        capa.director_approved_by = user.username
+        capa.director_approved_at = utcnow()
         capa.closed_by = user.username
         capa.closed_at = utcnow()
+
     before = {"state": capa.state}
     capa.state = target
     record_audit(db, entity_type="capa", entity_id=capa.capa_id, action=f"transition:{target}",
@@ -230,10 +269,66 @@ def list_capa(db: Session) -> list:
     rows = db.execute(select(CAPA).order_by(CAPA.opened_at.desc())).scalars().all()
     return [{"capa_code": c.capa_code, "title": c.title, "capa_type": c.capa_type,
              "severity": c.severity, "state": c.state, "deviation_id": c.deviation_id,
+             "scope_type": c.scope_type, "scope_id": c.scope_id,
              "root_cause": c.root_cause, "action_plan": c.action_plan,
-             "effectiveness": c.effectiveness, "owner": c.owner, "due_date": c.due_date,
+             "effectiveness": c.effectiveness, "effectiveness_checked_at": c.effectiveness_checked_at,
+             "close_note": c.close_note, "owner": c.owner, "due_date": c.due_date,
              "opened_by": c.opened_by, "closed_by": c.closed_by,
+             "kcs_approved_by": c.kcs_approved_by, "kcs_approved_at": c.kcs_approved_at,
+             "kcs_approval_note": c.kcs_approval_note,
+             "director_approved_by": c.director_approved_by, "director_approved_at": c.director_approved_at,
              "opened_at": c.opened_at, "closed_at": c.closed_at, "capa_id": c.capa_id} for c in rows]
+
+
+def add_capa_attachment(db: Session, capa_id: str, file_name: str, content: bytes,
+                        note: str, user: User) -> CapaAttachment:
+    capa = db.get(CAPA, capa_id)
+    if not capa:
+        raise NotFoundError("CAPA không tồn tại.")
+    attachment_id = new_id()
+    dir_path = CAPA_UPLOAD_DIR / capa_id
+    dir_path.mkdir(parents=True, exist_ok=True)
+    stored_name = f"{attachment_id}_{file_name}"
+    (dir_path / stored_name).write_bytes(content)
+    att = CapaAttachment(attachment_id=attachment_id, capa_id=capa_id, file_name=file_name,
+                         stored_path=str(Path("capa") / capa_id / stored_name),
+                         note=note, uploaded_by=user.username, uploaded_at=utcnow())
+    db.add(att)
+    record_audit(db, entity_type="capa", entity_id=capa_id, action="attach",
+                 actor=user, after={"file_name": file_name})
+    db.commit()
+    db.refresh(att)
+    return att
+
+
+def list_capa_attachments(db: Session, capa_id: str) -> list:
+    rows = db.execute(select(CapaAttachment).where(
+        CapaAttachment.capa_id == capa_id).order_by(CapaAttachment.uploaded_at.desc())).scalars().all()
+    return [{"attachment_id": a.attachment_id, "capa_id": a.capa_id, "file_name": a.file_name,
+             "note": a.note, "uploaded_by": a.uploaded_by, "uploaded_at": a.uploaded_at} for a in rows]
+
+
+def get_capa_attachment(db: Session, attachment_id: str) -> CapaAttachment:
+    att = db.get(CapaAttachment, attachment_id)
+    if not att:
+        raise NotFoundError("Tài liệu đính kèm không tồn tại.")
+    return att
+
+
+def delete_capa_attachment(db: Session, attachment_id: str, user: User) -> None:
+    """Chỉ người mở CAPA hoặc admin mới xóa được (mirror quy ước 'chỉ người liên quan/admin
+    mới xóa' đã dùng ở nơi khác trong hệ thống)."""
+    att = get_capa_attachment(db, attachment_id)
+    capa = db.get(CAPA, att.capa_id)
+    if capa and user.username != capa.opened_by and user.role != Role.ADMIN.value:
+        raise DomainError("Chỉ người mở CAPA hoặc admin mới xóa được tài liệu đính kèm.")
+    file_path = BASE_DIR / "uploads" / att.stored_path
+    if file_path.exists():
+        file_path.unlink()
+    record_audit(db, entity_type="capa", entity_id=att.capa_id, action="unattach",
+                 actor=user, before={"file_name": att.file_name})
+    db.delete(att)
+    db.commit()
 
 
 # ============================== COA ==============================

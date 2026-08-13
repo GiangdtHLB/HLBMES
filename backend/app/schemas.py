@@ -110,6 +110,9 @@ class OpsSettingIn(BaseModel):
     filter_yield_high_hl: float = 150.0
     filter_line_yield_low_l: float = 500.0
     filter_line_yield_high_l: float = 2000.0
+    finished_goods_restock_days: float = 7.0
+    fg_days_of_stock_critical_days: float = 3.0
+    fg_days_in_stock_warning_days: float = 30.0
     factory_code: Optional[str] = None
 
 
@@ -124,6 +127,9 @@ class OpsSettingOut(ORMModel):
     filter_yield_high_hl: float
     filter_line_yield_low_l: float
     filter_line_yield_high_l: float
+    finished_goods_restock_days: float
+    fg_days_of_stock_critical_days: float
+    fg_days_in_stock_warning_days: float
     factory_code: Optional[str] = None
     updated_by: Optional[str] = None
     updated_at: datetime
@@ -193,6 +199,46 @@ class FinishedProductOut(ORMModel):
     unit_volume_l: Optional[float] = None
     weight_primary_kg: Optional[float] = None
     weight_single_kg: Optional[float] = None
+
+
+class MonthlyPlanCellIn(BaseModel):
+    month: int  # 1-12
+    initial_qty: Optional[float] = None
+    adjusted_qty: Optional[float] = None
+    expected_production_qty: Optional[float] = None
+
+
+class MonthlyPlanCellOut(BaseModel):
+    month: int
+    initial_qty: Optional[float] = None
+    adjusted_qty: Optional[float] = None
+    expected_production_qty: Optional[float] = None
+
+
+class MonthlyPlanRowIn(BaseModel):
+    year: int
+    cells: list[MonthlyPlanCellIn]
+
+
+class FinishedProductMonthlyPlanOut(BaseModel):
+    finished_product_id: str
+    code: str
+    name: str
+    category: Optional[str] = None
+    months: list[MonthlyPlanCellOut]
+
+
+class FinishedProductGroupIn(BaseModel):
+    name: str
+    product_ids: list[str] = []
+
+
+class FinishedProductGroupOut(ORMModel):
+    group_id: str
+    name: str
+    product_ids: list[str]
+    created_by: Optional[str] = None
+    created_at: datetime
 
 
 class MaterialIn(BaseModel):
@@ -879,6 +925,7 @@ class DeviationIn(BaseModel):
     severity: str = "minor"
     reason: str
     parameter: Optional[str] = None
+    due_date: Optional[date] = None
 
 
 class DeviationOut(ORMModel):
@@ -896,18 +943,23 @@ class DeviationOut(ORMModel):
     opened_at: datetime
     closed_at: Optional[datetime] = None
     parameter: Optional[str] = None
+    due_date: Optional[date] = None
+    close_note: Optional[str] = None
 
 
 class DeviationTransitionIn(BaseModel):
     target: str
     investigation: Optional[str] = None
     disposition: Optional[str] = None
+    close_note: Optional[str] = None
 
 
 # ---- Quality hardcore: CAPA + LIMS ----
 class CapaIn(BaseModel):
     title: str
     deviation_id: Optional[str] = None
+    scope_type: Optional[str] = None
+    scope_id: Optional[str] = None
     capa_type: str = "corrective"     # corrective | preventive
     severity: str = "minor"
     root_cause: Optional[str] = None
@@ -921,6 +973,9 @@ class CapaTransitionIn(BaseModel):
     root_cause: Optional[str] = None
     action_plan: Optional[str] = None
     effectiveness: Optional[str] = None
+    effectiveness_checked_at: Optional[date] = None
+    kcs_approval_note: Optional[str] = None
+    close_note: Optional[str] = None
 
 
 class SampleIn(BaseModel):
@@ -1458,6 +1513,7 @@ class BrewOrderIn(BaseModel):
     order_code: str
     product_id: Optional[str] = None
     product_desc: Optional[str] = None
+    formula_id: Optional[str] = None
     planned_batch_count: int = 1
     planned_volume_hl: float = 0.0
     volume_tolerance_hl: float = 0.0
@@ -1476,6 +1532,7 @@ class BrewSubOrderIn(BaseModel):
     services/brew_order.py::_insert_children)."""
     product_id: Optional[str] = None
     product_desc: Optional[str] = None
+    formula_id: Optional[str] = None
     planned_batch_count: int = 1
     planned_volume_hl: float = 0.0
     volume_tolerance_hl: float = 0.0

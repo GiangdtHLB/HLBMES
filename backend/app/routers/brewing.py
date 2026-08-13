@@ -181,15 +181,19 @@ def list_brew_orders(db: Session = Depends(get_db)):
 
 
 @router.get("/orders/bom-preview")
-def preview_brew_order_bom(product_id: str = None, planned_batch_count: int = 1, planned_volume_hl: float = 0.0,
+def preview_brew_order_bom(formula_id: str = None, planned_batch_count: int = 1, planned_volume_hl: float = 0.0,
                            db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     """Xem trước bảng định mức NVL (tự nạp từ Công thức) + tồn kho hiện tại — TRƯỚC khi tạo
     lệnh nấu thật, để biết ngay có đủ NVL hay không (nút "Xem NVL" ở form Tạo Lệnh nấu). Cũng
     dùng làm gợi ý NVL/mẻ trong modal "+ NVL" khi lệnh nấu chưa có định mức riêng từng dòng
     (openBrewMaterialsModal) — người thao tác mẻ (batch.execute) không nhất thiết có quyền
-    order.create nên chấp nhận cả 2 quyền, không chỉ order.create."""
+    order.create nên chấp nhận cả 2 quyền, không chỉ order.create. Nhiều công thức/dịch bia có
+    thể cùng hiệu lực (xem services/formula.py) nên nhận thẳng formula_id đã chọn, không còn
+    tự suy ra công thức từ product_id."""
     require_any_perm(user, ["order.create", "batch.execute"])
-    return brew_order_svc.preview_bom_lines(db, product_id, planned_batch_count, planned_volume_hl)
+    if not formula_id:
+        raise DomainError("Chọn công thức trước khi xem định mức NVL.")
+    return brew_order_svc.preview_bom_lines(db, formula_id, planned_batch_count, planned_volume_hl)
 
 
 @router.post("/orders", status_code=201)

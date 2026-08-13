@@ -101,11 +101,21 @@ class CAPA(Base):
 
     capa_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
     capa_code: Mapped[str] = mapped_column(Unicode(64), unique=True, index=True)
-    deviation_id: Mapped[Optional[str]] = mapped_column(Unicode(64), nullable=True, index=True)
+    deviation_id: Mapped[Optional[str]] = mapped_column(
+        Unicode(64), ForeignKey("deviation.deviation_id"), nullable=True, index=True)
+    # Phạm vi CAPA (lô NVL/mẻ nấu/lô LM/mẻ lọc/mã chiết/mẻ SX) — CHỌN TRỰC TIẾP lúc mở CAPA,
+    # KHÔNG suy ra qua deviation_id (CAPA phòng ngừa/preventive thường không có Deviation liên
+    # kết nhưng vẫn cần biết đang nói về công đoạn/lô nào — cùng quy ước scope_type/scope_id
+    # với Deviation/QualityResult, xem services/quality.py). Để trống nếu CAPA không gắn 1
+    # công đoạn/lô cụ thể (vd CAPA hành chính).
+    scope_type: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    scope_id: Mapped[Optional[str]] = mapped_column(Unicode(64), nullable=True, index=True)
     title: Mapped[str] = mapped_column(Unicode(255))
     capa_type: Mapped[str] = mapped_column(Unicode(255), default="corrective")  # corrective | preventive
     severity: Mapped[str] = mapped_column(Unicode(255), default="minor")
-    # open → investigation → action → verification → closed
+    # open → investigation → action → verification → kcs_approval → director_approval → closed
+    # (2 giai đoạn duyệt cuối: kcs_approval = đã qua Trưởng phòng KCS, đang chờ Giám đốc SX-KT;
+    # director_approval = đã qua Giám đốc SX-KT duyệt, chờ set closed — xem services/quality_adv.py)
     state: Mapped[str] = mapped_column(Unicode(255), default="open")
     root_cause: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
     action_plan: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
@@ -116,6 +126,37 @@ class CAPA(Base):
     closed_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
     opened_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
     closed_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+    # Ngày kiểm tra hiệu lực (effectiveness check), tách biệt khỏi effectiveness (mô tả text) —
+    # cả 2 cùng bắt buộc trước khi đóng CAPA, xem services/quality_adv.py::transition_capa.
+    effectiveness_checked_at: Mapped[Optional[datetime]] = mapped_column(Date, nullable=True)
+    close_note: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)
+    # 2 bước duyệt tuần tự bắt buộc trước khi đóng CAPA — Trưởng phòng KCS rồi Giám đốc/Phó GĐ
+    # Sản xuất - Kỹ thuật (permission "quality.capa_approve_kcs"/"quality.capa_approve_director",
+    # xem security.py). kcs_approved_* set khi chuyển verification->director_approval;
+    # director_approved_* set khi chuyển director_approval->closed.
+    kcs_approved_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    kcs_approved_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+    director_approved_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    director_approved_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+    # Nhận xét/đánh giá của Trưởng phòng KCS khi duyệt (bắt buộc, giống close_note ở bước Giám
+    # đốc) — mỗi bước duyệt phải có ý kiến riêng, không chỉ set kcs_approved_by/at suông.
+    kcs_approval_note: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)
+
+
+class CapaAttachment(Base):
+    """Tài liệu đính kèm CAPA — lưu file thật trên đĩa (backend/uploads/capa/{capa_id}/...),
+    bảng này chỉ giữ metadata (giống quy ước on-prem Windows server của hệ thống, không lưu
+    blob vào DB)."""
+
+    __tablename__ = "capa_attachment"
+
+    attachment_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
+    capa_id: Mapped[str] = mapped_column(Unicode(64), ForeignKey("capa.capa_id"), index=True)
+    file_name: Mapped[str] = mapped_column(Unicode(255))
+    stored_path: Mapped[str] = mapped_column(Unicode(500))
+    note: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    uploaded_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    uploaded_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
 
 
 class Sample(Base):

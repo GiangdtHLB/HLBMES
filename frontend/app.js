@@ -4,6 +4,9 @@
 let TOKEN = localStorage.getItem("mes_token") || "";
 let CURRENT_USER = null;  // {username, full_name, job_title, role, views}
 let PENDING_QUALITY_SCOPE = null;  // {key: "scope_type:scope_id", kind: "hold"|"dev"} — set by Dashboard alert row click, consumed once by VIEWS.quality to preselect h_scope/d_scope
+let PENDING_CAPA_DEVIATION = null;  // deviation_id — set by "+ Tạo CAPA cho deviation này" trong devRow, consumed once by VIEWS.qclab để chọn sẵn ca_dev
+let PENDING_OPEN_CAPA_ID = null;  // capa_id — set khi bấm mã CAPA ở cột "CAPA liên kết" (Deviations), consumed once by VIEWS.qclab để tự mở modal chi tiết CAPA đó
+let PENDING_OPEN_DEVIATION_ID = null;  // deviation_id — set khi bấm mã Deviation ở cột "Deviation liên kết" (CAPA), consumed once by VIEWS.quality để cuộn/hiện đúng deviation đó
 
 async function api(path, opts = {}) {
   const headers = { "Content-Type": "application/json" };
@@ -28,9 +31,14 @@ const DELETE = (p) => api(p, { method: "DELETE" });
 async function POST_FILES(path, files) {
   const fd = new FormData();
   for (const f of files) fd.append("files", f);
+  return POST_FORM(path, fd);
+}
+// Gửi 1 FormData tự do (multipart) — dùng khi endpoint nhận field khác "files" (VD "file" +
+// "note" cho đính kèm CAPA) — KHÔNG set Content-Type tay để browser tự set boundary multipart.
+async function POST_FORM(path, formData) {
   const headers = {};
   if (TOKEN) headers["Authorization"] = "Bearer " + TOKEN;
-  const res = await fetch("/api" + path, { method: "POST", headers, body: fd });
+  const res = await fetch("/api" + path, { method: "POST", headers, body: formData });
   const text = await res.text();
   const data = text ? JSON.parse(text) : null;
   // Lỗi 422 validate của FastAPI trả detail dạng MẢNG object Pydantic ({loc,msg,type}), không
@@ -106,6 +114,21 @@ function toast(msg, kind = "ok") {
   setTimeout(() => t.remove(), 3800);
 }
 async function guard(fn) { try { await fn(); } catch (e) { toast(e.message, "err"); } }
+
+// Tải file từ endpoint yêu cầu Authorization header (thẻ <a href> thường không gửi được header
+// này) — fetch kèm token, đọc về Blob rồi bấm giả 1 link tạm để trình duyệt lưu file.
+async function downloadFile(path, filename) {
+  const headers = {};
+  if (TOKEN) headers["Authorization"] = "Bearer " + TOKEN;
+  const res = await fetch("/api" + path, { headers });
+  if (!res.ok) throw new Error("HTTP " + res.status);
+  const blob = await res.blob();
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
 
 // Chính sách mật khẩu mạnh (khớp backend security.validate_password_strength).
 // Trả null nếu hợp lệ, hoặc thông báo lỗi tiếng Việt nếu yếu.
@@ -455,12 +478,13 @@ function switchView(view) {
 VIEWS.dashboard = async function () {
   const safe = async (p) => { try { return await GET(p); } catch (e) { return null; } };
   const lowYieldDays = SUB.dashboard_low_yield_days || 5;
-  const [batches, audit, prodSummary, agingRows, expiryRows, agingOpsRaw, alerts, fermentsRaw, lowYield, bottledNotApproved] = await Promise.all([
+  const [batches, audit, prodSummary, agingRows, expiryRows, agingOpsRaw, alerts, fermentsRaw, lowYield, bottledNotApproved, overdueActions] = await Promise.all([
     GET("/batches"), GET("/audit?limit=10"), safe("/reports/dashboard-summary"),
     safe("/reports/inventory-aging"), safe("/warehouse/expiry?warn_days=14"), safe("/ops-settings"),
     safe("/reports/qc-attention-alerts"), safe("/brewing/ferments"),
     safe(`/reports/low-yield-filter-alerts?days=${lowYieldDays}&limit=5`),
     safe("/reports/bottled-not-approved"),
+    safe("/reports/overdue-action-alerts"),
   ]);
   const agingOps = agingOpsRaw || { aging_caution_days: 30, aging_warning_days: 60, aging_critical_days: 90 };
 
@@ -655,6 +679,23 @@ VIEWS.dashboard = async function () {
         </tr>`).join("")}</tbody></table></div>`
         : `<div class="muted">Không có mẻ chiết nào đang chờ duyệt.</div>`}
     </div>`;
+  // Deviation/CAPA quá hạn xử lý (services/dashboard.py::overdue_action_alerts) — gộp cả 2
+  // loại vì cùng ý nghĩa "còn mở, đã qua hạn", chỉ khác nơi xử lý tiếp (Deviation → tab Chất
+  // lượng, CAPA → tab QC Lab).
+  const overdueItems = (overdueActions && overdueActions.items) || [];
+  const overduePanel = `
+    <div class="panel" style="flex:1;min-width:280px;margin-bottom:0">
+      <h2>⏰ Deviation/CAPA quá hạn ${overdueItems.length ? `<span class="muted">(${overdueItems.length})</span>` : ""}</h2>
+      ${overdueItems.length ? `<div class="tablewrap" style="max-height:240px;overflow:auto"><table style="font-size:12px">
+        <thead><tr><th>Mã</th><th>Tiêu đề</th><th>Mức</th><th>Quá hạn</th></tr></thead>
+        <tbody>${overdueItems.map(it => `<tr style="cursor:pointer" data-goto="${it.kind === "capa" ? "qclab" : "quality"}" tabindex="0" role="button">
+          <td><code class="k">${esc(it.code)}</code></td>
+          <td class="muted">${esc(it.title || "—")}</td>
+          <td>${badge(it.severity)}</td>
+          <td><b style="color:var(--red)">${it.days_overdue} ngày</b></td>
+        </tr>`).join("")}</tbody></table></div>`
+        : `<div class="muted">Không có Deviation/CAPA nào quá hạn xử lý.</div>`}
+    </div>`;
   const alertsHtml = alerts ? `
     <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:stretch;margin-bottom:16px">
       ${miniAlertPanel("Cảnh báo QC", "🚨", qcFailItems, "Không có chỉ tiêu QC nào đang fail.",
@@ -665,6 +706,7 @@ VIEWS.dashboard = async function () {
         { label: "Số lượng mở", render: it => `<span class="badge on_hold">${it.deviation_count}</span>` }, "dev")}
       ${lowYieldPanel}
       ${bnaPanel}
+      ${overduePanel}
     </div>` : "";
   // Tank đang lên men theo số ngày lên men so ngày quy định — 2 dạng xem (thanh liên tục + lưới ô
   // màu), nhóm theo loại dịch bia rồi sắp theo số ngày quá hạn giảm dần trong từng nhóm. Chỉ lấy
@@ -1272,17 +1314,18 @@ VIEWS.orders = async function () {
       $("lo_cancel_wrap").innerHTML = editing ? `<button class="btn sm sec" id="lo_canceledit" style="align-self:flex-end">Hủy sửa</button>` : "";
       if (editing) $("lo_canceledit").onclick = () => render("orders");
     }
-    const newLnChild = () => ({ productId: "", batchCount: 1, plannedVol: "", tolerance: 0,
+    const newLnChild = () => ({ productId: "", formulaId: "", batchCount: 1, plannedVol: "", tolerance: 0,
       bxMin: "", bxMax: "", tankLm: "", batchFrom: "", batchTo: "" });
     let lnChildren = [newLnChild()];
 
     function fetchLnBomPreview(ci) {
       const c = lnChildren[ci];
       if (!c.productId) throw new Error(`Lệnh nấu nhỏ #${ci + 1}: Chọn Dịch bia để xem định mức NVL theo Công thức.`);
+      if (!c.formulaId) throw new Error(`Lệnh nấu nhỏ #${ci + 1}: Chọn công thức trước khi xem định mức NVL.`);
       const volHl = parseFloat(c.plannedVol) || 0;
       if (!volHl) throw new Error(`Lệnh nấu nhỏ #${ci + 1}: Nhập Sản lượng nấu kế hoạch (hl) trước.`);
       const batches = parseInt(c.batchCount, 10) || 1;
-      const qs = `product_id=${encodeURIComponent(c.productId)}&planned_batch_count=${batches}&planned_volume_hl=${volHl}`;
+      const qs = `formula_id=${encodeURIComponent(c.formulaId)}&planned_batch_count=${batches}&planned_volume_hl=${volHl}`;
       return GET(`/brewing/orders/bom-preview?${qs}`);
     }
 
@@ -1311,21 +1354,31 @@ VIEWS.orders = async function () {
         if (!box) return;
         const productId = lnChildren[ci].productId;
         if (!productId) { box.innerHTML = ""; return; }
-        box.innerHTML = `<div class="muted" style="margin-top:6px">Đang tải công thức đang dùng...</div>`;
+        box.innerHTML = `<div class="muted" style="margin-top:6px">Đang tải công thức...</div>`;
         try {
           const formulas = await GET(`/formulas?product_id=${encodeURIComponent(productId)}`);
           if (lnChildren[ci].productId !== productId) return; // đã đổi Dịch bia khác trong lúc chờ — bỏ kết quả cũ
-          const active = (formulas || []).find(f => f.is_active);
-          box.innerHTML = !active
-            ? `<div class="muted" style="margin-top:6px">Dịch bia này chưa có Công thức đang dùng.</div>`
-            : `<div class="muted" style="margin-top:6px">Công thức đang dùng: <code class="k">${esc(active.code)}</code>
-                · Quy mô chuẩn: ${active.base_qty} ${esc(active.base_uom)}${active.note ? ` · ${esc(active.note)}` : ""}</div>`;
+          const activeList = (formulas || []).filter(f => f.is_active);
+          if (!lnChildren[ci].formulaId || !activeList.some(f => f.formula_id === lnChildren[ci].formulaId)) {
+            lnChildren[ci].formulaId = activeList.length === 1 ? activeList[0].formula_id : "";
+          }
+          box.innerHTML = !activeList.length
+            ? `<div class="muted" style="margin-top:6px">Dịch bia này chưa có công thức hiệu lực.</div>`
+            : `<div class="field" style="margin-top:6px"><label>Chọn công thức (bắt buộc)</label>
+                <select class="lnc_formula" data-ci="${ci}">
+                  <option value="">(chọn công thức)</option>
+                  ${activeList.map(f => `<option value="${esc(f.formula_id)}" ${f.formula_id === lnChildren[ci].formulaId ? "selected" : ""}>
+                    ${esc(f.code)} · ${f.base_qty} ${esc(f.base_uom)}${f.note ? ` · ${esc(f.note)}` : ""}</option>`).join("")}
+                </select></div>`;
+          const fsel = box.querySelector(".lnc_formula");
+          if (fsel) fsel.onchange = () => { lnChildren[ci].formulaId = fsel.value; };
         } catch (e) { box.innerHTML = ""; }
       }
 
       document.querySelectorAll(".lnc_wort").forEach(sel => sel.onchange = () => {
         const ci = parseInt(sel.dataset.ci, 10);
         lnChildren[ci].productId = sel.value;
+        lnChildren[ci].formulaId = "";
         renderLnFormInfo(ci);
       });
       lnChildren.forEach((c, ci) => { if (c.productId) renderLnFormInfo(ci); });
@@ -1368,8 +1421,10 @@ VIEWS.orders = async function () {
       const children = lnChildren.map((c, ci) => {
         const volHl = parseFloat(c.plannedVol) || 0;
         if (!(volHl > 0)) throw new Error(`Lệnh nấu nhỏ #${ci + 1}: Nhập Sản lượng nấu kế hoạch (hl) (phải lớn hơn 0).`);
+        if (c.productId && !c.formulaId) throw new Error(`Lệnh nấu nhỏ #${ci + 1}: Chọn công thức đang dùng cho lệnh nhỏ này.`);
         return {
           product_id: c.productId || null,
+          formula_id: c.formulaId || null,
           planned_batch_count: parseInt(c.batchCount, 10) || 1,
           planned_volume_hl: volHl,
           volume_tolerance_hl: parseFloat(c.tolerance) || 0,
@@ -1418,7 +1473,7 @@ VIEWS.orders = async function () {
       $("lo_end").value = m.end_date ? m.end_date.slice(0, 16) : "";
       $("lo_safety").value = m.safety_note || "";
       lnChildren = m.children.map(c => ({
-        productId: c.product_id || "", batchCount: c.planned_batch_count || 1,
+        productId: c.product_id || "", formulaId: c.formula_id || "", batchCount: c.planned_batch_count || 1,
         plannedVol: c.planned_volume_hl || "", tolerance: c.volume_tolerance_hl || 0,
         bxMin: c.bx_min ?? "", bxMax: c.bx_max ?? "", tankLm: c.tank_lm || "",
         batchFrom: c.batch_range_from ?? "", batchTo: c.batch_range_to ?? "",
@@ -2484,7 +2539,7 @@ async function openEBR(batchId) {
 
 // ================= QUALITY =================
 VIEWS.quality = async function () {
-  const [results, devs, batches, lots, materials, qcParams, brewBatches, fermentsData, filtersData, bottlesData, holdHistory, pendingStageQc] = await Promise.all([
+  const [results, devs, batches, lots, materials, qcParams, brewBatches, fermentsData, filtersData, bottlesData, holdHistory, pendingStageQc, capas] = await Promise.all([
     GET("/quality/results"), GET("/quality/deviations"), GET("/batches"), GET("/lots"), GET("/materials"),
     GET("/qc/parameters?active_only=false").catch(() => []),
     GET("/brewing/brew-batches").catch(() => []),
@@ -2492,7 +2547,17 @@ VIEWS.quality = async function () {
     GET("/brewing/filters").catch(() => []),
     GET("/brewing/bottles").catch(() => []),
     GET("/audit?action=hold,release&limit=100").catch(() => []),
-    GET("/quality/pending-stage-qc").catch(() => [])]);
+    GET("/quality/pending-stage-qc").catch(() => []),
+    GET("/qc/capa").catch(() => [])]);
+  // Deviation major/critical bắt buộc có CAPA đã đóng trước khi đóng được (xem
+  // services/quality.py::_has_closed_capa) — tính sẵn theo deviation_id để devRow() cảnh báo
+  // sớm phía UI, chặn thật vẫn ở backend.
+  const closedCapaDevIds = new Set(capas.filter(c => c.state === "closed" && c.deviation_id).map(c => c.deviation_id));
+  const anyCapaDevIds = new Set(capas.filter(c => c.deviation_id).map(c => c.deviation_id));
+  // Map deviation_id -> [CAPA...] để render cột "CAPA liên kết" bấm được (điều hướng 2 chiều
+  // Deviation<->CAPA — xem PENDING_OPEN_CAPA_ID/PENDING_OPEN_DEVIATION_ID).
+  const capaByDevId = {};
+  capas.filter(c => c.deviation_id).forEach(c => (capaByDevId[c.deviation_id] ??= []).push(c));
   const ferments = fermentsData.items || [];
   // Hold/Release + Mở deviation tách riêng theo công đoạn sản xuất (Nấu/Lên men/Lọc/Chiết),
   // ngoài Mẻ SX (ISA-88)/Lô NVL đã có — mỗi <optgroup> 1 công đoạn, nhãn kèm trạng thái hiện
@@ -2501,6 +2566,21 @@ VIEWS.quality = async function () {
   // Deviation đã "closed" (đã qua CAPA/approval) coi như xong việc — ẩn khỏi danh sách, chỉ
   // hiện những cái còn đang xử lý để không làm rối bảng theo thời gian.
   const openDevs = devs.filter(d => d.state !== "closed");
+  // Điều hướng từ CAPA -> Deviation (bấm mã Deviation trong cột "Deviation liên kết" ở CAPA) —
+  // tiêu thụ 1 lần đúng mẫu PENDING_CAPA_DEVIATION (chiều ngược lại). Deviation đã đóng bị ẩn
+  // khỏi openDevs nên không cuộn tới được — hiện thông báo thay vào đó.
+  let devNavNotice = "";
+  let devNavHighlightId = null;
+  if (PENDING_OPEN_DEVIATION_ID) {
+    const targetId = PENDING_OPEN_DEVIATION_ID;
+    PENDING_OPEN_DEVIATION_ID = null;
+    if (openDevs.some(d => d.deviation_id === targetId)) {
+      devNavHighlightId = targetId;
+    } else {
+      const closedDev = devs.find(d => d.deviation_id === targetId);
+      devNavNotice = `<div class="muted" style="margin-bottom:6px">Deviation ${esc(closedDev?.deviation_code || "")} đã đóng — không hiện trong danh sách này.</div>`;
+    }
+  }
   const batchById = Object.fromEntries(batches.map(b => [b.batch_id, b]));
   const lotById = Object.fromEntries(lots.map(l => [l.lot_id, l]));
   const matById = Object.fromEntries(materials.map(m => [m.material_id, m]));
@@ -2637,8 +2717,10 @@ VIEWS.quality = async function () {
             <select id="d_scope">${hdScopeOpts}</select></div>
           <div class="field"><label>Mức</label><select id="d_sev"><option>minor</option><option>major</option><option>critical</option></select></div>
           <div class="field"><label>Lý do</label><input id="d_reason" /></div>
+          <div class="field"><label>Hạn xử lý</label><input id="d_due" type="date"/></div>
           <button class="btn sec" id="d_open">Mở</button>
         </div>
+        <div class="muted" style="margin-bottom:8px">Deviation mức <b>major/critical</b> bắt buộc phải có CAPA liên kết đã đóng (root cause + action plan + hiệu lực + ngày kiểm tra) trước khi đóng được.</div>
         <div id="d_scope_qc" class="muted" style="margin-bottom:8px">Đang tải chỉ tiêu của phạm vi này...</div>
         <h3>Lịch sử Hold/Release <span class="muted">(${holdHistory.length})</span></h3>
         <input class="searchbox" data-tbl="t_holdrelease" placeholder="Tìm theo phạm vi, hành động, lý do, người thực hiện..."/>
@@ -2667,10 +2749,11 @@ VIEWS.quality = async function () {
         <td><button type="button" class="btn sm sec" data-qcdetail="${gi}">Xem chi tiết</button></td></tr>`).join("") ||
         '<tr><td colspan=6 class="muted">Chưa có kết quả QC nào.</td></tr>'}</tbody></table></div></div>
     <div class="panel"><h2>Deviations <span class="muted">(${openDevs.length} đang mở)</span></h2>
+      ${devNavNotice}
       <input class="searchbox" data-tbl="t_deviations" placeholder="Tìm theo mã, lý do..."/>
-      <table id="t_deviations"><thead><tr><th>Mã</th><th>Mức</th><th>Lý do</th><th>Chỉ tiêu không đạt</th><th>Trạng thái</th><th>Hành động</th></tr></thead>
-      <tbody>${openDevs.map(d => devRow(d, scopeKeyToFailParams[`${d.scope_type}:${d.scope_id}`])).join("") ||
-        '<tr><td colspan=6 class="muted">Không còn deviation nào đang mở.</td></tr>'}</tbody></table></div>`;
+      <table id="t_deviations"><thead><tr><th>Mã</th><th>Mức</th><th>Lý do</th><th>Chỉ tiêu không đạt</th><th>CAPA liên kết</th><th>Trạng thái</th><th>Hành động</th></tr></thead>
+      <tbody>${openDevs.map(d => devRow(d, scopeKeyToFailParams[`${d.scope_type}:${d.scope_id}`], closedCapaDevIds.has(d.deviation_id), anyCapaDevIds.has(d.deviation_id), capaByDevId[d.deviation_id] || [])).join("") ||
+        '<tr><td colspan=7 class="muted">Không còn deviation nào đang mở.</td></tr>'}</tbody></table></div>`;
   const parseScope = (v) => { const [t, i] = v.split(":"); return { scope_type: t, scope_id: i }; };
   // Lấy chỉ tiêu ĐÃ khai báo cho 1 phạm vi (mẻ/lô) để hiện trước khi Hold/Release/Mở deviation —
   // người bấm cần thấy NGAY vì sao (chỉ tiêu nào fail/đạt) thay vì chỉ gõ lý do tự do. Quy ước
@@ -2762,7 +2845,7 @@ VIEWS.quality = async function () {
   wireSelectSearch("d_scope", "d_scope_q");
   $("d_open").onclick = () => guard(async () => {
     await POST("/quality/deviations", { ...parseScope($("d_scope").value), severity: $("d_sev").value,
-      reason: $("d_reason").value, parameter: checkedParams("d_scope_qc") });
+      reason: $("d_reason").value, parameter: checkedParams("d_scope_qc"), due_date: $("d_due").value || null });
     toast("Đã mở deviation"); render("quality");
   });
   document.querySelectorAll("[data-dt]").forEach(b => b.onclick = () => guard(async () => {
@@ -2776,6 +2859,22 @@ VIEWS.quality = async function () {
     await POST(`/quality/deviations/${b.dataset.did}/transition`, payload);
     toast("Deviation → " + b.dataset.dt); render("quality");
   }));
+  document.querySelectorAll("[data-devcapa]").forEach(b => b.onclick = () => {
+    PENDING_CAPA_DEVIATION = b.dataset.devcapa;
+    gotoView("qclab");
+  });
+  document.querySelectorAll("[data-opencapa]").forEach(b => b.onclick = () => {
+    PENDING_OPEN_CAPA_ID = b.dataset.opencapa;
+    gotoView("qclab");
+  });
+  if (devNavHighlightId) {
+    const row = document.querySelector(`tr[data-devid="${devNavHighlightId}"]`);
+    if (row) {
+      row.scrollIntoView({ behavior: "smooth", block: "center" });
+      row.style.outline = "2px solid var(--accent)";
+      setTimeout(() => { row.style.outline = ""; }, 2000);
+    }
+  }
   document.querySelectorAll("[data-qclot]").forEach(b => b.onclick = () => openLotQcModal(b.dataset.qclot, { editable: true }));
   document.querySelectorAll("[data-qcdetail]").forEach(b => b.onclick = () => {
     const g = qcGroups[parseInt(b.dataset.qcdetail, 10)];
@@ -2873,13 +2972,18 @@ function groupQcResultsByScope(rows) {
 const DEV_TEXT_FIELD = {
   investigation: { field: "investigation", label: "Nội dung điều tra" },
   disposition: { field: "disposition", label: "Hướng xử lý" },
+  closed: { field: "close_note", label: "Ghi chú đóng" },
 };
 // failParams: mảng tên chỉ tiêu ĐANG fail (live, tính từ kết quả QC gần đây nhất của đúng
 // phạm vi deviation này — xem scopeKeyToFailParams trong VIEWS.quality), không phải chỉ tiêu
 // người mở TỰ CHỌN lúc "Mở" (d.parameter) — hiện cả 2 để phân biệt rõ.
-function devRow(d, failParams) {
+// hasClosedCapa/hasAnyCapa: tính sẵn ở VIEWS.quality từ GET /qc/capa — dùng để cảnh báo sớm
+// phía UI khi severity major/critical còn thiếu CAPA đã đóng (chặn thật ở backend,
+// services/quality.py::transition_deviation nhánh CLOSED).
+function devRow(d, failParams, hasClosedCapa, hasAnyCapa, capaList) {
   const next = { open: ["triage"], triage: ["investigation"], investigation: ["disposition"],
     disposition: ["approval"], approval: ["closed"], closed: [] }[d.state] || [];
+  const needsCapa = ["major", "critical"].includes(d.severity) && !hasClosedCapa;
   const actions = next.map(n => {
     const t = DEV_TEXT_FIELD[n];
     if (!t) return `<button class="btn sm sec" data-dt="${n}" data-did="${d.deviation_id}">→ ${n}</button>`;
@@ -2889,12 +2993,18 @@ function devRow(d, failParams) {
     </span>`;
   }).join(" ");
   const notes = [d.investigation ? `<div class="muted">Điều tra: ${esc(d.investigation)}</div>` : "",
-    d.disposition ? `<div class="muted">Xử lý: ${esc(d.disposition)}</div>` : ""].join("");
+    d.disposition ? `<div class="muted">Xử lý: ${esc(d.disposition)}</div>` : "",
+    d.due_date ? `<div class="muted">Hạn xử lý: ${esc(d.due_date)}</div>` : "",
+    needsCapa ? `<div class="muted" style="color:var(--red)">⚠ Chưa có CAPA đóng — bắt buộc trước khi đóng deviation này.
+      <button class="btn sm sec" data-devcapa="${d.deviation_id}">+ Tạo CAPA</button></div>` : ""].join("");
   const failCell = failParams && failParams.length
     ? `<span class="badge fail">${esc([...new Set(failParams)].join(", "))}</span>`
     : d.parameter ? `<span class="muted">${esc(d.parameter)} (đã chọn khi mở)</span>` : `<span class="muted">—</span>`;
-  return `<tr><td><code class="k">${esc(d.deviation_code)}</code></td><td>${badge(d.severity)}</td>
-    <td>${esc(d.reason)}${notes}</td><td>${failCell}</td><td>${badge(d.state)}</td><td style="white-space:nowrap">${actions || "—"}</td></tr>`;
+  const capaCell = (capaList && capaList.length)
+    ? capaList.map(c => `<button class="btn sm sec" data-opencapa="${esc(c.capa_id)}">${esc(c.capa_code)}</button>`).join(" ")
+    : `<span class="muted">—</span>`;
+  return `<tr data-devid="${esc(d.deviation_id)}"><td><code class="k">${esc(d.deviation_code)}</code></td><td>${badge(d.severity)}</td>
+    <td>${esc(d.reason)}${notes}</td><td>${failCell}</td><td>${capaCell}</td><td>${badge(d.state)}</td><td style="white-space:nowrap">${actions || "—"}</td></tr>`;
 }
 
 // ================= TRACEABILITY =================
@@ -3372,6 +3482,11 @@ function subnav(view, sections, current) {
 }
 function wireSubnav(view) {
   document.querySelectorAll(`[data-sub^="${view}:"]`).forEach(b => b.onclick = () => {
+    // Đổi trạng thái active ngay khi bấm (trước khi dữ liệu tải xong) để nút phản hồi tức thì,
+    // tránh cảm giác "đứng hình" trong lúc chờ fetch — render(view) phía dưới sẽ vẽ lại đúng
+    // nội dung khi xong, active class ở đây chỉ là phản hồi tạm thời.
+    document.querySelectorAll(`[data-sub^="${view}:"]`).forEach(x => x.classList.remove("active"));
+    b.classList.add("active");
     SUB[view] = b.dataset.sub.split(":")[1]; render(view);
   });
 }
@@ -9961,6 +10076,14 @@ VIEWS.master = async function () {
         <div class="field"><label>Ngưỡng làm rỗng CCT (hl)</label><input id="ops_cct_tol" type="number" step="any" value="${opsSettings.empty_cct_tolerance_hl}" ${canManage ? "" : "disabled"}/></div>
         <div class="field"><label>Ngưỡng làm rỗng BBT (hl)</label><input id="ops_bbt_tol" type="number" step="any" value="${opsSettings.empty_bbt_tolerance_hl}" ${canManage ? "" : "disabled"}/></div>
       </div>
+      <div class="muted" style="margin:10px 0 6px">Ngưỡng số ngày tồn dự kiến (= tồn thực tế / lượng xuất TB 7 ngày) để đề xuất "Đóng bổ
+        sung" trên báo cáo "NXT kho thành phẩm" (Kho TP) — áp dụng chung mọi SKU. Cũng dùng làm ngưỡng màu Vàng/Xanh cho cột
+        "Số ngày tồn dự kiến"; dưới ngưỡng Đỏ thì hiện Đỏ.</div>
+      <div class="row">
+        <div class="field"><label>Ngưỡng đóng bổ sung / Đỏ-Vàng (ngày)</label><input id="ops_restock_days" type="number" step="any" value="${opsSettings.finished_goods_restock_days}" ${canManage ? "" : "disabled"}/></div>
+        <div class="field"><label>Ngưỡng Đỏ — Số ngày tồn dự kiến (ngày)</label><input id="ops_fg_critical_days" type="number" step="any" value="${opsSettings.fg_days_of_stock_critical_days}" ${canManage ? "" : "disabled"}/></div>
+        <div class="field"><label>Ngưỡng Vàng — Số ngày lưu kho (ngày)</label><input id="ops_fg_instock_warning_days" type="number" step="any" value="${opsSettings.fg_days_in_stock_warning_days}" ${canManage ? "" : "disabled"}/></div>
+      </div>
       <div class="muted" style="margin:10px 0 6px">Ngưỡng sản lượng (hl) để phân loại 1 mẻ lọc đã kết thúc là Thấp/Bình thường/Cao trên báo cáo
         "Sản lượng lọc" (tab Báo cáo) — mẻ Thấp sẽ được cảnh báo trên báo cáo đó.</div>
       <div class="row">
@@ -10031,6 +10154,9 @@ VIEWS.master = async function () {
         filter_yield_high_hl: parseFloat($("ops_yield_high").value) || 0,
         filter_line_yield_low_l: parseFloat($("ops_line_yield_low").value) || 0,
         filter_line_yield_high_l: parseFloat($("ops_line_yield_high").value) || 0,
+        finished_goods_restock_days: parseFloat($("ops_restock_days").value) || 7,
+        fg_days_of_stock_critical_days: parseFloat($("ops_fg_critical_days").value) || 3,
+        fg_days_in_stock_warning_days: parseFloat($("ops_fg_instock_warning_days").value) || 30,
         factory_code: $("ops_factory_code").value.trim() || null,
       });
       toast("Đã lưu cài đặt vận hành"); render("master");

@@ -34,16 +34,6 @@ from . import braumat_import as braumat_svc
 from . import warehouse as warehouse_svc
 
 
-def _effective_bom(db: Session, product_id: str):
-    """Công thức đang hiệu lực của dịch bia — tối đa 1 dòng vì services/formula.py::
-    activate_formula đảm bảo chỉ 1 formula/product được is_active=True tại 1 thời điểm
-    (khác bug cũ ở RecipeVersion.state='effective' không có ràng buộc loại trừ)."""
-    if not product_id:
-        return None
-    return db.execute(select(Formula).where(
-        Formula.product_id == product_id, Formula.is_active == true())).scalars().first()
-
-
 def _resolve_group_members(db: Session, group_code: str | None) -> list:
     """Tra danh sách material_id thành viên của 1 Nhóm vật tư thay thế (VD "Malt Úc" = rời +
     bao) — trả rỗng nếu nhóm không tồn tại/đã ngừng hoạt động. KHÔNG lưu cứng danh sách này
@@ -64,17 +54,18 @@ def _stock_snapshot(db: Session) -> tuple[dict, dict]:
     return company, workshop
 
 
-def build_lines_from_bom(db: Session, product_id: str, planned_batch_count: int, planned_volume_hl: float) -> list:
-    """Nạp Định mức từ Công thức hiệu lực của dịch bia — công thức khai báo định mức CHO
-    ĐÚNG 1 MẺ, nên Nhu cầu 1 mẻ = nguyên văn số lượng trong công thức (KHÔNG scale theo
-    planned_volume_hl — tham số này chỉ giữ lại cho tương thích chữ ký hàm/router, không
+def build_lines_from_bom(db: Session, formula_id: str, planned_batch_count: int, planned_volume_hl: float) -> list:
+    """Nạp Định mức từ 1 Công thức CỤ THỂ (formula_id do người lập Lệnh nấu tự chọn — nhiều
+    công thức/dịch bia có thể cùng hiệu lực, xem services/formula.py) — công thức khai báo
+    định mức CHO ĐÚNG 1 MẺ, nên Nhu cầu 1 mẻ = nguyên văn số lượng trong công thức (KHÔNG scale
+    theo planned_volume_hl — tham số này chỉ giữ lại cho tương thích chữ ký hàm/router, không
     dùng trong phép tính), Nhu cầu Tổng mẻ = Nhu cầu 1 mẻ x Số mẻ kế hoạch.
 
     Dòng khai theo Nhóm vật tư thay thế (alt_group_code, VD "Malt Úc") không có material_id
     cụ thể — material_name = tên nhóm, kèm member_material_ids để _annotate_stock cộng dồn
     tồn kho qua mọi mã thành viên và để thủ kho được gợi ý đúng mọi mã lúc ghi NVL thực tế
     (xem _resolve_group_members, frontend openBrewMaterialsModal)."""
-    formula = _effective_bom(db, product_id)
+    formula = db.get(Formula, formula_id) if formula_id else None
     if not formula:
         return []
     materials_by_code = {m.code: m for m in db.execute(select(Material)).scalars().all()}
@@ -212,11 +203,11 @@ def _annotate_stock(lines: list, company_stock: dict, workshop_stock: dict, mate
     return out
 
 
-def preview_bom_lines(db: Session, product_id: str, planned_batch_count: int, planned_volume_hl: float) -> list:
-    """Xem trước bảng định mức NVL tự nạp từ Công thức (BOM) + tồn kho hiện tại, TRƯỚC khi
-    tạo lệnh nấu thật — để người lập biết ngay có đủ NVL hay không mà không cần tạo lệnh
-    xong rồi mới xem (xem routers/brewing.py::preview_brew_order_bom)."""
-    lines = build_lines_from_bom(db, product_id, planned_batch_count, planned_volume_hl)
+def preview_bom_lines(db: Session, formula_id: str, planned_batch_count: int, planned_volume_hl: float) -> list:
+    """Xem trước bảng định mức NVL tự nạp từ 1 Công thức (BOM) cụ thể + tồn kho hiện tại,
+    TRƯỚC khi tạo lệnh nấu thật — để người lập biết ngay có đủ NVL hay không mà không cần tạo
+    lệnh xong rồi mới xem (xem routers/brewing.py::preview_brew_order_bom)."""
+    lines = build_lines_from_bom(db, formula_id, planned_batch_count, planned_volume_hl)
     company_stock, workshop_stock = _stock_snapshot(db)
     return _annotate_stock(lines, company_stock, workshop_stock, _materials_by_id(db))
 
@@ -252,6 +243,23 @@ def _validate_volume_plan(planned_volume_hl, tolerance_hl) -> None:
         raise DomainError("Sai số cho phép không được âm.")
 
 
+def _validate_formula_selection(db: Session, product_id: str | None, formula_id: str | None) -> None:
+    """Nhiều công thức/dịch bia có thể cùng hiệu lực (xem services/formula.py) — người lập
+    Lệnh nấu BẮT BUỘC tự chọn đúng 1 formula_id cho mỗi lệnh nhỏ có product_id, không còn tự
+    suy ra "công thức hiệu lực duy nhất" như trước."""
+    if not product_id:
+        return
+    if not formula_id:
+        raise DomainError("Chọn công thức đang dùng cho lệnh nấu nhỏ này.")
+    formula = db.get(Formula, formula_id)
+    if not formula:
+        raise DomainError("Công thức đã chọn không tồn tại.")
+    if formula.product_id != product_id:
+        raise DomainError(f"Công thức '{formula.code}' không thuộc Dịch bia đã chọn.")
+    if not formula.is_active:
+        raise DomainError(f"Công thức '{formula.code}' không còn hiệu lực.")
+
+
 def _insert_sub_order(db: Session, master_order_id, seq: int, order_code: str, order_year: int, payload: dict, user) -> BrewOrder:
     """Tạo 1 dòng BrewOrder ("lệnh nấu nhỏ") + định mức NVL — KHÔNG validate (caller đã
     validate), KHÔNG commit (caller tự quyết định điểm commit). Dùng chung bởi create_order
@@ -261,8 +269,11 @@ def _insert_sub_order(db: Session, master_order_id, seq: int, order_code: str, o
     lines_in = payload.pop("lines", None) or []
     auto_from_bom = payload.pop("auto_from_bom", True)
 
+    if auto_from_bom and not lines_in:
+        _validate_formula_selection(db, payload.get("product_id"), payload.get("formula_id"))
+
     lines = lines_in if lines_in else (
-        build_lines_from_bom(db, payload.get("product_id"), payload.get("planned_batch_count"),
+        build_lines_from_bom(db, payload.get("formula_id"), payload.get("planned_batch_count"),
                              payload.get("planned_volume_hl"))
         if auto_from_bom and payload.get("product_id") else []
     )
@@ -330,9 +341,11 @@ def update_order(db: Session, brew_order_id: str, payload: dict, user) -> BrewOr
                     BrewOrder.order_year == order.order_year)).first():
         raise DomainError(f"Số lệnh '{new_code}' đã tồn tại trong năm {order.order_year}.")
     _validate_volume_plan(payload.get("planned_volume_hl"), payload.get("volume_tolerance_hl"))
+    if auto_from_bom and not lines_in:
+        _validate_formula_selection(db, payload.get("product_id"), payload.get("formula_id"))
 
     lines = lines_in if lines_in else (
-        build_lines_from_bom(db, payload.get("product_id"), payload.get("planned_batch_count"),
+        build_lines_from_bom(db, payload.get("formula_id"), payload.get("planned_batch_count"),
                              payload.get("planned_volume_hl"))
         if auto_from_bom and payload.get("product_id") else []
     )
@@ -468,7 +481,7 @@ def list_orders(db: Session) -> list:
             "master_order_id": o.master_order_id, "master_order_code": master.order_code if master else None,
             "seq": o.seq,
             "product_id": o.product_id, "product_code": prod.code if prod else None,
-            "product_desc": o.product_desc,
+            "product_desc": o.product_desc, "formula_id": o.formula_id,
             "planned_batch_count": o.planned_batch_count,
             "tank_lm": o.tank_lm, "batch_range_from": o.batch_range_from, "batch_range_to": o.batch_range_to,
             "actual_tank_lm": actual_tank, "actual_batch_range": actual_batch_range,
@@ -523,6 +536,7 @@ def get_order(db: Session, brew_order_id: str) -> dict:
         "seq": order.seq,
         "product_id": order.product_id, "product_code": prod.code if prod else None,
         "product_name": prod.name if prod else None, "product_desc": order.product_desc,
+        "formula_id": order.formula_id,
         "planned_batch_count": order.planned_batch_count,
         "bx_min": order.bx_min, "bx_max": order.bx_max,
         "tank_lm": order.tank_lm, "batch_range_from": order.batch_range_from,
@@ -548,7 +562,7 @@ def _child_summary(db: Session, order: BrewOrder, products: dict) -> dict:
     return {
         "brew_order_id": order.brew_order_id, "seq": order.seq,
         "product_id": order.product_id, "product_code": prod.code if prod else None,
-        "product_desc": order.product_desc,
+        "product_desc": order.product_desc, "formula_id": order.formula_id,
         "planned_batch_count": order.planned_batch_count,
         "bx_min": order.bx_min, "bx_max": order.bx_max,
         "tank_lm": order.tank_lm, "batch_range_from": order.batch_range_from, "batch_range_to": order.batch_range_to,

@@ -16,7 +16,9 @@ def get_settings(db: Session) -> OpsSetting:
         s = OpsSetting(setting_id=new_id(), empty_cct_tolerance_hl=2.0, empty_bbt_tolerance_hl=2.0,
                        aging_caution_days=30.0, aging_warning_days=60.0, aging_critical_days=90.0,
                        filter_yield_low_hl=50.0, filter_yield_high_hl=150.0,
-                       filter_line_yield_low_l=500.0, filter_line_yield_high_l=2000.0)
+                       filter_line_yield_low_l=500.0, filter_line_yield_high_l=2000.0,
+                       finished_goods_restock_days=7.0, fg_days_of_stock_critical_days=3.0,
+                       fg_days_in_stock_warning_days=30.0)
         db.add(s)
         db.commit()
         db.refresh(s)
@@ -27,7 +29,10 @@ def update_settings(db: Session, empty_cct_tolerance_hl: float, empty_bbt_tolera
                     aging_caution_days: float, aging_warning_days: float, aging_critical_days: float,
                     user: User, factory_code: str = None,
                     filter_yield_low_hl: float = 50.0, filter_yield_high_hl: float = 150.0,
-                    filter_line_yield_low_l: float = 500.0, filter_line_yield_high_l: float = 2000.0) -> OpsSetting:
+                    filter_line_yield_low_l: float = 500.0, filter_line_yield_high_l: float = 2000.0,
+                    finished_goods_restock_days: float = 7.0,
+                    fg_days_of_stock_critical_days: float = 3.0,
+                    fg_days_in_stock_warning_days: float = 30.0) -> OpsSetting:
     s = get_settings(db)
     s.empty_cct_tolerance_hl = empty_cct_tolerance_hl
     s.empty_bbt_tolerance_hl = empty_bbt_tolerance_hl
@@ -38,6 +43,9 @@ def update_settings(db: Session, empty_cct_tolerance_hl: float, empty_bbt_tolera
     s.filter_yield_high_hl = filter_yield_high_hl
     s.filter_line_yield_low_l = filter_line_yield_low_l
     s.filter_line_yield_high_l = filter_line_yield_high_l
+    s.finished_goods_restock_days = finished_goods_restock_days
+    s.fg_days_of_stock_critical_days = fg_days_of_stock_critical_days
+    s.fg_days_in_stock_warning_days = fg_days_in_stock_warning_days
     s.factory_code = factory_code
     s.updated_by = user.username
     s.updated_at = utcnow()
