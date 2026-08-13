@@ -1,10 +1,11 @@
 """Công thức nguyên vật liệu theo dịch bia (xem models/formula.py cho bối cảnh thiết kế).
 
-Quy tắc cốt lõi: CHỈ ĐÚNG 1 formula/product được is_active=True tại 1 thời điểm — đảm bảo
-ở đây (activate_formula), KHÔNG dựa vào DB constraint. services/brew_order.py::_effective_bom
-tin tưởng bất biến này để chọn công thức hiệu lực mà không cần ORDER BY."""
+Nhiều công thức/dịch bia có thể cùng is_active=True — kích hoạt 1 công thức KHÔNG còn tự
+ngừng hiệu lực công thức khác của cùng dịch bia (khác quy tắc cũ trước đây). Người lập Lệnh
+nấu tự chọn dùng công thức nào (formula_id) cho mỗi lệnh nhỏ — xem
+services/brew_order.py::build_lines_from_bom."""
 
-from sqlalchemy import select, true
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..audit import record_audit
@@ -129,20 +130,11 @@ def activate_formula(db: Session, formula_id: str, user: User) -> Formula:
     if f.is_active:
         raise DomainError("Công thức này đang hiệu lực rồi.")
     now = utcnow()
-    prev = db.execute(select(Formula).where(
-        Formula.product_id == f.product_id, Formula.is_active == true(), Formula.formula_id != formula_id
-    )).scalars().first()
-    if prev:
-        prev.is_active = False
-        db.add(FormulaActivationLog(formula_id=prev.formula_id, product_id=prev.product_id, action="deactivate",
-                                     note=f"Tự động ngừng hiệu lực (do {f.code} được kích hoạt)",
-                                     changed_by=user.username, changed_at=now))
     f.is_active = True
     db.add(FormulaActivationLog(formula_id=f.formula_id, product_id=f.product_id, action="activate",
-                                 note=(f"Kích hoạt (thay thế {prev.code})" if prev else "Kích hoạt lần đầu"),
-                                 changed_by=user.username, changed_at=now))
+                                 note="Kích hoạt", changed_by=user.username, changed_at=now))
     record_audit(db, entity_type="formula", entity_id=f.formula_id, action="activate", actor=user,
-                 before={"prev_active_formula": prev.code if prev else None}, after={"code": f.code})
+                 after={"code": f.code})
     db.commit()
     return f
 

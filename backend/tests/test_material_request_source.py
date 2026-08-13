@@ -162,7 +162,7 @@ def test_preview_source_materials_brew_order_surfaces_group_line_instead_of_drop
     assert client.post(f"/api/formulas/{formula['formula_id']}/activate", headers=admin_h).status_code == 200
 
     order = client.post("/api/brewing/orders", headers=admin_h, json={
-        "order_code": "LN-SRCGRP01", "product_id": product_id,
+        "order_code": "LN-SRCGRP01", "product_id": product_id, "formula_id": formula["formula_id"],
         "planned_batch_count": 1, "planned_volume_hl": 100, "volume_tolerance_hl": 0,
         "auto_from_bom": True, "lines": [],
     })

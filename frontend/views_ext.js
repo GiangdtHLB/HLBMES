@@ -524,8 +524,53 @@
   // ======================================================================
   VIEWS.qclab = async function () {
     const root = $("view-qclab");
-    const [params, capas, samples, batches] = await Promise.all([
-      GET("/qc/parameters"), GET("/qc/capa"), GET("/qc/samples"), GET("/batches")]);
+    const [params, capas, samples, batches, devs, lots, brewBatches, fermentsData, filtersData, bottlesData] = await Promise.all([
+      GET("/qc/parameters"), GET("/qc/capa"), GET("/qc/samples"), GET("/batches"),
+      GET("/quality/deviations").catch(() => []), GET("/lots").catch(() => []),
+      GET("/brewing/brew-batches").catch(() => []),
+      GET("/brewing/ferments").catch(() => ({ items: [] })),
+      GET("/brewing/filters").catch(() => []),
+      GET("/brewing/bottles").catch(() => [])]);
+    const devById = Object.fromEntries(devs.map(d => [d.deviation_id, d]));
+    const openDevOpts = devs.filter(d => d.state !== "closed")
+      .map(d => `<option value="${esc(d.deviation_id)}" data-scope="${esc(d.scope_type)}:${esc(d.scope_id)}">${esc(d.deviation_code)} — ${badge(d.severity)}${esc(d.reason)}</option>`).join("");
+    // Phạm vi CAPA (lô NVL/mẻ nấu/lô LM/mẻ lọc/mã chiết/mẻ SX) — CHỌN TRỰC TIẾP lúc mở CAPA,
+    // không phụ thuộc Deviation liên kết (mirror cơ chế "Phạm vi (theo công đoạn)" ở
+    // VIEWS.quality, nhưng không cần optgroup FAIL/OK — chỉ cần liệt kê để chọn).
+    const ferments = fermentsData.items || [];
+    const batchById = Object.fromEntries(batches.map(b => [b.batch_id, b]));
+    const lotById = Object.fromEntries(lots.map(l => [l.lot_id, l]));
+    const fermentById = Object.fromEntries(ferments.map(f => [f.ferment_id, f]));
+    const filterById = Object.fromEntries(filtersData.map(f => [f.filter_id, f]));
+    const bottleById = Object.fromEntries(bottlesData.map(b => [b.bottle_id, b]));
+    const brewBatchByKey = {};
+    brewBatches.forEach(r => {
+      const info = { batch_code: r.batch_code, brew_id: r.brew_id, brew_code: r.brew_code };
+      brewBatchByKey[r.batch_id] = info;
+      brewBatchByKey[r.batch_code] = info;
+    });
+    const capaScopeLabel = (scopeType, scopeId) => {
+      if (!scopeType || !scopeId) return null;
+      if (scopeType === "batch") return `Mẻ SX ${batchById[scopeId] ? esc(batchById[scopeId].batch_code) : scopeId}`;
+      if (scopeType === "lot") return `Lô NVL ${lotById[scopeId] ? esc(lotById[scopeId].lot_code) : scopeId}`;
+      if (scopeType === "brew_batch") { const b = brewBatchByKey[scopeId];
+        return b ? `Mẻ nấu ${esc(b.batch_code)} (mã nấu ${esc(b.brew_code || "?")})` : `Mẻ nấu ${scopeId}`; }
+      if (scopeType === "ferment") return `Lô LM ${fermentById[scopeId] ? esc(fermentById[scopeId].lm_code) : scopeId}`;
+      if (scopeType === "filter") return `Mẻ lọc ${filterById[scopeId] ? esc(filterById[scopeId].filter_code) : scopeId}`;
+      if (scopeType === "bottle") return `Mã chiết ${bottleById[scopeId] ? esc(bottleById[scopeId].bottle_code) : scopeId}`;
+      return `${esc(scopeType)} ${scopeId}`;
+    };
+    const capaScopeStages = [
+      { tag: "Mẻ SX", items: batches, keyFn: b => `batch:${b.batch_id}`, optFn: b => `mẻ ${esc(b.batch_code)}` },
+      { tag: "Nấu", items: brewBatches, keyFn: b => `brew_batch:${b.batch_id}`,
+        optFn: b => `mẻ ${esc(b.batch_code)} (mã nấu ${esc(b.brew_code || "?")})` },
+      { tag: "Lên men", items: ferments, keyFn: f => `ferment:${f.ferment_id}`, optFn: f => `lô LM ${esc(f.lm_code)}` },
+      { tag: "Lọc", items: filtersData, keyFn: f => `filter:${f.filter_id}`, optFn: f => `mẻ lọc ${esc(f.filter_code)}` },
+      { tag: "Chiết", items: bottlesData, keyFn: b => `bottle:${b.bottle_id}`, optFn: b => `mã chiết ${esc(b.bottle_code)}` },
+      { tag: "NVL", items: lots, keyFn: l => `lot:${l.lot_id}`, optFn: l => `lô ${esc(l.lot_code)}` },
+    ];
+    const capaScopeOpts = `<option value="">— Không chọn —</option>` + capaScopeStages.flatMap(({ tag, items, keyFn, optFn }) =>
+      items.map(item => `<option value="${keyFn(item)}">[${tag}] ${optFn(item)}</option>`)).join("");
     root.innerHTML = `
       ${panel("📈 SPC — Biểu đồ kiểm soát", `
         <div class="row"><div class="field"><label>Chỉ tiêu</label>
@@ -535,12 +580,24 @@
         <div class="row">
           <div class="field"><label>Tiêu đề</label><input id="ca_title" style="width:280px"/></div>
           <div class="field"><label>Loại</label><select id="ca_type"><option value="corrective">Khắc phục</option><option value="preventive">Phòng ngừa</option></select></div>
+          <div class="field"><label>Liên kết Deviation</label><select id="ca_dev"><option value="">— Không liên kết —</option>${openDevOpts}</select></div>
+          <div class="field"><label>Hạn xử lý</label><input id="ca_due" type="date"/></div>
+        </div>
+        <div class="row">
+          <div class="field" style="flex:1"><label>Phạm vi (lô/mẻ/công đoạn liên quan)</label>
+            <input id="ca_scope_q" placeholder="Tìm nhanh (gõ mã lô/mẻ)..." style="margin-bottom:2px"/>
+            <select id="ca_scope">${capaScopeOpts}</select></div>
           <div class="field" style="align-self:flex-end"><button class="btn" id="ca_add">+ Mở CAPA</button></div>
         </div>
         <input class="searchbox" data-tbl="t_capa" placeholder="Tìm theo mã, tiêu đề, loại, trạng thái, phụ trách..."/>
-        <div class="tablewrap" style="margin-top:8px"><table id="t_capa"><thead><tr><th>Mã</th><th>Tiêu đề</th><th>Loại</th><th>Trạng thái</th><th>Phụ trách</th><th></th></tr></thead>
+        <div class="tablewrap" style="margin-top:8px"><table id="t_capa"><thead><tr><th>Mã</th><th>Tiêu đề</th><th>Phạm vi</th><th>Loại</th><th>Deviation liên kết</th><th>Hạn xử lý</th><th>Trạng thái</th><th>Phụ trách</th><th></th></tr></thead>
         <tbody>${capas.map(c => `<tr><td><code class="k">${esc(c.capa_code)}</code></td><td>${esc(c.title)}</td>
-          <td>${esc(c.capa_type)}</td><td>${badge(c.state === "closed" ? "available" : "planned")}${esc(c.state)}</td>
+          <td class="muted">${capaScopeLabel(c.scope_type, c.scope_id) || "—"}</td>
+          <td>${esc(c.capa_type)}</td><td>${c.deviation_id && devById[c.deviation_id]
+            ? `<button class="btn sm sec" data-opendev="${esc(c.deviation_id)}">${esc(devById[c.deviation_id].deviation_code)}</button>`
+            : `<span class="muted">—</span>`}</td>
+          <td class="muted">${c.due_date ? esc(c.due_date) : "—"}</td>
+          <td>${badge(["kcs_approval", "director_approval"].includes(c.state) ? "due" : c.state === "closed" ? "available" : "planned")}${esc(c.state)}</td>
           <td>${esc(c.owner || "—")}</td><td><button class="btn sm sec" data-capa="${esc(c.capa_id)}">Chi tiết</button></td></tr>`).join("")}</tbody></table></div>`)}
       ${panel("📄 COA — Phiếu phân tích (Certificate of Analysis)", `
         <div class="row"><div class="field"><label>Mẻ</label><select id="co_batch">${opt(batches, b => b.batch_id, b => b.batch_code)}</select></div>
@@ -573,26 +630,158 @@
     // Mặc định chọn chỉ tiêu có dữ liệu SPC để demo trực quan.
     if ([...$("sp_param").options].some(o => o.value === "Độ đường (°P)")) $("sp_param").value = "Độ đường (°P)";
     wireSearch(); wirePaginate("t_capa", 10); wirePaginate("t_samples", 10);
+    wireSelectSearch("ca_scope", "ca_scope_q");
+    // Chọn Deviation liên kết -> tự đồng bộ Phạm vi theo đúng phạm vi của Deviation đó (người
+    // dùng vẫn sửa lại được sau nếu muốn) — tránh phải chọn lại phạm vi 2 lần cho cùng 1 việc.
+    $("ca_dev").onchange = () => {
+      const opt = $("ca_dev").selectedOptions[0];
+      const scopeKey = opt && opt.dataset.scope;
+      if (scopeKey && scopeKey !== "undefined:undefined" && [...$("ca_scope").options].some(o => o.value === scopeKey)) {
+        $("ca_scope").value = scopeKey;
+      }
+    };
+    if (PENDING_CAPA_DEVIATION) {
+      if ([...$("ca_dev").options].some(o => o.value === PENDING_CAPA_DEVIATION)) { $("ca_dev").value = PENDING_CAPA_DEVIATION; $("ca_dev").onchange(); }
+      PENDING_CAPA_DEVIATION = null;
+      $("ca_dev").closest(".panel")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
     $("ca_add").onclick = () => guard(async () => {
-      await POST("/qc/capa", { title: $("ca_title").value, capa_type: $("ca_type").value });
+      const [scopeType, scopeId] = ($("ca_scope").value || "").split(":");
+      await POST("/qc/capa", { title: $("ca_title").value, capa_type: $("ca_type").value,
+        deviation_id: $("ca_dev").value || null, due_date: $("ca_due").value || null,
+        scope_type: scopeType || null, scope_id: scopeId || null });
       toast("Đã mở CAPA"); render("qclab");
     });
-    document.querySelectorAll("[data-capa]").forEach(b => b.onclick = () => {
-      const c = capas.find(x => x.capa_id === b.dataset.capa);
-      const nexts = { open: "investigation", investigation: "action", action: "verification", verification: "closed" };
-      const nx = nexts[c.state];
+    // Thứ tự đầy đủ 7 giai đoạn CAPA (khớp CAPA_TRANSITIONS backend, services/quality_adv.py) —
+    // dùng để tính giai đoạn đã qua/hiện tại/chưa tới khi vẽ modal chi tiết dạng stepper.
+    const CAPA_PHASES = ["open", "investigation", "action", "verification", "kcs_approval", "director_approval", "closed"];
+    const CAPA_NEXT = { open: "investigation", investigation: "action", action: "verification",
+                        verification: "kcs_approval", kcs_approval: "director_approval", director_approval: "closed" };
+    const CAPA_PHASE_LABEL = { open: "Mở CAPA", investigation: "Điều tra nguyên nhân gốc",
+      action: "Kế hoạch hành động", verification: "Xác nhận hiệu lực",
+      kcs_approval: "Chờ duyệt — Trưởng phòng KCS", director_approval: "Chờ duyệt — Giám đốc/Phó GĐ SX-KT",
+      closed: "Đã đóng" };
+
+    // Tách thành hàm named để tái dùng cho PENDING_OPEN_CAPA_ID (điều hướng từ Deviations ->
+    // CAPA, bấm mã CAPA ở cột "CAPA liên kết") — không chỉ gọi từ click trực tiếp trên bảng.
+    function openCapaDetailModal(c) {
+      const curIdx = CAPA_PHASES.indexOf(c.state);
+      const nx = CAPA_NEXT[c.state];
+      const phaseHtml = CAPA_PHASES.map((phase, i) => {
+        if (phase === "closed" && i > curIdx) return "";  // "closed" chỉ hiện khi đã đóng, không phải 1 giai đoạn "chưa tới" riêng
+        const title = `<b>${i + 1}. ${esc(CAPA_PHASE_LABEL[phase])}</b>`;
+        if (i < curIdx) {
+          // Đã qua — tóm tắt read-only.
+          let summary = "";
+          if (phase === "open") summary = `Đã mở — ${esc(c.opened_by || "—")} · ${fmt(c.opened_at)}`;
+          else if (phase === "investigation") summary = `Nguyên nhân gốc: ${esc(c.root_cause || "—")}`;
+          else if (phase === "action") summary = `Kế hoạch hành động: ${esc(c.action_plan || "—")}`;
+          else if (phase === "verification") summary = `Hiệu lực: ${esc(c.effectiveness || "—")} · Ngày kiểm tra: ${esc(c.effectiveness_checked_at || "—")}`;
+          else if (phase === "kcs_approval") summary = c.kcs_approved_by
+            ? `✓ Trưởng phòng KCS đã duyệt — ${esc(c.kcs_approved_by)} · ${fmt(c.kcs_approved_at)}${c.kcs_approval_note ? `<br>Nhận xét: ${esc(c.kcs_approval_note)}` : ""}`
+            : `Đã qua bước này — không có dữ liệu duyệt (CAPA đóng trước khi có bước duyệt KCS).`;
+          else if (phase === "director_approval") summary = c.director_approved_by
+            ? `✓ Giám đốc/Phó GĐ SX-KT đã duyệt — ${esc(c.director_approved_by)} · ${fmt(c.director_approved_at)}`
+            : `Đã qua bước này — không có dữ liệu duyệt (CAPA đóng trước khi có bước duyệt Giám đốc).`;
+          return `<div class="panel" style="margin-top:6px;padding:8px 12px;border:1px solid var(--border)">${title}<div class="muted" style="margin-top:2px">${summary}</div></div>`;
+        }
+        if (i === curIdx) {
+          if (phase === "closed") return `<div class="panel" style="margin-top:6px;padding:8px 12px;border:1px solid var(--border)">${title}<div class="muted" style="margin-top:2px">Ghi chú đóng: ${esc(c.close_note || "—")}</div></div>`;
+          let fieldsHtml = "";
+          if (phase === "investigation") fieldsHtml = `<div class="field" style="margin-top:6px"><label>Nguyên nhân gốc</label><input id="cd_rc" value="${esc(c.root_cause || "")}"/></div>`;
+          else if (phase === "action") fieldsHtml = `<div class="field" style="margin-top:6px"><label>Kế hoạch hành động</label><input id="cd_ap" value="${esc(c.action_plan || "")}"/></div>`;
+          else if (phase === "verification") fieldsHtml = `<div class="field" style="margin-top:6px"><label>Hiệu lực (verification)</label><input id="cd_ef" value="${esc(c.effectiveness || "")}"/></div>
+              <div class="field" style="margin-top:6px"><label>Ngày kiểm tra hiệu lực</label><input id="cd_eff_date" type="date" value="${esc(c.effectiveness_checked_at || "")}"/></div>`;
+          else if (phase === "kcs_approval") fieldsHtml = `<div class="field" style="margin-top:6px"><label>Nhận xét của Trưởng phòng KCS <span style="color:var(--red)">*</span></label><input id="cd_kcs_note" placeholder="Bắt buộc — đánh giá của Trưởng phòng KCS khi duyệt"/></div>`;
+          else if (phase === "director_approval") fieldsHtml = `<div class="field" style="margin-top:6px"><label>Ghi chú đóng <span style="color:var(--red)">*</span></label><input id="cd_close" placeholder="Bắt buộc — bằng chứng đóng CAPA"/></div>
+              <div class="muted" style="margin-top:4px">Người đóng phải khác người mở (${esc(c.opened_by || "—")}), trừ admin.</div>`;
+          const btnLabel = phase === "director_approval" ? "→ Duyệt & Đóng CAPA (Giám đốc/Phó GĐ SX-KT)"
+            : phase === "kcs_approval" ? "→ Duyệt (Trưởng phòng KCS)"
+            : `Chuyển sang: ${nx}`;
+          return `<div class="panel" style="margin-top:6px;padding:8px 12px;border:1px solid var(--accent)">${title}${fieldsHtml}
+              <button class="btn" id="cd_go" style="margin-top:10px">${esc(btnLabel)}</button></div>`;
+        }
+        // Chưa tới — xám, không input.
+        return `<div class="panel muted" style="margin-top:6px;padding:8px 12px;border:1px dashed var(--border);opacity:.6">${title}</div>`;
+      }).join("");
+
       modal(`<h3>${esc(c.capa_code)} — ${esc(c.title)}</h3>
-        <div>Trạng thái: ${badge("planned")}${esc(c.state)}</div>
-        <div class="field" style="margin-top:8px"><label>Nguyên nhân gốc</label><input id="cd_rc" value="${esc(c.root_cause || "")}"/></div>
-        <div class="field" style="margin-top:8px"><label>Kế hoạch hành động</label><input id="cd_ap" value="${esc(c.action_plan || "")}"/></div>
-        <div class="field" style="margin-top:8px"><label>Hiệu lực (verification)</label><input id="cd_ef" value="${esc(c.effectiveness || "")}"/></div>
-        ${nx ? `<button class="btn" id="cd_go" style="margin-top:12px">Chuyển sang: ${nx}</button>` : '<div class="muted" style="margin-top:8px">Đã đóng.</div>'}`);
+        <div>Trạng thái hiện tại: ${badge(["kcs_approval", "director_approval"].includes(c.state) ? "due" : c.state === "closed" ? "available" : "planned")}${esc(c.state)}</div>
+        ${phaseHtml}
+        <div id="cd_attach_box" style="margin-top:14px"><h4 style="margin:0 0 6px">📎 Tài liệu đính kèm</h4><div class="muted">Đang tải…</div></div>`, null, true);
+
       if (nx) $("cd_go").onclick = () => guard(async () => {
-        await POST(`/qc/capa/${c.capa_id}/transition`, { target: nx, root_cause: $("cd_rc").value,
-          action_plan: $("cd_ap").value, effectiveness: $("cd_ef").value });
+        const payload = { target: nx };
+        if ($("cd_rc")) payload.root_cause = $("cd_rc").value;
+        if ($("cd_ap")) payload.action_plan = $("cd_ap").value;
+        if ($("cd_ef")) payload.effectiveness = $("cd_ef").value;
+        if ($("cd_eff_date")) payload.effectiveness_checked_at = $("cd_eff_date").value || null;
+        if ($("cd_kcs_note")) {
+          const note = $("cd_kcs_note").value.trim();
+          if (!note) throw new Error("Nhập nhận xét của Trưởng phòng KCS trước khi duyệt.");
+          payload.kcs_approval_note = note;
+        }
+        if ($("cd_close")) {
+          const note = $("cd_close").value.trim();
+          if (!note) throw new Error("Nhập ghi chú đóng trước khi đóng CAPA.");
+          payload.close_note = note;
+        }
+        await POST(`/qc/capa/${c.capa_id}/transition`, payload);
         closeModal(); toast("Đã cập nhật CAPA"); render("qclab");
       });
+
+      async function refreshAttachments() {
+        const box = $("cd_attach_box");
+        if (!box) return;
+        const atts = await GET(`/qc/capa/${c.capa_id}/attachments`).catch(() => []);
+        const canDelete = CURRENT_USER && (CURRENT_USER.username === c.opened_by || CURRENT_USER.role === "admin");
+        box.innerHTML = `<h4 style="margin:0 0 6px">📎 Tài liệu đính kèm</h4>
+          <div class="tablewrap"><table><thead><tr><th>Tên file</th><th>Ghi chú</th><th>Người tải lên</th><th>Lúc</th><th></th></tr></thead>
+          <tbody>${atts.map(a => `<tr>
+            <td>${esc(a.file_name)}</td><td class="muted">${esc(a.note || "—")}</td>
+            <td class="muted">${esc(a.uploaded_by || "—")}</td><td class="muted">${fmt(a.uploaded_at)}</td>
+            <td style="white-space:nowrap">
+              <button class="btn sm sec" data-dlatt="${esc(a.attachment_id)}" data-fname="${esc(a.file_name)}">Tải xuống</button>
+              ${canDelete ? `<button class="btn sm sec" data-rmatt="${esc(a.attachment_id)}">Xóa</button>` : ""}
+            </td></tr>`).join("") || `<tr><td colspan=5 class="muted">Chưa có tài liệu nào.</td></tr>`}</tbody></table></div>
+          <div class="row" style="margin-top:8px">
+            <input type="file" id="cd_att_file"/>
+            <div class="field"><input id="cd_att_note" placeholder="Ghi chú (tuỳ chọn)"/></div>
+            <button class="btn sec" id="cd_att_upload">Tải lên</button>
+          </div>`;
+        box.querySelectorAll("[data-dlatt]").forEach(b => b.onclick = () => guard(async () => {
+          await downloadFile(`/qc/capa/attachments/${b.dataset.dlatt}/download`, b.dataset.fname);
+        }));
+        box.querySelectorAll("[data-rmatt]").forEach(b => b.onclick = () => guard(async () => {
+          if (!confirm("Xóa tài liệu đính kèm này?")) return;
+          await DELETE(`/qc/capa/attachments/${b.dataset.rmatt}`);
+          toast("Đã xóa tài liệu"); refreshAttachments();
+        }));
+        $("cd_att_upload").onclick = () => guard(async () => {
+          const file = $("cd_att_file").files[0];
+          if (!file) throw new Error("Chọn 1 file trước khi tải lên.");
+          const fd = new FormData();
+          fd.append("file", file);
+          fd.append("note", $("cd_att_note").value || "");
+          await POST_FORM(`/qc/capa/${c.capa_id}/attachments`, fd);
+          toast("Đã tải lên tài liệu"); refreshAttachments();
+        });
+      }
+      refreshAttachments();
+    }
+    document.querySelectorAll("[data-capa]").forEach(b => b.onclick = () => {
+      openCapaDetailModal(capas.find(x => x.capa_id === b.dataset.capa));
     });
+    document.querySelectorAll("[data-opendev]").forEach(b => b.onclick = () => {
+      PENDING_OPEN_DEVIATION_ID = b.dataset.opendev;
+      gotoView("quality");
+    });
+    if (PENDING_OPEN_CAPA_ID) {
+      const targetCapaId = PENDING_OPEN_CAPA_ID;
+      PENDING_OPEN_CAPA_ID = null;
+      const c = capas.find(x => x.capa_id === targetCapaId);
+      if (c) openCapaDetailModal(c);
+    }
     $("co_go").onclick = () => guard(async () => {
       const c = await GET(`/qc/coa/${$("co_batch").value}`);
       $("co_box").innerHTML = `
@@ -1354,17 +1543,19 @@
       { key: "lenhdonghang", label: "Lệnh đóng hàng" }, { key: "aging", label: "📦 Tồn kho theo tuổi" },
       { key: "canexpiry", label: "🕒 Bia cận date" }, { key: "consigned", label: "🎁 Bia gửi" },
       { key: "fgship", label: "Xuất TP theo ca" }, { key: "phanloai", label: "KM/Đổi trả/Cận date/Gửi" },
-      { key: "netship", label: "Xuất ròng theo kỳ" }, { key: "vehiclegs", label: "🚚 Xe & bia gửi" }];
+      { key: "netship", label: "Xuất ròng theo kỳ" }, { key: "vehiclegs", label: "🚚 Xe & bia gửi" },
+      { key: "fgstock", label: "📦 NXT kho thành phẩm" }];
     const root = $("view-wms");
     // "Nơi xuất đến" dùng chung danh mục Nhà cung cấp (không còn catalog ship_to_location riêng —
     // xem models/wms.py, migration 9a0b1c2d3e4f_ship_to_supplier_merge) — biến `shipTos` giữ tên cũ
     // để đỡ đổi các chỗ dùng bên dưới, nhưng nguồn dữ liệu giờ là /api/suppliers.
-    const [locs, shipTos, finishedProducts, vehicles, unitTypes, gsEligible, warehouses, factoryLocations] = await Promise.all([
+    const [locs, shipTos, finishedProducts, vehicles, unitTypes, gsEligible, warehouses, factoryLocations, fpGroups] = await Promise.all([
       GET("/wms/locations"), GET("/suppliers"), GET("/finished-products").catch(() => []),
       GET("/wms/vehicles").catch(() => []), GET("/unit-types").catch(() => []),
       GET("/wms/vehicles/consigned-eligible").catch(() => []),
       GET("/wms/warehouses").catch(() => []),
-      GET("/factory-locations").catch(() => [])]);
+      GET("/factory-locations").catch(() => []),
+      sec === "fgstock" ? GET("/finished-product-groups").catch(() => []) : Promise.resolve([])]);
     // "Kho thành phẩm" (WmsWarehouse) là cấp cha mới của vị trí kho — 1 kho có nhiều vị trí.
     // Nhãn hiển thị ưu tiên "[mã kho] mã vị trí - tên vị trí" để biết ngay lô đang ở kho nào.
     const whLabel = (l) => `${l.warehouse_name ? `[${esc(l.warehouse_name)}] ` : ""}${esc(l.code)}${l.name ? ` - ${esc(l.name)}` : ""}${locZoneSuffix(l)}`;
@@ -1798,6 +1989,126 @@
             <td>${r.liters_beer}</td><td>${r.l_fuel_per_l_beer != null ? r.l_fuel_per_l_beer : "—"}</td>
             <td>${r.km_per_l_fuel != null ? r.km_per_l_fuel : "—"}</td></tr>`).join("") ||
             '<tr><td colspan=9 class="muted">Chưa có phiếu nào đã duyệt VÀ đã điền km + lít xăng trong kỳ này.</td></tr>'}</tbody></table></div></div>`;
+    } else if (sec === "fgstock") {
+      // Chuyển từ VIEWS.reports (app.js) sang đây — hợp lý hơn khi nằm cạnh dữ liệu tồn kho TP
+      // khác. Thêm bộ lọc sản phẩm/nhóm sản phẩm (chọn 1 hoặc nhiều, lưu lại cho lần sau bằng
+      // localStorage — thuần hiển thị phía client, không cần lưu server) để tránh bảng quá dài
+      // khi danh mục có nhiều SKU. "Nhóm sản phẩm" (FinishedProductGroup) do người dùng tự đặt
+      // tên + chọn thành viên, quản lý ngay trong tab này (không tách sang Danh mục riêng).
+      const FS_SEL_KEY = "mes_fgstock_selection";
+      let fsSel = [];
+      try { fsSel = JSON.parse(localStorage.getItem(FS_SEL_KEY) || "[]"); } catch (e) { fsSel = []; }
+      const fsToday = new Date();
+      const fsFrom7 = new Date(fsToday); fsFrom7.setDate(fsFrom7.getDate() - 7);
+      // Từ/Đến ngày có kèm giờ (datetime-local) để lọc chính xác theo ca khi cần, không chỉ
+      // theo ngày như trước.
+      const fsDateFrom = SUB.fgstock_date_from || toDTLocal(fsFrom7);
+      const fsDateTo = SUB.fgstock_date_to || toDTLocal(fsToday);
+      SUB.fgstock_date_from = fsDateFrom; SUB.fgstock_date_to = fsDateTo;
+      // Quy đổi lựa chọn (mã token "g:<group_id>" hoặc "p:<finished_product_id>") thành danh
+      // sách finished_product_id thật để gửi lên server — rỗng = không lọc (hiện tất cả).
+      const fpGroupById = Object.fromEntries(fpGroups.map(g => [g.group_id, g]));
+      const resolvedProductIds = [...new Set(fsSel.flatMap(tok => {
+        if (tok.startsWith("g:")) return (fpGroupById[tok.slice(2)]?.product_ids) || [];
+        if (tok.startsWith("p:")) return [tok.slice(2)];
+        return [];
+      }))];
+      const fsQ = `date_from=${encodeURIComponent(fsDateFrom)}&date_to=${encodeURIComponent(fsDateTo)}` +
+        (resolvedProductIds.length ? `&product_ids=${resolvedProductIds.map(encodeURIComponent).join(",")}` : "");
+      const fsrep = await GET(`/reports/finished-goods-stock-report?${fsQ}`);
+      const fsDaysBadge = (d) => d == null ? badge("planned") :
+        d < fsrep.days_of_stock_critical_days ? badge("critical") : d < fsrep.restock_days ? badge("due") : badge("available");
+      const fsInStockBadge = (d) => d == null ? "" : d > fsrep.days_in_stock_warning_days ? badge("due") : badge("available");
+      const fsRow = (r) => `<tr data-fprow="${esc(r.finished_product_id)}">
+          <td class="code">${esc(r.code)}</td><td>${esc(r.name)}</td><td>${esc(r.uom)}</td>
+          <td>${r.opening_stock.toLocaleString("vi-VN")}</td><td>${r.produced.toLocaleString("vi-VN")}</td>
+          <td>${r.shipped.toLocaleString("vi-VN")}</td><td><b>${r.on_hand.toLocaleString("vi-VN")}</b></td>
+          <td class="muted">${r.avg_daily_shipped_7d.toLocaleString("vi-VN")}</td>
+          <td>${fsDaysBadge(r.days_of_stock)}${r.days_of_stock != null ? r.days_of_stock.toLocaleString("vi-VN") : "—"}</td>
+          <td>${r.restock_suggested ? '<b style="color:var(--red)">Đóng bổ sung</b>' : '<span class="muted">—</span>'}</td>
+          <td class="muted">${r.last_production_at ? fmt(r.last_production_at) : "—"}</td>
+          <td class="${r.days_in_stock == null ? "muted" : ""}">${fsInStockBadge(r.days_in_stock)}${r.days_in_stock != null ? r.days_in_stock.toLocaleString("vi-VN") : "—"}</td>
+          <td class="muted" title="Lấy từ Khai báo kế hoạch tiêu thụ tháng — kế hoạch điều chỉnh nếu có, không thì kế hoạch ban đầu">${r.monthly_target_stock != null ? r.monthly_target_stock.toLocaleString("vi-VN") : "—"}</td></tr>`;
+      const fsFilterOpts = `<optgroup label="Nhóm sản phẩm">${fpGroups.map(g =>
+          `<option value="g:${g.group_id}" ${fsSel.includes("g:" + g.group_id) ? "selected" : ""}>📁 ${esc(g.name)} (${g.product_ids.length})</option>`).join("") ||
+          '<option disabled>Chưa có nhóm nào</option>'}</optgroup>
+        <optgroup label="Sản phẩm">${finishedProducts.map(fp =>
+          `<option value="p:${fp.finished_product_id}" ${fsSel.includes("p:" + fp.finished_product_id) ? "selected" : ""}>${esc(fp.code)} — ${esc(fp.name)}</option>`).join("")}</optgroup>`;
+      // Nếu đã chọn ≥1 Nhóm sản phẩm, hiển thị bảng chia theo ĐÚNG nhóm người dùng đã đặt tên
+      // (mỗi nhóm 1 khối, kể cả khi nhóm gồm nhiều category khác nhau — VD "Bia hơi, bia tươi")
+      // thay vì luôn chia cứng theo category như báo cáo Excel gốc — vì người dùng đã tự định
+      // nghĩa nhóm để xem gộp, chia lại theo category sẽ vô nghĩa với nhóm của họ. Sản phẩm chọn
+      // riêng (không qua nhóm) mà không thuộc nhóm nào đã chọn thì gộp vào 1 khối "Sản phẩm
+      // khác" ở cuối. Không chọn nhóm nào (chỉ chọn sản phẩm riêng, hoặc để trống = tất cả) thì
+      // giữ đúng hành vi cũ, chia theo category.
+      const fsSum = (rows, k) => Math.round(rows.reduce((s, r) => s + r[k], 0) * 100) / 100;
+      const fsSubtotal = (rows) => ({ opening_stock: fsSum(rows, "opening_stock"), produced: fsSum(rows, "produced"),
+        shipped: fsSum(rows, "shipped"), on_hand: fsSum(rows, "on_hand") });
+      const fsSelectedGroups = fsSel.filter(t => t.startsWith("g:")).map(t => fpGroupById[t.slice(2)]).filter(Boolean);
+      let fsDisplayGroups = fsrep.groups;
+      if (fsSelectedGroups.length) {
+        const fsRowById = Object.fromEntries(fsrep.groups.flatMap(g => g.rows).map(r => [r.finished_product_id, r]));
+        fsDisplayGroups = fsSelectedGroups.map(g => {
+          const rows = g.product_ids.map(id => fsRowById[id]).filter(Boolean).sort((a, b) => a.name.localeCompare(b.name));
+          return { category: g.name, rows, subtotal: fsSubtotal(rows) };
+        });
+        const groupedIds = new Set(fsSelectedGroups.flatMap(g => g.product_ids));
+        const leftoverIds = fsSel.filter(t => t.startsWith("p:")).map(t => t.slice(2)).filter(id => !groupedIds.has(id));
+        if (leftoverIds.length) {
+          const rows = leftoverIds.map(id => fsRowById[id]).filter(Boolean).sort((a, b) => a.name.localeCompare(b.name));
+          fsDisplayGroups.push({ category: "Sản phẩm khác (không thuộc nhóm)", rows, subtotal: fsSubtotal(rows) });
+        }
+      }
+      body = `<div class="panel"><h2>📦 NXT kho thành phẩm <span class="muted">(${esc(fmt(fsDateFrom))} → ${esc(fmt(fsDateTo))})</span></h2>
+        <div class="muted" style="margin-bottom:8px">Theo mẫu báo cáo Excel thủ công đang dùng — số liệu Nhập/Xuất trong kỳ chọn; Tồn thực tế/Lượng xuất TB 7 ngày/Ngày sản xuất luôn tính tới hiện tại (không phụ thuộc kỳ chọn), dùng để dự báo tồn kho tới hạn. Ngưỡng "Đóng bổ sung" (số ngày tồn dự kiến) chỉnh ở Danh mục › Cài đặt vận hành (hiện tại: ≤ ${fsrep.restock_days} ngày). "Tồn mục tiêu tháng" lấy từ kế hoạch tiêu thụ tháng khai báo bên dưới (kế hoạch điều chỉnh nếu có, không thì kế hoạch ban đầu).</div>
+        <div class="row">
+          <div class="field"><label>Từ ngày (kèm giờ)</label><input id="fs_from" type="datetime-local" value="${fsDateFrom}"/></div>
+          <div class="field"><label>Đến ngày (kèm giờ)</label><input id="fs_to" type="datetime-local" value="${fsDateTo}"/></div>
+          <button class="btn" id="fs_apply" style="align-self:flex-end">Xem báo cáo</button>
+        </div>
+        <div class="row">
+          <div class="field" style="flex:1"><label>Báo cáo cho (để trống = tất cả sản phẩm — chọn 1 hoặc nhiều nhóm/sản phẩm, tự lưu cho lần sau)</label>
+            <select id="fs_filter" multiple size="4" style="width:100%">${fsFilterOpts}</select></div>
+        </div></div>
+        <div class="panel"><h3 style="margin:0 0 6px;cursor:pointer" id="fs_grp_toggle">📁 Quản lý nhóm sản phẩm ▾</h3>
+          <div id="fs_grp_box" style="display:none">
+            <div class="tablewrap"><table><thead><tr><th>Tên nhóm</th><th>Số sản phẩm</th><th></th></tr></thead>
+            <tbody>${fpGroups.map(g => `<tr><td>${esc(g.name)}</td><td>${g.product_ids.length}</td>
+              <td><button class="btn sm sec" data-editfpgroup="${esc(g.group_id)}">Sửa</button>
+                  <button class="btn sm sec" data-delfpgroup="${esc(g.group_id)}">Xóa</button></td></tr>`).join("") ||
+              '<tr><td colspan=3 class="muted">Chưa có nhóm nào.</td></tr>'}</tbody></table></div>
+            <div class="row" style="margin-top:8px">
+              <div class="field"><label>Tên nhóm mới</label><input id="fs_grp_name" placeholder="VD: Bia chai chủ lực" style="width:220px"/></div>
+              <div class="field" style="flex:1"><label>Sản phẩm trong nhóm</label>
+                <select id="fs_grp_members" multiple size="5" style="width:100%">${finishedProducts.map(fp =>
+                  `<option value="${esc(fp.finished_product_id)}">${esc(fp.code)} — ${esc(fp.name)}</option>`).join("")}</select></div>
+              <div class="field" style="align-self:flex-end"><button class="btn sec" id="fs_grp_add">+ Tạo nhóm</button></div>
+            </div>
+          </div>
+        </div>
+        <div class="panel"><h3 style="margin:0 0 6px;cursor:pointer" id="fs_mp_toggle">📅 Khai báo kế hoạch tiêu thụ tháng ▾</h3>
+          <div id="fs_mp_box" style="display:none">
+            <div class="muted" style="margin-bottom:8px">Mỗi SKU/tháng có 3 giá trị: "Ban đầu" (kế hoạch lập từ đầu), "Điều chỉnh" (sửa lại giữa/cuối kỳ, để trống nếu không điều chỉnh) và "SX dự kiến" (kế hoạch đóng bia dự kiến trong tháng đó). Cột "Tồn mục tiêu tháng" ở báo cáo trên lấy Điều chỉnh của THÁNG HIỆN TẠI nếu có, ngược lại lấy Ban đầu.</div>
+            <div class="row" style="margin-bottom:8px">
+              <div class="field"><label>Năm</label><input id="fs_mp_year" type="number" style="width:100px" value="${new Date().getFullYear()}"/></div>
+              <div class="field" style="align-self:flex-end"><button class="btn sec" id="fs_mp_load">Tải bảng</button></div>
+            </div>
+            <div id="fs_mp_grid"><div class="muted">Bấm "Tải bảng" để xem/sửa kế hoạch.</div></div>
+          </div>
+        </div>
+        <div class="panel"><div class="tablewrap"><table>
+          <thead><tr><th>Mã số</th><th>Mặt hàng</th><th>Đvt</th><th>Tồn đầu</th><th>Nhập sản xuất</th>
+            <th>Xuất ĐL &amp; KM</th><th>Tồn thực tế (TT)</th><th>Xuất TB 7 ngày</th><th>Số ngày tồn dự kiến</th>
+            <th>Đề xuất</th><th>Ngày SX gần nhất</th><th>Số ngày lưu kho</th><th>Tồn mục tiêu tháng</th></tr></thead>
+          <tbody>${fsDisplayGroups.map(g => `
+            <tr style="background:var(--panel2);font-weight:700"><td colspan=13>${esc(g.category)}</td></tr>
+            ${g.rows.map(fsRow).join("")}
+            <tr style="background:var(--panel2)"><td colspan=3 class="muted">Tổng ${esc(g.category)}</td>
+              <td>${g.subtotal.opening_stock.toLocaleString("vi-VN")}</td><td>${g.subtotal.produced.toLocaleString("vi-VN")}</td>
+              <td>${g.subtotal.shipped.toLocaleString("vi-VN")}</td><td><b>${g.subtotal.on_hand.toLocaleString("vi-VN")}</b></td>
+              <td colspan=6></td></tr>`).join("") ||
+            '<tr><td colspan=13 class="muted">Chưa có Sản phẩm (thành phẩm) nào trong Danh mục, hoặc không khớp bộ lọc đã chọn.</td></tr>'}</tbody>
+        </table></div></div>`;
     } else if (sec === "canexpiry") {
       const ceFpOpt = finishedProducts.map(fp => `<option value="${esc(fp.finished_product_id)}" data-code="${esc(fp.code)}">${esc(fp.code)} — ${esc(fp.name)}</option>`).join("");
       const ceLocOpt = myAllowedLocations(locs).map(l => `<option value="${esc(l.loc_id)}">${whLabel(l)} (${l.used}/${l.capacity})</option>`).join("");
@@ -1877,6 +2188,103 @@
     wireSearch();
     if (sec === "aging") root.querySelectorAll('table[id^="t_aging_"]').forEach(t => wirePaginate(t.id, 20));
     if (sec === "lenhdonghang") { wirePaginate("t_loadslip_hl", 10); wirePaginate("t_loadslip_dm", 10); }
+
+    if (sec === "fgstock") {
+      const FS_SEL_KEY = "mes_fgstock_selection";
+      $("fs_apply").onclick = () => {
+        SUB.fgstock_date_from = $("fs_from").value;
+        SUB.fgstock_date_to = $("fs_to").value;
+        render("wms");
+      };
+      $("fs_filter").onchange = () => {
+        const sel = [...$("fs_filter").selectedOptions].map(o => o.value);
+        localStorage.setItem(FS_SEL_KEY, JSON.stringify(sel));
+        render("wms");
+      };
+      $("fs_grp_toggle").onclick = () => {
+        const box = $("fs_grp_box");
+        box.style.display = box.style.display === "none" ? "" : "none";
+      };
+      $("fs_grp_add").onclick = () => guard(async () => {
+        const name = $("fs_grp_name").value.trim();
+        if (!name) { toast("Nhập tên nhóm", "err"); return; }
+        const memberIds = [...$("fs_grp_members").selectedOptions].map(o => o.value);
+        if (!memberIds.length) { toast("Chọn ít nhất 1 sản phẩm cho nhóm", "err"); return; }
+        await POST("/finished-product-groups", { name, product_ids: memberIds });
+        toast("Đã tạo nhóm sản phẩm"); render("wms");
+      });
+      document.querySelectorAll("[data-delfpgroup]").forEach(b => b.onclick = () => guard(async () => {
+        const gid = b.dataset.delfpgroup;
+        if (!confirm("Xóa nhóm sản phẩm này?")) return;
+        await DELETE(`/finished-product-groups/${gid}`);
+        let sel = [];
+        try { sel = JSON.parse(localStorage.getItem(FS_SEL_KEY) || "[]"); } catch (e) { sel = []; }
+        localStorage.setItem(FS_SEL_KEY, JSON.stringify(sel.filter(t => t !== `g:${gid}`)));
+        toast("Đã xóa nhóm sản phẩm"); render("wms");
+      }));
+      document.querySelectorAll("[data-editfpgroup]").forEach(b => b.onclick = () => {
+        const g = fpGroups.find(x => x.group_id === b.dataset.editfpgroup);
+        if (!g) return;
+        modal(`<h3>Sửa nhóm sản phẩm — ${esc(g.name)}</h3>
+          <div class="row"><div class="field" style="flex:1"><label>Tên nhóm</label><input id="efg_name" value="${esc(g.name)}"/></div></div>
+          <div class="row"><div class="field" style="flex:1"><label>Sản phẩm trong nhóm</label>
+            <select id="efg_members" multiple size="8" style="width:100%">${finishedProducts.map(fp =>
+              `<option value="${esc(fp.finished_product_id)}" ${g.product_ids.includes(fp.finished_product_id) ? "selected" : ""}>${esc(fp.code)} — ${esc(fp.name)}</option>`).join("")}</select></div></div>
+          <div class="row" style="margin-top:8px"><button class="btn" id="efg_save">Lưu</button></div>`);
+        $("efg_save").onclick = () => guard(async () => {
+          const name = $("efg_name").value.trim();
+          if (!name) { toast("Nhập tên nhóm", "err"); return; }
+          const memberIds = [...$("efg_members").selectedOptions].map(o => o.value);
+          if (!memberIds.length) { toast("Chọn ít nhất 1 sản phẩm cho nhóm", "err"); return; }
+          await PUT(`/finished-product-groups/${g.group_id}`, { name, product_ids: memberIds });
+          toast("Đã lưu nhóm sản phẩm"); closeModal(); render("wms");
+        });
+      });
+      $("fs_mp_toggle").onclick = () => {
+        const box = $("fs_mp_box");
+        box.style.display = box.style.display === "none" ? "" : "none";
+      };
+      const fsMpMonthNames = ["T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9", "T10", "T11", "T12"];
+      // Mỗi tháng gộp thành 1 ô to (.mp-box) chứa 3 ô nhỏ (KH ban đầu/KH điều chỉnh/SL SX dự
+      // kiến) thay vì 3 cột riêng dùng colspan — dễ đọc hơn khi có đủ 12 tháng x 3 giá trị.
+      const fsMpMonthBox = (c) => `<td><div class="mp-box">
+          <div class="mp-field"><span>Ban đầu</span><input type="number" step="any" class="no-spin fs-mp-initial"
+            data-month="${c.month}" value="${c.initial_qty ?? ""}"/></div>
+          <div class="mp-field"><span>Điều chỉnh</span><input type="number" step="any" class="no-spin fs-mp-adjusted"
+            data-month="${c.month}" value="${c.adjusted_qty ?? ""}"/></div>
+          <div class="mp-field"><span>SX dự kiến</span><input type="number" step="any" class="no-spin fs-mp-expected"
+            data-month="${c.month}" value="${c.expected_production_qty ?? ""}"/></div>
+        </div></td>`;
+      const fsMpRenderGrid = (year, grid) => {
+        const head = `<thead><tr><th>Mã số</th><th>Mặt hàng</th>${fsMpMonthNames.map(m =>
+          `<th>${m}</th>`).join("")}<th></th></tr></thead>`;
+        const rows = grid.map(row => `<tr data-fpmprow="${esc(row.finished_product_id)}">
+            <td class="code">${esc(row.code)}</td><td>${esc(row.name)}</td>
+            ${row.months.map(fsMpMonthBox).join("")}
+            <td><button class="btn sm sec" data-savefpmp="${esc(row.finished_product_id)}">Lưu</button></td></tr>`).join("") ||
+          `<tr><td colspan=${2 + fsMpMonthNames.length + 1} class="muted">Chưa có Sản phẩm (thành phẩm) nào trong Danh mục.</td></tr>`;
+        $("fs_mp_grid").innerHTML = `<div class="tablewrap"><table>${head}<tbody>${rows}</tbody></table></div>`;
+        document.querySelectorAll("[data-savefpmp]").forEach(b => b.onclick = () => guard(async () => {
+          const fpid = b.dataset.savefpmp;
+          const tr = document.querySelector(`tr[data-fpmprow="${fpid}"]`);
+          const cells = [...tr.querySelectorAll(".fs-mp-initial")].map(inp => {
+            const month = parseInt(inp.dataset.month, 10);
+            const adj = tr.querySelector(`.fs-mp-adjusted[data-month="${month}"]`).value;
+            const exp = tr.querySelector(`.fs-mp-expected[data-month="${month}"]`).value;
+            return { month, initial_qty: inp.value === "" ? null : parseFloat(inp.value),
+                     adjusted_qty: adj === "" ? null : parseFloat(adj),
+                     expected_production_qty: exp === "" ? null : parseFloat(exp) };
+          });
+          await PUT(`/finished-products/${fpid}/monthly-plan`, { year, cells });
+          toast("Đã lưu kế hoạch tiêu thụ tháng"); render("wms");
+        }));
+      };
+      $("fs_mp_load").onclick = () => guard(async () => {
+        const year = parseInt($("fs_mp_year").value, 10) || new Date().getFullYear();
+        const grid = await GET(`/finished-products/monthly-plan?year=${year}`);
+        fsMpRenderGrid(year, grid);
+      });
+    }
 
     if (sec === "canexpiry") {
       const canApproveCe = _hasPerm("wms.confirm_receipt");

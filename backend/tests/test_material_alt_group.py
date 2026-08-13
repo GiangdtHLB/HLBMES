@@ -182,7 +182,7 @@ def test_brew_order_bom_preview_resolves_alt_group_line(client, admin_h, malt_pi
     client.post(f"/api/formulas/{formula['formula_id']}/activate", headers=admin_h)
 
     preview = client.get("/api/brewing/orders/bom-preview", headers=admin_h,
-                         params={"product_id": lager_product_id, "planned_batch_count": 2,
+                         params={"formula_id": formula["formula_id"], "planned_batch_count": 2,
                                  "planned_volume_hl": 100}).json()
     line = next(l for l in preview if not l.get("is_header"))
     assert line["material_id"] is None
@@ -204,6 +204,7 @@ def test_brew_order_created_from_alt_group_formula_persists_group_code(client, a
 
     order = client.post("/api/brewing/orders", headers=admin_h, json={
         "order_code": f"LN-ALTGRP-{new_id()[:6]}", "product_id": lager_product_id,
+        "formula_id": formula["formula_id"],
         "planned_batch_count": 1, "planned_volume_hl": 100, "volume_tolerance_hl": 0,
         "auto_from_bom": True, "lines": [],
     })

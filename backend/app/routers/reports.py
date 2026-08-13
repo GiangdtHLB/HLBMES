@@ -98,6 +98,12 @@ def qc_attention_alerts(db: Session = Depends(get_db), user: User = Depends(get_
     return dashboard_svc.qc_attention_alerts(db)
 
 
+@router.get("/overdue-action-alerts")
+def overdue_action_alerts(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    from ..services import dashboard as dashboard_svc
+    return dashboard_svc.overdue_action_alerts(db)
+
+
 # ---- Báo cáo xuất thành phẩm theo ca (Ca 1/2/3, giống Năng lượng) ----
 @router.get("/finished-goods-shift-report")
 def finished_goods_shift_report(date_from: datetime = None, date_to: datetime = None,
@@ -230,3 +236,23 @@ def filter_line_yield_report(date_from: datetime = None, date_to: datetime = Non
     return filter_yield_svc.filter_line_yield_report(db, date_from, date_to,
                                                      settings.filter_line_yield_low_l,
                                                      settings.filter_line_yield_high_l)
+
+
+# ---- Báo cáo Nhập-Xuất-Tồn kho thành phẩm (theo mẫu Excel NXT KHO THANH PHAM) ----
+@router.get("/finished-goods-stock-report")
+def finished_goods_stock_report(date_from: datetime = None, date_to: datetime = None, product_ids: str = None,
+                                db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    from ..services import ops_setting as ops_setting_svc
+    from ..services import wms as wms_svc
+    if not date_from or not date_to:
+        date_to = date_to or utcnow()
+        date_from = date_from or (date_to - timedelta(days=7))
+    settings = ops_setting_svc.get_settings(db)
+    ids = [p for p in product_ids.split(",") if p] if product_ids else None
+    result = wms_svc.finished_goods_stock_inout_report(db, date_from, date_to,
+                                                       settings.finished_goods_restock_days, ids)
+    result.update({"date_from": date_from.isoformat(), "date_to": date_to.isoformat(),
+                   "restock_days": settings.finished_goods_restock_days,
+                   "days_of_stock_critical_days": settings.fg_days_of_stock_critical_days,
+                   "days_in_stock_warning_days": settings.fg_days_in_stock_warning_days})
+    return result

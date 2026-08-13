@@ -1,12 +1,13 @@
 """Master data: Product, Material. SoR là ERP/PLM trong thực tế; ở MVP
 ta giữ bản sao có version/effective date (tài liệu §5.2, §8.1)."""
 
+from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import JSON, Boolean, Float, ForeignKey, Integer, UnicodeText, Unicode
+from sqlalchemy import JSON, Boolean, Float, ForeignKey, Integer, UnicodeText, Unicode, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
-from ..common import new_id
+from ..common import UTCDateTime, new_id, utcnow
 from ..database import Base
 
 
@@ -92,6 +93,40 @@ class FinishedProduct(Base):
     # SKU unit_type="vi" khi bị phân rã (xem decompose_unit/decompose_batch, unit_type="lon").
     weight_primary_kg: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     weight_single_kg: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+
+
+class FinishedProductMonthlyPlan(Base):
+    """Kế hoạch tiêu thụ tháng theo SKU — mỗi (SKU, năm, tháng) có 3 giá trị: kế hoạch ban đầu
+    (lập từ đầu tháng), kế hoạch điều chỉnh (sửa lại giữa/cuối kỳ, tuỳ chọn), và lượng sản xuất
+    dự kiến (kế hoạch đóng bia trong tháng đó). Cột "Tồn mục tiêu tháng" trên báo cáo NXT kho
+    thành phẩm lấy kế hoạch điều chỉnh của THÁNG HIỆN TẠI nếu có, ngược lại lấy kế hoạch ban đầu
+    — xem services/wms.py::_monthly_target_map."""
+
+    __tablename__ = "finished_product_monthly_plan"
+    __table_args__ = (UniqueConstraint("finished_product_id", "year", "month", name="uq_fp_monthly_plan"),)
+
+    plan_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
+    finished_product_id: Mapped[str] = mapped_column(ForeignKey("finished_product.finished_product_id"), index=True)
+    year: Mapped[int] = mapped_column(Integer)
+    month: Mapped[int] = mapped_column(Integer)  # 1-12
+    initial_qty: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    adjusted_qty: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    expected_production_qty: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+
+
+class FinishedProductGroup(Base):
+    """Nhóm sản phẩm tự đặt tên (VD "Bia chai chủ lực") — dùng để lọc báo cáo "NXT kho thành
+    phẩm" theo nhóm thay vì phải chọn từng SKU (tránh bảng quá dài). Thành viên lưu dạng
+    finished_product_id nối dấu phẩy (giống quy ước Deviation.parameter), không dùng bảng
+    liên kết riêng vì số lượng thành viên nhỏ và không cần join phức tạp."""
+
+    __tablename__ = "finished_product_group"
+
+    group_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
+    name: Mapped[str] = mapped_column(Unicode(255), unique=True, index=True)
+    product_ids: Mapped[str] = mapped_column(UnicodeText, default="")
+    created_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
 
 
 class MaterialGroup(Base):

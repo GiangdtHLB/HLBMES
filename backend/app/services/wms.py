@@ -13,7 +13,7 @@ from ..common import Role, new_id, utcnow
 from ..errors import DomainError, NotFoundError
 from ..models.audit import AuditLog
 from ..models.brewing import BottleRecord
-from ..models.master import FinishedProduct, UnitTypeCatalog
+from ..models.master import FinishedProduct, FinishedProductMonthlyPlan, UnitTypeCatalog
 from ..models.materials import GenealogyEdge, Supplier
 from ..models.warehouse import FactoryLocation
 from ..models.wms import (ConsignedEntry, FactoryImportEntry, FinishedGoodsUnit, NearExpiryEntry, Shipment,
@@ -1946,6 +1946,121 @@ def _consigned_available_qty(db: Session, vehicle_id: str, finished_product_id: 
         already_q = already_q.where(ConsignedEntry.entry_id != exclude_entry_id)
     already_declared = db.execute(already_q).scalar() or 0.0
     return max(shipped_count - already_declared, 0.0)
+
+
+_STOCK_CATEGORY_ORDER = ["Bia hơi", "Bia tươi", "Bia chai", "Bia lon"]
+
+
+def _monthly_target_map(db: Session, year: int, month: int) -> dict[str, float]:
+    """Tồn mục tiêu tháng/SKU cho đúng (năm, tháng) — lấy kế hoạch điều chỉnh nếu có,
+    ngược lại kế hoạch ban đầu (xem models/master.py::FinishedProductMonthlyPlan)."""
+    rows = db.execute(
+        select(FinishedProductMonthlyPlan.finished_product_id, FinishedProductMonthlyPlan.initial_qty,
+              FinishedProductMonthlyPlan.adjusted_qty)
+        .where(FinishedProductMonthlyPlan.year == year, FinishedProductMonthlyPlan.month == month)
+    ).all()
+    return {fp_id: (adjusted if adjusted is not None else initial)
+            for fp_id, initial, adjusted in rows if adjusted is not None or initial is not None}
+
+
+def finished_goods_stock_inout_report(db: Session, date_from: datetime, date_to: datetime,
+                                      restock_days: float, product_ids: list[str] | None = None) -> dict:
+    """Báo cáo Nhập-Xuất-Tồn kho thành phẩm (theo mẫu Excel "NXT KHO THANH PHAM") — mỗi dòng 1
+    FinishedProduct, gộp nhóm theo category, có dòng tổng phụ mỗi nhóm. Chỉ tính unit_type ==
+    FinishedProduct.unit_type (đơn vị đóng gói CHÍNH của SKU, VD "vi"/"keg") — KHÔNG cộng lẫn
+    các dòng đã phân rã (VD "lon" tách từ SKU "vi") vào cùng 1 số, vì đó là 2 đơn vị đo khác
+    nhau (thùng/vỉ vs lon lẻ) không thể cộng gộp có nghĩa — đúng như list_lot_summaries luôn
+    giữ riêng theo unit_type, không gộp.
+    - Tồn thực tế (TT): tồn SỐNG ngay lúc gọi API (status="stored"), không phụ thuộc kỳ chọn.
+    - Tồn đầu: dựng lại tồn tại đúng mốc date_from — đơn vị đã tồn tại trước date_from và CHƯA
+      xuất trước mốc đó (status="stored", HOẶC đã "shipped" nhưng shipped_at >= date_from).
+    - Nhập sản xuất / Xuất ĐL & KM: cộng dồn trong [date_from, date_to) — Xuất ĐL & KM dùng
+      đúng filter is_consigned=False như finished_goods_shift_report (tránh đếm trùng bia gửi).
+    - Lượng xuất TB 7 ngày / Ngày sản xuất gần nhất: LUÔN tính từ hiện tại (utcnow()), độc lập
+      với date_from/date_to đã chọn — mục đích là dự báo tới hạn tồn kho, không phải số liệu
+      lịch sử của kỳ xem báo cáo.
+    """
+    now = utcnow()
+    divide_codes = _divide_by_pack_codes(db)
+    divisor_expr = _pack_divisor_expr(divide_codes)
+    week_ago = now - timedelta(days=7)
+
+    monthly_target_map = _monthly_target_map(db, now.year, now.month)
+
+    products_stmt = select(FinishedProduct)
+    if product_ids:
+        products_stmt = products_stmt.where(FinishedProduct.finished_product_id.in_(product_ids))
+    products = db.execute(products_stmt).scalars().all()
+    same_unit = FinishedGoodsUnit.unit_type == FinishedProduct.unit_type
+
+    def _agg(*conditions) -> dict[str, float]:
+        rows = db.execute(
+            select(FinishedGoodsUnit.finished_product_id, func.sum(FinishedGoodsUnit.quantity / divisor_expr))
+            .select_from(FinishedGoodsUnit)
+            .join(FinishedProduct, FinishedProduct.finished_product_id == FinishedGoodsUnit.finished_product_id)
+            .where(same_unit, *conditions)
+            .group_by(FinishedGoodsUnit.finished_product_id)
+        ).all()
+        return {fp_id: float(total or 0) for fp_id, total in rows}
+
+    on_hand_map = _agg(FinishedGoodsUnit.status == "stored")
+    opening_map = _agg(FinishedGoodsUnit.created_at < date_from,
+                       or_(FinishedGoodsUnit.status == "stored",
+                           and_(FinishedGoodsUnit.status == "shipped", FinishedGoodsUnit.shipped_at >= date_from)))
+    produced_map = _agg(FinishedGoodsUnit.source == "chiet",
+                        FinishedGoodsUnit.created_at >= date_from, FinishedGoodsUnit.created_at < date_to)
+    shipped_period_map = _agg(FinishedGoodsUnit.status == "shipped", FinishedGoodsUnit.is_consigned == false(),
+                              FinishedGoodsUnit.shipped_at >= date_from, FinishedGoodsUnit.shipped_at < date_to)
+    shipped_7d_map = _agg(FinishedGoodsUnit.status == "shipped", FinishedGoodsUnit.is_consigned == false(),
+                          FinishedGoodsUnit.shipped_at >= week_ago, FinishedGoodsUnit.shipped_at < now)
+
+    last_prod_rows = db.execute(
+        select(FinishedGoodsUnit.finished_product_id, func.max(FinishedGoodsUnit.created_at))
+        .select_from(FinishedGoodsUnit)
+        .join(FinishedProduct, FinishedProduct.finished_product_id == FinishedGoodsUnit.finished_product_id)
+        .where(same_unit, FinishedGoodsUnit.source == "chiet")
+        .group_by(FinishedGoodsUnit.finished_product_id)
+    ).all()
+    last_production_map = {fp_id: ts for fp_id, ts in last_prod_rows}
+
+    groups_map: dict[str, list[dict]] = {}
+    for fp in products:
+        avg_7d = (shipped_7d_map.get(fp.finished_product_id, 0.0)) / 7
+        on_hand = round(on_hand_map.get(fp.finished_product_id, 0.0), 2)
+        days_of_stock = round(on_hand / avg_7d, 1) if avg_7d > 0 else None
+        restock_suggested = days_of_stock is not None and days_of_stock <= restock_days
+        last_prod = last_production_map.get(fp.finished_product_id)
+        days_in_stock = round((now - last_prod).total_seconds() / 86400, 2) if last_prod else None
+        row = {
+            "finished_product_id": fp.finished_product_id, "code": fp.code, "name": fp.name,
+            "uom": fp.unit_type,
+            "opening_stock": round(opening_map.get(fp.finished_product_id, 0.0), 2),
+            "produced": round(produced_map.get(fp.finished_product_id, 0.0), 2),
+            "shipped": round(shipped_period_map.get(fp.finished_product_id, 0.0), 2),
+            "on_hand": on_hand,
+            "avg_daily_shipped_7d": round(avg_7d, 2),
+            "days_of_stock": days_of_stock,
+            "restock_suggested": restock_suggested,
+            "last_production_at": last_prod.isoformat() if last_prod else None,
+            "days_in_stock": days_in_stock,
+            "monthly_target_stock": monthly_target_map.get(fp.finished_product_id),
+        }
+        cat = fp.category or "Khác"
+        groups_map.setdefault(cat, []).append(row)
+
+    def _cat_sort_key(cat: str):
+        try:
+            return (0, _STOCK_CATEGORY_ORDER.index(cat))
+        except ValueError:
+            return (1, cat) if cat != "Khác" else (2, cat)
+
+    groups = []
+    for cat in sorted(groups_map.keys(), key=_cat_sort_key):
+        rows = sorted(groups_map[cat], key=lambda r: r["name"])
+        subtotal = {k: round(sum(r[k] for r in rows), 2)
+                    for k in ("opening_stock", "produced", "shipped", "on_hand")}
+        groups.append({"category": cat, "rows": rows, "subtotal": subtotal})
+    return {"groups": groups, "restock_days": restock_days}
 
 
 def finished_goods_shift_report(db: Session, date_from: datetime, date_to: datetime) -> dict:

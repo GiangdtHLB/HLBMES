@@ -75,7 +75,7 @@ def test_brew_order_auto_loads_bom_for_products_own_recipe(client, admin_h):
     assert act.status_code == 200, act.text
 
     order = client.post("/api/brewing/orders", headers=admin_h,
-                        json={"order_code": "LN-BOMCHK", "product_id": product_id,
+                        json={"order_code": "LN-BOMCHK", "product_id": product_id, "formula_id": formula_id,
                               "planned_batch_count": 2, "planned_volume_hl": 20,
                               "auto_from_bom": True})
     assert order.status_code == 201, order.text
@@ -98,12 +98,14 @@ def test_bom_qty_not_scaled_by_planned_volume_hl(client, admin_h):
                     json={"code": "CT-NOSCALE", "product_id": product_id, "base_qty": 1000, "base_uom": "L",
                           "materials": [{"material_code": "MALT-PILS", "qty": 15, "uom": "kg"}]})
     assert f.status_code == 201, f.text
-    act = client.post(f"/api/formulas/{f.json()['formula_id']}/activate", headers=admin_h)
+    formula_id = f.json()["formula_id"]
+    act = client.post(f"/api/formulas/{formula_id}/activate", headers=admin_h)
     assert act.status_code == 200, act.text
 
     for planned_volume_hl in (5, 111, 1000):
         order = client.post("/api/brewing/orders", headers=admin_h,
                             json={"order_code": f"LN-NOSCALE-{planned_volume_hl}", "product_id": product_id,
+                                  "formula_id": formula_id,
                                   "planned_batch_count": 3, "planned_volume_hl": planned_volume_hl,
                                   "auto_from_bom": True})
         assert order.status_code == 201, order.text

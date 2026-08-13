@@ -25,6 +25,7 @@ from ..models.batches import BatchExecution
 from ..models.brewing import BottleRecord, BrewBatch, FermentRecord, FilterRecord
 from ..models.materials import MaterialLot
 from ..models.quality import Deviation, QualityResult
+from ..models.quality_ext import CAPA
 from ..security import User, require_role
 
 # Scope theo công đoạn sản xuất (Nấu/Lên men/Lọc/Chiết) — scope_id là PK thật của bản ghi,
@@ -141,6 +142,7 @@ def open_deviation(db: Session, payload: dict, user: User) -> Deviation:
         state=DeviationState.OPEN.value,
         opened_by=user.username,
         opened_at=utcnow(),
+        due_date=payload.get("due_date"),
     )
     db.add(dev)
     _set_quality_status(db, scope_type, scope_id, QualityStatus.ON_HOLD.value)
@@ -173,6 +175,16 @@ def transition_deviation(db: Session, deviation_id: str, target: str, user: User
     if target_state == DeviationState.DISPOSITION:
         dev.disposition = payload.get("disposition", dev.disposition)
     if target_state == DeviationState.CLOSED:
+        if not payload.get("close_note"):
+            raise DomainError("Phải nhập ghi chú đóng.")
+        if user.username == dev.opened_by and user.role != Role.ADMIN.value:
+            raise DomainError("Người đóng phải khác người mở deviation.")
+        if dev.severity in ("major", "critical") and not _has_closed_capa(db, dev.deviation_id):
+            raise DomainError(
+                "Deviation major/critical phải có CAPA liên kết đã đóng (root cause + action "
+                "plan + effectiveness + ngày kiểm tra hiệu lực) trước khi đóng."
+            )
+        dev.close_note = payload["close_note"]
         dev.approved_by = user.username
         dev.closed_at = utcnow()
 
@@ -187,6 +199,12 @@ def transition_deviation(db: Session, deviation_id: str, target: str, user: User
 
 
 # ---- helpers ----
+
+def _has_closed_capa(db: Session, deviation_id: str) -> bool:
+    capa = db.execute(select(CAPA).where(
+        CAPA.deviation_id == deviation_id, CAPA.state == "closed")).scalars().first()
+    return capa is not None
+
 
 def _get_scope_obj(db: Session, scope_type: str, scope_id: str):
     if scope_type == "batch":

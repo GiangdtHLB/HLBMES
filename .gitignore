@@ -21,6 +21,9 @@ ENV/
 *.db.bak*
 backend/mes.db
 
+# --- File uploads (dữ liệu runtime, không phải mã nguồn) ---
+backend/uploads/
+
 # --- Environment / secrets ---
 .env
 .env.*

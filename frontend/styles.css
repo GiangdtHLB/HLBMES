@@ -83,6 +83,16 @@ th.sortable-th:hover { color: var(--text); }
 .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: flex-end; margin-bottom: 10px; }
 .field { display: flex; flex-direction: column; gap: 4px; }
 .field label { font-size: 11px; color: var(--muted); }
+/* Ô "1 tháng" trong bảng khai báo kế hoạch tiêu thụ tháng — gộp 3 ô nhỏ (KH ban đầu/KH điều
+   chỉnh/SL SX dự kiến) vào 1 khối có viền, thay cho 3 cột riêng lẻ dùng colspan trước đây. */
+.mp-box { display: flex; flex-direction: column; gap: 3px; padding: 6px; border: 1px solid var(--border);
+  border-radius: 6px; background: var(--panel2); min-width: 92px; }
+.mp-field { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+.mp-field span { font-size: 10px; color: var(--muted); white-space: nowrap; }
+.mp-field input { width: 60px; }
+/* Ẩn nút tăng/giảm mặc định của input number — nhập số trực tiếp, không cần bấm nút. */
+input.no-spin::-webkit-outer-spin-button, input.no-spin::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+input.no-spin[type=number] { -moz-appearance: textfield; }
 button.btn {
   background: var(--accent); color: #1a1206; border: none; border-radius: 6px;
   padding: 7px 14px; cursor: pointer; font-weight: 600; font-size: 13px;

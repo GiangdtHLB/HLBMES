@@ -1277,13 +1277,13 @@ def _seed_users(db) -> None:
         # Lệnh lọc (khác với NV KCS chỉ nhập/duyệt kết quả theo chỉ tiêu được gán).
         ("kcs_truongphong", "123456", "Trịnh Thị Trưởng", "Trưởng phòng KCS", "qa",
          "dashboard,orders,quality,qclab,process,trace,ai,cip",
-         "quality.release,quality.deviation,recipe.approve,ebr.sign,ebr.approve,order.create",
+         "quality.release,quality.deviation,recipe.approve,ebr.sign,ebr.approve,order.create,quality.capa_approve_kcs",
          "*", "*", "*", "*"),
         # Giám đốc/Phó GĐ Sản xuất - Kỹ thuật: duyệt lô chiết cho nhập kho thành phẩm — tách
         # khỏi quyền quality.release của KCS (KCS nhập/khóa chỉ tiêu, GĐ SX quyết định nhập kho).
         ("giamdoc_sx", "123456", "Đoàn Sản Xuất", "Giám đốc Sản xuất - Kỹ thuật", "supervisor",
          "dashboard,process,quality,trace,reports,ai",
-         "production.release_to_wms",
+         "production.release_to_wms,quality.capa_approve_director",
          "*", "*", "*", "*"),
         # Trung tâm Điều hành: quản lý kho thành phẩm (xuất kho, điều chuyển, nhập bia cận date...).
         ("ttdh_thukhotp", "123456", "Mai Thị Vận", "NV Trung tâm Điều hành - Thủ kho TP", "operator",
@@ -1339,11 +1339,11 @@ def _seed_role_templates(db) -> None:
          "*", "kho", "*", "cong_ty"),
         ("Trưởng phòng KCS", "qa",
          "dashboard,orders,quality,qclab,process,trace,ai,cip",
-         "quality.release,quality.deviation,recipe.approve,ebr.sign,ebr.approve,order.create",
+         "quality.release,quality.deviation,recipe.approve,ebr.sign,ebr.approve,order.create,quality.capa_approve_kcs",
          "*", "*", "*", "*"),
         ("Giám đốc Sản xuất - Kỹ thuật", "supervisor",
          "dashboard,process,quality,trace,reports,ai",
-         "production.release_to_wms",
+         "production.release_to_wms,quality.capa_approve_director",
          "*", "*", "*", "*"),
         ("NV Trung tâm Điều hành - Thủ kho TP", "operator",
          "dashboard,wms,packaging", "warehouse.receive,warehouse.issue",

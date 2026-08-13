@@ -1,8 +1,10 @@
 """Quality hardcore: SPC control chart, CAPA, COA, LIMS-lite (§7.5)."""
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, File, Form, UploadFile
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
+from ..config import BASE_DIR
 from ..database import get_db
 from ..schemas import (
     CapaIn,
@@ -150,6 +152,35 @@ def transition_capa(capa_id: str, payload: CapaTransitionIn, db: Session = Depen
                     user: User = Depends(get_current_user)):
     c = svc.transition_capa(db, capa_id, payload.target, user, payload.model_dump())
     return {"capa_code": c.capa_code, "state": c.state}
+
+
+@router.post("/capa/{capa_id}/attachments", status_code=201)
+async def add_capa_attachment(capa_id: str, file: UploadFile = File(...), note: str = Form(None),
+                              db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    content = await file.read()
+    att = svc.add_capa_attachment(db, capa_id, file.filename, content, note, user)
+    return {"attachment_id": att.attachment_id, "file_name": att.file_name}
+
+
+@router.get("/capa/{capa_id}/attachments")
+def list_capa_attachments(capa_id: str, db: Session = Depends(get_db),
+                          user: User = Depends(get_current_user)):
+    return svc.list_capa_attachments(db, capa_id)
+
+
+@router.get("/capa/attachments/{attachment_id}/download")
+def download_capa_attachment(attachment_id: str, db: Session = Depends(get_db),
+                             user: User = Depends(get_current_user)):
+    att = svc.get_capa_attachment(db, attachment_id)
+    file_path = BASE_DIR / "uploads" / att.stored_path
+    return FileResponse(file_path, filename=att.file_name)
+
+
+@router.delete("/capa/attachments/{attachment_id}")
+def delete_capa_attachment(attachment_id: str, db: Session = Depends(get_db),
+                           user: User = Depends(get_current_user)):
+    svc.delete_capa_attachment(db, attachment_id, user)
+    return {"ok": True}
 
 
 # ---- COA ----
