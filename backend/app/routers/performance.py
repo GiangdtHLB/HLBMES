@@ -28,6 +28,7 @@ def list_oee(line: str = None, db: Session = Depends(get_db)):
 def create_oee(payload: OEEIn, db: Session = Depends(get_db),
                user: User = Depends(get_current_user)):
     require_role(user, Role.SUPERVISOR, Role.OPERATOR)
+    total_count = (payload.good_count + payload.reject_count) if payload.reject_count is not None else payload.total_count
     rec = OEERecord(
         oee_id=new_id(),
         line=payload.line,
@@ -36,7 +37,7 @@ def create_oee(payload: OEEIn, db: Session = Depends(get_db),
         planned_time_min=payload.planned_time_min,
         downtime_min=payload.downtime_min,
         ideal_rate_per_min=payload.ideal_rate_per_min,
-        total_count=payload.total_count,
+        total_count=total_count,
         good_count=payload.good_count,
         downtime_reasons=payload.downtime_reasons,
     )

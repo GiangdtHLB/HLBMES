@@ -1,65 +1,138 @@
-"""Downtime reason-tree + Pareto + MTBF/MTTR + 6 big losses (tài liệu §7.7).
+"""Downtime dừng máy: danh mục lý do theo dây chuyền (OeeReasonCatalog, thay REASON_TREE
+hardcode cũ) + ghi sự kiện + Pareto + MTBF/MTTR + 6 big losses (tài liệu §7.7).
 
-Cây lý do (REASON_TREE) là hằng số: nhóm → mã lý do con, gắn loss_category để phân
-rã 6 big losses. MTBF/MTTR suy ra từ Incident + DowntimeEvent theo thiết bị.
+OeeReasonCatalog khớp đúng 8 nhóm tổn thất OPI thật của nhà máy (xem file vận hành gốc
+"OPI - CAN L3 (KHS 30K).xlsx", services/oee_waterfall.py giải thích công thức đầy đủ) — mỗi
+DowntimeEvent gắn reason_catalog_id, còn reason_group/reason_code/reason_label/loss_category
+được SAO CHÉP LẠI vào sự kiện tại thời điểm ghi để Pareto/big_losses/MTBF cũ (đọc thẳng các cột
+này) không cần sửa. loss_category (availability/performance/quality) suy từ category theo
+_CATEGORY_LOSS bên dưới — mirror đúng phân loại 6 Big Losses kinh điển của TPM.
 """
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..audit import record_audit
 from ..common import Role, new_id, utcnow
-from ..errors import DomainError
+from ..errors import DomainError, NotFoundError
 from ..models.maintenance import Equipment, Incident
-from ..models.oee_ext import DowntimeEvent
-from ..security import User, require_role
+from ..models.oee_ext import DowntimeEvent, OeeMinorStopTally, OeeReasonCatalog
+from ..security import User, require_perm, require_role
 
-# Cây lý do dừng máy nhiều cấp. loss ∈ availability|performance|quality (6 big losses).
-REASON_TREE = {
-    "thiet_bi": {"label": "Thiết bị", "loss": "availability", "reasons": {
-        "hong_co_khi": "Hỏng cơ khí", "hong_dien": "Sự cố điện",
-        "kep_chai": "Kẹt chai/lon", "ro_ri": "Rò rỉ"}},
-    "van_hanh": {"label": "Vận hành", "loss": "availability", "reasons": {
-        "thieu_nhan_luc": "Thiếu nhân lực", "cho_lenh": "Chờ lệnh sản xuất",
-        "thao_tac_cham": "Thao tác chậm"}},
-    "thieu_vat_tu": {"label": "Thiếu vật tư", "loss": "availability", "reasons": {
-        "het_chai": "Hết chai/lon", "het_nhan": "Hết nhãn", "het_co2": "Hết CO2",
-        "cho_dich": "Chờ dịch bia"}},
-    "chuyen_doi": {"label": "Chuyển đổi / CIP", "loss": "performance", "reasons": {
-        "cip": "Vệ sinh CIP", "doi_san_pham": "Đổi sản phẩm", "khoi_dong": "Khởi động/chạy thử"}},
-    "toc_do": {"label": "Giảm tốc độ", "loss": "performance", "reasons": {
-        "chay_cham": "Chạy dưới tốc độ", "dung_nho": "Dừng vặt (micro-stop)"}},
-    "chat_luong": {"label": "Chất lượng", "loss": "quality", "reasons": {
-        "loi_nhan": "Lỗi dán nhãn", "do_day_sai": "Độ đầy sai", "loi_dong_nap": "Lỗi đóng nắp"}},
+# category (OeeReasonCatalog) -> nhóm 6 Big Losses kinh điển (availability/performance/quality)
+_CATEGORY_LOSS = {
+    "bao_tri_ngoai": "availability", "nona": "availability", "ke_hoach": "availability",
+    "chuyen_may": "availability", "thieu_vat_tu": "availability", "breakdown": "availability",
+    "dung_lat_nhat": "performance", "sp_loi": "quality",
+}
+
+CATEGORY_LABELS = {
+    "bao_tri_ngoai": "Bảo trì ngoài", "nona": "NONA", "ke_hoach": "Dừng có kế hoạch",
+    "chuyen_may": "Chuyển máy", "thieu_vat_tu": "Dừng nguyên vật liệu",
+    "breakdown": "Breakdown", "dung_lat_nhat": "Dừng lắt nhắt", "sp_loi": "Sản phẩm lỗi",
 }
 
 
-def reason_tree() -> dict:
-    return REASON_TREE
+def list_reason_catalog(db: Session, line_code: str = None, category: str = None,
+                        active_only: bool = True) -> list:
+    stmt = select(OeeReasonCatalog)
+    if line_code:
+        stmt = stmt.where((OeeReasonCatalog.line_code == line_code) | (OeeReasonCatalog.line_code.is_(None)))
+    if category:
+        stmt = stmt.where(OeeReasonCatalog.category == category)
+    if active_only:
+        stmt = stmt.where(OeeReasonCatalog.active == True)  # noqa: E712
+    stmt = stmt.order_by(OeeReasonCatalog.category, OeeReasonCatalog.sort_order)
+    rows = db.execute(stmt).scalars().all()
+    return [{"reason_id": r.reason_id, "line_code": r.line_code, "category": r.category,
+             "category_label": CATEGORY_LABELS.get(r.category, r.category), "sub_code": r.sub_code,
+             "sub_label": r.sub_label, "machine_position": r.machine_position,
+             "target_pct": r.target_pct, "active": r.active, "sort_order": r.sort_order} for r in rows]
 
 
-def _resolve(group: str, code: str):
-    g = REASON_TREE.get(group)
-    if not g:
-        raise DomainError(f"Nhóm lý do không hợp lệ: {group}")
-    label = g["reasons"].get(code)
-    if not label:
-        raise DomainError(f"Mã lý do '{code}' không thuộc nhóm '{group}'.")
-    return label, g["loss"]
+def reason_tree(db: Session, line_code: str = None) -> dict:
+    """Cây lý do nhóm theo category — tương thích cách hiển thị cascading select cũ."""
+    rows = list_reason_catalog(db, line_code=line_code)
+    tree = {}
+    for r in rows:
+        g = tree.setdefault(r["category"], {"label": r["category_label"],
+                                            "loss": _CATEGORY_LOSS.get(r["category"], "availability"),
+                                            "reasons": {}})
+        g["reasons"][r["sub_code"]] = r["sub_label"]
+    return tree
+
+
+def create_reason(db: Session, payload: dict, user: User) -> OeeReasonCatalog:
+    require_perm(user, "master.manage")
+    if payload["category"] not in _CATEGORY_LOSS:
+        raise DomainError(f"Nhóm lý do không hợp lệ: {payload['category']}")
+    row = OeeReasonCatalog(reason_id=new_id(), line_code=payload.get("line_code"),
+                           category=payload["category"], sub_code=payload["sub_code"],
+                           sub_label=payload["sub_label"], machine_position=payload.get("machine_position"),
+                           target_pct=float(payload.get("target_pct", 0) or 0),
+                           active=payload.get("active", True), sort_order=int(payload.get("sort_order", 0) or 0))
+    db.add(row)
+    record_audit(db, entity_type="oee_reason_catalog", entity_id=row.reason_id, action="create",
+                actor=user, after={"category": row.category, "sub_code": row.sub_code})
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def update_reason(db: Session, reason_id: str, payload: dict, user: User) -> OeeReasonCatalog:
+    require_perm(user, "master.manage")
+    row = db.get(OeeReasonCatalog, reason_id)
+    if not row:
+        raise NotFoundError("Lý do dừng máy không tồn tại.")
+    for field in ("sub_label", "target_pct", "machine_position", "active", "sort_order"):
+        if field in payload and payload[field] is not None:
+            setattr(row, field, payload[field])
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def delete_reason(db: Session, reason_id: str, user: User) -> None:
+    require_perm(user, "master.manage")
+    row = db.get(OeeReasonCatalog, reason_id)
+    if not row:
+        raise NotFoundError("Lý do dừng máy không tồn tại.")
+    used_events = db.execute(select(func.count(DowntimeEvent.event_id))
+                             .where(DowntimeEvent.reason_catalog_id == reason_id)).scalar() or 0
+    used_tally = db.execute(select(func.count(OeeMinorStopTally.tally_id))
+                            .where(OeeMinorStopTally.reason_id == reason_id)).scalar() or 0
+    if used_events or used_tally:
+        raise DomainError(f"Không thể xóa lý do '{row.sub_label}' — đang được dùng bởi "
+                          f"{used_events} sự kiện dừng máy, {used_tally} bản ghi dừng lắt nhắt.")
+    db.delete(row)
+    record_audit(db, entity_type="oee_reason_catalog", entity_id=reason_id, action="delete",
+                actor=user, before={"category": row.category, "sub_code": row.sub_code})
+    db.commit()
 
 
 def record_downtime(db: Session, payload: dict, user: User) -> DowntimeEvent:
     require_role(user, Role.OPERATOR, Role.SUPERVISOR, Role.ENGINEER)
-    if float(payload.get("minutes", 0) or 0) < 0:
+    reason = db.get(OeeReasonCatalog, payload["reason_catalog_id"])
+    if not reason:
+        raise NotFoundError("Lý do dừng máy không tồn tại.")
+
+    from_time, to_time = payload.get("from_time"), payload.get("to_time")
+    if from_time and to_time:
+        minutes = (to_time - from_time).total_seconds() / 60.0
+    else:
+        minutes = float(payload.get("minutes", 0) or 0)
+    if minutes < 0:
         raise DomainError("Thời gian dừng (phút) không được âm.")
-    label, loss = _resolve(payload["reason_group"], payload["reason_code"])
+
     ev = DowntimeEvent(
         event_id=new_id(), line=payload["line"], equipment_id=payload.get("equipment_id"),
         shift=payload.get("shift", "A"), shift_date=payload.get("shift_date") or utcnow(),
-        reason_group=payload["reason_group"], reason_code=payload["reason_code"],
-        reason_label=label, loss_category=loss, minutes=float(payload.get("minutes", 0) or 0),
+        reason_group=reason.category, reason_code=reason.sub_code, reason_label=reason.sub_label,
+        reason_catalog_id=reason.reason_id, loss_category=_CATEGORY_LOSS.get(reason.category, "availability"),
+        minutes=minutes, start_at=from_time, end_at=to_time,
+        error_code=payload.get("error_code") if reason.category == "breakdown" else None,
         note=payload.get("note"), recorded_by=user.username, recorded_at=utcnow())
     db.add(ev)
     record_audit(db, entity_type="downtime", entity_id=ev.event_id, action="record", actor=user,
@@ -78,7 +151,9 @@ def list_events(db: Session, line: str = None) -> list:
     return [{"event_id": e.event_id, "line": e.line, "shift": e.shift, "shift_date": e.shift_date,
              "reason_group": e.reason_group, "reason_code": e.reason_code,
              "reason_label": e.reason_label, "loss_category": e.loss_category,
-             "minutes": e.minutes, "note": e.note, "recorded_by": e.recorded_by} for e in rows]
+             "minutes": e.minutes, "start_at": e.start_at, "end_at": e.end_at,
+             "error_code": e.error_code, "rcfa_id": e.rcfa_id,
+             "note": e.note, "recorded_by": e.recorded_by} for e in rows]
 
 
 def pareto(db: Session, line: str = None) -> dict:
@@ -109,6 +184,32 @@ def pareto(db: Session, line: str = None) -> dict:
     return {"total_minutes": round(total, 1), "items": items}
 
 
+def pareto_by_category(db: Session, line: str = None) -> dict:
+    """Pareto theo 8 nhóm tổn thất OPI (category) — mirror bảng Pareto chính trong sheet Summary."""
+    stmt = select(DowntimeEvent)
+    if line:
+        stmt = stmt.where(DowntimeEvent.line == line)
+    rows = db.execute(stmt).scalars().all()
+    agg = {}
+    for e in rows:
+        key = e.reason_group
+        if key not in agg:
+            agg[key] = {"category": key, "label": CATEGORY_LABELS.get(key, key), "minutes": 0.0, "count": 0}
+        agg[key]["minutes"] += e.minutes
+        agg[key]["count"] += 1
+    items = sorted(agg.values(), key=lambda x: x["minutes"], reverse=True)
+    total = sum(i["minutes"] for i in items)
+    denom = total or 1.0
+    cum = 0.0
+    for it in items:
+        raw = it["minutes"]
+        cum += raw
+        it["pct"] = round(raw / denom * 100, 1)
+        it["cum_pct"] = round(cum / denom * 100, 1)
+        it["minutes"] = round(raw, 1)
+    return {"total_minutes": round(total, 1), "items": items}
+
+
 def big_losses(db: Session, line: str = None) -> dict:
     """Phân rã 6 big losses theo loss_category (availability/performance/quality)."""
     stmt = select(DowntimeEvent)
@@ -119,7 +220,7 @@ def big_losses(db: Session, line: str = None) -> dict:
     by_group = {}
     for e in rows:
         cats[e.loss_category] = cats.get(e.loss_category, 0.0) + e.minutes
-        g = REASON_TREE.get(e.reason_group, {}).get("label", e.reason_group)
+        g = CATEGORY_LABELS.get(e.reason_group, e.reason_group)
         by_group[g] = round(by_group.get(g, 0.0) + e.minutes, 1)
     return {"by_category": {k: round(v, 1) for k, v in cats.items()},
             "by_group": by_group, "total_minutes": round(sum(cats.values()), 1)}

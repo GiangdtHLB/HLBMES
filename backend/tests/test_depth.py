@@ -88,8 +88,10 @@ def test_mtbf_window_filter(client):
 
 def test_downtime_negative_rejected(client):
     h = _login(client, "quandoc", "123456")
+    reason = client.get("/api/downtime/reason-catalog",
+                        params={"line_code": "CAN30K", "category": "breakdown"}, headers=h).json()[0]
     r = client.post("/api/downtime", headers=h, json={
-        "line": "L", "reason_group": "thiet_bi", "reason_code": "hong_co_khi", "minutes": -5})
+        "line": "L", "reason_catalog_id": reason["reason_id"], "minutes": -5})
     assert r.status_code == 409
 
 

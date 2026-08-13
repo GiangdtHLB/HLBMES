@@ -296,6 +296,7 @@ def seed():
     _seed_isa88(db)
     _seed_quality_adv(db, batch.batch_id)
     _seed_downtime(db)
+    _seed_oee_reason_catalog(db)
     _seed_dispense(db, batch.batch_id, [malt, hop, yeast])
     _seed_lines(db)
     _seed_cip(db)
@@ -698,6 +699,11 @@ def _seed_lines(db) -> None:
                        kind="line", area="chiet", ideal_rate_per_min=300, active=True),
         ProductionLine(line_id=new_id(), code="Line-2 (lon)", name="Dây chuyền lon #2",
                        kind="line", area="chiet", ideal_rate_per_min=500, active=True),
+        # Dây chuyền chiết lon 30K thật (CAN L3, KHS 30K) — Đông Mai, tách riêng khỏi
+        # "Line-2 (lon)" demo cũ vì OeeReasonCatalog/OPI dashboard khai đúng theo file Excel
+        # vận hành thật "OPI - CAN L3 (KHS 30K).xlsx" (xem _seed_oee_reason_catalog).
+        ProductionLine(line_id=new_id(), code="CAN30K", name="Dây chuyền chiết lon 30K (CAN L3, KHS 30K)",
+                       kind="line", area="chiet", ideal_rate_per_min=500, active=True),
     ] + [
         ProductionLine(line_id=new_id(), code=f"FV-0{i}", name=f"Tank lên men {i}",
                        kind="tank", area="len_men", ideal_rate_per_min=0, active=True)
@@ -1063,8 +1069,24 @@ def _seed_quality_adv(db, batch_id) -> None:
 
 
 def _seed_downtime(db) -> None:
-    """#8: sự kiện dừng máy cho reason-tree/Pareto/big-losses (2 line đóng gói)."""
-    from .services.downtime import REASON_TREE
+    """#8: sự kiện dừng máy demo cho Pareto/big-losses (2 line đóng gói cũ, KHÔNG phải
+    CAN30K — xem _seed_oee_reason_catalog cho danh mục lý do CAN30K thật). Nhãn/loss tra tay
+    (REASON_TREE hardcode cũ đã bị thay bằng OeeReasonCatalog theo dây chuyền)."""
+    _LABELS = {
+        ("thiet_bi", "kep_chai"): ("Kẹt chai/lon", "availability"),
+        ("thiet_bi", "hong_co_khi"): ("Hỏng cơ khí", "availability"),
+        ("thiet_bi", "hong_dien"): ("Sự cố điện", "availability"),
+        ("chuyen_doi", "cip"): ("Vệ sinh CIP", "performance"),
+        ("chuyen_doi", "doi_san_pham"): ("Đổi sản phẩm", "performance"),
+        ("thieu_vat_tu", "het_nhan"): ("Hết nhãn", "availability"),
+        ("thieu_vat_tu", "het_co2"): ("Hết CO2", "availability"),
+        ("van_hanh", "cho_lenh"): ("Chờ lệnh sản xuất", "availability"),
+        ("van_hanh", "thieu_nhan_luc"): ("Thiếu nhân lực", "availability"),
+        ("chat_luong", "loi_nhan"): ("Lỗi dán nhãn", "quality"),
+        ("chat_luong", "do_day_sai"): ("Độ đầy sai", "quality"),
+        ("toc_do", "dung_nho"): ("Dừng vặt (micro-stop)", "performance"),
+        ("toc_do", "chay_cham"): ("Chạy dưới tốc độ", "performance"),
+    }
     eqs = db.execute(select(Equipment)).scalars().all()
     eq_by = {e.code: e for e in eqs}
     # (line, group, code, minutes, shift)
@@ -1085,15 +1107,105 @@ def _seed_downtime(db) -> None:
         ("Line-2 (lon)", "thiet_bi", "hong_dien", 28, "A"),
     ]
     for i, (line, grp, code, mins, shift) in enumerate(events):
-        g = REASON_TREE[grp]
+        label, loss = _LABELS[(grp, code)]
         eq = eq_by.get("FILL-01") or (eqs[i % len(eqs)] if eqs else None)
         db.add(DowntimeEvent(event_id=new_id(), line=line,
                              equipment_id=(eq.equipment_id if (eq and i % 3 == 0) else None),
                              shift=shift, shift_date=utcnow() - timedelta(days=i % 5),
                              reason_group=grp, reason_code=code,
-                             reason_label=g["reasons"][code], loss_category=g["loss"],
+                             reason_label=label, loss_category=loss,
                              minutes=mins, recorded_by="truongca",
                              recorded_at=utcnow() - timedelta(hours=i)))
+    db.commit()
+
+
+def _seed_oee_reason_catalog(db) -> None:
+    """Danh mục lý do dừng máy 2 cấp + target % cho CAN30K — trích đúng sheet Target/List của
+    file vận hành thật "OPI - CAN L3 (KHS 30K).xlsx" (8 nhóm tổn thất OPI). target_pct cộng dồn
+    theo category phải khớp đúng % tổng nhóm trong sheet Target (kiểm bằng test_oee_waterfall).
+    """
+    from .models.oee_ext import OeeReasonCatalog
+
+    LINE = "CAN30K"
+
+    def _row(category, sub_code, sub_label, target_pct=0.0, machine_position=None, sort_order=0):
+        return OeeReasonCatalog(reason_id=new_id(), line_code=LINE, category=category,
+                                sub_code=sub_code, sub_label=sub_label, target_pct=target_pct,
+                                machine_position=machine_position, active=True, sort_order=sort_order)
+
+    rows = []
+    # Bảo trì ngoài (target nhóm 0.003)
+    rows += [
+        _row("bao_tri_ngoai", "bao_tri_ngoai", "Bảo trì ngoài", 0.0, sort_order=1),
+        _row("bao_tri_ngoai", "bao_tri_khong_cbnv", "Bảo trì không CBNV", 0.003, sort_order=2),
+    ]
+    # NONA (target nhóm 0.063) — "Không có order" tính tự động ở services/oee_waterfall.py
+    # (thời gian không có bản ghi ca nào), không phải lý do thao tác viên tự khai như đào tạo.
+    rows += [
+        _row("nona", "khong_co_order", "Không có order", 0.0, sort_order=1),
+        _row("nona", "dao_tao_hop", "Đào tạo-họp", 0.063, sort_order=2),
+    ]
+    # Dừng có kế hoạch (target nhóm 0.078) — sub_code khớp đúng tên cột trong CAN30K để nhập
+    # liệu, target dồn từ các mục con chi tiết hơn trong sheet Target (CIP hàng tuần+Vệ sinh
+    # hàng ngày/tuần -> CIP-vệ sinh; Bảo dưỡng hàng ngày/tuần -> Bảo dưỡng...).
+    rows += [
+        _row("ke_hoach", "cip_ve_sinh", "CIP-vệ sinh", 0.044, sort_order=1),
+        _row("ke_hoach", "bao_duong", "Bảo dưỡng", 0.0303, sort_order=2),
+        _row("ke_hoach", "chay_thu", "Chạy thử", 0.0, sort_order=3),
+        _row("ke_hoach", "start_up_line", "Start-up line", 0.001, sort_order=4),
+        _row("ke_hoach", "run_out_line", "Run out line", 0.0015, sort_order=5),
+        _row("ke_hoach", "lay_mau", "Lấy mẫu", 0.001, sort_order=6),
+        _row("ke_hoach", "chay_kiem_tra", "Chạy kiểm tra", 0.0001, sort_order=7),
+        _row("ke_hoach", "dung_khac", "Dừng khác", 0.0001, sort_order=8),
+    ]
+    # Chuyển máy (target nhóm 0.0025) — CAN30K tách theo loại lon đổi sang
+    rows += [
+        _row("chuyen_may", "normal_can", "Normal can", 0.0025, sort_order=1),
+        _row("chuyen_may", "sleek_can", "Sleek can", 0.0, sort_order=2),
+        _row("chuyen_may", "can_250ml", "Can 250ml", 0.0, sort_order=3),
+    ]
+    # Dừng nguyên vật liệu (target nhóm 0.001)
+    rows += [
+        _row("thieu_vat_tu", "mat_dien", "Mất điện", 0.0002, sort_order=1),
+        _row("thieu_vat_tu", "mat_nuoc", "Mất nước", 0.0003, sort_order=2),
+        _row("thieu_vat_tu", "mat_hoi", "Mất hơi", 0.0, sort_order=3),
+        _row("thieu_vat_tu", "mat_khi_nen", "Mất khí nén", 0.0001, sort_order=4),
+        _row("thieu_vat_tu", "cho_bia", "Chờ bia", 0.0002, sort_order=5),
+        _row("thieu_vat_tu", "cho_co2", "Chờ CO2", 0.0002, sort_order=6),
+        _row("thieu_vat_tu", "cho_vat_lieu", "Chờ vật liệu", 0.0, sort_order=7),
+    ]
+    # Breakdown (target nhóm 0.025) — 10 vị trí máy thật của CAN30K (sheet List cột B); target
+    # gộp vào 1 dòng "chung" vì file gốc chỉ theo dõi % Breakdown tổng, không tách theo vị trí.
+    positions = ["Dỡ lon", "Băng tải", "Chiết", "Hầm TT", "Thổi khô", "KT mức",
+                 "Đóng thùng", "Xếp thùng", "In code", "Cân thùng"]
+    rows.append(_row("breakdown", "chung", "Breakdown (chung)", 0.025, sort_order=0))
+    for i, pos in enumerate(positions, start=1):
+        rows.append(_row("breakdown", f"vt_{i}", pos, 0.0, machine_position=pos, sort_order=i))
+    # Dừng lắt nhắt (target nhóm 0.0265, gán vào dòng "Tổng dừng" — residual ở waterfall) +
+    # 14 lý do lắt nhắt cụ thể (đếm số lần theo tuần qua OeeMinorStopTally, sheet MS&SL).
+    rows.append(_row("dung_lat_nhat", "tong_dung", "Tổng dừng", 0.0265, sort_order=0))
+    minor_causes = [
+        "Xe nâng không vào kệ vỏ lon kịp thời ở máy dỡ lon",
+        "Mắc lon, đổ lon trên băng tải máy dỡ lon",
+        "Lon méo vào máy chiết",
+        "Phun nước vệ sinh băng tải làm sensor báo đầy băng tải máy chiết",
+        "Mắc lon, đổ lon trên băng tải máy thổi khô",
+        "Lon sleek đổ mắc vào vị trí đổ lon sau in phun",
+        "Nhiều lon vơi, đạp lon không kịp, làm mắc lon trên băng tải",
+        "Đổ lon trên băng tải đầu vào máy đóng hộp",
+        "Kẹt kệ máy đóng hộp do kệ gãy, rác che sensor",
+        "Kênh kệ do rác trên kệ máy đống hộp",
+        "Hộp lỗi dán đi lên máy xếp hộp",
+        "Dồn hộp, đầy kệ lao vỉ vào cần gạt tiến lùi",
+        "Xe nâng không lấy kệ kịp thời",
+        "Dừng khác",
+    ]
+    for i, cause in enumerate(minor_causes, start=1):
+        rows.append(_row("dung_lat_nhat", f"ms_{i}", cause, 0.0, sort_order=i))
+    # Sản phẩm lỗi (target nhóm 0.001)
+    rows.append(_row("sp_loi", "sp_loi", "Sản phẩm lỗi", 0.001, sort_order=1))
+
+    db.add_all(rows)
     db.commit()
 
 

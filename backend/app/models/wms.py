@@ -44,6 +44,12 @@ class WmsLocation(Base):
     # Kho thành phẩm cha — nullable để không phá các nơi tạo vị trí qua API cũ (test/import)
     # chưa kịp gửi trường này, nhưng UI luôn bắt chọn khi khai báo vị trí mới (xem VIEWS.wms).
     warehouse_id: Mapped[Optional[str]] = mapped_column(ForeignKey("wms_warehouse.warehouse_id"), nullable=True, index=True)
+    # Tọa độ hàng/cột trên "Bố cục kho" (bản đồ vị trí tự vẽ, admin kéo-thả gán) — None = CHƯA
+    # xếp bố cục. KHÔNG dùng mã vị trí (code) để suy ra vị trí vẽ trên sơ đồ như bản cũ (mã vị
+    # trí trên server thật vd "DM.K01" không theo quy luật cố định nào để tự đoán) — bố cục phải
+    # do admin tự xếp qua UI kéo-thả, sơ đồ kho chỉ vẽ lại đúng layout_row/layout_col đã lưu.
+    layout_row: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    layout_col: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
 
 class FinishedGoodsUnit(Base):
@@ -139,6 +145,13 @@ class Shipment(Base):
     shipment_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
     shipment_code: Mapped[str] = mapped_column(Unicode(64), unique=True, index=True)
     ship_to_id: Mapped[str] = mapped_column(ForeignKey("supplier.supplier_id"), index=True)
+    # Kho xuất — ghi lại tham số warehouse_id CALLER truyền vào create_shipment() (None nếu
+    # tài khoản không bị giới hạn kho và không chọn kho cụ thể) — dùng để chặn tài khoản bị
+    # giới hạn 1 kho thành phẩm (wms_warehouse_scope) xác nhận/sửa/hoàn tác phiếu của kho khác
+    # (xem confirm_shipment/update_shipment/undo_shipment) — KHÔNG chặn phiếu cũ/warehouse_id
+    # rỗng, theo đúng quy ước "chưa rõ -> không khóa cứng" của _assert_wh_scope.
+    warehouse_id: Mapped[Optional[str]] = mapped_column(ForeignKey("wms_warehouse.warehouse_id"),
+                                                         nullable=True, index=True)
     created_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
     note: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)  # Lý do xuất kho

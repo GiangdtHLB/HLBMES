@@ -9,7 +9,8 @@ from ..schemas import (ConsignedEntryIn, ConsignedEntryUpdate, DecomposeBatchIn,
                        FactoryImportEntryIn, FactoryImportEntryUpdate, FreeIssueBatchIn,
                        LoadSlipHeaderUpdate, NearExpiryEntryIn, NearExpiryEntryUpdate, PutawayIn, RelocateBatchIn,
                        ShipmentIn, ShipmentTripIn, ShipmentUpdate, UnitBuildIn, UnitDeleteIn, UnitTransferIn,
-                       VehicleIn, VehicleUpdate, WmsLocationIn, WmsLocationUpdate, WmsTransferIn, WmsTransferTripIn,
+                       VehicleIn, VehicleUpdate, WmsLocationIn, WmsLocationLayoutIn, WmsLocationUpdate,
+                       WmsTransferIn, WmsTransferTripIn,
                        WmsTransferUpdate, WmsWarehouseIn, WmsWarehouseUpdate)
 from ..security import User, get_current_user, require_perm, require_role
 from ..services import load_slip as load_slip_svc
@@ -31,7 +32,7 @@ def warehouses(db: Session = Depends(get_db), user: User = Depends(get_current_u
 @router.get("/warehouses/{warehouse_id}/floor-map")
 def warehouse_floor_map(warehouse_id: str, db: Session = Depends(get_db),
                         user: User = Depends(get_current_user)):
-    return svc.warehouse_floor_map(db, warehouse_id)
+    return svc.warehouse_floor_map(db, warehouse_id, user)
 
 
 @router.post("/warehouses", status_code=201)
@@ -83,6 +84,14 @@ def delete_location(loc_id: str, db: Session = Depends(get_db), user: User = Dep
     svc.delete_location(db, loc_id)
 
 
+@router.put("/locations/{loc_id}/layout")
+def update_location_layout(loc_id: str, payload: WmsLocationLayoutIn, db: Session = Depends(get_db),
+                           user: User = Depends(get_current_user)):
+    require_role(user, Role.ADMIN)
+    loc = svc.set_location_layout(db, loc_id, payload.row, payload.col)
+    return {"loc_id": loc.loc_id, "layout_row": loc.layout_row, "layout_col": loc.layout_col}
+
+
 @router.get("/vehicles")
 def vehicle_list(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     return svc.list_vehicles(db)
@@ -119,24 +128,26 @@ def vehicle_delete(vehicle_id: str, db: Session = Depends(get_db), user: User = 
 def units(status: str = None, unit_type: str = None, product: str = None, lot_code: str = None,
           limit: int = 1000, offset: int = 0,
           db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    return svc.list_units(db, status, unit_type, product, lot_code, limit, offset)
+    return svc.list_units(db, status, unit_type, product, lot_code, limit, offset, user=user)
 
 
 @router.get("/units/by-location")
 def units_by_location(loc_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    return svc.list_lot_summaries_by_location(db, loc_id)
+    return svc.list_lot_summaries_by_location(db, loc_id, user)
 
 
 @router.post("/units/delete-by-lot")
 def delete_units_by_lot(payload: DeleteByLotIn, db: Session = Depends(get_db),
                         user: User = Depends(get_current_user)):
-    return svc.delete_units_by_criteria(db, payload.product_name, payload.lot_code, payload.unit_type, user)
+    return svc.delete_units_by_criteria(db, payload.product_name, payload.lot_code, payload.unit_type, user,
+                                        warehouse_id=payload.warehouse_id)
 
 
 @router.post("/units/confirm-receipt-by-lot")
 def confirm_receipt_by_lot(payload: DeleteByLotIn, db: Session = Depends(get_db),
                            user: User = Depends(get_current_user)):
-    return svc.confirm_receipt_by_lot(db, payload.product_name, payload.lot_code, payload.unit_type, user)
+    return svc.confirm_receipt_by_lot(db, payload.product_name, payload.lot_code, payload.unit_type, user,
+                                      warehouse_id=payload.warehouse_id)
 
 
 @router.post("/units", status_code=201)
@@ -190,7 +201,8 @@ def decompose_unit(unit_id: str, db: Session = Depends(get_db), user: User = Dep
 @router.post("/units/decompose-batch", status_code=201)
 def decompose_batch(payload: DecomposeBatchIn, db: Session = Depends(get_db),
                     user: User = Depends(get_current_user)):
-    return svc.decompose_batch(db, payload.product_name, payload.lot_code, payload.unit_type, payload.count, user)
+    return svc.decompose_batch(db, payload.product_name, payload.lot_code, payload.unit_type, payload.count, user,
+                               warehouse_id=payload.warehouse_id)
 
 
 @router.post("/units/decompose-batch/{audit_id}/undo")
@@ -225,13 +237,13 @@ def free_issue_history(db: Session = Depends(get_db), user: User = Depends(get_c
 
 @router.get("/units/by-lot")
 def units_by_lot(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    return svc.list_lot_summaries(db)
+    return svc.list_lot_summaries(db, user)
 
 
 @router.get("/shipments")
 def shipments(limit: int = 200, offset: int = 0, db: Session = Depends(get_db),
              user: User = Depends(get_current_user)):
-    return svc.list_shipments(db, limit, offset)
+    return svc.list_shipments(db, limit, offset, user)
 
 
 @router.post("/shipments", status_code=201)
@@ -268,7 +280,7 @@ def update_shipment_trip(shipment_id: str, payload: ShipmentTripIn, db: Session 
 @router.get("/transfers")
 def transfers(limit: int = 200, offset: int = 0, db: Session = Depends(get_db),
              user: User = Depends(get_current_user)):
-    return svc.list_transfers(db, limit, offset)
+    return svc.list_transfers(db, limit, offset, user)
 
 
 @router.post("/transfers", status_code=201)
@@ -310,7 +322,7 @@ def create_near_expiry(payload: NearExpiryEntryIn, db: Session = Depends(get_db)
 
 @router.get("/near-expiry")
 def list_near_expiry(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    return svc.list_near_expiry_entries(db)
+    return svc.list_near_expiry_entries(db, user)
 
 
 @router.put("/near-expiry/{entry_id}")
@@ -339,7 +351,7 @@ def create_consigned(payload: ConsignedEntryIn, db: Session = Depends(get_db),
 
 @router.get("/consigned")
 def list_consigned(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    return svc.list_consigned_entries(db)
+    return svc.list_consigned_entries(db, user)
 
 
 @router.put("/consigned/{entry_id}")
@@ -369,7 +381,7 @@ def create_factory_import(payload: FactoryImportEntryIn, db: Session = Depends(g
 
 @router.get("/factory-import")
 def list_factory_import(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    return svc.list_factory_import_entries(db)
+    return svc.list_factory_import_entries(db, user)
 
 
 @router.put("/factory-import/{entry_id}")
@@ -424,4 +436,4 @@ def delete_load_slip(load_slip_id: str, db: Session = Depends(get_db), user: Use
 
 @router.get("/resolve")
 def resolve(code: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    return svc.resolve(db, code)
+    return svc.resolve(db, code, user)

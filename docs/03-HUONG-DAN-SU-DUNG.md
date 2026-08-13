@@ -680,18 +680,19 @@ Theo trạm biến áp: Trạm 560 KVA — 3.841.446 kWh · Trạm 320 KVA — 2
 
 ## 16. OEE / Dừng máy
 
-> **⚠️ Màn hình chưa hoạt động.** Tab **OEE/Dừng máy** đã có nút trên thanh điều hướng (`data-view="oee"`, class `nav-unused`) nhưng **chưa được lập trình** — bấm vào không hiển thị gì (không có `VIEWS.oee` trong `frontend/app.js`, section tương ứng trong `frontend/index.html` đang để trống; lỗi bị nuốt âm thầm, không có thông báo rõ ràng cho người dùng). Phần dưới đây mô tả **dữ liệu và tính năng đã có ở backend**, không phải các bước thao tác trên UI — vì UI này chưa tồn tại.
+**Mục đích:** theo dõi OPI (Overall Performance Indicator, tương đương OEE) và dừng máy cho dây chuyền chiết lon 30K (Đông Mai), mô phỏng đúng nghiệp vụ file vận hành thật "OPI - CAN L3 (KHS 30K).xlsx" dùng trong họp sản xuất hàng tuần: thác nước tổn thất theo tháng, cây lý do dừng máy 8 nhóm có target %, RCFA (phân tích nguyên nhân gốc) + 5 Whys, và Pareto dừng lắt nhắt theo tuần (MS&SL).
 
-**Backend đã xây (chưa có màn hình sử dụng):**
+**Ai dùng:** vận hành/quản đốc dây chuyền (ghi ca, ghi dừng máy, RCFA), quản trị hệ thống (Danh mục lý do & Target).
 
-- **Model:** `OEERecord` (bản ghi OEE theo dây chuyền/ca — availability/performance/quality) và `DowntimeEvent` (sự kiện dừng máy theo lý do).
-- **Tính OEE:** service `compute_oee` — tính % Availability/Performance/Quality từ 1 bản ghi OEE.
-- **Cây lý do dừng máy (reason-tree):** hằng số `REASON_TREE` hardcode trong `backend/app/services/downtime.py`, dùng **chung 1 cây cho mọi dây chuyền** (chưa phân theo loại dây chuyền/thiết bị).
-- **Pareto thời gian dừng** — service `pareto()`: xếp hạng giảm dần theo phút dừng cho từng lý do, kèm %/% tích lũy/số lần.
-- **Phân rã big losses** — service `big_losses()`: gộp theo `loss_category`, thực tế chỉ có **3 nhóm** (availability/performance/quality), không phải "6 big losses" theo đúng nghĩa TPM.
-- **MTBF/MTTR** — service `mtbf_mttr()`: số lần hỏng, MTBF (giờ), MTTR (phút), % khả dụng theo thiết bị, tính trong cửa sổ N ngày gần nhất (dựa trên `Incident` + `DowntimeEvent`).
+Đầu màn hình có ô **Dây chuyền OEE** (chọn dây chuyền, mặc định CAN30K) áp dụng cho mọi tab bên dưới trừ MTBF/MTTR. 7 tab:
 
-Các dữ liệu/logic trên hiện chỉ truy cập được qua API backend hoặc DB trực tiếp — chưa có cách nào nhập OEE theo ca hoặc ghi sự kiện dừng máy từ giao diện người dùng.
+1. **Dashboard OPI** — chọn Năm/Tháng, hiện 3 số **OPI / OPI NONA / Efficiency** so Target (donut, màu đỏ/vàng/xanh theo ngưỡng), bảng tổn thất 8 nhóm (Bảo trì ngoài, NONA, Dừng có kế hoạch, Chuyển máy, Dừng nguyên vật liệu, Breakdown, Dừng lắt nhắt, Sản phẩm lỗi) so Target %, bảng thác nước tổn thất tháng (17 dòng A→R, mỗi dòng trừ đi khối lượng phút của bước sau — công thức đầy đủ tại `backend/app/services/oee_waterfall.py`), và Pareto theo nhóm lý do.
+2. **Nhập ca** — chọn Ca (Ca1/Ca2/Ca3/Kip1/Kip2), nhập TG kế hoạch, Dừng (phút), Tốc độ lý tưởng (tự điền theo dây chuyền), **SP tốt**/**SP lỗi** tách riêng đúng cách nhập file gốc.
+3. **Ghi dừng máy** — chọn Nhóm lý do (8 nhóm) → Lý do con (cascading, tra theo Danh mục), nhập Dừng từ/đến (tự tính phút); nhóm Breakdown hiện thêm ô **Mã lỗi**. Khi phút dừng ≥ 30, hiện nút **Tạo RCFA từ sự kiện này** mở thẳng form RCFA điền sẵn dây chuyền/máy/thời điểm/thời lượng.
+4. **RCFA** — danh sách + nút **Thêm RCFA** (form đầy đủ: máy, bộ phận, thời gian dừng/sửa/chờ, mô tả, vật tư thay thế, nguyên lý hoạt động, cơ chế hư hỏng, **5 Whys** với 10 nhóm nguyên nhân cố định, phân loại **4M1E**, khắc phục/phòng ngừa); mã RCFA tự sinh dạng `RCFA-{năm}-{số thứ tự}`. Nút **Recheck** mở bảng tick 12 tuần (W+1..W+12) theo dõi tái diễn, mỗi tuần có ô ghi chú.
+5. **Dừng lắt nhắt (MS&SL)** — bảng 14 lý do lắt nhắt cố định (đếm **số lần**, khác với "Dừng lắt nhắt" ở Dashboard là phút residual không giải trình được) × ô nhập số lần theo Năm ISO/Tuần/Ca đã chọn, nút **Lưu số liệu tuần**; bên dưới là Pareto lũy kế cả năm.
+6. **MTBF/MTTR** — giữ nguyên bảng cũ (không đổi công thức), không phụ thuộc dây chuyền đang chọn ở đầu trang.
+7. **Danh mục lý do & Target** — CRUD `OeeReasonCatalog` theo dây chuyền, sửa Target % từng lý do (quyền `master.manage`); người không có quyền này chỉ xem được, không thấy nút Thêm/Sửa/Xóa.
 
 ---
 

@@ -38,6 +38,7 @@ from .routers import (
     maintenance,
     master,
     materials,
+    oee_rcfa,
     orders,
     packaging,
     performance,
@@ -156,7 +157,7 @@ async def _perm(_: Request, exc: PermissionError_):
 for r in (auth, master, orders, workorders, recipes, formula, batches, materials, dispense, quality,
           quality_adv, traceability, performance, downtime, warehouse, energy, maintenance,
           process, brewing, reports, historian, scan, schedule, ai, jobs, isa88, wms,
-          label, lines, packaging, import_explorer, gateway, audit, cip):
+          label, lines, packaging, import_explorer, gateway, audit, cip, oee_rcfa):
     app.include_router(r.router)
 
 

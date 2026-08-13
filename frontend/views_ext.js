@@ -616,77 +616,464 @@
   };
 
   // ======================================================================
-  // #8 — OEE & DỪNG MÁY (reason-tree / Pareto / big losses / MTBF)
+  // #8 — OEE & DỪNG MÁY — mirror nghiệp vụ file vận hành thật
+  //   "OPI - CAN L3 (KHS 30K).xlsx": Dashboard OPI (thác nước A→R + target %),
+  //   Nhập ca, Ghi dừng máy (danh mục 8 nhóm), RCFA + 5 Whys, Dừng lắt nhắt
+  //   (MS&SL, đếm SỐ LẦN theo tuần), MTBF/MTTR, Danh mục lý do & Target.
+  //   Công thức thác nước đầy đủ: backend/app/services/oee_waterfall.py.
   // ======================================================================
+  const OEE_CAT_LABELS = {
+    bao_tri_ngoai: "Bảo trì ngoài", nona: "NONA", ke_hoach: "Dừng có kế hoạch",
+    chuyen_may: "Chuyển máy", thieu_vat_tu: "Dừng nguyên vật liệu",
+    breakdown: "Breakdown", dung_lat_nhat: "Dừng lắt nhắt", sp_loi: "Sản phẩm lỗi",
+  };
+  const OEE_5WHY_CATS = [
+    ["qua_tai", "Quá tải"], ["hu_hong_theo_thoi_gian", "Hư hỏng theo thời gian"],
+    ["hong_dot_ngot", "Hỏng đột ngột"], ["ap_luc_tang_dan", "Áp lực tăng dần"],
+    ["dieu_kien_co_ban", "Điều kiện cơ bản"], ["dieu_kien_van_hanh", "Điều kiện vận hành"],
+    ["hu_hong_do_quen", "Hư hỏng do quên"], ["diem_yeu_thiet_ke", "Điểm yếu thiết kế"],
+    ["loi_tho_van_hanh", "Lỗi thợ vận hành"], ["loi_tho_bao_duong", "Lỗi thợ bảo dưỡng"],
+  ];
+  const OEE_4M1E = [["method", "Phương pháp"], ["material", "Nguyên vật liệu"],
+    ["machine", "Máy móc"], ["man", "Con người"]];
+  const OEE_SHIFTS = ["Ca1", "Ca2", "Ca3", "Kip1", "Kip2"];
+  let OEE_SEL = { line: "", year: new Date().getFullYear(), month: new Date().getMonth() + 1,
+    msYear: new Date().getFullYear() };
+  let OEE_MS_WEEK = { week: 1, shift: "Ca1" };
+  let OEE_CATALOG_CACHE = null;   // { line, rows } — cache danh mục lý do theo dây chuyền đang chọn
+
+  async function oeeLineOptions() {
+    const lns = await GET("/lines?active_only=true&kind=line").catch(() => []);
+    if ((!OEE_SEL.line || !lns.some(l => l.code === OEE_SEL.line)) && lns.length) {
+      OEE_SEL.line = (lns.find(l => l.code === "CAN30K") || lns[0]).code;
+    }
+    return lns;
+  }
+  async function oeeCatalogForLine() {
+    if (OEE_CATALOG_CACHE && OEE_CATALOG_CACHE.line === OEE_SEL.line) return OEE_CATALOG_CACHE.rows;
+    const rows = await GET(`/downtime/reason-catalog?line_code=${encodeURIComponent(OEE_SEL.line)}`);
+    OEE_CATALOG_CACHE = { line: OEE_SEL.line, rows };
+    return rows;
+  }
+
   VIEWS.oee = async function () {
     const root = $("view-oee");
-    const [oee, tree, pareto, losses, mtbf, lns] = await Promise.all([
-      GET("/oee"), GET("/downtime/reason-tree"), GET("/downtime/pareto"),
-      GET("/downtime/big-losses"), GET("/downtime/mtbf"), GET("/lines?active_only=true&kind=line").catch(() => [])]);
-    const donuts = oee.map(r => `<div class="panel" style="text-align:center">
-      <h3>${esc(r.line)} · ca ${esc(r.shift)}</h3>${CH.donut(r.oee, { label: "OEE" })}
-      <div class="muted" style="font-size:12px">A ${(r.availability * 100).toFixed(0)}% · P ${(r.performance * 100).toFixed(0)}% · Q ${(r.quality * 100).toFixed(0)}%</div></div>`).join("");
-    const groups = Object.keys(tree);
-    const lineOpts = lns.map(l => `<option value="${esc(l.code)}" data-rate="${l.ideal_rate_per_min}">${esc(l.code)}</option>`).join("")
-      || `<option value="">(chưa có dây chuyền — thêm ở Danh mục)</option>`;
-    root.innerHTML = `
-      ${panel("⚙️ OEE đóng gói", `<div class="split">${donuts || '<div class="muted">—</div>'}</div>`)}
-      ${panel("📝 Nhập OEE theo ca (chọn dây chuyền)", `
-        <div class="row">
-          <div class="field"><label>Dây chuyền</label><select id="oe_line">${lineOpts}</select></div>
-          <div class="field"><label>Ca</label><select id="oe_shift"><option>A</option><option>B</option><option>C</option></select></div>
-          <div class="field"><label>TG kế hoạch (phút)</label><input id="oe_plan" value="480" style="width:90px"/></div>
-          <div class="field"><label>Dừng (phút)</label><input id="oe_dt" value="60" style="width:80px"/></div>
-          <div class="field"><label>Tốc độ lý tưởng</label><input id="oe_rate" value="0" style="width:90px"/></div>
-          <div class="field"><label>Tổng SP</label><input id="oe_tot" value="0" style="width:90px"/></div>
-          <div class="field"><label>SP đạt</label><input id="oe_good" value="0" style="width:90px"/></div>
-          <div class="field" style="align-self:flex-end"><button class="btn" id="oe_go">Ghi OEE</button></div>
-        </div>
-        <div class="muted" style="margin-top:4px">Thêm/ngừng dây chuyền ở tab <b>Danh mục</b>.</div>`)}
-      ${panel("⏱️ Ghi sự kiện dừng máy (reason-tree)", `
-        <div class="row">
-          <div class="field"><label>Line</label><select id="dt_line">${lineOpts}</select></div>
-          <div class="field"><label>Nhóm lý do</label><select id="dt_grp">${groups.map(g => `<option value="${g}">${esc(tree[g].label)}</option>`).join("")}</select></div>
-          <div class="field"><label>Lý do</label><select id="dt_code"></select></div>
-          <div class="field"><label>Phút</label><input id="dt_min" value="15" style="width:80px"/></div>
-          <div class="field"><label>Ca</label><select id="dt_shift"><option>A</option><option>B</option><option>C</option></select></div>
-          <div class="field" style="align-self:flex-end"><button class="btn" id="dt_go">Ghi</button></div>
-        </div>`)}
-      ${panel("📊 Pareto thời gian dừng theo lý do", `
-        ${CH.vbars((pareto.items || []).map(i => ({ label: i.label, value: i.minutes })), { unit: "phút", color: "#e67e22" })}
-        <div class="tablewrap" style="margin-top:8px"><table><thead><tr><th>Lý do</th><th>Phút</th><th>%</th><th>Tích lũy %</th><th>Số lần</th></tr></thead>
-        <tbody>${(pareto.items || []).map(i => `<tr><td>${esc(i.label)}</td><td>${i.minutes}</td><td>${i.pct}%</td><td>${i.cum_pct}%</td><td>${i.count}</td></tr>`).join("")}</tbody></table></div>`)}
-      ${panel("🥧 Phân rã 6 big losses", `<div class="split">
-        <div>${CH.pie(Object.entries(losses.by_category).map(([k, v]) => ({ label: k, value: v })))}</div>
-        <div>${CH.pie(Object.entries(losses.by_group).map(([k, v]) => ({ label: k, value: v })))}</div></div>`)}
-      ${panel("🔧 MTBF / MTTR theo thiết bị", `
-        <div class="muted" style="margin-bottom:6px">Cửa sổ ${mtbf.window_days} ngày.</div>
-        <div class="tablewrap"><table><thead><tr><th>Thiết bị</th><th>Số lần hỏng</th><th>MTBF (giờ)</th><th>MTTR (phút)</th><th>Khả dụng</th><th>Dừng (phút)</th></tr></thead>
-        <tbody>${(mtbf.equipment || []).map(e => `<tr><td>${esc(e.name)}</td><td>${e.failures}</td>
-          <td>${e.mtbf_hours ?? "—"}</td><td>${e.mttr_min ?? "—"}</td><td>${e.availability_pct}%</td><td>${e.downtime_min}</td></tr>`).join("")}</tbody></table></div>`)}
-    `;
-    function fillCodes() {
-      const g = $("dt_grp").value;
-      $("dt_code").innerHTML = Object.entries(tree[g].reasons).map(([c, l]) => `<option value="${c}">${esc(l)}</option>`).join("");
+    const sec = SUB.oee || "dashboard";
+    const sections = [
+      { key: "dashboard", label: "📊 Dashboard OPI" }, { key: "ca", label: "📝 Nhập ca" },
+      { key: "dungmay", label: "⏱️ Ghi dừng máy" }, { key: "rcfa", label: "🔧 RCFA" },
+      { key: "mssl", label: "📉 Dừng lắt nhắt (MS&SL)" }, { key: "mtbf", label: "🔩 MTBF/MTTR" },
+      { key: "danhmuc", label: "🗂️ Danh mục lý do & Target" },
+    ];
+    const lns = await oeeLineOptions();
+    const lineBar = panel("Dây chuyền OEE", `<div class="row">
+      <div class="field"><label>Chọn dây chuyền</label><select id="oee_line_sel">
+        ${lns.map(l => `<option value="${esc(l.code)}" ${l.code === OEE_SEL.line ? "selected" : ""}>${esc(l.code)}</option>`).join("")
+          || `<option value="">(chưa có — thêm ở Danh mục chung)</option>`}</select></div>
+      <div class="muted" style="align-self:flex-end;padding-bottom:8px">Áp dụng cho tất cả các tab OEE bên dưới (trừ MTBF/MTTR — theo mọi thiết bị).</div>
+    </div>`);
+
+    let body = "";
+    if (sec === "dashboard") body = await renderOeeDashboard();
+    else if (sec === "ca") body = renderOeeShiftForm(lns);
+    else if (sec === "dungmay") body = await renderOeeDowntimeForm();
+    else if (sec === "rcfa") body = await renderOeeRcfa();
+    else if (sec === "mssl") body = await renderOeeMinorStop();
+    else if (sec === "mtbf") body = await renderOeeMtbf();
+    else if (sec === "danhmuc") body = await renderOeeCatalog();
+
+    root.innerHTML = (sec === "mtbf" ? "" : lineBar) + subnav("oee", sections, sec) + body;
+    wireSubnav("oee");
+    if (sec !== "mtbf") {
+      const lineSel = $("oee_line_sel");
+      if (lineSel) lineSel.onchange = () => { OEE_SEL.line = lineSel.value; render("oee"); };
     }
-    $("dt_grp").onchange = fillCodes; fillCodes();
-    $("dt_go").onclick = () => guard(async () => {
-      await POST("/downtime", { line: $("dt_line").value, reason_group: $("dt_grp").value,
-        reason_code: $("dt_code").value, minutes: num("dt_min") || 0, shift: $("dt_shift").value });
-      toast("Đã ghi sự kiện dừng"); render("oee");
-    });
-    // Tự điền tốc độ lý tưởng theo dây chuyền chọn.
-    const syncRate = () => { const o = $("oe_line").selectedOptions[0]; if (o && o.dataset.rate) $("oe_rate").value = o.dataset.rate; };
-    $("oe_line").onchange = syncRate; syncRate();
+    if (sec === "dashboard") wireOeeDashboard();
+    else if (sec === "ca") wireOeeShiftForm();
+    else if (sec === "dungmay") wireOeeDowntimeForm();
+    else if (sec === "rcfa") wireOeeRcfa();
+    else if (sec === "mssl") wireOeeMinorStop();
+    else if (sec === "danhmuc") wireOeeCatalog();
+  };
+
+  // ---- Tab 1: Dashboard OPI (thác nước A→R + OPI/OPI NONA/Efficiency so target) ----
+  async function renderOeeDashboard() {
+    if (!OEE_SEL.line) return panel("📊 Dashboard OPI", `<div class="muted">Chưa có dây chuyền active.</div>`);
+    const q = `line_code=${encodeURIComponent(OEE_SEL.line)}&year=${OEE_SEL.year}&month=${OEE_SEL.month}`;
+    const [summary, pareto] = await Promise.all([
+      GET(`/downtime/opi-summary?${q}`).catch(() => null),
+      GET(`/downtime/pareto-by-category?line=${encodeURIComponent(OEE_SEL.line)}`).catch(() => ({ items: [] })),
+    ]);
+    if (!summary) return panel("📊 Dashboard OPI", `<div class="muted">Không tải được dữ liệu cho dây chuyền này.</div>`);
+    const yearOpts = Array.from({ length: 6 }, (_, i) => new Date().getFullYear() + 1 - i)
+      .map(y => `<option value="${y}" ${y === OEE_SEL.year ? "selected" : ""}>${y}</option>`).join("");
+    const monthOpts = Array.from({ length: 12 }, (_, i) => i + 1)
+      .map(m => `<option value="${m}" ${m === OEE_SEL.month ? "selected" : ""}>Tháng ${m}</option>`).join("");
+    const catRows = summary.by_category.map(c => `<tr><td>${esc(c.label)}</td>
+      <td>${(c.actual_pct * 100).toFixed(2)}%</td><td>${(c.target_pct * 100).toFixed(2)}%</td>
+      <td>${c.actual_pct > c.target_pct ? `<span class="badge critical">Vượt target</span>` : `<span class="badge available">Đạt</span>`}</td>
+      <td>${c.actual_minutes.toLocaleString("vi-VN")}</td></tr>`).join("");
+    const wfRows = summary.waterfall.map(r => `<tr><td><b>${esc(r.code)}</b></td><td>${esc(r.label)}</td>
+      <td>${r.minutes.toLocaleString("vi-VN")}</td></tr>`).join("");
+    return `
+      ${panel("Kỳ báo cáo", `<div class="row" style="align-items:flex-end">
+        <div class="field"><label>Năm</label><select id="oe_d_year">${yearOpts}</select></div>
+        <div class="field"><label>Tháng</label><select id="oe_d_month">${monthOpts}</select></div>
+        <button class="btn" id="oe_d_go">Xem</button>
+      </div>`)}
+      ${panel("OPI / OPI NONA / Efficiency so Target", `<div class="split">
+        <div style="text-align:center"><h3>OPI</h3>${CH.donut(summary.opi, {})}
+          <div class="muted" style="font-size:12px">Target ${(summary.opi_target * 100).toFixed(1)}%</div></div>
+        <div style="text-align:center"><h3>OPI NONA</h3>${CH.donut(summary.opi_nona, {})}
+          <div class="muted" style="font-size:12px">Target ${(summary.opi_nona_target * 100).toFixed(1)}%</div></div>
+        <div style="text-align:center"><h3>Efficiency</h3>${CH.donut(summary.efficiency, {})}
+          <div class="muted" style="font-size:12px">Target ${(summary.efficiency_target * 100).toFixed(1)}%</div></div>
+      </div>`)}
+      ${panel("Tổn thất 8 nhóm so Target", `<div class="tablewrap"><table><thead><tr>
+        <th>Nhóm</th><th>Thực tế %</th><th>Target %</th><th>Trạng thái</th><th>Phút</th></tr></thead>
+        <tbody>${catRows}</tbody></table></div>`)}
+      ${panel("Thác nước tổn thất tháng (A → R)", `<div class="tablewrap"><table><thead><tr>
+        <th>Mã</th><th>Diễn giải</th><th>Phút</th></tr></thead><tbody>${wfRows}</tbody></table></div>`)}
+      ${panel("Pareto theo nhóm lý do (toàn thời gian đã ghi nhận)", `
+        ${CH.vbars((pareto.items || []).map(i => ({ label: i.label, value: i.minutes })), { unit: "phút", color: "#e67e22" })}
+        <div class="tablewrap" style="margin-top:8px"><table><thead><tr><th>Nhóm</th><th>Phút</th><th>%</th><th>Tích lũy %</th><th>Số lần</th></tr></thead>
+        <tbody>${(pareto.items || []).map(i => `<tr><td>${esc(i.label)}</td><td>${i.minutes}</td><td>${i.pct}%</td><td>${i.cum_pct}%</td><td>${i.count}</td></tr>`).join("")}</tbody></table></div>`)}
+    `;
+  }
+  function wireOeeDashboard() {
+    if (!$("oe_d_go")) return;
+    $("oe_d_go").onclick = () => {
+      OEE_SEL.year = parseInt($("oe_d_year").value) || OEE_SEL.year;
+      OEE_SEL.month = parseInt($("oe_d_month").value) || OEE_SEL.month;
+      render("oee");
+    };
+  }
+
+  // ---- Tab 2: Nhập ca (SP tốt/SP lỗi tách riêng đúng cách nhập file gốc) ----
+  function renderOeeShiftForm(lns) {
+    const line = lns.find(l => l.code === OEE_SEL.line);
+    const rate = line ? line.ideal_rate_per_min : 0;
+    return panel("📝 Nhập ca — " + esc(OEE_SEL.line || "—"), `
+      <div class="row">
+        <div class="field"><label>Ca</label><select id="oe_shift">${OEE_SHIFTS.map(s => `<option>${s}</option>`).join("")}</select></div>
+        <div class="field"><label>TG kế hoạch (phút)</label><input id="oe_plan" value="480" style="width:100px"/></div>
+        <div class="field"><label>Dừng (phút)</label><input id="oe_dt" value="0" style="width:90px"/></div>
+        <div class="field"><label>Tốc độ lý tưởng (SP/phút)</label><input id="oe_rate" value="${rate}" style="width:120px"/></div>
+        <div class="field"><label>SP tốt</label><input id="oe_good" value="0" style="width:100px"/></div>
+        <div class="field"><label>SP lỗi</label><input id="oe_reject" value="0" style="width:100px"/></div>
+        <div class="field" style="align-self:flex-end"><button class="btn" id="oe_go">Ghi OEE</button></div>
+      </div>
+      <div class="muted" style="margin-top:4px">Đổi dây chuyền ở ô "Dây chuyền OEE" phía trên. Thêm/ngừng dây chuyền ở Danh mục chung.</div>`);
+  }
+  function wireOeeShiftForm() {
     $("oe_go").onclick = () => guard(async () => {
-      if (!$("oe_line").value) { toast("Chưa có dây chuyền — thêm ở Danh mục", "err"); return; }
-      await POST("/oee", { line: $("oe_line").value, shift: $("oe_shift").value,
+      if (!OEE_SEL.line) { toast("Chưa có dây chuyền", "err"); return; }
+      await POST("/oee", { line: OEE_SEL.line, shift: $("oe_shift").value,
         planned_time_min: num("oe_plan") || 0, downtime_min: num("oe_dt") || 0,
-        ideal_rate_per_min: num("oe_rate") || 0, total_count: num("oe_tot") || 0,
-        good_count: num("oe_good") || 0 });
+        ideal_rate_per_min: num("oe_rate") || 0, good_count: num("oe_good") || 0,
+        reject_count: num("oe_reject") || 0 });
       toast("Đã ghi OEE ca"); render("oee");
     });
-  };
+  }
+
+  // ---- Tab 3: Ghi dừng máy (cascading Nhóm → Lý do theo danh mục DB) ----
+  async function renderOeeDowntimeForm() {
+    if (!OEE_SEL.line) return panel("⏱️ Ghi dừng máy", `<div class="muted">Chưa có dây chuyền.</div>`);
+    const rows = await oeeCatalogForLine();
+    const cats = [...new Set(rows.map(r => r.category))];
+    const events = await GET(`/downtime?line=${encodeURIComponent(OEE_SEL.line)}`).catch(() => []);
+    const nowLocal = toDTLocal(new Date());
+    return `
+      ${panel("⏱️ Ghi sự kiện dừng máy — " + esc(OEE_SEL.line), `
+        <div class="row">
+          <div class="field"><label>Nhóm lý do</label><select id="dt_cat">
+            ${cats.map(c => `<option value="${esc(c)}">${esc(OEE_CAT_LABELS[c] || c)}</option>`).join("")}</select></div>
+          <div class="field"><label>Lý do</label><select id="dt_reason"></select></div>
+          <div class="field" id="dt_err_wrap" style="display:none"><label>Mã lỗi</label><input id="dt_err" style="width:100px"/></div>
+        </div>
+        <div class="row">
+          <div class="field"><label>Ca</label><select id="dt_shift">${OEE_SHIFTS.map(s => `<option>${s}</option>`).join("")}</select></div>
+          <div class="field"><label>Dừng từ</label><input type="datetime-local" id="dt_from" value="${nowLocal}"/></div>
+          <div class="field"><label>Dừng đến</label><input type="datetime-local" id="dt_to" value="${nowLocal}"/></div>
+          <div class="field"><label>Phút (tự tính)</label><input id="dt_min_preview" value="0" style="width:80px" disabled/></div>
+        </div>
+        <div class="row"><div class="field" style="flex:1"><label>Ghi chú</label><input id="dt_note" style="width:100%"/></div></div>
+        <div class="row">
+          <button class="btn" id="dt_go">Ghi</button>
+          <button class="btn sec" id="dt_rcfa" style="display:none">🔧 Tạo RCFA từ sự kiện này</button>
+        </div>`)}
+      ${panel("Lịch sử gần đây", `<div class="tablewrap"><table><thead><tr>
+        <th>Ca</th><th>Nhóm</th><th>Lý do</th><th>Từ</th><th>Đến</th><th>Phút</th><th>Ghi chú</th></tr></thead>
+        <tbody>${events.slice(0, 30).map(e => `<tr><td>${esc(e.shift)}</td><td>${esc(OEE_CAT_LABELS[e.reason_group] || e.reason_group)}</td>
+          <td>${esc(e.reason_label || e.reason_code || "")}</td><td>${e.start_at ? fmt(e.start_at) : "—"}</td>
+          <td>${e.end_at ? fmt(e.end_at) : "—"}</td><td>${e.minutes}</td><td>${esc(e.note || "")}</td></tr>`).join("")
+          || `<tr><td colspan="7" class="muted">Chưa có sự kiện nào.</td></tr>`}</tbody></table></div>`)}
+    `;
+  }
+  function wireOeeDowntimeForm() {
+    if (!OEE_SEL.line || !OEE_CATALOG_CACHE) return;
+    const rows = OEE_CATALOG_CACHE.rows;
+    function fillReasons() {
+      const cat = $("dt_cat").value;
+      const opts = rows.filter(r => r.category === cat);
+      $("dt_reason").innerHTML = opts.map(r => `<option value="${r.reason_id}">${esc(r.sub_label)}${r.machine_position ? " — " + esc(r.machine_position) : ""}</option>`).join("");
+      $("dt_err_wrap").style.display = cat === "breakdown" ? "" : "none";
+    }
+    $("dt_cat").onchange = fillReasons; fillReasons();
+    function previewMinutes() {
+      const from = $("dt_from").value, to = $("dt_to").value;
+      let mins = 0;
+      if (from && to) mins = Math.max(0, Math.round((new Date(to) - new Date(from)) / 60000));
+      $("dt_min_preview").value = mins;
+      $("dt_rcfa").style.display = mins >= 30 ? "" : "none";
+    }
+    $("dt_from").oninput = previewMinutes; $("dt_to").oninput = previewMinutes; previewMinutes();
+    $("dt_go").onclick = () => guard(async () => {
+      const reasonId = $("dt_reason").value;
+      if (!reasonId) { toast("Chưa chọn lý do", "err"); return; }
+      await POST("/downtime", { line: OEE_SEL.line, reason_catalog_id: reasonId,
+        shift: $("dt_shift").value, from_time: $("dt_from").value, to_time: $("dt_to").value,
+        error_code: $("dt_cat").value === "breakdown" ? ($("dt_err").value || null) : null,
+        note: $("dt_note").value || null });
+      toast("Đã ghi sự kiện dừng máy"); render("oee");
+    });
+    $("dt_rcfa").onclick = () => {
+      const reasonOpt = $("dt_reason").selectedOptions[0];
+      openOeeRcfaModal(null, { line_code: OEE_SEL.line, machine: reasonOpt ? reasonOpt.textContent : "",
+        stop_at: $("dt_from").value, duration_min: num("dt_min_preview") || 0 });
+    };
+  }
+
+  // ---- Tab 4: RCFA + 5 Whys ----
+  async function renderOeeRcfa() {
+    const rows = OEE_SEL.line ? await GET(`/rcfa?line_code=${encodeURIComponent(OEE_SEL.line)}`) : [];
+    return panel("🔧 RCFA — Phân tích nguyên nhân gốc (" + esc(OEE_SEL.line || "—") + ")", `
+      <button class="btn" id="rcfa_add">+ Thêm RCFA</button>
+      <div class="tablewrap" style="margin-top:8px"><table><thead><tr>
+        <th>Số RCFA</th><th>Máy</th><th>Bộ phận</th><th>Dừng lúc</th><th>Phút</th><th>Mô tả</th>
+        <th>Khắc phục</th><th>Ngày hoàn thành</th><th>Recheck</th><th></th></tr></thead>
+        <tbody>${rows.map(r => `<tr>
+          <td>${esc(r.rcfa_no)}</td><td>${esc(r.machine)}</td><td>${esc(r.part || "")}</td>
+          <td>${r.stop_at ? fmt(r.stop_at) : "—"}</td><td>${r.duration_min}</td>
+          <td>${esc(r.description || "")}</td><td>${esc(r.corrective_action || "")}</td>
+          <td>${r.complete_date ? fmt(r.complete_date) : "—"}</td>
+          <td>${r.recheck_done}/${r.recheck_total}</td>
+          <td style="white-space:nowrap"><button class="btn sm sec" data-rcfa-edit="${r.rcfa_id}">Sửa</button>
+              <button class="btn sm sec" data-rcfa-recheck="${r.rcfa_id}">Recheck</button></td>
+        </tr>`).join("") || `<tr><td colspan="10" class="muted">Chưa có RCFA nào.</td></tr>`}</tbody></table></div>`);
+  }
+  function wireOeeRcfa() {
+    $("rcfa_add").onclick = () => openOeeRcfaModal(null, { line_code: OEE_SEL.line });
+    document.querySelectorAll("[data-rcfa-edit]").forEach(b => b.onclick = () => guard(async () => {
+      const rec = await GET(`/rcfa/${b.dataset.rcfaEdit}`);
+      openOeeRcfaModal(rec.rcfa_id, rec);
+    }));
+    document.querySelectorAll("[data-rcfa-recheck]").forEach(b => b.onclick = () => guard(async () => {
+      const rec = await GET(`/rcfa/${b.dataset.rcfaRecheck}`);
+      openOeeRecheckModal(rec);
+    }));
+  }
+  function openOeeRcfaModal(rcfaId, data) {
+    data = data || {};
+    const fiveWhys = (data.five_whys && data.five_whys.length) ? data.five_whys
+      : [1, 2, 3, 4, 5].map(l => ({ level: l, text: "", category: "" }));
+    const toLocal = (v) => v ? toDTLocal(new Date(v)) : "";
+    modal(`<h3>${rcfaId ? "Sửa" : "Thêm"} RCFA${data.rcfa_no ? " — " + esc(data.rcfa_no) : ""}</h3>
+      <div class="row">
+        <div class="field"><label>Dây chuyền</label><input id="rc_line" value="${esc(data.line_code || OEE_SEL.line || "")}"/></div>
+        <div class="field"><label>Máy</label><input id="rc_machine" value="${esc(data.machine || "")}"/></div>
+        <div class="field"><label>Bộ phận</label><input id="rc_part" value="${esc(data.part || "")}"/></div>
+      </div>
+      <div class="row">
+        <div class="field"><label>Dừng lúc</label><input type="datetime-local" id="rc_stop" value="${toLocal(data.stop_at) || toDTLocal(new Date())}"/></div>
+        <div class="field"><label>Thời gian dừng (phút)</label><input id="rc_dur" value="${data.duration_min || 0}" style="width:100px"/></div>
+        <div class="field"><label>Kỹ thuật viên</label><input id="rc_tech" value="${esc(data.technician || "")}"/></div>
+        <div class="field"><label>Phút sửa</label><input id="rc_repair" value="${data.repair_min ?? ""}" style="width:90px"/></div>
+        <div class="field"><label>Phút chờ</label><input id="rc_wait" value="${data.wait_min ?? ""}" style="width:90px"/></div>
+      </div>
+      <div class="field"><label>Chức năng lỗi</label><input id="rc_func" value="${esc(data.failure_function || "")}" style="width:100%"/></div>
+      <div class="field"><label>Dấu hiệu trước đó</label><input id="rc_prior" value="${esc(data.prior_signs || "")}" style="width:100%"/></div>
+      <div class="field"><label>Mô tả phát hiện + xử lý</label><textarea id="rc_desc" rows="2" style="width:100%">${esc(data.description || "")}</textarea></div>
+      <div class="field"><label>Vật tư thay thế (cách nhau bởi dấu phẩy)</label><input id="rc_parts" value="${esc((data.replaced_parts || []).join(", "))}" style="width:100%"/></div>
+      <div class="field"><label>Nguyên lý hoạt động</label><textarea id="rc_wp" rows="2" style="width:100%">${esc(data.working_principle || "")}</textarea></div>
+      <div class="field"><label>Cơ chế hư hỏng</label><textarea id="rc_fm" rows="2" style="width:100%">${esc(data.failure_mechanism || "")}</textarea></div>
+      <div class="row">
+        <div class="field"><label>Người phân tích</label><input id="rc_analyst" value="${esc(data.analyst || "")}"/></div>
+        <div class="field"><label>Yếu tố</label><input id="rc_factor" value="${esc(data.factor || "")}"/></div>
+        <div class="field"><label>Phân loại 4M1E</label><select id="rc_4m1e">
+          <option value="">—</option>${OEE_4M1E.map(([v, l]) => `<option value="${v}" ${data.category_4m1e === v ? "selected" : ""}>${l}</option>`).join("")}</select></div>
+      </div>
+      <h4>5 Whys</h4>
+      ${fiveWhys.map((w, i) => `<div class="row" data-why-row="${i}">
+        <div class="field" style="width:56px"><label>Why ${w.level || i + 1}</label></div>
+        <div class="field" style="flex:2"><input class="why-text" value="${esc(w.text || "")}" placeholder="Diễn giải" style="width:100%"/></div>
+        <div class="field"><select class="why-cat"><option value="">—</option>
+          ${OEE_5WHY_CATS.map(([v, l]) => `<option value="${v}" ${w.category === v ? "selected" : ""}>${l}</option>`).join("")}</select></div>
+      </div>`).join("")}
+      <div class="field"><label>Hành động khắc phục</label><textarea id="rc_corr" rows="2" style="width:100%">${esc(data.corrective_action || "")}</textarea></div>
+      <div class="field"><label>Hành động phòng ngừa</label><textarea id="rc_prev" rows="2" style="width:100%">${esc(data.preventive_action || "")}</textarea></div>
+      <div class="row">
+        <div class="field"><label>Người thực hiện</label><input id="rc_exec" value="${esc(data.executor || "")}"/></div>
+        <div class="field"><label>Ngày hoàn thành</label><input type="datetime-local" id="rc_complete" value="${toLocal(data.complete_date)}"/></div>
+        <div class="field"><label>Người kiểm tra</label><input id="rc_checker" value="${esc(data.checker || "")}"/></div>
+      </div>
+      <div class="row" style="margin-top:8px"><button class="btn" id="rc_save">Lưu</button></div>`, null, true);
+    $("rc_save").onclick = () => guard(async () => {
+      const five_whys = Array.from(document.querySelectorAll("[data-why-row]")).map((row, i) => ({
+        level: i + 1, text: row.querySelector(".why-text").value, category: row.querySelector(".why-cat").value || null,
+      })).filter(w => w.text);
+      const payload = {
+        line_code: $("rc_line").value, machine: $("rc_machine").value, part: $("rc_part").value || null,
+        stop_at: $("rc_stop").value || null, duration_min: parseFloat($("rc_dur").value) || 0,
+        failure_function: $("rc_func").value || null, prior_signs: $("rc_prior").value || null,
+        technician: $("rc_tech").value || null, repair_min: $("rc_repair").value ? parseFloat($("rc_repair").value) : null,
+        wait_min: $("rc_wait").value ? parseFloat($("rc_wait").value) : null, description: $("rc_desc").value || null,
+        replaced_parts: $("rc_parts").value.split(",").map(s => s.trim()).filter(Boolean),
+        working_principle: $("rc_wp").value || null, failure_mechanism: $("rc_fm").value || null,
+        analyst: $("rc_analyst").value || null, factor: $("rc_factor").value || null, five_whys,
+        category_4m1e: $("rc_4m1e").value || null, corrective_action: $("rc_corr").value || null,
+        preventive_action: $("rc_prev").value || null, executor: $("rc_exec").value || null,
+        complete_date: $("rc_complete").value || null, checker: $("rc_checker").value || null,
+      };
+      if (rcfaId) await PUT(`/rcfa/${rcfaId}`, payload);
+      else await POST("/rcfa", payload);
+      toast("Đã lưu RCFA"); closeModal(); render("oee");
+    });
+  }
+  function openOeeRecheckModal(rec) {
+    modal(`<h3>Theo dõi tái diễn — ${esc(rec.rcfa_no)}</h3>
+      <div class="tablewrap"><table><thead><tr><th>Tuần</th><th>Đã kiểm tra</th><th>Ghi chú</th><th></th></tr></thead>
+      <tbody>${rec.recheck_schedule.map(w => `<tr>
+        <td>W+${w.week_offset}</td>
+        <td><input type="checkbox" data-week="${w.week_offset}" ${w.checked ? "checked" : ""}/></td>
+        <td><input data-week-note="${w.week_offset}" value="${esc(w.note || "")}" style="width:100%"/></td>
+        <td><button class="btn sm sec" data-week-save="${w.week_offset}">Lưu</button></td>
+      </tr>`).join("")}</tbody></table></div>`, null, true);
+    document.querySelectorAll("[data-week-save]").forEach(b => b.onclick = () => guard(async () => {
+      const wk = b.dataset.weekSave;
+      const checked = document.querySelector(`[data-week="${wk}"]`).checked;
+      const note = document.querySelector(`[data-week-note="${wk}"]`).value;
+      await PUT(`/rcfa/${rec.rcfa_id}/recheck`, { week_offset: parseInt(wk), checked, note: note || null });
+      toast(`Đã lưu W+${wk}`);
+    }));
+  }
+
+  // ---- Tab 5: Dừng lắt nhắt (MS&SL) — đếm số lần theo tuần/ca ----
+  async function renderOeeMinorStop() {
+    if (!OEE_SEL.line) return panel("📉 Dừng lắt nhắt (MS&SL)", `<div class="muted">Chưa có dây chuyền.</div>`);
+    const [grid, pareto] = await Promise.all([
+      GET(`/downtime/minor-stop-tally?line_code=${encodeURIComponent(OEE_SEL.line)}&iso_year=${OEE_SEL.msYear}`),
+      GET(`/downtime/minor-stop-pareto?line_code=${encodeURIComponent(OEE_SEL.line)}&iso_year=${OEE_SEL.msYear}`),
+    ]);
+    const weekEntry = (row) => (row.by_week || []).find(w => w.iso_week === OEE_MS_WEEK.week && w.shift === OEE_MS_WEEK.shift);
+    const weekOpts = Array.from({ length: 53 }, (_, i) => i + 1)
+      .map(w => `<option value="${w}" ${w === OEE_MS_WEEK.week ? "selected" : ""}>Tuần ${w}</option>`).join("");
+    return `
+      ${panel("📉 Nhập số lần dừng lắt nhắt theo tuần — " + esc(OEE_SEL.line), `
+        <div class="row">
+          <div class="field"><label>Năm ISO</label><input id="ms_year" value="${OEE_SEL.msYear}" style="width:90px"/></div>
+          <div class="field"><label>Tuần</label><select id="ms_week">${weekOpts}</select></div>
+          <div class="field"><label>Ca</label><select id="ms_shift">
+            ${OEE_SHIFTS.map(s => `<option value="${s}" ${s === OEE_MS_WEEK.shift ? "selected" : ""}>${s}</option>`).join("")}</select></div>
+          <button class="btn sec" id="ms_reload" style="align-self:flex-end">Tải lại</button>
+        </div>
+        <div class="tablewrap" style="margin-top:8px"><table><thead><tr><th>Lý do</th><th>Số lần (tuần đã chọn)</th><th>Tổng lũy kế cả năm</th></tr></thead>
+        <tbody>${grid.rows.map(r => { const e = weekEntry(r); return `<tr>
+          <td>${esc(r.sub_label)}</td>
+          <td><input class="ms-count" data-reason="${r.reason_id}" value="${e ? e.count : 0}" style="width:70px"/></td>
+          <td>${r.total}</td></tr>`; }).join("") || `<tr><td colspan="3" class="muted">Chưa có danh mục lắt nhắt.</td></tr>`}</tbody></table></div>
+        <button class="btn" id="ms_save" style="margin-top:8px">Lưu số liệu tuần</button>`)}
+      ${panel("Pareto lũy kế cả năm", `
+        ${CH.vbars((pareto.items || []).map(i => ({ label: i.sub_label, value: i.count })), { unit: "lần", color: "#9b59b6" })}
+        <div class="tablewrap" style="margin-top:8px"><table><thead><tr><th>Lý do</th><th>Số lần</th><th>%</th><th>Tích lũy %</th></tr></thead>
+        <tbody>${(pareto.items || []).map(i => `<tr><td>${esc(i.sub_label)}</td><td>${i.count}</td><td>${i.pct}%</td><td>${i.cum_pct}%</td></tr>`).join("")}</tbody></table></div>`)}
+    `;
+  }
+  function wireOeeMinorStop() {
+    $("ms_reload").onclick = () => {
+      OEE_SEL.msYear = parseInt($("ms_year").value) || OEE_SEL.msYear;
+      OEE_MS_WEEK.week = parseInt($("ms_week").value) || 1;
+      OEE_MS_WEEK.shift = $("ms_shift").value;
+      render("oee");
+    };
+    $("ms_save").onclick = () => guard(async () => {
+      const week = parseInt($("ms_week").value) || 1, shift = $("ms_shift").value,
+        year = parseInt($("ms_year").value) || OEE_SEL.msYear;
+      for (const inp of document.querySelectorAll(".ms-count")) {
+        await PUT("/downtime/minor-stop-tally", { reason_id: inp.dataset.reason, iso_year: year,
+          iso_week: week, shift, count: parseInt(inp.value) || 0 });
+      }
+      OEE_SEL.msYear = year; OEE_MS_WEEK = { week, shift };
+      toast("Đã lưu MS&SL tuần " + week); render("oee");
+    });
+  }
+
+  // ---- Tab 6: MTBF/MTTR (giữ nguyên — không đổi công thức) ----
+  async function renderOeeMtbf() {
+    const mtbf = await GET("/downtime/mtbf");
+    return panel("🔧 MTBF / MTTR theo thiết bị", `
+      <div class="muted" style="margin-bottom:6px">Cửa sổ ${mtbf.window_days} ngày.</div>
+      <div class="tablewrap"><table><thead><tr><th>Thiết bị</th><th>Số lần hỏng</th><th>MTBF (giờ)</th><th>MTTR (phút)</th><th>Khả dụng</th><th>Dừng (phút)</th></tr></thead>
+      <tbody>${(mtbf.equipment || []).map(e => `<tr><td>${esc(e.name)}</td><td>${e.failures}</td>
+        <td>${e.mtbf_hours ?? "—"}</td><td>${e.mttr_min ?? "—"}</td><td>${e.availability_pct}%</td><td>${e.downtime_min}</td></tr>`).join("")}</tbody></table></div>`);
+  }
+
+  // ---- Tab 7: Danh mục lý do & Target (CRUD OeeReasonCatalog, quyền master.manage) ----
+  async function renderOeeCatalog() {
+    if (!OEE_SEL.line) return panel("🗂️ Danh mục lý do & Target", `<div class="muted">Chưa có dây chuyền.</div>`);
+    const canManage = _hasPerm("master.manage");
+    const rows = await GET(`/downtime/reason-catalog?line_code=${encodeURIComponent(OEE_SEL.line)}`);
+    const byCategory = {};
+    rows.forEach(r => (byCategory[r.category] = byCategory[r.category] || []).push(r));
+    const catBlocks = Object.keys(OEE_CAT_LABELS).map(cat => {
+      const list = byCategory[cat] || [];
+      const totalTarget = list.reduce((s, r) => s + (r.target_pct || 0), 0);
+      return `<h4>${esc(OEE_CAT_LABELS[cat])} <span class="muted" style="font-weight:400">(tổng target ${(totalTarget * 100).toFixed(2)}%)</span></h4>
+        <div class="tablewrap"><table><thead><tr><th>Lý do</th><th>Vị trí máy</th><th>Target %</th><th>Kích hoạt</th>
+          ${canManage ? "<th></th>" : ""}</tr></thead>
+        <tbody>${list.map(r => `<tr>
+          <td>${esc(r.sub_label)}</td><td>${esc(r.machine_position || "")}</td>
+          <td>${(r.target_pct * 100).toFixed(2)}%</td><td>${r.active ? "Có" : "Không"}</td>
+          ${canManage ? `<td style="white-space:nowrap"><button class="btn sm sec" data-cat-edit="${r.reason_id}">Sửa</button>
+            <button class="btn sm sec" style="color:var(--red)" data-cat-del="${r.reason_id}">Xóa</button></td>` : ""}
+        </tr>`).join("") || `<tr><td colspan="${canManage ? 5 : 4}" class="muted">Chưa có.</td></tr>`}</tbody></table></div>`;
+    }).join("");
+    return `
+      ${!canManage ? `<div class="muted" style="margin-bottom:8px">Bạn chỉ có quyền xem danh mục (cần quyền <code class="k">master.manage</code> để thêm/sửa/xóa).</div>` : ""}
+      ${canManage ? panel("+ Thêm lý do mới — " + esc(OEE_SEL.line), `
+        <div class="row">
+          <div class="field"><label>Nhóm</label><select id="oc_cat">
+            ${Object.entries(OEE_CAT_LABELS).map(([v, l]) => `<option value="${v}">${l}</option>`).join("")}</select></div>
+          <div class="field"><label>Mã lý do</label><input id="oc_code" style="width:140px"/></div>
+          <div class="field"><label>Tên hiển thị</label><input id="oc_label" style="width:220px"/></div>
+          <div class="field"><label>Vị trí máy (breakdown)</label><input id="oc_pos" style="width:140px"/></div>
+          <div class="field"><label>Target %</label><input id="oc_target" value="0" style="width:80px"/></div>
+          <button class="btn" id="oc_add" style="align-self:flex-end">Thêm</button>
+        </div>`) : ""}
+      ${panel("Danh sách lý do & target theo nhóm", catBlocks)}
+    `;
+  }
+  function wireOeeCatalog() {
+    if (!_hasPerm("master.manage")) return;
+    $("oc_add").onclick = () => guard(async () => {
+      await POST("/downtime/reason-catalog", { line_code: OEE_SEL.line, category: $("oc_cat").value,
+        sub_code: $("oc_code").value, sub_label: $("oc_label").value,
+        machine_position: $("oc_pos").value || null, target_pct: (parseFloat($("oc_target").value) || 0) / 100 });
+      toast("Đã thêm lý do"); render("oee");
+    });
+    document.querySelectorAll("[data-cat-edit]").forEach(b => b.onclick = () => guard(async () => {
+      const label = prompt("Tên hiển thị mới:"); if (label === null) return;
+      const targetPct = prompt("Target % mới (vd 2.5):"); if (targetPct === null) return;
+      await PUT(`/downtime/reason-catalog/${b.dataset.catEdit}`,
+        { sub_label: label, target_pct: (parseFloat(targetPct) || 0) / 100 });
+      toast("Đã cập nhật"); render("oee");
+    }));
+    document.querySelectorAll("[data-cat-del]").forEach(b => b.onclick = () => guard(async () => {
+      if (!confirm("Xóa lý do này?")) return;
+      await DELETE(`/downtime/reason-catalog/${b.dataset.catDel}`);
+      toast("Đã xóa"); render("oee");
+    }));
+  }
 
   // ======================================================================
   // #P3-1 — ISA-88 procedural (thực thi phase theo mẻ)
@@ -1002,37 +1389,41 @@
       const ut = utByCode[g.unit_type];
       return ut ? ut.name : (g.unit_type === "keg" ? "Keg" : "Vỉ");
     };
-    // Sơ đồ kho Đông Mai — tái hiện đúng bố cục sơ đồ giấy: Dãy xếp 01-12 xếp chồng dọc bên
-    // trái (12 ở trên, 01 ở dưới — đúng thứ tự vẽ trên sơ đồ gốc), Kho tạm dưới cùng khối trái,
-    // dải "Đường di chuyển" ở giữa, Dãy xếp 13-21 là 9 cột đứng liền kề bên phải. Không dùng
-    // SVG (khác gantt() ở app.js — vốn hợp cho thanh trục thời gian) vì mỗi ô cần hiện danh sách
-    // text (lô/SL) có thể xuống dòng/mở rộng, hợp <div> hơn <rect>.
+    // Sơ đồ kho Đông Mai — vẽ ĐỘNG theo layout_row/layout_col mà admin tự xếp ở Danh mục ›
+    // 🗺️ Bố cục kho (không hard-code danh sách mã vị trí — mã thật trên server, vd "DM.K01",
+    // không theo quy luật cố định nào để tự suy ra vị trí vẽ). Vị trí chưa được xếp bố cục vẫn
+    // phải hiện (dạng danh sách rời bên dưới lưới) để không lặp lại lỗi cũ: dữ liệu có thật
+    // nhưng biến mất khỏi sơ đồ chỉ vì mã không khớp danh sách hard-code.
+    // Mỗi khay chiếm NỬA bề ngang màn hình (2 khay/hàng, chữ to) — theo yêu cầu người dùng vì
+    // chữ quá bé khi vẽ nhiều khay nhỏ chen nhau trên 1 hàng phải cuộn ngang mới đọc được. Thứ
+    // tự khay đọc theo layout_row rồi layout_col (đúng thứ tự đã xếp ở Bố cục kho) — không còn
+    // giữ đúng hình dạng lưới hàng/cột thật, đổi lấy chữ đọc được trên màn hình nhỏ (tablet kho).
     function floorMapCell(loc, fallbackCode) {
       const code = loc ? loc.code : fallbackCode;
-      const lotDot = (l) => `<span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:${l.fifo_ready ? "#2ecc71" : "#95a5a6"};margin-right:4px;flex:none"></span>`;
-      const lotLine = (l) => `<div style="font-size:11px;line-height:1.5;display:flex;align-items:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(fpLabel(l.product_name))} — ${esc(l.lot_code || "")} — ${l.count}">${lotDot(l)}<span style="overflow:hidden;text-overflow:ellipsis">${esc(fpLabel(l.product_name))} · ${esc(l.lot_code || "—")} · ${l.count}</span></div>`;
+      const lotDot = (l) => `<span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${l.fifo_ready ? "#2ecc71" : "#95a5a6"};margin-right:6px;flex:none"></span>`;
+      const lotLine = (l) => `<div style="font-size:15px;line-height:1.6;display:flex;align-items:center" title="${esc(fpLabel(l.product_name))} — ${esc(l.lot_code || "")} — ${l.count}">${lotDot(l)}<span>${esc(fpLabel(l.product_name))} · ${esc(l.lot_code || "—")} · ${l.count}</span></div>`;
       const lots = (loc && loc.lots) || [];
       const shown = lots.slice(0, 3).map(lotLine).join("");
       const more = lots.length > 3
-        ? `<details><summary style="cursor:pointer;font-size:11px;color:var(--muted)">+${lots.length - 3} lô khác</summary>${lots.slice(3).map(lotLine).join("")}</details>` : "";
-      const body = lots.length ? shown + more : `<div class="muted" style="font-size:11px">Trống</div>`;
-      return `<div style="border:1px solid var(--border);border-radius:6px;padding:6px;min-height:56px;background:var(--panel2)">
-        <div style="font-weight:600;font-size:12px;margin-bottom:3px">${esc(code || "?")}</div>${body}</div>`;
+        ? `<details><summary style="cursor:pointer;font-size:14px;color:var(--muted)">+${lots.length - 3} lô khác</summary>${lots.slice(3).map(lotLine).join("")}</details>` : "";
+      const body = lots.length ? shown + more : `<div class="muted" style="font-size:14px">Trống</div>`;
+      return `<div style="border:1px solid var(--border);border-radius:8px;padding:12px 14px;min-height:64px;background:var(--panel2)">
+        <div style="font-weight:700;font-size:19px;margin-bottom:6px">${esc(code || "?")}</div>${body}</div>`;
     }
     function renderDongMaiFloorMap(rows) {
-      const byCode = Object.fromEntries((rows || []).map(r => [r.code, r]));
-      const leftCells = [];
-      for (let i = 12; i >= 1; i--) { const c = `D${String(i).padStart(2, "0")}`; leftCells.push(floorMapCell(byCode[c], c)); }
-      const rightCells = [];
-      for (let i = 13; i <= 21; i++) { const c = `D${i}`; rightCells.push(floorMapCell(byCode[c], c)); }
-      return `<div style="overflow-x:auto"><div style="display:flex;gap:14px;align-items:flex-start;min-width:900px;padding-bottom:4px">
-        <div style="display:flex;flex-direction:column;gap:4px;width:220px">
-          ${leftCells.join("")}
-          <div style="margin-top:6px">${floorMapCell(byCode["KHOTAM"], "KHOTAM")}</div>
-        </div>
-        <div style="writing-mode:vertical-rl;text-orientation:mixed;display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:12px;padding:4px 2px;white-space:nowrap">Đường di chuyển</div>
-        <div style="display:flex;gap:4px">${rightCells.map(c => `<div style="width:82px">${c}</div>`).join("")}</div>
-      </div></div>`;
+      const all = rows || [];
+      const placed = (all.filter(r => r.layout_row != null && r.layout_col != null))
+        .sort((a, b) => a.layout_row - b.layout_row || a.layout_col - b.layout_col);
+      const unplaced = all.filter(r => r.layout_row == null || r.layout_col == null);
+      const grid = "display:grid;grid-template-columns:1fr 1fr;gap:10px";
+      const unplacedBlock = unplaced.length ? `<div style="margin-top:14px">
+        <div class="muted" style="margin-bottom:6px;font-size:14px">Chưa xếp vào bố cục (${unplaced.length}) — vào Danh mục › 🗺️ Bố cục kho để xếp:</div>
+        <div style="${grid}">${unplaced.map(l => floorMapCell(l)).join("")}</div>
+      </div>` : "";
+      if (!placed.length) {
+        return `<div class="muted">Kho này chưa được xếp bố cục — vào Danh mục › 🗺️ Bố cục kho để xếp vị trí lên lưới hàng/cột.</div>${unplacedBlock}`;
+      }
+      return `<div style="${grid}">${placed.map(l => floorMapCell(l)).join("")}</div>${unplacedBlock}`;
     }
     let body = "";
     if (sec === "kho") {
