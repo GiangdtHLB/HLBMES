@@ -4065,12 +4065,12 @@ VIEWS.warehouse_kc = async function () {
     wireSearchableSelect("ob_mat_txt", "ob_mat", WH_CACHE.matItems, (item) => { $("ob_uom").value = item.uom || ""; });
     wireSearchableSelect("rc_supplier_txt", "rc_supplier", WH_CACHE.supplierItems);
     if ($("sng_mat_txt")) wireSearchableSelect("sng_mat_txt", "sng_mat", WH_CACHE.matItems, (item) => {
-      $("sng_uom_wrap").innerHTML = altUomFieldHtml(matByIdGiao[item.value], "sng_uom", 60);
+      $("sng_uom_wrap").innerHTML = altUomFieldHtml((WH_CACHE.matById || {})[item.value], "sng_uom", 60);
     });
     if ($("sng_supplier_txt")) wireSearchableSelect("sng_supplier_txt", "sng_supplier", WH_CACHE.supplierItems);
     if ($("sng_do")) $("sng_do").onclick = () => guard(async () => {
       if (!$("sng_loc").value) throw new Error("Chọn vị trí cất trước khi khai báo.");
-      const sngMat = matByIdGiao[$("sng_mat").value];
+      const sngMat = (WH_CACHE.matById || {})[$("sng_mat").value];
       const sngQty = altUomToBaseQty(sngMat, parseFloat($("sng_qty").value), $("sng_uom").value);
       const res = await POST("/warehouse/sang-ngang", { material_id: $("sng_mat").value,
         supplier_id: $("sng_supplier").value || null, unit_price: $("sng_price").value ? parseFloat($("sng_price").value) : null,
