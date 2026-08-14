@@ -21,7 +21,7 @@ Efficiency = R/J                                            (SP tốt quy đổi
 """
 
 import calendar
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -36,17 +36,45 @@ _CATEGORIES = ["bao_tri_ngoai", "nona", "ke_hoach", "chuyen_may", "thieu_vat_tu"
               "breakdown", "dung_lat_nhat", "sp_loi"]
 
 
+def _elapsed_days(start, end):
+    """Số ngày đã trôi qua trong [start, end] tính tới hiện tại — 0 nếu kỳ còn ở tương lai,
+    trọn vẹn nếu kỳ đã qua hẳn. Dùng chung cho tháng/quý/tuần để cắt đúng "A Tổng thời gian"."""
+    now = utcnow()
+    now_naive = now.replace(tzinfo=None) if now.tzinfo else now
+    if now_naive < start.replace(tzinfo=None):
+        return 0
+    elapsed_end = min(end, now)
+    return (elapsed_end.replace(tzinfo=None).date() - start.date()).days + 1
+
+
 def _month_bounds(year: int, month: int):
     start = datetime(year, month, 1, tzinfo=timezone.utc)
     days_in_month = calendar.monthrange(year, month)[1]
     end = datetime(year, month, days_in_month, 23, 59, 59, tzinfo=timezone.utc)
-    now = utcnow()
-    now_naive = now.replace(tzinfo=None) if now.tzinfo else now
-    if now_naive < start.replace(tzinfo=None):
-        return start, end, 0  # tháng tương lai — chưa có thời gian nào trôi qua
-    elapsed_end = min(end, now)
-    elapsed_days = (elapsed_end.replace(tzinfo=None).date() - start.date()).days + 1
-    return start, end, elapsed_days
+    return start, end, _elapsed_days(start, end)
+
+
+def _quarter_bounds(year: int, quarter: int):
+    start_month = (quarter - 1) * 3 + 1
+    end_month = start_month + 2
+    start, _, _ = _month_bounds(year, start_month)
+    _, end, _ = _month_bounds(year, end_month)
+    return start, end, _elapsed_days(start, end)
+
+
+def _week_bounds(year: int, iso_week: int):
+    """Tuần ISO (Thứ 2 → Chủ nhật). `year`/`iso_week` chuẩn hoá qua isocalendar nên iso_week có
+    thể vượt số tuần thực của năm (vd 53) mà vẫn tính đúng nhờ Python tự cuộn sang năm sau."""
+    start = datetime.fromisocalendar(year, iso_week, 1).replace(tzinfo=timezone.utc)
+    end = start + timedelta(days=7) - timedelta(seconds=1)
+    return start, end, _elapsed_days(start, end)
+
+
+def _year_bounds(year: int, upto_month: int = 12):
+    """Từ đầu năm tới hết tháng `upto_month` — dùng cho cột YTD."""
+    start, _, _ = _month_bounds(year, 1)
+    _, end, _ = _month_bounds(year, upto_month)
+    return start, end, _elapsed_days(start, end)
 
 
 def _line(db: Session, line_code: str) -> ProductionLine:
@@ -98,9 +126,10 @@ def _good_reject_minutes(db: Session, line_code: str, start, end, ideal_rate_per
     return good / rate, reject / rate
 
 
-def waterfall_report(db: Session, line_code: str, year: int, month: int) -> dict:
+def _waterfall_report_bounds(db: Session, line_code: str, start, end, elapsed_days: int, meta: dict) -> dict:
+    """Lõi thác nước tổn thất dùng chung cho tháng/quý/tuần/YTD — `meta` chỉ mang theo các trường
+    định danh kỳ báo cáo (year/month, hoặc year/quarter, ...) để giữ nguyên hình dạng kết quả."""
     line = _line(db, line_code)
-    start, end, elapsed_days = _month_bounds(year, month)
     A = elapsed_days * 24 * 60
     B = 0.0
     C = A - B
@@ -142,13 +171,18 @@ def waterfall_report(db: Session, line_code: str, year: int, month: int) -> dict
     ]
     loss_minutes = {"bao_tri_ngoai": D, "nona": F, "ke_hoach": H, "chuyen_may": I,
                     "thieu_vat_tu": K, "breakdown": M, "dung_lat_nhat": O, "sp_loi": Q}
-    return {"line_code": line_code, "year": year, "month": month, "elapsed_days": elapsed_days, "rows": rows,
+    return {"line_code": line_code, **meta, "elapsed_days": elapsed_days, "rows": rows,
             "_raw": {"A": A, "C": C, "D": D, "F": F, "G": G, "H": H, "I": I, "J": J, "K": K,
                      "M": M, "O": O, "Q": Q, "R": R, "loss_minutes": loss_minutes}}
 
 
-def opi_summary(db: Session, line_code: str, year: int, month: int) -> dict:
-    wf = waterfall_report(db, line_code, year, month)
+def waterfall_report(db: Session, line_code: str, year: int, month: int) -> dict:
+    start, end, elapsed_days = _month_bounds(year, month)
+    return _waterfall_report_bounds(db, line_code, start, end, elapsed_days, {"year": year, "month": month})
+
+
+def _opi_summary_bounds(db: Session, line_code: str, start, end, elapsed_days: int, meta: dict) -> dict:
+    wf = _waterfall_report_bounds(db, line_code, start, end, elapsed_days, meta)
     r = wf["_raw"]
     total_loss = r["D"] + r["F"] + r["H"] + r["I"] + r["K"] + r["M"] + r["O"] + r["Q"]
     opi = 1 - (total_loss / r["C"]) if r["C"] else 0.0
@@ -179,8 +213,13 @@ def opi_summary(db: Session, line_code: str, year: int, month: int) -> dict:
             "actual_pct": round(actual_min / r["C"], 4) if r["C"] else 0.0,
             "target_pct": round(targets[cat], 4), "actual_minutes": round(actual_min, 1)})
 
-    return {"line_code": line_code, "year": year, "month": month,
+    return {"line_code": line_code, **meta,
             "opi": round(opi, 4), "opi_target": round(target_opi, 4),
             "opi_nona": round(opi_nona, 4), "opi_nona_target": round(target_opi_nona, 4),
             "efficiency": round(efficiency, 4), "efficiency_target": 0.92,
             "by_category": by_category, "waterfall": wf["rows"]}
+
+
+def opi_summary(db: Session, line_code: str, year: int, month: int) -> dict:
+    start, end, elapsed_days = _month_bounds(year, month)
+    return _opi_summary_bounds(db, line_code, start, end, elapsed_days, {"year": year, "month": month})

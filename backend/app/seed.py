@@ -297,6 +297,7 @@ def seed():
     _seed_quality_adv(db, batch.batch_id)
     _seed_downtime(db)
     _seed_oee_reason_catalog(db)
+    _seed_oee_reason_catalog_keg30k(db)
     _seed_dispense(db, batch.batch_id, [malt, hop, yeast])
     _seed_lines(db)
     _seed_cip(db)
@@ -704,6 +705,12 @@ def _seed_lines(db) -> None:
         # vận hành thật "OPI - CAN L3 (KHS 30K).xlsx" (xem _seed_oee_reason_catalog).
         ProductionLine(line_id=new_id(), code="CAN30K", name="Dây chuyền chiết lon 30K (CAN L3, KHS 30K)",
                        kind="line", area="chiet", ideal_rate_per_min=500, active=True),
+        # Dây chuyền chiết keg 30L thật (KEG Hạ Long, KHS 30L) — 400 keg/giờ (xem cột H công
+        # thức "Hiệu suất d.chuyền" của sheet KEG30K: mẫu số 3200/8h = 400/h), OeeReasonCatalog
+        # khai đúng theo file "OPI - KEG HẠ LONG (KHS 30L)_20260718.xlsx" (xem
+        # _seed_oee_reason_catalog_keg30k).
+        ProductionLine(line_id=new_id(), code="KEG30K", name="Dây chuyền chiết keg 30L (Hạ Long, KHS 30L)",
+                       kind="line", area="chiet", ideal_rate_per_min=400 / 60, active=True),
     ] + [
         ProductionLine(line_id=new_id(), code=f"FV-0{i}", name=f"Tank lên men {i}",
                        kind="tank", area="len_men", ideal_rate_per_min=0, active=True)
@@ -1202,6 +1209,88 @@ def _seed_oee_reason_catalog(db) -> None:
     ]
     for i, cause in enumerate(minor_causes, start=1):
         rows.append(_row("dung_lat_nhat", f"ms_{i}", cause, 0.0, sort_order=i))
+    # Sản phẩm lỗi (target nhóm 0.001)
+    rows.append(_row("sp_loi", "sp_loi", "Sản phẩm lỗi", 0.001, sort_order=1))
+
+    db.add_all(rows)
+    db.commit()
+
+
+def _seed_oee_reason_catalog_keg30k(db) -> None:
+    """Danh mục lý do dừng máy 2 cấp + target % cho KEG30K — trích đúng sheet Target/List của
+    file vận hành thật "OPI - KEG HẠ LONG (KHS 30L)_20260718.xlsx". Cùng khuôn 8 nhóm tổn thất
+    OPI như CAN30K (_seed_oee_reason_catalog) — hầu hết target % nhóm con giống hệt CAN30K
+    (cùng công ty áp cùng chuẩn), chỉ khác các mục CHUYỂN MÁY/NGUYÊN VẬT LIỆU/BREAKDOWN vì đặc
+    thù dây chuyền chiết keg (không phải lon).
+
+    Lưu ý: sheet nhập liệu thô "KEG30K" của file gốc vẫn còn 2 cột "Normal can"/"Sleek can" ở
+    nhóm CHUYỂN — đây là tiêu đề copy sót lại từ mẫu CAN30K, KHÔNG khớp sheet "List" (cột
+    K: "Keg 30L"/"Keg 20L", đúng nghĩa với dây chuyền keg) — danh mục dưới đây dùng đúng tên
+    theo sheet List, không lặp lại lỗi đặt tên sai của sheet nhập liệu thô.
+    Tương tự, nhóm "Dừng nguyên vật liệu": sheet List ghi "Chờ xe" (sai — đó là lý do Breakdown,
+    xem cột E "Chờ xe" cuối) còn sheet Target ghi đúng "Chờ CO2" kèm % — dùng theo Target."""
+    from .models.oee_ext import OeeReasonCatalog
+
+    LINE = "KEG30K"
+
+    def _row(category, sub_code, sub_label, target_pct=0.0, machine_position=None, sort_order=0):
+        return OeeReasonCatalog(reason_id=new_id(), line_code=LINE, category=category,
+                                sub_code=sub_code, sub_label=sub_label, target_pct=target_pct,
+                                machine_position=machine_position, active=True, sort_order=sort_order)
+
+    rows = []
+    # Bảo trì ngoài (target nhóm 0.003) — giống CAN30K
+    rows += [
+        _row("bao_tri_ngoai", "bao_tri_ngoai", "Bảo trì ngoài", 0.0, sort_order=1),
+        _row("bao_tri_ngoai", "bao_tri_khong_cbnv", "Bảo trì không CBNV", 0.003, sort_order=2),
+    ]
+    # NONA (target nhóm 0.063) — giống CAN30K
+    rows += [
+        _row("nona", "khong_co_order", "Không có order", 0.0, sort_order=1),
+        _row("nona", "dao_tao_hop", "Đào tạo-họp", 0.063, sort_order=2),
+    ]
+    # Dừng có kế hoạch (target nhóm 0.078) — giống hệt breakdown target của CAN30K
+    rows += [
+        _row("ke_hoach", "cip_ve_sinh", "CIP-vệ sinh", 0.044, sort_order=1),
+        _row("ke_hoach", "bao_duong", "Bảo dưỡng", 0.0303, sort_order=2),
+        _row("ke_hoach", "chay_thu", "Chạy thử", 0.0, sort_order=3),
+        _row("ke_hoach", "start_up_line", "Start-up line", 0.001, sort_order=4),
+        _row("ke_hoach", "run_out_line", "Run out line", 0.0015, sort_order=5),
+        _row("ke_hoach", "lay_mau", "Lấy mẫu", 0.001, sort_order=6),
+        _row("ke_hoach", "chay_kiem_tra", "Chạy kiểm tra", 0.0001, sort_order=7),
+        _row("ke_hoach", "dung_khac", "Dừng khác", 0.0001, sort_order=8),
+    ]
+    # Chuyển máy (target nhóm 0.0025) — 2 cỡ keg thật (sheet List cột K), KHÔNG dùng "Normal
+    # can/Sleek can" của sheet nhập liệu thô (lỗi copy từ mẫu CAN30K).
+    rows += [
+        _row("chuyen_may", "keg_30l", "Keg 30L", 0.0025, sort_order=1),
+        _row("chuyen_may", "keg_20l", "Keg 20L", 0.0, sort_order=2),
+    ]
+    # Dừng nguyên vật liệu (target nhóm 0.001) — theo đúng % sheet Target; "Mất khí nén" có mặt
+    # ở sheet nhập liệu thô (cột AC) nhưng Target không chia % riêng — giữ lại với target=0 để
+    # không mất lựa chọn khi khai tay.
+    rows += [
+        _row("thieu_vat_tu", "mat_dien", "Mất điện", 0.0002, sort_order=1),
+        _row("thieu_vat_tu", "mat_nuoc", "Mất nước", 0.0003, sort_order=2),
+        _row("thieu_vat_tu", "mat_hoi", "Mất hơi", 0.0001, sort_order=3),
+        _row("thieu_vat_tu", "mat_khi_nen", "Mất khí nén", 0.0, sort_order=4),
+        _row("thieu_vat_tu", "cho_bia", "Chờ bia", 0.0002, sort_order=5),
+        _row("thieu_vat_tu", "cho_co2", "Chờ CO2", 0.0002, sort_order=6),
+        _row("thieu_vat_tu", "cho_vat_lieu", "Chờ vật liệu", 0.0, sort_order=7),
+    ]
+    # Breakdown (target nhóm 0.025) — 14 vị trí máy thật của KEG30K (sheet nhập liệu thô cột
+    # AG-AT — đầy đủ hơn sheet List cột E vì List thiếu "Hệ Robot"/"Quấn màng pallet"); target
+    # gộp vào 1 dòng "chung" như CAN30K vì file gốc chỉ theo dõi % Breakdown tổng.
+    positions = ["Vào vỏ", "Rửa vỏ", "CIP hóa chất", "Chiết keg", "In phun", "Cân", "Lật keg",
+                 "Phóng màng co", "Đặt tem", "Khò màng co", "Băng tải", "Hệ Robot",
+                 "Quấn màng pallet", "Chờ xe"]
+    rows.append(_row("breakdown", "chung", "Breakdown (chung)", 0.025, sort_order=0))
+    for i, pos in enumerate(positions, start=1):
+        rows.append(_row("breakdown", f"vt_{i}", pos, 0.0, machine_position=pos, sort_order=i))
+    # Dừng lắt nhắt (target nhóm 0.0265, gán vào dòng "Tổng dừng" — residual ở waterfall). File
+    # KEG không có sheet MS&SL riêng (khác CAN30K) nên KHÔNG bịa lý do lắt nhắt cụ thể — chỉ giữ
+    # đúng % tổng, khai tay lý do cụ thể khi có dữ liệu thật.
+    rows.append(_row("dung_lat_nhat", "tong_dung", "Tổng dừng", 0.0265, sort_order=0))
     # Sản phẩm lỗi (target nhóm 0.001)
     rows.append(_row("sp_loi", "sp_loi", "Sản phẩm lỗi", 0.001, sort_order=1))
 

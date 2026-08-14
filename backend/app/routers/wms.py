@@ -321,8 +321,9 @@ def create_near_expiry(payload: NearExpiryEntryIn, db: Session = Depends(get_db)
 
 
 @router.get("/near-expiry")
-def list_near_expiry(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    return svc.list_near_expiry_entries(db, user)
+def list_near_expiry(limit: int = 1000, offset: int = 0, db: Session = Depends(get_db),
+                     user: User = Depends(get_current_user)):
+    return svc.list_near_expiry_entries(db, user, limit, offset)
 
 
 @router.put("/near-expiry/{entry_id}")
@@ -350,8 +351,9 @@ def create_consigned(payload: ConsignedEntryIn, db: Session = Depends(get_db),
 
 
 @router.get("/consigned")
-def list_consigned(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    return svc.list_consigned_entries(db, user)
+def list_consigned(limit: int = 1000, offset: int = 0, db: Session = Depends(get_db),
+                   user: User = Depends(get_current_user)):
+    return svc.list_consigned_entries(db, user, limit, offset)
 
 
 @router.put("/consigned/{entry_id}")
@@ -380,8 +382,9 @@ def create_factory_import(payload: FactoryImportEntryIn, db: Session = Depends(g
 
 
 @router.get("/factory-import")
-def list_factory_import(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    return svc.list_factory_import_entries(db, user)
+def list_factory_import(limit: int = 1000, offset: int = 0, db: Session = Depends(get_db),
+                        user: User = Depends(get_current_user)):
+    return svc.list_factory_import_entries(db, user, limit, offset)
 
 
 @router.put("/factory-import/{entry_id}")
@@ -411,9 +414,9 @@ async def import_casing_order(file: UploadFile = File(...), db: Session = Depend
 
 
 @router.get("/load-slips")
-def list_load_slips(sheet_type: str | None = None, db: Session = Depends(get_db),
-                    user: User = Depends(get_current_user)):
-    return load_slip_svc.list_load_slips(db, sheet_type)
+def list_load_slips(sheet_type: str | None = None, limit: int = 1000, offset: int = 0,
+                    db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    return load_slip_svc.list_load_slips(db, sheet_type, limit, offset)
 
 
 @router.get("/load-slips/{load_slip_id}")

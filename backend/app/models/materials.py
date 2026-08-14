@@ -27,6 +27,21 @@ class Supplier(Base):
     active: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
+class MaterialLocation(Base):
+    """Vị trí cất trong Kho công ty (kho nguyên vật liệu) — danh mục khai báo trước, gán vào
+    từng lô lúc nhập kho (xem services/warehouse.py::receive, bắt buộc chọn khi tạo lô mới) và
+    có thể đổi sang vị trí khác trong quá trình làm việc (xem relocate_lot). Cố tình không có
+    trường capacity/kind như WmsLocation (kho thành phẩm) — vật tư NVL rất khác đơn vị tính
+    (kg/lít/cái...) nên không quy đổi chung 1 sức chứa số được, đây chỉ là nhãn vị trí vật lý."""
+    __tablename__ = "material_location"
+
+    loc_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
+    code: Mapped[str] = mapped_column(Unicode(64), unique=True, index=True)
+    name: Mapped[str] = mapped_column(Unicode(255))
+    zone: Mapped[Optional[str]] = mapped_column(Unicode(120), nullable=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
 class MaterialLot(Base):
     __tablename__ = "material_lot"
     # Mã lô do phần mềm tự sinh tăng dần theo năm (VD 2026-00001) — năm sau đánh lại từ 1,
@@ -50,6 +65,12 @@ class MaterialLot(Base):
     status: Mapped[str] = mapped_column(Unicode(255), default=LotStatus.AVAILABLE.value)
     expiry: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
     location: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    # Vị trí cất CỤ THỂ trong Kho công ty (xem MaterialLocation) — khác `location` ở trên vốn
+    # chỉ là nhãn TẦNG kho (Kho công ty/Kho phân xưởng/Nhà máy khác, dạng chuỗi tự do dùng để
+    # phân quyền/lọc báo cáo). Nullable vì lô ở Kho phân xưởng/Nhà máy khác không dùng vị trí
+    # này (chưa có danh mục vị trí riêng cho phân xưởng); bắt buộc khi tạo lô mới tại Kho công
+    # ty (xem receive()).
+    location_id: Mapped[Optional[str]] = mapped_column(ForeignKey("material_location.loc_id"), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
 
 

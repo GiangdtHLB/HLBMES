@@ -756,9 +756,14 @@ def approve_near_expiry_entry(db: Session, entry_id: str, user: User) -> dict:
     return {"entry_id": entry.entry_id, "count": entry.quantity, "unit_codes": [u.unit_code for u in units]}
 
 
-def list_near_expiry_entries(db: Session, user: User | None = None) -> list[dict]:
-    stmt = _filter_loc_scope(select(NearExpiryEntry), NearExpiryEntry.location_id,
-                             _disallowed_location_ids(db, user)).order_by(NearExpiryEntry.created_at.desc())
+def list_near_expiry_entries(db: Session, user: User | None = None, limit: int = 1000, offset: int = 0) -> list[dict]:
+    """Có phân trang (mặc định 1000, tối đa 5000) — mỗi lần khai "Nhập bia cận date" VÀ mỗi lần
+    xuất kho có bia cận date đều tự sinh thêm 1 dòng, tăng vĩnh viễn theo thời gian."""
+    limit = max(1, min(limit or 1000, 5000))
+    offset = max(0, offset or 0)
+    stmt = (_filter_loc_scope(select(NearExpiryEntry), NearExpiryEntry.location_id,
+                              _disallowed_location_ids(db, user))
+            .order_by(NearExpiryEntry.created_at.desc()).limit(limit).offset(offset))
     entries = db.execute(stmt).scalars().all()
     out = []
     for e in entries:
@@ -930,9 +935,14 @@ def approve_consigned_entry(db: Session, entry_id: str, user: User) -> dict:
     return {"entry_id": entry.entry_id, "count": entry.quantity, "unit_codes": [u.unit_code for u in units]}
 
 
-def list_consigned_entries(db: Session, user: User | None = None) -> list[dict]:
-    stmt = _filter_loc_scope(select(ConsignedEntry), ConsignedEntry.location_id,
-                             _disallowed_location_ids(db, user)).order_by(ConsignedEntry.created_at.desc())
+def list_consigned_entries(db: Session, user: User | None = None, limit: int = 1000, offset: int = 0) -> list[dict]:
+    """Có phân trang (mặc định 1000, tối đa 5000) — mỗi lần khai "Nhập bia gửi" VÀ mỗi lần xuất
+    kho có bia gửi đều tự sinh thêm 1 dòng, tăng vĩnh viễn theo thời gian."""
+    limit = max(1, min(limit or 1000, 5000))
+    offset = max(0, offset or 0)
+    stmt = (_filter_loc_scope(select(ConsignedEntry), ConsignedEntry.location_id,
+                              _disallowed_location_ids(db, user))
+            .order_by(ConsignedEntry.created_at.desc()).limit(limit).offset(offset))
     entries = db.execute(stmt).scalars().all()
     out = []
     for e in entries:
@@ -1094,9 +1104,14 @@ def approve_factory_import_entry(db: Session, entry_id: str, user: User) -> dict
     return {"entry_id": entry.entry_id, "count": entry.quantity, "unit_codes": [u.unit_code for u in units]}
 
 
-def list_factory_import_entries(db: Session, user: User | None = None) -> list[dict]:
-    stmt = _filter_loc_scope(select(FactoryImportEntry), FactoryImportEntry.location_id,
-                             _disallowed_location_ids(db, user)).order_by(FactoryImportEntry.created_at.desc())
+def list_factory_import_entries(db: Session, user: User | None = None, limit: int = 1000, offset: int = 0) -> list[dict]:
+    """Có phân trang (mặc định 1000, tối đa 5000) — mỗi lần khai "Nhập từ nhà máy khác" tự sinh
+    thêm 1 dòng, tăng dần theo thời gian."""
+    limit = max(1, min(limit or 1000, 5000))
+    offset = max(0, offset or 0)
+    stmt = (_filter_loc_scope(select(FactoryImportEntry), FactoryImportEntry.location_id,
+                              _disallowed_location_ids(db, user))
+            .order_by(FactoryImportEntry.created_at.desc()).limit(limit).offset(offset))
     entries = db.execute(stmt).scalars().all()
     out = []
     for e in entries:

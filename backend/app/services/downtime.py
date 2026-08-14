@@ -143,10 +143,12 @@ def record_downtime(db: Session, payload: dict, user: User) -> DowntimeEvent:
     return ev
 
 
-def list_events(db: Session, line: str = None) -> list:
+def list_events(db: Session, line: str = None, limit: int = None) -> list:
     stmt = select(DowntimeEvent).order_by(DowntimeEvent.shift_date.desc(), DowntimeEvent.recorded_at.desc())
     if line:
         stmt = stmt.where(DowntimeEvent.line == line)
+    if limit:
+        stmt = stmt.limit(limit)
     rows = db.execute(stmt).scalars().all()
     return [{"event_id": e.event_id, "line": e.line, "shift": e.shift, "shift_date": e.shift_date,
              "reason_group": e.reason_group, "reason_code": e.reason_code,
