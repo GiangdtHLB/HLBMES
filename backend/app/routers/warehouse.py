@@ -229,10 +229,9 @@ def create_sang_ngang(payload: ReceiptIn, db: Session = Depends(get_db),
                       user: User = Depends(get_current_user)):
     require_perm(user, "warehouse.receive")
     data = payload.model_dump()
-    # Xuất sang ngang cũng tăng tồn Kho công ty qua receive() (xem svc.create_sang_ngang) — cùng
-    # áp dụng bắt buộc chọn vị trí cất như /receive (chỉ khi danh mục vị trí đã có dữ liệu).
-    if not data.get("location_id") and svc.any_material_locations_declared(db):
-        raise DomainError("Vui lòng chọn vị trí kho trước khi khai báo.")
+    # Khác /receive thường — hàng "sang ngang" hiểu là về tới đâu chuyển thẳng cho phân xưởng
+    # tới đó, không cần cất vào 1 vị trí Kho công ty cụ thể trước, nên KHÔNG bắt buộc chọn vị
+    # trí kho ở đây (vẫn cho phép chọn nếu muốn, chỉ không ép buộc).
     return svc.create_sang_ngang(db, data, user)
 
 

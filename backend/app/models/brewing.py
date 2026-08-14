@@ -668,5 +668,9 @@ class OpsSetting(Base):
     # Mã nhận dạng nhà máy — khai báo ở Danh mục cùng "Cài đặt vận hành", giúp truy vết ngoài
     # thị trường sản phẩm được chiết từ nhà máy nào (hữu ích khi hệ thống mở rộng nhiều nhà máy).
     factory_code: Mapped[Optional[str]] = mapped_column(Unicode(32), nullable=True)
+    # Số ngày lùi về quá khứ tối đa cho phép ở "Ngày nhập" khi nhập kho thủ công thành phẩm/khai
+    # báo Nhập từ nhà máy khác (tránh gõ nhầm ngày) — trước đây hardcode 15, nay cấu hình được ở
+    # Cài đặt vận hành. Không áp dụng cho Nhập tồn đầu (luôn bỏ qua, xem services/wms.py::_create_units).
+    finished_goods_receive_max_backdate_days: Mapped[float] = mapped_column(Float, default=15.0)
     updated_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)

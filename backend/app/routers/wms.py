@@ -8,9 +8,9 @@ from ..database import get_db
 from ..schemas import (ConsignedEntryIn, ConsignedEntryUpdate, DecomposeBatchIn, DeleteByLotIn,
                        FactoryImportEntryIn, FactoryImportEntryUpdate, FreeIssueBatchIn,
                        LoadSlipHeaderUpdate, NearExpiryEntryIn, NearExpiryEntryUpdate, PutawayIn, RelocateBatchIn,
-                       ShipmentIn, ShipmentTripIn, ShipmentUpdate, UnitBuildIn, UnitDeleteIn, UnitTransferIn,
-                       VehicleIn, VehicleUpdate, WmsLocationIn, WmsLocationLayoutIn, WmsLocationUpdate,
-                       WmsTransferIn, WmsTransferTripIn,
+                       ShipmentIn, ShipmentTripIn, ShipmentUpdate, UnitBuildIn, UnitDeleteIn, UnitGroupUpdateIn,
+                       UnitTransferIn, VehicleIn, VehicleUpdate, WmsLocationIn, WmsLocationLayoutIn,
+                       WmsLocationSplitIn, WmsLocationUpdate, WmsTransferIn, WmsTransferTripIn,
                        WmsTransferUpdate, WmsWarehouseIn, WmsWarehouseUpdate)
 from ..security import User, get_current_user, require_perm, require_role
 from ..services import load_slip as load_slip_svc
@@ -92,6 +92,13 @@ def update_location_layout(loc_id: str, payload: WmsLocationLayoutIn, db: Sessio
     return {"loc_id": loc.loc_id, "layout_row": loc.layout_row, "layout_col": loc.layout_col}
 
 
+@router.post("/locations/{loc_id}/split")
+def split_location(loc_id: str, payload: WmsLocationSplitIn, db: Session = Depends(get_db),
+                   user: User = Depends(get_current_user)):
+    require_role(user, Role.ADMIN)
+    return [{"loc_id": c.loc_id, "code": c.code, "name": c.name} for c in svc.split_location(db, loc_id, payload.parts)]
+
+
 @router.get("/vehicles")
 def vehicle_list(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     return svc.list_vehicles(db)
@@ -141,6 +148,14 @@ def delete_units_by_lot(payload: DeleteByLotIn, db: Session = Depends(get_db),
                         user: User = Depends(get_current_user)):
     return svc.delete_units_by_criteria(db, payload.product_name, payload.lot_code, payload.unit_type, user,
                                         warehouse_id=payload.warehouse_id)
+
+
+@router.put("/units/by-lot")
+def update_units_by_lot(payload: UnitGroupUpdateIn, db: Session = Depends(get_db),
+                        user: User = Depends(get_current_user)):
+    return svc.update_units_by_criteria(db, payload.product_name, payload.lot_code, payload.unit_type, user,
+                                        warehouse_id=payload.warehouse_id, new_lot_code=payload.new_lot_code,
+                                        location_id=payload.location_id, received_at=payload.received_at)
 
 
 @router.post("/units/confirm-receipt-by-lot")

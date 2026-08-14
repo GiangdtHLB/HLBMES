@@ -113,6 +113,7 @@ class OpsSettingIn(BaseModel):
     finished_goods_restock_days: float = 7.0
     fg_days_of_stock_critical_days: float = 3.0
     fg_days_in_stock_warning_days: float = 30.0
+    finished_goods_receive_max_backdate_days: float = 15.0
     factory_code: Optional[str] = None
 
 
@@ -130,6 +131,7 @@ class OpsSettingOut(ORMModel):
     finished_goods_restock_days: float
     fg_days_of_stock_critical_days: float
     fg_days_in_stock_warning_days: float
+    finished_goods_receive_max_backdate_days: float
     factory_code: Optional[str] = None
     updated_by: Optional[str] = None
     updated_at: datetime
@@ -542,6 +544,10 @@ class WmsLocationLayoutIn(BaseModel):
     col: Optional[int] = None
 
 
+class WmsLocationSplitIn(BaseModel):
+    parts: int = 4
+
+
 class UnitBuildIn(BaseModel):
     finished_product_id: Optional[str] = None
     product_name: Optional[str] = None
@@ -593,6 +599,15 @@ class DeleteByLotIn(BaseModel):
     # Dùng cho cả confirm_receipt_by_lot (Duyệt nhập kho theo lô) và delete_units_by_criteria
     # (Xóa theo lô) — BẮT BUỘC nếu tài khoản bị giới hạn kho, mirror DecomposeBatchIn.
     warehouse_id: Optional[str] = None
+
+
+class UnitGroupUpdateIn(DeleteByLotIn):
+    # Sửa lô vỉ/keg đã nhập kho (thủ công/tồn đầu) THEO TIÊU CHÍ nhóm, mirror DeleteByLotIn —
+    # None = giữ nguyên field đó. new_lot_code đổi lot_code (khác lot_code ở DeleteByLotIn, dùng
+    # để KHỚP lô hiện tại).
+    new_lot_code: Optional[str] = None
+    location_id: Optional[str] = None
+    received_at: Optional[datetime] = None
 
 
 class RelocateBatchIn(BaseModel):
