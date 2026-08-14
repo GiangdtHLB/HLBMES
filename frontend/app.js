@@ -9964,7 +9964,7 @@ VIEWS.master = async function () {
         <td><select class="wl_wh" style="width:160px">${whOpt(l.warehouse_id)}</select></td>
         <td><input class="wl_zone" value="${esc(l.zone || "")}" style="width:60px"/></td>
         <td><select class="wl_kind">${kindOpt(l.kind)}</select></td>
-        <td><input class="wl_capacity" type="number" value="${l.capacity}" style="width:60px"/></td>` :
+        <td><input class="wl_capacity" type="number" value="${l.capacity}" style="width:100px"/></td>` :
         `<td><code class="k">${esc(l.code)}</code></td><td>${esc(l.name)}</td>
         <td class="muted">${wh ? esc(wh.code) + " — " + esc(wh.name) : "—"}</td>
         <td class="muted">${esc(l.zone || "—")}</td><td class="muted">${esc(kindLabel[l.kind] || l.kind)}</td>
@@ -9981,7 +9981,7 @@ VIEWS.master = async function () {
         <div class="field"><label>Kho thành phẩm</label><select id="wl_new_wh" style="width:160px"><option value="">(không có kho)</option>${wmsWarehouses.map(w => `<option value="${esc(w.warehouse_id)}">${esc(w.code)} — ${esc(w.name)}</option>`).join("")}</select></div>
         <div class="field"><label>Khu</label><input id="wl_new_zone" style="width:60px"/></div>
         <div class="field"><label>Loại</label><select id="wl_new_kind"><option value="bin">Kệ/ô chứa</option><option value="staging">Khu tập kết tạm</option><option value="cold">Kho lạnh</option><option value="dock">Bãi xuất/nhập hàng</option></select></div>
-        <div class="field"><label>Sức chứa</label><input id="wl_new_capacity" type="number" value="10" style="width:60px"/></div>
+        <div class="field"><label>Sức chứa</label><input id="wl_new_capacity" type="number" value="10" style="width:100px"/></div>
         <div class="field" style="align-self:flex-end"><button class="btn" id="wl_add">+ Thêm vị trí</button></div>
       </div>` : ""}
     </div>
