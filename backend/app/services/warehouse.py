@@ -3,7 +3,7 @@
 from datetime import datetime, timedelta
 from typing import Optional
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from ..audit import record_audit
@@ -109,6 +109,11 @@ def delete_material_location(db: Session, loc_id: str, user: User) -> None:
         MaterialLot.location_id == loc_id, MaterialLot.quantity != 0)).scalar() or 0
     if used:
         raise DomainError(f"Vị trí {loc.code} đang chứa {used} lô NVL — không thể xóa.")
+    # Lô đã RỖNG (quantity==0) vẫn giữ location_id trỏ tới vị trí này → MSSQL enforce FK
+    # fk_material_lot_location_id chặn DELETE (SQLite bỏ qua). Gỡ tham chiếu (an toàn vì lô hết
+    # tồn) + flush TRƯỚC khi xóa vị trí — xem DEPLOY-CONTRACT lớp con-ẩn.
+    db.execute(update(MaterialLot).where(MaterialLot.location_id == loc_id).values(location_id=None))
+    db.flush()
     record_audit(db, entity_type="material_location", entity_id=loc.loc_id, action="delete", actor=user,
                 before={"code": loc.code, "name": loc.name})
     db.delete(loc)
