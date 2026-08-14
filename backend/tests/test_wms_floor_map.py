@@ -114,3 +114,54 @@ def test_floor_map_second_newer_lot_not_fifo_ready(client, admin_h):
     new_lot = next(r for r in rows if r["code"] == "D02-FM2")["lots"][0]
     assert old_lot["fifo_ready"] is True
     assert new_lot["fifo_ready"] is False
+
+
+def test_split_location_creates_children_moves_stock_deactivates_parent(client, admin_h):
+    wh = client.post("/api/wms/warehouses", headers=admin_h,
+                     json={"code": "WH-SPLIT", "name": "Kho Split"}).json()
+    loc = client.post("/api/wms/locations", headers=admin_h,
+                      json={"code": "DM.K01-SPLIT", "name": "Dãy xếp 01", "capacity": 500,
+                            "warehouse_id": wh["warehouse_id"]}).json()
+    client.put(f"/api/wms/locations/{loc['loc_id']}/layout", headers=admin_h,
+              json={"row": 3, "col": 4})
+    product_name = f"SPLIT-TEST-{new_id()[:8]}"
+    _add_unit(product_name, "LOT-SPLIT", loc["loc_id"], age_days=1)
+
+    r = client.post(f"/api/wms/locations/{loc['loc_id']}/split", headers=admin_h, json={"parts": 4})
+    assert r.status_code == 200, r.text
+    children = r.json()
+    assert len(children) == 4
+    codes = sorted(c["code"] for c in children)
+    assert codes == [f"DM.K01-SPLIT-Ô{i}" for i in range(1, 5)]
+
+    all_locs = {l["loc_id"]: l for l in client.get("/api/wms/locations", headers=admin_h).json()}
+    parent = all_locs[loc["loc_id"]]
+    assert parent["active"] is False, "vị trí gốc phải deactivate, không bị xóa (giữ lịch sử FK)"
+
+    child1_id = next(c["loc_id"] for c in children if c["code"].endswith("Ô1"))
+    rows = client.get(f"/api/wms/warehouses/{wh['warehouse_id']}/floor-map", headers=admin_h).json()
+    row_codes = {r["code"] for r in rows}
+    assert "DM.K01-SPLIT" not in row_codes, "vị trí gốc (đã deactivate) không được hiện trong Sơ đồ kho nữa"
+    child1_row = next(r for r in rows if r["loc_id"] == child1_id)
+    assert child1_row["layout_row"] == 3 and child1_row["layout_col"] == 4, "Ô1 kế thừa đúng vị trí trên Bố cục kho của vị trí gốc"
+    assert len(child1_row["lots"]) == 1 and child1_row["lots"][0]["lot_code"] == "LOT-SPLIT", "tồn kho hiện có của vị trí gốc phải dồn hết vào Ô1"
+
+    other_children_rows = [r for r in rows if r["loc_id"] != child1_id and r["code"].startswith("DM.K01-SPLIT-Ô")]
+    assert all(r["layout_row"] is None for r in other_children_rows), "Ô2..Ô4 chưa xếp bố cục, chờ admin tự xếp thêm"
+
+
+def test_split_location_rejects_bad_parts_and_already_inactive(client, admin_h):
+    wh = client.post("/api/wms/warehouses", headers=admin_h,
+                     json={"code": "WH-SPLIT2", "name": "Kho Split 2"}).json()
+    loc = client.post("/api/wms/locations", headers=admin_h,
+                      json={"code": "DM.K02-SPLIT", "name": "Dãy xếp 02", "capacity": 500,
+                            "warehouse_id": wh["warehouse_id"]}).json()
+
+    r = client.post(f"/api/wms/locations/{loc['loc_id']}/split", headers=admin_h, json={"parts": 1})
+    assert r.status_code == 409, r.text
+
+    r = client.post(f"/api/wms/locations/{loc['loc_id']}/split", headers=admin_h, json={"parts": 4})
+    assert r.status_code == 200, r.text
+
+    r = client.post(f"/api/wms/locations/{loc['loc_id']}/split", headers=admin_h, json={"parts": 4})
+    assert r.status_code == 409, r.text

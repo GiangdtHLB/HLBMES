@@ -3597,8 +3597,10 @@ VIEWS.warehouse_kc = async function () {
   const lotChip = (l) => `<code class="k">${esc(l.lot_code)}</code> (${l.quantity}${l.uom}${l.status === "on_hold" ? ", CHỜ QC" : ""})`;
   if (sec === "ton") {
     const tonLoc = TON_LOC.warehouse_kc;
-    const [stock, allLots] = await Promise.all([
-      GET("/warehouse/stock" + (tonLoc ? "?location=" + encodeURIComponent(tonLoc) : "")), GET("/lots")]);
+    const [stock, allLots, matLocsTon] = await Promise.all([
+      GET("/warehouse/stock" + (tonLoc ? "?location=" + encodeURIComponent(tonLoc) : "")), GET("/lots"),
+      GET("/warehouse/locations").catch(() => [])]);
+    const locByIdTon = Object.fromEntries(matLocsTon.map(l => [l.loc_id, l]));
     const lotMatchesLoc = (l) => tonLoc === "" ? true : tonLoc === "Kho phân xưởng"
       ? /phân xưởng/i.test(l.location || "") : !/phân xưởng/i.test(l.location || "");
     allLots.filter(l => l.quantity > 0 && lotMatchesLoc(l)).forEach(l => {
@@ -3610,25 +3612,29 @@ VIEWS.warehouse_kc = async function () {
       <div class="row" style="margin-bottom:8px"><div class="field"><label>Kho</label>${tonLocSelectHtml("ton_loc", tonLoc)}</div></div>
       ${lowCount ? `<div class="muted" style="color:var(--red);margin-bottom:8px">⚠ ${lowCount} vật tư đang dưới tồn tối thiểu.</div>` : ""}
       <input class="searchbox" data-tbl="t_ton" placeholder="Tìm mã/tên vật tư..." style="margin-bottom:8px"/>
-      <div class="tablewrap"><table id="t_ton"><thead><tr><th>Mã VT</th><th>Tên</th><th>Nhóm</th><th>Mã lô</th><th>Tổng tồn thực tế</th><th>Đang chờ QC</th><th>Tồn khả dụng</th><th>ĐVT</th><th>Quy đổi</th><th>Tồn tối thiểu</th></tr></thead>
+      <div class="tablewrap"><table id="t_ton"><thead><tr><th>Mã VT</th><th>Tên</th><th>Nhóm</th><th>Mã lô</th><th>Vị trí kho</th><th>Tổng tồn thực tế</th><th>Đang chờ QC</th><th>Tồn khả dụng</th><th>ĐVT</th><th>Quy đổi</th><th>Tồn tối thiểu</th></tr></thead>
       <tbody>${stock.map(s => { const matLots = (lotsByMaterial[s.material_id] || [])
           .sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
         const shown = matLots.slice(0, LOT_CELL_MAX);
         const rest = matLots.length - shown.length;
         const lotCell = shown.map(lotChip).join(", ") +
           (rest > 0 ? ` <button type="button" class="btn sm sec" data-viewlots="${esc(s.material_id)}" data-matlabel="${esc(s.material_code)} — ${esc(s.material_name)}">+${rest} lô khác</button>` : "");
+        const locCodes = [...new Set(matLots.map(l => l.location_id && locByIdTon[l.location_id] ? locByIdTon[l.location_id].code : null).filter(Boolean))];
+        const locCell = locCodes.length ? locCodes.slice(0, 2).map(c => `<code class="k">${esc(c)}</code>`).join(", ") +
+          (locCodes.length > 2 ? ` +${locCodes.length - 2}` : "") : "—";
         const matTon = matByIdTon[s.material_id];
         const altDisp = matTon && matTon.alt_uom && matTon.alt_uom_ratio
           ? `${(s.on_hand * matTon.alt_uom_ratio).toFixed(2)} ${esc(matTon.alt_uom)}` : "—";
         return `<tr${s.low_stock ? ' style="background:color-mix(in srgb, var(--red) 10%, transparent)"' : ""}><td><code class="k">${esc(s.material_code)}</code></td><td>${esc(s.material_name)}</td>
         <td class="muted">${esc(s.category || "")}</td>
         <td class="muted">${lotCell || "—"}</td>
+        <td class="muted">${locCell}</td>
         <td>${s.actual_total}</td>
         <td class="muted">${s.pending_qc > 0 ? s.pending_qc : "—"}</td>
         <td>${s.on_hand}${s.low_stock ? ' <span style="color:var(--red)" title="Dưới tồn tối thiểu">⚠</span>' : ""}</td><td>${s.uom}</td>
         <td class="muted">${altDisp}</td>
         <td class="muted">${s.stock_min ?? "—"}</td></tr>`; }).join("") ||
-        '<tr><td colspan=10 class="muted">Không có tồn kho.</td></tr>'}</tbody></table></div></div>`;
+        '<tr><td colspan=11 class="muted">Không có tồn kho.</td></tr>'}</tbody></table></div></div>`;
   } else if (sec === "the") {
     const mats = await GET("/materials");
     const wcItems = mats.map(m => ({ value: m.material_id, label: `${m.code} — ${m.name}`, uom: m.uom }));
@@ -3796,7 +3802,7 @@ VIEWS.warehouse_kc = async function () {
           <div class="field"><label>ĐVT</label><span id="sng_uom_wrap">${altUomFieldHtml(matByIdGiao[matItemsGiao[0]?.value], "sng_uom", 60)}</span></div>
           <div class="field"><label>Đơn giá</label><input id="sng_price" type="number" placeholder="(tuỳ chọn)"/></div>
           <div class="field"><label>Hạn dùng</label><input id="sng_exp" type="date"/></div></div>
-        <div class="row"><div class="field"><label>Vị trí cất *</label><select id="sng_loc">${matLocOptsGiao}</select></div>
+        <div class="row"><div class="field"><label>Vị trí cất (tuỳ chọn)</label><select id="sng_loc"><option value="">(không cần chọn — chuyển thẳng phân xưởng)</option>${matLocOptsGiao}</select></div>
           <div class="field" style="flex:1"><label>Diễn giải</label><input id="sng_note" placeholder="(tuỳ chọn)"/></div>
           <button class="btn" id="sng_do" style="align-self:flex-end">Xuất sang ngang</button></div>`
           : '<div class="muted">Bạn không có quyền tạo Xuất sang ngang.</div>'}
@@ -3947,6 +3953,7 @@ VIEWS.warehouse_kc = async function () {
     body = `<div class="panel"><h2>🚚 Cất vào vị trí <span class="muted">(${unplacedVt.length})</span></h2>
       <div class="muted" style="margin-bottom:8px">Gán vị trí kho cho các lô Kho công ty CHƯA có vị trí (nhập trước khi khai danh mục vị trí, hoặc nhập tồn đầu bằng Excel) — chọn vị trí đích rồi tick các lô cần cất.</div>
       <div class="row"><div class="field"><label>Vị trí đích</label><select id="vt_to">${locOptsVt}</select></div></div>
+      <input class="searchbox" data-tbl="t_vt_unplaced" placeholder="Tìm mã lô/vật tư..." style="margin-bottom:8px"/>
       <div class="tablewrap" style="margin-top:10px"><table id="t_vt_unplaced">
         <thead><tr><th></th><th>Lô</th><th>Vật tư</th><th>SL</th><th>Ngày nhập</th></tr></thead>
         <tbody>${unplacedVt.map(l => `<tr><td><input type="checkbox" data-vtu="${esc(l.lot_id)}"/></td>
@@ -4069,12 +4076,11 @@ VIEWS.warehouse_kc = async function () {
     });
     if ($("sng_supplier_txt")) wireSearchableSelect("sng_supplier_txt", "sng_supplier", WH_CACHE.supplierItems);
     if ($("sng_do")) $("sng_do").onclick = () => guard(async () => {
-      if (!$("sng_loc").value) throw new Error("Chọn vị trí cất trước khi khai báo.");
       const sngMat = matByIdGiao[$("sng_mat").value];
       const sngQty = altUomToBaseQty(sngMat, parseFloat($("sng_qty").value), $("sng_uom").value);
       const res = await POST("/warehouse/sang-ngang", { material_id: $("sng_mat").value,
         supplier_id: $("sng_supplier").value || null, unit_price: $("sng_price").value ? parseFloat($("sng_price").value) : null,
-        quantity: sngQty, uom: sngMat ? sngMat.uom : $("sng_uom").value, location_id: $("sng_loc").value,
+        quantity: sngQty, uom: sngMat ? sngMat.uom : $("sng_uom").value, location_id: $("sng_loc").value || null,
         expiry: $("sng_exp").value || null, reason: $("sng_note").value.trim() || "Xuất sang ngang" });
       toast(`Đã tạo đề nghị xuất sang ngang (số ${res.request_code}) — chờ phân xưởng duyệt`);
       render("warehouse_kc");
@@ -4287,8 +4293,10 @@ VIEWS.warehouse_px = async function () {
     const pxLoc = TON_LOC.warehouse_px;
     const pxLotMatchesLoc = (l) => pxLoc === "" ? true : pxLoc === "Kho phân xưởng"
       ? /phân xưởng/i.test(l.location || "") : !/phân xưởng/i.test(l.location || "");
-    const [allLots, mats] = await Promise.all([GET("/lots"), GET("/materials")]);
+    const [allLots, mats, qcReqIdsPx] = await Promise.all([GET("/lots"), GET("/materials"),
+      GET("/materials/qc-required").catch(() => [])]);
     const matById = Object.fromEntries(mats.map(m => [m.material_id, m]));
+    const qcReqSetPx = new Set(qcReqIdsPx);
     const rows = allLots.filter(l => pxLotMatchesLoc(l) && l.quantity > 0)
       .sort((a, b) => new Date(a.created_at) - new Date(b.created_at));   // FIFO: nhập trước hiện trước
     body = `<div class="panel"><h2>Tồn kho — ${esc(pxLoc || "Tất cả")} <span class="muted">(${rows.length})</span></h2>
@@ -4305,7 +4313,7 @@ VIEWS.warehouse_px = async function () {
           <td class="muted">${fmt(l.created_at)}</td>
           <td class="muted">${esc(l.location || "")}</td>
           <td>${badge(l.status)}</td>
-          <td><button class="btn sm sec" data-lotqc="${esc(l.lot_id)}">Xem chỉ tiêu</button></td></tr>`).join("") ||
+          <td>${qcReqSetPx.has(l.material_id) ? `<button class="btn sm sec" data-lotqc="${esc(l.lot_id)}">Xem chỉ tiêu</button>` : ""}</td></tr>`).join("") ||
           `<tr><td colspan=7 class="muted">Chưa có lô nào ở ${esc(pxLoc || "kho nào")}.</td></tr>`}</tbody>
       </table></div>
     </div>`;
@@ -4920,10 +4928,11 @@ function isWhScopeRestricted() {
 // Mirror myAllowedWarehouses nhưng lọc trực tiếp danh sách WmsLocation (GET /wms/locations) theo
 // warehouse_code — dùng cho các picker chọn THẲNG vị trí (Nhập kho/Cất vào vị trí/Điều chuyển).
 function myAllowedLocations(allLocations) {
+  const active = allLocations.filter(l => l.active);
   const scope = CURRENT_USER && CURRENT_USER.wms_warehouse_scope;
-  if (!CURRENT_USER || CURRENT_USER.role === "admin" || !scope || scope === "*") return allLocations;
+  if (!CURRENT_USER || CURRENT_USER.role === "admin" || !scope || scope === "*") return active;
   const allowed = new Set(String(scope).split(",").map(s => s.trim()).filter(Boolean));
-  return allLocations.filter(l => allowed.has(l.warehouse_code));
+  return active.filter(l => allowed.has(l.warehouse_code));
 }
 // Kiểm tra 1 mã kho (warehouse_code) đơn lẻ có nằm trong phạm vi được phân hay không — dùng khi
 // lọc theo từng dòng thay vì cả mảng (VD picker Điều chuyển lấy warehouse_code từ vị trí lô hàng).
@@ -5095,6 +5104,9 @@ function requestLineRowHtml(r, l, matById, lotById, canFulfill, allLots) {
     ? `<select class="reqlot-select" id="reqlot-${esc(l.line_id)}">${lotOpts.html}</select>`
     : `<span class="muted">${fulLot ? esc(fulLot.lot_code) : "—"}</span>`;
   const dateCell = showLotPicker ? "" : `<span class="muted">${fulLot ? fmt(fulLot.created_at) : "—"}</span>`;
+  const dispLot = fulLot || (l.preferred_lot_id ? lotById[l.preferred_lot_id] : null);
+  const dispLoc = dispLot && dispLot.location_id ? (WH_CACHE.matLocById || {})[dispLot.location_id] : null;
+  const locCell = dispLoc ? `<code class="k">${esc(dispLoc.code)}</code>` : `<span class="muted">—</span>`;
   const actions = (canFulfill && l.status === "pending")
     ? `<button class="btn sm sec" data-reqfulfill data-reqid="${esc(r.request_id)}" data-lineid="${esc(l.line_id)}" data-qty="${l.quantity}">Xuất dòng này</button>
        <button class="btn sm sec" data-reqreject data-reqid="${esc(r.request_id)}" data-lineid="${esc(l.line_id)}">Từ chối</button>`
@@ -5106,6 +5118,7 @@ function requestLineRowHtml(r, l, matById, lotById, canFulfill, allLots) {
     <td>${l.quantity} ${esc(l.uom)}</td>
     <td>${lotCell}</td>
     <td>${dateCell}</td>
+    <td>${locCell}</td>
     <td>${l.status === "fulfilled" ? fulfilledFifoBadgeHtml(l.fifo_ok) : requestFifoBadgeHtml(l.material_id, l.preferred_lot_id, allLots)}</td>
     <td>${badge(REQ_STATUS_BADGE[l.status] || "planned")}${esc(l.status)}</td>
     <td>${actions}</td></tr>`;
@@ -5147,9 +5160,9 @@ function requestBlockHtml(r, matById, lotById, canFulfill, showBulk, allLots, ca
       </div>
       <div class="reqdetail" style="display:none;margin-top:8px">
         <table>
-          <thead><tr><th>Vật tư</th><th>SL</th><th>Lô</th><th>Ngày nhập</th><th>FIFO</th><th>Trạng thái</th><th></th></tr></thead>
+          <thead><tr><th>Vật tư</th><th>SL</th><th>Lô</th><th>Ngày nhập</th><th>Vị trí kho</th><th>FIFO</th><th>Trạng thái</th><th></th></tr></thead>
           <tbody>${r.lines.map(l => requestLineRowHtml(r, l, matById, lotById, canFulfill, allLots)).join("") ||
-            '<tr><td colspan=7 class="muted">Phiếu không có dòng nào.</td></tr>'}</tbody>
+            '<tr><td colspan=8 class="muted">Phiếu không có dòng nào.</td></tr>'}</tbody>
         </table>
       </div>
     </div>`;
@@ -5224,8 +5237,9 @@ function cartPanelHtml() {
     const slCell = c.locked
       ? `<span class="muted" title="Mã cũ hơn (FIFO) trong nhóm đã đủ định mức theo lệnh — mã này không cần lấy">0 ${esc(c.uom)} — đã đủ từ mã cũ hơn</span>`
       : `<input type="number" min="0" step="any" value="${c.quantity}" data-cartqty="${i}" style="width:80px"/> ${esc(c.uom)}`;
+    const matNameCart = REQ_CACHE.matById[c.material_id] ? REQ_CACHE.matById[c.material_id].name : "";
     return `<tr${c.locked ? ' style="opacity:.6"' : ""}>
-    <td>${esc(c.material_code)}</td>
+    <td><code class="k">${esc(c.material_code)}</code>${matNameCart ? ` ${esc(matNameCart)}` : ""}</td>
     <td>${c.group_code ? `<span class="badge on_hold" title="1 trong các mã thuộc Nhóm vật tư thay thế &quot;${esc(c.group_name)}&quot; — các mã trong nhóm dùng thay thế nhau, số lượng mỗi mã đã tự phân bổ theo FIFO">⚠️ Nhóm: ${esc(c.group_name)}</span>` : '<span class="muted">—</span>'}</td>
     <td class="${insufficient ? "" : "muted"}"${insufficient ? ` style="color:var(--red)" title="Không đủ tồn thực tế để xuất số lượng đang đề nghị"` : ""}>${available} ${esc(c.uom)}</td>
     <td class="muted">${pendingQc > 0 ? `${pendingQc} ${esc(c.uom)}` : "—"}</td>
@@ -9974,7 +9988,9 @@ VIEWS.master = async function () {
         ${isAdminWmsCatalog ? `<td style="white-space:nowrap">
           <button class="btn sm" data-loc-save="${esc(l.loc_id)}">Lưu</button>
           <button class="btn sm sec" data-loc-del="${esc(l.loc_id)}" ${l.used > 0 ? "disabled title=\"Đang có vỉ/keg — không xóa được\"" : ""}>Xóa</button>
+          <button class="btn sm sec" data-loc-split="${esc(l.loc_id)}" ${!l.active ? "disabled title=\"Đã ngừng hoạt động\"" : ""}>Chia ô</button>
         </td>` : ""}</tr>`; }).join("") || `<tr><td colspan="${isAdminWmsCatalog ? 9 : 8}" class="muted">Chưa có vị trí nào.</td></tr>`}</tbody></table></div>
+      <div class="muted" style="font-size:12px;margin-top:6px">"Chia ô": tạo N vị trí con thật (VD "DM.K01" → "DM.K01-Ô1"…"Ô4"), mỗi ô có sức chứa/tồn kho riêng — tồn hiện có của dãy gốc dồn hết vào Ô1, dãy gốc tự ngừng hoạt động (không xóa, vẫn giữ lịch sử điều chuyển/bia gửi/cận date cũ tham chiếu tới). Xếp thêm các ô mới vào "Bố cục kho" phía dưới sau khi chia.</div>
       ${isAdminWmsCatalog ? `<div class="row" style="margin-top:12px;flex-wrap:wrap">
         <div class="field"><label>Mã</label><input id="wl_new_code" style="width:90px"/></div>
         <div class="field"><label>Tên</label><input id="wl_new_name" style="width:160px"/></div>
@@ -9988,7 +10004,7 @@ VIEWS.master = async function () {
 
     ${isAdminWmsCatalog && wmsWarehouses.length ? (() => {
       if (!WMS_LAYOUT_WH || !wmsWarehouses.some(w => w.warehouse_id === WMS_LAYOUT_WH)) WMS_LAYOUT_WH = wmsWarehouses[0].warehouse_id;
-      const locsInWh = wmsLocations.filter(l => l.warehouse_id === WMS_LAYOUT_WH);
+      const locsInWh = wmsLocations.filter(l => l.warehouse_id === WMS_LAYOUT_WH && l.active);
       const whOptionsHtml = wmsWarehouses.map(w => `<option value="${esc(w.warehouse_id)}" ${w.warehouse_id === WMS_LAYOUT_WH ? "selected" : ""}>${esc(w.code)} — ${esc(w.name)}</option>`).join("");
       return `<div class="panel"><h2>🗺️ Bố cục kho</h2>
         <div class="muted" style="margin-bottom:8px">Tự xếp vị trí lên lưới hàng/cột đúng theo mặt bằng thật ngoài kho — "Sơ đồ kho" (tab Kho TP) chỉ vẽ lại đúng bố cục đã xếp ở đây, không đoán theo mã vị trí.</div>
@@ -10161,7 +10177,7 @@ VIEWS.master = async function () {
         không có Dịch bia/Loại bia để chọn — nhóm gán ở đây luôn áp dụng chung cho MỌI mẻ nấu, không phân biệt loại bia.</div>
       ${noPerm}
       ${canManage ? `<div class="row">
-        <div class="field"><label>Công đoạn</label><select id="sg_stage">${Object.entries(STAGE_LABELS).filter(([k]) => k !== "chiet").map(([k, v]) => `<option value="${k}">${esc(v)}</option>`).join("")}</select></div>
+        <div class="field"><label>Công đoạn</label><select id="sg_stage"><option value="">-- Chọn công đoạn --</option>${Object.entries(STAGE_LABELS).filter(([k]) => k !== "chiet").map(([k, v]) => `<option value="${k}">${esc(v)}</option>`).join("")}</select></div>
         <div class="field" id="sg_product_wrap"><label>Dịch bia (tuỳ chọn)</label><select id="sg_product"><option value="">(Mọi dịch bia)</option>${products.map(p => `<option value="${p.product_id}">${esc(p.code)}</option>`).join("")}</select></div>
         <div class="field" id="sg_beertype_wrap" style="display:none"><label>Loại bia (tuỳ chọn)</label><select id="sg_beertype"><option value="">(Mọi loại bia)</option>${beerTypes.map(bt => `<option value="${bt.beer_type_id}">${esc(bt.code)} — ${esc(bt.name)}</option>`).join("")}</select></div>
         <div class="field" id="sg_fproduct_wrap" style="display:none"><label>Sản phẩm (tuỳ chọn)</label><select id="sg_fproduct"><option value="">(Mọi sản phẩm)</option>${finishedProducts.map(fp => `<option value="${fp.finished_product_id}">${esc(fp.code)} — ${esc(fp.name)}</option>`).join("")}</select></div>
@@ -10208,6 +10224,11 @@ VIEWS.master = async function () {
         <div class="field"><label>Ngưỡng đóng bổ sung / Đỏ-Vàng (ngày)</label><input id="ops_restock_days" type="number" step="any" value="${opsSettings.finished_goods_restock_days}" ${canManage ? "" : "disabled"}/></div>
         <div class="field"><label>Ngưỡng Đỏ — Số ngày tồn dự kiến (ngày)</label><input id="ops_fg_critical_days" type="number" step="any" value="${opsSettings.fg_days_of_stock_critical_days}" ${canManage ? "" : "disabled"}/></div>
         <div class="field"><label>Ngưỡng Vàng — Số ngày lưu kho (ngày)</label><input id="ops_fg_instock_warning_days" type="number" step="any" value="${opsSettings.fg_days_in_stock_warning_days}" ${canManage ? "" : "disabled"}/></div>
+      </div>
+      <div class="muted" style="margin:10px 0 6px">Số ngày lùi tối đa cho phép ở "Ngày nhập" khi Nhập kho thủ công (Kho TP) hoặc khai báo
+        Nhập từ nhà máy khác — tránh gõ nhầm ngày quá xa trong quá khứ (không áp dụng cho Nhập tồn đầu).</div>
+      <div class="row">
+        <div class="field"><label>Số ngày lùi tối đa — Ngày nhập (ngày)</label><input id="ops_fg_max_backdate_days" type="number" step="any" value="${opsSettings.finished_goods_receive_max_backdate_days}" ${canManage ? "" : "disabled"}/></div>
       </div>
       <div class="muted" style="margin:10px 0 6px">Ngưỡng sản lượng (hl) để phân loại 1 mẻ lọc đã kết thúc là Thấp/Bình thường/Cao trên báo cáo
         "Sản lượng lọc" (tab Báo cáo) — mẻ Thấp sẽ được cảnh báo trên báo cáo đó.</div>
@@ -10282,6 +10303,7 @@ VIEWS.master = async function () {
         finished_goods_restock_days: parseFloat($("ops_restock_days").value) || 7,
         fg_days_of_stock_critical_days: parseFloat($("ops_fg_critical_days").value) || 3,
         fg_days_in_stock_warning_days: parseFloat($("ops_fg_instock_warning_days").value) || 30,
+        finished_goods_receive_max_backdate_days: parseFloat($("ops_fg_max_backdate_days").value) || 15,
         factory_code: $("ops_factory_code").value.trim() || null,
       });
       toast("Đã lưu cài đặt vận hành"); render("master");
@@ -10746,6 +10768,7 @@ VIEWS.master = async function () {
       const groupId = $("sg_group").value;
       if (!groupId) throw new Error("Chưa có nhóm chỉ tiêu nào để gán — tạo nhóm ở bảng trên trước.");
       const stage = $("sg_stage").value;
+      if (!stage) throw new Error("Chọn công đoạn trước khi gán.");
       const isProductScoped = PRODUCT_SCOPED_STAGES.includes(stage);
       const isBeerTypeScoped = BEER_TYPE_SCOPED_STAGES.includes(stage);
       await POST("/qc/stage-groups", { stage, group_id: groupId,
@@ -10845,6 +10868,17 @@ VIEWS.master = async function () {
       if (!confirm("Xóa vị trí này? Không thể hoàn tác.")) return;
       await DELETE(`/wms/locations/${b.dataset.locDel}`);
       toast("Đã xóa vị trí"); render("master");
+    }));
+    document.querySelectorAll("[data-loc-split]").forEach(b => b.onclick = () => guard(async () => {
+      const tr = b.closest("tr");
+      const code = tr.querySelector(".wl_code") ? tr.querySelector(".wl_code").value : "";
+      const raw = prompt(`Chia vị trí ${code} thành mấy ô?`, "4");
+      if (raw === null) return;
+      const parts = parseInt(raw);
+      if (!parts || parts < 2 || parts > 20) { toast("Số ô phải từ 2 đến 20.", "err"); return; }
+      if (!confirm(`Chia thành ${parts} ô con — vị trí gốc sẽ ngừng hoạt động, tồn hiện có dồn hết vào Ô1. Tiếp tục?`)) return;
+      await POST(`/wms/locations/${b.dataset.locSplit}/split`, { parts });
+      toast(`Đã chia thành ${parts} ô — nhớ xếp các ô mới vào Bố cục kho`); render("master");
     }));
     if ($("wl_add")) $("wl_add").onclick = () => guard(async () => {
       if (!$("wl_new_code").value || !$("wl_new_name").value) { toast("Nhập mã và tên vị trí", "err"); return; }

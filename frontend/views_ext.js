@@ -1739,6 +1739,11 @@
       const sm = await GET("/wms/summary");
       const locOpt = myAllowedLocations(locs).map(l => `<option value="${esc(l.loc_id)}">${whLabel(l)} (${l.used}/${l.capacity})</option>`).join("");
       const fpOpt = finishedProducts.map(fp => `<option value="${esc(fp.finished_product_id)}" data-code="${esc(fp.code)}" data-pack="${fp.pack_size}" data-unittype="${esc(fp.unit_type)}">${esc(fp.code)} — ${esc(fp.name)}</option>`).join("");
+      // DHLN300/FHLN020 (bia hơi/tươi Hạ Long) chỉ do nhà máy khác sản xuất — chặn khỏi "Nhập
+      // kho thủ công" (chỉ nhập được qua tab "Nhập từ nhà máy khác"), KHÔNG áp dụng cho "Nhập
+      // tồn đầu" (fpOpt giữ nguyên, dùng wob_prod bên dưới) vì đó là chỉnh số liệu gốc khi triển khai.
+      const fpOptNoFactory = finishedProducts.filter(fp => !["DHLN300", "FHLN020"].includes(fp.code))
+        .map(fp => `<option value="${esc(fp.finished_product_id)}" data-code="${esc(fp.code)}" data-pack="${fp.pack_size}" data-unittype="${esc(fp.unit_type)}">${esc(fp.code)} — ${esc(fp.name)}</option>`).join("");
       const card = (val, label, sub) => `<div class="card"><div class="n">${val}</div><div class="l">${label}</div>${sub ? `<div class="muted" style="font-size:11px;margin-top:2px">${sub}</div>` : ""}</div>`;
       const fmtN = (v) => (v || 0).toLocaleString("vi-VN", { maximumFractionDigits: 2 });
       const byStatus = Object.entries(sm.by_status || {}).map(([k, v]) => `${esc(k)}: <b>${fmtN(v)}</b>`).join(" · ") || "—";
@@ -1762,7 +1767,7 @@
           <div class="row">
             <div class="field"><label>Sản phẩm</label>
               <input id="wu_prod_q" placeholder="Tìm sản phẩm..." style="width:220px;margin-bottom:2px"/>
-              <select id="wu_prod" style="width:220px"><option value="">(chọn sản phẩm)</option>${fpOpt}</select></div>
+              <select id="wu_prod" style="width:220px"><option value="">(chọn sản phẩm)</option>${fpOptNoFactory}</select></div>
             <div class="field"><label>Lô TP</label><input id="wu_lot" placeholder="để trống = tự sinh" style="width:150px"/></div>
             <div class="field"><label>Ngày nhập</label><input id="wu_received_at" type="datetime-local" value="${toDTLocal(new Date())}" style="width:180px"/></div>
             <div class="field" id="wu_lonmode_wrap" style="align-self:flex-end">
@@ -2276,7 +2281,10 @@
         <div id="gs_hist"><div class="muted">Đang tải…</div></div>
       </div>`;
     } else if (sec === "factoryimport") {
-      const nmkFpOpt = finishedProducts.map(fp => `<option value="${esc(fp.finished_product_id)}" data-code="${esc(fp.code)}">${esc(fp.code)} — ${esc(fp.name)}</option>`).join("");
+      // Chỉ DHLN300/FHLN020 (bia hơi/tươi Hạ Long) do nhà máy khác sản xuất — 2 mã này KHÔNG
+      // được nhập qua "Nhập kho thủ công" (xem fpOptNoFactory), chỉ nhập ở đây.
+      const nmkFpOpt = finishedProducts.filter(fp => ["DHLN300", "FHLN020"].includes(fp.code))
+        .map(fp => `<option value="${esc(fp.finished_product_id)}" data-code="${esc(fp.code)}">${esc(fp.code)} — ${esc(fp.name)}</option>`).join("");
       const nmkLocOpt = myAllowedLocations(locs).map(l => `<option value="${esc(l.loc_id)}">${whLabel(l)} (${l.used}/${l.capacity})</option>`).join("");
       const nmkFactoryOpt = factoryLocations.filter(f => f.active).map(f => `<option value="${esc(f.factory_id)}">${esc(f.code)} — ${esc(f.name)}</option>`).join("");
       body = `<div class="panel"><h2>🏭 Nhập từ nhà máy khác</h2>
@@ -2709,8 +2717,7 @@
           <div class="muted" style="margin-bottom:10px">${badge("available")}stored ·
             Tổng <b>${g0.count}</b> đơn vị · Tổng SL nhỏ <b>${g0.qty}</b></div>
           ${spanWarning}
-          <div class="row" style="margin-bottom:12px"><button class="btn sec" id="ugm_label">🖨️ Tem lô (${esc(g0.lot_code || g0.product || "")})</button>
-            <button class="btn sec" id="ugm_del" style="color:var(--red)">🗑️ Xóa lô đã nhập</button></div>
+          <div class="row" style="margin-bottom:12px"><button class="btn sec" id="ugm_label">🖨️ Tem lô (${esc(g0.lot_code || g0.product || "")})</button></div>
           ${canDecompose ? `<div class="panel" style="margin-bottom:12px"><h3 style="font-size:14px">🔨 Phân rã theo số lượng</h3>
             <div class="muted" style="font-size:12px;margin-bottom:6px">Chọn số ${esc(unitTypeLabel(g0).toLowerCase())} cần phân rã tại lô này (cũ nhất phân rã trước) — không cần chọn từng đơn vị, phù hợp cả khi tồn hàng trăm ngàn đơn vị.</div>
             <div class="row"><div class="field"><label>Số ${esc(unitTypeLabel(g0).toLowerCase())} cần phân rã (tối đa ${g0.total_count ?? g0.count})</label>
@@ -2718,17 +2725,6 @@
               <button class="btn" id="dpq_do" style="align-self:flex-end">Phân rã</button></div></div>` : ""}`);
 
         $("ugm_label").onclick = () => labelModal(g0.lot_code || g0.product || "");
-        $("ugm_del").onclick = () => guard(async () => {
-          if (!confirm(`Xóa toàn bộ ${g0.total_count ?? g0.count} đơn vị đã nhập kho của ${g0.product || ""} ${g0.lot_code || ""}`
-            + (spansMultipleWh ? ` (ở TẤT CẢ các kho, không chỉ riêng kho đang xem)` : "") + `? `
-            + `Bản ghi Chiết nguồn sẽ được mở lại (bỏ duyệt KCS) để có thể sửa/duyệt lại. Không thể hoàn tác.`)) return;
-          const res = await POST("/wms/units/delete-by-lot",
-            { product_name: g0.product, lot_code: g0.lot_code, unit_type: g0.unit_type });
-          closeModal();
-          toast(`Đã xóa ${res.deleted} đơn vị đã nhập kho`
-            + (res.bottles_reset.length ? ` — đã mở lại duyệt KCS cho: ${res.bottles_reset.join(", ")}` : ""));
-          render("wms");
-        });
         if (canDecompose) {
           $("dpq_do").onclick = () => guard(async () => {
             const count = parseInt($("dpq_count").value, 10) || 0;
@@ -2744,6 +2740,31 @@
             render("wms");
           });
         }
+      }
+      // Sửa/Xóa lô đã nhập THEO TIÊU CHÍ nhóm (product+lot+loại đơn vị+kho đang xem dòng này) —
+      // mirror hệt cách "Duyệt nhập kho"/decompose/relocate đã thao tác trên cả nhóm, KHÔNG theo
+      // từng unit_id riêng lẻ. Chỉ cho sửa/xóa khi CHƯA duyệt nhập kho (g.confirmed === 0) —
+      // sau khi Trưởng bộ phận kho duyệt, coi như đã chốt số liệu (chặn ở cả 2 lớp FE/BE).
+      function openEditUnitGroupModal(g) {
+        const whLocs = locs.filter(l => l.warehouse_id === g.warehouse_id && l.active);
+        const locOpts = `<option value="">(giữ nguyên vị trí)</option>` + whLocs.map(l =>
+          `<option value="${esc(l.loc_id)}">${esc(l.code)}${l.name ? " - " + esc(l.name) : ""}</option>`).join("");
+        modal(`<h3>Sửa lô đã nhập — ${esc(fpLabel(g.product))} ${esc(g.lot_code || "")}</h3>
+          <div class="muted" style="margin-bottom:10px">Chỉ sửa được khi lô CHƯA được Trưởng bộ phận kho duyệt nhập kho. Áp dụng cho toàn bộ ${g.count} ${unitTypeLabel(g).toLowerCase()} của dòng đang xem.</div>
+          <div class="row"><div class="field"><label>Lô TP</label><input id="egu_lot" value="${esc(g.lot_code || "")}"/></div></div>
+          <div class="row"><div class="field"><label>Vị trí kho</label><select id="egu_loc">${locOpts}</select></div>
+            <div class="field"><label>Ngày nhập</label><input id="egu_dt" type="datetime-local" value="${toDTLocal(new Date(g.oldest_at || Date.now()))}"/></div></div>
+          <div class="muted" style="font-size:12px;margin-top:4px">Nếu dòng này gồm nhiều lượt nhập (nhiều ngày khác nhau), sửa Ngày nhập sẽ đặt lại TẤT CẢ về đúng 1 ngày.</div>
+          <button class="btn" id="egu_save" style="margin-top:10px">Lưu</button>`);
+        $("egu_save").onclick = () => guard(async () => {
+          await PUT("/wms/units/by-lot", {
+            product_name: g.product, lot_code: g.lot_code, unit_type: g.unit_type, warehouse_id: g.warehouse_id,
+            new_lot_code: $("egu_lot").value.trim() || null,
+            location_id: $("egu_loc").value || null,
+            received_at: $("egu_dt").value ? new Date($("egu_dt").value).toISOString() : null,
+          });
+          toast("Đã lưu"); closeModal(); render("wms");
+        });
       }
       const canConfirmReceipt = _hasPerm("wms.confirm_receipt");
       // Ô "Vị trí kho" cho bảng Kho TP — mỗi dòng ở đây đã được tách riêng theo KHO (xem
@@ -2795,7 +2816,9 @@
               <td class="muted">${whUnitsLocationCell(g)}</td>
               <td class="muted">${fmt(g.oldest_at)}</td>
               <td>${unitConfirmCell(g, i)}</td>
-              <td><button class="btn sm sec" data-viewgroup="${i}">Xem</button></td></tr>`;
+              <td style="white-space:nowrap">${g.confirmed > 0 ? "" : `<button class="btn sm sec" data-editgroup="${i}">Sửa</button>
+                <button class="btn sm sec" data-delgroup="${i}" style="color:var(--red)">Xóa</button>`}
+                <button class="btn sm sec" data-viewgroup="${i}">Xem</button></td></tr>`;
           }
           // Nhiều (loại, kho) cho CÙNG 1 lô (VD vừa còn Két vừa đã phân rã lẻ Chai, hoặc cùng lô
           // nằm ở 2 kho thành phẩm) — trước đây mỗi tổ hợp ra HẲN 1 dòng riêng khiến 1 lô vật lý
@@ -2809,7 +2832,9 @@
             <td style="padding:2px 10px">${it.g.count} <span class="muted">(${it.g.qty} lẻ)</span></td>
             <td style="padding:2px 10px">${whUnitsLocationCell(it.g)}</td>
             <td style="padding:2px 10px">${unitConfirmCell(it.g, it.i)}</td>
-            <td style="padding:2px 0"><button class="btn sm sec" data-viewgroup="${it.i}">Xem</button></td></tr>`).join("");
+            <td style="padding:2px 0;white-space:nowrap">${it.g.confirmed > 0 ? "" : `<button class="btn sm sec" data-editgroup="${it.i}">Sửa</button>
+              <button class="btn sm sec" data-delgroup="${it.i}" style="color:var(--red)">Xóa</button>`}
+              <button class="btn sm sec" data-viewgroup="${it.i}">Xem</button></td></tr>`).join("");
           return `<tr>
             <td>${esc(fpLabel(lg.product))}</td><td>${esc(lg.lot_code || "")}</td>
             <td class="muted">${esc((items[0].g.bottle_codes || []).join(", ") || "—")}</td>
@@ -2830,6 +2855,18 @@
         document.querySelectorAll("[data-viewgroup]").forEach(b => b.onclick = () => {
           openUnitGroupModal(rows[parseInt(b.dataset.viewgroup, 10)]);
         });
+        document.querySelectorAll("[data-editgroup]").forEach(b => b.onclick = () => {
+          openEditUnitGroupModal(rows[parseInt(b.dataset.editgroup, 10)]);
+        });
+        document.querySelectorAll("[data-delgroup]").forEach(b => b.onclick = () => guard(async () => {
+          const g = rows[parseInt(b.dataset.delgroup, 10)];
+          if (!confirm(`Xóa ${g.count} ${unitTypeLabel(g).toLowerCase()} đã nhập kho của ${g.product || ""} ${g.lot_code || ""} (tại vị trí đang xem)? Bản ghi Chiết nguồn sẽ được mở lại (bỏ duyệt KCS) để có thể sửa/duyệt lại. Không thể hoàn tác.`)) return;
+          const res = await POST("/wms/units/delete-by-lot",
+            { product_name: g.product, lot_code: g.lot_code, unit_type: g.unit_type, warehouse_id: g.warehouse_id });
+          toast(`Đã xóa ${res.deleted} đơn vị đã nhập kho`
+            + (res.bottles_reset.length ? ` — đã mở lại duyệt KCS cho: ${res.bottles_reset.join(", ")}` : ""));
+          render("wms");
+        }));
         document.querySelectorAll("[data-confirmreceipt]").forEach(b => b.onclick = () => guard(async () => {
           const g = rows[parseInt(b.dataset.confirmreceipt, 10)];
           // Duyệt nhập kho thao tác trên TOÀN BỘ lô+loại đơn vị (mọi kho), không riêng dòng đã

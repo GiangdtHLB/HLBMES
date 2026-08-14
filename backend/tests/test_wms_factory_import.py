@@ -45,12 +45,22 @@ def admin_h(client):
     return _login(client, "admin", "AdminTest123")
 
 
+_DHLN_FP_ID = None
+
+
 def _a_finished_product(client, admin_h, code):
-    fp = client.post("/api/finished-products", headers=admin_h,
-                     json={"code": code, "name": f"SP {code}", "uom": "lon",
-                           "unit_type": "vi", "pack_size": 1})
-    assert fp.status_code == 201, fp.text
-    return fp.json()["finished_product_id"]
+    """"Nhập từ nhà máy khác" nay CHỈ nhận đúng 2 mã DHLN300/FHLN020 (xem
+    FACTORY_ONLY_PRODUCT_CODES trong services/wms.py) — dùng chung 1 sản phẩm DHLN300 cho mọi
+    test trong file này thay vì tạo mã riêng theo từng test (giữ tham số `code` để log/đặt tên
+    dễ đọc ở call site, không dùng làm mã sản phẩm thật nữa)."""
+    global _DHLN_FP_ID
+    if _DHLN_FP_ID is None:
+        fp = client.post("/api/finished-products", headers=admin_h,
+                         json={"code": "DHLN300", "name": "Bia hoi Ha Long 30L", "uom": "lon",
+                               "unit_type": "vi", "pack_size": 1})
+        assert fp.status_code == 201, fp.text
+        _DHLN_FP_ID = fp.json()["finished_product_id"]
+    return _DHLN_FP_ID
 
 
 _DEFAULT_LOC_ID = None
@@ -136,9 +146,6 @@ def test_factory_import_declare_pending_then_approve_increases_stock(client, adm
     assert row["approved_by"] is None
     assert row["lot_code"] is None
     assert row["can_edit"] is True and row["can_approve"] is True and row["can_undo"] is True
-
-    by_lot_before = client.get("/api/wms/units/by-lot", headers=admin_h).json()
-    assert not any(g["product_name"] == "SKU-NMK-PENDING" for g in by_lot_before)
 
     approved = _approve(client, admin_h, entry_id)
     assert approved["count"] == 4

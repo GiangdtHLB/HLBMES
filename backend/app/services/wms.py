@@ -20,6 +20,7 @@ from ..models.wms import (ConsignedEntry, FactoryImportEntry, FinishedGoodsUnit,
                           Vehicle, WmsLocation, WmsTransfer, WmsTransferLine, WmsWarehouse)
 from ..security import User, require_perm, require_role, require_scope
 from . import genealogy
+from . import ops_setting as ops_setting_svc
 from .opening_balance_import import parse_opening_balance_sheet
 
 # Sentinel phân biệt "không lọc theo vị trí" với "lọc theo vị trí = chưa cất" (location_id
@@ -326,6 +327,47 @@ def set_location_layout(db: Session, loc_id: str, row: int | None, col: int | No
     return loc
 
 
+def split_location(db: Session, loc_id: str, parts: int) -> list[WmsLocation]:
+    """Chia 1 vị trí (VD "DM.K01" — cả dãy tính chung 1 sức chứa/tồn kho) thành N ô con thật,
+    mỗi ô là 1 WmsLocation riêng để cất/xuất/kiểm đếm theo đúng từng ô. Vị trí gốc KHÔNG bị
+    xóa (chỉ deactivate + gỡ khỏi Bố cục kho) — WmsTransferLine/ConsignedEntry/NearExpiryEntry/
+    FactoryImportEntry vẫn có thể có dòng lịch sử tham chiếu loc_id gốc (vị trí nhận tại thời
+    điểm đó), xóa thẳng sẽ vỡ FK trên MSSQL (xem bài học delete_material_location/delete_receipt
+    trong lịch sử dự án) — deactivate an toàn tuyệt đối, không đụng dữ liệu lịch sử. Tồn kho
+    LIVE (FinishedGoodsUnit đang stored tại vị trí gốc) được chuyển hết vào ô số 1 (không biết
+    thực tế đang nằm vật lý ở ô nào — thủ kho tự dùng "Vị trí kho" > Chuyển vị trí để dời tiếp
+    khi kiểm kê thực tế nếu cần). Ô số 1 kế thừa layout_row/layout_col của vị trí gốc để "Sơ đồ
+    kho" vẫn có 1 khay đúng ngay chỗ cũ — ô 2..N chưa xếp, admin tự xếp thêm ở Bố cục kho."""
+    loc = db.get(WmsLocation, loc_id)
+    if not loc:
+        raise NotFoundError("Vị trí không tồn tại.")
+    if not loc.active:
+        raise DomainError("Vị trí đã ngừng hoạt động — không thể chia ô.")
+    if 2 > parts or parts > 20:
+        raise DomainError("Số ô phải từ 2 đến 20.")
+    new_locs = []
+    for i in range(1, parts + 1):
+        child = WmsLocation(
+            loc_id=new_id(), code=f"{loc.code}-Ô{i}", name=f"{loc.name} - Ô{i}",
+            zone=loc.zone, kind=loc.kind, capacity=loc.capacity, active=True,
+            warehouse_id=loc.warehouse_id,
+            layout_row=loc.layout_row if i == 1 else None,
+            layout_col=loc.layout_col if i == 1 else None)
+        db.add(child)
+        new_locs.append(child)
+    db.flush()
+    db.execute(FinishedGoodsUnit.__table__.update()
+               .where(FinishedGoodsUnit.location_id == loc_id)
+               .values(location_id=new_locs[0].loc_id))
+    loc.active = False
+    loc.layout_row = None
+    loc.layout_col = None
+    db.commit()
+    for c in new_locs:
+        db.refresh(c)
+    return new_locs
+
+
 def delete_location(db: Session, loc_id: str) -> None:
     loc = db.get(WmsLocation, loc_id)
     if not loc:
@@ -488,10 +530,19 @@ def list_units(db: Session, status: str = None, unit_type: str = None,
     return out
 
 
-def _parse_received_at(received_at, now: datetime, skip_cap: bool = False) -> datetime:
+def _fg_receive_max_backdate_days(db: Session) -> float:
+    """Ngưỡng số ngày lùi tối đa cho "Ngày nhập" thủ công (Nhập kho thủ công/Nhập từ nhà máy
+    khác) — cấu hình ở Cài đặt vận hành, xem OpsSetting.finished_goods_receive_max_backdate_days
+    (trước đây hardcode 15 ngày)."""
+    return ops_setting_svc.get_settings(db).finished_goods_receive_max_backdate_days
+
+
+def _parse_received_at(received_at, now: datetime, max_backdate_days: float | None = 15.0) -> datetime:
     """Chuẩn hoá + validate "Ngày nhập" do người dùng nhập tay — dùng chung cho nhập kho thủ
     công/tồn đầu (_create_units) và khai báo nhập từ nhà máy khác
-    (create_factory_import_entry/update_factory_import_entry)."""
+    (create_factory_import_entry/update_factory_import_entry). max_backdate_days=None bỏ qua
+    hẳn giới hạn (tồn đầu/skip_date_cap); ngược lại là ngưỡng lấy từ Cài đặt vận hành
+    (xem _fg_receive_max_backdate_days), trước đây hardcode 15."""
     if not received_at:
         return now
     received_dt = datetime.fromisoformat(received_at) if isinstance(received_at, str) else received_at
@@ -499,10 +550,8 @@ def _parse_received_at(received_at, now: datetime, skip_cap: bool = False) -> da
         received_dt = received_dt.replace(tzinfo=now.tzinfo)
     if received_dt > now:
         raise DomainError("Ngày nhập không được sau thời điểm hiện tại.")
-    # Tồn đầu hợp lệ với ngày rất xa trong quá khứ — giới hạn 15 ngày chỉ áp dụng cho nhập
-    # kho thủ công thường (tránh gõ nhầm ngày), xem receive() cho cùng quy tắc bên kho NVL.
-    if not skip_cap and received_dt < now - timedelta(days=15):
-        raise DomainError("Ngày nhập không được quá 15 ngày trước thời điểm hiện tại.")
+    if max_backdate_days is not None and received_dt < now - timedelta(days=max_backdate_days):
+        raise DomainError(f"Ngày nhập không được quá {max_backdate_days:g} ngày trước thời điểm hiện tại.")
     return received_dt
 
 
@@ -529,8 +578,9 @@ def _create_units(db: Session, payload: dict, created_by: str, actor: User) -> l
     if total <= 0:
         raise DomainError("Tổng số lượng phải > 0.")
     now = utcnow()
+    skip_cap = bool(payload.get("is_opening_balance") or payload.get("skip_date_cap"))
     received_dt = _parse_received_at(payload.get("received_at"), now,
-                                     skip_cap=bool(payload.get("is_opening_balance") or payload.get("skip_date_cap")))
+                                     max_backdate_days=None if skip_cap else _fg_receive_max_backdate_days(db))
     loc_id = payload.get("loc_id") or None
     loc = None
     if loc_id:
@@ -591,6 +641,12 @@ def build_units(db: Session, payload: dict, user: User) -> list[FinishedGoodsUni
         # quyền warehouse.receive) vì đây là thao tác chỉnh số liệu gốc, không qua chiết thật.
         require_role(user, Role.ADMIN)
     else:
+        # DHLN300/FHLN020 (bia hơi/tươi Hạ Long) chỉ do nhà máy khác sản xuất — không qua chiết
+        # thật ở đây, nên chặn nhập thủ công tại tab Kho TP; phải khai báo qua "Nhập từ nhà máy
+        # khác" (xem create_factory_import_entry, chỉ CHO PHÉP đúng 2 mã này).
+        fp = db.get(FinishedProduct, payload["finished_product_id"]) if payload.get("finished_product_id") else None
+        if fp and fp.code in FACTORY_ONLY_PRODUCT_CODES:
+            raise DomainError(f"{fp.code} chỉ được nhập qua 'Nhập từ nhà máy khác', không nhập thủ công tại đây.")
         # Nhập kho thủ công thường — Lô TP tự sinh nếu người gọi KHÔNG tự truyền lot_code (giao
         # diện "Nhập kho thủ công" đã bỏ hẳn ô nhập tay, xem _next_wms_lot_code); vẫn cho phép
         # truyền lot_code tường minh (import Excel/nội bộ/test fixture cần mã cố định) — không
@@ -988,6 +1044,12 @@ def undo_consigned_entry(db: Session, entry_id: str, user: User) -> dict:
 # KHÔNG có xử lý đặc biệt gì sau khi duyệt (không ưu tiên xuất, không trừ báo cáo) — cờ
 # is_factory_import trên đơn vị chỉ để dành cho báo cáo riêng sau này. ----
 
+# 2 SKU bia hơi/tươi Hạ Long CHỈ do nhà máy khác sản xuất, không qua chiết thật ở nhà máy đang
+# chạy hệ thống này — dùng để khoá 2 chiều: "Nhập kho thủ công" (build_units) CHẶN 2 mã này,
+# "Nhập từ nhà máy khác" (create_factory_import_entry) CHỈ NHẬN đúng 2 mã này.
+FACTORY_ONLY_PRODUCT_CODES = ("DHLN300", "FHLN020")
+
+
 def create_factory_import_entry(db: Session, finished_product_id: str, quantity: int,
                                 location_id: str, factory_id: str, user: User, note: str = None,
                                 received_at: str = None) -> dict:
@@ -1001,6 +1063,8 @@ def create_factory_import_entry(db: Session, finished_product_id: str, quantity:
     fp = db.get(FinishedProduct, finished_product_id)
     if not fp:
         raise NotFoundError("Không tìm thấy sản phẩm tương ứng.")
+    if fp.code not in FACTORY_ONLY_PRODUCT_CODES:
+        raise DomainError("Chỉ được khai báo Nhập từ nhà máy khác cho sản phẩm DHLN300/FHLN020.")
     if quantity <= 0:
         raise DomainError("Số lượng phải > 0.")
     if not location_id or not db.get(WmsLocation, location_id):
@@ -1011,7 +1075,7 @@ def create_factory_import_entry(db: Session, finished_product_id: str, quantity:
     unit_type = fp.unit_type or "vi"
     product_name = fp.code
     now = utcnow()
-    declared_at = _parse_received_at(received_at, now)
+    declared_at = _parse_received_at(received_at, now, max_backdate_days=_fg_receive_max_backdate_days(db))
     entry = FactoryImportEntry(entry_id=new_id(), finished_product_id=finished_product_id,
                                product_name=product_name, unit_type=unit_type, quantity=quantity,
                                location_id=location_id, factory_id=factory_id, declared_at=declared_at,
@@ -1056,7 +1120,8 @@ def update_factory_import_entry(db: Session, entry_id: str, payload: dict, user:
     if "note" in payload:
         entry.note = payload["note"]
     if payload.get("received_at"):
-        entry.declared_at = _parse_received_at(payload["received_at"], utcnow())
+        entry.declared_at = _parse_received_at(payload["received_at"], utcnow(),
+                                               max_backdate_days=_fg_receive_max_backdate_days(db))
     record_audit(db, entity_type="factory_import_entry", entity_id=entry.entry_id, action="update", actor=user,
                 after={"product_name": entry.product_name, "count": entry.quantity})
     db.commit()
@@ -1706,8 +1771,8 @@ def warehouse_floor_map(db: Session, warehouse_id: str, user: User) -> list[dict
     đang xem, nên vẫn nên xuất trước khi thao tác trong phạm vi kho đó."""
     _assert_wh_scope(db, user, warehouse_id)
     divide_codes = _divide_by_pack_codes(db)
-    locs = list(db.execute(select(WmsLocation).where(WmsLocation.warehouse_id == warehouse_id)
-                           .order_by(WmsLocation.code)).scalars().all())
+    locs = list(db.execute(select(WmsLocation).where(WmsLocation.warehouse_id == warehouse_id,
+                           WmsLocation.active == true()).order_by(WmsLocation.code)).scalars().all())
     if not locs:
         return []
     loc_ids = [l.loc_id for l in locs]
@@ -2365,6 +2430,46 @@ def confirm_receipt_by_lot(db: Session, product_name: str, lot_code: str | None,
                                     "unit_type": unit_type, "confirmed": len(rows)})
     db.commit()
     return {"confirmed": len(rows)}
+
+
+def update_units_by_criteria(db: Session, product_name: str, lot_code: str | None, unit_type: str,
+                             user: User, warehouse_id: str | None = None, new_lot_code: str | None = None,
+                             location_id: str | None = None, received_at: datetime | None = None) -> dict:
+    """Sửa lô vỉ/keg đã nhập kho (thủ công/tồn đầu) THEO TIÊU CHÍ nhóm — mirror
+    delete_units_by_criteria (cùng cách khớp product_name/lot_code/unit_type/warehouse_id, vì UI
+    hiện gộp hiển thị theo nhóm, không theo unit_id riêng lẻ). Chỉ sửa được khi CHƯA có dòng nào
+    trong nhóm được Trưởng bộ phận kho duyệt nhập kho — cùng lý do chặn xóa (delete_units_by_
+    criteria): sau khi duyệt coi như đã chốt số liệu."""
+    require_perm(user, "warehouse.receive")
+    if warehouse_id:
+        _assert_wh_scope(db, user, warehouse_id)
+    elif _wh_scope_restricted(user):
+        raise DomainError("Vui lòng chọn kho (tài khoản bị giới hạn kho thành phẩm).")
+    if location_id:
+        _assert_loc_scope(db, user, location_id)
+    loc_filter = (FinishedGoodsUnit.location_id.in_(
+        select(WmsLocation.loc_id).where(WmsLocation.warehouse_id == warehouse_id)),) if warehouse_id else ()
+    rows = db.execute(select(FinishedGoodsUnit).where(
+        FinishedGoodsUnit.product_name == product_name, FinishedGoodsUnit.lot_code == lot_code,
+        FinishedGoodsUnit.unit_type == unit_type, FinishedGoodsUnit.status == "stored", *loc_filter)).scalars().all()
+    if not rows:
+        raise DomainError("Không tìm thấy vỉ/keg nào khớp lô này để sửa.")
+    if any(r.received_confirmed_by for r in rows):
+        raise DomainError("Lô này đã được Trưởng bộ phận kho duyệt nhập kho — không thể sửa.")
+    if new_lot_code:
+        for r in rows:
+            r.lot_code = new_lot_code
+    if location_id:
+        for r in rows:
+            r.location_id = location_id
+    if received_at:
+        for r in rows:
+            r.created_at = received_at
+    record_audit(db, entity_type="finished_goods_unit", entity_id=rows[0].unit_id, action="update_by_criteria",
+                 actor=user, after={"product_name": product_name, "lot_code": new_lot_code or lot_code,
+                                    "unit_type": unit_type, "updated": len(rows)})
+    db.commit()
+    return {"updated": len(rows)}
 
 
 def delete_units_by_criteria(db: Session, product_name: str, lot_code: str | None, unit_type: str,
