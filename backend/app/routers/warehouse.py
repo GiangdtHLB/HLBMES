@@ -7,10 +7,14 @@ from sqlalchemy.orm import Session
 
 from ..common import Role
 from ..database import get_db
+from ..errors import DomainError
 from ..security import User, get_current_user, require_perm, require_role
 from ..services import warehouse as svc
 from ..schemas import (
     IssueIn,
+    LotRelocateIn,
+    MaterialLocationIn,
+    MaterialLocationOut,
     MaterialRequestIn,
     MaterialRequestOut,
     ReceiptIn,
@@ -40,7 +44,43 @@ router = APIRouter(prefix="/api/warehouse", tags=["warehouse"],
 @router.post("/receive")
 def receive(payload: ReceiptIn, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     require_perm(user, "warehouse.receive")
-    return svc.receive(db, payload.model_dump(), user)
+    data = payload.model_dump()
+    # Bắt buộc chọn vị trí cất khi nhập vào Kho công ty — nhưng CHỈ SAU KHI danh mục vị trí đã
+    # có ít nhất 1 vị trí (tránh chặn nhập kho ngay từ đầu khi admin chưa kịp khai báo danh mục).
+    # Không áp dụng Kho phân xưởng — chưa có danh mục vị trí riêng.
+    if ("phân xưởng" not in (data.get("location") or "Kho công ty").lower() and not data.get("location_id")
+            and svc.any_material_locations_declared(db)):
+        raise DomainError("Vui lòng chọn vị trí kho trước khi nhập.")
+    return svc.receive(db, data, user)
+
+
+@router.get("/locations")
+def list_material_locations(db: Session = Depends(get_db)):
+    return svc.list_material_locations(db)
+
+
+@router.post("/locations", response_model=MaterialLocationOut, status_code=201)
+def create_material_location(payload: MaterialLocationIn, db: Session = Depends(get_db),
+                             user: User = Depends(get_current_user)):
+    return svc.create_material_location(db, payload.model_dump(), user)
+
+
+@router.put("/locations/{loc_id}", response_model=MaterialLocationOut)
+def update_material_location(loc_id: str, payload: MaterialLocationIn, db: Session = Depends(get_db),
+                             user: User = Depends(get_current_user)):
+    return svc.update_material_location(db, loc_id, payload.model_dump(), user)
+
+
+@router.delete("/locations/{loc_id}")
+def delete_material_location(loc_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    svc.delete_material_location(db, loc_id, user)
+    return {"deleted": True}
+
+
+@router.post("/lots/{lot_id}/relocate")
+def relocate_lot(lot_id: str, payload: LotRelocateIn, db: Session = Depends(get_db),
+                 user: User = Depends(get_current_user)):
+    return svc.relocate_lot(db, lot_id, payload.location_id, user)
 
 
 @router.post("/opening-balance/import")
@@ -188,7 +228,12 @@ def undo_transfer_px_request(request_id: str, db: Session = Depends(get_db),
 def create_sang_ngang(payload: ReceiptIn, db: Session = Depends(get_db),
                       user: User = Depends(get_current_user)):
     require_perm(user, "warehouse.receive")
-    return svc.create_sang_ngang(db, payload.model_dump(), user)
+    data = payload.model_dump()
+    # Xuất sang ngang cũng tăng tồn Kho công ty qua receive() (xem svc.create_sang_ngang) — cùng
+    # áp dụng bắt buộc chọn vị trí cất như /receive (chỉ khi danh mục vị trí đã có dữ liệu).
+    if not data.get("location_id") and svc.any_material_locations_declared(db):
+        raise DomainError("Vui lòng chọn vị trí kho trước khi khai báo.")
+    return svc.create_sang_ngang(db, data, user)
 
 
 @router.get("/sang-ngang", response_model=list[SangNgangRequestOut])
@@ -296,8 +341,8 @@ def create_count(payload: StockCountCreateIn, db: Session = Depends(get_db),
 
 
 @router.get("/counts")
-def list_counts(status: str = None, db: Session = Depends(get_db)):
-    return svc.list_counts(db, status)
+def list_counts(status: str = None, limit: int = 1000, offset: int = 0, db: Session = Depends(get_db)):
+    return svc.list_counts(db, status, limit, offset)
 
 
 @router.get("/counts/{count_id}")

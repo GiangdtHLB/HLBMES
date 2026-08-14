@@ -872,7 +872,27 @@ class LotOut(ORMModel):
     status: str
     expiry: Optional[datetime] = None
     location: Optional[str] = None
+    location_id: Optional[str] = None
     created_at: datetime
+
+
+class MaterialLocationIn(BaseModel):
+    code: str
+    name: str
+    zone: Optional[str] = None
+    active: bool = True
+
+
+class MaterialLocationOut(ORMModel):
+    loc_id: str
+    code: str
+    name: str
+    zone: Optional[str] = None
+    active: bool
+
+
+class LotRelocateIn(BaseModel):
+    location_id: str
 
 
 # ---- Quality ----
@@ -1132,6 +1152,7 @@ class ReceiptIn(BaseModel):
     expiry: Optional[datetime] = None
     received_at: Optional[datetime] = None  # bỏ trống -> hiện tại; giới hạn trong 15 ngày gần nhất, xem receive()
     location: str = "Kho công ty"
+    location_id: Optional[str] = None  # vị trí cất cụ thể — bắt buộc khi tạo lô mới tại Kho công ty, xem receive()
     reason: Optional[str] = None
     ref_doc: Optional[str] = None
     is_opening_balance: bool = False  # true -> chỉ admin được thực hiện, xem receive()

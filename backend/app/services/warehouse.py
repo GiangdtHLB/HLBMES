@@ -12,7 +12,7 @@ from ..errors import DomainError, NotFoundError, PermissionError_
 from ..models.brewing import (BottleMaterialUsage, BottleRecord, BrewBatch, BrewMaterialUsage, BrewOrder,
                               BrewRecord, FilterMasterOrder, FilterMaterialUsage, FilterRecord)
 from ..models.master import Material
-from ..models.materials import GenealogyEdge, MaterialLot
+from ..models.materials import GenealogyEdge, MaterialLocation, MaterialLot
 from ..models.quality import Deviation, QualityResult
 from ..models.warehouse import (FactoryLocation, MaterialRequest, MaterialRequestLine, SangNgangRequest,
                                 StockCount, StockCountLine, StockMovement, TransferPxRequest)
@@ -53,6 +53,88 @@ def _next_lot_code(db: Session, year: int) -> str:
             MaterialLot.lot_year == year, MaterialLot.lot_code == code)).scalar_one_or_none()
         if not exists:
             return code
+
+
+def any_material_locations_declared(db: Session) -> bool:
+    """Danh mục vị trí kho NVL đã có ít nhất 1 vị trí hay chưa — dùng để chỉ bắt buộc chọn vị
+    trí lúc nhập SAU KHI admin đã bắt đầu khai báo danh mục (tránh vấn đề con-gà-quả-trứng: nếu
+    bắt buộc ngay từ đầu khi danh mục còn trống thì không ai nhập kho được nữa)."""
+    return db.execute(select(func.count()).select_from(MaterialLocation)).scalar() > 0
+
+
+def list_material_locations(db: Session) -> list[dict]:
+    locs = db.execute(select(MaterialLocation).order_by(MaterialLocation.code)).scalars().all()
+    used = dict(db.execute(
+        select(MaterialLot.location_id, func.count())
+        .where(MaterialLot.location_id.isnot(None), MaterialLot.quantity != 0)
+        .group_by(MaterialLot.location_id)).all())
+    return [{"loc_id": l.loc_id, "code": l.code, "name": l.name, "zone": l.zone, "active": l.active,
+             "lot_count": used.get(l.loc_id, 0)} for l in locs]
+
+
+def create_material_location(db: Session, payload: dict, user: User) -> MaterialLocation:
+    require_perm(user, "master.manage")
+    if db.execute(select(MaterialLocation).where(MaterialLocation.code == payload["code"])).scalar_one_or_none():
+        raise DomainError(f"Mã vị trí '{payload['code']}' đã tồn tại.")
+    loc = MaterialLocation(loc_id=new_id(), **payload)
+    db.add(loc)
+    record_audit(db, entity_type="material_location", entity_id=loc.loc_id, action="create", actor=user,
+                after={"code": loc.code, "name": loc.name})
+    db.commit()
+    db.refresh(loc)
+    return loc
+
+
+def update_material_location(db: Session, loc_id: str, payload: dict, user: User) -> MaterialLocation:
+    require_perm(user, "master.manage")
+    loc = db.get(MaterialLocation, loc_id)
+    if not loc:
+        raise NotFoundError("Vị trí không tồn tại.")
+    for k, v in payload.items():
+        if v is not None:
+            setattr(loc, k, v)
+    record_audit(db, entity_type="material_location", entity_id=loc.loc_id, action="update", actor=user,
+                after={"code": loc.code, "name": loc.name})
+    db.commit()
+    db.refresh(loc)
+    return loc
+
+
+def delete_material_location(db: Session, loc_id: str, user: User) -> None:
+    require_perm(user, "master.manage")
+    loc = db.get(MaterialLocation, loc_id)
+    if not loc:
+        raise NotFoundError("Vị trí không tồn tại.")
+    used = db.execute(select(func.count()).select_from(MaterialLot).where(
+        MaterialLot.location_id == loc_id, MaterialLot.quantity != 0)).scalar() or 0
+    if used:
+        raise DomainError(f"Vị trí {loc.code} đang chứa {used} lô NVL — không thể xóa.")
+    record_audit(db, entity_type="material_location", entity_id=loc.loc_id, action="delete", actor=user,
+                before={"code": loc.code, "name": loc.name})
+    db.delete(loc)
+    db.commit()
+
+
+def relocate_lot(db: Session, lot_id: str, location_id: str, user: User) -> dict:
+    """Đổi vị trí cất của 1 lô NVL đang ở Kho công ty sang vị trí khác trong danh mục — dùng
+    khi thủ kho sắp xếp lại kho trong quá trình làm việc (khác receive(), vốn chỉ gán vị trí
+    LÚC nhập lô mới). Không đổi `location` (tầng kho Kho công ty/Kho phân xưởng) — chỉ đổi vị
+    trí cụ thể trong cùng tầng, mirror WMS putaway()."""
+    require_perm(user, "warehouse.receive")
+    lot = _lot(db, lot_id)
+    if _is_workshop_location(lot.location):
+        raise DomainError(f"Lô {lot.lot_code} đang ở Kho phân xưởng — chưa có danh mục vị trí "
+                          "cho kho phân xưởng.")
+    _assert_location_scope(user, lot.location)
+    loc = db.get(MaterialLocation, location_id)
+    if not loc:
+        raise NotFoundError("Vị trí không tồn tại.")
+    before = lot.location_id
+    lot.location_id = loc.loc_id
+    record_audit(db, entity_type="lot", entity_id=lot.lot_id, action="relocate", actor=user,
+                before={"location_id": before}, after={"location_id": loc.loc_id, "location_code": loc.code})
+    db.commit()
+    return {"lot_id": lot.lot_id, "lot_code": lot.lot_code, "location_id": loc.loc_id, "location_code": loc.code}
 
 
 def receive(db: Session, payload: dict, user: User) -> dict:
@@ -104,7 +186,13 @@ def receive(db: Session, payload: dict, user: User) -> dict:
         elif lot.status == LotStatus.CONSUMED.value:
             lot.status = LotStatus.AVAILABLE.value
     else:
-        _assert_location_scope(user, payload.get("location", "Kho công ty"))
+        location = payload.get("location", "Kho công ty")
+        _assert_location_scope(user, location)
+        # Bắt buộc chọn vị trí cất (khi tạo lô MỚI tại Kho công ty) được kiểm tra ở tầng router
+        # (routers/warehouse.py::receive), không phải ở đây — vì receive() còn được gọi trực
+        # tiếp từ import_opening_balance_materials (nhập tồn đầu hàng loạt qua Excel, chưa có
+        # cột vị trí trong mẫu import) và từ nhiều test fixture chỉ dùng receive() làm bước dựng
+        # sẵn tồn kho, không phải để kiểm thử chính bản thân việc nhập kho.
         expiry = payload.get("expiry")
         lot = MaterialLot(lot_id=new_id(), lot_code=lot_code or _next_lot_code(db, year), lot_year=year,
                           material_id=material_id, lot_type=payload.get("lot_type", "material"),
@@ -112,7 +200,7 @@ def receive(db: Session, payload: dict, user: User) -> dict:
                           unit_price=payload.get("unit_price"), kcs_lot_no=payload.get("kcs_lot_no"),
                           quantity=qty, uom=payload.get("uom", "kg"), status=LotStatus.AVAILABLE.value,
                           expiry=datetime.fromisoformat(expiry) if isinstance(expiry, str) else expiry,
-                          location=payload.get("location", "Kho công ty"), created_at=received_dt)
+                          location=location, location_id=payload.get("location_id"), created_at=received_dt)
         db.add(lot)
         db.flush()
         # Nguyên liệu có gán nhóm chỉ tiêu bắt buộc → lô mới phải HOLD chờ khai báo + KCS duyệt
@@ -1437,26 +1525,34 @@ def workshop_usage_history(db: Session, limit: int = 200) -> list[dict]:
     add_brew_material/add_filter_material/add_bottle_material). Khác "Xuất tự do" (StockMovement
     mode="tu_do") chỉ ghi lý do dạng text tự do dùng chung cho cả xuất tay lẫn xuất dùng sản
     xuất — ở đây tra thẳng 3 bảng usage (đã liên kết sẵn tới batch/filter/bottle) nên có cấu
-    trúc rõ ràng theo công đoạn/mẻ, không phải suy từ chuỗi lý do."""
+    trúc rõ ràng theo công đoạn/mẻ, không phải suy từ chuỗi lý do.
+
+    Mỗi truy vấn con đã ORDER BY created_at DESC LIMIT limit trước khi gộp — vì kết quả cuối
+    cùng chỉ lấy top `limit` bản ghi mới nhất trên cả 3 nguồn, top-limit của mỗi nguồn riêng
+    lẻ chắc chắn phủ hết top-limit gộp, nên không cần tải hết cả 3 bảng vào bộ nhớ."""
+    limit = max(1, min(limit or 200, 5000))
     rows = []
     for u, batch_code, brew_code in db.execute(
             select(BrewMaterialUsage, BrewBatch.batch_code, BrewRecord.brew_code)
             .join(BrewBatch, BrewMaterialUsage.batch_id == BrewBatch.batch_id)
-            .join(BrewRecord, BrewBatch.brew_id == BrewRecord.brew_id)).all():
+            .join(BrewRecord, BrewBatch.brew_id == BrewRecord.brew_id)
+            .order_by(BrewMaterialUsage.created_at.desc()).limit(limit)).all():
         rows.append({"usage_id": u.usage_id, "ts": u.created_at, "stage": "Nấu",
                     "batch_label": f"Mẻ {batch_code} (mã nấu {brew_code})",
                     "material_name": u.material_name, "lot_code": u.lot_pm,
                     "quantity": u.quantity, "uom": u.uom, "movement_id": u.movement_id})
     for u, filter_code in db.execute(
             select(FilterMaterialUsage, FilterRecord.filter_code)
-            .join(FilterRecord, FilterMaterialUsage.filter_id == FilterRecord.filter_id)).all():
+            .join(FilterRecord, FilterMaterialUsage.filter_id == FilterRecord.filter_id)
+            .order_by(FilterMaterialUsage.created_at.desc()).limit(limit)).all():
         rows.append({"usage_id": u.usage_id, "ts": u.created_at, "stage": "Lọc",
                     "batch_label": f"Mẻ lọc {filter_code}",
                     "material_name": u.material_name, "lot_code": u.lot_pm,
                     "quantity": u.quantity, "uom": u.uom, "movement_id": u.movement_id})
     for u, bottle_code in db.execute(
             select(BottleMaterialUsage, BottleRecord.bottle_code)
-            .join(BottleRecord, BottleMaterialUsage.bottle_id == BottleRecord.bottle_id)).all():
+            .join(BottleRecord, BottleMaterialUsage.bottle_id == BottleRecord.bottle_id)
+            .order_by(BottleMaterialUsage.created_at.desc()).limit(limit)).all():
         rows.append({"usage_id": u.usage_id, "ts": u.created_at, "stage": "Chiết",
                     "batch_label": f"Mẻ chiết {bottle_code}",
                     "material_name": u.material_name, "lot_code": u.lot_pm,
@@ -1533,15 +1629,23 @@ def create_count(db: Session, location: Optional[str], user: User, note: str = N
     return _count_dict(db, count)
 
 
-def list_counts(db: Session, status: str = None) -> list[dict]:
-    stmt = select(StockCount).order_by(StockCount.created_at.desc())
+def list_counts(db: Session, status: str = None, limit: int = 1000, offset: int = 0) -> list[dict]:
+    """Có phân trang (mặc định 1000, tối đa 5000). Đếm số dòng theo 1 truy vấn GROUP BY duy
+    nhất thay vì 1 truy vấn COUNT riêng cho mỗi phiếu kiểm kê (N+1) như trước."""
+    limit = max(1, min(limit or 1000, 5000))
+    offset = max(0, offset or 0)
+    stmt = select(StockCount).order_by(StockCount.created_at.desc()).limit(limit).offset(offset)
     if status:
         stmt = stmt.where(StockCount.status == status)
     counts = db.execute(stmt).scalars().all()
+    count_ids = [c.count_id for c in counts]
+    line_counts = dict(db.execute(
+        select(StockCountLine.count_id, func.count())
+        .where(StockCountLine.count_id.in_(count_ids))
+        .group_by(StockCountLine.count_id)).all()) if count_ids else {}
     out = []
     for c in counts:
-        n_lines = db.execute(select(func.count()).select_from(StockCountLine)
-                             .where(StockCountLine.count_id == c.count_id)).scalar_one()
+        n_lines = line_counts.get(c.count_id, 0)
         out.append({"count_id": c.count_id, "count_code": c.count_code, "location": c.location,
                     "start_date": c.start_date, "end_date": c.end_date,
                     "status": c.status, "created_by": c.created_by, "created_at": c.created_at,

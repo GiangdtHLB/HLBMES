@@ -3588,6 +3588,7 @@ VIEWS.warehouse_kc = async function () {
     { key: "han", label: "Hạn sử dụng" }, { key: "bc", label: "BC nhập-xuất-tồn" },
     { key: "giao", label: "Nhập / Xuất / Hoàn / Sang ngang" },
     { key: "kc", label: "Danh sách lô (FIFO)" },
+    { key: "vitri", label: "📍 Vị trí kho" },
     { key: "kk", label: "Kiểm kê định kỳ" }, { key: "min", label: "📉 Tồn tối thiểu" },
   ];
   let body = "";
@@ -3670,7 +3671,7 @@ VIEWS.warehouse_kc = async function () {
         <td style="color:var(--green)">${r.received}</td><td style="color:var(--orange)">${r.issued}</td>
         <td>${r.on_hand}</td><td>${r.uom}</td></tr>`).join("") || '<tr><td colspan=6 class="muted">Không có dữ liệu.</td></tr>'}</tbody></table></div></div>`;
   } else if (sec === "giao") {
-    const [lotsAvail, mats, allLots, allRequestsFull, freeIssues, pxRequests, factoryLocationsGiao, factoryTransfers, supplierReturns, suppliers, receipts, sangNgangRequests, qcReqIdsGiao] = await Promise.all([
+    const [lotsAvail, mats, allLots, allRequestsFull, freeIssues, pxRequests, factoryLocationsGiao, factoryTransfers, supplierReturns, suppliers, receipts, sangNgangRequests, qcReqIdsGiao, matLocsGiao] = await Promise.all([
       lotOptions(null, false), GET("/materials"), GET("/lots"), GET("/warehouse/requests"),
       GET("/warehouse/movements?movement_type=issue&mode=tu_do"),
       GET("/warehouse/transfer-px-requests"), GET("/factory-locations").catch(() => []),
@@ -3678,7 +3679,14 @@ VIEWS.warehouse_kc = async function () {
       GET("/warehouse/movements?movement_type=issue&mode=tra_ncc"),
       GET("/suppliers"), GET("/warehouse/movements?movement_type=receipt"),
       GET("/warehouse/sang-ngang"), GET("/materials/qc-required"),
+      GET("/warehouse/locations").catch(() => []),
     ]);
+    const activeMatLocsGiao = matLocsGiao.filter(l => l.active);
+    const matLocOptsGiao = activeMatLocsGiao.map(l =>
+      `<option value="${esc(l.loc_id)}">${esc(l.code)} — ${esc(l.name)}</option>`).join("") ||
+      `<option value="">(chưa khai báo vị trí kho — vào Danh mục để thêm)</option>`;
+    const matLocByIdGiao = Object.fromEntries(matLocsGiao.map(l => [l.loc_id, l]));
+    WH_CACHE.matLocById = matLocByIdGiao;
     // Giống hệt cách "Đề nghị nhận kho" tách pending/done: 1 phiếu còn dòng pending nào thì vẫn
     // nằm ở khối "đang chờ" (dù có dòng đã xuất khác) — chỉ rơi xuống "Sổ xuất theo đề nghị" khi
     // MỌI dòng đã được xử lý xong (fulfilled/rejected/cancelled), tránh phiếu xuất hiện 2 nơi.
@@ -3761,7 +3769,8 @@ VIEWS.warehouse_kc = async function () {
           <div class="field"><label>ĐVT</label><input id="rc_uom" value="${esc(matItemsGiao[0]?.uom || "")}" size="4" readonly title="Lấy tự động từ danh mục nguyên liệu — không sửa được"/></div>
           <div class="field"><label>Đơn giá</label><input id="rc_price" type="number" placeholder="(tuỳ chọn)"/></div>
           <div class="field"><label>Hạn dùng</label><input id="rc_exp" type="date"/></div></div>
-        <div class="row"><div class="field" style="flex:1"><label>Diễn giải</label><input id="rc_note" placeholder="(tuỳ chọn)"/></div>
+        <div class="row"><div class="field"><label>Vị trí cất *</label><select id="rc_loc">${matLocOptsGiao}</select></div>
+          <div class="field" style="flex:1"><label>Diễn giải</label><input id="rc_note" placeholder="(tuỳ chọn)"/></div>
           <button class="btn" id="rc_do" style="align-self:flex-end">Nhập</button></div>
         <div class="muted" style="margin-top:4px">Mã lô do hệ thống tự sinh (tăng dần theo năm) — Số lô KCS do bộ phận KCS tự điền khi khai báo chỉ tiêu chất lượng.</div>
         <input class="searchbox" data-tbl="rc_hist" placeholder="Tìm mã lô/nguyên liệu/nhà cung cấp..." style="margin-top:12px"/>
@@ -3787,7 +3796,8 @@ VIEWS.warehouse_kc = async function () {
           <div class="field"><label>ĐVT</label><span id="sng_uom_wrap">${altUomFieldHtml(matByIdGiao[matItemsGiao[0]?.value], "sng_uom", 60)}</span></div>
           <div class="field"><label>Đơn giá</label><input id="sng_price" type="number" placeholder="(tuỳ chọn)"/></div>
           <div class="field"><label>Hạn dùng</label><input id="sng_exp" type="date"/></div></div>
-        <div class="row"><div class="field" style="flex:1"><label>Diễn giải</label><input id="sng_note" placeholder="(tuỳ chọn)"/></div>
+        <div class="row"><div class="field"><label>Vị trí cất *</label><select id="sng_loc">${matLocOptsGiao}</select></div>
+          <div class="field" style="flex:1"><label>Diễn giải</label><input id="sng_note" placeholder="(tuỳ chọn)"/></div>
           <button class="btn" id="sng_do" style="align-self:flex-end">Xuất sang ngang</button></div>`
           : '<div class="muted">Bạn không có quyền tạo Xuất sang ngang.</div>'}
         <h4 style="margin-top:14px">Đang chờ phân xưởng duyệt <span class="muted">(${sngPending.length})</span></h4>
@@ -3897,27 +3907,64 @@ VIEWS.warehouse_kc = async function () {
         </table></div>
       </div></div>`;
   } else if (sec === "kc") {
-    const [allLots, mats, qcReqIds] = await Promise.all([GET("/lots"), GET("/materials"), GET("/materials/qc-required")]);
+    const [allLots, mats, qcReqIds, matLocsKc] = await Promise.all([GET("/lots"), GET("/materials"),
+      GET("/materials/qc-required"), GET("/warehouse/locations").catch(() => [])]);
     const matById = Object.fromEntries(mats.map(m => [m.material_id, m]));
     const qcReqSet = new Set(qcReqIds);
+    const matLocByIdKc = Object.fromEntries(matLocsKc.map(l => [l.loc_id, l]));
+    WH_CACHE.matLocById = matLocByIdKc;
+    WH_CACHE.matLocsActive = matLocsKc.filter(l => l.active);
     const rows = allLots.filter(l => !/phân xưởng/i.test(l.location || "") && l.quantity > 0)
       .sort((a, b) => new Date(a.created_at) - new Date(b.created_at));   // FIFO: nhập trước hiện trước
     body = `<div class="panel"><h2>Danh sách lô kho công ty <span class="muted">(${rows.length})</span></h2>
       <div class="muted" style="margin-bottom:6px">Toàn bộ lô đang nằm ở kho công ty, sắp xếp nhập trước hiện trước (FIFO) để ưu tiên xuất/chuyển.</div>
       <input class="searchbox" data-tbl="t_kc" placeholder="Tìm mã lô/vật tư..." style="margin-bottom:8px"/>
       <div class="tablewrap"><table id="t_kc">
-        <thead><tr><th>Lô</th><th>Vật tư</th><th>Tên vật tư</th><th>SL</th><th>Ngày giờ nhập</th><th>Vị trí</th><th>Trạng thái</th><th></th></tr></thead>
+        <thead><tr><th>Lô</th><th>Vật tư</th><th>Tên vật tư</th><th>SL</th><th>Ngày giờ nhập</th><th>Vị trí cất</th><th>Trạng thái</th><th></th></tr></thead>
         <tbody>${rows.map(l => `<tr>
           <td><code class="k">${esc(l.lot_code)}</code></td>
           <td class="muted">${esc(matById[l.material_id] ? matById[l.material_id].code : l.material_id || "—")}</td>
           <td>${esc(matById[l.material_id] ? matById[l.material_id].name : "—")}</td>
           <td>${l.quantity} ${l.uom}</td>
           <td class="muted">${fmt(l.created_at)}</td>
-          <td class="muted">${esc(l.location || "")}</td>
+          <td class="muted">${l.location_id && matLocByIdKc[l.location_id] ? esc(matLocByIdKc[l.location_id].code) + " — " + esc(matLocByIdKc[l.location_id].name) : "(chưa gán vị trí)"}</td>
           <td>${badge(l.status)}</td>
-          <td>${qcReqSet.has(l.material_id) ? `<button class="btn sm sec" data-lotqc="${esc(l.lot_id)}">Xem chỉ tiêu</button>` : ""}</td></tr>`).join("") ||
+          <td style="white-space:nowrap">${qcReqSet.has(l.material_id) ? `<button class="btn sm sec" data-lotqc="${esc(l.lot_id)}">Xem chỉ tiêu</button>` : ""}
+            <button class="btn sm sec" data-relocatelot="${esc(l.lot_id)}">Đổi vị trí</button></td></tr>`).join("") ||
           `<tr><td colspan=8 class="muted">Chưa có lô nào ở kho công ty.</td></tr>`}</tbody>
       </table></div>
+    </div>`;
+  } else if (sec === "vitri") {
+    const [allLotsVt, matsVt, matLocsVt] = await Promise.all([GET("/lots"), GET("/materials"),
+      GET("/warehouse/locations").catch(() => [])]);
+    const matByIdVt = Object.fromEntries(matsVt.map(m => [m.material_id, m]));
+    WH_CACHE.vtMatById = matByIdVt;
+    WH_CACHE.vtLots = allLotsVt.filter(l => !/phân xưởng/i.test(l.location || "") && l.quantity > 0);
+    const unplacedVt = WH_CACHE.vtLots.filter(l => !l.location_id);
+    const activeLocsVt = matLocsVt.filter(l => l.active);
+    const locOptsVt = activeLocsVt.map(l => `<option value="${esc(l.loc_id)}">${esc(l.code)} — ${esc(l.name)}</option>`).join("") ||
+      `<option value="">(chưa khai báo vị trí kho — vào Danh mục để thêm)</option>`;
+    body = `<div class="panel"><h2>🚚 Cất vào vị trí <span class="muted">(${unplacedVt.length})</span></h2>
+      <div class="muted" style="margin-bottom:8px">Gán vị trí kho cho các lô Kho công ty CHƯA có vị trí (nhập trước khi khai danh mục vị trí, hoặc nhập tồn đầu bằng Excel) — chọn vị trí đích rồi tick các lô cần cất.</div>
+      <div class="row"><div class="field"><label>Vị trí đích</label><select id="vt_to">${locOptsVt}</select></div></div>
+      <div class="tablewrap" style="margin-top:10px"><table id="t_vt_unplaced">
+        <thead><tr><th></th><th>Lô</th><th>Vật tư</th><th>SL</th><th>Ngày nhập</th></tr></thead>
+        <tbody>${unplacedVt.map(l => `<tr><td><input type="checkbox" data-vtu="${esc(l.lot_id)}"/></td>
+          <td><code class="k">${esc(l.lot_code)}</code></td>
+          <td>${esc(matByIdVt[l.material_id] ? matByIdVt[l.material_id].name : "—")}</td>
+          <td>${l.quantity} ${l.uom}</td><td class="muted">${fmt(l.created_at)}</td></tr>`).join("") ||
+          `<tr><td colspan=5 class="muted">Không có lô nào chưa gán vị trí.</td></tr>`}</tbody>
+      </table></div>
+      <button class="btn" id="vt_place_submit" style="margin-top:10px">Cất vào vị trí</button>
+    </div>
+    <div class="panel"><h2>🔁 Chuyển vị trí trong kho</h2>
+      <div class="muted" style="margin-bottom:8px">Chuyển các lô ĐÃ CẤT sang vị trí khác (VD sắp xếp lại kho) — chọn vị trí nguồn để xem các lô đang ở đó, chọn vị trí đích rồi tick lô cần chuyển.</div>
+      <div class="row">
+        <div class="field"><label>Vị trí nguồn</label><select id="vt_from"><option value="">(chọn vị trí nguồn)</option>${locOptsVt}</select></div>
+        <div class="field"><label>Vị trí đích</label><select id="vt_to2">${locOptsVt}</select></div>
+      </div>
+      <div id="vt_move_wrap" class="muted" style="margin-top:10px">Chọn vị trí nguồn để xem các lô đang ở đó.</div>
+      <button class="btn" id="vt_move_submit" style="margin-top:10px">Chuyển vị trí</button>
     </div>`;
   } else if (sec === "kk") {
     body = await renderStockCountSection("Kho công ty");
@@ -3947,6 +3994,56 @@ VIEWS.warehouse_kc = async function () {
     // là quay về đúng thứ tự FIFO (nhập trước lên đầu) khi cần chọn lô ưu tiên xuất/chuyển.
     if (!_pagerState.t_kc) _pagerState.t_kc = { page: 1, pageSize: 10, sortCol: 4, sortDir: -1 };
     wirePaginate("t_kc", 10);
+    document.querySelectorAll("[data-relocatelot]").forEach(b => b.onclick = () => {
+      const lotId = b.dataset.relocatelot;
+      const locs = WH_CACHE.matLocsActive || [];
+      const opts = locs.map(l => `<option value="${esc(l.loc_id)}">${esc(l.code)} — ${esc(l.name)}</option>`).join("") ||
+        `<option value="">(chưa khai báo vị trí kho — vào Danh mục để thêm)</option>`;
+      modal(`<h3>Đổi vị trí cất</h3>
+        <div class="field"><label>Vị trí mới</label><select id="rl_loc">${opts}</select></div>
+        <button class="btn" id="rl_save" style="margin-top:12px">Lưu</button>`);
+      $("rl_save").onclick = () => guard(async () => {
+        if (!$("rl_loc").value) throw new Error("Chọn vị trí mới.");
+        await POST(`/warehouse/lots/${lotId}/relocate`, { location_id: $("rl_loc").value });
+        closeModal(); toast("Đã đổi vị trí cất"); render("warehouse_kc");
+      });
+    });
+  }
+  if (sec === "vitri") {
+    wirePaginate("t_vt_unplaced", 10);
+    const rebuildMoveTable = () => {
+      const fromId = $("vt_from").value;
+      if (!fromId) { $("vt_move_wrap").innerHTML = '<div class="muted">Chọn vị trí nguồn để xem các lô đang ở đó.</div>'; return; }
+      const lotsAt = (WH_CACHE.vtLots || []).filter(l => l.location_id === fromId);
+      $("vt_move_wrap").innerHTML = `<div class="tablewrap"><table id="t_vt_move">
+        <thead><tr><th></th><th>Lô</th><th>Vật tư</th><th>SL</th></tr></thead>
+        <tbody>${lotsAt.map(l => `<tr><td><input type="checkbox" data-vtm="${esc(l.lot_id)}"/></td>
+          <td><code class="k">${esc(l.lot_code)}</code></td>
+          <td>${esc((WH_CACHE.vtMatById[l.material_id] || {}).name || "—")}</td>
+          <td>${l.quantity} ${l.uom}</td></tr>`).join("") ||
+          `<tr><td colspan=4 class="muted">Không có lô nào ở vị trí này.</td></tr>`}</tbody>
+      </table></div>`;
+      wirePaginate("t_vt_move", 10);
+    };
+    if ($("vt_from")) $("vt_from").onchange = rebuildMoveTable;
+    if ($("vt_place_submit")) $("vt_place_submit").onclick = () => guard(async () => {
+      const toId = $("vt_to").value;
+      if (!toId) throw new Error("Chọn vị trí đích.");
+      const ids = Array.from(document.querySelectorAll("[data-vtu]:checked")).map(c => c.dataset.vtu);
+      if (!ids.length) throw new Error("Chọn ít nhất 1 lô cần cất.");
+      for (const id of ids) await POST(`/warehouse/lots/${id}/relocate`, { location_id: toId });
+      toast(`Đã cất ${ids.length} lô vào vị trí`);
+      render("warehouse_kc");
+    });
+    if ($("vt_move_submit")) $("vt_move_submit").onclick = () => guard(async () => {
+      const toId = $("vt_to2").value;
+      if (!toId) throw new Error("Chọn vị trí đích.");
+      const ids = Array.from(document.querySelectorAll("[data-vtm]:checked")).map(c => c.dataset.vtm);
+      if (!ids.length) throw new Error("Chọn ít nhất 1 lô cần chuyển.");
+      for (const id of ids) await POST(`/warehouse/lots/${id}/relocate`, { location_id: toId });
+      toast(`Đã chuyển ${ids.length} lô sang vị trí mới`);
+      render("warehouse_kc");
+    });
   }
   if (sec === "min") wirePaginate("t_lowstock", 10);
   if (sec === "bc") {
@@ -3972,11 +4069,12 @@ VIEWS.warehouse_kc = async function () {
     });
     if ($("sng_supplier_txt")) wireSearchableSelect("sng_supplier_txt", "sng_supplier", WH_CACHE.supplierItems);
     if ($("sng_do")) $("sng_do").onclick = () => guard(async () => {
+      if (!$("sng_loc").value) throw new Error("Chọn vị trí cất trước khi khai báo.");
       const sngMat = matByIdGiao[$("sng_mat").value];
       const sngQty = altUomToBaseQty(sngMat, parseFloat($("sng_qty").value), $("sng_uom").value);
       const res = await POST("/warehouse/sang-ngang", { material_id: $("sng_mat").value,
         supplier_id: $("sng_supplier").value || null, unit_price: $("sng_price").value ? parseFloat($("sng_price").value) : null,
-        quantity: sngQty, uom: sngMat ? sngMat.uom : $("sng_uom").value,
+        quantity: sngQty, uom: sngMat ? sngMat.uom : $("sng_uom").value, location_id: $("sng_loc").value,
         expiry: $("sng_exp").value || null, reason: $("sng_note").value.trim() || "Xuất sang ngang" });
       toast(`Đã tạo đề nghị xuất sang ngang (số ${res.request_code}) — chờ phân xưởng duyệt`);
       render("warehouse_kc");
@@ -3984,9 +4082,11 @@ VIEWS.warehouse_kc = async function () {
     $("rc_do").onclick = () => guard(async () => {
       const rcDtRaw = $("rc_dt").value;
       if (!rcDtRaw) throw new Error("Chọn ngày nhập.");
+      if (!$("rc_loc").value) throw new Error("Chọn vị trí cất trước khi nhập.");
       const res = await POST("/warehouse/receive", { material_id: $("rc_mat").value,
         supplier_id: $("rc_supplier").value || null, unit_price: $("rc_price").value ? parseFloat($("rc_price").value) : null,
         quantity: parseFloat($("rc_qty").value), uom: $("rc_uom").value, received_at: new Date(rcDtRaw).toISOString(),
+        location_id: $("rc_loc").value,
         expiry: $("rc_exp").value || null, reason: $("rc_note").value.trim() || "Nhập kho" });
       if (res.status === "on_hold") toast(`Đã nhập kho (mã lô ${res.lot_code}) — lô đang CHỜ khai báo & duyệt chỉ tiêu chất lượng`, "err");
       else toast(`Đã nhập kho (mã lô ${res.lot_code})`);
@@ -9579,7 +9679,7 @@ function renderWmsLayoutGrid(wh, locsInWh, whOptionsHtml) {
     ${grid}`;
 }
 VIEWS.master = async function () {
-  const [products, finishedProducts, materials, plines, qcParams, qcGroups, stageGroups, beerTypes, suppliers, materialGroups, opsSettings, unitTypes, materialAltGroups, factoryLocations, wmsWarehouses, wmsLocations, wmsVehicles] = await Promise.all([
+  const [products, finishedProducts, materials, plines, qcParams, qcGroups, stageGroups, beerTypes, suppliers, materialGroups, opsSettings, unitTypes, materialAltGroups, factoryLocations, wmsWarehouses, wmsLocations, wmsVehicles, materialLocations] = await Promise.all([
     GET("/products"), GET("/finished-products").catch(() => []), GET("/materials"), GET("/lines").catch(() => []),
     GET("/qc/parameters?active_only=false").catch(() => []),
     GET("/qc/groups").catch(() => []), GET("/qc/stage-groups").catch(() => []), GET("/beer-types").catch(() => []),
@@ -9587,7 +9687,8 @@ VIEWS.master = async function () {
     GET("/ops-settings").catch(() => ({ empty_cct_tolerance_hl: 2, empty_bbt_tolerance_hl: 2 })),
     GET("/unit-types").catch(() => []), GET("/material-alt-groups").catch(() => []),
     GET("/factory-locations").catch(() => []),
-    GET("/wms/warehouses").catch(() => []), GET("/wms/locations").catch(() => []), GET("/wms/vehicles").catch(() => [])]);
+    GET("/wms/warehouses").catch(() => []), GET("/wms/locations").catch(() => []), GET("/wms/vehicles").catch(() => []),
+    GET("/warehouse/locations").catch(() => [])]);
   // Chỉ hiện loại "selectable" (bỏ "lon" — hệ thống tự sinh khi phân rã vỉ, xem services/wms.py)
   // khi khai báo SKU mới; nhưng vẫn hiện đủ mọi loại (kể cả không selectable) khi sửa 1 SKU đã
   // lỡ mang mã đó, để không xóa mất lựa chọn hiện tại khỏi dropdown.
@@ -9795,6 +9896,30 @@ VIEWS.master = async function () {
               <button class="btn sm sec" data-efldel="${esc(fl.factory_id)}">Xóa</button>
             </td>` : ""}</tr>`).join("") ||
             `<tr><td colspan="${canManage ? 6 : 5}" class="muted">Chưa có nhà máy nào.</td></tr>`}</tbody>
+        </table></div>
+      </div>
+
+      <div class="panel"><h2>📍 Vị trí kho nguyên vật liệu <span class="muted">(${materialLocations.length})</span></h2>
+        <div class="muted" style="margin-bottom:6px">Vị trí cất trong Kho công ty — bắt buộc chọn khi nhập kho (tab Kho công ty → Nhập/Xuất/Hoàn/Sang ngang). Vị trí đang chứa lô còn tồn (Số lô > 0) không xóa được.</div>
+        ${noPerm}
+        ${canManage ? `<div class="row">
+          <div class="field"><label>Mã</label><input id="ml_code" placeholder="A1-01"/></div>
+          <div class="field"><label>Tên</label><input id="ml_name" placeholder="Kệ A1 tầng 1"/></div>
+          <div class="field"><label>Khu</label><input id="ml_zone" placeholder="(tuỳ chọn)"/></div>
+          <button class="btn" id="ml_add" style="align-self:flex-end">+ Thêm vị trí</button>
+        </div>` : ""}
+        <input class="searchbox" data-tbl="t_matlocs" placeholder="Tìm mã/tên/khu vị trí..." style="margin-top:10px"/>
+        <div class="tablewrap" style="margin-top:6px"><table id="t_matlocs">
+          <thead><tr><th>Mã</th><th>Tên</th><th>Khu</th><th>Số lô</th><th>Trạng thái</th>${canManage ? "<th></th>" : ""}</tr></thead>
+          <tbody>${materialLocations.map(l => `<tr>
+            <td><code class="k">${esc(l.code)}</code></td><td>${esc(l.name)}</td>
+            <td class="muted">${esc(l.zone || "—")}</td><td>${l.lot_count}</td>
+            <td>${l.active ? '<span style="color:var(--green)">Đang dùng</span>' : '<span class="muted">Đã ẩn</span>'}</td>
+            ${canManage ? `<td style="white-space:nowrap">
+              <button class="btn sm sec" data-eml="${esc(l.loc_id)}">Sửa</button>
+              <button class="btn sm sec" data-emldel="${esc(l.loc_id)}" ${l.lot_count > 0 ? "disabled title=\"Đang chứa lô — không xóa được\"" : ""}>Xóa</button>
+            </td>` : ""}</tr>`).join("") ||
+            `<tr><td colspan="${canManage ? 6 : 5}" class="muted">Chưa có vị trí nào.</td></tr>`}</tbody>
         </table></div>
       </div>
     </div>
@@ -10257,6 +10382,30 @@ VIEWS.master = async function () {
       if (!confirm("Xóa nhà máy này? Không thể hoàn tác.")) return;
       await DELETE(`/factory-locations/${b.dataset.efldel}`);
       toast("Đã xóa nhà máy"); render("master");
+    }));
+    if ($("ml_add")) $("ml_add").onclick = () => guard(async () => {
+      await POST("/warehouse/locations", { code: $("ml_code").value.trim(), name: $("ml_name").value.trim(),
+        zone: $("ml_zone").value.trim() || null });
+      toast("Đã tạo vị trí kho"); render("master");
+    });
+    document.querySelectorAll("[data-eml]").forEach(b => b.onclick = () => {
+      const ml = materialLocations.find(x => x.loc_id === b.dataset.eml);
+      modal(`<h3>Sửa vị trí kho nguyên vật liệu</h3>
+        <div class="field"><label>Mã</label><input id="eml_code" value="${esc(ml.code)}"/></div>
+        <div class="field" style="margin-top:8px"><label>Tên</label><input id="eml_name" value="${esc(ml.name)}"/></div>
+        <div class="field" style="margin-top:8px"><label>Khu</label><input id="eml_zone" value="${esc(ml.zone || "")}"/></div>
+        <div class="field" style="margin-top:8px"><label><input type="checkbox" id="eml_active" ${ml.active ? "checked" : ""}/> Đang dùng (hiện trong danh sách chọn khi nhập kho)</label></div>
+        <button class="btn" id="eml_save" style="margin-top:12px">Lưu</button>`);
+      $("eml_save").onclick = () => guard(async () => {
+        await PUT(`/warehouse/locations/${ml.loc_id}`, { code: $("eml_code").value.trim(), name: $("eml_name").value.trim(),
+          zone: $("eml_zone").value.trim() || null, active: $("eml_active").checked });
+        closeModal(); toast("Đã cập nhật"); render("master");
+      });
+    });
+    document.querySelectorAll("[data-emldel]").forEach(b => b.onclick = () => guard(async () => {
+      if (!confirm("Xóa vị trí kho này? Không thể hoàn tác.")) return;
+      await DELETE(`/warehouse/locations/${b.dataset.emldel}`);
+      toast("Đã xóa vị trí kho"); render("master");
     }));
     if ($("mg_add")) $("mg_add").onclick = () => guard(async () => {
       const code = $("mg_code").value.trim(), name = $("mg_name").value.trim();

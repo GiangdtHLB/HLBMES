@@ -20,8 +20,13 @@ router = APIRouter(prefix="/api/lots", tags=["lots"],
 
 
 @router.get("", response_model=list[LotOut])
-def list_lots(db: Session = Depends(get_db)):
-    return db.execute(select(MaterialLot).order_by(MaterialLot.created_at.desc())).scalars().all()
+def list_lots(limit: int = 1000, offset: int = 0, db: Session = Depends(get_db)):
+    """Có phân trang (limit/offset, mặc định 1000, tối đa 5000) — số lô tích lũy tăng dần theo
+    mỗi lần nhập/tách/nhập tồn đầu nên endpoint không lọc vẫn cần chặn không tải hết bảng."""
+    limit = max(1, min(limit or 1000, 5000))
+    offset = max(0, offset or 0)
+    stmt = select(MaterialLot).order_by(MaterialLot.created_at.desc()).limit(limit).offset(offset)
+    return db.execute(stmt).scalars().all()
 
 
 @router.get("/{lot_id}/qc-status")

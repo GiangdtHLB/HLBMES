@@ -849,7 +849,8 @@
     const root = $("view-oee");
     const sec = SUB.oee || "dashboard";
     const sections = [
-      { key: "dashboard", label: "📊 Dashboard OPI" }, { key: "ca", label: "📝 Nhập ca" },
+      { key: "dashboard", label: "📊 Dashboard OPI" }, { key: "summary", label: "📈 Summary" },
+      { key: "ca", label: "📝 Nhập ca" },
       { key: "dungmay", label: "⏱️ Ghi dừng máy" }, { key: "rcfa", label: "🔧 RCFA" },
       { key: "mssl", label: "📉 Dừng lắt nhắt (MS&SL)" }, { key: "mtbf", label: "🔩 MTBF/MTTR" },
       { key: "danhmuc", label: "🗂️ Danh mục lý do & Target" },
@@ -864,6 +865,7 @@
 
     let body = "";
     if (sec === "dashboard") body = await renderOeeDashboard();
+    else if (sec === "summary") body = await renderOeeSummary();
     else if (sec === "ca") body = renderOeeShiftForm(lns);
     else if (sec === "dungmay") body = await renderOeeDowntimeForm();
     else if (sec === "rcfa") body = await renderOeeRcfa();
@@ -878,6 +880,7 @@
       if (lineSel) lineSel.onchange = () => { OEE_SEL.line = lineSel.value; render("oee"); };
     }
     if (sec === "dashboard") wireOeeDashboard();
+    else if (sec === "summary") wireOeeSummary();
     else if (sec === "ca") wireOeeShiftForm();
     else if (sec === "dungmay") wireOeeDowntimeForm();
     else if (sec === "rcfa") wireOeeRcfa();
@@ -938,6 +941,110 @@
     };
   }
 
+  // ---- Tab 1b: Summary — mirror 16 biểu đồ sheet Summary của file OPI Excel gốc, nhưng lấy
+  // target sống từ Danh mục lý do & Target đang dùng (không hardcode lại số target cũ trong Excel).
+  const OEE_CAT_ORDER = ["bao_tri_ngoai", "nona", "ke_hoach", "chuyen_may", "thieu_vat_tu", "breakdown", "dung_lat_nhat", "sp_loi"];
+  function oeeCatVsTargetItems(byCategory) {
+    const byKey = {}; (byCategory || []).forEach(c => byKey[c.category] = c);
+    return OEE_CAT_ORDER.filter(k => byKey[k]).map(k => ({
+      label: byKey[k].label, a: +(byKey[k].actual_pct * 100).toFixed(2), b: +(byKey[k].target_pct * 100).toFixed(2),
+    }));
+  }
+  function oeeParetoChart(items) {
+    if (!items || !items.length) return `<div class="muted">Không có dữ liệu trong kỳ này.</div>`;
+    return CH.vbars(items.map(i => ({ label: i.label, value: i.minutes })), { unit: "phút", color: "#e67e22" });
+  }
+  async function renderOeeSummary() {
+    if (!OEE_SEL.line) return panel("📈 Summary", `<div class="muted">Chưa có dây chuyền active.</div>`);
+    const q = `line_code=${encodeURIComponent(OEE_SEL.line)}&year=${OEE_SEL.year}&month=${OEE_SEL.month}`;
+    const d = await GET(`/downtime/summary-dashboard?${q}`).catch(() => null);
+    if (!d) return panel("📈 Summary", `<div class="muted">Không tải được dữ liệu cho dây chuyền này.</div>`);
+    const yearOpts = Array.from({ length: 6 }, (_, i) => new Date().getFullYear() + 1 - i)
+      .map(y => `<option value="${y}" ${y === OEE_SEL.year ? "selected" : ""}>${y}</option>`).join("");
+    const monthOpts = Array.from({ length: 12 }, (_, i) => i + 1)
+      .map(m => `<option value="${m}" ${m === OEE_SEL.month ? "selected" : ""}>Tháng ${m}</option>`).join("");
+    const monthly = d.monthly, quarterly = d.quarterly, weekly = d.weekly;
+    const lmCat = monthly[d.month - 1].by_category, tqCat = quarterly[d.quarter - 1].by_category;
+
+    const weeklyCatSeries = OEE_CAT_ORDER.map(k => ({
+      label: (weekly[0].by_category.find(c => c.category === k) || {}).label || k,
+      values: weekly.map(w => +(((w.by_category.find(c => c.category === k) || {}).actual_pct || 0) * 100).toFixed(2)),
+    }));
+
+    const chart = (title, sub, inner) => panel(`📊 ${esc(title)}`, `<div class="muted" style="font-size:12px;margin-bottom:6px">${esc(sub)}</div>${inner}`);
+
+    return `
+      ${panel("Kỳ báo cáo", `<div class="row" style="align-items:flex-end">
+        <div class="field"><label>Năm</label><select id="os_year">${yearOpts}</select></div>
+        <div class="field"><label>Tháng</label><select id="os_month">${monthOpts}</select></div>
+        <button class="btn" id="os_go">Xem</button>
+        <div class="muted" style="align-self:flex-end;padding-bottom:8px">"Tháng" quyết định luôn quý chứa nó (dùng cho các biểu đồ THIS QUARTER/LAST MONTH). Target lấy trực tiếp từ tab Danh mục lý do & Target.</div>
+      </div>`)}
+
+      ${chart("OPI CAN LINE MONTHLY", "OPI thực tế và Target theo từng tháng trong năm.",
+        CH.grouped(monthly.map(p => ({ label: p.label, a: +(p.opi * 100).toFixed(2), b: +(p.opi_target * 100).toFixed(2) })),
+          { labelA: "OPI thực tế", labelB: "Target", colorA: "#3498db", colorB: "#e74c3c" }))}
+
+      ${chart("MSSL & BREAKDOWN CAN LINE MONTHLY", "Dừng lắt nhắt (MS&SL) và Breakdown theo từng tháng.",
+        CH.grouped(monthly.map(p => ({ label: p.label, a: +(p.ms_sl_pct * 100).toFixed(2), b: +(p.breakdown_pct * 100).toFixed(2) })),
+          { labelA: "MS & SL", labelB: "Breakdown", colorA: "#e67e22", colorB: "#9b59b6" }))}
+
+      ${chart("WEEKLY CAN LINE OPI", "OPI thực tế và Target — 13 tuần ISO gần nhất.",
+        CH.grouped(weekly.map(p => ({ label: p.label, a: +(p.opi * 100).toFixed(2), b: +(p.opi_target * 100).toFixed(2) })),
+          { labelA: "OPI thực tế", labelB: "Target", colorA: "#3498db", colorB: "#e74c3c" }))}
+
+      ${chart("WEEKLY CAN LINE PLANNED DOWNTIME", "Dừng có kế hoạch thực tế và Target — 13 tuần gần nhất.",
+        CH.grouped(weekly.map(p => ({ label: p.label, a: +(p.planned_pct * 100).toFixed(2), b: +(p.planned_target * 100).toFixed(2) })),
+          { labelA: "Thực tế", labelB: "Target", colorA: "#16a085", colorB: "#e74c3c" }))}
+
+      ${chart("WEEKLY CAN LINE MINOR STOP AND SPEED LOSS", "Dừng lắt nhắt (% thời gian làm) — 13 tuần gần nhất.",
+        CH.vbars(weekly.map(p => ({ label: p.label, value: +(p.ms_sl_pct * 100).toFixed(2) })), { unit: "%", color: "#e67e22" }))}
+
+      ${chart("WEEKLY CAN LINE BREAKDOWN", "Cơ cấu 8 nhóm tổn thất (% thời gian làm) theo tuần — thay cho phân rã theo vị trí máy vì dữ liệu vị trí máy chỉ có cho nhóm Breakdown.",
+        CH.groupedN(weekly.map(p => p.label), weeklyCatSeries, { unit: "%" }))}
+
+      ${chart("OPI CAN LINE QUARTERLY", "OPI thực tế và Target theo từng quý trong năm.",
+        CH.grouped(quarterly.map(p => ({ label: p.label, a: +(p.opi * 100).toFixed(2), b: +(p.opi_target * 100).toFixed(2) })),
+          { labelA: "OPI thực tế", labelB: "Target", colorA: "#3498db", colorB: "#e74c3c" }))}
+
+      ${chart("DOWNTIME QUARTERLY", "Dừng có kế hoạch và Dừng ngoài kế hoạch (thiếu NVL + Breakdown + Dừng lắt nhắt) theo từng quý.",
+        CH.grouped(quarterly.map(p => ({ label: p.label, a: +(p.planned_pct * 100).toFixed(2), b: +(p.unplanned_pct * 100).toFixed(2) })),
+          { labelA: "Có kế hoạch", labelB: "Ngoài kế hoạch", colorA: "#16a085", colorB: "#c0392b" }))}
+
+      ${chart(`DOWNTIME CAN LINE LAST MONTH (Tháng ${d.month}/${d.year})`, "8 nhóm tổn thất thực tế so Target — tháng vừa chọn.",
+        CH.grouped(oeeCatVsTargetItems(lmCat), { labelA: "Thực tế", labelB: "Target", colorA: "#3498db", colorB: "#e74c3c" }))}
+
+      ${chart(`BREAKDOWN CAN LINE LAST MONTH (Tháng ${d.month}/${d.year})`, "Pareto phút Breakdown theo vị trí máy.",
+        oeeParetoChart(d.last_month_breakdowns.breakdown))}
+
+      ${chart(`PLANNED DOWNTIME CAN LINE LAST MONTH (Tháng ${d.month}/${d.year})`, "Pareto phút dừng có kế hoạch theo lý do con.",
+        oeeParetoChart(d.last_month_breakdowns.planned_downtime))}
+
+      ${chart(`MINOR STOP CAN LINE LAST MONTH (Tháng ${d.month}/${d.year})`, "Pareto phút dừng lắt nhắt theo lý do con.",
+        oeeParetoChart(d.last_month_breakdowns.minor_stop))}
+
+      ${chart(`DOWNTIME CAN LINE THIS QUARTER (Q${d.quarter}/${d.year})`, "8 nhóm tổn thất thực tế so Target — quý chứa tháng vừa chọn.",
+        CH.grouped(oeeCatVsTargetItems(tqCat), { labelA: "Thực tế", labelB: "Target", colorA: "#3498db", colorB: "#e74c3c" }))}
+
+      ${chart(`BREAKDOWN CAN LINE THIS QUARTER (Q${d.quarter}/${d.year})`, "Pareto phút Breakdown theo vị trí máy.",
+        oeeParetoChart(d.this_quarter_breakdowns.breakdown))}
+
+      ${chart(`PLANNED DOWNTIME CAN LINE THIS QUARTER (Q${d.quarter}/${d.year})`, "Pareto phút dừng có kế hoạch theo lý do con.",
+        oeeParetoChart(d.this_quarter_breakdowns.planned_downtime))}
+
+      ${chart(`MINOR STOP CAN LINE THIS QUARTER (Q${d.quarter}/${d.year})`, "Pareto phút dừng lắt nhắt theo lý do con.",
+        oeeParetoChart(d.this_quarter_breakdowns.minor_stop))}
+    `;
+  }
+  function wireOeeSummary() {
+    if (!$("os_go")) return;
+    $("os_go").onclick = () => {
+      OEE_SEL.year = parseInt($("os_year").value) || OEE_SEL.year;
+      OEE_SEL.month = parseInt($("os_month").value) || OEE_SEL.month;
+      render("oee");
+    };
+  }
+
   // ---- Tab 2: Nhập ca (SP tốt/SP lỗi tách riêng đúng cách nhập file gốc) ----
   function renderOeeShiftForm(lns) {
     const line = lns.find(l => l.code === OEE_SEL.line);
@@ -965,19 +1072,25 @@
     });
   }
 
-  // ---- Tab 3: Ghi dừng máy (cascading Nhóm → Lý do theo danh mục DB) ----
+  // ---- Tab 3: Ghi dừng máy (cascading Nhóm → Lý do theo danh mục DB, hiện hẳn ra dạng tích chọn) ----
+  const OEE_PICK_LABEL = "display:flex;align-items:center;gap:6px;font-size:13px;padding:4px 10px;border:1px solid var(--border);border-radius:16px;cursor:pointer;background:var(--panel)";
+  const OEE_PICK_BOX = "display:flex;flex-wrap:wrap;gap:6px;background:var(--panel2);border:1px solid var(--border);border-radius:8px;padding:8px";
   async function renderOeeDowntimeForm() {
     if (!OEE_SEL.line) return panel("⏱️ Ghi dừng máy", `<div class="muted">Chưa có dây chuyền.</div>`);
     const rows = await oeeCatalogForLine();
     const cats = [...new Set(rows.map(r => r.category))];
-    const events = await GET(`/downtime?line=${encodeURIComponent(OEE_SEL.line)}`).catch(() => []);
+    const events = await GET(`/downtime?line=${encodeURIComponent(OEE_SEL.line)}&limit=30`).catch(() => []);
     const nowLocal = toDTLocal(new Date());
     return `
       ${panel("⏱️ Ghi sự kiện dừng máy — " + esc(OEE_SEL.line), `
         <div class="row">
-          <div class="field"><label>Nhóm lý do</label><select id="dt_cat">
-            ${cats.map(c => `<option value="${esc(c)}">${esc(OEE_CAT_LABELS[c] || c)}</option>`).join("")}</select></div>
-          <div class="field"><label>Lý do</label><select id="dt_reason"></select></div>
+          <div class="field" style="flex:1"><label>Nhóm lý do</label>
+            <div id="dt_cat_box" style="${OEE_PICK_BOX}">${cats.map((c, i) => `<label style="${OEE_PICK_LABEL}">
+              <input type="radio" name="dt_cat" value="${esc(c)}" ${i === 0 ? "checked" : ""}/> ${esc(OEE_CAT_LABELS[c] || c)}</label>`).join("")}</div></div>
+        </div>
+        <div class="row">
+          <div class="field" style="flex:1"><label>Lý do</label>
+            <div id="dt_reason_box" style="${OEE_PICK_BOX}"></div></div>
           <div class="field" id="dt_err_wrap" style="display:none"><label>Mã lỗi</label><input id="dt_err" style="width:100px"/></div>
         </div>
         <div class="row">
@@ -993,7 +1106,7 @@
         </div>`)}
       ${panel("Lịch sử gần đây", `<div class="tablewrap"><table><thead><tr>
         <th>Ca</th><th>Nhóm</th><th>Lý do</th><th>Từ</th><th>Đến</th><th>Phút</th><th>Ghi chú</th></tr></thead>
-        <tbody>${events.slice(0, 30).map(e => `<tr><td>${esc(e.shift)}</td><td>${esc(OEE_CAT_LABELS[e.reason_group] || e.reason_group)}</td>
+        <tbody>${events.map(e => `<tr><td>${esc(e.shift)}</td><td>${esc(OEE_CAT_LABELS[e.reason_group] || e.reason_group)}</td>
           <td>${esc(e.reason_label || e.reason_code || "")}</td><td>${e.start_at ? fmt(e.start_at) : "—"}</td>
           <td>${e.end_at ? fmt(e.end_at) : "—"}</td><td>${e.minutes}</td><td>${esc(e.note || "")}</td></tr>`).join("")
           || `<tr><td colspan="7" class="muted">Chưa có sự kiện nào.</td></tr>`}</tbody></table></div>`)}
@@ -1002,13 +1115,18 @@
   function wireOeeDowntimeForm() {
     if (!OEE_SEL.line || !OEE_CATALOG_CACHE) return;
     const rows = OEE_CATALOG_CACHE.rows;
+    const catChecked = () => document.querySelector('input[name="dt_cat"]:checked');
+    const reasonChecked = () => document.querySelector('input[name="dt_reason"]:checked');
     function fillReasons() {
-      const cat = $("dt_cat").value;
+      const cat = catChecked() ? catChecked().value : "";
       const opts = rows.filter(r => r.category === cat);
-      $("dt_reason").innerHTML = opts.map(r => `<option value="${r.reason_id}">${esc(r.sub_label)}${r.machine_position ? " — " + esc(r.machine_position) : ""}</option>`).join("");
+      $("dt_reason_box").innerHTML = opts.map((r, i) => `<label style="${OEE_PICK_LABEL}">
+        <input type="radio" name="dt_reason" value="${r.reason_id}" ${i === 0 ? "checked" : ""}/> ${esc(r.sub_label)}${r.machine_position ? " — " + esc(r.machine_position) : ""}</label>`).join("")
+        || `<span class="muted" style="font-size:12px">(Nhóm này chưa có lý do nào)</span>`;
       $("dt_err_wrap").style.display = cat === "breakdown" ? "" : "none";
     }
-    $("dt_cat").onchange = fillReasons; fillReasons();
+    document.querySelectorAll('input[name="dt_cat"]').forEach(r => r.onchange = fillReasons);
+    fillReasons();
     function previewMinutes() {
       const from = $("dt_from").value, to = $("dt_to").value;
       let mins = 0;
@@ -1018,17 +1136,17 @@
     }
     $("dt_from").oninput = previewMinutes; $("dt_to").oninput = previewMinutes; previewMinutes();
     $("dt_go").onclick = () => guard(async () => {
-      const reasonId = $("dt_reason").value;
+      const reasonId = reasonChecked() ? reasonChecked().value : "";
       if (!reasonId) { toast("Chưa chọn lý do", "err"); return; }
       await POST("/downtime", { line: OEE_SEL.line, reason_catalog_id: reasonId,
         shift: $("dt_shift").value, from_time: $("dt_from").value, to_time: $("dt_to").value,
-        error_code: $("dt_cat").value === "breakdown" ? ($("dt_err").value || null) : null,
+        error_code: catChecked() && catChecked().value === "breakdown" ? ($("dt_err").value || null) : null,
         note: $("dt_note").value || null });
       toast("Đã ghi sự kiện dừng máy"); render("oee");
     });
     $("dt_rcfa").onclick = () => {
-      const reasonOpt = $("dt_reason").selectedOptions[0];
-      openOeeRcfaModal(null, { line_code: OEE_SEL.line, machine: reasonOpt ? reasonOpt.textContent : "",
+      const opt = reasonChecked();
+      openOeeRcfaModal(null, { line_code: OEE_SEL.line, machine: opt ? opt.parentElement.textContent.trim() : "",
         stop_at: $("dt_from").value, duration_min: num("dt_min_preview") || 0 });
     };
   }

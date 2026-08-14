@@ -8,7 +8,7 @@ from ..database import get_db
 from ..schemas import DowntimeIn, OeeMinorStopTallyIn, OeeReasonCatalogIn, OeeReasonCatalogUpdate
 from ..security import User, get_current_user
 from ..services import downtime as svc
-from ..services import oee_minor_stop, oee_waterfall
+from ..services import oee_minor_stop, oee_summary, oee_waterfall
 
 router = APIRouter(prefix="/api/downtime", tags=["downtime"])
 
@@ -45,9 +45,9 @@ def delete_reason_catalog(reason_id: str, db: Session = Depends(get_db),
 
 
 @router.get("")
-def list_events(line: str = None, db: Session = Depends(get_db),
+def list_events(line: str = None, limit: int = None, db: Session = Depends(get_db),
                 user: User = Depends(get_current_user)):
-    return svc.list_events(db, line)
+    return svc.list_events(db, line, limit)
 
 
 @router.post("", status_code=201)
@@ -88,6 +88,12 @@ def waterfall(line_code: str, year: int, month: int, db: Session = Depends(get_d
 def opi_summary(line_code: str, year: int, month: int, db: Session = Depends(get_db),
                 user: User = Depends(get_current_user)):
     return oee_waterfall.opi_summary(db, line_code, year, month)
+
+
+@router.get("/summary-dashboard")
+def summary_dashboard(line_code: str, year: int, month: int, db: Session = Depends(get_db),
+                      user: User = Depends(get_current_user)):
+    return oee_summary.summary_dashboard(db, line_code, year, month)
 
 
 @router.get("/minor-stop-tally")

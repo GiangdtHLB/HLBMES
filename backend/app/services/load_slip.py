@@ -218,15 +218,25 @@ def import_casing_order(db: Session, filename: str, content: bytes, user) -> dic
     return created
 
 
-def list_load_slips(db: Session, sheet_type: Optional[str] = None) -> list[dict]:
-    q = select(LoadSlip).order_by(LoadSlip.created_at.desc())
+def list_load_slips(db: Session, sheet_type: Optional[str] = None,
+                    limit: int = 1000, offset: int = 0) -> list[dict]:
+    """Có phân trang (mặc định 1000, tối đa 5000) — số biên bản tích lũy tăng dần theo mỗi
+    lần nhập lệnh đóng hàng. Đếm số dòng theo 1 truy vấn GROUP BY duy nhất thay vì 1 truy vấn
+    COUNT riêng cho mỗi biên bản (N+1) như trước."""
+    limit = max(1, min(limit or 1000, 5000))
+    offset = max(0, offset or 0)
+    q = select(LoadSlip).order_by(LoadSlip.created_at.desc()).limit(limit).offset(offset)
     if sheet_type:
         q = q.where(LoadSlip.sheet_type == sheet_type)
     slips = db.execute(q).scalars().all()
+    slip_ids = [s.load_slip_id for s in slips]
+    line_counts = dict(db.execute(
+        select(LoadSlipLine.load_slip_id, func.count())
+        .where(LoadSlipLine.load_slip_id.in_(slip_ids))
+        .group_by(LoadSlipLine.load_slip_id)).all()) if slip_ids else {}
     out = []
     for s in slips:
-        n_lines = db.execute(select(func.count()).select_from(LoadSlipLine)
-                             .where(LoadSlipLine.load_slip_id == s.load_slip_id)).scalar() or 0
+        n_lines = line_counts.get(s.load_slip_id, 0)
         out.append({
             "load_slip_id": s.load_slip_id, "slip_code": s.slip_code, "sheet_type": s.sheet_type,
             "shift_label": s.shift_label, "order_date": s.order_date, "vehicle_plate": s.vehicle_plate,
