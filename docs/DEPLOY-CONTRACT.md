@@ -105,6 +105,11 @@ Không chỉ migration; **code truy vấn** cũng phải chạy trên MSSQL. Đ�
   mọi DELETE vào 1 flush và KHÔNG tự xếp con-trước-cha. Quy tắc khi viết endpoint DELETE:
   (1) xóa ĐỦ mọi bảng con tham chiếu (tra FK bằng `sys.foreign_keys`), (2) `db.flush()` sau
   mỗi nhóm con, TRƯỚC khi `db.delete(cha)`. Mẫu: `routers/brewing.py::delete_brew`.
+  ⚠️ Con "ẩn" dễ sót: bản ghi con **CHƯA move stock/CHƯA đổi trạng thái** mà guard "đã dùng"
+  không thấy. VD `delete_receipt`: đề nghị `sang_ngang_request` (Xuất sang ngang) đang *pending*
+  chưa tạo StockMovement non-receipt nên `_lot_used()`=False → qua guard rồi vỡ FK
+  `sang_ngang_request.lot_id → material_lot`. Khi xóa cha, phải quét MỌI bảng có FK tới nó kể cả
+  bản con ở trạng thái nháp/pending — đừng chỉ dựa vào guard nghiệp vụ.
 
 Cách bắt (LÀM CẢ 2, vì bug ẩn ở cả đọc lẫn ghi):
 1. **Smoke GET**: enumerate `/openapi.json`, gọi mọi route không path-param với token admin,

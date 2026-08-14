@@ -20,9 +20,9 @@ depends_on = None
 
 def upgrade() -> None:
     op.add_column("capa", sa.Column("kcs_approved_by", sa.Unicode(255), nullable=True))
-    op.add_column("capa", sa.Column("kcs_approved_at", sa.DateTime(), nullable=True))
+    op.add_column("capa", sa.Column("kcs_approved_at", sa.DateTime(timezone=True), nullable=True))
     op.add_column("capa", sa.Column("director_approved_by", sa.Unicode(255), nullable=True))
-    op.add_column("capa", sa.Column("director_approved_at", sa.DateTime(), nullable=True))
+    op.add_column("capa", sa.Column("director_approved_at", sa.DateTime(timezone=True), nullable=True))
 
     op.create_table(
         "capa_attachment",
@@ -32,7 +32,7 @@ def upgrade() -> None:
         sa.Column("stored_path", sa.Unicode(500), nullable=False),
         sa.Column("note", sa.Unicode(255), nullable=True),
         sa.Column("uploaded_by", sa.Unicode(255), nullable=True),
-        sa.Column("uploaded_at", sa.DateTime(), nullable=False),
+        sa.Column("uploaded_at", sa.DateTime(timezone=True), nullable=False),
     )
     op.create_index("ix_capa_attachment_capa_id", "capa_attachment", ["capa_id"])
 

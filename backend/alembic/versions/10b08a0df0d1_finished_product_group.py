@@ -21,7 +21,7 @@ def upgrade():
         sa.Column("name", sa.Unicode(255), nullable=False),
         sa.Column("product_ids", sa.UnicodeText(), nullable=False, server_default=""),
         sa.Column("created_by", sa.Unicode(255), nullable=True),
-        sa.Column("created_at", sa.DateTime(), nullable=False),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     )
     op.create_index("ix_finished_product_group_name", "finished_product_group", ["name"], unique=True)
 

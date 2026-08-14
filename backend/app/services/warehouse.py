@@ -295,6 +295,17 @@ def delete_receipt(db: Session, movement_id: str, user: User) -> dict:
     db.flush()  # MSSQL enforce FK: xóa stock_movement (con) TRƯỚC material_lot (cha) — autoflush=False
     lot_deleted = False
     if remaining_receipts == 0:
+        # Lô sắp bị xóa → dọn các đề nghị "Xuất sang ngang" con còn trỏ tới lô. Tới được đây thì
+        # chúng CHỈ có thể là pending/rejected (chưa move stock): nếu đã duyệt thì transfer() để
+        # lại StockMovement non-receipt và _lot_used đã chặn ở trên. MSSQL enforce FK
+        # sang_ngang_request.lot_id → material_lot (SQLite bỏ qua) — phải xóa con + flush trước.
+        for req in db.execute(select(SangNgangRequest).where(
+                SangNgangRequest.lot_id == lot.lot_id)).scalars().all():
+            record_audit(db, entity_type="sang_ngang_request", entity_id=req.request_id,
+                         action="delete", actor=user,
+                         before={"lot_id": req.lot_id, "status": req.status})
+            db.delete(req)
+        db.flush()
         db.delete(lot)
         lot_deleted = True
     db.commit()

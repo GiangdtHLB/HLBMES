@@ -10852,7 +10852,7 @@ VIEWS.master = async function () {
       await POST("/wms/locations", { code: $("wl_new_code").value, name: $("wl_new_name").value,
         warehouse_id: $("wl_new_wh").value || null,
         zone: $("wl_new_zone").value || null, kind: $("wl_new_kind").value,
-        capacity: num("wl_new_capacity") || 10 });
+        capacity: parseInt($("wl_new_capacity").value) || 10 });
       toast("Đã thêm vị trí"); render("master");
     });
     if ($("wlo_wh")) {
