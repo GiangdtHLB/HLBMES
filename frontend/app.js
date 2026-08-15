@@ -446,13 +446,55 @@ let CACHE = { products: [], orders: [], recipes: [] };
 
 // ---------- navigation ----------
 const VIEWS = {};
-document.querySelectorAll("#nav button").forEach(b => {
+// Nhóm domain cấp cao nhất chứa mỗi view — dùng để tự mở/đóng đúng 1 trong 5 nhóm khi bấm view.
+const GROUP_OF_VIEW = {
+  flowmap: "sanxuat", orders: "sanxuat", process: "sanxuat", recipes: "sanxuat", cip: "sanxuat",
+  dispatch: "sanxuat", batches: "sanxuat", dispense: "sanxuat", recipeadv: "sanxuat", isa88: "sanxuat", schedule: "sanxuat",
+  oee: "baotri", maint: "baotri", calib: "baotri",
+  quality: "chatluong", qclab: "chatluong",
+  realtime: "giamsat", energy: "giamsat", reports: "giamsat",
+  integration: "hethong", users: "hethong", audit: "hethong", profile: "hethong",
+  // dashboard/master/trace/ai/warehouse_kc/warehouse_px/wms/packaging: đứng riêng, không thuộc nhóm nào.
+};
+// Chỉ 1 trong 5 nhóm domain cấp cao nhất được xổ ra tại 1 thời điểm (không tính nhóm lồng riêng
+// của Danh mục — #nav-master-groups nằm sâu bên trong nhóm "hethong", có accordion độc lập).
+function openNavGroup(grpKey) {
+  document.querySelectorAll("#nav .nav-topgroup").forEach(g => g.classList.toggle("active", !!grpKey && g.dataset.navgrp === grpKey));
+  document.querySelectorAll("#nav > .nav-scroll > .nav-groups").forEach(g => g.classList.toggle("open", !!grpKey && g.id === "nav-group-" + grpKey));
+}
+document.querySelectorAll("#nav button[data-view]").forEach(b => {
   b.onclick = () => {
     document.querySelectorAll("#nav button").forEach(x => x.classList.remove("active"));
     document.querySelectorAll(".view").forEach(x => x.classList.remove("active"));
     b.classList.add("active");
     $("view-" + b.dataset.view).classList.add("active");
+    openNavGroup(GROUP_OF_VIEW[b.dataset.view]);
+    // Danh sách 5 nhóm con của Danh mục chỉ xổ ra khi đang ở đúng view Danh mục — bấm sang view
+    // khác thì thu gọn lại, tránh menu trái dài thường trực.
+    $("nav-master-groups").classList.toggle("open", b.dataset.view === "master");
     render(b.dataset.view);
+  };
+});
+// Nhóm con lồng dưới "🗂️ Danh mục" trong menu trái — bấm 1 nhóm thì vào thẳng view Danh mục
+// với nhóm đó (không phải 1 view riêng), tái dùng đúng logic active-class của #nav button ở trên.
+document.querySelectorAll("#nav [data-mastergrp]").forEach(b => {
+  b.onclick = () => {
+    MASTER_GROUP = b.dataset.mastergrp;
+    document.querySelectorAll("#nav button").forEach(x => x.classList.remove("active"));
+    document.querySelectorAll(".view").forEach(x => x.classList.remove("active"));
+    document.querySelector('#nav button[data-view="master"]').classList.add("active");
+    b.classList.add("active");
+    openNavGroup(null);
+    $("nav-master-groups").classList.add("open");
+    $("view-master").classList.add("active");
+    render("master");
+  };
+});
+// 5 nút tiêu đề nhóm domain cấp cao nhất — bấm để xổ ra/thu gọn, không đổi view hiện tại.
+document.querySelectorAll("#nav .nav-topgroup").forEach(b => {
+  b.onclick = () => {
+    const willOpen = !b.classList.contains("active");
+    openNavGroup(willOpen ? b.dataset.navgrp : null);
   };
 });
 function render(view) {
@@ -4212,6 +4254,11 @@ VIEWS.warehouse_kc = async function () {
       toast(res.lot_deleted ? "Đã xóa đề nghị và cả lô (không còn lượt nhập nào khác)" : "Đã xóa đề nghị");
       render("warehouse_kc");
     }));
+    document.querySelectorAll("[data-sngresubmit]").forEach(b => b.onclick = () => guard(async () => {
+      await POST(`/warehouse/sang-ngang/${b.dataset.sngresubmit}/resubmit`, {});
+      toast("Đã gửi lại — đề nghị về trạng thái chờ Kho phân xưởng duyệt");
+      render("warehouse_kc");
+    }));
     if ($("ob_do")) $("ob_do").onclick = () => guard(async () => {
       const res = await POST("/warehouse/receive", { lot_code: $("ob_code").value, material_id: $("ob_mat").value,
         quantity: parseFloat($("ob_qty").value), uom: $("ob_uom").value, location: "Kho công ty",
@@ -4818,7 +4865,11 @@ function sangNgangEditDelCell(r) {
   // backend, xem services/warehouse.py::update_sang_ngang/delete_sang_ngang) — đã duyệt thì lô
   // thật sự chuyển sang Kho phân xưởng rồi, không còn "sửa nhập kho" an toàn nữa.
   if (!r.can_edit) return "<td></td>";
-  return `<td style="white-space:nowrap"><button class="btn sm sec" data-sngedit="${esc(r.request_id)}">Sửa</button>
+  // "Gửi lại" chỉ có ý nghĩa khi đã bị từ chối — đưa đề nghị về "pending" để phân xưởng duyệt
+  // lại (VD sau khi đã Sửa số lượng/lý do sai), xem services/warehouse.py::resubmit_sang_ngang.
+  const resubmitBtn = r.status === "rejected"
+    ? `<button class="btn sm" data-sngresubmit="${esc(r.request_id)}">Gửi lại</button> ` : "";
+  return `<td style="white-space:nowrap">${resubmitBtn}<button class="btn sm sec" data-sngedit="${esc(r.request_id)}">Sửa</button>
     <button class="btn sm sec" data-sngdel="${esc(r.request_id)}" style="color:var(--red)">Xóa</button></td>`;
 }
 
@@ -9697,7 +9748,7 @@ const ALL_VIEWS = ["dashboard","flowmap","orders","dispatch","recipes","batches"
 const STAGE_LABELS = { nau: "Mẻ nấu", nuoc_nau: "Nước nấu bia", len_men_chinh: "Lên men chính", len_men_phu: "Lên men phụ",
   loc: "Lọc", chiet: "Chiết", thanh_pham: "Thành phẩm" };
 
-function lineSectionHtml(kind, title, rows, canManage, noPerm) {
+function lineSectionHtml(kind, title, rows, canManage, noPerm, miAttr) {
   const isLine = kind === "line";
   const p = kind; // id prefix, tránh trùng id giữa 3 mục
   const kindPicker = isLine ? `<div class="field"><label>Loại</label><select id="ln_${p}_kind">
@@ -9722,7 +9773,7 @@ function lineSectionHtml(kind, title, rows, canManage, noPerm) {
         <button class="btn sm sec" data-ltoggle="${esc(l.line_id)}">${l.active ? "Ngừng" : "Bật lại"}</button>
         <button class="btn sm sec" data-ldel="${esc(l.line_id)}">Xóa</button></td>` : ""}</tr>`).join("")
     || `<tr><td colspan="${(isLine ? 6 : 5) + (canManage ? 1 : 0)}" class="muted">Chưa có mục nào.</td></tr>`;
-  return `<div class="panel"><h2>${title} <span class="muted">(${rows.length})</span></h2>
+  return `<div class="panel" ${miAttr || ""}><h2>${title} <span class="muted">(${rows.length})</span></h2>
     ${noPerm}
     ${canManage ? `<div class="row">
       <div class="field"><label>Mã</label><input id="ln_${p}_code" placeholder="${isLine ? "Line-3 (keg)" : kind === "tank" ? "FV-05" : "BBT-01"}"/></div>
@@ -9800,6 +9851,31 @@ function renderWmsLayoutGrid(wh, locsInWh, whOptionsHtml) {
       : `<span class="muted">Mọi vị trí trong kho này đã được xếp bố cục.</span>`}</div>
     ${grid}`;
 }
+const MASTER_GROUPS = [
+  { key: "sanxuat", label: "Sản xuất", items: [
+    { key: "dichbia", label: "Dịch bia" }, { key: "loaibia", label: "Loại bia" },
+    { key: "sanpham", label: "Sản phẩm (thành phẩm)" }, { key: "daychuyen", label: "Dây chuyền sản xuất" },
+    { key: "tanklm", label: "Tank lên men" }, { key: "tankbbt", label: "Tank thành phẩm (BBT)" },
+  ] },
+  { key: "nvl", label: "Nguyên vật liệu", items: [
+    { key: "vattu", label: "Vật tư / Nguyên liệu" }, { key: "nhomvattu", label: "Nhóm vật tư" },
+    { key: "nhomvattuthaythe", label: "Nhóm vật tư thay thế" }, { key: "nhacc", label: "Nhà cung cấp" },
+    { key: "vitrikho", label: "Vị trí kho NVL" },
+  ] },
+  { key: "khotp", label: "Kho thành phẩm", items: [
+    { key: "nhamaykhac", label: "Nhà máy khác" }, { key: "khothanhpham", label: "Kho thành phẩm" },
+    { key: "vitrikhotp", label: "Vị trí kho thành phẩm" }, { key: "boccuckho", label: "Bố cục kho" },
+    { key: "laixe", label: "Lái xe" }, { key: "loaidonvi", label: "Loại đơn vị tồn kho" },
+  ] },
+  { key: "chatluong", label: "Chất lượng", items: [
+    { key: "chitieucl", label: "Danh mục chỉ tiêu chất lượng" }, { key: "nhomchitieucl", label: "Nhóm chỉ tiêu chất lượng" },
+    { key: "nhomchitieucongdoan", label: "Nhóm chỉ tiêu theo công đoạn" },
+  ] },
+  { key: "caidat", label: "Cài đặt", items: [
+    { key: "caidatvanhanh", label: "Cài đặt vận hành" },
+  ] },
+];
+let MASTER_GROUP = "sanxuat";
 VIEWS.master = async function () {
   const [products, finishedProducts, materials, plines, qcParams, qcGroups, stageGroups, beerTypes, suppliers, materialGroups, opsSettings, unitTypes, materialAltGroups, factoryLocations, wmsWarehouses, wmsLocations, wmsVehicles, materialLocations] = await Promise.all([
     GET("/products"), GET("/finished-products").catch(() => []), GET("/materials"), GET("/lines").catch(() => []),
@@ -9828,9 +9904,12 @@ VIEWS.master = async function () {
     `<div class="muted" style="margin-bottom:8px">Chỉ tài khoản Admin mới được tạo/sửa/xóa — bạn chỉ có quyền xem.</div>`;
   const activeGroups = materialGroups.filter(g => g.active);
   const fpCats = ["Bia chai", "Bia lon", "Bia hơi", "Bia tươi"];
-  $("view-master").innerHTML = `
-    <div class="split">
-      <div class="panel"><h2>🍺 Dịch bia <span class="muted">(${products.length})</span></h2>
+  const mgroup = MASTER_GROUPS.find(g => g.key === MASTER_GROUP) || MASTER_GROUPS[0];
+  const mitem = mgroup.items.some(i => i.key === SUB.master) ? SUB.master : mgroup.items[0].key;
+  const mi = (key) => `data-mi="${key}"` + (key === mitem ? "" : ' style="display:none"');
+  $("view-master").innerHTML = (mgroup.items.length > 1 ? subnav("master", mgroup.items, mitem) : "") + `
+    <div class="master-content">
+      <div class="panel" ${mi("dichbia")}><h2>🍺 Dịch bia <span class="muted">(${products.length})</span></h2>
         <div class="muted" style="margin-bottom:6px">Loại dịch bia/công thức đang chạy qua nấu → lên men → lọc (khác Sản phẩm — SKU đóng gói cuối cùng, khai báo ở panel bên dưới). Gán "Loại bia" (thương hiệu, VD Sapphire) để chỉ tiêu Lọc/Chiết áp dụng chung cho mọi độ oP của cùng 1 Loại bia.</div>
         ${noPerm}
         ${canManage ? `<div class="row">
@@ -9858,7 +9937,7 @@ VIEWS.master = async function () {
         </table></div>
       </div>
 
-      <div class="panel"><h2>🏷️ Loại bia <span class="muted">(${beerTypes.length})</span></h2>
+      <div class="panel" ${mi("loaibia")}><h2>🏷️ Loại bia <span class="muted">(${beerTypes.length})</span></h2>
         <div class="muted" style="margin-bottom:6px">Thương hiệu bia (VD Sapphire) — gộp nhiều Dịch bia khác độ oP; Lọc/Chiết tra chỉ tiêu theo Loại bia (không phân biệt oP), xem panel Dịch bia bên cạnh.</div>
         ${noPerm}
         ${canManage ? `<div class="row">
@@ -9881,7 +9960,7 @@ VIEWS.master = async function () {
         </table></div>
       </div>
 
-      <div class="panel"><h2>📦 Vật tư / Nguyên liệu <span class="muted">(${materials.length})</span></h2>
+      <div class="panel" ${mi("vattu")}><h2>📦 Vật tư / Nguyên liệu <span class="muted">(${materials.length})</span></h2>
         ${noPerm}
         ${canManage ? `<div class="row">
           <div class="field"><label>Mã VT</label><input id="mt_code" placeholder="MALT-CARA"/></div>
@@ -9911,7 +9990,7 @@ VIEWS.master = async function () {
         </table></div>
       </div>
 
-      <div class="panel"><h2>🏷️ Nhóm vật tư <span class="muted">(${materialGroups.length})</span></h2>
+      <div class="panel" ${mi("nhomvattu")}><h2>🏷️ Nhóm vật tư <span class="muted">(${materialGroups.length})</span></h2>
         <div class="muted" style="margin-bottom:6px">Nhóm phân loại vật tư (malt/gạo/hoa bia/men/...) — chọn ở panel Vật tư/Nguyên liệu bên cạnh. Đánh dấu "Bao bì tiêu hao" để vật tư thuộc nhóm đó tự động xuất hiện ở báo cáo lô bao bì (tab Bao bì) — không áp dụng cho vỏ chai/két/keg tuần hoàn. Đánh dấu "Nguyên liệu (chính/phụ)" để khi khai báo chỉ tiêu chất lượng (Kho NVL) hiện thêm cột "Giá trị CA" (giá trị in trên bao bì NCC) bên cạnh giá trị nhà máy tự đo.</div>
         ${noPerm}
         ${canManage ? `<div class="row">
@@ -9937,7 +10016,7 @@ VIEWS.master = async function () {
         </table></div>
       </div>
 
-      <div class="panel"><h2>🔀 Nhóm vật tư thay thế <span class="muted">(${materialAltGroups.length})</span></h2>
+      <div class="panel" ${mi("nhomvattuthaythe")}><h2>🔀 Nhóm vật tư thay thế <span class="muted">(${materialAltGroups.length})</span></h2>
         <div class="muted" style="margin-bottom:6px">Nhiều mã vật tư CÙNG BẢN CHẤT, khác quy cách đóng gói/nhà cung cấp (VD "Malt Úc" gồm Malt Úc rời + Malt Úc bao). Công thức có thể khai NHÓM này thay vì 1 mã cụ thể — thủ kho tự chọn mã cụ thể lúc xuất kho thật, tùy tồn kho lúc đó.</div>
         ${noPerm}
         ${canManage ? `<div class="row">
@@ -9972,7 +10051,7 @@ VIEWS.master = async function () {
         </table></div>
       </div>
 
-      <div class="panel"><h2>🚚 Nhà cung cấp <span class="muted">(${suppliers.length})</span></h2>
+      <div class="panel" ${mi("nhacc")}><h2>🚚 Nhà cung cấp <span class="muted">(${suppliers.length})</span></h2>
         <div class="muted" style="margin-bottom:6px">Danh mục nhà cung cấp NVL — chọn ở màn hình Nhập kho (tab Kho NVL → Nhập/Xuất/Hoàn/Sang ngang).</div>
         ${noPerm}
         ${canManage ? `<div class="row">
@@ -9996,7 +10075,7 @@ VIEWS.master = async function () {
         </table></div>
       </div>
 
-      <div class="panel"><h2>🏭 Nhà máy khác <span class="muted">(${factoryLocations.length})</span></h2>
+      <div class="panel" ${mi("nhamaykhac")}><h2>🏭 Nhà máy khác <span class="muted">(${factoryLocations.length})</span></h2>
         <div class="muted" style="margin-bottom:6px">Danh mục nhà máy đích — chọn khi Điều chuyển Kho công ty → Nhà máy khác (tab Kho công ty → Điều chuyển).</div>
         ${noPerm}
         ${canManage ? `<div class="row">
@@ -10021,7 +10100,7 @@ VIEWS.master = async function () {
         </table></div>
       </div>
 
-      <div class="panel"><h2>📍 Vị trí kho nguyên vật liệu <span class="muted">(${materialLocations.length})</span></h2>
+      <div class="panel" ${mi("vitrikho")}><h2>📍 Vị trí kho nguyên vật liệu <span class="muted">(${materialLocations.length})</span></h2>
         <div class="muted" style="margin-bottom:6px">Vị trí cất trong Kho công ty — bắt buộc chọn khi nhập kho (tab Kho công ty → Nhập/Xuất/Hoàn/Sang ngang). Vị trí đang chứa lô còn tồn (Số lô > 0) không xóa được.</div>
         ${noPerm}
         ${canManage ? `<div class="row">
@@ -10044,9 +10123,8 @@ VIEWS.master = async function () {
             `<tr><td colspan="${canManage ? 6 : 5}" class="muted">Chưa có vị trí nào.</td></tr>`}</tbody>
         </table></div>
       </div>
-    </div>
 
-    <div class="panel"><h2>🏭 Kho thành phẩm <span class="muted">(${wmsWarehouses.length})</span></h2>
+    <div class="panel" ${mi("khothanhpham")}><h2>🏭 Kho thành phẩm <span class="muted">(${wmsWarehouses.length})</span></h2>
       <div class="muted" style="margin-bottom:8px">Kho thành phẩm là cấp cha của "Vị trí kho" — 1 kho có nhiều vị trí. Kho đang có vị trí (Số vị trí > 0) không xóa được. Chuyển từ Kho TP (WMS) sang đây — chỉ Admin mới tạo/sửa/xóa.</div>
       ${noPermWmsCatalog}
       <div class="tablewrap"><table id="t_wh"><thead><tr><th>Mã</th><th>Tên</th><th>Địa chỉ</th><th>Số vị trí</th><th>Hoạt động</th>${isAdminWmsCatalog ? "<th></th>" : ""}</tr></thead>
@@ -10069,7 +10147,7 @@ VIEWS.master = async function () {
       </div>` : ""}
     </div>
 
-    <div class="panel"><h2>📍 Vị trí kho thành phẩm <span class="muted">(${wmsLocations.length})</span></h2>
+    <div class="panel" ${mi("vitrikhotp")}><h2>📍 Vị trí kho thành phẩm <span class="muted">(${wmsLocations.length})</span></h2>
       <div class="muted" style="margin-bottom:8px">Vị trí đang chứa vỉ/keg (Sử dụng > 0) không xóa được — hãy chuyển/xuất hết trước. Chuyển từ Kho TP (WMS) sang đây — chỉ Admin mới tạo/sửa/xóa.</div>
       ${noPermWmsCatalog}
       <input class="searchbox" data-tbl="t_wmsloc" placeholder="Tìm theo mã, tên, khu..."/>
@@ -10114,7 +10192,7 @@ VIEWS.master = async function () {
       if (!WMS_LAYOUT_WH || !wmsWarehouses.some(w => w.warehouse_id === WMS_LAYOUT_WH)) WMS_LAYOUT_WH = wmsWarehouses[0].warehouse_id;
       const locsInWh = wmsLocations.filter(l => l.warehouse_id === WMS_LAYOUT_WH && l.active);
       const whOptionsHtml = wmsWarehouses.map(w => `<option value="${esc(w.warehouse_id)}" ${w.warehouse_id === WMS_LAYOUT_WH ? "selected" : ""}>${esc(w.code)} — ${esc(w.name)}</option>`).join("");
-      return `<div class="panel"><h2>🗺️ Bố cục kho</h2>
+      return `<div class="panel" ${mi("boccuckho")}><h2>🗺️ Bố cục kho</h2>
         <div class="muted" style="margin-bottom:8px">Tự xếp vị trí lên lưới hàng/cột đúng theo mặt bằng thật ngoài kho — "Sơ đồ kho" (tab Kho TP) chỉ vẽ lại đúng bố cục đã xếp ở đây, không đoán theo mã vị trí.</div>
         ${locsInWh.length ? renderWmsLayoutGrid(WMS_LAYOUT_WH, locsInWh, whOptionsHtml)
           : `<div class="row" style="margin-bottom:8px"><div class="field"><label>Kho thành phẩm</label><select id="wlo_wh">${whOptionsHtml}</select></div></div>
@@ -10122,7 +10200,7 @@ VIEWS.master = async function () {
       </div>`;
     })() : ""}
 
-    <div class="panel"><h2>🚚 Lái xe <span class="muted">(${wmsVehicles.length})</span></h2>
+    <div class="panel" ${mi("laixe")}><h2>🚚 Lái xe <span class="muted">(${wmsVehicles.length})</span></h2>
       <div class="muted" style="margin-bottom:8px">Biển số xe kèm lái xe/tải trọng/số pallet chở được — tra cứu nhanh khi lập Lệnh đóng hàng hoặc Phiếu xuất kho. Chuyển từ Kho TP (WMS) sang đây — chỉ Admin mới tạo/sửa/xóa.</div>
       ${noPermWmsCatalog}
       <input class="searchbox" data-tbl="t_vehicle" placeholder="Tìm theo biển số, tên lái xe, tổ đội..."/>
@@ -10157,7 +10235,7 @@ VIEWS.master = async function () {
       </div>` : ""}
     </div>
 
-    <div class="panel"><h2>🍾 Sản phẩm (thành phẩm) <span class="muted">(${finishedProducts.length})</span></h2>
+    <div class="panel" ${mi("sanpham")}><h2>🍾 Sản phẩm (thành phẩm) <span class="muted">(${finishedProducts.length})</span></h2>
       <div class="muted" style="margin-bottom:6px">SKU đóng gói (chai/lon/keg...) — chọn ở bước Chiết cùng tank BBT nguồn. Khác Dịch bia ở trên: cùng 1 dịch bia có thể ra nhiều Sản phẩm khác nhau.</div>
       ${noPerm}
       ${canManage ? `<div class="row">
@@ -10172,7 +10250,7 @@ VIEWS.master = async function () {
         <div class="field"><label>Khối lượng/1 đơn vị (vỉ hoặc keg) (kg)</label><input id="fp_weightcase" type="number" step="0.01" placeholder="VD 9.6" style="width:120px"/></div>
         <div class="field"><label>Khối lượng/1 lon-chai (kg)</label><input id="fp_weightunit" type="number" step="0.01" placeholder="VD 0.4" style="width:110px"/></div>
       </div>
-      <div class="muted" style="font-size:12px;margin-top:4px">Vỉ: SL/1 đơn vị = số lon/vỉ (VD 24). Keg: mỗi keg tự nó là 1 đơn vị (SL/1 đơn vị = 1). Dung tích/1 đơn vị dùng để đối chiếu Ca1+Ca2+Ca3 với V cấp chiết lúc "Kết thúc chiết" — để trống thì bỏ qua đối chiếu. Khối lượng dùng cho báo cáo tải trọng xe (Báo cáo → Xe & bia gửi): "Khối lượng/1 đơn vị" = 1 vỉ HOẶC 1 keg nguyên; "Khối lượng/1 lon-chai" chỉ áp dụng khi SKU vỉ bị phân rã thành lon/chai lẻ.
+      <div class="muted" style="font-size:12px;margin-top:4px">Vỉ: SL/1 đơn vị = số lon/vỉ (VD 24). Keg: mỗi keg tự nó là 1 đơn vị (SL/1 đơn vị = 1). Dung tích/1 đơn vị dùng để đối chiếu Ca1+Ca2+Ca3 với V cấp chiết lúc "Kết thúc chiết" — để trống thì bỏ qua đối chiếu. Khối lượng dùng cho báo cáo tải trọng xe (Báo cáo → Xe & bia gửi): "Khối lượng/1 đơn vị" = 1 vỉ HOẶC 1 keg nguyên; "Khối lượng/1 lon-chai" chỉ áp dụng khi SKU vỉ bị phân rã thành lon/chai lẻ.</div>
       <div class="field" style="margin-top:6px"><label>Mô tả</label><input id="fp_desc" placeholder="(tuỳ chọn)" style="width:100%"/></div>
       <button class="btn" id="fp_add" style="margin-top:10px">+ Tạo sản phẩm</button>` : ""}
       <input class="searchbox" data-tbl="t_fp" placeholder="Tìm theo mã, tên, loại sản phẩm..." style="margin-top:10px"/>
@@ -10196,7 +10274,7 @@ VIEWS.master = async function () {
       </table></div>
     </div>
 
-    <div class="panel"><h2>📐 Loại đơn vị tồn kho <span class="muted">(${unitTypes.length})</span></h2>
+    <div class="panel" ${mi("loaidonvi")}><h2>📐 Loại đơn vị tồn kho <span class="muted">(${unitTypes.length})</span></h2>
       <div class="muted" style="margin-bottom:6px">Cách quy đổi số lượng đóng gói (dùng ở Sản phẩm bên trên và mọi thao tác Kho TP): "Chia theo SL/1 đơn vị" giống Vỉ (VD Thùng chứa nhiều vỉ), hoặc không chia — giống Keg (1 đơn vị = 1, không nhân thêm).</div>
       ${noPerm}
       ${canManage ? `<div class="row">
@@ -10221,7 +10299,7 @@ VIEWS.master = async function () {
       </table></div>
     </div>
 
-    <div class="panel"><h2>📋 Danh mục chỉ tiêu chất lượng <span class="muted">(${qcParams.length})</span></h2>
+    <div class="panel" ${mi("chitieucl")}><h2>📋 Danh mục chỉ tiêu chất lượng <span class="muted">(${qcParams.length})</span></h2>
       <div class="muted" style="margin-bottom:6px">Chỉ tiêu dùng chung, tạo 1 lần ở đây rồi gán vào từng nhóm ("Chỉ tiêu trong nhóm" ở bảng bên dưới).</div>
       ${noPerm}
       ${canManage ? `<div class="row">
@@ -10250,7 +10328,7 @@ VIEWS.master = async function () {
       </table></div>
     </div>
 
-    <div class="panel"><h2>🧪 Nhóm chỉ tiêu chất lượng <span class="muted">(${qcGroups.length})</span></h2>
+    <div class="panel" ${mi("nhomchitieucl")}><h2>🧪 Nhóm chỉ tiêu chất lượng <span class="muted">(${qcGroups.length})</span></h2>
       <div class="muted" style="margin-bottom:6px">Chỉ nguyên liệu được gán nhóm chỉ tiêu (nút "Chỉ tiêu QC" ở bảng Vật tư)
         mới bị bắt buộc khai báo &amp; duyệt chỉ tiêu trước khi nhập kho nhà máy chính thức.</div>
       ${noPerm}
@@ -10273,7 +10351,7 @@ VIEWS.master = async function () {
       </table></div>
     </div>
 
-    <div class="panel"><h2>🍺 Nhóm chỉ tiêu theo công đoạn sản xuất <span class="muted">(${stageGroups.length})</span></h2>
+    <div class="panel" ${mi("nhomchitieucongdoan")}><h2>🍺 Nhóm chỉ tiêu theo công đoạn sản xuất <span class="muted">(${stageGroups.length})</span></h2>
       <div class="muted" style="margin-bottom:6px">Gán nhóm chỉ tiêu (ở bảng trên) cho một công đoạn — mẻ nấu, lên men chính/phụ, lọc,
         thành phẩm, nước nấu bia — để bắt buộc khai báo trước khi được duyệt/xuất tiếp. Nấu/Lên men tra theo <b>Dịch bia</b> (phân biệt cả độ oP);
         Lọc/Thành phẩm tra theo <b>Loại bia</b> (thương hiệu, VD Sapphire — không phân biệt oP, vì lọc phối có thể gộp nhiều
@@ -10312,11 +10390,11 @@ VIEWS.master = async function () {
       </table></div>
     </div>
 
-    ${lineSectionHtml("line", "🏭 Dây chuyền sản xuất", plines.filter(l => l.kind === "line" || l.kind === "brewhouse"), canManage, noPerm)}
-    ${lineSectionHtml("tank", "🛢️ Tank lên men", plines.filter(l => l.kind === "tank"), canManage, noPerm)}
-    ${lineSectionHtml("tank_bbt", "🧪 Tank thành phẩm (BBT)", plines.filter(l => l.kind === "tank_bbt"), canManage, noPerm)}
+    ${lineSectionHtml("line", "🏭 Dây chuyền sản xuất", plines.filter(l => l.kind === "line" || l.kind === "brewhouse"), canManage, noPerm, mi("daychuyen"))}
+    ${lineSectionHtml("tank", "🛢️ Tank lên men", plines.filter(l => l.kind === "tank"), canManage, noPerm, mi("tanklm"))}
+    ${lineSectionHtml("tank_bbt", "🧪 Tank thành phẩm (BBT)", plines.filter(l => l.kind === "tank_bbt"), canManage, noPerm, mi("tankbbt"))}
 
-    <div class="panel"><h2>⚙️ Cài đặt vận hành</h2>
+    <div class="panel" ${mi("caidatvanhanh")}><h2>⚙️ Cài đặt vận hành</h2>
       <div class="muted" style="margin-bottom:6px">Ngưỡng dung sai thể tích (hl) cho phép nút "Làm rỗng" (tab Lọc, modal Tank) buộc tồn tank
         CCT/BBT về 0 — chỉ dùng khi tank vật lý đã cạn/chiết hết thật nhưng số liệu phần mềm còn lệch một khoảng nhỏ do hao hụt đo
         đạc. Nếu phần lệch vượt ngưỡng này, hệ thống sẽ chặn (báo lỗi) để tránh xoá nhầm sai lệch lớn do lỗi nhập liệu thật.</div>
@@ -10357,8 +10435,11 @@ VIEWS.master = async function () {
       </div>
       ${canManage ? `<button class="btn" id="ops_save" style="margin-top:10px">Lưu tất cả cài đặt vận hành</button>` : ""}
       ${opsSettings.updated_by ? `<div class="muted" style="font-size:12px;margin-top:6px">Cập nhật lần cuối: ${esc(opsSettings.updated_by)} · ${fmt(opsSettings.updated_at)}</div>` : ""}
+    </div>
     </div>`;
 
+  wireSubnav("master");
+  document.querySelectorAll("#nav [data-mastergrp]").forEach(b => b.classList.toggle("active", b.dataset.mastergrp === MASTER_GROUP));
   wireSearch();
   wirePaginate("t_products", 10);
   wirePaginate("t_beertypes", 10);
@@ -11416,6 +11497,13 @@ function applyMenu() {
     b.style.display = ok ? "" : "none";
     if (ok && b.dataset.view !== "profile" && !first) first = b;
   });
+  // Ẩn hẳn tiêu đề 1 trong 5 nhóm domain nếu không còn view nào bên trong được phép xem.
+  document.querySelectorAll("#nav .nav-topgroup").forEach(g => {
+    const box = $("nav-group-" + g.dataset.navgrp);
+    const anyVisible = !!box && Array.from(box.querySelectorAll("button[data-view]")).some(x => x.style.display !== "none");
+    g.style.display = anyVisible ? "" : "none";
+    if (!anyVisible) box.classList.remove("open");
+  });
   $("u_name").textContent = CURRENT_USER.full_name;
   $("u_title").textContent = CURRENT_USER.job_title + " · " + CURRENT_USER.role;
   // chọn tab đầu tiên được phép
@@ -11424,6 +11512,8 @@ function applyMenu() {
   if (first) {
     first.classList.add("active");
     $("view-" + first.dataset.view).classList.add("active");
+    openNavGroup(GROUP_OF_VIEW[first.dataset.view]);
+    $("nav-master-groups").classList.toggle("open", first.dataset.view === "master");
     render(first.dataset.view);
   }
 }
