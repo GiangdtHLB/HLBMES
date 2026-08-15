@@ -116,7 +116,9 @@ def test_create_transfer_moves_stock_preserves_lot_no_stock_reduction(client, ad
     assert row["confirmed_by"] is None
 
 
-def test_create_transfer_requires_destination_and_lines(client, admin_h):
+def test_create_transfer_requires_lines_but_destination_is_optional(client, admin_h):
+    """Vị trí đích không bắt buộc (#dieu_chuyen_optional_dest) — bỏ trống nghĩa là đơn vị thành
+    "chưa cất vị trí" chung, ai cũng thấy để cất (giống build_units khi không chọn vị trí)."""
     _a_units(client, admin_h, "TXDOC-SKU2", "LOT-TXDOC2", 3)
     loc_b = _a_location(client, admin_h)
 
@@ -126,7 +128,12 @@ def test_create_transfer_requires_destination_and_lines(client, admin_h):
     no_dest = client.post("/api/wms/transfers", headers=admin_h,
                           json={"to_location_id": "", "lines": [{"product_name": "TXDOC-SKU2",
                                 "lot_code": "LOT-TXDOC2", "unit_type": "vi", "quantity": 1}]})
-    assert no_dest.status_code in (409, 422), no_dest.text
+    assert no_dest.status_code == 201, no_dest.text
+    assert no_dest.json()["to_location_code"] is None
+
+    units = client.get("/api/wms/units", headers=admin_h).json()
+    moved = [u for u in units if u["product"] == "TXDOC-SKU2" and u["lot_code"] == "LOT-TXDOC2"]
+    assert any(u["location"] is None for u in moved)  # đã "chưa cất vị trí" — không phải "" trần
 
 
 def test_create_transfer_blocks_insufficient_stock_and_capacity(client, admin_h):

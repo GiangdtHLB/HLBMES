@@ -59,6 +59,13 @@ batch_op.alter_column("col", existing_type=sa.Integer(), nullable=False)
 **(E) `batch_alter_table(recreate='always')`** vỡ trên MSSQL với bảng được FK tham chiếu.
 Dùng `recreate='auto'`.
 
+**(F) TRÙNG revision ID.** ĐỪNG tự chế revision ID bằng chuỗi hex "đẹp" tuần tự
+(`a1b2c3d4e5f7`, `b2c3d4e5f6a8`…) — dễ đụng ID đã dùng ở migration cũ → `alembic upgrade head`
+báo "Revision X is present more than once / Multiple head revisions" và **fail cả deploy**.
+Luôn để `alembic revision` tự sinh ID ngẫu nhiên. Trước khi push, kiểm:
+`grep -hoE "^revision = ['\"][^'\"]+" backend/alembic/versions/*.py | sort | uniq -d` → phải RỖNG.
+(Đợt này 2 migration mới đụng ID sql_connection 2026-07-10 → phải đổi tay.)
+
 ## 3. Điều kiện DỮ LIỆU (cổng MSSQL trên DB rỗng KHÔNG bắt được)
 Migration tạo `UNIQUE`/`NOT NULL`/`FK` chạy sạch trên DB test rỗng nhưng **fail trên prod
 có sẵn dữ liệu vi phạm**. VD `create unique index recipe(product_id)` fail vì prod có 2

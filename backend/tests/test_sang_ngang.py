@@ -205,3 +205,70 @@ def test_qc_required_material_blocks_approve_until_kcs_release(client, admin_h, 
     ap = client.post(f"/api/warehouse/sang-ngang/{req['request_id']}/approve", headers=vanhanh_h)
     assert ap.status_code == 200, ap.text
     assert ap.json()["status"] == "approved"
+
+
+def test_update_pending_sang_ngang_adjusts_lot_quantity(client, admin_h, thukho_h):
+    """Sửa đề nghị còn pending — quantity đổi cả trên request lẫn trên lô (tái dùng
+    update_receipt), vì "Xuất sang ngang" bản chất là 1 lượt nhập kho có kèm phiếu chuyển."""
+    mat_id = _create_material(client, admin_h, "SNG-06")
+    r = client.post("/api/warehouse/sang-ngang", headers=thukho_h,
+                    json={"lot_code": "SNG-LOT-06", "material_id": mat_id, "quantity": 100, "uom": "kg"})
+    req = r.json()
+    assert req["can_edit"] is True
+
+    upd = client.put(f"/api/warehouse/sang-ngang/{req['request_id']}", headers=thukho_h,
+                     json={"quantity": 150, "reason": "Sửa lại số lượng"})
+    assert upd.status_code == 200, upd.text
+    assert upd.json()["quantity"] == 150
+    assert upd.json()["reason"] == "Sửa lại số lượng"
+
+    lots = client.get("/api/lots", headers=admin_h).json()
+    lot = next(l for l in lots if l["lot_id"] == req["lot_id"])
+    assert lot["quantity"] == 150
+
+
+def test_delete_pending_sang_ngang_removes_lot(client, admin_h, thukho_h):
+    mat_id = _create_material(client, admin_h, "SNG-07")
+    r = client.post("/api/warehouse/sang-ngang", headers=thukho_h,
+                    json={"lot_code": "SNG-LOT-07", "material_id": mat_id, "quantity": 10, "uom": "kg"})
+    req = r.json()
+
+    dele = client.delete(f"/api/warehouse/sang-ngang/{req['request_id']}", headers=thukho_h)
+    assert dele.status_code == 200, dele.text
+    assert dele.json()["deleted"] is True
+
+    after = client.get("/api/warehouse/sang-ngang", headers=admin_h).json()
+    assert not any(x["request_id"] == req["request_id"] for x in after)
+    lots = client.get("/api/lots", headers=admin_h).json()
+    assert not any(l["lot_id"] == req["lot_id"] for l in lots)
+
+
+def test_rejected_sang_ngang_still_editable_approved_is_not(client, admin_h, thukho_h, vanhanh_h):
+    mat_id = _create_material(client, admin_h, "SNG-08")
+
+    # Rejected -> vẫn sửa/xóa được (chưa move stock, đúng như đang pending).
+    r1 = client.post("/api/warehouse/sang-ngang", headers=thukho_h,
+                     json={"lot_code": "SNG-LOT-08A", "material_id": mat_id, "quantity": 5, "uom": "kg"})
+    req1 = r1.json()
+    rej = client.post(f"/api/warehouse/sang-ngang/{req1['request_id']}/reject", headers=vanhanh_h,
+                      json={"reason": "test"})
+    assert rej.status_code == 200, rej.text
+    assert rej.json()["can_edit"] is True
+    upd1 = client.put(f"/api/warehouse/sang-ngang/{req1['request_id']}", headers=thukho_h,
+                      json={"quantity": 8})
+    assert upd1.status_code == 200, upd1.text
+    del1 = client.delete(f"/api/warehouse/sang-ngang/{req1['request_id']}", headers=thukho_h)
+    assert del1.status_code == 200, del1.text
+
+    # Approved -> KHÔNG còn sửa/xóa được (đã thật sự chuyển sang Kho phân xưởng).
+    r2 = client.post("/api/warehouse/sang-ngang", headers=thukho_h,
+                     json={"lot_code": "SNG-LOT-08B", "material_id": mat_id, "quantity": 7, "uom": "kg"})
+    req2 = r2.json()
+    ap2 = client.post(f"/api/warehouse/sang-ngang/{req2['request_id']}/approve", headers=vanhanh_h)
+    assert ap2.status_code == 200, ap2.text
+    assert ap2.json()["can_edit"] is False
+    upd2 = client.put(f"/api/warehouse/sang-ngang/{req2['request_id']}", headers=thukho_h,
+                      json={"quantity": 9})
+    assert upd2.status_code == 409, upd2.text
+    del2 = client.delete(f"/api/warehouse/sang-ngang/{req2['request_id']}", headers=thukho_h)
+    assert del2.status_code == 409, del2.text

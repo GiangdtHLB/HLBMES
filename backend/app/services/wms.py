@@ -18,7 +18,7 @@ from ..models.materials import GenealogyEdge, Supplier
 from ..models.warehouse import FactoryLocation
 from ..models.wms import (ConsignedEntry, FactoryImportEntry, FinishedGoodsUnit, NearExpiryEntry, Shipment,
                           Vehicle, WmsLocation, WmsTransfer, WmsTransferLine, WmsWarehouse)
-from ..security import User, require_perm, require_role, require_scope
+from ..security import User, has_scope, require_perm, require_role, require_scope
 from . import genealogy
 from . import ops_setting as ops_setting_svc
 from .opening_balance_import import parse_opening_balance_sheet
@@ -112,10 +112,25 @@ def _assert_loc_scope(db: Session, user: User, loc_id: str | None) -> None:
 
 
 def _assert_transfer_wh_scope(db: Session, user: User, transfer) -> None:
-    """Chặn thao tác trên 1 WmsTransfer ngoài phạm vi kho được phân — suy kho từ
-    to_location_id (LUÔN có giá trị, không như Shipment.warehouse_id có thể rỗng ở phiếu cũ)."""
-    loc = db.get(WmsLocation, transfer.to_location_id)
-    _assert_wh_scope(db, user, loc.warehouse_id if loc else None)
+    """Mirror _assert_wh_scope nhưng cho 1 WmsTransfer — "Vị trí đích" giờ LUÔN là kho KHÁC kho
+    người tạo (điều chuyển liên kho, xem create_transfer), nên không thể chỉ khoá theo phía ĐÍCH
+    như trước (sẽ khoá luôn chính người gửi khỏi phiếu họ tự tạo). Cho qua nếu user thuộc phạm vi
+    1 TRONG 2 đầu: đích (to_location_id, có thể NULL nếu chưa cất — không khoá, theo đúng quy ước
+    "chưa xác định -> không khóa cứng") hoặc bất kỳ vị trí NGUỒN nào (WmsTransferLine.
+    from_location_id) của phiếu."""
+    if not _wh_scope_restricted(user):
+        return
+    to_loc = db.get(WmsLocation, transfer.to_location_id) if transfer.to_location_id else None
+    to_wh = db.get(WmsWarehouse, to_loc.warehouse_id) if to_loc else None
+    if to_wh is None or has_scope(user, "wms_warehouse", to_wh.code):
+        return
+    from_wh_codes = set(db.execute(
+        select(WmsWarehouse.code).join(WmsLocation, WmsLocation.warehouse_id == WmsWarehouse.warehouse_id)
+        .join(WmsTransferLine, WmsTransferLine.from_location_id == WmsLocation.loc_id)
+        .where(WmsTransferLine.transfer_id == transfer.transfer_id)).scalars().all())
+    if any(has_scope(user, "wms_warehouse", code) for code in from_wh_codes):
+        return
+    require_scope(user, "wms_warehouse", to_wh.code)
 
 
 def _disallowed_location_ids(db: Session, user: User | None) -> set | None:
@@ -3073,21 +3088,27 @@ def _next_transfer_code(db: Session, year: int) -> str:
     return f"{max_seq + 1:03d}{suffix}"
 
 
-def create_transfer(db: Session, to_location_id: str, lines: list, user: User, header: dict | None = None) -> dict:
+def create_transfer(db: Session, to_location_id: str | None, lines: list, user: User, header: dict | None = None) -> dict:
     """Điều chuyển nội bộ — mirror y hệt create_shipment (chọn theo sản phẩm/lô/loại đơn vị/số
     lượng, hệ thống tự chọn FIFO cũ nhất, kiểm tra vi phạm FIFO, có thể kèm xe/lái xe) NHƯNG đích
     là 1 WmsLocation (không phải Supplier/ship_to) và KHÔNG làm giảm tổng tồn kho toàn công ty:
     CHỈ đổi FinishedGoodsUnit.location_id (giữ status="stored"), KHÔNG tạo genealogy edge ra
     ngoài, KHÔNG đụng lot_code — giữ nguyên mã chiết để truy xuất nguồn gốc không đứt. Không có
     near_expiry_only/consigned_only/shipment_type (không có ý nghĩa cho luồng nội bộ — các cờ
-    is_near_expiry/is_consigned trên đơn vị vẫn giữ nguyên nguyên vẹn qua lần điều chuyển)."""
+    is_near_expiry/is_consigned trên đơn vị vẫn giữ nguyên nguyên vẹn qua lần điều chuyển).
+
+    to_location_id bỏ trống -> đơn vị thành "chưa cất vị trí" (giống build_units khi không chọn
+    vị trí), rơi vào chung hàng đợi "Cất vào vị trí" — dùng khi chưa biết chính xác ô/kệ lúc lập
+    phiếu (VD xe chưa tới nơi). fifo_ok=False chỉ là CẢNH BÁO hiển thị, KHÔNG chặn tạo phiếu và
+    KHÔNG bắt buộc nêu lý do — người điều chuyển tự quyết định."""
     require_perm(user, "warehouse.issue")
-    if not to_location_id:
-        raise DomainError("Phải chọn vị trí đích.")
-    to_loc = db.get(WmsLocation, to_location_id)
-    if not to_loc:
+    to_loc = db.get(WmsLocation, to_location_id) if to_location_id else None
+    if to_location_id and not to_loc:
         raise NotFoundError("Vị trí đích không tồn tại.")
-    _assert_wh_scope(db, user, to_loc.warehouse_id)
+    # Không khoá theo scope của phía ĐÍCH — "Vị trí đích" giờ luôn là kho KHÁC kho người tạo
+    # (điều chuyển liên kho, xem otherWarehouseLocations ở frontend), khoá theo đích sẽ chặn
+    # luôn chính người gửi khỏi phiếu họ tạo. Phía NGUỒN (line["location_id"] bên dưới) vẫn bị
+    # khoá đúng phạm vi như cũ qua _assert_loc_scope.
     if not lines:
         raise DomainError("Phải chọn ít nhất 1 dòng sản phẩm để điều chuyển.")
 
@@ -3144,7 +3165,9 @@ def create_transfer(db: Session, to_location_id: str, lines: list, user: User, h
     from_location = ", ".join(sorted({f"{l.code} - {l.name}" if l.name else l.code for l in locs})) or None
 
     # Kiểm sức chứa đích — chỉ tính các đơn vị THỰC SỰ đổi vị trí (loại trừ đơn vị đã sẵn ở
-    # đích nếu người dùng lỡ chọn trùng — mirror transfer_units/relocate_batch).
+    # đích nếu người dùng lỡ chọn trùng — mirror transfer_units/relocate_batch). Bỏ qua hoàn
+    # toàn nếu chưa chọn vị trí đích (to_loc=None, xem create_transfer) — đơn vị thành "chưa
+    # cất", không có sức chứa nào để kiểm.
     fp_cache: dict = {}
 
     def _divisor_of(u):
@@ -3152,13 +3175,14 @@ def create_transfer(db: Session, to_location_id: str, lines: list, user: User, h
             fp_cache[u.finished_product_id] = db.get(FinishedProduct, u.finished_product_id) if u.finished_product_id else None
         return _pack_divisor(fp_cache[u.finished_product_id], u.unit_type, divide_codes)
 
-    moving_in = [u for u in units if u.location_id != to_location_id]
-    if moving_in:
-        used_at_dest = _location_used_count(db, to_location_id)
-        moving_in_count = sum(u.quantity / _divisor_of(u) for u in moving_in)
-        if used_at_dest + moving_in_count > to_loc.capacity:
-            raise DomainError(f"Vị trí {to_loc.code} không đủ sức chứa (sức chứa {to_loc.capacity}, "
-                              f"hiện có {used_at_dest:g}, cần thêm {moving_in_count:g}).")
+    if to_loc:
+        moving_in = [u for u in units if u.location_id != to_location_id]
+        if moving_in:
+            used_at_dest = _location_used_count(db, to_location_id)
+            moving_in_count = sum(u.quantity / _divisor_of(u) for u in moving_in)
+            if used_at_dest + moving_in_count > to_loc.capacity:
+                raise DomainError(f"Vị trí {to_loc.code} không đủ sức chứa (sức chứa {to_loc.capacity}, "
+                                  f"hiện có {used_at_dest:g}, cần thêm {moving_in_count:g}).")
 
     header = header or {}
     transfer = WmsTransfer(transfer_id=new_id(), transfer_code=_next_transfer_code(db, utcnow().year),
@@ -3180,19 +3204,22 @@ def create_transfer(db: Session, to_location_id: str, lines: list, user: User, h
         out_lines.append({"unit_code": u.unit_code, "product": u.product_name, "lot_code": u.lot_code})
 
     record_audit(db, entity_type="wms_transfer", entity_id=transfer.transfer_id, action="create", actor=user,
-                after={"transfer_code": transfer.transfer_code, "to_location": to_loc.code,
+                after={"transfer_code": transfer.transfer_code, "to_location": to_loc.code if to_loc else None,
                        "units": out_lines, "fifo_ok": fifo_ok})
     db.commit()
     return {"transfer_id": transfer.transfer_id, "transfer_code": transfer.transfer_code,
-            "to_location_code": to_loc.code, "fifo_ok": fifo_ok, "units": out_lines}
+            "to_location_code": to_loc.code if to_loc else None, "fifo_ok": fifo_ok, "units": out_lines}
 
 
 def list_transfers(db: Session, limit: int = 200, offset: int = 0, user: User | None = None) -> list:
     """Mirror list_shipments — có phân trang, nạp 1 LẦN toàn bộ FinishedGoodsUnit của các phiếu
     trong trang hiện tại rồi nhóm theo transfer_id trong Python (không N+1).
-    Tài khoản bị giới hạn kho chỉ thấy phiếu có vị trí ĐÍCH (to_location_id) thuộc kho mình —
-    to_location_id LUÔN có giá trị (không như Shipment) nên suy trực tiếp qua join, không cần
-    cột warehouse_id riêng."""
+    "Vị trí đích" giờ LUÔN là kho KHÁC kho người tạo (điều chuyển liên kho, xem create_transfer),
+    nên KHÔNG thể lọc chỉ theo "đích thuộc kho mình" như trước (sẽ ẩn mất chính phiếu mình tạo).
+    Tài khoản bị giới hạn kho thấy phiếu nếu: đích thuộc kho mình (phiếu kho khác gửi ĐẾN mình),
+    HOẶC ít nhất 1 dòng NGUỒN (WmsTransferLine.from_location_id) thuộc kho mình (phiếu MÌNH gửi
+    đi), HOẶC đích chưa xác định (to_location_id NULL — "chưa cất", theo đúng quy ước "chưa xác
+    định -> không khóa cứng" của _disallowed_location_ids)."""
     limit = max(1, min(limit or 200, 2000))
     offset = max(0, offset or 0)
     stmt = select(WmsTransfer).order_by(WmsTransfer.created_at.desc())
@@ -3201,8 +3228,14 @@ def list_transfers(db: Session, limit: int = 200, offset: int = 0, user: User | 
         disallowed_wh = set(db.execute(
             select(WmsWarehouse.warehouse_id).where(WmsWarehouse.code.notin_(allowed_codes))).scalars().all())
         if disallowed_wh:
-            stmt = stmt.where(WmsTransfer.to_location_id.in_(
-                select(WmsLocation.loc_id).where(WmsLocation.warehouse_id.notin_(disallowed_wh))))
+            stmt = stmt.where(or_(
+                WmsTransfer.to_location_id.is_(None),
+                WmsTransfer.to_location_id.in_(
+                    select(WmsLocation.loc_id).where(WmsLocation.warehouse_id.notin_(disallowed_wh))),
+                WmsTransfer.transfer_id.in_(
+                    select(WmsTransferLine.transfer_id).join(
+                        WmsLocation, WmsLocation.loc_id == WmsTransferLine.from_location_id)
+                    .where(WmsLocation.warehouse_id.notin_(disallowed_wh)))))
     transfers = db.execute(stmt.limit(limit).offset(offset)).scalars().all()
     loc_by_id = {l.loc_id: l for l in db.execute(select(WmsLocation)).scalars().all()}
     vehicle_by_id = {v.vehicle_id: v for v in db.execute(select(Vehicle)).scalars().all()}

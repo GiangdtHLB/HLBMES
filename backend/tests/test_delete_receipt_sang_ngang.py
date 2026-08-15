@@ -84,3 +84,20 @@ def test_delete_receipt_with_pending_sang_ngang(client, admin_h):
     assert not any(x["request_id"] == req_id for x in after)
     recs = client.get("/api/warehouse/movements?movement_type=receipt", headers=admin_h).json()
     assert not any(m.get("lot_id") == lot_id for m in recs)
+
+
+def test_delete_sang_ngang_request_removes_receipt_and_request(client, admin_h):
+    # Entry point 'Xóa đề nghị' → delete_sang_ngang → delete_receipt(receipt_movement_id).
+    # FK mới sang_ngang_request.receipt_movement_id → stock_movement: nếu xóa mv trước khi dọn
+    # request thì vỡ 547 trên MSSQL. Đảm bảo xóa được sạch.
+    mat_id = _material(client, admin_h, "DRSN02")
+    r = client.post("/api/warehouse/sang-ngang", headers=admin_h,
+                    json={"material_id": mat_id, "quantity": 250, "uom": "kg"})
+    assert r.status_code == 201, r.text
+    req = r.json()
+
+    rd = client.delete(f"/api/warehouse/sang-ngang/{req['request_id']}", headers=admin_h)
+    assert rd.status_code in (200, 204), rd.text
+
+    after = client.get("/api/warehouse/sang-ngang", headers=admin_h).json()
+    assert not any(x["request_id"] == req["request_id"] for x in after)

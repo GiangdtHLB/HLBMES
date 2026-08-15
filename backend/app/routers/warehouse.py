@@ -26,6 +26,7 @@ from ..schemas import (
     ReturnToSupplierIn,
     SangNgangRejectIn,
     SangNgangRequestOut,
+    SangNgangUpdateIn,
     SourceMaterialLineOut,
     StockCountCreateIn,
     StockCountLinesIn,
@@ -257,6 +258,21 @@ def reject_sang_ngang(request_id: str, payload: SangNgangRejectIn, db: Session =
 def undo_sang_ngang(request_id: str, db: Session = Depends(get_db),
                     user: User = Depends(get_current_user)):
     return svc.undo_sang_ngang(db, request_id, user)
+
+
+# Sửa/xóa — CHỈ khi CHƯA được Kho phân xưởng duyệt (status pending/rejected), xem
+# services/warehouse.py::update_sang_ngang/delete_sang_ngang. Đăng ký SAU /sang-ngang/{id}/approve
+# v.v — cùng lý do thứ tự route như /movements/{movement_id} ở trên.
+@router.put("/sang-ngang/{request_id}", response_model=SangNgangRequestOut)
+def update_sang_ngang(request_id: str, payload: SangNgangUpdateIn, db: Session = Depends(get_db),
+                      user: User = Depends(get_current_user)):
+    return svc.update_sang_ngang(db, request_id, payload.model_dump(exclude_unset=True), user)
+
+
+@router.delete("/sang-ngang/{request_id}")
+def delete_sang_ngang(request_id: str, db: Session = Depends(get_db),
+                      user: User = Depends(get_current_user)):
+    return svc.delete_sang_ngang(db, request_id, user)
 
 
 # ---- Điều chuyển kho công ty, chiều 2: Kho công ty → Nhà máy khác (xuất ngay, duyệt sau) ----

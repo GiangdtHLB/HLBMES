@@ -28,6 +28,11 @@ class Formula(Base):
     # KHÔNG unique — 1 dịch bia (product) có thể có nhiều công thức độc lập, khác Recipe cũ.
     product_id: Mapped[str] = mapped_column(ForeignKey("product.product_id"), index=True)
     note: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)
+    # Nội dung quyết định ban hành công thức + quy trình sản xuất (số QĐ, biểu công nghệ, lần
+    # ban hành...) — khai báo 1 lần trên công thức, in nguyên văn vào phiếu Lệnh nấu mỗi khi
+    # công thức này được chọn cho 1 lệnh nấu nhỏ (xem frontend/app.js::printBrewOrder và
+    # services/brew_order.py::_child_summary/get_order, field "formula_process_note").
+    process_reference_note: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)
 
     # Quy mô mẻ chuẩn mà định mức NVL tính cho — dùng để scale theo planned_volume của Lệnh nấu
     # (xem services/bom.py::factor_for), KHÔNG thuộc phần bị lược bỏ (chỉ bỏ tham số/QC/ISA-88).

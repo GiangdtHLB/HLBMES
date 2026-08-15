@@ -368,6 +368,7 @@ class FormulaIn(BaseModel):
     code: str
     product_id: str
     note: Optional[str] = None
+    process_reference_note: Optional[str] = None
     base_qty: float = 0.0
     base_uom: str = "L"
     materials: list[FormulaMaterialLineIn] = []
@@ -378,6 +379,7 @@ class FormulaOut(ORMModel):
     code: str
     product_id: str
     note: Optional[str] = None
+    process_reference_note: Optional[str] = None
     base_qty: float = 0.0
     base_uom: str = "L"
     materials: list
@@ -686,7 +688,8 @@ class WmsTransferLineIn(BaseModel):
 
 
 class WmsTransferIn(BaseModel):
-    to_location_id: str
+    # Optional: bỏ trống -> đơn vị thành "chưa cất vị trí" (xem services/wms.py::create_transfer).
+    to_location_id: Optional[str] = None
     lines: list[WmsTransferLineIn]
     note: Optional[str] = None
     driver_name: Optional[str] = None
@@ -1313,6 +1316,19 @@ class SangNgangRejectIn(BaseModel):
     reason: Optional[str] = None
 
 
+class SangNgangUpdateIn(BaseModel):
+    """Sửa 1 đề nghị "Xuất sang ngang" — CHỈ áp dụng khi CHƯA được Kho phân xưởng duyệt (xem
+    services/warehouse.py::update_sang_ngang). Mọi field tuỳ chọn — chỉ field nào gửi lên mới
+    bị ghi đè."""
+    quantity: Optional[float] = None
+    uom: Optional[str] = None
+    supplier_id: Optional[str] = None
+    unit_price: Optional[float] = None
+    kcs_lot_no: Optional[str] = None
+    expiry: Optional[datetime] = None
+    reason: Optional[str] = None
+
+
 class SangNgangRequestOut(ORMModel):
     request_id: str
     request_code: str
@@ -1330,6 +1346,7 @@ class SangNgangRequestOut(ORMModel):
     rejected_by: Optional[str] = None
     rejected_at: Optional[datetime] = None
     reject_reason: Optional[str] = None
+    can_edit: bool = True
 
 
 class TransferToFactoryIn(BaseModel):
@@ -1540,6 +1557,14 @@ class BrewOrderMaterialLineIn(BaseModel):
     unit_price: Optional[float] = None
 
 
+class BrewLineQtySplitIn(BaseModel):
+    """SL thực xuất người lập lệnh nấu tự sửa lại (đè lên gợi ý — xem
+    services/brew_order.py::_suggest_qty_split), key trong material_qty_overrides là
+    str(seq) của dòng NVL tương ứng (đúng thứ tự trong Công thức đã chọn)."""
+    qty_from_company: Optional[float] = None
+    qty_from_workshop: Optional[float] = None
+
+
 class BrewOrderIn(BaseModel):
     """Lệnh nấu nhỏ (1 dịch bia) — dùng cho API cũ /brewing/orders (tạo lệnh nhỏ đứng độc
     lập, master_order_id=None) VÀ làm khuôn field dùng chung bên trong BrewSubOrderIn (xem
@@ -1560,6 +1585,7 @@ class BrewOrderIn(BaseModel):
     batch_range_to: Optional[int] = None
     auto_from_bom: bool = True
     lines: list[BrewOrderMaterialLineIn] = []
+    material_qty_overrides: dict[str, BrewLineQtySplitIn] = {}
 
 
 class BrewSubOrderIn(BaseModel):
@@ -1579,6 +1605,7 @@ class BrewSubOrderIn(BaseModel):
     batch_range_to: Optional[int] = None
     auto_from_bom: bool = True
     lines: list[BrewOrderMaterialLineIn] = []
+    material_qty_overrides: dict[str, BrewLineQtySplitIn] = {}
 
 
 class BrewMasterOrderIn(BaseModel):

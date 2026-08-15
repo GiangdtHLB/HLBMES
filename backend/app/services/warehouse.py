@@ -212,13 +212,14 @@ def receive(db: Session, payload: dict, user: User) -> dict:
         # trước khi được coi là đã nhập kho nhà máy chính thức (không áp dụng khi cộng dồn lô cũ).
         if lot.material_id and required_params_for_material(db, lot.material_id):
             lot.status = LotStatus.ON_HOLD.value
-    _move(db, "receipt", lot, qty, user, ts=received_dt, location_to=lot.location,
-          reason=payload.get("reason"), ref_doc=payload.get("ref_doc"))
+    mv = _move(db, "receipt", lot, qty, user, ts=received_dt, location_to=lot.location,
+              reason=payload.get("reason"), ref_doc=payload.get("ref_doc"))
     record_audit(db, entity_type="lot", entity_id=lot.lot_id, action="receipt", actor=user,
                  after={"lot_code": lot.lot_code, "quantity": qty})
     db.commit()
+    db.refresh(mv)
     return {"lot_id": lot.lot_id, "lot_code": lot.lot_code, "on_hand": lot.quantity, "uom": lot.uom,
-            "status": lot.status}
+            "status": lot.status, "movement_id": mv.movement_id}
 
 
 def _lot_used(db: Session, lot_id: str) -> bool:
@@ -296,21 +297,27 @@ def delete_receipt(db: Session, movement_id: str, user: User) -> dict:
         StockMovement.movement_id != mv.movement_id)).scalar_one()
     record_audit(db, entity_type="stock_movement", entity_id=mv.movement_id, action="delete_receipt",
                  actor=user, before={"quantity": mv.quantity, "lot_code": lot.lot_code})
+    # Dọn đề nghị "Xuất sang ngang" con TRƯỚC khi xóa StockMovement/lô (autoflush=False nên phải
+    # tự xếp con-trước-cha). Tới được đây thì request chỉ có thể pending/rejected — nếu đã duyệt
+    # thì transfer() để lại StockMovement non-receipt và _lot_used đã chặn ở trên. MSSQL enforce
+    # 2 FK (SQLite bỏ qua), cả hai đều trỏ tới thứ sắp bị xóa nên phải xóa request trước:
+    #   • sang_ngang_request.receipt_movement_id → stock_movement  ⇒ trước db.delete(mv)   (LUÔN)
+    #   • sang_ngang_request.lot_id              → material_lot     ⇒ trước db.delete(lot)  (khi xóa lô)
+    reqs = {r.request_id: r for r in db.execute(select(SangNgangRequest).where(
+        SangNgangRequest.receipt_movement_id == mv.movement_id)).scalars().all()}
+    if remaining_receipts == 0:
+        for r in db.execute(select(SangNgangRequest).where(
+                SangNgangRequest.lot_id == lot.lot_id)).scalars().all():
+            reqs[r.request_id] = r
+    for req in reqs.values():
+        record_audit(db, entity_type="sang_ngang_request", entity_id=req.request_id,
+                     action="delete", actor=user, before={"lot_id": req.lot_id, "status": req.status})
+        db.delete(req)
+    db.flush()
     db.delete(mv)
-    db.flush()  # MSSQL enforce FK: xóa stock_movement (con) TRƯỚC material_lot (cha) — autoflush=False
+    db.flush()
     lot_deleted = False
     if remaining_receipts == 0:
-        # Lô sắp bị xóa → dọn các đề nghị "Xuất sang ngang" con còn trỏ tới lô. Tới được đây thì
-        # chúng CHỈ có thể là pending/rejected (chưa move stock): nếu đã duyệt thì transfer() để
-        # lại StockMovement non-receipt và _lot_used đã chặn ở trên. MSSQL enforce FK
-        # sang_ngang_request.lot_id → material_lot (SQLite bỏ qua) — phải xóa con + flush trước.
-        for req in db.execute(select(SangNgangRequest).where(
-                SangNgangRequest.lot_id == lot.lot_id)).scalars().all():
-            record_audit(db, entity_type="sang_ngang_request", entity_id=req.request_id,
-                         action="delete", actor=user,
-                         before={"lot_id": req.lot_id, "status": req.status})
-            db.delete(req)
-        db.flush()
         db.delete(lot)
         lot_deleted = True
     db.commit()
@@ -792,7 +799,9 @@ def _aggregate_source_material_lines(db: Session, source_type: str, source_id: s
     """Nhu cầu NVL của 1 Lệnh nấu/Lệnh lọc lớn, gộp theo vật tư (cộng dồn nếu 1 vật tư xuất
     hiện nhiều dòng/nhiều lệnh nhỏ) — dùng để tự động điền sẵn phiếu đề nghị nhận kho, mirror
     dữ liệu định mức đã có sẵn ở BrewOrderMaterialLine/FilterOrderMaterialLine (không tính lại
-    từ công thức, dùng đúng con số đã "chốt" lúc lập lệnh).
+    từ công thức, dùng đúng con số đã "chốt" lúc lập lệnh). Với Lệnh nấu, số lượng lấy đúng
+    bằng qty_from_company (phần đã tính phải lấy tại Kho công ty) chứ không phải toàn bộ nhu
+    cầu — phần còn lại đã có sẵn tại Kho phân xưởng nên không cần đề nghị nhận thêm.
 
     Dòng khai theo Nhóm vật tư thay thế (material_id=None, xem models/master.py::MaterialAltGroup)
     KHÔNG được tự chọn hộ 1 mã cụ thể — trả về riêng (is_group=True kèm member_material_ids) để
@@ -821,11 +830,16 @@ def _aggregate_source_material_lines(db: Session, source_type: str, source_id: s
         for l in order["lines"]:
             if l["is_header"]:
                 continue
+            # Chỉ cần đề nghị đúng phần đã tính phải lấy ở Kho công ty (phần còn lại lấy tại
+            # Kho phân xưởng, không cần đề nghị) — xem BrewOrderMaterialLine.qty_from_company.
+            # Lệnh cũ (lập trước khi có tính năng tách SL) chưa có giá trị này -> dùng tạm
+            # Nhu cầu Tổng mẻ như hành vi cũ.
+            qty = l["qty_from_company"] if l.get("qty_from_company") is not None else l["qty_total"]
             if l["material_id"]:
-                _add(l["material_id"], l["material_name"], l["uom"], l["qty_total"] or 0.0)
+                _add(l["material_id"], l["material_name"], l["uom"], qty or 0.0)
             elif l.get("material_group_code"):
                 _add_group(l["material_group_code"], l["material_name"], l.get("member_material_ids"),
-                           l["uom"], l["qty_total"] or 0.0)
+                           l["uom"], qty or 0.0)
     elif source_type == "filter_master_order":
         from . import filter_order as filter_order_svc
         master = filter_order_svc.get_master_order(db, source_id)
@@ -1274,7 +1288,8 @@ def _sang_ngang_dict(req: SangNgangRequest) -> dict:
             "created_by": req.created_by, "created_at": req.created_at,
             "approved_by": req.approved_by, "approved_at": req.approved_at,
             "rejected_by": req.rejected_by, "rejected_at": req.rejected_at,
-            "reject_reason": req.reject_reason}
+            "reject_reason": req.reject_reason,
+            "can_edit": req.status != "approved"}
 
 
 def _get_sang_ngang(db, request_id) -> SangNgangRequest:
@@ -1295,7 +1310,8 @@ def create_sang_ngang(db: Session, payload: dict, user: User) -> dict:
     req = SangNgangRequest(request_id=new_id(), request_code=f"SNG-{utcnow():%Y%m%d}-{new_id()[:5].upper()}",
                           lot_id=receipt["lot_id"], quantity=float(payload["quantity"]),
                           uom=payload.get("uom", "kg"), reason=payload.get("reason"),
-                          status="pending", created_by=user.username, created_at=utcnow())
+                          status="pending", created_by=user.username, created_at=utcnow(),
+                          receipt_movement_id=receipt["movement_id"])
     db.add(req)
     record_audit(db, entity_type="sang_ngang_request", entity_id=req.request_id, action="create",
                 actor=user, after={"lot_id": receipt["lot_id"], "quantity": payload["quantity"]})
@@ -1360,6 +1376,51 @@ def reject_sang_ngang(db: Session, request_id: str, user: User, reason: str = No
     db.commit()
     db.refresh(req)
     return _sang_ngang_dict(req)
+
+
+def update_sang_ngang(db: Session, request_id: str, payload: dict, user: User) -> dict:
+    """Sửa 1 đề nghị "Xuất sang ngang" — cho phép khi CHƯA được Kho phân xưởng duyệt (status
+    pending hoặc rejected; đã duyệt thì lô đã thật sự chuyển kho, không còn "sửa nhập" an toàn
+    nữa). Tái dùng đúng update_receipt() cho lượt nhập kho gốc (đã tự chặn nếu lô liên quan đã bị
+    dùng/xuất/chuyển — dù request này chưa duyệt, lô vẫn có thể đã bị thao tác khác động vào)."""
+    req = _get_sang_ngang(db, request_id)
+    if req.status == "approved":
+        raise DomainError(f"Đề nghị {req.request_code} đã được Kho phân xưởng duyệt — không thể sửa.")
+    if not req.receipt_movement_id:
+        raise DomainError("Đề nghị này không có lượt nhập kho liên kết (dữ liệu cũ) — không thể sửa.")
+    update_receipt(db, req.receipt_movement_id, payload, user)
+    if payload.get("quantity") is not None:
+        req.quantity = float(payload["quantity"])
+    if "uom" in payload and payload["uom"] is not None:
+        req.uom = payload["uom"]
+    if "reason" in payload:
+        req.reason = payload["reason"]
+    record_audit(db, entity_type="sang_ngang_request", entity_id=req.request_id, action="update",
+                actor=user, after={"quantity": req.quantity, "reason": req.reason})
+    db.commit()
+    db.refresh(req)
+    return _sang_ngang_dict(req)
+
+
+def delete_sang_ngang(db: Session, request_id: str, user: User) -> dict:
+    """Xóa 1 đề nghị "Xuất sang ngang" chưa được Kho phân xưởng duyệt (status pending hoặc
+    rejected) — xóa qua delete_receipt() trên đúng lượt nhập kho gốc (tự chặn nếu lô đã dùng/đã
+    khai báo QC; tự cascade xóa CHÍNH dòng đề nghị này nếu đây là lô vừa bị xóa hẳn — xem
+    delete_receipt), rồi dọn nốt nếu đề nghị vẫn còn (lô còn receipt khác nên chưa bị xóa)."""
+    req = _get_sang_ngang(db, request_id)
+    if req.status == "approved":
+        raise DomainError(f"Đề nghị {req.request_code} đã được Kho phân xưởng duyệt — không thể xóa.")
+    if not req.receipt_movement_id:
+        raise DomainError("Đề nghị này không có lượt nhập kho liên kết (dữ liệu cũ) — không thể xóa.")
+    request_code, lot_id, status = req.request_code, req.lot_id, req.status
+    result = delete_receipt(db, req.receipt_movement_id, user)
+    still_there = db.get(SangNgangRequest, request_id)
+    if still_there:
+        record_audit(db, entity_type="sang_ngang_request", entity_id=request_id, action="delete",
+                    actor=user, before={"lot_id": lot_id, "status": status})
+        db.delete(still_there)
+        db.commit()
+    return {"deleted": True, "request_code": request_code, **result}
 
 
 def undo_sang_ngang(db: Session, request_id: str, user: User) -> dict:
