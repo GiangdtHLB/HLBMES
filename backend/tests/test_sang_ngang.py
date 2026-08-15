@@ -272,3 +272,53 @@ def test_rejected_sang_ngang_still_editable_approved_is_not(client, admin_h, thu
     assert upd2.status_code == 409, upd2.text
     del2 = client.delete(f"/api/warehouse/sang-ngang/{req2['request_id']}", headers=thukho_h)
     assert del2.status_code == 409, del2.text
+
+
+def test_resubmit_rejected_sang_ngang_goes_back_to_pending(client, admin_h, thukho_h, vanhanh_h):
+    """Bị từ chối -> Sửa lại số lượng sai -> Gửi lại -> về "pending" -> phân xưởng duyệt lại
+    được bình thường. Đây là mắt xích còn thiếu trước đây: Sửa không tự đưa đề nghị về pending,
+    phải có bước "Gửi lại" riêng (services/warehouse.py::resubmit_sang_ngang)."""
+    mat_id = _create_material(client, admin_h, "SNG-09")
+    r = client.post("/api/warehouse/sang-ngang", headers=thukho_h,
+                    json={"lot_code": "SNG-LOT-09", "material_id": mat_id, "quantity": 20, "uom": "kg"})
+    req = r.json()
+
+    rej = client.post(f"/api/warehouse/sang-ngang/{req['request_id']}/reject", headers=vanhanh_h,
+                      json={"reason": "Sai số lượng"})
+    assert rej.status_code == 200, rej.text
+    assert rej.json()["status"] == "rejected"
+    assert rej.json()["rejected_by"] == "vanhanh"
+
+    # Gửi lại khi còn "pending" (chưa bị từ chối) phải báo lỗi rõ ràng — thử với 1 request khác.
+    r_pending = client.post("/api/warehouse/sang-ngang", headers=thukho_h,
+                            json={"lot_code": "SNG-LOT-09B", "material_id": mat_id, "quantity": 5, "uom": "kg"})
+    req_pending = r_pending.json()
+    bad2 = client.post(f"/api/warehouse/sang-ngang/{req_pending['request_id']}/resubmit", headers=thukho_h)
+    assert bad2.status_code == 409, bad2.text
+
+    # Sửa lại số lượng đúng, rồi Gửi lại -> về pending, xoá sạch dấu vết từ chối cũ.
+    upd = client.put(f"/api/warehouse/sang-ngang/{req['request_id']}", headers=thukho_h,
+                     json={"quantity": 25, "reason": "Đã sửa đúng số lượng"})
+    assert upd.status_code == 200, upd.text
+
+    resub = client.post(f"/api/warehouse/sang-ngang/{req['request_id']}/resubmit", headers=thukho_h)
+    assert resub.status_code == 200, resub.text
+    body = resub.json()
+    assert body["status"] == "pending"
+    assert body["rejected_by"] is None
+    assert body["rejected_at"] is None
+    assert body["reject_reason"] is None
+    assert body["quantity"] == 25
+
+    # Phân xưởng giờ duyệt lại được bình thường.
+    ap = client.post(f"/api/warehouse/sang-ngang/{req['request_id']}/approve", headers=vanhanh_h)
+    assert ap.status_code == 200, ap.text
+    assert ap.json()["status"] == "approved"
+
+    lots = client.get("/api/lots", headers=admin_h).json()
+    moved = [l for l in lots if l["lot_code"] == "SNG-LOT-09"]
+    assert any("phân xưởng" in (l["location"] or "").lower() and l["quantity"] == 25 for l in moved)
+
+    # Gửi lại 1 đề nghị đã approved phải báo lỗi (không còn ý nghĩa).
+    bad3 = client.post(f"/api/warehouse/sang-ngang/{req['request_id']}/resubmit", headers=thukho_h)
+    assert bad3.status_code == 409, bad3.text

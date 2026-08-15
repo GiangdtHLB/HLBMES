@@ -260,6 +260,12 @@ def undo_sang_ngang(request_id: str, db: Session = Depends(get_db),
     return svc.undo_sang_ngang(db, request_id, user)
 
 
+@router.post("/sang-ngang/{request_id}/resubmit", response_model=SangNgangRequestOut)
+def resubmit_sang_ngang(request_id: str, db: Session = Depends(get_db),
+                        user: User = Depends(get_current_user)):
+    return svc.resubmit_sang_ngang(db, request_id, user)
+
+
 # Sửa/xóa — CHỈ khi CHƯA được Kho phân xưởng duyệt (status pending/rejected), xem
 # services/warehouse.py::update_sang_ngang/delete_sang_ngang. Đăng ký SAU /sang-ngang/{id}/approve
 # v.v — cùng lý do thứ tự route như /movements/{movement_id} ở trên.

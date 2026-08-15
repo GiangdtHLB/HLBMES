@@ -1372,6 +1372,36 @@ def reject_sang_ngang(db: Session, request_id: str, user: User, reason: str = No
     return _sang_ngang_dict(req)
 
 
+def resubmit_sang_ngang(db: Session, request_id: str, user: User) -> dict:
+    """Gửi lại 1 đề nghị "Xuất sang ngang" đã bị Kho phân xưởng từ chối — đưa về trạng thái
+    "pending" để phân xưởng duyệt lại (dùng sau khi Kho công ty đã Sửa lại số lượng/lý do sai
+    qua update_sang_ngang). CHỈ áp dụng khi đang "rejected" — "pending" thì không cần gửi lại
+    (đã nằm sẵn ở hàng chờ duyệt), "approved" thì lô đã thật sự chuyển kho, gửi lại không còn
+    ý nghĩa. Xóa sạch dấu vết từ chối cũ (rejected_by/rejected_at/reject_reason) vì đề nghị coi
+    như quay lại vòng duyệt mới — lưu lại vào audit log trước khi xóa để vẫn tra cứu được lịch
+    sử từ chối trước đó."""
+    require_perm(user, "warehouse.receive")
+    req = _get_sang_ngang(db, request_id)
+    if req.status != "rejected":
+        raise DomainError(f"Chỉ gửi lại được đề nghị đang ở trạng thái 'Đã từ chối' (hiện tại: {req.status}).")
+    if not req.receipt_movement_id:
+        raise DomainError("Đề nghị này không có lượt nhập kho liên kết (dữ liệu cũ) — không thể gửi lại.")
+    if _lot_used(db, req.lot_id):
+        raise DomainError("Lô liên quan đã bị dùng bởi thao tác khác — không thể gửi lại.")
+    record_audit(db, entity_type="sang_ngang_request", entity_id=req.request_id, action="resubmit",
+                before={"rejected_by": req.rejected_by,
+                        "rejected_at": req.rejected_at.isoformat() if req.rejected_at else None,
+                        "reject_reason": req.reject_reason},
+                actor=user)
+    req.status = "pending"
+    req.rejected_by = None
+    req.rejected_at = None
+    req.reject_reason = None
+    db.commit()
+    db.refresh(req)
+    return _sang_ngang_dict(req)
+
+
 def update_sang_ngang(db: Session, request_id: str, payload: dict, user: User) -> dict:
     """Sửa 1 đề nghị "Xuất sang ngang" — cho phép khi CHƯA được Kho phân xưởng duyệt (status
     pending hoặc rejected; đã duyệt thì lô đã thật sự chuyển kho, không còn "sửa nhập" an toàn
