@@ -74,6 +74,7 @@ def create_formula(db: Session, payload: dict, user: User) -> Formula:
     materials = [m.model_dump() if hasattr(m, "model_dump") else dict(m) for m in payload.get("materials", [])]
     _validate_materials(db, materials)
     f = Formula(code=payload["code"], product_id=payload["product_id"], note=payload.get("note"),
+                process_reference_note=payload.get("process_reference_note"),
                 base_qty=payload.get("base_qty", 0.0), base_uom=payload.get("base_uom", "L"),
                 materials=materials, created_by=user.username)
     db.add(f)
@@ -100,6 +101,7 @@ def update_formula(db: Session, formula_id: str, payload: dict, user: User) -> F
     materials = [m.model_dump() if hasattr(m, "model_dump") else dict(m) for m in payload.get("materials", f.materials)]
     _validate_materials(db, materials)
     f.code, f.note = new_code, payload.get("note", f.note)
+    f.process_reference_note = payload.get("process_reference_note", f.process_reference_note)
     f.base_qty = payload.get("base_qty", f.base_qty)
     f.base_uom = payload.get("base_uom", f.base_uom)
     f.materials = materials

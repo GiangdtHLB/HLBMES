@@ -182,6 +182,36 @@ def _member_breakdown(member_ids: list, company_stock: dict, workshop_stock: dic
     return out
 
 
+def _suggest_qty_split(qty_total: float | None, workshop_stock: float) -> tuple:
+    """Gợi ý tách Nhu cầu Tổng mẻ thành 2 nguồn thực xuất: ưu tiên dùng hết tồn đang có tại
+    Kho phân xưởng (tối đa bằng đúng nhu cầu — không gợi ý lấy dư), phần còn thiếu lấy tại
+    Kho công ty. Chỉ là GỢI Ý ban đầu — người lập lệnh nấu có thể sửa lại 2 số này trước khi
+    lưu (xem frontend "Xem NVL" preview + _insert_sub_order/update_order phía dưới, nơi
+    override do người dùng nhập được áp lên trên gợi ý này)."""
+    if qty_total is None:
+        return None, None
+    qty_total = qty_total or 0
+    from_workshop = min(max(workshop_stock or 0, 0), qty_total)
+    return round(qty_total - from_workshop, 3), round(from_workshop, 3)
+
+
+def _apply_qty_split_override(line: dict, workshop_stock: float, overrides: dict) -> tuple:
+    """Tính SL thực xuất theo 2 nguồn cho 1 dòng NVL: bắt đầu từ gợi ý (_suggest_qty_split),
+    rồi áp đè giá trị người lập lệnh nấu đã tự sửa trong preview (nếu có, khớp theo `seq` —
+    key trong `overrides` là str(seq) vì JSON object key luôn là string). Chỉ áp đè từng
+    trường có giá trị — nếu người dùng chỉ sửa 1 trong 2 ô thì ô còn lại vẫn giữ gợi ý."""
+    if line.get("is_header") or not (line.get("material_id") or line.get("member_material_ids")):
+        return None, None
+    qty_from_company, qty_from_workshop = _suggest_qty_split(line.get("qty_total"), workshop_stock)
+    ov = overrides.get(str(line.get("seq"))) if overrides else None
+    if ov:
+        if ov.get("qty_from_company") is not None:
+            qty_from_company = ov["qty_from_company"]
+        if ov.get("qty_from_workshop") is not None:
+            qty_from_workshop = ov["qty_from_workshop"]
+    return qty_from_company, qty_from_workshop
+
+
 def _annotate_stock(lines: list, company_stock: dict, workshop_stock: dict, materials_by_id: dict | None = None) -> list:
     """Gắn tồn kho công ty/phân xưởng + cờ "shortage" (thiếu tồn) vào từng dòng NVL — dùng
     chung cho preview (trước khi tạo lệnh) và get_order (đã tạo, đọc lại snapshot đã lưu).
@@ -196,10 +226,13 @@ def _annotate_stock(lines: list, company_stock: dict, workshop_stock: dict, mate
         member_ids = l.get("member_material_ids") or []
         member_breakdown = (_member_breakdown(member_ids, company_stock, workshop_stock, materials_by_id)
                              if member_ids and materials_by_id is not None else [])
+        qty_from_company, qty_from_workshop = (
+            _suggest_qty_split(qty_total, workshop) if has_target and not l.get("is_header") else (None, None))
         out.append({**l, "stock_company_snapshot": company if has_target else None,
                     "stock_workshop_snapshot": workshop if has_target else None,
                     "unit_price": l.get("unit_price"), "shortage": shortage,
-                    "member_breakdown": member_breakdown})
+                    "member_breakdown": member_breakdown,
+                    "qty_from_company": qty_from_company, "qty_from_workshop": qty_from_workshop})
     return out
 
 
@@ -268,6 +301,7 @@ def _insert_sub_order(db: Session, master_order_id, seq: int, order_code: str, o
     payload = dict(payload)
     lines_in = payload.pop("lines", None) or []
     auto_from_bom = payload.pop("auto_from_bom", True)
+    qty_overrides = payload.pop("material_qty_overrides", None) or {}
 
     if auto_from_bom and not lines_in:
         _validate_formula_selection(db, payload.get("product_id"), payload.get("formula_id"))
@@ -291,6 +325,8 @@ def _insert_sub_order(db: Session, master_order_id, seq: int, order_code: str, o
         material_id = line.get("material_id")
         has_target = bool(material_id or line.get("member_material_ids"))
         company, workshop = _line_stock(line, company_stock, workshop_stock, materials_by_id)
+        qty_from_company, qty_from_workshop = _apply_qty_split_override(
+            line, workshop, qty_overrides)
         db.add(BrewOrderMaterialLine(
             line_id=new_id(), brew_order_id=order.brew_order_id, seq=line.get("seq", i),
             stt_label=line.get("stt_label"), is_header=line.get("is_header", False),
@@ -300,6 +336,7 @@ def _insert_sub_order(db: Session, master_order_id, seq: int, order_code: str, o
             unit_price=line.get("unit_price"),
             stock_company_snapshot=company if has_target else None,
             stock_workshop_snapshot=workshop if has_target else None,
+            qty_from_company=qty_from_company, qty_from_workshop=qty_from_workshop,
         ))
     return order
 
@@ -335,6 +372,7 @@ def update_order(db: Session, brew_order_id: str, payload: dict, user) -> BrewOr
 
     lines_in = payload.pop("lines", None) or []
     auto_from_bom = payload.pop("auto_from_bom", True)
+    qty_overrides = payload.pop("material_qty_overrides", None) or {}
     new_code = payload.get("order_code")
     if new_code != order.order_code and db.execute(
             select(BrewOrder).where(BrewOrder.order_code == new_code,
@@ -365,6 +403,8 @@ def update_order(db: Session, brew_order_id: str, payload: dict, user) -> BrewOr
         material_id = line.get("material_id")
         has_target = bool(material_id or line.get("member_material_ids"))
         company, workshop = _line_stock(line, company_stock, workshop_stock, materials_by_id)
+        qty_from_company, qty_from_workshop = _apply_qty_split_override(
+            line, workshop, qty_overrides)
         db.add(BrewOrderMaterialLine(
             line_id=new_id(), brew_order_id=order.brew_order_id, seq=line.get("seq", i),
             stt_label=line.get("stt_label"), is_header=line.get("is_header", False),
@@ -374,6 +414,7 @@ def update_order(db: Session, brew_order_id: str, payload: dict, user) -> BrewOr
             unit_price=line.get("unit_price"),
             stock_company_snapshot=company if has_target else None,
             stock_workshop_snapshot=workshop if has_target else None,
+            qty_from_company=qty_from_company, qty_from_workshop=qty_from_workshop,
         ))
 
     record_audit(db, entity_type="brew_order", entity_id=order.brew_order_id, action="update",
@@ -504,6 +545,7 @@ def get_order(db: Session, brew_order_id: str) -> dict:
     records = _record_summaries(db, brew_order_id)
     prod = db.get(Product, order.product_id) if order.product_id else None
     master = db.get(BrewMasterOrder, order.master_order_id) if order.master_order_id else None
+    formula = db.get(Formula, order.formula_id) if order.formula_id else None
 
     # Tồn kho TỪNG mã thành viên hiện tại (KHÔNG snapshot — nhóm có thể đổi tồn/thành viên
     # sau khi lệnh đã lập, nên hiện số sống để thủ kho biết thực tế đang còn mã nào).
@@ -527,6 +569,7 @@ def get_order(db: Session, brew_order_id: str) -> dict:
             "qty_per_batch": l.qty_per_batch, "qty_total": l.qty_total, "unit_price": l.unit_price,
             "stock_company_snapshot": l.stock_company_snapshot,
             "stock_workshop_snapshot": l.stock_workshop_snapshot, "shortage": shortage,
+            "qty_from_company": l.qty_from_company, "qty_from_workshop": l.qty_from_workshop,
         })
 
     actual_tank, actual_batch_range = _actual_tank_and_batch_range(db, [r["brew_id"] for r in records])
@@ -537,6 +580,8 @@ def get_order(db: Session, brew_order_id: str) -> dict:
         "product_id": order.product_id, "product_code": prod.code if prod else None,
         "product_name": prod.name if prod else None, "product_desc": order.product_desc,
         "formula_id": order.formula_id,
+        "formula_code": formula.code if formula else None,
+        "formula_process_note": formula.process_reference_note if formula else None,
         "planned_batch_count": order.planned_batch_count,
         "bx_min": order.bx_min, "bx_max": order.bx_max,
         "tank_lm": order.tank_lm, "batch_range_from": order.batch_range_from,
@@ -555,14 +600,17 @@ def get_order(db: Session, brew_order_id: str) -> dict:
 
 # ===== Lệnh nấu LỚN (BrewMasterOrder — chứa nhiều "lệnh nấu nhỏ" BrewOrder) =====
 
-def _child_summary(db: Session, order: BrewOrder, products: dict) -> dict:
+def _child_summary(db: Session, order: BrewOrder, products: dict, formulas: dict | None = None) -> dict:
     records = _record_summaries(db, order.brew_order_id)
     prod = products.get(order.product_id)
+    formula = (formulas or {}).get(order.formula_id)
     actual_tank, actual_batch_range = _actual_tank_and_batch_range(db, [r["brew_id"] for r in records])
     return {
         "brew_order_id": order.brew_order_id, "seq": order.seq,
         "product_id": order.product_id, "product_code": prod.code if prod else None,
         "product_desc": order.product_desc, "formula_id": order.formula_id,
+        "formula_code": formula.code if formula else None,
+        "formula_process_note": formula.process_reference_note if formula else None,
         "planned_batch_count": order.planned_batch_count,
         "bx_min": order.bx_min, "bx_max": order.bx_max,
         "tank_lm": order.tank_lm, "batch_range_from": order.batch_range_from, "batch_range_to": order.batch_range_to,
@@ -642,11 +690,12 @@ def list_master_orders(db: Session, years=None) -> list:
         stmt = stmt.where(BrewMasterOrder.order_year.in_(years))
     masters = db.execute(stmt.order_by(BrewMasterOrder.created_at.desc())).scalars().all()
     products = {p.product_id: p for p in db.execute(select(Product)).scalars().all()}
+    formulas = {f.formula_id: f for f in db.execute(select(Formula)).scalars().all()}
     out = []
     for m in masters:
         children_rows = db.execute(select(BrewOrder).where(
             BrewOrder.master_order_id == m.brew_master_order_id).order_by(BrewOrder.seq)).scalars().all()
-        children = [_child_summary(db, o, products) for o in children_rows]
+        children = [_child_summary(db, o, products, formulas) for o in children_rows]
         out.append({
             "brew_master_order_id": m.brew_master_order_id, "order_code": m.order_code,
             "issued_by": m.issued_by, "executor_unit": m.executor_unit, "warehouse_keeper": m.warehouse_keeper,
@@ -668,6 +717,7 @@ def get_master_order(db: Session, brew_master_order_id: str) -> dict:
     if not m:
         raise NotFoundError("Lệnh nấu không tồn tại.")
     products = {p.product_id: p for p in db.execute(select(Product)).scalars().all()}
+    formulas = {f.formula_id: f for f in db.execute(select(Formula)).scalars().all()}
     children_rows = db.execute(select(BrewOrder).where(
         BrewOrder.master_order_id == brew_master_order_id).order_by(BrewOrder.seq)).scalars().all()
     # Tồn kho TỪNG mã thành viên hiện tại (KHÔNG snapshot — xem get_order cùng lý do).
@@ -675,7 +725,7 @@ def get_master_order(db: Session, brew_master_order_id: str) -> dict:
     materials_by_id = _materials_by_id(db)
     children = []
     for o in children_rows:
-        summary = _child_summary(db, o, products)
+        summary = _child_summary(db, o, products, formulas)
         child_lines = []
         for l in db.execute(select(BrewOrderMaterialLine).where(
                 BrewOrderMaterialLine.brew_order_id == o.brew_order_id).order_by(BrewOrderMaterialLine.seq)).scalars().all():
@@ -688,6 +738,7 @@ def get_master_order(db: Session, brew_master_order_id: str) -> dict:
                 "member_breakdown": _member_breakdown(member_ids, live_company_stock, live_workshop_stock, materials_by_id),
                 "qty_per_batch": l.qty_per_batch, "qty_total": l.qty_total, "unit_price": l.unit_price,
                 "stock_company_snapshot": l.stock_company_snapshot, "stock_workshop_snapshot": l.stock_workshop_snapshot,
+                "qty_from_company": l.qty_from_company, "qty_from_workshop": l.qty_from_workshop,
             })
         summary["lines"] = child_lines
         children.append(summary)

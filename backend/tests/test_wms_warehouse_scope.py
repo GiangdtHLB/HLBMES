@@ -149,10 +149,13 @@ def test_create_shipment_requires_warehouse_when_restricted_and_blocks_out_of_sc
     assert ok.status_code == 201, ok.text
 
 
-def test_create_transfer_requires_location_when_restricted_and_blocks_out_of_scope(
+def test_create_transfer_dest_no_longer_scope_locked_source_still_enforced(
         client, admin_h, _warehouses):
-    """Điều chuyển: đích (to_location_id) ngoài phạm vi bị chặn 403; nguồn (line.location_id)
-    bắt buộc khi bị giới hạn kho, thiếu thì 409; chọn vị trí nguồn ngoài phạm vi bị chặn 403."""
+    """Điều chuyển: "Vị trí đích" giờ LUÔN được coi là kho KHÁC (điều chuyển liên kho, xem
+    otherWarehouseLocations ở frontend) nên KHÔNG còn bị khoá theo scope của người tạo — quản lý
+    kho A phải chọn được đích ở kho B và ngược lại, nếu không phiếu do chính họ tạo sẽ tự bị chặn.
+    Vị trí NGUỒN (line.location_id) vẫn bị khoá đúng phạm vi như cũ: bắt buộc khi bị giới hạn kho
+    (thiếu -> 409), chọn ngoài phạm vi bị chặn 403 (xem _assert_transfer_wh_scope/create_transfer)."""
     scoped_h = _make_scoped_user(client, admin_h, "wh_scope_user4", "WHSCOPE-A")
     build = client.post("/api/wms/units", headers=admin_h,
                         json={"product_name": "SKU-WHSCOPE-XFER", "lot_code": "LOT-WHSCOPE-XFER",
@@ -166,10 +169,6 @@ def test_create_transfer_requires_location_when_restricted_and_blocks_out_of_sco
     line = [{"product_name": "SKU-WHSCOPE-XFER", "lot_code": "LOT-WHSCOPE-XFER",
             "unit_type": "vi", "quantity": 1}]
 
-    blocked_dest = client.post("/api/wms/transfers", headers=scoped_h,
-                               json={"to_location_id": _warehouses["loc_b"]["loc_id"], "lines": line})
-    assert blocked_dest.status_code == 403, blocked_dest.text
-
     missing_source_loc = client.post("/api/wms/transfers", headers=scoped_h,
                                      json={"to_location_id": _warehouses["loc_a2"]["loc_id"], "lines": line})
     assert missing_source_loc.status_code == 409, missing_source_loc.text
@@ -180,10 +179,13 @@ def test_create_transfer_requires_location_when_restricted_and_blocks_out_of_sco
                                        "lines": line_with_wrong_source})
     assert blocked_source.status_code == 403, blocked_source.text
 
+    # Đích ở kho B (ngoài phạm vi WHSCOPE-A) -- KHÔNG còn bị chặn: đây chính là điều chuyển liên
+    # kho mà tính năng hướng tới, nguồn vẫn đúng phạm vi (loc_a) nên được phép.
     line_with_source = [{**line[0], "location_id": _warehouses["loc_a"]["loc_id"]}]
-    ok = client.post("/api/wms/transfers", headers=scoped_h,
-                     json={"to_location_id": _warehouses["loc_a2"]["loc_id"], "lines": line_with_source})
-    assert ok.status_code == 201, ok.text
+    ok_cross_warehouse = client.post("/api/wms/transfers", headers=scoped_h,
+                                     json={"to_location_id": _warehouses["loc_b"]["loc_id"],
+                                           "lines": line_with_source})
+    assert ok_cross_warehouse.status_code == 201, ok_cross_warehouse.text
 
 
 def test_admin_and_unrestricted_user_bypass_warehouse_scope(client, admin_h, _warehouses):

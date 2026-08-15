@@ -1315,7 +1315,7 @@ VIEWS.orders = async function () {
       if (editing) $("lo_canceledit").onclick = () => render("orders");
     }
     const newLnChild = () => ({ productId: "", formulaId: "", batchCount: 1, plannedVol: "", tolerance: 0,
-      bxMin: "", bxMax: "", tankLm: "", batchFrom: "", batchTo: "" });
+      bxMin: "", bxMax: "", tankLm: "", batchFrom: "", batchTo: "", qtyOverrides: {} });
     let lnChildren = [newLnChild()];
 
     function fetchLnBomPreview(ci) {
@@ -1371,7 +1371,7 @@ VIEWS.orders = async function () {
                     ${esc(f.code)} · ${f.base_qty} ${esc(f.base_uom)}${f.note ? ` · ${esc(f.note)}` : ""}</option>`).join("")}
                 </select></div>`;
           const fsel = box.querySelector(".lnc_formula");
-          if (fsel) fsel.onchange = () => { lnChildren[ci].formulaId = fsel.value; };
+          if (fsel) fsel.onchange = () => { lnChildren[ci].formulaId = fsel.value; lnChildren[ci].qtyOverrides = {}; };
         } catch (e) { box.innerHTML = ""; }
       }
 
@@ -1379,6 +1379,7 @@ VIEWS.orders = async function () {
         const ci = parseInt(sel.dataset.ci, 10);
         lnChildren[ci].productId = sel.value;
         lnChildren[ci].formulaId = "";
+        lnChildren[ci].qtyOverrides = {};
         renderLnFormInfo(ci);
       });
       lnChildren.forEach((c, ci) => { if (c.productId) renderLnFormInfo(ci); });
@@ -1394,19 +1395,41 @@ VIEWS.orders = async function () {
           return;
         }
         const shortageCount = lines.filter(l => l.shortage).length;
+        const ov = lnChildren[ci].qtyOverrides;
         box.innerHTML = `<div class="panel" style="margin-top:8px">
           <h3 style="font-size:14px">Xem trước định mức NVL ${shortageCount
             ? `<span style="color:var(--red)">— ⚠ ${shortageCount} dòng thiếu tồn</span>`
             : `<span style="color:var(--green)">— ✓ đủ tồn tất cả</span>`}</h3>
+          <div class="muted" style="margin-bottom:6px">Cột "SL lấy" là GỢI Ý (ưu tiên dùng hết tồn đang có tại Kho phân xưởng, phần
+            còn thiếu lấy tại Kho công ty) — có thể sửa lại trước khi tạo lệnh.</div>
           <div class="tablewrap"><table><thead><tr><th>STT</th><th>Tên NVL</th><th>ĐVT</th><th>Nhu cầu 1 mẻ</th>
-            <th>Nhu cầu Tổng mẻ</th><th>Tồn Kho công ty</th><th>Tồn Kho phân xưởng</th><th>Trạng thái</th></tr></thead>
-          <tbody>${lines.map(l => `<tr class="${l.shortage ? "row-red" : ""}">
+            <th>Nhu cầu Tổng mẻ</th><th>SL lấy tại Kho công ty</th><th>SL lấy tại Kho phân xưởng</th>
+            <th>Tồn Kho công ty</th><th>Tồn Kho phân xưởng</th><th>Trạng thái</th></tr></thead>
+          <tbody>${lines.map(l => {
+            const seqKey = String(l.seq);
+            const curOv = ov[seqKey] || {};
+            const fromCompany = curOv.fromCompany ?? l.qty_from_company;
+            const fromWorkshop = curOv.fromWorkshop ?? l.qty_from_workshop;
+            return `<tr class="${l.shortage ? "row-red" : ""}">
             <td>${esc(l.stt_label || "")}</td><td>${esc(l.material_name || "—")}</td><td>${esc(l.uom || "")}</td>
             <td>${l.qty_per_batch ?? "—"}</td><td>${l.qty_total ?? "—"}</td>
+            <td>${l.is_header ? "" : `<input type="number" class="lnc_qty_company" data-ci="${ci}" data-seq="${seqKey}" value="${fromCompany ?? ""}" style="width:80px"/>`}</td>
+            <td>${l.is_header ? "" : `<input type="number" class="lnc_qty_workshop" data-ci="${ci}" data-seq="${seqKey}" value="${fromWorkshop ?? ""}" style="width:80px"/>`}</td>
             <td>${l.stock_company_snapshot ?? "—"}</td><td>${l.stock_workshop_snapshot ?? "—"}</td>
             <td>${!l.is_header
               ? (l.shortage ? '<span class="badge on_hold">⚠ Thiếu</span>' : '<span class="badge available">✓ Đủ</span>')
-              : '<span class="muted">—</span>'}</td></tr>${bomMemberRowsHtml(l, 5, 1)}`).join("")}</tbody></table></div></div>`;
+              : '<span class="muted">—</span>'}</td></tr>${bomMemberRowsHtml(l, 7, 1)}`;
+          }).join("")}</tbody></table></div></div>`;
+        box.querySelectorAll(".lnc_qty_company").forEach(inp => inp.onchange = () => {
+          const c = lnChildren[parseInt(inp.dataset.ci, 10)];
+          const seq = inp.dataset.seq;
+          c.qtyOverrides[seq] = { ...(c.qtyOverrides[seq] || {}), fromCompany: inp.value === "" ? null : parseFloat(inp.value) };
+        });
+        box.querySelectorAll(".lnc_qty_workshop").forEach(inp => inp.onchange = () => {
+          const c = lnChildren[parseInt(inp.dataset.ci, 10)];
+          const seq = inp.dataset.seq;
+          c.qtyOverrides[seq] = { ...(c.qtyOverrides[seq] || {}), fromWorkshop: inp.value === "" ? null : parseFloat(inp.value) };
+        });
       }));
       document.querySelectorAll("[data-lnchildrm]").forEach(b => b.onclick = () => {
         lnChildren.splice(parseInt(b.dataset.lnchildrm, 10), 1); renderLnChildren();
@@ -1434,6 +1457,8 @@ VIEWS.orders = async function () {
           batch_range_from: c.batchFrom === "" ? null : parseInt(c.batchFrom, 10),
           batch_range_to: c.batchTo === "" ? null : parseInt(c.batchTo, 10),
           auto_from_bom: true, lines: [],
+          material_qty_overrides: Object.fromEntries(Object.entries(c.qtyOverrides || {}).map(([seq, o]) =>
+            [seq, { qty_from_company: o.fromCompany ?? null, qty_from_workshop: o.fromWorkshop ?? null }])),
         };
       });
       const payload = {
@@ -1477,6 +1502,11 @@ VIEWS.orders = async function () {
         plannedVol: c.planned_volume_hl || "", tolerance: c.volume_tolerance_hl || 0,
         bxMin: c.bx_min ?? "", bxMax: c.bx_max ?? "", tankLm: c.tank_lm || "",
         batchFrom: c.batch_range_from ?? "", batchTo: c.batch_range_to ?? "",
+        // Nạp lại SL lấy đã lưu (nếu người lập trước đó đã sửa lại gợi ý) — để "Xem NVL" khi
+        // sửa lệnh hiện đúng giá trị cũ thay vì tính lại gợi ý mặc định từ đầu.
+        qtyOverrides: Object.fromEntries((c.lines || []).filter(l => !l.is_header &&
+          (l.qty_from_company != null || l.qty_from_workshop != null)).map(l =>
+          [String(l.seq), { fromCompany: l.qty_from_company, fromWorkshop: l.qty_from_workshop }])),
       }));
       renderLnChildren();
       setLoFormMode(true);
@@ -2209,6 +2239,8 @@ function fmFormHTML(f) {
       <div class="field"><label>ĐVT</label><input class="fm-baseu" value="${esc(f.base_uom || "L")}" size="5"/></div>
     </div>
     <div class="field"><label>Ghi chú</label><input class="fm-note" value="${esc(f.note || "")}" style="width:100%" placeholder="Mô tả công thức, lý do tạo..."/></div>
+    <div class="field"><label>Quyết định ban hành công thức &amp; quy trình sản xuất</label>
+      <textarea class="fm-refnote" rows="3" style="width:100%" placeholder="VD: Quyết định ban hành công thức và quy trình sản xuất Bia hơi Hạ Long-Sản xuất tại phân xưởng sản xuất Hạ Long số .../QĐ-HCNS ngày .../.../.... & Công nghệ nấu tại biểu ...: Công nghệ nấu Bia Hơi số .../.... (HL). Lần ban hành ... ngày .../.../.... — nội dung này sẽ in nguyên văn vào phiếu Lệnh nấu.">${esc(f.process_reference_note || "")}</textarea></div>
     <h4>Nguyên vật liệu</h4>
     <table><thead><tr><th>Vật tư</th><th>Số lượng</th><th>ĐVT</th><th></th></tr></thead>
       <tbody class="fbm-body">${rows}</tbody></table>
@@ -2222,6 +2254,7 @@ function fmPayload(scope) {
   return {
     code: scope.querySelector(".fm-code").value.trim(),
     note: scope.querySelector(".fm-note").value || null,
+    process_reference_note: scope.querySelector(".fm-refnote").value.trim() || null,
     base_qty: parseFloat(scope.querySelector(".fm-base").value) || 0,
     base_uom: scope.querySelector(".fm-baseu").value,
     materials: collectFmBom(scope),
@@ -3733,6 +3766,7 @@ VIEWS.warehouse_kc = async function () {
     WH_CACHE.allLots = allLots;
     WH_CACHE.canFulfill = canFulfillGiao;
     WH_CACHE.receipts = receipts;
+    WH_CACHE.sangNgangRequests = sangNgangRequests;
     WH_CACHE.supplierItems = supplierItemsGiao;
     Object.keys(WH_HIST_VISIBLE).forEach(k => { WH_HIST_VISIBLE[k] = WH_HIST_PAGE; });
     const pxPending = pxRequests.filter(r => r.status === "pending").sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
@@ -3808,15 +3842,15 @@ VIEWS.warehouse_kc = async function () {
           : '<div class="muted">Bạn không có quyền tạo Xuất sang ngang.</div>'}
         <h4 style="margin-top:14px">Đang chờ phân xưởng duyệt <span class="muted">(${sngPending.length})</span></h4>
         <div class="tablewrap"><table id="t_sng_pending">
-          <thead><tr><th>Ngày tạo</th><th>Số đề nghị</th><th>Mã VT</th><th>Tên vật tư</th><th>Lô</th><th>SL</th><th>Trạng thái QC</th></tr></thead>
+          <thead><tr><th>Ngày tạo</th><th>Số đề nghị</th><th>Mã VT</th><th>Tên vật tư</th><th>Lô</th><th>SL</th><th>Trạng thái QC</th><th></th></tr></thead>
           <tbody>${sngPending.map(r => sangNgangKcRowHtml(r, matByIdGiao, lotByIdGiao, qcReqSetGiao)).join("") ||
-            `<tr><td colspan=7 class="muted">Không có đề nghị nào đang chờ.</td></tr>`}</tbody>
+            `<tr><td colspan=8 class="muted">Không có đề nghị nào đang chờ.</td></tr>`}</tbody>
         </table></div>
         <h4 style="margin-top:14px">Lịch sử đã xử lý <span class="muted">(${sngDone.length})</span></h4>
         <div class="tablewrap"><table id="t_sng_done">
-          <thead><tr><th>Ngày tạo</th><th>Số đề nghị</th><th>Mã VT</th><th>Tên vật tư</th><th>Lô</th><th>SL</th><th>Trạng thái</th><th>Người xử lý</th></tr></thead>
+          <thead><tr><th>Ngày tạo</th><th>Số đề nghị</th><th>Mã VT</th><th>Tên vật tư</th><th>Lô</th><th>SL</th><th>Trạng thái</th><th>Người xử lý</th><th></th></tr></thead>
           <tbody>${sngDone.map(r => sangNgangHistoryRowHtml(r, matByIdGiao, lotByIdGiao)).join("") ||
-            `<tr><td colspan=8 class="muted">Chưa có đề nghị nào đã xử lý.</td></tr>`}</tbody>
+            `<tr><td colspan=9 class="muted">Chưa có đề nghị nào đã xử lý.</td></tr>`}</tbody>
         </table></div>
       </div>
 
@@ -4139,6 +4173,43 @@ VIEWS.warehouse_kc = async function () {
       if (!confirm("Xóa lượt nhập kho này? Số lượng sẽ bị trừ khỏi tồn lô (hoặc xóa cả lô nếu đây là lượt nhập duy nhất). Không thể hoàn tác.")) return;
       const res = await DELETE(`/warehouse/movements/${b.dataset.delrc}`);
       toast(res.lot_deleted ? "Đã xóa lượt nhập kho và cả lô (không còn lượt nhập nào khác)" : "Đã xóa lượt nhập kho");
+      render("warehouse_kc");
+    }));
+    document.querySelectorAll("[data-sngedit]").forEach(b => b.onclick = () => {
+      const r = WH_CACHE.sangNgangRequests.find(x => x.request_id === b.dataset.sngedit);
+      if (!r) return;
+      const lot = r.lot_id ? WH_CACHE.lotById[r.lot_id] : null;
+      modal(`<h3>Sửa đề nghị Xuất sang ngang — ${esc(r.request_code)}</h3>
+        <div class="muted" style="margin-bottom:10px">Chỉ sửa được khi CHƯA được Kho phân xưởng duyệt — nếu đã duyệt, lưu sẽ báo lỗi.</div>
+        <div class="row"><div class="field"><label>Số lượng</label><input id="esng_qty" type="number" value="${r.quantity}"/></div>
+          <div class="field"><label>ĐVT</label><input value="${esc(r.uom)}" size="4" readonly/></div></div>
+        <div class="row"><div class="field" style="position:relative"><label>Nhà CC</label>
+            <input type="text" id="esng_supplier_txt" autocomplete="off" placeholder="Tìm nhà cung cấp..."/>
+            <input type="hidden" id="esng_supplier"/></div>
+          <div class="field"><label>Đơn giá</label><input id="esng_price" type="number" value="${lot && lot.unit_price != null ? lot.unit_price : ""}" placeholder="(tuỳ chọn)"/></div></div>
+        <div class="row"><div class="field"><label>Số lô KCS</label><input id="esng_kcs" value="${esc(lot && lot.kcs_lot_no || "")}"/></div>
+          <div class="field"><label>Hạn dùng</label><input id="esng_exp" type="date" value="${lot && lot.expiry ? lot.expiry.slice(0, 10) : ""}"/></div></div>
+        <div class="row"><div class="field" style="flex:1"><label>Diễn giải</label><input id="esng_note" value="${esc(r.reason || "")}"/></div>
+          <button class="btn" id="esng_save" style="align-self:flex-end">Lưu</button></div>`);
+      wireSearchableSelect("esng_supplier_txt", "esng_supplier", WH_CACHE.supplierItems);
+      if (lot && lot.supplier_id) {
+        const item = WH_CACHE.supplierItems.find(i => i.value === lot.supplier_id);
+        if (item) { $("esng_supplier").value = item.value; $("esng_supplier_txt").value = item.label; }
+      }
+      $("esng_save").onclick = () => guard(async () => {
+        await PUT(`/warehouse/sang-ngang/${r.request_id}`, {
+          quantity: parseFloat($("esng_qty").value), supplier_id: $("esng_supplier").value || null,
+          unit_price: $("esng_price").value ? parseFloat($("esng_price").value) : null,
+          kcs_lot_no: $("esng_kcs").value.trim() || null, expiry: $("esng_exp").value || null,
+          reason: $("esng_note").value.trim() || null,
+        });
+        toast("Đã lưu"); closeModal(); render("warehouse_kc");
+      });
+    });
+    document.querySelectorAll("[data-sngdel]").forEach(b => b.onclick = () => guard(async () => {
+      if (!confirm("Xóa đề nghị Xuất sang ngang này? Số lượng sẽ bị trừ khỏi tồn lô (hoặc xóa cả lô nếu đây là lượt nhập duy nhất). Không thể hoàn tác.")) return;
+      const res = await DELETE(`/warehouse/sang-ngang/${b.dataset.sngdel}`);
+      toast(res.lot_deleted ? "Đã xóa đề nghị và cả lô (không còn lượt nhập nào khác)" : "Đã xóa đề nghị");
       render("warehouse_kc");
     }));
     if ($("ob_do")) $("ob_do").onclick = () => guard(async () => {
@@ -4742,6 +4813,15 @@ function sangNgangQcBadge(r, lotById, qcReqSet) {
     : `<span class="badge approved">KCS đã duyệt</span>`;
 }
 
+function sangNgangEditDelCell(r) {
+  // Chỉ cho Sửa/Xóa khi CHƯA được Kho phân xưởng duyệt (pending hoặc rejected — can_edit từ
+  // backend, xem services/warehouse.py::update_sang_ngang/delete_sang_ngang) — đã duyệt thì lô
+  // thật sự chuyển sang Kho phân xưởng rồi, không còn "sửa nhập kho" an toàn nữa.
+  if (!r.can_edit) return "<td></td>";
+  return `<td style="white-space:nowrap"><button class="btn sm sec" data-sngedit="${esc(r.request_id)}">Sửa</button>
+    <button class="btn sm sec" data-sngdel="${esc(r.request_id)}" style="color:var(--red)">Xóa</button></td>`;
+}
+
 function sangNgangKcRowHtml(r, matById, lotById, qcReqSet) {
   const lot = lotById[r.lot_id];
   const mat = lot ? matById[lot.material_id] : null;
@@ -4752,7 +4832,8 @@ function sangNgangKcRowHtml(r, matById, lotById, qcReqSet) {
     <td>${esc(mat ? mat.name : "—")}</td>
     <td class="muted">${esc(lot ? lot.lot_code : "")}</td>
     <td>${r.quantity} ${esc(r.uom)}</td>
-    <td>${sangNgangQcBadge(r, lotById, qcReqSet)}</td></tr>`;
+    <td>${sangNgangQcBadge(r, lotById, qcReqSet)}</td>
+    ${sangNgangEditDelCell(r)}</tr>`;
 }
 
 function sangNgangHistoryRowHtml(r, matById, lotById) {
@@ -4767,7 +4848,8 @@ function sangNgangHistoryRowHtml(r, matById, lotById) {
     <td class="muted">${esc(lot ? lot.lot_code : "")}</td>
     <td>${r.quantity} ${esc(r.uom)}</td>
     <td>${badge(r.status)}${r.reversed ? ' <span class="muted" style="font-size:11px">(đã hoàn tác)</span>' : ""}</td>
-    <td class="muted">${esc(processedBy || "")}</td></tr>`;
+    <td class="muted">${esc(processedBy || "")}</td>
+    ${sangNgangEditDelCell(r)}</tr>`;
 }
 
 // ---- Điều chuyển kho công ty, chiều 2: Kho công ty → Nhà máy khác (xuất ngay, duyệt sau) ----
@@ -4920,6 +5002,17 @@ function myAllowedWarehouses(allWarehouses) {
   if (!CURRENT_USER || CURRENT_USER.role === "admin" || !scope || scope === "*") return allWarehouses;
   const allowed = new Set(String(scope).split(",").map(s => s.trim()).filter(Boolean));
   return allWarehouses.filter(w => allowed.has(w.code));
+}
+// Ngược lại myAllowedLocations — dùng riêng cho "Vị trí đích" của Điều chuyển (liên kho): tài
+// khoản bị giới hạn kho chỉ điều chuyển ĐẾN kho NGOÀI phạm vi của mình (điều chuyển về chính
+// kho mình quản lý là vô nghĩa, xem services/wms.py::create_transfer) — admin/không giới hạn
+// vẫn thấy toàn bộ như myAllowedLocations.
+function otherWarehouseLocations(allLocations) {
+  const active = allLocations.filter(l => l.active);
+  const scope = CURRENT_USER && CURRENT_USER.wms_warehouse_scope;
+  if (!CURRENT_USER || CURRENT_USER.role === "admin" || !scope || scope === "*") return active;
+  const allowed = new Set(String(scope).split(",").map(s => s.trim()).filter(Boolean));
+  return active.filter(l => !allowed.has(l.warehouse_code));
 }
 function isWhScopeRestricted() {
   const scope = CURRENT_USER && CURRENT_USER.wms_warehouse_scope;
@@ -7130,14 +7223,16 @@ async function openBrewMasterOrderModal(masterId) {
       </div>
       <div class="tablewrap" style="max-height:40vh"><table>
         <thead><tr><th>STT</th><th>Tên NVL</th><th>ĐVT</th><th>Nhu cầu 1 mẻ</th><th>Nhu cầu Tổng mẻ</th>
+          <th>SL lấy tại Kho công ty</th><th>SL lấy tại Kho phân xưởng</th>
           <th>Tồn Kho công ty (lúc lập)</th><th>Tồn Kho phân xưởng (lúc lập)</th><th>Đơn giá</th><th></th></tr></thead>
         <tbody>${c.lines.map(l => l.is_header
-          ? `<tr style="font-weight:700"><td colspan=9>${esc(l.stt_label || "")} ${esc(l.material_name || "")}</td></tr>`
+          ? `<tr style="font-weight:700"><td colspan=11>${esc(l.stt_label || "")} ${esc(l.material_name || "")}</td></tr>`
           : `<tr class="${l.shortage ? "row-red" : ""}"><td>${esc(l.stt_label || "")}</td><td>${esc(l.material_name || "—")}</td>
             <td>${esc(l.uom || "")}</td><td>${l.qty_per_batch ?? "—"}</td><td>${l.qty_total ?? "—"}</td>
+            <td>${l.qty_from_company ?? "—"}</td><td>${l.qty_from_workshop ?? "—"}</td>
             <td>${l.stock_company_snapshot ?? "—"}</td><td>${l.stock_workshop_snapshot ?? "—"}</td>
-            <td>${l.unit_price ?? "—"}</td><td>${l.shortage ? `<span style="color:var(--red)">⚠ Thiếu</span>` : `<span style="color:var(--green)">Đủ</span>`}</td></tr>${bomMemberRowsHtml(l, 5, 2)}`).join("") ||
-          `<tr><td colspan=9 class="muted">Chưa có dòng NVL.</td></tr>`}</tbody></table></div>
+            <td>${l.unit_price ?? "—"}</td><td>${l.shortage ? `<span style="color:var(--red)">⚠ Thiếu</span>` : `<span style="color:var(--green)">Đủ</span>`}</td></tr>${bomMemberRowsHtml(l, 7, 2)}`).join("") ||
+          `<tr><td colspan=11 class="muted">Chưa có dòng NVL.</td></tr>`}</tbody></table></div>
     </div>`;
     }).join("")}`);
 }
@@ -7256,15 +7351,18 @@ function printBrewOrder(m) {
   const safetyText = m.safety_note ||
     "Thực hiện đúng quy trình vận hành thiết bị, chỉ vận hành khi thống nhất thông tin giữa thợ chính và thợ phụ, các bộ phận khác có liên quan.";
   const childSections = m.children.map((c, ci) => {
-    const lineRows = c.lines.map(l => l.is_header
-      ? `<tr><td colspan=10 style="font-weight:700">${dash(l.stt_label)} ${dash(l.material_name)}</td></tr>`
-      : `<tr><td>${dash(l.stt_label)}</td><td>${dash(l.material_name)}</td><td>${dash(l.uom)}</td>
-          <td>${dash(l.qty_per_batch)}</td><td>${dash(l.qty_total)}</td><td></td><td></td>
-          <td>${blank(l.unit_price)}</td><td></td><td></td></tr>`).join("");
+    const lineRows = c.lines.map(l => {
+      if (l.is_header) return `<tr><td colspan=10 style="font-weight:700">${dash(l.stt_label)} ${dash(l.material_name)}</td></tr>`;
+      const xuatTong = l.qty_from_company;
+      return `<tr><td>${dash(l.stt_label)}</td><td>${dash(l.material_name)}</td><td>${dash(l.uom)}</td>
+          <td>${dash(l.qty_per_batch)}</td><td>${dash(l.qty_total)}</td><td></td><td>${dash(xuatTong)}</td>
+          <td>${blank(l.unit_price)}</td><td></td><td></td></tr>`;
+    }).join("");
     return `<div class="pf-section" style="border:1px solid #000;padding:6px;margin-bottom:10px">
       <h3 style="margin-top:0">Lệnh nấu nhỏ #${ci + 1}</h3>
-      <div>1/ Nấu: <b>${dash(c.product_code || c.product_desc)}</b>; Số lượng: <b>${dash(c.planned_batch_count)}</b> mẻ ≥ <b>${dash(c.planned_volume_hl)}</b> hl dịch${c.bx_min || c.bx_max ? `, với Bx: ${dash(c.bx_min)}-${dash(c.bx_max)}%` : ""}</div>
-      <div>- Chuyển dịch vào Tank lên men: ${dash(c.tank_lm)} / ${dash(c.planned_batch_count)} mẻ/Tank${c.batch_range_from ? `; mẻ ${dash(c.batch_range_from)}-${dash(c.batch_range_to)}` : ""}.</div>
+      <div>1/ Nấu: - Bia .......................................... mã số ........................................................ Số lượng: <b>${dash(c.planned_batch_count)}</b> mẻ ≥ <b>${dash(c.planned_volume_hl)}</b> hl dịch${c.bx_min || c.bx_max ? `, với Bx: ${dash(c.bx_min)}-${dash(c.bx_max)}%` : ""}</div>
+      ${c.formula_process_note ? `<div style="white-space:pre-wrap">${esc(c.formula_process_note)}</div>` : ""}
+      <div>- Chuyển dịch vào Tank lên men: ...........................................................................................................</div>
       <table class="pf-tbl"><thead>
         <tr><th rowspan=2>STT</th><th rowspan=2>Tên, nhãn hiệu quy cách NVL</th><th rowspan=2>ĐVT</th>
           <th colspan=2>Lượng</th><th colspan=2>Thực xuất</th><th rowspan=2>Đơn giá</th><th colspan=2>T/Tiền (đồng)</th></tr>
@@ -7290,7 +7388,7 @@ function printBrewOrder(m) {
       table.pf-tbl th{background:#eee;font-weight:700;text-align:center}
       table.pf-tbl td{text-align:center}
       table.pf-tbl td:nth-child(2){text-align:left}
-      .pf-sign{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-top:30px;text-align:center;font-size:11.5px}
+      .pf-sign{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-top:30px;text-align:center;font-size:11.5px}
       .pf-sign b{display:block;margin-bottom:2px}
       .pf-sign span{display:block;color:#555;margin-bottom:40px}
     </style></head><body>
@@ -7299,7 +7397,7 @@ function printBrewOrder(m) {
       <div class="right"><b>CỘNG HÒA XÃ HỘI CHỦ NGHĨA VIỆT NAM</b><br/>Độc lập – Tự do – Hạnh phúc</div>
     </div>
     <h2>LỆNH NẤU BIA KIÊM PHIẾU XUẤT KHO</h2>
-    <div class="pf-section"><h3>I. Người ra lệnh</h3><div>${dash(m.issued_by)}</div></div>
+    <div class="pf-section"><h3>I. Người ra lệnh</h3><div>${dash(m.issued_by || m.created_by)}</div></div>
     <div class="pf-section"><h3>II. Người nhận lệnh</h3>
       <div>1/ Người T/hiện: ${dash(m.executor_unit)}</div>
       <div>2/ Người xuất hàng: ${dash(m.warehouse_keeper)}</div></div>
@@ -7313,6 +7411,7 @@ function printBrewOrder(m) {
     <div class="pf-section"><h3>V. Biện pháp an toàn</h3><div>${dash(safetyText)}</div></div>
     <div class="pf-sign">
       <div><b>Giám đốc</b><span>(Ký, ghi rõ họ tên)</span></div>
+      <div><b>Quản đốc phân xưởng sản xuất</b><span>(Ký, ghi rõ họ tên)</span></div>
       <div><b>Người nhận lệnh</b><span>${dash(m.executor_unit)}<br/>(Ký, ghi rõ họ tên)</span></div>
       <div><b>Thủ kho</b><span>${dash(m.warehouse_keeper)}<br/>(Ký, ghi rõ họ tên)</span></div>
       <div><b>P. Kế toán</b><span>(Ký, ghi rõ họ tên)</span></div>

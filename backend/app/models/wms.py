@@ -191,7 +191,9 @@ class WmsTransfer(Base):
 
     transfer_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
     transfer_code: Mapped[str] = mapped_column(Unicode(64), unique=True, index=True)
-    to_location_id: Mapped[str] = mapped_column(ForeignKey("wms_location.loc_id"), index=True)
+    # Nullable: bỏ trống -> đơn vị thành "chưa cất vị trí" (giống build_units khi không chọn vị
+    # trí), rơi vào chung hàng đợi "Cất vào vị trí" — xem services/wms.py::create_transfer.
+    to_location_id: Mapped[Optional[str]] = mapped_column(ForeignKey("wms_location.loc_id"), nullable=True, index=True)
     created_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
     note: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)

@@ -131,6 +131,12 @@ class BrewOrderMaterialLine(Base):
     unit_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     stock_company_snapshot: Mapped[Optional[float]] = mapped_column(Float, nullable=True)   # tồn Kho công ty lúc lập phiếu
     stock_workshop_snapshot: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # tồn Kho phân xưởng lúc lập phiếu
+    # SL thực xuất tách theo 2 nguồn — mặc định GỢI Ý (ưu tiên dùng hết tồn đang có tại Kho
+    # phân xưởng, tối đa bằng Nhu cầu Tổng mẻ; phần còn thiếu lấy tại Kho công ty), người lập
+    # lệnh nấu có thể sửa lại 2 số này trước khi lưu (xem services/brew_order.py::_suggest_qty_split).
+    # In lên cột "Thực xuất" của biểu mẫu Lệnh nấu (frontend printBrewOrder).
+    qty_from_company: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    qty_from_workshop: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
 
 
 class BrewRecord(Base):

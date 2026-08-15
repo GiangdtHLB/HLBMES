@@ -1844,15 +1844,15 @@
       </div>
       <div class="panel"><h2>Lịch sử xuất kho</h2><input class="searchbox" data-tbl="t_xk_history" placeholder="Tìm theo mã phiếu, nơi xuất đến, người xuất..."/><div id="xk_history" class="muted">Đang tải…</div></div>`;
     } else if (sec === "dieuchuyen") {
-      const locOptDc = myAllowedLocations(locs).map(l => `<option value="${esc(l.loc_id)}">${whLabel(l)} (${l.used}/${l.capacity})</option>`).join("");
+      const locOptDc = otherWarehouseLocations(locs).map(l => `<option value="${esc(l.loc_id)}">${whLabel(l)} (${l.used}/${l.capacity})</option>`).join("");
       const activeVehiclesDc = vehicles.filter(v => v.active);
       const driverOptDc = activeVehiclesDc.map(v =>
         `<option value="${esc(v.vehicle_id)}">${esc(v.driver_name || v.driver_short_name || "(chưa rõ tên)")} — ${esc(v.plate)}</option>`).join("");
       body = `<div class="panel"><h2>🔀 Điều chuyển nội bộ</h2>
-        <div class="muted" style="margin-bottom:8px">Y hệt Xuất kho — chọn vị trí đích, sau đó thêm từng dòng sản phẩm/lô/loại đơn vị + số lượng cần chuyển vào "Sản phẩm đã chọn" (thêm được nhiều lô/sản phẩm khác nhau trong cùng 1 phiếu), rồi bấm "Tạo phiếu điều chuyển". Hệ thống tự chọn đúng vỉ/keg/lon cũ nhất (FIFO) trong mỗi lô. Khác Xuất kho: KHÔNG làm giảm tổng tồn kho công ty (chỉ đổi vị trí) và giữ nguyên lô/mã chiết để truy xuất nguồn gốc không đứt.</div>
+        <div class="muted" style="margin-bottom:8px">Y hệt Xuất kho — chọn vị trí đích (tuỳ chọn — bỏ trống nếu chưa biết chính xác ô/kệ, hàng sẽ vào hàng đợi "Cất vào vị trí"), sau đó thêm từng dòng sản phẩm/lô/loại đơn vị + số lượng cần chuyển vào "Sản phẩm đã chọn" (thêm được nhiều lô/sản phẩm khác nhau trong cùng 1 phiếu), rồi bấm "Tạo phiếu điều chuyển". Hệ thống tự chọn đúng vỉ/keg/lon cũ nhất (FIFO) trong mỗi lô — không đúng FIFO chỉ là CẢNH BÁO, không chặn tạo phiếu. Khác Xuất kho: KHÔNG làm giảm tổng tồn kho công ty (chỉ đổi vị trí) và giữ nguyên lô/mã chiết để truy xuất nguồn gốc không đứt.</div>
         <div class="row">
-          <div class="field"><label>Vị trí đích</label>
-            <select id="dc_to"><option value="">(chọn vị trí đích)</option>${locOptDc}</select></div>
+          <div class="field"><label>Vị trí đích (tuỳ chọn)</label>
+            <select id="dc_to"><option value="">(chưa cất vị trí)</option>${locOptDc}</select></div>
           <div class="field"><label>Lọc lô</label><select id="dc_lotfilter">
             <option value="">(tất cả lô)</option>
             <option value="has_lon">Lô có lon phân rã</option>
@@ -3463,14 +3463,14 @@
 
       function renderDcCart() {
         $("dc_cart").innerHTML = DC_CART.length ? `<div class="tablewrap"><table>
-          <thead><tr><th>Sản phẩm</th><th>Lô</th><th>Vị trí kho</th><th>Loại</th><th>SL</th><th>FIFO</th><th>Lý do (nếu không đúng FIFO)</th><th></th></tr></thead>
+          <thead><tr><th>Sản phẩm</th><th>Lô</th><th>Vị trí kho</th><th>Loại</th><th>SL</th><th>FIFO</th><th>Lý do (tuỳ chọn)</th><th></th></tr></thead>
           <tbody>${DC_CART.map((c, i) => { const lotOpts = dcLotOptionsFor(c.product_name, c.unit_type); return `<tr><td>${esc(fpLabel(c.product_name))}</td>
             <td>${lotOpts.length ? `<select data-dc-lot="${i}">${lotOpts.map(o => `<option value="${esc(o.lot_code || "")}|${esc(o.loc_id || "")}" ${o.lot_code === c.lot_code && o.loc_id === c.location_id ? "selected" : ""}>${esc(o.lot_code || "(không lô)")} (${esc(o.loc_code || "?")}) — còn ${o.count}${o.fifo_ok ? " · FIFO" : ""}</option>`).join("")}</select>`
               : esc(c.lot_code || "")}</td>
             <td class="muted">${esc(c.location_label || "—")}</td>
             <td>${unitTypeLabel({ product: c.product_name, unit_type: c.unit_type })}</td><td>${c.quantity}</td>
             <td>${c.fifo_ok ? '<span class="badge available">✓ FIFO</span>' : '<span class="badge on_hold">⚠ Không phải lô cũ nhất</span>'}</td>
-            <td>${c.fifo_ok ? '<span class="muted">—</span>' : `<input data-dc-reason="${i}" placeholder="Bắt buộc nhập lý do" value="${esc(c.fifo_reason || "")}" style="width:180px;border-color:var(--red)"/>`}</td>
+            <td>${c.fifo_ok ? '<span class="muted">—</span>' : `<input data-dc-reason="${i}" placeholder="(tuỳ chọn)" value="${esc(c.fifo_reason || "")}" style="width:180px"/>`}</td>
             <td><button class="btn sm sec" data-dc-del="${i}">Xoá</button></td></tr>`; }).join("")}</tbody></table></div>
           <div class="row" style="margin-top:10px;align-items:center">
             <div class="muted">Tổng: <b>${DC_CART.length}</b> dòng</div>
@@ -3501,22 +3501,16 @@
           renderDcCart();
         });
         if ($("dc_submit")) $("dc_submit").onclick = () => guard(async () => {
-          if (!$("dc_to").value) { toast("Chọn vị trí đích", "err"); return; }
           if (!DC_CART.length) { toast("Chưa có dòng nào trong phiếu", "err"); return; }
-          if (DC_CART.some(c => c.location_id === $("dc_to").value)) {
+          if ($("dc_to").value && DC_CART.some(c => c.location_id === $("dc_to").value)) {
             toast("Có dòng đang ở đúng vị trí đích — không thể điều chuyển, hãy xoá dòng đó hoặc đổi vị trí đích", "err");
             return;
           }
-          const missingReason = DC_CART.find(c => !c.fifo_ok && !(c.fifo_reason || "").trim());
-          if (missingReason) {
-            toast(`Dòng ${fpLabel(missingReason.product_name)} — lô ${missingReason.lot_code || "(không lô)"} không đúng FIFO: phải nhập lý do trước khi tạo phiếu`, "err");
-            return;
-          }
           const vehicleDc = vehicles.find(v => v.vehicle_id === $("dc_driver").value);
-          const fifoNotesDc = DC_CART.filter(c => !c.fifo_ok)
+          const fifoNotesDc = DC_CART.filter(c => !c.fifo_ok && (c.fifo_reason || "").trim())
             .map(c => `${fpLabel(c.product_name)} lô ${c.lot_code || "(không lô)"}: ${c.fifo_reason.trim()}`);
           const res = await POST("/wms/transfers", {
-            to_location_id: $("dc_to").value,
+            to_location_id: $("dc_to").value || null,
             lines: DC_CART.map(c => ({ product_name: c.product_name, lot_code: c.lot_code,
                                        unit_type: c.unit_type, quantity: c.quantity, location_id: c.location_id })),
             note: fifoNotesDc.length ? `Điều chuyển không đúng FIFO — ${fifoNotesDc.join("; ")}` : null,

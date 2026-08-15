@@ -112,6 +112,12 @@ class SangNgangRequest(Base):
     reason: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)
     status: Mapped[str] = mapped_column(Unicode(255), default="pending", index=True)  # pending|approved|rejected
     movement_id: Mapped[Optional[str]] = mapped_column(ForeignKey("stock_movement.movement_id"), nullable=True)
+    # StockMovement type=receipt gốc tạo ra lô lúc create_sang_ngang (KHÁC movement_id ở trên —
+    # đó là movement type=transfer chỉ có SAU KHI duyệt). Dùng để Sửa/Xóa đề nghị còn pending/
+    # rejected tái dùng đúng update_receipt/delete_receipt (đã có sẵn ràng buộc an toàn: chặn nếu
+    # lô đã dùng hoặc đã khai báo QC) — xem services/warehouse.py::update_sang_ngang/delete_sang_ngang.
+    receipt_movement_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("stock_movement.movement_id"), nullable=True)
     reversed: Mapped[bool] = mapped_column(Boolean, default=False)
     created_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
