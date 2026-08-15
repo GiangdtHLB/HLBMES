@@ -5457,7 +5457,14 @@ function wireCartPanel() {
       : `Đã nạp ${lines.length} dòng vật tư từ ${REQUEST_SOURCE.label}`,
       groupLines.length ? "warn" : undefined);
   });
-  if ($("rq_srcclear")) $("rq_srcclear").onclick = () => { REQUEST_SOURCE = null; refreshCartPanel(); };
+  // "Bỏ gắn" phải xoá luôn các dòng đã tự nạp từ lệnh (đánh dấu bằng order_label) — không chỉ
+  // bỏ nhãn REQUEST_SOURCE — nếu không, các dòng đó vẫn nằm trong giỏ dù không còn gắn với lệnh
+  // nào, dễ gửi nhầm. Dòng người dùng tự thêm thủ công (không có order_label) vẫn được giữ lại.
+  if ($("rq_srcclear")) $("rq_srcclear").onclick = () => {
+    REQUEST_SOURCE = null;
+    REQUEST_CART = REQUEST_CART.filter(c => !c.order_label);
+    refreshCartPanel();
+  };
   const refreshRqUom = () => {
     $("rq_uom_wrap").innerHTML = altUomFieldHtml(REQ_CACHE.matById[$("rq_mat").value], "rq_uom", 60);
   };
@@ -7353,9 +7360,11 @@ function printBrewOrder(m) {
   const childSections = m.children.map((c, ci) => {
     const lineRows = c.lines.map(l => {
       if (l.is_header) return `<tr><td colspan=10 style="font-weight:700">${dash(l.stt_label)} ${dash(l.material_name)}</td></tr>`;
-      const xuatTong = l.qty_from_company;
+      // Cột "Tổng mẻ" (Lượng) in đúng phần SL lấy tại Kho công ty — không phải Nhu cầu Tổng mẻ đầy
+      // đủ (l.qty_total): phần còn lại đã có sẵn tại Kho phân xưởng, không cần xuất thêm. Cột
+      // "Thực xuất" để trống hoàn toàn cho thủ kho tự ghi tay lúc xuất thực tế.
       return `<tr><td>${dash(l.stt_label)}</td><td>${dash(l.material_name)}</td><td>${dash(l.uom)}</td>
-          <td>${dash(l.qty_per_batch)}</td><td>${dash(l.qty_total)}</td><td></td><td>${dash(xuatTong)}</td>
+          <td>${dash(l.qty_per_batch)}</td><td>${dash(l.qty_from_company)}</td><td></td><td></td>
           <td>${blank(l.unit_price)}</td><td></td><td></td></tr>`;
     }).join("");
     return `<div class="pf-section" style="border:1px solid #000;padding:6px;margin-bottom:10px">
