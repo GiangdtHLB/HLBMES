@@ -297,21 +297,27 @@ def delete_receipt(db: Session, movement_id: str, user: User) -> dict:
         StockMovement.movement_id != mv.movement_id)).scalar_one()
     record_audit(db, entity_type="stock_movement", entity_id=mv.movement_id, action="delete_receipt",
                  actor=user, before={"quantity": mv.quantity, "lot_code": lot.lot_code})
+    # Dọn đề nghị "Xuất sang ngang" con TRƯỚC khi xóa StockMovement/lô (autoflush=False nên phải
+    # tự xếp con-trước-cha). Tới được đây thì request chỉ có thể pending/rejected — nếu đã duyệt
+    # thì transfer() để lại StockMovement non-receipt và _lot_used đã chặn ở trên. MSSQL enforce
+    # 2 FK (SQLite bỏ qua), cả hai đều trỏ tới thứ sắp bị xóa nên phải xóa request trước:
+    #   • sang_ngang_request.receipt_movement_id → stock_movement  ⇒ trước db.delete(mv)   (LUÔN)
+    #   • sang_ngang_request.lot_id              → material_lot     ⇒ trước db.delete(lot)  (khi xóa lô)
+    reqs = {r.request_id: r for r in db.execute(select(SangNgangRequest).where(
+        SangNgangRequest.receipt_movement_id == mv.movement_id)).scalars().all()}
+    if remaining_receipts == 0:
+        for r in db.execute(select(SangNgangRequest).where(
+                SangNgangRequest.lot_id == lot.lot_id)).scalars().all():
+            reqs[r.request_id] = r
+    for req in reqs.values():
+        record_audit(db, entity_type="sang_ngang_request", entity_id=req.request_id,
+                     action="delete", actor=user, before={"lot_id": req.lot_id, "status": req.status})
+        db.delete(req)
+    db.flush()
     db.delete(mv)
-    db.flush()  # MSSQL enforce FK: xóa stock_movement (con) TRƯỚC material_lot (cha) — autoflush=False
+    db.flush()
     lot_deleted = False
     if remaining_receipts == 0:
-        # Lô sắp bị xóa → dọn các đề nghị "Xuất sang ngang" con còn trỏ tới lô. Tới được đây thì
-        # chúng CHỈ có thể là pending/rejected (chưa move stock): nếu đã duyệt thì transfer() để
-        # lại StockMovement non-receipt và _lot_used đã chặn ở trên. MSSQL enforce FK
-        # sang_ngang_request.lot_id → material_lot (SQLite bỏ qua) — phải xóa con + flush trước.
-        for req in db.execute(select(SangNgangRequest).where(
-                SangNgangRequest.lot_id == lot.lot_id)).scalars().all():
-            record_audit(db, entity_type="sang_ngang_request", entity_id=req.request_id,
-                         action="delete", actor=user,
-                         before={"lot_id": req.lot_id, "status": req.status})
-            db.delete(req)
-        db.flush()
         db.delete(lot)
         lot_deleted = True
     db.commit()
