@@ -657,4 +657,5 @@ def update_ops_settings(payload: OpsSettingIn, db: Session = Depends(get_db),
                                            payload.finished_goods_restock_days,
                                            payload.fg_days_of_stock_critical_days,
                                            payload.fg_days_in_stock_warning_days,
-                                           payload.finished_goods_receive_max_backdate_days)
+                                           payload.finished_goods_receive_max_backdate_days,
+                                           payload.fg_day_cutoff_hour)

@@ -3,7 +3,7 @@ xem docs/WMS-LOT-LEVEL-REDESIGN.md), putaway/ship theo vị trí, tồn theo v�
 barcode (cho đầu đọc cầm tay / kiosk)."""
 
 import re
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy import and_, case, delete, false, func, or_, select, true
 from sqlalchemy.orm import Session
@@ -2156,6 +2156,144 @@ def finished_goods_stock_inout_report(db: Session, date_from: datetime, date_to:
                     for k in ("opening_stock", "produced", "shipped", "on_hand")}
         groups.append({"category": cat, "rows": rows, "subtotal": subtotal})
     return {"groups": groups, "restock_days": restock_days}
+
+
+def finished_goods_daily_stock_report(db: Session, day: date, cutoff_hour: int,
+                                      restock_days: float, product_ids: list[str] | None = None) -> dict:
+    """Báo cáo NXT kho thành phẩm THEO NGÀY (mẫu Excel "NXT KHO THANH PHAM", các sheet "Ngày
+    X.X") — CHỈ 1 ngày `day` duy nhất mỗi lần gọi (người dùng tự chọn ngày muốn xem, không phải
+    khoảng ngày) — Tồn đầu/Nhập sản xuất/Xuất ĐL & KM/Tồn cuối theo SKU, CHIA RIÊNG theo từng
+    KHO THÀNH PHẨM (WmsWarehouse, VD "Kho Đông Mai"/"Kho Hạ Long" — attribution theo location_id
+    HIỆN TẠI của từng đơn vị, không có lịch sử vị trí theo thời gian, cùng giới hạn đã chấp nhận ở
+    lot_aging_report), gộp nhóm category trong mỗi kho giống finished_goods_stock_inout_report.
+    Tồn đầu được DỰNG LẠI từ lịch sử FinishedGoodsUnit tại đúng mốc đầu ngày (không chain từ ngày
+    trước — cùng cách finished_goods_stock_inout_report dựng Tồn đầu tại date_from).
+    "Ngày" KHÔNG cố định 00h-24h mà theo mốc CẮT NGÀY cấu hình được (OpsSetting.fg_day_cutoff_hour,
+    giờ VN, xem _SHIFT_VN_OFFSET) — VD cutoff=6 thì "ngày 9/8" = 06h00 9/8 đến 06h00 10/8 giờ VN,
+    khớp thực tế vận hành nhà máy (ca đêm 22h-06h thuộc "hôm trước", không bị cắt đôi giữa 2 ngày
+    lịch). Chỉ xử lý đúng 1 ngày (không lặp N ngày) để tránh tải dữ liệu lớn khi người dùng chỉ
+    cần xem 1 ngày cụ thể.
+    Mỗi dòng SKU-trong-1-kho có thêm `oldest_at`/`fifo_ok` — SO SÁNH CẢ 2 (nhiều) KHO: tính từ
+    tồn kho THỰC TẾ HIỆN TẠI (status=stored, "bây giờ", không phụ thuộc ngày `day` đang xem — cùng
+    quy ước "luôn tính tới hiện tại" như Tồn thực tế/Xuất TB 7 ngày ở finished_goods_stock_inout_report),
+    để thủ kho biết NÊN XUẤT TỪ KHO NÀO TRƯỚC theo đúng nguyên tắc FIFO khi 1 SKU tồn ở nhiều kho.
+    Kèm `reorder_lot_code`/`reorder_location` — mã lô và vị trí kho (WmsLocation.code/name) của
+    ĐÚNG đơn vị đang giữ mốc `oldest_at` đó TRONG KHO ĐANG XEM (không phải kho khác) — để thủ kho
+    biết đi lấy lô nào ở đâu, không cần tự tra lại theo lot_code trong danh sách."""
+    divide_codes = _divide_by_pack_codes(db)
+    products_stmt = select(FinishedProduct)
+    if product_ids:
+        products_stmt = products_stmt.where(FinishedProduct.finished_product_id.in_(product_ids))
+    products = db.execute(products_stmt).scalars().all()
+    fp_map = {fp.finished_product_id: fp for fp in products}
+
+    local_start = datetime(day.year, day.month, day.day, cutoff_hour, tzinfo=timezone.utc)
+    utc_start = local_start - _SHIFT_VN_OFFSET
+    utc_end = utc_start + timedelta(days=1)
+
+    locs = db.execute(select(WmsLocation)).scalars().all()
+    loc_wh_by_id = {l.loc_id: l.warehouse_id for l in locs}
+    loc_by_id = {l.loc_id: l for l in locs}
+    wh_by_id = {w.warehouse_id: w for w in db.execute(select(WmsWarehouse)).scalars().all()}
+
+    rows = db.execute(
+        select(FinishedGoodsUnit.finished_product_id, FinishedGoodsUnit.unit_type,
+               FinishedGoodsUnit.quantity, FinishedGoodsUnit.status, FinishedGoodsUnit.created_at,
+               FinishedGoodsUnit.shipped_at, FinishedGoodsUnit.source, FinishedGoodsUnit.is_consigned,
+               FinishedGoodsUnit.location_id)
+        .select_from(FinishedGoodsUnit)
+        .join(FinishedProduct, FinishedProduct.finished_product_id == FinishedGoodsUnit.finished_product_id)
+        .where(FinishedGoodsUnit.finished_product_id.in_(fp_map.keys()),
+               FinishedGoodsUnit.unit_type == FinishedProduct.unit_type,
+               FinishedGoodsUnit.created_at < utc_end)
+    ).all()
+
+    by_product_wh: dict[tuple, list] = {}
+    for u in rows:
+        wh_id = loc_wh_by_id.get(u.location_id) if u.location_id else None
+        by_product_wh.setdefault((u.finished_product_id, wh_id), []).append(u)
+
+    def _count(u) -> float:
+        return u.quantity / _pack_divisor(fp_map.get(u.finished_product_id), u.unit_type, divide_codes)
+
+    def _cat_sort_key(cat: str):
+        try:
+            return (0, _STOCK_CATEGORY_ORDER.index(cat))
+        except ValueError:
+            return (1, cat) if cat != "Khác" else (2, cat)
+
+    # FIFO xét CẢ (nhiều) kho: lô cũ nhất còn "stored" HIỆN TẠI (không lọc theo utc_end/ngày đang
+    # xem) — độc lập với phần Tồn đầu/Nhập/Xuất bên trên, giống cách "Tồn thực tế" luôn tính tới
+    # hiện tại. oldest_by_fp_wh keyed (finished_product_id, warehouse_id|None) — giữ nguyên cả
+    # lot_code/location_id của ĐÚNG đơn vị cũ nhất đó (không chỉ mốc thời gian) để hiện "Lô cần
+    # xuất" + "Vị trí kho" cho thủ kho biết đi lấy đúng lô nào ở đâu, không phải tự tra lại.
+    live_rows = db.execute(
+        select(FinishedGoodsUnit.finished_product_id, FinishedGoodsUnit.location_id,
+               FinishedGoodsUnit.lot_code, FinishedGoodsUnit.created_at)
+        .where(FinishedGoodsUnit.status == "stored", FinishedGoodsUnit.finished_product_id.in_(fp_map.keys()))
+    ).all()
+    oldest_by_fp_wh: dict[tuple, dict] = {}
+    for fp_id, location_id, lot_code, created_at in live_rows:
+        wh_id = loc_wh_by_id.get(location_id) if location_id else None
+        key = (fp_id, wh_id)
+        cur = oldest_by_fp_wh.get(key)
+        if cur is None or created_at < cur["created_at"]:
+            oldest_by_fp_wh[key] = {"created_at": created_at, "lot_code": lot_code, "location_id": location_id}
+    oldest_overall_by_fp: dict[str, datetime] = {}
+    for (fp_id, _wh_id), info in oldest_by_fp_wh.items():
+        if fp_id not in oldest_overall_by_fp or info["created_at"] < oldest_overall_by_fp[fp_id]:
+            oldest_overall_by_fp[fp_id] = info["created_at"]
+
+    def _build_row(fp, wh_id, units) -> dict:
+        opening = sum(_count(u) for u in units
+                     if u.created_at < utc_start
+                     and (u.status == "stored"
+                          or (u.status == "shipped" and u.shipped_at and u.shipped_at >= utc_start)))
+        produced = sum(_count(u) for u in units
+                      if u.source == "chiet" and utc_start <= u.created_at < utc_end)
+        shipped = sum(_count(u) for u in units
+                     if u.status == "shipped" and not u.is_consigned
+                     and u.shipped_at and utc_start <= u.shipped_at < utc_end)
+        info = oldest_by_fp_wh.get((fp.finished_product_id, wh_id))
+        oldest_at = info["created_at"] if info else None
+        fifo_ok = bool(oldest_at is not None and oldest_at == oldest_overall_by_fp.get(fp.finished_product_id))
+        loc = loc_by_id.get(info["location_id"]) if info and info["location_id"] else None
+        return {
+            "finished_product_id": fp.finished_product_id, "code": fp.code, "name": fp.name,
+            "uom": fp.unit_type,
+            "opening_stock": round(opening, 2), "produced": round(produced, 2),
+            "shipped": round(shipped, 2), "closing_stock": round(opening + produced - shipped, 2),
+            "oldest_at": oldest_at.isoformat() if oldest_at else None, "fifo_ok": fifo_ok,
+            "reorder_lot_code": info["lot_code"] if info else None,
+            "reorder_location": f"{loc.code} - {loc.name}" if loc else None,
+        }
+
+    def _groups_for_warehouse(wh_id) -> list[dict]:
+        groups_map: dict[str, list[dict]] = {}
+        for fp in products:
+            units = by_product_wh.get((fp.finished_product_id, wh_id))
+            if not units:
+                continue
+            cat = fp.category or "Khác"
+            groups_map.setdefault(cat, []).append(_build_row(fp, wh_id, units))
+        groups = []
+        for cat in sorted(groups_map.keys(), key=_cat_sort_key):
+            cat_rows = sorted(groups_map[cat], key=lambda r: r["name"])
+            subtotal = {k: round(sum(r[k] for r in cat_rows), 2)
+                       for k in ("opening_stock", "produced", "shipped", "closing_stock")}
+            groups.append({"category": cat, "rows": cat_rows, "subtotal": subtotal})
+        return groups
+
+    warehouses_out = [{"warehouse_id": w.warehouse_id, "warehouse_code": w.code, "warehouse_name": w.name,
+                       "groups": _groups_for_warehouse(w.warehouse_id)}
+                      for w in sorted(wh_by_id.values(), key=lambda w: w.code)]
+    unassigned_groups = _groups_for_warehouse(None)
+    if any(g["rows"] for g in unassigned_groups):
+        warehouses_out.append({"warehouse_id": None, "warehouse_code": None,
+                               "warehouse_name": "Chưa xác định kho", "groups": unassigned_groups})
+
+    return {"date": day.isoformat(), "warehouses": warehouses_out,
+            "cutoff_hour": cutoff_hour, "restock_days": restock_days}
 
 
 def finished_goods_shift_report(db: Session, date_from: datetime, date_to: datetime) -> dict:

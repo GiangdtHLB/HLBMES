@@ -114,6 +114,7 @@ class OpsSettingIn(BaseModel):
     fg_days_of_stock_critical_days: float = 3.0
     fg_days_in_stock_warning_days: float = 30.0
     finished_goods_receive_max_backdate_days: float = 15.0
+    fg_day_cutoff_hour: int = 0
     factory_code: Optional[str] = None
 
 
@@ -132,6 +133,7 @@ class OpsSettingOut(ORMModel):
     fg_days_of_stock_critical_days: float
     fg_days_in_stock_warning_days: float
     finished_goods_receive_max_backdate_days: float
+    fg_day_cutoff_hour: int
     factory_code: Optional[str] = None
     updated_by: Optional[str] = None
     updated_at: datetime

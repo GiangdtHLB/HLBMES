@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>MES Bia Hạ Long - Nhà Máy Đông Mai</title>
-  <link rel="stylesheet" href="/styles.css?v=55" />
+  <link rel="stylesheet" href="/styles.css?v=60" />
 </head>
 <body>
   <!-- Màn hình đăng nhập -->
@@ -37,36 +37,67 @@
     </div>
     <div class="nav-scroll">
       <button data-view="dashboard" class="active">📊 Tổng quan</button>
-      <button data-view="flowmap">🗺️ Sơ đồ quy trình</button>
+
+      <button class="nav-topgroup" data-navgrp="sanxuat">🍺 Sản xuất</button>
+      <div class="nav-groups" id="nav-group-sanxuat">
+        <button data-view="flowmap">Sơ đồ quy trình</button>
+        <button data-view="orders">Lệnh SX</button>
+        <button data-view="process">Nấu-Lọc-Chiết</button>
+        <button data-view="recipes">Công thức</button>
+        <button data-view="cip">CIP</button>
+        <button data-view="dispatch" class="nav-unused">Điều độ</button>
+        <button data-view="batches" class="nav-unused">Mẻ sản xuất</button>
+        <button data-view="dispense" class="nav-unused">Cấp liệu</button>
+        <button data-view="recipeadv" class="nav-unused">Công thức+</button>
+        <button data-view="isa88" class="nav-unused">ISA-88</button>
+        <button data-view="schedule" class="nav-unused">Lập lịch</button>
+      </div>
+
+      <button class="nav-topgroup" data-navgrp="baotri">🔧 Bảo trì &amp; Hiệu suất thiết bị</button>
+      <div class="nav-groups" id="nav-group-baotri">
+        <button data-view="oee">OEE/Dừng máy</button>
+        <button data-view="maint" class="nav-unused">Bảo trì</button>
+        <button data-view="calib" class="nav-unused">Kiểm định</button>
+      </div>
+
+      <button class="nav-topgroup" data-navgrp="chatluong">✅ Chất lượng</button>
+      <div class="nav-groups" id="nav-group-chatluong">
+        <button data-view="quality">Chất lượng</button>
+        <button data-view="qclab">QC Lab</button>
+      </div>
+
       <button data-view="warehouse_kc">🏢 Kho công ty</button>
-      <button data-view="orders">📋 Lệnh SX</button>
-      <button data-view="dispatch" class="nav-unused">Điều độ</button>
-      <button data-view="batches" class="nav-unused">Mẻ sản xuất</button>
-      <button data-view="dispense" class="nav-unused">Cấp liệu</button>
-      <button data-view="process">🍺 Nấu-Lọc-Chiết</button>
-      <button data-view="quality">✅ Chất lượng</button>
-      <button data-view="wms">📦 Kho TP (WMS)</button>
-      <button data-view="trace">🔍 Truy xuất</button>
-      <button data-view="recipes">🧪 Công thức</button>
-      <button data-view="recipeadv" class="nav-unused">Công thức+</button>
-      <button data-view="isa88" class="nav-unused">ISA-88</button>
-      <button data-view="schedule" class="nav-unused">Lập lịch</button>
-      <button data-view="packaging">📦 Bao bì</button>
       <button data-view="warehouse_px">🏗️ Kho phân xưởng</button>
-      <button data-view="qclab" class="nav-unused">QC Lab</button>
-      <button data-view="cip">🧼 CIP</button>
-      <button data-view="energy">⚡ Năng lượng</button>
-      <button data-view="realtime">📡 Realtime</button>
-      <button data-view="oee">OEE/Dừng máy</button>
-      <button data-view="maint" class="nav-unused">Bảo trì</button>
-      <button data-view="calib" class="nav-unused">Kiểm định</button>
-      <button data-view="reports">📈 Báo cáo</button>
+      <button data-view="wms">📦 Kho TP (WMS)</button>
+      <button data-view="packaging">📦 Bao bì</button>
+      <button data-view="trace">🔍 Truy xuất</button>
       <button data-view="ai">🤖 Trợ lý AI</button>
-      <button data-view="integration">🔌 Tích hợp</button>
+
+      <button class="nav-topgroup" data-navgrp="giamsat">📈 Báo cáo &amp; giám sát</button>
+      <div class="nav-groups" id="nav-group-giamsat">
+        <button data-view="realtime">Realtime</button>
+        <button data-view="energy">Năng lượng</button>
+        <button data-view="reports">Báo cáo</button>
+      </div>
+
       <button data-view="master">🗂️ Danh mục</button>
-      <button data-view="users">👤 Tài khoản</button>
-      <button data-view="audit">🛡️ Audit</button>
-      <button data-view="profile">👤 Hồ sơ</button>
+      <div class="nav-groups" id="nav-master-groups">
+        <button class="nav-group" data-mastergrp="sanxuat">Sản xuất</button>
+        <button class="nav-group" data-mastergrp="nvl">Nguyên vật liệu</button>
+        <button class="nav-group" data-mastergrp="khotp">Kho thành phẩm</button>
+        <button class="nav-group" data-mastergrp="chatluong">Chất lượng</button>
+        <button class="nav-group" data-mastergrp="caidat">Cài đặt</button>
+      </div>
+
+      <button class="nav-topgroup" data-navgrp="hethong">🔌 Hệ thống</button>
+      <div class="nav-groups" id="nav-group-hethong">
+        <button data-view="integration">Tích hợp</button>
+        <button data-view="users">Tài khoản</button>
+        <button data-view="audit">Audit</button>
+        <button data-view="profile">Hồ sơ</button>
+        <button data-view="maint" class="nav-unused">Bảo trì</button>
+        <button data-view="calib" class="nav-unused">Kiểm định</button>
+      </div>
     </div>
     <div class="nav-foot">
       <a class="nav-foot-link" href="/kiosk.html" title="Giao diện kiosk/tablet cho xưởng">📱 Kiosk</a>
@@ -119,8 +150,8 @@
 
   <script src="/charts.js?v=38"></script>
   <script src="/barcode.js?v=20"></script>
-  <script src="/app.js?v=437"></script>
-  <script src="/views_ext.js?v=156"></script>
+  <script src="/app.js?v=447"></script>
+  <script src="/views_ext.js?v=160"></script>
   <script src="/import_explorer.js?v=22"></script>
 </body>
 </html>
