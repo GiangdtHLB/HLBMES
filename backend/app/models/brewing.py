@@ -678,5 +678,10 @@ class OpsSetting(Base):
     # báo Nhập từ nhà máy khác (tránh gõ nhầm ngày) — trước đây hardcode 15, nay cấu hình được ở
     # Cài đặt vận hành. Không áp dụng cho Nhập tồn đầu (luôn bỏ qua, xem services/wms.py::_create_units).
     finished_goods_receive_max_backdate_days: Mapped[float] = mapped_column(Float, default=15.0)
+    # Giờ cắt "ngày vận hành" (0-23, giờ VN) cho báo cáo NXT kho thành phẩm THEO NGÀY — 1 "ngày"
+    # = từ giờ này của ngày hôm trước đến đúng giờ này của ngày hôm sau, KHÔNG cố định 00h-24h
+    # (khớp thực tế ca đêm 22h-06h không bị cắt đôi giữa 2 ngày lịch). Xem
+    # services/wms.py::finished_goods_daily_stock_report.
+    fg_day_cutoff_hour: Mapped[int] = mapped_column(Integer, default=0)
     updated_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)

@@ -10411,6 +10411,12 @@ VIEWS.master = async function () {
         <div class="field"><label>Ngưỡng Đỏ — Số ngày tồn dự kiến (ngày)</label><input id="ops_fg_critical_days" type="number" step="any" value="${opsSettings.fg_days_of_stock_critical_days}" ${canManage ? "" : "disabled"}/></div>
         <div class="field"><label>Ngưỡng Vàng — Số ngày lưu kho (ngày)</label><input id="ops_fg_instock_warning_days" type="number" step="any" value="${opsSettings.fg_days_in_stock_warning_days}" ${canManage ? "" : "disabled"}/></div>
       </div>
+      <div class="muted" style="margin:10px 0 6px">Giờ cắt "ngày vận hành" (0-23, giờ VN) cho báo cáo "NXT kho thành phẩm" › mục "Theo ngày" —
+        1 "ngày" = từ giờ này của ngày hôm trước đến đúng giờ này của ngày hôm sau, không cố định 00h-24h (VD chọn 6 thì "ngày 9/8"
+        = 06h00 9/8 đến 06h00 10/8, khớp ca đêm 22h-06h không bị cắt đôi giữa 2 ngày lịch).</div>
+      <div class="row">
+        <div class="field"><label>Giờ cắt ngày (0-23)</label><input id="ops_fg_cutoff_hour" type="number" min="0" max="23" step="1" value="${opsSettings.fg_day_cutoff_hour ?? 0}" style="width:100px" ${canManage ? "" : "disabled"}/></div>
+      </div>
       <div class="muted" style="margin:10px 0 6px">Số ngày lùi tối đa cho phép ở "Ngày nhập" khi Nhập kho thủ công (Kho TP) hoặc khai báo
         Nhập từ nhà máy khác — tránh gõ nhầm ngày quá xa trong quá khứ (không áp dụng cho Nhập tồn đầu).</div>
       <div class="row">
@@ -10493,6 +10499,7 @@ VIEWS.master = async function () {
         fg_days_of_stock_critical_days: parseFloat($("ops_fg_critical_days").value) || 3,
         fg_days_in_stock_warning_days: parseFloat($("ops_fg_instock_warning_days").value) || 30,
         finished_goods_receive_max_backdate_days: parseFloat($("ops_fg_max_backdate_days").value) || 15,
+        fg_day_cutoff_hour: Math.min(23, Math.max(0, parseInt($("ops_fg_cutoff_hour").value, 10) || 0)),
         factory_code: $("ops_factory_code").value.trim() || null,
       });
       toast("Đã lưu cài đặt vận hành"); render("master");

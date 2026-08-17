@@ -1,6 +1,6 @@
 """Báo cáo sản xuất — BC định mức NVL (Nấu/Lọc/Chiết, tổng hợp nhiều lệnh)."""
 
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
@@ -256,3 +256,19 @@ def finished_goods_stock_report(date_from: datetime = None, date_to: datetime = 
                    "days_of_stock_critical_days": settings.fg_days_of_stock_critical_days,
                    "days_in_stock_warning_days": settings.fg_days_in_stock_warning_days})
     return result
+
+
+@router.get("/finished-goods-stock-daily-report")
+def finished_goods_stock_daily_report(day: date = None, product_ids: str = None,
+                                      db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """Báo cáo NXT kho thành phẩm THEO NGÀY (mẫu Excel sheet "Ngày X.X") — CHỈ 1 ngày `day` mỗi
+    lần gọi (người dùng tự chọn ngày cụ thể, không phải khoảng ngày — tránh tải dữ liệu lớn khi
+    hiển thị nhiều ngày cùng lúc). Xem services/wms.py::finished_goods_daily_stock_report. Giờ
+    cắt ngày lấy từ OpsSetting.fg_day_cutoff_hour (cấu hình ở Cài đặt vận hành)."""
+    from ..services import ops_setting as ops_setting_svc
+    from ..services import wms as wms_svc
+    day = day or utcnow().date()
+    settings = ops_setting_svc.get_settings(db)
+    ids = [p for p in product_ids.split(",") if p] if product_ids else None
+    return wms_svc.finished_goods_daily_stock_report(db, day, settings.fg_day_cutoff_hour,
+                                                     settings.finished_goods_restock_days, ids)

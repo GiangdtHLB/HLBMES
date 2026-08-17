@@ -2138,7 +2138,25 @@
       }))];
       const fsQ = `date_from=${encodeURIComponent(fsDateFrom)}&date_to=${encodeURIComponent(fsDateTo)}` +
         (resolvedProductIds.length ? `&product_ids=${resolvedProductIds.map(encodeURIComponent).join(",")}` : "");
-      const fsrep = await GET(`/reports/finished-goods-stock-report?${fsQ}`);
+      // "Theo ngày" — mẫu Excel sheet "Ngày X.X" (mỗi ngày 1 khối Tồn đầu/Nhập/Xuất/Tồn cuối,
+      // Tồn đầu ngày = dựng lại độc lập tại đúng mốc CẮT NGÀY cấu hình ở Cài đặt vận hành —
+      // xem services/wms.py::finished_goods_daily_stock_report), tách khỏi chế độ "Theo khoảng"
+      // (fsrep) sẵn có — 2 chế độ dùng chung bộ lọc sản phẩm/nhóm phía trên nhưng khác API/cột.
+      const fsMode = SUB.fgstock_mode || "range";
+      SUB.fgstock_mode = fsMode;
+      const toYMD = (d) => d.toISOString().slice(0, 10);
+      // CHỈ 1 ngày mỗi lần xem (không phải khoảng ngày) — tránh dựng/render nhiều khối cùng lúc
+      // gây tải dữ liệu lớn khi người dùng chỉ cần xem đúng 1 ngày cụ thể.
+      const fsDay = SUB.fgstock_day || toYMD(new Date());
+      SUB.fgstock_day = fsDay;
+      let fsrep = null, fsdailyrep = null;
+      if (fsMode === "daily") {
+        const fsDayQ = `day=${fsDay}` +
+          (resolvedProductIds.length ? `&product_ids=${resolvedProductIds.map(encodeURIComponent).join(",")}` : "");
+        fsdailyrep = await GET(`/reports/finished-goods-stock-daily-report?${fsDayQ}`);
+      } else {
+        fsrep = await GET(`/reports/finished-goods-stock-report?${fsQ}`);
+      }
       const fsDaysBadge = (d) => d == null ? badge("planned") :
         d < fsrep.days_of_stock_critical_days ? badge("critical") : d < fsrep.restock_days ? badge("due") : badge("available");
       const fsInStockBadge = (d) => d == null ? "" : d > fsrep.days_in_stock_warning_days ? badge("due") : badge("available");
@@ -2165,34 +2183,109 @@
       // khác" ở cuối. Không chọn nhóm nào (chỉ chọn sản phẩm riêng, hoặc để trống = tất cả) thì
       // giữ đúng hành vi cũ, chia theo category.
       const fsSum = (rows, k) => Math.round(rows.reduce((s, r) => s + r[k], 0) * 100) / 100;
-      const fsSubtotal = (rows) => ({ opening_stock: fsSum(rows, "opening_stock"), produced: fsSum(rows, "produced"),
-        shipped: fsSum(rows, "shipped"), on_hand: fsSum(rows, "on_hand") });
       const fsSelectedGroups = fsSel.filter(t => t.startsWith("g:")).map(t => fpGroupById[t.slice(2)]).filter(Boolean);
-      let fsDisplayGroups = fsrep.groups;
-      if (fsSelectedGroups.length) {
-        const fsRowById = Object.fromEntries(fsrep.groups.flatMap(g => g.rows).map(r => [r.finished_product_id, r]));
-        fsDisplayGroups = fsSelectedGroups.map(g => {
-          const rows = g.product_ids.map(id => fsRowById[id]).filter(Boolean).sort((a, b) => a.name.localeCompare(b.name));
-          return { category: g.name, rows, subtotal: fsSubtotal(rows) };
+      // Dùng chung cho cả 2 chế độ (Theo khoảng: opening_stock/produced/shipped/on_hand — Theo
+      // ngày: opening_stock/produced/shipped/closing_stock) — chỉ khác tên field cuối.
+      const fsRegroupByUserGroups = (groups, sumKeys) => {
+        const fsSubtotalG = (rows) => Object.fromEntries(sumKeys.map(k => [k, fsSum(rows, k)]));
+        if (!fsSelectedGroups.length) return groups;
+        const rowById = Object.fromEntries(groups.flatMap(g => g.rows).map(r => [r.finished_product_id, r]));
+        const out = fsSelectedGroups.map(g => {
+          const rows = g.product_ids.map(id => rowById[id]).filter(Boolean).sort((a, b) => a.name.localeCompare(b.name));
+          return { category: g.name, rows, subtotal: fsSubtotalG(rows) };
         });
         const groupedIds = new Set(fsSelectedGroups.flatMap(g => g.product_ids));
         const leftoverIds = fsSel.filter(t => t.startsWith("p:")).map(t => t.slice(2)).filter(id => !groupedIds.has(id));
         if (leftoverIds.length) {
-          const rows = leftoverIds.map(id => fsRowById[id]).filter(Boolean).sort((a, b) => a.name.localeCompare(b.name));
-          fsDisplayGroups.push({ category: "Sản phẩm khác (không thuộc nhóm)", rows, subtotal: fsSubtotal(rows) });
+          const rows = leftoverIds.map(id => rowById[id]).filter(Boolean).sort((a, b) => a.name.localeCompare(b.name));
+          out.push({ category: "Sản phẩm khác (không thuộc nhóm)", rows, subtotal: fsSubtotalG(rows) });
         }
-      }
-      body = `<div class="panel"><h2>📦 NXT kho thành phẩm <span class="muted">(${esc(fmt(fsDateFrom))} → ${esc(fmt(fsDateTo))})</span></h2>
-        <div class="muted" style="margin-bottom:8px">Theo mẫu báo cáo Excel thủ công đang dùng — số liệu Nhập/Xuất trong kỳ chọn; Tồn thực tế/Lượng xuất TB 7 ngày/Ngày sản xuất luôn tính tới hiện tại (không phụ thuộc kỳ chọn), dùng để dự báo tồn kho tới hạn. Ngưỡng "Đóng bổ sung" (số ngày tồn dự kiến) chỉnh ở Danh mục › Cài đặt vận hành (hiện tại: ≤ ${fsrep.restock_days} ngày). "Tồn mục tiêu tháng" lấy từ kế hoạch tiêu thụ tháng khai báo bên dưới (kế hoạch điều chỉnh nếu có, không thì kế hoạch ban đầu).</div>
-        <div class="row">
+        return out;
+      };
+      const fsDisplayGroups = fsrep ? fsRegroupByUserGroups(fsrep.groups, ["opening_stock", "produced", "shipped", "on_hand"]) : [];
+      // Cột FIFO so sánh CẢ (nhiều) KHO: r.oldest_at/r.fifo_ok tính từ tồn "stored" HIỆN TẠI
+      // (không phụ thuộc ngày đang xem), đánh dấu kho nào đang giữ lô nhập SỚM NHẤT của SKU đó
+      // trong TẤT CẢ kho — thủ kho nên ưu tiên xuất từ kho được đánh dấu "✓ Xuất trước".
+      const fsFifoCell = (r) => {
+        if (!r.oldest_at) return '<span class="muted">—</span>';
+        return (r.fifo_ok ? '<span class="badge available">✓ Xuất trước</span>' : '<span class="badge on_hold">⚠ Kho khác cũ hơn</span>') +
+          `<div class="muted" style="font-size:11px">${esc(fmt(r.oldest_at))}</div>`;
+      };
+      // Lô cần xuất + Vị trí kho — mã lô/vị trí của ĐÚNG đơn vị cũ nhất (oldest_at) TRONG kho
+      // đang xem, để thủ kho biết đi lấy đúng lô nào ở đâu (không cần tự tra lại theo lot_code).
+      const fsReorderCell = (r) => {
+        if (!r.reorder_lot_code && !r.reorder_location) return '<span class="muted">—</span>';
+        return (r.reorder_lot_code ? `<b>${esc(r.reorder_lot_code)}</b>` : '<span class="muted">(chưa gắn mã lô)</span>') +
+          (r.reorder_location ? `<div class="muted" style="font-size:11px">${esc(r.reorder_location)}</div>` :
+            '<div class="muted" style="font-size:11px">Chưa cất</div>');
+      };
+      const fsDayRow = (r) => `<tr data-fprow="${esc(r.finished_product_id)}">
+          <td class="code">${esc(r.code)}</td><td>${esc(r.name)}</td><td>${esc(r.uom)}</td>
+          <td>${r.opening_stock.toLocaleString("vi-VN")}</td><td>${r.produced.toLocaleString("vi-VN")}</td>
+          <td>${r.shipped.toLocaleString("vi-VN")}</td><td><b>${r.closing_stock.toLocaleString("vi-VN")}</b></td>
+          <td>${fsFifoCell(r)}</td><td>${fsReorderCell(r)}</td></tr>`;
+      const fsVnDate = (iso) => iso.split("-").reverse().join("/");
+      // Mỗi kho thành phẩm (WmsWarehouse, VD "Kho Đông Mai"/"Kho Hạ Long" + "Chưa xác định kho")
+      // ra 1 bảng riêng — mirror đúng cách tab "Tồn kho theo tuổi" (sec=aging) tách theo kho.
+      const fsDailyWarehouseBlocks = (fsdailyrep?.warehouses || []).map(wh => {
+        const whGroups = fsRegroupByUserGroups(wh.groups, ["opening_stock", "produced", "shipped", "closing_stock"]);
+        return `<div class="panel"><h3 style="margin:0 0 8px">🏭 ${esc(wh.warehouse_name)}</h3>
+          <div class="tablewrap"><table>
+            <thead><tr><th>Mã số</th><th>Mặt hàng</th><th>Đvt</th><th>Tồn đầu</th><th>Nhập sản xuất</th>
+              <th>Xuất ĐL &amp; KM</th><th>Tồn cuối</th><th>FIFO (so cả các kho)</th><th>Lô cần xuất / Vị trí kho</th></tr></thead>
+            <tbody>${whGroups.map(g => `
+              <tr style="background:var(--panel2);font-weight:700"><td colspan=9>${esc(g.category)}</td></tr>
+              ${g.rows.map(fsDayRow).join("")}
+              <tr style="background:var(--panel2)"><td colspan=3 class="muted">Tổng ${esc(g.category)}</td>
+                <td>${g.subtotal.opening_stock.toLocaleString("vi-VN")}</td><td>${g.subtotal.produced.toLocaleString("vi-VN")}</td>
+                <td>${g.subtotal.shipped.toLocaleString("vi-VN")}</td><td><b>${g.subtotal.closing_stock.toLocaleString("vi-VN")}</b></td>
+                <td colspan=2></td></tr>`).join("") ||
+              '<tr><td colspan=9 class="muted">Kho này chưa có tồn/hoạt động trong ngày.</td></tr>'}</tbody>
+          </table></div></div>`;
+      }).join("") || (fsMode === "daily" ? '<div class="muted">Chưa có dữ liệu.</div>' : "");
+      const fsModeTabs = `<div class="subnav" style="margin-bottom:10px">
+          <button class="${fsMode === "range" ? "active" : ""}" id="fs_mode_range">Theo khoảng</button>
+          <button class="${fsMode === "daily" ? "active" : ""}" id="fs_mode_daily">📅 Theo ngày</button>
+        </div>`;
+      const fsFilterBox = `<div class="row">
+          <div class="field" style="flex:1"><label>Báo cáo cho (để trống = tất cả sản phẩm — chọn 1 hoặc nhiều nhóm/sản phẩm, tự lưu cho lần sau)</label>
+            <select id="fs_filter" multiple size="4" style="width:100%">${fsFilterOpts}</select></div>
+        </div>`;
+      const fsRangeBody = `<div class="row">
           <div class="field"><label>Từ ngày (kèm giờ)</label><input id="fs_from" type="datetime-local" value="${fsDateFrom}"/></div>
           <div class="field"><label>Đến ngày (kèm giờ)</label><input id="fs_to" type="datetime-local" value="${fsDateTo}"/></div>
           <button class="btn" id="fs_apply" style="align-self:flex-end">Xem báo cáo</button>
         </div>
-        <div class="row">
-          <div class="field" style="flex:1"><label>Báo cáo cho (để trống = tất cả sản phẩm — chọn 1 hoặc nhiều nhóm/sản phẩm, tự lưu cho lần sau)</label>
-            <select id="fs_filter" multiple size="4" style="width:100%">${fsFilterOpts}</select></div>
-        </div></div>
+        ${fsFilterBox}</div>
+        <div class="panel"><div class="tablewrap"><table>
+          <thead><tr><th>Mã số</th><th>Mặt hàng</th><th>Đvt</th><th>Tồn đầu</th><th>Nhập sản xuất</th>
+            <th>Xuất ĐL &amp; KM</th><th>Tồn thực tế (TT)</th><th>Xuất TB 7 ngày</th><th>Số ngày tồn dự kiến</th>
+            <th>Đề xuất</th><th>Ngày SX gần nhất</th><th>Số ngày lưu kho</th><th>Tồn mục tiêu tháng</th></tr></thead>
+          <tbody>${fsDisplayGroups.map(g => `
+            <tr style="background:var(--panel2);font-weight:700"><td colspan=13>${esc(g.category)}</td></tr>
+            ${g.rows.map(fsRow).join("")}
+            <tr style="background:var(--panel2)"><td colspan=3 class="muted">Tổng ${esc(g.category)}</td>
+              <td>${g.subtotal.opening_stock.toLocaleString("vi-VN")}</td><td>${g.subtotal.produced.toLocaleString("vi-VN")}</td>
+              <td>${g.subtotal.shipped.toLocaleString("vi-VN")}</td><td><b>${g.subtotal.on_hand.toLocaleString("vi-VN")}</b></td>
+              <td colspan=6></td></tr>`).join("") ||
+            '<tr><td colspan=13 class="muted">Chưa có Sản phẩm (thành phẩm) nào trong Danh mục, hoặc không khớp bộ lọc đã chọn.</td></tr>'}</tbody>
+        </table></div></div>`;
+      const fsDailyBody = `<div class="row">
+          <div class="field"><label>Ngày</label><input id="fs_day" type="date" value="${fsDay}"/></div>
+          <button class="btn" id="fs_day_apply" style="align-self:flex-end">Xem báo cáo</button>
+        </div>
+        <div class="muted" style="margin:6px 0">1 ngày = từ ${String(fsdailyrep?.cutoff_hour ?? 0).padStart(2, "0")}h00 ngày hôm trước đến đúng
+          giờ đó ngày hôm sau (giờ VN) — chỉnh ở Danh mục › Cài đặt vận hành. Tồn đầu được dựng lại độc lập từ lịch sử tại đúng mốc này (không
+          chain từ ngày trước). Số liệu chia riêng theo TỪNG KHO thành phẩm; cột "FIFO" so sánh CẢ CÁC KHO — đánh dấu ✓ ở kho đang giữ lô nhập
+          sớm nhất của SKU đó, nên ưu tiên xuất từ kho đó trước.</div>
+        ${fsFilterBox}</div>
+        ${fsDailyWarehouseBlocks}`;
+      body = `<div class="panel"><h2>📦 NXT kho thành phẩm ${fsMode === "daily" ?
+          `<span class="muted">(${esc(fsVnDate(fsDay))})</span>` :
+          `<span class="muted">(${esc(fmt(fsDateFrom))} → ${esc(fmt(fsDateTo))})</span>`}</h2>
+        <div class="muted" style="margin-bottom:8px">Theo mẫu báo cáo Excel thủ công đang dùng — số liệu Nhập/Xuất trong kỳ chọn; Tồn thực tế/Lượng xuất TB 7 ngày/Ngày sản xuất luôn tính tới hiện tại (không phụ thuộc kỳ chọn), dùng để dự báo tồn kho tới hạn. Ngưỡng "Đóng bổ sung" (số ngày tồn dự kiến) chỉnh ở Danh mục › Cài đặt vận hành (hiện tại: ≤ ${(fsrep || fsdailyrep)?.restock_days} ngày). "Tồn mục tiêu tháng" lấy từ kế hoạch tiêu thụ tháng khai báo bên dưới (kế hoạch điều chỉnh nếu có, không thì kế hoạch ban đầu).</div>
+        ${fsModeTabs}
+        ${fsMode === "daily" ? fsDailyBody : fsRangeBody}
         <div class="panel"><h3 style="margin:0 0 6px;cursor:pointer" id="fs_grp_toggle">📁 Quản lý nhóm sản phẩm ▾</h3>
           <div id="fs_grp_box" style="display:none">
             <div class="tablewrap"><table><thead><tr><th>Tên nhóm</th><th>Số sản phẩm</th><th></th></tr></thead>
@@ -2218,20 +2311,7 @@
             </div>
             <div id="fs_mp_grid"><div class="muted">Bấm "Tải bảng" để xem/sửa kế hoạch.</div></div>
           </div>
-        </div>
-        <div class="panel"><div class="tablewrap"><table>
-          <thead><tr><th>Mã số</th><th>Mặt hàng</th><th>Đvt</th><th>Tồn đầu</th><th>Nhập sản xuất</th>
-            <th>Xuất ĐL &amp; KM</th><th>Tồn thực tế (TT)</th><th>Xuất TB 7 ngày</th><th>Số ngày tồn dự kiến</th>
-            <th>Đề xuất</th><th>Ngày SX gần nhất</th><th>Số ngày lưu kho</th><th>Tồn mục tiêu tháng</th></tr></thead>
-          <tbody>${fsDisplayGroups.map(g => `
-            <tr style="background:var(--panel2);font-weight:700"><td colspan=13>${esc(g.category)}</td></tr>
-            ${g.rows.map(fsRow).join("")}
-            <tr style="background:var(--panel2)"><td colspan=3 class="muted">Tổng ${esc(g.category)}</td>
-              <td>${g.subtotal.opening_stock.toLocaleString("vi-VN")}</td><td>${g.subtotal.produced.toLocaleString("vi-VN")}</td>
-              <td>${g.subtotal.shipped.toLocaleString("vi-VN")}</td><td><b>${g.subtotal.on_hand.toLocaleString("vi-VN")}</b></td>
-              <td colspan=6></td></tr>`).join("") ||
-            '<tr><td colspan=13 class="muted">Chưa có Sản phẩm (thành phẩm) nào trong Danh mục, hoặc không khớp bộ lọc đã chọn.</td></tr>'}</tbody>
-        </table></div></div>`;
+        </div>`;
     } else if (sec === "canexpiry") {
       const ceFpOpt = finishedProducts.map(fp => `<option value="${esc(fp.finished_product_id)}" data-code="${esc(fp.code)}">${esc(fp.code)} — ${esc(fp.name)}</option>`).join("");
       const ceLocOpt = myAllowedLocations(locs).map(l => `<option value="${esc(l.loc_id)}">${whLabel(l)} (${l.used}/${l.capacity})</option>`).join("");
@@ -2317,9 +2397,15 @@
 
     if (sec === "fgstock") {
       const FS_SEL_KEY = "mes_fgstock_selection";
-      $("fs_apply").onclick = () => {
+      $("fs_mode_range").onclick = () => { SUB.fgstock_mode = "range"; render("wms"); };
+      $("fs_mode_daily").onclick = () => { SUB.fgstock_mode = "daily"; render("wms"); };
+      if ($("fs_apply")) $("fs_apply").onclick = () => {
         SUB.fgstock_date_from = $("fs_from").value;
         SUB.fgstock_date_to = $("fs_to").value;
+        render("wms");
+      };
+      if ($("fs_day_apply")) $("fs_day_apply").onclick = () => {
+        SUB.fgstock_day = $("fs_day").value;
         render("wms");
       };
       $("fs_filter").onchange = () => {
