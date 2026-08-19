@@ -56,22 +56,29 @@ def _ferment_tank_rows(db: Session) -> tuple:
     tanks = db.execute(select(ProductionLine).where(
         ProductionLine.kind == "tank", ProductionLine.active == True)).scalars().all()
     ferments = db.execute(select(FermentRecord)).scalars().all()
-    occupied_codes = {f.tank_lm for f in ferments if derived.ferment_status(f) != "da_loc_het"}
-    return tanks, occupied_codes
+    occupied = {f.tank_lm: f for f in ferments if derived.ferment_status(f) != "da_loc_het"}
+    occupied_codes = set(occupied.keys())
+    return tanks, occupied_codes, occupied
 
 
 def _tank_len_men_counts(db: Session) -> dict:
-    tanks, occupied_codes = _ferment_tank_rows(db)
+    # "Đang lên men" CHỈ tính tank đã nạp ĐẦY dịch VÀ đã kết thúc nấu (FermentRecord.kt_date
+    # đã có — tự tính bằng giờ kết thúc mẻ CUỐI của (các) mã nấu chuyển sang tank đó, xem
+    # routers/brewing.py::_sync_ferment_kt_date) — tách riêng khỏi tank ĐANG NẠP dịch (đã gán
+    # tank nhưng mã nấu chuyển sang chưa kết thúc/chưa đầy tank, kt_date còn trống).
+    tanks, occupied_codes, occupied = _ferment_tank_rows(db)
     total = len(tanks)
-    dang_su_dung = sum(1 for t in tanks if t.code in occupied_codes)
-    return {"total": total, "dang_su_dung": dang_su_dung, "trong": total - dang_su_dung}
+    dang_su_dung = sum(1 for t in tanks if t.code in occupied_codes and occupied[t.code].kt_date is not None)
+    dang_nap = sum(1 for t in tanks if t.code in occupied_codes and occupied[t.code].kt_date is None)
+    return {"total": total, "dang_su_dung": dang_su_dung, "dang_nap": dang_nap,
+            "trong": total - dang_su_dung - dang_nap}
 
 
 def available_ferment_tanks(db: Session) -> list:
     """Từng tank lên men (CCT) kèm cờ đang chiếm dụng hay không — dùng cho picker "Tank lên
     men" khi tạo mã nấu (tab Nấu), lọc chỉ hiện tank "trống" thay vì liệt kê mọi tank trong
     Danh mục không phân biệt (xem routers/brewing.py::list_available_ferment_tanks)."""
-    tanks, occupied_codes = _ferment_tank_rows(db)
+    tanks, occupied_codes, _ = _ferment_tank_rows(db)
     return [{"code": t.code, "name": t.name, "occupied": t.code in occupied_codes}
             for t in sorted(tanks, key=lambda t: t.code)]
 

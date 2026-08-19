@@ -48,6 +48,22 @@ def _a_product(client, headers, suffix):
     return r.json()["product_id"]
 
 
+def _an_effective_recipe_version(client, headers, product_id, code, qty):
+    r = client.post("/api/recipes", headers=headers,
+                    json={"code": code, "name": f"Công thức {code}", "product_id": product_id})
+    assert r.status_code == 201, r.text
+    recipe = r.json()
+    v = client.post(f"/api/recipes/{recipe['recipe_id']}/versions", headers=headers,
+                    json={"base_qty": 1000, "base_uom": "L",
+                          "materials": [{"material_code": "MALT-PILS", "qty": qty, "uom": "kg"}]})
+    assert v.status_code == 201, v.text
+    version_id = v.json()["version_id"]
+    for target in ("review", "approved", "effective"):
+        t = client.post(f"/api/recipes/versions/{version_id}/transition", headers=headers, json={"target": target})
+        assert t.status_code == 200, t.text
+    return version_id
+
+
 def test_second_recipe_for_same_product_rejected(client, admin_h):
     product_id = _a_product(client, admin_h, "UNIQ")
 
@@ -61,21 +77,14 @@ def test_second_recipe_for_same_product_rejected(client, admin_h):
 
 
 def test_brew_order_auto_loads_bom_for_products_own_recipe(client, admin_h):
-    """Kiểm tra brew_order.build_lines_from_bom lấy đúng công thức (Formula) đang hiệu lực
-    của dịch bia, không lẫn với công thức của dịch bia khác (mô phỏng đúng bug đã gặp ở
-    RecipeVersion.state='effective' không loại trừ nhau — xem services/formula.py)."""
+    """Kiểm tra brew_order.build_lines_from_recipe_version lấy đúng RecipeVersion đang hiệu
+    lực của dịch bia, không lẫn với công thức của dịch bia khác (mô phỏng đúng bug đã gặp ở
+    RecipeVersion.state='effective' không loại trừ nhau — xem services/recipes.py)."""
     product_id = _a_product(client, admin_h, "BOMCHK")
-
-    f = client.post("/api/formulas", headers=admin_h,
-                    json={"code": "CT-BOMCHK", "product_id": product_id, "base_qty": 1000, "base_uom": "L",
-                          "materials": [{"material_code": "MALT-PILS", "qty": 20, "uom": "kg"}]})
-    assert f.status_code == 201, f.text
-    formula_id = f.json()["formula_id"]
-    act = client.post(f"/api/formulas/{formula_id}/activate", headers=admin_h)
-    assert act.status_code == 200, act.text
+    version_id = _an_effective_recipe_version(client, admin_h, product_id, "CT-BOMCHK", qty=20)
 
     order = client.post("/api/brewing/orders", headers=admin_h,
-                        json={"order_code": "LN-BOMCHK", "product_id": product_id, "formula_id": formula_id,
+                        json={"order_code": "LN-BOMCHK", "product_id": product_id, "recipe_version_id": version_id,
                               "planned_batch_count": 2, "planned_volume_hl": 20,
                               "auto_from_bom": True})
     assert order.status_code == 201, order.text
@@ -93,19 +102,12 @@ def test_bom_qty_not_scaled_by_planned_volume_hl(client, admin_h):
     Tổng mẻ = Nhu cầu 1 mẻ x Số mẻ kế hoạch. Trước đây bị scale sai theo tỉ lệ thể tích,
     ra số lượng/mẻ ảo (vd 0.444 kg) không khớp công thức thật."""
     product_id = _a_product(client, admin_h, "NOSCALE")
-
-    f = client.post("/api/formulas", headers=admin_h,
-                    json={"code": "CT-NOSCALE", "product_id": product_id, "base_qty": 1000, "base_uom": "L",
-                          "materials": [{"material_code": "MALT-PILS", "qty": 15, "uom": "kg"}]})
-    assert f.status_code == 201, f.text
-    formula_id = f.json()["formula_id"]
-    act = client.post(f"/api/formulas/{formula_id}/activate", headers=admin_h)
-    assert act.status_code == 200, act.text
+    version_id = _an_effective_recipe_version(client, admin_h, product_id, "CT-NOSCALE", qty=15)
 
     for planned_volume_hl in (5, 111, 1000):
         order = client.post("/api/brewing/orders", headers=admin_h,
                             json={"order_code": f"LN-NOSCALE-{planned_volume_hl}", "product_id": product_id,
-                                  "formula_id": formula_id,
+                                  "recipe_version_id": version_id,
                                   "planned_batch_count": 3, "planned_volume_hl": planned_volume_hl,
                                   "auto_from_bom": True})
         assert order.status_code == 201, order.text

@@ -156,13 +156,19 @@ def test_preview_source_materials_brew_order_surfaces_group_line_instead_of_drop
 
     products = client.get("/api/products", headers=admin_h).json()
     product_id = next(p["product_id"] for p in products if p["code"] == "BIA-LAGER")
-    formula = client.post("/api/formulas", headers=admin_h, json={
-        "code": "CT-SRCGRP01", "product_id": product_id, "base_qty": 1000, "base_uom": "L",
+    # 1 dịch bia có đúng 1 Recipe (seed.py đã tạo REC-LAGER cho BIA-LAGER) — thêm 1 version mới
+    # vào chính Recipe đó thay vì tạo Recipe khác (bị chặn bởi unique product_id).
+    recipes = client.get("/api/recipes", headers=admin_h).json()
+    recipe_id = next(r["recipe_id"] for r in recipes if r["product_id"] == product_id)
+    v = client.post(f"/api/recipes/{recipe_id}/versions", headers=admin_h, json={
+        "base_qty": 1000, "base_uom": "L",
         "materials": [{"alt_group_code": g["code"], "qty": 500, "uom": "kg"}]}).json()
-    assert client.post(f"/api/formulas/{formula['formula_id']}/activate", headers=admin_h).status_code == 200
+    for target in ("review", "approved", "effective"):
+        t = client.post(f"/api/recipes/versions/{v['version_id']}/transition", headers=admin_h, json={"target": target})
+        assert t.status_code == 200, t.text
 
     order = client.post("/api/brewing/orders", headers=admin_h, json={
-        "order_code": "LN-SRCGRP01", "product_id": product_id, "formula_id": formula["formula_id"],
+        "order_code": "LN-SRCGRP01", "product_id": product_id, "recipe_version_id": v["version_id"],
         "planned_batch_count": 1, "planned_volume_hl": 100, "volume_tolerance_hl": 0,
         "auto_from_bom": True, "lines": [],
     })

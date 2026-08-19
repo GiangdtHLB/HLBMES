@@ -28,6 +28,7 @@ from ..models.brewing import (
     FermentRecord,
 )
 from ..models.formula import Formula
+from ..models.recipes import Recipe, RecipeVersion
 from ..models.master import Material, MaterialAltGroup, Product
 from ..models.materials import MaterialLot
 from . import braumat_import as braumat_svc
@@ -93,6 +94,49 @@ def build_lines_from_bom(db: Session, formula_id: str, planned_batch_count: int,
         out.append({
             "seq": i, "stt_label": str(i + 1), "is_header": False,
             "material_id": mat.material_id if mat else None,
+            "material_code": mat.code if mat else code,
+            "material_name": mat.name if mat else code,
+            "uom": m.get("uom"),
+            "qty_per_batch": qty_per_batch,
+            "qty_total": qty_total,
+        })
+    return out
+
+
+def build_lines_from_recipe_version(db: Session, recipe_version_id: str, planned_batch_count: int,
+                                    planned_volume_hl: float) -> list:
+    """Nạp Định mức từ 1 RecipeVersion đang `effective` (do người lập Lệnh nấu tự chọn) — mirror
+    build_lines_from_bom (cùng ngữ nghĩa Nhu cầu 1 mẻ/Tổng mẻ, cùng hỗ trợ khai theo Nhóm vật tư
+    thay thế qua `alt_group_code` trong từng phần tử JSON `RecipeVersion.materials`)."""
+    rv = db.get(RecipeVersion, recipe_version_id) if recipe_version_id else None
+    if not rv:
+        return []
+    materials_by_code = {m.code: m for m in db.execute(select(Material)).scalars().all()}
+    groups_by_code = {g.code: g for g in db.execute(select(MaterialAltGroup)).scalars().all()}
+    out = []
+    for i, m in enumerate(rv.materials or []):
+        qty_per_batch = round(m.get("qty", 0) or 0, 3)
+        qty_total = round(qty_per_batch * planned_batch_count, 3)
+        group_code = m.get("alt_group_code")
+        if group_code:
+            group = groups_by_code.get(group_code)
+            out.append({
+                "seq": i, "stt_label": str(i + 1), "is_header": False,
+                "material_id": None,
+                "material_name": group.name if group else group_code,
+                "material_group_code": group_code,
+                "member_material_ids": list(group.member_material_ids or []) if group else [],
+                "uom": m.get("uom"),
+                "qty_per_batch": qty_per_batch,
+                "qty_total": qty_total,
+            })
+            continue
+        code = m.get("material_code")
+        mat = materials_by_code.get(code)
+        out.append({
+            "seq": i, "stt_label": str(i + 1), "is_header": False,
+            "material_id": mat.material_id if mat else None,
+            "material_code": mat.code if mat else code,
             "material_name": mat.name if mat else code,
             "uom": m.get("uom"),
             "qty_per_batch": qty_per_batch,
@@ -245,6 +289,14 @@ def preview_bom_lines(db: Session, formula_id: str, planned_batch_count: int, pl
     return _annotate_stock(lines, company_stock, workshop_stock, _materials_by_id(db))
 
 
+def preview_bom_lines_from_recipe_version(db: Session, recipe_version_id: str, planned_batch_count: int,
+                                          planned_volume_hl: float) -> list:
+    """Mirror preview_bom_lines, nạp từ RecipeVersion thay Formula."""
+    lines = build_lines_from_recipe_version(db, recipe_version_id, planned_batch_count, planned_volume_hl)
+    company_stock, workshop_stock = _stock_snapshot(db)
+    return _annotate_stock(lines, company_stock, workshop_stock, _materials_by_id(db))
+
+
 def _assert_no_shortage(lines: list, company_stock: dict, workshop_stock: dict, materials_by_id: dict) -> None:
     """Chặn hẳn việc lập/sửa Lệnh nấu nếu có dòng NVL thiếu tồn (tổng 2 kho) — mirror
     filter_order.py::_validate_material_lines. Trước đây Lệnh nấu chỉ CẢNH BÁO (cờ shortage
@@ -293,6 +345,24 @@ def _validate_formula_selection(db: Session, product_id: str | None, formula_id:
         raise DomainError(f"Công thức '{formula.code}' không còn hiệu lực.")
 
 
+def _validate_recipe_version_selection(db: Session, product_id: str | None, recipe_version_id: str | None) -> None:
+    """Mirror _validate_formula_selection cho hệ Recipe/RecipeVersion: 1 dịch bia có đúng 1
+    Recipe (nhiều RecipeVersion bên trong) — người lập Lệnh nấu chọn 1 version đang hiệu lực
+    (state=effective) của đúng Recipe thuộc dịch bia đã chọn."""
+    if not product_id:
+        return
+    if not recipe_version_id:
+        raise DomainError("Chọn công thức đang dùng cho lệnh nấu nhỏ này.")
+    rv = db.get(RecipeVersion, recipe_version_id)
+    if not rv:
+        raise DomainError("Công thức đã chọn không tồn tại.")
+    recipe = db.get(Recipe, rv.recipe_id)
+    if not recipe or recipe.product_id != product_id:
+        raise DomainError(f"Công thức (version {rv.version_no}) không thuộc Dịch bia đã chọn.")
+    if rv.state != "effective":
+        raise DomainError(f"Công thức '{recipe.code}' version {rv.version_no} không còn hiệu lực.")
+
+
 def _insert_sub_order(db: Session, master_order_id, seq: int, order_code: str, order_year: int, payload: dict, user) -> BrewOrder:
     """Tạo 1 dòng BrewOrder ("lệnh nấu nhỏ") + định mức NVL — KHÔNG validate (caller đã
     validate), KHÔNG commit (caller tự quyết định điểm commit). Dùng chung bởi create_order
@@ -304,11 +374,11 @@ def _insert_sub_order(db: Session, master_order_id, seq: int, order_code: str, o
     qty_overrides = payload.pop("material_qty_overrides", None) or {}
 
     if auto_from_bom and not lines_in:
-        _validate_formula_selection(db, payload.get("product_id"), payload.get("formula_id"))
+        _validate_recipe_version_selection(db, payload.get("product_id"), payload.get("recipe_version_id"))
 
     lines = lines_in if lines_in else (
-        build_lines_from_bom(db, payload.get("formula_id"), payload.get("planned_batch_count"),
-                             payload.get("planned_volume_hl"))
+        build_lines_from_recipe_version(db, payload.get("recipe_version_id"), payload.get("planned_batch_count"),
+                                        payload.get("planned_volume_hl"))
         if auto_from_bom and payload.get("product_id") else []
     )
     company_stock, workshop_stock = _stock_snapshot(db)
@@ -380,11 +450,11 @@ def update_order(db: Session, brew_order_id: str, payload: dict, user) -> BrewOr
         raise DomainError(f"Số lệnh '{new_code}' đã tồn tại trong năm {order.order_year}.")
     _validate_volume_plan(payload.get("planned_volume_hl"), payload.get("volume_tolerance_hl"))
     if auto_from_bom and not lines_in:
-        _validate_formula_selection(db, payload.get("product_id"), payload.get("formula_id"))
+        _validate_recipe_version_selection(db, payload.get("product_id"), payload.get("recipe_version_id"))
 
     lines = lines_in if lines_in else (
-        build_lines_from_bom(db, payload.get("formula_id"), payload.get("planned_batch_count"),
-                             payload.get("planned_volume_hl"))
+        build_lines_from_recipe_version(db, payload.get("recipe_version_id"), payload.get("planned_batch_count"),
+                                        payload.get("planned_volume_hl"))
         if auto_from_bom and payload.get("product_id") else []
     )
     company_stock, workshop_stock = _stock_snapshot(db)
@@ -522,7 +592,7 @@ def list_orders(db: Session) -> list:
             "master_order_id": o.master_order_id, "master_order_code": master.order_code if master else None,
             "seq": o.seq,
             "product_id": o.product_id, "product_code": prod.code if prod else None,
-            "product_desc": o.product_desc, "formula_id": o.formula_id,
+            "product_desc": o.product_desc, "recipe_version_id": o.recipe_version_id,
             "planned_batch_count": o.planned_batch_count,
             "tank_lm": o.tank_lm, "batch_range_from": o.batch_range_from, "batch_range_to": o.batch_range_to,
             "actual_tank_lm": actual_tank, "actual_batch_range": actual_batch_range,
@@ -545,7 +615,8 @@ def get_order(db: Session, brew_order_id: str) -> dict:
     records = _record_summaries(db, brew_order_id)
     prod = db.get(Product, order.product_id) if order.product_id else None
     master = db.get(BrewMasterOrder, order.master_order_id) if order.master_order_id else None
-    formula = db.get(Formula, order.formula_id) if order.formula_id else None
+    recipe_version = db.get(RecipeVersion, order.recipe_version_id) if order.recipe_version_id else None
+    recipe = db.get(Recipe, recipe_version.recipe_id) if recipe_version else None
 
     # Tồn kho TỪNG mã thành viên hiện tại (KHÔNG snapshot — nhóm có thể đổi tồn/thành viên
     # sau khi lệnh đã lập, nên hiện số sống để thủ kho biết thực tế đang còn mã nào).
@@ -579,9 +650,11 @@ def get_order(db: Session, brew_order_id: str) -> dict:
         "seq": order.seq,
         "product_id": order.product_id, "product_code": prod.code if prod else None,
         "product_name": prod.name if prod else None, "product_desc": order.product_desc,
-        "formula_id": order.formula_id,
-        "formula_code": formula.code if formula else None,
-        "formula_process_note": formula.process_reference_note if formula else None,
+        "recipe_version_id": order.recipe_version_id,
+        "recipe_code": recipe.code if recipe else None,
+        "recipe_name": recipe.name if recipe else None,
+        "recipe_version_no": recipe_version.version_no if recipe_version else None,
+        "recipe_note": recipe_version.change_reason if recipe_version else None,
         "planned_batch_count": order.planned_batch_count,
         "bx_min": order.bx_min, "bx_max": order.bx_max,
         "tank_lm": order.tank_lm, "batch_range_from": order.batch_range_from,
@@ -600,17 +673,21 @@ def get_order(db: Session, brew_order_id: str) -> dict:
 
 # ===== Lệnh nấu LỚN (BrewMasterOrder — chứa nhiều "lệnh nấu nhỏ" BrewOrder) =====
 
-def _child_summary(db: Session, order: BrewOrder, products: dict, formulas: dict | None = None) -> dict:
+def _child_summary(db: Session, order: BrewOrder, products: dict, recipe_versions: dict | None = None,
+                   recipes: dict | None = None) -> dict:
     records = _record_summaries(db, order.brew_order_id)
     prod = products.get(order.product_id)
-    formula = (formulas or {}).get(order.formula_id)
+    rv = (recipe_versions or {}).get(order.recipe_version_id)
+    recipe = (recipes or {}).get(rv.recipe_id) if rv else None
     actual_tank, actual_batch_range = _actual_tank_and_batch_range(db, [r["brew_id"] for r in records])
     return {
         "brew_order_id": order.brew_order_id, "seq": order.seq,
         "product_id": order.product_id, "product_code": prod.code if prod else None,
-        "product_desc": order.product_desc, "formula_id": order.formula_id,
-        "formula_code": formula.code if formula else None,
-        "formula_process_note": formula.process_reference_note if formula else None,
+        "product_desc": order.product_desc, "recipe_version_id": order.recipe_version_id,
+        "recipe_code": recipe.code if recipe else None,
+        "recipe_name": recipe.name if recipe else None,
+        "recipe_version_no": rv.version_no if rv else None,
+        "recipe_note": rv.change_reason if rv else None,
         "planned_batch_count": order.planned_batch_count,
         "bx_min": order.bx_min, "bx_max": order.bx_max,
         "tank_lm": order.tank_lm, "batch_range_from": order.batch_range_from, "batch_range_to": order.batch_range_to,
@@ -690,12 +767,13 @@ def list_master_orders(db: Session, years=None) -> list:
         stmt = stmt.where(BrewMasterOrder.order_year.in_(years))
     masters = db.execute(stmt.order_by(BrewMasterOrder.created_at.desc())).scalars().all()
     products = {p.product_id: p for p in db.execute(select(Product)).scalars().all()}
-    formulas = {f.formula_id: f for f in db.execute(select(Formula)).scalars().all()}
+    recipe_versions = {rv.version_id: rv for rv in db.execute(select(RecipeVersion)).scalars().all()}
+    recipes = {r.recipe_id: r for r in db.execute(select(Recipe)).scalars().all()}
     out = []
     for m in masters:
         children_rows = db.execute(select(BrewOrder).where(
             BrewOrder.master_order_id == m.brew_master_order_id).order_by(BrewOrder.seq)).scalars().all()
-        children = [_child_summary(db, o, products, formulas) for o in children_rows]
+        children = [_child_summary(db, o, products, recipe_versions, recipes) for o in children_rows]
         out.append({
             "brew_master_order_id": m.brew_master_order_id, "order_code": m.order_code,
             "issued_by": m.issued_by, "executor_unit": m.executor_unit, "warehouse_keeper": m.warehouse_keeper,
@@ -717,7 +795,8 @@ def get_master_order(db: Session, brew_master_order_id: str) -> dict:
     if not m:
         raise NotFoundError("Lệnh nấu không tồn tại.")
     products = {p.product_id: p for p in db.execute(select(Product)).scalars().all()}
-    formulas = {f.formula_id: f for f in db.execute(select(Formula)).scalars().all()}
+    recipe_versions = {rv.version_id: rv for rv in db.execute(select(RecipeVersion)).scalars().all()}
+    recipes = {r.recipe_id: r for r in db.execute(select(Recipe)).scalars().all()}
     children_rows = db.execute(select(BrewOrder).where(
         BrewOrder.master_order_id == brew_master_order_id).order_by(BrewOrder.seq)).scalars().all()
     # Tồn kho TỪNG mã thành viên hiện tại (KHÔNG snapshot — xem get_order cùng lý do).
@@ -725,7 +804,7 @@ def get_master_order(db: Session, brew_master_order_id: str) -> dict:
     materials_by_id = _materials_by_id(db)
     children = []
     for o in children_rows:
-        summary = _child_summary(db, o, products, formulas)
+        summary = _child_summary(db, o, products, recipe_versions, recipes)
         child_lines = []
         for l in db.execute(select(BrewOrderMaterialLine).where(
                 BrewOrderMaterialLine.brew_order_id == o.brew_order_id).order_by(BrewOrderMaterialLine.seq)).scalars().all():

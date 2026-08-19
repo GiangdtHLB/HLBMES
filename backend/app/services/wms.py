@@ -16,8 +16,8 @@ from ..models.brewing import BottleRecord
 from ..models.master import FinishedProduct, FinishedProductMonthlyPlan, UnitTypeCatalog
 from ..models.materials import GenealogyEdge, Supplier
 from ..models.warehouse import FactoryLocation
-from ..models.wms import (ConsignedEntry, FactoryImportEntry, FinishedGoodsUnit, NearExpiryEntry, Shipment,
-                          Vehicle, WmsLocation, WmsTransfer, WmsTransferLine, WmsWarehouse)
+from ..models.wms import (ConsignedEntry, FactoryImportEntry, FinishedGoodsUnit, LoadSlip, NearExpiryEntry,
+                          Shipment, Vehicle, WmsLocation, WmsTransfer, WmsTransferLine, WmsWarehouse)
 from ..security import User, has_scope, require_perm, require_role, require_scope
 from . import genealogy
 from . import ops_setting as ops_setting_svc
@@ -297,7 +297,8 @@ def list_warehouses(db: Session) -> list:
         select(WmsLocation.warehouse_id, func.count(WmsLocation.loc_id))
         .group_by(WmsLocation.warehouse_id)).all())
     return [{"warehouse_id": w.warehouse_id, "code": w.code, "name": w.name, "address": w.address,
-             "active": w.active, "location_count": loc_counts.get(w.warehouse_id, 0) or 0} for w in rows]
+             "active": w.active, "load_order_sheet_type": w.load_order_sheet_type,
+             "location_count": loc_counts.get(w.warehouse_id, 0) or 0} for w in rows]
 
 
 def create_location(db: Session, payload: dict) -> WmsLocation:
@@ -2694,7 +2695,7 @@ def _next_shipment_code(db: Session, year: int) -> str:
 
 
 def create_shipment(db: Session, ship_to_id: str, lines: list, user: User, header: dict | None = None,
-                    warehouse_id: str | None = None) -> dict:
+                    warehouse_id: str | None = None, load_slip_id: str | None = None) -> dict:
     """Xuất kho — mỗi dòng chọn (sản phẩm, lô, loại đơn vị, số lượng); hệ thống tự chọn
     đúng số vỉ/keg/lon cũ nhất (FIFO) trong lô đó, không cần liệt kê/chọn từng đơn vị (kho
     có thể có hàng trăm ngàn vỉ). Không đủ tồn cho 1 dòng thì báo lỗi rõ ràng (không xuất
@@ -2702,7 +2703,10 @@ def create_shipment(db: Session, ship_to_id: str, lines: list, user: User, heade
     (created_at sớm hơn) mà KHÔNG nằm trong danh sách đang xuất, coi là vi phạm FIFO.
     warehouse_id ("Kho xuất"): giới hạn FIFO trong 1 Kho thành phẩm — BẮT BUỘC nếu tài khoản
     bị giới hạn kho (xem _wh_scope_restricted), tuỳ chọn nếu không (mặc định FIFO tự do toàn
-    công ty như trước)."""
+    công ty như trước). load_slip_id: khi phiếu này được tạo bằng cách chọn 1 xe cụ thể trong
+    Lệnh đóng hàng (Xuất kho › Chọn từ Lệnh đóng hàng) — gắn LoadSlip.shipment_id để khoá xe đó
+    lại (không chọn lại được, không sửa dòng hàng được cho tới khi hoàn tác phiếu này, xem
+    undo_shipment)."""
     require_perm(user, "warehouse.issue")
     if not ship_to_id:
         raise DomainError("Phải chọn nơi xuất đến.")
@@ -2715,6 +2719,15 @@ def create_shipment(db: Session, ship_to_id: str, lines: list, user: User, heade
         _assert_wh_scope(db, user, warehouse_id)
     elif _wh_scope_restricted(user):
         raise DomainError("Vui lòng chọn kho xuất (tài khoản bị giới hạn kho thành phẩm).")
+
+    load_slip = None
+    if load_slip_id:
+        load_slip = db.get(LoadSlip, load_slip_id)
+        if not load_slip:
+            raise NotFoundError("Không tìm thấy xe/biên bản bàn giao tương ứng.")
+        if load_slip.shipment_id:
+            raise DomainError("Xe này đã có phiếu xuất kho — không thể chọn lại. Hoàn tác phiếu "
+                              "xuất cũ nếu cần xuất lại.")
 
     divide_codes = _divide_by_pack_codes(db)
     units = []
@@ -2813,6 +2826,8 @@ def create_shipment(db: Session, ship_to_id: str, lines: list, user: User, heade
                         shipment_type=header_shipment_type, warehouse_id=warehouse_id)
     db.add(shipment)
     db.flush()
+    if load_slip is not None:
+        load_slip.shipment_id = shipment.shipment_id
 
     out_lines = []
     near_expiry_groups: dict[tuple, float] = {}
@@ -3042,6 +3057,12 @@ def undo_shipment(db: Session, shipment_id: str, user: User) -> dict:
         GenealogyEdge.to_type == "ship_to", GenealogyEdge.to_id == shipment.ship_to_id)).scalars().all()
     for e in edges:
         db.delete(e)
+    # Mở khoá lại xe trong Lệnh đóng hàng (nếu phiếu này được tạo bằng cách chọn 1 xe cụ thể) —
+    # cho phép chọn lại xe đó trong Xuất kho và sửa lại dòng hàng (xem create_shipment,
+    # load_slip.py::update_load_slip_lines).
+    linked_slip = db.execute(select(LoadSlip).where(LoadSlip.shipment_id == shipment_id)).scalar_one_or_none()
+    if linked_slip:
+        linked_slip.shipment_id = None
     record_audit(db, entity_type="shipment", entity_id=shipment_id, action="undo", actor=user,
                  before={"unit_count": restored_count}, after={"restored": restored_count})
     db.commit()

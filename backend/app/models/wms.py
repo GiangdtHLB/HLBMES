@@ -29,6 +29,11 @@ class WmsWarehouse(Base):
     name: Mapped[str] = mapped_column(Unicode(255))
     address: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Gán kho này dùng cho lệnh đóng hàng sheet "HL" hay "ĐM" (LoadOrder.sheet_type) — admin tự
+    # khai qua Danh mục Kho thành phẩm, KHÔNG suy đoán qua tên — dùng để khoá kho xuất khi Xuất
+    # kho chọn "từ Lệnh đóng hàng" (xem services/wms.py::create_shipment cần warehouse_id, và
+    # services/load_slip.py::export_lines_for_order). NULL = kho này không gắn sheet nào.
+    load_order_sheet_type: Mapped[Optional[str]] = mapped_column(Unicode(16), nullable=True)
 
 
 class WmsLocation(Base):
@@ -345,6 +350,33 @@ class FactoryImportEntry(Base):
     approved_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
 
 
+class LoadOrder(Base):
+    """"Lệnh đóng hàng" theo ngày — 1 file Excel import tạo ra 1 (hoặc 2, nếu file có cả 2
+    sheet HL/ĐM) LoadOrder, mỗi cái gộp TẤT CẢ xe (LoadSlip) của sheet đó trong lần import.
+    Quy ước vận hành: mỗi ngày chỉ nên có 1 Lệnh đóng hàng/sheet (không ép buộc cứng ở DB/
+    service — vẫn cho tạo thêm nếu cần sửa/tách ca). Dùng để in lại đúng layout bảng ngang
+    của file Excel gốc (mỗi xe 1 dòng, mỗi mặt hàng 1 cột) — khác với LoadSlip (in "Biên bản
+    bàn giao hàng hóa" riêng cho từng xe)."""
+    __tablename__ = "load_order"
+
+    load_order_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
+    order_code: Mapped[str] = mapped_column(Unicode(64), unique=True, index=True)
+    sheet_type: Mapped[str] = mapped_column(Unicode(16), index=True)  # "HL" | "ĐM"
+    # Kho thành phẩm đóng hàng này lấy hàng — suy 1 LẦN lúc import theo
+    # WmsWarehouse.load_order_sheet_type khớp sheet_type (xem services/load_slip.py::
+    # import_casing_order), rồi CHỐT LẠI (không tự đổi theo nếu sau này admin cấu hình lại
+    # load_order_sheet_type — tránh 1 đơn hàng cũ âm thầm đổi kho). NULL = lúc import chưa có
+    # kho nào khớp sheet_type — vẫn dò lại LIVE theo cấu hình hiện tại mỗi lần đọc cho tới khi
+    # có giá trị thật (xem _order_warehouse), để không chặn admin cấu hình muộn sau khi đã nhập.
+    warehouse_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("wms_warehouse.warehouse_id"), nullable=True, index=True)
+    shift_label: Mapped[Optional[str]] = mapped_column(Unicode(64), nullable=True)
+    order_date: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+    source_file_name: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    created_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+
+
 class LoadSlip(Base):
     """1 "Biên bản bàn giao hàng hóa" cho 1 xe — gộp từ mọi dòng cùng SỐ XE trong 1 sheet
     (HL/ĐM) của file Excel "Lệnh đóng hàng" ngày đó (do bộ phận điều vận lập). Đây là chứng
@@ -355,6 +387,16 @@ class LoadSlip(Base):
     load_slip_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
     slip_code: Mapped[str] = mapped_column(Unicode(64), unique=True, index=True)
     sheet_type: Mapped[str] = mapped_column(Unicode(16), index=True)  # "HL" | "ĐM"
+    # Lệnh đóng hàng (ngày) chứa xe này — None cho phiếu cũ nhập trước khi có tính năng này,
+    # hoặc xe lẻ chưa được gộp vào lệnh nào. 1 xe chỉ thuộc ĐÚNG 1 lệnh (không đếm trùng).
+    load_order_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("load_order.load_order_id"), nullable=True, index=True)
+    # Gắn đúng 1 Shipment khi xe này được CHỌN xuất từ Xuất kho (không phải nhập tay/nhập tự
+    # do). NULL = chưa xuất HOẶC phiếu xuất trước đó đã bị hoàn tác (xem services/wms.py::
+    # undo_shipment) — cả 2 trường hợp đều cho phép sửa lại dòng hàng (LoadSlipLine) và chọn
+    # lại xe này trong Xuất kho.
+    shipment_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("shipment.shipment_id"), nullable=True, index=True)
     shift_label: Mapped[Optional[str]] = mapped_column(Unicode(64), nullable=True)   # "Ca 3" (từ ô A2)
     order_date: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)  # Ngày (từ ô A2)
     vehicle_plate: Mapped[str] = mapped_column(Unicode(64), index=True)   # SỐ XE
@@ -388,3 +430,12 @@ class LoadSlipLine(Base):
     quantity: Mapped[float] = mapped_column(Float, default=0)
     is_promo: Mapped[bool] = mapped_column(Boolean, default=False)   # dòng KM rời hay dòng chính
     note: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)   # VD "Theo QĐ KM 371"
+    # Mã SKU khai báo ở dòng "Mã sản phẩm" ngay dưới dòng tiêu đề trong file Excel (tuỳ chọn —
+    # file cũ chưa có dòng này thì cả 2 cột đều None). Cột "LON/Lốc ... KM" (khuyến mại rời do
+    # phân rã từ 1 cột vỉ/thùng nguyên) khai BẰNG ĐÚNG mã của cột vỉ/thùng gốc — is_promo=True
+    # + uom khác (Lon/Lốc thay vì Vỉ/Két) đã đủ phân biệt "cùng SKU, khác mức đóng gói", không
+    # cần thêm cột/quy ước nào khác. product_code giữ nguyên chuỗi gốc kể cả khi không khớp
+    # FinishedProduct nào (giúp phát hiện lỗi gõ mã) — finished_product_id chỉ set khi khớp.
+    product_code: Mapped[Optional[str]] = mapped_column(Unicode(64), nullable=True)
+    finished_product_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("finished_product.finished_product_id"), nullable=True, index=True)
