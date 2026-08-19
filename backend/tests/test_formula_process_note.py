@@ -1,9 +1,12 @@
-"""Test: Công thức có thêm trường process_reference_note (nội dung quyết định ban hành
-công thức + quy trình sản xuất, khai báo 1 lần trên công thức) — phải in nguyên văn vào
-phiếu Lệnh nấu mỗi khi công thức đó được chọn cho 1 lệnh nấu nhỏ. Xem
-models/formula.py::Formula.process_reference_note,
-services/brew_order.py::get_order/_child_summary (field formula_code/formula_process_note
-trả ra cho frontend::printBrewOrder)."""
+"""Test: Công thức (Formula) có thêm trường process_reference_note (nội dung quyết định ban
+hành công thức + quy trình sản xuất, khai báo 1 lần trên công thức). Xem
+models/formula.py::Formula.process_reference_note.
+
+Lưu ý: Lệnh nấu (BrewOrder) không còn nạp NVL từ Formula nữa (đã đổi về hệ Recipe/
+RecipeVersion, xem services/brew_order.py::build_lines_from_recipe_version) — RecipeVersion
+không có field tương đương process_reference_note, nên phần test cũ kiểm tra field này được
+in ra qua get_order/_child_summary (formula_code/formula_process_note) đã bị bỏ cùng với việc
+gỡ Formula khỏi luồng Lệnh nấu, không còn ý nghĩa để test lại ở đây."""
 
 import os
 import tempfile
@@ -62,16 +65,6 @@ def _a_material(client, headers, code):
     return r.json()["material_id"]
 
 
-def _receive_workshop_stock(client, headers, material_id, code, qty=100):
-    # Nhập vào Kho phân xưởng — không bị chặn bởi yêu cầu chọn vị trí kho (chỉ áp dụng phía
-    # Kho công ty, xem routers/warehouse.py::receive) — đủ để build_lines_from_bom không báo
-    # thiếu tồn khi tạo Lệnh nấu test.
-    r = client.post("/api/warehouse/receive", headers=headers,
-                    json={"lot_code": f"LOT-{code}", "material_id": material_id,
-                          "quantity": qty, "uom": "kg", "location": "Kho phân xưởng"})
-    assert r.status_code == 200, r.text
-
-
 def test_create_formula_with_process_reference_note(client, admin_h):
     product_id = _a_product(client, admin_h)
     mat_code = f"MAT-{new_id()[:6]}"
@@ -107,70 +100,3 @@ def test_update_formula_process_reference_note(client, admin_h):
     })
     assert u.status_code == 200, u.text
     assert u.json()["process_reference_note"] == REF_NOTE
-
-
-def test_brew_order_surfaces_formula_process_note(client, admin_h):
-    product_id = _a_product(client, admin_h)
-    mat_code = f"MAT-{new_id()[:6]}"
-    material_id = _a_material(client, admin_h, mat_code)
-    _receive_workshop_stock(client, admin_h, material_id, mat_code)
-    formula = client.post("/api/formulas", headers=admin_h, json={
-        "code": f"CT-{new_id()[:8]}", "product_id": product_id, "base_qty": 1000, "base_uom": "L",
-        "process_reference_note": REF_NOTE,
-        "materials": [{"material_code": mat_code, "qty": 10, "uom": "kg"}],
-    }).json()
-    client.post(f"/api/formulas/{formula['formula_id']}/activate", headers=admin_h)
-
-    order = client.post("/api/brewing/orders", headers=admin_h, json={
-        "order_code": f"LN-{new_id()[:8]}", "product_id": product_id, "formula_id": formula["formula_id"],
-        "planned_batch_count": 2, "planned_volume_hl": 100, "volume_tolerance_hl": 0,
-        "auto_from_bom": True, "lines": [],
-    })
-    assert order.status_code == 201, order.text
-    order_id = order.json()["brew_order_id"]
-
-    detail = client.get(f"/api/brewing/orders/{order_id}", headers=admin_h).json()
-    assert detail["formula_code"] == formula["code"]
-    assert detail["formula_process_note"] == REF_NOTE
-
-
-def test_brew_master_order_children_surface_formula_process_note(client, admin_h):
-    product_id = _a_product(client, admin_h)
-    mat_code = f"MAT-{new_id()[:6]}"
-    material_id = _a_material(client, admin_h, mat_code)
-    _receive_workshop_stock(client, admin_h, material_id, mat_code)
-    formula = client.post("/api/formulas", headers=admin_h, json={
-        "code": f"CT-{new_id()[:8]}", "product_id": product_id, "base_qty": 1000, "base_uom": "L",
-        "process_reference_note": REF_NOTE,
-        "materials": [{"material_code": mat_code, "qty": 10, "uom": "kg"}],
-    }).json()
-    client.post(f"/api/formulas/{formula['formula_id']}/activate", headers=admin_h)
-
-    r = client.post("/api/brewing/brew-master-orders", headers=admin_h, json={
-        "order_code": f"LNL-{new_id()[:8]}",
-        "children": [{"product_id": product_id, "formula_id": formula["formula_id"],
-                      "planned_batch_count": 2, "planned_volume_hl": 100, "volume_tolerance_hl": 0,
-                      "auto_from_bom": True, "lines": []}],
-    })
-    assert r.status_code == 201, r.text
-    master_id = r.json()["brew_master_order_id"]
-
-    master = client.get(f"/api/brewing/brew-master-orders/{master_id}", headers=admin_h).json()
-    child = master["children"][0]
-    assert child["formula_code"] == formula["code"]
-    assert child["formula_process_note"] == REF_NOTE
-
-    listed = client.get("/api/brewing/brew-master-orders", headers=admin_h).json()
-    row = next(m for m in listed if m["brew_master_order_id"] == master_id)
-    assert row["children"][0]["formula_process_note"] == REF_NOTE
-
-
-def test_brew_order_without_formula_has_null_process_note(client, admin_h):
-    order = client.post("/api/brewing/orders", headers=admin_h, json={
-        "order_code": f"LN-NOFORM-{new_id()[:8]}", "auto_from_bom": False, "planned_volume_hl": 100,
-        "lines": [],
-    })
-    assert order.status_code == 201, order.text
-    detail = client.get(f"/api/brewing/orders/{order.json()['brew_order_id']}", headers=admin_h).json()
-    assert detail["formula_code"] is None
-    assert detail["formula_process_note"] is None

@@ -86,11 +86,14 @@ class BrewOrder(Base):
     master_order_id: Mapped[Optional[str]] = mapped_column(ForeignKey("brew_master_order.brew_master_order_id"), nullable=True, index=True)
     seq: Mapped[int] = mapped_column(Integer, default=1)   # thứ tự "Lệnh nấu nhỏ #N" trong lệnh lớn
     product_id: Mapped[Optional[str]] = mapped_column(ForeignKey("product.product_id"), nullable=True, index=True)
-    # Công thức (BOM) người lập lệnh CHỌN dùng cho lệnh nhỏ này — nhiều công thức/dịch bia có
-    # thể cùng hiệu lực (xem services/formula.py), không còn tự suy ra "công thức hiệu lực duy
-    # nhất" như trước. Nullable vì lệnh cũ trước khi có field này không cần backfill (BOM đã
-    # snapshot cứng trong BrewOrderMaterialLine).
+    # CŨ — không còn dùng (Công thức đổi về hệ Recipe/RecipeVersion, xem recipe_version_id bên
+    # dưới); giữ cột lại (không xóa/migrate) để tránh đổi schema không cần thiết trên MSSQL.
     formula_id: Mapped[Optional[str]] = mapped_column(ForeignKey("formula.formula_id"), nullable=True, index=True)
+    # Công thức (BOM) người lập lệnh CHỌN dùng cho lệnh nhỏ này — 1 dịch bia có đúng 1 Recipe,
+    # nhiều RecipeVersion bên trong; chọn 1 version đang "effective" (xem services/recipes.py,
+    # services/brew_order.py::_validate_recipe_version_selection). Nullable vì lệnh cũ trước khi
+    # có field này không cần backfill (BOM đã snapshot cứng trong BrewOrderMaterialLine).
+    recipe_version_id: Mapped[Optional[str]] = mapped_column(ForeignKey("recipe_version.version_id"), nullable=True, index=True)
     product_desc: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)  # "Bia lon Sapphire Mã số...+ chai..."
     planned_batch_count: Mapped[int] = mapped_column(Integer, default=1)     # 12 mẻ
     planned_volume_hl: Mapped[float] = mapped_column(Float, default=0.0)      # kế hoạch (hl) — dùng để scale BOM/mẻ VÀ so với sản lượng nấu thật

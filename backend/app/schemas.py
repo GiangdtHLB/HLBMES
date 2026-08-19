@@ -511,6 +511,7 @@ class WmsWarehouseIn(BaseModel):
     code: str
     name: str
     address: Optional[str] = None
+    load_order_sheet_type: Optional[str] = None
 
 
 class WmsWarehouseUpdate(BaseModel):
@@ -518,6 +519,7 @@ class WmsWarehouseUpdate(BaseModel):
     name: Optional[str] = None
     address: Optional[str] = None
     active: Optional[bool] = None
+    load_order_sheet_type: Optional[str] = None
 
 
 class WmsLocationIn(BaseModel):
@@ -659,6 +661,7 @@ class ShipmentIn(BaseModel):
     vehicle_id: Optional[str] = None            # Liên kết ổn định tới Danh mục lái xe (báo cáo lượt xe)
     from_location: Optional[str] = None         # Xuất tại kho (ngăn lô)
     delivery_place: Optional[str] = None        # Địa điểm
+    load_slip_id: Optional[str] = None          # Chọn từ Lệnh đóng hàng — khoá xe đó lại sau khi xuất
 
 
 class ShipmentUpdate(BaseModel):
@@ -779,6 +782,24 @@ class LoadSlipHeaderUpdate(BaseModel):
     recipient_name: Optional[str] = None
     recipient_title: Optional[str] = None
     recipient_unit: Optional[str] = None
+
+
+class LoadOrderAddVehicleIn(BaseModel):
+    load_slip_id: str
+
+
+class LoadSlipLineIn(BaseModel):
+    product_name: str
+    uom: str
+    quantity: float
+    is_promo: bool = False
+    note: Optional[str] = None
+    product_code: Optional[str] = None
+    finished_product_id: Optional[str] = None
+
+
+class LoadSlipLinesUpdate(BaseModel):
+    lines: list[LoadSlipLineIn]
 
 
 class VehicleIn(BaseModel):
@@ -1576,7 +1597,7 @@ class BrewOrderIn(BaseModel):
     order_code: str
     product_id: Optional[str] = None
     product_desc: Optional[str] = None
-    formula_id: Optional[str] = None
+    recipe_version_id: Optional[str] = None
     planned_batch_count: int = 1
     planned_volume_hl: float = 0.0
     volume_tolerance_hl: float = 0.0
@@ -1596,7 +1617,7 @@ class BrewSubOrderIn(BaseModel):
     services/brew_order.py::_insert_children)."""
     product_id: Optional[str] = None
     product_desc: Optional[str] = None
-    formula_id: Optional[str] = None
+    recipe_version_id: Optional[str] = None
     planned_batch_count: int = 1
     planned_volume_hl: float = 0.0
     volume_tolerance_hl: float = 0.0

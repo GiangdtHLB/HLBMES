@@ -1,13 +1,17 @@
 """WMS thành phẩm: vị trí, đơn vị tồn kho (vỉ/keg), putaway/ship, phân giải barcode (P3-4)."""
 
-from fastapi import APIRouter, Depends, File, UploadFile
+import json
+
+from fastapi import APIRouter, Depends, File, Form, UploadFile
 from sqlalchemy.orm import Session
 
 from ..common import Role
 from ..database import get_db
 from ..schemas import (ConsignedEntryIn, ConsignedEntryUpdate, DecomposeBatchIn, DeleteByLotIn,
                        FactoryImportEntryIn, FactoryImportEntryUpdate, FreeIssueBatchIn,
-                       LoadSlipHeaderUpdate, NearExpiryEntryIn, NearExpiryEntryUpdate, PutawayIn, RelocateBatchIn,
+                       LoadOrderAddVehicleIn, LoadSlipHeaderUpdate, LoadSlipLinesUpdate,
+                       NearExpiryEntryIn, NearExpiryEntryUpdate,
+                       PutawayIn, RelocateBatchIn,
                        ShipmentIn, ShipmentTripIn, ShipmentUpdate, UnitBuildIn, UnitDeleteIn, UnitGroupUpdateIn,
                        UnitTransferIn, VehicleIn, VehicleUpdate, WmsLocationIn, WmsLocationLayoutIn,
                        WmsLocationSplitIn, WmsLocationUpdate, WmsTransferIn, WmsTransferTripIn,
@@ -267,7 +271,7 @@ def create_shipment(payload: ShipmentIn, db: Session = Depends(get_db), user: Us
                                           "vehicle_plate", "vehicle_id", "from_location", "delivery_place"})
     lines = [l.model_dump() for l in payload.lines]
     return svc.create_shipment(db, payload.ship_to_id, lines, user, header=header,
-                               warehouse_id=payload.warehouse_id)
+                               warehouse_id=payload.warehouse_id, load_slip_id=payload.load_slip_id)
 
 
 @router.put("/shipments/{shipment_id}")
@@ -419,13 +423,17 @@ def undo_factory_import(entry_id: str, db: Session = Depends(get_db), user: User
 
 
 @router.post("/load-slips/import", status_code=201)
-async def import_casing_order(file: UploadFile = File(...), db: Session = Depends(get_db),
-                              user: User = Depends(get_current_user)):
+async def import_casing_order(file: UploadFile = File(...), sheet_type_overrides: str | None = Form(None),
+                              db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     """Nhập file Excel "Lệnh đóng hàng" (2 sheet HL/ĐM) — tách thành các Biên bản bàn giao
-    hàng hóa theo từng xe (SỐ XE), sẵn sàng để xem/sửa và in ký."""
+    hàng hóa theo từng xe (SỐ XE), sẵn sàng để xem/sửa và in ký. sheet_type_overrides (tuỳ
+    chọn): chuỗi JSON {"tên sheet thật": "HL"|"ĐM"} — DỰ PHÒNG khi file có sheet không đặt tên
+    đúng "HL"/"ĐM"; nếu có sheet như vậy mà chưa khai overrides, response trả về
+    "needs_mapping" (không lỗi) để frontend hỏi lại người dùng rồi gọi lại kèm overrides."""
     require_perm(user, "warehouse.issue")
     content = await file.read()
-    return load_slip_svc.import_casing_order(db, file.filename, content, user)
+    overrides = json.loads(sheet_type_overrides) if sheet_type_overrides else None
+    return load_slip_svc.import_casing_order(db, file.filename, content, user, sheet_type_overrides=overrides)
 
 
 @router.get("/load-slips")
@@ -450,6 +458,56 @@ def update_load_slip(load_slip_id: str, payload: LoadSlipHeaderUpdate, db: Sessi
 def delete_load_slip(load_slip_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     require_perm(user, "warehouse.issue")
     load_slip_svc.delete_load_slip(db, load_slip_id)
+
+
+@router.get("/load-slips/{load_slip_id}/export-suggestion")
+def export_load_slip_lines(load_slip_id: str, db: Session = Depends(get_db),
+                          user: User = Depends(get_current_user)):
+    return load_slip_svc.export_lines_for_slip(db, load_slip_id)
+
+
+@router.put("/load-slips/{load_slip_id}/lines")
+def update_load_slip_lines(load_slip_id: str, payload: LoadSlipLinesUpdate, db: Session = Depends(get_db),
+                          user: User = Depends(get_current_user)):
+    require_perm(user, "warehouse.issue")
+    return load_slip_svc.update_load_slip_lines(db, load_slip_id, [l.model_dump() for l in payload.lines])
+
+
+@router.get("/load-orders")
+def list_load_orders(sheet_type: str | None = None, limit: int = 1000, offset: int = 0,
+                     db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    return load_slip_svc.list_load_orders(db, sheet_type, limit, offset)
+
+
+@router.get("/load-orders/{load_order_id}")
+def get_load_order(load_order_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    return load_slip_svc.get_load_order(db, load_order_id)
+
+
+@router.get("/load-orders/{load_order_id}/available-vehicles")
+def list_order_available_vehicles(load_order_id: str, db: Session = Depends(get_db),
+                                  user: User = Depends(get_current_user)):
+    return load_slip_svc.list_order_available_vehicles(db, load_order_id)
+
+
+@router.get("/load-orders/{load_order_id}/export-suggestion")
+def export_load_order_lines(load_order_id: str, db: Session = Depends(get_db),
+                            user: User = Depends(get_current_user)):
+    return load_slip_svc.export_lines_for_order(db, load_order_id)
+
+
+@router.post("/load-orders/{load_order_id}/vehicles", status_code=201)
+def add_vehicle_to_order(load_order_id: str, payload: LoadOrderAddVehicleIn, db: Session = Depends(get_db),
+                         user: User = Depends(get_current_user)):
+    require_perm(user, "warehouse.issue")
+    return load_slip_svc.add_vehicle_to_order(db, load_order_id, payload.load_slip_id)
+
+
+@router.delete("/load-orders/{load_order_id}/vehicles/{load_slip_id}")
+def remove_vehicle_from_order(load_order_id: str, load_slip_id: str, db: Session = Depends(get_db),
+                              user: User = Depends(get_current_user)):
+    require_perm(user, "warehouse.issue")
+    return load_slip_svc.remove_vehicle_from_order(db, load_order_id, load_slip_id)
 
 
 @router.get("/resolve")

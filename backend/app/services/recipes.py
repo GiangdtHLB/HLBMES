@@ -132,7 +132,9 @@ def diff_versions(db: Session, va_id: str, vb_id: str) -> dict:
         raise NotFoundError("Recipe version không tồn tại.")
 
     def _mat_map(rv):
-        return {m.get("material_code"): m for m in (rv.materials or [])}
+        # Dòng khai theo Nhóm vật tư thay thế không có material_code — key theo alt_group_code
+        # để không đụng độ/mất dòng khi so sánh 2 version (xem build_lines_from_recipe_version).
+        return {m.get("material_code") or m.get("alt_group_code"): m for m in (rv.materials or [])}
 
     def _param_map(rv):
         return {p.get("name"): p for p in (rv.parameters or [])}

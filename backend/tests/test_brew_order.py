@@ -59,11 +59,13 @@ def lager_product_id(client, admin_h):
 
 
 @pytest.fixture(scope="module")
-def lager_formula_id(client, admin_h, lager_product_id):
-    """Nhiều công thức/dịch bia có thể cùng hiệu lực (xem services/formula.py) — người lập
-    Lệnh nấu BẮT BUỘC tự chọn formula_id, không còn tự suy ra công thức hiệu lực duy nhất."""
-    formulas = client.get(f"/api/formulas?product_id={lager_product_id}", headers=admin_h).json()
-    return next(f["formula_id"] for f in formulas if f["is_active"])
+def lager_recipe_version_id(client, admin_h, lager_product_id):
+    """1 dịch bia có đúng 1 Recipe (nhiều RecipeVersion) — người lập Lệnh nấu BẮT BUỘC tự chọn
+    1 version đang hiệu lực (seed.py tạo sẵn REC-LAGER + version effective cho BIA-LAGER)."""
+    recipes = client.get("/api/recipes", headers=admin_h).json()
+    recipe = next(r for r in recipes if r["product_id"] == lager_product_id)
+    versions = client.get(f"/api/recipes/{recipe['recipe_id']}/versions", headers=admin_h).json()
+    return next(v["version_id"] for v in versions if v["state"] == "effective")
 
 
 def _a_brewhouse_line(client, admin_h):
@@ -83,11 +85,11 @@ def brewhouse_line_id(client, admin_h):
     return _a_brewhouse_line(client, admin_h)
 
 
-def _a_brew_order(client, admin_h, order_code, product_id=None, formula_id=None, planned_batch_count=1,
+def _a_brew_order(client, admin_h, order_code, product_id=None, recipe_version_id=None, planned_batch_count=1,
                   planned_volume_hl=100.0, volume_tolerance_hl=0.0,
                   auto_from_bom=False, lines=None):
     r = client.post("/api/brewing/orders", headers=admin_h, json={
-        "order_code": order_code, "product_id": product_id, "formula_id": formula_id,
+        "order_code": order_code, "product_id": product_id, "recipe_version_id": recipe_version_id,
         "planned_batch_count": planned_batch_count,
         "planned_volume_hl": planned_volume_hl, "volume_tolerance_hl": volume_tolerance_hl,
         "auto_from_bom": auto_from_bom, "lines": lines or [],
@@ -116,12 +118,12 @@ def _set_real_actual_volume(client, admin_h, brew_id, batch_code, volume_hl, lin
     return batch_id
 
 
-def test_create_order_auto_from_bom(client, admin_h, lager_product_id, lager_formula_id):
+def test_create_order_auto_from_bom(client, admin_h, lager_product_id, lager_recipe_version_id):
     # 3 mẻ là số lớn nhất còn NẰM TRONG tồn kho seed sẵn cho cả 3 NVL (Men Lager W-34/70 chỉ
     # đủ đúng 3 mẻ: 50kg/mẻ x 3 = 150kg = đúng tồn) — dùng số này để lệnh còn tạo được (đủ
     # tồn), xem test_create_order_blocked_when_shortage cho trường hợp ngược lại.
     order_id = _a_brew_order(client, admin_h, "LN-BOM01", product_id=lager_product_id,
-                             formula_id=lager_formula_id,
+                             recipe_version_id=lager_recipe_version_id,
                              planned_batch_count=3, planned_volume_hl=444, auto_from_bom=True)
     detail = client.get(f"/api/brewing/orders/{order_id}", headers=admin_h).json()
     assert detail["planned_batch_count"] == 3
@@ -137,12 +139,12 @@ def test_create_order_auto_from_bom(client, admin_h, lager_product_id, lager_for
     assert malt["stock_company_snapshot"] is not None or malt["stock_workshop_snapshot"] is not None
 
 
-def test_bom_preview_matches_created_order_without_creating_it(client, admin_h, lager_product_id, lager_formula_id):
+def test_bom_preview_matches_created_order_without_creating_it(client, admin_h, lager_product_id, lager_recipe_version_id):
     """Xem trước NVL (nút "Xem NVL") phải cho đúng số liệu như lúc tạo lệnh thật — nhưng
     KHÔNG tạo ra lệnh nào (chỉ để kiểm tra đủ/thiếu tồn trước khi bấm Tạo lệnh nấu)."""
     before = client.get("/api/brewing/orders", headers=admin_h).json()
     preview = client.get("/api/brewing/orders/bom-preview", headers=admin_h,
-                        params={"formula_id": lager_formula_id, "planned_batch_count": 12,
+                        params={"recipe_version_id": lager_recipe_version_id, "planned_batch_count": 12,
                                "planned_volume_hl": 1776})
     assert preview.status_code == 200, preview.text
     lines = {l["material_name"]: l for l in preview.json() if not l["is_header"]}
@@ -159,11 +161,11 @@ def test_bom_preview_matches_created_order_without_creating_it(client, admin_h, 
     assert len(after) == len(before), "Xem trước không được tạo ra lệnh nấu nào"
 
 
-def test_bom_preview_flags_shortage_for_huge_batch(client, admin_h, lager_product_id, lager_formula_id):
+def test_bom_preview_flags_shortage_for_huge_batch(client, admin_h, lager_product_id, lager_recipe_version_id):
     """planned_volume_hl không còn ảnh hưởng nhu cầu NVL — số mẻ kế hoạch cực lớn mới
     khiến tổng nhu cầu vượt tồn kho (Nhu cầu Tổng mẻ = Nhu cầu 1 mẻ x Số mẻ kế hoạch)."""
     preview = client.get("/api/brewing/orders/bom-preview", headers=admin_h,
-                        params={"formula_id": lager_formula_id, "planned_batch_count": 999999,
+                        params={"recipe_version_id": lager_recipe_version_id, "planned_batch_count": 999999,
                                "planned_volume_hl": 100})
     assert preview.status_code == 200, preview.text
     lines = [l for l in preview.json() if not l["is_header"]]
@@ -396,12 +398,12 @@ def test_delete_order_blocked_once_executed(client, admin_h, vanhanh_h, lager_pr
     assert blocked.status_code == 409, blocked.text
 
 
-def test_update_order_before_execution(client, admin_h, lager_product_id, lager_formula_id):
+def test_update_order_before_execution(client, admin_h, lager_product_id, lager_recipe_version_id):
     order_id = _a_brew_order(client, admin_h, "LN-UPD01", product_id=lager_product_id,
-                             formula_id=lager_formula_id,
+                             recipe_version_id=lager_recipe_version_id,
                              planned_batch_count=1, planned_volume_hl=100.0, auto_from_bom=True)
     updated = client.put(f"/api/brewing/orders/{order_id}", headers=admin_h, json={
-        "order_code": "LN-UPD01-B", "product_id": lager_product_id, "formula_id": lager_formula_id,
+        "order_code": "LN-UPD01-B", "product_id": lager_product_id, "recipe_version_id": lager_recipe_version_id,
         "planned_batch_count": 3, "planned_volume_hl": 300.0, "volume_tolerance_hl": 5.0,
         "auto_from_bom": True, "lines": [],
     })

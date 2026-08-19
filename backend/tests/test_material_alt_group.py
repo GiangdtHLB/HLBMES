@@ -78,6 +78,20 @@ def _a_alt_group(client, admin_h, member_ids, code=None, name=None, unit="kg"):
     return r.json()
 
 
+def _lager_recipe_id(client, admin_h, lager_product_id):
+    """1 dịch bia có đúng 1 Recipe — seed.py đã tạo sẵn REC-LAGER cho BIA-LAGER, các test dưới
+    THÊM version mới vào chính Recipe này (không tạo Recipe khác cho cùng sản phẩm — bị chặn
+    bởi unique product_id, xem models/recipes.py)."""
+    recipes = client.get("/api/recipes", headers=admin_h).json()
+    return next(r["recipe_id"] for r in recipes if r["product_id"] == lager_product_id)
+
+
+def _activate_recipe_version(client, headers, version_id):
+    for target in ("review", "approved", "effective"):
+        r = client.post(f"/api/recipes/versions/{version_id}/transition", headers=headers, json={"target": target})
+        assert r.status_code == 200, r.text
+
+
 # ---- 1) CRUD ----
 
 def test_create_alt_group_rejects_duplicate_code(client, admin_h, malt_pils_id, malt_vienna_id):
@@ -175,14 +189,14 @@ def test_formula_rejects_unknown_or_inactive_alt_group(client, admin_h, malt_pil
 
 def test_brew_order_bom_preview_resolves_alt_group_line(client, admin_h, malt_pils_id, malt_vienna_id, lager_product_id):
     g = _a_alt_group(client, admin_h, [malt_pils_id, malt_vienna_id], name="Malt Úc")
-    formula = client.post("/api/formulas", headers=admin_h,
-                          json={"code": f"CT-{new_id()[:8]}", "product_id": lager_product_id,
-                                "base_qty": 1000, "base_uom": "L",
-                                "materials": [{"alt_group_code": g["code"], "qty": 825, "uom": "kg"}]}).json()
-    client.post(f"/api/formulas/{formula['formula_id']}/activate", headers=admin_h)
+    recipe_id = _lager_recipe_id(client, admin_h, lager_product_id)
+    v = client.post(f"/api/recipes/{recipe_id}/versions", headers=admin_h,
+                    json={"base_qty": 1000, "base_uom": "L",
+                          "materials": [{"alt_group_code": g["code"], "qty": 825, "uom": "kg"}]}).json()
+    _activate_recipe_version(client, admin_h, v["version_id"])
 
     preview = client.get("/api/brewing/orders/bom-preview", headers=admin_h,
-                         params={"formula_id": formula["formula_id"], "planned_batch_count": 2,
+                         params={"recipe_version_id": v["version_id"], "planned_batch_count": 2,
                                  "planned_volume_hl": 100}).json()
     line = next(l for l in preview if not l.get("is_header"))
     assert line["material_id"] is None
@@ -196,15 +210,15 @@ def test_brew_order_bom_preview_resolves_alt_group_line(client, admin_h, malt_pi
 
 def test_brew_order_created_from_alt_group_formula_persists_group_code(client, admin_h, malt_pils_id, malt_vienna_id, lager_product_id):
     g = _a_alt_group(client, admin_h, [malt_pils_id, malt_vienna_id], name="Malt Úc")
-    formula = client.post("/api/formulas", headers=admin_h,
-                          json={"code": f"CT-{new_id()[:8]}", "product_id": lager_product_id,
-                                "base_qty": 1000, "base_uom": "L",
-                                "materials": [{"alt_group_code": g["code"], "qty": 500, "uom": "kg"}]}).json()
-    client.post(f"/api/formulas/{formula['formula_id']}/activate", headers=admin_h)
+    recipe_id = _lager_recipe_id(client, admin_h, lager_product_id)
+    v = client.post(f"/api/recipes/{recipe_id}/versions", headers=admin_h,
+                    json={"base_qty": 1000, "base_uom": "L",
+                          "materials": [{"alt_group_code": g["code"], "qty": 500, "uom": "kg"}]}).json()
+    _activate_recipe_version(client, admin_h, v["version_id"])
 
     order = client.post("/api/brewing/orders", headers=admin_h, json={
         "order_code": f"LN-ALTGRP-{new_id()[:6]}", "product_id": lager_product_id,
-        "formula_id": formula["formula_id"],
+        "recipe_version_id": v["version_id"],
         "planned_batch_count": 1, "planned_volume_hl": 100, "volume_tolerance_hl": 0,
         "auto_from_bom": True, "lines": [],
     })

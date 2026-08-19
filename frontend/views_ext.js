@@ -10,6 +10,9 @@
 
   let XK_CART = [];   // {product_name, lot_code, unit_type, quantity} — Xuất kho: nhiều dòng, gửi 1 lần
   let DC_CART = [];   // {product_name, lot_code, unit_type, quantity} — Điều chuyển: mirror XK_CART
+  // Xe (LoadSlip) đang được chọn để tự điền cart trong Xuất kho — gửi kèm lúc submit để backend
+  // gắn LoadSlip.shipment_id (khoá xe đó lại). null = đang xuất tự do / chưa chọn xe nào.
+  let XK_BOUND_LOAD_SLIP_ID = null;
 
   const num = (id) => { const x = $(id).value; return x === "" ? null : parseFloat(x); };
   const opt = (arr, val, lab, sel) => arr.map(o =>
@@ -37,11 +40,79 @@
   }
 
   // ---------- Lệnh đóng hàng → Biên bản bàn giao hàng hóa (theo xe) ----------
+  // Dòng hàng (LoadSlipLine) chỉ SỬA được khi xe CHƯA có phiếu xuất kho (s.shipment_id null) —
+  // xe đã xuất phải hoàn tác phiếu xuất đó trước (Xuất kho › Lịch sử) mới sửa lại được (xem
+  // services/load_slip.py::update_load_slip_lines, services/wms.py::undo_shipment). Bảng hiện
+  // TOÀN BỘ dòng (kể cả dòng chưa khớp Mã sản phẩm) giống hệt dữ liệu dùng để in, không lọc bớt
+  // như trước — dòng chưa khớp vẫn sửa được (chọn lại đúng sản phẩm trong dropdown).
   async function openLoadSlipModal(loadSlipId) {
     const s = await GET(`/wms/load-slips/${loadSlipId}`);
-    const lineRows = s.lines.map(l => `<tr class="${l.is_promo ? "row-cyan" : ""}">
-      <td>${l.seq + 1}</td><td>${esc(l.product_name)}</td><td>${l.quantity}</td><td>${esc(l.uom)}</td>
-      <td class="muted">${l.is_promo ? "Khuyến mại — hàng lẻ" : ""}</td><td class="muted">${esc(l.note || "")}</td></tr>`).join("");
+    const canEdit = !s.shipment_id;
+    const finishedProducts = canEdit ? await GET("/finished-products").catch(() => []) : [];
+    const fpOptions = finishedProducts.map(fp =>
+      `<option value="${esc(fp.finished_product_id)}">${esc(fp.code)} — ${esc(fp.name)}</option>`).join("");
+    // State cục bộ cho form sửa — mảng mutable, render lại toàn bộ tbody mỗi lần đổi.
+    let lineState = s.lines.map(l => ({ product_name: l.product_name, uom: l.uom, quantity: l.quantity,
+      is_promo: l.is_promo, note: l.note || "", product_code: l.product_code || "",
+      finished_product_id: l.finished_product_id || "" }));
+
+    function renderLinesBody() {
+      if (!canEdit) {
+        return s.lines.map((l, i) => `<tr class="${l.is_promo ? "row-cyan" : ""}">
+          <td>${i + 1}</td><td>${esc(l.product_name)}</td><td class="muted">${esc(l.product_code || "—")}</td>
+          <td>${l.quantity}</td><td>${esc(l.uom)}</td>
+          <td class="muted">${l.is_promo ? "Khuyến mại — hàng lẻ" : ""}</td><td class="muted">${esc(l.note || "")}</td></tr>`
+        ).join("") || '<tr><td colspan=7 class="muted">Chưa có dòng hàng hóa.</td></tr>';
+      }
+      return lineState.map((l, i) => `<tr>
+        <td>${i + 1}</td>
+        <td><input data-ll-name="${i}" value="${esc(l.product_name)}" placeholder="Tên hàng" style="width:140px"/></td>
+        <td><select data-ll-fp="${i}"><option value="">(chưa khớp)</option>${fpOptions.replace(
+          `value="${esc(l.finished_product_id)}"`, `value="${esc(l.finished_product_id)}" selected`)}</select></td>
+        <td class="muted">${esc(l.product_code || "—")}</td>
+        <td><input type="number" min="0.001" step="any" data-ll-qty="${i}" value="${l.quantity}" style="width:70px"/></td>
+        <td><input data-ll-uom="${i}" value="${esc(l.uom)}" style="width:60px"/></td>
+        <td><input type="checkbox" data-ll-promo="${i}" ${l.is_promo ? "checked" : ""}/></td>
+        <td><input data-ll-note="${i}" value="${esc(l.note)}" style="width:100px"/></td>
+        <td><button class="btn sm sec" data-ll-del="${i}">Xoá</button></td></tr>`).join("") ||
+        '<tr><td colspan=8 class="muted">Chưa có dòng hàng hóa.</td></tr>';
+    }
+
+    function wireEditInputs() {
+      if (!canEdit) return;
+      document.querySelectorAll("[data-ll-name]").forEach(el => el.oninput = () =>
+        lineState[+el.dataset.llName].product_name = el.value);
+      document.querySelectorAll("[data-ll-fp]").forEach(el => el.onchange = () => {
+        const i = +el.dataset.llFp;
+        lineState[i].finished_product_id = el.value || "";
+        const fp = finishedProducts.find(f => f.finished_product_id === el.value);
+        lineState[i].product_code = fp ? fp.code : "";
+        if (fp && !lineState[i].product_name) lineState[i].product_name = fp.name;
+        rerenderLines();
+      });
+      document.querySelectorAll("[data-ll-qty]").forEach(el => el.oninput = () =>
+        lineState[+el.dataset.llQty].quantity = parseFloat(el.value) || 0);
+      document.querySelectorAll("[data-ll-uom]").forEach(el => el.oninput = () =>
+        lineState[+el.dataset.llUom].uom = el.value);
+      document.querySelectorAll("[data-ll-promo]").forEach(el => el.onchange = () =>
+        lineState[+el.dataset.llPromo].is_promo = el.checked);
+      document.querySelectorAll("[data-ll-note]").forEach(el => el.oninput = () =>
+        lineState[+el.dataset.llNote].note = el.value);
+      document.querySelectorAll("[data-ll-del]").forEach(b => b.onclick = () => {
+        lineState.splice(+b.dataset.llDel, 1);
+        rerenderLines();
+      });
+    }
+
+    function rerenderLines() {
+      $("ld_lines_body").innerHTML = renderLinesBody();
+      wireEditInputs();
+    }
+
+    const shippedNote = s.shipment_id
+      ? `<div class="muted" style="margin-top:6px;color:var(--red)">⚠ Đã có phiếu xuất kho <b>${esc(s.shipment_code || "")}</b>
+          — cần hoàn tác phiếu xuất đó (Xuất kho › Lịch sử) trước khi sửa dòng hàng.</div>`
+      : "";
     modal(`<h3>Biên bản bàn giao hàng hóa — <code class="k">${esc(s.slip_code)}</code></h3>
       <div class="muted" style="margin-bottom:8px">
         Sheet ${esc(s.sheet_type)} · ${esc(s.shift_label || "")} ${s.order_date ? new Date(s.order_date).toLocaleDateString("vi-VN") : ""} ·
@@ -58,12 +129,31 @@
         <div class="field"><label>Đơn vị</label><input id="ld_recipient_unit" value="${esc(s.recipient_unit || "")}"/></div>
       </div>
       <div class="tablewrap" style="max-height:45vh"><table>
-        <thead><tr><th>TT</th><th>Hàng hóa</th><th>SL</th><th>ĐVT</th><th>Loại</th><th>Ghi chú</th></tr></thead>
-        <tbody>${lineRows || '<tr><td colspan=6 class="muted">Chưa có dòng hàng hóa.</td></tr>'}</tbody></table></div>
+        <thead><tr><th>TT</th>${canEdit ? "<th>Tên hàng</th><th>Sản phẩm (Danh mục)</th><th>Mã SP</th>" : "<th>Hàng hóa</th><th>Mã hàng</th>"}<th>SL</th><th>ĐVT</th><th>Loại</th><th>Ghi chú</th>${canEdit ? "<th></th>" : ""}</tr></thead>
+        <tbody id="ld_lines_body">${renderLinesBody()}</tbody></table></div>
+      ${canEdit ? `<button class="btn sm sec" id="ld_addline" style="margin-top:6px">+ Thêm dòng</button>` : ""}
+      ${shippedNote}
       <div class="row" style="margin-top:10px">
         <button class="btn sec" id="ld_save">Lưu</button>
+        ${canEdit ? `<button class="btn sec" id="ld_save_lines">Lưu dòng hàng</button>` : ""}
         <button class="btn" id="ld_print">🖨️ In biên bản</button>
-      </div>`);
+      </div>`, null, true);
+    wireEditInputs();
+    if (canEdit) {
+      $("ld_addline").onclick = () => {
+        lineState.push({ product_name: "", uom: "Vỉ", quantity: 1, is_promo: false, note: "",
+                        product_code: "", finished_product_id: "" });
+        rerenderLines();
+      };
+      $("ld_save_lines").onclick = () => guard(async () => {
+        const updated = await PUT(`/wms/load-slips/${loadSlipId}/lines`, { lines: lineState.map(l => ({
+          product_name: l.product_name, uom: l.uom, quantity: l.quantity, is_promo: l.is_promo,
+          note: l.note || null, product_code: l.product_code || null,
+          finished_product_id: l.finished_product_id || null })) });
+        Object.assign(s, updated);
+        toast("Đã lưu dòng hàng");
+      });
+    }
     $("ld_save").onclick = () => guard(async () => {
       const updated = await PUT(`/wms/load-slips/${loadSlipId}`, {
         issuer_name: $("ld_issuer_name").value.trim() || null,
@@ -77,6 +167,106 @@
       toast("Đã lưu");
     });
     $("ld_print").onclick = () => printLoadSlip(s);
+  }
+
+  // ---------- "Lệnh đóng hàng" theo ngày (gộp nhiều xe của 1 lần import) ----------
+  async function openLoadOrderModal(loadOrderId) {
+    const o = await GET(`/wms/load-orders/${loadOrderId}`);
+    const renderVehicleRows = () => o.vehicles.map((v, i) => `<tr>
+      <td>${i + 1}</td><td class="code">${esc(v.slip_code)}</td><td>${esc(v.vehicle_plate)}</td>
+      <td>${esc(v.driver_name || "—")}</td><td class="muted">${esc(v.routes || "—")}</td>
+      <td>${v.lines.length}</td>
+      <td><button class="btn sm sec" data-rmveh="${esc(v.load_slip_id)}">Bỏ</button></td></tr>`).join("") ||
+      `<tr><td colspan=7 class="muted">Chưa có xe nào trong lệnh này.</td></tr>`;
+    const avail = await GET(`/wms/load-orders/${loadOrderId}/available-vehicles`).catch(() => []);
+    const availOptions = avail.map(v =>
+      `<option value="${esc(v.load_slip_id)}">${esc(v.vehicle_plate)} — ${esc(v.driver_name || "?")} (${esc(v.slip_code)})</option>`).join("");
+    modal(`<h3>Lệnh đóng hàng — <code class="k">${esc(o.order_code)}</code></h3>
+      <div class="muted" style="margin-bottom:8px">
+        Sheet ${esc(o.sheet_type)} · ${esc(o.shift_label || "")} ${o.order_date ? new Date(o.order_date).toLocaleDateString("vi-VN") : ""} ·
+        ${o.vehicles.length} xe</div>
+      <div class="tablewrap" style="max-height:40vh"><table>
+        <thead><tr><th>TT</th><th>Số phiếu</th><th>Số xe</th><th>Lái xe</th><th>Tuyến (NPP)</th><th>Số dòng</th><th></th></tr></thead>
+        <tbody id="lo_veh_body">${renderVehicleRows()}</tbody></table></div>
+      <div class="row" style="margin-top:10px">
+        <div class="field" style="flex:1"><label>+ Thêm xe (chỉ hiện xe chưa thuộc lệnh nào)</label>
+          <select id="lo_add_veh" ${avail.length ? "" : "disabled"}>
+            ${avail.length ? `<option value="">— Chọn xe —</option>${availOptions}` : '<option value="">(Không còn xe nào khả dụng)</option>'}
+          </select></div>
+        <button class="btn sec" id="lo_add_btn" style="align-self:flex-end" ${avail.length ? "" : "disabled"}>Thêm</button>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <button class="btn" id="lo_print">🖨️ In lệnh đóng hàng</button>
+      </div>`);
+    document.querySelectorAll("[data-rmveh]").forEach(b => b.onclick = () => guard(async () => {
+      await DELETE(`/wms/load-orders/${loadOrderId}/vehicles/${b.dataset.rmveh}`);
+      toast("Đã bỏ xe khỏi lệnh"); closeModal(); openLoadOrderModal(loadOrderId);
+    }));
+    $("lo_add_btn").onclick = () => guard(async () => {
+      const id = $("lo_add_veh").value;
+      if (!id) throw new Error("Chọn xe trước.");
+      await POST(`/wms/load-orders/${loadOrderId}/vehicles`, { load_slip_id: id });
+      toast("Đã thêm xe vào lệnh"); closeModal(); openLoadOrderModal(loadOrderId);
+    });
+    $("lo_print").onclick = () => printLoadOrder(o);
+  }
+
+  // Gộp lines của TẤT CẢ xe trong lệnh thành cột — mỗi (tên hàng, khuyến mại hay không) là 1
+  // cột riêng, giữ đúng thứ tự xuất hiện đầu tiên (giống thứ tự cột trong file Excel gốc). Nếu
+  // 1 tên hàng vừa có dòng thường vừa có dòng khuyến mại (trường hợp KM gõ trong ô, không phải
+  // cột riêng), thêm hậu tố "(KM)" cho cột khuyến mại để phân biệt khi in — cột "LON ... KM"
+  // vốn đã có chữ KM trong tên thật thì giữ nguyên, không thêm lặp.
+  function _loadOrderColumns(order) {
+    const cols = [];
+    const seen = new Set();
+    order.vehicles.forEach(v => v.lines.forEach(l => {
+      const name = (l.product_name || "").trim();
+      const key = name + "|" + (l.is_promo ? "1" : "0");
+      if (!seen.has(key)) { seen.add(key); cols.push({ name, isPromo: l.is_promo }); }
+    }));
+    const nameCount = {};
+    cols.forEach(c => { nameCount[c.name] = (nameCount[c.name] || 0) + 1; });
+    return cols.map(c => ({ ...c, key: c.name + "|" + (c.isPromo ? "1" : "0"),
+      label: (nameCount[c.name] > 1 && c.isPromo) ? `${c.name} (KM)` : c.name }));
+  }
+
+  function printLoadOrder(order) {
+    const cols = _loadOrderColumns(order);
+    const headCells = cols.map(c => `<th>${esc(c.label)}</th>`).join("");
+    const bodyRows = order.vehicles.map((v, i) => {
+      const qtyByKey = {};
+      v.lines.forEach(l => { qtyByKey[(l.product_name || "").trim() + "|" + (l.is_promo ? "1" : "0")] = l.quantity; });
+      const cells = cols.map(c => {
+        const q = qtyByKey[c.key];
+        return `<td style="text-align:center">${q != null ? q : ""}</td>`;
+      }).join("");
+      return `<tr><td style="text-align:center">${i + 1}</td><td>${esc(v.vehicle_plate)}</td>
+        <td>${esc(v.driver_name || "")}</td><td>${esc(v.routes || "")}</td><td>${esc(v.note || "")}</td>${cells}</tr>`;
+    }).join("");
+    const title = order.sheet_type === "HL" ? "LỆNH ĐÓNG HÀNG HẠ LONG" : "LỆNH ĐÓNG HÀNG ĐÔNG MAI";
+    const dateStr = order.order_date ? new Date(order.order_date).toLocaleDateString("vi-VN") : "";
+    const html = `<!doctype html><html><head><meta charset="utf-8"/><title>${esc(order.order_code)}</title>
+      <style>
+        @page { size: A4 landscape; margin: 10mm; }
+        * { box-sizing: border-box; }
+        body{font-family:"Times New Roman",Times,serif;color:#000;background:#fff;margin:0;font-size:12px}
+        h2{font-size:16px;margin:2px 0;text-align:center}
+        .sub{text-align:center;margin-bottom:10px}
+        table{border-collapse:collapse;width:100%}
+        th, td{border:1px solid #000;padding:3px 5px;font-size:11px}
+        th{background:#eee;text-align:center}
+      </style></head><body>
+      <h2>${title}</h2>
+      <div class="sub">${esc(order.shift_label || "")} ${esc(dateStr)} — Số: ${esc(order.order_code)}</div>
+      <table><thead><tr><th>TT</th><th>SỐ XE</th><th>TÊN LX</th><th>NPP VÀ NVBH</th><th>GHI CHÚ</th>${headCells}</tr></thead>
+      <tbody>${bodyRows || `<tr><td colspan="${5 + cols.length}" style="text-align:center">Chưa có xe nào.</td></tr>`}</tbody></table>
+      </body></html>`;
+    const w = window.open("", "_blank");
+    if (!w) { toast("Trình duyệt chặn cửa sổ in — vui lòng cho phép popup.", "err"); return; }
+    w.document.write(html);
+    w.document.close();
+    w.focus();
+    setTimeout(() => w.print(), 300);
   }
 
   // Danh mục hàng hóa cố định đúng theo mẫu giấy in sẵn (BIÊN BẢN BÀN GIAO HÀNG HÓA, mẫu số
@@ -191,7 +381,7 @@
       <td style="text-align:center">${g.qty}</td><td style="text-align:center">${esc(g.dvt)}</td>
       <td>${esc(g.mota)}</td><td>${dash(g.note)}</td></tr>`).join("");
     const extraHtml = extra.map((l, i) => `<tr>
-      <td style="text-align:center">${keptFixed.length + i + 1}</td><td>${dash(l.product_name)}</td>
+      <td style="text-align:center">${keptFixed.length + i + 1}</td><td>${dash(l.finished_product_name || l.product_name)}</td>
       <td style="text-align:center">${l.quantity}</td><td style="text-align:center">${dash(l.uom)}</td>
       <td>${l.is_promo ? "Khuyến mại — hàng lẻ, chưa đủ vỉ/thùng" : ""}</td><td>${dash(l.note)}</td></tr>`).join("");
     const html = bienBanBanGiaoHtml({
@@ -1667,13 +1857,14 @@
     // "Nơi xuất đến" dùng chung danh mục Nhà cung cấp (không còn catalog ship_to_location riêng —
     // xem models/wms.py, migration 9a0b1c2d3e4f_ship_to_supplier_merge) — biến `shipTos` giữ tên cũ
     // để đỡ đổi các chỗ dùng bên dưới, nhưng nguồn dữ liệu giờ là /api/suppliers.
-    const [locs, shipTos, finishedProducts, vehicles, unitTypes, gsEligible, warehouses, factoryLocations, fpGroups] = await Promise.all([
+    const [locs, shipTos, finishedProducts, vehicles, unitTypes, gsEligible, warehouses, factoryLocations, fpGroups, xkLoadOrders] = await Promise.all([
       GET("/wms/locations"), GET("/suppliers"), GET("/finished-products").catch(() => []),
       GET("/wms/vehicles").catch(() => []), GET("/unit-types").catch(() => []),
       GET("/wms/vehicles/consigned-eligible").catch(() => []),
       GET("/wms/warehouses").catch(() => []),
       GET("/factory-locations").catch(() => []),
-      sec === "fgstock" ? GET("/finished-product-groups").catch(() => []) : Promise.resolve([])]);
+      sec === "fgstock" ? GET("/finished-product-groups").catch(() => []) : Promise.resolve([]),
+      sec === "xuatkho" ? GET("/wms/load-orders").catch(() => []) : Promise.resolve([])]);
     // "Kho thành phẩm" (WmsWarehouse) là cấp cha mới của vị trí kho — 1 kho có nhiều vị trí.
     // Nhãn hiển thị ưu tiên "[mã kho] mã vị trí - tên vị trí" để biết ngay lô đang ở kho nào.
     const whLabel = (l) => `${l.warehouse_name ? `[${esc(l.warehouse_name)}] ` : ""}${esc(l.code)}${l.name ? ` - ${esc(l.name)}` : ""}${locZoneSuffix(l)}`;
@@ -1820,9 +2011,20 @@
       // "(Tất cả kho — FIFO toàn công ty)" để giữ nguyên hành vi cũ.
       const myWh = myAllowedWarehouses(warehouses);
       const whRestricted = isWhScopeRestricted();
-      const xkWhOpt = myWh.map(w => `<option value="${esc(w.code)}">${esc(w.name)}</option>`).join("");
+      // value = warehouse_id (PK thật) — KHÔNG dùng code, vì backend (_assert_wh_scope/
+      // _consume_lot_rows) đều tra theo PK; dùng code ở đây từng là 1 bug tiềm ẩn (chưa lộ vì
+      // đa số user để trống "Tất cả kho"), nay bắt buộc phải đúng vì tính năng "chọn từ Lệnh
+      // đóng hàng" khoá cứng 1 kho cụ thể.
+      const xkWhOpt = myWh.map(w => `<option value="${esc(w.warehouse_id)}">${esc(w.name)}</option>`).join("");
+      const loOpt = xkLoadOrders.map(o => `<option value="${esc(o.load_order_id)}">${esc(o.order_code)} (${esc(o.sheet_type)}) — ${o.vehicle_count} xe</option>`).join("");
       body = `<div class="panel"><h2>🚚 Xuất kho</h2>
         <div class="muted" style="margin-bottom:8px">Chọn nơi xuất đến, sau đó thêm từng dòng sản phẩm/lô/loại đơn vị + số lượng cần xuất vào "Sản phẩm đã chọn" (thêm được nhiều lô/sản phẩm khác nhau trong cùng 1 phiếu), rồi bấm "Tạo phiếu xuất kho". Hệ thống tự chọn đúng vỉ/keg/lon cũ nhất (FIFO) trong mỗi lô — không cần liệt kê/chọn từng đơn vị.</div>
+        <div class="row">
+          <div class="field" style="flex:1"><label>🗂️ Chọn từ Lệnh đóng hàng (tuỳ chọn)</label>
+            <select id="xk_loadorder"><option value="">(không — chọn tự do)</option>${loOpt}</select></div>
+        </div>
+        <div id="xk_lo_vehicles"></div>
+        <div id="xk_lo_banner"></div>
         <div class="row">
           <div class="field"><label>Kho xuất${whRestricted ? " (bắt buộc)" : ""}</label>
             <select id="xk_wh">${whRestricted ? "" : '<option value="">(Tất cả kho — FIFO toàn công ty)</option>'}${xkWhOpt}</select></div>
@@ -1891,29 +2093,49 @@
       </div>
       <div class="panel"><h2>Lịch sử xuất tự do</h2><input class="searchbox" data-tbl="t_fi_history" placeholder="Tìm theo sản phẩm, lô, người..."/><div id="fi_history" class="muted">Đang tải…</div></div>`;
     } else if (sec === "lenhdonghang") {
-      const slips = await GET("/wms/load-slips").catch(() => []);
+      const [slips, loadOrders] = await Promise.all([
+        GET("/wms/load-slips").catch(() => []),
+        GET("/wms/load-orders").catch(() => []),
+      ]);
       const renderTbl = (rows, tableId) => `<input class="searchbox" data-tbl="${tableId}" placeholder="Tìm theo số phiếu, số xe, lái xe, tuyến..."/>
         <div class="tablewrap"><table id="${tableId}">
-        <thead><tr><th>Số phiếu</th><th>Ca/Ngày</th><th>Số xe</th><th>Lái xe</th><th>Tuyến (NPP)</th><th>Số dòng</th><th></th></tr></thead>
+        <thead><tr><th>Số phiếu</th><th>Ca/Ngày</th><th>Số xe</th><th>Lái xe</th><th>Tuyến (NPP)</th><th>Số dòng</th><th>Trạng thái</th><th></th></tr></thead>
         <tbody>${rows.map(s => `<tr>
           <td class="code">${esc(s.slip_code)}</td>
           <td class="muted">${esc(s.shift_label || "")} ${s.order_date ? new Date(s.order_date).toLocaleDateString("vi-VN") : ""}</td>
           <td>${esc(s.vehicle_plate)}</td><td>${esc(s.driver_name || "—")}</td>
           <td class="muted" style="max-width:260px">${esc(s.routes || "—")}</td>
           <td>${s.line_count}</td>
+          <td>${s.shipment_id ? `<span class="badge available">✓ Đã xuất — ${esc(s.shipment_code || "")}</span>` : '<span class="muted">Chưa xuất</span>'}</td>
           <td style="white-space:nowrap"><button class="btn sm sec" data-viewload="${esc(s.load_slip_id)}">Xem/In</button>
             <button class="btn sm sec" data-delload="${esc(s.load_slip_id)}">Xóa</button></td></tr>`).join("") ||
-          `<tr><td colspan=7 class="muted">Chưa có phiếu nào.</td></tr>`}</tbody></table></div>`;
+          `<tr><td colspan=8 class="muted">Chưa có phiếu nào.</td></tr>`}</tbody></table></div>`;
       const hlSlips = slips.filter(s => s.sheet_type === "HL");
       const dmSlips = slips.filter(s => s.sheet_type === "ĐM");
+      const renderOrderTbl = (rows) => `<div class="tablewrap"><table id="t_loadorder">
+        <thead><tr><th>Số lệnh</th><th>Sheet</th><th>Kho</th><th>Ca/Ngày</th><th>Số xe</th><th></th></tr></thead>
+        <tbody>${rows.map(o => `<tr>
+          <td class="code">${esc(o.order_code)}</td><td>${esc(o.sheet_type)}</td>
+          <td class="muted">${esc(o.warehouse_name || "(chưa gán kho)")}</td>
+          <td class="muted">${esc(o.shift_label || "")} ${o.order_date ? new Date(o.order_date).toLocaleDateString("vi-VN") : ""}</td>
+          <td>${o.vehicle_count}</td>
+          <td><button class="btn sm sec" data-vieworder="${esc(o.load_order_id)}">Xem/In</button></td></tr>`).join("") ||
+          `<tr><td colspan=6 class="muted">Chưa có lệnh đóng hàng nào — tự tạo khi nhập file Excel.</td></tr>`}</tbody></table></div>`;
       body = `<div class="panel"><h2>📥 Nhập lệnh đóng hàng</h2>
         <div class="muted" style="margin-bottom:8px">Tải lên file Excel "Lệnh đóng hàng" (2 sheet HL/ĐM) do bộ phận điều vận lập —
           hệ thống tự gộp các dòng theo <b>Số xe</b> thành từng "Biên bản bàn giao hàng hóa" riêng (khuyến mại rời không đủ vỉ/thùng
-          sẽ tự tách thành dòng Lon/Lốc riêng), sẵn sàng xem/sửa và in ký khi giao hàng cho xe.</div>
+          sẽ tự tách thành dòng Lon/Lốc riêng), sẵn sàng xem/sửa và in ký khi giao hàng cho xe. Mỗi lần nhập file cũng tự tạo 1
+          "Lệnh đóng hàng" gộp tất cả xe của lần đó — dùng để in lại đúng bảng ngang như file Excel gốc. Sheet trong file BẮT BUỘC
+          đặt tên đúng "HL" hoặc "ĐM" để hệ thống tự nhận kho — sheet đặt tên khác mà có dữ liệu xe sẽ hỏi lại bạn gán sheet đó
+          thuộc Hạ Long hay Đông Mai trước khi nhập.</div>
         <div class="row">
           <div class="field" style="flex:1"><label>File Excel</label><input type="file" id="ld_file" accept=".xlsx"/></div>
           <button class="btn" id="ld_import" style="align-self:flex-end">Nhập file</button>
-        </div></div>
+        </div>
+        <div id="ld_needs_mapping"></div>
+      </div>
+        <div class="panel"><h2>🗂️ Lệnh đóng hàng theo ngày <span class="muted">(${loadOrders.length})</span></h2>
+          ${renderOrderTbl(loadOrders)}</div>
         <div class="panel"><h2>Sheet HL <span class="muted">(${hlSlips.length} xe)</span></h2>${renderTbl(hlSlips, "t_loadslip_hl")}</div>
         <div class="panel"><h2>Sheet ĐM <span class="muted">(${dmSlips.length} xe)</span></h2>${renderTbl(dmSlips, "t_loadslip_dm")}</div>`;
     } else if (sec === "aging") {
@@ -2393,7 +2615,7 @@
     wireSubnav("wms");
     wireSearch();
     if (sec === "aging") root.querySelectorAll('table[id^="t_aging_"]').forEach(t => wirePaginate(t.id, 20));
-    if (sec === "lenhdonghang") { wirePaginate("t_loadslip_hl", 10); wirePaginate("t_loadslip_dm", 10); }
+    if (sec === "lenhdonghang") { wirePaginate("t_loadorder", 10); wirePaginate("t_loadslip_hl", 10); wirePaginate("t_loadslip_dm", 10); }
 
     if (sec === "fgstock") {
       const FS_SEL_KEY = "mes_fgstock_selection";
@@ -3136,7 +3358,7 @@
             // Đã chọn "Kho xuất" cụ thể — chỉ tính hàng ĐANG CẤT ĐÚNG kho đó (hàng "chưa cất" bỏ
             // qua vì chưa xác định được thuộc kho nào, xem docstring _assert_wh_scope).
             if (whFilter) {
-              locations = locations.filter(l => l.warehouse_code === whFilter);
+              locations = locations.filter(l => l.warehouse_id === whFilter);
               count = locations.reduce((s, l) => s + (l.count || 0), 0);
               unplaced = 0;
             }
@@ -3163,6 +3385,30 @@
       // (unplaced) vẫn hiển thị để người dùng biết mà đi cất trước, nhưng không tính vào SL
       // được phép chọn (khớp exclude_unplaced ở backend create_shipment).
       function sellableOf(r) { return Math.max(0, r.count - (r.unplaced || 0)); }
+
+      // Dùng chung cho "+ Thêm" tay VÀ tự điền từ Lệnh đóng hàng — lấy FIFO xuyên nhiều lô nếu 1
+      // lô không đủ SL (rows đã sắp theo đúng thứ tự ưu tiên FIFO của filteredLotRows()). Trả về
+      // phần còn thiếu (shortfall > 0 nghĩa là kho hiện không đủ tồn cho SL yêu cầu — KHÔNG lặng
+      // lẽ bỏ qua phần thiếu, để caller tự báo cho người dùng biết).
+      function pushBestFifoLinesToCart(productName, unitType, qty, shipmentType) {
+        const rows = filteredLotRows().filter(r => r.product_name === productName && r.unit_type === unitType);
+        let remaining = qty;
+        const added = [];
+        for (const r of rows) {
+          if (remaining <= 0) break;
+          const sellable = sellableOf(r);
+          if (sellable <= 0) continue;
+          const take = Math.min(remaining, sellable);
+          const neFull = (r.near_expiry_count || 0) > 0 && r.count === r.near_expiry_count;
+          const gsFull = (r.consigned_count || 0) > 0 && r.count === r.consigned_count;
+          XK_CART.push({ product_name: r.product_name, lot_code: r.lot_code, unit_type: r.unit_type,
+                        quantity: take, shipment_type: shipmentType, near_expiry_only: neFull, consigned_only: gsFull,
+                        fifo_ok: r.fifo_ok, location_label: placedLocationLabel(r) });
+          added.push({ lot_code: r.lot_code, qty: take });
+          remaining -= take;
+        }
+        return { added, shortfall: remaining };
+      }
 
       function renderLots() {
         const rows = filteredLotRows();
@@ -3249,14 +3495,23 @@
       // Mọi lô/loại đơn vị khác đang có tồn "stored" cho CÙNG sản phẩm — dùng để đổi lô ngay
       // trong giỏ (VD người xuất muốn lấy lô mới hơn lô hệ thống gợi ý theo FIFO).
       function lotOptionsFor(productName, unitType) {
+        // Đổi lô trong giỏ phải tôn trọng ĐÚNG "Kho xuất" đang chọn (nếu có) — nếu không, người
+        // dùng có thể đổi sang 1 lô THỰC RA chỉ còn tồn ở kho KHÁC, dẫn tới lỗi "không đủ tồn"
+        // lúc submit hoặc (tệ hơn) submit lấy nhầm kho khi trùng lot_code giữa 2 kho.
+        const whFilter = $("xk_wh") ? $("xk_wh").value : "";
         const out = [];
         lots.forEach(g => {
           if (g.product_name !== productName) return;
-          const count = g[`${unitType}_count`];
-          const unplaced = g[`${unitType}_unplaced`] || 0;
+          let locations = g[`${unitType}_locations`] || [];
+          let count = g[`${unitType}_count`];
+          let unplaced = g[`${unitType}_unplaced`] || 0;
+          if (whFilter) {
+            locations = locations.filter(l => l.warehouse_id === whFilter);
+            count = locations.reduce((s, l) => s + (l.count || 0), 0);
+            unplaced = 0;
+          }
           if (count) out.push({ lot_code: g.lot_code, count, fifo_ok: g[`${unitType}_fifo_ok`], unplaced,
-                                sellable: Math.max(0, count - unplaced),
-                                locations: g[`${unitType}_locations`] || [] });
+                                sellable: Math.max(0, count - unplaced), locations });
         });
         return out;
       }
@@ -3342,8 +3597,10 @@
             recipient_name: shipTo ? shipTo.name : null,
             driver_name: vehicle ? (vehicle.driver_name || vehicle.driver_short_name) : null,
             vehicle_plate: vehicle ? vehicle.plate : null,
-            vehicle_id: vehicle ? vehicle.vehicle_id : null });
+            vehicle_id: vehicle ? vehicle.vehicle_id : null,
+            load_slip_id: XK_BOUND_LOAD_SLIP_ID || undefined });
           XK_CART = [];
+          XK_BOUND_LOAD_SLIP_ID = null;
           renderCart();
           toast(`Đã tạo phiếu xuất kho ${res.shipment_code}${!res.fifo_ok ? " (⚠ không đúng FIFO)" : ""}`);
           render("wms");
@@ -3357,6 +3614,88 @@
       $("xk_lotfilter").onchange = renderLots;
       $("xk_search").oninput = renderLots;
       $("xk_wh").onchange = () => { XK_CART = []; renderLots(); renderCart(); };
+
+      function clearLoSelection() {
+        XK_BOUND_LOAD_SLIP_ID = null;
+        $("xk_wh").disabled = false;
+        $("xk_lo_banner").innerHTML = "";
+        renderLots();
+      }
+
+      function renderLoBanner(vehicleLabel, warehouseName, skipped, shortfalls) {
+        const skipRows = (skipped || []).map(s =>
+          `<li>${esc(s.product_name)} (${esc(s.uom)}) × ${s.quantity}</li>`).join("");
+        const shortRows = (shortfalls || []).map(s => s.added_any
+          ? `<li style="color:var(--red)">${esc(s.display_name)}: thiếu ${s.shortfall} — kho không đủ tồn, đã thêm tối đa hiện có (${s.shortfall} còn lại tự tìm ở bảng trên, bấm "+ Thêm")</li>`
+          : `<li style="color:var(--red)">${esc(s.display_name)}: cần ${s.shortfall} nhưng kho ${esc(warehouseName || "")} hiện KHÔNG CÒN tồn — chưa thêm được dòng nào, tìm sản phẩm ở bảng trên (kho khác/lô khác) rồi bấm "+ Thêm" thủ công</li>`
+        ).join("");
+        $("xk_lo_banner").innerHTML = `<div class="panel" style="background:#000;color:#fff;margin-bottom:8px">
+          <b>🗂️ ${esc(vehicleLabel)}</b> — Kho xuất: <b>${esc(warehouseName || "—")}</b>
+          (không đổi được, bấm "✕ Bỏ chọn xe" để xuất tự do)
+          <button class="btn sm sec" id="xk_lo_clear" style="margin-left:10px">✕ Bỏ chọn xe</button>
+          ${skipRows ? `<div class="muted" style="margin-top:6px">Cần thêm thủ công (chưa tự động điền được, tìm đúng tên sản phẩm ở bảng trên rồi bấm "+ Thêm"):<ul style="margin:4px 0 0 18px">${skipRows}</ul></div>` : ""}
+          ${shortRows ? `<ul style="margin:6px 0 0 18px">${shortRows}</ul>` : ""}
+        </div>`;
+        $("xk_lo_clear").onclick = clearLoSelection;
+      }
+
+      // Chọn 1 Lệnh đóng hàng chỉ hiện bảng DANH SÁCH XE (giống bảng Sheet HL/ĐM ở tab "Lệnh
+      // đóng hàng") để chọn ĐÚNG 1 xe cần xuất — không tự gộp SL của mọi xe làm 1 như trước, vì
+      // không cho biết xe nào đã xuất/xe nào chưa. Xe đã có phiếu xuất (shipment_id) hiện badge
+      // "Đã xuất" và KHÓA HẲN — không cho chọn lại (đã chốt qua AskUserQuestion); muốn xuất thêm
+      // phải hoàn tác phiếu xuất đó trước (Xuất kho › Lịch sử → gọi lại đúng đơn hàng để chọn xe).
+      function renderLoVehicles(order) {
+        if (!order) { $("xk_lo_vehicles").innerHTML = ""; return; }
+        const rows = order.vehicles.map(v => `<tr>
+          <td class="code">${esc(v.slip_code)}</td>
+          <td class="muted">${esc(v.shift_label || "")} ${v.order_date ? new Date(v.order_date).toLocaleDateString("vi-VN") : ""}</td>
+          <td>${esc(v.vehicle_plate)}</td><td>${esc(v.driver_name || "—")}</td>
+          <td class="muted" style="max-width:220px">${esc(v.routes || "—")}</td>
+          <td>${v.lines.length}</td>
+          <td>${v.shipment_id
+            ? `<span class="badge available">✓ Đã xuất — ${esc(v.shipment_code || "")}</span>`
+            : `<button class="btn sm" data-xk-pickveh="${esc(v.load_slip_id)}">Chọn</button>`}</td></tr>`).join("");
+        $("xk_lo_vehicles").innerHTML = `<div class="panel" style="margin-bottom:8px">
+          <div class="muted" style="margin-bottom:6px">Chọn ĐÚNG 1 xe cần xuất trong Lệnh đóng hàng ${esc(order.order_code)} — xe đã có phiếu xuất bị khoá,
+            muốn xuất thêm/sửa lại phải hoàn tác phiếu xuất đó trước (Xuất kho › Lịch sử).</div>
+          <div class="tablewrap"><table>
+            <thead><tr><th>Số phiếu</th><th>Ca/Ngày</th><th>Số xe</th><th>Lái xe</th><th>Tuyến (NPP)</th><th>Số dòng</th><th></th></tr></thead>
+            <tbody>${rows || '<tr><td colspan=7 class="muted">Lệnh đóng hàng chưa có xe nào.</td></tr>'}</tbody>
+          </table></div></div>`;
+        document.querySelectorAll("[data-xk-pickveh]").forEach(b => b.onclick = () => guard(async () => {
+          const loadSlipId = b.dataset.xkPickveh;
+          const v = order.vehicles.find(x => x.load_slip_id === loadSlipId);
+          const res = await GET(`/wms/load-slips/${loadSlipId}/export-suggestion`);
+          if (!res.warehouse_id) {
+            toast(`Chưa gán Kho thành phẩm cho sheet ${res.sheet_type} — vào Danh mục › Kho thành phẩm để gán trước.`, "err");
+            return;
+          }
+          $("xk_wh").value = res.warehouse_id;
+          $("xk_wh").disabled = true;
+          renderLots();
+          // Reset giỏ hàng trước khi điền — chọn 1 xe PHẢI ra đúng cart của xe đó, không cộng
+          // dồn với dòng đã thêm trước (tay hoặc từ xe khác đã chọn nhầm trước đó).
+          XK_CART = [];
+          const shortfalls = [];
+          res.lines.forEach(line => {
+            const { added, shortfall } = pushBestFifoLinesToCart(line.product_name, line.unit_type, line.quantity, line.shipment_type);
+            if (shortfall > 0) shortfalls.push({ display_name: line.display_name, shortfall, added_any: added.length > 0 });
+          });
+          XK_BOUND_LOAD_SLIP_ID = loadSlipId;
+          renderLoBanner(`Xe ${v.vehicle_plate} — Phiếu ${v.slip_code} (Lệnh ${order.order_code})`,
+            res.warehouse_name, res.skipped, shortfalls);
+          renderCart();
+          toast(`Đã điền ${res.lines.length} dòng từ xe ${v.vehicle_plate}${shortfalls.length ? " (⚠ có dòng thiếu tồn)" : ""}`);
+        }));
+      }
+
+      $("xk_loadorder").onchange = async () => {
+        const loId = $("xk_loadorder").value;
+        clearLoSelection();
+        if (!loId) { renderLoVehicles(null); return; }
+        const order = await GET(`/wms/load-orders/${loId}`);
+        renderLoVehicles(order);
+      };
       GET("/wms/shipments").then(ships => {
         const isAdminXk = CURRENT_USER && CURRENT_USER.role === "admin";
         const canConfirmShip = _hasPerm("wms.confirm_shipment");
@@ -3858,16 +4197,59 @@
         }));
       }).catch(() => { $("fi_history").innerHTML = `<div class="muted">Không tải được lịch sử.</div>`; });
     } else if (sec === "lenhdonghang") {
-      $("ld_import").onclick = () => guard(async () => {
-        const f = $("ld_file").files[0];
-        if (!f) throw new Error("Chọn file Excel trước.");
+      async function submitLoadOrderImport(file, sheetTypeOverrides) {
         const fd = new FormData();
-        fd.append("file", f);
+        fd.append("file", file);
+        if (sheetTypeOverrides) fd.append("sheet_type_overrides", JSON.stringify(sheetTypeOverrides));
         const headers = {};
         if (TOKEN) headers["Authorization"] = "Bearer " + TOKEN;
         const res = await fetch("/api/wms/load-slips/import", { method: "POST", headers, body: fd });
         const result = await res.json();
         if (!res.ok) throw new Error(result && result.detail ? result.detail : "HTTP " + res.status);
+        return result;
+      }
+      // Sheet không đặt tên đúng "HL"/"ĐM" nhưng có dữ liệu xe thật -> backend trả về
+      // "needs_mapping" thay vì nhập luôn — hỏi lại người dùng gán từng sheet đó thuộc Hạ Long
+      // hay Đông Mai (hoặc bỏ qua) rồi gọi lại import kèm sheet_type_overrides.
+      function renderNeedsMapping(file, sheetNames) {
+        $("ld_needs_mapping").innerHTML = `<div class="panel" style="margin-top:10px;border:1px solid var(--red)">
+          <b>⚠ File có sheet chưa rõ thuộc kho nào</b>
+          <div class="muted" style="margin:6px 0">Các sheet dưới đây tên không đúng "HL"/"ĐM" nhưng có dữ liệu xe — chọn đúng sheet
+            này thuộc Hạ Long hay Đông Mai (hoặc bỏ qua, không nhập sheet đó) rồi bấm "Nhập tiếp".</div>
+          ${sheetNames.map((name, i) => `<div class="row" style="align-items:center">
+            <div style="min-width:160px"><code class="k">${esc(name)}</code></div>
+            <select data-ldm-sheet="${i}" data-ldm-name="${esc(name)}">
+              <option value="">(Bỏ qua sheet này)</option>
+              <option value="HL">Hạ Long (HL)</option>
+              <option value="ĐM">Đông Mai (ĐM)</option>
+            </select></div>`).join("")}
+          <button class="btn" id="ld_confirm_mapping" style="margin-top:8px">Nhập tiếp</button>
+        </div>`;
+        $("ld_confirm_mapping").onclick = () => guard(async () => {
+          const overrides = {};
+          document.querySelectorAll("[data-ldm-sheet]").forEach(sel => {
+            if (sel.value) overrides[sel.dataset.ldmName] = sel.value;
+          });
+          const result = await submitLoadOrderImport(file, overrides);
+          $("ld_needs_mapping").innerHTML = "";
+          if (result.needs_mapping && result.needs_mapping.length) {
+            renderNeedsMapping(file, result.needs_mapping);
+            return;
+          }
+          const total = (result.HL || []).length + (result["ĐM"] || []).length;
+          toast(`Đã nhập ${total} xe (HL: ${(result.HL || []).length}, ĐM: ${(result["ĐM"] || []).length})`);
+          render("wms");
+        });
+      }
+      $("ld_import").onclick = () => guard(async () => {
+        const f = $("ld_file").files[0];
+        if (!f) throw new Error("Chọn file Excel trước.");
+        const result = await submitLoadOrderImport(f, null);
+        if (result.needs_mapping && result.needs_mapping.length) {
+          renderNeedsMapping(f, result.needs_mapping);
+          toast(`File có ${result.needs_mapping.length} sheet chưa rõ thuộc kho nào — gán bên dưới rồi nhập tiếp`, "err");
+          return;
+        }
         const total = (result.HL || []).length + (result["ĐM"] || []).length;
         toast(`Đã nhập ${total} xe (HL: ${(result.HL || []).length}, ĐM: ${(result["ĐM"] || []).length})`);
         render("wms");
@@ -3878,6 +4260,7 @@
         await DELETE(`/wms/load-slips/${b.dataset.delload}`);
         toast("Đã xóa"); render("wms");
       }));
+      document.querySelectorAll("[data-vieworder]").forEach(b => b.onclick = () => openLoadOrderModal(b.dataset.vieworder));
     } else if (sec === "aging") {
       if ($("ag_save")) $("ag_save").onclick = () => guard(async () => {
         const current = await GET("/ops-settings").catch(() => ({ empty_cct_tolerance_hl: 2, empty_bbt_tolerance_hl: 2 }));
