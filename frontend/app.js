@@ -1264,21 +1264,21 @@ VIEWS.orders = async function () {
       ${yearFilterControl("lenhnau", ynLn)}
       <input class="searchbox" data-tbl="t_lenhnau" placeholder="Enter text to search..."/>
       <div class="tablewrap"><table id="t_lenhnau"><thead><tr><th>Số lệnh</th><th>Lệnh nhỏ</th>
-        <th>Version</th><th>Tên công thức</th><th>Ghi chú công thức</th>
+        <th>Tên công thức</th><th>Version</th><th>Ghi chú công thức</th>
         <th>Thực tế/KH (hl)</th><th>Ngày lập</th><th>Trạng thái</th><th></th></tr></thead>
       <tbody>${masters.map(m => `<tr>
         <td class="code">${esc(m.order_code)}</td>
         <td class="muted">${m.children.map((c, i) => `#${i + 1} ${esc(c.product_code || c.product_desc || "—")}
           (${c.actual_volume_hl}/${c.planned_volume_hl}hl${c.tank_lm ? " · tank dự kiến " + esc(c.tank_lm) : ""})${c.is_complete ? " ✓" : ""}`).join("; ")}</td>
-        <td class="muted">${m.children.map((c, i) => `#${i + 1} ${c.recipe_code ? esc(c.recipe_code) + " v" + c.recipe_version_no : "—"}`).join("; ")}</td>
         <td class="muted">${m.children.map((c, i) => `#${i + 1} ${esc(c.recipe_name || "—")}`).join("; ")}</td>
+        <td class="muted">${m.children.map((c, i) => `#${i + 1} ${c.recipe_code ? esc(c.recipe_code) + " v" + c.recipe_version_no : "—"}`).join("; ")}</td>
         <td class="muted">${m.children.map((c, i) => `#${i + 1} ${esc(c.recipe_note || "—")}`).join("; ")}</td>
         <td class="muted">${m.actual_total_hl}/${m.planned_total_hl}</td>
         <td class="muted">${fmt(m.created_at)}</td>
         <td>${m.is_complete_all
           ? `<span style="color:var(--green)">✓ Hoàn thành</span>`
           : (m.is_executed_any
-              ? `<span class="muted">Đang nấu</span>`
+              ? `<span style="color:var(--orange)">Đang nấu</span>`
               : `<span class="muted">Chưa thực hiện</span>`)}</td>
         <td style="white-space:nowrap"><button class="btn sm sec" data-viewlo="${esc(m.brew_master_order_id)}">Xem</button>
           <button class="btn sm sec" data-printlo="${esc(m.brew_master_order_id)}">🖨️ In</button>
