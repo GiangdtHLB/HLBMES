@@ -637,7 +637,8 @@ VIEWS.dashboard = async function () {
   const tankStatCard = (s, view, subKey) => `
     <div class="card" style="cursor:pointer;text-align:left" data-goto="${esc(view)}" data-gotosub="${esc(subKey || "")}" tabindex="0" role="button">
       <div class="n">🛢️ ${s ? `${s.dang_su_dung}/${s.total}` : "–"}</div><div class="l">Tank đang lên men</div>
-      ${s ? `<div class="muted" style="font-size:11px;margin-top:4px">${s.trong} tank trống</div>` : ""}
+      ${s ? `<div class="muted" style="font-size:11px;margin-top:4px;line-height:1.6">
+        ${s.dang_nap ? `<span style="color:var(--orange)">${s.dang_nap} tank đang nạp dịch nấu</span> · ` : ""}${s.trong} tank trống</div>` : ""}
     </div>`;
   // Ô "Cảnh báo QC" trước đây gộp chung 1 bảng — nay tách thành 3 panel riêng theo đúng yêu cầu,
   // mỗi panel lọc từ CÙNG 1 nguồn dữ liệu alerts.items (BE không đổi): (1) Cảnh báo QC = lô có
@@ -1263,13 +1264,14 @@ VIEWS.orders = async function () {
       ${yearFilterControl("lenhnau", ynLn)}
       <input class="searchbox" data-tbl="t_lenhnau" placeholder="Enter text to search..."/>
       <div class="tablewrap"><table id="t_lenhnau"><thead><tr><th>Số lệnh</th><th>Lệnh nhỏ</th>
-        <th>Version</th><th>Ghi chú công thức</th>
+        <th>Version</th><th>Tên công thức</th><th>Ghi chú công thức</th>
         <th>Thực tế/KH (hl)</th><th>Ngày lập</th><th>Trạng thái</th><th></th></tr></thead>
       <tbody>${masters.map(m => `<tr>
         <td class="code">${esc(m.order_code)}</td>
         <td class="muted">${m.children.map((c, i) => `#${i + 1} ${esc(c.product_code || c.product_desc || "—")}
           (${c.actual_volume_hl}/${c.planned_volume_hl}hl${c.tank_lm ? " · tank dự kiến " + esc(c.tank_lm) : ""})${c.is_complete ? " ✓" : ""}`).join("; ")}</td>
         <td class="muted">${m.children.map((c, i) => `#${i + 1} ${c.recipe_code ? esc(c.recipe_code) + " v" + c.recipe_version_no : "—"}`).join("; ")}</td>
+        <td class="muted">${m.children.map((c, i) => `#${i + 1} ${esc(c.recipe_name || "—")}`).join("; ")}</td>
         <td class="muted">${m.children.map((c, i) => `#${i + 1} ${esc(c.recipe_note || "—")}`).join("; ")}</td>
         <td class="muted">${m.actual_total_hl}/${m.planned_total_hl}</td>
         <td class="muted">${fmt(m.created_at)}</td>
@@ -1282,7 +1284,7 @@ VIEWS.orders = async function () {
           <button class="btn sm sec" data-printlo="${esc(m.brew_master_order_id)}">🖨️ In</button>
           ${!m.is_executed_any ? `<button class="btn sm sec" data-editlo="${esc(m.brew_master_order_id)}">Sửa</button>
           <button class="btn sm sec" data-dello="${esc(m.brew_master_order_id)}">Xóa</button>` : ""}</td></tr>`).join("") ||
-        `<tr><td colspan=8 class="muted">Chưa có lệnh nấu nào.</td></tr>`}</tbody></table></div></div>`;
+        `<tr><td colspan=9 class="muted">Chưa có lệnh nấu nào.</td></tr>`}</tbody></table></div></div>`;
   }
 
   else if (sec === "lenhloc") {
@@ -7421,7 +7423,7 @@ async function openBrewMasterOrderModal(masterId) {
       <h4 style="font-size:13px;margin:0 0 6px">Lệnh nấu nhỏ #${ci + 1}</h4>
       <div class="muted" style="margin-bottom:6px">
         Dịch bia: <b>${esc(c.product_code || c.product_desc || "—")}</b> ·
-        Công thức: <b>${c.recipe_code ? esc(c.recipe_code) + " v" + c.recipe_version_no : "—"}</b>${c.recipe_note ? ` (${esc(c.recipe_note)})` : ""} ·
+        Công thức: <b>${c.recipe_code ? esc(c.recipe_code) + " v" + c.recipe_version_no : "—"}</b>${c.recipe_name ? ` — ${esc(c.recipe_name)}` : ""}${c.recipe_note ? ` (${esc(c.recipe_note)})` : ""} ·
         Số mẻ KH: <b>${c.planned_batch_count}</b> ·
         Sản lượng thực tế/KH: <b>${c.actual_volume_hl}/${c.planned_volume_hl} hl</b> (±${c.volume_tolerance_hl}hl)<br/>
         ${c.is_complete
@@ -8557,7 +8559,6 @@ VIEWS.process = async function () {
         <div class="field"><label>Lệnh nấu</label><select id="nb_master">${masterOptsLn}</select></div>
         <div class="field"><label>Lệnh nấu nhỏ</label><select id="nb_order"><option value="">(chọn Lệnh nấu trước)</option></select></div>
         <div class="field"><label>Mã nấu</label><input id="nb_code" placeholder="VD: N-0715"/></div>
-        <div class="field"><label>Ngày nấu</label><input id="nb_date" type="datetime-local"/></div>
       </div>
       <div class="row">
         <div class="field"><label>Dịch bia</label><select id="nb_wort">${wortOpts}</select></div>
@@ -8578,7 +8579,7 @@ VIEWS.process = async function () {
         <td style="white-space:nowrap">${b.locked
             ? (isAdminLot ? `<button class="btn sm sec" data-unlocklot="brew|${esc(b.brew_id)}">Mở khóa</button>` : '<span class="muted">—</span>')
             : (canLockLot ? `<button class="btn sm" data-locklot="brew|${esc(b.brew_id)}">Khóa lô</button>` : '<span class="muted">—</span>')}</td>
-        <td class="muted">${esc(b.brew_order_code || "—")}</td><td>${fmt(b.brew_date)}</td>
+        <td class="muted">${esc(b.brew_order_code || "—")}</td><td>${b.first_batch_started_at ? fmt(b.first_batch_started_at) : "—"}</td>
         <td>${esc(b.wort_type)}</td><td>${b.volume_hl}</td>
         <td class="muted" title="Tổng &quot;Tổng lượng dịch&quot; (Ghi chép nấu) cộng dồn qua các mẻ">${b.actual_volume_hl ?? "—"}</td>
         <td class="muted">${esc(b.lm_code || "—")}</td><td class="muted">${esc(b.tank_lm || "—")}</td>
@@ -8910,7 +8911,6 @@ VIEWS.process = async function () {
       if (!productId) throw new Error("Chọn Dịch bia trước khi thêm mã nấu.");
       const wortName = $("nb_wort").selectedOptions[0].textContent;
       await POST("/brewing/brews", { brew_code: code, wort_type: wortName, product_id: productId,
-        brew_date: $("nb_date").value || null,
         volume_hl: parseFloat($("nb_vol").value),
         note: $("nb_note").value.trim() || null,
         lm_code: lmCode, tank_lm: tank,

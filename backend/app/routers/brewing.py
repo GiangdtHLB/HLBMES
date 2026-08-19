@@ -429,7 +429,13 @@ def list_brews(years: list[int] = Query(None), db: Session = Depends(get_db)):
             all_qc_ok = all(_stage_ok(db, "nau", "brew_batch", batch.batch_id, b.product_id) for batch in batches)
             all_nvl_ok = all(batch.batch_id in nvl_batch_ids for batch in batches)
             color = "red" if not all_qc_ok else ("green" if not all_nvl_ok else "blue")
+        # Ngày nấu THẬT hiển thị ở danh sách = giờ bắt đầu của MẺ ĐẦU TIÊN (BrewBatch.started_at)
+        # — brew_date (mã nấu) chỉ là lúc tạo bản ghi, chưa có ý nghĩa vận hành thật lúc mã nấu
+        # vừa tạo (chưa có mẻ nào). Không đổi brew_date/brew_year (vẫn dùng cho unique code theo
+        # năm, lọc theo năm, báo cáo — xem services/brew_order.py, lo_status.py, norm_report.py).
+        first_batch_started_at = min((batch.started_at for batch in batches if batch.started_at), default=None)
         out.append({"brew_id": b.brew_id, "brew_code": b.brew_code, "brew_date": b.brew_date,
+                    "first_batch_started_at": first_batch_started_at,
                     "wort_type": b.wort_type, "product_id": b.product_id, "product_code": prod.code if prod else None,
                     "volume_hl": b.volume_hl, "note": b.note, "batch_count": batch_counts.get(b.brew_id, 0),
                     "actual_volume_hl": round(actual_volume_by_brew[b.brew_id], 3) if b.brew_id in actual_volume_by_brew else None,
