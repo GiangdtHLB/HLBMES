@@ -2108,8 +2108,10 @@ function woRow(w) {
 // lệnh tự chọn (services/brew_order.py::build_lines_from_recipe_version) — không phụ thuộc
 // màn này hiển thị thế nào.
 VIEWS.recipes = async function () {
-  const [recipes, products, materials] = await Promise.all([GET("/recipes"), GET("/products"), GET("/materials")]);
+  const [recipes, products, materials, materialAltGroups] = await Promise.all([
+    GET("/recipes"), GET("/products"), GET("/materials"), GET("/material-alt-groups").catch(() => [])]);
   CACHE.products = products; CACHE.recipes = recipes; CACHE.materials = materials;
+  CACHE.materialAltGroups = materialAltGroups;
   const popts = products.map(p => `<option value="${p.product_id}">${esc(p.code)}</option>`).join("");
   let versionsHtml = "";
   for (const r of recipes) {
@@ -2176,6 +2178,11 @@ function recipeVerRow(r, v) {
 async function showVersion(versionId) {
   const v = await GET("/recipes/versions/" + versionId);
   const bom = (v.materials || []).map(m => {
+    if (m.alt_group_code) {
+      const grp = (CACHE.materialAltGroups || []).find(g => g.code === m.alt_group_code);
+      return `<tr><td>${esc(grp ? grp.name : m.alt_group_code)} <span class="muted">(nhóm vật tư thay thế)</span></td>
+      <td>${m.qty}</td><td>${esc(m.uom || "")}</td><td>±${m.tol_pct || 0}%</td></tr>`;
+    }
     const mat = (CACHE.materials || []).find(x => x.code === m.material_code);
     return `<tr><td><code class="k">${esc(m.material_code)}</code> ${esc(mat ? mat.name : "")}</td>
     <td>${m.qty}</td><td>${esc(m.uom || "")}</td><td>±${m.tol_pct || 0}%</td></tr>`;
@@ -2207,25 +2214,42 @@ async function showVersion(versionId) {
 
 // ---- Form tạo/sửa version với editor BOM ----
 // Ô chọn vật tư là input gõ-để-tìm (không phải <select> dài — danh mục vật tư có hàng trăm
-// mã), value thật (material_code) giữ trong input hidden kế bên. ĐVT khoá cố định theo vật tư
-// đã chọn (altUomFieldHtml): vật tư có khai đơn vị phụ (alt_uom+alt_uom_ratio ở Danh mục Vật
-// tư) thì cho chọn Đơn vị chính/Đơn vị phụ, còn lại khoá cứng theo đơn vị chính (readonly) —
-// số lượng luôn quy đổi về đơn vị chính trước khi gửi lên server (collectBom).
+// mã), value thật giữ trong input hidden kế bên, tiền tố "grp:" cho dòng khai theo Nhóm vật
+// tư thay thế (VD "Malt Úc" = rời + bao — xem models/master.py::MaterialAltGroup) thay vì 1
+// material_code cụ thể — services/brew_order.py::build_lines_from_recipe_version đã hỗ trợ
+// alt_group_code trong materials JSON. ĐVT: vật tư có khai đơn vị phụ (alt_uom+alt_uom_ratio)
+// thì cho chọn Đơn vị chính/Đơn vị phụ, dòng nhóm thì khoá theo ĐVT của nhóm, còn lại khoá
+// cứng theo đơn vị chính (readonly) — số lượng luôn quy đổi về đơn vị chính trước khi gửi lên
+// server (collectBom).
 function bomMaterialSearchItems() {
-  return (CACHE.materials || []).map(m => ({ code: m.code, label: `${m.code} — ${m.name}`, mat: m }));
+  const matItems = (CACHE.materials || []).map(m => ({ code: m.code, label: `${m.code} — ${m.name}`, mat: m }));
+  const groupItems = (CACHE.materialAltGroups || []).filter(g => g.active)
+    .map(g => ({ code: `grp:${g.code}`, label: `${g.name} (nhóm vật tư thay thế)`, isGroup: true, uom: g.unit || null }));
+  return [...matItems, ...groupItems];
 }
-function bomMaterialLabel(materialCode) {
+function bomMaterialLabel(materialCode, groupCode) {
+  if (groupCode) {
+    const g = (CACHE.materialAltGroups || []).find(x => x.code === groupCode);
+    return g ? `${g.name} (nhóm vật tư thay thế)` : groupCode;
+  }
   const m = (CACHE.materials || []).find(x => x.code === materialCode);
   return m ? `${m.code} — ${m.name}` : (materialCode || "");
 }
+function bomUomCellHTML(mat, isGroup, groupUom) {
+  if (isGroup) {
+    return `<input class="bm-uom" value="${esc(groupUom || "")}" size="5" readonly title="ĐVT lấy theo Nhóm vật tư thay thế — không sửa được ở đây" style="width:90px"/>`;
+  }
+  return altUomFieldHtml(mat, `class="bm-uom"`, 90);
+}
 function bomRowHTML(line) {
   line = line || {};
+  const value = line.alt_group_code ? `grp:${line.alt_group_code}` : (line.material_code || "");
   const mat = line.material_code ? (CACHE.materials || []).find(m => m.code === line.material_code) : null;
   return `<tr class="bomrow">
-    <td><input type="text" class="bm-mat-txt" value="${esc(bomMaterialLabel(line.material_code))}" placeholder="Gõ để tìm vật tư..." autocomplete="off" style="min-width:220px"/>
-      <input type="hidden" class="bm-mat" value="${esc(line.material_code || "")}"/></td>
+    <td><input type="text" class="bm-mat-txt" value="${esc(bomMaterialLabel(line.material_code, line.alt_group_code))}" placeholder="Gõ để tìm vật tư/nhóm..." autocomplete="off" style="min-width:220px"/>
+      <input type="hidden" class="bm-mat" value="${esc(value)}"/></td>
     <td><input class="bm-qty" type="number" step="any" value="${line.qty ?? ""}" style="width:110px"/></td>
-    <td class="bm-uom-cell">${altUomFieldHtml(mat, `class="bm-uom"`, 90)}</td>
+    <td class="bm-uom-cell">${bomUomCellHTML(mat, !!line.alt_group_code, line.uom)}</td>
     <td><input class="bm-tol" type="number" value="${line.tol_pct ?? 0}" size="4"/> %</td>
     <td><button class="btn sm sec bm-del" type="button">×</button></td></tr>`;
 }
@@ -2259,7 +2283,7 @@ function wireBomRows() {
           if (item) {
             hidden.value = item.code; txt.value = item.label;
             const uomCell = txt.closest("tr").querySelector(".bm-uom-cell");
-            uomCell.innerHTML = altUomFieldHtml(item.mat, `class="bm-uom"`, 90);
+            uomCell.innerHTML = bomUomCellHTML(item.mat, !!item.isGroup, item.uom);
           }
           closePanel();
         };
@@ -2272,20 +2296,22 @@ function wireBomRows() {
 }
 function collectBom() {
   return [...document.querySelectorAll(".bomrow")].map(tr => {
-    const code = tr.querySelector(".bm-mat").value;
+    const val = tr.querySelector(".bm-mat").value;
     const qtyRaw = parseFloat(tr.querySelector(".bm-qty").value) || 0;
     const chosenUom = tr.querySelector(".bm-uom").value;
-    const mat = (CACHE.materials || []).find(m => m.code === code);
+    const tol_pct = parseFloat(tr.querySelector(".bm-tol").value) || 0;
+    if (val.startsWith("grp:")) return { alt_group_code: val.slice(4), qty: qtyRaw, uom: chosenUom, tol_pct };
+    const mat = (CACHE.materials || []).find(m => m.code === val);
     // Nếu chọn đơn vị phụ (VD "bao") để nhập, quy đổi về đơn vị chính trước khi gửi — server
     // luôn lưu/scale BOM theo đơn vị chính của vật tư.
     const qty = altUomToBaseQty(mat, qtyRaw, chosenUom);
     return {
-      material_code: code,
+      material_code: val,
       qty,
       uom: mat ? mat.uom : chosenUom,
-      tol_pct: parseFloat(tr.querySelector(".bm-tol").value) || 0,
+      tol_pct,
     };
-  }).filter(l => l.material_code && l.qty > 0);
+  }).filter(l => (l.material_code || l.alt_group_code) && l.qty > 0);
 }
 function versionFormHTML(v) {
   v = v || {};
