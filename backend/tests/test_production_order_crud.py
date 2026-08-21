@@ -1,6 +1,6 @@
-"""Lệnh SX (ERP) — production_order: CRUD (Xem/Sửa/Xóa mirror BrewMasterOrder), các trường
-hành chính mới (issued_by/executor_unit/warehouse_keeper/reference_note/start_date/end_date/
-safety_note), chặn sửa/xóa khi đã có Mẻ sản xuất (BatchExecution), mã lệnh không được trùng."""
+"""Lệnh SX (ERP) — production_order: CRUD (Xem/Sửa/Xóa), các trường hành chính (issued_by/
+executor_unit/warehouse_keeper/reference_note/start_date/end_date/safety_note), chặn sửa/xóa
+khi đã có Mẻ sản xuất (BatchExecution), mã lệnh không được trùng."""
 
 import os
 import tempfile

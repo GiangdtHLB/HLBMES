@@ -250,7 +250,7 @@ def _consume_lot_rows(db: Session, *, product_name: str, unit_type: str, status:
                 is_consigned=row.is_consigned,
             )
             db.add(split)
-            row.quantity -= remaining
+            row.quantity = round(row.quantity - remaining, 3)
             db.flush()
             picked.append(split)
             remaining = 0
@@ -1280,7 +1280,7 @@ def adjust_bottle_finish_stock(db: Session, *, finished_product_id: str | None, 
             removed_ids.append(u.unit_id)
             db.delete(u)
         else:
-            u.quantity -= remaining
+            u.quantity = round(u.quantity - remaining, 3)
             remaining = 0
     # Chia nhỏ IN(...) theo lô 500 id — SQLite giới hạn số biến/câu lệnh (~999), số lượng đơn
     # vị cần xóa có thể lên tới hàng chục nghìn dòng nếu Ca bị sửa giảm rất nhiều.

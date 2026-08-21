@@ -224,7 +224,10 @@ def receive(db: Session, payload: dict, user: User) -> dict:
                               "nhập mã lô khác hoặc để trống để hệ thống tự sinh.")
     if lot:
         _assert_location_scope(user, lot.location)
-        lot.quantity += qty
+        # round: lot.quantity là số dư CỘNG DỒN qua nhiều lần nhập/xuất/điều chuyển — không làm
+        # tròn lại mỗi lần sẽ trôi dần nhị phân theo thời gian, mirror cách sửa _convert_member_qty
+        # (services/brew_order.py) và on_hand_bbt/on_hand_cct (routers/brewing.py).
+        lot.quantity = round(lot.quantity + qty, 3)
         # Cộng dồn thêm 1 đợt hàng vào lô đã tồn tại (kể cả lô đã Released) — vật tư có chỉ
         # tiêu bắt buộc HOẶC thuộc nhóm Nguyên liệu chính/phụ phải quay lại HOLD chờ KCS khai
         # báo/duyệt lại cho đợt hàng mới này, không được coi là "đã qua QC" chỉ vì đợt hàng
@@ -294,7 +297,7 @@ def update_receipt(db: Session, movement_id: str, payload: dict, user: User) -> 
         new_qty = float(new_qty)
         if new_qty <= 0:
             raise DomainError("Số lượng phải > 0.")
-        lot.quantity += new_qty - mv.quantity
+        lot.quantity = round(lot.quantity + new_qty - mv.quantity, 3)
         mv.quantity = new_qty
     if "supplier_id" in payload:
         lot.supplier_id = payload["supplier_id"]
@@ -337,7 +340,7 @@ def delete_receipt(db: Session, movement_id: str, user: User) -> dict:
         Deviation.scope_type == "lot", Deviation.scope_id == lot.lot_id)).scalar_one() > 0
     if has_qc or has_dev:
         raise DomainError(f"Lô {lot.lot_code} đã được khai báo/duyệt chỉ tiêu chất lượng — không thể xóa nhập kho.")
-    lot.quantity -= mv.quantity
+    lot.quantity = round(lot.quantity - mv.quantity, 3)
     remaining_receipts = db.execute(select(func.count()).select_from(StockMovement).where(
         StockMovement.lot_id == lot.lot_id, StockMovement.movement_type == "receipt",
         StockMovement.movement_id != mv.movement_id)).scalar_one()
@@ -412,7 +415,7 @@ def return_stock(db: Session, lot_id: str, quantity: float, user: User, reason: 
     _assert_location_scope(user, lot.location)
     if quantity <= 0:
         raise DomainError("Số lượng hoàn phải > 0.")
-    lot.quantity += quantity
+    lot.quantity = round(lot.quantity + quantity, 3)
     if lot.status == LotStatus.CONSUMED.value:
         lot.status = LotStatus.AVAILABLE.value
     mv = _move(db, "return", lot, quantity, user, location_to=lot.location, reason=reason)
@@ -447,7 +450,7 @@ def issue(db: Session, lot_id: str, quantity: float, user: User, mode: str = "tu
         factory = db.get(FactoryLocation, destination_factory_id)
         if not factory or not factory.active:
             raise DomainError("Nhà máy đích không tồn tại hoặc đã ngừng hoạt động.")
-    lot.quantity -= quantity
+    lot.quantity = round(lot.quantity - quantity, 3)
     # So sánh bằng epsilon thay vì `== 0` — trừ dần bằng số thực (float) qua nhiều lần xuất có
     # thể để lại số dư cực nhỏ khác 0 tuyệt đối (VD 1e-13), khiến lô "còn hiện" trong dropdown
     # dù thực tế đã hết; dưới ngưỡng này coi như đã hết và chốt về đúng 0.
@@ -533,7 +536,7 @@ def _transfer_lot(db: Session, lot_id: str, quantity: float, location_to: str, u
         lot.location = location_to
         moved_lot = lot
     else:
-        lot.quantity -= quantity
+        lot.quantity = round(lot.quantity - quantity, 3)
         moved_lot = MaterialLot(lot_id=new_id(), lot_code=_next_lot_code(db, lot.lot_year), lot_year=lot.lot_year,
                                 material_id=lot.material_id, product_id=lot.product_id, lot_type=lot.lot_type,
                                 supplier_lot=lot.supplier_lot, supplier_id=lot.supplier_id,

@@ -90,6 +90,33 @@ def test_delete_brew_allowed_before_filtered(client, admin_h, vanhanh_h, brewhou
     assert deleted.status_code == 204, deleted.text
 
 
+def test_delete_brew_writes_audit_entry(client, admin_h, vanhanh_h, brewhouse_line_id):
+    """Xóa mã nấu (kéo theo xóa mẻ + lô lên men mồ côi) trước đây không ghi audit gì — mất
+    vết hoàn toàn ai xóa/xóa bao nhiêu. Giờ phải có audit cho cả brew_record và ferment bị
+    xóa kéo theo."""
+    suffix = "DELAUDIT01"
+    brew_id, batch_id = _a_brew(client, admin_h, vanhanh_h, suffix, brewhouse_line_id)
+
+    deleted = client.delete(f"/api/brewing/brews/{brew_id}", headers=vanhanh_h)
+    assert deleted.status_code == 204, deleted.text
+
+    brew_audit = client.get("/api/audit", headers=admin_h,
+                            params={"entity_type": "brew", "entity_id": brew_id, "action": "delete"}).json()
+    brew_entries = brew_audit.get("entries", brew_audit) if isinstance(brew_audit, dict) else brew_audit
+    assert len(brew_entries) == 1, "Phải có đúng 1 audit entry cho việc xóa mã nấu"
+    entry = brew_entries[0]
+    assert entry["actor"] == "vanhanh"
+    assert entry["before"]["brew_code"] == f"BR-{suffix}"
+    assert len(entry["before"]["batches"]) == 1
+    assert "batch_code" in entry["before"]["batches"][0]
+
+    ferment_audit = client.get("/api/audit", headers=admin_h,
+                               params={"entity_type": "ferment", "action": "delete"}).json()
+    ferment_entries = ferment_audit.get("entries", ferment_audit) if isinstance(ferment_audit, dict) else ferment_audit
+    assert any(e["before"].get("lm_code") == f"LM-{suffix}" for e in ferment_entries), \
+        "Lô lên men bị xóa kéo theo cũng phải có audit riêng"
+
+
 def test_delete_brew_also_deletes_orphaned_ferment(client, admin_h, vanhanh_h, brewhouse_line_id):
     """Xóa mã nấu phải xóa LUÔN lô lên men liên kết (nếu không còn mã nấu nào khác dùng
     chung tank/lô LM đó) — nếu không, lô lên men bị bỏ mồ côi, chiếm mã lô LM vĩnh viễn
