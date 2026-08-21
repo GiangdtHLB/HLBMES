@@ -178,6 +178,15 @@ class MaterialAltGroup(Base):
     # _line_stock, services/filter_order.py::_validate_material_lines) — không còn cộng thô
     # số lượng khác đơn vị với nhau. Nullable chỉ để migrate dữ liệu cũ; router luôn bắt buộc.
     unit: Mapped[Optional[str]] = mapped_column(Unicode(64), nullable=True)
+    # "single" (mặc định, hành vi gốc — VD Malt Úc rời/bao): người thao tác chọn ĐÚNG 1 thành
+    # viên khi ghi NVL thực tế. "multi" (VD 1 dòng CO2 có nhiều mã tương đương nhưng định mức
+    # khác nhau do khác nồng độ): được ghi nhận NHIỀU thành viên cùng lúc cho 1 mẻ — không còn
+    # cảnh báo "2 mã dùng thay thế nhau" (xem frontend openBrewMaterialsModal::
+    # otherGroupMemberInUsage). Cờ này chỉ ảnh hưởng tầng khai NVL thực tế; định mức riêng của
+    # từng thành viên luôn khai trong Công thức (RecipeVersion.materials::member_qty), không
+    # khai ở đây — vì định mức phụ thuộc công thức/quy mô mẻ, còn cờ này là bản chất quan hệ
+    # giữa các vật tư (có phối trộn được không), không đổi theo từng công thức.
+    selection_mode: Mapped[str] = mapped_column(Unicode(32), default="single")
 
 
 class Material(Base):

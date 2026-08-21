@@ -761,6 +761,12 @@
     ];
     const capaScopeOpts = `<option value="">— Không chọn —</option>` + capaScopeStages.flatMap(({ tag, items, keyFn, optFn }) =>
       items.map(item => `<option value="${keyFn(item)}">[${tag}] ${optFn(item)}</option>`)).join("");
+    // Nhãn tiếng Việt cho từng giai đoạn CAPA (khớp CAPA_TRANSITIONS backend, services/quality_adv.py) —
+    // khai báo trước root.innerHTML vì bảng danh sách CAPA bên dưới cũng cần dùng.
+    const CAPA_PHASE_LABEL = { open: "Mở CAPA", investigation: "Điều tra nguyên nhân gốc",
+      action: "Kế hoạch hành động", verification: "Xác nhận hiệu lực",
+      kcs_approval: "Chờ duyệt — Trưởng phòng KCS", director_approval: "Chờ duyệt — Giám đốc/Phó GĐ SX-KT",
+      closed: "Đã đóng" };
     root.innerHTML = `
       ${panel("📈 SPC — Biểu đồ kiểm soát", `
         <div class="row"><div class="field"><label>Chỉ tiêu</label>
@@ -787,7 +793,7 @@
             ? `<button class="btn sm sec" data-opendev="${esc(c.deviation_id)}">${esc(devById[c.deviation_id].deviation_code)}</button>`
             : `<span class="muted">—</span>`}</td>
           <td class="muted">${c.due_date ? esc(c.due_date) : "—"}</td>
-          <td>${badge(["kcs_approval", "director_approval"].includes(c.state) ? "due" : c.state === "closed" ? "available" : "planned")}${esc(c.state)}</td>
+          <td><span class="badge ${["kcs_approval", "director_approval"].includes(c.state) ? "due" : c.state === "closed" ? "available" : "planned"}">${esc(CAPA_PHASE_LABEL[c.state] || c.state)}</span></td>
           <td>${esc(c.owner || "—")}</td><td><button class="btn sm sec" data-capa="${esc(c.capa_id)}">Chi tiết</button></td></tr>`).join("")}</tbody></table></div>`)}
       ${panel("📄 COA — Phiếu phân tích (Certificate of Analysis)", `
         <div class="row"><div class="field"><label>Mẻ</label><select id="co_batch">${opt(batches, b => b.batch_id, b => b.batch_code)}</select></div>
@@ -802,7 +808,7 @@
         <input class="searchbox" data-tbl="t_samples" placeholder="Tìm theo mã mẫu, công đoạn, trạng thái..."/>
         <div class="tablewrap" style="margin-top:8px"><table id="t_samples"><thead><tr><th>Mã mẫu</th><th>Công đoạn</th><th>Trạng thái</th><th>KQ</th><th>Đăng ký</th><th></th></tr></thead>
         <tbody>${samples.map(s => `<tr><td><code class="k">${esc(s.sample_code)}</code></td><td>${esc(s.stage || "—")}</td>
-          <td>${badge(s.status === "completed" ? "available" : "planned")}${esc(s.status)}</td><td>${s.result_count}</td>
+          <td><span class="badge ${s.status === "completed" ? "available" : s.status === "in_test" ? "due" : "planned"}">${{registered:"Đã đăng ký",in_test:"Đang test",completed:"Hoàn thành"}[s.status] || esc(s.status)}</span></td><td>${s.result_count}</td>
           <td class="muted">${fmt(s.registered_at)}</td>
           <td>${s.status !== "completed" ? `<button class="btn sm sec" data-smp="${esc(s.sample_id)}" data-next="${s.status === "registered" ? "in_test" : "completed"}">${s.status === "registered" ? "Bắt đầu test" : "Hoàn thành"}</button>` : ""}</td></tr>`).join("")}</tbody></table></div>`)}
     `;
@@ -813,7 +819,7 @@
         const cap = (spc.cp != null) ? `Cp <b>${spc.cp}</b> · Cpk <b>${spc.cpk}</b>` : "—";
         $("sp_box").innerHTML = controlChart(spc) +
           `<div style="margin-top:6px">n=${spc.n} · Mean ${spc.mean} · σ ${spc.sigma} · UCL ${spc.ucl} · LCL ${spc.lcl} · ${cap}
-            · ${spc.in_control ? badge("available") + "trong kiểm soát" : badge("critical") + spc.out_of_control + " điểm vi phạm"}</div>`;
+            · ${spc.in_control ? '<span class="badge available">Trong kiểm soát</span>' : `<span class="badge critical">${spc.out_of_control} điểm vi phạm</span>`}</div>`;
       } catch (e) { $("sp_box").innerHTML = `<div class="muted">Lỗi: ${esc(e.message)}</div>`; }
     }
     $("sp_param").onchange = loadSPC;
@@ -847,10 +853,6 @@
     const CAPA_PHASES = ["open", "investigation", "action", "verification", "kcs_approval", "director_approval", "closed"];
     const CAPA_NEXT = { open: "investigation", investigation: "action", action: "verification",
                         verification: "kcs_approval", kcs_approval: "director_approval", director_approval: "closed" };
-    const CAPA_PHASE_LABEL = { open: "Mở CAPA", investigation: "Điều tra nguyên nhân gốc",
-      action: "Kế hoạch hành động", verification: "Xác nhận hiệu lực",
-      kcs_approval: "Chờ duyệt — Trưởng phòng KCS", director_approval: "Chờ duyệt — Giám đốc/Phó GĐ SX-KT",
-      closed: "Đã đóng" };
 
     // Tách thành hàm named để tái dùng cho PENDING_OPEN_CAPA_ID (điều hướng từ Deviations ->
     // CAPA, bấm mã CAPA ở cột "CAPA liên kết") — không chỉ gọi từ click trực tiếp trên bảng.
@@ -896,7 +898,7 @@
       }).join("");
 
       modal(`<h3>${esc(c.capa_code)} — ${esc(c.title)}</h3>
-        <div>Trạng thái hiện tại: ${badge(["kcs_approval", "director_approval"].includes(c.state) ? "due" : c.state === "closed" ? "available" : "planned")}${esc(c.state)}</div>
+        <div>Trạng thái hiện tại: <span class="badge ${["kcs_approval", "director_approval"].includes(c.state) ? "due" : c.state === "closed" ? "available" : "planned"}">${esc(CAPA_PHASE_LABEL[c.state] || c.state)}</span></div>
         ${phaseHtml}
         <div id="cd_attach_box" style="margin-top:14px"><h4 style="margin:0 0 6px">📎 Tài liệu đính kèm</h4><div class="muted">Đang tải…</div></div>`, null, true);
 
@@ -2734,6 +2736,7 @@
         render("wms");
       });
       GET("/wms/near-expiry").then(entries => {
+        if (!$("ce_hist")) return;
         $("ce_hist").innerHTML = entries.length ? `<div class="tablewrap"><table id="t_ce_hist">
           <thead><tr><th>Chiều</th><th>Sản phẩm</th><th>Lô</th><th>Loại ĐV</th><th>SL</th><th>Vị trí</th><th>Ngày khai báo</th><th>Phiếu xuất</th><th>Ghi chú</th><th>Người tạo</th><th>Thời gian</th><th>Duyệt</th><th></th></tr></thead>
           <tbody>${entries.map(e => `<tr>
@@ -2784,7 +2787,7 @@
             toast("Đã lưu"); closeModal(); render("wms");
           });
         });
-      }).catch(() => { $("ce_hist").innerHTML = `<div class="muted">Không tải được lịch sử.</div>`; });
+      }).catch(() => { if ($("ce_hist")) $("ce_hist").innerHTML = `<div class="muted">Không tải được lịch sử.</div>`; });
     }
 
     if (sec === "consigned") {
@@ -2830,6 +2833,7 @@
         render("wms");
       });
       GET("/wms/consigned").then(entries => {
+        if (!$("gs_hist")) return;
         $("gs_hist").innerHTML = entries.length ? `<div class="tablewrap"><table id="t_gs_hist">
           <thead><tr><th>Chiều</th><th>Sản phẩm</th><th>Lô</th><th>Loại ĐV</th><th>SL</th><th>Vị trí</th><th>Xe gửi</th><th>Ngày khai báo</th><th>Phiếu xuất</th><th>Ghi chú</th><th>Người tạo</th><th>Thời gian</th><th>Duyệt</th><th></th></tr></thead>
           <tbody>${entries.map(e => `<tr>
@@ -2881,7 +2885,7 @@
             toast("Đã lưu"); closeModal(); render("wms");
           });
         });
-      }).catch(() => { $("gs_hist").innerHTML = `<div class="muted">Không tải được lịch sử.</div>`; });
+      }).catch(() => { if ($("gs_hist")) $("gs_hist").innerHTML = `<div class="muted">Không tải được lịch sử.</div>`; });
     }
 
     if (sec === "factoryimport") {
@@ -2901,6 +2905,7 @@
         render("wms");
       });
       GET("/wms/factory-import").then(entries => {
+        if (!$("nmk_hist")) return;
         $("nmk_hist").innerHTML = entries.length ? `<div class="tablewrap"><table id="t_nmk_hist">
           <thead><tr><th>Sản phẩm</th><th>Lô</th><th>Loại ĐV</th><th>SL</th><th>Vị trí</th><th>Nhà máy nguồn</th><th>Ngày nhập</th><th>Ghi chú</th><th>Người tạo</th><th>Thời gian</th><th>Duyệt</th><th></th></tr></thead>
           <tbody>${entries.map(e => `<tr>
@@ -2954,7 +2959,7 @@
             toast("Đã lưu"); closeModal(); render("wms");
           });
         });
-      }).catch(() => { $("nmk_hist").innerHTML = `<div class="muted">Không tải được lịch sử.</div>`; });
+      }).catch(() => { if ($("nmk_hist")) $("nmk_hist").innerHTML = `<div class="muted">Không tải được lịch sử.</div>`; });
     }
 
     if (sec === "kho") {
@@ -3305,6 +3310,7 @@
         render("wms");
       });
       GET("/audit?entity_type=finished_goods_unit").then(entries => {
+        if (!$("dp_history")) return;
         const rows = entries.filter(e => e.action === "decompose_batch");
         // Chỉ hoàn tác được lượt phân rã (a) chưa từng hoàn tác trước đó và (b) có lưu
         // source_unit_ids/lon_unit_ids (lượt phân rã cũ trước khi có tính năng này thì không).
@@ -3326,7 +3332,7 @@
           toast(`Đã hoàn tác: khôi phục ${res.vi_restored} vỉ, xóa ${res.lon_removed} lon`);
           render("wms");
         }));
-      }).catch(() => { $("dp_history").innerHTML = `<div class="muted">Không tải được lịch sử.</div>`; });
+      }).catch(() => { if ($("dp_history")) $("dp_history").innerHTML = `<div class="muted">Không tải được lịch sử.</div>`; });
       // Sơ đồ kho Đông Mai — CHỈ kho có code "KH01" (fallback: tên chứa "Đông Mai" nếu code lỡ
       // đổi) vì đây là sơ đồ mặt bằng thật của 1 nhà máy cụ thể, không áp dụng cho kho khác.
       const dongMai = warehouses.find(w => w.code === "KH01") || warehouses.find(w => (w.name || "").includes("Đông Mai"));
@@ -3697,6 +3703,7 @@
         renderLoVehicles(order);
       };
       GET("/wms/shipments").then(ships => {
+        if (!$("xk_history")) return;
         const isAdminXk = CURRENT_USER && CURRENT_USER.role === "admin";
         const canConfirmShip = _hasPerm("wms.confirm_shipment");
         // Sửa thông tin đầu phiếu (người nhận/lái xe/biển số/địa điểm/lý do) chỉ khi CHƯA duyệt —
@@ -3784,7 +3791,7 @@
           const res = await POST(`/wms/shipments/${s.shipment_id}/undo`, {});
           toast(`Đã hoàn tác — khôi phục ${res.restored} đơn vị`); render("wms");
         }));
-      }).catch(() => { $("xk_history").innerHTML = `<div class="muted">Không tải được lịch sử.</div>`; });
+      }).catch(() => { if ($("xk_history")) $("xk_history").innerHTML = `<div class="muted">Không tải được lịch sử.</div>`; });
     } else if (sec === "dieuchuyen") {
       // Mirror y hệt sec === "xuatkho" ở trên (picker/cart/lịch sử) — chỉ khác đích là 1
       // WmsLocation (không phải nhà phân phối) và KHÔNG có Loại xuất/Bia gửi/Cận date (không có
@@ -3956,6 +3963,7 @@
       $("dc_lotfilter").onchange = renderDcLots;
       $("dc_search").oninput = renderDcLots;
       GET("/wms/transfers").then(transfers => {
+        if (!$("dc_history")) return;
         const isAdminDc = CURRENT_USER && CURRENT_USER.role === "admin";
         const canConfirmDc = _hasPerm("wms.confirm_shipment");
         const canEditDc = _hasPerm("warehouse.issue");
@@ -4033,7 +4041,7 @@
           const res = await POST(`/wms/transfers/${t.transfer_id}/undo`, {});
           toast(`Đã hoàn tác — khôi phục ${res.restored} đơn vị${res.skipped ? ` (bỏ qua ${res.skipped} đơn vị đã bị thao tác khác thay đổi)` : ""}`); render("wms");
         }));
-      }).catch(() => { $("dc_history").innerHTML = `<div class="muted">Không tải được lịch sử.</div>`; });
+      }).catch(() => { if ($("dc_history")) $("dc_history").innerHTML = `<div class="muted">Không tải được lịch sử.</div>`; });
     } else if (sec === "capvao") {
       const lotSummariesCv = await GET("/wms/units/by-lot");
       const cvRows = [];
@@ -4176,6 +4184,7 @@
         }
       }
       GET("/wms/units/free-issue-history").then(rows => {
+        if (!$("fi_history")) return;
         $("fi_history").innerHTML = rows.length ? `<div class="tablewrap"><table id="t_fi_history">
           <thead><tr><th>SP</th><th>Lô</th><th>Loại</th><th>SL yêu cầu</th><th>Đã xuất</th><th>Lý do</th>
             <th>Thời gian</th><th>Người</th><th></th></tr></thead>
@@ -4195,7 +4204,7 @@
           toast(`Đã hoàn tác: khôi phục ${res.restored} đơn vị`);
           render("wms");
         }));
-      }).catch(() => { $("fi_history").innerHTML = `<div class="muted">Không tải được lịch sử.</div>`; });
+      }).catch(() => { if ($("fi_history")) $("fi_history").innerHTML = `<div class="muted">Không tải được lịch sử.</div>`; });
     } else if (sec === "lenhdonghang") {
       async function submitLoadOrderImport(file, sheetTypeOverrides) {
         const fd = new FormData();
@@ -4843,13 +4852,13 @@
       const lines = canManage ? await GET("/lines") : [];
       const ftRows = formTypes.map(f => `<tr><td><code class="k">${esc(f.code)}</code></td><td>${esc(f.name)}</td>
         <td>${esc(CIP_AREA_LABEL[f.area] || f.area)}</td><td class="muted">${esc(f.kind)}</td>
-        <td>${f.active ? badge("available") + "Dùng" : badge("obsolete") + "Ngừng"}</td>
+        <td>${f.active ? '<span class="badge available">Dùng</span>' : '<span class="badge obsolete">Ngừng</span>'}</td>
         ${canManage ? `<td style="white-space:nowrap"><button class="btn sm sec" data-ft-edit="${f.form_type_id}">Sửa</button>
           <button class="btn sm sec" data-ft-del="${f.form_type_id}">Xóa</button></td>` : "<td></td>"}</tr>`).join("");
       const eqRows = equipment.map(e => `<tr><td><code class="k">${esc(e.code)}</code></td><td>${esc(e.name)}</td>
         <td>${esc(CIP_AREA_LABEL[e.area] || e.area)}</td>
         <td class="muted">${e.production_line_id ? "Gắn tank/dây chuyền cụ thể" : "Dùng chung"}</td>
-        <td>${e.active ? badge("available") + "Dùng" : badge("obsolete") + "Ngừng"}</td>
+        <td>${e.active ? '<span class="badge available">Dùng</span>' : '<span class="badge obsolete">Ngừng</span>'}</td>
         ${canManage ? `<td style="white-space:nowrap"><button class="btn sm sec" data-eq-edit="${e.equipment_id}">Sửa</button>
           <button class="btn sm sec" data-eq-del="${e.equipment_id}">Xóa</button></td>` : "<td></td>"}</tr>`).join("");
       body = `

@@ -52,6 +52,7 @@ async function POST_FORM(path, formData) {
 // ---------- utils ----------
 const $ = (id) => document.getElementById(id);
 const el = (html) => { const d = document.createElement("div"); d.innerHTML = html.trim(); return d.firstChild; };
+const round3 = (n) => Math.round(n * 1000) / 1000;
 const badge = (s) => `<span class="badge ${s}">${s}</span>`;
 const scopeBadge = (raw) => (raw === "*" || raw == null || raw === "")
   ? '<span class="badge available">Toàn nhà máy</span>'
@@ -223,15 +224,33 @@ function wireMultiSelectFilter(searchEl, selectEl) {
 // mã nào và mã nào đang thực sự còn tồn, không chỉ số tổng cộng dồn của cả nhóm. colspanLeft/
 // colspanRight canh dòng phụ thẳng cột với bảng chính (STT+Tên NVL ở bên trái, Tồn CT/PX ở
 // giữa, phần còn lại bên phải để trống).
-function bomMemberRowsHtml(l, colspanLeft, colspanRight) {
+function bomMemberRowsHtml(l, colspanLeft, colspanRight, showQtyCells) {
   if (!l.member_breakdown || !l.member_breakdown.length) return "";
   return l.member_breakdown.map(mb => {
     // actual_used: tổng đã dùng THẬT của đúng mã này qua mọi mẻ của lệnh (đối chiếu với Nhu
     // cầu Tổng mẻ của dòng gộp) — chỉ có ở get_order() (đã tạo lệnh), không có ở preview.
     const usedNote = mb.actual_used !== undefined
       ? ` · <b>Đã dùng: ${mb.actual_used}</b>` : "";
+    const hasQty = mb.qty_per_batch != null;
+    // showQtyCells: bảng có sẵn cột riêng Nhu cầu 1 mẻ/Tổng mẻ/SL lấy Company/Workshop — hiện
+    // đúng số CỦA CHÍNH mã này vào các cột đó (không chỉ ghi chú trong tên) — dùng cho bảng có
+    // đủ cột này (VD "Xem" Lệnh nấu). Dòng nhóm khai kiểu cũ (không có qty_per_batch riêng) vẫn
+    // hiện "—" ở các cột số, không suy đoán.
+    if (showQtyCells) {
+      return `<tr class="muted" style="font-size:12px" title="Tồn kho hiện tại (không phải lúc lập phiếu)">
+      <td colspan="${colspanLeft}" style="padding-left:24px">↳ ${esc(mb.material_code || "")} — ${esc(mb.material_name || "")}${usedNote}</td>
+      <td>${hasQty ? mb.qty_per_batch : "—"}</td><td>${hasQty ? mb.qty_total : "—"}</td>
+      <td>${hasQty ? (mb.qty_from_company ?? "—") : "—"}</td><td>${hasQty ? (mb.qty_from_workshop ?? "—") : "—"}</td>
+      <td>${mb.stock_company} <span style="font-size:10px">(hiện tại)</span></td><td>${mb.stock_workshop} <span style="font-size:10px">(hiện tại)</span></td>
+      <td colspan="${colspanRight}"></td></tr>`;
+    }
+    // Dòng Nhóm vật tư khai định mức riêng từng thành viên (member_qty) có sẵn qty_per_batch/
+    // qty_total CỦA CHÍNH mã này (khác dòng nhóm kiểu cũ, chỉ có tồn kho) — hiện luôn ra để
+    // biết ngay cần lấy bao nhiêu mã này, không chỉ thấy tên nhóm chung ở dòng cha.
+    const qtyNote = hasQty
+      ? ` · <b>Nhu cầu: ${mb.qty_per_batch}/mẻ, ${mb.qty_total} tổng mẻ</b>` : "";
     return `<tr class="muted" style="font-size:12px" title="Tồn kho hiện tại (không phải lúc lập phiếu)">
-    <td colspan="${colspanLeft}" style="padding-left:24px">↳ ${esc(mb.material_code || "")} — ${esc(mb.material_name || "")}${usedNote}</td>
+    <td colspan="${colspanLeft}" style="padding-left:24px">↳ ${esc(mb.material_code || "")} — ${esc(mb.material_name || "")}${qtyNote}${usedNote}</td>
     <td>${mb.stock_company} <span style="font-size:10px">(hiện tại)</span></td><td>${mb.stock_workshop} <span style="font-size:10px">(hiện tại)</span></td>
     <td colspan="${colspanRight}"></td></tr>`;
   }).join("");
@@ -281,6 +300,20 @@ function openFinishTimeModal(title, currentEndedAt, onSubmit, onBack) {
   $("fin_ok").onclick = () => guard(async () => {
     const raw = $("fin_time").value;
     if (!raw) throw new Error("Chọn giờ kết thúc.");
+    await onSubmit(new Date(raw).toISOString());
+  });
+}
+
+// Sửa giờ bắt đầu mẻ nấu — backend chặn nếu làm đảo thứ tự thời gian với mẻ trước/sau cùng mã
+// nấu (xem routers/brewing.py::update_brew_batch_start), lỗi hiện qua guard() như bình thường.
+function openStartTimeModal(title, currentStartedAt, onSubmit, onBack) {
+  const defaultVal = toDTLocal(currentStartedAt ? new Date(currentStartedAt) : new Date());
+  modal(`<h3>${esc(title)}</h3>
+    <div class="field"><label>Giờ bắt đầu</label><input id="stt_time" type="datetime-local" value="${defaultVal}"/></div>
+    <button class="btn" id="stt_ok" style="margin-top:12px">Xác nhận</button>`, onBack);
+  $("stt_ok").onclick = () => guard(async () => {
+    const raw = $("stt_time").value;
+    if (!raw) throw new Error("Chọn giờ bắt đầu.");
     await onSubmit(new Date(raw).toISOString());
   });
 }
@@ -1211,22 +1244,54 @@ VIEWS.orders = async function () {
     CACHE.products = products;
     const opts = products.map(p => `<option value="${p.product_id}">${esc(p.code)} — ${esc(p.name)}</option>`).join("");
     body = `<div class="panel">
-      <h2>Tạo lệnh sản xuất (ERP)</h2>
+      <h2 id="o_form_title">Tạo lệnh sản xuất (ERP)</h2>
+      <div class="muted" style="margin-bottom:6px">Chọn Sản phẩm rồi chọn <b>Công thức</b> đang hiệu lực của sản phẩm đó (tuỳ chọn) — dùng để xem trước
+        định mức NVL (BOM), chia đều theo <b>Số mẻ kế hoạch</b>. Đây chỉ là thông tin kế hoạch/tham khảo, KHÔNG lưu thành dòng định mức riêng —
+        SL kế hoạch/ĐVT ở trên vẫn là nguồn sự thật duy nhất cho sản lượng.</div>
       <div class="row">
         <div class="field"><label>Mã lệnh</label><input id="o_code" placeholder="PO-..." /></div>
         <div class="field"><label>Sản phẩm</label><select id="o_prod">${opts}</select></div>
         <div class="field"><label>SL kế hoạch</label><input id="o_qty" type="number" value="50000" /></div>
         <div class="field"><label>ĐVT</label><input id="o_uom" value="L" size="4" /></div>
         <div class="field"><label>Ưu tiên</label><input id="o_pri" type="number" value="5" size="3" /></div>
-        <button class="btn" id="o_save">Tạo lệnh</button>
+        <div class="field"><label>Số mẻ kế hoạch</label><input id="o_batches" type="number" min="1" value="1" style="width:80px"/></div>
       </div>
+      <div id="o_recipe_box"></div>
+      <div class="row">
+        <div class="field"><label>Người ra lệnh</label><input id="o_issuedby" placeholder="(tuỳ chọn)"/></div>
+        <div class="field"><label>Đơn vị thực hiện</label><input id="o_exec" value="Phân xưởng bia Đông Mai"/></div>
+        <div class="field"><label>Thủ kho</label><input id="o_kho" value="Thủ kho"/></div>
+      </div>
+      <div class="row">
+        <div class="field" style="flex:1"><label>Căn cứ</label><input id="o_refnote" placeholder="VD: Căn cứ theo kế hoạch sản xuất..."/></div>
+        <div class="field"><label>Thời gian bắt đầu</label><input id="o_start" type="datetime-local"/></div>
+        <div class="field"><label>Thời gian kết thúc</label><input id="o_end" type="datetime-local"/></div>
+      </div>
+      <div class="row">
+        <div class="field" style="flex:1"><label>Biện pháp an toàn</label><input id="o_safety" placeholder="(tuỳ chọn)"/></div>
+      </div>
+      <div class="row"><button class="btn sec" id="o_bom_preview" style="align-self:flex-end">📋 Xem NVL (đủ/thiếu tồn)</button>
+        <button class="btn" id="o_save" style="align-self:flex-end">Tạo lệnh</button>
+        <span id="o_cancel_wrap"></span></div>
+      <div id="o_bom_box"></div>
     </div>
     <div class="panel"><h2>Danh sách lệnh</h2>
       <input class="searchbox" data-tbl="t_po" placeholder="Tìm theo mã lệnh, sản phẩm, trạng thái..."/>
-      <div class="tablewrap"><table id="t_po"><thead><tr><th>Mã</th><th>Sản phẩm</th><th>SL</th><th>Ưu tiên</th><th>Trạng thái</th><th>Tạo lúc</th></tr></thead>
+      <div class="tablewrap"><table id="t_po"><thead><tr><th>Mã</th><th>Sản phẩm</th><th>SL</th><th>Ưu tiên</th>
+        <th>Tên công thức</th><th>Version</th><th>Ghi chú công thức</th><th>Số mẻ (KH)</th><th>Trạng thái</th><th>Tạo lúc</th><th></th></tr></thead>
       <tbody>${orders.map(o => `<tr><td><code class="k">${esc(o.order_code)}</code></td>
         <td>${esc(prodName(o.product_id))}</td><td>${o.planned_qty} ${o.uom}</td>
-        <td>${o.priority}</td><td>${badge(o.status)}</td><td class="muted">${fmt(o.created_at)}</td></tr>`).join("")}</tbody></table></div>
+        <td>${o.priority}</td>
+        <td class="muted">${esc(o.recipe_name || "—")}</td>
+        <td class="muted">${o.recipe_code ? `${esc(o.recipe_code)} v${o.recipe_version_no}` : "—"}</td>
+        <td class="muted">${esc(o.recipe_note || "—")}</td>
+        <td class="muted">${o.planned_batch_count ?? "—"}</td>
+        <td>${badge(o.status)}</td><td class="muted">${fmt(o.created_at)}</td>
+        <td style="white-space:nowrap"><button class="btn sm sec" data-vieworder="${esc(o.order_id)}">Xem</button>
+          <button class="btn sm sec" data-printorder="${esc(o.order_id)}">🖨️ In</button>
+          ${!o.is_executed ? `<button class="btn sm sec" data-editorder="${esc(o.order_id)}">Sửa</button>
+          <button class="btn sm sec" data-delorder="${esc(o.order_id)}">Xóa</button>` : ""}</td></tr>`).join("") ||
+        `<tr><td colspan=11 class="muted">Chưa có lệnh sản xuất nào.</td></tr>`}</tbody></table></div>
     </div>`;
   }
 
@@ -1348,11 +1413,280 @@ VIEWS.orders = async function () {
   if (sec === "lenhnau") wireYearFilter("lenhnau", "orders");
   if (sec === "lenhloc") wireYearFilter("lenhloc", "orders");
 
-  if (sec === "po") $("o_save").onclick = () => guard(async () => {
-    await POST("/orders", { order_code: $("o_code").value, product_id: $("o_prod").value,
-      planned_qty: parseFloat($("o_qty").value), uom: $("o_uom").value, priority: parseInt($("o_pri").value) });
-    toast("Đã tạo lệnh sản xuất"); render("orders");
-  });
+  if (sec === "po") {
+    let poRecipeVersionId = "";
+    let poActiveVersions = [];
+    let poRecipe = null;
+    let editingOrderId = null;
+    // Cho sửa lại SL lấy tại Kho công ty/phân xưởng + chọn thành viên Nhóm vật tư thay thế
+    // trước khi lưu — mirror hệt Lệnh nấu (lnChildren[ci].qtyOverrides/memberSelection/
+    // memberQtySplits, xem renderLncPreview) nhưng KHÔNG có chỉ số ci (1 Lệnh SX = 1 dòng).
+    let poQtyOverrides = {};
+    let poMemberSelection = {};
+    let poMemberQtySplits = {};
+    let poPreviewLines = [];
+    let poAltGroupsCache = null;
+    const getPoAltGroups = async () => poAltGroupsCache || (poAltGroupsCache = await GET("/material-alt-groups").catch(() => []));
+    function setPoFormMode(editing) {
+      $("o_form_title").textContent = editing ? "Sửa lệnh sản xuất (ERP)" : "Tạo lệnh sản xuất (ERP)";
+      $("o_save").textContent = editing ? "Lưu chỉnh sửa lệnh" : "Tạo lệnh";
+      $("o_cancel_wrap").innerHTML = editing ? `<button class="btn sm sec" id="o_canceledit" style="align-self:flex-end">Hủy sửa</button>` : "";
+      if (editing) $("o_canceledit").onclick = () => render("orders");
+    }
+    // Nạp lại state từ dòng NVL ĐÃ LƯU (get_order) khi vào chế độ Sửa — chỉ khôi phục lựa chọn,
+    // KHÔNG tự hiện lại bảng preview (giống Lệnh nấu: phải bấm "Xem NVL" lại mới thấy, lúc đó
+    // renderPoPreview sẽ merge state này vào định mức mới nạp từ Công thức).
+    function resetPoOverridesFromSavedLines(lines) {
+      poQtyOverrides = {}; poMemberSelection = {}; poMemberQtySplits = {};
+      (lines || []).forEach(l => {
+        if (l.is_header) return;
+        const seq = String(l.seq);
+        const isMemberDeclared = l.member_breakdown && l.member_breakdown.length && l.member_breakdown.some(mb => mb.qty_per_batch != null);
+        if (isMemberDeclared) {
+          poMemberSelection[seq] = l.member_breakdown.map(mb => mb.material_id).filter(Boolean);
+          const splits = {};
+          l.member_breakdown.forEach(mb => { if (mb.material_code) splits[mb.material_code] = { fromCompany: mb.qty_from_company, fromWorkshop: mb.qty_from_workshop }; });
+          poMemberQtySplits[seq] = splits;
+        } else if (l.qty_from_company != null || l.qty_from_workshop != null) {
+          poQtyOverrides[seq] = { fromCompany: l.qty_from_company, fromWorkshop: l.qty_from_workshop };
+        }
+      });
+    }
+
+    async function renderPoRecipeBox(preselectVersionId) {
+      const box = $("o_recipe_box");
+      const productId = $("o_prod").value;
+      if (!productId) { box.innerHTML = ""; poActiveVersions = []; poRecipe = null; poRecipeVersionId = ""; return; }
+      box.innerHTML = `<div class="muted" style="margin-top:6px">Đang tải công thức...</div>`;
+      try {
+        const recipes = await GET(`/recipes`);
+        if ($("o_prod").value !== productId) return; // đã đổi Sản phẩm khác trong lúc chờ — bỏ kết quả cũ
+        poRecipe = (recipes || []).find(r => r.product_id === productId) || null;
+        poActiveVersions = poRecipe ? (await GET(`/recipes/${poRecipe.recipe_id}/versions`)).filter(v => v.state === "effective") : [];
+        if (!poActiveVersions.length) {
+          box.innerHTML = `<div class="muted" style="margin-top:6px">Sản phẩm này chưa có công thức hiệu lực — vẫn tạo được lệnh, chỉ không xem trước được NVL.</div>`;
+          poRecipeVersionId = ""; return;
+        }
+        poRecipeVersionId = preselectVersionId && poActiveVersions.some(v => v.version_id === preselectVersionId)
+          ? preselectVersionId : (poActiveVersions.length === 1 ? poActiveVersions[0].version_id : "");
+        box.innerHTML = `<div class="row" style="margin-top:6px">
+          <div class="field"><label>Công thức</label><select id="o_recipe">
+            <option value="">(không chọn — bỏ qua BOM)</option>
+            ${poActiveVersions.map(v => `<option value="${esc(v.version_id)}" ${v.version_id === poRecipeVersionId ? "selected" : ""}>
+              ${esc(poRecipe.code)} v${v.version_no} · ${v.base_qty} ${esc(v.base_uom)}</option>`).join("")}
+          </select></div>
+          <div class="field" style="flex:1"><label>Ghi chú công thức</label><div class="muted" id="o_recipe_note" style="margin-top:8px"></div></div>
+        </div>`;
+        const showNote = () => {
+          const v = poActiveVersions.find(x => x.version_id === poRecipeVersionId);
+          $("o_recipe_note").textContent = v && v.change_reason ? v.change_reason : "—";
+        };
+        showNote();
+        $("o_recipe").onchange = () => { poRecipeVersionId = $("o_recipe").value; $("o_bom_box").innerHTML = ""; showNote(); };
+      } catch (e) { box.innerHTML = ""; }
+    }
+    $("o_prod").onchange = () => { $("o_bom_box").innerHTML = ""; renderPoRecipeBox(); };
+    if ($("o_prod").value) renderPoRecipeBox();
+
+    // Bảng "Xem NVL" tương tác — mirror renderLncPreview (Lệnh nấu) nhưng không có chỉ số ci
+    // (state là poQtyOverrides/poMemberSelection/poMemberQtySplits module-scope ở trên, không
+    // lồng trong 1 mảng children). SL lấy tại 2 kho + thành viên đã chọn được LƯU LẠI khi tạo/
+    // sửa lệnh (xem services/orders.py::_persist_lines), không chỉ để xem tham khảo.
+    async function renderPoPreview(lines) {
+      poPreviewLines = lines;
+      const box = $("o_bom_box");
+      if (!lines.length) {
+        box.innerHTML = `<div class="muted" style="margin-top:8px">Công thức này chưa khai báo NVL — không có định mức để xem.</div>`;
+        return;
+      }
+      const altGroups = await getPoAltGroups();
+      const ov = poQtyOverrides;
+      const isMemberDeclared = (l) => l.member_breakdown && l.member_breakdown.length && l.member_breakdown.some(mb => mb.qty_per_batch != null);
+      const rowsHtml = lines.map(l => {
+        const seqKey = String(l.seq);
+        if (isMemberDeclared(l)) {
+          const grp = altGroups.find(g => g.code === l.material_group_code);
+          const mode = grp ? grp.selection_mode : "single";
+          let selected = poMemberSelection[seqKey];
+          if (!selected || !selected.length) {
+            selected = mode === "single" ? [l.member_breakdown[0].material_id] : l.member_breakdown.map(mb => mb.material_id);
+            poMemberSelection[seqKey] = selected;
+          }
+          const selectedSet = new Set(selected);
+          const selMembers = l.member_breakdown.filter(mb => selectedSet.has(mb.material_id));
+          const dispQtyPerBatch = round3(selMembers.reduce((s, mb) => s + (mb.qty_per_batch || 0), 0));
+          const dispQtyTotal = round3(selMembers.reduce((s, mb) => s + (mb.qty_total || 0), 0));
+          const dispShortage = selMembers.length > 0 && selMembers.every(mb => mb.shortage);
+          const memberRows = l.member_breakdown.map(mb => {
+            const checked = selectedSet.has(mb.material_id);
+            const inputType = mode === "multi" ? "checkbox" : "radio";
+            const nameAttr = mode === "multi" ? "" : ` name="po_memsel_${seqKey}"`;
+            const splitOv = ((poMemberQtySplits[seqKey] || {})[mb.material_code]) || {};
+            const fromCompany = splitOv.fromCompany ?? mb.qty_from_company;
+            const fromWorkshop = splitOv.fromWorkshop ?? mb.qty_from_workshop;
+            const splitCells = checked
+              ? `<td><input type="number" class="po_mem_qty_company" data-seq="${esc(seqKey)}" data-code="${esc(mb.material_code)}" value="${fromCompany ?? ""}" style="width:70px"/></td>
+                 <td><input type="number" class="po_mem_qty_workshop" data-seq="${esc(seqKey)}" data-code="${esc(mb.material_code)}" value="${fromWorkshop ?? ""}" style="width:70px"/></td>`
+              : `<td class="muted">—</td><td class="muted">—</td>`;
+            return `<tr class="muted" style="font-size:12px">
+              <td colspan="4" style="padding-left:24px"><label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+                <input type="${inputType}" class="po-memsel" data-seq="${esc(seqKey)}" data-mid="${esc(mb.material_id)}"${nameAttr} ${checked ? "checked" : ""}/>
+                ${esc(mb.material_code)} — ${esc(mb.material_name)}</label></td>
+              <td>${mb.qty_per_batch}</td><td>${mb.qty_total}</td>
+              ${splitCells}
+              <td>${mb.stock_company}</td><td>${mb.stock_workshop}</td>
+              <td>${mb.shortage ? '<span class="badge on_hold">⚠ Thiếu</span>' : '<span class="badge available">✓ Đủ</span>'}</td></tr>`;
+          }).join("");
+          return `<tr class="${dispShortage ? "row-red" : ""}">
+          <td>${esc(l.stt_label || "")}</td><td class="muted">—</td><td>${esc(l.material_name || "—")}
+            <span class="muted" style="font-size:11px"> (nhóm — ${mode === "multi" ? "chọn nhiều mã" : "chọn 1 mã"})</span></td><td>${esc(l.uom || "")}</td>
+          <td>${dispQtyPerBatch}</td><td>${dispQtyTotal}</td>
+          <td colspan="2" class="muted">—</td>
+          <td>${l.stock_company_snapshot ?? "—"}</td><td>${l.stock_workshop_snapshot ?? "—"}</td>
+          <td>${selMembers.length === 0 ? '<span class="badge on_hold">⚠ Chưa chọn mã</span>'
+            : (dispShortage ? '<span class="badge on_hold">⚠ Thiếu</span>' : '<span class="badge available">✓ Đủ</span>')}</td></tr>${memberRows}`;
+        }
+        const curOv = ov[seqKey] || {};
+        const fromCompany = curOv.fromCompany ?? l.qty_from_company;
+        const fromWorkshop = curOv.fromWorkshop ?? l.qty_from_workshop;
+        return `<tr class="${l.shortage ? "row-red" : ""}">
+        <td>${esc(l.stt_label || "")}</td><td class="muted">${esc(l.material_code || "—")}</td><td>${esc(l.material_name || "—")}</td><td>${esc(l.uom || "")}</td>
+        <td>${l.qty_per_batch ?? "—"}</td><td>${l.qty_total ?? "—"}</td>
+        <td>${l.is_header ? "" : `<input type="number" class="po_qty_company" data-seq="${seqKey}" value="${fromCompany ?? ""}" style="width:80px"/>`}</td>
+        <td>${l.is_header ? "" : `<input type="number" class="po_qty_workshop" data-seq="${seqKey}" value="${fromWorkshop ?? ""}" style="width:80px"/>`}</td>
+        <td>${l.stock_company_snapshot ?? "—"}</td><td>${l.stock_workshop_snapshot ?? "—"}</td>
+        <td>${!l.is_header
+          ? (l.shortage ? '<span class="badge on_hold">⚠ Thiếu</span>' : '<span class="badge available">✓ Đủ</span>')
+          : '<span class="muted">—</span>'}</td></tr>${bomMemberRowsHtml(l, 8, 1)}`;
+      }).join("");
+      const shortageCount = lines.filter(l => isMemberDeclared(l)
+        ? new Set(poMemberSelection[String(l.seq)] || []).size === 0
+        : l.shortage).length;
+      box.innerHTML = `<div class="panel" style="margin-top:8px">
+        <h3 style="font-size:14px">Xem trước định mức NVL ${shortageCount
+          ? `<span style="color:var(--red)">— ⚠ ${shortageCount} dòng thiếu tồn/chưa chọn mã</span>`
+          : `<span style="color:var(--green)">— ✓ đủ tồn tất cả</span>`}</h3>
+        <div class="muted" style="margin-bottom:6px">Cột "SL lấy" là GỢI Ý (ưu tiên dùng hết tồn đang có tại Kho phân xưởng, phần
+          còn thiếu lấy tại Kho công ty) — có thể sửa lại trước khi tạo lệnh, sẽ được LƯU LẠI (không chỉ để xem). Dòng theo
+          Nhóm vật tư có định mức riêng từng thành viên — chọn thành viên áp dụng ngay bên dưới, Nhu cầu chỉ tính mã đã chọn.</div>
+        <div class="tablewrap"><table><thead><tr><th>STT</th><th>Mã NVL</th><th>Tên NVL</th><th>ĐVT</th><th>Nhu cầu 1 mẻ</th>
+          <th>Nhu cầu Tổng mẻ</th><th>SL lấy tại Kho công ty</th><th>SL lấy tại Kho phân xưởng</th>
+          <th>Tồn Kho công ty</th><th>Tồn Kho phân xưởng</th><th>Trạng thái</th></tr></thead>
+        <tbody>${rowsHtml}</tbody></table></div></div>`;
+      box.querySelectorAll(".po_qty_company").forEach(inp => inp.onchange = () => {
+        const seq = inp.dataset.seq;
+        poQtyOverrides[seq] = { ...(poQtyOverrides[seq] || {}), fromCompany: inp.value === "" ? null : parseFloat(inp.value) };
+      });
+      box.querySelectorAll(".po_qty_workshop").forEach(inp => inp.onchange = () => {
+        const seq = inp.dataset.seq;
+        poQtyOverrides[seq] = { ...(poQtyOverrides[seq] || {}), fromWorkshop: inp.value === "" ? null : parseFloat(inp.value) };
+      });
+      box.querySelectorAll(".po-memsel").forEach(inp => inp.onchange = () => {
+        const seq = inp.dataset.seq;
+        if (inp.type === "radio") {
+          poMemberSelection[seq] = [inp.dataset.mid];
+        } else {
+          const cur = new Set(poMemberSelection[seq] || []);
+          if (inp.checked) cur.add(inp.dataset.mid); else cur.delete(inp.dataset.mid);
+          poMemberSelection[seq] = [...cur];
+        }
+        renderPoPreview(poPreviewLines);
+      });
+      box.querySelectorAll(".po_mem_qty_company").forEach(inp => inp.onchange = () => {
+        const seq = inp.dataset.seq, code = inp.dataset.code;
+        poMemberQtySplits[seq] = { ...(poMemberQtySplits[seq] || {}) };
+        poMemberQtySplits[seq][code] = { ...(poMemberQtySplits[seq][code] || {}), fromCompany: inp.value === "" ? null : parseFloat(inp.value) };
+      });
+      box.querySelectorAll(".po_mem_qty_workshop").forEach(inp => inp.onchange = () => {
+        const seq = inp.dataset.seq, code = inp.dataset.code;
+        poMemberQtySplits[seq] = { ...(poMemberQtySplits[seq] || {}) };
+        poMemberQtySplits[seq][code] = { ...(poMemberQtySplits[seq][code] || {}), fromWorkshop: inp.value === "" ? null : parseFloat(inp.value) };
+      });
+    }
+    $("o_bom_preview").onclick = () => guard(async () => {
+      if (!poRecipeVersionId) throw new Error("Chọn Công thức trước khi xem định mức NVL.");
+      const batches = parseInt($("o_batches").value, 10) || 1;
+      const lines = await GET(`/orders/bom-preview?recipe_version_id=${encodeURIComponent(poRecipeVersionId)}&planned_batch_count=${batches}`);
+      await renderPoPreview(lines);
+    });
+    // Gộp 2 loại override trước khi gửi: SL lấy Company/Workshop (dòng thường) và thành viên
+    // đã chọn (dòng Nhóm vật tư có định mức riêng — poMemberSelection giữ material_id, cần đổi
+    // sang material_code vì server nhận selected_material_codes) — mirror lnBuildMaterialQtyOverrides.
+    function poBuildMaterialQtyOverrides() {
+      const out = {};
+      for (const [seq, o] of Object.entries(poQtyOverrides)) {
+        out[seq] = { qty_from_company: o.fromCompany ?? null, qty_from_workshop: o.fromWorkshop ?? null };
+      }
+      for (const [seq, materialIds] of Object.entries(poMemberSelection)) {
+        const line = poPreviewLines.find(l => String(l.seq) === seq);
+        const codeById = Object.fromEntries((line ? line.member_breakdown : []).map(mb => [mb.material_id, mb.material_code]));
+        out[seq] = { ...(out[seq] || {}), selected_material_codes: materialIds.map(mid => codeById[mid]).filter(Boolean) };
+      }
+      for (const [seq, byCode] of Object.entries(poMemberQtySplits)) {
+        const member_qty_splits = Object.fromEntries(Object.entries(byCode).map(([code, o]) =>
+          [code, { qty_from_company: o.fromCompany ?? null, qty_from_workshop: o.fromWorkshop ?? null }]));
+        out[seq] = { ...(out[seq] || {}), member_qty_splits };
+      }
+      return out;
+    }
+
+    $("o_save").onclick = () => guard(async () => {
+      const payload = { order_code: $("o_code").value, product_id: $("o_prod").value,
+        planned_qty: parseFloat($("o_qty").value), uom: $("o_uom").value, priority: parseInt($("o_pri").value),
+        recipe_version_id: poRecipeVersionId || null,
+        planned_batch_count: parseInt($("o_batches").value, 10) || null,
+        issued_by: $("o_issuedby").value.trim() || null,
+        executor_unit: $("o_exec").value.trim() || null,
+        warehouse_keeper: $("o_kho").value.trim() || null,
+        reference_note: $("o_refnote").value.trim() || null,
+        start_date: $("o_start").value || null,
+        end_date: $("o_end").value || null,
+        safety_note: $("o_safety").value.trim() || null,
+        material_qty_overrides: poBuildMaterialQtyOverrides() };
+      if (editingOrderId) {
+        await PUT(`/orders/${editingOrderId}`, payload);
+        toast("Đã lưu lệnh sản xuất");
+      } else {
+        await POST("/orders", payload);
+        toast("Đã tạo lệnh sản xuất");
+      }
+      render("orders");
+    });
+
+    document.querySelectorAll("[data-vieworder]").forEach(b => b.onclick = () => openProductionOrderModal(b.dataset.vieworder));
+    document.querySelectorAll("[data-printorder]").forEach(b => b.onclick = () => guard(async () => {
+      const o = await GET(`/orders/${b.dataset.printorder}`);
+      printProductionOrder(o, o.lines);
+    }));
+    document.querySelectorAll("[data-editorder]").forEach(b => b.onclick = () => guard(async () => {
+      const o = await GET(`/orders/${b.dataset.editorder}`);
+      editingOrderId = o.order_id;
+      $("o_code").value = o.order_code;
+      $("o_prod").value = o.product_id;
+      $("o_qty").value = o.planned_qty;
+      $("o_uom").value = o.uom;
+      $("o_pri").value = o.priority;
+      $("o_batches").value = o.planned_batch_count || 1;
+      $("o_issuedby").value = o.issued_by || "";
+      $("o_exec").value = o.executor_unit || "";
+      $("o_kho").value = o.warehouse_keeper || "";
+      $("o_refnote").value = o.reference_note || "";
+      $("o_start").value = o.start_date ? o.start_date.slice(0, 16) : "";
+      $("o_end").value = o.end_date ? o.end_date.slice(0, 16) : "";
+      $("o_safety").value = o.safety_note || "";
+      resetPoOverridesFromSavedLines(o.lines);
+      $("o_bom_box").innerHTML = "";
+      await renderPoRecipeBox(o.recipe_version_id);
+      setPoFormMode(true);
+      $("o_code").scrollIntoView({ behavior: "smooth", block: "center" });
+      toast(`Đang sửa lệnh ${o.order_code} — thay đổi rồi bấm "Lưu chỉnh sửa lệnh"`);
+    }));
+    document.querySelectorAll("[data-delorder]").forEach(b => b.onclick = () => guard(async () => {
+      if (!confirm("Xóa lệnh sản xuất này? Không thể hoàn tác.")) return;
+      await DELETE(`/orders/${b.dataset.delorder}`);
+      toast("Đã xóa lệnh sản xuất"); render("orders");
+    }));
+  }
 
   if (sec === "lenhnau") {
     let editingMasterId = null;
@@ -1363,8 +1697,10 @@ VIEWS.orders = async function () {
       if (editing) $("lo_canceledit").onclick = () => render("orders");
     }
     const newLnChild = () => ({ productId: "", recipeVersionId: "", batchCount: 1, plannedVol: "", tolerance: 0,
-      bxMin: "", bxMax: "", tankLm: "", batchFrom: "", batchTo: "", qtyOverrides: {} });
+      bxMin: "", bxMax: "", tankLm: "", batchFrom: "", batchTo: "", qtyOverrides: {}, memberSelection: {}, memberQtySplits: {} });
     let lnChildren = [newLnChild()];
+    let lnAltGroupsCache = null;
+    const getLnAltGroups = async () => lnAltGroupsCache || (lnAltGroupsCache = await GET("/material-alt-groups").catch(() => []));
 
     function fetchLnBomPreview(ci) {
       const c = lnChildren[ci];
@@ -1444,50 +1780,133 @@ VIEWS.orders = async function () {
       document.querySelectorAll(".lnc_batches").forEach(inp => inp.onchange = () => { lnChildren[parseInt(inp.dataset.ci, 10)].batchCount = inp.value; });
       document.querySelectorAll(".lnc_volplan").forEach(inp => inp.onchange = () => { lnChildren[parseInt(inp.dataset.ci, 10)].plannedVol = inp.value; });
       document.querySelectorAll(".lnc_voltol").forEach(inp => inp.onchange = () => { lnChildren[parseInt(inp.dataset.ci, 10)].tolerance = inp.value; });
-      document.querySelectorAll("[data-lnc-preview]").forEach(b => b.onclick = () => guard(async () => {
-        const ci = parseInt(b.dataset.lncPreview, 10);
-        const lines = await fetchLnBomPreview(ci);
+      async function renderLncPreview(ci, lines) {
+        const c = lnChildren[ci];
+        c._previewLines = lines;
         const box = document.querySelector(`.lnc_preview[data-ci="${ci}"]`);
         if (!lines.length) {
           box.innerHTML = `<div class="muted" style="margin-top:8px">Dịch bia này chưa có Công thức (BOM) hiệu lực — không có định mức để xem.</div>`;
           return;
         }
-        const shortageCount = lines.filter(l => l.shortage).length;
-        const ov = lnChildren[ci].qtyOverrides;
+        const altGroups = await getLnAltGroups();
+        const ov = c.qtyOverrides;
+        // Dòng khai định mức RIÊNG từng thành viên (member_breakdown có qty_per_batch) — BẮT
+        // BUỘC chọn thành viên áp dụng cho lệnh nấu này ngay lúc lập (theo selection_mode của
+        // Nhóm vật tư): "single" chọn đúng 1 (radio), "multi" chọn 1 trở lên (checkbox). Nhu
+        // cầu hiển thị = TỔNG CHỈ của các thành viên đã chọn — không cộng thành viên chưa chọn.
+        const isMemberDeclared = (l) => l.member_breakdown && l.member_breakdown.length && l.member_breakdown.some(mb => mb.qty_per_batch != null);
+        const rowsHtml = lines.map(l => {
+          const seqKey = String(l.seq);
+          if (isMemberDeclared(l)) {
+            const grp = altGroups.find(g => g.code === l.material_group_code);
+            const mode = grp ? grp.selection_mode : "single";
+            let selected = c.memberSelection[seqKey];
+            if (!selected || !selected.length) {
+              selected = mode === "single" ? [l.member_breakdown[0].material_id] : l.member_breakdown.map(mb => mb.material_id);
+              c.memberSelection[seqKey] = selected;
+            }
+            const selectedSet = new Set(selected);
+            const selMembers = l.member_breakdown.filter(mb => selectedSet.has(mb.material_id));
+            const dispQtyPerBatch = round3(selMembers.reduce((s, mb) => s + (mb.qty_per_batch || 0), 0));
+            const dispQtyTotal = round3(selMembers.reduce((s, mb) => s + (mb.qty_total || 0), 0));
+            const dispShortage = selMembers.length > 0 && selMembers.every(mb => mb.shortage);
+            const memberRows = l.member_breakdown.map(mb => {
+              const checked = selectedSet.has(mb.material_id);
+              const inputType = mode === "multi" ? "checkbox" : "radio";
+              const nameAttr = mode === "multi" ? "" : ` name="lnc_memsel_${ci}_${seqKey}"`;
+              const splitOv = ((c.memberQtySplits[seqKey] || {})[mb.material_code]) || {};
+              const fromCompany = splitOv.fromCompany ?? mb.qty_from_company;
+              const fromWorkshop = splitOv.fromWorkshop ?? mb.qty_from_workshop;
+              // Chỉ cho sửa SL lấy khi mã ĐÃ ĐƯỢC CHỌN — mã chưa chọn thì "SL lấy" vô nghĩa.
+              const splitCells = checked
+                ? `<td><input type="number" class="lnc_mem_qty_company" data-ci="${ci}" data-seq="${esc(seqKey)}" data-code="${esc(mb.material_code)}" value="${fromCompany ?? ""}" style="width:70px"/></td>
+                   <td><input type="number" class="lnc_mem_qty_workshop" data-ci="${ci}" data-seq="${esc(seqKey)}" data-code="${esc(mb.material_code)}" value="${fromWorkshop ?? ""}" style="width:70px"/></td>`
+                : `<td class="muted">—</td><td class="muted">—</td>`;
+              return `<tr class="muted" style="font-size:12px">
+                <td colspan="4" style="padding-left:24px"><label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+                  <input type="${inputType}" class="lnc-memsel" data-ci="${ci}" data-seq="${esc(seqKey)}" data-mid="${esc(mb.material_id)}"${nameAttr} ${checked ? "checked" : ""}/>
+                  ${esc(mb.material_code)} — ${esc(mb.material_name)}</label></td>
+                <td>${mb.qty_per_batch}</td><td>${mb.qty_total}</td>
+                ${splitCells}
+                <td>${mb.stock_company}</td><td>${mb.stock_workshop}</td>
+                <td>${mb.shortage ? '<span class="badge on_hold">⚠ Thiếu</span>' : '<span class="badge available">✓ Đủ</span>'}</td></tr>`;
+            }).join("");
+            return `<tr class="${dispShortage ? "row-red" : ""}">
+            <td>${esc(l.stt_label || "")}</td><td class="muted">—</td><td>${esc(l.material_name || "—")}
+              <span class="muted" style="font-size:11px"> (nhóm — ${mode === "multi" ? "chọn nhiều mã" : "chọn 1 mã"})</span></td><td>${esc(l.uom || "")}</td>
+            <td>${dispQtyPerBatch}</td><td>${dispQtyTotal}</td>
+            <td colspan="2" class="muted">—</td>
+            <td>${l.stock_company_snapshot ?? "—"}</td><td>${l.stock_workshop_snapshot ?? "—"}</td>
+            <td>${selMembers.length === 0 ? '<span class="badge on_hold">⚠ Chưa chọn mã</span>'
+              : (dispShortage ? '<span class="badge on_hold">⚠ Thiếu</span>' : '<span class="badge available">✓ Đủ</span>')}</td></tr>${memberRows}`;
+          }
+          const curOv = ov[seqKey] || {};
+          const fromCompany = curOv.fromCompany ?? l.qty_from_company;
+          const fromWorkshop = curOv.fromWorkshop ?? l.qty_from_workshop;
+          return `<tr class="${l.shortage ? "row-red" : ""}">
+          <td>${esc(l.stt_label || "")}</td><td class="muted">${esc(l.material_code || "—")}</td><td>${esc(l.material_name || "—")}</td><td>${esc(l.uom || "")}</td>
+          <td>${l.qty_per_batch ?? "—"}</td><td>${l.qty_total ?? "—"}</td>
+          <td>${l.is_header ? "" : `<input type="number" class="lnc_qty_company" data-ci="${ci}" data-seq="${seqKey}" value="${fromCompany ?? ""}" style="width:80px"/>`}</td>
+          <td>${l.is_header ? "" : `<input type="number" class="lnc_qty_workshop" data-ci="${ci}" data-seq="${seqKey}" value="${fromWorkshop ?? ""}" style="width:80px"/>`}</td>
+          <td>${l.stock_company_snapshot ?? "—"}</td><td>${l.stock_workshop_snapshot ?? "—"}</td>
+          <td>${!l.is_header
+            ? (l.shortage ? '<span class="badge on_hold">⚠ Thiếu</span>' : '<span class="badge available">✓ Đủ</span>')
+            : '<span class="muted">—</span>'}</td></tr>${bomMemberRowsHtml(l, 8, 1)}`;
+        }).join("");
+        const shortageCount = lines.filter(l => isMemberDeclared(l)
+          ? new Set(c.memberSelection[String(l.seq)] || []).size === 0
+          : l.shortage).length;
         box.innerHTML = `<div class="panel" style="margin-top:8px">
           <h3 style="font-size:14px">Xem trước định mức NVL ${shortageCount
-            ? `<span style="color:var(--red)">— ⚠ ${shortageCount} dòng thiếu tồn</span>`
+            ? `<span style="color:var(--red)">— ⚠ ${shortageCount} dòng thiếu tồn/chưa chọn mã</span>`
             : `<span style="color:var(--green)">— ✓ đủ tồn tất cả</span>`}</h3>
           <div class="muted" style="margin-bottom:6px">Cột "SL lấy" là GỢI Ý (ưu tiên dùng hết tồn đang có tại Kho phân xưởng, phần
-            còn thiếu lấy tại Kho công ty) — có thể sửa lại trước khi tạo lệnh.</div>
+            còn thiếu lấy tại Kho công ty) — có thể sửa lại trước khi tạo lệnh. Dòng theo Nhóm vật tư có định mức riêng từng thành
+            viên — chọn thành viên áp dụng ngay bên dưới, Nhu cầu chỉ tính mã đã chọn.</div>
           <div class="tablewrap"><table><thead><tr><th>STT</th><th>Mã NVL</th><th>Tên NVL</th><th>ĐVT</th><th>Nhu cầu 1 mẻ</th>
             <th>Nhu cầu Tổng mẻ</th><th>SL lấy tại Kho công ty</th><th>SL lấy tại Kho phân xưởng</th>
             <th>Tồn Kho công ty</th><th>Tồn Kho phân xưởng</th><th>Trạng thái</th></tr></thead>
-          <tbody>${lines.map(l => {
-            const seqKey = String(l.seq);
-            const curOv = ov[seqKey] || {};
-            const fromCompany = curOv.fromCompany ?? l.qty_from_company;
-            const fromWorkshop = curOv.fromWorkshop ?? l.qty_from_workshop;
-            return `<tr class="${l.shortage ? "row-red" : ""}">
-            <td>${esc(l.stt_label || "")}</td><td class="muted">${esc(l.material_code || "—")}</td><td>${esc(l.material_name || "—")}</td><td>${esc(l.uom || "")}</td>
-            <td>${l.qty_per_batch ?? "—"}</td><td>${l.qty_total ?? "—"}</td>
-            <td>${l.is_header ? "" : `<input type="number" class="lnc_qty_company" data-ci="${ci}" data-seq="${seqKey}" value="${fromCompany ?? ""}" style="width:80px"/>`}</td>
-            <td>${l.is_header ? "" : `<input type="number" class="lnc_qty_workshop" data-ci="${ci}" data-seq="${seqKey}" value="${fromWorkshop ?? ""}" style="width:80px"/>`}</td>
-            <td>${l.stock_company_snapshot ?? "—"}</td><td>${l.stock_workshop_snapshot ?? "—"}</td>
-            <td>${!l.is_header
-              ? (l.shortage ? '<span class="badge on_hold">⚠ Thiếu</span>' : '<span class="badge available">✓ Đủ</span>')
-              : '<span class="muted">—</span>'}</td></tr>${bomMemberRowsHtml(l, 8, 1)}`;
-          }).join("")}</tbody></table></div></div>`;
+          <tbody>${rowsHtml}</tbody></table></div></div>`;
         box.querySelectorAll(".lnc_qty_company").forEach(inp => inp.onchange = () => {
-          const c = lnChildren[parseInt(inp.dataset.ci, 10)];
+          const cc = lnChildren[parseInt(inp.dataset.ci, 10)];
           const seq = inp.dataset.seq;
-          c.qtyOverrides[seq] = { ...(c.qtyOverrides[seq] || {}), fromCompany: inp.value === "" ? null : parseFloat(inp.value) };
+          cc.qtyOverrides[seq] = { ...(cc.qtyOverrides[seq] || {}), fromCompany: inp.value === "" ? null : parseFloat(inp.value) };
         });
         box.querySelectorAll(".lnc_qty_workshop").forEach(inp => inp.onchange = () => {
-          const c = lnChildren[parseInt(inp.dataset.ci, 10)];
+          const cc = lnChildren[parseInt(inp.dataset.ci, 10)];
           const seq = inp.dataset.seq;
-          c.qtyOverrides[seq] = { ...(c.qtyOverrides[seq] || {}), fromWorkshop: inp.value === "" ? null : parseFloat(inp.value) };
+          cc.qtyOverrides[seq] = { ...(cc.qtyOverrides[seq] || {}), fromWorkshop: inp.value === "" ? null : parseFloat(inp.value) };
         });
+        box.querySelectorAll(".lnc-memsel").forEach(inp => inp.onchange = () => {
+          const cci = parseInt(inp.dataset.ci, 10);
+          const cc = lnChildren[cci];
+          const seq = inp.dataset.seq;
+          if (inp.type === "radio") {
+            cc.memberSelection[seq] = [inp.dataset.mid];
+          } else {
+            const cur = new Set(cc.memberSelection[seq] || []);
+            if (inp.checked) cur.add(inp.dataset.mid); else cur.delete(inp.dataset.mid);
+            cc.memberSelection[seq] = [...cur];
+          }
+          renderLncPreview(cci, cc._previewLines);
+        });
+        box.querySelectorAll(".lnc_mem_qty_company").forEach(inp => inp.onchange = () => {
+          const cc = lnChildren[parseInt(inp.dataset.ci, 10)];
+          const seq = inp.dataset.seq, code = inp.dataset.code;
+          cc.memberQtySplits[seq] = { ...(cc.memberQtySplits[seq] || {}) };
+          cc.memberQtySplits[seq][code] = { ...(cc.memberQtySplits[seq][code] || {}), fromCompany: inp.value === "" ? null : parseFloat(inp.value) };
+        });
+        box.querySelectorAll(".lnc_mem_qty_workshop").forEach(inp => inp.onchange = () => {
+          const cc = lnChildren[parseInt(inp.dataset.ci, 10)];
+          const seq = inp.dataset.seq, code = inp.dataset.code;
+          cc.memberQtySplits[seq] = { ...(cc.memberQtySplits[seq] || {}) };
+          cc.memberQtySplits[seq][code] = { ...(cc.memberQtySplits[seq][code] || {}), fromWorkshop: inp.value === "" ? null : parseFloat(inp.value) };
+        });
+      }
+      document.querySelectorAll("[data-lnc-preview]").forEach(b => b.onclick = () => guard(async () => {
+        const ci = parseInt(b.dataset.lncPreview, 10);
+        const lines = await fetchLnBomPreview(ci);
+        await renderLncPreview(ci, lines);
       }));
       document.querySelectorAll("[data-lnchildrm]").forEach(b => b.onclick = () => {
         lnChildren.splice(parseInt(b.dataset.lnchildrm, 10), 1); renderLnChildren();
@@ -1495,6 +1914,27 @@ VIEWS.orders = async function () {
     }
     renderLnChildren();
     $("lo_addchild").onclick = () => { lnChildren.push(newLnChild()); renderLnChildren(); };
+    // Gộp 2 loại override của 1 lệnh nhỏ trước khi gửi: SL lấy Company/Workshop (dòng thường)
+    // và thành viên đã chọn (dòng Nhóm vật tư có định mức riêng — memberSelection giữ
+    // material_id, cần đổi sang material_code vì server nhận selected_material_codes).
+    function lnBuildMaterialQtyOverrides(c) {
+      const out = {};
+      for (const [seq, o] of Object.entries(c.qtyOverrides || {})) {
+        out[seq] = { qty_from_company: o.fromCompany ?? null, qty_from_workshop: o.fromWorkshop ?? null };
+      }
+      const lines = c._previewLines || [];
+      for (const [seq, materialIds] of Object.entries(c.memberSelection || {})) {
+        const line = lines.find(l => String(l.seq) === seq);
+        const codeById = Object.fromEntries((line ? line.member_breakdown : []).map(mb => [mb.material_id, mb.material_code]));
+        out[seq] = { ...(out[seq] || {}), selected_material_codes: materialIds.map(mid => codeById[mid]).filter(Boolean) };
+      }
+      for (const [seq, byCode] of Object.entries(c.memberQtySplits || {})) {
+        const member_qty_splits = Object.fromEntries(Object.entries(byCode).map(([code, o]) =>
+          [code, { qty_from_company: o.fromCompany ?? null, qty_from_workshop: o.fromWorkshop ?? null }]));
+        out[seq] = { ...(out[seq] || {}), member_qty_splits };
+      }
+      return out;
+    }
 
     $("lo_add").onclick = () => guard(async () => {
       const code = $("lo_code").value.trim();
@@ -1515,8 +1955,7 @@ VIEWS.orders = async function () {
           batch_range_from: c.batchFrom === "" ? null : parseInt(c.batchFrom, 10),
           batch_range_to: c.batchTo === "" ? null : parseInt(c.batchTo, 10),
           auto_from_bom: true, lines: [],
-          material_qty_overrides: Object.fromEntries(Object.entries(c.qtyOverrides || {}).map(([seq, o]) =>
-            [seq, { qty_from_company: o.fromCompany ?? null, qty_from_workshop: o.fromWorkshop ?? null }])),
+          material_qty_overrides: lnBuildMaterialQtyOverrides(c),
         };
       });
       const payload = {
@@ -1565,6 +2004,16 @@ VIEWS.orders = async function () {
         qtyOverrides: Object.fromEntries((c.lines || []).filter(l => !l.is_header &&
           (l.qty_from_company != null || l.qty_from_workshop != null)).map(l =>
           [String(l.seq), { fromCompany: l.qty_from_company, fromWorkshop: l.qty_from_workshop }])),
+        // Nạp lại thành viên Nhóm vật tư đã chọn trước đó (member_qty_snapshot chỉ giữ đúng
+        // các mã đã chọn) — để sửa lệnh không mất lựa chọn cũ, phải bấm "Xem NVL" lại chọn từ đầu.
+        memberSelection: Object.fromEntries((c.lines || []).filter(l => !l.is_header &&
+          l.member_breakdown && l.member_breakdown.length && l.member_breakdown.some(mb => mb.qty_per_batch != null)).map(l =>
+          [String(l.seq), l.member_breakdown.map(mb => mb.material_id).filter(Boolean)])),
+        // Nạp lại SL lấy Company/Workshop đã lưu RIÊNG từng thành viên (member_qty_snapshot).
+        memberQtySplits: Object.fromEntries((c.lines || []).filter(l => !l.is_header &&
+          l.member_breakdown && l.member_breakdown.length && l.member_breakdown.some(mb => mb.qty_per_batch != null)).map(l =>
+          [String(l.seq), Object.fromEntries((l.member_breakdown || []).filter(mb => mb.material_code).map(mb =>
+            [mb.material_code, { fromCompany: mb.qty_from_company, fromWorkshop: mb.qty_from_workshop }]))])),
       }));
       renderLnChildren();
       setLoFormMode(true);
@@ -2180,8 +2629,10 @@ async function showVersion(versionId) {
   const bom = (v.materials || []).map(m => {
     if (m.alt_group_code) {
       const grp = (CACHE.materialAltGroups || []).find(g => g.code === m.alt_group_code);
-      return `<tr><td>${esc(grp ? grp.name : m.alt_group_code)} <span class="muted">(nhóm vật tư thay thế)</span></td>
-      <td>${m.qty}</td><td>${esc(m.uom || "")}</td><td>±${m.tol_pct || 0}%</td></tr>`;
+      const memberRows = (m.member_qty || []).map(mq => `<tr class="muted" style="font-size:12px">
+        <td style="padding-left:20px">↳ ${esc(mq.material_code)}</td><td>${mq.qty}</td><td>${esc(m.uom || "")}</td><td></td></tr>`).join("");
+      return `<tr><td>${esc(grp ? grp.name : m.alt_group_code)} <span class="muted">(nhóm vật tư thay thế${grp && grp.selection_mode === "multi" ? " — chọn nhiều mã" : ""})</span></td>
+      <td>${m.member_qty ? "—" : m.qty}</td><td>${esc(m.uom || "")}</td><td>±${m.tol_pct || 0}%</td></tr>${memberRows}`;
     }
     const mat = (CACHE.materials || []).find(x => x.code === m.material_code);
     return `<tr><td><code class="k">${esc(m.material_code)}</code> ${esc(mat ? mat.name : "")}</td>
@@ -2241,14 +2692,47 @@ function bomUomCellHTML(mat, isGroup, groupUom) {
   }
   return altUomFieldHtml(mat, `class="bm-uom"`, 90);
 }
+// Dòng khai theo Nhóm vật tư thay thế có 2 cách khai định mức, người tạo Công thức TỰ CHỌN
+// bằng checkbox "bm-permember" (mặc định TẮT — giữ đúng hành vi gốc):
+// - TẮT (mặc định, VD "Malt Anh" rời/bao — hoàn toàn tương đương nhau): chỉ điền 1 TỔNG dùng
+//   chung, giống hệt trước đây — người lập Lệnh nấu/ghi NVL thực tế tự do phân bổ tổng này
+//   qua các mã thành viên tuỳ tồn kho lúc đó (mirror hành vi Nhóm vật tư gốc, không đổi).
+// - BẬT (VD nhóm CO2 nhiều nồng độ khác nhau): mỗi thành viên có 1 định mức RIÊNG do khác bản
+//   chất/nồng độ — hiện 1 ô nhập/thành viên; lúc ghi NVL thực tế được chọn dùng 1 hay nhiều mã
+//   (tuỳ selection_mode của nhóm ở Danh mục), mỗi mã dùng đúng định mức đã khai cho chính nó.
+function bomGroupMemberQtyHTML(groupCode, memberQty, legacyQty) {
+  const g = (CACHE.materialAltGroups || []).find(x => x.code === groupCode);
+  if (!g) return `<div class="muted" style="font-size:12px">(nhóm vật tư không tồn tại)</div>`;
+  const qtyByCode = Object.fromEntries((memberQty || []).map(mq => [mq.material_code, mq.qty]));
+  const rows = (g.member_material_ids || []).map(mid => {
+    const mat = (CACHE.materials || []).find(m => m.material_id === mid);
+    const code = mat ? mat.code : mid;
+    const val = qtyByCode.hasOwnProperty(code) ? qtyByCode[code] : (legacyQty ?? "");
+    return `<div style="display:flex;align-items:center;gap:6px;margin-bottom:3px">
+      <input type="number" step="any" class="bm-member-qty" data-code="${esc(code)}" value="${esc(val)}" style="width:80px" placeholder="0"/>
+      <span class="muted" style="font-size:11px">${esc(mat ? `${mat.code} — ${mat.name}` : code)}</span>
+    </div>`;
+  }).join("");
+  return `<div class="bm-group-qty">${rows || '<span class="muted" style="font-size:12px">(nhóm chưa có thành viên)</span>'}</div>`;
+}
+function bomQtyCellHTML(line, groupCode, permember) {
+  if (groupCode && permember) return bomGroupMemberQtyHTML(groupCode, line.member_qty, line.qty);
+  return `<input class="bm-qty" type="number" step="any" value="${line.qty ?? ""}" style="width:110px" title="${groupCode ? 'Tổng dùng chung cho cả nhóm — người lập Lệnh nấu tự phân bổ qua các mã thành viên' : ''}"/>`;
+}
+function bomPermemberLabelHTML(groupCode, checked) {
+  if (!groupCode) return "";
+  return `<label class="muted bm-permember-wrap" style="display:block;font-size:11px;margin-top:2px"><input type="checkbox" class="bm-permember" ${checked ? "checked" : ""}/> Định mức riêng từng thành viên</label>`;
+}
 function bomRowHTML(line) {
   line = line || {};
   const value = line.alt_group_code ? `grp:${line.alt_group_code}` : (line.material_code || "");
   const mat = line.material_code ? (CACHE.materials || []).find(m => m.code === line.material_code) : null;
+  const permember = !!(line.member_qty && line.member_qty.length);
   return `<tr class="bomrow">
     <td><input type="text" class="bm-mat-txt" value="${esc(bomMaterialLabel(line.material_code, line.alt_group_code))}" placeholder="Gõ để tìm vật tư/nhóm..." autocomplete="off" style="min-width:220px"/>
-      <input type="hidden" class="bm-mat" value="${esc(value)}"/></td>
-    <td><input class="bm-qty" type="number" step="any" value="${line.qty ?? ""}" style="width:110px"/></td>
+      <input type="hidden" class="bm-mat" value="${esc(value)}"/>
+      ${bomPermemberLabelHTML(line.alt_group_code, permember)}</td>
+    <td class="bm-qty-cell">${bomQtyCellHTML(line, line.alt_group_code, permember)}</td>
     <td class="bm-uom-cell">${bomUomCellHTML(mat, !!line.alt_group_code, line.uom)}</td>
     <td><input class="bm-tol" type="number" value="${line.tol_pct ?? 0}" size="4"/> %</td>
     <td><button class="btn sm sec bm-del" type="button">×</button></td></tr>`;
@@ -2257,8 +2741,17 @@ function wireBomEditor() {
   $("bm_add").onclick = () => { $("bm_body").insertAdjacentHTML("beforeend", bomRowHTML()); wireBomRows(); };
   wireBomRows();
 }
+function wireBomPermemberCheckbox(tr) {
+  const cb = tr.querySelector(".bm-permember");
+  if (!cb) return;
+  cb.onchange = () => {
+    const groupCode = tr.querySelector(".bm-mat").value.slice(4);
+    tr.querySelector(".bm-qty-cell").innerHTML = bomQtyCellHTML({}, groupCode, cb.checked);
+  };
+}
 function wireBomRows() {
   document.querySelectorAll(".bm-del").forEach(b => b.onclick = () => { b.closest("tr").remove(); });
+  document.querySelectorAll(".bomrow").forEach(tr => wireBomPermemberCheckbox(tr));
   document.querySelectorAll(".bm-mat-txt").forEach(txt => {
     if (txt.dataset.wired) return;
     txt.dataset.wired = "1";
@@ -2282,8 +2775,13 @@ function wireBomRows() {
           const item = items.find(i => i.code === row.dataset.v);
           if (item) {
             hidden.value = item.code; txt.value = item.label;
-            const uomCell = txt.closest("tr").querySelector(".bm-uom-cell");
-            uomCell.innerHTML = bomUomCellHTML(item.mat, !!item.isGroup, item.uom);
+            const tr = txt.closest("tr");
+            tr.querySelector(".bm-uom-cell").innerHTML = bomUomCellHTML(item.mat, !!item.isGroup, item.uom);
+            tr.querySelector(".bm-qty-cell").innerHTML = bomQtyCellHTML({}, item.isGroup ? item.code.slice(4) : null, false);
+            const existingLabel = txt.parentElement.querySelector(".bm-permember-wrap");
+            if (existingLabel) existingLabel.remove();
+            if (item.isGroup) hidden.insertAdjacentHTML("afterend", bomPermemberLabelHTML(item.code.slice(4), false));
+            wireBomPermemberCheckbox(tr);
           }
           closePanel();
         };
@@ -2297,10 +2795,24 @@ function wireBomRows() {
 function collectBom() {
   return [...document.querySelectorAll(".bomrow")].map(tr => {
     const val = tr.querySelector(".bm-mat").value;
-    const qtyRaw = parseFloat(tr.querySelector(".bm-qty").value) || 0;
     const chosenUom = tr.querySelector(".bm-uom").value;
     const tol_pct = parseFloat(tr.querySelector(".bm-tol").value) || 0;
-    if (val.startsWith("grp:")) return { alt_group_code: val.slice(4), qty: qtyRaw, uom: chosenUom, tol_pct };
+    if (val.startsWith("grp:")) {
+      const permemberCb = tr.querySelector(".bm-permember");
+      if (permemberCb && permemberCb.checked) {
+        // Định mức RIÊNG từng thành viên — chỉ lưu kiểu này khi người tạo Công thức chủ động
+        // bật checkbox (VD nhóm CO2 nhiều nồng độ khác nhau).
+        const member_qty = [...tr.querySelectorAll(".bm-member-qty")].map(inp => ({
+          material_code: inp.dataset.code, qty: parseFloat(inp.value) || 0,
+        })).filter(mq => mq.qty > 0);
+        return { alt_group_code: val.slice(4), member_qty, uom: chosenUom, tol_pct };
+      }
+      // Mặc định: 1 TỔNG dùng chung cho cả nhóm (VD "Malt Anh" rời/bao hoàn toàn tương đương)
+      // — người lập Lệnh nấu/ghi NVL thực tế tự phân bổ qua các mã thành viên tuỳ tồn kho.
+      const qtyRaw = parseFloat(tr.querySelector(".bm-qty").value) || 0;
+      return { alt_group_code: val.slice(4), qty: qtyRaw, uom: chosenUom, tol_pct };
+    }
+    const qtyRaw = parseFloat(tr.querySelector(".bm-qty").value) || 0;
     const mat = (CACHE.materials || []).find(m => m.code === val);
     // Nếu chọn đơn vị phụ (VD "bao") để nhập, quy đổi về đơn vị chính trước khi gửi — server
     // luôn lưu/scale BOM theo đơn vị chính của vật tư.
@@ -2311,7 +2823,7 @@ function collectBom() {
       uom: mat ? mat.uom : chosenUom,
       tol_pct,
     };
-  }).filter(l => (l.material_code || l.alt_group_code) && l.qty > 0);
+  }).filter(l => (l.material_code || l.alt_group_code) && (l.member_qty ? l.member_qty.length > 0 : l.qty > 0));
 }
 function versionFormHTML(v) {
   v = v || {};
@@ -2614,8 +3126,8 @@ async function showBatch(id) {
       <tbody>${bom.lines.map(l => `<tr class="row-${{dat:"blue",vuot:"red",thieu:"green",chua_dung:""}[l.status] || ""}">
         <td><code class="k">${esc(l.material_code)}</code></td><td>${l.planned} ${esc(l.uom || "")}</td>
         <td>${l.actual}</td><td style="color:${l.diff > 0 ? "var(--red)" : l.diff < 0 ? "var(--orange)" : "var(--muted)"}">${l.diff > 0 ? "+" : ""}${l.diff}</td>
-        <td>${l.pct}%</td><td>${badge({dat:"available",vuot:"critical",thieu:"due",chua_dung:"planned"}[l.status] || "planned")}${{dat:"đạt",vuot:"vượt định mức",thieu:"thiếu",chua_dung:"chưa dùng"}[l.status] || l.status}</td></tr>`).join("")}
-      ${(bom.extras || []).map(e => `<tr><td><code class="k">${esc(e.material_code)}</code></td><td class="muted">(ngoài BOM)</td><td>${e.actual}</td><td colspan=3>${badge("obsolete")}ngoài định mức</td></tr>`).join("")}</tbody></table>`
+        <td>${l.pct}%</td><td><span class="badge ${{dat:"available",vuot:"critical",thieu:"due",chua_dung:"planned"}[l.status] || "planned"}">${{dat:"đạt",vuot:"vượt định mức",thieu:"thiếu",chua_dung:"chưa dùng"}[l.status] || l.status}</span></td></tr>`).join("")}
+      ${(bom.extras || []).map(e => `<tr><td><code class="k">${esc(e.material_code)}</code></td><td class="muted">(ngoài BOM)</td><td>${e.actual}</td><td colspan=3><span class="badge obsolete">ngoài định mức</span></td></tr>`).join("")}</tbody></table>`
       : '<div class="muted">Công thức của mẻ chưa khai báo BOM.</div>'}
     <h3>Tạo lô output</h3>
     <div class="row">
@@ -2734,7 +3246,7 @@ async function openEBR(batchId) {
 
 // ================= QUALITY =================
 VIEWS.quality = async function () {
-  const [results, devs, batches, lots, materials, qcParams, brewBatches, fermentsData, filtersData, bottlesData, holdHistory, pendingStageQc, capas] = await Promise.all([
+  const [results, devs, batches, lots, materials, qcParams, brewBatches, fermentsData, filtersData, bottlesData, holdHistory, pendingStageQc, capas, matLocsQuality, pendingKcPxQuality, pendingSngQuality] = await Promise.all([
     GET("/quality/results"), GET("/quality/deviations"), GET("/batches"), GET("/lots"), GET("/materials"),
     GET("/qc/parameters?active_only=false").catch(() => []),
     GET("/brewing/brew-batches").catch(() => []),
@@ -2743,7 +3255,10 @@ VIEWS.quality = async function () {
     GET("/brewing/bottles").catch(() => []),
     GET("/audit?action=hold,release&limit=100").catch(() => []),
     GET("/quality/pending-stage-qc").catch(() => []),
-    GET("/qc/capa").catch(() => [])]);
+    GET("/qc/capa").catch(() => []),
+    GET("/warehouse/locations").catch(() => []),
+    GET("/warehouse/transfer-kcpx-requests?status=pending").catch(() => []),
+    GET("/warehouse/sang-ngang?status=pending").catch(() => [])]);
   // Deviation major/critical bắt buộc có CAPA đã đóng trước khi đóng được (xem
   // services/quality.py::_has_closed_capa) — tính sẵn theo deviation_id để devRow() cảnh báo
   // sớm phía UI, chặn thật vẫn ở backend.
@@ -2859,21 +3374,41 @@ VIEWS.quality = async function () {
     if (scopeType === "bottle") return `Mã chiết ${bottleById[scopeId] ? esc(bottleById[scopeId].bottle_code) : scopeId}`;
     return `${esc(scopeType)} ${scopeId}`;
   };
-  const pendingQc = lots.filter(l => l.status === "on_hold");
+  // Lọc đúng "Lô NVL" (material_id có giá trị) — lô bright tank/thành phẩm cũng dùng chung
+  // MaterialLot.status=on_hold cho lý do khác (QC mẻ/sản phẩm, không phải chỉ tiêu NVL) nên
+  // không có material_id; hiện lẫn vào đây sẽ mở "Khai báo/Duyệt" ra trống trơn (không có chỉ
+  // tiêu NVL nào để khai vì required_params_for_material cần material_id) — gây hiểu lầm.
+  const pendingQc = lots.filter(l => l.status === "on_hold" && l.material_id);
+  // "Nghiệp vụ" — vì sao lô này đang HOLD: nếu có đề nghị Điều chuyển CT->PX (transfer-kcpx) hoặc
+  // Xuất sang ngang đang "pending" gắn với lô, thì HOLD là do đang chờ KCS duyệt lại để PX nhận
+  // hàng (xem create_transfer_kcpx_request/create_sang_ngang ở services/warehouse.py) — hiện rõ
+  // vị trí nguồn (Kho công ty) để KCS biết ngay bối cảnh, không phải tự suy đoán từ mã lô.
+  const matLocByIdQuality = Object.fromEntries((matLocsQuality || []).map(m => [m.loc_id, m]));
+  const locLabelQuality = (locId) => { const m = matLocByIdQuality[locId]; return m ? `${esc(m.code)} — ${esc(m.name)}` : ""; };
+  const nghiepVuByLotId = {};
+  (pendingKcPxQuality || []).forEach(r => {
+    const l = lotById[r.lot_id]; if (!l) return;
+    nghiepVuByLotId[r.lot_id] = `Điều chuyển từ Kho công ty${l.location_id ? ` – ${locLabelQuality(l.location_id)}` : ""} sang Kho phân xưởng`;
+  });
+  (pendingSngQuality || []).forEach(r => {
+    const l = lotById[r.lot_id]; if (!l || nghiepVuByLotId[r.lot_id]) return;
+    nghiepVuByLotId[r.lot_id] = `Xuất sang ngang từ Kho công ty${l.location_id ? ` – ${locLabelQuality(l.location_id)}` : ""} sang Kho phân xưởng`;
+  });
   $("view-quality").innerHTML = `
     <div class="panel"><h2>🔬 Lô NVL chờ khai báo/duyệt chỉ tiêu chất lượng <span class="muted">(${pendingQc.length})</span></h2>
       <div class="muted" style="margin-bottom:6px">Nguyên liệu nhập kho có gán nhóm chỉ tiêu bắt buộc sẽ nằm ở đây cho tới khi KCS khai báo đủ &amp; duyệt.</div>
       <input class="searchbox" data-tbl="t_qcpendinglots" placeholder="Tìm theo mã lô, mã/tên NVL..."/>
       <div class="tablewrap"><table id="t_qcpendinglots">
-        <thead><tr><th>Lô</th><th>Mã NVL</th><th>Tên NVL</th><th>SL</th><th>Vị trí</th><th>Ngày nhập</th><th></th></tr></thead>
+        <thead><tr><th>Lô</th><th>Mã NVL</th><th>Tên NVL</th><th>SL</th><th>Vị trí</th><th>Nghiệp vụ</th><th>Ngày nhập</th><th></th></tr></thead>
         <tbody>${pendingQc.map(l => `<tr>
-          <td><code class="k">${esc(l.lot_code)}</code>${badge("on_hold")}</td>
+          <td><code class="k">${lotCodeCellHtml(l)}</code>${badge("on_hold")}</td>
           <td class="muted">${esc(matById[l.material_id] ? matById[l.material_id].code : "")}</td>
           <td>${esc(matById[l.material_id] ? matById[l.material_id].name : "")}</td>
           <td>${l.quantity} ${l.uom}</td><td class="muted">${esc(l.location || "")}</td>
+          <td class="muted">${nghiepVuByLotId[l.lot_id] || "—"}</td>
           <td class="muted">${fmt(l.created_at)}</td>
           <td><button class="btn sm" data-qclot="${esc(l.lot_id)}">Khai báo / Duyệt</button></td></tr>`).join("") ||
-          '<tr><td colspan=7 class="muted">Không có lô nào đang chờ.</td></tr>'}</tbody>
+          '<tr><td colspan=8 class="muted">Không có lô nào đang chờ.</td></tr>'}</tbody>
       </table></div>
     </div>
     <div class="panel"><h2>🧪 Công đoạn chờ khai báo chỉ tiêu chất lượng <span class="muted">(${pendingStageQc.length})</span></h2>
@@ -3685,6 +4220,28 @@ function wireSubnav(view) {
     SUB[view] = b.dataset.sub.split(":")[1]; render(view);
   });
 }
+// Vị trí kho dùng CHUNG 1 danh mục cho cả Kho công ty lẫn Kho phân xưởng — scope quyết định vị
+// trí đó hiện ở màn chọn vị trí nào (xem backend/app/models/materials.py::MaterialLocation.scope).
+const LOC_SCOPE_LABELS = { cong_ty: "Kho công ty", phan_xuong: "Kho phân xưởng", ca_hai: "Cả 2 kho" };
+function locScopeLabel(scope) { return LOC_SCOPE_LABELS[scope] || scope; }
+function locScopeOptsHtml(selected) {
+  return Object.entries(LOC_SCOPE_LABELS).map(([v, l]) =>
+    `<option value="${v}" ${v === selected ? "selected" : ""}>${l}</option>`).join("");
+}
+// Khi 1 lô bị tách do điều chuyển 1 phần số lượng (xem services/warehouse.py::_transfer_lot),
+// mã lô đổi sang mã mới tự sinh — backend trả kèm `split_from_lot_code` (routers/materials.py::
+// list_lots) để hiển thị "(tách từ mã X)" ngay tại chỗ, người dùng không phải vào Truy xuất mới
+// biết lô này vốn là 1 phần của lô nào trước đó (ngày nhập gốc/NCC/số lô KCS vẫn giữ nguyên,
+// chỉ đổi mã).
+function lotCodeCellHtml(l) {
+  if (!l) return "";
+  const tag = l.split_from_lot_code ? ` <span class="muted" style="font-size:11px">(tách từ ${esc(l.split_from_lot_code)})</span>` : "";
+  return `${esc(l.lot_code)}${tag}`;
+}
+function lotCodePlain(l) {
+  if (!l) return "";
+  return l.split_from_lot_code ? `${esc(l.lot_code)} (tách từ ${esc(l.split_from_lot_code)})` : esc(l.lot_code);
+}
 async function lotOptions(db, onlyAvailable) {
   const [lots, mats] = await Promise.all([GET("/lots"), GET("/materials")]);
   const matById = Object.fromEntries(mats.map(m => [m.material_id, m]));
@@ -3692,7 +4249,7 @@ async function lotOptions(db, onlyAvailable) {
     .sort((a, b) => new Date(a.created_at) - new Date(b.created_at))   // FIFO: nhập trước hiện trước
     .map(l => {
       const m = matById[l.material_id];
-      return `<option value="${l.lot_id}" data-material="${esc(l.material_id || "")}">${esc(l.lot_code)}${m ? " — " + esc(m.name) : ""} (${l.quantity}${l.uom}, nhập ${fmt(l.created_at)})${l.status === "on_hold" ? " — CHỜ DUYỆT QC" : ""}</option>`;
+      return `<option value="${l.lot_id}" data-material="${esc(l.material_id || "")}">${lotCodePlain(l)}${m ? " — " + esc(m.name) : ""} (${l.quantity}${l.uom}, nhập ${fmt(l.created_at)})${l.status === "on_hold" ? " — CHỜ DUYỆT QC" : ""}</option>`;
     }).join("");
 }
 
@@ -3762,7 +4319,7 @@ function openMaterialLotsModal(matLabel, lots) {
   modal(`<h3>Toàn bộ lô — <code class="k">${esc(matLabel)}</code> <span class="muted">(${sorted.length} lô)</span></h3>
     <input class="searchbox" data-tbl="t_matlots" placeholder="Tìm mã lô/vị trí..." style="margin-bottom:8px"/>
     <div class="tablewrap"><table id="t_matlots"><thead><tr><th>Mã lô</th><th>Số lượng</th><th>ĐVT</th><th>Trạng thái</th><th>Vị trí</th><th>Ngày nhập</th></tr></thead>
-      <tbody>${sorted.map(l => `<tr><td><code class="k">${esc(l.lot_code)}</code></td><td>${l.quantity}</td><td>${esc(l.uom)}</td>
+      <tbody>${sorted.map(l => `<tr><td><code class="k">${lotCodeCellHtml(l)}</code></td><td>${l.quantity}</td><td>${esc(l.uom)}</td>
         <td>${l.status === "on_hold" ? badge("on_hold") + "Chờ QC" : badge("available") + "Sẵn có"}</td>
         <td class="muted">${esc(l.location || "")}</td><td class="muted">${fmt(l.created_at)}</td></tr>`).join("") ||
         '<tr><td colspan=6 class="muted">Không có lô nào.</td></tr>'}</tbody></table></div>`);
@@ -3776,12 +4333,120 @@ function openMaterialLotsModal(matLabel, lots) {
 // và Kho phân xưởng (chỉ xem tồn của mình + gửi đề nghị nhận thêm khi cần) — mỗi module có
 // view/permission riêng (xem seed.py: thukho -> warehouse_kc, truongca/vanhanh -> warehouse_px)
 // nên phân quyền vào chỉ thấy đúng module của vai trò mình, không thấy module còn lại.
+// Trước đây "Nhập/Xuất/Hoàn/Sang ngang" là 1 tab dồn 9 khối chức năng — tách thành nhiều tab
+// riêng theo nghiệp vụ (nhap/obal/xtdn/sng/tudo/dc/tra) cho gọn, nhưng tất cả vẫn cần chung 1
+// bộ dữ liệu (lots/materials/requests/...) nên giữ đúng nguyên logic fetch+tính toán cũ, chỉ
+// tách ra thành hàm dùng chung để mỗi tab tự gọi khi cần, tránh phải viết lại/duy trì 2 nơi.
+async function loadGiaoData() {
+  const [lotsAvail, mats, allLots, allRequestsFull, freeIssues, pxRequests, factoryLocationsGiao, factoryTransfers, supplierReturns, suppliers, receipts, sangNgangRequests, qcReqIdsGiao, matLocsGiao, kcpxRequests] = await Promise.all([
+    lotOptions(null, false), GET("/materials"), GET("/lots"), GET("/warehouse/requests"),
+    GET("/warehouse/movements?movement_type=issue&mode=tu_do"),
+    GET("/warehouse/transfer-px-requests"), GET("/factory-locations").catch(() => []),
+    GET("/warehouse/movements?movement_type=issue&mode=dieu_chuyen_nha_may"),
+    GET("/warehouse/movements?movement_type=issue&mode=tra_ncc"),
+    GET("/suppliers"), GET("/warehouse/movements?movement_type=receipt"),
+    GET("/warehouse/sang-ngang"), GET("/materials/qc-required"),
+    GET("/warehouse/locations").catch(() => []),
+    GET("/warehouse/transfer-kcpx-requests").catch(() => []),
+  ]);
+  const activeMatLocsGiao = matLocsGiao.filter(l => l.active && (l.scope === "cong_ty" || l.scope === "ca_hai"));
+  const matLocOptsGiao = activeMatLocsGiao.map(l =>
+    `<option value="${esc(l.loc_id)}">${esc(l.code)} — ${esc(l.name)}</option>`).join("") ||
+    `<option value="">(chưa khai báo vị trí kho — vào Danh mục để thêm)</option>`;
+  const matLocByIdGiao = Object.fromEntries(matLocsGiao.map(l => [l.loc_id, l]));
+  WH_CACHE.matLocById = matLocByIdGiao;
+  // Giống hệt cách "Đề nghị nhận kho" tách pending/done: 1 phiếu còn dòng pending nào thì vẫn
+  // nằm ở khối "đang chờ" (dù có dòng đã xuất khác) — chỉ rơi xuống "Sổ xuất theo đề nghị" khi
+  // MỌI dòng đã được xử lý xong (fulfilled/rejected/cancelled), tránh phiếu xuất hiện 2 nơi.
+  const allRequests = allRequestsFull.filter(r => r.lines.some(l => l.status === "pending"));
+  const doneRequests = allRequestsFull.filter(r => !r.lines.some(l => l.status === "pending"));
+  // Xuất tự do có thể thực hiện ở cả kho công ty lẫn kho phân xưởng (mode="tu_do" dùng chung) —
+  // tách theo location_from để mỗi nơi chỉ thấy đúng lịch sử của mình.
+  const freeIssuesKc = freeIssues.filter(m => !/phân xưởng/i.test(m.location_from || ""));
+  const matItemsGiao = mats.map(m => ({ value: m.material_id, label: `${m.code} — ${m.name}`, uom: m.uom }));
+  const matByIdGiao = Object.fromEntries(mats.map(m => [m.material_id, m]));
+  const lotByIdGiao = Object.fromEntries(allLots.map(l => [l.lot_id, l]));
+  const supplierByIdGiao = Object.fromEntries(suppliers.map(s => [s.supplier_id, s]));
+  const supplierItemsGiao = suppliers.map(s => ({ value: s.supplier_id, label: `${s.code} — ${s.name}` }));
+  const pending = allLots.filter(l => l.status === "on_hold");
+  const canFulfillGiao = _hasPerm("warehouse.issue");
+  const isAdminGiao = CURRENT_USER && CURRENT_USER.role === "admin";
+  const canApproveTransferPx = _hasPerm("warehouse.receive");
+  const canTransferToFactory = _hasPerm("warehouse.issue");
+  const canApproveFactory = _hasPerm("warehouse.transfer_approve_factory");
+  const factoryByIdGiao = Object.fromEntries(factoryLocationsGiao.map(f => [f.factory_id, f]));
+  const activeFactoryOpts = factoryLocationsGiao.filter(f => f.active)
+    .map(f => `<option value="${f.factory_id}">${esc(f.code)} — ${esc(f.name)}</option>`).join("") ||
+    `<option value="">(chưa có nhà máy nào trong danh mục)</option>`;
+  const qcReqSetGiao = new Set(qcReqIdsGiao);
+  const sngPending = sangNgangRequests.filter(r => r.status === "pending").sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+  const sngDone = sangNgangRequests.filter(r => r.status !== "pending").sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+  const canCreateSangNgang = _hasPerm("warehouse.receive");
+  // Mỗi lần vào lại 1 trong các tab này (kể cả sau 1 thao tác) là 1 lượt xem mới — reset về
+  // trang đầu (10 dòng) cho gọn; dữ liệu mới nhất (nếu vừa thao tác) luôn nằm trong 10 dòng đầu.
+  WH_CACHE.matById = matByIdGiao;
+  WH_CACHE.matItems = matItemsGiao;
+  WH_CACHE.tu_do = freeIssuesKc;
+  WH_CACHE.dieu_chuyen_nha_may = factoryTransfers;
+  WH_CACHE.factoryById = factoryByIdGiao;
+  WH_CACHE.tra_ncc = supplierReturns;
+  WH_CACHE.xuat_theo_de_nghi = doneRequests;
+  WH_CACHE.lotById = lotByIdGiao;
+  WH_CACHE.allLots = allLots;
+  WH_CACHE.canFulfill = canFulfillGiao;
+  WH_CACHE.receipts = receipts;
+  WH_CACHE.sangNgangRequests = sangNgangRequests;
+  WH_CACHE.supplierItems = supplierItemsGiao;
+  Object.keys(WH_HIST_VISIBLE).forEach(k => { WH_HIST_VISIBLE[k] = WH_HIST_PAGE; });
+  const pxPending = pxRequests.filter(r => r.status === "pending").sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+  const pxDone = pxRequests.filter(r => r.status !== "pending").sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+  const kcpxPending = kcpxRequests.filter(r => r.status === "pending").sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+  const kcpxDone = kcpxRequests.filter(r => r.status !== "pending").sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+  const workshopLotOpts = allLots.filter(l => l.quantity > 0 && /phân xưởng/i.test(l.location || ""))
+    .sort((a, b) => new Date(a.created_at) - new Date(b.created_at))
+    .map(l => { const m = matByIdGiao[l.material_id];
+      return `<option value="${l.lot_id}">${lotCodePlain(l)}${m ? ` — ${esc(m.code)} ${esc(m.name)}` : ""} (${l.quantity}${l.uom}, tại ${esc(l.location)})</option>`; }).join("") ||
+    `<option value="">(không có lô nào ở kho phân xưởng)</option>`;
+  const companyLotOptsGiao = allLots.filter(l => l.quantity > 0 && !/phân xưởng/i.test(l.location || "") && l.status !== "on_hold")
+    .sort((a, b) => new Date(a.created_at) - new Date(b.created_at))
+    .map(l => { const m = matByIdGiao[l.material_id];
+      return `<option value="${l.lot_id}">${lotCodePlain(l)}${m ? ` — ${esc(m.code)} ${esc(m.name)}` : ""} (${l.quantity}${l.uom})</option>`; }).join("") ||
+    `<option value="">(không có lô nào ở kho công ty)</option>`;
+  const canEditReceipt = _hasPerm("warehouse.receive");
+  const receiptRows = receipts.slice().sort((a, b) => new Date(b.ts) - new Date(a.ts)).map(m => {
+    const mat = m.material_id ? matByIdGiao[m.material_id] : null;
+    const lot = m.lot_id ? lotByIdGiao[m.lot_id] : null;
+    const sup = lot && lot.supplier_id ? supplierByIdGiao[lot.supplier_id] : null;
+    return `<tr>
+      <td class="muted">${fmt(m.ts)}</td>
+      <td><code class="k">${esc(m.lot_code || "")}</code></td>
+      <td class="muted">${esc(lot ? lot.kcs_lot_no || "" : "")}</td>
+      <td class="muted">${esc(lot ? lot.supplier_lot || "" : "")}</td>
+      <td>${mat ? `<code class="k">${esc(mat.code)}</code> ${esc(mat.name)}` : esc(m.material_id || "—")}</td>
+      <td>${m.quantity} ${esc(m.uom)}</td>
+      <td class="muted">${esc(sup ? sup.name : "")}</td>
+      <td class="muted">${esc(m.reason || "")}</td>
+      <td class="muted">${esc(m.actor || "")}</td>
+      <td style="white-space:nowrap">${canEditReceipt ? `<button class="btn sm sec" data-editrc="${esc(m.movement_id)}">Sửa</button>
+        <button class="btn sm sec" data-delrc="${esc(m.movement_id)}" style="color:var(--red)">Xóa</button>` : ""}</td></tr>`;
+  }).join("") || `<tr><td colspan="10" class="muted">Chưa có phiếu nhập kho nào.</td></tr>`;
+  return { lotsAvail, mats, allLots, allRequestsFull, freeIssues, pxRequests, factoryLocationsGiao, factoryTransfers,
+    supplierReturns, suppliers, receipts, sangNgangRequests, qcReqIdsGiao, matLocsGiao, activeMatLocsGiao,
+    matLocOptsGiao, matLocByIdGiao, allRequests, doneRequests, freeIssuesKc, matItemsGiao, matByIdGiao, lotByIdGiao,
+    supplierByIdGiao, supplierItemsGiao, pending, canFulfillGiao, isAdminGiao, canApproveTransferPx,
+    canTransferToFactory, canApproveFactory, factoryByIdGiao, activeFactoryOpts, qcReqSetGiao, sngPending, sngDone,
+    canCreateSangNgang, pxPending, pxDone, workshopLotOpts, companyLotOptsGiao, canEditReceipt, receiptRows,
+    kcpxRequests, kcpxPending, kcpxDone };
+}
 VIEWS.warehouse_kc = async function () {
   const sec = SUB.warehouse_kc || "ton";
   const sections = [
     { key: "ton", label: "Xem tồn kho" }, { key: "the", label: "Thẻ kho" },
     { key: "han", label: "Hạn sử dụng" }, { key: "bc", label: "BC nhập-xuất-tồn" },
-    { key: "giao", label: "Nhập / Xuất / Hoàn / Sang ngang" },
+    { key: "nhap", label: "Nhập kho" }, { key: "obal", label: "🏁 Nhập tồn đầu" },
+    { key: "xtdn", label: "Xuất theo đề nghị" }, { key: "sng", label: "Xuất sang ngang" },
+    { key: "tudo", label: "Xuất tự do" }, { key: "dc", label: "Điều chuyển" },
+    { key: "tra", label: "Hoàn / Trả NCC" },
     { key: "kc", label: "Danh sách lô (FIFO)" },
     { key: "vitri", label: "📍 Vị trí kho" },
     { key: "kk", label: "Kiểm kê định kỳ" }, { key: "min", label: "📉 Tồn tối thiểu" },
@@ -3789,7 +4454,7 @@ VIEWS.warehouse_kc = async function () {
   let body = "";
   let lotsByMaterial = {};
   const LOT_CELL_MAX = 3;
-  const lotChip = (l) => `<code class="k">${esc(l.lot_code)}</code> (${l.quantity}${l.uom}${l.status === "on_hold" ? ", CHỜ QC" : ""})`;
+  const lotChip = (l) => `<code class="k">${lotCodeCellHtml(l)}</code> (${l.quantity}${l.uom}${l.status === "on_hold" ? ", CHỜ QC" : ""})`;
   if (sec === "ton") {
     const tonLoc = TON_LOC.warehouse_kc;
     const [stock, allLots, matLocsTon] = await Promise.all([
@@ -3807,6 +4472,7 @@ VIEWS.warehouse_kc = async function () {
       <div class="row" style="margin-bottom:8px"><div class="field"><label>Kho</label>${tonLocSelectHtml("ton_loc", tonLoc)}</div></div>
       ${lowCount ? `<div class="muted" style="color:var(--red);margin-bottom:8px">⚠ ${lowCount} vật tư đang dưới tồn tối thiểu.</div>` : ""}
       <input class="searchbox" data-tbl="t_ton" placeholder="Tìm mã/tên vật tư..." style="margin-bottom:8px"/>
+      <div id="ton_total" class="muted" style="margin-bottom:6px"></div>
       <div class="tablewrap"><table id="t_ton"><thead><tr><th>Mã VT</th><th>Tên</th><th>Nhóm</th><th>Mã lô</th><th>Vị trí kho</th><th>Tổng tồn thực tế</th><th>Đang chờ QC</th><th>Tồn khả dụng</th><th>ĐVT</th><th>Quy đổi</th><th>Tồn tối thiểu</th></tr></thead>
       <tbody>${stock.map(s => { const matLots = (lotsByMaterial[s.material_id] || [])
           .sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
@@ -3820,7 +4486,7 @@ VIEWS.warehouse_kc = async function () {
         const matTon = matByIdTon[s.material_id];
         const altDisp = matTon && matTon.alt_uom && matTon.alt_uom_ratio
           ? `${(s.on_hand * matTon.alt_uom_ratio).toFixed(2)} ${esc(matTon.alt_uom)}` : "—";
-        return `<tr${s.low_stock ? ' style="background:color-mix(in srgb, var(--red) 10%, transparent)"' : ""}><td><code class="k">${esc(s.material_code)}</code></td><td>${esc(s.material_name)}</td>
+        return `<tr data-qty="${s.on_hand}" data-uom="${esc(s.uom)}"${s.low_stock ? ' style="background:color-mix(in srgb, var(--red) 10%, transparent)"' : ""}><td><code class="k">${esc(s.material_code)}</code></td><td>${esc(s.material_name)}</td>
         <td class="muted">${esc(s.category || "")}</td>
         <td class="muted">${lotCell || "—"}</td>
         <td class="muted">${locCell}</td>
@@ -3871,95 +4537,9 @@ VIEWS.warehouse_kc = async function () {
       <tbody>${rep.map(r => `<tr><td><code class="k">${esc(r.material_code)}</code></td><td>${esc(r.material_name)}</td>
         <td style="color:var(--green)">${r.received}</td><td style="color:var(--orange)">${r.issued}</td>
         <td>${r.on_hand}</td><td>${r.uom}</td></tr>`).join("") || '<tr><td colspan=6 class="muted">Không có dữ liệu.</td></tr>'}</tbody></table></div></div>`;
-  } else if (sec === "giao") {
-    const [lotsAvail, mats, allLots, allRequestsFull, freeIssues, pxRequests, factoryLocationsGiao, factoryTransfers, supplierReturns, suppliers, receipts, sangNgangRequests, qcReqIdsGiao, matLocsGiao] = await Promise.all([
-      lotOptions(null, false), GET("/materials"), GET("/lots"), GET("/warehouse/requests"),
-      GET("/warehouse/movements?movement_type=issue&mode=tu_do"),
-      GET("/warehouse/transfer-px-requests"), GET("/factory-locations").catch(() => []),
-      GET("/warehouse/movements?movement_type=issue&mode=dieu_chuyen_nha_may"),
-      GET("/warehouse/movements?movement_type=issue&mode=tra_ncc"),
-      GET("/suppliers"), GET("/warehouse/movements?movement_type=receipt"),
-      GET("/warehouse/sang-ngang"), GET("/materials/qc-required"),
-      GET("/warehouse/locations").catch(() => []),
-    ]);
-    const activeMatLocsGiao = matLocsGiao.filter(l => l.active);
-    const matLocOptsGiao = activeMatLocsGiao.map(l =>
-      `<option value="${esc(l.loc_id)}">${esc(l.code)} — ${esc(l.name)}</option>`).join("") ||
-      `<option value="">(chưa khai báo vị trí kho — vào Danh mục để thêm)</option>`;
-    const matLocByIdGiao = Object.fromEntries(matLocsGiao.map(l => [l.loc_id, l]));
-    WH_CACHE.matLocById = matLocByIdGiao;
-    // Giống hệt cách "Đề nghị nhận kho" tách pending/done: 1 phiếu còn dòng pending nào thì vẫn
-    // nằm ở khối "đang chờ" (dù có dòng đã xuất khác) — chỉ rơi xuống "Sổ xuất theo đề nghị" khi
-    // MỌI dòng đã được xử lý xong (fulfilled/rejected/cancelled), tránh phiếu xuất hiện 2 nơi.
-    const allRequests = allRequestsFull.filter(r => r.lines.some(l => l.status === "pending"));
-    const doneRequests = allRequestsFull.filter(r => !r.lines.some(l => l.status === "pending"));
-    // Xuất tự do có thể thực hiện ở cả kho công ty lẫn kho phân xưởng (mode="tu_do" dùng chung) —
-    // tách theo location_from để mỗi nơi chỉ thấy đúng lịch sử của mình.
-    const freeIssuesKc = freeIssues.filter(m => !/phân xưởng/i.test(m.location_from || ""));
-    const matItemsGiao = mats.map(m => ({ value: m.material_id, label: `${m.code} — ${m.name}`, uom: m.uom }));
-    const matByIdGiao = Object.fromEntries(mats.map(m => [m.material_id, m]));
-    const lotByIdGiao = Object.fromEntries(allLots.map(l => [l.lot_id, l]));
-    const supplierByIdGiao = Object.fromEntries(suppliers.map(s => [s.supplier_id, s]));
-    const supplierItemsGiao = suppliers.map(s => ({ value: s.supplier_id, label: `${s.code} — ${s.name}` }));
-    const pending = allLots.filter(l => l.status === "on_hold");
-    const canFulfillGiao = _hasPerm("warehouse.issue");
-    const isAdminGiao = CURRENT_USER && CURRENT_USER.role === "admin";
-    const canApproveTransferPx = _hasPerm("warehouse.receive");
-    const canTransferToFactory = _hasPerm("warehouse.issue");
-    const canApproveFactory = _hasPerm("warehouse.transfer_approve_factory");
-    const factoryByIdGiao = Object.fromEntries(factoryLocationsGiao.map(f => [f.factory_id, f]));
-    const activeFactoryOpts = factoryLocationsGiao.filter(f => f.active)
-      .map(f => `<option value="${f.factory_id}">${esc(f.code)} — ${esc(f.name)}</option>`).join("") ||
-      `<option value="">(chưa có nhà máy nào trong danh mục)</option>`;
-    const qcReqSetGiao = new Set(qcReqIdsGiao);
-    const sngPending = sangNgangRequests.filter(r => r.status === "pending").sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
-    const sngDone = sangNgangRequests.filter(r => r.status !== "pending").sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
-    const canCreateSangNgang = _hasPerm("warehouse.receive");
-    // Mỗi lần vào lại tab "giao" (kể cả sau 1 thao tác) là 1 lượt xem mới — reset về trang đầu
-    // (10 dòng) cho gọn; dữ liệu mới nhất (nếu vừa thao tác) luôn nằm trong 10 dòng đầu.
-    WH_CACHE.matById = matByIdGiao;
-    WH_CACHE.matItems = matItemsGiao;
-    WH_CACHE.tu_do = freeIssuesKc;
-    WH_CACHE.dieu_chuyen_nha_may = factoryTransfers;
-    WH_CACHE.factoryById = factoryByIdGiao;
-    WH_CACHE.tra_ncc = supplierReturns;
-    WH_CACHE.xuat_theo_de_nghi = doneRequests;
-    WH_CACHE.lotById = lotByIdGiao;
-    WH_CACHE.allLots = allLots;
-    WH_CACHE.canFulfill = canFulfillGiao;
-    WH_CACHE.receipts = receipts;
-    WH_CACHE.sangNgangRequests = sangNgangRequests;
-    WH_CACHE.supplierItems = supplierItemsGiao;
-    Object.keys(WH_HIST_VISIBLE).forEach(k => { WH_HIST_VISIBLE[k] = WH_HIST_PAGE; });
-    const pxPending = pxRequests.filter(r => r.status === "pending").sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
-    const pxDone = pxRequests.filter(r => r.status !== "pending").sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
-    const workshopLotOpts = allLots.filter(l => l.quantity > 0 && /phân xưởng/i.test(l.location || ""))
-      .sort((a, b) => new Date(a.created_at) - new Date(b.created_at))
-      .map(l => `<option value="${l.lot_id}">${esc(l.lot_code)} (${l.quantity}${l.uom}, tại ${esc(l.location)})</option>`).join("") ||
-      `<option value="">(không có lô nào ở kho phân xưởng)</option>`;
-    const companyLotOptsGiao = allLots.filter(l => l.quantity > 0 && !/phân xưởng/i.test(l.location || "") && l.status !== "on_hold")
-      .sort((a, b) => new Date(a.created_at) - new Date(b.created_at))
-      .map(l => `<option value="${l.lot_id}">${esc(l.lot_code)} (${l.quantity}${l.uom})</option>`).join("") ||
-      `<option value="">(không có lô nào ở kho công ty)</option>`;
-    const canEditReceipt = _hasPerm("warehouse.receive");
-    const receiptRows = receipts.slice().sort((a, b) => new Date(b.ts) - new Date(a.ts)).map(m => {
-      const mat = m.material_id ? matByIdGiao[m.material_id] : null;
-      const lot = m.lot_id ? lotByIdGiao[m.lot_id] : null;
-      const sup = lot && lot.supplier_id ? supplierByIdGiao[lot.supplier_id] : null;
-      return `<tr>
-        <td class="muted">${fmt(m.ts)}</td>
-        <td><code class="k">${esc(m.lot_code || "")}</code></td>
-        <td class="muted">${esc(lot ? lot.kcs_lot_no || "" : "")}</td>
-        <td>${mat ? `<code class="k">${esc(mat.code)}</code> ${esc(mat.name)}` : esc(m.material_id || "—")}</td>
-        <td>${m.quantity} ${esc(m.uom)}</td>
-        <td class="muted">${esc(sup ? sup.name : "")}</td>
-        <td class="muted">${esc(m.reason || "")}</td>
-        <td class="muted">${esc(m.actor || "")}</td>
-        <td style="white-space:nowrap">${canEditReceipt ? `<button class="btn sm sec" data-editrc="${esc(m.movement_id)}">Sửa</button>
-          <button class="btn sm sec" data-delrc="${esc(m.movement_id)}" style="color:var(--red)">Xóa</button>` : ""}</td></tr>`;
-    }).join("") || `<tr><td colspan="9" class="muted">Chưa có phiếu nhập kho nào.</td></tr>`;
-    body = `<div class="split">
-      <div class="panel"><h2>Nhập kho ${isAdminGiao ? `<button class="btn sm sec" id="rc_delhist" style="color:var(--red);font-size:12px;font-weight:normal">🗑️ Xóa lịch sử</button>` : ""}</h2>
+  } else if (sec === "nhap") {
+    const { matItemsGiao, matLocOptsGiao, isAdminGiao, receiptRows } = await loadGiaoData();
+    body = `<div class="panel"><h2>Nhập kho ${isAdminGiao ? `<button class="btn sm sec" id="rc_delhist" style="color:var(--red);font-size:12px;font-weight:normal">🗑️ Xóa lịch sử</button>` : ""}</h2>
         <div class="row"><div class="field"><label>Ngày nhập</label><input id="rc_dt" type="datetime-local" value="${toDTLocal(new Date())}" max="${toDTLocal(new Date())}" min="${toDTLocal(new Date(Date.now() - 15 * 86400000))}"/></div>
           <div class="field" style="position:relative"><label>Nguyên liệu</label>
             <input type="text" id="rc_mat_txt" autocomplete="off" placeholder="Tìm mã/tên nguyên liệu..." value="${esc(matItemsGiao[0]?.label || "")}"/>
@@ -3972,17 +4552,53 @@ VIEWS.warehouse_kc = async function () {
           <div class="field"><label>Đơn giá</label><input id="rc_price" type="number" placeholder="(tuỳ chọn)"/></div>
           <div class="field"><label>Hạn dùng</label><input id="rc_exp" type="date"/></div></div>
         <div class="row"><div class="field"><label>Vị trí cất *</label><select id="rc_loc">${matLocOptsGiao}</select></div>
+          <div class="field"><label>Số LOT nhà cung cấp</label><input id="rc_supplier_lot" placeholder="Ghi trên bao bì NCC"/></div>
           <div class="field" style="flex:1"><label>Diễn giải</label><input id="rc_note" placeholder="(tuỳ chọn)"/></div>
           <button class="btn" id="rc_do" style="align-self:flex-end">Nhập</button></div>
-        <div class="muted" style="margin-top:4px">Mã lô do hệ thống tự sinh (tăng dần theo năm) — Số lô KCS do bộ phận KCS tự điền khi khai báo chỉ tiêu chất lượng.</div>
+        <div class="muted" style="margin-top:4px">Mã lô do hệ thống tự sinh (tăng dần theo năm) — Số lô KCS do bộ phận KCS tự điền khi khai báo chỉ tiêu chất lượng. Nguyên liệu chính/phụ bắt buộc phải có Số lô KCS hoặc Số LOT nhà cung cấp mới được KCS duyệt.</div>
         <input class="searchbox" data-tbl="rc_hist" placeholder="Tìm mã lô/nguyên liệu/nhà cung cấp..." style="margin-top:12px"/>
         <div class="tablewrap" style="margin-top:6px"><table id="rc_hist">
-          <thead><tr><th>Ngày nhập</th><th>Mã lô</th><th>Số lô KCS</th><th>Nguyên liệu</th><th>Số lượng</th><th>Nhà cung cấp</th><th>Diễn giải</th><th>Người nhập</th><th></th></tr></thead>
+          <thead><tr><th>Ngày nhập</th><th>Mã lô</th><th>Số lô KCS</th><th>Số LOT NCC</th><th>Nguyên liệu</th><th>Số lượng</th><th>Nhà cung cấp</th><th>Diễn giải</th><th>Người nhập</th><th></th></tr></thead>
           <tbody>${receiptRows}</tbody>
         </table></div>
-      </div>
-
-      <div class="panel"><h2>Xuất sang ngang <span class="muted">(${sngPending.length} đang chờ phân xưởng duyệt)</span></h2>
+      </div>`;
+  } else if (sec === "obal") {
+    const { matItemsGiao, isAdminGiao } = await loadGiaoData();
+    body = `<div class="panel"><h2>🏁 Nhập tồn đầu (kho công ty)</h2>
+        <div class="muted" style="margin-bottom:6px">Nạp số dư tồn kho ban đầu khi triển khai hệ thống (không qua nhận hàng nhà cung cấp).</div>
+        ${isAdminGiao
+          ? `<div class="row"><div class="field"><label>Mã lô</label><input id="ob_code" placeholder="MALT-..."/></div>
+          <div class="field" style="position:relative"><label>Vật tư</label>
+            <input type="text" id="ob_mat_txt" autocomplete="off" placeholder="Tìm mã/tên nguyên liệu..." value="${esc(matItemsGiao[0]?.label || "")}"/>
+            <input type="hidden" id="ob_mat" value="${esc(matItemsGiao[0]?.value || "")}"/></div></div>
+        <div class="row"><div class="field"><label>SL</label><input id="ob_qty" type="number" value="500"/></div>
+          <div class="field"><label>ĐVT</label><input id="ob_uom" value="${esc(matItemsGiao[0]?.uom || "")}" size="4" readonly title="Lấy tự động từ danh mục nguyên liệu — không sửa được"/></div>
+          <div class="field"><label>Hạn dùng</label><input id="ob_exp" type="date"/></div>
+          <div class="field"><label>Số lô KCS</label><input id="ob_kcs" placeholder="(tuỳ chọn)"/></div>
+          <div class="field"><label>Số LOT NCC</label><input id="ob_supplier_lot" placeholder="(tuỳ chọn)"/></div>
+          <button class="btn" id="ob_do">Nhập tồn đầu</button></div>
+        <div class="row" style="margin-top:10px;border-top:1px solid var(--border);padding-top:10px">
+          <div class="field" style="flex:1"><label>Hoặc import Excel (cột: Ngày nhập, Mã vật tư, Lô, Số lượng, tuỳ chọn thêm Số lô KCS)</label>
+            <input type="file" id="ob_file" accept=".xlsx"/></div>
+          <button class="btn sec" id="ob_import" style="align-self:flex-end">📥 Import Excel</button></div>`
+          : '<div class="muted">Chỉ tài khoản Admin mới được thực hiện nhập tồn đầu.</div>'}
+      </div>`;
+  } else if (sec === "xtdn") {
+    const { allRequests, matByIdGiao, lotByIdGiao, canFulfillGiao, allLots } = await loadGiaoData();
+    body = `<div class="panel"><h2>Xuất theo số phiếu đề nghị <span class="muted">(${allRequests.length} phiếu đang chờ)</span></h2>
+        <div class="muted" style="margin-bottom:6px">Mỗi phiếu hiện đầy đủ danh mục vật tư đã đề nghị — bấm "Duyệt cả phiếu" để xuất
+          toàn bộ 1 lần (SL đề nghị đã được chặn không vượt tồn kho công ty từ lúc tạo phiếu), hoặc xử lý riêng từng dòng.</div>
+        <input class="searchbox" id="xtdn_search" placeholder="Tìm theo số phiếu, người tạo, ghi chú, vật tư..." style="margin-bottom:8px;width:100%"/>
+        <div id="xtdn_block">
+          ${allRequests.length
+            ? allRequests.map(r => requestBlockHtml(r, matByIdGiao, lotByIdGiao, canFulfillGiao, true, allLots)).join("")
+            : '<div class="muted">Không có phiếu đề nghị nào đang chờ.</div>'}
+        </div>
+        ${movementHistoryBlockHtml("xuat_theo_de_nghi")}
+      </div>`;
+  } else if (sec === "sng") {
+    const { matItemsGiao, matByIdGiao, lotByIdGiao, matLocOptsGiao, sngPending, sngDone, canCreateSangNgang, qcReqSetGiao } = await loadGiaoData();
+    body = `<div class="panel"><h2>Xuất sang ngang <span class="muted">(${sngPending.length} đang chờ phân xưởng duyệt)</span></h2>
         <div class="muted" style="margin-bottom:6px">Vật tư về thẳng kho phân xưởng nhưng khai báo Ở ĐÂY — hệ thống vẫn ghi tăng tồn
           Kho công ty (như Nhập kho thường) rồi tạo đề nghị xuất ngay sang Kho phân xưởng. Thủ kho phân xưởng duyệt (tab Kho phân xưởng
           → Xuất sang ngang) thì lô mới thật sự chuyển. Nếu vật tư có chỉ tiêu chất lượng bắt buộc, phải qua KCS duyệt trước khi phân
@@ -3999,6 +4615,7 @@ VIEWS.warehouse_kc = async function () {
           <div class="field"><label>Đơn giá</label><input id="sng_price" type="number" placeholder="(tuỳ chọn)"/></div>
           <div class="field"><label>Hạn dùng</label><input id="sng_exp" type="date"/></div></div>
         <div class="row"><div class="field"><label>Vị trí cất (tuỳ chọn)</label><select id="sng_loc"><option value="">(không cần chọn — chuyển thẳng phân xưởng)</option>${matLocOptsGiao}</select></div>
+          <div class="field"><label>Số LOT NCC</label><input id="sng_supplier_lot" placeholder="(tuỳ chọn)"/></div>
           <div class="field" style="flex:1"><label>Diễn giải</label><input id="sng_note" placeholder="(tuỳ chọn)"/></div>
           <button class="btn" id="sng_do" style="align-self:flex-end">Xuất sang ngang</button></div>`
           : '<div class="muted">Bạn không có quyền tạo Xuất sang ngang.</div>'}
@@ -4014,21 +4631,10 @@ VIEWS.warehouse_kc = async function () {
           <tbody>${sngDone.map(r => sangNgangHistoryRowHtml(r, matByIdGiao, lotByIdGiao)).join("") ||
             `<tr><td colspan=9 class="muted">Chưa có đề nghị nào đã xử lý.</td></tr>`}</tbody>
         </table></div>
-      </div>
-
-      <div class="panel"><h2>Xuất theo số phiếu đề nghị <span class="muted">(${allRequests.length} phiếu đang chờ)</span></h2>
-        <div class="muted" style="margin-bottom:6px">Mỗi phiếu hiện đầy đủ danh mục vật tư đã đề nghị — bấm "Duyệt cả phiếu" để xuất
-          toàn bộ 1 lần (SL đề nghị đã được chặn không vượt tồn kho công ty từ lúc tạo phiếu), hoặc xử lý riêng từng dòng.</div>
-        <input class="searchbox" id="xtdn_search" placeholder="Tìm theo số phiếu, người tạo, ghi chú, vật tư..." style="margin-bottom:8px;width:100%"/>
-        <div id="xtdn_block">
-          ${allRequests.length
-            ? allRequests.map(r => requestBlockHtml(r, matByIdGiao, lotByIdGiao, canFulfillGiao, true, allLots)).join("")
-            : '<div class="muted">Không có phiếu đề nghị nào đang chờ.</div>'}
-        </div>
-        ${movementHistoryBlockHtml("xuat_theo_de_nghi")}
-      </div>
-
-      <div class="panel"><h2>Xuất tự do</h2>
+      </div>`;
+  } else if (sec === "tudo") {
+    const { lotsAvail, isAdminGiao } = await loadGiaoData();
+    body = `<div class="panel"><h2>Xuất tự do</h2>
         <div class="muted" style="margin-bottom:6px">Xuất không theo phiếu đề nghị (vd. dùng nội bộ, thử nghiệm). Lô đang
           "CHỜ DUYỆT QC" sẽ bị chặn xuất. Có thể "Hoàn lại" nếu xuất nhầm — vật tư trở về đúng lô, tránh thất thoát.</div>
         ${isAdminGiao
@@ -4041,10 +4647,12 @@ VIEWS.warehouse_kc = async function () {
           <button class="btn sec" id="xt_do" style="align-self:flex-end">Xuất tự do</button></div>`
           : '<div class="muted">Chỉ tài khoản Admin mới được thực hiện xuất tự do.</div>'}
         ${movementHistoryBlockHtml("tu_do")}
-      </div>
-
+      </div>`;
+  } else if (sec === "dc") {
+    const { pxPending, pxDone, matByIdGiao, lotByIdGiao, canApproveTransferPx, isAdminGiao, companyLotOptsGiao, activeFactoryOpts, canTransferToFactory, kcpxPending, kcpxDone, qcReqSetGiao } = await loadGiaoData();
+    body = `<div class="split">
       <div class="panel"><h2>Đề nghị điều chuyển Phân xưởng → Công ty <span class="muted">(${pxPending.length} đang chờ duyệt)</span></h2>
-        <div class="muted" style="margin-bottom:6px">Thủ kho phân xưởng gửi đề nghị (tab Kho phân xưởng → Điều chuyển về Kho công ty) — chưa
+        <div class="muted" style="margin-bottom:6px">Thủ kho phân xưởng gửi đề nghị (tab Kho phân xưởng → Điều chuyển) — chưa
           động tồn kho, chỉ khi duyệt ở đây lệnh mới thật sự chuyển. Sau khi duyệt, chỉ ADMIN mới "Hoàn tác" được.</div>
         <div class="tablewrap"><table id="t_pxpending">
           <thead><tr><th>Ngày tạo</th><th>Số đề nghị</th><th>Vật tư</th><th>Lô</th><th>SL</th><th>Lý do</th><th>Người tạo</th>${canApproveTransferPx ? "<th></th>" : ""}</tr></thead>
@@ -4063,7 +4671,9 @@ VIEWS.warehouse_kc = async function () {
         <div class="muted" style="margin-bottom:6px">Chỉ điều chuyển được lô đang ở <b>Kho công ty</b> — xuất NGAY (giảm tồn), tự do
           hoàn tác cho tới khi Trưởng phòng Kế hoạch duyệt; sau khi duyệt chỉ ADMIN mới "Hoàn tác" được.</div>
         ${canTransferToFactory
-          ? `<div class="row"><div class="field"><label>Lô (đang ở kho công ty)</label><select id="dcnm_lot">${companyLotOptsGiao}</select></div>
+          ? `<div class="row"><div class="field"><label>Lô (đang ở kho công ty)</label>
+          <input id="dcnm_lot_q" placeholder="Tìm nhanh (gõ mã/tên vật tư)..." style="margin-bottom:2px"/>
+          <select id="dcnm_lot">${companyLotOptsGiao}</select></div>
           <div class="field"><label>SL</label><input id="dcnm_qty" type="number" value="50"/></div>
           <div class="field"><label>Nhà máy đến</label><select id="dcnm_factory">${activeFactoryOpts}</select></div>
           <div class="field" style="flex:1"><label>Lý do (tuỳ chọn)</label><input id="dcnm_reason" placeholder="(tuỳ chọn)"/></div>
@@ -4072,44 +4682,41 @@ VIEWS.warehouse_kc = async function () {
         ${movementHistoryBlockHtml("dieu_chuyen_nha_may")}
       </div>
 
-      <div class="panel"><h2>Xuất trả nhà cung cấp</h2>
+      <div class="panel"><h2>Điều chuyển Công ty → Phân xưởng <span class="muted">(${kcpxPending.length} đang chờ Phân xưởng duyệt)</span></h2>
+        <div class="muted" style="margin-bottom:6px">Điều chuyển 1 lô ĐANG CÓ SẴN ở Kho công ty sang Kho phân xưởng — chưa động tồn kho, chỉ
+          khi Phân xưởng duyệt (tab Kho phân xưởng → Điều chuyển) mới thật sự chuyển. Nếu vật tư có chỉ tiêu chất lượng bắt buộc, lô sẽ
+          quay lại "Đang chờ KCS duyệt" (dù trước đó đã qua QC) — Phân xưởng KHÔNG duyệt được cho tới khi KCS duyệt lại.</div>
+        ${canTransferToFactory
+          ? `<div class="row"><div class="field"><label>Lô (đang ở kho công ty)</label>
+          <input id="dckp_lot_q" placeholder="Tìm nhanh (gõ mã/tên vật tư)..." style="margin-bottom:2px"/>
+          <select id="dckp_lot">${companyLotOptsGiao}</select></div>
+          <div class="field"><label>SL</label><input id="dckp_qty" type="number" value="50"/></div>
+          <div class="field" style="flex:1"><label>Lý do (tuỳ chọn)</label><input id="dckp_reason" placeholder="(tuỳ chọn)"/></div>
+          <button class="btn sec" id="dckp_do" style="align-self:flex-end">Gửi đề nghị</button></div>`
+          : '<div class="muted">Bạn không có quyền tạo đề nghị điều chuyển.</div>'}
+        <h4 style="margin-top:14px">Đang chờ Phân xưởng duyệt <span class="muted">(${kcpxPending.length})</span></h4>
+        <div class="tablewrap"><table id="t_kcpx_pending">
+          <thead><tr><th>Ngày tạo</th><th>Số đề nghị</th><th>Mã VT</th><th>Tên vật tư</th><th>Lô</th><th>SL</th><th>Trạng thái QC</th></tr></thead>
+          <tbody>${kcpxPending.map(r => transferKcPxKcRowHtml(r, matByIdGiao, lotByIdGiao, qcReqSetGiao)).join("") ||
+            `<tr><td colspan=7 class="muted">Không có đề nghị nào đang chờ.</td></tr>`}</tbody>
+        </table></div>
+        <h4 style="margin-top:14px">Lịch sử đã xử lý <span class="muted">(${kcpxDone.length})</span></h4>
+        <div class="tablewrap"><table id="t_kcpx_done">
+          <thead><tr><th>Ngày tạo</th><th>Số đề nghị</th><th>Mã VT</th><th>Tên vật tư</th><th>Lô</th><th>SL</th><th>Trạng thái</th><th>Người xử lý</th></tr></thead>
+          <tbody>${kcpxDone.map(r => transferKcPxHistoryRowHtml(r, matByIdGiao, lotByIdGiao)).join("") ||
+            `<tr><td colspan=8 class="muted">Chưa có đề nghị nào đã xử lý.</td></tr>`}</tbody>
+        </table></div>
+      </div></div>`;
+  } else if (sec === "tra") {
+    const { lotsAvail } = await loadGiaoData();
+    body = `<div class="panel"><h2>Xuất trả nhà cung cấp</h2>
         <div class="muted" style="margin-bottom:6px">Chọn đúng lô vật tư hỏng/không đạt chỉ tiêu để trả lại nhà cung cấp — bắt buộc nêu lý do.</div>
         <div class="row"><div class="field"><label>Lô</label><select id="ncc_lot">${lotsAvail}</select></div>
           <div class="field"><label>SL</label><input id="ncc_qty" type="number" value="50"/></div>
           <div class="field" style="flex:1"><label>Lý do (bắt buộc)</label><input id="ncc_reason" placeholder="vd. hàng hỏng, không đạt chỉ tiêu"/></div>
           <button class="btn sec" id="ncc_do" style="align-self:flex-end">Xuất trả NCC</button></div>
         ${movementHistoryBlockHtml("tra_ncc")}
-      </div>
-
-      <div class="panel"><h2>🏁 Nhập tồn đầu (kho công ty)</h2>
-        <div class="muted" style="margin-bottom:6px">Nạp số dư tồn kho ban đầu khi triển khai hệ thống (không qua nhận hàng nhà cung cấp).</div>
-        ${isAdminGiao
-          ? `<div class="row"><div class="field"><label>Mã lô</label><input id="ob_code" placeholder="MALT-..."/></div>
-          <div class="field" style="position:relative"><label>Vật tư</label>
-            <input type="text" id="ob_mat_txt" autocomplete="off" placeholder="Tìm mã/tên nguyên liệu..." value="${esc(matItemsGiao[0]?.label || "")}"/>
-            <input type="hidden" id="ob_mat" value="${esc(matItemsGiao[0]?.value || "")}"/></div></div>
-        <div class="row"><div class="field"><label>SL</label><input id="ob_qty" type="number" value="500"/></div>
-          <div class="field"><label>ĐVT</label><input id="ob_uom" value="${esc(matItemsGiao[0]?.uom || "")}" size="4" readonly title="Lấy tự động từ danh mục nguyên liệu — không sửa được"/></div>
-          <div class="field"><label>Hạn dùng</label><input id="ob_exp" type="date"/></div>
-          <div class="field"><label>Số lô KCS</label><input id="ob_kcs" placeholder="(tuỳ chọn)"/></div>
-          <button class="btn" id="ob_do">Nhập tồn đầu</button></div>
-        <div class="row" style="margin-top:10px;border-top:1px solid var(--border);padding-top:10px">
-          <div class="field" style="flex:1"><label>Hoặc import Excel (cột: Ngày nhập, Mã vật tư, Lô, Số lượng, tuỳ chọn thêm Số lô KCS)</label>
-            <input type="file" id="ob_file" accept=".xlsx"/></div>
-          <button class="btn sec" id="ob_import" style="align-self:flex-end">📥 Import Excel</button></div>`
-          : '<div class="muted">Chỉ tài khoản Admin mới được thực hiện nhập tồn đầu.</div>'}
-      </div>
-
-      <div class="panel"><h2>🔬 Lô đang chờ KCS khai báo/duyệt chỉ tiêu chất lượng <span class="muted">(${pending.length})</span></h2>
-        <div class="tablewrap"><table id="t_giaoqcpending">
-          <thead><tr><th>Lô</th><th>SL</th><th>Vị trí</th><th></th></tr></thead>
-          <tbody>${pending.map(l => `<tr>
-            <td><code class="k">${esc(l.lot_code)}</code>${badge("on_hold")}</td>
-            <td>${l.quantity} ${l.uom}</td><td class="muted">${esc(l.location || "")}</td>
-            <td><button class="btn sm sec" data-lotqc="${esc(l.lot_id)}">Xem trạng thái</button></td></tr>`).join("") ||
-            '<tr><td colspan=4 class="muted">Không có lô nào đang chờ.</td></tr>'}</tbody>
-        </table></div>
-      </div></div>`;
+      </div>`;
   } else if (sec === "kc") {
     const [allLots, mats, qcReqIds, matLocsKc] = await Promise.all([GET("/lots"), GET("/materials"),
       GET("/materials/qc-required"), GET("/warehouse/locations").catch(() => [])]);
@@ -4117,16 +4724,20 @@ VIEWS.warehouse_kc = async function () {
     const qcReqSet = new Set(qcReqIds);
     const matLocByIdKc = Object.fromEntries(matLocsKc.map(l => [l.loc_id, l]));
     WH_CACHE.matLocById = matLocByIdKc;
-    WH_CACHE.matLocsActive = matLocsKc.filter(l => l.active);
-    const rows = allLots.filter(l => !/phân xưởng/i.test(l.location || "") && l.quantity > 0)
+    WH_CACHE.matLocsActive = matLocsKc.filter(l => l.active && (l.scope === "cong_ty" || l.scope === "ca_hai"));
+    const rowsAllKc = allLots.filter(l => !/phân xưởng/i.test(l.location || "") && l.quantity > 0)
       .sort((a, b) => new Date(a.created_at) - new Date(b.created_at));   // FIFO: nhập trước hiện trước
-    body = `<div class="panel"><h2>Danh sách lô kho công ty <span class="muted">(${rows.length})</span></h2>
+    const qcPendingCountKc = rowsAllKc.filter(l => l.status === "on_hold").length;
+    const rows = SUB.kc_only_qc ? rowsAllKc.filter(l => l.status === "on_hold") : rowsAllKc;
+    body = `<div class="panel"><h2>Danh sách lô kho công ty <span class="muted">(${rows.length}${SUB.kc_only_qc ? "/" + rowsAllKc.length : ""})</span></h2>
       <div class="muted" style="margin-bottom:6px">Toàn bộ lô đang nằm ở kho công ty, sắp xếp nhập trước hiện trước (FIFO) để ưu tiên xuất/chuyển.</div>
+      <label class="muted" style="display:inline-flex;align-items:center;gap:6px;margin-bottom:8px">
+        <input type="checkbox" id="kc_only_qc" ${SUB.kc_only_qc ? "checked" : ""}/> 🔬 Chỉ hiện lô đang chờ KCS khai báo/duyệt chỉ tiêu (${qcPendingCountKc})</label>
       <input class="searchbox" data-tbl="t_kc" placeholder="Tìm mã lô/vật tư..." style="margin-bottom:8px"/>
       <div class="tablewrap"><table id="t_kc">
         <thead><tr><th>Lô</th><th>Vật tư</th><th>Tên vật tư</th><th>SL</th><th>Ngày giờ nhập</th><th>Vị trí cất</th><th>Trạng thái</th><th></th></tr></thead>
         <tbody>${rows.map(l => `<tr>
-          <td><code class="k">${esc(l.lot_code)}</code></td>
+          <td><code class="k">${lotCodeCellHtml(l)}</code></td>
           <td class="muted">${esc(matById[l.material_id] ? matById[l.material_id].code : l.material_id || "—")}</td>
           <td>${esc(matById[l.material_id] ? matById[l.material_id].name : "—")}</td>
           <td>${l.quantity} ${l.uom}</td>
@@ -4145,7 +4756,7 @@ VIEWS.warehouse_kc = async function () {
     WH_CACHE.vtMatById = matByIdVt;
     WH_CACHE.vtLots = allLotsVt.filter(l => !/phân xưởng/i.test(l.location || "") && l.quantity > 0);
     const unplacedVt = WH_CACHE.vtLots.filter(l => !l.location_id);
-    const activeLocsVt = matLocsVt.filter(l => l.active);
+    const activeLocsVt = matLocsVt.filter(l => l.active && (l.scope === "cong_ty" || l.scope === "ca_hai"));
     const locOptsVt = activeLocsVt.map(l => `<option value="${esc(l.loc_id)}">${esc(l.code)} — ${esc(l.name)}</option>`).join("") ||
       `<option value="">(chưa khai báo vị trí kho — vào Danh mục để thêm)</option>`;
     body = `<div class="panel"><h2>🚚 Cất vào vị trí <span class="muted">(${unplacedVt.length})</span></h2>
@@ -4155,7 +4766,7 @@ VIEWS.warehouse_kc = async function () {
       <div class="tablewrap" style="margin-top:10px"><table id="t_vt_unplaced">
         <thead><tr><th></th><th>Lô</th><th>Vật tư</th><th>SL</th><th>Ngày nhập</th></tr></thead>
         <tbody>${unplacedVt.map(l => `<tr><td><input type="checkbox" data-vtu="${esc(l.lot_id)}"/></td>
-          <td><code class="k">${esc(l.lot_code)}</code></td>
+          <td><code class="k">${lotCodeCellHtml(l)}</code></td>
           <td>${esc(matByIdVt[l.material_id] ? matByIdVt[l.material_id].name : "—")}</td>
           <td>${l.quantity} ${l.uom}</td><td class="muted">${fmt(l.created_at)}</td></tr>`).join("") ||
           `<tr><td colspan=5 class="muted">Không có lô nào chưa gán vị trí.</td></tr>`}</tbody>
@@ -4192,13 +4803,17 @@ VIEWS.warehouse_kc = async function () {
     });
   }
   if (sec === "han") wirePaginate("t_expiry", 10);
-  if (sec === "ton") wirePaginate("t_ton", 10);
+  if (sec === "ton") wirePaginate("t_ton", 10, { onFilter: (trs) => {
+    const el = document.getElementById("ton_total");
+    if (el) el.innerHTML = `Tổng số lượng (theo bộ lọc đang áp dụng): ${sumTotalsHtml(trs)}`;
+  } });
   if (sec === "kc") {
     // Mặc định hiện lô nhập GẦN NHẤT trước (cột "Ngày giờ nhập", đảo chiều) để đỡ phải kéo dài
     // — vẫn giữ đúng dữ liệu FIFO nhập-trước-hiện-trước bên dưới, người dùng bấm lại tiêu đề cột
     // là quay về đúng thứ tự FIFO (nhập trước lên đầu) khi cần chọn lô ưu tiên xuất/chuyển.
     if (!_pagerState.t_kc) _pagerState.t_kc = { page: 1, pageSize: 10, sortCol: 4, sortDir: -1 };
     wirePaginate("t_kc", 10);
+    $("kc_only_qc").onchange = () => { SUB.kc_only_qc = $("kc_only_qc").checked; render("warehouse_kc"); };
     document.querySelectorAll("[data-relocatelot]").forEach(b => b.onclick = () => {
       const lotId = b.dataset.relocatelot;
       const locs = WH_CACHE.matLocsActive || [];
@@ -4223,7 +4838,7 @@ VIEWS.warehouse_kc = async function () {
       $("vt_move_wrap").innerHTML = `<div class="tablewrap"><table id="t_vt_move">
         <thead><tr><th></th><th>Lô</th><th>Vật tư</th><th>SL</th></tr></thead>
         <tbody>${lotsAt.map(l => `<tr><td><input type="checkbox" data-vtm="${esc(l.lot_id)}"/></td>
-          <td><code class="k">${esc(l.lot_code)}</code></td>
+          <td><code class="k">${lotCodeCellHtml(l)}</code></td>
           <td>${esc((WH_CACHE.vtMatById[l.material_id] || {}).name || "—")}</td>
           <td>${l.quantity} ${l.uom}</td></tr>`).join("") ||
           `<tr><td colspan=4 class="muted">Không có lô nào ở vị trí này.</td></tr>`}</tbody>
@@ -4259,30 +4874,10 @@ VIEWS.warehouse_kc = async function () {
       render("warehouse_kc");
     };
   }
-  if (sec === "giao") {
+  if (sec === "nhap") {
     wirePaginate("rc_hist", 10);
-    wirePaginate("t_sng_pending", 10);
-    wirePaginate("t_sng_done", 10);
-    wirePaginate("t_pxpending", 10);
-    wirePaginate("t_pxdone", 10);
-    wirePaginate("t_giaoqcpending", 10);
     wireSearchableSelect("rc_mat_txt", "rc_mat", WH_CACHE.matItems, (item) => { $("rc_uom").value = item.uom || ""; });
-    wireSearchableSelect("ob_mat_txt", "ob_mat", WH_CACHE.matItems, (item) => { $("ob_uom").value = item.uom || ""; });
     wireSearchableSelect("rc_supplier_txt", "rc_supplier", WH_CACHE.supplierItems);
-    if ($("sng_mat_txt")) wireSearchableSelect("sng_mat_txt", "sng_mat", WH_CACHE.matItems, (item) => {
-      $("sng_uom_wrap").innerHTML = altUomFieldHtml((WH_CACHE.matById || {})[item.value], "sng_uom", 60);
-    });
-    if ($("sng_supplier_txt")) wireSearchableSelect("sng_supplier_txt", "sng_supplier", WH_CACHE.supplierItems);
-    if ($("sng_do")) $("sng_do").onclick = () => guard(async () => {
-      const sngMat = (WH_CACHE.matById || {})[$("sng_mat").value];
-      const sngQty = altUomToBaseQty(sngMat, parseFloat($("sng_qty").value), $("sng_uom").value);
-      const res = await POST("/warehouse/sang-ngang", { material_id: $("sng_mat").value,
-        supplier_id: $("sng_supplier").value || null, unit_price: $("sng_price").value ? parseFloat($("sng_price").value) : null,
-        quantity: sngQty, uom: sngMat ? sngMat.uom : $("sng_uom").value, location_id: $("sng_loc").value || null,
-        expiry: $("sng_exp").value || null, reason: $("sng_note").value.trim() || "Xuất sang ngang" });
-      toast(`Đã tạo đề nghị xuất sang ngang (số ${res.request_code}) — chờ phân xưởng duyệt`);
-      render("warehouse_kc");
-    });
     $("rc_do").onclick = () => guard(async () => {
       const rcDtRaw = $("rc_dt").value;
       if (!rcDtRaw) throw new Error("Chọn ngày nhập.");
@@ -4290,7 +4885,7 @@ VIEWS.warehouse_kc = async function () {
       const res = await POST("/warehouse/receive", { material_id: $("rc_mat").value,
         supplier_id: $("rc_supplier").value || null, unit_price: $("rc_price").value ? parseFloat($("rc_price").value) : null,
         quantity: parseFloat($("rc_qty").value), uom: $("rc_uom").value, received_at: new Date(rcDtRaw).toISOString(),
-        location_id: $("rc_loc").value,
+        location_id: $("rc_loc").value, supplier_lot: $("rc_supplier_lot").value.trim() || null,
         expiry: $("rc_exp").value || null, reason: $("rc_note").value.trim() || "Nhập kho" });
       if (res.status === "on_hold") toast(`Đã nhập kho (mã lô ${res.lot_code}) — lô đang CHỜ khai báo & duyệt chỉ tiêu chất lượng`, "err");
       else toast(`Đã nhập kho (mã lô ${res.lot_code})`);
@@ -4315,6 +4910,7 @@ VIEWS.warehouse_kc = async function () {
             <input type="hidden" id="erc_supplier"/></div>
           <div class="field"><label>Đơn giá</label><input id="erc_price" type="number" value="${lot && lot.unit_price != null ? lot.unit_price : ""}" placeholder="(tuỳ chọn)"/></div></div>
         <div class="row"><div class="field"><label>Số lô KCS</label><input id="erc_kcs" value="${esc(lot && lot.kcs_lot_no || "")}"/></div>
+          <div class="field"><label>Số LOT nhà cung cấp</label><input id="erc_supplier_lot" value="${esc(lot && lot.supplier_lot || "")}"/></div>
           <div class="field"><label>Hạn dùng</label><input id="erc_exp" type="date" value="${lot && lot.expiry ? lot.expiry.slice(0, 10) : ""}"/></div></div>
         <div class="row"><div class="field" style="flex:1"><label>Diễn giải</label><input id="erc_note" value="${esc(m.reason || "")}"/></div>
           <button class="btn" id="erc_save" style="align-self:flex-end">Lưu</button></div>`);
@@ -4327,8 +4923,8 @@ VIEWS.warehouse_kc = async function () {
         await PUT(`/warehouse/movements/${m.movement_id}`, {
           quantity: parseFloat($("erc_qty").value), supplier_id: $("erc_supplier").value || null,
           unit_price: $("erc_price").value ? parseFloat($("erc_price").value) : null,
-          kcs_lot_no: $("erc_kcs").value.trim() || null, expiry: $("erc_exp").value || null,
-          reason: $("erc_note").value.trim() || null,
+          kcs_lot_no: $("erc_kcs").value.trim() || null, supplier_lot: $("erc_supplier_lot").value.trim() || null,
+          expiry: $("erc_exp").value || null, reason: $("erc_note").value.trim() || null,
         });
         toast("Đã lưu"); closeModal(); render("warehouse_kc");
       });
@@ -4339,52 +4935,14 @@ VIEWS.warehouse_kc = async function () {
       toast(res.lot_deleted ? "Đã xóa lượt nhập kho và cả lô (không còn lượt nhập nào khác)" : "Đã xóa lượt nhập kho");
       render("warehouse_kc");
     }));
-    document.querySelectorAll("[data-sngedit]").forEach(b => b.onclick = () => {
-      const r = WH_CACHE.sangNgangRequests.find(x => x.request_id === b.dataset.sngedit);
-      if (!r) return;
-      const lot = r.lot_id ? WH_CACHE.lotById[r.lot_id] : null;
-      modal(`<h3>Sửa đề nghị Xuất sang ngang — ${esc(r.request_code)}</h3>
-        <div class="muted" style="margin-bottom:10px">Chỉ sửa được khi CHƯA được Kho phân xưởng duyệt — nếu đã duyệt, lưu sẽ báo lỗi.</div>
-        <div class="row"><div class="field"><label>Số lượng</label><input id="esng_qty" type="number" value="${r.quantity}"/></div>
-          <div class="field"><label>ĐVT</label><input value="${esc(r.uom)}" size="4" readonly/></div></div>
-        <div class="row"><div class="field" style="position:relative"><label>Nhà CC</label>
-            <input type="text" id="esng_supplier_txt" autocomplete="off" placeholder="Tìm nhà cung cấp..."/>
-            <input type="hidden" id="esng_supplier"/></div>
-          <div class="field"><label>Đơn giá</label><input id="esng_price" type="number" value="${lot && lot.unit_price != null ? lot.unit_price : ""}" placeholder="(tuỳ chọn)"/></div></div>
-        <div class="row"><div class="field"><label>Số lô KCS</label><input id="esng_kcs" value="${esc(lot && lot.kcs_lot_no || "")}"/></div>
-          <div class="field"><label>Hạn dùng</label><input id="esng_exp" type="date" value="${lot && lot.expiry ? lot.expiry.slice(0, 10) : ""}"/></div></div>
-        <div class="row"><div class="field" style="flex:1"><label>Diễn giải</label><input id="esng_note" value="${esc(r.reason || "")}"/></div>
-          <button class="btn" id="esng_save" style="align-self:flex-end">Lưu</button></div>`);
-      wireSearchableSelect("esng_supplier_txt", "esng_supplier", WH_CACHE.supplierItems);
-      if (lot && lot.supplier_id) {
-        const item = WH_CACHE.supplierItems.find(i => i.value === lot.supplier_id);
-        if (item) { $("esng_supplier").value = item.value; $("esng_supplier_txt").value = item.label; }
-      }
-      $("esng_save").onclick = () => guard(async () => {
-        await PUT(`/warehouse/sang-ngang/${r.request_id}`, {
-          quantity: parseFloat($("esng_qty").value), supplier_id: $("esng_supplier").value || null,
-          unit_price: $("esng_price").value ? parseFloat($("esng_price").value) : null,
-          kcs_lot_no: $("esng_kcs").value.trim() || null, expiry: $("esng_exp").value || null,
-          reason: $("esng_note").value.trim() || null,
-        });
-        toast("Đã lưu"); closeModal(); render("warehouse_kc");
-      });
-    });
-    document.querySelectorAll("[data-sngdel]").forEach(b => b.onclick = () => guard(async () => {
-      if (!confirm("Xóa đề nghị Xuất sang ngang này? Số lượng sẽ bị trừ khỏi tồn lô (hoặc xóa cả lô nếu đây là lượt nhập duy nhất). Không thể hoàn tác.")) return;
-      const res = await DELETE(`/warehouse/sang-ngang/${b.dataset.sngdel}`);
-      toast(res.lot_deleted ? "Đã xóa đề nghị và cả lô (không còn lượt nhập nào khác)" : "Đã xóa đề nghị");
-      render("warehouse_kc");
-    }));
-    document.querySelectorAll("[data-sngresubmit]").forEach(b => b.onclick = () => guard(async () => {
-      await POST(`/warehouse/sang-ngang/${b.dataset.sngresubmit}/resubmit`, {});
-      toast("Đã gửi lại — đề nghị về trạng thái chờ Kho phân xưởng duyệt");
-      render("warehouse_kc");
-    }));
+  }
+  if (sec === "obal") {
+    wireSearchableSelect("ob_mat_txt", "ob_mat", WH_CACHE.matItems, (item) => { $("ob_uom").value = item.uom || ""; });
     if ($("ob_do")) $("ob_do").onclick = () => guard(async () => {
       const res = await POST("/warehouse/receive", { lot_code: $("ob_code").value, material_id: $("ob_mat").value,
         quantity: parseFloat($("ob_qty").value), uom: $("ob_uom").value, location: "Kho công ty",
         expiry: $("ob_exp").value || null, kcs_lot_no: $("ob_kcs").value.trim() || null,
+        supplier_lot: $("ob_supplier_lot").value.trim() || null,
         reason: "Nhập tồn đầu", is_opening_balance: true });
       if (res.status === "on_hold") toast("Đã nhập tồn đầu — lô đang CHỜ khai báo & duyệt chỉ tiêu chất lượng", "err");
       else toast("Đã nhập tồn đầu tại Kho công ty");
@@ -4409,6 +4967,70 @@ VIEWS.warehouse_kc = async function () {
       }
       render("warehouse_kc");
     });
+  }
+  if (sec === "sng") {
+    wirePaginate("t_sng_pending", 10);
+    wirePaginate("t_sng_done", 10);
+    if ($("sng_mat_txt")) wireSearchableSelect("sng_mat_txt", "sng_mat", WH_CACHE.matItems, (item) => {
+      $("sng_uom_wrap").innerHTML = altUomFieldHtml((WH_CACHE.matById || {})[item.value], "sng_uom", 60);
+    });
+    if ($("sng_supplier_txt")) wireSearchableSelect("sng_supplier_txt", "sng_supplier", WH_CACHE.supplierItems);
+    if ($("sng_do")) $("sng_do").onclick = () => guard(async () => {
+      const sngMat = (WH_CACHE.matById || {})[$("sng_mat").value];
+      const sngQty = altUomToBaseQty(sngMat, parseFloat($("sng_qty").value), $("sng_uom").value);
+      const res = await POST("/warehouse/sang-ngang", { material_id: $("sng_mat").value,
+        supplier_id: $("sng_supplier").value || null, unit_price: $("sng_price").value ? parseFloat($("sng_price").value) : null,
+        quantity: sngQty, uom: sngMat ? sngMat.uom : $("sng_uom").value, location_id: $("sng_loc").value || null,
+        supplier_lot: $("sng_supplier_lot").value.trim() || null,
+        expiry: $("sng_exp").value || null, reason: $("sng_note").value.trim() || "Xuất sang ngang" });
+      toast(`Đã tạo đề nghị xuất sang ngang (số ${res.request_code}) — chờ phân xưởng duyệt`);
+      render("warehouse_kc");
+    });
+    document.querySelectorAll("[data-sngedit]").forEach(b => b.onclick = () => {
+      const r = WH_CACHE.sangNgangRequests.find(x => x.request_id === b.dataset.sngedit);
+      if (!r) return;
+      const lot = r.lot_id ? WH_CACHE.lotById[r.lot_id] : null;
+      modal(`<h3>Sửa đề nghị Xuất sang ngang — ${esc(r.request_code)}</h3>
+        <div class="muted" style="margin-bottom:10px">Chỉ sửa được khi CHƯA được Kho phân xưởng duyệt — nếu đã duyệt, lưu sẽ báo lỗi.</div>
+        <div class="row"><div class="field"><label>Số lượng</label><input id="esng_qty" type="number" value="${r.quantity}"/></div>
+          <div class="field"><label>ĐVT</label><input value="${esc(r.uom)}" size="4" readonly/></div></div>
+        <div class="row"><div class="field" style="position:relative"><label>Nhà CC</label>
+            <input type="text" id="esng_supplier_txt" autocomplete="off" placeholder="Tìm nhà cung cấp..."/>
+            <input type="hidden" id="esng_supplier"/></div>
+          <div class="field"><label>Đơn giá</label><input id="esng_price" type="number" value="${lot && lot.unit_price != null ? lot.unit_price : ""}" placeholder="(tuỳ chọn)"/></div></div>
+        <div class="row"><div class="field"><label>Số lô KCS</label><input id="esng_kcs" value="${esc(lot && lot.kcs_lot_no || "")}"/></div>
+          <div class="field"><label>Số LOT NCC</label><input id="esng_supplier_lot" value="${esc(lot && lot.supplier_lot || "")}"/></div>
+          <div class="field"><label>Hạn dùng</label><input id="esng_exp" type="date" value="${lot && lot.expiry ? lot.expiry.slice(0, 10) : ""}"/></div></div>
+        <div class="row"><div class="field" style="flex:1"><label>Diễn giải</label><input id="esng_note" value="${esc(r.reason || "")}"/></div>
+          <button class="btn" id="esng_save" style="align-self:flex-end">Lưu</button></div>`);
+      wireSearchableSelect("esng_supplier_txt", "esng_supplier", WH_CACHE.supplierItems);
+      if (lot && lot.supplier_id) {
+        const item = WH_CACHE.supplierItems.find(i => i.value === lot.supplier_id);
+        if (item) { $("esng_supplier").value = item.value; $("esng_supplier_txt").value = item.label; }
+      }
+      $("esng_save").onclick = () => guard(async () => {
+        await PUT(`/warehouse/sang-ngang/${r.request_id}`, {
+          quantity: parseFloat($("esng_qty").value), supplier_id: $("esng_supplier").value || null,
+          unit_price: $("esng_price").value ? parseFloat($("esng_price").value) : null,
+          kcs_lot_no: $("esng_kcs").value.trim() || null, supplier_lot: $("esng_supplier_lot").value.trim() || null,
+          expiry: $("esng_exp").value || null, reason: $("esng_note").value.trim() || null,
+        });
+        toast("Đã lưu"); closeModal(); render("warehouse_kc");
+      });
+    });
+    document.querySelectorAll("[data-sngdel]").forEach(b => b.onclick = () => guard(async () => {
+      if (!confirm("Xóa đề nghị Xuất sang ngang này? Số lượng sẽ bị trừ khỏi tồn lô (hoặc xóa cả lô nếu đây là lượt nhập duy nhất). Không thể hoàn tác.")) return;
+      const res = await DELETE(`/warehouse/sang-ngang/${b.dataset.sngdel}`);
+      toast(res.lot_deleted ? "Đã xóa đề nghị và cả lô (không còn lượt nhập nào khác)" : "Đã xóa đề nghị");
+      render("warehouse_kc");
+    }));
+    document.querySelectorAll("[data-sngresubmit]").forEach(b => b.onclick = () => guard(async () => {
+      await POST(`/warehouse/sang-ngang/${b.dataset.sngresubmit}/resubmit`, {});
+      toast("Đã gửi lại — đề nghị về trạng thái chờ Kho phân xưởng duyệt");
+      render("warehouse_kc");
+    }));
+  }
+  if (sec === "tudo") {
     if ($("xt_lot")) wireLotAltUom("xt_lot", "xt_uom");
     wireSelectSearch("xt_lot", "xt_lot_q");
     if ($("xt_do")) $("xt_do").onclick = () => guard(async () => {
@@ -4417,6 +5039,13 @@ VIEWS.warehouse_kc = async function () {
         mode: "tu_do", reason: $("xt_reason").value.trim() || null });
       toast("Đã xuất tự do"); render("warehouse_kc");
     });
+    Object.keys(WH_HIST_VISIBLE).forEach(wireMovementHistoryBlock);
+  }
+  if (sec === "dc") {
+    wirePaginate("t_pxpending", 10);
+    wirePaginate("t_pxdone", 10);
+    wirePaginate("t_kcpx_pending", 10);
+    wirePaginate("t_kcpx_done", 10);
     document.querySelectorAll("[data-pxapprove]").forEach(b => b.onclick = () => guard(async () => {
       if (!confirm("Duyệt đề nghị điều chuyển này? Lô sẽ thật sự chuyển về Kho công ty ngay.")) return;
       await POST(`/warehouse/transfer-px-requests/${b.dataset.pxapprove}/approve`, {});
@@ -4432,6 +5061,8 @@ VIEWS.warehouse_kc = async function () {
       await POST(`/warehouse/transfer-px-requests/${b.dataset.pxundo}/undo`, {});
       toast("Đã hoàn tác điều chuyển"); render("warehouse_kc");
     }));
+    wireSelectSearch("dcnm_lot", "dcnm_lot_q");
+    wireSelectSearch("dckp_lot", "dckp_lot_q");
     if ($("dcnm_do")) $("dcnm_do").onclick = () => guard(async () => {
       if (!$("dcnm_lot").value) throw new Error("Không có lô nào đang ở kho công ty để điều chuyển.");
       if (!$("dcnm_factory").value) throw new Error("Chưa có nhà máy nào trong danh mục — vào Danh mục để tạo trước.");
@@ -4439,12 +5070,24 @@ VIEWS.warehouse_kc = async function () {
         factory_id: $("dcnm_factory").value, reason: $("dcnm_reason").value.trim() || null });
       toast("Đã điều chuyển sang nhà máy khác"); render("warehouse_kc");
     });
+    if ($("dckp_do")) $("dckp_do").onclick = () => guard(async () => {
+      if (!$("dckp_lot").value) throw new Error("Không có lô nào đang ở kho công ty để điều chuyển.");
+      await POST("/warehouse/transfer-kcpx-requests", { lot_id: $("dckp_lot").value,
+        quantity: parseFloat($("dckp_qty").value), reason: $("dckp_reason").value.trim() || null });
+      toast("Đã gửi đề nghị điều chuyển sang Phân xưởng — chờ Phân xưởng duyệt"); render("warehouse_kc");
+    });
+    Object.keys(WH_HIST_VISIBLE).forEach(wireMovementHistoryBlock);
+  }
+  if (sec === "tra") {
     $("ncc_do").onclick = () => guard(async () => {
       const reason = $("ncc_reason").value.trim();
       if (!reason) throw new Error("Phải nhập lý do trả nhà cung cấp.");
       await POST("/warehouse/return-to-supplier", { lot_id: $("ncc_lot").value, quantity: parseFloat($("ncc_qty").value), reason });
       toast("Đã xuất trả nhà cung cấp"); render("warehouse_kc");
     });
+    Object.keys(WH_HIST_VISIBLE).forEach(wireMovementHistoryBlock);
+  }
+  if (sec === "xtdn") {
     Object.keys(WH_HIST_VISIBLE).forEach(wireMovementHistoryBlock);
     wireRequestBlockActions();
     wireCardSearch("xtdn_search", "#xtdn_block");
@@ -4524,9 +5167,10 @@ VIEWS.warehouse_px = async function () {
   const sec = SUB.warehouse_px || "px";
   const sections = [
     { key: "px", label: "Xem tồn kho" }, { key: "tondau", label: "🏁 Nhập tồn đầu" },
-    { key: "req", label: "Đề nghị nhận kho" }, { key: "dieuchuyen", label: "Điều chuyển về Kho công ty" },
+    { key: "req", label: "Đề nghị nhận kho" }, { key: "dieuchuyen", label: "Điều chuyển" },
     { key: "sangngang", label: "Xuất sang ngang" },
     { key: "tudo", label: "Xuất tự do" }, { key: "nvlhist", label: "Lịch sử xuất dùng NVL" },
+    { key: "vitri", label: "📍 Vị trí kho" },
     { key: "kk", label: "Kiểm kê định kỳ" },
   ];
   let body = "";
@@ -4534,10 +5178,11 @@ VIEWS.warehouse_px = async function () {
     const pxLoc = TON_LOC.warehouse_px;
     const pxLotMatchesLoc = (l) => pxLoc === "" ? true : pxLoc === "Kho phân xưởng"
       ? /phân xưởng/i.test(l.location || "") : !/phân xưởng/i.test(l.location || "");
-    const [allLots, mats, qcReqIdsPx] = await Promise.all([GET("/lots"), GET("/materials"),
-      GET("/materials/qc-required").catch(() => [])]);
+    const [allLots, mats, qcReqIdsPx, wsLocsPx] = await Promise.all([GET("/lots"), GET("/materials"),
+      GET("/materials/qc-required").catch(() => []), GET("/warehouse/locations").catch(() => [])]);
     const matById = Object.fromEntries(mats.map(m => [m.material_id, m]));
     const qcReqSetPx = new Set(qcReqIdsPx);
+    const wsLocByIdPx = Object.fromEntries(wsLocsPx.map(l => [l.loc_id, l]));
     const rows = allLots.filter(l => pxLotMatchesLoc(l) && l.quantity > 0)
       .sort((a, b) => new Date(a.created_at) - new Date(b.created_at));   // FIFO: nhập trước hiện trước
     body = `<div class="panel"><h2>Tồn kho — ${esc(pxLoc || "Tất cả")} <span class="muted">(${rows.length})</span></h2>
@@ -4545,15 +5190,16 @@ VIEWS.warehouse_px = async function () {
       <div class="muted" style="margin-bottom:6px">Lô đã được duyệt chỉ tiêu chất lượng ở kho công ty và chuyển tới đây (qua Đề nghị nhận kho) —
         không cần khai báo lại, chỉ tiêu hiển thị tự động lấy theo dữ liệu đã duyệt.</div>
       <input class="searchbox" data-tbl="t_px" placeholder="Tìm mã lô/vật tư..." style="margin-bottom:8px"/>
+      <div id="px_total" class="muted" style="margin-bottom:6px"></div>
       <div class="tablewrap"><table id="t_px">
         <thead><tr><th>Lô</th><th>Vật tư</th><th>Tên vật tư</th><th>SL</th><th>Ngày giờ nhập</th><th>Vị trí</th><th>Trạng thái</th><th></th></tr></thead>
-        <tbody>${rows.map(l => `<tr>
-          <td><code class="k">${esc(l.lot_code)}</code></td>
+        <tbody>${rows.map(l => `<tr data-qty="${l.quantity}" data-uom="${esc(l.uom)}">
+          <td><code class="k">${lotCodeCellHtml(l)}</code></td>
           <td class="muted">${esc(matById[l.material_id] ? matById[l.material_id].code : l.material_id || "—")}</td>
           <td>${esc(matById[l.material_id] ? matById[l.material_id].name : "—")}</td>
           <td>${l.quantity} ${l.uom}</td>
           <td class="muted">${fmt(l.created_at)}</td>
-          <td class="muted">${esc(l.location || "")}</td>
+          <td class="muted">${esc(l.location || "")}${l.workshop_location_id && wsLocByIdPx[l.workshop_location_id] ? " — " + esc(wsLocByIdPx[l.workshop_location_id].code) : ""}</td>
           <td>${badge(l.status)}</td>
           <td>${qcReqSetPx.has(l.material_id) ? `<button class="btn sm sec" data-lotqc="${esc(l.lot_id)}">Xem chỉ tiêu</button>` : ""}</td></tr>`).join("") ||
           `<tr><td colspan=8 class="muted">Chưa có lô nào ở ${esc(pxLoc || "kho nào")}.</td></tr>`}</tbody>
@@ -4576,6 +5222,7 @@ VIEWS.warehouse_px = async function () {
           <div class="field"><label>ĐVT</label><input id="obpx_uom" value="${esc(matItemsPx[0]?.uom || "")}" size="4" readonly title="Lấy tự động từ danh mục nguyên liệu — không sửa được"/></div>
           <div class="field"><label>Hạn dùng</label><input id="obpx_exp" type="date"/></div>
           <div class="field"><label>Số lô KCS</label><input id="obpx_kcs" placeholder="(tuỳ chọn)"/></div>
+          <div class="field"><label>Số LOT NCC</label><input id="obpx_supplier_lot" placeholder="(tuỳ chọn)"/></div>
           <button class="btn" id="obpx_do">Nhập tồn đầu</button></div>
         <div class="row" style="margin-top:10px;border-top:1px solid var(--border);padding-top:10px">
           <div class="field" style="flex:1"><label>Hoặc import Excel (cột: Ngày nhập, Mã vật tư, Lô, Số lượng, tuỳ chọn thêm Số lô KCS)</label>
@@ -4586,13 +5233,25 @@ VIEWS.warehouse_px = async function () {
   } else if (sec === "req") {
     body = await renderRequestsSection();
   } else if (sec === "dieuchuyen") {
-    const [allLots, mats, pxRequests] = await Promise.all([GET("/lots"), GET("/materials"),
-      GET("/warehouse/transfer-px-requests")]);
+    const [allLots, mats, pxRequests, kcpxRequestsPx, qcReqIdsKcpx, workshopLocsPx] = await Promise.all([
+      GET("/lots"), GET("/materials"), GET("/warehouse/transfer-px-requests"),
+      GET("/warehouse/transfer-kcpx-requests").catch(() => []), GET("/materials/qc-required").catch(() => []),
+      GET("/warehouse/locations").catch(() => [])]);
     const matById = Object.fromEntries(mats.map(m => [m.material_id, m]));
+    const lotByIdPxDc = Object.fromEntries(allLots.map(l => [l.lot_id, l]));
+    const qcReqSetKcpx = new Set(qcReqIdsKcpx);
     const canRequestPx = _hasPerm("warehouse.request");
+    const canApproveKcpx = _hasPerm("warehouse.request");
+    const isAdminDc = CURRENT_USER && CURRENT_USER.role === "admin";
+    const activeWorkshopLocs = workshopLocsPx.filter(l => l.active && (l.scope === "phan_xuong" || l.scope === "ca_hai"));
+    WH_CACHE.matById = matById;
+    WH_CACHE.lotById = lotByIdPxDc;
+    WH_CACHE.workshopLocs = activeWorkshopLocs;
+    const workshopLocByIdPx = Object.fromEntries(workshopLocsPx.map(l => [l.loc_id, l]));
     const workshopLotOpts = allLots.filter(l => l.quantity > 0 && /phân xưởng/i.test(l.location || "") && l.status !== "on_hold")
       .sort((a, b) => new Date(a.created_at) - new Date(b.created_at))
-      .map(l => `<option value="${l.lot_id}">${esc(l.lot_code)} (${l.quantity}${l.uom})</option>`).join("") ||
+      .map(l => { const m = matById[l.material_id];
+        return `<option value="${l.lot_id}">${lotCodePlain(l)}${m ? ` — ${esc(m.code)} ${esc(m.name)}` : ""} (${l.quantity}${l.uom})</option>`; }).join("") ||
       `<option value="">(không có lô nào ở kho phân xưởng)</option>`;
     const sortedPx = pxRequests.slice().sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
     const pxRows = sortedPx.map(r => {
@@ -4602,16 +5261,60 @@ VIEWS.warehouse_px = async function () {
         <td class="muted">${fmt(r.created_at)}</td>
         <td><code class="k">${esc(r.request_code)}</code></td>
         <td>${esc(mat ? mat.code : "—")}</td>
-        <td class="muted">${esc(lot ? lot.lot_code : "")}</td>
+        <td class="muted">${lotCodeCellHtml(lot)}</td>
         <td>${r.quantity} ${esc(r.uom)}</td>
         <td class="muted">${esc(r.reason || "")}</td>
         <td>${badge(r.status)}</td></tr>`;
     }).join("") || `<tr><td colspan=7 class="muted">Chưa có đề nghị nào.</td></tr>`;
-    body = `<div class="panel"><h2>Điều chuyển về Kho công ty</h2>
+    const kcpxPendingPx = kcpxRequestsPx.filter(r => r.status === "pending").sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+    const kcpxDonePx = kcpxRequestsPx.filter(r => r.status !== "pending").sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+    const kcpxPendingRows = kcpxPendingPx.map(r => {
+      const lot = lotByIdPxDc[r.lot_id];
+      const mat = lot ? matById[lot.material_id] : null;
+      const qcBlocked = lot && qcReqSetKcpx.has(lot.material_id) && lot.status === "on_hold";
+      return `<tr>
+        <td class="muted">${fmt(r.created_at)}</td>
+        <td><code class="k">${esc(r.request_code)}</code></td>
+        <td>${esc(mat ? mat.code : "—")}</td>
+        <td>${esc(mat ? mat.name : "—")}</td>
+        <td class="muted">${lotCodeCellHtml(lot)}</td>
+        <td>${r.quantity} ${esc(r.uom)}</td>
+        <td class="muted">${esc(r.created_by || "")}</td>
+        <td>${sangNgangQcBadge(r, lotByIdPxDc, qcReqSetKcpx)}</td>
+        ${canApproveKcpx ? `<td style="white-space:nowrap">
+          <button class="btn sm" data-kcpxapprove="${esc(r.request_id)}" ${qcBlocked ? "disabled title=\"Đang chờ KCS duyệt chỉ tiêu chất lượng\"" : ""}>Duyệt</button>
+          <button class="btn sm sec" data-kcpxreject="${esc(r.request_id)}">Từ chối</button></td>` : ""}</tr>`;
+    }).join("") || `<tr><td colspan="${canApproveKcpx ? 9 : 8}" class="muted">Không có đề nghị nào đang chờ.</td></tr>`;
+    const kcpxDoneRows = kcpxDonePx.map(r => {
+      const lot = lotByIdPxDc[r.lot_id];
+      const mat = lot ? matById[lot.material_id] : null;
+      const wsloc = r.workshop_location_id ? workshopLocByIdPx[r.workshop_location_id] : null;
+      const processedBy = r.status === "approved" ? r.approved_by : r.rejected_by;
+      let actionCellKcpx = "";
+      if (isAdminDc && r.status === "approved") {
+        actionCellKcpx = r.reversed ? `<td class="muted">Đã hoàn tác</td>`
+          : `<td><button class="btn sm sec" data-kcpxundo="${esc(r.request_id)}">Hoàn tác</button></td>`;
+      } else if (isAdminDc) actionCellKcpx = "<td></td>";
+      return `<tr>
+        <td class="muted">${fmt(r.created_at)}</td>
+        <td><code class="k">${esc(r.request_code)}</code></td>
+        <td>${esc(mat ? mat.code : "—")}</td>
+        <td>${esc(mat ? mat.name : "—")}</td>
+        <td class="muted">${lotCodeCellHtml(lot)}</td>
+        <td>${r.quantity} ${esc(r.uom)}</td>
+        <td class="muted">${wsloc ? esc(wsloc.code) : "—"}</td>
+        <td>${badge(r.status)}</td>
+        <td class="muted">${esc(processedBy || "")}</td>
+        ${actionCellKcpx}</tr>`;
+    }).join("") || `<tr><td colspan="${isAdminDc ? 9 : 8}" class="muted">Chưa có đề nghị nào đã xử lý.</td></tr>`;
+    body = `<div class="split">
+      <div class="panel"><h2>Gửi đề nghị về Kho công ty</h2>
       <div class="muted" style="margin-bottom:6px">Gửi đề nghị điều chuyển 1 lô đang ở Kho phân xưởng về lại Kho công ty —
         chưa động tồn kho ngay, chỉ khi Thủ kho công ty duyệt lệnh mới thật sự chuyển.</div>
       ${canRequestPx
-        ? `<div class="row"><div class="field"><label>Lô (đang ở kho phân xưởng)</label><select id="dcpx_lot">${workshopLotOpts}</select></div>
+        ? `<div class="row"><div class="field"><label>Lô (đang ở kho phân xưởng)</label>
+        <input id="dcpx_lot_q" placeholder="Tìm nhanh (gõ mã/tên vật tư)..." style="margin-bottom:2px"/>
+        <select id="dcpx_lot">${workshopLotOpts}</select></div>
         <div class="field"><label>SL</label><input id="dcpx_qty" type="number" value="50"/></div>
         <div class="field" style="flex:1"><label>Lý do (tuỳ chọn)</label><input id="dcpx_reason" placeholder="(tuỳ chọn)"/></div>
         <button class="btn" id="dcpx_do" style="align-self:flex-end">Gửi đề nghị</button></div>`
@@ -4621,7 +5324,22 @@ VIEWS.warehouse_px = async function () {
         <thead><tr><th>Ngày tạo</th><th>Số đề nghị</th><th>Vật tư</th><th>Lô</th><th>SL</th><th>Lý do</th><th>Trạng thái</th></tr></thead>
         <tbody>${pxRows}</tbody>
       </table></div>
-    </div>`;
+      </div>
+
+      <div class="panel"><h2>Nhận điều chuyển từ Kho công ty <span class="muted">(${kcpxPendingPx.length} đang chờ duyệt)</span></h2>
+      <div class="muted" style="margin-bottom:6px">Kho công ty gửi đề nghị điều chuyển 1 lô đang có sẵn sang Kho phân xưởng — bấm "Duyệt"
+        để thật sự nhận (bắt buộc chọn vị trí cất). Nếu vật tư có chỉ tiêu chất lượng bắt buộc, phải chờ KCS duyệt xong (hết "Đang chờ
+        KCS duyệt") mới duyệt được.</div>
+      <div class="tablewrap"><table id="t_kcpx_pending_px">
+        <thead><tr><th>Ngày tạo</th><th>Số đề nghị</th><th>Mã VT</th><th>Tên vật tư</th><th>Lô</th><th>SL</th><th>Người tạo</th><th>Trạng thái QC</th>${canApproveKcpx ? "<th></th>" : ""}</tr></thead>
+        <tbody>${kcpxPendingRows}</tbody>
+      </table></div>
+      <h4 style="margin-top:14px">Lịch sử đã xử lý <span class="muted">(${kcpxDonePx.length})</span></h4>
+      <div class="tablewrap"><table id="t_kcpx_done_px">
+        <thead><tr><th>Ngày tạo</th><th>Số đề nghị</th><th>Mã VT</th><th>Tên vật tư</th><th>Lô</th><th>SL</th><th>Vị trí cất</th><th>Trạng thái</th><th>Người xử lý</th>${isAdminDc ? "<th></th>" : ""}</tr></thead>
+        <tbody>${kcpxDoneRows}</tbody>
+      </table></div>
+      </div></div>`;
   } else if (sec === "sangngang") {
     const [allLots, mats, sangNgangRequestsPx, qcReqIdsPx] = await Promise.all([GET("/lots"), GET("/materials"),
       GET("/warehouse/sang-ngang"), GET("/materials/qc-required")]);
@@ -4643,7 +5361,7 @@ VIEWS.warehouse_px = async function () {
         <td><code class="k">${esc(r.request_code)}</code></td>
         <td>${esc(mat ? mat.code : "—")}</td>
         <td>${esc(mat ? mat.name : "—")}</td>
-        <td class="muted">${esc(lot ? lot.lot_code : "")}</td>
+        <td class="muted">${lotCodeCellHtml(lot)}</td>
         <td>${r.quantity} ${esc(r.uom)}</td>
         <td class="muted">${esc(r.created_by || "")}</td>
         <td>${sangNgangQcBadge(r, lotByIdPx, qcReqSetPx)}</td>
@@ -4665,7 +5383,7 @@ VIEWS.warehouse_px = async function () {
         <td><code class="k">${esc(r.request_code)}</code></td>
         <td>${esc(mat ? mat.code : "—")}</td>
         <td>${esc(mat ? mat.name : "—")}</td>
-        <td class="muted">${esc(lot ? lot.lot_code : "")}</td>
+        <td class="muted">${lotCodeCellHtml(lot)}</td>
         <td>${r.quantity} ${esc(r.uom)}</td>
         <td>${badge(r.status)}</td>
         <td class="muted">${esc(processedBy || "")}</td>
@@ -4692,7 +5410,8 @@ VIEWS.warehouse_px = async function () {
     const isAdminPx = CURRENT_USER && CURRENT_USER.role === "admin";
     const workshopLotOpts = allLots.filter(l => l.quantity > 0 && /phân xưởng/i.test(l.location || ""))
       .sort((a, b) => new Date(a.created_at) - new Date(b.created_at))
-      .map(l => `<option value="${l.lot_id}" data-material="${esc(l.material_id || "")}">${esc(l.lot_code)} (${l.quantity}${l.uom}, nhập ${fmt(l.created_at)})${l.status === "on_hold" ? " — CHỜ DUYỆT QC" : ""}</option>`).join("") ||
+      .map(l => { const m = matById[l.material_id];
+        return `<option value="${l.lot_id}" data-material="${esc(l.material_id || "")}">${lotCodePlain(l)}${m ? ` — ${esc(m.code)} ${esc(m.name)}` : ""} (${l.quantity}${l.uom}, nhập ${fmt(l.created_at)})${l.status === "on_hold" ? " — CHỜ DUYỆT QC" : ""}</option>`; }).join("") ||
       `<option value="">(không có lô nào ở kho phân xưởng)</option>`;
     WH_CACHE.matById = matById;
     WH_CACHE.tu_do_px = freeIssuesAll.filter(m => /phân xưởng/i.test(m.location_from || ""));
@@ -4727,6 +5446,39 @@ VIEWS.warehouse_px = async function () {
           `<tr><td colspan=7 class="muted">Chưa có giao dịch xuất dùng NVL nào.</td></tr>`}</tbody>
       </table></div>
     </div>`;
+  } else if (sec === "vitri") {
+    const [allLotsVtPx, matsVtPx, wsLocsVtPx] = await Promise.all([GET("/lots"), GET("/materials"),
+      GET("/warehouse/locations").catch(() => [])]);
+    const matByIdVtPx = Object.fromEntries(matsVtPx.map(m => [m.material_id, m]));
+    WH_CACHE.vtMatByIdPx = matByIdVtPx;
+    WH_CACHE.vtLotsPx = allLotsVtPx.filter(l => /phân xưởng/i.test(l.location || "") && l.quantity > 0);
+    const unplacedVtPx = WH_CACHE.vtLotsPx.filter(l => !l.workshop_location_id);
+    const activeLocsVtPx = wsLocsVtPx.filter(l => l.active && (l.scope === "phan_xuong" || l.scope === "ca_hai"));
+    const locOptsVtPx = activeLocsVtPx.map(l => `<option value="${esc(l.loc_id)}">${esc(l.code)} — ${esc(l.name)}</option>`).join("") ||
+      `<option value="">(chưa khai báo vị trí kho phân xưởng — vào Danh mục để thêm)</option>`;
+    body = `<div class="panel"><h2>🚚 Cất vào vị trí <span class="muted">(${unplacedVtPx.length})</span></h2>
+      <div class="muted" style="margin-bottom:8px">Gán vị trí kho cho các lô Kho phân xưởng CHƯA có vị trí (lô đến từ Xuất sang ngang, Nhập tồn đầu, hoặc lô cũ trước khi khai danh mục vị trí) — chọn vị trí đích rồi tick các lô cần cất.</div>
+      <div class="row"><div class="field"><label>Vị trí đích</label><select id="vtpx_to">${locOptsVtPx}</select></div></div>
+      <input class="searchbox" data-tbl="t_vtpx_unplaced" placeholder="Tìm mã lô/vật tư..." style="margin-bottom:8px"/>
+      <div class="tablewrap" style="margin-top:10px"><table id="t_vtpx_unplaced">
+        <thead><tr><th></th><th>Lô</th><th>Vật tư</th><th>SL</th><th>Ngày nhập</th></tr></thead>
+        <tbody>${unplacedVtPx.map(l => `<tr><td><input type="checkbox" data-vtpxu="${esc(l.lot_id)}"/></td>
+          <td><code class="k">${lotCodeCellHtml(l)}</code></td>
+          <td>${esc(matByIdVtPx[l.material_id] ? matByIdVtPx[l.material_id].name : "—")}</td>
+          <td>${l.quantity} ${l.uom}</td><td class="muted">${fmt(l.created_at)}</td></tr>`).join("") ||
+          `<tr><td colspan=5 class="muted">Không có lô nào chưa gán vị trí.</td></tr>`}</tbody>
+      </table></div>
+      <button class="btn" id="vtpx_place_submit" style="margin-top:10px">Cất vào vị trí</button>
+    </div>
+    <div class="panel"><h2>🔁 Chuyển vị trí trong kho</h2>
+      <div class="muted" style="margin-bottom:8px">Chuyển các lô ĐÃ CẤT sang vị trí khác (VD sắp xếp lại kho) — chọn vị trí nguồn để xem các lô đang ở đó, chọn vị trí đích rồi tick lô cần chuyển.</div>
+      <div class="row">
+        <div class="field"><label>Vị trí nguồn</label><select id="vtpx_from"><option value="">(chọn vị trí nguồn)</option>${locOptsVtPx}</select></div>
+        <div class="field"><label>Vị trí đích</label><select id="vtpx_to2">${locOptsVtPx}</select></div>
+      </div>
+      <div id="vtpx_move_wrap" class="muted" style="margin-top:10px">Chọn vị trí nguồn để xem các lô đang ở đó.</div>
+      <button class="btn" id="vtpx_move_submit" style="margin-top:10px">Chuyển vị trí</button>
+    </div>`;
   } else if (sec === "kk") {
     body = await renderStockCountSection("Kho phân xưởng");
   }
@@ -4741,7 +5493,46 @@ VIEWS.warehouse_px = async function () {
     // làm ở "Danh sách lô (FIFO)" bên Kho công ty, bấm lại tiêu đề cột để quay về thứ tự FIFO
     // (nhập trước lên đầu) khi cần chọn lô ưu tiên dùng/chuyển.
     if (!_pagerState.t_px) _pagerState.t_px = { page: 1, pageSize: 10, sortCol: 3, sortDir: -1 };
-    wirePaginate("t_px", 10);
+    wirePaginate("t_px", 10, { onFilter: (trs) => {
+      const el = document.getElementById("px_total");
+      if (el) el.innerHTML = `Tổng số lượng (theo bộ lọc đang áp dụng): ${sumTotalsHtml(trs)}`;
+    } });
+  }
+  if (sec === "vitri") {
+    wirePaginate("t_vtpx_unplaced", 10);
+    const rebuildMoveTablePx = () => {
+      const fromId = $("vtpx_from").value;
+      if (!fromId) { $("vtpx_move_wrap").innerHTML = '<div class="muted">Chọn vị trí nguồn để xem các lô đang ở đó.</div>'; return; }
+      const lotsAt = (WH_CACHE.vtLotsPx || []).filter(l => l.workshop_location_id === fromId);
+      $("vtpx_move_wrap").innerHTML = `<div class="tablewrap"><table id="t_vtpx_move">
+        <thead><tr><th></th><th>Lô</th><th>Vật tư</th><th>SL</th></tr></thead>
+        <tbody>${lotsAt.map(l => `<tr><td><input type="checkbox" data-vtpxm="${esc(l.lot_id)}"/></td>
+          <td><code class="k">${lotCodeCellHtml(l)}</code></td>
+          <td>${esc((WH_CACHE.vtMatByIdPx[l.material_id] || {}).name || "—")}</td>
+          <td>${l.quantity} ${l.uom}</td></tr>`).join("") ||
+          `<tr><td colspan=4 class="muted">Không có lô nào ở vị trí này.</td></tr>`}</tbody>
+      </table></div>`;
+      wirePaginate("t_vtpx_move", 10);
+    };
+    if ($("vtpx_from")) $("vtpx_from").onchange = rebuildMoveTablePx;
+    if ($("vtpx_place_submit")) $("vtpx_place_submit").onclick = () => guard(async () => {
+      const toId = $("vtpx_to").value;
+      if (!toId) throw new Error("Chọn vị trí đích.");
+      const ids = Array.from(document.querySelectorAll("[data-vtpxu]:checked")).map(c => c.dataset.vtpxu);
+      if (!ids.length) throw new Error("Chọn ít nhất 1 lô cần cất.");
+      for (const id of ids) await POST(`/warehouse/lots/${id}/relocate-workshop`, { workshop_location_id: toId });
+      toast(`Đã cất ${ids.length} lô vào vị trí`);
+      render("warehouse_px");
+    });
+    if ($("vtpx_move_submit")) $("vtpx_move_submit").onclick = () => guard(async () => {
+      const toId = $("vtpx_to2").value;
+      if (!toId) throw new Error("Chọn vị trí đích.");
+      const ids = Array.from(document.querySelectorAll("[data-vtpxm]:checked")).map(c => c.dataset.vtpxm);
+      if (!ids.length) throw new Error("Chọn ít nhất 1 lô cần chuyển.");
+      for (const id of ids) await POST(`/warehouse/lots/${id}/relocate-workshop`, { workshop_location_id: toId });
+      toast(`Đã chuyển ${ids.length} lô sang vị trí mới`);
+      render("warehouse_px");
+    });
   }
   if (sec === "tondau") {
     wireSearchableSelect("obpx_mat_txt", "obpx_mat", WH_CACHE.matItemsPx, (item) => { $("obpx_uom").value = item.uom || ""; });
@@ -4749,6 +5540,7 @@ VIEWS.warehouse_px = async function () {
       const res = await POST("/warehouse/receive", { lot_code: $("obpx_code").value, material_id: $("obpx_mat").value,
         quantity: parseFloat($("obpx_qty").value), uom: $("obpx_uom").value, location: "Kho phân xưởng",
         expiry: $("obpx_exp").value || null, kcs_lot_no: $("obpx_kcs").value.trim() || null,
+        supplier_lot: $("obpx_supplier_lot").value.trim() || null,
         reason: "Nhập tồn đầu", is_opening_balance: true });
       if (res.status === "on_hold") toast("Đã nhập tồn đầu — lô đang CHỜ khai báo & duyệt chỉ tiêu chất lượng", "err");
       else toast("Đã nhập tồn đầu tại Kho phân xưởng");
@@ -4776,12 +5568,40 @@ VIEWS.warehouse_px = async function () {
   }
   if (sec === "dieuchuyen") {
     wirePaginate("t_dcpx", 10);
+    wirePaginate("t_kcpx_pending_px", 10);
+    wirePaginate("t_kcpx_done_px", 10);
+    wireSelectSearch("dcpx_lot", "dcpx_lot_q");
     if ($("dcpx_do")) $("dcpx_do").onclick = () => guard(async () => {
       if (!$("dcpx_lot").value) throw new Error("Không có lô nào đang ở kho phân xưởng để điều chuyển.");
       await POST("/warehouse/transfer-px-requests", { lot_id: $("dcpx_lot").value, quantity: parseFloat($("dcpx_qty").value),
         reason: $("dcpx_reason").value.trim() || null });
       toast("Đã gửi đề nghị điều chuyển"); render("warehouse_px");
     });
+    document.querySelectorAll("[data-kcpxapprove]").forEach(b => b.onclick = () => {
+      const requestId = b.dataset.kcpxapprove;
+      const locs = WH_CACHE.workshopLocs || [];
+      const opts = locs.map(l => `<option value="${esc(l.loc_id)}">${esc(l.code)} — ${esc(l.name)}</option>`).join("") ||
+        `<option value="">(chưa khai báo vị trí kho phân xưởng — vào Danh mục để thêm)</option>`;
+      modal(`<h3>Duyệt nhận điều chuyển từ Kho công ty</h3>
+        <div class="muted" style="margin-bottom:10px">Chọn vị trí cất tại Kho phân xưởng cho lô này (bắt buộc).</div>
+        <div class="field"><label>Vị trí cất *</label><select id="kcpxa_loc">${opts}</select></div>
+        <button class="btn" id="kcpxa_save" style="margin-top:12px">Duyệt</button>`);
+      $("kcpxa_save").onclick = () => guard(async () => {
+        if (!$("kcpxa_loc").value) throw new Error("Chọn vị trí cất trước khi duyệt.");
+        await POST(`/warehouse/transfer-kcpx-requests/${requestId}/approve`, { workshop_location_id: $("kcpxa_loc").value });
+        closeModal(); toast("Đã duyệt — lô đã về Kho phân xưởng"); render("warehouse_px");
+      });
+    });
+    document.querySelectorAll("[data-kcpxreject]").forEach(b => b.onclick = () => guard(async () => {
+      const reason = prompt("Lý do từ chối (tuỳ chọn):") || null;
+      await POST(`/warehouse/transfer-kcpx-requests/${b.dataset.kcpxreject}/reject`, { reason });
+      toast("Đã từ chối đề nghị"); render("warehouse_px");
+    }));
+    document.querySelectorAll("[data-kcpxundo]").forEach(b => b.onclick = () => guard(async () => {
+      if (!confirm("Hoàn tác đề nghị đã duyệt này? Lô sẽ trả về lại Kho công ty.")) return;
+      await POST(`/warehouse/transfer-kcpx-requests/${b.dataset.kcpxundo}/undo`, {});
+      toast("Đã hoàn tác điều chuyển"); render("warehouse_px");
+    }));
   }
   if (sec === "sangngang") {
     wirePaginate("t_sng_pending_px", 10);
@@ -4944,7 +5764,7 @@ function transferPxRequestRowHtml(r, matById, lotById, canApprove, isAdmin) {
     <td class="muted">${fmt(r.created_at)}</td>
     <td><code class="k">${esc(r.request_code)}</code></td>
     <td>${esc(mat ? mat.code : "—")}</td>
-    <td class="muted">${esc(lot ? lot.lot_code : "")}</td>
+    <td class="muted">${lotCodeCellHtml(lot)}</td>
     <td>${r.quantity} ${esc(r.uom)}</td>
     <td class="muted">${esc(r.reason || "")}</td>
     <td class="muted">${esc(r.created_by || "")}</td>
@@ -4967,7 +5787,7 @@ function transferPxRequestHistoryRowHtml(r, matById, lotById, isAdmin) {
     <td class="muted">${fmt(r.created_at)}</td>
     <td><code class="k">${esc(r.request_code)}</code></td>
     <td>${esc(mat ? mat.code : "—")}</td>
-    <td class="muted">${esc(lot ? lot.lot_code : "")}</td>
+    <td class="muted">${lotCodeCellHtml(lot)}</td>
     <td>${r.quantity} ${esc(r.uom)}</td>
     <td class="muted">${esc(r.reason || "")}</td>
     <td>${badge(r.status)}</td>
@@ -5005,10 +5825,39 @@ function sangNgangKcRowHtml(r, matById, lotById, qcReqSet) {
     <td><code class="k">${esc(r.request_code)}</code></td>
     <td>${esc(mat ? mat.code : "—")}</td>
     <td>${esc(mat ? mat.name : "—")}</td>
-    <td class="muted">${esc(lot ? lot.lot_code : "")}</td>
+    <td class="muted">${lotCodeCellHtml(lot)}</td>
     <td>${r.quantity} ${esc(r.uom)}</td>
     <td>${sangNgangQcBadge(r, lotById, qcReqSet)}</td>
     ${sangNgangEditDelCell(r)}</tr>`;
+}
+
+// ---- Điều chuyển kho công ty, chiều 3: Kho công ty → Kho phân xưởng (lô đang có sẵn) ----
+function transferKcPxKcRowHtml(r, matById, lotById, qcReqSet) {
+  const lot = lotById[r.lot_id];
+  const mat = lot ? matById[lot.material_id] : null;
+  return `<tr>
+    <td class="muted">${fmt(r.created_at)}</td>
+    <td><code class="k">${esc(r.request_code)}</code></td>
+    <td>${esc(mat ? mat.code : "—")}</td>
+    <td>${esc(mat ? mat.name : "—")}</td>
+    <td class="muted">${lotCodeCellHtml(lot)}</td>
+    <td>${r.quantity} ${esc(r.uom)}</td>
+    <td>${sangNgangQcBadge(r, lotById, qcReqSet)}</td></tr>`;
+}
+
+function transferKcPxHistoryRowHtml(r, matById, lotById) {
+  const lot = lotById[r.lot_id];
+  const mat = lot ? matById[lot.material_id] : null;
+  const processedBy = r.status === "approved" ? r.approved_by : r.rejected_by;
+  return `<tr>
+    <td class="muted">${fmt(r.created_at)}</td>
+    <td><code class="k">${esc(r.request_code)}</code></td>
+    <td>${esc(mat ? mat.code : "—")}</td>
+    <td>${esc(mat ? mat.name : "—")}</td>
+    <td class="muted">${lotCodeCellHtml(lot)}</td>
+    <td>${r.quantity} ${esc(r.uom)}</td>
+    <td>${badge(r.status)}${r.reversed ? ' <span class="muted" style="font-size:11px">(đã hoàn tác)</span>' : ""}</td>
+    <td class="muted">${esc(processedBy || "")}</td></tr>`;
 }
 
 function sangNgangHistoryRowHtml(r, matById, lotById) {
@@ -5020,7 +5869,7 @@ function sangNgangHistoryRowHtml(r, matById, lotById) {
     <td><code class="k">${esc(r.request_code)}</code></td>
     <td>${esc(mat ? mat.code : "—")}</td>
     <td>${esc(mat ? mat.name : "—")}</td>
-    <td class="muted">${esc(lot ? lot.lot_code : "")}</td>
+    <td class="muted">${lotCodeCellHtml(lot)}</td>
     <td>${r.quantity} ${esc(r.uom)}</td>
     <td>${badge(r.status)}${r.reversed ? ' <span class="muted" style="font-size:11px">(đã hoàn tác)</span>' : ""}</td>
     <td class="muted">${esc(processedBy || "")}</td>
@@ -5498,9 +6347,9 @@ function cartPanelHtml() {
     const fifoCell = c.group_code
       ? groupMemberFifoBadgeHtml(c.material_id, c.group_members, REQ_CACHE.lots)
       : requestFifoBadgeHtml(c.material_id, c.lot_id, REQ_CACHE.lots);
-    const available = materialAvailableCompanyQty(c.material_id, REQ_CACHE.lots);
-    const pendingQc = materialPendingQcCompanyQty(c.material_id, REQ_CACHE.lots);
-    const workshopQty = materialWorkshopQty(c.material_id, REQ_CACHE.lots);
+    const available = round3(materialAvailableCompanyQty(c.material_id, REQ_CACHE.lots));
+    const pendingQc = round3(materialPendingQcCompanyQty(c.material_id, REQ_CACHE.lots));
+    const workshopQty = round3(materialWorkshopQty(c.material_id, REQ_CACHE.lots));
     const insufficient = c.quantity > available;
     const slCell = c.locked
       ? `<span class="muted" title="Mã cũ hơn (FIFO) trong nhóm đã đủ định mức theo lệnh — mã này không cần lấy">0 ${esc(c.uom)} — đã đủ từ mã cũ hơn</span>`
@@ -5524,8 +6373,8 @@ function cartPanelHtml() {
     <h2>Tạo đề nghị nhận kho ${REQUEST_CART.length ? `<span class="muted">(${REQUEST_CART.length} dòng)</span>` : ""}</h2>
     <div class="muted" style="margin-bottom:6px">Thêm nhiều dòng (nhiều vật tư khác nhau) rồi gửi 1 lần — chọn nhanh
       từ bảng "Tồn kho công ty" ở cuối trang, hoặc thêm thủ công bên dưới. Chỉ chọn vật tư + số lượng — lô cụ thể
-      xuất từ đâu do thủ kho Kho công ty quyết định lúc duyệt phiếu (mặc định theo FIFO). Dòng nạp từ Nhóm vật tư
-      thay thế có SL = 0 (đã đủ từ mã cũ hơn trong nhóm) sẽ KHÔNG được tạo trong phiếu lúc gửi.</div>
+      xuất từ đâu do thủ kho Kho công ty quyết định lúc duyệt phiếu (mặc định theo FIFO). Khi nạp từ Nhóm vật tư
+      thay thế, mã nào đã đủ từ mã cũ hơn trong nhóm (SL = 0) sẽ tự động bỏ qua, không hiện trong bảng dưới đây.</div>
     ${REQUEST_CART.length ? `<div class="tablewrap"><table>
       <thead><tr><th>Vật tư</th><th>Cảnh báo</th><th>Tồn kho công ty thực tế</th><th>Đang chờ QC duyệt</th><th>Tồn kho phân xưởng</th><th>Lô</th><th>Ngày nhập</th><th>FIFO</th><th>Lệnh</th><th>SL theo lệnh</th><th>SL</th><th></th></tr></thead>
       <tbody>${cartRows}</tbody>
@@ -5602,11 +6451,11 @@ function wireCartPanel() {
         order_label: orderLabel, qty_per_order: l.quantity });
     }
     // Dòng Nhóm vật tư thay thế (material_id=null) — đưa THẲNG từng mã thành viên lên giỏ (mỗi mã
-    // 1 dòng), nhưng KHÔNG để trống SL chờ thủ kho tự xoá bớt như trước: tự động lấy hết tồn khả
-    // dụng của mã đang cũ nhất (FIFO) trước, thiếu bao nhiêu mới sang mã cũ thứ 2, 3... — mã nào
-    // không cần lấy (vì mã cũ hơn đã đủ định mức) mặc định về 0 và khoá lại (xem cartPanelHtml).
-    // Chỉ dòng có SL > 0 mới thực sự được tạo trong phiếu lúc "Gửi đề nghị" (xem rq_submit).
-    let addedMemberRows = 0, lockedMemberRows = 0;
+    // 1 dòng), tự động lấy hết tồn khả dụng của mã đang cũ nhất (FIFO) trước, thiếu bao nhiêu mới
+    // sang mã cũ thứ 2, 3... — mã nào không cần lấy (vì mã cũ hơn đã đủ định mức) thì SL=0, BỎ
+    // QUA HẲN không đưa vào giỏ (trước đây vẫn thêm rồi khoá xám dòng "0kg — đã đủ", gây rối mắt
+    // không cần thiết vì đằng nào cũng không được tạo trong phiếu lúc gửi).
+    let addedMemberRows = 0, skippedMemberRows = 0;
     for (const l of groupLines) {
       const members = l.member_material_ids || [];
       const sortedMembers = sortGroupMembersFifo(members, REQ_CACHE.lots);
@@ -5614,21 +6463,22 @@ function wireCartPanel() {
       for (const mid of sortedMembers) {
         const available = materialAvailableCompanyQty(mid, REQ_CACHE.lots);
         const take = Math.min(remaining, available);
+        remaining -= take;
+        if (take <= 0) { skippedMemberRows++; continue; }
         const m = REQ_CACHE.matById[mid];
         REQUEST_CART.push({ material_id: mid, material_code: m ? m.code : mid,
           lot_id: null, lot_code: null, quantity: take, uom: l.uom || "kg",
           group_code: l.group_code, group_name: l.material_name, group_members: members,
-          order_label: orderLabel, qty_per_order: l.quantity, locked: take <= 0 });
-        remaining -= take;
+          order_label: orderLabel, qty_per_order: l.quantity });
         addedMemberRows++;
-        if (take <= 0) lockedMemberRows++;
       }
     }
     REQUEST_SOURCE = { type, id, label: orderLabel };
     refreshCartPanel();
     toast(groupLines.length
       ? `Đã nạp ${normalLines.length} dòng vật tư — còn ${groupLines.length} Nhóm vật tư thay thế đã tự phân bổ ` +
-        `${addedMemberRows - lockedMemberRows}/${addedMemberRows} mã thành viên theo FIFO (mã còn lại về 0, khoá lại)`
+        `${addedMemberRows} mã thành viên cần lấy theo FIFO` +
+        (skippedMemberRows ? ` (bỏ qua ${skippedMemberRows} mã đã đủ từ mã cũ hơn)` : "")
       : `Đã nạp ${lines.length} dòng vật tư từ ${REQUEST_SOURCE.label}`,
       groupLines.length ? "warn" : undefined);
   });
@@ -5736,8 +6586,8 @@ function requestsHistoryBlockHtml() {
   const requests = REQ_CACHE.allRequests || [];
   const { matById, lotById, canRequest, lots } = REQ_CACHE;
   // Khối này chỉ dùng ở tab "Đề nghị nhận kho" của Kho phân xưởng — phía NGƯỜI ĐỀ NGHỊ, không
-  // phải người duyệt. Duyệt/từ chối/hoàn tác phiếu là việc của Kho công ty (tab "giao" ở
-  // VIEWS.warehouse_kc dùng canFulfillGiao riêng) — nên ép canFulfill=false tại đây, kể cả khi
+  // phải người duyệt. Duyệt/từ chối/hoàn tác phiếu là việc của Kho công ty (tab "Xuất theo đề
+  // nghị" ở VIEWS.warehouse_kc dùng canFulfillGiao riêng) — nên ép canFulfill=false tại đây, kể cả khi
   // người đang xem (vd admin) có sẵn quyền warehouse.issue, để không lộ nút duyệt sai chỗ.
   const canFulfill = false;
   const pending = requests.filter(r => r.lines.some(l => l.status === "pending"));
@@ -5877,34 +6727,67 @@ async function openLotQcModal(lotId, { editable = true } = {}) {
   const canRelease = editable && CURRENT_USER && (CURRENT_USER.permissions === "*" ||
     (Array.isArray(CURRENT_USER.permissions) && CURRENT_USER.permissions.includes("quality.release")));
   const recordedByParam = Object.fromEntries(st.recorded.map(r => [r.parameter, r]));
+  const paramByCodeLqc = Object.fromEntries(st.required.map(p => [p.code, p]));
+  // st.recorded gồm TOÀN BỘ lịch sử khai báo của lô này, sắp theo recorded_at TĂNG DẦN (xem
+  // qc_catalog.lot_qc_status) — mỗi lần bấm "Lưu giá trị đã nhập" TẠO DÒNG MỚI, KHÔNG ghi đè
+  // dòng cũ (xem services/quality.py::record_result: luôn new_id()) — lô bị đưa lại on_hold để
+  // duyệt lại (VD do có đề nghị điều chuyển sang kho phân xưởng) vẫn giữ đủ giá trị lần khai
+  // báo trước, chỉ giá trị MỚI NHẤT (dòng cuối mỗi mã chỉ tiêu) được dùng để tính đạt/không đạt
+  // và điều kiện duyệt (can_release) — group lại ở đây để hiện nút "Lịch sử" khi có ≥2 lần.
+  const historyByParam = {};
+  st.recorded.forEach(r => (historyByParam[r.parameter] = historyByParam[r.parameter] || []).push(r));
+  // Ô "Lần 1"/"Lần 2" — hiện thẳng giá trị + kết quả + người/thời gian của TỪNG lần, không cần
+  // mở modal mới cho trường hợp phổ biến (khai báo lại đúng 1 lần do điều chuyển/hold lại).
+  // Lần 2 LUÔN là lần MỚI NHẤT (dùng để tính đạt/không đạt & can_release) dù thực tế đã sang lần
+  // 3+ (hiếm) — kèm nhãn "(lần N)" đúng số thứ tự thật + nút "Lịch sử" để xem đủ các lần ở giữa.
+  const lqcRoundCell = (p, round, tag) => !round ? '<span class="muted">—</span>' :
+    `${qcValueLabel(p, round.value, round.value_text)}${tag || ""} ${badge(round.status)}${round.status}
+     <div class="muted" style="font-size:12px">${esc(round.recorded_by || "—")}<br/>${round.recorded_at ? fmt(round.recorded_at) : "—"}</div>`;
   modal(`<h3>Chỉ tiêu chất lượng — lô ${esc(st.lot_code)}</h3>
     ${!editable ? '<div class="muted" style="margin-bottom:8px">Chế độ xem — việc khai báo &amp; duyệt do KCS thực hiện ở tab Chất lượng.</div>' : ""}
+    ${editable ? `<div class="muted" style="margin-bottom:8px">Mỗi lần bấm "Lưu giá trị đã nhập" sẽ ghi thành 1 <b>lần khai báo mới</b> ("Lần 2", "Lần 3"...) —
+      giá trị lần trước KHÔNG bị mất, vẫn xem ở cột tương ứng/nút "Lịch sử". Chỉ giá trị của lần mới nhất được dùng để tính đạt/không đạt và điều kiện duyệt lô.</div>` : ""}
     <div class="row" style="margin-bottom:10px">
       <div class="field"><label>Số lô KCS</label>
         <input id="lqc_kcslot" value="${esc(st.kcs_lot_no || "")}" placeholder="(KCS tự điền)" ${editable ? "" : "disabled"}/></div>
-      ${editable ? '<button class="btn sec sm" id="lqc_kcslot_save" style="align-self:flex-end">Lưu số lô KCS</button>' : ""}
+      <div class="field"><label>Số LOT nhà cung cấp</label>
+        <input id="lqc_supplierlot" value="${esc(st.supplier_lot || "")}" placeholder="(ghi trên bao bì NCC)" ${editable ? "" : "disabled"}/></div>
+      ${editable ? '<button class="btn sec sm" id="lqc_kcslot_save" style="align-self:flex-end">Lưu số lô/LOT</button>' : ""}
     </div>
+    ${st.is_raw_material && st.missing_lot_no ? '<div class="muted" style="margin-bottom:10px;color:var(--red)">⚠ Nguyên liệu chính/phụ — phải nhập Số lô KCS hoặc Số LOT nhà cung cấp mới được duyệt.</div>' : ""}
     <div class="tablewrap"><table>
-      <thead><tr><th>Chỉ tiêu</th><th>Min</th><th>Max</th><th>Giá trị đã khai báo</th>${st.is_raw_material ? '<th>CA đã khai báo</th>' : ""}<th>Kết quả</th><th>Người/Thời gian điền</th>${editable ? `<th>Nhập giá trị mới</th>${st.is_raw_material ? "<th>Nhập giá trị CA</th>" : ""}` : ""}</tr></thead>
-      <tbody>${st.required.map(p => { const r = recordedByParam[p.code]; return `<tr>
+      <thead><tr><th>Chỉ tiêu</th><th>Min</th><th>Max</th><th>Lần 1</th><th>Lần 2</th>${st.is_raw_material ? '<th>CA đã khai báo</th>' : ""}${editable ? `<th>Nhập giá trị mới</th>${st.is_raw_material ? "<th>Nhập giá trị CA</th>" : ""}` : ""}</tr></thead>
+      <tbody>${st.required.map(p => { const r = recordedByParam[p.code]; const hist = historyByParam[p.code] || [];
+        const first = hist[0] || null;
+        const latest = hist.length ? hist[hist.length - 1] : null;
+        const lan2 = hist.length >= 2 ? latest : null;
+        const lan2Tag = hist.length > 2 ? ` <span class="muted" style="font-size:11px">(lần ${hist.length})</span>` : "";
+        return `<tr>
         <td>${esc(p.name)}<div class="muted">${esc(p.code)}${p.unit ? " (" + esc(p.unit) + ")" : ""}</div></td>
         <td>${p.value_type !== "numeric" ? "—" : (p.lsl ?? "—")}</td><td>${p.value_type !== "numeric" ? "—" : (p.usl ?? "—")}</td>
-        <td>${r ? qcValueLabel(p, r.value, r.value_text) : "—"}</td>
+        <td>${lqcRoundCell(p, first)}</td>
+        <td>${lqcRoundCell(p, lan2, lan2Tag)}${hist.length > 2 ? `<div><button type="button" class="btn sm sec" data-lqchist="${esc(p.code)}" style="margin-top:4px">Lịch sử (${hist.length} lần)</button></div>` : ""}</td>
         ${st.is_raw_material ? `<td>${r && r.ca_value != null ? esc(String(r.ca_value)) : "—"}</td>` : ""}
-        <td>${r ? badge(r.status) + r.status : '<span class="muted">chưa khai báo</span>'}</td>
-        <td>${qcRecordedMetaHtml(r)}</td>
         ${editable ? `<td>${qcValueInputHtml("lqc-val", p)}</td>${st.is_raw_material ? `<td><input type="number" step="any" class="lqc-ca-val" data-code="${esc(p.code)}" style="width:110px" title="Giá trị in trên bao bì nhà cung cấp — chỉ tham khảo, không tính pass/fail"/></td>` : ""}` : ""}
-        </tr>`; }).join("") || `<tr><td colspan=${editable ? (st.is_raw_material ? 9 : 7) : (st.is_raw_material ? 7 : 6)} class="muted">Nguyên liệu này không có chỉ tiêu bắt buộc.</td></tr>`}</tbody>
+        </tr>`; }).join("") || `<tr><td colspan=${editable ? (st.is_raw_material ? 8 : 6) : (st.is_raw_material ? 6 : 5)} class="muted">Nguyên liệu này không có chỉ tiêu bắt buộc.</td></tr>`}</tbody>
     </table></div>
     ${editable ? `<button class="btn" id="lqc_submit" style="margin-top:12px">Lưu giá trị đã nhập</button>
-    ${canRelease ? `<button class="btn sec" id="lqc_release" style="margin-top:12px" ${st.can_release ? "" : "disabled"}>
-      Duyệt (release)${st.can_release ? "" : " — còn thiếu khai báo"}</button>` :
+    ${canRelease ? `<button class="btn sec" id="lqc_release" style="margin-top:12px" ${st.can_release ? "" : "disabled"} ${st.missing_lot_no ? 'title="Còn thiếu Số lô KCS hoặc Số LOT nhà cung cấp"' : ""}>
+      Duyệt (release)${st.can_release ? "" : (st.missing_lot_no ? " — thiếu Số lô KCS/LOT NCC" : " — còn thiếu khai báo")}</button>` :
       '<div class="muted" style="margin-top:12px">Cần quyền <code class="k">quality.release</code> (KCS/QA) để duyệt.</div>'}` : ""}`);
+  document.querySelectorAll("[data-lqchist]").forEach(b => b.onclick = () => {
+    const code = b.dataset.lqchist;
+    openLotQcHistoryModal(st.lot_code, paramByCodeLqc[code], historyByParam[code], () => openLotQcModal(lotId, { editable }));
+  });
   if (!editable) return;
 
   $("lqc_kcslot_save").onclick = () => guard(async () => {
-    await PUT(`/lots/${lotId}`, { kcs_lot_no: $("lqc_kcslot").value.trim() || null });
-    toast("Đã lưu số lô KCS");
+    await PUT(`/lots/${lotId}`, {
+      kcs_lot_no: $("lqc_kcslot").value.trim() || null,
+      supplier_lot: $("lqc_supplierlot").value.trim() || null,
+    });
+    toast("Đã lưu số lô KCS/LOT NCC");
+    openLotQcModal(lotId, { editable });
   });
   $("lqc_submit").onclick = () => guard(async () => {
     // Mỗi dòng (1 chỉ tiêu) chỉ cần điền MỘT trong hai ô — "Nhập giá trị mới" hoặc "Nhập giá
@@ -5945,6 +6828,24 @@ async function openLotQcModal(lotId, { editable = true } = {}) {
     const v = document.querySelector("#nav button.active")?.dataset.view;
     if (v) render(v);
   });
+}
+
+// Xem lại TOÀN BỘ các lần khai báo trước đó của 1 chỉ tiêu (1 lô NVL) — chỉ đọc, không sửa được
+// ở đây (sửa/thêm lần mới vẫn làm ở openLotQcModal). "Lần 1" = dòng cũ nhất; dòng cuối luôn là
+// giá trị đang được dùng để tính đạt/không đạt & điều kiện duyệt lô hiện tại.
+function openLotQcHistoryModal(lotCode, param, history, onBack) {
+  const rows = history.slice().reverse(); // mới nhất lên đầu — dễ đối chiếu với giá trị hiện tại
+  modal(`<h3>Lịch sử khai báo — ${esc(param.name)} <span class="muted">(lô ${esc(lotCode)})</span></h3>
+    <div class="tablewrap"><table>
+      <thead><tr><th>Lần</th><th>Giá trị</th>${param.value_type !== "text" ? "<th>CA</th>" : ""}<th>Kết quả</th><th>Người điền</th><th>Thời gian</th></tr></thead>
+      <tbody>${rows.map((r, i) => { const lanNo = history.length - i; return `<tr${i === 0 ? ' style="font-weight:600"' : ""}>
+        <td>Lần ${lanNo}${i === 0 ? ' <span class="muted" style="font-weight:400">(hiện tại)</span>' : ""}</td>
+        <td>${qcValueLabel(param, r.value, r.value_text)}</td>
+        ${param.value_type !== "text" ? `<td class="muted">${r.ca_value != null ? esc(String(r.ca_value)) : "—"}</td>` : ""}
+        <td>${badge(r.status)}${r.status}</td>
+        <td class="muted">${esc(r.recorded_by || "—")}</td>
+        <td class="muted">${fmt(r.recorded_at)}</td></tr>`; }).join("")}</tbody>
+    </table></div>`, onBack);
 }
 
 // ---- Modal: khai báo chỉ tiêu theo công đoạn sản xuất (mẻ nấu/lên men chính-phụ/lọc/chiết/thành phẩm) ----
@@ -6196,7 +7097,9 @@ async function openBrewMaterialsModal(brewId, batchId, batchCode, onBack) {
   const otherGroupMemberInUsage = (mat) => {
     if (!mat) return null;
     const grp = altGroupByMaterialId[mat.material_id];
-    if (!grp) return null;
+    // Nhóm "chọn nhiều mã" (selection_mode="multi") — dùng phối hợp nhiều mã cùng lúc là hành
+    // vi ĐÚNG, không phải nhầm lẫn, nên bỏ cảnh báo/hỏi xác nhận (khác nhóm "chỉ 1 mã" mặc định).
+    if (!grp || grp.selection_mode === "multi") return null;
     for (const u2 of usage) {
       const m2 = matForUsage(u2);
       if (m2 && m2.material_id !== mat.material_id && grp.member_material_ids.includes(m2.material_id)) return m2;
@@ -6213,8 +7116,18 @@ async function openBrewMaterialsModal(brewId, batchId, batchCode, onBack) {
   let sugByMaterialId = {};
   const addBomLinesToSug = (lines) => {
     for (const l of lines || []) {
-      if (l.is_header || l.qty_per_batch == null) continue;
-      if (l.material_id) { sugByMaterialId[l.material_id] = l.qty_per_batch; continue; }
+      if (l.is_header) continue;
+      if (l.material_id) { if (l.qty_per_batch != null) sugByMaterialId[l.material_id] = l.qty_per_batch; continue; }
+      // Dòng Nhóm vật tư thay thế khai định mức RIÊNG từng thành viên (Công thức ->
+      // member_qty, xem services/brew_order.py::_build_group_line) — member_breakdown mang
+      // sẵn qty_per_batch của TỪNG mã, dùng đúng số đó thay vì gán chung 1 số như dòng nhóm
+      // khai kiểu cũ (không có member.qty_per_batch).
+      const hasPerMemberQty = (l.member_breakdown || []).some(mb => mb.qty_per_batch != null);
+      if (hasPerMemberQty) {
+        for (const mb of l.member_breakdown) if (mb.material_id) sugByMaterialId[mb.material_id] = mb.qty_per_batch;
+        continue;
+      }
+      if (l.qty_per_batch == null) continue;
       for (const mid of l.member_material_ids || []) sugByMaterialId[mid] = l.qty_per_batch;
     }
   };
@@ -6761,7 +7674,8 @@ async function openBrewBatchesModal(brewId, brewCode, productId, locked = false)
           <button class="btn sm sec" data-nvl="${esc(brewId)}|${esc(b.batch_id)}|${esc(b.batch_code)}">+ NVL</button>
           <button class="btn sm sec" data-processlog="${esc(brewId)}|${esc(b.batch_id)}|${esc(b.batch_code)}">Ghi chép nấu</button>
           <button class="btn sm sec" data-cip="brew_batch|${esc(b.batch_id)}|${esc(b.batch_code)}">CIP</button>
-          ${locked ? "" : `<button class="btn sm ${b.exec_status === "hoan_thanh" ? "sec" : ""}" data-finishbatch="${esc(b.batch_id)}" data-endedat="${esc(b.ended_at || "")}">${b.exec_status === "hoan_thanh" ? "Sửa giờ KT" : "Kết thúc"}</button>
+          ${locked ? "" : `<button class="btn sm sec" data-startbatch="${esc(b.batch_id)}" data-startedat="${esc(b.started_at || "")}">Sửa giờ BĐ</button>
+          <button class="btn sm ${b.exec_status === "hoan_thanh" ? "sec" : ""}" data-finishbatch="${esc(b.batch_id)}" data-endedat="${esc(b.ended_at || "")}">${b.exec_status === "hoan_thanh" ? "Sửa giờ KT" : "Kết thúc"}</button>
           <button class="btn sm sec" data-delbatch="${esc(b.batch_id)}">Xóa</button>`}
         </td></tr>`).join("") || `<tr><td colspan=8 class="muted">Chưa có mẻ nào — thêm mẻ bên dưới.</td></tr>`}</tbody>
     </table></div>
@@ -6805,6 +7719,12 @@ async function openBrewBatchesModal(brewId, brewCode, productId, locked = false)
     openFinishTimeModal("Kết thúc mẻ " + b.closest("tr").querySelector(".code").textContent, b.dataset.endedat || null, async (ended_at) => {
       await POST(`/brewing/brews/${brewId}/batches/${b.dataset.finishbatch}/finish`, { ended_at });
       toast("Đã lưu giờ kết thúc"); render("process"); openBrewBatchesModal(brewId, brewCode, productId, locked);
+    }, goBack);
+  });
+  document.querySelectorAll("[data-startbatch]").forEach(b => b.onclick = () => {
+    openStartTimeModal("Sửa giờ bắt đầu mẻ " + b.closest("tr").querySelector(".code").textContent, b.dataset.startedat || null, async (started_at) => {
+      await POST(`/brewing/brews/${brewId}/batches/${b.dataset.startbatch}/start`, { started_at });
+      toast("Đã lưu giờ bắt đầu"); render("process"); openBrewBatchesModal(brewId, brewCode, productId, locked);
     }, goBack);
   });
   document.querySelectorAll("[data-stageqc]").forEach(b => b.onclick = () => {
@@ -7469,10 +8389,37 @@ async function openBrewMasterOrderModal(masterId) {
             <td>${esc(l.uom || "")}</td><td>${l.qty_per_batch ?? "—"}</td><td>${l.qty_total ?? "—"}</td>
             <td>${l.qty_from_company ?? "—"}</td><td>${l.qty_from_workshop ?? "—"}</td>
             <td>${l.stock_company_snapshot ?? "—"}</td><td>${l.stock_workshop_snapshot ?? "—"}</td>
-            <td>${l.unit_price ?? "—"}</td><td>${l.shortage ? `<span style="color:var(--red)">⚠ Thiếu</span>` : `<span style="color:var(--green)">Đủ</span>`}</td></tr>${bomMemberRowsHtml(l, 7, 2)}`).join("") ||
+            <td>${l.unit_price ?? "—"}</td><td>${l.shortage ? `<span style="color:var(--red)">⚠ Thiếu</span>` : `<span style="color:var(--green)">Đủ</span>`}</td></tr>${bomMemberRowsHtml(l, 3, 2, true)}`).join("") ||
           `<tr><td colspan=11 class="muted">Chưa có dòng NVL.</td></tr>`}</tbody></table></div>
     </div>`;
     }).join("")}`);
+}
+
+// ---- Modal: xem Lệnh sản xuất (ERP) — mirror openBrewMasterOrderModal nhưng KHÔNG có cấu
+// trúc "lệnh nhỏ" (1 Lệnh SX = 1 dòng); o.lines là định mức NVL ĐÃ LƯU lúc lập/sửa lệnh (SL lấy
+// tại 2 kho + thành viên Nhóm vật tư đã chọn) — xem services/orders.py::get_order. ----
+async function openProductionOrderModal(orderId) {
+  const o = await GET(`/orders/${orderId}`);
+  const lines = o.lines || [];
+  modal(`<h3>Lệnh sản xuất (ERP) — <code class="k">${esc(o.order_code)}</code></h3>
+    <div class="muted" style="margin-bottom:8px">
+      Sản phẩm: <b>${esc(prodName(o.product_id))}</b> · SL kế hoạch: <b>${o.planned_qty} ${esc(o.uom)}</b> · Ưu tiên: <b>${o.priority}</b> ·
+      ${badge(o.status)}${esc(o.status)}
+      ${o.issued_by ? `<br/>Người ra lệnh: ${esc(o.issued_by)}` : ""}
+      ${o.recipe_code ? `<br/>Công thức: <b>${esc(o.recipe_code)} v${o.recipe_version_no}</b>${o.recipe_name ? " — " + esc(o.recipe_name) : ""}${o.recipe_note ? ` (${esc(o.recipe_note)})` : ""} · Số mẻ KH: <b>${o.planned_batch_count ?? "—"}</b>` : ""}
+    </div>
+    <div class="tablewrap" style="max-height:50vh"><table>
+      <thead><tr><th>STT</th><th>Tên NVL</th><th>ĐVT</th><th>Nhu cầu 1 mẻ</th><th>Nhu cầu Tổng mẻ</th>
+        <th>SL lấy tại Kho công ty</th><th>SL lấy tại Kho phân xưởng</th>
+        <th>Tồn Kho công ty</th><th>Tồn Kho phân xưởng</th><th>Đơn giá</th><th></th></tr></thead>
+      <tbody>${lines.map(l => l.is_header
+        ? `<tr style="font-weight:700"><td colspan=11>${esc(l.stt_label || "")} ${esc(l.material_name || "")}</td></tr>`
+        : `<tr class="${l.shortage ? "row-red" : ""}"><td>${esc(l.stt_label || "")}</td><td>${esc(l.material_name || "—")}</td>
+          <td>${esc(l.uom || "")}</td><td>${l.qty_per_batch ?? "—"}</td><td>${l.qty_total ?? "—"}</td>
+          <td>${l.qty_from_company ?? "—"}</td><td>${l.qty_from_workshop ?? "—"}</td>
+          <td>${l.stock_company_snapshot ?? "—"}</td><td>${l.stock_workshop_snapshot ?? "—"}</td>
+          <td>${l.unit_price ?? "—"}</td><td>${l.shortage ? `<span style="color:var(--red)">⚠ Thiếu</span>` : `<span style="color:var(--green)">Đủ</span>`}</td></tr>${bomMemberRowsHtml(l, 3, 2, true)}`).join("") ||
+        `<tr><td colspan=11 class="muted">Chưa có dòng NVL${o.recipe_version_id ? "" : " (chưa chọn công thức)"}.</td></tr>`}</tbody></table></div>`);
 }
 
 async function openFilterMasterOrderModal(masterId) {
@@ -7594,9 +8541,16 @@ function printBrewOrder(m) {
       // Cột "Tổng mẻ" (Lượng) in đúng phần SL lấy tại Kho công ty — không phải Nhu cầu Tổng mẻ đầy
       // đủ (l.qty_total): phần còn lại đã có sẵn tại Kho phân xưởng, không cần xuất thêm. Cột
       // "Thực xuất" để trống hoàn toàn cho thủ kho tự ghi tay lúc xuất thực tế.
+      // Dòng Nhóm vật tư khai định mức riêng từng thành viên (member_breakdown có qty_per_batch)
+      // — in thêm 1 dòng con mỗi mã ĐÃ CHỌN, kèm đúng mã + định mức riêng của mã đó, để thủ kho
+      // biết chính xác cần xuất mã nào bao nhiêu (không chỉ thấy tên nhóm chung).
+      const memberRows = (l.member_breakdown || []).filter(mb => mb.qty_per_batch != null).map(mb =>
+        `<tr><td></td><td style="padding-left:14px">↳ ${dash(mb.material_code)} — ${dash(mb.material_name)}</td><td>${dash(l.uom)}</td>
+          <td>${dash(mb.qty_per_batch)}</td><td>${dash(mb.qty_from_company)}</td><td></td><td></td>
+          <td></td><td></td><td></td></tr>`).join("");
       return `<tr><td>${dash(l.stt_label)}</td><td>${dash(l.material_name)}</td><td>${dash(l.uom)}</td>
           <td>${dash(l.qty_per_batch)}</td><td>${dash(l.qty_from_company)}</td><td></td><td></td>
-          <td>${blank(l.unit_price)}</td><td></td><td></td></tr>`;
+          <td>${blank(l.unit_price)}</td><td></td><td></td></tr>${memberRows}`;
     }).join("");
     return `<div class="pf-section" style="border:1px solid #000;padding:6px;margin-bottom:10px">
       <h3 style="margin-top:0">Lệnh nấu nhỏ #${ci + 1}</h3>
@@ -7653,6 +8607,85 @@ function printBrewOrder(m) {
       <div><b>Quản đốc phân xưởng sản xuất</b><span>(Ký, ghi rõ họ tên)</span></div>
       <div><b>Người nhận lệnh</b><span>${dash(m.executor_unit)}<br/>(Ký, ghi rõ họ tên)</span></div>
       <div><b>Thủ kho</b><span>${dash(m.warehouse_keeper)}<br/>(Ký, ghi rõ họ tên)</span></div>
+      <div><b>P. Kế toán</b><span>(Ký, ghi rõ họ tên)</span></div>
+    </div>
+    </body></html>`;
+  const w = window.open("", "_blank");
+  if (!w) { toast("Trình duyệt chặn cửa sổ in — vui lòng cho phép popup.", "err"); return; }
+  w.document.write(html);
+  w.document.close();
+  w.focus();
+  setTimeout(() => w.print(), 300);
+}
+
+// In Lệnh sản xuất (ERP) — mirror printBrewOrder nhưng KHÔNG có nhiều "lệnh nhỏ" (1 Lệnh SX =
+// 1 dòng), nên chỉ có 1 khối nội dung thay vì lặp childSections.
+function printProductionOrder(o, lines) {
+  const dash = (v) => (v === null || v === undefined || v === "" ? "—" : esc(String(v)));
+  const blank = (v) => (v === null || v === undefined || v === "" ? "" : esc(String(v)));
+  const safetyText = o.safety_note ||
+    "Thực hiện đúng quy trình vận hành thiết bị, chỉ vận hành khi thống nhất thông tin giữa thợ chính và thợ phụ, các bộ phận khác có liên quan.";
+  const lineRows = (lines || []).map(l => {
+    if (l.is_header) return `<tr><td colspan=10 style="font-weight:700">${dash(l.stt_label)} ${dash(l.material_name)}</td></tr>`;
+    const memberRows = (l.member_breakdown || []).filter(mb => mb.qty_per_batch != null).map(mb =>
+      `<tr><td></td><td style="padding-left:14px">↳ ${dash(mb.material_code)} — ${dash(mb.material_name)}</td><td>${dash(l.uom)}</td>
+        <td>${dash(mb.qty_per_batch)}</td><td>${dash(mb.qty_from_company)}</td><td></td><td></td>
+        <td></td><td></td><td></td></tr>`).join("");
+    return `<tr><td>${dash(l.stt_label)}</td><td>${dash(l.material_name)}</td><td>${dash(l.uom)}</td>
+        <td>${dash(l.qty_per_batch)}</td><td>${dash(l.qty_from_company)}</td><td></td><td></td>
+        <td>${blank(l.unit_price)}</td><td></td><td></td></tr>${memberRows}`;
+  }).join("");
+  const html = `<!doctype html><html><head><meta charset="utf-8"/><title>Lệnh sản xuất — ${esc(o.order_code)}</title>
+    <style>
+      @page { size: A4; margin: 12mm; }
+      * { box-sizing: border-box; }
+      body{font-family:Arial,Helvetica,sans-serif;color:#000;background:#fff;margin:0;font-size:12px;line-height:1.35}
+      h2{font-size:16px;margin:6px 0 10px;text-align:center;font-weight:700;text-transform:uppercase}
+      .pf-header{display:flex;justify-content:space-between;margin-bottom:6px;font-size:11.5px}
+      .pf-header .right{text-align:center}
+      .pf-section{margin-bottom:8px}
+      .pf-section h3{font-size:12.5px;margin:0 0 3px;font-weight:700}
+      table.pf-tbl{border-collapse:collapse;width:100%;margin-bottom:4px}
+      table.pf-tbl th, table.pf-tbl td{border:1px solid #000;padding:3px 5px;text-align:left;font-size:11px}
+      table.pf-tbl th{background:#eee;font-weight:700;text-align:center}
+      table.pf-tbl td{text-align:center}
+      table.pf-tbl td:nth-child(2){text-align:left}
+      .pf-sign{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-top:30px;text-align:center;font-size:11.5px}
+      .pf-sign b{display:block;margin-bottom:2px}
+      .pf-sign span{display:block;color:#555;margin-bottom:40px}
+    </style></head><body>
+    <div class="pf-header">
+      <div><b>CÔNG TY CP BIA &amp; NGK ĐÔNG MAI</b><br/>Pxsx bia ĐM<br/>Số: ${dash(o.order_code)}</div>
+      <div class="right"><b>CỘNG HÒA XÃ HỘI CHỦ NGHĨA VIỆT NAM</b><br/>Độc lập – Tự do – Hạnh phúc</div>
+    </div>
+    <h2>LỆNH SẢN XUẤT KIÊM PHIẾU XUẤT KHO</h2>
+    <div class="pf-section"><h3>I. Người ra lệnh</h3><div>${dash(o.issued_by || o.created_by)}</div></div>
+    <div class="pf-section"><h3>II. Người nhận lệnh</h3>
+      <div>1/ Người T/hiện: ${dash(o.executor_unit)}</div>
+      <div>2/ Người xuất hàng: ${dash(o.warehouse_keeper)}</div></div>
+    <div class="pf-section"><h3>III. Nội dung thực hiện</h3>
+      ${o.reference_note ? `<div>${dash(o.reference_note)}</div>` : ""}
+      <div class="pf-section" style="border:1px solid #000;padding:6px;margin-bottom:10px">
+        <div>Sản phẩm: <b>${dash(prodName(o.product_id))}</b> · Số lượng: <b>${dash(o.planned_qty)} ${dash(o.uom)}</b>${o.planned_batch_count ? ` ≈ <b>${dash(o.planned_batch_count)}</b> mẻ` : ""}${o.recipe_code ? ` · Công thức: ${dash(o.recipe_code)} v${o.recipe_version_no}` : ""}</div>
+        <table class="pf-tbl"><thead>
+          <tr><th rowspan=2>STT</th><th rowspan=2>Tên, nhãn hiệu quy cách NVL</th><th rowspan=2>ĐVT</th>
+            <th colspan=2>Lượng</th><th colspan=2>Thực xuất</th><th rowspan=2>Đơn giá</th><th colspan=2>T/Tiền (đồng)</th></tr>
+          <tr><th>Nhu cầu 1 mẻ</th><th>Tổng mẻ</th><th>1 mẻ</th><th>Tổng mẻ</th><th>Nhu cầu</th><th>Thực lĩnh</th></tr>
+        </thead>
+        <tbody>${lineRows || '<tr><td colspan=10 style="text-align:center">—</td></tr>'}
+          <tr style="font-weight:700"><td colspan=8 style="text-align:right">TỔNG GIÁ TRỊ</td><td></td><td></td></tr>
+        </tbody></table>
+      </div>
+    </div>
+    <div class="pf-section"><h3>IV. Thời gian thực hiện</h3>
+      <div>Bắt đầu: Ngày ${o.start_date ? fmt(o.start_date) : "......."} — Ca: .......</div>
+      <div>Kết thúc: Ngày ${o.end_date ? fmt(o.end_date) : "......."} — Ca: .......</div></div>
+    <div class="pf-section"><h3>V. Biện pháp an toàn</h3><div>${dash(safetyText)}</div></div>
+    <div class="pf-sign">
+      <div><b>Giám đốc</b><span>(Ký, ghi rõ họ tên)</span></div>
+      <div><b>Quản đốc phân xưởng sản xuất</b><span>(Ký, ghi rõ họ tên)</span></div>
+      <div><b>Người nhận lệnh</b><span>${dash(o.executor_unit)}<br/>(Ký, ghi rõ họ tên)</span></div>
+      <div><b>Thủ kho</b><span>${dash(o.warehouse_keeper)}<br/>(Ký, ghi rõ họ tên)</span></div>
       <div><b>P. Kế toán</b><span>(Ký, ghi rõ họ tên)</span></div>
     </div>
     </body></html>`;
@@ -8406,7 +9439,26 @@ function _sortCompare(a, b, type, dir) {
   if (type === "string") return dir * a.localeCompare(b, "vi");
   return dir * (a < b ? -1 : a > b ? 1 : 0);
 }
-function wirePaginate(tableId, defaultPageSize = 10) {
+// Cộng tổng SL theo ĐVT từ 1 danh sách <tr> có gắn data-qty/data-uom (xem sumTotalsHtml ở
+// dưới) — tách riêng theo ĐVT vì các vật tư trong 1 bảng thường khác đơn vị (kg/Lon/Cái...),
+// cộng lẫn sẽ ra số vô nghĩa.
+function sumQtyByUom(trs) {
+  const totals = {};
+  trs.forEach(tr => {
+    const q = parseFloat(tr.dataset.qty);
+    const u = tr.dataset.uom;
+    if (!isFinite(q) || !u) return;
+    totals[u] = (totals[u] || 0) + q;
+  });
+  return totals;
+}
+function sumTotalsHtml(trs) {
+  const totals = sumQtyByUom(trs);
+  const entries = Object.entries(totals);
+  if (!entries.length) return '<span class="muted">0</span>';
+  return entries.map(([u, q]) => `<b>${Math.round(q * 1000) / 1000}</b> ${esc(u)}`).join(" + ");
+}
+function wirePaginate(tableId, defaultPageSize = 10, opts = {}) {
   const table = document.getElementById(tableId);
   if (!table) return;
   table.dataset.paginated = "1";
@@ -8479,6 +9531,7 @@ function wirePaginate(tableId, defaultPageSize = 10) {
   function apply() {
     const q = (searchInput?.value || "").toLowerCase();
     const matched = q ? allRows.filter(tr => rowText(tr).includes(q)) : allRows;
+    if (opts.onFilter) opts.onFilter(matched);
     const pageSize = state.pageSize;
     const totalPages = pageSize === Infinity ? 1 : Math.max(1, Math.ceil(matched.length / pageSize));
     if (state.page > totalPages) state.page = totalPages;
@@ -8532,7 +9585,7 @@ VIEWS.process = async function () {
     const whOpts = ["", "Kho công ty", "Kho phân xưởng"].map(v =>
       `<option value="${esc(v)}" ${v === nlLoc ? "selected" : ""}>${v || "(Tất cả)"}</option>`).join("");
     const NL_LOT_CELL_MAX = 3;
-    const nlLotChip = (l) => `<code class="k">${esc(l.lot_code)}</code> (${l.quantity}${l.uom}${l.status === "on_hold" ? ", CHỜ QC" : ""})`;
+    const nlLotChip = (l) => `<code class="k">${lotCodeCellHtml(l)}</code> (${l.quantity}${l.uom}${l.status === "on_hold" ? ", CHỜ QC" : ""})`;
     body = `<div class="panel"><h2>Tồn kho NVL theo kho <span class="muted">(${stock.length})</span></h2>
       <div class="muted" style="margin-bottom:6px">Tồn kho thật từ hệ thống Kho NVL — nguyên liệu phân bổ vào mẻ nấu (nút "+NVL" ở tab Nấu) lấy từ <b>Kho phân xưởng</b>.</div>
       <div class="row" style="margin-bottom:8px"><div class="field"><label>Kho</label><select id="nl_loc">${whOpts}</select></div></div>
@@ -8591,6 +9644,7 @@ VIEWS.process = async function () {
         <div class="field"><label>SL nấu/hl</label><input id="nb_vol" type="number" value="900"/></div>
         <div class="field"><label>Tank lên men</label><select id="nb_tank"><option value="">(chưa chuyển lên men)</option>${tankOptsNau}</select></div>
         <div class="field"><label>Men sử dụng</label><select id="nb_yeast">${yeastOpts}</select></div>
+        <div class="field"><label>Số mẻ (KH)</label><input id="nb_batchcount" disabled style="width:70px" title="Số mẻ kế hoạch lấy từ Lệnh nấu nhỏ đã chọn — chỉ để tham khảo khi khai báo Mẻ, số mẻ thực tế (Braumat) vẫn khai tay từng mẻ."/></div>
       </div>
       <div class="row">
         <div class="field" style="flex:1"><label>Ghi chú</label><input id="nb_note" placeholder="(tuỳ chọn)"/></div>
@@ -8907,7 +9961,7 @@ VIEWS.process = async function () {
       } else {
         $("nb_wort").disabled = false;
       }
-      if (!opt || !opt.value) { $("nb_vol").disabled = false; return; }
+      if (!opt || !opt.value) { $("nb_vol").disabled = false; $("nb_batchcount").value = ""; return; }
       // SL nấu/hl luôn LẤY THEO sản lượng kế hoạch (planned_volume_hl) của Lệnh nấu nhỏ đã
       // chọn, không cho sửa tay — không chia theo số mẻ, vì planned_batch_count là số MẺ
       // (Braumat) bên trong 1 mã nấu, không phải số mã nấu chia sẻ sản lượng của lệnh nhỏ (1
@@ -8916,12 +9970,16 @@ VIEWS.process = async function () {
       const vol = parseFloat(opt.dataset.vol) || 0;   // đã là hl (tổng kế hoạch)
       $("nb_vol").value = vol;
       $("nb_vol").disabled = true;
+      // Số mẻ kế hoạch của Lệnh nấu nhỏ — chỉ hiển thị để người lập biết cần khai bao nhiêu mẻ
+      // (Braumat) khi bấm "Mẻ" sau khi tạo mã nấu; không auto-tạo mẻ vì số mẻ Braumat là số thật
+      // do vận hành nhập, hệ thống không tự sinh ra được (xem +Thêm mẻ ở openBrewBatchesModal).
+      $("nb_batchcount").value = opt.dataset.batchcount || "—";
     };
     $("nb_master").onchange = () => {
       const master = mastersLn.find(m => m.id === $("nb_master").value);
       $("nb_order").innerHTML = master
         ? `<option value="">(chọn Lệnh nấu nhỏ — bắt buộc)</option>` + master.children.map(c =>
-            `<option value="${esc(c.brew_order_id)}" data-wort="${esc(c.product_id || "")}" data-vol="${c.planned_volume_hl}">${esc(c.product_code || c.product_desc || "—")} — ${c.actual_volume_hl}/${c.planned_volume_hl} hl</option>`).join("")
+            `<option value="${esc(c.brew_order_id)}" data-wort="${esc(c.product_id || "")}" data-vol="${c.planned_volume_hl}" data-batchcount="${c.planned_batch_count != null ? c.planned_batch_count : ""}">${esc(c.product_code || c.product_desc || "—")} — ${c.actual_volume_hl}/${c.planned_volume_hl} hl${c.planned_batch_count != null ? ` — KH ${c.planned_batch_count} mẻ` : ""}</option>`).join("")
         : `<option value="">(chọn Lệnh nấu trước)</option>`;
       updateNbWortFromOrder();
     };
@@ -9234,7 +10292,7 @@ VIEWS.realtime = async function () {
 // ================= TRỢ LÝ AI =================
 let AI_HISTORY = [];
 let CURRENT_CONV = null;   // hội thoại đang mở (lưu phía server)
-const sevBadge = (s) => badge(s === "high" ? "critical" : s === "medium" ? "due" : "available") + s;
+const sevBadge = (s) => `<span class="badge ${s === "high" ? "critical" : s === "medium" ? "due" : "available"}">${s === "high" ? "Cao" : s === "medium" ? "Trung bình" : "Thấp"}</span>`;
 VIEWS.ai = async function () {
   const [status, ins, convs] = await Promise.all([
     GET("/ai/status"), GET("/ai/insights"), GET("/ai/conversations").catch(() => [])]);
@@ -10037,7 +11095,7 @@ const MASTER_GROUPS = [
   { key: "nvl", label: "Nguyên vật liệu", items: [
     { key: "vattu", label: "Vật tư / Nguyên liệu" }, { key: "nhomvattu", label: "Nhóm vật tư" },
     { key: "nhomvattuthaythe", label: "Nhóm vật tư thay thế" }, { key: "nhacc", label: "Nhà cung cấp" },
-    { key: "vitrikho", label: "Vị trí kho NVL" },
+    { key: "vitrikho", label: "Vị trí kho" },
   ] },
   { key: "khotp", label: "Kho thành phẩm", items: [
     { key: "nhamaykhac", label: "Nhà máy khác" }, { key: "khothanhpham", label: "Kho thành phẩm" },
@@ -10207,10 +11265,17 @@ VIEWS.master = async function () {
         <div class="field" style="margin-top:8px;max-width:260px"><label>Đơn vị nhóm <span class="muted">(mọi thành viên phải khai được đơn vị này)</span></label>
           <select id="mag_unit"><option value="">(chọn thành viên trước)</option></select>
         </div>
+        <div class="field" style="margin-top:8px;max-width:340px"><label>Chế độ chọn khi ghi NVL thực tế</label>
+          <select id="mag_mode">
+            <option value="single">Chỉ được chọn 1 mã (mặc định)</option>
+            <option value="multi">Được chọn nhiều mã cùng lúc</option>
+          </select>
+          <div class="muted" style="font-size:12px;margin-top:2px">"Chỉ 1 mã": các mã hoàn toàn thay thế nhau (VD Malt Úc rời/bao). "Nhiều mã": được dùng phối hợp nhiều mã cho cùng 1 mẻ (VD nhiều loại CO2 khác nồng độ) — định mức riêng từng mã khai trong Công thức.</div>
+        </div>
         <button class="btn" id="mag_add" style="margin-top:10px">+ Tạo nhóm</button>` : ""}
         <input class="searchbox" data-tbl="t_matgroups_alt" placeholder="Tìm mã/tên nhóm..." style="margin-top:10px"/>
         <div class="tablewrap" style="margin-top:6px"><table id="t_matgroups_alt">
-          <thead><tr><th>Mã</th><th>Tên</th><th>Thành viên</th><th>ĐVT nhóm</th><th>Trạng thái</th>${canManage ? "<th></th>" : ""}</tr></thead>
+          <thead><tr><th>Mã</th><th>Tên</th><th>Thành viên</th><th>ĐVT nhóm</th><th>Chế độ chọn</th><th>Trạng thái</th>${canManage ? "<th></th>" : ""}</tr></thead>
           <tbody>${materialAltGroups.map(g => {
             const memberNames = (g.member_material_ids || []).map(mid => {
               const m = materials.find(x => x.material_id === mid); return m ? `${m.code} — ${m.name}` : mid;
@@ -10219,12 +11284,13 @@ VIEWS.master = async function () {
             <td><code class="k">${esc(g.code)}</code></td><td>${esc(g.name)}</td>
             <td class="muted">${esc(memberNames || "—")}</td>
             <td>${esc(g.unit || "—")}</td>
+            <td class="muted">${g.selection_mode === "multi" ? "Nhiều mã" : "Chỉ 1 mã"}</td>
             <td>${g.active ? '<span style="color:var(--green)">Đang dùng</span>' : '<span class="muted">Đã ẩn</span>'}</td>
             ${canManage ? `<td style="white-space:nowrap">
               <button class="btn sm sec" data-emag="${esc(g.group_id)}">Sửa</button>
               <button class="btn sm sec" data-magdel="${esc(g.group_id)}">Xóa</button>
             </td>` : ""}</tr>`; }).join("") ||
-            `<tr><td colspan="${canManage ? 6 : 5}" class="muted">Chưa có nhóm vật tư thay thế nào.</td></tr>`}</tbody>
+            `<tr><td colspan="${canManage ? 7 : 6}" class="muted">Chưa có nhóm vật tư thay thế nào.</td></tr>`}</tbody>
         </table></div>
       </div>
 
@@ -10277,27 +11343,28 @@ VIEWS.master = async function () {
         </table></div>
       </div>
 
-      <div class="panel" ${mi("vitrikho")}><h2>📍 Vị trí kho nguyên vật liệu <span class="muted">(${materialLocations.length})</span></h2>
-        <div class="muted" style="margin-bottom:6px">Vị trí cất trong Kho công ty — bắt buộc chọn khi nhập kho (tab Kho công ty → Nhập/Xuất/Hoàn/Sang ngang). Vị trí đang chứa lô còn tồn (Số lô > 0) không xóa được.</div>
+      <div class="panel" ${mi("vitrikho")}><h2>📍 Vị trí kho <span class="muted">(${materialLocations.length})</span></h2>
+        <div class="muted" style="margin-bottom:6px">Vị trí cất — bắt buộc chọn khi nhập kho tại Kho công ty (tab Kho công ty → Nhập kho), hoặc khi Phân xưởng duyệt nhận điều chuyển từ Kho công ty (tab Kho phân xưởng → Điều chuyển). Chọn phạm vi "Cả 2 kho" để 1 vị trí dùng chung được ở cả 2 màn chọn vị trí. Vị trí đang chứa lô còn tồn (Số lô > 0) không xóa được.</div>
         ${noPerm}
         ${canManage ? `<div class="row">
           <div class="field"><label>Mã</label><input id="ml_code" placeholder="A1-01"/></div>
           <div class="field"><label>Tên</label><input id="ml_name" placeholder="Kệ A1 tầng 1"/></div>
           <div class="field"><label>Khu</label><input id="ml_zone" placeholder="(tuỳ chọn)"/></div>
+          <div class="field"><label>Dùng cho</label><select id="ml_scope">${locScopeOptsHtml()}</select></div>
           <button class="btn" id="ml_add" style="align-self:flex-end">+ Thêm vị trí</button>
         </div>` : ""}
         <input class="searchbox" data-tbl="t_matlocs" placeholder="Tìm mã/tên/khu vị trí..." style="margin-top:10px"/>
         <div class="tablewrap" style="margin-top:6px"><table id="t_matlocs">
-          <thead><tr><th>Mã</th><th>Tên</th><th>Khu</th><th>Số lô</th><th>Trạng thái</th>${canManage ? "<th></th>" : ""}</tr></thead>
+          <thead><tr><th>Mã</th><th>Tên</th><th>Khu</th><th>Dùng cho</th><th>Số lô</th><th>Trạng thái</th>${canManage ? "<th></th>" : ""}</tr></thead>
           <tbody>${materialLocations.map(l => `<tr>
             <td><code class="k">${esc(l.code)}</code></td><td>${esc(l.name)}</td>
-            <td class="muted">${esc(l.zone || "—")}</td><td>${l.lot_count}</td>
+            <td class="muted">${esc(l.zone || "—")}</td><td class="muted">${locScopeLabel(l.scope)}</td><td>${l.lot_count}</td>
             <td>${l.active ? '<span style="color:var(--green)">Đang dùng</span>' : '<span class="muted">Đã ẩn</span>'}</td>
             ${canManage ? `<td style="white-space:nowrap">
               <button class="btn sm sec" data-eml="${esc(l.loc_id)}">Sửa</button>
               <button class="btn sm sec" data-emldel="${esc(l.loc_id)}" ${l.lot_count > 0 ? "disabled title=\"Đang chứa lô — không xóa được\"" : ""}>Xóa</button>
             </td>` : ""}</tr>`).join("") ||
-            `<tr><td colspan="${canManage ? 6 : 5}" class="muted">Chưa có vị trí nào.</td></tr>`}</tbody>
+            `<tr><td colspan="${canManage ? 7 : 6}" class="muted">Chưa có vị trí nào.</td></tr>`}</tbody>
         </table></div>
       </div>
 
@@ -10786,20 +11853,21 @@ VIEWS.master = async function () {
     }));
     if ($("ml_add")) $("ml_add").onclick = () => guard(async () => {
       await POST("/warehouse/locations", { code: $("ml_code").value.trim(), name: $("ml_name").value.trim(),
-        zone: $("ml_zone").value.trim() || null });
+        zone: $("ml_zone").value.trim() || null, scope: $("ml_scope").value });
       toast("Đã tạo vị trí kho"); render("master");
     });
     document.querySelectorAll("[data-eml]").forEach(b => b.onclick = () => {
       const ml = materialLocations.find(x => x.loc_id === b.dataset.eml);
-      modal(`<h3>Sửa vị trí kho nguyên vật liệu</h3>
+      modal(`<h3>Sửa vị trí kho</h3>
         <div class="field"><label>Mã</label><input id="eml_code" value="${esc(ml.code)}"/></div>
         <div class="field" style="margin-top:8px"><label>Tên</label><input id="eml_name" value="${esc(ml.name)}"/></div>
         <div class="field" style="margin-top:8px"><label>Khu</label><input id="eml_zone" value="${esc(ml.zone || "")}"/></div>
-        <div class="field" style="margin-top:8px"><label><input type="checkbox" id="eml_active" ${ml.active ? "checked" : ""}/> Đang dùng (hiện trong danh sách chọn khi nhập kho)</label></div>
+        <div class="field" style="margin-top:8px"><label>Dùng cho</label><select id="eml_scope">${locScopeOptsHtml(ml.scope)}</select></div>
+        <div class="field" style="margin-top:8px"><label><input type="checkbox" id="eml_active" ${ml.active ? "checked" : ""}/> Đang dùng (hiện trong danh sách chọn vị trí)</label></div>
         <button class="btn" id="eml_save" style="margin-top:12px">Lưu</button>`);
       $("eml_save").onclick = () => guard(async () => {
         await PUT(`/warehouse/locations/${ml.loc_id}`, { code: $("eml_code").value.trim(), name: $("eml_name").value.trim(),
-          zone: $("eml_zone").value.trim() || null, active: $("eml_active").checked });
+          zone: $("eml_zone").value.trim() || null, scope: $("eml_scope").value, active: $("eml_active").checked });
         closeModal(); toast("Đã cập nhật"); render("master");
       });
     });
@@ -10851,7 +11919,7 @@ VIEWS.master = async function () {
       if (!code || !name) throw new Error("Nhập đủ Mã nhóm và Tên nhóm.");
       if (!members.length) throw new Error("Chọn ít nhất 1 vật tư thành viên.");
       if (!unit) throw new Error("Các vật tư thành viên không có đơn vị chung (đơn vị chính hoặc đơn vị phụ) — không thể tạo nhóm. Kiểm tra Đơn vị phụ ở Danh mục Vật tư nếu cần.");
-      await POST("/material-alt-groups", { code, name, member_material_ids: members, unit });
+      await POST("/material-alt-groups", { code, name, member_material_ids: members, unit, selection_mode: $("mag_mode").value });
       toast("Đã tạo nhóm vật tư thay thế"); render("master");
     });
     document.querySelectorAll("[data-emag]").forEach(b => b.onclick = () => {
@@ -10865,6 +11933,12 @@ VIEWS.master = async function () {
         </div>
         <div class="field" style="margin-top:8px;max-width:260px"><label>Đơn vị nhóm <span class="muted">(mọi thành viên phải khai được đơn vị này)</span></label>
           <select id="emag_unit"></select>
+        </div>
+        <div class="field" style="margin-top:8px;max-width:340px"><label>Chế độ chọn khi ghi NVL thực tế</label>
+          <select id="emag_mode">
+            <option value="single" ${g.selection_mode !== "multi" ? "selected" : ""}>Chỉ được chọn 1 mã (mặc định)</option>
+            <option value="multi" ${g.selection_mode === "multi" ? "selected" : ""}>Được chọn nhiều mã cùng lúc</option>
+          </select>
         </div>
         <div class="field" style="margin-top:8px"><label><input type="checkbox" id="emag_active" ${g.active ? "checked" : ""}/> Đang dùng (hiện trong danh sách chọn khi khai công thức)</label></div>
         <button class="btn" id="emag_save" style="margin-top:12px">Lưu</button>`);
@@ -10883,7 +11957,8 @@ VIEWS.master = async function () {
         if (!members.length) throw new Error("Chọn ít nhất 1 vật tư thành viên.");
         if (!unit) throw new Error("Các vật tư thành viên không có đơn vị chung (đơn vị chính hoặc đơn vị phụ) — không thể lưu. Kiểm tra Đơn vị phụ ở Danh mục Vật tư nếu cần.");
         await PUT(`/material-alt-groups/${g.group_id}`, { code: $("emag_code").value.trim(),
-          name: $("emag_name").value.trim(), member_material_ids: members, unit, active: $("emag_active").checked });
+          name: $("emag_name").value.trim(), member_material_ids: members, unit, active: $("emag_active").checked,
+          selection_mode: $("emag_mode").value });
         closeModal(); toast("Đã cập nhật"); render("master");
       });
     });

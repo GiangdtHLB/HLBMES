@@ -3,7 +3,7 @@
 from datetime import datetime, timedelta
 from typing import Optional
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.orm import Session
 
 from ..audit import record_audit
@@ -15,10 +15,11 @@ from ..models.master import Material
 from ..models.materials import GenealogyEdge, MaterialLocation, MaterialLot
 from ..models.quality import Deviation, QualityResult
 from ..models.warehouse import (FactoryLocation, MaterialRequest, MaterialRequestLine, SangNgangRequest,
-                                StockCount, StockCountLine, StockMovement, TransferPxRequest)
+                                StockCount, StockCountLine, StockMovement, TransferKcPxRequest,
+                                TransferPxRequest)
 from ..security import User, has_scope, require_perm, require_role, require_scope
 from .opening_balance_import import parse_opening_balance_sheet
-from .qc_catalog import required_params_for_material
+from .qc_catalog import requires_kcs_hold
 
 
 def _require_any_perm(user: User, *perms: str) -> None:
@@ -56,30 +57,42 @@ def _next_lot_code(db: Session, year: int) -> str:
 
 
 def any_material_locations_declared(db: Session) -> bool:
-    """Danh mục vị trí kho NVL đã có ít nhất 1 vị trí hay chưa — dùng để chỉ bắt buộc chọn vị
-    trí lúc nhập SAU KHI admin đã bắt đầu khai báo danh mục (tránh vấn đề con-gà-quả-trứng: nếu
-    bắt buộc ngay từ đầu khi danh mục còn trống thì không ai nhập kho được nữa)."""
-    return db.execute(select(func.count()).select_from(MaterialLocation)).scalar() > 0
+    """Danh mục vị trí Kho công ty đã có ít nhất 1 vị trí hay chưa — dùng để chỉ bắt buộc chọn
+    vị trí lúc nhập SAU KHI admin đã bắt đầu khai báo danh mục (tránh vấn đề con-gà-quả-trứng:
+    nếu bắt buộc ngay từ đầu khi danh mục còn trống thì không ai nhập kho được nữa). CHỈ đếm vị
+    trí scope="cong_ty"/"ca_hai" — 1 vị trí khai riêng cho Kho phân xưởng (scope="phan_xuong")
+    không được tính, kẻo khoá luôn màn nhập kho công ty dù chưa khai vị trí nào cho kho đó."""
+    return db.execute(select(func.count()).select_from(MaterialLocation)
+                      .where(MaterialLocation.scope.in_(("cong_ty", "ca_hai")))).scalar() > 0
+
+
+_LOCATION_SCOPES = ("cong_ty", "phan_xuong", "ca_hai")
 
 
 def list_material_locations(db: Session) -> list[dict]:
     locs = db.execute(select(MaterialLocation).order_by(MaterialLocation.code)).scalars().all()
-    used = dict(db.execute(
+    used_ct = dict(db.execute(
         select(MaterialLot.location_id, func.count())
         .where(MaterialLot.location_id.isnot(None), MaterialLot.quantity != 0)
         .group_by(MaterialLot.location_id)).all())
+    used_px = dict(db.execute(
+        select(MaterialLot.workshop_location_id, func.count())
+        .where(MaterialLot.workshop_location_id.isnot(None), MaterialLot.quantity != 0)
+        .group_by(MaterialLot.workshop_location_id)).all())
     return [{"loc_id": l.loc_id, "code": l.code, "name": l.name, "zone": l.zone, "active": l.active,
-             "lot_count": used.get(l.loc_id, 0)} for l in locs]
+             "scope": l.scope, "lot_count": used_ct.get(l.loc_id, 0) + used_px.get(l.loc_id, 0)} for l in locs]
 
 
 def create_material_location(db: Session, payload: dict, user: User) -> MaterialLocation:
     require_perm(user, "master.manage")
+    if payload.get("scope") not in _LOCATION_SCOPES:
+        raise DomainError(f"Phạm vi sử dụng không hợp lệ — phải là 1 trong {_LOCATION_SCOPES}.")
     if db.execute(select(MaterialLocation).where(MaterialLocation.code == payload["code"])).scalar_one_or_none():
         raise DomainError(f"Mã vị trí '{payload['code']}' đã tồn tại.")
     loc = MaterialLocation(loc_id=new_id(), **payload)
     db.add(loc)
     record_audit(db, entity_type="material_location", entity_id=loc.loc_id, action="create", actor=user,
-                after={"code": loc.code, "name": loc.name})
+                after={"code": loc.code, "name": loc.name, "scope": loc.scope})
     db.commit()
     db.refresh(loc)
     return loc
@@ -90,11 +103,13 @@ def update_material_location(db: Session, loc_id: str, payload: dict, user: User
     loc = db.get(MaterialLocation, loc_id)
     if not loc:
         raise NotFoundError("Vị trí không tồn tại.")
+    if payload.get("scope") is not None and payload["scope"] not in _LOCATION_SCOPES:
+        raise DomainError(f"Phạm vi sử dụng không hợp lệ — phải là 1 trong {_LOCATION_SCOPES}.")
     for k, v in payload.items():
         if v is not None:
             setattr(loc, k, v)
     record_audit(db, entity_type="material_location", entity_id=loc.loc_id, action="update", actor=user,
-                after={"code": loc.code, "name": loc.name})
+                after={"code": loc.code, "name": loc.name, "scope": loc.scope})
     db.commit()
     db.refresh(loc)
     return loc
@@ -106,13 +121,16 @@ def delete_material_location(db: Session, loc_id: str, user: User) -> None:
     if not loc:
         raise NotFoundError("Vị trí không tồn tại.")
     used = db.execute(select(func.count()).select_from(MaterialLot).where(
-        MaterialLot.location_id == loc_id, MaterialLot.quantity != 0)).scalar() or 0
+        or_(MaterialLot.location_id == loc_id, MaterialLot.workshop_location_id == loc_id),
+        MaterialLot.quantity != 0)).scalar() or 0
     if used:
         raise DomainError(f"Vị trí {loc.code} đang chứa {used} lô NVL — không thể xóa.")
-    # Lô đã RỖNG (quantity==0) vẫn giữ location_id trỏ tới vị trí này → MSSQL enforce FK
-    # fk_material_lot_location_id chặn DELETE (SQLite bỏ qua). Gỡ tham chiếu (an toàn vì lô hết
-    # tồn) + flush TRƯỚC khi xóa vị trí — xem DEPLOY-CONTRACT lớp con-ẩn.
+    # Lô đã RỖNG (quantity==0) vẫn giữ location_id/workshop_location_id trỏ tới vị trí này →
+    # MSSQL enforce FK chặn DELETE (SQLite bỏ qua). Gỡ tham chiếu (an toàn vì lô hết tồn) +
+    # flush TRƯỚC khi xóa vị trí — xem DEPLOY-CONTRACT lớp con-ẩn.
     db.execute(update(MaterialLot).where(MaterialLot.location_id == loc_id).values(location_id=None))
+    db.execute(update(MaterialLot).where(MaterialLot.workshop_location_id == loc_id)
+              .values(workshop_location_id=None))
     db.flush()
     record_audit(db, entity_type="material_location", entity_id=loc.loc_id, action="delete", actor=user,
                 before={"code": loc.code, "name": loc.name})
@@ -128,18 +146,42 @@ def relocate_lot(db: Session, lot_id: str, location_id: str, user: User) -> dict
     require_perm(user, "warehouse.receive")
     lot = _lot(db, lot_id)
     if _is_workshop_location(lot.location):
-        raise DomainError(f"Lô {lot.lot_code} đang ở Kho phân xưởng — chưa có danh mục vị trí "
-                          "cho kho phân xưởng.")
+        raise DomainError(f"Lô {lot.lot_code} đang ở Kho phân xưởng — dùng chức năng đổi vị trí "
+                          "kho phân xưởng riêng (xem relocate_lot_workshop).")
     _assert_location_scope(user, lot.location)
     loc = db.get(MaterialLocation, location_id)
-    if not loc:
-        raise NotFoundError("Vị trí không tồn tại.")
+    if not loc or loc.scope not in ("cong_ty", "ca_hai"):
+        raise NotFoundError("Vị trí không tồn tại hoặc không dùng được cho Kho công ty.")
     before = lot.location_id
     lot.location_id = loc.loc_id
     record_audit(db, entity_type="lot", entity_id=lot.lot_id, action="relocate", actor=user,
                 before={"location_id": before}, after={"location_id": loc.loc_id, "location_code": loc.code})
     db.commit()
     return {"lot_id": lot.lot_id, "lot_code": lot.lot_code, "location_id": loc.loc_id, "location_code": loc.code}
+
+
+def relocate_lot_workshop(db: Session, lot_id: str, workshop_location_id: str, user: User) -> dict:
+    """Gán/đổi vị trí cất của 1 lô NVL đang ở Kho phân xưởng — mirror relocate_lot (Kho công
+    ty), dùng chung danh mục MaterialLocation (lọc scope="phan_xuong"/"ca_hai"). Cho phép gán vị
+    trí cho lô CHƯA có vị trí (lô đến từ Xuất sang ngang/Nhập tồn đầu/lô cũ trước khi có danh
+    mục — workshop_location_id vẫn NULL) hoặc đổi sang vị trí khác khi sắp xếp lại kho."""
+    require_perm(user, "warehouse.receive")
+    lot = _lot(db, lot_id)
+    if not _is_workshop_location(lot.location):
+        raise DomainError(f"Lô {lot.lot_code} không ở Kho phân xưởng — chỉ đổi vị trí được lô "
+                          "đang ở kho phân xưởng.")
+    _assert_location_scope(user, lot.location)
+    loc = db.get(MaterialLocation, workshop_location_id)
+    if not loc or loc.scope not in ("phan_xuong", "ca_hai"):
+        raise NotFoundError("Vị trí không tồn tại hoặc không dùng được cho Kho phân xưởng.")
+    before = lot.workshop_location_id
+    lot.workshop_location_id = loc.loc_id
+    record_audit(db, entity_type="lot", entity_id=lot.lot_id, action="relocate_workshop", actor=user,
+                before={"workshop_location_id": before},
+                after={"workshop_location_id": loc.loc_id, "location_code": loc.code})
+    db.commit()
+    return {"lot_id": lot.lot_id, "lot_code": lot.lot_code, "workshop_location_id": loc.loc_id,
+            "location_code": loc.code}
 
 
 def receive(db: Session, payload: dict, user: User) -> dict:
@@ -184,9 +226,10 @@ def receive(db: Session, payload: dict, user: User) -> dict:
         _assert_location_scope(user, lot.location)
         lot.quantity += qty
         # Cộng dồn thêm 1 đợt hàng vào lô đã tồn tại (kể cả lô đã Released) — vật tư có chỉ
-        # tiêu bắt buộc phải quay lại HOLD chờ KCS khai báo/duyệt lại cho đợt hàng mới này,
-        # không được coi là "đã qua QC" chỉ vì đợt hàng trước của cùng mã lô đã được duyệt.
-        if lot.material_id and required_params_for_material(db, lot.material_id):
+        # tiêu bắt buộc HOẶC thuộc nhóm Nguyên liệu chính/phụ phải quay lại HOLD chờ KCS khai
+        # báo/duyệt lại cho đợt hàng mới này, không được coi là "đã qua QC" chỉ vì đợt hàng
+        # trước của cùng mã lô đã được duyệt.
+        if lot.material_id and requires_kcs_hold(db, lot.material_id):
             lot.status = LotStatus.ON_HOLD.value
         elif lot.status == LotStatus.CONSUMED.value:
             lot.status = LotStatus.AVAILABLE.value
@@ -208,9 +251,10 @@ def receive(db: Session, payload: dict, user: User) -> dict:
                           location=location, location_id=payload.get("location_id"), created_at=received_dt)
         db.add(lot)
         db.flush()
-        # Nguyên liệu có gán nhóm chỉ tiêu bắt buộc → lô mới phải HOLD chờ khai báo + KCS duyệt
-        # trước khi được coi là đã nhập kho nhà máy chính thức (không áp dụng khi cộng dồn lô cũ).
-        if lot.material_id and required_params_for_material(db, lot.material_id):
+        # Nguyên liệu có gán nhóm chỉ tiêu bắt buộc, HOẶC thuộc nhóm Nguyên liệu chính/phụ (dù
+        # chưa gán chỉ tiêu nào) → lô mới phải HOLD chờ khai báo + KCS duyệt (tối thiểu bằng Số
+        # lô KCS/Số LOT nhà cung cấp) trước khi được coi là đã nhập kho nhà máy chính thức.
+        if lot.material_id and requires_kcs_hold(db, lot.material_id):
             lot.status = LotStatus.ON_HOLD.value
     mv = _move(db, "receipt", lot, qty, user, ts=received_dt, location_to=lot.location,
               reason=payload.get("reason"), ref_doc=payload.get("ref_doc"))
@@ -258,6 +302,8 @@ def update_receipt(db: Session, movement_id: str, payload: dict, user: User) -> 
         lot.unit_price = payload["unit_price"]
     if "kcs_lot_no" in payload:
         lot.kcs_lot_no = payload["kcs_lot_no"]
+    if "supplier_lot" in payload:
+        lot.supplier_lot = payload["supplier_lot"]
     if "expiry" in payload:
         expiry = payload["expiry"]
         lot.expiry = datetime.fromisoformat(expiry) if isinstance(expiry, str) else expiry
@@ -830,6 +876,19 @@ def _aggregate_source_material_lines(db: Session, source_type: str, source_id: s
         for l in order["lines"]:
             if l["is_header"]:
                 continue
+            # Dòng Nhóm vật tư khai định mức RIÊNG từng thành viên (member_breakdown có
+            # qty_per_batch, xem services/brew_order.py::_build_group_line) — MỖI thành viên đã
+            # chọn là 1 nhu cầu ĐỘC LẬP với định mức riêng của chính nó (VD 5kg mã A + 6kg mã B,
+            # không phải "11kg, mã nào cũng được"), nên đề nghị nhận kho theo TỪNG mã riêng
+            # (_add, không qua _add_group/FIFO-across-members) — không được cộng gộp coi như 1
+            # nhu cầu chung rồi để mã đầu tiên "ăn hết", mã sau báo "đã đủ từ mã cũ hơn" (sai —
+            # cả 2 mã đều thực sự cần dùng đồng thời).
+            member_breakdown = l.get("member_breakdown") or []
+            if member_breakdown and any(mb.get("qty_per_batch") is not None for mb in member_breakdown):
+                for mb in member_breakdown:
+                    mqty = mb["qty_from_company"] if mb.get("qty_from_company") is not None else mb["qty_total"]
+                    _add(mb["material_id"], mb["material_name"], l["uom"], mqty or 0.0)
+                continue
             # Chỉ cần đề nghị đúng phần đã tính phải lấy ở Kho công ty (phần còn lại lấy tại
             # Kho phân xưởng, không cần đề nghị) — xem BrewOrderMaterialLine.qty_from_company.
             # Lệnh cũ (lập trước khi có tính năng tách SL) chưa có giá trị này -> dùng tạm
@@ -1279,6 +1338,146 @@ def undo_transfer_px_request(db: Session, request_id: str, user: User) -> dict:
     db.commit()
     db.refresh(req)
     return _transfer_px_request_dict(req)
+
+
+def _transfer_kcpx_dict(req: TransferKcPxRequest) -> dict:
+    return {"request_id": req.request_id, "request_code": req.request_code, "lot_id": req.lot_id,
+            "quantity": req.quantity, "uom": req.uom, "reason": req.reason, "status": req.status,
+            "movement_id": req.movement_id, "workshop_location_id": req.workshop_location_id,
+            "reversed": req.reversed, "created_by": req.created_by, "created_at": req.created_at,
+            "approved_by": req.approved_by, "approved_at": req.approved_at,
+            "rejected_by": req.rejected_by, "rejected_at": req.rejected_at,
+            "reject_reason": req.reject_reason}
+
+
+def _get_transfer_kcpx_request(db, request_id) -> TransferKcPxRequest:
+    req = db.get(TransferKcPxRequest, request_id)
+    if not req:
+        raise NotFoundError("Đề nghị điều chuyển không tồn tại.")
+    return req
+
+
+def create_transfer_kcpx_request(db: Session, lot_id: str, quantity: float, user: User,
+                                 reason: str = None) -> dict:
+    """Kho công ty tạo đề nghị điều chuyển 1 lô ĐANG CÓ SẴN sang Kho phân xưởng — chưa động tồn
+    kho. Nếu vật tư có chỉ tiêu chất lượng bắt buộc, đưa lô về HOLD ngay lúc tạo (dù đang
+    Released) để buộc KCS duyệt lại trước khi Phân xưởng duyệt được — lô có thể đã nằm kho một
+    thời gian, không được coi là "vẫn còn hợp lệ" chỉ vì đã qua QC từ trước (mirror đúng lý do
+    receive() làm vậy khi cộng dồn lô cũ, xem receive())."""
+    require_perm(user, "warehouse.issue")
+    lot = _lot(db, lot_id)
+    if _is_workshop_location(lot.location):
+        raise DomainError(f"Lô {lot.lot_code} đang ở Kho phân xưởng — chỉ tạo được đề nghị cho "
+                          "lô đang ở Kho công ty.")
+    _assert_location_scope(user, lot.location)
+    if quantity <= 0 or quantity > lot.quantity:
+        raise DomainError(f"Số lượng đề nghị không hợp lệ (tồn {lot.quantity} {lot.uom}).")
+    if lot.material_id and requires_kcs_hold(db, lot.material_id):
+        lot.status = LotStatus.ON_HOLD.value
+    req = TransferKcPxRequest(request_id=new_id(),
+                              request_code=f"DCKP-{utcnow():%Y%m%d}-{new_id()[:5].upper()}",
+                              lot_id=lot_id, quantity=quantity, uom=lot.uom, reason=reason,
+                              status="pending", created_by=user.username, created_at=utcnow())
+    db.add(req)
+    record_audit(db, entity_type="transfer_kcpx_request", entity_id=req.request_id, action="create",
+                actor=user, after={"lot_id": lot_id, "quantity": quantity})
+    db.commit()
+    db.refresh(req)
+    return _transfer_kcpx_dict(req)
+
+
+def list_transfer_kcpx_requests(db: Session, status: str = None, limit: int = 500,
+                                offset: int = 0) -> list[dict]:
+    limit = max(1, min(limit or 500, 2000))
+    offset = max(0, offset or 0)
+    stmt = select(TransferKcPxRequest).order_by(TransferKcPxRequest.created_at.desc()).limit(limit).offset(offset)
+    if status:
+        stmt = stmt.where(TransferKcPxRequest.status == status)
+    rows = db.execute(stmt).scalars().all()
+    return [_transfer_kcpx_dict(r) for r in rows]
+
+
+def approve_transfer_kcpx_request(db: Session, request_id: str, workshop_location_id: str,
+                                  user: User) -> dict:
+    """Thủ kho phân xưởng duyệt — BẮT BUỘC chọn vị trí cất tại Phân xưởng. Chốt bằng
+    _assert_location_scope("Kho phân xưởng") để người tạo đề nghị (Kho công ty) KHÔNG tự duyệt
+    được đề nghị của chính mình (maker-checker, mirror approve_sang_ngang). Nếu vật tư có chỉ
+    tiêu chất lượng bắt buộc và lô vẫn đang HOLD (chưa qua KCS), chặn duyệt."""
+    require_perm(user, "warehouse.request")
+    _assert_location_scope(user, "Kho phân xưởng")
+    req = _get_transfer_kcpx_request(db, request_id)
+    if req.status != "pending":
+        raise DomainError(f"Đề nghị {req.request_code} đã được xử lý (trạng thái: {req.status}).")
+    if not workshop_location_id:
+        raise DomainError("Phải chọn vị trí cất tại Kho phân xưởng trước khi duyệt.")
+    wsloc = db.get(MaterialLocation, workshop_location_id)
+    if not wsloc or not wsloc.active or wsloc.scope not in ("phan_xuong", "ca_hai"):
+        raise DomainError("Vị trí kho phân xưởng không hợp lệ.")
+    lot = _lot(db, req.lot_id)
+    if _is_workshop_location(lot.location):
+        raise DomainError(f"Lô {lot.lot_code} hiện không còn ở Kho công ty — có thể đã được "
+                          "xử lý bởi thao tác khác.")
+    if lot.status == LotStatus.ON_HOLD.value:
+        raise DomainError(f"Lô {lot.lot_code} đang chờ KCS khai báo/duyệt chỉ tiêu chất lượng — "
+                          "chưa thể nhận vào Kho phân xưởng.")
+    result = _transfer_lot(db, req.lot_id, req.quantity, "Kho phân xưởng", user, reason=req.reason,
+                           mode="dieu_chuyen_kcpx")
+    moved_lot = db.get(MaterialLot, result["lot_id"])
+    moved_lot.workshop_location_id = workshop_location_id
+    moved_lot.location_id = None  # rời khỏi vị trí kho công ty (nếu có)
+    req.movement_id = result["movement_id"]
+    req.workshop_location_id = workshop_location_id
+    req.status = "approved"
+    req.approved_by = user.username
+    req.approved_at = utcnow()
+    req.reversed = False
+    record_audit(db, entity_type="transfer_kcpx_request", entity_id=req.request_id, action="approve", actor=user)
+    db.commit()
+    db.refresh(req)
+    return _transfer_kcpx_dict(req)
+
+
+def reject_transfer_kcpx_request(db: Session, request_id: str, user: User, reason: str = None) -> dict:
+    require_perm(user, "warehouse.request")
+    _assert_location_scope(user, "Kho phân xưởng")
+    req = _get_transfer_kcpx_request(db, request_id)
+    if req.status != "pending":
+        raise DomainError(f"Đề nghị {req.request_code} đã được xử lý (trạng thái: {req.status}).")
+    req.status = "rejected"
+    req.rejected_by = user.username
+    req.rejected_at = utcnow()
+    req.reject_reason = reason
+    record_audit(db, entity_type="transfer_kcpx_request", entity_id=req.request_id, action="reject",
+                actor=user, after={"reason": reason})
+    db.commit()
+    db.refresh(req)
+    return _transfer_kcpx_dict(req)
+
+
+def undo_transfer_kcpx_request(db: Session, request_id: str, user: User) -> dict:
+    """Hoàn tác đề nghị ĐÃ duyệt — trả lô về lại Kho công ty VÀ đưa phiếu về lại "pending" để xử
+    lý lại (mirror undo_transfer_px_request/undo_sang_ngang) — chỉ ADMIN mới hoàn tác được sau
+    khi đã duyệt."""
+    req = _get_transfer_kcpx_request(db, request_id)
+    if req.status != "approved":
+        raise DomainError(f"Chỉ hoàn tác được đề nghị đã duyệt (trạng thái hiện tại: {req.status}).")
+    require_role(user, Role.ADMIN)
+    mv = db.get(StockMovement, req.movement_id) if req.movement_id else None
+    lot_id_to_revert = mv.lot_id if mv else req.lot_id
+    result = transfer(db, lot_id_to_revert, req.quantity, "Kho công ty", user,
+                      reason=f"Hoàn tác điều chuyển {req.request_code}", mode="dieu_chuyen_kcpx")
+    reverted_lot = db.get(MaterialLot, result["lot_id"])
+    reverted_lot.workshop_location_id = None
+    req.status = "pending"
+    req.approved_by = None
+    req.approved_at = None
+    req.movement_id = None
+    req.workshop_location_id = None
+    req.reversed = True
+    record_audit(db, entity_type="transfer_kcpx_request", entity_id=req.request_id, action="undo", actor=user)
+    db.commit()
+    db.refresh(req)
+    return _transfer_kcpx_dict(req)
 
 
 def _sang_ngang_dict(req: SangNgangRequest) -> dict:

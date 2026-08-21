@@ -282,6 +282,15 @@ def _assert_releasable(db: Session, scope_type: str, scope_id: str) -> None:
         )
 
     if scope_type == "lot":
+        # Nguyên liệu chính/phụ (MaterialGroup.is_raw_material) BẮT BUỘC phải qua KCS kiểm soát
+        # tối thiểu ở mức có Số lô KCS HOẶC Số LOT nhà cung cấp (in trên bao bì NCC) — kể cả khi
+        # vật tư không gán chỉ tiêu chất lượng nào (nên vòng kiểm tra "chỉ tiêu bắt buộc" ở trên
+        # không chặn được trường hợp này) — xem qc_catalog.py::requires_kcs_hold/lot_qc_status.
+        lot = db.get(MaterialLot, scope_id)
+        if lot and qc_catalog.is_raw_material_group(db, lot.material_id) and not (lot.kcs_lot_no or lot.supplier_lot):
+            raise DomainError(
+                "Không thể release: nguyên liệu chính/phụ phải có Số lô KCS hoặc Số LOT nhà cung cấp."
+            )
         # Tạm thời (theo yêu cầu 2026-08-01): duyệt chỉ tiêu NVL không chặn khi có chỉ tiêu
         # FAIL — màn hình Kho NVL không có luồng mở/đóng deviation cho lô NVL nên yêu cầu
         # "mọi FAIL phải có deviation CLOSED" bên dưới sẽ chặn cứng không lối ra. Chỉ cần

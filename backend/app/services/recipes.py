@@ -145,15 +145,22 @@ def diff_versions(db: Session, va_id: str, vb_id: str) -> dict:
         oa, ob = am.get(code), bm.get(code)
         if oa is None:                       # có ở b, không có ở a → thêm mới
             mat_changes.append({"material_code": code, "type": "added",
-                                "new_qty": ob.get("qty"), "new_tol": ob.get("tol_pct")})
+                                "new_qty": ob.get("qty"), "new_tol": ob.get("tol_pct"),
+                                "new_member_qty": ob.get("member_qty")})
         elif ob is None:                     # có ở a, không có ở b → bỏ
             mat_changes.append({"material_code": code, "type": "removed",
-                                "old_qty": oa.get("qty"), "old_tol": oa.get("tol_pct")})
+                                "old_qty": oa.get("qty"), "old_tol": oa.get("tol_pct"),
+                                "old_member_qty": oa.get("member_qty")})
         else:
             qa, qb = oa.get("qty"), ob.get("qty")
-            if qa != qb or oa.get("tol_pct") != ob.get("tol_pct"):
+            # member_qty (định mức riêng từng thành viên Nhóm vật tư thay thế) so sánh riêng —
+            # dòng khai kiểu này không có "qty" chung nên qa==qb==None không có nghĩa là
+            # KHÔNG đổi, phải so cả member_qty mới không bỏ sót thay đổi định mức từng mã.
+            mqa, mqb = oa.get("member_qty"), ob.get("member_qty")
+            if qa != qb or mqa != mqb or oa.get("tol_pct") != ob.get("tol_pct"):
                 mat_changes.append({"material_code": code, "type": "changed",
                                     "old_qty": qa, "new_qty": qb,
+                                    "old_member_qty": mqa, "new_member_qty": mqb,
                                     "old_tol": oa.get("tol_pct"), "new_tol": ob.get("tol_pct")})
     ap, bp = _param_map(a), _param_map(b)
     param_changes = []

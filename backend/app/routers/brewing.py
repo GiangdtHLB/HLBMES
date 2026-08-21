@@ -42,6 +42,7 @@ from ..schemas import (
     BottleIn,
     BottleMaterialUsageIn,
     BrewBatchIn,
+    BrewBatchStartIn,
     BrewIn,
     BrewMasterOrderIn,
     BrewMaterialUsageIn,
@@ -705,6 +706,37 @@ def add_brew_batch(brew_id: str, payload: BrewBatchIn, db: Session = Depends(get
     link = db.execute(select(FermentBrewLink).where(FermentBrewLink.brew_id == brew_id)).scalar_one_or_none()
     if link:
         _sync_ferment_kt_date(db, link.ferment_id)
+    db.commit(); db.refresh(batch)
+    return batch
+
+
+@router.post("/brews/{brew_id}/batches/{batch_id}/start")
+def update_brew_batch_start(brew_id: str, batch_id: str, payload: BrewBatchStartIn,
+                            db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """Sửa giờ bắt đầu mẻ nấu — chặn nếu làm đảo thứ tự thời gian giữa các mẻ CÙNG mã nấu (theo
+    `seq`, số mẻ trong Lệnh nấu): mẻ trước không được bắt đầu sau mẻ sau, mẻ sau không được bắt
+    đầu trước mẻ trước. Mẻ không có `seq` (dữ liệu cũ trước khi thêm cột này) không so sánh được
+    với ai — bỏ qua kiểm tra thứ tự cho riêng mẻ đó."""
+    require_perm(user, "batch.execute")
+    batch = db.get(BrewBatch, batch_id)
+    if not batch or batch.brew_id != brew_id:
+        raise NotFoundError("Mẻ không tồn tại.")
+    _assert_unlocked(batch, *_brew_and_order(db, brew_id))
+    started_at = payload.started_at
+    if started_at.tzinfo is None:
+        started_at = started_at.replace(tzinfo=utcnow().tzinfo)
+    if batch.seq is not None:
+        siblings = db.execute(select(BrewBatch).where(BrewBatch.brew_id == brew_id,
+                                                       BrewBatch.batch_id != batch_id)).scalars().all()
+        prev_started = max((s.started_at for s in siblings if s.seq is not None and s.seq < batch.seq and s.started_at), default=None)
+        next_started = min((s.started_at for s in siblings if s.seq is not None and s.seq > batch.seq and s.started_at), default=None)
+        # +7h quy đổi giờ VN cho thông báo lỗi — khớp cách frontend hiển thị giờ (fmt() dùng giờ
+        # local trình duyệt, VN=UTC+7), tránh người dùng thấy giờ UTC lệch 7h so với mọi nơi khác.
+        if prev_started and started_at < prev_started:
+            raise DomainError(f"Giờ bắt đầu không được sớm hơn mẻ trước (mẻ trước bắt đầu {prev_started + timedelta(hours=7):%H:%M %d/%m/%Y}).")
+        if next_started and started_at > next_started:
+            raise DomainError(f"Giờ bắt đầu không được muộn hơn mẻ sau (mẻ sau bắt đầu {next_started + timedelta(hours=7):%H:%M %d/%m/%Y}).")
+    batch.started_at = started_at
     db.commit(); db.refresh(batch)
     return batch
 
