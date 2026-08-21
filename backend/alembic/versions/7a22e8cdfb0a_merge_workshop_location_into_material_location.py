@@ -16,6 +16,8 @@ từ trước). `material_lot.workshop_location_id` và `transfer_kcpx_request.w
 from alembic import op
 import sqlalchemy as sa
 
+from app.alembic_mssql import prep_drop_columns
+
 
 revision = '7a22e8cdfb0a'
 down_revision = 'd1b494a07a70'
@@ -44,6 +46,9 @@ def upgrade() -> None:
     # drop_constraint theo tên. Tách làm 2 batch riêng (drop rồi mới add) — gộp chung 1 batch
     # khiến SQLAlchemy phản chiếu (reflect) nhầm giữ lại CẢ FK cũ (workshop_location) lẫn FK mới
     # (material_location) trên cùng 1 cột trong bảng được recreate.
+    # MSSQL từ chối DROP COLUMN khi cột còn FK auto-name (FK__transfer___works__XXXX) — gỡ
+    # FK/DEFAULT ràng buộc lên cột trước (no-op trên SQLite, DEPLOY-CONTRACT §2B/§5).
+    prep_drop_columns(conn, 'transfer_kcpx_request', ['workshop_location_id'])
     with op.batch_alter_table('transfer_kcpx_request') as batch_op:
         batch_op.drop_column('workshop_location_id')
     with op.batch_alter_table('transfer_kcpx_request') as batch_op:
@@ -78,6 +83,7 @@ def downgrade() -> None:
         batch_op.create_foreign_key(
             'fk_material_lot_workshop_location_id', 'workshop_location', ['workshop_location_id'], ['loc_id'])
 
+    prep_drop_columns(conn, 'transfer_kcpx_request', ['workshop_location_id'])
     with op.batch_alter_table('transfer_kcpx_request') as batch_op:
         batch_op.drop_column('workshop_location_id')
     with op.batch_alter_table('transfer_kcpx_request') as batch_op:
