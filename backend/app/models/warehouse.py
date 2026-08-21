@@ -128,6 +128,37 @@ class SangNgangRequest(Base):
     reject_reason: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)
 
 
+class TransferKcPxRequest(Base):
+    """Đề nghị điều chuyển Kho công ty → Kho phân xưởng cho 1 lô ĐANG CÓ SẴN ở Kho công ty —
+    CHƯA động tồn kho lúc tạo (khác SangNgangRequest: không có receive() đi kèm). Nếu vật tư có
+    chỉ tiêu chất lượng bắt buộc, lúc TẠO lô sẽ bị đưa về ON_HOLD (dù trước đó đã Released) để
+    buộc KCS duyệt lại — lô có thể đã nằm kho một thời gian, không được coi là "vẫn còn hợp lệ"
+    chỉ vì đã qua QC từ trước (mirror đúng lý do receive() làm vậy khi cộng dồn lô cũ, xem
+    services/warehouse.py::receive). Thủ kho phân xưởng duyệt (approve_transfer_kcpx_request)
+    mới thật sự transfer() — lúc đó BẮT BUỘC chọn workshop_location_id (vị trí cất tại Phân
+    xưởng). status: pending -> approved | rejected; reversed=True khi ADMIN hoàn tác."""
+    __tablename__ = "transfer_kcpx_request"
+
+    request_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
+    request_code: Mapped[str] = mapped_column(Unicode(64), unique=True, index=True)
+    lot_id: Mapped[str] = mapped_column(ForeignKey("material_lot.lot_id"), index=True)
+    quantity: Mapped[float] = mapped_column(Float)
+    uom: Mapped[str] = mapped_column(Unicode(255), default="kg")
+    reason: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)
+    status: Mapped[str] = mapped_column(Unicode(255), default="pending", index=True)  # pending|approved|rejected
+    movement_id: Mapped[Optional[str]] = mapped_column(ForeignKey("stock_movement.movement_id"), nullable=True)
+    workshop_location_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("material_location.loc_id"), nullable=True)
+    reversed: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    approved_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    approved_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+    rejected_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    rejected_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+    reject_reason: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)
+
+
 class MaterialRequest(Base):
     """Phiếu đề nghị nhận kho (header) — 1 phiếu có thể gồm nhiều dòng vật tư (MaterialRequestLine).
 

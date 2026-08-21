@@ -32,10 +32,15 @@ from ..schemas import (
     StockCountLinesIn,
     StockMovementOut,
     TransferIn,
+    TransferKcPxApproveIn,
+    TransferKcPxRejectIn,
+    TransferKcPxRequestIn,
+    TransferKcPxRequestOut,
     TransferPxRejectIn,
     TransferPxRequestIn,
     TransferPxRequestOut,
     TransferToFactoryIn,
+    WorkshopLotRelocateIn,
 )
 
 router = APIRouter(prefix="/api/warehouse", tags=["warehouse"],
@@ -46,9 +51,10 @@ router = APIRouter(prefix="/api/warehouse", tags=["warehouse"],
 def receive(payload: ReceiptIn, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     require_perm(user, "warehouse.receive")
     data = payload.model_dump()
-    # Bắt buộc chọn vị trí cất khi nhập vào Kho công ty — nhưng CHỈ SAU KHI danh mục vị trí đã
-    # có ít nhất 1 vị trí (tránh chặn nhập kho ngay từ đầu khi admin chưa kịp khai báo danh mục).
-    # Không áp dụng Kho phân xưởng — chưa có danh mục vị trí riêng.
+    # Bắt buộc chọn vị trí cất khi nhập vào Kho công ty — nhưng CHỈ SAU KHI danh mục vị trí
+    # scope="cong_ty"/"ca_hai" đã có ít nhất 1 vị trí (tránh chặn nhập kho ngay từ đầu khi admin
+    # chưa kịp khai báo danh mục). Không áp dụng Kho phân xưởng — nhận hàng trực tiếp ở đó không
+    # bắt buộc chọn vị trí ngay (có thể "Cất vào vị trí" sau, xem relocate_lot_workshop).
     if ("phân xưởng" not in (data.get("location") or "Kho công ty").lower() and not data.get("location_id")
             and svc.any_material_locations_declared(db)):
         raise DomainError("Vui lòng chọn vị trí kho trước khi nhập.")
@@ -82,6 +88,12 @@ def delete_material_location(loc_id: str, db: Session = Depends(get_db), user: U
 def relocate_lot(lot_id: str, payload: LotRelocateIn, db: Session = Depends(get_db),
                  user: User = Depends(get_current_user)):
     return svc.relocate_lot(db, lot_id, payload.location_id, user)
+
+
+@router.post("/lots/{lot_id}/relocate-workshop")
+def relocate_lot_workshop(lot_id: str, payload: WorkshopLotRelocateIn, db: Session = Depends(get_db),
+                          user: User = Depends(get_current_user)):
+    return svc.relocate_lot_workshop(db, lot_id, payload.workshop_location_id, user)
 
 
 @router.post("/opening-balance/import")
@@ -222,6 +234,38 @@ def reject_transfer_px_request(request_id: str, payload: TransferPxRejectIn, db:
 def undo_transfer_px_request(request_id: str, db: Session = Depends(get_db),
                              user: User = Depends(get_current_user)):
     return svc.undo_transfer_px_request(db, request_id, user)
+
+
+# ---- Điều chuyển kho công ty, chiều 3: Kho công ty → Kho phân xưởng (lô đang có sẵn, cần
+# Phân xưởng duyệt + KCS duyệt lại nếu vật tư có chỉ tiêu chất lượng bắt buộc) ----
+@router.post("/transfer-kcpx-requests", response_model=TransferKcPxRequestOut, status_code=201)
+def create_transfer_kcpx_request(payload: TransferKcPxRequestIn, db: Session = Depends(get_db),
+                                 user: User = Depends(get_current_user)):
+    return svc.create_transfer_kcpx_request(db, payload.lot_id, payload.quantity, user, payload.reason)
+
+
+@router.get("/transfer-kcpx-requests", response_model=list[TransferKcPxRequestOut])
+def list_transfer_kcpx_requests(status: str = None, limit: int = 500, offset: int = 0,
+                                db: Session = Depends(get_db)):
+    return svc.list_transfer_kcpx_requests(db, status, limit, offset)
+
+
+@router.post("/transfer-kcpx-requests/{request_id}/approve", response_model=TransferKcPxRequestOut)
+def approve_transfer_kcpx_request(request_id: str, payload: TransferKcPxApproveIn,
+                                  db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    return svc.approve_transfer_kcpx_request(db, request_id, payload.workshop_location_id, user)
+
+
+@router.post("/transfer-kcpx-requests/{request_id}/reject", response_model=TransferKcPxRequestOut)
+def reject_transfer_kcpx_request(request_id: str, payload: TransferKcPxRejectIn, db: Session = Depends(get_db),
+                                 user: User = Depends(get_current_user)):
+    return svc.reject_transfer_kcpx_request(db, request_id, user, payload.reason)
+
+
+@router.post("/transfer-kcpx-requests/{request_id}/undo", response_model=TransferKcPxRequestOut)
+def undo_transfer_kcpx_request(request_id: str, db: Session = Depends(get_db),
+                               user: User = Depends(get_current_user)):
+    return svc.undo_transfer_kcpx_request(db, request_id, user)
 
 
 # ---- Xuất sang ngang: hàng cập Kho công ty nhưng đích thực sự là Kho phân xưởng ----

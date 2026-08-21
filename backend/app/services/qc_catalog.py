@@ -252,6 +252,29 @@ def unlink_material_group(db: Session, material_id: str, group_id: str, user: Us
 
 # ---- Tra cứu dùng chung (cổng nhập kho + release) ----
 
+def is_raw_material_group(db: Session, material_id: str) -> bool:
+    """Vật tư có thuộc nhóm đánh dấu is_raw_material (Nguyên liệu chính/phụ) hay không — dùng
+    để BẮT BUỘC toàn bộ nguyên liệu chính/phụ đi qua KCS kiểm soát khi nhập kho (xem
+    requires_kcs_hold), kể cả khi vật tư đó CHƯA gán nhóm chỉ tiêu chất lượng nào (không có
+    required_params_for_material) — mirror đúng cờ đã dùng để hiện cột "Giá trị CA" ở
+    lot_qc_status()."""
+    if not material_id:
+        return False
+    material = db.get(Material, material_id)
+    if not material or not material.category:
+        return False
+    group = db.execute(select(MaterialGroup).where(MaterialGroup.code == material.category)).scalar_one_or_none()
+    return bool(group and group.is_raw_material)
+
+
+def requires_kcs_hold(db: Session, material_id: str) -> bool:
+    """Lô của vật tư này có phải HOLD chờ KCS kiểm soát khi nhập/điều chuyển hay không — TRUE
+    nếu có >=1 chỉ tiêu chất lượng bắt buộc, HOẶC vật tư thuộc nhóm Nguyên liệu chính/phụ
+    (is_raw_material) dù chưa gán chỉ tiêu nào (khi đó KCS vẫn phải kiểm soát bằng cách điền
+    Số lô KCS/Số LOT nhà cung cấp — xem services/quality.py::_assert_releasable)."""
+    return bool(required_params_for_material(db, material_id)) or is_raw_material_group(db, material_id)
+
+
 def required_params_for_material(db: Session, material_id: str, mandatory_only: bool = True) -> list[dict]:
     """Danh sách chỉ tiêu bắt buộc khai báo cho một nguyên liệu (rỗng nếu không gán nhóm nào)."""
     if not material_id:
@@ -279,8 +302,10 @@ def required_params_for_material(db: Session, material_id: str, mandatory_only: 
 
 
 def materials_with_required_qc(db: Session) -> list[str]:
-    """material_id nào có >=1 chỉ tiêu bắt buộc (dùng để ẩn nút "Xem chỉ tiêu" ở các bảng
-    danh sách lô cho nguyên liệu không gán nhóm chỉ tiêu nào — tránh N+1 gọi qc-status/lô)."""
+    """material_id nào cần KCS kiểm soát (dùng để hiện nút "Xem chỉ tiêu" + khoá nút Duyệt khi
+    lô đang on_hold ở các màn xuất/điều chuyển — tránh N+1 gọi qc-status/lô). Gồm 2 trường hợp:
+    có >=1 chỉ tiêu chất lượng bắt buộc, HOẶC thuộc nhóm Nguyên liệu chính/phụ (is_raw_material —
+    vẫn cần kiểm soát tối thiểu bằng Số lô KCS/Số LOT nhà cung cấp dù chưa gán chỉ tiêu nào)."""
     rows = db.execute(
         select(MaterialQcGroup.material_id)
         .join(QCParameterGroupItem, QCParameterGroupItem.group_id == MaterialQcGroup.group_id)
@@ -289,7 +314,12 @@ def materials_with_required_qc(db: Session) -> list[str]:
                QCParameter.active == true())
         .distinct()
     ).scalars().all()
-    return list(rows)
+    raw_material_ids = db.execute(
+        select(Material.material_id)
+        .join(MaterialGroup, MaterialGroup.code == Material.category)
+        .where(MaterialGroup.is_raw_material == true())
+    ).scalars().all()
+    return list(set(rows) | set(raw_material_ids))
 
 
 def lot_qc_status(db: Session, lot: MaterialLot) -> dict:
@@ -315,21 +345,21 @@ def lot_qc_status(db: Session, lot: MaterialLot) -> dict:
               or latest_by_param[p["code"]].status == ResultStatus.PENDING.value]
     # Nhóm vật tư đánh dấu is_raw_material -> modal khai báo (openLotQcModal) hiện thêm cột
     # "Giá trị CA" (giá trị in trên bao bì NCC, khác giá trị nhà máy tự đo) — chỉ áp dụng cho
-    # nguyên liệu chính/phụ, không áp dụng bao bì/vật tư khác.
-    is_raw_material = False
-    material = db.get(Material, lot.material_id) if lot.material_id else None
-    if material and material.category:
-        group = db.execute(select(MaterialGroup).where(MaterialGroup.code == material.category)).scalar_one_or_none()
-        is_raw_material = bool(group and group.is_raw_material)
+    # nguyên liệu chính/phụ, không áp dụng bao bì/vật tư khác. Nhóm này BẮT BUỘC phải có Số lô
+    # KCS HOẶC Số LOT nhà cung cấp mới được duyệt (release) — kể cả khi không còn chỉ tiêu nào
+    # đang pending — vì mọi lô NVL chính/phụ đều phải qua KCS kiểm soát tối thiểu ở mức này.
+    is_raw_material = is_raw_material_group(db, lot.material_id)
+    missing_lot_no = is_raw_material and not (lot.kcs_lot_no or lot.supplier_lot)
     return {
         "lot_id": lot.lot_id, "lot_code": lot.lot_code, "status": lot.status,
-        "kcs_lot_no": lot.kcs_lot_no, "is_raw_material": is_raw_material,
+        "kcs_lot_no": lot.kcs_lot_no, "supplier_lot": lot.supplier_lot, "is_raw_material": is_raw_material,
         "required": required,
         "recorded": [{"parameter": r.parameter, "value": r.value, "value_text": r.value_text,
                       "ca_value": r.ca_value, "status": r.status,
                       "recorded_by": r.recorded_by, "recorded_at": r.recorded_at} for r in recorded],
         "pending": pending,
-        "can_release": not pending,
+        "missing_lot_no": missing_lot_no,
+        "can_release": not pending and not missing_lot_no,
     }
 
 

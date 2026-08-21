@@ -186,6 +186,52 @@ def test_preview_source_materials_brew_order_surfaces_group_line_instead_of_drop
     assert group_line["quantity"] == 500
 
 
+def test_preview_source_materials_brew_order_member_qty_splits_into_separate_lines(client, admin_h, thukho_h):
+    """Regression: dòng Nhóm vật tư khai ĐỊNH MỨC RIÊNG từng thành viên (member_qty, VD 2 mã
+    tương đương nhưng khác nồng độ — 5kg mã A + 6kg mã B) trước đây bị gộp qua _add_group như
+    kiểu nhóm cũ (1 nhu cầu chung 11kg, FIFO coi mã đầu "ăn hết", mã sau báo thừa) — SAI vì cả
+    2 mã đều thực sự cần dùng ĐỒNG THỜI với định mức riêng của chính nó. Giờ phải trả về 2 dòng
+    RIÊNG BIỆT (is_group=False, có material_id cụ thể), đúng số lượng của từng mã."""
+    m1 = _create_material(client, admin_h, "SRC-MQTY-MAT-1")
+    m2 = _create_material(client, admin_h, "SRC-MQTY-MAT-2")
+    _receive(client, thukho_h, "LOT-SRCMQTY-01", m1, 500)
+    _receive(client, thukho_h, "LOT-SRCMQTY-02", m2, 500)
+    g = client.post("/api/material-alt-groups", headers=admin_h, json={
+        "code": "SRC-MQTY-GRP-01", "name": "Nhóm test định mức riêng", "unit": "kg",
+        "member_material_ids": [m1, m2], "selection_mode": "multi"}).json()
+
+    products = client.get("/api/products", headers=admin_h).json()
+    product_id = next(p["product_id"] for p in products if p["code"] == "BIA-LAGER")
+    recipes = client.get("/api/recipes", headers=admin_h).json()
+    recipe_id = next(r["recipe_id"] for r in recipes if r["product_id"] == product_id)
+    v = client.post(f"/api/recipes/{recipe_id}/versions", headers=admin_h, json={
+        "base_qty": 1000, "base_uom": "L",
+        "materials": [{"alt_group_code": g["code"], "uom": "kg",
+                      "member_qty": [{"material_code": "SRC-MQTY-MAT-1", "qty": 5},
+                                    {"material_code": "SRC-MQTY-MAT-2", "qty": 6}]}]}).json()
+    for target in ("review", "approved", "effective"):
+        t = client.post(f"/api/recipes/versions/{v['version_id']}/transition", headers=admin_h, json={"target": target})
+        assert t.status_code == 200, t.text
+
+    order = client.post("/api/brewing/orders", headers=admin_h, json={
+        "order_code": "LN-SRCMQTY01", "product_id": product_id, "recipe_version_id": v["version_id"],
+        "planned_batch_count": 1, "planned_volume_hl": 100, "volume_tolerance_hl": 0,
+        "auto_from_bom": True, "lines": [],
+        "material_qty_overrides": {"0": {"selected_material_codes": ["SRC-MQTY-MAT-1", "SRC-MQTY-MAT-2"]}},
+    })
+    assert order.status_code == 201, order.text
+    order_id = order.json()["brew_order_id"]
+
+    r = client.get("/api/warehouse/requests/source-preview", headers=admin_h,
+                   params={"source_type": "brew_order", "source_id": order_id})
+    assert r.status_code == 200, r.text
+    lines = r.json()
+    assert not any(l["is_group"] for l in lines)   # KHÔNG gộp thành 1 dòng nhóm nữa
+    by_code = {l["material_code"]: l for l in lines}
+    assert by_code["SRC-MQTY-MAT-1"]["quantity"] == 5
+    assert by_code["SRC-MQTY-MAT-2"]["quantity"] == 6
+
+
 def test_preview_source_materials_filter_master_order_surfaces_group_line(client, admin_h, thukho_h, vanhanh_h):
     m1 = _create_material(client, admin_h, "SRC-FGRP-MAT-1")
     m2 = _create_material(client, admin_h, "SRC-FGRP-MAT-2")

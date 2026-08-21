@@ -9,7 +9,7 @@ mô hình BatchExecution trừu tượng của lõi MES.
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import UnicodeText, Boolean, Float, ForeignKey, Integer, Unicode, UniqueConstraint
+from sqlalchemy import JSON, UnicodeText, Boolean, Float, ForeignKey, Integer, Unicode, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ..common import QualityStatus, UTCDateTime, new_id, utcnow
@@ -128,6 +128,15 @@ class BrewOrderMaterialLine(Base):
     # material_id cụ thể — material_id/material_name ở trên vẫn để None/tên nhóm tương ứng.
     # Xem services/brew_order.py::_resolve_group_members.
     material_group_code: Mapped[Optional[str]] = mapped_column(Unicode(64), nullable=True)
+    # Snapshot định mức RIÊNG từng thành viên lúc lập phiếu — chỉ có khi Công thức khai dòng
+    # nhóm này theo kiểu "mỗi thành viên 1 định mức riêng" (RecipeVersion.materials::member_qty,
+    # xem services/brew_order.py::build_lines_from_recipe_version). None với dòng nhóm kiểu cũ
+    # (1 định mức dùng chung cho mọi thành viên — qty_per_batch/qty_total ở dưới vẫn áp dụng
+    # như trước). List các dict {material_id, material_code, material_name, qty_per_batch,
+    # qty_total} — dùng để get_order() dựng lại đúng member_breakdown có định mức, không cần
+    # (và không nên) tính lại từ định mức Công thức hiện tại vì Công thức có thể đã sửa sau khi
+    # lệnh đã lập (giống mọi snapshot khác trên dòng này).
+    member_qty_snapshot: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
     uom: Mapped[Optional[str]] = mapped_column(Unicode(64), nullable=True)
     qty_per_batch: Mapped[Optional[float]] = mapped_column(Float, nullable=True)   # Nhu cầu 1 mẻ
     qty_total: Mapped[Optional[float]] = mapped_column(Float, nullable=True)       # Nhu cầu Tổng mẻ

@@ -28,11 +28,15 @@ class Supplier(Base):
 
 
 class MaterialLocation(Base):
-    """Vị trí cất trong Kho công ty (kho nguyên vật liệu) — danh mục khai báo trước, gán vào
-    từng lô lúc nhập kho (xem services/warehouse.py::receive, bắt buộc chọn khi tạo lô mới) và
-    có thể đổi sang vị trí khác trong quá trình làm việc (xem relocate_lot). Cố tình không có
-    trường capacity/kind như WmsLocation (kho thành phẩm) — vật tư NVL rất khác đơn vị tính
-    (kg/lít/cái...) nên không quy đổi chung 1 sức chứa số được, đây chỉ là nhãn vị trí vật lý."""
+    """Vị trí cất — danh mục khai báo trước, gán vào từng lô lúc nhập kho (xem
+    services/warehouse.py::receive, bắt buộc chọn khi tạo lô mới tại Kho công ty) và có thể đổi
+    sang vị trí khác trong quá trình làm việc (xem relocate_lot/relocate_lot_workshop). Cố tình
+    không có trường capacity/kind như WmsLocation (kho thành phẩm) — vật tư NVL rất khác đơn vị
+    tính (kg/lít/cái...) nên không quy đổi chung 1 sức chứa số được, đây chỉ là nhãn vị trí vật lý.
+
+    `scope` ("cong_ty" | "phan_xuong" | "ca_hai") quyết định vị trí này hiện ở màn chọn vị trí
+    của kho nào — 1 danh mục dùng chung cho cả 2 kho thay vì 2 bảng tách biệt, vì nhiều nhà máy
+    dùng chung 1 hệ thống mã vị trí vật lý cho cả 2 khu (VD cùng 1 dãy kệ nới rộng sang cả 2 bên)."""
     __tablename__ = "material_location"
 
     loc_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
@@ -40,6 +44,7 @@ class MaterialLocation(Base):
     name: Mapped[str] = mapped_column(Unicode(255))
     zone: Mapped[Optional[str]] = mapped_column(Unicode(120), nullable=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
+    scope: Mapped[str] = mapped_column(Unicode(32), default="cong_ty")
 
 
 class MaterialLot(Base):
@@ -71,6 +76,13 @@ class MaterialLot(Base):
     # này (chưa có danh mục vị trí riêng cho phân xưởng); bắt buộc khi tạo lô mới tại Kho công
     # ty (xem receive()).
     location_id: Mapped[Optional[str]] = mapped_column(ForeignKey("material_location.loc_id"), nullable=True, index=True)
+    # Vị trí cất cụ thể trong Kho phân xưởng — trỏ tới CÙNG bảng MaterialLocation (phân biệt
+    # bằng scope="phan_xuong"/"ca_hai"), cột RIÊNG với location_id ở trên (không tái dùng), vì
+    # rất nhiều chỗ trong services/warehouse.py suy luận "lô đang ở Kho công ty hay không" dựa
+    # trên location_id có/không có giá trị; gán vào lúc Phân xưởng duyệt nhận điều chuyển từ Kho
+    # công ty (xem approve_transfer_kcpx_request) hoặc relocate_lot_workshop, bắt buộc chọn.
+    workshop_location_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("material_location.loc_id"), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
 
 

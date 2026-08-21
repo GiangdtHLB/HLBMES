@@ -134,7 +134,9 @@ def _convert_member_qty(mat, target_unit: str | None, qty: float) -> float:
     if not mat or not target_unit or mat.uom == target_unit:
         return qty
     if mat.alt_uom == target_unit and mat.alt_uom_ratio:
-        return qty * mat.alt_uom_ratio
+        # round: mirror brew_order.py::_convert_member_qty — nhân 2 float ra dư số nhị phân li
+        # ti (VD 1007.9000000000001) dù kết quả thập phân đúng là số tròn.
+        return round(qty * mat.alt_uom_ratio, 3)
     return qty
 
 

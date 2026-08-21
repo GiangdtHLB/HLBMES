@@ -70,9 +70,9 @@ def lager_product_id(client, admin_h):
     return next(p["product_id"] for p in products if p["code"] == "BIA-LAGER")
 
 
-def _a_alt_group(client, admin_h, member_ids, code=None, name=None, unit="kg"):
+def _a_alt_group(client, admin_h, member_ids, code=None, name=None, unit="kg", selection_mode="single"):
     payload = {"code": code or f"ALTGRP-{new_id()[:8]}", "name": name or "Malt test",
-               "member_material_ids": member_ids, "unit": unit}
+               "member_material_ids": member_ids, "unit": unit, "selection_mode": selection_mode}
     r = client.post("/api/material-alt-groups", headers=admin_h, json=payload)
     assert r.status_code == 201, r.text
     return r.json()
@@ -229,3 +229,221 @@ def test_brew_order_created_from_alt_group_formula_persists_group_code(client, a
     assert line["material_id"] is None
     assert line["material_group_code"] == g["code"]
     assert set(line["member_material_ids"]) == {malt_pils_id, malt_vienna_id}
+
+
+# ---- 4) selection_mode + định mức RIÊNG từng thành viên (member_qty) ----
+
+def test_alt_group_defaults_to_single_mode(client, admin_h, malt_pils_id):
+    g = _a_alt_group(client, admin_h, [malt_pils_id])
+    assert g["selection_mode"] == "single"
+
+
+def test_alt_group_accepts_multi_mode(client, admin_h, malt_pils_id, malt_vienna_id):
+    r = client.post("/api/material-alt-groups", headers=admin_h,
+                    json={"code": f"ALTGRP-{new_id()[:8]}", "name": "CO2 tương đương", "unit": "kg",
+                          "member_material_ids": [malt_pils_id, malt_vienna_id], "selection_mode": "multi"})
+    assert r.status_code == 201, r.text
+    assert r.json()["selection_mode"] == "multi"
+
+
+def test_alt_group_rejects_invalid_selection_mode(client, admin_h, malt_pils_id):
+    r = client.post("/api/material-alt-groups", headers=admin_h,
+                    json={"code": f"ALTGRP-{new_id()[:8]}", "name": "X", "unit": "kg",
+                          "member_material_ids": [malt_pils_id], "selection_mode": "some_other_mode"})
+    assert r.status_code == 409, r.text
+
+
+def test_bom_preview_member_qty_resolves_per_member_amounts(client, admin_h, malt_pils_id, malt_vienna_id, lager_product_id):
+    """Dòng nhóm khai member_qty (mỗi thành viên 1 định mức riêng, VD do khác nồng độ) — BOM
+    preview phải trả đúng qty_per_batch/qty_total RIÊNG từng mã trong member_breakdown, không
+    còn 1 con số dùng chung cho cả dòng."""
+    g = _a_alt_group(client, admin_h, [malt_pils_id, malt_vienna_id], name="CO2 tương đương")
+    recipe_id = _lager_recipe_id(client, admin_h, lager_product_id)
+    v = client.post(f"/api/recipes/{recipe_id}/versions", headers=admin_h,
+                    json={"base_qty": 1000, "base_uom": "L",
+                          "materials": [{"alt_group_code": g["code"], "uom": "kg",
+                                        "member_qty": [{"material_code": "MALT-PILS", "qty": 5},
+                                                      {"material_code": "MALT-VIENNA", "qty": 6}]}]}).json()
+    _activate_recipe_version(client, admin_h, v["version_id"])
+
+    preview = client.get("/api/brewing/orders/bom-preview", headers=admin_h,
+                         params={"recipe_version_id": v["version_id"], "planned_batch_count": 2,
+                                 "planned_volume_hl": 100}).json()
+    line = next(l for l in preview if not l.get("is_header"))
+    assert line["material_id"] is None
+    assert line["qty_per_batch"] == 11    # tổng 2 mã: 5 + 6 (chỉ mang tính hiển thị tổng quan)
+    assert line["qty_total"] == 22        # (5 + 6) x 2 mẻ
+    breakdown_by_code = {mb["material_code"]: mb for mb in line["member_breakdown"]}
+    assert breakdown_by_code["MALT-PILS"]["qty_per_batch"] == 5
+    assert breakdown_by_code["MALT-PILS"]["qty_total"] == 10   # 5 x 2 mẻ
+    assert breakdown_by_code["MALT-VIENNA"]["qty_per_batch"] == 6
+    assert breakdown_by_code["MALT-VIENNA"]["qty_total"] == 12  # 6 x 2 mẻ
+    assert "shortage" in breakdown_by_code["MALT-PILS"]
+
+
+def test_create_order_member_qty_blocked_only_when_every_member_short(client, admin_h, malt_pils_id, malt_vienna_id, lager_product_id):
+    """_assert_no_shortage với dòng member_qty: chặn tạo lệnh CHỈ KHI không mã nào đủ tồn
+    riêng của chính nó — còn nếu ít nhất 1 mã đủ (VD định mức cực nhỏ) thì vẫn cho tạo, vì
+    người ghi NVL thực tế có thể chọn đúng mã đó."""
+    # selection_mode="multi" — kiểm tra logic thiếu tồn ĐỘC LẬP với việc yêu cầu chọn thành
+    # viên (xem test_create_order_requires_member_selection_for_single_mode_group ở dưới).
+    g = _a_alt_group(client, admin_h, [malt_pils_id, malt_vienna_id], name="CO2 tương đương 2", selection_mode="multi")
+    recipe_id = _lager_recipe_id(client, admin_h, lager_product_id)
+
+    # Cả 2 mã đều đòi hỏi 1 tỷ kg — chắc chắn vượt xa mọi tồn kho thật, phải bị chặn.
+    v_huge = client.post(f"/api/recipes/{recipe_id}/versions", headers=admin_h,
+                         json={"base_qty": 1000, "base_uom": "L",
+                               "materials": [{"alt_group_code": g["code"], "uom": "kg",
+                                             "member_qty": [{"material_code": "MALT-PILS", "qty": 1_000_000_000},
+                                                           {"material_code": "MALT-VIENNA", "qty": 1_000_000_000}]}]}).json()
+    _activate_recipe_version(client, admin_h, v_huge["version_id"])
+    blocked = client.post("/api/brewing/orders", headers=admin_h, json={
+        "order_code": f"LN-ALTGRP-BLOCKED-{new_id()[:6]}", "product_id": lager_product_id,
+        "recipe_version_id": v_huge["version_id"],
+        "planned_batch_count": 1, "planned_volume_hl": 100, "volume_tolerance_hl": 0,
+        "auto_from_bom": True, "lines": [],
+    })
+    assert blocked.status_code == 409, blocked.text
+
+    # Chỉ MALT-PILS đòi hỏi số cực nhỏ (chắc chắn đủ), MALT-VIENNA vẫn đòi 1 tỷ kg (chắc chắn
+    # thiếu) — vẫn phải cho tạo vì còn 1 lựa chọn khả thi (MALT-PILS).
+    recipe_id2 = recipe_id
+    v_mixed = client.post(f"/api/recipes/{recipe_id2}/versions", headers=admin_h,
+                          json={"base_qty": 1000, "base_uom": "L",
+                                "materials": [{"alt_group_code": g["code"], "uom": "kg",
+                                              "member_qty": [{"material_code": "MALT-PILS", "qty": 0.001},
+                                                            {"material_code": "MALT-VIENNA", "qty": 1_000_000_000}]}]}).json()
+    _activate_recipe_version(client, admin_h, v_mixed["version_id"])
+    allowed = client.post("/api/brewing/orders", headers=admin_h, json={
+        "order_code": f"LN-ALTGRP-ALLOWED-{new_id()[:6]}", "product_id": lager_product_id,
+        "recipe_version_id": v_mixed["version_id"],
+        "planned_batch_count": 1, "planned_volume_hl": 100, "volume_tolerance_hl": 0,
+        "auto_from_bom": True, "lines": [],
+    })
+    assert allowed.status_code == 201, allowed.text
+
+    detail = client.get(f"/api/brewing/orders/{allowed.json()['brew_order_id']}", headers=admin_h).json()
+    line = next(l for l in detail["lines"] if not l["is_header"])
+    assert line["material_group_code"] == g["code"]
+    breakdown_by_code = {mb["material_code"]: mb for mb in line["member_breakdown"]}
+    assert breakdown_by_code["MALT-PILS"]["shortage"] is False
+    assert breakdown_by_code["MALT-VIENNA"]["shortage"] is True
+
+
+# ---- 5) Người lập Lệnh nấu PHẢI chọn thành viên áp dụng cho dòng member_qty ----
+
+def _recipe_version_with_member_qty(client, admin_h, recipe_id, group_code):
+    v = client.post(f"/api/recipes/{recipe_id}/versions", headers=admin_h,
+                    json={"base_qty": 1000, "base_uom": "L",
+                          "materials": [{"alt_group_code": group_code, "uom": "kg",
+                                        "member_qty": [{"material_code": "MALT-PILS", "qty": 5},
+                                                      {"material_code": "MALT-VIENNA", "qty": 6}]}]}).json()
+    _activate_recipe_version(client, admin_h, v["version_id"])
+    return v
+
+
+def test_create_order_requires_member_selection_for_single_mode_group(client, admin_h, malt_pils_id, malt_vienna_id, lager_product_id):
+    """Nhóm selection_mode="single" (mặc định) — không chọn gì (frontend không gửi lựa chọn)
+    khiến member_declared giữ nguyên CẢ 2 thành viên → phải bị chặn (chỉ cho chọn ĐÚNG 1)."""
+    g = _a_alt_group(client, admin_h, [malt_pils_id, malt_vienna_id], name="Single sel test")
+    recipe_id = _lager_recipe_id(client, admin_h, lager_product_id)
+    v = _recipe_version_with_member_qty(client, admin_h, recipe_id, g["code"])
+
+    r = client.post("/api/brewing/orders", headers=admin_h, json={
+        "order_code": f"LN-SEL-NOPICK-{new_id()[:6]}", "product_id": lager_product_id,
+        "recipe_version_id": v["version_id"],
+        "planned_batch_count": 1, "planned_volume_hl": 100, "volume_tolerance_hl": 0,
+        "auto_from_bom": True, "lines": [],
+    })
+    assert r.status_code == 409, r.text
+
+
+def test_create_order_single_mode_selection_uses_only_chosen_member(client, admin_h, malt_pils_id, malt_vienna_id, lager_product_id):
+    """Chọn đúng 1 thành viên (material_qty_overrides[seq].selected_material_codes) — Nhu cầu
+    Tổng mẻ chỉ tính mã đã chọn, KHÔNG cộng dồn với mã còn lại."""
+    g = _a_alt_group(client, admin_h, [malt_pils_id, malt_vienna_id], name="Single sel test 2")
+    recipe_id = _lager_recipe_id(client, admin_h, lager_product_id)
+    v = _recipe_version_with_member_qty(client, admin_h, recipe_id, g["code"])
+
+    r = client.post("/api/brewing/orders", headers=admin_h, json={
+        "order_code": f"LN-SEL-PICK-{new_id()[:6]}", "product_id": lager_product_id,
+        "recipe_version_id": v["version_id"],
+        "planned_batch_count": 2, "planned_volume_hl": 100, "volume_tolerance_hl": 0,
+        "auto_from_bom": True, "lines": [],
+        "material_qty_overrides": {"0": {"selected_material_codes": ["MALT-PILS"]}},
+    })
+    assert r.status_code == 201, r.text
+
+    detail = client.get(f"/api/brewing/orders/{r.json()['brew_order_id']}", headers=admin_h).json()
+    line = next(l for l in detail["lines"] if not l["is_header"])
+    assert line["qty_total"] == 10   # CHỈ MALT-PILS: 5 x 2 mẻ — KHÔNG cộng thêm MALT-VIENNA
+    codes = [mb["material_code"] for mb in line["member_breakdown"]]
+    assert codes == ["MALT-PILS"]
+
+
+def test_create_order_rejects_two_selections_for_single_mode_group(client, admin_h, malt_pils_id, malt_vienna_id, lager_product_id):
+    g = _a_alt_group(client, admin_h, [malt_pils_id, malt_vienna_id], name="Single sel test 3")
+    recipe_id = _lager_recipe_id(client, admin_h, lager_product_id)
+    v = _recipe_version_with_member_qty(client, admin_h, recipe_id, g["code"])
+
+    r = client.post("/api/brewing/orders", headers=admin_h, json={
+        "order_code": f"LN-SEL-TWOPICK-{new_id()[:6]}", "product_id": lager_product_id,
+        "recipe_version_id": v["version_id"],
+        "planned_batch_count": 1, "planned_volume_hl": 100, "volume_tolerance_hl": 0,
+        "auto_from_bom": True, "lines": [],
+        "material_qty_overrides": {"0": {"selected_material_codes": ["MALT-PILS", "MALT-VIENNA"]}},
+    })
+    assert r.status_code == 409, r.text
+
+
+def test_create_order_multi_mode_partial_selection_sums_only_chosen(client, admin_h, malt_pils_id, malt_vienna_id, lager_product_id):
+    """Nhóm selection_mode="multi" — chọn 1 trong 2 thành viên (không bắt buộc chọn hết) —
+    vẫn hợp lệ (multi chỉ yêu cầu >=1), Nhu cầu Tổng mẻ chỉ tính mã đã chọn."""
+    g = _a_alt_group(client, admin_h, [malt_pils_id, malt_vienna_id], name="Multi sel test", selection_mode="multi")
+    recipe_id = _lager_recipe_id(client, admin_h, lager_product_id)
+    v = _recipe_version_with_member_qty(client, admin_h, recipe_id, g["code"])
+
+    r = client.post("/api/brewing/orders", headers=admin_h, json={
+        "order_code": f"LN-MULTISEL-{new_id()[:6]}", "product_id": lager_product_id,
+        "recipe_version_id": v["version_id"],
+        "planned_batch_count": 1, "planned_volume_hl": 100, "volume_tolerance_hl": 0,
+        "auto_from_bom": True, "lines": [],
+        "material_qty_overrides": {"0": {"selected_material_codes": ["MALT-VIENNA"]}},
+    })
+    assert r.status_code == 201, r.text
+    detail = client.get(f"/api/brewing/orders/{r.json()['brew_order_id']}", headers=admin_h).json()
+    line = next(l for l in detail["lines"] if not l["is_header"])
+    assert line["qty_total"] == 6
+    assert [mb["material_code"] for mb in line["member_breakdown"]] == ["MALT-VIENNA"]
+    assert line["shortage"] is False  # dòng KHÔNG shortage vì còn 1 lựa chọn khả thi
+
+
+def test_create_order_member_qty_per_member_split_override(client, admin_h, malt_pils_id, malt_vienna_id, lager_product_id):
+    """Mỗi thành viên đã chọn có gợi ý tách 2 nguồn kho RIÊNG (qty_from_company/workshop) —
+    người lập lệnh sửa lại qua material_qty_overrides[seq].member_qty_splits[material_code],
+    khớp theo material_code chứ không lẫn giữa các thành viên."""
+    g = _a_alt_group(client, admin_h, [malt_pils_id, malt_vienna_id], name="Split sel test", selection_mode="multi")
+    recipe_id = _lager_recipe_id(client, admin_h, lager_product_id)
+    v = _recipe_version_with_member_qty(client, admin_h, recipe_id, g["code"])
+
+    r = client.post("/api/brewing/orders", headers=admin_h, json={
+        "order_code": f"LN-SPLITSEL-{new_id()[:6]}", "product_id": lager_product_id,
+        "recipe_version_id": v["version_id"],
+        "planned_batch_count": 1, "planned_volume_hl": 100, "volume_tolerance_hl": 0,
+        "auto_from_bom": True, "lines": [],
+        "material_qty_overrides": {"0": {
+            "selected_material_codes": ["MALT-PILS", "MALT-VIENNA"],
+            "member_qty_splits": {
+                "MALT-PILS": {"qty_from_company": 2, "qty_from_workshop": 3},
+                "MALT-VIENNA": {"qty_from_company": 6, "qty_from_workshop": 0},
+            },
+        }},
+    })
+    assert r.status_code == 201, r.text
+    detail = client.get(f"/api/brewing/orders/{r.json()['brew_order_id']}", headers=admin_h).json()
+    line = next(l for l in detail["lines"] if not l["is_header"])
+    breakdown_by_code = {mb["material_code"]: mb for mb in line["member_breakdown"]}
+    assert breakdown_by_code["MALT-PILS"]["qty_from_company"] == 2
+    assert breakdown_by_code["MALT-PILS"]["qty_from_workshop"] == 3
+    assert breakdown_by_code["MALT-VIENNA"]["qty_from_company"] == 6
+    assert breakdown_by_code["MALT-VIENNA"]["qty_from_workshop"] == 0

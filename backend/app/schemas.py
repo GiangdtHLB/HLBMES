@@ -85,6 +85,7 @@ class MaterialAltGroupIn(BaseModel):
     member_material_ids: list[str] = []
     unit: str
     active: bool = True
+    selection_mode: str = "single"
 
 
 class MaterialAltGroupOut(ORMModel):
@@ -94,10 +95,12 @@ class MaterialAltGroupOut(ORMModel):
     member_material_ids: list
     unit: Optional[str] = None
     active: bool
+    selection_mode: str = "single"
 
 
 class LotKcsUpdateIn(BaseModel):
     kcs_lot_no: Optional[str] = None
+    supplier_lot: Optional[str] = None
 
 
 class OpsSettingIn(BaseModel):
@@ -267,7 +270,28 @@ class MaterialOut(ORMModel):
 
 
 # ---- Orders ----
+class OrderMemberQtySplitIn(BaseModel):
+    """Mirror MemberQtySplitIn (brew_order) — định nghĩa riêng ở đây vì BrewLineQtySplitIn/
+    MemberQtySplitIn nằm dưới xa trong file (dùng type string trực tiếp sẽ NameError lúc định
+    nghĩa OrderIn, do schemas.py không có `from __future__ import annotations`)."""
+    qty_from_company: Optional[float] = None
+    qty_from_workshop: Optional[float] = None
+
+
+class OrderLineQtySplitIn(BaseModel):
+    """SL lấy tại Kho công ty/phân xưởng người lập Lệnh SX tự sửa lại (đè lên gợi ý) — mirror
+    BrewLineQtySplitIn, key trong material_qty_overrides là str(seq) của dòng NVL. Xem
+    BrewLineQtySplitIn (services/brew_order.py) cho ngữ nghĩa đầy đủ — reuse services/orders.py
+    dùng chung cơ chế tính toán với Lệnh nấu, chỉ khác tên schema request."""
+    qty_from_company: Optional[float] = None
+    qty_from_workshop: Optional[float] = None
+    selected_material_codes: Optional[list[str]] = None
+    member_qty_splits: dict[str, OrderMemberQtySplitIn] = {}
+
+
 class OrderIn(BaseModel):
+    """Dùng chung cho tạo (POST) và sửa (PUT) Lệnh SX (ERP) — mirror BrewMasterOrderIn nhưng
+    KHÔNG có children (1 Lệnh SX = 1 dòng, xem services/orders.py)."""
     order_code: str
     product_id: str
     planned_qty: float
@@ -275,6 +299,16 @@ class OrderIn(BaseModel):
     due_time: Optional[datetime] = None
     priority: int = 5
     source_version: Optional[str] = None
+    recipe_version_id: Optional[str] = None
+    planned_batch_count: Optional[int] = None
+    issued_by: Optional[str] = None
+    executor_unit: Optional[str] = "Phân xưởng bia Đông Mai"
+    warehouse_keeper: Optional[str] = "Thủ kho"
+    reference_note: Optional[str] = None
+    start_date: Optional[datetime] = None
+    end_date: Optional[datetime] = None
+    safety_note: Optional[str] = None
+    material_qty_overrides: dict[str, OrderLineQtySplitIn] = {}
 
 
 class OrderOut(ORMModel):
@@ -287,7 +321,26 @@ class OrderOut(ORMModel):
     priority: int
     status: str
     source_version: Optional[str] = None
+    recipe_version_id: Optional[str] = None
+    recipe_code: Optional[str] = None
+    recipe_name: Optional[str] = None
+    recipe_version_no: Optional[int] = None
+    recipe_note: Optional[str] = None
+    issued_by: Optional[str] = None
+    executor_unit: Optional[str] = None
+    warehouse_keeper: Optional[str] = None
+    reference_note: Optional[str] = None
+    start_date: Optional[datetime] = None
+    end_date: Optional[datetime] = None
+    safety_note: Optional[str] = None
+    created_by: Optional[str] = None
+    planned_batch_count: Optional[int] = None
     created_at: datetime
+    is_executed: bool = False
+    # Chỉ get_order() (xem 1 lệnh) mới nạp — list_orders() để trống (nặng, không cần cho bảng
+    # danh sách) — mirror BrewMasterOrder child["lines"], dict tự do vì cấu trúc member_breakdown
+    # lồng nhau (xem services/orders.py::get_order).
+    lines: list[dict] = []
 
 
 # ---- Work Orders / Điều độ ----
@@ -914,7 +967,21 @@ class LotOut(ORMModel):
     expiry: Optional[datetime] = None
     location: Optional[str] = None
     location_id: Optional[str] = None
+    workshop_location_id: Optional[str] = None
     created_at: datetime
+    # Chỉ set khi lô này được TÁCH ra từ 1 lô khác lúc điều chuyển 1 phần số lượng (xem
+    # GenealogyEdge relation=SPLIT, routers/materials.py::list_lots) — mã lô gốc để hiển thị
+    # ngay "Tách từ lô X" ở mọi màn, không bắt người dùng phải vào Truy xuất mới thấy liên kết.
+    split_from_lot_code: Optional[str] = None
+
+    @field_validator("quantity")
+    @classmethod
+    def _round_quantity(cls, v: float) -> float:
+        # Số lượng tồn tích luỹ sai số dấu phẩy động qua nhiều lần cộng/trừ một phần (tách lô,
+        # điều chuyển, xuất từng phần...) nên hay ra dạng "15.399999999999999" — làm tròn ở tầng
+        # API (không sửa giá trị đã lưu trong DB) để MỌI nơi hiển thị lô (dropdown chọn lô, bảng
+        # tồn kho...) đều sạch, không phải vá lại từng màn hình một.
+        return round(v, 4) if v is not None else v
 
 
 class MaterialLocationIn(BaseModel):
@@ -922,6 +989,7 @@ class MaterialLocationIn(BaseModel):
     name: str
     zone: Optional[str] = None
     active: bool = True
+    scope: str = "cong_ty"  # "cong_ty" | "phan_xuong" | "ca_hai"
 
 
 class MaterialLocationOut(ORMModel):
@@ -930,10 +998,15 @@ class MaterialLocationOut(ORMModel):
     name: str
     zone: Optional[str] = None
     active: bool
+    scope: str
 
 
 class LotRelocateIn(BaseModel):
     location_id: str
+
+
+class WorkshopLotRelocateIn(BaseModel):
+    workshop_location_id: str
 
 
 # ---- Quality ----
@@ -1207,6 +1280,7 @@ class ReceiptUpdateIn(BaseModel):
     supplier_id: Optional[str] = None
     unit_price: Optional[float] = None
     kcs_lot_no: Optional[str] = None
+    supplier_lot: Optional[str] = None
     expiry: Optional[datetime] = None
     reason: Optional[str] = None
 
@@ -1335,6 +1409,40 @@ class TransferPxRequestOut(ORMModel):
     reject_reason: Optional[str] = None
 
 
+class TransferKcPxRequestIn(BaseModel):
+    lot_id: str
+    quantity: float
+    reason: Optional[str] = None
+
+
+class TransferKcPxRejectIn(BaseModel):
+    reason: Optional[str] = None
+
+
+class TransferKcPxApproveIn(BaseModel):
+    workshop_location_id: str
+
+
+class TransferKcPxRequestOut(ORMModel):
+    request_id: str
+    request_code: str
+    lot_id: str
+    quantity: float
+    uom: str
+    reason: Optional[str] = None
+    status: str
+    movement_id: Optional[str] = None
+    workshop_location_id: Optional[str] = None
+    reversed: bool
+    created_by: Optional[str] = None
+    created_at: datetime
+    approved_by: Optional[str] = None
+    approved_at: Optional[datetime] = None
+    rejected_by: Optional[str] = None
+    rejected_at: Optional[datetime] = None
+    reject_reason: Optional[str] = None
+
+
 class SangNgangRejectIn(BaseModel):
     reason: Optional[str] = None
 
@@ -1348,6 +1456,7 @@ class SangNgangUpdateIn(BaseModel):
     supplier_id: Optional[str] = None
     unit_price: Optional[float] = None
     kcs_lot_no: Optional[str] = None
+    supplier_lot: Optional[str] = None
     expiry: Optional[datetime] = None
     reason: Optional[str] = None
 
@@ -1580,12 +1689,25 @@ class BrewOrderMaterialLineIn(BaseModel):
     unit_price: Optional[float] = None
 
 
+class MemberQtySplitIn(BaseModel):
+    qty_from_company: Optional[float] = None
+    qty_from_workshop: Optional[float] = None
+
+
 class BrewLineQtySplitIn(BaseModel):
     """SL thực xuất người lập lệnh nấu tự sửa lại (đè lên gợi ý — xem
     services/brew_order.py::_suggest_qty_split), key trong material_qty_overrides là
-    str(seq) của dòng NVL tương ứng (đúng thứ tự trong Công thức đã chọn)."""
+    str(seq) của dòng NVL tương ứng (đúng thứ tự trong Công thức đã chọn).
+    selected_material_codes: BẮT BUỘC với dòng khai định mức riêng từng thành viên (member_qty)
+    — chọn những mã áp dụng cho lệnh nấu này (xem services/brew_order.py::_build_group_line/
+    _validate_member_selection); None = chưa chọn (nhóm "single" sẽ bị chặn tạo lệnh).
+    member_qty_splits: SL lấy Company/Workshop RIÊNG cho từng mã đã chọn của dòng member_qty
+    (key = material_code) — mirror qty_from_company/qty_from_workshop ở trên nhưng áp dụng cho
+    TỪNG thành viên thay vì cho cả dòng (dòng member_qty không có 1 con số Nhu cầu chung để tách)."""
     qty_from_company: Optional[float] = None
     qty_from_workshop: Optional[float] = None
+    selected_material_codes: Optional[list[str]] = None
+    member_qty_splits: dict[str, MemberQtySplitIn] = {}
 
 
 class BrewOrderIn(BaseModel):
@@ -1666,6 +1788,12 @@ class FinishIn(BaseModel):
     """Vận hành chọn tay giờ kết thúc (mặc định giờ hiện tại nếu không truyền) — gọi lại
     được nhiều lần để sửa giờ nếu bấm nhầm, không phải hành động một chiều."""
     ended_at: Optional[datetime] = None
+
+
+class BrewBatchStartIn(BaseModel):
+    """Sửa giờ bắt đầu mẻ nấu — bắt buộc truyền giá trị (khác FinishIn không có mặc định
+    "giờ hiện tại" vì started_at đã có giá trị từ lúc tạo mẻ, sửa là có chủ đích)."""
+    started_at: datetime
 
 
 class FinishFilterTankIn(FinishIn):

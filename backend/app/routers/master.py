@@ -282,6 +282,8 @@ def create_material_alt_group(payload: MaterialAltGroupIn, db: Session = Depends
         raise DomainError(f"Mã nhóm vật tư thay thế '{payload.code}' đã tồn tại.")
     if not payload.member_material_ids:
         raise DomainError("Nhóm vật tư thay thế phải có ít nhất 1 vật tư thành viên.")
+    if payload.selection_mode not in ("single", "multi"):
+        raise DomainError("Chế độ chọn không hợp lệ (chỉ 'single' hoặc 'multi').")
     master_data.validate_alt_group_unit(db, payload.member_material_ids, payload.unit)
     g = MaterialAltGroup(group_id=new_id(), **payload.model_dump())
     db.add(g)
@@ -304,13 +306,16 @@ def update_material_alt_group(group_id: str, payload: MaterialAltGroupIn, db: Se
         raise DomainError(f"Mã nhóm vật tư thay thế '{payload.code}' đã tồn tại.")
     if not payload.member_material_ids:
         raise DomainError("Nhóm vật tư thay thế phải có ít nhất 1 vật tư thành viên.")
+    if payload.selection_mode not in ("single", "multi"):
+        raise DomainError("Chế độ chọn không hợp lệ (chỉ 'single' hoặc 'multi').")
     master_data.validate_alt_group_unit(db, payload.member_material_ids, payload.unit)
     before = {"code": g.code, "name": g.name, "member_material_ids": g.member_material_ids,
-              "unit": g.unit, "active": g.active}
+              "unit": g.unit, "active": g.active, "selection_mode": g.selection_mode}
     g.code, g.name = payload.code, payload.name
     g.member_material_ids = payload.member_material_ids
     g.unit = payload.unit
     g.active = payload.active
+    g.selection_mode = payload.selection_mode
     record_audit(db, entity_type="material_alt_group", entity_id=g.group_id, action="update",
                  actor=user, before=before, after=payload.model_dump())
     db.commit()
