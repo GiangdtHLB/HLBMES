@@ -135,3 +135,18 @@ def _get(db: Session, wo_id: str) -> WorkOrder:
     if not wo:
         raise NotFoundError("Lệnh sản xuất không tồn tại.")
     return wo
+
+
+def delete_wo(db: Session, wo_id: str, user: User) -> None:
+    """Xóa Lệnh sản xuất (điều độ) — chặn nếu đã có Mẻ sản xuất (BatchExecution) dispatch từ
+    lệnh này, mirror quy ước chặn sửa/xóa-khi-đã-thực-hiện dùng ở mọi module lệnh khác
+    (brew_order.py/filter_order.py/orders.py::_assert_not_executed)."""
+    require_perm(user, "wo.manage")
+    wo = _get(db, wo_id)
+    require_scope(user, "lines", wo.line)
+    if db.execute(select(BatchExecution.batch_id).where(BatchExecution.work_order_id == wo.wo_id)).first():
+        raise DomainError(f"Lệnh {wo.wo_code} đã có Mẻ sản xuất — không thể xóa.")
+    record_audit(db, entity_type="work_order", entity_id=wo.wo_id, action="delete",
+                 actor=user, before={"wo_code": wo.wo_code})
+    db.delete(wo)
+    db.commit()

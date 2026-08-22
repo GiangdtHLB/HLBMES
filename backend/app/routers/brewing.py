@@ -35,6 +35,7 @@ from ..models.brewing import (
 from ..models.lines import ProductionLine
 from ..models.master import BeerType, FinishedProduct, Material, Product
 from ..models.materials import GenealogyEdge, MaterialLot
+from ..models.orders import ProductionOrder
 from ..models.quality import QualityResult
 from ..models.wms import FinishedGoodsUnit
 from ..schemas import (
@@ -72,6 +73,7 @@ from ..services import filter_order as filter_order_svc
 from ..services import genealogy
 from ..services import lot_lock as lot_lock_svc
 from ..services import lot_record as lot_record_svc
+from ..services import orders as order_svc
 from ..services import ops_setting as ops_setting_svc
 from ..services import qc_catalog
 from ..services import quality
@@ -354,6 +356,7 @@ def list_brews(years: list[int] = Query(None), db: Session = Depends(get_db)):
     ferments = {f.ferment_id: f for f in db.execute(select(FermentRecord)).scalars().all()}
     products = {p.product_id: p for p in db.execute(select(Product)).scalars().all()}
     orders = {o.brew_order_id: o for o in db.execute(select(BrewOrder)).scalars().all()}
+    prod_orders = {o.order_id: o for o in db.execute(select(ProductionOrder)).scalars().all()}
     batch_counts: dict[str, int] = {}
     for row in db.execute(select(BrewBatch.brew_id)).all():
         batch_counts[row[0]] = batch_counts.get(row[0], 0) + 1
@@ -374,6 +377,7 @@ def list_brews(years: list[int] = Query(None), db: Session = Depends(get_db)):
         f = ferments.get(ferment_id_by_brew.get(b.brew_id))
         prod = products.get(b.product_id)
         order = orders.get(b.brew_order_id)
+        prod_order = prod_orders.get(b.production_order_id)
         batches = batches_by_brew.get(b.brew_id, [])
         if not batches:
             color = "red"
@@ -394,6 +398,8 @@ def list_brews(years: list[int] = Query(None), db: Session = Depends(get_db)):
                     "lm_code": f.lm_code if f else None, "tank_lm": f.tank_lm if f else None,
                     "kt_date": f.kt_date if f else None,
                     "brew_order_id": b.brew_order_id, "brew_order_code": order.order_code if order else None,
+                    "production_order_id": b.production_order_id,
+                    "production_order_code": prod_order.order_code if prod_order else None,
                     "color": color,
                     "locked": b.locked or bool(order and order.locked), "locked_by": b.locked_by or (order.locked_by if order else None)})
     return out
@@ -412,17 +418,32 @@ def add_brew(payload: BrewIn, db: Session = Depends(get_db),
     lm_code = data.pop("lm_code", None)
     yeast_gen = data.pop("yeast_gen", None)
     brew_order_id = data.get("brew_order_id")
-    order = db.get(BrewOrder, brew_order_id)
-    if not order:
-        raise NotFoundError("Lệnh nấu không tồn tại.")
-    _assert_unlocked(order)
-    record_summaries = brew_order_svc._record_summaries(db, brew_order_id)
-    if brew_order_svc._is_complete(db, record_summaries, order.planned_volume_hl, order.volume_tolerance_hl):
-        raise DomainError("Lệnh nấu này đã hoàn thành (đủ sản lượng kế hoạch) — không thể thêm mã nấu mới.")
-    # Dịch bia trích từ Lệnh nấu (nguồn xác thực duy nhất) — không cho lệch giữa mã nấu và
-    # lệnh nấu của nó (nếu không, gợi ý NVL/BOM theo dịch bia ở lệnh nấu sẽ sai với mã nấu thật).
-    if order.product_id:
-        data["product_id"] = order.product_id
+    production_order_id = data.get("production_order_id")
+    if bool(brew_order_id) == bool(production_order_id):
+        raise DomainError("Phải chọn đúng 1 Lệnh sản xuất (Lệnh SX ERP hoặc Lệnh nấu cũ).")
+    if production_order_id:
+        # Đường đi hiện hành (tab Nấu) — tạo mã nấu từ "Lệnh SX (ERP)" (ProductionOrder). Lệnh
+        # này chưa có khái niệm "locked" / sai số riêng như BrewOrder — chỉ chặn khi đã hoàn
+        # thành (xem services/orders.py::recompute_status_after_finish).
+        order = db.get(ProductionOrder, production_order_id)
+        if not order:
+            raise NotFoundError("Lệnh sản xuất không tồn tại.")
+        if order.status == "completed":
+            raise DomainError("Lệnh sản xuất này đã hoàn thành — không thể thêm mã nấu mới.")
+        if order.product_id:
+            data["product_id"] = order.product_id
+    else:
+        order = db.get(BrewOrder, brew_order_id)
+        if not order:
+            raise NotFoundError("Lệnh nấu không tồn tại.")
+        _assert_unlocked(order)
+        record_summaries = brew_order_svc._record_summaries(db, brew_order_id)
+        if brew_order_svc._is_complete(db, record_summaries, order.planned_volume_hl, order.volume_tolerance_hl):
+            raise DomainError("Lệnh nấu này đã hoàn thành (đủ sản lượng kế hoạch) — không thể thêm mã nấu mới.")
+        # Dịch bia trích từ Lệnh nấu (nguồn xác thực duy nhất) — không cho lệch giữa mã nấu và
+        # lệnh nấu của nó (nếu không, gợi ý NVL/BOM theo dịch bia ở lệnh nấu sẽ sai với mã nấu thật).
+        if order.product_id:
+            data["product_id"] = order.product_id
     brew_year = (data.get("brew_date") or utcnow()).year
     data["brew_year"] = brew_year
     if lm_code:
@@ -458,6 +479,8 @@ def add_brew(payload: BrewIn, db: Session = Depends(get_db),
         ferment.batch_numbers = b.brew_code
 
     db.commit(); db.refresh(b)
+    if production_order_id:
+        order_svc.mark_in_progress(db, production_order_id)
     return b
 
 
@@ -504,6 +527,7 @@ def delete_brew(brew_id: str, db: Session = Depends(get_db), user: User = Depend
     b = db.get(BrewRecord, brew_id)
     if not b:
         raise NotFoundError("Bản ghi nấu không tồn tại.")
+    production_order_id = b.production_order_id
     _assert_unlocked(b, db.get(BrewOrder, b.brew_order_id) if b.brew_order_id else None)
     if _brew_already_filtered(db, brew_id):
         raise DomainError(f"Mã nấu '{b.brew_code}' đã được lọc — không thể xóa (ảnh hưởng truy xuất nguồn gốc).")
@@ -583,6 +607,8 @@ def delete_brew(brew_id: str, db: Session = Depends(get_db), user: User = Depend
                     before={"lm_code": f.lm_code}, reason=f"Xóa kéo theo do xóa mã nấu '{b.brew_code}'")
         db.delete(f)
     db.commit()
+    if production_order_id:
+        order_svc.recompute_status_after_delete(db, production_order_id, user)
 
 
 @router.post("/brews/{brew_id}/lock-lot")
@@ -748,6 +774,9 @@ def finish_brew_batch(brew_id: str, batch_id: str, payload: FinishIn = FinishIn(
     if link:
         _sync_ferment_kt_date(db, link.ferment_id)
     db.commit(); db.refresh(batch)
+    brew = db.get(BrewRecord, brew_id)
+    if brew and brew.production_order_id:
+        order_svc.recompute_status_after_finish(db, brew.production_order_id, user)
     return batch
 
 

@@ -874,7 +874,7 @@ VIEWS.dashboard = async function () {
     ${alertsHtml}
     <h3 style="color:var(--muted);text-transform:uppercase;letter-spacing:.5px;font-size:12px;margin:4px 2px 10px">Lệnh &amp; mẻ sản xuất (Nấu · Lọc · Chiết)</h3>
     <div class="cards">
-      ${stageStatCard("🍺", "Lệnh nấu", prodSummary && prodSummary.lenh_nau, "orders", "lenhnau")}
+      ${stageStatCard("🍺", "Lệnh SX (ERP)", prodSummary && prodSummary.lenh_sx_erp, "orders", "po")}
       ${stageStatCard("🧪", "Lệnh lọc", prodSummary && prodSummary.lenh_loc, "orders", "lenhloc")}
       ${stageStatCard("🔥", "Mẻ nấu", prodSummary && prodSummary.me_nau, "process", "nau")}
       ${tankStatCard(prodSummary && prodSummary.tank_len_men, "process", "lenmen")}
@@ -1247,27 +1247,36 @@ VIEWS.flowmap = async function () {
 // Khu vực tập trung các loại lệnh sản xuất: Lệnh SX (ERP) hiện có, Lệnh nấu (đã chuyển từ
 // tab Nấu-Lọc-Chiết sang đây), và sau này sẽ thêm Lệnh lọc / Lệnh chiết vào cùng subnav này.
 VIEWS.orders = async function () {
-  const sec = SUB.orders || "lenhnau";
+  const sec = SUB.orders || "po";
   const sections = [
-    { key: "lenhnau", label: "Lệnh nấu" }, { key: "lenhloc", label: "Lệnh lọc" },
     { key: "po", label: "Lệnh SX (ERP)" },
+    { key: "lenhloc", label: "Lệnh lọc" },
   ];
   let body = "";
   let approvedTanksLf = [];
   let availableBbtTanksLf = [];
 
   if (sec === "po") {
-    const [orders, products] = await Promise.all([GET("/orders"), GET("/products")]);
+    const [orders, products, beerTypes, poRecipes] = await Promise.all([
+      GET("/orders"), GET("/products"), GET("/beer-types").catch(() => []), GET("/recipes").catch(() => [])]);
     CACHE.products = products;
-    const opts = products.map(p => `<option value="${p.product_id}">${esc(p.code)} — ${esc(p.name)}</option>`).join("");
+    CACHE.beerTypes = beerTypes;
+    CACHE.recipesLn = poRecipes;
+    // Liệt kê theo Recipe (value=recipe_id, cần để nạp version) nhưng hiển thị theo tên Loại bia
+    // — Loại bia chưa có công thức thì chưa chọn được (đúng ý: chưa có version thì chưa xác
+    // định được Dịch bia nào để tạo lệnh).
+    const btOpts = poRecipes.map(r => {
+      const bt = beerTypes.find(x => x.beer_type_id === r.beer_type_id);
+      return `<option value="${esc(r.recipe_id)}">${esc(bt ? bt.code : r.code)}</option>`;
+    }).join("");
     body = `<div class="panel">
       <h2 id="o_form_title">Tạo lệnh sản xuất (ERP)</h2>
-      <div class="muted" style="margin-bottom:6px">Chọn Sản phẩm rồi chọn <b>Công thức</b> đang hiệu lực của sản phẩm đó (tuỳ chọn) — dùng để xem trước
-        định mức NVL (BOM), chia đều theo <b>Số mẻ kế hoạch</b>. Đây chỉ là thông tin kế hoạch/tham khảo, KHÔNG lưu thành dòng định mức riêng —
-        SL kế hoạch/ĐVT ở trên vẫn là nguồn sự thật duy nhất cho sản lượng.</div>
+      <div class="muted" style="margin-bottom:6px">Chọn <b>Loại bia</b> rồi chọn <b>Version</b> đang hiệu lực — dùng để xác định Dịch bia cho lệnh và
+        xem trước định mức NVL (BOM), chia đều theo <b>Số mẻ kế hoạch</b>. Định mức NVL chỉ là thông tin kế hoạch/tham khảo, KHÔNG lưu thành dòng
+        định mức riêng — SL kế hoạch/ĐVT ở trên vẫn là nguồn sự thật duy nhất cho sản lượng.</div>
       <div class="row">
         <div class="field"><label>Mã lệnh</label><input id="o_code" placeholder="PO-..." /></div>
-        <div class="field"><label>Sản phẩm</label><select id="o_prod">${opts}</select></div>
+        <div class="field"><label>Chọn loại bia</label><select id="o_beertype"><option value="">(chọn loại bia)</option>${btOpts}</select></div>
         <div class="field"><label>SL kế hoạch</label><input id="o_qty" type="number" value="50000" /></div>
         <div class="field"><label>ĐVT</label><input id="o_uom" value="L" size="4" /></div>
         <div class="field"><label>Ưu tiên</label><input id="o_pri" type="number" value="5" size="3" /></div>
@@ -1280,12 +1289,8 @@ VIEWS.orders = async function () {
         <div class="field"><label>Thủ kho</label><input id="o_kho" value="Thủ kho"/></div>
       </div>
       <div class="row">
-        <div class="field" style="flex:1"><label>Căn cứ</label><input id="o_refnote" placeholder="VD: Căn cứ theo kế hoạch sản xuất..."/></div>
         <div class="field"><label>Thời gian bắt đầu</label><input id="o_start" type="datetime-local"/></div>
         <div class="field"><label>Thời gian kết thúc</label><input id="o_end" type="datetime-local"/></div>
-      </div>
-      <div class="row">
-        <div class="field" style="flex:1"><label>Biện pháp an toàn</label><input id="o_safety" placeholder="(tuỳ chọn)"/></div>
       </div>
       <div class="row"><button class="btn sec" id="o_bom_preview" style="align-self:flex-end">📋 Xem NVL (đủ/thiếu tồn)</button>
         <button class="btn" id="o_save" style="align-self:flex-end">Tạo lệnh</button>
@@ -1294,12 +1299,12 @@ VIEWS.orders = async function () {
     </div>
     <div class="panel"><h2>Danh sách lệnh</h2>
       <input class="searchbox" data-tbl="t_po" placeholder="Tìm theo mã lệnh, sản phẩm, trạng thái..."/>
-      <div class="tablewrap"><table id="t_po"><thead><tr><th>Mã</th><th>Sản phẩm</th><th>SL</th><th>Ưu tiên</th>
-        <th>Tên công thức</th><th>Version</th><th>Ghi chú công thức</th><th>Số mẻ (KH)</th><th>Trạng thái</th><th>Tạo lúc</th><th></th></tr></thead>
+      <div class="tablewrap"><table id="t_po"><thead><tr><th>Mã</th><th>Loại bia</th><th>Dịch bia</th><th>SL</th><th>Ưu tiên</th>
+        <th>Version</th><th>Ghi chú công thức</th><th>Số mẻ (KH)</th><th>Trạng thái</th><th>Tạo lúc</th><th></th></tr></thead>
       <tbody>${orders.map(o => `<tr><td><code class="k">${esc(o.order_code)}</code></td>
+        <td class="muted">${esc(o.beer_type_name || "—")}</td>
         <td>${esc(prodName(o.product_id))}</td><td>${o.planned_qty} ${o.uom}</td>
         <td>${o.priority}</td>
-        <td class="muted">${esc(o.recipe_name || "—")}</td>
         <td class="muted">${o.recipe_code ? `v${o.recipe_version_no}` : "—"}</td>
         <td class="muted">${esc(o.recipe_note || "—")}</td>
         <td class="muted">${o.planned_batch_count ?? "—"}</td>
@@ -1310,65 +1315,6 @@ VIEWS.orders = async function () {
           <button class="btn sm sec" data-delorder="${esc(o.order_id)}">Xóa</button>` : ""}</td></tr>`).join("") ||
         `<tr><td colspan=11 class="muted">Chưa có lệnh sản xuất nào.</td></tr>`}</tbody></table></div>
     </div>`;
-  }
-
-  else if (sec === "lenhnau") {
-    const [orders, recipes, lnProducts] = await Promise.all([
-      GET("/brewing/orders"), GET("/recipes").catch(() => []), GET("/products").catch(() => [])]);
-    CACHE.recipesLn = recipes;
-    CACHE.products = lnProducts;
-    const recipeOpts = recipes.map(r => `<option value="${esc(r.recipe_id)}">${esc(r.code)} — ${esc(r.name)}</option>`).join("");
-    body = `<div class="panel"><h2 id="lo_form_title">Tạo Lệnh nấu</h2>
-      <div class="muted" style="margin-bottom:6px">Chọn <b>Loại bia</b> rồi chọn <b>Version</b> đang hiệu lực — định mức NVL (BOM) tự nạp
-        theo Số mẻ kế hoạch, xem trước (đủ/thiếu tồn) trước khi tạo lệnh. Có thể ứng với nhiều mã nấu (tạo ở tab "Nấu-Lọc-Chiết → Nấu") —
-        sản lượng thực tế cộng dồn qua các mã nấu tới khi đạt kế hoạch (±sai số) thì lệnh hoàn thành, không chọn được nữa.</div>
-      <div class="row">
-        <div class="field"><label>Số lệnh</label><input id="lo_code" placeholder="VD: 36/PXSXBĐM-T6/2026"/></div>
-        <div class="field"><label>Chọn loại bia</label><select id="lo_recipe"><option value="">(chọn loại bia)</option>${recipeOpts}</select></div>
-        <button class="btn sec" id="lo_bom_preview" style="align-self:flex-end">📋 Xem NVL (đủ/thiếu tồn)</button>
-      </div>
-      <div id="lo_recipe_box"></div>
-      <div class="row">
-        <div class="field"><label>Số mẻ kế hoạch</label><input id="lo_batches" type="number" min="1" value="1"/></div>
-        <div class="field"><label>Sản lượng nấu kế hoạch (hl)</label><input id="lo_volplan" type="number" placeholder="VD: 100"/></div>
-        <div class="field"><label>Sai số cho phép (±hl)</label><input id="lo_voltol" type="number" value="0"/></div>
-      </div>
-      <div class="row">
-        <div class="field"><label>Người ra lệnh</label><input id="lo_issuedby" placeholder="(tuỳ chọn)"/></div>
-        <div class="field"><label>Đơn vị thực hiện</label><input id="lo_exec" value="Phân xưởng bia Đông Mai"/></div>
-        <div class="field"><label>Thủ kho</label><input id="lo_kho" value="Thủ kho"/></div>
-      </div>
-      <div class="row">
-        <div class="field"><label>Thời gian bắt đầu</label><input id="lo_start" type="datetime-local"/></div>
-        <div class="field"><label>Thời gian kết thúc</label><input id="lo_end" type="datetime-local"/></div>
-      </div>
-      <div class="row"><button class="btn" id="lo_add" style="align-self:flex-end">Tạo lệnh</button>
-        <span id="lo_cancel_wrap"></span></div>
-      <div id="lo_bom_box"></div>
-    </div>
-    <div class="panel"><h2>Danh sách Lệnh nấu <span class="muted">(${orders.length})</span></h2>
-      <input class="searchbox" data-tbl="t_lenhnau" placeholder="Tìm theo số lệnh, dịch bia, trạng thái..."/>
-      <div class="tablewrap"><table id="t_lenhnau"><thead><tr><th>Số lệnh</th><th>Loại bia</th><th>Dịch bia</th>
-        <th>Version</th><th>Ghi chú công thức</th>
-        <th>Thực tế/KH (hl)</th><th>Ngày lập</th><th>Trạng thái</th><th></th></tr></thead>
-      <tbody>${orders.map(o => `<tr>
-        <td class="code">${esc(o.order_code)}</td>
-        <td class="muted">${esc(o.recipe_name || "—")}</td>
-        <td>${esc(o.product_code || o.product_desc || "—")}</td>
-        <td class="muted">${o.recipe_code ? "v" + o.recipe_version_no : "—"}</td>
-        <td class="muted">${esc(o.recipe_note || "—")}</td>
-        <td class="muted">${o.actual_volume_hl}/${o.planned_volume_hl}</td>
-        <td class="muted">${fmt(o.created_at)}</td>
-        <td>${o.is_complete
-          ? `<span style="color:var(--green)">✓ Hoàn thành</span>`
-          : (o.is_executed
-              ? `<span style="color:var(--orange)">Đang nấu</span>`
-              : `<span class="muted">Chưa thực hiện</span>`)}</td>
-        <td style="white-space:nowrap"><button class="btn sm sec" data-viewlo="${esc(o.brew_order_id)}">Xem</button>
-          <button class="btn sm sec" data-printlo="${esc(o.brew_order_id)}">🖨️ In</button>
-          ${!o.is_executed ? `<button class="btn sm sec" data-editlo="${esc(o.brew_order_id)}">Sửa</button>
-          <button class="btn sm sec" data-dello="${esc(o.brew_order_id)}">Xóa</button>` : ""}</td></tr>`).join("") ||
-        `<tr><td colspan=9 class="muted">Chưa có lệnh nấu nào.</td></tr>`}</tbody></table></div></div>`;
   }
 
   else if (sec === "lenhloc") {
@@ -1428,7 +1374,7 @@ VIEWS.orders = async function () {
 
   $("view-orders").innerHTML = subnav("orders", sections, sec) + body;
   wireSubnav("orders"); wireSearch();
-  wirePaginate("t_po", 10); wirePaginate("t_lenhnau", 10); wirePaginate("t_lenhloc", 10);
+  wirePaginate("t_po", 10); wirePaginate("t_lenhloc", 10);
   if (sec === "lenhloc") wireYearFilter("lenhloc", "orders");
 
   if (sec === "po") {
@@ -1473,28 +1419,24 @@ VIEWS.orders = async function () {
 
     async function renderPoRecipeBox(preselectVersionId) {
       const box = $("o_recipe_box");
-      const productId = $("o_prod").value;
-      if (!productId) { box.innerHTML = ""; poActiveVersions = []; poRecipe = null; poRecipeVersionId = ""; return; }
-      box.innerHTML = `<div class="muted" style="margin-top:6px">Đang tải công thức...</div>`;
+      const recipeId = $("o_beertype").value;
+      if (!recipeId) { box.innerHTML = ""; poActiveVersions = []; poRecipe = null; poRecipeVersionId = ""; return; }
+      box.innerHTML = `<div class="muted" style="margin-top:6px">Đang tải version...</div>`;
       try {
-        const recipes = await GET(`/recipes`);
-        if ($("o_prod").value !== productId) return; // đã đổi Sản phẩm khác trong lúc chờ — bỏ kết quả cũ
-        const product = (CACHE.products || []).find(p => p.product_id === productId);
-        poRecipe = (recipes || []).find(r => r.beer_type_id === (product && product.beer_type_id)) || null;
-        poActiveVersions = poRecipe
-          ? (await GET(`/recipes/${poRecipe.recipe_id}/versions`)).filter(v => v.state === "effective" && v.product_id === productId)
-          : [];
+        poRecipe = (CACHE.recipesLn || []).find(r => r.recipe_id === recipeId) || null;
+        poActiveVersions = (await GET(`/recipes/${recipeId}/versions`)).filter(v => v.state === "effective");
+        if ($("o_beertype").value !== recipeId) return; // đã đổi Loại bia khác trong lúc chờ — bỏ kết quả cũ
         if (!poActiveVersions.length) {
-          box.innerHTML = `<div class="muted" style="margin-top:6px">Sản phẩm này chưa có công thức hiệu lực — vẫn tạo được lệnh, chỉ không xem trước được NVL.</div>`;
+          box.innerHTML = `<div class="muted" style="margin-top:6px">Loại bia này chưa có version hiệu lực — chưa tạo được lệnh (cần version để xác định Dịch bia).</div>`;
           poRecipeVersionId = ""; return;
         }
         poRecipeVersionId = preselectVersionId && poActiveVersions.some(v => v.version_id === preselectVersionId)
           ? preselectVersionId : (poActiveVersions.length === 1 ? poActiveVersions[0].version_id : "");
         box.innerHTML = `<div class="row" style="margin-top:6px">
-          <div class="field"><label>Công thức</label><select id="o_recipe">
-            <option value="">(không chọn — bỏ qua BOM)</option>
+          <div class="field"><label>Chọn version</label><select id="o_recipe">
+            <option value="">(chọn version)</option>
             ${poActiveVersions.map(v => `<option value="${esc(v.version_id)}" ${v.version_id === poRecipeVersionId ? "selected" : ""}>
-              ${esc(poRecipe.code)} v${v.version_no} · ${v.base_qty} ${esc(v.base_uom)}</option>`).join("")}
+              ${esc(prodName(v.product_id))} · v${v.version_no}</option>`).join("")}
           </select></div>
           <div class="field" style="flex:1"><label>Ghi chú công thức</label><div class="muted" id="o_recipe_note" style="margin-top:8px"></div></div>
         </div>`;
@@ -1506,8 +1448,8 @@ VIEWS.orders = async function () {
         $("o_recipe").onchange = () => { poRecipeVersionId = $("o_recipe").value; $("o_bom_box").innerHTML = ""; showNote(); };
       } catch (e) { box.innerHTML = ""; }
     }
-    $("o_prod").onchange = () => { $("o_bom_box").innerHTML = ""; renderPoRecipeBox(); };
-    if ($("o_prod").value) renderPoRecipeBox();
+    $("o_beertype").onchange = () => { $("o_bom_box").innerHTML = ""; renderPoRecipeBox(); };
+    if ($("o_beertype").value) renderPoRecipeBox();
 
     // Bảng "Xem NVL" tương tác — mirror renderLnPreview (Lệnh nấu)
     // (state là poQtyOverrides/poMemberSelection/poMemberQtySplits module-scope ở trên, không
@@ -1625,7 +1567,7 @@ VIEWS.orders = async function () {
       });
     }
     $("o_bom_preview").onclick = () => guard(async () => {
-      if (!poRecipeVersionId) throw new Error("Chọn Công thức trước khi xem định mức NVL.");
+      if (!poRecipeVersionId) throw new Error("Chọn Loại bia rồi chọn Version trước khi xem định mức NVL.");
       const batches = parseInt($("o_batches").value, 10) || 1;
       const lines = await GET(`/orders/bom-preview?recipe_version_id=${encodeURIComponent(poRecipeVersionId)}&planned_batch_count=${batches}`);
       await renderPoPreview(lines);
@@ -1652,17 +1594,20 @@ VIEWS.orders = async function () {
     }
 
     $("o_save").onclick = () => guard(async () => {
-      const payload = { order_code: $("o_code").value, product_id: $("o_prod").value,
+      const orderCode = $("o_code").value.trim();
+      if (!orderCode) throw new Error("Nhập Mã lệnh trước khi tạo lệnh.");
+      if (!$("o_beertype").value) throw new Error("Chọn Loại bia trước khi tạo lệnh.");
+      const chosenVersion = poActiveVersions.find(v => v.version_id === poRecipeVersionId);
+      if (!chosenVersion) throw new Error("Chọn Version (để xác định Dịch bia) trước khi tạo lệnh.");
+      const payload = { order_code: orderCode, product_id: chosenVersion.product_id,
         planned_qty: parseFloat($("o_qty").value), uom: $("o_uom").value, priority: parseInt($("o_pri").value),
         recipe_version_id: poRecipeVersionId || null,
         planned_batch_count: parseInt($("o_batches").value, 10) || null,
         issued_by: $("o_issuedby").value.trim() || null,
         executor_unit: $("o_exec").value.trim() || null,
         warehouse_keeper: $("o_kho").value.trim() || null,
-        reference_note: $("o_refnote").value.trim() || null,
         start_date: $("o_start").value || null,
         end_date: $("o_end").value || null,
-        safety_note: $("o_safety").value.trim() || null,
         material_qty_overrides: poBuildMaterialQtyOverrides() };
       if (editingOrderId) {
         await PUT(`/orders/${editingOrderId}`, payload);
@@ -1683,7 +1628,15 @@ VIEWS.orders = async function () {
       const o = await GET(`/orders/${b.dataset.editorder}`);
       editingOrderId = o.order_id;
       $("o_code").value = o.order_code;
-      $("o_prod").value = o.product_id;
+      // Suy ra Recipe (Loại bia) từ recipe_version_id đã lưu; lệnh cũ chưa từng chọn version
+      // (trước khi có tính năng này) thì suy tạm qua beer_type_id của Dịch bia hiện tại — vẫn
+      // phải chọn lại 1 version thật để lưu tiếp được, vì product_id giờ luôn lấy từ version.
+      const recipeId = o.recipe_version_id
+        ? (await GET(`/recipes/versions/${o.recipe_version_id}`)).recipe_id
+        : (() => { const p = (CACHE.products || []).find(x => x.product_id === o.product_id);
+                   const r = (CACHE.recipesLn || []).find(x => x.beer_type_id === (p && p.beer_type_id));
+                   return r ? r.recipe_id : ""; })();
+      $("o_beertype").value = recipeId;
       $("o_qty").value = o.planned_qty;
       $("o_uom").value = o.uom;
       $("o_pri").value = o.priority;
@@ -1691,10 +1644,8 @@ VIEWS.orders = async function () {
       $("o_issuedby").value = o.issued_by || "";
       $("o_exec").value = o.executor_unit || "";
       $("o_kho").value = o.warehouse_keeper || "";
-      $("o_refnote").value = o.reference_note || "";
       $("o_start").value = o.start_date ? o.start_date.slice(0, 16) : "";
       $("o_end").value = o.end_date ? o.end_date.slice(0, 16) : "";
-      $("o_safety").value = o.safety_note || "";
       resetPoOverridesFromSavedLines(o.lines);
       $("o_bom_box").innerHTML = "";
       await renderPoRecipeBox(o.recipe_version_id);
@@ -1706,284 +1657,6 @@ VIEWS.orders = async function () {
       if (!confirm("Xóa lệnh sản xuất này? Không thể hoàn tác.")) return;
       await DELETE(`/orders/${b.dataset.delorder}`);
       toast("Đã xóa lệnh sản xuất"); render("orders");
-    }));
-  }
-
-  if (sec === "lenhnau") {
-    let editingOrderId = null;
-    let lnQtyOverrides = {};
-    let lnMemberSelection = {};
-    let lnMemberQtySplits = {};
-    let lnPreviewLines = [];
-    let lnAltGroupsCache = null;
-    let lnActiveVersions = [];
-    let lnRecipeVersionId = "";
-    const getLnAltGroups = async () => lnAltGroupsCache || (lnAltGroupsCache = await GET("/material-alt-groups").catch(() => []));
-    function setLoFormMode(editing) {
-      $("lo_form_title").textContent = editing ? "Sửa Lệnh nấu" : "Tạo Lệnh nấu";
-      $("lo_add").textContent = editing ? "Lưu chỉnh sửa lệnh" : "Tạo lệnh";
-      $("lo_cancel_wrap").innerHTML = editing ? `<button class="btn sm sec" id="lo_canceledit" style="align-self:flex-end">Hủy sửa</button>` : "";
-      if (editing) $("lo_canceledit").onclick = () => render("orders");
-    }
-    // Nạp lại state từ dòng NVL ĐÃ LƯU (get_order) khi vào chế độ Sửa — chỉ khôi phục lựa chọn,
-    // KHÔNG tự hiện lại bảng preview (phải bấm "Xem NVL" lại mới thấy, lúc đó renderLnPreview
-    // sẽ merge state này vào định mức mới nạp từ Công thức) — mirror resetPoOverridesFromSavedLines.
-    function resetLnOverridesFromSavedLines(lines) {
-      lnQtyOverrides = {}; lnMemberSelection = {}; lnMemberQtySplits = {};
-      (lines || []).forEach(l => {
-        if (l.is_header) return;
-        const seq = String(l.seq);
-        const isMemberDeclared = l.member_breakdown && l.member_breakdown.length && l.member_breakdown.some(mb => mb.qty_per_batch != null);
-        if (isMemberDeclared) {
-          lnMemberSelection[seq] = l.member_breakdown.map(mb => mb.material_id).filter(Boolean);
-          const splits = {};
-          l.member_breakdown.forEach(mb => { if (mb.material_code) splits[mb.material_code] = { fromCompany: mb.qty_from_company, fromWorkshop: mb.qty_from_workshop }; });
-          lnMemberQtySplits[seq] = splits;
-        } else if (l.qty_from_company != null || l.qty_from_workshop != null) {
-          lnQtyOverrides[seq] = { fromCompany: l.qty_from_company, fromWorkshop: l.qty_from_workshop };
-        }
-      });
-    }
-
-    async function renderLnRecipeBox(preselectVersionId) {
-      const box = $("lo_recipe_box");
-      const recipeId = $("lo_recipe").value;
-      if (!recipeId) { box.innerHTML = ""; lnActiveVersions = []; lnRecipeVersionId = ""; return; }
-      box.innerHTML = `<div class="muted" style="margin-top:6px">Đang tải version...</div>`;
-      try {
-        const recipe = (CACHE.recipesLn || []).find(r => r.recipe_id === recipeId);
-        if (!recipe) { box.innerHTML = ""; return; }
-        lnActiveVersions = (await GET(`/recipes/${recipe.recipe_id}/versions`)).filter(v => v.state === "effective");
-        if ($("lo_recipe").value !== recipeId) return; // đã đổi công thức khác trong lúc chờ — bỏ kết quả cũ
-        if (!lnActiveVersions.length) {
-          box.innerHTML = `<div class="muted" style="margin-top:6px">Công thức này chưa có version hiệu lực — vẫn tạo được lệnh, chỉ không xem trước được NVL.</div>`;
-          lnRecipeVersionId = ""; return;
-        }
-        lnRecipeVersionId = preselectVersionId && lnActiveVersions.some(v => v.version_id === preselectVersionId)
-          ? preselectVersionId : (lnActiveVersions.length === 1 ? lnActiveVersions[0].version_id : "");
-        box.innerHTML = `<div class="row" style="margin-top:6px">
-          <div class="field"><label>Chọn version</label><select id="lo_version">
-            <option value="">(chọn version)</option>
-            ${lnActiveVersions.map(v => `<option value="${esc(v.version_id)}" ${v.version_id === lnRecipeVersionId ? "selected" : ""}>
-              ${esc(prodName(v.product_id))} · v${v.version_no} · ${v.base_qty} ${esc(v.base_uom)}</option>`).join("")}
-          </select></div>
-          <div class="field" style="flex:1"><label>Ghi chú</label><div class="muted" id="lo_version_note" style="margin-top:8px"></div></div>
-        </div>`;
-        const showNote = () => {
-          const v = lnActiveVersions.find(x => x.version_id === lnRecipeVersionId);
-          $("lo_version_note").textContent = v && v.change_reason ? v.change_reason : "—";
-        };
-        showNote();
-        $("lo_version").onchange = () => { lnRecipeVersionId = $("lo_version").value; $("lo_bom_box").innerHTML = ""; showNote(); };
-      } catch (e) { box.innerHTML = ""; }
-    }
-    $("lo_recipe").onchange = () => { $("lo_bom_box").innerHTML = ""; renderLnRecipeBox(); };
-    if ($("lo_recipe").value) renderLnRecipeBox();
-
-    // Bảng "Xem NVL" tương tác — mirror renderPoPreview (Lệnh SX ERP), state module-scope ở trên.
-    async function renderLnPreview(lines) {
-      lnPreviewLines = lines;
-      const box = $("lo_bom_box");
-      if (!lines.length) {
-        box.innerHTML = `<div class="muted" style="margin-top:8px">Công thức này chưa khai báo NVL — không có định mức để xem.</div>`;
-        return;
-      }
-      const altGroups = await getLnAltGroups();
-      const ov = lnQtyOverrides;
-      const isMemberDeclared = (l) => l.member_breakdown && l.member_breakdown.length && l.member_breakdown.some(mb => mb.qty_per_batch != null);
-      const rowsHtml = lines.map(l => {
-        const seqKey = String(l.seq);
-        if (isMemberDeclared(l)) {
-          const grp = altGroups.find(g => g.code === l.material_group_code);
-          const mode = grp ? grp.selection_mode : "single";
-          let selected = lnMemberSelection[seqKey];
-          if (!selected || !selected.length) {
-            selected = mode === "single" ? [l.member_breakdown[0].material_id] : l.member_breakdown.map(mb => mb.material_id);
-            lnMemberSelection[seqKey] = selected;
-          }
-          const selectedSet = new Set(selected);
-          const selMembers = l.member_breakdown.filter(mb => selectedSet.has(mb.material_id));
-          const dispQtyPerBatch = round3(selMembers.reduce((s, mb) => s + (mb.qty_per_batch || 0), 0));
-          const dispQtyTotal = round3(selMembers.reduce((s, mb) => s + (mb.qty_total || 0), 0));
-          const dispShortage = selMembers.length > 0 && selMembers.every(mb => mb.shortage);
-          const memberRows = l.member_breakdown.map(mb => {
-            const checked = selectedSet.has(mb.material_id);
-            const inputType = mode === "multi" ? "checkbox" : "radio";
-            const nameAttr = mode === "multi" ? "" : ` name="ln_memsel_${seqKey}"`;
-            const splitOv = ((lnMemberQtySplits[seqKey] || {})[mb.material_code]) || {};
-            const fromCompany = splitOv.fromCompany ?? mb.qty_from_company;
-            const fromWorkshop = splitOv.fromWorkshop ?? mb.qty_from_workshop;
-            const splitCells = checked
-              ? `<td><input type="number" class="ln_mem_qty_company" data-seq="${esc(seqKey)}" data-code="${esc(mb.material_code)}" value="${fromCompany ?? ""}" style="width:70px"/></td>
-                 <td><input type="number" class="ln_mem_qty_workshop" data-seq="${esc(seqKey)}" data-code="${esc(mb.material_code)}" value="${fromWorkshop ?? ""}" style="width:70px"/></td>`
-              : `<td class="muted">—</td><td class="muted">—</td>`;
-            return `<tr class="muted" style="font-size:12px">
-              <td colspan="4" style="padding-left:24px"><label style="display:flex;align-items:center;gap:6px;cursor:pointer">
-                <input type="${inputType}" class="ln-memsel" data-seq="${esc(seqKey)}" data-mid="${esc(mb.material_id)}"${nameAttr} ${checked ? "checked" : ""}/>
-                ${esc(mb.material_code)} — ${esc(mb.material_name)}</label></td>
-              <td>${mb.qty_per_batch}</td><td>${mb.qty_total}</td>
-              ${splitCells}
-              <td>${mb.stock_company}</td><td>${mb.stock_workshop}</td>
-              <td>${mb.shortage ? '<span class="badge on_hold">⚠ Thiếu</span>' : '<span class="badge available">✓ Đủ</span>'}</td></tr>`;
-          }).join("");
-          return `<tr class="${dispShortage ? "row-red" : ""}">
-          <td>${esc(l.stt_label || "")}</td><td class="muted">—</td><td>${esc(l.material_name || "—")}
-            <span class="muted" style="font-size:11px"> (nhóm — ${mode === "multi" ? "chọn nhiều mã" : "chọn 1 mã"})</span></td><td>${esc(l.uom || "")}</td>
-          <td>${dispQtyPerBatch}</td><td>${dispQtyTotal}</td>
-          <td colspan="2" class="muted">—</td>
-          <td>${l.stock_company_snapshot ?? "—"}</td><td>${l.stock_workshop_snapshot ?? "—"}</td>
-          <td>${selMembers.length === 0 ? '<span class="badge on_hold">⚠ Chưa chọn mã</span>'
-            : (dispShortage ? '<span class="badge on_hold">⚠ Thiếu</span>' : '<span class="badge available">✓ Đủ</span>')}</td></tr>${memberRows}`;
-        }
-        const curOv = ov[seqKey] || {};
-        const fromCompany = curOv.fromCompany ?? l.qty_from_company;
-        const fromWorkshop = curOv.fromWorkshop ?? l.qty_from_workshop;
-        return `<tr class="${l.shortage ? "row-red" : ""}">
-        <td>${esc(l.stt_label || "")}</td><td class="muted">${esc(l.material_code || "—")}</td><td>${esc(l.material_name || "—")}</td><td>${esc(l.uom || "")}</td>
-        <td>${l.qty_per_batch ?? "—"}</td><td>${l.qty_total ?? "—"}</td>
-        <td>${l.is_header ? "" : `<input type="number" class="ln_qty_company" data-seq="${seqKey}" value="${fromCompany ?? ""}" style="width:80px"/>`}</td>
-        <td>${l.is_header ? "" : `<input type="number" class="ln_qty_workshop" data-seq="${seqKey}" value="${fromWorkshop ?? ""}" style="width:80px"/>`}</td>
-        <td>${l.stock_company_snapshot ?? "—"}</td><td>${l.stock_workshop_snapshot ?? "—"}</td>
-        <td>${!l.is_header
-          ? (l.shortage ? '<span class="badge on_hold">⚠ Thiếu</span>' : '<span class="badge available">✓ Đủ</span>')
-          : '<span class="muted">—</span>'}</td></tr>${bomMemberRowsHtml(l, 8, 1)}`;
-      }).join("");
-      const shortageCount = lines.filter(l => isMemberDeclared(l)
-        ? new Set(lnMemberSelection[String(l.seq)] || []).size === 0
-        : l.shortage).length;
-      box.innerHTML = `<div class="panel" style="margin-top:8px">
-        <h3 style="font-size:14px">Xem trước định mức NVL ${shortageCount
-          ? `<span style="color:var(--red)">— ⚠ ${shortageCount} dòng thiếu tồn/chưa chọn mã</span>`
-          : `<span style="color:var(--green)">— ✓ đủ tồn tất cả</span>`}</h3>
-        <div class="muted" style="margin-bottom:6px">Cột "SL lấy" là GỢI Ý (ưu tiên dùng hết tồn đang có tại Kho phân xưởng, phần
-          còn thiếu lấy tại Kho công ty) — có thể sửa lại trước khi tạo lệnh, sẽ được LƯU LẠI. Dòng theo Nhóm vật tư có định mức
-          riêng từng vật tư — chọn vật tư áp dụng ngay bên dưới, Nhu cầu chỉ tính mã đã chọn.</div>
-        <div class="tablewrap"><table><thead><tr><th>STT</th><th>Mã NVL</th><th>Tên NVL</th><th>ĐVT</th><th>Nhu cầu 1 mẻ</th>
-          <th>Nhu cầu Tổng mẻ</th><th>SL lấy tại Kho công ty</th><th>SL lấy tại Kho phân xưởng</th>
-          <th>Tồn Kho công ty</th><th>Tồn Kho phân xưởng</th><th>Trạng thái</th></tr></thead>
-        <tbody>${rowsHtml}</tbody></table></div></div>`;
-      box.querySelectorAll(".ln_qty_company").forEach(inp => inp.onchange = () => {
-        const seq = inp.dataset.seq;
-        lnQtyOverrides[seq] = { ...(lnQtyOverrides[seq] || {}), fromCompany: inp.value === "" ? null : parseFloat(inp.value) };
-      });
-      box.querySelectorAll(".ln_qty_workshop").forEach(inp => inp.onchange = () => {
-        const seq = inp.dataset.seq;
-        lnQtyOverrides[seq] = { ...(lnQtyOverrides[seq] || {}), fromWorkshop: inp.value === "" ? null : parseFloat(inp.value) };
-      });
-      box.querySelectorAll(".ln-memsel").forEach(inp => inp.onchange = () => {
-        const seq = inp.dataset.seq;
-        if (inp.type === "radio") {
-          lnMemberSelection[seq] = [inp.dataset.mid];
-        } else {
-          const cur = new Set(lnMemberSelection[seq] || []);
-          if (inp.checked) cur.add(inp.dataset.mid); else cur.delete(inp.dataset.mid);
-          lnMemberSelection[seq] = [...cur];
-        }
-        renderLnPreview(lnPreviewLines);
-      });
-      box.querySelectorAll(".ln_mem_qty_company").forEach(inp => inp.onchange = () => {
-        const seq = inp.dataset.seq, code = inp.dataset.code;
-        lnMemberQtySplits[seq] = { ...(lnMemberQtySplits[seq] || {}) };
-        lnMemberQtySplits[seq][code] = { ...(lnMemberQtySplits[seq][code] || {}), fromCompany: inp.value === "" ? null : parseFloat(inp.value) };
-      });
-      box.querySelectorAll(".ln_mem_qty_workshop").forEach(inp => inp.onchange = () => {
-        const seq = inp.dataset.seq, code = inp.dataset.code;
-        lnMemberQtySplits[seq] = { ...(lnMemberQtySplits[seq] || {}) };
-        lnMemberQtySplits[seq][code] = { ...(lnMemberQtySplits[seq][code] || {}), fromWorkshop: inp.value === "" ? null : parseFloat(inp.value) };
-      });
-    }
-    $("lo_bom_preview").onclick = () => guard(async () => {
-      if (!$("lo_recipe").value) throw new Error("Chọn loại bia trước khi xem định mức NVL.");
-      if (!lnRecipeVersionId) throw new Error("Chọn version trước khi xem định mức NVL.");
-      const volHl = parseFloat($("lo_volplan").value) || 0;
-      const batches = parseInt($("lo_batches").value, 10) || 1;
-      const qs = `recipe_version_id=${encodeURIComponent(lnRecipeVersionId)}&planned_batch_count=${batches}&planned_volume_hl=${volHl}`;
-      const lines = await GET(`/brewing/orders/bom-preview?${qs}`);
-      await renderLnPreview(lines);
-    });
-    // Gộp 2 loại override trước khi gửi: SL lấy Company/Workshop (dòng thường) và thành viên đã
-    // chọn (dòng Nhóm vật tư có định mức riêng — lnMemberSelection giữ material_id, cần đổi
-    // sang material_code vì server nhận selected_material_codes) — mirror poBuildMaterialQtyOverrides.
-    function lnBuildMaterialQtyOverrides() {
-      const out = {};
-      for (const [seq, o] of Object.entries(lnQtyOverrides)) {
-        out[seq] = { qty_from_company: o.fromCompany ?? null, qty_from_workshop: o.fromWorkshop ?? null };
-      }
-      for (const [seq, materialIds] of Object.entries(lnMemberSelection)) {
-        const line = lnPreviewLines.find(l => String(l.seq) === seq);
-        const codeById = Object.fromEntries((line ? line.member_breakdown : []).map(mb => [mb.material_id, mb.material_code]));
-        out[seq] = { ...(out[seq] || {}), selected_material_codes: materialIds.map(mid => codeById[mid]).filter(Boolean) };
-      }
-      for (const [seq, byCode] of Object.entries(lnMemberQtySplits)) {
-        const member_qty_splits = Object.fromEntries(Object.entries(byCode).map(([code, o]) =>
-          [code, { qty_from_company: o.fromCompany ?? null, qty_from_workshop: o.fromWorkshop ?? null }]));
-        out[seq] = { ...(out[seq] || {}), member_qty_splits };
-      }
-      return out;
-    }
-
-    $("lo_add").onclick = () => guard(async () => {
-      const code = $("lo_code").value.trim();
-      if (!code) throw new Error("Nhập Số lệnh.");
-      const volHl = parseFloat($("lo_volplan").value) || 0;
-      if (!(volHl > 0)) throw new Error("Nhập Sản lượng nấu kế hoạch (hl) (phải lớn hơn 0).");
-      const recipeId = $("lo_recipe").value;
-      if (recipeId && !lnRecipeVersionId) throw new Error("Chọn Version đang dùng cho lệnh này.");
-      const chosenVersion = lnActiveVersions.find(v => v.version_id === lnRecipeVersionId);
-      const payload = {
-        order_code: code,
-        product_id: chosenVersion ? chosenVersion.product_id : null,
-        recipe_version_id: lnRecipeVersionId || null,
-        planned_batch_count: parseInt($("lo_batches").value, 10) || 1,
-        planned_volume_hl: volHl,
-        volume_tolerance_hl: parseFloat($("lo_voltol").value) || 0,
-        issued_by: $("lo_issuedby").value.trim() || null,
-        executor_unit: $("lo_exec").value.trim() || null,
-        warehouse_keeper: $("lo_kho").value.trim() || null,
-        start_date: $("lo_start").value || null,
-        end_date: $("lo_end").value || null,
-        auto_from_bom: true, lines: [],
-        material_qty_overrides: lnBuildMaterialQtyOverrides(),
-      };
-      if (editingOrderId) {
-        await PUT(`/brewing/orders/${editingOrderId}`, payload);
-        toast("Đã lưu lệnh nấu");
-      } else {
-        await POST("/brewing/orders", payload);
-        toast("Đã tạo lệnh nấu");
-      }
-      render("orders");
-    });
-
-    document.querySelectorAll("[data-viewlo]").forEach(b => b.onclick = () => openBrewOrderModal(b.dataset.viewlo));
-    document.querySelectorAll("[data-printlo]").forEach(b => b.onclick = () => guard(async () => {
-      printBrewOrder(await GET(`/brewing/orders/${b.dataset.printlo}`));
-    }));
-    document.querySelectorAll("[data-editlo]").forEach(b => b.onclick = () => guard(async () => {
-      const o = await GET(`/brewing/orders/${b.dataset.editlo}`);
-      editingOrderId = o.brew_order_id;
-      $("lo_code").value = o.order_code;
-      const recipeId = o.recipe_version_id ? (await GET(`/recipes/versions/${o.recipe_version_id}`)).recipe_id : "";
-      $("lo_recipe").value = recipeId;
-      $("lo_batches").value = o.planned_batch_count || 1;
-      $("lo_volplan").value = o.planned_volume_hl || "";
-      $("lo_voltol").value = o.volume_tolerance_hl || 0;
-      $("lo_issuedby").value = o.issued_by || "";
-      $("lo_exec").value = o.executor_unit || "";
-      $("lo_kho").value = o.warehouse_keeper || "";
-      $("lo_start").value = o.start_date ? o.start_date.slice(0, 16) : "";
-      $("lo_end").value = o.end_date ? o.end_date.slice(0, 16) : "";
-      resetLnOverridesFromSavedLines(o.lines);
-      $("lo_bom_box").innerHTML = "";
-      await renderLnRecipeBox(o.recipe_version_id);
-      setLoFormMode(true);
-      $("lo_code").scrollIntoView({ behavior: "smooth", block: "center" });
-      toast(`Đang sửa lệnh ${o.order_code} — thay đổi rồi bấm "Lưu chỉnh sửa lệnh"`);
-    }));
-    document.querySelectorAll("[data-dello]").forEach(b => b.onclick = () => guard(async () => {
-      if (!confirm("Xóa lệnh nấu này? Không thể hoàn tác.")) return;
-      await DELETE(`/brewing/orders/${b.dataset.dello}`);
-      toast("Đã xóa lệnh nấu"); render("orders");
     }));
   }
 
@@ -2430,15 +2103,20 @@ const WO_NEXT = { planned: ["released", "cancelled"], released: ["cancelled"],
   in_progress: ["completed", "cancelled"], completed: ["closed"], closed: [], cancelled: [] };
 const WO_LABEL = { released: "Phát hành", completed: "Hoàn thành", closed: "Chốt", cancelled: "Hủy" };
 VIEWS.dispatch = async function () {
-  const [board, orders, products, recipes] = await Promise.all([
-    GET("/workorders"), GET("/orders"), GET("/products"), GET("/recipes")]);
+  const [board, orders, products, recipes, beerTypes] = await Promise.all([
+    GET("/workorders"), GET("/orders"), GET("/products"), GET("/recipes"), GET("/beer-types").catch(() => [])]);
   CACHE.products = products;
-  // recipe versions effective theo product
+  const btById = Object.fromEntries(beerTypes.map(bt => [bt.beer_type_id, bt]));
+  // Recipe giờ đại diện 1 Loại bia (không còn product_id riêng) — mỗi RecipeVersion tự gắn 1
+  // Dịch bia (product_id) riêng, nên phải gom theo version.product_id, KHÔNG còn theo
+  // recipe.product_id (đã bỏ từ khi tách Loại bia/Dịch bia).
   const verByProduct = {};
   for (const r of recipes) {
     const vs = await GET(`/recipes/${r.recipe_id}/versions`);
+    const bt = btById[r.beer_type_id];
     vs.filter(v => v.state === "effective").forEach(v =>
-      (verByProduct[r.product_id] = verByProduct[r.product_id] || []).push({ id: v.version_id, label: `${r.code} v${v.version_no}` }));
+      (verByProduct[v.product_id] = verByProduct[v.product_id] || []).push(
+        { id: v.version_id, label: `${bt ? bt.code : r.code} · v${v.version_no}` }));
   }
   const oOpts = orders.map(o => `<option value="${o.order_id}" data-prod="${o.product_id}">${esc(o.order_code)} (${esc(prodName(o.product_id))})</option>`).join("");
   const today = toISODateLocal(new Date());
@@ -2481,30 +2159,44 @@ VIEWS.dispatch = async function () {
     toast("Lệnh → " + (WO_LABEL[b.dataset.wotrans] || b.dataset.wotrans)); render("dispatch");
   }));
   document.querySelectorAll("[data-wodispatch]").forEach(b => b.onclick = () => guard(async () => {
+    // Version không chọn tay ở đây nữa — dùng đúng version đã gắn lúc lập lệnh (wo_rv khi
+    // "Tạo lệnh"). Nếu lệnh chưa có version (lập từ trước khi sửa lỗi dropdown), server tự báo
+    // lỗi rõ ràng (xem services/workorders.py::dispatch) thay vì chọn tay lại ở đây.
+    const wo = board.find(x => x.wo_id === b.dataset.wodispatch);
+    const basePayload = wo && wo.recipe_version_id ? { recipe_version_id: wo.recipe_version_id } : {};
     try {
-      const r = await POST(`/workorders/${b.dataset.wodispatch}/dispatch`, {});
+      const r = await POST(`/workorders/${b.dataset.wodispatch}/dispatch`, basePayload);
       toast("Đã phát mẻ " + r.batch_code);
     } catch (e) {
       if (/Không đủ tồn kho/.test(e.message)) {
         if (!confirm(e.message + "\n\nVẫn phát mẻ (ghi nhận thiếu)?")) return;
-        const r = await POST(`/workorders/${b.dataset.wodispatch}/dispatch`, { allow_shortage: true });
+        const r = await POST(`/workorders/${b.dataset.wodispatch}/dispatch`, { ...basePayload, allow_shortage: true });
         toast("Đã phát mẻ " + r.batch_code);
       } else { throw e; }
     }
     render("dispatch");
   }));
+  document.querySelectorAll("[data-wodel]").forEach(b => b.onclick = () => guard(async () => {
+    if (!confirm(`Xóa lệnh ${b.dataset.wocode}? Không thể hoàn tác.`)) return;
+    await DELETE(`/workorders/${b.dataset.wodel}`);
+    toast("Đã xóa lệnh"); render("dispatch");
+  }));
 };
 function woRow(w) {
   const st = WO_STATUS[w.status] || ["planned", w.status];
   const trans = (WO_NEXT[w.status] || []).map(t => `<button class="btn sm sec" data-wotrans="${t}" data-wo="${w.wo_id}">${WO_LABEL[t] || t}</button>`).join(" ");
-  const disp = (w.status === "released" || w.status === "in_progress")
+  const canDispatch = w.status === "released" || w.status === "in_progress";
+  const disp = canDispatch
     ? `<button class="btn sm" data-wodispatch="${w.wo_id}">⮞ Phát mẻ</button>` : "";
+  // Chỉ xóa được khi CHƯA có mẻ nào phát ra (mirror mọi module lệnh khác — chặn xóa khi đã
+  // thực hiện, xem services/workorders.py::delete_wo).
+  const del = !w.batches ? `<button class="btn sm sec" data-wodel="${w.wo_id}" data-wocode="${esc(w.wo_code)}">Xóa</button>` : "";
   const pct = w.completion_pct || 0;
   const pctColor = pct >= 100 ? "var(--green)" : pct > 0 ? "var(--accent)" : "var(--muted)";
   return `<tr><td><code class="k">${esc(w.wo_code)}</code></td><td>${fmt(w.scheduled_date)}</td><td>${esc(w.shift || "")}</td>
     <td>${esc(w.line || "")}</td><td>${esc(prodName(w.product_id))}</td><td>${w.planned_qty.toLocaleString("vi-VN")} ${esc(w.uom)}</td>
     <td>${(w.actual_qty || 0).toLocaleString("vi-VN")}</td><td style="color:${pctColor};font-weight:600">${pct}%</td>
-    <td>${w.batches}</td><td>${w.priority}</td><td>${badge(st[0])}${st[1]}</td><td>${disp} ${trans}</td></tr>`;
+    <td>${w.batches}</td><td>${w.priority}</td><td>${badge(st[0])}${st[1]}</td><td>${disp} ${trans} ${del}</td></tr>`;
 }
 
 // ================= CÔNG THỨC (Recipe/RecipeVersion — ISA-88, có version) =================
@@ -2553,6 +2245,11 @@ VIEWS.recipes = async function () {
     toast("Đã xóa công thức"); render("recipes");
   }));
   document.querySelectorAll("[data-vdetail]").forEach(b => b.onclick = () => showVersion(b.dataset.vdetail));
+  document.querySelectorAll("[data-vdel]").forEach(b => b.onclick = () => guard(async () => {
+    if (!confirm(`Xóa ${b.dataset.vlabel}? Chỉ xóa được nếu chưa dùng ở lệnh nấu/lệnh SX/work order/mẻ sản xuất nào. Không thể hoàn tác.`)) return;
+    await DELETE(`/recipes/versions/${b.dataset.vdel}`);
+    toast(`Đã xóa ${b.dataset.vlabel}`); render("recipes");
+  }));
   document.querySelectorAll("[data-vtrans]").forEach(b => b.onclick = () => {
     const t = b.dataset.vtrans, vid = b.dataset.vid;
     const doIt = (reason) => guard(async () => {
@@ -2582,7 +2279,8 @@ function recipeVerRow(r, v) {
     <td><b>${(v.materials || []).length}</b></td><td>${v.parameters.length}</td>
     <td>${v.quality_checks.length}</td><td class="muted">${esc(v.created_by || "—")}</td>
     <td class="muted">${esc(v.approved_by || "—")}</td>
-    <td><a href="#" data-vdetail="${v.version_id}" style="color:var(--accent2);margin-right:8px">Xem BOM</a>${btns}</td></tr>`;
+    <td><a href="#" data-vdetail="${v.version_id}" style="color:var(--accent2);margin-right:8px">Xem BOM</a>${btns}
+      ${v.is_used ? "" : `<button class="btn sm sec" data-vdel="${v.version_id}" data-vlabel="v${v.version_no}">🗑 Xóa version</button>`}</td></tr>`;
 }
 
 async function showVersion(versionId) {
@@ -2997,16 +2695,22 @@ VIEWS.batches = async function () {
       <div class="panel"><h2>Danh sách mẻ</h2>${tableBatches(batches, true)}</div>
       <div class="panel" id="b_detail"><h2>Chi tiết mẻ</h2><div class="muted">Chọn một mẻ để xem.</div></div>
     </div>`;
-  // load effective versions for selected order's product
+  // load effective versions for selected order's product — Recipe giờ đại diện 1 Loại bia
+  // (không còn product_id riêng), mỗi RecipeVersion mới tự gắn 1 Dịch bia (product_id) —
+  // phải lọc theo version.product_id, KHÔNG còn theo recipe.product_id (đã bỏ từ khi tách
+  // Loại bia/Dịch bia — xem services/recipes.py). Nhãn hiện "Loại bia · vN" để phân biệt
+  // dễ hơn mã Recipe.code tự do người dùng đặt.
   const loadVers = () => guard(async () => {
     const order = orders.find(o => o.order_id === $("b_order").value);
     if (!order) return;
-    const recs = await GET("/recipes");
+    const [recs, beerTypes] = await Promise.all([GET("/recipes"), GET("/beer-types").catch(() => [])]);
+    const btById = Object.fromEntries(beerTypes.map(bt => [bt.beer_type_id, bt]));
     let opts = "";
-    for (const r of recs.filter(r => r.product_id === order.product_id)) {
+    for (const r of recs) {
       const vs = await GET(`/recipes/${r.recipe_id}/versions`);
-      vs.filter(v => v.state === "effective").forEach(v =>
-        opts += `<option value="${v.version_id}">${esc(r.code)} v${v.version_no}</option>`);
+      const bt = btById[r.beer_type_id];
+      vs.filter(v => v.state === "effective" && v.product_id === order.product_id).forEach(v =>
+        opts += `<option value="${v.version_id}">${esc(bt ? bt.code : r.code)} · v${v.version_no}</option>`);
     }
     $("b_ver").innerHTML = opts || "<option>(không có version effective)</option>";
   });
@@ -6062,7 +5766,7 @@ let REQUEST_CART = [];   // {material_id, material_code, lot_id, lot_code, quant
                           // group_code/group_name/group_members chỉ có ở dòng được "Nạp vật tư từ lệnh"
                           // đưa lên từ 1 Nhóm vật tư thay thế — mỗi mã thành viên thành 1 dòng riêng,
                           // thủ kho tự xoá bớt chỉ giữ đúng 1 mã muốn xuất (xem cartPanelHtml).
-let REQUEST_SOURCE = null;   // {type: "brew_order"|"filter_master_order", id, label} — tuỳ chọn, chỉ để tham chiếu/báo cáo
+let REQUEST_SOURCE = null;   // {type: "production_order"|"filter_master_order", id, label} — tuỳ chọn, chỉ để tham chiếu/báo cáo
 
 const REQ_STATUS_BADGE = { pending: "on_hold", fulfilled: "available", rejected: "obsolete", cancelled: "obsolete" };
 
@@ -6347,13 +6051,13 @@ function cartPanelHtml() {
       <thead><tr><th>Vật tư</th><th>Cảnh báo</th><th>Tồn kho công ty thực tế</th><th>Đang chờ QC duyệt</th><th>Tồn kho phân xưởng</th><th>Lô</th><th>Ngày nhập</th><th>FIFO</th><th>Lệnh</th><th>SL theo lệnh</th><th>SL</th><th></th></tr></thead>
       <tbody>${cartRows}</tbody>
     </table></div>` : '<div class="muted" style="margin:8px 0">Chưa có dòng nào trong đề nghị.</div>'}
-    <h4 style="margin-top:14px">Nạp vật tư từ Lệnh nấu / Lệnh lọc (tuỳ chọn)</h4>
+    <h4 style="margin-top:14px">Nạp vật tư từ Lệnh SX (ERP) / Lệnh lọc (tuỳ chọn)</h4>
     <div class="muted" style="margin-bottom:6px">Chọn 1 lệnh để tự động điền sẵn các dòng vật tư theo định mức đã lập trong lệnh đó —
       vẫn sửa số lượng/lô hoặc thêm/xoá dòng như bình thường sau khi nạp.</div>
     <div class="row">
       <div class="field"><label>Loại lệnh</label><select id="rq_srctype">
         <option value="">(không có)</option>
-        <option value="brew_order">Lệnh nấu</option>
+        <option value="production_order">Lệnh SX (ERP)</option>
         <option value="filter_master_order">Lệnh lọc</option>
       </select></div>
       <div class="field" style="flex:1"><label>Lệnh</label><select id="rq_srcorder"><option value="">(chọn loại lệnh trước)</option></select></div>
@@ -6396,7 +6100,8 @@ function wireCartPanel() {
       $("rq_srcload").disabled = true;
       return;
     }
-    const opts = type === "brew_order" ? (REQ_CACHE.brewOrders || []) : (REQ_CACHE.filterMasterOrders || []);
+    const opts = type === "production_order" ? (REQ_CACHE.productionOrders || [])
+      : (REQ_CACHE.filterMasterOrders || []);
     sel.innerHTML = '<option value="">(chọn lệnh)</option>' +
       opts.map(o => `<option value="${esc(o.id)}">${esc(o.order_code)}</option>`).join("");
     $("rq_srcload").disabled = true;
@@ -6412,7 +6117,7 @@ function wireCartPanel() {
     const groupLines = lines.filter(l => l.is_group);
     const normalLines = lines.filter(l => !l.is_group);
     const orderCode = $("rq_srcorder").options[$("rq_srcorder").selectedIndex].textContent;
-    const orderLabel = (type === "brew_order" ? "Lệnh nấu " : "Lệnh lọc ") + orderCode;
+    const orderLabel = (type === "production_order" ? "Lệnh SX (ERP) " : "Lệnh lọc ") + orderCode;
     for (const l of normalLines) {
       REQUEST_CART.push({ material_id: l.material_id, material_code: l.material_code || l.material_id,
         lot_id: null, lot_code: null, quantity: l.quantity, uom: l.uom || "kg",
@@ -6593,15 +6298,16 @@ function refreshRequestsHistoryBlock() {
 }
 
 async function renderRequestsSection() {
-  const [requests, mats, lots, brewOrders, filterMasterOrders] = await Promise.all([
+  const [requests, mats, lots, filterMasterOrders, prodOrders] = await Promise.all([
     GET("/warehouse/requests"), GET("/materials"), GET("/lots"),
-    GET("/brewing/orders").catch(() => []), GET("/brewing/filter-master-orders").catch(() => [])]);
+    GET("/brewing/filter-master-orders").catch(() => []),
+    GET("/orders").catch(() => [])]);
   // Chỉ hiện lệnh CHƯA hoàn thành trong danh sách nạp vật tư — lệnh đã hoàn thành (đủ sản
   // lượng + hết mẻ) không còn cần đề nghị nhận thêm NVL nữa, ẩn đi để tránh chọn nhầm.
-  REQ_CACHE.brewOrders = brewOrders.filter(o => !o.is_complete).map(o => ({ id: o.brew_order_id,
-    order_code: `${o.order_code} · ${o.product_code || o.product_desc || "(chưa gán dịch bia)"} · ${o.created_at ? fmt(o.created_at) : "—"}` }));
   REQ_CACHE.filterMasterOrders = filterMasterOrders.filter(o => !o.is_complete_all)
     .map(o => ({ id: o.filter_master_order_id, order_code: o.order_code }));
+  REQ_CACHE.productionOrders = prodOrders.filter(o => o.status !== "completed").map(o => ({ id: o.order_id,
+    order_code: `${o.order_code} · ${o.beer_type_name || "(chưa gán loại bia)"} · ${o.created_at ? fmt(o.created_at) : "—"}` }));
   REQ_CACHE.matById = Object.fromEntries(mats.map(m => [m.material_id, m]));
   REQ_CACHE.lots = lots;
   const lotById = Object.fromEntries(lots.map(l => [l.lot_id, l]));
@@ -8316,50 +8022,17 @@ function printFermentForm(data, lmCode) {
   setTimeout(() => w.print(), 300);
 }
 
-async function openBrewOrderModal(orderId) {
-  const o = await GET(`/brewing/orders/${orderId}`);
-  const lines = o.lines || [];
-  const shortageCount = lines.filter(l => l.shortage).length;
-  modal(`<h3>Lệnh nấu — <code class="k">${esc(o.order_code)}</code></h3>
-    <div class="muted" style="margin-bottom:8px">
-      Dịch bia: <b>${esc(o.product_code || o.product_desc || "—")}</b> ·
-      Công thức: <b>${o.recipe_code ? esc(o.recipe_code) + " v" + o.recipe_version_no : "—"}</b>${o.recipe_name ? ` — ${esc(o.recipe_name)}` : ""}${o.recipe_note ? ` (${esc(o.recipe_note)})` : ""} ·
-      Số mẻ KH: <b>${o.planned_batch_count}</b> ·
-      Sản lượng thực tế/KH: <b>${o.actual_volume_hl}/${o.planned_volume_hl} hl</b> (±${o.volume_tolerance_hl}hl)<br/>
-      ${o.is_complete
-        ? `<span style="color:var(--green)">✓ Hoàn thành — mã nấu ${o.records.map(r => esc(r.brew_code)).join(", ")}</span>`
-        : (o.is_executed
-            ? `<span class="muted">Đang nấu — mã nấu ${o.records.map(r => esc(r.brew_code)).join(", ")}</span>`
-            : `<span class="muted">Chưa thực hiện nấu</span>`)}
-      ${shortageCount ? ` · <span style="color:var(--red)">⚠ ${shortageCount} dòng NVL không đủ tồn (tại thời điểm lập phiếu)</span>` : ""}
-      ${o.issued_by ? `<br/>Người ra lệnh: ${esc(o.issued_by)}` : ""}
-    </div>
-    <div class="tablewrap" style="max-height:50vh"><table>
-      <thead><tr><th>STT</th><th>Tên NVL</th><th>ĐVT</th><th>Nhu cầu 1 mẻ</th><th>Nhu cầu Tổng mẻ</th>
-        <th>SL lấy tại Kho công ty</th><th>SL lấy tại Kho phân xưởng</th>
-        <th>Tồn Kho công ty (lúc lập)</th><th>Tồn Kho phân xưởng (lúc lập)</th><th>Đơn giá</th><th></th></tr></thead>
-      <tbody>${lines.map(l => l.is_header
-        ? `<tr style="font-weight:700"><td colspan=11>${esc(l.stt_label || "")} ${esc(l.material_name || "")}</td></tr>`
-        : `<tr class="${l.shortage ? "row-red" : ""}"><td>${esc(l.stt_label || "")}</td><td>${esc(l.material_name || "—")}</td>
-          <td>${esc(l.uom || "")}</td><td>${l.qty_per_batch ?? "—"}</td><td>${l.qty_total ?? "—"}</td>
-          <td>${l.qty_from_company ?? "—"}</td><td>${l.qty_from_workshop ?? "—"}</td>
-          <td>${l.stock_company_snapshot ?? "—"}</td><td>${l.stock_workshop_snapshot ?? "—"}</td>
-          <td>${l.unit_price ?? "—"}</td><td>${l.shortage ? `<span style="color:var(--red)">⚠ Thiếu</span>` : `<span style="color:var(--green)">Đủ</span>`}</td></tr>${bomMemberRowsHtml(l, 3, 2, true)}`).join("") ||
-        `<tr><td colspan=11 class="muted">Chưa có dòng NVL.</td></tr>`}</tbody></table></div>`);
-}
-
-// ---- Modal: xem Lệnh sản xuất (ERP) — mirror openBrewOrderModal (Lệnh nấu); o.lines
-// là định mức NVL ĐÃ LƯU lúc lập/sửa lệnh (SL lấy tại 2 kho + thành viên Nhóm vật tư đã chọn)
-// — xem services/orders.py::get_order. ----
+// ---- Modal: xem Lệnh sản xuất (ERP); o.lines là định mức NVL ĐÃ LƯU lúc lập/sửa lệnh (SL
+// lấy tại 2 kho + thành viên Nhóm vật tư đã chọn) — xem services/orders.py::get_order. ----
 async function openProductionOrderModal(orderId) {
   const o = await GET(`/orders/${orderId}`);
   const lines = o.lines || [];
   modal(`<h3>Lệnh sản xuất (ERP) — <code class="k">${esc(o.order_code)}</code></h3>
     <div class="muted" style="margin-bottom:8px">
-      Sản phẩm: <b>${esc(prodName(o.product_id))}</b> · SL kế hoạch: <b>${o.planned_qty} ${esc(o.uom)}</b> · Ưu tiên: <b>${o.priority}</b> ·
+      ${o.beer_type_name ? `Loại bia: <b>${esc(o.beer_type_name)}</b> · ` : ""}Dịch bia: <b>${esc(prodName(o.product_id))}</b> · SL kế hoạch: <b>${o.planned_qty} ${esc(o.uom)}</b> · Ưu tiên: <b>${o.priority}</b> ·
       ${badge(o.status)}${esc(o.status)}
       ${o.issued_by ? `<br/>Người ra lệnh: ${esc(o.issued_by)}` : ""}
-      ${o.recipe_code ? `<br/>Công thức: <b>${esc(o.recipe_code)} v${o.recipe_version_no}</b>${o.recipe_name ? " — " + esc(o.recipe_name) : ""}${o.recipe_note ? ` (${esc(o.recipe_note)})` : ""} · Số mẻ KH: <b>${o.planned_batch_count ?? "—"}</b>` : ""}
+      ${o.recipe_code ? `<br/>Version: <b>v${o.recipe_version_no}</b>${o.recipe_note ? ` (${esc(o.recipe_note)})` : ""} · Số mẻ KH: <b>${o.planned_batch_count ?? "—"}</b>` : ""}
     </div>
     <div class="tablewrap" style="max-height:50vh"><table>
       <thead><tr><th>STT</th><th>Tên NVL</th><th>ĐVT</th><th>Nhu cầu 1 mẻ</th><th>Nhu cầu Tổng mẻ</th>
@@ -8483,94 +8156,7 @@ function printFilterMasterOrder(m) {
   setTimeout(() => w.print(), 300);
 }
 
-function printBrewOrder(o) {
-  const dash = (v) => (v === null || v === undefined || v === "" ? "—" : esc(String(v)));
-  const blank = (v) => (v === null || v === undefined || v === "" ? "" : esc(String(v)));
-  const safetyText = o.safety_note ||
-    "Thực hiện đúng quy trình vận hành thiết bị, chỉ vận hành khi thống nhất thông tin giữa thợ chính và thợ phụ, các bộ phận khác có liên quan.";
-  const lines = o.lines || [];
-  const lineRows = lines.map(l => {
-    if (l.is_header) return `<tr><td colspan=10 style="font-weight:700">${dash(l.stt_label)} ${dash(l.material_name)}</td></tr>`;
-    // Cột "Tổng mẻ" (Lượng) in đúng phần SL lấy tại Kho công ty — không phải Nhu cầu Tổng mẻ đầy
-    // đủ (l.qty_total): phần còn lại đã có sẵn tại Kho phân xưởng, không cần xuất thêm. Cột
-    // "Thực xuất" để trống hoàn toàn cho thủ kho tự ghi tay lúc xuất thực tế.
-    // Dòng Nhóm vật tư khai định mức riêng từng thành viên (member_breakdown có qty_per_batch)
-    // — in thêm 1 dòng con mỗi mã ĐÃ CHỌN, kèm đúng mã + định mức riêng của mã đó, để thủ kho
-    // biết chính xác cần xuất mã nào bao nhiêu (không chỉ thấy tên nhóm chung).
-    const memberRows = (l.member_breakdown || []).filter(mb => mb.qty_per_batch != null).map(mb =>
-      `<tr><td></td><td style="padding-left:14px">↳ ${dash(mb.material_code)} — ${dash(mb.material_name)}</td><td>${dash(l.uom)}</td>
-        <td>${dash(mb.qty_per_batch)}</td><td>${dash(mb.qty_from_company)}</td><td></td><td></td>
-        <td></td><td></td><td></td></tr>`).join("");
-    return `<tr><td>${dash(l.stt_label)}</td><td>${dash(l.material_name)}</td><td>${dash(l.uom)}</td>
-        <td>${dash(l.qty_per_batch)}</td><td>${dash(l.qty_from_company)}</td><td></td><td></td>
-        <td>${blank(l.unit_price)}</td><td></td><td></td></tr>${memberRows}`;
-  }).join("");
-  const orderSection = `<div class="pf-section" style="border:1px solid #000;padding:6px;margin-bottom:10px">
-    <div>1/ Nấu: - Bia .......................................... mã số ........................................................ Số lượng: <b>${dash(o.planned_batch_count)}</b> mẻ ≥ <b>${dash(o.planned_volume_hl)}</b> hl dịch${o.bx_min || o.bx_max ? `, với Bx: ${dash(o.bx_min)}-${dash(o.bx_max)}%` : ""}</div>
-    <div>- Chuyển dịch vào Tank lên men: ...........................................................................................................</div>
-    <table class="pf-tbl"><thead>
-      <tr><th rowspan=2>STT</th><th rowspan=2>Tên, nhãn hiệu quy cách NVL</th><th rowspan=2>ĐVT</th>
-        <th colspan=2>Lượng</th><th colspan=2>Thực xuất</th><th rowspan=2>Đơn giá</th><th colspan=2>T/Tiền (đồng)</th></tr>
-      <tr><th>Nhu cầu 1 mẻ</th><th>Tổng mẻ</th><th>1 mẻ</th><th>Tổng mẻ</th><th>Nhu cầu</th><th>Thực lĩnh</th></tr>
-    </thead>
-    <tbody>${lineRows || '<tr><td colspan=10 style="text-align:center">—</td></tr>'}
-      <tr style="font-weight:700"><td colspan=8 style="text-align:right">TỔNG GIÁ TRỊ</td><td></td><td></td></tr>
-    </tbody></table>
-  </div>`;
-  const html = `<!doctype html><html><head><meta charset="utf-8"/><title>Lệnh nấu — ${esc(o.order_code)}</title>
-    <style>
-      @page { size: A4; margin: 12mm; }
-      * { box-sizing: border-box; }
-      body{font-family:Arial,Helvetica,sans-serif;color:#000;background:#fff;margin:0;font-size:12px;line-height:1.35}
-      h2{font-size:16px;margin:6px 0 10px;text-align:center;font-weight:700;text-transform:uppercase}
-      .pf-header{display:flex;justify-content:space-between;margin-bottom:6px;font-size:11.5px}
-      .pf-header .right{text-align:center}
-      .pf-section{margin-bottom:8px}
-      .pf-section h3{font-size:12.5px;margin:0 0 3px;font-weight:700}
-      table.pf-tbl{border-collapse:collapse;width:100%;margin-bottom:4px}
-      table.pf-tbl th, table.pf-tbl td{border:1px solid #000;padding:3px 5px;text-align:left;font-size:11px}
-      table.pf-tbl th{background:#eee;font-weight:700;text-align:center}
-      table.pf-tbl td{text-align:center}
-      table.pf-tbl td:nth-child(2){text-align:left}
-      .pf-sign{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-top:30px;text-align:center;font-size:11.5px}
-      .pf-sign b{display:block;margin-bottom:2px}
-      .pf-sign span{display:block;color:#555;margin-bottom:40px}
-    </style></head><body>
-    <div class="pf-header">
-      <div><b>CÔNG TY CP BIA &amp; NGK ĐÔNG MAI</b><br/>Pxsx bia ĐM<br/>Số: ${dash(o.order_code)}</div>
-      <div class="right"><b>CỘNG HÒA XÃ HỘI CHỦ NGHĨA VIỆT NAM</b><br/>Độc lập – Tự do – Hạnh phúc</div>
-    </div>
-    <h2>LỆNH NẤU BIA KIÊM PHIẾU XUẤT KHO</h2>
-    <div class="pf-section"><h3>I. Người ra lệnh</h3><div>${dash(o.issued_by || o.created_by)}</div></div>
-    <div class="pf-section"><h3>II. Người nhận lệnh</h3>
-      <div>1/ Người T/hiện: ${dash(o.executor_unit)}</div>
-      <div>2/ Người xuất hàng: ${dash(o.warehouse_keeper)}</div></div>
-    <div class="pf-section"><h3>III. Nội dung thực hiện</h3>
-      ${o.reference_note ? `<div>${dash(o.reference_note)}</div>` : ""}
-      ${orderSection}
-    </div>
-    <div class="pf-section"><h3>IV. Thời gian thực hiện</h3>
-      <div>Bắt đầu: Ngày ${o.start_date ? fmt(o.start_date) : "......."} — Ca: .......</div>
-      <div>Kết thúc: Ngày ${o.end_date ? fmt(o.end_date) : "......."} — Ca: .......</div></div>
-    <div class="pf-section"><h3>V. Biện pháp an toàn</h3><div>${dash(safetyText)}</div></div>
-    <div class="pf-sign">
-      <div><b>Giám đốc</b><span>(Ký, ghi rõ họ tên)</span></div>
-      <div><b>Quản đốc phân xưởng sản xuất</b><span>(Ký, ghi rõ họ tên)</span></div>
-      <div><b>Người nhận lệnh</b><span>${dash(o.executor_unit)}<br/>(Ký, ghi rõ họ tên)</span></div>
-      <div><b>Thủ kho</b><span>${dash(o.warehouse_keeper)}<br/>(Ký, ghi rõ họ tên)</span></div>
-      <div><b>P. Kế toán</b><span>(Ký, ghi rõ họ tên)</span></div>
-    </div>
-    </body></html>`;
-  const w = window.open("", "_blank");
-  if (!w) { toast("Trình duyệt chặn cửa sổ in — vui lòng cho phép popup.", "err"); return; }
-  w.document.write(html);
-  w.document.close();
-  w.focus();
-  setTimeout(() => w.print(), 300);
-}
-
-// In Lệnh sản xuất (ERP) — mirror printBrewOrder nhưng KHÔNG có nhiều "lệnh nhỏ" (1 Lệnh SX =
-// 1 dòng), nên chỉ có 1 khối nội dung thay vì lặp childSections.
+// In Lệnh sản xuất (ERP) — 1 Lệnh SX = 1 dòng, chỉ có 1 khối nội dung.
 function printProductionOrder(o, lines) {
   const dash = (v) => (v === null || v === undefined || v === "" ? "—" : esc(String(v)));
   const blank = (v) => (v === null || v === undefined || v === "" ? "" : esc(String(v)));
@@ -8617,7 +8203,7 @@ function printProductionOrder(o, lines) {
     <div class="pf-section"><h3>III. Nội dung thực hiện</h3>
       ${o.reference_note ? `<div>${dash(o.reference_note)}</div>` : ""}
       <div class="pf-section" style="border:1px solid #000;padding:6px;margin-bottom:10px">
-        <div>Sản phẩm: <b>${dash(prodName(o.product_id))}</b> · Số lượng: <b>${dash(o.planned_qty)} ${dash(o.uom)}</b>${o.planned_batch_count ? ` ≈ <b>${dash(o.planned_batch_count)}</b> mẻ` : ""}${o.recipe_code ? ` · Công thức: ${dash(o.recipe_code)} v${o.recipe_version_no}` : ""}</div>
+        <div>${o.beer_type_name ? `Loại bia: <b>${dash(o.beer_type_name)}</b> · ` : ""}Dịch bia: <b>${dash(prodName(o.product_id))}</b> · Số lượng: <b>${dash(o.planned_qty)} ${dash(o.uom)}</b>${o.planned_batch_count ? ` ≈ <b>${dash(o.planned_batch_count)}</b> mẻ` : ""}${o.recipe_code ? ` · Version: v${o.recipe_version_no}` : ""}</div>
         <table class="pf-tbl"><thead>
           <tr><th rowspan=2>STT</th><th rowspan=2>Tên, nhãn hiệu quy cách NVL</th><th rowspan=2>ĐVT</th>
             <th colspan=2>Lượng</th><th colspan=2>Thực xuất</th><th rowspan=2>Đơn giá</th><th colspan=2>T/Tiền (đồng)</th></tr>
@@ -9556,10 +9142,10 @@ VIEWS.process = async function () {
 
   else if (sec === "nau") {
     const ynNau = YEARS.nau;
-    const [rows, fermentTanks, yeast, products, brewOrders] = await Promise.all([
+    const [rows, fermentTanks, yeast, products, prodOrders] = await Promise.all([
       GET("/brewing/brews" + (ynNau ? "?" + ynNau.map(y => "years=" + y).join("&") : "")),
       GET("/brewing/ferment-tanks").catch(() => []), GET("/process/yeast").catch(() => []),
-      GET("/products").catch(() => []), GET("/brewing/orders").catch(() => [])]);
+      GET("/products").catch(() => []), GET("/orders").catch(() => [])]);
     // Chỉ hiện tank lên men đang TRỐNG (không bị 1 lô LM còn hoạt động chiếm dụng) — xem
     // services/dashboard.py::available_ferment_tanks.
     const tankOptsNau = fermentTanks.filter(t => !t.occupied).map(t => `<option value="${esc(t.code)}">${esc(t.code)}</option>`).join("") ||
@@ -9571,20 +9157,24 @@ VIEWS.process = async function () {
       `<option value="">(chưa có dịch bia nào — khai báo Dịch bia ở Danh mục)</option>`;
     const canLockLot = _hasPerm("quality.release");
     const isAdminLot = CURRENT_USER && CURRENT_USER.role === "admin";
-    // Lệnh nấu CHƯA hoàn thành — chọn thẳng 1 lệnh để tạo mã nấu (đã bỏ lớp "lệnh nấu
-    // lớn"/"lệnh nấu nhỏ" — mỗi Lệnh nấu giờ đứng phẳng, không còn 2 tầng dropdown).
-    const openOrdersNau = brewOrders.filter(o => !o.is_complete);
-    const orderOptsLn = `<option value="">(chọn Lệnh nấu — bắt buộc)</option>` + openOrdersNau.map(o =>
-      `<option value="${esc(o.brew_order_id)}" data-wort="${esc(o.product_id || "")}" data-vol="${o.planned_volume_hl}" data-batchcount="${o.planned_batch_count != null ? o.planned_batch_count : ""}">${esc(o.order_code)} — ${esc(o.product_code || o.product_desc || "—")} — ${o.actual_volume_hl}/${o.planned_volume_hl} hl</option>`).join("");
+    const productsById = {}; products.forEach(p => productsById[p.product_id] = p);
+    // ProductionOrder.planned_qty ĐVT tự do theo uom — quy đổi về hl (giống mọi số liệu ở tab
+    // này) khi uom là "L", coi như đã là hl với mọi ĐVT khác.
+    const toHl = (o) => (o.uom && o.uom.trim().toLowerCase() === "l") ? o.planned_qty / 100 : o.planned_qty;
+    // Lệnh SX (ERP) CHƯA hoàn thành — chọn thẳng 1 lệnh để tạo mã nấu (thay "Lệnh nấu" cũ,
+    // nay chỉ còn giá trị lịch sử — xem tab "Lệnh SX → Lệnh nấu").
+    const openOrdersNau = prodOrders.filter(o => o.status !== "completed");
+    const orderOptsLn = `<option value="">(chọn Lệnh sản xuất — bắt buộc)</option>` + openOrdersNau.map(o =>
+      `<option value="${esc(o.order_id)}" data-wort="${esc(o.product_id || "")}" data-vol="${toHl(o)}" data-batchcount="${o.planned_batch_count != null ? o.planned_batch_count : ""}">${esc(o.order_code)} — ${esc((productsById[o.product_id] || {}).name || o.beer_type_code || "—")} — KH ${toHl(o)} hl</option>`).join("");
     body = `<div class="panel"><h2>Thêm thông tin nấu</h2>
       <div class="muted" style="margin-bottom:6px">1 mã nấu = 1 lần nấu vào 1 tank — chọn <b>Tank lên men</b> để tự động chuyển mã nấu này sang lên men (xem ở tab "Lên men").
         Sau khi tạo, bấm "Mẻ" trên dòng đó để khai báo các mẻ cụ thể (số mẻ từ Braumat, VD 123,124,125,126) — mỗi mẻ nhập nguyên liệu &amp; chỉ tiêu riêng.
-        Chọn <b>Lệnh nấu</b> (chưa hoàn thành) — <b>Dịch bia</b> trích tự động từ lệnh đã chọn (không sửa được, tránh lệch giữa mã nấu và lệnh) —
-        nếu lệnh chưa gắn dịch bia thì chọn tay. Tạo lệnh mới ở tab "Lệnh SX → Lệnh nấu" nếu danh sách trống.
+        Chọn <b>Lệnh sản xuất</b> (chưa hoàn thành) — <b>Dịch bia</b> trích tự động từ lệnh đã chọn (không sửa được, tránh lệch giữa mã nấu và lệnh) —
+        nếu lệnh chưa gắn dịch bia thì chọn tay. Tạo lệnh mới ở tab "Lệnh SX → Lệnh SX (ERP)" nếu danh sách trống.
         <b>Tank lên men</b> chỉ hiện tank đang trống (không bị lô LM khác chiếm dụng).
         <b>Ngày KT (nạp đầy tank)</b> không nhập tay — tự tính bằng giờ kết thúc của mẻ cuối cùng khi vận hành bấm "Kết thúc" ở mẻ đó, hiển thị ở cột tương ứng bên dưới.</div>
       <div class="row">
-        <div class="field"><label>Lệnh nấu</label><select id="nb_order">${orderOptsLn}</select></div>
+        <div class="field"><label>Lệnh sản xuất</label><select id="nb_order">${orderOptsLn}</select></div>
         <div class="field"><label>Mã nấu</label><input id="nb_code" placeholder="VD: N-0715"/></div>
       </div>
       <div class="row">
@@ -9601,13 +9191,13 @@ VIEWS.process = async function () {
       <div class="panel"><h2>Thông tin nấu <span class="muted">(${rows.length})</span></h2>
       ${yearFilterControl("nau", ynNau)}
       <input class="searchbox" data-tbl="t_nau" placeholder="Enter text to search..."/>
-      <div class="tablewrap"><table id="t_nau"><thead><tr><th>Mã nấu</th><th>Khóa mã nấu</th><th>Lệnh nấu</th><th>Ngày nấu</th><th>Ngày KT (nạp đầy tank)</th><th>Lô LM</th><th>Dịch nha</th><th>SL kế hoạch/hl</th><th>SL thực tế/hl</th>
+      <div class="tablewrap"><table id="t_nau"><thead><tr><th>Mã nấu</th><th>Khóa mã nấu</th><th>Lệnh sản xuất</th><th>Ngày nấu</th><th>Ngày KT (nạp đầy tank)</th><th>Lô LM</th><th>Dịch nha</th><th>SL kế hoạch/hl</th><th>SL thực tế/hl</th>
         <th>Tank</th><th>Số mẻ</th><th></th></tr></thead>
       <tbody>${rows.map(b => `<tr class="row-${b.color}"><td class="code">${esc(b.brew_code)}</td>
         <td style="white-space:nowrap">${b.locked
             ? (isAdminLot ? `<button class="btn sm sec" data-unlocklot="brew|${esc(b.brew_id)}">Mở khóa</button>` : '<span class="muted">—</span>')
             : (canLockLot ? `<button class="btn sm" data-locklot="brew|${esc(b.brew_id)}">Khóa</button>` : '<span class="muted">—</span>')}</td>
-        <td class="muted">${esc(b.brew_order_code || "—")}</td><td>${b.first_batch_started_at ? fmt(b.first_batch_started_at) : "—"}</td>
+        <td class="muted">${esc(b.production_order_code || b.brew_order_code || "—")}</td><td>${b.first_batch_started_at ? fmt(b.first_batch_started_at) : "—"}</td>
         <td class="muted">${b.kt_date ? fmt(b.kt_date) : "—"}</td><td class="muted">${esc(b.lm_code || "—")}</td>
         <td>${esc(b.wort_type)}</td><td>${b.volume_hl}</td>
         <td class="muted" title="Tổng &quot;Tổng lượng dịch&quot; (Ghi chép nấu) cộng dồn qua các mẻ">${b.actual_volume_hl ?? "—"}</td>
@@ -9925,7 +9515,7 @@ VIEWS.process = async function () {
   if (sec === "nau") {
     const updateNbWortFromOrder = () => {
       const opt = $("nb_order").selectedOptions[0];
-      // Dịch bia trích từ Lệnh nấu đã chọn — lệnh đã chốt sẵn 1 dịch bia lúc lập, không
+      // Dịch bia trích từ Lệnh sản xuất đã chọn — lệnh đã chốt sẵn 1 dịch bia lúc lập, không
       // cho chọn khác đi để tránh lệch giữa mã nấu và lệnh sản xuất của nó (gợi ý NVL/BOM sẽ sai).
       if (opt && opt.value && opt.dataset.wort) {
         $("nb_wort").value = opt.dataset.wort;
@@ -9934,15 +9524,15 @@ VIEWS.process = async function () {
         $("nb_wort").disabled = false;
       }
       if (!opt || !opt.value) { $("nb_vol").disabled = false; $("nb_batchcount").value = ""; return; }
-      // SL nấu/hl luôn LẤY THEO sản lượng kế hoạch (planned_volume_hl) của Lệnh nấu đã
-      // chọn, không cho sửa tay — không chia theo số mẻ, vì planned_batch_count là số MẺ
+      // SL nấu/hl luôn LẤY THEO sản lượng kế hoạch (planned_qty, quy đổi hl) của Lệnh sản
+      // xuất đã chọn, không cho sửa tay — không chia theo số mẻ, vì planned_batch_count là số MẺ
       // (Braumat) bên trong 1 mã nấu, không phải số mã nấu chia sẻ sản lượng của lệnh (1 lệnh
       // có thể có NHIỀU mã nấu, mỗi mã nấu cộng dồn tới khi đạt kế hoạch — xem
-      // services/brew_order.py::_is_complete).
+      // services/orders.py::recompute_status_after_finish).
       const vol = parseFloat(opt.dataset.vol) || 0;   // đã là hl (tổng kế hoạch)
       $("nb_vol").value = vol;
       $("nb_vol").disabled = true;
-      // Số mẻ kế hoạch của Lệnh nấu — chỉ hiển thị để người lập biết cần khai bao nhiêu mẻ
+      // Số mẻ kế hoạch của Lệnh sản xuất — chỉ hiển thị để người lập biết cần khai bao nhiêu mẻ
       // (Braumat) khi bấm "Mẻ" sau khi tạo mã nấu; không auto-tạo mẻ vì số mẻ Braumat là số thật
       // do vận hành nhập, hệ thống không tự sinh ra được (xem +Thêm mẻ ở openBrewBatchesModal).
       $("nb_batchcount").value = opt.dataset.batchcount || "—";
@@ -9951,7 +9541,7 @@ VIEWS.process = async function () {
     updateNbWortFromOrder();
     $("nb_add").onclick = () => guard(async () => {
       const orderId = $("nb_order").value;
-      if (!orderId) throw new Error("Chọn Lệnh nấu trước khi thêm mã nấu.");
+      if (!orderId) throw new Error("Chọn Lệnh sản xuất trước khi thêm mã nấu.");
       const code = $("nb_code").value.trim();
       if (!code) throw new Error("Nhập mã nấu.");
       const tank = $("nb_tank").value || null;
@@ -9964,7 +9554,7 @@ VIEWS.process = async function () {
         note: $("nb_note").value.trim() || null,
         lm_code: lmCode, tank_lm: tank,
         yeast_gen: $("nb_yeast").value || null,
-        brew_order_id: orderId });
+        production_order_id: orderId });
       toast("Đã thêm mã nấu" + (tank ? ` — đã chuyển sang lên men tại tank ${tank}` : "")); render("process");
     });
   }
@@ -11650,6 +11240,11 @@ VIEWS.master = async function () {
         <div class="field"><label>Ngưỡng mẻ lọc số Thấp (lít)</label><input id="ops_line_yield_low" type="number" step="any" value="${opsSettings.filter_line_yield_low_l}" ${canManage ? "" : "disabled"}/></div>
         <div class="field"><label>Ngưỡng mẻ lọc số Cao (lít)</label><input id="ops_line_yield_high" type="number" step="any" value="${opsSettings.filter_line_yield_high_l}" ${canManage ? "" : "disabled"}/></div>
       </div>
+      <div class="muted" style="margin:10px 0 6px">Sai số sản lượng (±hl) dùng CHUNG cho mọi Lệnh SX (ERP) khi tự động xét "hoàn thành" — dịch
+        thực tế cộng dồn từ các mã nấu gắn vào lệnh đó đạt SL kế hoạch trừ sai số này thì lệnh tự chuyển "Hoàn thành" (xem tab "Lệnh SX → Lệnh SX (ERP)").</div>
+      <div class="row">
+        <div class="field"><label>Sai số sản lượng Lệnh SX (ERP) (±hl)</label><input id="ops_erp_tol" type="number" step="any" value="${opsSettings.erp_order_volume_tolerance_hl}" ${canManage ? "" : "disabled"}/></div>
+      </div>
       <div class="muted" style="margin:10px 0 6px">Mã nhận dạng nhà máy — in/dập trên bao bì thực tế, giúp truy vết ngoài thị trường sản phẩm được chiết từ nhà máy nào.</div>
       <div class="row">
         <div class="field"><label>Mã nhà máy</label><input id="ops_factory_code" value="${esc(opsSettings.factory_code || "")}" placeholder="VD: DM01" style="width:120px" ${canManage ? "" : "disabled"}/></div>
@@ -11716,6 +11311,7 @@ VIEWS.master = async function () {
         finished_goods_receive_max_backdate_days: parseFloat($("ops_fg_max_backdate_days").value) || 15,
         fg_day_cutoff_hour: Math.min(23, Math.max(0, parseInt($("ops_fg_cutoff_hour").value, 10) || 0)),
         factory_code: $("ops_factory_code").value.trim() || null,
+        erp_order_volume_tolerance_hl: parseFloat($("ops_erp_tol").value) || 0,
       });
       toast("Đã lưu cài đặt vận hành"); render("master");
     });

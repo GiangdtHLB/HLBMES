@@ -10,7 +10,6 @@ Cấu trúc link tới Mẻ sản xuất (BatchExecution) giữ nguyên như cũ
 vẫn là khóa mà WorkOrder/BatchExecution tham chiếu tới (xem services/workorders.py,
 services/batches.py) — thêm recipe_version_id/planned_batch_count không thay đổi gì ở đó."""
 
-from datetime import datetime
 from typing import Optional
 
 from sqlalchemy import select
@@ -20,9 +19,12 @@ from ..audit import record_audit
 from ..common import new_id, utcnow
 from ..errors import DomainError, NotFoundError
 from ..models.batches import BatchExecution
+from ..models.brewing import BrewRecord
+from ..models.master import BeerType
 from ..models.orders import ProductionOrder, ProductionOrderMaterialLine
 from ..models.recipes import Recipe, RecipeVersion
 from ..security import User
+from . import ops_setting as ops_setting_svc
 from .brew_order import (
     _annotate_stock,
     _apply_qty_split_override,
@@ -31,6 +33,7 @@ from .brew_order import (
     _materials_by_id,
     _member_breakdown,
     _member_declared_breakdown,
+    _real_actual_by_brew,
     _resolve_group_members,
     _stock_snapshot,
     _validate_member_selection,
@@ -151,11 +154,11 @@ def _build_output_lines(db: Session, order_id: str) -> list:
 
 
 def _enrich(db: Session, order: ProductionOrder, recipes_by_id: dict = None, versions_by_id: dict = None,
-            executed_ids: set = None, with_lines: bool = False) -> dict:
-    """recipes_by_id/versions_by_id/executed_ids là bulk-lookup do list_orders() nạp sẵn (tránh
-    N+1 query) — khi gọi lẻ (create_order/get_order, không truyền) thì tự query trực tiếp.
-    with_lines=True (chỉ get_order) nạp thêm định mức NVL đã lưu — list_orders() để trống vì
-    bảng danh sách không cần và tránh N+1 query nặng."""
+            executed_ids: set = None, with_lines: bool = False, beer_types_by_id: dict = None) -> dict:
+    """recipes_by_id/versions_by_id/executed_ids/beer_types_by_id là bulk-lookup do list_orders()
+    nạp sẵn (tránh N+1 query) — khi gọi lẻ (create_order/get_order, không truyền) thì tự query
+    trực tiếp. with_lines=True (chỉ get_order) nạp thêm định mức NVL đã lưu — list_orders() để
+    trống vì bảng danh sách không cần và tránh N+1 query nặng."""
     is_executed = order.order_id in executed_ids if executed_ids is not None else bool(
         db.execute(select(BatchExecution.batch_id).where(BatchExecution.order_id == order.order_id)).first())
     if not order.recipe_version_id:
@@ -170,6 +173,12 @@ def _enrich(db: Session, order: ProductionOrder, recipes_by_id: dict = None, ver
         recipe = recipes_by_id.get(rv.recipe_id)
     else:
         recipe = db.get(Recipe, rv.recipe_id)
+    if not recipe:
+        beer_type = None
+    elif beer_types_by_id is not None:
+        beer_type = beer_types_by_id.get(recipe.beer_type_id)
+    else:
+        beer_type = db.get(BeerType, recipe.beer_type_id)
     return {
         "order_id": order.order_id, "order_code": order.order_code, "product_id": order.product_id,
         "planned_qty": order.planned_qty, "uom": order.uom, "due_time": order.due_time,
@@ -177,6 +186,8 @@ def _enrich(db: Session, order: ProductionOrder, recipes_by_id: dict = None, ver
         "recipe_version_id": order.recipe_version_id,
         "recipe_code": recipe.code if recipe else None,
         "recipe_name": recipe.name if recipe else None,
+        "beer_type_code": beer_type.code if beer_type else None,
+        "beer_type_name": beer_type.name if beer_type else None,
         "recipe_version_no": rv.version_no if rv else None,
         "recipe_note": rv.change_reason if rv else None,
         "planned_batch_count": order.planned_batch_count,
@@ -198,10 +209,13 @@ def list_orders(db: Session) -> list:
     recipe_ids = {v.recipe_id for v in versions_by_id.values()}
     recipes_by_id = {r.recipe_id: r for r in db.execute(
         select(Recipe).where(Recipe.recipe_id.in_(recipe_ids))).scalars().all()} if recipe_ids else {}
+    beer_type_ids = {r.beer_type_id for r in recipes_by_id.values()}
+    beer_types_by_id = {bt.beer_type_id: bt for bt in db.execute(
+        select(BeerType).where(BeerType.beer_type_id.in_(beer_type_ids))).scalars().all()} if beer_type_ids else {}
     order_ids = {o.order_id for o in orders}
     executed_ids = {row[0] for row in db.execute(select(BatchExecution.order_id).where(
         BatchExecution.order_id.in_(order_ids))).all()} if order_ids else set()
-    return [_enrich(db, o, recipes_by_id, versions_by_id, executed_ids) for o in orders]
+    return [_enrich(db, o, recipes_by_id, versions_by_id, executed_ids, beer_types_by_id=beer_types_by_id) for o in orders]
 
 
 def get_order(db: Session, order_id: str) -> dict:
@@ -272,3 +286,74 @@ def preview_bom(db: Session, recipe_version_id: str, planned_batch_count: int) -
     lines = build_lines_from_recipe_version(db, recipe_version_id, planned_batch_count, 0.0)
     company_stock, workshop_stock = _stock_snapshot(db)
     return _annotate_stock(lines, company_stock, workshop_stock, _materials_by_id(db))
+
+
+def _actual_volume_hl_for_order(db: Session, order_id: str) -> float:
+    """Sản lượng thực tế (hl) cộng dồn từ TẤT CẢ mã nấu (BrewRecord) đã tạo qua Lệnh SX này —
+    tái dùng nguyên _real_actual_by_brew (đo thật từ BrewProcessLog), KHÔNG cộng volume_hl
+    nhập tay lúc tạo mã nấu. Mirror brew_order.py::_actual_volume_hl."""
+    brew_ids = db.execute(select(BrewRecord.brew_id).where(
+        BrewRecord.production_order_id == order_id)).scalars().all()
+    if not brew_ids:
+        return 0.0
+    real_actual = _real_actual_by_brew(db, brew_ids)
+    return round(sum(real_actual.values()), 3)
+
+
+def _planned_qty_in_hl(order: ProductionOrder) -> float:
+    """Quy đổi planned_qty (ĐVT tự do theo order.uom) về hl để so với sản lượng thực tế —
+    giả định: uom "L" (lít) quy đổi /100, mọi ĐVT khác coi như đã là hl."""
+    if order.uom and order.uom.strip().lower() == "l":
+        return order.planned_qty / 100.0
+    return order.planned_qty
+
+
+def mark_in_progress(db: Session, order_id: str) -> None:
+    """Gọi ngay sau khi tạo mã nấu ĐẦU TIÊN từ 1 Lệnh SX (ERP) — released -> in_progress. Không
+    làm gì nếu lệnh đã ở trạng thái khác (in_progress/completed/cancelled)."""
+    order = db.get(ProductionOrder, order_id)
+    if order and order.status == "released":
+        order.status = "in_progress"
+        db.commit()
+
+
+def recompute_status_after_finish(db: Session, order_id: str, user: User) -> None:
+    """Gọi sau khi 1 mẻ nấu thuộc Lệnh SX này bấm "Kết thúc" — in_progress -> completed khi
+    sản lượng thực tế đạt kế hoạch trừ sai số CHUNG (Cài đặt vận hành,
+    erp_order_volume_tolerance_hl), KHÔNG cần chờ mọi mẻ kết thúc như BrewOrder (đơn giản hơn
+    theo đúng yêu cầu — chỉ xét ngưỡng sản lượng)."""
+    order = db.get(ProductionOrder, order_id)
+    if not order or order.status != "in_progress":
+        return
+    tolerance = ops_setting_svc.get_settings(db).erp_order_volume_tolerance_hl
+    actual = _actual_volume_hl_for_order(db, order_id)
+    if actual >= _planned_qty_in_hl(order) - tolerance:
+        order.status = "completed"
+        record_audit(db, entity_type="order", entity_id=order.order_id, action="complete",
+                     actor=user, after={"order_code": order.order_code, "actual_volume_hl": actual})
+        db.commit()
+
+
+def recompute_status_after_delete(db: Session, order_id: str, user: User) -> None:
+    """Gọi sau khi XÓA 1 mã nấu gắn với Lệnh SX này — status tự động có thể lùi lại (khác
+    recompute_status_after_finish chỉ tiến): hết sạch mã nấu -> về lại "released" (như chưa
+    từng tạo mã nấu nào); còn mã nấu nhưng sản lượng thực tế rớt xuống dưới ngưỡng -> lùi từ
+    "completed" về "in_progress". Không đụng "cancelled" (trạng thái người dùng tự chọn, không
+    do sản lượng quyết định)."""
+    order = db.get(ProductionOrder, order_id)
+    if not order or order.status not in ("in_progress", "completed"):
+        return
+    remaining = db.execute(select(BrewRecord.brew_id).where(
+        BrewRecord.production_order_id == order_id)).scalars().all()
+    before_status = order.status
+    if not remaining:
+        order.status = "released"
+    else:
+        tolerance = ops_setting_svc.get_settings(db).erp_order_volume_tolerance_hl
+        actual = _actual_volume_hl_for_order(db, order_id)
+        is_complete = actual >= _planned_qty_in_hl(order) - tolerance
+        order.status = "completed" if is_complete else "in_progress"
+    if order.status != before_status:
+        record_audit(db, entity_type="order", entity_id=order.order_id, action="revert_status",
+                     actor=user, before={"status": before_status}, after={"status": order.status})
+        db.commit()

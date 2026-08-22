@@ -189,9 +189,12 @@ def test_create_order_manual_lines(client, admin_h):
 
 
 def test_add_brew_requires_valid_order(client, admin_h, vanhanh_h, lager_product_id):
+    # Đúng 1 trong 2 (brew_order_id/production_order_id) phải được cung cấp — thiếu cả 2
+    # (hoặc thừa cả 2) là lỗi nghiệp vụ (409), không còn 422 vì cả 2 field giờ đều optional
+    # ở schema (xem routers/brewing.py::add_brew).
     missing = client.post("/api/brewing/brews", headers=vanhanh_h,
                           json={"brew_code": "BR-NOORDER", "wort_type": "Dịch test"})
-    assert missing.status_code == 422, missing.text
+    assert missing.status_code == 409, missing.text
 
     bogus = client.post("/api/brewing/brews", headers=vanhanh_h,
                         json={"brew_code": "BR-BOGUSORDER", "wort_type": "Dịch test",

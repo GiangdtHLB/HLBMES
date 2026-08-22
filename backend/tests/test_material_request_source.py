@@ -1,11 +1,13 @@
-"""Test 2 bổ sung cho "Đề nghị nhận vật tư" (MaterialRequest):
+"""Test 3 bổ sung cho "Đề nghị nhận vật tư" (MaterialRequest):
 
 1) Gắn phiếu với 1 Lệnh nấu/Lệnh lọc lớn (source_type/source_id) — chỉ để tham chiếu/báo
    cáo — và endpoint xem trước (preview) nhu cầu NVL gộp theo vật tư của lệnh đó, dùng để tự
    động điền sẵn dòng khi tạo phiếu (xem services/warehouse.py::preview_source_materials).
 2) Snapshot fifo_ok trên từng dòng NGAY LÚC XUẤT (fulfill_request_line/fulfill_all_lines) —
    trước đây phiếu đã xử lý xong không hiện được cảnh báo FIFO vì không có gì lưu lại; giờ
-   hiện đúng theo trạng thái tồn kho tại thời điểm xuất, không suy đoán lại sau này."""
+   hiện đúng theo trạng thái tồn kho tại thời điểm xuất, không suy đoán lại sau này.
+3) "Lệnh SX (ERP)" (production_order) cũng là 1 nguồn hợp lệ song song brew_order/
+   filter_master_order (xem services/warehouse.py::_aggregate_source_material_lines)."""
 
 import os
 import tempfile
@@ -111,6 +113,30 @@ def _a_filter_master_order_with_lines(client, admin_h, vanhanh_h, suffix, mat_id
     r = client.post("/api/brewing/filter-master-orders", headers=admin_h, json=payload)
     assert r.status_code == 201, r.text
     return r.json()["filter_master_order_id"]
+
+
+@pytest.fixture(scope="module")
+def lager_product_id(client, admin_h):
+    products = client.get("/api/products", headers=admin_h).json()
+    return next(p["product_id"] for p in products if p["code"] == "BIA-LAGER")
+
+
+@pytest.fixture(scope="module")
+def lager_recipe_version_id(client, admin_h, lager_product_id):
+    products = client.get("/api/products", headers=admin_h).json()
+    beer_type_id = next(p["beer_type_id"] for p in products if p["product_id"] == lager_product_id)
+    recipes = client.get("/api/recipes", headers=admin_h).json()
+    recipe = next(r for r in recipes if r["beer_type_id"] == beer_type_id)
+    versions = client.get(f"/api/recipes/{recipe['recipe_id']}/versions", headers=admin_h).json()
+    return next(v["version_id"] for v in versions if v["state"] == "effective" and v["product_id"] == lager_product_id)
+
+
+def _a_production_order(client, admin_h, code, product_id, recipe_version_id, planned_batch_count=1):
+    r = client.post("/api/orders", headers=admin_h, json={
+        "order_code": code, "product_id": product_id, "planned_qty": 100, "uom": "L",
+        "recipe_version_id": recipe_version_id, "planned_batch_count": planned_batch_count})
+    assert r.status_code == 201, r.text
+    return r.json()["order_id"]
 
 
 def test_preview_source_materials_brew_order_skips_header_row(client, admin_h, thukho_h):
@@ -411,3 +437,37 @@ def test_fulfill_all_lines_snapshots_fifo_ok(client, admin_h, thukho_h, vanhanh_
     assert fulfilled_lot["quantity"] == 10
     original_lot = next(l for l in lots if l["lot_id"] == lot_id)
     assert original_lot["quantity"] == 40
+
+
+def test_preview_source_materials_production_order(client, admin_h, lager_product_id, lager_recipe_version_id):
+    order_id = _a_production_order(client, admin_h, "PO-SRCPRE01", lager_product_id, lager_recipe_version_id)
+
+    r = client.get("/api/warehouse/requests/source-preview", headers=admin_h,
+                   params={"source_type": "production_order", "source_id": order_id})
+    assert r.status_code == 200, r.text
+    lines = {l["material_name"]: l for l in r.json() if not l["is_group"]}
+    assert set(lines.keys()) >= {"Malt Pilsner", "Hoa bia Saaz", "Men Lager W-34/70"}
+    assert lines["Malt Pilsner"]["quantity"] == pytest.approx(1200)
+
+
+def test_preview_source_materials_production_order_not_found(client, admin_h):
+    r = client.get("/api/warehouse/requests/source-preview", headers=admin_h,
+                   params={"source_type": "production_order", "source_id": "does-not-exist"})
+    assert r.status_code == 404, r.text
+
+
+def test_create_request_with_production_order_source_stores_and_shows_label(
+        client, admin_h, thukho_h, vanhanh_h, lager_product_id, lager_recipe_version_id):
+    order_id = _a_production_order(client, admin_h, "PO-SRCCREATE01", lager_product_id, lager_recipe_version_id)
+    mat_id = _create_material(client, admin_h, "SRC-PO-CREATE-MAT")
+    _receive(client, thukho_h, "LOT-SRCPOCREATE-01", mat_id, 50)
+
+    r = client.post("/api/warehouse/requests", headers=vanhanh_h, json={
+        "lines": [{"material_id": mat_id, "quantity": 5, "uom": "kg"}],
+        "source_type": "production_order", "source_id": order_id,
+    })
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["source_type"] == "production_order"
+    assert body["source_id"] == order_id
+    assert body["source_label"] == "Lệnh SX (ERP) PO-SRCCREATE01"

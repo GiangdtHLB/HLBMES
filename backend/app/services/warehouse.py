@@ -13,6 +13,7 @@ from ..models.brewing import (BottleMaterialUsage, BottleRecord, BrewBatch, Brew
                               BrewRecord, FilterMasterOrder, FilterMaterialUsage, FilterRecord)
 from ..models.master import Material
 from ..models.materials import GenealogyEdge, MaterialLocation, MaterialLot
+from ..models.orders import ProductionOrder
 from ..models.quality import Deviation, QualityResult
 from ..models.warehouse import (FactoryLocation, MaterialRequest, MaterialRequestLine, SangNgangRequest,
                                 StockCount, StockCountLine, StockMovement, TransferKcPxRequest,
@@ -820,6 +821,9 @@ def _source_label(db: Session, source_type: str, source_id: str) -> Optional[str
     if source_type == "filter_master_order":
         master = db.get(FilterMasterOrder, source_id)
         return f"Lệnh lọc {master.order_code}" if master else None
+    if source_type == "production_order":
+        order = db.get(ProductionOrder, source_id)
+        return f"Lệnh SX (ERP) {order.order_code}" if order else None
     return None
 
 
@@ -902,6 +906,24 @@ def _aggregate_source_material_lines(db: Session, source_type: str, source_id: s
             elif l.get("material_group_code"):
                 _add_group(l["material_group_code"], l["material_name"], l.get("member_material_ids"),
                            l["uom"], qty or 0.0)
+    elif source_type == "production_order":
+        from . import orders as order_svc
+        order = order_svc.get_order(db, source_id)
+        for l in order["lines"]:
+            if l["is_header"]:
+                continue
+            member_breakdown = l.get("member_breakdown") or []
+            if member_breakdown and any(mb.get("qty_per_batch") is not None for mb in member_breakdown):
+                for mb in member_breakdown:
+                    mqty = mb["qty_from_company"] if mb.get("qty_from_company") is not None else mb["qty_total"]
+                    _add(mb["material_id"], mb["material_name"], l["uom"], mqty or 0.0)
+                continue
+            qty = l["qty_from_company"] if l.get("qty_from_company") is not None else l["qty_total"]
+            if l["material_id"]:
+                _add(l["material_id"], l["material_name"], l["uom"], qty or 0.0)
+            elif l.get("material_group_code"):
+                _add_group(l["material_group_code"], l["material_name"], l.get("member_material_ids"),
+                           l["uom"], qty or 0.0)
     elif source_type == "filter_master_order":
         from . import filter_order as filter_order_svc
         master = filter_order_svc.get_master_order(db, source_id)
@@ -914,7 +936,7 @@ def _aggregate_source_material_lines(db: Session, source_type: str, source_id: s
                     _add_group(l["material_group_code"], l["material_name"], member_ids,
                                l["uom"], l["quantity"] or 0.0)
     else:
-        raise DomainError(f"Loại nguồn '{source_type}' không hợp lệ (chỉ nhận brew_order|filter_master_order).")
+        raise DomainError(f"Loại nguồn '{source_type}' không hợp lệ (chỉ nhận brew_order|production_order|filter_master_order).")
 
     out = []
     for a in agg.values():
@@ -939,11 +961,14 @@ def preview_source_materials(db: Session, source_type: str, source_id: str) -> l
     if source_type == "brew_order":
         if not db.get(BrewOrder, source_id):
             raise NotFoundError("Lệnh nấu không tồn tại.")
+    elif source_type == "production_order":
+        if not db.get(ProductionOrder, source_id):
+            raise NotFoundError("Lệnh sản xuất không tồn tại.")
     elif source_type == "filter_master_order":
         if not db.get(FilterMasterOrder, source_id):
             raise NotFoundError("Lệnh lọc không tồn tại.")
     else:
-        raise DomainError(f"Loại nguồn '{source_type}' không hợp lệ (chỉ nhận brew_order|filter_master_order).")
+        raise DomainError(f"Loại nguồn '{source_type}' không hợp lệ (chỉ nhận brew_order|production_order|filter_master_order).")
     return _aggregate_source_material_lines(db, source_type, source_id)
 
 
@@ -959,9 +984,11 @@ def create_request(db: Session, payload: dict, user: User) -> dict:
         raise DomainError("Đã chọn loại nguồn thì phải chọn cả lệnh cụ thể.")
     if source_type == "brew_order" and not db.get(BrewOrder, source_id):
         raise NotFoundError("Lệnh nấu không tồn tại.")
+    if source_type == "production_order" and not db.get(ProductionOrder, source_id):
+        raise NotFoundError("Lệnh sản xuất không tồn tại.")
     if source_type == "filter_master_order" and not db.get(FilterMasterOrder, source_id):
         raise NotFoundError("Lệnh lọc không tồn tại.")
-    if source_type and source_type not in ("brew_order", "filter_master_order"):
+    if source_type and source_type not in ("brew_order", "production_order", "filter_master_order"):
         raise DomainError(f"Loại nguồn '{source_type}' không hợp lệ.")
     lines_payload = payload.get("lines") or []
     if not lines_payload:

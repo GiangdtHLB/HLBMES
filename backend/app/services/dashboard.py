@@ -4,7 +4,7 @@ dashboard lấy trực tiếp từ báo cáo SCADA thật (services/filling_exte
 keg_external.py) — không tính lại ở đây."""
 from datetime import timedelta
 
-from sqlalchemy import false, select
+from sqlalchemy import false, select, true
 from sqlalchemy.orm import Session
 
 from ..common import DeviationState, LotStatus, QualityStatus, ResultStatus, utcnow
@@ -18,6 +18,7 @@ from ..models.quality_ext import CAPA, QCParameter
 from . import brew_order as brew_order_svc
 from . import derived
 from . import filter_order as filter_order_svc
+from . import orders as order_svc
 from . import quality as quality_svc
 
 # UI luôn hiển thị giờ theo múi VN (frontend fmt() dùng toLocaleString mặc định trình
@@ -39,6 +40,16 @@ def _order_counts(items: list, complete_key: str, executed_key: str) -> dict:
             "chua_thuc_hien": total - complete - executing}
 
 
+def _production_order_counts(items: list) -> dict:
+    """Đếm Lệnh SX (ERP) theo status (released/in_progress/completed/cancelled) — khác
+    _order_counts (dùng is_complete/is_executed của BrewOrder/FilterMasterOrder)."""
+    total = len(items)
+    complete = sum(1 for i in items if i["status"] == "completed")
+    executing = sum(1 for i in items if i["status"] == "in_progress")
+    return {"total": total, "hoan_thanh": complete, "dang_thuc_hien": executing,
+            "chua_thuc_hien": total - complete - executing}
+
+
 def _batch_counts(rows: list) -> dict:
     total = len(rows)
     today = _local_date(utcnow())
@@ -54,7 +65,7 @@ def _ferment_tank_rows(db: Session) -> tuple:
     "da_loc_het") — tank có toàn bộ lô đã lọc hết coi như trống, sẵn sàng nhận lô mới. Dùng
     chung bởi _tank_len_men_counts (đếm tổng hợp) và available_ferment_tanks (từng tank)."""
     tanks = db.execute(select(ProductionLine).where(
-        ProductionLine.kind == "tank", ProductionLine.active == True)).scalars().all()
+        ProductionLine.kind == "tank", ProductionLine.active == true())).scalars().all()
     ferments = db.execute(select(FermentRecord)).scalars().all()
     occupied = {f.tank_lm: f for f in ferments if derived.ferment_status(f) != "da_loc_het"}
     occupied_codes = set(occupied.keys())
@@ -89,11 +100,15 @@ def production_summary(db: Session) -> dict:
     # (ngoài phạm vi phẳng hóa), đếm theo master order như cũ.
     brew_orders = brew_order_svc.list_orders(db)
     filter_orders = filter_order_svc.list_master_orders(db)
+    production_orders = order_svc.list_orders(db)
     batches = db.execute(select(BrewBatch)).scalars().all()
     filters = db.execute(select(FilterRecord)).scalars().all()
     bottles = db.execute(select(BottleRecord)).scalars().all()
     return {
+        # "lenh_nau" (BrewOrder) giữ lại CHỈ để không phá vỡ API cũ — tab "Lệnh nấu" đã bỏ khỏi
+        # UI (chỉ dùng "Lệnh SX (ERP)"/lenh_sx_erp), xem frontend app.js dashboard card.
         "lenh_nau": _order_counts(brew_orders, "is_complete", "is_executed"),
+        "lenh_sx_erp": _production_order_counts(production_orders),
         "lenh_loc": _order_counts(filter_orders, "is_complete_all", "is_executed_any"),
         "me_nau": _batch_counts(batches),
         "me_loc": _batch_counts(filters),

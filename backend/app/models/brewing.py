@@ -140,9 +140,14 @@ class BrewRecord(Base):
     plato: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     seq: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # số mẻ (thứ tự trong lô LM)
     note: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)
-    # Bắt buộc ở tầng schema (BrewIn.brew_order_id: str) — để nullable=True ở DB để an toàn
-    # cho dữ liệu/test cũ; add_brew tự kiểm tra tồn tại + chưa bị mã nấu khác dùng.
+    # Đúng 1 trong 2 (brew_order_id/production_order_id) được set — add_brew tự kiểm tra
+    # (validate ở service, không CHECK constraint ở DB để linh hoạt dữ liệu cũ/test).
+    # brew_order_id: mã nấu tạo qua tab "Lệnh nấu" cũ (không còn dùng để tạo mới, chỉ còn dữ
+    # liệu lịch sử — xem services/brew_order.py).
     brew_order_id: Mapped[Optional[str]] = mapped_column(ForeignKey("brew_order.brew_order_id"), nullable=True, index=True)
+    # production_order_id: mã nấu tạo qua "Lệnh SX (ERP)" (đường đi hiện hành từ tab Nấu) — xem
+    # services/orders.py::mark_in_progress/recompute_status_after_finish.
+    production_order_id: Mapped[Optional[str]] = mapped_column(ForeignKey("production_order.order_id"), nullable=True, index=True)
     locked: Mapped[bool] = mapped_column(Boolean, default=False)
     locked_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
     locked_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
@@ -667,5 +672,10 @@ class OpsSetting(Base):
     # (khớp thực tế ca đêm 22h-06h không bị cắt đôi giữa 2 ngày lịch). Xem
     # services/wms.py::finished_goods_daily_stock_report.
     fg_day_cutoff_hour: Mapped[int] = mapped_column(Integer, default=0)
+    # Sai số sản lượng (±hl) dùng CHUNG cho mọi Lệnh SX (ERP, ProductionOrder) khi tự động xét
+    # "hoàn thành" — dịch thực tế cộng dồn từ các mã nấu gắn vào lệnh đó (qua
+    # BrewRecord.production_order_id) đạt SL kế hoạch trừ sai số này thì coi là hoàn thành. Xem
+    # services/orders.py::recompute_status_after_finish.
+    erp_order_volume_tolerance_hl: Mapped[float] = mapped_column(Float, default=5.0)
     updated_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
