@@ -1277,12 +1277,13 @@ VIEWS.orders = async function () {
       <div class="row">
         <div class="field"><label>Mã lệnh</label><input id="o_code" placeholder="PO-..." /></div>
         <div class="field"><label>Chọn loại bia</label><select id="o_beertype"><option value="">(chọn loại bia)</option>${btOpts}</select></div>
+        <span id="o_recipe_box" style="display:contents"></span>
         <div class="field"><label>SL kế hoạch</label><input id="o_qty" type="number" value="50000" /></div>
         <div class="field"><label>ĐVT</label><input id="o_uom" value="L" size="4" /></div>
         <div class="field"><label>Ưu tiên</label><input id="o_pri" type="number" value="5" size="3" /></div>
         <div class="field"><label>Số mẻ kế hoạch</label><input id="o_batches" type="number" min="1" value="1" style="width:80px"/></div>
       </div>
-      <div id="o_recipe_box"></div>
+      <div id="o_recipe_note_wrap" class="muted" style="margin-bottom:6px"></div>
       <div class="row">
         <div class="field"><label>Người ra lệnh</label><input id="o_issuedby" placeholder="(tuỳ chọn)"/></div>
         <div class="field"><label>Đơn vị thực hiện</label><input id="o_exec" value="Phân xưởng bia Đông Mai"/></div>
@@ -1299,13 +1300,14 @@ VIEWS.orders = async function () {
     </div>
     <div class="panel"><h2>Danh sách lệnh</h2>
       <input class="searchbox" data-tbl="t_po" placeholder="Tìm theo mã lệnh, sản phẩm, trạng thái..."/>
-      <div class="tablewrap"><table id="t_po"><thead><tr><th>Mã</th><th>Loại bia</th><th>Dịch bia</th><th>SL</th><th>Ưu tiên</th>
-        <th>Version</th><th>Ghi chú công thức</th><th>Số mẻ (KH)</th><th>Trạng thái</th><th>Tạo lúc</th><th></th></tr></thead>
+      <div class="tablewrap"><table id="t_po"><thead><tr><th>Mã</th><th>Loại bia</th><th>Version</th><th>Dịch bia</th><th>SL</th><th>Ưu tiên</th>
+        <th>Ghi chú công thức</th><th>Số mẻ (KH)</th><th>Trạng thái</th><th>Tạo lúc</th><th></th></tr></thead>
       <tbody>${orders.map(o => `<tr><td><code class="k">${esc(o.order_code)}</code></td>
         <td class="muted">${esc(o.beer_type_name || "—")}</td>
-        <td>${esc(prodName(o.product_id))}</td><td>${o.planned_qty} ${o.uom}</td>
-        <td>${o.priority}</td>
         <td class="muted">${o.recipe_code ? `v${o.recipe_version_no}` : "—"}</td>
+        <td>${esc(prodName(o.product_id))}</td>
+        <td>${o.planned_qty} ${o.uom}</td>
+        <td>${o.priority}</td>
         <td class="muted">${esc(o.recipe_note || "—")}</td>
         <td class="muted">${o.planned_batch_count ?? "—"}</td>
         <td>${badge(o.status)}</td><td class="muted">${fmt(o.created_at)}</td>
@@ -1419,30 +1421,30 @@ VIEWS.orders = async function () {
 
     async function renderPoRecipeBox(preselectVersionId) {
       const box = $("o_recipe_box");
+      const noteWrap = $("o_recipe_note_wrap");
       const recipeId = $("o_beertype").value;
-      if (!recipeId) { box.innerHTML = ""; poActiveVersions = []; poRecipe = null; poRecipeVersionId = ""; return; }
-      box.innerHTML = `<div class="muted" style="margin-top:6px">Đang tải version...</div>`;
+      if (!recipeId) { box.innerHTML = ""; noteWrap.innerHTML = ""; poActiveVersions = []; poRecipe = null; poRecipeVersionId = ""; return; }
+      box.innerHTML = `<div class="field"><label>Chọn version</label><div class="muted" style="margin-top:8px">Đang tải...</div></div>`;
+      noteWrap.innerHTML = "";
       try {
         poRecipe = (CACHE.recipesLn || []).find(r => r.recipe_id === recipeId) || null;
         poActiveVersions = (await GET(`/recipes/${recipeId}/versions`)).filter(v => v.state === "effective");
         if ($("o_beertype").value !== recipeId) return; // đã đổi Loại bia khác trong lúc chờ — bỏ kết quả cũ
         if (!poActiveVersions.length) {
-          box.innerHTML = `<div class="muted" style="margin-top:6px">Loại bia này chưa có version hiệu lực — chưa tạo được lệnh (cần version để xác định Dịch bia).</div>`;
+          box.innerHTML = "";
+          noteWrap.textContent = "Loại bia này chưa có version hiệu lực — chưa tạo được lệnh (cần version để xác định Dịch bia).";
           poRecipeVersionId = ""; return;
         }
         poRecipeVersionId = preselectVersionId && poActiveVersions.some(v => v.version_id === preselectVersionId)
           ? preselectVersionId : (poActiveVersions.length === 1 ? poActiveVersions[0].version_id : "");
-        box.innerHTML = `<div class="row" style="margin-top:6px">
-          <div class="field"><label>Chọn version</label><select id="o_recipe">
+        box.innerHTML = `<div class="field"><label>Chọn version</label><select id="o_recipe">
             <option value="">(chọn version)</option>
             ${poActiveVersions.map(v => `<option value="${esc(v.version_id)}" ${v.version_id === poRecipeVersionId ? "selected" : ""}>
               ${esc(prodName(v.product_id))} · v${v.version_no}</option>`).join("")}
-          </select></div>
-          <div class="field" style="flex:1"><label>Ghi chú công thức</label><div class="muted" id="o_recipe_note" style="margin-top:8px"></div></div>
-        </div>`;
+          </select></div>`;
         const showNote = () => {
           const v = poActiveVersions.find(x => x.version_id === poRecipeVersionId);
-          $("o_recipe_note").textContent = v && v.change_reason ? v.change_reason : "—";
+          noteWrap.textContent = v && v.change_reason ? `Ghi chú công thức: ${v.change_reason}` : "";
         };
         showNote();
         $("o_recipe").onchange = () => { poRecipeVersionId = $("o_recipe").value; $("o_bom_box").innerHTML = ""; showNote(); };
