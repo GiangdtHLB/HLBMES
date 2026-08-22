@@ -17,7 +17,6 @@ from ..errors import DomainError
 from ..models.brewing import (
     BottleRecord,
     BrewBatch,
-    BrewMasterOrder,
     BrewOrder,
     BrewRecord,
     FermentBrewLink,
@@ -113,20 +112,6 @@ def _recompute_brew_order_lock(db: Session, brew_order_id) -> None:
         order.locked, order.locked_by, order.locked_at = True, _AUTO, utcnow()
     elif not should_lock and order.locked:
         _unlock(order)
-    if order.master_order_id:
-        _recompute_brew_master_order_lock(db, order.master_order_id)
-
-
-def _recompute_brew_master_order_lock(db: Session, master_order_id: str) -> None:
-    master = db.get(BrewMasterOrder, master_order_id)
-    if not master:
-        return
-    orders = db.execute(select(BrewOrder).where(BrewOrder.master_order_id == master_order_id)).scalars().all()
-    should_lock = bool(orders) and all(o.locked for o in orders)
-    if should_lock and not master.locked:
-        master.locked, master.locked_by, master.locked_at = True, _AUTO, utcnow()
-    elif not should_lock and master.locked:
-        _unlock(master)
 
 
 # ===== Lên men (FermentRecord = lô LM) =====

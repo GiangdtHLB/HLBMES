@@ -15,7 +15,6 @@ from ..models.brewing import (
     BottleMaterialUsage,
     BottleRecord,
     BrewBatch,
-    BrewMasterOrder,
     BrewMaterialUsage,
     BrewOrder,
     BrewProcessLog,
@@ -41,10 +40,10 @@ from ..models.wms import FinishedGoodsUnit
 from ..schemas import (
     BottleIn,
     BottleMaterialUsageIn,
+    BrewBatchCodeIn,
     BrewBatchIn,
     BrewBatchStartIn,
     BrewIn,
-    BrewMasterOrderIn,
     BrewMaterialUsageIn,
     BrewOrderIn,
     BrewProcessLogIn,
@@ -144,12 +143,6 @@ def _filter_order_chain(db, filter_order_id):
     return order, master
 
 
-def _brew_order_chain(db, brew_order_id):
-    order = db.get(BrewOrder, brew_order_id) if brew_order_id else None
-    master = db.get(BrewMasterOrder, order.master_order_id) if order and order.master_order_id else None
-    return order, master
-
-
 def _assert_unlocked(*objs):
     """Chặn sửa/xóa/chuyển trạng thái nếu CHÍNH bản ghi HOẶC bất kỳ lệnh cha nào trong chuỗi
     đã bị "Khóa lô" (xem services/lot_lock.py::lock_lot — KCS khóa tại 1 mẻ chiết, khóa cả
@@ -214,7 +207,7 @@ def get_brew_order(brew_order_id: str, db: Session = Depends(get_db)):
 def update_brew_order(brew_order_id: str, payload: BrewOrderIn, db: Session = Depends(get_db),
                       user: User = Depends(get_current_user)):
     require_perm(user, "order.create")
-    _assert_unlocked(*_brew_order_chain(db, brew_order_id))
+    _assert_unlocked(db.get(BrewOrder, brew_order_id))
     order = brew_order_svc.update_order(db, brew_order_id, payload.model_dump(), user)
     return {"brew_order_id": order.brew_order_id, "order_code": order.order_code}
 
@@ -223,44 +216,8 @@ def update_brew_order(brew_order_id: str, payload: BrewOrderIn, db: Session = De
 def delete_brew_order(brew_order_id: str, db: Session = Depends(get_db),
                       user: User = Depends(get_current_user)):
     require_perm(user, "order.create")
-    _assert_unlocked(*_brew_order_chain(db, brew_order_id))
+    _assert_unlocked(db.get(BrewOrder, brew_order_id))
     brew_order_svc.delete_order(db, brew_order_id, user)
-
-
-# ===== Lệnh nấu LỚN (chứa nhiều "lệnh nấu nhỏ" — mỗi lệnh nhỏ là 1 BrewOrder ở trên) =====
-@router.get("/brew-master-orders")
-def list_brew_master_orders(years: list[int] = Query(None), db: Session = Depends(get_db)):
-    return brew_order_svc.list_master_orders(db, _years_or_current(years))
-
-
-@router.post("/brew-master-orders", status_code=201)
-def create_brew_master_order(payload: BrewMasterOrderIn, db: Session = Depends(get_db),
-                             user: User = Depends(get_current_user)):
-    require_perm(user, "order.create")
-    master = brew_order_svc.create_master_order(db, payload.model_dump(), user)
-    return {"brew_master_order_id": master.brew_master_order_id, "order_code": master.order_code}
-
-
-@router.get("/brew-master-orders/{brew_master_order_id}")
-def get_brew_master_order(brew_master_order_id: str, db: Session = Depends(get_db)):
-    return brew_order_svc.get_master_order(db, brew_master_order_id)
-
-
-@router.put("/brew-master-orders/{brew_master_order_id}")
-def update_brew_master_order(brew_master_order_id: str, payload: BrewMasterOrderIn,
-                             db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    require_perm(user, "order.create")
-    _assert_unlocked(db.get(BrewMasterOrder, brew_master_order_id))
-    master = brew_order_svc.update_master_order(db, brew_master_order_id, payload.model_dump(), user)
-    return {"brew_master_order_id": master.brew_master_order_id, "order_code": master.order_code}
-
-
-@router.delete("/brew-master-orders/{brew_master_order_id}", status_code=204)
-def delete_brew_master_order(brew_master_order_id: str, db: Session = Depends(get_db),
-                             user: User = Depends(get_current_user)):
-    require_perm(user, "order.create")
-    _assert_unlocked(db.get(BrewMasterOrder, brew_master_order_id))
-    brew_order_svc.delete_master_order(db, brew_master_order_id, user)
 
 
 # ===== Lệnh lọc (không phối = 1 tank, phối = nhiều tank) =====
@@ -397,7 +354,6 @@ def list_brews(years: list[int] = Query(None), db: Session = Depends(get_db)):
     ferments = {f.ferment_id: f for f in db.execute(select(FermentRecord)).scalars().all()}
     products = {p.product_id: p for p in db.execute(select(Product)).scalars().all()}
     orders = {o.brew_order_id: o for o in db.execute(select(BrewOrder)).scalars().all()}
-    masters = {m.brew_master_order_id: m for m in db.execute(select(BrewMasterOrder)).scalars().all()}
     batch_counts: dict[str, int] = {}
     for row in db.execute(select(BrewBatch.brew_id)).all():
         batch_counts[row[0]] = batch_counts.get(row[0], 0) + 1
@@ -418,11 +374,6 @@ def list_brews(years: list[int] = Query(None), db: Session = Depends(get_db)):
         f = ferments.get(ferment_id_by_brew.get(b.brew_id))
         prod = products.get(b.product_id)
         order = orders.get(b.brew_order_id)
-        # Lệnh nấu nhỏ hiển thị theo Số lệnh của Lệnh nấu LỚN cha (order_code của lệnh nhỏ tự
-        # sinh SUB-... không có ý nghĩa với người dùng) — nếu lệnh nhỏ đứng độc lập (không
-        # thuộc lệnh lớn nào), vẫn hiển thị order_code của chính nó như trước.
-        master = masters.get(order.master_order_id) if order and order.master_order_id else None
-        order_code_display = master.order_code if master else (order.order_code if order else None)
         batches = batches_by_brew.get(b.brew_id, [])
         if not batches:
             color = "red"
@@ -442,7 +393,7 @@ def list_brews(years: list[int] = Query(None), db: Session = Depends(get_db)):
                     "actual_volume_hl": round(actual_volume_by_brew[b.brew_id], 3) if b.brew_id in actual_volume_by_brew else None,
                     "lm_code": f.lm_code if f else None, "tank_lm": f.tank_lm if f else None,
                     "kt_date": f.kt_date if f else None,
-                    "brew_order_id": b.brew_order_id, "brew_order_code": order_code_display,
+                    "brew_order_id": b.brew_order_id, "brew_order_code": order.order_code if order else None,
                     "color": color,
                     "locked": b.locked or bool(order and order.locked), "locked_by": b.locked_by or (order.locked_by if order else None)})
     return out
@@ -574,12 +525,21 @@ def delete_brew(brew_id: str, db: Session = Depends(get_db), user: User = Depend
     for link in db.execute(select(FermentBrewLink).where(FermentBrewLink.brew_id == brew_id)).scalars().all():
         db.delete(link)
     db.flush()  # MSSQL enforce FK: xóa hết bản con (link) trước bản cha (brew_record).
+    # Gom lại tóm tắt TRƯỚC KHI xóa để ghi audit — xóa mã nấu kéo theo xóa cả cụm dữ liệu lớn
+    # (mẻ, NVL đã dùng, chỉ tiêu QC, nhật ký) nên phải ghi lại đủ để dò lại được ai xóa gì, xóa
+    # bao nhiêu mẻ/dòng NVL, thay vì để mất vết hoàn toàn như trước đây.
+    deleted_batches_summary = []
     for batch in db.execute(select(BrewBatch).where(BrewBatch.brew_id == brew_id)).scalars().all():
-        for u in db.execute(select(BrewMaterialUsage).where(BrewMaterialUsage.batch_id == batch.batch_id)).scalars().all():
+        usages = db.execute(select(BrewMaterialUsage).where(BrewMaterialUsage.batch_id == batch.batch_id)).scalars().all()
+        qc_results = db.execute(select(QualityResult).where(
+            QualityResult.scope_type == "brew_batch", QualityResult.scope_id == batch.batch_id)).scalars().all()
+        deleted_batches_summary.append({"batch_code": batch.batch_code, "material_usage_count": len(usages),
+                                        "quality_result_count": len(qc_results)})
+        for u in usages:
             if u.movement_id:
                 warehouse_svc.undo_issue(db, u.movement_id, user, strict=False, skip_perm_check=True)
             db.delete(u)
-        for r in db.execute(select(QualityResult).where(QualityResult.scope_type == "brew_batch", QualityResult.scope_id == batch.batch_id)).scalars().all():
+        for r in qc_results:
             db.delete(r)
         for s in db.execute(select(BrewProcessStep).where(BrewProcessStep.batch_id == batch.batch_id)).scalars().all():
             db.delete(s)
@@ -590,6 +550,9 @@ def delete_brew(brew_id: str, db: Session = Depends(get_db), user: User = Depend
         db.delete(batch)
     db.flush()  # xóa brew_batch (con) trước brew_record (cha).
     genealogy.delete_edges_for(db, "brew", brew_id)
+    record_audit(db, entity_type="brew", entity_id=brew_id, action="delete", actor=user,
+                before={"brew_code": b.brew_code, "batches": deleted_batches_summary,
+                        "ferment_ids_linked": list(ferment_ids_to_sync)})
     db.delete(b)
     db.flush()
     for ferment_id in ferment_ids_to_sync:
@@ -616,6 +579,8 @@ def delete_brew(brew_id: str, db: Session = Depends(get_db), user: User = Depend
             db.delete(lg)
         db.flush()  # xóa reading/process_log/quality_result (con) trước ferment_record (cha).
         genealogy.delete_edges_for(db, "ferment", ferment_id)
+        record_audit(db, entity_type="ferment", entity_id=ferment_id, action="delete", actor=user,
+                    before={"lm_code": f.lm_code}, reason=f"Xóa kéo theo do xóa mã nấu '{b.brew_code}'")
         db.delete(f)
     db.commit()
 
@@ -737,6 +702,26 @@ def update_brew_batch_start(brew_id: str, batch_id: str, payload: BrewBatchStart
         if next_started and started_at > next_started:
             raise DomainError(f"Giờ bắt đầu không được muộn hơn mẻ sau (mẻ sau bắt đầu {next_started + timedelta(hours=7):%H:%M %d/%m/%Y}).")
     batch.started_at = started_at
+    db.commit(); db.refresh(batch)
+    return batch
+
+
+@router.put("/brews/{brew_id}/batches/{batch_id}/code")
+def update_brew_batch_code(brew_id: str, batch_id: str, payload: BrewBatchCodeIn,
+                           db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """Đổi lại Mã mẻ (VD gõ nhầm số mẻ Braumat lúc tạo) — cùng ràng buộc duy nhất trong năm
+    như lúc tạo mẻ (xem add_brew_batch), theo batch_year đã snapshot lúc tạo (không tính lại
+    từ started_at hiện tại)."""
+    require_perm(user, "batch.execute")
+    batch = db.get(BrewBatch, batch_id)
+    if not batch or batch.brew_id != brew_id:
+        raise NotFoundError("Mẻ không tồn tại.")
+    _assert_unlocked(batch, *_brew_and_order(db, brew_id))
+    if payload.batch_code != batch.batch_code and db.execute(select(BrewBatch).where(
+            BrewBatch.batch_year == batch.batch_year, BrewBatch.batch_code == payload.batch_code,
+            BrewBatch.batch_id != batch_id)).scalar_one_or_none():
+        raise DomainError(f"Mã mẻ '{payload.batch_code}' đã tồn tại trong năm {batch.batch_year} (dù ở mã nấu khác) — số mẻ phải duy nhất trong năm.")
+    batch.batch_code = payload.batch_code
     db.commit(); db.refresh(batch)
     return batch
 
@@ -1575,11 +1560,14 @@ def finish_filter_tank(filter_id: str, line_id: str, payload: FinishFilterTankIn
     if line.tank_type == "bbt":
         source = db.get(FilterRecord, line.source_filter_id) if line.source_filter_id else None
         if source:
-            source.on_hand_bbt -= (new_v_dich - old_v_dich)
+            # round: on_hand_bbt/on_hand_cct là số dư CỘNG DỒN qua nhiều lần sửa/kết thúc mẻ
+            # lọc — không làm tròn lại sẽ trôi dần nhị phân theo thời gian (khác báo cáo luôn
+            # tính lại từ đầu rồi round), mirror cách sửa _convert_member_qty.
+            source.on_hand_bbt = round(source.on_hand_bbt - (new_v_dich - old_v_dich), 3)
     else:
         ferment = db.get(FermentRecord, line.ferment_id)
         if ferment:
-            ferment.on_hand_cct -= (new_v_dich - old_v_dich)
+            ferment.on_hand_cct = round(ferment.on_hand_cct - (new_v_dich - old_v_dich), 3)
     line.v_dich_hl = new_v_dich
     line.nuoc_bai_khi_hl = new_bai_khi
     db.flush()
@@ -1659,11 +1647,11 @@ def delete_filter_tank_batch(filter_id: str, line_id: str, db: Session = Depends
         if line.tank_type == "bbt":
             source = db.get(FilterRecord, line.source_filter_id) if line.source_filter_id else None
             if source:
-                source.on_hand_bbt += line.v_dich_hl
+                source.on_hand_bbt = round(source.on_hand_bbt + line.v_dich_hl, 3)
         else:
             ferment = db.get(FermentRecord, line.ferment_id)
             if ferment:
-                ferment.on_hand_cct += line.v_dich_hl
+                ferment.on_hand_cct = round(ferment.on_hand_cct + line.v_dich_hl, 3)
     db.delete(line)
     db.flush()
     _sync_filter_aggregate(db, f)
@@ -1848,11 +1836,11 @@ def delete_filter(filter_id: str, db: Session = Depends(get_db), user: User = De
             if line.tank_type == "bbt":
                 source = db.get(FilterRecord, line.source_filter_id) if line.source_filter_id else None
                 if source:
-                    source.on_hand_bbt += line.v_dich_hl
+                    source.on_hand_bbt = round(source.on_hand_bbt + line.v_dich_hl, 3)
             else:
                 ferment = db.get(FermentRecord, line.ferment_id)
                 if ferment:
-                    ferment.on_hand_cct += line.v_dich_hl
+                    ferment.on_hand_cct = round(ferment.on_hand_cct + line.v_dich_hl, 3)
         # Dòng nhân bản riêng của bản ghi này — xóa hẳn (không phải template dùng chung cấp
         # lệnh), tank BBT của bản ghi này lại "trống" vì không còn FilterRecord nào dùng nữa.
         db.delete(line)
@@ -1975,7 +1963,7 @@ def delete_bottle(bottle_id: str, db: Session = Depends(get_db), user: User = De
     if b.filter_id:
         f = db.get(FilterRecord, b.filter_id)
         if f:
-            f.on_hand_bbt += b.v_cap_chiet_hl
+            f.on_hand_bbt = round(f.on_hand_bbt + b.v_cap_chiet_hl, 3)
     for r in db.execute(select(QualityResult).where(QualityResult.scope_type == "bottle",
                         QualityResult.scope_id.in_([f"{b.bottle_code}__chiet", f"{b.bottle_code}__thanh_pham",
                                                     qc_catalog.bottle_scope_id(b.bottle_code, b.bottle_year)]))).scalars().all():
@@ -2101,7 +2089,7 @@ def finish_bottle(bottle_id: str, payload: FinishBottleIn = FinishBottleIn(), db
         if b.filter_id:
             f = db.get(FilterRecord, b.filter_id)
             if f:
-                f.on_hand_bbt -= (payload.v_cap_chiet_hl - old_v)
+                f.on_hand_bbt = round(f.on_hand_bbt - (payload.v_cap_chiet_hl - old_v), 3)
         b.v_cap_chiet_hl = payload.v_cap_chiet_hl
     old_total = b.ca1 + b.ca2 + b.ca3
     if payload.ca1 is not None:

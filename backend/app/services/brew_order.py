@@ -14,11 +14,10 @@ from sqlalchemy import select, true
 from sqlalchemy.orm import Session
 
 from ..audit import record_audit
-from ..common import new_id, resolve_years, utcnow
+from ..common import new_id, utcnow
 from ..errors import DomainError, NotFoundError
 from ..models.brewing import (
     BrewBatch,
-    BrewMasterOrder,
     BrewMaterialUsage,
     BrewOrder,
     BrewOrderMaterialLine,
@@ -498,37 +497,10 @@ def _validate_recipe_version_selection(db: Session, product_id: str | None, reci
         raise DomainError(f"Công thức '{recipe.code}' version {rv.version_no} không còn hiệu lực.")
 
 
-def _insert_sub_order(db: Session, master_order_id, seq: int, order_code: str, order_year: int, payload: dict, user) -> BrewOrder:
-    """Tạo 1 dòng BrewOrder ("lệnh nấu nhỏ") + định mức NVL — KHÔNG validate (caller đã
-    validate), KHÔNG commit (caller tự quyết định điểm commit). Dùng chung bởi create_order
-    (lệnh nấu phẳng cũ, master_order_id=None) và create_master_order/update_master_order
-    (nhiều lệnh nhỏ trong 1 lệnh lớn), mirror filter_order.py::_insert_sub_order."""
-    payload = dict(payload)
-    lines_in = payload.pop("lines", None) or []
-    auto_from_bom = payload.pop("auto_from_bom", True)
-    qty_overrides = payload.pop("material_qty_overrides", None) or {}
-    member_selection = {k: v["selected_material_codes"] for k, v in qty_overrides.items()
-                        if v.get("selected_material_codes") is not None}
-
-    if auto_from_bom and not lines_in:
-        _validate_recipe_version_selection(db, payload.get("product_id"), payload.get("recipe_version_id"))
-
-    lines = lines_in if lines_in else (
-        build_lines_from_recipe_version(db, payload.get("recipe_version_id"), payload.get("planned_batch_count"),
-                                        payload.get("planned_volume_hl"), member_selection)
-        if auto_from_bom and payload.get("product_id") else []
-    )
-    _validate_member_selection(lines)
-    company_stock, workshop_stock = _stock_snapshot(db)
-    materials_by_id = _materials_by_id(db)
-    _assert_no_shortage(lines, company_stock, workshop_stock, materials_by_id)
-
-    order = BrewOrder(brew_order_id=new_id(), order_code=order_code, order_year=order_year,
-                      master_order_id=master_order_id,
-                      seq=seq, created_by=user.username, created_at=utcnow(), **payload)
-    db.add(order)
-    db.flush()
-
+def _persist_material_lines(db: Session, order: BrewOrder, lines: list, qty_overrides: dict,
+                            company_stock: dict, workshop_stock: dict, materials_by_id: dict) -> None:
+    """Ghi các dòng BrewOrderMaterialLine cho 1 lệnh (order đã add/flush) — dùng chung bởi
+    _create_order_row (tạo mới) và update_order (xóa dòng cũ rồi gọi lại hàm này)."""
     for i, line in enumerate(lines):
         material_id = line.get("material_id")
         member_declared = line.get("member_declared")
@@ -559,6 +531,36 @@ def _insert_sub_order(db: Session, master_order_id, seq: int, order_code: str, o
             stock_workshop_snapshot=workshop if has_target else None,
             qty_from_company=qty_from_company, qty_from_workshop=qty_from_workshop,
         ))
+
+
+def _create_order_row(db: Session, order_code: str, order_year: int, payload: dict, user) -> BrewOrder:
+    """Tạo 1 dòng BrewOrder (Lệnh sản xuất) + định mức NVL — KHÔNG validate (caller đã
+    validate), KHÔNG commit (caller tự quyết định điểm commit)."""
+    payload = dict(payload)
+    lines_in = payload.pop("lines", None) or []
+    auto_from_bom = payload.pop("auto_from_bom", True)
+    qty_overrides = payload.pop("material_qty_overrides", None) or {}
+    member_selection = {k: v["selected_material_codes"] for k, v in qty_overrides.items()
+                        if v.get("selected_material_codes") is not None}
+
+    if auto_from_bom and not lines_in:
+        _validate_recipe_version_selection(db, payload.get("product_id"), payload.get("recipe_version_id"))
+
+    lines = lines_in if lines_in else (
+        build_lines_from_recipe_version(db, payload.get("recipe_version_id"), payload.get("planned_batch_count"),
+                                        payload.get("planned_volume_hl"), member_selection)
+        if auto_from_bom and payload.get("product_id") else []
+    )
+    _validate_member_selection(lines)
+    company_stock, workshop_stock = _stock_snapshot(db)
+    materials_by_id = _materials_by_id(db)
+    _assert_no_shortage(lines, company_stock, workshop_stock, materials_by_id)
+
+    order = BrewOrder(brew_order_id=new_id(), order_code=order_code, order_year=order_year,
+                      created_by=user.username, created_at=utcnow(), **payload)
+    db.add(order)
+    db.flush()
+    _persist_material_lines(db, order, lines, qty_overrides, company_stock, workshop_stock, materials_by_id)
     return order
 
 
@@ -571,7 +573,7 @@ def create_order(db: Session, payload: dict, user) -> BrewOrder:
         raise DomainError(f"Số lệnh '{order_code}' đã tồn tại trong năm {order_year}.")
     _validate_volume_plan(payload.get("planned_volume_hl"), payload.get("volume_tolerance_hl"))
 
-    order = _insert_sub_order(db, None, 1, order_code, order_year, payload, user)
+    order = _create_order_row(db, order_code, order_year, payload, user)
 
     record_audit(db, entity_type="brew_order", entity_id=order.brew_order_id, action="create",
                  actor=user, after={"order_code": order.order_code})
@@ -623,36 +625,7 @@ def update_order(db: Session, brew_order_id: str, payload: dict, user) -> BrewOr
     for field, value in payload.items():
         setattr(order, field, value)
 
-    for i, line in enumerate(lines):
-        material_id = line.get("material_id")
-        member_declared = line.get("member_declared")
-        member_qty_snapshot = None
-        if member_declared:
-            member_splits_ov = (qty_overrides.get(str(line.get("seq", i))) or {}).get("member_qty_splits")
-            member_qty_snapshot, _ = _member_declared_breakdown(
-                member_declared, line.get("uom"), company_stock, workshop_stock, materials_by_id,
-                member_qty_splits=member_splits_ov)
-            company = sum(d["stock_company"] for d in member_qty_snapshot)
-            workshop = sum(d["stock_workshop"] for d in member_qty_snapshot)
-            has_target = True
-            qty_from_company = qty_from_workshop = None
-        else:
-            has_target = bool(material_id or line.get("member_material_ids"))
-            company, workshop = _line_stock(line, company_stock, workshop_stock, materials_by_id)
-            qty_from_company, qty_from_workshop = _apply_qty_split_override(
-                line, workshop, qty_overrides)
-        db.add(BrewOrderMaterialLine(
-            line_id=new_id(), brew_order_id=order.brew_order_id, seq=line.get("seq", i),
-            stt_label=line.get("stt_label"), is_header=line.get("is_header", False),
-            material_id=material_id, material_name=line.get("material_name"), uom=line.get("uom"),
-            material_group_code=line.get("material_group_code"),
-            member_qty_snapshot=member_qty_snapshot,
-            qty_per_batch=line.get("qty_per_batch"), qty_total=line.get("qty_total"),
-            unit_price=line.get("unit_price"),
-            stock_company_snapshot=company if has_target else None,
-            stock_workshop_snapshot=workshop if has_target else None,
-            qty_from_company=qty_from_company, qty_from_workshop=qty_from_workshop,
-        ))
+    _persist_material_lines(db, order, lines, qty_overrides, company_stock, workshop_stock, materials_by_id)
 
     record_audit(db, entity_type="brew_order", entity_id=order.brew_order_id, action="update",
                  actor=user, after={"order_code": order.order_code, "lines": len(lines)})
@@ -747,19 +720,23 @@ def _is_complete(db: Session, records: list, planned_volume_hl: float, tolerance
 def list_orders(db: Session) -> list:
     orders = db.execute(select(BrewOrder).order_by(BrewOrder.created_at.desc())).scalars().all()
     products = {p.product_id: p for p in db.execute(select(Product)).scalars().all()}
-    masters = {m.brew_master_order_id: m for m in db.execute(select(BrewMasterOrder)).scalars().all()}
+    recipe_versions = {rv.version_id: rv for rv in db.execute(select(RecipeVersion)).scalars().all()}
+    recipes = {r.recipe_id: r for r in db.execute(select(Recipe)).scalars().all()}
     out = []
     for o in orders:
         records = _record_summaries(db, o.brew_order_id)
         prod = products.get(o.product_id)
-        master = masters.get(o.master_order_id)
+        rv = recipe_versions.get(o.recipe_version_id)
+        recipe = recipes.get(rv.recipe_id) if rv else None
         actual_tank, actual_batch_range = _actual_tank_and_batch_range(db, [r["brew_id"] for r in records])
         out.append({
             "brew_order_id": o.brew_order_id, "order_code": o.order_code,
-            "master_order_id": o.master_order_id, "master_order_code": master.order_code if master else None,
-            "seq": o.seq,
             "product_id": o.product_id, "product_code": prod.code if prod else None,
             "product_desc": o.product_desc, "recipe_version_id": o.recipe_version_id,
+            "recipe_code": recipe.code if recipe else None,
+            "recipe_name": recipe.name if recipe else None,
+            "recipe_version_no": rv.version_no if rv else None,
+            "recipe_note": rv.change_reason if rv else None,
             "planned_batch_count": o.planned_batch_count,
             "tank_lm": o.tank_lm, "batch_range_from": o.batch_range_from, "batch_range_to": o.batch_range_to,
             "actual_tank_lm": actual_tank, "actual_batch_range": actual_batch_range,
@@ -769,6 +746,9 @@ def list_orders(db: Session) -> list:
             "is_executed": len(records) > 0,
             "is_complete": _is_complete(db, records, o.planned_volume_hl, o.volume_tolerance_hl),
             "locked": o.locked, "locked_by": o.locked_by,
+            "issued_by": o.issued_by, "executor_unit": o.executor_unit, "warehouse_keeper": o.warehouse_keeper,
+            "reference_note": o.reference_note, "start_date": o.start_date, "end_date": o.end_date,
+            "safety_note": o.safety_note,
         })
     return out
 
@@ -781,7 +761,6 @@ def get_order(db: Session, brew_order_id: str) -> dict:
         BrewOrderMaterialLine.brew_order_id == brew_order_id).order_by(BrewOrderMaterialLine.seq)).scalars().all()
     records = _record_summaries(db, brew_order_id)
     prod = db.get(Product, order.product_id) if order.product_id else None
-    master = db.get(BrewMasterOrder, order.master_order_id) if order.master_order_id else None
     recipe_version = db.get(RecipeVersion, order.recipe_version_id) if order.recipe_version_id else None
     recipe = db.get(Recipe, recipe_version.recipe_id) if recipe_version else None
 
@@ -823,8 +802,6 @@ def get_order(db: Session, brew_order_id: str) -> dict:
     actual_tank, actual_batch_range = _actual_tank_and_batch_range(db, [r["brew_id"] for r in records])
     return {
         "brew_order_id": order.brew_order_id, "order_code": order.order_code,
-        "master_order_id": order.master_order_id, "master_order_code": master.order_code if master else None,
-        "seq": order.seq,
         "product_id": order.product_id, "product_code": prod.code if prod else None,
         "product_name": prod.name if prod else None, "product_desc": order.product_desc,
         "recipe_version_id": order.recipe_version_id,
@@ -845,234 +822,10 @@ def get_order(db: Session, brew_order_id: str) -> dict:
         "is_complete": _is_complete(db, records, order.planned_volume_hl, order.volume_tolerance_hl),
         "lines": line_out,
         "locked": order.locked, "locked_by": order.locked_by,
+        "issued_by": order.issued_by, "executor_unit": order.executor_unit,
+        "warehouse_keeper": order.warehouse_keeper, "reference_note": order.reference_note,
+        "start_date": order.start_date, "end_date": order.end_date, "safety_note": order.safety_note,
     }
-
-
-# ===== Lệnh nấu LỚN (BrewMasterOrder — chứa nhiều "lệnh nấu nhỏ" BrewOrder) =====
-
-def _child_summary(db: Session, order: BrewOrder, products: dict, recipe_versions: dict | None = None,
-                   recipes: dict | None = None) -> dict:
-    records = _record_summaries(db, order.brew_order_id)
-    prod = products.get(order.product_id)
-    rv = (recipe_versions or {}).get(order.recipe_version_id)
-    recipe = (recipes or {}).get(rv.recipe_id) if rv else None
-    actual_tank, actual_batch_range = _actual_tank_and_batch_range(db, [r["brew_id"] for r in records])
-    return {
-        "brew_order_id": order.brew_order_id, "seq": order.seq,
-        "product_id": order.product_id, "product_code": prod.code if prod else None,
-        "product_desc": order.product_desc, "recipe_version_id": order.recipe_version_id,
-        "recipe_code": recipe.code if recipe else None,
-        "recipe_name": recipe.name if recipe else None,
-        "recipe_version_no": rv.version_no if rv else None,
-        "recipe_note": rv.change_reason if rv else None,
-        "planned_batch_count": order.planned_batch_count,
-        "bx_min": order.bx_min, "bx_max": order.bx_max,
-        "tank_lm": order.tank_lm, "batch_range_from": order.batch_range_from, "batch_range_to": order.batch_range_to,
-        "actual_tank_lm": actual_tank, "actual_batch_range": actual_batch_range,
-        "created_at": order.created_at, "records": records,
-        "planned_volume_hl": order.planned_volume_hl, "volume_tolerance_hl": order.volume_tolerance_hl,
-        "actual_volume_hl": _actual_volume_hl(records),
-        "is_executed": len(records) > 0,
-        "is_complete": _is_complete(db, records, order.planned_volume_hl, order.volume_tolerance_hl),
-        "locked": order.locked, "locked_by": order.locked_by,
-    }
-
-
-def _validate_children(db: Session, children_in: list) -> list:
-    """Validate TOÀN BỘ lệnh nhỏ TRƯỚC khi ghi bất kỳ dòng nào (tránh tạo dở dang nếu 1 lệnh
-    nhỏ ở giữa danh sách bị lỗi). Không có kiểm tra chéo giữa các lệnh nhỏ (khác Lệnh lọc) —
-    tank_lm/batch_range_from/to ở đây chỉ là thông tin dự kiến (free text, không FK tới tài
-    nguyên sống nào), không có gì để tính over-commit."""
-    if not children_in:
-        raise DomainError("Lệnh nấu lớn phải có ít nhất 1 lệnh nấu nhỏ.")
-    validated = []
-    for child in children_in:
-        child = dict(child)
-        _validate_volume_plan(child.get("planned_volume_hl"), child.get("volume_tolerance_hl"))
-        validated.append(child)
-    return validated
-
-
-def _insert_children(db: Session, master_order_id: str, order_year: int, validated: list, user) -> list:
-    orders = []
-    for seq, child in enumerate(validated, start=1):
-        order = _insert_sub_order(db, master_order_id, seq, f"SUB-{new_id()[:12]}", order_year, child, user)
-        orders.append(order)
-    return orders
-
-
-def _delete_children(db: Session, children: list) -> None:
-    for o in children:
-        for l in db.execute(select(BrewOrderMaterialLine).where(
-                BrewOrderMaterialLine.brew_order_id == o.brew_order_id)).scalars().all():
-            db.delete(l)
-        db.flush()  # MSSQL enforce FK: material line (con) trước brew_order (cha).
-        db.delete(o)
-    db.flush()  # ... và brew_order (con) trước brew_master_order (cha).
-
-
-def create_master_order(db: Session, payload: dict, user) -> BrewMasterOrder:
-    order_code = payload["order_code"]
-    order_year = utcnow().year
-    if db.execute(select(BrewMasterOrder).where(BrewMasterOrder.order_code == order_code,
-                  BrewMasterOrder.order_year == order_year)).first():
-        raise DomainError(f"Số lệnh '{order_code}' đã tồn tại trong năm {order_year}.")
-    validated = _validate_children(db, payload.get("children") or [])
-
-    master = BrewMasterOrder(brew_master_order_id=new_id(), order_code=order_code, order_year=order_year,
-                             issued_by=payload.get("issued_by"), executor_unit=payload.get("executor_unit"),
-                             warehouse_keeper=payload.get("warehouse_keeper"),
-                             reference_note=payload.get("reference_note"),
-                             start_date=payload.get("start_date"), end_date=payload.get("end_date"),
-                             safety_note=payload.get("safety_note"),
-                             created_by=user.username, created_at=utcnow())
-    db.add(master)
-    db.flush()
-    orders = _insert_children(db, master.brew_master_order_id, master.order_year, validated, user)
-
-    record_audit(db, entity_type="brew_master_order", entity_id=master.brew_master_order_id, action="create",
-                 actor=user, after={"order_code": master.order_code, "children": len(orders)})
-    db.commit()
-    db.refresh(master)
-    return master
-
-
-def list_master_orders(db: Session, years=None) -> list:
-    years = resolve_years(years)
-    stmt = select(BrewMasterOrder)
-    if years:
-        stmt = stmt.where(BrewMasterOrder.order_year.in_(years))
-    masters = db.execute(stmt.order_by(BrewMasterOrder.created_at.desc())).scalars().all()
-    products = {p.product_id: p for p in db.execute(select(Product)).scalars().all()}
-    recipe_versions = {rv.version_id: rv for rv in db.execute(select(RecipeVersion)).scalars().all()}
-    recipes = {r.recipe_id: r for r in db.execute(select(Recipe)).scalars().all()}
-    out = []
-    for m in masters:
-        children_rows = db.execute(select(BrewOrder).where(
-            BrewOrder.master_order_id == m.brew_master_order_id).order_by(BrewOrder.seq)).scalars().all()
-        children = [_child_summary(db, o, products, recipe_versions, recipes) for o in children_rows]
-        out.append({
-            "brew_master_order_id": m.brew_master_order_id, "order_code": m.order_code,
-            "issued_by": m.issued_by, "executor_unit": m.executor_unit, "warehouse_keeper": m.warehouse_keeper,
-            "reference_note": m.reference_note, "start_date": m.start_date, "end_date": m.end_date,
-            "safety_note": m.safety_note,
-            "created_by": m.created_by, "created_at": m.created_at,
-            "children": children,
-            "planned_total_hl": round(sum(c["planned_volume_hl"] for c in children), 3),
-            "actual_total_hl": round(sum(c["actual_volume_hl"] for c in children), 3),
-            "is_executed_any": any(c["is_executed"] for c in children),
-            "is_complete_all": bool(children) and all(c["is_complete"] for c in children),
-            "locked": m.locked, "locked_by": m.locked_by,
-        })
-    return out
-
-
-def get_master_order(db: Session, brew_master_order_id: str) -> dict:
-    m = db.get(BrewMasterOrder, brew_master_order_id)
-    if not m:
-        raise NotFoundError("Lệnh nấu không tồn tại.")
-    products = {p.product_id: p for p in db.execute(select(Product)).scalars().all()}
-    recipe_versions = {rv.version_id: rv for rv in db.execute(select(RecipeVersion)).scalars().all()}
-    recipes = {r.recipe_id: r for r in db.execute(select(Recipe)).scalars().all()}
-    children_rows = db.execute(select(BrewOrder).where(
-        BrewOrder.master_order_id == brew_master_order_id).order_by(BrewOrder.seq)).scalars().all()
-    # Tồn kho TỪNG mã thành viên hiện tại (KHÔNG snapshot — xem get_order cùng lý do).
-    live_company_stock, live_workshop_stock = _stock_snapshot(db)
-    materials_by_id = _materials_by_id(db)
-    children = []
-    for o in children_rows:
-        summary = _child_summary(db, o, products, recipe_versions, recipes)
-        child_lines = []
-        for l in db.execute(select(BrewOrderMaterialLine).where(
-                BrewOrderMaterialLine.brew_order_id == o.brew_order_id).order_by(BrewOrderMaterialLine.seq)).scalars().all():
-            if l.member_qty_snapshot:
-                member_breakdown = l.member_qty_snapshot
-                member_ids = [mb["material_id"] for mb in member_breakdown if mb["material_id"]]
-            else:
-                member_ids = _resolve_group_members(db, l.material_group_code)
-                member_breakdown = _member_breakdown(member_ids, live_company_stock, live_workshop_stock, materials_by_id)
-            child_lines.append({
-                "line_id": l.line_id, "seq": l.seq, "stt_label": l.stt_label, "is_header": l.is_header,
-                "material_id": l.material_id, "material_name": l.material_name, "uom": l.uom,
-                "material_group_code": l.material_group_code,
-                "member_material_ids": member_ids,
-                "member_breakdown": member_breakdown,
-                "qty_per_batch": l.qty_per_batch, "qty_total": l.qty_total, "unit_price": l.unit_price,
-                "stock_company_snapshot": l.stock_company_snapshot, "stock_workshop_snapshot": l.stock_workshop_snapshot,
-                "qty_from_company": l.qty_from_company, "qty_from_workshop": l.qty_from_workshop,
-            })
-        summary["lines"] = child_lines
-        children.append(summary)
-    return {
-        "brew_master_order_id": m.brew_master_order_id, "order_code": m.order_code,
-        "issued_by": m.issued_by, "executor_unit": m.executor_unit, "warehouse_keeper": m.warehouse_keeper,
-        "reference_note": m.reference_note, "start_date": m.start_date, "end_date": m.end_date,
-        "safety_note": m.safety_note,
-        "created_by": m.created_by, "created_at": m.created_at,
-        "children": children,
-        "planned_total_hl": round(sum(c["planned_volume_hl"] for c in children), 3),
-        "actual_total_hl": round(sum(c["actual_volume_hl"] for c in children), 3),
-        "is_executed_any": any(c["is_executed"] for c in children),
-        "is_complete_all": bool(children) and all(c["is_complete"] for c in children),
-        "locked": m.locked, "locked_by": m.locked_by,
-    }
-
-
-def update_master_order(db: Session, brew_master_order_id: str, payload: dict, user) -> BrewMasterOrder:
-    """Sửa lệnh nấu lớn — chỉ cho phép khi CHƯA có lệnh nhỏ nào được thực hiện (có
-    BrewRecord); xoá hết lệnh nhỏ cũ (định mức NVL) rồi tạo lại từ children mới, mirror
-    filter_order.py::update_master_order."""
-    master = db.get(BrewMasterOrder, brew_master_order_id)
-    if not master:
-        raise NotFoundError("Lệnh nấu không tồn tại.")
-    old_children = db.execute(select(BrewOrder).where(
-        BrewOrder.master_order_id == brew_master_order_id)).scalars().all()
-    for o in old_children:
-        if db.execute(select(BrewRecord).where(BrewRecord.brew_order_id == o.brew_order_id)).first():
-            raise DomainError("Lệnh nấu đã được thực hiện — không thể sửa.")
-
-    order_code = payload["order_code"]
-    if order_code != master.order_code and db.execute(
-            select(BrewMasterOrder).where(BrewMasterOrder.order_code == order_code,
-                    BrewMasterOrder.order_year == master.order_year)).first():
-        raise DomainError(f"Số lệnh '{order_code}' đã tồn tại trong năm {master.order_year}.")
-
-    validated = _validate_children(db, payload.get("children") or [])
-
-    _delete_children(db, old_children)
-    db.flush()
-
-    master.order_code = order_code
-    master.issued_by = payload.get("issued_by")
-    master.executor_unit = payload.get("executor_unit")
-    master.warehouse_keeper = payload.get("warehouse_keeper")
-    master.reference_note = payload.get("reference_note")
-    master.start_date = payload.get("start_date")
-    master.end_date = payload.get("end_date")
-    master.safety_note = payload.get("safety_note")
-    orders = _insert_children(db, master.brew_master_order_id, master.order_year, validated, user)
-
-    record_audit(db, entity_type="brew_master_order", entity_id=master.brew_master_order_id, action="update",
-                 actor=user, after={"order_code": master.order_code, "children": len(orders)})
-    db.commit()
-    db.refresh(master)
-    return master
-
-
-def delete_master_order(db: Session, brew_master_order_id: str, user) -> None:
-    master = db.get(BrewMasterOrder, brew_master_order_id)
-    if not master:
-        raise NotFoundError("Lệnh nấu không tồn tại.")
-    children = db.execute(select(BrewOrder).where(
-        BrewOrder.master_order_id == brew_master_order_id)).scalars().all()
-    for o in children:
-        if db.execute(select(BrewRecord).where(BrewRecord.brew_order_id == o.brew_order_id)).first():
-            raise DomainError("Lệnh nấu đã được thực hiện — không thể xóa.")
-    _delete_children(db, children)
-    record_audit(db, entity_type="brew_master_order", entity_id=brew_master_order_id, action="delete",
-                 actor=user, before={"order_code": master.order_code, "children": len(children)})
-    db.delete(master)
-    db.commit()
 
 
 def delete_order(db: Session, brew_order_id: str, user) -> None:

@@ -1,9 +1,6 @@
-"""Test GET /api/reports/dashboard-summary đếm "Lệnh nấu" theo LỆNH (BrewMasterOrder — cái
-người dùng thực sự tạo ra ở Lệnh SX), không phải theo lệnh nhỏ (BrewOrder con) bên trong.
-Bug thực tế: trước đây dashboard dùng brew_order_svc.list_orders() (danh sách lệnh nhỏ) cho
-thẻ "Lệnh nấu", trong khi "Lệnh lọc" cùng màn hình đã đúng đếm theo master order — khiến 1
-Lệnh nấu có 2 lệnh nhỏ hiện thành "2", không khớp số lệnh người dùng thực sự tạo ra.
-"""
+"""Test GET /api/reports/dashboard-summary đếm "Lệnh nấu" theo Lệnh sản xuất (BrewOrder) —
+sau khi bỏ lớp "lệnh nấu lớn" (BrewMasterOrder), mỗi BrewOrder đứng phẳng, đếm thẳng 1:1 với
+số lệnh người dùng thực sự tạo ra (services/dashboard.py::production_summary)."""
 
 import os
 import tempfile
@@ -43,18 +40,15 @@ def admin_h(client):
     return _login(client, "admin", "AdminTest123")
 
 
-def _child(planned_volume_hl=100.0):
-    return {"product_id": None, "planned_batch_count": 1, "planned_volume_hl": planned_volume_hl,
-            "volume_tolerance_hl": 0.0, "auto_from_bom": False, "lines": []}
-
-
-def test_dashboard_counts_brew_master_orders_not_children(client, admin_h):
+def test_dashboard_counts_brew_orders(client, admin_h):
     before = client.get("/api/reports/dashboard-summary", headers=admin_h).json()
 
-    created = client.post("/api/brewing/brew-master-orders", headers=admin_h,
-                          json={"order_code": "LN-DASH-TEST", "children": [_child(), _child()]})
-    assert created.status_code == 201, created.text
+    created1 = client.post("/api/brewing/orders", headers=admin_h, json={
+        "order_code": "LN-DASH-TEST-1", "auto_from_bom": False, "planned_volume_hl": 100.0})
+    assert created1.status_code == 201, created1.text
+    created2 = client.post("/api/brewing/orders", headers=admin_h, json={
+        "order_code": "LN-DASH-TEST-2", "auto_from_bom": False, "planned_volume_hl": 100.0})
+    assert created2.status_code == 201, created2.text
 
     after = client.get("/api/reports/dashboard-summary", headers=admin_h).json()
-    # 1 lệnh nấu (master) mới, chứa 2 lệnh nhỏ -> "total" chỉ tăng 1, không phải 2.
-    assert after["lenh_nau"]["total"] == before["lenh_nau"]["total"] + 1
+    assert after["lenh_nau"]["total"] == before["lenh_nau"]["total"] + 2

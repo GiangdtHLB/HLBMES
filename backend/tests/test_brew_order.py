@@ -451,3 +451,54 @@ def test_create_order_blocked_when_shortage(client, admin_h):
     assert "Vật tư không đủ" in r.text
     after = client.get("/api/brewing/orders", headers=admin_h).json()
     assert len(after) == len(before), "Lệnh thiếu tồn bị chặn thì không được tạo ra bất kỳ lệnh nào"
+
+
+def test_available_ferment_tanks_excludes_occupied(client, admin_h, vanhanh_h):
+    free = client.post("/api/lines", headers=admin_h,
+                       json={"code": "TANK-AFT-FREE", "name": "Tank AFT trống", "kind": "tank"})
+    assert free.status_code == 201, free.text
+    occ = client.post("/api/lines", headers=admin_h,
+                      json={"code": "TANK-AFT-OCC", "name": "Tank AFT bận", "kind": "tank"})
+    assert occ.status_code == 201, occ.text
+
+    order_id = _a_brew_order(client, admin_h, "LN-AFT", planned_volume_hl=100)
+    brew = client.post("/api/brewing/brews", headers=vanhanh_h,
+                       json={"brew_code": "BR-AFT", "wort_type": "Dịch test", "brew_order_id": order_id,
+                             "tank_lm": "TANK-AFT-OCC", "lm_code": "LM-AFT"})
+    assert brew.status_code == 201, brew.text
+
+    tanks = client.get("/api/brewing/ferment-tanks", headers=admin_h).json()
+    by_code = {t["code"]: t for t in tanks}
+    assert by_code["TANK-AFT-FREE"]["occupied"] is False
+    assert by_code["TANK-AFT-OCC"]["occupied"] is True
+
+
+def test_create_and_update_order_admin_fields_roundtrip(client, admin_h):
+    """7 field hành chính (mirror ProductionOrder) phải lưu/đọc lại đúng qua create/update/get —
+    trước đây các field này chỉ tồn tại trên BrewMasterOrder (lệnh nấu lớn), giờ nằm thẳng trên
+    BrewOrder sau khi bỏ lớp lồng "lệnh nấu nhỏ"."""
+    r = client.post("/api/brewing/orders", headers=admin_h, json={
+        "order_code": "LN-ADMIN01", "auto_from_bom": False, "planned_volume_hl": 100.0,
+        "issued_by": "Người ra lệnh test", "executor_unit": "Phân xưởng bia Đông Mai",
+        "warehouse_keeper": "Thủ kho test", "reference_note": "Căn cứ kế hoạch sản xuất",
+        "safety_note": "Đeo bảo hộ đầy đủ",
+    })
+    assert r.status_code == 201, r.text
+    order_id = r.json()["brew_order_id"]
+    detail = client.get(f"/api/brewing/orders/{order_id}", headers=admin_h).json()
+    assert detail["issued_by"] == "Người ra lệnh test"
+    assert detail["executor_unit"] == "Phân xưởng bia Đông Mai"
+    assert detail["warehouse_keeper"] == "Thủ kho test"
+    assert detail["reference_note"] == "Căn cứ kế hoạch sản xuất"
+    assert detail["safety_note"] == "Đeo bảo hộ đầy đủ"
+
+    updated = client.put(f"/api/brewing/orders/{order_id}", headers=admin_h, json={
+        "order_code": "LN-ADMIN01", "auto_from_bom": False, "planned_volume_hl": 100.0,
+        "issued_by": "Người ra lệnh mới", "executor_unit": "Phân xưởng bia Đông Mai",
+        "warehouse_keeper": "Thủ kho test", "reference_note": "Căn cứ kế hoạch sản xuất",
+        "safety_note": "An toàn mới",
+    })
+    assert updated.status_code == 200, updated.text
+    detail2 = client.get(f"/api/brewing/orders/{order_id}", headers=admin_h).json()
+    assert detail2["issued_by"] == "Người ra lệnh mới"
+    assert detail2["safety_note"] == "An toàn mới"

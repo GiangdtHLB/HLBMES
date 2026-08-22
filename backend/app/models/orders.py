@@ -32,9 +32,8 @@ class ProductionOrder(Base):
     # services/orders.py::preview_bom), KHÔNG phải nguồn sự thật cho sản lượng (đó vẫn là
     # planned_qty/uom).
     planned_batch_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    # Phần hành chính mirror BrewMasterOrder (mẫu giấy "LỆNH SẢN XUẤT KIÊM PHIẾU XUẤT KHO") —
-    # Lệnh SX (ERP) không có cấu trúc "lệnh nhỏ" nên các trường này nằm thẳng trên 1 dòng,
-    # khác BrewMasterOrder (chung cho nhiều lệnh nhỏ bên trong).
+    # Phần hành chính mirror BrewOrder (mẫu giấy "LỆNH SẢN XUẤT KIÊM PHIẾU XUẤT KHO") — 1 Lệnh
+    # SX (ERP) = 1 dòng, các trường này nằm thẳng trên chính dòng đó.
     issued_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)          # Người ra lệnh
     executor_unit: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)      # Người thực hiện
     warehouse_keeper: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)   # Người xuất hàng

@@ -34,19 +34,20 @@ class MaterialReceipt(Base):
     has_indicators: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
-class BrewMasterOrder(Base):
-    """Lệnh nấu lớn — mẫu giấy thật "LỆNH NẤU BIA KIÊM PHIẾU XUẤT KHO", phần hành chính chung
-    cho cả tờ (Người ra lệnh/Thực hiện/Xuất hàng, căn cứ, thời gian thực hiện, biện pháp an
-    toàn) — chỉ 1 lần cho cả lệnh dù bên trong có nhiều dịch bia. Chứa 1..N "lệnh nấu nhỏ"
-    (BrewOrder, xem master_order_id), mỗi lệnh nhỏ ứng với đúng 1 dịch bia, tự có định mức
-    NVL/sản lượng kế hoạch riêng. In ra 1 tờ gồm tất cả lệnh nhỏ bên trong (xem frontend
-    printBrewOrder), mẫu y hệt FilterMasterOrder/Lệnh lọc."""
-    __tablename__ = "brew_master_order"
+class BrewOrder(Base):
+    """Lệnh sản xuất (nấu) — mẫu giấy thật "LỆNH NẤU BIA KIÊM PHIẾU XUẤT KHO": 1 lệnh ứng với
+    đúng 1 dịch bia (Công thức/RecipeVersion), có đủ phần hành chính ngay trên chính dòng này
+    (issued_by/executor_unit/warehouse_keeper/reference_note/start_date/end_date/safety_note —
+    mirror ProductionOrder, models/orders.py). Có thể ứng với NHIỀU mã nấu (nhiều tank lên men)
+    — sản lượng thực tế (BrewRecord.volume_hl) cộng dồn qua các mã nấu tới khi lệch trong khoảng
+    ±volume_tolerance_hl so với planned_volume_hl thì lệnh hoàn thành, không cho chọn thêm nữa
+    (xem services/brew_order.py::_is_complete, routers/brewing.py::add_brew)."""
+    __tablename__ = "brew_order"
     # order_code chỉ duy nhất TRONG 1 năm (order_year = năm created_at, snapshot lúc tạo) —
     # sang năm khác được đánh lại từ đầu, đúng quy ước đánh số trên giấy tờ thật.
-    __table_args__ = (UniqueConstraint("order_year", "order_code", name="uq_brew_master_order_year_code"),)
+    __table_args__ = (UniqueConstraint("order_year", "order_code", name="uq_brew_order_year_code"),)
 
-    brew_master_order_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
+    brew_order_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
     order_code: Mapped[str] = mapped_column(Unicode(64), index=True)   # Số: 36/PXSXBĐM-T6/2026
     order_year: Mapped[int] = mapped_column(Integer, index=True)
     issued_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)          # I. Người ra lệnh
@@ -56,35 +57,6 @@ class BrewMasterOrder(Base):
     start_date: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
     end_date: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
     safety_note: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)
-    created_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
-    # Tự suy ra từ các lệnh nhỏ con (xem services/lot_lock.py::_recompute_brew_master_order_lock)
-    # — khóa khi TẤT CẢ lệnh nhỏ đã khóa, tự mở ngay khi có 1 lệnh nhỏ được mở, không có nút riêng.
-    locked: Mapped[bool] = mapped_column(Boolean, default=False)
-    locked_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
-    locked_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
-
-
-class BrewOrder(Base):
-    """Lệnh nấu nhỏ — mẫu như FilterOrder/Lệnh lọc: mỗi lệnh nhỏ ứng với đúng 1 dịch bia, có
-    thể ứng với NHIỀU mã nấu (nhiều tank lên men) — sản lượng thực tế (BrewRecord.volume_hl)
-    cộng dồn qua các mã nấu tới khi lệch trong khoảng ±volume_tolerance_hl so với
-    planned_volume_hl thì lệnh nhỏ hoàn thành, không cho chọn thêm nữa (xem
-    services/brew_order.py::_is_complete, routers/brewing.py::add_brew). 1..N lệnh nhỏ gộp lại
-    dưới 1 "lệnh nấu lớn" (BrewMasterOrder, xem master_order_id) — phần hành chính chung của cả
-    tờ (issued_by/executor_unit/warehouse_keeper/reference_note/start_date/end_date/safety_note)
-    nằm ở đó, không lặp lại ở đây. order_code tự sinh (SUB-...) khi tạo qua lệnh lớn; vẫn dùng
-    được độc lập (master_order_id=None) qua API cũ /brewing/orders."""
-    __tablename__ = "brew_order"
-    # order_code chỉ duy nhất TRONG 1 năm — xem BrewMasterOrder.order_year (lệnh nhỏ trong 1
-    # lệnh lớn luôn kế thừa order_year của lệnh lớn; lệnh nhỏ độc lập tự tính = năm created_at).
-    __table_args__ = (UniqueConstraint("order_year", "order_code", name="uq_brew_order_year_code"),)
-
-    brew_order_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
-    order_code: Mapped[str] = mapped_column(Unicode(64), index=True)   # Số: 36/PXSXBĐM-T6/2026 hoặc SUB-...
-    order_year: Mapped[int] = mapped_column(Integer, index=True)
-    master_order_id: Mapped[Optional[str]] = mapped_column(ForeignKey("brew_master_order.brew_master_order_id"), nullable=True, index=True)
-    seq: Mapped[int] = mapped_column(Integer, default=1)   # thứ tự "Lệnh nấu nhỏ #N" trong lệnh lớn
     product_id: Mapped[Optional[str]] = mapped_column(ForeignKey("product.product_id"), nullable=True, index=True)
     # CŨ — không còn dùng (Công thức đổi về hệ Recipe/RecipeVersion, xem recipe_version_id bên
     # dưới); giữ cột lại (không xóa/migrate) để tránh đổi schema không cần thiết trên MSSQL.
@@ -364,7 +336,7 @@ class FilterMasterOrder(Base):
     tư riêng + thể tích dịch kế hoạch riêng. In ra 1 tờ gồm tất cả lệnh nhỏ bên trong (xem
     frontend printFilterMasterOrder)."""
     __tablename__ = "filter_master_order"
-    # order_code chỉ duy nhất TRONG 1 năm — mirror BrewMasterOrder.order_year.
+    # order_code chỉ duy nhất TRONG 1 năm — mirror BrewOrder.order_year.
     __table_args__ = (UniqueConstraint("order_year", "order_code", name="uq_filter_master_order_year_code"),)
 
     filter_master_order_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)

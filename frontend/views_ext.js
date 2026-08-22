@@ -199,6 +199,7 @@
         <button class="btn" id="lo_print">🖨️ In lệnh đóng hàng</button>
       </div>`);
     document.querySelectorAll("[data-rmveh]").forEach(b => b.onclick = () => guard(async () => {
+      if (!confirm("Bỏ xe này khỏi lệnh xuất? Không thể hoàn tác.")) return;
       await DELETE(`/wms/load-orders/${loadOrderId}/vehicles/${b.dataset.rmveh}`);
       toast("Đã bỏ xe khỏi lệnh"); closeModal(); openLoadOrderModal(loadOrderId);
     }));
@@ -4732,6 +4733,7 @@
       <div style="max-height:50vh;overflow:auto">${groups}</div>
       <button class="btn" id="cip_link_save" style="margin-top:10px">Lưu gắn kết</button>`, onBack);
     document.querySelectorAll("[data-cip-unlink]").forEach(b => b.onclick = () => guard(async () => {
+      if (!confirm("Hủy gắn lần CIP này khỏi mẻ/lô? Không thể hoàn tác.")) return;
       await DELETE(`/cip/links/${b.dataset.cipUnlink}`);
       toast("Đã hủy gắn"); closeModal(); window.openCipLinkModal(scopeType, scopeId, label, onBack);
     }));

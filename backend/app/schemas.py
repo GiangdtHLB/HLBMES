@@ -290,8 +290,8 @@ class OrderLineQtySplitIn(BaseModel):
 
 
 class OrderIn(BaseModel):
-    """Dùng chung cho tạo (POST) và sửa (PUT) Lệnh SX (ERP) — mirror BrewMasterOrderIn nhưng
-    KHÔNG có children (1 Lệnh SX = 1 dòng, xem services/orders.py)."""
+    """Dùng chung cho tạo (POST) và sửa (PUT) Lệnh SX (ERP) — 1 Lệnh SX = 1 dòng, xem
+    services/orders.py."""
     order_code: str
     product_id: str
     planned_qty: float
@@ -338,8 +338,8 @@ class OrderOut(ORMModel):
     created_at: datetime
     is_executed: bool = False
     # Chỉ get_order() (xem 1 lệnh) mới nạp — list_orders() để trống (nặng, không cần cho bảng
-    # danh sách) — mirror BrewMasterOrder child["lines"], dict tự do vì cấu trúc member_breakdown
-    # lồng nhau (xem services/orders.py::get_order).
+    # danh sách) — dict tự do vì cấu trúc member_breakdown lồng nhau (xem services/orders.py::
+    # get_order).
     lines: list[dict] = []
 
 
@@ -1711,11 +1711,8 @@ class BrewLineQtySplitIn(BaseModel):
 
 
 class BrewOrderIn(BaseModel):
-    """Lệnh nấu nhỏ (1 dịch bia) — dùng cho API cũ /brewing/orders (tạo lệnh nhỏ đứng độc
-    lập, master_order_id=None) VÀ làm khuôn field dùng chung bên trong BrewSubOrderIn (xem
-    bên dưới) khi tạo qua Lệnh nấu lớn. Các trường hành chính chung của cả tờ (issued_by/
-    executor_unit/warehouse_keeper/reference_note/start_date/end_date/safety_note) đã chuyển
-    sang BrewMasterOrderIn — không còn ở đây."""
+    """Lệnh sản xuất (nấu) — 1 dịch bia, đủ phần hành chính (Người ra lệnh/Thực hiện/Xuất
+    kho/Căn cứ/Thời gian/An toàn) ngay trên chính lệnh (mirror OrderIn/ProductionOrder)."""
     order_code: str
     product_id: Optional[str] = None
     product_desc: Optional[str] = None
@@ -1728,36 +1725,6 @@ class BrewOrderIn(BaseModel):
     tank_lm: Optional[str] = None
     batch_range_from: Optional[int] = None
     batch_range_to: Optional[int] = None
-    auto_from_bom: bool = True
-    lines: list[BrewOrderMaterialLineIn] = []
-    material_qty_overrides: dict[str, BrewLineQtySplitIn] = {}
-
-
-class BrewSubOrderIn(BaseModel):
-    """1 "lệnh nấu nhỏ" bên trong 1 lệnh nấu lớn (BrewMasterOrderIn) — mỗi lệnh nhỏ ứng với
-    đúng 1 dịch bia. order_code tự sinh (SUB-...), không nhận từ client (xem
-    services/brew_order.py::_insert_children)."""
-    product_id: Optional[str] = None
-    product_desc: Optional[str] = None
-    recipe_version_id: Optional[str] = None
-    planned_batch_count: int = 1
-    planned_volume_hl: float = 0.0
-    volume_tolerance_hl: float = 0.0
-    bx_min: Optional[float] = None
-    bx_max: Optional[float] = None
-    tank_lm: Optional[str] = None
-    batch_range_from: Optional[int] = None
-    batch_range_to: Optional[int] = None
-    auto_from_bom: bool = True
-    lines: list[BrewOrderMaterialLineIn] = []
-    material_qty_overrides: dict[str, BrewLineQtySplitIn] = {}
-
-
-class BrewMasterOrderIn(BaseModel):
-    """Lệnh nấu lớn — 1 số lệnh + phần hành chính (Người ra lệnh/Thực hiện/Xuất kho/Căn cứ/
-    Thời gian/An toàn) chung cho cả tờ; chứa 1..N lệnh nấu nhỏ (mỗi lệnh nhỏ 1 dịch bia riêng,
-    xem services/brew_order.py::create_master_order)."""
-    order_code: str
     issued_by: Optional[str] = None
     executor_unit: Optional[str] = "Phân xưởng bia Đông Mai"
     warehouse_keeper: Optional[str] = "Thủ kho"
@@ -1765,7 +1732,9 @@ class BrewMasterOrderIn(BaseModel):
     start_date: Optional[datetime] = None
     end_date: Optional[datetime] = None
     safety_note: Optional[str] = None
-    children: list[BrewSubOrderIn]
+    auto_from_bom: bool = True
+    lines: list[BrewOrderMaterialLineIn] = []
+    material_qty_overrides: dict[str, BrewLineQtySplitIn] = {}
 
 
 class BrewBatchIn(BaseModel):
@@ -1794,6 +1763,20 @@ class BrewBatchStartIn(BaseModel):
     """Sửa giờ bắt đầu mẻ nấu — bắt buộc truyền giá trị (khác FinishIn không có mặc định
     "giờ hiện tại" vì started_at đã có giá trị từ lúc tạo mẻ, sửa là có chủ đích)."""
     started_at: datetime
+
+
+class BrewBatchCodeIn(BaseModel):
+    """Đổi lại Mã mẻ sau khi đã tạo (VD gõ nhầm số mẻ Braumat) — cùng ràng buộc như lúc tạo
+    (số nguyên dương, duy nhất trong năm), xem routers/brewing.py::update_brew_batch_code."""
+    batch_code: str
+
+    @field_validator("batch_code")
+    @classmethod
+    def _batch_code_must_be_positive_int(cls, v: str) -> str:
+        v = v.strip()
+        if not v.isdigit() or int(v) <= 0:
+            raise ValueError("Mã mẻ phải là số nguyên dương (VD: 123).")
+        return v
 
 
 class FinishFilterTankIn(FinishIn):

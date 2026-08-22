@@ -84,17 +84,16 @@ def available_ferment_tanks(db: Session) -> list:
 
 
 def production_summary(db: Session) -> dict:
-    # Đếm theo LỆNH (Lệnh SX/master order — cái người dùng thực sự tạo ra), không phải theo
-    # lệnh nhỏ (con) bên trong — trước đây "Lệnh nấu" đếm nhầm brew_order_svc.list_orders()
-    # (danh sách lệnh nhỏ) trong khi "Lệnh lọc" đã đúng đếm theo master order, khiến 1 Lệnh
-    # nấu có 2 lệnh nhỏ hiện thành "2" thay vì "1" — không khớp Lệnh lọc cùng màn hình.
-    brew_orders = brew_order_svc.list_master_orders(db)
+    # Lệnh nấu đã bỏ lớp "lệnh nấu lớn" (BrewMasterOrder) — mỗi BrewOrder giờ đứng phẳng, đếm
+    # thẳng theo list_orders()/is_complete/is_executed. Lệnh lọc vẫn giữ cấu trúc master/child
+    # (ngoài phạm vi phẳng hóa), đếm theo master order như cũ.
+    brew_orders = brew_order_svc.list_orders(db)
     filter_orders = filter_order_svc.list_master_orders(db)
     batches = db.execute(select(BrewBatch)).scalars().all()
     filters = db.execute(select(FilterRecord)).scalars().all()
     bottles = db.execute(select(BottleRecord)).scalars().all()
     return {
-        "lenh_nau": _order_counts(brew_orders, "is_complete_all", "is_executed_any"),
+        "lenh_nau": _order_counts(brew_orders, "is_complete", "is_executed"),
         "lenh_loc": _order_counts(filter_orders, "is_complete_all", "is_executed_any"),
         "me_nau": _batch_counts(batches),
         "me_loc": _batch_counts(filters),

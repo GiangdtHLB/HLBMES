@@ -213,24 +213,3 @@ def test_update_order_applies_new_override(client, admin_h):
     line = next(l for l in detail["lines"] if not l["is_header"])
     assert line["qty_from_company"] == pytest.approx(20)
     assert line["qty_from_workshop"] == pytest.approx(0)
-
-
-def test_master_order_children_lines_expose_qty_split(client, admin_h):
-    mat_code = f"MAT-QS8-{new_id()[:6]}"
-    _a_material_with_stock(client, admin_h, mat_code, qty_company=1000, qty_workshop=15)
-    product_id = _a_product(client, admin_h)
-    version = _a_recipe_version(client, admin_h, product_id, mat_code, qty=10)
-
-    r = client.post("/api/brewing/brew-master-orders", headers=admin_h, json={
-        "order_code": f"LNL-QS-{new_id()[:6]}",
-        "children": [{"product_id": product_id, "recipe_version_id": version["version_id"],
-                      "planned_batch_count": 2, "planned_volume_hl": 100, "volume_tolerance_hl": 0,
-                      "auto_from_bom": True, "lines": [],
-                      "material_qty_overrides": {"0": {"qty_from_company": 6, "qty_from_workshop": 14}}}],
-    })
-    assert r.status_code == 201, r.text
-    master = client.get(f"/api/brewing/brew-master-orders/{r.json()['brew_master_order_id']}",
-                        headers=admin_h).json()
-    line = next(l for l in master["children"][0]["lines"] if not l["is_header"])
-    assert line["qty_from_company"] == pytest.approx(6)
-    assert line["qty_from_workshop"] == pytest.approx(14)
