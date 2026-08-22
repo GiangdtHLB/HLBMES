@@ -214,7 +214,8 @@ def delete_product(db: Session, product_id: str, user: User) -> None:
         ("lệnh sản xuất (ERP cũ)", select(func.count(ProductionOrder.order_id)).where(
             ProductionOrder.product_id == product_id)),
         ("work order", select(func.count(WorkOrder.wo_id)).where(WorkOrder.product_id == product_id)),
-        ("công thức", select(func.count(Recipe.recipe_id)).where(Recipe.product_id == product_id)),
+        ("version công thức", select(func.count(RecipeVersion.version_id)).where(
+            RecipeVersion.product_id == product_id)),
         ("mẻ sản xuất (module cũ)", select(func.count(BatchExecution.batch_id)).where(
             BatchExecution.product_id == product_id)),
     ]
@@ -272,14 +273,12 @@ def delete_finished_product(db: Session, finished_product_id: str, user: User) -
 
 def delete_recipe(db: Session, recipe_id: str, user: User) -> None:
     """Xóa công thức + toàn bộ version bên trong — chỉ khi KHÔNG version nào đã từng được
-    dùng (work order hoặc mẻ sản xuất tham chiếu recipe_version_id), vì batch SNAPSHOT dữ liệu
-    version lúc release nên xóa version đã dùng sẽ mất khả năng tra cứu tại sao mẻ đó chạy theo
-    thông số nào (tài liệu §4.2, §7.2 — models/recipes.py). Lệnh nấu (BrewOrder) hiện KHÔNG lưu
-    recipe_version_id (tự tra BOM hiệu lực theo Product.product_id lúc lập lệnh rồi snapshot
-    ngay vào BrewOrderMaterialLine — xem services/brew_order.py::_effective_bom), nên phải chặn
-    riêng theo product_id của công thức: 1 dịch bia đã được chọn cho lệnh nấu nào rồi thì công
-    thức (BOM) của dịch bia đó coi như đang dùng, không cho xóa (mirror delete_product chặn
-    theo product_id, chiều ngược lại)."""
+    dùng (lệnh nấu/lệnh SX/work order/mẻ sản xuất tham chiếu recipe_version_id), vì batch
+    SNAPSHOT dữ liệu version lúc release nên xóa version đã dùng sẽ mất khả năng tra cứu tại sao
+    mẻ đó chạy theo thông số nào (tài liệu §4.2, §7.2 — models/recipes.py). Recipe giờ đại diện
+    1 Loại bia (không còn 1 product_id duy nhất — mỗi version bên trong tự gắn 1 dịch bia riêng,
+    xem models/recipes.py), nên chặn trực tiếp theo recipe_version_id (mirror đúng
+    delete_recipe_version) thay vì suy qua product_id như trước."""
     require_perm(user, "master.manage")
     r = db.get(Recipe, recipe_id)
     if not r:
@@ -287,7 +286,10 @@ def delete_recipe(db: Session, recipe_id: str, user: User) -> None:
     version_ids = db.execute(select(RecipeVersion.version_id).where(
         RecipeVersion.recipe_id == recipe_id)).scalars().all()
     checks = [
-        ("lệnh nấu", select(func.count(BrewOrder.brew_order_id)).where(BrewOrder.product_id == r.product_id)),
+        ("lệnh nấu", select(func.count(BrewOrder.brew_order_id)).where(
+            BrewOrder.recipe_version_id.in_(version_ids))),
+        ("lệnh SX (ERP)", select(func.count(ProductionOrder.order_id)).where(
+            ProductionOrder.recipe_version_id.in_(version_ids))),
         ("work order", select(func.count(WorkOrder.wo_id)).where(WorkOrder.recipe_version_id.in_(version_ids))),
         ("mẻ sản xuất (module cũ)", select(func.count(BatchExecution.batch_id)).where(
             BatchExecution.recipe_version_id.in_(version_ids))),
@@ -297,6 +299,32 @@ def delete_recipe(db: Session, recipe_id: str, user: User) -> None:
                  actor=user, before={"code": r.code, "name": r.name, "versions": len(version_ids)})
     db.execute(sa_delete(RecipeVersion).where(RecipeVersion.recipe_id == recipe_id))
     db.delete(r)
+    db.commit()
+
+
+def delete_recipe_version(db: Session, version_id: str, user: User) -> None:
+    """Xóa 1 version riêng lẻ (VD tạo nhầm lúc test) — không đụng tới version khác cùng công
+    thức. Chặn nếu version này đã từng được tham chiếu ở bất kỳ đâu (Lệnh nấu, Lệnh SX (ERP),
+    work order, hoặc mẻ sản xuất module cũ) — khác delete_recipe (chặn theo product_id vì
+    BrewOrder trước đây không lưu recipe_version_id), giờ BrewOrder/ProductionOrder đều đã lưu
+    thẳng recipe_version_id (xem services/brew_order.py, services/orders.py) nên chặn trực tiếp
+    theo version_id là đủ, không cần suy ra qua product_id nữa."""
+    require_perm(user, "master.manage")
+    v = db.get(RecipeVersion, version_id)
+    if not v:
+        raise NotFoundError("Version không tồn tại.")
+    checks = [
+        ("lệnh nấu", select(func.count(BrewOrder.brew_order_id)).where(BrewOrder.recipe_version_id == version_id)),
+        ("lệnh SX (ERP)", select(func.count(ProductionOrder.order_id)).where(
+            ProductionOrder.recipe_version_id == version_id)),
+        ("work order", select(func.count(WorkOrder.wo_id)).where(WorkOrder.recipe_version_id == version_id)),
+        ("mẻ sản xuất (module cũ)", select(func.count(BatchExecution.batch_id)).where(
+            BatchExecution.recipe_version_id == version_id)),
+    ]
+    _block_if_used(_used_by(db, checks), "Version", f"v{v.version_no}")
+    record_audit(db, entity_type="recipe_version", entity_id=v.version_id, action="delete",
+                 actor=user, before={"recipe_id": v.recipe_id, "version_no": v.version_no, "state": v.state})
+    db.delete(v)
     db.commit()
 
 

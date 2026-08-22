@@ -1,8 +1,13 @@
 """Recipe + RecipeVersion theo ISA-88 (tài liệu §7.2).
 
-- Recipe: định danh ổn định gắn với product.
+- Recipe: định danh ổn định gắn với 1 Loại bia (BeerType, VD Sapphire) — không gắn trực tiếp
+  1 Product/dịch bia cụ thể, vì chỉ tiêu nấu/lên men khác nhau THEO DỊCH (VD 13oP/14oP) trong
+  khi bản thân công thức (quy trình soạn/duyệt) vẫn quản lý chung theo thương hiệu.
 - RecipeVersion: bản version có workflow draft->review->approved->effective->obsolete,
-  segregation of duties giữa người soạn và người duyệt.
+  segregation of duties giữa người soạn và người duyệt — MỖI version tự gắn 1 Product/dịch bia
+  cụ thể (product_id) thuộc đúng Loại bia của Recipe, vì BOM/tham số/chỉ tiêu của version đó
+  chỉ áp dụng cho đúng dịch đó (VD version cho 13oP và version cho 14oP cùng nằm trong 1 Recipe
+  Sapphire nhưng có thể cùng "effective" song song — không cái nào thay thế cái nào).
 - Khi batch được release, parameters/materials được SNAPSHOT vào batch để recipe
   thay đổi về sau không làm biến đổi hồ sơ mẻ đã chạy (tài liệu §4.2, §7.2).
 """
@@ -23,9 +28,10 @@ class Recipe(Base):
     recipe_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
     code: Mapped[str] = mapped_column(Unicode(64), unique=True, index=True)
     name: Mapped[str] = mapped_column(Unicode(255))
-    # 1 dịch bia = đúng 1 công thức (nhiều version bên trong RecipeVersion) — unique để
-    # services/brew_order.py::_effective_bom() luôn chọn đúng recipe duy nhất của dịch bia.
-    product_id: Mapped[str] = mapped_column(ForeignKey("product.product_id"), unique=True, index=True)
+    # 1 Loại bia = đúng 1 công thức (nhiều version bên trong RecipeVersion, mỗi version gắn 1
+    # dịch bia cụ thể qua RecipeVersion.product_id) — unique để chọn công thức theo Loại bia
+    # (Lệnh nấu/Lệnh SX) luôn ra đúng 1 Recipe.
+    beer_type_id: Mapped[str] = mapped_column(ForeignKey("beer_type.beer_type_id"), unique=True, index=True)
 
 
 class RecipeVersion(Base):
@@ -36,6 +42,9 @@ class RecipeVersion(Base):
     recipe_id: Mapped[str] = mapped_column(ForeignKey("recipe.recipe_id"), index=True)
     version_no: Mapped[int] = mapped_column(Integer)
     state: Mapped[str] = mapped_column(Unicode(255), default=RecipeState.DRAFT.value)
+    # Dịch bia cụ thể (VD SAPPHIRE-13OP) mà version này áp dụng — phải cùng Loại bia với
+    # Recipe cha (xem services/recipes.py::create_version).
+    product_id: Mapped[str] = mapped_column(ForeignKey("product.product_id"), index=True)
 
     # Quy mô mẻ chuẩn mà BOM định mức tính cho (để scale theo planned_qty của mẻ).
     base_qty: Mapped[float] = mapped_column(Float, default=0.0)

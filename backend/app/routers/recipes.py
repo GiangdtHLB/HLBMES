@@ -33,9 +33,10 @@ def list_recipes(db: Session = Depends(get_db)):
 def create_recipe(payload: RecipeIn, db: Session = Depends(get_db),
                   user: User = Depends(get_current_user)):
     require_perm(user, "recipe.author")
-    if db.execute(select(Recipe).where(Recipe.product_id == payload.product_id)).scalar_one_or_none():
-        raise DomainError("Dịch bia này đã có công thức — mỗi dịch bia chỉ được 1 công thức "
-                           "(tạo version mới trong công thức đã có thay vì tạo công thức khác).")
+    if db.execute(select(Recipe).where(Recipe.beer_type_id == payload.beer_type_id)).scalar_one_or_none():
+        raise DomainError("Loại bia này đã có công thức — mỗi loại bia chỉ được 1 công thức "
+                           "(tạo version mới trong công thức đã có, chọn đúng dịch bia, thay vì "
+                           "tạo công thức khác).")
     r = Recipe(recipe_id=new_id(), **payload.model_dump())
     db.add(r)
     db.commit()
@@ -83,6 +84,11 @@ def get_version(version_id: str, db: Session = Depends(get_db)):
     if not rv:
         raise NotFoundError("Recipe version không tồn tại.")
     return rv
+
+
+@router.delete("/versions/{version_id}", status_code=204)
+def delete_version(version_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    master_data.delete_recipe_version(db, version_id, user)
 
 
 # ---- Change-control (e-signature) + diff + danh sách thay đổi ----

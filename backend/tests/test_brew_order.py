@@ -60,12 +60,15 @@ def lager_product_id(client, admin_h):
 
 @pytest.fixture(scope="module")
 def lager_recipe_version_id(client, admin_h, lager_product_id):
-    """1 dịch bia có đúng 1 Recipe (nhiều RecipeVersion) — người lập Lệnh nấu BẮT BUỘC tự chọn
-    1 version đang hiệu lực (seed.py tạo sẵn REC-LAGER + version effective cho BIA-LAGER)."""
+    """1 Loại bia có đúng 1 Recipe (nhiều RecipeVersion, mỗi version tự gắn 1 Dịch bia riêng) —
+    người lập Lệnh nấu BẮT BUỘC tự chọn 1 version đang hiệu lực ĐÚNG dịch bia (seed.py tạo sẵn
+    REC-LAGER + version effective cho BIA-LAGER)."""
+    products = client.get("/api/products", headers=admin_h).json()
+    beer_type_id = next(p["beer_type_id"] for p in products if p["product_id"] == lager_product_id)
     recipes = client.get("/api/recipes", headers=admin_h).json()
-    recipe = next(r for r in recipes if r["product_id"] == lager_product_id)
+    recipe = next(r for r in recipes if r["beer_type_id"] == beer_type_id)
     versions = client.get(f"/api/recipes/{recipe['recipe_id']}/versions", headers=admin_h).json()
-    return next(v["version_id"] for v in versions if v["state"] == "effective")
+    return next(v["version_id"] for v in versions if v["state"] == "effective" and v["product_id"] == lager_product_id)
 
 
 def _a_brewhouse_line(client, admin_h):

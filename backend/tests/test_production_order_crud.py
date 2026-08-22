@@ -43,11 +43,13 @@ def admin_h(client):
 @pytest.fixture(scope="module")
 def recipe_ctx(client, admin_h):
     """Sản phẩm + version công thức đang hiệu lực có sẵn từ seed data — dùng để test
-    recipe_version_id (mirror cách test_depth.py::test_recipe_suspend_resume lấy dữ liệu)."""
+    recipe_version_id (mirror cách test_depth.py::test_recipe_suspend_resume lấy dữ liệu). Recipe
+    giờ đại diện 1 Loại bia (không còn 1 product_id duy nhất) — product_id phải lấy từ chính
+    version đã chọn (RecipeVersion.product_id), không còn từ Recipe."""
     recipe = client.get("/api/recipes", headers=admin_h).json()[0]
     vers = client.get(f"/api/recipes/{recipe['recipe_id']}/versions", headers=admin_h).json()
-    vid = next(v["version_id"] for v in vers if v["state"] == "effective")
-    return {"product_id": recipe["product_id"], "recipe_version_id": vid}
+    v = next(v for v in vers if v["state"] == "effective")
+    return {"product_id": v["product_id"], "recipe_version_id": v["version_id"]}
 
 
 def _create_order(client, admin_h, code, recipe_ctx, **extra):

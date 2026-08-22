@@ -103,17 +103,18 @@ def _persist_lines(db: Session, order_id: str, recipe_version_id: Optional[str],
 
 def _validate_recipe_version_selection(db: Session, product_id: Optional[str], recipe_version_id: Optional[str]) -> None:
     """Mirror brew_order._validate_recipe_version_selection: recipe_version_id (nếu có) phải
-    thuộc đúng Recipe của sản phẩm đã chọn và đang ở trạng thái `effective`."""
+    thuộc đúng Dịch bia đã chọn (RecipeVersion.product_id, không còn qua Recipe.product_id — mỗi
+    Recipe giờ đại diện 1 Loại bia, mỗi version tự gắn 1 dịch bia riêng) và đang `effective`."""
     if not recipe_version_id:
         return
     rv = db.get(RecipeVersion, recipe_version_id)
     if not rv:
         raise DomainError("Công thức đã chọn không tồn tại.")
-    recipe = db.get(Recipe, rv.recipe_id)
-    if not recipe or recipe.product_id != product_id:
+    if rv.product_id != product_id:
         raise DomainError(f"Công thức (version {rv.version_no}) không thuộc Sản phẩm đã chọn.")
     if rv.state != "effective":
-        raise DomainError(f"Công thức '{recipe.code}' version {rv.version_no} không còn hiệu lực.")
+        recipe = db.get(Recipe, rv.recipe_id)
+        raise DomainError(f"Công thức '{recipe.code if recipe else '?'}' version {rv.version_no} không còn hiệu lực.")
 
 
 def _build_output_lines(db: Session, order_id: str) -> list:

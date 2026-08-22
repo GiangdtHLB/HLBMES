@@ -45,19 +45,24 @@ def admin_h(client):
 
 def _a_product(client, headers):
     suffix = new_id()[:8]
+    bt = client.post("/api/beer-types", headers=headers, json={"code": f"BT-{suffix}", "name": f"Loại {suffix}"})
+    assert bt.status_code == 201, bt.text
     r = client.post("/api/products", headers=headers,
-                    json={"code": f"PRD-{suffix}", "name": f"Dịch test {suffix}", "uom": "L"})
+                    json={"code": f"PRD-{suffix}", "name": f"Dịch test {suffix}", "uom": "L",
+                          "beer_type_id": bt.json()["beer_type_id"]})
     assert r.status_code == 201, r.text
     return r.json()["product_id"]
 
 
 def _a_recipe_version(client, headers, product_id, qty=10):
+    product = client.get("/api/products", headers=headers).json()
+    beer_type_id = next(p["beer_type_id"] for p in product if p["product_id"] == product_id)
     r = client.post("/api/recipes", headers=headers,
-                    json={"code": f"CT-{new_id()[:8]}", "name": "Test recipe", "product_id": product_id})
+                    json={"code": f"CT-{new_id()[:8]}", "name": "Test recipe", "beer_type_id": beer_type_id})
     assert r.status_code == 201, r.text
     recipe = r.json()
     v = client.post(f"/api/recipes/{recipe['recipe_id']}/versions", headers=headers,
-                    json={"base_qty": 1000, "base_uom": "L",
+                    json={"product_id": product_id, "base_qty": 1000, "base_uom": "L",
                           "materials": [{"material_code": "MALT-PILS", "qty": qty, "uom": "kg"}]})
     assert v.status_code == 201, v.text
     return v.json()["version_id"]

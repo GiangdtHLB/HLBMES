@@ -368,17 +368,18 @@ class WoDispatchIn(BaseModel):
 class RecipeIn(BaseModel):
     code: str
     name: str
-    product_id: str
+    beer_type_id: str
 
 
 class RecipeOut(ORMModel):
     recipe_id: str
     code: str
     name: str
-    product_id: str
+    beer_type_id: str
 
 
 class RecipeVersionIn(BaseModel):
+    product_id: str
     base_qty: float = 0.0
     base_uom: str = "L"
     parameters: list[dict] = []
@@ -392,6 +393,7 @@ class RecipeVersionIn(BaseModel):
 class RecipeVersionOut(ORMModel):
     version_id: str
     recipe_id: str
+    product_id: str
     version_no: int
     state: str
     base_qty: float = 0.0

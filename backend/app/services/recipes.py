@@ -7,10 +7,25 @@ from sqlalchemy.orm import Session
 from ..audit import record_audit
 from ..common import RECIPE_TRANSITIONS, Role, RecipeState, new_id, utcnow
 from ..errors import DomainError, NotFoundError, PermissionError_
+from ..models.master import Product
 from ..models.recipes import Recipe, RecipeVersion
 from ..models.recipe_ext import RecipeChange
 from ..models.signature import Signature
 from ..security import User, enforce_sod, require_role, verify_password
+
+
+def _resolve_version_product(db: Session, recipe: Recipe, product_id: str) -> Product:
+    """1 version chỉ được gắn Product thuộc ĐÚNG Loại bia (beer_type_id) của Recipe cha — mỗi
+    Recipe giờ đại diện 1 Loại bia (VD Sapphire), còn từng version mới ứng với 1 dịch bia cụ thể
+    (VD SAPPHIRE-13OP/14OP), xem models/recipes.py."""
+    if not product_id:
+        raise DomainError("Chọn Dịch bia cho version này.")
+    product = db.get(Product, product_id)
+    if not product:
+        raise DomainError("Dịch bia đã chọn không tồn tại.")
+    if product.beer_type_id != recipe.beer_type_id:
+        raise DomainError(f"Dịch bia '{product.code}' không thuộc Loại bia của công thức này.")
+    return product
 
 
 def create_version(db: Session, recipe_id: str, payload: dict, user: User) -> RecipeVersion:
@@ -18,6 +33,7 @@ def create_version(db: Session, recipe_id: str, payload: dict, user: User) -> Re
     recipe = db.get(Recipe, recipe_id)
     if not recipe:
         raise NotFoundError("Recipe không tồn tại.")
+    _resolve_version_product(db, recipe, payload.get("product_id"))
     last = db.execute(
         select(RecipeVersion).where(RecipeVersion.recipe_id == recipe_id)
         .order_by(RecipeVersion.version_no.desc())
@@ -26,6 +42,7 @@ def create_version(db: Session, recipe_id: str, payload: dict, user: User) -> Re
     rv = RecipeVersion(
         version_id=new_id(),
         recipe_id=recipe_id,
+        product_id=payload.get("product_id"),
         version_no=next_no,
         state=RecipeState.DRAFT.value,
         base_qty=payload.get("base_qty", 0.0) or 0.0,
@@ -55,6 +72,8 @@ def update_draft(db: Session, version_id: str, payload: dict, user: User) -> Rec
     if rv.state != RecipeState.DRAFT.value:
         # Không cho phép chỉnh version đã rời draft (tài liệu §7.2).
         raise DomainError("Chỉ được sửa recipe version ở trạng thái draft.")
+    recipe = db.get(Recipe, rv.recipe_id)
+    rv.product_id = _resolve_version_product(db, recipe, payload.get("product_id", rv.product_id)).product_id
     before = {"parameters": rv.parameters, "materials": rv.materials, "quality_checks": rv.quality_checks}
     rv.base_qty = payload.get("base_qty", rv.base_qty) or 0.0
     rv.base_uom = payload.get("base_uom", rv.base_uom)

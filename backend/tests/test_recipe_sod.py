@@ -46,15 +46,19 @@ def kysu_h(client):
 
 
 def _a_recipe_version(client, headers, suffix):
+    bt = client.post("/api/beer-types", headers=headers, json={"code": f"BT-{suffix}", "name": f"Loại {suffix}"})
+    assert bt.status_code == 201, bt.text
+    beer_type_id = bt.json()["beer_type_id"]
     p = client.post("/api/products", headers=headers,
-                    json={"code": f"PRD-{suffix}", "name": f"Dịch test {suffix}", "uom": "L"})
+                    json={"code": f"PRD-{suffix}", "name": f"Dịch test {suffix}", "uom": "L",
+                          "beer_type_id": beer_type_id})
     assert p.status_code == 201, p.text
     product_id = p.json()["product_id"]
     r = client.post("/api/recipes", headers=headers,
-                    json={"code": f"REC-{suffix}", "name": f"Công thức {suffix}", "product_id": product_id})
+                    json={"code": f"REC-{suffix}", "name": f"Công thức {suffix}", "beer_type_id": beer_type_id})
     assert r.status_code == 201, r.text
     recipe_id = r.json()["recipe_id"]
-    v = client.post(f"/api/recipes/{recipe_id}/versions", headers=headers, json={})
+    v = client.post(f"/api/recipes/{recipe_id}/versions", headers=headers, json={"product_id": product_id})
     assert v.status_code == 201, v.text
     return v.json()["version_id"]
 

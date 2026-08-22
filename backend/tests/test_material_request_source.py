@@ -155,13 +155,15 @@ def test_preview_source_materials_brew_order_surfaces_group_line_instead_of_drop
         "member_material_ids": [m1, m2]}).json()
 
     products = client.get("/api/products", headers=admin_h).json()
-    product_id = next(p["product_id"] for p in products if p["code"] == "BIA-LAGER")
-    # 1 dịch bia có đúng 1 Recipe (seed.py đã tạo REC-LAGER cho BIA-LAGER) — thêm 1 version mới
-    # vào chính Recipe đó thay vì tạo Recipe khác (bị chặn bởi unique product_id).
+    product = next(p for p in products if p["code"] == "BIA-LAGER")
+    product_id = product["product_id"]
+    # 1 Loại bia có đúng 1 Recipe (seed.py đã tạo REC-LAGER cho Loại bia của BIA-LAGER) — thêm 1
+    # version mới (product_id=product_id) vào chính Recipe đó thay vì tạo Recipe khác (bị chặn
+    # bởi unique beer_type_id).
     recipes = client.get("/api/recipes", headers=admin_h).json()
-    recipe_id = next(r["recipe_id"] for r in recipes if r["product_id"] == product_id)
+    recipe_id = next(r["recipe_id"] for r in recipes if r["beer_type_id"] == product["beer_type_id"])
     v = client.post(f"/api/recipes/{recipe_id}/versions", headers=admin_h, json={
-        "base_qty": 1000, "base_uom": "L",
+        "product_id": product_id, "base_qty": 1000, "base_uom": "L",
         "materials": [{"alt_group_code": g["code"], "qty": 500, "uom": "kg"}]}).json()
     for target in ("review", "approved", "effective"):
         t = client.post(f"/api/recipes/versions/{v['version_id']}/transition", headers=admin_h, json={"target": target})
@@ -201,11 +203,12 @@ def test_preview_source_materials_brew_order_member_qty_splits_into_separate_lin
         "member_material_ids": [m1, m2], "selection_mode": "multi"}).json()
 
     products = client.get("/api/products", headers=admin_h).json()
-    product_id = next(p["product_id"] for p in products if p["code"] == "BIA-LAGER")
+    product = next(p for p in products if p["code"] == "BIA-LAGER")
+    product_id = product["product_id"]
     recipes = client.get("/api/recipes", headers=admin_h).json()
-    recipe_id = next(r["recipe_id"] for r in recipes if r["product_id"] == product_id)
+    recipe_id = next(r["recipe_id"] for r in recipes if r["beer_type_id"] == product["beer_type_id"])
     v = client.post(f"/api/recipes/{recipe_id}/versions", headers=admin_h, json={
-        "base_qty": 1000, "base_uom": "L",
+        "product_id": product_id, "base_qty": 1000, "base_uom": "L",
         "materials": [{"alt_group_code": g["code"], "uom": "kg",
                       "member_qty": [{"material_code": "SRC-MQTY-MAT-1", "qty": 5},
                                     {"material_code": "SRC-MQTY-MAT-2", "qty": 6}]}]}).json()
