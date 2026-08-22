@@ -79,11 +79,13 @@ def _a_alt_group(client, admin_h, member_ids, code=None, name=None, unit="kg", s
 
 
 def _lager_recipe_id(client, admin_h, lager_product_id):
-    """1 dịch bia có đúng 1 Recipe — seed.py đã tạo sẵn REC-LAGER cho BIA-LAGER, các test dưới
-    THÊM version mới vào chính Recipe này (không tạo Recipe khác cho cùng sản phẩm — bị chặn
-    bởi unique product_id, xem models/recipes.py)."""
+    """1 Loại bia có đúng 1 Recipe — seed.py đã tạo sẵn REC-LAGER cho Loại bia của BIA-LAGER,
+    các test dưới THÊM version mới (product_id=lager_product_id) vào chính Recipe này (không
+    tạo Recipe khác cho cùng loại bia — bị chặn bởi unique beer_type_id, xem models/recipes.py)."""
+    products = client.get("/api/products", headers=admin_h).json()
+    beer_type_id = next(p["beer_type_id"] for p in products if p["product_id"] == lager_product_id)
     recipes = client.get("/api/recipes", headers=admin_h).json()
-    return next(r["recipe_id"] for r in recipes if r["product_id"] == lager_product_id)
+    return next(r["recipe_id"] for r in recipes if r["beer_type_id"] == beer_type_id)
 
 
 def _activate_recipe_version(client, headers, version_id):
@@ -191,7 +193,7 @@ def test_brew_order_bom_preview_resolves_alt_group_line(client, admin_h, malt_pi
     g = _a_alt_group(client, admin_h, [malt_pils_id, malt_vienna_id], name="Malt Úc")
     recipe_id = _lager_recipe_id(client, admin_h, lager_product_id)
     v = client.post(f"/api/recipes/{recipe_id}/versions", headers=admin_h,
-                    json={"base_qty": 1000, "base_uom": "L",
+                    json={"product_id": lager_product_id, "base_qty": 1000, "base_uom": "L",
                           "materials": [{"alt_group_code": g["code"], "qty": 825, "uom": "kg"}]}).json()
     _activate_recipe_version(client, admin_h, v["version_id"])
 
@@ -212,7 +214,7 @@ def test_brew_order_created_from_alt_group_formula_persists_group_code(client, a
     g = _a_alt_group(client, admin_h, [malt_pils_id, malt_vienna_id], name="Malt Úc")
     recipe_id = _lager_recipe_id(client, admin_h, lager_product_id)
     v = client.post(f"/api/recipes/{recipe_id}/versions", headers=admin_h,
-                    json={"base_qty": 1000, "base_uom": "L",
+                    json={"product_id": lager_product_id, "base_qty": 1000, "base_uom": "L",
                           "materials": [{"alt_group_code": g["code"], "qty": 500, "uom": "kg"}]}).json()
     _activate_recipe_version(client, admin_h, v["version_id"])
 
@@ -260,7 +262,7 @@ def test_bom_preview_member_qty_resolves_per_member_amounts(client, admin_h, mal
     g = _a_alt_group(client, admin_h, [malt_pils_id, malt_vienna_id], name="CO2 tương đương")
     recipe_id = _lager_recipe_id(client, admin_h, lager_product_id)
     v = client.post(f"/api/recipes/{recipe_id}/versions", headers=admin_h,
-                    json={"base_qty": 1000, "base_uom": "L",
+                    json={"product_id": lager_product_id, "base_qty": 1000, "base_uom": "L",
                           "materials": [{"alt_group_code": g["code"], "uom": "kg",
                                         "member_qty": [{"material_code": "MALT-PILS", "qty": 5},
                                                       {"material_code": "MALT-VIENNA", "qty": 6}]}]}).json()
@@ -292,7 +294,7 @@ def test_create_order_member_qty_blocked_only_when_every_member_short(client, ad
 
     # Cả 2 mã đều đòi hỏi 1 tỷ kg — chắc chắn vượt xa mọi tồn kho thật, phải bị chặn.
     v_huge = client.post(f"/api/recipes/{recipe_id}/versions", headers=admin_h,
-                         json={"base_qty": 1000, "base_uom": "L",
+                         json={"product_id": lager_product_id, "base_qty": 1000, "base_uom": "L",
                                "materials": [{"alt_group_code": g["code"], "uom": "kg",
                                              "member_qty": [{"material_code": "MALT-PILS", "qty": 1_000_000_000},
                                                            {"material_code": "MALT-VIENNA", "qty": 1_000_000_000}]}]}).json()
@@ -309,7 +311,7 @@ def test_create_order_member_qty_blocked_only_when_every_member_short(client, ad
     # thiếu) — vẫn phải cho tạo vì còn 1 lựa chọn khả thi (MALT-PILS).
     recipe_id2 = recipe_id
     v_mixed = client.post(f"/api/recipes/{recipe_id2}/versions", headers=admin_h,
-                          json={"base_qty": 1000, "base_uom": "L",
+                          json={"product_id": lager_product_id, "base_qty": 1000, "base_uom": "L",
                                 "materials": [{"alt_group_code": g["code"], "uom": "kg",
                                               "member_qty": [{"material_code": "MALT-PILS", "qty": 0.001},
                                                             {"material_code": "MALT-VIENNA", "qty": 1_000_000_000}]}]}).json()
@@ -332,9 +334,9 @@ def test_create_order_member_qty_blocked_only_when_every_member_short(client, ad
 
 # ---- 5) Người lập Lệnh nấu PHẢI chọn thành viên áp dụng cho dòng member_qty ----
 
-def _recipe_version_with_member_qty(client, admin_h, recipe_id, group_code):
+def _recipe_version_with_member_qty(client, admin_h, recipe_id, group_code, product_id):
     v = client.post(f"/api/recipes/{recipe_id}/versions", headers=admin_h,
-                    json={"base_qty": 1000, "base_uom": "L",
+                    json={"product_id": product_id, "base_qty": 1000, "base_uom": "L",
                           "materials": [{"alt_group_code": group_code, "uom": "kg",
                                         "member_qty": [{"material_code": "MALT-PILS", "qty": 5},
                                                       {"material_code": "MALT-VIENNA", "qty": 6}]}]}).json()
@@ -347,7 +349,7 @@ def test_create_order_requires_member_selection_for_single_mode_group(client, ad
     khiến member_declared giữ nguyên CẢ 2 thành viên → phải bị chặn (chỉ cho chọn ĐÚNG 1)."""
     g = _a_alt_group(client, admin_h, [malt_pils_id, malt_vienna_id], name="Single sel test")
     recipe_id = _lager_recipe_id(client, admin_h, lager_product_id)
-    v = _recipe_version_with_member_qty(client, admin_h, recipe_id, g["code"])
+    v = _recipe_version_with_member_qty(client, admin_h, recipe_id, g["code"], lager_product_id)
 
     r = client.post("/api/brewing/orders", headers=admin_h, json={
         "order_code": f"LN-SEL-NOPICK-{new_id()[:6]}", "product_id": lager_product_id,
@@ -363,7 +365,7 @@ def test_create_order_single_mode_selection_uses_only_chosen_member(client, admi
     Tổng mẻ chỉ tính mã đã chọn, KHÔNG cộng dồn với mã còn lại."""
     g = _a_alt_group(client, admin_h, [malt_pils_id, malt_vienna_id], name="Single sel test 2")
     recipe_id = _lager_recipe_id(client, admin_h, lager_product_id)
-    v = _recipe_version_with_member_qty(client, admin_h, recipe_id, g["code"])
+    v = _recipe_version_with_member_qty(client, admin_h, recipe_id, g["code"], lager_product_id)
 
     r = client.post("/api/brewing/orders", headers=admin_h, json={
         "order_code": f"LN-SEL-PICK-{new_id()[:6]}", "product_id": lager_product_id,
@@ -384,7 +386,7 @@ def test_create_order_single_mode_selection_uses_only_chosen_member(client, admi
 def test_create_order_rejects_two_selections_for_single_mode_group(client, admin_h, malt_pils_id, malt_vienna_id, lager_product_id):
     g = _a_alt_group(client, admin_h, [malt_pils_id, malt_vienna_id], name="Single sel test 3")
     recipe_id = _lager_recipe_id(client, admin_h, lager_product_id)
-    v = _recipe_version_with_member_qty(client, admin_h, recipe_id, g["code"])
+    v = _recipe_version_with_member_qty(client, admin_h, recipe_id, g["code"], lager_product_id)
 
     r = client.post("/api/brewing/orders", headers=admin_h, json={
         "order_code": f"LN-SEL-TWOPICK-{new_id()[:6]}", "product_id": lager_product_id,
@@ -401,7 +403,7 @@ def test_create_order_multi_mode_partial_selection_sums_only_chosen(client, admi
     vẫn hợp lệ (multi chỉ yêu cầu >=1), Nhu cầu Tổng mẻ chỉ tính mã đã chọn."""
     g = _a_alt_group(client, admin_h, [malt_pils_id, malt_vienna_id], name="Multi sel test", selection_mode="multi")
     recipe_id = _lager_recipe_id(client, admin_h, lager_product_id)
-    v = _recipe_version_with_member_qty(client, admin_h, recipe_id, g["code"])
+    v = _recipe_version_with_member_qty(client, admin_h, recipe_id, g["code"], lager_product_id)
 
     r = client.post("/api/brewing/orders", headers=admin_h, json={
         "order_code": f"LN-MULTISEL-{new_id()[:6]}", "product_id": lager_product_id,
@@ -424,7 +426,7 @@ def test_create_order_member_qty_per_member_split_override(client, admin_h, malt
     khớp theo material_code chứ không lẫn giữa các thành viên."""
     g = _a_alt_group(client, admin_h, [malt_pils_id, malt_vienna_id], name="Split sel test", selection_mode="multi")
     recipe_id = _lager_recipe_id(client, admin_h, lager_product_id)
-    v = _recipe_version_with_member_qty(client, admin_h, recipe_id, g["code"])
+    v = _recipe_version_with_member_qty(client, admin_h, recipe_id, g["code"], lager_product_id)
 
     r = client.post("/api/brewing/orders", headers=admin_h, json={
         "order_code": f"LN-SPLITSEL-{new_id()[:6]}", "product_id": lager_product_id,

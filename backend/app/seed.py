@@ -166,11 +166,12 @@ def seed():
     recipe = db.execute(select(Recipe).where(Recipe.code == "REC-LAGER")).scalar_one_or_none()
     if not recipe:
         recipe = Recipe(recipe_id=new_id(), code="REC-LAGER", name="Công thức Bia Lager",
-                        product_id=lager.product_id)
+                        beer_type_id=lager_type.beer_type_id)
         db.add(recipe)
         db.commit()
 
     rv = recipe_svc.create_version(db, recipe.recipe_id, {
+        "product_id": lager.product_id,
         "base_qty": 50000, "base_uom": "L",   # BOM định mức cho mẻ chuẩn 50.000 L
         "parameters": [
             {"name": "Nhiệt độ đường hóa", "target": 65, "lower": 63, "upper": 67, "unit": "°C", "phase": "mash"},
@@ -668,6 +669,7 @@ def _seed_recipe_ext(db, recipe_id, rv_effective, batch_id) -> None:
 
     # Change-control: tạo version 2 (draft) đổi định mức malt + lý do, lưu RecipeChange + diff.
     rv2 = recipe_svc.create_version(db, recipe_id, {
+        "product_id": rv_effective.product_id,
         "base_qty": rv_effective.base_qty, "base_uom": rv_effective.base_uom,
         "parameters": rv_effective.parameters,
         "materials": [

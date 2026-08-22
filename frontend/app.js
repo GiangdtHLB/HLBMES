@@ -1300,7 +1300,7 @@ VIEWS.orders = async function () {
         <td>${esc(prodName(o.product_id))}</td><td>${o.planned_qty} ${o.uom}</td>
         <td>${o.priority}</td>
         <td class="muted">${esc(o.recipe_name || "—")}</td>
-        <td class="muted">${o.recipe_code ? `${esc(o.recipe_code)} v${o.recipe_version_no}` : "—"}</td>
+        <td class="muted">${o.recipe_code ? `v${o.recipe_version_no}` : "—"}</td>
         <td class="muted">${esc(o.recipe_note || "—")}</td>
         <td class="muted">${o.planned_batch_count ?? "—"}</td>
         <td>${badge(o.status)}</td><td class="muted">${fmt(o.created_at)}</td>
@@ -1313,16 +1313,18 @@ VIEWS.orders = async function () {
   }
 
   else if (sec === "lenhnau") {
-    const [orders, recipes] = await Promise.all([GET("/brewing/orders"), GET("/recipes").catch(() => [])]);
+    const [orders, recipes, lnProducts] = await Promise.all([
+      GET("/brewing/orders"), GET("/recipes").catch(() => []), GET("/products").catch(() => [])]);
     CACHE.recipesLn = recipes;
+    CACHE.products = lnProducts;
     const recipeOpts = recipes.map(r => `<option value="${esc(r.recipe_id)}">${esc(r.code)} — ${esc(r.name)}</option>`).join("");
     body = `<div class="panel"><h2 id="lo_form_title">Tạo Lệnh nấu</h2>
-      <div class="muted" style="margin-bottom:6px">Chọn <b>Công thức</b> rồi chọn <b>Version</b> đang hiệu lực — định mức NVL (BOM) tự nạp
+      <div class="muted" style="margin-bottom:6px">Chọn <b>Loại bia</b> rồi chọn <b>Version</b> đang hiệu lực — định mức NVL (BOM) tự nạp
         theo Số mẻ kế hoạch, xem trước (đủ/thiếu tồn) trước khi tạo lệnh. Có thể ứng với nhiều mã nấu (tạo ở tab "Nấu-Lọc-Chiết → Nấu") —
         sản lượng thực tế cộng dồn qua các mã nấu tới khi đạt kế hoạch (±sai số) thì lệnh hoàn thành, không chọn được nữa.</div>
       <div class="row">
         <div class="field"><label>Số lệnh</label><input id="lo_code" placeholder="VD: 36/PXSXBĐM-T6/2026"/></div>
-        <div class="field"><label>Chọn công thức</label><select id="lo_recipe"><option value="">(chọn công thức — bắt buộc)</option>${recipeOpts}</select></div>
+        <div class="field"><label>Chọn loại bia</label><select id="lo_recipe"><option value="">(chọn loại bia)</option>${recipeOpts}</select></div>
         <button class="btn sec" id="lo_bom_preview" style="align-self:flex-end">📋 Xem NVL (đủ/thiếu tồn)</button>
       </div>
       <div id="lo_recipe_box"></div>
@@ -1346,14 +1348,14 @@ VIEWS.orders = async function () {
     </div>
     <div class="panel"><h2>Danh sách Lệnh nấu <span class="muted">(${orders.length})</span></h2>
       <input class="searchbox" data-tbl="t_lenhnau" placeholder="Tìm theo số lệnh, dịch bia, trạng thái..."/>
-      <div class="tablewrap"><table id="t_lenhnau"><thead><tr><th>Số lệnh</th><th>Dịch bia</th>
-        <th>Tên công thức</th><th>Version</th><th>Ghi chú công thức</th>
+      <div class="tablewrap"><table id="t_lenhnau"><thead><tr><th>Số lệnh</th><th>Loại bia</th><th>Dịch bia</th>
+        <th>Version</th><th>Ghi chú công thức</th>
         <th>Thực tế/KH (hl)</th><th>Ngày lập</th><th>Trạng thái</th><th></th></tr></thead>
       <tbody>${orders.map(o => `<tr>
         <td class="code">${esc(o.order_code)}</td>
-        <td>${esc(o.product_code || o.product_desc || "—")}</td>
         <td class="muted">${esc(o.recipe_name || "—")}</td>
-        <td class="muted">${o.recipe_code ? esc(o.recipe_code) + " v" + o.recipe_version_no : "—"}</td>
+        <td>${esc(o.product_code || o.product_desc || "—")}</td>
+        <td class="muted">${o.recipe_code ? "v" + o.recipe_version_no : "—"}</td>
         <td class="muted">${esc(o.recipe_note || "—")}</td>
         <td class="muted">${o.actual_volume_hl}/${o.planned_volume_hl}</td>
         <td class="muted">${fmt(o.created_at)}</td>
@@ -1477,8 +1479,11 @@ VIEWS.orders = async function () {
       try {
         const recipes = await GET(`/recipes`);
         if ($("o_prod").value !== productId) return; // đã đổi Sản phẩm khác trong lúc chờ — bỏ kết quả cũ
-        poRecipe = (recipes || []).find(r => r.product_id === productId) || null;
-        poActiveVersions = poRecipe ? (await GET(`/recipes/${poRecipe.recipe_id}/versions`)).filter(v => v.state === "effective") : [];
+        const product = (CACHE.products || []).find(p => p.product_id === productId);
+        poRecipe = (recipes || []).find(r => r.beer_type_id === (product && product.beer_type_id)) || null;
+        poActiveVersions = poRecipe
+          ? (await GET(`/recipes/${poRecipe.recipe_id}/versions`)).filter(v => v.state === "effective" && v.product_id === productId)
+          : [];
         if (!poActiveVersions.length) {
           box.innerHTML = `<div class="muted" style="margin-top:6px">Sản phẩm này chưa có công thức hiệu lực — vẫn tạo được lệnh, chỉ không xem trước được NVL.</div>`;
           poRecipeVersionId = ""; return;
@@ -1760,7 +1765,7 @@ VIEWS.orders = async function () {
           <div class="field"><label>Chọn version</label><select id="lo_version">
             <option value="">(chọn version)</option>
             ${lnActiveVersions.map(v => `<option value="${esc(v.version_id)}" ${v.version_id === lnRecipeVersionId ? "selected" : ""}>
-              v${v.version_no} · ${v.base_qty} ${esc(v.base_uom)}</option>`).join("")}
+              ${esc(prodName(v.product_id))} · v${v.version_no} · ${v.base_qty} ${esc(v.base_uom)}</option>`).join("")}
           </select></div>
           <div class="field" style="flex:1"><label>Ghi chú</label><div class="muted" id="lo_version_note" style="margin-top:8px"></div></div>
         </div>`;
@@ -1888,7 +1893,7 @@ VIEWS.orders = async function () {
       });
     }
     $("lo_bom_preview").onclick = () => guard(async () => {
-      if (!$("lo_recipe").value) throw new Error("Chọn công thức trước khi xem định mức NVL.");
+      if (!$("lo_recipe").value) throw new Error("Chọn loại bia trước khi xem định mức NVL.");
       if (!lnRecipeVersionId) throw new Error("Chọn version trước khi xem định mức NVL.");
       const volHl = parseFloat($("lo_volplan").value) || 0;
       const batches = parseInt($("lo_batches").value, 10) || 1;
@@ -1924,10 +1929,10 @@ VIEWS.orders = async function () {
       if (!(volHl > 0)) throw new Error("Nhập Sản lượng nấu kế hoạch (hl) (phải lớn hơn 0).");
       const recipeId = $("lo_recipe").value;
       if (recipeId && !lnRecipeVersionId) throw new Error("Chọn Version đang dùng cho lệnh này.");
-      const recipe = (CACHE.recipesLn || []).find(r => r.recipe_id === recipeId);
+      const chosenVersion = lnActiveVersions.find(v => v.version_id === lnRecipeVersionId);
       const payload = {
         order_code: code,
-        product_id: recipe ? recipe.product_id : null,
+        product_id: chosenVersion ? chosenVersion.product_id : null,
         recipe_version_id: lnRecipeVersionId || null,
         planned_batch_count: parseInt($("lo_batches").value, 10) || 1,
         planned_volume_hl: volHl,
@@ -1958,8 +1963,8 @@ VIEWS.orders = async function () {
       const o = await GET(`/brewing/orders/${b.dataset.editlo}`);
       editingOrderId = o.brew_order_id;
       $("lo_code").value = o.order_code;
-      const recipe = (CACHE.recipesLn || []).find(r => r.product_id === o.product_id);
-      $("lo_recipe").value = recipe ? recipe.recipe_id : "";
+      const recipeId = o.recipe_version_id ? (await GET(`/recipes/versions/${o.recipe_version_id}`)).recipe_id : "";
+      $("lo_recipe").value = recipeId;
       $("lo_batches").value = o.planned_batch_count || 1;
       $("lo_volplan").value = o.planned_volume_hl || "";
       $("lo_voltol").value = o.volume_tolerance_hl || 0;
@@ -2415,6 +2420,7 @@ VIEWS.orders = async function () {
   }
 };
 const prodName = (id) => { const p = CACHE.products.find(x => x.product_id === id); return p ? p.code : id; };
+const beerTypeName = (id) => { const bt = (CACHE.beerTypes || []).find(x => x.beer_type_id === id); return bt ? bt.name : id; };
 
 // ================= ĐIỀU ĐỘ (Work Orders) =================
 const WO_STATUS = { planned: ["planned", "Lập KH"], released: ["released", "Đã phát hành"],
@@ -2512,18 +2518,18 @@ function woRow(w) {
 // lệnh tự chọn (services/brew_order.py::build_lines_from_recipe_version) — không phụ thuộc
 // màn này hiển thị thế nào.
 VIEWS.recipes = async function () {
-  const [recipes, products, materials, materialAltGroups] = await Promise.all([
-    GET("/recipes"), GET("/products"), GET("/materials"), GET("/material-alt-groups").catch(() => [])]);
-  CACHE.products = products; CACHE.recipes = recipes; CACHE.materials = materials;
+  const [recipes, products, beerTypes, materials, materialAltGroups] = await Promise.all([
+    GET("/recipes"), GET("/products"), GET("/beer-types"), GET("/materials"), GET("/material-alt-groups").catch(() => [])]);
+  CACHE.products = products; CACHE.recipes = recipes; CACHE.beerTypes = beerTypes; CACHE.materials = materials;
   CACHE.materialAltGroups = materialAltGroups;
-  const popts = products.map(p => `<option value="${p.product_id}">${esc(p.code)}</option>`).join("");
+  const btopts = beerTypes.map(bt => `<option value="${bt.beer_type_id}">${esc(bt.code)} — ${esc(bt.name)}</option>`).join("");
   let versionsHtml = "";
   for (const r of recipes) {
     const vs = await GET(`/recipes/${r.recipe_id}/versions`);
-    versionsHtml += `<div class="panel"><h2>${esc(r.code)} — ${esc(r.name)} ${badge(prodName(r.product_id))}</h2>
+    versionsHtml += `<div class="panel"><h2>${esc(r.code)} — ${esc(r.name)} ${badge(beerTypeName(r.beer_type_id))}</h2>
       <button class="btn sm" data-newver="${r.recipe_id}">+ Tạo version (BOM)</button>
       <button class="btn sm sec" data-rdel="${esc(r.recipe_id)}" data-rcode="${esc(r.code)}">🗑 Xóa công thức</button>
-      <div class="tablewrap"><table><thead><tr><th>Ver</th><th>Trạng thái</th><th>Quy mô chuẩn</th><th>Ghi chú</th><th>Dòng BOM</th><th>Tham số</th><th>QC</th><th>Soạn</th><th>Duyệt</th><th>Hành động</th></tr></thead>
+      <div class="tablewrap"><table><thead><tr><th>Ver</th><th>Dịch bia</th><th>Trạng thái</th><th>Quy mô chuẩn</th><th>Ghi chú</th><th>Dòng BOM</th><th>Tham số</th><th>QC</th><th>Soạn</th><th>Duyệt</th><th>Hành động</th></tr></thead>
       <tbody>${vs.map(v => recipeVerRow(r, v)).join("")}</tbody></table></div></div>`;
   }
   $("view-recipes").innerHTML = `
@@ -2531,13 +2537,13 @@ VIEWS.recipes = async function () {
       <div class="row">
         <div class="field"><label>Mã</label><input id="r_code" placeholder="REC-..." /></div>
         <div class="field"><label>Tên</label><input id="r_name" /></div>
-        <div class="field"><label>Sản phẩm</label><select id="r_prod">${popts}</select></div>
+        <div class="field"><label>Loại bia</label><select id="r_beertype">${btopts}</select></div>
         <button class="btn" id="r_save">Tạo</button>
       </div></div>
     <div id="rv_detail"></div>
     ${versionsHtml || '<div class="panel muted">Chưa có công thức.</div>'}`;
   $("r_save").onclick = () => guard(async () => {
-    await POST("/recipes", { code: $("r_code").value, name: $("r_name").value, product_id: $("r_prod").value });
+    await POST("/recipes", { code: $("r_code").value, name: $("r_name").value, beer_type_id: $("r_beertype").value });
     toast("Đã tạo công thức"); render("recipes");
   });
   document.querySelectorAll("[data-newver]").forEach(b => b.onclick = () => newVersionForm(b.dataset.newver));
@@ -2570,7 +2576,7 @@ function recipeVerRow(r, v) {
       suspended: "⏸ Tạm ngưng", obsolete: "⏹ Ngừng dùng" }[n] || ("→ " + n);
     return `<button class="btn sm sec" data-vtrans="${n}" data-vid="${v.version_id}">${lab}</button>`;
   }).join(" ");
-  return `<tr><td>v${v.version_no}</td><td>${badge(v.state)}</td>
+  return `<tr><td>v${v.version_no}</td><td>${esc(prodName(v.product_id))}</td><td>${badge(v.state)}</td>
     <td>${v.base_qty ? v.base_qty.toLocaleString("vi-VN") + " " + esc(v.base_uom) : "—"}</td>
     <td class="muted">${esc(v.change_reason || "—")}</td>
     <td><b>${(v.materials || []).length}</b></td><td>${v.parameters.length}</td>
@@ -2780,11 +2786,14 @@ function collectBom() {
     };
   }).filter(l => (l.material_code || l.alt_group_code) && (l.member_qty ? l.member_qty.length > 0 : l.qty > 0));
 }
-function versionFormHTML(v) {
+function versionFormHTML(v, recipe) {
   v = v || {};
+  const productOpts = (CACHE.products || []).filter(p => !recipe || p.beer_type_id === recipe.beer_type_id)
+    .map(p => `<option value="${p.product_id}" ${p.product_id === v.product_id ? "selected" : ""}>${esc(p.code)} — ${esc(p.name)}</option>`).join("");
   const rows = (v.materials && v.materials.length ? v.materials : [{}]).map(bomRowHTML).join("");
   return `<div class="panel"><h2>${v.version_id ? "Sửa" : "Tạo"} version công thức ${v.version_id ? "v" + v.version_no : ""}</h2>
     <div class="row">
+      <div class="field"><label>Dịch bia</label><select id="vf_product"><option value="">(chọn dịch bia — bắt buộc)</option>${productOpts}</select></div>
       <div class="field"><label>Quy mô mẻ chuẩn</label><input id="vf_base" type="number" value="${v.base_qty || 50000}" style="width:140px"/></div>
       <div class="field"><label>ĐVT</label><input id="vf_baseu" value="${esc(v.base_uom || "L")}" size="5"/></div>
       <span class="muted" style="align-self:center">BOM bên dưới tính cho quy mô này; khi chạy mẻ sẽ tự scale theo SL kế hoạch.</span>
@@ -2812,7 +2821,8 @@ function versionFormHTML(v) {
     </div></div>`;
 }
 function newVersionForm(recipeId) {
-  $("rv_detail").innerHTML = versionFormHTML(null);
+  const recipe = (CACHE.recipes || []).find(r => r.recipe_id === recipeId);
+  $("rv_detail").innerHTML = versionFormHTML(null, recipe);
   wireBomEditor();
   PROC_MODEL = []; _FORM_YIELD = null; procRender();
   $("proc_tpl").onclick = () => { PROC_MODEL = procTemplate(); procRender(); };
@@ -2823,7 +2833,8 @@ function newVersionForm(recipeId) {
   });
 }
 function editVersionForm(v) {
-  $("rv_detail").innerHTML = versionFormHTML(v);
+  const recipe = (CACHE.recipes || []).find(r => r.recipe_id === v.recipe_id);
+  $("rv_detail").innerHTML = versionFormHTML(v, recipe);
   wireBomEditor();
   PROC_MODEL = v.procedure ? JSON.parse(JSON.stringify(v.procedure)) : [];
   _FORM_YIELD = v.yield_steps && v.yield_steps.length ? v.yield_steps : null;  // giữ yield_steps, không ghi đè rỗng
@@ -2837,6 +2848,7 @@ function editVersionForm(v) {
 }
 function _versionPayload() {
   const p = {
+    product_id: $("vf_product").value,
     base_qty: parseFloat($("vf_base").value) || 0,
     base_uom: $("vf_baseu").value,
     change_reason: $("vf_note").value.trim() || null,

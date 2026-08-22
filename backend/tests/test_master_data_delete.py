@@ -119,14 +119,15 @@ def test_delete_unused_line(client, admin_h):
 
 
 def test_delete_unused_recipe(client, admin_h):
-    p_id = _a_product(client, admin_h, "PR-RCPDEL-01")
+    bt_id = _a_beer_type(client, admin_h, "BT-RCPDEL-01")
+    p_id = _a_product(client, admin_h, "PR-RCPDEL-01", bt_id)
     r = client.post("/api/recipes", headers=admin_h,
-                    json={"code": "REC-DEL-01", "name": "REC-DEL-01", "product_id": p_id})
+                    json={"code": "REC-DEL-01", "name": "REC-DEL-01", "beer_type_id": bt_id})
     assert r.status_code == 201, r.text
     recipe_id = r.json()["recipe_id"]
     # Có version nhưng chưa version nào được dùng ở work order/mẻ sản xuất -> vẫn xóa được
     # (kèm cascade xóa version bên trong).
-    v = client.post(f"/api/recipes/{recipe_id}/versions", headers=admin_h, json={})
+    v = client.post(f"/api/recipes/{recipe_id}/versions", headers=admin_h, json={"product_id": p_id})
     assert v.status_code == 201, v.text
     d = client.delete(f"/api/recipes/{recipe_id}", headers=admin_h)
     assert d.status_code == 204, d.text
@@ -188,12 +189,13 @@ def test_delete_recipe_blocked_by_work_order(client, admin_h):
     from app.database import SessionLocal
     from app.models.workorder import WorkOrder
 
-    p_id = _a_product(client, admin_h, "PR-RCPDEL-02")
+    bt_id = _a_beer_type(client, admin_h, "BT-RCPDEL-02")
+    p_id = _a_product(client, admin_h, "PR-RCPDEL-02", bt_id)
     r = client.post("/api/recipes", headers=admin_h,
-                    json={"code": "REC-DEL-02", "name": "REC-DEL-02", "product_id": p_id})
+                    json={"code": "REC-DEL-02", "name": "REC-DEL-02", "beer_type_id": bt_id})
     assert r.status_code == 201, r.text
     recipe_id = r.json()["recipe_id"]
-    v = client.post(f"/api/recipes/{recipe_id}/versions", headers=admin_h, json={})
+    v = client.post(f"/api/recipes/{recipe_id}/versions", headers=admin_h, json={"product_id": p_id})
     assert v.status_code == 201, v.text
     version_id = v.json()["version_id"]
     order = client.post("/api/orders", headers=admin_h,
@@ -217,16 +219,23 @@ def test_delete_recipe_blocked_by_work_order(client, admin_h):
 
 
 def test_delete_recipe_blocked_by_brew_order(client, admin_h):
-    # Lệnh nấu (BrewOrder) hiện tại KHÔNG lưu recipe_version_id (tự tra BOM hiệu lực theo
-    # product_id lúc lập lệnh — xem services/brew_order.py::_effective_bom) nên phải chặn theo
-    # product_id của công thức, không chỉ theo work order/mẻ sản xuất (module cũ).
-    p_id = _a_product(client, admin_h, "PR-RCPDEL-04")
+    # BrewOrder giờ lưu thẳng recipe_version_id (xem services/brew_order.py) — chặn xóa Recipe
+    # trực tiếp theo recipe_version_id của lệnh nấu, không còn suy qua product_id như trước.
+    bt_id = _a_beer_type(client, admin_h, "BT-RCPDEL-04")
+    p_id = _a_product(client, admin_h, "PR-RCPDEL-04", bt_id)
     r = client.post("/api/recipes", headers=admin_h,
-                    json={"code": "REC-DEL-04", "name": "REC-DEL-04", "product_id": p_id})
+                    json={"code": "REC-DEL-04", "name": "REC-DEL-04", "beer_type_id": bt_id})
     assert r.status_code == 201, r.text
     recipe_id = r.json()["recipe_id"]
+    v = client.post(f"/api/recipes/{recipe_id}/versions", headers=admin_h, json={"product_id": p_id})
+    assert v.status_code == 201, v.text
+    version_id = v.json()["version_id"]
+    for target in ("review", "approved", "effective"):
+        t = client.post(f"/api/recipes/versions/{version_id}/transition", headers=admin_h, json={"target": target})
+        assert t.status_code == 200, t.text
+
     bo = client.post("/api/brewing/orders", headers=admin_h,
-                     json={"order_code": "LN-RCPDEL-04", "product_id": p_id,
+                     json={"order_code": "LN-RCPDEL-04", "product_id": p_id, "recipe_version_id": version_id,
                            "auto_from_bom": False, "planned_volume_hl": 100})
     assert bo.status_code == 201, bo.text
 
@@ -244,9 +253,26 @@ def test_delete_requires_master_manage_permission(client, admin_h, vanhanh_h):
 
 
 def test_delete_recipe_requires_master_manage_permission(client, admin_h, vanhanh_h):
-    p_id = _a_product(client, admin_h, "PR-RCPDEL-03")
+    bt_id = _a_beer_type(client, admin_h, "BT-RCPDEL-03")
     r = client.post("/api/recipes", headers=admin_h,
-                    json={"code": "REC-DEL-03", "name": "REC-DEL-03", "product_id": p_id})
+                    json={"code": "REC-DEL-03", "name": "REC-DEL-03", "beer_type_id": bt_id})
     assert r.status_code == 201, r.text
     d = client.delete(f"/api/recipes/{r.json()['recipe_id']}", headers=vanhanh_h)
     assert d.status_code == 403, d.text
+
+
+def test_delete_product_blocked_by_recipe_version(client, admin_h):
+    """delete_product chặn theo RecipeVersion.product_id (không còn qua Recipe.product_id — mỗi
+    Recipe giờ đại diện 1 Loại bia, mỗi version tự gắn 1 dịch bia riêng)."""
+    bt_id = _a_beer_type(client, admin_h, "BT-RCPDEL-05")
+    p_id = _a_product(client, admin_h, "PR-RCPDEL-05", bt_id)
+    r = client.post("/api/recipes", headers=admin_h,
+                    json={"code": "REC-DEL-05", "name": "REC-DEL-05", "beer_type_id": bt_id})
+    assert r.status_code == 201, r.text
+    v = client.post(f"/api/recipes/{r.json()['recipe_id']}/versions", headers=admin_h,
+                    json={"product_id": p_id})
+    assert v.status_code == 201, v.text
+
+    d = client.delete(f"/api/products/{p_id}", headers=admin_h)
+    assert d.status_code == 409, d.text
+    assert "version công thức" in d.json()["detail"]

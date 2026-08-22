@@ -480,9 +480,10 @@ def _validate_formula_selection(db: Session, product_id: str | None, formula_id:
 
 
 def _validate_recipe_version_selection(db: Session, product_id: str | None, recipe_version_id: str | None) -> None:
-    """Mirror _validate_formula_selection cho hệ Recipe/RecipeVersion: 1 dịch bia có đúng 1
-    Recipe (nhiều RecipeVersion bên trong) — người lập Lệnh nấu chọn 1 version đang hiệu lực
-    (state=effective) của đúng Recipe thuộc dịch bia đã chọn."""
+    """Mirror _validate_formula_selection cho hệ Recipe/RecipeVersion: Recipe giờ đại diện 1
+    Loại bia (nhiều RecipeVersion bên trong, mỗi version tự gắn 1 Dịch bia riêng qua
+    RecipeVersion.product_id) — người lập Lệnh nấu chọn 1 version đang hiệu lực (state=effective)
+    ĐÚNG dịch bia đã chọn (so trực tiếp trên version, không cần qua Recipe)."""
     if not product_id:
         return
     if not recipe_version_id:
@@ -490,11 +491,11 @@ def _validate_recipe_version_selection(db: Session, product_id: str | None, reci
     rv = db.get(RecipeVersion, recipe_version_id)
     if not rv:
         raise DomainError("Công thức đã chọn không tồn tại.")
-    recipe = db.get(Recipe, rv.recipe_id)
-    if not recipe or recipe.product_id != product_id:
+    if rv.product_id != product_id:
         raise DomainError(f"Công thức (version {rv.version_no}) không thuộc Dịch bia đã chọn.")
     if rv.state != "effective":
-        raise DomainError(f"Công thức '{recipe.code}' version {rv.version_no} không còn hiệu lực.")
+        recipe = db.get(Recipe, rv.recipe_id)
+        raise DomainError(f"Công thức '{recipe.code if recipe else '?'}' version {rv.version_no} không còn hiệu lực.")
 
 
 def _persist_material_lines(db: Session, order: BrewOrder, lines: list, qty_overrides: dict,

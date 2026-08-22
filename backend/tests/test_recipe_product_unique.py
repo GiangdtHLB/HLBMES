@@ -1,7 +1,9 @@
-"""Test: 1 dịch bia chỉ được đúng 1 công thức (Recipe.product_id unique) — bug thực tế:
+"""Test: 1 Loại bia chỉ được đúng 1 công thức (Recipe.beer_type_id unique) — bug thực tế:
 trước đây tạo được 2 Recipe cho cùng 1 product, khiến brew_order._effective_bom() có thể
 chọn nhầm recipe rỗng (không version) thay vì recipe thật, làm Lệnh nấu không tự nạp
-được định mức NVL từ Công thức."""
+được định mức NVL từ Công thức. Recipe giờ đại diện 1 Loại bia (không còn 1 Product/dịch bia
+duy nhất) — mỗi version bên trong tự gắn 1 Dịch bia riêng (VD 13oP/14oP cùng 1 Loại bia có thể
+cùng nằm trong 1 Recipe, ở 2 version khác nhau) — xem models/recipes.py."""
 
 import os
 import tempfile
@@ -41,47 +43,89 @@ def admin_h(client):
     return _login(client, "admin", "AdminTest123")
 
 
-def _a_product(client, headers, suffix):
+def _a_beer_type(client, headers, suffix):
+    r = client.post("/api/beer-types", headers=headers, json={"code": f"BT-{suffix}", "name": f"Loại {suffix}"})
+    assert r.status_code == 201, r.text
+    return r.json()["beer_type_id"]
+
+
+def _a_product(client, headers, suffix, beer_type_id=None):
     r = client.post("/api/products", headers=headers,
-                    json={"code": f"PRD-{suffix}", "name": f"Dịch test {suffix}", "uom": "L"})
+                    json={"code": f"PRD-{suffix}", "name": f"Dịch test {suffix}", "uom": "L",
+                          "beer_type_id": beer_type_id})
     assert r.status_code == 201, r.text
     return r.json()["product_id"]
 
 
-def _an_effective_recipe_version(client, headers, product_id, code, qty):
+def _an_effective_recipe_version(client, headers, beer_type_id, product_id, code, qty):
     r = client.post("/api/recipes", headers=headers,
-                    json={"code": code, "name": f"Công thức {code}", "product_id": product_id})
+                    json={"code": code, "name": f"Công thức {code}", "beer_type_id": beer_type_id})
     assert r.status_code == 201, r.text
     recipe = r.json()
     v = client.post(f"/api/recipes/{recipe['recipe_id']}/versions", headers=headers,
-                    json={"base_qty": 1000, "base_uom": "L",
+                    json={"product_id": product_id, "base_qty": 1000, "base_uom": "L",
                           "materials": [{"material_code": "MALT-PILS", "qty": qty, "uom": "kg"}]})
     assert v.status_code == 201, v.text
     version_id = v.json()["version_id"]
     for target in ("review", "approved", "effective"):
         t = client.post(f"/api/recipes/versions/{version_id}/transition", headers=headers, json={"target": target})
         assert t.status_code == 200, t.text
-    return version_id
+    return recipe["recipe_id"], version_id
 
 
-def test_second_recipe_for_same_product_rejected(client, admin_h):
-    product_id = _a_product(client, admin_h, "UNIQ")
+def test_second_recipe_for_same_beer_type_rejected(client, admin_h):
+    beer_type_id = _a_beer_type(client, admin_h, "UNIQ")
+    product_id = _a_product(client, admin_h, "UNIQ", beer_type_id)
 
     first = client.post("/api/recipes", headers=admin_h,
-                        json={"code": "REC-UNIQ01", "name": "Công thức 1", "product_id": product_id})
+                        json={"code": "REC-UNIQ01", "name": "Công thức 1", "beer_type_id": beer_type_id})
     assert first.status_code == 201, first.text
 
     dup = client.post("/api/recipes", headers=admin_h,
-                      json={"code": "REC-UNIQ02", "name": "Công thức 2 (trùng dịch bia)", "product_id": product_id})
+                      json={"code": "REC-UNIQ02", "name": "Công thức 2 (trùng loại bia)", "beer_type_id": beer_type_id})
     assert dup.status_code == 409, dup.text
+
+
+def test_two_products_same_beer_type_get_two_versions_in_one_recipe(client, admin_h):
+    """2 dịch bia (VD 13oP/14oP) cùng 1 Loại bia — tạo 2 version trong CÙNG 1 Recipe phải
+    thành công, mỗi version tự gắn đúng dịch riêng của nó."""
+    beer_type_id = _a_beer_type(client, admin_h, "MULTIOP")
+    p13 = _a_product(client, admin_h, "MULTIOP-13", beer_type_id)
+    p14 = _a_product(client, admin_h, "MULTIOP-14", beer_type_id)
+
+    recipe_id, v13 = _an_effective_recipe_version(client, admin_h, beer_type_id, p13, "CT-MULTIOP", qty=10)
+    v14 = client.post(f"/api/recipes/{recipe_id}/versions", headers=admin_h,
+                      json={"product_id": p14, "base_qty": 1000, "base_uom": "L",
+                            "materials": [{"material_code": "MALT-PILS", "qty": 12, "uom": "kg"}]})
+    assert v14.status_code == 201, v14.text
+    assert v14.json()["product_id"] == p14
+
+    versions = client.get(f"/api/recipes/{recipe_id}/versions", headers=admin_h).json()
+    assert {v["product_id"] for v in versions} == {p13, p14}
+
+
+def test_version_rejects_product_from_other_beer_type(client, admin_h):
+    beer_type_id = _a_beer_type(client, admin_h, "WRONGBT")
+    other_beer_type_id = _a_beer_type(client, admin_h, "OTHERBT")
+    other_product_id = _a_product(client, admin_h, "WRONGBT", other_beer_type_id)
+
+    r = client.post("/api/recipes", headers=admin_h,
+                    json={"code": "REC-WRONGBT", "name": "REC-WRONGBT", "beer_type_id": beer_type_id})
+    assert r.status_code == 201, r.text
+
+    v = client.post(f"/api/recipes/{r.json()['recipe_id']}/versions", headers=admin_h,
+                    json={"product_id": other_product_id, "base_qty": 1000, "base_uom": "L"})
+    assert v.status_code == 409, v.text
+    assert "không thuộc Loại bia" in v.json()["detail"]
 
 
 def test_brew_order_auto_loads_bom_for_products_own_recipe(client, admin_h):
     """Kiểm tra brew_order.build_lines_from_recipe_version lấy đúng RecipeVersion đang hiệu
     lực của dịch bia, không lẫn với công thức của dịch bia khác (mô phỏng đúng bug đã gặp ở
     RecipeVersion.state='effective' không loại trừ nhau — xem services/recipes.py)."""
-    product_id = _a_product(client, admin_h, "BOMCHK")
-    version_id = _an_effective_recipe_version(client, admin_h, product_id, "CT-BOMCHK", qty=20)
+    beer_type_id = _a_beer_type(client, admin_h, "BOMCHK")
+    product_id = _a_product(client, admin_h, "BOMCHK", beer_type_id)
+    _, version_id = _an_effective_recipe_version(client, admin_h, beer_type_id, product_id, "CT-BOMCHK", qty=20)
 
     order = client.post("/api/brewing/orders", headers=admin_h,
                         json={"order_code": "LN-BOMCHK", "product_id": product_id, "recipe_version_id": version_id,
@@ -101,8 +145,9 @@ def test_bom_qty_not_scaled_by_planned_volume_hl(client, admin_h):
     lượng khai báo trong công thức (KHÔNG scale theo planned_volume_hl/base_qty), Nhu cầu
     Tổng mẻ = Nhu cầu 1 mẻ x Số mẻ kế hoạch. Trước đây bị scale sai theo tỉ lệ thể tích,
     ra số lượng/mẻ ảo (vd 0.444 kg) không khớp công thức thật."""
-    product_id = _a_product(client, admin_h, "NOSCALE")
-    version_id = _an_effective_recipe_version(client, admin_h, product_id, "CT-NOSCALE", qty=15)
+    beer_type_id = _a_beer_type(client, admin_h, "NOSCALE")
+    product_id = _a_product(client, admin_h, "NOSCALE", beer_type_id)
+    _, version_id = _an_effective_recipe_version(client, admin_h, beer_type_id, product_id, "CT-NOSCALE", qty=15)
 
     for planned_volume_hl in (5, 111, 1000):
         order = client.post("/api/brewing/orders", headers=admin_h,
