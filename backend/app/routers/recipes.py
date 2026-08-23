@@ -51,10 +51,14 @@ def delete_recipe(recipe_id: str, db: Session = Depends(get_db), user: User = De
 
 @router.get("/{recipe_id}/versions", response_model=list[RecipeVersionOut])
 def list_versions(recipe_id: str, db: Session = Depends(get_db)):
-    return db.execute(
+    versions = db.execute(
         select(RecipeVersion).where(RecipeVersion.recipe_id == recipe_id)
         .order_by(RecipeVersion.version_no)
     ).scalars().all()
+    used_ids = master_data.used_recipe_version_ids(db, [v.version_id for v in versions])
+    for v in versions:
+        v.is_used = v.version_id in used_ids
+    return versions
 
 
 @router.post("/{recipe_id}/versions", response_model=RecipeVersionOut, status_code=201)

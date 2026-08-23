@@ -119,6 +119,7 @@ class OpsSettingIn(BaseModel):
     finished_goods_receive_max_backdate_days: float = 15.0
     fg_day_cutoff_hour: int = 0
     factory_code: Optional[str] = None
+    erp_order_volume_tolerance_hl: float = 5.0
 
 
 class OpsSettingOut(ORMModel):
@@ -138,6 +139,7 @@ class OpsSettingOut(ORMModel):
     finished_goods_receive_max_backdate_days: float
     fg_day_cutoff_hour: int
     factory_code: Optional[str] = None
+    erp_order_volume_tolerance_hl: float = 5.0
     updated_by: Optional[str] = None
     updated_at: datetime
 
@@ -324,6 +326,8 @@ class OrderOut(ORMModel):
     recipe_version_id: Optional[str] = None
     recipe_code: Optional[str] = None
     recipe_name: Optional[str] = None
+    beer_type_code: Optional[str] = None
+    beer_type_name: Optional[str] = None
     recipe_version_no: Optional[int] = None
     recipe_note: Optional[str] = None
     issued_by: Optional[str] = None
@@ -408,6 +412,7 @@ class RecipeVersionOut(ORMModel):
     approved_by: Optional[str] = None
     approved_at: Optional[datetime] = None
     created_at: datetime
+    is_used: bool = False
 
 
 # ---- Formula (Công thức NVL mới — thay Recipe/RecipeVersion, xem models/formula.py) ----
@@ -1676,7 +1681,11 @@ class BrewIn(BaseModel):
     tank_lm: Optional[str] = None
     lm_code: Optional[str] = None
     yeast_gen: Optional[str] = None
-    brew_order_id: str   # bắt buộc — mỗi mã nấu phải ứng với đúng 1 Lệnh nấu (xem services/brew_order.py)
+    # Đúng 1 trong 2 field dưới được set — validate ở routers/brewing.py::add_brew. brew_order_id:
+    # tạo qua tab "Lệnh nấu" cũ (chỉ còn dữ liệu lịch sử). production_order_id: tạo qua "Lệnh SX
+    # (ERP)" — đường đi hiện hành từ tab Nấu.
+    brew_order_id: Optional[str] = None
+    production_order_id: Optional[str] = None
 
 
 class BrewOrderMaterialLineIn(BaseModel):

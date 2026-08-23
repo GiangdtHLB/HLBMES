@@ -19,7 +19,8 @@ def get_settings(db: Session) -> OpsSetting:
                        filter_line_yield_low_l=500.0, filter_line_yield_high_l=2000.0,
                        finished_goods_restock_days=7.0, fg_days_of_stock_critical_days=3.0,
                        fg_days_in_stock_warning_days=30.0,
-                       finished_goods_receive_max_backdate_days=15.0, fg_day_cutoff_hour=0)
+                       finished_goods_receive_max_backdate_days=15.0, fg_day_cutoff_hour=0,
+                       erp_order_volume_tolerance_hl=5.0)
         db.add(s)
         db.commit()
         db.refresh(s)
@@ -35,7 +36,8 @@ def update_settings(db: Session, empty_cct_tolerance_hl: float, empty_bbt_tolera
                     fg_days_of_stock_critical_days: float = 3.0,
                     fg_days_in_stock_warning_days: float = 30.0,
                     finished_goods_receive_max_backdate_days: float = 15.0,
-                    fg_day_cutoff_hour: int = 0) -> OpsSetting:
+                    fg_day_cutoff_hour: int = 0,
+                    erp_order_volume_tolerance_hl: float = 5.0) -> OpsSetting:
     s = get_settings(db)
     s.empty_cct_tolerance_hl = empty_cct_tolerance_hl
     s.empty_bbt_tolerance_hl = empty_bbt_tolerance_hl
@@ -52,6 +54,7 @@ def update_settings(db: Session, empty_cct_tolerance_hl: float, empty_bbt_tolera
     s.finished_goods_receive_max_backdate_days = finished_goods_receive_max_backdate_days
     s.fg_day_cutoff_hour = fg_day_cutoff_hour
     s.factory_code = factory_code
+    s.erp_order_volume_tolerance_hl = erp_order_volume_tolerance_hl
     s.updated_by = user.username
     s.updated_at = utcnow()
     db.commit()

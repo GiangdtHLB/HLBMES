@@ -28,7 +28,7 @@ from ..models.brewing import (
 )
 from ..models.formula import Formula
 from ..models.recipes import Recipe, RecipeVersion
-from ..models.master import Material, MaterialAltGroup, Product
+from ..models.master import BeerType, Material, MaterialAltGroup, Product
 from ..models.materials import MaterialLot
 from . import braumat_import as braumat_svc
 from . import warehouse as warehouse_svc
@@ -723,12 +723,14 @@ def list_orders(db: Session) -> list:
     products = {p.product_id: p for p in db.execute(select(Product)).scalars().all()}
     recipe_versions = {rv.version_id: rv for rv in db.execute(select(RecipeVersion)).scalars().all()}
     recipes = {r.recipe_id: r for r in db.execute(select(Recipe)).scalars().all()}
+    beer_types = {bt.beer_type_id: bt for bt in db.execute(select(BeerType)).scalars().all()}
     out = []
     for o in orders:
         records = _record_summaries(db, o.brew_order_id)
         prod = products.get(o.product_id)
         rv = recipe_versions.get(o.recipe_version_id)
         recipe = recipes.get(rv.recipe_id) if rv else None
+        beer_type = beer_types.get(recipe.beer_type_id) if recipe else None
         actual_tank, actual_batch_range = _actual_tank_and_batch_range(db, [r["brew_id"] for r in records])
         out.append({
             "brew_order_id": o.brew_order_id, "order_code": o.order_code,
@@ -736,6 +738,8 @@ def list_orders(db: Session) -> list:
             "product_desc": o.product_desc, "recipe_version_id": o.recipe_version_id,
             "recipe_code": recipe.code if recipe else None,
             "recipe_name": recipe.name if recipe else None,
+            "beer_type_code": beer_type.code if beer_type else None,
+            "beer_type_name": beer_type.name if beer_type else None,
             "recipe_version_no": rv.version_no if rv else None,
             "recipe_note": rv.change_reason if rv else None,
             "planned_batch_count": o.planned_batch_count,

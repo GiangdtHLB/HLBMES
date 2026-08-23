@@ -180,3 +180,52 @@ def test_delete_version_requires_master_manage_permission(client, admin_h, vanha
 
     d = client.delete(f"/api/recipes/versions/{version_id}", headers=vanhanh_h)
     assert d.status_code == 403, d.text
+
+
+def _is_used(client, headers, recipe_id, version_id):
+    versions = client.get(f"/api/recipes/{recipe_id}/versions", headers=headers).json()
+    return next(v for v in versions if v["version_id"] == version_id)["is_used"]
+
+
+def test_is_used_flag_false_for_unreferenced_version(client, admin_h):
+    """Cờ is_used trả về từ GET /recipes/{id}/versions — dùng để ẩn nút "Xóa version" trên UI
+    thay vì hiện rồi bấm mới báo lỗi (xem services/master_data.py::used_recipe_version_ids)."""
+    beer_type_id = _a_beer_type(client, admin_h)
+    product_id = _a_product(client, admin_h, beer_type_id)
+    recipe_id = _a_recipe(client, admin_h, beer_type_id)
+    version_id = _a_version(client, admin_h, recipe_id, product_id)
+
+    assert _is_used(client, admin_h, recipe_id, version_id) is False
+
+
+def test_is_used_flag_true_when_referenced_by_brew_order(client, admin_h):
+    beer_type_id = _a_beer_type(client, admin_h)
+    product_id = _a_product(client, admin_h, beer_type_id)
+    recipe_id = _a_recipe(client, admin_h, beer_type_id)
+    version_id = _a_version(client, admin_h, recipe_id, product_id)
+    for target in ("review", "approved", "effective"):
+        _transition(client, admin_h, version_id, target)
+
+    bo = client.post("/api/brewing/orders", headers=admin_h,
+                     json={"order_code": f"LN-ISUSED-{new_id()[:6]}", "product_id": product_id,
+                           "recipe_version_id": version_id, "auto_from_bom": False,
+                           "planned_volume_hl": 100})
+    assert bo.status_code == 201, bo.text
+
+    assert _is_used(client, admin_h, recipe_id, version_id) is True
+
+
+def test_is_used_flag_true_when_referenced_by_production_order(client, admin_h):
+    beer_type_id = _a_beer_type(client, admin_h)
+    product_id = _a_product(client, admin_h, beer_type_id)
+    recipe_id = _a_recipe(client, admin_h, beer_type_id)
+    version_id = _a_version(client, admin_h, recipe_id, product_id)
+    for target in ("review", "approved", "effective"):
+        _transition(client, admin_h, version_id, target)
+
+    order = client.post("/api/orders", headers=admin_h,
+                        json={"order_code": f"ORD-ISUSED-{new_id()[:6]}", "product_id": product_id,
+                              "recipe_version_id": version_id, "planned_qty": 1000, "uom": "L"})
+    assert order.status_code == 201, order.text
+
+    assert _is_used(client, admin_h, recipe_id, version_id) is True

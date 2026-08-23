@@ -162,10 +162,11 @@ class TransferKcPxRequest(Base):
 class MaterialRequest(Base):
     """Phiếu đề nghị nhận kho (header) — 1 phiếu có thể gồm nhiều dòng vật tư (MaterialRequestLine).
 
-    `source_type`/`source_id` (tuỳ chọn): gắn phiếu với 1 Lệnh nấu (brew_order) hoặc 1 Lệnh
-    lọc lớn (filter_master_order) — chỉ để tham chiếu/lọc/báo cáo (KHÔNG ràng buộc số lượng
-    dòng theo lệnh), vì phòng xưởng vẫn tự do thêm/sửa/xoá dòng sau khi hệ thống tự động điền
-    sẵn từ định mức NVL của lệnh (xem services/warehouse.py::preview_source_materials)."""
+    `source_type`/`source_id` (tuỳ chọn): gắn phiếu với 1 Lệnh nấu (brew_order), 1 Lệnh SX
+    (ERP, production_order), hoặc 1 Lệnh lọc lớn (filter_master_order) — chỉ để tham
+    chiếu/lọc/báo cáo (KHÔNG ràng buộc số lượng dòng theo lệnh), vì phòng xưởng vẫn tự do
+    thêm/sửa/xoá dòng sau khi hệ thống tự động điền sẵn từ định mức NVL của lệnh (xem
+    services/warehouse.py::preview_source_materials)."""
 
     __tablename__ = "material_request"
 
@@ -174,7 +175,7 @@ class MaterialRequest(Base):
     note: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)
     requested_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
     requested_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
-    source_type: Mapped[Optional[str]] = mapped_column(Unicode(32), nullable=True, index=True)  # brew_order|filter_master_order
+    source_type: Mapped[Optional[str]] = mapped_column(Unicode(32), nullable=True, index=True)  # brew_order|production_order|filter_master_order
     source_id: Mapped[Optional[str]] = mapped_column(Unicode(64), nullable=True, index=True)
 
 

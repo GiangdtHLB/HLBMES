@@ -302,6 +302,20 @@ def delete_recipe(db: Session, recipe_id: str, user: User) -> None:
     db.commit()
 
 
+def used_recipe_version_ids(db: Session, version_ids: list) -> set:
+    """Tập version_id ĐÃ được tham chiếu ở bất kỳ đâu (Lệnh nấu, Lệnh SX (ERP), work order, mẻ
+    sản xuất module cũ) — dùng để ẨN nút "Xóa version" ở UI cho version đã dùng, thay vì hiện
+    rồi bấm mới báo lỗi. Mirror đúng 4 bảng delete_recipe_version kiểm tra, không lặp logic
+    khác (không tính message chi tiết, chỉ cần có/không)."""
+    if not version_ids:
+        return set()
+    used = set()
+    for model in (BrewOrder, ProductionOrder, WorkOrder, BatchExecution):
+        used |= {row[0] for row in db.execute(
+            select(model.recipe_version_id).where(model.recipe_version_id.in_(version_ids))).all()}
+    return used
+
+
 def delete_recipe_version(db: Session, version_id: str, user: User) -> None:
     """Xóa 1 version riêng lẻ (VD tạo nhầm lúc test) — không đụng tới version khác cùng công
     thức. Chặn nếu version này đã từng được tham chiếu ở bất kỳ đâu (Lệnh nấu, Lệnh SX (ERP),
