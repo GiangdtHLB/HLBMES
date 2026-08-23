@@ -23,6 +23,7 @@ from ..models.brewing import BrewRecord
 from ..models.master import BeerType
 from ..models.orders import ProductionOrder, ProductionOrderMaterialLine
 from ..models.recipes import Recipe, RecipeVersion
+from ..models.workorder import WorkOrder
 from ..security import User
 from . import ops_setting as ops_setting_svc
 from .brew_order import (
@@ -42,10 +43,18 @@ from .brew_order import (
 
 
 def _assert_not_executed(db: Session, order: ProductionOrder) -> None:
-    """Chặn sửa/xóa khi đã có Mẻ sản xuất (BatchExecution) tạo từ lệnh này — mirror
-    brew_order.py::update_master_order/delete_master_order (kiểm tra BrewRecord)."""
+    """Chặn sửa/xóa khi lệnh đã đi vào sản xuất — mirror brew_order.py::update/delete_master_order.
+    Chặn theo MỌI bản con FK tham chiếu production_order.order_id (MSSQL enforce FK, SQLite bỏ
+    qua → phải chủ động chặn, xem DEPLOY-CONTRACT lớp con-ẩn): Mẻ sản xuất (BatchExecution), mã
+    nấu (BrewRecord — FK production_order_id, thêm ở migration b09abc6c171e), lệnh điều độ
+    (WorkOrder). KHÔNG cascade xóa vì đây là dữ liệu sản xuất thật — người dùng phải xóa mã
+    nấu/lệnh điều độ trước (xóa mã nấu tự lùi status về released, xem recompute_status_after_delete)."""
     if db.execute(select(BatchExecution.batch_id).where(BatchExecution.order_id == order.order_id)).first():
         raise DomainError(f"Lệnh {order.order_code} đã có Mẻ sản xuất — không thể sửa/xóa.")
+    if db.execute(select(BrewRecord.brew_id).where(BrewRecord.production_order_id == order.order_id)).first():
+        raise DomainError(f"Lệnh {order.order_code} đã có mã nấu — xóa mã nấu trước khi sửa/xóa lệnh.")
+    if db.execute(select(WorkOrder.wo_id).where(WorkOrder.production_order_id == order.order_id)).first():
+        raise DomainError(f"Lệnh {order.order_code} đã có lệnh điều độ — xóa lệnh điều độ trước khi sửa/xóa lệnh.")
 
 
 def _delete_lines(db: Session, order_id: str) -> None:
