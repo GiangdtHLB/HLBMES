@@ -6632,7 +6632,7 @@ async function openStageQcModal(stage, scopeType, scopeId, opts, onBack) {
     <div class="tablewrap"><table>
       <thead><tr><th>Chỉ tiêu</th><th>Min</th><th>Max</th><th>Giá trị đã khai báo</th><th>Kết quả</th><th>Người/Thời gian điền</th><th>Nhập giá trị mới</th></tr></thead>
       <tbody>${st.required.map(p => { const r = recordedByParam[p.code]; return `<tr>
-        <td>${esc(p.name)}<div class="muted">${esc(p.code)}${p.unit ? " (" + esc(p.unit) + ")" : ""}</div></td>
+        <td>${esc(p.name)}${p.mandatory ? "" : ' <span class="muted" style="font-size:11px">(không bắt buộc)</span>'}<div class="muted">${esc(p.code)}${p.unit ? " (" + esc(p.unit) + ")" : ""}</div></td>
         <td>${p.value_type !== "numeric" ? "—" : (p.lsl ?? "—")}</td><td>${p.value_type !== "numeric" ? "—" : (p.usl ?? "—")}</td>
         <td>${r ? qcValueLabel(p, r.value, r.value_text) : "—"}</td>
         <td>${r ? badge(r.status) + r.status : '<span class="muted">chưa khai báo</span>'}</td>
@@ -7420,6 +7420,15 @@ async function openBrewBatchesModal(brewId, brewCode, productId, locked = false)
   // Chỉ show dây chuyền NẤU (kind="brewhouse") trong danh mục — khác dây chuyền đóng gói
   // (kind="line") hay tank lên men (kind="tank"), xem models/lines.py::ProductionLine.kind.
   const brewLines = allLines.filter(l => l.kind === "brewhouse" && l.active);
+  // Tính trước "đã đủ chỉ tiêu bắt buộc" (can_release) cho từng mẻ — mirror đúng tiêu chí
+  // openStageQcModal dùng để hiện tích xanh cạnh nút "Chỉ tiêu", khỏi phải bấm vào mới biết.
+  const qcOkByBatch = {};
+  await Promise.all(batches.map(async b => {
+    try {
+      const qs = `stage=nau&scope_type=brew_batch&scope_id=${encodeURIComponent(b.batch_id)}${productId ? `&product_id=${encodeURIComponent(productId)}` : ""}`;
+      qcOkByBatch[b.batch_id] = (await GET(`/brewing/qc-status?${qs}`)).can_release;
+    } catch (e) { qcOkByBatch[b.batch_id] = false; }
+  }));
   // locked = mã nấu đã bị khóa (Khóa lô) — vẫn cho xem đầy đủ dữ liệu (Chỉ tiêu/+NVL/Ghi
   // chép nấu là các modal xem-là-chính, backend đã tự chặn ghi qua _assert_unlocked), chỉ ẩn
   // các thao tác THUẦN SỬA/XÓA (Kết thúc, Xóa mẻ, + Thêm mẻ, Gợi ý NVL) vì chúng không có giá
@@ -7436,7 +7445,7 @@ async function openBrewBatchesModal(brewId, brewCode, productId, locked = false)
         <td>${badge(b.exec_status === "hoan_thanh" ? "completed" : "in_progress")}${esc(b.exec_status_label)}</td>
         <td class="muted">${esc(b.note || "—")}</td>
         <td style="white-space:nowrap">
-          <button class="btn sm sec" data-stageqc="nau|brew_batch|${esc(b.batch_id)}|${esc(productId || "")}||${esc(b.batch_code)}">Chỉ tiêu</button>
+          <button class="btn sm sec" data-stageqc="nau|brew_batch|${esc(b.batch_id)}|${esc(productId || "")}||${esc(b.batch_code)}">Chỉ tiêu</button>${qcOkByBatch[b.batch_id] ? ' <span style="color:var(--green)" title="Đã đủ chỉ tiêu bắt buộc">✓</span>' : ""}
           <button class="btn sm sec" data-nvl="${esc(brewId)}|${esc(b.batch_id)}|${esc(b.batch_code)}">+ NVL</button>
           <button class="btn sm sec" data-processlog="${esc(brewId)}|${esc(b.batch_id)}|${esc(b.batch_code)}">Ghi chép nấu</button>
           <button class="btn sm sec" data-cip="brew_batch|${esc(b.batch_id)}|${esc(b.batch_code)}">CIP</button>

@@ -641,15 +641,20 @@ def stage_qc_status(db: Session, stage: str, scope_type: str, scope_id: str, pro
     NHẤT/chỉ tiêu — bắt buộc với các stage lấy mẫu nhiều lần (len_men_chinh/len_men_phu,
     xem MULTI_SAMPLE_STAGES/record_qc_sample) vốn có NHIỀU dòng lịch sử cho cùng 1 chỉ tiêu;
     nếu không dedup, 1 lần FAIL cũ (đã đo lại PASS) sẽ chặn duyệt mãi mãi. Với các stage khác
-    (chỉ có đúng 1 dòng/chỉ tiêu, ghi đè tại chỗ) hành vi không đổi."""
+    (chỉ có đúng 1 dòng/chỉ tiêu, ghi đè tại chỗ) hành vi không đổi.
+
+    `required` trả về CẢ chỉ tiêu không bắt buộc (mandatory=False trên QCParameterGroupItem) —
+    vẫn phải hiện trong bảng để nhập được (không bắt buộc khác với "ẩn hẳn đi"); chỉ khi tính
+    pending/has_fail/can_release mới LỌC RIÊNG tập mandatory=True, đúng nghĩa "không bắt buộc"
+    là không cần khai và không chặn duyệt vì nó."""
     from . import quality
     required = required_params_for_stage(db, stage, product_id=product_id,
-                                         finished_product_id=finished_product_id, mandatory_only=True,
+                                         finished_product_id=finished_product_id, mandatory_only=False,
                                          beer_type_id=beer_type_id)
     latest_by_param = quality.latest_results_by_param(db, scope_type, scope_id)
-    required_codes = {p["code"] for p in required}
-    pending = [p["code"] for p in required if p["code"] not in latest_by_param]
-    has_fail = any(r.status == "fail" for code, r in latest_by_param.items() if code in required_codes)
+    mandatory_codes = {p["code"] for p in required if p["mandatory"]}
+    pending = [p["code"] for p in required if p["mandatory"] and p["code"] not in latest_by_param]
+    has_fail = any(r.status == "fail" for code, r in latest_by_param.items() if code in mandatory_codes)
     return {
         "stage": stage, "scope_type": scope_type, "scope_id": scope_id,
         "required": required,
