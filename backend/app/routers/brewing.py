@@ -976,12 +976,26 @@ def list_ferments(years: list[int] = Query(None), db: Session = Depends(get_db))
     brews_by_ferment: dict[str, list[str]] = {}
     for link in links:
         brews_by_ferment.setdefault(link.ferment_id, []).append(link.brew_id)
+    # Ngày nấu hiển thị ở Lên men PHẢI khớp đúng "Ngày nấu" bên tab Nấu (first_batch_started_at
+    # = MIN(BrewBatch.started_at) của mã nấu) — không dùng brew_date (giờ tạo bản ghi mã nấu,
+    # xem chú thích tương tự ở list_brews()) và cũng không dùng FermentRecord.brew_date lưu sẵn
+    # (chỉ copy 1 lần lúc tạo Lên men, không tự đồng bộ lại khi mẻ nấu thực tế bắt đầu trễ hơn).
+    # Chưa có mẻ nào bắt đầu (started_at) thì trả None — khớp đúng "—" bên tab Nấu, KHÔNG fallback
+    # về brew_date kẻo lại tạo ra đúng kiểu lệch đang muốn sửa.
+    started_at_by_brew = {}
+    for batch in db.execute(select(BrewBatch.brew_id, BrewBatch.started_at)).all():
+        if batch.started_at and (batch.brew_id not in started_at_by_brew or batch.started_at < started_at_by_brew[batch.brew_id]):
+            started_at_by_brew[batch.brew_id] = batch.started_at
     products = {p.product_id: p for p in db.execute(select(Product)).scalars().all()}
     items = []
     beer_types = {bt.beer_type_id: bt for bt in db.execute(select(BeerType)).scalars().all()}
     for r in rows:
         prod = products.get(r.product_id)
         beer_type = beer_types.get(prod.beer_type_id) if prod and prod.beer_type_id else None
+        live_brew_date = min(
+            (started_at_by_brew[bid] for bid in brews_by_ferment.get(r.ferment_id, []) if bid in started_at_by_brew),
+            default=None,
+        )
         ready_date = None
         days_elapsed = None
         # Đếm ngày lên men từ kt_date (tank thực sự đầy — mẻ CUỐI của mã nấu kết thúc), KHÔNG
@@ -1014,7 +1028,7 @@ def list_ferments(years: list[int] = Query(None), db: Session = Depends(get_db))
         items.append({"ferment_id": r.ferment_id, "lm_code": r.lm_code, "ferment_year": r.ferment_year,
                       "brew_code": r.brew_code,
                       "color": color,
-                      "brew_date": r.brew_date, "kt_date": r.kt_date, "batch_numbers": r.batch_numbers,
+                      "brew_date": live_brew_date, "kt_date": r.kt_date, "batch_numbers": r.batch_numbers,
                       "brew_ids": brews_by_ferment.get(r.ferment_id, []),
                       "wort_type": r.wort_type, "product_id": r.product_id,
                       "product_code": prod.code if prod else None,
