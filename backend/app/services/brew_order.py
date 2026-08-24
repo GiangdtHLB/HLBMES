@@ -10,6 +10,8 @@ tính kế hoạch/báo cáo sản lượng, độc lập với định mức NV
 xưởng được ghi lại NGAY LÚC LẬP PHIẾU (không phải tồn sống) — đúng tính chất văn bản đã
 ký/in ra, để về sau xem lại vẫn đúng số liệu tại thời điểm đó."""
 
+from typing import Optional
+
 from sqlalchemy import select, true
 from sqlalchemy.orm import Session
 
@@ -27,10 +29,12 @@ from ..models.brewing import (
     FermentRecord,
 )
 from ..models.formula import Formula
+from ..models.orders import ProductionOrder
 from ..models.recipes import Recipe, RecipeVersion
 from ..models.master import BeerType, Material, MaterialAltGroup, Product
 from ..models.materials import MaterialLot
 from . import braumat_import as braumat_svc
+from . import ops_setting as ops_setting_svc
 from . import warehouse as warehouse_svc
 
 
@@ -565,6 +569,25 @@ def _create_order_row(db: Session, order_code: str, order_year: int, payload: di
     return order
 
 
+def _validate_production_order_link(db: Session, production_order_id: Optional[str]) -> None:
+    """Lệnh nấu mới gắn với 1 Lệnh SX (ERP) — chỉ tạo được khi cha CHƯA có Lệnh nấu nào khác
+    (1 Lệnh SX ↔ đúng 1 Lệnh nấu — Lệnh nấu tự gộp nhiều mã nấu bên trong để đạt sản lượng,
+    không cần nhiều Lệnh nấu cho cùng 1 Lệnh SX) và chưa hủy. Lệnh SX (ERP) mới lập đã ở
+    "released" ngay từ đầu (không còn trạng thái "planned") nên không cần chờ Điều độ phát mẻ
+    trước khi tạo Lệnh nấu. Không validate gì nếu production_order_id rỗng (Lệnh nấu độc lập,
+    kiểu lịch sử, vẫn cho tạo như cũ)."""
+    if not production_order_id:
+        return
+    po = db.get(ProductionOrder, production_order_id)
+    if not po:
+        raise NotFoundError("Lệnh sản xuất (ERP) không tồn tại.")
+    if po.status == "cancelled":
+        raise DomainError("Lệnh sản xuất (ERP) này đã hủy — không thể tạo Lệnh nấu.")
+    if db.execute(select(BrewOrder.brew_order_id).where(
+            BrewOrder.production_order_id == production_order_id)).first():
+        raise DomainError(f"Lệnh sản xuất (ERP) '{po.order_code}' đã có Lệnh nấu — không tạo thêm được.")
+
+
 def create_order(db: Session, payload: dict, user) -> BrewOrder:
     payload = dict(payload)
     order_code = payload.pop("order_code")
@@ -573,8 +596,16 @@ def create_order(db: Session, payload: dict, user) -> BrewOrder:
                   BrewOrder.order_year == order_year)).first():
         raise DomainError(f"Số lệnh '{order_code}' đã tồn tại trong năm {order_year}.")
     _validate_volume_plan(payload.get("planned_volume_hl"), payload.get("volume_tolerance_hl"))
+    _validate_production_order_link(db, payload.get("production_order_id"))
 
     order = _create_order_row(db, order_code, order_year, payload, user)
+
+    # Tạo Lệnh nấu cho 1 Lệnh SX (ERP) là mốc released -> in_progress (đã bỏ hẳn bước chờ Điều
+    # độ phát mẻ) — xem models/orders.py comment mới về vòng đời status.
+    if payload.get("production_order_id"):
+        po = db.get(ProductionOrder, payload["production_order_id"])
+        if po and po.status == "released":
+            po.status = "in_progress"
 
     record_audit(db, entity_type="brew_order", entity_id=order.brew_order_id, action="create",
                  actor=user, after={"order_code": order.order_code})
@@ -597,6 +628,8 @@ def update_order(db: Session, brew_order_id: str, payload: dict, user) -> BrewOr
     lines_in = payload.pop("lines", None) or []
     auto_from_bom = payload.pop("auto_from_bom", True)
     qty_overrides = payload.pop("material_qty_overrides", None) or {}
+    # Không cho đổi Lệnh SX (ERP) cha sau khi đã tạo — chỉ gán được lúc create_order.
+    payload.pop("production_order_id", None)
     member_selection = {k: v["selected_material_codes"] for k, v in qty_overrides.items()
                         if v.get("selected_material_codes") is not None}
     new_code = payload.get("order_code")
@@ -724,6 +757,10 @@ def list_orders(db: Session) -> list:
     recipe_versions = {rv.version_id: rv for rv in db.execute(select(RecipeVersion)).scalars().all()}
     recipes = {r.recipe_id: r for r in db.execute(select(Recipe)).scalars().all()}
     beer_types = {bt.beer_type_id: bt for bt in db.execute(select(BeerType)).scalars().all()}
+    po_ids = {o.production_order_id for o in orders if o.production_order_id}
+    production_orders = {po.order_id: po for po in db.execute(
+        select(ProductionOrder).where(ProductionOrder.order_id.in_(po_ids))).scalars().all()} if po_ids else {}
+    tolerance_common = None
     out = []
     for o in orders:
         records = _record_summaries(db, o.brew_order_id)
@@ -732,8 +769,20 @@ def list_orders(db: Session) -> list:
         recipe = recipes.get(rv.recipe_id) if rv else None
         beer_type = beer_types.get(recipe.beer_type_id) if recipe else None
         actual_tank, actual_batch_range = _actual_tank_and_batch_range(db, [r["brew_id"] for r in records])
+        po = production_orders.get(o.production_order_id)
+        # Lệnh nấu có Lệnh SX (ERP) cha dùng sai số CHUNG (Cài đặt vận hành), không phải
+        # volume_tolerance_hl riêng — Lệnh nấu độc lập (lịch sử) vẫn dùng sai số riêng như cũ.
+        if po:
+            if tolerance_common is None:
+                tolerance_common = ops_setting_svc.get_settings(db).erp_order_volume_tolerance_hl
+            tolerance = tolerance_common
+        else:
+            tolerance = o.volume_tolerance_hl
         out.append({
             "brew_order_id": o.brew_order_id, "order_code": o.order_code,
+            "production_order_id": o.production_order_id,
+            "production_order_code": po.order_code if po else None,
+            "production_order_status": po.status if po else None,
             "product_id": o.product_id, "product_code": prod.code if prod else None,
             "product_desc": o.product_desc, "recipe_version_id": o.recipe_version_id,
             "recipe_code": recipe.code if recipe else None,
@@ -749,7 +798,7 @@ def list_orders(db: Session) -> list:
             "planned_volume_hl": o.planned_volume_hl, "volume_tolerance_hl": o.volume_tolerance_hl,
             "actual_volume_hl": _actual_volume_hl(records),
             "is_executed": len(records) > 0,
-            "is_complete": _is_complete(db, records, o.planned_volume_hl, o.volume_tolerance_hl),
+            "is_complete": _is_complete(db, records, o.planned_volume_hl, tolerance),
             "locked": o.locked, "locked_by": o.locked_by,
             "issued_by": o.issued_by, "executor_unit": o.executor_unit, "warehouse_keeper": o.warehouse_keeper,
             "reference_note": o.reference_note, "start_date": o.start_date, "end_date": o.end_date,
@@ -805,8 +854,14 @@ def get_order(db: Session, brew_order_id: str) -> dict:
         })
 
     actual_tank, actual_batch_range = _actual_tank_and_batch_range(db, [r["brew_id"] for r in records])
+    po = db.get(ProductionOrder, order.production_order_id) if order.production_order_id else None
+    tolerance = (ops_setting_svc.get_settings(db).erp_order_volume_tolerance_hl
+                if po else order.volume_tolerance_hl)
     return {
         "brew_order_id": order.brew_order_id, "order_code": order.order_code,
+        "production_order_id": order.production_order_id,
+        "production_order_code": po.order_code if po else None,
+        "production_order_status": po.status if po else None,
         "product_id": order.product_id, "product_code": prod.code if prod else None,
         "product_name": prod.name if prod else None, "product_desc": order.product_desc,
         "recipe_version_id": order.recipe_version_id,
@@ -824,7 +879,7 @@ def get_order(db: Session, brew_order_id: str) -> dict:
         "planned_volume_hl": order.planned_volume_hl, "volume_tolerance_hl": order.volume_tolerance_hl,
         "actual_volume_hl": _actual_volume_hl(records),
         "is_executed": len(records) > 0,
-        "is_complete": _is_complete(db, records, order.planned_volume_hl, order.volume_tolerance_hl),
+        "is_complete": _is_complete(db, records, order.planned_volume_hl, tolerance),
         "lines": line_out,
         "locked": order.locked, "locked_by": order.locked_by,
         "issued_by": order.issued_by, "executor_unit": order.executor_unit,

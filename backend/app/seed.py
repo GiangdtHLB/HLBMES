@@ -246,7 +246,8 @@ def seed():
 
     # --- Production order ---
     order = ProductionOrder(order_id=new_id(), order_code="PO-2406-1001",
-                            product_id=lager.product_id, planned_qty=50000, uom="L",
+                            beer_type_id=lager_type.beer_type_id, product_id=lager.product_id,
+                            planned_qty=50000, uom="L",
                             priority=3, status="released", source_version="ERP-v1",
                             created_at=utcnow())
     db.add(order)

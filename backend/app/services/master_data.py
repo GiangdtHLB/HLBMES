@@ -53,6 +53,8 @@ def delete_beer_type(db: Session, beer_type_id: str, user: User) -> None:
         raise NotFoundError("Loại bia không tồn tại.")
     checks = [
         ("dịch bia", select(func.count(Product.product_id)).where(Product.beer_type_id == beer_type_id)),
+        ("lệnh sản xuất (ERP)", select(func.count(ProductionOrder.order_id)).where(
+            ProductionOrder.beer_type_id == beer_type_id)),
         ("lệnh lọc", select(func.count(FilterOrder.filter_order_id)).where(FilterOrder.beer_type_id == beer_type_id)),
         ("mẻ lọc", select(func.count(FilterRecord.filter_id)).where(FilterRecord.beer_type_id == beer_type_id)),
         ("mẻ chiết", select(func.count(BottleRecord.bottle_id)).where(BottleRecord.beer_type_id == beer_type_id)),

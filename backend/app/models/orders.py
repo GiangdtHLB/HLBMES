@@ -16,12 +16,19 @@ class ProductionOrder(Base):
 
     order_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
     order_code: Mapped[str] = mapped_column(Unicode(64), unique=True, index=True)
-    product_id: Mapped[str] = mapped_column(ForeignKey("product.product_id"))
+    # Loại bia chọn lúc lập lệnh — Dịch bia (product_id) cụ thể chỉ xác định được sau, lúc Lệnh
+    # nấu chọn Version (1 Loại bia có nhiều RecipeVersion, mỗi version tự gắn 1 Dịch bia riêng —
+    # xem migration cf9b414c3332/bfd9533a2e21).
+    beer_type_id: Mapped[str] = mapped_column(ForeignKey("beer_type.beer_type_id"), index=True)
+    # Nullable — không còn là nguồn sự thật bắt buộc lúc tạo lệnh (xem beer_type_id ở trên); vẫn
+    # giữ cho dữ liệu lịch sử (lệnh tạo trước migration bfd9533a2e21 đã có sẵn product_id).
+    product_id: Mapped[Optional[str]] = mapped_column(ForeignKey("product.product_id"), nullable=True)
     planned_qty: Mapped[float] = mapped_column(Float)
     uom: Mapped[str] = mapped_column(Unicode(255), default="L")
     due_time: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
     priority: Mapped[int] = mapped_column(Integer, default=5)
-    # released = sẵn sàng dispatch; in_progress = đã tạo batch; completed; cancelled
+    # released = mới lập; in_progress = đã tạo Lệnh nấu (xem services/brew_order.py::create_order);
+    # completed = Lệnh nấu hoàn thành (xem services/orders.py::recompute_status_from_brew_order); cancelled
     status: Mapped[str] = mapped_column(Unicode(255), default="released")
     source_version: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)  # version từ ERP
     # Công thức (BOM) người lập CHỌN dùng cho lệnh này — mirror brew_order.recipe_version_id,

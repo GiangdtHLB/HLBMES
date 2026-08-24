@@ -45,15 +45,18 @@ def recipe_ctx(client, admin_h):
     """Sản phẩm + version công thức đang hiệu lực có sẵn từ seed data — dùng để test
     recipe_version_id (mirror cách test_depth.py::test_recipe_suspend_resume lấy dữ liệu). Recipe
     giờ đại diện 1 Loại bia (không còn 1 product_id duy nhất) — product_id phải lấy từ chính
-    version đã chọn (RecipeVersion.product_id), không còn từ Recipe."""
+    version đã chọn (RecipeVersion.product_id), không còn từ Recipe. beer_type_id lấy trực tiếp
+    từ chính Recipe (Lệnh SX (ERP) giờ chọn Loại bia lúc lập, không còn product_id — xem
+    models/orders.py)."""
     recipe = client.get("/api/recipes", headers=admin_h).json()[0]
     vers = client.get(f"/api/recipes/{recipe['recipe_id']}/versions", headers=admin_h).json()
     v = next(v for v in vers if v["state"] == "effective")
-    return {"product_id": v["product_id"], "recipe_version_id": v["version_id"]}
+    return {"product_id": v["product_id"], "recipe_version_id": v["version_id"],
+            "beer_type_id": recipe["beer_type_id"]}
 
 
 def _create_order(client, admin_h, code, recipe_ctx, **extra):
-    payload = {"order_code": code, "product_id": recipe_ctx["product_id"], "planned_qty": 1000,
+    payload = {"order_code": code, "beer_type_id": recipe_ctx["beer_type_id"], "planned_qty": 1000,
                "uom": "L", "priority": 5, "recipe_version_id": recipe_ctx["recipe_version_id"],
                "planned_batch_count": 2, **extra}
     r = client.post("/api/orders", headers=admin_h, json=payload)
@@ -79,7 +82,7 @@ def test_create_order_with_admin_fields(client, admin_h, recipe_ctx):
 def test_duplicate_order_code_blocked(client, admin_h, recipe_ctx):
     _create_order(client, admin_h, "PO-CRUD-002", recipe_ctx)
     dup = client.post("/api/orders", headers=admin_h, json={
-        "order_code": "PO-CRUD-002", "product_id": recipe_ctx["product_id"], "planned_qty": 500})
+        "order_code": "PO-CRUD-002", "beer_type_id": recipe_ctx["beer_type_id"], "planned_qty": 500})
     assert dup.status_code == 409, dup.text
 
 
@@ -89,7 +92,7 @@ def test_update_order(client, admin_h, recipe_ctx):
     # tồn kho demo hiện có, bị chặn 409 (đúng hành vi mới — _assert_no_shortage, xem
     # services/orders.py::_persist_lines), không liên quan gì tới việc test PUT các trường khác.
     r = client.put(f"/api/orders/{o['order_id']}", headers=admin_h, json={
-        "order_code": "PO-CRUD-003", "product_id": recipe_ctx["product_id"], "planned_qty": 2000,
+        "order_code": "PO-CRUD-003", "beer_type_id": recipe_ctx["beer_type_id"], "planned_qty": 2000,
         "uom": "L", "priority": 3, "recipe_version_id": recipe_ctx["recipe_version_id"],
         "planned_batch_count": 2, "issued_by": "B", "reference_note": "Sửa lại kế hoạch"})
     assert r.status_code == 200, r.text
@@ -118,7 +121,7 @@ def test_update_and_delete_blocked_after_batch_created(client, admin_h, recipe_c
     assert got["is_executed"] is True
 
     blocked_edit = client.put(f"/api/orders/{o['order_id']}", headers=admin_h, json={
-        "order_code": "PO-CRUD-005", "product_id": recipe_ctx["product_id"], "planned_qty": 999})
+        "order_code": "PO-CRUD-005", "beer_type_id": recipe_ctx["beer_type_id"], "planned_qty": 999})
     assert blocked_edit.status_code == 409, blocked_edit.text
 
     blocked_delete = client.delete(f"/api/orders/{o['order_id']}", headers=admin_h)
@@ -148,7 +151,7 @@ def test_order_without_recipe_has_no_lines(client, admin_h, recipe_ctx):
 def test_create_blocked_when_bom_exceeds_stock(client, admin_h, recipe_ctx):
     """Tăng planned_batch_count đủ lớn để nhu cầu NVL vượt tồn kho demo (Malt Pilsner chỉ có
     3800kg, 1200kg/mẻ -> quá 3 mẻ là thiếu tồn) — phải bị chặn tạo lệnh, không lưu dòng nào."""
-    payload = {"order_code": "PO-CRUD-009", "product_id": recipe_ctx["product_id"], "planned_qty": 100000,
+    payload = {"order_code": "PO-CRUD-009", "beer_type_id": recipe_ctx["beer_type_id"], "planned_qty": 100000,
               "uom": "L", "priority": 5, "recipe_version_id": recipe_ctx["recipe_version_id"],
               "planned_batch_count": 50}
     r = client.post("/api/orders", headers=admin_h, json=payload)
@@ -159,5 +162,5 @@ def test_update_delete_require_order_create_perm(client, recipe_ctx, admin_h):
     vanhanh_h = _login(client, "vanhanh", "123456")
     o = _create_order(client, admin_h, "PO-CRUD-006", recipe_ctx)
     assert client.put(f"/api/orders/{o['order_id']}", headers=vanhanh_h, json={
-        "order_code": "PO-CRUD-006", "product_id": recipe_ctx["product_id"], "planned_qty": 1}).status_code == 403
+        "order_code": "PO-CRUD-006", "beer_type_id": recipe_ctx["beer_type_id"], "planned_qty": 1}).status_code == 403
     assert client.delete(f"/api/orders/{o['order_id']}", headers=vanhanh_h).status_code == 403

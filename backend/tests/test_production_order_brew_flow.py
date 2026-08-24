@@ -1,8 +1,10 @@
 """Mã nấu (BrewRecord) tạo qua "Lệnh SX (ERP)" (ProductionOrder) thay vì "Lệnh nấu" (BrewOrder)
 cũ — xem services/orders.py::mark_in_progress/recompute_status_after_finish:
 
-1) add_brew chấp nhận production_order_id thay brew_order_id — bắt buộc đúng 1 trong 2, tự
-   lấy product_id từ Lệnh SX, chặn khi lệnh đã "completed".
+1) add_brew chấp nhận production_order_id thay brew_order_id — bắt buộc đúng 1 trong 2. Lệnh SX
+   (ERP) giờ chỉ chọn Loại bia lúc lập (product_id luôn None) nên phải truyền product_id trực
+   tiếp trong payload (chỉ tự lấy từ Lệnh SX nếu lệnh đó đã có sẵn product_id — dữ liệu lịch sử).
+   Chặn khi lệnh đã "completed".
 2) Lệnh SX tự chuyển released -> in_progress khi có mã nấu đầu tiên.
 3) Lệnh SX tự chuyển in_progress -> completed khi sản lượng thực tế (đo qua BrewProcessLog,
    không phải volume_hl nhập tay) đạt kế hoạch (quy đổi hl theo uom) trừ sai số CHUNG
@@ -58,6 +60,12 @@ def lager_product_id(client, admin_h):
     return next(p["product_id"] for p in products if p["code"] == "BIA-LAGER")
 
 
+@pytest.fixture(scope="module")
+def lager_beer_type_id(client, admin_h, lager_product_id):
+    products = client.get("/api/products", headers=admin_h).json()
+    return next(p["beer_type_id"] for p in products if p["product_id"] == lager_product_id)
+
+
 def _a_brewhouse_line(client, admin_h):
     existing = client.get("/api/lines", headers=admin_h, params={"kind": "brewhouse"}).json()
     if existing:
@@ -73,9 +81,9 @@ def brewhouse_line_id(client, admin_h):
     return _a_brewhouse_line(client, admin_h)
 
 
-def _a_production_order(client, admin_h, code, product_id, planned_qty=10000, uom="L"):
+def _a_production_order(client, admin_h, code, beer_type_id, planned_qty=10000, uom="L"):
     r = client.post("/api/orders", headers=admin_h, json={
-        "order_code": code, "product_id": product_id, "planned_qty": planned_qty, "uom": uom})
+        "order_code": code, "beer_type_id": beer_type_id, "planned_qty": planned_qty, "uom": uom})
     assert r.status_code == 201, r.text
     return r.json()
 
@@ -94,8 +102,8 @@ def _set_real_actual_volume(client, admin_h, brew_id, batch_code, volume_hl, lin
     return batch_id
 
 
-def test_add_brew_requires_exactly_one_order_field(client, admin_h, vanhanh_h, lager_product_id):
-    order = _a_production_order(client, admin_h, "PO-FLOW-001", lager_product_id)
+def test_add_brew_requires_exactly_one_order_field(client, admin_h, vanhanh_h, lager_beer_type_id):
+    order = _a_production_order(client, admin_h, "PO-FLOW-001", lager_beer_type_id)
 
     neither = client.post("/api/brewing/brews", headers=vanhanh_h,
                           json={"brew_code": "BR-POFLOW-NEITHER", "wort_type": "Dịch test"})
@@ -112,12 +120,16 @@ def test_add_brew_requires_exactly_one_order_field(client, admin_h, vanhanh_h, l
     assert bogus.status_code == 404, bogus.text
 
 
-def test_add_brew_derives_product_id_and_moves_order_in_progress(client, admin_h, vanhanh_h, lager_product_id):
-    order = _a_production_order(client, admin_h, "PO-FLOW-002", lager_product_id)
+def test_add_brew_accepts_explicit_product_id_and_moves_order_in_progress(
+        client, admin_h, vanhanh_h, lager_product_id, lager_beer_type_id):
+    order = _a_production_order(client, admin_h, "PO-FLOW-002", lager_beer_type_id)
     assert order["status"] == "released"
 
+    # Lệnh SX (ERP) chỉ chọn Loại bia lúc lập (product_id luôn None) — phải truyền product_id
+    # trực tiếp ở đây, add_brew không còn gì để tự suy ra.
     ok = client.post("/api/brewing/brews", headers=vanhanh_h,
                      json={"brew_code": "BR-POFLOW-002", "wort_type": "Dịch test",
+                           "product_id": lager_product_id,
                            "production_order_id": order["order_id"]})
     assert ok.status_code == 201, ok.text
     assert ok.json()["product_id"] == lager_product_id
@@ -128,13 +140,13 @@ def test_add_brew_derives_product_id_and_moves_order_in_progress(client, admin_h
     assert got["status"] == "in_progress"
 
 
-def test_deleting_last_brew_reverts_order_to_released(client, admin_h, vanhanh_h, lager_product_id):
+def test_deleting_last_brew_reverts_order_to_released(client, admin_h, vanhanh_h, lager_beer_type_id):
     """Xóa mã nấu DUY NHẤT của 1 Lệnh SX (ERP) phải lùi status về lại "released" — khác
     BrewOrder (tự tính is_complete/is_executed sống mỗi lần xem, không có status lưu cứng),
     ProductionOrder.status là field lưu cứng nên phải tự lùi lại khi hết mã nấu, không được
     kẹt ở "in_progress" dù thực tế không còn mã nấu nào (xem services/orders.py::
     recompute_status_after_delete)."""
-    order = _a_production_order(client, admin_h, "PO-FLOW-002B", lager_product_id)
+    order = _a_production_order(client, admin_h, "PO-FLOW-002B", lager_beer_type_id)
     ok = client.post("/api/brewing/brews", headers=vanhanh_h,
                      json={"brew_code": "BR-POFLOW-002B", "wort_type": "Dịch test",
                            "production_order_id": order["order_id"]})
@@ -150,10 +162,10 @@ def test_deleting_last_brew_reverts_order_to_released(client, admin_h, vanhanh_h
 
 
 def test_deleting_one_of_two_brews_reverts_completed_to_in_progress(
-        client, admin_h, vanhanh_h, lager_product_id, brewhouse_line_id):
+        client, admin_h, vanhanh_h, lager_beer_type_id, brewhouse_line_id):
     """Xóa 1 trong 2 mã nấu khiến sản lượng thực tế rớt dưới ngưỡng -> lùi từ "completed" về
     "in_progress" (còn mã nấu khác nên KHÔNG về "released")."""
-    order = _a_production_order(client, admin_h, "PO-FLOW-002C", lager_product_id, planned_qty=10000, uom="L")
+    order = _a_production_order(client, admin_h, "PO-FLOW-002C", lager_beer_type_id, planned_qty=10000, uom="L")
     # Tạo cả 2 mã nấu TRƯỚC khi mã nào đạt ngưỡng (order còn in_progress) — nếu finish mã đầu
     # tới ngay ngưỡng hoàn thành thì add_brew mã thứ 2 sẽ bị chặn (lệnh đã "completed").
     b1 = client.post("/api/brewing/brews", headers=vanhanh_h,
@@ -178,8 +190,8 @@ def test_deleting_one_of_two_brews_reverts_completed_to_in_progress(
     assert got["status"] == "in_progress"
 
 
-def test_add_brew_blocked_once_order_completed(client, admin_h, vanhanh_h, lager_product_id, brewhouse_line_id):
-    order = _a_production_order(client, admin_h, "PO-FLOW-003", lager_product_id, planned_qty=9600, uom="L")
+def test_add_brew_blocked_once_order_completed(client, admin_h, vanhanh_h, lager_beer_type_id, brewhouse_line_id):
+    order = _a_production_order(client, admin_h, "PO-FLOW-003", lager_beer_type_id, planned_qty=9600, uom="L")
     b1 = client.post("/api/brewing/brews", headers=vanhanh_h,
                      json={"brew_code": "BR-POFLOW-003", "wort_type": "Dịch test",
                            "production_order_id": order["order_id"]})
@@ -195,8 +207,8 @@ def test_add_brew_blocked_once_order_completed(client, admin_h, vanhanh_h, lager
     assert blocked.status_code == 409, blocked.text
 
 
-def test_order_not_complete_while_shortfall_exceeds_tolerance(client, admin_h, vanhanh_h, lager_product_id, brewhouse_line_id):
-    order = _a_production_order(client, admin_h, "PO-FLOW-004", lager_product_id, planned_qty=10000, uom="L")
+def test_order_not_complete_while_shortfall_exceeds_tolerance(client, admin_h, vanhanh_h, lager_beer_type_id, brewhouse_line_id):
+    order = _a_production_order(client, admin_h, "PO-FLOW-004", lager_beer_type_id, planned_qty=10000, uom="L")
     b1 = client.post("/api/brewing/brews", headers=vanhanh_h,
                      json={"brew_code": "BR-POFLOW-004", "wort_type": "Dịch test",
                            "production_order_id": order["order_id"]})
@@ -214,8 +226,8 @@ def test_order_not_complete_while_shortfall_exceeds_tolerance(client, admin_h, v
     assert again.status_code == 201, again.text
 
 
-def test_multiple_brews_accumulate_volume_for_same_order(client, admin_h, vanhanh_h, lager_product_id, brewhouse_line_id):
-    order = _a_production_order(client, admin_h, "PO-FLOW-005", lager_product_id, planned_qty=10000, uom="L")
+def test_multiple_brews_accumulate_volume_for_same_order(client, admin_h, vanhanh_h, lager_beer_type_id, brewhouse_line_id):
+    order = _a_production_order(client, admin_h, "PO-FLOW-005", lager_beer_type_id, planned_qty=10000, uom="L")
     b1 = client.post("/api/brewing/brews", headers=vanhanh_h,
                      json={"brew_code": "BR-POFLOW-005A", "wort_type": "Dịch test",
                            "production_order_id": order["order_id"]})
