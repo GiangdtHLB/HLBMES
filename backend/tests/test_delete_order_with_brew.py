@@ -26,9 +26,11 @@ def admin_h(client): return _login(client,"admin","AdminTest123")
 
 def test_delete_order_with_brew(client, admin_h):
     prods = client.get("/api/products", headers=admin_h).json()
-    pid = next(p["product_id"] for p in prods if p["code"]=="BIA-LAGER")
+    # Lệnh SX (ERP) giờ chọn Loại bia (beer_type_id) thay vì product_id — mã nấu vẫn gắn qua
+    # production_order_id (xem models/orders.py, test_production_order_brew_flow).
+    bt_id = next(p["beer_type_id"] for p in prods if p["code"]=="BIA-LAGER")
     o = client.post("/api/orders", headers=admin_h, json={
-        "order_code":"PO-PROBE-DEL","product_id":pid,"planned_qty":10000,"uom":"L"})
+        "order_code":"PO-PROBE-DEL","beer_type_id":bt_id,"planned_qty":10000,"uom":"L"})
     assert o.status_code==201,o.text
     oid=o.json()["order_id"]
     b = client.post("/api/brewing/brews", headers=admin_h, json={

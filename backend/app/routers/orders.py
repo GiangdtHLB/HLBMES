@@ -44,7 +44,10 @@ def get_order(order_id: str, db: Session = Depends(get_db)):
 def update_order(order_id: str, payload: OrderIn, db: Session = Depends(get_db),
                  user: User = Depends(get_current_user)):
     require_perm(user, "order.create")
-    return order_svc.update_order(db, order_id, payload.model_dump(), user)
+    # exclude_unset=True: field nào client KHÔNG gửi thì giữ nguyên giá trị cũ trên lệnh (PATCH-
+    # semantics cho các field hành chính/công thức không còn ô nhập ở form Sửa lệnh đã đơn giản
+    # hoá) — xem services/orders.py::update_order.
+    return order_svc.update_order(db, order_id, payload.model_dump(exclude_unset=True), user)
 
 
 @router.delete("/{order_id}", status_code=204)

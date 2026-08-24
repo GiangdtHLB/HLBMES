@@ -19,7 +19,7 @@ from ..audit import record_audit
 from ..common import new_id, utcnow
 from ..errors import DomainError, NotFoundError
 from ..models.batches import BatchExecution
-from ..models.brewing import BrewRecord
+from ..models.brewing import BrewOrder, BrewRecord
 from ..models.master import BeerType
 from ..models.orders import ProductionOrder, ProductionOrderMaterialLine
 from ..models.recipes import Recipe, RecipeVersion
@@ -27,6 +27,8 @@ from ..models.workorder import WorkOrder
 from ..security import User
 from . import ops_setting as ops_setting_svc
 from .brew_order import (
+    _actual_volume_hl,
+    _all_batches_finished,
     _annotate_stock,
     _apply_qty_split_override,
     _assert_no_shortage,
@@ -35,6 +37,7 @@ from .brew_order import (
     _member_breakdown,
     _member_declared_breakdown,
     _real_actual_by_brew,
+    _record_summaries,
     _resolve_group_members,
     _stock_snapshot,
     _validate_member_selection,
@@ -113,20 +116,20 @@ def _persist_lines(db: Session, order_id: str, recipe_version_id: Optional[str],
         ))
 
 
-def _validate_recipe_version_selection(db: Session, product_id: Optional[str], recipe_version_id: Optional[str]) -> None:
+def _validate_recipe_version_selection(db: Session, beer_type_id: Optional[str], recipe_version_id: Optional[str]) -> None:
     """Mirror brew_order._validate_recipe_version_selection: recipe_version_id (nếu có) phải
-    thuộc đúng Dịch bia đã chọn (RecipeVersion.product_id, không còn qua Recipe.product_id — mỗi
-    Recipe giờ đại diện 1 Loại bia, mỗi version tự gắn 1 dịch bia riêng) và đang `effective`."""
+    thuộc đúng Loại bia đã chọn (qua RecipeVersion.recipe_id -> Recipe.beer_type_id — Lệnh SX
+    (ERP) giờ không còn product_id cố định lúc lập, xem models/orders.py) và đang `effective`."""
     if not recipe_version_id:
         return
     rv = db.get(RecipeVersion, recipe_version_id)
     if not rv:
         raise DomainError("Công thức đã chọn không tồn tại.")
-    if rv.product_id != product_id:
-        raise DomainError(f"Công thức (version {rv.version_no}) không thuộc Sản phẩm đã chọn.")
+    recipe = db.get(Recipe, rv.recipe_id)
+    if not recipe or recipe.beer_type_id != beer_type_id:
+        raise DomainError(f"Công thức (version {rv.version_no}) không thuộc Loại bia đã chọn.")
     if rv.state != "effective":
-        recipe = db.get(Recipe, rv.recipe_id)
-        raise DomainError(f"Công thức '{recipe.code if recipe else '?'}' version {rv.version_no} không còn hiệu lực.")
+        raise DomainError(f"Công thức '{recipe.code}' version {rv.version_no} không còn hiệu lực.")
 
 
 def _build_output_lines(db: Session, order_id: str) -> list:
@@ -182,14 +185,15 @@ def _enrich(db: Session, order: ProductionOrder, recipes_by_id: dict = None, ver
         recipe = recipes_by_id.get(rv.recipe_id)
     else:
         recipe = db.get(Recipe, rv.recipe_id)
-    if not recipe:
-        beer_type = None
-    elif beer_types_by_id is not None:
-        beer_type = beer_types_by_id.get(recipe.beer_type_id)
+    # beer_type tra TRỰC TIẾP qua order.beer_type_id (chọn lúc lập lệnh, luôn có) — không còn
+    # qua recipe/version nữa (thường None vì Lệnh SX (ERP) không còn chọn Version).
+    if beer_types_by_id is not None:
+        beer_type = beer_types_by_id.get(order.beer_type_id)
     else:
-        beer_type = db.get(BeerType, recipe.beer_type_id)
+        beer_type = db.get(BeerType, order.beer_type_id) if order.beer_type_id else None
     return {
-        "order_id": order.order_id, "order_code": order.order_code, "product_id": order.product_id,
+        "order_id": order.order_id, "order_code": order.order_code,
+        "beer_type_id": order.beer_type_id, "product_id": order.product_id,
         "planned_qty": order.planned_qty, "uom": order.uom, "due_time": order.due_time,
         "priority": order.priority, "status": order.status, "source_version": order.source_version,
         "recipe_version_id": order.recipe_version_id,
@@ -218,7 +222,7 @@ def list_orders(db: Session) -> list:
     recipe_ids = {v.recipe_id for v in versions_by_id.values()}
     recipes_by_id = {r.recipe_id: r for r in db.execute(
         select(Recipe).where(Recipe.recipe_id.in_(recipe_ids))).scalars().all()} if recipe_ids else {}
-    beer_type_ids = {r.beer_type_id for r in recipes_by_id.values()}
+    beer_type_ids = {o.beer_type_id for o in orders if o.beer_type_id}
     beer_types_by_id = {bt.beer_type_id: bt for bt in db.execute(
         select(BeerType).where(BeerType.beer_type_id.in_(beer_type_ids))).scalars().all()} if beer_type_ids else {}
     order_ids = {o.order_id for o in orders}
@@ -239,7 +243,7 @@ def create_order(db: Session, payload: dict, user: User) -> dict:
     order_code = payload["order_code"]
     if db.execute(select(ProductionOrder).where(ProductionOrder.order_code == order_code)).first():
         raise DomainError(f"Mã lệnh '{order_code}' đã tồn tại.")
-    _validate_recipe_version_selection(db, payload.get("product_id"), payload.get("recipe_version_id"))
+    _validate_recipe_version_selection(db, payload.get("beer_type_id"), payload.get("recipe_version_id"))
     qty_overrides = payload.pop("material_qty_overrides", None) or {}
     order = ProductionOrder(order_id=new_id(), created_by=user.username, created_at=utcnow(), **payload)
     db.add(order)
@@ -262,12 +266,20 @@ def update_order(db: Session, order_id: str, payload: dict, user: User) -> dict:
     if order_code != order.order_code and db.execute(
             select(ProductionOrder).where(ProductionOrder.order_code == order_code)).first():
         raise DomainError(f"Mã lệnh '{order_code}' đã tồn tại.")
-    _validate_recipe_version_selection(db, payload.get("product_id"), payload.get("recipe_version_id"))
+    _validate_recipe_version_selection(db, payload.get("beer_type_id"), payload.get("recipe_version_id"))
     qty_overrides = payload.pop("material_qty_overrides", None) or {}
-    for field in ("order_code", "product_id", "planned_qty", "uom", "due_time", "priority", "source_version",
-                  "recipe_version_id", "planned_batch_count", "issued_by", "executor_unit", "warehouse_keeper",
-                  "reference_note", "start_date", "end_date", "safety_note"):
-        setattr(order, field, payload.get(field))
+    # CHỈ set field nào THỰC SỰ có mặt trong payload (router gọi payload.model_dump(exclude_
+    # unset=True) — xem routers/orders.py::update_order) — PATCH-semantics cho các field hành
+    # chính/công thức cũ (issued_by/executor_unit/.../recipe_version_id/planned_batch_count):
+    # form Sửa lệnh (đơn giản hoá) không còn ô nhập cho chúng nên không gửi lên, phải GIỮ
+    # NGUYÊN giá trị cũ thay vì bị ghi đè về None/default — chỉ client nào CHỦ ĐỘNG gửi field
+    # đó (VD API/test cũ) mới thực sự thay đổi được. order_code/beer_type_id/planned_qty/uom/
+    # priority bắt buộc (không có default) nên luôn có mặt, hành vi "full replace" như cũ.
+    for field in ("order_code", "beer_type_id", "planned_qty", "uom", "due_time", "priority",
+                  "source_version", "recipe_version_id", "planned_batch_count", "issued_by", "executor_unit",
+                  "warehouse_keeper", "reference_note", "start_date", "end_date", "safety_note"):
+        if field in payload:
+            setattr(order, field, payload[field])
     _delete_lines(db, order_id)
     _persist_lines(db, order.order_id, order.recipe_version_id, order.planned_batch_count, qty_overrides)
     record_audit(db, entity_type="order", entity_id=order.order_id, action="update",
@@ -364,5 +376,31 @@ def recompute_status_after_delete(db: Session, order_id: str, user: User) -> Non
         order.status = "completed" if is_complete else "in_progress"
     if order.status != before_status:
         record_audit(db, entity_type="order", entity_id=order.order_id, action="revert_status",
+                     actor=user, before={"status": before_status}, after={"status": order.status})
+        db.commit()
+
+
+def recompute_status_from_brew_order(db: Session, brew_order_id: str, user: User) -> None:
+    """Gọi sau khi 1 mẻ thuộc Lệnh nấu (BrewOrder) này Kết thúc/bị xóa — nếu Lệnh nấu có Lệnh
+    SX (ERP) cha (brew_order.production_order_id), tự chuyển cha completed/in_progress theo
+    Lệnh nấu có hoàn thành hay không. LUÔN dùng sai số CHUNG (không phải volume_tolerance_hl
+    riêng của Lệnh nấu — nhánh Lệnh nấu độc lập không gọi hàm này) — mirror đúng tiêu chí
+    brew_order_svc._is_complete nhưng tự tính lại vì tolerance nguồn khác."""
+    bo = db.get(BrewOrder, brew_order_id)
+    if not bo or not bo.production_order_id:
+        return
+    order = db.get(ProductionOrder, bo.production_order_id)
+    if not order or order.status not in ("in_progress", "completed"):
+        return
+    records = _record_summaries(db, brew_order_id)
+    actual = _actual_volume_hl(records)
+    tolerance = ops_setting_svc.get_settings(db).erp_order_volume_tolerance_hl
+    is_complete = (actual >= bo.planned_volume_hl - tolerance
+                  and _all_batches_finished(db, [r["brew_id"] for r in records]))
+    before_status = order.status
+    order.status = "completed" if is_complete else "in_progress"
+    if order.status != before_status:
+        record_audit(db, entity_type="order", entity_id=order.order_id,
+                     action="complete" if order.status == "completed" else "revert_status",
                      actor=user, before={"status": before_status}, after={"status": order.status})
         db.commit()

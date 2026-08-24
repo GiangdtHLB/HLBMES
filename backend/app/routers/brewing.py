@@ -481,6 +481,8 @@ def add_brew(payload: BrewIn, db: Session = Depends(get_db),
     db.commit(); db.refresh(b)
     if production_order_id:
         order_svc.mark_in_progress(db, production_order_id)
+    elif order.production_order_id:
+        order_svc.mark_in_progress(db, order.production_order_id)
     return b
 
 
@@ -528,6 +530,7 @@ def delete_brew(brew_id: str, db: Session = Depends(get_db), user: User = Depend
     if not b:
         raise NotFoundError("Bản ghi nấu không tồn tại.")
     production_order_id = b.production_order_id
+    brew_order_id = b.brew_order_id
     _assert_unlocked(b, db.get(BrewOrder, b.brew_order_id) if b.brew_order_id else None)
     if _brew_already_filtered(db, brew_id):
         raise DomainError(f"Mã nấu '{b.brew_code}' đã được lọc — không thể xóa (ảnh hưởng truy xuất nguồn gốc).")
@@ -609,6 +612,8 @@ def delete_brew(brew_id: str, db: Session = Depends(get_db), user: User = Depend
     db.commit()
     if production_order_id:
         order_svc.recompute_status_after_delete(db, production_order_id, user)
+    elif brew_order_id:
+        order_svc.recompute_status_from_brew_order(db, brew_order_id, user)
 
 
 @router.post("/brews/{brew_id}/lock-lot")
@@ -777,6 +782,8 @@ def finish_brew_batch(brew_id: str, batch_id: str, payload: FinishIn = FinishIn(
     brew = db.get(BrewRecord, brew_id)
     if brew and brew.production_order_id:
         order_svc.recompute_status_after_finish(db, brew.production_order_id, user)
+    elif brew and brew.brew_order_id:
+        order_svc.recompute_status_from_brew_order(db, brew.brew_order_id, user)
     return batch
 
 

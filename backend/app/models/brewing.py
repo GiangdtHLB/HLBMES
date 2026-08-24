@@ -50,6 +50,10 @@ class BrewOrder(Base):
     brew_order_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
     order_code: Mapped[str] = mapped_column(Unicode(64), index=True)   # Số: 36/PXSXBĐM-T6/2026
     order_year: Mapped[int] = mapped_column(Integer, index=True)
+    # Lệnh SX (ERP) mà Lệnh nấu này thuộc về — 1 Lệnh SX chỉ có ĐÚNG 1 Lệnh nấu (validate ở
+    # services/brew_order.py::create_order). Nullable để không phá dữ liệu Lệnh nấu lịch sử
+    # (tạo trước khi có liên kết này, hoàn toàn độc lập, không có Lệnh SX cha).
+    production_order_id: Mapped[Optional[str]] = mapped_column(ForeignKey("production_order.order_id"), nullable=True, index=True)
     issued_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)          # I. Người ra lệnh
     executor_unit: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)      # II.1 Người thực hiện
     warehouse_keeper: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)   # II.2 Người xuất hàng
@@ -142,10 +146,12 @@ class BrewRecord(Base):
     note: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)
     # Đúng 1 trong 2 (brew_order_id/production_order_id) được set — add_brew tự kiểm tra
     # (validate ở service, không CHECK constraint ở DB để linh hoạt dữ liệu cũ/test).
-    # brew_order_id: mã nấu tạo qua tab "Lệnh nấu" cũ (không còn dùng để tạo mới, chỉ còn dữ
-    # liệu lịch sử — xem services/brew_order.py).
+    # brew_order_id: mã nấu tạo qua tab "Lệnh nấu" (BrewOrder) — đường đi hiện hành từ tab Nấu,
+    # BrewOrder có thể tự gắn 1 Lệnh SX (ERP) cha qua BrewOrder.production_order_id (khác field
+    # này) — xem services/brew_order.py::create_order.
     brew_order_id: Mapped[Optional[str]] = mapped_column(ForeignKey("brew_order.brew_order_id"), nullable=True, index=True)
-    # production_order_id: mã nấu tạo qua "Lệnh SX (ERP)" (đường đi hiện hành từ tab Nấu) — xem
+    # production_order_id: mã nấu tạo TRỰC TIẾP vào "Lệnh SX (ERP)", bỏ qua Lệnh nấu — đường đi
+    # cũ/lịch sử, API vẫn hỗ trợ nhưng tab Nấu không còn tạo mới theo đường này — xem
     # services/orders.py::mark_in_progress/recompute_status_after_finish.
     production_order_id: Mapped[Optional[str]] = mapped_column(ForeignKey("production_order.order_id"), nullable=True, index=True)
     locked: Mapped[bool] = mapped_column(Boolean, default=False)

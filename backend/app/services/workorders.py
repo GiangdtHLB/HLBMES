@@ -10,6 +10,7 @@ from ..common import WORKORDER_TRANSITIONS, WorkOrderState, new_id, utcnow
 from ..errors import DomainError, NotFoundError
 from ..models.batches import BatchExecution
 from ..models.orders import ProductionOrder
+from ..models.recipes import RecipeVersion
 from ..models.workorder import WorkOrder
 from ..security import User, filter_by_scope, require_perm, require_scope
 from . import batches as batch_svc
@@ -21,13 +22,26 @@ def create_wo(db: Session, payload: dict, user: User) -> WorkOrder:
     po = db.get(ProductionOrder, payload["production_order_id"])
     if not po:
         raise NotFoundError("Production order không tồn tại.")
+    rv_id = payload.get("recipe_version_id")
+    # Lệnh SX (ERP) giờ chỉ chọn Loại bia lúc lập, po.product_id thường None cho tới khi Lệnh
+    # nấu chọn Version — Work Order cần 1 Dịch bia CỤ THỂ (WorkOrder.product_id bắt buộc, dùng
+    # thật cho Mẻ sản xuất/BOM), nên nếu PO chưa có product_id thì bắt buộc chọn Version ngay
+    # lúc lập Work Order để suy ra Dịch bia (RecipeVersion.product_id).
+    product_id = po.product_id
+    if not product_id:
+        if not rv_id:
+            raise DomainError("Lệnh SX (ERP) này chưa xác định Dịch bia — chọn Version lúc lập lệnh điều độ.")
+        rv = db.get(RecipeVersion, rv_id)
+        if not rv:
+            raise NotFoundError("Recipe version không tồn tại.")
+        product_id = rv.product_id
     sd = payload.get("scheduled_date") or date.today()
     wo = WorkOrder(
         wo_id=new_id(),
         wo_code=payload.get("wo_code") or f"WO-{utcnow():%Y%m%d}-{new_id()[:5].upper()}",
         production_order_id=po.order_id,
-        product_id=po.product_id,
-        recipe_version_id=payload.get("recipe_version_id"),
+        product_id=product_id,
+        recipe_version_id=rv_id,
         planned_qty=float(payload.get("planned_qty") or po.planned_qty),
         uom=payload.get("uom") or po.uom,
         line=payload.get("line"),

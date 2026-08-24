@@ -293,9 +293,10 @@ class OrderLineQtySplitIn(BaseModel):
 
 class OrderIn(BaseModel):
     """Dùng chung cho tạo (POST) và sửa (PUT) Lệnh SX (ERP) — 1 Lệnh SX = 1 dòng, xem
-    services/orders.py."""
+    services/orders.py. Chọn Loại bia (beer_type_id) lúc lập — Dịch bia (product_id) cụ thể chỉ
+    xác định được sau, lúc Lệnh nấu chọn Version, nên KHÔNG có field product_id ở đây."""
     order_code: str
-    product_id: str
+    beer_type_id: str
     planned_qty: float
     uom: str = "L"
     due_time: Optional[datetime] = None
@@ -316,7 +317,8 @@ class OrderIn(BaseModel):
 class OrderOut(ORMModel):
     order_id: str
     order_code: str
-    product_id: str
+    beer_type_id: Optional[str] = None
+    product_id: Optional[str] = None
     planned_qty: float
     uom: str
     due_time: Optional[datetime] = None
@@ -1725,6 +1727,9 @@ class BrewOrderIn(BaseModel):
     """Lệnh sản xuất (nấu) — 1 dịch bia, đủ phần hành chính (Người ra lệnh/Thực hiện/Xuất
     kho/Căn cứ/Thời gian/An toàn) ngay trên chính lệnh (mirror OrderIn/ProductionOrder)."""
     order_code: str
+    # Lệnh SX (ERP) làm cha — chỉ dùng lúc TẠO (update_order không đọc field này, không cho
+    # đổi cha sau khi đã tạo — xem services/brew_order.py::create_order).
+    production_order_id: Optional[str] = None
     product_id: Optional[str] = None
     product_desc: Optional[str] = None
     recipe_version_id: Optional[str] = None

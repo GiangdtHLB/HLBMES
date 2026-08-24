@@ -75,7 +75,9 @@ def create_batch(db: Session, order_id: str, recipe_version_id: str, user: User,
         order_id=order_id,
         work_order_id=work_order_id,
         recipe_version_id=recipe_version_id,
-        product_id=order.product_id,
+        # Lệnh SX (ERP) giờ chỉ chọn Loại bia lúc lập (order.product_id thường None) — Dịch bia
+        # thật của mẻ lấy từ chính RecipeVersion đã chọn để tạo mẻ này (luôn có, đã validate ở trên).
+        product_id=rv.product_id,
         state=BatchState.PLANNED.value,
         quality_status=QualityStatus.PENDING.value,
         planned_qty=qty,
@@ -85,8 +87,9 @@ def create_batch(db: Session, order_id: str, recipe_version_id: str, user: User,
         created_at=utcnow(),
     )
     db.add(batch)
-    if order.status == "released":
-        order.status = "in_progress"
+    # KHÔNG tự chuyển order.status ở đây nữa — "in_progress" giờ chỉ do TẠO Lệnh nấu (BrewOrder)
+    # gắn với Lệnh SX quyết định (xem services/brew_order.py::create_order), không còn liên quan
+    # gì tới việc tạo BatchExecution ở module "Mẻ sản xuất" cũ (nav-unused) này nữa.
     record_audit(db, entity_type="batch", entity_id=batch.batch_id, action="create",
                  actor=user, after={"batch_code": code, "recipe_version": rv.version_no})
     db.commit()

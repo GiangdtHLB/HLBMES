@@ -122,18 +122,22 @@ def lager_product_id(client, admin_h):
 
 
 @pytest.fixture(scope="module")
-def lager_recipe_version_id(client, admin_h, lager_product_id):
+def lager_beer_type_id(client, admin_h, lager_product_id):
     products = client.get("/api/products", headers=admin_h).json()
-    beer_type_id = next(p["beer_type_id"] for p in products if p["product_id"] == lager_product_id)
+    return next(p["beer_type_id"] for p in products if p["product_id"] == lager_product_id)
+
+
+@pytest.fixture(scope="module")
+def lager_recipe_version_id(client, admin_h, lager_product_id, lager_beer_type_id):
     recipes = client.get("/api/recipes", headers=admin_h).json()
-    recipe = next(r for r in recipes if r["beer_type_id"] == beer_type_id)
+    recipe = next(r for r in recipes if r["beer_type_id"] == lager_beer_type_id)
     versions = client.get(f"/api/recipes/{recipe['recipe_id']}/versions", headers=admin_h).json()
     return next(v["version_id"] for v in versions if v["state"] == "effective" and v["product_id"] == lager_product_id)
 
 
-def _a_production_order(client, admin_h, code, product_id, recipe_version_id, planned_batch_count=1):
+def _a_production_order(client, admin_h, code, beer_type_id, recipe_version_id, planned_batch_count=1):
     r = client.post("/api/orders", headers=admin_h, json={
-        "order_code": code, "product_id": product_id, "planned_qty": 100, "uom": "L",
+        "order_code": code, "beer_type_id": beer_type_id, "planned_qty": 100, "uom": "L",
         "recipe_version_id": recipe_version_id, "planned_batch_count": planned_batch_count})
     assert r.status_code == 201, r.text
     return r.json()["order_id"]
@@ -439,8 +443,8 @@ def test_fulfill_all_lines_snapshots_fifo_ok(client, admin_h, thukho_h, vanhanh_
     assert original_lot["quantity"] == 40
 
 
-def test_preview_source_materials_production_order(client, admin_h, lager_product_id, lager_recipe_version_id):
-    order_id = _a_production_order(client, admin_h, "PO-SRCPRE01", lager_product_id, lager_recipe_version_id)
+def test_preview_source_materials_production_order(client, admin_h, lager_beer_type_id, lager_recipe_version_id):
+    order_id = _a_production_order(client, admin_h, "PO-SRCPRE01", lager_beer_type_id, lager_recipe_version_id)
 
     r = client.get("/api/warehouse/requests/source-preview", headers=admin_h,
                    params={"source_type": "production_order", "source_id": order_id})
@@ -457,8 +461,8 @@ def test_preview_source_materials_production_order_not_found(client, admin_h):
 
 
 def test_create_request_with_production_order_source_stores_and_shows_label(
-        client, admin_h, thukho_h, vanhanh_h, lager_product_id, lager_recipe_version_id):
-    order_id = _a_production_order(client, admin_h, "PO-SRCCREATE01", lager_product_id, lager_recipe_version_id)
+        client, admin_h, thukho_h, vanhanh_h, lager_beer_type_id, lager_recipe_version_id):
+    order_id = _a_production_order(client, admin_h, "PO-SRCCREATE01", lager_beer_type_id, lager_recipe_version_id)
     mat_id = _create_material(client, admin_h, "SRC-PO-CREATE-MAT")
     _receive(client, thukho_h, "LOT-SRCPOCREATE-01", mat_id, 50)
 

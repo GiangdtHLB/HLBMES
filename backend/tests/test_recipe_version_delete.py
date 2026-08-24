@@ -132,7 +132,7 @@ def test_delete_version_blocked_by_production_order(client, admin_h):
         _transition(client, admin_h, version_id, target)
 
     order = client.post("/api/orders", headers=admin_h,
-                        json={"order_code": f"ORD-VDEL-{new_id()[:6]}", "product_id": product_id,
+                        json={"order_code": f"ORD-VDEL-{new_id()[:6]}", "beer_type_id": beer_type_id,
                               "recipe_version_id": version_id, "planned_qty": 1000, "uom": "L"})
     assert order.status_code == 201, order.text
 
@@ -152,7 +152,7 @@ def test_delete_version_blocked_by_work_order(client, admin_h):
     recipe_id = _a_recipe(client, admin_h, beer_type_id)
     version_id = _a_version(client, admin_h, recipe_id, product_id)
     order = client.post("/api/orders", headers=admin_h,
-                        json={"order_code": f"ORD-VDEL2-{new_id()[:6]}", "product_id": product_id,
+                        json={"order_code": f"ORD-VDEL2-{new_id()[:6]}", "beer_type_id": beer_type_id,
                               "planned_qty": 1000, "uom": "L"})
     assert order.status_code == 201, order.text
     order_id = order.json()["order_id"]
@@ -224,7 +224,7 @@ def test_is_used_flag_true_when_referenced_by_production_order(client, admin_h):
         _transition(client, admin_h, version_id, target)
 
     order = client.post("/api/orders", headers=admin_h,
-                        json={"order_code": f"ORD-ISUSED-{new_id()[:6]}", "product_id": product_id,
+                        json={"order_code": f"ORD-ISUSED-{new_id()[:6]}", "beer_type_id": beer_type_id,
                               "recipe_version_id": version_id, "planned_qty": 1000, "uom": "L"})
     assert order.status_code == 201, order.text
 
