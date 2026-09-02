@@ -150,3 +150,127 @@ def test_sample_history_out_of_order_backfill_still_resolves_by_sampled_at(clien
     assert status["recorded"][0]["value"] == 5
     assert status["has_fail"] is False
     assert status["can_release"] is True
+
+
+def test_merge_duplicate_qc_samples_unifies_fragmented_rounds(client, admin_h, vanhanh_h):
+    """merge_duplicate_qc_samples phải gộp các "lần lấy mẫu" bị TÁCH VỤN (bug frontend cũ — cho
+    submit từng chỉ tiêu một, mỗi lần sinh 1 sample_id riêng dù CÙNG sampled_at/recorded_by —
+    đã sửa frontend, nhưng dữ liệu cũ vẫn cần gộp lại, yêu cầu người dùng 2026-09-02: "lần 1
+    cũng phải gom lại"). 2 dòng khác sample_id nhưng cùng (scope, sampled_at, recorded_by) và
+    KHÁC mã chỉ tiêu -> gộp về 1 sample_id. Idempotent — gọi lại lần 2 không gộp thêm gì."""
+    code_a = _make_group_with_param(client, admin_h, "MERGEA", stage="len_men_phu")
+    code_b = _make_group_with_param(client, admin_h, "MERGEB", stage="len_men_phu")
+    lm_code = _make_ferment(client, admin_h, vanhanh_h, "MERGE1")
+    scope_id = f"{lm_code}__len_men_phu"
+    sampled_at = "2026-07-15T08:21:00+00:00"
+
+    r1 = client.post("/api/brewing/qc-samples", headers=vanhanh_h,
+                     json={"stage": "len_men_phu", "scope_type": "ferment", "scope_id": scope_id,
+                           "sampled_at": sampled_at,
+                           "results": [{"parameter": code_a, "value": 5, "lower_limit": 1, "upper_limit": 10}]})
+    assert r1.status_code == 201, r1.text
+    r2 = client.post("/api/brewing/qc-samples", headers=vanhanh_h,
+                     json={"stage": "len_men_phu", "scope_type": "ferment", "scope_id": scope_id,
+                           "sampled_at": sampled_at,
+                           "results": [{"parameter": code_b, "value": 6, "lower_limit": 1, "upper_limit": 10}]})
+    assert r2.status_code == 201, r2.text
+
+    before = client.get("/api/brewing/qc-samples", headers=admin_h,
+                        params={"scope_type": "ferment", "scope_id": scope_id}).json()
+    assert len(before["items"]) == 2   # tách vụn thành 2 "lần" riêng — đúng bug đã báo
+
+    from app.database import SessionLocal
+    from app.services.qc_catalog import merge_duplicate_qc_samples
+    db = SessionLocal()
+    result = merge_duplicate_qc_samples(db)
+    db.close()
+    assert result["merged_groups"] == 1
+    assert result["merged_rows"] == 1
+
+    after = client.get("/api/brewing/qc-samples", headers=admin_h,
+                       params={"scope_type": "ferment", "scope_id": scope_id}).json()
+    assert len(after["items"]) == 1
+    merged_params = {r["parameter"] for r in after["items"][0]["results"]}
+    assert merged_params == {code_a, code_b}
+
+    db2 = SessionLocal()
+    result2 = merge_duplicate_qc_samples(db2)
+    db2.close()
+    assert result2["merged_groups"] == 0   # idempotent
+
+
+def test_merge_duplicate_qc_samples_skips_conflicting_duplicate_parameter(client, admin_h, vanhanh_h):
+    """2 dòng khác sample_id, cùng (scope, sampled_at, recorded_by) NHƯNG cùng mã chỉ tiêu (VD
+    sửa lại giá trị trùng giờ) — KHÔNG tự ý gộp (có thể là 2 lần đo thật khác nhau, không phải
+    do bug tách vụn)."""
+    code = _make_group_with_param(client, admin_h, "NOMERGE1", stage="len_men_phu")
+    lm_code = _make_ferment(client, admin_h, vanhanh_h, "NOMERGE1")
+    scope_id = f"{lm_code}__len_men_phu"
+    sampled_at = "2026-07-16T09:00:00+00:00"
+
+    for v in (5, 7):
+        r = client.post("/api/brewing/qc-samples", headers=vanhanh_h,
+                        json={"stage": "len_men_phu", "scope_type": "ferment", "scope_id": scope_id,
+                              "sampled_at": sampled_at,
+                              "results": [{"parameter": code, "value": v, "lower_limit": 1, "upper_limit": 10}]})
+        assert r.status_code == 201, r.text
+
+    from app.database import SessionLocal
+    from app.services.qc_catalog import merge_duplicate_qc_samples
+    db = SessionLocal()
+    result = merge_duplicate_qc_samples(db)
+    db.close()
+
+    after = client.get("/api/brewing/qc-samples", headers=admin_h,
+                       params={"scope_type": "ferment", "scope_id": scope_id}).json()
+    assert len(after["items"]) == 2   # vẫn giữ nguyên 2 dòng riêng — không gộp nhầm
+
+
+def test_merge_duplicate_qc_samples_clusters_by_time_proximity(client, admin_h, vanhanh_h):
+    """Bug thực tế đã gặp: mỗi lần bấm lưu dở dang tự làm mới ô "Ngày giờ lấy mẫu" (không giữ
+    nguyên) -> sampled_at giữa các dòng CHỈ lệch vài trăm mili-giây, không hề GIỐNG HỆT nhau —
+    merge_duplicate_qc_samples phải gộp cụm submit dồn dập (cách nhau ≤ tolerance_seconds) chứ
+    không chỉ đúng khi sampled_at trùng khớp tuyệt đối. 1 lần lấy mẫu THẬT sự khác (cách xa,
+    ngoài tolerance) không được gộp lẫn vào."""
+    code_a = _make_group_with_param(client, admin_h, "CLUSTERA", stage="len_men_chinh")
+    code_b = _make_group_with_param(client, admin_h, "CLUSTERB", stage="len_men_chinh")
+    lm_code = _make_ferment(client, admin_h, vanhanh_h, "CLUSTER1")
+    scope_id = f"{lm_code}__len_men_chinh"
+
+    # Cụm 1: 2 dòng cách nhau 0.3s (mô phỏng submit dồn dập) -> phải gộp thành 1 lần.
+    r1 = client.post("/api/brewing/qc-samples", headers=vanhanh_h,
+                     json={"stage": "len_men_chinh", "scope_type": "ferment", "scope_id": scope_id,
+                           "sampled_at": "2026-08-01T09:00:00.100000+00:00",
+                           "results": [{"parameter": code_a, "value": 5, "lower_limit": 1, "upper_limit": 10}]})
+    assert r1.status_code == 201, r1.text
+    r2 = client.post("/api/brewing/qc-samples", headers=vanhanh_h,
+                     json={"stage": "len_men_chinh", "scope_type": "ferment", "scope_id": scope_id,
+                           "sampled_at": "2026-08-01T09:00:00.400000+00:00",
+                           "results": [{"parameter": code_b, "value": 6, "lower_limit": 1, "upper_limit": 10}]})
+    assert r2.status_code == 201, r2.text
+
+    # Lần lấy mẫu THẬT khác, 1 giờ sau, cùng 2 chỉ tiêu -> phải giữ RIÊNG, không gộp lẫn cụm 1.
+    r3 = client.post("/api/brewing/qc-samples", headers=vanhanh_h,
+                     json={"stage": "len_men_chinh", "scope_type": "ferment", "scope_id": scope_id,
+                           "sampled_at": "2026-08-01T10:00:00+00:00",
+                           "results": [{"parameter": code_a, "value": 5.5, "lower_limit": 1, "upper_limit": 10},
+                                      {"parameter": code_b, "value": 6.5, "lower_limit": 1, "upper_limit": 10}]})
+    assert r3.status_code == 201, r3.text
+
+    before = client.get("/api/brewing/qc-samples", headers=admin_h,
+                        params={"scope_type": "ferment", "scope_id": scope_id}).json()
+    assert len(before["items"]) == 3
+
+    from app.database import SessionLocal
+    from app.services.qc_catalog import merge_duplicate_qc_samples
+    db = SessionLocal()
+    result = merge_duplicate_qc_samples(db)
+    db.close()
+    assert result["merged_groups"] == 1
+    assert result["merged_rows"] == 1
+
+    after = client.get("/api/brewing/qc-samples", headers=admin_h,
+                       params={"scope_type": "ferment", "scope_id": scope_id}).json()
+    assert len(after["items"]) == 2   # cụm dồn dập gộp thành 1 + lần thật riêng biệt = 2
+    sizes = sorted(len(it["results"]) for it in after["items"])
+    assert sizes == [2, 2]

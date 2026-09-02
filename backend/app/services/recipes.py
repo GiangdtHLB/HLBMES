@@ -8,10 +8,105 @@ from ..audit import record_audit
 from ..common import RECIPE_TRANSITIONS, Role, RecipeState, new_id, utcnow
 from ..errors import DomainError, NotFoundError, PermissionError_
 from ..models.master import Product
-from ..models.recipes import Recipe, RecipeVersion
+from ..models.quality_ext import ProcessParameter, QCParameter
+from ..models.recipes import Recipe, RecipeVersion, RecipeVersionParamItem, RecipeVersionQcItem
 from ..models.recipe_ext import RecipeChange
 from ..models.signature import Signature
 from ..security import User, enforce_sod, require_role, verify_password
+
+
+# ---- Chọn chỉ tiêu/tham số từ Danh mục cho 1 RecipeVersion ----
+# `quality_checks`/`parameters` (JSON phẳng, cột cũ trên RecipeVersion) vẫn được TỰ TÍNH/ghi đè
+# từ 2 hàm dưới đây mỗi lần lưu (giữ nguyên shape cũ) — để services/batches.py, quality_adv.py::
+# coa, services/derived.py (đang đọc thẳng 2 cột JSON này) không cần sửa gì. `param_id` được
+# nhét thêm vào bản ghi phẳng (field mới, không phá vỡ shape cũ) để diff_versions/UI có thể nối
+# ngược lại danh mục khi cần.
+
+def _resolve_qc_items(db: Session, items: list) -> tuple[list[dict], list[dict]]:
+    """items: [{param_id, seq, mandatory, target_override, usl_override, lsl_override}] (chọn từ
+    Danh mục chỉ tiêu QCParameter) → (rows để lưu RecipeVersionQcItem, quality_checks JSON phẳng
+    — override-hoặc-mặc-định mirror qc_catalog.py::_item_out/required_params_for_material)."""
+    rows, flat = [], []
+    for it in items:
+        param = db.get(QCParameter, it["param_id"])
+        if not param:
+            raise NotFoundError(f"Chỉ tiêu '{it['param_id']}' không tồn tại.")
+        mandatory = it.get("mandatory", True)
+        lsl = it.get("lsl_override") if it.get("lsl_override") is not None else param.lsl
+        usl = it.get("usl_override") if it.get("usl_override") is not None else param.usl
+        rows.append({"param_id": param.param_id, "seq": it.get("seq", 0), "mandatory": mandatory,
+                    "target_override": it.get("target_override"),
+                    "usl_override": it.get("usl_override"), "lsl_override": it.get("lsl_override")})
+        flat.append({"param_id": param.param_id, "parameter": param.name, "method": param.method,
+                    "unit": param.unit, "mandatory": mandatory, "lower": lsl, "upper": usl})
+    return rows, flat
+
+
+def _resolve_param_items(db: Session, items: list) -> tuple[list[dict], list[dict]]:
+    """items: [{param_id, seq, mandatory, phase_override, target_override, usl_override,
+    lsl_override}] (chọn từ Danh mục tham số ProcessParameter) → (rows để lưu
+    RecipeVersionParamItem, parameters JSON phẳng)."""
+    rows, flat = [], []
+    for it in items:
+        param = db.get(ProcessParameter, it["param_id"])
+        if not param:
+            raise NotFoundError(f"Tham số '{it['param_id']}' không tồn tại.")
+        phase = it.get("phase_override") or param.phase
+        target = it.get("target_override") if it.get("target_override") is not None else param.target
+        lsl = it.get("lsl_override") if it.get("lsl_override") is not None else param.lsl
+        usl = it.get("usl_override") if it.get("usl_override") is not None else param.usl
+        rows.append({"param_id": param.param_id, "seq": it.get("seq", 0),
+                    "mandatory": it.get("mandatory", True), "phase_override": it.get("phase_override"),
+                    "target_override": it.get("target_override"),
+                    "usl_override": it.get("usl_override"), "lsl_override": it.get("lsl_override")})
+        flat.append({"param_id": param.param_id, "name": param.name, "unit": param.unit,
+                    "phase": phase, "target": target, "lower": lsl, "upper": usl})
+    return rows, flat
+
+
+def _replace_qc_items(db: Session, version_id: str, rows: list) -> None:
+    for old in db.execute(select(RecipeVersionQcItem).where(
+            RecipeVersionQcItem.version_id == version_id)).scalars().all():
+        db.delete(old)
+    for r in rows:
+        db.add(RecipeVersionQcItem(link_id=new_id(), version_id=version_id, **r))
+
+
+def _replace_param_items(db: Session, version_id: str, rows: list) -> None:
+    for old in db.execute(select(RecipeVersionParamItem).where(
+            RecipeVersionParamItem.version_id == version_id)).scalars().all():
+        db.delete(old)
+    for r in rows:
+        db.add(RecipeVersionParamItem(link_id=new_id(), version_id=version_id, **r))
+
+
+def list_qc_items(db: Session, version_id: str) -> list[dict]:
+    items = db.execute(select(RecipeVersionQcItem).where(
+        RecipeVersionQcItem.version_id == version_id).order_by(RecipeVersionQcItem.seq)).scalars().all()
+    out = []
+    for it in items:
+        param = db.get(QCParameter, it.param_id)
+        out.append({"link_id": it.link_id, "version_id": it.version_id, "param_id": it.param_id,
+                    "seq": it.seq, "mandatory": it.mandatory, "target_override": it.target_override,
+                    "usl_override": it.usl_override, "lsl_override": it.lsl_override,
+                    "param_code": param.code if param else None, "param_name": param.name if param else None,
+                    "param_unit": param.unit if param else None})
+    return out
+
+
+def list_param_items(db: Session, version_id: str) -> list[dict]:
+    items = db.execute(select(RecipeVersionParamItem).where(
+        RecipeVersionParamItem.version_id == version_id).order_by(RecipeVersionParamItem.seq)).scalars().all()
+    out = []
+    for it in items:
+        param = db.get(ProcessParameter, it.param_id)
+        out.append({"link_id": it.link_id, "version_id": it.version_id, "param_id": it.param_id,
+                    "seq": it.seq, "mandatory": it.mandatory, "phase_override": it.phase_override,
+                    "target_override": it.target_override,
+                    "usl_override": it.usl_override, "lsl_override": it.lsl_override,
+                    "param_code": param.code if param else None, "param_name": param.name if param else None,
+                    "param_unit": param.unit if param else None})
+    return out
 
 
 def _resolve_version_product(db: Session, recipe: Recipe, product_id: str) -> Product:
@@ -39,6 +134,15 @@ def create_version(db: Session, recipe_id: str, payload: dict, user: User) -> Re
         .order_by(RecipeVersion.version_no.desc())
     ).scalars().first()
     next_no = (last.version_no + 1) if last else 1
+    # qc_items/param_items (chọn từ Danh mục) — nếu có, resolve rồi GHI ĐÈ quality_checks/
+    # parameters (JSON phẳng cũ) bằng bản đã resolve; không có thì giữ nguyên hành vi cũ (nhận
+    # thẳng quality_checks/parameters tự do, tương thích ngược).
+    qc_rows, param_rows = None, None
+    quality_checks, parameters = payload.get("quality_checks", []), payload.get("parameters", [])
+    if payload.get("qc_items") is not None:
+        qc_rows, quality_checks = _resolve_qc_items(db, payload["qc_items"])
+    if payload.get("param_items") is not None:
+        param_rows, parameters = _resolve_param_items(db, payload["param_items"])
     rv = RecipeVersion(
         version_id=new_id(),
         recipe_id=recipe_id,
@@ -47,9 +151,9 @@ def create_version(db: Session, recipe_id: str, payload: dict, user: User) -> Re
         state=RecipeState.DRAFT.value,
         base_qty=payload.get("base_qty", 0.0) or 0.0,
         base_uom=payload.get("base_uom", "L"),
-        parameters=payload.get("parameters", []),
+        parameters=parameters,
         materials=payload.get("materials", []),
-        quality_checks=payload.get("quality_checks", []),
+        quality_checks=quality_checks,
         yield_steps=payload.get("yield_steps", []),
         procedure=payload.get("procedure", []),
         change_reason=payload.get("change_reason"),
@@ -57,6 +161,11 @@ def create_version(db: Session, recipe_id: str, payload: dict, user: User) -> Re
         created_at=utcnow(),
     )
     db.add(rv)
+    db.flush()
+    if qc_rows is not None:
+        _replace_qc_items(db, rv.version_id, qc_rows)
+    if param_rows is not None:
+        _replace_param_items(db, rv.version_id, param_rows)
     record_audit(db, entity_type="recipe_version", entity_id=rv.version_id,
                  action="create", actor=user, after={"version_no": next_no})
     db.commit()
@@ -69,17 +178,27 @@ def update_draft(db: Session, version_id: str, payload: dict, user: User) -> Rec
     rv = db.get(RecipeVersion, version_id)
     if not rv:
         raise NotFoundError("Recipe version không tồn tại.")
-    if rv.state != RecipeState.DRAFT.value:
+    if rv.state != RecipeState.DRAFT.value and user.role != Role.ADMIN.value:
         # Không cho phép chỉnh version đã rời draft (tài liệu §7.2).
+        # TẠM THỜI: admin được phép sửa version ở bất kỳ trạng thái nào (theo yêu cầu người
+        # dùng) — bỏ điều kiện "and user.role != Role.ADMIN.value" ở trên khi không cần nữa.
         raise DomainError("Chỉ được sửa recipe version ở trạng thái draft.")
     recipe = db.get(Recipe, rv.recipe_id)
     rv.product_id = _resolve_version_product(db, recipe, payload.get("product_id", rv.product_id)).product_id
     before = {"parameters": rv.parameters, "materials": rv.materials, "quality_checks": rv.quality_checks}
     rv.base_qty = payload.get("base_qty", rv.base_qty) or 0.0
     rv.base_uom = payload.get("base_uom", rv.base_uom)
-    rv.parameters = payload.get("parameters", rv.parameters)
     rv.materials = payload.get("materials", rv.materials)
-    rv.quality_checks = payload.get("quality_checks", rv.quality_checks)
+    if payload.get("qc_items") is not None:
+        qc_rows, rv.quality_checks = _resolve_qc_items(db, payload["qc_items"])
+        _replace_qc_items(db, rv.version_id, qc_rows)
+    else:
+        rv.quality_checks = payload.get("quality_checks", rv.quality_checks)
+    if payload.get("param_items") is not None:
+        param_rows, rv.parameters = _resolve_param_items(db, payload["param_items"])
+        _replace_param_items(db, rv.version_id, param_rows)
+    else:
+        rv.parameters = payload.get("parameters", rv.parameters)
     rv.yield_steps = payload.get("yield_steps", rv.yield_steps)
     rv.procedure = payload.get("procedure", rv.procedure)
     if payload.get("change_reason") is not None:
@@ -156,7 +275,9 @@ def diff_versions(db: Session, va_id: str, vb_id: str) -> dict:
         return {m.get("material_code") or m.get("alt_group_code"): m for m in (rv.materials or [])}
 
     def _param_map(rv):
-        return {p.get("name"): p for p in (rv.parameters or [])}
+        # Ưu tiên khoá theo param_id (tham số chọn từ Danh mục) — fallback "name" cho version cũ
+        # chưa có catalog ref (gõ tay tự do, không có param_id).
+        return {p.get("param_id") or p.get("name"): p for p in (rv.parameters or [])}
 
     am, bm = _mat_map(a), _mat_map(b)
     mat_changes = []

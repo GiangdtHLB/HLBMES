@@ -6,8 +6,8 @@
 2) Snapshot fifo_ok trên từng dòng NGAY LÚC XUẤT (fulfill_request_line/fulfill_all_lines) —
    trước đây phiếu đã xử lý xong không hiện được cảnh báo FIFO vì không có gì lưu lại; giờ
    hiện đúng theo trạng thái tồn kho tại thời điểm xuất, không suy đoán lại sau này.
-3) "Lệnh SX (ERP)" (production_order) cũng là 1 nguồn hợp lệ song song brew_order/
-   filter_master_order (xem services/warehouse.py::_aggregate_source_material_lines)."""
+3) source_type chỉ chấp nhận brew_order/filter_master_order (xem
+   services/warehouse.py::_aggregate_source_material_lines)."""
 
 import os
 import tempfile
@@ -135,12 +135,6 @@ def lager_recipe_version_id(client, admin_h, lager_product_id, lager_beer_type_i
     return next(v["version_id"] for v in versions if v["state"] == "effective" and v["product_id"] == lager_product_id)
 
 
-def _a_production_order(client, admin_h, code, beer_type_id, recipe_version_id, planned_batch_count=1):
-    r = client.post("/api/orders", headers=admin_h, json={
-        "order_code": code, "beer_type_id": beer_type_id, "planned_qty": 100, "uom": "L",
-        "recipe_version_id": recipe_version_id, "planned_batch_count": planned_batch_count})
-    assert r.status_code == 201, r.text
-    return r.json()["order_id"]
 
 
 def test_preview_source_materials_brew_order_skips_header_row(client, admin_h, thukho_h):
@@ -443,35 +437,3 @@ def test_fulfill_all_lines_snapshots_fifo_ok(client, admin_h, thukho_h, vanhanh_
     assert original_lot["quantity"] == 40
 
 
-def test_preview_source_materials_production_order(client, admin_h, lager_beer_type_id, lager_recipe_version_id):
-    order_id = _a_production_order(client, admin_h, "PO-SRCPRE01", lager_beer_type_id, lager_recipe_version_id)
-
-    r = client.get("/api/warehouse/requests/source-preview", headers=admin_h,
-                   params={"source_type": "production_order", "source_id": order_id})
-    assert r.status_code == 200, r.text
-    lines = {l["material_name"]: l for l in r.json() if not l["is_group"]}
-    assert set(lines.keys()) >= {"Malt Pilsner", "Hoa bia Saaz", "Men Lager W-34/70"}
-    assert lines["Malt Pilsner"]["quantity"] == pytest.approx(1200)
-
-
-def test_preview_source_materials_production_order_not_found(client, admin_h):
-    r = client.get("/api/warehouse/requests/source-preview", headers=admin_h,
-                   params={"source_type": "production_order", "source_id": "does-not-exist"})
-    assert r.status_code == 404, r.text
-
-
-def test_create_request_with_production_order_source_stores_and_shows_label(
-        client, admin_h, thukho_h, vanhanh_h, lager_beer_type_id, lager_recipe_version_id):
-    order_id = _a_production_order(client, admin_h, "PO-SRCCREATE01", lager_beer_type_id, lager_recipe_version_id)
-    mat_id = _create_material(client, admin_h, "SRC-PO-CREATE-MAT")
-    _receive(client, thukho_h, "LOT-SRCPOCREATE-01", mat_id, 50)
-
-    r = client.post("/api/warehouse/requests", headers=vanhanh_h, json={
-        "lines": [{"material_id": mat_id, "quantity": 5, "uom": "kg"}],
-        "source_type": "production_order", "source_id": order_id,
-    })
-    assert r.status_code == 201, r.text
-    body = r.json()
-    assert body["source_type"] == "production_order"
-    assert body["source_id"] == order_id
-    assert body["source_label"] == "Lệnh SX (ERP) PO-SRCCREATE01"

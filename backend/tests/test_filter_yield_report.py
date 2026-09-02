@@ -317,26 +317,15 @@ def test_final_batch_toggle_excludes_from_classification(client, admin_h, vanhan
     assert toggle2.json()["is_final_batch"] is False
 
 
-def test_low_yield_filter_alerts_dashboard_widget(client, admin_h, vanhanh_h):
-    """Widget Dashboard "Sản lượng lọc thấp" (5 ngày gần nhất, top N, xem
-    services/dashboard.py::low_yield_filter_alerts) — chỉ gồm mẻ Thấp (mặc định ≤500L), sắp
-    tăng dần theo V bia (hụt nặng nhất lên đầu), không lẫn mẻ Bình thường/Cao."""
-    low_filter_id = _finish_one_mẻ(client, admin_h, vanhanh_h, "DASHLOW-A", 2, 0)   # 200L -> Thấp
-    lower_filter_id = _finish_one_mẻ(client, admin_h, vanhanh_h, "DASHLOW-B", 1, 0)  # 100L -> Thấp, thấp hơn nữa
-    high_filter_id = _finish_one_mẻ(client, admin_h, vanhanh_h, "DASHHIGH", 25, 0)   # 2500L -> Cao
-
-    r = client.get("/api/reports/low-yield-filter-alerts", headers=admin_h)
-    assert r.status_code == 200, r.text
-    data = r.json()
-    assert data["low_l"] == 500.0
-    ids = {it["filter_id"] for it in data["items"]}
-    assert low_filter_id in ids and lower_filter_id in ids
-    assert high_filter_id not in ids
-    assert all(it["classification"] == "thap" for it in data["items"])
-    # Mẻ hụt nặng nhất (100L) phải đứng TRƯỚC mẻ hụt nhẹ hơn (200L).
-    v_ls = [it["v_l"] for it in data["items"]]
-    assert v_ls == sorted(v_ls)
-
-    r2 = client.get("/api/reports/low-yield-filter-alerts?limit=1", headers=admin_h)
-    assert len(r2.json()["items"]) == 1
-    assert r2.json()["items"][0]["v_l"] == 100.0
+def test_filter_line_yield_report_still_works_via_old_pipeline(client, admin_h, vanhanh_h):
+    """GET /api/reports/filter-line-yield-report (services/filter_yield_report.py, theo
+    FilterOrderTank module Nấu-Lọc-Chiết cũ) không đổi — chỉ Dashboard widget "Sản lượng lọc
+    thấp" (GET /api/reports/low-yield-filter-alerts) đã đổi nguồn sang pipeline "Mẻ sản xuất"
+    mới (BatchFilterLotBatch, xem test_dashboard_summary.py::
+    test_low_yield_filter_alerts_source_from_new_batch_pipeline), theo yêu cầu người dùng
+    2026-09-02: "Sản lượng lọc thấp thì lấy theo mẻ của Lọc"."""
+    low_filter_id = _finish_one_mẻ(client, admin_h, vanhanh_h, "OLDLOW", 2, 0)  # 200L -> Thấp
+    rep = client.get("/api/reports/filter-line-yield-report", headers=admin_h)
+    assert rep.status_code == 200, rep.text
+    ids = {it["filter_id"] for it in rep.json()["items"]}
+    assert low_filter_id in ids

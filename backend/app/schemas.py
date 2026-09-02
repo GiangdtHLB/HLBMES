@@ -167,7 +167,7 @@ class ProductIn(BaseModel):
     name: str
     uom: str = "L"
     description: Optional[str] = None
-    ferment_days_std: Optional[int] = None   # số ngày lên men chuẩn — tính ngày sẵn sàng chiết
+    ferment_days_std: Optional[float] = None   # số ngày lên men chuẩn — tính ngày sẵn sàng chiết (cho phép số thực)
     beer_type_id: Optional[str] = None   # Loại bia (thương hiệu) — dùng để tra chỉ tiêu Lọc/Chiết
 
 
@@ -177,7 +177,7 @@ class ProductOut(ORMModel):
     name: str
     uom: str
     description: Optional[str] = None
-    ferment_days_std: Optional[int] = None
+    ferment_days_std: Optional[float] = None
     beer_type_id: Optional[str] = None
 
 
@@ -186,6 +186,7 @@ class FinishedProductIn(BaseModel):
     name: str
     uom: str = "L"
     product_id: Optional[str] = None   # dịch bia gốc (tuỳ chọn)
+    beer_type_id: Optional[str] = None   # Loại bia — khai trực tiếp, không suy qua product_id
     unit_type: str = "vi"               # vi | keg — loại đơn vị tồn kho thành phẩm
     pack_size: int = 24                 # Lon/vỉ (vi) hoặc 1 (keg)
     category: Optional[str] = None     # Bia chai|Bia lon|Bia hơi|Bia tươi...
@@ -201,6 +202,7 @@ class FinishedProductOut(ORMModel):
     name: str
     uom: str
     product_id: Optional[str] = None
+    beer_type_id: Optional[str] = None
     unit_type: str
     pack_size: int
     category: Optional[str] = None
@@ -271,92 +273,17 @@ class MaterialOut(ORMModel):
     alt_uom_ratio: Optional[float] = None
 
 
-# ---- Orders ----
-class OrderMemberQtySplitIn(BaseModel):
-    """Mirror MemberQtySplitIn (brew_order) — định nghĩa riêng ở đây vì BrewLineQtySplitIn/
-    MemberQtySplitIn nằm dưới xa trong file (dùng type string trực tiếp sẽ NameError lúc định
-    nghĩa OrderIn, do schemas.py không có `from __future__ import annotations`)."""
-    qty_from_company: Optional[float] = None
-    qty_from_workshop: Optional[float] = None
-
-
-class OrderLineQtySplitIn(BaseModel):
-    """SL lấy tại Kho công ty/phân xưởng người lập Lệnh SX tự sửa lại (đè lên gợi ý) — mirror
-    BrewLineQtySplitIn, key trong material_qty_overrides là str(seq) của dòng NVL. Xem
-    BrewLineQtySplitIn (services/brew_order.py) cho ngữ nghĩa đầy đủ — reuse services/orders.py
-    dùng chung cơ chế tính toán với Lệnh nấu, chỉ khác tên schema request."""
-    qty_from_company: Optional[float] = None
-    qty_from_workshop: Optional[float] = None
-    selected_material_codes: Optional[list[str]] = None
-    member_qty_splits: dict[str, OrderMemberQtySplitIn] = {}
-
-
-class OrderIn(BaseModel):
-    """Dùng chung cho tạo (POST) và sửa (PUT) Lệnh SX (ERP) — 1 Lệnh SX = 1 dòng, xem
-    services/orders.py. Chọn Loại bia (beer_type_id) lúc lập — Dịch bia (product_id) cụ thể chỉ
-    xác định được sau, lúc Lệnh nấu chọn Version, nên KHÔNG có field product_id ở đây."""
-    order_code: str
-    beer_type_id: str
-    planned_qty: float
-    uom: str = "L"
-    due_time: Optional[datetime] = None
-    priority: int = 5
-    source_version: Optional[str] = None
-    recipe_version_id: Optional[str] = None
-    planned_batch_count: Optional[int] = None
-    issued_by: Optional[str] = None
-    executor_unit: Optional[str] = "Phân xưởng bia Đông Mai"
-    warehouse_keeper: Optional[str] = "Thủ kho"
-    reference_note: Optional[str] = None
-    start_date: Optional[datetime] = None
-    end_date: Optional[datetime] = None
-    safety_note: Optional[str] = None
-    material_qty_overrides: dict[str, OrderLineQtySplitIn] = {}
-
-
-class OrderOut(ORMModel):
-    order_id: str
-    order_code: str
-    beer_type_id: Optional[str] = None
-    product_id: Optional[str] = None
-    planned_qty: float
-    uom: str
-    due_time: Optional[datetime] = None
-    priority: int
-    status: str
-    source_version: Optional[str] = None
-    recipe_version_id: Optional[str] = None
-    recipe_code: Optional[str] = None
-    recipe_name: Optional[str] = None
-    beer_type_code: Optional[str] = None
-    beer_type_name: Optional[str] = None
-    recipe_version_no: Optional[int] = None
-    recipe_note: Optional[str] = None
-    issued_by: Optional[str] = None
-    executor_unit: Optional[str] = None
-    warehouse_keeper: Optional[str] = None
-    reference_note: Optional[str] = None
-    start_date: Optional[datetime] = None
-    end_date: Optional[datetime] = None
-    safety_note: Optional[str] = None
-    created_by: Optional[str] = None
-    planned_batch_count: Optional[int] = None
-    created_at: datetime
-    is_executed: bool = False
-    # Chỉ get_order() (xem 1 lệnh) mới nạp — list_orders() để trống (nặng, không cần cho bảng
-    # danh sách) — dict tự do vì cấu trúc member_breakdown lồng nhau (xem services/orders.py::
-    # get_order).
-    lines: list[dict] = []
-
-
 # ---- Work Orders / Điều độ ----
 class WorkOrderIn(BaseModel):
-    production_order_id: str
+    brew_order_id: str
     wo_code: Optional[str] = None
     recipe_version_id: Optional[str] = None
     planned_qty: Optional[float] = None
     uom: Optional[str] = None
     line: Optional[str] = None
+    # Dây chuyền nấu THẬT — không còn bắt buộc chọn lúc lập lệnh (bỏ theo yêu cầu 2026-08-31,
+    # UI tự gán nếu Danh mục chỉ có đúng 1 dây chuyền); vẫn validate hợp lệ nếu có truyền lên.
+    brewhouse_line_id: Optional[str] = None
     shift: str = "A"
     scheduled_date: Optional[date] = None
     priority: int = 5
@@ -364,10 +291,13 @@ class WorkOrderIn(BaseModel):
 
 
 class WoDispatchIn(BaseModel):
-    recipe_version_id: Optional[str] = None
-    batch_code: Optional[str] = None
-    planned_qty: Optional[float] = None
-    allow_shortage: bool = False
+    """Phát mẻ — tạo `batch_count` Mẻ sản xuất (BatchExecution) liên tiếp đánh số từ
+    `from_batch`, xem services/workorders.py::dispatch. Dây chuyền nấu/Recipe version KHÔNG
+    còn chọn ở đây — lấy từ WorkOrder (chọn lúc lập lệnh). `tank_lm` (tùy chọn): tank lên men
+    vật lý còn trống — nếu chọn, tự động gộp toàn bộ mẻ vừa phát vào 1 tank lên men mới."""
+    from_batch: int
+    batch_count: int = 1
+    tank_lm: Optional[str] = None
 
 
 # ---- Recipes ----
@@ -384,10 +314,38 @@ class RecipeOut(ORMModel):
     beer_type_id: str
 
 
+class RecipeVersionQcItemIn(BaseModel):
+    """1 chỉ tiêu chọn từ Danh mục (QCParameter) cho RecipeVersion — xem
+    services/recipes.py::_resolve_qc_items."""
+    param_id: str
+    seq: int = 0
+    mandatory: bool = True
+    target_override: Optional[float] = None
+    usl_override: Optional[float] = None
+    lsl_override: Optional[float] = None
+
+
+class RecipeVersionParamItemIn(BaseModel):
+    """1 tham số chọn từ Danh mục (ProcessParameter) cho RecipeVersion — xem
+    services/recipes.py::_resolve_param_items."""
+    param_id: str
+    seq: int = 0
+    mandatory: bool = True
+    phase_override: Optional[str] = None
+    target_override: Optional[float] = None
+    usl_override: Optional[float] = None
+    lsl_override: Optional[float] = None
+
+
 class RecipeVersionIn(BaseModel):
     product_id: str
     base_qty: float = 0.0
     base_uom: str = "L"
+    # qc_items/param_items: nếu truyền (khác None), server resolve từ Danh mục rồi GHI ĐÈ
+    # quality_checks/parameters bên dưới — không truyền thì giữ hành vi cũ (nhận thẳng
+    # quality_checks/parameters tự do, tương thích ngược).
+    qc_items: Optional[list[RecipeVersionQcItemIn]] = None
+    param_items: Optional[list[RecipeVersionParamItemIn]] = None
     parameters: list[dict] = []
     materials: list[dict] = []
     quality_checks: list[dict] = []
@@ -491,11 +449,30 @@ class BatchIn(BaseModel):
     batch_code: Optional[str] = None
     planned_qty: Optional[float] = None
     allow_shortage: bool = False   # bỏ qua chặn thiếu tồn theo BOM
+    work_order_id: Optional[str] = None   # Lệnh SX (điều độ) nguồn — hiện dây chuyền nấu/mã WO
+    brewhouse_line_id: Optional[str] = None   # Dây chuyền nấu — mặc định theo Lệnh SX nếu có, chọn/sửa độc lập được
+
+
+class BatchLineIn(BaseModel):
+    brewhouse_line_id: Optional[str] = None   # Sửa Dây chuyền nấu sau khi mẻ đã tồn tại (bỏ chọn nếu None)
+
+
+class BatchStartIn(BaseModel):
+    start_at: datetime   # Sửa giờ bắt đầu mẻ trực tiếp — gọi lại được nhiều lần để sửa nếu bấm nhầm
+
+
+class BatchFinishIn(BaseModel):
+    end_at: Optional[datetime] = None   # None = dùng giờ hiện tại
+
+
+class BatchActualQtyIn(BaseModel):
+    actual_qty: float   # Nhập/sửa trực tiếp SL thực tế (VD lít dịch thực tế) — khác produce_lot
 
 
 class BatchOut(ORMModel):
     batch_id: str
     batch_code: str
+    batch_year: int
     order_id: str
     recipe_version_id: str
     product_id: str
@@ -510,14 +487,20 @@ class BatchOut(ORMModel):
     end_at: Optional[datetime] = None
     version: int
     created_at: datetime
+    ebr_locked: bool = False
+    work_order_id: Optional[str] = None
+    brewhouse_line_id: Optional[str] = None
 
 
 class ActualIn(BaseModel):
     name: str
+    param_id: Optional[str] = None     # tham số chọn từ Danh mục (ProcessParameter) qua công thức
     target: Optional[float] = None
     actual: Optional[float] = None
     unit: Optional[str] = None
     phase: Optional[str] = None
+    lower: Optional[float] = None      # giới hạn lấy từ recipe_snapshot.parameters (mirror QC)
+    upper: Optional[float] = None
 
 
 class ConsumeIn(BaseModel):
@@ -532,6 +515,7 @@ class DispenseLineIn(BaseModel):
     quantity: float
     lot_id: Optional[str] = None       # None → tự chọn lô theo FEFO
     allow_over: bool = False
+    reason: Optional[str] = None       # bắt buộc nếu lot_id KHÁC lô FIFO/FEFO gợi ý
 
 
 class DispenseIn(BaseModel):
@@ -541,6 +525,12 @@ class DispenseIn(BaseModel):
 
 class BackflushIn(BaseModel):
     produced_qty: float
+
+
+class AdjustActualIn(BaseModel):
+    material_code: str
+    new_actual: float
+    reason: str
 
 
 # ---- Tác vụ nền (jobs) ----
@@ -895,16 +885,19 @@ class LineIn(BaseModel):
     capacity_uom: Optional[str] = None   # đơn vị công suất (kind="line"), VD "lon/phút"
     volume: Optional[float] = None       # thể tích (kind="tank"/"tank_bbt")
     volume_uom: Optional[str] = None     # đơn vị thể tích, VD "hl"
+    usable_pct: Optional[float] = None   # % khả dụng (kind="tank"/"tank_bbt")
     identification_code: Optional[str] = None  # mã nhận dạng dây chuyền (kind="line")
 
 
 class LineUpdate(BaseModel):
+    code: Optional[str] = None
     name: Optional[str] = None
     area: Optional[str] = None
     ideal_rate_per_min: Optional[float] = None
     capacity_uom: Optional[str] = None
     volume: Optional[float] = None
     volume_uom: Optional[str] = None
+    usable_pct: Optional[float] = None
     identification_code: Optional[str] = None
 
 
@@ -1683,11 +1676,8 @@ class BrewIn(BaseModel):
     tank_lm: Optional[str] = None
     lm_code: Optional[str] = None
     yeast_gen: Optional[str] = None
-    # Đúng 1 trong 2 field dưới được set — validate ở routers/brewing.py::add_brew. brew_order_id:
-    # tạo qua tab "Lệnh nấu" cũ (chỉ còn dữ liệu lịch sử). production_order_id: tạo qua "Lệnh SX
-    # (ERP)" — đường đi hiện hành từ tab Nấu.
+    # Lệnh nấu (BrewOrder) làm cha — bắt buộc (xem services/brew_order.py::create_brew_record).
     brew_order_id: Optional[str] = None
-    production_order_id: Optional[str] = None
 
 
 class BrewOrderMaterialLineIn(BaseModel):
@@ -1725,11 +1715,8 @@ class BrewLineQtySplitIn(BaseModel):
 
 class BrewOrderIn(BaseModel):
     """Lệnh sản xuất (nấu) — 1 dịch bia, đủ phần hành chính (Người ra lệnh/Thực hiện/Xuất
-    kho/Căn cứ/Thời gian/An toàn) ngay trên chính lệnh (mirror OrderIn/ProductionOrder)."""
+    kho/Căn cứ/Thời gian/An toàn) ngay trên chính lệnh."""
     order_code: str
-    # Lệnh SX (ERP) làm cha — chỉ dùng lúc TẠO (update_order không đọc field này, không cho
-    # đổi cha sau khi đã tạo — xem services/brew_order.py::create_order).
-    production_order_id: Optional[str] = None
     product_id: Optional[str] = None
     product_desc: Optional[str] = None
     recipe_version_id: Optional[str] = None
@@ -1769,6 +1756,25 @@ class BrewBatchIn(BaseModel):
         return v
 
 
+class BrewBatchBulkIn(BaseModel):
+    """Tạo N mẻ 1 lần thuộc cùng 1 mã nấu — mã mẻ tự sinh liên tiếp, không nhập tay từng mã
+    (xem services/brew_order.py::create_brew_batches_bulk). interval_minutes: khoảng cách giữa
+    giờ bắt đầu 2 mẻ liên tiếp (mặc định 90 phút, mirror chu kỳ nấu thật) — KHÔNG dùng chung
+    1 giờ bắt đầu cho cả loạt."""
+    count: int
+    line_id: str
+    started_at: Optional[datetime] = None
+    interval_minutes: int = 90
+    note: Optional[str] = None
+
+    @field_validator("count")
+    @classmethod
+    def _count_must_be_positive(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError("Số mẻ phải >= 1.")
+        return v
+
+
 class FinishIn(BaseModel):
     """Vận hành chọn tay giờ kết thúc (mặc định giờ hiện tại nếu không truyền) — gọi lại
     được nhiều lần để sửa giờ nếu bấm nhầm, không phải hành động một chiều."""
@@ -1793,6 +1799,14 @@ class BrewBatchCodeIn(BaseModel):
         if not v.isdigit() or int(v) <= 0:
             raise ValueError("Mã mẻ phải là số nguyên dương (VD: 123).")
         return v
+
+
+class BrewBatchDetailsIn(BaseModel):
+    """Sửa Dây chuyền/Ghi chú của 1 mẻ đã tạo — mirror BrewBatchIn.line_id/note, tách riêng
+    khỏi batch_code/started_at/ended_at (đã có endpoint sửa riêng), xem routers/brewing.py::
+    update_brew_batch_details. Cả 2 field tuỳ chọn (exclude_unset) — chỉ đổi field nào gửi lên."""
+    line_id: Optional[str] = None
+    note: Optional[str] = None
 
 
 class FinishFilterTankIn(FinishIn):
@@ -2115,6 +2129,74 @@ class QcGroupCopyItemsIn(BaseModel):
     source_group_id: str = Field(min_length=1)
 
 
+# ---- Danh mục tham số quy trình (setpoint công nghệ) ----
+class ProcessParameterIn(BaseModel):
+    code: str = Field(min_length=1)
+    name: str = Field(min_length=1)
+    unit: Optional[str] = None
+    target: Optional[float] = None
+    usl: Optional[float] = None
+    lsl: Optional[float] = None
+    phase: Optional[str] = None
+    note: Optional[str] = None
+    active: bool = True
+
+
+class ProcessParameterOut(ORMModel):
+    param_id: str
+    code: str
+    name: str
+    unit: Optional[str] = None
+    target: Optional[float] = None
+    usl: Optional[float] = None
+    lsl: Optional[float] = None
+    phase: Optional[str] = None
+    note: Optional[str] = None
+    active: bool
+
+
+class ProcessParameterGroupIn(BaseModel):
+    code: str = Field(min_length=1)
+    name: str = Field(min_length=1)
+    note: Optional[str] = None
+    active: bool = True
+
+
+class ProcessParameterGroupOut(ORMModel):
+    group_id: str
+    code: str
+    name: str
+    note: Optional[str] = None
+    active: bool
+
+
+class ProcessParameterGroupItemIn(BaseModel):
+    param_id: str
+    seq: int = 0
+    mandatory: bool = True
+    target_override: Optional[float] = None
+    usl_override: Optional[float] = None
+    lsl_override: Optional[float] = None
+
+
+class ProcessParameterGroupItemOut(ORMModel):
+    item_id: str
+    group_id: str
+    param_id: str
+    seq: int
+    mandatory: bool
+    target_override: Optional[float] = None
+    usl_override: Optional[float] = None
+    lsl_override: Optional[float] = None
+    param_code: Optional[str] = None
+    param_name: Optional[str] = None
+    param_unit: Optional[str] = None
+
+
+class ProcessParameterGroupCopyItemsIn(BaseModel):
+    source_group_id: str = Field(min_length=1)
+
+
 class MaterialQcGroupIn(BaseModel):
     group_id: str
     mandatory: bool = True
@@ -2307,3 +2389,355 @@ class AuditOut(ORMModel):
     after: Optional[Any] = None
     correlation_id: Optional[str] = None
     ts: datetime
+
+
+# ---- Batch pipeline (blueprint mới cho Mẻ sản xuất: tank/lô lọc/lô thành phẩm) ----
+class BatchFilterOrderSourceIn(BaseModel):
+    source_type: str = "tank"    # tank | filter_lot (lọc lại)
+    source_tank_id: Optional[str] = None
+    source_filter_lot_id: Optional[str] = None
+    reason: Optional[str] = None
+    planned_v_dich_hl: float = 0.0
+
+
+class BatchFilterOrderCreateIn(BaseModel):
+    sources: list[BatchFilterOrderSourceIn] = Field(min_length=1)
+    order_code: str = Field(min_length=1)
+    blend_mode: Optional[str] = None    # tự suy từ số nguồn nếu bỏ trống
+    volume_tolerance_hl: float = 0.0
+    beer_type_id: Optional[str] = None
+    finished_product_id: Optional[str] = None
+    kcs_lot_no: Optional[str] = None
+    note: Optional[str] = None
+
+
+class BatchFilterOrderOut(BaseModel):
+    order_id: str
+    order_code: str
+    order_year: int
+    blend_mode: str
+    planned_volume_hl: float = 0.0
+    volume_tolerance_hl: float = 0.0
+    beer_type_id: Optional[str] = None
+    finished_product_id: Optional[str] = None
+    kcs_lot_no: Optional[str] = None
+    note: Optional[str] = None
+    created_by: Optional[str] = None
+    created_at: datetime
+    locked: bool = False
+    lot_count: int = 0
+    actual_volume_hl: float = 0.0
+    is_complete: bool = False
+    consumed_downstream: bool = False
+    status: str = "planned"
+    status_label: str = ""
+    tank_lm_names: list[str] = []
+
+
+class BatchFilterOrderSourceOut(BaseModel):
+    link_id: str
+    order_id: str
+    source_type: str
+    source_tank_id: Optional[str] = None
+    source_filter_lot_id: Optional[str] = None
+    source_label: str
+    reason: Optional[str] = None
+    planned_v_dich_hl: float = 0.0
+    seq: int
+
+
+class FilterLotFromOrderIn(BaseModel):
+    filter_lot_code: str = Field(min_length=1)
+    to_bbt: str = Field(min_length=1)
+    note: Optional[str] = None
+
+
+class BatchTankMergeIn(BaseModel):
+    batch_ids: list[str] = Field(min_length=1)
+    # Không bắt buộc nữa — bỏ trống thì tự sinh theo số thứ tự Lệnh SX (điều độ) của các mẻ đang
+    # gộp (xem services/batch_pipeline.py::_auto_tank_code, yêu cầu người dùng 2026-09-01: lô lên
+    # men không cần mã riêng, coi là 1 thể thống nhất với điều độ/tank vật lý sinh ra nó).
+    tank_code: Optional[str] = None
+    tank_lm: Optional[str] = None
+    note: Optional[str] = None
+
+
+class BatchTankEditIn(BaseModel):
+    """Sửa 1 BatchTank đã tồn tại (gõ nhầm mã/tank vật lý lúc gộp) — chỉ nhận field THỰC SỰ có
+    trong request (exclude_unset ở router), không truyền thì giữ nguyên (2026-09-02, audit
+    module "Mẻ sản xuất")."""
+    tank_code: Optional[str] = None
+    tank_lm: Optional[str] = None
+    note: Optional[str] = None
+
+
+class BatchTankOut(ORMModel):
+    tank_id: str
+    tank_code: str
+    tank_year: int
+    tank_lm: Optional[str] = None
+    product_id: Optional[str] = None
+    volume_hl: float = 0.0
+    on_hand: float = 0.0
+    status: str
+    status_label: str = ""
+    note: Optional[str] = None
+    created_by: Optional[str] = None
+    created_at: datetime
+    locked: bool = False
+    quality_status: str
+    vao_dich_start: Optional[datetime] = None
+    vao_dich_end: Optional[datetime] = None
+    ferment_days_std: Optional[float] = None
+    days_elapsed: Optional[int] = None
+    ready_date: Optional[datetime] = None
+
+
+class BatchFilterLotSourceIn(BaseModel):
+    source_type: str = "tank"    # tank | filter_lot (lọc lại)
+    source_tank_id: Optional[str] = None
+    source_filter_lot_id: Optional[str] = None
+    reason: Optional[str] = None
+
+
+class BatchFilterLotDrawIn(BaseModel):
+    sources: list[BatchFilterLotSourceIn] = Field(min_length=1)
+    filter_lot_code: str = Field(min_length=1)
+    to_bbt: str = Field(min_length=1)
+    beer_type_id: Optional[str] = None
+    finished_product_id: Optional[str] = None
+    note: Optional[str] = None
+
+
+class BatchFilterLotEditIn(BaseModel):
+    """Sửa 1 BatchFilterLot đã tồn tại (gõ nhầm mã lúc tạo) — mirror BatchTankEditIn. Không có
+    `to_bbt` — xem services/batch_pipeline.py::update_filter_lot vì sao."""
+    filter_lot_code: Optional[str] = None
+    note: Optional[str] = None
+
+
+class BatchFilterLotOut(ORMModel):
+    filter_lot_id: str
+    filter_lot_code: str
+    filter_lot_year: int
+    order_id: Optional[str] = None
+    to_bbt: Optional[str] = None
+    product_id: Optional[str] = None
+    beer_type_id: Optional[str] = None
+    finished_product_id: Optional[str] = None
+    v_dich_hl: float = 0.0
+    nuoc_bai_khi_hl: float = 0.0
+    volume_hl: float = 0.0
+    on_hand: float = 0.0
+    status: str
+    status_label: str = ""
+    note: Optional[str] = None
+    ended_at: Optional[datetime] = None
+    qc_approved: bool = False
+    qc_approved_by: Optional[str] = None
+    qc_approved_at: Optional[datetime] = None
+    created_by: Optional[str] = None
+    created_at: datetime
+    locked: bool = False
+    quality_status: str
+
+
+class BatchFilterLotSourceOut(ORMModel):
+    link_id: str
+    filter_lot_id: str
+    source_type: str
+    source_tank_id: Optional[str] = None
+    source_filter_lot_id: Optional[str] = None
+    source_label: str = ""
+    reason: Optional[str] = None
+    seq: int
+
+
+class BatchFilterLotBatchDrawOut(ORMModel):
+    source_link_id: str
+    dich_nha_hl: Optional[float] = None
+
+
+class BatchFilterLotBatchOut(ORMModel):
+    batch_link_id: str
+    filter_lot_id: str
+    batch_seq_no: Optional[str] = None
+    nuoc_bai_khi_hl: Optional[float] = None
+    is_final_batch: bool = False
+    ended_at: Optional[datetime] = None
+    created_at: datetime
+    draws: list[BatchFilterLotBatchDrawOut] = []
+
+
+class FilterLotBatchDrawIn(BaseModel):
+    source_link_id: str
+    dich_nha_hl: float = Field(ge=0)
+
+
+class FinishFilterLotBatchIn(BaseModel):
+    draws: list[FilterLotBatchDrawIn]
+    nuoc_bai_khi_hl: float = Field(ge=0, default=0.0)
+    batch_seq_no: Optional[str] = None
+    # Bắt đầu/Kết thúc — tuỳ chọn, sửa lại giờ thực tế qua popup "Sửa" (mirror created_at/ended_at
+    # đã có sẵn); không truyền thì giữ nguyên created_at, ended_at mặc định = giờ hiện tại (hành
+    # vi cũ), yêu cầu người dùng 2026-09-01.
+    started_at: Optional[datetime] = None
+    ended_at: Optional[datetime] = None
+
+
+class BatchTankProcessLogIn(BaseModel):
+    """Ghi chép lên men (bảng thông tin đầu) — PATCH-style, chỉ lưu field nào được gửi lên.
+    Key hợp lệ ở services/batch_tank_log.py::MANUAL_FIELD_KEYS + LIST_FIELD_KEYS — extra="allow"
+    để nhận mọi key đó, server lọc theo whitelist khi lưu."""
+    model_config = ConfigDict(extra="allow")
+    note: Optional[str] = None
+
+
+class BatchTankDailyReadingIn(BaseModel):
+    day_no: int
+    reading_date: Optional[str] = None
+    nhiet_do_c: Optional[float] = None
+    do_s: Optional[float] = None
+    mat_do_tb: Optional[float] = None
+    kcs: Optional[str] = None
+    truc_ca: Optional[str] = None
+
+
+class BatchTankDailyReadingsIn(BaseModel):
+    readings: list[BatchTankDailyReadingIn]
+
+
+class BatchPackLotSplitIn(BaseModel):
+    qty: float = Field(gt=0)   # Số lượng cấp chiết, đơn vị LÍT (khác on_hand lô lọc, đơn vị hl)
+    pack_lot_code: str = Field(min_length=1)
+    finished_product_id: Optional[str] = None
+    lot_no: str = Field(min_length=1)   # số lô bia in trên bao bì — bắt buộc, khác mã lô TP (nội bộ)
+    line: Optional[str] = None
+    from_bbt: Optional[str] = None
+    pack_date: Optional[datetime] = None
+    note: Optional[str] = None
+
+
+class BatchPackLotCreateIn(BaseModel):
+    """Tạo lô thành phẩm chọn "Tank BBT nào đi chiết" (mirror BottleIn.from_bbt) — server tự
+    tìm lô lọc nguồn tương ứng, không cần người dùng tự chọn lô lọc. Xem
+    services/batch_pipeline.py::create_pack_lot_from_bbt."""
+    from_bbt: str = Field(min_length=1)
+    qty: float = Field(gt=0)   # Số lượng cấp chiết, đơn vị LÍT (khác on_hand lô lọc, đơn vị hl)
+    pack_lot_code: str = Field(min_length=1)
+    finished_product_id: Optional[str] = None
+    lot_no: str = Field(min_length=1)   # số lô bia in trên bao bì — bắt buộc, khác mã lô TP (nội bộ)
+    line: Optional[str] = None
+    pack_date: Optional[datetime] = None
+    note: Optional[str] = None
+
+
+class BatchPackLotQtyIn(BaseModel):
+    qty: float = Field(gt=0)   # Số lượng cấp chiết, đơn vị LÍT
+
+
+class BatchPackLotOut(ORMModel):
+    pack_lot_id: str
+    pack_lot_code: str
+    pack_lot_year: int
+    filter_lot_id: str
+    qty: float = 0.0   # Số lượng cấp chiết, đơn vị LÍT (khác on_hand lô lọc, đơn vị hl)
+    finished_product_id: Optional[str] = None
+    lot_no: Optional[str] = None
+    line: Optional[str] = None
+    from_bbt: Optional[str] = None
+    pack_date: Optional[datetime] = None
+    note: Optional[str] = None
+    ca1_qty: Optional[float] = None
+    ca1_start_at: Optional[datetime] = None
+    ca1_end_at: Optional[datetime] = None
+    ca2_qty: Optional[float] = None
+    ca2_start_at: Optional[datetime] = None
+    ca2_end_at: Optional[datetime] = None
+    ca3_qty: Optional[float] = None
+    ca3_start_at: Optional[datetime] = None
+    ca3_end_at: Optional[datetime] = None
+    ended_at: Optional[datetime] = None   # tính từ ca1/2/3 (computed property) — xem models/batch_pipeline.py
+    approved: bool = False
+    approved_by: Optional[str] = None
+    approved_at: Optional[datetime] = None
+    stocked: bool = False
+    stocked_by: Optional[str] = None
+    stocked_at: Optional[datetime] = None
+    created_by: Optional[str] = None
+    created_at: datetime
+    locked: bool = False
+    quality_status: str
+    status: str = "dang_chiet"
+    status_label: str = ""
+
+
+class BatchPackLotPackDateIn(BaseModel):
+    pack_date: datetime
+
+
+class BatchPackLotShiftsIn(BaseModel):
+    """SL chiết theo ca 1/2/3 + giờ bắt đầu/kết thúc từng ca — mirror FinishBottleIn.ca1/ca2/ca3
+    (module Nấu-Lọc-Chiết cũ), sửa được nhiều lần (không phải finish 1 lần như module cũ vì
+    BatchPackLot đã trừ on_hand ngay lúc tạo, không cần bước "Kết thúc" riêng). ca*_qty >= 0
+    (Field, không phải chỉ check ở service) — trước đây không ràng buộc gì (2026-09-02, audit
+    module "Mẻ sản xuất")."""
+    ca1_qty: Optional[float] = Field(default=None, ge=0)
+    ca1_start_at: Optional[datetime] = None
+    ca1_end_at: Optional[datetime] = None
+    ca2_qty: Optional[float] = Field(default=None, ge=0)
+    ca2_start_at: Optional[datetime] = None
+    ca2_end_at: Optional[datetime] = None
+    ca3_qty: Optional[float] = Field(default=None, ge=0)
+    ca3_start_at: Optional[datetime] = None
+    ca3_end_at: Optional[datetime] = None
+
+
+class BatchPackLotMaterialUsageIn(BaseModel):
+    """NVL (VD CO2, hóa chất vệ sinh) dùng thật cho 1 lô thành phẩm — mirror BottleMaterialUsageIn."""
+    lot_id: Optional[str] = None
+    material_name: Optional[str] = None
+    lot_pm: Optional[str] = None
+    quantity: float
+    uom: str = "kg"
+    reason: Optional[str] = None   # bắt buộc nếu chọn lô KHÁC lô FIFO cũ nhất — xem add_pack_lot_material
+
+
+class BatchPackLotMaterialUsageOut(ORMModel):
+    usage_id: str
+    pack_lot_id: str
+    lot_id: Optional[str] = None
+    movement_id: Optional[str] = None
+    material_name: Optional[str] = None
+    lot_pm: Optional[str] = None
+    lot_date: Optional[datetime] = None
+    fifo_ok: Optional[bool] = None
+    reason: Optional[str] = None
+    quantity: float = 0.0
+    uom: str = "kg"
+    created_at: datetime
+
+
+class BatchFilterLotMaterialUsageIn(BaseModel):
+    """NVL (VD bột trợ lọc/diatomite) dùng thật cho 1 lô lọc — mirror BatchPackLotMaterialUsageIn."""
+    lot_id: Optional[str] = None
+    material_name: Optional[str] = None
+    lot_pm: Optional[str] = None
+    quantity: float
+    uom: str = "kg"
+    reason: Optional[str] = None   # bắt buộc nếu chọn lô KHÁC lô FIFO cũ nhất — xem add_filter_lot_material
+
+
+class BatchFilterLotMaterialUsageOut(ORMModel):
+    usage_id: str
+    filter_lot_id: str
+    lot_id: Optional[str] = None
+    movement_id: Optional[str] = None
+    material_name: Optional[str] = None
+    lot_pm: Optional[str] = None
+    lot_date: Optional[datetime] = None
+    fifo_ok: Optional[bool] = None
+    reason: Optional[str] = None
+    quantity: float = 0.0
+    uom: str = "kg"
+    created_at: datetime

@@ -9,17 +9,19 @@ from sqlalchemy.orm import Session
 
 from ..common import DeviationState, LotStatus, QualityStatus, ResultStatus, utcnow
 from ..models.batches import BatchExecution
+from ..models.batch_pipeline import BatchFilterLot, BatchFilterLotBatch, BatchFilterLotBatchDraw, BatchPackLot
 from ..models.brewing import BottleRecord, BrewBatch, BrewRecord, FermentRecord, FilterOrder, FilterRecord
 from ..models.lines import ProductionLine
 from ..models.master import FinishedProduct, Material
 from ..models.materials import MaterialLot
 from ..models.quality import Deviation, QualityResult
 from ..models.quality_ext import CAPA, QCParameter
+from . import batch_pipeline as batch_pipeline_svc
 from . import brew_order as brew_order_svc
 from . import derived
-from . import filter_order as filter_order_svc
-from . import orders as order_svc
 from . import quality as quality_svc
+from .filter_yield_report import LABEL as _YIELD_LABEL
+from .filter_yield_report import classify_yield_l
 
 # UI luôn hiển thị giờ theo múi VN (frontend fmt() dùng toLocaleString mặc định trình
 # duyệt, Asia/Ho_Chi_Minh = UTC+7) — quy đổi trước khi lấy .date() để "hôm nay" ở dashboard
@@ -40,21 +42,16 @@ def _order_counts(items: list, complete_key: str, executed_key: str) -> dict:
             "chua_thuc_hien": total - complete - executing}
 
 
-def _production_order_counts(items: list) -> dict:
-    """Đếm Lệnh SX (ERP) theo status (released/in_progress/completed/cancelled) — khác
-    _order_counts (dùng is_complete/is_executed của BrewOrder/FilterMasterOrder)."""
-    total = len(items)
-    complete = sum(1 for i in items if i["status"] == "completed")
-    executing = sum(1 for i in items if i["status"] == "in_progress")
-    return {"total": total, "hoan_thanh": complete, "dang_thuc_hien": executing,
-            "chua_thuc_hien": total - complete - executing}
-
-
-def _batch_counts(rows: list) -> dict:
+def _batch_counts(rows: list, ended_attr: str = "ended_at") -> dict:
+    """`ended_attr` cho phép mirror mốc "đã kết thúc" khác tên tuỳ model (BatchExecution dùng
+    `end_at`, BatchFilterLotBatch dùng `ended_at`, BatchPackLot không có mốc kết thúc riêng nên
+    dùng tạm `approved_at` — chỉ có giá trị khi KCS đã duyệt, cùng ý nghĩa "coi như xong việc",
+    xem production_summary)."""
     total = len(rows)
     today = _local_date(utcnow())
-    done = sum(1 for r in rows if r.ended_at is not None)
-    done_today = sum(1 for r in rows if r.ended_at is not None and _local_date(r.ended_at) == today)
+    ended = lambda r: getattr(r, ended_attr, None)
+    done = sum(1 for r in rows if ended(r) is not None)
+    done_today = sum(1 for r in rows if ended(r) is not None and _local_date(ended(r)) == today)
     return {"total": total, "dang_thuc_hien": total - done, "hoan_thanh": done, "hoan_thanh_hom_nay": done_today}
 
 
@@ -94,26 +91,56 @@ def available_ferment_tanks(db: Session) -> list:
             for t in sorted(tanks, key=lambda t: t.code)]
 
 
+def _batch_tank_len_men_counts(db: Session) -> dict:
+    """"Tank đang lên men" trên Dashboard — CHỈ tính tank còn ĐÚNG NGHĨA đang lên men (status
+    "len_men" hoặc "cho_loc", xem services/batch_pipeline.py::_tank_status) — KHÁC
+    available_tank_lines (dùng cho picker chọn tank gộp mẻ mới, "chiếm dụng" ở đó = còn tồn
+    khác 0 bất kể đã lọc hay chưa, mục đích khác hẳn: không cho dùng lại tank chưa dọn sạch).
+    Tank đã "loc_1_phan"/"da_loc_het"/"am" (đã bị rút dịch, dù còn tồn dở) đã CHUYỂN sang công
+    đoạn Lọc rồi, không còn tính là "đang lên men" nữa (yêu cầu người dùng 2026-09-02: "tank
+    đang lọc mà lại vẫn hiển thị đang lên men"). `dang_loc` (yêu cầu người dùng 2026-09-02: ghi
+    chú thêm "số tank đang lọc") đếm riêng tank "loc_1_phan" (đang rút dịch dở dang) — KHÁC
+    "trống" thật sự (đã rút hết/am, hoặc chưa từng gộp mẻ nào). `dang_nap` giữ nguyên = 0 (không
+    có trạng thái "đang nạp dở dang" trong dữ liệu — merge_batches_into_tank ghi on_hand ĐỦ ngay
+    khi gộp mẻ, không có bước tăng dần để tính riêng, theo lựa chọn người dùng 2026-09-02)."""
+    lines = db.execute(select(ProductionLine).where(
+        ProductionLine.kind == "tank", ProductionLine.active == true())).scalars().all()
+    tanks_by_code: dict[str, str] = {}
+    for t in batch_pipeline_svc.list_tanks_out(db):
+        if t["tank_lm"]:
+            tanks_by_code[t["tank_lm"]] = t["status"]
+    total = len(lines)
+    dang_su_dung = sum(1 for l in lines if tanks_by_code.get(l.code) in ("len_men", "cho_loc"))
+    dang_loc = sum(1 for l in lines if tanks_by_code.get(l.code) == "loc_1_phan")
+    return {"total": total, "dang_su_dung": dang_su_dung, "dang_loc": dang_loc, "dang_nap": 0,
+            "trong": total - dang_su_dung - dang_loc}
+
+
 def production_summary(db: Session) -> dict:
-    # Lệnh nấu đã bỏ lớp "lệnh nấu lớn" (BrewMasterOrder) — mỗi BrewOrder giờ đứng phẳng, đếm
-    # thẳng theo list_orders()/is_complete/is_executed. Lệnh lọc vẫn giữ cấu trúc master/child
-    # (ngoài phạm vi phẳng hóa), đếm theo master order như cũ.
+    """Lệnh & mẻ sản xuất (yêu cầu người dùng 2026-09-02: toàn bộ 6 thẻ đổi sang lấy dữ liệu từ
+    pipeline "Mẻ sản xuất" MỚI, không còn từ module Nấu-Lọc-Chiết cũ — TRỪ "Lệnh nấu" (BrewOrder)
+    vốn đã là lớp ERP DÙNG CHUNG cho cả 2 pipeline (WorkOrder/BatchExecution mới VÀ BrewRecord/
+    BrewBatch cũ đều có thể tạo dưới 1 BrewOrder), không phải "dữ liệu module cũ" cần thay).
+    "Mẻ nấu"/"Mẻ lọc"/"Mẻ chiết" đều hiện TỔNG SỐ (cộng dồn cả lịch sử, không chỉ phần đang làm
+    dở — yêu cầu người dùng 2026-09-02: "hiển thị tất cả số lượng ra, bên dưới có ghi chú rồi"),
+    kèm ghi chú hoàn thành/đang thực hiện/chưa thực hiện ngay dưới số tổng (xem _batch_counts).
+    Riêng "Tank đang lên men" (_batch_tank_len_men_counts) vẫn CHỈ tính tank còn đúng nghĩa đang
+    lên men — khác hẳn ý nghĩa "tổng số mẻ", vì 1 tank vật lý chỉ có thể ở ĐÚNG 1 trạng thái tại
+    1 thời điểm (không có "lịch sử" để cộng dồn như mẻ nấu/lọc/chiết)."""
     brew_orders = brew_order_svc.list_orders(db)
-    filter_orders = filter_order_svc.list_master_orders(db)
-    production_orders = order_svc.list_orders(db)
-    batches = db.execute(select(BrewBatch)).scalars().all()
-    filters = db.execute(select(FilterRecord)).scalars().all()
-    bottles = db.execute(select(BottleRecord)).scalars().all()
+    filter_orders = batch_pipeline_svc.list_filter_orders(db)
+    batches = db.execute(select(BatchExecution)).scalars().all()
+    filter_lot_batches = db.execute(select(BatchFilterLotBatch)).scalars().all()
+    pack_lots = db.execute(select(BatchPackLot)).scalars().all()
     return {
-        # "lenh_nau" (BrewOrder) giữ lại CHỈ để không phá vỡ API cũ — tab "Lệnh nấu" đã bỏ khỏi
-        # UI (chỉ dùng "Lệnh SX (ERP)"/lenh_sx_erp), xem frontend app.js dashboard card.
         "lenh_nau": _order_counts(brew_orders, "is_complete", "is_executed"),
-        "lenh_sx_erp": _production_order_counts(production_orders),
-        "lenh_loc": _order_counts(filter_orders, "is_complete_all", "is_executed_any"),
-        "me_nau": _batch_counts(batches),
-        "me_loc": _batch_counts(filters),
-        "me_chiet": _batch_counts(bottles),
-        "tank_len_men": _tank_len_men_counts(db),
+        "lenh_loc": _order_counts(
+            [{"is_complete": o["is_complete"], "is_executed": o["status"] != "planned"} for o in filter_orders],
+            "is_complete", "is_executed"),
+        "me_nau": _batch_counts(batches, ended_attr="end_at"),
+        "me_loc": _batch_counts(filter_lot_batches, ended_attr="ended_at"),
+        "me_chiet": _batch_counts(pack_lots, ended_attr="approved_at"),
+        "tank_len_men": _batch_tank_len_men_counts(db),
     }
 
 
@@ -264,24 +291,72 @@ def qc_attention_alerts(db: Session) -> dict:
     return {"items": out, "total": len(out)}
 
 
+def _batch_filter_lot_yield_items(db: Session, date_from, date_to, low_l: float, high_l: float) -> list[dict]:
+    """Mirror filter_yield_report.filter_line_yield_report (module Nấu-Lọc-Chiết cũ, theo
+    FilterOrderTank) nhưng cho pipeline "Mẻ sản xuất" mới — BatchFilterLotBatch (1 mẻ lọc/lần
+    chạy máy) ĐÃ tự là đơn vị atomic (không bị tách ghi nhận qua nhiều FilterRecord như module
+    cũ) nên KHÔNG cần gộp theo (batch_number/order_number/batch_seq_no) — mỗi mẻ = đúng 1 dòng.
+    V lọc (V dịch nha + Nước bài khí, đổi hl -> lít) so ngưỡng Thấp/Cao cấu hình — mẻ "cuối"
+    (is_final_batch, mẻ vét) loại khỏi phân loại để không báo động giả (yêu cầu người dùng
+    2026-09-02)."""
+    batches = db.execute(
+        select(BatchFilterLotBatch)
+        .where(BatchFilterLotBatch.ended_at.is_not(None),
+               BatchFilterLotBatch.ended_at >= date_from, BatchFilterLotBatch.ended_at < date_to)
+        .order_by(BatchFilterLotBatch.ended_at)
+    ).scalars().all()
+    batch_ids = [b.batch_link_id for b in batches]
+    draws = db.execute(select(BatchFilterLotBatchDraw).where(
+        BatchFilterLotBatchDraw.batch_link_id.in_(batch_ids))).scalars().all() if batch_ids else []
+    draw_hl_by_batch: dict[str, float] = {}
+    for d in draws:
+        draw_hl_by_batch[d.batch_link_id] = draw_hl_by_batch.get(d.batch_link_id, 0.0) + (d.dich_nha_hl or 0.0)
+    filter_lot_ids = {b.filter_lot_id for b in batches}
+    filter_lots_by_id = {fl.filter_lot_id: fl for fl in db.execute(
+        select(BatchFilterLot).where(BatchFilterLot.filter_lot_id.in_(filter_lot_ids))).scalars().all()} if filter_lot_ids else {}
+    from ..models.master import BeerType
+    beer_type_ids = {fl.beer_type_id for fl in filter_lots_by_id.values() if fl.beer_type_id}
+    beer_types_by_id = {bt.beer_type_id: bt for bt in db.execute(
+        select(BeerType).where(BeerType.beer_type_id.in_(beer_type_ids))).scalars().all()} if beer_type_ids else {}
+
+    items = []
+    for b in batches:
+        fl = filter_lots_by_id.get(b.filter_lot_id)
+        bt = beer_types_by_id.get(fl.beer_type_id) if fl and fl.beer_type_id else None
+        v_dich_l = draw_hl_by_batch.get(b.batch_link_id, 0.0) * 100
+        v_daw_l = (b.nuoc_bai_khi_hl or 0.0) * 100
+        v_l = v_dich_l + v_daw_l
+        cls = "cuoi" if b.is_final_batch else classify_yield_l(v_l, low_l, high_l)
+        items.append({
+            "batch_link_id": b.batch_link_id, "batch_seq_no": b.batch_seq_no,
+            "filter_lot_id": fl.filter_lot_id if fl else None,
+            "filter_lot_code": fl.filter_lot_code if fl else None,
+            "beer_type": bt.name if bt else None,
+            "ended_at": b.ended_at.isoformat() if b.ended_at else None,
+            "v_dich_l": round(v_dich_l, 1), "v_daw_l": round(v_daw_l, 1),
+            "v_l": round(v_l, 1), "classification": cls, "classification_label": _YIELD_LABEL[cls],
+        })
+    return items
+
+
 def low_yield_filter_alerts(db: Session, days: int = 5, limit: int = 5) -> dict:
-    """Cảnh báo sản lượng lọc thấp cho Dashboard: lấy báo cáo "Theo mẻ lọc số"
-    (filter_yield_report_svc.filter_line_yield_report, xem tab Báo cáo › Sản lượng lọc) trong
-    N ngày gần nhất (mặc định 5, tính theo `ended_at` — thời điểm kết thúc mẻ lọc), chỉ giữ các
-    dòng classification="thap" (dưới ngưỡng Thấp cấu hình ở Cài đặt vận hành), sắp theo V bia
-    thấp nhất lên trước (mẻ hụt sản lượng nặng nhất đáng chú ý nhất), giới hạn top N dòng —
-    mirror qc_attention_alerts (widget cảnh báo gọn trên Dashboard, xem đầy đủ ở tab Báo cáo)."""
-    from . import filter_yield_report as filter_yield_svc
+    """Cảnh báo sản lượng lọc thấp cho Dashboard — pipeline "Mẻ sản xuất" mới (yêu cầu người
+    dùng 2026-09-02: đổi nguồn từ module Nấu-Lọc-Chiết cũ sang BatchFilterLotBatch, tính toán
+    tương tự y hệt cách cũ — xem _batch_filter_lot_yield_items). Trong N ngày gần nhất (mặc
+    định 5, tính theo `ended_at` — thời điểm kết thúc mẻ lọc), chỉ giữ classification="thap",
+    sắp theo V lọc thấp nhất lên trước (mẻ hụt sản lượng nặng nhất đáng chú ý nhất), giới hạn
+    top N dòng — mirror qc_attention_alerts (widget cảnh báo gọn trên Dashboard)."""
     from . import ops_setting as ops_setting_svc
     settings = ops_setting_svc.get_settings(db)
     date_to = utcnow()
     date_from = date_to - timedelta(days=days)
-    report = filter_yield_svc.filter_line_yield_report(
+    all_items = _batch_filter_lot_yield_items(
         db, date_from, date_to, settings.filter_line_yield_low_l, settings.filter_line_yield_high_l)
-    low_items = sorted((it for it in report["items"] if it["classification"] == "thap"),
+    low_items = sorted((it for it in all_items if it["classification"] == "thap"),
                        key=lambda it: it["v_l"])
     return {"items": low_items[:limit], "total": len(low_items),
-            "date_from": report["date_from"], "date_to": report["date_to"], "low_l": report["low_l"]}
+            "date_from": date_from.isoformat(), "date_to": date_to.isoformat(),
+            "low_l": settings.filter_line_yield_low_l}
 
 
 def overdue_action_alerts(db: Session) -> dict:
@@ -323,24 +398,35 @@ def overdue_action_alerts(db: Session) -> dict:
 
 
 def bottled_not_approved_report(db: Session) -> dict:
-    """Báo cáo "Đã chiết nhưng chưa duyệt" — mẻ chiết đã bấm "Kết thúc" (ended_at có giá trị,
-    số liệu ca1/ca2/ca3/v_cap_chiet_hl đã chốt) nhưng chưa được Giám đốc SX duyệt nhập kho
-    (approved=False, xem routers/brewing.py::approve_bottle) — trước đây không có báo cáo/bộ
-    lọc riêng cho khoảng trống này nên dễ bị bỏ sót, hàng chiết xong nằm chờ vô thời hạn mà
-    không ai để ý."""
-    rows = db.execute(select(BottleRecord).where(
-        BottleRecord.ended_at.isnot(None), BottleRecord.approved == false()
-    ).order_by(BottleRecord.ended_at)).scalars().all()
+    """Báo cáo "Đã chiết nhưng chưa duyệt" — pipeline "Mẻ sản xuất" mới (yêu cầu người dùng
+    2026-09-02: đổi nguồn từ BottleRecord (module cũ) sang BatchPackLot). BatchPackLot.approved
+    giữ ĐÚNG vai trò như BottleRecord.approved (KCS duyệt chỉ tiêu — mirror approve_pack_lot,
+    tách biệt với release_pack_lot_to_wms/"Duyệt nhập kho" là bước RIÊNG của Giám đốc SX) —
+    không có mốc "ended_at" riêng như BottleRecord nên dùng `created_at` (thời điểm ghi nhận đã
+    chiết) làm mốc "đang chờ từ khi nào", trước đây không có báo cáo/bộ lọc riêng cho khoảng
+    trống này nên dễ bị bỏ sót, hàng chiết xong nằm chờ vô thời hạn mà không ai để ý."""
+    from ..models.master import BeerType
+    rows = db.execute(select(BatchPackLot).where(
+        BatchPackLot.approved == false()
+    ).order_by(BatchPackLot.created_at)).scalars().all()
     products = {p.finished_product_id: p for p in db.execute(select(FinishedProduct)).scalars().all()}
+    filter_lot_ids = {p.filter_lot_id for p in rows}
+    filter_lots_by_id = {fl.filter_lot_id: fl for fl in db.execute(
+        select(BatchFilterLot).where(BatchFilterLot.filter_lot_id.in_(filter_lot_ids))).scalars().all()} if filter_lot_ids else {}
+    beer_type_ids = {fl.beer_type_id for fl in filter_lots_by_id.values() if fl.beer_type_id}
+    beer_types_by_id = {bt.beer_type_id: bt for bt in db.execute(
+        select(BeerType).where(BeerType.beer_type_id.in_(beer_type_ids))).scalars().all()} if beer_type_ids else {}
     now = utcnow()
     items = []
-    for b in rows:
-        fp = products.get(b.finished_product_id)
+    for p in rows:
+        fp = products.get(p.finished_product_id)
+        fl = filter_lots_by_id.get(p.filter_lot_id)
+        bt = beer_types_by_id.get(fl.beer_type_id) if fl and fl.beer_type_id else None
         items.append({
-            "bottle_id": b.bottle_id, "bottle_code": b.bottle_code, "beer_type": b.beer_type,
+            "pack_lot_id": p.pack_lot_id, "pack_lot_code": p.pack_lot_code, "beer_type": bt.name if bt else None,
             "finished_product_code": fp.code if fp else None, "finished_product_name": fp.name if fp else None,
-            "from_bbt": b.from_bbt, "ended_at": b.ended_at,
-            "hours_waiting": round((now - b.ended_at).total_seconds() / 3600, 1),
-            "v_cap_chiet_hl": b.v_cap_chiet_hl, "ca1": b.ca1, "ca2": b.ca2, "ca3": b.ca3,
+            "from_bbt": p.from_bbt, "created_at": p.created_at,
+            "hours_waiting": round((now - p.created_at).total_seconds() / 3600, 1),
+            "qty": p.qty, "ca1_qty": p.ca1_qty, "ca2_qty": p.ca2_qty, "ca3_qty": p.ca3_qty,
         })
     return {"items": items, "total": len(items)}

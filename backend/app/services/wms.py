@@ -12,6 +12,7 @@ from ..audit import record_audit
 from ..common import Role, new_id, utcnow
 from ..errors import DomainError, NotFoundError
 from ..models.audit import AuditLog
+from ..models.batch_pipeline import BatchPackLot
 from ..models.brewing import BottleRecord
 from ..models.master import FinishedProduct, FinishedProductMonthlyPlan, UnitTypeCatalog
 from ..models.materials import GenealogyEdge, Supplier
@@ -528,6 +529,11 @@ def list_units(db: Session, status: str = None, unit_type: str = None,
     for lot_no, bottle_code in db.execute(select(BottleRecord.lot_no, BottleRecord.bottle_code)
                                           .where(BottleRecord.lot_no.isnot(None))).all():
         bottle_codes_by_lot.setdefault(lot_no, []).append(bottle_code)
+    # Pipeline "Mẻ SX" không tạo BottleRecord — bổ sung BatchPackLot.pack_lot_code vào cùng
+    # danh sách "Mã chiết" (mirror list_lot_summaries, yêu cầu người dùng 2026-09-01).
+    for lot_no, pack_lot_code in db.execute(select(BatchPackLot.lot_no, BatchPackLot.pack_lot_code)
+                                            .where(BatchPackLot.lot_no.isnot(None))).all():
+        bottle_codes_by_lot.setdefault(lot_no, []).append(pack_lot_code)
     for u in db.execute(stmt).scalars().all():
         loc = loc_by.get(u.location_id)
         wh = wh_by_id.get(loc.warehouse_id) if loc else None
@@ -1642,12 +1648,15 @@ def list_lot_summaries(db: Session, user: User | None = None) -> list:
     {type}_fifo_ok: lô này có phải lô CŨ NHẤT còn tồn của (sản phẩm, loại đơn vị) này
     không — để người dùng thấy ngay có nên chọn lô này trước hay không, đúng thứ tự FIFO
     mà create_shipment vẫn áp dụng khi tự chọn đơn vị.
-    bottle_codes: mã chiết (BottleRecord.bottle_code) đã sinh ra lot_code này — tra qua
-    BottleRecord.lot_no == lot_code (thường 1:1, nhưng liệt kê hết phòng khi trùng số lô bia
-    thủ công) — chỉ để hiển thị tham khảo, KHÔNG dùng để gom nhóm/FIFO (vẫn theo lot_code).
-    bottle_date: thời điểm chiết SỚM NHẤT của lô (BottleRecord.bottle_date) — cho picker
-    "Cất vào vị trí" biết lô mới nhập kho được chiết từ lúc nào.
-    lines: danh sách dây chuyền (BottleRecord.line) đã chiết ra lô này — cùng mục đích trên.
+    bottle_codes: mã chiết đã sinh ra lot_code này — GỘP CẢ 2 nguồn: BottleRecord.bottle_code
+    (module Nấu-Lọc-Chiết cũ) VÀ BatchPackLot.pack_lot_code (pipeline "Mẻ SX" mới, không tạo
+    BottleRecord nên phải tra riêng) — cả 2 đều tra qua lot_no == lot_code (thường 1:1, nhưng
+    liệt kê hết phòng khi trùng số lô bia thủ công) — chỉ để hiển thị tham khảo, KHÔNG dùng để
+    gom nhóm/FIFO (vẫn theo lot_code).
+    bottle_date: thời điểm chiết SỚM NHẤT của lô (BottleRecord.bottle_date/BatchPackLot.pack_date)
+    — cho picker "Cất vào vị trí" biết lô mới nhập kho được chiết từ lúc nào.
+    lines: danh sách dây chuyền (BottleRecord.line/BatchPackLot.line) đã chiết ra lô này — cùng
+    mục đích trên.
     {type}_locations: danh sách [{"code","name","count"}] các vị trí kho đang giữ loại đơn vị
     đó của lô này (1 lô/loại vẫn có thể nằm rải rác nhiều vị trí) — "(chưa cất vị trí)" tính
     riêng qua {type}_unplaced, không lẫn vào đây.
@@ -1696,6 +1705,18 @@ def list_lot_summaries(db: Session, user: User | None = None) -> list:
         bottle_codes_by_lot.setdefault(lot_no, []).append(bottle_code)
         if bottle_date and (lot_no not in bottle_date_by_lot or bottle_date < bottle_date_by_lot[lot_no]):
             bottle_date_by_lot[lot_no] = bottle_date
+        if line:
+            lines_by_lot.setdefault(lot_no, set()).add(line)
+    # "Mã chiết" cho lô nhập kho từ pipeline "Mẻ SX" (release_pack_lot_to_wms) — không tạo
+    # BottleRecord nào cả nên join trên KHÔNG khớp được, "Mã chiết" luôn trống — bổ sung
+    # BatchPackLot.pack_lot_code (mã lô thành phẩm nội bộ) vào CÙNG danh sách hiển thị, tra qua
+    # lot_no == lot_code (yêu cầu người dùng 2026-09-01: Mã chiết = mã của lô TP).
+    for lot_no, pack_lot_code, pack_date, line in db.execute(
+            select(BatchPackLot.lot_no, BatchPackLot.pack_lot_code, BatchPackLot.pack_date, BatchPackLot.line)
+            .where(BatchPackLot.lot_no.isnot(None))).all():
+        bottle_codes_by_lot.setdefault(lot_no, []).append(pack_lot_code)
+        if pack_date and (lot_no not in bottle_date_by_lot or pack_date < bottle_date_by_lot[lot_no]):
+            bottle_date_by_lot[lot_no] = pack_date
         if line:
             lines_by_lot.setdefault(lot_no, set()).add(line)
     wh_by_id = {w.warehouse_id: w for w in db.execute(select(WmsWarehouse)).scalars().all()}
@@ -2666,6 +2687,10 @@ def delete_units_by_criteria(db: Session, product_name: str, lot_code: str | Non
                     bottle.approved = False
                     bottle.stocked = False
                     bottles_reset.add(bottle.bottle_code)
+            if e.to_type == "finished_goods_unit" and e.to_id in chunk and e.from_type == "batch_pack_lot":
+                pack_lot = db.get(BatchPackLot, e.from_id)
+                if pack_lot:
+                    pack_lot.stocked = False
             db.delete(e)
     for i in range(0, len(ids), 500):
         chunk = ids[i:i + 500]
@@ -3094,6 +3119,10 @@ def delete_unit(db: Session, unit_id: str, user: User) -> None:
             if bottle:
                 bottle.approved = False
                 bottle.stocked = False
+        if e.to_type == "finished_goods_unit" and e.to_id == unit_id and e.from_type == "batch_pack_lot":
+            pack_lot = db.get(BatchPackLot, e.from_id)
+            if pack_lot:
+                pack_lot.stocked = False
         db.delete(e)
     record_audit(db, entity_type="finished_goods_unit", entity_id=unit_id, action="delete", actor=user,
                  before={"unit_code": u.unit_code, "status": u.status})
@@ -3133,6 +3162,10 @@ def delete_units(db: Session, unit_ids: list[str], user: User) -> dict:
                     bottle.approved = False
                     bottle.stocked = False
                     bottles_reset.add(bottle.bottle_code)
+            if e.to_type == "finished_goods_unit" and e.to_id == u.unit_id and e.from_type == "batch_pack_lot":
+                pack_lot = db.get(BatchPackLot, e.from_id)
+                if pack_lot:
+                    pack_lot.stocked = False
             db.delete(e)
         record_audit(db, entity_type="finished_goods_unit", entity_id=u.unit_id, action="delete", actor=user,
                      before={"unit_code": u.unit_code, "status": u.status})

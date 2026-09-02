@@ -56,8 +56,8 @@ def test_auth_required_without_token(client):
 
 def test_rbac_permission(client):
     h = _login(client, "vanhanh", "123456")            # operator, không có order.create
-    r = client.post("/api/orders", headers=h,
-                    json={"order_code": "PO-X", "beer_type_id": "x", "planned_qty": 1})
+    r = client.post("/api/brewing/orders", headers=h,
+                    json={"order_code": "PO-X", "planned_volume_hl": 1})
     assert r.status_code == 403   # thiếu quyền order.create
 
 
@@ -72,9 +72,21 @@ def test_audit_chain_intact(client):
     assert client.get("/api/audit/verify-chain", headers=h).json()["intact"] is True
 
 
+def test_audit_rows_expose_timestamp(client):
+    """AuditOut từng thiếu field `ts` (chỉ có ở model AuditLog, không khai trong schema) —
+    khiến GET /api/audit trả về JSON không có `ts` nào, làm cột "Lúc" ở Lịch sử Hold/Release
+    (tab Chất lượng) luôn hiện "—" dù dữ liệu có thời gian thật (yêu cầu người dùng 2026-09-02:
+    "Lúc thì lại không thấy có thời gian")."""
+    h = _login(client, "admin", "AdminTest123")
+    rows = client.get("/api/audit?limit=5", headers=h).json()
+    assert rows, "Cần có ít nhất 1 dòng audit (seed đã tạo nhiều thao tác)."
+    for r in rows:
+        assert r.get("ts"), f"Dòng audit {r.get('audit_id')} thiếu `ts`."
+
+
 def test_scan_and_historian(client):
     h = _login(client, "quandoc", "123456")
-    s = client.get("/api/scan", params={"code": "B-2406-0001"}, headers=h).json()
+    s = client.get("/api/scan", params={"code": "9001"}, headers=h).json()
     assert s["type"] == "batch"
     tags = client.get("/api/historian/tags", headers=h).json()
     assert len(tags) >= 1

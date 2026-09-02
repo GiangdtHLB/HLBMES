@@ -142,6 +142,71 @@ def test_create_order_auto_from_bom(client, admin_h, lager_product_id, lager_rec
     assert malt["stock_company_snapshot"] is not None or malt["stock_workshop_snapshot"] is not None
 
 
+def test_batch_nvl_ok_requires_every_bom_material_not_just_any(client, admin_h, vanhanh_h, brewhouse_line_id):
+    """Bug đã gặp: 1 mẻ chỉ ghi NVL cho 1/nhiều dòng Định mức (VD chỉ 1 trong 2 NVL) vẫn báo
+    "đủ NVL" (tiêu chí cũ chỉ kiểm tra "có ghi NVL bất kỳ" cho mẻ, không đối chiếu đúng từng
+    dòng BOM). Đúng phải là: đủ NVL = có usage khớp material_id cho MỌI dòng Định mức
+    (is_header=False) của Lệnh nấu cha — xem services/brew_order.py::batch_material_status,
+    dùng ở cả list_brews (màu dòng mã nấu) và list_brew_batches (nvl_ok, tích xanh cạnh nút
+    "+ NVL" ở app.js::openBrewBatchesModal). Dùng 2 NVL/lô RIÊNG tạo mới ngay trong test (thay
+    vì mượn BOM Lager có sẵn) để không đụng tồn kho các test khác đang dựa vào ngưỡng "vừa đủ"
+    (VD test_update_order_before_execution cần đúng 150kg Men Lager còn nguyên)."""
+    mat1 = client.post("/api/materials", headers=admin_h,
+                       json={"code": "NVL-BOMOK-1", "name": "NVL BOM test 1", "uom": "kg"})
+    assert mat1.status_code == 201, mat1.text
+    mat1_id = mat1.json()["material_id"]
+    mat2 = client.post("/api/materials", headers=admin_h,
+                       json={"code": "NVL-BOMOK-2", "name": "NVL BOM test 2", "uom": "kg"})
+    assert mat2.status_code == 201, mat2.text
+    mat2_id = mat2.json()["material_id"]
+    # Lô đủ tồn, tạo thẳng ở "Kho phân xưởng" (nơi mẻ nấu được phép dùng NVL) — không cần qua
+    # Kho công ty + điều chuyển vì 2 NVL này không dùng ở đâu khác.
+    lot1 = client.post("/api/lots", headers=admin_h,
+                       json={"lot_code": "LOT-BOMOK-1", "material_id": mat1_id, "quantity": 1000,
+                             "uom": "kg", "location": "Kho phân xưởng"})
+    assert lot1.status_code == 201, lot1.text
+    lot1_id = lot1.json()["lot_id"]
+    lot2 = client.post("/api/lots", headers=admin_h,
+                       json={"lot_code": "LOT-BOMOK-2", "material_id": mat2_id, "quantity": 1000,
+                             "uom": "kg", "location": "Kho phân xưởng"})
+    assert lot2.status_code == 201, lot2.text
+    lot2_id = lot2.json()["lot_id"]
+
+    order_id = _a_brew_order(client, admin_h, "LN-BOM-NVL01", auto_from_bom=False, lines=[
+        {"material_id": mat1_id, "material_name": "NVL BOM test 1", "uom": "kg",
+         "qty_per_batch": 1, "qty_total": 1},
+        {"material_id": mat2_id, "material_name": "NVL BOM test 2", "uom": "kg",
+         "qty_per_batch": 1, "qty_total": 1},
+    ])
+    brew = client.post("/api/brewing/brews", headers=vanhanh_h,
+                       json={"brew_code": "BR-BOM-NVL01", "wort_type": "Dịch test", "volume_hl": 100,
+                             "lm_code": "LM-BOM-NVL01", "tank_lm": "T-BOM-NVL01", "brew_order_id": order_id})
+    assert brew.status_code == 201, brew.text
+    brew_id = brew.json()["brew_id"]
+    batch = client.post(f"/api/brewing/brews/{brew_id}/batches", headers=vanhanh_h,
+                        json={"batch_code": "890", "line_id": brewhouse_line_id})
+    assert batch.status_code == 201, batch.text
+    batch_id = batch.json()["batch_id"]
+
+    def nvl_ok():
+        rows = client.get(f"/api/brewing/brews/{brew_id}/batches", headers=admin_h).json()
+        return next(r for r in rows if r["batch_id"] == batch_id)["nvl_ok"]
+
+    assert nvl_ok() is False
+
+    add1 = client.post(f"/api/brewing/brews/{brew_id}/batches/{batch_id}/materials", headers=vanhanh_h,
+                       json={"lot_id": lot1_id, "quantity": 1, "uom": "kg"})
+    assert add1.status_code == 201, add1.text
+    # Mới ghi ĐÚNG 1/2 dòng định mức — vẫn CHƯA đủ, không phải cứ "có ghi NVL bất kỳ".
+    assert nvl_ok() is False
+
+    add2 = client.post(f"/api/brewing/brews/{brew_id}/batches/{batch_id}/materials", headers=vanhanh_h,
+                       json={"lot_id": lot2_id, "quantity": 1, "uom": "kg"})
+    assert add2.status_code == 201, add2.text
+    # Đủ cả 2/2 dòng định mức -> giờ mới đủ NVL thật.
+    assert nvl_ok() is True
+
+
 def test_bom_preview_matches_created_order_without_creating_it(client, admin_h, lager_product_id, lager_recipe_version_id):
     """Xem trước NVL (nút "Xem NVL") phải cho đúng số liệu như lúc tạo lệnh thật — nhưng
     KHÔNG tạo ra lệnh nào (chỉ để kiểm tra đủ/thiếu tồn trước khi bấm Tạo lệnh nấu)."""
@@ -189,9 +254,8 @@ def test_create_order_manual_lines(client, admin_h):
 
 
 def test_add_brew_requires_valid_order(client, admin_h, vanhanh_h, lager_product_id):
-    # Đúng 1 trong 2 (brew_order_id/production_order_id) phải được cung cấp — thiếu cả 2
-    # (hoặc thừa cả 2) là lỗi nghiệp vụ (409), không còn 422 vì cả 2 field giờ đều optional
-    # ở schema (xem routers/brewing.py::add_brew).
+    # brew_order_id bắt buộc — thiếu là lỗi nghiệp vụ (409), không phải 422 vì field vẫn
+    # optional ở schema (validate ở services/brew_order.py::create_brew_record).
     missing = client.post("/api/brewing/brews", headers=vanhanh_h,
                           json={"brew_code": "BR-NOORDER", "wort_type": "Dịch test"})
     assert missing.status_code == 409, missing.text
@@ -508,3 +572,19 @@ def test_create_and_update_order_admin_fields_roundtrip(client, admin_h):
     detail2 = client.get(f"/api/brewing/orders/{order_id}", headers=admin_h).json()
     assert detail2["issued_by"] == "Người ra lệnh mới"
     assert detail2["safety_note"] == "An toàn mới"
+
+
+def test_legacy_brew_order_path_still_works(client, admin_h, vanhanh_h, lager_product_id):
+    """brew_order_id (đường đi qua Lệnh nấu) vẫn hoạt động bình thường khi tạo lệnh không qua
+    auto_from_bom (dòng NVL nhập tay/rỗng)."""
+    order = client.post("/api/brewing/orders", headers=admin_h, json={
+        "order_code": "LN-POFLOW-LEGACY", "product_id": lager_product_id,
+        "planned_volume_hl": 100, "auto_from_bom": False})
+    assert order.status_code == 201, order.text
+    order_id = order.json()["brew_order_id"]
+
+    ok = client.post("/api/brewing/brews", headers=vanhanh_h,
+                     json={"brew_code": "BR-POFLOW-LEGACY", "wort_type": "Dịch test",
+                           "brew_order_id": order_id})
+    assert ok.status_code == 201, ok.text
+    assert ok.json()["brew_order_id"] == order_id

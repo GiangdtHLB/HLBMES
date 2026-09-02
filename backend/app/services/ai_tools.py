@@ -102,7 +102,7 @@ TOOLS = {
         "fn": get_batch_status,
         "description": "Trạng thái thực thi và chất lượng các mẻ. Có thể lọc theo mã mẻ.",
         "input_schema": {"type": "object", "properties": {
-            "batch_code": {"type": "string", "description": "Mã mẻ, vd B-2406-0001"}}},
+            "batch_code": {"type": "string", "description": "Mã mẻ Braumat (số nguyên), vd 1"}}},
     },
     "get_calibrations_due": {
         "fn": get_calibrations_due,

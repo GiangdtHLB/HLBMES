@@ -442,6 +442,7 @@ def update_finished_product(finished_product_id: str, payload: FinishedProductIn
     fp.name = payload.name
     fp.uom = payload.uom
     fp.product_id = payload.product_id
+    fp.beer_type_id = payload.beer_type_id
     fp.unit_type = payload.unit_type
     fp.pack_size = payload.pack_size
     fp.category = payload.category

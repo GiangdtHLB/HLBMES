@@ -157,53 +157,40 @@ def test_delete_ferment_blocked_while_filter_references_it(client, admin_h, vanh
     assert "duyệt kcs" in still_blocked.json()["detail"].lower()
 
 
-def test_delete_bottle_blocked_until_units_deleted(client, admin_h, vanhanh_h, kcs_h):
-    chain = _build_chain(client, admin_h, vanhanh_h, kcs_h, "DELGUARD03")
-    _declare_pending(client, vanhanh_h, "thanh_pham", "bottle", f"{chain['bottle_code']}__thanh_pham")
-    # Duyệt nhập kho thành phẩm nay thuộc quyền Giám đốc/Phó GĐ Sản xuất (production.release_to_wms),
-    # tách khỏi quality.release của KCS — dùng admin_h (bypass mọi permission) thay vì kcs_h ở đây.
-    approve = client.post(f"/api/brewing/bottles/{chain['bottle_id']}/approve", headers=admin_h)
-    assert approve.status_code == 200, approve.text
-    unit_codes = approve.json()["unit_codes"]
-
-    blocked = client.delete(f"/api/brewing/bottles/{chain['bottle_id']}", headers=vanhanh_h)
-    assert blocked.status_code == 409, blocked.text
-    assert "vỉ/keg" in blocked.json()["detail"].lower()
-
-    units = client.get("/api/wms/units", headers=vanhanh_h).json()
-
-    # Xóa unit cần quyền warehouse.issue (kcs không có quyền kho — chỉ có quality.release).
-    for code in unit_codes:
-        u = next(x for x in units if x["unit_code"] == code)
-        del_unit = client.delete(f"/api/wms/units/{u['unit_id']}", headers=admin_h)
-        assert del_unit.status_code == 204, del_unit.text
-
-    # Bottle giờ phải xóa được (approved/stocked đã được "mở khóa" lại).
-    ok = client.delete(f"/api/brewing/bottles/{chain['bottle_id']}", headers=vanhanh_h)
-    assert ok.status_code == 204, ok.text
+# test_delete_bottle_blocked_until_units_deleted (bottle bị chặn xóa khi còn vỉ/keg trong kho)
+# đã bỏ — approve_bottle đã tháo khỏi WMS, bottle mới không còn cách nào tạo ra vỉ/keg để rơi
+# vào trạng thái này nữa (xem docstring approve_bottle hiện tại). Coverage tương đương (chặn
+# xóa Lô thành phẩm) nay là guard sẵn có `if p.approved: ...` ở delete_pack_lot — chặn RỘNG HƠN
+# (mọi lô đã Duyệt KCS, không chỉ khi có vỉ/keg), nên không cần test unlock-rồi-xóa riêng.
 
 
-def test_cannot_delete_shipped_unit(client, admin_h, vanhanh_h, kcs_h):
+def test_cannot_delete_shipped_unit(client, admin_h):
     """1 dòng lô (xem docs/WMS-LOT-LEVEL-REDESIGN.md) chỉ chuyển hẳn sang status="shipped"
     khi bị xuất TRỌN VẸN — xuất một phần chỉ tách dòng (phần "stored" còn lại tách sang dòng
-    khác), nên phải xuất ĐÚNG BẰNG số lượng cả lô (ca1=100) để dòng gốc không bị tách. Cần
-    đăng ký SKU (FinishedProduct) trước để _pack_divisor tra đúng pack_size=24 lúc xuất —
-    không có SKU sẽ mặc định 1, khiến "quantity=100" chỉ xuất được 100/2400 lon (một phần)."""
+    khác), nên phải xuất ĐÚNG BẰNG số lượng cả lô để dòng gốc không bị tách. Dùng "Nhập kho
+    thủ công" (source=manual, cần confirm-receipt-by-lot trước khi xuất được) thay chuỗi chiết
+    cũ đã tháo khỏi WMS — mirror test_wms_units.py::test_delete_units_batch_blocked_if_shipped
+    nhưng qua DELETE đơn (không phải delete-batch)."""
     fp = client.post("/api/finished-products", headers=admin_h,
                      json={"code": "SKU-DELGUARD04", "name": "SKU delguard04", "uom": "lon",
                            "unit_type": "vi", "pack_size": 24})
     assert fp.status_code == 201, fp.text
-    chain = _build_chain(client, admin_h, vanhanh_h, kcs_h, "DELGUARD04",
-                         finished_product_id=fp.json()["finished_product_id"])
-    _declare_pending(client, vanhanh_h, "thanh_pham", "bottle", f"{chain['bottle_code']}__thanh_pham")
-    # Duyệt nhập kho thành phẩm nay thuộc quyền Giám đốc/Phó GĐ Sản xuất (production.release_to_wms),
-    # tách khỏi quality.release của KCS — dùng admin_h (bypass mọi permission) thay vì kcs_h ở đây.
-    approve = client.post(f"/api/brewing/bottles/{chain['bottle_id']}/approve", headers=admin_h)
-    assert approve.json()["count"] == 100
-    unit_code = approve.json()["unit_codes"][0]
-    units = client.get("/api/wms/units", headers=vanhanh_h).json()
+    loc = client.post("/api/wms/locations", headers=admin_h,
+                      json={"code": "LOC-DELGUARD04", "name": "Vị trí delguard04", "capacity": 5000})
+    assert loc.status_code == 201, loc.text
+    build = client.post("/api/wms/units", headers=admin_h,
+                        json={"finished_product_id": fp.json()["finished_product_id"],
+                              "product_name": "SKU-DELGUARD04", "lot_code": "LOT-DELGUARD04",
+                              "total": 2400, "pack_size": 24, "unit_type": "vi", "loc_id": loc.json()["loc_id"]})
+    assert build.status_code == 201, build.text
+    unit_code = build.json()["unit_codes"][0]
+    units = client.get("/api/wms/units", headers=admin_h).json()
     unit = next(u for u in units if u["unit_code"] == unit_code)
     unit_id = unit["unit_id"]
+
+    confirm = client.post("/api/wms/units/confirm-receipt-by-lot", headers=admin_h,
+                          json={"product_name": "SKU-DELGUARD04", "lot_code": "LOT-DELGUARD04", "unit_type": "vi"})
+    assert confirm.status_code == 200, confirm.text
 
     st = client.post("/api/suppliers", headers=admin_h, json={"code": "DIST-DELGUARD", "name": "NPP test"})
     assert st.status_code == 201, st.text

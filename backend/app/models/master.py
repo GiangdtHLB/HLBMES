@@ -56,7 +56,7 @@ class Product(Base):
     name: Mapped[str] = mapped_column(Unicode(255))
     uom: Mapped[str] = mapped_column(Unicode(255), default="L")
     description: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)
-    ferment_days_std: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # số ngày lên men chuẩn (sẵn sàng chiết)
+    ferment_days_std: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # số ngày lên men chuẩn (sẵn sàng chiết) — cho phép số thực (VD 7.5 ngày)
     spec_json: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)  # Quy định (chỉ tiêu công nghệ nấu) — xem services/braumat_import.py::SPEC_FIELDS, chỉ admin (master.manage) sửa được
     beer_type_id: Mapped[Optional[str]] = mapped_column(ForeignKey("beer_type.beer_type_id"), nullable=True, index=True)  # Loại bia (thương hiệu) — dùng để tra chỉ tiêu Lọc/Chiết
 
@@ -73,6 +73,10 @@ class FinishedProduct(Base):
     name: Mapped[str] = mapped_column(Unicode(255))
     uom: Mapped[str] = mapped_column(Unicode(255), default="L")
     product_id: Mapped[Optional[str]] = mapped_column(ForeignKey("product.product_id"), nullable=True, index=True)  # dịch bia gốc (tuỳ chọn, để tham khảo)
+    # Loại bia của SKU này — khai trực tiếp (KHÔNG suy qua product_id, vì product_id ở trên chỉ
+    # là tham khảo/tuỳ chọn) để lọc đúng nhóm chỉ tiêu/sản phẩm theo Loại bia khi lập Lệnh lọc
+    # (yêu cầu người dùng 2026-09-01).
+    beer_type_id: Mapped[Optional[str]] = mapped_column(ForeignKey("beer_type.beer_type_id"), nullable=True, index=True)
     # Kho thành phẩm quản lý theo vỉ/keg (không theo pallet, xem services/wms.py) — mỗi SKU
     # khai báo loại đơn vị tồn kho (vi|keg) + số lượng nhỏ trong 1 đơn vị đó (pack_size):
     # vỉ = số lon/vỉ (VD 24); keg = 1 (mỗi keg tự nó là 1 đơn vị, không gộp).

@@ -17,7 +17,9 @@ from sqlalchemy.orm import Session
 from ..common import new_id, utcnow
 from ..models.brewing import (
     BrewBatch,
+    BrewOrder,
     BrewProcessLog,
+    BrewRecord,
     FermentBrewLink,
     FermentDailyReading,
     FermentProcessLog,
@@ -113,11 +115,35 @@ def _braumat_fields_for_ferment(db: Session, ferment_id: str) -> tuple[str | Non
     return (", ".join(order_numbers) or None), (", ".join(batch_numbers) or None)
 
 
+def _brew_order_codes_for_ferment(db: Session, ferment_id: str) -> str | None:
+    """Số Lệnh nấu (BrewOrder.order_code) của TẤT CẢ mã nấu (BrewRecord) đã liên kết vào lô
+    LM này (FermentBrewLink) — 1 lô LM có thể gồm nhiều mã nấu, mỗi mã nấu ứng với ĐÚNG 1
+    Lệnh nấu (brew_order_id, nullable với mã nấu tạo trước khi có Lệnh nấu) — gộp thành 1
+    chuỗi (cách nhau dấu phẩy), bỏ trùng, giữ thứ tự xuất hiện, mirror cách gộp Braumat Order
+    Number ở _braumat_fields_for_ferment."""
+    brew_ids = [r[0] for r in db.execute(
+        select(FermentBrewLink.brew_id).where(FermentBrewLink.ferment_id == ferment_id)).all()]
+    if not brew_ids:
+        return None
+    brew_order_ids = [r[0] for r in db.execute(
+        select(BrewRecord.brew_order_id).where(BrewRecord.brew_id.in_(brew_ids),
+                                                BrewRecord.brew_order_id.isnot(None))).all()]
+    if not brew_order_ids:
+        return None
+    codes: list[str] = []
+    for order_id in brew_order_ids:
+        order = db.get(BrewOrder, order_id)
+        if order and order.order_code not in codes:
+            codes.append(order.order_code)
+    return ", ".join(codes) or None
+
+
 def auto_header_values(db: Session, ferment: FermentRecord) -> dict:
     """Phần tự động lấy từ FermentRecord có sẵn — KHÔNG lưu riêng, tính lại mỗi lần GET.
     kt_date (ngày KT/kết thúc nấu) dùng để FE tính mặc định 20 ngày cho bảng theo ngày.
     braumat_order_number/braumat_batch_number lấy THẬT từ dữ liệu Braumat đã import ở các
-    mẻ nấu nguồn (xem _braumat_fields_for_ferment) — không phải nhập tay."""
+    mẻ nấu nguồn (xem _braumat_fields_for_ferment) — không phải nhập tay. brew_order_code
+    (Số Lệnh nấu) lấy từ BrewOrder qua mã nấu nguồn (xem _brew_order_codes_for_ferment)."""
     order_number, batch_number = _braumat_fields_for_ferment(db, ferment.ferment_id)
     return {
         "so_me": ferment.batch_numbers,
@@ -127,6 +153,7 @@ def auto_header_values(db: Session, ferment: FermentRecord) -> dict:
         "kt_date": ferment.kt_date,
         "braumat_order_number": order_number,
         "braumat_batch_number": batch_number,
+        "brew_order_code": _brew_order_codes_for_ferment(db, ferment.ferment_id),
     }
 
 

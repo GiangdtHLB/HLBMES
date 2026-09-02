@@ -95,3 +95,39 @@ def test_edit_batch_code_rejects_non_positive_int(client, admin_h, brewhouse_lin
     bad = client.put(f"/api/brewing/brews/{brew}/batches/{b1}/code", headers=admin_h,
                      json={"batch_code": "abc"})
     assert bad.status_code == 422, bad.text
+
+
+def test_edit_batch_line_and_note(client, admin_h, brewhouse_line_id):
+    """Sửa Dây chuyền/Ghi chú (routers/brewing.py::update_brew_batch_details) — chọn nhầm
+    dây chuyền lúc tạo mẻ thì sửa lại được, không cần xóa tạo lại mẻ."""
+    other_line = client.post("/api/lines", headers=admin_h,
+                             json={"code": "BREW-CODEEDIT-02", "name": "Nhà nấu test 2", "kind": "brewhouse"})
+    assert other_line.status_code == 201, other_line.text
+    other_line_id = other_line.json()["line_id"]
+
+    brew = _a_brew(client, admin_h, "CODEEDIT-D")
+    b1 = _add_batch(client, admin_h, brew, "306", "2026-01-10T08:00:00", brewhouse_line_id)
+
+    r = client.put(f"/api/brewing/brews/{brew}/batches/{b1}", headers=admin_h,
+                   json={"line_id": other_line_id, "note": "Ghi chú test"})
+    assert r.status_code == 200, r.text
+    assert r.json()["line_id"] == other_line_id
+    assert r.json()["note"] == "Ghi chú test"
+
+    rows = client.get(f"/api/brewing/brews/{brew}/batches", headers=admin_h).json()
+    row = next(x for x in rows if x["batch_id"] == b1)
+    assert row["line_id"] == other_line_id
+    assert row["note"] == "Ghi chú test"
+
+
+def test_edit_batch_line_rejects_non_brewhouse(client, admin_h, brewhouse_line_id):
+    non_brewhouse = client.post("/api/lines", headers=admin_h,
+                                json={"code": "LINE-CODEEDIT-01", "name": "Dây chuyền chiết test", "kind": "line"})
+    assert non_brewhouse.status_code == 201, non_brewhouse.text
+
+    brew = _a_brew(client, admin_h, "CODEEDIT-E")
+    b1 = _add_batch(client, admin_h, brew, "307", "2026-01-10T08:00:00", brewhouse_line_id)
+
+    bad = client.put(f"/api/brewing/brews/{brew}/batches/{b1}", headers=admin_h,
+                     json={"line_id": non_brewhouse.json()["line_id"]})
+    assert bad.status_code == 409, bad.text

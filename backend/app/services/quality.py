@@ -1,8 +1,16 @@
 """Chất lượng, deviation, hold/release (tài liệu §7.5).
 
 - Pass/fail tính theo limit số học (không dùng text tùy ý).
-- Hold/release theo vai trò QA; release bị chặn nếu còn kết quả FAIL chưa có
-  deviation được xử lý.
+- HOLD thủ công vẫn theo vai trò QA. RELEASE thì tự động qua attempt_auto_release(): chuyển
+  quality_status sang RELEASED ngay khi đủ chỉ tiêu bắt buộc và không còn FAIL nào chưa có
+  deviation đóng — đối xứng với việc 1 kết quả FAIL tự động đưa về ON_HOLD (yêu cầu người dùng
+  2026-08-31, trước đó RELEASE là thao tác tay riêng của QA qua set_hold()). Gọi từ record_result()
+  (scope batch/lot/brew_batch/ferment/filter/bottle — scope_id là PK thật) VÀ từ
+  qc_catalog.py::record_stage_result() khi scope_type="batch" (mẻ nấu, stage "nau" — CŨNG là PK
+  thật). Không gọi được cho scope_id ghép chuỗi (len_men_chinh/phu, loc, thanh_pham — không có
+  object thật để set quality_status; attempt_auto_release() tự no-op an toàn nếu lỡ gọi nhầm) hay
+  record_qc_sample() (lên men chính/phụ nhiều lần lấy mẫu) — các trường hợp đó vẫn cần QA bấm
+  RELEASE thủ công qua set_hold().
 - Deviation có workflow chuẩn.
 """
 
@@ -22,6 +30,7 @@ from ..common import (
 )
 from ..errors import DomainError, NotFoundError
 from ..models.batches import BatchExecution
+from ..models.batch_pipeline import BatchFilterLot, BatchPackLot, BatchTank
 from ..models.brewing import BottleRecord, BrewBatch, FermentRecord, FilterRecord
 from ..models.materials import MaterialLot
 from ..models.quality import Deviation, QualityResult
@@ -33,11 +42,21 @@ from ..security import User, require_role
 # báo chỉ tiêu theo từng công đoạn con; 2 hệ thống dùng chung bảng QualityResult/Deviation
 # nhưng scope_id không bao giờ trùng nhau (PK ngẫu nhiên vs chuỗi ghép có "__") nên không xung
 # đột. Xem routers/quality.py (Hold/Release, Mở deviation) và app.js VIEWS.quality.
+# batch_tank/batch_filter_lot/batch_pack_lot (pipeline "Mẻ sản xuất" mới) — trước đây CHỈ khai
+# báo được chỉ tiêu (qc_catalog.py::record_stage_result) chứ Hold/Release/Deviation hoàn toàn
+# không thấy được 3 loại này (mọi thao tác trả "Phạm vi không hợp lệ") — yêu cầu người dùng
+# 2026-09-01: "Hold/Release và Deviation không nhìn thấy lô chiết/lô lên men/mã nấu [của pipeline
+# mới]". scope_id vẫn là PK thật (tank_id/filter_lot_id/pack_lot_id) — KHÔNG dùng quy ước ghép
+# chuỗi "__len_men_chinh/phu" của qc_catalog (đó chỉ áp dụng cho khai báo chỉ tiêu theo từng công
+# đoạn con của tank, không áp dụng cho Hold/Release ở cấp cả tank).
 _STAGE_MODELS = {
     "brew_batch": BrewBatch,
     "ferment": FermentRecord,
     "filter": FilterRecord,
     "bottle": BottleRecord,
+    "batch_tank": BatchTank,
+    "batch_filter_lot": BatchFilterLot,
+    "batch_pack_lot": BatchPackLot,
 }
 
 
@@ -94,6 +113,8 @@ def record_result(db: Session, payload: dict, user: User) -> QualityResult:
     # Kết quả FAIL tự động đưa scope về ON_HOLD (tài liệu §7.5).
     if status == ResultStatus.FAIL.value:
         _set_quality_status(db, scope_type, scope_id, QualityStatus.ON_HOLD.value)
+    else:
+        attempt_auto_release(db, scope_type, scope_id, user)
 
     record_audit(db, entity_type="quality_result", entity_id=result.result_id, action="record",
                  actor=user, after={"parameter": result.parameter, "value": value, "ca_value": result.ca_value,
@@ -311,3 +332,31 @@ def _assert_releasable(db: Session, scope_type: str, scope_id: str) -> None:
             raise DomainError(
                 "Không thể release: còn kết quả FAIL chưa được deviation đóng (disposition/approval)."
             )
+
+
+def attempt_auto_release(db: Session, scope_type: str, scope_id: str, user: User,
+                         reason: str = "Tự động release — đủ chỉ tiêu bắt buộc, không còn FAIL treo") -> bool:
+    """Tự động chuyển quality_status sang RELEASED nếu đủ điều kiện (đúng tiêu chí
+    _assert_releasable của RELEASE thủ công qua set_hold) — gọi mỗi khi ghi 1 kết quả không FAIL,
+    đối xứng với 1 kết quả FAIL tự động đưa về ON_HOLD (yêu cầu người dùng 2026-08-31, trước đó
+    RELEASE luôn là thao tác tay riêng của QA). Không đè nếu đã released rồi (tránh audit log
+    thừa). CHỈ áp dụng cho scope_id là PK thật (`_get_scope_obj` resolve được) — bản ghi công đoạn
+    dùng scope_id ghép chuỗi (VD "{lm_code}__len_men_phu", xem qc_catalog.py) không có object thật
+    để đọc/set quality_status nên gọi hàm này với các scope đó là no-op an toàn (trả về False)."""
+    try:
+        obj = _get_scope_obj(db, scope_type, scope_id)
+    except DomainError:
+        return False
+    if obj is None:
+        return False
+    current = obj.status if scope_type == "lot" else obj.quality_status
+    if current == QualityStatus.RELEASED.value:
+        return False
+    try:
+        _assert_releasable(db, scope_type, scope_id)
+    except DomainError:
+        return False
+    before = _set_quality_status(db, scope_type, scope_id, QualityStatus.RELEASED.value)
+    record_audit(db, entity_type=scope_type, entity_id=scope_id, action="release", actor=user,
+                before=before, after={"quality_status": QualityStatus.RELEASED.value}, reason=reason)
+    return True

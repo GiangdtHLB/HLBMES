@@ -94,6 +94,28 @@ def test_update_tank_volume(client, admin_h):
     assert row["volume"] == 180
 
 
+def test_update_line_code(client, admin_h):
+    lines = client.get("/api/lines?kind=line", headers=admin_h).json()
+    line_id = next(l for l in lines if l["code"] == "LINE-TEST01")["line_id"]
+    r = client.put(f"/api/lines/{line_id}", headers=admin_h, json={"code": "LINE-TEST01-RENAMED"})
+    assert r.status_code == 200, r.text
+    lines = client.get("/api/lines?kind=line", headers=admin_h).json()
+    row = next(l for l in lines if l["line_id"] == line_id)
+    assert row["code"] == "LINE-TEST01-RENAMED"
+
+
+def test_update_line_code_blocked_when_duplicate(client, admin_h):
+    lines = client.get("/api/lines?kind=tank", headers=admin_h).json()
+    line_id = next(l for l in lines if l["code"] == "FV-TEST01")["line_id"]
+    # "LINE-TEST01-RENAMED" đã có ở test trên (mã dùng chung 1 bảng ProductionLine cho cả
+    # line/tank/tank_bbt) — đổi trùng phải bị chặn, không đổi mã cũ đi.
+    r = client.put(f"/api/lines/{line_id}", headers=admin_h, json={"code": "LINE-TEST01-RENAMED"})
+    assert r.status_code == 403, r.text
+    lines = client.get("/api/lines?kind=tank", headers=admin_h).json()
+    row = next(l for l in lines if l["line_id"] == line_id)
+    assert row["code"] == "FV-TEST01"
+
+
 def test_update_unknown_line_404(client, admin_h):
     r = client.put("/api/lines/does-not-exist", headers=admin_h, json={"volume": 1})
     assert r.status_code == 404, r.text

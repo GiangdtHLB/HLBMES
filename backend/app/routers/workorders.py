@@ -46,8 +46,8 @@ def transition(wo_id: str, payload: TransitionIn, db: Session = Depends(get_db),
 @router.post("/{wo_id}/dispatch")
 def dispatch(wo_id: str, payload: WoDispatchIn, db: Session = Depends(get_db),
              user: User = Depends(get_current_user)):
-    return svc.dispatch(db, wo_id, user, payload.recipe_version_id, payload.batch_code,
-                        payload.planned_qty, payload.allow_shortage)
+    return svc.dispatch(db, wo_id, user, payload.from_batch, payload.batch_count,
+                        tank_lm=payload.tank_lm)
 
 
 @router.delete("/{wo_id}", status_code=204)

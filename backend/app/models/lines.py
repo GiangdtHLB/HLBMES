@@ -33,5 +33,9 @@ class ProductionLine(Base):
     # Thể tích (kind="tank"/"tank_bbt") — hiển thị/khai báo ở Danh mục "Tank lên men"/"Tank thành phẩm".
     volume: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     volume_uom: Mapped[Optional[str]] = mapped_column(Unicode(64), nullable=True)  # VD "hl"
+    # % khả dụng (kind="tank"/"tank_bbt") — tank thật không chứa được 100% thể tích danh định
+    # (chừa khoảng CO2/bọt) — thể tích khả dụng = volume * usable_pct/100, hiển thị ở Danh mục
+    # "Tank lên men"/"Tank thành phẩm" (yêu cầu người dùng 2026-09-01).
+    usable_pct: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)

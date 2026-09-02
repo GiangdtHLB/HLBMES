@@ -32,16 +32,19 @@ from ..models.brewing import (
     MaterialReceipt,
     StageIndicator,
 )
+from ..models.batch_pipeline import BatchFilterLot, BatchPackLot, BatchTank
+from ..models.batches import BatchExecution
 from ..models.lines import ProductionLine
 from ..models.master import BeerType, FinishedProduct, Material, Product
 from ..models.materials import GenealogyEdge, MaterialLot
-from ..models.orders import ProductionOrder
 from ..models.quality import QualityResult
 from ..models.wms import FinishedGoodsUnit
 from ..schemas import (
     BottleIn,
     BottleMaterialUsageIn,
+    BrewBatchBulkIn,
     BrewBatchCodeIn,
+    BrewBatchDetailsIn,
     BrewBatchIn,
     BrewBatchStartIn,
     BrewIn,
@@ -64,8 +67,10 @@ from ..schemas import (
     StageQcResultIn,
 )
 from ..security import User, get_current_user, require_any_perm, require_perm
+from ..services import batch_pipeline as batch_pipeline_svc
 from ..services import braumat_import as braumat_svc
 from ..services import brew_order as brew_order_svc
+from ..services.brew_order import _assert_unlocked, _brew_and_order, _sync_ferment_kt_date
 from ..services import dashboard as dashboard_svc
 from ..services import derived
 from ..services import ferment_log as ferment_log_svc
@@ -73,7 +78,6 @@ from ..services import filter_order as filter_order_svc
 from ..services import genealogy
 from ..services import lot_lock as lot_lock_svc
 from ..services import lot_record as lot_record_svc
-from ..services import orders as order_svc
 from ..services import ops_setting as ops_setting_svc
 from ..services import qc_catalog
 from ..services import quality
@@ -111,11 +115,6 @@ def _has_indicators(db, stage, code):
         StageIndicator.stage == stage, StageIndicator.scope_code == code)).first() is not None
 
 
-def _brew_and_order(db, brew_id):
-    b = db.get(BrewRecord, brew_id)
-    return b, (db.get(BrewOrder, b.brew_order_id) if b and b.brew_order_id else None)
-
-
 def _assert_stage_scope_unlocked(db, scope_type: str, scope_id: str) -> None:
     """Resolve scope_type/scope_id (quy ước dùng bởi qc_catalog/StageIndicator, xem
     data-stageqc ở app.js) về đúng bản ghi để kiểm tra khóa trước khi ghi chỉ tiêu/indicator."""
@@ -137,27 +136,27 @@ def _assert_stage_scope_unlocked(db, scope_type: str, scope_id: str) -> None:
     elif scope_type == "bottle":
         b = db.execute(select(BottleRecord).where(BottleRecord.bottle_code == scope_id.split("__")[0])).scalar_one_or_none()
         _assert_unlocked(b)
+    # Pipeline "Mẻ SX" (mới) — trước đây KHÔNG có nhánh nào ở đây nên ghi chỉ tiêu luôn lọt qua
+    # vô điều kiện, dù mẻ nấu/tank/lô lọc/lô thành phẩm đã bị khóa qua services/ebr.py::
+    # lock_pack_lot (cascade "locked"/"ebr_locked" xuống cả cây genealogy) — yêu cầu người dùng
+    # 2026-09-01: khóa hồ sơ EBR phải chặn ghi chỉ tiêu ở MỌI công đoạn, không riêng NVL/SL.
+    elif scope_type == "batch":
+        b = db.get(BatchExecution, scope_id)
+        if b and b.ebr_locked:
+            raise DomainError("Bản ghi đã bị khóa — không thể sửa.")
+    elif scope_type == "batch_tank":
+        t = db.get(BatchTank, scope_id.split("__")[0])
+        batch_pipeline_svc._assert_unlocked(t)
+    elif scope_type == "batch_filter_lot":
+        batch_pipeline_svc._assert_unlocked(db.get(BatchFilterLot, scope_id))
+    elif scope_type == "batch_pack_lot":
+        batch_pipeline_svc._assert_unlocked(db.get(BatchPackLot, scope_id))
 
 
 def _filter_order_chain(db, filter_order_id):
     order = db.get(FilterOrder, filter_order_id) if filter_order_id else None
     master = db.get(FilterMasterOrder, order.master_order_id) if order and order.master_order_id else None
     return order, master
-
-
-def _assert_unlocked(*objs):
-    """Chặn sửa/xóa/chuyển trạng thái nếu CHÍNH bản ghi HOẶC bất kỳ lệnh cha nào trong chuỗi
-    đã bị "Khóa lô" (xem services/lot_lock.py::lock_lot — KCS khóa tại 1 mẻ chiết, khóa cả
-    chuỗi ngược dòng) HOẶC đang bị QA "HOLD" (xem services/quality.py::set_hold — công đoạn
-    Nấu/Lên men/Lọc/Chiết, tách biệt với khóa sổ). Truyền vào bản ghi + các cha của nó (VD mẻ,
-    mã nấu, Lệnh nấu) — Lệnh nấu/Lệnh lọc không có quality_status riêng nên chỉ getattr rỗng."""
-    for obj in objs:
-        if obj is None:
-            continue
-        if getattr(obj, "locked", False):
-            raise DomainError("Bản ghi đã bị khóa (lô đã chốt) — không thể sửa/xóa. Chỉ admin mới mở khóa được.")
-        if getattr(obj, "quality_status", None) == "on_hold":
-            raise DomainError("Bản ghi đang bị QA giữ (HOLD) — không thể sửa/xóa/chuyển bước. Phải RELEASE trước (tab Chất lượng).")
 
 
 def _stage_ok(db, stage, scope_type, scope_id, product_id=None, beer_type_id=None, finished_product_id=None) -> bool:
@@ -356,7 +355,6 @@ def list_brews(years: list[int] = Query(None), db: Session = Depends(get_db)):
     ferments = {f.ferment_id: f for f in db.execute(select(FermentRecord)).scalars().all()}
     products = {p.product_id: p for p in db.execute(select(Product)).scalars().all()}
     orders = {o.brew_order_id: o for o in db.execute(select(BrewOrder)).scalars().all()}
-    prod_orders = {o.order_id: o for o in db.execute(select(ProductionOrder)).scalars().all()}
     batch_counts: dict[str, int] = {}
     for row in db.execute(select(BrewBatch.brew_id)).all():
         batch_counts[row[0]] = batch_counts.get(row[0], 0) + 1
@@ -371,19 +369,20 @@ def list_brews(years: list[int] = Query(None), db: Session = Depends(get_db)):
     batches_by_brew: dict[str, list] = {}
     for batch in all_batches:
         batches_by_brew.setdefault(batch.brew_id, []).append(batch)
-    nvl_batch_ids = {row[0] for row in db.execute(select(BrewMaterialUsage.batch_id).distinct()).all()}
+    # nvl_ok ĐÚNG NGHĨA (đối chiếu từng dòng Định mức NVL của Lệnh nấu, không chỉ "có ghi NVL
+    # bất kỳ") — xem services/brew_order.py::batch_material_status.
+    nvl_ok_by_batch = brew_order_svc.batch_material_status(db, all_batches)
     out = []
     for b in rows:
         f = ferments.get(ferment_id_by_brew.get(b.brew_id))
         prod = products.get(b.product_id)
         order = orders.get(b.brew_order_id)
-        prod_order = prod_orders.get(b.production_order_id)
         batches = batches_by_brew.get(b.brew_id, [])
         if not batches:
             color = "red"
         else:
             all_qc_ok = all(_stage_ok(db, "nau", "brew_batch", batch.batch_id, b.product_id) for batch in batches)
-            all_nvl_ok = all(batch.batch_id in nvl_batch_ids for batch in batches)
+            all_nvl_ok = all(nvl_ok_by_batch.get(batch.batch_id, False) for batch in batches)
             color = "red" if not all_qc_ok else ("green" if not all_nvl_ok else "blue")
         # Ngày nấu THẬT hiển thị ở danh sách = giờ bắt đầu của MẺ ĐẦU TIÊN (BrewBatch.started_at)
         # — brew_date (mã nấu) chỉ là lúc tạo bản ghi, chưa có ý nghĩa vận hành thật lúc mã nấu
@@ -398,8 +397,6 @@ def list_brews(years: list[int] = Query(None), db: Session = Depends(get_db)):
                     "lm_code": f.lm_code if f else None, "tank_lm": f.tank_lm if f else None,
                     "kt_date": f.kt_date if f else None,
                     "brew_order_id": b.brew_order_id, "brew_order_code": order.order_code if order else None,
-                    "production_order_id": b.production_order_id,
-                    "production_order_code": prod_order.order_code if prod_order else None,
                     "color": color,
                     "locked": b.locked or bool(order and order.locked), "locked_by": b.locked_by or (order.locked_by if order else None)})
     return out
@@ -411,94 +408,10 @@ def add_brew(payload: BrewIn, db: Session = Depends(get_db),
     """Tạo mẻ nấu (1 mã nấu = 1 lần nấu vào 1 tank) — tự tạo lô lên men (FermentRecord) tương ứng.
     product_id (loại bia) quyết định nhóm chỉ tiêu chất lượng áp dụng. Sau khi tạo, khai báo các
     mẻ cụ thể (BrewBatch, VD số mẻ Braumat 123/124/125/126) qua /brews/{brew_id}/batches — mỗi
-    mẻ mới có nguyên liệu & chỉ tiêu riêng."""
+    mẻ mới có nguyên liệu & chỉ tiêu riêng. Logic thật nằm ở brew_order_svc.create_brew_record
+    (dùng lại được ở services/workorders.py::dispatch, xem "Phát mẻ" ở Điều độ)."""
     require_perm(user, "batch.execute")
-    data = payload.model_dump()
-    tank_lm = data.pop("tank_lm", None)
-    lm_code = data.pop("lm_code", None)
-    yeast_gen = data.pop("yeast_gen", None)
-    brew_order_id = data.get("brew_order_id")
-    production_order_id = data.get("production_order_id")
-    if bool(brew_order_id) == bool(production_order_id):
-        raise DomainError("Phải chọn đúng 1 Lệnh sản xuất (Lệnh SX ERP hoặc Lệnh nấu cũ).")
-    if production_order_id:
-        # Đường đi hiện hành (tab Nấu) — tạo mã nấu từ "Lệnh SX (ERP)" (ProductionOrder). Lệnh
-        # này chưa có khái niệm "locked" / sai số riêng như BrewOrder — chỉ chặn khi đã hoàn
-        # thành (xem services/orders.py::recompute_status_after_finish).
-        order = db.get(ProductionOrder, production_order_id)
-        if not order:
-            raise NotFoundError("Lệnh sản xuất không tồn tại.")
-        if order.status == "completed":
-            raise DomainError("Lệnh sản xuất này đã hoàn thành — không thể thêm mã nấu mới.")
-        if order.product_id:
-            data["product_id"] = order.product_id
-    else:
-        order = db.get(BrewOrder, brew_order_id)
-        if not order:
-            raise NotFoundError("Lệnh nấu không tồn tại.")
-        _assert_unlocked(order)
-        record_summaries = brew_order_svc._record_summaries(db, brew_order_id)
-        if brew_order_svc._is_complete(db, record_summaries, order.planned_volume_hl, order.volume_tolerance_hl):
-            raise DomainError("Lệnh nấu này đã hoàn thành (đủ sản lượng kế hoạch) — không thể thêm mã nấu mới.")
-        # Dịch bia trích từ Lệnh nấu (nguồn xác thực duy nhất) — không cho lệch giữa mã nấu và
-        # lệnh nấu của nó (nếu không, gợi ý NVL/BOM theo dịch bia ở lệnh nấu sẽ sai với mã nấu thật).
-        if order.product_id:
-            data["product_id"] = order.product_id
-    brew_year = (data.get("brew_date") or utcnow()).year
-    data["brew_year"] = brew_year
-    if lm_code:
-        if not tank_lm:
-            raise DomainError("Chọn Tank lên men.")
-        if db.execute(select(FermentRecord).where(FermentRecord.lm_code == lm_code,
-                      FermentRecord.ferment_year == brew_year)).scalar_one_or_none():
-            raise DomainError(f"Mã lô LM '{lm_code}' đã tồn tại trong năm {brew_year}.")
-        # tank_lm phải đang TRỐNG — trước đây chỉ chặn trùng lm_code, không chặn trùng tank vật
-        # lý, nên 2 lô lên men (2 lm_code) khác nhau vẫn có thể cùng trỏ 1 tank cùng lúc (chỉ
-        # gợi ý "tank trống" ở dropdown frontend, không tự chặn ở backend — xem
-        # dashboard.available_ferment_tanks, cùng logic occupied dùng ở đây).
-        occupying = db.execute(select(FermentRecord).where(FermentRecord.tank_lm == tank_lm)).scalars().all()
-        if any(derived.ferment_status(f) != "da_loc_het" for f in occupying):
-            raise DomainError(f"Tank '{tank_lm}' đang có lô lên men khác chưa lọc hết — chọn tank khác.")
-    b = BrewRecord(brew_id=new_id(), **data)
-    db.add(b)
-    db.flush()
-
-    if lm_code:
-        # kt_date (ngày nạp đầy tank) không nhập tay — tự tính bằng _sync_ferment_kt_date khi
-        # mẻ cuối cùng trong tank được bấm "Kết thúc" (xem finish_brew_batch).
-        ferment = FermentRecord(ferment_id=new_id(), lm_code=lm_code, brew_code=b.brew_code,
-                                ferment_year=brew_year,
-                                brew_date=b.brew_date, wort_type=b.wort_type,
-                                product_id=b.product_id, yeast_gen=yeast_gen, tank_lm=tank_lm,
-                                volume_hl=b.volume_hl, on_hand_cct=b.volume_hl, status="len_men")
-        db.add(ferment)
-        db.flush()
-        db.add(FermentBrewLink(link_id=new_id(), ferment_id=ferment.ferment_id, brew_id=b.brew_id))
-        genealogy.add_edge(db, from_type="brew", from_id=b.brew_id, to_type="ferment",
-                           to_id=ferment.ferment_id, relation="lên men")
-        ferment.batch_numbers = b.brew_code
-
-    db.commit(); db.refresh(b)
-    if production_order_id:
-        order_svc.mark_in_progress(db, production_order_id)
-    elif order.production_order_id:
-        order_svc.mark_in_progress(db, order.production_order_id)
-    return b
-
-
-def _sync_ferment_kt_date(db: Session, ferment_id: str) -> None:
-    """Ngày KT (nạp đầy tank) chỉ có giá trị khi TẤT CẢ mẻ của TẤT CẢ mã nấu nạp vào tank này
-    đã được bấm "Kết thúc" — còn thiếu mẻ nào (hoặc chưa có mẻ nào) thì để trống, vì tank
-    chưa thật sự "đầy" cho tới lúc đó. Khi đã đủ, giá trị = giờ kết thúc mẻ CUỐI CÙNG (lớn
-    nhất). Gọi lại mỗi khi 1 mẻ kết thúc/sửa giờ/bị xóa."""
-    ferment = db.get(FermentRecord, ferment_id)
-    if not ferment:
-        return
-    brew_ids = [r[0] for r in db.execute(
-        select(FermentBrewLink.brew_id).where(FermentBrewLink.ferment_id == ferment_id)).all()]
-    ended_ats = [r[0] for r in db.execute(
-        select(BrewBatch.ended_at).where(BrewBatch.brew_id.in_(brew_ids))).all()] if brew_ids else []
-    ferment.kt_date = max(ended_ats) if ended_ats and all(e is not None for e in ended_ats) else None
+    return brew_order_svc.create_brew_record(db, payload.model_dump(), user)
 
 
 def _filter_order_ids_for_ferments(db: Session, ferment_ids: list[str]) -> list[str]:
@@ -529,8 +442,6 @@ def delete_brew(brew_id: str, db: Session = Depends(get_db), user: User = Depend
     b = db.get(BrewRecord, brew_id)
     if not b:
         raise NotFoundError("Bản ghi nấu không tồn tại.")
-    production_order_id = b.production_order_id
-    brew_order_id = b.brew_order_id
     _assert_unlocked(b, db.get(BrewOrder, b.brew_order_id) if b.brew_order_id else None)
     if _brew_already_filtered(db, brew_id):
         raise DomainError(f"Mã nấu '{b.brew_code}' đã được lọc — không thể xóa (ảnh hưởng truy xuất nguồn gốc).")
@@ -610,10 +521,6 @@ def delete_brew(brew_id: str, db: Session = Depends(get_db), user: User = Depend
                     before={"lm_code": f.lm_code}, reason=f"Xóa kéo theo do xóa mã nấu '{b.brew_code}'")
         db.delete(f)
     db.commit()
-    if production_order_id:
-        order_svc.recompute_status_after_delete(db, production_order_id, user)
-    elif brew_order_id:
-        order_svc.recompute_status_from_brew_order(db, brew_order_id, user)
 
 
 @router.post("/brews/{brew_id}/lock-lot")
@@ -657,6 +564,11 @@ def list_brew_batches(brew_id: str, db: Session = Depends(get_db)):
     line_ids = {b.line_id for b in rows if b.line_id}
     lines = {l.line_id: l for l in db.execute(select(ProductionLine).where(
         ProductionLine.line_id.in_(line_ids))).scalars().all()} if line_ids else {}
+    # nvl_ok ĐÚNG NGHĨA (đối chiếu đủ mọi dòng Định mức NVL của Lệnh nấu, không chỉ "có ghi NVL
+    # bất kỳ") — dùng để hiện tích xanh cạnh nút "+ NVL" (frontend openBrewBatchesModal), tính
+    # 1 lần ở đây cho cả mã nấu, mirror đúng list_brews (xem services/brew_order.py::
+    # batch_material_status).
+    nvl_ok_by_batch = brew_order_svc.batch_material_status(db, rows)
     out = []
     for b in rows:
         exec_status = _exec_status(b.ended_at)
@@ -667,43 +579,30 @@ def list_brew_batches(brew_id: str, db: Session = Depends(get_db)):
                     "seq": b.seq, "note": b.note, "created_at": b.created_at,
                     "started_at": b.started_at, "ended_at": b.ended_at,
                     "exec_status": exec_status, "exec_status_label": EXEC_STATUS[exec_status],
-                    "quality_status": b.quality_status})
+                    "quality_status": b.quality_status, "nvl_ok": nvl_ok_by_batch.get(b.batch_id, False)})
     return out
 
 
 @router.post("/brews/{brew_id}/batches", status_code=201)
 def add_brew_batch(brew_id: str, payload: BrewBatchIn, db: Session = Depends(get_db),
                    user: User = Depends(get_current_user)):
+    """Logic thật nằm ở brew_order_svc.create_brew_batch (dùng lại được ở
+    create_brew_batches_bulk và services/workorders.py::dispatch)."""
     require_perm(user, "batch.execute")
-    brew, order = _brew_and_order(db, brew_id)
-    if not brew:
-        raise NotFoundError("Bản ghi nấu không tồn tại.")
-    _assert_unlocked(brew, order)
-    line = db.get(ProductionLine, payload.line_id)
-    if not line or line.kind != "brewhouse":
-        raise DomainError("Dây chuyền nấu không hợp lệ — phải chọn từ Danh mục dây chuyền (loại: Nhà nấu/brewhouse).")
-    data = payload.model_dump()
-    if not data.get("started_at"):
-        data["started_at"] = utcnow()
-    # Số mẻ (batch_code) là 1 dãy đếm chung TOÀN NHÀ MÁY, không phải riêng từng mã nấu —
-    # 2 mã nấu khác nhau không được dùng trùng số mẻ. Dãy số reset lại mỗi năm (theo năm
-    # của started_at) nên chỉ chặn trùng trong CÙNG năm — sang năm mới lại đánh số từ 1.
-    batch_year = data["started_at"].year
-    if db.execute(select(BrewBatch).where(BrewBatch.batch_year == batch_year,
-                                          BrewBatch.batch_code == payload.batch_code)).scalar_one_or_none():
-        raise DomainError(f"Mã mẻ '{payload.batch_code}' đã tồn tại trong năm {batch_year} (dù ở mã nấu khác) — số mẻ phải duy nhất trong năm.")
-    batch = BrewBatch(batch_id=new_id(), brew_id=brew_id, batch_year=batch_year, **data)
-    db.add(batch); db.flush()
-    genealogy.add_edge(db, from_type="brew_batch", from_id=batch.batch_id, to_type="brew",
-                       to_id=brew_id, relation="mẻ")
-    # Mẻ mới thêm chưa "Kết thúc" — nếu tank lên men trước đó đã coi là nạp đầy (kt_date có
-    # giá trị) thì phải tính lại về rỗng, đưa trạng thái lên men về "đang nấu" cho tới khi mẻ
-    # mới này (và mọi mẻ khác) cũng kết thúc — xem services/derived.py::ferment_status.
-    link = db.execute(select(FermentBrewLink).where(FermentBrewLink.brew_id == brew_id)).scalar_one_or_none()
-    if link:
-        _sync_ferment_kt_date(db, link.ferment_id)
-    db.commit(); db.refresh(batch)
-    return batch
+    return brew_order_svc.create_brew_batch(db, brew_id, payload.model_dump(), user)
+
+
+@router.post("/brews/{brew_id}/batches/bulk", status_code=201)
+def add_brew_batches_bulk(brew_id: str, payload: BrewBatchBulkIn, db: Session = Depends(get_db),
+                          user: User = Depends(get_current_user)):
+    """Tạo NHIỀU mẻ 1 lần thuộc cùng 1 mã nấu (VD 12 mẻ) — tự sinh dãy mã mẻ liên tiếp không
+    trùng, thay vì gọi add_brew_batch từng mẻ một. Dùng ở nút "+ Thêm mẻ" (Số mẻ > 1, tab Nấu)
+    và "Phát mẻ" (Điều độ) — xem brew_order_svc.create_brew_batches_bulk."""
+    require_perm(user, "batch.execute")
+    return brew_order_svc.create_brew_batches_bulk(
+        db, brew_id, payload.count, payload.line_id, user,
+        started_at=payload.started_at, note=payload.note,
+        interval_minutes=payload.interval_minutes)
 
 
 @router.post("/brews/{brew_id}/batches/{batch_id}/start")
@@ -757,6 +656,27 @@ def update_brew_batch_code(brew_id: str, batch_id: str, payload: BrewBatchCodeIn
     return batch
 
 
+@router.put("/brews/{brew_id}/batches/{batch_id}")
+def update_brew_batch_details(brew_id: str, batch_id: str, payload: BrewBatchDetailsIn,
+                              db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """Sửa Dây chuyền/Ghi chú của mẻ đã tạo (VD chọn nhầm dây chuyền lúc tạo) — cùng ràng buộc
+    dây chuyền phải là brewhouse như lúc tạo (xem add_brew_batch)."""
+    require_perm(user, "batch.execute")
+    batch = db.get(BrewBatch, batch_id)
+    if not batch or batch.brew_id != brew_id:
+        raise NotFoundError("Mẻ không tồn tại.")
+    _assert_unlocked(batch, *_brew_and_order(db, brew_id))
+    data = payload.model_dump(exclude_unset=True)
+    if "line_id" in data:
+        line = db.get(ProductionLine, data["line_id"])
+        if not line or line.kind != "brewhouse":
+            raise DomainError("Dây chuyền nấu không hợp lệ — phải chọn từ Danh mục dây chuyền (loại: Nhà nấu/brewhouse).")
+    for k, v in data.items():
+        setattr(batch, k, v)
+    db.commit(); db.refresh(batch)
+    return batch
+
+
 @router.post("/brews/{brew_id}/batches/{batch_id}/finish")
 def finish_brew_batch(brew_id: str, batch_id: str, payload: FinishIn = FinishIn(),
                       db: Session = Depends(get_db), user: User = Depends(get_current_user)):
@@ -779,11 +699,6 @@ def finish_brew_batch(brew_id: str, batch_id: str, payload: FinishIn = FinishIn(
     if link:
         _sync_ferment_kt_date(db, link.ferment_id)
     db.commit(); db.refresh(batch)
-    brew = db.get(BrewRecord, brew_id)
-    if brew and brew.production_order_id:
-        order_svc.recompute_status_after_finish(db, brew.production_order_id, user)
-    elif brew and brew.brew_order_id:
-        order_svc.recompute_status_from_brew_order(db, brew.brew_order_id, user)
     return batch
 
 
@@ -2167,7 +2082,10 @@ def finish_bottle(bottle_id: str, payload: FinishBottleIn = FinishBottleIn(), db
             record_audit(db, entity_type="bottle_record", entity_id=b.bottle_id, action="finish_ca_mismatch",
                         actor=user, after={"ca_total": new_total, "expected_units": round(expected_units, 1)},
                         reason=payload.mismatch_reason)
-    if b.approved and new_total != old_total:
+    # b.stocked (KHÔNG dùng b.approved) — approve_bottle đã tháo khỏi WMS (xem docstring),
+    # b.approved=True không còn kéo theo có hàng thật trong kho; chỉ mẻ chiết CŨ (stocked=True
+    # từ trước khi tháo) mới còn tồn kho thật cần điều chỉnh theo đây.
+    if b.stocked and new_total != old_total:
         pack_size = finished_product.pack_size if finished_product else 24
         unit_type = finished_product.unit_type if finished_product else "vi"
         product_name = finished_product.code if finished_product else b.beer_type
@@ -2182,13 +2100,12 @@ def finish_bottle(bottle_id: str, payload: FinishBottleIn = FinishBottleIn(), db
 
 @router.post("/bottles/{bottle_id}/approve")
 def approve_bottle(bottle_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    """Giám đốc/Phó GĐ Sản xuất - Kỹ thuật duyệt lô chiết nhập kho thành phẩm — sau khi duyệt,
-    hàng được tự động nhập kho thành phẩm theo vỉ/keg (không còn pallet, xem
-    services/wms.py::_create_units — mỗi dòng đúng 1 vỉ/keg, dòng cuối có thể lẻ), đánh dấu
-    b.stocked. Yêu cầu đã khai báo đủ chỉ tiêu thành phẩm bắt buộc (KCS đã nhập/khóa); chỉ tiêu
-    FAIL (vượt giới hạn) không còn chặn duyệt, chỉ cảnh báo (qc_has_fail). Quyền duyệt tách khỏi
-    quality.release (KCS) theo đúng sơ đồ tổ chức thật: KCS nhập/khóa chỉ tiêu, còn quyết định
-    cho nhập kho thành phẩm hay không thuộc Giám đốc/Phó GĐ Sản xuất."""
+    """Duyệt hồ sơ chiết (module Nấu-Lọc-Chiết cũ) — CHỈ còn ý nghĩa đóng hồ sơ/audit của mẻ
+    chiết, KHÔNG còn tạo FinishedGoodsUnit/nhập kho thành phẩm nữa. Module Chiết cũ đã tháo
+    khỏi WMS — pipeline "Mẻ SX" mới thay thế hoàn toàn vai trò này, cụ thể Lô thành phẩm là nơi
+    DUY NHẤT còn tạo hàng nhập kho thành phẩm từ sản xuất (xem
+    services/batch_pipeline.py::release_pack_lot_to_wms). Vẫn giữ cổng chỉ tiêu thành phẩm bắt
+    buộc để không đổi ý nghĩa "đã hoàn tất hồ sơ chiết" của cờ approved."""
     require_perm(user, "production.release_to_wms")
     b = db.get(BottleRecord, bottle_id)
     if not b:
@@ -2201,34 +2118,13 @@ def approve_bottle(bottle_id: str, db: Session = Depends(get_db), user: User = D
                                         finished_product_id=b.finished_product_id, beer_type_id=b.beer_type_id)
     if status["pending"]:
         raise DomainError(f"Còn thiếu chỉ tiêu bắt buộc (thành phẩm): {', '.join(status['pending'])}.")
-    # Ca 1/2/3 tính theo VỈ/KEG (đơn vị đóng gói cuối cùng vận hành đếm được ở cuối line), KHÔNG
-    # phải theo lon rời — 1 vỉ = pack_size lon (khai báo ở Danh mục Sản phẩm). _create_units
-    # nhận "total" theo LON (chia cho pack_size ra số vỉ, mirror Nhập kho thủ công) nên phải
-    # nhân ca_total (vỉ) với pack_size trước khi gọi, để n dòng sinh ra ĐÚNG BẰNG ca_total vỉ.
-    ca_total = b.ca1 + b.ca2 + b.ca3
-    if ca_total <= 0:
-        raise DomainError("Chưa nhập sản lượng (SL ca 1/2/3) — không thể duyệt xuất kho thành phẩm.")
-    finished_product = db.get(FinishedProduct, b.finished_product_id) if b.finished_product_id else None
-    pack_size = finished_product.pack_size if finished_product else 24
-    unit_type = finished_product.unit_type if finished_product else "vi"
-    product_name = finished_product.code if finished_product else b.beer_type
-    units = wms_svc._create_units(db, {
-        "finished_product_id": b.finished_product_id, "product_name": product_name,
-        "lot_code": b.lot_no or b.bottle_code, "total": ca_total * pack_size, "pack_size": pack_size,
-        "unit_type": unit_type, "source": "chiet",
-    }, created_by=user.username, actor=user)
-    for u in units:
-        genealogy.add_edge(db, from_type="bottle", from_id=bottle_id, to_type="finished_goods_unit",
-                           to_id=u.unit_id, relation="nhập kho", quantity=u.quantity, uom=u.unit_type)
+    if (b.ca1 + b.ca2 + b.ca3) <= 0:
+        raise DomainError("Chưa nhập sản lượng (SL ca 1/2/3) — không thể duyệt.")
     b.approved = True
     b.approved_by = user.username
     b.approved_at = utcnow()
-    b.stocked = True
     db.commit()
-    # count=ca_total (KHÔNG dùng len(units)) — _create_units giờ luôn trả về 1 dòng/lô
-    # (xem docs/WMS-LOT-LEVEL-REDESIGN.md), ca_total mới là số vỉ/keg thật đã nhập kho.
-    return {"bottle_id": bottle_id, "approved": True, "unit_type": unit_type, "count": ca_total,
-            "unit_codes": [u.unit_code for u in units], "qc_has_fail": status["has_fail"]}
+    return {"bottle_id": bottle_id, "approved": True, "qc_has_fail": status["has_fail"]}
 
 
 @router.post("/bottles/{bottle_id}/lock-lot")
@@ -2261,8 +2157,12 @@ def brewing_qc_status(stage: str, scope_type: str, scope_id: str, product_id: st
 @router.post("/qc-samples", status_code=201)
 def add_qc_sample(payload: QcSampleIn, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     """Ghi 1 lần lấy mẫu (nhiều chỉ tiêu cùng lúc) cho CT chính/CT phụ lên men — xem
-    qc_catalog.record_qc_sample. LUÔN thêm bản ghi mới, không ghi đè lần trước."""
-    require_perm(user, "batch.execute")
+    qc_catalog.record_qc_sample. LUÔN thêm bản ghi mới, không ghi đè lần trước. CHỈ pipeline "Mẻ
+    sản xuất" mới (scope_type="batch_tank") yêu cầu quyền "quality.release" — CHỈ KCS (tái dùng
+    đúng quy ước đã dùng cho Duyệt LM/Lọc/Chiết, yêu cầu người dùng 2026-09-02: "chỉ cho nhân
+    viên KCS được điền"). Module Nấu-Lọc-Chiết CŨ (scope_type="ferment") giữ nguyên
+    "batch.execute" — KHÔNG đổi hành vi module cũ, vận hành vẫn ghi được như trước."""
+    require_perm(user, "quality.release" if payload.scope_type == "batch_tank" else "batch.execute")
     _assert_stage_scope_unlocked(db, payload.scope_type, payload.scope_id)
     return qc_catalog.record_qc_sample(db, payload.stage, payload.scope_type, payload.scope_id,
                                        payload.sampled_at, [r.model_dump() for r in payload.results], user)
@@ -2288,10 +2188,20 @@ def get_brew_forward_record(brew_id: str, db: Session = Depends(get_db)):
     return lot_record_svc.build_brew_forward_record(db, brew_id)
 
 
+# Chỉ tiêu lên men (chính/phụ) CỦA PIPELINE "MẺ SẢN XUẤT" MỚI (scope_type="batch_tank") là chỉ
+# tiêu CHẤT LƯỢNG cần KCS ghi/xác nhận — tái dùng quyền "quality.release" (mirror quy ước đã
+# dùng cho Duyệt LM/Lọc/Chiết, xem services/cip.py) thay vì "batch.execute" (cấp cho vận hành)
+# — yêu cầu người dùng 2026-09-02: "chỉ cho nhân viên KCS được điền". Module Nấu-Lọc-Chiết CŨ
+# (scope_type="ferment") và các stage khác (nau/loc/thanh_pham) giữ nguyên "batch.execute" —
+# không đổi hành vi module cũ, chỉ gate đúng phạm vi vừa hỏi tới.
+_KCS_ONLY_STAGES = ("len_men_chinh", "len_men_phu")
+
+
 @router.post("/qc-results", status_code=201)
 def add_stage_qc_result(payload: StageQcResultIn, db: Session = Depends(get_db),
                         user: User = Depends(get_current_user)):
-    require_perm(user, "batch.execute")
+    kcs_only = payload.stage in _KCS_ONLY_STAGES and payload.scope_type == "batch_tank"
+    require_perm(user, "quality.release" if kcs_only else "batch.execute")
     data = payload.model_dump()
     stage, scope_type, scope_id = data.pop("stage"), data.pop("scope_type"), data.pop("scope_id")
     _assert_stage_scope_unlocked(db, scope_type, scope_id)

@@ -37,11 +37,11 @@ class MaterialReceipt(Base):
 class BrewOrder(Base):
     """Lệnh sản xuất (nấu) — mẫu giấy thật "LỆNH NẤU BIA KIÊM PHIẾU XUẤT KHO": 1 lệnh ứng với
     đúng 1 dịch bia (Công thức/RecipeVersion), có đủ phần hành chính ngay trên chính dòng này
-    (issued_by/executor_unit/warehouse_keeper/reference_note/start_date/end_date/safety_note —
-    mirror ProductionOrder, models/orders.py). Có thể ứng với NHIỀU mã nấu (nhiều tank lên men)
-    — sản lượng thực tế (BrewRecord.volume_hl) cộng dồn qua các mã nấu tới khi lệch trong khoảng
-    ±volume_tolerance_hl so với planned_volume_hl thì lệnh hoàn thành, không cho chọn thêm nữa
-    (xem services/brew_order.py::_is_complete, routers/brewing.py::add_brew)."""
+    (issued_by/executor_unit/warehouse_keeper/reference_note/start_date/end_date/safety_note).
+    Có thể ứng với NHIỀU mã nấu (nhiều tank lên men) — sản lượng thực tế (BrewRecord.volume_hl)
+    cộng dồn qua các mã nấu tới khi lệch trong khoảng ±volume_tolerance_hl so với
+    planned_volume_hl thì lệnh hoàn thành, không cho chọn thêm nữa (xem
+    services/brew_order.py::_is_complete, routers/brewing.py::add_brew)."""
     __tablename__ = "brew_order"
     # order_code chỉ duy nhất TRONG 1 năm (order_year = năm created_at, snapshot lúc tạo) —
     # sang năm khác được đánh lại từ đầu, đúng quy ước đánh số trên giấy tờ thật.
@@ -50,10 +50,6 @@ class BrewOrder(Base):
     brew_order_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
     order_code: Mapped[str] = mapped_column(Unicode(64), index=True)   # Số: 36/PXSXBĐM-T6/2026
     order_year: Mapped[int] = mapped_column(Integer, index=True)
-    # Lệnh SX (ERP) mà Lệnh nấu này thuộc về — 1 Lệnh SX chỉ có ĐÚNG 1 Lệnh nấu (validate ở
-    # services/brew_order.py::create_order). Nullable để không phá dữ liệu Lệnh nấu lịch sử
-    # (tạo trước khi có liên kết này, hoàn toàn độc lập, không có Lệnh SX cha).
-    production_order_id: Mapped[Optional[str]] = mapped_column(ForeignKey("production_order.order_id"), nullable=True, index=True)
     issued_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)          # I. Người ra lệnh
     executor_unit: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)      # II.1 Người thực hiện
     warehouse_keeper: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)   # II.2 Người xuất hàng
@@ -144,16 +140,14 @@ class BrewRecord(Base):
     plato: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     seq: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # số mẻ (thứ tự trong lô LM)
     note: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)
-    # Đúng 1 trong 2 (brew_order_id/production_order_id) được set — add_brew tự kiểm tra
-    # (validate ở service, không CHECK constraint ở DB để linh hoạt dữ liệu cũ/test).
-    # brew_order_id: mã nấu tạo qua tab "Lệnh nấu" (BrewOrder) — đường đi hiện hành từ tab Nấu,
-    # BrewOrder có thể tự gắn 1 Lệnh SX (ERP) cha qua BrewOrder.production_order_id (khác field
-    # này) — xem services/brew_order.py::create_order.
+    # Lệnh nấu (BrewOrder) cha — bắt buộc lúc tạo qua service (create_brew_record), nhưng vẫn
+    # nullable ở DB để không phá dữ liệu demo/dashboard tạo thẳng bằng ORM không qua lệnh nấu
+    # nào (xem seed.py::_seed_brewing), mirror cách field này đã luôn nullable từ trước.
     brew_order_id: Mapped[Optional[str]] = mapped_column(ForeignKey("brew_order.brew_order_id"), nullable=True, index=True)
-    # production_order_id: mã nấu tạo TRỰC TIẾP vào "Lệnh SX (ERP)", bỏ qua Lệnh nấu — đường đi
-    # cũ/lịch sử, API vẫn hỗ trợ nhưng tab Nấu không còn tạo mới theo đường này — xem
-    # services/orders.py::mark_in_progress/recompute_status_after_finish.
-    production_order_id: Mapped[Optional[str]] = mapped_column(ForeignKey("production_order.order_id"), nullable=True, index=True)
+    # Work Order (Điều độ) đã "Phát mẻ" tạo ra mã nấu này — 1 WorkOrder ↔ ĐÚNG 1 mã nấu (validate
+    # ở services/workorders.py::dispatch). Nullable — mã nấu tạo trực tiếp ở tab Nấu (không qua
+    # Điều độ) vẫn hợp lệ như cũ, không bắt buộc phải có Work Order cha.
+    work_order_id: Mapped[Optional[str]] = mapped_column(ForeignKey("work_order.wo_id"), nullable=True, index=True)
     locked: Mapped[bool] = mapped_column(Boolean, default=False)
     locked_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
     locked_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
@@ -678,10 +672,9 @@ class OpsSetting(Base):
     # (khớp thực tế ca đêm 22h-06h không bị cắt đôi giữa 2 ngày lịch). Xem
     # services/wms.py::finished_goods_daily_stock_report.
     fg_day_cutoff_hour: Mapped[int] = mapped_column(Integer, default=0)
-    # Sai số sản lượng (±hl) dùng CHUNG cho mọi Lệnh SX (ERP, ProductionOrder) khi tự động xét
-    # "hoàn thành" — dịch thực tế cộng dồn từ các mã nấu gắn vào lệnh đó (qua
-    # BrewRecord.production_order_id) đạt SL kế hoạch trừ sai số này thì coi là hoàn thành. Xem
-    # services/orders.py::recompute_status_after_finish.
+    # KHÔNG CÒN DÙNG — trước đây là sai số sản lượng (±hl) để tự động xét "hoàn thành" cho Lệnh
+    # SX (ERP, ProductionOrder, đã xóa hẳn). Giữ lại cột (không đáng để migration riêng), không
+    # còn code nào đọc field này. BrewOrder tự tính "hoàn thành" qua volume_tolerance_hl riêng.
     erp_order_volume_tolerance_hl: Mapped[float] = mapped_column(Float, default=5.0)
     updated_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)

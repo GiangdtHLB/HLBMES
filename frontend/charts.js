@@ -270,8 +270,9 @@ const CH = {
   // 2 trục Y độc lập (vd nhiệt độ+°S bên trái 0-20, mật độ tế bào 10^6/ml bên phải 0-56 —
   // biểu đồ theo dõi lên men BM 1.11 (06)): leftSeries/rightSeries=[{label,color,
   // points:[{x,value}]}] (value=null/undefined -> vẽ đứt đoạn, bỏ điểm đó). xLabels dùng
-  // chung trục ngang (VD số ngày) cho cả 2 nhóm series.
-  lineDualAxis(leftSeries, rightSeries, xLabels, { height = 220 } = {}) {
+  // chung trục ngang (VD số ngày) cho cả 2 nhóm series. showValueLabels=true (opt-in, không
+  // đổi mặc định cho các nơi gọi cũ) in số liệu ngay cạnh từng điểm, không phải chỉ 2 trục.
+  lineDualAxis(leftSeries, rightSeries, xLabels, { height = 220, showValueLabels = false } = {}) {
     const all = [...(leftSeries || []), ...(rightSeries || [])];
     if (!all.length || !all.some(s => s.points && s.points.length)) return '<div class="muted">Không có dữ liệu.</div>';
     const W = 640, H = height, pad = { l: 40, r: 40, t: 22, b: 24 };
@@ -307,6 +308,18 @@ const CH = {
     }).join("");
     const linesLeft = drawLines(leftSeries, PAL_L, pyL, null);
     const linesRight = drawLines(rightSeries, PAL_R, pyR, "4,3");
+    // Nhãn số liệu cạnh từng điểm — lệch dy XEN KẼ theo thứ tự series trong từng nhóm (trên/
+    // dưới) để 2 đường CÙNG trục (VD Nhiệt độ + °S bên trái) không in đè lên nhau.
+    const fmtVal = (v) => (Number.isInteger(v) ? String(v) : String(Math.round(v * 100) / 100));
+    const labelsOf = (list, PAL, py) => (list || []).map((s, si) => {
+      const col = s.color || PAL[si % PAL.length];
+      const dy = si % 2 === 0 ? -8 : 14;
+      return (s.points || []).map((p, i) => {
+        if (p.value === null || p.value === undefined) return "";
+        return `<text x="${px(i).toFixed(1)}" y="${(py(p.value) + dy).toFixed(1)}" fill="${col}" font-size="9" text-anchor="middle">${fmtVal(p.value)}</text>`;
+      }).join("");
+    }).join("");
+    const valueLabels = showValueLabels ? labelsOf(leftSeries, PAL_L, pyL) + labelsOf(rightSeries, PAL_R, pyR) : "";
     const legendOf = (list, PAL) => (list || []).map((s, si) => `<span style="display:inline-flex;align-items:center;gap:4px;margin-right:12px;font-size:11px;color:var(--muted)">
       <span style="width:9px;height:9px;border-radius:2px;background:${s.color || PAL[si % PAL.length]};display:inline-block"></span>${esc(s.label)}</span>`).join("");
     const fmtX = (i) => (xLabels && xLabels[i] != null) ? String(xLabels[i]) : String(i + 1);
@@ -322,7 +335,7 @@ const CH = {
         <text x="${W - pad.r + 3}" y="${pyR(rymin) + 4}" fill="var(--muted)" font-size="10">${rymin.toFixed(1)}</text>
         <text x="${pad.l}" y="${H - 6}" fill="var(--muted)" font-size="10">${esc(fmtX(0))}</text>
         <text x="${W - pad.r}" y="${H - 6}" fill="var(--muted)" font-size="10" text-anchor="end">${esc(fmtX(n - 1))}</text>
-        ${linesLeft}${linesRight}
+        ${linesLeft}${linesRight}${valueLabels}
       </svg></div>`;
   },
   // Tròn/donut phân loại: items=[{label,value,color?}]

@@ -27,7 +27,7 @@ def list_lines(active_only: bool = False, kind: str = None, db: Session = Depend
     return [{"line_id": l.line_id, "code": l.code, "name": l.name, "area": l.area,
              "kind": l.kind, "ideal_rate_per_min": l.ideal_rate_per_min,
              "capacity_uom": l.capacity_uom, "volume": l.volume, "volume_uom": l.volume_uom,
-             "identification_code": l.identification_code, "active": l.active}
+             "usable_pct": l.usable_pct, "identification_code": l.identification_code, "active": l.active}
             for l in db.execute(stmt).scalars().all()]
 
 
@@ -52,6 +52,9 @@ def update_line(line_id: str, payload: LineUpdate, db: Session = Depends(get_db)
     if not line:
         raise NotFoundError("Dây chuyền/tank không tồn tại.")
     data = payload.model_dump(exclude_unset=True)
+    if data.get("code") and data["code"] != line.code:
+        if db.execute(select(ProductionLine).where(ProductionLine.code == data["code"])).scalar_one_or_none():
+            raise PermissionError_(f"Dây chuyền '{data['code']}' đã tồn tại.")
     for k, v in data.items():
         setattr(line, k, v)
     record_audit(db, entity_type="line", entity_id=line_id, action="update", actor=user, after=data)
