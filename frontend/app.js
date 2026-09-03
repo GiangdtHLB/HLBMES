@@ -2927,17 +2927,19 @@ VIEWS.batchtanks = async function () {
     </div>
     <div class="split">
       <div class="panel"><h2>Danh sách lô lên men</h2>
-        <table><thead><tr><th>Lô lên men</th><th>Tank lên men</th><th>Trạng thái</th><th>Tồn/Tổng (hl)</th><th>Ngày vào dịch</th><th>Ngày KT vào dịch</th><th>Số ngày đã lên men</th></tr></thead>
+        <input class="searchbox" data-tbl="t_battank" placeholder="Tìm theo lô, tank, trạng thái..."/>
+        <div class="tablewrap"><table id="t_battank"><thead><tr><th>Lô lên men</th><th>Tank lên men</th><th>Trạng thái</th><th>Tồn/Tổng (hl)</th><th>Ngày vào dịch</th><th>Ngày KT vào dịch</th><th>Số ngày đã lên men</th></tr></thead>
           <tbody>${tanks.map(t => `<tr data-tank="${t.tank_id}" style="cursor:pointer">
             <td><code class="k">${esc(t.tank_code)}</code></td>
             <td>${esc(t.tank_lm || "—")}</td><td>${statusBadge(TANK_BADGE_CLASS[t.status], t.status_label)}</td>
             <td>${t.on_hand} / ${t.volume_hl}</td>
             <td class="muted">${t.vao_dich_start ? fmt(t.vao_dich_start) : "—"}</td>
             <td class="muted">${t.vao_dich_end ? fmt(t.vao_dich_end) : "—"}</td>
-            <td>${batchTankDaysFermentedCell(t)}</td></tr>`).join("") || '<tr><td colspan=7 class="muted">Chưa có lô lên men nào.</td></tr>'}</tbody></table>
+            <td>${batchTankDaysFermentedCell(t)}</td></tr>`).join("") || '<tr><td colspan=7 class="muted">Chưa có lô lên men nào.</td></tr>'}</tbody></table></div>
       </div>
       <div class="panel" id="bt_detail"><h2>Chi tiết lô lên men</h2><div class="muted">Chọn một lô để xem.</div></div>
     </div>`;
+  wirePaginate("t_battank", 10);
   $("bt_create").onclick = () => guard(async () => {
     const batch_ids = Array.from(document.querySelectorAll(".bt-pick-batch:checked")).map(x => x.value);
     if (!batch_ids.length) throw new Error("Chọn ít nhất 1 mẻ nấu.");
@@ -3257,15 +3259,17 @@ VIEWS.batchfilterorders = async function () {
     </div>
     <div class="split">
       <div class="panel"><h2>Danh sách lệnh lọc</h2>
-        <table><thead><tr><th>Số lệnh</th><th>Kiểu</th><th>Tank lên men</th><th>Trạng thái</th><th>Thực tế/KH (hl)</th></tr></thead>
+        <input class="searchbox" data-tbl="t_flotorder" placeholder="Tìm theo số lệnh, tank, trạng thái..."/>
+        <div class="tablewrap"><table id="t_flotorder"><thead><tr><th>Số lệnh</th><th>Kiểu</th><th>Tank lên men</th><th>Trạng thái</th><th>Thực tế/KH (hl)</th></tr></thead>
           <tbody>${orders.map(o => `<tr data-flotorder="${o.order_id}" style="cursor:pointer">
             <td><code class="k">${esc(o.order_code)}</code></td><td>${o.blend_mode === "phoi" ? "Phối" : "Không phối"}</td>
             <td class="muted">${o.tank_lm_names && o.tank_lm_names.length ? esc(o.tank_lm_names.join(", ")) : "—"}</td>
             <td>${orderStatusBadge(o)}</td><td>${o.actual_volume_hl} / ${o.planned_volume_hl}</td></tr>`).join("")
-            || '<tr><td colspan=5 class="muted">Chưa có lệnh lọc nào.</td></tr>'}</tbody></table>
+            || '<tr><td colspan=5 class="muted">Chưa có lệnh lọc nào.</td></tr>'}</tbody></table></div>
       </div>
       <div class="panel" id="fo_detail"><h2>Chi tiết lệnh lọc</h2><div class="muted">Chọn một lệnh lọc để xem.</div></div>
     </div>`;
+  wirePaginate("t_flotorder", 10);
   renderFoChildren();
   $("fo_addchild").onclick = () => { foChildren.push(newFoChild()); renderFoChildren(); };
   $("fo_create").onclick = () => guard(async () => {
@@ -3349,17 +3353,19 @@ VIEWS.batchfilterlots = async function () {
     </div>
     <div class="split">
       <div class="panel"><h2>Danh sách lô lọc</h2>
-        <table><thead><tr><th>Mã lô lọc</th><th>Trạng thái</th><th>Sản phẩm bia</th><th>Tank lên men</th><th>Kế hoạch (hl)</th><th>Tank BBT</th><th>Tồn/Tổng (hl)</th></tr></thead>
+        <input class="searchbox" data-tbl="t_batfilterlot" placeholder="Tìm theo mã lô, sản phẩm, trạng thái..."/>
+        <div class="tablewrap"><table id="t_batfilterlot"><thead><tr><th>Mã lô lọc</th><th>Trạng thái</th><th>Sản phẩm bia</th><th>Tank lên men</th><th>Kế hoạch (hl)</th><th>Tank BBT</th><th>Tồn/Tổng (hl)</th></tr></thead>
           <tbody>${lots.map(f => `<tr data-flot="${f.filter_lot_id}" style="cursor:pointer">
             <td><code class="k">${esc(f.filter_lot_code)}</code></td><td>${statusBadge(FILTER_LOT_BADGE_CLASS[f.status], f.status_label)}</td>
             <td>${esc(beerTypeName(f.beer_type_id))}</td>
             <td class="muted">${esc(tankLmNames(f))}</td>
             <td class="muted">${plannedVol(f) ?? "—"}</td>
             <td>${esc(f.to_bbt || "—")}</td>
-            <td>${f.on_hand} / ${f.volume_hl}</td></tr>`).join("") || '<tr><td colspan=7 class="muted">Chưa có lô lọc nào.</td></tr>'}</tbody></table>
+            <td>${f.on_hand} / ${f.volume_hl}</td></tr>`).join("") || '<tr><td colspan=7 class="muted">Chưa có lô lọc nào.</td></tr>'}</tbody></table></div>
       </div>
       <div class="panel" id="fl_detail"><h2>Chi tiết lô lọc</h2><div class="muted">Chọn một lô lọc để xem.</div></div>
     </div>`;
+  wirePaginate("t_batfilterlot", 10);
   $("fl_create").onclick = () => guard(async () => {
     if (!$("fl_order_sel").value) throw new Error("Chọn 1 lệnh lọc.");
     if (!$("fl_bbt").value) throw new Error("Chọn tank thành phẩm (BBT).");
@@ -3568,7 +3574,8 @@ VIEWS.batchpacklots = async function () {
     </div>
     <div class="split">
       <div class="panel"><h2>Danh sách lô thành phẩm</h2>
-        <table><thead><tr><th>Mã lô TP</th><th>Lô lọc nguồn</th><th>Tank BBT</th><th>SL cấp chiết (lít)</th><th>Số lô bia</th><th>Trạng thái</th><th>Duyệt</th></tr></thead>
+        <input class="searchbox" data-tbl="t_packlot" placeholder="Tìm theo mã lô, số lô bia, trạng thái..."/>
+        <div class="tablewrap"><table id="t_packlot"><thead><tr><th>Mã lô TP</th><th>Lô lọc nguồn</th><th>Tank BBT</th><th>SL cấp chiết (lít)</th><th>Số lô bia</th><th>Trạng thái</th><th>Duyệt</th></tr></thead>
           <tbody>${packLots.map(p => `<tr data-pklot2="${p.pack_lot_id}" style="cursor:pointer">
             <td><code class="k">${esc(p.pack_lot_code)}</code></td>
             <td><code class="k">${esc(lotByCode[p.filter_lot_id] || p.filter_lot_id)}</code></td>
@@ -3576,10 +3583,11 @@ VIEWS.batchpacklots = async function () {
             <td>${p.qty}</td><td>${esc(p.lot_no || "—")}</td>
             <td>${statusBadge(PACK_LOT_BADGE_CLASS[p.status], p.status_label)}</td>
             <td>${p.approved ? badge("released") + " đã duyệt" : badge("pending")}</td></tr>`).join("")
-            || '<tr><td colspan=7 class="muted">Chưa có lô thành phẩm nào.</td></tr>'}</tbody></table>
+            || '<tr><td colspan=7 class="muted">Chưa có lô thành phẩm nào.</td></tr>'}</tbody></table></div>
       </div>
       <div class="panel" id="pk_detail"><h2>Chi tiết lô thành phẩm</h2><div class="muted">Chọn một lô để xem.</div></div>
     </div>`;
+  wirePaginate("t_packlot", 10);
   const pkLinePicker = initCheckboxMultiSelect($("pk_line_wrap"), lineItems, []);
   const updatePkFp = () => {
     const opt = $("pk_bbt").selectedOptions[0];
