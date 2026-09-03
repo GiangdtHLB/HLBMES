@@ -144,19 +144,6 @@ def test_delete_beer_type_blocked_by_product(client, admin_h):
     assert "dịch bia" in r.json()["detail"]
 
 
-def test_delete_beer_type_blocked_by_production_order(client, admin_h):
-    """Lệnh SX (ERP) giờ bắt buộc gắn beer_type_id lúc lập (xem models/orders.py) — xóa Loại
-    bia đang được 1 Lệnh SX tham chiếu phải báo lỗi rõ ràng (409), không để lộ IntegrityError
-    thô từ ràng buộc khóa ngoại của DB."""
-    bt_id = _a_beer_type(client, admin_h, "BT-DEL-PO-01")
-    order = client.post("/api/orders", headers=admin_h,
-                        json={"order_code": "ORD-BTDEL-01", "beer_type_id": bt_id, "planned_qty": 1000, "uom": "L"})
-    assert order.status_code == 201, order.text
-    r = client.delete(f"/api/beer-types/{bt_id}", headers=admin_h)
-    assert r.status_code == 409, r.text
-    assert "lệnh sản xuất" in r.json()["detail"]
-
-
 def test_delete_product_blocked_by_finished_product(client, admin_h):
     p_id = _a_product(client, admin_h, "PR-DEL-03")
     _a_finished_product(client, admin_h, "FP-DEL-02", product_id=p_id)
@@ -211,16 +198,17 @@ def test_delete_recipe_blocked_by_work_order(client, admin_h):
     v = client.post(f"/api/recipes/{recipe_id}/versions", headers=admin_h, json={"product_id": p_id})
     assert v.status_code == 201, v.text
     version_id = v.json()["version_id"]
-    order = client.post("/api/orders", headers=admin_h,
-                        json={"order_code": "ORD-RCPDEL-02", "beer_type_id": bt_id, "planned_qty": 1000, "uom": "L"})
+    order = client.post("/api/brewing/orders", headers=admin_h,
+                        json={"order_code": "LN-RCPDEL-02", "product_id": p_id, "recipe_version_id": version_id,
+                              "planned_volume_hl": 100, "auto_from_bom": False})
     assert order.status_code == 201, order.text
-    order_id = order.json()["order_id"]
+    brew_order_id = order.json()["brew_order_id"]
 
     # Giả lập version đã được dispatch xuống 1 work order — tái dùng bảng có sẵn thay vì dựng
     # toàn bộ pipeline work-order/batch chỉ để test cờ chặn (mirror test_material_qc.py).
     db = SessionLocal()
     try:
-        db.add(WorkOrder(wo_code="WO-RCPDEL-02", production_order_id=order_id, product_id=p_id,
+        db.add(WorkOrder(wo_code="WO-RCPDEL-02", brew_order_id=brew_order_id, product_id=p_id,
                          recipe_version_id=version_id, planned_qty=1000, scheduled_date=date.today()))
         db.commit()
     finally:

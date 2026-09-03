@@ -95,6 +95,16 @@ def delete_version(version_id: str, db: Session = Depends(get_db), user: User = 
     master_data.delete_recipe_version(db, version_id, user)
 
 
+@router.get("/versions/{version_id}/qc-items")
+def list_version_qc_items(version_id: str, db: Session = Depends(get_db)):
+    return svc.list_qc_items(db, version_id)
+
+
+@router.get("/versions/{version_id}/param-items")
+def list_version_param_items(version_id: str, db: Session = Depends(get_db)):
+    return svc.list_param_items(db, version_id)
+
+
 # ---- Change-control (e-signature) + diff + danh sách thay đổi ----
 @router.post("/versions/{version_id}/change-approve")
 def change_approve(version_id: str, payload: ChangeApproveIn, db: Session = Depends(get_db),

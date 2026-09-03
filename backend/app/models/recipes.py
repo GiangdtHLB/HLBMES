@@ -69,3 +69,41 @@ class RecipeVersion(Base):
     approved_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
     approved_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+
+
+class RecipeVersionQcItem(Base):
+    """Chỉ tiêu QC chọn từ Danh mục (QCParameter) cho 1 RecipeVersion — nguồn sự thật cho UI
+    chọn-từ-danh-mục (mirror QCParameterGroupItem). `quality_checks` (JSON, phía trên) vẫn được
+    tự tính/ghi đè từ đây mỗi lần lưu, giữ nguyên shape cũ để các nơi đang đọc thẳng JSON đó
+    (services/batches.py, quality_adv.py::coa, services/derived.py) không phải sửa gì — xem
+    services/recipes.py::create_version/update_draft."""
+
+    __tablename__ = "recipe_version_qc_item"
+
+    link_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
+    version_id: Mapped[str] = mapped_column(ForeignKey("recipe_version.version_id"), index=True)
+    param_id: Mapped[str] = mapped_column(ForeignKey("qc_parameter.param_id"), index=True)
+    seq: Mapped[int] = mapped_column(Integer, default=0)
+    mandatory: Mapped[bool] = mapped_column(default=True)
+    target_override: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    usl_override: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    lsl_override: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+
+
+class RecipeVersionParamItem(Base):
+    """Tham số quy trình chọn từ Danh mục (ProcessParameter) cho 1 RecipeVersion — mirror
+    RecipeVersionQcItem nhưng cho `parameters` (JSON, phía trên) thay vì `quality_checks`."""
+
+    __tablename__ = "recipe_version_param_item"
+
+    link_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
+    version_id: Mapped[str] = mapped_column(ForeignKey("recipe_version.version_id"), index=True)
+    param_id: Mapped[str] = mapped_column(ForeignKey("process_parameter.param_id"), index=True)
+    seq: Mapped[int] = mapped_column(Integer, default=0)
+    mandatory: Mapped[bool] = mapped_column(default=True)
+    # Ghi đè công đoạn mặc định của tham số (ProcessParameter.phase) nếu version này dùng tham
+    # số đó ở 1 công đoạn khác — để trống = dùng đúng phase mặc định của tham số.
+    phase_override: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    target_override: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    usl_override: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    lsl_override: Mapped[Optional[float]] = mapped_column(Float, nullable=True)

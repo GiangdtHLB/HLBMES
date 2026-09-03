@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 
 from ..common import new_id, utcnow
 from ..models.batches import BatchExecution
+from ..models.batch_pipeline import BatchFilterLot, BatchPackLot, BatchTank
 from ..models.brewing import BottleRecord, BrewBatch, BrewRecord, FermentRecord, FilterRecord
 from ..models.master import FinishedProduct, Material
 from ..models.materials import GenealogyEdge, MaterialLot, Supplier
@@ -38,6 +39,9 @@ _PACK_DIVISOR_EXPR = case(
 NODE_REGISTRY = {
     "lot": (MaterialLot, "lot_id", "lot_code"),
     "batch": (BatchExecution, "batch_id", "batch_code"),
+    "batch_tank": (BatchTank, "tank_id", "tank_code"),
+    "batch_filter_lot": (BatchFilterLot, "filter_lot_id", "filter_lot_code"),
+    "batch_pack_lot": (BatchPackLot, "pack_lot_id", "pack_lot_code"),
     "brew_batch": (BrewBatch, "batch_id", "batch_code"),
     "brew": (BrewRecord, "brew_id", "brew_code"),
     "ferment": (FermentRecord, "ferment_id", "lm_code"),
@@ -162,6 +166,32 @@ def _qc_summary(db: Session, node_type: str, node_id: str) -> list:
                                         b.product_id, finished_product_id=b.finished_product_id,
                                         beer_type_id=b.beer_type_id)
         return [_trim_qc("thanh_pham", "Thành phẩm", st)]
+    if node_type == "batch_tank":
+        t = db.get(BatchTank, node_id)
+        if not t:
+            return []
+        out = []
+        for stage, label in (("len_men_chinh", "Lên men chính"), ("len_men_phu", "Lên men phụ")):
+            st = qc_catalog.stage_qc_status(db, stage, "batch_tank",
+                                            qc_catalog.batch_tank_scope_id(node_id, stage), t.product_id)
+            out.append(_trim_qc(stage, label, st))
+        return out
+    if node_type == "batch_filter_lot":
+        fl = db.get(BatchFilterLot, node_id)
+        if not fl:
+            return []
+        st = qc_catalog.stage_qc_status(db, "loc", "batch_filter_lot", node_id, fl.product_id,
+                                        finished_product_id=fl.finished_product_id, beer_type_id=fl.beer_type_id)
+        return [_trim_qc("loc", "Lọc (Mẻ SX)", st)]
+    if node_type == "batch_pack_lot":
+        p = db.get(BatchPackLot, node_id)
+        if not p:
+            return []
+        fl = db.get(BatchFilterLot, p.filter_lot_id)
+        st = qc_catalog.stage_qc_status(db, "thanh_pham", "batch_pack_lot", node_id,
+                                        fl.product_id if fl else None, finished_product_id=p.finished_product_id,
+                                        beer_type_id=fl.beer_type_id if fl else None)
+        return [_trim_qc("thanh_pham", "Thành phẩm (Mẻ SX)", st)]
     return []
 
 
@@ -191,6 +221,18 @@ def _period(db: Session, node_type: str, node_id: str) -> Optional[dict]:
     if node_type == "finished_goods_unit":
         u = db.get(FinishedGoodsUnit, node_id)
         return {"start": u.created_at, "end": u.shipped_at} if u else None
+    if node_type == "batch":
+        b = db.get(BatchExecution, node_id)
+        return {"start": b.start_at, "end": b.end_at} if b else None
+    if node_type == "batch_tank":
+        t = db.get(BatchTank, node_id)
+        return {"start": t.created_at, "end": None} if t else None
+    if node_type == "batch_filter_lot":
+        fl = db.get(BatchFilterLot, node_id)
+        return {"start": fl.created_at, "end": fl.ended_at} if fl else None
+    if node_type == "batch_pack_lot":
+        p = db.get(BatchPackLot, node_id)
+        return {"start": p.created_at, "end": None} if p else None
     return None
 
 
@@ -314,20 +356,28 @@ def _walk(db: Session, node_type: str, node_id: str, direction: str,
     node vẫn hiện trong cây nhưng KHÔNG đi tiếp xuống con của nó — dùng cho "Truy xuôi theo
     nấu" (dừng ở "bottle"/chiết, không đi tiếp ra pallet/xuất kho, xem services/lot_record.py
     ::build_brew_forward_record)."""
-    visited: set[tuple] = set()
     stop_types = stop_types or set()
 
-    def recurse(ntype: str, nid: str) -> dict:
+    def recurse(ntype: str, nid: str, ancestors: frozenset) -> dict:
         node = _label(db, ntype, nid)
         key = (ntype, nid)
-        if key in visited:
+        if key in ancestors:
+            # CHỈ đánh dấu "cycle" thật (node tự lặp lại trên CHÍNH đường đi từ gốc xuống) —
+            # KHÔNG dùng 1 set "visited" DÙNG CHUNG toàn bộ cây như trước (2026-09-02, audit
+            # module "Mẻ sản xuất": phối/lọc lại tạo ra "diamond" hợp lệ trong DAG — VD 1 lô lọc
+            # vừa rút trực tiếp từ tank X vừa "lọc lại" từ 1 lô lọc khác cũng rút từ tank X — gặp
+            # lại (batch_tank, X) lần 2 qua nhánh khác KHÔNG phải chu trình, nhưng set dùng chung
+            # trước đây gắn nhãn "cycle" sai VÀ bỏ dở việc mở rộng nhánh đó). `ancestors` chỉ gồm
+            # tổ tiên TRÊN đường đi hiện tại (truyền xuống dạng frozenset mới mỗi lần đệ quy, tự
+            # "quên" khi quay lui sang nhánh khác) — 1 diamond thật giờ được mở rộng ĐẦY ĐỦ ở CẢ
+            # 2 nhánh, chỉ chu trình thật (node là tổ tiên của chính nó) mới bị cắt + gắn nhãn.
             node["children"] = []
             node["cycle"] = True
             return node
-        visited.add(key)
         if ntype in stop_types:
             node["children"] = []
             return node
+        ancestors = ancestors | {key}
 
         if direction == "forward" and ntype == "bottle":
             # Dưới ngưỡng: đệ quy đầy đủ như mọi loại node khác (giữ nguyên mã từng vỉ/keg —
@@ -357,7 +407,7 @@ def _walk(db: Session, node_type: str, node_id: str, direction: str,
 
         children = []
         for nt, ni, e in nexts:
-            child = recurse(nt, ni)
+            child = recurse(nt, ni, ancestors)
             child["relation"] = e.relation
             child["quantity"] = e.quantity
             child["uom"] = e.uom
@@ -365,7 +415,7 @@ def _walk(db: Session, node_type: str, node_id: str, direction: str,
         node["children"] = children
         return node
 
-    return recurse(node_type, node_id)
+    return recurse(node_type, node_id, frozenset())
 
 
 def trace_backward(db: Session, node_type: str, node_id: str) -> dict:

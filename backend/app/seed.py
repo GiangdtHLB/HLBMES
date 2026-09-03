@@ -15,6 +15,7 @@ from .config import SEED_DEMO
 from .database import SessionLocal, init_db
 from .models.brewing import (
     BottleRecord,
+    BrewOrder,
     BrewRecord,
     FermentRecord,
     FilterRecord,
@@ -30,7 +31,6 @@ from .models.maintenance import Calibration, Equipment, Incident, MaintenancePla
 from .models.master import BeerType, Material, Product
 from .models.materials import MaterialLot
 from .models.metrics import OEERecord, ProcessReading
-from .models.orders import ProductionOrder
 from .models.process import ChemicalUsage, YeastIssue, YeastLot
 from .models.recipes import Recipe, RecipeVersion
 from .models.formula import Formula
@@ -129,7 +129,7 @@ def seed():
         print("MES_SEED_DEMO=0 → chỉ tạo admin, KHÔNG seed tài khoản/API key/dữ liệu demo (an toàn cho production).")
         db.close()
         return
-    if db.execute(select(ProductionOrder)).first():
+    if db.execute(select(BrewOrder).where(BrewOrder.order_code == "PO-2406-1001")).first():
         print("Đã có dữ liệu — bỏ qua seed. (Xóa backend/mes.db để seed lại.)")
         db.close()
         return
@@ -244,18 +244,18 @@ def seed():
         }, ENG)
         formula_svc.activate_formula(db, lager_formula.formula_id, ENG)
 
-    # --- Production order ---
-    order = ProductionOrder(order_id=new_id(), order_code="PO-2406-1001",
-                            beer_type_id=lager_type.beer_type_id, product_id=lager.product_id,
-                            planned_qty=50000, uom="L",
-                            priority=3, status="released", source_version="ERP-v1",
-                            created_at=utcnow())
+    # --- Lệnh nấu (BrewOrder) làm cha cho mẻ demo end-to-end ---
+    order = BrewOrder(brew_order_id=new_id(), order_code="PO-2406-1001", order_year=utcnow().year,
+                      product_id=lager.product_id, recipe_version_id=rv.version_id,
+                      planned_volume_hl=50000, created_at=utcnow())
     db.add(order)
     db.commit()
 
     # --- Kịch bản end-to-end cho một mẻ ---
-    batch = batch_svc.create_batch(db, order.order_id, rv.version_id, SUP,
-                                   batch_code="B-2406-0001", planned_qty=50000)
+    # Mã mẻ Braumat BẮT BUỘC số nguyên (unique theo năm) từ 2026-09-02 — xem
+    # services/batches.py::create_batch; seed dùng "9001"/"9002" (số cao, tránh trùng với mã nhỏ 1,2,3... mà các test file khác hay tự đặt trong cùng 1 DB tạm) thay vì mã mô tả cũ "B-2406-0001".
+    batch = batch_svc.create_batch(db, order.brew_order_id, rv.version_id, SUP,
+                                   batch_code="9001", planned_qty=50000)
     # consume nguyên liệu
     malt_lot = db.execute(select(MaterialLot).where(MaterialLot.lot_code == "MALT-2406-01")).scalar_one()
     hop_lot = db.execute(select(MaterialLot).where(MaterialLot.lot_code == "HOP-2406-01")).scalar_one()
@@ -276,6 +276,8 @@ def seed():
                                 "value": 4.4, "unit": "", "lower_limit": 4.2, "upper_limit": 4.6}, QA)
     # tạo lô bright beer
     bright = batch_svc.produce_lot(db, batch.batch_id, "BRIGHT-2406-0001", 48500, "bright", OP)
+    batch_svc.set_actual_qty(db, batch.batch_id, 48500, OP)
+    batch_svc.set_end_at(db, batch.batch_id, utcnow(), OP)
     batch_svc.transition(db, batch.batch_id, "completed", OP)
     # release chất lượng cho mẻ và lô bright
     qual_svc.set_hold(db, "batch", batch.batch_id, on_hold=False, user=QA, reason="QC đạt")
@@ -323,7 +325,7 @@ def seed():
     db.commit()
 
     db.close()
-    print("Seed xong. Order PO-2406-1001, mẻ B-2406-0001 đã chạy & close.")
+    print("Seed xong. Order PO-2406-1001, mẻ 9001 đã chạy & close.")
     print("Thử truy xuất: GET /api/trace/backward?code=PKG-2406-0001")
     print(f"API key (read) : {read_token}")
     print(f"API key (write/edge): {edge_token}")
@@ -335,15 +337,15 @@ def _seed_workorders(db, order, rv, batch) -> None:
     from .models.workorder import WorkOrder
     from .common import WorkOrderState
     today = utcnow().date()
-    wo1 = WorkOrder(wo_id=new_id(), wo_code="WO-2406-001", production_order_id=order.order_id,
+    wo1 = WorkOrder(wo_id=new_id(), wo_code="WO-2406-001", brew_order_id=order.brew_order_id,
                     product_id=order.product_id, recipe_version_id=rv.version_id, planned_qty=50000,
                     uom="L", line="Nấu A", shift="A", scheduled_date=today - timedelta(days=1),
                     priority=3, status=WorkOrderState.COMPLETED.value, created_by="quandoc")
-    wo2 = WorkOrder(wo_id=new_id(), wo_code="WO-2406-002", production_order_id=order.order_id,
+    wo2 = WorkOrder(wo_id=new_id(), wo_code="WO-2406-002", brew_order_id=order.brew_order_id,
                     product_id=order.product_id, recipe_version_id=rv.version_id, planned_qty=50000,
                     uom="L", line="Nấu A", shift="B", scheduled_date=today,
                     priority=2, status=WorkOrderState.RELEASED.value, created_by="quandoc")
-    wo3 = WorkOrder(wo_id=new_id(), wo_code="WO-2406-003", production_order_id=order.order_id,
+    wo3 = WorkOrder(wo_id=new_id(), wo_code="WO-2406-003", brew_order_id=order.brew_order_id,
                     product_id=order.product_id, recipe_version_id=rv.version_id, planned_qty=25000,
                     uom="L", line="Nấu B", shift="A", scheduled_date=today + timedelta(days=1),
                     priority=5, status=WorkOrderState.PLANNED.value, created_by="quandoc")
@@ -352,7 +354,7 @@ def _seed_workorders(db, order, rv, batch) -> None:
     demand = [("004", 40000, 0, 2), ("005", 50000, 1, 3), ("006", 500000, 1, 1),
               ("007", 30000, 2, 4), ("008", 45000, 3, 2)]
     for code, qty, day_off, prio in demand:
-        extra.append(WorkOrder(wo_id=new_id(), wo_code=f"WO-2406-{code}", production_order_id=order.order_id,
+        extra.append(WorkOrder(wo_id=new_id(), wo_code=f"WO-2406-{code}", brew_order_id=order.brew_order_id,
                                product_id=order.product_id, recipe_version_id=rv.version_id, planned_qty=qty,
                                uom="L", line="Nấu A", shift="A", scheduled_date=today + timedelta(days=day_off),
                                priority=prio, status=WorkOrderState.RELEASED.value, created_by="quandoc"))
@@ -364,8 +366,8 @@ def _seed_workorders(db, order, rv, batch) -> None:
     # Mẻ thứ 2 (đang chạy, CHƯA cấp liệu) thuộc WO-002 (Nấu A) — để demo Cấp liệu/Backflush.
     rv_eff = db.execute(select(RecipeVersion).where(
         RecipeVersion.recipe_id == rv.recipe_id, RecipeVersion.state == "effective")).scalars().first()
-    b2 = batch_svc.create_batch(db, order.order_id, rv_eff.version_id, SUP,
-                                batch_code="B-2406-0002", planned_qty=50000,
+    b2 = batch_svc.create_batch(db, order.brew_order_id, rv_eff.version_id, SUP,
+                                batch_code="9002", planned_qty=50000,
                                 work_order_id=wo2.wo_id)
     batch_svc.transition(db, b2.batch_id, "ready", SUP)
     batch_svc.transition(db, b2.batch_id, "running", OP)
@@ -442,7 +444,7 @@ def _seed_warehouse(db, materials) -> None:
                           ts=now - timedelta(days=10)),
             StockMovement(movement_id=new_id(), movement_type="issue", material_id=mat.material_id,
                           lot_id=lot.lot_id, lot_code=lot.lot_code, quantity=200, uom=lot.uom,
-                          location_from=lot.location, mode="de_nghi", reason="Cấp cho mẻ B-2406-0001",
+                          location_from=lot.location, mode="de_nghi", reason="Cấp cho mẻ 9001",
                           actor="operator1", ts=now - timedelta(days=2)),
         ])
     db.commit()
@@ -1017,7 +1019,7 @@ def _seed_schedule(db) -> None:
 def _seed_isa88(db) -> None:
     """#P3-1: chạy vài phase ISA-88 trên mẻ B-2406-0002 (đang chạy)."""
     from .models.isa88 import BatchPhaseRun
-    b = db.execute(select(BatchExecution).where(BatchExecution.batch_code == "B-2406-0002")).scalar_one_or_none()
+    b = db.execute(select(BatchExecution).where(BatchExecution.batch_code == "9002")).scalar_one_or_none()
     if not b:
         return
     plan = [("Nấu", "Đường hóa", "Vào liệu", "complete"),
@@ -1304,7 +1306,7 @@ def _seed_oee_reason_catalog_keg30k(db) -> None:
 def _seed_dispense(db, batch_id, materials) -> None:
     """#6: 1 phiếu cấp liệu (informational) khớp lượng đã tiêu thụ của mẻ demo."""
     disp = Dispense(dispense_id=new_id(), dispense_code="DISP-2406-0001", batch_id=batch_id,
-                    mode="dispense", status="issued", note="Cấp liệu mẻ B-2406-0001 (FEFO)",
+                    mode="dispense", status="issued", note="Cấp liệu mẻ 9001 (FEFO)",
                     created_by="vanhanh", created_at=utcnow())
     db.add(disp)
     db.flush()

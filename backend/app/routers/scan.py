@@ -8,8 +8,8 @@ from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..models.batches import BatchExecution
+from ..models.brewing import BrewOrder
 from ..models.materials import MaterialLot
-from ..models.orders import ProductionOrder
 from ..models.workorder import WorkOrder
 from ..security import User, get_current_user
 
@@ -37,11 +37,11 @@ def scan(code: str, db: Session = Depends(get_db), user: User = Depends(get_curr
         return {"type": "work_order", "data": {"wo_id": wo.wo_id, "wo_code": wo.wo_code,
                 "status": wo.status, "line": wo.line, "shift": wo.shift, "planned_qty": wo.planned_qty,
                 "uom": wo.uom}}
-    # Lệnh ERP
-    po = db.execute(select(ProductionOrder).where(ProductionOrder.order_code == code)).scalar_one_or_none()
-    if po:
-        return {"type": "production_order", "data": {"order_id": po.order_id, "order_code": po.order_code,
-                "status": po.status, "planned_qty": po.planned_qty, "uom": po.uom}}
+    # Lệnh nấu
+    bo = db.execute(select(BrewOrder).where(BrewOrder.order_code == code)).scalar_one_or_none()
+    if bo:
+        return {"type": "brew_order", "data": {"brew_order_id": bo.brew_order_id, "order_code": bo.order_code,
+                "planned_qty": bo.planned_volume_hl, "uom": "hl"}}
 
     # Vỉ/keg kho thành phẩm (đầu đọc cầm tay quét — WMS)
     from ..services import wms as wms_svc

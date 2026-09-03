@@ -130,9 +130,9 @@ async function renderScanResult(r) {
     $("scanres").innerHTML = `<div class="card">
       <h3>📋 Lệnh SX <code>${esc(d.wo_code)}</code> <span class="badge b-info">${esc(d.status)}</span></h3>
       ${kv("Line/Ca", `${esc(d.line || "—")} / ${esc(d.shift || "—")}`)}${kv("SL kế hoạch", `${d.planned_qty} ${esc(d.uom)}`)}</div>`;
-  } else if (r.type === "production_order") {
-    $("scanres").innerHTML = `<div class="card"><h3>🧾 Lệnh ERP <code>${esc(d.order_code)}</code> <span class="badge b-info">${esc(d.status)}</span></h3>
-      ${kv("SL", `${d.planned_qty} ${esc(d.uom)}`)}</div>`;
+  } else if (r.type === "brew_order") {
+    $("scanres").innerHTML = `<div class="card"><h3>🧾 Lệnh nấu <code>${esc(d.order_code)}</code></h3>
+      ${kv("SL kế hoạch", `${d.planned_qty} ${esc(d.uom)}`)}</div>`;
   }
 }
 

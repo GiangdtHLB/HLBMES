@@ -1,10 +1,15 @@
 """Smoke test "đường GHI" cho lô lớn (190.000 vỉ) — bắt buộc theo docs/DEPLOY-CONTRACT.md
 trước khi merge thay đổi kho thành phẩm (xem docs/WMS-LOT-LEVEL-REDESIGN.md §7): seed 1 lô
-lớn -> duyệt chiết (phải sinh ĐÚNG 1 dòng trong vài giây — đây chính là bug gốc: trước đây
-sinh 1 dòng/vỉ, ca_total=190.000 tạo ~190.000 INSERT row-by-row, qua mạng tới SQL Server mất
-~1 giờ, Cloudflare cắt ở 100s -> nút Duyệt "treo") -> xuất một phần -> phân rã một phần ->
-điều chuyển một phần -> xuất tự do một phần -> hoàn tác từng thao tác -> kiểm số lượng khớp
-tuyệt đối và không phát sinh dòng thừa (không quay lại mô hình 1 dòng/vỉ)."""
+lớn -> duyệt nhập kho thành phẩm (phải sinh ĐÚNG 1 dòng trong vài giây — đây chính là bug gốc:
+trước đây sinh 1 dòng/vỉ, ca_total=190.000 tạo ~190.000 INSERT row-by-row, qua mạng tới SQL
+Server mất ~1 giờ, Cloudflare cắt ở 100s -> nút Duyệt "treo") -> xuất một phần -> phân rã một
+phần -> điều chuyển một phần -> xuất tự do một phần -> hoàn tác từng thao tác -> kiểm số lượng
+khớp tuyệt đối và không phát sinh dòng thừa (không quay lại mô hình 1 dòng/vỉ).
+
+Nguồn tạo lô đổi từ "duyệt chiết" (routers/brewing.py::approve_bottle, module Nấu-Lọc-Chiết cũ,
+đã tháo khỏi WMS) sang "duyệt nhập kho Lô thành phẩm" (services/batch_pipeline.py::
+release_pack_lot_to_wms, pipeline "Mẻ SX" mới) — cùng dùng _create_units nên smoke test vẫn
+đúng ý nghĩa gốc (O(1) theo quy mô lô, không phải O(n))."""
 
 import os
 import tempfile
@@ -73,6 +78,33 @@ def _declare_pending(client, headers, stage, scope_type, scope_id):
             assert r.status_code == 201, r.text
 
 
+def _make_batch(client, admin_h, batch_code):
+    rid = client.get("/api/recipes", headers=admin_h).json()[0]["recipe_id"]
+    vers = client.get(f"/api/recipes/{rid}/versions", headers=admin_h).json()
+    v = next(v for v in vers if v["state"] == "effective")
+    oid = client.get("/api/brewing/orders", headers=admin_h).json()[0]["brew_order_id"]
+    b = client.post("/api/batches", headers=admin_h,
+                    json={"order_id": oid, "recipe_version_id": v["version_id"],
+                          "batch_code": batch_code, "planned_qty": 1000, "allow_shortage": True})
+    assert b.status_code == 201, b.text
+    return b.json()["batch_id"]
+
+
+def _run_batch_to_completed(client, admin_h, batch_id, actual_qty=None):
+    for target in ("ready", "running"):
+        r = client.post(f"/api/batches/{batch_id}/transition", headers=admin_h, json={"target": target})
+        assert r.status_code == 200, r.text
+    if actual_qty is None:
+        actual_qty = client.get(f"/api/batches/{batch_id}", headers=admin_h).json()["planned_qty"]
+    aq = client.post(f"/api/batches/{batch_id}/actual-qty", headers=admin_h, json={"actual_qty": actual_qty})
+    assert aq.status_code == 200, aq.text
+    fin = client.post(f"/api/batches/{batch_id}/finish", headers=admin_h, json={})
+    assert fin.status_code == 200, fin.text
+    r = client.post(f"/api/batches/{batch_id}/transition", headers=admin_h, json={"target": "completed"})
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
 def _lot_qty(client, admin_h, lot_code, status=None, unit_type=None):
     """Tổng quantity của lô — LOẠI TRỪ status="decomposed": dòng vỉ nguồn sau khi phân rã
     được GIỮ LẠI (không xóa) để truy vết genealogy/audit, nhưng quantity của nó đã được "nhân
@@ -91,25 +123,47 @@ def test_190k_lot_write_path_smoke(client, admin_h, vanhanh_h, kcs_h):
     assert fp.status_code == 201, fp.text
     fp_id = fp.json()["finished_product_id"]
 
-    bottle_code = "CH-SMOKE190K"
-    b = client.post("/api/brewing/bottles", headers=vanhanh_h,
-                    json={"bottle_code": bottle_code, "beer_type": "Bia smoke test",
-                          "finished_product_id": fp_id})
-    assert b.status_code == 201, b.text
-    bottle_id = b.json()["bottle_id"]
+    batch_id = _make_batch(client, admin_h, "1")
+    _run_batch_to_completed(client, admin_h, batch_id)
+    tank = client.post("/api/batch-tanks", headers=admin_h,
+                       json={"batch_ids": [batch_id], "tank_code": "TANK-SMOKE190K"})
+    assert tank.status_code == 201, tank.text
+    to_bbt_r = client.post("/api/lines", headers=admin_h,
+                           json={"code": "BBT-SMOKE190K", "name": "Tank thành phẩm smoke", "kind": "tank_bbt"})
+    assert to_bbt_r.status_code == 201, to_bbt_r.text
+    to_bbt = to_bbt_r.json()["code"]
+    draw = client.post("/api/batch-filter-lots", headers=admin_h, json={
+        "filter_lot_code": "FLOT-SMOKE190K", "to_bbt": to_bbt,
+        "sources": [{"source_type": "tank", "source_tank_id": tank.json()["tank_id"]}],
+    })
+    assert draw.status_code == 201, draw.text
+    filter_lot_id = draw.json()["filter_lot_id"]
+    src = client.get(f"/api/batch-filter-lots/{filter_lot_id}/sources", headers=admin_h).json()[0]
+    batches = client.get(f"/api/batch-filter-lots/{filter_lot_id}/batches", headers=admin_h).json()
+    fin_src = client.put(f"/api/batch-filter-lots/batches/{batches[0]['batch_link_id']}/finish",
+                         headers=admin_h,
+                         json={"draws": [{"source_link_id": src["link_id"], "dich_nha_hl": 900}],
+                              "nuoc_bai_khi_hl": 0})
+    assert fin_src.status_code == 200, fin_src.text
+    appr_fl = client.post(f"/api/batch-filter-lots/{filter_lot_id}/approve", headers=admin_h)
+    assert appr_fl.status_code == 200, appr_fl.text
 
-    fin = client.post(f"/api/brewing/bottles/{bottle_id}/finish", headers=vanhanh_h,
-                      json={"ca1": CA_TOTAL})
-    assert fin.status_code == 200, fin.text
-    _declare_pending(client, admin_h, "thanh_pham", "bottle", f"{bottle_code}__thanh_pham")
+    pack = client.post("/api/batch-pack-lots", headers=admin_h, json={
+        "from_bbt": to_bbt, "qty": 90000, "pack_lot_code": "PKG-SMOKE190K", "lot_no": "LOT-SMOKE190K",
+        "finished_product_id": fp_id})
+    assert pack.status_code == 201, pack.text
+    pack_lot_id = pack.json()["pack_lot_id"]
+
+    shifts = client.put(f"/api/batch-pack-lots/{pack_lot_id}/shifts", headers=admin_h, json={"ca1_qty": CA_TOTAL})
+    assert shifts.status_code == 200, shifts.text
+    approve_qc = client.post(f"/api/batch-pack-lots/{pack_lot_id}/approve", headers=admin_h)
+    assert approve_qc.status_code == 200, approve_qc.text
 
     t0 = time.perf_counter()
-    # Duyệt nhập kho thành phẩm nay thuộc quyền Giám đốc/Phó GĐ Sản xuất (production.release_to_wms),
-    # tách khỏi quality.release của KCS — dùng admin_h (bypass mọi permission) thay vì kcs_h ở đây.
-    approve = client.post(f"/api/brewing/bottles/{bottle_id}/approve", headers=admin_h)
+    approve = client.post(f"/api/batch-pack-lots/{pack_lot_id}/release-to-wms", headers=admin_h)
     elapsed = time.perf_counter() - t0
     assert approve.status_code == 200, approve.text
-    assert elapsed < 5, (f"Duyệt chiết lô {CA_TOTAL} vỉ mất {elapsed:.2f}s — phải O(1) theo quy mô lô "
+    assert elapsed < 5, (f"Duyệt nhập kho lô {CA_TOTAL} vỉ mất {elapsed:.2f}s — phải O(1) theo quy mô lô "
                         "(1 INSERT duy nhất), không phải O(n) như mô hình 1 dòng/vỉ cũ")
 
     body = approve.json()

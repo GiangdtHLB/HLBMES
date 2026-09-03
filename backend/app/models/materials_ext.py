@@ -11,7 +11,7 @@ Việc trừ tồn lô + tạo genealogy + chặn vượt định mức tái dù
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import UnicodeText, Float, ForeignKey, Unicode
+from sqlalchemy import Boolean, UnicodeText, Float, ForeignKey, Unicode
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ..common import UTCDateTime, new_id, utcnow
@@ -41,6 +41,10 @@ class DispenseLine(Base):
     lot_code: Mapped[Optional[str]] = mapped_column(Unicode(64), nullable=True)
     quantity: Mapped[float] = mapped_column(Float, default=0.0)
     uom: Mapped[str] = mapped_column(Unicode(255), default="kg")
+    # fifo_ok=False khi người dùng chọn lô KHÁC lô FIFO/FEFO gợi ý — bắt buộc có `reason` lúc đó
+    # (xem services/dispense.py::_plan_consume) để truy vết tại sao chọn lệch FIFO.
+    fifo_ok: Mapped[bool] = mapped_column(Boolean, default=True)
+    reason: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
 
 

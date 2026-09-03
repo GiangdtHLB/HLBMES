@@ -64,7 +64,7 @@ def test_capa_and_coa(client):
     h = _login(client, "quandoc", "123456")
     capas = client.get("/api/qc/capa", headers=h).json()
     assert len(capas) >= 1
-    b1 = _batch_id(client, h, "B-2406-0001")
+    b1 = _batch_id(client, h, "9001")
     coa = client.get(f"/api/qc/coa/{b1}", headers=h).json()
     assert coa["overall_verdict"] == "PASS"   # mẻ đạt + released
 
@@ -98,7 +98,7 @@ def test_downtime_negative_rejected(client):
 # ---------------- #6 Material: dispense ----------------
 def test_dispense_fefo_and_ceiling(client):
     h = _login(client, "vanhanh", "123456")          # operator scope Nấu A (B2 thuộc Nấu A)
-    b2 = _batch_id(client, h, "B-2406-0002")
+    b2 = _batch_id(client, h, "9002")
     ok = client.post(f"/api/dispense/{b2}", headers=h,
                      json={"lines": [{"material_code": "MALT-PILS", "quantity": 1000}]})
     assert ok.status_code == 200, ok.text
@@ -112,7 +112,7 @@ def test_dispense_fefo_and_ceiling(client):
 # ---------------- #3 Recipe/BOM: yield + change-control ----------------
 def test_yield_report(client):
     h = _login(client, "quandoc", "123456")
-    b1 = _batch_id(client, h, "B-2406-0001")
+    b1 = _batch_id(client, h, "9001")
     y = client.get(f"/api/batches/{b1}/yield", headers=h).json()
     assert y["overall_yield_pct"] and y["overall_yield_pct"] < 100
     assert any(s["expected_pct"] for s in y["steps"])   # snapshot có yield_steps
@@ -133,7 +133,7 @@ def test_scope_line_filters_workorders(client):
 
 def test_scope_qc_blocks_unassigned_test(client):
     h = _login(client, "kcs", "123456")               # scope_qc = "Độ đường (°P),pH"
-    b1 = _batch_id(client, _login(client, "admin", "AdminTest123"), "B-2406-0001")
+    b1 = _batch_id(client, _login(client, "admin", "AdminTest123"), "9001")
     bad = client.post("/api/quality/results", headers=h,
                       json={"scope_id": b1, "parameter": "CO2 (g/L)", "value": 5.2})
     assert bad.status_code == 403
@@ -214,7 +214,7 @@ def test_ai_chat_stream(client):
 # ---------------- P3-1: ISA-88 procedural ----------------
 def test_isa88_procedure_execution(client):
     h = _login(client, "quandoc", "123456")
-    b2 = _batch_id(client, h, "B-2406-0002")
+    b2 = _batch_id(client, h, "9002")
     st = client.get(f"/api/isa88/batch/{b2}", headers=h).json()
     assert st["phases_total"] > 0 and st["phases_done"] >= 2   # seed đã chạy 2 phase complete
     # tìm 1 phase idle → start → complete
@@ -331,7 +331,7 @@ def test_recipe_suspend_resume(client):
                        json={"target": "suspended", "reason": "Tạm ngưng để hiệu chỉnh men"}).json()["state"] == "suspended"
     # đang tạm ngưng → KHÔNG tạo được mẻ
     hq = _login(client, "quandoc", "123456")
-    oid = client.get("/api/orders", headers=hq).json()[0]["order_id"]
+    oid = client.get("/api/brewing/orders", headers=hq).json()[0]["brew_order_id"]
     bad = client.post("/api/batches", headers=hq,
                       json={"order_id": oid, "recipe_version_id": vid, "planned_qty": 1000, "allow_shortage": True})
     assert bad.status_code == 409

@@ -156,7 +156,11 @@ def test_approve_bottle_blocked_when_no_output(client, admin_h, vanhanh_h):
     assert "sản lượng" in blocked.json()["detail"].lower()
 
 
-def test_approve_bottle_creates_wms_units_and_marks_stocked(client, admin_h, vanhanh_h):
+def test_approve_bottle_no_longer_creates_wms_units(client, admin_h, vanhanh_h):
+    """Hồi quy xác nhận đã tháo khỏi WMS (module Nấu-Lọc-Chiết cũ) — approve_bottle chỉ còn
+    đóng hồ sơ (approved), KHÔNG còn tự sinh FinishedGoodsUnit/đánh dấu stocked nữa. Lô thành
+    phẩm (services/batch_pipeline.py::release_pack_lot_to_wms) là nơi thay thế duy nhất, xem
+    tests/test_batch_pack_lot_wms.py."""
     fp = client.post("/api/finished-products", headers=admin_h,
                      json={"code": "SKU-WMS-TEST", "name": "SKU WMS test", "uom": "chai"})
     assert fp.status_code == 201, fp.text
@@ -176,31 +180,20 @@ def test_approve_bottle_creates_wms_units_and_marks_stocked(client, admin_h, van
 
     ok = client.post(f"/api/brewing/bottles/{bottle_id}/approve", headers=admin_h)
     assert ok.status_code == 200, ok.text
-    unit_codes = ok.json()["unit_codes"]
-    assert unit_codes
-    # Ca 1/2/3 tính theo VỈ (đơn vị đóng gói), không phải lon rời — ca1+ca2=15 VỈ, pack_size
-    # lấy từ FinishedProduct (mặc định 24 vì không khai báo riêng) -> 1 dòng lô duy nhất
-    # (xem docs/WMS-LOT-LEVEL-REDESIGN.md), quantity = 15*24 = 360 lon.
-    assert ok.json()["count"] == 15
-    assert ok.json()["unit_type"] == "vi"
+    assert "unit_codes" not in ok.json()
+    assert "count" not in ok.json()
 
     units = client.get("/api/wms/units", headers=admin_h).json()
     new_units = {u["unit_code"] for u in units} - before_units
-    assert set(unit_codes) == new_units
-    unit = next(u for u in units if u["unit_code"] == unit_codes[0])
-    assert unit["product"] == "SKU-WMS-TEST"
-    assert unit["quantity"] == 360
+    assert new_units == set()   # không sinh thêm dòng nào trong Kho TP
 
     rows = client.get("/api/brewing/bottles", headers=admin_h).json()
     row = next(r for r in rows if r["bottle_code"] == bottle_code)
-    assert row["stocked"] is True
+    assert row["stocked"] is False   # KHÔNG còn tự đánh dấu đã nhập kho
     assert row["approved"] is True
     assert row["approved_by"] == "admin"
     assert row["approved_at"]
-    # Số lô bia (lot_no) tự sinh — vỉ kế thừa đúng số lô đó, không rơi về bottle_code.
-    assert row["lot_no"]
-    assert unit["lot_code"] == row["lot_no"]
 
-    # Duyệt lần 2 phải báo lỗi (đã duyệt rồi), không được tạo vỉ trùng.
+    # Duyệt lần 2 phải báo lỗi (đã duyệt rồi).
     twice = client.post(f"/api/brewing/bottles/{bottle_id}/approve", headers=admin_h)
     assert twice.status_code == 409, twice.text

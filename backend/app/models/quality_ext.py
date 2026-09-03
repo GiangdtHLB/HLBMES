@@ -96,6 +96,53 @@ class StageQcGroup(Base):
     active: Mapped[bool] = mapped_column(default=True)
 
 
+class ProcessParameter(Base):
+    """Danh mục "Tham số quy trình" (setpoint công nghệ, VD nhiệt độ đường hóa/lên men) —
+    mirror QCParameter nhưng cho tham số vận hành thay vì chỉ tiêu chất lượng. Recipe chọn
+    tham số từ đây thay vì gõ tay tên (xem models/recipes.py::RecipeVersionParamItem)."""
+
+    __tablename__ = "process_parameter"
+
+    param_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
+    code: Mapped[str] = mapped_column(Unicode(64), unique=True, index=True)
+    name: Mapped[str] = mapped_column(Unicode(255))
+    unit: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    target: Mapped[Optional[float]] = mapped_column(Float, nullable=True)     # setpoint
+    usl: Mapped[Optional[float]] = mapped_column(Float, nullable=True)        # ngưỡng trên
+    lsl: Mapped[Optional[float]] = mapped_column(Float, nullable=True)        # ngưỡng dưới
+    phase: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)  # công đoạn mặc định (VD "mash")
+    note: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    active: Mapped[bool] = mapped_column(default=True)
+
+
+class ProcessParameterGroup(Base):
+    """Nhóm tham số quy trình — mirror QCParameterGroup."""
+
+    __tablename__ = "process_parameter_group"
+
+    group_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
+    code: Mapped[str] = mapped_column(Unicode(64), unique=True, index=True)
+    name: Mapped[str] = mapped_column(Unicode(255))
+    note: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    active: Mapped[bool] = mapped_column(default=True)
+
+
+class ProcessParameterGroupItem(Base):
+    """Một tham số trong một nhóm — có thể ghi đè target/usl/lsl riêng cho nhóm đó.
+    Mirror QCParameterGroupItem."""
+
+    __tablename__ = "process_parameter_group_item"
+
+    item_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
+    group_id: Mapped[str] = mapped_column(ForeignKey("process_parameter_group.group_id"), index=True)
+    param_id: Mapped[str] = mapped_column(ForeignKey("process_parameter.param_id"), index=True)
+    seq: Mapped[int] = mapped_column(Integer, default=0)
+    mandatory: Mapped[bool] = mapped_column(default=True)
+    target_override: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    usl_override: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    lsl_override: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+
+
 class CAPA(Base):
     __tablename__ = "capa"
 

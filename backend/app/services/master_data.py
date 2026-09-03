@@ -20,7 +20,6 @@ from ..models.materials import MaterialLot, Supplier
 from ..models.materials_ext import MaterialQcGroup
 from ..models.metrics import OEERecord
 from ..models.oee_ext import DowntimeEvent
-from ..models.orders import ProductionOrder
 from ..models.quality_ext import StageQcGroup
 from ..models.recipes import Recipe, RecipeVersion
 from ..models.scheduling import ScheduleSlot
@@ -53,8 +52,6 @@ def delete_beer_type(db: Session, beer_type_id: str, user: User) -> None:
         raise NotFoundError("Loại bia không tồn tại.")
     checks = [
         ("dịch bia", select(func.count(Product.product_id)).where(Product.beer_type_id == beer_type_id)),
-        ("lệnh sản xuất (ERP)", select(func.count(ProductionOrder.order_id)).where(
-            ProductionOrder.beer_type_id == beer_type_id)),
         ("lệnh lọc", select(func.count(FilterOrder.filter_order_id)).where(FilterOrder.beer_type_id == beer_type_id)),
         ("mẻ lọc", select(func.count(FilterRecord.filter_id)).where(FilterRecord.beer_type_id == beer_type_id)),
         ("mẻ chiết", select(func.count(BottleRecord.bottle_id)).where(BottleRecord.beer_type_id == beer_type_id)),
@@ -213,8 +210,6 @@ def delete_product(db: Session, product_id: str, user: User) -> None:
             FinishedProduct.product_id == product_id)),
         ("nhóm chỉ tiêu công đoạn", select(func.count(StageQcGroup.link_id)).where(
             StageQcGroup.product_id == product_id, StageQcGroup.active == true())),
-        ("lệnh sản xuất (ERP cũ)", select(func.count(ProductionOrder.order_id)).where(
-            ProductionOrder.product_id == product_id)),
         ("work order", select(func.count(WorkOrder.wo_id)).where(WorkOrder.product_id == product_id)),
         ("version công thức", select(func.count(RecipeVersion.version_id)).where(
             RecipeVersion.product_id == product_id)),
@@ -290,8 +285,6 @@ def delete_recipe(db: Session, recipe_id: str, user: User) -> None:
     checks = [
         ("lệnh nấu", select(func.count(BrewOrder.brew_order_id)).where(
             BrewOrder.recipe_version_id.in_(version_ids))),
-        ("lệnh SX (ERP)", select(func.count(ProductionOrder.order_id)).where(
-            ProductionOrder.recipe_version_id.in_(version_ids))),
         ("work order", select(func.count(WorkOrder.wo_id)).where(WorkOrder.recipe_version_id.in_(version_ids))),
         ("mẻ sản xuất (module cũ)", select(func.count(BatchExecution.batch_id)).where(
             BatchExecution.recipe_version_id.in_(version_ids))),
@@ -305,14 +298,14 @@ def delete_recipe(db: Session, recipe_id: str, user: User) -> None:
 
 
 def used_recipe_version_ids(db: Session, version_ids: list) -> set:
-    """Tập version_id ĐÃ được tham chiếu ở bất kỳ đâu (Lệnh nấu, Lệnh SX (ERP), work order, mẻ
-    sản xuất module cũ) — dùng để ẨN nút "Xóa version" ở UI cho version đã dùng, thay vì hiện
-    rồi bấm mới báo lỗi. Mirror đúng 4 bảng delete_recipe_version kiểm tra, không lặp logic
-    khác (không tính message chi tiết, chỉ cần có/không)."""
+    """Tập version_id ĐÃ được tham chiếu ở bất kỳ đâu (Lệnh nấu, work order, mẻ sản xuất module
+    cũ) — dùng để ẨN nút "Xóa version" ở UI cho version đã dùng, thay vì hiện rồi bấm mới báo
+    lỗi. Mirror đúng các bảng delete_recipe_version kiểm tra, không lặp logic khác (không tính
+    message chi tiết, chỉ cần có/không)."""
     if not version_ids:
         return set()
     used = set()
-    for model in (BrewOrder, ProductionOrder, WorkOrder, BatchExecution):
+    for model in (BrewOrder, WorkOrder, BatchExecution):
         used |= {row[0] for row in db.execute(
             select(model.recipe_version_id).where(model.recipe_version_id.in_(version_ids))).all()}
     return used
@@ -320,19 +313,17 @@ def used_recipe_version_ids(db: Session, version_ids: list) -> set:
 
 def delete_recipe_version(db: Session, version_id: str, user: User) -> None:
     """Xóa 1 version riêng lẻ (VD tạo nhầm lúc test) — không đụng tới version khác cùng công
-    thức. Chặn nếu version này đã từng được tham chiếu ở bất kỳ đâu (Lệnh nấu, Lệnh SX (ERP),
-    work order, hoặc mẻ sản xuất module cũ) — khác delete_recipe (chặn theo product_id vì
-    BrewOrder trước đây không lưu recipe_version_id), giờ BrewOrder/ProductionOrder đều đã lưu
-    thẳng recipe_version_id (xem services/brew_order.py, services/orders.py) nên chặn trực tiếp
-    theo version_id là đủ, không cần suy ra qua product_id nữa."""
+    thức. Chặn nếu version này đã từng được tham chiếu ở bất kỳ đâu (Lệnh nấu, work order, hoặc
+    mẻ sản xuất module cũ) — khác delete_recipe (chặn theo product_id vì BrewOrder trước đây
+    không lưu recipe_version_id), giờ BrewOrder đã lưu thẳng recipe_version_id (xem
+    services/brew_order.py) nên chặn trực tiếp theo version_id là đủ, không cần suy ra qua
+    product_id nữa."""
     require_perm(user, "master.manage")
     v = db.get(RecipeVersion, version_id)
     if not v:
         raise NotFoundError("Version không tồn tại.")
     checks = [
         ("lệnh nấu", select(func.count(BrewOrder.brew_order_id)).where(BrewOrder.recipe_version_id == version_id)),
-        ("lệnh SX (ERP)", select(func.count(ProductionOrder.order_id)).where(
-            ProductionOrder.recipe_version_id == version_id)),
         ("work order", select(func.count(WorkOrder.wo_id)).where(WorkOrder.recipe_version_id == version_id)),
         ("mẻ sản xuất (module cũ)", select(func.count(BatchExecution.batch_id)).where(
             BatchExecution.recipe_version_id == version_id)),

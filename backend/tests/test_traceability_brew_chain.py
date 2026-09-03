@@ -170,17 +170,18 @@ def test_full_chain_traceable_from_lot_to_unit(client, admin_h, vanhanh_h, thukh
     bottle_row = next(r for r in bottles if r["bottle_code"] == bottle_code)
     assert bottle_row["filter_code"] == filter_code
 
-    # 6) KCS duyệt chiết -> tự động sinh vỉ/keg Kho TP (WMS).
+    # 6) KCS duyệt chiết — CHỈ đóng hồ sơ, không còn sinh vỉ/keg Kho TP (WMS) nữa (approve_bottle
+    # đã tháo khỏi WMS; Lô thành phẩm là nơi thay thế duy nhất, xem
+    # tests/test_batch_pack_lot_wms.py cho phần truy xuất tới finished_goods_unit qua pipeline mới).
     _declare_pending(client, admin_h, "thanh_pham", "bottle", f"{bottle_code}__thanh_pham")
     approve_bottle = client.post(f"/api/brewing/bottles/{bottle_id}/approve", headers=admin_h)
     assert approve_bottle.status_code == 200, approve_bottle.text
-    unit_code = approve_bottle.json()["unit_codes"][0]
 
     # ---- Truy xuất phải nhận diện ĐÚNG mọi mã trong chuỗi (trước đây chỉ nhận mã mẻ/lô NVL cũ) ----
-    back_from_unit = client.get(f"/api/trace/backward?code={unit_code}", headers=admin_h)
-    assert back_from_unit.status_code == 200, back_from_unit.text
-    tree = back_from_unit.json()
-    assert tree["type"] == "finished_goods_unit" and tree["code"] == unit_code
+    back_from_bottle = client.get(f"/api/trace/backward?code={bottle_code}", headers=admin_h)
+    assert back_from_bottle.status_code == 200, back_from_bottle.text
+    tree = back_from_bottle.json()
+    assert tree["type"] == "bottle" and tree["code"] == bottle_code
 
     def _codes(node):
         out = {node["code"]}
@@ -224,21 +225,17 @@ def test_full_chain_traceable_from_lot_to_unit(client, admin_h, vanhanh_h, thukh
     thanh_pham_qc = next(q for q in bottle_node["qc"] if q["stage"] == "thanh_pham")
     assert thanh_pham_qc["can_release"] is True  # vừa khai báo đủ ở bước 6 trước khi duyệt chiết
 
-    unit_node = tree
-    assert unit_node["qc"] == []  # vỉ/keg không có bước khai báo chỉ tiêu riêng
-
-    # Truy xuôi từ lô NVL phải ra tới tận vỉ/keg thành phẩm.
+    # Truy xuôi từ lô NVL phải ra tới tận mã chiết (bottle) — chiết là node cuối module cũ còn
+    # với tới (không còn tự sinh vỉ/keg Kho TP, xem ghi chú ở bước 6).
     fwd_from_lot = client.get(f"/api/trace/forward?code={lot_code}", headers=admin_h)
     assert fwd_from_lot.status_code == 200, fwd_from_lot.text
     codes_downstream = _codes(fwd_from_lot.json())
-    assert unit_code in codes_downstream
     assert bottle_code in codes_downstream
 
-    # Recall simulation từ lô NVL phải liệt kê đúng vỉ/keg bị ảnh hưởng.
+    # Recall simulation từ lô NVL phải liệt kê đúng mã chiết bị ảnh hưởng.
     recall = client.get(f"/api/trace/recall?code={lot_code}", headers=admin_h)
     assert recall.status_code == 200, recall.text
     recall_codes = {a["code"] for a in recall.json()["affected"]}
-    assert unit_code in recall_codes
     assert bottle_code in recall_codes
 
 

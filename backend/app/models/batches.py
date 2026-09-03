@@ -4,7 +4,7 @@
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import JSON, Boolean, Float, ForeignKey, Integer, Unicode
+from sqlalchemy import JSON, Boolean, Float, ForeignKey, Integer, Unicode, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ..common import BatchState, QualityStatus, UTCDateTime, new_id, utcnow
@@ -13,11 +13,24 @@ from ..database import Base
 
 class BatchExecution(Base):
     __tablename__ = "batch_execution"
+    # Mã mẻ Braumat (batch_code) unique THEO NĂM (batch_year), không phải toàn hệ thống — mirror
+    # đúng quy ước đã áp dụng cho brew_code/lm_code/filter_code/bottle_code (xem
+    # b4c5d6e7f8b0_year_scoped_code_uniqueness.py): số reset lại mỗi năm, năm sau dùng lại được
+    # số đã dùng năm trước (yêu cầu người dùng 2026-09-02: "khi hết năm thì sẽ tự tính lại từ
+    # đầu... còn năm sau sẽ lặp lại được"). Từ nay batch_code BẮT BUỘC là số nguyên dương (xem
+    # services/batches.py::create_batch) — dữ liệu cũ (trước ràng buộc này) có thể còn mã dạng
+    # chữ, KHÔNG bị ép chuyển đổi ngược, chỉ áp dụng cho bản ghi tạo mới.
+    __table_args__ = (UniqueConstraint("batch_year", "batch_code", name="uq_batch_execution_year_code"),)
 
     batch_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
-    batch_code: Mapped[str] = mapped_column(Unicode(64), unique=True, index=True)
-    order_id: Mapped[str] = mapped_column(ForeignKey("production_order.order_id"), index=True)
+    batch_code: Mapped[str] = mapped_column(Unicode(64), index=True)
+    batch_year: Mapped[int] = mapped_column(Integer, index=True)
+    order_id: Mapped[str] = mapped_column(ForeignKey("brew_order.brew_order_id"), index=True)
     work_order_id: Mapped[Optional[str]] = mapped_column(Unicode(64), nullable=True, index=True)
+    # Dây chuyền nấu THẬT (ProductionLine kind="brewhouse") — mặc định lấy theo Lệnh SX (điều độ)
+    # đã chọn (WorkOrder.brewhouse_line_id) nếu có, nhưng chọn/sửa được độc lập ngay ở "Tạo mẻ"
+    # dù không gắn Lệnh SX nào.
+    brewhouse_line_id: Mapped[Optional[str]] = mapped_column(Unicode(64), nullable=True, index=True)
     recipe_version_id: Mapped[str] = mapped_column(ForeignKey("recipe_version.version_id"))
     product_id: Mapped[str] = mapped_column(ForeignKey("product.product_id"))
 

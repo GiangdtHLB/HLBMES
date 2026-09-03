@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>MES Bia Hạ Long - Nhà Máy Đông Mai</title>
-  <link rel="stylesheet" href="/styles.css?v=64" />
+  <link rel="stylesheet" href="/styles.css?v=65" />
 </head>
 <body>
   <!-- Màn hình đăng nhập -->
@@ -40,17 +40,20 @@
 
       <button class="nav-topgroup" data-navgrp="sanxuat">🍺 Sản xuất</button>
       <div class="nav-groups" id="nav-group-sanxuat">
-        <button data-view="flowmap">Sơ đồ quy trình</button>
-        <button data-view="orders">Lệnh SX</button>
-        <button data-view="process">Nấu-Lọc-Chiết</button>
         <button data-view="recipes">Công thức</button>
-        <button data-view="cip">CIP</button>
-        <button data-view="dispatch" class="nav-unused">Điều độ</button>
-        <button data-view="batches" class="nav-unused">Mẻ sản xuất</button>
-        <button data-view="dispense" class="nav-unused">Cấp liệu</button>
-        <button data-view="recipeadv" class="nav-unused">Công thức+</button>
+        <button data-view="orders">Lệnh nấu</button>
+        <button data-view="dispatch">Điều độ</button>
+        <button data-view="batches">Mẻ sản xuất</button>
+        <button data-view="batchtanks">Lên men</button>
+        <button data-view="batchfilterorders">Lệnh lọc</button>
+        <button data-view="batchfilterlots">Lọc</button>
+        <button data-view="batchpacklots">Chiết</button>
+        <button data-view="dispense">Cấp liệu</button>
+        <button data-view="recipeadv">Công thức+</button>
         <button data-view="isa88" class="nav-unused">ISA-88</button>
         <button data-view="schedule" class="nav-unused">Lập lịch</button>
+        <button data-view="process" class="nav-unused">Nấu-Lọc-Chiết</button>
+        <button data-view="cip" class="nav-unused">CIP</button>
       </div>
 
       <button class="nav-topgroup" data-navgrp="baotri">🔧 Bảo trì &amp; Hiệu suất thiết bị</button>
@@ -114,13 +117,16 @@
   <div class="app-main">
   <main>
     <section id="view-dashboard" class="view active"></section>
-    <section id="view-flowmap" class="view"></section>
     <section id="view-orders" class="view"></section>
     <section id="view-dispatch" class="view"></section>
     <section id="view-schedule" class="view"></section>
     <section id="view-recipes" class="view"></section>
     <section id="view-recipeadv" class="view"></section>
     <section id="view-batches" class="view"></section>
+    <section id="view-batchtanks" class="view"></section>
+    <section id="view-batchfilterorders" class="view"></section>
+    <section id="view-batchfilterlots" class="view"></section>
+    <section id="view-batchpacklots" class="view"></section>
     <section id="view-isa88" class="view"></section>
     <section id="view-dispense" class="view"></section>
     <section id="view-quality" class="view"></section>
@@ -148,10 +154,10 @@
   </div>
   </div>
 
-  <script src="/charts.js?v=38"></script>
+  <script src="/charts.js?v=39"></script>
   <script src="/barcode.js?v=20"></script>
-  <script src="/app.js?v=533"></script>
-  <script src="/views_ext.js?v=173"></script>
+  <script src="/app.js?v=660"></script>
+  <script src="/views_ext.js?v=184"></script>
   <script src="/import_explorer.js?v=22"></script>
 </body>
 </html>

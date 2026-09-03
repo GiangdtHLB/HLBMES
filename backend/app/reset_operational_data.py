@@ -17,9 +17,14 @@ KHÔNG xóa (giữ nguyên theo yêu cầu + quyết định 2026-08-01):
   - ops_setting (cấu hình vận hành, không phải dữ liệu vận hành).
   - packaging_type (Danh mục bao bì — GIỮ dòng, nhưng xem note bên dưới về
     on_hand/in_circulation).
-  - Các module KHÔNG nằm trong 6 module đã nêu (WorkOrder/BatchExecution/
-    ProductionOrder/ISA-88/Lập lịch/Cấp liệu/CAPA/LIMS/Bảo trì/Năng lượng...) —
-    đều là tab "nav-unused", không thuộc phạm vi yêu cầu, KHÔNG đụng tới.
+  - Các module KHÔNG nằm trong 6 module đã nêu (ISA-88/Lập lịch/Cấp liệu/CAPA/
+    LIMS/Bảo trì/Năng lượng...) — đều là tab "nav-unused", không thuộc phạm vi
+    yêu cầu, KHÔNG đụng tới.
+  - NGOẠI LỆ: WorkOrder/BatchExecution VẪN bị xóa cùng BrewOrder dù bản thân
+    2 module này ("Điều độ"/"Mẻ sản xuất") không nằm trong 6 module trên — vì
+    WorkOrder.brew_order_id/BatchExecution.order_id đều FK thẳng vào brew_order
+    (từ khi ProductionOrder bị xóa hẳn), để sót lại sẽ orphan 2 bảng này khi
+    BrewOrder bị xóa.
 
 CHƯA xử lý (cần quyết định thêm nếu cần): PackagingType.on_hand/in_circulation
 là 2 cột số tồn/lưu hành nằm ngay trên bảng Danh mục bao bì — script này KHÔNG
@@ -49,6 +54,8 @@ import sys
 from sqlalchemy import delete, func, select
 
 from .database import SessionLocal
+from .models.batches import BatchExecution
+from .models.workorder import WorkOrder
 from .models.brewing import (
     BottleMaterialUsage,
     BottleRecord,
@@ -124,6 +131,8 @@ DELETE_ORDER = [
     BrewRecord,
     FermentRecord,
     Shipment,
+    BatchExecution,
+    WorkOrder,
     BrewOrder,
     FilterOrder,
     FilterMasterOrder,

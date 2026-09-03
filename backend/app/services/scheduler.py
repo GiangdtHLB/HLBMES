@@ -90,7 +90,11 @@ def auto_schedule(db: Session, user: User, days: int = 10,
             if rv:
                 snap = {"base_qty": rv.base_qty, "base_uom": rv.base_uom, "materials": rv.materials}
                 try:
-                    short = bom.availability(db, snap, wo.planned_qty)["shortage"]
+                    # scale=True: ở đây CHƯA biết Lệnh sẽ chia thành bao nhiêu mẻ (chưa "Phát
+                    # mẻ") nên chỉ ước lượng SƠ BỘ theo tỉ lệ planned_qty/base_qty — khác hẳn
+                    # bom.py::compare_batch (Cấp liệu/Mẻ sản xuất, LUÔN scale=False vì ở đó nhu
+                    # cầu tính đúng theo số mẻ thật, xem bom.py::factor_for).
+                    short = bom.availability(db, snap, wo.planned_qty, scale=True)["shortage"]
                 except Exception:  # noqa: BLE001
                     short = False
         # chọn tank: thử mọi tank, lấy nơi production bắt đầu sớm nhất.

@@ -97,7 +97,8 @@ def test_get_or_create_returns_all_keys_none(client, admin_h, vanhanh_h):
     data = r.json()
     assert data["auto"] == {"so_me": "BR-FL-A", "so_tank": "T-FL-A", "the_tich_tank": 100.0,
                             "the_he": None, "kt_date": None,
-                            "braumat_order_number": None, "braumat_batch_number": None}
+                            "braumat_order_number": None, "braumat_batch_number": None,
+                            "brew_order_code": "LN-FL-A"}
     assert data["manual"]["kieu_men"] is None
     assert data["manual"]["mat_do_ml_b"] is None
     assert data["ha_phu_events"] == []

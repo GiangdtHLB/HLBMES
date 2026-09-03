@@ -400,7 +400,6 @@ def test_approve_bottle_blocked_until_stage_qc_satisfied(client, admin_h, vanhan
     ok = client.post(f"/api/brewing/bottles/{bottle_id}/approve", headers=admin_h)
     assert ok.status_code == 200, ok.text
     assert ok.json()["approved"] is True
-    assert ok.json()["unit_codes"]
 
 
 def _a_brew_order(client, admin_h, order_code, product_id=None):

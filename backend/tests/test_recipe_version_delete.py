@@ -123,24 +123,6 @@ def test_delete_version_blocked_by_brew_order(client, admin_h):
     assert "lệnh nấu" in d.json()["detail"]
 
 
-def test_delete_version_blocked_by_production_order(client, admin_h):
-    beer_type_id = _a_beer_type(client, admin_h)
-    product_id = _a_product(client, admin_h, beer_type_id)
-    recipe_id = _a_recipe(client, admin_h, beer_type_id)
-    version_id = _a_version(client, admin_h, recipe_id, product_id)
-    for target in ("review", "approved", "effective"):
-        _transition(client, admin_h, version_id, target)
-
-    order = client.post("/api/orders", headers=admin_h,
-                        json={"order_code": f"ORD-VDEL-{new_id()[:6]}", "beer_type_id": beer_type_id,
-                              "recipe_version_id": version_id, "planned_qty": 1000, "uom": "L"})
-    assert order.status_code == 201, order.text
-
-    d = client.delete(f"/api/recipes/versions/{version_id}", headers=admin_h)
-    assert d.status_code == 409, d.text
-    assert "lệnh SX" in d.json()["detail"]
-
-
 def test_delete_version_blocked_by_work_order(client, admin_h):
     from datetime import date
 
@@ -151,17 +133,18 @@ def test_delete_version_blocked_by_work_order(client, admin_h):
     product_id = _a_product(client, admin_h, beer_type_id)
     recipe_id = _a_recipe(client, admin_h, beer_type_id)
     version_id = _a_version(client, admin_h, recipe_id, product_id)
-    order = client.post("/api/orders", headers=admin_h,
-                        json={"order_code": f"ORD-VDEL2-{new_id()[:6]}", "beer_type_id": beer_type_id,
-                              "planned_qty": 1000, "uom": "L"})
+    order = client.post("/api/brewing/orders", headers=admin_h,
+                        json={"order_code": f"LN-VDEL2-{new_id()[:6]}", "product_id": product_id,
+                              "recipe_version_id": version_id, "planned_volume_hl": 100,
+                              "auto_from_bom": False})
     assert order.status_code == 201, order.text
-    order_id = order.json()["order_id"]
+    brew_order_id = order.json()["brew_order_id"]
 
     # Giả lập version đã dispatch xuống 1 work order — tái dùng bảng có sẵn thay vì dựng toàn bộ
     # pipeline work-order/batch chỉ để test cờ chặn (mirror test_master_data_delete.py).
     db = SessionLocal()
     try:
-        db.add(WorkOrder(wo_code=f"WO-VDEL-{new_id()[:6]}", production_order_id=order_id, product_id=product_id,
+        db.add(WorkOrder(wo_code=f"WO-VDEL-{new_id()[:6]}", brew_order_id=brew_order_id, product_id=product_id,
                          recipe_version_id=version_id, planned_qty=1000, scheduled_date=date.today()))
         db.commit()
     finally:
@@ -211,21 +194,5 @@ def test_is_used_flag_true_when_referenced_by_brew_order(client, admin_h):
                            "recipe_version_id": version_id, "auto_from_bom": False,
                            "planned_volume_hl": 100})
     assert bo.status_code == 201, bo.text
-
-    assert _is_used(client, admin_h, recipe_id, version_id) is True
-
-
-def test_is_used_flag_true_when_referenced_by_production_order(client, admin_h):
-    beer_type_id = _a_beer_type(client, admin_h)
-    product_id = _a_product(client, admin_h, beer_type_id)
-    recipe_id = _a_recipe(client, admin_h, beer_type_id)
-    version_id = _a_version(client, admin_h, recipe_id, product_id)
-    for target in ("review", "approved", "effective"):
-        _transition(client, admin_h, version_id, target)
-
-    order = client.post("/api/orders", headers=admin_h,
-                        json={"order_code": f"ORD-ISUSED-{new_id()[:6]}", "beer_type_id": beer_type_id,
-                              "recipe_version_id": version_id, "planned_qty": 1000, "uom": "L"})
-    assert order.status_code == 201, order.text
 
     assert _is_used(client, admin_h, recipe_id, version_id) is True

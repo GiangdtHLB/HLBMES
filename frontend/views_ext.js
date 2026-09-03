@@ -663,7 +663,9 @@
     root.innerHTML = `
       ${panel("🚚 Cấp liệu cho mẻ", `
         <div class="row"><div class="field"><label>Mẻ</label>
-          <select id="dp_batch">${opt(batches, b => b.batch_id, b => b.batch_code + " · " + b.state, running && running.batch_id)}</select></div></div>
+          <input type="text" id="dp_batch_txt" autocomplete="off" placeholder="Gõ để tìm mã mẻ..."
+            value="${running ? esc(running.batch_code + " · " + running.state) : ""}"/>
+          <input type="hidden" id="dp_batch" value="${running ? esc(running.batch_id) : ""}"/></div></div>
         <div id="dp_bom" class="muted" style="margin-top:8px">Đang tải định mức…</div>
         <h3 style="margin-top:12px">Cấp 1 vật tư (tự chọn lô theo FEFO — hết hạn trước xuất trước)</h3>
         <div class="row">
@@ -672,37 +674,171 @@
           <div class="field" style="align-self:flex-end"><label style="display:flex;gap:4px;align-items:center"><input type="checkbox" id="dp_over"/> cho vượt ĐM</label></div>
           <div class="field" style="align-self:flex-end"><button class="btn" id="dp_go">Cấp liệu</button></div>
         </div>`)}
+      ${panel("💡 Gợi ý cấp liệu (tự động, FEFO — Kho phân xưởng)", `
+        <div class="muted" style="margin-bottom:8px">Tính vật tư còn thiếu theo Định mức (BOM) của mẻ, tự chọn lô theo FEFO ở Kho phân xưởng — chỉ xem trước, chưa trừ tồn.</div>
+        <div class="row"><div class="field" style="align-self:flex-end"><button class="btn sec" id="sg_go">Xem gợi ý</button></div></div>
+        <div id="sg_result" class="muted" style="margin-top:8px">Bấm "Xem gợi ý" để xem vật tư còn thiếu và lô sẽ dùng.</div>`)}
       ${panel("♻️ Backflush (tự khấu trừ theo định mức)", `
-        <div class="row">
-          <div class="field"><label>Sản lượng đã SX (L)</label><input id="bf_qty" value="48000" style="width:140px"/></div>
-          <div class="field" style="align-self:flex-end"><button class="btn sec" id="bf_go">Chạy backflush</button></div>
-        </div>
-        <div class="muted" style="margin-top:6px">Khấu trừ NVL = định mức BOM × (SL/ base_qty), trừ phần đã tiêu thụ trước đó.</div>`)}
+        <div class="muted">⚠ Tính năng này tạm thời tắt.</div>`)}
       ${panel("📜 Lịch sử cấp liệu", `<div id="dp_hist" class="muted">Đang tải…</div>`)}
     `;
 
     async function refresh() {
       const bid = $("dp_batch").value;
       if (!bid) { $("dp_bom").innerHTML = '<div class="muted">Chưa có mẻ nào để cấp liệu.</div>'; return; }
-      const [bom, hist] = await Promise.all([
-        GET(`/batches/${bid}/bom`), GET(`/dispense?batch_id=${bid}`)]);
-      $("dp_bom").innerHTML = `<div class="tablewrap"><table>
-        <thead><tr><th>Vật tư</th><th>Định mức</th><th>Thực tế</th><th>Chênh</th><th>Trạng thái</th></tr></thead>
-        <tbody>${(bom.lines || []).map(l => `<tr><td>${esc(l.material_code)}</td><td>${l.planned} ${esc(l.uom || "")}</td>
-          <td>${l.actual}</td><td>${l.diff}</td><td>${badge(l.status === "dat" ? "available" : l.status === "vuot" ? "critical" : "planned")}${esc(l.status)}</td></tr>`).join("")}</tbody></table></div>`;
-      $("dp_mat").innerHTML = (bom.lines || []).map(l => `<option value="${esc(l.material_code)}">${esc(l.material_code)} (ĐM ${l.planned})</option>`).join("");
+      const [batch, bom, hist, summary] = await Promise.all([
+        GET(`/batches/${bid}`), GET(`/batches/${bid}/bom`), GET(`/dispense?batch_id=${bid}`),
+        GET(`/dispense/${bid}/summary`)]);
+      const canEdit = !batch.ebr_locked;
+      // Bảng đối chiếu tách THEO MÃ VẬT TƯ THẬT đã cấp (không gộp theo mã Nhóm vật tư thay thế
+      // như bom.lines — xem services/dispense.py::batch_dispense_summary), kèm mã lô + có đúng
+      // FIFO không. CHỈ hiện vật tư ĐÃ thực sự cấp — không tự liệt kê sẵn toàn bộ định mức công
+      // thức khi chưa cấp gì, để người dùng tự chủ động cấp qua "Gợi ý cấp liệu"/"Cấp 1 vật tư"
+      // bên dưới thay vì bị gợi ý sẵn (theo yêu cầu người dùng).
+      $("dp_bom").innerHTML = summary.length ? `<div class="tablewrap"><table>
+        <thead><tr><th>Vật tư</th><th>Mã lô</th><th>FIFO?</th><th>Định mức</th><th>Thực tế</th><th>Chênh</th><th>Trạng thái</th><th></th></tr></thead>
+        <tbody>${summary.map(l => `<tr data-bomrow="${esc(l.material_code)}">
+          <td>${esc(l.material_code)}${l.material_name ? ` ${esc(l.material_name)}` : ""}</td>
+          <td>${esc((l.lot_codes || []).join(", ") || "—")}</td>
+          <td>${l.fifo_ok === false ? '<span style="color:var(--red)">⚠ khác FIFO</span>' : '<span style="color:var(--green)">✔ FIFO</span>'}</td>
+          <td>${l.planned != null ? l.planned + " " + esc(l.uom || "") : ""}</td>
+          <td class="bom-actual">${l.actual}</td><td>${l.diff != null ? l.diff : ""}</td>
+          <td>${l.status != null ? badge(l.status === "dat" ? "available" : l.status === "vuot" ? "critical" : "planned") + esc(l.status) : ""}</td>
+          <td>${canEdit ? `<button class="btn sm sec" data-bomedit="${esc(l.material_code)}">Sửa</button>
+            <button class="btn sm sec" data-bomdel="${esc(l.material_code)}" style="color:var(--red)">Xóa</button>` : ""}</td></tr>`).join("")}</tbody></table></div>
+        <div class="muted" style="margin-top:6px">${canEdit ? "" : "Hồ sơ mẻ (EBR) đã khóa — không thể sửa Thực tế."}</div>`
+        : '<div class="muted">Chưa cấp vật tư nào cho mẻ này — dùng "Gợi ý cấp liệu" hoặc "Cấp 1 vật tư" bên dưới.</div>';
+      $("dp_mat").innerHTML = (bom.lines || []).map(l => `<option value="${esc(l.material_code)}">${esc(l.material_code)}${l.material_name ? " — " + esc(l.material_name) : ""} (ĐM ${l.planned})</option>`).join("");
       $("dp_hist").innerHTML = hist.length ? hist.map(d => `<div style="margin-bottom:8px">
-        <b>${esc(d.dispense_code)}</b> ${badge(d.mode === "backflush" ? "planned" : "available")}${esc(d.mode)} <span class="muted">${fmt(d.created_at)} · ${esc(d.created_by || "")}</span>
-        <div class="muted">${d.lines.map(l => `${esc(l.material_code)}: ${l.quantity} ${esc(l.uom)} ${l.lot_code ? "(" + esc(l.lot_code) + ")" : ""}`).join(" · ") || "—"}</div></div>`).join("")
+        <b>${esc(d.dispense_code)}</b> ${badge(d.mode === "backflush" ? "planned" : d.mode === "adjust" ? "critical" : "available")}${esc(d.mode)} <span class="muted">${fmt(d.created_at)} · ${esc(d.created_by || "")}</span>
+        <div class="muted">${d.lines.map(l => `${esc(l.material_code)}: ${l.quantity} ${esc(l.uom)} ${l.lot_code ? "(" + esc(l.lot_code) + ")" : ""}${l.fifo_ok === false ? " ⚠ khác FIFO" : ""}${l.reason ? " — " + esc(l.reason) : ""}`).join(" · ") || "—"}</div></div>`).join("")
         : '<div class="muted">Chưa có phiếu cấp liệu.</div>';
+      document.querySelectorAll("[data-bomedit]").forEach(btn => btn.onclick = () => {
+        const code = btn.dataset.bomedit;
+        const row = document.querySelector(`[data-bomrow="${CSS.escape(code)}"]`);
+        const actualCell = row.querySelector(".bom-actual");
+        const current = actualCell.textContent.trim();
+        actualCell.innerHTML = `<input type="number" class="bom-actual-input" value="${esc(current)}" style="width:90px"/>
+          <input class="bom-reason-input" placeholder="Lý do sửa (bắt buộc)" style="width:200px;margin-top:4px;display:block"/>
+          <button class="btn sm" data-bomsave="${esc(code)}" style="margin-top:4px">Lưu</button>
+          <button class="btn sm sec" data-bomcancel style="margin-top:4px">Hủy</button>`;
+        row.querySelector("[data-bomcancel]").onclick = refresh;
+        row.querySelector("[data-bomsave]").onclick = () => guard(async () => {
+          const newActual = parseFloat(row.querySelector(".bom-actual-input").value);
+          const reason = row.querySelector(".bom-reason-input").value.trim();
+          if (!Number.isFinite(newActual)) throw new Error("Nhập số Thực tế hợp lệ.");
+          if (!reason) throw new Error("Bắt buộc nhập lý do khi sửa Thực tế.");
+          await POST(`/dispense/${bid}/adjust`, { material_code: code, new_actual: newActual, reason });
+          toast("Đã sửa Thực tế"); refresh();
+        });
+      });
+      document.querySelectorAll("[data-bomdel]").forEach(btn => btn.onclick = () => guard(async () => {
+        const code = btn.dataset.bomdel;
+        if (!confirm(`Xóa toàn bộ Thực tế đã cấp cho "${code}"? Sẽ hoàn lại lô/tồn kho tương ứng.`)) return;
+        const reason = prompt("Lý do xóa (bắt buộc):", "Cấp nhầm / không dùng");
+        if (reason === null) return;
+        if (!reason.trim()) throw new Error("Bắt buộc nhập lý do khi xóa.");
+        await POST(`/dispense/${bid}/adjust`, { material_code: code, new_actual: 0, reason: reason.trim() });
+        toast("Đã xóa dòng cấp liệu"); refresh();
+      }));
     }
-    $("dp_batch").onchange = refresh;
+    wireSearchableSelect("dp_batch_txt", "dp_batch",
+      batches.map(b => ({ value: b.batch_id, label: b.batch_code + " · " + b.state })),
+      () => { $("sg_result").innerHTML = 'Bấm "Xem gợi ý" để xem vật tư còn thiếu và lô sẽ dùng.'; refresh(); });
     $("dp_go").onclick = () => guard(async () => {
       const bid = $("dp_batch").value;
       await POST(`/dispense/${bid}`, { lines: [{ material_code: $("dp_mat").value, quantity: num("dp_qty") || 0, allow_over: $("dp_over").checked }] });
       toast("Đã cấp liệu"); $("dp_qty").value = ""; refresh();
     });
-    $("bf_go").onclick = () => guard(async () => {
+    $("sg_go").onclick = () => guard(async () => {
+      const bid = $("dp_batch").value;
+      const sug = await GET(`/dispense/${bid}/suggest`);
+      if (!sug.lines.length) {
+        $("sg_result").innerHTML = '<div class="muted">Đã đủ định mức — không còn vật tư nào cần cấp thêm.</div>';
+        return;
+      }
+      const rows = [];
+      sug.lines.forEach((l, li) => {
+        const statusCell = l.shortfall > 0
+          ? `<span style="color:var(--red)">thiếu ${l.shortfall} ${esc(l.uom || "")}</span>`
+          : '<span style="color:var(--green)">đủ</span>';
+        const matLabel = l.material_name ? `${esc(l.material_code)} ${esc(l.material_name)}` : esc(l.material_code);
+        const stockCells = `<td>${l.stock_company} ${esc(l.uom || "")}</td><td>${l.stock_workshop} ${esc(l.uom || "")}</td>`;
+        if (!l.picks.length && !l.alternatives.length) {
+          // Không có lô nào của vật tư này (kể cả tự chọn tay) — thật sự không có gì để cấp.
+          rows.push(`<tr>
+            <td>${matLabel}</td>${stockCells}<td>${l.planned} ${esc(l.uom || "")}</td><td>${l.need} ${esc(l.uom || "")}</td>
+            <td colspan="4" class="muted">Không có lô khả dụng (Kho phân xưởng)</td>
+            <td>${statusCell}</td></tr>`);
+          return;
+        }
+        const altOpts = l.alternatives.map(a =>
+          `<option value="${a.lot_id}">${esc(a.lot_code)} (còn ${a.quantity}${a.expiry ? ", HSD " + fmt(a.expiry) : ""})</option>`).join("");
+        // Nếu gợi ý tự động không phân bổ gì cho vật tư này (VD 1 vật tư khác trong CÙNG nhóm
+        // đã đủ đáp ứng qua FIFO) nhưng vẫn có lô khả dụng — vẫn hiện dòng này (không ẩn), NHƯNG
+        // làm mờ + khóa nhập nếu nhóm ĐÃ đủ tồn qua thành viên khác rồi (không cần lấy thêm mã
+        // này nữa, tránh người dùng lỡ nhập cộng thêm vượt định mức chung của nhóm).
+        const isRedundantGroupMember = !!l.group_code && l.picks.length === 0 && l.shortfall === 0;
+        const rowPicks = l.picks.length ? l.picks
+          : [{ lot_id: l.alternatives[0].lot_id, lot_code: l.alternatives[0].lot_code, quantity: 0, uom: l.uom }];
+        rowPicks.forEach((p, pi) => {
+          rows.push(`<tr${isRedundantGroupMember ? ' style="opacity:.5"' : ""}>
+            <td>${pi === 0 ? matLabel : ""}</td>
+            ${pi === 0 ? stockCells : "<td></td><td></td>"}
+            <td>${pi === 0 ? l.planned + " " + esc(l.uom || "") : ""}</td>
+            <td>${pi === 0 ? l.need + " " + esc(l.uom || "") : ""}</td>
+            <td><input type="number" class="sg-qty" data-li="${li}" data-pi="${pi}" value="${p.quantity}" style="width:80px"${isRedundantGroupMember ? " disabled" : ""}/></td>
+            <td><select class="sg-lot" data-li="${li}" data-pi="${pi}" data-orig="${p.lot_id}"${isRedundantGroupMember ? " disabled" : ""}>${altOpts}</select></td>
+            <td class="sg-fifo" data-li="${li}" data-pi="${pi}"></td>
+            <td><input class="sg-note" data-li="${li}" data-pi="${pi}" placeholder="Bắt buộc nếu chọn khác FIFO" style="width:170px;display:none"/></td>
+            <td>${pi === 0 ? (isRedundantGroupMember ? '<span class="muted">nhóm đã đủ</span>' : statusCell) : ""}</td>
+          </tr>`);
+        });
+      });
+      $("sg_result").innerHTML = `<div class="tablewrap"><table>
+        <thead><tr><th>Vật tư</th><th>Tồn kho công ty</th><th>Tồn kho phân xưởng</th><th>Định mức</th><th>Còn thiếu</th><th>SL thực tế</th><th>Lô sẽ dùng</th><th>FIFO?</th><th>Ghi chú (nếu khác FIFO)</th><th>Tình trạng</th></tr></thead>
+        <tbody>${rows.join("")}</tbody></table></div>
+        <button class="btn" id="sg_apply" style="margin-top:8px">✔ Áp dụng gợi ý</button>`;
+      document.querySelectorAll(".sg-lot").forEach(sel => {
+        sel.value = sel.dataset.orig;
+        const updateFifo = () => {
+          const noteInput = document.querySelector(`.sg-note[data-li="${sel.dataset.li}"][data-pi="${sel.dataset.pi}"]`);
+          const fifoCell = document.querySelector(`.sg-fifo[data-li="${sel.dataset.li}"][data-pi="${sel.dataset.pi}"]`);
+          const isFifo = sel.value === sel.dataset.orig;
+          fifoCell.innerHTML = isFifo ? '<span style="color:var(--green)">✔ FIFO</span>' : '<span style="color:var(--red)">⚠ khác FIFO</span>';
+          noteInput.style.display = isFifo ? "none" : "";
+          if (isFifo) noteInput.value = "";
+        };
+        sel.onchange = updateFifo;
+        updateFifo();
+      });
+      $("sg_apply").onclick = () => guard(async () => {
+        if (sug.lines.some(l => l.shortfall > 0)) {
+          toast("Còn vật tư thiếu tồn kho — bổ sung đủ tồn trước khi áp dụng cấp liệu", "err");
+          return;
+        }
+        const lotSels = Array.from(document.querySelectorAll(".sg-lot"));
+        for (const sel of lotSels) {
+          if (sel.value !== sel.dataset.orig) {
+            const note = document.querySelector(`.sg-note[data-li="${sel.dataset.li}"][data-pi="${sel.dataset.pi}"]`).value.trim();
+            if (!note) { toast("Chọn lô khác FIFO phải nhập ghi chú lý do", "err"); sel.focus(); return; }
+          }
+        }
+        const lines = lotSels.map(sel => {
+          const qty = parseFloat(document.querySelector(`.sg-qty[data-li="${sel.dataset.li}"][data-pi="${sel.dataset.pi}"]`).value) || 0;
+          const note = document.querySelector(`.sg-note[data-li="${sel.dataset.li}"][data-pi="${sel.dataset.pi}"]`).value.trim();
+          return { material_code: sug.lines[sel.dataset.li].material_code, lot_id: sel.value, quantity: qty, reason: note || null };
+        }).filter(l => l.quantity > 0);
+        if (!lines.length) { toast("Không có dòng nào để áp dụng", "err"); return; }
+        await POST(`/dispense/${bid}`, { lines });
+        toast("Đã áp dụng gợi ý cấp liệu");
+        $("sg_result").innerHTML = 'Bấm "Xem gợi ý" để xem vật tư còn thiếu và lô sẽ dùng.';
+        refresh();
+      });
+    });
+    // Backflush tạm thời tắt (yêu cầu người dùng 2026-09-01) — bỏ HTML nút/ô nhập ở trên nhưng
+    // giữ nguyên hàm xử lý, chỉ gắn khi nút còn tồn tại, để bật lại dễ dàng.
+    if ($("bf_go")) $("bf_go").onclick = () => guard(async () => {
       const bid = $("dp_batch").value;
       const r = await POST(`/dispense/${bid}/backflush`, { produced_qty: num("bf_qty") || 0 });
       toast(`Backflush ${r.dispense_code}: ${r.lines.length} dòng` + (r.skipped.length ? `, ${r.skipped.length} bỏ qua` : "")); refresh();

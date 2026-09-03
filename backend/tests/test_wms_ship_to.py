@@ -292,34 +292,10 @@ def test_ship_to_delete_blocked_when_used_by_shipment(client, admin_h):
     assert blocked.status_code == 409, blocked.text
 
 
-def test_approve_bottle_uses_finished_product_pack_size(client, admin_h, vanhanh_h, kcs_h):
-    suffix = "UPCFIX01"
-    fp = client.post("/api/finished-products", headers=admin_h,
-                     json={"code": f"SKU-{suffix}", "name": "SKU test 20 lon", "uom": "lon", "pack_size": 20})
-    assert fp.status_code == 201, fp.text
-    fp_id = fp.json()["finished_product_id"]
-
-    bottle_code = f"CH-{suffix}"
-    b = client.post("/api/brewing/bottles", headers=vanhanh_h,
-                    json={"bottle_code": bottle_code, "beer_type": "Bia test", "finished_product_id": fp_id})
-    assert b.status_code == 201, b.text
-    bottle_id = b.json()["bottle_id"]
-    b_fin = client.post(f"/api/brewing/bottles/{bottle_id}/finish", headers=vanhanh_h, json={"ca1": 100})
-    assert b_fin.status_code == 200, b_fin.text
-
-    _declare_pending(client, admin_h, "thanh_pham", "bottle", f"{bottle_code}__thanh_pham")
-    # Duyệt nhập kho thành phẩm nay thuộc quyền Giám đốc/Phó GĐ Sản xuất (production.release_to_wms),
-    # tách khỏi quality.release của KCS — dùng admin_h (bypass mọi permission) thay vì kcs_h ở đây.
-    approve = client.post(f"/api/brewing/bottles/{bottle_id}/approve", headers=admin_h)
-    assert approve.status_code == 200, approve.text
-    # Ca 1/2/3 tính theo VỈ — ca1=100 vỉ x 20 lon/vỉ (pack_size) = 2000 lon, dồn vào 1 dòng lô
-    # duy nhất (xem docs/WMS-LOT-LEVEL-REDESIGN.md).
-    assert approve.json()["count"] == 100
-
-    units = client.get("/api/wms/units", headers=admin_h).json()
-    made = [u for u in units if u["unit_code"] in approve.json()["unit_codes"]]
-    assert len(made) == 1
-    assert made[0]["quantity"] == 2000
+    # Test "pack_size dùng đúng theo FinishedProduct lúc nhập kho" trước đây chạy qua
+    # approve_bottle (module Nấu-Lọc-Chiết cũ, đã tháo khỏi WMS) — coverage tương đương nay ở
+    # tests/test_batch_pack_lot_wms.py::test_release_creates_one_row_regardless_of_ca_count
+    # (Lô thành phẩm là nơi thay thế duy nhất tạo hàng nhập kho từ sản xuất).
 
 
 def test_shipment_slip_header_fields_persist(client, admin_h):

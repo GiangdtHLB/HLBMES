@@ -11,10 +11,15 @@ from ..models.batches import BatchExecution
 from ..models.metrics import ProcessReading
 from ..models.recipes import RecipeVersion
 from ..services import bom as bom_svc
+from ..services import dispense as dispense_svc
 from ..schemas import (
     ActualIn,
+    BatchActualQtyIn,
+    BatchFinishIn,
     BatchIn,
+    BatchLineIn,
     BatchOut,
+    BatchStartIn,
     ConsumeIn,
     EbrLockIn,
     EbrSignIn,
@@ -44,27 +49,29 @@ def list_batches(db: Session = Depends(get_db), user: User = Depends(get_current
 
 
 @router.get("/availability")
-def check_availability(recipe_version_id: str, planned_qty: float, db: Session = Depends(get_db),
-                      user: User = Depends(get_current_user)):
-    """Xem trước nhu cầu BOM (đã scale) so với tồn khả dụng — trước khi tạo mẻ (§7.1).
+def check_availability(recipe_version_id: str, planned_qty: float, order_id: str = None,
+                      db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """Xem trước nhu cầu BOM so với tồn khả dụng — trước khi tạo mẻ (§7.1). Truyền `order_id`
+    (Lệnh nấu, nếu đã chọn) để tính đúng thành viên ĐÃ CHỌN của dòng khai theo Nhóm vật tư thay
+    thế kiểu member_qty (xem services/bom.py::availability).
 
     Khai báo TRƯỚC /{batch_id} để không bị route động bắt nhầm."""
     rv = db.get(RecipeVersion, recipe_version_id)
     if not rv:
         raise NotFoundError("Recipe version không tồn tại.")
     snap = {"base_qty": rv.base_qty, "base_uom": rv.base_uom, "materials": rv.materials}
-    return bom_svc.availability(db, snap, planned_qty)
+    return bom_svc.availability(db, snap, planned_qty, brew_order_id=order_id)
 
 
 @router.get("/availability-alt")
-def check_availability_alt(recipe_version_id: str, planned_qty: float, db: Session = Depends(get_db),
-                           user: User = Depends(get_current_user)):
+def check_availability_alt(recipe_version_id: str, planned_qty: float, order_id: str = None,
+                           db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     """Như /availability nhưng kèm gợi ý nguyên liệu thay thế khi NVL chính thiếu (§7.2)."""
     rv = db.get(RecipeVersion, recipe_version_id)
     if not rv:
         raise NotFoundError("Recipe version không tồn tại.")
     snap = {"base_qty": rv.base_qty, "base_uom": rv.base_uom, "materials": rv.materials}
-    return bom_svc.availability_with_alternates(db, snap, planned_qty)
+    return bom_svc.availability_with_alternates(db, snap, planned_qty, brew_order_id=order_id)
 
 
 @router.get("/{batch_id}", response_model=BatchOut)
@@ -82,7 +89,50 @@ def create_batch(payload: BatchIn, db: Session = Depends(get_db),
                  user: User = Depends(get_current_user)):
     require_perm(user, "batch.create")
     return svc.create_batch(db, payload.order_id, payload.recipe_version_id, user,
-                            payload.batch_code, payload.planned_qty, payload.allow_shortage)
+                            payload.batch_code, payload.planned_qty, payload.allow_shortage,
+                            work_order_id=payload.work_order_id, brewhouse_line_id=payload.brewhouse_line_id)
+
+
+@router.delete("/{batch_id}", status_code=204)
+def delete_batch(batch_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    require_perm(user, "batch.execute")
+    _scope_guard(db, batch_id, user)
+    svc.delete_batch(db, batch_id, user)
+
+
+@router.post("/{batch_id}/brewhouse-line", response_model=BatchOut)
+def set_brewhouse_line(batch_id: str, payload: BatchLineIn, db: Session = Depends(get_db),
+                       user: User = Depends(get_current_user)):
+    require_perm(user, "batch.execute")
+    _scope_guard(db, batch_id, user)
+    return svc.set_brewhouse_line(db, batch_id, payload.brewhouse_line_id, user)
+
+
+@router.post("/{batch_id}/start", response_model=BatchOut)
+def start_batch(batch_id: str, payload: BatchStartIn, db: Session = Depends(get_db),
+                user: User = Depends(get_current_user)):
+    """Sửa giờ bắt đầu mẻ trực tiếp — gọi lại được nhiều lần để sửa nếu bấm nhầm."""
+    require_perm(user, "batch.execute")
+    _scope_guard(db, batch_id, user)
+    return svc.set_start_at(db, batch_id, payload.start_at, user)
+
+
+@router.post("/{batch_id}/finish", response_model=BatchOut)
+def finish_batch(batch_id: str, payload: BatchFinishIn, db: Session = Depends(get_db),
+                 user: User = Depends(get_current_user)):
+    """Sửa giờ kết thúc mẻ trực tiếp — gọi lại được nhiều lần để sửa nếu bấm nhầm."""
+    require_perm(user, "batch.execute")
+    _scope_guard(db, batch_id, user)
+    return svc.set_end_at(db, batch_id, payload.end_at or utcnow(), user)
+
+
+@router.post("/{batch_id}/actual-qty", response_model=BatchOut)
+def set_actual_qty(batch_id: str, payload: BatchActualQtyIn, db: Session = Depends(get_db),
+                   user: User = Depends(get_current_user)):
+    """Nhập/sửa trực tiếp SL thực tế (VD lít/hl dịch thực tế) — khác produce_lot."""
+    require_perm(user, "batch.execute")
+    _scope_guard(db, batch_id, user)
+    return svc.set_actual_qty(db, batch_id, payload.actual_qty, user)
 
 
 @router.post("/{batch_id}/transition", response_model=BatchOut)
@@ -121,12 +171,17 @@ def produce(batch_id: str, payload: ProduceIn, db: Session = Depends(get_db),
 @router.get("/{batch_id}/bom")
 def bom_compare(batch_id: str, db: Session = Depends(get_db),
                 user: User = Depends(get_current_user)):
-    """Đối chiếu định mức (BOM, scale theo quy mô mẻ) với thực tế tiêu thụ (genealogy)."""
+    """Đối chiếu định mức (BOM) với thực tế tiêu thụ (genealogy) — "lines" tách theo mã vật tư
+    THẬT đã cấp (không gộp theo mã Nhóm vật tư thay thế), kèm mã lô/FIFO (xem
+    services/dispense.py::batch_dispense_summary); dòng nào chưa cấp gì vẫn giữ gộp theo nhóm
+    (only_dispensed=False) vì chưa biết sẽ cấp qua thành viên nào."""
     b = db.get(BatchExecution, batch_id)
     if not b:
         raise NotFoundError("Batch không tồn tại.")
     _assert_batch_scope(db, b, user)
-    return bom_svc.compare_batch(db, b)
+    result = bom_svc.compare_batch(db, b)
+    result["lines"] = dispense_svc.batch_dispense_summary(db, batch_id, only_dispensed=False)
+    return result
 
 
 @router.get("/{batch_id}/yield")
