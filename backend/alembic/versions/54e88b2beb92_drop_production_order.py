@@ -24,6 +24,8 @@ from datetime import datetime, timezone
 from alembic import op
 import sqlalchemy as sa
 
+from app.alembic_mssql import prep_drop_columns
+
 
 revision = '54e88b2beb92'
 down_revision = '36f5abb78e7e'
@@ -75,6 +77,12 @@ def upgrade() -> None:
             "created_by": po["created_by"], "created_at": created_at})
         mapping[po["order_id"]] = new_brew_order_id
 
+    # MSSQL: batch_execution.order_id còn FK trỏ production_order → repoint sang brew_order_id ở
+    # bước 3 sẽ vỡ FK. Phải gỡ FK TRƯỚC khi UPDATE (SQLite không enforce nên gỡ sau ở block dưới).
+    # prep_drop_columns gỡ FK trên cột mà KHÔNG drop cột.
+    if conn.dialect.name == 'mssql':
+        prep_drop_columns(conn, 'batch_execution', ['order_id'])
+
     # 3) Cập nhật mọi tham chiếu theo map vừa dựng.
     for old_id, new_id in mapping.items():
         conn.execute(sa.text("UPDATE batch_execution SET order_id = :new WHERE order_id = :old"),
@@ -87,20 +95,28 @@ def upgrade() -> None:
         ), {"new": new_id, "old": old_id})
 
     op.drop_index('ix_work_order_production_order_id', table_name='work_order')
-    with op.batch_alter_table('work_order', recreate='always') as batch_op:
-        batch_op.alter_column('brew_order_id', existing_type=sa.Unicode(length=64), nullable=False)
-        batch_op.drop_column('production_order_id')
+    # MSSQL: recreate='always' copy PK/constraint auto-name sang bảng tạm → trùng tên (§2E). Dùng
+    # ALTER trực tiếp: gỡ FK production_order trên cột trước (prep_drop_columns), rồi siết NOT NULL
+    # + drop cột. SQLite không ALTER được NOT NULL/drop cột còn FK → vẫn phải recreate.
+    if conn.dialect.name == 'mssql':
+        prep_drop_columns(conn, 'work_order', ['production_order_id'])
+        op.alter_column('work_order', 'brew_order_id', existing_type=sa.Unicode(length=64), nullable=False)
+        op.drop_column('work_order', 'production_order_id')
+    else:
+        with op.batch_alter_table('work_order', recreate='always') as batch_op:
+            batch_op.alter_column('brew_order_id', existing_type=sa.Unicode(length=64), nullable=False)
+            batch_op.drop_column('production_order_id')
     op.create_index('ix_work_order_brew_order_id', 'work_order', ['brew_order_id'])
 
-    # batch_execution.order_id giữ nguyên cột/index — chỉ đổi Ý NGHĨA giá trị (đã UPDATE ở trên)
-    # + gỡ FK vật lý cũ trỏ production_order (bảng sắp xóa). FK này tạo từ lúc init_schema nên
-    # không tên (name=None khi reflect) — phải gán tên qua naming_convention để drop_constraint
-    # nhận diện được trên SQLite (mirror batch mode drop unnamed FK, xem alembic batch docs).
-    _naming = {'fk': 'fk_%(table_name)s_%(column_0_name)s_%(referred_table_name)s'}
-    with op.batch_alter_table('batch_execution', recreate='always', naming_convention=_naming) as batch_op:
-        batch_op.drop_constraint('fk_batch_execution_order_id_production_order', type_='foreignkey')
+    # batch_execution.order_id giữ nguyên cột/index — chỉ đổi Ý NGHĨA giá trị (đã UPDATE ở trên).
+    # SQLite: recreate + naming_convention để gỡ FK auto-name cũ (MSSQL đã gỡ TRƯỚC bước 3 ở trên).
+    if conn.dialect.name != 'mssql':
+        _naming = {'fk': 'fk_%(table_name)s_%(column_0_name)s_%(referred_table_name)s'}
+        with op.batch_alter_table('batch_execution', recreate='always', naming_convention=_naming) as batch_op:
+            batch_op.drop_constraint('fk_batch_execution_order_id_production_order', type_='foreignkey')
 
     op.drop_index('ix_brew_order_production_order_id', table_name='brew_order')
+    prep_drop_columns(conn, 'brew_order', ['production_order_id'])  # MSSQL: gỡ FK trước khi drop cột
     op.drop_column('brew_order', 'production_order_id')
 
     # brew_record.brew_order_id GIỮ NGUYÊN nullable (khác work_order — không siết NOT NULL): vẫn
@@ -108,6 +124,7 @@ def upgrade() -> None:
     # _seed_brewing) — chỉ tầng service (create_brew_record) bắt buộc chọn Lệnh nấu, không phải
     # ràng buộc DB.
     op.drop_index('ix_brew_record_production_order_id', table_name='brew_record')
+    prep_drop_columns(conn, 'brew_record', ['production_order_id'])  # MSSQL: gỡ FK trước khi drop cột
     op.drop_column('brew_record', 'production_order_id')
 
     op.drop_table('production_order_material_line')

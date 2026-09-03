@@ -12,7 +12,7 @@ ký/in ra, để về sau xem lại vẫn đúng số liệu tại thời điể
 
 from datetime import timedelta
 
-from sqlalchemy import select, true
+from sqlalchemy import false, select, true
 from sqlalchemy.orm import Session
 
 from ..audit import record_audit
@@ -281,7 +281,7 @@ def batch_material_status(db: Session, batches: list) -> dict:
     if order_ids:
         for ln in db.execute(select(BrewOrderMaterialLine).where(
                 BrewOrderMaterialLine.brew_order_id.in_(order_ids),
-                BrewOrderMaterialLine.is_header.is_(False))).scalars().all():
+                BrewOrderMaterialLine.is_header == false())).scalars().all():
             lines_by_order.setdefault(ln.brew_order_id, []).append(ln)
     usages = db.execute(select(BrewMaterialUsage).where(BrewMaterialUsage.batch_id.in_(batch_ids))).scalars().all()
     lot_ids = [u.lot_id for u in usages if u.lot_id]
