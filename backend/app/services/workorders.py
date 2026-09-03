@@ -68,9 +68,15 @@ def create_wo(db: Session, payload: dict, user: User) -> WorkOrder:
             raise NotFoundError("Recipe version không tồn tại.")
         product_id = rv.product_id
     sd = payload.get("scheduled_date") or date.today()
+    wo_code = payload.get("wo_code")
+    if wo_code:
+        if db.execute(select(WorkOrder).where(WorkOrder.wo_code == wo_code)).scalar_one_or_none():
+            raise DomainError(f"Mã WO '{wo_code}' đã tồn tại — chọn mã khác.")
+    else:
+        wo_code = _next_wo_code(db)
     wo = WorkOrder(
         wo_id=new_id(),
-        wo_code=payload.get("wo_code") or _next_wo_code(db),
+        wo_code=wo_code,
         brew_order_id=bo.brew_order_id,
         product_id=product_id,
         recipe_version_id=rv_id,

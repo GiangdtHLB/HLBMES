@@ -1602,6 +1602,7 @@ VIEWS.dispatch = async function () {
         <div class="field"><label>SL kế hoạch (hl)</label><input id="wo_qty" type="number" placeholder="theo Lệnh nấu"/></div>
         <div class="field"><label>Ca</label><select id="wo_shift"><option>Ca 1</option><option>Ca 2</option><option>Ca 3</option></select></div>
         <div class="field"><label>Ngày</label><input id="wo_date" type="date" value="${today}"/></div>
+        <div class="field"><label>Mã WO (tùy chọn)</label><input id="wo_code" type="number" min="1" step="1" placeholder="tự sinh nếu trống"/></div>
         <div class="field"><label>Ưu tiên</label><input id="wo_pri" type="number" value="5" size="3"/></div>
         <button class="btn" id="wo_add">Tạo lệnh (wo.manage)</button>
       </div>
@@ -1625,9 +1626,16 @@ VIEWS.dispatch = async function () {
     // gán nếu Danh mục chỉ có đúng 1 dây chuyền (kind=brewhouse), Khu vực giữ mặc định "Nấu A"
     // để cơ chế phân quyền theo khu vực (require_scope) không đổi hành vi.
     const autoBline = brewLinesWo.length === 1 ? brewLinesWo[0].line_id : null;
+    const woCodeRaw = $("wo_code").value.trim();
+    let wo_code = null;
+    if (woCodeRaw) {
+      const n = parseInt(woCodeRaw, 10);
+      if (!Number.isInteger(n) || n <= 0) throw new Error("Mã WO phải là số nguyên dương.");
+      wo_code = `WO-${n}`;
+    }
     await POST("/workorders", { brew_order_id: opt.value, recipe_version_id: opt.dataset.rv || null,
       planned_qty: $("wo_qty").value ? parseFloat($("wo_qty").value) : null, uom: "hl", line: "Nấu A",
-      brewhouse_line_id: autoBline,
+      brewhouse_line_id: autoBline, wo_code,
       shift: $("wo_shift").value, scheduled_date: $("wo_date").value, priority: parseInt($("wo_pri").value) });
     toast("Đã tạo lệnh sản xuất"); render("dispatch");
   });
