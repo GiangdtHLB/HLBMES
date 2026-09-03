@@ -138,26 +138,31 @@ def test_close_wo_blocked_while_batches_not_terminal(
     assert dispatched.status_code == 200, dispatched.text
     batch_ids = dispatched.json()["batch_ids"]
 
-    complete_wo = client.post(f"/api/workorders/{wo_id}/transition", headers=admin_h,
-                              json={"target": "completed"})
-    assert complete_wo.status_code == 200, complete_wo.text
+    # Cả 2 mẻ vẫn "planned" (active) -> chặn đánh dấu Lệnh "Hoàn thành" (xem
+    # services/workorders.py::_assert_no_active_batches — trước đây KHÔNG kiểm tra, cho qua
+    # thẳng dù mẻ còn dang dở).
+    blocked_complete = client.post(f"/api/workorders/{wo_id}/transition", headers=admin_h,
+                                  json={"target": "completed"})
+    assert blocked_complete.status_code == 409, blocked_complete.text
+    assert "chưa hoàn thành sản xuất" in blocked_complete.json()["detail"]
 
-    # Cả 2 mẻ vẫn "planned" -> chặn chốt lệnh.
-    blocked = client.post(f"/api/workorders/{wo_id}/transition", headers=admin_h, json={"target": "closed"})
-    assert blocked.status_code == 409, blocked.text
-    assert "chưa kết thúc" in blocked.json()["detail"]
-
-    # Hủy mẻ thứ nhất -> vẫn còn mẻ thứ 2 chưa xong -> vẫn chặn.
+    # Hủy mẻ thứ nhất -> vẫn còn mẻ thứ 2 "planned" (active) -> vẫn chặn "Hoàn thành".
     cancel1 = client.post(f"/api/batches/{batch_ids[0]}/transition", headers=admin_h,
                           json={"target": "cancelled"})
     assert cancel1.status_code == 200, cancel1.text
-    still_blocked = client.post(f"/api/workorders/{wo_id}/transition", headers=admin_h, json={"target": "closed"})
+    still_blocked = client.post(f"/api/workorders/{wo_id}/transition", headers=admin_h,
+                               json={"target": "completed"})
     assert still_blocked.status_code == 409, still_blocked.text
 
-    # Hủy nốt mẻ thứ 2 -> cả 2 mẻ đã kết thúc -> chốt lệnh được.
+    # Hủy nốt mẻ thứ 2 -> cả 2 mẻ không còn active -> đánh dấu "Hoàn thành" được.
     cancel2 = client.post(f"/api/batches/{batch_ids[1]}/transition", headers=admin_h,
                           json={"target": "cancelled"})
     assert cancel2.status_code == 200, cancel2.text
+    complete_wo = client.post(f"/api/workorders/{wo_id}/transition", headers=admin_h,
+                             json={"target": "completed"})
+    assert complete_wo.status_code == 200, complete_wo.text
+
+    # Cả 2 mẻ đã cancelled (terminal) -> Chốt lệnh được.
     closed = client.post(f"/api/workorders/{wo_id}/transition", headers=admin_h, json={"target": "closed"})
     assert closed.status_code == 200, closed.text
     assert closed.json()["status"] == "closed"

@@ -227,6 +227,223 @@ def test_wms_location_crud(client, admin_h):
     assert not any(l["loc_id"] == loc_id for l in locs3)
 
 
+# ==================== Audit đợt 2 (2026-09-03) — FK-delete safety Kho TP/WMS ====================
+# 18. delete_vehicle không kiểm tra Shipment/WmsTransfer.vehicle_id.
+# 19. delete_location sót WmsTransferLine/WmsTransfer/NearExpiryEntry/ConsignedEntry/
+#     FactoryImportEntry tham chiếu vị trí (chỉ kiểm tra tồn LIVE, không kiểm tra lịch sử).
+# 20. delete_unit(s)/delete_units_by_criteria không dọn/chặn khi còn WmsTransferLine (FK NOT
+#     NULL, không ondelete, tự nhận là "giữ vĩnh viễn làm lịch sử").
+# 21. delete_warehouse không kiểm tra Shipment.warehouse_id/LoadOrder.warehouse_id.
+
+def test_delete_vehicle_blocked_by_shipment(client, admin_h):
+    v = client.post("/api/wms/vehicles", headers=admin_h, json={"plate": "R2-VEH-SHIP"})
+    assert v.status_code == 201, v.text
+    vehicle_id = v.json()["vehicle_id"]
+
+    loc = client.post("/api/wms/locations", headers=admin_h,
+                      json={"code": "R2-VEH-LOC1", "name": "R2 veh loc1", "capacity": 100}).json()
+    build = client.post("/api/wms/units", headers=admin_h,
+                        json={"product_name": "R2-VEH-SKU", "lot_code": "R2-VEH-LOT", "total": 10,
+                              "pack_size": 1, "loc_id": loc["loc_id"]})
+    assert build.status_code == 201, build.text
+    confirm = client.post("/api/wms/units/confirm-receipt-by-lot", headers=admin_h,
+                          json={"product_name": "R2-VEH-SKU", "lot_code": "R2-VEH-LOT", "unit_type": "vi"})
+    assert confirm.status_code == 200, confirm.text
+    st = client.post("/api/suppliers", headers=admin_h, json={"code": "R2-VEH-DIST", "name": "NPP test veh"})
+    assert st.status_code == 201, st.text
+    ship = client.post("/api/wms/shipments", headers=admin_h,
+                       json={"ship_to_id": st.json()["supplier_id"], "vehicle_id": vehicle_id,
+                             "lines": [{"product_name": "R2-VEH-SKU", "lot_code": "R2-VEH-LOT",
+                                       "unit_type": "vi", "quantity": 5}]})
+    assert ship.status_code == 201, ship.text
+
+    blocked = client.delete(f"/api/wms/vehicles/{vehicle_id}", headers=admin_h)
+    assert blocked.status_code == 409, blocked.text
+    assert "phiếu xuất kho" in blocked.json()["detail"].lower()
+
+
+def test_delete_vehicle_blocked_by_transfer(client, admin_h):
+    v = client.post("/api/wms/vehicles", headers=admin_h, json={"plate": "R2-VEH-TRANS"})
+    assert v.status_code == 201, v.text
+    vehicle_id = v.json()["vehicle_id"]
+
+    loc_a = client.post("/api/wms/locations", headers=admin_h,
+                        json={"code": "R2-VEHTX-LOCA", "name": "loc a", "capacity": 100}).json()["loc_id"]
+    loc_b = client.post("/api/wms/locations", headers=admin_h,
+                        json={"code": "R2-VEHTX-LOCB", "name": "loc b", "capacity": 100}).json()["loc_id"]
+    build = client.post("/api/wms/units", headers=admin_h,
+                        json={"product_name": "R2-VEHTX-SKU", "lot_code": "R2-VEHTX-LOT", "total": 10,
+                              "pack_size": 1, "loc_id": loc_a})
+    assert build.status_code == 201, build.text
+    confirm = client.post("/api/wms/units/confirm-receipt-by-lot", headers=admin_h,
+                          json={"product_name": "R2-VEHTX-SKU", "lot_code": "R2-VEHTX-LOT", "unit_type": "vi"})
+    assert confirm.status_code == 200, confirm.text
+    tr = client.post("/api/wms/transfers", headers=admin_h,
+                     json={"to_location_id": loc_b, "vehicle_id": vehicle_id,
+                           "lines": [{"product_name": "R2-VEHTX-SKU", "lot_code": "R2-VEHTX-LOT",
+                                     "unit_type": "vi", "quantity": 5}]})
+    assert tr.status_code == 201, tr.text
+
+    blocked = client.delete(f"/api/wms/vehicles/{vehicle_id}", headers=admin_h)
+    assert blocked.status_code == 409, blocked.text
+    assert "điều chuyển" in blocked.json()["detail"].lower()
+
+
+def test_delete_warehouse_blocked_by_shipment(client, admin_h):
+    wh = client.post("/api/wms/warehouses", headers=admin_h,
+                     json={"code": "R2-WH-SHIP", "name": "Kho test R2 shipment"})
+    assert wh.status_code == 201, wh.text
+    warehouse_id = wh.json()["warehouse_id"]
+
+    loc = client.post("/api/wms/locations", headers=admin_h,
+                      json={"code": "R2-WH-LOC", "name": "R2 wh loc", "capacity": 100,
+                            "warehouse_id": warehouse_id}).json()
+    build = client.post("/api/wms/units", headers=admin_h,
+                        json={"product_name": "R2-WH-SKU", "lot_code": "R2-WH-LOT", "total": 10,
+                              "pack_size": 1, "loc_id": loc["loc_id"]})
+    assert build.status_code == 201, build.text
+    confirm = client.post("/api/wms/units/confirm-receipt-by-lot", headers=admin_h,
+                          json={"product_name": "R2-WH-SKU", "lot_code": "R2-WH-LOT", "unit_type": "vi"})
+    assert confirm.status_code == 200, confirm.text
+    st = client.post("/api/suppliers", headers=admin_h, json={"code": "R2-WH-DIST", "name": "NPP test wh"})
+    assert st.status_code == 201, st.text
+    ship = client.post("/api/wms/shipments", headers=admin_h,
+                       json={"ship_to_id": st.json()["supplier_id"], "warehouse_id": warehouse_id,
+                             "lines": [{"product_name": "R2-WH-SKU", "lot_code": "R2-WH-LOT",
+                                       "unit_type": "vi", "quantity": 5}]})
+    assert ship.status_code == 201, ship.text
+
+    # Xóa hết vị trí trước để loại trừ nguyên nhân "còn vị trí" (guard đã có sẵn) — vẫn phải
+    # chặn vì Shipment.warehouse_id còn tham chiếu.
+    del_loc = client.delete(f"/api/wms/locations/{loc['loc_id']}", headers=admin_h)
+    assert del_loc.status_code == 409, del_loc.text  # còn unit "stored" — dùng lại kho khác để test warehouse guard riêng
+
+    blocked = client.delete(f"/api/wms/warehouses/{warehouse_id}", headers=admin_h)
+    assert blocked.status_code == 409, blocked.text
+
+
+def test_delete_location_blocked_by_transfer_history_even_after_stock_moved_away(client, admin_h):
+    loc_a = client.post("/api/wms/locations", headers=admin_h,
+                        json={"code": "R2-LOCTX-A", "name": "loc a", "capacity": 100}).json()["loc_id"]
+    loc_b = client.post("/api/wms/locations", headers=admin_h,
+                        json={"code": "R2-LOCTX-B", "name": "loc b", "capacity": 100}).json()["loc_id"]
+    loc_c = client.post("/api/wms/locations", headers=admin_h,
+                        json={"code": "R2-LOCTX-C", "name": "loc c", "capacity": 100}).json()["loc_id"]
+    build = client.post("/api/wms/units", headers=admin_h,
+                        json={"product_name": "R2-LOCTX-SKU", "lot_code": "R2-LOCTX-LOT", "total": 10,
+                              "pack_size": 1, "loc_id": loc_a})
+    assert build.status_code == 201, build.text
+    confirm = client.post("/api/wms/units/confirm-receipt-by-lot", headers=admin_h,
+                          json={"product_name": "R2-LOCTX-SKU", "lot_code": "R2-LOCTX-LOT", "unit_type": "vi"})
+    assert confirm.status_code == 200, confirm.text
+
+    tr1 = client.post("/api/wms/transfers", headers=admin_h,
+                      json={"to_location_id": loc_b,
+                            "lines": [{"product_name": "R2-LOCTX-SKU", "lot_code": "R2-LOCTX-LOT",
+                                      "unit_type": "vi", "quantity": 10}]})
+    assert tr1.status_code == 201, tr1.text
+
+    # loc_a KHÔNG còn unit "stored" nào (đã chuyển hết đi) — guard tồn LIVE cũ sẽ cho qua, nhưng
+    # WmsTransferLine.from_location_id vẫn trỏ tới loc_a (lịch sử) -> vẫn phải chặn xóa.
+    blocked_a = client.delete(f"/api/wms/locations/{loc_a}", headers=admin_h)
+    assert blocked_a.status_code == 409, blocked_a.text
+    assert "điều chuyển" in blocked_a.json()["detail"].lower()
+
+    # Chuyển tiếp từ loc_b sang loc_c -> loc_b cũng hết tồn LIVE, nhưng WmsTransfer.to_location_id
+    # (phiếu tr1) vẫn trỏ tới loc_b -> vẫn phải chặn xóa.
+    tr2 = client.post("/api/wms/transfers", headers=admin_h,
+                      json={"to_location_id": loc_c,
+                            "lines": [{"product_name": "R2-LOCTX-SKU", "lot_code": "R2-LOCTX-LOT",
+                                      "unit_type": "vi", "quantity": 10}]})
+    assert tr2.status_code == 201, tr2.text
+    blocked_b = client.delete(f"/api/wms/locations/{loc_b}", headers=admin_h)
+    assert blocked_b.status_code == 409, blocked_b.text
+    assert "điều chuyển" in blocked_b.json()["detail"].lower()
+
+
+def _release_chiet_unit_to_wms(client, admin_h, suffix):
+    """Dựng 1 vỉ/keg nguồn "chiet" (qua pipeline Mẻ sản xuất, release_pack_lot_to_wms) — KHÁC
+    "manual" (build_units): "chiet" xuất/điều chuyển được NGAY, không cần confirm-receipt-by-lot
+    trước — cần thiết để cô lập test khỏi guard "đã duyệt Trưởng bộ phận kho" sẵn có (guard đó
+    chỉ áp dụng SAU khi confirm, che mất guard MỚI đang test ở đây nếu dùng unit "manual" đã
+    confirm, vì "manual" bắt buộc confirm mới điều chuyển được)."""
+    rid = client.get("/api/recipes", headers=admin_h).json()[0]["recipe_id"]
+    vers = client.get(f"/api/recipes/{rid}/versions", headers=admin_h).json()
+    v = next(x for x in vers if x["state"] == "effective")
+    oid = client.get("/api/brewing/orders", headers=admin_h).json()[0]["brew_order_id"]
+    b = client.post("/api/batches", headers=admin_h,
+                    json={"order_id": oid, "recipe_version_id": v["version_id"],
+                          "planned_qty": 1000, "allow_shortage": True})
+    assert b.status_code == 201, b.text
+    batch_id = b.json()["batch_id"]
+    for target in ("ready", "running"):
+        assert client.post(f"/api/batches/{batch_id}/transition", headers=admin_h,
+                           json={"target": target}).status_code == 200
+    assert client.post(f"/api/batches/{batch_id}/actual-qty", headers=admin_h,
+                       json={"actual_qty": 1000}).status_code == 200
+    assert client.post(f"/api/batches/{batch_id}/finish", headers=admin_h, json={}).status_code == 200
+    assert client.post(f"/api/batches/{batch_id}/transition", headers=admin_h,
+                       json={"target": "completed"}).status_code == 200
+    tank = client.post("/api/batch-tanks", headers=admin_h,
+                       json={"batch_ids": [batch_id], "tank_code": f"TANK-{suffix}"})
+    assert tank.status_code == 201, tank.text
+    bbt = client.post("/api/lines", headers=admin_h,
+                      json={"code": f"BBT-{suffix}", "name": f"BBT {suffix}", "kind": "tank_bbt"})
+    assert bbt.status_code == 201, bbt.text
+    fl = client.post("/api/batch-filter-lots", headers=admin_h,
+                     json={"filter_lot_code": f"FLOT-{suffix}", "to_bbt": bbt.json()["code"],
+                           "sources": [{"source_type": "tank", "source_tank_id": tank.json()["tank_id"]}]})
+    assert fl.status_code == 201, fl.text
+    filter_lot_id = fl.json()["filter_lot_id"]
+    src = client.get(f"/api/batch-filter-lots/{filter_lot_id}/sources", headers=admin_h).json()[0]
+    batches = client.get(f"/api/batch-filter-lots/{filter_lot_id}/batches", headers=admin_h).json()
+    fin = client.put(f"/api/batch-filter-lots/batches/{batches[0]['batch_link_id']}/finish", headers=admin_h,
+                    json={"draws": [{"source_link_id": src["link_id"], "dich_nha_hl": 900}], "nuoc_bai_khi_hl": 0})
+    assert fin.status_code == 200, fin.text
+    fp = client.post("/api/finished-products", headers=admin_h,
+                     json={"code": f"SKU-{suffix}", "name": f"SKU {suffix}", "uom": "lon",
+                           "unit_type": "vi", "pack_size": 1})
+    assert fp.status_code == 201, fp.text
+    pack = client.post(f"/api/batch-filter-lots/{filter_lot_id}/pack-lots", headers=admin_h,
+                      json={"qty": 500, "pack_lot_code": f"PKG-{suffix}", "lot_no": f"LOT-{suffix}",
+                            "finished_product_id": fp.json()["finished_product_id"]})
+    assert pack.status_code == 201, pack.text
+    pack_lot_id = pack.json()["pack_lot_id"]
+    shifts = client.put(f"/api/batch-pack-lots/{pack_lot_id}/shifts", headers=admin_h, json={"ca1_qty": 10})
+    assert shifts.status_code == 200, shifts.text
+    approve = client.post(f"/api/batch-pack-lots/{pack_lot_id}/approve", headers=admin_h)
+    assert approve.status_code == 200, approve.text
+    release = client.post(f"/api/batch-pack-lots/{pack_lot_id}/release-to-wms", headers=admin_h)
+    assert release.status_code == 200, release.text
+    unit_code = release.json()["unit_codes"][0]
+    units = client.get("/api/wms/units", headers=admin_h).json()
+    return next(u for u in units if u["unit_code"] == unit_code)
+
+
+def test_delete_unit_blocked_after_transfer_history(client, admin_h):
+    unit = _release_chiet_unit_to_wms(client, admin_h, "R2UNITTX")
+    assert unit["status"] == "stored"
+    loc_b = client.post("/api/wms/locations", headers=admin_h,
+                        json={"code": "R2-UNITTX-B", "name": "loc b", "capacity": 100}).json()["loc_id"]
+    tr = client.post("/api/wms/transfers", headers=admin_h,
+                     json={"to_location_id": loc_b,
+                           "lines": [{"product_name": unit["product"], "lot_code": unit["lot_code"],
+                                     "unit_type": unit["unit_type"], "quantity": unit["quantity"]}]})
+    assert tr.status_code == 201, tr.text
+
+    units = client.get("/api/wms/units", headers=admin_h).json()
+    moved_unit = next(u for u in units if u["product"] == unit["product"] and u["lot_code"] == unit["lot_code"]
+                     and u["status"] == "stored")
+
+    blocked = client.delete(f"/api/wms/units/{moved_unit['unit_id']}", headers=admin_h)
+    assert blocked.status_code == 409, blocked.text
+    assert "điều chuyển" in blocked.json()["detail"].lower()
+
+    blocked_batch = client.post("/api/wms/units/delete-batch", headers=admin_h,
+                                json={"unit_ids": [moved_unit["unit_id"]]})
+    assert blocked_batch.status_code == 409, blocked_batch.text
+
+
 def test_wms_location_delete_blocked_when_unit_stored(client, admin_h, vanhanh_h):
     """capacity=5 tính theo SỐ VỈ (không phải lon) — cần đăng ký SKU trước để _pack_divisor
     tra đúng pack_size=24, nếu không sẽ mặc định 1 và 48 lon bị hiểu nhầm thành 48 vỉ (> 5)."""
