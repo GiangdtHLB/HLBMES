@@ -2391,9 +2391,13 @@ VIEWS.batches = async function () {
       <div id="b_avail" class="muted" style="margin-top:6px">Chỉ recipe version đã <code class="k">effective</code> mới được dùng. Hệ thống kiểm tra tồn theo BOM trước khi tạo. Chọn Lệnh SX (điều độ) để tự điền Lệnh nấu + Dây chuyền nấu theo lệnh đó — vẫn chọn/sửa lại Dây chuyền nấu độc lập được.</div>
     </div>
     <div class="split">
-      <div class="panel"><h2>Danh sách mẻ</h2>${tableBatches(batches, true, woByIdB)}</div>
+      <div class="panel"><h2>Danh sách mẻ</h2>
+        <input class="searchbox" data-tbl="t_batches" placeholder="Tìm theo mã mẻ, WO, trạng thái..."/>
+        <div class="tablewrap">${tableBatches(batches, true, woByIdB, "t_batches")}</div>
+      </div>
       <div class="panel" id="b_detail"><h2>Chi tiết mẻ</h2><div class="muted">Chọn một mẻ để xem.</div></div>
     </div>`;
+  wirePaginate("t_batches", 10);
   $("b_wo").onchange = () => {
     const opt = $("b_wo").options[$("b_wo").selectedIndex];
     const brewOrderId = opt.dataset.breworder || "";
@@ -2451,8 +2455,8 @@ VIEWS.batches = async function () {
   document.querySelectorAll("[data-batch]").forEach(tr => tr.onclick = () => showBatch(tr.dataset.batch));
   if (SELECTED_BATCH) showBatch(SELECTED_BATCH);
 };
-function tableBatches(batches, clickable, woById) {
-  return `<table><thead><tr><th>Mã mẻ Braumat</th><th>Mã WO</th><th>Trạng thái</th><th>Chất lượng</th><th>KH</th><th>Thực tế</th></tr></thead>
+function tableBatches(batches, clickable, woById, tableId) {
+  return `<table${tableId ? ` id="${tableId}"` : ""}><thead><tr><th>Mã mẻ Braumat</th><th>Mã WO</th><th>Trạng thái</th><th>Chất lượng</th><th>KH</th><th>Thực tế</th></tr></thead>
     <tbody>${batches.map(b => `<tr ${clickable ? `data-batch="${b.batch_id}" style="cursor:pointer"` : ""}>
       <td><code class="k">${esc(b.batch_code)}</code></td>
       <td class="muted">${(woById && woById[b.work_order_id]) ? esc(woById[b.work_order_id].wo_code) : "—"}</td>

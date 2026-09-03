@@ -663,7 +663,9 @@
     root.innerHTML = `
       ${panel("🚚 Cấp liệu cho mẻ", `
         <div class="row"><div class="field"><label>Mẻ</label>
-          <select id="dp_batch">${opt(batches, b => b.batch_id, b => b.batch_code + " · " + b.state, running && running.batch_id)}</select></div></div>
+          <input type="text" id="dp_batch_txt" autocomplete="off" placeholder="Gõ để tìm mã mẻ..."
+            value="${running ? esc(running.batch_code + " · " + running.state) : ""}"/>
+          <input type="hidden" id="dp_batch" value="${running ? esc(running.batch_id) : ""}"/></div></div>
         <div id="dp_bom" class="muted" style="margin-top:8px">Đang tải định mức…</div>
         <h3 style="margin-top:12px">Cấp 1 vật tư (tự chọn lô theo FEFO — hết hạn trước xuất trước)</h3>
         <div class="row">
@@ -740,7 +742,9 @@
         toast("Đã xóa dòng cấp liệu"); refresh();
       }));
     }
-    $("dp_batch").onchange = () => { $("sg_result").innerHTML = 'Bấm "Xem gợi ý" để xem vật tư còn thiếu và lô sẽ dùng.'; refresh(); };
+    wireSearchableSelect("dp_batch_txt", "dp_batch",
+      batches.map(b => ({ value: b.batch_id, label: b.batch_code + " · " + b.state })),
+      () => { $("sg_result").innerHTML = 'Bấm "Xem gợi ý" để xem vật tư còn thiếu và lô sẽ dùng.'; refresh(); });
     $("dp_go").onclick = () => guard(async () => {
       const bid = $("dp_batch").value;
       await POST(`/dispense/${bid}`, { lines: [{ material_code: $("dp_mat").value, quantity: num("dp_qty") || 0, allow_over: $("dp_over").checked }] });
