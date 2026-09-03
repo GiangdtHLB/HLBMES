@@ -24,7 +24,9 @@ alembic upgrade head                          # áp toàn bộ migration mới
 | `sa.Unicode(length=N)` | `sa.String` | MSSQL `VARCHAR` mất dấu tiếng Việt ("QC đạt"→"QC dat") → vỡ hash-chain audit. `Unicode`→`NVARCHAR`. |
 | `sa.UnicodeText` | `sa.Text` | Như trên cho cột dài. |
 | luôn có `length=` cho cột PK/index/unique | `Unicode()` không length | MSSQL không PK/index được `NVARCHAR(MAX)`. |
-| cột thời gian: `sa.DateTime(timezone=True)` | `sa.DateTime()` trần | Model dùng `UTCDateTime` (tz-aware) + app ghi `utcnow()` tz-aware. `DateTime()` trần → MSSQL tạo `DATETIME` (không offset); ghi tz-aware → 500 "Conversion failed converting date/time from character string". `timezone=True` → `DATETIMEOFFSET`. Xem migration `51e5e329b0d1`. |
+| cột thời gian: `sa.DateTime(timezone=True)` | `sa.DateTime()` trần | Model dùng `UTCDateTime` (tz-aware) + app ghi `utcnow()` tz-aware. `DateTime()` trần → MSSQL tạo `DATETIME` (không offset); ghi tz-aware → 500 "Conversion failed converting date/time from character string". `timezone=True` → `DATETIMEOFFSET`. Áp dụng cho CẢ `op.add_column` LẪN `sa.Column(...)` trong `op.create_table` (dễ sót ở create_table). Xem migration `a1e7f3c9b2d4` (đổi 27 cột pipeline bare DATETIME→DATETIMEOFFSET). |
+
+> ⚠️ **Gate phải chạy trên schema DỰNG QUA MIGRATION, không phải `create_all`.** `Base.metadata.create_all` sinh cột từ MODEL (UTCDateTime→DATETIMEOFFSET đúng), che mất lỗi `sa.DateTime()` trần trong migration. Prod dựng schema bằng `alembic upgrade head` nên mới lộ. GET-smoke/write-smoke MSSQL phải chạy trên DB đã `alembic upgrade head` (rồi `seed()` qua ORM), KHÔNG dùng `MES_AUTO_CREATE=1`, mới bắt được lệch kiểu model↔migration.
 
 ## 2. Năm lớp lỗi MSSQL đã gặp & cách xử lý
 
