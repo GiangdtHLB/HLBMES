@@ -17,8 +17,9 @@ from ..models.brewing import BottleRecord
 from ..models.master import FinishedProduct, FinishedProductMonthlyPlan, UnitTypeCatalog
 from ..models.materials import GenealogyEdge, Supplier
 from ..models.warehouse import FactoryLocation
-from ..models.wms import (ConsignedEntry, FactoryImportEntry, FinishedGoodsUnit, LoadSlip, NearExpiryEntry,
-                          Shipment, Vehicle, WmsLocation, WmsTransfer, WmsTransferLine, WmsWarehouse)
+from ..models.wms import (ConsignedEntry, FactoryImportEntry, FinishedGoodsUnit, LoadOrder, LoadSlip,
+                          NearExpiryEntry, Shipment, Vehicle, WmsLocation, WmsTransfer, WmsTransferLine,
+                          WmsWarehouse)
 from ..security import User, has_scope, require_perm, require_role, require_scope
 from . import genealogy
 from . import ops_setting as ops_setting_svc
@@ -288,6 +289,13 @@ def delete_warehouse(db: Session, warehouse_id: str) -> None:
                       .where(WmsLocation.warehouse_id == warehouse_id)).scalar() or 0
     if used:
         raise DomainError(f"Kho {wh.code} còn {used} vị trí — không thể xóa.")
+    # Shipment.warehouse_id/LoadOrder.warehouse_id là FK nullable nhưng KHI đã set (phiếu xuất/
+    # lệnh đóng hàng từng gắn kho này) thì vẫn phải giữ nguyên vẹn (lịch sử) — xóa thẳng vỡ FK
+    # trên MSSQL dù kho không còn vị trí nào (2026-09-03, audit Kho TP/WMS).
+    if db.execute(select(Shipment.shipment_id).where(Shipment.warehouse_id == warehouse_id)).first():
+        raise DomainError(f"Kho {wh.code} đã có phiếu xuất kho tham chiếu — không thể xóa.")
+    if db.execute(select(LoadOrder.load_order_id).where(LoadOrder.warehouse_id == warehouse_id)).first():
+        raise DomainError(f"Kho {wh.code} đã có Lệnh đóng hàng tham chiếu — không thể xóa.")
     db.delete(wh)
     db.commit()
 
@@ -393,6 +401,21 @@ def delete_location(db: Session, loc_id: str) -> None:
         FinishedGoodsUnit.location_id == loc_id, FinishedGoodsUnit.status == "stored")).scalar() or 0
     if used:
         raise DomainError(f"Vị trí {loc.code} đang chứa {used} vỉ/keg — không thể xóa.")
+    # Chỉ kiểm tra tồn LIVE (ở trên) là không đủ — WmsTransferLine/WmsTransfer/NearExpiryEntry/
+    # ConsignedEntry/FactoryImportEntry vẫn có thể còn dòng LỊCH SỬ tham chiếu vị trí này (dù
+    # hiện không còn hàng ở đó), xóa thẳng vỡ FK trên MSSQL — đúng bài học đã ghi trong docstring
+    # split_location() ở trên, nhưng chưa áp dụng cho delete_location (2026-09-03, audit Kho TP/
+    # WMS). Dùng "Chia ô"/ngừng hoạt động thay vì xóa khi vị trí đã có lịch sử.
+    if db.execute(select(WmsTransferLine.line_id).where(WmsTransferLine.from_location_id == loc_id)).first():
+        raise DomainError(f"Vị trí {loc.code} đã có lịch sử điều chuyển — không thể xóa (dùng Ngừng hoạt động).")
+    if db.execute(select(WmsTransfer.transfer_id).where(WmsTransfer.to_location_id == loc_id)).first():
+        raise DomainError(f"Vị trí {loc.code} đã có lịch sử điều chuyển — không thể xóa (dùng Ngừng hoạt động).")
+    if db.execute(select(NearExpiryEntry.entry_id).where(NearExpiryEntry.location_id == loc_id)).first():
+        raise DomainError(f"Vị trí {loc.code} đã có lịch sử nhập bia cận date — không thể xóa (dùng Ngừng hoạt động).")
+    if db.execute(select(ConsignedEntry.entry_id).where(ConsignedEntry.location_id == loc_id)).first():
+        raise DomainError(f"Vị trí {loc.code} đã có lịch sử nhập bia gửi — không thể xóa (dùng Ngừng hoạt động).")
+    if db.execute(select(FactoryImportEntry.entry_id).where(FactoryImportEntry.location_id == loc_id)).first():
+        raise DomainError(f"Vị trí {loc.code} đã có lịch sử nhập từ nhà máy khác — không thể xóa (dùng Ngừng hoạt động).")
     db.delete(loc)
     db.commit()
 
@@ -453,6 +476,15 @@ def delete_vehicle(db: Session, vehicle_id: str) -> None:
     v = db.get(Vehicle, vehicle_id)
     if not v:
         raise NotFoundError("Xe không tồn tại.")
+    # Shipment/WmsTransfer/ConsignedEntry.vehicle_id đều FK nullable tới wms_vehicle — xe đã
+    # từng gắn vào 1 phiếu xuất/điều chuyển/nhập bia gửi (kể cả lịch sử, không chỉ phiếu đang mở)
+    # vẫn tham chiếu, xóa thẳng vỡ FK trên MSSQL (2026-09-03, audit Kho TP/WMS).
+    if db.execute(select(Shipment.shipment_id).where(Shipment.vehicle_id == vehicle_id)).first():
+        raise DomainError(f"Xe {v.plate} đã gắn vào phiếu xuất kho — không thể xóa.")
+    if db.execute(select(WmsTransfer.transfer_id).where(WmsTransfer.vehicle_id == vehicle_id)).first():
+        raise DomainError(f"Xe {v.plate} đã gắn vào phiếu điều chuyển — không thể xóa.")
+    if db.execute(select(ConsignedEntry.entry_id).where(ConsignedEntry.vehicle_id == vehicle_id)).first():
+        raise DomainError(f"Xe {v.plate} đã gắn vào phiếu nhập bia gửi — không thể xóa.")
     db.delete(v)
     db.commit()
 
@@ -2674,6 +2706,14 @@ def delete_units_by_criteria(db: Session, product_name: str, lot_code: str | Non
         FinishedGoodsUnit.unit_type == unit_type, FinishedGoodsUnit.status == "stored", *loc_filter)).all()]
     if not ids:
         raise DomainError("Không tìm thấy vỉ/keg nào khớp lô này để xóa.")
+    for i in range(0, len(ids), 500):
+        chunk = ids[i:i + 500]
+        # Mirror delete_unit/delete_units — 1 đơn vị đã từng điều chuyển (WmsTransferLine.unit_id,
+        # FK NOT NULL, không đổi status nên không tự loại khỏi bộ lọc status='stored' ở trên) vẫn
+        # vỡ FK 547 trên MSSQL nếu xóa (2026-09-03, audit Kho TP/WMS).
+        if db.execute(select(WmsTransferLine.line_id).where(WmsTransferLine.unit_id.in_(chunk))).first():
+            raise DomainError("Lô này có đơn vị đã từng điều chuyển — không thể xóa theo lô "
+                              "(dùng xóa từng đơn vị ở màn Chi tiết vị trí nếu cần).")
     bottles_reset = set()
     for i in range(0, len(ids), 500):
         chunk = ids[i:i + 500]
@@ -3111,6 +3151,12 @@ def delete_unit(db: Session, unit_id: str, user: User) -> None:
         raise DomainError("Đã phân rã thành lon — không thể xóa (còn lon con phụ thuộc).")
     if u.source in ("chiet", "manual") and u.received_confirmed_by:
         raise DomainError("Đã được Trưởng bộ phận kho duyệt nhập kho — không thể xóa.")
+    # WmsTransferLine.unit_id là FK NOT NULL không ondelete, và CHÍNH docstring của
+    # WmsTransferLine khẳng định dòng này "giữ lại NGUYÊN VẸN... coi như lịch sử" — điều chuyển
+    # (create_transfer) không đổi status nên 1 đơn vị đã từng điều chuyển (vẫn "stored") qua
+    # được mọi check ở trên rồi vỡ FK 547 trên MSSQL khi xóa (2026-09-03, audit Kho TP/WMS).
+    if db.execute(select(WmsTransferLine.line_id).where(WmsTransferLine.unit_id == unit_id)).first():
+        raise DomainError(f"{u.unit_code} đã có lịch sử điều chuyển — không thể xóa.")
     for e in db.execute(select(GenealogyEdge).where(or_(
             and_(GenealogyEdge.to_type == "finished_goods_unit", GenealogyEdge.to_id == unit_id),
             and_(GenealogyEdge.from_type == "finished_goods_unit", GenealogyEdge.from_id == unit_id)))).scalars().all():
@@ -3150,6 +3196,8 @@ def delete_units(db: Session, unit_ids: list[str], user: User) -> dict:
             raise DomainError(f"{u.unit_code} đã phân rã thành lon — không thể xóa (còn lon con phụ thuộc).")
         if u.source in ("chiet", "manual") and u.received_confirmed_by:
             raise DomainError(f"{u.unit_code} đã được Trưởng bộ phận kho duyệt nhập kho — không thể xóa.")
+        if db.execute(select(WmsTransferLine.line_id).where(WmsTransferLine.unit_id == unit_id)).first():
+            raise DomainError(f"{u.unit_code} đã có lịch sử điều chuyển — không thể xóa.")
         units.append(u)
     bottles_reset = set()
     for u in units:

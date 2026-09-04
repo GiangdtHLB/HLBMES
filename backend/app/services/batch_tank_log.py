@@ -12,7 +12,7 @@ import json
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..common import new_id, utcnow
+from ..common import Role, new_id, utcnow
 from ..errors import DomainError
 from ..models.batch_pipeline import (
     BatchTank,
@@ -21,7 +21,7 @@ from ..models.batch_pipeline import (
     BatchTankProcessLog,
 )
 from ..models.batches import BatchExecution
-from ..security import User, require_perm
+from ..security import User, require_perm, require_role
 
 
 def _assert_tank_unlocked(db: Session, tank_id: str) -> None:
@@ -149,6 +149,12 @@ def get_daily_readings(db: Session, tank_id: str) -> list[BatchTankDailyReading]
 def upsert_daily_readings(db: Session, tank_id: str, rows: list[dict], user: User) -> list[BatchTankDailyReading]:
     require_perm(user, "batch.execute")
     _assert_tank_unlocked(db, tank_id)
+    # "kcs" (đạt/không đạt theo ngày) là phán quyết QC — trước đây CHỈ cần batch.execute (như
+    # nhiệt độ/độ Plato, các trường vận hành thuần túy), khác hẳn kênh ghi QC "chính danh"
+    # (services/quality.py::record_result) đòi role QA/OPERATOR — mirror lại ở đây để không phải
+    # ai có batch.execute cũng tự phán "đạt" được (2026-09-03, audit pipeline "Mẻ SX" đợt 2).
+    if any(row.get("kcs") is not None for row in rows):
+        require_role(user, Role.QA, Role.OPERATOR)
     now = utcnow()
     for row in rows:
         reading = db.execute(

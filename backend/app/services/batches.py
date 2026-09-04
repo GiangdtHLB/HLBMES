@@ -353,7 +353,11 @@ def consume_lot(db: Session, batch_id: str, lot_id: str, quantity: float, user: 
     require_role(user, Role.OPERATOR, Role.SUPERVISOR, Role.ENGINEER)
     batch = _get(db, batch_id)
     _assert_not_locked(batch)
-    lot = db.get(MaterialLot, lot_id)
+    # with_for_update(): khóa hàng lô NVL TRƯỚC khi đọc-rồi-ghi quantity — 2 request cấp liệu
+    # gần như đồng thời trên CÙNG lô (VD cấp liệu cho 2 mẻ khác nhau cùng lúc) có thể cùng đọc
+    # quantity cũ, mất 1 lần trừ trên DB có row-lock thật (SQL Server/Postgres — SQLite bỏ qua;
+    # 2026-09-03, audit Kho công ty/phân xưởng).
+    lot = db.execute(select(MaterialLot).where(MaterialLot.lot_id == lot_id).with_for_update()).scalar_one_or_none()
     if not lot:
         raise NotFoundError("Lô vật tư không tồn tại.")
     if lot.status == LotStatus.ON_HOLD.value:

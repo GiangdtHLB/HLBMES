@@ -131,6 +131,13 @@ def delete_material_location(db: Session, loc_id: str, user: User) -> None:
     db.execute(update(MaterialLot).where(MaterialLot.location_id == loc_id).values(location_id=None))
     db.execute(update(MaterialLot).where(MaterialLot.workshop_location_id == loc_id)
               .values(workshop_location_id=None))
+    # TransferKcPxRequest.workshop_location_id được gán VĨNH VIỄN lúc duyệt (approve_transfer_
+    # kcpx_request) làm bản ghi lịch sử — không bao giờ tự null lại sau đó, khác MaterialLot ở
+    # trên (di chuyển được). Bỏ sót thì xóa 1 vị trí kho phân xưởng đã từng dùng để duyệt nhận
+    # hàng sẽ vỡ FK trên MSSQL dù MaterialLot không còn lô nào ở vị trí đó (2026-09-03, audit
+    # Kho công ty/phân xưởng).
+    db.execute(update(TransferKcPxRequest).where(TransferKcPxRequest.workshop_location_id == loc_id)
+              .values(workshop_location_id=None))
     db.flush()
     record_audit(db, entity_type="material_location", entity_id=loc.loc_id, action="delete", actor=user,
                 before={"code": loc.code, "name": loc.name})
@@ -217,8 +224,12 @@ def receive(db: Session, payload: dict, user: User) -> dict:
     # trùng mã lô của vật tư khác sẽ âm thầm cộng nhầm vào lô của vật tư đó (bug thực tế).
     lot = None
     if lot_code:
+        # with_for_update(): khóa hàng ngay TRƯỚC khi đọc lot.quantity để cộng dồn — 2 request
+        # nhập cùng lô gần như đồng thời (VD import Excel song song) có thể cùng đọc quantity cũ
+        # (2026-09-03, audit Kho công ty/phân xưởng).
         lot = db.execute(select(MaterialLot).where(
-            MaterialLot.lot_year == year, MaterialLot.lot_code == lot_code)).scalar_one_or_none()
+            MaterialLot.lot_year == year, MaterialLot.lot_code == lot_code)
+            .with_for_update()).scalar_one_or_none()
         if lot and lot.material_id != material_id:
             raise DomainError(f"Mã lô '{lot_code}' đã dùng cho vật tư khác trong năm {year} — "
                               "nhập mã lô khác hoặc để trống để hệ thống tự sinh.")
@@ -287,9 +298,7 @@ def update_receipt(db: Session, movement_id: str, payload: dict, user: User) -> 
     mv = db.get(StockMovement, movement_id)
     if not mv or mv.movement_type != "receipt":
         raise NotFoundError("Không tìm thấy lượt nhập kho này.")
-    lot = db.get(MaterialLot, mv.lot_id)
-    if not lot:
-        raise NotFoundError("Lô không tồn tại.")
+    lot = _lock_lot(db, mv.lot_id)
     if _lot_used(db, lot.lot_id):
         raise DomainError(f"Lô {lot.lot_code} đã được sử dụng (xuất/chuyển/tiêu thụ) — không thể sửa nhập kho.")
     new_qty = payload.get("quantity")
@@ -329,9 +338,7 @@ def delete_receipt(db: Session, movement_id: str, user: User) -> dict:
     mv = db.get(StockMovement, movement_id)
     if not mv or mv.movement_type != "receipt":
         raise NotFoundError("Không tìm thấy lượt nhập kho này.")
-    lot = db.get(MaterialLot, mv.lot_id)
-    if not lot:
-        raise NotFoundError("Lô không tồn tại.")
+    lot = _lock_lot(db, mv.lot_id)
     if _lot_used(db, lot.lot_id):
         raise DomainError(f"Lô {lot.lot_code} đã được sử dụng (xuất/chuyển/tiêu thụ) — không thể xóa nhập kho.")
     has_qc = db.execute(select(func.count()).select_from(QualityResult).where(
@@ -362,6 +369,32 @@ def delete_receipt(db: Session, movement_id: str, user: User) -> dict:
         record_audit(db, entity_type="sang_ngang_request", entity_id=req.request_id,
                      action="delete", actor=user, before={"lot_id": req.lot_id, "status": req.status})
         db.delete(req)
+    if remaining_receipts == 0:
+        # Lô sắp bị xóa THẬT (không còn receipt nào khác) — 4 bảng con khác cũng có FK NOT NULL
+        # (hoặc nullable nhưng vẫn enforce khi có giá trị) tới material_lot mà _lot_used() không
+        # phát hiện được (lô "chưa dùng" theo StockMovement vẫn có thể còn các bản ghi này ở
+        # trạng thái pending/rejected/gợi ý-chưa-fulfill): TransferPxRequest.lot_id,
+        # TransferKcPxRequest.lot_id (mirror SangNgangRequest — tới được đây chỉ có thể pending/
+        # rejected, vì đã duyệt thì transfer() để lại StockMovement non-receipt bị _lot_used chặn
+        # ở trên), MaterialRequestLine.preferred_lot_id (chỉ là gợi ý FIFO chưa fulfill, gỡ tham
+        # chiếu chứ không xóa cả dòng phiếu), StockCountLine.lot_id (dòng snapshot kiểm kê, không
+        # còn lô để đối chiếu thì xóa luôn dòng đó) — vỡ FK 547 trên MSSQL nếu bỏ sót
+        # (2026-09-03, audit Kho công ty/phân xưởng).
+        for r in db.execute(select(TransferPxRequest).where(
+                TransferPxRequest.lot_id == lot.lot_id)).scalars().all():
+            record_audit(db, entity_type="transfer_px_request", entity_id=r.request_id,
+                        action="delete", actor=user, before={"lot_id": r.lot_id, "status": r.status})
+            db.delete(r)
+        for r in db.execute(select(TransferKcPxRequest).where(
+                TransferKcPxRequest.lot_id == lot.lot_id)).scalars().all():
+            record_audit(db, entity_type="transfer_kcpx_request", entity_id=r.request_id,
+                        action="delete", actor=user, before={"lot_id": r.lot_id, "status": r.status})
+            db.delete(r)
+        db.execute(update(MaterialRequestLine).where(MaterialRequestLine.preferred_lot_id == lot.lot_id)
+                  .values(preferred_lot_id=None))
+        for line in db.execute(select(StockCountLine).where(
+                StockCountLine.lot_id == lot.lot_id)).scalars().all():
+            db.delete(line)
     db.flush()
     db.delete(mv)
     db.flush()
@@ -411,7 +444,7 @@ def return_stock(db: Session, lot_id: str, quantity: float, user: User, reason: 
     undo_issue() với skip_perm_check=True (xem đó)."""
     if not skip_perm_check:
         require_perm(user, "warehouse.issue")
-    lot = _lot(db, lot_id)
+    lot = _lock_lot(db, lot_id)
     _assert_location_scope(user, lot.location)
     if quantity <= 0:
         raise DomainError("Số lượng hoàn phải > 0.")
@@ -437,7 +470,7 @@ def issue(db: Session, lot_id: str, quantity: float, user: User, mode: str = "tu
     vụ Xuất kho), không nên đòi thêm quyền "warehouse.issue" vốn dành cho thủ kho."""
     if not skip_perm_check:
         require_perm(user, "warehouse.issue")
-    lot = _lot(db, lot_id)
+    lot = _lock_lot(db, lot_id)
     _assert_location_scope(user, lot.location)
     if lot.status == LotStatus.ON_HOLD.value:
         raise DomainError(f"Lô {lot.lot_code} đang HOLD, không được xuất.")
@@ -524,7 +557,7 @@ def _transfer_lot(db: Session, lot_id: str, quantity: float, location_to: str, u
     """Logic chuyển vị trí thực sự, KHÔNG kiểm tra `warehouse.issue` — dùng cho các nơi đã tự
     xác thực quyền theo cách khác (vd approve_sang_ngang/undo_sang_ngang: thủ kho phân xưởng
     duyệt qua `warehouse.request` + phạm vi kho, không phải người cầm quyền "xuất kho" chung)."""
-    lot = _lot(db, lot_id)
+    lot = _lock_lot(db, lot_id)
     _assert_transfer_scope(user, lot.location, location_to)
     if lot.status == LotStatus.ON_HOLD.value:
         raise DomainError(f"Lô {lot.lot_code} đang HOLD (chờ khai báo/duyệt chỉ tiêu chất lượng), "
@@ -791,6 +824,20 @@ def inventory_report(db: Session, days: int = 30, location: str = None,
 
 def _lot(db, lot_id):
     lot = db.get(MaterialLot, lot_id)
+    if not lot:
+        raise NotFoundError("Lô không tồn tại.")
+    return lot
+
+
+def _lock_lot(db, lot_id):
+    """Mirror _lot() nhưng khóa hàng (SELECT ... FOR UPDATE) — dùng ngay TRƯỚC khi đọc-rồi-ghi
+    MaterialLot.quantity (issue/transfer/return/receive-cộng-dồn/update_receipt/delete_receipt/
+    post_count/undo_count), tuần tự hoá 2 giao dịch gần như đồng thời cùng trừ/cộng 1 lô — trước
+    đây CHỈ dùng db.get()/select() thường, không khóa hàng, có thể mất-cập-nhật (lost update)
+    trên DB có row-lock thật (SQL Server/Postgres — SQLite bỏ qua, xem cùng pattern đã áp dụng ở
+    services/ebr.py/batch_pipeline.py). Chỉ dùng ở các thao tác THỰC SỰ ghi lại quantity — không
+    dùng cho các hàm chỉ đọc (VD relocate_lot chỉ đổi location, không đọc-rồi-ghi số lượng)."""
+    lot = db.execute(select(MaterialLot).where(MaterialLot.lot_id == lot_id).with_for_update()).scalar_one_or_none()
     if not lot:
         raise NotFoundError("Lô không tồn tại.")
     return lot
@@ -2018,7 +2065,8 @@ def post_count(db: Session, count_id: str, user: User) -> dict:
         diff = round(line.counted_qty - line.system_qty, 3)
         if diff == 0:
             continue
-        lot = db.get(MaterialLot, line.lot_id)
+        lot = db.execute(select(MaterialLot).where(
+            MaterialLot.lot_id == line.lot_id).with_for_update()).scalar_one_or_none()
         if not lot:
             continue
         _move(db, "adjust", lot, abs(diff), user,
@@ -2077,7 +2125,8 @@ def undo_count(db: Session, count_id: str, user: User) -> dict:
         diff = round(line.counted_qty - line.system_qty, 3)
         if diff == 0:
             continue
-        lot = db.get(MaterialLot, line.lot_id)
+        lot = db.execute(select(MaterialLot).where(
+            MaterialLot.lot_id == line.lot_id).with_for_update()).scalar_one_or_none()
         if not lot:
             continue
         _move(db, "adjust", lot, abs(diff), user,

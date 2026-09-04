@@ -38,7 +38,8 @@ from ..models.batches import BatchExecution
 from ..models.lines import ProductionLine
 from ..models.master import BeerType, FinishedProduct, Material, Product
 from ..models.materials import MaterialLot
-from ..models.quality import QualityResult
+from ..models.quality import Deviation, QualityResult
+from ..models.signature import Signature
 from ..models.workorder import WorkOrder
 from ..security import User, require_perm
 from . import genealogy, ops_setting, qc_catalog, quality
@@ -440,6 +441,7 @@ def delete_tank(db: Session, tank_id: str, user: User) -> None:
     require_perm(user, "batch.execute")
     tank = get_tank(db, tank_id)
     _assert_unlocked(tank)
+    _assert_no_ebr_signature(db, tank_id)
     if db.execute(select(BatchFilterLotSource).where(
             BatchFilterLotSource.source_tank_id == tank_id)).first():
         raise DomainError("Đã có lô lọc rút dịch từ tank này — xóa lô lọc trước khi xóa tank.")
@@ -460,6 +462,13 @@ def delete_tank(db: Session, tank_id: str, user: User) -> None:
             QualityResult.scope_id.in_([qc_catalog.batch_tank_scope_id(tank_id, "len_men_chinh"),
                                         qc_catalog.batch_tank_scope_id(tank_id, "len_men_phu")]))).scalars().all():
         db.delete(r)
+    # Deviation dùng scope_id = tank_id TRỰC TIẾP (khác QualityResult ở trên, dùng scope_id
+    # ghép theo stage) — xem services/quality.py::open_deviation/_get_scope_obj. Trước đây không
+    # dọn, để lại deviation mồ côi (có thể đang OPEN) khi xóa tank (2026-09-03, audit pipeline
+    # "Mẻ SX" đợt 2).
+    for dv in db.execute(select(Deviation).where(
+            Deviation.scope_type == "batch_tank", Deviation.scope_id == tank_id)).scalars().all():
+        db.delete(dv)
     db.flush()  # xóa con trước cha (đúng thứ tự cho DB có enforce FK thật, VD SQL Server).
     genealogy.delete_edges_for(db, "batch_tank", tank_id)
     db.delete(tank)
@@ -920,8 +929,12 @@ def _open_first_batch(db: Session, fl: BatchFilterLot, src_rows: list[BatchFilte
 
 
 def list_filter_lot_batches(db: Session, filter_lot_id: str) -> list[BatchFilterLotBatch]:
+    # Tie-breaker phụ (batch_link_id) TRÊN created_at — created_at (DATETIMEOFFSET trên MSSQL)
+    # có thể trùng giữa 2 request tạo mẻ gần như đồng thời, khiến "mẻ cuối" (batches[-1], xem
+    # add_filter_lot_batch/frontend canAdd) không ổn định giữa các lần gọi — thêm tie-breaker để
+    # thứ tự LUÔN xác định (2026-09-03, audit pipeline "Mẻ SX" đợt 2).
     return db.execute(select(BatchFilterLotBatch).where(BatchFilterLotBatch.filter_lot_id == filter_lot_id)
-                      .order_by(BatchFilterLotBatch.created_at)).scalars().all()
+                      .order_by(BatchFilterLotBatch.created_at, BatchFilterLotBatch.batch_link_id)).scalars().all()
 
 
 def list_batch_draws(db: Session, batch_link_id: str) -> list[BatchFilterLotBatchDraw]:
@@ -989,6 +1002,30 @@ def add_filter_lot_batch(db: Session, filter_lot_id: str, user: User) -> BatchFi
     return b
 
 
+def _assert_no_ebr_signature(db: Session, entity_id: str) -> None:
+    """Chặn xóa nếu đã có chữ ký điện tử (Signature scope_type="ebr") ký cho entity này — trước
+    đây sign_tank/sign_filter_lot/sign_pack_lot (services/ebr.py) cho ký TRƯỚC khi khóa
+    (`.locked`), và delete_tank/delete_filter_lot/delete_pack_lot chỉ chặn xóa theo `.locked`/
+    `qc_approved`/`approved`, không kiểm tra đã ký hay chưa — ký xong nhưng CHƯA khóa vẫn xóa
+    được, làm chữ ký điện tử (bằng chứng GMP) trỏ tới 1 bản ghi không còn tồn tại (2026-09-03,
+    audit pipeline "Mẻ SX" đợt 2)."""
+    if db.execute(select(Signature.sig_id).where(
+            Signature.scope_type == "ebr", Signature.scope_id == entity_id)).first():
+        raise DomainError("Bản ghi này đã có chữ ký điện tử (EBR) — không thể xóa.")
+
+
+def _lock_origin(db: Session, source: BatchFilterLotSource):
+    """Khóa hàng (SELECT ... FOR UPDATE) tank/lô lọc NGUỒN của 1 khoản rút — tuần tự hoá đọc-
+    rồi-ghi on_hand khi 2 thao tác (Kết thúc mẻ lọc/Xóa mẻ lọc/Xóa lô lọc) cùng lúc động vào
+    CÙNG 1 nguồn, tránh mất-cập-nhật (lost update) trên DB có row-lock thật (SQL Server/
+    Postgres — SQLite bỏ qua, xem 2026-09-03, audit pipeline "Mẻ SX" đợt 2)."""
+    if source.source_type == "filter_lot":
+        return db.execute(select(BatchFilterLot).where(
+            BatchFilterLot.filter_lot_id == source.source_filter_lot_id).with_for_update()).scalar_one_or_none()
+    return db.execute(select(BatchTank).where(
+        BatchTank.tank_id == source.source_tank_id).with_for_update()).scalar_one_or_none()
+
+
 def finish_filter_lot_batch(db: Session, batch_link_id: str, draws: list[dict],
                             nuoc_bai_khi_hl: float, batch_seq_no: str, user: User,
                             started_at=None, ended_at=None) -> BatchFilterLot:
@@ -1005,6 +1042,8 @@ def finish_filter_lot_batch(db: Session, batch_link_id: str, draws: list[dict],
         raise NotFoundError("Mẻ lọc không tồn tại.")
     fl = get_filter_lot(db, b.filter_lot_id)
     _assert_unlocked(fl)
+    if nuoc_bai_khi_hl is not None and nuoc_bai_khi_hl < 0:
+        raise DomainError("Nước bài khí (hl) không được âm.")
     existing_draws = {d.source_link_id: d for d in list_batch_draws(db, batch_link_id)}
     total_v = 0.0
     for item in draws:
@@ -1012,11 +1051,14 @@ def finish_filter_lot_batch(db: Session, batch_link_id: str, draws: list[dict],
         if d is None:
             raise DomainError("Nguồn rút dịch không thuộc mẻ lọc này.")
         v = item.get("dich_nha_hl") or 0.0
+        # Trước đây chỉ check TỔNG > 0 — 1 nguồn âm bù 1 nguồn dương lớn hơn vẫn qua được, cộng
+        # khống tồn ảo cho nguồn kia (2026-09-03, audit pipeline "Mẻ SX" đợt 2).
+        if v < 0:
+            raise DomainError("V dịch nha từng nguồn không được âm.")
         old_v = d.dich_nha_hl or 0.0
         delta = v - old_v
         source = db.get(BatchFilterLotSource, d.source_link_id)
-        origin = (db.get(BatchFilterLot, source.source_filter_lot_id) if source.source_type == "filter_lot"
-                 else db.get(BatchTank, source.source_tank_id))
+        origin = _lock_origin(db, source)
         if origin:
             origin.on_hand = round(origin.on_hand - delta, 3)
         d.dich_nha_hl = v
@@ -1066,6 +1108,11 @@ def delete_filter_lot_batch(db: Session, batch_link_id: str, user: User) -> Batc
         raise DomainError("Đây là mẻ lọc duy nhất của lô lọc này — xóa cả lô lọc nếu muốn bỏ hẳn.")
     draws = list_batch_draws(db, batch_link_id)
     this_total = sum((d.dich_nha_hl or 0.0) for d in draws) + (b.nuoc_bai_khi_hl or 0.0)
+    # with_for_update(): khóa lô lọc TRƯỚC khi so sánh tồn đã tách lô TP — 2 thao tác đồng thời
+    # (VD tách lô TP + xóa mẻ lọc) trên CÙNG lô lọc có thể cùng đọc on_hand cũ (2026-09-03, audit
+    # pipeline "Mẻ SX" đợt 2).
+    fl = db.execute(select(BatchFilterLot).where(
+        BatchFilterLot.filter_lot_id == fl.filter_lot_id).with_for_update()).scalar_one()
     consumed = (fl.volume_hl or 0.0) - (fl.on_hand or 0.0)
     remaining_after = (fl.volume_hl or 0.0) - this_total
     if consumed > remaining_after + 1e-6:
@@ -1073,8 +1120,7 @@ def delete_filter_lot_batch(db: Session, batch_link_id: str, user: User) -> Batc
     for d in draws:
         if d.dich_nha_hl:
             source = db.get(BatchFilterLotSource, d.source_link_id)
-            origin = (db.get(BatchFilterLot, source.source_filter_lot_id) if source.source_type == "filter_lot"
-                     else db.get(BatchTank, source.source_tank_id))
+            origin = _lock_origin(db, source)
             if origin:
                 origin.on_hand = round(origin.on_hand + d.dich_nha_hl, 3)
         db.delete(d)
@@ -1122,6 +1168,7 @@ def delete_filter_lot(db: Session, filter_lot_id: str, user: User) -> None:
     require_perm(user, "batch.execute")
     fl = get_filter_lot(db, filter_lot_id)
     _assert_unlocked(fl)
+    _assert_no_ebr_signature(db, filter_lot_id)
     if fl.qc_approved:
         raise DomainError("Lô lọc này đã được KCS duyệt — không thể xóa.")
     if db.execute(select(BatchPackLot).where(BatchPackLot.filter_lot_id == filter_lot_id)).first():
@@ -1129,16 +1176,22 @@ def delete_filter_lot(db: Session, filter_lot_id: str, user: User) -> None:
     if db.execute(select(BatchFilterLotSource).where(
             BatchFilterLotSource.source_filter_lot_id == filter_lot_id)).first():
         raise DomainError("Đã có lô lọc khác lọc lại từ lô lọc này — xóa lô lọc lại đó trước.")
-    for b in list_filter_lot_batches(db, filter_lot_id):
+    # Xóa TẤT CẢ draw (con) + flush TRƯỚC khi xóa batch (cha): model không có relationship() +
+    # autoflush=False nên SQLAlchemy KHÔNG tự xếp con-trước-cha trong 1 flush chung → MSSQL enforce
+    # FK batch_filter_lot_batch_draw.batch_link_id sẽ vỡ 547 (SQLite bỏ qua). DEPLOY-CONTRACT lớp con-ẩn.
+    filter_batches = list_filter_lot_batches(db, filter_lot_id)
+    for b in filter_batches:
         for d in list_batch_draws(db, b.batch_link_id):
             if d.dich_nha_hl:
                 source = db.get(BatchFilterLotSource, d.source_link_id)
-                origin = (db.get(BatchFilterLot, source.source_filter_lot_id) if source.source_type == "filter_lot"
-                         else db.get(BatchTank, source.source_tank_id))
+                origin = _lock_origin(db, source)
                 if origin:
                     origin.on_hand = round(origin.on_hand + d.dich_nha_hl, 3)
             db.delete(d)
+    db.flush()
+    for b in filter_batches:
         db.delete(b)
+    db.flush()
     for source in list_filter_lot_sources(db, filter_lot_id):
         db.delete(source)
     for u in list_filter_lot_materials(db, filter_lot_id):
@@ -1148,6 +1201,9 @@ def delete_filter_lot(db: Session, filter_lot_id: str, user: User) -> None:
     for r in db.execute(select(QualityResult).where(
             QualityResult.scope_type == "batch_filter_lot", QualityResult.scope_id == filter_lot_id)).scalars().all():
         db.delete(r)
+    for dv in db.execute(select(Deviation).where(
+            Deviation.scope_type == "batch_filter_lot", Deviation.scope_id == filter_lot_id)).scalars().all():
+        db.delete(dv)
     db.flush()
     genealogy.delete_edges_for(db, "batch_filter_lot", filter_lot_id)
     db.delete(fl)
@@ -1263,6 +1319,11 @@ def split_filter_lot_to_pack_lot(db: Session, filter_lot_id: str, payload: dict,
     if qty <= 0:
         raise DomainError("Số lượng cấp chiết (lít) phải lớn hơn 0.")
     qty_hl = qty / L_PER_HL
+    # with_for_update(): khóa lô lọc TRƯỚC khi check "đủ tồn" — 2 request tách lô TP gần như
+    # đồng thời từ CÙNG lô lọc có thể cùng đọc on_hand cũ rồi cùng qua được check, tách vượt tồn
+    # thật (2026-09-03, audit pipeline "Mẻ SX" đợt 2).
+    fl = db.execute(select(BatchFilterLot).where(
+        BatchFilterLot.filter_lot_id == filter_lot_id).with_for_update()).scalar_one()
     if qty_hl > fl.on_hand + 1e-6:
         raise DomainError(f"Không đủ tồn để tách — lô lọc còn {fl.on_hand:g} hl ({fl.on_hand * L_PER_HL:g} lít), "
                          f"yêu cầu tách {qty:g} lít.")
@@ -1335,7 +1396,13 @@ def update_pack_lot_qty(db: Session, pack_lot_id: str, qty: float, user: User) -
     _assert_unlocked(p)
     if qty <= 0:
         raise DomainError("Số lượng cấp chiết (lít) phải lớn hơn 0.")
-    fl = get_filter_lot(db, p.filter_lot_id)
+    # with_for_update(): khóa CẢ lô TP (đọc p.qty cũ) LẪN lô lọc nguồn (đọc/ghi on_hand) trước
+    # khi tính chênh lệch — 2 request sửa SL cấp chiết gần như đồng thời có thể cùng đọc giá trị
+    # cũ rồi cùng ghi, làm sai on_hand lô lọc (2026-09-03, audit pipeline "Mẻ SX" đợt 2).
+    p = db.execute(select(BatchPackLot).where(
+        BatchPackLot.pack_lot_id == pack_lot_id).with_for_update()).scalar_one()
+    fl = db.execute(select(BatchFilterLot).where(
+        BatchFilterLot.filter_lot_id == p.filter_lot_id).with_for_update()).scalar_one()
     delta_hl = (qty - p.qty) / L_PER_HL
     if delta_hl > fl.on_hand + 1e-6:
         raise DomainError(f"Không đủ tồn để tăng số lượng — lô lọc còn {fl.on_hand:g} hl "
@@ -1393,9 +1460,13 @@ def delete_pack_lot(db: Session, pack_lot_id: str, user: User) -> None:
     require_perm(user, "batch.execute")
     p = get_pack_lot(db, pack_lot_id)
     _assert_unlocked(p)
+    _assert_no_ebr_signature(db, pack_lot_id)
     if p.approved:
         raise DomainError("Lô thành phẩm đã được duyệt KCS — không thể xóa.")
-    fl = get_filter_lot(db, p.filter_lot_id)
+    # with_for_update(): khóa lô lọc trước khi hoàn on_hand — cùng lớp race với split/update qty
+    # (2026-09-03, audit pipeline "Mẻ SX" đợt 2).
+    fl = db.execute(select(BatchFilterLot).where(
+        BatchFilterLot.filter_lot_id == p.filter_lot_id).with_for_update()).scalar_one()
     fl.on_hand = round(fl.on_hand + p.qty / L_PER_HL, 3)
     _sync_filter_lot_chiet_status(fl)
     for u in list_pack_lot_materials(db, pack_lot_id):
@@ -1405,6 +1476,9 @@ def delete_pack_lot(db: Session, pack_lot_id: str, user: User) -> None:
     for r in db.execute(select(QualityResult).where(
             QualityResult.scope_type == "batch_pack_lot", QualityResult.scope_id == pack_lot_id)).scalars().all():
         db.delete(r)
+    for dv in db.execute(select(Deviation).where(
+            Deviation.scope_type == "batch_pack_lot", Deviation.scope_id == pack_lot_id)).scalars().all():
+        db.delete(dv)
     db.flush()
     genealogy.delete_edges_for(db, "batch_pack_lot", pack_lot_id)
     db.delete(p)

@@ -861,7 +861,7 @@ def list_pending_stage_declarations(db: Session) -> list[dict]:
                 out.append({"stage": stage, "stage_label": f"Lên men (Mẻ SX) — {part_label}",
                            "scope_type": "batch_tank", "scope_id": scope_id,
                            "label": f"{tank_label} — {part_label}", "pending": st["pending"],
-                           "product_id": t.product_id,
+                           "product_id": t.product_id, "tank_lm": t.tank_lm,
                            "sample_round_count": tank_sample_round_counts.get(scope_id, 0)})
     brews = {r.brew_id: r for r in db.execute(select(BrewRecord)).scalars().all()}
     for b in db.execute(select(BrewBatch)).scalars().all():

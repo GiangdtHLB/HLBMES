@@ -10,10 +10,11 @@ import re
 from datetime import date
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..audit import record_audit
-from ..common import WORKORDER_TRANSITIONS, BatchState, WorkOrderState, new_id, utcnow
+from ..common import WORKORDER_TRANSITIONS, BatchState, WorkOrderState, new_id
 from ..errors import DomainError, NotFoundError
 from ..models.batches import BatchExecution
 from ..models.brewing import BrewOrder, BrewRecord
@@ -45,6 +46,7 @@ def create_wo(db: Session, payload: dict, user: User) -> WorkOrder:
     bo = db.get(BrewOrder, payload["brew_order_id"])
     if not bo:
         raise NotFoundError("Lệnh nấu không tồn tại.")
+    brew_order_svc._assert_unlocked(bo)
     if brew_order_svc.is_order_complete(db, bo.brew_order_id):
         raise DomainError(f"Lệnh nấu '{bo.order_code}' đã hoàn thành — không thể lập thêm Lệnh SX (điều độ) mới.")
     # Không còn bắt buộc chọn Dây chuyền nấu lúc lập lệnh (bỏ theo yêu cầu 2026-08-31) — chỉ
@@ -94,12 +96,20 @@ def create_wo(db: Session, payload: dict, user: User) -> WorkOrder:
     db.add(wo)
     record_audit(db, entity_type="work_order", entity_id=wo.wo_id, action="create", actor=user,
                  after={"wo_code": wo.wo_code, "qty": wo.planned_qty, "line": wo.line, "shift": wo.shift})
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        # Race: 2 request cùng lúc kiểm tra "chưa trùng" rồi cùng insert (TOCTOU) — unique
+        # constraint DB chặn được, nhưng nếu không bắt ở đây sẽ lộ ra 500 thô thay vì 409.
+        db.rollback()
+        raise DomainError(f"Mã WO '{wo_code}' đã tồn tại — chọn mã khác.") from None
     db.refresh(wo)
     return wo
 
 
 _BATCH_TERMINAL_STATES = (BatchState.CLOSED.value, BatchState.CANCELLED.value)
+_BATCH_ACTIVE_STATES = (BatchState.PLANNED.value, BatchState.READY.value,
+                        BatchState.RUNNING.value, BatchState.HELD.value)
 
 
 def _assert_all_batches_terminal(db: Session, wo: WorkOrder) -> None:
@@ -114,10 +124,25 @@ def _assert_all_batches_terminal(db: Session, wo: WorkOrder) -> None:
             f"{', '.join(sorted(open_batches))} — không thể chốt lệnh.")
 
 
+def _assert_no_active_batches(db: Session, wo: WorkOrder) -> None:
+    """Chặn chuyển "Hoàn thành" (completed) nếu còn Mẻ sản xuất nào thuộc lệnh CHƯA thực sự
+    chạy xong (còn planned/ready/running/held) — trước đây chỉ "Chốt" (closed) mới kiểm tra
+    mẻ, nên "Hoàn thành" cho qua kể cả khi mẻ vừa dispatch còn nguyên trạng thái planned
+    (test_workorder_delete.py tự lộ bug này)."""
+    active = db.execute(select(BatchExecution.batch_code).where(
+        BatchExecution.work_order_id == wo.wo_id,
+        BatchExecution.state.in_(_BATCH_ACTIVE_STATES))).scalars().all()
+    if active:
+        raise DomainError(
+            f"Còn {len(active)} mẻ chưa hoàn thành sản xuất (planned/ready/running/held): "
+            f"{', '.join(sorted(active))} — không thể đánh dấu 'Hoàn thành'.")
+
+
 def transition(db: Session, wo_id: str, target: str, user: User, reason: str = None) -> WorkOrder:
     require_perm(user, "wo.manage")
     wo = _get(db, wo_id)
     require_scope(user, "lines", wo.line)
+    brew_order_svc._assert_unlocked(db.get(BrewOrder, wo.brew_order_id))
     try:
         target_state = WorkOrderState(target)
     except ValueError:
@@ -125,6 +150,15 @@ def transition(db: Session, wo_id: str, target: str, user: User, reason: str = N
     current = WorkOrderState(wo.status)
     if target_state not in WORKORDER_TRANSITIONS[current]:
         raise DomainError(f"Không thể chuyển lệnh từ {current.value} sang {target}.")
+    if target_state == WorkOrderState.IN_PROGRESS:
+        # "in_progress" đúng ra chỉ nên đạt được qua dispatch() (Phát mẻ) — endpoint transition
+        # công khai vẫn cho phép released->in_progress theo WORKORDER_TRANSITIONS, nên chặn ở
+        # đây nếu chưa từng Phát mẻ (chưa có Mẻ sản xuất nào), tránh bỏ qua toàn bộ bước dispatch.
+        if not db.execute(select(BatchExecution.batch_id).where(
+                BatchExecution.work_order_id == wo.wo_id)).first():
+            raise DomainError("Lệnh chưa 'Phát mẻ' — dùng nút Phát mẻ, không chuyển 'Đang chạy' thủ công.")
+    if target_state == WorkOrderState.COMPLETED:
+        _assert_no_active_batches(db, wo)
     if target_state == WorkOrderState.CLOSED:
         _assert_all_batches_terminal(db, wo)
     before = {"status": wo.status}
@@ -138,6 +172,17 @@ def transition(db: Session, wo_id: str, target: str, user: User, reason: str = N
 
 def _brew_record_for_wo(db: Session, wo_id: str):
     return db.execute(select(BrewRecord).where(BrewRecord.work_order_id == wo_id)).scalar_one_or_none()
+
+
+def _split_planned_qty(planned_qty: float | None, batch_count: int) -> list:
+    """Chia SL kế hoạch cho `batch_count` mẻ sao cho TỔNG đúng bằng `planned_qty` (không lệch
+    do làm tròn từng phần như `round(planned_qty / batch_count, 3)` trước đây) — quy về đơn vị
+    nguyên "phần nghìn" rồi chia dư nguyên, phần dư được gán cho các mẻ ĐẦU tiên."""
+    if not planned_qty:
+        return [None] * batch_count
+    total_milli = round(planned_qty * 1000)
+    base, rem = divmod(total_milli, batch_count)
+    return [(base + (1 if i < rem else 0)) / 1000 for i in range(batch_count)]
 
 
 def dispatch(db: Session, wo_id: str, user: User, from_batch: int, batch_count: int = 1,
@@ -157,6 +202,7 @@ def dispatch(db: Session, wo_id: str, user: User, from_batch: int, batch_count: 
     require_perm(user, "wo.dispatch")
     wo = _get(db, wo_id)
     require_scope(user, "lines", wo.line)
+    brew_order_svc._assert_unlocked(db.get(BrewOrder, wo.brew_order_id))
     if wo.status not in (WorkOrderState.RELEASED.value, WorkOrderState.IN_PROGRESS.value):
         raise DomainError("Chỉ dispatch lệnh đã 'released' (hoặc đang chạy).")
     if not wo.recipe_version_id:
@@ -170,11 +216,11 @@ def dispatch(db: Session, wo_id: str, user: User, from_batch: int, batch_count: 
         BatchExecution.batch_code.in_(codes))).scalars().all()
     if dup:
         raise DomainError(f"Mã mẻ đã tồn tại: {', '.join(sorted(dup))} — chọn số Từ mẻ khác.")
-    per_batch_qty = round(wo.planned_qty / batch_count, 3) if wo.planned_qty else None
+    qtys = _split_planned_qty(wo.planned_qty, batch_count)
     created = [batch_svc.create_batch(db, wo.brew_order_id, wo.recipe_version_id, user,
-                                      batch_code=code, planned_qty=per_batch_qty, allow_shortage=True,
+                                      batch_code=code, planned_qty=qty, allow_shortage=True,
                                       work_order_id=wo.wo_id, brewhouse_line_id=wo.brewhouse_line_id)
-              for code in codes]
+              for code, qty in zip(codes, qtys)]
     tank_out = None
     if tank_lm:
         # Không truyền tank_code — merge_batches_into_tank tự sinh theo số thứ tự Lệnh SX (điều
@@ -230,13 +276,17 @@ def board(db: Session, date_from: date = None, date_to: date = None, line: str =
     out = []
     for wo in wos:
         r = rollup(db, wo)
+        batch_states = [b["state"] for b in r["batch_list"]]
+        can_complete = not any(s in _BATCH_ACTIVE_STATES for s in batch_states)
+        can_close = all(s in _BATCH_TERMINAL_STATES for s in batch_states)
         out.append({"wo_id": wo.wo_id, "wo_code": wo.wo_code, "product_id": wo.product_id,
                     "brew_order_id": wo.brew_order_id, "recipe_version_id": wo.recipe_version_id,
                     "planned_qty": wo.planned_qty, "uom": wo.uom, "line": wo.line, "shift": wo.shift,
                     "brewhouse_line_id": wo.brewhouse_line_id,
                     "scheduled_date": wo.scheduled_date, "priority": wo.priority, "status": wo.status,
                     "note": wo.note, "actual_qty": r["actual_qty"], "completion_pct": r["completion_pct"],
-                    "batches": r["batches"], "brew_id": r["brew_id"], "brew_code": r["brew_code"]})
+                    "batches": r["batches"], "brew_id": r["brew_id"], "brew_code": r["brew_code"],
+                    "can_complete": can_complete, "can_close": can_close})
     if user is not None:
         out = filter_by_scope(user, out, "lines", "line")
     return out
@@ -257,6 +307,7 @@ def delete_wo(db: Session, wo_id: str, user: User) -> None:
     require_perm(user, "wo.manage")
     wo = _get(db, wo_id)
     require_scope(user, "lines", wo.line)
+    brew_order_svc._assert_unlocked(db.get(BrewOrder, wo.brew_order_id))
     if db.execute(select(BatchExecution.batch_id).where(
             BatchExecution.work_order_id == wo.wo_id)).first():
         raise DomainError(f"Lệnh {wo.wo_code} đã có Mẻ sản xuất — không thể xóa.")

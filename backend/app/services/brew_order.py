@@ -998,6 +998,12 @@ def delete_order(db: Session, brew_order_id: str, user) -> None:
         raise NotFoundError("Lệnh nấu không tồn tại.")
     if _has_any_execution(db, brew_order_id):
         raise DomainError("Lệnh nấu đã được thực hiện — không thể xóa.")
+    # WorkOrder.brew_order_id là FK NOT NULL không ondelete — 1 Lệnh SX (điều độ) dù CHƯA
+    # dispatch (còn "planned"/"released", _has_any_execution() ở trên không chặn) vẫn tham
+    # chiếu Lệnh nấu này, xóa thẳng sẽ vỡ FK 547 trên MSSQL (SQLite không enforce nên test
+    # trước đây không lộ). Phải xóa/hủy Lệnh SX con trước.
+    if db.execute(select(WorkOrder.wo_id).where(WorkOrder.brew_order_id == brew_order_id)).first():
+        raise DomainError("Lệnh nấu đã có Lệnh SX (điều độ) — xóa Lệnh SX trước khi xóa Lệnh nấu.")
     for l in db.execute(select(BrewOrderMaterialLine).where(
             BrewOrderMaterialLine.brew_order_id == brew_order_id)).scalars().all():
         db.delete(l)
@@ -1195,4 +1201,3 @@ def create_brew_batches_bulk(db: Session, brew_id: str, count: int, line_id: str
     for b in batches:
         db.refresh(b)
     return batches
-    db.commit()

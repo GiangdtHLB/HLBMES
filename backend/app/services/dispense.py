@@ -388,7 +388,11 @@ def adjust_actual(db: Session, batch_id: str, material_code: str, new_actual: fl
         for edge in edges:
             if not edge.quantity:
                 continue
-            lot = db.get(MaterialLot, edge.from_id)
+            # with_for_update(): khóa hàng trước khi đọc lot.quantity — 2 request hoàn lại/cấp
+            # liệu gần như đồng thời trên CÙNG lô có thể cùng đọc quantity cũ (2026-09-03, audit
+            # Kho công ty/phân xưởng).
+            lot = db.execute(select(MaterialLot).where(
+                MaterialLot.lot_id == edge.from_id).with_for_update()).scalar_one_or_none()
             if not lot or bom.material_code_for_lot(db, lot) not in refund_codes:
                 continue
             candidates.append((edge, lot))

@@ -9,7 +9,7 @@ from ..database import get_db
 from ..models.workorder import WorkOrder
 from ..errors import NotFoundError
 from ..schemas import WorkOrderIn, WoDispatchIn, TransitionIn
-from ..security import User, get_current_user
+from ..security import User, get_current_user, require_scope
 from ..services import workorders as svc
 
 router = APIRouter(prefix="/api/workorders", tags=["workorders"])
@@ -26,6 +26,7 @@ def get_wo(wo_id: str, db: Session = Depends(get_db), user: User = Depends(get_c
     wo = db.get(WorkOrder, wo_id)
     if not wo:
         raise NotFoundError("Lệnh sản xuất không tồn tại.")
+    require_scope(user, "lines", wo.line)
     return {**{c.name: getattr(wo, c.name) for c in wo.__table__.columns},
             "rollup": svc.rollup(db, wo)}
 

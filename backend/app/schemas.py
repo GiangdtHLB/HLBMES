@@ -276,7 +276,7 @@ class MaterialOut(ORMModel):
 # ---- Work Orders / Điều độ ----
 class WorkOrderIn(BaseModel):
     brew_order_id: str
-    wo_code: Optional[str] = None
+    wo_code: Optional[str] = Field(default=None, max_length=64)
     recipe_version_id: Optional[str] = None
     planned_qty: Optional[float] = None
     uom: Optional[str] = None

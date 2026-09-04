@@ -171,7 +171,7 @@ def _stage_ok(db, stage, scope_type, scope_id, product_id=None, beer_type_id=Non
 
 # ===== Lệnh nấu (Brew Production Order) =====
 @router.get("/orders")
-def list_brew_orders(db: Session = Depends(get_db)):
+def list_brew_orders(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     return brew_order_svc.list_orders(db)
 
 
@@ -200,7 +200,7 @@ def create_brew_order(payload: BrewOrderIn, db: Session = Depends(get_db),
 
 
 @router.get("/orders/{brew_order_id}")
-def get_brew_order(brew_order_id: str, db: Session = Depends(get_db)):
+def get_brew_order(brew_order_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     return brew_order_svc.get_order(db, brew_order_id)
 
 
