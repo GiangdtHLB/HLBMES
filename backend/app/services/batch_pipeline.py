@@ -1176,7 +1176,11 @@ def delete_filter_lot(db: Session, filter_lot_id: str, user: User) -> None:
     if db.execute(select(BatchFilterLotSource).where(
             BatchFilterLotSource.source_filter_lot_id == filter_lot_id)).first():
         raise DomainError("Đã có lô lọc khác lọc lại từ lô lọc này — xóa lô lọc lại đó trước.")
-    for b in list_filter_lot_batches(db, filter_lot_id):
+    # Xóa TẤT CẢ draw (con) + flush TRƯỚC khi xóa batch (cha): model không có relationship() +
+    # autoflush=False nên SQLAlchemy KHÔNG tự xếp con-trước-cha trong 1 flush chung → MSSQL enforce
+    # FK batch_filter_lot_batch_draw.batch_link_id sẽ vỡ 547 (SQLite bỏ qua). DEPLOY-CONTRACT lớp con-ẩn.
+    filter_batches = list_filter_lot_batches(db, filter_lot_id)
+    for b in filter_batches:
         for d in list_batch_draws(db, b.batch_link_id):
             if d.dich_nha_hl:
                 source = db.get(BatchFilterLotSource, d.source_link_id)
@@ -1184,7 +1188,10 @@ def delete_filter_lot(db: Session, filter_lot_id: str, user: User) -> None:
                 if origin:
                     origin.on_hand = round(origin.on_hand + d.dich_nha_hl, 3)
             db.delete(d)
+    db.flush()
+    for b in filter_batches:
         db.delete(b)
+    db.flush()
     for source in list_filter_lot_sources(db, filter_lot_id):
         db.delete(source)
     for u in list_filter_lot_materials(db, filter_lot_id):
