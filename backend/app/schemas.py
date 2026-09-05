@@ -2129,6 +2129,20 @@ class QcGroupCopyItemsIn(BaseModel):
     source_group_id: str = Field(min_length=1)
 
 
+# ---- Danh mục Công đoạn (VD "Đường hóa", "Đun sôi") — mirror MaterialGroupIn/Out ----
+class ProcessPhaseIn(BaseModel):
+    code: str = Field(min_length=1)
+    name: str = Field(min_length=1)
+    active: bool = True
+
+
+class ProcessPhaseOut(ORMModel):
+    phase_id: str
+    code: str
+    name: str
+    active: bool
+
+
 # ---- Danh mục tham số quy trình (setpoint công nghệ) ----
 class ProcessParameterIn(BaseModel):
     code: str = Field(min_length=1)
@@ -2177,6 +2191,7 @@ class ProcessParameterGroupItemIn(BaseModel):
     target_override: Optional[float] = None
     usl_override: Optional[float] = None
     lsl_override: Optional[float] = None
+    phase_override: Optional[str] = None
 
 
 class ProcessParameterGroupItemOut(ORMModel):
@@ -2188,6 +2203,7 @@ class ProcessParameterGroupItemOut(ORMModel):
     target_override: Optional[float] = None
     usl_override: Optional[float] = None
     lsl_override: Optional[float] = None
+    phase_override: Optional[str] = None
     param_code: Optional[str] = None
     param_name: Optional[str] = None
     param_unit: Optional[str] = None

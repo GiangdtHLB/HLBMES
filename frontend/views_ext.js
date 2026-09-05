@@ -798,7 +798,10 @@
       $("sg_result").innerHTML = `<div class="tablewrap"><table>
         <thead><tr><th>Vật tư</th><th>Tồn kho công ty</th><th>Tồn kho phân xưởng</th><th>Định mức</th><th>Còn thiếu</th><th>SL thực tế</th><th>Lô sẽ dùng</th><th>FIFO?</th><th>Ghi chú (nếu khác FIFO)</th><th>Tình trạng</th></tr></thead>
         <tbody>${rows.join("")}</tbody></table></div>
-        <button class="btn" id="sg_apply" style="margin-top:8px">✔ Áp dụng gợi ý</button>`;
+        <div class="row" style="margin-top:8px;align-items:center">
+          <button class="btn" id="sg_apply">✔ Áp dụng gợi ý</button>
+          <label style="display:flex;gap:4px;align-items:center"><input type="checkbox" id="sg_over"/> cho phép cấp vượt định mức</label>
+        </div>`;
       document.querySelectorAll(".sg-lot").forEach(sel => {
         sel.value = sel.dataset.orig;
         const updateFifo = () => {
@@ -827,7 +830,8 @@
         const lines = lotSels.map(sel => {
           const qty = parseFloat(document.querySelector(`.sg-qty[data-li="${sel.dataset.li}"][data-pi="${sel.dataset.pi}"]`).value) || 0;
           const note = document.querySelector(`.sg-note[data-li="${sel.dataset.li}"][data-pi="${sel.dataset.pi}"]`).value.trim();
-          return { material_code: sug.lines[sel.dataset.li].material_code, lot_id: sel.value, quantity: qty, reason: note || null };
+          return { material_code: sug.lines[sel.dataset.li].material_code, lot_id: sel.value, quantity: qty, reason: note || null,
+                  allow_over: $("sg_over").checked };
         }).filter(l => l.quantity > 0);
         if (!lines.length) { toast("Không có dòng nào để áp dụng", "err"); return; }
         await POST(`/dispense/${bid}`, { lines });
@@ -1732,26 +1736,43 @@
       const phaseRow = (up, op, p) => {
         const b = PHASE_BADGE[p.state] || "planned";
         const sp = (p.params || []).map(x => `${esc(x.name)}=${esc(x.setpoint)}${esc(x.unit || "")}`).join(", ");
+        const started = p.started_at ? new Date(p.started_at) : null;
+        const ended = p.ended_at ? new Date(p.ended_at) : null;
+        const elapsedMin = started ? Math.round(((ended || new Date()) - started) / 60000) : null;
+        const durCell = `${p.duration_min ? esc(p.duration_min) + "' (cài đặt)" : "—"}${elapsedMin != null ? `<br><span class="muted">${elapsedMin}' thực tế${ended ? "" : " (đang chạy)"}</span>` : ""}`;
+        // Còn đang chạy/giữ: cho nhập giá trị thực tế của từng setpoint (gửi kèm lúc chuyển
+        // trạng thái) — đã complete/aborted: chỉ hiển thị lại giá trị đã ghi (values, xem
+        // services/isa88.py::transition_phase).
+        const editable = p.state === "running" || p.state === "held";
+        const actualCell = !(p.params || []).length ? '<span class="muted">—</span>'
+          : editable
+          ? (p.params || []).map(x => `<div style="margin-bottom:3px"><input type="text" class="i8-val" data-run="${p.run_id}" data-pname="${esc(x.name)}"
+              value="${esc(p.values && p.values[x.name] != null ? p.values[x.name] : "")}" placeholder="${esc(x.name)} thực tế" style="width:90px"/>
+              <span class="muted" style="font-size:11px">${esc(x.unit || "")}</span></div>`).join("")
+          : (p.values && Object.keys(p.values).length
+              ? (p.params || []).map(x => `${esc(x.name)}: ${p.values[x.name] != null ? esc(p.values[x.name]) : "—"}${esc(x.unit || "")}`).join("<br>")
+              : '<span class="muted">—</span>');
         let btns = "";
         if (p.state === "idle") btns = `<button class="btn sm" data-act="start" data-up="${esc(up)}" data-op="${esc(op)}" data-ph="${esc(p.phase)}">Bắt đầu</button>`;
         else if (p.state === "running") btns = `<button class="btn sm" data-act="complete" data-run="${p.run_id}">Hoàn thành</button> <button class="btn sm sec" data-act="held" data-run="${p.run_id}">Giữ</button>`;
         else if (p.state === "held") btns = `<button class="btn sm" data-act="running" data-run="${p.run_id}">Tiếp</button> <button class="btn sm sec" data-act="aborted" data-run="${p.run_id}">Hủy</button>`;
-        return `<tr><td style="padding-left:24px">${esc(p.phase)} ${p.duration_min ? `<span class="muted">(${p.duration_min}')</span>` : ""}</td>
-          <td class="muted" style="font-size:12px">${sp || "—"}</td>
+        return `<tr><td style="padding-left:24px">${esc(p.phase)}</td>
+          <td class="muted" style="font-size:12px">${sp || "—"}<br>${durCell}</td>
+          <td style="font-size:12px">${actualCell}</td>
           <td>${badge(b)}${esc(p.state)}</td><td>${esc(p.operator || "")}</td><td>${btns}</td></tr>`;
       };
       const rows = st.unit_procedures.map(u => {
-        const head = `<tr style="background:var(--panel2)"><td colspan="5"><b>▸ ${esc(u.unit_procedure)}</b>
+        const head = `<tr style="background:var(--panel2)"><td colspan="6"><b>▸ ${esc(u.unit_procedure)}</b>
           ${u.unit_class === "cip" ? badge("critical") + "CIP" : badge("available") + esc(u.unit_class || "")}</td></tr>`;
         const ops = u.operations.map(o =>
-          `<tr><td colspan="5" style="padding-left:12px"><i>${esc(o.operation)}</i></td></tr>` +
+          `<tr><td colspan="6" style="padding-left:12px"><i>${esc(o.operation)}</i></td></tr>` +
           o.phases.map(p => phaseRow(u.unit_procedure, o.operation, p)).join("")).join("");
         return head + ops;
       }).join("");
       $("i8_box").innerHTML = `
         <div style="margin-bottom:8px">Tiến độ: <b>${st.completion_pct}%</b>
           (${st.phases_done}/${st.phases_total} phase) ${CH.donut(st.completion_pct / 100, { label: "phase", size: 96 })}</div>
-        <div class="tablewrap"><table><thead><tr><th>Unit procedure / Operation / Phase</th><th>Setpoint</th><th>Trạng thái</th><th>Người</th><th></th></tr></thead>
+        <div class="tablewrap"><table><thead><tr><th>Unit procedure / Operation / Phase</th><th>Setpoint / Thời gian</th><th>Thực tế</th><th>Trạng thái</th><th>Người</th><th></th></tr></thead>
         <tbody>${rows}</tbody></table></div>`;
       const bid2 = bid;
       document.querySelectorAll("#i8_box [data-act]").forEach(btn => btn.onclick = () => guard(async () => {
@@ -1759,7 +1780,14 @@
         if (act === "start") {
           await POST(`/isa88/batch/${bid2}/start`, { up: btn.dataset.up, op: btn.dataset.op, phase: btn.dataset.ph });
         } else {
-          await POST(`/isa88/phase/${btn.dataset.run}/transition`, { target: act });
+          const values = {};
+          document.querySelectorAll(`.i8-val[data-run="${btn.dataset.run}"]`).forEach(inp => {
+            const v = inp.value.trim();
+            if (v === "") return;
+            const num = Number(v);
+            values[inp.dataset.pname] = Number.isFinite(num) ? num : v;
+          });
+          await POST(`/isa88/phase/${btn.dataset.run}/transition`, { target: act, values });
         }
         toast("Đã cập nhật phase"); load();
       }));

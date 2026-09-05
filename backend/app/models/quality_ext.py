@@ -96,6 +96,20 @@ class StageQcGroup(Base):
     active: Mapped[bool] = mapped_column(default=True)
 
 
+class ProcessPhase(Base):
+    """Danh mục "Công đoạn" (VD "Đường hóa", "Đun sôi", "Lên men chính") — trước đây
+    ProcessParameter.phase và RecipeVersionParamItem.phase_override là gõ tay tự do, nay khai
+    báo 1 lần ở đây rồi cả 2 nơi CHỈ CHỌN (mirror MaterialGroup — nhóm vật tư gõ tay từng bị
+    lệch danh sách)."""
+
+    __tablename__ = "process_phase"
+
+    phase_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
+    code: Mapped[str] = mapped_column(Unicode(64), unique=True, index=True)
+    name: Mapped[str] = mapped_column(Unicode(255))
+    active: Mapped[bool] = mapped_column(default=True)
+
+
 class ProcessParameter(Base):
     """Danh mục "Tham số quy trình" (setpoint công nghệ, VD nhiệt độ đường hóa/lên men) —
     mirror QCParameter nhưng cho tham số vận hành thay vì chỉ tiêu chất lượng. Recipe chọn
@@ -141,6 +155,10 @@ class ProcessParameterGroupItem(Base):
     target_override: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     usl_override: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     lsl_override: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    # Ghi đè công đoạn (ProcessPhase.code) cho tham số NÀY trong nhóm này — mirror
+    # RecipeVersionParamItem.phase_override, để khi copy nguyên nhóm vào 1 version công thức,
+    # từng tham số đã mang sẵn đúng bước/công đoạn (VD "Nâng nhiệt") thay vì phải gán lại tay.
+    phase_override: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
 
 
 class CAPA(Base):

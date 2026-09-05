@@ -9,8 +9,65 @@ from sqlalchemy.orm import Session
 from ..audit import record_audit
 from ..common import new_id
 from ..errors import DomainError, NotFoundError
-from ..models.quality_ext import ProcessParameter, ProcessParameterGroup, ProcessParameterGroupItem
+from ..models.quality_ext import ProcessParameter, ProcessParameterGroup, ProcessParameterGroupItem, ProcessPhase
+from ..models.recipes import RecipeVersionParamItem
 from ..security import User, require_perm
+
+
+# ---- Công đoạn ----
+
+def list_phases(db: Session, active_only: bool = False) -> list[ProcessPhase]:
+    stmt = select(ProcessPhase).order_by(ProcessPhase.code)
+    if active_only:
+        stmt = stmt.where(ProcessPhase.active == True)  # noqa: E712
+    return db.execute(stmt).scalars().all()
+
+
+def create_phase(db: Session, payload: dict, user: User) -> ProcessPhase:
+    require_perm(user, "master.manage")
+    if db.execute(select(ProcessPhase).where(ProcessPhase.code == payload["code"])).scalar_one_or_none():
+        raise DomainError(f"Mã công đoạn '{payload['code']}' đã tồn tại.")
+    ph = ProcessPhase(phase_id=new_id(), **payload)
+    db.add(ph)
+    record_audit(db, entity_type="process_phase", entity_id=ph.phase_id, action="create",
+                 actor=user, after={"code": ph.code, "name": ph.name})
+    db.commit()
+    db.refresh(ph)
+    return ph
+
+
+def update_phase(db: Session, phase_id: str, payload: dict, user: User) -> ProcessPhase:
+    require_perm(user, "master.manage")
+    ph = db.get(ProcessPhase, phase_id)
+    if not ph:
+        raise NotFoundError("Công đoạn không tồn tại.")
+    before = {"code": ph.code, "name": ph.name, "active": ph.active}
+    for k, v in payload.items():
+        setattr(ph, k, v)
+    record_audit(db, entity_type="process_phase", entity_id=ph.phase_id, action="update",
+                 actor=user, before=before, after=payload)
+    db.commit()
+    db.refresh(ph)
+    return ph
+
+
+def delete_phase(db: Session, phase_id: str, user: User) -> None:
+    """Chỉ xóa được khi công đoạn CHƯA được dùng làm phase mặc định của 1 Tham số quy trình
+    hoặc phase_override của 1 tham số trong Recipe — mirror master_data.py::
+    delete_material_group (chặn xóa "mồ côi" dữ liệu đang tham chiếu theo code)."""
+    require_perm(user, "master.manage")
+    ph = db.get(ProcessPhase, phase_id)
+    if not ph:
+        raise NotFoundError("Công đoạn không tồn tại.")
+    used_param = db.execute(select(ProcessParameter).where(ProcessParameter.phase == ph.code)).first()
+    used_override = db.execute(
+        select(RecipeVersionParamItem).where(RecipeVersionParamItem.phase_override == ph.code)).first()
+    if used_param or used_override:
+        raise DomainError(f"Không thể xóa — công đoạn '{ph.code}' đang được dùng ở ít nhất 1 tham số quy trình hoặc công thức. Hãy đổi công đoạn ở đó trước.")
+    record_audit(db, entity_type="process_phase", entity_id=phase_id, action="delete", actor=user,
+                 before={"code": ph.code, "name": ph.name})
+    db.delete(ph)
+    db.commit()
 
 
 # ---- Tham số ----
@@ -131,7 +188,7 @@ def _item_out(db: Session, item: ProcessParameterGroupItem) -> dict:
         "item_id": item.item_id, "group_id": item.group_id, "param_id": item.param_id,
         "seq": item.seq, "mandatory": item.mandatory,
         "target_override": item.target_override, "usl_override": item.usl_override,
-        "lsl_override": item.lsl_override,
+        "lsl_override": item.lsl_override, "phase_override": item.phase_override,
         "param_code": param.code if param else None,
         "param_name": param.name if param else None,
         "param_unit": param.unit if param else None,
@@ -189,6 +246,7 @@ def copy_items(db: Session, target_group_id: str, source_group_id: str, user: Us
             item_id=new_id(), group_id=target_group_id, param_id=it.param_id, seq=it.seq,
             mandatory=it.mandatory, target_override=it.target_override,
             usl_override=it.usl_override, lsl_override=it.lsl_override,
+            phase_override=it.phase_override,
         ))
     record_audit(db, entity_type="process_parameter_group", entity_id=target_group_id, action="copy_items",
                  actor=user, after={"source_group_id": source_group_id, "copied": len(source_items)})

@@ -68,7 +68,8 @@ def status(db: Session, batch_id: str) -> dict:
                                "state": st, "run_id": run.run_id if run else None,
                                "operator": run.operator if run else None,
                                "started_at": run.started_at if run else None,
-                               "ended_at": run.ended_at if run else None})
+                               "ended_at": run.ended_at if run else None,
+                               "values": (run.values or None) if run else None})
             ops.append({"operation": o["name"], "phases": phases})
         ups.append({"unit_procedure": u["name"], "unit_class": u.get("unit_class"), "operations": ops})
     pct = round(done / total * 100, 1) if total else 0.0
