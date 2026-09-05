@@ -458,6 +458,11 @@ def test_delete_order_blocked_once_executed(client, admin_h, vanhanh_h, lager_pr
                              planned_batch_count=1)
     deletable = client.delete(f"/api/brewing/orders/{order_id}", headers=admin_h)
     assert deletable.status_code == 204, deletable.text
+    # Xác nhận đã xóa THẬT trong DB (không chỉ status 204) — bug thực tế đã gặp: thiếu
+    # db.commit() sau db.delete() khiến session đóng lại rollback ngầm, lệnh vẫn còn nguyên
+    # (báo cáo người dùng 2026-09-05: "đã ấn xóa, ghi là đã xóa nhưng vẫn còn ở đó không mất").
+    gone = client.get(f"/api/brewing/orders/{order_id}", headers=admin_h)
+    assert gone.status_code == 404, gone.text
 
     order_id2 = _a_brew_order(client, admin_h, "LN-DEL02", product_id=lager_product_id,
                               planned_batch_count=1)
