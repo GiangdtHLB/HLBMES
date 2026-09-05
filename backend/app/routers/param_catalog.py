@@ -12,11 +12,38 @@ from ..schemas import (
     ProcessParameterGroupOut,
     ProcessParameterIn,
     ProcessParameterOut,
+    ProcessPhaseIn,
+    ProcessPhaseOut,
 )
 from ..security import User, get_current_user
 from ..services import param_catalog as svc
 
 router = APIRouter(prefix="/api/process-params", tags=["process-params"])
+
+
+# ---- Công đoạn ----
+@router.get("/phases", response_model=list[ProcessPhaseOut])
+def list_phases(active_only: bool = False, db: Session = Depends(get_db),
+                user: User = Depends(get_current_user)):
+    return svc.list_phases(db, active_only)
+
+
+@router.post("/phases", response_model=ProcessPhaseOut, status_code=201)
+def create_phase(payload: ProcessPhaseIn, db: Session = Depends(get_db),
+                 user: User = Depends(get_current_user)):
+    return svc.create_phase(db, payload.model_dump(), user)
+
+
+@router.put("/phases/{phase_id}", response_model=ProcessPhaseOut)
+def update_phase(phase_id: str, payload: ProcessPhaseIn, db: Session = Depends(get_db),
+                 user: User = Depends(get_current_user)):
+    return svc.update_phase(db, phase_id, payload.model_dump(), user)
+
+
+@router.delete("/phases/{phase_id}", status_code=204)
+def delete_phase(phase_id: str, db: Session = Depends(get_db),
+                 user: User = Depends(get_current_user)):
+    svc.delete_phase(db, phase_id, user)
 
 
 # ---- Tham số ----

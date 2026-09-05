@@ -477,3 +477,50 @@ def test_batch_code_braumat_duplicate_rejected_and_blank_auto_generates_integer(
                                          "planned_qty": 100, "allow_shortage": True})
     assert reused_next_year.status_code == 201, reused_next_year.text
     assert reused_next_year.json()["batch_year"] == this_year
+
+
+def test_merge_into_occupied_tank_lm_blocked_even_while_dang_nau(client, admin_h):
+    """Trước đây available_tank_lines() CHỈ coi tank vật lý "chiếm dụng" khi on_hand != 0 — 1
+    tank vừa gộp mẻ nấu CHƯA hoàn thành (status "dang_nau"/"Đang điền dịch") vẫn on_hand == 0
+    (actual_qty chưa ghi, xem merge_batches_into_tank) nên tank vật lý đó vẫn báo "trống", cho
+    chọn lại để gộp vào 1 lô lên men KHÁC — 2 lô cùng nhận 1 tank vật lý trong khi lô đầu chưa
+    xong. Test cả occupied flag VÀ guard chặn thật ở server (không chỉ dropdown frontend tự lọc)
+    — yêu cầu người dùng 2026-09-04: "Tank lên men đang điền dịch thì không cho tạo thêm nữa,
+    bạn vẫn cho tạo thêm để điền vào"."""
+    line = client.post("/api/lines", headers=admin_h,
+                       json={"code": "FV-DANGNAU-GUARD1", "name": "Tank dangnau guard", "kind": "tank"})
+    assert line.status_code == 201, line.text
+
+    # Mẻ 1 CHƯA hoàn thành (running, chưa actual_qty) -> tank mới tạo có on_hand=0, status "dang_nau".
+    unfinished_id = _make_batch(client, admin_h, "12")
+    for target in ("ready", "running"):
+        r = client.post(f"/api/batches/{unfinished_id}/transition", headers=admin_h, json={"target": target})
+        assert r.status_code == 200, r.text
+    tank = client.post("/api/batch-tanks", headers=admin_h,
+                       json={"batch_ids": [unfinished_id], "tank_code": "TANK-DANGNAU-GUARD1",
+                             "tank_lm": "FV-DANGNAU-GUARD1"})
+    assert tank.status_code == 201, tank.text
+    got = client.get(f"/api/batch-tanks/{tank.json()['tank_id']}", headers=admin_h).json()
+    assert got["status"] == "dang_nau"
+    assert got["on_hand"] == 0.0
+
+    # available_tank_lines() phải báo ĐANG chiếm dụng dù on_hand == 0.
+    lines = client.get("/api/batch-tanks/available-lines", headers=admin_h).json()
+    row = next(r for r in lines if r["code"] == "FV-DANGNAU-GUARD1")
+    assert row["occupied"] is True
+
+    # Guard THẬT ở server: gộp 1 mẻ khác vào CÙNG tank vật lý này phải bị chặn (409), không chỉ
+    # dựa vào dropdown frontend tự lọc.
+    other_id = _make_batch(client, admin_h, "13")
+    blocked = client.post("/api/batch-tanks", headers=admin_h,
+                          json={"batch_ids": [other_id], "tank_code": "TANK-DANGNAU-GUARD2",
+                                "tank_lm": "FV-DANGNAU-GUARD1"})
+    assert blocked.status_code == 409, blocked.text
+    assert "chiếm dụng" in blocked.json()["detail"]
+
+    # Sửa tank_lm của 1 tank KHÁC sang tank vật lý đang chiếm dụng này cũng phải bị chặn.
+    free_tank = _make_tank(client, admin_h, "14", "TANK-DANGNAU-GUARD3")
+    blocked_update = client.put(f"/api/batch-tanks/{free_tank['tank_id']}", headers=admin_h,
+                                json={"tank_lm": "FV-DANGNAU-GUARD1"})
+    assert blocked_update.status_code == 409, blocked_update.text
+    assert "chiếm dụng" in blocked_update.json()["detail"]

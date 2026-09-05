@@ -1793,16 +1793,18 @@ async function openWoBatchesModal(woId, woCode) {
 // lệnh tự chọn (services/brew_order.py::build_lines_from_recipe_version) — không phụ thuộc
 // màn này hiển thị thế nào.
 VIEWS.recipes = async function () {
-  const [recipes, products, beerTypes, materials, materialAltGroups, qcParamsRecipe, processParamsRecipe] = await Promise.all([
+  const [recipes, products, beerTypes, materials, materialAltGroups, qcParamsRecipe, processParamsRecipe, processPhasesRecipe] = await Promise.all([
     GET("/recipes"), GET("/products"), GET("/beer-types"), GET("/materials"), GET("/material-alt-groups").catch(() => []),
     GET("/qc/parameters?active_only=false").catch(() => []),
-    GET("/process-params/parameters?active_only=false").catch(() => [])]);
+    GET("/process-params/parameters?active_only=false").catch(() => []),
+    GET("/process-params/phases?active_only=true").catch(() => [])]);
   CACHE.products = products; CACHE.recipes = recipes; CACHE.beerTypes = beerTypes; CACHE.materials = materials;
   CACHE.materialAltGroups = materialAltGroups;
   // Chỉ chọn chỉ tiêu do người dùng tự khai (stage rỗng) — không lẫn chỉ tiêu SPC quy trình
   // sản xuất có sẵn (stage=nau/len_men/loc/chiet), mirror openQcGroupItemsModal.
   CACHE.qcParamsRecipe = qcParamsRecipe.filter(p => !p.stage);
   CACHE.processParamsRecipe = processParamsRecipe;
+  CACHE.processPhasesRecipe = processPhasesRecipe;
   const btopts = beerTypes.map(bt => `<option value="${bt.beer_type_id}">${esc(bt.code)} — ${esc(bt.name)}</option>`).join("");
   let versionsHtml = "";
   // Gom phẳng TOÀN BỘ version của MỌI công thức (kèm mã công thức/loại bia) — dùng cho picker
@@ -2119,12 +2121,14 @@ function vfParamItemRowHTML(it) {
   it = it || {};
   const opts = (CACHE.processParamsRecipe || []).map(p =>
     `<option value="${esc(p.param_id)}" ${p.param_id === it.param_id ? "selected" : ""}>${esc(p.code)} — ${esc(p.name)}${p.unit ? " (" + esc(p.unit) + ")" : ""}</option>`).join("");
+  const phaseOpts = (CACHE.processPhasesRecipe || []).map(ph =>
+    `<option value="${esc(ph.code)}" ${ph.code === it.phase_override ? "selected" : ""}>${esc(ph.name)}</option>`).join("");
   return `<tr class="vfparamrow">
     <td><select class="vfparam-param" style="min-width:200px"><option value="">(chọn tham số)</option>${opts}</select></td>
     <td><input type="number" step="any" class="vfparam-target" value="${it.target_override ?? ""}" style="width:80px" placeholder="mặc định"/></td>
     <td><input type="number" step="any" class="vfparam-lsl" value="${it.lsl_override ?? ""}" style="width:80px" placeholder="mặc định"/></td>
     <td><input type="number" step="any" class="vfparam-usl" value="${it.usl_override ?? ""}" style="width:80px" placeholder="mặc định"/></td>
-    <td><input type="text" class="vfparam-phase" value="${esc(it.phase_override || "")}" style="width:90px" placeholder="mặc định"/></td>
+    <td><select class="vfparam-phase" style="min-width:110px"><option value="">(mặc định)</option>${phaseOpts}</select></td>
     <td><input type="checkbox" class="vfparam-mand" ${it.mandatory !== false ? "checked" : ""}/></td>
     <td><button class="btn sm sec vfparam-del" type="button">×</button></td></tr>`;
 }
@@ -2139,7 +2143,7 @@ function collectVfParamItems() {
     return {
       param_id: paramId,
       mandatory: tr.querySelector(".vfparam-mand").checked,
-      phase_override: tr.querySelector(".vfparam-phase").value.trim() || null,
+      phase_override: tr.querySelector(".vfparam-phase").value || null,
       target_override: tr.querySelector(".vfparam-target").value === "" ? null : parseFloat(tr.querySelector(".vfparam-target").value),
       lsl_override: tr.querySelector(".vfparam-lsl").value === "" ? null : parseFloat(tr.querySelector(".vfparam-lsl").value),
       usl_override: tr.querySelector(".vfparam-usl").value === "" ? null : parseFloat(tr.querySelector(".vfparam-usl").value),
@@ -2186,7 +2190,8 @@ function versionFormHTML(v, recipe, qcItems, paramItems) {
         <table><thead><tr><th>Tham số</th><th>Setpoint</th><th>Ngưỡng dưới</th><th>Ngưỡng trên</th><th>Công đoạn</th><th>Bắt buộc</th><th></th></tr></thead>
           <tbody id="vfparam_body">${paramRows}</tbody></table>
         <button class="btn sm sec" id="vfparam_add" type="button" style="margin-top:6px">+ Thêm tham số</button>
-        ${(CACHE.processParamsRecipe || []).length ? "" : '<div class="muted" style="font-size:12px;margin-top:4px">Chưa có tham số nào trong Danh mục — tạo ở Danh mục › Chất lượng › Danh mục tham số quy trình.</div>'}</div>
+        ${(CACHE.processParamsRecipe || []).length ? "" : '<div class="muted" style="font-size:12px;margin-top:4px">Chưa có tham số nào trong Danh mục — tạo ở Danh mục › Chất lượng › Danh mục tham số quy trình.</div>'}
+        ${(CACHE.processPhasesRecipe || []).length ? "" : '<div class="muted" style="font-size:12px;margin-top:2px">Chưa có công đoạn nào trong Danh mục — tạo ở Danh mục › Chất lượng › Danh mục công đoạn (để chọn cột "Công đoạn" bên trên).</div>'}</div>
       <div><h3>Chỉ tiêu QC</h3>
         <table><thead><tr><th>Chỉ tiêu</th><th>Ngưỡng dưới</th><th>Ngưỡng trên</th><th>Bắt buộc</th><th></th></tr></thead>
           <tbody id="vfqc_body">${qcRows}</tbody></table>
@@ -3027,6 +3032,16 @@ async function showBatchTank(tankId, allBatches) {
     GET(`/batch-tanks/${tankId}`), GET(`/batch-tanks/${tankId}/batches`),
     GET(`/batch-tanks/${tankId}/process-log`)]);
   const memberBatches = (allBatches || []).filter(b => links.batch_ids.includes(b.batch_id));
+  // Độ oP trung bình = trung bình cộng chỉ tiêu Plato (mã 6238) đã ghi ở TỪNG mẻ nấu đã gộp vào
+  // tank này — lấy giá trị MỚI NHẤT nếu 1 mẻ có ghi lại nhiều lần, bỏ qua mẻ chưa ghi chỉ tiêu
+  // này (yêu cầu người dùng 2026-09-04: "chỉ trung bình của chỉ tiêu 6238 của các mẻ nấu").
+  const platoValues = (await Promise.all(memberBatches.map(async (b) => {
+    const bres = await GET(`/quality/results?scope_id=${b.batch_id}`).catch(() => []);
+    const rows = bres.filter(r => r.parameter === "6238" && r.value != null);
+    if (!rows.length) return null;
+    return rows.reduce((a, c) => new Date(c.recorded_at) > new Date(a.recorded_at) ? c : a).value;
+  }))).filter(v => v != null);
+  const avgPlato = platoValues.length ? platoValues.reduce((a, b) => a + b, 0) / platoValues.length : null;
   const qcQs = `scope_type=batch_tank&product_id=${encodeURIComponent(t.product_id || "")}`;
   const [qcChinhStatus, qcPhuStatus, qcChinhHistory, qcPhuHistory] = await Promise.all([
     GET(`/brewing/qc-status?stage=len_men_chinh&scope_id=${encodeURIComponent(tankId + "__len_men_chinh")}&${qcQs}`).catch(() => null),
@@ -3064,6 +3079,7 @@ async function showBatchTank(tankId, allBatches) {
       <dt>Lô lên men</dt><dd><code class="k">${esc(t.tank_code)}</code></dd>
       <dt>Tank lên men</dt><dd>${esc(t.tank_lm || "—")}</dd>
       <dt>Mẻ nấu đã gộp</dt><dd>${memberBatches.map(b => `<code class="k">${esc(b.batch_code)}</code>`).join(", ") || "—"}</dd>
+      <dt>Độ oP trung bình</dt><dd>${avgPlato != null ? avgPlato.toFixed(2) + " °P" : '<span class="muted">chưa có mẻ nào ghi chỉ tiêu Plato</span>'}</dd>
       <dt>Ngày bắt đầu vào dịch</dt><dd>${t.vao_dich_start ? fmt(t.vao_dich_start) : "—"}</dd>
       <dt>Ngày kết thúc vào dịch</dt><dd>${t.vao_dich_end ? fmt(t.vao_dich_end) : '<span class="muted">chưa xong (còn mẻ chưa "Kết thúc")</span>'}</dd>
       <dt>Thời gian lên men</dt><dd>${batchTankDaysFermentedCell(t)}</dd>
@@ -12163,6 +12179,7 @@ const MASTER_GROUPS = [
     { key: "chitieucl", label: "Danh mục chỉ tiêu chất lượng" }, { key: "nhomchitieucl", label: "Nhóm chỉ tiêu chất lượng" },
     { key: "nhomchitieucongdoan", label: "Nhóm chỉ tiêu theo công đoạn" },
     { key: "thamsoqt", label: "Danh mục tham số quy trình" }, { key: "nhomthamsoqt", label: "Nhóm tham số quy trình" },
+    { key: "congdoan", label: "Danh mục công đoạn" },
   ] },
   { key: "caidat", label: "Cài đặt", items: [
     { key: "caidatvanhanh", label: "Cài đặt vận hành" },
@@ -12170,7 +12187,7 @@ const MASTER_GROUPS = [
 ];
 let MASTER_GROUP = "sanxuat";
 VIEWS.master = async function () {
-  const [products, finishedProducts, materials, plines, qcParams, qcGroups, stageGroups, beerTypes, suppliers, materialGroups, opsSettings, unitTypes, materialAltGroups, factoryLocations, wmsWarehouses, wmsLocations, wmsVehicles, materialLocations, scopeCatalog, processParams, processParamGroups] = await Promise.all([
+  const [products, finishedProducts, materials, plines, qcParams, qcGroups, stageGroups, beerTypes, suppliers, materialGroups, opsSettings, unitTypes, materialAltGroups, factoryLocations, wmsWarehouses, wmsLocations, wmsVehicles, materialLocations, scopeCatalog, processParams, processParamGroups, processPhases] = await Promise.all([
     GET("/products"), GET("/finished-products").catch(() => []), GET("/materials"), GET("/lines").catch(() => []),
     GET("/qc/parameters?active_only=false").catch(() => []),
     GET("/qc/groups").catch(() => []), GET("/qc/stage-groups").catch(() => []), GET("/beer-types").catch(() => []),
@@ -12182,7 +12199,8 @@ VIEWS.master = async function () {
     GET("/warehouse/locations").catch(() => []),
     GET("/auth/scope-catalog").catch(() => ({ areas: [] })),
     GET("/process-params/parameters?active_only=false").catch(() => []),
-    GET("/process-params/groups").catch(() => [])]);
+    GET("/process-params/groups").catch(() => []),
+    GET("/process-params/phases").catch(() => [])]);
   // Danh mục "Khu vực" chuẩn — dùng chung với phạm vi phân quyền Tài khoản (security.py::
   // SCOPE_AREAS: nau/len_men/loc/chiet/kho) — Dây chuyền chỉ được CHỌN trong danh sách này,
   // không gõ tay tự do (tránh gõ sai/lệch chính tả khỏi các nơi khác đang dùng đúng mã này).
@@ -12718,7 +12736,8 @@ VIEWS.master = async function () {
         <div class="field"><label>Setpoint</label><input id="pp_target" type="number" step="any" style="width:100px"/></div>
         <div class="field"><label>Ngưỡng dưới</label><input id="pp_lsl" type="number" step="any" style="width:100px"/></div>
         <div class="field"><label>Ngưỡng trên</label><input id="pp_usl" type="number" step="any" style="width:100px"/></div>
-        <div class="field"><label>Công đoạn mặc định</label><input id="pp_phase" placeholder="mash"/></div>
+        <div class="field"><label>Công đoạn mặc định</label><select id="pp_phase"><option value="">(không có)</option>${
+          processPhases.filter(ph => ph.active).map(ph => `<option value="${esc(ph.code)}">${esc(ph.name)}</option>`).join("")}</select></div>
         <button class="btn" id="pp_add" style="align-self:flex-end">+ Tạo tham số</button>
       </div>` : ""}
       <input class="searchbox" data-tbl="t_ppparam" placeholder="Tìm mã/tên tham số..." style="margin-top:10px"/>
@@ -12755,6 +12774,27 @@ VIEWS.master = async function () {
           <td style="white-space:nowrap"><button class="btn sm sec" data-ppgi="${esc(g.group_id)}">Tham số trong nhóm</button>
             ${canManage ? `<button class="btn sm sec" data-ppgedit="${esc(g.group_id)}">Sửa</button>
             <button class="btn sm sec" data-ppgdel="${esc(g.group_id)}">Xóa</button></td>` : "</td>"}</tr>`).join("")}</tbody>
+      </table></div>
+    </div>
+
+    <div class="panel" ${mi("congdoan")}><h2>🧭 Danh mục công đoạn <span class="muted">(${processPhases.length})</span></h2>
+      <div class="muted" style="margin-bottom:6px">Công đoạn sản xuất (VD "Đường hóa", "Đun sôi", "Lên men chính") — khai báo 1 lần ở đây, dùng làm "Công đoạn mặc định" của Tham số quy trình (bảng trên) và "Công đoạn" ghi đè khi chọn tham số vào Công thức — cả 2 nơi chỉ CHỌN từ danh sách này, không gõ tay.</div>
+      ${noPerm}
+      ${canManage ? `<div class="row">
+        <div class="field"><label>Mã công đoạn</label><input id="cp_code" placeholder="mash"/></div>
+        <div class="field"><label>Tên công đoạn</label><input id="cp_name" placeholder="Đường hóa"/></div>
+        <button class="btn" id="cp_add" style="align-self:flex-end">+ Tạo công đoạn</button>
+      </div>` : ""}
+      <input class="searchbox" data-tbl="t_ppphase" placeholder="Tìm mã/tên công đoạn..." style="margin-top:10px"/>
+      <div class="tablewrap" style="margin-top:8px"><table id="t_ppphase">
+        <thead><tr><th>Mã</th><th>Tên</th><th>Trạng thái</th>${canManage ? "<th></th>" : ""}</tr></thead>
+        <tbody>${processPhases.map(ph => `<tr>
+          <td><code class="k">${esc(ph.code)}</code></td><td>${esc(ph.name)}</td>
+          <td>${badge(ph.active ? "available" : "obsolete")}${ph.active ? "hoạt động" : "ngừng"}</td>
+          ${canManage ? `<td style="white-space:nowrap"><button class="btn sm sec" data-cpedit="${esc(ph.phase_id)}">Sửa</button>
+            <button class="btn sm sec" data-cptoggle="${esc(ph.phase_id)}">${ph.active ? "Ngừng" : "Kích hoạt"}</button>
+            <button class="btn sm sec" data-cpdel="${esc(ph.phase_id)}">Xóa</button></td>` : ""}</tr>`).join("") ||
+          `<tr><td colspan="${canManage ? 4 : 3}" class="muted">Chưa có công đoạn nào.</td></tr>`}</tbody>
       </table></div>
     </div>
 
@@ -13433,7 +13473,9 @@ VIEWS.master = async function () {
         <div class="field" style="margin-top:8px"><label>Setpoint</label><input id="ppe_target" type="number" step="any" value="${p.target ?? ""}"/></div>
         <div class="field" style="margin-top:8px"><label>Ngưỡng dưới</label><input id="ppe_lsl" type="number" step="any" value="${p.lsl ?? ""}"/></div>
         <div class="field" style="margin-top:8px"><label>Ngưỡng trên</label><input id="ppe_usl" type="number" step="any" value="${p.usl ?? ""}"/></div>
-        <div class="field" style="margin-top:8px"><label>Công đoạn mặc định</label><input id="ppe_phase" value="${esc(p.phase || "")}"/></div>
+        <div class="field" style="margin-top:8px"><label>Công đoạn mặc định</label><select id="ppe_phase"><option value="">(không có)</option>${
+          processPhases.filter(ph => ph.active || ph.code === p.phase).map(ph =>
+            `<option value="${esc(ph.code)}" ${ph.code === p.phase ? "selected" : ""}>${esc(ph.name)}</option>`).join("")}</select></div>
         <button class="btn" id="ppe_save" style="margin-top:12px">Lưu</button>`);
       $("ppe_save").onclick = () => guard(async () => {
         const code = $("ppe_code").value.trim(), name = $("ppe_name").value.trim();
@@ -13482,6 +13524,36 @@ VIEWS.master = async function () {
       if (!confirm("Xóa nhóm tham số này? Không thể hoàn tác.")) return;
       await DELETE(`/process-params/groups/${b.dataset.ppgdel}`);
       toast("Đã xóa nhóm tham số"); render("master");
+    }));
+
+    if ($("cp_add")) $("cp_add").onclick = () => guard(async () => {
+      const code = $("cp_code").value.trim(), name = $("cp_name").value.trim();
+      if (!code || !name) throw new Error("Nhập đủ Mã và Tên công đoạn.");
+      await POST("/process-params/phases", { code, name });
+      toast("Đã tạo công đoạn"); render("master");
+    });
+    document.querySelectorAll("[data-cpedit]").forEach(b => b.onclick = () => {
+      const ph = processPhases.find(x => x.phase_id === b.dataset.cpedit);
+      modal(`<h3>Sửa công đoạn — ${esc(ph.code)}</h3>
+        <div class="field"><label>Mã</label><input id="cpe_code" value="${esc(ph.code)}"/></div>
+        <div class="field" style="margin-top:8px"><label>Tên</label><input id="cpe_name" value="${esc(ph.name)}"/></div>
+        <button class="btn" id="cpe_save" style="margin-top:12px">Lưu</button>`);
+      $("cpe_save").onclick = () => guard(async () => {
+        const code = $("cpe_code").value.trim(), name = $("cpe_name").value.trim();
+        if (!code || !name) throw new Error("Nhập đủ Mã và Tên công đoạn.");
+        await PUT(`/process-params/phases/${ph.phase_id}`, { code, name, active: ph.active });
+        closeModal(); toast("Đã lưu công đoạn"); render("master");
+      });
+    });
+    document.querySelectorAll("[data-cptoggle]").forEach(b => b.onclick = () => guard(async () => {
+      const ph = processPhases.find(x => x.phase_id === b.dataset.cptoggle);
+      await PUT(`/process-params/phases/${ph.phase_id}`, { code: ph.code, name: ph.name, active: !ph.active });
+      toast(ph.active ? "Đã ngừng công đoạn" : "Đã kích hoạt lại công đoạn"); render("master");
+    }));
+    document.querySelectorAll("[data-cpdel]").forEach(b => b.onclick = () => guard(async () => {
+      if (!confirm("Xóa công đoạn này? Chỉ xóa được khi chưa dùng ở tham số/công thức nào. Không thể hoàn tác.")) return;
+      await DELETE(`/process-params/phases/${b.dataset.cpdel}`);
+      toast("Đã xóa công đoạn"); render("master");
     }));
   }
 
@@ -13697,30 +13769,37 @@ VIEWS.master = async function () {
     const [items, allParams] = await Promise.all([
       GET(`/process-params/groups/${group.group_id}/items`), GET("/process-params/parameters?active_only=false")]);
     const paramOpts = allParams.map(p => `<option value="${esc(p.param_id)}">${esc(p.code)} — ${esc(p.name)}${p.unit ? " (" + esc(p.unit) + ")" : ""}</option>`).join("");
+    const phaseOptsFor = selectedCode => `<option value="">(mặc định)</option>` + (processPhases || []).map(ph =>
+      `<option value="${esc(ph.code)}" ${ph.code === selectedCode ? "selected" : ""}>${esc(ph.name)}</option>`).join("");
     modal(`<h3>Tham số trong nhóm — ${esc(group.name)}</h3>
       ${canManage ? "" : `<div class="muted" style="margin-bottom:8px">Bạn chỉ có quyền xem (cần quyền <code class="k">master.manage</code> để thêm/sửa/xóa tham số trong nhóm).</div>`}
+      <div class="muted" style="margin-bottom:8px">Cột "Công đoạn" gắn tham số này với 1 bước cụ thể (VD "Nâng nhiệt") — 1 bước có thể gồm nhiều tham số (VD thời gian + nhiệt độ), mỗi tham số gán CÙNG 1 công đoạn để nhận biết chung 1 bước. "Copy tham số từ nhóm khác" (bên dưới) giữ nguyên công đoạn đã gán ở đây.</div>
       <div class="tablewrap"><table>
-        <thead><tr><th>Mã TS</th><th>Tên</th><th>ĐVT</th><th>Ngưỡng dưới</th><th>Ngưỡng trên</th><th>Bắt buộc</th>${canManage ? "<th></th>" : ""}</tr></thead>
+        <thead><tr><th>Mã TS</th><th>Tên</th><th>ĐVT</th><th>Ngưỡng dưới</th><th>Ngưỡng trên</th><th>Công đoạn</th><th>Bắt buộc</th>${canManage ? "<th></th>" : ""}</tr></thead>
         <tbody>${items.map(it => `<tr>
           <td><code class="k">${esc(it.param_code || "—")}</code></td><td>${esc(it.param_name || "—")}</td>
           <td>${esc(it.param_unit || "—")}</td>
           ${canManage ? `<td><input type="number" step="any" class="ppgi-lsl-edit" data-item="${esc(it.item_id)}" value="${it.lsl_override ?? ""}" style="width:85px"/></td>
           <td><input type="number" step="any" class="ppgi-usl-edit" data-item="${esc(it.item_id)}" value="${it.usl_override ?? ""}" style="width:85px"/></td>
+          <td><select class="ppgi-phase-edit" data-item="${esc(it.item_id)}" style="min-width:110px">${phaseOptsFor(it.phase_override)}</select></td>
           <td><input type="checkbox" class="ppgi-mand-edit" data-item="${esc(it.item_id)}" ${it.mandatory ? "checked" : ""}/></td>
           <td style="white-space:nowrap"><button class="btn sm sec" data-ppsaveitem="${esc(it.item_id)}">Lưu</button>
             <button class="btn sm sec" data-ppdelitem="${esc(it.item_id)}">Xóa</button></td>` : `<td>${it.lsl_override ?? "—"}</td>
           <td>${it.usl_override ?? "—"}</td>
+          <td class="muted">${esc(it.phase_override || "—")}</td>
           <td>${it.mandatory ? "Có" : "Không"}</td>`}</tr>`).join("") ||
-          `<tr><td colspan="${canManage ? 7 : 6}" class="muted">Chưa có tham số nào trong nhóm.</td></tr>`}</tbody>
+          `<tr><td colspan="${canManage ? 8 : 7}" class="muted">Chưa có tham số nào trong nhóm.</td></tr>`}</tbody>
       </table></div>
       ${canManage ? `<h4 style="margin-top:14px">+ Thêm tham số vào nhóm</h4>
       <div class="row">
         <div class="field" style="min-width:220px"><label>Tham số</label><select id="ppgi_param">${paramOpts || "<option value=''>(chưa có tham số nào — tạo ở Danh mục tham số quy trình)</option>"}</select></div>
         <div class="field"><label>Ngưỡng dưới</label><input id="ppgi_lsl" type="number" step="any" style="width:90px"/></div>
         <div class="field"><label>Ngưỡng trên</label><input id="ppgi_usl" type="number" step="any" style="width:90px"/></div>
+        <div class="field"><label>Công đoạn</label><select id="ppgi_phase" style="min-width:110px">${phaseOptsFor(null)}</select></div>
         <div class="field"><label>Bắt buộc</label><input id="ppgi_mandatory" type="checkbox" checked/></div>
         <button class="btn" id="ppgi_add" style="align-self:flex-end">Thêm</button>
       </div>
+      ${(processPhases || []).length ? "" : '<div class="muted" style="font-size:12px;margin-top:4px">Chưa có công đoạn nào trong Danh mục — tạo ở Danh mục › Chất lượng › Danh mục công đoạn.</div>'}
       <div class="muted" style="margin-top:10px">Chưa thấy tham số cần dùng? Tạo mới ở panel "🌡️ Danh mục tham số quy trình" (phía trên bảng Nhóm tham số), rồi quay lại đây để thêm vào nhóm.</div>
       <h4 style="margin-top:14px">↪ Copy tham số từ nhóm khác</h4>
       ${items.length ? `<div class="muted">Nhóm này đã có tham số — chỉ có thể copy vào nhóm đang rỗng. Xóa hết tham số hiện tại (bảng phía trên) nếu muốn copy nguyên bộ từ nhóm khác.</div>` : `<div class="row">
@@ -13740,6 +13819,7 @@ VIEWS.master = async function () {
         param_id: paramId, mandatory: $("ppgi_mandatory").checked,
         lsl_override: $("ppgi_lsl").value === "" ? null : parseFloat($("ppgi_lsl").value),
         usl_override: $("ppgi_usl").value === "" ? null : parseFloat($("ppgi_usl").value),
+        phase_override: $("ppgi_phase").value || null,
       });
       toast("Đã thêm tham số vào nhóm"); openProcessParamGroupItemsModal(group);
     });
@@ -13754,11 +13834,13 @@ VIEWS.master = async function () {
       const it = items.find(x => x.item_id === itemId);
       const lsl = document.querySelector(`.ppgi-lsl-edit[data-item="${itemId}"]`).value;
       const usl = document.querySelector(`.ppgi-usl-edit[data-item="${itemId}"]`).value;
+      const phase = document.querySelector(`.ppgi-phase-edit[data-item="${itemId}"]`).value;
       const mandatory = document.querySelector(`.ppgi-mand-edit[data-item="${itemId}"]`).checked;
       await PUT(`/process-params/groups/${group.group_id}/items/${itemId}`, {
         param_id: it.param_id, seq: it.seq, mandatory,
         lsl_override: lsl === "" ? null : parseFloat(lsl),
         usl_override: usl === "" ? null : parseFloat(usl),
+        phase_override: phase || null,
       });
       toast("Đã lưu tham số"); openProcessParamGroupItemsModal(group);
     }));

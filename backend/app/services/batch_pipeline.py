@@ -13,7 +13,7 @@ import re
 from datetime import timedelta
 from typing import Optional
 
-from sqlalchemy import or_, select, true
+from sqlalchemy import select, true
 from sqlalchemy.orm import Session
 
 from ..audit import record_audit
@@ -215,22 +215,32 @@ def get_tank_out(db: Session, tank_id: str) -> dict:
     return _tank_out(db, get_tank(db, tank_id))
 
 
+def _tank_lm_occupied(db: Session, tank_lm: str) -> bool:
+    """1 tank vật lý (tank_lm) coi là đang chiếm dụng nếu có BẤT KỲ BatchTank nào đang dùng nó
+    mà HOẶC còn tồn dịch thật (on_hand != 0, kể cả tồn ÂM) HOẶC còn mẻ nấu đã gộp CHƯA "Kết
+    thúc" (chưa có end_at — tank đang "dang_nau"/"đang điền dịch", xem _tank_status). Trước đây
+    CHỈ xét on_hand != 0 — bỏ sót đúng lúc "đang điền dịch": mẻ vừa gộp vào tank nhưng CHƯA mẻ
+    nào ghi actual_qty (on_hand vẫn = 0, xem merge_batches_into_tank), nên tank vật lý đó vẫn bị
+    coi là "trống" và cho chọn lại cho 1 lô lên men KHÁC trong khi lô cũ chưa xong (yêu cầu
+    người dùng 2026-09-03: "Tank lên men đang điền dịch thì không cho tạo thêm nữa")."""
+    tanks = db.execute(select(BatchTank).where(BatchTank.tank_lm == tank_lm)).scalars().all()
+    if not tanks:
+        return False
+    if any(abs(t.on_hand) > 1e-6 for t in tanks):
+        return True
+    tank_ids = [t.tank_id for t in tanks]
+    return db.execute(select(BatchTankLink.tank_id).join(
+        BatchExecution, BatchExecution.batch_id == BatchTankLink.batch_id
+    ).where(BatchTankLink.tank_id.in_(tank_ids), BatchExecution.end_at.is_(None))).first() is not None
+
+
 def available_tank_lines(db: Session) -> list[dict]:
     """Từng tank lên men trong Danh mục (ProductionLine.kind == "tank") kèm cờ đang chiếm dụng
-    hay không — mirror services/dashboard.py::available_ferment_tanks (module Nấu-Lọc-Chiết
-    cũ). Khác FermentRecord (chiếm dụng suy theo derived.ferment_status != "da_loc_het"),
-    BatchTank không có vòng đời trạng thái riêng nên dùng on_hand != 0 làm tín hiệu "còn dịch,
-    tank vật lý chưa thật sự trống" — mirror đúng ý nghĩa (tank chỉ trống khi đã rút/làm rỗng
-    hết dịch). Tồn ÂM (đồng hồ đo lúc lọc ra số vượt tồn phần mềm) CŨNG coi là còn chiếm dụng —
-    KHÔNG cho mẻ nấu mới nào gộp vào tank này tới khi tồn thật sự = 0 (yêu cầu người dùng
-    2026-09-02: tồn âm vẫn phải xử lý xong (qua "Làm rỗng tank", trong ngưỡng dung sai) trước
-    khi dùng lại tank, không chỉ riêng tồn dương)."""
+    hay không — mirror services/dashboard.py::available_ferment_tanks (module Nấu-Lọc-Chiết cũ).
+    Chiếm dụng = _tank_lm_occupied (còn tồn dịch HOẶC còn mẻ nấu chưa kết thúc)."""
     lines = db.execute(select(ProductionLine).where(
         ProductionLine.kind == "tank", ProductionLine.active == true())).scalars().all()
-    occupied_codes = {t.tank_lm for t in db.execute(
-        select(BatchTank).where(or_(BatchTank.on_hand > 1e-6, BatchTank.on_hand < -1e-6))
-    ).scalars().all() if t.tank_lm}
-    return [{"code": l.code, "name": l.name, "occupied": l.code in occupied_codes}
+    return [{"code": l.code, "name": l.name, "occupied": _tank_lm_occupied(db, l.code)}
             for l in sorted(lines, key=lambda x: x.code)]
 
 
@@ -372,6 +382,13 @@ def merge_batches_into_tank(db: Session, batch_ids: list[str], payload: dict, us
     product_ids = {b.product_id for b in batches if b.product_id}
     volume = sum(b.actual_qty or 0.0 for b in batches)
     tank_lm = payload.get("tank_lm")
+    # Trước đây chỉ frontend tự lọc "tank đang trống" (available_tank_lines) khỏi dropdown —
+    # không có chặn thật ở server, gọi API trực tiếp (hoặc dropdown đã stale) vẫn gộp được vào 1
+    # tank vật lý đang bị tank khác chiếm dụng (2026-09-04, "Tank lên men đang điền dịch thì
+    # không cho tạo thêm nữa").
+    if tank_lm and _tank_lm_occupied(db, tank_lm):
+        raise DomainError(f"Tank vật lý '{tank_lm}' đang bị chiếm dụng (còn tồn dịch hoặc còn mẻ nấu "
+                          "chưa kết thúc) — chọn tank khác.")
     _assert_within_capacity(volume, usable_capacity_for_code(db, tank_lm, "tank"), tank_lm, "tank lên men")
     tank = BatchTank(
         tank_id=new_id(), tank_code=tank_code, tank_year=tank_year,
@@ -416,6 +433,9 @@ def update_tank(db: Session, tank_id: str, payload: dict, user: User) -> dict:
     if "tank_lm" in payload:
         new_tank_lm = payload["tank_lm"]
         if new_tank_lm != tank.tank_lm:
+            if new_tank_lm and _tank_lm_occupied(db, new_tank_lm):
+                raise DomainError(f"Tank vật lý '{new_tank_lm}' đang bị chiếm dụng (còn tồn dịch hoặc còn "
+                                  "mẻ nấu chưa kết thúc) — chọn tank khác.")
             _assert_within_capacity(tank.volume_hl, usable_capacity_for_code(db, new_tank_lm, "tank"),
                                     new_tank_lm, "tank lên men")
             tank.tank_lm = new_tank_lm
