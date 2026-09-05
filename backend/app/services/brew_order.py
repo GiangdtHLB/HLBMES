@@ -1011,6 +1011,7 @@ def delete_order(db: Session, brew_order_id: str, user) -> None:
     record_audit(db, entity_type="brew_order", entity_id=brew_order_id, action="delete",
                  actor=user, before={"order_code": order.order_code})
     db.delete(order)
+    db.commit()
 
 
 # ===== Tạo mã nấu/mẻ — dùng chung cho routers/brewing.py (tab Nấu) VÀ
