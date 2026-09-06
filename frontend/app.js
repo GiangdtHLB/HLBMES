@@ -3077,13 +3077,21 @@ async function showBatchTank(tankId, allBatches) {
   // Độ oP trung bình = trung bình cộng chỉ tiêu Plato (mã 6238) đã ghi ở TỪNG mẻ nấu đã gộp vào
   // tank này — lấy giá trị MỚI NHẤT nếu 1 mẻ có ghi lại nhiều lần, bỏ qua mẻ chưa ghi chỉ tiêu
   // này (yêu cầu người dùng 2026-09-04: "chỉ trung bình của chỉ tiêu 6238 của các mẻ nấu").
-  const platoValues = (await Promise.all(memberBatches.map(async (b) => {
-    const bres = await GET(`/quality/results?scope_id=${b.batch_id}`).catch(() => []);
-    const rows = bres.filter(r => r.parameter === "6238" && r.value != null);
+  // Độ Bx trung bình = mirror Độ oP trung bình ở trên nhưng chỉ tiêu "Bx" (mã 69) — yêu cầu
+  // người dùng 2026-09-06: "cứ mẻ nào khai báo thì lại cộng trung bình lại với các mẻ trước".
+  // Gọi CHUNG 1 lần /quality/results cho mỗi mẻ (đã fetch ở trên cho Plato) thay vì gọi lại lần
+  // 2 — gộp 2 vòng lọc trên cùng 1 kết quả trả về.
+  const batchQcResults = await Promise.all(memberBatches.map(b =>
+    GET(`/quality/results?scope_id=${b.batch_id}`).catch(() => [])));
+  const latestByParam = (paramCode) => batchQcResults.map(bres => {
+    const rows = bres.filter(r => r.parameter === paramCode && r.value != null);
     if (!rows.length) return null;
     return rows.reduce((a, c) => new Date(c.recorded_at) > new Date(a.recorded_at) ? c : a).value;
-  }))).filter(v => v != null);
+  }).filter(v => v != null);
+  const platoValues = latestByParam("6238");
   const avgPlato = platoValues.length ? platoValues.reduce((a, b) => a + b, 0) / platoValues.length : null;
+  const bxValues = latestByParam("69");
+  const avgBx = bxValues.length ? bxValues.reduce((a, b) => a + b, 0) / bxValues.length : null;
   const qcQs = `scope_type=batch_tank&product_id=${encodeURIComponent(t.product_id || "")}`;
   const [qcChinhStatus, qcPhuStatus, qcChinhHistory, qcPhuHistory] = await Promise.all([
     GET(`/brewing/qc-status?stage=len_men_chinh&scope_id=${encodeURIComponent(tankId + "__len_men_chinh")}&${qcQs}`).catch(() => null),
@@ -3122,6 +3130,7 @@ async function showBatchTank(tankId, allBatches) {
       <dt>Tank lên men</dt><dd>${esc(t.tank_lm || "—")}</dd>
       <dt>Mẻ nấu đã gộp</dt><dd>${memberBatches.map(b => `<code class="k">${esc(b.batch_code)}</code>`).join(", ") || "—"}</dd>
       <dt>Độ oP trung bình</dt><dd>${avgPlato != null ? avgPlato.toFixed(2) + " °P" : '<span class="muted">chưa có mẻ nào ghi chỉ tiêu Plato</span>'}</dd>
+      <dt>Độ Bx trung bình</dt><dd>${avgBx != null ? avgBx.toFixed(2) + " °Bx" : '<span class="muted">chưa có mẻ nào ghi chỉ tiêu Bx</span>'}</dd>
       <dt>Ngày bắt đầu vào dịch</dt><dd>${t.vao_dich_start ? fmt(t.vao_dich_start) : "—"}</dd>
       <dt>Ngày kết thúc vào dịch</dt><dd>${t.vao_dich_end ? fmt(t.vao_dich_end) : '<span class="muted">chưa xong (còn mẻ chưa "Kết thúc")</span>'}</dd>
       <dt>Thời gian lên men</dt><dd>${batchTankDaysFermentedCell(t)}</dd>
