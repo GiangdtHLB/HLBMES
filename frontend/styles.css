@@ -105,9 +105,12 @@ th.sortable-th:hover { color: var(--text); }
 .mp-field { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
 .mp-field span { font-size: 10px; color: var(--muted); white-space: nowrap; }
 .mp-field input { width: 60px; }
-/* Ẩn nút tăng/giảm mặc định của input number — nhập số trực tiếp, không cần bấm nút. */
-input.no-spin::-webkit-outer-spin-button, input.no-spin::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
-input.no-spin[type=number] { -moz-appearance: textfield; }
+/* Ẩn nút tăng/giảm mặc định của input number TRÊN TOÀN BỘ ứng dụng — nhập số trực tiếp,
+   không cần bấm nút (trước đây chỉ áp dụng cho input có class "no-spin" — rất ít input thật
+   sự gắn class đó, hầu hết input[type=number] trong app.js/views_ext.js vẫn hiện nút +/-,
+   yêu cầu người dùng 2026-09-06: "kiểm tra toàn bộ code có mục +- này thì bỏ hết đi"). */
+input[type=number]::-webkit-outer-spin-button, input[type=number]::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+input[type=number] { -moz-appearance: textfield; }
 button.btn {
   background: var(--accent); color: #1a1206; border: none; border-radius: 6px;
   padding: 7px 14px; cursor: pointer; font-weight: 600; font-size: 13px;

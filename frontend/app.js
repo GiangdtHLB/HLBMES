@@ -315,6 +315,32 @@ function wireSearchableSelect(txtId, hiddenId, items, onSelect) {
   txt.addEventListener("blur", () => setTimeout(closePanel, 150));
 }
 
+// Picker qua modal (nút "🔍 Tìm" mở popup có ô tìm riêng) thay cho gõ trực tiếp vào ô hiển thị
+// (wireSearchableSelect ở trên) — dùng khi muốn ô hiển thị CHỈ để xem giá trị đã chọn, không
+// cho gõ/lọc ngay tại đó (yêu cầu người dùng 2026-09-06: "còn ô bên cạnh vẫn để show ra, không
+// cho tìm kiếm kiểu vậy"). items: [{value, label}] — chọn 1 dòng thì đóng modal và gọi onSelect.
+function openSearchPickerModal(title, items, onSelect) {
+  modal(`<h3>${esc(title)}</h3>
+    <input id="spm_q" autocomplete="off" placeholder="Gõ để tìm..." style="width:100%;box-sizing:border-box;margin-bottom:8px"/>
+    <div id="spm_list" style="max-height:340px;overflow-y:auto;border:1px solid var(--border);border-radius:6px"></div>`);
+  const render = (query) => {
+    const q = (query || "").trim().toLowerCase();
+    const matches = (q ? items.filter(i => i.label.toLowerCase().includes(q)) : items).slice(0, 100);
+    $("spm_list").innerHTML = matches.map(i => `<div class="ss-item" data-v="${esc(i.value)}">${esc(i.label)}</div>`).join("") ||
+      '<div class="ss-empty">Không tìm thấy.</div>';
+    $("spm_list").querySelectorAll(".ss-item").forEach(row => {
+      row.onclick = () => {
+        const item = items.find(i => i.value === row.dataset.v);
+        closeModal(false);
+        if (item && onSelect) onSelect(item);
+      };
+    });
+  };
+  render("");
+  $("spm_q").oninput = () => render($("spm_q").value);
+  $("spm_q").focus();
+}
+
 // Hộp thoại chọn giờ kết thúc (mẻ nấu/lọc/chiết) — KHÔNG tự động lấy giờ hiện tại khi bấm
 // Sửa 1 mẻ nấu: gộp Mã mẻ + Giờ bắt đầu + Giờ kết thúc vào 1 modal duy nhất (trước đây tách
 // 2 nút "Sửa giờ BĐ"/"Kết thúc"·"Sửa giờ KT") — Giờ kết thúc để trống nếu mẻ chưa kết thúc,

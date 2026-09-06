@@ -662,10 +662,14 @@
     const running = batches.find(b => b.state === "running") || batches[0];
     root.innerHTML = `
       ${panel("🚚 Cấp liệu cho mẻ", `
-        <div class="row"><div class="field"><label>Mẻ</label>
-          <input type="text" id="dp_batch_txt" autocomplete="off" placeholder="Gõ để tìm mã mẻ..."
-            value="${running ? esc(running.batch_code + " · " + running.state) : ""}"/>
-          <input type="hidden" id="dp_batch" value="${running ? esc(running.batch_id) : ""}"/></div></div>
+        <div class="row">
+          <div class="field"><label>Mẻ (bấm để chọn)</label>
+            <input type="text" id="dp_batch_txt" readonly autocomplete="off" placeholder="Chưa chọn mẻ — bấm để chọn"
+              value="${running ? esc(running.batch_code + " · " + running.state) : ""}" style="cursor:pointer"/>
+            <input type="hidden" id="dp_batch" value="${running ? esc(running.batch_id) : ""}"/></div>
+          <div class="field"><label>Hoặc gõ mã mẻ để tìm</label>
+            <input type="text" id="dp_batch_search" autocomplete="off" placeholder="Nhập mã mẻ..."/></div>
+        </div>
         <div id="dp_bom" class="muted" style="margin-top:8px">Đang tải định mức…</div>
         <h3 style="margin-top:12px">Cấp 1 vật tư (tự chọn lô theo FEFO — hết hạn trước xuất trước)</h3>
         <div class="row">
@@ -750,9 +754,18 @@
         toast("Đã xóa dòng cấp liệu"); refresh();
       }));
     }
-    wireSearchableSelect("dp_batch_txt", "dp_batch",
-      batches.map(b => ({ value: b.batch_id, label: b.batch_code + " · " + b.state })),
-      () => { $("sg_result").innerHTML = 'Bấm "Xem gợi ý" để xem vật tư còn thiếu và lô sẽ dùng.'; refresh(); });
+    // 2 cách chọn mẻ (yêu cầu người dùng 2026-09-06): (1) bấm thẳng vào ô "Mẻ" — mở popup duyệt
+    // toàn bộ danh sách qua openSearchPickerModal; (2) gõ mã mẻ vào ô tìm riêng bên cạnh — gợi ý
+    // hiện ngay dưới ô đó (wireSearchableSelect), chọn xong tự điền lại vào ô "Mẻ" bên trái +
+    // xóa ô tìm để gõ lần sau.
+    const batchItems = (batches || []).map(b => ({ value: b.batch_id, label: b.batch_code + " · " + b.state }));
+    const onBatchPicked = (item) => {
+      $("dp_batch").value = item.value; $("dp_batch_txt").value = item.label;
+      $("dp_batch_search").value = "";
+      $("sg_result").innerHTML = 'Bấm "Xem gợi ý" để xem vật tư còn thiếu và lô sẽ dùng.'; refresh();
+    };
+    $("dp_batch_txt").onclick = () => openSearchPickerModal("Chọn mẻ", batchItems, onBatchPicked);
+    wireSearchableSelect("dp_batch_search", "dp_batch", batchItems, onBatchPicked);
     $("dp_go").onclick = () => guard(async () => {
       const bid = $("dp_batch").value;
       await POST(`/dispense/${bid}`, { lines: [{ material_code: $("dp_mat").value, quantity: num("dp_qty") || 0, allow_over: $("dp_over").checked }],
