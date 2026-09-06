@@ -315,6 +315,32 @@ function wireSearchableSelect(txtId, hiddenId, items, onSelect) {
   txt.addEventListener("blur", () => setTimeout(closePanel, 150));
 }
 
+// Picker qua modal (nút "🔍 Tìm" mở popup có ô tìm riêng) thay cho gõ trực tiếp vào ô hiển thị
+// (wireSearchableSelect ở trên) — dùng khi muốn ô hiển thị CHỈ để xem giá trị đã chọn, không
+// cho gõ/lọc ngay tại đó (yêu cầu người dùng 2026-09-06: "còn ô bên cạnh vẫn để show ra, không
+// cho tìm kiếm kiểu vậy"). items: [{value, label}] — chọn 1 dòng thì đóng modal và gọi onSelect.
+function openSearchPickerModal(title, items, onSelect) {
+  modal(`<h3>${esc(title)}</h3>
+    <input id="spm_q" autocomplete="off" placeholder="Gõ để tìm..." style="width:100%;box-sizing:border-box;margin-bottom:8px"/>
+    <div id="spm_list" style="max-height:340px;overflow-y:auto;border:1px solid var(--border);border-radius:6px"></div>`);
+  const render = (query) => {
+    const q = (query || "").trim().toLowerCase();
+    const matches = (q ? items.filter(i => i.label.toLowerCase().includes(q)) : items).slice(0, 100);
+    $("spm_list").innerHTML = matches.map(i => `<div class="ss-item" data-v="${esc(i.value)}">${esc(i.label)}</div>`).join("") ||
+      '<div class="ss-empty">Không tìm thấy.</div>';
+    $("spm_list").querySelectorAll(".ss-item").forEach(row => {
+      row.onclick = () => {
+        const item = items.find(i => i.value === row.dataset.v);
+        closeModal(false);
+        if (item && onSelect) onSelect(item);
+      };
+    });
+  };
+  render("");
+  $("spm_q").oninput = () => render($("spm_q").value);
+  $("spm_q").focus();
+}
+
 // Hộp thoại chọn giờ kết thúc (mẻ nấu/lọc/chiết) — KHÔNG tự động lấy giờ hiện tại khi bấm
 // Sửa 1 mẻ nấu: gộp Mã mẻ + Giờ bắt đầu + Giờ kết thúc vào 1 modal duy nhất (trước đây tách
 // 2 nút "Sửa giờ BĐ"/"Kết thúc"·"Sửa giờ KT") — Giờ kết thúc để trống nếu mẻ chưa kết thúc,
@@ -3077,13 +3103,21 @@ async function showBatchTank(tankId, allBatches) {
   // Độ oP trung bình = trung bình cộng chỉ tiêu Plato (mã 6238) đã ghi ở TỪNG mẻ nấu đã gộp vào
   // tank này — lấy giá trị MỚI NHẤT nếu 1 mẻ có ghi lại nhiều lần, bỏ qua mẻ chưa ghi chỉ tiêu
   // này (yêu cầu người dùng 2026-09-04: "chỉ trung bình của chỉ tiêu 6238 của các mẻ nấu").
-  const platoValues = (await Promise.all(memberBatches.map(async (b) => {
-    const bres = await GET(`/quality/results?scope_id=${b.batch_id}`).catch(() => []);
-    const rows = bres.filter(r => r.parameter === "6238" && r.value != null);
+  // Độ Bx trung bình = mirror Độ oP trung bình ở trên nhưng chỉ tiêu "Bx" (mã 69) — yêu cầu
+  // người dùng 2026-09-06: "cứ mẻ nào khai báo thì lại cộng trung bình lại với các mẻ trước".
+  // Gọi CHUNG 1 lần /quality/results cho mỗi mẻ (đã fetch ở trên cho Plato) thay vì gọi lại lần
+  // 2 — gộp 2 vòng lọc trên cùng 1 kết quả trả về.
+  const batchQcResults = await Promise.all(memberBatches.map(b =>
+    GET(`/quality/results?scope_id=${b.batch_id}`).catch(() => [])));
+  const latestByParam = (paramCode) => batchQcResults.map(bres => {
+    const rows = bres.filter(r => r.parameter === paramCode && r.value != null);
     if (!rows.length) return null;
     return rows.reduce((a, c) => new Date(c.recorded_at) > new Date(a.recorded_at) ? c : a).value;
-  }))).filter(v => v != null);
+  }).filter(v => v != null);
+  const platoValues = latestByParam("6238");
   const avgPlato = platoValues.length ? platoValues.reduce((a, b) => a + b, 0) / platoValues.length : null;
+  const bxValues = latestByParam("69");
+  const avgBx = bxValues.length ? bxValues.reduce((a, b) => a + b, 0) / bxValues.length : null;
   const qcQs = `scope_type=batch_tank&product_id=${encodeURIComponent(t.product_id || "")}`;
   const [qcChinhStatus, qcPhuStatus, qcChinhHistory, qcPhuHistory] = await Promise.all([
     GET(`/brewing/qc-status?stage=len_men_chinh&scope_id=${encodeURIComponent(tankId + "__len_men_chinh")}&${qcQs}`).catch(() => null),
@@ -3122,6 +3156,7 @@ async function showBatchTank(tankId, allBatches) {
       <dt>Tank lên men</dt><dd>${esc(t.tank_lm || "—")}</dd>
       <dt>Mẻ nấu đã gộp</dt><dd>${memberBatches.map(b => `<code class="k">${esc(b.batch_code)}</code>`).join(", ") || "—"}</dd>
       <dt>Độ oP trung bình</dt><dd>${avgPlato != null ? avgPlato.toFixed(2) + " °P" : '<span class="muted">chưa có mẻ nào ghi chỉ tiêu Plato</span>'}</dd>
+      <dt>Độ Bx trung bình</dt><dd>${avgBx != null ? avgBx.toFixed(2) + " °Bx" : '<span class="muted">chưa có mẻ nào ghi chỉ tiêu Bx</span>'}</dd>
       <dt>Ngày bắt đầu vào dịch</dt><dd>${t.vao_dich_start ? fmt(t.vao_dich_start) : "—"}</dd>
       <dt>Ngày kết thúc vào dịch</dt><dd>${t.vao_dich_end ? fmt(t.vao_dich_end) : '<span class="muted">chưa xong (còn mẻ chưa "Kết thúc")</span>'}</dd>
       <dt>Thời gian lên men</dt><dd>${batchTankDaysFermentedCell(t)}</dd>
@@ -9499,7 +9534,14 @@ function _collectFlManualPayload() {
 }
 
 function _flChartHtml(readings) {
-  const xLabels = readings.map(r => r.day_no);
+  // Trục X hiện ngày thật (dd/mm) thay vì chỉ số ngày lên men trần trụi (yêu cầu người dùng
+  // 2026-09-06: "hiển thị cho tôi ngày ở dưới trục X") — lùi về "Ngày N" nếu dòng đó chưa có
+  // reading_date (VD dòng vừa "+ Thêm ngày" chưa nhập gì).
+  const xLabels = readings.map(r => {
+    if (!r.reading_date) return `Ngày ${r.day_no}`;
+    const d = new Date(r.reading_date);
+    return `${d.getDate()}/${d.getMonth() + 1}`;
+  });
   const left = [
     { label: "Nhiệt độ, °C", color: "#3498db", points: readings.map(r => ({ x: r.day_no, value: r.nhiet_do_c })) },
     { label: "°S", color: "#f5a623", points: readings.map(r => ({ x: r.day_no, value: r.do_s })) },
