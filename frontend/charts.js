@@ -323,6 +323,19 @@ const CH = {
     const legendOf = (list, PAL) => (list || []).map((s, si) => `<span style="display:inline-flex;align-items:center;gap:4px;margin-right:12px;font-size:11px;color:var(--muted)">
       <span style="width:9px;height:9px;border-radius:2px;background:${s.color || PAL[si % PAL.length]};display:inline-block"></span>${esc(s.label)}</span>`).join("");
     const fmtX = (i) => (xLabels && xLabels[i] != null) ? String(xLabels[i]) : String(i + 1);
+    // Trước đây CHỈ hiện đúng 2 nhãn (đầu/cuối) ở trục X, để trống cả 1 khoảng dài ở giữa dù
+    // truyền vào đủ nhãn từng điểm (VD ngày lên men) — giờ hiện thêm các mốc ở giữa theo bước
+    // nhảy tính từ độ rộng khả dụng, tránh chữ đè lên nhau (yêu cầu người dùng 2026-09-06:
+    // "hiển thị cho tôi ngày ở dưới trục X").
+    const maxTicks = Math.max(2, Math.floor((W - pad.l - pad.r) / 45));
+    const stride = Math.max(1, Math.ceil((n - 1 || 1) / (maxTicks - 1)));
+    const tickIdxs = [];
+    for (let i = 0; i < n; i += stride) tickIdxs.push(i);
+    if (tickIdxs[tickIdxs.length - 1] !== n - 1) tickIdxs.push(n - 1);
+    const xAxisLabels = tickIdxs.map(i => {
+      const anchor = i === 0 ? "start" : i === n - 1 ? "end" : "middle";
+      return `<text x="${px(i).toFixed(1)}" y="${H - 6}" fill="var(--muted)" font-size="10" text-anchor="${anchor}">${esc(fmtX(i))}</text>`;
+    }).join("");
     return `<div>
       <div style="margin-bottom:4px">${legendOf(leftSeries, PAL_L)}${legendOf(rightSeries, PAL_R)}</div>
       <svg viewBox="0 0 ${W} ${H}" width="100%" style="display:block">
@@ -333,8 +346,7 @@ const CH = {
         <text x="4" y="${pyL(lymin) + 4}" fill="var(--muted)" font-size="10">${lymin.toFixed(1)}</text>
         <text x="${W - pad.r + 3}" y="${pyR(rymax) + 4}" fill="var(--muted)" font-size="10">${rymax.toFixed(1)}</text>
         <text x="${W - pad.r + 3}" y="${pyR(rymin) + 4}" fill="var(--muted)" font-size="10">${rymin.toFixed(1)}</text>
-        <text x="${pad.l}" y="${H - 6}" fill="var(--muted)" font-size="10">${esc(fmtX(0))}</text>
-        <text x="${W - pad.r}" y="${H - 6}" fill="var(--muted)" font-size="10" text-anchor="end">${esc(fmtX(n - 1))}</text>
+        ${xAxisLabels}
         ${linesLeft}${linesRight}${valueLabels}
       </svg></div>`;
   },

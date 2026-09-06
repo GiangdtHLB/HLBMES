@@ -9499,7 +9499,14 @@ function _collectFlManualPayload() {
 }
 
 function _flChartHtml(readings) {
-  const xLabels = readings.map(r => r.day_no);
+  // Trục X hiện ngày thật (dd/mm) thay vì chỉ số ngày lên men trần trụi (yêu cầu người dùng
+  // 2026-09-06: "hiển thị cho tôi ngày ở dưới trục X") — lùi về "Ngày N" nếu dòng đó chưa có
+  // reading_date (VD dòng vừa "+ Thêm ngày" chưa nhập gì).
+  const xLabels = readings.map(r => {
+    if (!r.reading_date) return `Ngày ${r.day_no}`;
+    const d = new Date(r.reading_date);
+    return `${d.getDate()}/${d.getMonth() + 1}`;
+  });
   const left = [
     { label: "Nhiệt độ, °C", color: "#3498db", points: readings.map(r => ({ x: r.day_no, value: r.nhiet_do_c })) },
     { label: "°S", color: "#f5a623", points: readings.map(r => ({ x: r.day_no, value: r.do_s })) },
