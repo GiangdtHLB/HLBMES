@@ -51,13 +51,23 @@ L_PER_HL = 100.0   # 1 hectolít = 100 lít — quy đổi Số lượng cấp c
 # Trạng thái hiển thị (yêu cầu người dùng 2026-09-01) — mirror đúng mã/nhãn đã dùng ở module
 # Nấu-Lọc-Chiết cũ (routers/brewing.py::FILTER_STATUS, services/derived.py::ferment_status) cho
 # nhất quán, dù 2 hệ không liên kết. BatchTank suy hoàn toàn từ dữ liệu (không lưu cột status —
-# xem _tank_status); BatchFilterLot lưu cột status thật vì "cho_chiet" cần 1 mốc XÁC NHẬN của
+# xem _tank_status); BatchFilterLot lưu cột status thật vì "hoan_thanh" cần 1 mốc XÁC NHẬN của
 # vận hành ("Hoàn thành lọc") không suy được từ on_hand/ended_at; BatchFilterOrder suy hoàn toàn
 # từ lot_count/is_complete (xem _filter_order_status).
-TANK_STATUS_LABEL = {"dang_nau": "Đang điền dịch", "len_men": "Đang lên men", "cho_loc": "Chờ lọc",
-                     "loc_1_phan": "Lọc 1 phần", "da_loc_het": "Lọc hết", "am": "⚠ Âm (lệch số liệu)"}
-FILTER_LOT_STATUS_LABEL = {"dang_loc": "Đang lọc", "cho_chiet": "Chờ chiết", "chiet_1_phan": "Đang chiết",
-                           "da_chiet_het": "Đã chiết hết", "am": "⚠ Âm (lệch số liệu)"}
+#
+# "planned" (Chưa nấu — yêu cầu người dùng 2026-09-06: "nếu 1 trong các mẻ sản xuất nấu ít nhất
+# là running/Completed/closed thì được coi là đang điền dịch, nếu không đều ở trạng thái Planned")
+# — tank đã gộp mẻ nhưng CHƯA mẻ nào thật sự bắt đầu nấu (running/held/completed/closed), chỉ mới
+# "đặt chỗ", KHÁC hẳn "dang_nau" (đã có ít nhất 1 mẻ bắt đầu, dịch thật đã/đang chảy vào tank).
+TANK_STATUS_LABEL = {"planned": "Chưa nấu", "dang_nau": "Đang điền dịch", "len_men": "Đang lên men",
+                     "cho_loc": "Chờ lọc", "loc_1_phan": "Lọc 1 phần", "da_loc_het": "Lọc hết",
+                     "am": "⚠ Âm (lệch số liệu)"}
+# Lô lọc CHỈ còn 2 mốc: "dang_loc" (đang lọc) -> "hoan_thanh" (đã "Hoàn thành lọc") — KHÔNG còn
+# tự chuyển tiếp theo tiến độ rút dịch vào lô thành phẩm (yêu cầu người dùng 2026-09-06: "lọc này
+# để ở trạng thái completed thôi, không mở đến trạng thái chiết, chiết 1 phần chiết hết. các
+# trạng thái chiết sẽ ở bên chiết thôi" — tiến độ chiết đã có sẵn riêng ở BatchPackLot, xem
+# _pack_lot_status, không cần lặp lại ở đây).
+FILTER_LOT_STATUS_LABEL = {"dang_loc": "Đang lọc", "hoan_thanh": "Hoàn thành", "am": "⚠ Âm (lệch số liệu)"}
 FILTER_ORDER_STATUS_LABEL = {"planned": "Lập kế hoạch", "dang_loc": "Đang lọc", "hoan_thanh": "Hoàn thành"}
 
 
@@ -70,34 +80,32 @@ def _stamp_filter_lot_label(fl: BatchFilterLot) -> BatchFilterLot:
     return fl
 
 
-def _sync_filter_lot_chiet_status(fl: BatchFilterLot) -> None:
-    """Gọi sau MỌI lần đổi fl.on_hand do lô thành phẩm (tạo/sửa SL/xóa) — chuyển
-    cho_chiet<->chiet_1_phan<->da_chiet_het theo on_hand còn lại (yêu cầu người dùng
-    2026-09-01). Nếu lô lọc chưa từng bấm "Hoàn thành lọc" (còn "dang_loc") mà đã có mẻ chiết
-    rồi (VD do thao tác cũ/test không qua bước đó) thì coi như đã bỏ qua bước đó, tự chuyển
-    thẳng sang chiet_1_phan/da_chiet_het luôn — KHÔNG chặn, chỉ "cho_chiet" (chưa chiết gì) mới
-    cần đã rời khỏi dang_loc trước.
+def _sync_filter_lot_status(fl: BatchFilterLot) -> None:
+    """Gọi sau MỌI lần đổi fl.on_hand do lô thành phẩm (tạo/sửa SL/xóa). CHỈ còn 2 mốc:
+    "dang_loc" (đang lọc, chưa bấm "Hoàn thành lọc") <-> "hoan_thanh" (đã xong) — KHÔNG còn tự
+    chuyển tiếp theo tiến độ rút dịch vào lô thành phẩm nữa (trước đây tới 2026-09-06 còn
+    cho_chiet/chiet_1_phan/da_chiet_het — bỏ hẳn theo yêu cầu người dùng: "lọc này để ở trạng
+    thái completed thôi, không mở đến trạng thái chiết, chiết 1 phần chiết hết. các trạng thái
+    chiết sẽ ở bên chiết thôi" — tiến độ chiết đã có sẵn riêng ở BatchPackLot, xem
+    _pack_lot_status, không cần lặp lại ở đây). Nếu lô lọc chưa từng bấm "Hoàn thành lọc" (còn
+    "dang_loc") mà đã có mẻ chiết rồi (VD do thao tác cũ/test không qua bước đó) thì coi như đã
+    bỏ qua bước đó, tự chuyển luôn sang "hoan_thanh" — mirror hành vi cũ, chỉ khác không còn
+    phân biệt chiết 1 phần/chiết hết nữa. Dữ liệu CŨ còn lưu 3 giá trị deprecated (cho_chiet/
+    chiet_1_phan/da_chiet_het) tự "chữa lành" về "hoan_thanh" qua đúng nhánh này (status khác
+    "dang_loc" → luôn hoan_thanh), gọi ở mọi lần đọc — xem _resync_filter_lot_status_if_stale.
 
-    "am" (tồn ÂM — đồng hồ đo lúc lọc/chiết ra số vượt tồn phần mềm đang có, yêu cầu người dùng
-    2026-09-02: chọn cho phép ghi nhận thay vì chặn cứng, nhưng phải cảnh báo RÕ, khác hẳn
-    "da_chiet_het" — 2 trạng thái ý nghĩa vật lý ngược nhau dù cùng "không còn gì để chiết tiếp")
-    — chỉ zero được qua empty_filter_lot (trong ngưỡng dung sai); available_bbt_lines coi tank
-    BBT còn "am" là VẪN CHIẾM DỤNG, không cho mẻ lọc mới nào khác dùng lại tank đó tới khi = 0."""
+    "am" (tồn ÂM — đồng hồ đo lúc chiết ra số vượt tồn phần mềm đang có, yêu cầu người dùng
+    2026-09-02: cho phép ghi nhận thay vì chặn cứng, nhưng phải cảnh báo RÕ) — chỉ zero được qua
+    empty_filter_lot (trong ngưỡng dung sai); available_bbt_lines coi tank BBT còn "am" là VẪN
+    CHIẾM DỤNG, không cho mẻ lọc mới nào khác dùng lại tank đó tới khi = 0."""
     if fl.on_hand < -1e-6:
         fl.status = "am"
     elif fl.volume_hl <= 1e-6:
         # Chưa từng có mẻ lọc nào "Kết thúc" (volume_hl vẫn = 0, chưa rút được hl nào) — LUÔN
-        # "dang_loc" bất kể status cột DB đang lưu gì (kể cả đã lỡ bị lệch từ trước, VD do bug
-        # cũ ở nhánh da_chiet_het thiếu điều kiện volume_hl > 0 — yêu cầu người dùng 2026-09-02:
-        # "tôi vừa mới tạo lô lọc 03 mà tự nhiên lại hiện đã chiết hết"). Nhánh "cho_chiet" bên
-        # dưới chỉ áp dụng cho lô ĐÃ có volume_hl thật.
+        # "dang_loc" bất kể status cột DB đang lưu gì (kể cả giá trị cũ/deprecated đã lỡ lệch).
         fl.status = "dang_loc"
-    elif fl.on_hand <= 1e-6:
-        fl.status = "da_chiet_het"
-    elif fl.on_hand < fl.volume_hl - 1e-6:
-        fl.status = "chiet_1_phan"
-    elif fl.status != "dang_loc":
-        fl.status = "cho_chiet"
+    elif fl.on_hand < fl.volume_hl - 1e-6 or fl.status != "dang_loc":
+        fl.status = "hoan_thanh"
 
 
 def _assert_unlocked(*objs) -> None:
@@ -143,13 +151,27 @@ def _tank_status(db: Session, tank: BatchTank) -> str:
     xong khác cùng gộp) trong khi VẪN còn ít nhất 1 mẻ chưa "Kết thúc" (chưa có end_at) — tank đó
     CHƯA thật sự "đang lên men", vẫn đang trong giai đoạn nấu. Chỉ khi TẤT CẢ mẻ đã gộp đều xong
     (có ngày bắt đầu/kết thúc — xem _tank_out::vao_dich_start/vao_dich_end) mới xét tiếp các
-    nhánh lên men/lọc bên dưới."""
+    nhánh lên men/lọc bên dưới.
+
+    "planned" (yêu cầu người dùng 2026-09-06: "nếu 1 trong các mẻ sản xuất nấu ít nhất là
+    running/Completed/closed thì được coi là đang điền dịch, nếu không đều ở trạng thái Planned")
+    — tách khỏi "dang_nau": chỉ coi là "đang điền dịch" (dịch THẬT đã/đang chảy vào tank) khi có
+    ÍT NHẤT 1 mẻ đã thật sự bắt đầu nấu (running/held — đã qua "running" nên start_at đã có/
+    completed/closed); nếu TẤT CẢ mẻ đã gộp còn planned/ready (chưa mẻ nào chạy) thì tank mới chỉ
+    "đặt chỗ", CHƯA có gì đổ vào — không tính là "đang điền dịch" (trước đây gộp chung với
+    "dang_nau" khiến tank chưa hề bắt đầu nấu cũng hiện "Đang điền dịch", gây hiểu lầm)."""
     if tank.on_hand < -1e-6:
         return "am"
     batch_ids = tank_batch_ids(db, tank.tank_id)
-    if batch_ids and db.execute(select(BatchExecution.batch_id).where(
-            BatchExecution.batch_id.in_(batch_ids), BatchExecution.end_at.is_(None))).first():
-        return "dang_nau"
+    if batch_ids:
+        states = set(db.execute(select(BatchExecution.state).where(
+            BatchExecution.batch_id.in_(batch_ids))).scalars().all())
+        started = {"running", "held", "completed", "closed"}
+        if not (states & started):
+            return "planned"
+        if db.execute(select(BatchExecution.batch_id).where(
+                BatchExecution.batch_id.in_(batch_ids), BatchExecution.end_at.is_(None))).first():
+            return "dang_nau"
     if tank.volume_hl > 1e-6 and tank.on_hand <= 1e-6:
         return "da_loc_het"
     if tank.on_hand < tank.volume_hl - 1e-6:
@@ -295,7 +317,7 @@ def empty_filter_lot(db: Session, filter_lot_id: str, user: User) -> dict:
     record_audit(db, entity_type="batch_filter_lot", entity_id=fl.filter_lot_id, action="empty", actor=user,
                 before={"on_hand": residual}, after={"on_hand": 0.0})
     fl.on_hand = 0.0
-    _sync_filter_lot_chiet_status(fl)
+    _sync_filter_lot_status(fl)
     db.commit()
     db.refresh(fl)
     return _stamp_filter_lot_label(fl)
@@ -824,13 +846,13 @@ def draw_from_filter_order(db: Session, order_id: str, payload: dict, user: User
 
 def _resync_filter_lot_status_if_stale(db: Session, fl: BatchFilterLot) -> None:
     """Tự sửa lại status nếu bị lệch so với on_hand/volume_hl thật — phòng trường hợp 1 lô lọc đã
-    tách lô thành phẩm TỪ TRƯỚC khi có _sync_filter_lot_chiet_status (hoặc 1 đường mutation nào
+    tách lô thành phẩm TỪ TRƯỚC khi có _sync_filter_lot_status (hoặc 1 đường mutation nào
     đó lỡ quên gọi sync), status lưu (cột DB) không tự cập nhật lại nên hiện sai vĩnh viễn dù
     tồn/tổng đã đổi thật (VD lô lọc "1": on_hand 26.99/28.1 vẫn hiện "Chờ chiết" dù đã tách lô TP
     PKG-934995 — yêu cầu người dùng 2026-09-01). Gọi ở MỌI lần đọc (list/get) để tự "chữa lành",
     không chỉ đúng lúc mutate."""
     old_status = fl.status
-    _sync_filter_lot_chiet_status(fl)
+    _sync_filter_lot_status(fl)
     if fl.status != old_status:
         db.commit()
         db.refresh(fl)
@@ -1260,8 +1282,10 @@ def approve_filter_lot(db: Session, filter_lot_id: str, user: User) -> dict:
 def finish_filtering(db: Session, filter_lot_id: str, user: User) -> BatchFilterLot:
     """"Hoàn thành lọc" — mốc XÁC NHẬN riêng của vận hành (KHÁC "✔ Duyệt KCS" ở trên, đúng sơ đồ
     tổ chức đã áp dụng cho BatchPackLot: vận hành xác nhận xong việc, KCS ký duyệt chỉ tiêu là
-    2 bước tách biệt) — chuyển trạng thái "dang_loc" -> "cho_chiet", yêu cầu người dùng
-    2026-09-01. Yêu cầu mọi mẻ lọc đã "Kết thúc" (fl.ended_at) — chưa xong mà xác nhận thì sai."""
+    2 bước tách biệt) — chuyển trạng thái "dang_loc" -> "hoan_thanh" (yêu cầu người dùng
+    2026-09-01, đổi tên từ "cho_chiet" — không mở đến khái niệm chiết ở đây, tiến độ chiết ở
+    riêng BatchPackLot, xem _sync_filter_lot_status, 2026-09-06). Yêu cầu mọi mẻ lọc đã "Kết
+    thúc" (fl.ended_at) — chưa xong mà xác nhận thì sai."""
     require_perm(user, "batch.execute")
     fl = get_filter_lot(db, filter_lot_id)
     _assert_unlocked(fl)
@@ -1269,7 +1293,7 @@ def finish_filtering(db: Session, filter_lot_id: str, user: User) -> BatchFilter
         raise DomainError("Lô lọc không ở trạng thái đang lọc.")
     if fl.ended_at is None:
         raise DomainError("Còn mẻ lọc chưa kết thúc — kết thúc hết các mẻ lọc trước khi xác nhận hoàn thành lọc.")
-    fl.status = "cho_chiet"
+    fl.status = "hoan_thanh"
     record_audit(db, entity_type="batch_filter_lot", entity_id=filter_lot_id, action="finish_filtering", actor=user)
     db.commit()
     db.refresh(fl)
@@ -1283,7 +1307,7 @@ PACK_LOT_STATUS_LABEL = {"dang_chiet": "Đang chiết", "chiet_1_phan": "Chiết
 
 def _pack_lot_status(db: Session, p: BatchPackLot) -> str:
     """Suy hoàn toàn từ dữ liệu (không lưu cột status riêng), mirror _tank_status/
-    _sync_filter_lot_chiet_status — yêu cầu người dùng 2026-09-02: "Chiết thì bổ sung thêm cột
+    _sync_filter_lot_status — yêu cầu người dùng 2026-09-02: "Chiết thì bổ sung thêm cột
     trạng thái, Nếu tạo ra lô chiết thì là đang chiết, khi thể tích chiết có sai số bằng +- sai
     số làm rỗng tank và số lượng chiết ra của tổng 3 ca >0 thì lô đó được coi là chiết hết, nếu
     thể tích cấp chiết >0 nhưng chưa chiết hết thì được coi là chiết 1 phần".
@@ -1375,7 +1399,7 @@ def split_filter_lot_to_pack_lot(db: Session, filter_lot_id: str, payload: dict,
         created_by=user.username, created_at=utcnow(),
     )
     fl.on_hand = round(fl.on_hand - qty_hl, 3)
-    _sync_filter_lot_chiet_status(fl)
+    _sync_filter_lot_status(fl)
     db.add(p)
     db.flush()
     genealogy.add_edge(db, from_type="batch_filter_lot", from_id=filter_lot_id, to_type="batch_pack_lot",
@@ -1428,7 +1452,7 @@ def update_pack_lot_qty(db: Session, pack_lot_id: str, qty: float, user: User) -
         raise DomainError(f"Không đủ tồn để tăng số lượng — lô lọc còn {fl.on_hand:g} hl "
                          f"({fl.on_hand * L_PER_HL:g} lít), cần thêm {(qty - p.qty):g} lít.")
     fl.on_hand = round(fl.on_hand - delta_hl, 3)
-    _sync_filter_lot_chiet_status(fl)
+    _sync_filter_lot_status(fl)
     p.qty = qty
     db.commit()
     db.refresh(p)
@@ -1488,7 +1512,7 @@ def delete_pack_lot(db: Session, pack_lot_id: str, user: User) -> None:
     fl = db.execute(select(BatchFilterLot).where(
         BatchFilterLot.filter_lot_id == p.filter_lot_id).with_for_update()).scalar_one()
     fl.on_hand = round(fl.on_hand + p.qty / L_PER_HL, 3)
-    _sync_filter_lot_chiet_status(fl)
+    _sync_filter_lot_status(fl)
     for u in list_pack_lot_materials(db, pack_lot_id):
         if u.movement_id:
             warehouse_svc.undo_issue(db, u.movement_id, user, strict=False, skip_perm_check=True)

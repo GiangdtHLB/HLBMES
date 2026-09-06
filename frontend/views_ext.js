@@ -709,10 +709,18 @@
         <div class="muted" style="margin-top:6px">${canEdit ? "" : "Hồ sơ mẻ (EBR) đã khóa — không thể sửa Thực tế."}</div>`
         : '<div class="muted">Chưa cấp vật tư nào cho mẻ này — dùng "Gợi ý cấp liệu" hoặc "Cấp 1 vật tư" bên dưới.</div>';
       $("dp_mat").innerHTML = (bom.lines || []).map(l => `<option value="${esc(l.material_code)}">${esc(l.material_code)}${l.material_name ? " — " + esc(l.material_name) : ""} (ĐM ${l.planned})</option>`).join("");
-      $("dp_hist").innerHTML = hist.length ? hist.map(d => `<div style="margin-bottom:8px">
-        <b>${esc(d.dispense_code)}</b> ${badge(d.mode === "backflush" ? "planned" : d.mode === "adjust" ? "critical" : "available")}${esc(d.mode)} <span class="muted">${fmt(d.created_at)} · ${esc(d.created_by || "")}</span>
-        <div class="muted">${d.lines.map(l => `${esc(l.material_code)}: ${l.quantity} ${esc(l.uom)} ${l.lot_code ? "(" + esc(l.lot_code) + ")" : ""}${l.fifo_ok === false ? " ⚠ khác FIFO" : ""}${l.reason ? " — " + esc(l.reason) : ""}`).join(" · ") || "—"}</div></div>`).join("")
-        : '<div class="muted">Chưa có phiếu cấp liệu.</div>';
+      // Mỗi phiếu cấp liệu (Dispense) — dp_go ("Cấp 1 vật tư") và sg_apply ("Áp dụng gợi ý")
+      // đều gọi CHUNG endpoint POST /dispense/{bid} nên chỉ phân biệt được nguồn gốc qua `note`
+      // ("Cấp tự do"/"Cấp theo gợi ý (FEFO)") — luôn hiện `note` rõ ràng, kèm dịch `mode` sang
+      // tiếng Việt và nhãn "Vật tư đã cấp" cho dòng chi tiết bên dưới (yêu cầu người dùng
+      // 2026-09-05: "Lịch sử cấp liệu không rõ là gì").
+      const DISPENSE_MODE_LABEL = { dispense: "Cấp liệu", backflush: "Backflush (tự động theo định mức)", adjust: "Sửa Thực tế" };
+      $("dp_hist").innerHTML = hist.length ? hist.map(d => `<div style="margin-bottom:10px;padding-bottom:8px;border-bottom:1px solid var(--border)">
+        <div><b>${esc(d.dispense_code)}</b> ${badge(d.mode === "backflush" ? "planned" : d.mode === "adjust" ? "critical" : "available")}${esc(DISPENSE_MODE_LABEL[d.mode] || d.mode)}
+          <span class="muted">— ${fmt(d.created_at)} · ${esc(d.created_by || "")}</span></div>
+        ${d.note ? `<div style="margin-top:2px">${esc(d.note)}</div>` : ""}
+        <div class="muted" style="margin-top:2px">Vật tư đã cấp: ${d.lines.map(l => `${esc(l.material_code)}: ${l.quantity} ${esc(l.uom)}${l.lot_code ? " (lô " + esc(l.lot_code) + ")" : ""}${l.fifo_ok === false ? " ⚠ khác FIFO" : ""}${l.reason ? " — " + esc(l.reason) : ""}`).join(" · ") || "không có dòng nào"}</div></div>`).join("")
+        : '<div class="muted">Chưa có phiếu cấp liệu nào cho mẻ này.</div>';
       document.querySelectorAll("[data-bomedit]").forEach(btn => btn.onclick = () => {
         const code = btn.dataset.bomedit;
         const row = document.querySelector(`[data-bomrow="${CSS.escape(code)}"]`);
@@ -747,7 +755,8 @@
       () => { $("sg_result").innerHTML = 'Bấm "Xem gợi ý" để xem vật tư còn thiếu và lô sẽ dùng.'; refresh(); });
     $("dp_go").onclick = () => guard(async () => {
       const bid = $("dp_batch").value;
-      await POST(`/dispense/${bid}`, { lines: [{ material_code: $("dp_mat").value, quantity: num("dp_qty") || 0, allow_over: $("dp_over").checked }] });
+      await POST(`/dispense/${bid}`, { lines: [{ material_code: $("dp_mat").value, quantity: num("dp_qty") || 0, allow_over: $("dp_over").checked }],
+        note: "Cấp tự do" });
       toast("Đã cấp liệu"); $("dp_qty").value = ""; refresh();
     });
     $("sg_go").onclick = () => guard(async () => {
@@ -834,7 +843,7 @@
                   allow_over: $("sg_over").checked };
         }).filter(l => l.quantity > 0);
         if (!lines.length) { toast("Không có dòng nào để áp dụng", "err"); return; }
-        await POST(`/dispense/${bid}`, { lines });
+        await POST(`/dispense/${bid}`, { lines, note: "Cấp theo gợi ý (FEFO)" });
         toast("Đã áp dụng gợi ý cấp liệu");
         $("sg_result").innerHTML = 'Bấm "Xem gợi ý" để xem vật tư còn thiếu và lô sẽ dùng.';
         refresh();
@@ -1733,52 +1742,100 @@
       const bid = $("i8_batch").value;
       if (!bid) { $("i8_box").innerHTML = '<div class="muted">Chưa có mẻ.</div>'; return; }
       const st = await GET(`/isa88/batch/${bid}`);
+      // So giá trị thực tế với ngưỡng dưới/trên đã khai (lsl/usl, mới thêm — yêu cầu người dùng
+      // 2026-09-05: "tiêu chuẩn để làm so sánh sau này" — trước đây ISA-88 chỉ có Setpoint,
+      // không có ngưỡng nào để so Đạt/Vượt). null/undefined ở lsl hoặc usl = không giới hạn phía đó.
+      const i8OutOfRange = (param, val) => {
+        const num = Number(val);
+        if (!Number.isFinite(num)) return false;
+        if (param.lsl != null && num < param.lsl) return true;
+        if (param.usl != null && num > param.usl) return true;
+        return false;
+      };
+      // Mỗi Setpoint 1 CỘT riêng (không gộp chung 1 ô như trước), mỗi cột 2 dòng: dòng trên là
+      // setpoint cài đặt, dòng dưới là giá trị thực tế — mirror đúng cách trình bày file Step
+      // Protocol Braumat (mỗi Setpoint 1/2/3/4 là 1 cột) — yêu cầu người dùng 2026-09-05:
+      // "làm giống như file pdf tôi gửi đó phù hợp hơn mỗi cột là 1 setpoint, mỗi giá trị có 2
+      // dòng, dòng trên là setpoint, dòng dưới là thực tế". Số cột = số setpoint NHIỀU NHẤT
+      // trong toàn bộ thủ tục đang xem (phase nào ít hơn thì để trống ô thừa).
+      const allPhasesI8 = st.unit_procedures.flatMap(u => u.operations.flatMap(o => o.phases));
+      const maxParams = Math.max(0, ...allPhasesI8.map(ph => (ph.params || []).length));
+      const totalCols = 4 + maxParams;
+      const paramCell = (p, x) => {
+        if (!x) return "<td></td>";
+        const range = (x.lsl != null || x.usl != null) ? ` [${x.lsl ?? "-∞"}–${x.usl ?? "+∞"}]` : "";
+        const setpointLine = `<div class="muted" style="font-size:11px">${esc(x.name)}=${esc(x.setpoint)}${esc(x.unit || "")}${esc(range)}</div>`;
+        const editable = p.state === "running" || p.state === "held";
+        let actualLine;
+        if (editable) {
+          actualLine = `<input type="text" class="i8-val" data-run="${p.run_id}" data-pname="${esc(x.name)}"
+            value="${esc(p.values && p.values[x.name] != null ? p.values[x.name] : "")}" placeholder="thực tế" style="width:70px"/>`;
+        } else {
+          const v = p.values ? p.values[x.name] : null;
+          if (v == null) {
+            actualLine = '<span class="muted">—</span>';
+          } else {
+            const hasRange = x.lsl != null || x.usl != null;
+            // Hiện kèm luôn khoảng ngưỡng ngay trong nhãn Đạt/Vượt — yêu cầu người dùng
+            // 2026-09-05: "sao biết vượt ngưỡng vậy, thêm cho tôi giá trị ngưỡng vào để biết".
+            const statusBadge = hasRange ? (i8OutOfRange(x, v) ? ` ${badge("critical")}Vượt` : ` ${badge("available")}Đạt`) : "";
+            actualLine = `${esc(v)}${esc(x.unit || "")}${statusBadge}`;
+          }
+        }
+        return `<td style="font-size:12px">${setpointLine}<div style="margin-top:2px">${actualLine}</div></td>`;
+      };
       const phaseRow = (up, op, p) => {
         const b = PHASE_BADGE[p.state] || "planned";
-        const sp = (p.params || []).map(x => `${esc(x.name)}=${esc(x.setpoint)}${esc(x.unit || "")}`).join(", ");
         const started = p.started_at ? new Date(p.started_at) : null;
         const ended = p.ended_at ? new Date(p.ended_at) : null;
         const elapsedMin = started ? Math.round(((ended || new Date()) - started) / 60000) : null;
-        const durCell = `${p.duration_min ? esc(p.duration_min) + "' (cài đặt)" : "—"}${elapsedMin != null ? `<br><span class="muted">${elapsedMin}' thực tế${ended ? "" : " (đang chạy)"}</span>` : ""}`;
-        // Còn đang chạy/giữ: cho nhập giá trị thực tế của từng setpoint (gửi kèm lúc chuyển
-        // trạng thái) — đã complete/aborted: chỉ hiển thị lại giá trị đã ghi (values, xem
-        // services/isa88.py::transition_phase).
-        const editable = p.state === "running" || p.state === "held";
-        const actualCell = !(p.params || []).length ? '<span class="muted">—</span>'
-          : editable
-          ? (p.params || []).map(x => `<div style="margin-bottom:3px"><input type="text" class="i8-val" data-run="${p.run_id}" data-pname="${esc(x.name)}"
-              value="${esc(p.values && p.values[x.name] != null ? p.values[x.name] : "")}" placeholder="${esc(x.name)} thực tế" style="width:90px"/>
-              <span class="muted" style="font-size:11px">${esc(x.unit || "")}</span></div>`).join("")
-          : (p.values && Object.keys(p.values).length
-              ? (p.params || []).map(x => `${esc(x.name)}: ${p.values[x.name] != null ? esc(p.values[x.name]) : "—"}${esc(x.unit || "")}`).join("<br>")
-              : '<span class="muted">—</span>');
+        // Ngày giờ THẬT bắt đầu/kết thúc của từng phase (mirror cột Date/Time trong file Step
+        // Protocol Braumat — yêu cầu người dùng 2026-09-05: "thêm ngày giờ bắt đầu, ngày giờ kết
+        // thúc của phase vào") — hiện bên cạnh thời lượng cài đặt/thực tế, không thay thế nó.
+        const timeLine = started
+          ? `<br><span class="muted">${fmt(p.started_at)}${ended ? " → " + fmt(p.ended_at) : " (đang chạy)"}</span>` : "";
+        const durCell = `${p.duration_min ? esc(p.duration_min) + "' (cài đặt)" : "—"}${elapsedMin != null ? `<br><span class="muted">${elapsedMin}' thực tế</span>` : ""}${timeLine}`;
+        const paramCells = Array.from({ length: maxParams }, (_, i) => paramCell(p, (p.params || [])[i])).join("");
+        // Cho nhập tay giờ bắt đầu/kết thúc THẬT (để trống = giờ hiện tại, như trước) — dùng khi
+        // nạp lại lịch sử theo file export Braumat thay vì đúng lúc bấm nút (xem services/
+        // isa88.py::start_phase/transition_phase, tham số started_at/ended_at mới thêm).
         let btns = "";
-        if (p.state === "idle") btns = `<button class="btn sm" data-act="start" data-up="${esc(up)}" data-op="${esc(op)}" data-ph="${esc(p.phase)}">Bắt đầu</button>`;
-        else if (p.state === "running") btns = `<button class="btn sm" data-act="complete" data-run="${p.run_id}">Hoàn thành</button> <button class="btn sm sec" data-act="held" data-run="${p.run_id}">Giữ</button>`;
-        else if (p.state === "held") btns = `<button class="btn sm" data-act="running" data-run="${p.run_id}">Tiếp</button> <button class="btn sm sec" data-act="aborted" data-run="${p.run_id}">Hủy</button>`;
+        if (p.state === "idle") btns = `<input type="datetime-local" class="i8-started" data-up="${esc(up)}" data-op="${esc(op)}" data-ph="${esc(p.phase)}"
+            title="Giờ bắt đầu thật (để trống = giờ hiện tại)" style="width:150px;margin-bottom:3px;display:block"/>
+          <button class="btn sm" data-act="start" data-up="${esc(up)}" data-op="${esc(op)}" data-ph="${esc(p.phase)}">Bắt đầu</button>`;
+        else if (p.state === "running") btns = `<input type="datetime-local" class="i8-ended" data-run="${p.run_id}"
+            title="Giờ kết thúc thật khi Hoàn thành/Hủy (để trống = giờ hiện tại)" style="width:150px;margin-bottom:3px;display:block"/>
+          <button class="btn sm" data-act="complete" data-run="${p.run_id}">Hoàn thành</button> <button class="btn sm sec" data-act="held" data-run="${p.run_id}">Giữ</button>`;
+        else if (p.state === "held") btns = `<input type="datetime-local" class="i8-ended" data-run="${p.run_id}"
+            title="Giờ kết thúc thật khi Hủy (để trống = giờ hiện tại)" style="width:150px;margin-bottom:3px;display:block"/>
+          <button class="btn sm" data-act="running" data-run="${p.run_id}">Tiếp</button> <button class="btn sm sec" data-act="aborted" data-run="${p.run_id}">Hủy</button>`;
         return `<tr><td style="padding-left:24px">${esc(p.phase)}</td>
-          <td class="muted" style="font-size:12px">${sp || "—"}<br>${durCell}</td>
-          <td style="font-size:12px">${actualCell}</td>
+          <td class="muted" style="font-size:12px">${durCell}</td>
+          ${paramCells}
           <td>${badge(b)}${esc(p.state)}</td><td>${esc(p.operator || "")}</td><td>${btns}</td></tr>`;
       };
       const rows = st.unit_procedures.map(u => {
-        const head = `<tr style="background:var(--panel2)"><td colspan="6"><b>▸ ${esc(u.unit_procedure)}</b>
+        const head = `<tr style="background:var(--panel2)"><td colspan="${totalCols}"><b>▸ ${esc(u.unit_procedure)}</b>
           ${u.unit_class === "cip" ? badge("critical") + "CIP" : badge("available") + esc(u.unit_class || "")}</td></tr>`;
         const ops = u.operations.map(o =>
-          `<tr><td colspan="6" style="padding-left:12px"><i>${esc(o.operation)}</i></td></tr>` +
+          `<tr><td colspan="${totalCols}" style="padding-left:12px"><i>${esc(o.operation)}</i></td></tr>` +
           o.phases.map(p => phaseRow(u.unit_procedure, o.operation, p)).join("")).join("");
         return head + ops;
       }).join("");
+      const setpointHeaders = Array.from({ length: maxParams }, (_, i) => `<th>Setpoint ${i + 1}</th>`).join("");
       $("i8_box").innerHTML = `
         <div style="margin-bottom:8px">Tiến độ: <b>${st.completion_pct}%</b>
           (${st.phases_done}/${st.phases_total} phase) ${CH.donut(st.completion_pct / 100, { label: "phase", size: 96 })}</div>
-        <div class="tablewrap"><table><thead><tr><th>Unit procedure / Operation / Phase</th><th>Setpoint / Thời gian</th><th>Thực tế</th><th>Trạng thái</th><th>Người</th><th></th></tr></thead>
+        ${maxParams ? `<div class="muted" style="margin-bottom:6px;font-size:12px">Mỗi cột Setpoint gồm 2 dòng — <b>dòng 1: Cài đặt</b> (setpoint + ngưỡng theo công thức), <b>dòng 2: Actual</b> (giá trị thực tế đã ghi, kèm Đạt/Vượt nếu có khai ngưỡng).</div>` : ""}
+        <div class="tablewrap"><table><thead><tr><th>Unit procedure / Operation / Phase</th><th>Thời gian</th>${setpointHeaders}<th>Trạng thái</th><th>Người</th><th></th></tr></thead>
         <tbody>${rows}</tbody></table></div>`;
       const bid2 = bid;
       document.querySelectorAll("#i8_box [data-act]").forEach(btn => btn.onclick = () => guard(async () => {
         const act = btn.dataset.act;
         if (act === "start") {
-          await POST(`/isa88/batch/${bid2}/start`, { up: btn.dataset.up, op: btn.dataset.op, phase: btn.dataset.ph });
+          const startedInp = document.querySelector(`.i8-started[data-up="${CSS.escape(btn.dataset.up)}"][data-op="${CSS.escape(btn.dataset.op)}"][data-ph="${CSS.escape(btn.dataset.ph)}"]`);
+          const started_at = startedInp && startedInp.value ? new Date(startedInp.value).toISOString() : undefined;
+          await POST(`/isa88/batch/${bid2}/start`, { up: btn.dataset.up, op: btn.dataset.op, phase: btn.dataset.ph, started_at });
         } else {
           const values = {};
           document.querySelectorAll(`.i8-val[data-run="${btn.dataset.run}"]`).forEach(inp => {
@@ -1787,7 +1844,10 @@
             const num = Number(v);
             values[inp.dataset.pname] = Number.isFinite(num) ? num : v;
           });
-          await POST(`/isa88/phase/${btn.dataset.run}/transition`, { target: act, values });
+          const endedInp = document.querySelector(`.i8-ended[data-run="${btn.dataset.run}"]`);
+          const ended_at = (act === "complete" || act === "aborted") && endedInp && endedInp.value
+            ? new Date(endedInp.value).toISOString() : undefined;
+          await POST(`/isa88/phase/${btn.dataset.run}/transition`, { target: act, values, ended_at });
         }
         toast("Đã cập nhật phase"); load();
       }));
@@ -2538,11 +2598,13 @@
       // gây tải dữ liệu lớn khi người dùng chỉ cần xem đúng 1 ngày cụ thể.
       const fsDay = SUB.fgstock_day || toYMD(new Date());
       SUB.fgstock_day = fsDay;
-      let fsrep = null, fsdailyrep = null;
+      let fsrep = null, fsdailyrep = null, fslotrep = null;
       if (fsMode === "daily") {
         const fsDayQ = `day=${fsDay}` +
           (resolvedProductIds.length ? `&product_ids=${resolvedProductIds.map(encodeURIComponent).join(",")}` : "");
         fsdailyrep = await GET(`/reports/finished-goods-stock-daily-report?${fsDayQ}`);
+      } else if (fsMode === "lot") {
+        fslotrep = await GET(`/reports/finished-goods-lot-report?${fsQ}`);
       } else {
         fsrep = await GET(`/reports/finished-goods-stock-report?${fsQ}`);
       }
@@ -2633,8 +2695,9 @@
           </table></div></div>`;
       }).join("") || (fsMode === "daily" ? '<div class="muted">Chưa có dữ liệu.</div>' : "");
       const fsModeTabs = `<div class="subnav" style="margin-bottom:10px">
-          <button class="${fsMode === "range" ? "active" : ""}" id="fs_mode_range">Theo khoảng</button>
+          <button class="${fsMode === "range" ? "active" : ""}" id="fs_mode_range">Theo khoảng (mã SP)</button>
           <button class="${fsMode === "daily" ? "active" : ""}" id="fs_mode_daily">📅 Theo ngày</button>
+          <button class="${fsMode === "lot" ? "active" : ""}" id="fs_mode_lot">Theo từng lô</button>
         </div>`;
       const fsFilterBox = `<div class="row">
           <div class="field" style="flex:1"><label>Báo cáo cho (để trống = tất cả sản phẩm — chọn 1 hoặc nhiều nhóm/sản phẩm, tự lưu cho lần sau)</label>
@@ -2669,12 +2732,34 @@
           sớm nhất của SKU đó, nên ưu tiên xuất từ kho đó trước.</div>
         ${fsFilterBox}</div>
         ${fsDailyWarehouseBlocks}`;
+      // "Theo từng lô" — mirror BC nhập-xuất-tồn NVL (bcReportSectionHtml): liệt kê từng lô đã
+      // phát sinh nhập/xuất trong kỳ HOẶC còn tồn, kể cả lô đã xuất/tiêu thụ hết (tồn=0, không
+      // còn hiện ở tồn kho sống) — yêu cầu người dùng 2026-09-05: "xem theo cả 2 từng lô hoặc
+      // từng mã vật tư [...] Modul kho thành phẩm thì nằm ở kho thành phẩm."
+      const fsLotRow = (r) => `<tr><td><code class="k">${esc(r.lot_code)}</code></td>
+          <td class="code">${esc(r.product_code)}</td><td>${esc(r.product_name)}</td><td>${esc(r.uom)}</td>
+          <td>${r.opening_stock.toLocaleString("vi-VN")}</td><td>${r.produced.toLocaleString("vi-VN")}</td>
+          <td>${r.shipped.toLocaleString("vi-VN")}</td><td><b>${r.on_hand.toLocaleString("vi-VN")}</b></td></tr>`;
+      const fsLotBody = `<div class="row">
+          <div class="field"><label>Từ ngày (kèm giờ)</label><input id="fs_lot_from" type="datetime-local" value="${fsDateFrom}"/></div>
+          <div class="field"><label>Đến ngày (kèm giờ)</label><input id="fs_lot_to" type="datetime-local" value="${fsDateTo}"/></div>
+          <button class="btn" id="fs_lot_apply" style="align-self:flex-end">Xem báo cáo</button>
+        </div>
+        ${fsFilterBox}</div>
+        <div class="panel">
+          <input class="searchbox" data-tbl="t_fslot" placeholder="Tìm theo mã lô/mã SP/tên..." style="margin-bottom:8px"/>
+          <div class="tablewrap"><table id="t_fslot">
+          <thead><tr><th>Mã lô</th><th>Mã SP</th><th>Mặt hàng</th><th>Đvt</th><th>Tồn đầu</th><th>Nhập sản xuất</th>
+            <th>Xuất</th><th>Tồn cuối</th></tr></thead>
+          <tbody>${(fslotrep || []).map(fsLotRow).join("") ||
+            '<tr><td colspan=8 class="muted">Không có dữ liệu.</td></tr>'}</tbody>
+        </table></div></div>`;
       body = `<div class="panel"><h2>📦 NXT kho thành phẩm ${fsMode === "daily" ?
           `<span class="muted">(${esc(fsVnDate(fsDay))})</span>` :
           `<span class="muted">(${esc(fmt(fsDateFrom))} → ${esc(fmt(fsDateTo))})</span>`}</h2>
         <div class="muted" style="margin-bottom:8px">Theo mẫu báo cáo Excel thủ công đang dùng — số liệu Nhập/Xuất trong kỳ chọn; Tồn thực tế/Lượng xuất TB 7 ngày/Ngày sản xuất luôn tính tới hiện tại (không phụ thuộc kỳ chọn), dùng để dự báo tồn kho tới hạn. Ngưỡng "Đóng bổ sung" (số ngày tồn dự kiến) chỉnh ở Danh mục › Cài đặt vận hành (hiện tại: ≤ ${(fsrep || fsdailyrep)?.restock_days} ngày). "Tồn mục tiêu tháng" lấy từ kế hoạch tiêu thụ tháng khai báo bên dưới (kế hoạch điều chỉnh nếu có, không thì kế hoạch ban đầu).</div>
         ${fsModeTabs}
-        ${fsMode === "daily" ? fsDailyBody : fsRangeBody}
+        ${fsMode === "daily" ? fsDailyBody : fsMode === "lot" ? fsLotBody : fsRangeBody}
         <div class="panel"><h3 style="margin:0 0 6px;cursor:pointer" id="fs_grp_toggle">📁 Quản lý nhóm sản phẩm ▾</h3>
           <div id="fs_grp_box" style="display:none">
             <div class="tablewrap"><table><thead><tr><th>Tên nhóm</th><th>Số sản phẩm</th><th></th></tr></thead>
@@ -2788,6 +2873,7 @@
       const FS_SEL_KEY = "mes_fgstock_selection";
       $("fs_mode_range").onclick = () => { SUB.fgstock_mode = "range"; render("wms"); };
       $("fs_mode_daily").onclick = () => { SUB.fgstock_mode = "daily"; render("wms"); };
+      $("fs_mode_lot").onclick = () => { SUB.fgstock_mode = "lot"; render("wms"); };
       if ($("fs_apply")) $("fs_apply").onclick = () => {
         SUB.fgstock_date_from = $("fs_from").value;
         SUB.fgstock_date_to = $("fs_to").value;
@@ -2795,6 +2881,11 @@
       };
       if ($("fs_day_apply")) $("fs_day_apply").onclick = () => {
         SUB.fgstock_day = $("fs_day").value;
+        render("wms");
+      };
+      if ($("fs_lot_apply")) $("fs_lot_apply").onclick = () => {
+        SUB.fgstock_date_from = $("fs_lot_from").value;
+        SUB.fgstock_date_to = $("fs_lot_to").value;
         render("wms");
       };
       $("fs_filter").onchange = () => {

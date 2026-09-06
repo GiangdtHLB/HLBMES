@@ -138,6 +138,28 @@ def _assert_no_active_batches(db: Session, wo: WorkOrder) -> None:
             f"{', '.join(sorted(active))} — không thể đánh dấu 'Hoàn thành'.")
 
 
+def _cancel_active_batches(db: Session, wo: WorkOrder, user: User, reason: str = None) -> None:
+    """Khi Lệnh SX (Điều độ) bị Hủy, cascade hủy MỌI Mẻ sản xuất còn active (planned/ready/
+    running/held) thuộc lệnh — trước đây "Hủy" chỉ đổi status của WorkOrder, không đụng gì tới
+    các mẻ con: mẻ vẫn "chạy" bình thường (cấp liệu/ghi actual/hoàn thành được) dù lệnh cha đã
+    "Đã hủy", tạo ra nghịch lý sổ sách (audit 2026-09-06). Mẻ completed/closed KHÔNG bị đụng —
+    đã có kết quả thật, BATCH_TRANSITIONS cũng không cho phép cancel từ 2 trạng thái đó. Tái
+    dùng batch_svc.cancel_batch_system (đổi state + hoàn NVL đã cấp qua genealogy, xem
+    batches.py::_refund_consumed_materials) — an toàn cho cả mẻ đã cấp liệu/đang chạy vì NVL
+    được hoàn lại đầy đủ, không còn lý do phải chặn hủy khi có mẻ đang dở dang."""
+    active = db.execute(select(BatchExecution).where(
+        BatchExecution.work_order_id == wo.wo_id,
+        BatchExecution.state.in_(_BATCH_ACTIVE_STATES))).scalars().all()
+    locked = [b.batch_code for b in active if b.ebr_locked]
+    if locked:
+        raise DomainError(
+            f"Còn {len(locked)} mẻ đã khóa hồ sơ (EBR) chưa thể tự hủy theo: "
+            f"{', '.join(sorted(locked))} — xử lý riêng mẻ đó trước (amendment), không thể hủy lệnh.")
+    for batch in active:
+        batch_svc.cancel_batch_system(db, batch, user,
+                                      reason or "Hủy theo Lệnh SX (Điều độ) cha bị hủy")
+
+
 def transition(db: Session, wo_id: str, target: str, user: User, reason: str = None) -> WorkOrder:
     require_perm(user, "wo.manage")
     wo = _get(db, wo_id)
@@ -161,6 +183,8 @@ def transition(db: Session, wo_id: str, target: str, user: User, reason: str = N
         _assert_no_active_batches(db, wo)
     if target_state == WorkOrderState.CLOSED:
         _assert_all_batches_terminal(db, wo)
+    if target_state == WorkOrderState.CANCELLED:
+        _cancel_active_batches(db, wo, user, reason)
     before = {"status": wo.status}
     wo.status = target_state.value
     record_audit(db, entity_type="work_order", entity_id=wo.wo_id, action=f"transition:{target}",

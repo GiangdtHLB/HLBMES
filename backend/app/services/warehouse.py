@@ -759,6 +759,29 @@ def expiry_report(db: Session, warn_days: int = 30) -> list[dict]:
     return out
 
 
+def _consumed_lot_edges(db: Session, since: datetime, until: datetime = None) -> list:
+    """NVL tiêu thụ vào Mẻ sản xuất (services/batches.py::consume_lot, pipeline "Mẻ sản xuất"
+    MỚI) trong kỳ — hàm đó CHỈ tạo GenealogyEdge(relation="consume"), KHÔNG tạo StockMovement
+    như warehouse.issue() (khác nhánh pipeline CŨ add_brew_material/add_filter_material/
+    add_bottle_material — các hàm đó gọi warehouse.issue() nên ĐÃ có StockMovement("issue")
+    riêng, cũng tạo thêm GenealogyEdge(consume) nhưng với to_type khác ("brew_batch"/"filter"/
+    "bottle"), lọc CHỈ to_type="batch" ở đây để không cộng trùng 2 lần cho nhánh cũ.
+
+    Trả về list[(GenealogyEdge, MaterialLot)] — cần join MaterialLot để biết material_id/
+    lô/vị trí (event_time không lưu trên StockMovement nên phải xét riêng khỏi vòng lặp `moves`
+    ở trên). Bug thực tế đã gặp: cả năm 2026 báo "Xuất: 0" cho 1 vật tư dù có lô đã dùng hết
+    (tiêu thụ qua consume_lot) — yêu cầu người dùng 2026-09-05: "trong báo cáo xuất nhập tồn
+    phải có chứ"."""
+    stmt = select(GenealogyEdge, MaterialLot).join(
+        MaterialLot, MaterialLot.lot_id == GenealogyEdge.from_id
+    ).where(GenealogyEdge.from_type == "lot", GenealogyEdge.to_type == "batch",
+            GenealogyEdge.relation == GenealogyRelation.CONSUME.value,
+            GenealogyEdge.event_time >= since)
+    if until:
+        stmt = stmt.where(GenealogyEdge.event_time <= until)
+    return db.execute(stmt).all()
+
+
 def inventory_report(db: Session, days: int = 30, location: str = None,
                      date_from: datetime = None, date_to: datetime = None) -> list[dict]:
     """BC nhập-xuất-tồn trong kỳ: tổng nhập, tổng xuất, tồn hiện tại theo vật tư (lọc theo kho
@@ -804,6 +827,10 @@ def inventory_report(db: Session, days: int = 30, location: str = None,
                 continue
         if m.movement_type in ("receipt", "issue", "return"):
             agg.setdefault(m.material_id, {"receipt": 0.0, "issue": 0.0, "return": 0.0})[m.movement_type] += m.quantity
+    for edge, lot in _consumed_lot_edges(db, since, until):
+        if location and _is_workshop_location(lot.location) != workshop:
+            continue
+        agg.setdefault(lot.material_id, {"receipt": 0.0, "issue": 0.0, "return": 0.0})["issue"] += (edge.quantity or 0.0)
     mat_ids = set(on_hand) | set(agg)
     mats = {mt.material_id: mt for mt in db.execute(
         select(Material).where(Material.material_id.in_(mat_ids))).scalars().all()} if mat_ids else {}
@@ -820,6 +847,73 @@ def inventory_report(db: Session, days: int = 30, location: str = None,
         out.append({**oh, "received": round(a["receipt"] + a["return"], 3),
                     "issued": round(a["issue"], 3)})
     return sorted(out, key=lambda x: x["material_code"])
+
+
+def lot_inventory_report(db: Session, days: int = 30, location: str = None,
+                         date_from: datetime = None, date_to: datetime = None) -> list[dict]:
+    """BC nhập-xuất-tồn trong kỳ THEO TỪNG LÔ — mirror inventory_report nhưng nhóm theo lot_id
+    thay vì material_id, để tra được đúng 1 lô cụ thể đã nhập/xuất bao nhiêu, kể cả lô đã dùng
+    hết (quantity=0, không còn hiện ở "Xem tồn kho" — yêu cầu người dùng 2026-09-05: tra 1 lô
+    NVL đã hết vẫn phải thấy được ở đâu đó ngoài Truy xuất từng lô một)."""
+    since = date_from or (utcnow() - timedelta(days=days))
+    until = date_to
+    workshop = _is_workshop_location(location) if location else None
+
+    all_lots = db.execute(select(MaterialLot)).scalars().all()
+    lots_by_id = {l.lot_id: l for l in all_lots}
+
+    stmt = select(StockMovement).where(StockMovement.ts >= since)
+    if until:
+        stmt = stmt.where(StockMovement.ts <= until)
+    moves = db.execute(stmt).scalars().all()
+    agg: dict[str, dict] = {}
+    for m in moves:
+        if not m.lot_id:
+            continue
+        if m.movement_type == "transfer":
+            if not location:
+                continue
+            if _is_workshop_location(m.location_to) == workshop:
+                agg.setdefault(m.lot_id, {"receipt": 0.0, "issue": 0.0, "return": 0.0})["receipt"] += m.quantity
+            elif _is_workshop_location(m.location_from) == workshop:
+                agg.setdefault(m.lot_id, {"receipt": 0.0, "issue": 0.0, "return": 0.0})["issue"] += m.quantity
+            continue
+        if location:
+            loc = m.location_to if m.movement_type in ("receipt", "return") else m.location_from
+            if _is_workshop_location(loc) != workshop:
+                continue
+        if m.movement_type in ("receipt", "issue", "return"):
+            agg.setdefault(m.lot_id, {"receipt": 0.0, "issue": 0.0, "return": 0.0})[m.movement_type] += m.quantity
+    for edge, lot in _consumed_lot_edges(db, since, until):
+        if location and _is_workshop_location(lot.location) != workshop:
+            continue
+        agg.setdefault(lot.lot_id, {"receipt": 0.0, "issue": 0.0, "return": 0.0})["issue"] += (edge.quantity or 0.0)
+
+    if location:
+        current_ids = {l.lot_id for l in all_lots if l.quantity > 0 and _is_workshop_location(l.location) == workshop}
+    else:
+        current_ids = {l.lot_id for l in all_lots if l.quantity > 0}
+    lot_ids = set(agg) | current_ids
+    mat_ids = {lots_by_id[lid].material_id for lid in lot_ids if lots_by_id.get(lid) and lots_by_id[lid].material_id}
+    mats = {mt.material_id: mt for mt in db.execute(
+        select(Material).where(Material.material_id.in_(mat_ids))).scalars().all()} if mat_ids else {}
+    out = []
+    for lid in lot_ids:
+        lot = lots_by_id.get(lid)
+        if not lot:
+            continue
+        a = agg.get(lid, {"receipt": 0.0, "issue": 0.0, "return": 0.0})
+        mat = mats.get(lot.material_id)
+        out.append({
+            "lot_id": lot.lot_id, "lot_code": lot.lot_code,
+            "material_id": lot.material_id, "material_code": mat.code if mat else (lot.material_id or ""),
+            "material_name": mat.name if mat else "", "uom": lot.uom,
+            "location": lot.location, "status": lot.status,
+            "on_hand": round(lot.quantity, 3),
+            "received": round(a["receipt"] + a["return"], 3),
+            "issued": round(a["issue"], 3),
+        })
+    return sorted(out, key=lambda x: (x["material_code"], x["lot_code"]))
 
 
 def _lot(db, lot_id):

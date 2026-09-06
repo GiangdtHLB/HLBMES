@@ -1,11 +1,13 @@
-"""Test tự "chữa lành" trạng thái Lô lọc (BatchFilterLot.status) khi bị lệch so với on_hand/
-volume_hl thật — trước đây status chỉ được đồng bộ (cho_chiet<->chiet_1_phan<->da_chiet_het) tại
-đúng 3 điểm mutate (services/batch_pipeline.py::split_filter_lot_to_pack_lot/update_pack_lot_qty/
-delete_pack_lot). Lô lọc nào đã tách lô thành phẩm TỪ TRƯỚC KHI có logic đồng bộ này (dữ liệu cũ)
-sẽ mãi hiện sai (VD lô lọc "1" đã tách PKG-934995, tồn 26.99/28.1 hl nhưng vẫn hiện "Chờ chiết")
-— giờ services/batch_pipeline.py::list_filter_lots/get_filter_lot tự tính lại VÀ lưu lại mỗi lần
-đọc nếu phát hiện lệch (yêu cầu người dùng 2026-09-01: "tại sao BBT 01 đang chiết 1 phần rồi, mà
-vẫn hiện trạng thái là chờ chiết").
+"""Test tự "chữa lành" trạng thái Lô lọc (BatchFilterLot.status) khi bị lệch — services/
+batch_pipeline.py::list_filter_lots/get_filter_lot tự tính lại VÀ lưu lại mỗi lần đọc nếu phát
+hiện lệch (yêu cầu người dùng 2026-09-01: "tại sao BBT 01 đang chiết 1 phần rồi, mà vẫn hiện
+trạng thái là chờ chiết").
+
+Từ 2026-09-06, Lô lọc CHỈ còn 2 mốc "dang_loc"/"hoan_thanh" (bỏ hẳn cho_chiet/chiet_1_phan/
+da_chiet_het — yêu cầu người dùng: "lọc này để ở trạng thái completed thôi... các trạng thái
+chiết sẽ ở bên chiết thôi", xem services/batch_pipeline.py::_sync_filter_lot_status) — 3 giá trị
+deprecated đó tự "chữa lành" về "hoan_thanh" qua đúng cơ chế tự-sửa-lúc-đọc này, không cần
+migration riêng.
 """
 
 import os
@@ -94,11 +96,13 @@ def test_filter_lot_status_self_heals_when_stale_after_partial_pack(client, admi
     assert pack.status_code == 201, pack.text
 
     fl = client.get(f"/api/batch-filter-lots/{filter_lot_id}", headers=admin_h).json()
-    assert fl["status"] == "chiet_1_phan"   # đồng bộ đúng ngay khi tách (đường mutate bình thường)
+    # Rút 1 phần (10000L < tổng volume_hl*100) -> vẫn chỉ "hoan_thanh" (KHÔNG còn "chiet_1_phan"
+    # riêng — tiến độ chiết nằm ở BatchPackLot, xem _pack_lot_status).
+    assert fl["status"] == "hoan_thanh"   # đồng bộ đúng ngay khi tách (đường mutate bình thường)
 
-    # Giả lập dữ liệu CŨ (tạo lô thành phẩm từ TRƯỚC khi có đồng bộ) — ghi thẳng status sai vào
-    # DB, bỏ qua _sync_filter_lot_chiet_status (mirror đúng cách lệch đã xảy ra thật ở lô lọc "1"/
-    # PKG-934995).
+    # Giả lập dữ liệu CŨ (3 giá trị deprecated cho_chiet/chiet_1_phan/da_chiet_het, từ TRƯỚC khi
+    # gộp về còn 2 mốc) — ghi thẳng status cũ vào DB, bỏ qua _sync_filter_lot_status (mirror đúng
+    # cách lệch đã xảy ra thật ở lô lọc "1"/PKG-934995).
     from app.database import SessionLocal
     from app.models.batch_pipeline import BatchFilterLot
     db2 = SessionLocal()
@@ -108,17 +112,17 @@ def test_filter_lot_status_self_heals_when_stale_after_partial_pack(client, admi
     db2.close()
 
     stale_check = client.get(f"/api/batch-filter-lots/{filter_lot_id}", headers=admin_h).json()
-    assert stale_check["status"] == "chiet_1_phan"   # tự sửa lại đúng ngay lần đọc kế tiếp
-    assert stale_check["status_label"] == "Đang chiết"
+    assert stale_check["status"] == "hoan_thanh"   # tự sửa lại đúng ngay lần đọc kế tiếp
+    assert stale_check["status_label"] == "Hoàn thành"
 
     listed = client.get("/api/batch-filter-lots", headers=admin_h).json()
     row2 = next(r for r in listed if r["filter_lot_id"] == filter_lot_id)
-    assert row2["status"] == "chiet_1_phan"
+    assert row2["status"] == "hoan_thanh"
 
     # Xác nhận đã LƯU LẠI thật (không chỉ đúng trong response) bằng cách đọc thẳng DB.
     db3 = SessionLocal()
     persisted = db3.get(BatchFilterLot, filter_lot_id)
-    assert persisted.status == "chiet_1_phan"
+    assert persisted.status == "hoan_thanh"
     db3.close()
 
 

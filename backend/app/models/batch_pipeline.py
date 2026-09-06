@@ -119,11 +119,13 @@ class BatchFilterLot(Base):
     nuoc_bai_khi_hl: Mapped[float] = mapped_column(Float, default=0.0)   # V nước DAW (bài khí) phối vào
     volume_hl: Mapped[float] = mapped_column(Float, default=0.0)    # tổng dự kiến (tổng nguồn)
     on_hand: Mapped[float] = mapped_column(Float, default=0.0)
-    # dang_loc (mới tạo) -> cho_chiet ("Hoàn thành lọc", mốc XÁC NHẬN riêng của vận hành) ->
-    # chiet_1_phan (đã tách ≥1 lô thành phẩm, còn tồn) -> da_chiet_het (on_hand về 0) — luôn set
-    # rõ ràng ở services/batch_pipeline.py (draw_from_filter_order/draw_from_tank_into_filter_lot/
-    # finish_filtering/_sync_filter_lot_chiet_status), default ở đây chỉ là an toàn dự phòng,
-    # yêu cầu người dùng 2026-09-01.
+    # dang_loc (mới tạo) -> hoan_thanh ("Hoàn thành lọc", mốc XÁC NHẬN riêng của vận hành) —
+    # CHỈ 2 mốc (đổi từ dang_loc->cho_chiet->chiet_1_phan->da_chiet_het cũ, bỏ hẳn theo yêu cầu
+    # người dùng 2026-09-06: tiến độ chiết không còn phản ánh ở Lô lọc nữa, xem riêng
+    # BatchPackLot._pack_lot_status) — luôn set rõ ràng ở services/batch_pipeline.py
+    # (draw_from_filter_order/draw_from_tank_into_filter_lot/finish_filtering/
+    # _sync_filter_lot_status), default ở đây chỉ là an toàn dự phòng, yêu cầu người dùng
+    # 2026-09-01.
     status: Mapped[str] = mapped_column(Unicode(255), default="dang_loc")
     note: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)
     ended_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)

@@ -155,6 +155,12 @@ def report(days: int = 30, location: str = None, date_from: datetime = None,
     return svc.inventory_report(db, days, location, date_from, date_to)
 
 
+@router.get("/report/by-lot")
+def report_by_lot(days: int = 30, location: str = None, date_from: datetime = None,
+                  date_to: datetime = None, db: Session = Depends(get_db)):
+    return svc.lot_inventory_report(db, days, location, date_from, date_to)
+
+
 # ---- Đề nghị nhận kho ----
 @router.get("/requests/source-preview", response_model=list[SourceMaterialLineOut])
 def preview_source_materials(source_type: str, source_id: str, db: Session = Depends(get_db)):

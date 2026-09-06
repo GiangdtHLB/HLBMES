@@ -177,7 +177,6 @@ def test_dashboard_stat_cards_source_from_new_batch_pipeline(client, admin_h):
     after_filter_done = client.get("/api/reports/dashboard-summary", headers=admin_h).json()
     assert after_filter_done["me_loc"]["total"] == before["me_loc"]["total"] + 2
     assert after_filter_done["me_loc"]["hoan_thanh"] == before["me_loc"]["hoan_thanh"] + 2
-    assert after_filter_done["me_loc"]["dang_thuc_hien"] == before["me_loc"]["dang_thuc_hien"]
 
     pack = client.post(f"/api/batch-filter-lots/{filter_lot_id}/pack-lots", headers=admin_h,
                        json={"qty": 500, "pack_lot_code": "PKG-DASHNEW-1", "lot_no": "LOT-DASHNEW-1"})
@@ -188,6 +187,78 @@ def test_dashboard_stat_cards_source_from_new_batch_pipeline(client, admin_h):
 
     bna = client.get("/api/reports/bottled-not-approved", headers=admin_h).json()
     assert any(it["pack_lot_code"] == "PKG-DASHNEW-1" for it in bna["items"])
+
+
+def test_dashboard_tank_dang_nau_not_counted_as_trong(client, admin_h):
+    """services/dashboard.py::_batch_tank_len_men_counts — tank gộp 1 mẻ nấu CHƯA kết thúc
+    (status "dang_nau", xem batch_pipeline.py::_tank_status) trước đây rơi vào "trống" (dang_nap
+    hardcode = 0), dù tank đó đang thật sự bị chiếm dụng bởi mẻ chưa nấu xong (audit 2026-09-06,
+    người dùng phát hiện qua dashboard thật: "tank đang vào dịch... hiển thị không có số tank
+    đang điền dịch"). Giờ phải đếm riêng vào `dang_nap`, KHÔNG tính vào `dang_su_dung` (chưa
+    "len_men" thật) và KHÔNG tính vào `trong` (tank không hề trống)."""
+    before = client.get("/api/reports/dashboard-summary", headers=admin_h).json()
+
+    line = client.post("/api/lines", headers=admin_h,
+                       json={"code": "FV-DASHNAU-1", "name": "Tank dashnau", "kind": "tank"})
+    assert line.status_code == 201, line.text
+
+    batch_id = _make_batch(client, admin_h, None)
+    r = client.post(f"/api/batches/{batch_id}/transition", headers=admin_h, json={"target": "ready"})
+    assert r.status_code == 200, r.text
+    r = client.post(f"/api/batches/{batch_id}/transition", headers=admin_h, json={"target": "running"})
+    assert r.status_code == 200, r.text
+    # Mẻ nấu CHƯA finish (chưa có end_at) — gộp vào tank ngay lúc còn "running" (merge_batches_
+    # into_tank cho gộp ở bất kỳ trạng thái nào, mirror thực tế nấu nhiều mẻ liên tiếp).
+    tank = client.post("/api/batch-tanks", headers=admin_h,
+                       json={"batch_ids": [batch_id], "tank_code": "TANK-DASHNAU-1", "tank_lm": "FV-DASHNAU-1"})
+    assert tank.status_code == 201, tank.text
+
+    after = client.get("/api/reports/dashboard-summary", headers=admin_h).json()
+    assert after["tank_len_men"]["total"] == before["tank_len_men"]["total"] + 1
+    assert after["tank_len_men"]["dang_nap"] == before["tank_len_men"]["dang_nap"] + 1
+    assert after["tank_len_men"]["dang_su_dung"] == before["tank_len_men"]["dang_su_dung"]
+    assert after["tank_len_men"]["trong"] == before["tank_len_men"]["trong"]
+
+    # Kết thúc mẻ nấu (end_at) -> tank hết "dang_nau", chuyển sang "len_men" thật (dang_su_dung).
+    aq = client.post(f"/api/batches/{batch_id}/actual-qty", headers=admin_h, json={"actual_qty": 1000})
+    assert aq.status_code == 200, aq.text
+    fin = client.post(f"/api/batches/{batch_id}/finish", headers=admin_h, json={})
+    assert fin.status_code == 200, fin.text
+    after_finished = client.get("/api/reports/dashboard-summary", headers=admin_h).json()
+    assert after_finished["tank_len_men"]["dang_nap"] == before["tank_len_men"]["dang_nap"]
+    assert after_finished["tank_len_men"]["dang_su_dung"] == before["tank_len_men"]["dang_su_dung"] + 1
+
+
+def test_dashboard_tank_planned_only_counted_as_dat_cho_not_trong(client, admin_h):
+    """services/dashboard.py::_batch_tank_len_men_counts — tank gộp mẻ nấu CÒN "planned" (chưa
+    mẻ nào thật sự chạy) phải đếm vào `dat_cho` (đã đặt chỗ, chưa nấu) — KHÔNG rơi vào `trong`
+    (tank không hề trống, không cho mẻ khác gộp vào được — xem _tank_lm_occupied) và KHÔNG rơi
+    vào `dang_nap` (chưa có dịch nào chảy vào, khác "dang_nau" — yêu cầu người dùng 2026-09-06)."""
+    before = client.get("/api/reports/dashboard-summary", headers=admin_h).json()
+
+    line = client.post("/api/lines", headers=admin_h,
+                       json={"code": "FV-DASHPLANNED-1", "name": "Tank dashplanned", "kind": "tank"})
+    assert line.status_code == 201, line.text
+    batch_id = _make_batch(client, admin_h, None)   # còn "planned", chưa transition gì.
+    tank = client.post("/api/batch-tanks", headers=admin_h,
+                       json={"batch_ids": [batch_id], "tank_code": "TANK-DASHPLANNED-1",
+                             "tank_lm": "FV-DASHPLANNED-1"})
+    assert tank.status_code == 201, tank.text
+
+    after = client.get("/api/reports/dashboard-summary", headers=admin_h).json()
+    assert after["tank_len_men"]["total"] == before["tank_len_men"]["total"] + 1
+    assert after["tank_len_men"]["dat_cho"] == before["tank_len_men"].get("dat_cho", 0) + 1
+    assert after["tank_len_men"]["dang_nap"] == before["tank_len_men"]["dang_nap"]
+    assert after["tank_len_men"]["dang_su_dung"] == before["tank_len_men"]["dang_su_dung"]
+    assert after["tank_len_men"]["trong"] == before["tank_len_men"]["trong"]
+
+    # Chuyển "running" -> chuyển từ dat_cho sang dang_nap.
+    client.post(f"/api/batches/{batch_id}/transition", headers=admin_h, json={"target": "ready"})
+    r = client.post(f"/api/batches/{batch_id}/transition", headers=admin_h, json={"target": "running"})
+    assert r.status_code == 200, r.text
+    after_running = client.get("/api/reports/dashboard-summary", headers=admin_h).json()
+    assert after_running["tank_len_men"]["dat_cho"] == before["tank_len_men"].get("dat_cho", 0)
+    assert after_running["tank_len_men"]["dang_nap"] == before["tank_len_men"]["dang_nap"] + 1
 
 
 def _finish_one_me_loc(client, admin_h, suffix, dich_nha_hl):

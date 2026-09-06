@@ -4,6 +4,12 @@ Xếp các work order (planned/released) lên tank lên men, tôn trọng:
 - Không chồng lấn trên cùng tank.
 - CIP bắt buộc giữa 2 mẻ trên cùng tank (thời gian vệ sinh).
 - Cửa sổ bảo trì (slot maintenance) khóa tài nguyên.
+- Tank đang bị CHIẾM DỤNG THẬT bởi pipeline "Mẻ sản xuất" (BatchTank — còn tồn dịch hoặc còn
+  mẻ nấu đã gộp chưa kết thúc, xem batch_pipeline.py::_tank_lm_occupied) — coi như bận suốt
+  khung nhìn (không có mốc ước tính khi nào tank đó thật sự trống, nên KHÔNG được xếp mẻ mới vào
+  tank đó ở lần chạy này (audit 2026-09-06: trước đây auto_schedule() chỉ biết ScheduleSlot
+  "maintenance" tự sinh trong hệ thống, không hề biết tank nào đang thật sự có dịch/mẻ chưa xong
+  ngoài xưởng — có thể xếp chồng lên tank đang chạy thật).
 - Kiểm tra đủ NVL theo BOM (đánh dấu material_short nếu thiếu).
 Thuật toán: greedy theo (ngày kế hoạch, ưu tiên) + earliest-fit chọn tank kết thúc sớm nhất.
 Quy mô lớn: thay bằng CP-SAT/OR-Tools — interface auto_schedule()/board() giữ nguyên.
@@ -21,6 +27,7 @@ from ..models.recipes import RecipeVersion
 from ..models.scheduling import ScheduleSlot
 from ..models.workorder import WorkOrder
 from ..security import User, require_role
+from . import batch_pipeline as batch_pipeline_svc
 from . import bom
 
 TANKS = ["FV-01", "FV-02", "FV-03", "FV-04"]   # fallback nếu chưa khai báo tank trong danh mục
@@ -72,6 +79,13 @@ def auto_schedule(db: Session, user: User, days: int = 10,
     for m in db.execute(select(ScheduleSlot).where(ScheduleSlot.kind == "maintenance")).scalars().all():
         if m.resource in busy:
             busy[m.resource].append((_naive(m.start_at), _naive(m.end_at)))
+    # Tank đang bị chiếm dụng THẬT ngoài xưởng (BatchTank còn tồn dịch hoặc còn mẻ nấu chưa kết
+    # thúc) — chặn suốt khung nhìn (không biết mốc trống thật để tính earliest-fit), tránh xếp
+    # mẻ mới chồng lên tank đang chạy thật (xem docstring module).
+    far_future = horizon + timedelta(days=3650)
+    for t in tanks:
+        if batch_pipeline_svc._tank_lm_occupied(db, t):
+            busy[t].append((now, far_future))
     for t in busy:
         busy[t].sort()
 

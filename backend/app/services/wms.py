@@ -2212,6 +2212,65 @@ def finished_goods_stock_inout_report(db: Session, date_from: datetime, date_to:
     return {"groups": groups, "restock_days": restock_days}
 
 
+def finished_goods_lot_inout_report(db: Session, date_from: datetime, date_to: datetime,
+                                    product_ids: list[str] | None = None) -> list[dict]:
+    """BC nhập-xuất-tồn kho thành phẩm THEO TỪNG LÔ — mirror finished_goods_stock_inout_report
+    nhưng nhóm theo lot_code thay vì SKU, để tra đúng 1 lô cụ thể còn tồn hay không (kể cả lô đã
+    xuất/tiêu thụ hết, không còn hiện ở tồn kho sống) — yêu cầu người dùng 2026-09-05: "Áp dụng
+    cho cả NVL và thành phẩm, xem theo cả 2 từng lô hoặc từng mã vật tư."""
+    divide_codes = _divide_by_pack_codes(db)
+    divisor_expr = _pack_divisor_expr(divide_codes)
+    products_stmt = select(FinishedProduct)
+    if product_ids:
+        products_stmt = products_stmt.where(FinishedProduct.finished_product_id.in_(product_ids))
+    products = {p.finished_product_id: p for p in db.execute(products_stmt).scalars().all()}
+    if not products:
+        return []
+    same_unit = FinishedGoodsUnit.unit_type == FinishedProduct.unit_type
+
+    def _agg_by_lot(*conditions) -> dict[str, float]:
+        rows = db.execute(
+            select(FinishedGoodsUnit.lot_code, func.sum(FinishedGoodsUnit.quantity / divisor_expr))
+            .select_from(FinishedGoodsUnit)
+            .join(FinishedProduct, FinishedProduct.finished_product_id == FinishedGoodsUnit.finished_product_id)
+            .where(same_unit, FinishedGoodsUnit.finished_product_id.in_(products), *conditions)
+            .group_by(FinishedGoodsUnit.lot_code)
+        ).all()
+        return {code: float(total or 0) for code, total in rows}
+
+    on_hand_map = _agg_by_lot(FinishedGoodsUnit.status == "stored")
+    opening_map = _agg_by_lot(FinishedGoodsUnit.created_at < date_from,
+                              or_(FinishedGoodsUnit.status == "stored",
+                                  and_(FinishedGoodsUnit.status == "shipped", FinishedGoodsUnit.shipped_at >= date_from)))
+    produced_map = _agg_by_lot(FinishedGoodsUnit.created_at >= date_from, FinishedGoodsUnit.created_at < date_to)
+    shipped_map = _agg_by_lot(FinishedGoodsUnit.status == "shipped",
+                              FinishedGoodsUnit.shipped_at >= date_from, FinishedGoodsUnit.shipped_at < date_to)
+
+    # 1 lot_code luôn thuộc đúng 1 SKU (finished_product_id/unit_type) — tra 1 lần để hiện tên/
+    # mã SKU cho từng lô, kể cả lô không phát sinh gì trong kỳ nhưng vẫn còn tồn (on_hand_map).
+    lot_info = {lot_code: (fp_id, unit_type) for lot_code, fp_id, unit_type in db.execute(
+        select(FinishedGoodsUnit.lot_code, FinishedGoodsUnit.finished_product_id, FinishedGoodsUnit.unit_type)
+        .where(FinishedGoodsUnit.finished_product_id.in_(products))
+        .group_by(FinishedGoodsUnit.lot_code, FinishedGoodsUnit.finished_product_id, FinishedGoodsUnit.unit_type)
+    ).all()}
+
+    lot_codes = set(on_hand_map) | set(opening_map) | set(produced_map) | set(shipped_map) | set(lot_info)
+    out = []
+    for code in lot_codes:
+        fp_id, unit_type = lot_info.get(code, (None, None))
+        fp = products.get(fp_id)
+        out.append({
+            "lot_code": code, "finished_product_id": fp_id,
+            "product_code": fp.code if fp else "", "product_name": fp.name if fp else "",
+            "uom": fp.unit_type if fp else (unit_type or ""),
+            "opening_stock": round(opening_map.get(code, 0.0), 2),
+            "produced": round(produced_map.get(code, 0.0), 2),
+            "shipped": round(shipped_map.get(code, 0.0), 2),
+            "on_hand": round(on_hand_map.get(code, 0.0), 2),
+        })
+    return sorted(out, key=lambda x: (x["product_code"], x["lot_code"]))
+
+
 def finished_goods_daily_stock_report(db: Session, day: date, cutoff_hour: int,
                                       restock_days: float, product_ids: list[str] | None = None) -> dict:
     """Báo cáo NXT kho thành phẩm THEO NGÀY (mẫu Excel "NXT KHO THANH PHAM", các sheet "Ngày
