@@ -27,11 +27,11 @@ def batch_status(batch_id: str, db: Session = Depends(get_db),
 def start_phase(batch_id: str, payload: PhaseStartIn, db: Session = Depends(get_db),
                 user: User = Depends(get_current_user)):
     require_perm(user, "batch.execute")
-    return svc.start_phase(db, batch_id, payload.up, payload.op, payload.phase, user)
+    return svc.start_phase(db, batch_id, payload.up, payload.op, payload.phase, user, payload.started_at)
 
 
 @router.post("/phase/{run_id}/transition")
 def transition_phase(run_id: str, payload: PhaseTransitionIn, db: Session = Depends(get_db),
                      user: User = Depends(get_current_user)):
     require_perm(user, "batch.execute")
-    return svc.transition_phase(db, run_id, payload.target, user, payload.values)
+    return svc.transition_phase(db, run_id, payload.target, user, payload.values, payload.ended_at)

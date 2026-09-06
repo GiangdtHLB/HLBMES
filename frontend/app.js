@@ -57,7 +57,7 @@ const badge = (s) => `<span class="badge ${s}">${s}</span>`;
 // Badge trạng thái pipeline "Mẻ SX" — status_label do backend trả (services/batch_pipeline.py),
 // class dùng để tô màu mượn từ bộ badge có sẵn (mirror cách module Nấu-Lọc-Chiết cũ làm ở
 // routers/brewing.py::FILTER_STATUS + frontend stBadge, không tự thêm class CSS mới).
-const TANK_BADGE_CLASS = { dang_nau: "pending", len_men: "running", cho_loc: "in_progress", loc_1_phan: "due", da_loc_het: "done", am: "critical" };
+const TANK_BADGE_CLASS = { planned: "planned", dang_nau: "pending", len_men: "running", cho_loc: "in_progress", loc_1_phan: "due", da_loc_het: "done", am: "critical" };
 // tank_code (BatchTank) là mã LÔ tự sinh theo Lệnh SX/điều độ (VD "01"/"02"/"4") — KHÔNG nói
 // lên tank vật lý nào, chỉ tank_lm (tra từ Danh mục "Tank lên men") mới làm được việc đó. Mọi
 // nơi hiển thị ĐỘC LẬP 1 tank (không có cột tank_lm riêng đứng cạnh) phải dùng hàm này thay vì
@@ -65,7 +65,7 @@ const TANK_BADGE_CLASS = { dang_nau: "pending", len_men: "running", cho_loc: "in
 // 2026-09-02: "không rõ tank 01, 02, 04 là gì, tank men phải là lấy từ danh mục tank men chứ").
 const batchTankDisplayName = (t) => t && t.tank_lm ? `${t.tank_lm} (Lô ${t.tank_code})` : `Lô ${t ? t.tank_code : "?"} (chưa gán tank vật lý)`;
 const PACK_LOT_BADGE_CLASS = { dang_chiet: "in_progress", chiet_1_phan: "due", chiet_het: "done" };
-const FILTER_LOT_BADGE_CLASS = { dang_loc: "in_progress", cho_chiet: "planned", chiet_1_phan: "due", da_chiet_het: "done", am: "critical" };
+const FILTER_LOT_BADGE_CLASS = { dang_loc: "in_progress", hoan_thanh: "released", am: "critical" };
 const FILTER_ORDER_BADGE_CLASS = { planned: "pending", dang_loc: "in_progress", hoan_thanh: "released" };
 const statusBadge = (cls, label) => `<span class="badge ${cls || "pending"}">${esc(label)}</span>`;
 const scopeBadge = (raw) => (raw === "*" || raw == null || raw === "")
@@ -737,7 +737,7 @@ VIEWS.dashboard = async function () {
     <div class="card" style="cursor:pointer;text-align:left" data-goto="${esc(view)}" data-gotosub="${esc(subKey || "")}" tabindex="0" role="button">
       <div class="n">🛢️ ${s ? `${s.dang_su_dung}/${s.total}` : "–"}</div><div class="l">Tank đang lên men</div>
       ${s ? `<div class="muted" style="font-size:11px;margin-top:4px;line-height:1.6">
-        ${s.dang_nap ? `<span style="color:var(--orange)">${s.dang_nap} tank đang nạp dịch nấu</span> · ` : ""}${s.dang_loc ? `${s.dang_loc} tank đang lọc · ` : ""}${s.trong} tank trống</div>` : ""}
+        ${s.dang_nap ? `<span style="color:var(--orange)">${s.dang_nap} tank đang nạp dịch nấu</span> · ` : ""}${s.dat_cho ? `${s.dat_cho} tank đã đặt chỗ (chưa nấu) · ` : ""}${s.dang_loc ? `${s.dang_loc} tank đang lọc · ` : ""}${s.trong} tank trống</div>` : ""}
     </div>`;
   // Ô "Cảnh báo QC" trước đây gộp chung 1 bảng — nay tách thành 3 panel riêng theo đúng yêu cầu,
   // mỗi panel lọc từ CÙNG 1 nguồn dữ liệu alerts.items (BE không đổi): (1) Cảnh báo QC = lô có
@@ -1571,8 +1571,10 @@ const beerTypeName = (id) => { const bt = (CACHE.beerTypes || []).find(x => x.be
 const WO_STATUS = { planned: ["planned", "Lập KH"], released: ["released", "Đã phát hành"],
   in_progress: ["running", "Đang chạy"], completed: ["completed", "Hoàn thành"],
   closed: ["closed", "Đã chốt"], cancelled: ["cancelled", "Đã hủy"] };
-const WO_NEXT = { planned: ["released", "cancelled"], released: ["cancelled"],
-  in_progress: ["completed", "cancelled"], completed: ["closed"], closed: [], cancelled: [] };
+// "cancelled" tạm thời ẩn khỏi UI (không cho bấm "Hủy") theo yêu cầu người dùng 2026-09-06 —
+// backend vẫn giữ nguyên logic cascade/hoàn NVL đã làm, chỉ ẩn nút để tạm ngừng dùng qua UI.
+const WO_NEXT = { planned: ["released"], released: [],
+  in_progress: ["completed"], completed: ["closed"], closed: [], cancelled: [] };
 const WO_LABEL = { released: "Phát hành", completed: "Hoàn thành", closed: "Chốt", cancelled: "Hủy" };
 // Trạng thái Lệnh nấu (BrewOrder) — ƯU TIÊN trạng thái Điều độ (WorkOrder.status, qua
 // o.wo_status — xem services/brew_order.py::_wo_derived_status) khi lệnh đã có Lệnh SX (điều
@@ -1616,6 +1618,7 @@ VIEWS.dispatch = async function () {
   const lnOptsWo = brewOrders.filter(bo => !bo.is_complete)
     .map(bo => `<option value="${esc(bo.brew_order_id)}" data-rv="${esc(bo.recipe_version_id || "")}" data-vol="${bo.planned_volume_hl ?? ""}">
       ${esc(bo.order_code)} — ${esc(bo.beer_type_name || bo.product_code || "—")}</option>`).join("");
+  const brewOrderCodeById = Object.fromEntries(brewOrders.map(bo => [bo.brew_order_id, bo.order_code]));
   const today = toISODateLocal(new Date());
   $("view-dispatch").innerHTML = `
     <div class="panel"><h2>Lập lệnh sản xuất (điều độ)</h2>
@@ -1632,8 +1635,8 @@ VIEWS.dispatch = async function () {
     </div>
     <div class="panel"><h2>Bảng điều độ <span class="muted">(${board.length} lệnh)</span></h2>
       <input class="searchbox" data-tbl="t_workorders" placeholder="Tìm theo mã WO, line, sản phẩm, trạng thái..."/>
-      <div class="tablewrap"><table id="t_workorders"><thead><tr><th>Mã WO</th><th>Ngày</th><th>Ca</th><th>Sản phẩm</th><th>KH</th><th>Thực tế</th><th>% HT</th><th>Mẻ</th><th>Ưu tiên</th><th>Trạng thái</th><th>Chỉ tiêu nước nấu</th><th>Hành động</th></tr></thead>
-      <tbody>${board.map(w => woRow(w, waterQcByWo[w.wo_id])).join("") || '<tr><td colspan=12 class="muted">Chưa có lệnh.</td></tr>'}</tbody></table></div>
+      <div class="tablewrap"><table id="t_workorders"><thead><tr><th>Mã WO</th><th>Lệnh nấu</th><th>Ngày</th><th>Ca</th><th>Sản phẩm</th><th>KH</th><th>Thực tế</th><th>% HT</th><th>Mẻ</th><th>Ưu tiên</th><th>Trạng thái</th><th>Chỉ tiêu nước nấu</th><th>Hành động</th></tr></thead>
+      <tbody>${board.map(w => woRow(w, waterQcByWo[w.wo_id], brewOrderCodeById)).join("") || '<tr><td colspan=13 class="muted">Chưa có lệnh.</td></tr>'}</tbody></table></div>
       <div class="legend">% hoàn thành = tổng SL thực tế các mẻ thuộc lệnh / SL kế hoạch (planned vs actual).</div>
     </div>`;
   wirePaginate("t_workorders", 10);
@@ -1722,7 +1725,7 @@ function waterQcBadge(w, st) {
     : '<span class="muted">Chưa khai báo</span>';
   return `<button class="btn sm sec" data-woviewwater="${w.wo_id}" data-wocode3="${esc(w.wo_code)}" style="background:none;border:none;padding:2px 4px">${label}</button>`;
 }
-function woRow(w, waterQc) {
+function woRow(w, waterQc, brewOrderCodeById) {
   const st = WO_STATUS[w.status] || ["planned", w.status];
   // "Hoàn thành"/"Chốt" ẩn khi backend biết trước sẽ 409 (còn mẻ chưa xong/chưa kết thúc) —
   // xem services/workorders.py::board (can_complete/can_close), tránh bấm-rồi-mới-báo-lỗi.
@@ -1737,7 +1740,8 @@ function woRow(w, waterQc) {
   const del = (!w.brew_id && !w.batches) ? `<button class="btn sm sec" data-wodel="${w.wo_id}" data-wocode="${esc(w.wo_code)}">Xóa</button>` : "";
   const pct = w.completion_pct || 0;
   const pctColor = pct >= 100 ? "var(--green)" : pct > 0 ? "var(--accent)" : "var(--muted)";
-  return `<tr><td><code class="k">${esc(w.wo_code)}</code></td><td>${fmt(w.scheduled_date)}</td><td>${esc(w.shift || "")}</td>
+  const lnCode = (brewOrderCodeById && brewOrderCodeById[w.brew_order_id]) || "—";
+  return `<tr><td><code class="k">${esc(w.wo_code)}</code></td><td class="muted">${esc(lnCode)}</td><td>${fmt(w.scheduled_date)}</td><td>${esc(w.shift || "")}</td>
     <td>${esc(prodName(w.product_id))}</td><td>${w.planned_qty.toLocaleString("vi-VN")} ${esc(w.uom)}</td>
     <td>${(w.actual_qty || 0).toLocaleString("vi-VN")}</td><td style="color:${pctColor};font-weight:600">${pct}%</td>
     <td>${w.batches > 0 ? `<button class="btn sm sec" data-woviewbatches2="${w.wo_id}" data-wocode2="${esc(w.wo_code)}">${w.batches}</button>` : w.batches}</td>
@@ -2325,15 +2329,25 @@ function procHarvest() {
         const ph = { name: phEl.querySelector(".pp-name").value.trim() };
         const dur = phEl.querySelector(".pp-dur").value.trim();
         if (dur !== "") ph.duration_min = parseFloat(dur);
-        const pn = phEl.querySelector(".pp-pn").value.trim();
-        if (pn) {
-          const pv = phEl.querySelector(".pp-pv").value.trim();
+        // Nhiều setpoint/phase (yêu cầu người dùng 2026-09-05: "sửa UI cho phép nhiều setpoint/
+        // phase" — 1 Step Braumat thật có thể có 10-15 tham số, trước đây form chỉ khai được
+        // đúng 1 dù data model `params` vốn đã là list) — mỗi dòng .proc-param trong phase.
+        ph.params = [];
+        phEl.querySelectorAll(":scope > .proc-param").forEach(prmEl => {
+          const pn = prmEl.querySelector(".pp-pn").value.trim();
+          if (!pn) return;
+          const pv = prmEl.querySelector(".pp-pv").value.trim();
           const num = parseFloat(pv);
-          ph.params = [{ name: pn, setpoint: (pv !== "" && !isNaN(num)) ? num : pv,
-                         unit: phEl.querySelector(".pp-pu").value.trim() }];
-        } else {
-          ph.params = [];
-        }
+          const lslStr = prmEl.querySelector(".pp-lsl").value.trim();
+          const uslStr = prmEl.querySelector(".pp-usl").value.trim();
+          // Ngưỡng dưới/trên (tiêu chuẩn để so sánh thực tế sau này) — mirror Chỉ tiêu QC/Tham
+          // số quy trình (lsl/usl), trước đây ISA-88 chỉ có 1 giá trị Setpoint, không có ngưỡng
+          // nào để so Đạt/Vượt (yêu cầu người dùng 2026-09-05, chọn phương án "ngưỡng tuyệt đối").
+          ph.params.push({ name: pn, setpoint: (pv !== "" && !isNaN(num)) ? num : pv,
+                           unit: prmEl.querySelector(".pp-pu").value.trim(),
+                           lsl: lslStr === "" ? null : parseFloat(lslStr),
+                           usl: uslStr === "" ? null : parseFloat(uslStr) });
+        });
         op.phases.push(ph);
       });
       up.operations.push(op);
@@ -2347,7 +2361,6 @@ function procHarvest() {
 function procRender() {
   const box = $("vf_proc");
   if (!box) return;
-  const p0 = (ph) => (ph.params && ph.params[0]) || {};
   box.innerHTML = PROC_MODEL.map((up, ui) => `
     <div class="proc-up" style="border:1px solid var(--border);border-radius:8px;padding:8px;margin-bottom:8px;background:var(--panel2)">
       <div class="row">
@@ -2366,15 +2379,24 @@ function procRender() {
               <button class="btn sm sec" type="button" data-del-op="${ui}.${oi}">✕</button></div>
           </div>
           ${(op.phases || []).map((ph, pi) => `
-            <div class="proc-ph" style="margin-left:14px;margin-top:4px">
+            <div class="proc-ph" style="margin-left:14px;margin-top:6px;border-left:2px solid var(--border);padding-left:8px">
               <div class="row">
                 <div class="field"><label>Phase</label><input class="pp-name" value="${esc(ph.name || "")}"/></div>
                 <div class="field"><label>Phút</label><input class="pp-dur" type="number" value="${ph.duration_min ?? ""}" style="width:90px"/></div>
-                <div class="field"><label>Setpoint</label><input class="pp-pn" value="${esc(p0(ph).name || "")}" placeholder="Nhiệt độ" style="width:120px"/></div>
-                <div class="field"><label>Giá trị</label><input class="pp-pv" value="${p0(ph).setpoint ?? ""}" style="width:80px"/></div>
-                <div class="field"><label>ĐVT</label><input class="pp-pu" value="${esc(p0(ph).unit || "")}" size="4"/></div>
-                <div class="field" style="align-self:flex-end"><button class="btn sm sec" type="button" data-del-ph="${ui}.${oi}.${pi}">✕</button></div>
+                <div class="field" style="align-self:flex-end">
+                  <button class="btn sm sec" type="button" data-add-param="${ui}.${oi}.${pi}">+ Setpoint</button>
+                  <button class="btn sm sec" type="button" data-del-ph="${ui}.${oi}.${pi}">✕ Xóa phase</button></div>
               </div>
+              ${(ph.params || []).map((prm, pmi) => `
+                <div class="proc-param row" style="margin-left:14px;margin-top:2px">
+                  <div class="field"><label>Setpoint</label><input class="pp-pn" value="${esc(prm.name || "")}" placeholder="Nhiệt độ" style="width:120px"/></div>
+                  <div class="field"><label>Giá trị</label><input class="pp-pv" value="${prm.setpoint ?? ""}" style="width:70px"/></div>
+                  <div class="field"><label>Ngưỡng dưới</label><input class="pp-lsl" type="number" step="any" value="${prm.lsl ?? ""}" placeholder="không giới hạn" style="width:100px"/></div>
+                  <div class="field"><label>Ngưỡng trên</label><input class="pp-usl" type="number" step="any" value="${prm.usl ?? ""}" placeholder="không giới hạn" style="width:100px"/></div>
+                  <div class="field"><label>ĐVT</label><input class="pp-pu" value="${esc(prm.unit || "")}" size="4"/></div>
+                  <div class="field" style="align-self:flex-end"><button class="btn sm sec" type="button" data-del-param="${ui}.${oi}.${pi}.${pmi}">✕</button></div>
+                </div>`).join("") ||
+                '<div class="muted" style="margin-left:14px;font-size:12px;margin-top:2px">Chưa có setpoint nào — bấm "+ Setpoint".</div>'}
             </div>`).join("")}
         </div>`).join("")}
     </div>`).join("") +
@@ -2386,6 +2408,18 @@ function procRender() {
   box.querySelectorAll("[data-del-op]").forEach(b => b.onclick = () => { procHarvest(); const [u, o] = b.dataset.delOp.split(".").map(Number); PROC_MODEL[u].operations.splice(o, 1); procRender(); });
   box.querySelectorAll("[data-add-ph]").forEach(b => b.onclick = () => { procHarvest(); const [u, o] = b.dataset.addPh.split(".").map(Number); PROC_MODEL[u].operations[o].phases.push({ name: "", params: [] }); procRender(); });
   box.querySelectorAll("[data-del-ph]").forEach(b => b.onclick = () => { procHarvest(); const [u, o, p] = b.dataset.delPh.split(".").map(Number); PROC_MODEL[u].operations[o].phases.splice(p, 1); procRender(); });
+  box.querySelectorAll("[data-add-param]").forEach(b => b.onclick = () => {
+    procHarvest();
+    const [u, o, p] = b.dataset.addParam.split(".").map(Number);
+    PROC_MODEL[u].operations[o].phases[p].params.push({ name: "", setpoint: "", unit: "", lsl: null, usl: null });
+    procRender();
+  });
+  box.querySelectorAll("[data-del-param]").forEach(b => b.onclick = () => {
+    procHarvest();
+    const [u, o, p, pmi] = b.dataset.delParam.split(".").map(Number);
+    PROC_MODEL[u].operations[o].phases[p].params.splice(pmi, 1);
+    procRender();
+  });
 }
 
 // ================= BATCHES =================
@@ -2541,8 +2575,10 @@ async function showBatch(id) {
   const allBrewLinesDetail = (await GET("/lines").catch(() => [])).filter(l => l.kind === "brewhouse" && l.active);
   const bLineOptsDetail = `<option value="">-- chưa chọn --</option>` +
     allBrewLinesDetail.map(l => `<option value="${esc(l.line_id)}" ${l.line_id === b.brewhouse_line_id ? "selected" : ""}>${esc(l.code)} — ${esc(l.name)}</option>`).join("");
-  const next = { planned: ["ready", "cancelled"], ready: ["running", "cancelled"],
-    running: ["held", "completed", "cancelled"], held: ["running", "cancelled"],
+  // "cancelled" tạm thời ẩn khỏi UI (không cho bấm "Hủy") theo yêu cầu người dùng 2026-09-06 —
+  // backend vẫn giữ nguyên logic hoàn NVL đã làm, chỉ ẩn nút để tạm ngừng dùng qua UI.
+  const next = { planned: ["ready"], ready: ["running"],
+    running: ["held", "completed"], held: ["running"],
     completed: ["closed"], closed: [], cancelled: [] }[b.state] || [];
   const transBtns = next.map(n => `<button class="btn sm sec" data-bt="${n}">→ ${n}</button>`).join(" ");
   const avail = lots.filter(l => l.status === "available");
@@ -2727,6 +2763,11 @@ async function openEBR(batchId) {
     <td>${q.value ?? "—"} ${esc(q.unit || "")}</td><td>${badge(q.status)}</td></tr>`; }).join("");
   const devs = (c.deviations || []).map(d => `<tr><td><code class="k">${esc(d.code)}</code></td><td>${esc(d.severity)}</td><td>${esc(d.reason)}</td><td>${badge(d.state)}</td></tr>`).join("");
   const chems = (c.chemicals || []).map(x => `<tr><td>${esc(x.stage)}</td><td>${esc(x.chemical)}</td><td>${x.quantity} ${esc(x.uom)}</td></tr>`).join("");
+  // Chỉ tiêu Nước nấu bia — khai theo Mã điều độ (WorkOrder) của mẻ này, xem services/ebr.py::
+  // _nuoc_nau_display (yêu cầu người dùng 2026-09-06: "Thêm chỉ tiêu chất lượng nước vào trong
+  // pop up hồ sơ EBR này").
+  const nuocNau = (e.nuoc_nau_display || []).map(n => `<tr><td>${esc(n.parameter_name)}<div class="muted">${esc(n.parameter)}</div></td>
+    <td>${n.value ?? "—"} ${esc(n.unit || "")}</td><td>${badge(n.status)}</td></tr>`).join("");
   const sigs = (e.signatures || []).map(s => `<tr><td>${esc(s.meaning)}</td><td>${esc(s.by)} ${s.role ? "(" + esc(s.role) + ")" : ""}</td>
     <td class="muted">${fmt(s.time)}</td><td class="muted">${esc(s.reason || "")}</td><td class="hashbox" style="max-width:120px">${esc((s.hash || "").slice(0, 16))}…</td></tr>`).join("");
   const lockBadge = e.locked ? `${badge("closed")}ĐÃ KHÓA (v${e.snapshot ? e.snapshot.version : "?"})` : `${badge("planned")}chưa khóa`;
@@ -2744,7 +2785,8 @@ async function openEBR(batchId) {
       <div><h3>Định mức ↔ Thực tế (BOM)</h3><table><thead><tr><th>Vật tư</th><th>ĐM</th><th>TT</th><th>Mã lô</th><th>KQ</th></tr></thead><tbody>${matRows || '<tr><td colspan=5 class="muted">—</td></tr>'}</tbody></table>
         <h3>Kết quả QC</h3><table><thead><tr><th>Chỉ tiêu</th><th>Giá trị</th><th>KQ</th></tr></thead><tbody>${qc || '<tr><td colspan=3 class="muted">—</td></tr>'}</tbody></table></div>
       <div><h3>Deviation</h3><table><thead><tr><th>Mã</th><th>Mức</th><th>Lý do</th><th>TT</th></tr></thead><tbody>${devs || '<tr><td colspan=4 class="muted">—</td></tr>'}</tbody></table>
-        <h3>Hóa chất</h3><table><thead><tr><th>Công đoạn</th><th>Hóa chất</th><th>SL</th></tr></thead><tbody>${chems || '<tr><td colspan=3 class="muted">—</td></tr>'}</tbody></table></div>
+        <h3>Hóa chất</h3><table><thead><tr><th>Công đoạn</th><th>Hóa chất</th><th>SL</th></tr></thead><tbody>${chems || '<tr><td colspan=3 class="muted">—</td></tr>'}</tbody></table>
+        <h3>Chỉ tiêu chất lượng nước (nấu bia)</h3><table><thead><tr><th>Chỉ tiêu</th><th>Giá trị</th><th>KQ</th></tr></thead><tbody>${nuocNau || '<tr><td colspan=3 class="muted">—</td></tr>'}</tbody></table></div>
     </div>
     <h3>Chữ ký điện tử</h3>
     <table><thead><tr><th>Ý nghĩa</th><th>Người ký</th><th>Thời gian</th><th>Lý do</th><th>Hash</th></tr></thead>
@@ -4436,7 +4478,7 @@ VIEWS.quality = async function () {
       <div class="muted" style="margin-bottom:6px">Mẻ nấu/mẻ lọc/mã chiết có gán nhóm chỉ tiêu bắt buộc sẽ nằm ở đây — bấm "Khai báo" để chuyển tới đúng công đoạn. Panel này LUÔN hiện đủ mọi công đoạn (Mẻ SX) đã gán nhóm chỉ tiêu, kể cả khi đã khai đủ — bấm lại "Khai báo" để sửa giá trị, hoặc "Xem chi tiết" để xem lại (riêng Lên men CT chính/CT phụ bấm "+ Thêm lần lấy mẫu" để lấy thêm mẫu mới).</div>
       <input class="searchbox" data-tbl="t_stageqcpending" placeholder="Tìm theo công đoạn, mẻ/lô..."/>
       <div class="tablewrap"><table id="t_stageqcpending">
-        <thead><tr><th>Công đoạn</th><th>Mẻ/lô</th><th>Tank lên men</th><th>Dịch bia</th><th>Chỉ tiêu còn thiếu</th><th></th><th></th></tr></thead>
+        <thead><tr><th>Công đoạn</th><th>Mẻ/lô</th><th>Tank lên men / Tank TP</th><th>Dịch bia</th><th>Chỉ tiêu còn thiếu</th><th></th><th></th></tr></thead>
         <tbody>${pendingStageQc.map((p, pi) => {
           // Toàn bộ pipeline "Mẻ SX" giờ LUÔN hiện ở đây, không ẩn đi khi đã khai đủ (yêu cầu
           // người dùng 2026-09-02: "khi khai xong công đoạn đó thì không cần ẩn đi nhé") — xem
@@ -5627,6 +5669,73 @@ async function loadGiaoData() {
     canCreateSangNgang, pxPending, pxDone, workshopLotOpts, companyLotOptsGiao, canEditReceipt, receiptRows,
     kcpxRequests, kcpxPending, kcpxDone };
 }
+// ---- BC nhập-xuất-tồn — dùng chung cho tab "bc" ở cả Kho công ty và Kho phân xưởng, thêm
+// chế độ xem "Theo lô" (mirror "Theo mã vật tư" đã có) + lọc theo 1 kho hoặc "Cả 2 kho" (yêu
+// cầu người dùng 2026-09-05: "Áp dụng cho cả NVL và thành phẩm, xem theo cả 2 từng lô hoặc
+// từng mã vật tư. có lọc kho công ty/kho phân xưởng hoặc 2 kho. Modul này nằm ở cả kho phân
+// xưởng và kho công ty."). `prefix` khác nhau cho mỗi view (bc/bcpx) để state trong SUB (dùng
+// chung 1 object phẳng cho mọi view) không đè lên nhau.
+async function bcReportSectionHtml(prefix, defaultLocation) {
+  const today = new Date();
+  const from60 = new Date(today); from60.setDate(from60.getDate() - 60);
+  const dateFrom = SUB[prefix + "_date_from"] || toISODateLocal(from60);
+  const dateTo = SUB[prefix + "_date_to"] || toISODateLocal(today);
+  SUB[prefix + "_date_from"] = dateFrom; SUB[prefix + "_date_to"] = dateTo;
+  const location = SUB[prefix + "_location"] !== undefined ? SUB[prefix + "_location"] : defaultLocation;
+  SUB[prefix + "_location"] = location;
+  const mode = SUB[prefix + "_mode"] || "material";
+  const start = new Date(dateFrom + "T00:00:00");
+  const end = new Date(dateTo + "T00:00:00"); end.setDate(end.getDate() + 1);
+  const q = `date_from=${encodeURIComponent(toDTLocal(start))}&date_to=${encodeURIComponent(toDTLocal(end))}` +
+    (location ? `&location=${encodeURIComponent(location)}` : "");
+  const rep = await GET(`/warehouse/report${mode === "lot" ? "/by-lot" : ""}?${q}`);
+  const locLabel = location || "Cả 2 kho";
+  const thead = mode === "lot"
+    ? `<tr><th>Mã lô</th><th>Mã VT</th><th>Tên</th><th>Nhập</th><th>Xuất</th><th>Tồn cuối</th><th>ĐVT</th><th>Vị trí</th><th>Trạng thái</th></tr>`
+    : `<tr><th>Mã VT</th><th>Tên</th><th>Nhập</th><th>Xuất</th><th>Tồn cuối</th><th>ĐVT</th></tr>`;
+  const colspan = mode === "lot" ? 9 : 6;
+  const rows = (mode === "lot" ? rep.map(r => `<tr><td><code class="k">${esc(r.lot_code)}</code></td>
+      <td><code class="k">${esc(r.material_code)}</code></td><td>${esc(r.material_name)}</td>
+      <td style="color:var(--green)">${r.received}</td><td style="color:var(--orange)">${r.issued}</td>
+      <td>${r.on_hand}</td><td>${esc(r.uom)}</td><td class="muted">${esc(r.location || "")}</td>
+      <td>${badge(r.status === "consumed" || r.status === "scrapped" ? "obsolete" : r.status === "on_hold" ? "critical" : "available")}${esc(r.status)}</td></tr>`)
+    : rep.map(r => `<tr><td><code class="k">${esc(r.material_code)}</code></td><td>${esc(r.material_name)}</td>
+      <td style="color:var(--green)">${r.received}</td><td style="color:var(--orange)">${r.issued}</td>
+      <td>${r.on_hand}</td><td>${esc(r.uom)}</td></tr>`)).join("");
+  return `<div class="panel"><h2>Báo cáo nhập-xuất-tồn — ${esc(locLabel)} <span class="muted">(${esc(dateFrom)} → ${esc(dateTo)})</span></h2>
+    <div class="row">
+      <div class="field"><label>Từ ngày</label><input id="${prefix}_from" type="date" value="${dateFrom}"/></div>
+      <div class="field"><label>Đến ngày</label><input id="${prefix}_to" type="date" value="${dateTo}"/></div>
+      <div class="field"><label>Kho</label><select id="${prefix}_loc">
+        <option value="Kho công ty" ${location === "Kho công ty" ? "selected" : ""}>Kho công ty</option>
+        <option value="Kho phân xưởng" ${location === "Kho phân xưởng" ? "selected" : ""}>Kho phân xưởng</option>
+        <option value="" ${!location ? "selected" : ""}>Cả 2 kho</option>
+      </select></div>
+      <div class="field"><label>Xem theo</label><select id="${prefix}_mode">
+        <option value="material" ${mode === "material" ? "selected" : ""}>Theo mã vật tư</option>
+        <option value="lot" ${mode === "lot" ? "selected" : ""}>Theo từng lô</option>
+      </select></div>
+      <button class="btn" id="${prefix}_apply" style="align-self:flex-end">Xem báo cáo</button>
+    </div>
+    <div class="muted" style="margin:4px 0 8px">${mode === "lot"
+      ? "Liệt kê từng lô đã phát sinh nhập/xuất trong kỳ HOẶC còn tồn ở kho đang lọc — kể cả lô đã dùng hết (tồn=0, không còn hiện ở \"Xem tồn kho\")."
+      : "Gộp theo mã vật tư — xem \"Theo từng lô\" để tra đúng 1 lô cụ thể (kể cả đã dùng hết)."}</div>
+    <input class="searchbox" data-tbl="t_${prefix}rep" placeholder="Tìm theo mã/tên vật tư${mode === "lot" ? ", mã lô" : ""}..."/>
+    <div class="tablewrap"><table id="t_${prefix}rep"><thead>${thead}</thead>
+    <tbody>${rows || `<tr><td colspan="${colspan}" class="muted">Không có dữ liệu.</td></tr>`}</tbody></table></div></div>`;
+}
+
+function wireBcReportSection(prefix, viewName) {
+  wirePaginate(`t_${prefix}rep`, 10);
+  $(`${prefix}_apply`).onclick = () => {
+    SUB[prefix + "_date_from"] = $(`${prefix}_from`).value;
+    SUB[prefix + "_date_to"] = $(`${prefix}_to`).value;
+    SUB[prefix + "_location"] = $(`${prefix}_loc`).value;
+    SUB[prefix + "_mode"] = $(`${prefix}_mode`).value;
+    render(viewName);
+  };
+}
+
 VIEWS.warehouse_kc = async function () {
   const sec = SUB.warehouse_kc || "ton";
   const sections = [
@@ -5704,28 +5813,7 @@ VIEWS.warehouse_kc = async function () {
         <td><code class="k">${esc(e.lot_code)}</code></td><td>${e.quantity} ${e.uom}</td>
         <td class="muted">${fmt(e.expiry)}</td><td>${e.days_left}</td><td>${badge(e.status)}</td><td class="muted">${esc(e.location || "")}</td></tr>`).join("") || '<tr><td colspan=7 class="muted">Không có lô có hạn dùng.</td></tr>'}</tbody></table></div>`;
   } else if (sec === "bc") {
-    // Mặc định khung 60 ngày gần nhất, cho chọn lại từ-đến ngày — persist lựa chọn trong SUB
-    // giống các báo cáo khác (mirror sec === "netship" ở VIEWS.reports).
-    const bcToday = new Date();
-    const bcFrom60 = new Date(bcToday); bcFrom60.setDate(bcFrom60.getDate() - 60);
-    const bcDateFrom = SUB.bc_date_from || toISODateLocal(bcFrom60);
-    const bcDateTo = SUB.bc_date_to || toISODateLocal(bcToday);
-    SUB.bc_date_from = bcDateFrom; SUB.bc_date_to = bcDateTo;
-    const bcStart = new Date(bcDateFrom + "T00:00:00");
-    const bcEnd = new Date(bcDateTo + "T00:00:00"); bcEnd.setDate(bcEnd.getDate() + 1);
-    const bcQ = `date_from=${encodeURIComponent(toDTLocal(bcStart))}&date_to=${encodeURIComponent(toDTLocal(bcEnd))}&location=${encodeURIComponent("Kho công ty")}`;
-    const rep = await GET(`/warehouse/report?${bcQ}`);
-    body = `<div class="panel"><h2>Báo cáo nhập-xuất-tồn — Kho công ty <span class="muted">(${esc(bcDateFrom)} → ${esc(bcDateTo)})</span></h2>
-      <div class="row">
-        <div class="field"><label>Từ ngày</label><input id="bc_from" type="date" value="${bcDateFrom}"/></div>
-        <div class="field"><label>Đến ngày</label><input id="bc_to" type="date" value="${bcDateTo}"/></div>
-        <button class="btn" id="bc_apply" style="align-self:flex-end">Xem báo cáo</button>
-      </div>
-      <input class="searchbox" data-tbl="t_bcrep" placeholder="Tìm theo mã/tên vật tư..."/>
-      <div class="tablewrap"><table id="t_bcrep"><thead><tr><th>Mã VT</th><th>Tên</th><th>Nhập</th><th>Xuất</th><th>Tồn cuối</th><th>ĐVT</th></tr></thead>
-      <tbody>${rep.map(r => `<tr><td><code class="k">${esc(r.material_code)}</code></td><td>${esc(r.material_name)}</td>
-        <td style="color:var(--green)">${r.received}</td><td style="color:var(--orange)">${r.issued}</td>
-        <td>${r.on_hand}</td><td>${r.uom}</td></tr>`).join("") || '<tr><td colspan=6 class="muted">Không có dữ liệu.</td></tr>'}</tbody></table></div></div>`;
+    body = await bcReportSectionHtml("bc", "Kho công ty");
   } else if (sec === "nhap") {
     const { matItemsGiao, matLocOptsGiao, isAdminGiao, receiptRows } = await loadGiaoData();
     body = `<div class="panel"><h2>Nhập kho ${isAdminGiao ? `<button class="btn sm sec" id="rc_delhist" style="color:var(--red);font-size:12px;font-weight:normal">🗑️ Xóa lịch sử</button>` : ""}</h2>
@@ -6055,14 +6143,7 @@ VIEWS.warehouse_kc = async function () {
     });
   }
   if (sec === "min") wirePaginate("t_lowstock", 10);
-  if (sec === "bc") {
-    wirePaginate("t_bcrep", 10);
-    $("bc_apply").onclick = () => {
-      SUB.bc_date_from = $("bc_from").value;
-      SUB.bc_date_to = $("bc_to").value;
-      render("warehouse_kc");
-    };
-  }
+  if (sec === "bc") wireBcReportSection("bc", "warehouse_kc");
   if (sec === "nhap") {
     wirePaginate("rc_hist", 10);
     wireSearchableSelect("rc_mat_txt", "rc_mat", WH_CACHE.matItems, (item) => { $("rc_uom").value = item.uom || ""; });
@@ -6360,10 +6441,12 @@ VIEWS.warehouse_px = async function () {
     { key: "sangngang", label: "Xuất sang ngang" },
     { key: "tudo", label: "Xuất tự do" }, { key: "nvlhist", label: "Lịch sử xuất dùng NVL" },
     { key: "vitri", label: "📍 Vị trí kho" },
-    { key: "kk", label: "Kiểm kê định kỳ" },
+    { key: "kk", label: "Kiểm kê định kỳ" }, { key: "bc", label: "BC nhập-xuất-tồn" },
   ];
   let body = "";
-  if (sec === "px") {
+  if (sec === "bc") {
+    body = await bcReportSectionHtml("bcpx", "Kho phân xưởng");
+  } else if (sec === "px") {
     const pxLoc = TON_LOC.warehouse_px;
     const pxLotMatchesLoc = (l) => pxLoc === "" ? true : pxLoc === "Kho phân xưởng"
       ? /phân xưởng/i.test(l.location || "") : !/phân xưởng/i.test(l.location || "");
@@ -6822,6 +6905,7 @@ VIEWS.warehouse_px = async function () {
     wireMovementHistoryBlock("tu_do_px");
   }
   if (sec === "nvlhist") wirePaginate("t_nvlhist", 10);
+  if (sec === "bc") wireBcReportSection("bcpx", "warehouse_px");
   if (sec === "req") {
     wireCartPanel();
     wireRequestsHistoryBlock();

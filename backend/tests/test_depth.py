@@ -380,6 +380,47 @@ def test_scheduler_uses_master_tanks(client):
     assert "FV-99" in board["resources"]
 
 
+# ---------------- B2: scheduler bỏ qua tank đang chiếm dụng thật (pipeline Mẻ sản xuất) ----------------
+def test_scheduler_skips_tank_occupied_by_real_production(client):
+    """services/scheduler.py::auto_schedule — trước đây chỉ biết ScheduleSlot "maintenance" tự
+    sinh trong hệ thống, không hề biết tank nào đang thật sự có dịch/mẻ chưa xong ngoài xưởng
+    (BatchTank, pipeline "Mẻ sản xuất" mới) — có thể xếp mẻ mới chồng lên tank đang chạy thật.
+    Giờ phải coi tank đang bị _tank_lm_occupied (còn tồn dịch HOẶC còn mẻ nấu chưa "Kết thúc")
+    là bận suốt khung nhìn, không được chọn (audit 2026-09-06)."""
+    h = _login(client, "kysu", "123456")
+    hq = _login(client, "quandoc", "123456")
+    line = client.post("/api/lines", headers=h, json={
+        "code": "FV-SCHED-OCC-1", "name": "Tank scheduler occupied test", "kind": "tank", "area": "len_men"})
+    assert line.status_code == 201, line.text
+
+    rid = client.get("/api/recipes", headers=hq).json()[0]["recipe_id"]
+    vers = client.get(f"/api/recipes/{rid}/versions", headers=hq).json()
+    vid = next(v["version_id"] for v in vers if v["state"] == "effective")
+    oid = client.get("/api/brewing/orders", headers=hq).json()[0]["brew_order_id"]
+    b = client.post("/api/batches", headers=hq, json={
+        "order_id": oid, "recipe_version_id": vid, "batch_code": "88940",
+        "planned_qty": 1000, "allow_shortage": True})
+    assert b.status_code == 201, b.text
+    batch_id = b.json()["batch_id"]
+    assert client.post(f"/api/batches/{batch_id}/transition", headers=hq,
+                       json={"target": "ready"}).status_code == 200
+    assert client.post(f"/api/batches/{batch_id}/transition", headers=hq,
+                       json={"target": "running"}).status_code == 200
+    # Mẻ CHƯA "Kết thúc" (chưa end_at) -> tank ở status "dang_nau" (_tank_lm_occupied == True).
+    tank = client.post("/api/batch-tanks", headers=hq, json={
+        "batch_ids": [batch_id], "tank_code": "TANK-SCHED-OCC-1", "tank_lm": "FV-SCHED-OCC-1"})
+    assert tank.status_code == 201, tank.text
+
+    auto = client.post("/api/schedule/auto", headers=hq, json={"days": 12})
+    assert auto.status_code == 200, auto.text
+    board = client.get("/api/schedule", headers=hq).json()
+    assert "FV-SCHED-OCC-1" in board["resources"]
+    occupied_slots = board["lanes"].get("FV-SCHED-OCC-1", [])
+    assert not any(s["kind"] == "production" for s in occupied_slots), occupied_slots
+    conf = client.get("/api/schedule/conflicts", headers=hq).json()
+    assert conf["overlaps"] == []
+
+
 # ---------------- C: WMS summary tổng hợp ----------------
 def test_wms_summary(client):
     h = _login(client, "thukho", "123456")

@@ -362,3 +362,128 @@ def test_wo_auto_completes_when_remaining_batch_is_cancelled_not_finished(
 
     wo = client.get(f"/api/workorders/{wo_id}", headers=admin_h).json()
     assert wo["status"] == "completed"
+
+
+def test_cancel_wo_cascades_cancel_active_batches_and_refunds_material(
+        client, admin_h, lager_product_id, lager_recipe_version_id, brewhouse_line_id):
+    """services/workorders.py::_cancel_active_batches — trước đây "Hủy" Lệnh SX chỉ đổi status
+    của WorkOrder, không đụng gì tới các mẻ con: mẻ vẫn "chạy" bình thường (cấp liệu/hoàn thành
+    được) dù lệnh cha đã "Đã hủy". Giờ hủy Lệnh SX phải cascade hủy MỌI mẻ còn active (planned/
+    ready/running/held), và hoàn lại NVL đã cấp cho mẻ đó (mirror batches.py::
+    _refund_consumed_materials, 2026-09-06)."""
+    brew_order_id = _a_brew_order(client, admin_h, "LN-DISPATCH2-012", lager_product_id, lager_recipe_version_id)
+    wo_id = _a_wo(client, admin_h, brew_order_id, lager_recipe_version_id, brewhouse_line_id, planned_qty=20)
+    _release(client, admin_h, wo_id)
+
+    dispatched = client.post(f"/api/workorders/{wo_id}/dispatch", headers=admin_h,
+                             json={"from_batch": 2000, "batch_count": 2})
+    assert dispatched.status_code == 200, dispatched.text
+    batch_ids = dispatched.json()["batch_ids"]
+
+    mat = client.post("/api/materials", headers=admin_h,
+                      json={"code": "NVL-WOCANCEL-01", "name": "NVL test hủy WO", "uom": "kg"})
+    assert mat.status_code == 201, mat.text
+    lot = client.post("/api/lots", headers=admin_h,
+                      json={"lot_code": "LOT-WOCANCEL-01", "material_id": mat.json()["material_id"],
+                            "quantity": 500, "uom": "kg", "location": "Kho phân xưởng"})
+    assert lot.status_code == 201, lot.text
+    lot_id = lot.json()["lot_id"]
+    consume = client.post(f"/api/batches/{batch_ids[0]}/consume", headers=admin_h,
+                          json={"lot_id": lot_id, "quantity": 120})
+    assert consume.status_code == 200, consume.text
+
+    cancel = client.post(f"/api/workorders/{wo_id}/transition", headers=admin_h,
+                         json={"target": "cancelled", "reason": "Test cascade hủy WO"})
+    assert cancel.status_code == 200, cancel.text
+    assert cancel.json()["status"] == "cancelled"
+
+    for bid in batch_ids:
+        b = client.get(f"/api/batches/{bid}", headers=admin_h).json()
+        assert b["state"] == "cancelled", b
+
+    lot_after = next(l for l in client.get("/api/lots", headers=admin_h).json() if l["lot_id"] == lot_id)
+    assert lot_after["quantity"] == 500
+    assert lot_after["status"] == "available"
+
+
+def test_cancel_wo_leaves_completed_batches_untouched(
+        client, admin_h, lager_product_id, lager_recipe_version_id, brewhouse_line_id):
+    """Hủy Lệnh SX chỉ cascade hủy mẻ CÒN ACTIVE — mẻ đã completed (có kết quả thật) không bị
+    đụng tới (BATCH_TRANSITIONS cũng không cho phép completed -> cancelled)."""
+    brew_order_id = _a_brew_order(client, admin_h, "LN-DISPATCH2-013", lager_product_id, lager_recipe_version_id)
+    wo_id = _a_wo(client, admin_h, brew_order_id, lager_recipe_version_id, brewhouse_line_id, planned_qty=20)
+    _release(client, admin_h, wo_id)
+
+    dispatched = client.post(f"/api/workorders/{wo_id}/dispatch", headers=admin_h,
+                             json={"from_batch": 2100, "batch_count": 2})
+    assert dispatched.status_code == 200, dispatched.text
+    batch_ids = dispatched.json()["batch_ids"]
+
+    _finish_batch(client, admin_h, batch_ids[0])
+
+    cancel = client.post(f"/api/workorders/{wo_id}/transition", headers=admin_h, json={"target": "cancelled"})
+    assert cancel.status_code == 200, cancel.text
+
+    done = client.get(f"/api/batches/{batch_ids[0]}", headers=admin_h).json()
+    assert done["state"] == "completed"
+    still_active = client.get(f"/api/batches/{batch_ids[1]}", headers=admin_h).json()
+    assert still_active["state"] == "cancelled"
+
+
+def test_cancel_wo_blocked_when_active_batch_ebr_locked(
+        client, admin_h, lager_product_id, lager_recipe_version_id, brewhouse_line_id):
+    """Không cascade-hủy mẻ đã khóa hồ sơ (EBR) — chặn hủy cả Lệnh SX, bắt xử lý riêng mẻ đó
+    (amendment) trước, giống mọi chỗ khác đang tôn trọng ebr_locked."""
+    brew_order_id = _a_brew_order(client, admin_h, "LN-DISPATCH2-014", lager_product_id, lager_recipe_version_id)
+    wo_id = _a_wo(client, admin_h, brew_order_id, lager_recipe_version_id, brewhouse_line_id, planned_qty=20)
+    _release(client, admin_h, wo_id)
+
+    dispatched = client.post(f"/api/workorders/{wo_id}/dispatch", headers=admin_h,
+                             json={"from_batch": 2200, "batch_count": 1})
+    assert dispatched.status_code == 200, dispatched.text
+    batch_id = dispatched.json()["batch_ids"][0]
+
+    sign = client.post(f"/api/batches/{batch_id}/ebr/sign", headers=admin_h,
+                       json={"password": "AdminTest123", "meaning": "Xác nhận thực thi"})
+    assert sign.status_code == 200, sign.text
+    lock = client.post(f"/api/batches/{batch_id}/ebr/lock", headers=admin_h,
+                       json={"password": "AdminTest123", "reason": "Phê duyệt release"})
+    assert lock.status_code == 200, lock.text
+
+    cancel = client.post(f"/api/workorders/{wo_id}/transition", headers=admin_h, json={"target": "cancelled"})
+    assert cancel.status_code == 409, cancel.text
+
+    wo = client.get(f"/api/workorders/{wo_id}", headers=admin_h).json()
+    assert wo["status"] == "in_progress"
+
+
+def test_ebr_shows_water_qc_declared_at_work_order_level(
+        client, admin_h, lager_product_id, lager_recipe_version_id, brewhouse_line_id):
+    """services/ebr.py::assemble — hồ sơ EBR của 1 mẻ nấu (BatchExecution) phải hiện luôn Chỉ
+    tiêu Nước nấu bia (stage "nuoc_nau") đã khai theo Mã điều độ (WorkOrder) của mẻ đó — trước
+    đây popup EBR HOÀN TOÀN không có mục này dù đã khai qua tab Điều độ (yêu cầu người dùng
+    2026-09-06: "Thêm chỉ tiêu chất lượng nước vào trong pop up hồ sơ EBR này")."""
+    brew_order_id = _a_brew_order(client, admin_h, "LN-DISPATCH2-015", lager_product_id, lager_recipe_version_id)
+    wo_id2 = _a_wo(client, admin_h, brew_order_id, lager_recipe_version_id, brewhouse_line_id, planned_qty=20)
+    _release(client, admin_h, wo_id2)
+    dispatched = client.post(f"/api/workorders/{wo_id2}/dispatch", headers=admin_h,
+                             json={"from_batch": 2300, "batch_count": 1})
+    assert dispatched.status_code == 200, dispatched.text
+    batch_id = dispatched.json()["batch_ids"][0]
+
+    param = client.post("/api/qc/parameters", headers=admin_h,
+                       json={"code": "CT_NUOCNAU_EBR", "name": "Độ cứng nước nấu", "lsl": 1, "usl": 10})
+    assert param.status_code == 201, param.text
+    rec = client.post("/api/brewing/qc-results", headers=admin_h,
+                      json={"stage": "nuoc_nau", "scope_type": "work_order", "scope_id": wo_id2,
+                            "parameter": "CT_NUOCNAU_EBR", "value": 5, "lower_limit": 1, "upper_limit": 10})
+    assert rec.status_code == 201, rec.text
+
+    ebr = client.get(f"/api/batches/{batch_id}/ebr", headers=admin_h).json()
+    rows = ebr.get("nuoc_nau_display") or []
+    row = next((r for r in rows if r["parameter"] == "CT_NUOCNAU_EBR"), None)
+    assert row is not None, rows
+    assert row["parameter_name"] == "Độ cứng nước nấu"
+    assert row["value"] == 5
+    assert row["status"] == "pass"
+    assert row["work_order_id"] == wo_id2

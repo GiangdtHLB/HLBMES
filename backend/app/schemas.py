@@ -544,11 +544,17 @@ class PhaseStartIn(BaseModel):
     up: str
     op: str
     phase: str
+    # Cho nhập tay giờ bắt đầu THẬT của phase (VD nạp lại lịch sử từ file Step Protocol Braumat
+    # — mỗi phase có ngày giờ bắt đầu riêng, không phải lúc bấm nút) — để trống = giờ hiện tại.
+    started_at: Optional[datetime] = None
 
 
 class PhaseTransitionIn(BaseModel):
     target: str                        # running | held | complete | aborted
     values: dict = {}
+    # Cho nhập tay giờ kết thúc THẬT (mirror started_at ở PhaseStartIn) — chỉ có ý nghĩa khi
+    # target=complete/aborted; để trống = giờ hiện tại.
+    ended_at: Optional[datetime] = None
 
 
 # ---- Scheduling ----

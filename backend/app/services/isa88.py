@@ -2,6 +2,8 @@
 phase (BatchPhaseRun) + state machine theo ISA-88.
 """
 
+from datetime import datetime
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -78,7 +80,8 @@ def status(db: Session, batch_id: str) -> dict:
             "unit_procedures": ups}
 
 
-def start_phase(db: Session, batch_id: str, up: str, op: str, phase: str, user: User) -> dict:
+def start_phase(db: Session, batch_id: str, up: str, op: str, phase: str, user: User,
+                started_at: datetime = None) -> dict:
     require_role(user, Role.OPERATOR, Role.SUPERVISOR, Role.ENGINEER)
     batch = _get_batch(db, batch_id)
     if batch.ebr_locked:
@@ -97,11 +100,15 @@ def start_phase(db: Session, batch_id: str, up: str, op: str, phase: str, user: 
     if existing and existing.state == PhaseState.COMPLETE.value:
         raise DomainError("Phase đã hoàn thành.")
     seq = (db.execute(select(BatchPhaseRun).where(BatchPhaseRun.batch_id == batch_id)).scalars().all())
+    # started_at cho phép truyền tay (mirror file Step Protocol Braumat — mỗi phase có ngày giờ
+    # bắt đầu THẬT riêng, không phải lúc bấm nút — yêu cầu người dùng 2026-09-05: "thêm ngày giờ
+    # bắt đầu, ngày giờ kết thúc của phase"), mặc định giờ hiện tại nếu không truyền (vận hành
+    # bấm tay bình thường).
     run = BatchPhaseRun(run_id=new_id(), batch_id=batch_id, seq=len(seq) + 1,
                         unit_class=u.get("unit_class"), up_name=up, op_name=op, phase_name=phase,
                         state=PhaseState.RUNNING.value, params={"params": p.get("params", []),
                         "duration_min": p.get("duration_min")},
-                        operator=user.username, started_at=utcnow())
+                        operator=user.username, started_at=started_at or utcnow())
     db.add(run)
     record_audit(db, entity_type="batch", entity_id=batch_id, action="isa88:start_phase",
                  actor=user, after={"up": up, "op": op, "phase": phase})
@@ -110,7 +117,8 @@ def start_phase(db: Session, batch_id: str, up: str, op: str, phase: str, user: 
     return {"run_id": run.run_id, "state": run.state}
 
 
-def transition_phase(db: Session, run_id: str, target: str, user: User, values: dict = None) -> dict:
+def transition_phase(db: Session, run_id: str, target: str, user: User, values: dict = None,
+                     ended_at: datetime = None) -> dict:
     require_role(user, Role.OPERATOR, Role.SUPERVISOR, Role.ENGINEER)
     run = db.get(BatchPhaseRun, run_id)
     if not run:
@@ -126,7 +134,12 @@ def transition_phase(db: Session, run_id: str, target: str, user: User, values: 
         run.values = {**(run.values or {}), **values}
     run.state = tgt.value
     if tgt in (PhaseState.COMPLETE, PhaseState.ABORTED):
-        run.ended_at = utcnow()
+        # ended_at cho phép truyền tay (mirror started_at ở start_phase) — chặn ghi giờ kết thúc
+        # TRƯỚC giờ bắt đầu (dữ liệu vô nghĩa, dễ gõ nhầm khi nhập tay theo file quá khứ).
+        end = ended_at or utcnow()
+        if end < run.started_at:
+            raise DomainError("Giờ kết thúc không được trước giờ bắt đầu của phase.")
+        run.ended_at = end
     record_audit(db, entity_type="batch", entity_id=run.batch_id,
                  action=f"isa88:phase:{target}", actor=user,
                  after={"phase": f"{run.up_name}/{run.op_name}/{run.phase_name}"})

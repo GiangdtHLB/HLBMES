@@ -13,7 +13,7 @@ from ..audit import record_audit
 from ..common import ResultStatus, new_id, utcnow
 from ..errors import DomainError, NotFoundError
 from ..models.batches import BatchExecution
-from ..models.batch_pipeline import BatchFilterLot, BatchPackLot, BatchTank
+from ..models.batch_pipeline import BatchFilterLot, BatchPackLot, BatchTank, BatchTankLink
 from ..models.brewing import BottleRecord, BrewBatch, BrewRecord, FermentRecord, FilterRecord
 from ..models.master import BeerType, Material, MaterialGroup
 from ..models.materials import MaterialLot
@@ -834,12 +834,31 @@ def list_pending_stage_declarations(db: Session) -> list[dict]:
     Module Nấu-Lọc-Chiết CŨ (BrewBatch/FermentRecord/FilterRecord/BottleRecord) GIỮ NGUYÊN hành
     vi ẩn-khi-đã-đủ — không đổi, ngoài phạm vi yêu cầu."""
     out = []
+    # Cột "tank_lm" ở panel này dùng CHUNG 1 tên field cho 2 ý nghĩa khác nhau tuỳ công đoạn
+    # (yêu cầu người dùng 2026-09-05: "cột này để cả tank lên men/tank thành phẩm được không,
+    # nếu là nấu và lên men thì để tank lên men, còn lọc và chiết thì để tank thành phẩm"):
+    # - nau/len_men_chinh/len_men_phu: tank LÊN MEN (BatchTank.tank_lm / FermentRecord không có
+    #   field riêng nên chỉ áp dụng pipeline mới).
+    # - loc/thanh_pham: tank THÀNH PHẨM (BBT) — FilterRecord.to_bbt/BatchFilterLot.to_bbt/
+    #   BottleRecord.from_bbt; BatchPackLot tự nó không có field tank, phải tra qua
+    #   BatchFilterLot nguồn (filter_lots_by_id, xem khối BatchPackLot bên dưới).
+    # Mẻ nấu (BatchExecution) đã gộp vào tank lên men nào (nếu có) — tra sẵn 1 lần để hiện cột
+    # "Tank lên men" ở panel này luôn, không chỉ riêng ở các dòng "Lên men" phía dưới (yêu cầu
+    # người dùng 2026-09-05: "các mẻ sản xuất đã gộp vào tank men thì phải hiện tank men lên đây").
+    tank_by_batch_id: dict[str, BatchTank] = {}
+    tanks_by_id = {t.tank_id: t for t in db.execute(select(BatchTank)).scalars().all()}
+    for link in db.execute(select(BatchTankLink)).scalars().all():
+        t = tanks_by_id.get(link.tank_id)
+        if t:
+            tank_by_batch_id[link.batch_id] = t
     for b in db.execute(select(BatchExecution)).scalars().all():
         st = stage_qc_status(db, "nau", "batch", b.batch_id, product_id=b.product_id)
         if st["required"]:
+            merged_tank = tank_by_batch_id.get(b.batch_id)
             out.append({"stage": "nau", "stage_label": "Nấu (Mẻ SX)", "scope_type": "batch",
                        "scope_id": b.batch_id, "label": f"Mẻ SX {b.batch_code}",
-                       "pending": st["pending"], "product_id": b.product_id})
+                       "pending": st["pending"], "product_id": b.product_id,
+                       "tank_lm": merged_tank.tank_lm if merged_tank else None})
     # Số lần đã lấy mẫu (đếm sample_id khác nhau) cho MỖI scope_id batch_tank — dùng để hiển thị
     # "+ Thêm lần lấy mẫu (lần N)" đúng số thứ tự thay vì chỉ ghi chung chung "thêm lần lấy mẫu"
     # (yêu cầu người dùng 2026-09-02: "Ghi rõ thêm lấy mẫu lần mấy").
@@ -906,7 +925,7 @@ def list_pending_stage_declarations(db: Session) -> list[dict]:
             out.append({"stage": "loc", "stage_label": "Lọc", "scope_type": "filter", "scope_id": scope_id,
                        "label": f"Mẻ lọc {r.filter_code}", "pending": st["pending"],
                        "product_id": r.product_id, "beer_type_id": r.beer_type_id,
-                       "finished_product_id": r.finished_product_id})
+                       "finished_product_id": r.finished_product_id, "tank_lm": r.to_bbt})
     # Lô lọc (Mẻ SX) — mirror khối FilterRecord trên nhưng cho pipeline mới (scope_id = chính
     # filter_lot_id, không cần ghép năm vì đã là khóa chính duy nhất toàn hệ thống, mirror cách
     # gọi có sẵn ở batch_pipeline.py::approve_filter_lot).
@@ -917,7 +936,8 @@ def list_pending_stage_declarations(db: Session) -> list[dict]:
             out.append({"stage": "loc", "stage_label": "Lọc (Mẻ SX)", "scope_type": "batch_filter_lot",
                        "scope_id": fl.filter_lot_id, "label": f"Lô lọc {fl.filter_lot_code}",
                        "pending": st["pending"], "product_id": fl.product_id,
-                       "beer_type_id": fl.beer_type_id, "finished_product_id": fl.finished_product_id})
+                       "beer_type_id": fl.beer_type_id, "finished_product_id": fl.finished_product_id,
+                       "tank_lm": fl.to_bbt})
     for b in db.execute(select(BottleRecord)).scalars().all():
         scope_id = bottle_scope_id(b.bottle_code, b.bottle_year)
         st = stage_qc_status(db, "thanh_pham", "bottle", scope_id, b.product_id,
@@ -926,7 +946,7 @@ def list_pending_stage_declarations(db: Session) -> list[dict]:
             out.append({"stage": "thanh_pham", "stage_label": "Chiết", "scope_type": "bottle", "scope_id": scope_id,
                        "label": f"Mã chiết {b.bottle_code}", "pending": st["pending"],
                        "product_id": b.product_id, "beer_type_id": b.beer_type_id,
-                       "finished_product_id": b.finished_product_id})
+                       "finished_product_id": b.finished_product_id, "tank_lm": b.from_bbt})
     # Lô thành phẩm (Mẻ SX) — mirror khối BottleRecord trên; product_id/beer_type_id kế thừa từ
     # BatchFilterLot nguồn (BatchPackLot không tự lưu 2 field này, mirror approve_pack_lot).
     filter_lots_by_id = {fl.filter_lot_id: fl for fl in db.execute(select(BatchFilterLot)).scalars().all()}
@@ -941,5 +961,6 @@ def list_pending_stage_declarations(db: Session) -> list[dict]:
                        "scope_id": p.pack_lot_id, "label": f"Lô TP {p.pack_lot_code}",
                        "pending": st["pending"], "product_id": fl.product_id if fl else None,
                        "beer_type_id": fl.beer_type_id if fl else None,
-                       "finished_product_id": p.finished_product_id})
+                       "finished_product_id": p.finished_product_id,
+                       "tank_lm": fl.to_bbt if fl else None})
     return out

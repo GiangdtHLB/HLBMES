@@ -123,6 +123,11 @@ def assemble(db: Session, batch: BatchExecution) -> dict:
         # NGUYÊN để không đổi hash) thành đúng mã vật tư thật + mã lô/FIFO, xem
         # services/dispense.py::batch_dispense_summary.
         "materials_display": dispense_svc.batch_dispense_summary(db, batch.batch_id, only_dispensed=False),
+        # Chỉ tiêu Nước nấu bia — khai theo Mã điều độ (WorkOrder) của mẻ này, KHÔNG phải theo
+        # mẻ/genealogy (mirror _nuoc_nau_display dùng ở assemble_pack_lot — trước đây hồ sơ EBR
+        # của Mẻ nấu KHÔNG hề hiện chỉ tiêu nước, dù đã khai báo qua tab Điều độ, yêu cầu người
+        # dùng 2026-09-06: "Thêm chỉ tiêu chất lượng nước vào trong pop up hồ sơ EBR này").
+        "nuoc_nau_display": _nuoc_nau_display(db, [{"type": "batch", "id": batch.batch_id}]),
         "snapshot": ({"version": snapshot.snapshot_version, "hash": snapshot.content_hash,
                       "locked_by": snapshot.locked_by, "locked_at": snapshot.locked_at.isoformat()}
                      if snapshot else None),

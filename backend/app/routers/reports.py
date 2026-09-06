@@ -258,6 +258,19 @@ def finished_goods_stock_report(date_from: datetime = None, date_to: datetime = 
     return result
 
 
+@router.get("/finished-goods-lot-report")
+def finished_goods_lot_report(date_from: datetime = None, date_to: datetime = None, product_ids: str = None,
+                              db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """BC nhập-xuất-tồn kho thành phẩm THEO TỪNG LÔ (mirror finished-goods-stock-report nhưng
+    theo lot_code thay vì SKU)."""
+    from ..services import wms as wms_svc
+    if not date_from or not date_to:
+        date_to = date_to or utcnow()
+        date_from = date_from or (date_to - timedelta(days=7))
+    ids = [p for p in product_ids.split(",") if p] if product_ids else None
+    return wms_svc.finished_goods_lot_inout_report(db, date_from, date_to, ids)
+
+
 @router.get("/finished-goods-stock-daily-report")
 def finished_goods_stock_daily_report(day: date = None, product_ids: str = None,
                                       db: Session = Depends(get_db), user: User = Depends(get_current_user)):

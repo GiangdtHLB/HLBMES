@@ -382,6 +382,40 @@ def test_tank_shows_dang_nau_until_all_merged_batches_finish(client, admin_h):
     assert got3["status_label"] == "Đang lên men"
 
 
+def test_tank_shows_planned_not_dang_nau_when_no_batch_has_started(client, admin_h):
+    """services/batch_pipeline.py::_tank_status — tank gộp mẻ nấu CÒN "planned"/"ready" (CHƯA
+    mẻ nào thật sự chạy) phải hiện "planned" (Chưa nấu), KHÔNG được hiện "dang_nau" (Đang điền
+    dịch) như trước đây (yêu cầu người dùng 2026-09-06: "nếu 1 trong các mẻ sản xuất nấu ít nhất
+    là running/Completed/closed thì được coi là đang điền dịch, nếu không đều ở trạng thái
+    Planned") — trước đây gộp chung với "dang_nau" (chỉ cần end_at rỗng) khiến tank chưa hề bắt
+    đầu nấu (0/0, chưa ai bấm running) cũng hiện "Đang điền dịch", gây hiểu lầm ngoài xưởng."""
+    batch_id = _make_batch(client, admin_h, "88950")   # còn "planned", CHƯA transition gì cả.
+    line = client.post("/api/lines", headers=admin_h,
+                       json={"code": "FV-PLANNEDTANK-1", "name": "Tank planned test", "kind": "tank"})
+    assert line.status_code == 201, line.text
+    tank = client.post("/api/batch-tanks", headers=admin_h,
+                       json={"batch_ids": [batch_id], "tank_code": "TANK-PLANNEDTANK-1",
+                             "tank_lm": "FV-PLANNEDTANK-1"})
+    assert tank.status_code == 201, tank.text
+    tank_id = tank.json()["tank_id"]
+    got = client.get(f"/api/batch-tanks/{tank_id}", headers=admin_h).json()
+    assert got["status"] == "planned"
+    assert got["status_label"] == "Chưa nấu"
+
+    # Chuyển "ready" (vẫn chưa running) -> vẫn còn "planned".
+    r = client.post(f"/api/batches/{batch_id}/transition", headers=admin_h, json={"target": "ready"})
+    assert r.status_code == 200, r.text
+    got2 = client.get(f"/api/batch-tanks/{tank_id}", headers=admin_h).json()
+    assert got2["status"] == "planned"
+
+    # Chuyển "running" -> giờ mới tính "đang điền dịch" (dang_nau).
+    r = client.post(f"/api/batches/{batch_id}/transition", headers=admin_h, json={"target": "running"})
+    assert r.status_code == 200, r.text
+    got3 = client.get(f"/api/batch-tanks/{tank_id}", headers=admin_h).json()
+    assert got3["status"] == "dang_nau"
+    assert got3["status_label"] == "Đang điền dịch"
+
+
 def test_ferment_qc_sample_kcs_only_for_batch_tank_scope(client, admin_h, kcs_h, vanhanh_h):
     """Ghi "lần lấy mẫu" CT chính/CT phụ lên men (POST /brewing/qc-samples) cho pipeline "Mẻ sản
     xuất" mới (scope_type="batch_tank") CHỈ dành cho KCS (quyền "quality.release") — vận hành

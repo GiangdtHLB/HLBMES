@@ -273,14 +273,34 @@ def transition(db: Session, batch_id: str, target: str, user: User, reason: str 
     if target_state == BatchState.RUNNING and batch.start_at is None:
         batch.start_at = utcnow()
     batch.version += 1
+    refunded = _refund_consumed_materials(db, batch, user, reason) if target_state == BatchState.CANCELLED else []
     record_audit(db, entity_type="batch", entity_id=batch.batch_id,
                  action=f"transition:{target}", actor=user, before=before,
-                 after={"state": batch.state}, reason=reason)
+                 after={"state": batch.state, "refunded_materials": refunded} if refunded else {"state": batch.state},
+                 reason=reason)
     if target_state in (BatchState.COMPLETED, BatchState.CANCELLED) and batch.work_order_id:
         _auto_complete_work_order(db, batch.work_order_id, user)
     db.commit()
     db.refresh(batch)
     return batch
+
+
+def cancel_batch_system(db: Session, batch: BatchExecution, user: User, reason: str = None) -> list:
+    """Hủy 1 mẻ do HỆ THỐNG cascade (khi Lệnh SX cha bị hủy, xem
+    workorders.py::_cancel_active_batches) — mirror nhánh "cancelled" của transition() (đổi
+    state + hoàn NVL đã cấp qua _refund_consumed_materials), nhưng KHÔNG check lại role thao
+    tác mẻ riêng lẻ (người gọi đã qua require_perm(wo.manage) ở lệnh cha) và KHÔNG tự commit
+    (gộp chung 1 transaction với lệnh cha). Chỉ gọi cho mẻ đang active (planned/ready/running/
+    held) — completed/closed không được cancel (BATCH_TRANSITIONS chặn, mẻ đã có kết quả thật)."""
+    before = {"state": batch.state}
+    batch.state = BatchState.CANCELLED.value
+    batch.version += 1
+    refunded = _refund_consumed_materials(db, batch, user, reason)
+    record_audit(db, entity_type="batch", entity_id=batch.batch_id,
+                 action="transition:cancelled", actor=user, before=before,
+                 after={"state": batch.state, "refunded_materials": refunded} if refunded else {"state": batch.state},
+                 reason=reason or "Hủy theo Lệnh SX (Điều độ) cha bị hủy")
+    return refunded
 
 
 def _auto_complete_work_order(db: Session, work_order_id: str, user: User) -> None:
@@ -353,6 +373,8 @@ def consume_lot(db: Session, batch_id: str, lot_id: str, quantity: float, user: 
     require_role(user, Role.OPERATOR, Role.SUPERVISOR, Role.ENGINEER)
     batch = _get(db, batch_id)
     _assert_not_locked(batch)
+    if batch.state == BatchState.CLOSED.value:
+        raise DomainError("Mẻ đã đóng hồ sơ (closed) — không thể cấp liệu.")
     # with_for_update(): khóa hàng lô NVL TRƯỚC khi đọc-rồi-ghi quantity — 2 request cấp liệu
     # gần như đồng thời trên CÙNG lô (VD cấp liệu cho 2 mẻ khác nhau cùng lúc) có thể cùng đọc
     # quantity cũ, mất 1 lần trừ trên DB có row-lock thật (SQL Server/Postgres — SQLite bỏ qua;
@@ -423,6 +445,45 @@ def produce_lot(db: Session, batch_id: str, lot_code: str, quantity: float, lot_
     db.commit()
     db.refresh(lot)
     return lot
+
+
+def _refund_consumed_materials(db: Session, batch: BatchExecution, user: User, reason: str = None) -> list:
+    """Hoàn lại TOÀN BỘ NVL đã cấp cho mẻ khi mẻ bị HỦY (cancelled) — mirror
+    dispense.py::adjust_actual (nhánh hoàn) nhưng hoàn hết chứ không hoàn theo target: cộng lại
+    lot.quantity, mở lại status nếu đang consumed, xóa cạnh genealogy consume (đã hoàn hết, không
+    còn số dư để giữ). Trước đây transition() sang "cancelled" chỉ đổi state, không hoàn gì —
+    NVL đã cấp bị coi như tiêu thụ vĩnh viễn dù mẻ không còn sản xuất nữa (audit 2026-09-06)."""
+    edges = db.execute(select(GenealogyEdge).where(
+        GenealogyEdge.to_type == "batch", GenealogyEdge.to_id == batch.batch_id,
+        GenealogyEdge.from_type == "lot", GenealogyEdge.relation == GenealogyRelation.CONSUME.value,
+    )).scalars().all()
+    edges = [e for e in edges if e.quantity]
+    if not edges:
+        return []
+    disp = Dispense(dispense_id=new_id(),
+                    dispense_code=f"CANCEL-{utcnow():%Y%m%d}-{new_id()[:5].upper()}",
+                    batch_id=batch.batch_id, mode="cancel_refund", status="issued",
+                    note=f"Hoàn NVL do hủy mẻ '{batch.batch_code}'" + (f" — {reason}" if reason else ""),
+                    created_by=user.username, created_at=utcnow())
+    db.add(disp)
+    db.flush()
+    lines = []
+    for edge in edges:
+        lot = db.execute(select(MaterialLot).where(
+            MaterialLot.lot_id == edge.from_id).with_for_update()).scalar_one_or_none()
+        if not lot:
+            continue
+        take = edge.quantity
+        lot.quantity = round(lot.quantity + take, 6)
+        if lot.status == LotStatus.CONSUMED.value:
+            lot.status = LotStatus.AVAILABLE.value
+        row = {"material_code": bom.material_code_for_lot(db, lot), "lot_id": lot.lot_id,
+              "lot_code": lot.lot_code, "quantity": -take, "uom": lot.uom,
+              "fifo_ok": True, "reason": reason or "Hủy mẻ"}
+        db.add(DispenseLine(line_id=new_id(), dispense_id=disp.dispense_id, **row))
+        lines.append(row)
+        db.delete(edge)
+    return lines
 
 
 def _assert_closeable(db: Session, batch: BatchExecution) -> None:

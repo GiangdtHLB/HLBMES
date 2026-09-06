@@ -100,9 +100,17 @@ def _batch_tank_len_men_counts(db: Session) -> dict:
     đoạn Lọc rồi, không còn tính là "đang lên men" nữa (yêu cầu người dùng 2026-09-02: "tank
     đang lọc mà lại vẫn hiển thị đang lên men"). `dang_loc` (yêu cầu người dùng 2026-09-02: ghi
     chú thêm "số tank đang lọc") đếm riêng tank "loc_1_phan" (đang rút dịch dở dang) — KHÁC
-    "trống" thật sự (đã rút hết/am, hoặc chưa từng gộp mẻ nào). `dang_nap` giữ nguyên = 0 (không
-    có trạng thái "đang nạp dở dang" trong dữ liệu — merge_batches_into_tank ghi on_hand ĐỦ ngay
-    khi gộp mẻ, không có bước tăng dần để tính riêng, theo lựa chọn người dùng 2026-09-02)."""
+    "trống" thật sự (đã rút hết/am, hoặc chưa từng gộp mẻ nào). `dang_nap` đếm tank status
+    "dang_nau" (ÍT NHẤT 1 mẻ đã gộp vào THẬT SỰ bắt đầu nấu — running/held/completed/closed —
+    nhưng CHƯA kết thúc hết cả tank, xem services/batch_pipeline.py::_tank_status dòng
+    "dang_nau") — TRƯỚC ĐÂY hardcode = 0 dựa trên tiền đề sai (tưởng không có trạng thái "đang
+    nạp dở dang" nào), khiến tank đang thật sự bị chiếm dụng bị đếm nhầm vào "trống" (audit
+    2026-09-06, người dùng phát hiện qua dashboard thật). `dat_cho` (yêu cầu người dùng
+    2026-09-06: "nếu 1 trong các mẻ sản xuất nấu ít nhất là running/Completed/closed thì được
+    coi là đang điền dịch, nếu không đều ở trạng thái Planned") đếm riêng tank ĐÃ gộp mẻ nhưng
+    TẤT CẢ mẻ còn "planned"/"ready" (chưa mẻ nào thật sự chạy) — tank đã bị "đặt chỗ" (không cho
+    mẻ khác gộp vào nữa, xem _tank_lm_occupied) nhưng CHƯA có dịch nào chảy vào, khác cả "đang
+    điền dịch" lẫn "trống" thật sự."""
     lines = db.execute(select(ProductionLine).where(
         ProductionLine.kind == "tank", ProductionLine.active == true())).scalars().all()
     tanks_by_code: dict[str, str] = {}
@@ -112,8 +120,10 @@ def _batch_tank_len_men_counts(db: Session) -> dict:
     total = len(lines)
     dang_su_dung = sum(1 for l in lines if tanks_by_code.get(l.code) in ("len_men", "cho_loc"))
     dang_loc = sum(1 for l in lines if tanks_by_code.get(l.code) == "loc_1_phan")
-    return {"total": total, "dang_su_dung": dang_su_dung, "dang_loc": dang_loc, "dang_nap": 0,
-            "trong": total - dang_su_dung - dang_loc}
+    dang_nap = sum(1 for l in lines if tanks_by_code.get(l.code) == "dang_nau")
+    dat_cho = sum(1 for l in lines if tanks_by_code.get(l.code) == "planned")
+    return {"total": total, "dang_su_dung": dang_su_dung, "dang_loc": dang_loc, "dang_nap": dang_nap,
+            "dat_cho": dat_cho, "trong": total - dang_su_dung - dang_loc - dang_nap - dat_cho}
 
 
 def production_summary(db: Session) -> dict:

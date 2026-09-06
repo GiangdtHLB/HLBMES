@@ -157,3 +157,70 @@ def test_delete_removes_own_produced_lot_when_untouched(client, admin_h):
     assert r.status_code == 204, r.text
     lots = client.get("/api/lots", headers=admin_h).json()
     assert not any(l["lot_id"] == out_lot_id for l in lots)
+
+
+def test_cancel_refunds_consumed_lot_quantity(client, admin_h):
+    """Trước đây chuyển mẻ sang "cancelled" chỉ đổi state, không hoàn NVL đã cấp — khác hẳn
+    delete_batch (đã hoàn từ trước). Giờ cancelled cũng phải hoàn (mirror delete_batch), nhưng
+    KHÔNG xóa mẻ (khác delete) — chỉ hoàn tồn + xóa cạnh genealogy consume đã hoàn hết."""
+    batch_id = _make_batch(client, admin_h, "8")
+    mat = client.post("/api/materials", headers=admin_h,
+                      json={"code": "NVL-CANCEL-08", "name": "NVL hủy mẻ 08", "uom": "kg"})
+    assert mat.status_code == 201, mat.text
+    lot = client.post("/api/lots", headers=admin_h,
+                      json={"lot_code": "LOT-CANCEL-08", "material_id": mat.json()["material_id"],
+                            "quantity": 500, "uom": "kg", "location": "Kho phân xưởng"})
+    assert lot.status_code == 201, lot.text
+    lot_id = lot.json()["lot_id"]
+
+    consume = client.post(f"/api/batches/{batch_id}/consume", headers=admin_h,
+                          json={"lot_id": lot_id, "quantity": 120})
+    assert consume.status_code == 200, consume.text
+    remaining = next(l for l in client.get("/api/lots", headers=admin_h).json() if l["lot_id"] == lot_id)
+    assert remaining["quantity"] == 380
+
+    cancel = client.post(f"/api/batches/{batch_id}/transition", headers=admin_h,
+                         json={"target": "cancelled", "reason": "Test hủy mẻ có hoàn NVL"})
+    assert cancel.status_code == 200, cancel.text
+    assert cancel.json()["state"] == "cancelled"
+
+    restored = next(l for l in client.get("/api/lots", headers=admin_h).json() if l["lot_id"] == lot_id)
+    assert restored["quantity"] == 500
+    assert restored["status"] == "available"
+
+    # Mẻ vẫn còn (khác delete) — chỉ đổi state, hồ sơ vẫn truy xuất được.
+    still_there = client.get(f"/api/batches/{batch_id}", headers=admin_h)
+    assert still_there.status_code == 200, still_there.text
+    assert still_there.json()["state"] == "cancelled"
+
+
+def test_dispense_blocked_after_closed(client, admin_h):
+    """Sau khi mẻ đã "closed", không cấp liệu được nữa — services/batches.py::consume_lot
+    trước đây không hề check state, mẻ closed vẫn cấp liệu bình thường như chưa đóng hồ sơ gì
+    (yêu cầu người dùng 2026-09-06: "nếu closed thì không cho cấp liệu"). Chặn ở consume_lot
+    (chokepoint chung cho cả /consume, /dispense, /dispense/backflush, phần "tăng" của
+    /dispense/adjust)."""
+    batch_id = _make_batch(client, admin_h, "9")
+    _run_batch_to_completed(client, admin_h, batch_id)
+    release = client.post("/api/quality/hold", headers=admin_h,
+                          json={"scope_type": "batch", "scope_id": batch_id, "on_hold": False})
+    assert release.status_code == 200, release.text
+    close = client.post(f"/api/batches/{batch_id}/transition", headers=admin_h, json={"target": "closed"})
+    assert close.status_code == 200, close.text
+
+    mat = client.post("/api/materials", headers=admin_h,
+                      json={"code": "NVL-CLOSEDBLOCK-01", "name": "NVL test chặn cấp liệu closed", "uom": "kg"})
+    assert mat.status_code == 201, mat.text
+    lot = client.post("/api/lots", headers=admin_h,
+                      json={"lot_code": "LOT-CLOSEDBLOCK-01", "material_id": mat.json()["material_id"],
+                            "quantity": 500, "uom": "kg", "location": "Kho phân xưởng"})
+    assert lot.status_code == 201, lot.text
+    lot_id = lot.json()["lot_id"]
+
+    consume = client.post(f"/api/batches/{batch_id}/consume", headers=admin_h,
+                          json={"lot_id": lot_id, "quantity": 10})
+    assert consume.status_code == 409, consume.text
+
+    dispense = client.post(f"/api/dispense/{batch_id}", headers=admin_h,
+                           json={"lines": [{"material_code": "NVL-CLOSEDBLOCK-01", "quantity": 10}]})
+    assert dispense.status_code == 409, dispense.text
