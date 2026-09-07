@@ -782,6 +782,26 @@ def _consumed_lot_edges(db: Session, since: datetime, until: datetime = None) ->
     return db.execute(stmt).all()
 
 
+def _blank_movement_agg() -> dict:
+    return {"receipt": 0.0, "issue": 0.0, "return": 0.0,
+            "receipt_first": None, "receipt_last": None,
+            "issue_first": None, "issue_last": None}
+
+
+def _touch_movement_agg(agg_row: dict, kind: str, qty: float, ts) -> None:
+    """Cộng dồn số lượng VÀ cập nhật mốc ngày đầu/cuối cho inventory_report/lot_inventory_report
+    — kind "receipt"/"return" tính vào mốc "nhập" hiển thị, "issue" tính vào mốc "xuất" (yêu cầu
+    người dùng 2026-09-06: "thiếu ngày tháng nhập, xuất" trên BC nhập-xuất-tồn — trước đây chỉ
+    cộng dồn số lượng cả kỳ, không biết giao dịch xảy ra khoảng nào)."""
+    agg_row[kind] += qty
+    date_key = "receipt" if kind in ("receipt", "return") else "issue"
+    first_k, last_k = f"{date_key}_first", f"{date_key}_last"
+    if agg_row[first_k] is None or ts < agg_row[first_k]:
+        agg_row[first_k] = ts
+    if agg_row[last_k] is None or ts > agg_row[last_k]:
+        agg_row[last_k] = ts
+
+
 def inventory_report(db: Session, days: int = 30, location: str = None,
                      date_from: datetime = None, date_to: datetime = None) -> list[dict]:
     """BC nhập-xuất-tồn trong kỳ: tổng nhập, tổng xuất, tồn hiện tại theo vật tư (lọc theo kho
@@ -800,6 +820,7 @@ def inventory_report(db: Session, days: int = 30, location: str = None,
         stmt = stmt.where(StockMovement.ts <= until)
     moves = db.execute(stmt).scalars().all()
     workshop = _is_workshop_location(location) if location else None
+    _blank_agg, _touch = _blank_movement_agg, _touch_movement_agg
     agg = {}
     for m in moves:
         if m.material_id is None:
@@ -817,20 +838,20 @@ def inventory_report(db: Session, days: int = 30, location: str = None,
             if not location:
                 continue
             if _is_workshop_location(m.location_to) == workshop:
-                agg.setdefault(m.material_id, {"receipt": 0.0, "issue": 0.0, "return": 0.0})["receipt"] += m.quantity
+                _touch(agg.setdefault(m.material_id, _blank_agg()), "receipt", m.quantity, m.ts)
             elif _is_workshop_location(m.location_from) == workshop:
-                agg.setdefault(m.material_id, {"receipt": 0.0, "issue": 0.0, "return": 0.0})["issue"] += m.quantity
+                _touch(agg.setdefault(m.material_id, _blank_agg()), "issue", m.quantity, m.ts)
             continue
         if location:
             loc = m.location_to if m.movement_type in ("receipt", "return") else m.location_from
             if _is_workshop_location(loc) != workshop:
                 continue
         if m.movement_type in ("receipt", "issue", "return"):
-            agg.setdefault(m.material_id, {"receipt": 0.0, "issue": 0.0, "return": 0.0})[m.movement_type] += m.quantity
+            _touch(agg.setdefault(m.material_id, _blank_agg()), m.movement_type, m.quantity, m.ts)
     for edge, lot in _consumed_lot_edges(db, since, until):
         if location and _is_workshop_location(lot.location) != workshop:
             continue
-        agg.setdefault(lot.material_id, {"receipt": 0.0, "issue": 0.0, "return": 0.0})["issue"] += (edge.quantity or 0.0)
+        _touch(agg.setdefault(lot.material_id, _blank_agg()), "issue", edge.quantity or 0.0, edge.event_time)
     mat_ids = set(on_hand) | set(agg)
     mats = {mt.material_id: mt for mt in db.execute(
         select(Material).where(Material.material_id.in_(mat_ids))).scalars().all()} if mat_ids else {}
@@ -843,9 +864,11 @@ def inventory_report(db: Session, days: int = 30, location: str = None,
                   "material_name": mat.name if mat else "", "on_hand": 0.0, "actual_total": 0.0,
                   "pending_qc": 0.0, "uom": mat.uom if mat else "", "category": mat.category if mat else None,
                   "stock_min": None, "low_stock": False}
-        a = agg.get(mid, {"receipt": 0.0, "issue": 0.0, "return": 0.0})
+        a = agg.get(mid, _blank_agg())
         out.append({**oh, "received": round(a["receipt"] + a["return"], 3),
-                    "issued": round(a["issue"], 3)})
+                    "issued": round(a["issue"], 3),
+                    "receipt_first": a["receipt_first"], "receipt_last": a["receipt_last"],
+                    "issue_first": a["issue_first"], "issue_last": a["issue_last"]})
     return sorted(out, key=lambda x: x["material_code"])
 
 
@@ -861,6 +884,7 @@ def lot_inventory_report(db: Session, days: int = 30, location: str = None,
 
     all_lots = db.execute(select(MaterialLot)).scalars().all()
     lots_by_id = {l.lot_id: l for l in all_lots}
+    _blank_agg, _touch = _blank_movement_agg, _touch_movement_agg
 
     stmt = select(StockMovement).where(StockMovement.ts >= since)
     if until:
@@ -874,20 +898,20 @@ def lot_inventory_report(db: Session, days: int = 30, location: str = None,
             if not location:
                 continue
             if _is_workshop_location(m.location_to) == workshop:
-                agg.setdefault(m.lot_id, {"receipt": 0.0, "issue": 0.0, "return": 0.0})["receipt"] += m.quantity
+                _touch(agg.setdefault(m.lot_id, _blank_agg()), "receipt", m.quantity, m.ts)
             elif _is_workshop_location(m.location_from) == workshop:
-                agg.setdefault(m.lot_id, {"receipt": 0.0, "issue": 0.0, "return": 0.0})["issue"] += m.quantity
+                _touch(agg.setdefault(m.lot_id, _blank_agg()), "issue", m.quantity, m.ts)
             continue
         if location:
             loc = m.location_to if m.movement_type in ("receipt", "return") else m.location_from
             if _is_workshop_location(loc) != workshop:
                 continue
         if m.movement_type in ("receipt", "issue", "return"):
-            agg.setdefault(m.lot_id, {"receipt": 0.0, "issue": 0.0, "return": 0.0})[m.movement_type] += m.quantity
+            _touch(agg.setdefault(m.lot_id, _blank_agg()), m.movement_type, m.quantity, m.ts)
     for edge, lot in _consumed_lot_edges(db, since, until):
         if location and _is_workshop_location(lot.location) != workshop:
             continue
-        agg.setdefault(lot.lot_id, {"receipt": 0.0, "issue": 0.0, "return": 0.0})["issue"] += (edge.quantity or 0.0)
+        _touch(agg.setdefault(lot.lot_id, _blank_agg()), "issue", edge.quantity or 0.0, edge.event_time)
 
     if location:
         current_ids = {l.lot_id for l in all_lots if l.quantity > 0 and _is_workshop_location(l.location) == workshop}
@@ -902,7 +926,7 @@ def lot_inventory_report(db: Session, days: int = 30, location: str = None,
         lot = lots_by_id.get(lid)
         if not lot:
             continue
-        a = agg.get(lid, {"receipt": 0.0, "issue": 0.0, "return": 0.0})
+        a = agg.get(lid, _blank_agg())
         mat = mats.get(lot.material_id)
         out.append({
             "lot_id": lot.lot_id, "lot_code": lot.lot_code,
@@ -910,6 +934,8 @@ def lot_inventory_report(db: Session, days: int = 30, location: str = None,
             "material_name": mat.name if mat else "", "uom": lot.uom,
             "location": lot.location, "status": lot.status,
             "on_hand": round(lot.quantity, 3),
+            "receipt_first": a["receipt_first"], "receipt_last": a["receipt_last"],
+            "issue_first": a["issue_first"], "issue_last": a["issue_last"],
             "received": round(a["receipt"] + a["return"], 3),
             "issued": round(a["issue"], 3),
         })

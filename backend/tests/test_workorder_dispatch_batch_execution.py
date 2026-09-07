@@ -487,3 +487,7 @@ def test_ebr_shows_water_qc_declared_at_work_order_level(
     assert row["value"] == 5
     assert row["status"] == "pass"
     assert row["work_order_id"] == wo_id2
+    # Ngưỡng (lower/upper) phải đi kèm để popup EBR hiện được cột "Ngưỡng" (yêu cầu người dùng
+    # 2026-09-06: "bổ sung thêm cột ngưỡng giá trị cho chỉ tiêu QC, chỉ tiêu nước nấu").
+    assert row["lower"] == 1
+    assert row["upper"] == 10

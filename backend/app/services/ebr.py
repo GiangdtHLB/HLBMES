@@ -346,7 +346,8 @@ def _nuoc_nau_display(db: Session, nodes: list[dict]) -> list[dict]:
         for r in rows:
             out.append({"work_order_id": wo.wo_id, "wo_code": wo.wo_code, "parameter": r.parameter,
                        "parameter_name": param_names.get(r.parameter, r.parameter),
-                       "value": r.value, "unit": r.unit, "status": r.status})
+                       "value": r.value, "unit": r.unit, "status": r.status,
+                       "lower": r.lower_limit, "upper": r.upper_limit})
     return out
 
 
