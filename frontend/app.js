@@ -1922,13 +1922,13 @@ async function showVersion(versionId) {
     if (m.alt_group_code) {
       const grp = (CACHE.materialAltGroups || []).find(g => g.code === m.alt_group_code);
       const memberRows = (m.member_qty || []).map(mq => `<tr class="muted" style="font-size:12px">
-        <td style="padding-left:20px">↳ ${esc(mq.material_code)}</td><td>${mq.qty}</td><td>${esc(m.uom || "")}</td><td></td></tr>`).join("");
+        <td style="padding-left:20px">↳ ${esc(mq.material_code)}</td><td>${round4(mq.qty)}</td><td>${esc(m.uom || "")}</td><td></td></tr>`).join("");
       return `<tr><td>${esc(grp ? grp.name : m.alt_group_code)} <span class="muted">(nhóm vật tư thay thế${grp && grp.selection_mode === "multi" ? " — chọn nhiều mã" : ""})</span></td>
-      <td>${m.member_qty ? "—" : m.qty}</td><td>${esc(m.uom || "")}</td><td>±${m.tol_pct || 0}%</td></tr>${memberRows}`;
+      <td>${m.member_qty ? "—" : round4(m.qty)}</td><td>${esc(m.uom || "")}</td><td>±${m.tol_pct || 0}%</td></tr>${memberRows}`;
     }
     const mat = (CACHE.materials || []).find(x => x.code === m.material_code);
     return `<tr><td><code class="k">${esc(m.material_code)}</code> ${esc(mat ? mat.name : "")}</td>
-    <td>${m.qty}</td><td>${esc(m.uom || "")}</td><td>±${m.tol_pct || 0}%</td></tr>`;
+    <td>${round4(m.qty)}</td><td>${esc(m.uom || "")}</td><td>±${m.tol_pct || 0}%</td></tr>`;
   }).join("");
   const params = (v.parameters || []).map(p => `<tr><td>${esc(p.name)}</td><td>${p.target ?? ""}</td>
     <td class="muted">${p.lower ?? "−∞"} … ${p.upper ?? "+∞"}</td><td>${esc(p.unit || "")}</td></tr>`).join("");
@@ -2000,7 +2000,7 @@ function bomGroupMemberQtyHTML(groupCode, memberQty, legacyQty) {
   const rows = (g.member_material_ids || []).map(mid => {
     const mat = (CACHE.materials || []).find(m => m.material_id === mid);
     const code = mat ? mat.code : mid;
-    const val = qtyByCode.hasOwnProperty(code) ? qtyByCode[code] : (legacyQty ?? "");
+    const val = qtyByCode.hasOwnProperty(code) ? round4(qtyByCode[code]) : (legacyQty != null ? round4(legacyQty) : "");
     return `<div style="display:flex;align-items:center;gap:6px;margin-bottom:3px">
       <input type="number" step="any" class="bm-member-qty" data-code="${esc(code)}" value="${esc(val)}" style="width:80px" placeholder="0"/>
       <span class="muted" style="font-size:11px">${esc(mat ? `${mat.code} — ${mat.name}` : code)}</span>
@@ -2010,7 +2010,7 @@ function bomGroupMemberQtyHTML(groupCode, memberQty, legacyQty) {
 }
 function bomQtyCellHTML(line, groupCode, permember) {
   if (groupCode && permember) return bomGroupMemberQtyHTML(groupCode, line.member_qty, line.qty);
-  return `<input class="bm-qty" type="number" step="any" value="${line.qty ?? ""}" style="width:110px" title="${groupCode ? 'Tổng dùng chung cho cả nhóm — người lập Lệnh nấu tự phân bổ qua các mã thành viên' : ''}"/>`;
+  return `<input class="bm-qty" type="number" step="any" value="${line.qty != null ? round4(line.qty) : ""}" style="width:110px" title="${groupCode ? 'Tổng dùng chung cho cả nhóm — người lập Lệnh nấu tự phân bổ qua các mã thành viên' : ''}"/>`;
 }
 function bomPermemberLabelHTML(groupCode, checked) {
   if (!groupCode) return "";
@@ -2085,6 +2085,7 @@ function wireBomRows() {
     txt.addEventListener("blur", () => setTimeout(closePanel, 150));
   });
 }
+function round4(x) { return Math.round((parseFloat(x) || 0) * 10000) / 10000; }
 function collectBom() {
   return [...document.querySelectorAll(".bomrow")].map(tr => {
     const val = tr.querySelector(".bm-mat").value;
@@ -2096,20 +2097,20 @@ function collectBom() {
         // Định mức RIÊNG từng thành viên — chỉ lưu kiểu này khi người tạo Công thức chủ động
         // bật checkbox (VD nhóm CO2 nhiều nồng độ khác nhau).
         const member_qty = [...tr.querySelectorAll(".bm-member-qty")].map(inp => ({
-          material_code: inp.dataset.code, qty: parseFloat(inp.value) || 0,
+          material_code: inp.dataset.code, qty: round4(inp.value),
         })).filter(mq => mq.qty > 0);
         return { alt_group_code: val.slice(4), member_qty, uom: chosenUom, tol_pct };
       }
       // Mặc định: 1 TỔNG dùng chung cho cả nhóm (VD "Malt Anh" rời/bao hoàn toàn tương đương)
       // — người lập Lệnh nấu/ghi NVL thực tế tự phân bổ qua các mã thành viên tuỳ tồn kho.
-      const qtyRaw = parseFloat(tr.querySelector(".bm-qty").value) || 0;
+      const qtyRaw = round4(tr.querySelector(".bm-qty").value);
       return { alt_group_code: val.slice(4), qty: qtyRaw, uom: chosenUom, tol_pct };
     }
     const qtyRaw = parseFloat(tr.querySelector(".bm-qty").value) || 0;
     const mat = (CACHE.materials || []).find(m => m.code === val);
     // Nếu chọn đơn vị phụ (VD "bao") để nhập, quy đổi về đơn vị chính trước khi gửi — server
-    // luôn lưu/scale BOM theo đơn vị chính của vật tư.
-    const qty = altUomToBaseQty(mat, qtyRaw, chosenUom);
+    // luôn lưu/scale BOM theo đơn vị chính của vật tư. Định mức chỉ giữ 4 số sau dấu phẩy.
+    const qty = round4(altUomToBaseQty(mat, qtyRaw, chosenUom));
     return {
       material_code: val,
       qty,
@@ -2784,16 +2785,24 @@ async function openEBR(batchId) {
     <td>${l.planned != null ? l.planned + " " + esc(l.uom || "") : ""}</td><td>${l.actual}</td>
     <td>${(l.lot_codes || []).join(", ")}${l.fifo_ok === false ? ' <span style="color:var(--red)">⚠</span>' : l.fifo_ok === true ? ' <span style="color:var(--green)">✔</span>' : ""}</td>
     <td>${l.status != null ? badge({dat:"available",vuot:"critical",thieu:"due",chua_dung:"planned"}[l.status] || "planned") + l.status : ""}</td></tr>`).join("");
+  // Ngưỡng (lower–upper) cho Kết quả QC + Chỉ tiêu nước nấu (yêu cầu người dùng 2026-09-06:
+  // "bổ sung thêm cột ngưỡng giá trị") — dữ liệu đã có sẵn ở cả 2 nguồn (QualityResult.lower_
+  // limit/upper_limit), chỉ chưa hiện ra ở popup EBR này.
+  const fmtThreshold = (lower, upper) => {
+    if (lower == null && upper == null) return '<span class="muted">—</span>';
+    if (lower != null && upper != null) return `${lower} – ${upper}`;
+    return lower != null ? `≥ ${lower}` : `≤ ${upper}`;
+  };
   const qc = (c.quality || []).map(q => { const p = paramByCode[q.parameter]; return `<tr>
     <td>${p ? esc(p.name) : esc(q.parameter)}<div class="muted">${esc(q.parameter)}${(p && p.unit) || q.unit ? " (" + esc((p && p.unit) || q.unit) + ")" : ""}</div></td>
-    <td>${q.value ?? "—"} ${esc(q.unit || "")}</td><td>${badge(q.status)}</td></tr>`; }).join("");
+    <td>${q.value ?? "—"} ${esc(q.unit || "")}</td><td class="muted">${fmtThreshold(q.lower, q.upper)}</td><td>${badge(q.status)}</td></tr>`; }).join("");
   const devs = (c.deviations || []).map(d => `<tr><td><code class="k">${esc(d.code)}</code></td><td>${esc(d.severity)}</td><td>${esc(d.reason)}</td><td>${badge(d.state)}</td></tr>`).join("");
   const chems = (c.chemicals || []).map(x => `<tr><td>${esc(x.stage)}</td><td>${esc(x.chemical)}</td><td>${x.quantity} ${esc(x.uom)}</td></tr>`).join("");
   // Chỉ tiêu Nước nấu bia — khai theo Mã điều độ (WorkOrder) của mẻ này, xem services/ebr.py::
   // _nuoc_nau_display (yêu cầu người dùng 2026-09-06: "Thêm chỉ tiêu chất lượng nước vào trong
   // pop up hồ sơ EBR này").
   const nuocNau = (e.nuoc_nau_display || []).map(n => `<tr><td>${esc(n.parameter_name)}<div class="muted">${esc(n.parameter)}</div></td>
-    <td>${n.value ?? "—"} ${esc(n.unit || "")}</td><td>${badge(n.status)}</td></tr>`).join("");
+    <td>${n.value ?? "—"} ${esc(n.unit || "")}</td><td class="muted">${fmtThreshold(n.lower, n.upper)}</td><td>${badge(n.status)}</td></tr>`).join("");
   const sigs = (e.signatures || []).map(s => `<tr><td>${esc(s.meaning)}</td><td>${esc(s.by)} ${s.role ? "(" + esc(s.role) + ")" : ""}</td>
     <td class="muted">${fmt(s.time)}</td><td class="muted">${esc(s.reason || "")}</td><td class="hashbox" style="max-width:120px">${esc((s.hash || "").slice(0, 16))}…</td></tr>`).join("");
   const lockBadge = e.locked ? `${badge("closed")}ĐÃ KHÓA (v${e.snapshot ? e.snapshot.version : "?"})` : `${badge("planned")}chưa khóa`;
@@ -2809,10 +2818,10 @@ async function openEBR(batchId) {
     <div class="timeline" style="max-height:220px;overflow-y:auto">${steps || '<div class="muted">—</div>'}</div>
     <div class="split">
       <div><h3>Định mức ↔ Thực tế (BOM)</h3><table><thead><tr><th>Vật tư</th><th>ĐM</th><th>TT</th><th>Mã lô</th><th>KQ</th></tr></thead><tbody>${matRows || '<tr><td colspan=5 class="muted">—</td></tr>'}</tbody></table>
-        <h3>Kết quả QC</h3><table><thead><tr><th>Chỉ tiêu</th><th>Giá trị</th><th>KQ</th></tr></thead><tbody>${qc || '<tr><td colspan=3 class="muted">—</td></tr>'}</tbody></table></div>
+        <h3>Kết quả QC</h3><table><thead><tr><th>Chỉ tiêu</th><th>Giá trị</th><th>Ngưỡng</th><th>KQ</th></tr></thead><tbody>${qc || '<tr><td colspan=4 class="muted">—</td></tr>'}</tbody></table></div>
       <div><h3>Deviation</h3><table><thead><tr><th>Mã</th><th>Mức</th><th>Lý do</th><th>TT</th></tr></thead><tbody>${devs || '<tr><td colspan=4 class="muted">—</td></tr>'}</tbody></table>
         <h3>Hóa chất</h3><table><thead><tr><th>Công đoạn</th><th>Hóa chất</th><th>SL</th></tr></thead><tbody>${chems || '<tr><td colspan=3 class="muted">—</td></tr>'}</tbody></table>
-        <h3>Chỉ tiêu chất lượng nước (nấu bia)</h3><table><thead><tr><th>Chỉ tiêu</th><th>Giá trị</th><th>KQ</th></tr></thead><tbody>${nuocNau || '<tr><td colspan=3 class="muted">—</td></tr>'}</tbody></table></div>
+        <h3>Chỉ tiêu chất lượng nước (nấu bia)</h3><table><thead><tr><th>Chỉ tiêu</th><th>Giá trị</th><th>Ngưỡng</th><th>KQ</th></tr></thead><tbody>${nuocNau || '<tr><td colspan=4 class="muted">—</td></tr>'}</tbody></table></div>
     </div>
     <h3>Chữ ký điện tử</h3>
     <table><thead><tr><th>Ý nghĩa</th><th>Người ký</th><th>Thời gian</th><th>Lý do</th><th>Hash</th></tr></thead>
@@ -5725,17 +5734,28 @@ async function bcReportSectionHtml(prefix, defaultLocation) {
     (location ? `&location=${encodeURIComponent(location)}` : "");
   const rep = await GET(`/warehouse/report${mode === "lot" ? "/by-lot" : ""}?${q}`);
   const locLabel = location || "Cả 2 kho";
+  // Ngày nhập/xuất đầu-cuối trong kỳ (yêu cầu người dùng 2026-09-06: "thiếu ngày tháng nhập,
+  // xuất" — trước đây chỉ cộng dồn số lượng, không biết giao dịch xảy ra khoảng nào). Cùng 1
+  // ngày thì chỉ hiện 1 mốc, khác ngày thì hiện "đầu → cuối".
+  const fmtDateOnly = (t) => t ? new Date(t).toLocaleDateString("vi-VN") : null;
+  const fmtDateRange = (first, last) => {
+    if (!first) return '<span class="muted">—</span>';
+    const f = fmtDateOnly(first), l = fmtDateOnly(last);
+    return esc(f === l ? f : `${f} → ${l}`);
+  };
   const thead = mode === "lot"
-    ? `<tr><th>Mã lô</th><th>Mã VT</th><th>Tên</th><th>Nhập</th><th>Xuất</th><th>Tồn cuối</th><th>ĐVT</th><th>Vị trí</th><th>Trạng thái</th></tr>`
-    : `<tr><th>Mã VT</th><th>Tên</th><th>Nhập</th><th>Xuất</th><th>Tồn cuối</th><th>ĐVT</th></tr>`;
-  const colspan = mode === "lot" ? 9 : 6;
+    ? `<tr><th>Mã lô</th><th>Mã VT</th><th>Tên</th><th>Nhập</th><th>Ngày nhập</th><th>Xuất</th><th>Ngày xuất</th><th>Tồn cuối</th><th>ĐVT</th><th>Vị trí</th><th>Trạng thái</th></tr>`
+    : `<tr><th>Mã VT</th><th>Tên</th><th>Nhập</th><th>Ngày nhập</th><th>Xuất</th><th>Ngày xuất</th><th>Tồn cuối</th><th>ĐVT</th></tr>`;
+  const colspan = mode === "lot" ? 11 : 8;
   const rows = (mode === "lot" ? rep.map(r => `<tr><td><code class="k">${esc(r.lot_code)}</code></td>
       <td><code class="k">${esc(r.material_code)}</code></td><td>${esc(r.material_name)}</td>
-      <td style="color:var(--green)">${r.received}</td><td style="color:var(--orange)">${r.issued}</td>
+      <td style="color:var(--green)">${r.received}</td><td class="muted" style="font-size:12px">${fmtDateRange(r.receipt_first, r.receipt_last)}</td>
+      <td style="color:var(--orange)">${r.issued}</td><td class="muted" style="font-size:12px">${fmtDateRange(r.issue_first, r.issue_last)}</td>
       <td>${r.on_hand}</td><td>${esc(r.uom)}</td><td class="muted">${esc(r.location || "")}</td>
       <td>${badge(r.status === "consumed" || r.status === "scrapped" ? "obsolete" : r.status === "on_hold" ? "critical" : "available")}${esc(r.status)}</td></tr>`)
     : rep.map(r => `<tr><td><code class="k">${esc(r.material_code)}</code></td><td>${esc(r.material_name)}</td>
-      <td style="color:var(--green)">${r.received}</td><td style="color:var(--orange)">${r.issued}</td>
+      <td style="color:var(--green)">${r.received}</td><td class="muted" style="font-size:12px">${fmtDateRange(r.receipt_first, r.receipt_last)}</td>
+      <td style="color:var(--orange)">${r.issued}</td><td class="muted" style="font-size:12px">${fmtDateRange(r.issue_first, r.issue_last)}</td>
       <td>${r.on_hand}</td><td>${esc(r.uom)}</td></tr>`)).join("");
   return `<div class="panel"><h2>Báo cáo nhập-xuất-tồn — ${esc(locLabel)} <span class="muted">(${esc(dateFrom)} → ${esc(dateTo)})</span></h2>
     <div class="row">

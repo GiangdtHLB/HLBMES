@@ -354,6 +354,40 @@ def test_inventory_report_location_filter(client, admin_h, thukho_h):
     assert not any(r["material_id"] == mat_id for r in rep_px)
 
 
+def test_inventory_report_tracks_first_last_movement_dates(client, admin_h, thukho_h):
+    """services/warehouse.py::inventory_report/lot_inventory_report — BC nhập-xuất-tồn phải kèm
+    mốc ngày nhập/xuất đầu-cuối trong kỳ (yêu cầu người dùng 2026-09-06: "thiếu ngày tháng nhập,
+    xuất" — trước đây chỉ cộng dồn số lượng cả kỳ, không biết giao dịch xảy ra khoảng nào)."""
+    mat_id = _create_material(client, admin_h, "REP-DATE")
+    rc = client.post("/api/warehouse/receive", headers=thukho_h,
+                     json={"lot_code": "LOT-REP-DATE-01", "material_id": mat_id, "quantity": 100, "uom": "kg"})
+    assert rc.status_code == 200, rc.text
+    lot_id = rc.json()["lot_id"]
+    issue = client.post("/api/warehouse/issue", headers=admin_h,
+                       json={"lot_id": lot_id, "quantity": 30, "mode": "tu_do", "reason": "Thử nghiệm"})
+    assert issue.status_code == 200, issue.text
+
+    rep = client.get("/api/warehouse/report?days=1", headers=thukho_h).json()
+    row = next(r for r in rep if r["material_id"] == mat_id)
+    assert row["receipt_first"] is not None and row["receipt_last"] is not None
+    assert row["issue_first"] is not None and row["issue_last"] is not None
+
+    rep_lot = client.get("/api/warehouse/report/by-lot?days=1", headers=thukho_h).json()
+    row_lot = next(r for r in rep_lot if r["lot_id"] == lot_id)
+    assert row_lot["receipt_first"] is not None and row_lot["receipt_last"] is not None
+    assert row_lot["issue_first"] is not None and row_lot["issue_last"] is not None
+
+    # Vật tư chưa từng xuất (chỉ mới nhập) — issue_first/issue_last phải là None, không phải 0
+    # hay ngày giả nào khác.
+    mat_id2 = _create_material(client, admin_h, "REP-DATE-2")
+    client.post("/api/warehouse/receive", headers=thukho_h,
+               json={"lot_code": "LOT-REP-DATE-02", "material_id": mat_id2, "quantity": 50, "uom": "kg"})
+    rep2 = client.get("/api/warehouse/report?days=1", headers=thukho_h).json()
+    row2 = next(r for r in rep2 if r["material_id"] == mat_id2)
+    assert row2["receipt_first"] is not None
+    assert row2["issue_first"] is None and row2["issue_last"] is None
+
+
 def test_material_request_rejects_qty_over_stock(client, admin_h, thukho_h, vanhanh_h):
     mat_id = _create_material(client, admin_h, "REQ-OVERQTY")
     client.post("/api/warehouse/receive", headers=thukho_h,
