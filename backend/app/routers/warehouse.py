@@ -115,7 +115,8 @@ def issue(payload: IssueIn, db: Session = Depends(get_db), user: User = Depends(
     # gọi tới svc.issue() từ UI (nội bộ Nấu/Lọc/Chiết gọi thẳng svc.issue() bằng Python, không
     # qua route này nên không bị ảnh hưởng bởi ràng buộc admin-only ở đây).
     require_role(user, Role.ADMIN)
-    return svc.issue(db, payload.lot_id, payload.quantity, user, payload.mode, payload.reason, payload.ref_doc)
+    return svc.issue(db, payload.lot_id, payload.quantity, user, payload.mode, payload.reason, payload.ref_doc,
+                     issued_at=payload.issued_at)
 
 
 @router.post("/transfer")
@@ -361,8 +362,8 @@ def undo_issue(movement_id: str, db: Session = Depends(get_db), user: User = Dep
 
 @router.get("/movements", response_model=list[StockMovementOut])
 def list_movements(movement_type: str = None, mode: str = None, limit: int = 200, offset: int = 0,
-                   db: Session = Depends(get_db)):
-    return svc.list_movements(db, movement_type, mode, limit, offset)
+                   is_opening_balance: bool = None, db: Session = Depends(get_db)):
+    return svc.list_movements(db, movement_type, mode, limit, offset, is_opening_balance)
 
 
 # ---- Xóa lịch sử (chỉ admin) — dọn dẹp sổ nhập/xuất tự do/xuất theo đề nghị, dữ liệu vận
