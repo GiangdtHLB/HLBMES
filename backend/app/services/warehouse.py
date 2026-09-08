@@ -746,6 +746,18 @@ def _material_balances_as_of(db: Session, as_of, location: str = None) -> dict[s
                 delta -= qty
         if delta:
             out[material_id] = out.get(material_id, 0.0) + delta
+    # Bù cho lô KHÔNG có StockMovement nào (VD dữ liệu nạp thẳng vào DB từ hệ thống cũ, không qua
+    # receive()/issue() của app nên chưa từng ghi giao dịch) — không có lịch sử để dựng lại, nên
+    # lấy tạm MaterialLot.quantity/created_at HIỆN TẠI làm mốc duy nhất đã biết: coi như lô này
+    # "có mặt" nguyên vẹn kể từ created_at, tính vào mọi as_of >= created_at.
+    moved_lot_ids = {r[0] for r in db.execute(select(StockMovement.lot_id).where(
+        StockMovement.lot_id.isnot(None)).distinct())}
+    orphan_lots = db.execute(select(MaterialLot).where(
+        MaterialLot.lot_type == "material", MaterialLot.created_at <= as_of,
+        ~MaterialLot.lot_id.in_(moved_lot_ids) if moved_lot_ids else True)).scalars().all()
+    for lot in orphan_lots:
+        if lot.material_id and loc_matches(lot.location) and lot.quantity:
+            out[lot.material_id] = out.get(lot.material_id, 0.0) + lot.quantity
     return out
 
 
@@ -810,6 +822,19 @@ def _lot_balances_as_of(db: Session, as_of) -> tuple[dict[str, float], dict[str,
             if original_id:
                 balances[original_id] = balances.get(original_id, 0.0) - qty
         # adjust: bỏ qua (giới hạn đã biết, xem docstring)
+    # Bù cho lô KHÔNG có StockMovement nào (VD dữ liệu nạp thẳng vào DB từ hệ thống cũ) — lấy tạm
+    # MaterialLot.quantity/location/created_at HIỆN TẠI làm mốc duy nhất đã biết (mirror
+    # _material_balances_as_of, xem giải thích ở đó).
+    moved_lot_ids = {r[0] for r in db.execute(select(StockMovement.lot_id).where(
+        StockMovement.lot_id.isnot(None)).distinct())}
+    orphan_lots = db.execute(select(MaterialLot).where(
+        MaterialLot.lot_type == "material", MaterialLot.created_at <= as_of,
+        ~MaterialLot.lot_id.in_(moved_lot_ids) if moved_lot_ids else True)).scalars().all()
+    for lot in orphan_lots:
+        if lot.quantity:
+            balances[lot.lot_id] = balances.get(lot.lot_id, 0.0) + lot.quantity
+            if lot.location:
+                locations[lot.lot_id] = lot.location
     return balances, locations
 
 
@@ -1807,11 +1832,19 @@ def undo_transfer_kcpx_request(db: Session, request_id: str, user: User) -> dict
     return _transfer_kcpx_dict(req)
 
 
-def _sang_ngang_dict(req: SangNgangRequest) -> dict:
+def _sang_ngang_dict(db: Session, req: SangNgangRequest) -> dict:
+    # "Ngày xuất sang ngang" (received_at) = ts của StockMovement receipt GỐC (tạo lúc khai báo,
+    # có thể đã khai lùi ngày qua form) — khác "Ngày lập phiếu" (created_at, luôn là lúc submit
+    # form thật) — yêu cầu người dùng 2026-09-08.
+    received_at = None
+    if req.receipt_movement_id:
+        mv = db.get(StockMovement, req.receipt_movement_id)
+        if mv:
+            received_at = mv.ts
     return {"request_id": req.request_id, "request_code": req.request_code, "lot_id": req.lot_id,
             "quantity": req.quantity, "uom": req.uom, "reason": req.reason, "status": req.status,
             "movement_id": req.movement_id, "reversed": req.reversed,
-            "created_by": req.created_by, "created_at": req.created_at,
+            "created_by": req.created_by, "created_at": req.created_at, "received_at": received_at,
             "approved_by": req.approved_by, "approved_at": req.approved_at,
             "rejected_by": req.rejected_by, "rejected_at": req.rejected_at,
             "reject_reason": req.reject_reason,
@@ -1843,7 +1876,7 @@ def create_sang_ngang(db: Session, payload: dict, user: User) -> dict:
                 actor=user, after={"lot_id": receipt["lot_id"], "quantity": payload["quantity"]})
     db.commit()
     db.refresh(req)
-    return _sang_ngang_dict(req)
+    return _sang_ngang_dict(db, req)
 
 
 def list_sang_ngang_requests(db: Session, status: str = None, limit: int = 500,
@@ -1854,7 +1887,7 @@ def list_sang_ngang_requests(db: Session, status: str = None, limit: int = 500,
     if status:
         stmt = stmt.where(SangNgangRequest.status == status)
     rows = db.execute(stmt).scalars().all()
-    return [_sang_ngang_dict(r) for r in rows]
+    return [_sang_ngang_dict(db, r) for r in rows]
 
 
 def approve_sang_ngang(db: Session, request_id: str, user: User) -> dict:
@@ -1884,7 +1917,7 @@ def approve_sang_ngang(db: Session, request_id: str, user: User) -> dict:
     record_audit(db, entity_type="sang_ngang_request", entity_id=req.request_id, action="approve", actor=user)
     db.commit()
     db.refresh(req)
-    return _sang_ngang_dict(req)
+    return _sang_ngang_dict(db, req)
 
 
 def reject_sang_ngang(db: Session, request_id: str, user: User, reason: str = None) -> dict:
@@ -1901,7 +1934,7 @@ def reject_sang_ngang(db: Session, request_id: str, user: User, reason: str = No
                 actor=user, after={"reason": reason})
     db.commit()
     db.refresh(req)
-    return _sang_ngang_dict(req)
+    return _sang_ngang_dict(db, req)
 
 
 def resubmit_sang_ngang(db: Session, request_id: str, user: User) -> dict:
@@ -1931,7 +1964,7 @@ def resubmit_sang_ngang(db: Session, request_id: str, user: User) -> dict:
     req.reject_reason = None
     db.commit()
     db.refresh(req)
-    return _sang_ngang_dict(req)
+    return _sang_ngang_dict(db, req)
 
 
 def update_sang_ngang(db: Session, request_id: str, payload: dict, user: User) -> dict:
@@ -1955,7 +1988,7 @@ def update_sang_ngang(db: Session, request_id: str, payload: dict, user: User) -
                 actor=user, after={"quantity": req.quantity, "reason": req.reason})
     db.commit()
     db.refresh(req)
-    return _sang_ngang_dict(req)
+    return _sang_ngang_dict(db, req)
 
 
 def delete_sang_ngang(db: Session, request_id: str, user: User) -> dict:
@@ -1998,7 +2031,7 @@ def undo_sang_ngang(db: Session, request_id: str, user: User) -> dict:
     record_audit(db, entity_type="sang_ngang_request", entity_id=req.request_id, action="undo", actor=user)
     db.commit()
     db.refresh(req)
-    return _sang_ngang_dict(req)
+    return _sang_ngang_dict(db, req)
 
 
 def return_to_supplier(db: Session, lot_id: str, quantity: float, user: User, reason: str) -> dict:

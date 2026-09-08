@@ -620,8 +620,14 @@ def delete_material(material_id: str, db: Session = Depends(get_db),
 
 
 # ---- Danh sách material_id có chỉ tiêu bắt buộc (ẩn nút "Xem chỉ tiêu" cho NVL không cần) ----
+# params_only=true: chỉ material_id có >=1 chỉ tiêu THẬT SỰ (bỏ qua Nguyên liệu chính/phụ chỉ
+# cần Số lô KCS/Số LOT NCC) — dùng ở "Danh sách lô (FIFO)" để ẩn "Xem chỉ tiêu" khi bấm vào chỉ
+# thấy bảng trống (xem qc_catalog.materials_with_required_qc_params).
 @router.get("/materials/qc-required")
-def materials_with_required_qc(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+def materials_with_required_qc(params_only: bool = False, db: Session = Depends(get_db),
+                               user: User = Depends(get_current_user)):
+    if params_only:
+        return qc_catalog.materials_with_required_qc_params(db)
     return qc_catalog.materials_with_required_qc(db)
 
 

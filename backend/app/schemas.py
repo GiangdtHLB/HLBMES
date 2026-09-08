@@ -1482,6 +1482,7 @@ class SangNgangRequestOut(ORMModel):
     reversed: bool
     created_by: Optional[str] = None
     created_at: datetime
+    received_at: Optional[datetime] = None  # ngày xuất sang ngang (ts của receipt gốc, có thể đã khai lùi)
     approved_by: Optional[str] = None
     approved_at: Optional[datetime] = None
     rejected_by: Optional[str] = None
