@@ -7371,20 +7371,19 @@ function movementHistoryBlockHtml(key) {
   }
   const showUndo = WH_HIST_UNDO[key];
   const showCreated = !!WH_HIST_SHOW_CREATED[key];
-  const visible = all.slice(0, WH_HIST_VISIBLE[key] || WH_HIST_PAGE);
   const cols = 7 + (showUndo ? 1 : 0) + (showCreated ? 1 : 0);
-  const moreBtn = all.length > visible.length
-    ? `<button class="btn sm sec" data-loadmorehist="${key}" style="margin-top:6px">Tải thêm (còn ${all.length - visible.length})</button>` : "";
   const tblId = `wh_histtbl_${key}`;
+  // Bảng phẳng như "Xem tồn kho" (t_ton/t_px...) — render TOÀN BỘ dòng rồi để wirePaginate()
+  // tự phân trang/tìm kiếm/sắp xếp (Trang X/Y, đổi số dòng/trang), thay vì "Tải thêm" tăng dần
+  // (khác kiểu với các bảng khác trong app, dễ gây khó chịu khi danh sách dài — vd 105 dòng).
   return `<div class="tablewrap" id="wh_hist_${key}" style="margin-top:14px">
-    <h4>${esc(WH_HIST_TITLE[key])} <span class="muted">(${visible.length}/${all.length})</span>${delBtn}</h4>
+    <h4>${esc(WH_HIST_TITLE[key])} <span class="muted">(${all.length})</span>${delBtn}</h4>
     <input class="searchbox" data-tbl="${tblId}" placeholder="Tìm mã lô/vật tư/người thực hiện..." style="margin-bottom:6px"/>
     <table id="${tblId}">
       <thead><tr><th>Thời gian</th><th>Vật tư</th><th>Lô</th><th>SL</th><th>Từ → Đến</th><th>Lý do</th><th>Người thực hiện</th>${showCreated ? "<th>Ngày tạo</th>" : ""}${showUndo ? "<th></th>" : ""}</tr></thead>
-      <tbody>${visible.map(m => movementRowHtml(m, WH_CACHE.matById, showUndo, showCreated)).join("") ||
+      <tbody>${all.map(m => movementRowHtml(m, WH_CACHE.matById, showUndo, showCreated)).join("") ||
         `<tr><td colspan=${cols} class="muted">Chưa có giao dịch nào.</td></tr>`}</tbody>
     </table>
-    ${moreBtn}
   </div>`;
 }
 
@@ -7413,7 +7412,11 @@ function wireMovementHistoryBlock(key) {
       await POST(`/warehouse/movements/${b.dataset.approvefactory}/approve-factory`, {});
       toast("Đã duyệt điều chuyển sang nhà máy khác"); render(WH_HIST_VIEW[key] || "warehouse_kc");
     }));
+    return;
   }
+  // Các sổ dạng bảng phẳng (tu_do, tu_do_px, tra_ncc, obal, tondau...) — phân trang kiểu
+  // "Trang X/Y" giống mọi bảng khác trong app (t_ton/t_px...), thay vì "Tải thêm".
+  wirePaginate(`wh_histtbl_${key}`, WH_HIST_PAGE);
 }
 
 function refreshMovementHistoryBlock(key) {
