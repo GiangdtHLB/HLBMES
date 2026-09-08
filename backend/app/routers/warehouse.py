@@ -130,6 +130,20 @@ def stock(location: str = None, db: Session = Depends(get_db)):
     return svc.stock_on_hand(db, location)
 
 
+# ---- Tồn kho tính đến 1 ngày trong quá khứ ("Xem tồn kho" -> chọn "Chỉ 1 ngày") — dựng lại từ
+# lịch sử StockMovement, khác /stock ở trên vốn đọc thẳng MaterialLot.quantity hiện tại. Xem giới
+# hạn đã biết (không tính được chiều tăng/giảm của "adjust" từ Kiểm kê định kỳ) ở
+# services/warehouse.py::_lot_balances_as_of.
+@router.get("/stock/as-of")
+def stock_as_of(as_of: str, location: str = None, db: Session = Depends(get_db)):
+    return svc.stock_on_hand_as_of(db, datetime.fromisoformat(as_of), location)
+
+
+@router.get("/stock/as-of/lots")
+def stock_as_of_lots(as_of: str, location: str = None, db: Session = Depends(get_db)):
+    return svc.lot_on_hand_as_of(db, datetime.fromisoformat(as_of), location)
+
+
 @router.get("/low-stock")
 def low_stock(db: Session = Depends(get_db)):
     return svc.low_stock_report(db)
