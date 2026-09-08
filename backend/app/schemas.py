@@ -1299,6 +1299,7 @@ class IssueIn(BaseModel):
     mode: str = "tu_do"   # de_nghi | tu_do
     reason: Optional[str] = None
     ref_doc: Optional[str] = None
+    issued_at: Optional[str] = None  # ngày xuất — bỏ trống -> hiện tại; xem issue()
 
 
 class ReturnIn(BaseModel):
@@ -1534,6 +1535,7 @@ class StockMovementOut(ORMModel):
     ref_doc: Optional[str] = None
     actor: Optional[str] = None
     ts: datetime
+    created_at: Optional[datetime] = None
     reversed: bool
     reversal_of: Optional[str] = None
     destination_factory_id: Optional[str] = None

@@ -124,6 +124,15 @@ const toDTLocal = (d) => {
 // Tương tự toDTLocal nhưng chỉ lấy phần ngày (cho input type="date") — cùng lý do phải dùng
 // giờ LOCAL: gần nửa đêm, toISOString() có thể lệch sang NGÀY KHÁC do quy đổi UTC.
 const toISODateLocal = (d) => toDTLocal(d).slice(0, 10);
+// input type="date" (VD "2026-09-07") -> ISO gửi server, chốt vào 12:00 TRƯA giờ địa phương
+// (không phải 00:00) — tránh trường hợp Việt Nam (UTC+7) đã sang ngày mới nhưng UTC server
+// chưa sang, khiến "hôm nay" bị hiểu nhầm thành tương lai (bị chặn "Ngày nhập không được sau
+// thời điểm hiện tại") nếu chốt 00:00.
+function dateInputToIsoNoon(dateStr) {
+  if (!dateStr) return null;
+  const [y, m, d] = dateStr.split("-").map(Number);
+  return new Date(y, m - 1, d, 12, 0, 0).toISOString();
+}
 function toast(msg, kind = "ok") {
   const t = el(`<div class="toast ${kind}">${esc(msg)}</div>`);
   document.body.appendChild(t);
@@ -5444,6 +5453,46 @@ const TON_LOC_OPTS = [
 ];
 const tonLocSelectHtml = (id, selected) => `<select id="${esc(id)}">${TON_LOC_OPTS.map(o =>
   `<option value="${esc(o.value)}" ${o.value === selected ? "selected" : ""}>${esc(o.label)}</option>`).join("")}</select>`;
+// Bộ lọc "Ngày nhập" ở "Xem tồn kho" — CHỈ ẩn bớt lô có ngày nhập ngoài khoảng chọn (giúp tìm
+// nhanh lô mới), KHÔNG tính lại Tổng tồn/Tồn khả dụng (vẫn lấy nguyên số thực tế hiện tại từ
+// server) để tránh gây hiểu nhầm là tồn kho thật đã đổi theo bộ lọc. Mặc định Đến ngày = hôm
+// nay, Từ ngày = 10 ngày trước — theo đúng yêu cầu người dùng 2026-09-07.
+const TON_DATE_RANGE = {};
+function tonDateRangeGet(view) {
+  if (!TON_DATE_RANGE[view]) {
+    TON_DATE_RANGE[view] = { from: toISODateLocal(new Date(Date.now() - 10 * 86400000)), to: toISODateLocal(new Date()),
+      singleDay: false };  // singleDay=true: chỉ chọn đúng 1 ngày (from===to), ẩn ô "Đến ngày"
+  }
+  return TON_DATE_RANGE[view];
+}
+function tonDateRangeFieldsHtml(fromId, toId, range) {
+  const singleId = fromId + "_single";
+  return `<div class="field"><label>${range.singleDay ? "Ngày (nhập)" : "Từ ngày (nhập)"}</label><input type="date" id="${fromId}" value="${esc(range.from)}"/></div>
+    ${range.singleDay ? "" : `<div class="field"><label>Đến ngày (nhập)</label><input type="date" id="${toId}" value="${esc(range.to)}"/></div>`}
+    <div class="field"><label>&nbsp;</label><label class="muted" style="display:flex;align-items:center;gap:5px;white-space:nowrap;height:34px">
+      <input type="checkbox" id="${singleId}" ${range.singleDay ? "checked" : ""}/> Chỉ 1 ngày</label></div>`;
+}
+function lotInDateRange(lot, range) {
+  if (!lot.created_at) return true;
+  const d = toISODateLocal(new Date(lot.created_at));
+  return (!range.from || d >= range.from) && (!range.to || d <= range.to);
+}
+function wireTonDateRangeFields(view, fromId, toId) {
+  const range = tonDateRangeGet(view);
+  const apply = () => {
+    range.from = $(fromId).value || "";
+    range.to = range.singleDay ? range.from : ($(toId) ? $(toId).value || "" : range.from);
+    render(view);
+  };
+  if ($(fromId)) $(fromId).onchange = apply;
+  if ($(toId)) $(toId).onchange = apply;
+  const singleCb = $(fromId + "_single");
+  if (singleCb) singleCb.onchange = () => {
+    range.singleDay = singleCb.checked;
+    if (range.singleDay) range.to = range.from;
+    render(view);
+  };
+}
 // Bộ lọc năm dùng chung cho các màn hình mã/số hiệu theo năm (Thông tin nấu/lên men/lọc/chiết,
 // Lệnh lọc) — mã nấu/lô lên men/lệnh lọc/mã lọc/mã chiết chỉ duy nhất TRONG 1 năm (xem backend
 // common.py::resolve_years), nên các màn liệt kê cần cho chọn xem theo năm nào, mặc định năm
@@ -5821,13 +5870,18 @@ VIEWS.warehouse_kc = async function () {
     });
     const lowCount = stock.filter(s => s.low_stock).length;
     const matByIdTon = Object.fromEntries((CACHE.materials || []).map(m => [m.material_id, m]));
+    const tonDateRange = tonDateRangeGet("warehouse_kc");
     body = `<div class="panel"><h2>Tồn kho hiện tại — ${esc(tonLoc || "Tất cả")}</h2>
-      <div class="row" style="margin-bottom:8px"><div class="field"><label>Kho</label>${tonLocSelectHtml("ton_loc", tonLoc)}</div></div>
+      <div class="row" style="margin-bottom:8px"><div class="field"><label>Kho</label>${tonLocSelectHtml("ton_loc", tonLoc)}</div>
+        ${tonDateRangeFieldsHtml("ton_date_from", "ton_date_to", tonDateRange)}</div>
+      <div class="muted" style="margin-bottom:6px">Cột "Mã lô"/"Vị trí kho" chỉ hiện lô có ngày nhập trong khoảng đã chọn (để tìm nhanh lô mới) —
+        "Tổng tồn thực tế"/"Tồn khả dụng" vẫn là số tồn kho THẬT hiện tại, không đổi theo bộ lọc ngày.</div>
       ${lowCount ? `<div class="muted" style="color:var(--red);margin-bottom:8px">⚠ ${lowCount} vật tư đang dưới tồn tối thiểu.</div>` : ""}
       <input class="searchbox" data-tbl="t_ton" placeholder="Tìm mã/tên vật tư..." style="margin-bottom:8px"/>
       <div id="ton_total" class="muted" style="margin-bottom:6px"></div>
       <div class="tablewrap"><table id="t_ton"><thead><tr><th>Mã VT</th><th>Tên</th><th>Nhóm</th><th>Mã lô</th><th>Vị trí kho</th><th>Tổng tồn thực tế</th><th>Đang chờ QC</th><th>Tồn khả dụng</th><th>ĐVT</th><th>Quy đổi</th><th>Tồn tối thiểu</th></tr></thead>
       <tbody>${stock.map(s => { const matLots = (lotsByMaterial[s.material_id] || [])
+          .filter(l => lotInDateRange(l, tonDateRange))
           .sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
         const shown = matLots.slice(0, LOT_CELL_MAX);
         const rest = matLots.length - shown.length;
@@ -5896,13 +5950,16 @@ VIEWS.warehouse_kc = async function () {
       </div>`;
   } else if (sec === "obal") {
     const { matItemsGiao, isAdminGiao } = await loadGiaoData();
+    const obHist = await GET("/warehouse/movements?movement_type=receipt&is_opening_balance=true");
+    WH_CACHE.obal = obHist.filter(m => !/phân xưởng/i.test(m.location_to || ""));
     body = `<div class="panel"><h2>🏁 Nhập tồn đầu (kho công ty)</h2>
         <div class="muted" style="margin-bottom:6px">Nạp số dư tồn kho ban đầu khi triển khai hệ thống (không qua nhận hàng nhà cung cấp).</div>
         ${isAdminGiao
           ? `<div class="row"><div class="field"><label>Mã lô</label><input id="ob_code" placeholder="MALT-..."/></div>
           <div class="field" style="position:relative"><label>Vật tư</label>
             <input type="text" id="ob_mat_txt" autocomplete="off" placeholder="Tìm mã/tên nguyên liệu..." value="${esc(matItemsGiao[0]?.label || "")}"/>
-            <input type="hidden" id="ob_mat" value="${esc(matItemsGiao[0]?.value || "")}"/></div></div>
+            <input type="hidden" id="ob_mat" value="${esc(matItemsGiao[0]?.value || "")}"/></div>
+          <div class="field"><label>Ngày nhập tồn đầu</label><input id="ob_date" type="date" value="${toISODateLocal(new Date())}" max="${toISODateLocal(new Date())}"/></div></div>
         <div class="row"><div class="field"><label>SL</label><input id="ob_qty" type="number" value="500"/></div>
           <div class="field"><label>ĐVT</label><input id="ob_uom" value="${esc(matItemsGiao[0]?.uom || "")}" size="4" readonly title="Lấy tự động từ danh mục nguyên liệu — không sửa được"/></div>
           <div class="field"><label>Hạn dùng</label><input id="ob_exp" type="date"/></div>
@@ -5914,6 +5971,7 @@ VIEWS.warehouse_kc = async function () {
             <input type="file" id="ob_file" accept=".xlsx"/></div>
           <button class="btn sec" id="ob_import" style="align-self:flex-end">📥 Import Excel</button></div>`
           : '<div class="muted">Chỉ tài khoản Admin mới được thực hiện nhập tồn đầu.</div>'}
+        ${movementHistoryBlockHtml("obal")}
       </div>`;
   } else if (sec === "xtdn") {
     const { allRequests, matByIdGiao, lotByIdGiao, canFulfillGiao, allLots } = await loadGiaoData();
@@ -5975,6 +6033,7 @@ VIEWS.warehouse_kc = async function () {
           <select id="xt_lot">${lotsAvail}</select></div>
           <div class="field"><label>SL</label><input id="xt_qty" type="number" value="50"/></div>
           <div class="field"><label>ĐVT</label><span id="xt_uom"></span></div>
+          <div class="field"><label>Ngày xuất tự do</label><input id="xt_date" type="date" value="${toISODateLocal(new Date())}" max="${toISODateLocal(new Date())}"/></div>
           <div class="field" style="flex:1"><label>Lý do (tuỳ chọn)</label><input id="xt_reason" placeholder="(tuỳ chọn)"/></div>
           <button class="btn sec" id="xt_do" style="align-self:flex-end">Xuất tự do</button></div>`
           : '<div class="muted">Chỉ tài khoản Admin mới được thực hiện xuất tự do.</div>'}
@@ -6263,11 +6322,13 @@ VIEWS.warehouse_kc = async function () {
   }
   if (sec === "obal") {
     wireSearchableSelect("ob_mat_txt", "ob_mat", WH_CACHE.matItems, (item) => { $("ob_uom").value = item.uom || ""; });
+    wireMovementHistoryBlock("obal");
     if ($("ob_do")) $("ob_do").onclick = () => guard(async () => {
       const res = await POST("/warehouse/receive", { lot_code: $("ob_code").value, material_id: $("ob_mat").value,
         quantity: parseFloat($("ob_qty").value), uom: $("ob_uom").value, location: "Kho công ty",
         expiry: $("ob_exp").value || null, kcs_lot_no: $("ob_kcs").value.trim() || null,
         supplier_lot: $("ob_supplier_lot").value.trim() || null,
+        received_at: dateInputToIsoNoon($("ob_date").value),
         reason: "Nhập tồn đầu", is_opening_balance: true });
       if (res.status === "on_hold") toast("Đã nhập tồn đầu — lô đang CHỜ khai báo & duyệt chỉ tiêu chất lượng", "err");
       else toast("Đã nhập tồn đầu tại Kho công ty");
@@ -6361,7 +6422,8 @@ VIEWS.warehouse_kc = async function () {
     if ($("xt_do")) $("xt_do").onclick = () => guard(async () => {
       const qty = lotAltUomQty("xt_lot", "xt_uom", parseFloat($("xt_qty").value));
       await POST("/warehouse/issue", { lot_id: $("xt_lot").value, quantity: qty,
-        mode: "tu_do", reason: $("xt_reason").value.trim() || null });
+        mode: "tu_do", reason: $("xt_reason").value.trim() || null,
+        issued_at: dateInputToIsoNoon($("xt_date").value) });
       toast("Đã xuất tự do"); render("warehouse_kc");
     });
     Object.keys(WH_HIST_VISIBLE).forEach(wireMovementHistoryBlock);
@@ -6421,6 +6483,7 @@ VIEWS.warehouse_kc = async function () {
     document.querySelectorAll("[data-viewlots]").forEach(b => b.onclick = () =>
       openMaterialLotsModal(b.dataset.matlabel, lotsByMaterial[b.dataset.viewlots] || []));
     $("ton_loc").onchange = () => { TON_LOC.warehouse_kc = $("ton_loc").value; render("warehouse_kc"); };
+    wireTonDateRangeFields("warehouse_kc", "ton_date_from", "ton_date_to");
   }
   document.querySelectorAll("[data-lotqc]").forEach(b => b.onclick = () => openLotQcModal(b.dataset.lotqc, { editable: false }));
   if (sec === "kk") wireStockCountSection("warehouse_kc");
@@ -6510,12 +6573,14 @@ VIEWS.warehouse_px = async function () {
     const matById = Object.fromEntries(mats.map(m => [m.material_id, m]));
     const qcReqSetPx = new Set(qcReqIdsPx);
     const wsLocByIdPx = Object.fromEntries(wsLocsPx.map(l => [l.loc_id, l]));
-    const rows = allLots.filter(l => pxLotMatchesLoc(l) && l.quantity > 0)
+    const pxDateRange = tonDateRangeGet("warehouse_px");
+    const rows = allLots.filter(l => pxLotMatchesLoc(l) && l.quantity > 0 && lotInDateRange(l, pxDateRange))
       .sort((a, b) => new Date(a.created_at) - new Date(b.created_at));   // FIFO: nhập trước hiện trước
     body = `<div class="panel"><h2>Tồn kho — ${esc(pxLoc || "Tất cả")} <span class="muted">(${rows.length})</span></h2>
-      <div class="row" style="margin-bottom:8px"><div class="field"><label>Kho</label>${tonLocSelectHtml("px_loc", pxLoc)}</div></div>
+      <div class="row" style="margin-bottom:8px"><div class="field"><label>Kho</label>${tonLocSelectHtml("px_loc", pxLoc)}</div>
+        ${tonDateRangeFieldsHtml("px_date_from", "px_date_to", pxDateRange)}</div>
       <div class="muted" style="margin-bottom:6px">Lô đã được duyệt chỉ tiêu chất lượng ở kho công ty và chuyển tới đây (qua Đề nghị nhận kho) —
-        không cần khai báo lại, chỉ tiêu hiển thị tự động lấy theo dữ liệu đã duyệt.</div>
+        không cần khai báo lại, chỉ tiêu hiển thị tự động lấy theo dữ liệu đã duyệt. Chỉ hiện lô có ngày nhập trong khoảng đã chọn.</div>
       <input class="searchbox" data-tbl="t_px" placeholder="Tìm mã lô/vật tư..." style="margin-bottom:8px"/>
       <div id="px_total" class="muted" style="margin-bottom:6px"></div>
       <div class="tablewrap"><table id="t_px">
@@ -6537,6 +6602,8 @@ VIEWS.warehouse_px = async function () {
     const matItemsPx = mats.map(m => ({ value: m.material_id, label: `${m.code} — ${m.name}`, uom: m.uom }));
     const isAdminTondauPx = CURRENT_USER && CURRENT_USER.role === "admin";
     WH_CACHE.matItemsPx = matItemsPx;
+    const tondauHist = await GET("/warehouse/movements?movement_type=receipt&is_opening_balance=true");
+    WH_CACHE.tondau = tondauHist.filter(m => /phân xưởng/i.test(m.location_to || ""));
     body = `<div class="panel"><h2>🏁 Nhập tồn đầu (kho phân xưởng)</h2>
       <div class="muted" style="margin-bottom:6px">Nạp số dư tồn kho ban đầu khi triển khai hệ thống trực tiếp tại kho phân xưởng
         (không qua nhận hàng nhà cung cấp hay điều chuyển từ kho công ty).</div>
@@ -6544,7 +6611,8 @@ VIEWS.warehouse_px = async function () {
         ? `<div class="row"><div class="field"><label>Mã lô</label><input id="obpx_code" placeholder="MALT-..."/></div>
         <div class="field" style="position:relative"><label>Vật tư</label>
           <input type="text" id="obpx_mat_txt" autocomplete="off" placeholder="Tìm mã/tên nguyên liệu..." value="${esc(matItemsPx[0]?.label || "")}"/>
-          <input type="hidden" id="obpx_mat" value="${esc(matItemsPx[0]?.value || "")}"/></div></div>
+          <input type="hidden" id="obpx_mat" value="${esc(matItemsPx[0]?.value || "")}"/></div>
+        <div class="field"><label>Ngày nhập tồn đầu</label><input id="obpx_date" type="date" value="${toISODateLocal(new Date())}" max="${toISODateLocal(new Date())}"/></div></div>
         <div class="row"><div class="field"><label>SL</label><input id="obpx_qty" type="number" value="500"/></div>
           <div class="field"><label>ĐVT</label><input id="obpx_uom" value="${esc(matItemsPx[0]?.uom || "")}" size="4" readonly title="Lấy tự động từ danh mục nguyên liệu — không sửa được"/></div>
           <div class="field"><label>Hạn dùng</label><input id="obpx_exp" type="date"/></div>
@@ -6556,6 +6624,7 @@ VIEWS.warehouse_px = async function () {
             <input type="file" id="obpx_file" accept=".xlsx"/></div>
           <button class="btn sec" id="obpx_import" style="align-self:flex-end">📥 Import Excel</button></div>`
         : '<div class="muted">Chỉ tài khoản Admin mới được thực hiện nhập tồn đầu.</div>'}
+      ${movementHistoryBlockHtml("tondau")}
     </div>`;
   } else if (sec === "req") {
     body = await renderRequestsSection();
@@ -6749,6 +6818,7 @@ VIEWS.warehouse_px = async function () {
         ? `<div class="row"><div class="field"><label>Lô</label><select id="xtpx_lot">${workshopLotOpts}</select></div>
         <div class="field"><label>SL</label><input id="xtpx_qty" type="number" value="50"/></div>
         <div class="field"><label>ĐVT</label><span id="xtpx_uom"></span></div>
+        <div class="field"><label>Ngày xuất tự do</label><input id="xtpx_date" type="date" value="${toISODateLocal(new Date())}" max="${toISODateLocal(new Date())}"/></div>
         <div class="field" style="flex:1"><label>Lý do (tuỳ chọn)</label><input id="xtpx_reason" placeholder="(tuỳ chọn)"/></div>
         <button class="btn sec" id="xtpx_do" style="align-self:flex-end">Xuất tự do</button></div>`
         : '<div class="muted">Chỉ tài khoản Admin mới được thực hiện xuất tự do.</div>'}
@@ -6816,6 +6886,7 @@ VIEWS.warehouse_px = async function () {
   if (sec === "kk") wireStockCountSection("warehouse_px");
   if (sec === "px") {
     $("px_loc").onchange = () => { TON_LOC.warehouse_px = $("px_loc").value; render("warehouse_px"); };
+    wireTonDateRangeFields("warehouse_px", "px_date_from", "px_date_to");
     // Mặc định hiện lô nhập GẦN NHẤT trước (cột "Ngày giờ nhập", đảo chiều) — mirror đúng cách
     // làm ở "Danh sách lô (FIFO)" bên Kho công ty, bấm lại tiêu đề cột để quay về thứ tự FIFO
     // (nhập trước lên đầu) khi cần chọn lô ưu tiên dùng/chuyển.
@@ -6863,11 +6934,13 @@ VIEWS.warehouse_px = async function () {
   }
   if (sec === "tondau") {
     wireSearchableSelect("obpx_mat_txt", "obpx_mat", WH_CACHE.matItemsPx, (item) => { $("obpx_uom").value = item.uom || ""; });
+    wireMovementHistoryBlock("tondau");
     if ($("obpx_do")) $("obpx_do").onclick = () => guard(async () => {
       const res = await POST("/warehouse/receive", { lot_code: $("obpx_code").value, material_id: $("obpx_mat").value,
         quantity: parseFloat($("obpx_qty").value), uom: $("obpx_uom").value, location: "Kho phân xưởng",
         expiry: $("obpx_exp").value || null, kcs_lot_no: $("obpx_kcs").value.trim() || null,
         supplier_lot: $("obpx_supplier_lot").value.trim() || null,
+        received_at: dateInputToIsoNoon($("obpx_date").value),
         reason: "Nhập tồn đầu", is_opening_balance: true });
       if (res.status === "on_hold") toast("Đã nhập tồn đầu — lô đang CHỜ khai báo & duyệt chỉ tiêu chất lượng", "err");
       else toast("Đã nhập tồn đầu tại Kho phân xưởng");
@@ -6950,11 +7023,12 @@ VIEWS.warehouse_px = async function () {
     }));
   }
   if (sec === "tudo") {
-    if ($("xtpx_lot")) wireLotAltUom("xtpx_lot", "xtpx_uom", matById);
+    if ($("xtpx_lot")) wireLotAltUom("xtpx_lot", "xtpx_uom", WH_CACHE.matById);
     if ($("xtpx_do")) $("xtpx_do").onclick = () => guard(async () => {
-      const qty = lotAltUomQty("xtpx_lot", "xtpx_uom", parseFloat($("xtpx_qty").value), matById);
+      const qty = lotAltUomQty("xtpx_lot", "xtpx_uom", parseFloat($("xtpx_qty").value), WH_CACHE.matById);
       await POST("/warehouse/issue", { lot_id: $("xtpx_lot").value, quantity: qty,
-        mode: "tu_do", reason: $("xtpx_reason").value.trim() || null });
+        mode: "tu_do", reason: $("xtpx_reason").value.trim() || null,
+        issued_at: dateInputToIsoNoon($("xtpx_date").value) });
       toast("Đã xuất tự do"); render("warehouse_px");
     });
     wireMovementHistoryBlock("tu_do_px");
@@ -7065,11 +7139,15 @@ async function openStockCountModal(countId) {
 }
 
 // ---- Sổ giao dịch kho dùng chung: xuất tự do / điều chuyển / trả NCC / xuất theo đề nghị ----
-function movementRowHtml(m, matById, showUndo) {
+function movementRowHtml(m, matById, showUndo, showCreated) {
   const mat = m.material_id ? matById[m.material_id] : null;
   const undoCell = !showUndo ? "" :
     m.reversed ? '<td><span class="muted">Đã hoàn lại</span></td>' :
     `<td><button class="btn sm sec" data-undoissue="${esc(m.movement_id)}">Hoàn lại</button></td>`;
+  // "Thời gian" = ts (ngày HIỆU LỰC, có thể đã khai lùi qua "Ngày xuất tự do"/"Nhập tồn đầu");
+  // "Ngày tạo" = created_at (ngày THẬT sự tạo phiếu, không đổi theo ts) — chỉ hiện ở các sổ có
+  // ngày hiệu lực khai lùi được (xem WH_HIST_SHOW_CREATED) để tránh thừa cột ở sổ khác.
+  const createdCell = showCreated ? `<td class="muted">${fmt(m.created_at)}</td>` : "";
   return `<tr>
     <td class="muted">${fmt(m.ts)}</td>
     <td>${mat ? `<code class="k">${esc(mat.code)}</code> ${esc(mat.name)}` : esc(m.material_id || "—")}</td>
@@ -7078,6 +7156,7 @@ function movementRowHtml(m, matById, showUndo) {
     <td class="muted">${esc(m.location_from || "—")} → ${esc(m.location_to || "—")}</td>
     <td class="muted">${esc(m.reason || "")}</td>
     <td class="muted">${esc(m.actor || "")}</td>
+    ${createdCell}
     ${undoCell}</tr>`;
 }
 
@@ -7232,13 +7311,19 @@ const WH_HIST_PAGE = 10;
 // Toàn bộ giao dịch đã fetch (tối đa 200 dòng/backend) + số dòng đang hiển thị mỗi bảng —
 // "Tải thêm" chỉ lộ thêm dữ liệu đã có sẵn trong bộ nhớ, không gọi lại API.
 const WH_CACHE = { matById: {} };
-const WH_HIST_VISIBLE = { tu_do: WH_HIST_PAGE, tu_do_px: WH_HIST_PAGE, dieu_chuyen_nha_may: WH_HIST_PAGE, tra_ncc: WH_HIST_PAGE, xuat_theo_de_nghi: WH_HIST_PAGE };
+const WH_HIST_VISIBLE = { tu_do: WH_HIST_PAGE, tu_do_px: WH_HIST_PAGE, dieu_chuyen_nha_may: WH_HIST_PAGE, tra_ncc: WH_HIST_PAGE, xuat_theo_de_nghi: WH_HIST_PAGE, obal: WH_HIST_PAGE, tondau: WH_HIST_PAGE };
 const WH_HIST_TITLE = { tu_do: "Lịch sử xuất tự do", tu_do_px: "Lịch sử xuất tự do (phân xưởng)", dieu_chuyen_nha_may: "Lịch sử điều chuyển sang nhà máy khác",
-  tra_ncc: "Lịch sử trả nhà cung cấp", xuat_theo_de_nghi: "Sổ xuất theo đề nghị (tất cả phiếu)" };
-const WH_HIST_UNDO = { tu_do: true, tu_do_px: true, dieu_chuyen_nha_may: true, tra_ncc: false, xuat_theo_de_nghi: false };
+  tra_ncc: "Lịch sử trả nhà cung cấp", xuat_theo_de_nghi: "Sổ xuất theo đề nghị (tất cả phiếu)",
+  obal: "Lịch sử nhập tồn đầu (kho công ty)", tondau: "Lịch sử nhập tồn đầu (kho phân xưởng)" };
+const WH_HIST_UNDO = { tu_do: true, tu_do_px: true, dieu_chuyen_nha_may: true, tra_ncc: false, xuat_theo_de_nghi: false, obal: false, tondau: false };
+// "Ngày tạo" (created_at) chỉ hiện thêm ở các sổ có "ngày hiệu lực" (ts) khai lùi được — Xuất
+// tự do (Ngày xuất tự do) và Nhập tồn đầu (Ngày nhập tồn đầu) — không thêm ở sổ khác (Trả NCC,
+// Điều chuyển...) để tránh thừa cột không cần thiết.
+const WH_HIST_SHOW_CREATED = { tu_do: true, tu_do_px: true, obal: true, tondau: true };
 // "tu_do" (Kho công ty) và "tu_do_px" (Kho phân xưởng) dùng chung 1 endpoint/mode ở backend
-// (StockMovement.mode="tu_do"), chỉ khác view nào gọi render() lại sau khi Hoàn tác.
-const WH_HIST_VIEW = { tu_do: "warehouse_kc", tu_do_px: "warehouse_px" };
+// (StockMovement.mode="tu_do"), chỉ khác view nào gọi render() lại sau khi Hoàn tác. Tương tự
+// "obal"/"tondau" (Nhập tồn đầu) đều là movement_type="receipt" chỉ khác location.
+const WH_HIST_VIEW = { tu_do: "warehouse_kc", tu_do_px: "warehouse_px", obal: "warehouse_kc", tondau: "warehouse_px" };
 // Nút "Xóa lịch sử" (chỉ admin) — mỗi key trỏ tới 1 endpoint xóa riêng ở backend (xem
 // services/warehouse.py::delete_free_issue_history/delete_request_history). Chỉ xóa được
 // dữ liệu THẬT SỰ là lịch sử (không đụng NVL đã dùng cho mẻ sản xuất/phiếu còn đang chờ).
@@ -7285,20 +7370,20 @@ function movementHistoryBlockHtml(key) {
     </div>`;
   }
   const showUndo = WH_HIST_UNDO[key];
-  const visible = all.slice(0, WH_HIST_VISIBLE[key] || WH_HIST_PAGE);
-  const cols = 7 + (showUndo ? 1 : 0);
-  const moreBtn = all.length > visible.length
-    ? `<button class="btn sm sec" data-loadmorehist="${key}" style="margin-top:6px">Tải thêm (còn ${all.length - visible.length})</button>` : "";
+  const showCreated = !!WH_HIST_SHOW_CREATED[key];
+  const cols = 7 + (showUndo ? 1 : 0) + (showCreated ? 1 : 0);
   const tblId = `wh_histtbl_${key}`;
+  // Bảng phẳng như "Xem tồn kho" (t_ton/t_px...) — render TOÀN BỘ dòng rồi để wirePaginate()
+  // tự phân trang/tìm kiếm/sắp xếp (Trang X/Y, đổi số dòng/trang), thay vì "Tải thêm" tăng dần
+  // (khác kiểu với các bảng khác trong app, dễ gây khó chịu khi danh sách dài — vd 105 dòng).
   return `<div class="tablewrap" id="wh_hist_${key}" style="margin-top:14px">
-    <h4>${esc(WH_HIST_TITLE[key])} <span class="muted">(${visible.length}/${all.length})</span>${delBtn}</h4>
+    <h4>${esc(WH_HIST_TITLE[key])} <span class="muted">(${all.length})</span>${delBtn}</h4>
     <input class="searchbox" data-tbl="${tblId}" placeholder="Tìm mã lô/vật tư/người thực hiện..." style="margin-bottom:6px"/>
     <table id="${tblId}">
-      <thead><tr><th>Thời gian</th><th>Vật tư</th><th>Lô</th><th>SL</th><th>Từ → Đến</th><th>Lý do</th><th>Người thực hiện</th>${showUndo ? "<th></th>" : ""}</tr></thead>
-      <tbody>${visible.map(m => movementRowHtml(m, WH_CACHE.matById, showUndo)).join("") ||
+      <thead><tr><th>Thời gian</th><th>Vật tư</th><th>Lô</th><th>SL</th><th>Từ → Đến</th><th>Lý do</th><th>Người thực hiện</th>${showCreated ? "<th>Ngày tạo</th>" : ""}${showUndo ? "<th></th>" : ""}</tr></thead>
+      <tbody>${all.map(m => movementRowHtml(m, WH_CACHE.matById, showUndo, showCreated)).join("") ||
         `<tr><td colspan=${cols} class="muted">Chưa có giao dịch nào.</td></tr>`}</tbody>
     </table>
-    ${moreBtn}
   </div>`;
 }
 
@@ -7327,7 +7412,11 @@ function wireMovementHistoryBlock(key) {
       await POST(`/warehouse/movements/${b.dataset.approvefactory}/approve-factory`, {});
       toast("Đã duyệt điều chuyển sang nhà máy khác"); render(WH_HIST_VIEW[key] || "warehouse_kc");
     }));
+    return;
   }
+  // Các sổ dạng bảng phẳng (tu_do, tu_do_px, tra_ncc, obal, tondau...) — phân trang kiểu
+  // "Trang X/Y" giống mọi bảng khác trong app (t_ton/t_px...), thay vì "Tải thêm".
+  wirePaginate(`wh_histtbl_${key}`, WH_HIST_PAGE);
 }
 
 function refreshMovementHistoryBlock(key) {

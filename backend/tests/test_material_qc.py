@@ -8,6 +8,7 @@ nhận kho (tạo/duyệt/từ chối, chặn khi lô on_hold) + lọc báo cáo
 
 import os
 import tempfile
+from datetime import datetime, timedelta, timezone
 
 _TMP = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
 os.environ["MES_DATABASE_URL"] = f"sqlite:///{_TMP.name}"
@@ -683,6 +684,59 @@ def test_free_issue_workshop_location_tracked(client, admin_h, thukho_h):
     hist = client.get("/api/warehouse/movements?movement_type=issue&mode=tu_do", headers=thukho_h).json()
     m = next(m for m in hist if m["lot_id"] == lot_id)
     assert m["location_from"] == "Kho phân xưởng"
+
+
+def test_free_issue_issued_at_backdates_ts_but_created_at_stays_now(client, admin_h, thukho_h):
+    """"Ngày xuất tự do" (issued_at) chỉ khai lùi `ts` (ngày hiệu lực) — `created_at` (ngày tạo
+    phiếu thật) vẫn luôn là thời điểm gọi API, không đổi theo issued_at."""
+    mat_id = _create_material(client, admin_h, "FREE-ISSUED-AT")
+    rc = client.post("/api/warehouse/receive", headers=thukho_h,
+                     json={"lot_code": "LOT-FREE-ISSUED-AT", "material_id": mat_id, "quantity": 50, "uom": "kg"})
+    lot_id = rc.json()["lot_id"]
+
+    backdated = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+    before_call = datetime.now(timezone.utc)
+    issue = client.post("/api/warehouse/issue", headers=admin_h,
+                        json={"lot_id": lot_id, "quantity": 10, "mode": "tu_do", "reason": "Thử nghiệm",
+                              "issued_at": backdated})
+    assert issue.status_code == 200, issue.text
+
+    hist = client.get("/api/warehouse/movements?movement_type=issue&mode=tu_do", headers=thukho_h).json()
+    m = next(m for m in hist if m["lot_id"] == lot_id)
+    ts = datetime.fromisoformat(m["ts"].replace("Z", "+00:00"))
+    created_at = datetime.fromisoformat(m["created_at"].replace("Z", "+00:00"))
+    assert ts < before_call - timedelta(days=29)
+    assert created_at >= before_call - timedelta(seconds=5)
+
+
+def test_free_issue_issued_at_cannot_be_future(client, admin_h, thukho_h):
+    mat_id = _create_material(client, admin_h, "FREE-ISSUED-FUTURE")
+    rc = client.post("/api/warehouse/receive", headers=thukho_h,
+                     json={"lot_code": "LOT-FREE-ISSUED-FUTURE", "material_id": mat_id, "quantity": 20, "uom": "kg"})
+    lot_id = rc.json()["lot_id"]
+    future = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
+    r = client.post("/api/warehouse/issue", headers=admin_h,
+                    json={"lot_id": lot_id, "quantity": 5, "mode": "tu_do", "issued_at": future})
+    assert r.status_code == 409, r.text
+
+
+def test_movements_filter_is_opening_balance(client, admin_h, thukho_h):
+    """GET /warehouse/movements?is_opening_balance=true chỉ trả các lượt "Nhập tồn đầu" (nhận
+    diện qua `reason` bắt đầu bằng "Nhập tồn đầu"), bỏ qua Nhập kho thường."""
+    mat_id = _create_material(client, admin_h, "OB-FILTER")
+    rc_normal = client.post("/api/warehouse/receive", headers=thukho_h,
+                            json={"lot_code": "LOT-OB-FILTER-NORMAL", "material_id": mat_id, "quantity": 10,
+                                  "uom": "kg", "reason": "Nhập kho"})
+    rc_ob = client.post("/api/warehouse/receive", headers=admin_h,
+                        json={"lot_code": "LOT-OB-FILTER-OB", "material_id": mat_id, "quantity": 20, "uom": "kg",
+                              "reason": "Nhập tồn đầu", "is_opening_balance": True})
+    assert rc_normal.status_code == 200 and rc_ob.status_code == 200
+
+    hist = client.get("/api/warehouse/movements?movement_type=receipt&is_opening_balance=true",
+                      headers=thukho_h).json()
+    lot_ids = {m["lot_id"] for m in hist}
+    assert rc_ob.json()["lot_id"] in lot_ids
+    assert rc_normal.json()["lot_id"] not in lot_ids
 
 
 def test_undo_issue_blocked_for_return_to_supplier(client, admin_h, thukho_h):

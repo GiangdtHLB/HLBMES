@@ -35,9 +35,11 @@ def _require_any_perm(user: User, *perms: str) -> None:
 
 
 def _move(db, mtype, lot, quantity, user, ts=None, **kw):
+    # created_at LUÔN là utcnow() thật — ts mới là ngày hiệu lực có thể khai lùi (xem model).
     mv = StockMovement(movement_id=new_id(), movement_type=mtype,
                        material_id=lot.material_id, lot_id=lot.lot_id, lot_code=lot.lot_code,
-                       quantity=quantity, uom=lot.uom, actor=user.username, ts=ts or utcnow(), **kw)
+                       quantity=quantity, uom=lot.uom, actor=user.username, ts=ts or utcnow(),
+                       created_at=utcnow(), **kw)
     db.add(mv)
     return mv
 
@@ -461,13 +463,17 @@ def return_stock(db: Session, lot_id: str, quantity: float, user: User, reason: 
 
 def issue(db: Session, lot_id: str, quantity: float, user: User, mode: str = "tu_do",
           reason: str = None, ref_doc: str = None, destination_factory_id: str = None,
-          skip_perm_check: bool = False) -> dict:
+          skip_perm_check: bool = False, issued_at=None) -> dict:
     """Xuất kho tự do (không qua phiếu đề nghị), trả nhà cung cấp (mode="tra_ncc"), hoặc điều
     chuyển sang nhà máy khác (mode="dieu_chuyen_nha_may", destination_factory_id bắt buộc).
     skip_perm_check=True dành cho lệnh gọi NỘI BỘ từ tiêu thụ NVL cho mẻ nấu/mẻ lọc (xem
     routers/brewing.py::add_brew_material/add_filter_material) — router đó đã tự gate bằng
     "batch.execute" (vận hành nhà máy tiêu thụ NVL phân xưởng cho SẢN XUẤT, không phải nghiệp
-    vụ Xuất kho), không nên đòi thêm quyền "warehouse.issue" vốn dành cho thủ kho."""
+    vụ Xuất kho), không nên đòi thêm quyền "warehouse.issue" vốn dành cho thủ kho.
+    issued_at (tuỳ chọn): ngày HIỆU LỰC của giao dịch xuất — cho phép khai lùi ngày không giới
+    hạn (giống is_opening_balance ở receive()) vì "/warehouse/issue" (mode="tu_do") vốn đã chỉ
+    ADMIN mới gọi được (routers/warehouse.py::issue). created_at (ngày tạo phiếu thật) vẫn luôn
+    là utcnow() qua _move(), không đổi theo issued_at."""
     if not skip_perm_check:
         require_perm(user, "warehouse.issue")
     lot = _lock_lot(db, lot_id)
@@ -476,6 +482,14 @@ def issue(db: Session, lot_id: str, quantity: float, user: User, mode: str = "tu
         raise DomainError(f"Lô {lot.lot_code} đang HOLD, không được xuất.")
     if quantity <= 0 or quantity > lot.quantity:
         raise DomainError(f"Số lượng xuất không hợp lệ (tồn {lot.quantity} {lot.uom}).")
+    now = utcnow()
+    issued_dt = None
+    if issued_at:
+        issued_dt = datetime.fromisoformat(issued_at) if isinstance(issued_at, str) else issued_at
+        if issued_dt.tzinfo is None:
+            issued_dt = issued_dt.replace(tzinfo=now.tzinfo)
+        if issued_dt > now:
+            raise DomainError("Ngày xuất không được sau thời điểm hiện tại.")
     factory = None
     if mode == "dieu_chuyen_nha_may":
         if not destination_factory_id:
@@ -490,7 +504,7 @@ def issue(db: Session, lot_id: str, quantity: float, user: User, mode: str = "tu
     if lot.quantity <= 1e-6:
         lot.quantity = 0.0
         lot.status = LotStatus.CONSUMED.value
-    mv = _move(db, "issue", lot, quantity, user, location_from=lot.location, mode=mode,
+    mv = _move(db, "issue", lot, quantity, user, ts=issued_dt, location_from=lot.location, mode=mode,
               reason=reason, ref_doc=ref_doc,
               destination_factory_id=factory.factory_id if factory else None)
     record_audit(db, entity_type="lot", entity_id=lot.lot_id, action="issue", actor=user,
@@ -1981,10 +1995,13 @@ def delete_request_history(db: Session, user: User) -> dict:
 
 
 def list_movements(db: Session, movement_type: str = None, mode: str = None, limit: int = 200,
-                   offset: int = 0) -> list[StockMovement]:
+                   offset: int = 0, is_opening_balance: bool = None) -> list[StockMovement]:
     """Sổ giao dịch kho — dùng chung cho lịch sử xuất tự do / điều chuyển / trả NCC / xuất theo đề
     nghị. Có phân trang (limit tối đa 2000, offset) — sổ càng ngày càng dài nên không cho tải hết
-    không giới hạn."""
+    không giới hạn.
+    is_opening_balance=True: chỉ lấy các lượt "Nhập tồn đầu" — nhận diện qua `reason` (receive()
+    không có cột/flag is_opening_balance riêng ở StockMovement, chỉ ghi `reason` bắt đầu bằng
+    "Nhập tồn đầu" cho cả 2 đường nhập tay và import Excel, xem receive()/import_opening_balance)."""
     limit = max(1, min(limit or 200, 2000))
     offset = max(0, offset or 0)
     stmt = select(StockMovement).order_by(StockMovement.ts.desc()).limit(limit).offset(offset)
@@ -1992,6 +2009,8 @@ def list_movements(db: Session, movement_type: str = None, mode: str = None, lim
         stmt = stmt.where(StockMovement.movement_type == movement_type)
     if mode:
         stmt = stmt.where(StockMovement.mode == mode)
+    if is_opening_balance:
+        stmt = stmt.where(StockMovement.reason.like("Nhập tồn đầu%"))
     return db.execute(stmt).scalars().all()
 
 

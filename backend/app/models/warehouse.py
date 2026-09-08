@@ -35,7 +35,13 @@ class StockMovement(Base):
     reason: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)
     ref_doc: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
     actor: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    # ts = ngày HIỆU LỰC của giao dịch (nhập/xuất tự do đều cho phép lùi ngày, VD "Nhập tồn đầu"
+    # hay "Ngày xuất tự do") — có thể khác ngày THẬT sự nhập liệu vào hệ thống, xem created_at.
     ts: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, index=True)
+    # created_at = thời điểm THẬT sự tạo bản ghi trong hệ thống (audit) — LUÔN là utcnow() lúc
+    # tạo, KHÔNG bao giờ lùi ngày theo ts (xem _move()) — giúp phân biệt "ngày hiệu lực" (ts, có
+    # thể khai lùi) với "ngày tạo phiếu" thật (created_at).
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
     # "Hoàn lại" xuất tự do (không áp dụng cho trả NCC): đánh dấu đã hoàn + trỏ tới giao dịch hoàn.
     reversed: Mapped[bool] = mapped_column(default=False)
     reversal_of: Mapped[Optional[str]] = mapped_column(ForeignKey("stock_movement.movement_id"), nullable=True)
