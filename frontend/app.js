@@ -133,6 +133,14 @@ function dateInputToIsoNoon(dateStr) {
   const [y, m, d] = dateStr.split("-").map(Number);
   return new Date(y, m - 1, d, 12, 0, 0).toISOString();
 }
+// input type="date" -> ISO CUỐI ngày đó (23:59:59 giờ địa phương) — dùng làm mốc "tính đến hết
+// ngày X" khi xem tồn kho quá khứ ("Chỉ 1 ngày" ở Xem tồn kho), gồm trọn mọi giao dịch trong
+// ngày đó.
+function dateInputToIsoEndOfDay(dateStr) {
+  if (!dateStr) return null;
+  const [y, m, d] = dateStr.split("-").map(Number);
+  return new Date(y, m - 1, d, 23, 59, 59).toISOString();
+}
 function toast(msg, kind = "ok") {
   const t = el(`<div class="toast ${kind}">${esc(msg)}</div>`);
   document.body.appendChild(t);
@@ -5859,6 +5867,34 @@ VIEWS.warehouse_kc = async function () {
   const lotChip = (l) => `<code class="k">${lotCodeCellHtml(l)}</code> (${l.quantity}${l.uom}${l.status === "on_hold" ? ", CHỜ QC" : ""})`;
   if (sec === "ton") {
     const tonLoc = TON_LOC.warehouse_kc;
+    const tonDateRange = tonDateRangeGet("warehouse_kc");
+    if (tonDateRange.singleDay) {
+      const asOf = dateInputToIsoEndOfDay(tonDateRange.to);
+      const q = "?as_of=" + encodeURIComponent(asOf) + (tonLoc ? "&location=" + encodeURIComponent(tonLoc) : "");
+      const [asOfStock, asOfLots] = await Promise.all([
+        GET("/warehouse/stock/as-of" + q), GET("/warehouse/stock/as-of/lots" + q)]);
+      const lotsByMatAsOf = {};
+      asOfLots.forEach(l => { (lotsByMatAsOf[l.material_id] = lotsByMatAsOf[l.material_id] || []).push(l); });
+      body = `<div class="panel"><h2>Tồn kho tính đến ${esc(tonDateRange.to)} — ${esc(tonLoc || "Tất cả")}</h2>
+        <div class="row" style="margin-bottom:8px"><div class="field"><label>Kho</label>${tonLocSelectHtml("ton_loc", tonLoc)}</div>
+          ${tonDateRangeFieldsHtml("ton_date_from", "ton_date_to", tonDateRange)}</div>
+        <div class="muted" style="margin-bottom:6px">Dựng lại từ lịch sử nhập/xuất tính đến hết ngày đã chọn — KHÁC với "Tổng tồn thực tế" hiện tại.
+          Chưa tính được các đợt điều chỉnh từ "Kiểm kê định kỳ" trước ngày này (giới hạn dữ liệu) nên có thể lệch nhẹ nếu vật tư từng bị kiểm kê điều chỉnh.
+          Không tách được "Đang chờ QC"/"Tồn khả dụng" (trạng thái lô là giá trị hiện tại, không có lịch sử).</div>
+        <input class="searchbox" data-tbl="t_ton" placeholder="Tìm mã/tên vật tư..." style="margin-bottom:8px"/>
+        <div id="ton_total" class="muted" style="margin-bottom:6px"></div>
+        <div class="tablewrap"><table id="t_ton"><thead><tr><th>Mã VT</th><th>Tên</th><th>Nhóm</th><th>Mã lô</th><th>Tồn tính đến ngày</th><th>ĐVT</th></tr></thead>
+        <tbody>${asOfStock.map(s => { const matLots = (lotsByMatAsOf[s.material_id] || []);
+          const shown = matLots.slice(0, LOT_CELL_MAX);
+          const rest = matLots.length - shown.length;
+          const lotCell = shown.map(l => `<code class="k">${esc(l.lot_code)}</code> (${l.quantity}${l.uom})`).join(", ") +
+            (rest > 0 ? ` +${rest} lô khác` : "");
+          return `<tr data-qty="${s.on_hand}" data-uom="${esc(s.uom)}"><td><code class="k">${esc(s.material_code)}</code></td><td>${esc(s.material_name)}</td>
+          <td class="muted">${esc(s.category || "")}</td>
+          <td class="muted">${lotCell || "—"}</td>
+          <td>${s.on_hand}</td><td>${s.uom}</td></tr>`; }).join("") ||
+          '<tr><td colspan=6 class="muted">Không có tồn kho tại ngày này.</td></tr>'}</tbody></table></div></div>`;
+    } else {
     const [stock, allLots, matLocsTon] = await Promise.all([
       GET("/warehouse/stock" + (tonLoc ? "?location=" + encodeURIComponent(tonLoc) : "")), GET("/lots"),
       GET("/warehouse/locations").catch(() => [])]);
@@ -5870,7 +5906,6 @@ VIEWS.warehouse_kc = async function () {
     });
     const lowCount = stock.filter(s => s.low_stock).length;
     const matByIdTon = Object.fromEntries((CACHE.materials || []).map(m => [m.material_id, m]));
-    const tonDateRange = tonDateRangeGet("warehouse_kc");
     body = `<div class="panel"><h2>Tồn kho hiện tại — ${esc(tonLoc || "Tất cả")}</h2>
       <div class="row" style="margin-bottom:8px"><div class="field"><label>Kho</label>${tonLocSelectHtml("ton_loc", tonLoc)}</div>
         ${tonDateRangeFieldsHtml("ton_date_from", "ton_date_to", tonDateRange)}</div>
@@ -5903,6 +5938,7 @@ VIEWS.warehouse_kc = async function () {
         <td class="muted">${altDisp}</td>
         <td class="muted">${s.stock_min ?? "—"}</td></tr>`; }).join("") ||
         '<tr><td colspan=11 class="muted">Không có tồn kho.</td></tr>'}</tbody></table></div></div>`;
+    }
   } else if (sec === "the") {
     const mats = await GET("/materials");
     const wcItems = mats.map(m => ({ value: m.material_id, label: `${m.code} — ${m.name}`, uom: m.uom }));
@@ -6566,6 +6602,31 @@ VIEWS.warehouse_px = async function () {
     body = await bcReportSectionHtml("bcpx", "Kho phân xưởng");
   } else if (sec === "px") {
     const pxLoc = TON_LOC.warehouse_px;
+    const pxDateRange = tonDateRangeGet("warehouse_px");
+    if (pxDateRange.singleDay) {
+      const asOf = dateInputToIsoEndOfDay(pxDateRange.to);
+      const q = "?as_of=" + encodeURIComponent(asOf) + (pxLoc ? "&location=" + encodeURIComponent(pxLoc) : "");
+      const asOfRows = (await GET("/warehouse/stock/as-of/lots" + q))
+        .sort((a, b) => a.material_code.localeCompare(b.material_code) || (a.lot_code || "").localeCompare(b.lot_code || ""));
+      body = `<div class="panel"><h2>Tồn kho tính đến ${esc(pxDateRange.to)} — ${esc(pxLoc || "Tất cả")} <span class="muted">(${asOfRows.length})</span></h2>
+        <div class="row" style="margin-bottom:8px"><div class="field"><label>Kho</label>${tonLocSelectHtml("px_loc", pxLoc)}</div>
+          ${tonDateRangeFieldsHtml("px_date_from", "px_date_to", pxDateRange)}</div>
+        <div class="muted" style="margin-bottom:6px">Dựng lại từ lịch sử nhập/xuất/điều chuyển tính đến hết ngày đã chọn — KHÁC với tồn kho hiện tại.
+          Chưa tính được các đợt điều chỉnh từ "Kiểm kê định kỳ" trước ngày này (giới hạn dữ liệu). Không hiện được "Trạng thái" (chờ QC/released...) vì đó là giá trị hiện tại, không có lịch sử.</div>
+        <input class="searchbox" data-tbl="t_px" placeholder="Tìm mã lô/vật tư..." style="margin-bottom:8px"/>
+        <div id="px_total" class="muted" style="margin-bottom:6px"></div>
+        <div class="tablewrap"><table id="t_px">
+          <thead><tr><th>Lô</th><th>Vật tư</th><th>Tên vật tư</th><th>SL tính đến ngày</th><th>Vị trí (ước tính)</th></tr></thead>
+          <tbody>${asOfRows.map(l => `<tr data-qty="${l.quantity}" data-uom="${esc(l.uom)}">
+            <td><code class="k">${esc(l.lot_code)}</code></td>
+            <td class="muted">${esc(l.material_code)}</td>
+            <td>${esc(l.material_name)}</td>
+            <td>${l.quantity} ${l.uom}</td>
+            <td class="muted">${esc(l.location || "—")}</td></tr>`).join("") ||
+            `<tr><td colspan=5 class="muted">Không có lô nào tại ngày này ở ${esc(pxLoc || "kho nào")}.</td></tr>`}</tbody>
+        </table></div>
+      </div>`;
+    } else {
     const pxLotMatchesLoc = (l) => pxLoc === "" ? true : pxLoc === "Kho phân xưởng"
       ? /phân xưởng/i.test(l.location || "") : !/phân xưởng/i.test(l.location || "");
     const [allLots, mats, qcReqIdsPx, wsLocsPx] = await Promise.all([GET("/lots"), GET("/materials"),
@@ -6573,7 +6634,6 @@ VIEWS.warehouse_px = async function () {
     const matById = Object.fromEntries(mats.map(m => [m.material_id, m]));
     const qcReqSetPx = new Set(qcReqIdsPx);
     const wsLocByIdPx = Object.fromEntries(wsLocsPx.map(l => [l.loc_id, l]));
-    const pxDateRange = tonDateRangeGet("warehouse_px");
     const rows = allLots.filter(l => pxLotMatchesLoc(l) && l.quantity > 0 && lotInDateRange(l, pxDateRange))
       .sort((a, b) => new Date(a.created_at) - new Date(b.created_at));   // FIFO: nhập trước hiện trước
     body = `<div class="panel"><h2>Tồn kho — ${esc(pxLoc || "Tất cả")} <span class="muted">(${rows.length})</span></h2>
@@ -6597,6 +6657,7 @@ VIEWS.warehouse_px = async function () {
           `<tr><td colspan=8 class="muted">Chưa có lô nào ở ${esc(pxLoc || "kho nào")}.</td></tr>`}</tbody>
       </table></div>
     </div>`;
+    }
   } else if (sec === "tondau") {
     const mats = await GET("/materials");
     const matItemsPx = mats.map(m => ({ value: m.material_id, label: `${m.code} — ${m.name}`, uom: m.uom }));

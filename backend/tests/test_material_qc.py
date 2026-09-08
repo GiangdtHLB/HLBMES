@@ -739,6 +739,111 @@ def test_movements_filter_is_opening_balance(client, admin_h, thukho_h):
     assert rc_normal.json()["lot_id"] not in lot_ids
 
 
+def test_stock_as_of_reflects_balance_before_and_after_issue(client, admin_h, thukho_h):
+    """GET /warehouse/stock/as-of dựng lại tồn kho tính đến 1 ngày trong quá khứ từ lịch sử
+    StockMovement (yêu cầu người dùng 2026-09-08: "xem ngày đó còn tồn bao nhiêu") — khác /stock
+    (đọc thẳng MaterialLot.quantity hiện tại, không lùi được quá khứ)."""
+    mat_id = _create_material(client, admin_h, "ASOF-BASIC")
+    day1 = (datetime.now(timezone.utc) - timedelta(days=10))
+    day2 = (datetime.now(timezone.utc) - timedelta(days=5))
+    rc = client.post("/api/warehouse/receive", headers=thukho_h,
+                     json={"lot_code": "LOT-ASOF-BASIC", "material_id": mat_id, "quantity": 100, "uom": "kg",
+                           "received_at": day1.isoformat()})
+    lot_id = rc.json()["lot_id"]
+    issue = client.post("/api/warehouse/issue", headers=admin_h,
+                        json={"lot_id": lot_id, "quantity": 30, "mode": "tu_do", "issued_at": day2.isoformat()})
+    assert issue.status_code == 200, issue.text
+
+    before_receipt = (day1 - timedelta(days=1)).isoformat()
+    r0 = client.get("/api/warehouse/stock/as-of", params={"as_of": before_receipt}, headers=thukho_h).json()
+    assert not any(r["material_id"] == mat_id for r in r0)
+
+    between = (day1 + timedelta(hours=1)).isoformat()
+    r1 = client.get("/api/warehouse/stock/as-of", params={"as_of": between}, headers=thukho_h).json()
+    row1 = next(r for r in r1 if r["material_id"] == mat_id)
+    assert row1["on_hand"] == 100
+    assert row1["material_code"] == "ASOF-BASIC"
+
+    after_issue = (day2 + timedelta(hours=1)).isoformat()
+    r2 = client.get("/api/warehouse/stock/as-of", params={"as_of": after_issue}, headers=thukho_h).json()
+    row2 = next(r for r in r2 if r["material_id"] == mat_id)
+    assert row2["on_hand"] == 70
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    r3 = client.get("/api/warehouse/stock/as-of", params={"as_of": now_iso}, headers=thukho_h).json()
+    row3 = next(r for r in r3 if r["material_id"] == mat_id)
+    assert row3["on_hand"] == 70
+
+
+def test_stock_as_of_transfer_splits_by_location_but_nets_zero_overall(client, admin_h, thukho_h):
+    """transfer() không đổi TỔNG công ty (chỉ đổi vị trí) — lọc theo "Kho công ty"/"Kho phân
+    xưởng" phải phản ánh đúng vị trí tại thời điểm đó, nhưng lọc "Tất cả" (không truyền location)
+    phải ra đúng tổng ban đầu, không bị giảm/tăng do transfer."""
+    mat_id = _create_material(client, admin_h, "ASOF-TRANSFER")
+    rc = client.post("/api/warehouse/receive", headers=thukho_h,
+                     json={"lot_code": "LOT-ASOF-TRANSFER", "material_id": mat_id, "quantity": 50, "uom": "kg"})
+    lot_id = rc.json()["lot_id"]
+    tr = client.post("/api/warehouse/transfer", headers=admin_h,
+                     json={"lot_id": lot_id, "quantity": 20, "location_to": "Kho phân xưởng"})
+    assert tr.status_code == 200, tr.text
+
+    now_iso = (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat()
+    r_all = client.get("/api/warehouse/stock/as-of", params={"as_of": now_iso}, headers=thukho_h).json()
+    assert next(r for r in r_all if r["material_id"] == mat_id)["on_hand"] == 50
+
+    r_kc = client.get("/api/warehouse/stock/as-of", params={"as_of": now_iso, "location": "Kho công ty"},
+                      headers=thukho_h).json()
+    assert next(r for r in r_kc if r["material_id"] == mat_id)["on_hand"] == 30
+
+    r_px = client.get("/api/warehouse/stock/as-of", params={"as_of": now_iso, "location": "Kho phân xưởng"},
+                      headers=thukho_h).json()
+    assert next(r for r in r_px if r["material_id"] == mat_id)["on_hand"] == 20
+
+
+def test_lot_on_hand_as_of_original_lot_reflects_partial_transfer_split(client, admin_h, thukho_h):
+    """Lô GỐC sau khi bị transfer() TÁCH MỘT PHẦN (quantity < tồn lô gốc) không có StockMovement
+    riêng ghi nhận phần đã giảm (chỉ lô MỚI có) — lot_on_hand_as_of phải bù đúng qua GenealogyEdge
+    (relation=split), không được hiện lô gốc như CHƯA hề giảm (bug đã phát hiện & sửa 2026-09-08)."""
+    mat_id = _create_material(client, admin_h, "ASOF-SPLIT-LOT")
+    rc = client.post("/api/warehouse/receive", headers=thukho_h,
+                     json={"lot_code": "LOT-ASOF-SPLIT", "material_id": mat_id, "quantity": 50, "uom": "kg"})
+    original_lot_id = rc.json()["lot_id"]
+    tr = client.post("/api/warehouse/transfer", headers=admin_h,
+                     json={"lot_id": original_lot_id, "quantity": 20, "location_to": "Kho phân xưởng"})
+    assert tr.status_code == 200, tr.text
+
+    now_iso = (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat()
+    rows = client.get("/api/warehouse/stock/as-of/lots", params={"as_of": now_iso}, headers=thukho_h).json()
+    original_row = next(r for r in rows if r["lot_id"] == original_lot_id)
+    assert original_row["quantity"] == 30   # 50 - 20 tách sang phân xưởng, KHÔNG phải 50
+    moved_row = next(r for r in rows if r["lot_id"] != original_lot_id and r["material_id"] == mat_id)
+    assert moved_row["quantity"] == 20
+
+    rows_kc = client.get("/api/warehouse/stock/as-of/lots", params={"as_of": now_iso, "location": "Kho công ty"},
+                         headers=thukho_h).json()
+    kc_lot_ids = {r["lot_id"] for r in rows_kc}
+    assert original_lot_id in kc_lot_ids
+    assert moved_row["lot_id"] not in kc_lot_ids
+
+    rows_px = client.get("/api/warehouse/stock/as-of/lots", params={"as_of": now_iso, "location": "Kho phân xưởng"},
+                         headers=thukho_h).json()
+    px_lot_ids = {r["lot_id"] for r in rows_px}
+    assert moved_row["lot_id"] in px_lot_ids
+    assert original_lot_id not in px_lot_ids
+
+
+def test_lot_on_hand_as_of_lists_matching_lots(client, admin_h, thukho_h):
+    mat_id = _create_material(client, admin_h, "ASOF-LOTLIST")
+    rc = client.post("/api/warehouse/receive", headers=thukho_h,
+                     json={"lot_code": "LOT-ASOF-LOTLIST", "material_id": mat_id, "quantity": 40, "uom": "kg"})
+    lot_id = rc.json()["lot_id"]
+    now_iso = (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat()
+    rows = client.get("/api/warehouse/stock/as-of/lots", params={"as_of": now_iso}, headers=thukho_h).json()
+    row = next(r for r in rows if r["lot_id"] == lot_id)
+    assert row["quantity"] == 40
+    assert row["lot_code"] == "LOT-ASOF-LOTLIST"
+
+
 def test_undo_issue_blocked_for_return_to_supplier(client, admin_h, thukho_h):
     mat_id = _create_material(client, admin_h, "NCC-UNDO-BLOCK")
     rc = client.post("/api/warehouse/receive", headers=thukho_h,

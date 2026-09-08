@@ -697,6 +697,149 @@ def stock_on_hand(db: Session, location: str = None) -> list[dict]:
     return sorted(out, key=lambda x: x["material_code"])
 
 
+def _asof_loc_matcher(location: str):
+    def loc_matches(loc):
+        if not location:
+            return True
+        if _is_workshop_location(location):
+            return _is_workshop_location(loc or "")
+        return not _is_workshop_location(loc or "")
+    return loc_matches
+
+
+def _material_balances_as_of(db: Session, as_of, location: str = None) -> dict[str, float]:
+    """{material_id: số dư dựng lại từ lịch sử StockMovement tính đến hết thời điểm `as_of`} —
+    khác stock_on_hand() vốn đọc thẳng MaterialLot.quantity (số dư TRỰC TIẾP hiện tại, không lùi
+    được quá khứ). Tính TRỰC TIẾP theo material_id (KHÔNG qua lot_id trước rồi mới gộp) — vì
+    transfer() khi TÁCH lô (`_transfer_lot`, quantity < tồn lô gốc) chỉ ghi StockMovement gắn với
+    LÔ MỚI, lô GỐC không có dòng riêng cho phần đã giảm; nếu gộp qua lot_id rồi mới cộng theo
+    material sẽ bị sai (lô gốc "thấy" như chưa hề giảm). Ở cấp material_id thì không sao vì
+    location_from/location_to đã có sẵn ngay trên mỗi dòng, không cần biết lô nào.
+
+    Diễn giải dấu mỗi loại giao dịch:
+    - receipt/return: LUÔN +quantity; chỉ tính nếu location_to khớp bộ lọc (hoặc không lọc).
+    - issue: LUÔN -quantity; chỉ tính nếu location_from khớp bộ lọc.
+    - transfer: không đổi TỔNG công ty (chỉ đổi vị trí) — lọc "Tất cả" thì BỎ QUA hẳn (net 0);
+      lọc theo 1 kho cụ thể thì +quantity nếu location_to khớp, -quantity nếu location_from khớp.
+    - adjust (từ Kiểm kê định kỳ): CHỈ lưu |chênh lệch| — không xác định được TĂNG hay GIẢM từ dữ
+      liệu đã lưu, nên BỎ QUA (giới hạn đã biết) — vật tư có kiểm kê điều chỉnh trước ngày lọc có
+      thể lệch nhẹ so với thực tế thời điểm đó.
+    """
+    stmt = select(StockMovement.material_id, StockMovement.movement_type, StockMovement.quantity,
+                 StockMovement.location_from, StockMovement.location_to).where(
+        StockMovement.ts <= as_of, StockMovement.material_id.isnot(None))
+    rows = db.execute(stmt).all()
+    loc_matches = _asof_loc_matcher(location)
+    out: dict[str, float] = {}
+    for material_id, mtype, qty, loc_from, loc_to in rows:
+        delta = 0.0
+        if mtype in ("receipt", "return"):
+            if loc_matches(loc_to):
+                delta = qty
+        elif mtype == "issue":
+            if loc_matches(loc_from):
+                delta = -qty
+        elif mtype == "transfer" and location:
+            if loc_matches(loc_to):
+                delta += qty
+            if loc_matches(loc_from):
+                delta -= qty
+        if delta:
+            out[material_id] = out.get(material_id, 0.0) + delta
+    return out
+
+
+def stock_on_hand_as_of(db: Session, as_of, location: str = None) -> list[dict]:
+    """Tồn kho THEO VẬT TƯ tính đến hết 1 ngày trong quá khứ — xem giới hạn đã biết (adjust) và
+    diễn giải dấu ở _material_balances_as_of(). Chỉ trả về 1 con số "on_hand" duy nhất — KHÔNG
+    tách được available/pending_qc như stock_on_hand() vì trạng thái lô (on_hold/released...) là
+    giá trị SỐNG, không có lịch sử để dựng lại."""
+    agg = {mid: q for mid, q in _material_balances_as_of(db, as_of, location).items() if q > 1e-6}
+    if not agg:
+        return []
+    mats = {m.material_id: m for m in db.execute(
+        select(Material).where(Material.material_id.in_(agg.keys()))).scalars().all()}
+    out = [{"material_id": mid, "material_code": mats[mid].code if mid in mats else mid,
+           "material_name": mats[mid].name if mid in mats else "",
+           "category": mats[mid].category if mid in mats else None,
+           "uom": mats[mid].uom if mid in mats else "", "on_hand": round(total, 3)}
+          for mid, total in agg.items()]
+    return sorted(out, key=lambda x: x["material_code"])
+
+
+def _lot_balances_as_of(db: Session, as_of) -> tuple[dict[str, float], dict[str, str]]:
+    """({lot_id: số dư}, {lot_id: vị trí ước tính}) dựng lại từ lịch sử StockMovement tính đến hết
+    `as_of` — dùng riêng cho tồn THEO LÔ (lot_on_hand_as_of). Tính KHÔNG phụ thuộc bộ lọc kho (bộ
+    lọc chỉ áp dụng SAU, ở lot_on_hand_as_of) — vì số dư/vị trí LỊCH SỬ thật của 1 lô là cố định,
+    không phụ thuộc đang xem theo kho nào.
+
+    Vị trí ước tính = location_to (hoặc giữ nguyên nếu issue, vì issue không đổi vị trí) của giao
+    dịch GẦN NHẤT ảnh hưởng tới lô — xử lý các dòng theo thứ tự `ts` TĂNG DẦN nên giá trị ghi sau
+    cùng luôn là mới nhất trong khoảng tính đến `as_of`.
+
+    Bù trừ phần bị THIẾU do transfer() TÁCH lô (`_transfer_lot`, quantity < tồn lô gốc) —
+    StockMovement "transfer" chỉ gắn với LÔ MỚI (moved_lot), lô GỐC không có dòng riêng ghi nhận
+    phần đã giảm (vị trí lô gốc thì KHÔNG đổi, chỉ số dư giảm) — dùng GenealogyEdge(relation=
+    "split", source_event="transfer") để biết lô gốc là lô nào.
+
+    adjust (từ Kiểm kê định kỳ): CHỈ lưu |chênh lệch| — không xác định được TĂNG hay GIẢM từ dữ
+    liệu đã lưu, nên BỎ QUA (giới hạn đã biết) — vật tư có kiểm kê điều chỉnh trước ngày lọc có
+    thể lệch nhẹ so với thực tế thời điểm đó."""
+    split_map = dict(db.execute(select(GenealogyEdge.to_id, GenealogyEdge.from_id).where(
+        GenealogyEdge.from_type == "lot", GenealogyEdge.to_type == "lot",
+        GenealogyEdge.relation == GenealogyRelation.SPLIT.value,
+        GenealogyEdge.source_event == "transfer")).all())
+    stmt = select(StockMovement.lot_id, StockMovement.movement_type, StockMovement.quantity,
+                 StockMovement.location_to).where(
+        StockMovement.ts <= as_of, StockMovement.lot_id.isnot(None)).order_by(StockMovement.ts.asc())
+    rows = db.execute(stmt).all()
+    balances: dict[str, float] = {}
+    locations: dict[str, str] = {}
+    for lot_id, mtype, qty, loc_to in rows:
+        if mtype in ("receipt", "return"):
+            balances[lot_id] = balances.get(lot_id, 0.0) + qty
+            if loc_to:
+                locations[lot_id] = loc_to
+        elif mtype == "issue":
+            balances[lot_id] = balances.get(lot_id, 0.0) - qty
+        elif mtype == "transfer":
+            balances[lot_id] = balances.get(lot_id, 0.0) + qty
+            if loc_to:
+                locations[lot_id] = loc_to
+            original_id = split_map.get(lot_id)
+            if original_id:
+                balances[original_id] = balances.get(original_id, 0.0) - qty
+        # adjust: bỏ qua (giới hạn đã biết, xem docstring)
+    return balances, locations
+
+
+def lot_on_hand_as_of(db: Session, as_of, location: str = None) -> list[dict]:
+    """Tồn theo LÔ tính đến hết 1 ngày trong quá khứ — dùng cho Kho phân xưởng "Xem tồn kho"
+    (liệt kê từng lô). Chỉ trả lô có số dư dựng lại > 0 (coi như "đã tồn tại" ở thời điểm đó),
+    lọc theo VỊ TRÍ ƯỚC TÍNH tại thời điểm đó (xem _lot_balances_as_of) nếu có truyền `location`."""
+    balances, locations = _lot_balances_as_of(db, as_of)
+    loc_matches = _asof_loc_matcher(location)
+    lot_ids = [lid for lid, q in balances.items() if q > 1e-6 and loc_matches(locations.get(lid))]
+    if not lot_ids:
+        return []
+    lots = {l.lot_id: l for l in db.execute(
+        select(MaterialLot).where(MaterialLot.lot_id.in_(lot_ids))).scalars().all()}
+    mat_ids = {l.material_id for l in lots.values() if l.material_id}
+    mats = {m.material_id: m for m in db.execute(
+        select(Material).where(Material.material_id.in_(mat_ids))).scalars().all()} if mat_ids else {}
+    out = []
+    for lot_id in lot_ids:
+        lot = lots.get(lot_id)
+        if not lot:
+            continue
+        mat = mats.get(lot.material_id)
+        out.append({"lot_id": lot.lot_id, "lot_code": lot.lot_code, "material_id": lot.material_id,
+                    "material_code": mat.code if mat else lot.material_id, "material_name": mat.name if mat else "",
+                    "quantity": round(balances[lot_id], 3), "uom": lot.uom, "created_at": lot.created_at,
+                    "location": locations.get(lot_id) or lot.location})
+    return sorted(out, key=lambda x: (x["material_code"] or "", x["lot_code"] or ""))
+
+
 def low_stock_report(db: Session) -> list[dict]:
     """Chỉ các vật tư đang dưới ngưỡng tồn tối thiểu (Material.stock_min) — dùng cho biểu đồ
     "Tồn tối thiểu" ở Kho NVL, sắp theo mức thiếu hụt (deficit = stock_min - on_hand) giảm dần
