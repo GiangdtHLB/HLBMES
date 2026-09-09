@@ -6636,7 +6636,7 @@ VIEWS.warehouse_px = async function () {
     const pxLotMatchesLoc = (l) => pxLoc === "" ? true : pxLoc === "Kho phân xưởng"
       ? /phân xưởng/i.test(l.location || "") : !/phân xưởng/i.test(l.location || "");
     const [allLots, mats, qcReqIdsPx, wsLocsPx] = await Promise.all([GET("/lots"), GET("/materials"),
-      GET("/materials/qc-required").catch(() => []), GET("/warehouse/locations").catch(() => [])]);
+      GET("/materials/qc-required?params_only=true").catch(() => []), GET("/warehouse/locations").catch(() => [])]);
     const matById = Object.fromEntries(mats.map(m => [m.material_id, m]));
     const qcReqSetPx = new Set(qcReqIdsPx);
     const wsLocByIdPx = Object.fromEntries(wsLocsPx.map(l => [l.loc_id, l]));
