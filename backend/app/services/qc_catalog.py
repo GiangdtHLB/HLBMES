@@ -311,11 +311,12 @@ def required_params_for_material(db: Session, material_id: str, mandatory_only: 
     return out
 
 
-def materials_with_required_qc(db: Session) -> list[str]:
-    """material_id nào cần KCS kiểm soát (dùng để hiện nút "Xem chỉ tiêu" + khoá nút Duyệt khi
-    lô đang on_hold ở các màn xuất/điều chuyển — tránh N+1 gọi qc-status/lô). Gồm 2 trường hợp:
-    có >=1 chỉ tiêu chất lượng bắt buộc, HOẶC thuộc nhóm Nguyên liệu chính/phụ (is_raw_material —
-    vẫn cần kiểm soát tối thiểu bằng Số lô KCS/Số LOT nhà cung cấp dù chưa gán chỉ tiêu nào)."""
+def materials_with_required_qc_params(db: Session) -> list[str]:
+    """material_id nào có >=1 chỉ tiêu chất lượng bắt buộc THẬT SỰ (có giá trị để xem/khai báo) —
+    KHÔNG gồm nhóm Nguyên liệu chính/phụ chỉ cần Số lô KCS/Số LOT NCC (is_raw_material) mà chưa
+    gán chỉ tiêu nào. Dùng để ẩn nút "Xem chỉ tiêu" ở "Danh sách lô (FIFO)" cho các lô chỉ cần
+    Số lô KCS/Số LOT NCC — bấm vào sẽ chỉ thấy bảng trống, không có gì để "xem" (yêu cầu người
+    dùng 2026-09-08: "cái nào chỉ có số lô KCS, số LOT NCC thì không cần hiện chữ xem chỉ tiêu")."""
     rows = db.execute(
         select(MaterialQcGroup.material_id)
         .join(QCParameterGroupItem, QCParameterGroupItem.group_id == MaterialQcGroup.group_id)
@@ -324,12 +325,20 @@ def materials_with_required_qc(db: Session) -> list[str]:
                QCParameter.active == true())
         .distinct()
     ).scalars().all()
+    return list(set(rows))
+
+
+def materials_with_required_qc(db: Session) -> list[str]:
+    """material_id nào cần KCS kiểm soát (dùng để hiện nút "Xem chỉ tiêu" + khoá nút Duyệt khi
+    lô đang on_hold ở các màn xuất/điều chuyển — tránh N+1 gọi qc-status/lô). Gồm 2 trường hợp:
+    có >=1 chỉ tiêu chất lượng bắt buộc, HOẶC thuộc nhóm Nguyên liệu chính/phụ (is_raw_material —
+    vẫn cần kiểm soát tối thiểu bằng Số lô KCS/Số LOT nhà cung cấp dù chưa gán chỉ tiêu nào)."""
     raw_material_ids = db.execute(
         select(Material.material_id)
         .join(MaterialGroup, MaterialGroup.code == Material.category)
         .where(MaterialGroup.is_raw_material == true())
     ).scalars().all()
-    return list(set(rows) | set(raw_material_ids))
+    return list(set(materials_with_required_qc_params(db)) | set(raw_material_ids))
 
 
 def lot_qc_status(db: Session, lot: MaterialLot) -> dict:

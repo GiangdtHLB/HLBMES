@@ -22,7 +22,7 @@ from fastapi.testclient import TestClient
 from app.main import app
 from app import seed as seed_mod
 from app.database import SessionLocal
-from app.models.materials import GenealogyEdge
+from app.models.materials import GenealogyEdge, MaterialLot
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -842,6 +842,99 @@ def test_lot_on_hand_as_of_lists_matching_lots(client, admin_h, thukho_h):
     row = next(r for r in rows if r["lot_id"] == lot_id)
     assert row["quantity"] == 40
     assert row["lot_code"] == "LOT-ASOF-LOTLIST"
+
+
+def test_stock_as_of_includes_lots_with_no_stock_movement_history(client, admin_h, thukho_h):
+    """Lô nạp thẳng vào DB (VD di chuyển dữ liệu từ hệ thống cũ) không có StockMovement nào —
+    stock_on_hand_as_of/lot_on_hand_as_of phải lấy MaterialLot.quantity/created_at hiện tại làm
+    phương án dự phòng, không được trả về trống (bug phát hiện & sửa 2026-09-08, người dùng báo
+    "chỉ 1 ngày thì lại mất, từ ngày đến ngày lại hiện ra" cho dữ liệu kho công ty có sẵn)."""
+    mat_id = _create_material(client, admin_h, "ASOF-NOMOVEMENT")
+    old_created = datetime(2026, 6, 1, 8, 0, 0, tzinfo=timezone.utc)
+    db = SessionLocal()
+    try:
+        lot = MaterialLot(lot_code="LOT-NOMOVEMENT", lot_year=2026, material_id=mat_id, lot_type="material",
+                          quantity=75, uom="kg", location="Kho công ty", created_at=old_created)
+        db.add(lot)
+        db.commit()
+        lot_id = lot.lot_id
+    finally:
+        db.close()
+
+    before_creation = datetime(2026, 5, 1, tzinfo=timezone.utc).isoformat()
+    r0 = client.get("/api/warehouse/stock/as-of", params={"as_of": before_creation}, headers=thukho_h).json()
+    assert not any(r["material_id"] == mat_id for r in r0)
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    r1 = client.get("/api/warehouse/stock/as-of", params={"as_of": now_iso}, headers=thukho_h).json()
+    row1 = next(r for r in r1 if r["material_id"] == mat_id)
+    assert row1["on_hand"] == 75
+
+    r2 = client.get("/api/warehouse/stock/as-of", params={"as_of": now_iso, "location": "Kho công ty"},
+                    headers=thukho_h).json()
+    assert next(r for r in r2 if r["material_id"] == mat_id)["on_hand"] == 75
+
+    lots = client.get("/api/warehouse/stock/as-of/lots", params={"as_of": now_iso}, headers=thukho_h).json()
+    lot_row = next(r for r in lots if r["lot_id"] == lot_id)
+    assert lot_row["quantity"] == 75
+    assert lot_row["location"] == "Kho công ty"
+
+
+def test_qc_required_params_only_excludes_raw_material_without_group(client, admin_h, thukho_h):
+    """GET /materials/qc-required?params_only=true chỉ trả material_id có >=1 chỉ tiêu THẬT SỰ
+    gán — khác với ?params_only mặc định (false) vốn CŨNG gồm Nguyên liệu chính/phụ chỉ cần Số
+    lô KCS/Số LOT NCC (is_raw_material) dù chưa gán chỉ tiêu nào. Dùng để ẩn nút "Xem chỉ tiêu" ở
+    "Danh sách lô (FIFO)" cho các lô chỉ cần Số lô KCS/Số LOT NCC (yêu cầu người dùng 2026-09-08)."""
+    grp = client.post("/api/material-groups", headers=admin_h,
+                      json={"code": "GRP-RAWONLY-TEST", "name": "Nhóm NVL chính test", "is_raw_material": True})
+    assert grp.status_code == 201, grp.text
+
+    mat_raw_only = client.post("/api/materials", headers=admin_h,
+                               json={"code": "QCT-RAWONLY", "name": "NVL chỉ cần Số lô KCS", "uom": "kg",
+                                     "category": "GRP-RAWONLY-TEST"}).json()["material_id"]
+
+    mat_with_param = _create_material(client, admin_h, "QCT-REALPARAM")
+    p = client.post("/api/qc/parameters", headers=admin_h,
+                    json={"code": "REALPARAM_TEST", "name": "Độ ẩm", "unit": "%", "lsl": 3, "usl": 6})
+    param_id = p.json()["param_id"]
+    g = client.post("/api/qc/groups", headers=admin_h,
+                    json={"code": "GRP-REALPARAM-TEST", "name": "Chỉ tiêu thật test"})
+    group_id = g.json()["group_id"]
+    client.post(f"/api/qc/groups/{group_id}/items", headers=admin_h,
+               json={"param_id": param_id, "mandatory": True})
+    client.post(f"/api/materials/{mat_with_param}/qc-groups", headers=admin_h,
+               json={"group_id": group_id, "mandatory": True})
+
+    all_required = client.get("/api/materials/qc-required", headers=thukho_h).json()
+    assert mat_raw_only in all_required
+    assert mat_with_param in all_required
+
+    params_only = client.get("/api/materials/qc-required", params={"params_only": "true"}, headers=thukho_h).json()
+    assert mat_raw_only not in params_only
+    assert mat_with_param in params_only
+
+
+def test_sang_ngang_received_at_backdated_distinct_from_created_at(client, admin_h, thukho_h):
+    """"Xuất sang ngang" thêm ô "Ngày xuất sang ngang" — gửi received_at (đã hỗ trợ sẵn qua
+    ReceiptIn/receive(), không cần đổi backend) phải phản ánh đúng vào StockMovement receipt gốc,
+    tách biệt với "Ngày lập phiếu" (created_at, luôn là lúc submit form thật) — yêu cầu người
+    dùng 2026-09-08."""
+    mat_id = _create_material(client, admin_h, "SNG-DATE-TEST")
+    backdated = (datetime.now(timezone.utc) - timedelta(days=5)).isoformat()
+    before_call = datetime.now(timezone.utc)
+    r = client.post("/api/warehouse/sang-ngang", headers=thukho_h,
+                    json={"lot_code": "LOT-SNG-DATE", "material_id": mat_id, "quantity": 30, "uom": "kg",
+                          "received_at": backdated})
+    assert r.status_code == 201, r.text
+    data = r.json()
+    received_at = datetime.fromisoformat(data["received_at"].replace("Z", "+00:00"))
+    created_at = datetime.fromisoformat(data["created_at"].replace("Z", "+00:00"))
+    assert received_at < before_call - timedelta(days=4)
+    assert created_at >= before_call - timedelta(seconds=5)
+
+    listed = client.get("/api/warehouse/sang-ngang", headers=thukho_h).json()
+    row = next(x for x in listed if x["request_id"] == data["request_id"])
+    assert row["received_at"] == data["received_at"]
 
 
 def test_undo_issue_blocked_for_return_to_supplier(client, admin_h, thukho_h):
