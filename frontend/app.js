@@ -2618,7 +2618,7 @@ async function showBatch(id) {
   // dùng chưa hề tự chọn, xem services/batches.py::set_brewhouse_line.
   const allBrewLinesDetail = (await GET("/lines").catch(() => [])).filter(l => l.kind === "brewhouse" && l.active);
   const bLineOptsDetail = `<option value="">-- chưa chọn --</option>` +
-    allBrewLinesDetail.map(l => `<option value="${esc(l.line_id)}" ${l.line_id === b.brewhouse_line_id ? "selected" : ""}>${esc(l.code)} — ${esc(l.name)}</option>`).join("");
+    allBrewLinesDetail.map(l => `<option value="${esc(l.line_id)}" ${l.line_id === b.brewhouse_line_id ? "selected" : ""}>${esc(l.name)}</option>`).join("");
   // "cancelled" tạm thời ẩn khỏi UI (không cho bấm "Hủy") theo yêu cầu người dùng 2026-09-06 —
   // backend vẫn giữ nguyên logic hoàn NVL đã làm, chỉ ẩn nút để tạm ngừng dùng qua UI.
   const next = { planned: ["ready"], ready: ["running"],
