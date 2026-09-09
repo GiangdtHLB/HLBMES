@@ -2742,6 +2742,10 @@ async function showBatch(id) {
   $("bd_time_save").onclick = () => guard(async () => {
     const startRaw = $("bd_start").value, endRaw = $("bd_end").value;
     if (!startRaw && !endRaw) throw new Error("Chọn ít nhất 1 mốc giờ để lưu.");
+    const effectiveStartRaw = startRaw || (b.start_at ? toDTLocal(new Date(b.start_at)) : "");
+    if (endRaw && effectiveStartRaw && new Date(endRaw) <= new Date(effectiveStartRaw)) {
+      throw new Error("Giờ kết thúc phải sau giờ bắt đầu.");
+    }
     if (startRaw) await POST(`/batches/${id}/start`, { start_at: new Date(startRaw).toISOString() });
     if (endRaw) await POST(`/batches/${id}/finish`, { end_at: new Date(endRaw).toISOString() });
     toast("Đã lưu thời gian"); showBatch(id);
