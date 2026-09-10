@@ -11562,6 +11562,51 @@ VIEWS.realtime = async function () {
 let AI_HISTORY = [];
 let CURRENT_CONV = null;   // hội thoại đang mở (lưu phía server)
 const sevBadge = (s) => `<span class="badge ${s === "high" ? "critical" : s === "medium" ? "due" : "available"}">${s === "high" ? "Cao" : s === "medium" ? "Trung bình" : "Thấp"}</span>`;
+// Render markdown RÚT GỌN cho câu trả lời của AI (chỉ phần cú pháp AI thực tế hay dùng: tiêu đề
+// #/##/###, in đậm **x**, code `x`, gạch đầu dòng -, bảng |a|b|, --- ) — viết tay thay vì dùng
+// thư viện ngoài (marked.js...) vì app này quy ước chạy offline, zero-build, không phụ thuộc CDN
+// (yêu cầu người dùng 2026-09-10: "trả lời không theo dòng, theo group nào cả" — trước đây chỉ
+// esc() rồi in thẳng, markdown thô dính liền 1 khối, không xuống dòng/không ra bảng).
+function renderMarkdownLite(text) {
+  if (!text) return "";
+  const inlineMd = (s) => esc(s.trim())
+    .replace(/\*\*(.+?)\*\*/g, "<b>$1</b>")
+    .replace(/`(.+?)`/g, "<code>$1</code>");
+  const lines = String(text).replace(/\r\n/g, "\n").split("\n");
+  let html = "", inList = false, tableRows = [];
+  const flushList = () => { if (inList) { html += "</ul>"; inList = false; } };
+  const flushTable = () => {
+    if (!tableRows.length) return;
+    const isSep = (r) => r.every(c => /^:?-{2,}:?$/.test(c.trim()));
+    const header = tableRows[0];
+    const body = tableRows.slice(1).filter(r => !isSep(r));
+    html += `<div style="overflow-x:auto"><table class="ai-md-table"><thead><tr>${header.map(c => `<th>${inlineMd(c)}</th>`).join("")}</tr></thead>
+      <tbody>${body.map(r => `<tr>${r.map(c => `<td>${inlineMd(c)}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`;
+    tableRows = [];
+  };
+  for (const raw of lines) {
+    const line = raw.trimEnd();
+    if (/^\s*\|.*\|\s*$/.test(line)) {
+      flushList();
+      tableRows.push(line.split("|").slice(1, -1).map(c => c.trim()));
+      continue;
+    }
+    flushTable();
+    if (/^-{3,}$/.test(line.trim())) { flushList(); html += "<hr/>"; continue; }
+    const h = line.match(/^(#{1,4})\s+(.*)$/);
+    if (h) { flushList(); html += `<div class="ai-md-h${h[1].length}">${inlineMd(h[2])}</div>`; continue; }
+    const li = line.match(/^[-*]\s+(.*)$/);
+    if (li) {
+      if (!inList) { html += "<ul style=\"margin:4px 0;padding-left:18px\">"; inList = true; }
+      html += `<li>${inlineMd(li[1])}</li>`;
+      continue;
+    }
+    flushList();
+    html += line.trim() === "" ? "<br/>" : `<div>${inlineMd(line)}</div>`;
+  }
+  flushTable(); flushList();
+  return html;
+}
 VIEWS.ai = async function () {
   const [status, ins, convs] = await Promise.all([
     GET("/ai/status"), GET("/ai/insights"), GET("/ai/conversations").catch(() => [])]);
@@ -11606,10 +11651,15 @@ VIEWS.ai = async function () {
     $("chatlog").innerHTML = AI_HISTORY.map(m => {
       const me = m.role === "user";
       const tools = m.tools_used ? (Array.isArray(m.tools_used) ? m.tools_used : String(m.tools_used).split(",")) : (m.tools || null);
+      // Tin của AI render markdown rút gọn (bảng/tiêu đề/in đậm/gạch đầu dòng xuống đúng dòng,
+      // đúng nhóm) — tin người dùng tự gõ giữ nguyên text thô, chỉ xuống dòng theo Enter thật.
+      const bodyHtml = me
+        ? esc(m.content).replace(/\n/g, "<br/>")
+        : renderMarkdownLite(m.content);
       return `<div style="margin:6px 0;text-align:${me ? "right" : "left"}">
-        <span style="display:inline-block;max-width:85%;padding:8px 12px;border-radius:10px;text-align:left;
+        <span style="display:inline-block;max-width:${me ? "85%" : "94%"};padding:8px 12px;border-radius:10px;text-align:left;
           background:${me ? "var(--accent)" : "var(--panel)"};color:${me ? "#1a1206" : "var(--text)"};border:1px solid var(--border)">
-          ${esc(m.content)}${tools && tools.length ? `<div style="font-size:11px;opacity:.7;margin-top:4px">🔧 ${tools.map(esc).join(", ")}</div>` : ""}</span></div>`;
+          ${bodyHtml}${tools && tools.length ? `<div style="font-size:11px;opacity:.7;margin-top:4px">🔧 ${tools.map(esc).join(", ")}</div>` : ""}</span></div>`;
     }).join("") || '<div class="muted">Bắt đầu hỏi trợ lý…</div>';
     $("chatlog").scrollTop = $("chatlog").scrollHeight;
   };
