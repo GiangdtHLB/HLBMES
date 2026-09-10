@@ -44,14 +44,16 @@ nav#nav {
 .nav-brand-logo { font-size: 20px; line-height: 1; }
 .nav-brand-title { font-size: 15px; font-weight: 700; color: #fff; line-height: 1.25; white-space: nowrap; }
 .nav-brand-sub { font-size: 12px; color: #9fb0d6; line-height: 1.25; white-space: nowrap; }
-.nav-bell { position: relative; margin-left: auto; flex: none; width: 30px; height: 30px; border-radius: 6px; border: none; background: none; color: #cfd8ec; font-size: 16px; cursor: pointer; display: flex; align-items: center; justify-content: center; }
-.nav-bell:hover { background: rgba(255,255,255,.08); color: #fff; }
+/* Độ ưu tiên: phải thắng "nav#nav button" (id+element) ở dưới — ghép thêm "#nav" vào mọi
+   selector nút bên trong nav để không bị luật chung (display:block;width:100%...) đè mất. */
+#nav .nav-bell { position: relative; margin-left: auto; flex: none; width: 30px; height: 30px; border-radius: 6px; border: none; background: none; color: #cfd8ec; font-size: 16px; cursor: pointer; display: flex; align-items: center; justify-content: center; padding: 0; }
+#nav .nav-bell:hover { background: rgba(255,255,255,.08); color: #fff; }
 .nav-bell-count { position: absolute; top: 1px; right: 1px; background: var(--red); color: #fff; font-size: 10px; font-weight: 700; line-height: 1; min-width: 15px; height: 15px; border-radius: 8px; display: flex; align-items: center; justify-content: center; padding: 0 3px; }
 .pt-dropdown { position: absolute; top: 100%; left: 8px; right: 8px; background: #16223b; border: 1px solid rgba(255,255,255,.15); border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,.45); z-index: 50; max-height: 340px; overflow-y: auto; }
-.pt-row { display: flex; justify-content: space-between; align-items: center; gap: 8px; width: 100%; text-align: left; background: none; border: none; border-bottom: 1px solid rgba(255,255,255,.08); color: #e5e9f0; padding: 9px 12px; cursor: pointer; font-size: 12.5px; }
-.pt-row:last-child { border-bottom: none; }
-.pt-row:hover { background: rgba(255,255,255,.06); }
-.pt-badge { font-size: 11px; font-weight: 700; min-width: 18px; height: 18px; border-radius: 9px; display: flex; align-items: center; justify-content: center; padding: 0 5px; background: #FAC775; color: #3a2205; flex: none; }
+#nav .pt-row { display: flex; justify-content: space-between; align-items: center; gap: 8px; width: 100%; text-align: left; background: none; border: none; border-bottom: 1px solid rgba(255,255,255,.08); color: #e5e9f0; padding: 9px 12px; cursor: pointer; font-size: 12.5px; border-radius: 0; }
+#nav .pt-row:last-child { border-bottom: none; }
+#nav .pt-row:hover { background: rgba(255,255,255,.06); }
+.pt-badge { font-size: 11px; font-weight: 700; min-width: 18px; height: 18px; border-radius: 9px; display: inline-flex; align-items: center; justify-content: center; padding: 0 5px; background: #FAC775; color: #3a2205; flex: none; }
 .pt-empty { padding: 14px 12px; font-size: 12px; color: #9fb0d6; text-align: center; }
 .nav-scroll { flex: 0 1 auto; overflow-y: auto; padding: 3px 8px; min-height: 0; }
 nav#nav button {
