@@ -309,7 +309,6 @@ def scope_catalog(db: Session = Depends(get_db), user: User = Depends(get_curren
     from ..models.quality import QualityResult
     from ..models.quality_ext import QCParameter
     from ..models.lines import ProductionLine
-    from ..models.wms import WmsWarehouse
     wo_lines = {l for (l,) in db.execute(select(WorkOrder.line).distinct()).all() if l}
     master_lines = {l for (l,) in db.execute(select(ProductionLine.code)).all() if l}
     line_codes = sorted(wo_lines | master_lines)   # gộp line từ WO + danh mục dây chuyền
@@ -327,12 +326,10 @@ def scope_catalog(db: Session = Depends(get_db), user: User = Depends(get_curren
     qc_codes = sorted(set(qc_names) | legacy_qc_codes)
     qc_params = [{"key": c, "label": f"{c} — {qc_names[c]}" if qc_names.get(c) and qc_names[c] != c else c}
                   for c in qc_codes]
-    wms_warehouses = [{"key": w.code, "label": w.name} for w in
-                       db.execute(select(WmsWarehouse).order_by(WmsWarehouse.code)).scalars().all()]
     return {"areas": [{"key": k, "label": v} for k, v in SCOPE_AREAS.items()],
             "lines": lines, "qc_params": qc_params,
             "warehouse_locations": [{"key": k, "label": v} for k, v in SCOPE_WAREHOUSE_LOCATIONS.items()],
-            "wms_warehouses": wms_warehouses}
+            "wms_warehouses": []}
 
 
 @router.post("/users/{username}/toggle")

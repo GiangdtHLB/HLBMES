@@ -13,7 +13,7 @@ FilterRecord/BottleRecord — routers/brewing.py::approve_ferment/approve_filter
 trùng 1 mẻ vật lý thành 2 việc nếu cả 2 module cùng có bước duyệt riêng trên nó (xác nhận với
 người dùng: module cũ không còn là nguồn chính, xem lịch sử trao đổi 2026-09-10)."""
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..common import DeviationState, RecipeState, Role
@@ -25,10 +25,8 @@ from ..models.quality_ext import CAPA
 from ..models.recipes import RecipeVersion
 from ..models.warehouse import (MaterialRequestLine, SangNgangRequest, StockCount,
                                 TransferKcPxRequest, TransferPxRequest)
-from ..models.wms import FinishedGoodsUnit, Shipment, WmsLocation, WmsTransfer, WmsTransferLine, WmsWarehouse
 from ..models.maintenance import Incident, MaintenancePlan
 from . import qc_catalog
-from . import wms as wms_svc
 
 
 def _has_perm(user: User, perm: str) -> bool:
@@ -118,53 +116,6 @@ def get_pending_tasks(db: Session, user: User) -> list[dict]:
         n = db.execute(select(func.count()).select_from(RecipeVersion)
                       .where(RecipeVersion.state == RecipeState.REVIEW.value)).scalar_one()
         add("recipe_review", "Recipe version chờ duyệt", n, "recipeadv")
-
-    # ---- Kho TP (WMS) ----
-    if _has_perm(user, "wms.confirm_receipt"):
-        n = sum(1 for e in wms_svc.list_near_expiry_entries(db, user=user) if e["can_approve"])
-        add("near_expiry_approve", "Bia cận date chờ duyệt nhập kho", n, "wms", "canexpiry")
-
-        n = sum(1 for e in wms_svc.list_consigned_entries(db, user=user) if e["can_approve"])
-        add("consigned_approve", "Bia gửi chờ duyệt nhập kho", n, "wms", "consigned")
-
-        n = sum(1 for e in wms_svc.list_factory_import_entries(db, user=user) if e["can_approve"])
-        add("factory_import_approve", "Nhập từ nhà máy khác chờ duyệt", n, "wms", "factoryimport")
-
-        disallowed = wms_svc._disallowed_location_ids(db, user)
-        stmt = wms_svc._filter_loc_scope(
-            select(func.count()).select_from(FinishedGoodsUnit)
-            .where(FinishedGoodsUnit.source.in_(("chiet", "manual")),
-                  FinishedGoodsUnit.received_confirmed_by.is_(None)),
-            FinishedGoodsUnit.location_id, disallowed)
-        n = db.execute(stmt).scalar_one()
-        add("unit_receipt_confirm", "Đơn vị chiết/nhập tay chờ duyệt nhập kho", n, "wms", "kho")
-
-    if _has_perm(user, "wms.confirm_shipment"):
-        allowed_codes = None if (user.role == Role.ADMIN.value or user.scope_wms_warehouse == "*") \
-            else user.scope_wms_warehouse
-        stmt = select(func.count()).select_from(Shipment).where(Shipment.confirmed_by.is_(None))
-        if allowed_codes is not None:
-            disallowed_wh = set(db.execute(select(WmsWarehouse.warehouse_id)
-                                          .where(WmsWarehouse.code.notin_(allowed_codes))).scalars().all())
-            if disallowed_wh:
-                stmt = stmt.where(or_(Shipment.warehouse_id.is_(None), Shipment.warehouse_id.notin_(disallowed_wh)))
-        n = db.execute(stmt).scalar_one()
-        add("shipment_confirm", "Phiếu xuất kho chưa xác nhận", n, "wms", "xuatkho")
-
-        stmt_tr = select(func.count()).select_from(WmsTransfer).where(WmsTransfer.confirmed_by.is_(None))
-        if allowed_codes is not None and disallowed_wh:
-            # Mirror list_transfers: hiện phiếu nếu ĐÍCH thuộc kho mình, HOẶC ít nhất 1 dòng
-            # NGUỒN thuộc kho mình, HOẶC đích chưa xác định (chưa cất) — xem docstring ở đó.
-            stmt_tr = stmt_tr.where(or_(
-                WmsTransfer.to_location_id.is_(None),
-                WmsTransfer.to_location_id.in_(
-                    select(WmsLocation.loc_id).where(WmsLocation.warehouse_id.notin_(disallowed_wh))),
-                WmsTransfer.transfer_id.in_(
-                    select(WmsTransferLine.transfer_id).join(
-                        WmsLocation, WmsLocation.loc_id == WmsTransferLine.from_location_id)
-                    .where(WmsLocation.warehouse_id.notin_(disallowed_wh)))))
-        n = db.execute(stmt_tr).scalar_one()
-        add("wms_transfer_confirm", "Phiếu điều chuyển kho TP chưa xác nhận", n, "wms", "dieuchuyen")
 
     # ---- Bảo trì ----
     if _has_perm(user, "maintenance.manage"):

@@ -1,7 +1,7 @@
 """Tổng hợp số liệu cho Tổng quan (dashboard): lệnh nấu/lọc, mẻ nấu/lọc/chiết (thực thi
-thật, không phải trạng thái ERP). Sản lượng chiết lon/keg theo ngày+ca hiển thị trên
-dashboard lấy trực tiếp từ báo cáo SCADA thật (services/filling_external.py,
-keg_external.py) — không tính lại ở đây."""
+thật, không phải trạng thái ERP). Sản lượng chiết lon theo ngày+ca hiển thị trên
+dashboard lấy trực tiếp từ báo cáo SCADA thật (services/filling_external.py) — không
+tính lại ở đây."""
 from datetime import timedelta
 
 from sqlalchemy import false, select, true

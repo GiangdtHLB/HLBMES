@@ -254,39 +254,28 @@ def test_scheduler_auto_no_overlap(client):
     assert any(s["wo_code"] == "WO-2406-006" for s in conf["material_short"])
 
 
-# ---------------- P3-4: WMS vỉ/keg + barcode ----------------
-def test_wms_unit_lifecycle(client):
-    """Đăng ký SKU riêng (pack_size=24) + vị trí sức chứa lớn riêng cho test này — tránh
-    dùng chung vị trí/sản phẩm với seed._seed_wms (BIA-LAGER không có SKU danh mục nên
-    _pack_divisor sẽ mặc định 1, khiến quantity=240 bị hiểu nhầm thành 240 vỉ thay vì 10)."""
+# ---------------- P3-4: WMS pallet/case + barcode ----------------
+def test_wms_pallet_lifecycle(client):
     admin_h = _login(client, "admin", "AdminTest123")
     h = _login(client, "thukho", "123456")            # warehouse.receive + warehouse.issue
     locs = client.get("/api/wms/locations", headers=h).json()
     assert len(locs) >= 3
-    fp = client.post("/api/finished-products", headers=admin_h,
-                     json={"code": "SKU-DEPTHLC01", "name": "SKU depth lifecycle", "uom": "lon",
-                           "unit_type": "vi", "pack_size": 24})
-    assert fp.status_code == 201, fp.text
     loc = client.post("/api/wms/locations", headers=admin_h,
                       json={"code": "DEPTH-LC-01", "name": "Vị trí depth lifecycle", "capacity": 1000})
     assert loc.status_code == 201, loc.text
-    r = client.post("/api/wms/units", headers=h,
-                    json={"finished_product_id": fp.json()["finished_product_id"],
-                          "product_name": "SKU-DEPTHLC01", "lot_code": "PKG-DEPTHLC01",
-                          "total": 240, "pack_size": 24, "loc_id": loc.json()["loc_id"]})
-    assert r.status_code == 201
-    uid = None
-    units = client.get("/api/wms/units", headers=h).json()
-    ucode = r.json()["unit_codes"][0]
-    uid = next(u["unit_id"] for u in units if u["unit_code"] == ucode)
-    pa = client.post(f"/api/wms/units/{uid}/putaway", headers=h, json={"loc_id": loc.json()["loc_id"]})
+    r = client.post("/api/wms/pallets", headers=h,
+                    json={"product": "SKU-DEPTHLC01", "lot_code": "PKG-DEPTHLC01",
+                          "case_count": 10, "units_per_case": 24})
+    assert r.status_code == 201, r.text
+    pallet_id, pallet_code = r.json()["pallet_id"], r.json()["pallet_code"]
+    pa = client.post(f"/api/wms/pallets/{pallet_id}/putaway", headers=h, json={"loc_id": loc.json()["loc_id"]})
     assert pa.json()["status"] == "stored"
-    # barcode vỉ phân giải qua kiosk /api/scan
-    sc = client.get("/api/scan", params={"code": ucode}, headers=h).json()
-    assert sc["type"] == "finished_goods_unit"
-    # barcode vỉ phân giải qua /api/wms/resolve
-    rc = client.get("/api/wms/resolve", params={"code": ucode}, headers=h).json()
-    assert rc["type"] == "finished_goods_unit" and rc["unit_code"] == ucode
+    # barcode pallet phân giải qua kiosk /api/scan
+    sc = client.get("/api/scan", params={"code": pallet_code}, headers=h).json()
+    assert sc["type"] == "pallet"
+    # barcode pallet phân giải qua /api/wms/resolve
+    rc = client.get("/api/wms/resolve", params={"code": pallet_code}, headers=h).json()
+    assert rc["type"] == "pallet" and rc["pallet_code"] == pallet_code
 
 
 # ---------------- P2: worker job queue ----------------
@@ -426,8 +415,9 @@ def test_wms_summary(client):
     h = _login(client, "thukho", "123456")
     sm = client.get("/api/wms/summary", headers=h).json()
     assert sm["locations"] >= 4
-    assert sm["capacity_units"] >= sm["units_stored"]
-    assert sm["units_total"] >= 8   # seed sinh 8 vỉ (xem app/seed.py::_seed_wms)
+    assert sm["capacity_pallets"] >= sm["pallets_stored"]
+    assert sm["pallets_total"] >= 4   # seed sinh 4 pallet (xem app/seed.py::_seed_wms)
+    assert sm["units"] >= 4 * 40 * 24
     assert 0 <= sm["fill_pct"] <= 100
     # cần đăng nhập
     assert client.get("/api/wms/summary").status_code == 403

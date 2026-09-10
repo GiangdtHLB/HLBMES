@@ -7,7 +7,7 @@ nguồn gốc dùng chung toàn hệ thống (GenealogyEdge).
 
 KHÔNG xóa (giữ nguyên theo yêu cầu + quyết định 2026-08-01):
   - Toàn bộ Danh mục: Material/Product/BeerType/FinishedProduct/MaterialGroup/
-    MaterialAltGroup/Supplier (cũng là nơi xuất đến của Kho TP)/WmsLocation/Vehicle/UnitTypeCatalog/
+    MaterialAltGroup/Supplier/WmsLocation/UnitTypeCatalog/
     Formula/Recipe/RecipeVersion/QCParameter*/StageQcGroup/CipFormType/CipEquipment/
     ProductionLine/User/...
   - audit_log (nhật ký thao tác — có chuỗi hash, xóa sẽ vỡ chuỗi + mất lịch sử
@@ -88,14 +88,7 @@ from .models.warehouse import (
     StockCountLine,
     StockMovement,
 )
-from .models.wms import (
-    ConsignedEntry,
-    FinishedGoodsUnit,
-    LoadSlip,
-    LoadSlipLine,
-    NearExpiryEntry,
-    Shipment,
-)
+from .models.wms import Case, Pallet
 
 # Thứ tự XÓA — con trước cha, đã tính toán theo toàn bộ khóa ngoại thật giữa các
 # bảng (kể cả tự tham chiếu như StockMovement.reversal_of, FilterRecord.source_filter_id
@@ -109,7 +102,6 @@ DELETE_ORDER = [
     FermentBrewLink,
     FermentProcessLog,
     FermentDailyReading,
-    LoadSlipLine,
     PackagingMove,
     BrewMaterialUsage,
     FilterMaterialUsage,
@@ -119,10 +111,8 @@ DELETE_ORDER = [
     FilterOrderTank,
     FilterOrderMaterialLine,
     BrewOrderMaterialLine,
-    NearExpiryEntry,
-    ConsignedEntry,
-    FinishedGoodsUnit,
-    LoadSlip,
+    Case,
+    Pallet,
     MaterialRequest,
     StockCount,
     BrewBatch,
@@ -130,7 +120,6 @@ DELETE_ORDER = [
     FilterRecord,
     BrewRecord,
     FermentRecord,
-    Shipment,
     BatchExecution,
     WorkOrder,
     BrewOrder,

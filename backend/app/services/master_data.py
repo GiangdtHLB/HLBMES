@@ -24,7 +24,6 @@ from ..models.quality_ext import StageQcGroup
 from ..models.recipes import Recipe, RecipeVersion
 from ..models.scheduling import ScheduleSlot
 from ..models.warehouse import FactoryLocation, MaterialRequestLine, StockMovement
-from ..models.wms import FinishedGoodsUnit, Shipment
 from ..models.workorder import WorkOrder
 from ..security import User, require_perm
 
@@ -83,8 +82,6 @@ def delete_unit_type(db: Session, unit_type_id: str, user: User) -> None:
     checks = [
         ("sản phẩm (SKU)", select(func.count(FinishedProduct.finished_product_id)).where(
             FinishedProduct.unit_type == ut.code)),
-        ("vỉ/keg/lon trong kho", select(func.count(FinishedGoodsUnit.unit_id)).where(
-            FinishedGoodsUnit.unit_type == ut.code)),
     ]
     _block_if_used(_used_by(db, checks), "Loại đơn vị tồn kho", ut.code)
     record_audit(db, entity_type="unit_type_catalog", entity_id=ut.unit_type_id, action="delete",
@@ -166,10 +163,6 @@ def delete_supplier(db: Session, supplier_id: str, user: User) -> None:
         raise NotFoundError("Nhà cung cấp không tồn tại.")
     checks = [
         ("lô NVL", select(func.count(MaterialLot.lot_id)).where(MaterialLot.supplier_id == supplier_id)),
-        # Nhà cung cấp giờ dùng chung làm "nơi xuất đến" của Kho thành phẩm (ShipToLocation cũ
-        # đã gộp vào đây) — chặn xóa nếu đã có phiếu xuất kho nào từng dùng, không được để
-        # genealogy edge/Shipment trỏ tới bản ghi đã bị xóa.
-        ("phiếu xuất kho", select(func.count(Shipment.shipment_id)).where(Shipment.ship_to_id == supplier_id)),
     ]
     _block_if_used(_used_by(db, checks), "Nhà cung cấp", sup.code)
     record_audit(db, entity_type="supplier", entity_id=sup.supplier_id, action="delete",
@@ -258,8 +251,6 @@ def delete_finished_product(db: Session, finished_product_id: str, user: User) -
             BottleRecord.finished_product_id == finished_product_id)),
         ("nhóm chỉ tiêu công đoạn", select(func.count(StageQcGroup.link_id)).where(
             StageQcGroup.finished_product_id == finished_product_id, StageQcGroup.active == true())),
-        ("vỉ/keg tồn kho thành phẩm", select(func.count(FinishedGoodsUnit.unit_id)).where(
-            FinishedGoodsUnit.finished_product_id == finished_product_id)),
     ]
     _block_if_used(_used_by(db, checks), "Sản phẩm", fp.code)
     record_audit(db, entity_type="finished_product", entity_id=fp.finished_product_id, action="delete",

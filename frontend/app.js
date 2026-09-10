@@ -658,72 +658,13 @@ VIEWS.dashboard = async function () {
   // mới, GET /batch-tanks đã có sẵn qc_fail_count/product_code/beer_type_name — xem
   // services/batch_pipeline.py::_tank_out) thay vì GET /brewing/ferments (module cũ) — yêu cầu
   // người dùng 2026-09-02.
-  const [batches, audit, prodSummary, agingRows, expiryRows, agingOpsRaw, alerts, batchTanksRaw, lowYield, bottledNotApproved] = await Promise.all([
+  const [batches, audit, prodSummary, expiryRows, alerts, batchTanksRaw, lowYield, bottledNotApproved] = await Promise.all([
     GET("/batches"), GET("/audit?limit=10"), safe("/reports/dashboard-summary"),
-    safe("/reports/inventory-aging"), safe("/warehouse/expiry?warn_days=14"), safe("/ops-settings"),
+    safe("/warehouse/expiry?warn_days=14"),
     safe("/reports/qc-attention-alerts"), safe("/batch-tanks"),
     safe(`/reports/low-yield-filter-alerts?days=${lowYieldDays}&limit=5`),
     safe("/reports/bottled-not-approved"),
   ]);
-  const agingOps = agingOpsRaw || { aging_caution_days: 30, aging_warning_days: 60, aging_critical_days: 90 };
-
-  // Chỉ đưa lên dashboard các lô THÀNH PHẨM từ mức "Chú ý" trở lên (ẩn "Bình thường") — xem
-  // đầy đủ mọi lô tại Kho TP (WMS) › Tồn kho theo tuổi. Sắp theo số ngày tồn giảm dần (đã sort
-  // sẵn từ backend) để lô cần đẩy bán gấp nhất lên đầu.
-  const AGING_BUCKET_COLOR = { critical: "#d03b3b", warning: "#ec835a", caution: "#fab219" };
-  const AGING_UNIT_LABEL = { vi: "vỉ", keg: "keg", lon: "lon" };
-  const AGING_BUCKET_ORDER = ["caution", "warning", "critical"];
-  const AGING_BUCKET_META = {
-    caution: { label: "Chú ý", threshold: agingOps.aging_caution_days },
-    warning: { label: "Cảnh báo", threshold: agingOps.aging_warning_days },
-    critical: { label: "Nghiêm trọng", threshold: agingOps.aging_critical_days },
-  };
-  const agingChartItems = (agingRows || [])
-    .filter(r => r.age_bucket && r.age_bucket !== "ok")
-    .map(r => ({
-      label: `${r.product_display_name || r.product_name || "—"} · lô ${r.lot_code || "—"}`,
-      value: r.age_days || 0,
-      color: AGING_BUCKET_COLOR[r.age_bucket] || "var(--muted)",
-      disp: `${(r.count || 0).toLocaleString("vi-VN")} ${AGING_UNIT_LABEL[r.unit_type] || r.unit_type} · ${r.age_days} ngày`,
-    }));
-  // Khi không có lô nào cần chú ý, vẫn hiện biểu đồ (không thay bằng câu chữ) — 3 mức luôn có
-  // mặt, giá trị 0 nếu không có lô nào ở mức đó.
-  const agingChartDisplay = agingChartItems.length ? agingChartItems : AGING_BUCKET_ORDER.map(b => ({
-    label: AGING_BUCKET_META[b].label, value: 0, color: AGING_BUCKET_COLOR[b], disp: "0",
-  }));
-  // Trục X dùng chung 1 thang đo cố định (KHÔNG co giãn theo lô dài nhất — 1 lô tồn kho lâu năm
-  // do lỗi dữ liệu/test cũ có thể lên tới hàng nghìn ngày, nếu đưa vào công thức max() sẽ kéo dãn
-  // cả trục khiến mọi lô còn lại (7-30 ngày) co lại thành 1 vệt sát mép trái, không đọc được).
-  // Chỉ dựa vào ngưỡng "nghiêm trọng" (tối thiểu 50 ngày) — lô vượt trục sẽ hiện thanh đầy (kịch
-  // trục) kèm số ngày thật ở nhãn bên phải, thay vì làm hỏng thang đo chung.
-  const agingAxisMax = Math.ceil(Math.max(agingOps.aging_critical_days * 1.1, 50) / 10) * 10;
-  // Danh sách lô cần chú ý có thể rất dài (hàng chục lô) — chỉ hiện top N (đã sort theo số
-  // ngày tồn giảm dần từ backend, nên top N luôn là các lô đáng lo nhất) kèm nút "Xem thêm" để
-  // tránh dashboard dài lê thê; "Xem thêm" vẽ lại SVG với đầy đủ dữ liệu (agingBars dựng 1 khối
-  // SVG duy nhất theo chiều cao items.length, không có cơ chế ẩn/hiện từng dòng như bảng).
-  const AGING_CHART_LIMIT = 10;
-  const agingMoreCount = Math.max(0, agingChartDisplay.length - AGING_CHART_LIMIT);
-  // Tổng số lượng theo từng mức (gộp theo loại đơn vị vỉ/keg/lon nếu 1 mức có lẫn nhiều loại)
-  // — hiển thị làm 3 ô KPI phía trên biểu đồ.
-  const agingKpiTotal = (bucket) => {
-    const byUnit = {};
-    (agingRows || []).filter(r => r.age_bucket === bucket).forEach(r => {
-      const u = AGING_UNIT_LABEL[r.unit_type] || r.unit_type;
-      byUnit[u] = (byUnit[u] || 0) + (r.count || 0);
-    });
-    const parts = Object.entries(byUnit).map(([u, n]) => `${n.toLocaleString("vi-VN")} ${u}`);
-    return parts.length ? parts.join(" + ") : "0";
-  };
-  const agingKpiHtml = AGING_BUCKET_ORDER.map(b => `
-    <div style="flex:1;min-width:110px;display:flex;align-items:center;gap:8px">
-      <span style="width:12px;height:12px;border-radius:50%;background:${AGING_BUCKET_COLOR[b]};flex:none"></span>
-      <div><div class="muted" style="font-size:11px">${AGING_BUCKET_META[b].label}</div>
-        <div style="font-size:18px;font-weight:700">${agingKpiTotal(b)}</div></div>
-    </div>`).join("");
-  const agingLegendHtml = AGING_BUCKET_ORDER.map(b => `
-    <span style="display:inline-flex;align-items:center;gap:6px;margin-right:14px;font-size:11px;color:var(--muted)">
-      <span style="width:9px;height:9px;border-radius:2px;background:${AGING_BUCKET_COLOR[b]};display:inline-block"></span>
-      ${AGING_BUCKET_META[b].label} (≥${AGING_BUCKET_META[b].threshold} ngày)</span>`).join("");
 
   // NVL đã hết hạn (số ngày âm, thanh lệch trái) hoặc sắp hết hạn (≤14 ngày, thanh lệch phải;
   // ẩn các lô còn hạn xa) — xem đầy đủ tại Kho NVL › Hạn sử dụng.
@@ -950,13 +891,11 @@ VIEWS.dashboard = async function () {
       <span style="width:9px;height:9px;border-radius:2px;background:${FERMENT_STAGE_FG[s]};display:inline-block"></span>${FERMENT_STAGE_LABEL[s]}</span>`).join("")
     + `<span style="display:inline-flex;align-items:center;gap:6px;font-size:11px;color:var(--muted)">${fermentQcBadge(1)} Số chỉ tiêu CT chính/phụ đang fail</span>`;
 
-  // Mặc định NGÀY HÔM QUA (giờ máy client) — giống hệt quy ước ở Báo cáo > Chiết (lon)/(keg):
+  // Mặc định NGÀY HÔM QUA (giờ máy client) — giống hệt quy ước ở Báo cáo > Chiết (lon):
   // hôm nay chưa qua hết ca 3 nên chưa có đủ dữ liệu để tính trọn 3 ca.
   const dbYesterday = new Date(); dbYesterday.setDate(dbYesterday.getDate() - 1);
   const dbChietDate = SUB.dashboard_chiet_date || toISODateLocal(dbYesterday);
   SUB.dashboard_chiet_date = dbChietDate;
-  const dbDienDate = SUB.dashboard_dien_date || toISODateLocal(dbYesterday);
-  SUB.dashboard_dien_date = dbDienDate;
 
   $("view-dashboard").innerHTML = `
     ${alertsHtml}
@@ -985,14 +924,6 @@ VIEWS.dashboard = async function () {
     </div>
     <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:stretch;margin-bottom:16px">
       <div class="panel" style="flex:1;min-width:320px;margin-bottom:0">
-        <h2>📦 Tồn kho thành phẩm cần chú ý (theo tuổi lô)</h2>
-        <div class="muted" style="margin-bottom:8px">Các lô từ mức 🟡 Chú ý trở lên — xem đầy đủ tại <button class="btn sm sec" data-goto="wms" data-gotosub="aging" style="padding:1px 8px">Kho TP › Tồn kho theo tuổi</button></div>
-        <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:12px;padding:10px 12px;background:var(--panel2);border:1px solid var(--border);border-radius:10px">${agingKpiHtml}</div>
-        <div style="margin-bottom:8px">${agingLegendHtml}</div>
-        <div id="db_aging_chart">${CH.agingBars(agingChartDisplay.slice(0, AGING_CHART_LIMIT), { max: agingAxisMax, axisLabel: "Số ngày tồn kho" })}</div>
-        ${agingMoreCount > 0 ? `<button type="button" class="btn sm sec" id="db_aging_more" data-expanded="0" style="margin-top:8px">Xem thêm (${agingMoreCount})</button>` : ""}
-      </div>
-      <div class="panel" style="flex:1;min-width:320px;margin-bottom:0">
         <h2>⏰ Nguyên vật liệu sắp/đã hết hạn</h2>
         <div class="muted" style="margin-bottom:8px">Lô còn tồn kho, đã hết hạn hoặc còn ≤14 ngày — xem đầy đủ tại <button class="btn sm sec" data-goto="warehouse_kc" data-gotosub="han" style="padding:1px 8px">Kho công ty › Hạn sử dụng</button></div>
         <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:12px;padding:10px 12px;background:var(--panel2);border:1px solid var(--border);border-radius:10px">${expiryKpiHtml}</div>
@@ -1002,21 +933,12 @@ VIEWS.dashboard = async function () {
     </div>
     <div class="panel">
       <h2>🍺 Sản lượng chiết 5 ngày gần nhất · theo ca (dữ liệu SCADA thật)</h2>
-      <div class="muted" style="margin-bottom:8px">Bia lon: Nhà máy Đông Mai (nguồn 30K_Report) · Bia keg: Nhà máy Hạ Long (nguồn Donggoi). Mỗi ngày có 3 cột Ca 1/Ca 2/Ca 3 — chọn ngày cuối để xem 5 ngày gần nhất tính tới ngày đó.</div>
+      <div class="muted" style="margin-bottom:8px">Bia lon: Nhà máy Đông Mai (nguồn 30K_Report). Mỗi ngày có 3 cột Ca 1/Ca 2/Ca 3 — chọn ngày cuối để xem 5 ngày gần nhất tính tới ngày đó.</div>
       <div class="row" style="align-items:flex-end;margin-bottom:12px">
         <div class="field"><label>Ngày cuối (5 ngày gần nhất)</label><input id="db_chiet_date" type="date" value="${dbChietDate}"/></div>
         <button class="btn" id="db_chiet_apply">Xem</button>
       </div>
       <div id="db_chiet_data"><div class="muted">⏳ Đang tải dữ liệu SCADA...</div></div>
-    </div>
-    <div class="panel">
-      <h2>⚡ Điện tiêu thụ 5 ngày gần nhất · theo ca — Nhà máy Hạ Long (dữ liệu SCADA thật)</h2>
-      <div class="muted" style="margin-bottom:8px">Nguồn: bảng Energy/NameSys qua kết nối CSDL gán "Dùng cho: Năng lượng — Hạ Long". Mỗi ngày có 3 cột Ca 1/Ca 2/Ca 3 — chọn ngày cuối để xem 5 ngày gần nhất tính tới ngày đó.</div>
-      <div class="row" style="align-items:flex-end;margin-bottom:12px">
-        <div class="field"><label>Ngày cuối (5 ngày gần nhất)</label><input id="db_dien_date" type="date" value="${dbDienDate}"/></div>
-        <button class="btn" id="db_dien_apply">Xem</button>
-      </div>
-      <div id="db_dien_data"><div class="muted">⏳ Đang tải dữ liệu SCADA...</div></div>
     </div>
     <div class="panel"><h2>Audit gần đây</h2>${tableAudit(audit)}</div>
     <div class="panel"><h2>Mẻ gần đây</h2>${tableBatches(batches.slice(0, 8))}</div>`;
@@ -1027,17 +949,6 @@ VIEWS.dashboard = async function () {
       gotoView(el.dataset.goto, el.dataset.gotosub || null);
     };
   });
-  if ($("db_aging_more")) {
-    $("db_aging_more").onclick = () => {
-      const btn = $("db_aging_more");
-      const expanding = btn.dataset.expanded === "0";
-      $("db_aging_chart").innerHTML = CH.agingBars(
-        expanding ? agingChartDisplay : agingChartDisplay.slice(0, AGING_CHART_LIMIT),
-        { max: agingAxisMax, axisLabel: "Số ngày tồn kho" });
-      btn.dataset.expanded = expanding ? "1" : "0";
-      btn.textContent = expanding ? "Thu gọn" : `Xem thêm (${agingMoreCount})`;
-    };
-  }
   document.querySelectorAll("#view-dashboard [data-minimore]").forEach(btn => {
     btn.onclick = (ev) => {
       ev.stopPropagation();
@@ -1061,11 +972,6 @@ VIEWS.dashboard = async function () {
     loadDashboardChiet();
   };
   loadDashboardChiet();
-  $("db_dien_apply").onclick = () => {
-    SUB.dashboard_dien_date = $("db_dien_date").value;
-    loadDashboardDienHL();
-  };
-  loadDashboardDienHL();
   if ($("lowyield_days")) $("lowyield_days").onchange = () => {
     SUB.dashboard_low_yield_days = parseInt($("lowyield_days").value);
     render("dashboard");
@@ -1095,12 +1001,12 @@ function setChietTarget(key, value) {
   else localStorage.removeItem("mes_chiet_target_" + key);
 }
 
-// Tải sản lượng chiết lon (NM Đông Mai) + keg (NM Hạ Long) cho 5 ngày gần nhất (kết thúc tại
-// ngày chọn) trên dashboard — dùng đúng /reports/filling-report và /reports/keg-report (CSDL
-// SCADA thật) như tab Báo cáo > Chiết (lon)/(keg), KHÔNG dùng số liệu MES nội bộ (BottleRecord)
-// nữa. Mỗi ngày gọi riêng 1 request (API chỉ trả theo 1 khung 24h/3 ca) rồi gộp thành biểu đồ
-// cột nhóm 3 series (Ca 1/2/3) x 5 ngày bằng CH.groupedN. Tải SAU khi khung màn hình đã hiện
-// — tự thoát nếu người dùng đã chuyển tab trước khi tải xong.
+// Tải sản lượng chiết lon (NM Đông Mai) cho 5 ngày gần nhất (kết thúc tại ngày chọn) trên
+// dashboard — dùng đúng /reports/filling-report (CSDL SCADA thật) như tab Báo cáo > Chiết
+// (lon), KHÔNG dùng số liệu MES nội bộ (BottleRecord) nữa. Mỗi ngày gọi riêng 1 request (API
+// chỉ trả theo 1 khung 24h/3 ca) rồi gộp thành biểu đồ cột nhóm 3 series (Ca 1/2/3) x 5 ngày
+// bằng CH.groupedN. Tải SAU khi khung màn hình đã hiện — tự thoát nếu người dùng đã chuyển tab
+// trước khi tải xong.
 async function loadDashboardChiet() {
   const stillHere = () => $("view-dashboard").classList.contains("active") && $("db_chiet_data");
   const days = lastNDates(SUB.dashboard_chiet_date, 5);
@@ -1115,16 +1021,13 @@ async function loadDashboardChiet() {
       return { ok: true, rpt };
     } catch (e) { return { ok: false, error: e.message }; }
   };
-  const [lonDays, kegDays] = await Promise.all([
-    Promise.all(days.map(d => fetchDay("filling-report", d))),
-    Promise.all(days.map(d => fetchDay("keg-report", d))),
-  ]);
+  const lonDays = await Promise.all(days.map(d => fetchDay("filling-report", d)));
   if (!stillHere()) return;
 
   const dayLabels = days.map(d => new Date(d + "T00:00:00").toLocaleDateString("vi-VN", { day: "2-digit", month: "2-digit" }));
 
   const frameStyle = "background:var(--panel2);border:1px solid var(--border);border-radius:10px;padding:12px 14px";
-  // key = "lon"/"keg" — dùng để lưu/đọc target riêng từng dây chuyền (xem chietTarget).
+  // key = "lon" — dùng để lưu/đọc target riêng dây chuyền (xem chietTarget).
   const block = (key, title, plantNote, unit, results) => {
     if (results.every(r => !r.ok)) {
       const lastErr = results.find(r => !r.ok);
@@ -1158,7 +1061,6 @@ async function loadDashboardChiet() {
 
   $("db_chiet_data").innerHTML = `<div style="display:flex;gap:14px;flex-wrap:wrap;align-items:stretch">
     <div style="flex:1;min-width:280px">${block("lon", "🥫 Dây chuyền 30.000 lon/giờ", "NM Đông Mai", "lon", lonDays)}</div>
-    <div style="flex:1;min-width:280px">${block("keg", "🛢️ Dây chuyền 400 keg/giờ", "NM Hạ Long", "keg", kegDays)}</div>
   </div>`;
   document.querySelectorAll("#db_chiet_data [data-goto-intg]").forEach(b => b.onclick = () => gotoView("integration", "dbconn"));
   // Đổi target chỉ vẽ lại đúng SVG của dây chuyền đó (dùng lại series đã tải, không gọi lại API).
@@ -1166,80 +1068,15 @@ async function loadDashboardChiet() {
     inp.onchange = () => {
       const key = inp.dataset.chietTarget;
       setChietTarget(key, parseFloat(inp.value) || 0);
-      const results = key === "lon" ? lonDays : kegDays;
-      const unit = key === "lon" ? "lon" : "keg";
+      const unit = "lon";
       const series = [1, 2, 3].map((ca, i) => ({
         label: `Ca ${ca}`, color: caColors[i],
-        values: results.map(r => r.ok ? ((r.rpt.by_ca.find(c => c.ca === ca) || {}).value || 0) : 0),
+        values: lonDays.map(r => r.ok ? ((r.rpt.by_ca.find(c => c.ca === ca) || {}).value || 0) : 0),
       }));
       const chartEl = document.querySelector(`#db_chiet_data [data-chiet-chart="${key}"]`);
       if (chartEl) chartEl.innerHTML = CH.groupedN(dayLabels, series, { unit, height: 130, target: chietTarget(key) });
     };
   });
-}
-
-// Tải điện tiêu thụ theo ca (Ca1/Ca2/Ca3) cho Nhà máy Hạ Long trên dashboard, 5 ngày gần nhất
-// — dùng đúng /energy/external-ca-report?site=hl (CSDL SCADA thật) như tab Năng lượng > Báo
-// cáo NL - Hạ Long. CHỈ Hạ Long — chưa đưa dữ liệu Đông Mai (site=dm) ra dashboard theo yêu
-// cầu. Tải SAU khi khung màn hình đã hiện — tự thoát nếu người dùng đã chuyển tab trước khi
-// tải xong.
-async function loadDashboardDienHL() {
-  const stillHere = () => $("view-dashboard").classList.contains("active") && $("db_dien_data");
-  const days = lastNDates(SUB.dashboard_dien_date, 5);
-  const caColors = ["#3498db", "#f5a623", "#9b59b6"];
-
-  const fetchDay = async (dateStr) => {
-    const start = new Date(dateStr + "T06:00:00");
-    const end = new Date(start); end.setDate(end.getDate() + 1);
-    const dateFrom = toDTLocal(start), dateTo = toDTLocal(end);
-    try {
-      const rpt = await GET(`/energy/external-ca-report?date_from=${encodeURIComponent(dateFrom)}&date_to=${encodeURIComponent(dateTo)}&site=hl`);
-      return { ok: true, rpt };
-    } catch (e) { return { ok: false, error: e.message }; }
-  };
-
-  const results = await Promise.all(days.map(fetchDay));
-  if (!stillHere()) return;
-
-  const frameStyle = "background:var(--panel2);border:1px solid var(--border);border-radius:10px;padding:12px 14px";
-  const reservedBox = `<div style="${frameStyle};display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;min-height:130px">
-    <div style="font-size:16px;font-weight:700;margin-bottom:6px">🏭 Nhà máy Đông Mai</div>
-    <div class="muted" style="font-size:12px">Dự phòng cho báo cáo năng lượng Nhà máy Đông Mai — sẽ bổ sung sau.</div>
-  </div>`;
-
-  if (results.every(r => !r.ok)) {
-    const lastErr = results.find(r => !r.ok);
-    $("db_dien_data").innerHTML = `<div style="display:flex;gap:14px;flex-wrap:wrap;align-items:stretch">
-      <div style="flex:1;min-width:280px">
-        <div style="${frameStyle}">
-          <div style="font-size:16px;font-weight:700;margin-bottom:8px">⚡ Nhà máy Hạ Long</div>
-          <div class="muted">Chưa xem được: ${esc(lastErr.error)} <button class="btn sm sec" id="db_dien_goto_intg">Đi tới Tích hợp › Kết nối CSDL</button></div>
-        </div>
-      </div>
-      <div style="flex:1;min-width:280px">${reservedBox}</div>
-    </div>`;
-    $("db_dien_goto_intg").onclick = () => gotoView("integration", "dbconn");
-    return;
-  }
-
-  const dayLabels = days.map(d => new Date(d + "T00:00:00").toLocaleDateString("vi-VN", { day: "2-digit", month: "2-digit" }));
-  const anyGap = results.some(r => r.ok && r.rpt.has_gap);
-  const series = [1, 2, 3].map((ca, i) => ({
-    label: `Ca ${ca}`, color: caColors[i],
-    values: results.map(r => r.ok ? ((r.rpt.by_ca.find(c => c.ca === ca) || {}).value || 0) : 0),
-  }));
-  const grandTotal = series.reduce((s, ser) => s + ser.values.reduce((a, b) => a + b, 0), 0);
-  $("db_dien_data").innerHTML = `<div style="display:flex;gap:14px;flex-wrap:wrap;align-items:stretch">
-    <div style="flex:1;min-width:280px">
-      <div style="${frameStyle}">
-        <div style="font-size:16px;font-weight:700;margin-bottom:6px">⚡ Nhà máy Hạ Long</div>
-        ${anyGap ? `<div style="color:var(--orange,#f5a623);font-size:12px;margin-bottom:6px">⚠ Có 1+ hệ thống bị khoảng trống dữ liệu lớn trong 1+ ngày/ca.</div>` : ""}
-        <div class="muted" style="font-size:12px;margin-bottom:4px">Tổng 5 ngày: <b style="color:var(--green)">${grandTotal.toLocaleString("vi-VN")} kWh</b></div>
-        ${CH.groupedN(dayLabels, series, { unit: "kWh", height: 130 })}
-      </div>
-    </div>
-    <div style="flex:1;min-width:280px">${reservedBox}</div>
-  </div>`;
 }
 
 // gotoView: điều hướng sang 1 view khác (dùng ở nhiều nơi — dashboard "goto integration", v.v.)
@@ -3945,7 +3782,7 @@ async function showBatchPackLot(packLotId) {
   });
   if ($("pk_release_wms")) $("pk_release_wms").onclick = () => guard(async () => {
     const r = await POST(`/batch-pack-lots/${packLotId}/release-to-wms`, {});
-    toast(`Đã duyệt nhập kho thành phẩm (${r.count} ${r.unit_type === "keg" ? "keg" : "vỉ"})`);
+    toast(`Đã duyệt nhập kho thành phẩm — pallet ${r.pallet_code} (${r.count} case)`);
     showBatchPackLot(packLotId);
   });
   $("pk_trace").onclick = () => goTraceBackward(p.pack_lot_code);
@@ -5210,19 +5047,15 @@ function renderLotRecord(data, opts = {}) {
 }
 const TRACE_NODE_ICON = {
   lot: "📦", batch: "🍺", brew_batch: "🍺", brew: "🍺",
-  ferment: "🛢️", filter: "🧪", bottle: "🥫", finished_goods_unit: "📦", ship_to: "🏬",
-  shipment_group: "🚚", stock_group: "🏠",
+  ferment: "🛢️", filter: "🧪", bottle: "🥫", pallet: "🟦",
   batch_tank: "🛢️", batch_filter_lot: "🧪", batch_pack_lot: "🥫",
 };
 // Nhãn LOẠI của node (khác với n.relation — xem renderTree bên dưới).
 const TRACE_NODE_LABEL = {
   lot: "Lô NVL", batch: "Mẻ nấu", brew_batch: "Mẻ nấu", brew: "Mã nấu",
-  ferment: "Lô lên men", filter: "Mã lọc", bottle: "Lô chiết",
-  finished_goods_unit: "Đơn vị TP", ship_to: "Nơi xuất",
-  shipment_group: "Đã xuất", stock_group: "Còn tồn kho",
+  ferment: "Lô lên men", filter: "Mã lọc", bottle: "Lô chiết", pallet: "Pallet",
   batch_tank: "Tank lên men", batch_filter_lot: "Lô lọc", batch_pack_lot: "Lô TP",
 };
-const SHIPMENT_TYPE_LABEL = { promo: "Khuyến mại", return: "Đổi trả", normal: "Thường", mixed: "Nhiều loại" };
 function qcPill(q) {
   let text, cls;
   if (q.required_count === 0) { text = "không có chỉ tiêu"; cls = "muted"; }
@@ -5247,21 +5080,6 @@ function renderTree(tree, title) {
       <td>${l.quantity != null ? l.quantity : ""} ${esc(l.uom || "")}</td>
       <td>${(l.qc || []).map(qcPill).join("") || '<span class="muted">—</span>'}</td></tr>`).join("")}</tbody></table>`;
   const node = (n) => {
-    if (n.type === "shipment_group" || n.type === "stock_group") {
-      return `<div class="node">${TRACE_NODE_ICON[n.type]}
-      <span class="muted" style="font-size:11px">${esc(TRACE_NODE_LABEL[n.type])}</span>
-      <b>${n.count} ${esc(n.unit_type_label || (n.unit_type === "keg" ? "keg" : n.unit_type === "lon" ? "lon" : "vỉ"))}</b>
-      <span class="muted">(tổng ${n.quantity})</span>
-      ${n.type === "shipment_group" ? `
-        <div class="muted" style="font-size:12px;margin-top:2px">
-          🏬 ${esc(n.ship_to_name || n.ship_to_code || "—")} (${esc(n.ship_to_code || "")})
-          · 📄 ${esc(n.shipment_code)} · ${SHIPMENT_TYPE_LABEL[n.shipment_type] || n.shipment_type}
-          · 🚚 ${esc(n.driver_name || "—")}${n.vehicle_plate ? " — " + esc(n.vehicle_plate) : ""}
-          · 🕒 ${n.shipped_at ? fmt(n.shipped_at) : "—"}
-          ${n.from_location ? " · từ " + esc(n.from_location) : ""}
-        </div>` : `<div class="muted" style="font-size:12px;margin-top:2px">Chưa xuất kho — vẫn còn tại kho thành phẩm.</div>`}
-      </div>`;
-    }
     const kids = n.children || [];
     const lotKids = kids.filter(c => c.type === "lot");
     const otherKids = kids.filter(c => c.type !== "lot");
@@ -5301,7 +5119,7 @@ VIEWS.audit = async function () {
 // backend record_audit call sites) — phần không có trong dict sẽ tự "làm đẹp" (thay _ bằng khoảng
 // trắng, viết hoa chữ đầu) thay vì hiện mã thô khó đọc.
 const AUDIT_ENTITY_LABELS = {
-  finished_goods_unit: "Đơn vị kho thành phẩm", near_expiry_entry: "Bia cận date", shipment: "Phiếu xuất kho",
+  pallet: "Pallet kho thành phẩm", wms_case: "Case kho thành phẩm",
   batch: "Mẻ sản xuất", lot: "Lô", brew_order: "Lệnh nấu", brew_master_order: "Lệnh nấu (gộp)",
   filter_order: "Lệnh lọc", filter_master_order: "Lệnh lọc (gộp)", ferment_record: "Lô lên men",
   bbt_tank: "Tank BBT", work_order: "Lệnh sản xuất (WO)", yeast_lot: "Lô men giống",
@@ -5317,7 +5135,6 @@ const AUDIT_ENTITY_LABELS = {
   unit_type_catalog: "Loại đơn vị tồn kho", supplier: "Nhà cung cấp", material_group: "Nhóm vật tư",
   product: "Dịch bia", product_brew_spec: "Thông số nấu sản phẩm", finished_product: "Sản phẩm (SKU)",
   material: "Vật tư/NVL", recipe: "Công thức", line: "Dây chuyền", incident: "Sự cố bảo trì",
-  ship_to_location: "Nơi xuất đến",
 };
 const AUDIT_ACTION_LABELS = {
   build: "Tạo/nhập kho", putaway: "Cất vào vị trí", transfer: "Điều chuyển", decompose: "Phân rã 1 đơn vị",
@@ -5345,8 +5162,7 @@ const AUDIT_ACTION_PREFIX_LABELS = { transition: "Chuyển trạng thái", isa88
 // receive/issue/transfer NVL chính (services/warehouse.py) — không phân biệt được Kho phân xưởng
 // ở tầng hiển thị vì audit không lưu location.
 const AUDIT_MODULE_MAP = {
-  finished_goods_unit: "Kho TP (WMS)", near_expiry_entry: "Kho TP (WMS)", shipment: "Kho TP (WMS)",
-  ship_to_location: "Kho TP (WMS)",
+  pallet: "Kho TP (WMS)", wms_case: "Kho TP (WMS)",
   batch: "Nấu-Lọc-Chiết", ferment_record: "Nấu-Lọc-Chiết", bbt_tank: "Nấu-Lọc-Chiết", yeast_lot: "Nấu-Lọc-Chiết",
   brew_order: "Lệnh SX", brew_master_order: "Lệnh SX", filter_order: "Lệnh SX", filter_master_order: "Lệnh SX",
   order: "Lệnh SX", work_order: "Điều độ",
@@ -7396,49 +7212,6 @@ const REQ_CACHE = { lots: [], matById: {}, lotOptsByMaterial: () => "" };
 function _hasPerm(perm) {
   return CURRENT_USER && (CURRENT_USER.permissions === "*" ||
     (Array.isArray(CURRENT_USER.permissions) && CURRENT_USER.permissions.includes(perm)));
-}
-
-// Lọc danh sách Kho thành phẩm (WMS) theo phạm vi được phân của user hiện tại
-// (CURRENT_USER.wms_warehouse_scope — admin/"*" = không lọc) — dùng cho mọi picker chọn kho
-// (Xuất kho/Điều chuyển/Cất vào vị trí/Nhập kho) để tránh chọn nhầm kho ngoài phạm vi (BE vẫn tự
-// chặn nếu ai đó cố gọi thẳng API, xem services/wms.py::_assert_wh_scope).
-function myAllowedWarehouses(allWarehouses) {
-  const scope = CURRENT_USER && CURRENT_USER.wms_warehouse_scope;
-  if (!CURRENT_USER || CURRENT_USER.role === "admin" || !scope || scope === "*") return allWarehouses;
-  const allowed = new Set(String(scope).split(",").map(s => s.trim()).filter(Boolean));
-  return allWarehouses.filter(w => allowed.has(w.code));
-}
-// Ngược lại myAllowedLocations — dùng riêng cho "Vị trí đích" của Điều chuyển (liên kho): tài
-// khoản bị giới hạn kho chỉ điều chuyển ĐẾN kho NGOÀI phạm vi của mình (điều chuyển về chính
-// kho mình quản lý là vô nghĩa, xem services/wms.py::create_transfer) — admin/không giới hạn
-// vẫn thấy toàn bộ như myAllowedLocations.
-function otherWarehouseLocations(allLocations) {
-  const active = allLocations.filter(l => l.active);
-  const scope = CURRENT_USER && CURRENT_USER.wms_warehouse_scope;
-  if (!CURRENT_USER || CURRENT_USER.role === "admin" || !scope || scope === "*") return active;
-  const allowed = new Set(String(scope).split(",").map(s => s.trim()).filter(Boolean));
-  return active.filter(l => !allowed.has(l.warehouse_code));
-}
-function isWhScopeRestricted() {
-  const scope = CURRENT_USER && CURRENT_USER.wms_warehouse_scope;
-  return !!(CURRENT_USER && CURRENT_USER.role !== "admin" && scope && scope !== "*");
-}
-// Mirror myAllowedWarehouses nhưng lọc trực tiếp danh sách WmsLocation (GET /wms/locations) theo
-// warehouse_code — dùng cho các picker chọn THẲNG vị trí (Nhập kho/Cất vào vị trí/Điều chuyển).
-function myAllowedLocations(allLocations) {
-  const active = allLocations.filter(l => l.active);
-  const scope = CURRENT_USER && CURRENT_USER.wms_warehouse_scope;
-  if (!CURRENT_USER || CURRENT_USER.role === "admin" || !scope || scope === "*") return active;
-  const allowed = new Set(String(scope).split(",").map(s => s.trim()).filter(Boolean));
-  return active.filter(l => allowed.has(l.warehouse_code));
-}
-// Kiểm tra 1 mã kho (warehouse_code) đơn lẻ có nằm trong phạm vi được phân hay không — dùng khi
-// lọc theo từng dòng thay vì cả mảng (VD picker Điều chuyển lấy warehouse_code từ vị trí lô hàng).
-function isWarehouseAllowed(warehouseCode) {
-  const scope = CURRENT_USER && CURRENT_USER.wms_warehouse_scope;
-  if (!CURRENT_USER || CURRENT_USER.role === "admin" || !scope || scope === "*") return true;
-  const allowed = new Set(String(scope).split(",").map(s => s.trim()).filter(Boolean));
-  return allowed.has(warehouseCode);
 }
 
 // Tìm kiếm cho danh sách thẻ (card) như phiếu đề nghị nhận kho — khác wireSearch()/.searchbox
@@ -10263,21 +10036,20 @@ async function openBrewProcessLogModal(brewId, batchId, batchCode, onBack) {
 
 // ================= NĂNG LƯỢNG =================
 VIEWS.energy = async function () {
-  const sec = SUB.energy || "report_hl";
+  const sec = SUB.energy || "report_dm";
   const sections = [
-    { key: "report_hl", label: "Báo cáo NL - Hạ Long" }, { key: "report_dm", label: "Báo cáo NL - Đông Mai" },
+    { key: "report_dm", label: "Báo cáo NL - Đông Mai" },
     { key: "daily", label: "Biểu đồ ngày" },
     { key: "month", label: "Tổng hợp tháng" },
     { key: "update", label: "Cập nhật số liệu" }, { key: "dm", label: "Danh mục" },
   ];
   const groups = await GET("/energy/groups");
   let body = "";
-  if (sec === "report_hl" || sec === "report_dm") {
-    // Mỗi nhà máy là 1 tab riêng (không dùng chung dropdown chọn site) — mỗi tab tự nhớ bộ lọc
-    // riêng qua SUB key hậu tố _hl/_dm. Hiện khung màn hình điện SCADA NGAY (không đợi CSDL
-    // ngoài) — dữ liệu tải bất đồng bộ sau, đổ vào #elec_data khi xong.
-    const site = sec === "report_dm" ? "dm" : "hl";
-    const siteLabel = site === "dm" ? "Đông Mai" : "Hạ Long";
+  if (sec === "report_dm") {
+    // Hiện khung màn hình điện SCADA NGAY (không đợi CSDL ngoài) — dữ liệu tải bất đồng bộ
+    // sau, đổ vào #elec_data khi xong.
+    const site = "dm";
+    const siteLabel = "Đông Mai";
     const eFrom = SUB[`energy_ext_from_${site}`] || "";
     const eTo = SUB[`energy_ext_to_${site}`] || "";
     const eGb = SUB[`energy_ext_gb_${site}`] || "day";
@@ -10359,8 +10131,8 @@ VIEWS.energy = async function () {
   $("view-energy").innerHTML = subnav("energy", sections, sec) + body;
   wireSubnav("energy"); wireSearch();
   if (sec === "month") wirePaginate("t_energymonth", 10);
-  if (sec === "report_hl" || sec === "report_dm") {
-    const site = sec === "report_dm" ? "dm" : "hl";
+  if (sec === "report_dm") {
+    const site = "dm";
     $("erp_apply").onclick = () => {
       SUB[`energy_ext_from_${site}`] = $("erp_from").value; SUB[`energy_ext_to_${site}`] = $("erp_to").value;
       SUB[`energy_ext_gb_${site}`] = $("erp_gb").value;
@@ -11474,57 +11246,10 @@ VIEWS.process = async function () {
 // ================= REALTIME (trạm quan trắc nước thải + máy chiết lon 30K) =================
 VIEWS.realtime = async function () {
   $("view-realtime").innerHTML = `
-    <div class="panel"><h2>🌊 Trạm quan trắc nước thải Hạ Long <span id="rtww_clock" class="muted"></span></h2>
-      <div class="muted">Dữ liệu thật từ SCADA quan trắc nước thải — bảng <code class="k">QT_Realtime</code>, qua kết nối <code class="k">CSDL_NL_HL</code> (WAN). Tự cập nhật mỗi 15 giây.</div>
-      <div id="rtww_body" class="muted" style="margin-top:12px">Đang tải…</div>
-    </div>
     <div class="panel"><h2>🥫 Máy chiết lon 30K — Realtime <span id="rt30k_clock" class="muted"></span></h2>
       <div class="muted">Dữ liệu thật từ SCADA máy chiết lon "30K" (nhà máy Đông Mai) — bảng <code class="k">30K_Realtime</code>, qua kết nối <code class="k">CSDL_NL_ĐM</code> (WAN). Tự cập nhật mỗi 15 giây.</div>
       <div id="rt30k_body" class="muted" style="margin-top:12px">Đang tải…</div>
     </div>`;
-  let rtwwBusy = false;
-  const refreshWw = async () => {
-    if (rtwwBusy) return;
-    rtwwBusy = true;
-    try {
-      let s;
-      try { s = await GET("/reports/wastewater-realtime"); }
-      catch (e) {
-        $("rtww_clock").textContent = "· cập nhật " + new Date().toLocaleTimeString("vi-VN");
-        $("rtww_body").innerHTML = `<div class="muted" style="color:var(--red)">Không lấy được dữ liệu từ SCADA: ${esc(e.message)}</div>`;
-        return;
-      }
-      $("rtww_clock").textContent = "· cập nhật " + new Date().toLocaleTimeString("vi-VN");
-      if (!s.available) {
-        $("rtww_body").innerHTML = `<div class="muted" style="color:var(--red)">Không có bản ghi nào trong bảng QT_Realtime.</div>`;
-        return;
-      }
-      // Tiêu chuẩn xả thải theo QCVN 40:2011/BTNMT (cột B) — dùng để tô cảnh báo khi vượt ngưỡng,
-      // không áp dụng cho FlowIn/FlowOut (chỉ là lưu lượng, không có ngưỡng xả thải).
-      const wwCard = (value, decimals, unit, label, std, ok) => `
-        <div class="card">
-          <div class="n" style="font-size:22px${value != null && !ok ? ";color:var(--red)" : ""}">${value != null ? value.toFixed(decimals) : "—"}${unit ? `<span style="font-size:12px;color:var(--muted)"> ${unit}</span>` : ""}</div>
-          <div class="l">${label}${value != null ? " " + badge(ok ? "available" : "critical") + (ok ? "Đạt" : "Vượt chuẩn") : ""}</div>
-          <div class="muted" style="font-size:11px;margin-top:2px">Tiêu chuẩn: ${std}</div>
-        </div>`;
-      const phOk = s.ph == null || (s.ph >= 5.5 && s.ph <= 9);
-      const tempOk = s.temp == null || s.temp <= 40;
-      const tssOk = s.tss == null || s.tss <= 100;
-      const codOk = s.cod == null || s.cod <= 150;
-      const nh4Ok = s.nh4 == null || s.nh4 <= 10;
-      $("rtww_body").innerHTML = `
-        <div class="cards">
-          ${wwCard(s.ph, 2, "", "pH", "5.5 – 9", phOk)}
-          ${wwCard(s.temp, 1, "°C", "Nhiệt độ (Temp)", "≤ 40 °C", tempOk)}
-          ${wwCard(s.tss, 1, "mg/L", "TSS", "≤ 100 mg/L", tssOk)}
-          ${wwCard(s.cod, 1, "mg/L", "COD", "≤ 150 mg/L", codOk)}
-          ${wwCard(s.nh4, 3, "mg/L", "NH4", "≤ 10 mg/L", nh4Ok)}
-          <div class="card"><div class="n" style="font-size:22px">${s.flow_in != null ? s.flow_in.toFixed(2) : "—"}<span style="font-size:12px;color:var(--muted)"> m³/h</span></div><div class="l">Lưu lượng vào (FlowIn)</div></div>
-          <div class="card"><div class="n" style="font-size:22px">${s.flow_out != null ? s.flow_out.toFixed(2) : "—"}<span style="font-size:12px;color:var(--muted)"> m³/h</span></div><div class="l">Lưu lượng ra (FlowOut)</div></div>
-        </div>
-        <div class="muted" style="margin-top:8px">Bản ghi SCADA lúc: ${s.last_update ? fmt(s.last_update) : "—"} · Kết nối: <code class="k">${esc(s.connection_name)}</code></div>`;
-    } finally { rtwwBusy = false; }
-  };
   let rt30kBusy = false;
   const refresh30k = async () => {
     if (rt30kBusy) return;   // kết nối WAN có thể chậm — không gọi chồng lượt trước chưa xong
@@ -11553,9 +11278,8 @@ VIEWS.realtime = async function () {
         <div class="muted" style="margin-top:8px">Bản ghi SCADA lúc: ${s.last_update ? fmt(s.last_update) : "—"} · Kết nối: <code class="k">${esc(s.connection_name)}</code></div>`;
     } finally { rt30kBusy = false; }
   };
-  await refreshWw();
   await refresh30k();
-  window.__rt30k = setInterval(() => { refreshWw(); refresh30k(); }, 15000);
+  window.__rt30k = setInterval(() => { refresh30k(); }, 15000);
 };
 
 // ================= TRỢ LÝ AI =================
@@ -11937,8 +11661,7 @@ const normStatus = { dat: ["available", "đạt"], vuot: ["critical", "vượt �
 VIEWS.reports = async function () {
   const sec = SUB.reports || "material";
   const sections = [{ key: "material", label: "Định mức NVL" }, { key: "filling", label: "Chiết (lon)" },
-    { key: "keg", label: "Chiết (keg)" }, { key: "lostatus", label: "Trạng thái lô" },
-    { key: "yield", label: "Sản lượng lọc" }];
+    { key: "lostatus", label: "Trạng thái lô" }, { key: "yield", label: "Sản lượng lọc" }];
   let body = "";
 
   if (sec === "material") {
@@ -11999,24 +11722,6 @@ VIEWS.reports = async function () {
         <button class="btn" id="fp_apply">Xem báo cáo</button>
       </div></div>
       <div id="fp_data"><div class="panel muted">⏳ Đang tải dữ liệu từ CSDL SCADA...</div></div>`;
-  } else if (sec === "keg") {
-    // Giống hệt Chiết (lon): hiện khung màn hình NGAY, mặc định NGÀY HÔM QUA (giờ máy client).
-    const kYesterday = new Date(); kYesterday.setDate(kYesterday.getDate() - 1);
-    const kMode = SUB.keg_mode || "day";
-    const kDate = SUB.keg_date || toISODateLocal(kYesterday);
-    const kMonth = SUB.keg_month || toISODateLocal(kYesterday).slice(0, 7);
-    SUB.keg_mode = kMode; SUB.keg_date = kDate; SUB.keg_month = kMonth;
-    body = `<div class="panel"><h2>🛢️ Sản lượng chiết keg — dữ liệu SCADA thật</h2>
-      <div class="muted" style="margin-bottom:8px">Nguồn: bảng Donggoi (4 line L1-L4) qua kết nối CSDL gán "Dùng cho: Chiết (keg)". Chọn 1 ngày để xem 3 ca của ngày đó, hoặc chọn cả tháng để xem theo từng ngày trong tháng. Nếu không có bản ghi đúng giờ ranh giới ca, hệ thống lấy bản ghi gần giờ đó nhất TRƯỚC mốc (không lấy bản ghi ở tương lai so với mốc) — dữ liệu nguồn càng thưa, breakdown theo ca càng chỉ mang tính tham khảo.</div>
-      <div class="row">
-        <div class="field"><label>Xem theo</label><select id="kp_mode">
-          <option value="day" ${kMode === "day" ? "selected" : ""}>Ngày cụ thể</option>
-          <option value="month" ${kMode === "month" ? "selected" : ""}>Cả tháng</option></select></div>
-        <div class="field" id="kp_day_field" style="${kMode === "month" ? "display:none" : ""}"><label>Ngày</label><input id="kp_date" type="date" value="${kDate}"/></div>
-        <div class="field" id="kp_month_field" style="${kMode === "day" ? "display:none" : ""}"><label>Tháng</label><input id="kp_month" type="month" value="${kMonth}"/></div>
-        <button class="btn" id="kp_apply">Xem báo cáo</button>
-      </div></div>
-      <div id="kp_data"><div class="panel muted">⏳ Đang tải dữ liệu từ CSDL SCADA...</div></div>`;
   } else if (sec === "lostatus") {
     const lstDays = SUB.lostatus_days || 180;
     const rows = await GET("/reports/lo-status?days=" + lstDays);
@@ -12146,20 +11851,6 @@ VIEWS.reports = async function () {
     };
     loadFillingData();
   }
-  if (sec === "keg") {
-    $("kp_mode").onchange = () => {
-      const isMonth = $("kp_mode").value === "month";
-      $("kp_day_field").style.display = isMonth ? "none" : "";
-      $("kp_month_field").style.display = isMonth ? "" : "none";
-    };
-    $("kp_apply").onclick = () => {
-      SUB.keg_mode = $("kp_mode").value;
-      SUB.keg_date = $("kp_date").value;
-      SUB.keg_month = $("kp_month").value;
-      render("reports");
-    };
-    loadKegData();
-  }
 };
 
 // Tải dữ liệu sản lượng chiết lon (CSDL SCADA ngoài) SAU khi khung màn hình đã hiện —
@@ -12222,76 +11913,6 @@ async function loadFillingData() {
 }
 
 // Tải dữ liệu sản lượng chiết keg (CSDL SCADA ngoài) SAU khi khung màn hình đã hiện —
-// tự thoát nếu người dùng đã chuyển sang tab khác trước khi tải xong.
-async function loadKegData() {
-  const stillHere = () => $("view-reports").classList.contains("active") && $("kp_data");
-  try {
-    let dateFrom, dateTo;
-    if (SUB.keg_mode === "month") {
-      const [y, m] = SUB.keg_month.split("-").map(Number);
-      dateFrom = toDTLocal(new Date(y, m - 1, 1, 6, 0, 0));
-      dateTo = toDTLocal(new Date(y, m, 1, 6, 0, 0));
-    } else {
-      const start = new Date(SUB.keg_date + "T06:00:00");
-      const end = new Date(start); end.setDate(end.getDate() + 1);
-      dateFrom = toDTLocal(start); dateTo = toDTLocal(end);
-    }
-
-    const rpt = await GET(`/reports/keg-report?date_from=${encodeURIComponent(dateFrom)}&date_to=${encodeURIComponent(dateTo)}`);
-    if (!stillHere()) return;
-    const caColors = ["#3498db", "#f5a623", "#9b59b6"];
-    const dayLabels = rpt.by_day.map(d => d.date.slice(5));
-    const barSeries = [
-      { label: "Ca 1 (06h-14h)", color: caColors[0], values: rpt.by_day.map(d => d.ca1) },
-      { label: "Ca 2 (14h-22h)", color: caColors[1], values: rpt.by_day.map(d => d.ca2) },
-      { label: "Ca 3 (22h-06h)", color: caColors[2], values: rpt.by_day.map(d => d.ca3) },
-    ];
-    const pieItems = rpt.by_ca.map((c, i) => ({ label: c.label, value: c.value, color: caColors[i] }));
-
-    $("kp_data").innerHTML = `<div class="muted" style="margin-bottom:8px">📅 Đang xem dữ liệu từ <b>${fmt(rpt.date_from)}</b> đến <b>${fmt(rpt.date_to)}</b></div>
-      <div class="muted" style="margin-bottom:8px">Kết nối "${esc(rpt.connection_name)}"</div>
-      ${rpt.has_gap ? '<div style="color:var(--orange,#f5a623);margin-bottom:8px">⚠ Có khoảng trống dữ liệu lớn trong CSDL nguồn ở 1+ ca — các ca đó hiện "—" thay vì số bịa, tổng có thể chưa đầy đủ.</div>' : ""}
-      <div class="row" style="gap:10px;flex-wrap:wrap">
-        <div class="panel" style="flex:1;min-width:180px">
-          <div class="muted" style="font-size:12px">TỔNG SỐ KEG</div>
-          <div style="font-size:26px;font-weight:700;color:var(--green)">${rpt.total_kegs.toLocaleString("vi-VN")} <span style="font-size:14px;font-weight:400">keg</span></div>
-        </div>
-        ${rpt.by_ca.map((c, i) => `<div class="panel" style="flex:1;min-width:160px">
-          <div class="muted" style="font-size:12px">${esc(c.label.toUpperCase())}${c.data_gap ? ' ⚠' : ""}</div>
-          <div style="font-size:22px;font-weight:700;color:${caColors[i]}">${c.value.toLocaleString("vi-VN")} <span style="font-size:13px;font-weight:400">keg</span></div>
-        </div>`).join("")}
-      </div>
-      <div class="split">
-        <div class="panel"><h2>Tỉ lệ theo ca</h2>${pieItems.some(p => p.value > 0) ? CH.pie(pieItems) : '<div class="muted">Không có dữ liệu.</div>'}</div>
-        <div class="panel"><h2>Theo ngày — từng ca</h2>${dayLabels.length ? CH.groupedN(dayLabels, barSeries) : '<div class="muted">Không có dữ liệu.</div>'}</div>
-      </div>
-      <div class="panel"><h2>Chi tiết theo ca</h2>
-        <div class="tablewrap"><table id="t_kegca"><thead><tr><th>Ngày</th><th>Ca</th><th>Bắt đầu</th><th>Kết thúc</th><th>Số keg</th></tr></thead>
-        <tbody>${rpt.shifts.map(s => `<tr><td>${fmt(s.date)}</td><td>Ca ${s.ca}</td>
-          <td class="muted">${new Date(s.start).toLocaleString("vi-VN")}</td><td class="muted">${new Date(s.end).toLocaleString("vi-VN")}</td>
-          <td${s.data_gap ? ' class="muted" title="Thiếu dữ liệu — khoảng trống lớn trong CSDL nguồn"' : ""}>${s.kegs != null ? s.kegs.toLocaleString("vi-VN") : "— ⚠"}</td></tr>`).join("") ||
-          '<tr><td colspan=5 class="muted">Không có dữ liệu.</td></tr>'}</tbody></table></div></div>
-      <div class="panel"><h2>Theo từng line</h2>
-        <div class="muted" style="margin-bottom:8px">Sản lượng từng line chiết keg (L1-L4), chia theo ca.${rpt.has_gap ? ' ⚠ Có ca thiếu dữ liệu (xem ở trên) — số theo line dưới đây không tính ca đó.' : ""}</div>
-        ${rpt.by_line.some(l => l.total > 0) ? CH.groupedN(rpt.by_line.map(l => l.label), [
-          { label: "Ca 1 (06h-14h)", color: caColors[0], values: rpt.by_line.map(l => l.ca1) },
-          { label: "Ca 2 (14h-22h)", color: caColors[1], values: rpt.by_line.map(l => l.ca2) },
-          { label: "Ca 3 (22h-06h)", color: caColors[2], values: rpt.by_line.map(l => l.ca3) },
-        ]) : '<div class="muted">Không có dữ liệu.</div>'}
-        <div class="tablewrap" style="margin-top:12px"><table><thead><tr><th>Line</th><th>Ca 1</th><th>Ca 2</th><th>Ca 3</th><th>Tổng</th></tr></thead>
-        <tbody>${rpt.by_line.map(l => `<tr><td>${esc(l.label)}</td>
-          <td>${l.ca1.toLocaleString("vi-VN")}</td><td>${l.ca2.toLocaleString("vi-VN")}</td><td>${l.ca3.toLocaleString("vi-VN")}</td>
-          <td><b>${l.total.toLocaleString("vi-VN")}</b></td></tr>`).join("") ||
-          '<tr><td colspan=5 class="muted">Không có dữ liệu.</td></tr>'}</tbody></table></div></div>`;
-    wirePaginate("t_kegca", 10);
-  } catch (e) {
-    if (!stillHere()) return;
-    $("kp_data").innerHTML = `<div class="panel muted">Chưa xem được sản lượng chiết keg: ${esc(e.message)}
-      <button class="btn sm sec" id="kp_goto_intg">Đi tới Tích hợp › Kết nối CSDL</button></div>`;
-    $("kp_goto_intg").onclick = () => gotoView("integration", "dbconn");
-  }
-}
-
 // ================= QUẢN TRỊ TÀI KHOẢN (admin) =================
 const ROLE_DESC = { operator: "Vận hành (ghi nhận)", supervisor: "Trưởng ca/Quản đốc",
   qa: "QA/KCS (release)", engineer: "Kỹ sư (recipe)", admin: "Quản trị" };
@@ -12365,55 +11986,6 @@ const BEER_TYPE_SCOPED_STAGES = ["loc", "thanh_pham"];
 const MULTI_SAMPLE_STAGES = ["len_men_chinh", "len_men_phu"];
 // Sản phẩm (SKU) chỉ có ý nghĩa ở "loc" và "thanh_pham" — mirror qc_catalog.SKU_SCOPED_STAGES.
 const SKU_SCOPED_STAGES = ["loc", "thanh_pham"];
-// "Bố cục kho" — admin tự xếp vị trí lên lưới hàng/cột (khác sơ đồ vẽ cứng D01-D21 cũ, mã vị
-// trí thật trên server vd "DM.K01" không theo quy luật nào để tự suy ra vị trí vẽ). Biến module
-// để giữ trạng thái đang chọn kho/đang "cầm" 1 vị trí xuyên suốt các lần render("master") lại
-// (mỗi lần gọi VIEWS.master() là 1 hàm mới, không tự nhớ state cục bộ).
-let WMS_LAYOUT_WH = null;
-let WMS_LAYOUT_PICK = null;
-let WMS_LAYOUT_EXTRA_ROWS = 0;
-let WMS_LAYOUT_EXTRA_COLS = 0;
-function renderWmsLayoutGrid(wh, locsInWh, whOptionsHtml) {
-  const placed = locsInWh.filter(l => l.layout_row != null && l.layout_col != null);
-  const unplaced = locsInWh.filter(l => l.layout_row == null || l.layout_col == null);
-  const maxRow = placed.reduce((m, l) => Math.max(m, l.layout_row), -1);
-  const maxCol = placed.reduce((m, l) => Math.max(m, l.layout_col), -1);
-  const rows = Math.max(maxRow + 2, 5) + WMS_LAYOUT_EXTRA_ROWS;
-  const cols = Math.max(maxCol + 2, 6) + WMS_LAYOUT_EXTRA_COLS;
-  const byCell = {};
-  placed.forEach(l => { byCell[`${l.layout_row}:${l.layout_col}`] = l; });
-  const pickedLoc = WMS_LAYOUT_PICK ? locsInWh.find(l => l.loc_id === WMS_LAYOUT_PICK) : null;
-  let grid = `<div class="tablewrap"><table style="border-collapse:separate;border-spacing:4px">`;
-  for (let r = 0; r < rows; r++) {
-    grid += "<tr>";
-    for (let c = 0; c < cols; c++) {
-      const loc = byCell[`${r}:${c}`];
-      if (loc) {
-        grid += `<td><div class="panel" data-layout-cell="${r}:${c}" data-layout-loc="${esc(loc.loc_id)}"
-          style="min-width:90px;padding:6px;text-align:center;cursor:pointer;${loc.loc_id === WMS_LAYOUT_PICK ? "outline:2px solid var(--accent)" : ""}"
-          title="Bấm để nhấc ra khỏi ô, xếp lại chỗ khác">
-          <div style="font-weight:600;font-size:12px">${esc(loc.code)}</div>
-          <div class="muted" style="font-size:11px">${esc(loc.name)}</div>
-          <button class="btn sm sec" data-layout-unplace="${esc(loc.loc_id)}" style="margin-top:4px;padding:0 6px">Gỡ</button>
-        </div></td>`;
-      } else {
-        grid += `<td><div data-layout-cell="${r}:${c}" style="min-width:90px;min-height:52px;border:1px dashed var(--border);border-radius:6px;cursor:pointer"
-          title="${pickedLoc ? "Bấm để đặt '" + esc(pickedLoc.code) + "' vào đây" : "Chọn 1 vị trí ở danh sách bên trên trước"}"></div></td>`;
-      }
-    }
-    grid += "</tr>";
-  }
-  grid += "</table></div>";
-  return `<div class="row" style="align-items:flex-end;flex-wrap:wrap;margin-bottom:8px">
-      <div class="field"><label>Kho thành phẩm</label><select id="wlo_wh">${whOptionsHtml}</select></div>
-      <button class="btn sec" id="wlo_addrow">+ Hàng</button>
-      <button class="btn sec" id="wlo_addcol">+ Cột</button>
-    </div>
-    <div class="muted" style="margin-bottom:8px">Bấm chọn 1 vị trí ${unplaced.length ? "chưa xếp" : "đã xếp (để dời)"} bên dưới, rồi bấm vào 1 ô trống trên lưới để đặt vào đó — lưới sẽ vẽ lại đúng như vậy trên "Sơ đồ kho".</div>
-    <div style="margin-bottom:10px">${unplaced.length ? unplaced.map(l => `<button class="btn sm ${l.loc_id === WMS_LAYOUT_PICK ? "" : "sec"}" data-layout-pick="${esc(l.loc_id)}" style="margin:2px">${esc(l.code)} — ${esc(l.name)}</button>`).join("")
-      : `<span class="muted">Mọi vị trí trong kho này đã được xếp bố cục.</span>`}</div>
-    ${grid}`;
-}
 const MASTER_GROUPS = [
   { key: "sanxuat", label: "Sản xuất", items: [
     { key: "dichbia", label: "Dịch bia" }, { key: "loaibia", label: "Loại bia" },
@@ -12426,9 +11998,7 @@ const MASTER_GROUPS = [
     { key: "vitrikho", label: "Vị trí kho" },
   ] },
   { key: "khotp", label: "Kho thành phẩm", items: [
-    { key: "nhamaykhac", label: "Nhà máy khác" }, { key: "khothanhpham", label: "Kho thành phẩm" },
-    { key: "vitrikhotp", label: "Vị trí kho thành phẩm" }, { key: "boccuckho", label: "Bố cục kho" },
-    { key: "laixe", label: "Lái xe" }, { key: "loaidonvi", label: "Loại đơn vị tồn kho" },
+    { key: "nhamaykhac", label: "Nhà máy khác" }, { key: "loaidonvi", label: "Loại đơn vị tồn kho" },
   ] },
   { key: "chatluong", label: "Chất lượng", items: [
     { key: "chitieucl", label: "Danh mục chỉ tiêu chất lượng" }, { key: "nhomchitieucl", label: "Nhóm chỉ tiêu chất lượng" },
@@ -12442,7 +12012,7 @@ const MASTER_GROUPS = [
 ];
 let MASTER_GROUP = "sanxuat";
 VIEWS.master = async function () {
-  const [products, finishedProducts, materials, plines, qcParams, qcGroups, stageGroups, beerTypes, suppliers, materialGroups, opsSettings, unitTypes, materialAltGroups, factoryLocations, wmsWarehouses, wmsLocations, wmsVehicles, materialLocations, scopeCatalog, processParams, processParamGroups, processPhases] = await Promise.all([
+  const [products, finishedProducts, materials, plines, qcParams, qcGroups, stageGroups, beerTypes, suppliers, materialGroups, opsSettings, unitTypes, materialAltGroups, factoryLocations, materialLocations, scopeCatalog, processParams, processParamGroups, processPhases] = await Promise.all([
     GET("/products"), GET("/finished-products").catch(() => []), GET("/materials"), GET("/lines").catch(() => []),
     GET("/qc/parameters?active_only=false").catch(() => []),
     GET("/qc/groups").catch(() => []), GET("/qc/stage-groups").catch(() => []), GET("/beer-types").catch(() => []),
@@ -12450,7 +12020,6 @@ VIEWS.master = async function () {
     GET("/ops-settings").catch(() => ({ empty_cct_tolerance_hl: 2, empty_bbt_tolerance_hl: 2 })),
     GET("/unit-types").catch(() => []), GET("/material-alt-groups").catch(() => []),
     GET("/factory-locations").catch(() => []),
-    GET("/wms/warehouses").catch(() => []), GET("/wms/locations").catch(() => []), GET("/wms/vehicles").catch(() => []),
     GET("/warehouse/locations").catch(() => []),
     GET("/auth/scope-catalog").catch(() => ({ areas: [] })),
     GET("/process-params/parameters?active_only=false").catch(() => []),
@@ -12468,13 +12037,6 @@ VIEWS.master = async function () {
     (Array.isArray(CURRENT_USER.permissions) && CURRENT_USER.permissions.includes("master.manage")));
   const noPerm = canManage ? "" :
     `<div class="muted" style="margin-bottom:8px">Bạn chỉ có quyền xem danh mục (cần quyền <code class="k">master.manage</code> để tạo/sửa).</div>`;
-  // Kho thành phẩm/Vị trí kho/Lái xe: chuyển từ Kho TP (WMS) sang đây + khóa CHỈ ADMIN được
-  // tạo/sửa/xóa (trước đây bất kỳ ai có quyền warehouse.receive đều làm được, không có gate) —
-  // dùng cờ riêng theo role, KHÔNG dùng canManage (master.manage) như các panel khác trong
-  // trang này, vì quyền phía backend đã đổi thành require_role(user, Role.ADMIN) (routers/wms.py).
-  const isAdminWmsCatalog = CURRENT_USER && CURRENT_USER.role === "admin";
-  const noPermWmsCatalog = isAdminWmsCatalog ? "" :
-    `<div class="muted" style="margin-bottom:8px">Chỉ tài khoản Admin mới được tạo/sửa/xóa — bạn chỉ có quyền xem.</div>`;
   const activeGroups = materialGroups.filter(g => g.active);
   const fpCats = ["Bia chai", "Bia lon", "Bia hơi", "Bia tươi"];
   const mgroup = MASTER_GROUPS.find(g => g.key === MASTER_GROUP) || MASTER_GROUPS[0];
@@ -12705,123 +12267,6 @@ VIEWS.master = async function () {
             `<tr><td colspan="${canManage ? 7 : 6}" class="muted">Chưa có vị trí nào.</td></tr>`}</tbody>
         </table></div>
       </div>
-
-    <div class="panel" ${mi("khothanhpham")}><h2>🏭 Kho thành phẩm <span class="muted">(${wmsWarehouses.length})</span></h2>
-      <div class="muted" style="margin-bottom:8px">Kho thành phẩm là cấp cha của "Vị trí kho" — 1 kho có nhiều vị trí. Kho đang có vị trí (Số vị trí > 0) không xóa được. Chuyển từ Kho TP (WMS) sang đây — chỉ Admin mới tạo/sửa/xóa.</div>
-      ${noPermWmsCatalog}
-      <div class="tablewrap"><table id="t_wh"><thead><tr><th>Mã</th><th>Tên</th><th>Địa chỉ</th><th>Sheet Lệnh đóng hàng</th><th>Số vị trí</th><th>Hoạt động</th>${isAdminWmsCatalog ? "<th></th>" : ""}</tr></thead>
-      <tbody>${wmsWarehouses.map(w => { const loOpts = [["", "(Không gắn)"], ["HL", "HL — Hạ Long"], ["ĐM", "ĐM — Đông Mai"]]
-          .map(([v, l]) => `<option value="${v}" ${w.load_order_sheet_type === v || (!w.load_order_sheet_type && !v) ? "selected" : ""}>${l}</option>`).join(""); return `<tr data-wh-row="${esc(w.warehouse_id)}">
-        ${isAdminWmsCatalog ? `<td><input class="wh_code" value="${esc(w.code)}" style="width:100px"/></td>
-        <td><input class="wh_name" value="${esc(w.name)}" style="width:180px"/></td>
-        <td><input class="wh_addr" value="${esc(w.address || "")}" style="width:200px"/></td>
-        <td><select class="wh_lo_sheet">${loOpts}</select></td>` :
-        `<td><code class="k">${esc(w.code)}</code></td><td>${esc(w.name)}</td><td class="muted">${esc(w.address || "—")}</td>
-        <td>${w.load_order_sheet_type ? esc(w.load_order_sheet_type) : "—"}</td>`}
-        <td>${w.location_count}</td>
-        <td>${isAdminWmsCatalog ? `<input class="wh_active" type="checkbox" ${w.active ? "checked" : ""}/>` : (w.active ? "Có" : "Không")}</td>
-        ${isAdminWmsCatalog ? `<td style="white-space:nowrap">
-          <button class="btn sm" data-wh-save="${esc(w.warehouse_id)}">Lưu</button>
-          <button class="btn sm sec" data-wh-del="${esc(w.warehouse_id)}" ${w.location_count > 0 ? "disabled title=\"Đang có vị trí — không xóa được\"" : ""}>Xóa</button>
-        </td>` : ""}</tr>`; }).join("") || `<tr><td colspan="${isAdminWmsCatalog ? 7 : 6}" class="muted">Chưa có kho thành phẩm nào.</td></tr>`}</tbody></table></div>
-      ${isAdminWmsCatalog ? `<div class="row" style="margin-top:12px;flex-wrap:wrap">
-        <div class="field"><label>Mã</label><input id="wh_new_code" style="width:100px"/></div>
-        <div class="field"><label>Tên</label><input id="wh_new_name" style="width:180px"/></div>
-        <div class="field"><label>Địa chỉ</label><input id="wh_new_addr" style="width:200px"/></div>
-        <div class="field"><label>Sheet Lệnh đóng hàng</label><select id="wh_new_lo_sheet">
-          <option value="">(Không gắn)</option><option value="HL">HL — Hạ Long</option><option value="ĐM">ĐM — Đông Mai</option></select></div>
-        <div class="field" style="align-self:flex-end"><button class="btn" id="wh_add">+ Thêm kho</button></div>
-      </div>` : ""}
-    </div>
-
-    <div class="panel" ${mi("vitrikhotp")}><h2>📍 Vị trí kho thành phẩm <span class="muted">(${wmsLocations.length})</span></h2>
-      <div class="muted" style="margin-bottom:8px">Vị trí đang chứa vỉ/keg (Sử dụng > 0) không xóa được — hãy chuyển/xuất hết trước. Chuyển từ Kho TP (WMS) sang đây — chỉ Admin mới tạo/sửa/xóa.</div>
-      ${noPermWmsCatalog}
-      <input class="searchbox" data-tbl="t_wmsloc" placeholder="Tìm theo mã, tên, khu..."/>
-      <div class="tablewrap"><table id="t_wmsloc"><thead><tr><th>Mã</th><th>Tên</th><th>Kho thành phẩm</th><th>Khu</th><th>Loại</th><th>Sức chứa</th><th>Sử dụng</th><th>Hoạt động</th>${isAdminWmsCatalog ? "<th></th>" : ""}</tr></thead>
-      <tbody>${wmsLocations.map(l => { const wh = wmsWarehouses.find(w => w.warehouse_id === l.warehouse_id);
-        const kindLabel = { bin: "Kệ/ô chứa", staging: "Khu tập kết tạm", cold: "Kho lạnh", dock: "Bãi xuất/nhập hàng" };
-        const whOpt = (sel) => `<option value="">(không có kho)</option>` + wmsWarehouses.map(w =>
-          `<option value="${esc(w.warehouse_id)}" ${w.warehouse_id === sel ? "selected" : ""}>${esc(w.code)} — ${esc(w.name)}</option>`).join("");
-        const kindOpt = (sel) => ["bin", "staging", "cold", "dock"].map(k =>
-          `<option value="${k}" ${k === sel ? "selected" : ""}>${kindLabel[k]}</option>`).join("");
-        return `<tr data-loc-row="${esc(l.loc_id)}">
-        ${isAdminWmsCatalog ? `<td><input class="wl_code" value="${esc(l.code)}" style="width:90px"/></td>
-        <td><input class="wl_name" value="${esc(l.name)}" style="width:160px"/></td>
-        <td><select class="wl_wh" style="width:160px">${whOpt(l.warehouse_id)}</select></td>
-        <td><input class="wl_zone" value="${esc(l.zone || "")}" style="width:60px"/></td>
-        <td><select class="wl_kind">${kindOpt(l.kind)}</select></td>
-        <td><input class="wl_capacity" type="number" value="${l.capacity}" style="width:100px"/></td>` :
-        `<td><code class="k">${esc(l.code)}</code></td><td>${esc(l.name)}</td>
-        <td class="muted">${wh ? esc(wh.code) + " — " + esc(wh.name) : "—"}</td>
-        <td class="muted">${esc(l.zone || "—")}</td><td class="muted">${esc(kindLabel[l.kind] || l.kind)}</td>
-        <td>${l.capacity}</td>`}
-        <td>${l.used}</td>
-        <td>${isAdminWmsCatalog ? `<input class="wl_active" type="checkbox" ${l.active ? "checked" : ""}/>` : (l.active ? "Có" : "Không")}</td>
-        ${isAdminWmsCatalog ? `<td style="white-space:nowrap">
-          <button class="btn sm" data-loc-save="${esc(l.loc_id)}">Lưu</button>
-          <button class="btn sm sec" data-loc-del="${esc(l.loc_id)}" ${l.used > 0 ? "disabled title=\"Đang có vỉ/keg — không xóa được\"" : ""}>Xóa</button>
-          <button class="btn sm sec" data-loc-split="${esc(l.loc_id)}" ${!l.active ? "disabled title=\"Đã ngừng hoạt động\"" : ""}>Chia ô</button>
-        </td>` : ""}</tr>`; }).join("") || `<tr><td colspan="${isAdminWmsCatalog ? 9 : 8}" class="muted">Chưa có vị trí nào.</td></tr>`}</tbody></table></div>
-      <div class="muted" style="font-size:12px;margin-top:6px">"Chia ô": tạo N vị trí con thật (VD "DM.K01" → "DM.K01-Ô1"…"Ô4"), mỗi ô có sức chứa/tồn kho riêng — tồn hiện có của dãy gốc dồn hết vào Ô1, dãy gốc tự ngừng hoạt động (không xóa, vẫn giữ lịch sử điều chuyển/bia gửi/cận date cũ tham chiếu tới). Xếp thêm các ô mới vào "Bố cục kho" phía dưới sau khi chia.</div>
-      ${isAdminWmsCatalog ? `<div class="row" style="margin-top:12px;flex-wrap:wrap">
-        <div class="field"><label>Mã</label><input id="wl_new_code" style="width:90px"/></div>
-        <div class="field"><label>Tên</label><input id="wl_new_name" style="width:160px"/></div>
-        <div class="field"><label>Kho thành phẩm</label><select id="wl_new_wh" style="width:160px"><option value="">(không có kho)</option>${wmsWarehouses.map(w => `<option value="${esc(w.warehouse_id)}">${esc(w.code)} — ${esc(w.name)}</option>`).join("")}</select></div>
-        <div class="field"><label>Khu</label><input id="wl_new_zone" style="width:60px"/></div>
-        <div class="field"><label>Loại</label><select id="wl_new_kind"><option value="bin">Kệ/ô chứa</option><option value="staging">Khu tập kết tạm</option><option value="cold">Kho lạnh</option><option value="dock">Bãi xuất/nhập hàng</option></select></div>
-        <div class="field"><label>Sức chứa</label><input id="wl_new_capacity" type="number" value="10" style="width:100px"/></div>
-        <div class="field" style="align-self:flex-end"><button class="btn" id="wl_add">+ Thêm vị trí</button></div>
-      </div>` : ""}
-    </div>
-
-    ${isAdminWmsCatalog && wmsWarehouses.length ? (() => {
-      if (!WMS_LAYOUT_WH || !wmsWarehouses.some(w => w.warehouse_id === WMS_LAYOUT_WH)) WMS_LAYOUT_WH = wmsWarehouses[0].warehouse_id;
-      const locsInWh = wmsLocations.filter(l => l.warehouse_id === WMS_LAYOUT_WH && l.active);
-      const whOptionsHtml = wmsWarehouses.map(w => `<option value="${esc(w.warehouse_id)}" ${w.warehouse_id === WMS_LAYOUT_WH ? "selected" : ""}>${esc(w.code)} — ${esc(w.name)}</option>`).join("");
-      return `<div class="panel" ${mi("boccuckho")}><h2>🗺️ Bố cục kho</h2>
-        <div class="muted" style="margin-bottom:8px">Tự xếp vị trí lên lưới hàng/cột đúng theo mặt bằng thật ngoài kho — "Sơ đồ kho" (tab Kho TP) chỉ vẽ lại đúng bố cục đã xếp ở đây, không đoán theo mã vị trí.</div>
-        ${locsInWh.length ? renderWmsLayoutGrid(WMS_LAYOUT_WH, locsInWh, whOptionsHtml)
-          : `<div class="row" style="margin-bottom:8px"><div class="field"><label>Kho thành phẩm</label><select id="wlo_wh">${whOptionsHtml}</select></div></div>
-          <div class="muted">Kho này chưa có vị trí nào — thêm ở bảng "Vị trí kho thành phẩm" phía trên trước.</div>`}
-      </div>`;
-    })() : ""}
-
-    <div class="panel" ${mi("laixe")}><h2>🚚 Lái xe <span class="muted">(${wmsVehicles.length})</span></h2>
-      <div class="muted" style="margin-bottom:8px">Biển số xe kèm lái xe/tải trọng/số pallet chở được — tra cứu nhanh khi lập Lệnh đóng hàng hoặc Phiếu xuất kho. Chuyển từ Kho TP (WMS) sang đây — chỉ Admin mới tạo/sửa/xóa.</div>
-      ${noPermWmsCatalog}
-      <input class="searchbox" data-tbl="t_vehicle" placeholder="Tìm theo biển số, tên lái xe, tổ đội..."/>
-      <div class="tablewrap"><table id="t_vehicle"><thead><tr><th>Mã xe</th><th>Biển số</th><th>Số xe</th><th>Họ và tên lái xe</th><th>Tên lái xe</th>
-        <th>Khối lượng (kg)</th><th>Pallet</th><th>Số ĐT</th><th>Tổ đội</th><th>Hoạt động</th>${isAdminWmsCatalog ? "<th></th>" : ""}</tr></thead>
-      <tbody>${wmsVehicles.map(v => `<tr data-vehicle-row="${esc(v.vehicle_id)}">
-        <td class="muted"><code class="k">${esc(v.vehicle_code || "—")}</code></td>
-        ${isAdminWmsCatalog ? `<td><input class="vh_plate" value="${esc(v.plate)}" style="width:100px"/></td>
-        <td class="muted"><code class="k">${esc(plateLast5(v.plate))}</code></td>
-        <td><input class="vh_driver" value="${esc(v.driver_name || "")}" style="width:180px"/></td>
-        <td><input class="vh_short" value="${esc(v.driver_short_name || "")}" style="width:100px"/></td>
-        <td><input class="vh_cap" type="number" value="${v.capacity_kg ?? ""}" style="width:90px"/></td>
-        <td><input class="vh_pallet" type="number" value="${v.pallet_capacity ?? ""}" style="width:70px"/></td>
-        <td><input class="vh_phone" value="${esc(v.phone || "")}" style="width:120px"/></td>
-        <td><input class="vh_team" value="${esc(v.team || "")}" style="width:90px"/></td>` :
-        `<td>${esc(v.plate)}</td><td class="muted"><code class="k">${esc(plateLast5(v.plate))}</code></td><td class="muted">${esc(v.driver_name || "—")}</td><td class="muted">${esc(v.driver_short_name || "—")}</td>
-        <td class="muted">${v.capacity_kg ?? "—"}</td><td class="muted">${v.pallet_capacity ?? "—"}</td>
-        <td class="muted">${esc(v.phone || "—")}</td><td class="muted">${esc(v.team || "—")}</td>`}
-        <td>${isAdminWmsCatalog ? `<input class="vh_active" type="checkbox" ${v.active ? "checked" : ""}/>` : (v.active ? "Có" : "Không")}</td>
-        ${isAdminWmsCatalog ? `<td style="white-space:nowrap">
-          <button class="btn sm" data-vehicle-save="${esc(v.vehicle_id)}">Lưu</button>
-          <button class="btn sm sec" data-vehicle-del="${esc(v.vehicle_id)}">Xóa</button>
-        </td>` : ""}</tr>`).join("") || `<tr><td colspan="${isAdminWmsCatalog ? 11 : 10}" class="muted">Chưa có xe nào.</td></tr>`}</tbody></table></div>
-      ${isAdminWmsCatalog ? `<div class="row" style="margin-top:12px;flex-wrap:wrap">
-        <div class="field"><label>Biển số</label><input id="vh_new_plate" style="width:100px"/></div>
-        <div class="field"><label>Họ và tên lái xe</label><input id="vh_new_driver" style="width:180px"/></div>
-        <div class="field"><label>Tên lái xe</label><input id="vh_new_short" style="width:100px"/></div>
-        <div class="field"><label>Khối lượng (kg)</label><input id="vh_new_cap" type="number" style="width:90px"/></div>
-        <div class="field"><label>Pallet</label><input id="vh_new_pallet" type="number" style="width:70px"/></div>
-        <div class="field"><label>Số ĐT</label><input id="vh_new_phone" style="width:120px"/></div>
-        <div class="field"><label>Tổ đội</label><input id="vh_new_team" style="width:90px"/></div>
-        <div class="field" style="align-self:flex-end"><button class="btn" id="vh_add">+ Thêm xe</button></div>
-      </div>` : ""}
-    </div>
 
     <div class="panel" ${mi("sanpham")}><h2>🍾 Sản phẩm (thành phẩm) <span class="muted">(${finishedProducts.length})</span></h2>
       <div class="muted" style="margin-bottom:6px">SKU đóng gói (chai/lon/keg...) — chọn ở bước Chiết cùng tank BBT nguồn. Khác Dịch bia ở trên: cùng 1 dịch bia có thể ra nhiều Sản phẩm khác nhau.</div>
@@ -13812,135 +13257,6 @@ VIEWS.master = async function () {
     }));
   }
 
-  // Kho thành phẩm/Vị trí kho/Lái xe — CHỈ ADMIN mới tạo/sửa/xóa (gate riêng isAdminWmsCatalog,
-  // khác canManage/master.manage ở trên — xem ghi chú tại khai báo cờ này phía đầu VIEWS.master).
-  if (isAdminWmsCatalog) {
-    document.querySelectorAll("[data-wh-save]").forEach(b => b.onclick = () => guard(async () => {
-      const tr = b.closest("tr");
-      await PUT(`/wms/warehouses/${b.dataset.whSave}`, {
-        code: tr.querySelector(".wh_code").value,
-        name: tr.querySelector(".wh_name").value,
-        address: tr.querySelector(".wh_addr").value || null,
-        active: tr.querySelector(".wh_active").checked,
-        // Gửi "" (không phải null) khi chọn "(Không gắn)" — update_warehouse bỏ qua giá trị
-        // None (coi như "không đổi"), nên phải dùng chuỗi rỗng mới XOÁ được gán cũ.
-        load_order_sheet_type: tr.querySelector(".wh_lo_sheet").value,
-      });
-      toast("Đã lưu kho"); render("master");
-    }));
-    document.querySelectorAll("[data-wh-del]").forEach(b => b.onclick = () => guard(async () => {
-      if (!confirm("Xóa kho này? Không thể hoàn tác.")) return;
-      await DELETE(`/wms/warehouses/${b.dataset.whDel}`);
-      toast("Đã xóa kho"); render("master");
-    }));
-    if ($("wh_add")) $("wh_add").onclick = () => guard(async () => {
-      if (!$("wh_new_code").value || !$("wh_new_name").value) { toast("Nhập mã và tên kho", "err"); return; }
-      await POST("/wms/warehouses", { code: $("wh_new_code").value, name: $("wh_new_name").value,
-        address: $("wh_new_addr").value || null,
-        load_order_sheet_type: $("wh_new_lo_sheet").value || null });
-      toast("Đã thêm kho"); render("master");
-    });
-    document.querySelectorAll("[data-loc-save]").forEach(b => b.onclick = () => guard(async () => {
-      const tr = b.closest("tr");
-      await PUT(`/wms/locations/${b.dataset.locSave}`, {
-        code: tr.querySelector(".wl_code").value,
-        name: tr.querySelector(".wl_name").value,
-        warehouse_id: tr.querySelector(".wl_wh").value || null,
-        zone: tr.querySelector(".wl_zone").value || null,
-        kind: tr.querySelector(".wl_kind").value,
-        capacity: parseInt(tr.querySelector(".wl_capacity").value) || 1,
-        active: tr.querySelector(".wl_active").checked,
-      });
-      toast("Đã lưu vị trí"); render("master");
-    }));
-    document.querySelectorAll("[data-loc-del]").forEach(b => b.onclick = () => guard(async () => {
-      if (!confirm("Xóa vị trí này? Không thể hoàn tác.")) return;
-      await DELETE(`/wms/locations/${b.dataset.locDel}`);
-      toast("Đã xóa vị trí"); render("master");
-    }));
-    document.querySelectorAll("[data-loc-split]").forEach(b => b.onclick = () => guard(async () => {
-      const tr = b.closest("tr");
-      const code = tr.querySelector(".wl_code") ? tr.querySelector(".wl_code").value : "";
-      const raw = prompt(`Chia vị trí ${code} thành mấy ô?`, "4");
-      if (raw === null) return;
-      const parts = parseInt(raw);
-      if (!parts || parts < 2 || parts > 20) { toast("Số ô phải từ 2 đến 20.", "err"); return; }
-      if (!confirm(`Chia thành ${parts} ô con — vị trí gốc sẽ ngừng hoạt động, tồn hiện có dồn hết vào Ô1. Tiếp tục?`)) return;
-      await POST(`/wms/locations/${b.dataset.locSplit}/split`, { parts });
-      toast(`Đã chia thành ${parts} ô — nhớ xếp các ô mới vào Bố cục kho`); render("master");
-    }));
-    if ($("wl_add")) $("wl_add").onclick = () => guard(async () => {
-      if (!$("wl_new_code").value || !$("wl_new_name").value) { toast("Nhập mã và tên vị trí", "err"); return; }
-      if (!$("wl_new_wh").value) { toast("Vui lòng chọn kho thành phẩm cho vị trí mới", "err"); return; }
-      await POST("/wms/locations", { code: $("wl_new_code").value, name: $("wl_new_name").value,
-        warehouse_id: $("wl_new_wh").value || null,
-        zone: $("wl_new_zone").value || null, kind: $("wl_new_kind").value,
-        capacity: parseInt($("wl_new_capacity").value) || 10 });
-      toast("Đã thêm vị trí"); render("master");
-    });
-    if ($("wlo_wh")) {
-      $("wlo_wh").onchange = () => {
-        WMS_LAYOUT_WH = $("wlo_wh").value; WMS_LAYOUT_PICK = null;
-        WMS_LAYOUT_EXTRA_ROWS = 0; WMS_LAYOUT_EXTRA_COLS = 0; render("master");
-      };
-      if ($("wlo_addrow")) $("wlo_addrow").onclick = () => { WMS_LAYOUT_EXTRA_ROWS++; render("master"); };
-      if ($("wlo_addcol")) $("wlo_addcol").onclick = () => { WMS_LAYOUT_EXTRA_COLS++; render("master"); };
-      document.querySelectorAll("[data-layout-pick]").forEach(b => b.onclick = () => {
-        WMS_LAYOUT_PICK = b.dataset.layoutPick === WMS_LAYOUT_PICK ? null : b.dataset.layoutPick;
-        render("master");
-      });
-      document.querySelectorAll("[data-layout-unplace]").forEach(b => b.onclick = (e) => guard(async () => {
-        e.stopPropagation();
-        await PUT(`/wms/locations/${b.dataset.layoutUnplace}/layout`, { row: null, col: null });
-        if (WMS_LAYOUT_PICK === b.dataset.layoutUnplace) WMS_LAYOUT_PICK = null;
-        toast("Đã gỡ khỏi bố cục"); render("master");
-      }));
-      document.querySelectorAll("[data-layout-cell]").forEach(td => td.onclick = (e) => guard(async () => {
-        if (e.target.closest("[data-layout-unplace]")) return;   // nút Gỡ tự xử lý riêng
-        const occupiedLocId = td.dataset.layoutLoc;
-        if (occupiedLocId) {
-          // Bấm vào ô đã có vị trí (không phải nút Gỡ) → chọn/bỏ chọn để chuẩn bị dời đi nơi khác.
-          WMS_LAYOUT_PICK = occupiedLocId === WMS_LAYOUT_PICK ? null : occupiedLocId;
-          render("master");
-          return;
-        }
-        if (!WMS_LAYOUT_PICK) { toast("Chọn 1 vị trí ở danh sách bên trên trước", "err"); return; }
-        const [row, col] = td.dataset.layoutCell.split(":").map(Number);
-        await PUT(`/wms/locations/${WMS_LAYOUT_PICK}/layout`, { row, col });
-        WMS_LAYOUT_PICK = null;
-        toast("Đã xếp vào bố cục"); render("master");
-      }));
-    }
-    document.querySelectorAll("[data-vehicle-save]").forEach(b => b.onclick = () => guard(async () => {
-      const tr = b.closest("tr");
-      await PUT(`/wms/vehicles/${b.dataset.vehicleSave}`, {
-        plate: tr.querySelector(".vh_plate").value,
-        driver_name: tr.querySelector(".vh_driver").value || null,
-        driver_short_name: tr.querySelector(".vh_short").value || null,
-        capacity_kg: tr.querySelector(".vh_cap").value === "" ? null : parseFloat(tr.querySelector(".vh_cap").value),
-        pallet_capacity: tr.querySelector(".vh_pallet").value === "" ? null : parseInt(tr.querySelector(".vh_pallet").value, 10),
-        phone: tr.querySelector(".vh_phone").value || null,
-        team: tr.querySelector(".vh_team").value || null,
-        active: tr.querySelector(".vh_active").checked,
-      });
-      toast("Đã lưu xe"); render("master");
-    }));
-    document.querySelectorAll("[data-vehicle-del]").forEach(b => b.onclick = () => guard(async () => {
-      if (!confirm("Xóa xe này? Không thể hoàn tác.")) return;
-      await DELETE(`/wms/vehicles/${b.dataset.vehicleDel}`);
-      toast("Đã xóa xe"); render("master");
-    }));
-    if ($("vh_add")) $("vh_add").onclick = () => guard(async () => {
-      if (!$("vh_new_plate").value) { toast("Nhập biển số", "err"); return; }
-      await POST("/wms/vehicles", { plate: $("vh_new_plate").value,
-        driver_name: $("vh_new_driver").value || null, driver_short_name: $("vh_new_short").value || null,
-        capacity_kg: $("vh_new_cap").value === "" ? null : parseFloat($("vh_new_cap").value),
-        pallet_capacity: $("vh_new_pallet").value === "" ? null : parseInt($("vh_new_pallet").value, 10),
-        phone: $("vh_new_phone").value || null, team: $("vh_new_team").value || null });
-      toast("Đã thêm xe"); render("master");
-    });
-  }
-
   // ---- Modal: chỉ tiêu trong 1 nhóm ----
   async function openQcGroupItemsModal(group) {
     const [items, allParams] = await Promise.all([GET(`/qc/groups/${group.group_id}/items`), GET("/qc/parameters?active_only=false")]);
@@ -14156,14 +13472,11 @@ VIEWS.users = async function () {
       <div class="field" style="color:var(--text)"><label>Khu vực</label>${scopePickerHtml(`${prefix}_areas`, scat.areas, current ? current.scope_areas : "*")}</div>
       <div class="field" style="color:var(--text)"><label>Loại test QC</label>${scopePickerHtml(`${prefix}_qc`, scat.qc_params, current ? current.scope_qc : "*")}</div>
       <div class="field" style="color:var(--text)"><label>Địa điểm kho (NVL)</label>${scopePickerHtml(`${prefix}_wh`, scat.warehouse_locations, current ? current.scope_warehouse : "*")}</div>
-      <div class="field" style="color:var(--text)"><label>Kho thành phẩm (WMS)</label>${scopePickerHtml(`${prefix}_wmswh`, scat.wms_warehouses, current ? current.wms_warehouse_scope : "*")}
-        <div class="muted" style="font-size:11px">Chặn Xuất kho/Điều chuyển/Nhập kho/Cất vào vị trí ngoài kho được chọn — khác "Địa điểm kho" (chỉ áp dụng kho NVL công ty/phân xưởng)</div></div>
     </div>`;
-  const wireScopeFields = (prefix) => ["lines", "areas", "qc", "wh", "wmswh"].forEach(d => wireScopePicker(`${prefix}_${d}`));
+  const wireScopeFields = (prefix) => ["lines", "areas", "qc", "wh"].forEach(d => wireScopePicker(`${prefix}_${d}`));
   const readScopeFields = (prefix) => ({
     scope_lines: readScopePicker(`${prefix}_lines`), scope_areas: readScopePicker(`${prefix}_areas`),
-    scope_qc: readScopePicker(`${prefix}_qc`), scope_warehouse: readScopePicker(`${prefix}_wh`),
-    wms_warehouse_scope: readScopePicker(`${prefix}_wmswh`) });
+    scope_qc: readScopePicker(`${prefix}_qc`), scope_warehouse: readScopePicker(`${prefix}_wh`) });
   $("view-users").innerHTML = `
     <div class="panel"><h2>Tạo tài khoản</h2>
       <div class="field"><label>Áp dụng mẫu chức danh (tuỳ chọn)</label>
@@ -14232,7 +13545,6 @@ VIEWS.users = async function () {
     document.querySelectorAll(".nu_perm").forEach(c => c.checked = permSet.has(c.value));
     setScopePicker("nu_lines", t.scope_lines); setScopePicker("nu_areas", t.scope_areas);
     setScopePicker("nu_qc", t.scope_qc); setScopePicker("nu_wh", t.scope_warehouse);
-    setScopePicker("nu_wmswh", t.wms_warehouse_scope);
   };
   $("nu_add").onclick = () => guard(async () => {
     const weak = passwordPolicyMsg($("nu_pass").value, $("nu_user").value);

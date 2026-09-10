@@ -61,7 +61,7 @@ MES này điều phối toàn bộ vòng đời sản xuất bia: **Lệnh sản
 │  brew_order · filter_order · lot_lock · lot_record · load_slip        │
 │  ferment_log · braumat_import · dashboard · lo_status · ops_setting   │
 │  master_data · integration_connection · energy_external · filling_… │
-│  keg_external · wastewater_external · import_mapping/parser/runner/… │
+│  import_mapping/parser/runner/…                                    │
 │  custom_fields · ai · ai_tools · conversations · jobs · derived · cip │
 └───────────────┬──────────────────────────────────────────────────────┘
 ┌───────────────▼──────────────────────────────────────────────────────┐
@@ -72,7 +72,7 @@ MES này điều phối toàn bộ vòng đời sản xuất bia: **Lệnh sản
 └───────────────────────────────────────────────────────────────────────┘
    ┌─────────────────────────────────────────────────────────────────┐
    │  CSDL SCADA NGOÀI (WAN, chỉ đọc) — qua SqlConnection cấu hình    │
-   │  purpose: energy_* · filling · filling_keg · wastewater · …      │
+   │  purpose: energy_dm · filling                                     │
    └─────────────────────────────────────────────────────────────────┘
 
    Cross-cutting (xuyên suốt mọi tầng):
@@ -437,8 +437,8 @@ Xác thực **`X-API-Key`** theo scope `read`/`write`: `ping · production/batch
 ### 9.2 Kết nối CSDL SCADA ngoài + panel Realtime thật (tính năng mới)
 - **`SqlConnection`** (Tích hợp › Kết nối CSDL): khai báo host/port/database/user/password (lưu server, không hiển thị lại) + **`purpose`** (CSV token) để mỗi service tự tìm đúng kết nối qua `get_connection_by_purpose()` — 1 kết nối vật lý có thể phục vụ nhiều mục đích (VD `energy_dm,filling`).
 - **Chỉ đọc (`SELECT`)** — `test-connection`, `preview-table` (xem cột + mẫu dữ liệu) dùng SQLAlchemy reflection, không nối chuỗi SQL thô với tên bảng người dùng nhập.
-- **Báo cáo từ CSDL ngoài**: `services/energy_external.py` (điện theo site/ca), `filling_external.py` (chiết lon 30K), `keg_external.py` (chiết keg) — đọc bảng lịch sử theo khoảng ngày.
-- **Panel Realtime thật** (`GET /reports/filling-realtime`, `/reports/wastewater-realtime`): đọc **snapshot 1 dòng** (PLC ghi đè liên tục) từ bảng `30K_Realtime` / `QT_Realtime` — hiển thị **nguyên văn** các cột nguồn (không tính tốc độ/suy diễn); UI tự thử lại mỗi 15 giây; badge cảnh báo vượt ngưỡng QCVN cho trạm quan trắc nước thải.
+- **Báo cáo từ CSDL ngoài**: `services/energy_external.py` (điện, site Đông Mai — `energy_dm`), `filling_external.py` (chiết lon 30K) — đọc bảng lịch sử theo khoảng ngày. (Deployment này chỉ phục vụ nhà máy Đông Mai — `keg_external.py`/`wastewater_external.py` và site điện Hạ Long đã bị gỡ 2026-09-11.)
+- **Panel Realtime thật** (`GET /reports/filling-realtime`): đọc **snapshot 1 dòng** (PLC ghi đè liên tục) từ bảng `30K_Realtime` — hiển thị **nguyên văn** các cột nguồn (không tính tốc độ/suy diễn); UI tự thử lại mỗi 15 giây.
 - **Tự động thử lại kết nối lỗi**: tab Kết nối CSDL tự `test-connection` lại mỗi 15 giây cho các kết nối đang ở trạng thái Lỗi (không đụng tới kết nối đang OK), phục hồi badge khi WAN thông trở lại — không cần thao tác thủ công.
 
 ### 9.3 Import dữ liệu ngoài (Import Mapping Explorer)

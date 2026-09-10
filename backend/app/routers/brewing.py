@@ -36,9 +36,8 @@ from ..models.batch_pipeline import BatchFilterLot, BatchPackLot, BatchTank
 from ..models.batches import BatchExecution
 from ..models.lines import ProductionLine
 from ..models.master import BeerType, FinishedProduct, Material, Product
-from ..models.materials import GenealogyEdge, MaterialLot
+from ..models.materials import MaterialLot
 from ..models.quality import QualityResult
-from ..models.wms import FinishedGoodsUnit
 from ..schemas import (
     BottleIn,
     BottleMaterialUsageIn,
@@ -1914,17 +1913,6 @@ def delete_bottle(bottle_id: str, db: Session = Depends(get_db), user: User = De
     if not b:
         raise NotFoundError("Bản ghi chiết không tồn tại.")
     _assert_unlocked(b)
-    if b.approved:
-        # b.approved chỉ đánh dấu ĐÃ TỪNG nhập kho — không có nghĩa vỉ/keg đó vẫn còn tồn
-        # (đã có thể xuất/phân rã/xóa hết). Tra thẳng genealogy để biết còn đơn vị nào thật
-        # sự tồn tại không, tránh chặn nhầm khi kho đã trống.
-        unit_ids = [row[0] for row in db.execute(select(GenealogyEdge.to_id).where(
-            GenealogyEdge.from_type == "bottle", GenealogyEdge.from_id == bottle_id,
-            GenealogyEdge.to_type == "finished_goods_unit")).all()]
-        remaining = db.execute(select(FinishedGoodsUnit.unit_id).where(
-            FinishedGoodsUnit.unit_id.in_(unit_ids))).first() if unit_ids else None
-        if remaining:
-            raise DomainError("Bản ghi chiết này đã được duyệt và còn vỉ/keg trong kho thành phẩm — xóa các vỉ/keg đó trước khi xóa bản ghi chiết.")
     if b.filter_id:
         f = db.get(FilterRecord, b.filter_id)
         if f:

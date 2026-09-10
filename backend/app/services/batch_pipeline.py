@@ -9,6 +9,7 @@ Chỉ tiêu chất lượng tái dùng đúng stage cũ ("len_men_chinh"/"loc"/"
 mới ("batch_tank"/"batch_filter_lot"/"batch_pack_lot") — xem services/qc_catalog.py::stage_qc_status.
 """
 
+import math
 import re
 from datetime import timedelta
 from typing import Optional
@@ -1552,15 +1553,11 @@ def approve_pack_lot(db: Session, pack_lot_id: str, user: User) -> dict:
 def release_pack_lot_to_wms(db: Session, pack_lot_id: str, user: User) -> dict:
     """Giám đốc/Phó GĐ Sản xuất - Kỹ thuật duyệt cho nhập kho thành phẩm — mirror
     routers/brewing.py::approve_bottle (module Nấu-Lọc-Chiết cũ; module đó đã THÁO khỏi WMS,
-    Lô thành phẩm là nơi thay thế duy nhất tạo FinishedGoodsUnit từ sản xuất). Yêu cầu đã Duyệt
-    KCS (p.approved) và đã khai SL theo ca (ca1+ca2+ca3 > 0, đơn vị vỉ/két/keg theo
-    FinishedProduct.unit_type — KHÁC qty (lít) ở trên). Tạo 1 dòng FinishedGoodsUnit
-    (source="chiet" — tái dùng đúng giá trị cũ để không phải sửa mọi nơi trong services/wms.py
-    đang lọc theo source, VD confirm_receipt_by_lot/_consume_lot_rows), lot_code=lot_no. Sau
-    khi tạo, dòng này vẫn cần Trưởng bộ phận kho duyệt nhập kho riêng
-    (wms_svc.confirm_receipt_by_lot, y hệt luồng cũ, không đổi gì ở services/wms.py) mới khoá
-    lại/mở khoá xuất được — xem UI Kho TP (WMS) hiện có, tự động thấy dòng mới này qua cùng
-    tiêu chí lọc (product_name/lot_code/unit_type/source)."""
+    Lô thành phẩm là nơi thay thế duy nhất tạo hàng nhập kho từ sản xuất). Yêu cầu đã Duyệt KCS
+    (p.approved) và đã khai SL theo ca (ca1+ca2+ca3 > 0, đơn vị vỉ/két/keg theo
+    FinishedProduct.unit_type — KHÁC qty (lít) ở trên). Tạo 1 Pallet (đã đóng sẵn case, xem
+    wms_svc.build_pallet) — case_count = số vỉ/keg đã khai (làm tròn lên), units_per_case =
+    pack_size của SKU."""
     require_perm(user, "production.release_to_wms")
     p = get_pack_lot(db, pack_lot_id)
     _assert_unlocked(p)
@@ -1573,23 +1570,19 @@ def release_pack_lot_to_wms(db: Session, pack_lot_id: str, user: User) -> dict:
         raise DomainError("Chưa nhập SL theo ca (Ca 1/2/3) — không thể duyệt nhập kho thành phẩm.")
     finished_product = db.get(FinishedProduct, p.finished_product_id) if p.finished_product_id else None
     pack_size = finished_product.pack_size if finished_product else 24
-    unit_type = finished_product.unit_type if finished_product else "vi"
     product_name = finished_product.code if finished_product else p.pack_lot_code
-    units = wms_svc._create_units(db, {
-        "finished_product_id": p.finished_product_id, "product_name": product_name,
-        "lot_code": p.lot_no or p.pack_lot_code, "total": ca_total * pack_size, "pack_size": pack_size,
-        "unit_type": unit_type, "source": "chiet",
-    }, created_by=user.username, actor=user)
-    for u in units:
-        genealogy.add_edge(db, from_type="batch_pack_lot", from_id=pack_lot_id, to_type="finished_goods_unit",
-                           to_id=u.unit_id, relation="nhập kho", quantity=u.quantity, uom=u.unit_type)
+    pallet = wms_svc._build_pallet(db, {
+        "product": product_name, "lot_code": p.lot_no or p.pack_lot_code,
+        "case_count": math.ceil(ca_total), "units_per_case": pack_size,
+    }, user)
+    genealogy.add_edge(db, from_type="batch_pack_lot", from_id=pack_lot_id, to_type="pallet",
+                       to_id=pallet.pallet_id, relation="nhập kho", quantity=ca_total, uom="case")
     p.stocked = True
     p.stocked_by = user.username
     p.stocked_at = utcnow()
     record_audit(db, entity_type="batch_pack_lot", entity_id=pack_lot_id, action="release_to_wms", actor=user)
     db.commit()
-    return {"pack_lot_id": pack_lot_id, "stocked": True, "unit_type": unit_type, "count": ca_total,
-            "unit_codes": [u.unit_code for u in units]}
+    return {"pack_lot_id": pack_lot_id, "stocked": True, "pallet_code": pallet.pallet_code, "count": ca_total}
 
 
 # ==================== NVL dùng cho lô thành phẩm (chiết) ====================

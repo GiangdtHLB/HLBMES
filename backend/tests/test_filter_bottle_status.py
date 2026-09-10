@@ -176,16 +176,16 @@ def test_approve_bottle_no_longer_creates_wms_units(client, admin_h, vanhanh_h):
                       json={"ca1": 12, "ca2": 3})
     assert fin.status_code == 200, fin.text
 
-    before_units = {u["unit_code"] for u in client.get("/api/wms/units", headers=admin_h).json()}
+    before_pallets = {p["pallet_code"] for p in client.get("/api/wms/pallets", headers=admin_h).json()}
 
     ok = client.post(f"/api/brewing/bottles/{bottle_id}/approve", headers=admin_h)
     assert ok.status_code == 200, ok.text
     assert "unit_codes" not in ok.json()
     assert "count" not in ok.json()
 
-    units = client.get("/api/wms/units", headers=admin_h).json()
-    new_units = {u["unit_code"] for u in units} - before_units
-    assert new_units == set()   # không sinh thêm dòng nào trong Kho TP
+    pallets = client.get("/api/wms/pallets", headers=admin_h).json()
+    new_pallets = {p["pallet_code"] for p in pallets} - before_pallets
+    assert new_pallets == set()   # không sinh thêm pallet nào trong Kho TP
 
     rows = client.get("/api/brewing/bottles", headers=admin_h).json()
     row = next(r for r in rows if r["bottle_code"] == bottle_code)

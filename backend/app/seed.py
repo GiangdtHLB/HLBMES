@@ -974,10 +974,9 @@ def _seed_packaging(db) -> None:
 
 
 def _seed_wms(db) -> None:
-    """#P3-4: vị trí kho TP + vài vỉ tồn kho (đơn vị độc lập, không pallet) cho lô đóng
-    gói PKG-2406-0001."""
-    from .models.wms import FinishedGoodsUnit, WmsLocation
-    from .models.master import FinishedProduct
+    """#P3-4: vị trí kho TP + vài pallet (40 case/pallet, 24 lon/case) cho lô đóng gói
+    PKG-2406-0001 — hệ pallet/case."""
+    from .models.wms import Case, Pallet, WmsLocation
     locs = [
         WmsLocation(loc_id=new_id(), code="TP-A1", name="Kho TP - Kệ A1", zone="A", kind="bin", capacity=50),
         WmsLocation(loc_id=new_id(), code="TP-A2", name="Kho TP - Kệ A2", zone="A", kind="bin", capacity=50),
@@ -985,22 +984,21 @@ def _seed_wms(db) -> None:
         WmsLocation(loc_id=new_id(), code="DOCK-1", name="Bãi xuất hàng", zone="DOCK", kind="dock", capacity=20),
     ]
     db.add_all(locs)
-    # Đăng ký danh mục SKU cho BIA-LAGER (pack_size=24 lon/vỉ) — cần thiết để
-    # services/wms.py::_pack_divisor tra đúng pack_size khi quy đổi quantity ra số vỉ; không
-    # có SKU sẽ mặc định 1 (không đoán 24), khiến số vỉ hiển thị/kiểm sức chứa sai 24 lần.
-    fp = FinishedProduct(finished_product_id=new_id(), code="BIA-LAGER", name="Bia Lager 4.8% (vỉ)",
-                         uom="lon", unit_type="vi", pack_size=24)
-    db.add(fp)
     db.commit()
-    # 8 vỉ (24 lon/vỉ) — 5 đã cất kệ A1/A2, 3 chưa cất (chờ vị trí) tại dock.
-    plan = ["TP-A1", "TP-A1", "TP-A2", "TP-A2", "TP-A2", None, None, None]
+    # 4 pallet (40 case x 24 lon/case) — 2 đã cất kệ A1/A2, 2 chưa cất (đang đóng).
+    plan = ["TP-A1", "TP-A2", None, None]
     stamp = "260624"
     for i, loc_code in enumerate(plan, start=1):
         loc = next((l for l in locs if l.code == loc_code), None)
-        db.add(FinishedGoodsUnit(unit_id=new_id(), unit_code=f"VI-{stamp}-{i:04d}", unit_type="vi",
-                                 finished_product_id=fp.finished_product_id,
-                                 product_name="BIA-LAGER", lot_code="PKG-2406-0001", quantity=24,
-                                 status="stored", location_id=loc.loc_id if loc else None, created_by="thukho"))
+        pallet = Pallet(pallet_id=new_id(), pallet_code=f"PLT-{stamp}-{i:02d}", product="BIA-LAGER",
+                        lot_code="PKG-2406-0001", case_count=40, units_per_case=24,
+                        status="stored" if loc else "building",
+                        location_id=loc.loc_id if loc else None, created_by="thukho")
+        db.add(pallet)
+        db.flush()
+        for c in range(1, 41):
+            db.add(Case(case_id=new_id(), case_code=f"CS-{stamp}-{i:02d}-{c:03d}", pallet_id=pallet.pallet_id,
+                       product="BIA-LAGER", units=24, lot_code="PKG-2406-0001"))
     db.commit()
 
 
