@@ -23,7 +23,7 @@ from ..models.process import ChemicalUsage
 from ..models.quality import Deviation, QualityResult
 from ..models.quality_ext import QCParameter
 from ..models.signature import EBRSnapshot, Signature
-from ..security import User, require_perm, verify_password
+from ..security import User, enforce_sod, require_perm, verify_password
 from . import bom, dispense as dispense_svc, genealogy
 
 
@@ -147,6 +147,20 @@ def _reauth(db: Session, user: User, password: str) -> UserModel:
     return u
 
 
+def _assert_not_own_signer(db: Session, scope_id: str, user: User) -> None:
+    """SoD (tài liệu §8.4: "Ký EBR ≠ Phê duyệt/khóa EBR") — người phê duyệt/khóa không được là
+    người đã tự ký (ebr.sign) chính hồ sơ đang khóa — mirror enforce_sod đã dùng cho recipe
+    (services/recipes.py::transition, "soạn ≠ duyệt"). Gọi ở CẢ lock()/lock_tank()/
+    lock_filter_lot()/lock_pack_lot() (thủ công) LẪN _lock_batch_snapshot/_lock_tank_snapshot/
+    _lock_filter_lot_snapshot (lõi dùng chung với cascade từ khóa lô thành phẩm) — nếu chỉ chặn
+    ở đường thủ công, cascade vẫn có thể tự khóa hộ 1 mắt xích mà chính người bấm khóa lô TP đã
+    tự ký, lách qua guard. Admin miễn trừ (xem enforce_sod)."""
+    signers = db.execute(select(Signature.signed_by).where(
+        Signature.scope_type == "ebr", Signature.scope_id == scope_id)).scalars().all()
+    for signed_by in set(signers):
+        enforce_sod(signed_by, user, "phê duyệt/khóa hồ sơ (EBR)")
+
+
 def sign(db: Session, batch: BatchExecution, user: User, password: str, meaning: str, reason: str) -> dict:
     require_perm(user, "ebr.sign")
     _reauth(db, user, password)
@@ -166,6 +180,7 @@ def sign(db: Session, batch: BatchExecution, user: User, password: str, meaning:
 def lock(db: Session, batch: BatchExecution, user: User, password: str, reason: str) -> dict:
     require_perm(user, "ebr.approve")
     _reauth(db, user, password)
+    _assert_not_own_signer(db, batch.batch_id, user)
     # with_for_update(): khóa hàng ngay TRƯỚC khi check ebr_locked — tuần tự hoá đúng 2 giao dịch
     # gần như đồng thời (VD 1 người bấm khóa thủ công đúng lúc lô thành phẩm dùng mẻ này bị khóa
     # ở Chiết, kích hoạt cascade) trên DB có row-lock thật (SQL Server/Postgres — SQLite bỏ qua,
@@ -464,6 +479,7 @@ def _lock_batch_snapshot(db: Session, batch: BatchExecution, user: User, reason:
         BatchExecution.batch_id == batch.batch_id).with_for_update()).scalar_one()
     if batch.ebr_locked:
         return
+    _assert_not_own_signer(db, batch.batch_id, user)
     core = assemble(db, batch)["core"]
     core_hash = _hash(core)
     db.add(EBRSnapshot(snap_id=new_id(), batch_id=batch.batch_id, snapshot_version=1,
@@ -495,6 +511,7 @@ def _tank_fermentation_log_display(db: Session, tank_id: str) -> dict:
         "daily_readings": [{
             "day_no": r.day_no, "reading_date": r.reading_date,
             "nhiet_do_c": r.nhiet_do_c, "do_s": r.do_s, "mat_do_tb": r.mat_do_tb,
+            "ap_suat_bar": r.ap_suat_bar,
             "measured_by": r.measured_by, "measured_at": r.measured_at.isoformat() if r.measured_at else None,
             "kcs": r.kcs, "kcs_by": r.kcs_by, "kcs_at": r.kcs_at.isoformat() if r.kcs_at else None,
             "truc_ca": r.truc_ca, "truc_ca_by": r.truc_ca_by,
@@ -610,6 +627,7 @@ def _lock_tank_snapshot(db: Session, tank, user: User, reason: str) -> None:
         BatchTank.tank_id == tank.tank_id).with_for_update()).scalar_one()
     if tank.locked:
         return
+    _assert_not_own_signer(db, tank.tank_id, user)
     core = _tank_core(db, tank)
     core_hash = _hash(core)
     db.add(EBRSnapshot(snap_id=new_id(), batch_id=tank.tank_id, snapshot_version=1,
@@ -710,6 +728,7 @@ def _lock_filter_lot_snapshot(db: Session, fl, user: User, reason: str) -> None:
         BatchFilterLot.filter_lot_id == fl.filter_lot_id).with_for_update()).scalar_one()
     if fl.locked:
         return
+    _assert_not_own_signer(db, fl.filter_lot_id, user)
     core = _filter_lot_core(db, fl)
     core_hash = _hash(core)
     db.add(EBRSnapshot(snap_id=new_id(), batch_id=fl.filter_lot_id, snapshot_version=1,
@@ -775,6 +794,7 @@ def lock_pack_lot(db: Session, pack_lot_id: str, user: User, password: str, reas
                       .order_by(EBRSnapshot.snapshot_version.desc())).scalars().first()
     if last:
         raise DomainError("Hồ sơ lô thành phẩm đã được khóa trước đó.")
+    _assert_not_own_signer(db, pack_lot_id, user)
     dossier = assemble_pack_lot(db, pack_lot_id)
     core = dossier["core"]
     core_hash = _hash(core)
