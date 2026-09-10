@@ -567,10 +567,15 @@ def transfer(db: Session, lot_id: str, quantity: float, location_to: str, user: 
 
 def _transfer_lot(db: Session, lot_id: str, quantity: float, location_to: str, user: User,
                   reason: str = None, mode: str = "sang_ngang", request_id: str = None,
-                  request_line_id: str = None) -> dict:
+                  request_line_id: str = None, ts=None) -> dict:
     """Logic chuyển vị trí thực sự, KHÔNG kiểm tra `warehouse.issue` — dùng cho các nơi đã tự
     xác thực quyền theo cách khác (vd approve_sang_ngang/undo_sang_ngang: thủ kho phân xưởng
-    duyệt qua `warehouse.request` + phạm vi kho, không phải người cầm quyền "xuất kho" chung)."""
+    duyệt qua `warehouse.request` + phạm vi kho, không phải người cầm quyền "xuất kho" chung).
+    `ts` (tuỳ chọn): ngày hiệu lực của StockMovement transfer — mặc định utcnow() thật lúc thao
+    tác (không truyền); approve_sang_ngang truyền lại "Ngày xuất sang ngang" đã khai ở Kho công
+    ty để tồn kho theo ngày (as-of) ở Kho phân xưởng phản ánh đúng ngày đó, thay vì ngày Thủ kho
+    phân xưởng bấm Duyệt (yêu cầu người dùng 2026-09-09: "vật tư có vào kho phân xưởng theo ngày
+    xuất sang ngang bên kho công ty đưa ra không" — chọn CÓ)."""
     lot = _lock_lot(db, lot_id)
     _assert_transfer_scope(user, lot.location, location_to)
     if lot.status == LotStatus.ON_HOLD.value:
@@ -595,7 +600,7 @@ def _transfer_lot(db: Session, lot_id: str, quantity: float, location_to: str, u
         db.add(GenealogyEdge(edge_id=new_id(), from_type="lot", from_id=lot.lot_id, to_type="lot",
                              to_id=moved_lot.lot_id, relation=GenealogyRelation.SPLIT.value,
                              quantity=quantity, uom=lot.uom, source_event="transfer"))
-    mv = _move(db, "transfer", moved_lot, quantity, user, location_from=loc_from, location_to=location_to,
+    mv = _move(db, "transfer", moved_lot, quantity, user, ts=ts, location_from=loc_from, location_to=location_to,
               mode=mode, reason=reason, request_id=request_id, request_line_id=request_line_id)
     record_audit(db, entity_type="lot", entity_id=moved_lot.lot_id, action="transfer", actor=user,
                  after={"from": loc_from, "to": location_to, "quantity": quantity,
@@ -786,8 +791,11 @@ def _lot_balances_as_of(db: Session, as_of) -> tuple[dict[str, float], dict[str,
     không phụ thuộc đang xem theo kho nào.
 
     Vị trí ước tính = location_to (hoặc giữ nguyên nếu issue, vì issue không đổi vị trí) của giao
-    dịch GẦN NHẤT ảnh hưởng tới lô — xử lý các dòng theo thứ tự `ts` TĂNG DẦN nên giá trị ghi sau
-    cùng luôn là mới nhất trong khoảng tính đến `as_of`.
+    dịch GẦN NHẤT ảnh hưởng tới lô — xử lý các dòng theo thứ tự `ts` TĂNG DẦN (kèm `created_at`
+    làm tiêu chí phụ khi `ts` trùng nhau — VD approve_sang_ngang giờ gán transfer.ts = đúng ts
+    của receipt gốc, xem _transfer_lot — SQL không đảm bảo thứ tự giữa các dòng cùng `ts`, phải
+    tự chốt bằng `created_at` LUÔN là thời điểm ghi thật, phản ánh đúng thứ tự nghiệp vụ thật dù
+    `ts` trùng) nên giá trị ghi sau cùng luôn là mới nhất trong khoảng tính đến `as_of`.
 
     Bù trừ phần bị THIẾU do transfer() TÁCH lô (`_transfer_lot`, quantity < tồn lô gốc) —
     StockMovement "transfer" chỉ gắn với LÔ MỚI (moved_lot), lô GỐC không có dòng riêng ghi nhận
@@ -803,7 +811,8 @@ def _lot_balances_as_of(db: Session, as_of) -> tuple[dict[str, float], dict[str,
         GenealogyEdge.source_event == "transfer")).all())
     stmt = select(StockMovement.lot_id, StockMovement.movement_type, StockMovement.quantity,
                  StockMovement.location_to).where(
-        StockMovement.ts <= as_of, StockMovement.lot_id.isnot(None)).order_by(StockMovement.ts.asc())
+        StockMovement.ts <= as_of, StockMovement.lot_id.isnot(None)
+    ).order_by(StockMovement.ts.asc(), StockMovement.created_at.asc())
     rows = db.execute(stmt).all()
     balances: dict[str, float] = {}
     locations: dict[str, str] = {}
@@ -815,7 +824,15 @@ def _lot_balances_as_of(db: Session, as_of) -> tuple[dict[str, float], dict[str,
         elif mtype == "issue":
             balances[lot_id] = balances.get(lot_id, 0.0) - qty
         elif mtype == "transfer":
-            balances[lot_id] = balances.get(lot_id, 0.0) + qty
+            if lot_id not in balances:
+                # Lô này CHƯA từng có dòng nào khác trong lịch sử -> đây là lô MỚI do transfer()
+                # TÁCH một phần (moved_lot, tương đương 1 "receipt" ngầm, dòng balance ĐẦU TIÊN).
+                # Ngược lại (lot_id ĐÃ có số dư từ trước, VD dòng receipt của chính lô đó — lô
+                # chuyển NGUYÊN vẹn không tách, cùng lot_id) thì số dư KHÔNG được cộng thêm nữa,
+                # transfer chỉ đổi vị trí — bug đã phát hiện 2026-09-09 (audit
+                # approve_sang_ngang): lô chuyển nguyên vẹn 70kg bị cộng dồn thành 140kg vì trước
+                # đây luôn += qty bất kể lô mới hay cũ.
+                balances[lot_id] = qty
             if loc_to:
                 locations[lot_id] = loc_to
             original_id = split_map.get(lot_id)
@@ -903,7 +920,9 @@ def stock_card(db: Session, material_id: str = None, lot_id: str = None) -> list
         stmt = stmt.where(StockMovement.lot_id == lot_id)
     elif material_id:
         stmt = stmt.where(StockMovement.material_id == material_id)
-    movements = db.execute(stmt.order_by(StockMovement.ts)).scalars().all()
+    # created_at làm tiêu chí phụ khi ts trùng nhau (VD approve_sang_ngang gán transfer.ts = đúng
+    # ts của receipt gốc, xem _transfer_lot) — SQL không đảm bảo thứ tự giữa các dòng cùng ts.
+    movements = db.execute(stmt.order_by(StockMovement.ts, StockMovement.created_at)).scalars().all()
     bal = 0.0
     out = []
     for m in movements:
@@ -1907,8 +1926,18 @@ def approve_sang_ngang(db: Session, request_id: str, user: User) -> dict:
     if lot.status == LotStatus.ON_HOLD.value:
         raise DomainError(f"Lô {lot.lot_code} đang chờ KCS khai báo/duyệt chỉ tiêu chất lượng — "
                           "chưa thể nhận vào Kho phân xưởng.")
+    # Giao dịch transfer dùng chính "Ngày xuất sang ngang" (received_at, ts của receipt gốc ở
+    # Kho công ty — có thể đã khai lùi ngày) làm ts hiệu lực, KHÔNG phải lúc Thủ kho phân xưởng
+    # bấm Duyệt — để "Xem tồn kho theo 1 ngày" ở Kho phân xưởng phản ánh đúng ngày vật tư thật sự
+    # được coi là về kho (yêu cầu người dùng 2026-09-09). Rỗng nếu dữ liệu cũ không có
+    # receipt_movement_id -> _transfer_lot tự lùi về utcnow() thật (hành vi cũ, không đổi).
+    receipt_ts = None
+    if req.receipt_movement_id:
+        receipt_mv = db.get(StockMovement, req.receipt_movement_id)
+        if receipt_mv:
+            receipt_ts = receipt_mv.ts
     result = _transfer_lot(db, req.lot_id, req.quantity, "Kho phân xưởng", user, reason=req.reason,
-                           mode="sang_ngang")
+                           mode="sang_ngang", ts=receipt_ts)
     req.movement_id = result["movement_id"]
     req.status = "approved"
     req.approved_by = user.username

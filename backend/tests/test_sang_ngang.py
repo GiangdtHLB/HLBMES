@@ -7,6 +7,7 @@ tới khi KCS duyệt xong (lot rời ON_HOLD)."""
 
 import os
 import tempfile
+from datetime import datetime, timedelta, timezone
 
 _TMP = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
 os.environ["MES_DATABASE_URL"] = f"sqlite:///{_TMP.name}"
@@ -322,3 +323,40 @@ def test_resubmit_rejected_sang_ngang_goes_back_to_pending(client, admin_h, thuk
     # Gửi lại 1 đề nghị đã approved phải báo lỗi (không còn ý nghĩa).
     bad3 = client.post(f"/api/warehouse/sang-ngang/{req['request_id']}/resubmit", headers=thukho_h)
     assert bad3.status_code == 409, bad3.text
+
+
+def test_approve_uses_declared_received_at_as_transfer_ts(client, admin_h, thukho_h, vanhanh_h):
+    """Giao dịch transfer khi Duyệt phải dùng ĐÚNG "Ngày xuất sang ngang" đã khai (received_at,
+    ts của receipt gốc) làm ts hiệu lực — KHÔNG phải lúc thật sự bấm Duyệt — để vật tư coi như đã
+    "vào" Kho phân xưởng kể từ ngày đó trong tính năng xem tồn kho theo 1 ngày (as-of). Yêu cầu
+    người dùng 2026-09-09: xác nhận chọn hướng này thay vì giữ nguyên ts=lúc duyệt thật."""
+    mat_id = _create_material(client, admin_h, "SNG-10")
+    declared = (datetime.now(timezone.utc) - timedelta(days=3)).replace(microsecond=0)
+    r = client.post("/api/warehouse/sang-ngang", headers=thukho_h,
+                    json={"lot_code": "SNG-LOT-10", "material_id": mat_id, "quantity": 70, "uom": "kg",
+                          "received_at": declared.isoformat()})
+    assert r.status_code == 201, r.text
+    req = r.json()
+    assert req["received_at"][:19] == declared.isoformat()[:19]
+
+    ap = client.post(f"/api/warehouse/sang-ngang/{req['request_id']}/approve", headers=vanhanh_h)
+    assert ap.status_code == 200, ap.text
+    movement_id = ap.json()["movement_id"]
+
+    movements = client.get("/api/warehouse/movements?movement_type=transfer&mode=sang_ngang&limit=500",
+                           headers=admin_h).json()
+    mv = next(m for m in movements if m["movement_id"] == movement_id)
+    # ts của giao dịch transfer = đúng ngày đã khai — KHÔNG phải utcnow() lúc bấm Duyệt.
+    assert mv["ts"][:19] == declared.isoformat()[:19]
+
+    # "Xem tồn kho theo 1 ngày" ở Kho phân xưởng: as_of = trước 1 ngày so ngày đã khai -> CHƯA
+    # thấy; as_of = đúng ngày đã khai -> ĐÃ thấy (vật tư coi như về kho từ ngày đó, không phải
+    # ngày Duyệt thật).
+    before = (declared - timedelta(hours=1)).isoformat()
+    at_declared = (declared + timedelta(hours=1)).isoformat()
+    lots_before = client.get("/api/warehouse/stock/as-of/lots",
+                             params={"as_of": before, "location": "Kho phân xưởng"}, headers=admin_h).json()
+    lots_after = client.get("/api/warehouse/stock/as-of/lots",
+                            params={"as_of": at_declared, "location": "Kho phân xưởng"}, headers=admin_h).json()
+    assert not any(l["lot_code"] == "SNG-LOT-10" for l in lots_before)
+    assert any(l["lot_code"] == "SNG-LOT-10" and l["quantity"] == 70 for l in lots_after)
