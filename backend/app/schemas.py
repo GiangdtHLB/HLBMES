@@ -2624,6 +2624,7 @@ class BatchTankDailyReadingIn(BaseModel):
     nhiet_do_c: Optional[float] = None
     do_s: Optional[float] = None
     mat_do_tb: Optional[float] = None
+    ap_suat_bar: Optional[float] = None
     kcs: Optional[str] = None
     truc_ca: Optional[str] = None
 

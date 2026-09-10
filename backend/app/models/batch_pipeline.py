@@ -321,6 +321,7 @@ class BatchTankDailyReading(Base):
     nhiet_do_c: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     do_s: Mapped[Optional[float]] = mapped_column(Float, nullable=True)          # °S (Plato)
     mat_do_tb: Mapped[Optional[float]] = mapped_column(Float, nullable=True)      # 10^6/ml
+    ap_suat_bar: Mapped[Optional[float]] = mapped_column(Float, nullable=True)    # bar
     measured_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
     measured_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
     kcs: Mapped[Optional[str]] = mapped_column(Unicode(64), nullable=True)  # "dat"|"khong_dat"

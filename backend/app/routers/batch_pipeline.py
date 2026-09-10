@@ -111,6 +111,7 @@ def lock_tank_ebr(tank_id: str, payload: EbrLockIn, db: Session = Depends(get_db
 def _tank_reading_dict(r) -> dict:
     return {"day_no": r.day_no, "reading_date": r.reading_date,
             "nhiet_do_c": r.nhiet_do_c, "do_s": r.do_s, "mat_do_tb": r.mat_do_tb,
+            "ap_suat_bar": r.ap_suat_bar,
             "measured_by": r.measured_by, "measured_at": r.measured_at,
             "kcs": r.kcs, "kcs_by": r.kcs_by, "kcs_at": r.kcs_at,
             "truc_ca": r.truc_ca, "truc_ca_by": r.truc_ca_by, "truc_ca_at": r.truc_ca_at}

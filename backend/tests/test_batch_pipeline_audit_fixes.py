@@ -289,7 +289,7 @@ def test_tank_ebr_core_includes_fermentation_log(client, admin_h):
                     json={"kieu_men": "Lager W-34/70", "note": "ghi chú test"})
     assert pl.status_code == 200, pl.text
     rd = client.put(f"/api/batch-tanks/{tank_id}/process-log/readings", headers=admin_h,
-                    json={"readings": [{"day_no": 1, "nhiet_do_c": 12.5, "do_s": 11.2}]})
+                    json={"readings": [{"day_no": 1, "nhiet_do_c": 12.5, "do_s": 11.2, "ap_suat_bar": 1.5}]})
     assert rd.status_code == 200, rd.text
 
     ebr = client.get(f"/api/batch-tanks/{tank_id}/ebr", headers=admin_h)
@@ -299,6 +299,9 @@ def test_tank_ebr_core_includes_fermentation_log(client, admin_h):
     assert ferm["note"] == "ghi chú test"
     assert len(ferm["daily_readings"]) == 1
     assert ferm["daily_readings"][0]["nhiet_do_c"] == 12.5
+    # Áp suất (bar) phải được niêm phong vào core EBR như nhiệt độ/°S/mật độ (yêu cầu người dùng
+    # 2026-09-09: thêm áp suất vào bảng theo dõi lên men).
+    assert ferm["daily_readings"][0]["ap_suat_bar"] == 1.5
 
     lock = client.post(f"/api/batch-tanks/{tank_id}/ebr/lock", headers=admin_h,
                        json={"password": "AdminTest123", "reason": "khóa test"})

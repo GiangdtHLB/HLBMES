@@ -43,6 +43,16 @@ def admin_h(client):
     return _login(client, "admin", "AdminTest123")
 
 
+@pytest.fixture(scope="module")
+def quandoc_h(client):
+    return _login(client, "quandoc", "123456")
+
+
+@pytest.fixture(scope="module")
+def kcs_h(client):
+    return _login(client, "kcs", "123456")
+
+
 def _make_batch(client, admin_h, batch_code):
     rid = client.get("/api/recipes", headers=admin_h).json()[0]["recipe_id"]
     vers = client.get(f"/api/recipes/{rid}/versions", headers=admin_h).json()
@@ -604,3 +614,104 @@ def test_old_batch_scoped_ebr_untouched(client, admin_h):
     assert ebr.status_code == 200, ebr.text
     assert ebr.json()["core"]["batch_code"] == "1"
     assert ebr.json()["locked"] is False
+
+
+# ============ SoD (tài liệu §8.4): "Ký EBR ≠ Phê duyệt/khóa EBR" ============
+# 2026-09-09: enforce_sod() đã dùng cho recipe (soạn ≠ duyệt) từ trước NHƯNG chưa hề được gọi
+# trong services/ebr.py — người giữ cả 2 quyền ebr.sign + ebr.approve (VD quandoc/kcs) có thể tự
+# ký rồi tự khóa chính hồ sơ mình vừa ký, trái với §8.4. Test dưới đây phủ cả 4 tầng (Nấu/Lên
+# men/Lọc/Thành phẩm) VÀ cả 2 đường (thủ công + cascade từ khóa lô thành phẩm).
+
+def test_batch_lock_blocks_self_signed_ebr(client, admin_h, quandoc_h, kcs_h):
+    """Scope 'batch' (đường EBR cũ, độc lập pipeline mới) — quandoc ký rồi tự khóa bị chặn
+    (403, SoD); kcs (người khác, cũng có ebr.approve) khóa được bình thường."""
+    batch_id = _make_batch(client, admin_h, None)
+    _run_batch_to_completed(client, admin_h, batch_id)
+
+    sign = client.post(f"/api/batches/{batch_id}/ebr/sign", headers=quandoc_h,
+                       json={"password": "123456", "meaning": "Xác nhận thực thi"})
+    assert sign.status_code == 200, sign.text
+
+    self_lock = client.post(f"/api/batches/{batch_id}/ebr/lock", headers=quandoc_h,
+                            json={"password": "123456", "reason": "tự khóa"})
+    assert self_lock.status_code == 403, self_lock.text
+    assert "phân tách nhiệm vụ" in self_lock.json()["detail"]
+
+    other_lock = client.post(f"/api/batches/{batch_id}/ebr/lock", headers=kcs_h,
+                             json={"password": "123456", "reason": "duyệt bởi người khác"})
+    assert other_lock.status_code == 200, other_lock.text
+
+
+def test_lock_pack_lot_blocks_self_signed_ebr(client, admin_h, quandoc_h, kcs_h):
+    """Scope 'batch_pack_lot' (Thành phẩm) — mirror test trên, entry point thủ công lock_pack_lot()."""
+    _b, _t, _f, pack_lot_id = _build_chain(client, admin_h, "SODPACK1")
+
+    sign = client.post(f"/api/batch-pack-lots/{pack_lot_id}/ebr/sign", headers=quandoc_h,
+                       json={"password": "123456", "meaning": "Xác nhận thực thi"})
+    assert sign.status_code == 200, sign.text
+
+    self_lock = client.post(f"/api/batch-pack-lots/{pack_lot_id}/ebr/lock", headers=quandoc_h,
+                            json={"password": "123456", "reason": "tự khóa"})
+    assert self_lock.status_code == 403, self_lock.text
+    assert "phân tách nhiệm vụ" in self_lock.json()["detail"]
+
+    other_lock = client.post(f"/api/batch-pack-lots/{pack_lot_id}/ebr/lock", headers=kcs_h,
+                             json={"password": "123456", "reason": "duyệt bởi người khác"})
+    assert other_lock.status_code == 200, other_lock.text
+
+
+def test_lock_tank_and_filter_lot_block_self_signed_ebr(client, admin_h, quandoc_h, kcs_h):
+    """Scope 'batch_tank' (Lên men) và 'batch_filter_lot' (Lọc) — entry point thủ công
+    lock_tank()/lock_filter_lot(), mirror test trên cho 2 tầng còn lại."""
+    _b, tank_id, filter_lot_id, _p = _build_chain(client, admin_h, "SODTANKFL1")
+
+    sign_tank = client.post(f"/api/batch-tanks/{tank_id}/ebr/sign", headers=quandoc_h,
+                           json={"password": "123456", "meaning": "Xác nhận lên men đạt", "reason": ""})
+    assert sign_tank.status_code == 200, sign_tank.text
+    self_lock_tank = client.post(f"/api/batch-tanks/{tank_id}/ebr/lock", headers=quandoc_h,
+                                 json={"password": "123456", "reason": "tự khóa"})
+    assert self_lock_tank.status_code == 403, self_lock_tank.text
+    other_lock_tank = client.post(f"/api/batch-tanks/{tank_id}/ebr/lock", headers=kcs_h,
+                                  json={"password": "123456", "reason": "duyệt bởi người khác"})
+    assert other_lock_tank.status_code == 200, other_lock_tank.text
+
+    sign_fl = client.post(f"/api/batch-filter-lots/{filter_lot_id}/ebr/sign", headers=quandoc_h,
+                          json={"password": "123456", "meaning": "Xác nhận lọc đạt", "reason": ""})
+    assert sign_fl.status_code == 200, sign_fl.text
+    self_lock_fl = client.post(f"/api/batch-filter-lots/{filter_lot_id}/ebr/lock", headers=quandoc_h,
+                               json={"password": "123456", "reason": "tự khóa"})
+    assert self_lock_fl.status_code == 403, self_lock_fl.text
+    other_lock_fl = client.post(f"/api/batch-filter-lots/{filter_lot_id}/ebr/lock", headers=kcs_h,
+                                json={"password": "123456", "reason": "duyệt bởi người khác"})
+    assert other_lock_fl.status_code == 200, other_lock_fl.text
+
+
+def test_cascade_lock_blocks_when_locker_signed_upstream_node(client, admin_h, quandoc_h, kcs_h):
+    """SoD phải áp dụng CẢ ở đường cascade (khóa lô thành phẩm tự khóa hộ tank/lô lọc/mẻ nấu
+    upstream chưa khóa thủ công) — không chỉ đường thủ công. quandoc CHỈ ký (không khóa thủ công)
+    tank upstream, rồi thử khóa lô thành phẩm (kích hoạt cascade) — phải bị chặn vì cascade sẽ tự
+    khóa hộ đúng cái tank quandoc đã ký. kcs (chưa từng ký gì trong cây) khóa lô thành phẩm bình
+    thường, cascade khóa hộ tank không vi phạm SoD."""
+    _b, tank_id, _f, pack_lot_id = _build_chain(client, admin_h, "SODCASCADE1")
+
+    sign_tank = client.post(f"/api/batch-tanks/{tank_id}/ebr/sign", headers=quandoc_h,
+                           json={"password": "123456", "meaning": "Xác nhận lên men đạt", "reason": ""})
+    assert sign_tank.status_code == 200, sign_tank.text
+    # Tank CHƯA bị khóa thủ công — vẫn ở trạng thái chờ cascade từ lô thành phẩm.
+    still_unlocked = client.get(f"/api/batch-tanks/{tank_id}/ebr", headers=admin_h).json()
+    assert still_unlocked["locked"] is False
+
+    self_cascade = client.post(f"/api/batch-pack-lots/{pack_lot_id}/ebr/lock", headers=quandoc_h,
+                               json={"password": "123456", "reason": "tự khóa qua cascade"})
+    assert self_cascade.status_code == 403, self_cascade.text
+    # Cascade phải KHÔNG tạo snapshot/khóa gì cả khi bị chặn giữa chừng (all-or-nothing).
+    still_unlocked_after = client.get(f"/api/batch-tanks/{tank_id}/ebr", headers=admin_h).json()
+    assert still_unlocked_after["locked"] is False
+    pack_still_unlocked = client.get(f"/api/batch-pack-lots/{pack_lot_id}/ebr", headers=admin_h).json()
+    assert pack_still_unlocked["locked"] is False
+
+    other_cascade = client.post(f"/api/batch-pack-lots/{pack_lot_id}/ebr/lock", headers=kcs_h,
+                                json={"password": "123456", "reason": "duyệt bởi người khác"})
+    assert other_cascade.status_code == 200, other_cascade.text
+    tank_after = client.get(f"/api/batch-tanks/{tank_id}/ebr", headers=admin_h).json()
+    assert tank_after["locked"] is True
