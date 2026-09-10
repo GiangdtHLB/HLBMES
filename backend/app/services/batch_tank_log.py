@@ -170,7 +170,8 @@ def upsert_daily_readings(db: Session, tank_id: str, rows: list[dict], user: Use
         reading.nhiet_do_c = row.get("nhiet_do_c")
         reading.do_s = row.get("do_s")
         reading.mat_do_tb = row.get("mat_do_tb")
-        if any(v is not None for v in (reading.nhiet_do_c, reading.do_s, reading.mat_do_tb)):
+        reading.ap_suat_bar = row.get("ap_suat_bar")
+        if any(v is not None for v in (reading.nhiet_do_c, reading.do_s, reading.mat_do_tb, reading.ap_suat_bar)):
             reading.measured_by = user.username
             reading.measured_at = now
         else:

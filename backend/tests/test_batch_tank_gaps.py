@@ -266,20 +266,27 @@ def test_process_log_header_and_daily_readings(client, admin_h):
     readings = client.put(f"/api/batch-tanks/{tank_id}/process-log/readings", headers=admin_h, json={
         "readings": [
             {"day_no": 1, "reading_date": "2026-08-01", "nhiet_do_c": 18.0, "do_s": 12.0, "mat_do_tb": 50.0,
-             "kcs": "dat", "truc_ca": "dat"},
+             "ap_suat_bar": 1.2, "kcs": "dat", "truc_ca": "dat"},
             {"day_no": 2, "reading_date": "2026-08-02"},
+            # Chỉ nhập áp suất (không nhiệt độ/°S/mật độ) — vẫn phải đóng dấu measured_by/at
+            # (yêu cầu người dùng 2026-09-09: thêm áp suất vào bảng theo dõi lên men).
+            {"day_no": 3, "reading_date": "2026-08-03", "ap_suat_bar": 0.8},
         ],
     })
     assert readings.status_code == 200, readings.text
     day1 = next(r for r in readings.json() if r["day_no"] == 1)
     assert day1["measured_by"] == "admin" and day1["measured_at"] is not None
     assert day1["kcs_by"] == "admin"
+    assert day1["ap_suat_bar"] == 1.2
     day2 = next(r for r in readings.json() if r["day_no"] == 2)
     assert day2["measured_by"] is None
+    day3 = next(r for r in readings.json() if r["day_no"] == 3)
+    assert day3["ap_suat_bar"] == 0.8
+    assert day3["measured_by"] == "admin" and day3["measured_at"] is not None
 
     final = client.get(f"/api/batch-tanks/{tank_id}/process-log", headers=admin_h).json()
     assert final["manual"]["kieu_men"] == "Ale"
-    assert len(final["readings"]) == 2
+    assert len(final["readings"]) == 3
 
 
 def test_available_tank_lines_reflects_occupied_state(client, admin_h):
