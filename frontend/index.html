@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>MES Bia Hạ Long - Nhà Máy Đông Mai</title>
-  <link rel="stylesheet" href="/styles.css?v=66" />
+  <link rel="stylesheet" href="/styles.css?v=68" />
 </head>
 <body>
   <!-- Màn hình đăng nhập -->
@@ -34,6 +34,8 @@
         <div class="nav-brand-title">MES Bia Hạ Long</div>
         <div class="nav-brand-sub">Nhà máy Đông Mai</div>
       </div>
+      <button id="pt_bell" class="nav-bell" aria-label="Việc cần làm" title="Việc cần làm">🔔<span id="pt_bell_count" class="nav-bell-count" hidden>0</span></button>
+      <div id="pt_dropdown" class="pt-dropdown" hidden></div>
     </div>
     <div class="nav-scroll">
       <button data-view="dashboard" class="active">📊 Tổng quan</button>
@@ -153,7 +155,7 @@
 
   <script src="/charts.js?v=40"></script>
   <script src="/barcode.js?v=20"></script>
-  <script src="/app.js?v=700"></script>
+  <script src="/app.js?v=701"></script>
   <script src="/views_ext.js?v=195"></script>
   <script src="/import_explorer.js?v=22"></script>
 </body>

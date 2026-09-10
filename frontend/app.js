@@ -14356,10 +14356,60 @@ function applyMenu() {
   }
 }
 
+// ================= Việc cần làm (chuông thông báo, /api/pending-tasks) =================
+// Riêng theo từng tài khoản — backend đã tự lọc đúng quyền/phạm vi của user đang đăng nhập
+// (services/pending_tasks.py), ở đây chỉ hiển thị + điều hướng, KHÔNG tự lọc gì thêm.
+let PENDING_TASKS = [];
+let PENDING_TASKS_TIMER = null;
+
+async function refreshPendingTasks() {
+  if (!CURRENT_USER) return;
+  let data;
+  try { data = await GET("/pending-tasks"); } catch (e) { return; }  // lỗi mạng tạm thời — im lặng, thử lại ở lần poll sau
+  PENDING_TASKS = data.items || [];
+  const countEl = $("pt_bell_count");
+  if (data.total > 0) { countEl.textContent = data.total > 99 ? "99+" : String(data.total); countEl.hidden = false; }
+  else countEl.hidden = true;
+  if (!$("pt_dropdown").hidden) renderPendingTasksDropdown();
+}
+
+function renderPendingTasksDropdown() {
+  const dd = $("pt_dropdown");
+  dd.innerHTML = PENDING_TASKS.length
+    ? PENDING_TASKS.map((it, i) => `<button class="pt-row" data-idx="${i}">
+        <span>${esc(it.label)}</span><span class="pt-badge">${it.count}</span></button>`).join("")
+    : `<div class="pt-empty">Không có việc nào đang chờ.</div>`;
+  dd.querySelectorAll(".pt-row").forEach(b => b.onclick = () => goToPendingTask(PENDING_TASKS[parseInt(b.dataset.idx, 10)]));
+}
+
+function goToPendingTask(item) {
+  $("pt_dropdown").hidden = true;
+  if (item.sub) SUB[item.view] = item.sub;
+  openNavGroup(GROUP_OF_VIEW[item.view]);
+  switchView(item.view);
+}
+
+function initPendingTasks() {
+  refreshPendingTasks();
+  if (PENDING_TASKS_TIMER) clearInterval(PENDING_TASKS_TIMER);
+  PENDING_TASKS_TIMER = setInterval(refreshPendingTasks, 90000);
+  $("pt_bell").onclick = () => {
+    const dd = $("pt_dropdown");
+    dd.hidden = !dd.hidden;
+    if (!dd.hidden) renderPendingTasksDropdown();
+  };
+  document.addEventListener("click", (e) => {
+    if (!$("pt_dropdown").hidden && !e.target.closest("#pt_dropdown") && !e.target.closest("#pt_bell")) {
+      $("pt_dropdown").hidden = true;
+    }
+  });
+}
+
 function enterApp() {
   $("login").style.display = "none";
   $("app").style.display = "";
   applyMenu();
+  initPendingTasks();
   // Buộc đổi mật khẩu lần đầu (mật khẩu mặc định) — modal chặn, không bỏ qua được.
   if (CURRENT_USER && CURRENT_USER.must_change_password) forcePasswordChange();
 }
@@ -14419,6 +14469,8 @@ async function doLogin() {
 
 async function doLogout() {
   try { await fetch("/api/auth/logout", { method: "POST", headers: { "Authorization": "Bearer " + TOKEN } }); } catch (e) {}
+  if (PENDING_TASKS_TIMER) { clearInterval(PENDING_TASKS_TIMER); PENDING_TASKS_TIMER = null; }
+  PENDING_TASKS = []; $("pt_bell_count").hidden = true; $("pt_dropdown").hidden = true;
   TOKEN = ""; CURRENT_USER = null; localStorage.removeItem("mes_token");
   AI_HISTORY = []; CURRENT_CONV = null;
   // Máy dùng chung tại xưởng/kho — người dùng kế tiếp đăng nhập KHÔNG được thấy/kế thừa dữ

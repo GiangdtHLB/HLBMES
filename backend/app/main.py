@@ -42,6 +42,7 @@ from .routers import (
     oee_rcfa,
     packaging,
     param_catalog,
+    pending_tasks,
     performance,
     process,
     quality,
@@ -159,7 +160,7 @@ for r in (auth, master, workorders, recipes, formula, batches, materials, dispen
           quality_adv, traceability, performance, downtime, warehouse, energy, maintenance,
           process, brewing, reports, historian, scan, schedule, ai, jobs, isa88, wms,
           label, lines, packaging, import_explorer, gateway, audit, cip, oee_rcfa, param_catalog,
-          batch_pipeline):
+          batch_pipeline, pending_tasks):
     app.include_router(r.router)
 
 
