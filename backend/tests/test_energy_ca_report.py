@@ -103,3 +103,41 @@ def test_aggregate_ca_values_flags_gap_without_poisoning_other_local_ids():
     assert by_ca[2]["value"] == 115.0  # ca 2: LocalID 1 (1300-1200=100, moc 14h/22h deu gan) + LocalID 2 (35-20=15)
     assert by_ca[2]["data_gap"] is False
     assert result["has_gap"] is True
+
+
+def test_aggregate_ca_values_computes_station_group_separately():
+    """by_ca_station/by_day_station/total_kwh_station gộp RIÊNG các LocalID trạm/máy phát
+    (VD Trạm 1250KVA + Trạm 560KVA) — độc lập với by_ca/total_kwh (hệ thống tiêu thụ) ở trên,
+    dùng cho panel Dashboard theo dõi tổng điện toàn nhà máy qua các trạm."""
+    boundaries = shift_boundaries(datetime(2024, 3, 1, 6, 0), datetime(2024, 3, 2, 6, 0))
+    names = {1: "May nen khi", 20: "Trạm 1250 KVA", 21: "Trạm 560 KVA"}
+    raw_rows = [
+        # LocalID 1 (he thong tieu thu): 100 -> 250 -> 400 -> 600
+        (1, datetime(2024, 3, 1, 6, 0), 100.0),
+        (1, datetime(2024, 3, 1, 14, 0), 250.0),
+        (1, datetime(2024, 3, 1, 22, 0), 400.0),
+        (1, datetime(2024, 3, 2, 6, 0), 600.0),
+        # LocalID 20 (Tram 1250KVA): 5000 -> 5300 -> 5700 -> 6200
+        (20, datetime(2024, 3, 1, 6, 0), 5000.0),
+        (20, datetime(2024, 3, 1, 14, 0), 5300.0),
+        (20, datetime(2024, 3, 1, 22, 0), 5700.0),
+        (20, datetime(2024, 3, 2, 6, 0), 6200.0),
+        # LocalID 21 (Tram 560KVA): 1000 -> 1100 -> 1250 -> 1400
+        (21, datetime(2024, 3, 1, 6, 0), 1000.0),
+        (21, datetime(2024, 3, 1, 14, 0), 1100.0),
+        (21, datetime(2024, 3, 1, 22, 0), 1250.0),
+        (21, datetime(2024, 3, 2, 6, 0), 1400.0),
+    ]
+    result = aggregate_ca_values(raw_rows, names, boundaries)
+
+    by_ca_station = {c["ca"]: c["value"] for c in result["by_ca_station"]}
+    assert by_ca_station[1] == 400.0   # (5300-5000) + (1100-1000)
+    assert by_ca_station[2] == 550.0   # (5700-5300) + (1250-1100)
+    assert by_ca_station[3] == 650.0   # (6200-5700) + (1400-1250)
+    assert result["total_kwh_station"] == 1600.0
+    assert result["has_gap_station"] is False
+    assert result["by_day_station"] == [
+        {"date": "2024-03-01", "ca1": 400.0, "ca2": 550.0, "ca3": 650.0, "has_gap": False}]
+
+    # LocalID 20/21 (tram) khong duoc lan vao tong he thong tieu thu.
+    assert result["total_kwh"] == 500.0  # chi LocalID 1: (250-100)+(400-250)+(600-400)

@@ -1,8 +1,9 @@
 """Test xóa lịch sử (chỉ admin): xuất tự do (công ty/phân xưởng), nhập kho, xuất theo đề nghị.
 
 Phủ: 403 khi không phải admin; xóa đúng dòng ad-hoc nhưng GIỮ dòng xuất tự do đang gắn với
-NVL đã dùng cho mẻ nấu (brew_material_usage.movement_id); nhập kho xóa lịch sử nhưng không
-đụng material_lot; xuất theo đề nghị chỉ xóa phiếu đã xử lý xong (không đụng phiếu còn dòng
+NVL đã dùng thật cho lô lọc (pipeline "Mẻ sản xuất" —
+batch_filter_lot_material_usage.movement_id); nhập kho xóa lịch sử nhưng không đụng
+material_lot; xuất theo đề nghị chỉ xóa phiếu đã xử lý xong (không đụng phiếu còn dòng
 pending); mọi thao tác xóa đều ghi audit_log bình thường.
 """
 
@@ -21,8 +22,7 @@ from fastapi.testclient import TestClient
 from app.main import app
 from app import seed as seed_mod
 from app.database import SessionLocal
-from app.models.brewing import BrewBatch, BrewMaterialUsage, BrewOrder, BrewRecord
-from app.models.audit import AuditLog
+from app.models.batch_pipeline import BatchFilterLot, BatchFilterLotMaterialUsage
 from app.common import new_id, utcnow
 
 
@@ -83,29 +83,23 @@ def test_delete_free_issue_history_keeps_production_linked_rows(client, admin_h)
                      json={"lot_id": lot_id, "quantity": 30, "mode": "tu_do", "reason": "test ad-hoc 2"})
     assert r2.status_code == 200, r2.text
 
-    # Giả lập 1 dòng NVL đã dùng thật cho mẻ nấu — tạo tối thiểu 1 chuỗi brew_order/brew_record/
-    # brew_batch rồi gắn brew_material_usage.movement_id trỏ vào 1 giao dịch mode="tu_do" khác.
+    # Giả lập 1 dòng NVL đã dùng thật cho lô lọc (pipeline "Mẻ sản xuất") — tạo tối thiểu 1
+    # BatchFilterLot rồi gắn batch_filter_lot_material_usage.movement_id trỏ vào 1 giao dịch
+    # mode="tu_do" khác.
     r3 = client.post("/api/warehouse/issue", headers=admin_h,
-                     json={"lot_id": lot_id, "quantity": 20, "mode": "tu_do", "reason": "Dùng cho mẻ nấu 1"})
+                     json={"lot_id": lot_id, "quantity": 20, "mode": "tu_do", "reason": "Dùng cho lô lọc 1"})
     assert r3.status_code == 200, r3.text
     tied_movement_id = r3.json()["movement_id"]
 
     db = SessionLocal()
     try:
-        order = BrewOrder(brew_order_id=new_id(), order_code="TEST-HDEL-1", order_year=2026,
-                          created_at=utcnow())
-        db.add(order)
+        filter_lot = BatchFilterLot(filter_lot_id=new_id(), filter_lot_code="TEST-HDEL-1",
+                                    filter_lot_year=2026, created_at=utcnow())
+        db.add(filter_lot)
         db.flush()
-        brew = BrewRecord(brew_id=new_id(), brew_code="TEST-HDEL-1", brew_year=2026,
-                          brew_date=utcnow(), wort_type="test", brew_order_id=order.brew_order_id)
-        db.add(brew)
-        db.flush()
-        batch = BrewBatch(batch_id=new_id(), brew_id=brew.brew_id, batch_code="99001", batch_year=2026,
-                          created_at=utcnow())
-        db.add(batch)
-        db.flush()
-        usage = BrewMaterialUsage(usage_id=new_id(), batch_id=batch.batch_id, movement_id=tied_movement_id,
-                                  material_name="HDEL01", quantity=20, uom="kg", created_at=utcnow())
+        usage = BatchFilterLotMaterialUsage(usage_id=new_id(), filter_lot_id=filter_lot.filter_lot_id,
+                                            movement_id=tied_movement_id, material_name="HDEL01",
+                                            quantity=20, uom="kg", created_at=utcnow())
         db.add(usage)
         db.commit()
     finally:
@@ -113,12 +107,12 @@ def test_delete_free_issue_history_keeps_production_linked_rows(client, admin_h)
 
     res = client.delete("/api/warehouse/movements/free-issue-history?workshop=false", headers=admin_h)
     assert res.status_code == 200, res.text
-    assert res.json()["deleted"] == 2  # chỉ 2 dòng ad-hoc, KHÔNG tính dòng gắn mẻ nấu
+    assert res.json()["deleted"] == 2  # chỉ 2 dòng ad-hoc, KHÔNG tính dòng gắn lô lọc
 
     remaining = client.get("/api/warehouse/movements?movement_type=issue&mode=tu_do", headers=admin_h).json()
     remaining_ids = {m["movement_id"] for m in remaining}
     assert ad_hoc_movement_id not in remaining_ids
-    assert tied_movement_id in remaining_ids  # dòng gắn NVL đã dùng cho mẻ nấu vẫn còn
+    assert tied_movement_id in remaining_ids  # dòng gắn NVL đã dùng cho lô lọc vẫn còn
 
     audit = client.get("/api/audit", headers=admin_h)
     if audit.status_code == 200:
@@ -131,7 +125,6 @@ def test_delete_receipt_history_keeps_lot(client, admin_h):
     rc = client.post("/api/warehouse/receive", headers=admin_h,
                      json={"material_id": mat_id, "quantity": 200, "uom": "kg"})
     assert rc.status_code == 200, rc.text
-    lot_id = rc.json()["lot_id"]
 
     before = client.get("/api/warehouse/movements?movement_type=receipt", headers=admin_h).json()
     assert len(before) > 0

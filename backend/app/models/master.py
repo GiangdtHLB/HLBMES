@@ -15,7 +15,7 @@ class BeerType(Base):
     """Loại bia (thương hiệu, VD Sapphire/Legend/lowCarb) — cấp trên Product: 1 Dịch bia
     (Product, có thể khác độ Bx/oP, VD SAPPHIRE-13OP và SAPPHIRE-14OP) thuộc về 1 Loại
     bia. Lọc/Chiết tra chỉ tiêu QC theo Loại bia (không phân biệt oP) thay vì theo Dịch
-    bia cụ thể — xem StageQcGroup.beer_type_id, FilterOrder/FilterRecord/BottleRecord.beer_type_id."""
+    bia cụ thể — xem StageQcGroup.beer_type_id, BatchFilterOrder/BatchFilterLot.beer_type_id."""
 
     __tablename__ = "beer_type"
 
@@ -57,7 +57,7 @@ class Product(Base):
     uom: Mapped[str] = mapped_column(Unicode(255), default="L")
     description: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)
     ferment_days_std: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # số ngày lên men chuẩn (sẵn sàng chiết) — cho phép số thực (VD 7.5 ngày)
-    spec_json: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)  # Quy định (chỉ tiêu công nghệ nấu) — xem services/braumat_import.py::SPEC_FIELDS, chỉ admin (master.manage) sửa được
+    spec_json: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)  # Quy định (chỉ tiêu công nghệ nấu) — xem services/master_data.py::SPEC_FIELD_KEYS, chỉ admin (master.manage) sửa được
     beer_type_id: Mapped[Optional[str]] = mapped_column(ForeignKey("beer_type.beer_type_id"), nullable=True, index=True)  # Loại bia (thương hiệu) — dùng để tra chỉ tiêu Lọc/Chiết
 
 

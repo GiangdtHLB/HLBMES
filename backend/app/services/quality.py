@@ -5,7 +5,7 @@
   quality_status sang RELEASED ngay khi đủ chỉ tiêu bắt buộc và không còn FAIL nào chưa có
   deviation đóng — đối xứng với việc 1 kết quả FAIL tự động đưa về ON_HOLD (yêu cầu người dùng
   2026-08-31, trước đó RELEASE là thao tác tay riêng của QA qua set_hold()). Gọi từ record_result()
-  (scope batch/lot/brew_batch/ferment/filter/bottle — scope_id là PK thật) VÀ từ
+  (scope batch/lot/batch_tank/batch_filter_lot/batch_pack_lot — scope_id là PK thật) VÀ từ
   qc_catalog.py::record_stage_result() khi scope_type="batch" (mẻ nấu, stage "nau" — CŨNG là PK
   thật). Không gọi được cho scope_id ghép chuỗi (len_men_chinh/phu, loc, thanh_pham — không có
   object thật để set quality_status; attempt_auto_release() tự no-op an toàn nếu lỡ gọi nhầm) hay
@@ -31,29 +31,20 @@ from ..common import (
 from ..errors import DomainError, NotFoundError
 from ..models.batches import BatchExecution
 from ..models.batch_pipeline import BatchFilterLot, BatchPackLot, BatchTank
-from ..models.brewing import BottleRecord, BrewBatch, FermentRecord, FilterRecord
 from ..models.materials import MaterialLot
 from ..models.quality import Deviation, QualityResult
 from ..models.quality_ext import CAPA
 from ..security import User, require_role
 
-# Scope theo công đoạn sản xuất (Nấu/Lên men/Lọc/Chiết) — scope_id là PK thật của bản ghi,
-# KHÁC quy ước scope_id ghép chuỗi (VD "{lm_code}__len_men_phu") mà qc_catalog.py dùng để khai
-# báo chỉ tiêu theo từng công đoạn con; 2 hệ thống dùng chung bảng QualityResult/Deviation
-# nhưng scope_id không bao giờ trùng nhau (PK ngẫu nhiên vs chuỗi ghép có "__") nên không xung
-# đột. Xem routers/quality.py (Hold/Release, Mở deviation) và app.js VIEWS.quality.
-# batch_tank/batch_filter_lot/batch_pack_lot (pipeline "Mẻ sản xuất" mới) — trước đây CHỈ khai
-# báo được chỉ tiêu (qc_catalog.py::record_stage_result) chứ Hold/Release/Deviation hoàn toàn
-# không thấy được 3 loại này (mọi thao tác trả "Phạm vi không hợp lệ") — yêu cầu người dùng
-# 2026-09-01: "Hold/Release và Deviation không nhìn thấy lô chiết/lô lên men/mã nấu [của pipeline
-# mới]". scope_id vẫn là PK thật (tank_id/filter_lot_id/pack_lot_id) — KHÔNG dùng quy ước ghép
-# chuỗi "__len_men_chinh/phu" của qc_catalog (đó chỉ áp dụng cho khai báo chỉ tiêu theo từng công
-# đoạn con của tank, không áp dụng cho Hold/Release ở cấp cả tank).
+# Scope theo công đoạn sản xuất (Lên men/Lọc/Chiết, pipeline "Mẻ sản xuất") — scope_id là PK
+# thật của bản ghi, KHÁC quy ước scope_id ghép chuỗi (VD "{tank_id}__len_men_phu") mà
+# qc_catalog.py dùng để khai báo chỉ tiêu theo từng công đoạn con; 2 hệ thống dùng chung bảng
+# QualityResult/Deviation nhưng scope_id không bao giờ trùng nhau (PK ngẫu nhiên vs chuỗi ghép
+# có "__") nên không xung đột. Xem routers/quality.py (Hold/Release, Mở deviation) và app.js
+# VIEWS.quality. scope_id vẫn là PK thật (tank_id/filter_lot_id/pack_lot_id) — KHÔNG dùng quy
+# ước ghép chuỗi "__len_men_chinh/phu" của qc_catalog (đó chỉ áp dụng cho khai báo chỉ tiêu
+# theo từng công đoạn con của tank, không áp dụng cho Hold/Release ở cấp cả tank).
 _STAGE_MODELS = {
-    "brew_batch": BrewBatch,
-    "ferment": FermentRecord,
-    "filter": FilterRecord,
-    "bottle": BottleRecord,
     "batch_tank": BatchTank,
     "batch_filter_lot": BatchFilterLot,
     "batch_pack_lot": BatchPackLot,
@@ -259,23 +250,11 @@ def _set_quality_status(db: Session, scope_type: str, scope_id: str, status: str
     return before
 
 
-# Hold 1 mẻ nấu (brew_batch) hoặc mẻ lọc (filter) phải kéo cả lô nấu (BrewRecord)/lô lọc
-# (FilterOrder) chứa nó vào diện hold — người vận hành mở khóa lô lọc/lô nấu và thấy MỌI mẻ
-# trong đó đang bị giữ, không chỉ mẻ vừa fail. CHỈ áp dụng chiều hold: release 1 mẻ KHÔNG tự
-# release cả lô — mỗi mẻ anh chị em vẫn phải tự qua được _assert_releasable của chính nó (an
-# toàn hơn, tránh 1 lần release vô tình mở khóa luôn các mẻ khác còn FAIL treo).
+# Không còn scope_type nào kéo cascade hold sang "anh chị em" (module Nấu-Lọc-Chiết cũ có
+# brew_batch/filter làm vậy — đã xóa cùng module đó; pipeline "Mẻ sản xuất" chưa cần cascade
+# tương tự). Giữ lại hàm (no-op) làm điểm mở rộng nếu sau này cần cascade cho scope_type mới.
 def _cascade_hold_siblings(db: Session, scope_type: str, obj) -> None:
-    if scope_type == "brew_batch":
-        siblings = db.execute(select(BrewBatch).where(
-            BrewBatch.brew_id == obj.brew_id, BrewBatch.batch_id != obj.batch_id)).scalars().all()
-    elif scope_type == "filter" and obj.filter_order_id:
-        siblings = db.execute(select(FilterRecord).where(
-            FilterRecord.filter_order_id == obj.filter_order_id,
-            FilterRecord.filter_id != obj.filter_id)).scalars().all()
-    else:
-        return
-    for sib in siblings:
-        sib.quality_status = QualityStatus.ON_HOLD.value
+    return
 
 
 def latest_results_by_param(db: Session, scope_type: str, scope_id: str) -> dict[str, QualityResult]:

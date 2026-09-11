@@ -232,8 +232,6 @@ def aggregate_ca_values(raw_rows: list, names: dict, boundaries: list) -> dict:
     đánh dấu "data_gap": True để biết tổng có thể bị thiếu — khác với báo cáo chiết lon/keg (1
     dòng dữ liệu duy nhất), ở đây tổng là CỘNG DỒN NHIỀU LocalID độc lập nên 1 LocalID bị gap
     không cần làm mất số của toàn bộ hệ thống khác."""
-    from .filling_external import ca_number, reliable_at_boundaries, values_at_boundaries
-
     candidates_by_lid: dict = {}
     for lid, rt, aed in raw_rows:
         candidates_by_lid.setdefault(lid, []).append((rt, float(aed or 0)))
@@ -242,8 +240,32 @@ def aggregate_ca_values(raw_rows: list, names: dict, boundaries: list) -> dict:
         lid: cands for lid, cands in candidates_by_lid.items()
         if not _is_station(names.get(lid, str(lid)))
     }
-    values_by_lid = {lid: values_at_boundaries(cands, boundaries) for lid, cands in system_cands.items()}
-    reliable_by_lid = {lid: reliable_at_boundaries(cands, boundaries) for lid, cands in system_cands.items()}
+    station_cands = {
+        lid: cands for lid, cands in candidates_by_lid.items()
+        if _is_station(names.get(lid, str(lid)))
+    }
+    system_agg = _aggregate_ca_group(system_cands, boundaries)
+    station_agg = _aggregate_ca_group(station_cands, boundaries)
+
+    return {
+        "total_kwh": system_agg["total_kwh"], "has_gap": system_agg["has_gap"],
+        "by_ca": system_agg["by_ca"], "by_day": system_agg["by_day"], "shifts": system_agg["shifts"],
+        # Cộng dồn riêng "trạm/máy phát" (VD Trạm 1250KVA + Trạm 560KVA — đo điện đầu vào/nguồn
+        # cấp, khác "hệ thống tiêu thụ" ở trên) — dùng cho panel Dashboard riêng theo dõi tổng
+        # điện toàn nhà máy qua 2 trạm, không lẫn với tổng tiêu thụ nội bộ theo từng hệ.
+        "total_kwh_station": station_agg["total_kwh"], "has_gap_station": station_agg["has_gap"],
+        "by_ca_station": station_agg["by_ca"], "by_day_station": station_agg["by_day"],
+    }
+
+
+def _aggregate_ca_group(cands_by_lid: dict, boundaries: list) -> dict:
+    """Phần gộp theo ca/theo ngày dùng chung cho 1 nhóm LocalID (hệ thống tiêu thụ HOẶC
+    trạm/máy phát) — tách khỏi aggregate_ca_values() để tính riêng cho 2 nhóm mà không lặp
+    logic LOCF/gộp ca."""
+    from .filling_external import ca_number, reliable_at_boundaries, values_at_boundaries
+
+    values_by_lid = {lid: values_at_boundaries(cands, boundaries) for lid, cands in cands_by_lid.items()}
+    reliable_by_lid = {lid: reliable_at_boundaries(cands, boundaries) for lid, cands in cands_by_lid.items()}
 
     n_shifts = len(boundaries) - 1
     shift_totals = [0.0] * n_shifts

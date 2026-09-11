@@ -9,8 +9,9 @@ from sqlalchemy.orm import Session
 from ..audit import record_audit
 from ..common import GenealogyRelation, LotStatus, Role, new_id, utcnow
 from ..errors import DomainError, NotFoundError, PermissionError_
-from ..models.brewing import (BottleMaterialUsage, BottleRecord, BrewBatch, BrewMaterialUsage, BrewOrder,
-                              BrewRecord, FilterMasterOrder, FilterMaterialUsage, FilterRecord)
+from ..models.batch_pipeline import (BatchFilterLot, BatchFilterLotMaterialUsage, BatchPackLot,
+                                     BatchPackLotMaterialUsage)
+from ..models.brewing import BrewOrder
 from ..models.master import Material
 from ..models.materials import GenealogyEdge, MaterialLocation, MaterialLot
 from ..models.quality import Deviation, QualityResult
@@ -46,7 +47,7 @@ def _move(db, mtype, lot, quantity, user, ts=None, **kw):
 
 def _next_lot_code(db: Session, year: int) -> str:
     """Mã lô tự sinh tăng dần theo năm (VD 2026-00001) — năm sau đánh lại từ 1
-    (mirror BrewBatch.batch_code per-year numbering)."""
+    (mirror BatchExecution.batch_code per-year numbering)."""
     count = db.execute(select(func.count()).select_from(MaterialLot)
                        .where(MaterialLot.lot_year == year)).scalar_one()
     while True:
@@ -1178,16 +1179,13 @@ def _line_dict(line: MaterialRequestLine) -> dict:
 
 
 def _source_label(db: Session, source_type: str, source_id: str) -> Optional[str]:
-    """Nhãn hiển thị cho nguồn gắn kèm phiếu (Lệnh nấu/Lệnh lọc lớn) — chỉ để hiển thị,
-    không raise nếu nguồn đã bị xoá (phiếu cũ vẫn xem được bình thường)."""
+    """Nhãn hiển thị cho nguồn gắn kèm phiếu (Lệnh nấu) — chỉ để hiển thị, không raise nếu
+    nguồn đã bị xoá (phiếu cũ vẫn xem được bình thường)."""
     if not source_type or not source_id:
         return None
     if source_type == "brew_order":
         order = db.get(BrewOrder, source_id)
         return f"Lệnh nấu {order.order_code}" if order else None
-    if source_type == "filter_master_order":
-        master = db.get(FilterMasterOrder, source_id)
-        return f"Lệnh lọc {master.order_code}" if master else None
     return None
 
 
@@ -1213,12 +1211,12 @@ def _stock_at_company(db: Session, material_id: str) -> float:
 
 
 def _aggregate_source_material_lines(db: Session, source_type: str, source_id: str) -> list[dict]:
-    """Nhu cầu NVL của 1 Lệnh nấu/Lệnh lọc lớn, gộp theo vật tư (cộng dồn nếu 1 vật tư xuất
-    hiện nhiều dòng/nhiều lệnh nhỏ) — dùng để tự động điền sẵn phiếu đề nghị nhận kho, mirror
-    dữ liệu định mức đã có sẵn ở BrewOrderMaterialLine/FilterOrderMaterialLine (không tính lại
-    từ công thức, dùng đúng con số đã "chốt" lúc lập lệnh). Với Lệnh nấu, số lượng lấy đúng
-    bằng qty_from_company (phần đã tính phải lấy tại Kho công ty) chứ không phải toàn bộ nhu
-    cầu — phần còn lại đã có sẵn tại Kho phân xưởng nên không cần đề nghị nhận thêm.
+    """Nhu cầu NVL của 1 Lệnh nấu, gộp theo vật tư (cộng dồn nếu 1 vật tư xuất hiện nhiều
+    dòng) — dùng để tự động điền sẵn phiếu đề nghị nhận kho, mirror dữ liệu định mức đã có sẵn
+    ở BrewOrderMaterialLine (không tính lại từ công thức, dùng đúng con số đã "chốt" lúc lập
+    lệnh). Số lượng lấy đúng bằng qty_from_company (phần đã tính phải lấy tại Kho công ty) chứ
+    không phải toàn bộ nhu cầu — phần còn lại đã có sẵn tại Kho phân xưởng nên không cần đề
+    nghị nhận thêm.
 
     Dòng khai theo Nhóm vật tư thay thế (material_id=None, xem models/master.py::MaterialAltGroup)
     KHÔNG được tự chọn hộ 1 mã cụ thể — trả về riêng (is_group=True kèm member_material_ids) để
@@ -1270,19 +1268,8 @@ def _aggregate_source_material_lines(db: Session, source_type: str, source_id: s
             elif l.get("material_group_code"):
                 _add_group(l["material_group_code"], l["material_name"], l.get("member_material_ids"),
                            l["uom"], qty or 0.0)
-    elif source_type == "filter_master_order":
-        from . import filter_order as filter_order_svc
-        master = filter_order_svc.get_master_order(db, source_id)
-        for child in master["children"]:
-            for l in child["lines"]:
-                if l["material_id"]:
-                    _add(l["material_id"], l["material_name"], l["uom"], l["quantity"] or 0.0)
-                elif l.get("material_group_code"):
-                    member_ids = [m["material_id"] for m in l.get("member_breakdown") or []]
-                    _add_group(l["material_group_code"], l["material_name"], member_ids,
-                               l["uom"], l["quantity"] or 0.0)
     else:
-        raise DomainError(f"Loại nguồn '{source_type}' không hợp lệ (chỉ nhận brew_order|filter_master_order).")
+        raise DomainError(f"Loại nguồn '{source_type}' không hợp lệ (chỉ nhận brew_order).")
 
     out = []
     for a in agg.values():
@@ -1301,23 +1288,20 @@ def _aggregate_source_material_lines(db: Session, source_type: str, source_id: s
 
 
 def preview_source_materials(db: Session, source_type: str, source_id: str) -> list[dict]:
-    """Xem trước nhu cầu NVL của 1 Lệnh nấu/Lệnh lọc lớn để tự động điền sẵn phiếu đề nghị
-    nhận kho — trả về danh sách vật tư gộp, KHÔNG tạo phiếu (người dùng vẫn chỉnh SL/lô trước
-    khi gửi thật, giống Xem NVL của Lệnh nấu — routers/orders.py::preview_bom_lines)."""
+    """Xem trước nhu cầu NVL của 1 Lệnh nấu để tự động điền sẵn phiếu đề nghị nhận kho — trả
+    về danh sách vật tư gộp, KHÔNG tạo phiếu (người dùng vẫn chỉnh SL/lô trước khi gửi thật,
+    giống Xem NVL của Lệnh nấu — routers/orders.py::preview_bom_lines)."""
     if source_type == "brew_order":
         if not db.get(BrewOrder, source_id):
             raise NotFoundError("Lệnh nấu không tồn tại.")
-    elif source_type == "filter_master_order":
-        if not db.get(FilterMasterOrder, source_id):
-            raise NotFoundError("Lệnh lọc không tồn tại.")
     else:
-        raise DomainError(f"Loại nguồn '{source_type}' không hợp lệ (chỉ nhận brew_order|filter_master_order).")
+        raise DomainError(f"Loại nguồn '{source_type}' không hợp lệ (chỉ nhận brew_order).")
     return _aggregate_source_material_lines(db, source_type, source_id)
 
 
 def create_request(db: Session, payload: dict, user: User) -> dict:
     """Phân xưởng tạo 1 phiếu đề nghị nhận kho gồm 1 hoặc nhiều dòng vật tư — tuỳ chọn gắn
-    với 1 Lệnh nấu/Lệnh lọc lớn (`source_type`/`source_id`, chỉ để tham chiếu/báo cáo).
+    với 1 Lệnh nấu (`source_type`/`source_id`, chỉ để tham chiếu/báo cáo).
 
     Mỗi dòng không được đề nghị vượt quá tồn kho công ty hiện có của vật tư đó."""
     require_perm(user, "warehouse.request")
@@ -1327,9 +1311,7 @@ def create_request(db: Session, payload: dict, user: User) -> dict:
         raise DomainError("Đã chọn loại nguồn thì phải chọn cả lệnh cụ thể.")
     if source_type == "brew_order" and not db.get(BrewOrder, source_id):
         raise NotFoundError("Lệnh nấu không tồn tại.")
-    if source_type == "filter_master_order" and not db.get(FilterMasterOrder, source_id):
-        raise NotFoundError("Lệnh lọc không tồn tại.")
-    if source_type and source_type not in ("brew_order", "filter_master_order"):
+    if source_type and source_type not in ("brew_order",):
         raise DomainError(f"Loại nguồn '{source_type}' không hợp lệ.")
     lines_payload = payload.get("lines") or []
     if not lines_payload:
@@ -1447,9 +1429,9 @@ def _is_oldest_company_lot(db: Session, material_id: str, lot_id: str) -> bool:
 def is_oldest_workshop_lot(db: Session, material_id: str, lot_id: str) -> bool:
     """Lô đang chọn có phải lô cũ nhất (FIFO) hiện có tại Kho phân xưởng của vật tư đó hay
     không — mirror _is_oldest_company_lot (cùng loại trừ lô đang HOLD/SCRAPPED khỏi so sánh),
-    dùng cho NVL dùng thật ở mẻ nấu/mẻ lọc/mẻ chiết (xem BrewMaterialUsage/FilterMaterialUsage/
-    BottleMaterialUsage.fifo_ok). Gọi NGAY TRƯỚC LÚC issue() trừ kho — so sánh live sau khi đã
-    xuất sẽ sai lệch vì lô có thể đã hết."""
+    dùng cho NVL dùng thật ở lô lọc/lô thành phẩm (pipeline "Mẻ sản xuất", xem
+    BatchFilterLotMaterialUsage/BatchPackLotMaterialUsage.fifo_ok). Gọi NGAY TRƯỚC LÚC issue()
+    trừ kho — so sánh live sau khi đã xuất sẽ sai lệch vì lô có thể đã hết."""
     clause = _location_filter_clause("Kho phân xưởng")
     candidates = db.execute(
         select(MaterialLot).where(MaterialLot.material_id == material_id, MaterialLot.quantity > 0, clause,
@@ -2117,14 +2099,14 @@ def undo_issue(db: Session, movement_id: str, user: User, strict: bool = True,
 
 def delete_free_issue_history(db: Session, workshop: bool, user: User) -> dict:
     """Xóa lịch sử Xuất tự do (Kho phân xưởng nếu workshop=True, Kho công ty nếu False) —
-    CHỈ ADMIN. Chỉ xóa các giao dịch xuất tự do THẬT SỰ tự do (không gắn với NVL đã dùng cho
-    mẻ nấu/lọc/chiết) — những dòng đó cũng dùng chung mode="tu_do" (xem add_brew_material/
-    add_filter_material/add_bottle_material) nhưng đang bị brew_material_usage/
-    filter_material_usage/bottle_material_usage.movement_id tham chiếu, PHẢI giữ nguyên để
-    không làm mất dấu vết NVL đã dùng thật cho sản xuất."""
+    CHỈ ADMIN. Chỉ xóa các giao dịch xuất tự do THẬT SỰ tự do (không gắn với NVL đã dùng thật
+    cho lô thành phẩm/lô lọc của pipeline "Mẻ sản xuất") — những dòng đó cũng dùng chung
+    mode="tu_do" (xem services/batch_pipeline.py::add_pack_lot_material/add_filter_lot_material)
+    nhưng đang bị batch_pack_lot_material_usage/batch_filter_lot_material_usage.movement_id
+    tham chiếu, PHẢI giữ nguyên để không làm mất dấu vết NVL đã dùng thật cho sản xuất."""
     require_role(user, Role.ADMIN)
     used_ids = set()
-    for cls in (BrewMaterialUsage, FilterMaterialUsage, BottleMaterialUsage):
+    for cls in (BatchPackLotMaterialUsage, BatchFilterLotMaterialUsage):
         used_ids.update(row[0] for row in db.execute(
             select(cls.movement_id).where(cls.movement_id.isnot(None))).all())
     rows = db.execute(select(StockMovement).where(
@@ -2221,40 +2203,33 @@ def list_movements(db: Session, movement_type: str = None, mode: str = None, lim
 
 def workshop_usage_history(db: Session, limit: int = 200) -> list[dict]:
     """Lịch sử NVL xuất từ Kho phân xưởng đã dùng thật cho sản xuất — cho biết đúng công
-    đoạn (Nấu/Lọc/Chiết), mẻ, lô NVL của từng dòng đã gán (xem routers/brewing.py::
-    add_brew_material/add_filter_material/add_bottle_material). Khác "Xuất tự do" (StockMovement
-    mode="tu_do") chỉ ghi lý do dạng text tự do dùng chung cho cả xuất tay lẫn xuất dùng sản
-    xuất — ở đây tra thẳng 3 bảng usage (đã liên kết sẵn tới batch/filter/bottle) nên có cấu
-    trúc rõ ràng theo công đoạn/mẻ, không phải suy từ chuỗi lý do.
+    đoạn (Lọc/Chiết của pipeline "Mẻ sản xuất"), lô, lô NVL của từng dòng đã gán (xem
+    services/batch_pipeline.py::add_filter_lot_material/add_pack_lot_material). Khác "Xuất tự
+    do" (StockMovement mode="tu_do") chỉ ghi lý do dạng text tự do dùng chung cho cả xuất tay
+    lẫn xuất dùng sản xuất — ở đây tra thẳng 2 bảng usage (đã liên kết sẵn tới lô lọc/lô thành
+    phẩm) nên có cấu trúc rõ ràng theo công đoạn/lô, không phải suy từ chuỗi lý do. (NVL dùng
+    cho công đoạn Nấu của pipeline mới đi qua Dispense/DispenseLine — không dùng cơ chế
+    StockMovement.movement_id như 2 công đoạn dưới nên không liệt kê được ở đây.)
 
     Mỗi truy vấn con đã ORDER BY created_at DESC LIMIT limit trước khi gộp — vì kết quả cuối
-    cùng chỉ lấy top `limit` bản ghi mới nhất trên cả 3 nguồn, top-limit của mỗi nguồn riêng
-    lẻ chắc chắn phủ hết top-limit gộp, nên không cần tải hết cả 3 bảng vào bộ nhớ."""
+    cùng chỉ lấy top `limit` bản ghi mới nhất trên cả 2 nguồn, top-limit của mỗi nguồn riêng
+    lẻ chắc chắn phủ hết top-limit gộp, nên không cần tải hết cả 2 bảng vào bộ nhớ."""
     limit = max(1, min(limit or 200, 5000))
     rows = []
-    for u, batch_code, brew_code in db.execute(
-            select(BrewMaterialUsage, BrewBatch.batch_code, BrewRecord.brew_code)
-            .join(BrewBatch, BrewMaterialUsage.batch_id == BrewBatch.batch_id)
-            .join(BrewRecord, BrewBatch.brew_id == BrewRecord.brew_id)
-            .order_by(BrewMaterialUsage.created_at.desc()).limit(limit)).all():
-        rows.append({"usage_id": u.usage_id, "ts": u.created_at, "stage": "Nấu",
-                    "batch_label": f"Mẻ {batch_code} (mã nấu {brew_code})",
-                    "material_name": u.material_name, "lot_code": u.lot_pm,
-                    "quantity": u.quantity, "uom": u.uom, "movement_id": u.movement_id})
-    for u, filter_code in db.execute(
-            select(FilterMaterialUsage, FilterRecord.filter_code)
-            .join(FilterRecord, FilterMaterialUsage.filter_id == FilterRecord.filter_id)
-            .order_by(FilterMaterialUsage.created_at.desc()).limit(limit)).all():
+    for u, filter_lot_code in db.execute(
+            select(BatchFilterLotMaterialUsage, BatchFilterLot.filter_lot_code)
+            .join(BatchFilterLot, BatchFilterLotMaterialUsage.filter_lot_id == BatchFilterLot.filter_lot_id)
+            .order_by(BatchFilterLotMaterialUsage.created_at.desc()).limit(limit)).all():
         rows.append({"usage_id": u.usage_id, "ts": u.created_at, "stage": "Lọc",
-                    "batch_label": f"Mẻ lọc {filter_code}",
+                    "batch_label": f"Lô lọc {filter_lot_code}",
                     "material_name": u.material_name, "lot_code": u.lot_pm,
                     "quantity": u.quantity, "uom": u.uom, "movement_id": u.movement_id})
-    for u, bottle_code in db.execute(
-            select(BottleMaterialUsage, BottleRecord.bottle_code)
-            .join(BottleRecord, BottleMaterialUsage.bottle_id == BottleRecord.bottle_id)
-            .order_by(BottleMaterialUsage.created_at.desc()).limit(limit)).all():
+    for u, pack_lot_code in db.execute(
+            select(BatchPackLotMaterialUsage, BatchPackLot.pack_lot_code)
+            .join(BatchPackLot, BatchPackLotMaterialUsage.pack_lot_id == BatchPackLot.pack_lot_id)
+            .order_by(BatchPackLotMaterialUsage.created_at.desc()).limit(limit)).all():
         rows.append({"usage_id": u.usage_id, "ts": u.created_at, "stage": "Chiết",
-                    "batch_label": f"Mẻ chiết {bottle_code}",
+                    "batch_label": f"Lô thành phẩm {pack_lot_code}",
                     "material_name": u.material_name, "lot_code": u.lot_pm,
                     "quantity": u.quantity, "uom": u.uom, "movement_id": u.movement_id})
 

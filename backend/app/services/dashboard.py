@@ -10,7 +10,6 @@ from sqlalchemy.orm import Session
 from ..common import DeviationState, LotStatus, QualityStatus, ResultStatus, utcnow
 from ..models.batches import BatchExecution
 from ..models.batch_pipeline import BatchFilterLot, BatchFilterLotBatch, BatchFilterLotBatchDraw, BatchPackLot
-from ..models.brewing import BottleRecord, BrewBatch, BrewRecord, FermentRecord, FilterOrder, FilterRecord
 from ..models.lines import ProductionLine
 from ..models.master import FinishedProduct, Material
 from ..models.materials import MaterialLot
@@ -18,7 +17,6 @@ from ..models.quality import Deviation, QualityResult
 from ..models.quality_ext import CAPA, QCParameter
 from . import batch_pipeline as batch_pipeline_svc
 from . import brew_order as brew_order_svc
-from . import derived
 from . import quality as quality_svc
 from .filter_yield_report import LABEL as _YIELD_LABEL
 from .filter_yield_report import classify_yield_l
@@ -53,42 +51,6 @@ def _batch_counts(rows: list, ended_attr: str = "ended_at") -> dict:
     done = sum(1 for r in rows if ended(r) is not None)
     done_today = sum(1 for r in rows if ended(r) is not None and _local_date(ended(r)) == today)
     return {"total": total, "dang_thuc_hien": total - done, "hoan_thanh": done, "hoan_thanh_hom_nay": done_today}
-
-
-def _ferment_tank_rows(db: Session) -> tuple:
-    """Danh sách tank lên men (CCT) đã khai báo (Danh mục "Tank lên men", ProductionLine.kind
-    == "tank") + tập mã tank đang thật sự bị chiếm dụng. Một tank được coi là "đang lên men"
-    nếu có ÍT NHẤT 1 FermentRecord ứng với tank đó chưa lọc hết (derived.ferment_status !=
-    "da_loc_het") — tank có toàn bộ lô đã lọc hết coi như trống, sẵn sàng nhận lô mới. Dùng
-    chung bởi _tank_len_men_counts (đếm tổng hợp) và available_ferment_tanks (từng tank)."""
-    tanks = db.execute(select(ProductionLine).where(
-        ProductionLine.kind == "tank", ProductionLine.active == true())).scalars().all()
-    ferments = db.execute(select(FermentRecord)).scalars().all()
-    occupied = {f.tank_lm: f for f in ferments if derived.ferment_status(f) != "da_loc_het"}
-    occupied_codes = set(occupied.keys())
-    return tanks, occupied_codes, occupied
-
-
-def _tank_len_men_counts(db: Session) -> dict:
-    # "Đang lên men" CHỈ tính tank đã nạp ĐẦY dịch VÀ đã kết thúc nấu (FermentRecord.kt_date
-    # đã có — tự tính bằng giờ kết thúc mẻ CUỐI của (các) mã nấu chuyển sang tank đó, xem
-    # routers/brewing.py::_sync_ferment_kt_date) — tách riêng khỏi tank ĐANG NẠP dịch (đã gán
-    # tank nhưng mã nấu chuyển sang chưa kết thúc/chưa đầy tank, kt_date còn trống).
-    tanks, occupied_codes, occupied = _ferment_tank_rows(db)
-    total = len(tanks)
-    dang_su_dung = sum(1 for t in tanks if t.code in occupied_codes and occupied[t.code].kt_date is not None)
-    dang_nap = sum(1 for t in tanks if t.code in occupied_codes and occupied[t.code].kt_date is None)
-    return {"total": total, "dang_su_dung": dang_su_dung, "dang_nap": dang_nap,
-            "trong": total - dang_su_dung - dang_nap}
-
-
-def available_ferment_tanks(db: Session) -> list:
-    """Từng tank lên men (CCT) kèm cờ đang chiếm dụng hay không — dùng cho picker "Tank lên
-    men" khi tạo mã nấu (tab Nấu), lọc chỉ hiện tank "trống" thay vì liệt kê mọi tank trong
-    Danh mục không phân biệt (xem routers/brewing.py::list_available_ferment_tanks)."""
-    tanks, occupied_codes, _ = _ferment_tank_rows(db)
-    return [{"code": t.code, "name": t.name, "occupied": t.code in occupied_codes}
-            for t in sorted(tanks, key=lambda t: t.code)]
 
 
 def _batch_tank_len_men_counts(db: Session) -> dict:
@@ -156,15 +118,11 @@ def production_summary(db: Session) -> dict:
 
 # Nhãn hiển thị + thuộc tính chứa mã người-đọc-được cho từng loại phạm vi (scope_type) mà
 # Deviation/QualityResult dùng — mirror app.js::holdScopeLabel (VIEWS.quality Hold/Release)
-# để "Lô/Phạm vi" trên Dashboard hiện đúng mã (VD "Mẻ lọc FL-20601") thay vì UUID scope_id thô.
-_SCOPE_MODELS = {"lot": MaterialLot, "batch": BatchExecution, "brew_batch": BrewBatch,
-                 "ferment": FermentRecord, "filter": FilterRecord, "bottle": BottleRecord}
-_SCOPE_CODE_ATTR = {"lot": "lot_code", "batch": "batch_code", "brew_batch": "batch_code",
-                    "ferment": "lm_code", "filter": "filter_code", "bottle": "bottle_code"}
-_SCOPE_LABEL_PREFIX = {"lot": "Lô NVL", "batch": "Mẻ SX", "brew_batch": "Mẻ nấu",
-                       "ferment": "Lô LM", "filter": "Mẻ lọc", "bottle": "Mã chiết"}
-_SCOPE_ID_ATTR = {"brew_batch": "batch_id", "ferment": "ferment_id",
-                  "filter": "filter_id", "bottle": "bottle_id"}
+# để "Lô/Phạm vi" trên Dashboard hiện đúng mã thay vì UUID scope_id thô.
+_SCOPE_MODELS = {"lot": MaterialLot, "batch": BatchExecution}
+_SCOPE_CODE_ATTR = {"lot": "lot_code", "batch": "batch_code"}
+_SCOPE_LABEL_PREFIX = {"lot": "Lô NVL", "batch": "Mẻ SX"}
+_SCOPE_ID_ATTR: dict[str, str] = {}
 
 
 def _scope_code(db: Session, scope_type: str, scope_id: str) -> str | None:
@@ -177,18 +135,11 @@ def _scope_label(scope_type: str, scope_code: str | None, scope_id: str) -> str:
     return f"{_SCOPE_LABEL_PREFIX.get(scope_type, scope_type)} {scope_code or scope_id}"
 
 
-# mẻ nấu/mẻ lọc/mã chiết chỉ có nghĩa khi biết chúng thuộc lô nấu/lô lọc/mẻ lọc nguồn nào —
-# dùng FK sẵn có (không query thêm ngoài 1 db.get) để trả ra nhãn lô cha, thay cho cột "Vật
-# tư"/"SL" trên Dashboard vốn luôn rỗng với các scope_type này (chỉ có nghĩa với scope="lot").
+# Dành cho scope_type có "lô cha" (chỉ có nghĩa với scope="lot" hiện tại không cần) — thay cho
+# cột "Vật tư"/"SL" trên Dashboard vốn luôn rỗng với các scope_type không phải "lot". Không còn
+# scope_type nào cần nhãn lô cha kể từ khi module Nấu-Lọc-Chiết cũ (brew_batch/filter/bottle)
+# bị xóa — giữ lại hàm (no-op) làm điểm mở rộng nếu sau này cần cho scope_type mới.
 def _parent_label(db: Session, scope_type: str, obj) -> str | None:
-    if scope_type == "brew_batch" and obj.brew_id:
-        brew = db.get(BrewRecord, obj.brew_id)
-        return f"Lô nấu {brew.brew_code}" if brew else None
-    if scope_type == "filter" and obj.filter_order_id:
-        order = db.get(FilterOrder, obj.filter_order_id)
-        return f"Lô lọc {order.order_code}" if order else None
-    if scope_type == "bottle" and obj.filter_code:
-        return f"Mẻ lọc {obj.filter_code}"
     return None
 
 
@@ -213,11 +164,13 @@ def qc_attention_alerts(db: Session) -> dict:
                       "quantity": l.quantity, "uom": l.uom, "parent_label": None, "reasons": ["on_hold"],
                       "deviation_count": 0, "opened_at": None}
 
-    # Mẻ/lô công đoạn (brew_batch/ferment/filter/bottle) bị hold trực tiếp qua
-    # quality_status (services/quality.py::set_hold/_cascade_hold_siblings) — không có
-    # deviation mở kèm theo thì trước đây KHÔNG bao giờ lộ ra ở đây (chỉ suy luận "on_hold"
-    # gián tiếp qua deviation trùng scope), khiến Dashboard "Hold/Release" bỏ sót các hold
-    # loại này dù Lịch sử Hold/Release đã ghi nhận đúng.
+    # Mẻ/lô công đoạn bị hold trực tiếp qua quality_status (services/quality.py::
+    # set_hold/_cascade_hold_siblings) — không có deviation mở kèm theo thì trước đây KHÔNG bao
+    # giờ lộ ra ở đây (chỉ suy luận "on_hold" gián tiếp qua deviation trùng scope), khiến
+    # Dashboard "Hold/Release" bỏ sót các hold loại này dù Lịch sử Hold/Release đã ghi nhận
+    # đúng. _SCOPE_ID_ATTR hiện rỗng (module Nấu-Lọc-Chiết cũ — scope duy nhất từng cần vòng
+    # lặp này — đã bị xóa) nên vòng lặp dưới đây không còn chạy; giữ lại làm điểm mở rộng nếu
+    # sau này pipeline "Mẻ sản xuất" cần liệt kê hold trực tiếp tương tự.
     for scope_type, attr in _SCOPE_ID_ATTR.items():
         model = _SCOPE_MODELS[scope_type]
         rows = db.execute(select(model).where(
