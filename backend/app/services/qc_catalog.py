@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from ..audit import record_audit
 from ..common import ResultStatus, new_id, utcnow
 from ..errors import DomainError, NotFoundError
+from ..models.audit import AuditLog
 from ..models.batches import BatchExecution
 from ..models.batch_pipeline import BatchFilterLot, BatchPackLot, BatchTank, BatchTankLink
 from ..models.brewing import BottleRecord, BrewBatch, BrewRecord, FermentRecord, FilterRecord
@@ -667,6 +668,35 @@ def record_stage_result(db: Session, stage: str, scope_type: str, scope_id: str,
             "status": result.status, "recorded_by": result.recorded_by, "recorded_at": result.recorded_at}
 
 
+def _orphaned_param_names(db: Session, codes: set) -> dict:
+    """Tra tên hiển thị GỐC của các chỉ tiêu KHÔNG còn trong `required` (đã bị gỡ khỏi nhóm/
+    công đoạn, hoặc đã bị xóa hẳn khỏi Danh mục) — để các bảng CHỈ XEM LẠI vẫn hiện đúng TÊN
+    (không chỉ mã thô) dù Danh mục đã đổi SAU KHI ghi kết quả (yêu cầu người dùng 2026-09-11).
+    2 nguồn, ưu tiên nguồn 1:
+    1) `QCParameter` VẪN CÒN trong Danh mục (chỉ bị gỡ khỏi nhóm/công đoạn, chưa xóa hẳn) — tra
+       thẳng, luôn có tên chính xác nhất.
+    2) Đã bị XÓA HẲN — tra qua audit_log (delete_qc_parameter ghi {"code","name"} vào before lúc
+       xóa, xem services/quality_adv.py). Nếu 1 mã bị xóa nhiều lần (hiếm), lấy bản ghi MỚI NHẤT."""
+    if not codes:
+        return {}
+    out = {}
+    still_exists = db.execute(select(QCParameter.code, QCParameter.name).where(
+        QCParameter.code.in_(codes))).all()
+    for code, name in still_exists:
+        out[code] = name
+    remaining = codes - set(out)
+    if remaining:
+        rows = db.execute(select(AuditLog).where(
+            AuditLog.entity_type == "qc_parameter", AuditLog.action == "delete",
+        ).order_by(AuditLog.seq)).scalars().all()
+        for r in rows:
+            before = r.before or {}
+            code, name = before.get("code"), before.get("name")
+            if code in remaining and name:
+                out[code] = name
+    return out
+
+
 def stage_qc_status(db: Session, stage: str, scope_type: str, scope_id: str, product_id: str = None,
                     finished_product_id: str = None, beer_type_id: str = None) -> dict:
     """Trạng thái khai báo chỉ tiêu của một bản ghi công đoạn (mẻ nấu/lô LM/lô lọc/mã chiết)
@@ -689,11 +719,17 @@ def stage_qc_status(db: Session, stage: str, scope_type: str, scope_id: str, pro
     mandatory_codes = {p["code"] for p in required if p["mandatory"]}
     pending = [p["code"] for p in required if p["mandatory"] and p["code"] not in latest_by_param]
     has_fail = any(r.status == "fail" for code, r in latest_by_param.items() if code in mandatory_codes)
+    # Chỉ tiêu đã có kết quả nhưng KHÔNG còn trong required (bị xóa khỏi Danh mục/gỡ khỏi nhóm
+    # sau khi ghi) — tra lại tên gốc từ audit_log để bảng xem lại hiện đúng tên, không chỉ mã thô.
+    required_codes = {p["code"] for p in required}
+    orphaned_names = _orphaned_param_names(db, {c for c in latest_by_param if c not in required_codes})
     return {
         "stage": stage, "scope_type": scope_type, "scope_id": scope_id,
         "required": required,
-        "recorded": [{"parameter": r.parameter, "value": r.value, "value_text": r.value_text, "status": r.status,
-                      "recorded_by": r.recorded_by, "recorded_at": r.recorded_at}
+        "recorded": [{"parameter": r.parameter, "name": orphaned_names.get(r.parameter), "value": r.value,
+                      "value_text": r.value_text, "status": r.status,
+                      "recorded_by": r.recorded_by, "recorded_at": r.recorded_at,
+                      "lower_limit": r.lower_limit, "upper_limit": r.upper_limit}
                      for r in latest_by_param.values()],
         "pending": pending,
         "has_fail": has_fail,

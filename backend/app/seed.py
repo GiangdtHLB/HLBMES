@@ -1386,11 +1386,12 @@ def _seed_users(db) -> None:
         ("truongphong_kh", "123456", "Ngô Thị Kế Hoạch", "Trưởng phòng Kế hoạch", "supervisor",
          "dashboard,warehouse_kc,reports", "warehouse.transfer_approve_factory",
          "*", "*", "*", "cong_ty"),
-        # Trưởng bộ phận Kho thành phẩm: xác nhận phiếu xuất kho thành phẩm + duyệt nhập kho từ
-        # chiết — sau khi xác nhận/duyệt, chỉ ADMIN mới hoàn tác/xóa được (xem
-        # services/wms.py::confirm_shipment/undo_shipment, confirm_receipt_by_lot).
+        # Trưởng bộ phận Kho thành phẩm: đóng pallet/cất vị trí/xuất kho (hệ pallet/case, xem
+        # services/wms.py::build_pallet/putaway/ship) — quyền warehouse.receive/warehouse.issue
+        # dùng chung với Kho NVL, không còn quyền riêng "xác nhận/duyệt" như hệ vỉ/keg cũ
+        # (wms.confirm_shipment/wms.confirm_receipt đã bỏ, xem security.py).
         ("truongkho_tp", "123456", "Bùi Thị Trưởng Kho", "Trưởng bộ phận Kho thành phẩm", "supervisor",
-         "dashboard,wms,reports", "wms.confirm_shipment,wms.confirm_receipt",
+         "dashboard,wms,reports", "warehouse.receive,warehouse.issue",
          "*", "*", "*", "*"),
     ]
     for username, pw, full, title, role, views, perms, sl, sa, sq, sw in accounts:
@@ -1444,7 +1445,7 @@ def _seed_role_templates(db) -> None:
          "dashboard,warehouse_kc,reports", "warehouse.transfer_approve_factory",
          "*", "*", "*", "cong_ty"),
         ("Trưởng bộ phận Kho thành phẩm", "supervisor",
-         "dashboard,wms,reports", "wms.confirm_shipment,wms.confirm_receipt",
+         "dashboard,wms,reports", "warehouse.receive,warehouse.issue",
          "*", "*", "*", "*"),
     ]
     for name, role, views, perms, sl, sa, sq, sw in templates:

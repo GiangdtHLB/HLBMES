@@ -1638,8 +1638,8 @@ async function openWaterQcViewModal(woId, woCode) {
     <div class="muted" style="margin-bottom:8px">Chỉ xem lại — khai báo/sửa giá trị làm ở tab "Chất lượng" › "Công đoạn chờ khai báo chỉ tiêu chất lượng".</div>
     <div class="tablewrap"><table>
       <thead><tr><th>Chỉ tiêu</th><th>Min</th><th>Max</th><th>Giá trị đã khai báo</th><th>Kết quả</th><th>Người/Thời gian điền</th></tr></thead>
-      <tbody>${st.required.map(p => { const r = recordedByParam[p.code]; return `<tr>
-        <td>${esc(p.name)}${p.mandatory ? "" : ' <span class="muted" style="font-size:11px">(không bắt buộc)</span>'}<div class="muted">${esc(p.code)}${p.unit ? " (" + esc(p.unit) + ")" : ""}</div></td>
+      <tbody>${qcRowsWithOrphans(st).map(p => { const r = recordedByParam[p.code]; return `<tr>
+        <td>${qcParamNameCell(p)}</td>
         <td>${p.value_type !== "numeric" ? "—" : (p.lsl ?? "—")}</td><td>${p.value_type !== "numeric" ? "—" : (p.usl ?? "—")}</td>
         <td>${r ? qcValueLabel(p, r.value, r.value_text) : "—"}</td>
         <td>${r ? badge(r.status) + r.status : '<span class="muted">chưa khai báo</span>'}</td>
@@ -2534,11 +2534,11 @@ async function showBatch(id) {
       : '<div class="muted">Công thức của mẻ chưa khai tham số nào (khai ở màn Công thức).</div>'}
     <h3>Chỉ tiêu nước nấu bia${woCode ? ` <span class="muted" style="font-size:13px;font-weight:400">(Lệnh SX ${esc(woCode)})</span>` : ""}</h3>
     ${!b.work_order_id ? '<div class="muted">Mẻ này không gắn Lệnh SX (điều độ) nên không có chỉ tiêu Nước nấu bia riêng.</div>'
-      : (waterQc && waterQc.required && waterQc.required.length ? `
+      : (waterQc && qcRowsWithOrphans(waterQc).length ? `
       <div class="muted" style="margin-bottom:6px">Chỉ xem lại — khai báo/sửa giá trị làm ở tab "Chất lượng" › "Công đoạn chờ khai báo chỉ tiêu chất lượng".</div>
       <table><thead><tr><th>Chỉ tiêu</th><th>Min</th><th>Max</th><th>Giá trị đã khai báo</th><th>Kết quả</th><th>Người/Thời gian điền</th></tr></thead>
-        <tbody>${waterQc.required.map(p => { const r = (waterQc.recorded || []).find(x => x.parameter === p.code); return `<tr>
-          <td>${esc(p.name)}${p.mandatory ? "" : ' <span class="muted" style="font-size:11px">(không bắt buộc)</span>'}<div class="muted">${esc(p.code)}${p.unit ? " (" + esc(p.unit) + ")" : ""}</div></td>
+        <tbody>${qcRowsWithOrphans(waterQc).map(p => { const r = (waterQc.recorded || []).find(x => x.parameter === p.code); return `<tr>
+          <td>${qcParamNameCell(p)}</td>
           <td>${p.value_type !== "numeric" ? "—" : (p.lsl ?? "—")}</td><td>${p.value_type !== "numeric" ? "—" : (p.usl ?? "—")}</td>
           <td>${r ? qcValueLabel(p, r.value, r.value_text) : "—"}</td>
           <td>${r ? badge(r.status) + r.status : '<span class="muted">chưa khai báo</span>'}</td>
@@ -3465,13 +3465,13 @@ async function showBatchFilterLot(filterLotId) {
     ${lk ? "" : (canAdd ? `<button class="btn sm" id="fb_add" style="margin-top:8px">+ Thêm mẻ</button>` : '<div class="muted" style="margin-top:8px">Kết thúc mẻ gần nhất trước khi thêm mẻ mới.</div>')}
     <h3 style="margin-top:16px">Chỉ tiêu Lọc</h3>
     <div class="muted" style="margin-bottom:8px">Chỉ hiển thị — khai báo/sửa giá trị ở tab <b>"Chất lượng"</b> (panel "Công đoạn chờ khai báo chỉ tiêu chất lượng").</div>
-    ${!qc || !qc.required.length ? '<div class="muted">Chưa gán nhóm chỉ tiêu nào cho công đoạn Lọc (gán ở tab Danh mục).</div>' : `
+    ${!qc || !qcRowsWithOrphans(qc).length ? '<div class="muted">Chưa gán nhóm chỉ tiêu nào cho công đoạn Lọc (gán ở tab Danh mục).</div>' : `
     <div class="tablewrap"><table>
       <thead><tr><th>Chỉ tiêu</th><th>Min</th><th>Max</th><th>Giá trị đã khai báo</th><th>Kết quả</th><th>Người/Thời gian điền</th></tr></thead>
-      <tbody>${qc.required.map(p => {
+      <tbody>${qcRowsWithOrphans(qc).map(p => {
         const r = (qc.recorded || []).find(x => x.parameter === p.code);
         return `<tr>
-        <td>${esc(p.name)}${p.mandatory ? "" : ' <span class="muted" style="font-size:11px">(không bắt buộc)</span>'}<div class="muted">${esc(p.code)}${p.unit ? " (" + esc(p.unit) + ")" : ""}</div></td>
+        <td>${qcParamNameCell(p)}</td>
         <td>${p.value_type !== "numeric" ? "—" : (p.lsl ?? "—")}</td><td>${p.value_type !== "numeric" ? "—" : (p.usl ?? "—")}</td>
         <td>${r ? qcValueLabel(p, r.value, r.value_text) : "—"}</td>
         <td>${r ? badge(r.status) + r.status : '<span class="muted">chưa khai báo</span>'}</td>
@@ -3720,13 +3720,13 @@ async function showBatchPackLot(packLotId) {
     <button class="btn sm sec" id="pk_shifts_save" ${dis}>Lưu SL theo ca</button>
     <h3 style="margin-top:16px">Chỉ tiêu thành phẩm</h3>
     <div class="muted" style="margin-bottom:8px">Chỉ hiển thị — khai báo/sửa giá trị ở tab <b>"Chất lượng"</b> (panel "Công đoạn chờ khai báo chỉ tiêu chất lượng").</div>
-    ${!pkQc || !pkQc.required.length ? '<div class="muted">Chưa gán nhóm chỉ tiêu nào cho công đoạn Thành phẩm (gán ở tab Danh mục).</div>' : `
+    ${!pkQc || !qcRowsWithOrphans(pkQc).length ? '<div class="muted">Chưa gán nhóm chỉ tiêu nào cho công đoạn Thành phẩm (gán ở tab Danh mục).</div>' : `
     <div class="tablewrap"><table>
       <thead><tr><th>Chỉ tiêu</th><th>Min</th><th>Max</th><th>Giá trị đã khai báo</th><th>Kết quả</th><th>Người/Thời gian điền</th></tr></thead>
-      <tbody>${pkQc.required.map(pm => {
+      <tbody>${qcRowsWithOrphans(pkQc).map(pm => {
         const r = (pkQc.recorded || []).find(x => x.parameter === pm.code);
         return `<tr>
-        <td>${esc(pm.name)}${pm.mandatory ? "" : ' <span class="muted" style="font-size:11px">(không bắt buộc)</span>'}<div class="muted">${esc(pm.code)}${pm.unit ? " (" + esc(pm.unit) + ")" : ""}</div></td>
+        <td>${qcParamNameCell(pm)}</td>
         <td>${pm.value_type !== "numeric" ? "—" : (pm.lsl ?? "—")}</td><td>${pm.value_type !== "numeric" ? "—" : (pm.usl ?? "—")}</td>
         <td>${r ? qcValueLabel(pm, r.value, r.value_text) : "—"}</td>
         <td>${r ? badge(r.status) + r.status : '<span class="muted">chưa khai báo</span>'}</td>
@@ -4930,9 +4930,10 @@ VIEWS.trace = async function () {
 };
 
 function qcStatusTable(status) {
-  if (!status || !status.required.length) return `<div class="muted">Không có chỉ tiêu.</div>`;
+  const rowsList = status ? qcRowsWithOrphans(status) : [];
+  if (!rowsList.length) return `<div class="muted">Không có chỉ tiêu.</div>`;
   const byCode = Object.fromEntries(status.recorded.map(r => [r.parameter, r]));
-  const rows = status.required.map(p => {
+  const rows = rowsList.map(p => {
     const r = byCode[p.code];
     const spec = (p.lsl != null || p.usl != null) ? `${p.lsl ?? ""}–${p.usl ?? ""}` : (p.target ?? "—");
     const result = !r ? '<span class="qc-pill muted">Chưa ghi</span>'
@@ -7893,6 +7894,30 @@ function qcValueInputHtml(cls, p) {
 function qcRecordedMetaHtml(r) {
   if (!r) return "—";
   return `<span class="muted" style="font-size:12px">${esc(r.recorded_by || "—")}<br/>${r.recorded_at ? fmt(r.recorded_at) : "—"}</span>`;
+}
+// Gộp danh sách chỉ tiêu ĐANG áp dụng (status.required, theo Danh mục/nhóm hiện tại) với các
+// chỉ tiêu ĐÃ GHI KẾT QUẢ (status.recorded) nhưng bản ghi Danh mục gốc đã bị xóa hoặc gỡ khỏi
+// nhóm sau đó ("mồ côi") — để các bảng CHỈ XEM LẠI không "mất" dữ liệu lịch sử chỉ vì Danh mục
+// đổi SAU KHI đã ghi (yêu cầu người dùng 2026-09-11: EBR vẫn giữ nguyên chỉ tiêu đã xóa khỏi
+// Danh mục, các bảng xem lại trên mẻ/lô lọc/lô TP cũng phải giữ vậy). Mirror cách EBR/qc-samples
+// đọc thẳng QualityResult, không qua required_params_for_stage. CHỈ dùng cho HIỂN THỊ — pending/
+// has_fail/can_release vẫn tính nguyên từ status.required như cũ ở tầng backend, không đổi gating.
+function qcRowsWithOrphans(status) {
+  const required = (status && status.required) || [];
+  const recorded = (status && status.recorded) || [];
+  const requiredCodes = new Set(required.map(p => p.code));
+  const orphaned = recorded.filter(r => !requiredCodes.has(r.parameter)).map(r => ({
+    code: r.parameter, name: r.name || r.parameter, unit: "", mandatory: false, value_type: "numeric",
+    lsl: r.lower_limit ?? null, usl: r.upper_limit ?? null, orphaned: true,
+  }));
+  return [...required, ...orphaned];
+}
+// Nhãn tên chỉ tiêu cho 1 dòng trong bảng xem lại — chỉ tiêu đã bị xóa khỏi Danh mục (xem
+// qcRowsWithOrphans) vẫn hiện bình thường, không đánh dấu gì khác biệt (yêu cầu người dùng
+// 2026-09-11: xóa khỏi Danh mục chỉ ảnh hưởng các lô/mẻ SAU, không cần ghi chú gì ở đây).
+function qcParamNameCell(p) {
+  return `${esc(p.name)}${p.mandatory === false && !p.orphaned ? ' <span class="muted" style="font-size:11px">(không bắt buộc)</span>' : ""}
+    <div class="muted">${esc(p.code)}${p.unit ? " (" + esc(p.unit) + ")" : ""}</div>`;
 }
 async function openLotQcModal(lotId, { editable = true } = {}) {
   const st = await GET(`/lots/${lotId}/qc-status`);
