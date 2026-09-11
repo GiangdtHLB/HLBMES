@@ -1,8 +1,8 @@
-"""Test Lô thành phẩm (Mẻ SX) nhập kho thành phẩm (WMS) — thay thế vai trò của
+"""Test Lô thành phẩm (Mẻ SX) nhập kho thành phẩm (WMS, hệ pallet/case) — thay thế vai trò của
 routers/brewing.py::approve_bottle (module Nấu-Lọc-Chiết cũ, đã THÁO khỏi WMS, xem docstring
 hiện tại của approve_bottle). services/batch_pipeline.py::release_pack_lot_to_wms là nơi DUY
-NHẤT còn tạo FinishedGoodsUnit từ sản xuất — mirror đúng mechanics của _create_units (1 dòng/
-lô bất kể ca lớn cỡ nào, quy đổi vỉ/keg qua pack_size) mà trước đây được test qua approve_bottle.
+NHẤT còn tạo hàng nhập kho từ sản xuất — tạo 1 Pallet (case_count = số vỉ/keg đã khai làm tròn
+lên, units_per_case = pack_size của SKU), xem services/wms.py::_build_pallet.
 """
 
 import os
@@ -137,41 +137,39 @@ def _build_pack_lot(client, admin_h, suffix, fp_payload=None, ca1=10, ca2=0, ca3
     return pack_lot_id, fp_id
 
 
-def test_release_creates_one_row_regardless_of_ca_count(client, admin_h):
-    """Ca 1/2/3 tính theo VỈ (đơn vị đóng gói), không phải lon rời — release_pack_lot_to_wms
-    luôn sinh ĐÚNG 1 dòng lô duy nhất bất kể ca1 lớn cỡ nào (mirror _create_units, trước đây
-    test qua approve_bottle — xem docs/WMS-LOT-LEVEL-REDESIGN.md)."""
+def test_release_creates_pallet_with_correct_case_count(client, admin_h):
+    """release_pack_lot_to_wms tạo 1 Pallet, case_count = số vỉ đã khai (ca1+ca2+ca3), mirror
+    _build_pallet (trước đây test qua approve_bottle — xem docs/WMS-LOT-LEVEL-REDESIGN.md)."""
     pack_lot_id, fp_id = _build_pack_lot(
         client, admin_h, "ROW01", {"name": "SKU vi test", "uom": "lon", "unit_type": "vi", "pack_size": 24},
         ca1=100)
     release = client.post(f"/api/batch-pack-lots/{pack_lot_id}/release-to-wms", headers=admin_h)
     assert release.status_code == 200, release.text
     result = release.json()
-    assert result["unit_type"] == "vi"
-    assert result["count"] == 100   # 100 vỉ thật, dù chỉ 1 dòng DB
+    assert result["count"] == 100   # 100 vỉ thật
 
-    units = client.get("/api/wms/units", headers=admin_h).json()
-    made = [u for u in units if u["unit_code"] in result["unit_codes"]]
-    assert len(made) == 1
-    assert made[0]["quantity"] == 2400   # 100 vỉ x 24 lon/vỉ
-    assert made[0]["status"] == "stored"
+    pallets = client.get("/api/wms/pallets", headers=admin_h).json()
+    made = next(p for p in pallets if p["pallet_code"] == result["pallet_code"])
+    assert made["case_count"] == 100
+    assert made["units_per_case"] == 24
+    assert made["total_units"] == 2400   # 100 case x 24 lon/case
+    assert made["status"] == "building"
 
     p = client.get(f"/api/batch-pack-lots/{pack_lot_id}", headers=admin_h).json()
     assert p["stocked"] is True and p["stocked_by"] == "admin"
 
 
-def test_release_creates_keg_one_row(client, admin_h):
+def test_release_creates_pallet_for_keg_sku(client, admin_h):
     pack_lot_id, _ = _build_pack_lot(
         client, admin_h, "KEG01", {"name": "SKU keg test", "uom": "lít", "unit_type": "keg", "pack_size": 1},
         ca1=10)
     release = client.post(f"/api/batch-pack-lots/{pack_lot_id}/release-to-wms", headers=admin_h)
     assert release.status_code == 200, release.text
-    assert release.json()["unit_type"] == "keg"
     assert release.json()["count"] == 10
 
-    units = client.get("/api/wms/units", headers=admin_h).json()
-    made = [u for u in units if u["unit_code"] in release.json()["unit_codes"]]
-    assert len(made) == 1 and made[0]["unit_type"] == "keg" and made[0]["quantity"] == 10
+    pallets = client.get("/api/wms/pallets", headers=admin_h).json()
+    made = next(p for p in pallets if p["pallet_code"] == release.json()["pallet_code"])
+    assert made["case_count"] == 10 and made["units_per_case"] == 1 and made["total_units"] == 10
 
 
 def test_release_blocked_until_approved_and_ca_declared(client, admin_h):
@@ -214,64 +212,6 @@ def test_release_requires_production_release_to_wms_permission(client, admin_h, 
     pack_lot_id, _ = _build_pack_lot(client, admin_h, "PERM01", ca1=5)
     forbidden = client.post(f"/api/batch-pack-lots/{pack_lot_id}/release-to-wms", headers=vanhanh_h)
     assert forbidden.status_code == 403, forbidden.text
-
-
-def test_delete_unit_resets_pack_lot_stocked_flag(client, admin_h):
-    pack_lot_id, _ = _build_pack_lot(client, admin_h, "UNLOCK01", ca1=3)
-    release = client.post(f"/api/batch-pack-lots/{pack_lot_id}/release-to-wms", headers=admin_h)
-    assert release.status_code == 200, release.text
-    unit_code = release.json()["unit_codes"][0]
-    units = client.get("/api/wms/units", headers=admin_h).json()
-    unit_id = next(u["unit_id"] for u in units if u["unit_code"] == unit_code)
-
-    p_before = client.get(f"/api/batch-pack-lots/{pack_lot_id}", headers=admin_h).json()
-    assert p_before["stocked"] is True
-
-    deleted = client.delete(f"/api/wms/units/{unit_id}", headers=admin_h)
-    assert deleted.status_code == 204, deleted.text
-
-    p_after = client.get(f"/api/batch-pack-lots/{pack_lot_id}", headers=admin_h).json()
-    assert p_after["stocked"] is False
-
-
-def test_delete_units_batch_resets_pack_lot_stocked_flag(client, admin_h):
-    """Xóa cả lô (1 dòng duy nhất dù ca lớn) qua /wms/units/delete-batch cũng phải mở khóa lại
-    lô thành phẩm nguồn — mirror test_delete_unit_resets_pack_lot_stocked_flag nhưng qua
-    services/wms.py::delete_units."""
-    pack_lot_id, _ = _build_pack_lot(client, admin_h, "UNLOCKBATCH01", ca1=100)
-    release = client.post(f"/api/batch-pack-lots/{pack_lot_id}/release-to-wms", headers=admin_h)
-    assert release.status_code == 200, release.text
-    unit_codes = release.json()["unit_codes"]
-    units = client.get("/api/wms/units", headers=admin_h).json()
-    unit_ids = [u["unit_id"] for u in units if u["unit_code"] in unit_codes]
-    assert len(unit_ids) == 1
-
-    deleted = client.post("/api/wms/units/delete-batch", headers=admin_h, json={"unit_ids": unit_ids})
-    assert deleted.status_code == 200, deleted.text
-    assert deleted.json()["deleted"] == 1
-
-    p_after = client.get(f"/api/batch-pack-lots/{pack_lot_id}", headers=admin_h).json()
-    assert p_after["stocked"] is False
-
-
-def test_wms_units_show_pack_lot_code_as_bottle_code(client, admin_h):
-    """"Mã chiết" (bottle_codes) ở Kho TP trước đây LUÔN trống cho hàng nhập từ pipeline "Mẻ SX"
-    (release_pack_lot_to_wms không tạo BottleRecord nên join theo BottleRecord.lot_no không bao
-    giờ khớp) — giờ phải hiện đúng BatchPackLot.pack_lot_code, cả ở danh sách từng đơn vị
-    (GET /wms/units) lẫn bảng tổng hợp theo lô (GET /wms/units/by-lot), yêu cầu người dùng
-    2026-09-01: Mã chiết = mã của lô TP."""
-    pack_lot_id, _ = _build_pack_lot(client, admin_h, "BCODE01", ca1=10)
-    pack = client.get(f"/api/batch-pack-lots/{pack_lot_id}", headers=admin_h).json()
-    release = client.post(f"/api/batch-pack-lots/{pack_lot_id}/release-to-wms", headers=admin_h)
-    assert release.status_code == 200, release.text
-
-    units = client.get("/api/wms/units", headers=admin_h).json()
-    made = next(u for u in units if u["unit_code"] in release.json()["unit_codes"])
-    assert made["bottle_codes"] == [pack["pack_lot_code"]]
-
-    by_lot = client.get("/api/wms/units/by-lot", headers=admin_h).json()
-    row = next(r for r in by_lot if r["lot_code"] == pack["lot_no"])
-    assert row["bottle_codes"] == [pack["pack_lot_code"]]
 
 
 def test_pack_lot_rejects_duplicate_lot_no_same_year(client, admin_h):

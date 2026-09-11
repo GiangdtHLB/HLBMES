@@ -71,7 +71,7 @@ from .ai_memory import AiConversation, AiMessage
 from .jobs import Job
 from .isa88 import BatchPhaseRun
 from .scheduling import ScheduleSlot
-from .wms import FinishedGoodsUnit, WmsLocation
+from .wms import Case, Pallet, WmsLocation
 from .lines import ProductionLine
 from .packaging import PackagingMove, PackagingType
 from .integration_import import (  # noqa: F401
@@ -169,7 +169,8 @@ __all__ = [
     "BatchPhaseRun",
     "ScheduleSlot",
     "WmsLocation",
-    "FinishedGoodsUnit",
+    "Pallet",
+    "Case",
     "ProductionLine",
     "PackagingType",
     "PackagingMove",

@@ -43,10 +43,10 @@ def scan(code: str, db: Session = Depends(get_db), user: User = Depends(get_curr
         return {"type": "brew_order", "data": {"brew_order_id": bo.brew_order_id, "order_code": bo.order_code,
                 "planned_qty": bo.planned_volume_hl, "uom": "hl"}}
 
-    # Vỉ/keg kho thành phẩm (đầu đọc cầm tay quét — WMS)
+    # Pallet/case kho thành phẩm (đầu đọc cầm tay quét — WMS)
     from ..services import wms as wms_svc
     w = wms_svc.resolve(db, code)
-    if w.get("type") == "finished_goods_unit":
+    if w.get("type") in ("pallet", "case"):
         return {"type": w["type"], "data": w}
 
     # Gợi ý: tìm gần đúng (prefix) lô đang available

@@ -170,9 +170,9 @@ def test_full_chain_traceable_from_lot_to_unit(client, admin_h, vanhanh_h, thukh
     bottle_row = next(r for r in bottles if r["bottle_code"] == bottle_code)
     assert bottle_row["filter_code"] == filter_code
 
-    # 6) KCS duyệt chiết — CHỈ đóng hồ sơ, không còn sinh vỉ/keg Kho TP (WMS) nữa (approve_bottle
-    # đã tháo khỏi WMS; Lô thành phẩm là nơi thay thế duy nhất, xem
-    # tests/test_batch_pack_lot_wms.py cho phần truy xuất tới finished_goods_unit qua pipeline mới).
+    # 6) KCS duyệt chiết — CHỈ đóng hồ sơ, không còn sinh pallet Kho TP (WMS) nữa (approve_bottle
+    # đã tháo khỏi WMS; Lô thành phẩm là nơi thay thế duy nhất, xem tests/test_batch_pack_lot_wms.py
+    # cho phần tạo pallet qua pipeline mới).
     _declare_pending(client, admin_h, "thanh_pham", "bottle", f"{bottle_code}__thanh_pham")
     approve_bottle = client.post(f"/api/brewing/bottles/{bottle_id}/approve", headers=admin_h)
     assert approve_bottle.status_code == 200, approve_bottle.text

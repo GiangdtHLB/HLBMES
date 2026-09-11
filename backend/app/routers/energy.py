@@ -120,14 +120,14 @@ def external_sites():
 
 
 @router.get("/external-bounds")
-def external_bounds(site: str = "hl", db: Session = Depends(get_db)):
+def external_bounds(site: str = "dm", db: Session = Depends(get_db)):
     from ..services import energy_external
     return energy_external.data_bounds(db, site)
 
 
 @router.get("/external-report")
 def external_report(date_from: datetime = None, date_to: datetime = None, group_by: str = "day",
-                    site: str = "hl", db: Session = Depends(get_db)):
+                    site: str = "dm", db: Session = Depends(get_db)):
     from ..services import energy_external
     if not date_from or not date_to:
         bounds = energy_external.data_bounds(db, site)
@@ -139,7 +139,7 @@ def external_report(date_from: datetime = None, date_to: datetime = None, group_
 # ---- Điện tiêu thụ theo ca (Ca1/Ca2/Ca3) ----
 @router.get("/external-ca-report")
 def external_ca_report(date_from: datetime = None, date_to: datetime = None,
-                       site: str = "hl", db: Session = Depends(get_db)):
+                       site: str = "dm", db: Session = Depends(get_db)):
     from ..services import energy_external
     if not date_from or not date_to:
         # Mặc định: ngày hôm qua (hôm nay chưa qua hết ca 3) — Ca 1 (06h) hôm qua tới Ca 3 (06h hôm nay).

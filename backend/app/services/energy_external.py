@@ -33,14 +33,12 @@ from sqlalchemy.orm import Session
 from ..errors import DomainError
 from . import integration_connection as sqlconn_svc
 
-ENERGY_PURPOSE = "energy"
-# Nhiều nhà máy (site) có thể cùng khai báo bảng Energy/NameSys ở CSDL riêng — mỗi site 1
-# purpose token riêng để get_connection_by_purpose() không bị nhập nhằng giữa 2 kết nối cùng
-# gán "energy" (xem services/integration_connection.py::get_connection_by_purpose — so khớp
-# CHÍNH XÁC 1 token trong CSV purpose, không phải substring). "hl" giữ nguyên token "energy"
-# cũ để không phá vỡ cấu hình/kết nối đã gán từ trước.
-SITE_PURPOSE = {"hl": "energy", "dm": "energy_dm"}
-SITE_LABELS = {"hl": "Hạ Long", "dm": "Đông Mai"}
+# Deployment này CHỈ phục vụ nhà máy Đông Mai — site "hl" (Hạ Long) đã bị gỡ (2026-09-11,
+# yêu cầu người dùng: không dùng bất kỳ kết nối CSDL nào liên quan nhà máy Hạ Long). Vẫn giữ
+# dict theo "site" (thay vì hardcode phẳng) để không phải đổi chữ ký các hàm bên dưới nếu sau
+# này cần thêm site khác.
+SITE_PURPOSE = {"dm": "energy_dm"}
+SITE_LABELS = {"dm": "Đông Mai"}
 _STATION_MARKERS = ("Trạm", "Máy phát")
 
 
@@ -66,7 +64,7 @@ def compute_daily_diffs(baseline: dict, daily_rows: list) -> dict:
     return daily_diff
 
 
-def _get_energy_connection(db: Session, site: str = "hl"):
+def _get_energy_connection(db: Session, site: str = "dm"):
     purpose = SITE_PURPOSE.get(site)
     if not purpose:
         raise DomainError(f"Nhà máy không hợp lệ: '{site}' (chỉ hỗ trợ: {', '.join(SITE_PURPOSE)}).")
@@ -81,7 +79,7 @@ def _get_energy_connection(db: Session, site: str = "hl"):
 
 
 def electricity_report(db: Session, date_from: datetime, date_to: datetime, group_by: str = "day",
-                       site: str = "hl") -> dict:
+                       site: str = "dm") -> dict:
     conn = _get_energy_connection(db, site)
     engine = create_engine(sqlconn_svc._build_url(conn), connect_args={"timeout": 4}, pool_pre_ping=False)
     try:
@@ -162,7 +160,7 @@ def electricity_report(db: Session, date_from: datetime, date_to: datetime, grou
     }
 
 
-def electricity_ca_report(db: Session, date_from: datetime, date_to: datetime, site: str = "hl") -> dict:
+def electricity_ca_report(db: Session, date_from: datetime, date_to: datetime, site: str = "dm") -> dict:
     """Điện tiêu thụ theo ca (Ca 1 06h-14h, Ca 2 14h-22h, Ca 3 22h-06h qua ngày) trong
     [date_from, date_to] — tái dùng đúng kỹ thuật "mốc ranh giới + giá trị gần nhất, fetch
     1 lần" đã xây cho báo cáo chiết lon (xem filling_external.shift_boundaries/nearest_value),
@@ -293,7 +291,7 @@ def aggregate_ca_values(raw_rows: list, names: dict, boundaries: list) -> dict:
     }
 
 
-def data_bounds(db: Session, site: str = "hl") -> dict:
+def data_bounds(db: Session, site: str = "dm") -> dict:
     """Ngày nhỏ nhất/lớn nhất thật có trong bảng Energy — dùng làm mặc định khoảng ngày báo
     cáo, vì dữ liệu SCADA export có thể đã dừng từ lâu (không còn cập nhật tới ngày hiện tại)."""
     conn = _get_energy_connection(db, site)

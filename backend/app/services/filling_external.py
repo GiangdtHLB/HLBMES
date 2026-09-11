@@ -181,7 +181,7 @@ def filling_report(db: Session, date_from: datetime, date_to: datetime) -> dict:
 def aggregate_filling_values(candidates: list, boundaries: list) -> dict:
     """Phần logic thuần (không cần CSDL) của filling_report — candidates=[(recordtime, value),
     ...] đã fetch 1 lần (gộp cả trước/trong/sau khoảng). Tách riêng để unit test độc lập, giống
-    aggregate_ca_values()/aggregate_keg_values() ở energy_external.py/keg_external.py.
+    aggregate_ca_values() ở energy_external.py.
 
     Mỗi ca chỉ tính được khi CẢ 2 mốc đầu/cuối ca đều "đáng tin" (xem `reliable_at_boundaries`)
     — nếu không, "cans" trả về None kèm cờ "data_gap": True thay vì 1 con số bịa (xem cảnh báo
