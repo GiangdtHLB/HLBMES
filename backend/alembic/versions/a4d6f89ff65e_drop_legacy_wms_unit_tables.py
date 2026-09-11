@@ -24,6 +24,8 @@ theo bản cuối cùng trước khi các bảng này bị xóa — KHÔNG khôi
 from alembic import op
 import sqlalchemy as sa
 
+from app.alembic_mssql import prep_drop_columns
+
 revision = 'a4d6f89ff65e'
 down_revision = '3313a1228281'
 branch_labels = None
@@ -46,6 +48,11 @@ def upgrade() -> None:
         "DELETE FROM genealogy_edge WHERE from_type = 'finished_goods_unit' "
         "OR to_type = 'finished_goods_unit'"
     ))
+    # FK NGOÀI 12 bảng trỏ VÀO: wms_location.warehouse_id -> wms_warehouse. wms_location KHÔNG bị
+    # xóa (hệ pallet/case còn dùng) nhưng cột warehouse_id cũ để nguyên → còn FK, chặn drop
+    # wms_warehouse trên MSSQL (547; SQLite bỏ qua). Gỡ FK trên cột (giữ cột) trước drop loop.
+    conn = op.get_bind()
+    prep_drop_columns(conn, 'wms_location', ['warehouse_id'])
     for table in DROP_ORDER:
         op.drop_table(table)
 
