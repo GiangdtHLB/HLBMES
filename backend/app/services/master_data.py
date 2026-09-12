@@ -3,14 +3,15 @@ mã đó đã được tham chiếu ở bất kỳ đâu (kể cả lịch sử,
 dữ liệu gốc ảnh hưởng truy xuất nguồn gốc một khi đã có bản ghi trỏ tới (mirror
 qc_catalog.py::delete_group)."""
 
+import json
+
 from sqlalchemy import delete as sa_delete
 from sqlalchemy import func, select, true
 from sqlalchemy.orm import Session
 
 from ..audit import record_audit
 from ..errors import DomainError, NotFoundError
-from ..models.brewing import (BottleRecord, BrewOrder, BrewOrderMaterialLine, BrewRecord, FermentRecord,
-    FilterOrder, FilterOrderMaterialLine, FilterOrderTank, FilterRecord)
+from ..models.brewing import BrewOrder, BrewOrderMaterialLine
 from ..models.batches import BatchExecution
 from ..models.cip import CipEquipment
 from ..models.lines import ProductionLine
@@ -51,9 +52,6 @@ def delete_beer_type(db: Session, beer_type_id: str, user: User) -> None:
         raise NotFoundError("Loại bia không tồn tại.")
     checks = [
         ("dịch bia", select(func.count(Product.product_id)).where(Product.beer_type_id == beer_type_id)),
-        ("lệnh lọc", select(func.count(FilterOrder.filter_order_id)).where(FilterOrder.beer_type_id == beer_type_id)),
-        ("mẻ lọc", select(func.count(FilterRecord.filter_id)).where(FilterRecord.beer_type_id == beer_type_id)),
-        ("mẻ chiết", select(func.count(BottleRecord.bottle_id)).where(BottleRecord.beer_type_id == beer_type_id)),
         ("nhóm chỉ tiêu công đoạn", select(func.count(StageQcGroup.link_id)).where(
             StageQcGroup.beer_type_id == beer_type_id, StageQcGroup.active == true())),
     ]
@@ -194,10 +192,6 @@ def delete_product(db: Session, product_id: str, user: User) -> None:
         raise NotFoundError("Dịch bia không tồn tại.")
     checks = [
         ("lệnh nấu", select(func.count(BrewOrder.brew_order_id)).where(BrewOrder.product_id == product_id)),
-        ("mẻ nấu", select(func.count(BrewRecord.brew_id)).where(BrewRecord.product_id == product_id)),
-        ("lô lên men", select(func.count(FermentRecord.ferment_id)).where(FermentRecord.product_id == product_id)),
-        ("mẻ lọc", select(func.count(FilterRecord.filter_id)).where(FilterRecord.product_id == product_id)),
-        ("mẻ chiết", select(func.count(BottleRecord.bottle_id)).where(BottleRecord.product_id == product_id)),
         ("lô hàng tồn kho", select(func.count(MaterialLot.lot_id)).where(MaterialLot.product_id == product_id)),
         ("sản phẩm thành phẩm", select(func.count(FinishedProduct.finished_product_id)).where(
             FinishedProduct.product_id == product_id)),
@@ -224,8 +218,6 @@ def delete_material(db: Session, material_id: str, user: User) -> None:
     checks = [
         ("dòng vật tư lệnh nấu", select(func.count(BrewOrderMaterialLine.line_id)).where(
             BrewOrderMaterialLine.material_id == material_id)),
-        ("dòng vật tư lệnh lọc", select(func.count(FilterOrderMaterialLine.line_id)).where(
-            FilterOrderMaterialLine.material_id == material_id)),
         ("lô hàng tồn kho", select(func.count(MaterialLot.lot_id)).where(MaterialLot.material_id == material_id)),
         ("gán nhóm chỉ tiêu QC", select(func.count(MaterialQcGroup.link_id)).where(
             MaterialQcGroup.material_id == material_id, MaterialQcGroup.active == true())),
@@ -247,8 +239,6 @@ def delete_finished_product(db: Session, finished_product_id: str, user: User) -
     if not fp:
         raise NotFoundError("Sản phẩm không tồn tại.")
     checks = [
-        ("mẻ chiết", select(func.count(BottleRecord.bottle_id)).where(
-            BottleRecord.finished_product_id == finished_product_id)),
         ("nhóm chỉ tiêu công đoạn", select(func.count(StageQcGroup.link_id)).where(
             StageQcGroup.finished_product_id == finished_product_id, StageQcGroup.active == true())),
     ]
@@ -335,18 +325,11 @@ def delete_production_line(db: Session, line_id: str, user: User) -> None:
         raise NotFoundError("Dây chuyền/tank không tồn tại.")
     code = line.code
     checks = [
-        ("mẻ chiết (dây chuyền)", select(func.count(BottleRecord.bottle_id)).where(BottleRecord.line == code)),
         ("work order (dây chuyền)", select(func.count(WorkOrder.wo_id)).where(WorkOrder.line == code)),
         ("bản ghi OEE", select(func.count(OEERecord.oee_id)).where(OEERecord.line == code)),
         ("sự kiện dừng máy", select(func.count(DowntimeEvent.event_id)).where(DowntimeEvent.line == code)),
         ("lịch sản xuất", select(func.count(ScheduleSlot.slot_id)).where(ScheduleSlot.resource == code)),
         ("lệnh nấu (tank LM)", select(func.count(BrewOrder.brew_order_id)).where(BrewOrder.tank_lm == code)),
-        ("lô lên men (tank LM)", select(func.count(FermentRecord.ferment_id)).where(FermentRecord.tank_lm == code)),
-        ("mẻ lọc (lọc từ)", select(func.count(FilterRecord.filter_id)).where(FilterRecord.from_cct == code)),
-        ("mẻ lọc (đổ vào BBT)", select(func.count(FilterRecord.filter_id)).where(FilterRecord.to_bbt == code)),
-        ("mẻ chiết (từ BBT)", select(func.count(BottleRecord.bottle_id)).where(BottleRecord.from_bbt == code)),
-        ("tank BBT nguồn lọc lại", select(func.count(FilterOrderTank.line_id)).where(
-            FilterOrderTank.source_bbt_code == code)),
         ("thiết bị CIP gắn tank/dây chuyền này", select(func.count(CipEquipment.equipment_id)).where(
             CipEquipment.production_line_id == line_id)),
     ]
@@ -355,3 +338,56 @@ def delete_production_line(db: Session, line_id: str, user: User) -> None:
                  actor=user, before={"code": code, "name": line.name})
     db.delete(line)
     db.commit()
+
+
+# ===== Quy định công nghệ nấu (Sapphire form QT-KCS-QT-BM-05) theo dịch bia =====
+# Trước đây các field "Thực hiện" (vận hành ghi qua BrewProcessLog.manual_json, module
+# Nấu-Lọc-Chiết cũ) sống cùng file với các field "Quy định" này (Product.spec_json, chỉ
+# admin/master.manage sửa) vì cùng 1 biểu mẫu giấy có 2 cột — nay "Thực hiện" đã xóa cùng
+# module cũ, chỉ còn "Quy định" (độc lập, không phụ thuộc bảng nào đã xóa). Danh sách key
+# dưới đây PHẢI khớp đúng field có spec:true/tempSteps trong BF_SECTIONS (frontend/app.js).
+SPEC_FIELD_KEYS: list[str] = [
+    "rc_bot_gao_kg", "rc_nuoc_hl", "rc_ph_nuoc", "rc_termamyl_ml",
+    "rc_step1_nhietdo", "rc_step2_nhietdo",
+    "mt_malt_anh_kg", "mt_malt_uc_kg", "mt_malt_duc_kg", "mt_neutrase_ml",
+    "mt_ultraprime_ml", "mt_cacl2_kg", "mt_caso4_kg", "mt_nuoc_hl", "mt_ph_nuoc",
+    "mt_step1_nhietdo", "mt_step2_nhietdo", "mt_step3_nhietdo", "mt_step4_nhietdo", "mt_step5_nhietdo",
+    "whp_chuyen_gio", "whp_thoi_gian_lang_phut", "whp_t0_chuyen_dich", "whp_oxy_lit_phut",
+]
+
+
+def _load_spec_json(text: str | None) -> dict:
+    if not text:
+        return {}
+    try:
+        parsed = json.loads(text)
+    except (TypeError, ValueError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def get_spec_values(db: Session, product_id: str) -> dict:
+    """Trả về đủ mọi key SPEC_FIELD_KEYS (None nếu chưa cấu hình)."""
+    product = db.get(Product, product_id)
+    if not product:
+        raise NotFoundError("Sản phẩm không tồn tại.")
+    stored = _load_spec_json(product.spec_json)
+    return {k: stored.get(k) for k in SPEC_FIELD_KEYS}
+
+
+def update_spec_values(db: Session, product_id: str, payload: dict, user: User) -> dict:
+    require_perm(user, "master.manage")
+    product = db.get(Product, product_id)
+    if not product:
+        raise NotFoundError("Sản phẩm không tồn tại.")
+    values = _load_spec_json(product.spec_json)
+    for key, value in payload.items():
+        if key not in SPEC_FIELD_KEYS:
+            continue
+        if value is None:
+            values.pop(key, None)
+        else:
+            values[key] = value
+    product.spec_json = json.dumps(values, ensure_ascii=False)
+    db.commit()
+    return {k: values.get(k) for k in SPEC_FIELD_KEYS}

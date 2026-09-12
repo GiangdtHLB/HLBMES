@@ -34,10 +34,9 @@ def get_oee(db: Session, line: str = None) -> dict:
     return {"records": [compute_oee(r) for r in recs[:10]]}
 
 
-def get_quality_alerts(db: Session, month: int = None, year: int = None) -> dict:
+def get_quality_alerts(db: Session) -> dict:
     from . import derived
-    return {"brewing": derived.brewing_alerts(db, month, year),
-            "process": derived.process_quality_alerts(db)}
+    return {"process": derived.process_quality_alerts(db)}
 
 
 def get_batch_status(db: Session, batch_code: str = None) -> dict:
@@ -94,9 +93,8 @@ TOOLS = {
     },
     "get_quality_alerts": {
         "fn": get_quality_alerts,
-        "description": "Tổng hợp cảnh báo chỉ tiêu chất lượng (nấu/lọc/chiết + QC mẻ) theo tháng/năm.",
-        "input_schema": {"type": "object", "properties": {
-            "month": {"type": "integer"}, "year": {"type": "integer"}}},
+        "description": "Tổng hợp cảnh báo QC mẻ (FAIL/ngoài giới hạn).",
+        "input_schema": {"type": "object", "properties": {}},
     },
     "get_batch_status": {
         "fn": get_batch_status,

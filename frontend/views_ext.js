@@ -418,49 +418,25 @@
   // ======================================================================
   VIEWS.qclab = async function () {
     const root = $("view-qclab");
-    const [params, capas, samples, batches, devs, lots, brewBatches, fermentsData, filtersData, bottlesData] = await Promise.all([
+    const [params, capas, samples, batches, devs, lots] = await Promise.all([
       GET("/qc/parameters"), GET("/qc/capa"), GET("/qc/samples"), GET("/batches"),
-      GET("/quality/deviations").catch(() => []), GET("/lots").catch(() => []),
-      GET("/brewing/brew-batches").catch(() => []),
-      GET("/brewing/ferments").catch(() => ({ items: [] })),
-      GET("/brewing/filters").catch(() => []),
-      GET("/brewing/bottles").catch(() => [])]);
+      GET("/quality/deviations").catch(() => []), GET("/lots").catch(() => [])]);
     const devById = Object.fromEntries(devs.map(d => [d.deviation_id, d]));
     const openDevOpts = devs.filter(d => d.state !== "closed")
       .map(d => `<option value="${esc(d.deviation_id)}" data-scope="${esc(d.scope_type)}:${esc(d.scope_id)}">${esc(d.deviation_code)} — ${badge(d.severity)}${esc(d.reason)}</option>`).join("");
-    // Phạm vi CAPA (lô NVL/mẻ nấu/lô LM/mẻ lọc/mã chiết/mẻ SX) — CHỌN TRỰC TIẾP lúc mở CAPA,
-    // không phụ thuộc Deviation liên kết (mirror cơ chế "Phạm vi (theo công đoạn)" ở
-    // VIEWS.quality, nhưng không cần optgroup FAIL/OK — chỉ cần liệt kê để chọn).
-    const ferments = fermentsData.items || [];
+    // Phạm vi CAPA (lô NVL/mẻ SX) — CHỌN TRỰC TIẾP lúc mở CAPA, không phụ thuộc Deviation liên
+    // kết (mirror cơ chế "Phạm vi (theo công đoạn)" ở VIEWS.quality, nhưng không cần optgroup
+    // FAIL/OK — chỉ cần liệt kê để chọn).
     const batchById = Object.fromEntries(batches.map(b => [b.batch_id, b]));
     const lotById = Object.fromEntries(lots.map(l => [l.lot_id, l]));
-    const fermentById = Object.fromEntries(ferments.map(f => [f.ferment_id, f]));
-    const filterById = Object.fromEntries(filtersData.map(f => [f.filter_id, f]));
-    const bottleById = Object.fromEntries(bottlesData.map(b => [b.bottle_id, b]));
-    const brewBatchByKey = {};
-    brewBatches.forEach(r => {
-      const info = { batch_code: r.batch_code, brew_id: r.brew_id, brew_code: r.brew_code };
-      brewBatchByKey[r.batch_id] = info;
-      brewBatchByKey[r.batch_code] = info;
-    });
     const capaScopeLabel = (scopeType, scopeId) => {
       if (!scopeType || !scopeId) return null;
       if (scopeType === "batch") return `Mẻ SX ${batchById[scopeId] ? esc(batchById[scopeId].batch_code) : scopeId}`;
       if (scopeType === "lot") return `Lô NVL ${lotById[scopeId] ? esc(lotById[scopeId].lot_code) : scopeId}`;
-      if (scopeType === "brew_batch") { const b = brewBatchByKey[scopeId];
-        return b ? `Mẻ nấu ${esc(b.batch_code)} (mã nấu ${esc(b.brew_code || "?")})` : `Mẻ nấu ${scopeId}`; }
-      if (scopeType === "ferment") return `Lô LM ${fermentById[scopeId] ? esc(fermentById[scopeId].lm_code) : scopeId}`;
-      if (scopeType === "filter") return `Mẻ lọc ${filterById[scopeId] ? esc(filterById[scopeId].filter_code) : scopeId}`;
-      if (scopeType === "bottle") return `Mã chiết ${bottleById[scopeId] ? esc(bottleById[scopeId].bottle_code) : scopeId}`;
       return `${esc(scopeType)} ${scopeId}`;
     };
     const capaScopeStages = [
       { tag: "Mẻ SX", items: batches, keyFn: b => `batch:${b.batch_id}`, optFn: b => `mẻ ${esc(b.batch_code)}` },
-      { tag: "Nấu", items: brewBatches, keyFn: b => `brew_batch:${b.batch_id}`,
-        optFn: b => `mẻ ${esc(b.batch_code)} (mã nấu ${esc(b.brew_code || "?")})` },
-      { tag: "Lên men", items: ferments, keyFn: f => `ferment:${f.ferment_id}`, optFn: f => `lô LM ${esc(f.lm_code)}` },
-      { tag: "Lọc", items: filtersData, keyFn: f => `filter:${f.filter_id}`, optFn: f => `mẻ lọc ${esc(f.filter_code)}` },
-      { tag: "Chiết", items: bottlesData, keyFn: b => `bottle:${b.bottle_id}`, optFn: b => `mã chiết ${esc(b.bottle_code)}` },
       { tag: "NVL", items: lots, keyFn: l => `lot:${l.lot_id}`, optFn: l => `lô ${esc(l.lot_code)}` },
     ];
     const capaScopeOpts = `<option value="">— Không chọn —</option>` + capaScopeStages.flatMap(({ tag, items, keyFn, optFn }) =>
@@ -1652,7 +1628,7 @@
     // khác hẳn vỏ chai/két/keg tuần hoàn ở trên (đặt cọc/lưu hành). Xem services/packaging.py::lot_report.
     const lotRows = lotReport.map(l => {
       const usedFor = l.usages.length
-        ? l.usages.map(u => `${esc(u.bottle_code || "—")} (${fmtN(u.quantity)} ${esc(u.uom)})`).join(", ")
+        ? l.usages.map(u => `${esc(u.pack_lot_code || "—")} (${fmtN(u.quantity)} ${esc(u.uom)})`).join(", ")
         : '<span class="muted">Chưa dùng</span>';
       return `<tr>
         <td><code class="k">${esc(l.lot_code)}</code></td>
@@ -1670,7 +1646,7 @@
         <div class="cards">${cards}</div>
         <div class="muted" style="margin-top:4px">Tổng tồn kho <b>${fmtN(sm.total_on_hand)}</b> · Tổng đang lưu hành (ngoài thị trường) <b>${fmtN(sm.total_in_circulation)}</b></div>`)}
       ${panel(`📦 Bao bì tiêu hao theo lô (từ Kho NVL) <span class="muted">(${lotReport.length})</span>`, `
-        <div class="muted" style="margin-bottom:6px">Nắp, thùng carton, tem nhãn... — nhập kho qua Kho NVL (Nhập kho) như vật tư thường, tự động hiện ở đây nếu Nhóm vật tư được đánh dấu "Bao bì tiêu hao" (Danh mục → Nhóm vật tư). Xuất dùng cho mẻ chiết qua nút NVL trên dòng Chiết (tab Nấu-Lọc-Chiết). Khác với vỏ chai/két/keg tuần hoàn ở trên.</div>
+        <div class="muted" style="margin-bottom:6px">Nắp, thùng carton, tem nhãn... — nhập kho qua Kho NVL (Nhập kho) như vật tư thường, tự động hiện ở đây nếu Nhóm vật tư được đánh dấu "Bao bì tiêu hao" (Danh mục → Nhóm vật tư). Xuất dùng cho lô thành phẩm qua nút NVL trên dòng Mẻ SX (Mẻ sản xuất → Lô thành phẩm). Khác với vỏ chai/két/keg tuần hoàn ở trên.</div>
         <input class="searchbox" data-tbl="t_pkg_lot" placeholder="Tìm mã lô/vật tư/mã chiết..."/>
         <div class="tablewrap" style="margin-top:6px"><table id="t_pkg_lot">
           <thead><tr><th>Mã lô</th><th>Vật tư</th><th>Tồn kho</th><th>Vị trí</th><th>Ngày nhập</th><th>Đã dùng cho mẻ chiết</th><th>Ngày xuất gần nhất</th></tr></thead>

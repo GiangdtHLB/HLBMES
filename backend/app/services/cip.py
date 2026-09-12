@@ -9,16 +9,16 @@ from sqlalchemy.orm import Session
 from ..audit import record_audit
 from ..common import new_id, utcnow
 from ..errors import DomainError, NotFoundError
-from ..models.brewing import BottleRecord, BrewBatch, FermentRecord, FilterRecord
+from ..models.batch_pipeline import BatchFilterLot
 from ..models.cip import CipEquipment, CipFormType, CipLink, CipRecord
 from ..models.lines import ProductionLine
 from ..security import User, require_perm
 
-# Khu vực áp dụng cho từng loại scope (mẻ nấu/lô lên men/mẻ lọc/mẻ chiết) — cùng vocabulary
-# scope_type đã dùng cho Hold/Deviation (xem services/quality.py). "bbt_tank" là khu vực Lọc
-# nhưng gắn theo TANK BBT VẬT LÝ (scope_id = mã tank, vd "BBT03") thay vì 1 mẻ lọc cụ thể —
-# dùng cho CIP tank thành phẩm (nhiều mẻ lọc có thể cùng dùng 1 tank, CIP thuộc về tank).
-_AREA_BY_SCOPE = {"brew_batch": "nau", "ferment": "len_men", "filter": "loc", "bottle": "chiet", "bbt_tank": "loc"}
+# Khu vực áp dụng cho từng loại scope — cùng vocabulary scope_type đã dùng cho Hold/Deviation
+# (xem services/quality.py). "bbt_tank" là khu vực Lọc nhưng gắn theo TANK BBT VẬT LÝ
+# (scope_id = mã tank, vd "BBT03") thay vì 1 lô lọc cụ thể — dùng cho CIP tank thành phẩm
+# (nhiều lô lọc có thể cùng dùng 1 tank, CIP thuộc về tank).
+_AREA_BY_SCOPE = {"bbt_tank": "loc"}
 
 
 # ---- Danh mục loại biểu mẫu ----
@@ -171,8 +171,8 @@ def _assert_bbt_tank_empty(db: Session, equipment: CipEquipment) -> None:
     line = db.get(ProductionLine, equipment.production_line_id)
     if not line or line.kind != "tank_bbt":
         return
-    on_hand = sum(r.on_hand_bbt for r in db.execute(
-        select(FilterRecord).where(FilterRecord.to_bbt == line.code)).scalars().all())
+    on_hand = sum(r.on_hand for r in db.execute(
+        select(BatchFilterLot).where(BatchFilterLot.to_bbt == line.code)).scalars().all())
     if on_hand > 1e-6:
         raise DomainError(f"Tank BBT '{line.code}' còn tồn {on_hand:g} hl — không thể CIP khi tank chưa rỗng.")
 
@@ -294,31 +294,7 @@ def _codes_for_scope(db: Session, scope_type: str, scope_id: str) -> set:
     production_line_id (tank/dây chuyền cụ thể); thiết bị KHÔNG gắn (dùng chung — đường ống,
     máy nghiền...) luôn hiện bất kể set này."""
     codes = set()
-    if scope_type == "brew_batch":
-        b = db.get(BrewBatch, scope_id)
-        if b and b.line_id:
-            line = db.get(ProductionLine, b.line_id)
-            if line:
-                codes.add(line.code)
-    elif scope_type == "ferment":
-        f = db.get(FermentRecord, scope_id)
-        if f and f.tank_lm:
-            codes.add(f.tank_lm)
-    elif scope_type == "filter":
-        f = db.get(FilterRecord, scope_id)
-        if f:
-            if f.from_cct:
-                codes.add(f.from_cct)
-            if f.to_bbt:
-                codes.add(f.to_bbt)
-    elif scope_type == "bottle":
-        b = db.get(BottleRecord, scope_id)
-        if b:
-            if b.from_bbt:
-                codes.add(b.from_bbt)
-            if b.line:
-                codes.add(b.line)
-    elif scope_type == "bbt_tank":
+    if scope_type == "bbt_tank":
         codes.add(scope_id)  # scope_id CHÍNH LÀ mã tank BBT — không tra qua bảng nào cả
     return codes
 

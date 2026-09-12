@@ -50,10 +50,6 @@ def operational_insights(db: Session) -> dict:
                             "Phân công xử lý; theo dõi downtime ảnh hưởng OEE"))
 
     qa = ai_tools.get_quality_alerts(db)
-    bcount = qa["brewing"].get("count", 0)
-    if bcount:
-        insights.append(_mk("Chất lượng", "medium", f"Có {bcount} cảnh báo chỉ tiêu nấu/lọc/chiết",
-                            "Cập nhật đủ chỉ tiêu/sản lượng để báo cáo chính xác"))
     pcount = qa["process"].get("count", 0)
     if pcount:
         insights.append(_mk("Chất lượng", "high", f"Có {pcount} cảnh báo QC mẻ (FAIL/ngoài giới hạn)",
@@ -282,8 +278,7 @@ def _summarize(tool: str, data: dict) -> str:
         parts = [f"{r['line']} ca {r['shift']}: OEE {r['oee']*100:.1f}%" for r in recs[:3]]
         return "OEE gần nhất — " + "; ".join(parts) + "."
     if tool == "get_quality_alerts":
-        return (f"Cảnh báo: {data['brewing'].get('count',0)} ở nấu/lọc/chiết, "
-                f"{data['process'].get('count',0)} ở QC mẻ.")
+        return f"Cảnh báo: {data['process'].get('count',0)} ở QC mẻ."
     if tool == "get_batch_status":
         bs = data.get("batches", [])
         run = sum(1 for b in bs if b["state"] == "running")

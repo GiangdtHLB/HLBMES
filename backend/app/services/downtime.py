@@ -9,7 +9,7 @@ này) không cần sửa. loss_category (availability/performance/quality) suy t
 _CATEGORY_LOSS bên dưới — mirror đúng phân loại 6 Big Losses kinh điển của TPM.
 """
 
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session

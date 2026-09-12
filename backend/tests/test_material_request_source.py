@@ -1,13 +1,14 @@
 """Test 3 bổ sung cho "Đề nghị nhận vật tư" (MaterialRequest):
 
-1) Gắn phiếu với 1 Lệnh nấu/Lệnh lọc lớn (source_type/source_id) — chỉ để tham chiếu/báo
-   cáo — và endpoint xem trước (preview) nhu cầu NVL gộp theo vật tư của lệnh đó, dùng để tự
-   động điền sẵn dòng khi tạo phiếu (xem services/warehouse.py::preview_source_materials).
+1) Gắn phiếu với 1 Lệnh nấu (source_type/source_id) — chỉ để tham chiếu/báo cáo — và endpoint
+   xem trước (preview) nhu cầu NVL gộp theo vật tư của lệnh đó, dùng để tự động điền sẵn dòng
+   khi tạo phiếu (xem services/warehouse.py::preview_source_materials).
 2) Snapshot fifo_ok trên từng dòng NGAY LÚC XUẤT (fulfill_request_line/fulfill_all_lines) —
    trước đây phiếu đã xử lý xong không hiện được cảnh báo FIFO vì không có gì lưu lại; giờ
    hiện đúng theo trạng thái tồn kho tại thời điểm xuất, không suy đoán lại sau này.
-3) source_type chỉ chấp nhận brew_order/filter_master_order (xem
-   services/warehouse.py::_aggregate_source_material_lines)."""
+3) source_type chỉ chấp nhận brew_order (xem
+   services/warehouse.py::_aggregate_source_material_lines) — module Nấu-Lọc-Chiết cũ
+   (filter_master_order) đã xóa hẳn, không còn là 1 lựa chọn source_type nữa."""
 
 import os
 import tempfile
@@ -85,36 +86,6 @@ def _a_brew_order_with_lines(client, admin_h, order_code, mat_id, qty_total):
     return r.json()["brew_order_id"]
 
 
-def _setup_ferment(client, admin_h, vanhanh_h, suffix):
-    ob = client.post("/api/brewing/orders", headers=admin_h,
-                     json={"order_code": f"LN-{suffix}", "auto_from_bom": False, "planned_volume_hl": 100})
-    assert ob.status_code == 201, ob.text
-    order_id = ob.json()["brew_order_id"]
-    b = client.post("/api/brewing/brews", headers=vanhanh_h,
-                    json={"brew_code": f"BR-{suffix}", "wort_type": "Dịch test", "volume_hl": 100,
-                          "lm_code": f"LM-{suffix}", "tank_lm": f"T-{suffix}", "brew_order_id": order_id})
-    assert b.status_code == 201, b.text
-    ferments = client.get("/api/brewing/ferments", headers=admin_h).json()["items"]
-    ferment = next(f for f in ferments if f["lm_code"] == f"LM-{suffix}")
-    ok = client.post(f"/api/brewing/ferments/{ferment['ferment_id']}/approve", headers=admin_h)
-    assert ok.status_code == 200, ok.text
-    return ferment["ferment_id"]
-
-
-def _a_filter_master_order_with_lines(client, admin_h, vanhanh_h, suffix, mat_id, qty_each):
-    f1 = _setup_ferment(client, admin_h, vanhanh_h, f"{suffix}-A")
-    f2 = _setup_ferment(client, admin_h, vanhanh_h, f"{suffix}-B")
-    payload = {"order_code": f"LOC-{suffix}", "children": [
-        {"blend_mode": "khong_phoi", "tanks": [{"ferment_id": f1, "planned_v_dich_hl": 50}],
-         "volume_tolerance_hl": 0, "lines": [{"material_id": mat_id, "quantity": qty_each}]},
-        {"blend_mode": "khong_phoi", "tanks": [{"ferment_id": f2, "planned_v_dich_hl": 50}],
-         "volume_tolerance_hl": 0, "lines": [{"material_id": mat_id, "quantity": qty_each}]},
-    ]}
-    r = client.post("/api/brewing/filter-master-orders", headers=admin_h, json=payload)
-    assert r.status_code == 201, r.text
-    return r.json()["filter_master_order_id"]
-
-
 @pytest.fixture(scope="module")
 def lager_product_id(client, admin_h):
     products = client.get("/api/products", headers=admin_h).json()
@@ -150,20 +121,6 @@ def test_preview_source_materials_brew_order_skips_header_row(client, admin_h, t
     assert lines[0]["material_id"] == mat_id
     assert lines[0]["material_code"] == "SRC-BREW-MAT"
     assert lines[0]["quantity"] == 12.5
-
-
-def test_preview_source_materials_filter_master_order_sums_across_children(client, admin_h, thukho_h, vanhanh_h):
-    mat_id = _create_material(client, admin_h, "SRC-FILT-MAT")
-    _receive(client, thukho_h, "LOT-SRCFILT-01", mat_id, 100)
-    master_id = _a_filter_master_order_with_lines(client, admin_h, vanhanh_h, "SRCPRE01", mat_id, qty_each=3)
-
-    r = client.get("/api/warehouse/requests/source-preview", headers=admin_h,
-                   params={"source_type": "filter_master_order", "source_id": master_id})
-    assert r.status_code == 200, r.text
-    lines = r.json()
-    assert len(lines) == 1
-    assert lines[0]["material_id"] == mat_id
-    assert lines[0]["quantity"] == 6   # 3 + 3 gộp từ 2 lệnh nhỏ
 
 
 def test_preview_source_materials_brew_order_surfaces_group_line_instead_of_dropping(client, admin_h, thukho_h):
@@ -257,37 +214,6 @@ def test_preview_source_materials_brew_order_member_qty_splits_into_separate_lin
     by_code = {l["material_code"]: l for l in lines}
     assert by_code["SRC-MQTY-MAT-1"]["quantity"] == 5
     assert by_code["SRC-MQTY-MAT-2"]["quantity"] == 6
-
-
-def test_preview_source_materials_filter_master_order_surfaces_group_line(client, admin_h, thukho_h, vanhanh_h):
-    m1 = _create_material(client, admin_h, "SRC-FGRP-MAT-1")
-    m2 = _create_material(client, admin_h, "SRC-FGRP-MAT-2")
-    _receive(client, thukho_h, "LOT-SRCFGRP-01", m1, 20)
-    g = client.post("/api/material-alt-groups", headers=admin_h, json={
-        "code": "SRC-FALTGRP-01", "name": "Nhóm test lọc", "unit": "kg",
-        "member_material_ids": [m1, m2]}).json()
-
-    f1 = _setup_ferment(client, admin_h, vanhanh_h, "FGRP-A")
-    f2 = _setup_ferment(client, admin_h, vanhanh_h, "FGRP-B")
-    payload = {"order_code": "LOC-FGRP01", "children": [
-        {"blend_mode": "khong_phoi", "tanks": [{"ferment_id": f1, "planned_v_dich_hl": 50}],
-         "volume_tolerance_hl": 0, "lines": [{"alt_group_code": g["code"], "quantity": 3}]},
-        {"blend_mode": "khong_phoi", "tanks": [{"ferment_id": f2, "planned_v_dich_hl": 50}],
-         "volume_tolerance_hl": 0, "lines": [{"alt_group_code": g["code"], "quantity": 3}]},
-    ]}
-    r = client.post("/api/brewing/filter-master-orders", headers=admin_h, json=payload)
-    assert r.status_code == 201, r.text
-    master_id = r.json()["filter_master_order_id"]
-
-    r2 = client.get("/api/warehouse/requests/source-preview", headers=admin_h,
-                    params={"source_type": "filter_master_order", "source_id": master_id})
-    assert r2.status_code == 200, r2.text
-    lines = r2.json()
-    group_line = next(l for l in lines if l["is_group"])
-    assert group_line["material_id"] is None
-    assert group_line["group_code"] == g["code"]
-    assert set(group_line["member_material_ids"]) == {m1, m2}
-    assert group_line["quantity"] == 6   # 3 + 3 gộp từ 2 lệnh nhỏ
 
 
 def test_preview_source_materials_invalid_type_rejected(client, admin_h):

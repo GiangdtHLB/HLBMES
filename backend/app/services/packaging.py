@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from ..audit import record_audit
 from ..common import new_id, utcnow
 from ..errors import DomainError, NotFoundError
-from ..models.brewing import BottleMaterialUsage, BottleRecord
+from ..models.batch_pipeline import BatchPackLot, BatchPackLotMaterialUsage
 from ..models.master import Material, MaterialGroup
 from ..models.materials import MaterialLot
 from ..models.packaging import PackagingMove, PackagingType
@@ -109,8 +109,9 @@ def lot_report(db: Session) -> list[dict]:
     """Báo cáo bao bì TIÊU HAO (nắp, thùng carton, tem nhãn...) theo lô — lấy trực tiếp từ
     Kho NVL (Material/MaterialLot), không khai báo tay như packaging_type. Vật tư thuộc 1
     Nhóm vật tư đã đánh dấu is_packaging tự động lọt vào đây; nhập kho qua Nhập kho NVL bình
-    thường, xuất dùng cho mẻ chiết qua nút NVL trên dòng Chiết (BottleMaterialUsage) —
-    KHÔNG áp dụng cho vỏ chai/két/keg tuần hoàn (vẫn dùng packaging_type/packaging_move)."""
+    thường, xuất dùng cho lô thành phẩm (chiết) qua nút NVL trên dòng Mẻ SX
+    (BatchPackLotMaterialUsage, pipeline "Mẻ sản xuất") — KHÔNG áp dụng cho vỏ chai/két/keg
+    tuần hoàn (vẫn dùng packaging_type/packaging_move)."""
     packaging_group_codes = [g.code for g in db.execute(
         select(MaterialGroup).where(MaterialGroup.is_packaging == true())).scalars().all()]
     if not packaging_group_codes:
@@ -122,15 +123,15 @@ def lot_report(db: Session) -> list[dict]:
     lots = db.execute(select(MaterialLot).where(MaterialLot.material_id.in_(material_by_id))
                       .order_by(MaterialLot.created_at.desc())).scalars().all()
     lot_ids = [l.lot_id for l in lots]
-    usages = db.execute(select(BottleMaterialUsage).where(
-        BottleMaterialUsage.lot_id.in_(lot_ids))).scalars().all() if lot_ids else []
-    bottle_by_id = {b.bottle_id: b for b in db.execute(select(BottleRecord).where(
-        BottleRecord.bottle_id.in_({u.bottle_id for u in usages}))).scalars().all()} if usages else {}
+    usages = db.execute(select(BatchPackLotMaterialUsage).where(
+        BatchPackLotMaterialUsage.lot_id.in_(lot_ids))).scalars().all() if lot_ids else []
+    pack_lot_by_id = {p.pack_lot_id: p for p in db.execute(select(BatchPackLot).where(
+        BatchPackLot.pack_lot_id.in_({u.pack_lot_id for u in usages}))).scalars().all()} if usages else {}
     usages_by_lot: dict[str, list] = {}
     for u in usages:
-        b = bottle_by_id.get(u.bottle_id)
+        p = pack_lot_by_id.get(u.pack_lot_id)
         usages_by_lot.setdefault(u.lot_id, []).append({
-            "bottle_id": u.bottle_id, "bottle_code": b.bottle_code if b else None,
+            "pack_lot_id": u.pack_lot_id, "pack_lot_code": p.pack_lot_code if p else None,
             "quantity": u.quantity, "uom": u.uom, "used_at": u.created_at,
         })
     out = []

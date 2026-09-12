@@ -21,7 +21,6 @@ from ..schemas import (BeerTypeIn, BeerTypeOut, FactoryLocationIn, FactoryLocati
     MaterialGroupOut, MaterialIn, MaterialOut, MaterialQcGroupIn, MonthlyPlanRowIn, OpsSettingIn, OpsSettingOut,
     ProductBrewSpecIn, ProductIn, ProductOut, SupplierIn, SupplierOut, UnitTypeCatalogIn, UnitTypeCatalogOut)
 from ..security import User, get_current_user, require_perm
-from ..services import braumat_import as braumat_svc
 from ..services import master_data, ops_setting as ops_setting_svc
 from ..services import qc_catalog
 
@@ -381,14 +380,14 @@ def delete_product(product_id: str, db: Session = Depends(get_db),
 # ---- Quy định công nghệ nấu (Sapphire form QT-KCS-QT-BM-05) theo dịch bia ----
 @router.get("/products/{product_id}/brew-spec")
 def get_product_brew_spec(product_id: str, db: Session = Depends(get_db)):
-    return braumat_svc.get_spec_values(db, product_id)
+    return master_data.get_spec_values(db, product_id)
 
 
 @router.put("/products/{product_id}/brew-spec")
 def update_product_brew_spec(product_id: str, payload: ProductBrewSpecIn, db: Session = Depends(get_db),
                              user: User = Depends(get_current_user)):
-    before = braumat_svc.get_spec_values(db, product_id)
-    values = braumat_svc.update_spec_values(db, product_id, payload.model_dump(exclude_unset=True), user)
+    before = master_data.get_spec_values(db, product_id)
+    values = master_data.update_spec_values(db, product_id, payload.model_dump(exclude_unset=True), user)
     record_audit(db, entity_type="product_brew_spec", entity_id=product_id, action="update",
                  actor=user, before=before, after=values)
     db.commit()

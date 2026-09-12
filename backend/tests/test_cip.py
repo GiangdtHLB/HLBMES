@@ -66,13 +66,6 @@ def _equipment(client, admin_h, code):
     return next(e for e in eq if e["code"] == code)
 
 
-def _a_brew_order(client, admin_h, order_code):
-    r = client.post("/api/brewing/orders", headers=admin_h,
-                    json={"order_code": order_code, "auto_from_bom": False, "planned_volume_hl": 100})
-    assert r.status_code == 201, r.text
-    return r.json()["brew_order_id"]
-
-
 def test_seed_creates_21_form_types_and_equipment(client, admin_h):
     form_types = client.get("/api/cip/form-types", headers=admin_h).json()
     assert len(form_types) >= 21
@@ -201,86 +194,6 @@ def test_cip_record_list_and_approve(client, vanhanh_h, kcs_h, thukho_h, admin_h
     assert approve.json()["result"] == "dat"
     assert approve.json()["checked_by"] == "KCS Test"
     assert approve.json()["approved_at"] is not None
-
-
-def test_suggest_and_link_for_ferment_uses_matching_tank_equipment(client, admin_h, vanhanh_h):
-    """Tank FV-01 đã được seed sẵn 1 CipEquipment gắn production_line_id — suggest_for_scope
-    cho 1 lô lên men dùng đúng tank FV-01 phải hiện thiết bị đó, và CHỈ thiết bị đó trong số
-    các tank lên men (không lẫn FV-02/03/04) — đúng nguyên tắc lọc theo mã tank cụ thể; thiết
-    bị dùng chung (không gắn tank cụ thể) vẫn luôn hiện bất kể tank nào."""
-    order_id = _a_brew_order(client, admin_h, "LN-CIP01")
-    b = client.post("/api/brewing/brews", headers=vanhanh_h,
-                    json={"brew_code": "BR-CIP01", "wort_type": "Dịch test", "volume_hl": 100,
-                          "lm_code": "LM-CIP01", "tank_lm": "FV-01", "brew_order_id": order_id})
-    assert b.status_code == 201, b.text
-    ferments = client.get("/api/brewing/ferments", headers=admin_h).json()["items"]
-    ferment_id = next(f for f in ferments if f["lm_code"] == "LM-CIP01")["ferment_id"]
-
-    ft = _form_type(client, admin_h, "2.1.2/2025/QT-KCS-QT-BM-01")
-    eq_fv01 = _equipment(client, admin_h, "EQ-LM-TANK-FV-01")
-
-    rec = client.post("/api/cip/records", headers=vanhanh_h, json={
-        "form_type_id": ft["form_type_id"], "equipment_id": eq_fv01["equipment_id"],
-        "batch_number": "LM-CIP01", "order_number": "LN-CIP01",
-        "started_at": "2026-06-25T08:00:00", "steps": []})
-    assert rec.status_code == 201, rec.text
-    cip_id = rec.json()["cip_id"]
-
-    suggestions = client.get("/api/cip/suggest", headers=admin_h,
-                             params={"scope_type": "ferment", "scope_id": ferment_id}).json()
-    matched_groups = [g for g in suggestions if g["equipment_code"] == "EQ-LM-TANK-FV-01"]
-    assert len(matched_groups) == 1
-    assert any(r["cip_id"] == cip_id for r in matched_groups[0]["records"])
-    other_tank_groups = [g for g in suggestions if g["equipment_code"] in
-                         ("EQ-LM-TANK-FV-02", "EQ-LM-TANK-FV-03", "EQ-LM-TANK-FV-04")]
-    assert other_tank_groups == []
-    shared_groups = [g for g in suggestions if g["equipment_code"] == "EQ-LM-05"]
-    assert len(shared_groups) == 1
-
-    link = client.post("/api/cip/links", headers=vanhanh_h,
-                       json={"scope_type": "ferment", "scope_id": ferment_id, "cip_ids": [cip_id]})
-    assert link.status_code == 201, link.text
-    assert link.json()["linked"] == 1
-
-    linked = client.get("/api/cip/links", headers=admin_h,
-                        params={"scope_type": "ferment", "scope_id": ferment_id}).json()
-    assert len(linked) == 1
-    assert linked[0]["cip_id"] == cip_id
-    link_id = linked[0]["link_id"]
-
-    listed = client.get("/api/cip/records", headers=admin_h,
-                        params={"equipment_id": eq_fv01["equipment_id"]}).json()
-    assert next(r for r in listed if r["cip_id"] == cip_id)["linked_count"] == 1
-
-    # Gắn lại lần 2 (trùng) phải được BỎ QUA êm ái — không lỗi, không tạo thêm link.
-    relink = client.post("/api/cip/links", headers=vanhanh_h,
-                         json={"scope_type": "ferment", "scope_id": ferment_id, "cip_ids": [cip_id]})
-    assert relink.status_code == 201, relink.text
-    assert relink.json()["linked"] == 0
-    still_linked = client.get("/api/cip/links", headers=admin_h,
-                              params={"scope_type": "ferment", "scope_id": ferment_id}).json()
-    assert len(still_linked) == 1
-
-    unlink = client.delete(f"/api/cip/links/{link_id}", headers=vanhanh_h)
-    assert unlink.status_code == 204, unlink.text
-    after_unlink = client.get("/api/cip/links", headers=admin_h,
-                              params={"scope_type": "ferment", "scope_id": ferment_id}).json()
-    assert after_unlink == []
-
-    # Gắn lại để bài test hồ sơ điện tử phía sau xác nhận CIP hiện đúng trong Hồ sơ điện tử.
-    relink2 = client.post("/api/cip/links", headers=vanhanh_h,
-                          json={"scope_type": "ferment", "scope_id": ferment_id, "cip_ids": [cip_id]})
-    assert relink2.status_code == 201, relink2.text
-
-
-def test_lot_record_includes_cip_links(client, admin_h):
-    """Hồ sơ điện tử (services/lot_record.py) phải hiển thị CIP đã gắn cho lô lên men."""
-    r = client.get("/api/brewing/lot-record", headers=admin_h, params={"code": "LM-CIP01"})
-    assert r.status_code == 200, r.text
-    ferments = r.json()["ferments"]
-    assert len(ferments) == 1
-    assert len(ferments[0]["cip"]) == 1
-    assert ferments[0]["cip"][0]["equipment_name"]
 
 
 def test_form_type_and_equipment_guarded_delete(client, admin_h):

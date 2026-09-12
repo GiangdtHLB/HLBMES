@@ -13,15 +13,7 @@ from sqlalchemy import select
 from .common import LotStatus, Role, new_id, utcnow
 from .config import SEED_DEMO
 from .database import SessionLocal, init_db
-from .models.brewing import (
-    BottleRecord,
-    BrewOrder,
-    BrewRecord,
-    FermentRecord,
-    FilterRecord,
-    MaterialReceipt,
-    StageIndicator,
-)
+from .models.brewing import BrewOrder
 from .models.auth import RoleTemplate, User as AppUser
 from .models.batches import BatchExecution
 from .models.energy import EnergyArea, EnergyGroup, EnergyReading
@@ -295,7 +287,6 @@ def seed():
     _seed_energy(db)
     _seed_maintenance(db)
     _seed_process(db, batch.batch_id)
-    _seed_brewing(db)
     _seed_recipe_ext(db, recipe.recipe_id, rv, batch.batch_id)
     _seed_isa88(db)
     _seed_quality_adv(db, batch.batch_id)
@@ -552,108 +543,6 @@ def _seed_process(db, batch_id: str) -> None:
                       quantity=20, uom="L", actor="operator1", ts=utcnow() - timedelta(days=1)))
     y1.quantity -= 20
     db.commit()
-
-
-def _seed_brewing(db) -> None:
-    """Luồng sản xuất bia: nguyên liệu → nấu → lên men → lọc → chiết."""
-    now = utcnow()
-    H = lambda days, hours=0: now - timedelta(days=days, hours=hours)
-
-    # --- Nguyên liệu (Thông tin nguyên liệu) ---
-    mats = [
-        ("Malt Đức", "51672", None, 25000, "kg", "Nguyễn Thị Tuyết", "nhập mới", False),
-        ("Malt Đức", "51671", "NC-MDB", 25024, "kg", "Nguyễn Thị Tuyết", "nhập Silo", False),
-        ("Gạo tẻ (504)", "51670", "NC-G", 21000, "kg", "Hưng Cúc", "nhập Silo", True),
-        ("Food Flavor NSF-02", "51668", "NC-DV", 50, "kg", "Cty TNHH BRENNTAG Việt Nam", "nhập mới", True),
-        ("Dinh dưỡng nấm men", "51667", "VP-SPRINGER", 25, "kg", "Cty TNHH BRENNTAG Việt Nam", "nhập mới", True),
-        ("Enzyme Termamyl SCDS (Đan Mạch)", "51665", "NP-Ez-Termamyl", 25, "kg", "Cty TNHH BRENNTAG Việt Nam", "nhập mới", True),
-        ("Malt Úc rời", "51664", "NC-MUR", 25050, "kg", "Công ty CP Bắc Mỹ", "nhập mới", True),
-        ("Gạo tẻ (504)", "51663", "G-LH-TB", 25000, "kg", "Công ty TNHH Liên Hạnh", "nhập mới", True),
-        ("Hoa bia Saaz", "51662", None, 800, "kg", "Cty TNHH BRENNTAG Việt Nam", "nhập mới", False),
-    ]
-    for i, (name, mskt, lot_kcs, qty, uom, sup, note, ind) in enumerate(mats):
-        db.add(MaterialReceipt(receipt_id=new_id(), mskt=mskt, receipt_date=H(i),
-                               material_name=name, lot_pm=mskt, lot_kcs=lot_kcs, quantity=qty,
-                               uom=uom, location=note, supplier=sup, has_indicators=ind))
-
-    worts = ["Dịch bia Sapphire 14oP", "Dịch bia Legend 13oP", "Dịch bia lowCarb 13oP"]
-    beers = {"Dịch bia Sapphire 14oP": "Bia lon Sapphire", "Dịch bia Legend 13oP": "Bia lon Legend",
-             "Dịch bia lowCarb 13oP": "Bia lon Golden"}
-
-    # --- Nấu (10 mẻ; 2 mẻ thiếu chỉ tiêu để sinh cảnh báo) ---
-    for i in range(10):
-        wort = worts[i % 3]
-        full = i not in (2, 5)  # mẻ 2 và 5 thiếu OE/Plato
-        brew_date = H(10 - i, 6)
-        db.add(BrewRecord(brew_id=new_id(), brew_code=f"412{40 + i}", brew_date=brew_date,
-                          brew_year=brew_date.year,
-                          wort_type=wort, volume_hl=round(890 + (i % 3) * 450 + i * 5, 1),
-                          original_extract=(14.0 if full else None) if i % 3 == 0 else (13.0 if full else None),
-                          plato=(14.2 if full else None)))
-
-    # --- Lên men (8 lô đang lên men, tank B01-B31) ---
-    tanks_lm = ["B18", "B03", "B14", "B16", "B15", "B05", "B26", "B01"]
-    for i in range(8):
-        wort = worts[i % 3]
-        vol = round(896 + (i % 3) * 450 + i * 3, 1)
-        ferment_brew_date = H(2 + i, 4)
-        db.add(FermentRecord(ferment_id=new_id(), lm_code=f"{145 - i}", brew_code=f"412{50 - i}",
-                             brew_date=ferment_brew_date, ferment_year=ferment_brew_date.year, kt_date=H(1 + i),
-                             batch_numbers=",".join(str(1423 - i * 6 - j) for j in range(3)) + ",...",
-                             wort_type=wort, yeast_gen="Men Khác", tank_lm=tanks_lm[i],
-                             volume_hl=vol, on_hand_cct=vol, status="len_men",
-                             ferment_days=f"{i + 1}.{(i*7) % 24}.35"))
-
-    # --- Lọc (10 bản ghi, đủ trạng thái) ---
-    statuses = ["cho_chiet", "chiet_1_phan", "chiet_1_phan", "cho_chiet", "da_chiet_het",
-                "da_chiet_het", "da_chiet_het", "cho_chiet", "da_chiet_het", "da_chiet_het"]
-    bbt = ["T1", "T2", "T9", "T11", "T6", "T1", "T12", "T3", "T2", "T11"]
-    cct = ["B28", "B28", "B28", "B08", "B11,B04", "B06,B11", "B06,B11", "B08", "B08", "B23"]
-    for i in range(10):
-        wort = worts[i % 3]
-        v_dich = round(148 + i * 17, 1)
-        v_beer = round(228 + i * 12, 1)
-        on_hand = 0 if statuses[i] == "da_chiet_het" else (v_beer if statuses[i] == "cho_chiet" else round(v_beer * 0.5, 1))
-        has_ind = i not in (0, 3)
-        filter_date = H(i, 3)
-        db.add(FilterRecord(filter_id=new_id(), filter_code=f"839{42 - i}", brew_code=f"412{27 - (i % 5)}",
-                            lot_loc=f"{700 - i}", filter_date=filter_date, filter_year=filter_date.year, filter_type="thuong",
-                            wort_type=wort, from_cct=cct[i], v_dich_hl=v_dich,
-                            beer_type=beers[wort], v_beer_hl=v_beer, to_bbt=bbt[i],
-                            status=statuses[i], on_hand_bbt=on_hand, has_indicators=has_ind, has_nvl=has_ind))
-
-    # --- Chiết (10 bản ghi theo ca; 1 bản ghi sản lượng = 0 để cảnh báo) ---
-    blines = ["Lon Sapphire", "Lon Sapphire", "Tươi Ha Long", "Lon Sapphire", "Lon Legend",
-              "Chai Legend", "Lon Golden", "Lon Sapphire", "Lon Sapphire", "Lon Sapphire"]
-    bbeers = ["Bia lon Sapphire(sleek can)", "Bia lon Sapphire(sleek can)", "Bia tươi Ha Long 20L",
-              "Bia lon Sapphire(sleek can)", "Bia lon Legend(sleek can)", "Bia chai Legend",
-              "Bia lon Golden", "Bia lon Sapphire(sleek can)", "Bia lon Sapphire(sleek can)", "Bia lon Sapphire(sleek can)"]
-    ca_data = [(0, 0, 0), (0, 0, 0), (973, 0, 0), (0, 0, 2370), (0, 0, 3180), (2490, 0, 0),
-               (0, 0, 5537), (0, 4375, 0), (5050, 0, 0), (5166, 0, 0)]
-    for i in range(10):
-        c1, c2, c3 = ca_data[i]
-        stocked = i >= 4
-        bottle_date = H(i // 2, (i % 2) * 5)
-        db.add(BottleRecord(bottle_id=new_id(), bottle_code=f"935{35 - i}", filter_code=f"839{42 - i}",
-                            bottle_date=bottle_date, bottle_year=bottle_date.year, beer_type=bbeers[i], lot_no=f"{697 - (i % 6)}",
-                            v_cap_chiet_hl=round(21 + i * 35, 1), from_bbt=bbt[i], line=blines[i],
-                            ca1=c1, ca2=c2, ca3=c3, stocked=stocked, approved=stocked,
-                            has_indicators=stocked, has_nvl=stocked))
-
-    db.commit()
-
-    # vài chỉ tiêu cho lô lên men đầu
-    fr = db.execute(select(FermentRecord).order_by(FermentRecord.brew_date.desc())).scalars().first()
-    if fr:
-        db.add_all([
-            StageIndicator(indicator_id=new_id(), stage="len_men", scope_code=fr.lm_code,
-                           name="Độ đường biểu kiến", unit="°P", value=3.2, analyst="qa1"),
-            StageIndicator(indicator_id=new_id(), stage="len_men", scope_code=fr.lm_code,
-                           name="pH", unit="", value=4.35, analyst="qa1"),
-            StageIndicator(indicator_id=new_id(), stage="len_men", scope_code=fr.lm_code,
-                           name="Diacetyl", unit="ppm", value=0.08, warning="OK", analyst="qa1"),
-        ])
-        db.commit()
 
 
 def _seed_recipe_ext(db, recipe_id, rv_effective, batch_id) -> None:
@@ -1386,11 +1275,12 @@ def _seed_users(db) -> None:
         ("truongphong_kh", "123456", "Ngô Thị Kế Hoạch", "Trưởng phòng Kế hoạch", "supervisor",
          "dashboard,warehouse_kc,reports", "warehouse.transfer_approve_factory",
          "*", "*", "*", "cong_ty"),
-        # Trưởng bộ phận Kho thành phẩm: xác nhận phiếu xuất kho thành phẩm + duyệt nhập kho từ
-        # chiết — sau khi xác nhận/duyệt, chỉ ADMIN mới hoàn tác/xóa được (xem
-        # services/wms.py::confirm_shipment/undo_shipment, confirm_receipt_by_lot).
+        # Trưởng bộ phận Kho thành phẩm: đóng pallet/cất vị trí/xuất kho (hệ pallet/case, xem
+        # services/wms.py::build_pallet/putaway/ship) — quyền warehouse.receive/warehouse.issue
+        # dùng chung với Kho NVL, không còn quyền riêng "xác nhận/duyệt" như hệ vỉ/keg cũ
+        # (wms.confirm_shipment/wms.confirm_receipt đã bỏ, xem security.py).
         ("truongkho_tp", "123456", "Bùi Thị Trưởng Kho", "Trưởng bộ phận Kho thành phẩm", "supervisor",
-         "dashboard,wms,reports", "wms.confirm_shipment,wms.confirm_receipt",
+         "dashboard,wms,reports", "warehouse.receive,warehouse.issue",
          "*", "*", "*", "*"),
     ]
     for username, pw, full, title, role, views, perms, sl, sa, sq, sw in accounts:
@@ -1444,7 +1334,7 @@ def _seed_role_templates(db) -> None:
          "dashboard,warehouse_kc,reports", "warehouse.transfer_approve_factory",
          "*", "*", "*", "cong_ty"),
         ("Trưởng bộ phận Kho thành phẩm", "supervisor",
-         "dashboard,wms,reports", "wms.confirm_shipment,wms.confirm_receipt",
+         "dashboard,wms,reports", "warehouse.receive,warehouse.issue",
          "*", "*", "*", "*"),
     ]
     for name, role, views, perms, sl, sa, sq, sw in templates:

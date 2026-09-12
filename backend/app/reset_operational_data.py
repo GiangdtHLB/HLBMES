@@ -1,9 +1,11 @@
 """Xóa dữ liệu VẬN HÀNH (tồn) trước khi chạy thử — GIỮ NGUYÊN Danh mục.
 
-Phạm vi xóa (đúng 6 module người dùng yêu cầu — 2026-08-01): Nấu, Lên men, Lọc,
-Chiết, Kho TP (WMS), Kho công ty/phân xưởng (NVL) — gồm cả 2 bảng sổ cái dùng
-chung giữa Kho công ty/phân xưởng (StockMovement, MaterialLot) và bảng truy xuất
-nguồn gốc dùng chung toàn hệ thống (GenealogyEdge).
+Phạm vi xóa (đúng 6 module người dùng yêu cầu — 2026-08-01): Nấu (Lệnh nấu/BrewOrder — mã
+nấu/BrewRecord module Nấu-Lọc-Chiết cũ đã xóa hẳn khỏi schema, không còn trong phạm vi script
+này nữa), Lên men, Lọc, Chiết (2 module này đã chuyển hẳn sang pipeline "Mẻ sản xuất" —
+BatchExecution/WorkOrder — cũng nằm trong DELETE_ORDER), Kho TP (WMS), Kho công ty/phân xưởng
+(NVL) — gồm cả 2 bảng sổ cái dùng chung giữa Kho công ty/phân xưởng (StockMovement,
+MaterialLot) và bảng truy xuất nguồn gốc dùng chung toàn hệ thống (GenealogyEdge).
 
 KHÔNG xóa (giữ nguyên theo yêu cầu + quyết định 2026-08-01):
   - Toàn bộ Danh mục: Material/Product/BeerType/FinishedProduct/MaterialGroup/
@@ -56,29 +58,7 @@ from sqlalchemy import delete, func, select
 from .database import SessionLocal
 from .models.batches import BatchExecution
 from .models.workorder import WorkOrder
-from .models.brewing import (
-    BottleMaterialUsage,
-    BottleRecord,
-    BrewBatch,
-    BrewMaterialUsage,
-    BrewOrder,
-    BrewOrderMaterialLine,
-    BrewProcessLog,
-    BrewProcessStep,
-    BrewRecord,
-    FermentBrewLink,
-    FermentDailyReading,
-    FermentProcessLog,
-    FermentRecord,
-    FilterMasterOrder,
-    FilterMaterialUsage,
-    FilterOrder,
-    FilterOrderMaterialLine,
-    FilterOrderTank,
-    FilterRecord,
-    MaterialReceipt,
-    StageIndicator,
-)
+from .models.brewing import BrewOrder, BrewOrderMaterialLine
 from .models.materials import GenealogyEdge, MaterialLot
 from .models.packaging import PackagingMove
 from .models.warehouse import (
@@ -95,39 +75,20 @@ from .models.wms import Case, Pallet
 # — xóa gọn trong 1 câu lệnh DELETE cho cả bảng nên không cần xử lý thứ tự bên
 # trong 1 bảng tự tham chiếu). KHÔNG tự ý đổi thứ tự nếu không kiểm tra lại FK.
 DELETE_ORDER = [
-    StageIndicator,
     GenealogyEdge,
-    BrewProcessStep,
-    BrewProcessLog,
-    FermentBrewLink,
-    FermentProcessLog,
-    FermentDailyReading,
     PackagingMove,
-    BrewMaterialUsage,
-    FilterMaterialUsage,
-    BottleMaterialUsage,
     MaterialRequestLine,
     StockCountLine,
-    FilterOrderTank,
-    FilterOrderMaterialLine,
     BrewOrderMaterialLine,
     Case,
     Pallet,
     MaterialRequest,
     StockCount,
-    BrewBatch,
-    BottleRecord,
-    FilterRecord,
-    BrewRecord,
-    FermentRecord,
     BatchExecution,
     WorkOrder,
     BrewOrder,
-    FilterOrder,
-    FilterMasterOrder,
     StockMovement,
     MaterialLot,
-    MaterialReceipt,
 ]
 
 

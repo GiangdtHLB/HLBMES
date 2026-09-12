@@ -1,13 +1,9 @@
 """Test báo cáo "Đã chiết nhưng chưa duyệt" (GET /api/reports/bottled-not-approved) — lô thành
-phẩm (BatchPackLot, pipeline "Mẻ sản xuất" mới) đã tách nhưng chưa được KCS duyệt
+phẩm (BatchPackLot, pipeline "Mẻ sản xuất") đã tách nhưng chưa được KCS duyệt
 (approved=False). Xem services/dashboard.py::bottled_not_approved_report.
 
-Báo cáo này đã đổi nguồn từ BottleRecord (module Nấu-Lọc-Chiết cũ) sang BatchPackLot
-(2026-09-02, theo yêu cầu người dùng: "duyệt từ chiết bây giờ chỉ lấy từ nguồn mới là Chiết mới
-tạo ra, không lấy từ nguồn cũ Nấu lọc chiết nữa") — test trước đây vẫn dựng dữ liệu qua
-BottleRecord (/api/brewing/bottles) và assert theo `bottle_id`, nên luôn thấy báo cáo rỗng vì
-báo cáo không còn đọc BottleRecord nữa. Sửa lại dựng dữ liệu qua chuỗi mới: BatchExecution ->
-BatchTank -> BatchFilterLot -> BatchPackLot, assert theo `pack_lot_id`.
+Dựng dữ liệu qua chuỗi: BatchExecution -> BatchTank -> BatchFilterLot -> BatchPackLot, assert
+theo `pack_lot_id`.
 """
 
 import os

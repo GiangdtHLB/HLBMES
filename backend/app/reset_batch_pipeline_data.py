@@ -18,11 +18,11 @@ from_type/to_type thuộc 4 loại trên (cạnh nối MaterialLot<->batch cũng
 
 KHÔNG xóa (giữ nguyên theo đúng phạm vi người dùng chỉ ra):
   - BrewOrder ("Lệnh nấu"/"Lệnh SX") — KHÔNG nằm trong sidebar được khoanh, giữ để dispatch
-    lại WorkOrder mới ngay trên các Lệnh nấu đã có. Chỉ NULL work_order_id trên các BrewRecord
-    (module cũ) đang trỏ vào WorkOrder sắp xóa (cờ hiển thị lịch sử dispatch kiểu cũ, không
-    còn ý nghĩa khi WorkOrder gốc đã bị xóa) — KHÔNG xóa bản thân BrewRecord.
-  - Toàn bộ module Nấu-Lọc-Chiết cũ (BrewBatch/FermentRecord/FilterRecord/BottleRecord) và
-    Kho/WMS — không liên quan pipeline "Mẻ SX".
+    lại WorkOrder mới ngay trên các Lệnh nấu đã có. (Trước đây còn NULL BrewRecord.work_order_id
+    ở đây — module Nấu-Lọc-Chiết cũ/BrewRecord đã bị xóa hẳn khỏi schema nên bước này không
+    còn cần thiết nữa.)
+  - Toàn bộ module Nấu-Lọc-Chiết cũ (đã xóa hẳn khỏi schema, không liên quan pipeline "Mẻ SX")
+    và Kho/WMS.
   - Danh mục (ProductionLine/Product/Recipe*/QCParameter*/ProcessParameter*/...), audit_log.
   - MaterialLot (Danh mục lô NVL thật) — CHỈ hoàn lại `quantity` đã bị trừ do mẻ tiêu thụ
     (consume_lot/dispense), không xóa lô. Lô OUTPUT do produce_lot tạo ra (nếu có) bị xóa
@@ -45,7 +45,7 @@ Cách chạy (từ thư mục backend/, đã kích hoạt venv có đúng MES_DA
 import argparse
 import sys
 
-from sqlalchemy import delete, func, or_, select, update
+from sqlalchemy import delete, func, or_, select
 
 from .database import SessionLocal
 from .common import LotStatus
@@ -64,7 +64,6 @@ from .models.batch_pipeline import (
     BatchTankLink,
     BatchTankProcessLog,
 )
-from .models.brewing import BrewRecord
 from .models.isa88 import BatchPhaseRun
 from .models.materials import GenealogyEdge, MaterialLot
 from .models.materials_ext import Dispense, DispenseLine
@@ -220,11 +219,6 @@ def main() -> None:
             print("\nCó cảnh báo ở trên — DỪNG, chưa xóa gì. Kiểm tra tay rồi chạy lại.")
             db.rollback()
             sys.exit(1)
-
-        print("\nĐang gỡ liên kết BrewRecord.work_order_id (giữ nguyên BrewRecord, chỉ NULL cột này)...")
-        r = db.execute(update(BrewRecord).where(BrewRecord.work_order_id.isnot(None))
-                      .values(work_order_id=None))
-        print(f"  brew_record.work_order_id đã NULL: {r.rowcount}")
 
         print("\nĐang xóa các bảng scope-tự-do (quality_result/deviation/lims_sample/genealogy_edge)...")
         for label, model, col in (

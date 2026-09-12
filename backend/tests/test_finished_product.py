@@ -1,7 +1,7 @@
 """Test Sản phẩm (thành phẩm/SKU đóng gói, FinishedProduct) — khác Dịch bia (Product):
-CRUD danh mục, chọn khi chiết (BottleRecord.finished_product_id), và gán chỉ tiêu thành
-phẩm theo SKU cụ thể (StageQcGroup.finished_product_id) — vẫn tương thích ngược với các
-nhóm chỉ tiêu cũ chỉ gán theo dịch bia (product_id).
+CRUD danh mục, chọn khi chiết (BatchPackLot.finished_product_id, pipeline "Mẻ sản xuất"), và
+gán chỉ tiêu thành phẩm theo SKU cụ thể (StageQcGroup.finished_product_id) — vẫn tương thích
+ngược với các nhóm chỉ tiêu cũ chỉ gán theo dịch bia (product_id).
 """
 
 import os
@@ -42,11 +42,6 @@ def admin_h(client):
     return _login(client, "admin", "AdminTest123")
 
 
-@pytest.fixture(scope="module")
-def vanhanh_h(client):
-    return _login(client, "vanhanh", "123456")
-
-
 def _make_group_with_param(client, admin_h, suffix):
     p = client.post("/api/qc/parameters", headers=admin_h,
                     json={"code": f"CT_{suffix}", "name": f"Chỉ tiêu {suffix}", "lsl": 1, "usl": 10})
@@ -60,6 +55,65 @@ def _make_group_with_param(client, admin_h, suffix):
                      json={"param_id": param_id, "mandatory": True})
     assert it.status_code == 201, it.text
     return group_id, f"CT_{suffix}"
+
+
+def _make_batch(client, admin_h):
+    rid = client.get("/api/recipes", headers=admin_h).json()[0]["recipe_id"]
+    vers = client.get(f"/api/recipes/{rid}/versions", headers=admin_h).json()
+    v = next(x for x in vers if x["state"] == "effective")
+    oid = client.get("/api/brewing/orders", headers=admin_h).json()[0]["brew_order_id"]
+    b = client.post("/api/batches", headers=admin_h,
+                    json={"order_id": oid, "recipe_version_id": v["version_id"],
+                          "planned_qty": 1000, "allow_shortage": True})
+    assert b.status_code == 201, b.text
+    return b.json()["batch_id"]
+
+
+def _run_batch_to_completed(client, admin_h, batch_id):
+    for target in ("ready", "running"):
+        r = client.post(f"/api/batches/{batch_id}/transition", headers=admin_h, json={"target": target})
+        assert r.status_code == 200, r.text
+    aq = client.post(f"/api/batches/{batch_id}/actual-qty", headers=admin_h, json={"actual_qty": 1000})
+    assert aq.status_code == 200, aq.text
+    fin = client.post(f"/api/batches/{batch_id}/finish", headers=admin_h, json={})
+    assert fin.status_code == 200, fin.text
+    r = client.post(f"/api/batches/{batch_id}/transition", headers=admin_h, json={"target": "completed"})
+    assert r.status_code == 200, r.text
+
+
+def _make_filter_lot(client, admin_h, suffix):
+    batch_id = _make_batch(client, admin_h)
+    _run_batch_to_completed(client, admin_h, batch_id)
+    t = client.post("/api/batch-tanks", headers=admin_h,
+                    json={"batch_ids": [batch_id], "tank_code": f"TANK-{suffix}"})
+    assert t.status_code == 201, t.text
+    tank_id = t.json()["tank_id"]
+    bbt = client.post("/api/lines", headers=admin_h,
+                      json={"code": f"BBT-{suffix}", "name": f"Tank thành phẩm {suffix}", "kind": "tank_bbt"})
+    assert bbt.status_code == 201, bbt.text
+    draw = client.post("/api/batch-filter-lots", headers=admin_h, json={
+        "filter_lot_code": f"FLOT-{suffix}", "to_bbt": bbt.json()["code"],
+        "sources": [{"source_type": "tank", "source_tank_id": tank_id}],
+    })
+    assert draw.status_code == 201, draw.text
+    return draw.json()["filter_lot_id"]
+
+
+def _finish_only_source(client, admin_h, filter_lot_id, v_drawn=900):
+    src = client.get(f"/api/batch-filter-lots/{filter_lot_id}/sources", headers=admin_h).json()[0]
+    batches = client.get(f"/api/batch-filter-lots/{filter_lot_id}/batches", headers=admin_h).json()
+    fin = client.put(f"/api/batch-filter-lots/batches/{batches[0]['batch_link_id']}/finish", headers=admin_h,
+                     json={"draws": [{"source_link_id": src["link_id"], "dich_nha_hl": v_drawn}],
+                          "nuoc_bai_khi_hl": 0})
+    assert fin.status_code == 200, fin.text
+
+
+def _make_pack_lot(client, admin_h, filter_lot_id, suffix, finished_product_id=None, qty=500):
+    pack = client.post(f"/api/batch-filter-lots/{filter_lot_id}/pack-lots", headers=admin_h,
+                       json={"qty": qty, "pack_lot_code": f"PKG-{suffix}", "lot_no": f"LOT-{suffix}",
+                             "finished_product_id": finished_product_id})
+    assert pack.status_code == 201, pack.text
+    return pack.json()["pack_lot_id"]
 
 
 def test_finished_product_crud(client, admin_h):
@@ -77,9 +131,9 @@ def test_finished_product_crud(client, admin_h):
     assert update.json()["name"] == "Lon 330ml (sửa)"
 
 
-def test_approve_bottle_scoped_by_finished_product(client, admin_h, vanhanh_h):
-    """Nhóm chỉ tiêu thành phẩm gán theo finished_product_id — chỉ chặn duyệt các mã chiết
-    đã chọn đúng SKU đó, không ảnh hưởng mã chiết khác/không chọn SKU."""
+def test_approve_pack_lot_scoped_by_finished_product(client, admin_h):
+    """Nhóm chỉ tiêu thành phẩm gán theo finished_product_id — chỉ chặn duyệt các lô thành
+    phẩm (BatchPackLot) đã chọn đúng SKU đó, không ảnh hưởng lô khác/không chọn SKU."""
     fp = client.post("/api/finished-products", headers=admin_h,
                      json={"code": "SKU-CHAI-500", "name": "Chai 500ml", "uom": "chai"})
     assert fp.status_code == 201, fp.text
@@ -92,45 +146,36 @@ def test_approve_bottle_scoped_by_finished_product(client, admin_h, vanhanh_h):
     assert link.status_code == 201, link.text
     assert link.json()["finished_product_id"] == fp_id
 
-    bottle_code = "CH-FP-TEST-01"
-    b = client.post("/api/brewing/bottles", headers=vanhanh_h,
-                    json={"bottle_code": bottle_code, "beer_type": "Bia test", "finished_product_id": fp_id})
-    assert b.status_code == 201, b.text
-    bottle_id = b.json()["bottle_id"]
-    bottle_year = b.json()["bottle_year"]
-    b_fin = client.post(f"/api/brewing/bottles/{bottle_id}/finish", headers=vanhanh_h, json={"ca1": 10})
-    assert b_fin.status_code == 200, b_fin.text
+    fl = _make_filter_lot(client, admin_h, "FP-TEST-01")
+    _finish_only_source(client, admin_h, fl)
+    pack_lot_id = _make_pack_lot(client, admin_h, fl, "FP-TEST-01", finished_product_id=fp_id)
 
-    # bottle_code chỉ duy nhất TRONG 1 năm — scope_id thật (qc_catalog.bottle_scope_id) phải
-    # kèm năm để khớp đúng bản ghi approve_bottle tra cứu.
-    bottle_scope_id = f"{bottle_year}-{bottle_code}__thanh_pham"
-    st = client.get(f"/api/brewing/qc-status?stage=thanh_pham&scope_type=bottle&"
-                    f"scope_id={bottle_scope_id}&finished_product_id={fp_id}", headers=admin_h).json()
+    st = client.get(f"/api/brewing/qc-status?stage=thanh_pham&scope_type=batch_pack_lot&"
+                    f"scope_id={pack_lot_id}&finished_product_id={fp_id}", headers=admin_h).json()
     assert code in st["pending"]
 
-    blocked = client.post(f"/api/brewing/bottles/{bottle_id}/approve", headers=admin_h)
+    blocked = client.post(f"/api/batch-pack-lots/{pack_lot_id}/approve", headers=admin_h)
     assert blocked.status_code == 409, blocked.text
 
-    rec = client.post("/api/brewing/qc-results", headers=vanhanh_h,
-                      json={"stage": "thanh_pham", "scope_type": "bottle", "scope_id": bottle_scope_id,
+    rec = client.post("/api/brewing/qc-results", headers=admin_h,
+                      json={"stage": "thanh_pham", "scope_type": "batch_pack_lot", "scope_id": pack_lot_id,
                             "parameter": code, "value": 5, "lower_limit": 1, "upper_limit": 10})
     assert rec.status_code == 201, rec.text
 
-    ok = client.post(f"/api/brewing/bottles/{bottle_id}/approve", headers=admin_h)
+    ok = client.post(f"/api/batch-pack-lots/{pack_lot_id}/approve", headers=admin_h)
     assert ok.status_code == 200, ok.text
     assert ok.json()["approved"] is True
 
-    # Mã chiết khác không chọn SKU này thì không bị nhóm chỉ tiêu trên chặn.
-    other_code = "CH-FP-TEST-OTHER"
-    other = client.post("/api/brewing/bottles", headers=vanhanh_h,
-                        json={"bottle_code": other_code, "beer_type": "Bia test"})
-    assert other.status_code == 201, other.text
-    other_st = client.get(f"/api/brewing/qc-status?stage=thanh_pham&scope_type=bottle&"
-                          f"scope_id={other_code}__thanh_pham", headers=admin_h).json()
+    # Lô khác không chọn SKU này thì không bị nhóm chỉ tiêu trên chặn.
+    fl2 = _make_filter_lot(client, admin_h, "FP-TEST-OTHER")
+    _finish_only_source(client, admin_h, fl2)
+    other_pack_lot_id = _make_pack_lot(client, admin_h, fl2, "FP-TEST-OTHER")
+    other_st = client.get(f"/api/brewing/qc-status?stage=thanh_pham&scope_type=batch_pack_lot&"
+                          f"scope_id={other_pack_lot_id}", headers=admin_h).json()
     assert not any(p["code"] == code for p in other_st["required"])
 
 
-def test_finished_product_scoping_by_beer_type_applies_across_skus(client, admin_h, vanhanh_h):
+def test_finished_product_scoping_by_beer_type_applies_across_skus(client, admin_h):
     """Nhóm chỉ tiêu thành phẩm gán theo Loại bia (beer_type_id, finished_product_id để
     trống) phải áp dụng cho MỌI SKU thuộc Loại bia đó — không cần khớp finished_product_id
     tuyệt đối. Đây là chỗ thay thế hành vi cũ (gán theo product_id/Dịch bia): stage=thanh_pham
@@ -161,20 +206,18 @@ def test_finished_product_scoping_by_beer_type_applies_across_skus(client, admin
     assert link.json()["finished_product_id"] is None
     assert link.json()["beer_type_id"] == beer_type_id
 
-    bottle_code = "CH-COMPAT-01"
-    b = client.post("/api/brewing/bottles", headers=vanhanh_h,
-                    json={"bottle_code": bottle_code, "beer_type": "Bia test"})
-    assert b.status_code == 201, b.text
-    bottle_id = b.json()["bottle_id"]
-    # beer_type_id không tự gắn qua from_bbt trong test này nên gán thủ công qua qc-status params.
+    fl = _make_filter_lot(client, admin_h, "COMPAT-01")
+    _finish_only_source(client, admin_h, fl)
+    pack_lot_id = _make_pack_lot(client, admin_h, fl, "COMPAT-01")
+    # beer_type_id không tự gắn qua nguồn trong test này nên gán thủ công qua qc-status params.
 
-    st = client.get(f"/api/brewing/qc-status?stage=thanh_pham&scope_type=bottle&"
-                    f"scope_id={bottle_code}__thanh_pham&beer_type_id={beer_type_id}&finished_product_id={fp_id}",
+    st = client.get(f"/api/brewing/qc-status?stage=thanh_pham&scope_type=batch_pack_lot&"
+                    f"scope_id={pack_lot_id}&beer_type_id={beer_type_id}&finished_product_id={fp_id}",
                     headers=admin_h).json()
     assert any(p["code"] == code for p in st["required"])
 
 
-def test_same_param_in_common_and_override_group_deduped_override_wins(client, admin_h, vanhanh_h):
+def test_same_param_in_common_and_override_group_deduped_override_wins(client, admin_h):
     """Cùng 1 mã chỉ tiêu (VD "Độ cồn") được gán qua CẢ nhóm áp dụng chung (theo Loại bia) LẪN
     nhóm gán riêng cho 1 SKU cụ thể (finished_product_id), mỗi nhóm đặt ngưỡng khác nhau —
     required_params_for_stage phải CHỈ trả về 1 dòng duy nhất cho mã đó (không trùng lặp),
@@ -219,13 +262,12 @@ def test_same_param_in_common_and_override_group_deduped_override_wins(client, a
                                       "finished_product_id": fp_id, "mandatory": True})
     assert link_override.status_code == 201, link_override.text
 
-    bottle_code = "CH-OVERRIDE-01"
-    b = client.post("/api/brewing/bottles", headers=vanhanh_h,
-                    json={"bottle_code": bottle_code, "beer_type": "Bia test", "finished_product_id": fp_id})
-    assert b.status_code == 201, b.text
+    fl = _make_filter_lot(client, admin_h, "OVERRIDE-01")
+    _finish_only_source(client, admin_h, fl)
+    pack_lot_id = _make_pack_lot(client, admin_h, fl, "OVERRIDE-01", finished_product_id=fp_id)
 
-    st = client.get(f"/api/brewing/qc-status?stage=thanh_pham&scope_type=bottle&"
-                    f"scope_id={bottle_code}__thanh_pham&beer_type_id={beer_type_id}&finished_product_id={fp_id}",
+    st = client.get(f"/api/brewing/qc-status?stage=thanh_pham&scope_type=batch_pack_lot&"
+                    f"scope_id={pack_lot_id}&beer_type_id={beer_type_id}&finished_product_id={fp_id}",
                     headers=admin_h).json()
     matches = [p for p in st["required"] if p["code"] == "ABV-OVR"]
     assert len(matches) == 1, f"Phải chỉ có 1 dòng cho mã chỉ tiêu trùng, thấy {len(matches)}"

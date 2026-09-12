@@ -358,198 +358,6 @@ function openSearchPickerModal(title, items, onSelect) {
   $("spm_q").focus();
 }
 
-// Hộp thoại chọn giờ kết thúc (mẻ nấu/lọc/chiết) — KHÔNG tự động lấy giờ hiện tại khi bấm
-// Sửa 1 mẻ nấu: gộp Mã mẻ + Giờ bắt đầu + Giờ kết thúc vào 1 modal duy nhất (trước đây tách
-// 2 nút "Sửa giờ BĐ"/"Kết thúc"·"Sửa giờ KT") — Giờ kết thúc để trống nếu mẻ chưa kết thúc,
-// điền vào coi như bấm "Kết thúc"; sửa lại giờ đã có coi như "Sửa giờ KT" (gọi lại /finish
-// được nhiều lần, xem routers/brewing.py::finish_brew_batch). Chỉ gọi API cho field THỰC SỰ
-// đổi, tránh gọi /start hay /finish không cần thiết khi người dùng chỉ sửa Mã mẻ.
-function openEditBrewBatchModal(batch, brewLines, onSubmit, onBack) {
-  const startVal = toDTLocal(batch.started_at ? new Date(batch.started_at) : new Date());
-  const endVal = batch.ended_at ? toDTLocal(new Date(batch.ended_at)) : "";
-  const noteVal = batch.note || "";
-  modal(`<h3>Sửa mẻ <code class="k">${esc(batch.batch_code)}</code></h3>
-    <div class="field"><label>Mã mẻ</label><input id="eb_code" type="number" min="1" step="1" value="${esc(batch.batch_code)}"/></div>
-    <div class="field" style="margin-top:8px"><label>Dây chuyền nấu</label><select id="eb_line">
-      ${(brewLines || []).map(l => `<option value="${esc(l.line_id)}" ${l.line_id === batch.line_id ? "selected" : ""}>${esc(l.code)} — ${esc(l.name)}</option>`).join("")}
-    </select></div>
-    <div class="field" style="margin-top:8px"><label>Giờ bắt đầu</label><input id="eb_start" type="datetime-local" value="${startVal}"/></div>
-    <div class="field" style="margin-top:8px"><label>Giờ kết thúc <span class="muted" style="font-weight:400">(để trống nếu mẻ chưa kết thúc)</span></label><input id="eb_end" type="datetime-local" value="${endVal}"/></div>
-    <div class="field" style="margin-top:8px"><label>Ghi chú</label><input id="eb_note" value="${esc(noteVal)}" placeholder="(tuỳ chọn)"/></div>
-    <button class="btn" id="eb_ok" style="margin-top:12px">Lưu</button>`, onBack);
-  $("eb_ok").onclick = () => guard(async () => {
-    const code = $("eb_code").value.trim();
-    if (!code || !/^\d+$/.test(code) || parseInt(code, 10) <= 0) throw new Error("Mã mẻ phải là số nguyên dương (VD: 123).");
-    const startRaw = $("eb_start").value;
-    if (!startRaw) throw new Error("Chọn giờ bắt đầu.");
-    const endRaw = $("eb_end").value;
-    const lineVal = $("eb_line").value;
-    const noteRaw = $("eb_note").value.trim();
-    await onSubmit({
-      code: code !== batch.batch_code ? code : null,
-      started_at: startRaw !== startVal ? new Date(startRaw).toISOString() : null,
-      ended_at: (endRaw && endRaw !== endVal) ? new Date(endRaw).toISOString() : null,
-      line_id: lineVal !== batch.line_id ? lineVal : null,
-      note: noteRaw !== noteVal ? noteRaw : null,
-    });
-  });
-}
-
-// Kết thúc lọc CHO 1 TANK (lọc phối kết thúc riêng từng tank rồi cộng dồn) — Dịch nha
-// lọc/Sản lượng lọc không bắt buộc lúc tạo, điền ở đây kèm Nước bài khí; Sản lượng lọc
-// (V Bia/hl) tự tính = Dịch nha lọc + Nước bài khí (không nhập tay).
-function openFinishFilterModal(title, currentEndedAt, currentVDich, currentBaiKhi, currentBatchNumber, currentOrderNumber, currentBatchSeqNo, suggestedSeqNo, usedSeqNos, onSubmit, onBack) {
-  const defaultVal = toDTLocal(currentEndedAt ? new Date(currentEndedAt) : new Date());
-  // Gợi ý "Mẻ lọc số" kế tiếp (chỉ khi chưa có giá trị đã lưu — sửa lại mẻ cũ vẫn giữ nguyên số
-  // đã ghi) — vận hành có thể sửa tay, không khoá cứng vì số này KHÔNG bắt buộc phải tăng dần
-  // (xem services/filter_order.py::next_batch_seq_no).
-  const seqValue = currentBatchSeqNo || suggestedSeqNo || "";
-  modal(`<h3>${esc(title)}</h3>
-    <div class="row">
-      <div class="field"><label>Số mẻ (Batch number Brewmax) *</label><input id="ff_batch" value="${esc(currentBatchNumber || "")}"/></div>
-      <div class="field"><label>Số lệnh (Order number Brewmax) *</label><input id="ff_order" value="${esc(currentOrderNumber || "")}"/></div>
-      <div class="field"><label>Mẻ lọc số * <span class="muted" style="font-weight:400">(gợi ý: ${esc(suggestedSeqNo || "1")})</span></label><input id="ff_seqno" value="${esc(seqValue)}"/></div>
-    </div>
-    <div class="field" style="margin-top:8px"><label>Giờ kết thúc</label><input id="ff_time" type="datetime-local" value="${defaultVal}"/></div>
-    <div class="row" style="margin-top:8px">
-      <div class="field"><label>Dịch nha lọc (hl)</label><input id="ff_dich" type="number" value="${currentVDich || 0}"/></div>
-      <div class="field"><label>Nước bài khí (hl)</label><input id="ff_baikhi" type="number" value="${currentBaiKhi || 0}"/></div>
-    </div>
-    <div class="muted" style="margin-top:8px">Tổng tank này (hl) = Dịch nha lọc + Nước bài khí = <b id="ff_total">${((currentVDich || 0) + (currentBaiKhi || 0)).toFixed(1)}</b></div>
-    <button class="btn" id="ff_ok" style="margin-top:12px">Xác nhận</button>`, onBack);
-  const recalc = () => {
-    const d = parseFloat($("ff_dich").value) || 0;
-    const k = parseFloat($("ff_baikhi").value) || 0;
-    $("ff_total").textContent = (d + k).toFixed(1);
-  };
-  $("ff_dich").oninput = recalc; $("ff_baikhi").oninput = recalc;
-  $("ff_ok").onclick = () => guard(async () => {
-    const raw = $("ff_time").value;
-    if (!raw) throw new Error("Chọn giờ kết thúc.");
-    const batchNumber = $("ff_batch").value.trim();
-    const orderNumber = $("ff_order").value.trim();
-    const batchSeqNo = $("ff_seqno").value.trim();
-    if (!batchNumber || !orderNumber || !batchSeqNo) throw new Error("Nhập Mẻ lọc số, Số mẻ (Batch number Brewmax) và Số lệnh (Order number Brewmax).");
-    const vDich = parseFloat($("ff_dich").value) || 0;
-    if (vDich <= 0) throw new Error("Dịch nha lọc (hl) phải lớn hơn 0 mới được kết thúc mẻ lọc.");
-    // batch_seq_no KHÔNG chặn trùng ở BE (thực tế có thể trùng hợp lệ giữa các lệnh lọc khác
-    // nhau) — chỉ hỏi lại ở đây để bắt lỗi gõ nhầm (nhập lại đúng số mẻ trước trong CÙNG lệnh
-    // lọc này) trước khi lưu.
-    if (batchSeqNo !== (currentBatchSeqNo || "") && (usedSeqNos || []).includes(batchSeqNo)) {
-      if (!confirm(`Mẻ lọc số "${batchSeqNo}" đã dùng trong lệnh lọc này trước đó. Mẻ này có phải là mẻ lọc trùng với mẻ trước không? Bấm OK để vẫn lưu.`)) return;
-    }
-    await onSubmit({
-      ended_at: new Date(raw).toISOString(),
-      v_dich_hl: parseFloat($("ff_dich").value) || 0,
-      nuoc_bai_khi_hl: parseFloat($("ff_baikhi").value) || 0,
-      batch_number: batchNumber,
-      order_number: orderNumber,
-      batch_seq_no: batchSeqNo,
-    });
-  });
-}
-
-// Kết thúc chiết — V cấp chiết/hl + Ca 1/2/3 không bắt buộc lúc tạo, điền ở đây (mirror
-// openFinishFilterModal cho Lọc).
-function openFinishBottleModal(title, currentEndedAt, currentVCap, currentCa1, currentCa2, currentCa3, onSubmit) {
-  const defaultVal = toDTLocal(currentEndedAt ? new Date(currentEndedAt) : new Date());
-  modal(`<h3>${esc(title)}</h3>
-    <div class="field"><label>Giờ kết thúc</label><input id="fb_time" type="datetime-local" value="${defaultVal}"/></div>
-    <div class="row" style="margin-top:8px">
-      <div class="field"><label>V cấp chiết/hl</label><input id="fb_vcap" type="number" value="${currentVCap || 0}"/></div>
-      <div class="field"><label>Ca 1/két,thùng</label><input id="fb_ca1" type="number" value="${currentCa1 || 0}"/></div>
-      <div class="field"><label>Ca 2/két,thùng</label><input id="fb_ca2" type="number" value="${currentCa2 || 0}"/></div>
-      <div class="field"><label>Ca 3/két,thùng</label><input id="fb_ca3" type="number" value="${currentCa3 || 0}"/></div>
-    </div>
-    <button class="btn" id="fb_ok" style="margin-top:12px">Xác nhận</button>`);
-  $("fb_ok").onclick = () => guard(async () => {
-    const raw = $("fb_time").value;
-    if (!raw) throw new Error("Chọn giờ kết thúc.");
-    await onSubmit({
-      ended_at: new Date(raw).toISOString(),
-      v_cap_chiet_hl: parseFloat($("fb_vcap").value) || 0,
-      ca1: parseFloat($("fb_ca1").value) || 0,
-      ca2: parseFloat($("fb_ca2").value) || 0,
-      ca3: parseFloat($("fb_ca3").value) || 0,
-    });
-  });
-}
-
-// ---- Modal: các tank nguồn (CCT lên men hoặc BBT lọc lại) thuộc 1 bản ghi lọc — mirror
-// openBrewBatchesModal, mỗi tank kết thúc RIÊNG (đặc biệt cần cho lọc phối, nhiều tank cùng
-// lọc vào 1 BBT). "Làm rỗng lên men" (CCT nguồn) chuyển sang màn hình Lên men (rỗng cả tank,
-// không riêng theo mẻ lọc); "Làm rỗng tank thành phẩm" (BBT đích) + CIP nằm ngay trên dòng
-// đầu mỗi khối Tank BBT ở bảng "Thông tin lọc" (rỗng cả tank, không riêng theo mẻ) — xem
-// VIEWS.process sec=loc, renderTankBlock.
-async function openFilterTanksModal(filterId, onHandBbt) {
-  const tanks = await GET(`/brewing/filters/${filterId}/tanks`);
-  // Nhóm các dòng theo CÙNG 1 tank nguồn vật lý (tank lên men hoặc BBT lọc lại) — 1 tank có
-  // thể có NHIỀU mẻ (nhiều đợt rút dịch), mỗi mẻ kết thúc riêng qua data-finishtank; nút
-  // data-addbatch chỉ hiện khi mẻ mới nhất của tank đã kết thúc (không rút dịch 2 đợt cùng lúc).
-  const groups = [];
-  const byKey = new Map();
-  tanks.forEach(t => {
-    const key = t.tank_type + "|" + (t.tank_type === "bbt" ? t.source_bbt_code : t.ferment_id);
-    let g = byKey.get(key);
-    if (!g) { g = { key, tank_type: t.tank_type, tank_lm: t.tank_lm, lm_code: t.lm_code, source_bbt_code: t.source_bbt_code, rows: [] }; byKey.set(key, g); groups.push(g); }
-    g.rows.push(t);
-  });
-  const rowHtml = (t, label) => `<tr>
-    <td>${fmt(t.ended_at)}</td>
-    <td>${badge(t.exec_status === "hoan_thanh" ? "completed" : "in_progress")}${esc(t.exec_status_label)}
-      ${t.is_final_batch ? `<div><span class="badge planned" style="margin-top:2px">Mẻ cuối</span></div>` : ""}</td>
-    <td>${t.v_dich_hl ?? "—"}</td><td>${t.nuoc_bai_khi_hl ?? "—"}</td>
-    <td>${esc(t.batch_number || "—")}</td><td>${esc(t.order_number || "—")}</td><td>${esc(t.batch_seq_no || "—")}</td>
-    <td style="white-space:nowrap"><button class="btn sm ${t.exec_status === "hoan_thanh" ? "sec" : ""}" data-finishtank="${esc(t.line_id)}"
-      data-tanklabel="${esc(label)}" data-endedat="${esc(t.ended_at || "")}" data-vdich="${t.v_dich_hl || 0}"
-      data-baikhi="${t.nuoc_bai_khi_hl || 0}" data-batchnumber="${esc(t.batch_number || "")}"
-      data-ordernumber="${esc(t.order_number || "")}" data-batchseqno="${esc(t.batch_seq_no || "")}">
-      ${t.exec_status === "hoan_thanh" ? "Sửa giờ KT" : "Kết thúc"}</button>
-      ${tanks.length > 1 ? `<button class="btn sm sec" data-delbatch="${esc(t.line_id)}" style="margin-left:4px">Xóa mẻ</button>` : ""}
-      ${t.exec_status === "hoan_thanh" ? `<button class="btn sm sec" data-togglefinal="${esc(t.line_id)}" style="margin-left:4px">${t.is_final_batch ? "Bỏ đánh dấu cuối" : "Xác nhận mẻ cuối"}</button>` : ""}</td></tr>`;
-  const groupHtml = (g) => {
-    const total = g.rows.reduce((s, t) => s + (t.v_dich_hl || 0) + (t.nuoc_bai_khi_hl || 0), 0);
-    const last = g.rows[g.rows.length - 1];
-    const label = g.tank_type === "bbt" ? `BBT ${g.source_bbt_code} (lọc lại)` : `${g.tank_lm || "—"} (Lô LM ${g.lm_code || "—"})`;
-    return `<tr><td colspan=8 style="padding-top:14px;border-top:1px solid var(--border)"><b>${esc(label)}</b>
-        <span class="muted"> — Tổng: ${total.toFixed(1)} hl</span>
-        ${last.ended_at ? `<button class="btn sm sec" data-addbatch="${esc(last.line_id)}" style="margin-left:10px">+ Thêm mẻ</button>` : ""}</td></tr>
-      ${g.rows.map(t => rowHtml(t, label)).join("")}`;
-  };
-  modal(`<h3>Các tank nguồn thuộc bản ghi lọc</h3>
-    <div class="tablewrap"><table>
-      <thead><tr><th>Kết thúc</th><th>Trạng thái</th><th>Dịch nha lọc (hl)</th><th>Nước bài khí (hl)</th><th>Batch number Brewmax</th><th>Order number Brewmax</th><th>Mẻ lọc số</th><th></th></tr></thead>
-      <tbody>${groups.map(groupHtml).join("") || `<tr><td colspan=8 class="muted">Không có tank nào.</td></tr>`}</tbody>
-    </table></div>`);
-  document.querySelectorAll("[data-finishtank]").forEach(b => b.onclick = () => guard(async () => {
-    const lineId = b.dataset.finishtank;
-    const suggest = await GET(`/brewing/next-batch-seq-no?exclude_line_id=${encodeURIComponent(lineId)}`);
-    openFinishFilterModal("Kết thúc mẻ — " + b.dataset.tanklabel,
-      b.dataset.endedat || null, parseFloat(b.dataset.vdich) || 0, parseFloat(b.dataset.baikhi) || 0,
-      b.dataset.batchnumber || "", b.dataset.ordernumber || "", b.dataset.batchseqno || "",
-      suggest.next_batch_seq_no, suggest.used_batch_seq_nos || [],
-      async (payload) => {
-        await POST(`/brewing/filters/${filterId}/tanks/${lineId}/finish`, payload);
-        toast("Đã lưu kết quả lọc"); openFilterTanksModal(filterId, onHandBbt); render("process");
-      }, () => openFilterTanksModal(filterId, onHandBbt));
-  }));
-  document.querySelectorAll("[data-addbatch]").forEach(b => b.onclick = () => guard(async () => {
-    await POST(`/brewing/filters/${filterId}/tanks/${b.dataset.addbatch}/add-batch`, {});
-    toast("Đã thêm mẻ mới cho tank này — bấm \"Kết thúc\" khi rút dịch xong");
-    openFilterTanksModal(filterId, onHandBbt); render("process");
-  }));
-  document.querySelectorAll("[data-delbatch]").forEach(b => b.onclick = () => guard(async () => {
-    if (!confirm("Xóa mẻ này? Tồn sẽ hoàn lại tank nguồn nếu đã ghi nhận thể tích. Không thể hoàn tác.")) return;
-    await DELETE(`/brewing/filters/${filterId}/tanks/${b.dataset.delbatch}`);
-    toast("Đã xóa mẻ"); openFilterTanksModal(filterId, onHandBbt); render("process");
-  }));
-  document.querySelectorAll("[data-togglefinal]").forEach(b => b.onclick = () => guard(async () => {
-    const r = await POST(`/brewing/filters/${filterId}/tanks/${b.dataset.togglefinal}/toggle-final`, {});
-    toast(r.is_final_batch ? "Đã đánh dấu mẻ cuối — không tính Thấp/Cao trong báo cáo sản lượng" : "Đã bỏ đánh dấu mẻ cuối");
-    openFilterTanksModal(filterId, onHandBbt); render("process");
-  }));
-}
-
 // ---------- SVG charts (CH): đã tách sang charts.js (nạp trước app.js) ----------
 
 // caches for dropdowns
@@ -932,8 +740,8 @@ VIEWS.dashboard = async function () {
       </div>
     </div>
     <div class="panel">
-      <h2>🍺 Sản lượng chiết 5 ngày gần nhất · theo ca (dữ liệu SCADA thật)</h2>
-      <div class="muted" style="margin-bottom:8px">Bia lon: Nhà máy Đông Mai (nguồn 30K_Report). Mỗi ngày có 3 cột Ca 1/Ca 2/Ca 3 — chọn ngày cuối để xem 5 ngày gần nhất tính tới ngày đó.</div>
+      <h2>🍺 Sản lượng chiết &amp; ⚡ Điện tiêu thụ · 5 ngày gần nhất theo ca (dữ liệu SCADA thật)</h2>
+      <div class="muted" style="margin-bottom:8px">Bia lon (nguồn 30K_Report) và điện tiêu thụ (nguồn Energy/NameSys) — Nhà máy Đông Mai. Mỗi ngày có 3 cột Ca 1/Ca 2/Ca 3 — chọn ngày cuối để xem 5 ngày gần nhất tính tới ngày đó.</div>
       <div class="row" style="align-items:flex-end;margin-bottom:12px">
         <div class="field"><label>Ngày cuối (5 ngày gần nhất)</label><input id="db_chiet_date" type="date" value="${dbChietDate}"/></div>
         <button class="btn" id="db_chiet_apply">Xem</button>
@@ -1021,14 +829,42 @@ async function loadDashboardChiet() {
       return { ok: true, rpt };
     } catch (e) { return { ok: false, error: e.message }; }
   };
-  const lonDays = await Promise.all(days.map(d => fetchDay("filling-report", d)));
+  // Điện: 1 request duy nhất cho cả khung 5 ngày (API tự gộp theo ngày trong khoảng, khác
+  // filling-report chỉ trả 1 khung 24h/lần) — tách "tổng qua TRẠM" (by_ca_station, Trạm
+  // 1250KVA + Trạm 560KVA — điện đầu vào/nguồn cấp toàn nhà máy) khỏi "hệ thống tiêu thụ"
+  // (by_ca) đã dùng cho báo cáo AED theo ngày/tháng ở Danh mục Tích hợp.
+  const fetchEnergyRange = async () => {
+    const start = new Date(days[0] + "T06:00:00");
+    const end = new Date(days[days.length - 1] + "T06:00:00"); end.setDate(end.getDate() + 1);
+    try {
+      const rpt = await GET(`/energy/external-ca-report?date_from=${encodeURIComponent(toDTLocal(start))}&date_to=${encodeURIComponent(toDTLocal(end))}`);
+      return { ok: true, rpt };
+    } catch (e) { return { ok: false, error: e.message }; }
+  };
+  const [lonDays, energyRange] = await Promise.all([
+    Promise.all(days.map(d => fetchDay("filling-report", d))),
+    fetchEnergyRange(),
+  ]);
+  // Chuyển by_day_station (1 mảng cho cả khoảng) thành 1 kết quả/ngày để dùng chung khuôn
+  // "results" (giống lonDays) — ngày không có dữ liệu vẫn hiện cột 0, không rớt hẳn khỏi biểu đồ.
+  const energyDays = !energyRange.ok ? days.map(() => energyRange) : days.map(d => {
+    const row = energyRange.rpt.by_day_station.find(r => r.date === d);
+    return { ok: true, rpt: {
+      by_ca: [1, 2, 3].map(ca => ({ ca, value: row ? row[`ca${ca}`] : 0 })),
+      has_gap: row ? row.has_gap : false,
+    } };
+  });
   if (!stillHere()) return;
 
   const dayLabels = days.map(d => new Date(d + "T00:00:00").toLocaleDateString("vi-VN", { day: "2-digit", month: "2-digit" }));
 
   const frameStyle = "background:var(--panel2);border:1px solid var(--border);border-radius:10px;padding:12px 14px";
-  // key = "lon" — dùng để lưu/đọc target riêng dây chuyền (xem chietTarget).
+  // blockData[key] = {unit, results} — dùng lại khi đổi Target/ca để vẽ lại đúng biểu đồ đó
+  // (không gọi lại API), xem wiring data-chiet-target bên dưới.
+  const blockData = {};
+  // key: "lon"/"energy" — dùng để lưu/đọc target riêng từng biểu đồ (xem chietTarget).
   const block = (key, title, plantNote, unit, results) => {
+    blockData[key] = { unit, results };
     if (results.every(r => !r.ok)) {
       const lastErr = results.find(r => !r.ok);
       return `<div style="${frameStyle}">
@@ -1061,17 +897,19 @@ async function loadDashboardChiet() {
 
   $("db_chiet_data").innerHTML = `<div style="display:flex;gap:14px;flex-wrap:wrap;align-items:stretch">
     <div style="flex:1;min-width:280px">${block("lon", "🥫 Dây chuyền 30.000 lon/giờ", "NM Đông Mai", "lon", lonDays)}</div>
+    <div style="flex:1;min-width:280px">${block("energy", "⚡ Điện tiêu thụ (Trạm 1250KVA + Trạm 560KVA)", "NM Đông Mai", "kWh", energyDays)}</div>
   </div>`;
   document.querySelectorAll("#db_chiet_data [data-goto-intg]").forEach(b => b.onclick = () => gotoView("integration", "dbconn"));
-  // Đổi target chỉ vẽ lại đúng SVG của dây chuyền đó (dùng lại series đã tải, không gọi lại API).
+  // Đổi target chỉ vẽ lại đúng SVG của biểu đồ đó (dùng lại results đã tải theo blockData,
+  // không gọi lại API).
   document.querySelectorAll("#db_chiet_data [data-chiet-target]").forEach(inp => {
     inp.onchange = () => {
       const key = inp.dataset.chietTarget;
       setChietTarget(key, parseFloat(inp.value) || 0);
-      const unit = "lon";
+      const { unit, results } = blockData[key];
       const series = [1, 2, 3].map((ca, i) => ({
         label: `Ca ${ca}`, color: caColors[i],
-        values: lonDays.map(r => r.ok ? ((r.rpt.by_ca.find(c => c.ca === ca) || {}).value || 0) : 0),
+        values: results.map(r => r.ok ? ((r.rpt.by_ca.find(c => c.ca === ca) || {}).value || 0) : 0),
       }));
       const chartEl = document.querySelector(`#db_chiet_data [data-chiet-chart="${key}"]`);
       if (chartEl) chartEl.innerHTML = CH.groupedN(dayLabels, series, { unit, height: 130, target: chietTarget(key) });
@@ -1638,8 +1476,8 @@ async function openWaterQcViewModal(woId, woCode) {
     <div class="muted" style="margin-bottom:8px">Chỉ xem lại — khai báo/sửa giá trị làm ở tab "Chất lượng" › "Công đoạn chờ khai báo chỉ tiêu chất lượng".</div>
     <div class="tablewrap"><table>
       <thead><tr><th>Chỉ tiêu</th><th>Min</th><th>Max</th><th>Giá trị đã khai báo</th><th>Kết quả</th><th>Người/Thời gian điền</th></tr></thead>
-      <tbody>${st.required.map(p => { const r = recordedByParam[p.code]; return `<tr>
-        <td>${esc(p.name)}${p.mandatory ? "" : ' <span class="muted" style="font-size:11px">(không bắt buộc)</span>'}<div class="muted">${esc(p.code)}${p.unit ? " (" + esc(p.unit) + ")" : ""}</div></td>
+      <tbody>${qcRowsWithOrphans(st).map(p => { const r = recordedByParam[p.code]; return `<tr>
+        <td>${qcParamNameCell(p)}</td>
         <td>${p.value_type !== "numeric" ? "—" : (p.lsl ?? "—")}</td><td>${p.value_type !== "numeric" ? "—" : (p.usl ?? "—")}</td>
         <td>${r ? qcValueLabel(p, r.value, r.value_text) : "—"}</td>
         <td>${r ? badge(r.status) + r.status : '<span class="muted">chưa khai báo</span>'}</td>
@@ -1648,8 +1486,7 @@ async function openWaterQcViewModal(woId, woCode) {
     </table></div>`);
 }
 // Cột "Mẻ" ở Bảng điều độ link tới Mẻ sản xuất (BatchExecution, liên kết qua work_order_id) —
-// KHÔNG còn link tới Nấu-Lọc-Chiết (BrewBatch cũ, xem openBrewBatchesModal, vẫn giữ riêng cho
-// module đó nếu còn dùng "Phát mẻ").
+// module Nấu-Lọc-Chiết cũ (BrewBatch) đã bị gỡ bỏ hoàn toàn (2026-09-11).
 async function openWoBatchesModal(woId, woCode) {
   const batches = await GET("/batches");
   const rows = batches.filter(b => b.work_order_id === woId);
@@ -2534,11 +2371,11 @@ async function showBatch(id) {
       : '<div class="muted">Công thức của mẻ chưa khai tham số nào (khai ở màn Công thức).</div>'}
     <h3>Chỉ tiêu nước nấu bia${woCode ? ` <span class="muted" style="font-size:13px;font-weight:400">(Lệnh SX ${esc(woCode)})</span>` : ""}</h3>
     ${!b.work_order_id ? '<div class="muted">Mẻ này không gắn Lệnh SX (điều độ) nên không có chỉ tiêu Nước nấu bia riêng.</div>'
-      : (waterQc && waterQc.required && waterQc.required.length ? `
+      : (waterQc && qcRowsWithOrphans(waterQc).length ? `
       <div class="muted" style="margin-bottom:6px">Chỉ xem lại — khai báo/sửa giá trị làm ở tab "Chất lượng" › "Công đoạn chờ khai báo chỉ tiêu chất lượng".</div>
       <table><thead><tr><th>Chỉ tiêu</th><th>Min</th><th>Max</th><th>Giá trị đã khai báo</th><th>Kết quả</th><th>Người/Thời gian điền</th></tr></thead>
-        <tbody>${waterQc.required.map(p => { const r = (waterQc.recorded || []).find(x => x.parameter === p.code); return `<tr>
-          <td>${esc(p.name)}${p.mandatory ? "" : ' <span class="muted" style="font-size:11px">(không bắt buộc)</span>'}<div class="muted">${esc(p.code)}${p.unit ? " (" + esc(p.unit) + ")" : ""}</div></td>
+        <tbody>${qcRowsWithOrphans(waterQc).map(p => { const r = (waterQc.recorded || []).find(x => x.parameter === p.code); return `<tr>
+          <td>${qcParamNameCell(p)}</td>
           <td>${p.value_type !== "numeric" ? "—" : (p.lsl ?? "—")}</td><td>${p.value_type !== "numeric" ? "—" : (p.usl ?? "—")}</td>
           <td>${r ? qcValueLabel(p, r.value, r.value_text) : "—"}</td>
           <td>${r ? badge(r.status) + r.status : '<span class="muted">chưa khai báo</span>'}</td>
@@ -3465,13 +3302,13 @@ async function showBatchFilterLot(filterLotId) {
     ${lk ? "" : (canAdd ? `<button class="btn sm" id="fb_add" style="margin-top:8px">+ Thêm mẻ</button>` : '<div class="muted" style="margin-top:8px">Kết thúc mẻ gần nhất trước khi thêm mẻ mới.</div>')}
     <h3 style="margin-top:16px">Chỉ tiêu Lọc</h3>
     <div class="muted" style="margin-bottom:8px">Chỉ hiển thị — khai báo/sửa giá trị ở tab <b>"Chất lượng"</b> (panel "Công đoạn chờ khai báo chỉ tiêu chất lượng").</div>
-    ${!qc || !qc.required.length ? '<div class="muted">Chưa gán nhóm chỉ tiêu nào cho công đoạn Lọc (gán ở tab Danh mục).</div>' : `
+    ${!qc || !qcRowsWithOrphans(qc).length ? '<div class="muted">Chưa gán nhóm chỉ tiêu nào cho công đoạn Lọc (gán ở tab Danh mục).</div>' : `
     <div class="tablewrap"><table>
       <thead><tr><th>Chỉ tiêu</th><th>Min</th><th>Max</th><th>Giá trị đã khai báo</th><th>Kết quả</th><th>Người/Thời gian điền</th></tr></thead>
-      <tbody>${qc.required.map(p => {
+      <tbody>${qcRowsWithOrphans(qc).map(p => {
         const r = (qc.recorded || []).find(x => x.parameter === p.code);
         return `<tr>
-        <td>${esc(p.name)}${p.mandatory ? "" : ' <span class="muted" style="font-size:11px">(không bắt buộc)</span>'}<div class="muted">${esc(p.code)}${p.unit ? " (" + esc(p.unit) + ")" : ""}</div></td>
+        <td>${qcParamNameCell(p)}</td>
         <td>${p.value_type !== "numeric" ? "—" : (p.lsl ?? "—")}</td><td>${p.value_type !== "numeric" ? "—" : (p.usl ?? "—")}</td>
         <td>${r ? qcValueLabel(p, r.value, r.value_text) : "—"}</td>
         <td>${r ? badge(r.status) + r.status : '<span class="muted">chưa khai báo</span>'}</td>
@@ -3720,13 +3557,13 @@ async function showBatchPackLot(packLotId) {
     <button class="btn sm sec" id="pk_shifts_save" ${dis}>Lưu SL theo ca</button>
     <h3 style="margin-top:16px">Chỉ tiêu thành phẩm</h3>
     <div class="muted" style="margin-bottom:8px">Chỉ hiển thị — khai báo/sửa giá trị ở tab <b>"Chất lượng"</b> (panel "Công đoạn chờ khai báo chỉ tiêu chất lượng").</div>
-    ${!pkQc || !pkQc.required.length ? '<div class="muted">Chưa gán nhóm chỉ tiêu nào cho công đoạn Thành phẩm (gán ở tab Danh mục).</div>' : `
+    ${!pkQc || !qcRowsWithOrphans(pkQc).length ? '<div class="muted">Chưa gán nhóm chỉ tiêu nào cho công đoạn Thành phẩm (gán ở tab Danh mục).</div>' : `
     <div class="tablewrap"><table>
       <thead><tr><th>Chỉ tiêu</th><th>Min</th><th>Max</th><th>Giá trị đã khai báo</th><th>Kết quả</th><th>Người/Thời gian điền</th></tr></thead>
-      <tbody>${pkQc.required.map(pm => {
+      <tbody>${qcRowsWithOrphans(pkQc).map(pm => {
         const r = (pkQc.recorded || []).find(x => x.parameter === pm.code);
         return `<tr>
-        <td>${esc(pm.name)}${pm.mandatory ? "" : ' <span class="muted" style="font-size:11px">(không bắt buộc)</span>'}<div class="muted">${esc(pm.code)}${pm.unit ? " (" + esc(pm.unit) + ")" : ""}</div></td>
+        <td>${qcParamNameCell(pm)}</td>
         <td>${pm.value_type !== "numeric" ? "—" : (pm.lsl ?? "—")}</td><td>${pm.value_type !== "numeric" ? "—" : (pm.usl ?? "—")}</td>
         <td>${r ? qcValueLabel(pm, r.value, r.value_text) : "—"}</td>
         <td>${r ? badge(r.status) + r.status : '<span class="muted">chưa khai báo</span>'}</td>
@@ -4164,13 +4001,9 @@ async function openPackLotEBR(packLotId) {
 
 // ================= QUALITY =================
 VIEWS.quality = async function () {
-  const [results, devs, batches, lots, materials, qcParams, brewBatches, fermentsData, filtersData, bottlesData, holdHistory, pendingStageQc, capas, matLocsQuality, pendingKcPxQuality, pendingSngQuality, batchTanksQuality, batchFilterLotsQuality, batchPackLotsQuality, productsQuality, beerTypesQuality] = await Promise.all([
+  const [results, devs, batches, lots, materials, qcParams, holdHistory, pendingStageQc, capas, matLocsQuality, pendingKcPxQuality, pendingSngQuality, batchTanksQuality, batchFilterLotsQuality, batchPackLotsQuality, productsQuality, beerTypesQuality] = await Promise.all([
     GET("/quality/results"), GET("/quality/deviations"), GET("/batches"), GET("/lots"), GET("/materials"),
     GET("/qc/parameters?active_only=false").catch(() => []),
-    GET("/brewing/brew-batches").catch(() => []),
-    GET("/brewing/ferments").catch(() => ({ items: [] })),
-    GET("/brewing/filters").catch(() => []),
-    GET("/brewing/bottles").catch(() => []),
     GET("/audit?action=hold,release&limit=100").catch(() => []),
     GET("/quality/pending-stage-qc").catch(() => []),
     GET("/qc/capa").catch(() => []),
@@ -4202,8 +4035,7 @@ VIEWS.quality = async function () {
   // Deviation<->CAPA — xem PENDING_OPEN_CAPA_ID/PENDING_OPEN_DEVIATION_ID).
   const capaByDevId = {};
   capas.filter(c => c.deviation_id).forEach(c => (capaByDevId[c.deviation_id] ??= []).push(c));
-  const ferments = fermentsData.items || [];
-  // Hold/Release + Mở deviation tách riêng theo công đoạn sản xuất (Nấu/Lên men/Lọc/Chiết),
+  // Hold/Release + Mở deviation tách riêng theo công đoạn sản xuất (Mẻ SX/NVL),
   // ngoài Mẻ SX (ISA-88)/Lô NVL đã có — mỗi <optgroup> 1 công đoạn, nhãn kèm trạng thái hiện
   // tại để thấy ngay công đoạn nào đang bị giữ. Xem services/quality.py::_STAGE_MODELS.
   const hqLabel = (q) => q === "on_hold" ? " — ĐANG HOLD" : "";
@@ -4229,29 +4061,17 @@ VIEWS.quality = async function () {
   const lotById = Object.fromEntries(lots.map(l => [l.lot_id, l]));
   const matById = Object.fromEntries(materials.map(m => [m.material_id, m]));
   const paramByCode = Object.fromEntries(qcParams.map(p => [p.code, p]));
-  const fermentByLm = Object.fromEntries(ferments.map(f => [f.lm_code, f]));
-  const filterByCode = Object.fromEntries(filtersData.map(f => [f.filter_code, f]));
-  const bottleByCode = Object.fromEntries(bottlesData.map(b => [b.bottle_code, b]));
   // Pipeline "Mẻ SX" — tra tên hiển thị cho "Kết quả QC gần đây" (trước đây rơi vào nhánh mặc
   // định của qcResultsWithGroupLabel, hiện thẳng "batch_tank <uuid>__len_men_chinh" khó hiểu,
   // yêu cầu người dùng 2026-09-01).
   const batchTankById = Object.fromEntries(batchTanksQuality.map(t => [t.tank_id, t]));
   const batchFilterLotById = Object.fromEntries(batchFilterLotsQuality.map(f => [f.filter_lot_id, f]));
   const batchPackLotById = Object.fromEntries(batchPackLotsQuality.map(p => [p.pack_lot_id, p]));
-  const brewBatchByKey = {};
-  brewBatches.forEach(r => {
-    const info = { batch_code: r.batch_code, brew_id: r.brew_id, brew_code: r.brew_code };
-    brewBatchByKey[r.batch_id] = info;
-    brewBatchByKey[r.batch_code] = info;
-  });
-  const fermentById = Object.fromEntries(ferments.map(f => [f.ferment_id, f]));
-  const filterById = Object.fromEntries(filtersData.map(f => [f.filter_id, f]));
-  const bottleById = Object.fromEntries(bottlesData.map(b => [b.bottle_id, b]));
   // Gộp các dòng chỉ tiêu (đã gán groupLabel/paramLabel ở qcResultsWithGroupLabel) thành 1
   // dòng tổng hợp cho mỗi mẻ/lô nguồn — người dùng bấm "Xem chi tiết" mới thấy từng chỉ tiêu,
   // thay vì liệt kê lặp lại tên mẻ/lô cho mỗi chỉ tiêu như trước.
   const qcGroups = groupQcResultsByScope(qcResultsWithGroupLabel(results,
-    { batchById, lotById, brewBatchByKey, fermentByLm, filterByCode, bottleByCode, paramByCode,
+    { batchById, lotById, paramByCode,
       batchTankById, batchFilterLotById, batchPackLotById }));
   // Tra thẳng kết quả QC ĐÃ GHI cho panel "Công đoạn chờ khai báo" — scope_type/scope_id ở đây
   // trùng NGUYÊN VĂN với QualityResult.scope_type/scope_id lúc ghi (mọi stage đều dùng chung 1
@@ -4271,10 +4091,6 @@ VIEWS.quality = async function () {
     const failLabels = g.rows.filter(r => r.status === "fail").map(r => r.paramLabel);
     let key = null;
     if (g.scope_type === "batch" || g.scope_type === "lot") key = `${g.scope_type}:${g.scope_id}`;
-    else if (g.scope_type === "brew_batch" || g.scope_type === "brew") key = `brew_batch:${g.scope_id}`;
-    else if (g.scope_type === "ferment") { const [lmCode] = g.scope_id.split("__"); const f = fermentByLm[lmCode]; if (f) key = `ferment:${f.ferment_id}`; }
-    else if (g.scope_type === "filter") { const f = filterByCode[g.scope_id]; if (f) key = `filter:${f.filter_id}`; }
-    else if (g.scope_type === "bottle") { const [code] = g.scope_id.split("__"); const b = bottleByCode[code]; if (b) key = `bottle:${b.bottle_id}`; }
     // Pipeline "Mẻ SX" mới — batch_tank dùng scope_id ghép chuỗi "tank_id__len_men_chinh/phu"
     // (khai theo từng công đoạn con của tank), nhưng Hold/Release/Deviation áp dụng ở CẤP CẢ
     // TANK nên chỉ lấy phần tank_id; batch_filter_lot/batch_pack_lot scope_id đã là PK thật
@@ -4295,14 +4111,6 @@ VIEWS.quality = async function () {
   const scopeStages = [
     { tag: "Mẻ SX", items: batches, keyFn: b => `batch:${b.batch_id}`,
       optFn: b => `mẻ ${esc(b.batch_code)}` },
-    { tag: "Nấu", items: brewBatches, keyFn: b => `brew_batch:${b.batch_id}`,
-      optFn: b => `mẻ ${esc(b.batch_code)} (mã nấu ${esc(b.brew_code || "?")})${hqLabel(b.quality_status)}` },
-    { tag: "Lên men", items: ferments, keyFn: f => `ferment:${f.ferment_id}`,
-      optFn: f => `lô LM ${esc(f.lm_code)}${hqLabel(f.quality_status)}` },
-    { tag: "Lọc", items: filtersData, keyFn: f => `filter:${f.filter_id}`,
-      optFn: f => `mẻ lọc ${esc(f.filter_code)}${hqLabel(f.quality_status)}` },
-    { tag: "Chiết", items: bottlesData, keyFn: b => `bottle:${b.bottle_id}`,
-      optFn: b => `mã chiết ${esc(b.bottle_code)}${hqLabel(b.quality_status)}` },
     // Pipeline "Mẻ SX" mới (BatchTank/BatchFilterLot/BatchPackLot) — trước đây hoàn toàn không
     // có mặt ở đây nên Hold/Release/Deviation không thấy được lô lên men/lọc/chiết của pipeline
     // mới dù đã khai báo chỉ tiêu và có FAIL (yêu cầu người dùng 2026-09-01).
@@ -4330,11 +4138,6 @@ VIEWS.quality = async function () {
   const holdScopeLabel = (scopeType, scopeId) => {
     if (scopeType === "batch") return `Mẻ SX ${batchById[scopeId] ? esc(batchById[scopeId].batch_code) : scopeId}`;
     if (scopeType === "lot") return `Lô NVL ${lotById[scopeId] ? esc(lotById[scopeId].lot_code) : scopeId}`;
-    if (scopeType === "brew_batch") { const b = brewBatchByKey[scopeId];
-      return b ? `Mẻ nấu ${esc(b.batch_code)} (mã nấu ${esc(b.brew_code || "?")})` : `Mẻ nấu ${scopeId}`; }
-    if (scopeType === "ferment") return `Lô LM ${fermentById[scopeId] ? esc(fermentById[scopeId].lm_code) : scopeId}`;
-    if (scopeType === "filter") return `Mẻ lọc ${filterById[scopeId] ? esc(filterById[scopeId].filter_code) : scopeId}`;
-    if (scopeType === "bottle") return `Lô chiết ${bottleById[scopeId] ? esc(bottleById[scopeId].bottle_code) : scopeId}`;
     if (scopeType === "batch_tank") return batchTankById[scopeId] ? esc(batchTankDisplayName(batchTankById[scopeId])) : `Tank ${scopeId}`;
     if (scopeType === "batch_filter_lot") return `Lô lọc ${batchFilterLotById[scopeId] ? esc(batchFilterLotById[scopeId].filter_lot_code) : scopeId}`;
     if (scopeType === "batch_pack_lot") return `Lô TP ${batchPackLotById[scopeId] ? esc(batchPackLotById[scopeId].pack_lot_code) : scopeId}`;
@@ -4475,12 +4278,8 @@ VIEWS.quality = async function () {
   const parseScope = (v) => { const [t, i] = v.split(":"); return { scope_type: t, scope_id: i }; };
   // Lấy chỉ tiêu ĐÃ khai báo cho 1 phạm vi (mẻ/lô) để hiện trước khi Hold/Release/Mở deviation —
   // người bấm cần thấy NGAY vì sao (chỉ tiêu nào fail/đạt) thay vì chỉ gõ lý do tự do. Quy ước
-  // scope_id lưu ở QualityResult khác nhau theo loại: lot/batch/brew_batch dùng thẳng scope_id
-  // (khớp _get_scope_obj), còn ferment/filter/bottle dùng mã CÓ NĂM (year-lm_code__part /
-  // year-filter_code / year-bottle_code__thanh_pham, xem qc_catalog.ferment_scope_id/
-  // filter_scope_id/bottle_scope_id — mã lô LM/lọc/chiết chỉ duy nhất TRONG 1 năm nên phải kèm
-  // năm để không lẫn giữa 2 lô khác năm trùng mã) — phải quy đổi ngược từ id sang mã tương ứng
-  // trước khi gọi /quality/results.
+  // scope_id lưu ở QualityResult khác nhau theo loại: lot/batch dùng thẳng scope_id (khớp
+  // _get_scope_obj), còn batch_tank ghép "tank_id__len_men_chinh/phu" — xem nhánh riêng bên dưới.
   async function scopeQcParams(scopeValue) {
     const [type, id] = scopeValue.split(":");
     const paramLabel = (code) => { const p = paramByCode[code]; return p ? p.name : code; };
@@ -4490,20 +4289,7 @@ VIEWS.quality = async function () {
         return (st.recorded || []).map(r => ({ code: r.parameter, label: paramLabel(r.parameter), value: r.value, status: r.status }));
       }
       let results;
-      if (type === "ferment") {
-        const f = fermentById[id];
-        if (!f) return [];
-        const [chinh, phu] = await Promise.all([
-          GET(`/quality/results?scope_id=${encodeURIComponent(f.ferment_year + "-" + f.lm_code + "__len_men_chinh")}`),
-          GET(`/quality/results?scope_id=${encodeURIComponent(f.ferment_year + "-" + f.lm_code + "__len_men_phu")}`)]);
-        results = [...chinh, ...phu];
-      } else if (type === "filter") {
-        const flt = filterById[id];
-        results = flt ? await GET(`/quality/results?scope_id=${encodeURIComponent(flt.filter_year + "-" + flt.filter_code)}`) : [];
-      } else if (type === "bottle") {
-        const b = bottleById[id];
-        results = b ? await GET(`/quality/results?scope_id=${encodeURIComponent(b.bottle_year + "-" + b.bottle_code + "__thanh_pham")}`) : [];
-      } else if (type === "batch_tank") {
+      if (type === "batch_tank") {
         // Tank (Mẻ SX) dùng thẳng tank_id (PK thật, không cần năm) ghép "__len_men_chinh/phu" —
         // khác ferment cũ (cần năm vì lm_code chỉ duy nhất trong 1 năm).
         const [chinh, phu] = await Promise.all([
@@ -4511,7 +4297,7 @@ VIEWS.quality = async function () {
           GET(`/quality/results?scope_id=${encodeURIComponent(id + "__len_men_phu")}`)]);
         results = [...chinh, ...phu];
       } else {
-        // batch, brew_batch, batch_filter_lot, batch_pack_lot: scope_id dùng thẳng id (PK thật)
+        // batch, batch_filter_lot, batch_pack_lot: scope_id dùng thẳng id (PK thật)
         results = await GET(`/quality/results?scope_id=${encodeURIComponent(id)}`);
       }
       const seen = new Set(); const out = [];
@@ -4653,10 +4439,6 @@ VIEWS.quality = async function () {
     const [scopeType, scopeId] = b.dataset.navscope.split("|");
     if (scopeType === "lot") return openLotQcModal(scopeId, { editable: true });
     if (scopeType === "batch") return switchView("batches");
-    if (scopeType === "brew_batch" || scopeType === "brew") { SUB.process = "nau"; return switchView("process"); }
-    if (scopeType === "ferment") { SUB.process = "lenmen"; return switchView("process"); }
-    if (scopeType === "filter") { SUB.process = "loc"; return switchView("process"); }
-    if (scopeType === "bottle") { SUB.process = "chiet"; return switchView("process"); }
     // Nước nấu bia (Mẻ SX) khai theo mã điều độ (WorkOrder), không phải theo tank/mẻ — chưa có
     // route sâu hơn nên nhảy tới Điều độ (Dispatch), nơi WO đó được quản lý.
     if (scopeType === "work_order") return switchView("dispatch");
@@ -4726,7 +4508,7 @@ VIEWS.quality = async function () {
 // tham số (QCParameter.code, VD "6245") sang tên thật, và đánh dấu dòng nào bấm được để
 // nhảy về đúng khu vực (Nấu/Lên men/Lọc/Chiết/Mẻ sản xuất) đang chứa mẻ/lô đó.
 function qcResultsWithGroupLabel(results, ctx) {
-  const { batchById, lotById, brewBatchByKey, fermentByLm, filterByCode, bottleByCode, paramByCode,
+  const { batchById, lotById, paramByCode,
     batchTankById, batchFilterLotById, batchPackLotById } = ctx;
   const labelFor = (r) => {
     if (r.scope_type === "batch_tank") {
@@ -4751,25 +4533,8 @@ function qcResultsWithGroupLabel(results, ctx) {
       const l = lotById[r.scope_id];
       return { label: l ? `Lô NVL ${l.lot_code}` : `Lô NVL ${r.scope_id}`, navigable: true };
     }
-    if (r.scope_type === "brew_batch" || r.scope_type === "brew") {
-      const b = brewBatchByKey[r.scope_id];
-      return { label: b ? `Mẻ nấu ${b.batch_code} (mã nấu ${b.brew_code})` : `Mẻ nấu ${r.scope_id} (không còn tồn tại)`, navigable: !!b };
-    }
-    if (r.scope_type === "ferment") {
-      const [lmCode, part] = r.scope_id.split("__");
-      const f = fermentByLm[lmCode];
-      const partLabel = part === "len_men_phu" ? " — CT phụ" : part === "len_men_chinh" ? " — CT chính" : "";
-      return { label: `Lô lên men ${lmCode}${partLabel}`, navigable: !!f };
-    }
-    if (r.scope_type === "filter") {
-      const f = filterByCode[r.scope_id];
-      return { label: `Mẻ lọc ${r.scope_id}`, navigable: !!f };
-    }
-    if (r.scope_type === "bottle") {
-      const [bottleCode] = r.scope_id.split("__");
-      const b = bottleByCode[bottleCode];
-      return { label: `Lô chiết ${bottleCode}`, navigable: !!b };
-    }
+    // Dữ liệu lịch sử của module Nấu-Lọc-Chiết cũ (brew_batch/ferment/filter/bottle) đã bị gỡ
+    // bỏ khỏi UI — rơi về nhãn mặc định bên dưới (không điều hướng được) nếu còn sót bản ghi cũ.
     return { label: `${r.scope_type} ${r.scope_id}`, navigable: false };
   };
   return results.map(r => {
@@ -4844,9 +4609,6 @@ function devRow(d, failParams, hasClosedCapa, hasAnyCapa, capaList) {
 
 // ================= TRACEABILITY =================
 VIEWS.trace = async function () {
-  const brews = await GET("/brewing/brews").catch(() => []);
-  const brewOpts = `<option value="">(chọn lô nấu)</option>` + brews.map(b =>
-    `<option value="${esc(b.brew_id)}">${esc(b.brew_code)}${b.product_code ? " — " + esc(b.product_code) : ""}</option>`).join("");
   $("view-trace").innerHTML = `
     <div class="panel"><h2>Truy xuất nguồn gốc & Recall</h2>
       <div class="row">
@@ -4856,18 +4618,14 @@ VIEWS.trace = async function () {
         <button class="btn sec" id="t_recall">Recall simulation</button>
         <button class="btn sec" id="t_record_btn">📄 Hồ sơ điện tử</button>
       </div>
-      <div class="row" style="margin-top:8px">
-        <div class="field"><label>Truy xuôi theo nấu — chọn lô nấu</label><select id="t_brew_sel">${brewOpts}</select></div>
-        <button class="btn sec" id="t_fwd_brew">Truy xuôi theo nấu ↓</button>
-      </div>
-      <div class="muted">Truy ngược: thành phẩm → nguyên liệu. Truy xuôi xuất/Recall: nguyên liệu → các lô bị ảnh hưởng, đi tới tận nơi xuất (pallet/xuất kho). Truy xuôi theo nấu: chọn 1 lô nấu, xem xuôi chiều mẻ/lên men/lọc/chiết liên quan — DỪNG Ở CHIẾT, không ra thành phẩm/xuất kho bên ngoài. Hồ sơ điện tử: toàn bộ NVL→Nấu→Lên men→Lọc→Chiết của 1 lô trong 1 màn hình.</div>
+      <div class="muted">Truy ngược: thành phẩm → nguyên liệu. Truy xuôi xuất/Recall: nguyên liệu → các lô bị ảnh hưởng, đi tới tận nơi xuất (pallet/xuất kho). Hồ sơ điện tử: toàn bộ NVL→Nấu→Lên men→Lọc→Chiết của 1 lô trong 1 màn hình.</div>
     </div>
     <div class="panel" id="t_out"><div class="muted">Nhập mã và chọn hướng truy xuất.</div></div>
     <div id="t_record"></div>`;
   const code = () => $("t_code").value.trim();
   // Nút nào vừa bấm hiện màu chính (bỏ "sec"), các nút còn lại chuyển màu phụ — để luôn biết
   // rõ đang xem kết quả của thao tác truy xuất nào (trước đây màu nút cố định, gây nhầm lẫn).
-  const TRACE_BTN_IDS = ["t_back", "t_fwd", "t_fwd_brew", "t_recall", "t_record_btn"];
+  const TRACE_BTN_IDS = ["t_back", "t_fwd", "t_recall", "t_record_btn"];
   const setActiveTraceBtn = (activeId) => TRACE_BTN_IDS.forEach(id => $(id).classList.toggle("sec", id !== activeId));
   const traceGuard = async (fn) => {
     if (!code()) { $("t_out").innerHTML = `<div class="muted">⚠ Chưa nhập mã lô/mã mẻ.</div>`; return; }
@@ -4889,62 +4647,25 @@ VIEWS.trace = async function () {
     setActiveTraceBtn("t_record_btn");
     $("t_record").innerHTML = "";
     return traceGuard(async () => {
-      // Hồ sơ điện tử (EBR) đúng chuẩn của pipeline "Mẻ sản xuất" (mới) chỉ neo ở Lô thành phẩm
-      // (services/ebr.py::assemble_pack_lot, gộp cả cây genealogy ngược tới mẻ nấu gốc) —
-      // KHÔNG dùng chung với "Hồ sơ điện tử" cũ (lot-record) vốn CHỈ đọc module Nấu-Lọc-Chiết
-      // (brew_batch/brew/ferment/filter/bottle) và bỏ qua hẳn node "batch"/"batch_tank"/
-      // "batch_filter_lot"/"batch_pack_lot" — gọi nhầm lot-record cho mã thuộc Mẻ SX sẽ trả về
-      // rỗng, không thấy NVL/Nấu/Lên men/Lọc/Chiết thật nào (yêu cầu người dùng 2026-09-01: phải
-      // lấy từ Mẻ sản xuất, không lấy từ module Nấu-Lọc-Chiết). Nên resolve mã trước để tách
-      // đúng nhánh — cùng cách "Truy ngược" đã resolve (genealogy.find_node), không tốn thêm gì.
+      // Hồ sơ điện tử (EBR) đúng chuẩn của pipeline "Mẻ sản xuất" chỉ neo ở Lô thành phẩm
+      // (services/ebr.py::assemble_pack_lot, gộp cả cây genealogy ngược tới mẻ nấu gốc). Nên
+      // resolve mã trước để tách đúng nhánh — cùng cách "Truy ngược" đã resolve
+      // (genealogy.find_node), không tốn thêm gì.
       const tree = await GET("/trace/backward?code=" + encodeURIComponent(code()));
       if (tree.type === "batch_pack_lot") {
-        // Hiển thị TRỰC TIẾP ngay trên trang (không mở popup) — mirror renderLotRecord của
-        // module cũ, cùng cách hiển thị inline mọi kết quả khác trên màn Truy xuất. KHÔNG hiện
-        // nút Ký điện tử/Phê duyệt & khóa hồ sơ ở đây — đó là hành động chính thức, chỉ làm ở
-        // đúng 1 nơi (màn "Chiết") để tránh ký/khóa nhầm từ màn tra cứu (yêu cầu người dùng
-        // 2026-09-01).
+        // Hiển thị TRỰC TIẾP ngay trên trang (không mở popup), cùng cách hiển thị inline mọi
+        // kết quả khác trên màn Truy xuất. KHÔNG hiện nút Ký điện tử/Phê duyệt & khóa hồ sơ ở
+        // đây — đó là hành động chính thức, chỉ làm ở đúng 1 nơi (màn "Chiết") để tránh ký/khóa
+        // nhầm từ màn tra cứu (yêu cầu người dùng 2026-09-01).
         const { html } = await buildPackLotEBRHtml(tree.id, { showActions: false });
         $("t_record").innerHTML = `<div class="panel">${html}</div>`;
         wirePackLotEBRDiffButton(tree.id);
         return;
       }
-      if (["batch", "batch_tank", "batch_filter_lot"].includes(tree.type)) {
-        $("t_record").innerHTML = `<div class="panel"><div class="muted">⚠ Chưa có Lô thành phẩm nào tách ra từ đây — Hồ sơ điện tử (EBR) của pipeline "Mẻ sản xuất" chỉ có ở Lô thành phẩm (Mẻ SX). Truy xuất lại bằng mã Lô thành phẩm sau khi đã chiết.</div></div>`;
-        return;
-      }
-      renderLotRecord(await GET("/brewing/lot-record?code=" + encodeURIComponent(code())));
+      $("t_record").innerHTML = `<div class="panel"><div class="muted">⚠ Chưa có Lô thành phẩm nào tách ra từ đây — Hồ sơ điện tử (EBR) của pipeline "Mẻ sản xuất" chỉ có ở Lô thành phẩm (Mẻ SX). Truy xuất lại bằng mã Lô thành phẩm sau khi đã chiết.</div></div>`;
     });
   };
-  $("t_fwd_brew").onclick = () => guard(async () => {
-    setActiveTraceBtn("t_fwd_brew");
-    const brewId = $("t_brew_sel").value;
-    if (!brewId) { $("t_out").innerHTML = `<div class="muted">⚠ Chưa chọn lô nấu.</div>`; return; }
-    $("t_record").innerHTML = "";
-    try {
-      const data = await GET("/brewing/brew-forward-record?brew_id=" + encodeURIComponent(brewId));
-      renderTree(data.tree, `Truy xuôi theo nấu — ${esc(data.root.code)}`);
-      renderLotRecord(data, { title: `🍺 Truy xuôi theo nấu — ${esc(data.root.code)}`, showLots: false });
-    } catch (e) { $("t_out").innerHTML = `<div class="muted">⚠ Không truy xuất được: ${esc(e.message)}</div>`; }
-  });
 };
-
-function qcStatusTable(status) {
-  if (!status || !status.required.length) return `<div class="muted">Không có chỉ tiêu.</div>`;
-  const byCode = Object.fromEntries(status.recorded.map(r => [r.parameter, r]));
-  const rows = status.required.map(p => {
-    const r = byCode[p.code];
-    const spec = (p.lsl != null || p.usl != null) ? `${p.lsl ?? ""}–${p.usl ?? ""}` : (p.target ?? "—");
-    const result = !r ? '<span class="qc-pill muted">Chưa ghi</span>'
-      : (r.status === "fail" ? '<span class="qc-pill err">Không đạt</span>' : '<span class="qc-pill ok">Đạt</span>');
-    return `<tr><td>${esc(p.name)}</td><td>${esc(p.unit || "")}</td><td>${esc(String(spec))}</td>
-      <td>${r ? r.value : "—"}</td><td>${result}</td></tr>`;
-  }).join("");
-  return `<table><thead><tr><th>Chỉ tiêu</th><th>ĐVT</th><th>Giới hạn</th><th>Giá trị</th><th>Kết quả</th></tr></thead>
-    <tbody>${rows}</tbody></table>
-    <div class="muted" style="font-size:12px">${status.can_release ? "✅ Đạt đủ chỉ tiêu bắt buộc" :
-      status.pending.length ? `⚠ còn thiếu ${status.pending.length} chỉ tiêu` : "❌ có chỉ tiêu FAIL"}</div>`;
-}
 
 const periodLine = (start, end) => `<div class="muted" style="font-size:12px">🕒 Bắt đầu: ${start ? fmt(start) : "—"} — Kết thúc: ${end ? fmt(end) : "đang thực hiện"}</div>`;
 function cipLinksHtml(cip) {
@@ -4953,97 +4674,6 @@ function cipLinksHtml(cip) {
     <tbody>${cip.map(c => `<tr><td class="code">${esc(c.cip_code)}</td><td>${esc(c.equipment_name || "—")}</td>
       <td class="muted">${fmt(c.started_at)}</td>
       <td>${c.result === "dat" ? '<span class="qc-pill ok">Đạt</span>' : c.result === "khong_dat" ? '<span class="qc-pill err">Không đạt</span>' : '<span class="qc-pill muted">Chờ nghiệm thu</span>'}</td></tr>`).join("")}</tbody></table>`;
-}
-function renderLotRecord(data, opts = {}) {
-  const title = opts.title || `📄 Hồ sơ điện tử — ${esc(data.root.code)}`;
-  const showLots = opts.showLots !== false;
-  const nvlRows = (data.lots || []).map(l => `<tr><td class="code">${esc(l.lot_code)}</td>
-    <td>${esc(l.material_name || l.material_code || "")}</td><td>${l.quantity} ${esc(l.uom)}</td>
-    <td>${badge(l.status)}</td>
-    <td>${l.qc.required.length ? (l.qc.can_release ? '<span class="qc-pill ok">Đạt</span>' : '<span class="qc-pill err">⚠ thiếu/fail</span>')
-      : '<span class="qc-pill muted">Không có chỉ tiêu</span>'}</td></tr>`).join("")
-    || `<tr><td colspan=5 class="muted">Không có lô NVL nào trong chuỗi này.</td></tr>`;
-
-  const nauBlock = data.brew_batches.map(b => `
-    <div class="panel" style="margin-top:8px">
-      <h3>Mẻ ${esc(b.batch_code)} <span class="muted">(mã nấu ${esc(b.brew_code || "—")} · Lệnh nấu ${esc(b.brew_order_code || "—")})</span></h3>
-      ${periodLine(b.started_at, b.ended_at)}
-      <h4>Nguyên vật liệu dùng cho mẻ</h4>
-      <table><thead><tr><th>Vật tư</th><th>Lô PM</th><th>Ngày lô</th><th>FIFO</th><th>SL</th><th>ĐVT</th></tr></thead>
-        <tbody>${b.materials.map(m => `<tr><td>${esc(m.material_name)}</td><td>${esc(m.lot_pm || "")}</td>
-          <td class="muted">${m.lot_date ? fmt(m.lot_date) : "—"}</td><td>${fifoBadgeHtml(m.fifo_ok)}</td>
-          <td>${m.quantity}</td><td>${esc(m.uom)}</td></tr>`).join("") ||
-          '<tr><td colspan=6 class="muted">Chưa khai báo NVL.</td></tr>'}</tbody></table>
-      <h4>Chỉ tiêu Nấu</h4>${qcStatusTable(b.qc)}
-      <h4>CIP liên quan</h4>${cipLinksHtml(b.cip)}
-      <h4>Ghi chép nấu (đầy đủ)</h4>
-      ${BF_SECTIONS.map(sec => `<div style="margin-bottom:10px"><b>${esc(sec.title)}</b>
-        ${_bfPrintSectionBody(sec, b.process_log)}</div>`).join("")}
-    </div>`).join("") || `<div class="muted">Không có mẻ nấu nào trong chuỗi này.</div>`;
-
-  const lenmenBlock = data.ferments.map(f => `
-    <div class="panel" style="margin-top:8px">
-      <h3>Lô LM ${esc(f.lm_code)} <span class="muted">(tank ${esc(f.tank_lm)})</span></h3>
-      ${periodLine(f.started_at, f.ended_at)}
-      <h4>Lên men chính</h4>${qcStatusTable(f.qc.len_men_chinh)}
-      <h4>Lên men phụ</h4>${qcStatusTable(f.qc.len_men_phu)}
-      <h4>CIP liên quan</h4>${cipLinksHtml(f.cip)}
-      <h4>Biểu đồ theo dõi lên men</h4>
-      ${(f.readings && f.readings.length) ? _flChartHtml(f.readings) : '<div class="muted">Chưa có số liệu ghi chép hàng ngày.</div>'}
-    </div>`).join("") || `<div class="muted">Không có lô lên men nào trong chuỗi này.</div>`;
-
-  const locBlock = data.filters.map(f => `
-    <div class="panel" style="margin-top:8px">
-      <h3>Mã lọc ${esc(f.filter_code)} <span class="muted">(mã nấu ${esc(f.brew_code || "—")} · Lệnh lọc ${esc(f.filter_master_order_code || f.filter_order_code || "—")}${f.batch_number || f.order_number ? ` · Số mẻ ${esc(f.batch_number || "—")} · Số lệnh ${esc(f.order_number || "—")}` : ""})</span></h3>
-      ${periodLine(f.started_at, f.ended_at)}
-      ${f.is_refilter ? `<div class="muted" style="color:var(--red)">⚠ Lọc lại từ tank BBT <b>${esc(f.refilter_source_bbt_code)}</b> — lý do: ${esc(f.refilter_reason || "—")}</div>` : ""}
-      ${qcStatusTable(f.qc)}
-      <h4>CIP liên quan</h4>${cipLinksHtml(f.cip)}
-      <h4>Mẻ lọc số (từng đợt rút dịch)</h4>
-      <table><thead><tr><th>Mẻ lọc số</th><th>Tank nguồn</th><th>V dịch/hl</th><th>Nước bài khí/hl</th><th>V bia/hl</th><th>Kết thúc</th><th></th></tr></thead>
-        <tbody>${(f.tank_lines || []).map(l => `<tr>
-          <td>${esc(l.batch_seq_no || "—")}</td>
-          <td class="muted">${l.tank_type === "bbt" ? `BBT ${esc(l.source_bbt_code || "—")} (lọc lại)` : esc(l.tank_lm || "—")}${l.brew_code ? ` · mã nấu ${esc(l.brew_code)}` : ""}</td>
-          <td>${l.v_dich_hl != null ? l.v_dich_hl : "—"}</td>
-          <td>${l.nuoc_bai_khi_hl != null ? l.nuoc_bai_khi_hl : "—"}</td>
-          <td>${l.v_beer_hl != null ? l.v_beer_hl : "—"}</td>
-          <td>${l.ended_at ? fmt(l.ended_at) : "—"}</td>
-          <td>${l.is_final_batch ? '<span class="badge planned">Mẻ cuối</span>' : ""}</td>
-        </tr>`).join("") ||
-          '<tr><td colspan=7 class="muted">Chưa có đợt rút dịch nào.</td></tr>'}</tbody></table>
-      <h4>Nguyên vật liệu lọc</h4>
-      <table><thead><tr><th>Nguyên liệu</th><th>Lô PM</th><th>Ngày lô</th><th>FIFO</th><th>SL</th><th>ĐVT</th></tr></thead>
-        <tbody>${(f.materials || []).map(m => `<tr><td>${esc(m.material_name)}</td><td>${esc(m.lot_pm || "")}</td>
-          <td class="muted">${m.lot_date ? fmt(m.lot_date) : "—"}</td><td>${fifoBadgeHtml(m.fifo_ok)}</td>
-          <td>${m.quantity}</td><td>${esc(m.uom)}</td></tr>`).join("") ||
-          '<tr><td colspan=6 class="muted">Chưa ghi nguyên liệu nào.</td></tr>'}</tbody></table>
-    </div>`).join("") || `<div class="muted">Không có bản ghi lọc nào trong chuỗi này.</div>`;
-
-  const chietBlock = data.bottles.map(b => `
-    <div class="panel" style="margin-top:8px">
-      <h3>Lô chiết ${esc(b.bottle_code)} <span class="muted">(số lô bia ${esc(b.lot_no || "—")})</span></h3>
-      ${periodLine(b.started_at, b.ended_at)}
-      <h4>Nguyên vật liệu chiết</h4>
-      <table><thead><tr><th>Nguyên liệu</th><th>Lô PM</th><th>Ngày lô</th><th>FIFO</th><th>SL</th><th>ĐVT</th></tr></thead>
-        <tbody>${(b.materials || []).map(m => `<tr><td>${esc(m.material_name)}</td><td>${esc(m.lot_pm || "")}</td>
-          <td class="muted">${m.lot_date ? fmt(m.lot_date) : "—"}</td><td>${fifoBadgeHtml(m.fifo_ok)}</td>
-          <td>${m.quantity}</td><td>${esc(m.uom)}</td></tr>`).join("") ||
-          '<tr><td colspan=6 class="muted">Chưa ghi nguyên liệu nào.</td></tr>'}</tbody></table>
-      <h4>Thành phẩm</h4>${qcStatusTable(b.qc.thanh_pham)}
-      <h4>CIP liên quan</h4>${cipLinksHtml(b.cip)}
-    </div>`).join("") || `<div class="muted">Không có bản ghi chiết nào trong chuỗi này.</div>`;
-
-  let n = 1;
-  const lotsSection = showLots ? `<div class="panel"><h3>${n++}. Nguyên vật liệu</h3>
-      <table><thead><tr><th>Mã lô</th><th>Vật tư</th><th>SL</th><th>Trạng thái</th><th>Chỉ tiêu</th></tr></thead>
-      <tbody>${nvlRows}</tbody></table></div>` : "";
-  $("t_record").innerHTML = `
-    <div class="panel"><h2>${title}</h2></div>
-    ${lotsSection}
-    <div class="panel"><h3>${n++}. Mẻ nấu</h3>${nauBlock}</div>
-    <div class="panel"><h3>${n++}. Lên men</h3>${lenmenBlock}</div>
-    <div class="panel"><h3>${n++}. Lọc</h3>${locBlock}</div>
-    <div class="panel"><h3>${n++}. Chiết</h3>${chietBlock}</div>`;
 }
 const TRACE_NODE_ICON = {
   lot: "📦", batch: "🍺", brew_batch: "🍺", brew: "🍺",
@@ -7248,7 +6878,7 @@ let REQUEST_CART = [];   // {material_id, material_code, lot_id, lot_code, quant
                           // group_code/group_name/group_members chỉ có ở dòng được "Nạp vật tư từ lệnh"
                           // đưa lên từ 1 Nhóm vật tư thay thế — mỗi mã thành viên thành 1 dòng riêng,
                           // thủ kho tự xoá bớt chỉ giữ đúng 1 mã muốn xuất (xem cartPanelHtml).
-let REQUEST_SOURCE = null;   // {type: "brew_order"|"filter_master_order", id, label} — tuỳ chọn, chỉ để tham chiếu/báo cáo
+let REQUEST_SOURCE = null;   // {type: "brew_order", id, label} — tuỳ chọn, chỉ để tham chiếu/báo cáo
 
 const REQ_STATUS_BADGE = { pending: "on_hold", fulfilled: "available", rejected: "obsolete", cancelled: "obsolete" };
 
@@ -7546,7 +7176,6 @@ function cartPanelHtml() {
       <div class="field"><label>Loại lệnh</label><select id="rq_srctype">
         <option value="">(không có)</option>
         <option value="brew_order">Lệnh nấu</option>
-        <option value="filter_master_order">Lệnh lọc</option>
       </select></div>
       <div class="field" style="flex:1"><label>Lệnh</label><select id="rq_srcorder"><option value="">(chọn loại lệnh trước)</option></select></div>
       <button class="btn sec" id="rq_srcload" style="align-self:flex-end" disabled>Nạp vật tư từ lệnh</button>
@@ -7588,7 +7217,7 @@ function wireCartPanel() {
       $("rq_srcload").disabled = true;
       return;
     }
-    const opts = type === "brew_order" ? (REQ_CACHE.brewOrders || []) : (REQ_CACHE.filterMasterOrders || []);
+    const opts = REQ_CACHE.brewOrders || [];
     sel.innerHTML = '<option value="">(chọn lệnh)</option>' +
       opts.map(o => `<option value="${esc(o.id)}">${esc(o.order_code)}</option>`).join("");
     $("rq_srcload").disabled = true;
@@ -7604,7 +7233,7 @@ function wireCartPanel() {
     const groupLines = lines.filter(l => l.is_group);
     const normalLines = lines.filter(l => !l.is_group);
     const orderCode = $("rq_srcorder").options[$("rq_srcorder").selectedIndex].textContent;
-    const orderLabel = (type === "brew_order" ? "Lệnh nấu " : "Lệnh lọc ") + orderCode;
+    const orderLabel = "Lệnh nấu " + orderCode;
     for (const l of normalLines) {
       REQUEST_CART.push({ material_id: l.material_id, material_code: l.material_code || l.material_id,
         lot_id: null, lot_code: null, quantity: l.quantity, uom: l.uom || "kg",
@@ -7802,15 +7431,13 @@ function refreshRequestsHistoryBlock() {
 }
 
 async function renderRequestsSection() {
-  const [requests, mats, lots, brewOrders, filterMasterOrders] = await Promise.all([
+  const [requests, mats, lots, brewOrders] = await Promise.all([
     GET("/warehouse/requests"), GET("/materials"), GET("/lots"),
-    GET("/brewing/orders").catch(() => []), GET("/brewing/filter-master-orders").catch(() => [])]);
+    GET("/brewing/orders").catch(() => [])]);
   // Chỉ hiện lệnh CHƯA hoàn thành trong danh sách nạp vật tư — lệnh đã hoàn thành (đủ sản
   // lượng + hết mẻ) không còn cần đề nghị nhận thêm NVL nữa, ẩn đi để tránh chọn nhầm.
   REQ_CACHE.brewOrders = brewOrders.filter(o => !o.is_complete).map(o => ({ id: o.brew_order_id,
     order_code: `${o.order_code} · ${o.product_code || o.product_desc || "(chưa gán dịch bia)"} · ${o.created_at ? fmt(o.created_at) : "—"}` }));
-  REQ_CACHE.filterMasterOrders = filterMasterOrders.filter(o => !o.is_complete_all)
-    .map(o => ({ id: o.filter_master_order_id, order_code: o.order_code }));
   REQ_CACHE.matById = Object.fromEntries(mats.map(m => [m.material_id, m]));
   REQ_CACHE.lots = lots;
   const lotById = Object.fromEntries(lots.map(l => [l.lot_id, l]));
@@ -7893,6 +7520,30 @@ function qcValueInputHtml(cls, p) {
 function qcRecordedMetaHtml(r) {
   if (!r) return "—";
   return `<span class="muted" style="font-size:12px">${esc(r.recorded_by || "—")}<br/>${r.recorded_at ? fmt(r.recorded_at) : "—"}</span>`;
+}
+// Gộp danh sách chỉ tiêu ĐANG áp dụng (status.required, theo Danh mục/nhóm hiện tại) với các
+// chỉ tiêu ĐÃ GHI KẾT QUẢ (status.recorded) nhưng bản ghi Danh mục gốc đã bị xóa hoặc gỡ khỏi
+// nhóm sau đó ("mồ côi") — để các bảng CHỈ XEM LẠI không "mất" dữ liệu lịch sử chỉ vì Danh mục
+// đổi SAU KHI đã ghi (yêu cầu người dùng 2026-09-11: EBR vẫn giữ nguyên chỉ tiêu đã xóa khỏi
+// Danh mục, các bảng xem lại trên mẻ/lô lọc/lô TP cũng phải giữ vậy). Mirror cách EBR/qc-samples
+// đọc thẳng QualityResult, không qua required_params_for_stage. CHỈ dùng cho HIỂN THỊ — pending/
+// has_fail/can_release vẫn tính nguyên từ status.required như cũ ở tầng backend, không đổi gating.
+function qcRowsWithOrphans(status) {
+  const required = (status && status.required) || [];
+  const recorded = (status && status.recorded) || [];
+  const requiredCodes = new Set(required.map(p => p.code));
+  const orphaned = recorded.filter(r => !requiredCodes.has(r.parameter)).map(r => ({
+    code: r.parameter, name: r.name || r.parameter, unit: "", mandatory: false, value_type: "numeric",
+    lsl: r.lower_limit ?? null, usl: r.upper_limit ?? null, orphaned: true,
+  }));
+  return [...required, ...orphaned];
+}
+// Nhãn tên chỉ tiêu cho 1 dòng trong bảng xem lại — chỉ tiêu đã bị xóa khỏi Danh mục (xem
+// qcRowsWithOrphans) vẫn hiện bình thường, không đánh dấu gì khác biệt (yêu cầu người dùng
+// 2026-09-11: xóa khỏi Danh mục chỉ ảnh hưởng các lô/mẻ SAU, không cần ghi chú gì ở đây).
+function qcParamNameCell(p) {
+  return `${esc(p.name)}${p.mandatory === false && !p.orphaned ? ' <span class="muted" style="font-size:11px">(không bắt buộc)</span>' : ""}
+    <div class="muted">${esc(p.code)}${p.unit ? " (" + esc(p.unit) + ")" : ""}</div>`;
 }
 async function openLotQcModal(lotId, { editable = true } = {}) {
   const st = await GET(`/lots/${lotId}/qc-status`);
@@ -8223,803 +7874,10 @@ function sortLotsFifo(lotsArr) {
   });
 }
 
-// ---- Modal: nguyên liệu đã dùng cho 1 mẻ cụ thể (thuộc 1 mã nấu) — lấy thật từ tồn kho Kho phân xưởng ----
-async function openBrewMaterialsModal(brewId, batchId, batchCode, onBack) {
-  const [usage, lots, materials, brews, altGroups] = await Promise.all([
-    GET(`/brewing/brews/${brewId}/batches/${batchId}/materials`), GET("/lots"), GET("/materials"),
-    GET("/brewing/brews").catch(() => []), GET("/material-alt-groups").catch(() => [])]);
-  const matById = Object.fromEntries(materials.map(m => [m.material_id, m]));
-  const lotById = Object.fromEntries(lots.map(l => [l.lot_id, l]));
-  const matForUsage = (u) => { const lot = u.lot_id ? lotById[u.lot_id] : null; return lot ? matById[lot.material_id] : null; };
-  // Mã vật tư -> Nhóm vật tư thay thế chứa nó (nếu có) — dùng để: (1) cảnh báo khi mẻ này đã
-  // ghi nhận >1 mã KHÁC nhau cùng 1 nhóm (thường là do nhầm, nên chỉ dùng 1 mã thay thế cho
-  // nhóm đó), (2) ép ĐVT của các mã thuộc nhóm phải theo đúng MaterialAltGroup.unit (không cho
-  // tự chọn uom/alt_uom riêng của từng mã) để tồn kho các mã trong nhóm cộng được với nhau,
-  // (3) hỏi xác nhận trước khi thêm 1 mã KHÁC trong cùng nhóm vào mẻ đã có mã đó rồi.
-  const altGroupByMaterialId = {};
-  for (const g of altGroups) for (const mid of g.member_material_ids || []) altGroupByMaterialId[mid] = g;
-  const groupForcedUomHtml = (mat, attrs) => {
-    const grp = mat ? altGroupByMaterialId[mat.material_id] : null;
-    if (grp && grp.unit) {
-      const a = /=/.test(attrs) ? attrs : `id="${attrs}"`;
-      return `<input ${a} value="${esc(grp.unit)}" readonly title="Bắt buộc theo đơn vị của Nhóm vật tư thay thế &quot;${esc(grp.name)}&quot;" style="width:60px;background:var(--bg2,#f2f2f2)"/>`;
-    }
-    return altUomFieldHtml(mat, attrs, 60);
-  };
-  // Số lượng đã LƯU (BrewMaterialUsage.quantity) luôn ở đơn vị GỐC (mat.uom) của vật tư — khi ép
-  // hiển thị ĐVT theo đơn vị NHÓM (groupForcedUomHtml, có thể là mat.alt_uom, VD "kg" khi
-  // mat.uom="lon") phải quy đổi lại số hiển thị cho khớp, nếu không số trên màn hình (đơn vị
-  // gốc) sẽ bị đọc nhầm thành đơn vị nhóm — đây là lỗi cụ thể người dùng vừa báo (0.8 thay vì 4).
-  const groupForcedDisplayQty = (mat, baseQty) => {
-    const grp = mat ? altGroupByMaterialId[mat.material_id] : null;
-    if (grp && grp.unit && grp.unit === mat.alt_uom && mat.alt_uom_ratio) return baseQty * mat.alt_uom_ratio;
-    return baseQty;
-  };
-  // Lô cũ nhất trong Kho phân xưởng TÍNH CHUNG CẢ NHÓM vật tư thay thế (so giữa các mã thành
-  // viên với nhau, giống hệt cách "Đề nghị nhận kho" đang so — xem groupFifoBestMaterialId) —
-  // KHÁC workshopLots vốn chỉ sort trong phạm vi 1 mã. Vì workshopLots đã sort theo (material_id,
-  // created_at) nên .find() theo từng mid trả ngay lô cũ nhất của riêng mã đó.
-  const groupOldestWorkshopLot = (memberIds) => {
-    let best = null;
-    for (const mid of memberIds || []) {
-      const l = workshopLots.find(l => l.material_id === mid);
-      if (l && (!best || new Date(l.created_at) < new Date(best.created_at))) best = l;
-    }
-    return best;
-  };
-  // Badge FIFO cho 1 dòng gợi ý BOM: nếu mã thuộc Nhóm vật tư thay thế, phải so với lô cũ nhất
-  // CỦA CẢ NHÓM (không chỉ so với các lô khác của riêng mã đó) — mã không thuộc nhóm thì vẫn so
-  // trong phạm vi riêng mã như trước.
-  const bomRowFifoHtml = (mid, matLots, chosenLotId) => {
-    const grp = altGroupByMaterialId[mid];
-    if (grp) {
-      const groupBest = groupOldestWorkshopLot(grp.member_material_ids);
-      if (groupBest && chosenLotId === groupBest.lot_id) return '<span class="badge available">✓ Lô cũ nhất (FIFO)</span>';
-      const bestMat = groupBest ? matById[groupBest.material_id] : null;
-      return `<span class="badge on_hold" title="Còn lô cũ hơn ở mã ${esc(bestMat ? bestMat.code : "")} trong nhóm: ${esc(groupBest ? groupBest.lot_code : "")} (${groupBest ? fmt(groupBest.created_at) : ""})">⚠ Còn mã khác cũ hơn trong nhóm</span>`;
-    }
-    if (!matLots.length) return '<span class="muted">—</span>';
-    return matLots[0].lot_id === chosenLotId
-      ? '<span class="badge available">✓ Lô cũ nhất (FIFO)</span>'
-      : `<span class="badge on_hold" title="Còn lô cũ hơn: ${esc(matLots[0].lot_code)} (${fmt(matLots[0].created_at)})">⚠ Không phải lô cũ nhất</span>`;
-  };
-  // Mã khác (nếu có) trong CÙNG nhóm với `mat` đã được ghi nhận (Lưu thành công) cho mẻ này —
-  // dùng để cảnh báo cột "Cảnh báo" của dòng đã ghi nhận, và để hỏi xác nhận lúc thêm dòng mới.
-  const otherGroupMemberInUsage = (mat) => {
-    if (!mat) return null;
-    const grp = altGroupByMaterialId[mat.material_id];
-    // Nhóm "chọn nhiều mã" (selection_mode="multi") — dùng phối hợp nhiều mã cùng lúc là hành
-    // vi ĐÚNG, không phải nhầm lẫn, nên bỏ cảnh báo/hỏi xác nhận (khác nhóm "chỉ 1 mã" mặc định).
-    if (!grp || grp.selection_mode === "multi") return null;
-    for (const u2 of usage) {
-      const m2 = matForUsage(u2);
-      if (m2 && m2.material_id !== mat.material_id && grp.member_material_ids.includes(m2.material_id)) return m2;
-    }
-    return null;
-  };
-
-  // Gợi ý số lượng NVL/mẻ — lấy từ Định mức của Lệnh nấu (mã nấu này thuộc về), đã tự
-  // chia đều cho số mẻ khai báo lúc lập lệnh (BrewOrderMaterialLine.qty_per_batch).
-  // Chỉ là gợi ý — số thực tế dùng vẫn ghi ở ô SL riêng, sửa tự do được. Dòng khai theo Nhóm
-  // vật tư thay thế (VD "Malt Úc") không có material_id cụ thể — thêm TỪNG material_id thành
-  // viên vào sugByMaterialId (cùng gợi ý qty_per_batch) để bảng gợi ý bên dưới tự hiện đủ mọi
-  // mã cụ thể (rời/bao) đang có tồn Kho phân xưởng, thủ kho chọn lô nào cũng được.
-  let sugByMaterialId = {};
-  const addBomLinesToSug = (lines) => {
-    for (const l of lines || []) {
-      if (l.is_header) continue;
-      if (l.material_id) { if (l.qty_per_batch != null) sugByMaterialId[l.material_id] = l.qty_per_batch; continue; }
-      // Dòng Nhóm vật tư thay thế khai định mức RIÊNG từng thành viên (Công thức ->
-      // member_qty, xem services/brew_order.py::_build_group_line) — member_breakdown mang
-      // sẵn qty_per_batch của TỪNG mã, dùng đúng số đó thay vì gán chung 1 số như dòng nhóm
-      // khai kiểu cũ (không có member.qty_per_batch).
-      const hasPerMemberQty = (l.member_breakdown || []).some(mb => mb.qty_per_batch != null);
-      if (hasPerMemberQty) {
-        for (const mb of l.member_breakdown) if (mb.material_id) sugByMaterialId[mb.material_id] = mb.qty_per_batch;
-        continue;
-      }
-      if (l.qty_per_batch == null) continue;
-      for (const mid of l.member_material_ids || []) sugByMaterialId[mid] = l.qty_per_batch;
-    }
-  };
-  const brew = brews.find(b => b.brew_id === brewId);
-  if (brew && brew.brew_order_id) {
-    try {
-      const order = await GET(`/brewing/orders/${brew.brew_order_id}`);
-      addBomLinesToSug(order.lines);
-      // Lệnh nấu chưa lưu định mức riêng từng dòng (VD lệnh cũ/tạo tay không qua auto-BOM)
-      // — tính lại gợi ý trực tiếp từ Công thức (BOM) của dịch bia, dùng ĐÚNG planned_batch_count/
-      // planned_volume_hl đã lưu ở lệnh để ra cùng 1 số/mẻ như khi lệnh có định mức sẵn.
-      if (!Object.keys(sugByMaterialId).length && order.product_id && order.planned_batch_count) {
-        const preview = await GET(`/brewing/orders/bom-preview?product_id=${encodeURIComponent(order.product_id)}&planned_batch_count=${order.planned_batch_count}&planned_volume_hl=${order.planned_volume_hl || 0}`);
-        addBomLinesToSug(preview);
-      }
-    } catch (e) { /* không có lệnh nấu/định mức/công thức — bỏ qua gợi ý */ }
-  }
-
-  // Chỉ hiển thị NVL có trong định mức của lệnh nấu này — tránh chọn nhầm vật tư
-  // không thuộc công thức. Nếu lệnh chưa có định mức thì mới cho chọn tự do.
-  const bomMaterialIds = new Set(Object.keys(sugByMaterialId));
-  const workshopLotsAll = lots.filter(l => l.quantity > 0 && l.status !== "on_hold" && /phân xưởng/i.test(l.location || ""));
-  const workshopLots = sortLotsFifo(bomMaterialIds.size ? workshopLotsAll.filter(l => bomMaterialIds.has(l.material_id)) : workshopLotsAll);
-  // Bảng "gợi ý" CHỈ hiện mã nào đã thực sự có tồn Kho phân xưởng — mã cùng Nhóm vật tư thay
-  // thế nhưng chưa chuyển sang Kho phân xưởng (SL=0, nút Thêm vô dụng) chỉ gây rối mắt, đã có
-  // cảnh báo thiếu tồn riêng ở Lệnh nấu/BOM preview rồi nên không cần lặp lại ở đây.
-  const bomIdsWithStock = [...bomMaterialIds].filter(mid => workshopLots.some(l => l.material_id === mid));
-  const lotOpts = `<option value="">(nhập tên tự do)</option>` + workshopLots.map(l => {
-    const mat = matById[l.material_id];
-    return `<option value="${esc(l.lot_id)}" data-material="${esc(l.material_id || "")}">${esc(mat ? mat.name : l.lot_code)} — lô ${esc(l.lot_code)} (còn ${l.quantity}${l.uom}, nhập ${fmt(l.created_at)})</option>`;
-  }).join("") || `<option value="">(Kho phân xưởng chưa có tồn NVL thuộc định mức lệnh nấu này)</option>`;
-
-  modal(`<h3>Nguyên liệu dùng cho mẻ — <code class="k">${esc(batchCode)}</code></h3>
-    <div class="muted" style="margin-bottom:8px">Nguyên liệu phân bổ vào mẻ nấu lấy từ tồn kho <b>Kho phân xưởng</b> — chọn lô sẽ trừ tồn kho thật ngay. Danh sách lô bên dưới đã sắp theo FIFO (cũ nhất trước) trong từng vật tư.</div>
-    <div class="tablewrap"><table>
-      <thead><tr><th>Nguyên liệu</th><th>Cảnh báo</th><th>Số lô PM</th><th>Ngày lô</th><th>FIFO</th><th>Số lượng</th><th>ĐVT</th><th></th></tr></thead>
-      <tbody>${usage.map(u => {
-        const otherMember = otherGroupMemberInUsage(matForUsage(u));
-        return `<tr>
-        <td>${esc(u.material_name)}</td>
-        <td>${otherMember ? `<span class="badge on_hold" title="Mã ${esc(otherMember.code)} cũng thuộc Nhóm vật tư thay thế này đã được ghi nhận cho mẻ — 2 mã dùng thay thế nhau, thường chỉ nên giữ 1 mã">⚠️ Nhóm: ${esc(altGroupByMaterialId[matForUsage(u).material_id].name)}</span>` : '<span class="muted">—</span>'}</td>
-        <td class="muted">${esc(u.lot_pm || "—")}</td>
-        <td class="muted">${u.lot_date ? fmt(u.lot_date) : "—"}</td>
-        <td>${fifoBadgeHtml(u.fifo_ok)}</td>
-        <td><input type="number" step="any" class="bmu-edit-qty" data-usage="${esc(u.usage_id)}" value="${groupForcedDisplayQty(matForUsage(u), u.quantity)}" style="width:90px"/></td>
-        <td>${groupForcedUomHtml(matForUsage(u), `class="bmu-edit-uom" data-usage="${esc(u.usage_id)}"`)}</td>
-        <td style="white-space:nowrap">
-          <button class="btn sm sec" data-saveusage="${esc(u.usage_id)}" data-name="${esc(u.material_name)}" data-lot="${esc(u.lot_pm || "")}" data-receipt="${esc(u.receipt_id || "")}" data-lotid="${esc(u.lot_id || "")}">Lưu</button>
-          <button class="btn sm sec" data-delusage="${esc(u.usage_id)}">Xóa</button>
-        </td></tr>`;
-      }).join("") ||
-        `<tr><td colspan=8 class="muted">Chưa ghi nguyên liệu nào cho mẻ này.</td></tr>`}</tbody>
-    </table></div>
-    ${bomIdsWithStock.length ? `<h4 style="margin-top:14px;display:flex;align-items:center;gap:10px">
-      <span>Nguyên liệu gợi ý từ Lệnh nấu (theo định mức)</span>
-      <button class="btn sm" id="bmu_add_all" style="margin-left:auto">+ Thêm tất cả (SL &gt; 0)</button>
-    </h4>
-    <div class="muted" style="font-size:12px;margin-bottom:6px">Chỉ hiện nguyên liệu ĐÃ CÓ tồn Kho phân xưởng (mã nào chưa chuyển sang Kho phân xưởng thì không hiện ở đây — xem cảnh báo thiếu tồn ở Lệnh nấu) — lô đã chọn theo FIFO (cũ nhất trước), đổi sang lô khác nếu muốn. SL đã điền theo gợi ý định mức/mẻ, sửa lại theo thực tế dùng rồi bấm Thêm cho từng dòng, hoặc "+ Thêm tất cả" để thêm 1 lần mọi dòng đang có SL &gt; 0.</div>
-    <div class="tablewrap"><table>
-      <thead><tr><th>Nguyên liệu</th><th>Cảnh báo</th><th>Chọn lô (Kho phân xưởng)</th><th>Tồn kho PX thực tế</th><th>FIFO</th><th>Gợi ý</th><th>SL thực tế</th><th>ĐVT</th><th></th></tr></thead>
-      <tbody>${bomIdsWithStock.map(mid => {
-        const mat = matById[mid];
-        const matLots = workshopLots.filter(l => l.material_id === mid);
-        const sug = sugByMaterialId[mid];
-        const rowOpts = matLots.map((l, i) => `<option value="${esc(l.lot_id)}" data-uom="${esc(l.uom)}" ${i === 0 ? "selected" : ""}>lô ${esc(l.lot_code)} (còn ${l.quantity}${l.uom}, nhập ${fmt(l.created_at)})</option>`).join("");
-        const firstLot = matLots[0];
-        const grp = altGroupByMaterialId[mid];
-        return `<tr data-bomrow="${esc(mid)}">
-          <td>${esc(mat ? mat.name : mid)}</td>
-          <td>${grp ? `<span class="badge on_hold" title="Thuộc Nhóm vật tư thay thế &quot;${esc(grp.name)}&quot; — các mã trong nhóm dùng thay thế nhau, phải so FIFO giữa các mã trong nhóm trước khi chọn lô">⚠️ Nhóm: ${esc(grp.name)}</span>` : '<span class="muted">—</span>'}</td>
-          <td><select class="bmu-row-lot" data-material="${esc(mid)}">${rowOpts}</select></td>
-          <td class="bmu-row-stock">${firstLot.quantity} ${esc(firstLot.uom)}</td>
-          <td class="bmu-row-fifo">${bomRowFifoHtml(mid, matLots, firstLot.lot_id)}</td>
-          <td class="muted">${sug != null ? sug : "—"}</td>
-          <td><input type="number" step="any" class="bmu-row-qty" value="${sug != null ? sug : 0}" style="width:90px"/></td>
-          <td>${groupForcedUomHtml(mat, `class="bmu-row-uom"`)}</td>
-          <td><button class="btn sm" data-bomadd="${esc(mid)}" data-name="${esc(mat ? mat.name : mid)}">Thêm</button></td>
-        </tr>`;
-      }).join("")}</tbody>
-    </table></div>` : ""}
-    <h4 style="margin-top:14px">${bomMaterialIds.size ? "Thêm nguyên liệu khác (ngoài định mức)" : "+ Thêm nguyên liệu"}</h4>
-    <div class="muted" style="font-size:12px;margin-bottom:4px">Chọn nguyên liệu ở Kho phân xưởng sẽ tự hiện "Gợi ý" (định mức/mẻ theo Lệnh nấu, đã chia đều cho số mẻ) và tự điền tạm vào ô SL — chỉ là gợi ý, sửa lại SL theo thực tế dùng.</div>
-    <div class="row">
-      <div class="field" style="min-width:300px"><label>Chọn từ tồn kho Kho phân xưởng</label><select id="bmu_lot">${bomMaterialIds.size ? (`<option value="">(nhập tên tự do)</option>` + sortLotsFifo(workshopLotsAll).map(l => {
-        const mat = matById[l.material_id];
-        return `<option value="${esc(l.lot_id)}" data-material="${esc(l.material_id || "")}">${esc(mat ? mat.name : l.lot_code)} — lô ${esc(l.lot_code)} (còn ${l.quantity}${l.uom}, nhập ${fmt(l.created_at)})</option>`;
-      }).join("")) : lotOpts}</select></div>
-      <div class="field"><label>Hoặc tên tự do</label><input id="bmu_name" placeholder="(nếu không chọn ở trên)"/></div>
-      <div class="field"><label>Gợi ý (định mức/mẻ)</label><input id="bmu_qty_sug" value="—" disabled style="width:100px;opacity:.7"/></div>
-      <div class="field"><label>SL thực tế</label><input id="bmu_qty" type="number" value="0"/></div>
-      <div class="field"><label>ĐVT</label><span id="bmu_uom_wrap"></span></div>
-      <button class="btn" id="bmu_add" style="align-self:flex-end">Thêm</button>
-    </div>`, onBack, true);
-  // Đổi lô đã chọn ở dòng gợi ý BOM → cập nhật lại cột "Tồn kho PX thực tế" + "FIFO" theo đúng
-  // lô đang chọn (không phải luôn là lô đầu tiên) — dùng chung dữ liệu matLots đã lọc theo mã.
-  document.querySelectorAll(".bmu-row-lot").forEach(sel => {
-    const mid = sel.dataset.material;
-    const matLots = workshopLots.filter(l => l.material_id === mid);
-    sel.onchange = () => {
-      const row = sel.closest("tr");
-      const chosen = matLots.find(l => l.lot_id === sel.value);
-      row.querySelector(".bmu-row-stock").textContent = chosen ? `${chosen.quantity} ${chosen.uom}` : "0";
-      row.querySelector(".bmu-row-fifo").innerHTML = bomRowFifoHtml(mid, matLots, sel.value);
-    };
-  });
-  document.querySelectorAll("[data-bomadd]").forEach(b => b.onclick = () => guard(async () => {
-    const row = b.closest("tr");
-    const lotSel = row.querySelector(".bmu-row-lot");
-    const mat = matById[b.dataset.bomadd];
-    if (!lotSel) throw new Error(`${mat ? mat.name : b.dataset.bomadd} chưa có tồn Kho phân xưởng — không thể ghi nhận dùng cho mẻ.`);
-    const lotId = lotSel.value;
-    const uomVal = row.querySelector(".bmu-row-uom").value.trim() || "kg";
-    const qty = altUomToBaseQty(mat, parseFloat(row.querySelector(".bmu-row-qty").value), uomVal);
-    if (!qty || qty <= 0) throw new Error("Số lượng phải > 0.");
-    // Lô cụ thể của Kho phân xưởng đã chọn — SL dùng KHÔNG được vượt tồn thật của đúng lô đó.
-    const matLots = workshopLots.filter(l => l.material_id === b.dataset.bomadd);
-    const chosenLot = matLots.find(l => l.lot_id === lotId);
-    if (chosenLot && qty > chosenLot.quantity) throw new Error(
-      `Số lượng (${qty}${mat ? mat.uom : ""}) vượt quá tồn kho phân xưởng thực tế của lô đã chọn ` +
-      `(${chosenLot.quantity}${chosenLot.uom}).`);
-    // Mẻ đã ghi nhận 1 mã khác cùng Nhóm vật tư thay thế với mã đang thêm — 2 mã này dùng thay
-    // thế nhau, thêm cả 2 vào cùng 1 mẻ thường là nhầm nên hỏi xác nhận trước.
-    const otherMember = otherGroupMemberInUsage(mat);
-    if (otherMember) {
-      const grp = altGroupByMaterialId[mat.material_id];
-      if (!confirm(`Mẻ này đã ghi nhận mã ${otherMember.code} thuộc Nhóm vật tư thay thế "${grp.name}". ` +
-                   `Bạn có chắc chắn muốn thêm thêm mã ${mat ? mat.code : b.dataset.bomadd} (cùng nhóm) vào mẻ này không?`)) return;
-    }
-    await POST(`/brewing/brews/${brewId}/batches/${batchId}/materials`, {
-      lot_id: lotId, material_name: lotId ? null : b.dataset.name, quantity: qty, uom: mat ? mat.uom : uomVal });
-    toast("Đã thêm nguyên liệu cho mẻ" + (lotId ? " — đã trừ tồn Kho phân xưởng" : "")); openBrewMaterialsModal(brewId, batchId, batchCode, onBack);
-  }));
-  // "+ Thêm tất cả" — làm y hệt bấm "Thêm" từng dòng ở bảng gợi ý (đúng lô/SL/ĐVT đang hiện trên
-  // mỗi dòng), chỉ khác là gộp lại 1 lần cho MỌI dòng đang có SL > 0 và có tồn Kho phân xưởng để
-  // chọn — dòng nào SL = 0 hoặc chưa có tồn (nút Thêm đang disabled) thì bỏ qua, không báo lỗi.
-  if ($("bmu_add_all")) $("bmu_add_all").onclick = () => guard(async () => {
-    const rows = [...document.querySelectorAll("[data-bomrow]")].filter(row => {
-      const qtyInp = row.querySelector(".bmu-row-qty");
-      const lotSel = row.querySelector(".bmu-row-lot");
-      return lotSel && qtyInp && parseFloat(qtyInp.value) > 0;
-    });
-    if (!rows.length) throw new Error("Không có dòng nào đang có SL > 0 và có tồn Kho phân xưởng để thêm.");
-    // Hỏi 1 lần duy nhất cho mọi xung đột Nhóm vật tư thay thế thay vì hỏi từng dòng — liệt kê
-    // rõ mã nào trùng nhóm với mã nào để người dùng tự quyết định thêm tất cả hay huỷ để bỏ bớt.
-    const conflicts = [];
-    for (const row of rows) {
-      const mid = row.dataset.bomrow;
-      const mat = matById[mid];
-      const otherMember = otherGroupMemberInUsage(mat);
-      if (otherMember) conflicts.push(`${mat ? mat.name : mid} (trùng nhóm với ${otherMember.code} đã ghi nhận)`);
-    }
-    if (conflicts.length && !confirm(`Có ${conflicts.length} nguyên liệu trùng Nhóm vật tư thay thế với mã đã ghi nhận cho mẻ:\n` +
-        conflicts.join("\n") + "\n\nVẫn thêm tất cả?")) return;
-    let added = 0;
-    const failed = [];
-    for (const row of rows) {
-      const mid = row.dataset.bomrow;
-      const mat = matById[mid];
-      const lotSel = row.querySelector(".bmu-row-lot");
-      const lotId = lotSel.value;
-      const uomVal = row.querySelector(".bmu-row-uom").value.trim() || "kg";
-      const qty = altUomToBaseQty(mat, parseFloat(row.querySelector(".bmu-row-qty").value), uomVal);
-      const matLots = workshopLots.filter(l => l.material_id === mid);
-      const chosenLot = matLots.find(l => l.lot_id === lotId);
-      if (chosenLot && qty > chosenLot.quantity) {
-        failed.push(`${mat ? mat.name : mid}: SL (${qty}${mat ? mat.uom : ""}) vượt tồn lô đã chọn (${chosenLot.quantity}${chosenLot.uom})`);
-        continue;
-      }
-      try {
-        await POST(`/brewing/brews/${brewId}/batches/${batchId}/materials`, {
-          lot_id: lotId, material_name: lotId ? null : (mat ? mat.name : mid), quantity: qty, uom: mat ? mat.uom : uomVal });
-        added++;
-      } catch (e) {
-        failed.push(`${mat ? mat.name : mid}: ${e.message || e}`);
-      }
-    }
-    if (added) toast(`Đã thêm ${added} nguyên liệu cho mẻ — đã trừ tồn Kho phân xưởng` + (failed.length ? ` (${failed.length} dòng lỗi)` : ""));
-    if (failed.length) alert(`${failed.length} dòng KHÔNG thêm được:\n` + failed.join("\n"));
-    openBrewMaterialsModal(brewId, batchId, batchCode, onBack);
-  });
-  const refreshBmuUom = () => {
-    const opt = $("bmu_lot").selectedOptions[0];
-    const materialId = opt ? opt.dataset.material : "";
-    $("bmu_uom_wrap").innerHTML = groupForcedUomHtml(materialId ? matById[materialId] : null, "bmu_uom");
-  };
-  $("bmu_lot").onchange = () => {
-    const opt = $("bmu_lot").selectedOptions[0];
-    const materialId = opt ? opt.dataset.material : "";
-    const sug = materialId ? sugByMaterialId[materialId] : null;
-    $("bmu_qty_sug").value = sug != null ? sug : "—";
-    if (sug != null && (!$("bmu_qty").value || parseFloat($("bmu_qty").value) === 0)) {
-      $("bmu_qty").value = sug;
-    }
-    refreshBmuUom();
-  };
-  refreshBmuUom();
-  $("bmu_add").onclick = () => guard(async () => {
-    const lotId = $("bmu_lot").value || null;
-    const name = $("bmu_name").value.trim() || null;
-    if (!lotId && !name) throw new Error("Chọn nguyên liệu từ tồn kho Kho phân xưởng, hoặc nhập tên tự do.");
-    const lotOpt = $("bmu_lot").selectedOptions[0];
-    const mat = lotOpt && lotOpt.dataset.material ? matById[lotOpt.dataset.material] : null;
-    const qty = altUomToBaseQty(mat, parseFloat($("bmu_qty").value), $("bmu_uom").value);
-    if (!qty || qty <= 0) throw new Error("Số lượng phải > 0.");
-    if (lotId) {
-      const chosenLot = workshopLotsAll.find(l => l.lot_id === lotId);
-      if (chosenLot && qty > chosenLot.quantity) throw new Error(
-        `Số lượng (${qty}${mat ? mat.uom : ""}) vượt quá tồn kho phân xưởng thực tế của lô đã chọn ` +
-        `(${chosenLot.quantity}${chosenLot.uom}).`);
-    }
-    const otherMember = otherGroupMemberInUsage(mat);
-    if (otherMember) {
-      const grp = altGroupByMaterialId[mat.material_id];
-      if (!confirm(`Mẻ này đã ghi nhận mã ${otherMember.code} thuộc Nhóm vật tư thay thế "${grp.name}". ` +
-                   `Bạn có chắc chắn muốn thêm thêm mã ${mat.code} (cùng nhóm) vào mẻ này không?`)) return;
-    }
-    await POST(`/brewing/brews/${brewId}/batches/${batchId}/materials`, {
-      lot_id: lotId, material_name: name, quantity: qty, uom: mat ? mat.uom : ($("bmu_uom").value.trim() || "kg") });
-    toast("Đã thêm nguyên liệu cho mẻ" + (lotId ? " — đã trừ tồn Kho phân xưởng" : "")); openBrewMaterialsModal(brewId, batchId, batchCode, onBack);
-  });
-  document.querySelectorAll("[data-saveusage]").forEach(b => b.onclick = () => guard(async () => {
-    const usageId = b.dataset.saveusage;
-    const mat = b.dataset.lotid ? (lotById[b.dataset.lotid] ? matById[lotById[b.dataset.lotid].material_id] : null) : null;
-    const uomVal = document.querySelector(`.bmu-edit-uom[data-usage="${usageId}"]`).value.trim() || "kg";
-    const qty = altUomToBaseQty(mat, parseFloat(document.querySelector(`.bmu-edit-qty[data-usage="${usageId}"]`).value), uomVal);
-    if (!qty || qty <= 0) throw new Error("Số lượng phải > 0.");
-    await PUT(`/brewing/brews/${brewId}/batches/${batchId}/materials/${usageId}`, {
-      lot_id: b.dataset.lotid || null, receipt_id: b.dataset.receipt || null, material_name: b.dataset.name,
-      lot_pm: b.dataset.lot || null, quantity: qty, uom: mat ? mat.uom : uomVal });
-    toast("Đã lưu"); openBrewMaterialsModal(brewId, batchId, batchCode, onBack);
-  }));
-  document.querySelectorAll("[data-delusage]").forEach(b => b.onclick = () => guard(async () => {
-    if (!confirm("Xóa dòng nguyên liệu đã ghi cho mẻ này? Không thể hoàn tác.")) return;
-    await DELETE(`/brewing/brews/${brewId}/batches/${batchId}/materials/${b.dataset.delusage}`);
-    toast("Đã xóa"); openBrewMaterialsModal(brewId, batchId, batchCode, onBack);
-  }));
-}
-
-// ---- Modal: nguyên liệu đã dùng cho 1 mẻ lọc cụ thể — lấy thật từ tồn kho Kho phân xưởng
-// (mirror openBrewMaterialsModal, gợi ý số lượng lấy từ FilterOrderMaterialLine của Lệnh lọc) ----
-async function openFilterMaterialsModal(filterId, filterOrderId, filterCode) {
-  const [usage, lots, materials] = await Promise.all([
-    GET(`/brewing/filters/${filterId}/materials`), GET("/lots"), GET("/materials")]);
-  const matById = Object.fromEntries(materials.map(m => [m.material_id, m]));
-  const lotById = Object.fromEntries(lots.map(l => [l.lot_id, l]));
-  const matForUsage = (u) => { const lot = u.lot_id ? lotById[u.lot_id] : null; return lot ? matById[lot.material_id] : null; };
-
-  // Gợi ý số lượng NVL — lấy từ dòng vật tư đã khai báo lúc lập Lệnh lọc
-  // (FilterOrderMaterialLine.quantity, không chia theo mẻ vì lệnh không có qty_per_batch).
-  // Chỉ là gợi ý — số thực tế dùng vẫn ghi ở ô SL riêng, sửa tự do được.
-  let sugByMaterialId = {};
-  if (filterOrderId) {
-    try {
-      const order = await GET(`/brewing/filter-orders/${filterOrderId}`);
-      sugByMaterialId = Object.fromEntries((order.lines || []).map(l => [l.material_id, l.quantity]));
-    } catch (e) { /* không lấy được lệnh lọc — bỏ qua gợi ý */ }
-  }
-  // Chỉ cho lấy NVL có trong định mức của Lệnh lọc này — không cho "nhập tên tự do" nữa khi
-  // đã có định mức (khác NVL nấu — ở đây siết chặt hơn theo yêu cầu: vật tư không thuộc lệnh
-  // lọc thì không được lấy, không có đường vòng qua tên tự do). Lệnh lọc chưa khai báo định
-  // mức nào (rỗng) thì mới cho chọn tự do như cũ.
-  const bomMaterialIds = new Set(Object.keys(sugByMaterialId));
-  const workshopLotsAll = lots.filter(l => l.quantity > 0 && l.status !== "on_hold" && /phân xưởng/i.test(l.location || ""));
-  const workshopLots = sortLotsFifo(bomMaterialIds.size ? workshopLotsAll.filter(l => bomMaterialIds.has(l.material_id)) : workshopLotsAll);
-  const lotOpts = `<option value="">${bomMaterialIds.size ? "(chọn nguyên liệu)" : "(nhập tên tự do)"}</option>` + workshopLots.map(l => {
-    const mat = matById[l.material_id];
-    return `<option value="${esc(l.lot_id)}" data-material="${esc(l.material_id || "")}">${esc(mat ? mat.name : l.lot_code)} — lô ${esc(l.lot_code)} (còn ${l.quantity}${l.uom}, nhập ${fmt(l.created_at)})</option>`;
-  }).join("") || `<option value="">${bomMaterialIds.size
-      ? "(Kho phân xưởng chưa có tồn đúng vật tư của Lệnh lọc — khai báo ở Kho NVL)"
-      : "(Kho phân xưởng chưa có tồn — khai báo ở Kho NVL)"}</option>`;
-
-  modal(`<h3>Nguyên liệu dùng cho mẻ lọc — <code class="k">${esc(filterCode)}</code></h3>
-    <div class="muted" style="margin-bottom:8px">Nguyên liệu phân bổ vào mẻ lọc lấy từ tồn kho <b>Kho phân xưởng</b> — chọn lô sẽ trừ tồn kho thật ngay. Danh sách lô bên dưới đã sắp theo FIFO (cũ nhất trước) trong từng vật tư.
-      ${bomMaterialIds.size ? " Chỉ cho chọn đúng vật tư đã khai báo trong Lệnh lọc — vật tư khác không được lấy." : ""}</div>
-    <div class="tablewrap"><table>
-      <thead><tr><th>Nguyên liệu</th><th>Số lô PM</th><th>Ngày lô</th><th>FIFO</th><th>Số lượng</th><th>ĐVT</th><th></th></tr></thead>
-      <tbody>${usage.map(u => `<tr>
-        <td>${esc(u.material_name)}</td><td class="muted">${esc(u.lot_pm || "—")}</td>
-        <td class="muted">${u.lot_date ? fmt(u.lot_date) : "—"}</td>
-        <td>${fifoBadgeHtml(u.fifo_ok)}</td>
-        <td><input type="number" step="any" class="fmu-edit-qty" data-usage="${esc(u.usage_id)}" value="${u.quantity}" style="width:90px"/></td>
-        <td>${altUomFieldHtml(matForUsage(u), `class="fmu-edit-uom" data-usage="${esc(u.usage_id)}"`, 60)}</td>
-        <td style="white-space:nowrap">
-          <button class="btn sm sec" data-savefusage="${esc(u.usage_id)}" data-name="${esc(u.material_name)}" data-lot="${esc(u.lot_pm || "")}" data-receipt="${esc(u.receipt_id || "")}" data-lotid="${esc(u.lot_id || "")}">Lưu</button>
-          <button class="btn sm sec" data-delfusage="${esc(u.usage_id)}">Xóa</button>
-        </td></tr>`).join("") ||
-        `<tr><td colspan=7 class="muted">Chưa ghi nguyên liệu nào cho mẻ lọc này.</td></tr>`}</tbody>
-    </table></div>
-    ${bomMaterialIds.size ? `<h4 style="margin-top:14px">Nguyên liệu gợi ý từ Lệnh lọc (theo định mức)</h4>
-    <div class="muted" style="font-size:12px;margin-bottom:6px">Hiện sẵn từng nguyên liệu trong định mức — lô đã chọn theo FIFO (cũ nhất trước), đổi sang lô khác nếu muốn. SL đã điền theo số lượng khai báo lúc lập Lệnh lọc, sửa lại theo thực tế dùng rồi bấm Thêm cho từng dòng.</div>
-    <div class="tablewrap"><table>
-      <thead><tr><th>Nguyên liệu</th><th>Chọn lô (Kho phân xưởng)</th><th>Gợi ý</th><th>SL thực tế</th><th>ĐVT</th><th></th></tr></thead>
-      <tbody>${[...bomMaterialIds].map(mid => {
-        const mat = matById[mid];
-        const matLots = workshopLots.filter(l => l.material_id === mid);
-        const sug = sugByMaterialId[mid];
-        const rowOpts = matLots.map((l, i) => `<option value="${esc(l.lot_id)}" data-uom="${esc(l.uom)}" ${i === 0 ? "selected" : ""}>lô ${esc(l.lot_code)} (còn ${l.quantity}${l.uom}, nhập ${fmt(l.created_at)})</option>`).join("");
-        return `<tr>
-          <td>${esc(mat ? mat.name : mid)}</td>
-          <td>${matLots.length ? `<select class="fmu-row-lot">${rowOpts}</select>` : `<span class="muted">Chưa có tồn Kho phân xưởng</span>`}</td>
-          <td class="muted">${sug != null ? sug : "—"}</td>
-          <td><input type="number" step="any" class="fmu-row-qty" value="${sug != null ? sug : 0}" style="width:90px" ${matLots.length ? "" : "disabled"}/></td>
-          <td>${altUomFieldHtml(mat, `class="fmu-row-uom"${matLots.length ? "" : " disabled"}`, 60)}</td>
-          <td><button class="btn sm" data-fmadd="${esc(mid)}" ${matLots.length ? "" : "disabled"}>Thêm</button></td>
-        </tr>`;
-      }).join("")}</tbody>
-    </table></div>` : `<h4 style="margin-top:14px">+ Thêm nguyên liệu</h4>
-    <div class="muted" style="font-size:12px;margin-bottom:4px">Chọn nguyên liệu ở Kho phân xưởng sẽ tự hiện "Gợi ý" (số lượng đã khai báo lúc lập Lệnh lọc) và tự điền tạm vào ô SL — chỉ là gợi ý, sửa lại SL theo thực tế dùng.</div>
-    <div class="row">
-      <div class="field" style="min-width:300px"><label>Chọn từ tồn kho Kho phân xưởng</label><select id="fmu_lot">${lotOpts}</select></div>
-      <div class="field"><label>Hoặc tên tự do</label><input id="fmu_name" placeholder="(nếu không chọn ở trên)"/></div>
-      <div class="field"><label>Gợi ý (Lệnh lọc)</label><input id="fmu_qty_sug" value="—" disabled style="width:100px;opacity:.7"/></div>
-      <div class="field"><label>SL thực tế</label><input id="fmu_qty" type="number" value="0"/></div>
-      <div class="field"><label>ĐVT</label><span id="fmu_uom_wrap"></span></div>
-      <button class="btn" id="fmu_add" style="align-self:flex-end">Thêm</button>
-    </div>`}`);
-  document.querySelectorAll("[data-fmadd]").forEach(b => b.onclick = () => guard(async () => {
-    const row = b.closest("tr");
-    const lotSel = row.querySelector(".fmu-row-lot");
-    const lotId = lotSel ? lotSel.value : null;
-    const mat = matById[b.dataset.fmadd];
-    const uomVal = row.querySelector(".fmu-row-uom").value.trim() || "kg";
-    const qty = altUomToBaseQty(mat, parseFloat(row.querySelector(".fmu-row-qty").value), uomVal);
-    if (!qty || qty <= 0) throw new Error("Số lượng phải > 0.");
-    await POST(`/brewing/filters/${filterId}/materials`, { lot_id: lotId, material_name: null, quantity: qty, uom: mat ? mat.uom : uomVal });
-    toast("Đã thêm nguyên liệu cho mẻ lọc" + (lotId ? " — đã trừ tồn Kho phân xưởng" : "")); openFilterMaterialsModal(filterId, filterOrderId, filterCode);
-  }));
-  const refreshFmuUom = () => {
-    const opt = $("fmu_lot").selectedOptions[0];
-    const materialId = opt ? opt.dataset.material : "";
-    $("fmu_uom_wrap").innerHTML = altUomFieldHtml(materialId ? matById[materialId] : null, "fmu_uom", 60);
-  };
-  if ($("fmu_lot")) $("fmu_lot").onchange = () => {
-    const opt = $("fmu_lot").selectedOptions[0];
-    const materialId = opt ? opt.dataset.material : "";
-    const sug = materialId ? sugByMaterialId[materialId] : null;
-    $("fmu_qty_sug").value = sug != null ? sug : "—";
-    if (sug != null && (!$("fmu_qty").value || parseFloat($("fmu_qty").value) === 0)) {
-      $("fmu_qty").value = sug;
-    }
-    refreshFmuUom();
-  };
-  if ($("fmu_lot")) refreshFmuUom();
-  if ($("fmu_add")) $("fmu_add").onclick = () => guard(async () => {
-    const lotId = $("fmu_lot").value || null;
-    const name = bomMaterialIds.size ? null : ($("fmu_name")?.value.trim() || null);
-    if (!lotId && !name) throw new Error("Chọn nguyên liệu từ tồn kho Kho phân xưởng" + (bomMaterialIds.size ? " (đúng vật tư của Lệnh lọc)." : ", hoặc nhập tên tự do."));
-    const lotOpt = $("fmu_lot").selectedOptions[0];
-    const mat = lotOpt && lotOpt.dataset.material ? matById[lotOpt.dataset.material] : null;
-    const qty = altUomToBaseQty(mat, parseFloat($("fmu_qty").value), $("fmu_uom").value);
-    if (!qty || qty <= 0) throw new Error("Số lượng phải > 0.");
-    await POST(`/brewing/filters/${filterId}/materials`, {
-      lot_id: lotId, material_name: name, quantity: qty, uom: mat ? mat.uom : ($("fmu_uom").value.trim() || "kg") });
-    toast("Đã thêm nguyên liệu cho mẻ lọc" + (lotId ? " — đã trừ tồn Kho phân xưởng" : "")); openFilterMaterialsModal(filterId, filterOrderId, filterCode);
-  });
-  document.querySelectorAll("[data-savefusage]").forEach(b => b.onclick = () => guard(async () => {
-    const usageId = b.dataset.savefusage;
-    const mat = b.dataset.lotid ? (lotById[b.dataset.lotid] ? matById[lotById[b.dataset.lotid].material_id] : null) : null;
-    const uomVal = document.querySelector(`.fmu-edit-uom[data-usage="${usageId}"]`).value.trim() || "kg";
-    const qty = altUomToBaseQty(mat, parseFloat(document.querySelector(`.fmu-edit-qty[data-usage="${usageId}"]`).value), uomVal);
-    if (!qty || qty <= 0) throw new Error("Số lượng phải > 0.");
-    await PUT(`/brewing/filters/${filterId}/materials/${usageId}`, {
-      lot_id: b.dataset.lotid || null, receipt_id: b.dataset.receipt || null, material_name: b.dataset.name,
-      lot_pm: b.dataset.lot || null, quantity: qty, uom: mat ? mat.uom : uomVal });
-    toast("Đã lưu"); openFilterMaterialsModal(filterId, filterOrderId, filterCode);
-  }));
-  document.querySelectorAll("[data-delfusage]").forEach(b => b.onclick = () => guard(async () => {
-    if (!confirm("Xóa dòng nguyên liệu đã ghi cho mẻ lọc này? Không thể hoàn tác.")) return;
-    await DELETE(`/brewing/filters/${filterId}/materials/${b.dataset.delfusage}`);
-    toast("Đã xóa"); openFilterMaterialsModal(filterId, filterOrderId, filterCode);
-  }));
-}
-
-// ---- Modal: nguyên liệu đã dùng cho 1 mẻ chiết cụ thể (VD: CO2, hóa chất vệ sinh) — lấy
-// thật từ tồn kho Kho phân xưởng (mirror openFilterMaterialsModal). Chiết không có Lệnh với
-// định mức vật tư riêng như Nấu/Lọc nên không có cột "Gợi ý" — chọn tự do trong Kho phân
-// xưởng hoặc nhập tên tự do. ----
-async function openBottleMaterialsModal(bottleId, bottleCode) {
-  const [usage, lots, materials] = await Promise.all([
-    GET(`/brewing/bottles/${bottleId}/materials`), GET("/lots"), GET("/materials")]);
-  const matById = Object.fromEntries(materials.map(m => [m.material_id, m]));
-  const workshopLots = sortLotsFifo(lots.filter(l => l.quantity > 0 && l.status !== "on_hold" && /phân xưởng/i.test(l.location || "")));
-  const lotOpts = `<option value="">(nhập tên tự do)</option>` + workshopLots.map(l => {
-    const mat = matById[l.material_id];
-    return `<option value="${esc(l.lot_id)}" data-material="${esc(l.material_id || "")}">${esc(mat ? mat.name : l.lot_code)} — lô ${esc(l.lot_code)} (còn ${l.quantity}${l.uom}, nhập ${fmt(l.created_at)})</option>`;
-  }).join("") || `<option value="">(Kho phân xưởng chưa có tồn — khai báo ở Kho NVL)</option>`;
-
-  modal(`<h3>Nguyên liệu dùng cho mẻ chiết — <code class="k">${esc(bottleCode)}</code></h3>
-    <div class="muted" style="margin-bottom:8px">Nguyên liệu phân bổ vào mẻ chiết (VD CO2, hóa chất vệ sinh) lấy từ tồn kho <b>Kho phân xưởng</b> — chọn lô sẽ trừ tồn kho thật ngay. Danh sách lô bên dưới đã sắp theo FIFO (cũ nhất trước) trong từng vật tư.</div>
-    <div class="tablewrap"><table>
-      <thead><tr><th>Nguyên liệu</th><th>Số lô PM</th><th>Ngày lô</th><th>FIFO</th><th>Số lượng</th><th>ĐVT</th><th></th></tr></thead>
-      <tbody>${usage.map(u => `<tr>
-        <td>${esc(u.material_name)}</td><td class="muted">${esc(u.lot_pm || "—")}</td>
-        <td class="muted">${u.lot_date ? fmt(u.lot_date) : "—"}</td>
-        <td>${fifoBadgeHtml(u.fifo_ok)}</td>
-        <td><input type="number" step="any" class="cmu-edit-qty" data-usage="${esc(u.usage_id)}" value="${u.quantity}" style="width:90px"/></td>
-        <td><input class="cmu-edit-uom" data-usage="${esc(u.usage_id)}" value="${esc(u.uom)}" style="width:60px"/></td>
-        <td style="white-space:nowrap">
-          <button class="btn sm sec" data-savecusage="${esc(u.usage_id)}" data-name="${esc(u.material_name)}" data-lot="${esc(u.lot_pm || "")}" data-lotid="${esc(u.lot_id || "")}">Lưu</button>
-          <button class="btn sm sec" data-delcusage="${esc(u.usage_id)}">Xóa</button>
-        </td></tr>`).join("") ||
-        `<tr><td colspan=7 class="muted">Chưa ghi nguyên liệu nào cho mẻ chiết này.</td></tr>`}</tbody>
-    </table></div>
-    <h4 style="margin-top:14px">+ Thêm nguyên liệu</h4>
-    <div class="row">
-      <div class="field" style="min-width:300px"><label>Chọn từ tồn kho Kho phân xưởng</label><select id="cmu_lot">${lotOpts}</select></div>
-      <div class="field"><label>Hoặc tên tự do</label><input id="cmu_name" placeholder="(nếu không chọn ở trên)"/></div>
-      <div class="field"><label>SL thực tế</label><input id="cmu_qty" type="number" value="0"/></div>
-      <div class="field"><label>ĐVT</label><input id="cmu_uom" value="kg" size="4"/></div>
-      <button class="btn" id="cmu_add" style="align-self:flex-end">Thêm</button>
-    </div>`);
-  $("cmu_add").onclick = () => guard(async () => {
-    const lotId = $("cmu_lot").value || null;
-    const name = $("cmu_name").value.trim() || null;
-    if (!lotId && !name) throw new Error("Chọn nguyên liệu từ tồn kho Kho phân xưởng, hoặc nhập tên tự do.");
-    const qty = parseFloat($("cmu_qty").value);
-    if (!qty || qty <= 0) throw new Error("Số lượng phải > 0.");
-    await POST(`/brewing/bottles/${bottleId}/materials`, {
-      lot_id: lotId, material_name: name, quantity: qty, uom: $("cmu_uom").value.trim() || "kg" });
-    toast("Đã thêm nguyên liệu cho mẻ chiết" + (lotId ? " — đã trừ tồn Kho phân xưởng" : "")); openBottleMaterialsModal(bottleId, bottleCode);
-  });
-  document.querySelectorAll("[data-savecusage]").forEach(b => b.onclick = () => guard(async () => {
-    const usageId = b.dataset.savecusage;
-    const qty = parseFloat(document.querySelector(`.cmu-edit-qty[data-usage="${usageId}"]`).value);
-    const uom = document.querySelector(`.cmu-edit-uom[data-usage="${usageId}"]`).value.trim() || "kg";
-    if (!qty || qty <= 0) throw new Error("Số lượng phải > 0.");
-    await PUT(`/brewing/bottles/${bottleId}/materials/${usageId}`, {
-      lot_id: b.dataset.lotid || null, material_name: b.dataset.name, lot_pm: b.dataset.lot || null, quantity: qty, uom });
-    toast("Đã lưu"); openBottleMaterialsModal(bottleId, bottleCode);
-  }));
-  document.querySelectorAll("[data-delcusage]").forEach(b => b.onclick = () => guard(async () => {
-    if (!confirm("Xóa dòng nguyên liệu đã ghi cho mẻ chiết này? Không thể hoàn tác.")) return;
-    await DELETE(`/brewing/bottles/${bottleId}/materials/${b.dataset.delcusage}`);
-    toast("Đã xóa"); openBottleMaterialsModal(bottleId, bottleCode);
-  }));
-}
-
-// ---- Modal: gợi ý NVL copy từ 1 mẻ nguồn sang 1 mẻ đích — KHÔNG copy thẳng lot_id cũ (có
-// thể không còn là lô FIFO đúng tại thời điểm này, hoặc lô đã hết) — với mỗi dòng vật tư của
-// mẻ nguồn, tự tra lại lô CŨ NHẤT còn tồn tại Kho phân xưởng NGAY LÚC MỞ màn hình này làm gợi
-// ý mặc định, cho sửa lại (đổi lô/SL/bỏ dòng) trước khi xác nhận — chỉ khi bấm "Xác nhận" mới
-// thật sự gọi add_brew_material (tự tính lại fifo_ok/trừ kho lúc đó, không lệ thuộc gợi ý). ----
-async function openCopyMaterialsSuggestModal(brewId, source, target, onDone) {
-  const [sourceUsage, targetUsage, lots, materials] = await Promise.all([
-    GET(`/brewing/brews/${brewId}/batches/${source.batch_id}/materials`),
-    GET(`/brewing/brews/${brewId}/batches/${target.batch_id}/materials`), GET("/lots"), GET("/materials")]);
-  if (!sourceUsage.length) throw new Error(`Mẻ ${source.batch_code} chưa có nguyên liệu để gợi ý.`);
-  // Mẻ đích đã tự ghi nhận NVL riêng rồi thì không cho gợi ý/copy đè lên nữa — tránh cộng dồn
-  // nhầm hoặc ghi đè dữ liệu vận hành đã nhập tay cho đúng mẻ đó.
-  if (targetUsage.length) throw new Error(`Mẻ ${target.batch_code} đã có ${targetUsage.length} dòng nguyên liệu riêng — không thể copy/gợi ý đè lên. Hãy xóa hết NVL của mẻ này trước nếu thực sự muốn làm lại.`);
-  const lotById = Object.fromEntries(lots.map(l => [l.lot_id, l]));
-  const matById = Object.fromEntries(materials.map(m => [m.material_id, m]));
-  const workshopLotsAll = sortLotsFifo(lots.filter(l => l.quantity > 0 && l.status !== "on_hold" && /phân xưởng/i.test(l.location || "")));
-
-  // Với mỗi dòng NVL của mẻ nguồn, xác định material_id qua lot_id đã dùng (nếu có) rồi tìm
-  // lô cũ nhất CÒN TỒN của đúng vật tư đó ngay lúc này — đây là gợi ý FIFO thật, không phải
-  // copy nguyên lô cũ (lô đó có thể đã hết hoặc không còn là lô cũ nhất).
-  const rows = sourceUsage.map(u => {
-    const srcLot = u.lot_id ? lotById[u.lot_id] : null;
-    const materialId = srcLot ? srcLot.material_id : null;
-    const candidates = materialId ? workshopLotsAll.filter(l => l.material_id === materialId) : [];
-    const suggested = candidates[0] || null;
-    return { material_name: u.material_name, quantity: u.quantity, uom: u.uom, materialId, candidates, suggested };
-  });
-
-  const lotOptionsHtml = (row) => {
-    const opts = row.candidates.map(l =>
-      `<option value="${esc(l.lot_id)}" ${row.suggested && l.lot_id === row.suggested.lot_id ? "selected" : ""}>` +
-      `${esc(l.lot_code)} (còn ${l.quantity}${l.uom}, nhập ${fmt(l.created_at)})</option>`).join("");
-    const freeLabel = row.materialId ? "(nhập tên tự do — không trừ kho)" : `(giữ tên tự do: ${esc(row.material_name)})`;
-    return `<option value="">${freeLabel}</option>${opts}`;
-  };
-
-  modal(`<h3>Gợi ý NVL — mẻ ${esc(source.batch_code)} → mẻ ${esc(target.batch_code)}</h3>
-    <div class="muted" style="margin-bottom:8px">Danh sách vật tư/SL lấy từ mẻ ${esc(source.batch_code)} chỉ là gợi ý — lô đề xuất bên dưới đã tự tra lại theo FIFO (cũ nhất còn tồn tại Kho phân xưởng) NGAY LÚC NÀY, có thể khác lô đã dùng ở mẻ đầu. Xem lại, sửa lô/số lượng hoặc bỏ dòng không cần, rồi bấm "Xác nhận" — lúc đó hệ thống mới thật sự trừ kho cho mẻ ${esc(target.batch_code)}.</div>
-    <div class="tablewrap"><table id="cpv_table">
-      <thead><tr><th>Nguyên liệu</th><th>Lô đề xuất (FIFO hiện tại)</th><th>FIFO</th><th>Số lượng</th><th>ĐVT</th><th></th></tr></thead>
-      <tbody>${rows.map((row, i) => `<tr data-row="${i}">
-        <td>${esc(row.material_name)}${!row.materialId ? ' <span class="muted" title="Dòng gốc không gắn lô thật — không tra được FIFO">(tên tự do)</span>' : (!row.candidates.length ? ' <span style="color:var(--red)" title="Kho phân xưởng hiện không còn tồn vật tư này">(hết tồn)</span>' : "")}</td>
-        <td><select class="cpv-lot" data-name="${esc(row.material_name)}" data-oldest="${row.candidates[0] ? esc(row.candidates[0].lot_id) : ""}">${lotOptionsHtml(row)}</select></td>
-        <td class="cpv-fifo">${fifoBadgeHtml(row.candidates.length ? true : null)}</td>
-        <td><input type="number" step="any" class="cpv-qty" value="${row.quantity}" style="width:90px"/></td>
-        <td><input class="cpv-uom" value="${esc(row.uom)}" style="width:60px"/></td>
-        <td><button type="button" class="btn sm sec" data-cpvremove="${i}">Bỏ dòng</button></td>
-      </tr>`).join("")}</tbody>
-    </table></div>
-    <button class="btn" id="cpv_confirm" style="margin-top:12px">Xác nhận & thêm vào mẻ ${esc(target.batch_code)}</button>`);
-
-  document.querySelectorAll("[data-cpvremove]").forEach(b => b.onclick = () => {
-    b.closest("tr").remove();
-  });
-  // Đổi lô đề xuất (VD chọn lô mới hơn thay vì lô cũ nhất) → cập nhật ngay badge FIFO của
-  // dòng đó, để người thao tác thấy rõ lựa chọn của mình có còn đúng FIFO hay không trước
-  // khi bấm Xác nhận — không chờ tới lúc server tính lại is_oldest_workshop_lot.
-  document.querySelectorAll(".cpv-lot").forEach(sel => sel.onchange = () => {
-    const fifoCell = sel.closest("tr").querySelector(".cpv-fifo");
-    if (!sel.value) { fifoCell.innerHTML = fifoBadgeHtml(null); return; }
-    fifoCell.innerHTML = fifoBadgeHtml(sel.value === sel.dataset.oldest);
-  });
-
-  $("cpv_confirm").onclick = () => guard(async () => {
-    const trs = [...document.querySelectorAll("#cpv_table tbody tr")];
-    if (!trs.length) throw new Error("Không còn dòng nào để thêm — đã bỏ hết.");
-    let added = 0;
-    for (const tr of trs) {
-      const sel = tr.querySelector(".cpv-lot");
-      const lotId = sel.value || null;
-      const name = lotId ? null : sel.dataset.name;
-      const qty = parseFloat(tr.querySelector(".cpv-qty").value);
-      const uom = tr.querySelector(".cpv-uom").value.trim() || "kg";
-      if (!qty || qty <= 0) continue;
-      await POST(`/brewing/brews/${brewId}/batches/${target.batch_id}/materials`, {
-        lot_id: lotId, material_name: name, quantity: qty, uom });
-      added++;
-    }
-    if (!added) throw new Error("Không có dòng hợp lệ nào (số lượng phải > 0).");
-    toast(`Đã thêm ${added} dòng nguyên liệu cho mẻ ${target.batch_code} — đã trừ tồn Kho phân xưởng theo lô đã chọn`);
-    closeModal();
-    if (onDone) onDone();
-  });
-}
-
-// ---- Modal: các mẻ thuộc 1 mã nấu — mỗi mẻ có Chỉ tiêu + NVL riêng ----
-async function openBrewBatchesModal(brewId, brewCode, productId, locked = false) {
-  const [batches, allLines] = await Promise.all([
-    GET(`/brewing/brews/${brewId}/batches`), GET("/lines").catch(() => [])]);
-  // Chỉ show dây chuyền NẤU (kind="brewhouse") trong danh mục — khác dây chuyền đóng gói
-  // (kind="line") hay tank lên men (kind="tank"), xem models/lines.py::ProductionLine.kind.
-  const brewLines = allLines.filter(l => l.kind === "brewhouse" && l.active);
-  // Tính trước "đã đủ" cho từng mẻ ở cả 4 mục (Chỉ tiêu/NVL/Ghi chép nấu/CIP) — hiện tích
-  // xanh cạnh nút tương ứng, khỏi phải bấm vào mới biết. Tiêu chí "đủ":
-  // - Chỉ tiêu: can_release (đủ chỉ tiêu bắt buộc, không FAIL) — mirror openStageQcModal.
-  // - NVL: b.nvl_ok đã tính sẵn ở BE (đối chiếu ĐỦ mọi dòng Định mức NVL của Lệnh nấu, không
-  //   chỉ "có ghi NVL bất kỳ" — xem routers/brewing.py::list_brew_batches,
-  //   services/brew_order.py::batch_material_status).
-  // - Ghi chép nấu: biểu mẫu KHÔNG có khái niệm "bắt buộc" như chỉ tiêu QC (~150 trường tùy
-  //   chọn) — coi "đủ" là đã lưu ít nhất 1 giá trị trong biểu mẫu (manual_json không rỗng).
-  // - CIP: đã gắn ít nhất 1 bản ghi CIP cho mẻ.
-  const qcOkByBatch = {}, processLogOkByBatch = {}, cipOkByBatch = {};
-  await Promise.all(batches.map(async b => {
-    try {
-      const qs = `stage=nau&scope_type=brew_batch&scope_id=${encodeURIComponent(b.batch_id)}${productId ? `&product_id=${encodeURIComponent(productId)}` : ""}`;
-      qcOkByBatch[b.batch_id] = (await GET(`/brewing/qc-status?${qs}`)).can_release;
-    } catch (e) { qcOkByBatch[b.batch_id] = false; }
-    try {
-      const log = await GET(`/brewing/brews/${brewId}/batches/${b.batch_id}/process-log`);
-      processLogOkByBatch[b.batch_id] = Object.values(log.manual || {}).some(v => v !== null && v !== "");
-    } catch (e) { processLogOkByBatch[b.batch_id] = false; }
-    try {
-      cipOkByBatch[b.batch_id] = (await GET(`/cip/links?scope_type=brew_batch&scope_id=${encodeURIComponent(b.batch_id)}`)).length > 0;
-    } catch (e) { cipOkByBatch[b.batch_id] = false; }
-  }));
-  // locked = mã nấu đã bị khóa (Khóa lô) — vẫn cho xem đầy đủ dữ liệu (Chỉ tiêu/+NVL/Ghi
-  // chép nấu là các modal xem-là-chính, backend đã tự chặn ghi qua _assert_unlocked), chỉ ẩn
-  // các thao tác THUẦN SỬA/XÓA (Kết thúc, Xóa mẻ, + Thêm mẻ, Gợi ý NVL) vì chúng không có giá
-  // trị xem — trước đây cả modal không mở được khi khóa (xem cột "" ở VIEWS.process/sec=nau),
-  // khiến không còn cách nào xem lại dữ liệu mẻ đã khóa.
-  modal(`<h3>Các mẻ thuộc mã nấu — <code class="k">${esc(brewCode)}</code></h3>
-    ${locked ? '<div class="muted" style="margin-bottom:8px">🔒 Mã nấu đã khóa — chỉ xem, không sửa/xóa được.</div>' : ""}
-    <div class="tablewrap"><table>
-      <thead><tr><th>Số mẻ</th><th>Mã mẻ</th><th>Dây chuyền</th><th>Bắt đầu</th><th>Kết thúc</th><th>Trạng thái</th><th>Ghi chú</th><th></th></tr></thead>
-      <tbody>${batches.map(b => `<tr>
-        <td>${b.seq ?? "—"}</td><td class="code">${holdBadgeHtml(b)}${esc(b.batch_code)}</td>
-        <td class="muted">${esc(b.line_code || "—")}</td>
-        <td>${fmt(b.started_at || b.created_at)}</td><td>${fmt(b.ended_at)}</td>
-        <td>${badge(b.exec_status === "hoan_thanh" ? "completed" : "in_progress")}${esc(b.exec_status_label)}</td>
-        <td class="muted">${esc(b.note || "—")}</td>
-        <td style="white-space:nowrap">
-          <button class="btn sm sec" data-stageqc="nau|brew_batch|${esc(b.batch_id)}|${esc(productId || "")}||${esc(b.batch_code)}">Chỉ tiêu</button>${qcOkByBatch[b.batch_id] ? ' <span style="color:var(--green)" title="Đã đủ chỉ tiêu bắt buộc">✓</span>' : ""}
-          <button class="btn sm sec" data-nvl="${esc(brewId)}|${esc(b.batch_id)}|${esc(b.batch_code)}">+ NVL</button>${b.nvl_ok ? ' <span style="color:var(--green)" title="Đã ghi đủ NVL theo định mức">✓</span>' : ""}
-          <button class="btn sm sec" data-processlog="${esc(brewId)}|${esc(b.batch_id)}|${esc(b.batch_code)}">Ghi chép nấu</button>${processLogOkByBatch[b.batch_id] ? ' <span style="color:var(--green)" title="Đã ghi biểu mẫu">✓</span>' : ""}
-          <button class="btn sm sec" data-cip="brew_batch|${esc(b.batch_id)}|${esc(b.batch_code)}">CIP</button>${cipOkByBatch[b.batch_id] ? ' <span style="color:var(--green)" title="Đã gắn CIP">✓</span>' : ""}
-          ${locked ? "" : `<button class="btn sm sec" data-editbatch="${esc(b.batch_id)}">Sửa</button>
-          <button class="btn sm sec" data-delbatch="${esc(b.batch_id)}">Xóa</button>`}
-        </td></tr>`).join("") || `<tr><td colspan=8 class="muted">Chưa có mẻ nào — thêm mẻ bên dưới.</td></tr>`}</tbody>
-    </table></div>
-    ${!locked && batches.length > 1 ? `<div class="row" style="margin-top:8px;align-items:end">
-      <div class="field"><label>Gợi ý NVL từ mẻ đầu (${esc(batches[0].batch_code)}) cho mẻ</label>
-        <select id="bb_copytarget">${batches.slice(1).map(b => `<option value="${esc(b.batch_id)}">${esc(b.batch_code)}</option>`).join("")}</select></div>
-      <div class="field"><button class="btn sec" id="bb_copynvl">Xem gợi ý</button></div>
-    </div>
-    <div class="muted" style="font-size:12px;margin-top:2px">Chỉ gợi ý danh sách vật tư/số lượng — hệ thống tự tìm lô FIFO còn tồn tại thời điểm này (có thể khác lô đã dùng ở mẻ đầu), bạn xem lại và xác nhận trước khi ghi nhận.</div>` : ""}
-    ${locked ? "" : `<h4 style="margin-top:14px">+ Thêm mẻ</h4>
-    <div class="row">
-      <div class="field" style="min-width:140px"><label>Số mẻ</label><input id="bb_count" type="number" min="1" step="1" value="1"/></div>
-      <div class="field" style="min-width:220px"><label>Mã mẻ <span class="muted" style="font-weight:400">(chỉ dùng khi Số mẻ = 1 — Số mẻ > 1 tự sinh mã liên tiếp)</span></label><input id="bb_code" type="number" min="1" step="1" placeholder="VD: 123"/></div>
-      <div class="field"><label>Dây chuyền nấu *</label><select id="bb_line">
-        <option value="">-- Chọn dây chuyền --</option>
-        ${brewLines.map(l => `<option value="${esc(l.line_id)}">${esc(l.code)} — ${esc(l.name)}</option>`).join("")}
-      </select></div>
-      <div class="field"><label>Giờ bắt đầu (mẻ đầu)</label><input id="bb_started" type="datetime-local" value="${toDTLocal(new Date())}"/></div>
-      <div class="field" id="bb_interval_wrap" style="display:none;min-width:160px"><label>Cách nhau (phút)</label><input id="bb_interval" type="number" min="0" step="1" value="90"/></div>
-      <div class="field"><label>Ghi chú</label><input id="bb_note" placeholder="(tuỳ chọn)"/></div>
-      <button class="btn" id="bb_add" style="align-self:flex-end">Thêm</button>
-    </div>
-    ${brewLines.length === 0 ? '<div class="muted" style="font-size:12px;margin-top:2px">Chưa có dây chuyền nấu nào trong Danh mục — vào Danh mục › Dây chuyền, thêm dây chuyền loại "Nhà nấu (brewhouse)".</div>' : ""}`}`);
-  if ($("bb_count")) {
-    const toggleBulkFields = () => {
-      const isBulk = (parseInt($("bb_count").value, 10) || 1) > 1;
-      $("bb_interval_wrap").style.display = isBulk ? "" : "none";
-      $("bb_code").disabled = isBulk;
-      if (isBulk) $("bb_code").value = "";
-    };
-    $("bb_count").oninput = toggleBulkFields;
-    toggleBulkFields();
-  }
-  if ($("bb_add")) $("bb_add").onclick = () => guard(async () => {
-    const line_id = $("bb_line").value;
-    if (!line_id) throw new Error("Chọn dây chuyền nấu.");
-    const note = $("bb_note").value.trim() || null;
-    const startedRaw = $("bb_started").value;
-    const started_at = startedRaw ? new Date(startedRaw).toISOString() : null;
-    const count = parseInt($("bb_count").value, 10) || 1;
-    if (count > 1) {
-      // Tạo hàng loạt — mã mẻ tự sinh liên tiếp, giờ bắt đầu mẻ sau cách mẻ trước
-      // `interval_minutes` phút (KHÔNG dùng chung 1 giờ — xem services/brew_order.py::
-      // create_brew_batches_bulk, lý do đã bỏ tính năng nhập nhiều mã cách nhau dấu phẩy cũ).
-      const interval_minutes = parseInt($("bb_interval").value, 10) || 0;
-      await POST(`/brewing/brews/${brewId}/batches/bulk`, { count, line_id, note, started_at, interval_minutes });
-      toast(`Đã thêm ${count} mẻ`);
-    } else {
-      const code = $("bb_code").value.trim();
-      // Mã mẻ (số mẻ Braumat) bắt buộc là số nguyên dương, duy nhất trong năm — xem
-      // routers/brewing.py::add_brew_batch.
-      if (!code || !/^\d+$/.test(code) || parseInt(code, 10) <= 0) throw new Error("Nhập mã mẻ là số nguyên dương (VD: 123).");
-      await POST(`/brewing/brews/${brewId}/batches`, { batch_code: code, line_id, seq: batches.length + 1, note, started_at });
-      toast("Đã thêm mẻ");
-    }
-    render("process"); openBrewBatchesModal(brewId, brewCode, productId, locked);
-  });
-  // Mỗi nút mở modal con dưới đây truyền kèm goBack — bấm "‹ Quay lại" trong modal con sẽ
-  // render lại đúng modal danh sách này (dữ liệu mới nhất) thay vì chỉ đóng mất ngữ cảnh.
-  const goBack = () => openBrewBatchesModal(brewId, brewCode, productId, locked);
-  document.querySelectorAll("[data-editbatch]").forEach(b => b.onclick = () => {
-    const batch = batches.find(x => x.batch_id === b.dataset.editbatch);
-    openEditBrewBatchModal(batch, brewLines, async ({ code, started_at, ended_at, line_id, note }) => {
-      if (code) await PUT(`/brewing/brews/${brewId}/batches/${batch.batch_id}/code`, { batch_code: code });
-      if (started_at) await POST(`/brewing/brews/${brewId}/batches/${batch.batch_id}/start`, { started_at });
-      if (ended_at) await POST(`/brewing/brews/${brewId}/batches/${batch.batch_id}/finish`, { ended_at });
-      if (line_id !== null || note !== null) {
-        const payload = {};
-        if (line_id !== null) payload.line_id = line_id;
-        if (note !== null) payload.note = note;
-        await PUT(`/brewing/brews/${brewId}/batches/${batch.batch_id}`, payload);
-      }
-      toast("Đã lưu mẻ"); render("process"); openBrewBatchesModal(brewId, brewCode, productId, locked);
-    }, goBack);
-  });
-  document.querySelectorAll("[data-stageqc]").forEach(b => b.onclick = () => {
-    const [stage, scopeType, scopeId, pid, fpid, displayOverride, beerTypeId] = b.dataset.stageqc.split("|");
-    if (MULTI_SAMPLE_STAGES.includes(stage)) {
-      openFermentQcSampleModal(stage, scopeType, scopeId, pid || null, goBack);
-      return;
-    }
-    openStageQcModal(stage, scopeType, scopeId, { productId: pid || null, finishedProductId: fpid || null,
-      beerTypeId: beerTypeId || null, displayId: displayOverride || scopeId.split("__")[0] }, goBack);
-  });
-  document.querySelectorAll("[data-nvl]").forEach(b => b.onclick = () => {
-    const [bId, batchId, batchCode] = b.dataset.nvl.split("|");
-    openBrewMaterialsModal(bId, batchId, batchCode, goBack);
-  });
-  if ($("bb_copynvl")) $("bb_copynvl").onclick = () => guard(async () => {
-    const first = batches[0];
-    const targetId = $("bb_copytarget").value;
-    const target = batches.find(b => b.batch_id === targetId);
-    await openCopyMaterialsSuggestModal(brewId, first, target, () => openBrewBatchesModal(brewId, brewCode, productId, locked));
-  });
-  document.querySelectorAll("[data-processlog]").forEach(b => b.onclick = () => {
-    const [bId, batchId, batchCode] = b.dataset.processlog.split("|");
-    openBrewProcessLogModal(bId, batchId, batchCode, goBack);
-  });
-  document.querySelectorAll("[data-cip]").forEach(b => b.onclick = () => {
-    const [scopeType, scopeId, label] = b.dataset.cip.split("|");
-    window.openCipLinkModal(scopeType, scopeId, label, goBack);
-  });
-  document.querySelectorAll("[data-delbatch]").forEach(b => b.onclick = () => guard(async () => {
-    if (!confirm("Xóa mẻ này? Không thể hoàn tác.")) return;
-    await DELETE(`/brewing/brews/${brewId}/batches/${b.dataset.delbatch}`);
-    toast("Đã xóa"); render("process"); openBrewBatchesModal(brewId, brewCode, productId, locked);
-  }));
-}
-
-// ---- Modal: Ghi chép nấu (import Step Protocol Braumat + biểu mẫu KCS QT-KCS-QT-BM-05) ----
-// Mirror của backend/app/services/braumat_import.py::FORM_SECTIONS/HEADER_FIELDS — giữ
-// đồng bộ khi sửa 1 bên. kind: "num"|"text"|"bool". spec:true = có cặp Quy định (Product.
-// spec_json, admin sửa) / Thực hiện (BrewProcessLog.manual_json, vận hành sửa).
-const BF_HEADER_FIELDS = [
-  // batch_number/order_number/gio_bat_dau/gio_ket_thuc là nhân viên tự ghi tay (giống bản
-  // giấy), KHÔNG lấy tự động từ batch_code/braumat_order_number/thời gian tính từ bước
-  // Braumat — KCS đối chiếu 2 nguồn này với nhau sau (xem dòng "tự động" cạnh mỗi ô).
-  { key: "batch_number", label: "Batch number", kind: "text" },
-  { key: "order_number", label: "Order Number", kind: "text" },
-  { key: "gio_bat_dau", label: "Bắt đầu", kind: "text" },
-  { key: "gio_ket_thuc", label: "Kết thúc", kind: "text" },
-  { key: "ka", label: "Ca", kind: "text" },
-  { key: "truc_ca", label: "Trực ca", kind: "text" },
-  { key: "nau_chinh", label: "Nấu chính", kind: "text" },
-  { key: "ngay_nhap_gao", label: "Ngày nhập gạo", kind: "text" },
-  { key: "ngay_nhap_malt", label: "Ngày nhập malt", kind: "text" },
-  { key: "silo", label: "Silo", kind: "text" },
-];
+// Mirror của backend/app/services/braumat_import.py::FORM_SECTIONS — giữ đồng bộ khi sửa 1
+// bên. kind: "num"|"text"|"bool". spec:true = có cặp Quy định (Product.spec_json, admin sửa).
+// Dùng cho "Quy định nấu" (openBrewSpecModal, gắn ở Danh mục Dịch bia) — bảng "Thực hiện"
+// (Ghi chép nấu, BrewProcessLog thuộc module Nấu-Lọc-Chiết cũ) đã bị gỡ bỏ.
 const BF_SECTIONS = [
   { key: "rc", title: "Nồi cháo", tempSteps: 2, fields: [
     { key: "rc_gao_truoc_kg", label: "Nghiền gạo ướt — trước (kg)", kind: "num", spec: false },
@@ -9134,36 +7992,6 @@ function _bfTempStepsHtml(sectionKey, n, specVals, manualVals, mode) {
     <tbody>${rows}</tbody></table></div>`;
 }
 
-function _bfTimeStepsHtml(steps, manualVals) {
-  const rows = steps.map(s => `<tr><td>${esc(s.label)}</td>
-    <td>${_bfInput(`${s.key}_batdau`, "text", manualVals?.[`${s.key}_batdau`], "pl-manual")}</td>
-    <td>${_bfInput(`${s.key}_ketthuc`, "text", manualVals?.[`${s.key}_ketthuc`], "pl-manual")}</td></tr>`).join("");
-  return `<div class="tablewrap"><table class="bf-mini"><thead><tr><th></th><th>Bắt đầu</th><th>Kết thúc</th></tr></thead>
-    <tbody>${rows}</tbody></table></div>`;
-}
-
-function _bfHopRowsHtml(rows, manualVals) {
-  const trs = rows.map(r => `<tr><td>${esc(r.label)}</td>
-    <td>${_bfInput(`${r.key}_hoacao_kg`, "num", manualVals?.[`${r.key}_hoacao_kg`], "pl-manual")}</td>
-    <td>${_bfInput(`${r.key}_hoavien_kg`, "num", manualVals?.[`${r.key}_hoavien_kg`], "pl-manual")}</td>
-    <td>${_bfInput(`${r.key}_rho_kg`, "num", manualVals?.[`${r.key}_rho_kg`], "pl-manual")}</td>
-    <td>${_bfInput(`${r.key}_batdau`, "text", manualVals?.[`${r.key}_batdau`], "pl-manual")}</td>
-    <td>${_bfInput(`${r.key}_giunhiet`, "num", manualVals?.[`${r.key}_giunhiet`], "pl-manual")}</td>
-    <td>${_bfInput(`${r.key}_ketthuc`, "text", manualVals?.[`${r.key}_ketthuc`], "pl-manual")}</td></tr>`).join("");
-  return `<div class="tablewrap"><table class="bf-mini">
-    <thead><tr><th></th><th>Hoa Cao (kg)</th><th>Hoa viên Đức (kg)</th><th>RHO Mỹ (kg)</th><th>Bắt đầu</th><th>Giữ nhiệt (dừng) phút</th><th>Kết thúc</th></tr></thead>
-    <tbody>${trs}</tbody></table></div>`;
-}
-
-function _bfSectionHtml(sec, specVals, manualVals) {
-  let html = `<table class="bf-mini"><thead><tr><th>Trường</th><th>Quy định</th><th>Thực hiện</th></tr></thead>
-    <tbody>${sec.fields.map(f => _bfFieldRow(f, specVals, manualVals, "log")).join("")}</tbody></table>`;
-  if (sec.tempSteps) html += _bfTempStepsHtml(sec.key, sec.tempSteps, specVals, manualVals, "log");
-  if (sec.timeSteps) html += _bfTimeStepsHtml(sec.timeSteps, manualVals);
-  if (sec.hopRows) html += _bfHopRowsHtml(sec.hopRows, manualVals);
-  return html;
-}
-
 function _bfSpecSectionHtml(sec, specVals) {
   const specFields = sec.fields.filter(f => f.spec);
   let html = specFields.length ? `<table class="bf-mini"><thead><tr><th>Trường</th><th>Quy định</th></tr></thead>
@@ -9172,16 +8000,6 @@ function _bfSpecSectionHtml(sec, specVals) {
   return html || '<div class="muted">Công đoạn này không có Quy định cấu hình được.</div>';
 }
 
-function _collectBfManualPayload() {
-  const payload = {};
-  document.querySelectorAll(".pl-manual").forEach(el => {
-    const key = el.dataset.key;
-    if (el.dataset.bool) payload[key] = el.checked;
-    else if (el.dataset.kind === "num") payload[key] = el.value === "" ? null : parseFloat(el.value);
-    else payload[key] = el.value.trim() === "" ? null : el.value.trim();
-  });
-  return payload;
-}
 function _collectBfSpecPayload() {
   const payload = {};
   document.querySelectorAll(".bf-spec").forEach(el => {
@@ -9209,143 +8027,6 @@ async function openBrewSpecModal(product) {
   });
 }
 
-function _computeOverallTiming(steps) {
-  const starts = steps.map(s => s.start_at).filter(Boolean).sort();
-  const ends = steps.map(s => s.end_at).filter(Boolean).sort();
-  return { start: starts[0] || null, end: ends[ends.length - 1] || null };
-}
-
-function _bfPrintFieldRows(sec, specVals, manualVals) {
-  return sec.fields.map(f => `<tr><td>${esc(f.label)}</td><td>${f.spec ? _bfDash(specVals?.[f.key]) : ""}</td>
-    <td>${_bfDash(manualVals?.[f.key])}</td></tr>`).join("");
-}
-function _bfPrintTempSteps(sectionKey, n, specVals, manualVals) {
-  let rows = "";
-  for (let i = 1; i <= n; i++) {
-    const base = `${sectionKey}_step${i}`;
-    rows += `<tr><td>Bước ${i}</td><td>${_bfDash(specVals?.[`${base}_nhietdo`])}</td>
-      <td>${_bfDash(manualVals?.[`${base}_nhietdo`])}</td><td>${_bfDash(manualVals?.[`${base}_batdau`])}</td>
-      <td>${_bfDash(manualVals?.[`${base}_dung`])}</td><td>${_bfDash(manualVals?.[`${base}_giunhiet`])}</td>
-      <td>${_bfDash(manualVals?.[`${base}_ketthuc`])}</td></tr>`;
-  }
-  return `<table class="pf-tbl"><thead><tr><th>Bước</th><th>Quy định (°C)</th><th>TH (°C)</th><th>Bắt đầu</th><th>Dừng</th><th>Giữ nhiệt</th><th>Kết thúc</th></tr></thead><tbody>${rows}</tbody></table>`;
-}
-function _bfPrintTimeSteps(steps, manualVals) {
-  const rows = steps.map(s => `<tr><td>${esc(s.label)}</td><td>${_bfDash(manualVals?.[`${s.key}_batdau`])}</td>
-    <td>${_bfDash(manualVals?.[`${s.key}_ketthuc`])}</td></tr>`).join("");
-  return `<table class="pf-tbl"><thead><tr><th></th><th>Bắt đầu</th><th>Kết thúc</th></tr></thead><tbody>${rows}</tbody></table>`;
-}
-function _bfPrintHopRows(rows, manualVals) {
-  const trs = rows.map(r => `<tr><td>${esc(r.label)}</td><td>${_bfDash(manualVals?.[`${r.key}_hoacao_kg`])}</td>
-    <td>${_bfDash(manualVals?.[`${r.key}_hoavien_kg`])}</td><td>${_bfDash(manualVals?.[`${r.key}_rho_kg`])}</td>
-    <td>${_bfDash(manualVals?.[`${r.key}_batdau`])}</td><td>${_bfDash(manualVals?.[`${r.key}_giunhiet`])}</td>
-    <td>${_bfDash(manualVals?.[`${r.key}_ketthuc`])}</td></tr>`).join("");
-  return `<table class="pf-tbl"><thead><tr><th></th><th>Hoa Cao</th><th>Hoa viên Đức</th><th>RHO Mỹ</th><th>Bắt đầu</th><th>Giữ nhiệt</th><th>Kết thúc</th></tr></thead><tbody>${trs}</tbody></table>`;
-}
-
-function _bfPrintSectionBody(sec, data) {
-  let body = `<table class="pf-tbl"><thead><tr><th>Trường</th><th>QĐ</th><th>TH</th></tr></thead>
-    <tbody>${_bfPrintFieldRows(sec, data.spec, data.manual)}</tbody></table>`;
-  if (sec.tempSteps) body += _bfPrintTempSteps(sec.key, sec.tempSteps, data.spec, data.manual);
-  if (sec.timeSteps) body += _bfPrintTimeSteps(sec.timeSteps, data.manual);
-  if (sec.hopRows) body += _bfPrintHopRows(sec.hopRows, data.manual);
-  return body;
-}
-
-function printBrewForm(data, batchCode) {
-  const timing = _computeOverallTiming(data.steps);
-  const byKey = Object.fromEntries(BF_SECTIONS.map(s => [s.key, s]));
-  const kaFields = ["ka", "truc_ca", "nau_chinh"].map(k => BF_HEADER_FIELDS.find(f => f.key === k));
-  const header = kaFields.map(f => `<div><b>${esc(f.label)}:</b> ${_bfDash(data.manual?.[f.key])}</div>`).join("");
-  // Bố cục 1 trang A4 nằm ngang: header rồi 3 cột dọc cân đối theo số dòng ước lượng
-  // (Nồi malt 1 mình đã ~19 dòng nên ghép 3 cột thay vì 2 mới đủ chỗ vừa 1 trang, không
-  // xếp cứng theo đúng nhóm trong file giấy vì bản giấy là 1 cột dài, không giới hạn cao).
-  const sectionBlock = (title, bodyHtml) => `<div class="pf-section"><h3>${esc(title)}</h3>${bodyHtml}</div>`;
-  const colA = [byKey.rc, byKey.lt].map(sec => sectionBlock(sec.title, _bfPrintSectionBody(sec, data))).join("");
-  const colB = [byKey.mt].map(sec => sectionBlock(sec.title, _bfPrintSectionBody(sec, data))).join("")
-    + sectionBlock("Ghi chú", `<div class="pf-note">${esc(data.note || "")}</div>`);
-  const colC = [byKey.wk, byKey.whp].map(sec => sectionBlock(sec.title, _bfPrintSectionBody(sec, data))).join("");
-  const html = `<!doctype html><html><head><meta charset="utf-8"/><title>Biểu mẫu nấu — ${esc(batchCode)}</title>
-    <style>
-      @page { size: A4 landscape; margin: 8mm; }
-      * { box-sizing: border-box; }
-      html,body{width:281mm}
-      body{font-family:Arial,Helvetica,sans-serif;color:#000;background:#fff;margin:0;font-size:11px;line-height:1.2}
-      h1{font-size:15px;margin:0 0 2px;text-align:center}
-      h2{font-size:12px;margin:0 0 5px;text-align:center;font-weight:normal}
-      h3{font-size:11.5px;margin:0 0 2px;border-bottom:1.5px solid #000;padding-bottom:1px;text-transform:uppercase}
-      .pf-body{display:grid;grid-template-columns:1fr 1fr 1fr;gap:0 14px;align-items:start}
-      .pf-section{margin-bottom:5px}
-      .pf-header{display:grid;grid-template-columns:1fr 1.3fr 1fr;gap:0 16px;border:1.5px solid #000;padding:4px 10px;margin-bottom:5px}
-      .pf-header > div > div{margin-bottom:1px}
-      table.pf-tbl{border-collapse:collapse;width:100%;margin-bottom:3px}
-      table.pf-tbl th, table.pf-tbl td{border:1px solid #000;padding:1px 4px;text-align:left;font-size:10px}
-      table.pf-tbl th{background:#eee;font-weight:normal}
-      .pf-note{border:1.5px solid #000;padding:5px;min-height:40px;white-space:pre-wrap;font-size:11px}
-      .pf-auto{color:#555;font-weight:normal}
-      .pf-kcs{border-top:1px solid #000;margin-top:4px;padding-top:2px}
-    </style></head><body>
-    <h1>1.5.2/2025/QT-KCS-QT-BM-05: CÔNG NGHỆ</h1>
-    <h2>NẤU BIA ${esc((data.braumat_recipe || "").toUpperCase())} — Mã nấu ${esc(data.brew_code || "")} — Mẻ ${esc(batchCode)}</h2>
-    <div class="pf-header">
-      <div><div><b>Batch number:</b> ${_bfDash(data.manual?.batch_number)}
-        ${batchCode ? `<span class="pf-auto"> (mã mẻ hệ thống: ${esc(batchCode)})</span>` : ""}</div>
-        <div><b>Ngày nhập gạo:</b> ${_bfDash(data.manual?.ngay_nhap_gao)}</div>
-        <div><b>Ngày nhập malt:</b> ${_bfDash(data.manual?.ngay_nhap_malt)}</div>
-        <div><b>Silo:</b> ${_bfDash(data.manual?.silo)}</div></div>
-      <div><div><b>Order Number:</b> ${_bfDash(data.manual?.order_number)}
-        ${data.braumat_order_number ? `<span class="pf-auto"> (tự động: ${esc(data.braumat_order_number)})</span>` : ""}</div></div>
-      <div><div><b>Bắt đầu:</b> ${_bfDash(data.manual?.gio_bat_dau)} &nbsp; <b>Kết thúc:</b> ${_bfDash(data.manual?.gio_ket_thuc)}
-        ${fmt(timing.start) !== "—" ? `<span class="pf-auto"> (tự động: ${fmt(timing.start)} → ${fmt(timing.end)})</span>` : ""}</div>
-        ${header}
-        <div class="pf-kcs"><b>KCS kiểm tra:</b> _______________________ (Ký, ghi rõ họ tên)</div></div>
-    </div>
-    <div class="pf-body"><div>${colA}</div><div>${colB}</div><div>${colC}</div></div>
-    </body></html>`;
-  const w = window.open("", "_blank");
-  if (!w) { toast("Trình duyệt chặn cửa sổ in — vui lòng cho phép popup.", "err"); return; }
-  w.document.write(html);
-  w.document.close();
-  w.focus();
-  setTimeout(() => w.print(), 300);
-}
-
-// ---- Modal: Ghi chép lên men (biểu mẫu giấy BM 1.11 (06) BIỂU THEO DÕI LÊN MEN) ----
-// Mirror của backend/app/services/ferment_log.py::HEADER_FIELDS — giữ đồng bộ khi sửa 1
-// bên. Không có import Braumat (chưa có file mẫu — xem ghi chú ở tab import bên dưới).
-// order_number/batch_number nhập tay (mirror BF_HEADER_FIELDS) — giá trị Braumat lấy từ mẻ
-// nấu nguồn (auto.braumat_order_number/batch_number) chỉ hiện kèm làm gợi ý đối chiếu, vì
-// không phải mẻ nấu nguồn nào cũng có import Braumat.
-const FL_HEADER_FIELDS = [
-  { key: "order_number", label: "Order Number", kind: "text", required: true },
-  { key: "batch_number", label: "Batch Number", kind: "text", required: true },
-  { key: "kieu_men", label: "Kiểu men", kind: "text" },
-  { key: "luu_luong_khi_bs", label: "Lưu lượng khí bổ sung, Lít/Phút", kind: "num" },
-  { key: "mat_do_ml_b", label: "Mật độ tế bào, 10⁶/ml (B)", kind: "num" },
-  { key: "pct_song_c", label: "% tế bào sống (C)", kind: "num" },
-  { key: "kg_can_cap_d", label: "Khối lượng men cần cấp, kg (D)", kind: "num" },
-  { key: "mat_do_ban_dau_e", label: "Mật độ ban đầu, 10⁶/ml (E)", kind: "num" },
-  { key: "kg_cap_thuc_j", label: "Khối lượng men cấp thực, kg (J)", kind: "num" },
-  { key: "mat_do_tach_f", label: "Tách men — mật độ, 10⁶/ml (F)", kind: "num" },
-  { key: "tach_men_kg_g", label: "Tách men — khối lượng, kg (G)", kind: "num" },
-  { key: "tach_men_pct_song", label: "Tách men — % tế bào sống", kind: "num" },
-  { key: "day_full_at", label: "Đầy (giờ, ngày)", kind: "text" },
-  { key: "nguoi_lenh_day", label: "Người lệnh (đầy tank)", kind: "text" },
-  { key: "nguoi_nhan_lenh_day", label: "Người nhận lệnh (đầy tank)", kind: "text" },
-  { key: "truc_ca_day", label: "Trực ca (đầy tank)", kind: "text" },
-];
-const FL_DAILY_ROWS = [
-  { key: "reading_date", label: "Ngày tháng", kind: "date" },
-  { key: "nhiet_do_c", label: "Nhiệt độ, °C", kind: "num" },
-  { key: "do_s", label: "°S", kind: "num" },
-  { key: "mat_do_tb", label: "Mật độ tb, 10⁶/ml", kind: "num" },
-  { key: "kcs", label: "KCS", kind: "select",
-    options: [["", "—"], ["dat", "Đạt"], ["khong_dat", "Không đạt"]] },
-  { key: "truc_ca", label: "Trực ca", kind: "select",
-    options: [["", "—"], ["dat", "Đạt"], ["khong_dat", "Không đạt"]] },
-];
-const FL_KCS_LABELS = { dat: "Đạt", khong_dat: "Không đạt" };
-
 function _flDash(v) { return (v === null || v === undefined || v === "" ? "—" : esc(String(v))); }
 
 function _flAuditText(by, at) { return by ? `${esc(by)} · ${fmt(at)}` : "—"; }
@@ -9364,21 +8045,6 @@ function _flDayInput(key, kind, value, dayNo, options, disabled) {
     value="${esc(value === null || value === undefined ? "" : String(value))}" style="width:${width}px" ${dis}/>`;
 }
 
-function _flHaphuInput(key, value, idx) {
-  return `<input type="text" class="fl-haphu-cell" data-hpkey="${key}" data-hpidx="${idx}"
-    value="${esc(value === null || value === undefined ? "" : String(value))}" style="width:120px"/>`;
-}
-
-function _collectFlManualPayload() {
-  const payload = {};
-  document.querySelectorAll(".fl-manual").forEach(el => {
-    const key = el.dataset.key;
-    if (el.dataset.kind === "num") payload[key] = el.value === "" ? null : parseFloat(el.value);
-    else payload[key] = el.value.trim() === "" ? null : el.value.trim();
-  });
-  return payload;
-}
-
 function _flChartHtml(readings, opts) {
   // Trục X hiện ngày thật (dd/mm) thay vì chỉ số ngày lên men trần trụi (yêu cầu người dùng
   // 2026-09-06: "hiển thị cho tôi ngày ở dưới trục X") — lùi về "Ngày N" nếu dòng đó chưa có
@@ -9392,9 +8058,9 @@ function _flChartHtml(readings, opts) {
     { label: "Nhiệt độ, °C", color: "#3498db", points: readings.map(r => ({ x: r.day_no, value: r.nhiet_do_c })) },
     { label: "°S", color: "#f5a623", points: readings.map(r => ({ x: r.day_no, value: r.do_s })) },
   ];
-  // Áp suất (bar) — CHỈ tank lên men (Mẻ SX, BatchTank), không có ở module Nấu-Lọc-Chiết cũ
-  // (FermentDailyReading không có cột này) — opts.pressure gạt riêng, tránh đổi biểu đồ dùng
-  // chung cho openFermentProcessLogModal (yêu cầu người dùng 2026-09-09).
+  // Áp suất (bar) — CHỈ tank lên men (Mẻ SX, BatchTank), module Nấu-Lọc-Chiết cũ (FermentDailyReading,
+  // không có cột này) đã bị gỡ bỏ — opts.pressure gạt riêng để giữ biểu đồ dùng chung an toàn
+  // (yêu cầu người dùng 2026-09-09).
   if (opts && opts.pressure) {
     left.push({ label: "Áp suất, bar", color: "#e74c3c", points: readings.map(r => ({ x: r.day_no, value: r.ap_suat_bar })) });
   }
@@ -9402,212 +8068,6 @@ function _flChartHtml(readings, opts) {
     { label: "Mật độ tb, 10⁶/ml", color: "#2ecc71", points: readings.map(r => ({ x: r.day_no, value: r.mat_do_tb })) },
   ];
   return CH.lineDualAxis(left, right, xLabels, { height: 220, showValueLabels: true });
-}
-
-async function openFermentProcessLogModal(fermentId, lmCode) {
-  const data = await GET(`/brewing/ferments/${fermentId}/process-log`);
-  const auto = data.auto;
-  let dayNos;
-  const readingsByDay = {};
-  if (data.readings.length) {
-    dayNos = data.readings.map(r => r.day_no);
-    data.readings.forEach(r => { readingsByDay[r.day_no] = { ...r }; });
-  } else {
-    // Mặc định 20 ngày, ngày 1 = ngày kết thúc nấu (auto.kt_date) — nếu chưa có kt_date thì để
-    // trống, vẫn hiện đủ 20 cột để nhập.
-    dayNos = Array.from({ length: 20 }, (_, i) => i + 1);
-    if (auto.kt_date) {
-      const base = new Date(auto.kt_date);
-      dayNos.forEach(d => {
-        const dt = new Date(base); dt.setDate(dt.getDate() + (d - 1));
-        readingsByDay[d] = { day_no: d, reading_date: toISODateLocal(dt) };
-      });
-    }
-  }
-  let haphuEvents = (data.ha_phu_events || []).map(e => ({ ...e }));
-
-  const autoFieldsHtml = `<div class="row" style="flex-wrap:wrap">
-    <div class="field"><label>Số lệnh nấu</label><div>${_flDash(auto.brew_order_code)}</div></div>
-    <div class="field"><label>Số mẻ</label><div>${_flDash(auto.so_me)}</div></div>
-    <div class="field"><label>Số Tank</label><div>${_flDash(auto.so_tank)}</div></div>
-    <div class="field"><label>Thể tích Tank, hl</label><div>${_flDash(auto.the_tich_tank)}</div></div>
-    <div class="field"><label>Thế hệ</label><div>${_flDash(auto.the_he)}</div></div>
-  </div>`;
-  // order_number/batch_number nhập tay — giá trị Braumat (nếu mẻ nấu nguồn có import) chỉ
-  // hiện kèm làm gợi ý đối chiếu, không tự điền vào ô (mirror BF_HEADER_FIELDS/_headerAutoHint).
-  const _flAutoHint = { order_number: auto.braumat_order_number, batch_number: auto.braumat_batch_number };
-  const manualFieldsHtml = `<div class="row" style="flex-wrap:wrap">${FL_HEADER_FIELDS.map(f => `<div class="field">
-    <label>${esc(f.label)}${f.required ? ' <span style="color:var(--red)">*</span>' : ""}</label>${_bfInput(f.key, f.kind, data.manual?.[f.key], "fl-manual")}
-    ${_flAutoHint[f.key] ? `<span class="muted" style="font-size:11px">Braumat (mẻ nấu nguồn): ${esc(_flAutoHint[f.key])}</span>` : ""}</div>`).join("")}</div>`;
-
-  modal(`<h3>Ghi chép lên men — lô LM <code class="k">${esc(lmCode)}</code></h3>
-    <div class="muted" style="margin-bottom:8px">Biểu mẫu BM 1.11 (06) — nhập tay bảng thông tin đầu, bảng theo ngày (nhiệt độ/°S/mật độ tế bào) và các mốc "Hạ phụ".</div>
-    <div class="row" style="align-items:flex-end">
-      <div class="field" style="flex:1"><label>Import dữ liệu Braumat (chưa hỗ trợ)</label>
-        <input type="file" disabled/>
-        <span class="muted" style="font-size:11px">Chưa có định dạng mẫu Braumat cho lên men — sẽ bổ sung khi có file mẫu.</span></div>
-      <button class="btn sec" id="fl_print">🖨️ In biểu mẫu</button>
-    </div>
-    <div style="max-height:60vh;overflow-y:auto;margin-top:10px">
-    <div class="panel"><h2 style="font-size:15px">Thông tin đầu</h2>
-      ${autoFieldsHtml}${manualFieldsHtml}
-    </div>
-    <div class="panel" style="margin-top:10px"><h2 style="font-size:15px">Biểu đồ theo dõi lên men</h2>
-      <div id="fl_chart">${_flChartHtml(data.readings)}</div>
-    </div>
-    <div class="panel" style="margin-top:10px"><h2 style="font-size:15px">Bảng theo ngày</h2>
-      <div id="fl_daily_wrap"></div>
-      <button class="btn" id="fl_save_readings" style="margin-top:8px">Lưu bảng ngày</button>
-    </div>
-    <div class="panel" style="margin-top:10px"><h2 style="font-size:15px">Hạ phụ</h2>
-      <div class="tablewrap"><table><thead><tr><th>Thời điểm</th><th>Người lệnh</th><th>Người nhận lệnh</th><th>Trực ca</th><th></th></tr></thead>
-        <tbody id="fl_haphu_wrap"></tbody></table></div>
-      <button class="btn sm sec" id="fl_addhaphu" style="margin-top:6px">+ Thêm mốc hạ phụ</button>
-    </div>
-    <div class="panel" style="margin-top:10px"><h2 style="font-size:15px">Ghi chú</h2>
-      <textarea id="fl_note" style="width:100%;min-height:50px">${esc(data.note || "")}</textarea></div>
-    </div>
-    <button class="btn" id="fl_save" style="margin-top:12px">Lưu</button>`);
-
-  function renderDailyTable() {
-    const auditRow = (label, getBy, getAt) => `<tr><td class="muted" style="font-size:11px">${esc(label)}</td>
-      ${dayNos.map(d => { const r = readingsByDay[d] || {};
-        return `<td class="muted" style="font-size:11px">${_flAuditText(getBy(r), getAt(r))}</td>`; }).join("")}</tr>`;
-    const rowsHtml = FL_DAILY_ROWS.map(f => {
-      let html = `<tr><td>${esc(f.label)}</td>
-        ${dayNos.map(d => `<td>${_flDayInput(f.key, f.kind, (readingsByDay[d] || {})[f.key], d, f.options)}</td>`).join("")}</tr>`;
-      if (f.key === "mat_do_tb") html += auditRow("Đo đạc bởi", r => r.measured_by, r => r.measured_at);
-      if (f.key === "kcs") html += auditRow("KCS bởi", r => r.kcs_by, r => r.kcs_at);
-      if (f.key === "truc_ca") html += auditRow("Trực ca bởi", r => r.truc_ca_by, r => r.truc_ca_at);
-      return html;
-    }).join("");
-    $("fl_daily_wrap").innerHTML = `<div class="tablewrap"><table class="bf-mini">
-      <thead><tr><th>Trường</th>${dayNos.map(d => `<th>Ngày ${d}</th>`).join("")}</tr></thead>
-      <tbody>${rowsHtml}</tbody></table></div>
-      <button class="btn sm sec" id="fl_addday" style="margin-top:6px">+ Thêm ngày</button>`;
-    document.querySelectorAll(".fl-daily-cell").forEach(el => {
-      const handler = () => {
-        const d = parseInt(el.dataset.flday, 10), k = el.dataset.flkey;
-        readingsByDay[d] = readingsByDay[d] || { day_no: d };
-        readingsByDay[d][k] = el.dataset.flkind === "num" ? (el.value === "" ? null : parseFloat(el.value)) : (el.value.trim() || null);
-      };
-      el.oninput = handler; el.onchange = handler;
-    });
-    $("fl_addday").onclick = () => { dayNos.push((dayNos[dayNos.length - 1] || 0) + 1); renderDailyTable(); };
-  }
-  renderDailyTable();
-
-  function renderHaphu() {
-    $("fl_haphu_wrap").innerHTML = haphuEvents.map((ev, idx) => `<tr>
-      <td>${_flHaphuInput("at", ev.at, idx)}</td>
-      <td>${_flHaphuInput("nguoi_lenh", ev.nguoi_lenh, idx)}</td>
-      <td>${_flHaphuInput("nguoi_nhan_lenh", ev.nguoi_nhan_lenh, idx)}</td>
-      <td>${_flHaphuInput("truc_ca", ev.truc_ca, idx)}</td>
-      <td><button class="btn sm sec" data-delhaphu="${idx}">Xóa</button></td></tr>`).join("")
-      || `<tr><td colspan=5 class="muted">Chưa có mốc hạ phụ nào.</td></tr>`;
-    document.querySelectorAll(".fl-haphu-cell").forEach(el => el.oninput = () => {
-      const idx = parseInt(el.dataset.hpidx, 10);
-      haphuEvents[idx][el.dataset.hpkey] = el.value.trim() || null;
-    });
-    document.querySelectorAll("[data-delhaphu]").forEach(b => b.onclick = () => {
-      haphuEvents.splice(parseInt(b.dataset.delhaphu, 10), 1);
-      renderHaphu();
-    });
-  }
-  renderHaphu();
-  $("fl_addhaphu").onclick = () => { haphuEvents.push({ at: null, nguoi_lenh: null, nguoi_nhan_lenh: null, truc_ca: null }); renderHaphu(); };
-
-  $("fl_print").onclick = () => printFermentForm({ ...data, manual_current: _collectFlManualPayload() }, lmCode);
-
-  $("fl_save_readings").onclick = () => guard(async () => {
-    const readings = dayNos.map(d => ({ day_no: d, ...(readingsByDay[d] || {}) }));
-    await PUT(`/brewing/ferments/${fermentId}/process-log/readings`, { readings });
-    toast("Đã lưu bảng theo ngày"); openFermentProcessLogModal(fermentId, lmCode);
-  });
-  $("fl_save").onclick = () => guard(async () => {
-    const payload = _collectFlManualPayload();
-    if (!payload.order_number || !payload.batch_number) {
-      toast("Order Number và Batch Number là bắt buộc.", "err");
-      return;
-    }
-    payload.note = $("fl_note").value.trim() || null;
-    payload.ha_phu_events = haphuEvents;
-    // Nút "Lưu" chính ở cuối modal trước đây CHỈ lưu thông tin đầu/ghi chú, không lưu Bảng
-    // theo ngày — nếu người dùng gõ số liệu ngày rồi bấm thẳng nút này (thay vì "Lưu bảng
-    // ngày" ở giữa modal) thì dữ liệu ngày bị mất khi đóng modal. Lưu luôn cả 2 để không ai
-    // mất dữ liệu dù bấm nút nào.
-    const readings = dayNos.map(d => ({ day_no: d, ...(readingsByDay[d] || {}) }));
-    await Promise.all([
-      PUT(`/brewing/ferments/${fermentId}/process-log`, payload),
-      PUT(`/brewing/ferments/${fermentId}/process-log/readings`, { readings }),
-    ]);
-    toast("Đã lưu ghi chép lên men"); closeModal(); render("process");
-  });
-}
-
-function printFermentForm(data, lmCode) {
-  const manual = { ...data.manual, ...(data.manual_current || {}) };
-  const auto = data.auto;
-  const _flPrintAutoHint = { order_number: auto.braumat_order_number, batch_number: auto.braumat_batch_number };
-  const headerRows = FL_HEADER_FIELDS.map(f => `<tr><td>${esc(f.label)}</td><td>${_flDash(manual[f.key])}
-    ${_flPrintAutoHint[f.key] ? ` <span style="color:#555">(Braumat: ${esc(_flPrintAutoHint[f.key])})</span>` : ""}</td></tr>`).join("");
-  const dailyCols = data.readings.length ? data.readings.map(r => r.day_no) : [];
-  const byDay = Object.fromEntries(data.readings.map(r => [r.day_no, r]));
-  const printAuditRow = (label, getBy, getAt) => `<tr><td style="color:#555">${esc(label)}</td>
-    ${dailyCols.map(d => { const r = byDay[d] || {}; return `<td style="color:#555">${_flAuditText(getBy(r), getAt(r))}</td>`; }).join("")}</tr>`;
-  const dailyRows = FL_DAILY_ROWS.map(f => {
-    let row = `<tr><td>${esc(f.label)}</td>
-      ${dailyCols.map(d => { const v = (byDay[d] || {})[f.key];
-        return `<td>${f.kind === "select" ? (FL_KCS_LABELS[v] || _flDash(v)) : _flDash(v)}</td>`; }).join("")}</tr>`;
-    if (f.key === "mat_do_tb") row += printAuditRow("Đo đạc bởi", r => r.measured_by, r => r.measured_at);
-    if (f.key === "kcs") row += printAuditRow("KCS bởi", r => r.kcs_by, r => r.kcs_at);
-    if (f.key === "truc_ca") row += printAuditRow("Trực ca bởi", r => r.truc_ca_by, r => r.truc_ca_at);
-    return row;
-  }).join("");
-  const haphuRows = (data.ha_phu_events || []).map(ev => `<tr><td>${_flDash(ev.at)}</td><td>${_flDash(ev.nguoi_lenh)}</td>
-    <td>${_flDash(ev.nguoi_nhan_lenh)}</td><td>${_flDash(ev.truc_ca)}</td></tr>`).join("");
-  const chartHtml = _flChartHtml(data.readings);
-  const html = `<!doctype html><html><head><meta charset="utf-8"/><title>Ghi chép lên men — ${esc(lmCode)}</title>
-    <style>
-      @page { size: A4 landscape; margin: 10mm; }
-      * { box-sizing: border-box; }
-      body{font-family:Arial,Helvetica,sans-serif;color:#000;background:#fff;margin:0;font-size:11px;line-height:1.25}
-      h1{font-size:15px;margin:0 0 2px;text-align:center}
-      h2{font-size:12px;margin:0 0 8px;text-align:center;font-weight:normal}
-      h3{font-size:11.5px;margin:8px 0 3px;border-bottom:1.5px solid #000;padding-bottom:1px;text-transform:uppercase}
-      table.pf-tbl{border-collapse:collapse;width:100%;margin-bottom:4px}
-      table.pf-tbl th, table.pf-tbl td{border:1px solid #000;padding:2px 5px;text-align:left;font-size:10.5px}
-      table.pf-tbl th{background:#eee;font-weight:normal}
-      .pf-header{display:grid;grid-template-columns:repeat(3,1fr);gap:2px 14px;border:1.5px solid #000;padding:5px 10px;margin-bottom:8px}
-      svg text{fill:#000 !important}
-      svg line{stroke:#000 !important}
-    </style></head><body>
-    <h1>BM 1.11 (06) — BIỂU THEO DÕI LÊN MEN</h1>
-    <h2>Lô LM ${esc(lmCode)}</h2>
-    <div class="pf-header">
-      <div><b>Số lệnh nấu:</b> ${_flDash(auto.brew_order_code)}</div>
-      <div><b>Số mẻ:</b> ${_flDash(auto.so_me)}</div>
-      <div><b>Số Tank:</b> ${_flDash(auto.so_tank)}</div>
-      <div><b>Thể tích Tank, hl:</b> ${_flDash(auto.the_tich_tank)}</div>
-      <div><b>Thế hệ:</b> ${_flDash(auto.the_he)}</div>
-    </div>
-    <h3>Thông tin đầu</h3>
-    <table class="pf-tbl"><tbody>${headerRows}</tbody></table>
-    <h3>Biểu đồ theo dõi</h3>
-    <div style="max-width:500px">${chartHtml}</div>
-    <h3>Bảng theo ngày</h3>
-    <table class="pf-tbl"><thead><tr><th></th>${dailyCols.map(d => `<th>Ngày ${d}</th>`).join("")}</tr></thead>
-      <tbody>${dailyRows}</tbody></table>
-    <h3>Hạ phụ</h3>
-    <table class="pf-tbl"><thead><tr><th>Thời điểm</th><th>Người lệnh</th><th>Người nhận lệnh</th><th>Trực ca</th></tr></thead>
-      <tbody>${haphuRows || '<tr><td colspan=4 style="text-align:center">—</td></tr>'}</tbody></table>
-    </body></html>`;
-  const w = window.open("", "_blank");
-  if (!w) { toast("Trình duyệt chặn cửa sổ in — vui lòng cho phép popup.", "err"); return; }
-  w.document.write(html);
-  w.document.close();
-  w.focus();
-  setTimeout(() => w.print(), 300);
 }
 
 async function openBrewOrderModal(orderId) {
@@ -9852,186 +8312,6 @@ async function printWarehouseIssueSlip(shipment) {
     lines: shipment.lines.map(l => ({ name: nameByCode[l.product] || l.product, code: l.product, uom: "Thùng", qty: l.quantity })),
   });
   openPrintWindow(html);
-}
-
-async function openBrewProcessLogModal(brewId, batchId, batchCode, onBack) {
-  const data = await GET(`/brewing/brews/${brewId}/batches/${batchId}/process-log`);
-  const cp = data.checkpoints;
-
-  const autoRow = (label, value) => `<div class="muted" style="font-size:12px">${esc(label)}: <b>${value ?? "—"}</b></div>`;
-  const autoBySection = {
-    rc: cp.rice_cooker ? [
-      autoRow("Khối lượng gạo (tự động)", cp.rice_cooker.rice_weight_kg && cp.rice_cooker.rice_weight_kg + " kg"),
-      autoRow("Nhiệt độ sau nấu chín (tự động)", cp.rice_cooker.mash_in_temp_c && cp.rice_cooker.mash_in_temp_c + " °C"),
-      autoRow("Heat up (tự động)", cp.rice_cooker.heat_up_temp_c && `${cp.rice_cooker.heat_up_temp_c} °C — ${cp.rice_cooker.heat_up_elapsed || ""}`),
-      autoRow("Giữ nhiệt/Rest (tự động)", cp.rice_cooker.rest_temp_c && `${cp.rice_cooker.rest_temp_c} °C — ${cp.rice_cooker.rest_elapsed || ""}`),
-    ].join("") : "",
-    mt: cp.mash_tun ? [
-      autoRow("Khối lượng malt (tự động)", cp.mash_tun.malt_weight_kg && cp.mash_tun.malt_weight_kg + " kg"),
-      ...(cp.mash_tun.rests || []).map((r, i) => autoRow(`Giữ nhiệt lần ${i + 1} (tự động)`, r.temp_c && `${r.temp_c} °C — ${r.elapsed}`)),
-    ].join("") : "",
-    lt: cp.lauter_tun ? [
-      autoRow("Dịch cốt / lượng đầu (tự động)", cp.lauter_tun.first_wort_hl && cp.lauter_tun.first_wort_hl + " hl"),
-      autoRow("Nước tráng bã (tự động)", cp.lauter_tun.water_sparge_hl && cp.lauter_tun.water_sparge_hl + " hl"),
-      autoRow("Dịch lần 2 (tự động)", cp.lauter_tun.second_wort_hl && cp.lauter_tun.second_wort_hl + " hl"),
-    ].join("") : "",
-    wk: cp.wort_kettle ? [
-      autoRow("Tổng thời gian đun sôi (tự động)", cp.wort_kettle.boiling_total_elapsed_min && cp.wort_kettle.boiling_total_elapsed_min + " phút"),
-      autoRow("Thời điểm châm hoa 1 (tự động)", cp.wort_kettle.hop1_time),
-      autoRow("Thời điểm châm hoa 2 (tự động)", cp.wort_kettle.hop2_time),
-    ].join("") : "",
-    whp: cp.whirlpool ? [
-      autoRow("Thời gian nhận dịch từ nồi hoa (tự động)", cp.whirlpool.receive_elapsed),
-    ].join("") : "",
-  };
-
-  // Làm phẳng dữ liệu đã import (1 dòng = 1 tham số) — chỉ dùng để xuất CSV cho báo cáo
-  // sau này (so với số liệu vận hành nhập tay và tiêu chuẩn công ty). Bảng hiển thị trên
-  // màn hình thì gộp theo bước (giống bố cục file PDF gốc — mỗi Unit/Bước/Bắt đầu/Kết
-  // thúc chỉ khai báo 1 lần, các tham số của bước đó liệt kê bên dưới, không lặp lại).
-  const flatRows = [];
-  data.steps.forEach(s => {
-    const entries = Object.entries(s.params);
-    if (!entries.length) {
-      flatRows.push({ unit: s.unit, step_no: s.step_no, eop: s.eop, name: s.name,
-        start_at: s.start_at, end_at: s.end_at, elapsed_actual: s.elapsed_actual,
-        param: "", setpoint: "", actual: "" });
-    }
-    entries.forEach(([param, v]) => flatRows.push({ unit: s.unit, step_no: s.step_no, eop: s.eop,
-      name: s.name, start_at: s.start_at, end_at: s.end_at, elapsed_actual: s.elapsed_actual,
-      param, setpoint: v.setpoint ?? "", actual: v.actual ?? "" }));
-  });
-  const units = [...new Set(data.steps.map(s => s.unit))];
-  const unitOpts = `<option value="">(Tất cả unit)</option>` + units.map(u => `<option value="${esc(u)}">${esc(u)}</option>`).join("");
-
-  let groupedRowsHtml = "";
-  data.steps.forEach((s, idx) => {
-    const entries = Object.entries(s.params);
-    const n = Math.max(1, entries.length);
-    const headerCells = `
-      <td rowspan="${n}" style="vertical-align:top">${esc(s.unit)}</td>
-      <td rowspan="${n}" style="vertical-align:top">${s.step_no}</td>
-      <td rowspan="${n}" class="muted" style="vertical-align:top">${esc(s.eop || "")}</td>
-      <td rowspan="${n}" style="vertical-align:top">${esc(s.name || "")}</td>
-      <td rowspan="${n}" class="muted" style="vertical-align:top">${fmt(s.start_at)}</td>
-      <td rowspan="${n}" class="muted" style="vertical-align:top">${fmt(s.end_at)}</td>
-      <td rowspan="${n}" style="vertical-align:top">${esc(s.elapsed_actual || "")}</td>`;
-    if (!entries.length) {
-      groupedRowsHtml += `<tr data-unit="${esc(s.unit)}" data-step="${idx}">${headerCells}<td class="muted" colspan=3>—</td></tr>`;
-    } else {
-      entries.forEach(([param, v], i) => {
-        groupedRowsHtml += `<tr data-unit="${esc(s.unit)}" data-step="${idx}">${i === 0 ? headerCells : ""}
-          <td>${esc(param)}</td><td>${esc(v.setpoint ?? "")}</td><td><b>${esc(v.actual ?? "")}</b></td></tr>`;
-      });
-    }
-  });
-  const rawHtml = data.steps.length ? `
-    <div class="row" style="align-items:flex-end;margin-bottom:8px">
-      <div class="field"><label>Lọc theo unit</label><select id="pl_raw_unit">${unitOpts}</select></div>
-      <div class="field" style="flex:1"><label>Tìm kiếm</label><input id="pl_raw_search" placeholder="Enter text to search..."/></div>
-      <button class="btn sec" id="pl_raw_csv">Xuất CSV</button>
-    </div>
-    <div class="tablewrap" style="max-height:55vh"><table id="pl_raw_tbl">
-      <thead><tr><th>Unit</th><th>Bước</th><th>EOP</th><th>Tên bước</th><th>Bắt đầu</th><th>Kết thúc</th><th>Thời gian</th><th>Tham số</th><th>Setpoint</th><th>Thực tế</th></tr></thead>
-      <tbody>${groupedRowsHtml}</tbody>
-    </table></div>` : '<div class="muted">Chưa import Step Protocol nào.</div>';
-
-  // 4 field nhập tay (batch_number/order_number/gio_bat_dau/gio_ket_thuc) hiện kèm giá trị
-  // hệ thống/Braumat (nếu có) để KCS đối chiếu — không tự điền vào ô, chỉ hiện tham khảo.
-  const _timingAuto = _computeOverallTiming(data.steps);
-  const _headerAutoHint = {
-    batch_number: batchCode,
-    order_number: data.braumat_order_number,
-    gio_bat_dau: fmt(_timingAuto.start) !== "—" ? fmt(_timingAuto.start) : null,
-    gio_ket_thuc: fmt(_timingAuto.end) !== "—" ? fmt(_timingAuto.end) : null,
-  };
-  const _headerHintLabel = { batch_number: "Mã mẻ hệ thống" };
-  const headerFieldsHtml = BF_HEADER_FIELDS.map(f => `<div class="field">
-    <label>${esc(f.label)}</label>${_bfInput(f.key, f.kind, data.manual?.[f.key], "pl-manual")}
-    ${_headerAutoHint[f.key] ? `<span class="muted" style="font-size:11px">${esc(_headerHintLabel[f.key] || "Tự động")}: ${esc(_headerAutoHint[f.key])}</span>` : ""}</div>`).join("");
-
-  modal(`<h3>Ghi chép nấu — mẻ <code class="k">${esc(batchCode)}</code></h3>
-    <div class="muted" style="margin-bottom:8px">Nhập số liệu đo tay (pH, %Bx, hóa chất, nhiệt độ/thời gian từng bước) theo biểu mẫu QT-KCS-QT-BM-05, hoặc import
-      file Step Protocol (Braumat) để tự động điền checkpoint tham khảo bên cạnh.
-      ${data.braumat_order_number ? `Đã import từ Order Number <b>${esc(data.braumat_order_number)}</b> — ${esc(data.braumat_recipe || "")}.` : ""}</div>
-    <div class="row" style="align-items:flex-end">
-      <div class="field" style="flex:1"><label>Import Step Protocol (PDF, có thể chọn nhiều file)</label>
-        <input type="file" id="pl_files" accept="application/pdf" multiple/></div>
-      <button class="btn" id="pl_import">Import</button>
-      <button class="btn sec" id="pl_print">🖨️ In biểu mẫu</button>
-    </div>
-    <div class="subnav" style="margin-top:10px">
-      <button class="active" data-pltab="form">Ghi chép</button>
-      <button data-pltab="raw">Dữ liệu Braumat đã import (${flatRows.length})</button>
-    </div>
-    <div id="pl_tab_form" style="max-height:60vh;overflow-y:auto;margin-top:10px">
-    <div class="panel"><h2 style="font-size:15px">Thông tin chung</h2>
-      <div class="row" style="flex-wrap:wrap">${headerFieldsHtml}</div>
-    </div>
-    ${BF_SECTIONS.map(sec => `
-      <div class="panel" style="margin-top:10px"><h2 style="font-size:15px">${esc(sec.title)}</h2>
-        ${autoBySection[sec.key] || ""}
-        ${_bfSectionHtml(sec, data.spec, data.manual)}
-      </div>`).join("")}
-    <div class="panel" style="margin-top:10px"><h2 style="font-size:15px">Ghi chú</h2>
-      <textarea id="pl_note" style="width:100%;min-height:50px">${esc(data.note || "")}</textarea></div>
-    </div>
-    <div id="pl_tab_raw" style="display:none;margin-top:10px">${rawHtml}</div>
-    <button class="btn" id="pl_save" style="margin-top:12px">Lưu ghi chép</button>`, onBack);
-
-  document.querySelectorAll("[data-pltab]").forEach(b => b.onclick = () => {
-    document.querySelectorAll("[data-pltab]").forEach(x => x.classList.remove("active"));
-    b.classList.add("active");
-    $("pl_tab_form").style.display = b.dataset.pltab === "form" ? "" : "none";
-    $("pl_tab_raw").style.display = b.dataset.pltab === "raw" ? "" : "none";
-  });
-  // Lọc theo nhóm bước (không phải theo từng dòng riêng lẻ) — vì các dòng của cùng 1
-  // bước dùng chung ô rowspan (Unit/Bước/Bắt đầu/Kết thúc), phải ẩn/hiện cả nhóm cùng lúc.
-  const filterRawTable = () => {
-    const q = ($("pl_raw_search")?.value || "").trim().toLowerCase();
-    const u = $("pl_raw_unit")?.value || "";
-    const groups = {};
-    document.querySelectorAll("#pl_raw_tbl tbody tr").forEach(tr => {
-      (groups[tr.dataset.step] = groups[tr.dataset.step] || []).push(tr);
-    });
-    Object.values(groups).forEach(trs => {
-      const unit = trs[0].dataset.unit;
-      const text = trs.map(tr => tr.textContent.toLowerCase()).join(" ");
-      const show = (!u || unit === u) && (!q || text.includes(q));
-      trs.forEach(tr => tr.style.display = show ? "" : "none");
-    });
-  };
-  if ($("pl_raw_unit")) $("pl_raw_unit").onchange = filterRawTable;
-  if ($("pl_raw_search")) $("pl_raw_search").oninput = filterRawTable;
-  if ($("pl_raw_csv")) $("pl_raw_csv").onclick = () => {
-    const header = ["Unit", "Bước", "EOP", "Tên bước", "Bắt đầu", "Kết thúc", "Thời gian", "Tham số", "Setpoint", "Thực tế"];
-    const csvCell = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
-    const lines = [header.map(csvCell).join(",")].concat(flatRows.map(r =>
-      [r.unit, r.step_no, r.eop, r.name, fmt(r.start_at), fmt(r.end_at), r.elapsed_actual, r.param, r.setpoint, r.actual]
-        .map(csvCell).join(",")));
-    const blob = new Blob(["﻿" + lines.join("\r\n")], { type: "text/csv;charset=utf-8" });
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = `braumat_${batchCode}.csv`;
-    a.click();
-    URL.revokeObjectURL(a.href);
-  };
-
-  $("pl_import").onclick = () => guard(async () => {
-    const files = $("pl_files").files;
-    if (!files.length) throw new Error("Chọn ít nhất 1 file PDF.");
-    const res = await POST_FILES(`/brewing/brews/${brewId}/batches/${batchId}/process-log/import`, files);
-    toast(res.warning || `Đã import ${Object.values(res.units).reduce((a, b) => a + b, 0)} bước từ ${Object.keys(res.units).length} unit`,
-         res.warning ? "err" : "ok");
-    openBrewProcessLogModal(brewId, batchId, batchCode, onBack);
-  });
-  $("pl_print").onclick = () => printBrewForm(data, batchCode);
-  $("pl_save").onclick = () => guard(async () => {
-    const payload = _collectBfManualPayload();
-    payload.note = $("pl_note").value.trim() || null;
-    await PUT(`/brewing/brews/${brewId}/batches/${batchId}/process-log`, payload);
-    toast("Đã lưu ghi chép nấu"); closeModal(); render("process");
-  });
 }
 
 // ================= NĂNG LƯỢNG =================
@@ -10587,662 +8867,6 @@ function wirePaginate(tableId, defaultPageSize = 10, opts = {}) {
 }
 const chk = (v) => v ? '<span class="chk">✔</span>' : '<span class="chk no">▢</span>';
 
-VIEWS.process = async function () {
-  const sec = SUB.process || "nguyenlieu";
-  const sections = [
-    { key: "nguyenlieu", label: "Nguyên liệu" }, { key: "nau", label: "Nấu" },
-    { key: "lenmen", label: "Lên men" }, { key: "loc", label: "Lọc" },
-    { key: "chiet", label: "Chiết" }, { key: "canhbao", label: "Cảnh báo chỉ tiêu" },
-    { key: "hoachat", label: "Hóa chất" }, { key: "men", label: "Thu hồi men" },
-  ];
-  let body = "";
-  let mastersLf = [];
-  let lotsByMaterial = {};
-
-  if (sec === "nguyenlieu") {
-    const nlLoc = SUB.process_nl_loc || "";
-    const [stock, lots] = await Promise.all([
-      GET("/warehouse/stock" + (nlLoc ? "?location=" + encodeURIComponent(nlLoc) : "")),
-      GET("/lots")]);
-    const matchesLoc = (loc) => !nlLoc || (/phân xưởng/i.test(nlLoc) === /phân xưởng/i.test(loc || ""));
-    lots.filter(l => l.quantity > 0 && matchesLoc(l.location)).forEach(l => {
-      (lotsByMaterial[l.material_id] = lotsByMaterial[l.material_id] || []).push(l);
-    });
-    const whOpts = ["", "Kho công ty", "Kho phân xưởng"].map(v =>
-      `<option value="${esc(v)}" ${v === nlLoc ? "selected" : ""}>${v || "(Tất cả)"}</option>`).join("");
-    const NL_LOT_CELL_MAX = 3;
-    const nlLotChip = (l) => `<code class="k">${lotCodeCellHtml(l)}</code> (${l.quantity}${l.uom}${l.status === "on_hold" ? ", CHỜ QC" : ""})`;
-    body = `<div class="panel"><h2>Tồn kho NVL theo kho <span class="muted">(${stock.length})</span></h2>
-      <div class="muted" style="margin-bottom:6px">Tồn kho thật từ hệ thống Kho NVL — nguyên liệu phân bổ vào mẻ nấu (nút "+NVL" ở tab Nấu) lấy từ <b>Kho phân xưởng</b>.</div>
-      <div class="row" style="margin-bottom:8px"><div class="field"><label>Kho</label><select id="nl_loc">${whOpts}</select></div></div>
-      <input class="searchbox" data-tbl="t_nlstock" placeholder="Tìm theo mã/tên vật tư..."/>
-      <div class="tablewrap"><table id="t_nlstock"><thead><tr><th>Mã VT</th><th>Tên</th><th>Nhóm</th><th>Mã lô</th><th>Tồn</th><th>ĐVT</th></tr></thead>
-      <tbody>${stock.map(s => { const matLots = (lotsByMaterial[s.material_id] || [])
-          .sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
-        const shown = matLots.slice(0, NL_LOT_CELL_MAX);
-        const rest = matLots.length - shown.length;
-        const lotCell = shown.map(nlLotChip).join(", ") +
-          (rest > 0 ? ` <button type="button" class="btn sm sec" data-viewlots="${esc(s.material_id)}" data-matlabel="${esc(s.material_code)} — ${esc(s.material_name)}">+${rest} lô khác</button>` : "");
-        return `<tr><td><code class="k">${esc(s.material_code)}</code></td><td>${esc(s.material_name)}</td>
-        <td class="muted">${esc(s.category || "")}</td>
-        <td class="muted">${lotCell || "—"}</td>
-        <td>${s.on_hand}</td><td>${s.uom}</td></tr>`; }).join("") ||
-        '<tr><td colspan=6 class="muted">Không có tồn kho.</td></tr>'}</tbody></table></div></div>`;
-  }
-
-  else if (sec === "nau") {
-    const ynNau = YEARS.nau;
-    const [rows, fermentTanks, yeast, products, brewOrders] = await Promise.all([
-      GET("/brewing/brews" + (ynNau ? "?" + ynNau.map(y => "years=" + y).join("&") : "")),
-      GET("/brewing/ferment-tanks").catch(() => []), GET("/process/yeast").catch(() => []),
-      GET("/products").catch(() => []), GET("/brewing/orders").catch(() => [])]);
-    // Chỉ hiện tank lên men đang TRỐNG (không bị 1 lô LM còn hoạt động chiếm dụng) — xem
-    // services/dashboard.py::available_ferment_tanks.
-    const tankOptsNau = fermentTanks.filter(t => !t.occupied).map(t => `<option value="${esc(t.code)}">${esc(t.code)}</option>`).join("") ||
-      `<option value="">(không còn tank trống — khai báo thêm ở Danh mục)</option>`;
-    const yeastOpts = `<option value="">(không chọn)</option>` + yeast.filter(y => y.status === "available")
-      .map(y => `<option value="${esc(y.code)}">${esc(y.code)} (${y.strain}, đời ${y.generation})</option>`).join("");
-    const wortOpts = `<option value="">(chọn dịch bia)</option>` + products.map(p =>
-      `<option value="${esc(p.product_id)}">${esc(p.name)}</option>`).join("") ||
-      `<option value="">(chưa có dịch bia nào — khai báo Dịch bia ở Danh mục)</option>`;
-    const canLockLot = _hasPerm("quality.release");
-    const isAdminLot = CURRENT_USER && CURRENT_USER.role === "admin";
-    // Lệnh nấu CHƯA hoàn thành — hiện tất cả để chọn tạo mã nấu (xem tab "Lệnh SX → Lệnh nấu").
-    const openOrdersNau = brewOrders.filter(o => !o.is_complete);
-    const orderOptsLn = `<option value="">(chọn Lệnh nấu — bắt buộc)</option>` + openOrdersNau.map(o =>
-      `<option value="${esc(o.brew_order_id)}" data-wort="${esc(o.product_id || "")}" data-vol="${o.planned_volume_hl}" data-batchcount="${o.planned_batch_count != null ? o.planned_batch_count : ""}">${esc(o.order_code)} — ${esc(o.product_code || o.product_desc || "—")} — ${o.actual_volume_hl}/${o.planned_volume_hl} hl</option>`).join("");
-    body = `<div class="panel"><h2>Thêm thông tin nấu</h2>
-      <div class="muted" style="margin-bottom:6px">1 mã nấu = 1 lần nấu vào 1 tank — chọn <b>Tank lên men</b> để tự động chuyển mã nấu này sang lên men (xem ở tab "Lên men").
-        Sau khi tạo, bấm "Mẻ" trên dòng đó để khai báo các mẻ cụ thể (số mẻ từ Braumat, VD 123,124,125,126) — mỗi mẻ nhập nguyên liệu &amp; chỉ tiêu riêng.
-        Chọn <b>Lệnh nấu</b> (chưa hoàn thành) — <b>Dịch bia</b> trích tự động từ lệnh đã chọn (không sửa được, tránh lệch giữa mã nấu và lệnh) —
-        nếu lệnh chưa gắn dịch bia thì chọn tay. Tạo lệnh mới ở tab "Lệnh nấu" nếu danh sách trống.
-        <b>Tank lên men</b> chỉ hiện tank đang trống (không bị lô LM khác chiếm dụng).
-        <b>Ngày KT (nạp đầy tank)</b> không nhập tay — tự tính bằng giờ kết thúc của mẻ cuối cùng khi vận hành bấm "Kết thúc" ở mẻ đó, hiển thị ở cột tương ứng bên dưới.</div>
-      <div class="row">
-        <div class="field"><label>Lệnh nấu</label><select id="nb_order">${orderOptsLn}</select></div>
-        <div class="field"><label>Mã nấu</label><input id="nb_code" placeholder="VD: N-0715"/></div>
-      </div>
-      <div class="row">
-        <div class="field"><label>Dịch bia</label><select id="nb_wort">${wortOpts}</select></div>
-        <div class="field"><label>SL nấu/hl</label><input id="nb_vol" type="number" value="900"/></div>
-        <div class="field"><label>Tank lên men</label><select id="nb_tank"><option value="">(chưa chuyển lên men)</option>${tankOptsNau}</select></div>
-        <div class="field"><label>Men sử dụng</label><select id="nb_yeast">${yeastOpts}</select></div>
-        <div class="field"><label>Số mẻ (KH)</label><input id="nb_batchcount" disabled style="width:70px" title="Số mẻ kế hoạch lấy từ Lệnh nấu đã chọn — chỉ để tham khảo khi khai báo Mẻ, số mẻ thực tế (Braumat) vẫn khai tay từng mẻ."/></div>
-      </div>
-      <div class="row">
-        <div class="field" style="flex:1"><label>Ghi chú</label><input id="nb_note" placeholder="(tuỳ chọn)"/></div>
-        <button class="btn" id="nb_add" style="align-self:flex-end">Thêm</button>
-      </div></div>
-      <div class="panel"><h2>Thông tin nấu <span class="muted">(${rows.length})</span></h2>
-      ${yearFilterControl("nau", ynNau)}
-      <input class="searchbox" data-tbl="t_nau" placeholder="Enter text to search..."/>
-      <div class="tablewrap"><table id="t_nau"><thead><tr><th>Mã nấu</th><th>Khóa mã nấu</th><th>Lệnh nấu</th><th>Ngày nấu</th><th>Ngày KT (nạp đầy tank)</th><th>Lô LM</th><th>Dịch nha</th><th>SL kế hoạch/hl</th><th>SL thực tế/hl</th>
-        <th>Tank</th><th>Số mẻ</th><th></th></tr></thead>
-      <tbody>${rows.map(b => `<tr class="row-${b.color}"><td class="code">${esc(b.brew_code)}</td>
-        <td style="white-space:nowrap">${b.locked
-            ? (isAdminLot ? `<button class="btn sm sec" data-unlocklot="brew|${esc(b.brew_id)}">Mở khóa</button>` : '<span class="muted">—</span>')
-            : (canLockLot ? `<button class="btn sm" data-locklot="brew|${esc(b.brew_id)}">Khóa</button>` : '<span class="muted">—</span>')}</td>
-        <td class="muted">${esc(b.brew_order_code || "—")}</td><td>${b.first_batch_started_at ? fmt(b.first_batch_started_at) : "—"}</td>
-        <td class="muted">${b.kt_date ? fmt(b.kt_date) : "—"}</td><td class="muted">${esc(b.lm_code || "—")}</td>
-        <td>${esc(b.wort_type)}</td><td>${b.volume_hl}</td>
-        <td class="muted" title="Tổng &quot;Tổng lượng dịch&quot; (Ghi chép nấu) cộng dồn qua các mẻ">${b.actual_volume_hl ?? "—"}</td>
-        <td class="muted">${esc(b.tank_lm || "—")}</td><td class="muted">${b.batch_count}</td>
-        <td style="white-space:nowrap"><button class="btn sm" data-brewbatches="${esc(b.brew_id)}|${esc(b.brew_code)}|${esc(b.product_id || "")}|${b.locked ? "1" : "0"}">Mẻ (${b.batch_count})</button>
-          <button class="btn sm sec" data-stageqc="nuoc_nau|brew|${esc(b.brew_id)}|||${esc(b.brew_code)}">Chỉ tiêu nước nấu</button>
-          ${b.locked ? "" : `<button class="btn sm sec" data-delrec="brew|${esc(b.brew_id)}">Xóa</button>`}</td></tr>`).join("")}</tbody></table></div>
-      <div class="legend">Bấm "Mẻ" để khai báo/xem các mẻ cụ thể của mã nấu này. Chú thích màu:
-        <b class="red">Đỏ</b>: Có mẻ thiếu chỉ tiêu bắt buộc, hoặc đã nhập đủ nhưng có chỉ tiêu FAIL (ngoài khoảng min-max) — <b class="green">Xanh lá</b>: Đủ chỉ tiêu (không FAIL) nhưng có mẻ chưa nhập NVL —
-        <b class="blue">Xanh dương</b>: Tất cả mẻ đầy đủ.</div></div>`;
-  }
-
-  else if (sec === "lenmen") {
-    const ynLm = YEARS.lenmen;
-    const data = await GET("/brewing/ferments" + (ynLm ? "?" + ynLm.map(y => "years=" + y).join("&") : ""));
-    // Dòng còn CẦN thao tác (chưa duyệt LM và/hoặc chưa khóa lô) lên đầu bảng — dễ thấy ngay
-    // việc cần làm thay vì phải tìm giữa các dòng đã xong (sort ổn định, giữ nguyên thứ tự
-    // tương đối giữa các dòng cùng nhóm cần/không cần).
-    data.items = [...data.items].sort((a, b) =>
-      Number(!b.qc_approved || !b.locked) - Number(!a.qc_approved || !a.locked));
-    // dang_nau: còn mẻ nấu nào của mã nấu nạp vào tank này chưa "Kết thúc" — chưa thật sự
-    // lên men dù đã có dịch trong tank, xem services/derived.py::ferment_status.
-    const stLabel = { dang_nau: "Đang nấu", len_men: "Đang lên men", loc_mot_phan: "Lọc 1 phần", da_loc_het: "Lọc hết" };
-    const stBadge = { dang_nau: "in_progress", len_men: "running", loc_mot_phan: "due", da_loc_het: "done" };
-    const canApproveLm = _hasPerm("quality.release");
-    const canLockLot = _hasPerm("quality.release");
-    const isAdminLot = CURRENT_USER && CURRENT_USER.role === "admin";
-    const daysFermentedCell = (r) => {
-      if (!r.kt_date) return '<span class="muted">—</span>';
-      let diffMs = new Date() - new Date(r.kt_date);
-      if (diffMs < 0) diffMs = 0;
-      const totalMin = Math.floor(diffMs / 60000);
-      const d = Math.floor(totalMin / 1440), h = Math.floor((totalMin % 1440) / 60), m = totalMin % 60;
-      const dd = String(d), hh = String(h).padStart(2, "0"), mm = String(m).padStart(2, "0");
-      return `${dd}.${hh}.${mm}${r.ferment_days_std ? ` / ${r.ferment_days_std} ngày` : ""}`;
-    };
-    const readyBadge = (r) => {
-      if (r.qc_approved) return '<span class="muted">—</span>';
-      if (!r.ready_date) return '<span class="muted">—</span>';
-      const ready = new Date(r.ready_date) <= new Date();
-      return ready ? `<span style="color:var(--red)">Đủ ${r.ferment_days_std} ngày — chờ KCS duyệt</span>` :
-        `<span class="muted">Còn ${Math.max(0, r.ferment_days_std - (r.days_elapsed ?? 0))} ngày (dự kiến ${fmt(r.ready_date)})</span>`;
-    };
-    body = `<div class="panel"><h2>Thông tin quá trình lên men <span class="muted">(${data.items.length})</span></h2>
-      <div class="muted" style="margin-bottom:6px">Tank &amp; lô LM được gán ngay lúc tạo mẻ nấu (tab "Nấu") — 1 tank có thể nhận nhiều mẻ.
-        Tab này chỉ dùng để xem &amp; khai báo chỉ tiêu lên men chính/phụ. Số ngày lên men chuẩn khai báo theo loại bia ở Danh mục —
-        sau khi đủ ngày, KCS ký duyệt "tank lên men đạt" mới được tạo bản ghi Lọc từ tank đó.</div>
-      ${yearFilterControl("lenmen", ynLm)}
-      <input class="searchbox" data-tbl="t_lm" placeholder="Enter text to search..."/>
-      <div class="tablewrap"><table id="t_lm"><thead><tr><th>Duyệt</th><th>Khóa lô lên men</th><th>Lô LM</th><th>Mã nấu</th><th>Ngày nấu</th><th>Ngày KT</th><th>Số ngày đã lên men</th>
-        <th>Dịch nha</th><th>Đời men</th><th>Tank LM</th><th>SL nấu/hl</th><th>Đang tồn CCT/hl</th><th>Trạng thái</th><th>Sẵn sàng chiết</th><th></th><th>Chỉ tiêu</th></tr></thead>
-      <tbody>${data.items.map(r => `<tr class="row-${r.color}">
-        <td style="white-space:nowrap">${r.locked ? lockBadgeHtml(r) : (r.qc_approved
-            ? `<span style="color:var(--green)">✓ ${esc(r.qc_approved_by || "")}</span><div class="muted">${fmt(r.qc_approved_at)}</div>`
-            : (canApproveLm ? `<button class="btn sm" data-lmapprove="${esc(r.ferment_id)}">Duyệt LM (KCS)</button>` : '<span class="muted">—</span>'))}</td>
-        <td style="white-space:nowrap">${r.locked
-            ? (isAdminLot ? `<button class="btn sm sec" data-unlocklot="ferment|${esc(r.ferment_id)}">Mở khóa</button>` : '<span class="muted">—</span>')
-            : (canLockLot ? `<button class="btn sm" data-locklot="ferment|${esc(r.ferment_id)}">Khóa</button>` : '<span class="muted">—</span>')}</td>
-        <td>${holdBadgeHtml(r)}${esc(r.lm_code)}</td><td>${esc(r.brew_code || "")}</td><td>${fmt(r.brew_date)}</td>
-        <td>${fmt(r.kt_date)}</td><td>${daysFermentedCell(r)}</td><td>${esc(r.wort_type)}</td>
-        <td class="muted">${esc(r.yeast_gen || "")}</td><td>${esc(r.tank_lm)}</td><td>${r.volume_hl.toLocaleString("vi-VN")}</td>
-        <td>${r.on_hand_cct.toLocaleString("vi-VN")}</td><td>${badge(stBadge[r.status] || "planned")}${stLabel[r.status] || r.status}</td>
-        <td>${readyBadge(r)}</td>
-        <td style="white-space:nowrap"><button class="btn sm sec" data-fermentlog="${esc(r.ferment_id)}|${esc(r.lm_code)}">Ghi chép LM</button></td>
-        <td style="white-space:nowrap"><button class="btn sm sec" data-stageqc="len_men_chinh|ferment|${esc(r.ferment_year)}-${esc(r.lm_code)}__len_men_chinh|${esc(r.product_id || "")}">CT chính</button>
-          <button class="btn sm sec" data-stageqc="len_men_phu|ferment|${esc(r.ferment_year)}-${esc(r.lm_code)}__len_men_phu|${esc(r.product_id || "")}">CT phụ</button>
-          <button class="btn sm sec" data-cip="ferment|${esc(r.ferment_id)}|${esc(r.lm_code)}" title="Gắn CIP liên quan">CIP</button>
-          ${!r.locked && (r.on_hand_cct || 0) > 0 ? `<button class="btn sm sec" data-emptycct="${esc(r.ferment_id)}"
-            title="Buộc tồn CCT (${r.on_hand_cct} hl) của cả tank ${esc(r.tank_lm)} về 0 khi tank vật lý đã lọc cạn thật nhưng số liệu còn lệch">Làm rỗng tank</button>` : ""}</td></tr>`).join("")}
-      <tr style="font-weight:700"><td colspan=10 style="text-align:right">Tổng cộng:</td><td>${data.total_brew_hl.toLocaleString("vi-VN")}</td><td>${data.total_cct_hl.toLocaleString("vi-VN")}</td><td colspan=4></td></tr></tbody></table></div>
-      <div class="legend">Chú thích: <b class="red">Đỏ</b>: Thiếu chỉ tiêu bắt buộc, hoặc đã đủ nhưng có chỉ tiêu FAIL — <b class="blue">Xanh dương</b>: Đầy đủ, không FAIL</div></div>`;
-  }
-
-  else if (sec === "loc") {
-    const ynLoc = YEARS.loc;
-    const [rows, filterOrders, lines, bbtTanksLocRaw] = await Promise.all([
-      GET("/brewing/filters" + (ynLoc ? "?" + ynLoc.map(y => "years=" + y).join("&") : "")),
-      GET("/brewing/filter-orders"), GET("/lines").catch(() => []),
-      GET("/brewing/bbt-tanks").catch(() => [])]);
-    // Tank còn CẦN thao tác (còn ít nhất 1 mẻ lọc chưa duyệt KCS và/hoặc chưa khóa lô) lên đầu
-    // bảng — xem lý do tương tự ở "lenmen"/"chiet".
-    const needsActionLoc = (r) => !r.qc_approved || !r.locked;
-    const tankNeedsAction = (t) => rows.some(r => r.to_bbt === t.to_bbt && needsActionLoc(r));
-    const bbtTanksLoc = [...bbtTanksLocRaw].sort((a, b) => Number(tankNeedsAction(b)) - Number(tankNeedsAction(a)));
-    const canApproveFilter = _hasPerm("quality.release");
-    const canLockLot = _hasPerm("quality.release");
-    const isAdminLot = CURRENT_USER && CURRENT_USER.role === "admin";
-    const ordersById = Object.fromEntries(filterOrders.map(o => [o.filter_order_id, o]));
-    // Đếm số tank thành phẩm CÙNG 1 Lệnh lọc (master_order_id) — chỉ hiện "(N)" khi Lệnh lọc đó
-    // thật sự có NHIỀU HƠN 1 tank (mới cần phân biệt tank nào); còn đúng 1 tank thì số lệnh đã
-    // đủ rõ, không cần "(1)" thừa.
-    const siblingCountByMaster = {};
-    for (const o of filterOrders) {
-      if (!o.master_order_id) continue;
-      siblingCountByMaster[o.master_order_id] = (siblingCountByMaster[o.master_order_id] || 0) + 1;
-    }
-    // Đã bắt đầu chiết (có mẻ chiết tham chiếu tới 1 trong các mẻ lọc của lệnh) thì không cho
-    // thêm mẻ lọc mới nữa — chỉ được thêm khi lệnh còn "Đang lọc" (xem
-    // filter_order_svc._chiet_started, chặn tương ứng ở routers/brewing.py::add_filter).
-    const availableOrders = filterOrders.filter(o => !o.is_complete && !o.chiet_started);
-    // Nhóm các "tank thành phẩm" CHƯA hoàn thành theo Lệnh lọc (master_order_id) — chọn
-    // theo 2 bước: chọn Lệnh lọc rồi chọn đúng Tank thành phẩm bên trong để thực hiện lọc.
-    const mastersMap = new Map();
-    for (const o of availableOrders) {
-      if (!o.master_order_id) continue;
-      if (!mastersMap.has(o.master_order_id)) mastersMap.set(o.master_order_id, { id: o.master_order_id, code: o.master_order_code, children: [] });
-      mastersMap.get(o.master_order_id).children.push(o);
-    }
-    mastersLf = [...mastersMap.values()];
-    mastersLf.forEach(m => m.children.sort((a, b) => (a.seq || 0) - (b.seq || 0)));
-    const masterOptsLf = `<option value="">(chọn Lệnh lọc — bắt buộc)</option>` + mastersLf.map(m =>
-      `<option value="${esc(m.id)}">${esc(m.code)} (${m.children.length} tank thành phẩm chưa xong)</option>`).join("");
-    // Tank BBT bị khoá — mirror ĐÚNG điều kiện chặn server-side filter_order_svc._bbt_target_blocked_by:
-    // (1) đang có mẻ chưa kết thúc (!all_finished, không thể vừa rót mẻ này vừa cho mẻ khác vào
-    // cùng lúc) HOẶC (2) còn dịch VÀ đã có mẻ được KCS duyệt (nhiều lệnh khác nhau được phép
-    // cùng đổ vào 1 tank TRƯỚC khi duyệt KCS, chỉ chặn SAU khi duyệt) — áp dụng thêm ở UI để
-    // không phải bấm thử mới biết bị chặn.
-    const occupiedBbtCodes = new Set(bbtTanksLoc.filter(t => !t.all_finished || (t.on_hand_bbt > 1e-6 && t.any_qc_approved)).map(t => t.to_bbt));
-    const freeBbtLines = lines.filter(l => l.kind === "tank_bbt" && !occupiedBbtCodes.has(l.code));
-    const bbtOpts = freeBbtLines.map(l => `<option value="${esc(l.code)}">${esc(l.code)}</option>`).join("") ||
-      `<option value="">(không còn Tank BBT trống — tank khác đang lọc/còn dịch chưa chiết hết)</option>`;
-    // Bảng phẳng, KHÔNG gom theo khối tank BBT nữa — mỗi dòng = 1 mẻ lọc, hiện thẳng Tank BBT/
-    // Loại bia/Dịch bia (dịch nguồn của TỪNG tank, nối " + " nếu là mẻ phối >=2 tank nguồn) ngay
-    // trên dòng đó. Nút cấp-tank (Làm rỗng tank/CIP) chỉ hiện 1 lần ở dòng ĐẦU TIÊN gặp mỗi
-    // to_bbt (theo thứ tự lặp bbtTanksLoc rồi mẻ của tank đó) để tránh lặp nút trên mọi dòng.
-    const seenTanksLoc = new Set();
-    const rowsHtmlLoc = bbtTanksLoc.flatMap(t => rows.filter(r => r.to_bbt === t.to_bbt)
-        .sort((a, b) => Number(needsActionLoc(b)) - Number(needsActionLoc(a))).map(r => {
-      const tankCount = ordersById[r.filter_order_id]?.tanks?.length || 0;
-      const ord = ordersById[r.filter_order_id];
-      const lenhLocText = ord && ord.master_order_code
-        ? `${esc(ord.master_order_code)}${ord.seq && (siblingCountByMaster[ord.master_order_id] || 0) > 1 ? `(${ord.seq})` : ""}`
-        : "—";
-      const firstOfTank = !seenTanksLoc.has(t.to_bbt);
-      seenTanksLoc.add(t.to_bbt);
-      const dichBia = [...new Set((r.source_products || []).filter(Boolean))].join(" + ") || r.product_code || "—";
-      return `<tr class="row-${r.color}">
-        <td class="code">${esc(t.to_bbt)}</td>
-        <td>${esc(r.beer_type || t.beer_type || "—")}</td>
-        <td>${esc(dichBia)}</td>
-        <td style="white-space:nowrap">${r.locked ? lockBadgeHtml(r) : (r.qc_approved ? `<span style="color:var(--green)">✓ ${esc(r.qc_approved_by || "")}</span><div class="muted">${fmt(r.qc_approved_at)}</div>`
-          : (r.exec_status !== "hoan_thanh") ? `<span class="muted" title="Chỉ duyệt được khi đã lọc xong (kết thúc hết các tank)">— (đang lọc)</span>`
-          : (canApproveFilter ? `<button class="btn sm" data-filterapprove="${esc(r.filter_id)}">Duyệt KCS</button>` : '<span class="muted">—</span>'))}</td>
-        <td style="white-space:nowrap">${r.locked
-            ? (isAdminLot ? `<button class="btn sm sec" data-unlocklot="filter|${esc(r.filter_id)}">Mở khóa</button>` : '<span class="muted">—</span>')
-            : (canLockLot ? `<button class="btn sm" data-locklot="filter|${esc(r.filter_id)}">Khóa</button>` : '<span class="muted">—</span>')}</td>
-        <td class="code">${holdBadgeHtml(r)}${esc(r.filter_code)}</td>
-        <td class="muted">${lenhLocText}</td>
-        <td>${fmt(r.filter_date)}</td><td>${r.v_dich_hl > 0 ? r.v_dich_hl : "—"}</td><td>${r.nuoc_bai_khi_hl > 0 ? r.nuoc_bai_khi_hl : "—"}</td>
-        <td>${r.v_beer_hl > 0 ? r.v_beer_hl : "—"}</td><td>${r.on_hand_bbt}</td>
-        <td>${badge({ dang_loc: "in_progress", cho_duyet: "held", cho_chiet: "planned", chiet_1_phan: "due", da_chiet_het: "done" }[r.status] || "planned")}${esc(r.status_label)}</td>
-        <td>${fmt(r.ended_at)}</td>
-        <td>${badge(r.exec_status === "hoan_thanh" ? "completed" : "in_progress")}${esc(r.exec_status_label)}
-          <button class="btn sm" data-filtertanks="${esc(r.filter_id)}" data-filterbbt="${r.on_hand_bbt || 0}" style="margin-left:6px">Tank (${tankCount})</button></td>
-        <td style="white-space:nowrap"><button class="btn sm sec" data-nvlloc="${esc(r.filter_id)}|${esc(r.filter_order_id || "")}|${esc(r.filter_code)}">NVL lọc</button>
-          ${r.locked ? "" : `<button class="btn sm sec" data-delrec="filter|${esc(r.filter_id)}">Xóa</button>`}</td>
-        <td style="white-space:nowrap"><button class="btn sm sec" data-stageqc="loc|filter|${esc(r.filter_year)}-${esc(r.filter_code)}|${esc(r.product_id || "")}|${esc(r.finished_product_id || "")}|${""}|${esc(r.beer_type_id || "")}">Chỉ tiêu</button></td>
-        <td style="white-space:nowrap">${firstOfTank ? `${t.on_hand_bbt > 0 ? `<button class="btn sm sec" data-emptybbttank="${esc(t.to_bbt)}">Làm rỗng tank</button>` : ""}<button class="btn sm sec" data-cip="bbt_tank|${esc(t.to_bbt)}|${esc(t.to_bbt)}" title="Gắn CIP liên quan cho cả tank">CIP</button>` : ""}</td>
-      </tr>`;
-    })).join("") || `<tr><td colspan=18 class="muted">Chưa có mẻ lọc nào — thêm ở form "Thêm thông tin lọc" phía trên.</td></tr>`;
-    body = `<div class="panel"><h2>Thêm thông tin lọc (Lọc thường)</h2>
-      <div class="muted" style="margin-bottom:6px">Bắt buộc chọn <b>Lệnh lọc</b> rồi chọn đúng <b>Tank thành phẩm</b> bên trong (chưa dùng hết) — tạo lệnh mới ở tab "Lệnh lọc" nếu danh sách trống; tank nguồn kế thừa từ tank đã chọn, không chọn lại.
-        Dịch nha lọc/Sản lượng lọc chưa cần điền ngay — sẽ nhập khi bấm "Kết thúc" từng tank (kèm nước bài khí, sản lượng tự tính = dịch nha lọc + nước bài khí, cộng dồn nếu lọc phối). Dùng form này để thêm mẻ vào tank MỚI (chưa có mẻ nào) — tank đã có mẻ thì bấm nút "Tank (N)" trên dòng mẻ đó rồi bấm "+ Thêm mẻ" trong đó (tự dùng lại đúng tank nguồn của mẻ, không cần chọn lại).</div>
-      <div class="row">
-        <div class="field"><label>Lệnh lọc</label><select id="fl_master">${masterOptsLf}</select></div>
-        <div class="field"><label>Tank thành phẩm</label><select id="fl_order"><option value="">(chọn Lệnh lọc trước)</option></select></div>
-        <div class="field"><label>Loại bia</label><div id="fl_beer_display" class="muted" style="padding:6px 0">— (chọn Tank thành phẩm trước)</div></div>
-        <div class="field"><label>Cho vào Tank BBT</label><select id="fl_bbt"><option value=""></option>${bbtOpts}</select>
-          <div id="fl_bbt_locked" class="muted" style="padding:6px 0;display:none"></div></div>
-        <button class="btn" id="fl_add">Thêm</button>
-      </div></div>
-      <h2 style="margin:16px 0 8px">Thông tin lọc <span class="muted">(${bbtTanksLoc.length} tank · ${rows.length} mẻ)</span></h2>
-      ${yearFilterControl("loc", ynLoc)}
-      <input class="searchbox" data-tbl="t_loc" placeholder="Enter text to search..."/>
-      <div class="tablewrap"><table id="t_loc">
-        <thead><tr><th>Tank BBT</th><th>Loại bia</th><th>Dịch bia</th><th>Duyệt KCS</th><th>Khóa mã lọc</th><th>Mã lọc</th><th>Lệnh lọc</th><th>Ngày lọc</th><th>V dịch/hl</th><th>Nước bài khí/hl</th>
-          <th>V Bia/hl</th><th>Đang tồn/hl</th><th>Trạng thái</th><th>Kết thúc</th><th>TH thực tế</th><th></th><th>Chỉ tiêu</th><th>Tank</th></tr></thead>
-        <tbody>${rowsHtmlLoc}</tbody>
-      </table></div>
-      <div class="legend">Chú thích: <b class="red">Đỏ</b>: Thiếu chỉ tiêu bắt buộc, hoặc đã đủ nhưng có chỉ tiêu FAIL — <b class="green">Xanh lá</b>: Đủ chỉ tiêu (không FAIL) nhưng chưa nhập NVL — <b class="blue">Xanh dương</b>: Đầy đủ, không FAIL — <b class="cyan">Xanh nhạt</b>: Lọc vào BBT phối</div>`;
-  }
-
-  else if (sec === "chiet") {
-    const ynChiet = YEARS.chiet;
-    const [rows, finishedProducts, lines, bbtTanksChiet] = await Promise.all([
-      GET("/brewing/bottles" + (ynChiet ? "?" + ynChiet.map(y => "years=" + y).join("&") : "")),
-      GET("/finished-products").catch(() => []), GET("/lines").catch(() => []),
-      GET("/brewing/bbt-tanks").catch(() => [])]);
-    // Dòng còn CẦN thao tác (chưa duyệt và/hoặc chưa khóa lô) lên đầu bảng — xem lý do tương
-    // tự ở "lenmen".
-    rows.sort((a, b) => Number(!b.approved || !b.locked) - Number(!a.approved || !a.locked));
-    const canLockLot = _hasPerm("quality.release");
-    const isAdminLot = CURRENT_USER && CURRENT_USER.role === "admin";
-    // Tank BBT chỉ hiện khi ĐÃ LỌC XONG (mọi mẻ lọc cùng tank có ended_at) + KCS duyệt hết
-    // + KHÔNG đang bị chọn làm nguồn "lọc lại" (xem services/filter_order.py::available_bbt_tanks,
-    // enforce lại server-side ở add_bottle — đây chỉ để ẩn lựa chọn không hợp lệ trên UI).
-    const bbtTanksApproved = bbtTanksChiet.filter(t => t.eligible_for_chiet);
-    const bbtOpts = bbtTanksApproved.map(t =>
-      `<option value="${esc(t.to_bbt)}" data-beer="${esc(t.beer_type || "")}" data-fp="${esc(t.finished_product_code || "")}">${esc(t.to_bbt)} — ${esc(t.beer_type || "")}${t.finished_product_code ? ` · SP: ${esc(t.finished_product_code)} — ${esc(t.finished_product_name || "")}` : " · (mọi sản phẩm)"}</option>`).join("");
-    const fpOpts = `<option value="">(chọn sản phẩm)</option>` + finishedProducts.map(fp =>
-      `<option value="${esc(fp.finished_product_id)}">${esc(fp.code)} — ${esc(fp.name)}</option>`).join("");
-    const packagingLines = lines.filter(l => l.kind === "line" && l.active);
-    const lineItems = packagingLines.map(l => ({ value: l.code, label: `${l.code} — ${l.name}` }));
-    body = `<div class="panel"><h2>Thêm thông tin chiết</h2>
-      <div class="muted" style="margin-bottom:6px">V cấp chiết/hl và Ca 1/2/3 chưa cần điền ngay — sẽ nhập khi bấm "Kết thúc".
-        Chỉ hiện Tank BBT có mẻ lọc đã được KCS duyệt (xem tab "Lọc").</div>
-      <div class="row">
-        <div class="field"><label>Chiết từ tank BBT</label><select id="bo_bbt"><option value=""></option>${bbtOpts}</select></div>
-        <div class="field"><label>Sản phẩm</label><select id="bo_fp">${fpOpts}</select></div>
-        <div class="field"><label>Dây chuyền</label><div id="bo_line_wrap" data-items="${esc(JSON.stringify(lineItems))}"></div></div>
-        <div class="field"><label>Loại bia</label><div id="bo_beer_display" class="muted" style="padding:6px 0">— (chọn Tank BBT trước)</div></div>
-        <div class="field"><label>Ngày giờ chiết</label><input id="bo_date" type="datetime-local" value="${toDTLocal(new Date())}"/></div>
-        <button class="btn" id="bo_add">Thêm</button>
-      </div></div>
-      <div class="panel"><h2>Thông tin chiết <span class="muted">(${rows.length})</span></h2>
-      ${yearFilterControl("chiet", ynChiet)}
-      <input class="searchbox" data-tbl="t_chiet" placeholder="Enter text to search..."/>
-      <div class="tablewrap"><table id="t_chiet"><thead><tr><th>Duyệt</th><th>Khóa lô</th><th>Lô chiết</th><th>Mã lọc</th><th>Ngày chiết</th><th>Loại bia</th><th>Sản phẩm</th>
-        <th>Số lô bia</th><th>V cấp chiết/hl</th><th>Chiết từ Tank BBT</th><th>SL ca 1</th><th>SL ca 2</th><th>SL ca 3</th>
-        <th>Tổng Cộng</th><th>Đã nhập kho</th><th>Chiết duyệt</th><th>Ngày giờ kết thúc</th><th>TH thực tế</th><th></th><th>Chỉ tiêu</th></tr></thead>
-      <tbody>${rows.map(b => `<tr class="row-${b.color}"><td style="white-space:nowrap">${b.locked ? lockBadgeHtml(b) : (b.approved ? `<span style="color:var(--green)">✓ ${esc(b.approved_by || "")}</span><div class="muted">${fmt(b.approved_at)}</div>` : `<a href="#" data-approve="${b.bottle_id}" style="color:var(--accent)">Duyệt</a>`)}</td>
-        <td style="white-space:nowrap">${b.locked
-            ? (isAdminLot ? `<button class="btn sm sec" data-unlocklot="bottle|${esc(b.bottle_id)}">Mở khóa</button>` : '<span class="muted">—</span>')
-            : (canLockLot ? `<button class="btn sm" data-locklot="bottle|${esc(b.bottle_id)}">Khóa</button>` : '<span class="muted">—</span>')}</td>
-        <td class="code">${holdBadgeHtml(b)}${esc(b.bottle_code)}</td><td>${esc(b.filter_code || "")}</td><td>${fmt(b.bottle_date)}</td><td>${esc(b.beer_type)}</td>
-        <td class="muted">${b.finished_product_code ? `${esc(b.finished_product_code)} — ${esc(b.finished_product_name || "")}` : "—"}</td>
-        <td>${esc(b.lot_no || "")}</td><td>${b.v_cap_chiet_hl}</td><td>${esc(b.from_bbt || "")}</td>
-        <td>${b.ca1 ? b.ca1.toLocaleString("vi-VN") : ""}</td><td>${b.ca2 ? b.ca2.toLocaleString("vi-VN") : ""}</td>
-        <td>${b.ca3 ? b.ca3.toLocaleString("vi-VN") : ""}</td><td>${b.total.toLocaleString("vi-VN")}</td>
-        <td style="text-align:center">${chk(b.stocked)}</td><td style="text-align:center">${chk(b.approved)}</td>
-        <td class="muted">${b.ended_at ? fmt(b.ended_at) : "—"}</td>
-        <td>${badge(b.exec_status === "hoan_thanh" ? "completed" : "in_progress")}${esc(b.exec_status_label)}
-          ${b.locked ? "" : `<button class="btn sm ${b.exec_status === "hoan_thanh" ? "sec" : ""}" data-finishrec="bottle|${esc(b.bottle_id)}" data-endedat="${esc(b.ended_at || "")}"
-            data-vcap="${b.v_cap_chiet_hl || 0}" data-ca1="${b.ca1 || 0}" data-ca2="${b.ca2 || 0}" data-ca3="${b.ca3 || 0}"
-            style="margin-left:6px">${b.exec_status === "hoan_thanh" ? "Sửa" : "Kết thúc"}</button>`}
-          ${!b.locked && b.from_bbt && (b.source_filter_on_hand_bbt || 0) > 0 ? `<button class="btn sm sec" data-emptybbtchiet="${esc(b.from_bbt)}"
-            title="Buộc tồn BBT (${b.source_filter_on_hand_bbt} hl) của cả tank ${esc(b.from_bbt)} về 0 khi tank vật lý đã chiết cạn thật nhưng số liệu còn lệch"
-            style="margin-left:6px">Làm rỗng tank</button>` : ""}</td>
-        <td><button class="btn sm sec" data-nvlchiet="${esc(b.bottle_id)}|${esc(b.bottle_code)}">NVL chiết</button>
-          ${b.locked ? "" : `<button class="btn sm sec" data-delrec="bottle|${esc(b.bottle_id)}">Xóa</button>`}</td>
-        <td style="white-space:nowrap"><button class="btn sm sec" data-stageqc="thanh_pham|bottle|${esc(b.bottle_year)}-${esc(b.bottle_code)}__thanh_pham|${esc(b.product_id || "")}|${esc(b.finished_product_id || "")}|${""}|${esc(b.beer_type_id || "")}">Thành phẩm</button>
-          <button class="btn sm sec" data-cip="bottle|${esc(b.bottle_id)}|${esc(b.bottle_code)}" title="Gắn CIP liên quan">CIP</button></td></tr>`).join("")}</tbody></table></div>
-      <div class="legend">Chú thích: <b class="red">Đỏ</b>: Thiếu chỉ tiêu bắt buộc, hoặc đã đủ nhưng có chỉ tiêu FAIL — <b class="blue">Xanh dương</b>: Đầy đủ, không FAIL</div></div>`;
-  }
-
-  else if (sec === "canhbao") {
-    const now = new Date();
-    body = `<div class="panel"><h2>Cảnh báo chỉ tiêu chất lượng</h2>
-      <div class="row"><div class="field"><label>Tháng</label><input id="al_m" type="number" min="1" max="12" value="${now.getMonth() + 1}" size="3"/></div>
-        <div class="field"><label>Năm</label><input id="al_y" type="number" value="${now.getFullYear()}" size="5"/></div>
-        <button class="btn" id="al_load">Xem cảnh báo</button></div>
-      <div class="muted" style="margin:6px 0">Cảnh báo (nếu không cập nhật đủ những thông tin bên dưới báo cáo sẽ không đúng)</div>
-      <div id="al_out"></div></div>`;
-  }
-
-  else if (sec === "hoachat") {
-    const chems = await GET("/process/chemicals");
-    const batches = await GET("/batches");
-    const bopts = batches.map(b => `<option value="${b.batch_id}">${esc(b.batch_code)}</option>`).join("");
-    const stageLabel = { nau: "Nấu", len_men: "Lên men", loc: "Lọc", chiet: "Chiết", cip: "CIP" };
-    body = `<div class="panel"><h2>Ghi sử dụng hóa chất</h2>
-      <div class="row"><div class="field"><label>Mẻ</label><select id="ch_batch">${bopts}</select></div>
-        <div class="field"><label>Công đoạn</label><select id="ch_stage"><option value="nau">Nấu</option><option value="len_men">Lên men</option><option value="loc">Lọc</option><option value="chiet">Chiết</option><option value="cip">CIP</option></select></div>
-        <div class="field"><label>Hóa chất</label><input id="ch_name"/></div>
-        <div class="field"><label>SL</label><input id="ch_qty" type="number"/></div>
-        <div class="field"><label>ĐVT</label><input id="ch_uom" value="kg" size="4"/></div>
-        <button class="btn" id="ch_add">Ghi</button></div></div>
-      <div class="panel"><h2>Lịch sử sử dụng hóa chất</h2>
-      <input class="searchbox" data-tbl="t_chemhist" placeholder="Tìm theo công đoạn, hóa chất..."/>
-      <table id="t_chemhist"><thead><tr><th>Thời gian</th><th>Công đoạn</th><th>Hóa chất</th><th>SL</th><th>Ghi chú</th></tr></thead>
-      <tbody>${chems.map(c => `<tr><td class="muted">${fmt(c.ts)}</td><td>${esc(stageLabel[c.stage] || c.stage)}</td>
-        <td>${esc(c.chemical)}</td><td>${c.quantity} ${esc(c.uom)}</td><td class="muted">${esc(c.note || "")}</td></tr>`).join("")}</tbody></table></div>`;
-  }
-
-  else if (sec === "men") {
-    const [yeast, issues, batches] = await Promise.all([GET("/process/yeast"), GET("/process/yeast/issues"), GET("/batches")]);
-    const bopts = `<option value="">(không gắn mẻ)</option>` + batches.map(b => `<option value="${b.batch_id}">${esc(b.batch_code)}</option>`).join("");
-    const yopts = yeast.filter(y => y.status === "available").map(y => `<option value="${y.yeast_lot_id}">${esc(y.code)} (${y.quantity}${y.uom})</option>`).join("");
-    body = `<div class="split">
-      <div class="panel"><h2>Lô men thu hồi</h2>
-        <input class="searchbox" data-tbl="t_yeastlot" placeholder="Tìm theo mã, chủng..."/>
-        <table id="t_yeastlot"><thead><tr><th>Mã</th><th>Chủng</th><th>Đời</th><th>SL</th><th>Sống %</th><th>Trạng thái</th></tr></thead>
-        <tbody>${yeast.map(y => `<tr><td><code class="k">${esc(y.code)}</code></td><td>${esc(y.strain)}</td><td>${y.generation}</td>
-          <td>${y.quantity} ${y.uom}</td><td>${y.viability ?? "—"}</td><td>${badge(y.status === "available" ? "available" : "obsolete")}${y.status}</td></tr>`).join("")}</tbody></table></div>
-      <div class="panel"><h2>Xuất men thu hồi</h2>
-        <div class="row"><div class="field"><label>Lô men</label><select id="ye_lot">${yopts}</select></div>
-          <div class="field"><label>Cấy cho mẻ</label><select id="ye_batch">${bopts}</select></div>
-          <div class="field"><label>SL</label><input id="ye_qty" type="number" value="20"/></div>
-          <button class="btn" id="ye_issue">Xuất men</button></div>
-        <h3>Lịch sử xuất men</h3>
-        <table id="t_yeastissue"><thead><tr><th>Thời gian</th><th>Lô men</th><th>Mẻ</th><th>SL</th></tr></thead>
-        <tbody>${issues.map(i => `<tr><td class="muted">${fmt(i.ts)}</td><td>${esc(i.yeast_code)}</td><td>${esc(i.batch || "—")}</td><td>${i.quantity} ${i.uom}</td></tr>`).join("") || '<tr><td colspan=4 class="muted">Chưa có.</td></tr>'}</tbody></table></div></div>`;
-  }
-
-  $("view-process").innerHTML = subnav("process", sections, sec) + body;
-  wireSubnav("process"); wireSearch();
-  wirePaginate("t_nlstock", 10);
-  wirePaginate("t_chemhist", 10);
-  wirePaginate("t_yeastlot", 10);
-  wirePaginate("t_yeastissue", 10);
-  wirePaginate("t_nau", 10);
-  wirePaginate("t_lm", 10);
-  wirePaginate("t_loc", 10);
-  wirePaginate("t_chiet", 10);
-  if (sec === "nau") wireYearFilter("nau", "process");
-  if (sec === "lenmen") wireYearFilter("lenmen", "process");
-  if (sec === "loc") wireYearFilter("loc", "process");
-  if (sec === "chiet") wireYearFilter("chiet", "process");
-
-  if (sec === "nguyenlieu") {
-    $("nl_loc").onchange = () => { SUB.process_nl_loc = $("nl_loc").value; render("process"); };
-    document.querySelectorAll("[data-viewlots]").forEach(b => b.onclick = () =>
-      openMaterialLotsModal(b.dataset.matlabel, lotsByMaterial[b.dataset.viewlots] || []));
-  }
-  if (sec === "nau") {
-    const updateNbWortFromOrder = () => {
-      const opt = $("nb_order").selectedOptions[0];
-      // Dịch bia trích từ Lệnh nấu đã chọn — lệnh đã chốt sẵn 1 dịch bia lúc lập, không
-      // cho chọn khác đi để tránh lệch giữa mã nấu và lệnh sản xuất của nó (gợi ý NVL/BOM sẽ sai).
-      if (opt && opt.value && opt.dataset.wort) {
-        $("nb_wort").value = opt.dataset.wort;
-        $("nb_wort").disabled = true;
-      } else {
-        $("nb_wort").disabled = false;
-      }
-      if (!opt || !opt.value) { $("nb_vol").disabled = false; $("nb_batchcount").value = ""; return; }
-      // SL nấu/hl luôn LẤY THEO sản lượng kế hoạch (planned_volume_hl) của Lệnh nấu đã
-      // chọn, không cho sửa tay — không chia theo số mẻ, vì planned_batch_count là số MẺ
-      // (Braumat) bên trong 1 mã nấu, không phải số mã nấu chia sẻ sản lượng của lệnh (1 lệnh
-      // có thể có NHIỀU mã nấu, mỗi mã nấu cộng dồn tới khi đạt kế hoạch — xem
-      // services/brew_order.py::_is_complete).
-      const vol = parseFloat(opt.dataset.vol) || 0;   // đã là hl (tổng kế hoạch)
-      $("nb_vol").value = vol;
-      $("nb_vol").disabled = true;
-      // Số mẻ kế hoạch của Lệnh nấu — chỉ hiển thị để người lập biết cần khai bao nhiêu mẻ
-      // (Braumat) khi bấm "Mẻ" sau khi tạo mã nấu; không auto-tạo mẻ vì số mẻ Braumat là số thật
-      // do vận hành nhập, hệ thống không tự sinh ra được (xem +Thêm mẻ ở openBrewBatchesModal).
-      $("nb_batchcount").value = opt.dataset.batchcount || "—";
-    };
-    $("nb_order").onchange = updateNbWortFromOrder;
-    updateNbWortFromOrder();
-    $("nb_add").onclick = () => guard(async () => {
-      const orderId = $("nb_order").value;
-      if (!orderId) throw new Error("Chọn Lệnh nấu trước khi thêm mã nấu.");
-      const code = $("nb_code").value.trim();
-      if (!code) throw new Error("Nhập mã nấu.");
-      const tank = $("nb_tank").value || null;
-      const lmCode = tank ? code : null;   // 1 mã nấu = 1 lô LM — dùng luôn mã nấu làm mã lô LM
-      const productId = $("nb_wort").value || null;
-      if (!productId) throw new Error("Chọn Dịch bia trước khi thêm mã nấu.");
-      const wortName = $("nb_wort").selectedOptions[0].textContent;
-      await POST("/brewing/brews", { brew_code: code, wort_type: wortName, product_id: productId,
-        volume_hl: parseFloat($("nb_vol").value),
-        note: $("nb_note").value.trim() || null,
-        lm_code: lmCode, tank_lm: tank,
-        yeast_gen: $("nb_yeast").value || null,
-        brew_order_id: orderId });
-      toast("Đã thêm mã nấu" + (tank ? ` — đã chuyển sang lên men tại tank ${tank}` : "")); render("process");
-    });
-  }
-  if (sec === "loc") {
-    const updateFlBeerDisplay = () => {
-      const opt = $("fl_order").selectedOptions[0];
-      const beer = opt && opt.dataset.beer;
-      $("fl_beer_display").textContent = opt && opt.value ? (beer || "(chưa xác định — kiểm tra Loại bia của lệnh lọc)") : "— (chọn Tank thành phẩm trước)";
-    };
-    $("fl_master").onchange = () => {
-      const master = mastersLf.find(m => m.id === $("fl_master").value);
-      $("fl_order").innerHTML = master
-        ? `<option value="">(chọn Tank thành phẩm — bắt buộc)</option>` + master.children.map(o => {
-            const last = o.records.length ? o.records[o.records.length - 1] : null;
-            const lastUnfinished = last && !last.ended_at;
-            return `<option value="${esc(o.filter_order_id)}" data-beer="${esc(o.beer_type_name || "")}"
-              data-lasttobbt="${esc(last ? last.to_bbt || "" : "")}" data-lastunfinished="${lastUnfinished ? "1" : ""}">Tank thành phẩm #${o.seq} — ${o.blend_mode === "phoi" ? "Phối" : "Không phối"} (${o.tanks.map(t => esc(t.tank_lm)).join(", ")}) — ${o.actual_volume_hl}/${o.planned_volume_hl} hl${o.finished_product_code ? ` — SP: ${esc(o.finished_product_code)} — ${esc(o.finished_product_name || "")}` : ""}${o.records.length ? ` — đã có ${o.records.length} mẻ` : ""}</option>`;
-          }).join("")
-        : `<option value="">(chọn Lệnh lọc trước)</option>`;
-      updateFlBeerDisplay(); updateFlBbtLock();
-    };
-    // Mẻ gần nhất của tank thành phẩm còn đang lọc dở (chưa "Kết thúc") — bắt buộc tiếp tục đúng tank
-    // đó, không cho đổi tank giữa chừng (xem routers/brewing.py::add_filter). Nếu mẻ gần nhất
-    // đã kết thúc (tank cũ đầy/xong) thì được chọn tank khác tự do — tank cũ vẫn được gợi ý
-    // chọn sẵn (tiện tiếp tục dùng lại nếu còn chỗ), nhưng có thể đổi sang tank khác.
-    const updateFlBbtLock = () => {
-      const opt = $("fl_order").selectedOptions[0];
-      const lastTobbt = opt && opt.dataset.lasttobbt;
-      const forced = !!(opt && opt.dataset.lastunfinished === "1");
-      $("fl_bbt").style.display = forced ? "none" : "";
-      $("fl_bbt_locked").style.display = forced ? "" : "none";
-      if (forced) {
-        $("fl_bbt_locked").textContent = `${lastTobbt} (đang lọc dở — kết thúc tank này trước khi đổi sang tank khác)`;
-      } else if (lastTobbt) {
-        for (const o of $("fl_bbt").options) { if (o.value === lastTobbt) { $("fl_bbt").value = lastTobbt; break; } }
-      }
-    };
-    $("fl_order").onchange = () => { updateFlBeerDisplay(); updateFlBbtLock(); };
-    $("fl_add").onclick = () => guard(async () => {
-      const orderId = $("fl_order").value;
-      if (!orderId) throw new Error("Chọn Tank thành phẩm trước khi thêm bản ghi lọc.");
-      // Không gửi wort_type — backend tự suy ra đúng dịch nha từ tank nguồn của lệnh lọc
-      // (xem routers/brewing.py::add_filter, "if not data.get(wort_type)"). Trước đây gửi
-      // cứng "Dịch bia 14oP" ở đây khiến điều kiện đó luôn False nên giá trị đúng bị đè mất.
-      const res = await POST("/brewing/filters", { filter_code: "FL-" + Date.now().toString().slice(-5), filter_order_id: orderId,
-        to_bbt: $("fl_bbt").value });
-      if (res.mix_warning) toast(res.mix_warning, "warn");
-      toast("Đã thêm bản ghi lọc (mã lô lọc tự sinh) — điền Dịch nha lọc/Nước bài khí khi bấm \"Kết thúc\" từng tank"); render("process");
-    });
-  }
-  if (sec === "chiet") {
-    const updateBoBeerDisplay = () => {
-      const opt = $("bo_bbt").selectedOptions[0];
-      const beer = opt && opt.dataset.beer;
-      $("bo_beer_display").textContent = opt && opt.value ? (beer || "(chưa xác định — kiểm tra Loại bia của mẻ lọc)") : "— (chọn Tank BBT trước)";
-    };
-    $("bo_bbt").onchange = updateBoBeerDisplay;
-    updateBoBeerDisplay();
-    const boLineItems = JSON.parse($("bo_line_wrap").dataset.items || "[]");
-    const boLinePicker = initCheckboxMultiSelect($("bo_line_wrap"), boLineItems, []);
-    $("bo_add").onclick = () => guard(async () => {
-      const finishedProductId = $("bo_fp").value;
-      if (!finishedProductId) throw new Error("Chọn Sản phẩm trước khi thêm bản ghi chiết.");
-      const selectedLines = boLinePicker.getSelected();
-      if (!selectedLines.length) throw new Error("Chọn ít nhất 1 Dây chuyền.");
-      const dateRaw = $("bo_date").value;
-      await POST("/brewing/bottles", { bottle_code: "CH-" + Date.now().toString().slice(-5), from_bbt: $("bo_bbt").value,
-        finished_product_id: finishedProductId,
-        bottle_date: dateRaw ? new Date(dateRaw).toISOString() : null,
-        line: selectedLines.join(", ") });
-      toast("Đã thêm bản ghi chiết (số lô tự sinh) — điền V cấp chiết/Ca 1/2/3 khi bấm \"Kết thúc\""); render("process");
-    });
-    document.querySelectorAll("[data-approve]").forEach(a => a.onclick = (e) => { e.preventDefault(); guard(async () => {
-      const res = await POST(`/brewing/bottles/${a.dataset.approve}/approve`);
-      // Module Chiết cũ đã tháo khỏi WMS — duyệt chỉ đóng hồ sơ, KHÔNG còn tự nhập kho thành
-      // phẩm nữa (dùng màn "Lô TP" thay thế, xem services/batch_pipeline.py::release_pack_lot_to_wms).
-      if (res.qc_has_fail)
-        toast("⚠ Đã duyệt chiết, nhưng còn chỉ tiêu thành phẩm KHÔNG ĐẠT — vui lòng theo dõi.", "warn");
-      else
-        toast("Đã duyệt chiết");
-      render("process");
-    }); });
-  }
-  if (sec === "canhbao") {
-    const load = () => guard(async () => {
-      const a = await GET(`/brewing/alerts?month=${$("al_m").value}&year=${$("al_y").value}`);
-      $("al_out").innerHTML = `<table><thead><tr><th>Cảnh báo (${a.count})</th></tr></thead>
-        <tbody>${a.alerts.map(x => `<tr><td>${esc(x)}</td></tr>`).join("") || '<tr><td class="muted">Không có cảnh báo.</td></tr>'}</tbody></table>`;
-    });
-    $("al_load").onclick = load; load();
-  }
-  if (sec === "hoachat") $("ch_add").onclick = () => guard(async () => {
-    await POST("/process/chemicals", { batch_id: $("ch_batch").value, stage: $("ch_stage").value,
-      chemical: $("ch_name").value, quantity: parseFloat($("ch_qty").value), uom: $("ch_uom").value });
-    toast("Đã ghi hóa chất"); render("process");
-  });
-  if (sec === "men") $("ye_issue").onclick = () => guard(async () => {
-    await POST(`/process/yeast/${$("ye_lot").value}/issue`, { batch_id: $("ye_batch").value || null, quantity: parseFloat($("ye_qty").value) });
-    toast("Đã xuất men"); render("process");
-  });
-  document.querySelectorAll("[data-stageqc]").forEach(b => b.onclick = () => {
-    const [stage, scopeType, scopeId, productId, finishedProductId, displayOverride, beerTypeId] = b.dataset.stageqc.split("|");
-    if (MULTI_SAMPLE_STAGES.includes(stage)) {
-      openFermentQcSampleModal(stage, scopeType, scopeId, productId || null);
-      return;
-    }
-    openStageQcModal(stage, scopeType, scopeId, { productId: productId || null, finishedProductId: finishedProductId || null,
-      beerTypeId: beerTypeId || null, displayId: displayOverride || scopeId.split("__")[0] }, () => render("process"));
-  });
-  document.querySelectorAll("[data-lmapprove]").forEach(b => b.onclick = () => guard(async () => {
-    const res = await POST(`/brewing/ferments/${b.dataset.lmapprove}/approve`);
-    if (res.qc_has_fail) toast("⚠ Đã duyệt lên men, nhưng còn chỉ tiêu lên men phụ KHÔNG ĐẠT — vui lòng theo dõi.", "warn");
-    else toast("Đã duyệt lên men — cho phép lọc từ tank này");
-    render("process");
-  }));
-  document.querySelectorAll("[data-fermentlog]").forEach(b => b.onclick = () => {
-    const [fermentId, lmCode] = b.dataset.fermentlog.split("|");
-    openFermentProcessLogModal(fermentId, lmCode);
-  });
-  document.querySelectorAll("[data-emptycct]").forEach(b => b.onclick = () => guard(async () => {
-    if (!confirm("Buộc tồn CCT (tank lên men) của tank này về 0? Chỉ dùng khi tank vật lý đã lọc cạn thật nhưng số liệu còn lệch một khoảng nhỏ.")) return;
-    const res = await POST(`/brewing/ferments/${b.dataset.emptycct}/empty-cct`, {});
-    toast(`Đã làm rỗng — tồn CCT: ${res.on_hand_cct} hl`); render("process");
-  }));
-  document.querySelectorAll("[data-filterapprove]").forEach(b => b.onclick = () => guard(async () => {
-    const res = await POST(`/brewing/filters/${b.dataset.filterapprove}/approve`);
-    if (res.qc_has_fail) toast("⚠ Đã duyệt mẻ lọc, nhưng còn chỉ tiêu lọc KHÔNG ĐẠT — vui lòng theo dõi.", "warn");
-    else toast("Đã duyệt KCS mẻ lọc");
-    render("process");
-  }));
-  document.querySelectorAll("[data-brewbatches]").forEach(b => b.onclick = () => {
-    const [brewId, brewCode, productId, locked] = b.dataset.brewbatches.split("|");
-    openBrewBatchesModal(brewId, brewCode, productId || null, locked === "1");
-  });
-  const DELREC_PATH = { material: "materials", brew: "brews", ferment: "ferments", filter: "filters", bottle: "bottles" };
-  document.querySelectorAll("[data-delrec]").forEach(b => b.onclick = () => guard(async () => {
-    if (!confirm("Xóa bản ghi này? Không thể hoàn tác.")) return;
-    const [type, id] = b.dataset.delrec.split("|");
-    await DELETE(`/brewing/${DELREC_PATH[type]}/${id}`);
-    toast("Đã xóa"); render("process");
-  }));
-  document.querySelectorAll("[data-finishrec]").forEach(b => b.onclick = () => {
-    const [type, id] = b.dataset.finishrec.split("|");
-    openFinishBottleModal("Kết thúc chiết", b.dataset.endedat || null,
-      parseFloat(b.dataset.vcap) || 0, parseFloat(b.dataset.ca1) || 0, parseFloat(b.dataset.ca2) || 0, parseFloat(b.dataset.ca3) || 0,
-      async (payload) => {
-        try {
-          await POST(`/brewing/bottles/${id}/finish`, payload);
-        } catch (e) {
-          if (/mismatch_reason/.test(e.message)) {
-            const reason = prompt(e.message + "\n\nNhập lý do sai lệch để vẫn tiếp tục:");
-            if (!reason || !reason.trim()) throw new Error("Đã hủy — cần nhập lý do sai lệch để tiếp tục.");
-            await POST(`/brewing/bottles/${id}/finish`, { ...payload, mismatch_reason: reason.trim() });
-          } else {
-            throw e;
-          }
-        }
-        closeModal(); toast("Đã lưu kết quả chiết"); render("process");
-      });
-  });
-  document.querySelectorAll("[data-filtertanks]").forEach(b => b.onclick = () => openFilterTanksModal(b.dataset.filtertanks, parseFloat(b.dataset.filterbbt) || 0));
-  document.querySelectorAll("[data-emptybbtchiet]").forEach(b => b.onclick = () => guard(async () => {
-    if (!confirm(`Buộc tồn cả tank thành phẩm (BBT) ${b.dataset.emptybbtchiet} về 0? Chỉ dùng khi tank vật lý đã chiết cạn thật. Không thể hoàn tác.`)) return;
-    const res = await POST(`/brewing/bbt-tanks/${b.dataset.emptybbtchiet}/empty`, {});
-    toast(`Đã làm rỗng — tồn BBT: ${res.on_hand_bbt} hl`); render("process");
-  }));
-  document.querySelectorAll("[data-emptybbttank]").forEach(b => b.onclick = () => guard(async () => {
-    if (!confirm(`Buộc tồn cả tank BBT ${b.dataset.emptybbttank} về 0? Chỉ dùng khi tank vật lý đã chiết cạn thật. Không thể hoàn tác.`)) return;
-    const res = await POST(`/brewing/bbt-tanks/${b.dataset.emptybbttank}/empty`, {});
-    toast(`Đã làm rỗng — tồn BBT: ${res.on_hand_bbt} hl`); render("process");
-  }));
-  document.querySelectorAll("[data-nvlloc]").forEach(b => b.onclick = () => {
-    const [fId, fOrderId, fCode] = b.dataset.nvlloc.split("|");
-    openFilterMaterialsModal(fId, fOrderId || null, fCode);
-  });
-  document.querySelectorAll("[data-nvlchiet]").forEach(b => b.onclick = () => {
-    const [bId, bCode] = b.dataset.nvlchiet.split("|");
-    openBottleMaterialsModal(bId, bCode);
-  });
-  document.querySelectorAll("[data-cip]").forEach(b => b.onclick = () => {
-    const [scopeType, scopeId, label] = b.dataset.cip.split("|");
-    window.openCipLinkModal(scopeType, scopeId, label);
-  });
-  // Khóa lô theo từng công đoạn — Nấu/Lên men/Lọc/Chiết mỗi bảng có nút riêng (xem
-  // services/lot_lock.py) — KCS khóa xuôi (chặn nếu công đoạn nguồn chưa khóa), chỉ admin
-  // mở khóa được và phải mở ngược (chặn nếu công đoạn hạ lưu còn khóa) — lỗi trả về từ
-  // server hiển thị qua guard()/toast như các lỗi domain khác, không cần xử lý riêng.
-  const LOCKLOT_PATH = { brew: "brews", ferment: "ferments", filter: "filters", bottle: "bottles" };
-  const LOCKLOT_LABEL = { brew: "mã nấu", ferment: "lô LM", filter: "mẻ lọc", bottle: "lô chiết" };
-  document.querySelectorAll("[data-locklot]").forEach(b => b.onclick = () => guard(async () => {
-    const [kind, id] = b.dataset.locklot.split("|");
-    if (!confirm(`Khóa ${LOCKLOT_LABEL[kind]} này? Cần đã hoàn thành + đủ chỉ tiêu + công đoạn nguồn đã khóa.`)) return;
-    await POST(`/brewing/${LOCKLOT_PATH[kind]}/${id}/lock-lot`);
-    toast(`Đã khóa ${LOCKLOT_LABEL[kind]}`); render("process");
-  }));
-  document.querySelectorAll("[data-unlocklot]").forEach(b => b.onclick = () => guard(async () => {
-    const [kind, id] = b.dataset.unlocklot.split("|");
-    if (!confirm(`Mở khóa ${LOCKLOT_LABEL[kind]} này?`)) return;
-    await POST(`/brewing/${LOCKLOT_PATH[kind]}/${id}/unlock-lot`);
-    toast(`Đã mở khóa ${LOCKLOT_LABEL[kind]}`); render("process");
-  }));
-};
-
 // ================= REALTIME (trạm quan trắc nước thải + máy chiết lon 30K) =================
 VIEWS.realtime = async function () {
   $("view-realtime").innerHTML = `
@@ -11657,50 +9281,41 @@ VIEWS.integration = async function () {
 };
 
 // ================= BÁO CÁO SẢN XUẤT =================
-const normStatus = { dat: ["available", "đạt"], vuot: ["critical", "vượt định mức"], thieu: ["due", "thiếu"] };
+// Trước đây còn 2 tab khác "Trạng thái lô"/"Sản lượng lọc" (module Nấu-Lọc-Chiết cũ, dựa
+// trên FilterOrderTank/FilterRecord — đã xóa cùng module đó, chưa có báo cáo tương đương cho
+// pipeline "Mẻ sản xuất" mới). "Định mức NVL" khôi phục lại được vì bản gốc (trước khi bị viết
+// lại theo module Nấu-Lọc-Chiết ngày 2026-08-06) vốn tính trên BatchExecution/bom_svc — độc
+// lập hoàn toàn với module đó, vẫn còn sống nguyên trong pipeline "Mẻ sản xuất" hiện tại.
+const normStatus = { dat: ["available", "đạt"], vuot: ["critical", "vượt định mức"], thieu: ["due", "thiếu"], chua_dung: ["planned", "chưa dùng"] };
 VIEWS.reports = async function () {
   const sec = SUB.reports || "material";
-  const sections = [{ key: "material", label: "Định mức NVL" }, { key: "filling", label: "Chiết (lon)" },
-    { key: "lostatus", label: "Trạng thái lô" }, { key: "yield", label: "Sản lượng lọc" }];
+  const sections = [{ key: "material", label: "Định mức NVL" }, { key: "filling", label: "Chiết (lon)" }];
   let body = "";
 
   if (sec === "material") {
-    const days = SUB.reports_days || 90;
-    const tolPct = SUB.reports_tol || 5;
-    const rep = await GET(`/reports/material-norm?days=${days}&tol_pct=${tolPct}`);
-    const normModuleBlock = (title, hint, data, showNorm) => `
-      <div class="panel"><h2>${title} <span class="muted">(${data.order_count != null ? data.order_count + " lệnh" : data.record_count + " mẻ chiết"})</span></h2>
-      <div class="muted" style="margin-bottom:8px">${hint}</div>
-      <input class="searchbox" data-tbl="${data._tid}" placeholder="Tìm theo tên vật tư, trạng thái..."/>
-      <div class="tablewrap"><table id="${data._tid}"><thead><tr><th>Vật tư</th>${showNorm ? "<th>Số lệnh</th>" : ""}
-        ${showNorm ? "<th>Định mức</th>" : ""}<th>Thực tế</th>${showNorm ? "<th>Chênh</th><th>%</th>" : ""}<th>ĐVT</th>${showNorm ? "<th>Trạng thái</th>" : ""}</tr></thead>
-      <tbody>${data.materials.map(m => `<tr class="${showNorm ? `row-${{dat:"blue",vuot:"red",thieu:"green"}[m.status] || ""}` : ""}">
-        <td>${esc(m.material_name || "")}</td>${showNorm ? `<td>${m.orders}</td>` : ""}
-        ${showNorm ? `<td>${m.planned.toLocaleString("vi-VN")}</td>` : ""}<td>${m.actual.toLocaleString("vi-VN")}</td>
-        ${showNorm ? `<td style="color:${m.diff > 0 ? "var(--red)" : m.diff < 0 ? "var(--orange)" : "var(--muted)"}">${m.diff > 0 ? "+" : ""}${m.diff.toLocaleString("vi-VN")}</td><td>${m.pct}%</td>` : ""}
-        <td>${esc(m.uom || "")}</td>
-        ${showNorm ? `<td>${badge((normStatus[m.status] || ["planned", m.status])[0])}${(normStatus[m.status] || ["", m.status])[1]}</td>` : ""}</tr>`).join("") ||
-        `<tr><td colspan=${showNorm ? 7 : 3} class="muted">Chưa có dữ liệu.</td></tr>`}</tbody></table></div>
-      ${data.orders ? `<h3 style="margin-top:14px">Theo lệnh</h3>
-      <input class="searchbox" data-tbl="${data._tid}_o" placeholder="Tìm theo số lệnh, trạng thái..."/>
-      <div class="tablewrap"><table id="${data._tid}_o"><thead><tr><th>Số lệnh</th><th>Tổng định mức</th><th>Tổng thực tế</th><th>Chênh</th><th>%</th><th>Trạng thái</th></tr></thead>
-      <tbody>${data.orders.map(o => `<tr class="row-${{dat:"blue",vuot:"red",thieu:"green"}[o.status] || ""}">
-        <td class="code">${esc(o.order_code)}</td><td>${o.planned_total.toLocaleString("vi-VN")}</td><td>${o.actual_total.toLocaleString("vi-VN")}</td>
-        <td style="color:${o.diff > 0 ? "var(--red)" : o.diff < 0 ? "var(--orange)" : "var(--muted)"}">${o.diff > 0 ? "+" : ""}${o.diff.toLocaleString("vi-VN")}</td><td>${o.pct}%</td>
-        <td>${badge((normStatus[o.status] || ["planned", o.status])[0])}${(normStatus[o.status] || ["", o.status])[1]}</td></tr>`).join("") ||
-        '<tr><td colspan=6 class="muted">—</td></tr>'}</tbody></table></div>` : ""}
-      </div>`;
-    rep.nau._tid = "t_norm_nau"; rep.loc._tid = "t_norm_loc"; rep.chiet._tid = "t_norm_chiet";
-    body = `<div class="panel">
+    const days = SUB.reports_days || 3650;
+    const rep = await GET("/reports/material-norm?days=" + days);
+    body = `<div class="panel"><h2>BC định mức nguyên vật liệu <span class="muted">(${rep.batch_count} mẻ)</span></h2>
       <div class="row"><div class="field"><label>Kỳ (ngày gần đây)</label>
-        <select id="rp_days"><option value="30">30 ngày</option><option value="90" ${days == 90 ? "selected" : ""}>90 ngày</option><option value="365">365 ngày</option><option value="3650">Tất cả</option></select></div>
-        <div class="field"><label>Ngưỡng đạt (±%)</label><input id="rp_tol" type="number" step="0.5" min="0" value="${tolPct}" style="width:90px"/></div>
+        <select id="rp_days"><option value="30">30 ngày</option><option value="90">90 ngày</option><option value="365">365 ngày</option><option value="3650" ${days == 3650 ? "selected" : ""}>Tất cả</option></select></div>
       </div>
-      <div class="muted">Đối chiếu định mức (đã chốt lúc lập Lệnh nấu/Lệnh lọc) ↔ thực tế tiêu thụ, theo đúng 3 khâu SX: Nấu, Lọc, Chiết. Chiết chưa có định mức đóng gói theo SKU nên chỉ hiện thực tế đã dùng.</div>
-    </div>
-    ${normModuleBlock("🍺 Nấu", "Định mức = BrewOrderMaterialLine (đã chốt lúc lập Lệnh nấu); thực tế = NVL đã ghi cho các mẻ (BrewMaterialUsage), cộng dồn qua mọi mã thành viên nếu là Nhóm vật tư thay thế.", rep.nau, true)}
-    ${normModuleBlock("🧪 Lọc", "Định mức = FilterOrderMaterialLine (VD bột trợ lọc/diatomite); thực tế = NVL đã ghi cho các mẻ lọc (FilterMaterialUsage).", rep.loc, true)}
-    ${normModuleBlock("📦 Chiết", "Chiết chưa có định mức đóng gói theo SKU — chỉ hiện thực tế đã dùng (CO2, hóa chất vệ sinh, nắp/lon...).", rep.chiet, false)}`;
+      <h3>Tổng hợp theo vật tư (định mức scale ↔ thực tế)</h3>
+      <input class="searchbox" data-tbl="t_matnorm" placeholder="Tìm theo mã vật tư, trạng thái..."/>
+      <div class="tablewrap"><table id="t_matnorm"><thead><tr><th>Vật tư</th><th>Số mẻ</th><th>Định mức</th><th>Thực tế</th><th>Chênh</th><th>%</th><th>ĐVT</th><th>Trạng thái</th></tr></thead>
+      <tbody>${rep.materials.map(m => `<tr class="row-${{dat:"blue",vuot:"red",thieu:"green"}[m.status] || ""}">
+        <td><code class="k">${esc(m.material_code)}</code></td><td>${m.batches}</td>
+        <td>${m.planned.toLocaleString("vi-VN")}</td><td>${m.actual.toLocaleString("vi-VN")}</td>
+        <td style="color:${m.diff > 0 ? "var(--red)" : m.diff < 0 ? "var(--orange)" : "var(--muted)"}">${m.diff > 0 ? "+" : ""}${m.diff.toLocaleString("vi-VN")}</td>
+        <td>${m.pct}%</td><td>${esc(m.uom || "")}</td>
+        <td>${badge((normStatus[m.status] || ["planned", m.status])[0])}${(normStatus[m.status] || ["", m.status])[1]}</td></tr>`).join("") || '<tr><td colspan=8 class="muted">Chưa có dữ liệu.</td></tr>'}</tbody></table></div>
+      <h3>Theo mẻ</h3>
+      <input class="searchbox" data-tbl="t_matnorm_batch" placeholder="Tìm theo mã mẻ, trạng thái..."/>
+      <div class="tablewrap"><table id="t_matnorm_batch"><thead><tr><th>Mã mẻ</th><th>Trạng thái</th><th>SL kế hoạch</th><th>Tổng định mức</th><th>Tổng thực tế</th></tr></thead>
+      <tbody>${rep.batches.map(b => `<tr><td><code class="k">${esc(b.batch_code)}</code></td><td>${badge(b.state)}</td>
+        <td>${b.planned_qty.toLocaleString("vi-VN")} ${esc(b.uom)}</td><td>${b.planned_total.toLocaleString("vi-VN")}</td>
+        <td>${b.actual_total.toLocaleString("vi-VN")}</td></tr>`).join("") || '<tr><td colspan=5 class="muted">—</td></tr>'}</tbody></table></div>
+      <div class="muted" style="margin-top:8px">Định mức = BOM của từng mẻ đã scale theo SL kế hoạch; thực tế = tiêu thụ thật (genealogy). Ngưỡng đạt: ±5%.</div>
+    </div>`;
   } else if (sec === "filling") {
     // Hiện khung màn hình NGAY (không đợi CSDL SCADA ngoài) — dữ liệu tải bất đồng bộ sau,
     // đổ vào #fp_data khi xong, tránh cảm giác "bấm vào tab rất lâu mới thấy gì".
@@ -11722,120 +9337,14 @@ VIEWS.reports = async function () {
         <button class="btn" id="fp_apply">Xem báo cáo</button>
       </div></div>
       <div id="fp_data"><div class="panel muted">⏳ Đang tải dữ liệu từ CSDL SCADA...</div></div>`;
-  } else if (sec === "lostatus") {
-    const lstDays = SUB.lostatus_days || 180;
-    const rows = await GET("/reports/lo-status?days=" + lstDays);
-    const nauBadge = { chua_co_me: "planned", dang_thuc_hien: "in_progress", hoan_thanh: "completed" };
-    const lmBadge = { len_men: "running", loc_mot_phan: "due", da_loc_het: "done" };
-    const locBadge = { chua_loc: "planned", dang_loc: "in_progress", da_ket_thuc: "completed" };
-    const chietBadge = { chua_chiet: "planned", dang_chiet: "in_progress", da_ket_thuc: "completed" };
-    body = `<div class="panel"><h2>Trạng thái lô — Nấu / Lên men / Lọc / Chiết <span class="muted">(${rows.length} mã nấu)</span></h2>
-      <div class="muted" style="margin-bottom:8px">Trạng thái Nấu/Lọc/Chiết theo việc vận hành đã bấm "Kết thúc" hay chưa ở từng tab; Lên men vẫn tự động theo tồn CCT như trước.</div>
-      <div class="row"><div class="field"><label>Kỳ (theo ngày nấu)</label>
-        <select id="lst_days"><option value="30">30 ngày</option><option value="90">90 ngày</option>
-        <option value="180" ${lstDays == 180 ? "selected" : ""}>180 ngày</option><option value="365">365 ngày</option>
-        <option value="3650">Tất cả</option></select></div></div>
-      <input class="searchbox" data-tbl="t_lostatus" placeholder="Enter text to search..."/>
-      <div class="tablewrap"><table id="t_lostatus"><thead><tr><th>Mã nấu</th><th>Ngày nấu</th><th>Dịch nha</th>
-        <th>Nấu</th><th>Lên men</th><th>Lọc</th><th>Chiết</th></tr></thead>
-      <tbody>${rows.map(r => `<tr><td class="code">${esc(r.brew_code)}</td><td>${fmt(r.brew_date)}</td><td>${esc(r.wort_type || "")}</td>
-        <td>${badge(nauBadge[r.nau] || "planned")}${esc(r.nau_label)}</td>
-        <td>${r.len_men ? badge(lmBadge[r.len_men] || "planned") + esc(r.len_men_label) : `${badge("planned")}${esc(r.len_men_label)}`}</td>
-        <td>${badge(locBadge[r.loc] || "planned")}${esc(r.loc_label)}</td>
-        <td>${badge(chietBadge[r.chiet] || "planned")}${esc(r.chiet_label)}</td></tr>`).join("") ||
-        '<tr><td colspan=7 class="muted">Chưa có mã nấu nào.</td></tr>'}</tbody></table></div></div>`;
-  } else if (sec === "yield") {
-    const yToday = new Date();
-    const yFrom90 = new Date(yToday); yFrom90.setDate(yFrom90.getDate() - 90);
-    const yGroupBy = SUB.yield_group_by || "day";
-    const yDateFrom = SUB.yield_date_from || toISODateLocal(yFrom90);
-    const yDateTo = SUB.yield_date_to || toISODateLocal(yToday);
-    SUB.yield_group_by = yGroupBy; SUB.yield_date_from = yDateFrom; SUB.yield_date_to = yDateTo;
-    const yq = `date_from=${yDateFrom}&date_to=${encodeURIComponent(yDateTo + "T23:59:59")}&group_by=${yGroupBy}`;
-    const yrep = await GET(`/reports/filter-yield-report?${yq}`);
-    const ylq = `date_from=${yDateFrom}&date_to=${encodeURIComponent(yDateTo + "T23:59:59")}`;
-    const ylrep = await GET(`/reports/filter-line-yield-report?${ylq}`);
-    const yColors = { thap: "#9E2626", binh_thuong: "#1B5FA6", cao: "#1F6B41", cuoi: "#767065" };
-    const yLabel = { thap: "Thấp", binh_thuong: "Bình thường", cao: "Cao", cuoi: "Mẻ cuối (không tính)" };
-    const yBadge = { thap: "critical", binh_thuong: "available", cao: "done", cuoi: "planned" };
-    const ySeries = [
-      { label: "Thấp", color: yColors.thap, values: yrep.series.map(p => p.thap) },
-      { label: "Bình thường", color: yColors.binh_thuong, values: yrep.series.map(p => p.binh_thuong) },
-      { label: "Cao", color: yColors.cao, values: yrep.series.map(p => p.cao) },
-    ];
-    body = `<div class="panel"><h2>🧪 Sản lượng lọc theo mẻ <span class="muted">(${yrep.total} mẻ đã kết thúc)</span></h2>
-      <div class="muted" style="margin-bottom:8px">Phân loại mỗi mẻ lọc (đã bấm "Kết thúc") theo V bia (hl) so với ngưỡng cấu hình ở
-        Danh mục › Cài đặt vận hành (hiện tại: Thấp ≤ ${yrep.low_hl}hl, Cao &gt; ${yrep.high_hl}hl).</div>
-      <div class="row">
-        <div class="field"><label>Từ ngày</label><input id="yr_from" type="date" value="${yDateFrom}"/></div>
-        <div class="field"><label>Đến ngày</label><input id="yr_to" type="date" value="${yDateTo}"/></div>
-        <div class="field"><label>Gộp theo</label><select id="yr_gb">
-          <option value="day" ${yGroupBy === "day" ? "selected" : ""}>Ngày</option>
-          <option value="week" ${yGroupBy === "week" ? "selected" : ""}>Tuần</option>
-          <option value="month" ${yGroupBy === "month" ? "selected" : ""}>Tháng</option></select></div>
-        <button class="btn" id="yr_apply" style="align-self:flex-end">Xem báo cáo</button>
-      </div></div>
-      ${yrep.has_warning ? `<div class="panel" style="border-left:4px solid ${yColors.thap}">
-        ⚠️ Có <b>${yrep.low_count}</b> mẻ lọc sản lượng <b>Thấp</b> (≤ ${yrep.low_hl}hl) trong kỳ này — xem danh sách bên dưới.</div>` : ""}
-      <div class="split">
-        <div class="panel"><h2>Tỉ lệ phân loại</h2>${yrep.total ? CH.pie([
-          { label: "Thấp", value: yrep.series.reduce((s, p) => s + p.thap, 0), color: yColors.thap },
-          { label: "Bình thường", value: yrep.series.reduce((s, p) => s + p.binh_thuong, 0), color: yColors.binh_thuong },
-          { label: "Cao", value: yrep.series.reduce((s, p) => s + p.cao, 0), color: yColors.cao },
-        ]) : '<div class="muted">Không có dữ liệu.</div>'}</div>
-        <div class="panel"><h2>Theo ${yGroupBy === "day" ? "ngày" : yGroupBy === "week" ? "tuần" : "tháng"}</h2>
-          ${yrep.series.length ? CH.groupedN(yrep.series.map(p => p.period), ySeries) : '<div class="muted">Không có dữ liệu.</div>'}</div>
-      </div>
-      <div class="panel"><h2>Chi tiết theo mẻ lọc</h2>
-        <input class="searchbox" data-tbl="t_yieldrep" placeholder="Tìm theo mã lọc, batch/order number..."/>
-        <div class="tablewrap"><table id="t_yieldrep"><thead><tr><th>Mã lọc</th><th>Batch number Brewmax</th>
-          <th>Order number Brewmax</th><th>Ngày lọc</th><th>Kết thúc</th><th>V bia (hl)</th><th>Phân loại</th></tr></thead>
-        <tbody>${yrep.items.map(it => `<tr class="row-${it.classification === "thap" ? "red" : it.classification === "cao" ? "green" : "blue"}">
-          <td class="code">${esc(it.filter_code)}</td><td>${esc(it.batch_number || "—")}</td><td>${esc(it.order_number || "—")}</td>
-          <td>${fmt(it.filter_date)}</td><td>${fmt(it.ended_at)}</td><td>${it.v_beer_hl}</td>
-          <td>${badge(yBadge[it.classification])}${esc(yLabel[it.classification])}</td></tr>`).join("") ||
-          '<tr><td colspan=7 class="muted">Chưa có mẻ lọc nào kết thúc trong kỳ này.</td></tr>'}</tbody></table></div></div>
-      <div class="panel"><h2>Theo mẻ lọc số <span class="muted">(${ylrep.total} dòng)</span></h2>
-        <div class="muted" style="margin-bottom:8px">Mỗi dòng = 1 "mẻ lọc số" (1 đợt rút dịch riêng, xem nút "+ Thêm mẻ" trong modal Tank) —
-          cho biết mẻ đó lọc được bao nhiêu lít bia, thuộc mã lọc/tank lên men/mẻ nấu nào. Ngưỡng cảnh báo (lít) khai báo ở
-          Danh mục › Cài đặt vận hành (hiện tại: Thấp ≤ ${ylrep.low_l}L, Cao &gt; ${ylrep.high_l}L).</div>
-        ${ylrep.has_warning ? `<div class="panel" style="border-left:4px solid ${yColors.thap}">
-          ⚠️ Có <b>${ylrep.low_count}</b> mẻ lọc số sản lượng <b>Thấp</b> (≤ ${ylrep.low_l}L) trong kỳ này.</div>` : ""}
-        <input class="searchbox" data-tbl="t_yieldlinerep" placeholder="Tìm theo mẻ lọc số, mã lọc, tank lên men, mã nấu, loại dịch bia..."/>
-        <div class="tablewrap"><table id="t_yieldlinerep"><thead><tr><th>Mẻ lọc số</th><th>Mã lọc</th><th>Loại dịch bia</th><th>Tank lên men</th>
-          <th>Mẻ nấu</th><th>Ngày vào dịch</th><th>Ngày lọc</th><th>Kết thúc</th><th>V dịch bia (lít)</th><th>V nước DAW (lít)</th><th>V bia (lít)</th><th>Phân loại</th></tr></thead>
-        <tbody>${ylrep.items.map(it => `<tr class="row-${it.classification === "thap" ? "red" : it.classification === "cao" ? "green" : it.classification === "cuoi" ? "" : "blue"}">
-          <td class="code">${esc(it.batch_seq_no || "—")}</td><td>${esc(it.filter_code || "—")}</td><td>${esc(it.beer_type || "—")}</td>
-          <td>${esc(it.tank_lm || "—")}</td>
-          <td>${esc(it.brew_code || "—")}</td><td>${it.brew_date ? fmt(it.brew_date) : "—"}</td>
-          <td>${it.filter_date ? fmt(it.filter_date) : "—"}</td><td>${fmt(it.ended_at)}</td>
-          <td>${it.v_dich_l}</td><td>${it.v_daw_l}</td><td>${it.v_l}</td>
-          <td>${badge(yBadge[it.classification])}${esc(yLabel[it.classification])}</td></tr>`).join("") ||
-          '<tr><td colspan=12 class="muted">Chưa có mẻ lọc số nào kết thúc trong kỳ này.</td></tr>'}</tbody></table></div></div>`;
   }
 
   $("view-reports").innerHTML = subnav("reports", sections, sec) + body;
   wireSubnav("reports"); wireSearch();
-  if (sec === "lostatus") wirePaginate("t_lostatus", 20);
-  if (sec === "yield") {
-    wirePaginate("t_yieldrep", 20);
-    wirePaginate("t_yieldlinerep", 20);
-    $("yr_apply").onclick = () => {
-      SUB.yield_date_from = $("yr_from").value;
-      SUB.yield_date_to = $("yr_to").value;
-      SUB.yield_group_by = $("yr_gb").value;
-      render("reports");
-    };
-  }
   if (sec === "material") {
-    ["t_norm_nau", "t_norm_nau_o", "t_norm_loc", "t_norm_loc_o", "t_norm_chiet"].forEach(id => wirePaginate(id, 10));
-    $("rp_days").value = String(SUB.reports_days || 90);
+    wirePaginate("t_matnorm", 10); wirePaginate("t_matnorm_batch", 10);
+    $("rp_days").value = String(SUB.reports_days || 3650);
     $("rp_days").onchange = () => { SUB.reports_days = parseInt($("rp_days").value); render("reports"); };
-    $("rp_tol").onchange = () => { SUB.reports_tol = parseFloat($("rp_tol").value) || 5; render("reports"); };
-  }
-  if (sec === "lostatus") {
-    $("lst_days").value = String(SUB.lostatus_days || 180);
-    $("lst_days").onchange = () => { SUB.lostatus_days = parseInt($("lst_days").value); render("reports"); };
   }
   if (sec === "filling") {
     $("fp_mode").onchange = () => {
@@ -11916,7 +9425,7 @@ async function loadFillingData() {
 // ================= QUẢN TRỊ TÀI KHOẢN (admin) =================
 const ROLE_DESC = { operator: "Vận hành (ghi nhận)", supervisor: "Trưởng ca/Quản đốc",
   qa: "QA/KCS (release)", engineer: "Kỹ sư (recipe)", admin: "Quản trị" };
-const ALL_VIEWS = ["dashboard","orders","dispatch","recipes","batches","quality","process","trace",
+const ALL_VIEWS = ["dashboard","orders","dispatch","recipes","batches","quality","trace",
   "warehouse_kc","warehouse_px","energy","realtime","maint","calib","reports","ai","integration","master","users","audit"];
 
 // ================= DANH MỤC (master data: sản phẩm + vật tư) =================

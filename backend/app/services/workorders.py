@@ -3,8 +3,7 @@
 "Phát mẻ" (dispatch) tạo NHIỀU Mẻ sản xuất (BatchExecution) liên tiếp — đánh số từ "Từ mẻ" do
 người dùng nhập (VD từ mẻ 120, số mẻ 4 -> mã mẻ 120/121/122/123), gắn work_order_id = lệnh này
 (tích hợp Điều độ→Mẻ sản xuất, xem batches.py::create_batch). KHÔNG còn tạo Nấu-Lọc-Chiết
-(BrewRecord/BrewBatch) như trước — `_brew_record_for_wo` chỉ còn đọc dữ liệu CŨ (WO đã dispatch
-kiểu cũ trước khi có thay đổi này) để hiển thị/tương thích ngược, không tạo mới nữa."""
+(BrewRecord/BrewBatch, module đó đã xóa hẳn) như trước."""
 
 import re
 from datetime import date
@@ -17,7 +16,7 @@ from ..audit import record_audit
 from ..common import WORKORDER_TRANSITIONS, BatchState, WorkOrderState, new_id
 from ..errors import DomainError, NotFoundError
 from ..models.batches import BatchExecution
-from ..models.brewing import BrewOrder, BrewRecord
+from ..models.brewing import BrewOrder
 from ..models.lines import ProductionLine
 from ..models.recipes import RecipeVersion
 from ..models.workorder import WorkOrder
@@ -194,10 +193,6 @@ def transition(db: Session, wo_id: str, target: str, user: User, reason: str = N
     return wo
 
 
-def _brew_record_for_wo(db: Session, wo_id: str):
-    return db.execute(select(BrewRecord).where(BrewRecord.work_order_id == wo_id)).scalar_one_or_none()
-
-
 def _split_planned_qty(planned_qty: float | None, batch_count: int) -> list:
     """Chia SL kế hoạch cho `batch_count` mẻ sao cho TỔNG đúng bằng `planned_qty` (không lệch
     do làm tròn từng phần như `round(planned_qty / batch_count, 3)` trước đây) — quy về đơn vị
@@ -269,18 +264,16 @@ def dispatch(db: Session, wo_id: str, user: User, from_batch: int, batch_count: 
 def rollup(db: Session, wo: WorkOrder) -> dict:
     """Planned vs actual: gộp theo Mẻ sản xuất (BatchExecution) liên kết TRỰC TIẾP qua
     work_order_id (tạo qua "Tạo mẻ" ở tab Mẻ sản xuất, chọn đúng Lệnh SX này) — KHÔNG còn qua
-    Nấu-Lọc-Chiết (BrewRecord/BrewBatch, xem dispatch()/_brew_record_for_wo). brew_id/brew_code
-    (mã nấu cũ, nếu đã "Phát mẻ" ít nhất 1 lần) vẫn trả riêng để dispatch() biết tái sử dụng mã
-    nấu cũ khi phát mẻ tiếp — KHÔNG tính vào batches/actual_qty/completion_pct nữa."""
+    Nấu-Lọc-Chiết (BrewRecord/BrewBatch, module đó đã xóa hẳn). brew_id/brew_code giữ lại trong
+    payload trả về (luôn None) chỉ để không phá vỡ hợp đồng API cũ."""
     batch_rows = db.execute(select(BatchExecution).where(
         BatchExecution.work_order_id == wo.wo_id)).scalars().all()
     actual = sum(b.actual_qty or 0.0 for b in batch_rows)
     pct = round(actual / wo.planned_qty * 100, 1) if wo.planned_qty else 0.0
-    brew = _brew_record_for_wo(db, wo.wo_id)
     return {"batches": len(batch_rows), "actual_qty": round(actual, 3), "completion_pct": pct,
             "batch_list": [{"batch_id": b.batch_id, "batch_code": b.batch_code, "state": b.state,
                             "start_at": b.start_at, "end_at": b.end_at} for b in batch_rows],
-            "brew_id": brew.brew_id if brew else None, "brew_code": brew.brew_code if brew else None}
+            "brew_id": None, "brew_code": None}
 
 
 def board(db: Session, date_from: date = None, date_to: date = None, line: str = None,
@@ -325,9 +318,8 @@ def _get(db: Session, wo_id: str) -> WorkOrder:
 
 def delete_wo(db: Session, wo_id: str, user: User) -> None:
     """Xóa Lệnh sản xuất (điều độ) — chặn nếu đã "Phát mẻ" tạo Mẻ sản xuất (BatchExecution,
-    xem dispatch()) HOẶC mã nấu thật kiểu cũ (BrewRecord, WO dispatch trước khi có thay đổi
-    này) từ lệnh này, mirror quy ước chặn sửa/xóa-khi-đã-thực-hiện dùng ở mọi module lệnh khác
-    (brew_order.py/filter_order.py/orders.py::_assert_not_executed)."""
+    xem dispatch()) từ lệnh này, mirror quy ước chặn sửa/xóa-khi-đã-thực-hiện dùng ở mọi module
+    lệnh khác (brew_order.py/orders.py::_assert_not_executed)."""
     require_perm(user, "wo.manage")
     wo = _get(db, wo_id)
     require_scope(user, "lines", wo.line)
@@ -335,8 +327,6 @@ def delete_wo(db: Session, wo_id: str, user: User) -> None:
     if db.execute(select(BatchExecution.batch_id).where(
             BatchExecution.work_order_id == wo.wo_id)).first():
         raise DomainError(f"Lệnh {wo.wo_code} đã có Mẻ sản xuất — không thể xóa.")
-    if db.execute(select(BrewRecord.brew_id).where(BrewRecord.work_order_id == wo.wo_id)).first():
-        raise DomainError(f"Lệnh {wo.wo_code} đã có mã nấu — không thể xóa.")
     record_audit(db, entity_type="work_order", entity_id=wo.wo_id, action="delete",
                  actor=user, before={"wo_code": wo.wo_code})
     db.delete(wo)

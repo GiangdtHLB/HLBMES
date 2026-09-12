@@ -5,11 +5,10 @@ vào một node; truy xuôi (forward) trả về tất cả lô/mẻ sinh ra t�
 Có chống chu trình để tránh vòng lặp vô hạn.
 
 NODE_REGISTRY liệt kê mọi loại node được hỗ trợ: "lot"/"batch" là 2 loại gốc
-(lô NVL, mẻ của module Mẻ sản xuất/BatchExecution cũ) — "brew_batch"/"brew"/
-"ferment"/"filter"/"bottle"/"pallet" là chuỗi công đoạn sản xuất bia thật
-(Nấu→Lên men→Lọc→Chiết→Kho TP theo pallet, xem routers/brewing.py và
-services/wms.py nơi add_edge() được gọi tại từng bước) — nhờ đó Truy xuất nhận
-được cả mã chiết/mã pallet thật, không chỉ mã mẻ/lô của module BatchExecution cũ."""
+(lô NVL, mẻ của pipeline "Mẻ sản xuất"/BatchExecution) — "batch_tank"/
+"batch_filter_lot"/"batch_pack_lot"/"pallet" là chuỗi công đoạn sản xuất bia
+thật (Nấu→Lên men→Lọc→Chiết→Kho TP theo pallet, xem routers/batch_pipeline.py
+và services/wms.py nơi add_edge() được gọi tại từng bước)."""
 
 from typing import Optional
 
@@ -19,52 +18,26 @@ from sqlalchemy.orm import Session
 from ..common import new_id, utcnow
 from ..models.batches import BatchExecution
 from ..models.batch_pipeline import BatchFilterLot, BatchPackLot, BatchTank
-from ..models.brewing import BottleRecord, BrewBatch, BrewRecord, FermentRecord, FilterRecord
 from ..models.master import Material
 from ..models.materials import GenealogyEdge, MaterialLot
 from ..models.wms import Pallet
 from . import qc_catalog
 
 # node_type -> (Model, tên cột khóa chính, tên cột mã hiển thị) — dùng để LABEL 1 node đã biết
-# type+id (an toàn, tra theo khóa chính, xem _label) VÀ để tra cứu theo mã ở find_node (CHỈ
-# với các mã thật sự duy nhất — xem FIND_NODE_ORDER bên dưới, KHÔNG dùng nguyên thứ tự dict
-# này cho việc tra cứu vì "brew_batch" (số mẻ) không duy nhất toàn hệ thống).
+# type+id (an toàn, tra theo khóa chính, xem _label) VÀ để tra cứu theo mã ở find_node.
 NODE_REGISTRY = {
     "lot": (MaterialLot, "lot_id", "lot_code"),
     "batch": (BatchExecution, "batch_id", "batch_code"),
     "batch_tank": (BatchTank, "tank_id", "tank_code"),
     "batch_filter_lot": (BatchFilterLot, "filter_lot_id", "filter_lot_code"),
     "batch_pack_lot": (BatchPackLot, "pack_lot_id", "pack_lot_code"),
-    "brew_batch": (BrewBatch, "batch_id", "batch_code"),
-    "brew": (BrewRecord, "brew_id", "brew_code"),
-    "ferment": (FermentRecord, "ferment_id", "lm_code"),
-    "filter": (FilterRecord, "filter_id", "filter_code"),
-    "bottle": (BottleRecord, "bottle_id", "bottle_code"),
     "pallet": (Pallet, "pallet_id", "pallet_code"),
 }
 
-# Thứ tự tra mã DUY NHẤT trong find_node (tier 1) — TOÀN BỘ NODE_REGISTRY trừ "brew_batch":
-# BrewBatch.batch_code ("số mẻ", VD "1") chỉ duy nhất TRONG 1 NĂM (unique constraint thật sự
-# là (batch_year, batch_code), xem models/brewing.py::BrewBatch), KHÔNG duy nhất toàn hệ
-# thống — nếu xếp ngang hàng các mã thật-sự-duy-nhất khác (brew_code, lm_code, filter_code,
-# bottle_code... đều unique=True) thì 1 mã ngắn kiểu "1" sẽ ưu tiên khớp nhầm vào 1 mẻ nấu
-# "1" của 1 mã nấu KHÁC hoàn toàn không liên quan, thay vì "số lô bia" (BottleRecord.lot_no)
-# mà người dùng thật sự định tra (bug thực tế: Truy ngược/Hồ sơ điện tử lô "1" ra rỗng vì
-# resolve nhầm sang mẻ nấu "1" mồ côi, trong khi Truy xuôi theo nấu (chọn thẳng brew_id, không
-# qua find_node) vẫn đúng) — nên brew_batch bị đẩy xuống ALIAS_LOOKUP (tra SAU CÙNG, sau cả
-# bottle) bên dưới.
-FIND_NODE_ORDER = [nt for nt in NODE_REGISTRY if nt != "brew_batch"]
-
-# Bí danh tra cứu THÊM khi không khớp mã duy nhất ở FIND_NODE_ORDER — theo thứ tự ưu tiên:
-# "số lô bia" (BottleRecord.lot_no) là con số NGƯỜI DÙNG THẬT SỰ CẦM TRONG TAY (in trên bao
-# bì/phiếu), khác với bottle_code (mã nội bộ hệ thống tự sinh) — nên phải cho tra được cả 2
-# chiều; "brew_batch" (số mẻ) xếp SAU CÙNG vì ít đặc hiệu nhất (xem lý do ở FIND_NODE_ORDER).
-# Cột này KHÔNG unique (có thể trùng qua nhiều lần/nhiều năm), nên lấy bản ghi MỚI NHẤT khi có
-# nhiều khớp.
-ALIAS_LOOKUP = [
-    ("bottle", BottleRecord, "bottle_id", "lot_no", "bottle_date"),
-    ("brew_batch", BrewBatch, "batch_id", "batch_code", "created_at"),
-]
+# Thứ tự tra mã DUY NHẤT trong find_node — mọi mã ở NODE_REGISTRY đều unique=True nên tra
+# thẳng theo thứ tự khai báo, không cần bí danh riêng.
+FIND_NODE_ORDER = list(NODE_REGISTRY)
+ALIAS_LOOKUP: list = []
 
 
 def add_edge(
@@ -104,9 +77,7 @@ def _trim_qc(stage: str, label: str, status: dict) -> dict:
 def _qc_summary(db: Session, node_type: str, node_id: str) -> list:
     """Tóm tắt tình trạng khai báo chỉ tiêu chất lượng tại 1 node — để Truy xuất hiện được
     NGAY chỉ tiêu NVL/từng công đoạn thay vì chỉ có mã, người dùng khỏi phải mở riêng từng
-    màn hình Kho NVL/Nấu-Lọc-Chiết để xem. Rỗng nếu node không có bước khai báo chỉ tiêu nào
-    (VD "brew"/"pallet" — chỉ tiêu gắn ở "brew_batch"/"bottle" tương ứng, xem quy ước stage
-    ở routers/brewing.py::data-stageqc)."""
+    màn hình Kho NVL/Mẻ sản xuất để xem. Rỗng nếu node không có bước khai báo chỉ tiêu nào."""
     if node_type == "lot":
         lot = db.get(MaterialLot, node_id)
         if not lot:
@@ -115,42 +86,6 @@ def _qc_summary(db: Session, node_type: str, node_id: str) -> list:
         return [{"stage": "lot", "label": "NVL", "can_release": st["can_release"],
                  "pending": st["pending"], "recorded_count": len(st["recorded"]),
                  "required_count": len(st["required"])}]
-    if node_type == "brew_batch":
-        batch = db.get(BrewBatch, node_id)
-        if not batch:
-            return []
-        brew = db.get(BrewRecord, batch.brew_id)
-        st = qc_catalog.stage_qc_status(db, "nau", "brew_batch", batch.batch_id,
-                                        brew.product_id if brew else None)
-        return [_trim_qc("nau", "Nấu", st)]
-    if node_type == "ferment":
-        f = db.get(FermentRecord, node_id)
-        if not f:
-            return []
-        out = []
-        for stage, label in (("len_men_chinh", "Lên men chính"), ("len_men_phu", "Lên men phụ")):
-            st = qc_catalog.stage_qc_status(db, stage, "ferment",
-                                            qc_catalog.ferment_scope_id(f.lm_code, f.ferment_year, stage),
-                                            f.product_id)
-            out.append(_trim_qc(stage, label, st))
-        return out
-    if node_type == "filter":
-        f = db.get(FilterRecord, node_id)
-        if not f:
-            return []
-        st = qc_catalog.stage_qc_status(db, "loc", "filter",
-                                        qc_catalog.filter_scope_id(f.filter_code, f.filter_year), f.product_id,
-                                        finished_product_id=f.finished_product_id, beer_type_id=f.beer_type_id)
-        return [_trim_qc("loc", "Lọc", st)]
-    if node_type == "bottle":
-        b = db.get(BottleRecord, node_id)
-        if not b:
-            return []
-        st = qc_catalog.stage_qc_status(db, "thanh_pham", "bottle",
-                                        qc_catalog.bottle_scope_id(b.bottle_code, b.bottle_year),
-                                        b.product_id, finished_product_id=b.finished_product_id,
-                                        beer_type_id=b.beer_type_id)
-        return [_trim_qc("thanh_pham", "Thành phẩm", st)]
     if node_type == "batch_tank":
         t = db.get(BatchTank, node_id)
         if not t:
@@ -181,28 +116,8 @@ def _qc_summary(db: Session, node_type: str, node_id: str) -> list:
 
 
 def _period(db: Session, node_type: str, node_id: str) -> Optional[dict]:
-    """Mốc bắt đầu/kết thúc hiển thị trên cây truy xuất (dùng lại started_at/ended_at,
-    brew_date/kt_date đã có sẵn từ tính năng "Trạng thái lô" — xem routers/brewing.py).
-    "brew" (mã nấu) không có started_at/ended_at riêng vì 1 mã nấu có thể gồm nhiều mẻ —
-    tính từ các BrewBatch con: bắt đầu = mẻ sớm nhất, kết thúc = mẻ trễ nhất (None nếu còn
-    mẻ nào chưa bấm Kết thúc, nghĩa là mã nấu chưa xong hẳn)."""
-    if node_type == "brew":
-        batches = db.execute(select(BrewBatch).where(BrewBatch.brew_id == node_id)).scalars().all()
-        if not batches:
-            return None
-        starts = [b.started_at for b in batches if b.started_at]
-        ends = [b.ended_at for b in batches]
-        return {"start": min(starts) if starts else None,
-                "end": max(ends) if ends and all(ends) else None}
-    if node_type == "ferment":
-        f = db.get(FermentRecord, node_id)
-        return {"start": f.brew_date, "end": f.kt_date} if f else None
-    if node_type == "filter":
-        f = db.get(FilterRecord, node_id)
-        return {"start": f.filter_date, "end": f.ended_at} if f else None
-    if node_type == "bottle":
-        b = db.get(BottleRecord, node_id)
-        return {"start": b.bottle_date, "end": b.ended_at} if b else None
+    """Mốc bắt đầu/kết thúc hiển thị trên cây truy xuất (dùng lại started_at/ended_at đã có
+    sẵn từ tính năng "Trạng thái lô")."""
     if node_type == "pallet":
         p = db.get(Pallet, node_id)
         return {"start": p.created_at, "end": None} if p else None
@@ -248,7 +163,7 @@ def _label(db: Session, node_type: str, node_id: str) -> dict:
 
 def delete_edges_for(db: Session, node_type: str, node_id: str) -> None:
     """Xóa mọi cạnh phả hệ (2 chiều) gắn với 1 node khi node đó bị xóa hẳn khỏi hệ thống —
-    gọi từ các endpoint DELETE (xóa mã nấu/mẻ/lô LM/mã lọc/mã chiết ở routers/brewing.py).
+    gọi từ các endpoint DELETE (xóa mẻ/tank/lô lọc/lô thành phẩm ở routers/batch_pipeline.py).
     Không dọn thì cạnh còn trỏ tới id không còn tồn tại — hiện thành node mã ngẫu nhiên vô
     nghĩa mãi mãi ở Truy xuất (không tra được code thật vì bản ghi gốc đã bị xóa)."""
     db.execute(delete(GenealogyEdge).where(or_(
@@ -261,9 +176,7 @@ def _walk(db: Session, node_type: str, node_id: str, direction: str,
           stop_types: Optional[set] = None) -> dict:
     """direction='backward' đi theo cạnh tới->từ (cái gì tạo ra node này);
     direction='forward' đi theo cạnh từ->tới (node này sinh ra cái gì). stop_types: các loại
-    node vẫn hiện trong cây nhưng KHÔNG đi tiếp xuống con của nó — dùng cho "Truy xuôi theo
-    nấu" (dừng ở "bottle"/chiết, không đi tiếp ra pallet/xuất kho, xem services/lot_record.py
-    ::build_brew_forward_record)."""
+    node vẫn hiện trong cây nhưng KHÔNG đi tiếp xuống con của nó."""
     stop_types = stop_types or set()
 
     def recurse(ntype: str, nid: str, ancestors: frozenset) -> dict:

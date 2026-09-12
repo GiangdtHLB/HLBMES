@@ -1,4 +1,4 @@
-"""Truy vấn dẫn xuất dùng chung (cảnh báo brewing/QC, kiểm định, năng lượng).
+"""Truy vấn dẫn xuất dùng chung (cảnh báo QC, kiểm định, năng lượng).
 
 Tách khỏi router để cả router lẫn ai_tools cùng gọi service — tránh service
 import ngược lên router (vòng phụ thuộc, khó test). Hàm thuần (db, **params)->dict/list.
@@ -6,74 +6,14 @@ import ngược lên router (vòng phụ thuộc, khó test). Hàm thuần (db, 
 
 from datetime import date
 
-from sqlalchemy import extract, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..common import utcnow
 from ..models.batches import BatchExecution
-from ..models.brewing import BottleRecord, FermentRecord, FilterRecord
 from ..models.energy import EnergyArea, EnergyGroup, EnergyReading
 from ..models.maintenance import Calibration, Equipment
 from ..models.metrics import ProcessReading
 from ..models.quality import QualityResult
-
-
-def ferment_status(r: FermentRecord) -> str:
-    """Trạng thái lên men suy ra từ dữ liệu thật, không dùng cột status tĩnh:
-    - `kt_date` rỗng (chưa nạp đầy tank — còn mẻ nào của mã nấu nạp vào tank này chưa bấm
-      "Kết thúc", xem routers/brewing.py::_sync_ferment_kt_date) → "đang nấu", CHƯA thật sự
-      lên men dù đã có dịch trong tank.
-    - Từ lúc `kt_date` có giá trị (mẻ cuối đã kết thúc) mới xét theo tồn CCT thật
-      (on_hand_cct): chưa lọc gì (đang lên men) / đã lọc một phần / đã lọc hết (về 0)."""
-    if r.kt_date is None:
-        return "dang_nau"
-    if r.on_hand_cct <= 1e-6:
-        return "da_loc_het"
-    if r.on_hand_cct < r.volume_hl - 1e-6:
-        return "loc_mot_phan"
-    return "len_men"
-
-
-def filter_status(r: FilterRecord) -> str:
-    """Trạng thái lọc suy ra từ tồn BBT thật (on_hand_bbt), không dùng cột status tĩnh:
-    chưa chiết chút nào / đang chiết (chưa hết) / đã chiết hết (on_hand_bbt về 0). ended_at
-    (toàn bản ghi) chỉ có khi TẤT CẢ tank của bản ghi đã bấm "Kết thúc" (xem
-    routers/brewing.py::_sync_filter_aggregate) — trong lúc đó phải coi là "đang lọc", KHÔNG
-    phải "chờ chiết" (dễ hiểu nhầm là đã lọc xong, chỉ còn chờ đem đi chiết). Sau khi lọc xong
-    nhưng CHƯA được KCS duyệt (qc_approved) phải coi là "chờ duyệt" — chưa cho phép chiết (xem
-    filter_order_svc.available_bbt_tanks gate any_qc_approved) nên không được hiện "chờ chiết"
-    (dễ hiểu nhầm là đã sẵn sàng đem đi chiết)."""
-    if r.ended_at is None:
-        return "dang_loc"
-    if not r.qc_approved:
-        return "cho_duyet"
-    if r.v_beer_hl <= 1e-6:
-        return "cho_chiet"
-    if r.on_hand_bbt <= 1e-6:
-        return "da_chiet_het"
-    if r.on_hand_bbt < r.v_beer_hl - 1e-6:
-        return "chiet_1_phan"
-    return "cho_chiet"
-
-
-def brewing_alerts(db: Session, month: int = None, year: int = None) -> dict:
-    now = utcnow()
-    month = month or now.month
-    year = year or now.year
-    out = []
-    bottles = db.execute(select(BottleRecord).where(
-        extract("month", BottleRecord.bottle_date) == month,
-        extract("year", BottleRecord.bottle_date) == year)).scalars().all()
-    for bo in bottles:
-        if bo.v_cap_chiet_hl > 0 and (bo.ca1 + bo.ca2 + bo.ca3) <= 0:
-            out.append(f"Mã thông tin chiết = {bo.bottle_code} Nhập sản lượng không đúng")
-    filters = db.execute(select(FilterRecord).where(
-        extract("month", FilterRecord.filter_date) == month,
-        extract("year", FilterRecord.filter_date) == year)).scalars().all()
-    for fl in filters:
-        if fl.filter_type != "ve_bbt_phoi" and not fl.has_indicators:
-            out.append(f"Mã thông tin lọc = {fl.filter_code} Chưa nhập chỉ tiêu lọc")
-    return {"month": month, "year": year, "count": len(out), "alerts": out}
 
 
 def process_quality_alerts(db: Session) -> dict:

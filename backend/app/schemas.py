@@ -103,6 +103,12 @@ class LotKcsUpdateIn(BaseModel):
     supplier_lot: Optional[str] = None
 
 
+class ProductBrewSpecIn(BaseModel):
+    """Quy định công nghệ nấu theo dịch bia (Product.spec_json) — chỉ admin/master.manage
+    sửa được. Key hợp lệ ở services/master_data.py::SPEC_FIELD_KEYS."""
+    model_config = ConfigDict(extra="allow")
+
+
 class OpsSettingIn(BaseModel):
     empty_cct_tolerance_hl: float
     empty_bbt_tolerance_hl: float
@@ -1036,10 +1042,10 @@ class MaterialRequestLineIn(BaseModel):
 
 class MaterialRequestIn(BaseModel):
     """1 phiếu đề nghị nhận kho — có thể gồm nhiều dòng vật tư khác nhau, tuỳ chọn gắn với
-    1 Lệnh nấu/Lệnh lọc lớn (source_type/source_id) chỉ để tham chiếu/báo cáo."""
+    1 Lệnh nấu (source_type/source_id) chỉ để tham chiếu/báo cáo."""
     lines: list[MaterialRequestLineIn] = Field(min_length=1)
     note: Optional[str] = None
-    source_type: Optional[str] = None   # brew_order | filter_master_order
+    source_type: Optional[str] = None   # brew_order
     source_id: Optional[str] = None
 
 
@@ -1369,38 +1375,6 @@ class YeastIssueIn(BaseModel):
 
 
 # ---- Brewing (Nấu-Lọc-Chiết chi tiết) ----
-class MaterialReceiptIn(BaseModel):
-    mskt: Optional[str] = None
-    receipt_date: Optional[datetime] = None
-    material_name: str
-    lot_pm: Optional[str] = None
-    lot_kcs: Optional[str] = None
-    quantity: float = 0.0
-    uom: str = "kg"
-    location: Optional[str] = None
-    note: Optional[str] = None
-    supplier: Optional[str] = None
-    has_indicators: bool = False
-
-
-class BrewIn(BaseModel):
-    brew_code: str
-    brew_date: Optional[datetime] = None
-    wort_type: str
-    product_id: Optional[str] = None   # loại bia — quyết định nhóm chỉ tiêu áp dụng
-    volume_hl: float = 0.0
-    original_extract: Optional[float] = None
-    plato: Optional[float] = None
-    note: Optional[str] = None
-    # Gán ngay vào lô lên men lúc tạo mẻ nấu — tạo mới FermentRecord nếu lm_code chưa có,
-    # hoặc gộp vào lô LM đã có (1 tank có thể nhận nhiều mẻ nấu).
-    tank_lm: Optional[str] = None
-    lm_code: Optional[str] = None
-    yeast_gen: Optional[str] = None
-    # Lệnh nấu (BrewOrder) làm cha — bắt buộc (xem services/brew_order.py::create_brew_record).
-    brew_order_id: Optional[str] = None
-
-
 class BrewOrderMaterialLineIn(BaseModel):
     seq: Optional[int] = None
     stt_label: Optional[str] = None
@@ -1461,211 +1435,6 @@ class BrewOrderIn(BaseModel):
     material_qty_overrides: dict[str, BrewLineQtySplitIn] = {}
 
 
-class BrewBatchIn(BaseModel):
-    batch_code: str   # số mẻ Braumat — bắt buộc số nguyên dương, duy nhất trong năm (xem add_brew_batch)
-    line_id: str      # dây chuyền/nhà nấu (ProductionLine.kind="brewhouse") — bắt buộc, xem add_brew_batch
-    seq: Optional[int] = None
-    note: Optional[str] = None
-    started_at: Optional[datetime] = None   # mặc định giờ hiện tại nếu không truyền (xem add_brew_batch)
-
-    @field_validator("batch_code")
-    @classmethod
-    def _batch_code_must_be_positive_int(cls, v: str) -> str:
-        v = v.strip()
-        if not v.isdigit() or int(v) <= 0:
-            raise ValueError("Mã mẻ phải là số nguyên dương (VD: 123).")
-        return v
-
-
-class BrewBatchBulkIn(BaseModel):
-    """Tạo N mẻ 1 lần thuộc cùng 1 mã nấu — mã mẻ tự sinh liên tiếp, không nhập tay từng mã
-    (xem services/brew_order.py::create_brew_batches_bulk). interval_minutes: khoảng cách giữa
-    giờ bắt đầu 2 mẻ liên tiếp (mặc định 90 phút, mirror chu kỳ nấu thật) — KHÔNG dùng chung
-    1 giờ bắt đầu cho cả loạt."""
-    count: int
-    line_id: str
-    started_at: Optional[datetime] = None
-    interval_minutes: int = 90
-    note: Optional[str] = None
-
-    @field_validator("count")
-    @classmethod
-    def _count_must_be_positive(cls, v: int) -> int:
-        if v < 1:
-            raise ValueError("Số mẻ phải >= 1.")
-        return v
-
-
-class FinishIn(BaseModel):
-    """Vận hành chọn tay giờ kết thúc (mặc định giờ hiện tại nếu không truyền) — gọi lại
-    được nhiều lần để sửa giờ nếu bấm nhầm, không phải hành động một chiều."""
-    ended_at: Optional[datetime] = None
-
-
-class BrewBatchStartIn(BaseModel):
-    """Sửa giờ bắt đầu mẻ nấu — bắt buộc truyền giá trị (khác FinishIn không có mặc định
-    "giờ hiện tại" vì started_at đã có giá trị từ lúc tạo mẻ, sửa là có chủ đích)."""
-    started_at: datetime
-
-
-class BrewBatchCodeIn(BaseModel):
-    """Đổi lại Mã mẻ sau khi đã tạo (VD gõ nhầm số mẻ Braumat) — cùng ràng buộc như lúc tạo
-    (số nguyên dương, duy nhất trong năm), xem routers/brewing.py::update_brew_batch_code."""
-    batch_code: str
-
-    @field_validator("batch_code")
-    @classmethod
-    def _batch_code_must_be_positive_int(cls, v: str) -> str:
-        v = v.strip()
-        if not v.isdigit() or int(v) <= 0:
-            raise ValueError("Mã mẻ phải là số nguyên dương (VD: 123).")
-        return v
-
-
-class BrewBatchDetailsIn(BaseModel):
-    """Sửa Dây chuyền/Ghi chú của 1 mẻ đã tạo — mirror BrewBatchIn.line_id/note, tách riêng
-    khỏi batch_code/started_at/ended_at (đã có endpoint sửa riêng), xem routers/brewing.py::
-    update_brew_batch_details. Cả 2 field tuỳ chọn (exclude_unset) — chỉ đổi field nào gửi lên."""
-    line_id: Optional[str] = None
-    note: Optional[str] = None
-
-
-class FinishFilterTankIn(FinishIn):
-    """Kết thúc lọc CHO 1 TANK trong lệnh lọc (không phối chỉ có 1 tank/dòng; phối có nhiều
-    dòng, kết thúc riêng từng dòng) — Dịch nha lọc + Nước bài khí của dòng đó điền lúc này;
-    FilterRecord tổng hợp (sum) các dòng để ra Sản lượng lọc (xem _sync_filter_aggregate).
-    batch_number/order_number bắt buộc mỗi lần gọi (xem finish_filter_tank) — thuộc về cả
-    FilterRecord (không phải riêng dòng tank này), gọi lại nhiều lần với cùng giá trị để sửa
-    giờ/số liệu không bị coi là trùng."""
-    v_dich_hl: Optional[float] = None
-    nuoc_bai_khi_hl: Optional[float] = None
-    batch_number: Optional[str] = None
-    order_number: Optional[str] = None
-    batch_seq_no: Optional[str] = None
-
-
-class FinishBottleIn(FinishIn):
-    """Kết thúc chiết — Ca 1/2/3 + V cấp chiết/hl không bắt buộc lúc tạo, điền lúc bấm
-    "Kết thúc" (mirror FinishFilterTankIn/finish_filter_tank). `mismatch_reason` bắt buộc nếu
-    SL ca1+ca2+ca3 (quy đổi ra hl qua FinishedProduct.unit_volume_l) lệch quá nhiều so với
-    V cấp chiết/hl đã nhập — xem routers/brewing.py::finish_bottle."""
-    v_cap_chiet_hl: Optional[float] = None
-    ca1: Optional[float] = None
-    ca2: Optional[float] = None
-    ca3: Optional[float] = None
-    mismatch_reason: Optional[str] = None
-
-
-class FilterOrderMaterialLineIn(BaseModel):
-    """1 dòng vật tư (VD: bột trợ lọc) dùng cho lệnh lọc — chọn từ Danh mục vật tư HOẶC 1
-    Nhóm vật tư thay thế (alt_group_code, đúng 1 trong 2 — validate ở service), số lượng cần
-    được kiểm tra ngay lúc lập lệnh (xem services/filter_order.py::create_order)."""
-    material_id: Optional[str] = None
-    alt_group_code: Optional[str] = None
-    quantity: float
-    unit_price: Optional[float] = None
-
-
-class FilterOrderIn(BaseModel):
-    """Lệnh lọc — lập trước, bắt buộc chọn 1 lệnh CHƯA DÙNG khi tạo bản ghi lọc
-    (xem FilterIn.filter_order_id, routers/brewing.py::add_filter)."""
-    order_code: str
-    blend_mode: str = "khong_phoi"   # khong_phoi | phoi
-    tank_ferment_ids: list[str]
-    note: Optional[str] = None
-    lines: list[FilterOrderMaterialLineIn] = []
-    kcs_lot_no: Optional[str] = None
-    planned_volume_hl: float = 0.0
-    volume_tolerance_hl: float = 0.0
-    # Loại bia — chỉ bắt buộc (ở tầng service) khi các tank chọn thuộc >1 Loại bia khác
-    # nhau; nếu cùng 1 Loại bia (hoặc chỉ 1 tank) thì tự suy ra, bỏ qua field này.
-    beer_type_id: Optional[str] = None
-    # Sản phẩm đích (SKU, tuỳ chọn) — cùng 1 Loại bia vẫn có thể cần chỉ tiêu Lọc khác nhau
-    # theo hình thức đóng gói đích (VD Legend chai lọc khác Legend tươi). Không tự suy ra,
-    # người lập lệnh tự chọn nếu cần phân biệt.
-    finished_product_id: Optional[str] = None
-
-
-class FilterSubOrderTankIn(BaseModel):
-    """1 tank NGUỒN trong 1 lệnh lọc nhỏ — mỗi tank tự khai báo thể tích dịch lọc kế hoạch
-    RIÊNG; FilterSubOrderIn không còn planned_volume_hl tổng — tổng = cộng dồn các tank.
-    tank_type="cct" (tank lên men, mặc định, bắt buộc ferment_id) hoặc "bbt" (tank thành
-    phẩm ĐÃ LỌC XONG — lọc lại, bắt buộc source_bbt_code + reason). Validate chéo (field
-    nào bắt buộc theo tank_type, reason không được rỗng khi bbt, v.v.) ở tầng service —
-    xem services/filter_order.py::_validate_tanks."""
-    tank_type: str = "cct"          # cct | bbt
-    ferment_id: Optional[str] = None
-    source_bbt_code: Optional[str] = None   # bắt buộc khi tank_type="bbt"
-    reason: Optional[str] = None            # Lý do lọc lại — bắt buộc khi tank_type="bbt"
-    planned_v_dich_hl: float
-
-
-class FilterSubOrderIn(BaseModel):
-    """1 "lệnh lọc nhỏ" bên trong 1 lệnh lọc lớn (FilterMasterOrderIn) — mỗi tank lên men tự
-    có thể tích dịch lọc kế hoạch riêng (xem FilterSubOrderTankIn); order_code tự sinh (không
-    có ở đây, xem services/filter_order.py::create_master_order)."""
-    blend_mode: str = "khong_phoi"   # khong_phoi | phoi
-    tanks: list[FilterSubOrderTankIn]
-    lines: list[FilterOrderMaterialLineIn] = []
-    kcs_lot_no: Optional[str] = None
-    volume_tolerance_hl: float = 0.0
-    # Loại bia — chỉ bắt buộc (ở tầng service) khi các tank chọn thuộc >1 Loại bia khác
-    # nhau; nếu cùng 1 Loại bia (hoặc chỉ 1 tank) thì tự suy ra, bỏ qua field này.
-    beer_type_id: Optional[str] = None
-    # Sản phẩm đích (SKU, tuỳ chọn) — xem FilterOrderIn.finished_product_id.
-    finished_product_id: Optional[str] = None
-
-
-class FilterMasterOrderIn(BaseModel):
-    """Lệnh lọc lớn — 1 số lệnh, chứa 1..N lệnh lọc nhỏ (mỗi lệnh nhỏ tự chọn phối/không
-    phối + tank + vật tư + thể tích riêng); in ra 1 tờ gồm tất cả lệnh nhỏ bên trong."""
-    order_code: str
-    note: Optional[str] = None
-    children: list[FilterSubOrderIn]
-
-
-class BrewProcessLogIn(BaseModel):
-    """Ghi chép nấu (Thực hiện — khớp biểu mẫu giấy QT-KCS-QT-BM-05) — PATCH-style, chỉ
-    lưu field nào được gửi lên. Danh sách key hợp lệ rất dài (header + 5 công đoạn + các
-    bước nhiệt độ/thời gian) nên khai báo động ở services/braumat_import.py::
-    MANUAL_FIELD_KEYS thay vì liệt kê lại ở đây — extra="allow" để nhận mọi key đó,
-    server lọc/validate theo MANUAL_FIELD_KEYS khi lưu (key lạ bị bỏ qua, không lỗi)."""
-    model_config = ConfigDict(extra="allow")
-    note: Optional[str] = None
-
-
-class ProductBrewSpecIn(BaseModel):
-    """Quy định công nghệ nấu theo dịch bia (Product.spec_json) — chỉ admin/master.manage
-    sửa được. Key hợp lệ ở services/braumat_import.py::SPEC_FIELD_KEYS (subset của
-    MANUAL_FIELD_KEYS — chỉ field có cột Quy định trên biểu mẫu giấy)."""
-    model_config = ConfigDict(extra="allow")
-
-
-class FermentProcessLogIn(BaseModel):
-    """Ghi chép lên men (bảng thông tin đầu, biểu mẫu giấy BM 1.11 (06)) — PATCH-style, chỉ
-    lưu field nào được gửi lên. Key hợp lệ ở services/ferment_log.py::MANUAL_FIELD_KEYS +
-    LIST_FIELD_KEYS (riêng "ha_phu_events" là 1 list, gửi lại nguyên mảng) — extra="allow"
-    để nhận mọi key đó, server lọc theo whitelist khi lưu."""
-    model_config = ConfigDict(extra="allow")
-    note: Optional[str] = None
-
-
-class FermentDailyReadingIn(BaseModel):
-    """1 dòng / 1 ngày trong bảng theo dõi lên men — xem services/ferment_log.py::
-    upsert_daily_readings (upsert theo ferment_id + day_no)."""
-    day_no: int
-    reading_date: Optional[str] = None
-    nhiet_do_c: Optional[float] = None
-    do_s: Optional[float] = None
-    mat_do_tb: Optional[float] = None
-    kcs: Optional[str] = None  # "dat"|"khong_dat"
-    truc_ca: Optional[str] = None
-
-
-class FermentDailyReadingsIn(BaseModel):
-    readings: list[FermentDailyReadingIn]
-
-
 class SqlConnectionIn(BaseModel):
     """Khai báo kết nối CSDL SQL bên ngoài — chỉ admin sửa được. password=None khi sửa
     nghĩa là giữ nguyên mật khẩu cũ (không xoá/rỗng hoá). purpose = các module MES được
@@ -1680,102 +1449,6 @@ class SqlConnectionIn(BaseModel):
     extra_params: Optional[str] = None
     purpose: Optional[str] = None
     active: bool = True
-
-
-class BrewMaterialUsageIn(BaseModel):
-    lot_id: Optional[str] = None   # nguồn thật từ tồn kho Kho phân xưởng (MaterialLot) — ưu tiên nếu có
-    receipt_id: Optional[str] = None
-    material_name: Optional[str] = None
-    lot_pm: Optional[str] = None
-    quantity: float
-    uom: str = "kg"
-
-
-class FilterMaterialUsageIn(BaseModel):
-    """NVL (VD: bột trợ lọc) dùng thật cho 1 mẻ lọc — mirror BrewMaterialUsageIn."""
-    lot_id: Optional[str] = None
-    receipt_id: Optional[str] = None
-    material_name: Optional[str] = None
-    lot_pm: Optional[str] = None
-    quantity: float
-    uom: str = "kg"
-
-
-class BottleMaterialUsageIn(BaseModel):
-    """NVL (VD: CO2, hóa chất vệ sinh) dùng thật cho 1 mẻ chiết — mirror FilterMaterialUsageIn.
-    Không có receipt_id (lối dự phòng cũ) vì Chiết là tính năng NVL mới, chỉ dùng lot_id thật."""
-    lot_id: Optional[str] = None
-    material_name: Optional[str] = None
-    lot_pm: Optional[str] = None
-    quantity: float
-    uom: str = "kg"
-
-
-class FermentIn(BaseModel):
-    lm_code: str
-    brew_code: Optional[str] = None
-    brew_date: Optional[datetime] = None
-    kt_date: Optional[datetime] = None
-    batch_numbers: Optional[str] = None
-    brew_ids: list[str] = []   # các mẻ nấu (BrewRecord) thật đưa vào lô LM này — liên kết qua FermentBrewLink
-    wort_type: str
-    product_id: Optional[str] = None
-    yeast_gen: Optional[str] = None
-    tank_lm: str
-    volume_hl: float = 0.0
-    on_hand_cct: float = 0.0
-    status: str = "len_men"
-    ferment_days: Optional[str] = None
-
-
-class FilterIn(BaseModel):
-    filter_code: str
-    lot_loc: Optional[str] = None
-    filter_phoi_code: Optional[str] = None
-    filter_date: Optional[datetime] = None
-    filter_type: str = "thuong"
-    wort_type: Optional[str] = None
-    # Loại bia không còn nhập tay — server tự điền từ FilterOrder.beer_type_id (xem
-    # add_filter). Field này giữ lại optional để không phá vỡ payload cũ (giá trị gửi lên
-    # bị bỏ qua).
-    beer_type: Optional[str] = None
-    to_bbt: Optional[str] = None
-    has_indicators: bool = False
-    has_nvl: bool = False
-    # Tank(s) nguồn không tự chọn tay nữa — bắt buộc chọn 1 Lệnh lọc CHƯA DÙNG, server tự
-    # điền product_id/wort_type/brew_code/from_cct từ tank(s) của lệnh đó (xem add_filter).
-    filter_order_id: str
-
-
-class BottleIn(BaseModel):
-    bottle_code: str
-    filter_code: Optional[str] = None
-    bottle_date: Optional[datetime] = None
-    # Loại bia không còn nhập tay — server tự điền từ FilterRecord.beer_type_id nguồn (xem
-    # add_bottle). Field này giữ lại optional để không phá vỡ payload cũ (giá trị gửi lên
-    # bị bỏ qua).
-    beer_type: Optional[str] = None
-    finished_product_id: Optional[str] = None   # sản phẩm đóng gói (SKU) — chọn khi chiết
-    lot_no: Optional[str] = None
-    # V cấp chiết/hl và Ca 1/2/3 chưa biết lúc bắt đầu chiết — chỉ điền khi vận hành bấm
-    # "Kết thúc" (xem FinishBottleIn/finish_bottle), mirror FilterIn không có v_dich_hl.
-    from_bbt: Optional[str] = None
-    line: Optional[str] = None
-    stocked: bool = False
-    approved: bool = False
-    has_indicators: bool = False
-    has_nvl: bool = False
-    note: Optional[str] = None
-
-
-class StageIndicatorIn(BaseModel):
-    stage: str
-    scope_code: str
-    name: str
-    unit: Optional[str] = None
-    value: Optional[float] = None
-    value_text: Optional[str] = None
-    warning: Optional[str] = None
 
 
 # ---- Danh mục chỉ tiêu chất lượng NVL ----
