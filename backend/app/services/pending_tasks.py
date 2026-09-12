@@ -13,7 +13,7 @@ FilterRecord/BottleRecord — routers/brewing.py::approve_ferment/approve_filter
 trùng 1 mẻ vật lý thành 2 việc nếu cả 2 module cùng có bước duyệt riêng trên nó (xác nhận với
 người dùng: module cũ không còn là nguồn chính, xem lịch sử trao đổi 2026-09-10)."""
 
-from sqlalchemy import func, select
+from sqlalchemy import false, func, select, true
 from sqlalchemy.orm import Session
 
 from ..common import DeviationState, RecipeState, Role
@@ -100,16 +100,16 @@ def get_pending_tasks(db: Session, user: User) -> list[dict]:
     # ---- Mẻ sản xuất (pipeline mới) ----
     if _has_perm(user, "quality.release"):
         n = db.execute(select(func.count()).select_from(BatchPackLot)
-                      .where(BatchPackLot.approved.is_(False))).scalar_one()
+                      .where(BatchPackLot.approved == false())).scalar_one()
         add("pack_lot_approve", "Mẻ chiết chờ duyệt KCS", n, "batchpacklots")
 
         n = db.execute(select(func.count()).select_from(BatchFilterLot)
-                      .where(BatchFilterLot.qc_approved.is_(False))).scalar_one()
+                      .where(BatchFilterLot.qc_approved == false())).scalar_one()
         add("filter_lot_approve", "Lô lọc chưa duyệt KCS", n, "batchfilterlots")
 
     if _has_perm(user, "production.release_to_wms"):
         n = db.execute(select(func.count()).select_from(BatchPackLot)
-                      .where(BatchPackLot.approved.is_(True), BatchPackLot.stocked.is_(False))).scalar_one()
+                      .where(BatchPackLot.approved == true(), BatchPackLot.stocked == false())).scalar_one()
         add("pack_lot_release_wms", "Đã duyệt KCS, chưa nhập kho thành phẩm", n, "batchpacklots")
 
     if _has_perm(user, "recipe.approve"):
