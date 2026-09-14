@@ -28,6 +28,7 @@ def list_lots(limit: int = 1000, offset: int = 0, db: Session = Depends(get_db))
     stmt = select(MaterialLot).order_by(MaterialLot.created_at.desc()).limit(limit).offset(offset)
     lots = db.execute(stmt).scalars().all()
     _attach_split_from(db, lots)
+    _attach_sibling_locations(db, lots)
     return lots
 
 
@@ -50,7 +51,38 @@ def _attach_split_from(db: Session, lots: list[MaterialLot]) -> None:
         parent_code_by_id = dict(rows)
     for l in lots:
         parent_id = parent_id_by_lot.get(l.lot_id)
-        l.split_from_lot_code = parent_code_by_id.get(parent_id) if parent_id else None
+        parent_code = parent_code_by_id.get(parent_id) if parent_id else None
+        # Từ khi tách lô KHÔNG còn sinh mã mới (dùng LẠI lot_code gốc, xem
+        # services/warehouse.py::_transfer_lot) — lô cha/con cùng mã thì KHÔNG gắn tag "tách từ
+        # X" (vô nghĩa, tự nói về chính nó); tag chỉ còn hiện cho dữ liệu tách kiểu CŨ (mã khác).
+        l.split_from_lot_code = parent_code if parent_code and parent_code != l.lot_code else None
+
+
+def _attach_sibling_locations(db: Session, lots: list[MaterialLot]) -> None:
+    """Gắn `sibling_locations` (thuộc tính tạm, KHÔNG lưu DB) — "lô này còn ở kho khác: bao
+    nhiêu" (yêu cầu người dùng 2026-09-14). 1 lot_code giờ có thể có nhiều dòng MaterialLot, mỗi
+    dòng ở 1 kho (xem models/materials.py); tra 1 lần theo (lot_year, lot_code) cho cả danh sách,
+    loại trừ chính dòng đang xem."""
+    keys = {(l.lot_year, l.lot_code) for l in lots}
+    if not keys:
+        return
+    # IN theo lot_code đơn cột (an toàn mọi dialect — MSSQL không hỗ trợ IN theo tuple nhiều cột)
+    # rồi lọc đúng cặp (lot_year, lot_code) ở Python; lot_code trùng khác năm hiếm và vô hại (chỉ
+    # bị loại ở bước lọc dưới, không gắn nhầm sibling).
+    codes = {l.lot_code for l in lots}
+    rows = db.execute(select(MaterialLot.lot_id, MaterialLot.lot_year, MaterialLot.lot_code,
+                             MaterialLot.location, MaterialLot.quantity)
+                      .where(MaterialLot.lot_code.in_(codes))).all()
+    by_key: dict[tuple, list] = {}
+    for lot_id, lot_year, lot_code, location, quantity in rows:
+        if (lot_year, lot_code) not in keys:
+            continue
+        by_key.setdefault((lot_year, lot_code), []).append(
+            {"lot_id": lot_id, "location": location, "quantity": quantity})
+    for l in lots:
+        siblings = [s for s in by_key.get((l.lot_year, l.lot_code), []) if s["lot_id"] != l.lot_id]
+        l.sibling_locations = ([{"location": s["location"], "quantity": s["quantity"]} for s in siblings]
+                               if siblings else None)
 
 
 @router.get("/{lot_id}/qc-status")

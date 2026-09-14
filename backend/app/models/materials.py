@@ -51,7 +51,13 @@ class MaterialLot(Base):
     __tablename__ = "material_lot"
     # Mã lô do phần mềm tự sinh tăng dần theo năm (VD 2026-00001) — năm sau đánh lại từ 1,
     # nên khóa duy nhất phải gồm cả lot_year, không chỉ lot_code (mirror BrewBatch.batch_year).
-    __table_args__ = (UniqueConstraint("lot_year", "lot_code", name="uq_material_lot_year_code"),)
+    # `location` cũng nằm trong khóa: 1 mã lô được phép có NHIỀU dòng, mỗi dòng ở 1 kho khác nhau
+    # (VD Kho công ty + Kho phân xưởng) — điều chuyển MỘT PHẦN lô giữa các kho không còn sinh mã
+    # lô mới (`_transfer_lot`, services/warehouse.py) mà tách/gộp vào đúng dòng của kho đích, dùng
+    # LẠI cùng lot_code — 1 lô vật lý vẫn là 1 mã lô duy nhất dù tồn ở nhiều kho khác nhau.
+    __table_args__ = (
+        UniqueConstraint("lot_year", "lot_code", "location", name="uq_material_lot_year_code_location"),
+    )
 
     lot_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
     lot_code: Mapped[str] = mapped_column(Unicode(64), index=True)
@@ -100,3 +106,9 @@ class GenealogyEdge(Base):
     uom: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
     source_event: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
     event_time: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    # Cạnh split/source_event="transfer" gắn đúng StockMovement (transfer) đã sinh ra nó — dùng để
+    # dựng lại tồn-theo-ngày chính xác khi 1 lô được điều chuyển NHIỀU LẦN vào CÙNG 1 dòng đích
+    # (cùng lot_code, cùng kho — xem _lot_balances_as_of, services/warehouse.py) thay vì suy luận
+    # "lần đầu thấy lot_id" (không còn đúng khi dòng đích có thể nhận thêm nhiều lượt gộp).
+    movement_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("stock_movement.movement_id"), nullable=True, index=True)

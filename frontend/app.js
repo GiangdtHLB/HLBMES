@@ -4810,6 +4810,11 @@ const TRACE_NODE_LABEL = {
   ferment: "Lô lên men", filter: "Mã lọc", bottle: "Lô chiết", pallet: "Pallet",
   batch_tank: "Tank lên men", batch_filter_lot: "Lô lọc", batch_pack_lot: "Lô TP",
 };
+// Nhãn quan hệ cho lô con trong lotTable() — từ khi tách kho KHÔNG còn sinh mã lô mới (cùng
+// lot_code có thể xuất hiện nhiều dòng, xem services/warehouse.py::_transfer_lot), phải gắn rõ
+// "tách kho" (relation=split, không thật sự tiêu thụ) để không nhầm với "tiêu thụ" (relation=
+// consume, NVL đã dùng cho mẻ/lọc/chiết) — 2 dòng có thể trùng HỆT mã lô nếu không có nhãn này.
+const RELATION_LABEL = {consume: "Tiêu thụ", split: "Tách kho", transfer: "Chuyển kho", merge: "Gộp"};
 function qcPill(q) {
   let text, cls;
   if (q.required_count === 0) { text = "không có chỉ tiêu"; cls = "muted"; }
@@ -4828,9 +4833,10 @@ function renderTree(tree, title) {
   // bảng compact (mã NVL/số lượng/chỉ tiêu) thay vì đệ quy từng box; các loại con khác (ferment,
   // filter, bottle...) vẫn hiện đệ quy như cũ.
   const lotTable = (lots) => `<table class="nvl-table"><thead><tr>
-      <th>Mã nguyên vật liệu</th><th>Số lượng</th><th>Chỉ tiêu</th></tr></thead>
+      <th>Mã nguyên vật liệu</th><th>Quan hệ</th><th>Số lượng</th><th>Chỉ tiêu</th></tr></thead>
     <tbody>${lots.map(l => `<tr><td>${esc(l.material_label || "")}
         <span class="muted" style="font-size:11px">(lô ${esc(l.code)})</span></td>
+      <td>${l.relation ? `<span class="qc-pill ${l.relation === "split" ? "ok" : "muted"}" title="Dùng ở bước &quot;${esc(l.relation)}&quot; để tạo ra bản ghi cha bên trên">${esc(RELATION_LABEL[l.relation] || l.relation)}</span>` : '<span class="muted">—</span>'}</td>
       <td>${l.quantity != null ? l.quantity : ""} ${esc(l.uom || "")}</td>
       <td>${(l.qc || []).map(qcPill).join("") || '<span class="muted">—</span>'}</td></tr>`).join("")}</tbody></table>`;
   const node = (n) => {
@@ -5113,11 +5119,9 @@ function locScopeOptsHtml(selected) {
   return Object.entries(LOC_SCOPE_LABELS).map(([v, l]) =>
     `<option value="${v}" ${v === selected ? "selected" : ""}>${l}</option>`).join("");
 }
-// Khi 1 lô bị tách do điều chuyển 1 phần số lượng (xem services/warehouse.py::_transfer_lot),
-// mã lô đổi sang mã mới tự sinh — backend trả kèm `split_from_lot_code` (routers/materials.py::
-// list_lots) để hiển thị "(tách từ mã X)" ngay tại chỗ, người dùng không phải vào Truy xuất mới
-// biết lô này vốn là 1 phần của lô nào trước đó (ngày nhập gốc/NCC/số lô KCS vẫn giữ nguyên,
-// chỉ đổi mã).
+// Tách lô do điều chuyển 1 phần số lượng (services/warehouse.py::_transfer_lot) từ 2026-09-14
+// KHÔNG còn sinh mã mới (dùng LẠI cùng lot_code ở kho đích) — `split_from_lot_code` giờ chỉ còn
+// khác `lot_code` (nên tag "(tách từ X)" mới hiện) cho dữ liệu tách kiểu CŨ, trước ngày đổi này.
 function lotCodeCellHtml(l) {
   if (!l) return "";
   const tag = l.split_from_lot_code ? ` <span class="muted" style="font-size:11px">(tách từ ${esc(l.split_from_lot_code)})</span>` : "";
@@ -5126,6 +5130,14 @@ function lotCodeCellHtml(l) {
 function lotCodePlain(l) {
   if (!l) return "";
   return l.split_from_lot_code ? `${esc(l.lot_code)} (tách từ ${esc(l.split_from_lot_code)})` : esc(l.lot_code);
+}
+// "Lô này còn ở kho khác: bao nhiêu" (yêu cầu người dùng 2026-09-14) — 1 lot_code giờ có thể có
+// nhiều dòng MaterialLot, mỗi dòng ở 1 kho (backend trả kèm `sibling_locations`, xem
+// routers/materials.py::_attach_sibling_locations).
+function siblingLocationsHtml(l) {
+  if (!l || !l.sibling_locations || !l.sibling_locations.length) return "";
+  const parts = l.sibling_locations.map(s => `${s.quantity} ${esc(l.uom || "")} ở ${esc(s.location || "?")}`);
+  return ` <span class="muted" style="font-size:11px">(còn ${parts.join(", ")})</span>`;
 }
 async function lotOptions(db, onlyAvailable) {
   const [lots, mats] = await Promise.all([GET("/lots"), GET("/materials")]);
@@ -5206,7 +5218,7 @@ function openMaterialLotsModal(matLabel, lots) {
     <div class="tablewrap"><table id="t_matlots"><thead><tr><th>Mã lô</th><th>Số lượng</th><th>ĐVT</th><th>Trạng thái</th><th>Vị trí</th><th>Ngày nhập</th></tr></thead>
       <tbody>${sorted.map(l => `<tr><td><code class="k">${lotCodeCellHtml(l)}</code></td><td>${l.quantity}</td><td>${esc(l.uom)}</td>
         <td>${l.status === "on_hold" ? badge("on_hold") + "Chờ QC" : badge("available") + "Sẵn có"}</td>
-        <td class="muted">${esc(l.location || "")}</td><td class="muted">${fmt(l.created_at)}</td></tr>`).join("") ||
+        <td class="muted">${esc(l.location || "")}${siblingLocationsHtml(l)}</td><td class="muted">${fmt(l.created_at)}</td></tr>`).join("") ||
         '<tr><td colspan=6 class="muted">Không có lô nào.</td></tr>'}</tbody></table></div>`);
   delete _pagerState["t_matlots"];
   wireSearch();
@@ -5368,7 +5380,10 @@ async function bcReportSectionHtml(prefix, defaultLocation) {
       <td style="color:var(--orange)">${r.issued}</td><td class="muted" style="font-size:12px">${fmtDateRange(r.issue_first, r.issue_last)}</td>
       <td>${r.on_hand}</td><td>${esc(r.uom)}</td><td class="muted">${esc(r.location || "")}</td>
       <td>${badge(r.status === "consumed" || r.status === "scrapped" ? "obsolete" : r.status === "on_hold" ? "critical" : "available")}${esc(r.status)}</td></tr>`)
-    : rep.map(r => `<tr><td><code class="k">${esc(r.material_code)}</code></td><td>${esc(r.material_name)}</td>
+    : rep.map(r => `<tr class="bc-detail-row" style="cursor:pointer" title="Bấm để xem sổ chi tiết vật tư"
+        data-bcdetail="${esc(r.material_id)}" data-bcfrom="${esc(dateFrom)}" data-bcto="${esc(dateTo)}" data-bcloc="${esc(location || "")}"
+        data-bccode="${esc(r.material_code)}" data-bcname="${esc(r.material_name)}" data-bcuom="${esc(r.uom)}">
+      <td><code class="k">${esc(r.material_code)}</code></td><td>${esc(r.material_name)}</td>
       <td style="color:var(--green)">${r.received}</td><td class="muted" style="font-size:12px">${fmtDateRange(r.receipt_first, r.receipt_last)}</td>
       <td style="color:var(--orange)">${r.issued}</td><td class="muted" style="font-size:12px">${fmtDateRange(r.issue_first, r.issue_last)}</td>
       <td>${r.on_hand}</td><td>${esc(r.uom)}</td></tr>`)).join("");
@@ -5404,6 +5419,43 @@ function wireBcReportSection(prefix, viewName) {
     SUB[prefix + "_mode"] = $(`${prefix}_mode`).value;
     render(viewName);
   };
+  document.querySelectorAll(`#t_${prefix}rep [data-bcdetail]`).forEach(tr => tr.onclick = () => guard(async () => {
+    openMaterialDetailModal(tr.dataset);
+  }));
+}
+
+// "Sổ chi tiết vật tư" — bấm vào 1 mã ở BC nhập-xuất-tồn (Kho công ty/Kho phân xưởng, dùng
+// chung bcReportSectionHtml) ra popup liệt kê TỪNG chứng từ Nhập/Xuất/Điều chuyển + Cấp liệu vào
+// mẻ Nấu trong đúng kỳ/kho đang xem, kèm Tồn đầu kỳ/Tồn luỹ kế — mirror sổ chi tiết vật tư kế
+// toán (yêu cầu người dùng 2026-09-14). GET /warehouse/report/material-detail (services/
+// warehouse.py::material_transaction_detail) — khớp đúng tổng Nhập/Xuất đã hiện ở bảng báo cáo.
+const BC_MOVE_TYPE_LABEL = {
+  receipt: "Nhập kho", return: "Nhập hoàn", issue: "Xuất kho", transfer: "Điều chuyển", consume: "Cấp liệu",
+};
+async function openMaterialDetailModal(ds) {
+  const { bcdetail: materialId, bcfrom: dateFrom, bcto: dateTo, bcloc: location, bccode, bcname, bcuom } = ds;
+  const start = new Date(dateFrom + "T00:00:00");
+  const end = new Date(dateTo + "T00:00:00"); end.setDate(end.getDate() + 1);
+  const q = `material_id=${encodeURIComponent(materialId)}&date_from=${encodeURIComponent(toDTLocal(start))}` +
+    `&date_to=${encodeURIComponent(toDTLocal(end))}` + (location ? `&location=${encodeURIComponent(location)}` : "");
+  const detail = await GET(`/warehouse/report/material-detail?${q}`);
+  const rowsHtml = detail.rows.map(r => `<tr>
+      <td class="muted" style="font-size:12px">${fmt(r.ts)}</td>
+      <td>${esc(BC_MOVE_TYPE_LABEL[r.type] || r.type)}</td>
+      <td><code class="k">${esc(r.lot_code || "")}</code></td>
+      <td class="muted">${esc(r.location_from || "—")}</td>
+      <td class="muted">${esc(r.location_to || "—")}</td>
+      <td style="color:var(--green)">${r.in ? r.in : ""}</td>
+      <td style="color:var(--orange)">${r.out ? r.out : ""}</td>
+      <td><b>${r.balance}</b></td>
+      <td class="muted">${esc(r.reason || "")}</td></tr>`).join("");
+  modal(`<h3>Sổ chi tiết vật tư — <code class="k">${esc(bccode)}</code> ${esc(bcname)}</h3>
+    <div class="muted" style="margin-bottom:8px">${esc(location || "Cả 2 kho")} · ${esc(dateFrom)} → ${esc(dateTo)}
+      · Tồn đầu kỳ: <b>${detail.opening_balance} ${esc(bcuom)}</b> · Tồn cuối kỳ: <b>${detail.closing_balance} ${esc(bcuom)}</b></div>
+    <div class="tablewrap"><table><thead><tr>
+      <th>Ngày</th><th>Loại</th><th>Lô</th><th>Kho xuất</th><th>Kho nhập</th><th>Nhập</th><th>Xuất</th><th>Tồn</th><th>Diễn giải</th>
+    </tr></thead><tbody>${rowsHtml || '<tr><td colspan=9 class="muted">Không có chứng từ nào trong kỳ.</td></tr>'}</tbody></table></div>`,
+    null, true);
 }
 
 VIEWS.warehouse_kc = async function () {
@@ -5635,9 +5687,9 @@ VIEWS.warehouse_kc = async function () {
           : '<div class="muted">Bạn không có quyền tạo đề nghị điều chuyển.</div>'}
         <h4 style="margin-top:14px">Đang chờ Phân xưởng duyệt <span class="muted">(${kcpxPending.length})</span></h4>
         <div class="tablewrap"><table id="t_kcpx_pending">
-          <thead><tr><th>Ngày tạo</th><th>Số đề nghị</th><th>Mã VT</th><th>Tên vật tư</th><th>Lô</th><th>SL</th><th>Người tạo</th><th>Trạng thái QC</th></tr></thead>
+          <thead><tr><th>Ngày tạo</th><th>Số đề nghị</th><th>Mã VT</th><th>Tên vật tư</th><th>Lô</th><th>SL</th><th>Người tạo</th><th>Trạng thái QC</th><th></th></tr></thead>
           <tbody>${kcpxPending.map(r => transferKcPxKcRowHtml(r, matByIdGiao, lotByIdGiao, qcReqSetGiao)).join("") ||
-            `<tr><td colspan=8 class="muted">Không có đề nghị nào đang chờ.</td></tr>`}</tbody>
+            `<tr><td colspan=9 class="muted">Không có đề nghị nào đang chờ.</td></tr>`}</tbody>
         </table></div>
         <h4 style="margin-top:14px">Lịch sử đã xử lý <span class="muted">(${kcpxDone.length})</span></h4>
         <div class="tablewrap"><table id="t_kcpx_done">
@@ -5682,7 +5734,7 @@ VIEWS.warehouse_kc = async function () {
           <td><code class="k">${lotCodeCellHtml(l)}</code></td>
           <td class="muted">${esc(matById[l.material_id] ? matById[l.material_id].code : l.material_id || "—")}</td>
           <td>${esc(matById[l.material_id] ? matById[l.material_id].name : "—")}</td>
-          <td>${l.quantity} ${l.uom}</td>
+          <td>${l.quantity} ${l.uom}${siblingLocationsHtml(l)}</td>
           <td class="muted">${esc(l.kcs_lot_no || "—")}</td>
           <td class="muted">${esc(l.supplier_lot || "—")}</td>
           <td class="muted">${fmt(l.created_at)}</td>
@@ -6020,6 +6072,13 @@ VIEWS.warehouse_kc = async function () {
         quantity: parseFloat($("dckp_qty").value), reason: $("dckp_reason").value.trim() || null });
       toast("Đã gửi đề nghị điều chuyển sang Phân xưởng — chờ Phân xưởng duyệt"); render("warehouse_kc");
     });
+    document.querySelectorAll("[data-kcpxdcedit]").forEach(b => b.onclick = () =>
+      openTransferEditModal(b.dataset.kcpxdcedit, b.dataset, "/warehouse/transfer-kcpx-requests", "warehouse_kc"));
+    document.querySelectorAll("[data-kcpxdcdel]").forEach(b => b.onclick = () => guard(async () => {
+      if (!confirm("Xóa đề nghị điều chuyển này?")) return;
+      await DELETE(`/warehouse/transfer-kcpx-requests/${b.dataset.kcpxdcdel}`);
+      toast("Đã xóa đề nghị điều chuyển"); render("warehouse_kc");
+    }));
     Object.keys(WH_HIST_VISIBLE).forEach(wireMovementHistoryBlock);
   }
   if (sec === "tra") {
@@ -6207,8 +6266,9 @@ VIEWS.warehouse_px = async function () {
         <td class="muted">${lotCodeCellHtml(lot)}</td>
         <td>${r.quantity} ${esc(r.uom)}</td>
         <td class="muted">${esc(r.reason || "")}</td>
-        <td>${badge(r.status)}</td></tr>`;
-    }).join("") || `<tr><td colspan=7 class="muted">Chưa có đề nghị nào.</td></tr>`;
+        <td>${badge(r.status)}</td>
+        ${transferEditDelCell(r, "data-pxdcedit", "data-pxdcdel")}</tr>`;
+    }).join("") || `<tr><td colspan=8 class="muted">Chưa có đề nghị nào.</td></tr>`;
     const kcpxPendingPx = kcpxRequestsPx.filter(r => r.status === "pending").sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
     const kcpxDonePx = kcpxRequestsPx.filter(r => r.status !== "pending").sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
     const kcpxPendingRows = kcpxPendingPx.map(r => {
@@ -6264,7 +6324,7 @@ VIEWS.warehouse_px = async function () {
         : '<div class="muted">Bạn không có quyền tạo đề nghị điều chuyển.</div>'}
       <input class="searchbox" data-tbl="t_dcpx" placeholder="Tìm mã đề nghị/vật tư/lô..." style="margin-top:12px"/>
       <div class="tablewrap" style="margin-top:6px"><table id="t_dcpx">
-        <thead><tr><th>Ngày tạo</th><th>Số đề nghị</th><th>Vật tư</th><th>Lô</th><th>SL</th><th>Lý do</th><th>Trạng thái</th></tr></thead>
+        <thead><tr><th>Ngày tạo</th><th>Số đề nghị</th><th>Vật tư</th><th>Lô</th><th>SL</th><th>Lý do</th><th>Trạng thái</th><th></th></tr></thead>
         <tbody>${pxRows}</tbody>
       </table></div>
       </div>
@@ -6551,6 +6611,13 @@ VIEWS.warehouse_px = async function () {
       await POST(`/warehouse/transfer-kcpx-requests/${b.dataset.kcpxundo}/undo`, {});
       toast("Đã hoàn tác điều chuyển"); render("warehouse_px");
     }));
+    document.querySelectorAll("[data-pxdcedit]").forEach(b => b.onclick = () =>
+      openTransferEditModal(b.dataset.pxdcedit, b.dataset, "/warehouse/transfer-px-requests", "warehouse_px"));
+    document.querySelectorAll("[data-pxdcdel]").forEach(b => b.onclick = () => guard(async () => {
+      if (!confirm("Xóa đề nghị điều chuyển này?")) return;
+      await DELETE(`/warehouse/transfer-px-requests/${b.dataset.pxdcdel}`);
+      toast("Đã xóa đề nghị điều chuyển"); render("warehouse_px");
+    }));
   }
   if (sec === "sangngang") {
     wirePaginate("t_sng_pending_px", 10);
@@ -6788,6 +6855,35 @@ function sangNgangKcRowHtml(r, matById, lotById, qcReqSet) {
     ${sangNgangEditDelCell(r)}</tr>`;
 }
 
+// Sửa/Xóa đề nghị điều chuyển (2 chiều Công ty↔Phân xưởng) — chỉ khi `can_edit` (backend tính
+// sẵn, xem services/warehouse.py::_transfer_kcpx_dict/_transfer_px_request_dict): còn pending,
+// và riêng chiều Công ty→Phân xưởng thêm điều kiện lô chưa được KCS duyệt xong (yêu cầu người
+// dùng 2026-09-14, mirror sangNgangEditDelCell).
+function transferEditDelCell(r, editAttr, delAttr) {
+  if (!r.can_edit) return "<td></td>";
+  return `<td style="white-space:nowrap">
+    <button class="btn sm sec" ${editAttr}="${esc(r.request_id)}" data-txcode="${esc(r.request_code)}"
+      data-txqty="${r.quantity}" data-txuom="${esc(r.uom)}" data-txreason="${esc(r.reason || "")}">Sửa</button>
+    <button class="btn sm sec" ${delAttr}="${esc(r.request_id)}" style="color:var(--red)">Xóa</button></td>`;
+}
+
+// Modal sửa số lượng/lý do đề nghị điều chuyển (2 chiều) — mirror openSangNgangEditModal nhưng
+// đơn giản hơn (chỉ 2 trường, không đổi lô — xem services/warehouse.py::update_transfer_px_request/
+// update_transfer_kcpx_request). `apiPath`: đúng endpoint PUT theo chiều (px hoặc kcpx).
+function openTransferEditModal(requestId, ds, apiPath, viewName) {
+  const { txcode, txqty, txuom, txreason } = ds;
+  modal(`<h3>Sửa đề nghị điều chuyển — <code class="k">${esc(txcode)}</code></h3>
+    <div class="muted" style="margin-bottom:10px">Chỉ sửa được số lượng/lý do — không đổi lô. Nếu đề nghị đã được xử lý, lưu sẽ báo lỗi.</div>
+    <div class="row"><div class="field"><label>Số lượng</label><input id="etx_qty" type="number" value="${txqty}"/></div>
+      <div class="field"><label>ĐVT</label><input value="${esc(txuom)}" size="4" readonly/></div></div>
+    <div class="row"><div class="field" style="flex:1"><label>Lý do (tuỳ chọn)</label><input id="etx_reason" value="${esc(txreason)}"/></div>
+      <button class="btn" id="etx_save" style="align-self:flex-end">Lưu</button></div>`);
+  $("etx_save").onclick = () => guard(async () => {
+    await PUT(`${apiPath}/${requestId}`, { quantity: parseFloat($("etx_qty").value), reason: $("etx_reason").value.trim() || null });
+    toast("Đã lưu"); closeModal(); render(viewName);
+  });
+}
+
 // ---- Điều chuyển kho công ty, chiều 3: Kho công ty → Kho phân xưởng (lô đang có sẵn) ----
 function transferKcPxKcRowHtml(r, matById, lotById, qcReqSet) {
   const lot = lotById[r.lot_id];
@@ -6800,7 +6896,8 @@ function transferKcPxKcRowHtml(r, matById, lotById, qcReqSet) {
     <td class="muted">${lotCodeCellHtml(lot)}</td>
     <td>${r.quantity} ${esc(r.uom)}</td>
     <td class="muted">${esc(r.created_by || "")}</td>
-    <td>${sangNgangQcBadge(r, lotById, qcReqSet)}</td></tr>`;
+    <td>${sangNgangQcBadge(r, lotById, qcReqSet)}</td>
+    ${transferEditDelCell(r, "data-kcpxdcedit", "data-kcpxdcdel")}</tr>`;
 }
 
 function transferKcPxHistoryRowHtml(r, matById, lotById) {
@@ -7016,6 +7113,10 @@ let REQUEST_CART = [];   // {material_id, material_code, lot_id, lot_code, quant
                           // đưa lên từ 1 Nhóm vật tư thay thế — mỗi mã thành viên thành 1 dòng riêng,
                           // thủ kho tự xoá bớt chỉ giữ đúng 1 mã muốn xuất (xem cartPanelHtml).
 let REQUEST_SOURCE = null;   // {type: "brew_order", id, label} — tuỳ chọn, chỉ để tham chiếu/báo cáo
+// Giữ giá trị "Ngày đề nghị nhận kho" qua các lần refreshCartPanel() (thêm/xoá dòng render lại
+// cả khung) — không dùng lại `new Date()` mặc định mỗi lần render, kẻo xoá mất ngày người dùng
+// vừa chọn (bug thực tế phát hiện lúc kiểm thử trực tiếp trên trình duyệt 2026-09-14).
+let REQUEST_RECEIPT_DATE = toISODateLocal(new Date());
 
 const REQ_STATUS_BADGE = { pending: "on_hold", fulfilled: "available", rejected: "obsolete", cancelled: "obsolete" };
 
@@ -7166,6 +7267,55 @@ function requestLineRowHtml(r, l, matById, lotById, canFulfill, allLots) {
     <td>${actions}</td></tr>`;
 }
 
+// Sửa phiếu đề nghị nhận kho: ngày đề nghị nhận kho (header, sửa được bất kể trạng thái dòng)
+// + vật tư/số lượng của các dòng CÒN pending (dòng đã fulfilled/rejected khóa cứng, chỉ hiện
+// đọc) — mirror đúng phạm vi services/warehouse.py::update_request, chỉ hiện nút ở phía đề
+// nghị (canRequest, xem requestBlockHtml).
+function openEditRequestModal(r, matById) {
+  const dateVal = r.requested_receipt_date ? toISODateLocal(new Date(r.requested_receipt_date)) : "";
+  const rows = r.lines.map(l => {
+    const mat = matById[l.material_id];
+    if (l.status !== "pending") {
+      const matLabel = mat ? `${esc(mat.code)} — ${esc(mat.name)}` : esc(l.material_id);
+      return `<tr><td>${matLabel}</td><td>${l.quantity} ${esc(l.uom)}</td>
+        <td>${badge(REQ_STATUS_BADGE[l.status] || "planned")}${esc(l.status)}</td></tr>`;
+    }
+    return `<tr data-editline="${esc(l.line_id)}">
+      <td><select class="reqedit-mat" style="width:100%">${REQ_CACHE.matOpts}</select></td>
+      <td><input type="number" min="0" step="any" class="reqedit-qty" value="${l.quantity}" style="width:90px"/> ${esc(l.uom)}</td>
+      <td>${badge(REQ_STATUS_BADGE[l.status] || "planned")}${esc(l.status)}</td></tr>`;
+  }).join("");
+  modal(`<h3>Sửa phiếu <code class="k">${esc(r.request_code)}</code></h3>
+    <div class="field" style="margin-bottom:10px;max-width:220px"><label>Ngày đề nghị nhận kho</label>
+      <input id="reqedit_date" type="date" value="${esc(dateVal)}"/></div>
+    <div class="tablewrap"><table><thead><tr><th>Vật tư</th><th>SL</th><th>Trạng thái</th></tr></thead>
+      <tbody>${rows}</tbody></table></div>
+    <div class="muted" style="margin:8px 0;font-size:12px">Chỉ sửa được vật tư/số lượng của dòng còn "pending" — dòng đã xử lý giữ nguyên, không sửa được.</div>
+    <div class="row" style="margin-top:10px;justify-content:flex-end">
+      <button class="btn" id="reqedit_save">Lưu</button>
+    </div>`, null, true);
+  document.querySelectorAll("[data-editline]").forEach(tr => {
+    const line = r.lines.find(l => l.line_id === tr.dataset.editline);
+    const sel = tr.querySelector(".reqedit-mat");
+    if (sel && line) sel.value = line.material_id;
+  });
+  $("reqedit_save").onclick = () => guard(async () => {
+    const lines = Array.from(document.querySelectorAll("[data-editline]")).map(tr => ({
+      line_id: tr.dataset.editline,
+      material_id: tr.querySelector(".reqedit-mat").value,
+      quantity: parseFloat(tr.querySelector(".reqedit-qty").value),
+    }));
+    await PUT(`/warehouse/requests/${r.request_id}`, {
+      requested_receipt_date: dateInputToIsoNoon($("reqedit_date").value),
+      lines,
+    });
+    toast("Đã lưu thay đổi phiếu đề nghị");
+    closeModal();
+    const v = document.querySelector("#nav button.active[data-view]")?.dataset.view;
+    if (v) render(v);
+  });
+}
+
 // 1 khối = 1 phiếu — mặc định chỉ hiện 1 dòng tóm tắt (số phiếu/người tạo/ngày/nguồn/trạng
 // thái), bấm "Chi tiết" mới giãn ra bảng các dòng vật tư ngay tại chỗ (accordion, không mở
 // modal/không gọi lại API) — nếu hiện luôn hết mọi dòng vật tư của MỌI phiếu như trước thì
@@ -7180,6 +7330,10 @@ function requestBlockHtml(r, matById, lotById, canFulfill, showBulk, allLots, ca
     ? `<button class="btn sm" data-fulfillall="${esc(r.request_id)}">Duyệt cả phiếu (${pendingCount} dòng) →</button>` : "";
   const cancelBtn = (!hasFulfilled && pendingCount > 0 && (canRequest || canFulfill))
     ? `<button class="btn sm sec" data-reqcancel="${esc(r.request_id)}">Xóa phiếu</button>` : "";
+  // Sửa (ngày đề nghị nhận + các dòng còn pending) — chỉ phía đề nghị (canRequest), bất kể
+  // phiếu đã có dòng fulfilled hay chưa (ngày header luôn sửa được, xem update_request).
+  const editBtn = canRequest
+    ? `<button class="btn sm sec" data-reqedit="${esc(r.request_id)}">Sửa</button>` : "";
   const summary = `${r.lines.length} dòng` +
     (pendingCount ? ` · ${pendingCount} chờ xử lý` : "") +
     (fulfilledCount ? ` · ${fulfilledCount} đã xuất` : "");
@@ -7192,13 +7346,14 @@ function requestBlockHtml(r, matById, lotById, canFulfill, showBulk, allLots, ca
           <button class="btn sm sec" data-reqtoggle>▸ Chi tiết</button>
           <div class="muted">
             Số phiếu <code class="k">${esc(r.request_code)}</code>
-            · người tạo <b>${esc(r.requested_by || "")}</b> · ${fmt(r.requested_at)}
+            · người tạo <b>${esc(r.requested_by || "")}</b> · ngày lập phiếu ${fmt(r.requested_at)}
+            ${r.requested_receipt_date ? ` · <b>ngày đề nghị nhận kho ${fmt(r.requested_receipt_date)}</b>` : ""}
             ${r.source_label ? " · " + esc(r.source_label) : ""}
             · ${summary}
             ${r.note ? " · " + esc(r.note) : ""}
           </div>
         </div>
-        <div class="row" style="gap:6px">${bulkBtn}${cancelBtn}</div>
+        <div class="row" style="gap:6px">${bulkBtn}${editBtn}${cancelBtn}</div>
       </div>
       <div class="reqdetail" style="display:none;margin-top:8px">
         <table>
@@ -7256,6 +7411,10 @@ function wireRequestBlockActions() {
     await DELETE(`/warehouse/requests/${b.dataset.reqcancel}`);
     toast("Đã xóa phiếu đề nghị"); renderCurrentWarehouseView();
   }));
+  document.querySelectorAll("[data-reqedit]").forEach(b => b.onclick = () => {
+    const req = (REQ_CACHE.allRequests || []).find(r => r.request_id === b.dataset.reqedit);
+    if (req) openEditRequestModal(req, REQ_CACHE.matById || {});
+  });
   document.querySelectorAll("[data-requndo]").forEach(b => b.onclick = () => guard(async () => {
     if (!confirm("Hoàn tác dòng đã xuất này? Vật tư sẽ được chuyển lại Kho công ty.")) return;
     await POST(`/warehouse/requests/${b.dataset.reqid}/lines/${b.dataset.lineid}/undo-fulfill`, {});
@@ -7334,6 +7493,8 @@ function cartPanelHtml() {
       <button class="btn sec" id="rq_add" style="align-self:flex-end">+ Thêm dòng</button>
     </div>
     <div class="row" style="margin-top:10px">
+      <div class="field"><label>Ngày đề nghị nhận kho (tuỳ chọn)</label>
+        <input id="rq_recv_date" type="date" value="${esc(REQUEST_RECEIPT_DATE)}"/></div>
       <div class="field" style="flex:1"><label>Ghi chú chung (tuỳ chọn)</label><input id="rq_note" placeholder="(tuỳ chọn)"/></div>
       <button class="btn" id="rq_submit" style="align-self:flex-end" ${REQUEST_CART.some(c => c.quantity > 0) ? "" : "disabled"}>
         Gửi đề nghị (${REQUEST_CART.filter(c => c.quantity > 0).length} dòng)</button>
@@ -7351,6 +7512,7 @@ function refreshCartPanel() {
 
 function wireCartPanel() {
   if (!$("rq_form_panel")) return;
+  $("rq_recv_date").onchange = () => { REQUEST_RECEIPT_DATE = $("rq_recv_date").value; };
   const fillSrcOrderOpts = () => {
     const type = $("rq_srctype").value;
     const sel = $("rq_srcorder");
@@ -7516,10 +7678,12 @@ function wireCartPanel() {
       note,
       source_type: REQUEST_SOURCE ? REQUEST_SOURCE.type : null,
       source_id: REQUEST_SOURCE ? REQUEST_SOURCE.id : null,
+      requested_receipt_date: dateInputToIsoNoon(REQUEST_RECEIPT_DATE),
     });
     toast(`Đã gửi phiếu ${res.request_code} (${submitRows.length} dòng)`);
     REQUEST_CART = [];
     REQUEST_SOURCE = null;
+    REQUEST_RECEIPT_DATE = toISODateLocal(new Date());
     render("warehouse_px");
   });
 }
@@ -11491,7 +11655,7 @@ async function doLogout() {
   // liệu của người trước: giỏ hàng yêu cầu xuất kho đang soạn dở (có thể vô tình bị gửi đi dưới
   // danh tính người mới), và các cờ "điều hướng 1 lần" từ Dashboard (mở thẳng CAPA/Deviation/
   // Hold-Release theo scope đã chọn) — nếu còn sót sẽ tự mở nhầm màn cho người dùng kế tiếp.
-  REQUEST_CART = []; REQUEST_SOURCE = null;
+  REQUEST_CART = []; REQUEST_SOURCE = null; REQUEST_RECEIPT_DATE = toISODateLocal(new Date());
   PENDING_QUALITY_SCOPE = null; PENDING_CAPA_DEVIATION = null;
   PENDING_OPEN_CAPA_ID = null; PENDING_OPEN_DEVIATION_ID = null;
   showLogin();

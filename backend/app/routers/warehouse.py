@@ -17,6 +17,7 @@ from ..schemas import (
     MaterialLocationOut,
     MaterialRequestIn,
     MaterialRequestOut,
+    MaterialRequestUpdateIn,
     ReceiptIn,
     ReceiptUpdateIn,
     RequestFulfillAllIn,
@@ -39,6 +40,7 @@ from ..schemas import (
     TransferPxRejectIn,
     TransferPxRequestIn,
     TransferPxRequestOut,
+    TransferQuantityUpdateIn,
     TransferToFactoryIn,
     WorkshopLotRelocateIn,
 )
@@ -170,6 +172,12 @@ def report(days: int = 30, location: str = None, date_from: datetime = None,
     return svc.inventory_report(db, days, location, date_from, date_to)
 
 
+@router.get("/report/material-detail")
+def report_material_detail(material_id: str, date_from: datetime, date_to: datetime,
+                           location: str = None, db: Session = Depends(get_db)):
+    return svc.material_transaction_detail(db, material_id, date_from, date_to, location)
+
+
 @router.get("/report/by-lot")
 def report_by_lot(days: int = 30, location: str = None, date_from: datetime = None,
                   date_to: datetime = None, db: Session = Depends(get_db)):
@@ -194,6 +202,12 @@ def create_request(payload: MaterialRequestIn, db: Session = Depends(get_db),
 def list_requests(status: str = None, limit: int = 500, offset: int = 0, db: Session = Depends(get_db),
                   user: User = Depends(get_current_user)):
     return svc.list_requests(db, status, limit, offset)
+
+
+@router.put("/requests/{request_id}", response_model=MaterialRequestOut)
+def update_request(request_id: str, payload: MaterialRequestUpdateIn, db: Session = Depends(get_db),
+                   user: User = Depends(get_current_user)):
+    return svc.update_request(db, request_id, payload.model_dump(exclude_unset=True), user)
 
 
 @router.post("/requests/{request_id}/lines/{line_id}/fulfill")
@@ -239,6 +253,18 @@ def list_transfer_px_requests(status: str = None, limit: int = 500, offset: int 
     return svc.list_transfer_px_requests(db, status, limit, offset)
 
 
+@router.put("/transfer-px-requests/{request_id}", response_model=TransferPxRequestOut)
+def update_transfer_px_request(request_id: str, payload: TransferQuantityUpdateIn, db: Session = Depends(get_db),
+                               user: User = Depends(get_current_user)):
+    return svc.update_transfer_px_request(db, request_id, payload.quantity, payload.reason, user)
+
+
+@router.delete("/transfer-px-requests/{request_id}", response_model=TransferPxRequestOut)
+def cancel_transfer_px_request(request_id: str, db: Session = Depends(get_db),
+                               user: User = Depends(get_current_user)):
+    return svc.cancel_transfer_px_request(db, request_id, user)
+
+
 @router.post("/transfer-px-requests/{request_id}/approve", response_model=TransferPxRequestOut)
 def approve_transfer_px_request(request_id: str, db: Session = Depends(get_db),
                                 user: User = Depends(get_current_user)):
@@ -269,6 +295,18 @@ def create_transfer_kcpx_request(payload: TransferKcPxRequestIn, db: Session = D
 def list_transfer_kcpx_requests(status: str = None, limit: int = 500, offset: int = 0,
                                 db: Session = Depends(get_db)):
     return svc.list_transfer_kcpx_requests(db, status, limit, offset)
+
+
+@router.put("/transfer-kcpx-requests/{request_id}", response_model=TransferKcPxRequestOut)
+def update_transfer_kcpx_request(request_id: str, payload: TransferQuantityUpdateIn, db: Session = Depends(get_db),
+                                 user: User = Depends(get_current_user)):
+    return svc.update_transfer_kcpx_request(db, request_id, payload.quantity, payload.reason, user)
+
+
+@router.delete("/transfer-kcpx-requests/{request_id}", response_model=TransferKcPxRequestOut)
+def cancel_transfer_kcpx_request(request_id: str, db: Session = Depends(get_db),
+                                 user: User = Depends(get_current_user)):
+    return svc.cancel_transfer_kcpx_request(db, request_id, user)
 
 
 @router.post("/transfer-kcpx-requests/{request_id}/approve", response_model=TransferKcPxRequestOut)

@@ -327,10 +327,18 @@ def materials_with_required_qc(db: Session) -> list[str]:
 
 
 def lot_qc_status(db: Session, lot: MaterialLot) -> dict:
-    """Trạng thái khai báo/duyệt chỉ tiêu chất lượng của một lô NVL."""
+    """Trạng thái khai báo/duyệt chỉ tiêu chất lượng của một lô NVL.
+
+    Chỉ tiêu QC là thuộc tính của LÔ (theo `lot_code`), không phải của riêng 1 dòng-kho — từ khi
+    1 lot_code được phép có nhiều dòng `MaterialLot` (1 dòng/kho, xem models/materials.py), 1 dòng
+    tách/gộp KHÔNG mang theo QualityResult riêng (tránh sao chép bị lệch khi sửa 1 bản sau này),
+    nên tra theo TẤT CẢ lot_id cùng (lot_year, lot_code) — dòng nào cũng thấy đúng 1 bộ kết quả
+    QC chung của cả lô, không rỗng lịch sử chỉ vì đang xem 1 dòng vừa được tách ra."""
+    sibling_ids = db.execute(select(MaterialLot.lot_id).where(
+        MaterialLot.lot_year == lot.lot_year, MaterialLot.lot_code == lot.lot_code)).scalars().all()
     required = required_params_for_material(db, lot.material_id, mandatory_only=True)
     recorded = db.execute(
-        select(QualityResult).where(QualityResult.scope_type == "lot", QualityResult.scope_id == lot.lot_id)
+        select(QualityResult).where(QualityResult.scope_type == "lot", QualityResult.scope_id.in_(sibling_ids))
         .order_by(QualityResult.recorded_at)
     ).scalars().all()
     # Bản ghi MỚI NHẤT theo từng chỉ tiêu (ORDER BY recorded_at ASC rồi ghi đè tại chỗ — dict

@@ -179,7 +179,13 @@ class MaterialRequest(Base):
     request_code: Mapped[str] = mapped_column(Unicode(64), unique=True, index=True)
     note: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)
     requested_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
-    requested_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    requested_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)  # ngày LẬP phiếu (không sửa được)
+    # Ngày phân xưởng MUỐN nhận hàng — khác requested_at (ngày lập phiếu) ở trên. Sửa được (xem
+    # services/warehouse.py::update_request); khi duyệt (fulfill_request_line/fulfill_all_lines)
+    # dùng làm `ts` hiệu lực của StockMovement transfer, mirror đúng cách approve_sang_ngang dùng
+    # "Ngày xuất sang ngang" (receipt.ts) làm ts — để "Xem tồn kho theo ngày" phản ánh đúng ngày
+    # phân xưởng khai, không phải ngày thủ kho công ty bấm Duyệt (yêu cầu người dùng 2026-09-14).
+    requested_receipt_date: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
     source_type: Mapped[Optional[str]] = mapped_column(Unicode(32), nullable=True, index=True)  # brew_order|production_order
     source_id: Mapped[Optional[str]] = mapped_column(Unicode(64), nullable=True, index=True)
 

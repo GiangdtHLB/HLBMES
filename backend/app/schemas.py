@@ -699,6 +699,10 @@ class LotOut(ORMModel):
     # GenealogyEdge relation=SPLIT, routers/materials.py::list_lots) — mã lô gốc để hiển thị
     # ngay "Tách từ lô X" ở mọi màn, không bắt người dùng phải vào Truy xuất mới thấy liên kết.
     split_from_lot_code: Optional[str] = None
+    # Chỉ set khi CÙNG lot_code còn tồn tại ở (các) kho khác (xem routers/materials.py::
+    # _attach_sibling_locations) — "lô này còn ở kho khác: bao nhiêu" (yêu cầu người dùng
+    # 2026-09-14), vì 1 lot_code giờ có thể có nhiều dòng, mỗi dòng 1 kho.
+    sibling_locations: Optional[list[dict]] = None
 
     @field_validator("quantity")
     @classmethod
@@ -1047,6 +1051,21 @@ class MaterialRequestIn(BaseModel):
     note: Optional[str] = None
     source_type: Optional[str] = None   # brew_order
     source_id: Optional[str] = None
+    requested_receipt_date: Optional[datetime] = None
+
+
+class MaterialRequestLineUpdateIn(BaseModel):
+    line_id: str
+    material_id: Optional[str] = None
+    quantity: Optional[float] = Field(default=None, gt=0)
+
+
+class MaterialRequestUpdateIn(BaseModel):
+    """Sửa phiếu đề nghị nhận kho — chỉ người tạo (warehouse.request) sửa được, chỉ áp dụng cho
+    các dòng CÒN pending (xem services/warehouse.py::update_request). requested_receipt_date sửa
+    được bất kể trạng thái dòng."""
+    requested_receipt_date: Optional[datetime] = None
+    lines: Optional[list[MaterialRequestLineUpdateIn]] = None
 
 
 class MaterialRequestLineOut(ORMModel):
@@ -1072,6 +1091,7 @@ class MaterialRequestOut(ORMModel):
     note: Optional[str] = None
     requested_by: Optional[str] = None
     requested_at: datetime
+    requested_receipt_date: Optional[datetime] = None
     source_type: Optional[str] = None
     source_id: Optional[str] = None
     source_label: Optional[str] = None
@@ -1117,6 +1137,12 @@ class TransferPxRejectIn(BaseModel):
     reason: Optional[str] = None
 
 
+class TransferQuantityUpdateIn(BaseModel):
+    """Sửa đề nghị điều chuyển (2 chiều Công ty↔Phân xưởng) — chỉ số lượng/lý do, không đổi lô."""
+    quantity: float = Field(gt=0)
+    reason: Optional[str] = None
+
+
 class TransferPxRequestOut(ORMModel):
     request_id: str
     request_code: str
@@ -1134,6 +1160,7 @@ class TransferPxRequestOut(ORMModel):
     rejected_by: Optional[str] = None
     rejected_at: Optional[datetime] = None
     reject_reason: Optional[str] = None
+    can_edit: bool = True
 
 
 class TransferKcPxRequestIn(BaseModel):
@@ -1168,6 +1195,7 @@ class TransferKcPxRequestOut(ORMModel):
     rejected_by: Optional[str] = None
     rejected_at: Optional[datetime] = None
     reject_reason: Optional[str] = None
+    can_edit: bool = True
 
 
 class SangNgangRejectIn(BaseModel):
