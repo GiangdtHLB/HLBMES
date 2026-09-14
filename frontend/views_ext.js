@@ -240,15 +240,18 @@
       // FIFO không. CHỈ hiện vật tư ĐÃ thực sự cấp — không tự liệt kê sẵn toàn bộ định mức công
       // thức khi chưa cấp gì, để người dùng tự chủ động cấp qua "Gợi ý cấp liệu"/"Cấp 1 vật tư"
       // bên dưới thay vì bị gợi ý sẵn (theo yêu cầu người dùng).
+      const BOM_STATUS_LABEL = { dat: "đạt", vuot: "vượt định mức", thieu: "thiếu", chua_dung: "chưa dùng", ngoai_bom: "ngoài định mức" };
+      const BOM_STATUS_BADGE = { dat: "available", vuot: "critical", thieu: "due", chua_dung: "planned", ngoai_bom: "obsolete" };
       $("dp_bom").innerHTML = summary.length ? `<div class="tablewrap"><table>
-        <thead><tr><th>Vật tư</th><th>Mã lô</th><th>FIFO?</th><th>Định mức</th><th>Thực tế</th><th>Chênh</th><th>Trạng thái</th><th></th></tr></thead>
+        <thead><tr><th>Vật tư</th><th>Mã lô</th><th>FIFO?</th><th>Định mức</th><th>Thực tế</th><th>Chênh</th><th>Trạng thái</th><th>Cấp tự do?</th><th></th></tr></thead>
         <tbody>${summary.map(l => `<tr data-bomrow="${esc(l.material_code)}">
           <td>${esc(l.material_code)}${l.material_name ? ` ${esc(l.material_name)}` : ""}</td>
           <td>${esc((l.lot_codes || []).join(", ") || "—")}</td>
           <td>${l.fifo_ok === false ? '<span style="color:var(--red)">⚠ khác FIFO</span>' : '<span style="color:var(--green)">✔ FIFO</span>'}</td>
           <td>${l.planned != null ? l.planned + " " + esc(l.uom || "") : ""}</td>
           <td class="bom-actual">${l.actual}</td><td>${l.diff != null ? l.diff : ""}</td>
-          <td>${l.status != null ? badge(l.status === "dat" ? "available" : l.status === "vuot" ? "critical" : "planned") + esc(l.status) : ""}</td>
+          <td>${l.status != null ? badge(BOM_STATUS_BADGE[l.status] || "planned") + esc(BOM_STATUS_LABEL[l.status] || l.status) : ""}</td>
+          <td>${l.is_free ? badge("obsolete") + "Cấp tự do" : ""}</td>
           <td>${canEdit ? `<button class="btn sm sec" data-bomedit="${esc(l.material_code)}">Sửa</button>
             <button class="btn sm sec" data-bomdel="${esc(l.material_code)}" style="color:var(--red)">Xóa</button>` : ""}</td></tr>`).join("")}</tbody></table></div>
         <div class="muted" style="margin-top:6px">${canEdit ? "" : "Hồ sơ mẻ (EBR) đã khóa — không thể sửa Thực tế."}</div>`

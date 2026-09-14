@@ -522,7 +522,11 @@ def test_undo_fulfill_line_success(client, admin_h, thukho_h, vanhanh_h):
                            if l["request_id"] == request_id)["lines"][0]["fulfilled_lot_id"]
     assert fulfilled_lot_id != lot_id
 
-    undo = client.post(f"/api/warehouse/requests/{request_id}/lines/{line_id}/undo-fulfill", headers=thukho_h)
+    # Hoàn tác chỉ ADMIN mới làm được (mirror quy ước Điều chuyển/Xuất sang ngang) — thủ kho
+    # (dù có warehouse.issue) bị chặn.
+    forbidden = client.post(f"/api/warehouse/requests/{request_id}/lines/{line_id}/undo-fulfill", headers=thukho_h)
+    assert forbidden.status_code == 403, forbidden.text
+    undo = client.post(f"/api/warehouse/requests/{request_id}/lines/{line_id}/undo-fulfill", headers=admin_h)
     assert undo.status_code == 200, undo.text
     assert undo.json()["status"] == "pending"
 
@@ -563,7 +567,7 @@ def test_undo_fulfill_line_blocked_when_consumed(client, admin_h, thukho_h, vanh
     finally:
         db.close()
 
-    undo = client.post(f"/api/warehouse/requests/{request_id}/lines/{line_id}/undo-fulfill", headers=thukho_h)
+    undo = client.post(f"/api/warehouse/requests/{request_id}/lines/{line_id}/undo-fulfill", headers=admin_h)
     assert undo.status_code == 409, undo.text
 
 

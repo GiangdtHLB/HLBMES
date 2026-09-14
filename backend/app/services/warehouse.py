@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from ..audit import record_audit
 from ..common import GenealogyRelation, LotStatus, Role, new_id, utcnow
 from ..errors import DomainError, NotFoundError, PermissionError_
-from ..models.batch_pipeline import (BatchFilterLot, BatchFilterLotMaterialUsage, BatchPackLot,
+from ..models.batch_pipeline import (BatchFilterLot, BatchFilterLotMaterialUsage, BatchFilterOrder, BatchPackLot,
                                      BatchPackLotMaterialUsage)
 from ..models.brewing import BrewOrder
 from ..models.master import Material
@@ -1186,6 +1186,9 @@ def _source_label(db: Session, source_type: str, source_id: str) -> Optional[str
     if source_type == "brew_order":
         order = db.get(BrewOrder, source_id)
         return f"Lệnh nấu {order.order_code}" if order else None
+    if source_type == "batch_filter_order":
+        order = db.get(BatchFilterOrder, source_id)
+        return f"Lệnh lọc {order.order_code}" if order else None
     return None
 
 
@@ -1268,8 +1271,16 @@ def _aggregate_source_material_lines(db: Session, source_type: str, source_id: s
             elif l.get("material_group_code"):
                 _add_group(l["material_group_code"], l["material_name"], l.get("member_material_ids"),
                            l["uom"], qty or 0.0)
+    elif source_type == "batch_filter_order":
+        from . import batch_pipeline as batch_pipeline_svc
+        for l in batch_pipeline_svc.list_filter_order_materials(db, source_id):
+            # Vật tư dự kiến của Lệnh lọc KHÔNG tách qty_from_company/qty_from_workshop (không
+            # có bước chọn FIFO lúc lập lệnh lọc) — dùng thẳng qty_planned, mirror nhánh
+            # brew_order phía trên nhưng đơn giản hơn (không có nhóm vật tư thay thế).
+            if l.get("material_id"):
+                _add(l["material_id"], l["material_name"], l["uom"], l.get("qty_planned") or 0.0)
     else:
-        raise DomainError(f"Loại nguồn '{source_type}' không hợp lệ (chỉ nhận brew_order).")
+        raise DomainError(f"Loại nguồn '{source_type}' không hợp lệ (chỉ nhận brew_order, batch_filter_order).")
 
     out = []
     for a in agg.values():
@@ -1294,8 +1305,11 @@ def preview_source_materials(db: Session, source_type: str, source_id: str) -> l
     if source_type == "brew_order":
         if not db.get(BrewOrder, source_id):
             raise NotFoundError("Lệnh nấu không tồn tại.")
+    elif source_type == "batch_filter_order":
+        if not db.get(BatchFilterOrder, source_id):
+            raise NotFoundError("Lệnh lọc không tồn tại.")
     else:
-        raise DomainError(f"Loại nguồn '{source_type}' không hợp lệ (chỉ nhận brew_order).")
+        raise DomainError(f"Loại nguồn '{source_type}' không hợp lệ (chỉ nhận brew_order, batch_filter_order).")
     return _aggregate_source_material_lines(db, source_type, source_id)
 
 
@@ -1311,7 +1325,9 @@ def create_request(db: Session, payload: dict, user: User) -> dict:
         raise DomainError("Đã chọn loại nguồn thì phải chọn cả lệnh cụ thể.")
     if source_type == "brew_order" and not db.get(BrewOrder, source_id):
         raise NotFoundError("Lệnh nấu không tồn tại.")
-    if source_type and source_type not in ("brew_order",):
+    if source_type == "batch_filter_order" and not db.get(BatchFilterOrder, source_id):
+        raise NotFoundError("Lệnh lọc không tồn tại.")
+    if source_type and source_type not in ("brew_order", "batch_filter_order"):
         raise DomainError(f"Loại nguồn '{source_type}' không hợp lệ.")
     lines_payload = payload.get("lines") or []
     if not lines_payload:
@@ -1473,8 +1489,11 @@ def fulfill_request_line(db: Session, request_id: str, line_id: str, lot_id: str
 def undo_fulfill_line(db: Session, request_id: str, line_id: str, user: User) -> dict:
     """Hoàn tác 1 dòng đã fulfilled: chuyển lô về lại Kho công ty + đưa dòng về `pending`.
     Chỉ cho phép khi lô CHƯA từng được tiêu thụ (consume) cho mẻ nào — tái dùng bảng
-    genealogy có sẵn để tự kiểm tra, không cần thủ kho tự xác nhận."""
-    require_perm(user, "warehouse.issue")
+    genealogy có sẵn để tự kiểm tra, không cần thủ kho tự xác nhận. Xuất theo đề nghị coi
+    như khóa lại sau khi fulfilled, chỉ ADMIN mới hoàn tác được (mirror đúng quy ước đã áp
+    dụng cho hoàn tác Điều chuyển/Xuất sang ngang — xem undo_transfer_px_request/
+    undo_sang_ngang), không phải thủ kho thường (warehouse.issue) như lúc fulfill."""
+    require_role(user, Role.ADMIN)
     req = _get_request(db, request_id)
     line = _get_request_line(db, request_id, line_id)
     if line.status != "fulfilled":
@@ -2058,8 +2077,10 @@ def undo_issue(db: Session, movement_id: str, user: User, strict: bool = True,
     (mode="dieu_chuyen_nha_may") — không áp dụng cho trả NCC (hàng đã rời kho thật sự) hay
     xuất theo đề nghị. Chặn hoàn 2 lần bằng cờ `reversed`.
 
-    Điều chuyển sang nhà máy khác: tự do hoàn tác cho tới khi Trưởng phòng Kế hoạch duyệt
-    (approve_transfer_to_factory đặt `approved_by`) — sau đó CHỈ ADMIN mới hoàn tác được.
+    Điều chuyển sang nhà máy khác: CHỈ ADMIN mới hoàn tác được (mirror đúng quy ước đã áp
+    dụng cho mọi "Hoàn tác" điều chuyển khác — PX↔CT, Xuất sang ngang, Xuất theo đề nghị —
+    yêu cầu người dùng 2026-09-14: "tất cả hoàn tác cũng chỉ cho admin hoàn tác", KHÔNG còn
+    phân biệt trước/sau khi Trưởng phòng Kế hoạch duyệt như trước).
 
     `strict=False` (dùng khi xóa theo tầng — xóa mẻ nấu/lọc/chiết kéo theo xóa từng dòng NVL
     đã dùng): nếu giao dịch ĐÃ được hoàn trước đó rồi thì coi là xong việc, trả về luôn thay vì
@@ -2085,7 +2106,7 @@ def undo_issue(db: Session, movement_id: str, user: User, strict: bool = True,
         if not strict:
             return {"movement_id": mv.movement_id, "already_reversed": True}
         raise DomainError("Giao dịch này đã được hoàn lại trước đó.")
-    if mv.mode == "dieu_chuyen_nha_may" and mv.approved_by:
+    if mv.mode == "dieu_chuyen_nha_may":
         require_role(user, Role.ADMIN)
     result = return_stock(db, mv.lot_id, mv.quantity, user, reason=f"Hoàn lại xuất kho (giao dịch {mv.movement_id})",
                           skip_perm_check=skip_perm_check)

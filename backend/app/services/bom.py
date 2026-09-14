@@ -197,8 +197,13 @@ def compare_batch(db: Session, batch) -> dict:
         lines.append({"material_code": code, "material_name": m.get("material_name"), "uom": m.get("uom"),
                       "tol_pct": tol, "planned": planned, "actual": act, "diff": diff, "pct": pct,
                       "status": status, "is_group": bool(m.get("is_group")), "match_codes": sorted(match_codes)})
-    extras = [{"material_code": c, "actual": round(q, 3), "status": "ngoai_bom"}
-              for c, q in actual.items() if c not in seen]
+    extra_codes = [c for c in actual if c not in seen]
+    extra_mats = {m.code: m for m in db.execute(
+        select(Material).where(Material.code.in_(extra_codes))).scalars().all()} if extra_codes else {}
+    extras = [{"material_code": c, "material_name": extra_mats[c].name if c in extra_mats else None,
+              "uom": extra_mats[c].uom if c in extra_mats else None,
+              "actual": round(actual[c], 3), "status": "ngoai_bom"}
+             for c in extra_codes]
     return {"batch_code": batch.batch_code, "base_qty": snap.get("base_qty"),
             "base_uom": snap.get("base_uom"), "planned_qty": batch.planned_qty,
             "factor": round(factor, 4), "lines": lines, "extras": extras}

@@ -137,15 +137,19 @@ def seed():
 
     # --- Material lots (nguyên liệu đầu vào) ---
     lots = [
+        # 3 lô này bị "Cấp liệu cho mẻ" (consume_lot, cả 2 mẻ demo 9001/9002) tiêu thụ trực tiếp
+        # bên dưới — PHẢI ở Kho phân xưởng (yêu cầu người dùng 2026-09-14: cấp liệu chỉ được lấy
+        # từ Kho phân xưởng, đã chặn cứng ở consume_lot()), khác lô MALT-V-2406-01 (thay thế,
+        # chỉ dùng cho demo availability/BOM, không bị consume_lot() nào đụng tới).
         MaterialLot(lot_id=new_id(), lot_code="MALT-2406-01", lot_year=2024, material_id=malt.material_id,
                     lot_type="material", supplier_lot="SUP-M-991", quantity=5000, uom="kg",
-                    status=LotStatus.AVAILABLE.value, location="Kho công ty"),
+                    status=LotStatus.AVAILABLE.value, location="Kho phân xưởng"),
         MaterialLot(lot_id=new_id(), lot_code="HOP-2406-01", lot_year=2024, material_id=hop.material_id,
                     lot_type="material", supplier_lot="SUP-H-220", quantity=80, uom="kg",
-                    status=LotStatus.AVAILABLE.value, location="Kho công ty"),
+                    status=LotStatus.AVAILABLE.value, location="Kho phân xưởng"),
         MaterialLot(lot_id=new_id(), lot_code="YEAST-2406-01", lot_year=2024, material_id=yeast.material_id,
                     lot_type="material", supplier_lot="SUP-Y-007", quantity=200, uom="L",
-                    status=LotStatus.AVAILABLE.value, location="Kho công ty"),
+                    status=LotStatus.AVAILABLE.value, location="Kho phân xưởng"),
         MaterialLot(lot_id=new_id(), lot_code="MALT-V-2406-01", lot_year=2024, material_id=malt_alt.material_id,
                     lot_type="material", supplier_lot="SUP-MV-101", quantity=3000, uom="kg",
                     status=LotStatus.AVAILABLE.value, location="Kho công ty",
