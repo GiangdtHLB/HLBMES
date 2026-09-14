@@ -199,14 +199,21 @@
   // ======================================================================
   VIEWS.dispense = async function () {
     const root = $("view-dispense");
-    const batches = await GET("/batches");
+    const [batches, fullyDispensedMap] = await Promise.all([GET("/batches"), GET("/dispense/fully-dispensed-map").catch(() => ({}))]);
     const running = batches.find(b => b.state === "running") || batches[0];
+    // ✔ = đã cấp ĐỦ mọi dòng định mức (BOM) của mẻ — yêu cầu người dùng 2026-09-14, xem
+    // services/bom.py::batches_fully_dispensed_map. batchLabel: chữ thường (dùng lọc tìm kiếm +
+    // hiện trong ô input đã chọn, không tô màu được vì input chỉ nhận text thường). batchLabelHtml:
+    // bản HTML tô dấu ✔ màu xanh, dùng cho danh sách chọn (openSearchPickerModal/wireSearchableSelect
+    // hỗ trợ labelHtml riêng, xem app.js).
+    const batchLabel = (b) => `${fullyDispensedMap[b.batch_id] ? "✔ " : ""}${b.batch_code} · ${b.state}`;
+    const batchLabelHtml = (b) => `${fullyDispensedMap[b.batch_id] ? '<span style="color:var(--green)">✔</span> ' : ""}${esc(b.batch_code)} · ${esc(b.state)}`;
     root.innerHTML = `
       ${panel("🚚 Cấp liệu cho mẻ", `
         <div class="row">
           <div class="field"><label>Mẻ (bấm để chọn)</label>
             <input type="text" id="dp_batch_txt" readonly autocomplete="off" placeholder="Chưa chọn mẻ — bấm để chọn"
-              value="${running ? esc(running.batch_code + " · " + running.state) : ""}" style="cursor:pointer"/>
+              value="${running ? esc(batchLabel(running)) : ""}" style="cursor:pointer"/>
             <input type="hidden" id="dp_batch" value="${running ? esc(running.batch_id) : ""}"/></div>
           <div class="field"><label>Hoặc gõ mã mẻ để tìm</label>
             <input type="text" id="dp_batch_search" autocomplete="off" placeholder="Nhập mã mẻ..."/></div>
@@ -302,7 +309,7 @@
     // toàn bộ danh sách qua openSearchPickerModal; (2) gõ mã mẻ vào ô tìm riêng bên cạnh — gợi ý
     // hiện ngay dưới ô đó (wireSearchableSelect), chọn xong tự điền lại vào ô "Mẻ" bên trái +
     // xóa ô tìm để gõ lần sau.
-    const batchItems = (batches || []).map(b => ({ value: b.batch_id, label: b.batch_code + " · " + b.state }));
+    const batchItems = (batches || []).map(b => ({ value: b.batch_id, label: batchLabel(b), labelHtml: batchLabelHtml(b) }));
     const onBatchPicked = (item) => {
       $("dp_batch").value = item.value; $("dp_batch_txt").value = item.label;
       $("dp_batch_search").value = "";

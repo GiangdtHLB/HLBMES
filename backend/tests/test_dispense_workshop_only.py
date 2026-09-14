@@ -259,3 +259,53 @@ def test_dispense_summary_marks_free_dispense_via_cap_1_vat_tu_note(client, admi
     assert bom_by_code[in_recipe_code]["is_free"] is False
     assert bom_by_code[mixed_code]["is_free"] is True
     assert bom_by_code[free_code]["is_free"] is True
+
+
+def test_fully_dispensed_map_marks_only_batches_with_full_recipe_coverage(client, admin_h):
+    """GET /dispense/fully-dispensed-map — dùng đánh dấu ✓ ở danh sách "Chọn mẻ" (Cấp liệu),
+    yêu cầu người dùng 2026-09-14. True chỉ khi MỌI dòng định mức đã đủ (Thực tế >= Định mức
+    trong dung sai); mẻ chưa cấp gì hoặc mới cấp 1 phần phải là False."""
+    material_id, code = _new_material(client, admin_h, "FULLMAP01")
+    _receive_lot(client, admin_h, material_id, 20, "Kho phân xưởng")
+    version_id = _recipe_version(client, admin_h, "FULLMAP01", code, qty=10, base_qty=100)
+
+    empty_batch_id = _new_batch(client, admin_h, version_id, planned_qty=100, suffix="FULLMAP_EMPTY")
+    full_batch_id = _new_batch(client, admin_h, version_id, planned_qty=100, suffix="FULLMAP_FULL")
+
+    ok = client.post(f"/api/dispense/{full_batch_id}", headers=admin_h,
+                     json={"lines": [{"material_code": code, "quantity": 10}]})
+    assert ok.status_code == 200, ok.text
+
+    fmap = client.get("/api/dispense/fully-dispensed-map", headers=admin_h).json()
+    assert fmap[empty_batch_id] is False
+    assert fmap[full_batch_id] is True
+
+    # Mẻ khác vật tư, khai định mức 2 dòng nhưng chỉ cấp 1 -> vẫn False (thiếu 1 dòng).
+    material_id2, code2 = _new_material(client, admin_h, "FULLMAP02")
+    _receive_lot(client, admin_h, material_id2, 20, "Kho phân xưởng")
+    bt = client.post("/api/beer-types", headers=admin_h, json={"code": "BT-FULLMAP02", "name": "Loại FULLMAP02"})
+    assert bt.status_code == 201, bt.text
+    recipe = client.post("/api/recipes", headers=admin_h,
+                        json={"code": "CT-FULLMAP02", "name": "Test partial", "beer_type_id": bt.json()["beer_type_id"]})
+    assert recipe.status_code == 201, recipe.text
+    prod = client.post("/api/products", headers=admin_h,
+                       json={"code": "PRD-FULLMAP02", "name": "Dich FULLMAP02", "uom": "L",
+                            "beer_type_id": bt.json()["beer_type_id"]})
+    assert prod.status_code == 201, prod.text
+    v = client.post(f"/api/recipes/{recipe.json()['recipe_id']}/versions", headers=admin_h,
+                    json={"base_qty": 100, "base_uom": "L", "product_id": prod.json()["product_id"],
+                         "materials": [{"material_code": code, "qty": 10, "uom": "kg"},
+                                      {"material_code": code2, "qty": 5, "uom": "kg"}]})
+    assert v.status_code == 201, v.text
+    version_id2 = v.json()["version_id"]
+    for target in ("review", "approved", "effective"):
+        t = client.post(f"/api/recipes/versions/{version_id2}/transition", headers=admin_h, json={"target": target})
+        assert t.status_code == 200, t.text
+    partial_batch_id = _new_batch(client, admin_h, version_id2, planned_qty=100, suffix="FULLMAP_PARTIAL",
+                                  allow_shortage=True)
+    ok2 = client.post(f"/api/dispense/{partial_batch_id}", headers=admin_h,
+                      json={"lines": [{"material_code": code, "quantity": 10}]})
+    assert ok2.status_code == 200, ok2.text
+
+    fmap2 = client.get("/api/dispense/fully-dispensed-map", headers=admin_h).json()
+    assert fmap2[partial_batch_id] is False
