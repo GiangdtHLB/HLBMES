@@ -2346,7 +2346,7 @@ async function showBatch(id) {
         <td>${l.planned != null ? l.planned + " " + esc(l.uom || "") : ""}</td>
         <td>${l.actual}</td><td style="color:${l.diff > 0 ? "var(--red)" : l.diff < 0 ? "var(--orange)" : "var(--muted)"}">${l.diff != null ? (l.diff > 0 ? "+" : "") + l.diff : ""}</td>
         <td>${l.pct != null ? l.pct + "%" : ""}</td><td>${l.status != null ? `<span class="badge ${{dat:"available",vuot:"critical",thieu:"due",chua_dung:"planned",ngoai_bom:"obsolete"}[l.status] || "planned"}">${{dat:"đạt",vuot:"vượt định mức",thieu:"thiếu",chua_dung:"chưa dùng",ngoai_bom:"ngoài định mức"}[l.status] || l.status}</span>` : ""}</td>
-        <td>${l.is_free ? '<span class="badge obsolete">Tự do (ngoài công thức)</span>' : ""}</td></tr>`).join("")}</tbody></table>`
+        <td>${l.is_free ? '<span class="badge obsolete">Cấp tự do</span>' : ""}</td></tr>`).join("")}</tbody></table>`
       : '<div class="muted">Công thức của mẻ chưa khai báo BOM.</div>'}
     <h3>Ghi actual (tham số quy trình)</h3>
     ${b.state !== "running" ? `<div class="muted" style="margin-bottom:6px">Mẻ phải ở trạng thái <b>running</b> mới ghi được tham số quy trình (đang ${esc(b.state)}).</div>` : ""}

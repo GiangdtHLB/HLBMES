@@ -251,7 +251,7 @@
           <td>${l.planned != null ? l.planned + " " + esc(l.uom || "") : ""}</td>
           <td class="bom-actual">${l.actual}</td><td>${l.diff != null ? l.diff : ""}</td>
           <td>${l.status != null ? badge(BOM_STATUS_BADGE[l.status] || "planned") + esc(BOM_STATUS_LABEL[l.status] || l.status) : ""}</td>
-          <td>${l.is_free ? badge("obsolete") + "Tự do (ngoài công thức)" : ""}</td>
+          <td>${l.is_free ? badge("obsolete") + "Cấp tự do" : ""}</td>
           <td>${canEdit ? `<button class="btn sm sec" data-bomedit="${esc(l.material_code)}">Sửa</button>
             <button class="btn sm sec" data-bomdel="${esc(l.material_code)}" style="color:var(--red)">Xóa</button>` : ""}</td></tr>`).join("")}</tbody></table></div>
         <div class="muted" style="margin-top:6px">${canEdit ? "" : "Hồ sơ mẻ (EBR) đã khóa — không thể sửa Thực tế."}</div>`

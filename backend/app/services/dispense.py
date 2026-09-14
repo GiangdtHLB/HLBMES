@@ -479,17 +479,27 @@ def batch_dispense_summary(db: Session, batch_id: str, only_dispensed: bool = Tr
     # DispenseLine CHỈ dùng để tra mã lô/FIFO — vốn chỉ có khi đi qua dispense() (suggest/Cấp 1
     # vật tư/backflush/adjust), KHÔNG có với tiêu thụ qua /consume trực tiếp (lot_codes rỗng/
     # fifo_ok=None khi đó — không suy đoán được là ĐÚNG hay SAI FIFO).
-    dispense_ids = db.execute(select(Dispense.dispense_id).where(
-        Dispense.batch_id == batch_id)).scalars().all()
+    # "Cấp tự do" = ĐÃ từng cấp qua nút "Cấp 1 vật tư" (dp_go, luôn ghi note="Cấp tự do" — xem
+    # views_ext.js) — KHÔNG phải "vật tư ngoài công thức" (yêu cầu người dùng 2026-09-14 làm rõ:
+    # "Cấp 1 vật tư" chỉ cho chọn vật tư CÓ trong BOM (dropdown dp_mat lấy từ bom.lines), nên 1
+    # vật tư CÓ định mức vẫn có thể vừa được "Áp dụng gợi ý" vừa được "Cấp 1 vật tư" thêm — chỉ
+    # cần có ít nhất 1 lần qua "Cấp 1 vật tư" là đánh dấu cả dòng, mirror đúng cách "fifo_ok" bị
+    # lật false nếu có BẤT KỲ lần cấp lệch FIFO nào).
+    dispenses = db.execute(select(Dispense.dispense_id, Dispense.note).where(
+        Dispense.batch_id == batch_id)).all()
+    free_dispense_ids = {did for did, note in dispenses if note == "Cấp tự do"}
+    dispense_ids = [did for did, _ in dispenses]
     dlines = db.execute(select(DispenseLine).where(
         DispenseLine.dispense_id.in_(dispense_ids))).scalars().all() if dispense_ids else []
     lot_info: dict[str, dict] = {}
     for dl in dlines:
-        info = lot_info.setdefault(dl.material_code, {"lot_codes": [], "fifo_ok": True})
+        info = lot_info.setdefault(dl.material_code, {"lot_codes": [], "fifo_ok": True, "is_free": False})
         if dl.lot_code and dl.lot_code not in info["lot_codes"]:
             info["lot_codes"].append(dl.lot_code)
         if dl.fifo_ok is False:
             info["fifo_ok"] = False
+        if dl.dispense_id in free_dispense_ids:
+            info["is_free"] = True
     rows = []
     for l in cmp["lines"]:
         codes = l.get("match_codes") or [l["material_code"]]
@@ -515,12 +525,12 @@ def batch_dispense_summary(db: Session, batch_id: str, only_dispensed: bool = Tr
                 "status": l["status"] if i == 0 else None,
                 "lot_codes": info["lot_codes"] if info else [],
                 "fifo_ok": info["fifo_ok"] if info else None,
-                "is_free": False,
+                "is_free": bool(info and info["is_free"]),
             })
-    # "Cấp tự do": vật tư đã tiêu thụ nhưng KHÔNG khớp mã/nhóm nào trong BOM công thức (yêu cầu
-    # người dùng 2026-09-14 — chỉ "Cấp 1 vật tư" mới cho phép chọn tự do 1 mã ngoài công thức;
-    # compare_batch() đã tính sẵn ở `extras`, trước đây bảng này BỎ QUA hoàn toàn, hiện gộp vào
-    # CÙNG 1 dòng thống nhất thay vì render riêng ở phía frontend).
+    # Vật tư đã tiêu thụ nhưng KHÔNG khớp mã/nhóm nào trong BOM công thức — compare_batch() đã
+    # tính sẵn ở `extras`, trước đây bảng này BỎ QUA hoàn toàn, hiện gộp vào CÙNG 1 dòng thống
+    # nhất thay vì render riêng ở phía frontend (is_free tính y hệt các dòng BOM ở trên, không
+    # tự suy ra True chỉ vì ngoài công thức — xem giải thích "Cấp tự do" phía trên).
     for e in cmp.get("extras", []):
         code = e["material_code"]
         info = lot_info.get(code)
@@ -528,6 +538,6 @@ def batch_dispense_summary(db: Session, batch_id: str, only_dispensed: bool = Tr
             "material_code": code, "material_name": e.get("material_name"), "uom": e.get("uom"),
             "planned": None, "actual": e["actual"], "diff": None, "pct": None, "status": e["status"],
             "lot_codes": info["lot_codes"] if info else [], "fifo_ok": info["fifo_ok"] if info else None,
-            "is_free": True,
+            "is_free": bool(info and info["is_free"]),
         })
     return rows
