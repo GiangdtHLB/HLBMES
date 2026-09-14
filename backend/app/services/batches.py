@@ -36,6 +36,7 @@ from ..models.recipes import RecipeVersion
 from ..models.workorder import WorkOrder
 from ..security import User, require_role
 from . import bom, genealogy, qc_catalog
+from . import warehouse as warehouse_svc
 
 
 def create_batch(db: Session, order_id: str, recipe_version_id: str, user: User,
@@ -382,6 +383,15 @@ def consume_lot(db: Session, batch_id: str, lot_id: str, quantity: float, user: 
     lot = db.execute(select(MaterialLot).where(MaterialLot.lot_id == lot_id).with_for_update()).scalar_one_or_none()
     if not lot:
         raise NotFoundError("Lô vật tư không tồn tại.")
+    # Chỉ chặn lô NVL THẬT (material_id khác None, nhập từ kho) — lô do 1 mẻ khác SẢN XUẤT ra
+    # (produce_lot: product_id, lot_type "brew"/"bright"/...) không hề gắn với kho nào, tiêu thụ
+    # nó ở mẻ sau (VD mẻ lọc dùng dịch từ mẻ nấu) không thuộc phạm vi "cấp liệu từ Kho phân
+    # xưởng" — bug thực tế: chặn cả trường hợp này khiến test_delete_blocked_when_produced_lot_
+    # consumed_downstream 409 sai (lot.location luôn None với lô sản xuất ra, không phải "chưa ở
+    # đúng kho").
+    if lot.material_id and not warehouse_svc._is_workshop_location(lot.location):
+        raise DomainError(f"Lô {lot.lot_code} không ở Kho phân xưởng — chỉ được cấp liệu/tiêu thụ "
+                          "nguyên liệu từ Kho phân xưởng cho mẻ sản xuất.")
     if lot.status == LotStatus.ON_HOLD.value:
         raise DomainError(f"Lô {lot.lot_code} đang ON HOLD, không được tiêu thụ.")
     if quantity <= 0 or quantity > lot.quantity:

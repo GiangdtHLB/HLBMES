@@ -37,10 +37,16 @@ def _is_expired(lot: MaterialLot) -> bool:
 
 def _fefo_lots(db: Session, material_code: str) -> list:
     """Các lô khả dụng (available/released — mirror warehouse.py::stock_on_hand, KHÔNG chỉ
-    "available") của một material_code, sắp theo FEFO (hết hạn trước) rồi FIFO — nếu
+    "available") của một material_code Ở MỌI KHO, sắp theo FEFO (hết hạn trước) rồi FIFO — nếu
     `material_code` thực ra là mã 1 Nhóm vật tư thay thế (dòng BOM khai theo nhóm, không có mã
     vật tư cụ thể — xem bom.py::codes_for_dispense), gộp lô của MỌI thành viên rồi mới sắp
-    chung 1 hàng đợi FEFO (thủ kho xuất mã thành viên nào cũng hợp lệ)."""
+    chung 1 hàng đợi FEFO (thủ kho xuất mã thành viên nào cũng hợp lệ).
+
+    CHỈ dùng làm building-block nội bộ cho _workshop_fefo_lots() — không lọc kho nên KHÔNG được
+    gọi trực tiếp ở bất kỳ đường cấp liệu/gợi ý thật nào (bug thực tế đã gặp: _plan_consume và
+    suggest_dispense từng gọi thẳng hàm này, khiến "Cấp 1 vật tư"/gợi ý theo nhóm có thể lấy
+    nhầm lô đang ở Kho công ty — yêu cầu người dùng 2026-09-14, đã sửa toàn bộ sang
+    _workshop_fefo_lots)."""
     real_codes = bom.codes_for_dispense(db, material_code)
     mats = db.execute(select(Material).where(Material.code.in_(real_codes))).scalars().all()
     material_ids = [m.material_id for m in mats]
@@ -109,6 +115,9 @@ def _plan_consume(db: Session, material_code: str, qty: float, picked_lot_id: st
         lot = db.get(MaterialLot, picked_lot_id)
         if not lot:
             raise NotFoundError("Lô vật tư không tồn tại.")
+        if lot.material_id and not warehouse_svc._is_workshop_location(lot.location):
+            raise DomainError(f"Lô {lot.lot_code} không ở Kho phân xưởng — chỉ được cấp liệu "
+                              "từ Kho phân xưởng cho mẻ sản xuất.")
         if _is_expired(lot):
             raise DomainError(f"Lô {lot.lot_code} đã HẾT HẠN — không được cấp.")
         fifo_ok = _is_fifo_choice(db, material_code, lot.lot_id, reserved)
@@ -122,7 +131,7 @@ def _plan_consume(db: Session, material_code: str, qty: float, picked_lot_id: st
             reserved[lot.lot_id] = reserved.get(lot.lot_id, 0.0) + take
         remaining = round(remaining - take, 6)
     else:
-        for lot in _fefo_lots(db, material_code):
+        for lot in _workshop_fefo_lots(db, material_code):
             if remaining <= 1e-9:
                 break
             take = min(remaining, max(_effective_qty(lot, reserved), 0.0))
@@ -202,7 +211,7 @@ def suggest_dispense(db: Session, batch_id: str) -> dict:
                 remaining = round(remaining - take, 6)
             group_shortfall = round(remaining, 3) if remaining > 1e-6 else 0.0
             for mcode in member_codes:
-                member_lots = _fefo_lots(db, mcode)
+                member_lots = _workshop_fefo_lots(db, mcode)
                 alternatives = [{"lot_id": lot.lot_id, "lot_code": lot.lot_code, "quantity": round(lot.quantity, 6),
                                 "uom": lot.uom, "expiry": lot.expiry.isoformat() if lot.expiry else None}
                                for lot in member_lots]
@@ -491,7 +500,7 @@ def batch_dispense_summary(db: Session, batch_id: str, only_dispensed: bool = Tr
             rows.append({"material_code": l["material_code"], "material_name": l.get("material_name"),
                         "uom": l["uom"], "planned": l["planned"], "actual": l["actual"],
                         "diff": l["diff"], "pct": l["pct"], "status": l["status"],
-                        "lot_codes": [], "fifo_ok": None})
+                        "lot_codes": [], "fifo_ok": None, "is_free": False})
             continue
         for i, code in enumerate(dispensed):
             info = lot_info.get(code)
@@ -506,5 +515,19 @@ def batch_dispense_summary(db: Session, batch_id: str, only_dispensed: bool = Tr
                 "status": l["status"] if i == 0 else None,
                 "lot_codes": info["lot_codes"] if info else [],
                 "fifo_ok": info["fifo_ok"] if info else None,
+                "is_free": False,
             })
+    # "Cấp tự do": vật tư đã tiêu thụ nhưng KHÔNG khớp mã/nhóm nào trong BOM công thức (yêu cầu
+    # người dùng 2026-09-14 — chỉ "Cấp 1 vật tư" mới cho phép chọn tự do 1 mã ngoài công thức;
+    # compare_batch() đã tính sẵn ở `extras`, trước đây bảng này BỎ QUA hoàn toàn, hiện gộp vào
+    # CÙNG 1 dòng thống nhất thay vì render riêng ở phía frontend).
+    for e in cmp.get("extras", []):
+        code = e["material_code"]
+        info = lot_info.get(code)
+        rows.append({
+            "material_code": code, "material_name": e.get("material_name"), "uom": e.get("uom"),
+            "planned": None, "actual": e["actual"], "diff": None, "pct": None, "status": e["status"],
+            "lot_codes": info["lot_codes"] if info else [], "fifo_ok": info["fifo_ok"] if info else None,
+            "is_free": True,
+        })
     return rows

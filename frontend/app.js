@@ -2338,15 +2338,15 @@ async function showBatch(id) {
     <h3>Tiêu thụ nguyên liệu (genealogy)</h3>
     <div class="muted">⚠ Tính năng này tạm thời tắt.</div>
     <h3>📋 Định mức (BOM) ↔ Thực tế tiêu thụ <span class="muted">· quy mô chuẩn ${bom.base_qty ? bom.base_qty.toLocaleString("vi-VN") + " " + esc(bom.base_uom || "") : "—"} · định mức tính cho 1 mẻ</span></h3>
-    ${(bom.lines && bom.lines.length) ? `<table><thead><tr><th>Vật tư</th><th>Mã lô</th><th>FIFO?</th><th>Định mức</th><th>Thực tế</th><th>Chênh</th><th>%</th><th>Trạng thái</th></tr></thead>
+    ${(bom.lines && bom.lines.length) ? `<table><thead><tr><th>Vật tư</th><th>Mã lô</th><th>FIFO?</th><th>Định mức</th><th>Thực tế</th><th>Chênh</th><th>%</th><th>Trạng thái</th><th>Cấp tự do?</th></tr></thead>
       <tbody>${bom.lines.map(l => `<tr class="row-${{dat:"blue",vuot:"red",thieu:"green",chua_dung:""}[l.status] || ""}">
         <td><code class="k">${esc(l.material_code)}</code>${l.material_name ? ` ${esc(l.material_name)}` : ""}</td>
         <td>${esc((l.lot_codes || []).join(", "))}</td>
         <td>${l.fifo_ok === false ? '<span style="color:var(--red)">⚠ khác FIFO</span>' : l.fifo_ok === true ? '<span style="color:var(--green)">✔ FIFO</span>' : ""}</td>
         <td>${l.planned != null ? l.planned + " " + esc(l.uom || "") : ""}</td>
         <td>${l.actual}</td><td style="color:${l.diff > 0 ? "var(--red)" : l.diff < 0 ? "var(--orange)" : "var(--muted)"}">${l.diff != null ? (l.diff > 0 ? "+" : "") + l.diff : ""}</td>
-        <td>${l.pct != null ? l.pct + "%" : ""}</td><td>${l.status != null ? `<span class="badge ${{dat:"available",vuot:"critical",thieu:"due",chua_dung:"planned"}[l.status] || "planned"}">${{dat:"đạt",vuot:"vượt định mức",thieu:"thiếu",chua_dung:"chưa dùng"}[l.status] || l.status}</span>` : ""}</td></tr>`).join("")}
-      ${(bom.extras || []).map(e => `<tr><td><code class="k">${esc(e.material_code)}</code></td><td class="muted">(ngoài BOM)</td><td colspan=6><span class="badge obsolete">ngoài định mức · ${e.actual}</span></td></tr>`).join("")}</tbody></table>`
+        <td>${l.pct != null ? l.pct + "%" : ""}</td><td>${l.status != null ? `<span class="badge ${{dat:"available",vuot:"critical",thieu:"due",chua_dung:"planned",ngoai_bom:"obsolete"}[l.status] || "planned"}">${{dat:"đạt",vuot:"vượt định mức",thieu:"thiếu",chua_dung:"chưa dùng",ngoai_bom:"ngoài định mức"}[l.status] || l.status}</span>` : ""}</td>
+        <td>${l.is_free ? '<span class="badge obsolete">Tự do (ngoài công thức)</span>' : ""}</td></tr>`).join("")}</tbody></table>`
       : '<div class="muted">Công thức của mẻ chưa khai báo BOM.</div>'}
     <h3>Ghi actual (tham số quy trình)</h3>
     ${b.state !== "running" ? `<div class="muted" style="margin-bottom:6px">Mẻ phải ở trạng thái <b>running</b> mới ghi được tham số quy trình (đang ${esc(b.state)}).</div>` : ""}
