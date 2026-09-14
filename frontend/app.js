@@ -4110,7 +4110,7 @@ async function openPackLotEBR(packLotId) {
 
 // ================= QUALITY =================
 VIEWS.quality = async function () {
-  const [results, devs, batches, lots, materials, qcParams, holdHistory, pendingStageQc, capas, matLocsQuality, pendingKcPxQuality, pendingSngQuality, batchTanksQuality, batchFilterLotsQuality, batchPackLotsQuality, productsQuality, beerTypesQuality] = await Promise.all([
+  const [results, devs, batches, lots, materials, qcParams, holdHistory, pendingStageQc, capas, matLocsQuality, pendingKcPxQuality, pendingSngQuality, batchTanksQuality, batchFilterLotsQuality, batchPackLotsQuality, productsQuality, beerTypesQuality, workOrdersQuality] = await Promise.all([
     GET("/quality/results"), GET("/quality/deviations"), GET("/batches"), GET("/lots"), GET("/materials"),
     GET("/qc/parameters?active_only=false").catch(() => []),
     GET("/audit?action=hold,release&limit=100").catch(() => []),
@@ -4123,7 +4123,8 @@ VIEWS.quality = async function () {
     GET("/batch-filter-lots").catch(() => []),
     GET("/batch-pack-lots").catch(() => []),
     GET("/products").catch(() => []),
-    GET("/beer-types").catch(() => [])]);
+    GET("/beer-types").catch(() => []),
+    GET("/workorders").catch(() => [])]);
   // Tra "Dịch bia" cho panel "Công đoạn chờ khai báo" — ưu tiên Dịch bia (product, cụ thể hơn),
   // rơi về Loại bia (beer_type) nếu công đoạn chưa chốt Dịch bia cụ thể (yêu cầu người dùng
   // 2026-09-03: "thêm cột tank lên men nào, dịch bia nào").
@@ -4176,12 +4177,16 @@ VIEWS.quality = async function () {
   const batchTankById = Object.fromEntries(batchTanksQuality.map(t => [t.tank_id, t]));
   const batchFilterLotById = Object.fromEntries(batchFilterLotsQuality.map(f => [f.filter_lot_id, f]));
   const batchPackLotById = Object.fromEntries(batchPackLotsQuality.map(p => [p.pack_lot_id, p]));
+  // "Nước nấu bia" (Mẻ SX) khai theo Work Order (scope_type="work_order") — trước đây không có
+  // trong labelFor nên rơi về mặc định "work_order <uuid>" khó hiểu (yêu cầu người dùng
+  // 2026-09-14: "để tôi biết chỉ tiêu nước nấu thuộc WO nào").
+  const workOrderById = Object.fromEntries(workOrdersQuality.map(w => [w.wo_id, w]));
   // Gộp các dòng chỉ tiêu (đã gán groupLabel/paramLabel ở qcResultsWithGroupLabel) thành 1
   // dòng tổng hợp cho mỗi mẻ/lô nguồn — người dùng bấm "Xem chi tiết" mới thấy từng chỉ tiêu,
   // thay vì liệt kê lặp lại tên mẻ/lô cho mỗi chỉ tiêu như trước.
   const qcGroups = groupQcResultsByScope(qcResultsWithGroupLabel(results,
     { batchById, lotById, paramByCode,
-      batchTankById, batchFilterLotById, batchPackLotById }));
+      batchTankById, batchFilterLotById, batchPackLotById, workOrderById }));
   // Tra thẳng kết quả QC ĐÃ GHI cho panel "Công đoạn chờ khai báo" — scope_type/scope_id ở đây
   // trùng NGUYÊN VĂN với QualityResult.scope_type/scope_id lúc ghi (mọi stage đều dùng chung 1
   // quy ước scope_id qua qc_catalog.py, kể cả len_men_chinh/phu compound "tank_id__stage"), nên
@@ -4618,8 +4623,15 @@ VIEWS.quality = async function () {
 // nhảy về đúng khu vực (Nấu/Lên men/Lọc/Chiết/Mẻ sản xuất) đang chứa mẻ/lô đó.
 function qcResultsWithGroupLabel(results, ctx) {
   const { batchById, lotById, paramByCode,
-    batchTankById, batchFilterLotById, batchPackLotById } = ctx;
+    batchTankById, batchFilterLotById, batchPackLotById, workOrderById } = ctx;
   const labelFor = (r) => {
+    if (r.scope_type === "work_order") {
+      const w = workOrderById && workOrderById[r.scope_id];
+      // Chưa có route sâu hơn theo đúng WO (data-navscope work_order chỉ nhảy chung tới Điều
+      // độ) nên vẫn navigable=true kể cả khi WO không còn (mirror "batch", khác batch_tank/
+      // batch_filter_lot/batch_pack_lot vốn cần đúng bản ghi để mở chi tiết).
+      return { label: w ? `Nước nấu bia — ${w.wo_code}` : `Nước nấu bia — WO ${r.scope_id} (không còn tồn tại)`, navigable: true };
+    }
     if (r.scope_type === "batch_tank") {
       const [tankId, part] = r.scope_id.split("__");
       const t = batchTankById[tankId];
