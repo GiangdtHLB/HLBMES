@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 from ..audit import record_audit
 from ..common import new_id, utcnow
 from ..errors import DomainError, NotFoundError
+from ..models.audit import AuditLog
 from ..models.batch_pipeline import (
     BatchFilterLot,
     BatchFilterLotBatch,
@@ -27,6 +28,7 @@ from ..models.batch_pipeline import (
     BatchFilterLotMaterialUsage,
     BatchFilterLotSource,
     BatchFilterOrder,
+    BatchFilterOrderMaterialLine,
     BatchFilterOrderSource,
     BatchPackLot,
     BatchPackLotMaterialUsage,
@@ -294,6 +296,18 @@ def empty_tank(db: Session, tank_id: str, user: User) -> dict:
     db.commit()
     db.refresh(tank)
     return _tank_out(db, tank)
+
+
+def list_tank_empty_history(db: Session, tank_id: str) -> list[dict]:
+    """Lịch sử làm rỗng tank — đọc lại từ AuditLog (đã ghi sẵn ở empty_tank(), before.on_hand =
+    tồn còn lại lúc làm rỗng, after.on_hand luôn 0.0) thay vì lưu thêm bảng/JSON riêng — đây là
+    log HỆ THỐNG tự ghi mỗi lần bấm "Làm rỗng tank" (không phải dữ liệu người dùng tự nhập/sửa
+    tay như mốc hạ phụ), mirror cách services/ebr.py dựng lại lịch sử thao tác từ AuditLog."""
+    rows = db.execute(select(AuditLog).where(
+        AuditLog.entity_type == "batch_tank", AuditLog.entity_id == tank_id, AuditLog.action == "empty",
+    ).order_by(AuditLog.ts.desc())).scalars().all()
+    return [{"at": a.ts.isoformat(), "residual_hl": (a.before or {}).get("on_hand"), "by": a.actor}
+            for a in rows]
 
 
 def empty_filter_lot(db: Session, filter_lot_id: str, user: User) -> dict:
@@ -616,6 +630,55 @@ def list_filter_order_sources_out(db: Session, order_id: str) -> list[dict]:
             for s in list_filter_order_sources(db, order_id)]
 
 
+def _filter_order_stock_snapshot(db: Session) -> tuple[dict, dict]:
+    """Trả 2 dict {material_id: on_hand} — mirror brew_order.py::_stock_snapshot, dùng cho vật
+    tư dự kiến khai báo lúc lập lệnh lọc (BatchFilterOrderMaterialLine)."""
+    company = {r["material_id"]: r["on_hand"] for r in warehouse_svc.stock_on_hand(db, "Kho công ty")}
+    workshop = {r["material_id"]: r["on_hand"] for r in warehouse_svc.stock_on_hand(db, "Kho phân xưởng")}
+    return company, workshop
+
+
+def _assert_filter_order_material_stock(lines: list[dict], company_stock: dict, workshop_stock: dict) -> None:
+    """Chặn hẳn việc lập lệnh lọc nếu có dòng vật tư dự kiến thiếu tồn (tổng 2 kho) — mirror
+    brew_order.py::_assert_no_shortage nhưng đơn giản hơn (không có header/nhóm vật tư thay
+    thế). Dòng chỉ có material_name tự do (không chọn từ danh mục) bỏ qua kiểm tra tồn vì
+    không tra được tồn kho cho vật tư không có trong danh mục."""
+    shortages = []
+    for line in lines:
+        material_id = line.get("material_id")
+        qty_planned = line.get("qty_planned") or 0.0
+        if not material_id or qty_planned <= 0:
+            continue
+        company = company_stock.get(material_id, 0.0)
+        workshop = workshop_stock.get(material_id, 0.0)
+        if qty_planned > company + workshop:
+            name = line.get("material_name") or material_id
+            shortages.append(
+                f"{name}: cần {qty_planned}, hiện có {round(company + workshop, 3)} "
+                f"(Kho công ty {round(company, 3)} + Kho phân xưởng {round(workshop, 3)})")
+    if shortages:
+        raise DomainError("Không đủ tồn kho để lập lệnh lọc — " + "; ".join(shortages) + ".")
+
+
+def list_filter_order_materials(db: Session, order_id: str) -> list[dict]:
+    lines = db.execute(select(BatchFilterOrderMaterialLine).where(
+        BatchFilterOrderMaterialLine.order_id == order_id
+    ).order_by(BatchFilterOrderMaterialLine.seq)).scalars().all()
+    out = []
+    for l in lines:
+        mat = db.get(Material, l.material_id) if l.material_id else None
+        out.append({
+            "line_id": l.line_id, "order_id": l.order_id, "seq": l.seq,
+            "material_id": l.material_id,
+            "material_code": mat.code if mat else None,
+            "material_name": (mat.name if mat else None) or l.material_name,
+            "uom": l.uom, "qty_planned": l.qty_planned,
+            "stock_company_snapshot": l.stock_company_snapshot,
+            "stock_workshop_snapshot": l.stock_workshop_snapshot,
+        })
+    return out
+
+
 def create_filter_order(db: Session, sources: list[dict], payload: dict, user: User) -> dict:
     require_perm(user, "batch.execute")
     if not sources:
@@ -632,6 +695,12 @@ def create_filter_order(db: Session, sources: list[dict], payload: dict, user: U
     if db.execute(select(BatchFilterOrder).where(BatchFilterOrder.order_code == order_code,
                   BatchFilterOrder.order_year == order_year)).scalar_one_or_none():
         raise DomainError(f"Số lệnh lọc '{order_code}' đã tồn tại trong năm {order_year}.")
+
+    material_lines = payload.get("lines") or []
+    company_stock, workshop_stock = ({}, {})
+    if material_lines:
+        company_stock, workshop_stock = _filter_order_stock_snapshot(db)
+        _assert_filter_order_material_stock(material_lines, company_stock, workshop_stock)
 
     tanks, filter_lots = [], []
     for src in sources:
@@ -672,6 +741,15 @@ def create_filter_order(db: Session, sources: list[dict], payload: dict, user: U
                                       source_filter_lot_id=fl.filter_lot_id, reason=src["reason"],
                                       planned_v_dich_hl=src.get("planned_v_dich_hl") or 0.0, seq=seq))
         seq += 1
+    for i, line in enumerate(material_lines):
+        material_id = line.get("material_id")
+        db.add(BatchFilterOrderMaterialLine(
+            line_id=new_id(), order_id=order.order_id, seq=i,
+            material_id=material_id, material_name=line.get("material_name"), uom=line.get("uom"),
+            qty_planned=line.get("qty_planned") or 0.0,
+            stock_company_snapshot=company_stock.get(material_id, 0.0) if material_id else None,
+            stock_workshop_snapshot=workshop_stock.get(material_id, 0.0) if material_id else None,
+        ))
     record_audit(db, entity_type="batch_filter_order", entity_id=order.order_id, action="create",
                 actor=user, after={"order_code": order_code, "blend_mode": blend_mode,
                                    "planned_volume_hl": planned_volume})

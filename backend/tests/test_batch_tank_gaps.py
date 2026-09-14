@@ -184,6 +184,18 @@ def test_empty_tank_within_tolerance_and_blocked_over_tolerance(client, admin_h)
     already_empty = client.post(f"/api/batch-tanks/{tank['tank_id']}/empty", headers=admin_h)
     assert already_empty.status_code == 409, already_empty.text
 
+    history = client.get(f"/api/batch-tanks/{tank['tank_id']}/empty-history", headers=admin_h).json()
+    assert len(history) == 1
+    assert history[0]["residual_hl"] == round(tol / 2, 3)
+    assert history[0]["by"] == "admin"
+    assert history[0]["at"]
+
+
+def test_empty_tank_history_empty_when_never_emptied(client, admin_h):
+    tank = _make_tank(client, admin_h, "15", "TANK-GAP-15")
+    history = client.get(f"/api/batch-tanks/{tank['tank_id']}/empty-history", headers=admin_h).json()
+    assert history == []
+
 
 def test_empty_tank_blocked_when_residual_exceeds_tolerance(client, admin_h):
     tank = _make_tank(client, admin_h, "4", "TANK-GAP-04")

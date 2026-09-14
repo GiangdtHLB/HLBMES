@@ -332,7 +332,7 @@ def test_undo_fulfill_resets_fifo_ok_to_none(client, admin_h, thukho_h, vanhanh_
     client.post(f"/api/warehouse/requests/{req['request_id']}/lines/{line_id}/fulfill", headers=thukho_h,
                json={"lot_id": lot_id, "quantity": 10, "location_to": "Kho phân xưởng"})
 
-    u = client.post(f"/api/warehouse/requests/{req['request_id']}/lines/{line_id}/undo-fulfill", headers=thukho_h)
+    u = client.post(f"/api/warehouse/requests/{req['request_id']}/lines/{line_id}/undo-fulfill", headers=admin_h)
     assert u.status_code == 200, u.text
     assert u.json()["fifo_ok"] is None
 

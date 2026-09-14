@@ -97,6 +97,24 @@ class BatchFilterOrderSource(Base):
     seq: Mapped[int] = mapped_column(Integer, default=1)
 
 
+class BatchFilterOrderMaterialLine(Base):
+    """1 dòng vật tư dự kiến (bột trợ lọc/diatomite...) khai báo NGAY LÚC LẬP Lệnh lọc — mirror
+    BrewOrderMaterialLine nhưng ĐƠN GIẢN HƠN: không tách "Kho công ty"/"Kho phân xưởng" ở đây
+    (không có bước chọn FIFO lúc lập lệnh — FIFO do vận hành tự chọn khi ghi NGUYÊN LIỆU LỌC
+    thật ở Lô lọc, xem add_filter_lot_material). Dùng để CHẶN thiếu tồn lúc lập lệnh + làm gợi
+    ý khi ghi nguyên liệu thật."""
+    __tablename__ = "batch_filter_order_material_line"
+    line_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
+    order_id: Mapped[str] = mapped_column(ForeignKey("batch_filter_order.order_id"), index=True)
+    seq: Mapped[int] = mapped_column(Integer, default=0)
+    material_id: Mapped[Optional[str]] = mapped_column(ForeignKey("material.material_id"), nullable=True)
+    material_name: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    uom: Mapped[Optional[str]] = mapped_column(Unicode(64), nullable=True)
+    qty_planned: Mapped[float] = mapped_column(Float, default=0.0)
+    stock_company_snapshot: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    stock_workshop_snapshot: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+
+
 class BatchFilterLot(Base):
     """Lô lọc mới — rút dịch từ 1..N BatchTank (phối) hoặc lọc lại từ 1..N BatchFilterLot khác
     (mirror FilterRecord). on_hand giảm theo DELTA khi tách vào lô thành phẩm."""
@@ -319,7 +337,7 @@ class BatchTankDailyReading(Base):
     day_no: Mapped[int] = mapped_column(Integer)
     reading_date: Mapped[Optional[str]] = mapped_column(Unicode(32), nullable=True)  # ISO "YYYY-MM-DD"
     nhiet_do_c: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
-    do_s: Mapped[Optional[float]] = mapped_column(Float, nullable=True)          # °S (Plato)
+    do_s: Mapped[Optional[float]] = mapped_column(Float, nullable=True)          # °P (Plato)
     mat_do_tb: Mapped[Optional[float]] = mapped_column(Float, nullable=True)      # 10^6/ml
     ap_suat_bar: Mapped[Optional[float]] = mapped_column(Float, nullable=True)    # bar
     measured_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)

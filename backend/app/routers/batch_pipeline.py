@@ -14,6 +14,7 @@ from ..schemas import (
     BatchFilterLotOut,
     BatchFilterLotSourceOut,
     BatchFilterOrderCreateIn,
+    BatchFilterOrderMaterialLineOut,
     BatchFilterOrderOut,
     BatchFilterOrderSourceOut,
     BatchPackLotCreateIn,
@@ -86,6 +87,11 @@ def delete_tank(tank_id: str, db: Session = Depends(get_db), user: User = Depend
 @router.post("/batch-tanks/{tank_id}/empty", response_model=BatchTankOut)
 def empty_tank(tank_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     return svc.empty_tank(db, tank_id, user)
+
+
+@router.get("/batch-tanks/{tank_id}/empty-history")
+def get_tank_empty_history(tank_id: str, db: Session = Depends(get_db)):
+    return svc.list_tank_empty_history(db, tank_id)
 
 
 @router.get("/batch-tanks/{tank_id}/ebr")
@@ -163,6 +169,11 @@ def get_filter_order(order_id: str, db: Session = Depends(get_db)):
 @router.get("/batch-filter-orders/{order_id}/sources", response_model=list[BatchFilterOrderSourceOut])
 def get_filter_order_sources(order_id: str, db: Session = Depends(get_db)):
     return svc.list_filter_order_sources_out(db, order_id)
+
+
+@router.get("/batch-filter-orders/{order_id}/materials", response_model=list[BatchFilterOrderMaterialLineOut])
+def get_filter_order_materials(order_id: str, db: Session = Depends(get_db)):
+    return svc.list_filter_order_materials(db, order_id)
 
 
 @router.post("/batch-filter-orders", response_model=BatchFilterOrderOut, status_code=201)

@@ -192,8 +192,13 @@ def test_transfer_to_factory_full_flow(client, admin_h, thukho_h, truongphong_kh
     lot = next(l for l in lot if l["lot_id"] == lot_id)
     assert lot["quantity"] == 0
 
-    # chưa duyệt — thukho tự hoàn tác được
-    undo1 = client.post(f"/api/warehouse/movements/{movement_id}/undo-issue", headers=thukho_h)
+    # Hoàn tác điều chuyển sang nhà máy khác CHỈ ADMIN, kể cả khi CHƯA duyệt (yêu cầu người
+    # dùng 2026-09-14: "tất cả hoàn tác cũng chỉ cho admin hoàn tác") — thukho bị chặn dù đã
+    # tự tay điều chuyển, chỉ admin mới hoàn tác được.
+    denied_undo1 = client.post(f"/api/warehouse/movements/{movement_id}/undo-issue", headers=thukho_h)
+    assert denied_undo1.status_code == 403, denied_undo1.text
+
+    undo1 = client.post(f"/api/warehouse/movements/{movement_id}/undo-issue", headers=admin_h)
     assert undo1.status_code == 200, undo1.text
     lot = client.get("/api/lots", headers=admin_h).json()
     lot = next(l for l in lot if l["lot_id"] == lot_id)

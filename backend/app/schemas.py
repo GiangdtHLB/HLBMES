@@ -1810,6 +1810,13 @@ class BatchFilterOrderSourceIn(BaseModel):
     planned_v_dich_hl: float = 0.0
 
 
+class BatchFilterOrderMaterialLineIn(BaseModel):
+    material_id: Optional[str] = None
+    material_name: Optional[str] = None
+    uom: Optional[str] = None
+    qty_planned: float = 0.0
+
+
 class BatchFilterOrderCreateIn(BaseModel):
     sources: list[BatchFilterOrderSourceIn] = Field(min_length=1)
     order_code: str = Field(min_length=1)
@@ -1819,6 +1826,7 @@ class BatchFilterOrderCreateIn(BaseModel):
     finished_product_id: Optional[str] = None
     kcs_lot_no: Optional[str] = None
     note: Optional[str] = None
+    lines: list[BatchFilterOrderMaterialLineIn] = []
 
 
 class BatchFilterOrderOut(BaseModel):
@@ -1854,6 +1862,19 @@ class BatchFilterOrderSourceOut(BaseModel):
     reason: Optional[str] = None
     planned_v_dich_hl: float = 0.0
     seq: int
+
+
+class BatchFilterOrderMaterialLineOut(BaseModel):
+    line_id: str
+    order_id: str
+    seq: int
+    material_id: Optional[str] = None
+    material_code: Optional[str] = None
+    material_name: Optional[str] = None
+    uom: Optional[str] = None
+    qty_planned: float = 0.0
+    stock_company_snapshot: Optional[float] = None
+    stock_workshop_snapshot: Optional[float] = None
 
 
 class FilterLotFromOrderIn(BaseModel):
