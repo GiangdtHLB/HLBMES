@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from ..common import LotStatus
 from ..errors import DomainError
+from ..models.batches import BatchExecution
 from ..models.brewing import BrewOrderMaterialLine
 from ..models.master import Material, MaterialAltGroup
 from ..models.materials import GenealogyEdge, MaterialLot
@@ -207,6 +208,53 @@ def compare_batch(db: Session, batch) -> dict:
     return {"batch_code": batch.batch_code, "base_qty": snap.get("base_qty"),
             "base_uom": snap.get("base_uom"), "planned_qty": batch.planned_qty,
             "factor": round(factor, 4), "lines": lines, "extras": extras}
+
+
+def batches_fully_dispensed_map(db: Session) -> dict[str, bool]:
+    """{batch_id: True/False} — mẻ đã cấp ĐỦ mọi dòng định mức (BOM) hay chưa (không dòng nào
+    "thieu"/"chua_dung"; mẻ chưa khai định mức nào coi là CHƯA đủ, an toàn hơn tự nhận "đủ" khi
+    không biết) — dùng đánh dấu ✓ ở danh sách chọn mẻ (màn Cấp liệu, yêu cầu người dùng
+    2026-09-14). Viết riêng thay vì gọi compare_batch() theo từng mẻ (N+1: mỗi lần gọi lại
+    actual_consumed() + _expand_materials() tự fetch lại toàn bộ Danh mục vật tư) — ở đây gộp
+    TRƯỚC 1 lần: 1 câu SELECT lấy mọi cạnh genealogy consume của MỌI mẻ, 1 câu tra material_code
+    theo lô, rồi mới lặp qua từng mẻ chỉ để đối chiếu (không truy vấn gì thêm ngoài
+    _expand_materials's phần group/brew_order — vẫn còn, nhưng đã cắt hẳn phần actual_consumed
+    N+1 tốn nhất)."""
+    batches = db.execute(select(BatchExecution)).scalars().all()
+    if not batches:
+        return {}
+    batch_ids = [b.batch_id for b in batches]
+    edges = db.execute(select(GenealogyEdge.to_id, GenealogyEdge.from_id, GenealogyEdge.quantity).where(
+        GenealogyEdge.to_type == "batch", GenealogyEdge.to_id.in_(batch_ids),
+        GenealogyEdge.relation == "consume")).all()
+    lot_ids = list({from_id for _, from_id, _ in edges})
+    lots = db.execute(select(MaterialLot).where(MaterialLot.lot_id.in_(lot_ids))).scalars().all() if lot_ids else []
+    code_by_lot_id = _material_codes_for_lots(db, lots)
+    actual_by_batch: dict[str, dict[str, float]] = {}
+    for batch_id, lot_id, qty in edges:
+        code = code_by_lot_id.get(lot_id, "?")
+        bucket = actual_by_batch.setdefault(batch_id, {})
+        bucket[code] = bucket.get(code, 0.0) + (qty or 0.0)
+    out = {}
+    for b in batches:
+        snap = b.recipe_snapshot or {}
+        lines = _expand_materials(db, snap.get("materials"), brew_order_id=b.order_id)
+        if not lines:
+            out[b.batch_id] = False
+            continue
+        actual = actual_by_batch.get(b.batch_id, {})
+        ok = True
+        for m in lines:
+            match_codes = m.get("match_codes") or {m.get("material_code")}
+            planned = round(m.get("qty", 0) or 0, 3)
+            act = round(sum(actual.get(c, 0.0) for c in match_codes), 3)
+            tol = m.get("tol_pct", 0) or 0
+            _, _, status = _classify(planned, act, tol)
+            if status in ("thieu", "chua_dung"):
+                ok = False
+                break
+        out[b.batch_id] = ok
+    return out
 
 
 def stock_available(db: Session) -> dict:

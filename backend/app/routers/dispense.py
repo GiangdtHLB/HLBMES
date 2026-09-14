@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from ..database import get_db
 from ..schemas import AdjustActualIn, BackflushIn, DispenseIn
 from ..security import User, get_current_user, require_perm
+from ..services import bom as bom_svc
 from ..services import dispense as svc
 
 router = APIRouter(prefix="/api/dispense", tags=["dispense"])
@@ -15,6 +16,13 @@ router = APIRouter(prefix="/api/dispense", tags=["dispense"])
 def list_dispenses(batch_id: str = None, db: Session = Depends(get_db),
                    user: User = Depends(get_current_user)):
     return svc.list_dispenses(db, batch_id)
+
+
+@router.get("/fully-dispensed-map")
+def fully_dispensed_map(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """{batch_id: True/False} mọi mẻ đã cấp ĐỦ định mức (BOM) hay chưa — dùng đánh dấu ✓ ở danh
+    sách chọn mẻ (màn Cấp liệu). Khai báo TRƯỚC /{batch_id}/... để không bị route động bắt nhầm."""
+    return bom_svc.batches_fully_dispensed_map(db)
 
 
 @router.get("/{batch_id}/summary")

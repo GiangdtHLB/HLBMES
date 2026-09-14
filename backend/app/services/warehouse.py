@@ -11,9 +11,11 @@ from ..common import GenealogyRelation, LotStatus, Role, new_id, utcnow
 from ..errors import DomainError, NotFoundError, PermissionError_
 from ..models.batch_pipeline import (BatchFilterLot, BatchFilterLotMaterialUsage, BatchFilterOrder, BatchPackLot,
                                      BatchPackLotMaterialUsage)
+from ..models.batches import BatchExecution
 from ..models.brewing import BrewOrder
 from ..models.master import Material
 from ..models.materials import GenealogyEdge, MaterialLocation, MaterialLot
+from ..models.materials_ext import Dispense, DispenseLine
 from ..models.quality import Deviation, QualityResult
 from ..models.warehouse import (FactoryLocation, MaterialRequest, MaterialRequestLine, SangNgangRequest,
                                 StockCount, StockCountLine, StockMovement, TransferKcPxRequest,
@@ -2224,17 +2226,22 @@ def list_movements(db: Session, movement_type: str = None, mode: str = None, lim
 
 def workshop_usage_history(db: Session, limit: int = 200) -> list[dict]:
     """Lịch sử NVL xuất từ Kho phân xưởng đã dùng thật cho sản xuất — cho biết đúng công
-    đoạn (Lọc/Chiết của pipeline "Mẻ sản xuất"), lô, lô NVL của từng dòng đã gán (xem
-    services/batch_pipeline.py::add_filter_lot_material/add_pack_lot_material). Khác "Xuất tự
-    do" (StockMovement mode="tu_do") chỉ ghi lý do dạng text tự do dùng chung cho cả xuất tay
-    lẫn xuất dùng sản xuất — ở đây tra thẳng 2 bảng usage (đã liên kết sẵn tới lô lọc/lô thành
-    phẩm) nên có cấu trúc rõ ràng theo công đoạn/lô, không phải suy từ chuỗi lý do. (NVL dùng
-    cho công đoạn Nấu của pipeline mới đi qua Dispense/DispenseLine — không dùng cơ chế
-    StockMovement.movement_id như 2 công đoạn dưới nên không liệt kê được ở đây.)
+    đoạn (Nấu/Lọc/Chiết của pipeline "Mẻ sản xuất"), lô, lô NVL của từng dòng đã gán (xem
+    services/batch_pipeline.py::add_filter_lot_material/add_pack_lot_material và
+    services/dispense.py::dispense/adjust_actual cho Nấu). Khác "Xuất tự do" (StockMovement
+    mode="tu_do") chỉ ghi lý do dạng text tự do dùng chung cho cả xuất tay lẫn xuất dùng sản
+    xuất — ở đây tra thẳng 3 nguồn (đã liên kết sẵn tới lô lọc/lô thành phẩm/mẻ nấu) nên có
+    cấu trúc rõ ràng theo công đoạn/lô, không phải suy từ chuỗi lý do.
+
+    Nấu dùng cơ chế khác 2 công đoạn kia (Dispense/DispenseLine, không có StockMovement.
+    movement_id) nên tra actor trực tiếp từ Dispense.created_by thay vì qua StockMovement —
+    yêu cầu người dùng 2026-09-14: "đưa vào màn hình này bao gồm cả xuất vật tư cho mẻ nấu"
+    (trước đây chỉ có Lọc/Chiết). Dòng "hoàn lại" (adjust_actual giảm Thực tế) giữ nguyên SL âm
+    — cho thấy đúng lịch sử thật, mirror cách "Lịch sử cấp liệu" ở màn Cấp liệu hiển thị.
 
     Mỗi truy vấn con đã ORDER BY created_at DESC LIMIT limit trước khi gộp — vì kết quả cuối
-    cùng chỉ lấy top `limit` bản ghi mới nhất trên cả 2 nguồn, top-limit của mỗi nguồn riêng
-    lẻ chắc chắn phủ hết top-limit gộp, nên không cần tải hết cả 2 bảng vào bộ nhớ."""
+    cùng chỉ lấy top `limit` bản ghi mới nhất trên cả 3 nguồn, top-limit của mỗi nguồn riêng
+    lẻ chắc chắn phủ hết top-limit gộp, nên không cần tải hết cả 3 bảng vào bộ nhớ."""
     limit = max(1, min(limit or 200, 5000))
     rows = []
     for u, filter_lot_code in db.execute(
@@ -2253,12 +2260,25 @@ def workshop_usage_history(db: Session, limit: int = 200) -> list[dict]:
                     "batch_label": f"Lô thành phẩm {pack_lot_code}",
                     "material_name": u.material_name, "lot_code": u.lot_pm,
                     "quantity": u.quantity, "uom": u.uom, "movement_id": u.movement_id})
+    mat_name_by_code = {m.code: m.name for m in db.execute(select(Material)).scalars().all()}
+    for dl, batch_code, dispensed_by in db.execute(
+            select(DispenseLine, BatchExecution.batch_code, Dispense.created_by)
+            .join(Dispense, DispenseLine.dispense_id == Dispense.dispense_id)
+            .join(BatchExecution, Dispense.batch_id == BatchExecution.batch_id)
+            .order_by(DispenseLine.created_at.desc()).limit(limit)).all():
+        rows.append({"usage_id": dl.line_id, "ts": dl.created_at, "stage": "Nấu",
+                    "batch_label": f"Mẻ nấu {batch_code}",
+                    "material_name": mat_name_by_code.get(dl.material_code, dl.material_code),
+                    "lot_code": dl.lot_code, "quantity": dl.quantity, "uom": dl.uom,
+                    "movement_id": None, "actor": dispensed_by})
 
     movement_ids = [r["movement_id"] for r in rows if r["movement_id"]]
     actor_by_id = dict(db.execute(select(StockMovement.movement_id, StockMovement.actor)
                                   .where(StockMovement.movement_id.in_(movement_ids))).all()) if movement_ids else {}
     for r in rows:
-        r["actor"] = actor_by_id.get(r.pop("movement_id"))
+        mid = r.pop("movement_id", None)
+        if mid:
+            r["actor"] = actor_by_id.get(mid)
 
     rows.sort(key=lambda r: r["ts"], reverse=True)
     return rows[:limit]
