@@ -1067,19 +1067,29 @@ def _consumed_lot_edges(db: Session, since: datetime, until: datetime = None) ->
     riêng, cũng tạo thêm GenealogyEdge(consume) nhưng với to_type khác ("brew_batch"/"filter"/
     "bottle"), lọc CHỈ to_type="batch" ở đây để không cộng trùng 2 lần cho nhánh cũ.
 
-    Trả về list[(GenealogyEdge, MaterialLot)] — cần join MaterialLot để biết material_id/
-    lô/vị trí (event_time không lưu trên StockMovement nên phải xét riêng khỏi vòng lặp `moves`
-    ở trên). Bug thực tế đã gặp: cả năm 2026 báo "Xuất: 0" cho 1 vật tư dù có lô đã dùng hết
-    (tiêu thụ qua consume_lot) — yêu cầu người dùng 2026-09-05: "trong báo cáo xuất nhập tồn
-    phải có chứ"."""
-    stmt = select(GenealogyEdge, MaterialLot).join(
+    Trả về list[(GenealogyEdge, MaterialLot, ngày_cấp)] — `ngày_cấp` = `batch.start_at` ("Ngày
+    cấp" — ngày mẻ THỰC SỰ bắt đầu nấu, có thể khai lùi ngày), fallback `edge.event_time` nếu mẻ
+    chưa khai start_at (dữ liệu cũ). Lọc theo `ngày_cấp` (KHÔNG phải `event_time` — giờ bấm nút
+    cấp liệu thật) — yêu cầu người dùng 2026-09-15: "ngày trừ tồn kho là ngày cấp liệu", phải
+    tính đúng và nhất quán vào CẢ báo cáo xuất-nhập-tồn (inventory_report) LẪN Sổ chi tiết vật tư
+    (material_transaction_detail), không chỉ riêng "Tồn kho tính đến ngày" (_material_balances_
+    as_of/_lot_balances_as_of, xem _nau_consume_as_of — đã sửa trước, cùng nguyên tắc). Bug thực
+    tế đã gặp trước đó: cả năm 2026 báo "Xuất: 0" cho 1 vật tư dù có lô đã dùng hết (tiêu thụ qua
+    consume_lot) — yêu cầu người dùng 2026-09-05: "trong báo cáo xuất nhập tồn phải có chứ"."""
+    stmt = select(GenealogyEdge, MaterialLot, BatchExecution.start_at).join(
         MaterialLot, MaterialLot.lot_id == GenealogyEdge.from_id
+    ).join(BatchExecution, BatchExecution.batch_id == GenealogyEdge.to_id
     ).where(GenealogyEdge.from_type == "lot", GenealogyEdge.to_type == "batch",
-            GenealogyEdge.relation == GenealogyRelation.CONSUME.value,
-            GenealogyEdge.event_time >= since)
-    if until:
-        stmt = stmt.where(GenealogyEdge.event_time <= until)
-    return db.execute(stmt).all()
+            GenealogyEdge.relation == GenealogyRelation.CONSUME.value)
+    out = []
+    for edge, lot, start_at in db.execute(stmt).all():
+        supply_date = start_at or edge.event_time
+        if supply_date < since:
+            continue
+        if until and supply_date > until:
+            continue
+        out.append((edge, lot, supply_date))
+    return out
 
 
 def _blank_movement_agg() -> dict:
@@ -1135,18 +1145,21 @@ def material_transaction_detail(db: Session, material_id: str, date_from: dateti
                     "_movement_id": m.movement_id, "_reversal_of": m.reversal_of})
     batch_ids = set()
     consume_rows = []
-    for edge, lot in _consumed_lot_edges(db, date_from, date_to):
+    for edge, lot, supply_date in _consumed_lot_edges(db, date_from, date_to):
         if lot.material_id != material_id:
             continue
         if location and _is_workshop_location(lot.location) != workshop:
             continue
         batch_ids.add(edge.to_id)
-        consume_rows.append((edge, lot))
+        consume_rows.append((edge, lot, supply_date))
     batches = {b.batch_id: b for b in db.execute(
         select(BatchExecution).where(BatchExecution.batch_id.in_(batch_ids))).scalars().all()} if batch_ids else {}
-    for edge, lot in consume_rows:
+    for edge, lot, supply_date in consume_rows:
         batch = batches.get(edge.to_id)
-        rows.append({"ts": edge.event_time, "type": "consume", "lot_code": lot.lot_code,
+        # ts = "Ngày cấp" (supply_date — batch.start_at), KHÔNG phải edge.event_time (giờ bấm nút
+        # thật) — nhất quán với opening_balance ở dưới (stock_on_hand_as_of cũng đã dùng
+        # batch.start_at qua _nau_consume_as_of, xem _consumed_lot_edges).
+        rows.append({"ts": supply_date, "type": "consume", "lot_code": lot.lot_code,
                     "quantity": -(edge.quantity or 0.0), "uom": edge.uom or lot.uom,
                     "location_from": lot.location, "location_to": None,
                     "mode": "cap_lieu", "actor": None,
@@ -1251,10 +1264,10 @@ def inventory_report(db: Session, days: int = 30, location: str = None,
                 continue
         if m.movement_type in ("receipt", "issue", "return"):
             _touch(agg.setdefault(m.material_id, _blank_agg()), m.movement_type, m.quantity, m.ts)
-    for edge, lot in _consumed_lot_edges(db, since, until):
+    for edge, lot, supply_date in _consumed_lot_edges(db, since, until):
         if location and _is_workshop_location(lot.location) != workshop:
             continue
-        _touch(agg.setdefault(lot.material_id, _blank_agg()), "issue", edge.quantity or 0.0, edge.event_time)
+        _touch(agg.setdefault(lot.material_id, _blank_agg()), "issue", edge.quantity or 0.0, supply_date)
     mat_ids = set(on_hand) | set(agg)
     mats = {mt.material_id: mt for mt in db.execute(
         select(Material).where(Material.material_id.in_(mat_ids))).scalars().all()} if mat_ids else {}
@@ -1311,10 +1324,10 @@ def lot_inventory_report(db: Session, days: int = 30, location: str = None,
                 continue
         if m.movement_type in ("receipt", "issue", "return"):
             _touch(agg.setdefault(m.lot_id, _blank_agg()), m.movement_type, m.quantity, m.ts)
-    for edge, lot in _consumed_lot_edges(db, since, until):
+    for edge, lot, supply_date in _consumed_lot_edges(db, since, until):
         if location and _is_workshop_location(lot.location) != workshop:
             continue
-        _touch(agg.setdefault(lot.lot_id, _blank_agg()), "issue", edge.quantity or 0.0, edge.event_time)
+        _touch(agg.setdefault(lot.lot_id, _blank_agg()), "issue", edge.quantity or 0.0, supply_date)
 
     if location:
         current_ids = {l.lot_id for l in all_lots if l.quantity > 0 and _is_workshop_location(l.location) == workshop}
