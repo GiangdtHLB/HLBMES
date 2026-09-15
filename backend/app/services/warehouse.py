@@ -56,7 +56,8 @@ def _next_lot_code(db: Session, year: int) -> str:
         count += 1
         code = f"{year}-{count:05d}"
         exists = db.execute(select(MaterialLot.lot_id).where(
-            MaterialLot.lot_year == year, MaterialLot.lot_code == code)).scalar_one_or_none()
+            MaterialLot.lot_year == year, MaterialLot.lot_code == code)
+            .limit(1)).scalar_one_or_none()
         if not exists:
             return code
 
@@ -223,21 +224,27 @@ def receive(db: Session, payload: dict, user: User) -> dict:
     year = received_dt.year
     lot_code = payload.get("lot_code") or None
     material_id = payload.get("material_id")
-    # (lot_year, lot_code) là duy nhất TOÀN HỆ THỐNG (không phải riêng từng vật tư — mã lô
-    # tự sinh là 1 dãy đếm chung), nên phải tra theo đúng mã lô trước, rồi mới kiểm tra
-    # có KHỚP vật tư không — trước đây chỉ khớp theo lot_code mà bỏ qua vật tư, nên nhập
-    # trùng mã lô của vật tư khác sẽ âm thầm cộng nhầm vào lô của vật tư đó (bug thực tế).
+    location = payload.get("location") or "Kho công ty"
+    # (lot_year, lot_code) không còn là duy nhất TOÀN HỆ THỐNG kể từ khi 1 lô được phép có nhiều
+    # dòng ở nhiều kho (xem models/materials.py::MaterialLot, uq_material_lot_year_code_location)
+    # — phải tra theo đúng mã lô trước, kiểm tra KHỚP vật tư trên TẤT CẢ dòng cùng mã (không chỉ
+    # dòng khớp kho — trước đây chỉ khớp theo lot_code mà bỏ qua vật tư, nên nhập trùng mã lô của
+    # vật tư khác sẽ âm thầm cộng nhầm vào lô của vật tư đó, bug thực tế), rồi mới lọc đúng dòng
+    # khớp `location` để quyết định cộng dồn hay tách dòng mới (dùng LẠI cùng lot_code, mirror
+    # _transfer_lot — nhập kho trùng mã ở kho KHÁC là trường hợp hiếm nhưng vẫn phải nhất quán).
     lot = None
     if lot_code:
         # with_for_update(): khóa hàng ngay TRƯỚC khi đọc lot.quantity để cộng dồn — 2 request
         # nhập cùng lô gần như đồng thời (VD import Excel song song) có thể cùng đọc quantity cũ
         # (2026-09-03, audit Kho công ty/phân xưởng).
-        lot = db.execute(select(MaterialLot).where(
+        siblings = db.execute(select(MaterialLot).where(
             MaterialLot.lot_year == year, MaterialLot.lot_code == lot_code)
-            .with_for_update()).scalar_one_or_none()
-        if lot and lot.material_id != material_id:
-            raise DomainError(f"Mã lô '{lot_code}' đã dùng cho vật tư khác trong năm {year} — "
-                              "nhập mã lô khác hoặc để trống để hệ thống tự sinh.")
+            .with_for_update()).scalars().all()
+        for s in siblings:
+            if s.material_id != material_id:
+                raise DomainError(f"Mã lô '{lot_code}' đã dùng cho vật tư khác trong năm {year} — "
+                                  "nhập mã lô khác hoặc để trống để hệ thống tự sinh.")
+        lot = next((s for s in siblings if s.location == location), None)
     if lot:
         _assert_location_scope(user, lot.location)
         # round: lot.quantity là số dư CỘNG DỒN qua nhiều lần nhập/xuất/điều chuyển — không làm
@@ -253,7 +260,6 @@ def receive(db: Session, payload: dict, user: User) -> dict:
         elif lot.status == LotStatus.CONSUMED.value:
             lot.status = LotStatus.AVAILABLE.value
     else:
-        location = payload.get("location", "Kho công ty")
         _assert_location_scope(user, location)
         # Bắt buộc chọn vị trí cất (khi tạo lô MỚI tại Kho công ty) được kiểm tra ở tầng router
         # (routers/warehouse.py::receive), không phải ở đây — vì receive() còn được gọi trực
@@ -554,10 +560,12 @@ def approve_transfer_to_factory(db: Session, movement_id: str, user: User) -> di
 
 def transfer(db: Session, lot_id: str, quantity: float, location_to: str, user: User,
              reason: str = None, mode: str = "sang_ngang", request_id: str = None,
-             request_line_id: str = None) -> dict:
+             request_line_id: str = None, ts=None) -> dict:
     """Chuyển vị trí (không đổi tổng tồn) — entrypoint công khai, đòi `warehouse.issue`. `mode`
     phân biệt nguồn gốc giao dịch trong lịch sử: "xuat_theo_de_nghi" (công ty→phân xưởng qua đề
-    nghị) | "dieu_chuyen" (phân xưởng→công ty thủ công).
+    nghị) | "dieu_chuyen" (phân xưởng→công ty thủ công). `ts` (tuỳ chọn): ngày hiệu lực của
+    StockMovement transfer — mặc định utcnow() thật lúc thao tác nếu không truyền (VD
+    fulfill_request_line truyền lại "Ngày đề nghị nhận kho" đã khai, mirror approve_sang_ngang).
 
     Nếu `quantity` bằng đúng tồn của lô thì đổi vị trí NGUYÊN lô đó; nếu nhỏ hơn, TÁCH một lô
     mới tại `location_to` mang đúng `quantity` (giữ nguyên lô gốc ở vị trí cũ với phần còn lại,
@@ -565,7 +573,7 @@ def transfer(db: Session, lot_id: str, quantity: float, location_to: str, user: 
     NGUYÊN LÔ bất kể `quantity` truyền vào, khiến sổ sách ghi sai số lượng đã chuyển khi người
     dùng chỉ định chuyển một phần lô."""
     require_perm(user, "warehouse.issue")
-    return _transfer_lot(db, lot_id, quantity, location_to, user, reason, mode, request_id, request_line_id)
+    return _transfer_lot(db, lot_id, quantity, location_to, user, reason, mode, request_id, request_line_id, ts=ts)
 
 
 def _transfer_lot(db: Session, lot_id: str, quantity: float, location_to: str, user: User,
@@ -578,7 +586,13 @@ def _transfer_lot(db: Session, lot_id: str, quantity: float, location_to: str, u
     tác (không truyền); approve_sang_ngang truyền lại "Ngày xuất sang ngang" đã khai ở Kho công
     ty để tồn kho theo ngày (as-of) ở Kho phân xưởng phản ánh đúng ngày đó, thay vì ngày Thủ kho
     phân xưởng bấm Duyệt (yêu cầu người dùng 2026-09-09: "vật tư có vào kho phân xưởng theo ngày
-    xuất sang ngang bên kho công ty đưa ra không" — chọn CÓ)."""
+    xuất sang ngang bên kho công ty đưa ra không" — chọn CÓ).
+
+    KHÔNG sinh mã lô mới khi tách 1 phần (yêu cầu người dùng 2026-09-14: "1 lô tồn ở 2 kho số
+    lượng khác nhau hoàn toàn bình thường") — nếu kho đích ĐÃ có sẵn 1 dòng cùng lot_code (từ lần
+    điều chuyển trước), CỘNG DỒN vào đúng dòng đó thay vì tạo dòng thứ 3; chỉ khi kho đích CHƯA có
+    dòng nào mới tách dòng mới, dùng LẠI cùng lot_code (mirror UniqueConstraint mới
+    `uq_material_lot_year_code_location`, xem models/materials.py)."""
     lot = _lock_lot(db, lot_id)
     _assert_transfer_scope(user, lot.location, location_to)
     if lot.status == LotStatus.ON_HOLD.value:
@@ -587,12 +601,34 @@ def _transfer_lot(db: Session, lot_id: str, quantity: float, location_to: str, u
     if quantity <= 0 or quantity > lot.quantity + 1e-6:
         raise DomainError(f"Số lượng chuyển không hợp lệ (tồn {lot.quantity} {lot.uom}).")
     loc_from = lot.location
-    if quantity >= lot.quantity - 1e-6:
+    sibling = db.execute(select(MaterialLot).where(
+        MaterialLot.lot_year == lot.lot_year, MaterialLot.lot_code == lot.lot_code,
+        MaterialLot.location == location_to, MaterialLot.lot_id != lot.lot_id)
+        .with_for_update()).scalar_one_or_none()
+    edge = None
+    if sibling is None and quantity >= lot.quantity - 1e-6:
+        # Không có dòng anh em ở kho đích + chuyển hết tồn -> đổi vị trí NGUYÊN dòng, không tách.
         lot.location = location_to
         moved_lot = lot
-    else:
+    elif sibling is not None:
+        # Kho đích ĐÃ có dòng cùng lot_code -> cộng dồn vào đó (dù chuyển 1 phần hay toàn bộ).
         lot.quantity = round(lot.quantity - quantity, 3)
-        moved_lot = MaterialLot(lot_id=new_id(), lot_code=_next_lot_code(db, lot.lot_year), lot_year=lot.lot_year,
+        # So sánh bằng epsilon (mirror issue()) — trừ dần bằng float có thể để lại số dư cực nhỏ.
+        if lot.quantity <= 1e-6:
+            lot.quantity = 0.0
+            lot.status = LotStatus.CONSUMED.value
+        sibling.quantity = round(sibling.quantity + quantity, 3)
+        if sibling.status == LotStatus.CONSUMED.value:
+            sibling.status = LotStatus.AVAILABLE.value
+        moved_lot = sibling
+        edge = GenealogyEdge(edge_id=new_id(), from_type="lot", from_id=lot.lot_id, to_type="lot",
+                             to_id=moved_lot.lot_id, relation=GenealogyRelation.SPLIT.value,
+                             quantity=quantity, uom=lot.uom, source_event="transfer")
+        db.add(edge)
+    else:
+        # Kho đích chưa có dòng nào + chuyển 1 phần -> tách dòng mới, DÙNG LẠI cùng lot_code.
+        lot.quantity = round(lot.quantity - quantity, 3)
+        moved_lot = MaterialLot(lot_id=new_id(), lot_code=lot.lot_code, lot_year=lot.lot_year,
                                 material_id=lot.material_id, product_id=lot.product_id, lot_type=lot.lot_type,
                                 supplier_lot=lot.supplier_lot, supplier_id=lot.supplier_id,
                                 kcs_lot_no=lot.kcs_lot_no, unit_price=lot.unit_price,
@@ -600,11 +636,19 @@ def _transfer_lot(db: Session, lot_id: str, quantity: float, location_to: str, u
                                 location=location_to, created_at=lot.created_at)
         db.add(moved_lot)
         db.flush()
-        db.add(GenealogyEdge(edge_id=new_id(), from_type="lot", from_id=lot.lot_id, to_type="lot",
+        edge = GenealogyEdge(edge_id=new_id(), from_type="lot", from_id=lot.lot_id, to_type="lot",
                              to_id=moved_lot.lot_id, relation=GenealogyRelation.SPLIT.value,
-                             quantity=quantity, uom=lot.uom, source_event="transfer"))
+                             quantity=quantity, uom=lot.uom, source_event="transfer")
+        db.add(edge)
     mv = _move(db, "transfer", moved_lot, quantity, user, ts=ts, location_from=loc_from, location_to=location_to,
               mode=mode, reason=reason, request_id=request_id, request_line_id=request_line_id)
+    if edge is not None:
+        # Flush để stock_movement (mv) THẬT SỰ tồn tại trong DB TRƯỚC khi gán genealogy_edge.movement_id
+        # (FK → stock_movement). Model không có relationship() nên SQLAlchemy KHÔNG tự xếp INSERT mv
+        # trước edge trong 1 flush chung → MSSQL enforce FK vỡ 547 (SQLite bỏ qua). Flush ở đây chèn
+        # edge với movement_id=NULL (hợp lệ, nullable) + mv; gán bên dưới thành UPDATE khi mv đã có.
+        db.flush()
+        edge.movement_id = mv.movement_id
     record_audit(db, entity_type="lot", entity_id=moved_lot.lot_id, action="transfer", actor=user,
                  after={"from": loc_from, "to": location_to, "quantity": quantity,
                        "split_from": lot.lot_id if moved_lot is not lot else None})
@@ -800,26 +844,33 @@ def _lot_balances_as_of(db: Session, as_of) -> tuple[dict[str, float], dict[str,
     tự chốt bằng `created_at` LUÔN là thời điểm ghi thật, phản ánh đúng thứ tự nghiệp vụ thật dù
     `ts` trùng) nên giá trị ghi sau cùng luôn là mới nhất trong khoảng tính đến `as_of`.
 
-    Bù trừ phần bị THIẾU do transfer() TÁCH lô (`_transfer_lot`, quantity < tồn lô gốc) —
-    StockMovement "transfer" chỉ gắn với LÔ MỚI (moved_lot), lô GỐC không có dòng riêng ghi nhận
-    phần đã giảm (vị trí lô gốc thì KHÔNG đổi, chỉ số dư giảm) — dùng GenealogyEdge(relation=
-    "split", source_event="transfer") để biết lô gốc là lô nào.
+    Bù trừ phần bị THIẾU do transfer() TÁCH/GỘP lô (`_transfer_lot`) — StockMovement "transfer"
+    chỉ gắn với LÔ ĐÍCH (moved_lot: lô mới tách HOẶC dòng anh em đã có sẵn được gộp thêm vào), lô
+    NGUỒN không có dòng StockMovement riêng ghi nhận phần đã giảm. Dùng GenealogyEdge(relation=
+    "split", source_event="transfer").movement_id — gắn ĐÚNG 1-1 với StockMovement đã sinh ra nó
+    (xem models/materials.py, migration ae7424b8e601) — để biết chính xác lô NGUỒN của TỪNG lượt
+    transfer, thay vì suy luận qua "lần đầu thấy lot_id trong lịch sử" (không còn đúng từ khi 1
+    lô có thể được gộp LẶP LẠI nhiều lần vào CÙNG 1 dòng đích — dòng đích khi đó đã có số dư từ
+    trước, "lần đầu thấy" sẽ sai cho lượt gộp thứ 2 trở đi). KHÔNG có cạnh (transfer đổi vị trí
+    NGUYÊN 1 dòng, không tách/gộp) → không đổi số dư, chỉ đổi vị trí (bug đã phát hiện 2026-09-09,
+    audit approve_sang_ngang: lô chuyển nguyên vẹn 70kg bị cộng dồn nhầm thành 140kg).
 
     adjust (từ Kiểm kê định kỳ): CHỈ lưu |chênh lệch| — không xác định được TĂNG hay GIẢM từ dữ
     liệu đã lưu, nên BỎ QUA (giới hạn đã biết) — vật tư có kiểm kê điều chỉnh trước ngày lọc có
     thể lệch nhẹ so với thực tế thời điểm đó."""
-    split_map = dict(db.execute(select(GenealogyEdge.to_id, GenealogyEdge.from_id).where(
+    origin_by_movement = dict(db.execute(select(GenealogyEdge.movement_id, GenealogyEdge.from_id).where(
         GenealogyEdge.from_type == "lot", GenealogyEdge.to_type == "lot",
         GenealogyEdge.relation == GenealogyRelation.SPLIT.value,
-        GenealogyEdge.source_event == "transfer")).all())
-    stmt = select(StockMovement.lot_id, StockMovement.movement_type, StockMovement.quantity,
-                 StockMovement.location_to).where(
+        GenealogyEdge.source_event == "transfer",
+        GenealogyEdge.movement_id.isnot(None))).all())
+    stmt = select(StockMovement.movement_id, StockMovement.lot_id, StockMovement.movement_type,
+                 StockMovement.quantity, StockMovement.location_to).where(
         StockMovement.ts <= as_of, StockMovement.lot_id.isnot(None)
     ).order_by(StockMovement.ts.asc(), StockMovement.created_at.asc())
     rows = db.execute(stmt).all()
     balances: dict[str, float] = {}
     locations: dict[str, str] = {}
-    for lot_id, mtype, qty, loc_to in rows:
+    for movement_id, lot_id, mtype, qty, loc_to in rows:
         if mtype in ("receipt", "return"):
             balances[lot_id] = balances.get(lot_id, 0.0) + qty
             if loc_to:
@@ -827,20 +878,15 @@ def _lot_balances_as_of(db: Session, as_of) -> tuple[dict[str, float], dict[str,
         elif mtype == "issue":
             balances[lot_id] = balances.get(lot_id, 0.0) - qty
         elif mtype == "transfer":
-            if lot_id not in balances:
-                # Lô này CHƯA từng có dòng nào khác trong lịch sử -> đây là lô MỚI do transfer()
-                # TÁCH một phần (moved_lot, tương đương 1 "receipt" ngầm, dòng balance ĐẦU TIÊN).
-                # Ngược lại (lot_id ĐÃ có số dư từ trước, VD dòng receipt của chính lô đó — lô
-                # chuyển NGUYÊN vẹn không tách, cùng lot_id) thì số dư KHÔNG được cộng thêm nữa,
-                # transfer chỉ đổi vị trí — bug đã phát hiện 2026-09-09 (audit
-                # approve_sang_ngang): lô chuyển nguyên vẹn 70kg bị cộng dồn thành 140kg vì trước
-                # đây luôn += qty bất kể lô mới hay cũ.
-                balances[lot_id] = qty
+            origin_id = origin_by_movement.get(movement_id)
+            if origin_id:
+                # Lượt transfer này tách dòng mới HOẶC gộp thêm vào dòng đích đã có -> cộng đúng
+                # phần vừa nhận cho lot_id (đích), trừ đúng phần đã mất cho origin_id (nguồn).
+                balances[lot_id] = balances.get(lot_id, 0.0) + qty
+                balances[origin_id] = balances.get(origin_id, 0.0) - qty
+            # else: đổi vị trí NGUYÊN 1 dòng, không tách/gộp -> không đổi số dư.
             if loc_to:
                 locations[lot_id] = loc_to
-            original_id = split_map.get(lot_id)
-            if original_id:
-                balances[original_id] = balances.get(original_id, 0.0) - qty
         # adjust: bỏ qua (giới hạn đã biết, xem docstring)
     # Bù cho lô KHÔNG có StockMovement nào (VD dữ liệu nạp thẳng vào DB từ hệ thống cũ) — lấy tạm
     # MaterialLot.quantity/location/created_at HIỆN TẠI làm mốc duy nhất đã biết (mirror
@@ -1004,6 +1050,70 @@ def _touch_movement_agg(agg_row: dict, kind: str, qty: float, ts) -> None:
         agg_row[first_k] = ts
     if agg_row[last_k] is None or ts > agg_row[last_k]:
         agg_row[last_k] = ts
+
+
+def material_transaction_detail(db: Session, material_id: str, date_from: datetime, date_to: datetime,
+                                location: str = None) -> dict:
+    """"Sổ chi tiết vật tư" — TỪNG chứng từ Nhập/Xuất/Điều chuyển (StockMovement) VÀ Cấp liệu vào
+    mẻ Nấu (GenealogyEdge consume, to_type="batch" — pipeline "Mẻ sản xuất" không tạo
+    StockMovement riêng, xem _consumed_lot_edges) trong kỳ, kèm Tồn đầu kỳ + Tồn luỹ kế theo
+    từng dòng — khớp ĐÚNG số "Nhập"/"Xuất" đã hiển thị ở inventory_report() (bấm vào 1 mã ở BC
+    nhập-xuất-tồn ra đúng sổ chi tiết như phần mềm kế toán, yêu cầu người dùng 2026-09-14)."""
+    workshop = _is_workshop_location(location) if location else None
+    stmt = select(StockMovement).where(StockMovement.material_id == material_id,
+                                       StockMovement.ts >= date_from, StockMovement.ts <= date_to)
+    moves = db.execute(stmt.order_by(StockMovement.ts, StockMovement.created_at)).scalars().all()
+    rows = []
+    for m in moves:
+        if m.movement_type == "transfer":
+            if not location:
+                continue   # không đổi tổng tồn toàn nhà máy -> chỉ có ý nghĩa khi đã lọc 1 kho
+            arriving = _is_workshop_location(m.location_to) == workshop
+            leaving = _is_workshop_location(m.location_from) == workshop
+            if not (arriving or leaving):
+                continue
+            sign = 1 if arriving else -1
+        else:
+            loc = m.location_to if m.movement_type in ("receipt", "return") else m.location_from
+            if location and _is_workshop_location(loc) != workshop:
+                continue
+            sign = 1 if m.movement_type in ("receipt", "return") else -1
+        rows.append({"ts": m.ts, "type": m.movement_type, "lot_code": m.lot_code,
+                    "quantity": m.quantity * sign, "uom": m.uom,
+                    "location_from": m.location_from, "location_to": m.location_to,
+                    "mode": m.mode, "reason": m.reason, "actor": m.actor})
+    batch_ids = set()
+    consume_rows = []
+    for edge, lot in _consumed_lot_edges(db, date_from, date_to):
+        if lot.material_id != material_id:
+            continue
+        if location and _is_workshop_location(lot.location) != workshop:
+            continue
+        batch_ids.add(edge.to_id)
+        consume_rows.append((edge, lot))
+    batches = {b.batch_id: b for b in db.execute(
+        select(BatchExecution).where(BatchExecution.batch_id.in_(batch_ids))).scalars().all()} if batch_ids else {}
+    for edge, lot in consume_rows:
+        batch = batches.get(edge.to_id)
+        rows.append({"ts": edge.event_time, "type": "consume", "lot_code": lot.lot_code,
+                    "quantity": -(edge.quantity or 0.0), "uom": edge.uom or lot.uom,
+                    "location_from": lot.location, "location_to": None,
+                    "mode": "cap_lieu", "actor": None,
+                    "reason": f"Cấp liệu mẻ nấu {batch.batch_code}" if batch else "Cấp liệu mẻ nấu"})
+    rows.sort(key=lambda r: r["ts"])
+    opening = 0.0
+    for r in stock_on_hand_as_of(db, date_from, location):
+        if r["material_id"] == material_id:
+            opening = r["on_hand"]
+            break
+    balance = opening
+    for r in rows:
+        balance = round(balance + r["quantity"], 3)
+        r["balance"] = balance
+        r["in"] = r["quantity"] if r["quantity"] > 0 else 0.0
+        r["out"] = -r["quantity"] if r["quantity"] < 0 else 0.0
+    return {"opening_balance": round(opening, 3), "rows": rows,
+            "closing_balance": round(balance, 3)}
 
 
 def inventory_report(db: Session, days: int = 30, location: str = None,
@@ -1197,6 +1307,7 @@ def _source_label(db: Session, source_type: str, source_id: str) -> Optional[str
 def _request_dict(db: Session, req: MaterialRequest, lines: list[MaterialRequestLine]) -> dict:
     return {"request_id": req.request_id, "request_code": req.request_code, "note": req.note,
             "requested_by": req.requested_by, "requested_at": req.requested_at,
+            "requested_receipt_date": req.requested_receipt_date,
             "source_type": req.source_type, "source_id": req.source_id,
             "source_label": _source_label(db, req.source_type, req.source_id),
             "lines": [_line_dict(l) for l in sorted(lines, key=lambda l: l.seq)]}
@@ -1352,6 +1463,7 @@ def create_request(db: Session, payload: dict, user: User) -> dict:
 
     req = MaterialRequest(request_id=new_id(), request_code=f"DN-{utcnow():%Y%m%d}-{new_id()[:5].upper()}",
                           note=payload.get("note"), requested_by=user.username, requested_at=utcnow(),
+                          requested_receipt_date=payload.get("requested_receipt_date"),
                           source_type=source_type, source_id=source_id)
     db.add(req)
     db.flush()
@@ -1425,6 +1537,49 @@ def cancel_request(db: Session, request_id: str, user: User) -> dict:
     return _request_dict(db, req, lines)
 
 
+def update_request(db: Session, request_id: str, payload: dict, user: User) -> dict:
+    """Sửa phiếu đề nghị nhận kho — CHỈ người có quyền tạo đề nghị (`warehouse.request`, phía
+    phân xưởng), không phải thủ kho công ty (yêu cầu người dùng 2026-09-14). Sửa được:
+    - `requested_receipt_date` (ngày MUỐN nhận) — bất kể phiếu đã có dòng fulfilled hay chưa,
+      vì đây là header, không gắn với 1 dòng cụ thể. Không đổi `requested_at` (ngày lập phiếu).
+    - Từng dòng qua `lines` ([{line_id, material_id?, quantity?}]) — CHỈ áp dụng cho dòng đang
+      "pending"; dòng đã fulfilled/rejected/cancelled thì chặn (đã khóa, giữ đúng lịch sử đã
+      xử lý). Không thêm/xóa dòng — chỉ sửa giá trị dòng đã có (giữ đúng phạm vi yêu cầu)."""
+    require_perm(user, "warehouse.request")
+    req = _get_request(db, request_id)
+    if "requested_receipt_date" in payload:
+        req.requested_receipt_date = payload["requested_receipt_date"]
+    for line_upd in payload.get("lines") or []:
+        line = _get_request_line(db, request_id, line_upd["line_id"])
+        if line.status != "pending":
+            raise DomainError(f"Dòng vật tư (vị trí {line.seq + 1}) đã ở trạng thái "
+                              f"'{line.status}', không thể sửa.")
+        new_material_id = line_upd.get("material_id") or line.material_id
+        new_qty = line_upd.get("quantity") if line_upd.get("quantity") is not None else line.quantity
+        mat = db.get(Material, new_material_id)
+        if not mat:
+            raise NotFoundError(f"Vật tư '{new_material_id}' không tồn tại.")
+        if new_qty <= 0:
+            raise DomainError("Số lượng đề nghị phải > 0.")
+        on_hand = _stock_at_company(db, new_material_id)
+        if new_qty > on_hand:
+            raise DomainError(
+                f"Số lượng đề nghị của '{mat.code}' ({new_qty} {line.uom}) vượt quá tồn kho "
+                f"công ty hiện có ({on_hand} {line.uom})."
+            )
+        line.material_id = new_material_id
+        line.quantity = new_qty
+    lines = db.execute(select(MaterialRequestLine).where(
+        MaterialRequestLine.request_id == request_id)).scalars().all()
+    record_audit(db, entity_type="material_request", entity_id=req.request_id, action="update", actor=user,
+                after={"requested_receipt_date": (req.requested_receipt_date.isoformat()
+                                                  if req.requested_receipt_date else None),
+                      "lines": [{"line_id": ln.line_id, "material_id": ln.material_id, "quantity": ln.quantity}
+                                for ln in lines]})
+    db.commit()
+    return _request_dict(db, req, lines)
+
+
 def _is_oldest_company_lot(db: Session, material_id: str, lot_id: str) -> bool:
     """Lô đang chọn có phải lô cũ nhất (FIFO) hiện có tại Kho công ty của vật tư đó hay
     không — gọi NGAY TRƯỚC LÚC transfer() để chụp lại (snapshot) vào
@@ -1462,7 +1617,9 @@ def is_oldest_workshop_lot(db: Session, material_id: str, lot_id: str) -> bool:
 def fulfill_request_line(db: Session, request_id: str, line_id: str, lot_id: str, quantity: float,
                          user: User, location_to: str = "Kho phân xưởng") -> dict:
     """Thủ kho công ty duyệt 1 dòng của phiếu: chuyển lô sang kho đích đã chọn (transfer,
-    không phải issue — nguyên liệu vẫn được theo dõi trong hệ thống, chỉ đổi kho)."""
+    không phải issue — nguyên liệu vẫn được theo dõi trong hệ thống, chỉ đổi kho). Dùng
+    `req.requested_receipt_date` (nếu có khai) làm `ts` hiệu lực — mirror approve_sang_ngang,
+    xem MaterialRequest.requested_receipt_date."""
     require_perm(user, "warehouse.issue")
     req = _get_request(db, request_id)
     line = _get_request_line(db, request_id, line_id)
@@ -1471,7 +1628,8 @@ def fulfill_request_line(db: Session, request_id: str, line_id: str, lot_id: str
     fifo_ok = _is_oldest_company_lot(db, line.material_id, lot_id)
     result = transfer(db, lot_id, quantity, location_to, user, mode="xuat_theo_de_nghi",
                       reason=f"Xuất theo đề nghị {req.request_code} (dòng {line.seq + 1})",
-                      request_id=req.request_id, request_line_id=line.line_id)
+                      request_id=req.request_id, request_line_id=line.line_id,
+                      ts=req.requested_receipt_date)
     line.status = "fulfilled"
     # Dùng lot_id TRẢ VỀ từ transfer(), không phải lot_id truyền vào — nếu quantity < tồn của
     # lô gốc, transfer() tách 1 lô mới mang đúng quantity đã xuất; lot_id gốc lúc này vẫn còn
@@ -1481,10 +1639,16 @@ def fulfill_request_line(db: Session, request_id: str, line_id: str, lot_id: str
     line.fulfilled_by = user.username
     line.fulfilled_at = utcnow()
     line.fifo_ok = fifo_ok
+    # BUG cũ đã sửa (2026-09-14, phát hiện lúc kiểm thử chuỗi Nhập kho→Đề nghị→Cấp liệu→Lọc→
+    # Chiết đầy đủ): audit/response trước đây ghi `lot_id` (tham số ĐẦU VÀO — lô GỐC còn ở Kho
+    # công ty với phần dư) thay vì `result["lot_id"]` (lô THỰC SỰ đã sang Kho phân xưởng, có thể
+    # là lô mới tách nếu xuất 1 phần) — line.fulfilled_lot_id đã lưu ĐÚNG result["lot_id"] từ
+    # trước nên không ảnh hưởng nghiệp vụ hoàn tác/truy vết đã lưu, chỉ audit "after" + response
+    # trả cho FE lúc bấm Duyệt bị sai — FE không lộ vì luôn tải lại /requests ngay sau đó.
     record_audit(db, entity_type="material_request_line", entity_id=line.line_id, action="fulfill",
-                 actor=user, after={"lot_id": lot_id, "quantity": quantity, "location_to": location_to})
+                 actor=user, after={"lot_id": result["lot_id"], "quantity": quantity, "location_to": location_to})
     db.commit()
-    return {"request_id": request_id, "line_id": line.line_id, "status": line.status, "lot_id": lot_id,
+    return {"request_id": request_id, "line_id": line.line_id, "status": line.status, "lot_id": result["lot_id"],
             "quantity": quantity, "location": result["location"]}
 
 
@@ -1524,7 +1688,9 @@ def fulfill_all_lines(db: Session, request_id: str, user: User,
     """Duyệt cả phiếu 1 lần: với mỗi dòng đang pending, tự chọn lô (ưu tiên lô đã chọn khi đề
     nghị nếu đủ số lượng và không đang HOLD, ngược lại chọn lô FIFO đủ số lượng) rồi transfer.
     Dòng nào không có lô đơn lẻ nào đủ số lượng (hoặc lô đang chờ QC) sẽ bị bỏ qua để xử lý
-    thủ công riêng — vì việc tách 1 dòng ra nhiều lô nằm ngoài phạm vi MVP này."""
+    thủ công riêng — vì việc tách 1 dòng ra nhiều lô nằm ngoài phạm vi MVP này. Dùng
+    `req.requested_receipt_date` (nếu có khai) làm `ts` hiệu lực cho mọi dòng, mirror
+    fulfill_request_line."""
     require_perm(user, "warehouse.issue")
     req = _get_request(db, request_id)
     lines = db.execute(
@@ -1552,7 +1718,8 @@ def fulfill_all_lines(db: Session, request_id: str, user: User,
         fifo_ok = _is_oldest_company_lot(db, line.material_id, lot.lot_id)
         result = transfer(db, lot.lot_id, line.quantity, location_to, user, mode="xuat_theo_de_nghi",
                           reason=f"Xuất theo đề nghị {req.request_code} (dòng {line.seq + 1}, duyệt cả phiếu)",
-                          request_id=req.request_id, request_line_id=line.line_id)
+                          request_id=req.request_id, request_line_id=line.line_id,
+                          ts=req.requested_receipt_date)
         line.status = "fulfilled"
         # Dùng lot_id TRẢ VỀ từ transfer() (có thể là lô tách), không phải lot.lot_id gốc —
         # mirror fulfill_request_line (xem đó), tránh cùng lỗi cho đường "duyệt cả phiếu".
@@ -1596,7 +1763,10 @@ def _transfer_px_request_dict(req: TransferPxRequest) -> dict:
             "created_by": req.created_by, "created_at": req.created_at,
             "approved_by": req.approved_by, "approved_at": req.approved_at,
             "rejected_by": req.rejected_by, "rejected_at": req.rejected_at,
-            "reject_reason": req.reject_reason}
+            "reject_reason": req.reject_reason,
+            # can_edit: không cần điều kiện QC như chiều Công ty→Phân xưởng — lô của 1 đề nghị
+            # pending luôn chắc chắn không HOLD (create_transfer_px_request đã chặn cứng từ đầu).
+            "can_edit": req.status == "pending"}
 
 
 def _get_transfer_px_request(db, request_id) -> TransferPxRequest:
@@ -1624,6 +1794,43 @@ def create_transfer_px_request(db: Session, lot_id: str, quantity: float, user: 
     db.add(req)
     record_audit(db, entity_type="transfer_px_request", entity_id=req.request_id, action="create",
                 actor=user, after={"lot_id": lot_id, "quantity": quantity})
+    db.commit()
+    db.refresh(req)
+    return _transfer_px_request_dict(req)
+
+
+def update_transfer_px_request(db: Session, request_id: str, quantity: float, reason: str,
+                               user: User) -> dict:
+    """Sửa đề nghị điều chuyển Phân xưởng → Công ty — CHỈ khi còn "pending" (chưa Kho công ty
+    duyệt/từ chối). Chỉ sửa số lượng/lý do (không đổi lô — đổi lô coi như huỷ rồi tạo đề nghị
+    mới, tránh phức tạp việc dò lại trạng thái khoá/HOLD của lô khác). Không cần chặn theo QC
+    như chiều Công ty→Phân xưởng: create_transfer_px_request() đã chặn cứng không cho tạo đề
+    nghị với lô đang HOLD ngay từ đầu, nên lô của 1 đề nghị pending luôn chắc chắn không HOLD."""
+    require_perm(user, "warehouse.request")
+    req = _get_transfer_px_request(db, request_id)
+    if req.status != "pending":
+        raise DomainError(f"Đề nghị {req.request_code} đã được xử lý (trạng thái: {req.status}) — không thể sửa.")
+    lot = _lot(db, req.lot_id)
+    if quantity <= 0 or quantity > lot.quantity:
+        raise DomainError(f"Số lượng đề nghị không hợp lệ (tồn {lot.quantity} {lot.uom}).")
+    req.quantity = quantity
+    req.reason = reason
+    record_audit(db, entity_type="transfer_px_request", entity_id=req.request_id, action="update",
+                actor=user, after={"quantity": quantity, "reason": reason})
+    db.commit()
+    db.refresh(req)
+    return _transfer_px_request_dict(req)
+
+
+def cancel_transfer_px_request(db: Session, request_id: str, user: User) -> dict:
+    """Xóa (huỷ mềm — giữ lại trong lịch sử) đề nghị điều chuyển Phân xưởng → Công ty — CHỈ khi
+    còn "pending"."""
+    require_perm(user, "warehouse.request")
+    req = _get_transfer_px_request(db, request_id)
+    if req.status != "pending":
+        raise DomainError(f"Đề nghị {req.request_code} đã được xử lý (trạng thái: {req.status}) — không thể xóa.")
+    req.status = "cancelled"
+    record_audit(db, entity_type="transfer_px_request", entity_id=req.request_id, action="cancel", actor=user)
     db.commit()
     db.refresh(req)
     return _transfer_px_request_dict(req)
@@ -1714,14 +1921,26 @@ def undo_transfer_px_request(db: Session, request_id: str, user: User) -> dict:
     return _transfer_px_request_dict(req)
 
 
-def _transfer_kcpx_dict(req: TransferKcPxRequest) -> dict:
+def _kcpx_can_edit(db: Session, req: TransferKcPxRequest) -> bool:
+    """`can_edit` hiện ở FE (nút Sửa/Xóa, mirror sang_ngang's can_edit) — True khi còn pending VÀ
+    (vật tư không cần KCS HOẶC lô còn đang "Chờ KCS duyệt"), xem _assert_kcpx_editable."""
+    if req.status != "pending":
+        return False
+    lot = db.get(MaterialLot, req.lot_id)
+    if not lot:
+        return False
+    return not (lot.material_id and requires_kcs_hold(db, lot.material_id)
+               and lot.status != LotStatus.ON_HOLD.value)
+
+
+def _transfer_kcpx_dict(db: Session, req: TransferKcPxRequest) -> dict:
     return {"request_id": req.request_id, "request_code": req.request_code, "lot_id": req.lot_id,
             "quantity": req.quantity, "uom": req.uom, "reason": req.reason, "status": req.status,
             "movement_id": req.movement_id, "workshop_location_id": req.workshop_location_id,
             "reversed": req.reversed, "created_by": req.created_by, "created_at": req.created_at,
             "approved_by": req.approved_by, "approved_at": req.approved_at,
             "rejected_by": req.rejected_by, "rejected_at": req.rejected_at,
-            "reject_reason": req.reject_reason}
+            "reject_reason": req.reject_reason, "can_edit": _kcpx_can_edit(db, req)}
 
 
 def _get_transfer_kcpx_request(db, request_id) -> TransferKcPxRequest:
@@ -1757,7 +1976,53 @@ def create_transfer_kcpx_request(db: Session, lot_id: str, quantity: float, user
                 actor=user, after={"lot_id": lot_id, "quantity": quantity})
     db.commit()
     db.refresh(req)
-    return _transfer_kcpx_dict(req)
+    return _transfer_kcpx_dict(db, req)
+
+
+def _assert_kcpx_editable(db: Session, req: TransferKcPxRequest, lot: MaterialLot) -> None:
+    """Chặn sửa/xóa nếu KCS ĐÃ duyệt xong lô (yêu cầu người dùng 2026-09-14: chỉ cho sửa/xóa khi
+    lô còn "Chờ KCS duyệt") — vật tư KHÔNG cần chỉ tiêu chất lượng bắt buộc thì không có khái
+    niệm "chờ KCS" nên luôn cho sửa/xóa trong lúc còn pending, không bị chặn bởi điều kiện này."""
+    if req.status != "pending":
+        raise DomainError(f"Đề nghị {req.request_code} đã được xử lý (trạng thái: {req.status}) — không thể sửa/xóa.")
+    if lot.material_id and requires_kcs_hold(db, lot.material_id) and lot.status != LotStatus.ON_HOLD.value:
+        raise DomainError(f"Lô {lot.lot_code} đã được KCS duyệt xong — không thể sửa/xóa đề nghị này nữa.")
+
+
+def update_transfer_kcpx_request(db: Session, request_id: str, quantity: float, reason: str,
+                                 user: User) -> dict:
+    """Sửa đề nghị điều chuyển Công ty → Phân xưởng — chỉ số lượng/lý do (không đổi lô, xem
+    update_transfer_px_request). CHỈ khi còn pending VÀ (vật tư không cần KCS HOẶC lô còn đang
+    "Chờ KCS duyệt" — xem _assert_kcpx_editable)."""
+    require_perm(user, "warehouse.issue")
+    req = _get_transfer_kcpx_request(db, request_id)
+    lot = _lot(db, req.lot_id)
+    _assert_kcpx_editable(db, req, lot)
+    if quantity <= 0 or quantity > lot.quantity:
+        raise DomainError(f"Số lượng đề nghị không hợp lệ (tồn {lot.quantity} {lot.uom}).")
+    req.quantity = quantity
+    req.reason = reason
+    record_audit(db, entity_type="transfer_kcpx_request", entity_id=req.request_id, action="update",
+                actor=user, after={"quantity": quantity, "reason": reason})
+    db.commit()
+    db.refresh(req)
+    return _transfer_kcpx_dict(db, req)
+
+
+def cancel_transfer_kcpx_request(db: Session, request_id: str, user: User) -> dict:
+    """Xóa (huỷ mềm) đề nghị điều chuyển Công ty → Phân xưởng — cùng điều kiện update (xem
+    _assert_kcpx_editable). KHÔNG tự trả lô về lại trạng thái QC trước đó (nếu đã bị đưa về HOLD
+    lúc tạo) — giữ nguyên như quy ước hủy đề nghị nhận kho hiện có, tránh suy đoán sai trạng thái
+    gốc của lô."""
+    require_perm(user, "warehouse.issue")
+    req = _get_transfer_kcpx_request(db, request_id)
+    lot = _lot(db, req.lot_id)
+    _assert_kcpx_editable(db, req, lot)
+    req.status = "cancelled"
+    record_audit(db, entity_type="transfer_kcpx_request", entity_id=req.request_id, action="cancel", actor=user)
+    db.commit()
+    db.refresh(req)
+    return _transfer_kcpx_dict(db, req)
 
 
 def list_transfer_kcpx_requests(db: Session, status: str = None, limit: int = 500,
@@ -1768,7 +2033,7 @@ def list_transfer_kcpx_requests(db: Session, status: str = None, limit: int = 50
     if status:
         stmt = stmt.where(TransferKcPxRequest.status == status)
     rows = db.execute(stmt).scalars().all()
-    return [_transfer_kcpx_dict(r) for r in rows]
+    return [_transfer_kcpx_dict(db, r) for r in rows]
 
 
 def approve_transfer_kcpx_request(db: Session, request_id: str, workshop_location_id: str,
@@ -1808,7 +2073,7 @@ def approve_transfer_kcpx_request(db: Session, request_id: str, workshop_locatio
     record_audit(db, entity_type="transfer_kcpx_request", entity_id=req.request_id, action="approve", actor=user)
     db.commit()
     db.refresh(req)
-    return _transfer_kcpx_dict(req)
+    return _transfer_kcpx_dict(db, req)
 
 
 def reject_transfer_kcpx_request(db: Session, request_id: str, user: User, reason: str = None) -> dict:
@@ -1825,7 +2090,7 @@ def reject_transfer_kcpx_request(db: Session, request_id: str, user: User, reaso
                 actor=user, after={"reason": reason})
     db.commit()
     db.refresh(req)
-    return _transfer_kcpx_dict(req)
+    return _transfer_kcpx_dict(db, req)
 
 
 def undo_transfer_kcpx_request(db: Session, request_id: str, user: User) -> dict:
@@ -1851,7 +2116,7 @@ def undo_transfer_kcpx_request(db: Session, request_id: str, user: User) -> dict
     record_audit(db, entity_type="transfer_kcpx_request", entity_id=req.request_id, action="undo", actor=user)
     db.commit()
     db.refresh(req)
-    return _transfer_kcpx_dict(req)
+    return _transfer_kcpx_dict(db, req)
 
 
 def _sang_ngang_dict(db: Session, req: SangNgangRequest) -> dict:

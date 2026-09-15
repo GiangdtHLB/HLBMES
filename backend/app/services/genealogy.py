@@ -15,7 +15,7 @@ from typing import Optional
 from sqlalchemy import and_, delete, or_, select
 from sqlalchemy.orm import Session
 
-from ..common import new_id, utcnow
+from ..common import GenealogyRelation, new_id, utcnow
 from ..models.batches import BatchExecution
 from ..models.batch_pipeline import BatchFilterLot, BatchPackLot, BatchTank
 from ..models.master import Material
@@ -260,10 +260,25 @@ def recall_affected(db: Session, node_type: str, node_id: str) -> list[dict]:
 def find_node(db: Session, code: str) -> Optional[tuple]:
     """Tìm node theo mã — thử lần lượt từng loại trong FIND_NODE_ORDER (mã nội bộ, duy nhất
     toàn hệ thống) trước, rồi mới thử ALIAS_LOOKUP (số lô người dùng thật sự cầm trong tay/số
-    mẻ, có thể trùng — lấy bản ghi mới nhất) -> (type, id)."""
+    mẻ, có thể trùng — lấy bản ghi mới nhất) -> (type, id).
+
+    NGOẠI LỆ "lot": từ khi 1 lot_code được phép có NHIỀU dòng MaterialLot (1 dòng/kho, xem
+    models/materials.py) — mã lô KHÔNG còn duy nhất toàn hệ thống như các loại node khác. Nếu
+    khớp nhiều dòng, ưu tiên dòng GỐC (chưa từng là đích của 1 cạnh split/transfer nào — nơi lô
+    THẬT SỰ sinh ra, qua receive()/nhập tồn đầu) thay vì 1 dòng ngẫu nhiên: Truy ngược từ dòng
+    gốc luôn đầy đủ (đúng nguồn nhập), Truy xuôi từ dòng gốc cũng đầy đủ (đi qua đúng cạnh split
+    để tiếp tục vào mọi dòng con ở kho khác) — không dòng nào khác cho kết quả đầy đủ hơn."""
     for node_type in FIND_NODE_ORDER:
         model, pk_attr, code_attr = NODE_REGISTRY[node_type]
-        obj = db.execute(select(model).where(getattr(model, code_attr) == code)).scalar_one_or_none()
+        matches = db.execute(select(model).where(getattr(model, code_attr) == code)).scalars().all()
+        if len(matches) > 1 and node_type == "lot":
+            split_targets = set(db.execute(select(GenealogyEdge.to_id).where(
+                GenealogyEdge.from_type == "lot", GenealogyEdge.to_type == "lot",
+                GenealogyEdge.relation == GenealogyRelation.SPLIT.value,
+                GenealogyEdge.source_event == "transfer",
+                GenealogyEdge.to_id.in_([getattr(m, pk_attr) for m in matches]))).scalars().all())
+            matches = [m for m in matches if getattr(m, pk_attr) not in split_targets] or matches
+        obj = matches[0] if matches else None
         if obj:
             return (node_type, getattr(obj, pk_attr))
     for node_type, model, pk_attr, code_attr, order_attr in ALIAS_LOOKUP:

@@ -530,13 +530,17 @@ def test_undo_fulfill_line_success(client, admin_h, thukho_h, vanhanh_h):
     assert undo.status_code == 200, undo.text
     assert undo.json()["status"] == "pending"
 
-    # Hoàn tác trả lô tách (20) về lại Kho công ty — KHÔNG gộp ngược vào lô gốc (transfer()
-    # không tự gộp lô), nên giờ có 2 lô riêng cùng ở Kho công ty, tổng vẫn đúng 50.
+    # Hoàn tác trả lô tách (20) về lại Kho công ty — từ 2026-09-14, transfer() GỘP NGƯỢC vào
+    # đúng lô gốc cùng lot_code đã có sẵn ở đó (thay vì để 2 lô riêng cùng mã như trước, xem
+    # services/warehouse.py::_transfer_lot) — lô gốc trở lại đúng 50, lô tách (fulfilled_lot_id)
+    # về 0/consumed, tổng vẫn đúng 50.
     lots = client.get("/api/lots", headers=thukho_h).json()
     original_lot = next(l for l in lots if l["lot_id"] == lot_id)
     returned_lot = next(l for l in lots if l["lot_id"] == fulfilled_lot_id)
     assert original_lot["location"] == "Kho công ty"
-    assert returned_lot["location"] == "Kho công ty"
+    assert original_lot["quantity"] == 50
+    assert returned_lot["quantity"] == 0
+    assert returned_lot["status"] == "consumed"
     assert original_lot["quantity"] + returned_lot["quantity"] == 50
 
 

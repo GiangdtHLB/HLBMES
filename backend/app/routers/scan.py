@@ -19,12 +19,19 @@ router = APIRouter(prefix="/api/scan", tags=["scan"])
 @router.get("")
 def scan(code: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     code = (code or "").strip()
-    # Lô vật tư / thành phẩm
-    lot = db.execute(select(MaterialLot).where(MaterialLot.lot_code == code)).scalar_one_or_none()
-    if lot:
+    # Lô vật tư / thành phẩm — 1 lot_code có thể khớp NHIỀU dòng (1 dòng/kho, xem
+    # models/materials.py::MaterialLot) nên phải lấy hết rồi mới quyết định trả 1 dòng hay để
+    # người quét chọn, không còn dùng scalar_one_or_none() (raise khi có >1 kết quả).
+    lots = db.execute(select(MaterialLot).where(MaterialLot.lot_code == code)).scalars().all()
+    if len(lots) == 1:
+        lot = lots[0]
         return {"type": "lot", "data": {"lot_id": lot.lot_id, "lot_code": lot.lot_code,
                 "lot_type": lot.lot_type, "quantity": lot.quantity, "uom": lot.uom,
                 "status": lot.status, "location": lot.location}}
+    if len(lots) > 1:
+        return {"type": "lot_multi", "data": [
+            {"lot_id": l.lot_id, "lot_code": l.lot_code, "lot_type": l.lot_type, "quantity": l.quantity,
+             "uom": l.uom, "status": l.status, "location": l.location} for l in lots]}
     # Mẻ
     b = db.execute(select(BatchExecution).where(BatchExecution.batch_code == code)).scalar_one_or_none()
     if b:
