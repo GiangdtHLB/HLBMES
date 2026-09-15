@@ -398,9 +398,11 @@ def consume_lot(db: Session, batch_id: str, lot_id: str, quantity: float, user: 
         BatchExecution.batch_id == batch_id).with_for_update()).scalar_one_or_none()
     if not batch:
         raise NotFoundError("Batch không tồn tại.")
+    # Chỉ chặn theo ebr_locked (_assert_not_locked) — mirror MỌI hàm sửa mẻ khác (adjust_actual,
+    # set_brewhouse_line...), KHÔNG chặn thêm theo state=="closed" nữa: mẻ có thể đã chuyển sang
+    # "closed" (xong quy trình) nhưng hồ sơ EBR CHƯA khóa chính thức (ebr_locked=False) — vẫn cần
+    # cấp liệu bổ sung/sửa được cho tới khi EBR thật sự khóa (yêu cầu người dùng 2026-09-15).
     _assert_not_locked(batch)
-    if batch.state == BatchState.CLOSED.value:
-        raise DomainError("Mẻ đã đóng hồ sơ (closed) — không thể cấp liệu.")
     # with_for_update(): khóa hàng lô NVL TRƯỚC khi đọc-rồi-ghi quantity — 2 request cấp liệu
     # gần như đồng thời trên CÙNG lô (VD cấp liệu cho 2 mẻ khác nhau cùng lúc) có thể cùng đọc
     # quantity cũ, mất 1 lần trừ trên DB có row-lock thật (SQL Server/Postgres — SQLite bỏ qua;

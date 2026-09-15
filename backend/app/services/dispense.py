@@ -13,7 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..audit import record_audit
-from ..common import LotStatus, Role, new_id, utcnow
+from ..common import BatchState, LotStatus, Role, new_id, utcnow
 from ..errors import DomainError, NotFoundError
 from ..models.batches import BatchExecution
 from ..models.master import Material
@@ -33,6 +33,43 @@ def _is_expired(lot: MaterialLot) -> bool:
     if exp.tzinfo is None:
         now = now.replace(tzinfo=None)
     return exp < now
+
+
+def _assert_dispensable(db: Session, batch: BatchExecution) -> None:
+    """2 điều kiện bắt buộc trước khi cấp liệu (áp dụng cho MỌI cách cấp — Cấp 1 vật tư/Áp dụng
+    gợi ý/Backflush/tăng Thực tế qua adjust_actual; KHÔNG áp dụng cho nhánh HOÀN LẠI của
+    adjust_actual — hoàn lại không "lấy" thêm tồn nên không cần xếp hàng) — yêu cầu người dùng
+    2026-09-15:
+
+    1. Mẻ phải có `start_at` (thời điểm bắt đầu nấu) — tồn kho phân xưởng dùng để đối chiếu
+       (xem _workshop_fefo_lots's `as_of`) tính TẠI thời điểm này, không có mốc thì không tính
+       được, cũng không có cơ sở xác định "hàng nào đã về trước lúc mẻ bắt đầu".
+    2. Mẻ nào bắt đầu nấu TRƯỚC phải được cấp liệu TRƯỚC: chặn nếu còn mẻ khác đang chạy
+       (running/held) có `start_at` sớm hơn mà CHƯA cấp liệu lần nào (0 dòng DispenseLine thật
+       sự) — đảm bảo tồn phân xưởng được nhường đúng thứ tự, mẻ sau không "chen ngang" trước khi
+       mẻ cần trước kịp lấy phần của mình. Chỉ cần mẻ trước đã cấp ÍT NHẤT 1 vật tư (không cần đủ
+       100% định mức) là coi như đã "đến lượt", không chặn mẻ sau nữa."""
+    if batch.start_at is None:
+        raise DomainError("Mẻ chưa có thời điểm bắt đầu nấu — không thể cấp liệu. "
+                          "Vào Mẻ sản xuất nhập thời điểm bắt đầu trước.")
+    earlier = db.execute(select(BatchExecution).where(
+        BatchExecution.state.in_([BatchState.RUNNING.value, BatchState.HELD.value]),
+        BatchExecution.batch_id != batch.batch_id,
+        BatchExecution.start_at.isnot(None),
+        BatchExecution.start_at < batch.start_at,
+    ).order_by(BatchExecution.start_at.asc())).scalars().all()
+    if not earlier:
+        return
+    earlier_ids = [b.batch_id for b in earlier]
+    dispensed_ids = {bid for (bid,) in db.execute(
+        select(Dispense.batch_id).join(DispenseLine, DispenseLine.dispense_id == Dispense.dispense_id)
+        .where(Dispense.batch_id.in_(earlier_ids)).distinct())}
+    pending = [b for b in earlier if b.batch_id not in dispensed_ids]
+    if pending:
+        codes = ", ".join(b.batch_code for b in pending[:5])
+        more = f" (+{len(pending) - 5} mẻ khác)" if len(pending) > 5 else ""
+        raise DomainError(f"Mẻ {codes}{more} bắt đầu nấu trước mẻ này và chưa cấp liệu lần nào — "
+                          "cấp liệu cho (các) mẻ đó trước.")
 
 
 def _fefo_lots(db: Session, material_code: str) -> list:
@@ -73,25 +110,63 @@ def _fefo_lots(db: Session, material_code: str) -> list:
     return sorted(lots, key=key)
 
 
-def _workshop_fefo_lots(db: Session, material_code: str) -> list:
+def _workshop_fefo_lots(db: Session, material_code: str, as_of=None) -> list:
     """Như _fefo_lots nhưng chỉ lấy lô ở Kho phân xưởng — nơi NVL thật sự cấp cho mẻ nấu
-    (tài liệu §9.0: "nguyên liệu phân bổ vào mẻ nấu ... luôn lấy từ Kho phân xưởng")."""
-    return [l for l in _fefo_lots(db, material_code) if warehouse_svc._is_workshop_location(l.location)]
+    (tài liệu §9.0: "nguyên liệu phân bổ vào mẻ nấu ... luôn lấy từ Kho phân xưởng").
+
+    `as_of` (thường là batch.start_at, xem _assert_dispensable): nếu truyền, mỗi lô CHỈ được coi
+    khả dụng tối đa bằng tồn dựng lại tính đến hết thời điểm đó (warehouse.py::lot_on_hand_as_of)
+    — không cho mượn hàng về kho phân xưởng SAU khi mẻ đã bắt đầu nấu (yêu cầu người dùng
+    2026-09-15). Lô nào tồn dựng lại = 0 tại thời điểm đó (chưa về kho lúc mẻ bắt đầu) bị loại
+    hẳn khỏi hàng đợi FEFO của mẻ này. Gắn `asof_cap` tạm lên từng lô còn lại (đọc bởi
+    _effective_qty) = MIN(tồn sống hiện tại, tồn dựng lại tại `as_of`) — vừa không vượt trần lịch
+    sử (hàng mới về sau không tính), vừa không vượt tồn thật hiện có (nếu phần cũ đã bị mẻ khác
+    lấy bớt từ đó tới giờ). Tiêu chí phụ FIFO vẫn theo `created_at` GỐC của lô (ngày nhập đầu
+    tiên, xem _fefo_lots) — xác nhận lại với người dùng 2026-09-15: KHÔNG đổi sang ngày điều
+    chuyển vào phân xưởng, chỉ cần đảm bảo lọc kho đúng (Kho phân xưởng, không lấy sang Kho công
+    ty — đã tự nhiên đúng qua bộ lọc _is_workshop_location bên dưới)."""
+    lots = [l for l in _fefo_lots(db, material_code) if warehouse_svc._is_workshop_location(l.location)]
+    if as_of is None:
+        return lots
+    asof_by_lot = {r["lot_id"]: r["quantity"] for r in
+                  warehouse_svc.lot_on_hand_as_of(db, as_of, "Kho phân xưởng")}
+    out = []
+    for l in lots:
+        cap = asof_by_lot.get(l.lot_id, 0.0)
+        if cap <= 1e-9:
+            continue
+        l.asof_cap = min(l.quantity, cap)
+        out.append(l)
+    return out
 
 
 def _effective_qty(lot: MaterialLot, reserved: dict) -> float:
     """Tồn CÒN LẠI của 1 lô sau khi trừ phần đã "giữ chỗ" bởi các dòng KHÁC trong CÙNG 1 lần
     gọi dispense()/backflush() (chưa commit vào DB — 2 pha lập kế hoạch rồi mới thực thi, xem
-    _plan_consume) — tránh 2 dòng trong cùng 1 phiếu cùng tưởng còn nguyên 1 lô rồi tính trùng."""
-    return round(lot.quantity - reserved.get(lot.lot_id, 0.0), 4)
+    _plan_consume) — tránh 2 dòng trong cùng 1 phiếu cùng tưởng còn nguyên 1 lô rồi tính trùng.
+
+    Nếu lô có `asof_cap` gắn kèm (xem _workshop_fefo_lots's `as_of`), trần thật sự là MIN(tồn
+    sống, asof_cap) chứ không phải tồn sống — hàng về sau thời điểm mẻ bắt đầu không được tính."""
+    cap = getattr(lot, "asof_cap", None)
+    total_cap = lot.quantity if cap is None else min(lot.quantity, cap)
+    return round(total_cap - reserved.get(lot.lot_id, 0.0), 4)
 
 
-def _is_fifo_choice(db: Session, material_code: str, lot_id: str, reserved: dict) -> bool:
+def _lot_avail_qty(lot: MaterialLot) -> float:
+    """Tồn khả dụng của 1 lô cho MỤC ĐÍCH HIỂN THỊ/GỢI Ý (suggest_dispense) — không giữ chỗ
+    (reserved) như _effective_qty vì đây chỉ là xem trước từng dòng độc lập. Tôn trọng `asof_cap`
+    nếu có (xem _workshop_fefo_lots's `as_of`) — không gợi ý vượt quá tồn tại thời điểm mẻ bắt
+    đầu nấu."""
+    cap = getattr(lot, "asof_cap", None)
+    return lot.quantity if cap is None else min(lot.quantity, cap)
+
+
+def _is_fifo_choice(db: Session, material_code: str, lot_id: str, reserved: dict, as_of=None) -> bool:
     """1 lô được coi là "đúng FIFO/FEFO" nếu KHÔNG có lô nào xếp TRƯỚC nó (theo FEFO, Kho phân
-    xưởng) mà còn tồn > 0 (SAU khi trừ phần đã giữ chỗ bởi dòng khác cùng phiếu) bị bỏ qua. Lô
-    không nằm trong danh sách FEFO hợp lệ (khác Kho phân xưởng / đã hết hạn / khác vật tư) luôn
-    coi là lệch."""
-    order = _workshop_fefo_lots(db, material_code)
+    xưởng, cùng giới hạn `as_of` nếu có) mà còn tồn > 0 (SAU khi trừ phần đã giữ chỗ bởi dòng
+    khác cùng phiếu) bị bỏ qua. Lô không nằm trong danh sách FEFO hợp lệ (khác Kho phân xưởng /
+    đã hết hạn / khác vật tư / chưa tồn tại tại `as_of`) luôn coi là lệch."""
+    order = _workshop_fefo_lots(db, material_code, as_of)
     idx = next((i for i, l in enumerate(order) if l.lot_id == lot_id), None)
     if idx is None:
         return False
@@ -99,14 +174,15 @@ def _is_fifo_choice(db: Session, material_code: str, lot_id: str, reserved: dict
 
 
 def _plan_consume(db: Session, material_code: str, qty: float, picked_lot_id: str = None,
-                  reason: str = None, reserved: dict = None) -> tuple:
+                  reason: str = None, reserved: dict = None, as_of=None) -> tuple:
     """Lập kế hoạch cấp liệu cho `qty` của material_code — CHỈ TÍNH, KHÔNG trừ tồn (all-or-
     nothing: raise NGAY nếu không đủ 100%, tránh trừ 1 phần rồi mới báo thiếu). Nếu chỉ định lot
     mà lot đó KHÔNG phải lô FIFO/FEFO gợi ý (còn lô xếp trước còn tồn) thì bắt buộc có `reason`.
     `reserved` (dict lot_id -> đã giữ chỗ) dùng CHUNG cho mọi dòng trong 1 lần gọi dispense()/
     backflush() — CẬP NHẬT TRỰC TIẾP (mutate) để dòng sau thấy đúng phần lô mà dòng trước đã
-    dùng, dù chưa commit DB thật. Trả về (plan, fifo_ok) — plan: list[(lot, take)] để
-    _execute_plan thực thi thật khi đã chắc chắn đủ."""
+    dùng, dù chưa commit DB thật. `as_of` (batch.start_at) — xem _workshop_fefo_lots — áp dụng
+    CẢ cho lô chỉ định tay (picked_lot_id), không chỉ nhánh tự động FEFO. Trả về (plan, fifo_ok)
+    — plan: list[(lot, take)] để _execute_plan thực thi thật khi đã chắc chắn đủ."""
     reserved = reserved if reserved is not None else {}
     remaining = round(qty, 4)
     plan = []
@@ -120,7 +196,15 @@ def _plan_consume(db: Session, material_code: str, qty: float, picked_lot_id: st
                               "từ Kho phân xưởng cho mẻ sản xuất.")
         if _is_expired(lot):
             raise DomainError(f"Lô {lot.lot_code} đã HẾT HẠN — không được cấp.")
-        fifo_ok = _is_fifo_choice(db, material_code, lot.lot_id, reserved)
+        if as_of is not None:
+            asof_by_lot = {r["lot_id"]: r["quantity"] for r in
+                          warehouse_svc.lot_on_hand_as_of(db, as_of, "Kho phân xưởng")}
+            cap = asof_by_lot.get(lot.lot_id, 0.0)
+            if cap <= 1e-9:
+                raise DomainError(f"Lô {lot.lot_code} chưa tồn tại ở Kho phân xưởng tính đến "
+                                  "thời điểm mẻ bắt đầu nấu — không được chọn.")
+            lot.asof_cap = min(lot.quantity, cap)
+        fifo_ok = _is_fifo_choice(db, material_code, lot.lot_id, reserved, as_of)
         if not fifo_ok and not (reason or "").strip():
             raise DomainError(
                 f"Lô {lot.lot_code} không phải lô FIFO/FEFO gợi ý cho {material_code} — "
@@ -131,7 +215,7 @@ def _plan_consume(db: Session, material_code: str, qty: float, picked_lot_id: st
             reserved[lot.lot_id] = reserved.get(lot.lot_id, 0.0) + take
         remaining = round(remaining - take, 4)
     else:
-        for lot in _workshop_fefo_lots(db, material_code):
+        for lot in _workshop_fefo_lots(db, material_code, as_of):
             if remaining <= 1e-9:
                 break
             take = min(remaining, max(_effective_qty(lot, reserved), 0.0))
@@ -141,8 +225,9 @@ def _plan_consume(db: Session, material_code: str, qty: float, picked_lot_id: st
             reserved[lot.lot_id] = reserved.get(lot.lot_id, 0.0) + take
             remaining = round(remaining - take, 4)
     if remaining > 1e-6:
+        hint = " (tính theo tồn kho phân xưởng tại thời điểm mẻ bắt đầu nấu)" if as_of is not None else ""
         raise DomainError(
-            f"Không đủ lô khả dụng (còn hạn) cho {material_code}: thiếu {round(remaining, 4)} — "
+            f"Không đủ lô khả dụng (còn hạn) cho {material_code}: thiếu {round(remaining, 4)}{hint} — "
             "không cấp liệu (all-or-nothing).")
     return plan, fifo_ok
 
@@ -180,6 +265,7 @@ def suggest_dispense(db: Session, batch_id: str) -> dict:
     batch = db.get(BatchExecution, batch_id)
     if not batch:
         raise NotFoundError("Batch không tồn tại.")
+    _assert_dispensable(db, batch)
     cmp = bom.compare_batch(db, batch)
     # Tồn hiện tại theo material_code THẬT ở mỗi kho — dùng để hiển thị tham khảo "Tồn kho công
     # ty"/"Tồn kho phân xưởng" cạnh gợi ý (khác `alternatives`/`picks` vốn CHỈ xét Kho phân
@@ -201,13 +287,13 @@ def suggest_dispense(db: Session, batch_id: str) -> dict:
             # gợi ý trước theo FIFO chung (gộp tồn mọi thành viên rồi chia theo thứ tự FEFO) —
             # tổng số lượng qua các dòng này không được vượt định mức chung (chặn thật ở
             # consume_lot/ceiling_for_material, không phải ở đây)."""
-            combined_lots = _workshop_fefo_lots(db, l["material_code"])
+            combined_lots = _workshop_fefo_lots(db, l["material_code"], batch.start_at)
             picks_by_member = {c: [] for c in member_codes}
             remaining = need
             for lot in combined_lots:
                 if remaining <= 1e-9:
                     break
-                take = min(remaining, lot.quantity)
+                take = min(remaining, _lot_avail_qty(lot))
                 if take <= 0:
                     continue
                 mcode = bom.material_code_for_lot(db, lot)
@@ -217,8 +303,8 @@ def suggest_dispense(db: Session, batch_id: str) -> dict:
                 remaining = round(remaining - take, 4)
             group_shortfall = round(remaining, 4) if remaining > 1e-6 else 0.0
             for mcode in member_codes:
-                member_lots = _workshop_fefo_lots(db, mcode)
-                alternatives = [{"lot_id": lot.lot_id, "lot_code": lot.lot_code, "quantity": round(lot.quantity, 4),
+                member_lots = _workshop_fefo_lots(db, mcode, batch.start_at)
+                alternatives = [{"lot_id": lot.lot_id, "lot_code": lot.lot_code, "quantity": round(_lot_avail_qty(lot), 4),
                                 "uom": lot.uom, "expiry": lot.expiry.isoformat() if lot.expiry else None}
                                for lot in member_lots]
                 lines.append({"material_code": mcode, "material_name": name_by_code.get(mcode),
@@ -231,8 +317,8 @@ def suggest_dispense(db: Session, batch_id: str) -> dict:
         real_codes = bom.codes_for_dispense(db, l["material_code"])
         stock_company = round(sum(company_stock.get(c, 0.0) for c in real_codes), 4)
         stock_workshop = round(sum(workshop_stock.get(c, 0.0) for c in real_codes), 4)
-        fefo_lots = _workshop_fefo_lots(db, l["material_code"])
-        alternatives = [{"lot_id": lot.lot_id, "lot_code": lot.lot_code, "quantity": round(lot.quantity, 4),
+        fefo_lots = _workshop_fefo_lots(db, l["material_code"], batch.start_at)
+        alternatives = [{"lot_id": lot.lot_id, "lot_code": lot.lot_code, "quantity": round(_lot_avail_qty(lot), 4),
                         "uom": lot.uom, "expiry": lot.expiry.isoformat() if lot.expiry else None}
                        for lot in fefo_lots]
         picks = []
@@ -240,7 +326,7 @@ def suggest_dispense(db: Session, batch_id: str) -> dict:
         for lot in fefo_lots:
             if remaining <= 1e-9:
                 break
-            take = min(remaining, lot.quantity)
+            take = min(remaining, _lot_avail_qty(lot))
             if take <= 0:
                 continue
             picks.append({"lot_id": lot.lot_id, "lot_code": lot.lot_code,
@@ -263,6 +349,7 @@ def dispense(db: Session, batch_id: str, lines_in: list, user: User, note: str =
     batch = db.get(BatchExecution, batch_id)
     if not batch:
         raise NotFoundError("Batch không tồn tại.")
+    _assert_dispensable(db, batch)
     if not lines_in:
         raise DomainError("Phiếu cấp liệu rỗng.")
     planned, errors, reserved = [], [], {}
@@ -273,7 +360,7 @@ def dispense(db: Session, batch_id: str, lines_in: list, user: User, note: str =
             continue
         try:
             plan, fifo_ok = _plan_consume(db, code, qty, picked_lot_id=ln.get("lot_id"),
-                                          reason=ln.get("reason"), reserved=reserved)
+                                          reason=ln.get("reason"), reserved=reserved, as_of=batch.start_at)
             planned.append((code, plan, bool(ln.get("allow_over")), fifo_ok, ln.get("reason")))
         except DomainError as e:
             errors.append(str(e))
@@ -306,6 +393,7 @@ def backflush(db: Session, batch_id: str, produced_qty: float, user: User) -> di
     batch = db.get(BatchExecution, batch_id)
     if not batch:
         raise NotFoundError("Batch không tồn tại.")
+    _assert_dispensable(db, batch)
     snap = batch.recipe_snapshot or {}
     base = snap.get("base_qty") or 0
     if not base:
@@ -337,7 +425,7 @@ def backflush(db: Session, batch_id: str, produced_qty: float, user: User) -> di
             # Backflush vẫn TÔN TRỌNG trần định mức BOM (không tự ý vượt); nếu vượt hoặc
             # thiếu tồn sẽ rơi vào DomainError → ghi vào 'skipped' để người dùng xử lý thủ công
             # (KHÔNG chặn toàn bộ backflush như dispense() — mỗi vật tư độc lập).
-            plan, fifo_ok = _plan_consume(db, code, need, reserved=reserved)
+            plan, fifo_ok = _plan_consume(db, code, need, reserved=reserved, as_of=batch.start_at)
             rows = _execute_plan(db, batch, code, plan, user, allow_over=False, fifo_ok=fifo_ok)
             for r in rows:
                 db.add(DispenseLine(line_id=new_id(), dispense_id=disp.dispense_id, **r))
@@ -384,7 +472,10 @@ def adjust_actual(db: Session, batch_id: str, material_code: str, new_actual: fl
     db.flush()
     all_lines = []
     if delta > 0:
-        plan, fifo_ok = _plan_consume(db, material_code, delta)
+        # Chỉ nhánh TĂNG (lấy thêm tồn) mới cần qua _assert_dispensable — nhánh GIẢM (hoàn lại)
+        # bên dưới không "lấy" thêm tồn nên không cần xếp hàng theo thứ tự mẻ.
+        _assert_dispensable(db, batch)
+        plan, fifo_ok = _plan_consume(db, material_code, delta, as_of=batch.start_at)
         rows = _execute_plan(db, batch, material_code, plan, user, allow_over=True,
                              fifo_ok=fifo_ok, reason=reason)
         for r in rows:
@@ -499,13 +590,27 @@ def batch_dispense_summary(db: Session, batch_id: str, only_dispensed: bool = Tr
         DispenseLine.dispense_id.in_(dispense_ids))).scalars().all() if dispense_ids else []
     lot_info: dict[str, dict] = {}
     for dl in dlines:
-        info = lot_info.setdefault(dl.material_code, {"lot_codes": [], "fifo_ok": True, "is_free": False})
-        if dl.lot_code and dl.lot_code not in info["lot_codes"]:
-            info["lot_codes"].append(dl.lot_code)
+        info = lot_info.setdefault(dl.material_code, {"lot_qty": {}, "fifo_ok": True, "is_free": False,
+                                                       "created_at": None})
+        # Cộng dồn THEO LÔ (không chỉ liệt kê distinct) — 1 lô đã cấp rồi HOÀN HẾT (net về 0, VD
+        # "Sửa Thực tế"/"Xóa" hoàn lại toàn bộ) không còn đóng góp gì vào Thực tế hiện tại nữa,
+        # không nên còn hiện tên trong "Mã lô" — gây hiểu lầm là "vẫn đang dùng lô đó" dù thực ra
+        # chỉ còn sót lại trong LỊCH SỬ (xem "Lịch sử cấp liệu" nếu cần xem đủ dấu vết quá khứ).
+        # Trước đây liệt kê MỌI lot_code từng xuất hiện (kể cả đã hoàn hết) khiến 1 vật tư có thể
+        # hiện "lô A, lô B" dù thực tế chỉ đang dùng lô A — yêu cầu người dùng 2026-09-15.
+        if dl.lot_code:
+            info["lot_qty"][dl.lot_code] = info["lot_qty"].get(dl.lot_code, 0.0) + dl.quantity
         if dl.fifo_ok is False:
             info["fifo_ok"] = False
         if dl.dispense_id in free_dispense_ids:
             info["is_free"] = True
+        # "Ngày tạo" = lần ghi/sửa GẦN NHẤT (dispense/backflush/sửa Thực tế) cho vật tư này — thời
+        # điểm THẬT sự bấm nút trên hệ thống, khác "Ngày cấp" (batch.start_at, xem bên dưới) vốn
+        # là ngày mẻ BẮT ĐẦU NẤU dùng cho hồ sơ (yêu cầu người dùng 2026-09-15).
+        if info["created_at"] is None or dl.created_at > info["created_at"]:
+            info["created_at"] = dl.created_at
+    for info in lot_info.values():
+        info["lot_codes"] = [code for code, qty in info["lot_qty"].items() if qty > 1e-9]
     rows = []
     for l in cmp["lines"]:
         codes = l.get("match_codes") or [l["material_code"]]
@@ -516,7 +621,8 @@ def batch_dispense_summary(db: Session, batch_id: str, only_dispensed: bool = Tr
             rows.append({"material_code": l["material_code"], "material_name": l.get("material_name"),
                         "uom": l["uom"], "planned": l["planned"], "actual": l["actual"],
                         "diff": l["diff"], "pct": l["pct"], "status": l["status"],
-                        "lot_codes": [], "fifo_ok": None, "is_free": False})
+                        "lot_codes": [], "fifo_ok": None, "is_free": False,
+                        "created_at": None, "supply_date": batch.start_at})
             continue
         for i, code in enumerate(dispensed):
             info = lot_info.get(code)
@@ -532,6 +638,8 @@ def batch_dispense_summary(db: Session, batch_id: str, only_dispensed: bool = Tr
                 "lot_codes": info["lot_codes"] if info else [],
                 "fifo_ok": info["fifo_ok"] if info else None,
                 "is_free": bool(info and info["is_free"]),
+                "created_at": info["created_at"] if info else None,
+                "supply_date": batch.start_at,
             })
     # Vật tư đã tiêu thụ nhưng KHÔNG khớp mã/nhóm nào trong BOM công thức — compare_batch() đã
     # tính sẵn ở `extras`, trước đây bảng này BỎ QUA hoàn toàn, hiện gộp vào CÙNG 1 dòng thống
@@ -545,5 +653,6 @@ def batch_dispense_summary(db: Session, batch_id: str, only_dispensed: bool = Tr
             "planned": None, "actual": e["actual"], "diff": None, "pct": None, "status": e["status"],
             "lot_codes": info["lot_codes"] if info else [], "fifo_ok": info["fifo_ok"] if info else None,
             "is_free": bool(info and info["is_free"]),
+            "created_at": info["created_at"] if info else None, "supply_date": batch.start_at,
         })
     return rows
