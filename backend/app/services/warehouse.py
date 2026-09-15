@@ -1076,7 +1076,8 @@ def material_transaction_detail(db: Session, material_id: str, date_from: dateti
         rows.append({"ts": m.ts, "type": m.movement_type, "lot_code": m.lot_code,
                     "quantity": m.quantity * sign, "uom": m.uom,
                     "location_from": m.location_from, "location_to": m.location_to,
-                    "mode": m.mode, "reason": m.reason, "actor": m.actor})
+                    "mode": m.mode, "reason": m.reason, "actor": m.actor,
+                    "_movement_id": m.movement_id, "_reversal_of": m.reversal_of})
     batch_ids = set()
     consume_rows = []
     for edge, lot in _consumed_lot_edges(db, date_from, date_to):
@@ -1096,6 +1097,10 @@ def material_transaction_detail(db: Session, material_id: str, date_from: dateti
                     "mode": "cap_lieu", "actor": None,
                     "reason": f"Cấp liệu mẻ nấu {batch.batch_code}" if batch else "Cấp liệu mẻ nấu"})
     rows.sort(key=lambda r: r["ts"])
+    rows = _hide_reversed_transfer_pairs(rows)
+    for r in rows:
+        r.pop("_movement_id", None)
+        r.pop("_reversal_of", None)
     opening = 0.0
     for r in stock_on_hand_as_of(db, date_from, location):
         if r["material_id"] == material_id:
@@ -1109,6 +1114,40 @@ def material_transaction_detail(db: Session, material_id: str, date_from: dateti
         r["out"] = -r["quantity"] if r["quantity"] < 0 else 0.0
     return {"opening_balance": round(opening, 4), "rows": rows,
             "closing_balance": round(balance, 4)}
+
+
+def _hide_reversed_transfer_pairs(rows: list[dict]) -> list[dict]:
+    """Ẩn khỏi Sổ chi tiết vật tư các cặp "điều chuyển đi rồi hoàn tác ngay sau đó" (net = 0,
+    tồn kho chưa hề thật sự tăng lên/mất đi lâu dài — VD "Xuất theo đề nghị" rồi bị "Hoàn tác")
+    — chỉ giữ lại giao dịch làm tồn kho THẬT SỰ thay đổi (yêu cầu người dùng 2026-09-15: "chỉ cần
+    hiện khi kho tăng lên, hoặc mất đi thôi, các thao tác liên quan đến hoàn tác không cần hiển
+    thị"). Ghép cặp qua 2 cơ chế (đã sort theo `ts` tăng dần trước khi gọi hàm này):
+      1. `reversal_of` (undo_issue ghi FK thẳng tới StockMovement gốc) — đáng tin nhất.
+      2. Cùng `lot_code` + số lượng NGƯỢC DẤU + dòng sau có `reason` bắt đầu "Hoàn tác" — dùng cho
+         hoàn tác điều chuyển/xuất theo đề nghị (undo_fulfill_line/undo_transfer_px_request/
+         undo_sang_ngang không ghi `reversal_of`, chỉ có tiền tố "Hoàn tác" trong `reason`)."""
+    hidden = set()
+    by_movement_id = {r["_movement_id"]: i for i, r in enumerate(rows) if r.get("_movement_id")}
+    for i, r in enumerate(rows):
+        rev_of = r.get("_reversal_of")
+        if rev_of and rev_of in by_movement_id:
+            hidden.add(i)
+            hidden.add(by_movement_id[rev_of])
+    used = set()
+    for i, r in enumerate(rows):
+        if i in hidden or r["type"] != "transfer" or not (r.get("reason") or "").startswith("Hoàn tác"):
+            continue
+        for j in range(i - 1, -1, -1):
+            if j in hidden or j in used or rows[j]["type"] != "transfer":
+                continue
+            if (rows[j].get("reason") or "").startswith("Hoàn tác"):
+                continue
+            if rows[j]["lot_code"] == r["lot_code"] and abs(rows[j]["quantity"] + r["quantity"]) < 1e-9:
+                hidden.add(i)
+                hidden.add(j)
+                used.add(j)
+                break
+    return [r for i, r in enumerate(rows) if i not in hidden]
 
 
 def inventory_report(db: Session, days: int = 30, location: str = None,

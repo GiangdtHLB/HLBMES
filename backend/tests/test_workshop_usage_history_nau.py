@@ -18,6 +18,7 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app import seed as seed_mod
+from app.common import utcnow
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -81,13 +82,32 @@ def _recipe_version(client, admin_h, suffix, material_code, qty, base_qty=100):
     return version_id
 
 
+def _clear_seed_batch_9002(client, admin_h):
+    """seed.py cố tình để mẻ demo "9002" ở trạng thái "running, chưa cấp liệu lần nào" — với điều
+    kiện cấp liệu mới (2026-09-15, _assert_dispensable), mẻ test này (bắt đầu SAU 9002) sẽ bị
+    chặn oan nếu không hủy 9002 trước."""
+    batches = client.get("/api/batches", headers=admin_h).json()
+    b9002 = next((b for b in batches if b.get("batch_code") == "9002"), None)
+    if b9002 and b9002["state"] in ("running", "held"):
+        r = client.post(f"/api/batches/{b9002['batch_id']}/transition", headers=admin_h,
+                        json={"target": "cancelled"})
+        assert r.status_code == 200, r.text
+
+
 def _new_batch(client, admin_h, version_id, suffix):
+    _clear_seed_batch_9002(client, admin_h)
     oid = client.get("/api/brewing/orders", headers=admin_h).json()[0]["brew_order_id"]
     b = client.post("/api/batches", headers=admin_h,
                     json={"order_id": oid, "recipe_version_id": version_id,
                          "planned_qty": 100})
     assert b.status_code == 201, b.text
-    return b.json()
+    batch = b.json()
+    # Điều kiện cấp liệu mới (yêu cầu người dùng 2026-09-15, services/dispense.py::
+    # _assert_dispensable) chặn cấp liệu khi mẻ chưa có start_at.
+    s = client.post(f"/api/batches/{batch['batch_id']}/start", headers=admin_h,
+                    json={"start_at": utcnow().isoformat()})
+    assert s.status_code == 200, s.text
+    return batch
 
 
 def test_history_includes_nau_dispense_and_refund(client, admin_h):
@@ -110,17 +130,18 @@ def test_history_includes_nau_dispense_and_refund(client, admin_h):
     assert row["actor"] == "admin"
     assert row["lot_code"]
 
-    # "Sửa Thực tế" giảm về 4 -> hoàn lại 6, phải xuất hiện thêm 1 dòng SL âm (-6), không xóa
-    # dòng gốc — mirror đúng "Lịch sử cấp liệu" ở màn Cấp liệu.
+    # "Sửa Thực tế" giảm về 4 -> hoàn lại 6. workshop_usage_history GỘP NET theo (batch_id,
+    # material_code, lot_code) — chỉ còn ĐÚNG 1 dòng với SL NET = 10 - 6 = 4 (không hiện riêng 2
+    # dòng +10/-6 nữa — SỬA 2026-09-14, tránh hiểu lầm "đã dùng 10kg rồi lại trả 6kg" trong khi
+    # thực tế NET chỉ dùng 4kg; xem services/warehouse.py::workshop_usage_history).
     adj = client.post(f"/api/dispense/{batch['batch_id']}/adjust", headers=admin_h,
                       json={"material_code": code, "new_actual": 4, "reason": "test hoàn lại"})
     assert adj.status_code == 200, adj.text
 
     hist2 = client.get("/api/warehouse/workshop-usage-history?limit=2000", headers=admin_h).json()
     nau_rows2 = [r for r in hist2 if r["stage"] == "Nấu" and r["material_name"] == f"Vật tư lịch sử NAU01"]
-    assert len(nau_rows2) == 2, nau_rows2
-    quantities = sorted(r["quantity"] for r in nau_rows2)
-    assert quantities == [-6.0, 10.0]
+    assert len(nau_rows2) == 1, nau_rows2
+    assert nau_rows2[0]["quantity"] == 4.0
 
 
 def test_history_still_includes_loc_chiet_unchanged(client, admin_h):

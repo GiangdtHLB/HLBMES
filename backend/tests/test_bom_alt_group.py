@@ -102,13 +102,28 @@ def _recipe_version_group(client, admin_h, suffix, group_code, qty, base_qty=100
 
 
 def _new_batch(client, admin_h, version_id, planned_qty, suffix, allow_shortage=True):
+    # seed.py cố tình để mẻ demo "9002" ở trạng thái "running, chưa cấp liệu lần nào" — với điều
+    # kiện cấp liệu mới (2026-09-15, _assert_dispensable), mẻ test tạo SAU 9002 sẽ bị chặn cấp
+    # liệu (suggest/dispense) nếu không hủy 9002 trước (idempotent — gọi lại nhiều lần vô hại).
+    batches = client.get("/api/batches", headers=admin_h).json()
+    b9002 = next((b for b in batches if b.get("batch_code") == "9002"), None)
+    if b9002 and b9002["state"] in ("running", "held"):
+        c = client.post(f"/api/batches/{b9002['batch_id']}/transition", headers=admin_h,
+                        json={"target": "cancelled"})
+        assert c.status_code == 200, c.text
     oid = client.get("/api/brewing/orders", headers=admin_h).json()[0]["brew_order_id"]
     b = client.post("/api/batches", headers=admin_h,
                     json={"order_id": oid, "recipe_version_id": version_id,
                          "planned_qty": planned_qty,   # batch_code: để tự sinh (giờ bắt buộc số nguyên)
                          "allow_shortage": allow_shortage})
     assert b.status_code == 201, b.text
-    return b.json()["batch_id"]
+    batch_id = b.json()["batch_id"]
+    # Điều kiện cấp liệu mới cũng chặn khi chưa có start_at — set SAU khi test đã nhận lô trước đó
+    # (nếu có), để tồn kho phân xưởng đối chiếu TẠI thời điểm bắt đầu mẻ vẫn thấy đủ.
+    s = client.post(f"/api/batches/{batch_id}/start", headers=admin_h,
+                    json={"start_at": utcnow().isoformat()})
+    assert s.status_code == 200, s.text
+    return batch_id
 
 
 def test_bom_line_shows_group_name_not_blank(client, admin_h, group):

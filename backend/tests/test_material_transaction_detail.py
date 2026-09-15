@@ -100,6 +100,15 @@ def test_detail_includes_dispense_into_batch_reconciles_with_report(client, admi
     client.post("/api/warehouse/transfer", headers=admin_h,
                json={"lot_id": lot_id, "quantity": 50, "location_to": "Kho phân xưởng"})
 
+    # seed.py cố tình để mẻ demo "9002" ở trạng thái "running, chưa cấp liệu lần nào" — với điều
+    # kiện cấp liệu mới (2026-09-15, _assert_dispensable), mẻ test này (bắt đầu SAU 9002) sẽ bị
+    # chặn oan nếu không hủy 9002 trước.
+    batches_now = client.get("/api/batches", headers=admin_h).json()
+    b9002 = next((b for b in batches_now if b.get("batch_code") == "9002"), None)
+    if b9002 and b9002["state"] in ("running", "held"):
+        c9002 = client.post(f"/api/batches/{b9002['batch_id']}/transition", headers=admin_h,
+                            json={"target": "cancelled"})
+        assert c9002.status_code == 200, c9002.text
     batch_id = _make_batch(client, admin_h)
     client.post(f"/api/batches/{batch_id}/transition", headers=admin_h, json={"target": "ready"})
     client.post(f"/api/batches/{batch_id}/transition", headers=admin_h, json={"target": "running"})
