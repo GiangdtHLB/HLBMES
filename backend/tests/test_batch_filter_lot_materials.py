@@ -411,3 +411,56 @@ def test_completed_filter_lot_no_longer_blocks_later_ones(client, admin_h):
     ok_b = client.post(f"/api/batch-filter-lots/{filter_lot_b}/materials", headers=admin_h,
                        json={"lot_id": lot_b["lot_id"], "quantity": 5})
     assert ok_b.status_code == 201, ok_b.text
+
+
+def test_filter_and_pack_material_supply_date_also_reflected_in_inventory_report(client, admin_h):
+    """"Ngày cấp" (Lọc: supply_date, Chiết: pack_date) không chỉ tính đúng ở "Tồn kho tính đến
+    ngày" (đã test ở 2 test trên) mà PHẢI khớp CẢ "BC nhập-xuất-tồn" (inventory_report/
+    lot_inventory_report) VÀ "Sổ chi tiết vật tư" (material_transaction_detail) — cả 3 đều đọc
+    chung StockMovement.ts do warehouse_svc.issue(issued_at=...) ghi, không cần xử lý riêng như
+    Nấu (yêu cầu người dùng 2026-09-15: xác nhận toàn bộ chuỗi nhất quán)."""
+    suffix = "FLMU-RPT01"
+    mat = client.post("/api/materials", headers=admin_h,
+                      json={"code": f"MAT-{suffix}", "name": f"Vật tư MAT-{suffix}", "uom": "kg"})
+    assert mat.status_code == 201, mat.text
+    material_id = mat.json()["material_id"]
+    recv = client.post("/api/warehouse/receive", headers=admin_h, json={
+        "lot_code": f"LOT-MAT-{suffix}-PX", "material_id": material_id, "quantity": 50, "uom": "kg",
+        "location": "Kho phân xưởng", "received_at": (utcnow() - timedelta(hours=3)).isoformat()})
+    assert recv.status_code == 200, recv.text
+    filter_lot_id = _make_filter_lot(client, admin_h, suffix)
+    lot = _lot_id_by_code(client, admin_h, f"LOT-MAT-{suffix}-PX")
+
+    supply_date = utcnow() - timedelta(hours=1)
+    add = client.post(f"/api/batch-filter-lots/{filter_lot_id}/materials", headers=admin_h,
+                      json={"lot_id": lot["lot_id"], "quantity": 12, "uom": "kg",
+                           "supply_date": supply_date.isoformat()})
+    assert add.status_code == 201, add.text
+
+    # Kỳ báo cáo CHỈ phủ tới supply_date + 5 phút — KHÔNG phủ tới "now" (giờ bấm nút thật).
+    date_from = (utcnow() - timedelta(hours=4)).isoformat()
+    date_to = (supply_date + timedelta(minutes=5)).isoformat()
+
+    rep = client.get("/api/warehouse/report", headers=admin_h, params={
+        "date_from": date_from, "date_to": date_to, "location": "Kho phân xưởng"}).json()
+    row = next(r for r in rep if r["material_id"] == material_id)
+    assert row["issued"] == pytest.approx(12.0)
+
+    rep_lot = client.get("/api/warehouse/report/by-lot", headers=admin_h, params={
+        "date_from": date_from, "date_to": date_to, "location": "Kho phân xưởng"}).json()
+    lot_row = next(r for r in rep_lot if r["lot_id"] == lot["lot_id"])
+    assert lot_row["issued"] == pytest.approx(12.0)
+
+    detail = client.get("/api/warehouse/report/material-detail", headers=admin_h, params={
+        "material_id": material_id, "date_from": date_from, "date_to": date_to,
+        "location": "Kho phân xưởng"}).json()
+    total_out = sum(r["out"] for r in detail["rows"])
+    assert total_out == pytest.approx(12.0)
+
+    # Kỳ báo cáo CHỈ phủ "now" trở đi (không phủ supply_date) -> KHÔNG được tính lại lần 2.
+    date_from2 = (utcnow() - timedelta(minutes=1)).isoformat()
+    date_to2 = (utcnow() + timedelta(hours=1)).isoformat()
+    rep2 = client.get("/api/warehouse/report", headers=admin_h, params={
+        "date_from": date_from2, "date_to": date_to2, "location": "Kho phân xưởng"}).json()
+    row2 = next((r for r in rep2 if r["material_id"] == material_id), None)
+    assert row2 is None or row2["issued"] == 0.0
