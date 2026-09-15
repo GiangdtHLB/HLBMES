@@ -6092,7 +6092,7 @@ VIEWS.warehouse_kc = async function () {
   if (sec === "xtdn") {
     Object.keys(WH_HIST_VISIBLE).forEach(wireMovementHistoryBlock);
     wireRequestBlockActions();
-    wireCardSearch("xtdn_search", "#xtdn_block");
+    wirePaginateCards("xtdn_block", "xtdn_search", 10);
   }
   if (sec === "ton") {
     $("ton_loc").onchange = () => { TON_LOC.warehouse_kc = $("ton_loc").value; render("warehouse_kc"); };
@@ -9164,6 +9164,57 @@ function wirePaginate(tableId, defaultPageSize = 10, opts = {}) {
     allRows.forEach(tr => { tr.style.display = visible.has(tr) ? "" : "none"; });
     bar.innerHTML = `
       <span class="muted">${matched.length} dòng${q ? " (đã lọc)" : ""}</span>
+      <button type="button" class="btn sm sec" data-pg="prev" ${state.page <= 1 ? "disabled" : ""}>‹ Trước</button>
+      <span class="muted">Trang ${state.page}/${totalPages}</span>
+      <button type="button" class="btn sm sec" data-pg="next" ${state.page >= totalPages ? "disabled" : ""}>Sau ›</button>
+      <select data-pg="size" style="width:auto">
+        ${[10, 25, 50, 100].map(n => `<option value="${n}" ${state.pageSize === n ? "selected" : ""}>${n}/trang</option>`).join("")}
+        <option value="all" ${state.pageSize === Infinity ? "selected" : ""}>Hiển thị tất cả</option>
+      </select>`;
+    bar.querySelector('[data-pg="prev"]').onclick = () => { state.page--; apply(); };
+    bar.querySelector('[data-pg="next"]').onclick = () => { state.page++; apply(); };
+    bar.querySelector('[data-pg="size"]').onchange = (e) => {
+      state.pageSize = e.target.value === "all" ? Infinity : parseInt(e.target.value, 10);
+      state.page = 1; apply();
+    };
+  }
+  if (searchInput) searchInput.oninput = () => { state.page = 1; apply(); };
+  apply();
+}
+const _cardPagerState = {};
+// Phân trang kiểu wirePaginate() nhưng cho danh sách THẺ/PANEL (mỗi phiếu 1 khối HTML nhiều
+// dòng con — VD "Xuất theo đề nghị" — không phải bảng <table><tr>, không dùng wirePaginate()
+// được) — phân trang trên các phần tử con TRỰC TIẾP của `containerId`, lọc theo thuộc tính
+// data-search có sẵn (mirror wireCardSearch, dùng CHUNG 1 input tìm kiếm thay vì phải bật 2 cơ
+// chế tìm kiếm khác nhau cho cùng 1 ô input) — yêu cầu người dùng 2026-09-15: "chỉ hiện 10 dòng,
+// giống các mục khác".
+function wirePaginateCards(containerId, searchInputId, defaultPageSize = 10) {
+  const container = document.getElementById(containerId);
+  if (!container) return;
+  const searchInput = searchInputId ? $(searchInputId) : null;
+  const allCards = Array.from(container.children);
+  const state = _cardPagerState[containerId] || { page: 1, pageSize: defaultPageSize };
+  _cardPagerState[containerId] = state;
+
+  let bar = container.nextElementSibling;
+  if (!bar || !bar.classList.contains("pager-bar")) {
+    bar = document.createElement("div");
+    bar.className = "pager-bar";
+    container.insertAdjacentElement("afterend", bar);
+  }
+
+  function apply() {
+    const q = (searchInput?.value || "").trim().toLowerCase();
+    const matched = q ? allCards.filter(el => (el.dataset.search || "").includes(q)) : allCards;
+    const pageSize = state.pageSize;
+    const totalPages = pageSize === Infinity ? 1 : Math.max(1, Math.ceil(matched.length / pageSize));
+    if (state.page > totalPages) state.page = totalPages;
+    const start = pageSize === Infinity ? 0 : (state.page - 1) * pageSize;
+    const end = pageSize === Infinity ? matched.length : start + pageSize;
+    const visible = new Set(matched.slice(start, end));
+    allCards.forEach(el => { el.style.display = visible.has(el) ? "" : "none"; });
+    bar.innerHTML = `
+      <span class="muted">${matched.length} phiếu${q ? " (đã lọc)" : ""}</span>
       <button type="button" class="btn sm sec" data-pg="prev" ${state.page <= 1 ? "disabled" : ""}>‹ Trước</button>
       <span class="muted">Trang ${state.page}/${totalPages}</span>
       <button type="button" class="btn sm sec" data-pg="next" ${state.page >= totalPages ? "disabled" : ""}>Sau ›</button>
