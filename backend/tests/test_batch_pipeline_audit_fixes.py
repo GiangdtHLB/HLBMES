@@ -54,6 +54,26 @@ def admin_h(client):
     return _login(client, "admin", "AdminTest123")
 
 
+@pytest.fixture(autouse=True)
+def _unblock_dangling_filter_lots_before_each_test(client, admin_h):
+    """Dọn đường TRƯỚC MỖI TEST — điều kiện xếp hàng mới cho Lọc (_assert_filter_material_
+    addable, yêu cầu người dùng 2026-09-15: "lô lọc mở trước phải thêm NVL trước") sẽ chặn oan
+    lô lọc mà 1 test SAU tạo ra nếu còn lô lọc "dang_loc" từ test TRƯỚC chưa hề có nguyên liệu
+    nào (nhiều test trong file này tạo lô lọc chỉ để test xóa/sửa/khóa, không thêm nguyên liệu
+    thật). Thêm 1 dòng nguyên liệu TỰ DO (không lot_id -> không đụng tồn kho thật) cho các lô đó
+    để "đến lượt" trước khi test hiện tại tạo lô MỚI của chính nó."""
+    lots = client.get("/api/batch-filter-lots", headers=admin_h).json()
+    for fl in lots:
+        if fl["status"] != "dang_loc":
+            continue
+        usage = client.get(f"/api/batch-filter-lots/{fl['filter_lot_id']}/materials", headers=admin_h).json()
+        if usage:
+            continue
+        client.post(f"/api/batch-filter-lots/{fl['filter_lot_id']}/materials", headers=admin_h,
+                   json={"material_name": "AUTO-UNBLOCK (test)", "quantity": 0.001, "uom": "kg"})
+    yield
+
+
 def _make_batch(client, admin_h, batch_code=None):
     rid = client.get("/api/recipes", headers=admin_h).json()[0]["recipe_id"]
     vers = client.get(f"/api/recipes/{rid}/versions", headers=admin_h).json()

@@ -1720,9 +1720,14 @@ def add_pack_lot_material(db: Session, pack_lot_id: str, payload: dict, user: Us
             raise DomainError(f"Lô {lot.lot_code} không phải lô FIFO (cũ nhất) của vật tư này — "
                              "bắt buộc nhập lý do chọn lô khác.")
         data["uom"] = lot.uom
+        # issued_at=p.pack_date ("Ngày cấp" — mốc bắt đầu chiết đã khai lúc tạo lô thành phẩm,
+        # có thể khai lùi ngày) — trước đây KHÔNG truyền, StockMovement.ts mặc định = utcnow()
+        # thật (giờ bấm nút thêm nguyên liệu), sai lệch với "Ngày cấp" đã hiển thị ở "Lịch sử
+        # xuất dùng NVL" (yêu cầu người dùng 2026-09-15: "ngày cấp chính là ngày trừ vào tồn
+        # kho... không được lấy ngày tạo làm ngày trừ tồn kho").
         result = warehouse_svc.issue(db, lot_id, data["quantity"], user, mode="tu_do",
                                      reason=f"Dùng cho lô thành phẩm {p.pack_lot_code}",
-                                     ref_doc=p.pack_lot_code, skip_perm_check=True)
+                                     ref_doc=p.pack_lot_code, skip_perm_check=True, issued_at=p.pack_date)
         data["movement_id"] = result["movement_id"]
     elif not (data.get("material_name") or "").strip():
         raise DomainError("Chọn nguyên liệu từ tồn kho Kho phân xưởng, hoặc nhập tên tự do.")
@@ -1758,6 +1763,34 @@ def delete_pack_lot_material(db: Session, usage_id: str, user: User) -> None:
 
 # ==================== NVL dùng cho Lô lọc — mirror BatchPackLotMaterialUsage trên ====================
 
+def _assert_filter_material_addable(db: Session, filter_lot: BatchFilterLot) -> None:
+    """Lô lọc nào MỞ (tạo) trước phải được thêm NVL trước — mirror services/dispense.py::
+    _assert_dispensable áp dụng cho Nấu, nay áp dụng thêm cho Lọc (yêu cầu người dùng
+    2026-09-15: "cấp liệu thì mẻ sản xuất trước phải cấp trước... áp dụng cho Lọc luôn").
+    Dùng `created_at` làm mốc "bắt đầu" (Lô lọc không có trường start_at riêng như Mẻ nấu —
+    tạo lô lọc chính là lúc THỰC SỰ mở ra để lọc, khác Mẻ nấu có thể tạo trước rồi mới khai
+    "Bắt đầu" sau). Chỉ xét lô lọc ĐANG LỌC (status="dang_loc") — lô đã "Hoàn thành lọc" không
+    còn "chiếm hàng" (mirror chỉ xét RUNNING/HELD ở Nấu, không xét COMPLETED/CLOSED/CANCELLED).
+    Chỉ cần lô đó đã thêm NVL ÍT NHẤT 1 lần (không cần đủ hết) là coi như "đến lượt", không
+    chặn lô sau nữa."""
+    earlier = db.execute(select(BatchFilterLot).where(
+        BatchFilterLot.status == "dang_loc",
+        BatchFilterLot.filter_lot_id != filter_lot.filter_lot_id,
+        BatchFilterLot.created_at < filter_lot.created_at,
+    ).order_by(BatchFilterLot.created_at.asc())).scalars().all()
+    if not earlier:
+        return
+    earlier_ids = [f.filter_lot_id for f in earlier]
+    has_usage = set(db.execute(select(BatchFilterLotMaterialUsage.filter_lot_id).where(
+        BatchFilterLotMaterialUsage.filter_lot_id.in_(earlier_ids)).distinct()).scalars().all())
+    blocking = [f for f in earlier if f.filter_lot_id not in has_usage]
+    if not blocking:
+        return
+    codes = ", ".join(f.filter_lot_code for f in blocking[:5])
+    raise DomainError(f"Lô lọc {codes} mở trước lô này và chưa thêm nguyên liệu lần nào — "
+                      "thêm nguyên liệu cho (các) lô đó trước.")
+
+
 def list_filter_lot_materials(db: Session, filter_lot_id: str) -> list[BatchFilterLotMaterialUsage]:
     return db.execute(select(BatchFilterLotMaterialUsage).where(
         BatchFilterLotMaterialUsage.filter_lot_id == filter_lot_id)).scalars().all()
@@ -1767,9 +1800,15 @@ def add_filter_lot_material(db: Session, filter_lot_id: str, payload: dict, user
     require_perm(user, "batch.execute")
     fl = get_filter_lot(db, filter_lot_id)
     _assert_unlocked(fl)
+    _assert_filter_material_addable(db, fl)
     data = dict(payload)
     lot_id = data.get("lot_id")
     reason = (data.get("reason") or "").strip() or None
+    # "Ngày cấp" — mốc HIỆU LỰC trừ tồn kho phân xưởng, KHÁC created_at (giờ ghi vào hệ thống,
+    # luôn là utcnow() thật, không sửa được) — bỏ trống thì mặc định = bây giờ (yêu cầu người
+    # dùng 2026-09-15: "ngày cấp chính là ngày trừ vào tồn kho... không được lấy ngày tạo làm
+    # ngày trừ tồn kho").
+    supply_date = data.get("supply_date") or utcnow()
     if lot_id:
         lot = db.get(MaterialLot, lot_id)
         if not lot:
@@ -1788,13 +1827,14 @@ def add_filter_lot_material(db: Session, filter_lot_id: str, payload: dict, user
         data["uom"] = lot.uom
         result = warehouse_svc.issue(db, lot_id, data["quantity"], user, mode="tu_do",
                                      reason=f"Dùng cho lô lọc {fl.filter_lot_code}",
-                                     ref_doc=fl.filter_lot_code, skip_perm_check=True)
+                                     ref_doc=fl.filter_lot_code, skip_perm_check=True, issued_at=supply_date)
         data["movement_id"] = result["movement_id"]
     elif not (data.get("material_name") or "").strip():
         raise DomainError("Chọn nguyên liệu từ tồn kho Kho phân xưởng, hoặc nhập tên tự do.")
     u = BatchFilterLotMaterialUsage(
         usage_id=new_id(), filter_lot_id=filter_lot_id, lot_id=lot_id, movement_id=data.get("movement_id"),
         material_name=data.get("material_name"), lot_pm=data.get("lot_pm"), lot_date=data.get("lot_date"),
+        supply_date=supply_date,
         fifo_ok=data.get("fifo_ok"), reason=reason, quantity=data["quantity"], uom=data.get("uom") or "kg",
         created_at=utcnow(),
     )

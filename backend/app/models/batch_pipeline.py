@@ -305,6 +305,13 @@ class BatchFilterLotMaterialUsage(Base):
     material_name: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
     lot_pm: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
     lot_date: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+    # "Ngày cấp" — mốc HIỆU LỰC dùng để trừ tồn kho phân xưởng (đẩy thẳng vào StockMovement.ts
+    # qua warehouse_svc.issue(issued_at=...), xem services/batch_pipeline.py::
+    # add_filter_lot_material) — khai tay lúc thêm nguyên liệu, có thể khai lùi ngày, KHÁC
+    # created_at (giờ ghi vào hệ thống, không sửa được). Mặc định = utcnow() nếu không khai
+    # (yêu cầu người dùng 2026-09-15: "ngày cấp chính là ngày trừ vào tồn kho... không được lấy
+    # ngày tạo làm ngày trừ tồn kho").
+    supply_date: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
     fifo_ok: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
     reason: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)
     quantity: Mapped[float] = mapped_column(Float, default=0.0)

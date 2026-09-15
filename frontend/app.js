@@ -3751,17 +3751,24 @@ async function showBatchPackLot(packLotId) {
 // mirror wireSearchableSelect ở Kho NVL) + BẮT BUỘC ghi lý do nếu chọn lô KHÁC lô FIFO cũ nhất.
 // `prefix` ("flmu"/"pkmu") tách id để dùng chung 1 cặp hàm cho cả lô lọc và lô thành phẩm.
 function materialUsageSectionHtml(prefix, usage, locked) {
+  // "Ngày cấp" (mốc trừ tồn kho, khai tay được, KHÁC "Ngày tạo" = giờ ghi vào hệ thống) chỉ có
+  // cột riêng ở Lọc (flmu) — Chiết (pkmu) đã có "Giờ bắt đầu chiết" (pack_date) khai chung 1 lần
+  // ở mức lô thành phẩm, không cần lặp lại theo từng dòng nguyên liệu (yêu cầu người dùng
+  // 2026-09-15: "cấp liệu cho lọc, lên men, thêm trường ngày cấp, ngày tạo thì tự động lấy thời
+  // gian tạo, ngày cấp chính là ngày trừ vào tồn kho").
+  const showSupplyDate = prefix === "flmu";
   return `<h3 style="margin-top:16px">Nguyên liệu ${prefix === "flmu" ? "lọc" : "chiết"}</h3>
     <div class="tablewrap"><table>
-      <thead><tr><th>Nguyên liệu</th><th>Số lô PM</th><th>Ngày lô</th><th>FIFO</th><th>Lý do (nếu khác FIFO)</th><th>Số lượng</th><th>ĐVT</th><th></th></tr></thead>
+      <thead><tr><th>Nguyên liệu</th><th>Số lô PM</th><th>Ngày lô</th>${showSupplyDate ? "<th>Ngày tạo</th><th>Ngày cấp</th>" : ""}<th>FIFO</th><th>Lý do (nếu khác FIFO)</th><th>Số lượng</th><th>ĐVT</th><th></th></tr></thead>
       <tbody>${usage.map(u => `<tr>
         <td>${esc(u.material_name)}</td><td class="muted">${esc(u.lot_pm || "—")}</td>
         <td class="muted">${u.lot_date ? fmt(u.lot_date) : "—"}</td>
+        ${showSupplyDate ? `<td class="muted">${u.created_at ? fmt(u.created_at) : "—"}</td><td class="muted">${u.supply_date ? fmt(u.supply_date) : "—"}</td>` : ""}
         <td>${fifoBadgeHtml(u.fifo_ok)}</td>
         <td class="muted">${esc(u.reason || "—")}</td>
         <td>${u.quantity}</td><td>${esc(u.uom)}</td>
         <td>${locked ? "" : `<button class="btn sm sec" data-delmatusage="${esc(u.usage_id)}">Xóa</button>`}</td></tr>`).join("") ||
-        `<tr><td colspan=8 class="muted">Chưa ghi nguyên liệu nào cho lô này.</td></tr>`}</tbody>
+        `<tr><td colspan=${showSupplyDate ? 10 : 8} class="muted">Chưa ghi nguyên liệu nào cho lô này.</td></tr>`}</tbody>
     </table></div>
     ${locked ? '<div class="muted" style="margin-top:6px">🔒 Hồ sơ EBR đã khóa — không thêm/sửa/xóa được nữa.</div>' : `
     <div class="muted" style="margin-top:6px">+ Thêm nguyên liệu — lấy từ tồn kho <b>Kho phân xưởng</b> (chọn lô sẽ trừ tồn kho thật ngay), gõ để tìm vật tư; chọn lô khác lô FIFO (cũ nhất) phải ghi rõ lý do.</div>
@@ -3772,6 +3779,8 @@ function materialUsageSectionHtml(prefix, usage, locked) {
       <div class="field"><label>Hoặc tên tự do</label><input id="${prefix}_name" placeholder="(nếu không chọn ở trên)"/></div>
       <div class="field"><label>SL thực tế</label><input id="${prefix}_qty" type="number" value="0" style="width:100px"/></div>
       <div class="field"><label>ĐVT</label><input id="${prefix}_uom" value="kg" size="4" readonly title="Tự động lấy theo đơn vị của nguyên vật liệu đã chọn — không sửa tay được"/></div>
+      ${showSupplyDate ? `<div class="field"><label>Ngày cấp <span class="muted" style="font-weight:400">(mốc trừ tồn kho)</span></label>
+        <input type="datetime-local" id="${prefix}_supply" value="${toDTLocal(new Date())}" max="${toDTLocal(new Date())}"/></div>` : ""}
       <div class="field" style="flex:1;min-width:220px"><label>Lý do <span class="muted" style="font-weight:400">(bắt buộc nếu chọn lô khác FIFO)</span></label><input id="${prefix}_reason" placeholder="VD: lô cũ đã hết chỗ chứa"/></div>
       <button class="btn sm" id="${prefix}_add" style="align-self:flex-end">+ Thêm</button>
     </div>`}`;
@@ -3806,8 +3815,10 @@ function wireMaterialUsageSection(prefix, lots, materials, opts) {
       const item = items.find(i => i.value === lotId);
       if (item && !item.isOldest && !reason) throw new Error("Lô đã chọn không phải lô FIFO (cũ nhất) của vật tư này — bắt buộc nhập Lý do.");
     }
+    const supplyEl = $(`${prefix}_supply`);
+    const supplyDate = supplyEl && supplyEl.value ? new Date(supplyEl.value).toISOString() : null;
     await POST(opts.postUrl, { lot_id: lotId, material_name: name, quantity: qty,
-      uom: $(`${prefix}_uom`).value.trim() || "kg", reason: reason || null });
+      uom: $(`${prefix}_uom`).value.trim() || "kg", reason: reason || null, supply_date: supplyDate });
     toast("Đã thêm nguyên liệu" + (lotId ? " — đã trừ tồn Kho phân xưởng" : ""));
     opts.onChange();
   });

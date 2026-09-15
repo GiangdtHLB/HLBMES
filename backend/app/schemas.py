@@ -2186,6 +2186,7 @@ class BatchFilterLotMaterialUsageIn(BaseModel):
     quantity: float
     uom: str = "kg"
     reason: Optional[str] = None   # bắt buộc nếu chọn lô KHÁC lô FIFO cũ nhất — xem add_filter_lot_material
+    supply_date: Optional[datetime] = None   # "Ngày cấp" — bỏ trống -> utcnow(), xem add_filter_lot_material
 
 
 class BatchFilterLotMaterialUsageOut(ORMModel):
@@ -2196,6 +2197,7 @@ class BatchFilterLotMaterialUsageOut(ORMModel):
     material_name: Optional[str] = None
     lot_pm: Optional[str] = None
     lot_date: Optional[datetime] = None
+    supply_date: Optional[datetime] = None
     fifo_ok: Optional[bool] = None
     reason: Optional[str] = None
     quantity: float = 0.0
