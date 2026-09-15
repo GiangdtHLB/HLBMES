@@ -261,7 +261,13 @@ def suggest_dispense(db: Session, batch_id: str) -> dict:
     FEFO ở Kho phân xưởng — CHỈ TÍNH, không trừ tồn. `alternatives` liệt kê MỌI lô khả dụng
     (Kho phân xưởng, còn hạn) của vật tư đó để người dùng có thể chọn lô KHÁC lô FIFO gợi ý
     (kèm lý do, xem _plan_consume). Người dùng xem bảng này rồi bấm "Áp dụng" sẽ gọi lại
-    dispense() với đúng lô/số lượng (có thể đã sửa) lấy từ đây."""
+    dispense() với đúng lô/số lượng (có thể đã sửa) lấy từ đây.
+
+    Mỗi dòng trả về CẢ 2 cặp tồn kho công ty/phân xưởng: `stock_company`/`stock_workshop` (tồn
+    HIỆN TẠI, thời gian thực lúc gọi API) và `stock_company_asof`/`stock_workshop_asof` (tồn
+    TẠI ĐÚNG THỜI ĐIỂM `batch.start_at` — dựng lại từ lịch sử StockMovement qua
+    stock_on_hand_as_of, không lẫn biến động kho xảy ra SAU khi mẻ đã bắt đầu nấu — yêu cầu
+    người dùng 2026-09-15, tránh nhầm với tồn hiện tại ở 2 cột đầu)."""
     batch = db.get(BatchExecution, batch_id)
     if not batch:
         raise NotFoundError("Batch không tồn tại.")
@@ -273,6 +279,13 @@ def suggest_dispense(db: Session, batch_id: str) -> dict:
     # thay thế (bom.codes_for_dispense) cộng dồn tồn của MỌI mã thành viên.
     company_stock = {r["material_code"]: r["on_hand"] for r in warehouse_svc.stock_on_hand(db, "Kho công ty")}
     workshop_stock = {r["material_code"]: r["on_hand"] for r in warehouse_svc.stock_on_hand(db, "Kho phân xưởng")}
+    # Tồn TẠI THỜI ĐIỂM MẺ BẮT ĐẦU (khác 2 dict trên là tồn HIỆN TẠI) — người dùng cần đối chiếu
+    # đúng số đã có lúc nấu, không lẫn với biến động kho xảy ra SAU đó (yêu cầu người dùng
+    # 2026-09-15). batch.start_at chắc chắn có giá trị ở đây vì _assert_dispensable đã kiểm tra.
+    company_stock_asof = {r["material_code"]: r["on_hand"]
+                          for r in warehouse_svc.stock_on_hand_as_of(db, batch.start_at, "Kho công ty")}
+    workshop_stock_asof = {r["material_code"]: r["on_hand"]
+                           for r in warehouse_svc.stock_on_hand_as_of(db, batch.start_at, "Kho phân xưởng")}
     name_by_code = {m.code: m.name for m in db.execute(select(Material)).scalars().all()}
     lines = []
     for l in cmp["lines"]:
@@ -311,12 +324,16 @@ def suggest_dispense(db: Session, batch_id: str) -> dict:
                              "uom": l["uom"], "planned": l["planned"],
                              "stock_company": round(company_stock.get(mcode, 0.0), 4),
                              "stock_workshop": round(workshop_stock.get(mcode, 0.0), 4),
+                             "stock_company_asof": round(company_stock_asof.get(mcode, 0.0), 4),
+                             "stock_workshop_asof": round(workshop_stock_asof.get(mcode, 0.0), 4),
                              "need": need, "picks": picks_by_member.get(mcode, []), "alternatives": alternatives,
                              "group_code": l["material_code"], "shortfall": group_shortfall})
             continue
         real_codes = bom.codes_for_dispense(db, l["material_code"])
         stock_company = round(sum(company_stock.get(c, 0.0) for c in real_codes), 4)
         stock_workshop = round(sum(workshop_stock.get(c, 0.0) for c in real_codes), 4)
+        stock_company_asof = round(sum(company_stock_asof.get(c, 0.0) for c in real_codes), 4)
+        stock_workshop_asof = round(sum(workshop_stock_asof.get(c, 0.0) for c in real_codes), 4)
         fefo_lots = _workshop_fefo_lots(db, l["material_code"], batch.start_at)
         alternatives = [{"lot_id": lot.lot_id, "lot_code": lot.lot_code, "quantity": round(_lot_avail_qty(lot), 4),
                         "uom": lot.uom, "expiry": lot.expiry.isoformat() if lot.expiry else None}
@@ -336,6 +353,7 @@ def suggest_dispense(db: Session, batch_id: str) -> dict:
         lines.append({"material_code": l["material_code"], "material_name": l.get("material_name"),
                      "uom": l["uom"], "planned": l["planned"],
                      "stock_company": stock_company, "stock_workshop": stock_workshop,
+                     "stock_company_asof": stock_company_asof, "stock_workshop_asof": stock_workshop_asof,
                      "need": need, "picks": picks, "alternatives": alternatives,
                      "shortfall": round(remaining, 4) if remaining > 1e-6 else 0.0})
     return {"batch_id": batch_id, "batch_code": batch.batch_code, "lines": lines}

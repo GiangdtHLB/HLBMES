@@ -687,16 +687,6 @@ def _assert_transfer_scope(user: User, loc_from: str, loc_to: str) -> None:
     )
 
 
-def _location_filter_clause(location_filter: str):
-    """`location_filter`: None (không lọc) | 'Kho công ty' | 'Kho phân xưởng' (khớp theo quy ước
-    "chứa 'phân xưởng'" — nhất quán với frontend)."""
-    if not location_filter:
-        return None
-    if _is_workshop_location(location_filter):
-        return func.lower(MaterialLot.location).contains("phân xưởng")
-    return ~func.coalesce(func.lower(MaterialLot.location), "").contains("phân xưởng")
-
-
 def stock_on_hand(db: Session, location: str = None) -> list[dict]:
     """Xem tồn kho theo vật tư (lọc theo kho nếu truyền `location`).
 
@@ -708,21 +698,26 @@ def stock_on_hand(db: Session, location: str = None) -> list[dict]:
 
     `pending_qc` = tổng SL đang ở lô HOLD (đã nhập kho vật lý nhưng chưa qua QC) và
     `actual_total` = on_hand + pending_qc — tổng SL thực tế đang nằm trong kho (kể cả lô chưa
-    qua QC), phục vụ đối chiếu kiểm kê thực tế, tách biệt với con số "khả dụng để xuất/chuyển"."""
-    stmt = (
-        select(MaterialLot.material_id, MaterialLot.status, func.sum(MaterialLot.quantity), MaterialLot.uom)
-        .where(MaterialLot.material_id.isnot(None),
-              MaterialLot.status.in_([LotStatus.AVAILABLE.value, LotStatus.RELEASED.value,
-                                       LotStatus.ON_HOLD.value]))
-    )
-    clause = _location_filter_clause(location)
-    if clause is not None:
-        stmt = stmt.where(clause)
-    rows = db.execute(stmt.group_by(MaterialLot.material_id, MaterialLot.status, MaterialLot.uom)).all()
+    qua QC), phục vụ đối chiếu kiểm kê thực tế, tách biệt với con số "khả dụng để xuất/chuyển".
+
+    SỬA 2026-09-15: trước đây lọc `location` bằng `_location_filter_clause` NGAY TRONG câu SQL
+    (mệnh đề phủ định `~...contains(...)` cho "Kho công ty") — kiểm chứng thật trên SQL Server
+    production phát hiện mệnh đề phủ định này KHÔNG lọc được gì (trả về y hệt không lọc), khiến
+    "Tồn kho công ty" hiển thị TRÙNG với "Tồn kho phân xưởng" cho mọi vật tư (yêu cầu người dùng
+    2026-09-15, phát hiện qua dòng "Gạo tẻ" ở gợi ý cấp liệu). Đổi sang lọc bằng PYTHON
+    (`_asof_loc_matcher`, đã dùng ổn định ở _material_balances_as_of/lot_on_hand_as_of) thay vì
+    dựa vào SQL — an toàn chắc chắn, không phụ thuộc cách SQL Server dịch mệnh đề phủ định."""
+    stmt = select(MaterialLot.material_id, MaterialLot.status, MaterialLot.quantity,
+                 MaterialLot.uom, MaterialLot.location).where(
+        MaterialLot.material_id.isnot(None),
+        MaterialLot.status.in_([LotStatus.AVAILABLE.value, LotStatus.RELEASED.value,
+                                 LotStatus.ON_HOLD.value]))
+    loc_matches = _asof_loc_matcher(location)
+    rows = [r for r in db.execute(stmt).all() if loc_matches(r.location)]
     if not rows:
         return []
     agg = {}
-    for material_id, status, total, uom in rows:
+    for material_id, status, total, uom, _loc in rows:
         a = agg.setdefault(material_id, {"uom": uom, "available": 0.0, "pending_qc": 0.0})
         if status == LotStatus.ON_HOLD.value:
             a["pending_qc"] += total or 0
@@ -1311,14 +1306,16 @@ def _request_dict(db: Session, req: MaterialRequest, lines: list[MaterialRequest
 def _stock_at_company(db: Session, material_id: str) -> float:
     """Tổng tồn KHẢ DỤNG của 1 vật tư tại Kho công ty (dùng để chặn đề nghị vượt tồn) — loại
     trừ lô đang HOLD/SCRAPPED, nếu không phiếu đề nghị vẫn tạo được nhưng không bao giờ xuất
-    nổi vì issue()/transfer() chặn lô hold (mirror material_fifo_detail đã lọc đúng)."""
-    clause = _location_filter_clause("Kho công ty")
-    total = db.execute(
-        select(func.sum(MaterialLot.quantity)).where(
-            MaterialLot.material_id == material_id, clause,
+    nổi vì issue()/transfer() chặn lô hold (mirror material_fifo_detail đã lọc đúng).
+
+    Lọc kho bằng PYTHON (`_asof_loc_matcher`) — xem lý do ở stock_on_hand (SỬA 2026-09-15)."""
+    loc_matches = _asof_loc_matcher("Kho công ty")
+    rows = db.execute(
+        select(MaterialLot.quantity, MaterialLot.location).where(
+            MaterialLot.material_id == material_id,
             MaterialLot.status.in_([LotStatus.AVAILABLE.value, LotStatus.RELEASED.value]))
-    ).scalar()
-    return total or 0.0
+    ).all()
+    return sum(q for q, loc in rows if loc_matches(loc)) or 0.0
 
 
 def _aggregate_source_material_lines(db: Session, source_type: str, source_id: str) -> list[dict]:
@@ -1584,13 +1581,15 @@ def _is_oldest_company_lot(db: Session, material_id: str, lot_id: str) -> bool:
     Chỉ so sánh trong số lô KHẢ DỤNG (không tính lô đang HOLD/SCRAPPED) — lô cũ nhất tuyệt đối
     có thể đang chờ duyệt QC nên không thể chọn được; nếu vẫn tính lô đó vào danh sách so sánh,
     thủ kho chọn đúng lô khả dụng cũ nhất vẫn bị báo oan "vi phạm FIFO" dù không có lựa chọn nào
-    khác."""
-    clause = _location_filter_clause("Kho công ty")
-    candidates = db.execute(
-        select(MaterialLot).where(MaterialLot.material_id == material_id, MaterialLot.quantity > 0, clause,
+    khác.
+
+    Lọc kho bằng PYTHON (`_asof_loc_matcher`) — xem lý do ở stock_on_hand (SỬA 2026-09-15)."""
+    loc_matches = _asof_loc_matcher("Kho công ty")
+    candidates = [l for l in db.execute(
+        select(MaterialLot).where(MaterialLot.material_id == material_id, MaterialLot.quantity > 0,
                                   MaterialLot.status.in_([LotStatus.AVAILABLE.value, LotStatus.RELEASED.value]))
         .order_by(MaterialLot.created_at)
-    ).scalars().all()
+    ).scalars().all() if loc_matches(l.location)]
     return bool(candidates) and candidates[0].lot_id == lot_id
 
 
@@ -1599,13 +1598,15 @@ def is_oldest_workshop_lot(db: Session, material_id: str, lot_id: str) -> bool:
     không — mirror _is_oldest_company_lot (cùng loại trừ lô đang HOLD/SCRAPPED khỏi so sánh),
     dùng cho NVL dùng thật ở lô lọc/lô thành phẩm (pipeline "Mẻ sản xuất", xem
     BatchFilterLotMaterialUsage/BatchPackLotMaterialUsage.fifo_ok). Gọi NGAY TRƯỚC LÚC issue()
-    trừ kho — so sánh live sau khi đã xuất sẽ sai lệch vì lô có thể đã hết."""
-    clause = _location_filter_clause("Kho phân xưởng")
-    candidates = db.execute(
-        select(MaterialLot).where(MaterialLot.material_id == material_id, MaterialLot.quantity > 0, clause,
+    trừ kho — so sánh live sau khi đã xuất sẽ sai lệch vì lô có thể đã hết.
+
+    Lọc kho bằng PYTHON (`_asof_loc_matcher`) — xem lý do ở stock_on_hand (SỬA 2026-09-15)."""
+    loc_matches = _asof_loc_matcher("Kho phân xưởng")
+    candidates = [l for l in db.execute(
+        select(MaterialLot).where(MaterialLot.material_id == material_id, MaterialLot.quantity > 0,
                                   MaterialLot.status.in_([LotStatus.AVAILABLE.value, LotStatus.RELEASED.value]))
         .order_by(MaterialLot.created_at)
-    ).scalars().all()
+    ).scalars().all() if loc_matches(l.location)]
     return bool(candidates) and candidates[0].lot_id == lot_id
 
 
@@ -2605,10 +2606,8 @@ def create_count(db: Session, location: Optional[str], user: User, note: str = N
     require_perm(user, "warehouse.receive")
     _assert_location_scope(user, location)
     stmt = select(MaterialLot).where(MaterialLot.material_id.isnot(None), MaterialLot.quantity != 0)
-    clause = _location_filter_clause(location)
-    if clause is not None:
-        stmt = stmt.where(clause)
-    lots = db.execute(stmt).scalars().all()
+    loc_matches = _asof_loc_matcher(location)
+    lots = [l for l in db.execute(stmt).scalars().all() if loc_matches(l.location)]
     if not lots:
         raise DomainError("Không có lô nào đang tồn tại kho này để kiểm kê.")
     stamp = f"{utcnow():%y%m%d}-{new_id()[:4].upper()}"

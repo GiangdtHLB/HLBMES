@@ -6,11 +6,21 @@ dữ liệu tách kiểu CŨ").
 Phạm vi (yêu cầu người dùng 2026-09-15): rà toàn hệ thống thấy 154 lô (20 "lô cha" gốc, mỗi cha
 có 1-18 "lô con" mang mã KHÁC hẳn cha) là tồn dư từ TRƯỚC khi code fix được deploy lên server
 thật — không phải lỗi đang tiếp diễn (đã xác nhận: mọi lần tách MỚI sau khi fix đều tái dùng
-đúng lot_code, không sinh mã mới nữa). Đã kiểm chứng bằng dữ liệu thật: với MỌI cặp cha/con kiểm
-tra, "lô cha còn lại" + "tổng mọi lô con" = ĐÚNG BẰNG tổng số lượng đã nhập kho ban đầu (StockMovement
-type=receipt) của lô cha — nghĩa là KHÔNG có phần nào trong số đó từng bị tiêu thụ/xuất đi nơi
-khác, an toàn để gộp NGUYÊN VẸN về lại đúng 1 dòng duy nhất (mã lô cha gốc), không mất/không dư
-số lượng.
+đúng lot_code, không sinh mã mới nữa).
+
+QUAN TRỌNG — sửa 2026-09-15 sau khi đối chiếu dữ liệu thật: điều kiện an toàn BAN ĐẦU ("đúng 1
+StockMovement") vừa THIẾU vừa THỪA:
+  - THIẾU: không kiểm tra `parent.location == child.location`. Kiểm tra thật thấy cặp DUY NHẤT
+    khớp điều kiện cũ (TD-KCT-22 → 2026-00069) có lô cha ở "Kho công ty" nhưng lô con đang THẬT
+    SỰ nằm ở "Kho phân xưởng" (transfer thật, CHƯA hoàn tác) — nếu gộp sẽ cộng nhầm số lượng vào
+    sai kho, làm sai lệch tồn kho thật giữa 2 kho. Đã thêm điều kiện bắt buộc: chỉ gộp khi 2 lô
+    CÙNG vị trí kho hiện tại.
+  - THỪA: yêu cầu "đúng 1 giao dịch" loại bỏ nhầm các lô con đã "Xuất theo đề nghị" rồi bị
+    "Hoàn tác" (undo_fulfill_line) — 2 giao dịch transfer (đi + hoàn tác) nhưng NET không đổi gì,
+    lô con thực chất CHƯA từng được dùng thật, quay đúng về vị trí ban đầu. Đổi điều kiện thành:
+    MỌI StockMovement của lô con đều phải là movement_type="transfer" (không giới hạn số lượng
+    giao dịch) — nếu có bất kỳ issue/receipt/adjust nào khác xen vào, vẫn coi là có lịch sử độc
+    lập, không tự ý gộp.
 
 Với MỖI cặp cha/con hợp lệ để gộp:
   1. Cộng dồn quantity của lô con vào lô cha (parent.quantity += child.quantity).
@@ -28,9 +38,10 @@ AN TOÀN — BỎ QUA (không gộp, in ra để kiểm tra tay) nếu lô con K
   - Không phải nguồn (from_id) của bất kỳ GenealogyEdge nào khác (nghĩa là chưa từng bị tách tiếp/
     tiêu thụ cho mẻ/dùng cho lô lọc/lô thành phẩm nào — nếu có, gộp sẽ làm sai lệch chuỗi truy xuất
     nguồn gốc thật, KHÔNG được tự ý gộp).
-  - Không có StockMovement nào khác NGOÀI đúng 1 dòng "transfer" đã tạo ra nó (nếu có thêm issue/
-    receipt/adjust/return riêng, lô con đã có lịch sử độc lập, không đơn thuần "vừa tách xong nằm
-    im" — không tự ý gộp).
+  - MỌI StockMovement của lô con đều là movement_type="transfer" (không có issue/receipt/adjust
+    nào khác xen vào — nếu có, lô con đã có lịch sử độc lập, không tự ý gộp).
+  - `location` hiện tại của lô con TRÙNG với `location` hiện tại của lô cha (nếu khác kho, lô con
+    đang là tồn thật ở kho khác — gộp sẽ sai lệch tồn kho theo từng kho, KHÔNG được gộp).
   - status khác "on_hold" (đang chờ khai báo/duyệt QC — không tự ý gộp khi chưa rõ kết quả).
 
 QUAN TRỌNG — ĐỌC TRƯỚC KHI CHẠY (giống hệt quy ước reset_nvl_dispense_and_requests.py):
@@ -84,10 +95,16 @@ def _find_merge_candidates(db) -> tuple[list[tuple], list[str]]:
             continue
         movements = db.execute(select(StockMovement).where(
             StockMovement.lot_id == child.lot_id)).scalars().all()
-        if len(movements) != 1 or movements[0].movement_type != "transfer":
+        non_transfer = [m for m in movements if m.movement_type != "transfer"]
+        if non_transfer:
             skipped.append(f"Lô {child.lot_code} (tách từ {parent.lot_code}): có "
-                           f"{len(movements)} giao dịch kho (khác đúng 1 lần tách) — bỏ qua, "
-                           "cần kiểm tra tay.")
+                           f"{len(non_transfer)} giao dịch khác transfer (issue/receipt/adjust) — "
+                           "bỏ qua, cần kiểm tra tay.")
+            continue
+        if child.location != parent.location:
+            skipped.append(f"Lô {child.lot_code} (tách từ {parent.lot_code}): đang ở kho "
+                           f"'{child.location}' khác kho lô cha '{parent.location}' — bỏ qua, "
+                           "đây là tồn thật ở kho khác, không tự ý gộp.")
             continue
         if child.status == LotStatus.ON_HOLD.value:
             skipped.append(f"Lô {child.lot_code} (tách từ {parent.lot_code}): đang ON HOLD — "

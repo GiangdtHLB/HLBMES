@@ -346,7 +346,8 @@
           ? `<span style="color:var(--red)">thiếu ${l.shortfall} ${esc(l.uom || "")}</span>`
           : '<span style="color:var(--green)">đủ</span>';
         const matLabel = l.material_name ? `${esc(l.material_code)} ${esc(l.material_name)}` : esc(l.material_code);
-        const stockCells = `<td>${l.stock_company} ${esc(l.uom || "")}</td><td>${l.stock_workshop} ${esc(l.uom || "")}</td>`;
+        const stockCells = `<td>${l.stock_company} ${esc(l.uom || "")}</td><td>${l.stock_workshop} ${esc(l.uom || "")}</td>` +
+          `<td>${l.stock_company_asof} ${esc(l.uom || "")}</td><td>${l.stock_workshop_asof} ${esc(l.uom || "")}</td>`;
         if (!l.picks.length && !l.alternatives.length) {
           // Không có lô nào của vật tư này (kể cả tự chọn tay) — thật sự không có gì để cấp.
           rows.push(`<tr>
@@ -367,7 +368,7 @@
         rowPicks.forEach((p, pi) => {
           rows.push(`<tr${isRedundantGroupMember ? ' style="opacity:.5"' : ""}>
             <td>${pi === 0 ? matLabel : ""}</td>
-            ${pi === 0 ? stockCells : "<td></td><td></td>"}
+            ${pi === 0 ? stockCells : "<td></td><td></td><td></td><td></td>"}
             <td>${pi === 0 ? l.planned + " " + esc(l.uom || "") : ""}</td>
             <td>${pi === 0 ? l.need + " " + esc(l.uom || "") : ""}</td>
             <td><input type="number" class="sg-qty" data-li="${li}" data-pi="${pi}" value="${p.quantity}" style="width:80px"${isRedundantGroupMember ? " disabled" : ""}/></td>
@@ -379,7 +380,9 @@
         });
       });
       $("sg_result").innerHTML = `<div class="tablewrap"><table>
-        <thead><tr><th>Vật tư</th><th>Tồn kho công ty</th><th>Tồn kho phân xưởng</th><th>Định mức</th><th>Còn thiếu</th><th>SL thực tế</th><th>Lô sẽ dùng</th><th>FIFO?</th><th>Ghi chú (nếu khác FIFO)</th><th>Tình trạng</th></tr></thead>
+        <thead><tr><th>Vật tư</th><th>Tồn kho công ty</th><th>Tồn kho phân xưởng</th>
+          <th>Tồn kho công ty (lúc mẻ bắt đầu)</th><th>Tồn kho phân xưởng (lúc mẻ bắt đầu)</th>
+          <th>Định mức</th><th>Còn thiếu</th><th>SL thực tế</th><th>Lô sẽ dùng</th><th>FIFO?</th><th>Ghi chú (nếu khác FIFO)</th><th>Tình trạng</th></tr></thead>
         <tbody>${rows.join("")}</tbody></table></div>
         <div class="row" style="margin-top:8px;align-items:center">
           <button class="btn" id="sg_apply">✔ Áp dụng gợi ý</button>
@@ -399,8 +402,21 @@
         updateFifo();
       });
       $("sg_apply").onclick = () => guard(async () => {
-        if (sug.lines.some(l => l.shortfall > 0)) {
-          toast("Còn vật tư thiếu tồn kho — bổ sung đủ tồn trước khi áp dụng cấp liệu", "err");
+        // Chỉ chặn khi dòng nào đó BỊ THIẾU tồn NHƯNG người dùng vẫn đang cố cấp 1 phần dở dang
+        // (SL thực tế > 0 nhưng < Còn thiếu) — nếu người dùng chủ động để SL thực tế = 0 (không
+        // lấy vật tư đó lần này) thì KHÔNG tính là lỗi, vẫn cho áp dụng bình thường các dòng khác
+        // (yêu cầu người dùng 2026-09-15: trước đây dùng thẳng `shortfall` gốc lúc gợi ý — không
+        // phản ánh việc người dùng đã tự sửa SL thực tế về 0 để bỏ qua dòng đó).
+        const qtyByLi = {};
+        document.querySelectorAll(".sg-qty").forEach(inp => {
+          qtyByLi[inp.dataset.li] = (qtyByLi[inp.dataset.li] || 0) + (parseFloat(inp.value) || 0);
+        });
+        const shortLine = sug.lines.find((l, li) => {
+          const entered = qtyByLi[li] || 0;
+          return entered > 1e-9 && entered < l.need - 1e-6;
+        });
+        if (shortLine) {
+          toast(`"${shortLine.material_code}" chưa nhập đủ SL thực tế theo Còn thiếu — nhập đủ hoặc để 0 nếu không cấp vật tư này`, "err");
           return;
         }
         const lotSels = Array.from(document.querySelectorAll(".sg-lot"));
