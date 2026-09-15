@@ -3401,7 +3401,7 @@ async function showBatchFilterLot(filterLotId) {
     <div class="row" style="flex-wrap:wrap;gap:6px;margin-top:4px">
       ${orderMaterials.map((m, mi) => `<button type="button" class="btn sm sec" data-flmusuggest="${mi}">${esc(m.material_code ? `${m.material_code} — ${m.material_name}` : m.material_name)} (${m.qty_planned} ${esc(m.uom || "")})</button>`).join("")}
     </div>` : ""}
-    ${materialUsageSectionHtml("flmu", matUsage, lk)}
+    ${materialUsageSectionHtml("flmu", matUsage, lk, f.ended_at)}
     <div class="row" style="margin-top:10px">
       ${(!lk && f.status === "dang_loc") ? '<button class="btn sm sec" id="fl_finish">Hoàn thành lọc</button>' : ""}
       ${(!lk && !f.qc_approved) ? '<button class="btn sm sec" id="fl_approve">✔ Duyệt KCS</button>' : ""}
@@ -3411,37 +3411,26 @@ async function showBatchFilterLot(filterLotId) {
       ${lk ? "" : '<button class="btn sm" style="background:var(--red)" id="fl_del">Xóa lô lọc</button>'}
     </div>
     <div class="muted" style="margin-top:10px">Lô lọc chỉ dùng để lọc — tách lô thành phẩm (chiết) thực hiện ở màn <b>"Chiết"</b>, chọn tank BBT tương ứng.</div>`;
-  wireMaterialUsageSection("flmu", lots, materials,
+  const flmuHandle = wireMaterialUsageSection("flmu", lots, materials,
     { postUrl: `/batch-filter-lots/${filterLotId}/materials`, deleteBaseUrl: `/batch-filter-lots/materials`,
+      suggestUrl: `/batch-filter-lots/${filterLotId}/materials/suggest`,
       onChange: () => showBatchFilterLot(filterLotId) });
-  // Gợi ý vật tư từ lệnh lọc — nếu vật tư gợi ý (có material_id, không phải tên tự do) đang có
-  // tồn ở Kho phân xưởng thì TỰ CHỌN LUÔN đúng lô FIFO (cũ nhất) của vật tư đó — mirror đúng
-  // cách wireSearchableSelect/wireMaterialUsageSection tự tính (workshopLots/oldestByMaterial),
-  // để bấm gợi ý xong hiện luôn Số lô PM/Ngày lô/FIFO như chọn tay, không phải tự tìm lại. Chỉ
-  // rơi về điền tên tự do khi vật tư đó KHÔNG có lô nào còn tồn ở Kho phân xưởng (không có gì
-  // để chọn FIFO). Người dùng vẫn đổi lô/tên tự do khác trước khi bấm "+ Thêm" như bình thường,
-  // không tự động gửi.
+  // Gợi ý vật tư từ lệnh lọc — điền sẵn ĐÚNG vật tư (material_id) vào form "+ Thêm nguyên liệu",
+  // hệ thống tự tính lô FIFO qua pickMaterial() (yêu cầu người dùng 2026-09-16: bỏ hẳn đường
+  // "tên tự do" — gợi ý không có material_id thật thì không điền được gì, báo cho biết).
   const flmuMatById = Object.fromEntries(materials.map(m => [m.material_id, m]));
-  const flmuWorkshopLots = sortLotsFifo(lots.filter(l => l.quantity > 0 && l.status !== "on_hold" && /phân xưởng/i.test(l.location || "")));
-  const flmuOldestByMaterial = {};
-  flmuWorkshopLots.forEach(l => { if (l.material_id && !(l.material_id in flmuOldestByMaterial)) flmuOldestByMaterial[l.material_id] = l; });
   document.querySelectorAll("[data-flmusuggest]").forEach(b => b.onclick = () => {
     const m = orderMaterials[parseInt(b.dataset.flmusuggest, 10)];
     if (!m) return;
-    const fifoLot = m.material_id ? flmuOldestByMaterial[m.material_id] : null;
-    if (fifoLot) {
-      const mat = flmuMatById[fifoLot.material_id];
-      if ($("flmu_mat_lot")) $("flmu_mat_lot").value = fifoLot.lot_id;
-      if ($("flmu_mat_txt")) $("flmu_mat_txt").value = `${mat ? mat.name : fifoLot.lot_code} — lô ${fifoLot.lot_code} (còn ${fifoLot.quantity}${fifoLot.uom}, nhập ${fmt(fifoLot.created_at)})`;
-      if ($("flmu_name")) $("flmu_name").value = "";
-      if ($("flmu_uom")) $("flmu_uom").value = fifoLot.uom || m.uom || "";
-    } else {
-      if ($("flmu_mat_lot")) $("flmu_mat_lot").value = "";
-      if ($("flmu_mat_txt")) $("flmu_mat_txt").value = "";
-      if ($("flmu_name")) $("flmu_name").value = m.material_name || "";
-      if ($("flmu_uom")) $("flmu_uom").value = m.uom || "";
+    if (!m.material_id || !flmuHandle) {
+      toast(`"${m.material_name || m.material_code}" không có vật tư thật trong danh mục — tự tìm và chọn tay ở ô Vật tư bên dưới.`, "err");
+      return;
     }
     if ($("flmu_qty")) $("flmu_qty").value = m.qty_planned || "";
+    // Set SL TRƯỚC rồi mới pickMaterial() (gọi refreshSuggest() nội bộ ngay sau khi chọn vật tư)
+    // — nếu làm ngược lại, gợi ý FIFO sẽ tính với SL cũ/0 vì set qty bằng .value = không tự bắn
+    // sự kiện "input".
+    flmuHandle.pickMaterial(m.material_id, flmuMatById[m.material_id] ? flmuMatById[m.material_id].name : m.material_name);
   });
   if ($("fl_finish")) $("fl_finish").onclick = () => guard(async () => {
     await POST(`/batch-filter-lots/${filterLotId}/finish-filtering`, {});
@@ -3685,7 +3674,7 @@ async function showBatchPackLot(packLotId) {
     <div class="muted" style="margin-top:8px">${pkQc.can_release ? '<span style="color:var(--green)">✓ Đã đủ chỉ tiêu bắt buộc</span>' :
       pkQc.pending.length ? `⚠ Còn thiếu: ${pkQc.pending.map(esc).join(", ")}` :
       '<span style="color:var(--red)">✗ Có chỉ tiêu bắt buộc không đạt (FAIL)</span>'}</div>`}
-    ${materialUsageSectionHtml("pkmu", matUsage, lk)}
+    ${materialUsageSectionHtml("pkmu", matUsage, lk, p.ended_at)}
     <div class="row" style="margin-top:10px">
       ${p.approved ? "" : '<button class="btn sm sec" id="pk_approve">✔ Duyệt KCS</button>'}
       ${(p.approved && !p.stocked) ? '<button class="btn sm sec" id="pk_release_wms">📦 Duyệt nhập kho TP</button>' : ""}
@@ -3697,6 +3686,7 @@ async function showBatchPackLot(packLotId) {
     </div>`;
   wireMaterialUsageSection("pkmu", lots, materials,
     { postUrl: `/batch-pack-lots/${packLotId}/materials`, deleteBaseUrl: `/batch-pack-lots/materials`,
+      suggestUrl: `/batch-pack-lots/${packLotId}/materials/suggest`,
       onChange: () => showBatchPackLot(packLotId) });
   $("pk_ebr").onclick = () => openPackLotEBR(packLotId);
   $("pk_audit").onclick = (e) => { e.preventDefault(); document.querySelector('[data-view="audit"]').click(); setTimeout(() => { $("au_entity").value = packLotId; $("au_load").click(); }, 50); };
@@ -3750,76 +3740,116 @@ async function showBatchPackLot(packLotId) {
 // (yêu cầu người dùng 2026-09-01) — lấy theo FIFO (cũ nhất trước, gõ-để-tìm thay <select> dài
 // mirror wireSearchableSelect ở Kho NVL) + BẮT BUỘC ghi lý do nếu chọn lô KHÁC lô FIFO cũ nhất.
 // `prefix` ("flmu"/"pkmu") tách id để dùng chung 1 cặp hàm cho cả lô lọc và lô thành phẩm.
-function materialUsageSectionHtml(prefix, usage, locked) {
-  // "Ngày cấp" (mốc trừ tồn kho, khai tay được, KHÁC "Ngày tạo" = giờ ghi vào hệ thống) chỉ có
-  // cột riêng ở Lọc (flmu) — Chiết (pkmu) đã có "Giờ bắt đầu chiết" (pack_date) khai chung 1 lần
-  // ở mức lô thành phẩm, không cần lặp lại theo từng dòng nguyên liệu (yêu cầu người dùng
-  // 2026-09-15: "cấp liệu cho lọc, lên men, thêm trường ngày cấp, ngày tạo thì tự động lấy thời
-  // gian tạo, ngày cấp chính là ngày trừ vào tồn kho").
-  const showSupplyDate = prefix === "flmu";
-  return `<h3 style="margin-top:16px">Nguyên liệu ${prefix === "flmu" ? "lọc" : "chiết"}</h3>
+function materialUsageSectionHtml(prefix, usage, locked, endedAt) {
+  // "Ngày cấp" LUÔN = giờ kết thúc mẻ lọc/mẻ chiết (endedAt — BatchFilterLot.ended_at /
+  // BatchPackLot.ended_at), KHÔNG cho khai tay nữa (yêu cầu người dùng 2026-09-16: "lấy ngày
+  // cấp là ngày kết thúc của mẻ lọc và mẻ chiết, không cho tự điền") — khác "Ngày tạo" (giờ ghi
+  // vào hệ thống, luôn utcnow() thật). Chưa có endedAt thì KHÔNG cho thêm nguyên liệu (không có
+  // mốc để trừ tồn kho đúng).
+  const stageLabel = prefix === "flmu" ? "lọc" : "chiết";
+  return `<h3 style="margin-top:16px">Nguyên liệu ${stageLabel}</h3>
     <div class="tablewrap"><table>
-      <thead><tr><th>Nguyên liệu</th><th>Số lô PM</th><th>Ngày lô</th>${showSupplyDate ? "<th>Ngày tạo</th><th>Ngày cấp</th>" : ""}<th>FIFO</th><th>Lý do (nếu khác FIFO)</th><th>Số lượng</th><th>ĐVT</th><th></th></tr></thead>
+      <thead><tr><th>Nguyên liệu</th><th>Số lô PM</th><th>Ngày lô</th><th>Ngày tạo</th><th>Ngày cấp</th><th>FIFO</th><th>Lý do (nếu khác FIFO)</th><th>Số lượng</th><th>ĐVT</th><th></th></tr></thead>
       <tbody>${usage.map(u => `<tr>
         <td>${esc(u.material_name)}</td><td class="muted">${esc(u.lot_pm || "—")}</td>
         <td class="muted">${u.lot_date ? fmt(u.lot_date) : "—"}</td>
-        ${showSupplyDate ? `<td class="muted">${u.created_at ? fmt(u.created_at) : "—"}</td><td class="muted">${u.supply_date ? fmt(u.supply_date) : "—"}</td>` : ""}
+        <td class="muted">${u.created_at ? fmt(u.created_at) : "—"}</td>
+        <td class="muted">${u.supply_date ? fmt(u.supply_date) : "—"}</td>
         <td>${fifoBadgeHtml(u.fifo_ok)}</td>
         <td class="muted">${esc(u.reason || "—")}</td>
         <td>${u.quantity}</td><td>${esc(u.uom)}</td>
         <td>${locked ? "" : `<button class="btn sm sec" data-delmatusage="${esc(u.usage_id)}">Xóa</button>`}</td></tr>`).join("") ||
-        `<tr><td colspan=${showSupplyDate ? 10 : 8} class="muted">Chưa ghi nguyên liệu nào cho lô này.</td></tr>`}</tbody>
+        `<tr><td colspan=10 class="muted">Chưa ghi nguyên liệu nào cho lô này.</td></tr>`}</tbody>
     </table></div>
-    ${locked ? '<div class="muted" style="margin-top:6px">🔒 Hồ sơ EBR đã khóa — không thêm/sửa/xóa được nữa.</div>' : `
-    <div class="muted" style="margin-top:6px">+ Thêm nguyên liệu — lấy từ tồn kho <b>Kho phân xưởng</b> (chọn lô sẽ trừ tồn kho thật ngay), gõ để tìm vật tư; chọn lô khác lô FIFO (cũ nhất) phải ghi rõ lý do.</div>
+    ${locked ? '<div class="muted" style="margin-top:6px">🔒 Hồ sơ EBR đã khóa — không thêm/sửa/xóa được nữa.</div>' :
+      !endedAt ? `<div class="muted" style="margin-top:6px;color:var(--red)">⚠ Lô ${stageLabel} chưa có "Giờ kết thúc" — kết thúc mẻ ${stageLabel} trước khi thêm nguyên liệu (Ngày cấp lấy đúng giờ kết thúc này).</div>` : `
+    <div class="muted" style="margin-top:6px">+ Thêm nguyên liệu — chọn VẬT TƯ (hệ thống tự lấy đúng lô theo FIFO tại tồn kho <b>Kho phân xưởng</b> ĐÚNG THỜI ĐIỂM kết thúc mẻ ${stageLabel} — ${esc(fmt(endedAt))}, không phải tồn hiện tại); không đủ tồn tại thời điểm đó sẽ báo thiếu và không cho thêm.</div>
     <div class="row" style="margin-top:4px">
-      <div class="field" style="min-width:280px"><label>Tìm vật tư trong tồn Kho phân xưởng</label>
+      <div class="field" style="min-width:280px"><label>Vật tư (tồn Kho phân xưởng)</label>
         <input id="${prefix}_mat_txt" placeholder="Gõ tên vật tư..." autocomplete="off"/>
-        <input type="hidden" id="${prefix}_mat_lot"/></div>
-      <div class="field"><label>Hoặc tên tự do</label><input id="${prefix}_name" placeholder="(nếu không chọn ở trên)"/></div>
+        <input type="hidden" id="${prefix}_mat_id"/></div>
       <div class="field"><label>SL thực tế</label><input id="${prefix}_qty" type="number" value="0" style="width:100px"/></div>
-      <div class="field"><label>ĐVT</label><input id="${prefix}_uom" value="kg" size="4" readonly title="Tự động lấy theo đơn vị của nguyên vật liệu đã chọn — không sửa tay được"/></div>
-      ${showSupplyDate ? `<div class="field"><label>Ngày cấp <span class="muted" style="font-weight:400">(mốc trừ tồn kho)</span></label>
-        <input type="datetime-local" id="${prefix}_supply" value="${toDTLocal(new Date())}" max="${toDTLocal(new Date())}"/></div>` : ""}
+      <div class="field"><label>ĐVT</label><input id="${prefix}_uom" value="" size="4" readonly title="Tự động lấy theo đơn vị của vật tư đã chọn"/></div>
+      <div class="field" style="min-width:260px"><label>Lô sẽ dùng <span class="muted" style="font-weight:400">(gợi ý FIFO)</span></label>
+        <select id="${prefix}_override_lot"><option value="">— Tự động theo FIFO —</option></select></div>
       <div class="field" style="flex:1;min-width:220px"><label>Lý do <span class="muted" style="font-weight:400">(bắt buộc nếu chọn lô khác FIFO)</span></label><input id="${prefix}_reason" placeholder="VD: lô cũ đã hết chỗ chứa"/></div>
       <button class="btn sm" id="${prefix}_add" style="align-self:flex-end">+ Thêm</button>
-    </div>`}`;
+    </div>
+    <div id="${prefix}_suggest" class="muted" style="margin-top:6px"></div>`}`;
 }
 function wireMaterialUsageSection(prefix, lots, materials, opts) {
-  // Hồ sơ đã khóa -> materialUsageSectionHtml không render form "+ Thêm"/nút "Xóa" nào cả (xem
-  // đó) — không có gì để wire (2026-09-02, audit module "Mẻ sản xuất": trước đây HTML vẫn luôn
-  // render form dù đã khóa, chỉ bị chặn SAU KHI bấm Lưu bằng lỗi 409 từ server).
+  // Hồ sơ đã khóa HOẶC chưa có "Ngày cấp" (endedAt) -> materialUsageSectionHtml không render
+  // form "+ Thêm" (xem đó) — không có gì để wire (2026-09-02, audit "Mẻ sản xuất": trước đây
+  // HTML vẫn luôn render form dù đã khóa, chỉ bị chặn SAU KHI bấm Lưu bằng lỗi 409 từ server).
   if (!$(`${prefix}_add`)) return;
   const matById = Object.fromEntries(materials.map(m => [m.material_id, m]));
   const workshopLots = sortLotsFifo(lots.filter(l => l.quantity > 0 && l.status !== "on_hold" && /phân xưởng/i.test(l.location || "")));
-  const oldestByMaterial = {};
-  workshopLots.forEach(l => { if (l.material_id && !(l.material_id in oldestByMaterial)) oldestByMaterial[l.material_id] = l.lot_id; });
-  const items = workshopLots.map(l => {
+  // Chọn theo VẬT TƯ (không phải lô — yêu cầu người dùng 2026-09-16: bỏ "tên tự do", hệ thống tự
+  // chọn lô FIFO tại đúng thời điểm "Ngày cấp") — mỗi vật tư CÓ tồn ở Kho phân xưởng hiện 1 dòng,
+  // ĐVT lấy theo lô đầu tiên gặp (mọi lô cùng vật tư luôn cùng ĐVT).
+  const matItems = [];
+  const seenMat = new Set();
+  workshopLots.forEach(l => {
+    if (!l.material_id || seenMat.has(l.material_id)) return;
+    seenMat.add(l.material_id);
     const mat = matById[l.material_id];
-    const isOldest = !l.material_id || oldestByMaterial[l.material_id] === l.lot_id;
-    return { value: l.lot_id, isOldest, uom: l.uom,
-      label: `${mat ? mat.name : l.lot_code} — lô ${l.lot_code} (còn ${l.quantity}${l.uom}, nhập ${fmt(l.created_at)})${isOldest ? "" : " ⚠ không phải lô FIFO"}` };
+    matItems.push({ value: l.material_id, uom: l.uom, label: mat ? mat.name : l.lot_code });
   });
-  // ĐVT LUÔN lấy theo đơn vị thật của lô NVL đã chọn — không cho gõ tay để tránh ghi sai đơn vị
-  // so với tồn kho thật (yêu cầu người dùng 2026-09-01).
-  wireSearchableSelect(`${prefix}_mat_txt`, `${prefix}_mat_lot`, items,
-    (item) => { $(`${prefix}_uom`).value = item.uom || "kg"; });
+  const lotsByMaterial = (materialId) => sortLotsFifo(workshopLots.filter(l => l.material_id === materialId));
+
+  const renderOverrideOptions = (materialId) => {
+    const sel = $(`${prefix}_override_lot`);
+    if (!sel) return;
+    const mLots = lotsByMaterial(materialId);
+    sel.innerHTML = '<option value="">— Tự động theo FIFO —</option>' +
+      mLots.map((l, i) => `<option value="${esc(l.lot_id)}">${esc(l.lot_code)} (còn ${l.quantity}${esc(l.uom)}, nhập ${fmt(l.created_at)})${i === 0 ? "" : " ⚠ không phải lô FIFO"}</option>`).join("");
+  };
+
+  let suggestSeq = 0;
+  const refreshSuggest = async () => {
+    const box = $(`${prefix}_suggest`);
+    const materialId = $(`${prefix}_mat_id`).value;
+    const qty = parseFloat($(`${prefix}_qty`).value);
+    if (!box) return;
+    if (!materialId || !qty || qty <= 0) { box.innerHTML = ""; return; }
+    const seq = ++suggestSeq;
+    box.innerHTML = "Đang tính gợi ý FIFO...";
+    try {
+      const r = await GET(`${opts.suggestUrl}?material_id=${encodeURIComponent(materialId)}&quantity=${qty}`);
+      if (seq !== suggestSeq) return;   // trả lời chậm của lần gõ trước — bỏ qua, đã có lần mới hơn
+      if (r.shortfall > 0) {
+        box.innerHTML = `<span style="color:var(--red)">⚠ Thiếu ${r.shortfall}${$(`${prefix}_uom`).value || ""} tồn kho phân xưởng TẠI THỜI ĐIỂM kết thúc mẻ — không đủ để thêm.</span>` +
+          (r.picks.length ? ` (đã tìm được: ${r.picks.map(p => `lô ${esc(p.lot_code)} (${p.quantity}${esc(p.uom)})`).join(", ")})` : "");
+      } else {
+        box.innerHTML = `<span style="color:var(--green)">Sẽ lấy: ${r.picks.map(p => `lô ${esc(p.lot_code)} (${p.quantity}${esc(p.uom)})`).join(", ") || "—"}</span>`;
+      }
+    } catch (e) {
+      if (seq === suggestSeq) box.innerHTML = `<span style="color:var(--red)">${esc(e.message || "Không tính được gợi ý.")}</span>`;
+    }
+  };
+
+  const onMaterialPicked = (materialId, label) => {
+    $(`${prefix}_mat_id`).value = materialId || "";
+    $(`${prefix}_mat_txt`).value = label || "";
+    const item = matItems.find(i => i.value === materialId);
+    $(`${prefix}_uom`).value = (item && item.uom) || "";
+    renderOverrideOptions(materialId);
+    refreshSuggest();
+  };
+  wireSearchableSelect(`${prefix}_mat_txt`, `${prefix}_mat_id`, matItems,
+    (item) => onMaterialPicked(item.value, item.label));
+  $(`${prefix}_qty`).addEventListener("input", refreshSuggest);
+  $(`${prefix}_override_lot`).addEventListener("change", refreshSuggest);
+
   $(`${prefix}_add`).onclick = () => guard(async () => {
-    const lotId = $(`${prefix}_mat_lot`).value || null;
-    const name = $(`${prefix}_name`).value.trim() || null;
-    if (!lotId && !name) throw new Error("Chọn nguyên liệu từ tồn kho Kho phân xưởng, hoặc nhập tên tự do.");
+    const materialId = $(`${prefix}_mat_id`).value || null;
+    if (!materialId) throw new Error("Chọn vật tư từ tồn kho Kho phân xưởng.");
     const qty = parseFloat($(`${prefix}_qty`).value);
     if (!qty || qty <= 0) throw new Error("Số lượng phải > 0.");
-    const reason = $(`${prefix}_reason`).value.trim();
-    if (lotId) {
-      const item = items.find(i => i.value === lotId);
-      if (item && !item.isOldest && !reason) throw new Error("Lô đã chọn không phải lô FIFO (cũ nhất) của vật tư này — bắt buộc nhập Lý do.");
-    }
-    const supplyEl = $(`${prefix}_supply`);
-    const supplyDate = supplyEl && supplyEl.value ? new Date(supplyEl.value).toISOString() : null;
-    await POST(opts.postUrl, { lot_id: lotId, material_name: name, quantity: qty,
-      uom: $(`${prefix}_uom`).value.trim() || "kg", reason: reason || null, supply_date: supplyDate });
-    toast("Đã thêm nguyên liệu" + (lotId ? " — đã trừ tồn Kho phân xưởng" : ""));
+    const lotId = $(`${prefix}_override_lot`).value || null;
+    const reason = $(`${prefix}_reason`).value.trim() || null;
+    await POST(opts.postUrl, { material_id: materialId, lot_id: lotId, quantity: qty, reason });
+    toast("Đã thêm nguyên liệu — đã trừ tồn Kho phân xưởng");
     opts.onChange();
   });
   document.querySelectorAll("[data-delmatusage]").forEach(b => b.onclick = () => guard(async () => {
@@ -3827,6 +3857,10 @@ function wireMaterialUsageSection(prefix, lots, materials, opts) {
     await DELETE(`${opts.deleteBaseUrl}/${b.dataset.delmatusage}`);
     toast("Đã xóa"); opts.onChange();
   }));
+  // Trả ra pickMaterial() để nơi gọi (VD nút gợi ý vật tư từ lệnh lọc) điền sẵn vật tư + SL vào
+  // form mà không cần thao tác chuột qua wireSearchableSelect (yêu cầu người dùng 2026-09-16,
+  // thay thế cơ chế điền tay cũ dựa vào các field lot/tên tự do đã bỏ).
+  return { pickMaterial: onMaterialPicked };
 }
 
 // ---- EBR neo ở lô thành phẩm (blueprint mới) — gộp cả cây genealogy ngược tới mẻ nấu gốc ----

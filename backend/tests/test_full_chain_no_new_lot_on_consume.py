@@ -159,11 +159,14 @@ def test_full_chain_receive_request_dispense_filter_pack_no_extra_lot(client, ad
     assert by_id[workshop_lot_id]["quantity"] == 30, "Phải trừ đúng 20kg trên ĐÚNG dòng PX cũ"
     assert by_id[company_lot_id]["quantity"] == 50, "Dòng ở Kho công ty không bị đụng tới"
 
-    # 5. NVL dùng cho Lô lọc — 10kg từ đúng lô PX đó.
+    # 5. NVL dùng cho Lô lọc — 10kg từ đúng lô PX đó (lô lọc phải "Kết thúc" mẻ trước thì mới có
+    # "Ngày cấp" (ended_at) để được thêm nguyên liệu, 2026-09-16).
     filter_lot_id = _make_filter_lot(client, admin_h, "E2E")
+    _finish_only_source(client, admin_h, filter_lot_id, v_drawn=900)
     fl_usage = client.post(f"/api/batch-filter-lots/{filter_lot_id}/materials", headers=admin_h,
-                           json={"lot_id": workshop_lot_id, "quantity": 10, "uom": "kg"})
+                           json={"material_id": material_id, "quantity": 10})
     assert fl_usage.status_code == 201, fl_usage.text
+    assert fl_usage.json()[0]["lot_id"] == workshop_lot_id
 
     rows = _lots_by_code(client, admin_h, lot_code)
     assert len(rows) == 2, f"Sau NVL Lọc KHÔNG được sinh thêm dòng nào, thấy {len(rows)}"
@@ -171,16 +174,18 @@ def test_full_chain_receive_request_dispense_filter_pack_no_extra_lot(client, ad
     assert by_id[workshop_lot_id]["quantity"] == 20, "Phải trừ đúng 10kg trên ĐÚNG dòng PX cũ"
 
     # 6. NVL dùng cho Lô thành phẩm (Chiết) — 5kg từ đúng lô PX đó, tạo từ lô lọc vừa dùng NVL ở
-    # trên (cần khai "dịch nhà HL" đã rút trước thì mới tách được Lô thành phẩm — không liên
-    # quan tới NVL/lô, chỉ là điều kiện tiên quyết của nghiệp vụ Lọc/Chiết).
-    _finish_only_source(client, admin_h, filter_lot_id, v_drawn=900)
+    # trên. Cũng cần "Giờ kết thúc chiết" (ended_at, qua khai SL+giờ 1 ca) trước khi thêm NVL.
     pack = client.post(f"/api/batch-filter-lots/{filter_lot_id}/pack-lots", headers=admin_h,
                        json={"qty": 200, "pack_lot_code": "PKG-E2E", "lot_no": "LOT-E2E-PKG"})
     assert pack.status_code == 201, pack.text
     pack_lot_id = pack.json()["pack_lot_id"]
+    shifts = client.put(f"/api/batch-pack-lots/{pack_lot_id}/shifts", headers=admin_h,
+                        json={"ca1_qty": 200, "ca1_end_at": utcnow().isoformat()})
+    assert shifts.status_code == 200, shifts.text
     pl_usage = client.post(f"/api/batch-pack-lots/{pack_lot_id}/materials", headers=admin_h,
-                           json={"lot_id": workshop_lot_id, "quantity": 5, "uom": "kg"})
+                           json={"material_id": material_id, "quantity": 5})
     assert pl_usage.status_code == 201, pl_usage.text
+    assert pl_usage.json()[0]["lot_id"] == workshop_lot_id
 
     rows = _lots_by_code(client, admin_h, lot_code)
     assert len(rows) == 2, f"Sau NVL Chiết KHÔNG được sinh thêm dòng nào, thấy {len(rows)}"

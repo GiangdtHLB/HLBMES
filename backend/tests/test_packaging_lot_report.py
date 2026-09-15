@@ -18,6 +18,7 @@ os.environ["MES_ADMIN_PASSWORD"] = "AdminTest123"
 import pytest
 from fastapi.testclient import TestClient
 
+from app.common import utcnow
 from app.main import app
 from app import seed as seed_mod
 
@@ -147,18 +148,23 @@ def test_lot_report_shows_usage_after_pack_lot_consumes_lot(client, admin_h):
     pkg_mat = client.post("/api/materials", headers=admin_h,
                           json={"code": "CARTON01", "name": "Thùng carton 01", "uom": "cái", "category": "PKGGRP01"})
     assert pkg_mat.status_code == 201, pkg_mat.text
+    material_id = pkg_mat.json()["material_id"]
     rc = client.post("/api/warehouse/receive", headers=admin_h,
-                     json={"lot_code": "LOT-CARTON01-PX", "material_id": pkg_mat.json()["material_id"],
+                     json={"lot_code": "LOT-CARTON01-PX", "material_id": material_id,
                            "quantity": 200, "uom": "cái", "location": "Kho phân xưởng"})
     assert rc.status_code == 200, rc.text
     lots = client.get("/api/lots", headers=admin_h).json()
     lot = next(l for l in lots if l["lot_code"] == "LOT-CARTON01-PX")
 
     pack_lot_id, pack_lot_code = _make_pack_lot(client, admin_h, "PKGLOT01")
+    shifts = client.put(f"/api/batch-pack-lots/{pack_lot_id}/shifts", headers=admin_h,
+                        json={"ca1_qty": 500, "ca1_end_at": utcnow().isoformat()})
+    assert shifts.status_code == 200, shifts.text
 
     add = client.post(f"/api/batch-pack-lots/{pack_lot_id}/materials", headers=admin_h,
-                      json={"lot_id": lot["lot_id"], "quantity": 30, "uom": "cái"})
+                      json={"material_id": material_id, "quantity": 30})
     assert add.status_code == 201, add.text
+    assert add.json()[0]["lot_id"] == lot["lot_id"]
 
     report = client.get("/api/packaging/lot-report", headers=admin_h).json()
     row = next(r for r in report if r["lot_code"] == "LOT-CARTON01-PX")

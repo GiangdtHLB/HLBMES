@@ -1,12 +1,13 @@
-"""Test NVL dùng cho Lô lọc (BatchFilterLotMaterialUsage, mới) — mirror test_filter_material_usage.py
-(module Nấu-Lọc-Chiết cũ) cho pipeline "Mẻ SX", CỘNG THÊM enforcement mới: chọn lô KHÁC lô FIFO
-cũ nhất bắt buộc ghi lý do (áp dụng cho CẢ BatchFilterLotMaterialUsage lẫn BatchPackLotMaterialUsage
-đã có sẵn — yêu cầu người dùng 2026-09-01).
-"""
+"""Test NVL dùng cho Lô lọc (BatchFilterLotMaterialUsage) — chọn theo VẬT TƯ (material_id), hệ
+thống tự chọn lô theo FIFO tại đúng "Ngày cấp" = BatchFilterLot.ended_at (yêu cầu người dùng
+2026-09-16: bỏ tên tự do, không cho tự điền Ngày cấp, chặn hẳn khi không đủ tồn tại thời điểm kết
+thúc). Enforcement cũ vẫn giữ nguyên: chọn lô KHÁC lô FIFO cũ nhất bắt buộc ghi lý do (áp dụng cho
+CẢ BatchFilterLotMaterialUsage lẫn BatchPackLotMaterialUsage — yêu cầu người dùng 2026-09-01), và
+lô lọc mở trước phải thêm NVL trước (yêu cầu người dùng 2026-09-15)."""
 
 import os
 import tempfile
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 _TMP = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
 os.environ["MES_DATABASE_URL"] = f"sqlite:///{_TMP.name}"
@@ -44,15 +45,44 @@ def admin_h(client):
     return _login(client, "admin", "AdminTest123")
 
 
+def _force_finish_filter_lot(client, admin_h, filter_lot_id):
+    """Đưa 1 lô lọc "dang_loc" ra khỏi trạng thái đó (Kết thúc mẻ dở dang nếu cần rồi "Hoàn thành
+    lọc") — dùng để dọn đường cho hàng đợi (_assert_filter_material_addable) mà KHÔNG cần thêm
+    nguyên liệu thật (tên tự do đã bị bỏ, không còn cách "thêm 1 dòng 0.001kg vô hại" như trước
+    2026-09-16 nữa)."""
+    fl = client.get(f"/api/batch-filter-lots/{filter_lot_id}", headers=admin_h).json()
+    if fl["status"] != "dang_loc":
+        return
+    if fl.get("ended_at") is None:
+        sources = client.get(f"/api/batch-filter-lots/{filter_lot_id}/sources", headers=admin_h).json()
+        draws = [{"source_link_id": s["link_id"], "dich_nha_hl": 1} for s in sources]
+        batches = client.get(f"/api/batch-filter-lots/{filter_lot_id}/batches", headers=admin_h).json()
+        for b in batches:
+            if b.get("ended_at"):
+                continue
+            fin = client.put(f"/api/batch-filter-lots/batches/{b['batch_link_id']}/finish", headers=admin_h,
+                             json={"draws": draws, "nuoc_bai_khi_hl": 0})
+            assert fin.status_code == 200, fin.text
+    done = client.post(f"/api/batch-filter-lots/{filter_lot_id}/finish-filtering", headers=admin_h)
+    assert done.status_code == 200, done.text
+
+
 @pytest.fixture(autouse=True)
 def _unblock_dangling_filter_lots_before_each_test(client, admin_h):
     """Dọn đường TRƯỚC MỖI TEST (không phải trước mỗi lần gọi _make_filter_lot — nếu không sẽ tự
     phá vỡ chính các test kiểm tra thứ tự xếp hàng, vốn CỐ Ý tạo 2 lô lọc A/B trong CÙNG 1 test
-    và dựa vào việc A còn "chặn" B). Điều kiện xếp hàng mới (_assert_filter_material_addable,
-    yêu cầu người dùng 2026-09-15) sẽ chặn oan lô lọc mà 1 test SAU tạo ra nếu còn lô lọc
-    "dang_loc" từ test TRƯỚC chưa hề có nguyên liệu nào (VD test cố ý kiểm tra 1 nhánh lỗi,
-    không thêm nguyên liệu thật) — dọn sạch các lô đó trước khi test hiện tại bắt đầu."""
-    _unblock_earlier_filter_lots(client, admin_h)
+    và dựa vào việc A còn "chặn" B). Điều kiện xếp hàng (_assert_filter_material_addable, yêu cầu
+    người dùng 2026-09-15) sẽ chặn oan lô lọc mà 1 test SAU tạo ra nếu còn lô lọc "dang_loc" từ
+    test TRƯỚC chưa hề có nguyên liệu nào — chuyển hẳn các lô đó sang "hoan_thanh" (không còn
+    "chiếm hàng" nữa) trước khi test hiện tại bắt đầu."""
+    lots = client.get("/api/batch-filter-lots", headers=admin_h).json()
+    for fl in lots:
+        if fl["status"] != "dang_loc":
+            continue
+        usage = client.get(f"/api/batch-filter-lots/{fl['filter_lot_id']}/materials", headers=admin_h).json()
+        if usage:
+            continue
+        _force_finish_filter_lot(client, admin_h, fl["filter_lot_id"])
     yield
 
 
@@ -111,25 +141,6 @@ def _make_batch_tank(client, admin_h, batch_code, tank_code):
     return t.json()
 
 
-def _unblock_earlier_filter_lots(client, admin_h):
-    """Dọn đường trước khi tạo lô lọc MỚI trong test: điều kiện xếp hàng mới
-    (_assert_filter_material_addable, yêu cầu người dùng 2026-09-15 — "lô lọc mở trước phải
-    thêm NVL trước") sẽ chặn oan lô lọc SẮP tạo nếu còn lô lọc "dang_loc" từ test TRƯỚC chưa hề
-    có nguyên liệu nào (VD test cố ý kiểm tra 1 nhánh lỗi, không thêm nguyên liệu thật). Thêm 1
-    dòng nguyên liệu TỰ DO (material_name, không lot_id -> không đụng tồn kho thật) cho các lô
-    đó để "đến lượt" — không ảnh hưởng gì tới lô MỚI đang test."""
-    lots = client.get("/api/batch-filter-lots", headers=admin_h).json()
-    for fl in lots:
-        if fl["status"] != "dang_loc":
-            continue
-        usage = client.get(f"/api/batch-filter-lots/{fl['filter_lot_id']}/materials", headers=admin_h).json()
-        if usage:
-            continue
-        add = client.post(f"/api/batch-filter-lots/{fl['filter_lot_id']}/materials", headers=admin_h,
-                          json={"material_name": "AUTO-UNBLOCK (test)", "quantity": 0.001, "uom": "kg"})
-        assert add.status_code == 201, add.text
-
-
 def _make_filter_lot(client, admin_h, suffix):
     # batch_code giờ bắt buộc số nguyên (2026-09-02) — bỏ trống để tự sinh, suffix (không phải
     # số) chỉ dùng cho tank_code (tự do định dạng).
@@ -148,20 +159,51 @@ def _make_filter_lot(client, admin_h, suffix):
     return fl.json()["filter_lot_id"]
 
 
+def _finish_only_source(client, admin_h, filter_lot_id, v_drawn=900, ended_at=None):
+    """Kết thúc mẻ lọc duy nhất của 1 lô lọc mới tạo — đặt "Ngày cấp" (BatchFilterLot.ended_at)
+    cho lô đó, điều kiện bắt buộc TRƯỚC khi thêm bất kỳ nguyên liệu nào (2026-09-16)."""
+    src = client.get(f"/api/batch-filter-lots/{filter_lot_id}/sources", headers=admin_h).json()[0]
+    batches = client.get(f"/api/batch-filter-lots/{filter_lot_id}/batches", headers=admin_h).json()
+    payload = {"draws": [{"source_link_id": src["link_id"], "dich_nha_hl": v_drawn}], "nuoc_bai_khi_hl": 0}
+    if ended_at is not None:
+        payload["ended_at"] = ended_at.isoformat()
+    fin = client.put(f"/api/batch-filter-lots/batches/{batches[0]['batch_link_id']}/finish", headers=admin_h,
+                     json=payload)
+    assert fin.status_code == 200, fin.text
+    return fin.json()
+
+
+def test_add_filter_lot_material_blocked_before_ended_at(client, admin_h):
+    """Chưa "Kết thúc" mẻ lọc nào (chưa có ended_at) -> chưa có "Ngày cấp" -> chặn hẳn việc thêm
+    nguyên liệu (yêu cầu người dùng 2026-09-16: "Lọc và chiết đều lấy ngày cấp là ngày kết thúc
+    của mẻ lọc/chiết, không cho tự điền")."""
+    suffix = "FLMU-NOEND"
+    material_id = _a_material_with_stock(client, admin_h, f"MAT-{suffix}", qty_workshop=50)
+    filter_lot_id = _make_filter_lot(client, admin_h, suffix)
+
+    blocked = client.post(f"/api/batch-filter-lots/{filter_lot_id}/materials", headers=admin_h,
+                          json={"material_id": material_id, "quantity": 5})
+    assert blocked.status_code == 409, blocked.text
+    assert "kết thúc" in blocked.json()["detail"].lower()
+
+
 def test_add_filter_lot_material_from_workshop_lot_deducts_stock(client, admin_h):
     suffix = "FLMU01"
     material_id = _a_material_with_stock(client, admin_h, f"MAT-{suffix}", qty_workshop=50)
     filter_lot_id = _make_filter_lot(client, admin_h, suffix)
-    lot = _lot_id_by_code(client, admin_h, f"LOT-MAT-{suffix}-PX")
+    _finish_only_source(client, admin_h, filter_lot_id)
 
     add = client.post(f"/api/batch-filter-lots/{filter_lot_id}/materials", headers=admin_h,
-                      json={"lot_id": lot["lot_id"], "quantity": 12, "uom": "kg"})
+                      json={"material_id": material_id, "quantity": 12})
     assert add.status_code == 201, add.text
-    usage = add.json()
+    rows = add.json()
+    assert len(rows) == 1
+    usage = rows[0]
     assert usage["material_name"] == f"Vật tư MAT-{suffix}"
     assert usage["lot_pm"] == f"LOT-MAT-{suffix}-PX"
     assert usage["fifo_ok"] is True
     assert usage["movement_id"]
+    assert usage["supply_date"] is not None
 
     assert _lot_id_by_code(client, admin_h, f"LOT-MAT-{suffix}-PX")["quantity"] == 38
 
@@ -173,14 +215,58 @@ def test_add_filter_lot_material_from_workshop_lot_deducts_stock(client, admin_h
     assert _lot_id_by_code(client, admin_h, f"LOT-MAT-{suffix}-PX")["quantity"] == 50
 
 
+def test_add_filter_lot_material_insufficient_stock_at_ended_at_blocks_all_or_nothing(client, admin_h):
+    """Không đủ tồn kho phân xưởng TẠI THỜI ĐIỂM ended_at cho đủ quantity -> chặn hẳn, không trừ
+    dở dang (yêu cầu người dùng 2026-09-16: "nếu không đủ vật tư tại thời điểm kết thúc thì sẽ
+    cảnh báo và không cho nhập")."""
+    suffix = "FLMU-SHORT"
+    material_id = _a_material_with_stock(client, admin_h, f"MAT-{suffix}", qty_workshop=5)
+    filter_lot_id = _make_filter_lot(client, admin_h, suffix)
+    _finish_only_source(client, admin_h, filter_lot_id)
+
+    blocked = client.post(f"/api/batch-filter-lots/{filter_lot_id}/materials", headers=admin_h,
+                          json={"material_id": material_id, "quantity": 12})
+    assert blocked.status_code == 409, blocked.text
+    assert "thiếu" in blocked.json()["detail"].lower()
+    # All-or-nothing: không trừ dở dang.
+    assert _lot_id_by_code(client, admin_h, f"LOT-MAT-{suffix}-PX")["quantity"] == 5
+
+
+def test_suggest_filter_lot_material_previews_fifo_pick_without_deducting(client, admin_h):
+    """GET .../materials/suggest xem trước lô sẽ dùng (FIFO, tại đúng ended_at) mà KHÔNG trừ tồn
+    (yêu cầu người dùng 2026-09-16: "hiện tại không biết lấy lô nào khi chọn vật tư trong list")."""
+    suffix = "FLMU-SUGGEST"
+    material_id = _a_material_with_stock(client, admin_h, f"MAT-{suffix}", qty_workshop=50)
+    filter_lot_id = _make_filter_lot(client, admin_h, suffix)
+    _finish_only_source(client, admin_h, filter_lot_id)
+
+    suggest = client.get(f"/api/batch-filter-lots/{filter_lot_id}/materials/suggest", headers=admin_h,
+                         params={"material_id": material_id, "quantity": 12})
+    assert suggest.status_code == 200, suggest.text
+    body = suggest.json()
+    assert body["shortfall"] == 0.0
+    assert len(body["picks"]) == 1
+    assert body["picks"][0]["lot_code"] == f"LOT-MAT-{suffix}-PX"
+    assert body["picks"][0]["quantity"] == 12
+
+    # Chỉ xem trước, KHÔNG trừ tồn thật.
+    assert _lot_id_by_code(client, admin_h, f"LOT-MAT-{suffix}-PX")["quantity"] == 50
+
+    short = client.get(f"/api/batch-filter-lots/{filter_lot_id}/materials/suggest", headers=admin_h,
+                       params={"material_id": material_id, "quantity": 999})
+    assert short.status_code == 200, short.text
+    assert short.json()["shortfall"] == pytest.approx(949.0)
+
+
 def test_add_filter_lot_material_blocks_non_workshop_lot(client, admin_h):
     suffix = "FLMU02"
-    _a_material_with_stock(client, admin_h, f"MAT-{suffix}", qty_company=20)
+    material_id = _a_material_with_stock(client, admin_h, f"MAT-{suffix}", qty_company=20)
     filter_lot_id = _make_filter_lot(client, admin_h, suffix)
+    _finish_only_source(client, admin_h, filter_lot_id)
     lot = _lot_id_by_code(client, admin_h, f"LOT-MAT-{suffix}-CTY")
 
     blocked = client.post(f"/api/batch-filter-lots/{filter_lot_id}/materials", headers=admin_h,
-                          json={"lot_id": lot["lot_id"], "quantity": 5})
+                          json={"material_id": material_id, "lot_id": lot["lot_id"], "quantity": 5})
     assert blocked.status_code == 409, blocked.text
     assert "kho phân xưởng" in blocked.json()["detail"].lower()
 
@@ -192,133 +278,126 @@ def test_add_filter_lot_material_non_fifo_requires_reason(client, admin_h):
     material_id = _a_material_with_stock(client, admin_h, f"MAT-{suffix}", qty_workshop=10)
     _a_workshop_lot(client, admin_h, material_id, f"LOT-{suffix}-NEWER", 20)
     filter_lot_id = _make_filter_lot(client, admin_h, suffix)
+    _finish_only_source(client, admin_h, filter_lot_id)
     newer_lot = _lot_id_by_code(client, admin_h, f"LOT-{suffix}-NEWER")
 
     no_reason = client.post(f"/api/batch-filter-lots/{filter_lot_id}/materials", headers=admin_h,
-                            json={"lot_id": newer_lot["lot_id"], "quantity": 5})
+                            json={"material_id": material_id, "lot_id": newer_lot["lot_id"], "quantity": 5})
     assert no_reason.status_code == 409, no_reason.text
     assert "fifo" in no_reason.json()["detail"].lower()
 
     with_reason = client.post(f"/api/batch-filter-lots/{filter_lot_id}/materials", headers=admin_h,
-                              json={"lot_id": newer_lot["lot_id"], "quantity": 5, "reason": "Lô cũ đã hết chỗ chứa"})
+                              json={"material_id": material_id, "lot_id": newer_lot["lot_id"], "quantity": 5,
+                                   "reason": "Lô cũ đã hết chỗ chứa"})
     assert with_reason.status_code == 201, with_reason.text
-    usage = with_reason.json()
+    usage = with_reason.json()[0]
     assert usage["fifo_ok"] is False
     assert usage["reason"] == "Lô cũ đã hết chỗ chứa"
 
 
-def test_add_filter_lot_material_supply_date_defaults_to_now_and_drives_stock_as_of(client, admin_h):
-    """"Ngày cấp" (supply_date) mặc định = bây giờ nếu không khai, và CHÍNH LÀ mốc dùng để trừ
-    tồn kho phân xưởng "tính đến ngày" (StockMovement.ts qua issue(issued_at=...)) — KHÁC
-    created_at (yêu cầu người dùng 2026-09-15)."""
+def test_add_filter_lot_material_supply_date_equals_ended_at(client, admin_h):
+    """"Ngày cấp" (supply_date) LUÔN = BatchFilterLot.ended_at — server tự gán, không nhận input
+    (yêu cầu người dùng 2026-09-16) — CHÍNH LÀ mốc dùng để trừ tồn kho phân xưởng "tính đến
+    ngày" (StockMovement.ts qua issue(issued_at=...))."""
     suffix = "FLMU-SUP01"
     material_id = _a_material_with_stock(client, admin_h, f"MAT-{suffix}", qty_workshop=50)
     filter_lot_id = _make_filter_lot(client, admin_h, suffix)
-    lot = _lot_id_by_code(client, admin_h, f"LOT-MAT-{suffix}-PX")
+    _finish_only_source(client, admin_h, filter_lot_id)
+    ended_at = client.get(f"/api/batch-filter-lots/{filter_lot_id}", headers=admin_h).json()["ended_at"]
 
     add = client.post(f"/api/batch-filter-lots/{filter_lot_id}/materials", headers=admin_h,
-                      json={"lot_id": lot["lot_id"], "quantity": 12, "uom": "kg"})
+                      json={"material_id": material_id, "quantity": 12})
     assert add.status_code == 201, add.text
-    usage = add.json()
+    usage = add.json()[0]
     assert usage["supply_date"] is not None
-    assert usage["created_at"] is not None
+    got = datetime.fromisoformat(usage["supply_date"].replace("Z", "+00:00"))
+    want = datetime.fromisoformat(ended_at.replace("Z", "+00:00"))
+    assert abs((got - want).total_seconds()) < 2
 
 
-def test_add_filter_lot_material_backdated_supply_date_used_for_stock_as_of(client, admin_h):
+def test_add_filter_lot_material_backdated_ended_at_used_for_stock_as_of(client, admin_h):
     suffix = "FLMU-SUP02"
     mat = client.post("/api/materials", headers=admin_h,
                       json={"code": f"MAT-{suffix}", "name": f"Vật tư MAT-{suffix}", "uom": "kg"})
     assert mat.status_code == 201, mat.text
     material_id = mat.json()["material_id"]
-    # Nhận kho backdated TRƯỚC supply_date (nếu không, "before" ở dưới sẽ rơi vào lúc lô còn
-    # chưa tồn tại, không phải lúc chưa bị trừ — 2 chuyện khác nhau).
+    # Nhận kho backdated TRƯỚC ended_at (nếu không, "before" ở dưới sẽ rơi vào lúc lô còn chưa
+    # tồn tại, không phải lúc chưa bị trừ — 2 chuyện khác nhau).
     recv = client.post("/api/warehouse/receive", headers=admin_h, json={
         "lot_code": f"LOT-MAT-{suffix}-PX", "material_id": material_id, "quantity": 50, "uom": "kg",
         "location": "Kho phân xưởng", "received_at": (utcnow() - timedelta(hours=3)).isoformat()})
     assert recv.status_code == 200, recv.text
     filter_lot_id = _make_filter_lot(client, admin_h, suffix)
-    lot = _lot_id_by_code(client, admin_h, f"LOT-MAT-{suffix}-PX")
+    ended_at = utcnow() - timedelta(hours=1)
+    _finish_only_source(client, admin_h, filter_lot_id, ended_at=ended_at)
 
-    supply_date = utcnow() - timedelta(hours=1)
     add = client.post(f"/api/batch-filter-lots/{filter_lot_id}/materials", headers=admin_h,
-                      json={"lot_id": lot["lot_id"], "quantity": 12, "uom": "kg",
-                           "supply_date": supply_date.isoformat()})
+                      json={"material_id": material_id, "quantity": 12})
     assert add.status_code == 201, add.text
-    usage = add.json()
-    from datetime import datetime
+    usage = add.json()[0]
     got = datetime.fromisoformat(usage["supply_date"].replace("Z", "+00:00"))
-    assert abs((got - supply_date).total_seconds()) < 2
+    assert abs((got - ended_at).total_seconds()) < 2
 
-    # TRƯỚC supply_date -> chưa trừ, còn nguyên 50kg.
-    before = (supply_date - timedelta(minutes=1)).isoformat()
+    # TRƯỚC ended_at -> chưa trừ, còn nguyên 50kg.
+    before = (ended_at - timedelta(minutes=1)).isoformat()
     stock_before = client.get("/api/warehouse/stock/as-of", headers=admin_h,
                               params={"as_of": before, "location": "Kho phân xưởng"}).json()
     row_before = next((r for r in stock_before if r["material_id"] == material_id), None)
     assert row_before is not None and row_before["on_hand"] == 50.0
 
-    # TỪ supply_date trở đi -> đã trừ 12kg, còn 38kg (dù giờ bấm nút thật là "now", muộn hơn).
+    # TỪ ended_at trở đi -> đã trừ 12kg, còn 38kg (dù giờ bấm nút thật là "now", muộn hơn).
     stock_at = client.get("/api/warehouse/stock/as-of", headers=admin_h,
-                          params={"as_of": supply_date.isoformat(), "location": "Kho phân xưởng"}).json()
+                          params={"as_of": ended_at.isoformat(), "location": "Kho phân xưởng"}).json()
     row_at = next(r for r in stock_at if r["material_id"] == material_id)
     assert row_at["on_hand"] == 38.0
 
 
-def test_add_filter_lot_material_future_supply_date_rejected(client, admin_h):
-    suffix = "FLMU-SUP03"
-    material_id = _a_material_with_stock(client, admin_h, f"MAT-{suffix}", qty_workshop=50)
-    filter_lot_id = _make_filter_lot(client, admin_h, suffix)
-    lot = _lot_id_by_code(client, admin_h, f"LOT-MAT-{suffix}-PX")
-
-    future = (utcnow() + timedelta(hours=1)).isoformat()
-    add = client.post(f"/api/batch-filter-lots/{filter_lot_id}/materials", headers=admin_h,
-                      json={"lot_id": lot["lot_id"], "quantity": 12, "uom": "kg", "supply_date": future})
-    assert add.status_code == 409, add.text
-
-
-def test_add_pack_lot_material_uses_pack_date_for_stock_as_of(client, admin_h):
+def test_add_pack_lot_material_uses_ended_at_for_stock_as_of(client, admin_h):
     """Chiết KHÔNG có field "Ngày cấp" riêng theo từng dòng nguyên liệu — dùng thẳng
-    BatchPackLot.pack_date (khai 1 lần ở mức lô thành phẩm) làm mốc trừ tồn kho, KHÁC created_at
-    (yêu cầu người dùng 2026-09-15, áp dụng nhất quán với Lọc/Nấu)."""
+    BatchPackLot.ended_at (MAX giờ kết thúc trong số các ca ĐÃ khai cả SL và giờ) làm mốc trừ tồn
+    kho, KHÔNG cho tự điền (yêu cầu người dùng 2026-09-16, thay cho pack_date trước đây)."""
     suffix = "PLMU-SUP01"
     mat = client.post("/api/materials", headers=admin_h,
                       json={"code": f"MAT-{suffix}", "name": f"Vật tư MAT-{suffix}", "uom": "kg"})
     assert mat.status_code == 201, mat.text
     material_id = mat.json()["material_id"]
-    # Nhận kho backdated TRƯỚC pack_date (nếu không, "before" ở dưới sẽ rơi vào lúc lô còn chưa
+    # Nhận kho backdated TRƯỚC ended_at (nếu không, "before" ở dưới sẽ rơi vào lúc lô còn chưa
     # tồn tại, không phải lúc chưa bị trừ).
     recv = client.post("/api/warehouse/receive", headers=admin_h, json={
         "lot_code": f"LOT-MAT-{suffix}-PX", "material_id": material_id, "quantity": 10, "uom": "kg",
         "location": "Kho phân xưởng", "received_at": (utcnow() - timedelta(hours=3)).isoformat()})
     assert recv.status_code == 200, recv.text
     filter_lot_id = _make_filter_lot(client, admin_h, suffix)
-    src = client.get(f"/api/batch-filter-lots/{filter_lot_id}/sources", headers=admin_h).json()[0]
-    batches = client.get(f"/api/batch-filter-lots/{filter_lot_id}/batches", headers=admin_h).json()
-    fin = client.put(f"/api/batch-filter-lots/batches/{batches[0]['batch_link_id']}/finish", headers=admin_h,
-                     json={"draws": [{"source_link_id": src["link_id"], "dich_nha_hl": 900}], "nuoc_bai_khi_hl": 0})
-    assert fin.status_code == 200, fin.text
+    _finish_only_source(client, admin_h, filter_lot_id)
     appr = client.post(f"/api/batch-filter-lots/{filter_lot_id}/approve", headers=admin_h)
     assert appr.status_code == 200, appr.text
     to_bbt = client.get(f"/api/batch-filter-lots/{filter_lot_id}", headers=admin_h).json()["to_bbt"]
-    pack_date = utcnow() - timedelta(hours=1)
     pack = client.post("/api/batch-pack-lots", headers=admin_h,
                        json={"from_bbt": to_bbt, "qty": 200, "pack_lot_code": f"PKG-{suffix}",
-                            "lot_no": f"LOT-{suffix}", "pack_date": pack_date.isoformat()})
+                            "lot_no": f"LOT-{suffix}"})
     assert pack.status_code == 201, pack.text
     pack_lot_id = pack.json()["pack_lot_id"]
-    lot = _lot_id_by_code(client, admin_h, f"LOT-MAT-{suffix}-PX")
+
+    ended_at = utcnow() - timedelta(hours=1)
+    shifts = client.put(f"/api/batch-pack-lots/{pack_lot_id}/shifts", headers=admin_h,
+                        json={"ca1_qty": 200, "ca1_end_at": ended_at.isoformat()})
+    assert shifts.status_code == 200, shifts.text
 
     add = client.post(f"/api/batch-pack-lots/{pack_lot_id}/materials", headers=admin_h,
-                      json={"lot_id": lot["lot_id"], "quantity": 4})
+                      json={"material_id": material_id, "quantity": 4})
     assert add.status_code == 201, add.text
+    usage = add.json()[0]
+    got = datetime.fromisoformat(usage["supply_date"].replace("Z", "+00:00"))
+    assert abs((got - ended_at).total_seconds()) < 2
 
-    before = (pack_date - timedelta(minutes=1)).isoformat()
+    before = (ended_at - timedelta(minutes=1)).isoformat()
     stock_before = client.get("/api/warehouse/stock/as-of", headers=admin_h,
                               params={"as_of": before, "location": "Kho phân xưởng"}).json()
     row_before = next(r for r in stock_before if r["material_id"] == material_id)
     assert row_before["on_hand"] == 10.0
 
     stock_at = client.get("/api/warehouse/stock/as-of", headers=admin_h,
-                          params={"as_of": pack_date.isoformat(), "location": "Kho phân xưởng"}).json()
+                          params={"as_of": ended_at.isoformat(), "location": "Kho phân xưởng"}).json()
     row_at = next(r for r in stock_at if r["material_id"] == material_id)
     assert row_at["on_hand"] == 6.0
 
@@ -329,11 +408,7 @@ def test_add_pack_lot_material_non_fifo_requires_reason(client, admin_h):
     material_id = _a_material_with_stock(client, admin_h, f"MAT-{suffix}", qty_workshop=10)
     _a_workshop_lot(client, admin_h, material_id, f"LOT-{suffix}-NEWER", 20)
     filter_lot_id = _make_filter_lot(client, admin_h, suffix)
-    src = client.get(f"/api/batch-filter-lots/{filter_lot_id}/sources", headers=admin_h).json()[0]
-    batches = client.get(f"/api/batch-filter-lots/{filter_lot_id}/batches", headers=admin_h).json()
-    fin = client.put(f"/api/batch-filter-lots/batches/{batches[0]['batch_link_id']}/finish", headers=admin_h,
-                     json={"draws": [{"source_link_id": src["link_id"], "dich_nha_hl": 900}], "nuoc_bai_khi_hl": 0})
-    assert fin.status_code == 200, fin.text
+    _finish_only_source(client, admin_h, filter_lot_id)
     appr = client.post(f"/api/batch-filter-lots/{filter_lot_id}/approve", headers=admin_h)
     assert appr.status_code == 200, appr.text
     to_bbt = client.get(f"/api/batch-filter-lots/{filter_lot_id}", headers=admin_h).json()["to_bbt"]
@@ -341,17 +416,21 @@ def test_add_pack_lot_material_non_fifo_requires_reason(client, admin_h):
                        json={"from_bbt": to_bbt, "qty": 200, "pack_lot_code": f"PKG-{suffix}", "lot_no": f"LOT-{suffix}"})
     assert pack.status_code == 201, pack.text
     pack_lot_id = pack.json()["pack_lot_id"]
+    shifts = client.put(f"/api/batch-pack-lots/{pack_lot_id}/shifts", headers=admin_h,
+                        json={"ca1_qty": 200, "ca1_end_at": utcnow().isoformat()})
+    assert shifts.status_code == 200, shifts.text
     newer_lot = _lot_id_by_code(client, admin_h, f"LOT-{suffix}-NEWER")
 
     no_reason = client.post(f"/api/batch-pack-lots/{pack_lot_id}/materials", headers=admin_h,
-                            json={"lot_id": newer_lot["lot_id"], "quantity": 3})
+                            json={"material_id": material_id, "lot_id": newer_lot["lot_id"], "quantity": 3})
     assert no_reason.status_code == 409, no_reason.text
     assert "fifo" in no_reason.json()["detail"].lower()
 
     with_reason = client.post(f"/api/batch-pack-lots/{pack_lot_id}/materials", headers=admin_h,
-                              json={"lot_id": newer_lot["lot_id"], "quantity": 3, "reason": "Lô cũ để dành mẻ khác"})
+                              json={"material_id": material_id, "lot_id": newer_lot["lot_id"], "quantity": 3,
+                                   "reason": "Lô cũ để dành mẻ khác"})
     assert with_reason.status_code == 201, with_reason.text
-    usage = with_reason.json()
+    usage = with_reason.json()[0]
     assert usage["fifo_ok"] is False
     assert usage["reason"] == "Lô cũ để dành mẻ khác"
 
@@ -365,21 +444,23 @@ def test_add_filter_lot_material_blocked_by_earlier_unstarted_filter_lot(client,
     _a_material_with_stock(client, admin_h, f"MAT-{suffix_b}", qty_workshop=50)
     filter_lot_a = _make_filter_lot(client, admin_h, suffix_a)
     filter_lot_b = _make_filter_lot(client, admin_h, suffix_b)   # tạo SAU A
-    lot_b = _lot_id_by_code(client, admin_h, f"LOT-MAT-{suffix_b}-PX")
+    _finish_only_source(client, admin_h, filter_lot_a)
+    _finish_only_source(client, admin_h, filter_lot_b)
+    material_b = _lot_id_by_code(client, admin_h, f"LOT-MAT-{suffix_b}-PX")["material_id"]
 
     blocked = client.post(f"/api/batch-filter-lots/{filter_lot_b}/materials", headers=admin_h,
-                          json={"lot_id": lot_b["lot_id"], "quantity": 5})
+                          json={"material_id": material_b, "quantity": 5})
     assert blocked.status_code == 409, blocked.text
     assert "mở trước" in blocked.json()["detail"]
 
     # Thêm NVL cho A trước -> A "đến lượt", B hết bị chặn.
-    lot_a = _lot_id_by_code(client, admin_h, f"LOT-MAT-{suffix_a}-PX")
+    material_a = _lot_id_by_code(client, admin_h, f"LOT-MAT-{suffix_a}-PX")["material_id"]
     ok_a = client.post(f"/api/batch-filter-lots/{filter_lot_a}/materials", headers=admin_h,
-                       json={"lot_id": lot_a["lot_id"], "quantity": 5})
+                       json={"material_id": material_a, "quantity": 5})
     assert ok_a.status_code == 201, ok_a.text
 
     ok_b = client.post(f"/api/batch-filter-lots/{filter_lot_b}/materials", headers=admin_h,
-                       json={"lot_id": lot_b["lot_id"], "quantity": 5})
+                       json={"material_id": material_b, "quantity": 5})
     assert ok_b.status_code == 201, ok_b.text
 
 
@@ -391,34 +472,31 @@ def test_completed_filter_lot_no_longer_blocks_later_ones(client, admin_h):
     _a_material_with_stock(client, admin_h, f"MAT-{suffix_b}", qty_workshop=50)
     filter_lot_a = _make_filter_lot(client, admin_h, suffix_a)
     filter_lot_b = _make_filter_lot(client, admin_h, suffix_b)
-    lot_b = _lot_id_by_code(client, admin_h, f"LOT-MAT-{suffix_b}-PX")
+    _finish_only_source(client, admin_h, filter_lot_b)
+    material_b = _lot_id_by_code(client, admin_h, f"LOT-MAT-{suffix_b}-PX")["material_id"]
 
     # A chưa xong -> B vẫn bị chặn trước.
     blocked = client.post(f"/api/batch-filter-lots/{filter_lot_b}/materials", headers=admin_h,
-                          json={"lot_id": lot_b["lot_id"], "quantity": 5})
+                          json={"material_id": material_b, "quantity": 5})
     assert blocked.status_code == 409, blocked.text
 
     # Kết thúc + "Hoàn thành lọc" A mà KHÔNG thêm NVL nào (hợp lệ nghiệp vụ).
-    src = client.get(f"/api/batch-filter-lots/{filter_lot_a}/sources", headers=admin_h).json()[0]
-    batches = client.get(f"/api/batch-filter-lots/{filter_lot_a}/batches", headers=admin_h).json()
-    fin = client.put(f"/api/batch-filter-lots/batches/{batches[0]['batch_link_id']}/finish", headers=admin_h,
-                     json={"draws": [{"source_link_id": src["link_id"], "dich_nha_hl": 900}], "nuoc_bai_khi_hl": 0})
-    assert fin.status_code == 200, fin.text
+    _finish_only_source(client, admin_h, filter_lot_a)
     done = client.post(f"/api/batch-filter-lots/{filter_lot_a}/finish-filtering", headers=admin_h)
     assert done.status_code == 200, done.text
     assert done.json()["status"] == "hoan_thanh"
 
     ok_b = client.post(f"/api/batch-filter-lots/{filter_lot_b}/materials", headers=admin_h,
-                       json={"lot_id": lot_b["lot_id"], "quantity": 5})
+                       json={"material_id": material_b, "quantity": 5})
     assert ok_b.status_code == 201, ok_b.text
 
 
 def test_filter_and_pack_material_supply_date_also_reflected_in_inventory_report(client, admin_h):
-    """"Ngày cấp" (Lọc: supply_date, Chiết: pack_date) không chỉ tính đúng ở "Tồn kho tính đến
-    ngày" (đã test ở 2 test trên) mà PHẢI khớp CẢ "BC nhập-xuất-tồn" (inventory_report/
-    lot_inventory_report) VÀ "Sổ chi tiết vật tư" (material_transaction_detail) — cả 3 đều đọc
-    chung StockMovement.ts do warehouse_svc.issue(issued_at=...) ghi, không cần xử lý riêng như
-    Nấu (yêu cầu người dùng 2026-09-15: xác nhận toàn bộ chuỗi nhất quán)."""
+    """"Ngày cấp" (Lọc/Chiết: ended_at) không chỉ tính đúng ở "Tồn kho tính đến ngày" (đã test ở
+    2 test trên) mà PHẢI khớp CẢ "BC nhập-xuất-tồn" (inventory_report/lot_inventory_report) VÀ
+    "Sổ chi tiết vật tư" (material_transaction_detail) — cả 3 đều đọc chung StockMovement.ts do
+    warehouse_svc.issue(issued_at=...) ghi, không cần xử lý riêng như Nấu (yêu cầu người dùng
+    2026-09-15: xác nhận toàn bộ chuỗi nhất quán)."""
     suffix = "FLMU-RPT01"
     mat = client.post("/api/materials", headers=admin_h,
                       json={"code": f"MAT-{suffix}", "name": f"Vật tư MAT-{suffix}", "uom": "kg"})
@@ -429,13 +507,13 @@ def test_filter_and_pack_material_supply_date_also_reflected_in_inventory_report
         "location": "Kho phân xưởng", "received_at": (utcnow() - timedelta(hours=3)).isoformat()})
     assert recv.status_code == 200, recv.text
     filter_lot_id = _make_filter_lot(client, admin_h, suffix)
-    lot = _lot_id_by_code(client, admin_h, f"LOT-MAT-{suffix}-PX")
-
     supply_date = utcnow() - timedelta(hours=1)
+    _finish_only_source(client, admin_h, filter_lot_id, ended_at=supply_date)
+
     add = client.post(f"/api/batch-filter-lots/{filter_lot_id}/materials", headers=admin_h,
-                      json={"lot_id": lot["lot_id"], "quantity": 12, "uom": "kg",
-                           "supply_date": supply_date.isoformat()})
+                      json={"material_id": material_id, "quantity": 12})
     assert add.status_code == 201, add.text
+    lot = _lot_id_by_code(client, admin_h, f"LOT-MAT-{suffix}-PX")
 
     # Kỳ báo cáo CHỈ phủ tới supply_date + 5 phút — KHÔNG phủ tới "now" (giờ bấm nút thật).
     date_from = (utcnow() - timedelta(hours=4)).isoformat()

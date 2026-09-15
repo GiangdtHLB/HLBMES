@@ -17,6 +17,7 @@ os.environ["MES_ADMIN_PASSWORD"] = "AdminTest123"
 import pytest
 from fastapi.testclient import TestClient
 
+from app.common import utcnow
 from app.main import app
 from app import seed as seed_mod
 
@@ -220,10 +221,22 @@ def test_ebr_diff_material_and_qty_steps_carry_full_before_after_detail(client, 
     nhiêu, sau sửa là bao nhiêu, công đoạn nào")."""
     batch_id, _tank_id, filter_lot_id, pack_lot_id = _build_chain(client, admin_h, "DIFF2")
 
+    mat = client.post("/api/materials", headers=admin_h,
+                      json={"code": "MAT-EBRDIFF2", "name": "CO2 test diff", "uom": "kg"})
+    assert mat.status_code == 201, mat.text
+    material_id = mat.json()["material_id"]
+    recv = client.post("/api/warehouse/receive", headers=admin_h,
+                       json={"lot_code": "LOT-EBRDIFF2-PX", "material_id": material_id,
+                             "quantity": 10, "uom": "kg", "location": "Kho phân xưởng"})
+    assert recv.status_code == 200, recv.text
+    shifts = client.put(f"/api/batch-pack-lots/{pack_lot_id}/shifts", headers=admin_h,
+                        json={"ca1_qty": 500, "ca1_end_at": utcnow().isoformat()})
+    assert shifts.status_code == 200, shifts.text
+
     add = client.post(f"/api/batch-pack-lots/{pack_lot_id}/materials", headers=admin_h,
-                      json={"material_name": "CO2 test diff", "quantity": 3, "uom": "kg"})
+                      json={"material_id": material_id, "quantity": 3})
     assert add.status_code == 201, add.text
-    usage_id = add.json()["usage_id"]
+    usage_id = add.json()[0]["usage_id"]
 
     lock = client.post(f"/api/batch-pack-lots/{pack_lot_id}/ebr/lock", headers=admin_h,
                        json={"password": "AdminTest123", "reason": "test"})
@@ -259,7 +272,7 @@ def test_ebr_diff_material_and_qty_steps_carry_full_before_after_detail(client, 
     mat_step = steps["material_delete"]
     assert mat_step["node_type"] == "batch_pack_lot"
     assert mat_step["stage_label"] == "Thành phẩm"
-    assert mat_step["before"] == {"material_name": "CO2 test diff", "lot_pm": None, "quantity": 3.0, "uom": "kg"}
+    assert mat_step["before"] == mat_before
 
     qty_step = steps["set_actual_qty"]
     assert qty_step["node_type"] == "batch"
@@ -274,13 +287,25 @@ def test_lock_cascades_immutability_to_whole_chain(client, admin_h):
     cột `.locked`/`.ebr_locked` của từng bản ghi nên mọi cổng chặn sửa có sẵn (xóa/thêm NVL/sửa
     SL/ghi chỉ tiêu...) không bao giờ được kích hoạt — sửa được cả sau khi "đã khóa" (yêu cầu
     người dùng 2026-09-01)."""
+    # NVL tạo + về kho TRƯỚC khi dựng chuỗi (lô lọc/lô TP) — filter_lot.ended_at (đặt lúc dựng
+    # chuỗi bên dưới) phải SAU thời điểm nguyên liệu về kho thì mới đủ tồn "tại thời điểm kết
+    # thúc" để thêm được (2026-09-16).
+    mat = client.post("/api/materials", headers=admin_h,
+                      json={"code": "MAT-LOCKCASCADE1", "name": "NVL trước khóa", "uom": "kg"})
+    assert mat.status_code == 201, mat.text
+    material_id = mat.json()["material_id"]
+    recv = client.post("/api/warehouse/receive", headers=admin_h,
+                       json={"lot_code": "LOT-LOCKCASCADE1-PX", "material_id": material_id,
+                             "quantity": 10, "uom": "kg", "location": "Kho phân xưởng"})
+    assert recv.status_code == 200, recv.text
+
     batch_id, tank_id, filter_lot_id, pack_lot_id = _build_chain(client, admin_h, "LOCKCASCADE1")
 
     # Trước khi khóa: các thao tác này đều phải chạy được (baseline, tránh false positive).
     ok_mat = client.post(f"/api/batch-filter-lots/{filter_lot_id}/materials", headers=admin_h,
-                         json={"material_name": "NVL trước khóa", "quantity": 1, "uom": "kg"})
+                         json={"material_id": material_id, "quantity": 1})
     assert ok_mat.status_code == 201, ok_mat.text
-    client.delete(f"/api/batch-filter-lots/materials/{ok_mat.json()['usage_id']}", headers=admin_h)
+    client.delete(f"/api/batch-filter-lots/materials/{ok_mat.json()[0]['usage_id']}", headers=admin_h)
 
     lock = client.post(f"/api/batch-pack-lots/{pack_lot_id}/ebr/lock", headers=admin_h,
                        json={"password": "AdminTest123", "reason": "test cascade"})
@@ -290,12 +315,12 @@ def test_lock_cascades_immutability_to_whole_chain(client, admin_h):
     blocked_qty = client.put(f"/api/batch-pack-lots/{pack_lot_id}/qty", headers=admin_h, json={"qty": 999})
     assert blocked_qty.status_code == 409, blocked_qty.text
     blocked_pk_mat = client.post(f"/api/batch-pack-lots/{pack_lot_id}/materials", headers=admin_h,
-                                 json={"material_name": "sau khóa", "quantity": 1, "uom": "kg"})
+                                 json={"material_id": material_id, "quantity": 1})
     assert blocked_pk_mat.status_code == 409, blocked_pk_mat.text
 
     # Lô lọc: thêm NVL bị chặn.
     blocked_fl_mat = client.post(f"/api/batch-filter-lots/{filter_lot_id}/materials", headers=admin_h,
-                                 json={"material_name": "sau khóa", "quantity": 1, "uom": "kg"})
+                                 json={"material_id": material_id, "quantity": 1})
     assert blocked_fl_mat.status_code == 409, blocked_fl_mat.text
 
     # Tank lên men: sửa SL thực tế của mẻ nấu đã gộp vào tank bị chặn.
