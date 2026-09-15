@@ -227,6 +227,33 @@ def test_transfer_to_factory_full_flow(client, admin_h, thukho_h, truongphong_kh
     assert lot["quantity"] == 60
 
 
+def test_transfer_to_factory_requested_transfer_date_used_as_movement_ts(client, admin_h, thukho_h):
+    """"Ngày đề nghị điều chuyển" (tuỳ chọn) — dùng làm `ts` hiệu lực của StockMovement thay vì
+    giờ bấm nút thật (yêu cầu người dùng 2026-09-16, mirror TransferKcPxRequest.
+    requested_transfer_date/MaterialRequest.requested_receipt_date)."""
+    from datetime import timedelta
+    from app.common import utcnow
+    factory_id = _create_factory(client, admin_h, "NM-RTD01", "Nhà máy test RTD")
+    mat_id = _create_material(client, admin_h, "CTNM-RTD01")
+    rc = client.post("/api/warehouse/receive", headers=thukho_h,
+                     json={"lot_code": "LOT-CTNM-RTD01", "material_id": mat_id, "quantity": 20, "uom": "kg"})
+    lot_id = rc.json()["lot_id"]
+
+    requested_date = utcnow() - timedelta(hours=1)
+    r = client.post("/api/warehouse/transfer-to-factory", headers=thukho_h,
+                    json={"lot_id": lot_id, "quantity": 20, "factory_id": factory_id,
+                         "requested_transfer_date": requested_date.isoformat()})
+    assert r.status_code == 200, r.text
+    movement_id = r.json()["movement_id"]
+
+    movements = client.get("/api/warehouse/movements", headers=admin_h,
+                           params={"movement_type": "issue", "mode": "dieu_chuyen_nha_may"}).json()
+    mv = next(m for m in movements if m["movement_id"] == movement_id)
+    from datetime import datetime
+    got = datetime.fromisoformat(mv["ts"].replace("Z", "+00:00"))
+    assert abs((got - requested_date).total_seconds()) < 2
+
+
 def test_transfer_to_factory_blocked_when_at_workshop(client, admin_h, thukho_h):
     factory_id = _create_factory(client, admin_h, "NM-02", "Nhà máy khác 2")
     mat_id = _create_material(client, admin_h, "CTNM-WS")

@@ -524,17 +524,20 @@ def issue(db: Session, lot_id: str, quantity: float, user: User, mode: str = "tu
 
 
 def transfer_to_factory(db: Session, lot_id: str, quantity: float, factory_id: str, user: User,
-                        reason: str = None) -> dict:
+                        reason: str = None, requested_transfer_date=None) -> dict:
     """Điều chuyển 1 lô đang ở Kho công ty sang 1 nhà máy khác — xuất NGAY (giảm tồn Kho công
     ty), tự do hoàn tác cho tới khi Trưởng phòng Kế hoạch duyệt (approve_transfer_to_factory),
-    sau đó chỉ ADMIN mới hoàn tác được (xem undo_issue)."""
+    sau đó chỉ ADMIN mới hoàn tác được (xem undo_issue). `requested_transfer_date` (tuỳ chọn):
+    "Ngày đề nghị điều chuyển" — dùng làm `ts` hiệu lực của StockMovement (issue() tự chặn nếu
+    ở tương lai), mirror MaterialRequest.requested_receipt_date/TransferKcPxRequest.
+    requested_transfer_date (yêu cầu người dùng 2026-09-16)."""
     require_perm(user, "warehouse.issue")
     lot = _lot(db, lot_id)
     if _is_workshop_location(lot.location):
         raise DomainError(f"Lô {lot.lot_code} đang ở Kho phân xưởng — chỉ điều chuyển sang nhà "
                           "máy khác được lô đang ở Kho công ty.")
     return issue(db, lot_id, quantity, user, mode="dieu_chuyen_nha_may", reason=reason,
-                destination_factory_id=factory_id)
+                destination_factory_id=factory_id, issued_at=requested_transfer_date)
 
 
 def approve_transfer_to_factory(db: Session, movement_id: str, user: User) -> dict:
@@ -2045,6 +2048,7 @@ def _transfer_kcpx_dict(db: Session, req: TransferKcPxRequest) -> dict:
     return {"request_id": req.request_id, "request_code": req.request_code, "lot_id": req.lot_id,
             "quantity": req.quantity, "uom": req.uom, "reason": req.reason, "status": req.status,
             "movement_id": req.movement_id, "workshop_location_id": req.workshop_location_id,
+            "requested_transfer_date": req.requested_transfer_date,
             "reversed": req.reversed, "created_by": req.created_by, "created_at": req.created_at,
             "approved_by": req.approved_by, "approved_at": req.approved_at,
             "rejected_by": req.rejected_by, "rejected_at": req.rejected_at,
@@ -2059,7 +2063,7 @@ def _get_transfer_kcpx_request(db, request_id) -> TransferKcPxRequest:
 
 
 def create_transfer_kcpx_request(db: Session, lot_id: str, quantity: float, user: User,
-                                 reason: str = None) -> dict:
+                                 reason: str = None, requested_transfer_date=None) -> dict:
     """Kho công ty tạo đề nghị điều chuyển 1 lô ĐANG CÓ SẴN sang Kho phân xưởng — chưa động tồn
     kho. Nếu vật tư có chỉ tiêu chất lượng bắt buộc, đưa lô về HOLD ngay lúc tạo (dù đang
     Released) để buộc KCS duyệt lại trước khi Phân xưởng duyệt được — lô có thể đã nằm kho một
@@ -2078,6 +2082,7 @@ def create_transfer_kcpx_request(db: Session, lot_id: str, quantity: float, user
     req = TransferKcPxRequest(request_id=new_id(),
                               request_code=f"DCKP-{utcnow():%Y%m%d}-{new_id()[:5].upper()}",
                               lot_id=lot_id, quantity=quantity, uom=lot.uom, reason=reason,
+                              requested_transfer_date=requested_transfer_date,
                               status="pending", created_by=user.username, created_at=utcnow())
     db.add(req)
     record_audit(db, entity_type="transfer_kcpx_request", entity_id=req.request_id, action="create",
@@ -2098,10 +2103,13 @@ def _assert_kcpx_editable(db: Session, req: TransferKcPxRequest, lot: MaterialLo
 
 
 def update_transfer_kcpx_request(db: Session, request_id: str, quantity: float, reason: str,
-                                 user: User) -> dict:
-    """Sửa đề nghị điều chuyển Công ty → Phân xưởng — chỉ số lượng/lý do (không đổi lô, xem
-    update_transfer_px_request). CHỈ khi còn pending VÀ (vật tư không cần KCS HOẶC lô còn đang
-    "Chờ KCS duyệt" — xem _assert_kcpx_editable)."""
+                                 user: User, requested_transfer_date=None,
+                                 requested_transfer_date_set: bool = False) -> dict:
+    """Sửa đề nghị điều chuyển Công ty → Phân xưởng — số lượng/lý do/"Ngày đề nghị điều chuyển"
+    (không đổi lô, xem update_transfer_px_request). CHỈ khi còn pending VÀ (vật tư không cần KCS
+    HOẶC lô còn đang "Chờ KCS duyệt" — xem _assert_kcpx_editable). `requested_transfer_date_set`
+    phân biệt "không gửi field này" (giữ nguyên) với "gửi None" (xoá về rỗng), mirror
+    update_request."""
     require_perm(user, "warehouse.issue")
     req = _get_transfer_kcpx_request(db, request_id)
     lot = _lot(db, req.lot_id)
@@ -2110,6 +2118,8 @@ def update_transfer_kcpx_request(db: Session, request_id: str, quantity: float, 
         raise DomainError(f"Số lượng đề nghị không hợp lệ (tồn {lot.quantity} {lot.uom}).")
     req.quantity = quantity
     req.reason = reason
+    if requested_transfer_date_set:
+        req.requested_transfer_date = requested_transfer_date
     record_audit(db, entity_type="transfer_kcpx_request", entity_id=req.request_id, action="update",
                 actor=user, after={"quantity": quantity, "reason": reason})
     db.commit()
@@ -2168,7 +2178,7 @@ def approve_transfer_kcpx_request(db: Session, request_id: str, workshop_locatio
         raise DomainError(f"Lô {lot.lot_code} đang chờ KCS khai báo/duyệt chỉ tiêu chất lượng — "
                           "chưa thể nhận vào Kho phân xưởng.")
     result = _transfer_lot(db, req.lot_id, req.quantity, "Kho phân xưởng", user, reason=req.reason,
-                           mode="dieu_chuyen_kcpx")
+                           mode="dieu_chuyen_kcpx", ts=req.requested_transfer_date)
     moved_lot = db.get(MaterialLot, result["lot_id"])
     moved_lot.workshop_location_id = workshop_location_id
     moved_lot.location_id = None  # rời khỏi vị trí kho công ty (nếu có)

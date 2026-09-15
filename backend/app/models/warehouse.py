@@ -155,6 +155,11 @@ class TransferKcPxRequest(Base):
     movement_id: Mapped[Optional[str]] = mapped_column(ForeignKey("stock_movement.movement_id"), nullable=True)
     workshop_location_id: Mapped[Optional[str]] = mapped_column(
         ForeignKey("material_location.loc_id"), nullable=True)
+    # Ngày Phân xưởng MUỐN nhận (khai lúc tạo/sửa đề nghị) — khác created_at (ngày lập phiếu,
+    # không sửa được). Khi duyệt (approve_transfer_kcpx_request) dùng làm `ts` hiệu lực của
+    # StockMovement transfer, mirror đúng MaterialRequest.requested_receipt_date (yêu cầu người
+    # dùng 2026-09-16: "vật tư vào kho phân xưởng ... chính là ngày đề nghị điều chuyển").
+    requested_transfer_date: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
     reversed: Mapped[bool] = mapped_column(Boolean, default=False)
     created_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
