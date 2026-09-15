@@ -220,7 +220,12 @@ def set_actual_qty(db: Session, batch_id: str, actual_qty: float, user: User) ->
     if delta:
         link = db.execute(select(BatchTankLink).where(BatchTankLink.batch_id == batch_id)).scalar_one_or_none()
         if link:
-            tank = db.get(BatchTank, link.tank_id)
+            # with_for_update(): khóa dòng tank TRƯỚC khi đọc-rồi-ghi on_hand — nhiều mẻ có thể
+            # cùng gộp vào 1 tank (merge_batches_into_tank), nên 2 mẻ ghi actual_qty gần như
+            # đồng thời có thể cùng đọc on_hand cũ, mất 1 lần cộng (audit rủi ro 2026-09-15,
+            # cùng lớp race đã sửa cho lot.quantity ở warehouse.py 2026-09-03).
+            tank = db.execute(select(BatchTank).where(
+                BatchTank.tank_id == link.tank_id).with_for_update()).scalar_one_or_none()
             if tank:
                 from . import batch_pipeline as batch_pipeline_svc
                 # Tank có thể đã bị khóa qua services/ebr.py::lock_pack_lot (cascade xuống cả
@@ -367,12 +372,32 @@ def record_actual(db: Session, batch_id: str, actual: dict, user: User) -> Batch
 
 
 def consume_lot(db: Session, batch_id: str, lot_id: str, quantity: float, user: User,
-                allow_over: bool = False) -> dict:
+                allow_over: bool = False, commit: bool = True) -> dict:
     """Tiêu thụ một lô nguyên liệu vào mẻ: trừ tồn + tạo genealogy edge.
 
-    Chặn vượt định mức BOM (định mức scale × (1+dung sai)) trừ khi allow_over."""
+    Chặn vượt định mức BOM (định mức scale × (1+dung sai)) trừ khi allow_over.
+
+    `commit=False` (dùng bởi dispense._execute_plan khi 1 phiếu cấp liệu gồm NHIỀU lô/dòng):
+    KHÔNG tự commit ở đây — để nguyên trong transaction đang mở, người gọi (dispense()/
+    backflush()/adjust_actual()) chỉ commit MỘT LẦN sau khi TẤT CẢ các lô trong phiếu đã qua
+    hết mọi kiểm tra (kể cả trần định mức BOM của các dòng SAU). Trước đây mỗi lô tự commit
+    ngay tại đây, phá vỡ đúng cái "all-or-nothing" mà dispense() đã hứa: dòng 1 trừ tồn +
+    commit thật, dòng 2 mới phát hiện vượt định mức BOM và raise — dispense() báo lỗi "không
+    cấp liệu dòng nào" nhưng dòng 1 đã bị trừ tồn vĩnh viễn (audit rủi ro 2026-09-15). Endpoint
+    "Tiêu thụ lô" đơn lẻ (routers/batches.py) gọi trực tiếp, không qua dispense() nên vẫn dùng
+    mặc định commit=True để hành vi không đổi."""
     require_role(user, Role.OPERATOR, Role.SUPERVISOR, Role.ENGINEER)
-    batch = _get(db, batch_id)
+    # with_for_update(): khóa dòng MẺ TRƯỚC khi đọc "đã dùng" cho kiểm tra trần định mức BOM bên
+    # dưới — 2 lời gọi consume_lot gần như đồng thời trên CÙNG mẻ (khác lô/vật tư nhưng CÙNG 1
+    # Nhóm vật tư thay thế dùng chung 1 trần, xem bom.py::ceiling_for_material) có thể cùng đọc
+    # "đã dùng" trước khi cái nào commit, cùng qua được kiểm tra rồi cùng ghi — tổng vượt trần dù
+    # allow_over=False (audit rủi ro 2026-09-15). Khóa mẻ TRƯỚC lô (không phải ngược lại) vì
+    # không có chỗ nào khác trong module này khóa lô rồi mới khóa mẻ — giữ đúng thứ tự này ở mọi
+    # nơi khác để tránh deadlock.
+    batch = db.execute(select(BatchExecution).where(
+        BatchExecution.batch_id == batch_id).with_for_update()).scalar_one_or_none()
+    if not batch:
+        raise NotFoundError("Batch không tồn tại.")
     _assert_not_locked(batch)
     if batch.state == BatchState.CLOSED.value:
         raise DomainError("Mẻ đã đóng hồ sơ (closed) — không thể cấp liệu.")
@@ -421,7 +446,8 @@ def consume_lot(db: Session, batch_id: str, lot_id: str, quantity: float, user: 
                        quantity=quantity, uom=lot.uom, source_event="consume_lot")
     record_audit(db, entity_type="batch", entity_id=batch.batch_id, action="consume_lot",
                  actor=user, after={"lot_code": lot.lot_code, "quantity": quantity, "uom": lot.uom})
-    db.commit()
+    if commit:
+        db.commit()
     return {"batch_id": batch.batch_id, "lot_id": lot.lot_id, "remaining": lot.quantity}
 
 

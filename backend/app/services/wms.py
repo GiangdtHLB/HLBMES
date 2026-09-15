@@ -80,7 +80,7 @@ def list_pallets(db: Session, status: str = None) -> list:
         cases = db.execute(select(Case).where(Case.pallet_id == p.pallet_id)).scalars().all()
         out.append({"pallet_id": p.pallet_id, "pallet_code": p.pallet_code, "product": p.product,
                     "lot_code": p.lot_code, "case_count": p.case_count, "units_per_case": p.units_per_case,
-                    "total_units": sum(c.units for c in cases), "status": p.status,
+                    "total_units": sum(c.units for c in cases), "status": p.status, "source": p.source,
                     "location": loc.code if loc else None,
                     "cases": [{"case_code": c.case_code, "units": c.units} for c in cases]})
     return out
@@ -88,14 +88,20 @@ def list_pallets(db: Session, status: str = None) -> list:
 
 def build_pallet(db: Session, payload: dict, user: User) -> Pallet:
     require_perm(user, "warehouse.receive")
-    return _build_pallet(db, payload, user)
+    return _build_pallet(db, payload, user, source="manual")
 
 
-def _build_pallet(db: Session, payload: dict, user: User) -> Pallet:
+def _build_pallet(db: Session, payload: dict, user: User, source: str = "manual") -> Pallet:
     """Lõi tạo pallet, KHÔNG check quyền — dùng chung cho build_pallet() (thao tác tay, tự
     check warehouse.receive) và release_pack_lot_to_wms() (services/batch_pipeline.py, đã tự
     check production.release_to_wms — không bắt người duyệt nhập kho từ Mẻ sản xuất phải có
-    thêm quyền warehouse.receive)."""
+    thêm quyền warehouse.receive).
+
+    `source` chỉ để đánh dấu hiển thị/kiểm toán — "manual" (thủ kho tự đóng pallot, KHÔNG qua
+    duyệt KCS/Giám đốc SX, không link genealogy về lô chiết) hay "production" (đã qua đủ 2 bước
+    duyệt qua release_pack_lot_to_wms). KHÔNG dùng để chặn quyền — người dùng đã xác nhận giữ
+    nguyên khả năng đóng pallet thủ công (audit rủi ro 2026-09-15), chỉ cần phân biệt rõ khi
+    xem danh sách/kiểm toán."""
     n = int(payload.get("case_count", 0) or 0)
     upc = int(payload.get("units_per_case", 24) or 24)
     if n <= 0:
@@ -103,7 +109,7 @@ def _build_pallet(db: Session, payload: dict, user: User) -> Pallet:
     stamp = f"{utcnow():%y%m%d}-{new_id()[:4].upper()}"
     pallet = Pallet(pallet_id=new_id(), pallet_code=f"PLT-{stamp}",
                     product=payload.get("product"), lot_code=payload.get("lot_code"),
-                    case_count=n, units_per_case=upc, status="building",
+                    case_count=n, units_per_case=upc, status="building", source=source,
                     created_by=user.username, created_at=utcnow())
     db.add(pallet)
     db.flush()
@@ -111,7 +117,7 @@ def _build_pallet(db: Session, payload: dict, user: User) -> Pallet:
         db.add(Case(case_id=new_id(), case_code=f"CS-{stamp}-{i:03d}", pallet_id=pallet.pallet_id,
                     product=payload.get("product"), units=upc, lot_code=payload.get("lot_code")))
     record_audit(db, entity_type="pallet", entity_id=pallet.pallet_id, action="build", actor=user,
-                 after={"pallet_code": pallet.pallet_code, "cases": n, "units": n * upc})
+                 after={"pallet_code": pallet.pallet_code, "cases": n, "units": n * upc, "source": source})
     db.commit()
     db.refresh(pallet)
     return pallet
@@ -165,7 +171,7 @@ def resolve(db: Session, code: str) -> dict:
         loc = db.get(WmsLocation, p.location_id) if p.location_id else None
         return {"type": "pallet", "pallet_code": p.pallet_code, "product": p.product,
                 "lot_code": p.lot_code, "case_count": p.case_count, "status": p.status,
-                "location": loc.code if loc else None}
+                "source": p.source, "location": loc.code if loc else None}
     c = db.execute(select(Case).where(Case.case_code == code)).scalar_one_or_none()
     if c:
         pal = db.get(Pallet, c.pallet_id)

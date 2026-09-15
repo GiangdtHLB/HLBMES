@@ -2689,12 +2689,25 @@ def post_count(db: Session, count_id: str, user: User) -> dict:
             MaterialLot.lot_id == line.lot_id).with_for_update()).scalar_one_or_none()
         if not lot:
             continue
+        # system_qty chỉ là ảnh chụp tồn lúc TẠO phiếu (create_count) — không khóa lô trong suốt
+        # thời gian đếm thực tế (có thể kéo dài nhiều ngày), nên 1 phiếu nhập/xuất/điều chuyển
+        # THẬT hoàn toàn có thể xảy ra trên lô này sau đó. Trước đây khoản chênh do phiếu thật
+        # đó gây ra bị "nuốt" âm thầm vào biên độ kiểm kê, không để lại dấu vết (audit rủi ro
+        # 2026-09-15). KHÔNG chặn chốt phiếu (chưa có cơ chế hủy phiếu kiểm kê draft để làm lại
+        # nếu bị chặn ở đây) — chỉ đánh dấu rõ trong lý do StockMovement + kết quả trả về để
+        # người duyệt biết mà đối chiếu thủ công thay vì mất dấu hoàn toàn.
+        interim_moves = db.execute(select(func.count()).select_from(StockMovement).where(
+            StockMovement.lot_id == line.lot_id, StockMovement.movement_type != "adjust",
+            StockMovement.created_at > count.created_at)).scalar_one()
+        warn = (f" (⚠ có {interim_moves} phiếu nhập/xuất/điều chuyển khác xảy ra SAU khi lập "
+                "phiếu kiểm kê — đối chiếu lại thủ công)" if interim_moves else "")
         _move(db, "adjust", lot, abs(diff), user,
-              reason=f"Kiểm kê {count.count_code}: hệ thống {line.system_qty}{lot.uom} → thực tế {line.counted_qty}{lot.uom}",
+              reason=f"Kiểm kê {count.count_code}: hệ thống {line.system_qty}{lot.uom} → thực tế {line.counted_qty}{lot.uom}{warn}",
               location_from=lot.location, location_to=lot.location)
         lot.quantity = line.counted_qty
         adjustments.append({"lot_code": lot.lot_code, "system_qty": line.system_qty,
-                            "counted_qty": line.counted_qty, "variance": diff})
+                            "counted_qty": line.counted_qty, "variance": diff,
+                            "interim_movements": interim_moves})
     count.status = "posted"
     count.posted_by = user.username
     count.posted_at = utcnow()
