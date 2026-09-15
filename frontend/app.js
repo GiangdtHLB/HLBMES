@@ -52,7 +52,6 @@ async function POST_FORM(path, formData) {
 // ---------- utils ----------
 const $ = (id) => document.getElementById(id);
 const el = (html) => { const d = document.createElement("div"); d.innerHTML = html.trim(); return d.firstChild; };
-const round3 = (n) => Math.round(n * 1000) / 1000;
 const badge = (s) => `<span class="badge ${s}">${s}</span>`;
 // Badge trạng thái pipeline "Mẻ SX" — status_label do backend trả (services/batch_pipeline.py),
 // class dùng để tô màu mượn từ bộ badge có sẵn (mirror cách module Nấu-Lọc-Chiết cũ làm ở
@@ -1099,8 +1098,8 @@ VIEWS.orders = async function () {
           }
           const selectedSet = new Set(selected);
           const selMembers = l.member_breakdown.filter(mb => selectedSet.has(mb.material_id));
-          const dispQtyPerBatch = round3(selMembers.reduce((s, mb) => s + (mb.qty_per_batch || 0), 0));
-          const dispQtyTotal = round3(selMembers.reduce((s, mb) => s + (mb.qty_total || 0), 0));
+          const dispQtyPerBatch = round4(selMembers.reduce((s, mb) => s + (mb.qty_per_batch || 0), 0));
+          const dispQtyTotal = round4(selMembers.reduce((s, mb) => s + (mb.qty_total || 0), 0));
           const dispShortage = selMembers.length > 0 && selMembers.every(mb => mb.shortage);
           const memberRows = l.member_breakdown.map(mb => {
             const checked = selectedSet.has(mb.material_id);
@@ -7431,9 +7430,9 @@ function cartPanelHtml() {
     const fifoCell = c.group_code
       ? groupMemberFifoBadgeHtml(c.material_id, c.group_members, REQ_CACHE.lots)
       : requestFifoBadgeHtml(c.material_id, c.lot_id, REQ_CACHE.lots);
-    const available = round3(materialAvailableCompanyQty(c.material_id, REQ_CACHE.lots));
-    const pendingQc = round3(materialPendingQcCompanyQty(c.material_id, REQ_CACHE.lots));
-    const workshopQty = round3(materialWorkshopQty(c.material_id, REQ_CACHE.lots));
+    const available = round4(materialAvailableCompanyQty(c.material_id, REQ_CACHE.lots));
+    const pendingQc = round4(materialPendingQcCompanyQty(c.material_id, REQ_CACHE.lots));
+    const workshopQty = round4(materialWorkshopQty(c.material_id, REQ_CACHE.lots));
     const insufficient = c.quantity > available;
     const slCell = c.locked
       ? `<span class="muted" title="Mã cũ hơn (FIFO) trong nhóm đã đủ định mức theo lệnh — mã này không cần lấy">0 ${esc(c.uom)} — đã đủ từ mã cũ hơn</span>`

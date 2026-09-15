@@ -164,7 +164,7 @@ def actual_consumed(db: Session, batch_id: str) -> dict:
 
 
 def _classify(planned, act, tol):
-    diff = round(act - planned, 3)
+    diff = round(act - planned, 4)
     pct = round((diff / planned * 100), 1) if planned else 0.0
     if planned <= 0:
         # BOM không khai định mức (qty=0): có tiêu thụ là vượt, không thì bỏ qua.
@@ -191,8 +191,8 @@ def compare_batch(db: Session, batch) -> dict:
         code = m.get("material_code")
         match_codes = m.get("match_codes") or {code}
         seen |= match_codes
-        planned = round(m.get("qty", 0) or 0, 3)
-        act = round(sum(actual.get(c, 0.0) for c in match_codes), 3)
+        planned = round(m.get("qty", 0) or 0, 4)
+        act = round(sum(actual.get(c, 0.0) for c in match_codes), 4)
         tol = m.get("tol_pct", 0) or 0
         diff, pct, status = _classify(planned, act, tol)
         lines.append({"material_code": code, "material_name": m.get("material_name"), "uom": m.get("uom"),
@@ -203,7 +203,7 @@ def compare_batch(db: Session, batch) -> dict:
         select(Material).where(Material.code.in_(extra_codes))).scalars().all()} if extra_codes else {}
     extras = [{"material_code": c, "material_name": extra_mats[c].name if c in extra_mats else None,
               "uom": extra_mats[c].uom if c in extra_mats else None,
-              "actual": round(actual[c], 3), "status": "ngoai_bom"}
+              "actual": round(actual[c], 4), "status": "ngoai_bom"}
              for c in extra_codes]
     return {"batch_code": batch.batch_code, "base_qty": snap.get("base_qty"),
             "base_uom": snap.get("base_uom"), "planned_qty": batch.planned_qty,
@@ -246,8 +246,8 @@ def batches_fully_dispensed_map(db: Session) -> dict[str, bool]:
         ok = True
         for m in lines:
             match_codes = m.get("match_codes") or {m.get("material_code")}
-            planned = round(m.get("qty", 0) or 0, 3)
-            act = round(sum(actual.get(c, 0.0) for c in match_codes), 3)
+            planned = round(m.get("qty", 0) or 0, 4)
+            act = round(sum(actual.get(c, 0.0) for c in match_codes), 4)
             tol = m.get("tol_pct", 0) or 0
             _, _, status = _classify(planned, act, tol)
             if status in ("thieu", "chua_dung"):
@@ -293,13 +293,13 @@ def availability(db: Session, snapshot: dict, planned_qty: float, brew_order_id:
             name_by[code] = m["material_name"]
     rows, shortage = [], False
     for code, req in req_by.items():
-        req = round(req, 3)
-        have = round(sum(avail.get(c, 0.0) for c in match_by[code]), 3)
+        req = round(req, 4)
+        have = round(sum(avail.get(c, 0.0) for c in match_by[code]), 4)
         ok = have >= req
         if not ok:
             shortage = True
         rows.append({"material_code": code, "material_name": name_by.get(code), "uom": uom_by.get(code),
-                     "required": req, "available": have, "ok": ok, "short": round(max(req - have, 0), 3)})
+                     "required": req, "available": have, "ok": ok, "short": round(max(req - have, 0), 4)})
     return {"factor": round(factor, 4), "shortage": shortage, "rows": rows}
 
 
@@ -326,10 +326,10 @@ def availability_with_alternates(db: Session, snapshot: dict, planned_qty: float
             alt_by.setdefault(code, m.get("alternates"))
     rows, shortage = [], False
     for code, req in req_by.items():
-        req = round(req, 3)
-        have = round(sum(avail.get(c, 0.0) for c in match_by[code]), 3)
+        req = round(req, 4)
+        have = round(sum(avail.get(c, 0.0) for c in match_by[code]), 4)
         ok = have >= req
-        short = round(max(req - have, 0), 3)
+        short = round(max(req - have, 0), 4)
         suggestions = []
         if not ok:
             shortage = True
@@ -338,8 +338,8 @@ def availability_with_alternates(db: Session, snapshot: dict, planned_qty: float
                 acode = alt.get("material_code")
                 af = alt.get("factor")            # 0 là giá trị hợp lệ (không quy đổi)
                 af = 1 if af is None else af
-                alt_need = round(need_more * af, 3)         # quy đổi sang NVL thay thế
-                alt_have = round(avail.get(acode, 0.0), 3)
+                alt_need = round(need_more * af, 4)         # quy đổi sang NVL thay thế
+                alt_have = round(avail.get(acode, 0.0), 4)
                 suggestions.append({"material_code": acode, "factor": af,
                                     "need": alt_need, "available": alt_have,
                                     "covers": alt_have >= alt_need})
@@ -369,7 +369,7 @@ def ceiling_for_material(db: Session, batch, material_code: str):
             tol = max(tol, (m.get("tol_pct", 0) or 0))  # dùng dung sai lớn nhất nếu trùng dòng
     if not found:
         return None
-    return round(qty_sum * (1 + tol / 100.0), 3), round(qty_sum, 3)
+    return round(qty_sum * (1 + tol / 100.0), 4), round(qty_sum, 4)
 
 
 def actual_consumed_for_match(db: Session, batch, material_code: str) -> float:

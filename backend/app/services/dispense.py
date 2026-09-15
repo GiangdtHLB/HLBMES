@@ -83,7 +83,7 @@ def _effective_qty(lot: MaterialLot, reserved: dict) -> float:
     """Tồn CÒN LẠI của 1 lô sau khi trừ phần đã "giữ chỗ" bởi các dòng KHÁC trong CÙNG 1 lần
     gọi dispense()/backflush() (chưa commit vào DB — 2 pha lập kế hoạch rồi mới thực thi, xem
     _plan_consume) — tránh 2 dòng trong cùng 1 phiếu cùng tưởng còn nguyên 1 lô rồi tính trùng."""
-    return round(lot.quantity - reserved.get(lot.lot_id, 0.0), 6)
+    return round(lot.quantity - reserved.get(lot.lot_id, 0.0), 4)
 
 
 def _is_fifo_choice(db: Session, material_code: str, lot_id: str, reserved: dict) -> bool:
@@ -108,7 +108,7 @@ def _plan_consume(db: Session, material_code: str, qty: float, picked_lot_id: st
     dùng, dù chưa commit DB thật. Trả về (plan, fifo_ok) — plan: list[(lot, take)] để
     _execute_plan thực thi thật khi đã chắc chắn đủ."""
     reserved = reserved if reserved is not None else {}
-    remaining = round(qty, 6)
+    remaining = round(qty, 4)
     plan = []
     fifo_ok = True
     if picked_lot_id:
@@ -129,7 +129,7 @@ def _plan_consume(db: Session, material_code: str, qty: float, picked_lot_id: st
         if take > 0:
             plan.append((lot, take))
             reserved[lot.lot_id] = reserved.get(lot.lot_id, 0.0) + take
-        remaining = round(remaining - take, 6)
+        remaining = round(remaining - take, 4)
     else:
         for lot in _workshop_fefo_lots(db, material_code):
             if remaining <= 1e-9:
@@ -139,10 +139,10 @@ def _plan_consume(db: Session, material_code: str, qty: float, picked_lot_id: st
                 continue
             plan.append((lot, take))
             reserved[lot.lot_id] = reserved.get(lot.lot_id, 0.0) + take
-            remaining = round(remaining - take, 6)
+            remaining = round(remaining - take, 4)
     if remaining > 1e-6:
         raise DomainError(
-            f"Không đủ lô khả dụng (còn hạn) cho {material_code}: thiếu {round(remaining,3)} — "
+            f"Không đủ lô khả dụng (còn hạn) cho {material_code}: thiếu {round(remaining, 4)} — "
             "không cấp liệu (all-or-nothing).")
     return plan, fifo_ok
 
@@ -184,7 +184,7 @@ def suggest_dispense(db: Session, batch_id: str) -> dict:
     name_by_code = {m.code: m.name for m in db.execute(select(Material)).scalars().all()}
     lines = []
     for l in cmp["lines"]:
-        need = round(-l["diff"], 3) if l["diff"] < 0 else 0.0
+        need = round(-l["diff"], 4) if l["diff"] < 0 else 0.0
         if need <= 1e-6:
             continue
         member_codes = l.get("match_codes") or [l["material_code"]]
@@ -206,27 +206,27 @@ def suggest_dispense(db: Session, batch_id: str) -> dict:
                     continue
                 mcode = bom.material_code_for_lot(db, lot)
                 picks_by_member.setdefault(mcode, []).append(
-                    {"lot_id": lot.lot_id, "lot_code": lot.lot_code, "quantity": round(take, 6),
+                    {"lot_id": lot.lot_id, "lot_code": lot.lot_code, "quantity": round(take, 4),
                      "uom": lot.uom, "expiry": lot.expiry.isoformat() if lot.expiry else None})
-                remaining = round(remaining - take, 6)
-            group_shortfall = round(remaining, 3) if remaining > 1e-6 else 0.0
+                remaining = round(remaining - take, 4)
+            group_shortfall = round(remaining, 4) if remaining > 1e-6 else 0.0
             for mcode in member_codes:
                 member_lots = _workshop_fefo_lots(db, mcode)
-                alternatives = [{"lot_id": lot.lot_id, "lot_code": lot.lot_code, "quantity": round(lot.quantity, 6),
+                alternatives = [{"lot_id": lot.lot_id, "lot_code": lot.lot_code, "quantity": round(lot.quantity, 4),
                                 "uom": lot.uom, "expiry": lot.expiry.isoformat() if lot.expiry else None}
                                for lot in member_lots]
                 lines.append({"material_code": mcode, "material_name": name_by_code.get(mcode),
                              "uom": l["uom"], "planned": l["planned"],
-                             "stock_company": round(company_stock.get(mcode, 0.0), 3),
-                             "stock_workshop": round(workshop_stock.get(mcode, 0.0), 3),
+                             "stock_company": round(company_stock.get(mcode, 0.0), 4),
+                             "stock_workshop": round(workshop_stock.get(mcode, 0.0), 4),
                              "need": need, "picks": picks_by_member.get(mcode, []), "alternatives": alternatives,
                              "group_code": l["material_code"], "shortfall": group_shortfall})
             continue
         real_codes = bom.codes_for_dispense(db, l["material_code"])
-        stock_company = round(sum(company_stock.get(c, 0.0) for c in real_codes), 3)
-        stock_workshop = round(sum(workshop_stock.get(c, 0.0) for c in real_codes), 3)
+        stock_company = round(sum(company_stock.get(c, 0.0) for c in real_codes), 4)
+        stock_workshop = round(sum(workshop_stock.get(c, 0.0) for c in real_codes), 4)
         fefo_lots = _workshop_fefo_lots(db, l["material_code"])
-        alternatives = [{"lot_id": lot.lot_id, "lot_code": lot.lot_code, "quantity": round(lot.quantity, 6),
+        alternatives = [{"lot_id": lot.lot_id, "lot_code": lot.lot_code, "quantity": round(lot.quantity, 4),
                         "uom": lot.uom, "expiry": lot.expiry.isoformat() if lot.expiry else None}
                        for lot in fefo_lots]
         picks = []
@@ -238,14 +238,14 @@ def suggest_dispense(db: Session, batch_id: str) -> dict:
             if take <= 0:
                 continue
             picks.append({"lot_id": lot.lot_id, "lot_code": lot.lot_code,
-                         "quantity": round(take, 6), "uom": lot.uom,
+                         "quantity": round(take, 4), "uom": lot.uom,
                          "expiry": lot.expiry.isoformat() if lot.expiry else None})
-            remaining = round(remaining - take, 6)
+            remaining = round(remaining - take, 4)
         lines.append({"material_code": l["material_code"], "material_name": l.get("material_name"),
                      "uom": l["uom"], "planned": l["planned"],
                      "stock_company": stock_company, "stock_workshop": stock_workshop,
                      "need": need, "picks": picks, "alternatives": alternatives,
-                     "shortfall": round(remaining, 3) if remaining > 1e-6 else 0.0})
+                     "shortfall": round(remaining, 4) if remaining > 1e-6 else 0.0})
     return {"batch_id": batch_id, "batch_code": batch.batch_code, "lines": lines}
 
 
@@ -324,7 +324,7 @@ def backflush(db: Session, batch_id: str, produced_qty: float, user: User) -> di
         match_by.setdefault(code, m.get("match_codes") or {code})
     for code, std in req_by.items():
         already_code = sum(already.get(c, 0.0) for c in match_by[code])
-        need = round(std - already_code, 3)
+        need = round(std - already_code, 4)
         if need <= 1e-6:
             continue
         try:
@@ -363,9 +363,9 @@ def adjust_actual(db: Session, batch_id: str, material_code: str, new_actual: fl
         raise DomainError("Hồ sơ mẻ (EBR) đã khóa — không thể sửa Thực tế; chỉ tạo amendment.")
     if not (reason or "").strip():
         raise DomainError("Bắt buộc nhập lý do khi sửa Thực tế.")
-    current = round(bom.actual_consumed_for_match(db, batch, material_code), 6)
-    new_actual = round(new_actual, 6)
-    delta = round(new_actual - current, 6)
+    current = round(bom.actual_consumed_for_match(db, batch, material_code), 4)
+    new_actual = round(new_actual, 4)
+    delta = round(new_actual - current, 4)
     if abs(delta) <= 1e-6:
         raise DomainError("Số Thực tế mới giống hệt hiện tại — không có gì để sửa.")
 
@@ -385,7 +385,7 @@ def adjust_actual(db: Session, batch_id: str, material_code: str, new_actual: fl
             db.add(DispenseLine(line_id=new_id(), dispense_id=disp.dispense_id, **r))
             all_lines.append(r)
     else:
-        need_refund = round(-delta, 6)
+        need_refund = round(-delta, 4)
         # material_code có thể là mã Nhóm vật tư thay thế (dòng BOM khai theo nhóm) — hoàn lại
         # phải khớp BẤT KỲ mã thành viên nào đã thực sự tiêu thụ, không chỉ đúng mã nhóm.
         refund_codes = set(bom.codes_for_dispense(db, material_code))
@@ -413,16 +413,16 @@ def adjust_actual(db: Session, batch_id: str, material_code: str, new_actual: fl
             if take <= 0:
                 continue
             plan_refund.append((edge, lot, take))
-            remaining = round(remaining - take, 6)
+            remaining = round(remaining - take, 4)
         if remaining > 1e-6:
             raise DomainError(
                 f"Không đủ lịch sử tiêu thụ (qua Cấp liệu/Consume) để hoàn lại — thiếu "
                 f"{remaining} {material_code}.")
         for edge, lot, take in plan_refund:
-            lot.quantity = round(lot.quantity + take, 6)
+            lot.quantity = round(lot.quantity + take, 4)
             if lot.status == LotStatus.CONSUMED.value:
                 lot.status = LotStatus.AVAILABLE.value
-            edge.quantity = round(edge.quantity - take, 6)
+            edge.quantity = round(edge.quantity - take, 4)
             if edge.quantity <= 1e-9:
                 db.delete(edge)
             row = {"material_code": bom.material_code_for_lot(db, lot), "lot_id": lot.lot_id,
@@ -519,7 +519,7 @@ def batch_dispense_summary(db: Session, batch_id: str, only_dispensed: bool = Tr
                 "material_name": l.get("material_name") if code == l["material_code"] else name_by_code.get(code),
                 "uom": l["uom"],
                 "planned": l["planned"] if i == 0 else None,
-                "actual": round(actual_by_code.get(code, 0.0), 3),
+                "actual": round(actual_by_code.get(code, 0.0), 4),
                 "diff": l["diff"] if i == 0 else None,
                 "pct": l["pct"] if i == 0 else None,
                 "status": l["status"] if i == 0 else None,

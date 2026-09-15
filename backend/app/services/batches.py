@@ -406,13 +406,13 @@ def consume_lot(db: Session, batch_id: str, lot_id: str, quantity: float, user: 
         # "đã dùng" phải cộng dồn thực tế của MỌI mã thành viên trong nhóm — ngưỡng vốn tính
         # chung cho cả nhóm, không phải riêng mã này (xem bom.py::actual_consumed_for_match).
         already = bom.actual_consumed_for_match(db, batch, code)
-        if round(already + quantity, 3) > ceiling:
+        if round(already + quantity, 4) > ceiling:
             raise DomainError(
-                f"Vượt định mức BOM cho {code}: đã dùng {round(already,3)}, thêm {quantity} "
+                f"Vượt định mức BOM cho {code}: đã dùng {round(already,4)}, thêm {quantity} "
                 f"> ngưỡng {ceiling} (định mức {planned} + dung sai). "
                 f"Bỏ qua bằng allow_over nếu có phê duyệt.")
 
-    lot.quantity = round(lot.quantity - quantity, 6)
+    lot.quantity = round(lot.quantity - quantity, 4)
     if lot.quantity <= 1e-9:
         lot.quantity = 0.0
         lot.status = LotStatus.CONSUMED.value
@@ -484,7 +484,7 @@ def _refund_consumed_materials(db: Session, batch: BatchExecution, user: User, r
         if not lot:
             continue
         take = edge.quantity
-        lot.quantity = round(lot.quantity + take, 6)
+        lot.quantity = round(lot.quantity + take, 4)
         if lot.status == LotStatus.CONSUMED.value:
             lot.status = LotStatus.AVAILABLE.value
         row = {"material_code": bom.material_code_for_lot(db, lot), "lot_id": lot.lot_id,
@@ -533,7 +533,7 @@ def delete_batch(db: Session, batch_id: str, user: User) -> None:
     for edge in consumed_edges:
         lot = db.get(MaterialLot, edge.from_id)
         if lot and edge.quantity:
-            lot.quantity = round(lot.quantity + edge.quantity, 6)
+            lot.quantity = round(lot.quantity + edge.quantity, 4)
             if lot.status == LotStatus.CONSUMED.value:
                 lot.status = LotStatus.AVAILABLE.value
 

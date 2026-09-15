@@ -250,7 +250,7 @@ def receive(db: Session, payload: dict, user: User) -> dict:
         # round: lot.quantity là số dư CỘNG DỒN qua nhiều lần nhập/xuất/điều chuyển — không làm
         # tròn lại mỗi lần sẽ trôi dần nhị phân theo thời gian, mirror cách sửa _convert_member_qty
         # (services/brew_order.py) và on_hand_bbt/on_hand_cct (routers/brewing.py).
-        lot.quantity = round(lot.quantity + qty, 3)
+        lot.quantity = round(lot.quantity + qty, 4)
         # Cộng dồn thêm 1 đợt hàng vào lô đã tồn tại (kể cả lô đã Released) — vật tư có chỉ
         # tiêu bắt buộc HOẶC thuộc nhóm Nguyên liệu chính/phụ phải quay lại HOLD chờ KCS khai
         # báo/duyệt lại cho đợt hàng mới này, không được coi là "đã qua QC" chỉ vì đợt hàng
@@ -317,7 +317,7 @@ def update_receipt(db: Session, movement_id: str, payload: dict, user: User) -> 
         new_qty = float(new_qty)
         if new_qty <= 0:
             raise DomainError("Số lượng phải > 0.")
-        lot.quantity = round(lot.quantity + new_qty - mv.quantity, 3)
+        lot.quantity = round(lot.quantity + new_qty - mv.quantity, 4)
         mv.quantity = new_qty
     if "supplier_id" in payload:
         lot.supplier_id = payload["supplier_id"]
@@ -358,7 +358,7 @@ def delete_receipt(db: Session, movement_id: str, user: User) -> dict:
         Deviation.scope_type == "lot", Deviation.scope_id == lot.lot_id)).scalar_one() > 0
     if has_qc or has_dev:
         raise DomainError(f"Lô {lot.lot_code} đã được khai báo/duyệt chỉ tiêu chất lượng — không thể xóa nhập kho.")
-    lot.quantity = round(lot.quantity - mv.quantity, 3)
+    lot.quantity = round(lot.quantity - mv.quantity, 4)
     remaining_receipts = db.execute(select(func.count()).select_from(StockMovement).where(
         StockMovement.lot_id == lot.lot_id, StockMovement.movement_type == "receipt",
         StockMovement.movement_id != mv.movement_id)).scalar_one()
@@ -459,7 +459,7 @@ def return_stock(db: Session, lot_id: str, quantity: float, user: User, reason: 
     _assert_location_scope(user, lot.location)
     if quantity <= 0:
         raise DomainError("Số lượng hoàn phải > 0.")
-    lot.quantity = round(lot.quantity + quantity, 3)
+    lot.quantity = round(lot.quantity + quantity, 4)
     if lot.status == LotStatus.CONSUMED.value:
         lot.status = LotStatus.AVAILABLE.value
     mv = _move(db, "return", lot, quantity, user, location_to=lot.location, reason=reason)
@@ -506,7 +506,7 @@ def issue(db: Session, lot_id: str, quantity: float, user: User, mode: str = "tu
         factory = db.get(FactoryLocation, destination_factory_id)
         if not factory or not factory.active:
             raise DomainError("Nhà máy đích không tồn tại hoặc đã ngừng hoạt động.")
-    lot.quantity = round(lot.quantity - quantity, 3)
+    lot.quantity = round(lot.quantity - quantity, 4)
     # So sánh bằng epsilon thay vì `== 0` — trừ dần bằng số thực (float) qua nhiều lần xuất có
     # thể để lại số dư cực nhỏ khác 0 tuyệt đối (VD 1e-13), khiến lô "còn hiện" trong dropdown
     # dù thực tế đã hết; dưới ngưỡng này coi như đã hết và chốt về đúng 0.
@@ -612,12 +612,12 @@ def _transfer_lot(db: Session, lot_id: str, quantity: float, location_to: str, u
         moved_lot = lot
     elif sibling is not None:
         # Kho đích ĐÃ có dòng cùng lot_code -> cộng dồn vào đó (dù chuyển 1 phần hay toàn bộ).
-        lot.quantity = round(lot.quantity - quantity, 3)
+        lot.quantity = round(lot.quantity - quantity, 4)
         # So sánh bằng epsilon (mirror issue()) — trừ dần bằng float có thể để lại số dư cực nhỏ.
         if lot.quantity <= 1e-6:
             lot.quantity = 0.0
             lot.status = LotStatus.CONSUMED.value
-        sibling.quantity = round(sibling.quantity + quantity, 3)
+        sibling.quantity = round(sibling.quantity + quantity, 4)
         if sibling.status == LotStatus.CONSUMED.value:
             sibling.status = LotStatus.AVAILABLE.value
         moved_lot = sibling
@@ -627,7 +627,7 @@ def _transfer_lot(db: Session, lot_id: str, quantity: float, location_to: str, u
         db.add(edge)
     else:
         # Kho đích chưa có dòng nào + chuyển 1 phần -> tách dòng mới, DÙNG LẠI cùng lot_code.
-        lot.quantity = round(lot.quantity - quantity, 3)
+        lot.quantity = round(lot.quantity - quantity, 4)
         moved_lot = MaterialLot(lot_id=new_id(), lot_code=lot.lot_code, lot_year=lot.lot_year,
                                 material_id=lot.material_id, product_id=lot.product_id, lot_type=lot.lot_type,
                                 supplier_lot=lot.supplier_lot, supplier_id=lot.supplier_id,
@@ -733,12 +733,12 @@ def stock_on_hand(db: Session, location: str = None) -> list[dict]:
     out = []
     for material_id, a in agg.items():
         mat = mats.get(material_id)
-        on_hand = round(a["available"], 3)
-        pending_qc = round(a["pending_qc"], 3)
+        on_hand = round(a["available"], 4)
+        pending_qc = round(a["pending_qc"], 4)
         stock_min = mat.stock_min if mat else None
         out.append({"material_id": material_id, "material_code": mat.code if mat else material_id,
                     "material_name": mat.name if mat else "", "on_hand": on_hand,
-                    "actual_total": round(on_hand + pending_qc, 3), "pending_qc": pending_qc,
+                    "actual_total": round(on_hand + pending_qc, 4), "pending_qc": pending_qc,
                     "uom": a["uom"], "category": mat.category if mat else None,
                     "stock_min": stock_min, "low_stock": stock_min is not None and on_hand < stock_min})
     return sorted(out, key=lambda x: x["material_code"])
@@ -821,7 +821,7 @@ def stock_on_hand_as_of(db: Session, as_of, location: str = None) -> list[dict]:
     out = [{"material_id": mid, "material_code": mats[mid].code if mid in mats else mid,
            "material_name": mats[mid].name if mid in mats else "",
            "category": mats[mid].category if mid in mats else None,
-           "uom": mats[mid].uom if mid in mats else "", "on_hand": round(total, 3)}
+           "uom": mats[mid].uom if mid in mats else "", "on_hand": round(total, 4)}
           for mid, total in agg.items()]
     return sorted(out, key=lambda x: x["material_code"])
 
@@ -921,7 +921,7 @@ def lot_on_hand_as_of(db: Session, as_of, location: str = None) -> list[dict]:
         mat = mats.get(lot.material_id)
         out.append({"lot_id": lot.lot_id, "lot_code": lot.lot_code, "material_id": lot.material_id,
                     "material_code": mat.code if mat else lot.material_id, "material_name": mat.name if mat else "",
-                    "quantity": round(balances[lot_id], 3), "uom": lot.uom, "created_at": lot.created_at,
+                    "quantity": round(balances[lot_id], 4), "uom": lot.uom, "created_at": lot.created_at,
                     "location": locations.get(lot_id) or lot.location})
     return sorted(out, key=lambda x: (x["material_code"] or "", x["lot_code"] or ""))
 
@@ -932,7 +932,7 @@ def low_stock_report(db: Session) -> list[dict]:
     để vật tư cần xử lý gấp nhất hiện lên đầu."""
     rows = [r for r in stock_on_hand(db) if r["low_stock"]]
     for r in rows:
-        r["deficit"] = round(r["stock_min"] - r["on_hand"], 3)
+        r["deficit"] = round(r["stock_min"] - r["on_hand"], 4)
     return sorted(rows, key=lambda r: r["deficit"], reverse=True)
 
 
@@ -949,10 +949,10 @@ def material_fifo_detail(db: Session, material_id: str) -> dict:
     workshop = sum(l.quantity for l in lots_sorted if _is_workshop_location(l.location or ""))
     return {
         "material_id": material_id,
-        "stock_company": round(company, 3), "stock_workshop": round(workshop, 3),
-        "stock_total": round(company + workshop, 3),
+        "stock_company": round(company, 4), "stock_workshop": round(workshop, 4),
+        "stock_total": round(company + workshop, 4),
         "lots": [{"lot_id": l.lot_id, "lot_code": l.lot_code, "location": l.location,
-                 "quantity": round(l.quantity, 3), "uom": l.uom, "received_at": l.created_at}
+                 "quantity": round(l.quantity, 4), "uom": l.uom, "received_at": l.created_at}
                 for l in lots_sorted],
     }
 
@@ -974,7 +974,7 @@ def stock_card(db: Session, material_id: str = None, lot_id: str = None) -> list
         bal += sign * m.quantity
         out.append({"ts": m.ts, "type": m.movement_type, "lot_code": m.lot_code,
                     "in": m.quantity if sign > 0 else 0, "out": m.quantity if sign < 0 else 0,
-                    "balance": round(bal, 3), "uom": m.uom, "mode": m.mode,
+                    "balance": round(bal, 4), "uom": m.uom, "mode": m.mode,
                     "reason": m.reason, "actor": m.actor})
     return out
 
@@ -1103,12 +1103,12 @@ def material_transaction_detail(db: Session, material_id: str, date_from: dateti
             break
     balance = opening
     for r in rows:
-        balance = round(balance + r["quantity"], 3)
+        balance = round(balance + r["quantity"], 4)
         r["balance"] = balance
         r["in"] = r["quantity"] if r["quantity"] > 0 else 0.0
         r["out"] = -r["quantity"] if r["quantity"] < 0 else 0.0
-    return {"opening_balance": round(opening, 3), "rows": rows,
-            "closing_balance": round(balance, 3)}
+    return {"opening_balance": round(opening, 4), "rows": rows,
+            "closing_balance": round(balance, 4)}
 
 
 def inventory_report(db: Session, days: int = 30, location: str = None,
@@ -1174,8 +1174,8 @@ def inventory_report(db: Session, days: int = 30, location: str = None,
                   "pending_qc": 0.0, "uom": mat.uom if mat else "", "category": mat.category if mat else None,
                   "stock_min": None, "low_stock": False}
         a = agg.get(mid, _blank_agg())
-        out.append({**oh, "received": round(a["receipt"] + a["return"], 3),
-                    "issued": round(a["issue"], 3),
+        out.append({**oh, "received": round(a["receipt"] + a["return"], 4),
+                    "issued": round(a["issue"], 4),
                     "receipt_first": a["receipt_first"], "receipt_last": a["receipt_last"],
                     "issue_first": a["issue_first"], "issue_last": a["issue_last"]})
     return sorted(out, key=lambda x: x["material_code"])
@@ -1242,11 +1242,11 @@ def lot_inventory_report(db: Session, days: int = 30, location: str = None,
             "material_id": lot.material_id, "material_code": mat.code if mat else (lot.material_id or ""),
             "material_name": mat.name if mat else "", "uom": lot.uom,
             "location": lot.location, "status": lot.status,
-            "on_hand": round(lot.quantity, 3),
+            "on_hand": round(lot.quantity, 4),
             "receipt_first": a["receipt_first"], "receipt_last": a["receipt_last"],
             "issue_first": a["issue_first"], "issue_last": a["issue_last"],
-            "received": round(a["receipt"] + a["return"], 3),
-            "issued": round(a["issue"], 3),
+            "received": round(a["receipt"] + a["return"], 4),
+            "issued": round(a["issue"], 4),
         })
     return sorted(out, key=lambda x: (x["material_code"], x["lot_code"]))
 
@@ -1397,11 +1397,11 @@ def _aggregate_source_material_lines(db: Session, source_type: str, source_id: s
                     "material_code": mat.code if mat else None,
                     "material_name": (mat.name if mat else None) or a["material_name"],
                     "uom": a["uom"] or (mat.uom if mat else "kg"),
-                    "quantity": round(a["quantity"], 3), "is_group": False, "group_code": None,
+                    "quantity": round(a["quantity"], 4), "is_group": False, "group_code": None,
                     "member_material_ids": []})
     for a in group_agg.values():
         out.append({"material_id": None, "material_code": None, "material_name": a["material_name"],
-                    "uom": a["uom"] or "kg", "quantity": round(a["quantity"], 3), "is_group": True,
+                    "uom": a["uom"] or "kg", "quantity": round(a["quantity"], 4), "is_group": True,
                     "group_code": a["group_code"], "member_material_ids": sorted(a["member_material_ids"])})
     return sorted(out, key=lambda x: x["material_code"] or x["material_name"] or "")
 
@@ -2549,13 +2549,13 @@ def workshop_usage_history(db: Session, limit: int = 200) -> list[dict]:
 def _count_line_dict(line: StockCountLine, mat_by_id: dict, lot_by_id: dict) -> dict:
     mat = mat_by_id.get(line.material_id)
     lot = lot_by_id.get(line.lot_id)
-    variance = None if line.counted_qty is None else round(line.counted_qty - line.system_qty, 3)
+    variance = None if line.counted_qty is None else round(line.counted_qty - line.system_qty, 4)
     return {"line_id": line.line_id, "material_id": line.material_id,
             "material_code": mat.code if mat else None, "material_name": mat.name if mat else None,
             "lot_id": line.lot_id, "lot_code": lot.lot_code if lot else None,
             "location": lot.location if lot else None,
-            "system_qty": round(line.system_qty, 3),
-            "counted_qty": round(line.counted_qty, 3) if line.counted_qty is not None else None,
+            "system_qty": round(line.system_qty, 4),
+            "counted_qty": round(line.counted_qty, 4) if line.counted_qty is not None else None,
             "variance": variance, "uom": line.uom, "note": line.note}
 
 
@@ -2682,7 +2682,7 @@ def post_count(db: Session, count_id: str, user: User) -> dict:
         raise DomainError("Chưa nhập số liệu đếm thực tế cho dòng nào — không thể chốt phiếu.")
     adjustments = []
     for line in entered:
-        diff = round(line.counted_qty - line.system_qty, 3)
+        diff = round(line.counted_qty - line.system_qty, 4)
         if diff == 0:
             continue
         lot = db.execute(select(MaterialLot).where(
@@ -2742,7 +2742,7 @@ def undo_count(db: Session, count_id: str, user: User) -> dict:
     for line in lines:
         if line.counted_qty is None:
             continue
-        diff = round(line.counted_qty - line.system_qty, 3)
+        diff = round(line.counted_qty - line.system_qty, 4)
         if diff == 0:
             continue
         lot = db.execute(select(MaterialLot).where(
