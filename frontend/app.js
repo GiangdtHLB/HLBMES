@@ -6192,14 +6192,15 @@ VIEWS.warehouse_px = async function () {
       <input class="searchbox" data-tbl="t_px" placeholder="Tìm mã lô/vật tư..." style="margin-bottom:8px"/>
       <div id="px_total" class="muted" style="margin-bottom:6px"></div>
       <div class="tablewrap"><table id="t_px">
-        <thead><tr><th>Lô</th><th>Vật tư</th><th>Tên vật tư</th><th>SL tính đến ngày</th><th>Vị trí (ước tính)</th></tr></thead>
+        <thead><tr><th>Lô</th><th>Vật tư</th><th>Tên vật tư</th><th>Ngày nhập</th><th>SL tính đến ngày</th><th>Vị trí (ước tính)</th></tr></thead>
         <tbody>${asOfRows.map(l => `<tr data-qty="${l.quantity}" data-uom="${esc(l.uom)}">
           <td><code class="k">${esc(l.lot_code)}</code></td>
           <td class="muted">${esc(l.material_code)}</td>
           <td>${esc(l.material_name)}</td>
+          <td class="muted">${l.created_at ? fmt(l.created_at) : "—"}</td>
           <td>${l.quantity} ${l.uom}</td>
           <td class="muted">${esc(l.location || "—")}</td></tr>`).join("") ||
-          `<tr><td colspan=5 class="muted">Không có lô nào tại ngày này ở ${esc(pxLoc || "kho nào")}.</td></tr>`}</tbody>
+          `<tr><td colspan=6 class="muted">Không có lô nào tại ngày này ở ${esc(pxLoc || "kho nào")}.</td></tr>`}</tbody>
       </table></div>
     </div>`;
   } else if (sec === "tondau") {
@@ -6439,16 +6440,17 @@ VIEWS.warehouse_px = async function () {
         từng mẻ) — cho biết đúng công đoạn, mẻ, lô NVL đã dùng, khác với "Xuất tự do" (chỉ ghi lý do dạng tự do).</div>
       <input class="searchbox" data-tbl="t_nvlhist" placeholder="Tìm theo công đoạn, mẻ, vật tư, lô, người..." style="margin-bottom:8px;width:100%"/>
       <div class="tablewrap"><table id="t_nvlhist">
-        <thead><tr><th>Thời gian</th><th>Công đoạn</th><th>Mẻ</th><th>Vật tư</th><th>Lô NVL</th><th>SL</th><th>Người thực hiện</th></tr></thead>
+        <thead><tr><th>Ngày tạo</th><th>Ngày cấp</th><th>Công đoạn</th><th>Mẻ</th><th>Vật tư</th><th>Lô NVL</th><th>SL</th><th>Người thực hiện</th></tr></thead>
         <tbody>${rows.map(r => `<tr>
           <td class="muted">${fmt(r.ts)}</td>
+          <td class="muted">${r.supply_date ? fmt(r.supply_date) : "—"}</td>
           <td>${esc(r.stage)}</td>
           <td class="muted">${esc(r.batch_label || "")}</td>
           <td>${esc(r.material_name || "")}</td>
           <td class="muted">${esc(r.lot_code || "")}</td>
           <td>${r.quantity} ${esc(r.uom)}</td>
           <td class="muted">${esc(r.actor || "")}</td></tr>`).join("") ||
-          `<tr><td colspan=7 class="muted">Chưa có giao dịch xuất dùng NVL nào.</td></tr>`}</tbody>
+          `<tr><td colspan=8 class="muted">Chưa có giao dịch xuất dùng NVL nào.</td></tr>`}</tbody>
       </table></div>
     </div>`;
   } else if (sec === "vitri") {

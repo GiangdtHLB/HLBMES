@@ -754,6 +754,35 @@ def _asof_loc_matcher(location: str):
     return loc_matches
 
 
+def _nau_consume_as_of(db: Session, as_of) -> list[tuple["MaterialLot", float]]:
+    """[(lô NVL, SL đã cấp)] cho MỌI lượt cấp liệu vào mẻ Nấu (GenealogyEdge relation=consume,
+    to_type="batch") có "Ngày cấp" (mốc hiệu lực = `batch.start_at`, fallback `edge.event_time`
+    nếu mẻ chưa khai start_at — dữ liệu cũ trước khi bắt buộc) <= `as_of`. Dùng chung cho
+    _material_balances_as_of (trừ theo material_id) và _lot_balances_as_of (trừ theo lot_id) —
+    xem lý do ở docstring _material_balances_as_of."""
+    edges = db.execute(select(GenealogyEdge).where(
+        GenealogyEdge.to_type == "batch", GenealogyEdge.from_type == "lot",
+        GenealogyEdge.relation == GenealogyRelation.CONSUME.value)).scalars().all()
+    if not edges:
+        return []
+    batch_ids = {e.to_id for e in edges}
+    start_at_by_batch = dict(db.execute(select(BatchExecution.batch_id, BatchExecution.start_at)
+                                        .where(BatchExecution.batch_id.in_(batch_ids))).all())
+    lots = {l.lot_id: l for l in db.execute(select(MaterialLot).where(
+        MaterialLot.lot_id.in_({e.from_id for e in edges}))).scalars().all()}
+    out = []
+    for e in edges:
+        if not e.quantity:
+            continue
+        lot = lots.get(e.from_id)
+        if not lot:
+            continue
+        effective = start_at_by_batch.get(e.to_id) or e.event_time
+        if effective <= as_of:
+            out.append((lot, e.quantity))
+    return out
+
+
 def _material_balances_as_of(db: Session, as_of, location: str = None) -> dict[str, float]:
     """{material_id: số dư dựng lại từ lịch sử StockMovement tính đến hết thời điểm `as_of`} —
     khác stock_on_hand() vốn đọc thẳng MaterialLot.quantity (số dư TRỰC TIẾP hiện tại, không lùi
@@ -771,7 +800,17 @@ def _material_balances_as_of(db: Session, as_of, location: str = None) -> dict[s
     - adjust (từ Kiểm kê định kỳ): CHỈ lưu |chênh lệch| — không xác định được TĂNG hay GIẢM từ dữ
       liệu đã lưu, nên BỎ QUA (giới hạn đã biết) — vật tư có kiểm kê điều chỉnh trước ngày lọc có
       thể lệch nhẹ so với thực tế thời điểm đó.
-    """
+
+    Cấp liệu vào mẻ Nấu (GenealogyEdge relation=consume, to_type="batch") KHÔNG tạo StockMovement
+    riêng (xem services/dispense.py::consume_lot) nên trước đây hoàn toàn KHÔNG bị trừ ở đây —
+    "Tồn kho phân xưởng tính đến ngày X" không phản ánh NVL đã cấp cho mẻ Nấu (yêu cầu người dùng
+    2026-09-15: "khi xem tồn kho phân xưởng thì phải tính tồn trừ đi lượng đã xuất, tức là ngày
+    cấp liệu"). Mốc trừ dùng `batch.start_at` ("Ngày cấp" — ngày mẻ THỰC SỰ bắt đầu nấu, có thể
+    khai lùi ngày, KHÁC `event_time` là giờ bấm nút thật) — coi như NVL đã "rời khỏi" Kho phân
+    xưởng kể từ đúng thời điểm mẻ bắt đầu, không phải lúc dữ liệu được nhập vào hệ thống. Lọc/Chiết
+    (BatchFilterLotMaterialUsage/BatchPackLotMaterialUsage) KHÔNG cần xử lý riêng — cả 2 đều gọi
+    thẳng warehouse_svc.issue() (tạo StockMovement thật, xem services/batch_pipeline.py::
+    add_filter_lot_material/add_pack_lot_material) nên đã được tính đúng qua nhánh "issue" ở trên."""
     stmt = select(StockMovement.material_id, StockMovement.movement_type, StockMovement.quantity,
                  StockMovement.location_from, StockMovement.location_to).where(
         StockMovement.ts <= as_of, StockMovement.material_id.isnot(None))
@@ -799,6 +838,13 @@ def _material_balances_as_of(db: Session, as_of, location: str = None) -> dict[s
     # "có mặt" nguyên vẹn kể từ created_at, tính vào mọi as_of >= created_at.
     moved_lot_ids = {r[0] for r in db.execute(select(StockMovement.lot_id).where(
         StockMovement.lot_id.isnot(None)).distinct())}
+    if loc_matches("Kho phân xưởng"):
+        # CHỈ trừ cho lô đã có StockMovement thật (moved_lot_ids) — lô "mồ côi" dùng thẳng
+        # MaterialLot.quantity HIỆN TẠI bên dưới, đã tự nhiên trừ sẵn phần cấp Nấu rồi (tránh trừ
+        # trùng 2 lần — xem giải thích tương tự ở _lot_balances_as_of).
+        for lot, qty in _nau_consume_as_of(db, as_of):
+            if lot.material_id and lot.lot_id in moved_lot_ids:
+                out[lot.material_id] = out.get(lot.material_id, 0.0) - qty
     orphan_lots = db.execute(select(MaterialLot).where(
         MaterialLot.lot_type == "material", MaterialLot.created_at <= as_of,
         ~MaterialLot.lot_id.in_(moved_lot_ids) if moved_lot_ids else True)).scalars().all()
@@ -852,7 +898,10 @@ def _lot_balances_as_of(db: Session, as_of) -> tuple[dict[str, float], dict[str,
 
     adjust (từ Kiểm kê định kỳ): CHỈ lưu |chênh lệch| — không xác định được TĂNG hay GIẢM từ dữ
     liệu đã lưu, nên BỎ QUA (giới hạn đã biết) — vật tư có kiểm kê điều chỉnh trước ngày lọc có
-    thể lệch nhẹ so với thực tế thời điểm đó."""
+    thể lệch nhẹ so với thực tế thời điểm đó.
+
+    Cấp liệu vào mẻ Nấu (GenealogyEdge relation=consume) trừ riêng qua _nau_consume_as_of, dùng
+    `batch.start_at` ("Ngày cấp") làm mốc hiệu lực — xem lý do ở _material_balances_as_of."""
     origin_by_movement = dict(db.execute(select(GenealogyEdge.movement_id, GenealogyEdge.from_id).where(
         GenealogyEdge.from_type == "lot", GenealogyEdge.to_type == "lot",
         GenealogyEdge.relation == GenealogyRelation.SPLIT.value,
@@ -888,6 +937,12 @@ def _lot_balances_as_of(db: Session, as_of) -> tuple[dict[str, float], dict[str,
     # _material_balances_as_of, xem giải thích ở đó).
     moved_lot_ids = {r[0] for r in db.execute(select(StockMovement.lot_id).where(
         StockMovement.lot_id.isnot(None)).distinct())}
+    # Trừ cấp liệu Nấu CHỈ cho lô đã có StockMovement thật (moved_lot_ids) — lô "mồ côi" (không
+    # StockMovement nào) dùng thẳng MaterialLot.quantity HIỆN TẠI làm mốc duy nhất đã biết (bên
+    # dưới), số đó ĐÃ tự nhiên trừ sẵn phần đã cấp Nấu rồi — trừ thêm ở đây sẽ bị trừ TRÙNG 2 lần.
+    for lot, qty in _nau_consume_as_of(db, as_of):
+        if lot.lot_id in moved_lot_ids:
+            balances[lot.lot_id] = balances.get(lot.lot_id, 0.0) - qty
     orphan_lots = db.execute(select(MaterialLot).where(
         MaterialLot.lot_type == "material", MaterialLot.created_at <= as_of,
         ~MaterialLot.lot_id.in_(moved_lot_ids) if moved_lot_ids else True)).scalars().all()
@@ -2551,6 +2606,12 @@ def workshop_usage_history(db: Session, limit: int = 200) -> list[dict]:
     rồi xóa) không còn hiện nữa, tránh hiểu nhầm "vẫn đang trừ kho" (yêu cầu người dùng
     2026-09-15). ts hiển thị = lần ghi/sửa GẦN NHẤT trong nhóm net đó.
 
+    Mỗi dòng trả về CẢ 2 mốc thời gian (yêu cầu người dùng 2026-09-15): `ts` ("Ngày tạo" — giờ
+    thao tác THẬT trên hệ thống, không sửa được) và `supply_date` ("Ngày cấp" — mốc HIỆU LỰC dùng
+    để trừ tồn kho phân xưởng, có thể khai lùi ngày: batch.start_at cho Nấu, BatchPackLot.pack_date
+    cho Chiết; Lọc không có khái niệm khai lùi ngày riêng nên `supply_date` = `ts`). `supply_date`
+    chính là mốc `_nau_consume_as_of`/StockMovement.ts dùng để dựng lại "Tồn kho tính đến ngày X".
+
     Mỗi truy vấn con đã ORDER BY created_at DESC LIMIT limit trước khi gộp — vì kết quả cuối
     cùng chỉ lấy top `limit` bản ghi mới nhất trên cả 3 nguồn, top-limit của mỗi nguồn riêng
     lẻ chắc chắn phủ hết top-limit gộp, nên không cần tải hết cả 3 bảng vào bộ nhớ (gộp net của
@@ -2562,27 +2623,38 @@ def workshop_usage_history(db: Session, limit: int = 200) -> list[dict]:
             select(BatchFilterLotMaterialUsage, BatchFilterLot.filter_lot_code)
             .join(BatchFilterLot, BatchFilterLotMaterialUsage.filter_lot_id == BatchFilterLot.filter_lot_id)
             .order_by(BatchFilterLotMaterialUsage.created_at.desc()).limit(limit)).all():
-        rows.append({"usage_id": u.usage_id, "ts": u.created_at, "stage": "Lọc",
-                    "batch_label": f"Lô lọc {filter_lot_code}",
+        # Lọc không có mốc "hiệu lực" riêng khác giờ tạo — NVL luôn gán thẳng lúc thao tác thật,
+        # không khai lùi ngày được (khác Nấu/Chiết) — "Ngày cấp" = "Ngày tạo" (yêu cầu người dùng
+        # 2026-09-15: rà soát các công đoạn khác, bổ sung nếu thiếu — Lọc không thiếu, chỉ là
+        # không có khái niệm khai lùi ngày).
+        rows.append({"usage_id": u.usage_id, "ts": u.created_at, "supply_date": u.created_at,
+                    "stage": "Lọc", "batch_label": f"Lô lọc {filter_lot_code}",
                     "material_name": u.material_name, "lot_code": u.lot_pm,
                     "quantity": u.quantity, "uom": u.uom, "movement_id": u.movement_id})
-    for u, pack_lot_code in db.execute(
-            select(BatchPackLotMaterialUsage, BatchPackLot.pack_lot_code)
+    for u, pack_lot_code, pack_date in db.execute(
+            select(BatchPackLotMaterialUsage, BatchPackLot.pack_lot_code, BatchPackLot.pack_date)
             .join(BatchPackLot, BatchPackLotMaterialUsage.pack_lot_id == BatchPackLot.pack_lot_id)
             .order_by(BatchPackLotMaterialUsage.created_at.desc()).limit(limit)).all():
-        rows.append({"usage_id": u.usage_id, "ts": u.created_at, "stage": "Chiết",
-                    "batch_label": f"Lô thành phẩm {pack_lot_code}",
+        # "Ngày cấp" = BatchPackLot.pack_date (mốc bắt đầu chiết, khai tay lúc tạo lô — mirror
+        # BottleRecord.bottle_date, có thể KHÁC created_at thật).
+        rows.append({"usage_id": u.usage_id, "ts": u.created_at, "supply_date": pack_date,
+                    "stage": "Chiết", "batch_label": f"Lô thành phẩm {pack_lot_code}",
                     "material_name": u.material_name, "lot_code": u.lot_pm,
                     "quantity": u.quantity, "uom": u.uom, "movement_id": u.movement_id})
     mat_name_by_code = {m.code: m.name for m in db.execute(select(Material)).scalars().all()}
     nau_agg: dict[tuple, dict] = {}
-    for dl, batch_id, batch_code, dispensed_by in db.execute(
-            select(DispenseLine, Dispense.batch_id, BatchExecution.batch_code, Dispense.created_by)
+    for dl, batch_id, batch_code, batch_start_at, dispensed_by in db.execute(
+            select(DispenseLine, Dispense.batch_id, BatchExecution.batch_code, BatchExecution.start_at,
+                  Dispense.created_by)
             .join(Dispense, DispenseLine.dispense_id == Dispense.dispense_id)
             .join(BatchExecution, Dispense.batch_id == BatchExecution.batch_id)
             .order_by(DispenseLine.created_at.desc()).limit(limit)).all():
         key = (batch_id, dl.material_code, dl.lot_code)
         agg = nau_agg.setdefault(key, {"qty": 0.0, "ts": dl.created_at, "batch_code": batch_code,
+                                       # "Ngày cấp" = batch.start_at (ngày mẻ THỰC SỰ bắt đầu nấu,
+                                       # có thể khai lùi ngày) — CHÍNH LÀ mốc đã dùng để trừ tồn
+                                       # kho phân xưởng "tính đến ngày" (xem _nau_consume_as_of).
+                                       "supply_date": batch_start_at,
                                        "actor": dispensed_by, "uom": dl.uom, "usage_id": dl.line_id})
         agg["qty"] = round(agg["qty"] + dl.quantity, 4)
         if dl.created_at > agg["ts"]:
@@ -2592,8 +2664,8 @@ def workshop_usage_history(db: Session, limit: int = 200) -> list[dict]:
     for (batch_id, material_code, lot_code), agg in nau_agg.items():
         if agg["qty"] <= 1e-9:
             continue
-        rows.append({"usage_id": agg["usage_id"], "ts": agg["ts"], "stage": "Nấu",
-                    "batch_label": f"Mẻ nấu {agg['batch_code']}",
+        rows.append({"usage_id": agg["usage_id"], "ts": agg["ts"], "supply_date": agg["supply_date"],
+                    "stage": "Nấu", "batch_label": f"Mẻ nấu {agg['batch_code']}",
                     "material_name": mat_name_by_code.get(material_code, material_code),
                     "lot_code": lot_code, "quantity": agg["qty"], "uom": agg["uom"],
                     "movement_id": None, "actor": agg["actor"]})
