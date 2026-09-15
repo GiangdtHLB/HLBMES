@@ -6092,7 +6092,7 @@ VIEWS.warehouse_kc = async function () {
   if (sec === "xtdn") {
     Object.keys(WH_HIST_VISIBLE).forEach(wireMovementHistoryBlock);
     wireRequestBlockActions();
-    wireCardSearch("xtdn_search", "#xtdn_block");
+    wirePaginateCards("xtdn_block", "xtdn_search", 10);
   }
   if (sec === "ton") {
     $("ton_loc").onchange = () => { TON_LOC.warehouse_kc = $("ton_loc").value; render("warehouse_kc"); };
@@ -7339,9 +7339,10 @@ function requestBlockHtml(r, matById, lotById, canFulfill, showBulk, allLots, ca
     ? `<button class="btn sm" data-fulfillall="${esc(r.request_id)}">Duyệt cả phiếu (${pendingCount} dòng) →</button>` : "";
   const cancelBtn = (!hasFulfilled && pendingCount > 0 && (canRequest || canFulfill))
     ? `<button class="btn sm sec" data-reqcancel="${esc(r.request_id)}">Xóa phiếu</button>` : "";
-  // Sửa (ngày đề nghị nhận + các dòng còn pending) — chỉ phía đề nghị (canRequest), bất kể
-  // phiếu đã có dòng fulfilled hay chưa (ngày header luôn sửa được, xem update_request).
-  const editBtn = canRequest
+  // Sửa (ngày đề nghị nhận + các dòng còn pending) — chỉ phía đề nghị (canRequest), CHỈ khi
+  // phiếu còn ít nhất 1 dòng pending — phiếu đã xử lý xong hết (không còn dòng nào pending)
+  // không cho sửa nữa (yêu cầu người dùng 2026-09-15).
+  const editBtn = canRequest && pendingCount > 0
     ? `<button class="btn sm sec" data-reqedit="${esc(r.request_id)}">Sửa</button>` : "";
   const summary = `${r.lines.length} dòng` +
     (pendingCount ? ` · ${pendingCount} chờ xử lý` : "") +
@@ -7697,12 +7698,6 @@ function wireCartPanel() {
   });
 }
 
-// "Đang chờ xử lý" (còn dòng pending) luôn hiện hết vì cần thao tác; "Đã xử lý xong" (mọi dòng
-// đã fulfilled/rejected/cancelled) chỉ hiện REQ_DONE_VISIBLE phiếu đầu — "Tải thêm" chỉ lộ thêm
-// dữ liệu đã fetch sẵn, không gọi lại API.
-const REQ_DONE_PAGE = 10;
-let REQ_DONE_VISIBLE = REQ_DONE_PAGE;
-
 function requestsHistoryBlockHtml() {
   const requests = REQ_CACHE.allRequests || [];
   const { matById, lotById, canRequest, lots } = REQ_CACHE;
@@ -7713,29 +7708,26 @@ function requestsHistoryBlockHtml() {
   const canFulfill = false;
   const pending = requests.filter(r => r.lines.some(l => l.status === "pending"));
   const done = requests.filter(r => !r.lines.some(l => l.status === "pending"));
-  const visibleDone = done.slice(0, REQ_DONE_VISIBLE);
   const pendingHtml = pending.map(r => requestBlockHtml(r, matById, lotById, canFulfill, true, lots, canRequest)).join("") ||
     '<div class="muted">Không có phiếu nào đang chờ xử lý.</div>';
-  const doneHtml = visibleDone.map(r => requestBlockHtml(r, matById, lotById, canFulfill, false, lots, canRequest)).join("");
-  const moreBtn = done.length > visibleDone.length
-    ? `<button class="btn sm sec" id="req_done_more">Tải thêm (còn ${done.length - visibleDone.length} phiếu)</button>` : "";
+  const doneHtml = done.map(r => requestBlockHtml(r, matById, lotById, canFulfill, false, lots, canRequest)).join("") ||
+    '<div class="muted">Chưa có phiếu nào đã xử lý xong.</div>';
+  // Phân trang 10/trang cho cả 2 khối (giống "Xuất theo đề nghị" ở Kho công ty) — mỗi khối tự
+  // phân trang riêng, dùng CHUNG 1 ô tìm kiếm (xem wirePaginateCards, yêu cầu người dùng
+  // 2026-09-15) — thay cho "Tải thêm" cũ chỉ áp cho khối "Đã xử lý xong".
   return `<div id="req_history_block">
     <input class="searchbox" id="req_hist_search" placeholder="Tìm theo số phiếu, người tạo, ghi chú, vật tư..." style="margin-bottom:10px;width:100%"/>
     <h3 style="margin:14px 0 8px">Đang chờ xử lý <span class="muted">(${pending.length})</span></h3>
-    ${pendingHtml}
-    <h3 style="margin:18px 0 8px">Đã xử lý xong <span class="muted">(${visibleDone.length}/${done.length})</span></h3>
-    ${doneHtml || '<div class="muted">Chưa có phiếu nào đã xử lý xong.</div>'}
-    ${moreBtn}
+    <div id="req_pending_block">${pendingHtml}</div>
+    <h3 style="margin:18px 0 8px">Đã xử lý xong <span class="muted">(${done.length})</span></h3>
+    <div id="req_done_block">${doneHtml}</div>
   </div>`;
 }
 
 function wireRequestsHistoryBlock() {
   wireRequestBlockActions();
-  wireCardSearch("req_hist_search", "#req_history_block");
-  if ($("req_done_more")) $("req_done_more").onclick = () => {
-    REQ_DONE_VISIBLE += REQ_DONE_PAGE;
-    refreshRequestsHistoryBlock();
-  };
+  wirePaginateCards("req_pending_block", "req_hist_search", 10);
+  wirePaginateCards("req_done_block", "req_hist_search", 10);
 }
 
 function refreshRequestsHistoryBlock() {
@@ -7764,8 +7756,6 @@ async function renderRequestsSection() {
   REQ_CACHE.matOpts = mats.map(m => `<option value="${m.material_id}">${esc(m.code)} — ${esc(m.name)}</option>`).join("");
   REQ_CACHE.canRequest = canRequest;
   REQ_CACHE.canFulfill = canFulfill;
-  // Mỗi lần vào lại tab (kể cả sau 1 thao tác) là 1 lượt xem mới — reset về trang đầu.
-  REQ_DONE_VISIBLE = REQ_DONE_PAGE;
 
   const cartSection = cartPanelHtml();
 
@@ -9179,6 +9169,61 @@ function wirePaginate(tableId, defaultPageSize = 10, opts = {}) {
     };
   }
   if (searchInput) searchInput.oninput = () => { state.page = 1; apply(); };
+  apply();
+}
+const _cardPagerState = {};
+// Phân trang kiểu wirePaginate() nhưng cho danh sách THẺ/PANEL (mỗi phiếu 1 khối HTML nhiều
+// dòng con — VD "Xuất theo đề nghị" — không phải bảng <table><tr>, không dùng wirePaginate()
+// được) — phân trang trên các phần tử con TRỰC TIẾP của `containerId`, lọc theo thuộc tính
+// data-search có sẵn (mirror wireCardSearch, dùng CHUNG 1 input tìm kiếm thay vì phải bật 2 cơ
+// chế tìm kiếm khác nhau cho cùng 1 ô input) — yêu cầu người dùng 2026-09-15: "chỉ hiện 10 dòng,
+// giống các mục khác".
+function wirePaginateCards(containerId, searchInputId, defaultPageSize = 10) {
+  const container = document.getElementById(containerId);
+  if (!container) return;
+  const searchInput = searchInputId ? $(searchInputId) : null;
+  const allCards = Array.from(container.children);
+  const state = _cardPagerState[containerId] || { page: 1, pageSize: defaultPageSize };
+  _cardPagerState[containerId] = state;
+
+  let bar = container.nextElementSibling;
+  if (!bar || !bar.classList.contains("pager-bar")) {
+    bar = document.createElement("div");
+    bar.className = "pager-bar";
+    container.insertAdjacentElement("afterend", bar);
+  }
+
+  function apply() {
+    const q = (searchInput?.value || "").trim().toLowerCase();
+    const matched = q ? allCards.filter(el => (el.dataset.search || "").includes(q)) : allCards;
+    const pageSize = state.pageSize;
+    const totalPages = pageSize === Infinity ? 1 : Math.max(1, Math.ceil(matched.length / pageSize));
+    if (state.page > totalPages) state.page = totalPages;
+    const start = pageSize === Infinity ? 0 : (state.page - 1) * pageSize;
+    const end = pageSize === Infinity ? matched.length : start + pageSize;
+    const visible = new Set(matched.slice(start, end));
+    allCards.forEach(el => { el.style.display = visible.has(el) ? "" : "none"; });
+    bar.innerHTML = `
+      <span class="muted">${matched.length} phiếu${q ? " (đã lọc)" : ""}</span>
+      <button type="button" class="btn sm sec" data-pg="prev" ${state.page <= 1 ? "disabled" : ""}>‹ Trước</button>
+      <span class="muted">Trang ${state.page}/${totalPages}</span>
+      <button type="button" class="btn sm sec" data-pg="next" ${state.page >= totalPages ? "disabled" : ""}>Sau ›</button>
+      <select data-pg="size" style="width:auto">
+        ${[10, 25, 50, 100].map(n => `<option value="${n}" ${state.pageSize === n ? "selected" : ""}>${n}/trang</option>`).join("")}
+        <option value="all" ${state.pageSize === Infinity ? "selected" : ""}>Hiển thị tất cả</option>
+      </select>`;
+    bar.querySelector('[data-pg="prev"]').onclick = () => { state.page--; apply(); };
+    bar.querySelector('[data-pg="next"]').onclick = () => { state.page++; apply(); };
+    bar.querySelector('[data-pg="size"]').onchange = (e) => {
+      state.pageSize = e.target.value === "all" ? Infinity : parseInt(e.target.value, 10);
+      state.page = 1; apply();
+    };
+  }
+  // addEventListener (không phải searchInput.oninput=) — 1 ô tìm kiếm có thể dùng CHUNG cho
+  // NHIỀU danh sách thẻ cùng lúc (VD "Đề nghị nhận kho": 2 khối Đang chờ/Đã xử lý xong dùng
+  // chung 1 ô tìm, mỗi khối tự phân trang riêng) — gán thẳng .oninput sẽ bị lời gọi
+  // wirePaginateCards() SAU đè mất handler của lời gọi TRƯỚC trên cùng 1 input.
+  if (searchInput) searchInput.addEventListener("input", () => { state.page = 1; apply(); });
   apply();
 }
 const chk = (v) => v ? '<span class="chk">✔</span>' : '<span class="chk no">▢</span>';
