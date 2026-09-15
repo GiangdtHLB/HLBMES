@@ -6747,7 +6747,17 @@ async function openStockCountModal(countId) {
     });
     $("kk_post").onclick = () => guard(async () => {
       if (!confirm("Chốt phiếu kiểm kê? Lệch tồn (nếu có) sẽ được tự động điều chỉnh và không sửa lại được.")) return;
-      await POST(`/warehouse/counts/${countId}/post`, {});
+      const res = await POST(`/warehouse/counts/${countId}/post`, {});
+      // Lô có phiếu nhập/xuất/điều chuyển THẬT xảy ra sau khi lập phiếu kiểm kê (system_qty chỉ
+      // là ảnh chụp lúc tạo phiếu) — khoản chênh do đó có thể đã lẫn vào biên độ kiểm kê, cần
+      // đối chiếu lại thủ công thay vì tin thẳng số liệu (audit rủi ro 2026-09-15).
+      const flagged = (res.adjustments || []).filter(a => a.interim_movements > 0);
+      if (flagged.length) {
+        alert("⚠ Đã chốt phiếu, nhưng " + flagged.length + " mã lô có phát sinh nhập/xuất/điều "
+          + "chuyển SAU khi lập phiếu kiểm kê — nên đối chiếu lại thủ công:\n"
+          + flagged.map(a => `- ${a.lot_code}: hệ thống ${a.system_qty} → thực tế ${a.counted_qty} `
+            + `(${a.interim_movements} phiếu phát sinh)`).join("\n"));
+      }
       toast("Đã chốt phiếu kiểm kê"); closeModal(); render("warehouse_kc");
     });
   }

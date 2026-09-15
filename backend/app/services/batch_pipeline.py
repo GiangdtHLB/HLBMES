@@ -1627,6 +1627,13 @@ def approve_pack_lot(db: Session, pack_lot_id: str, user: User) -> dict:
                                         finished_product_id=p.finished_product_id)
     if status["pending"]:
         raise DomainError(f"Còn thiếu chỉ tiêu bắt buộc (thành phẩm): {', '.join(status['pending'])}.")
+    # with_for_update(): khóa lô TP trước khi ghi approved — 2 lần bấm "Duyệt KCS" gần như đồng
+    # thời đều có thể qua được check "p.approved" ở trên rồi cùng ghi audit (cùng lớp race đã
+    # sửa cho split/update_qty, 2026-09-15).
+    p = db.execute(select(BatchPackLot).where(
+        BatchPackLot.pack_lot_id == pack_lot_id).with_for_update()).scalar_one()
+    if p.approved:
+        raise DomainError("Lô thành phẩm này đã được duyệt.")
     p.approved = True
     p.approved_by = user.username
     p.approved_at = utcnow()
@@ -1653,13 +1660,20 @@ def release_pack_lot_to_wms(db: Session, pack_lot_id: str, user: User) -> dict:
     ca_total = (p.ca1_qty or 0.0) + (p.ca2_qty or 0.0) + (p.ca3_qty or 0.0)
     if ca_total <= 0:
         raise DomainError("Chưa nhập SL theo ca (Ca 1/2/3) — không thể duyệt nhập kho thành phẩm.")
+    # with_for_update(): khóa lô TP trước khi ghi stocked — 2 lần bấm/2 request gần như đồng
+    # thời đều có thể qua được check "p.stocked" ở trên rồi cùng tạo pallet, nhân đôi tồn kho
+    # thành phẩm (cùng lớp race đã sửa cho split/update_qty ở trên, 2026-09-15).
+    p = db.execute(select(BatchPackLot).where(
+        BatchPackLot.pack_lot_id == pack_lot_id).with_for_update()).scalar_one()
+    if p.stocked:
+        raise DomainError("Lô thành phẩm này đã nhập kho thành phẩm.")
     finished_product = db.get(FinishedProduct, p.finished_product_id) if p.finished_product_id else None
     pack_size = finished_product.pack_size if finished_product else 24
     product_name = finished_product.code if finished_product else p.pack_lot_code
     pallet = wms_svc._build_pallet(db, {
         "product": product_name, "lot_code": p.lot_no or p.pack_lot_code,
         "case_count": math.ceil(ca_total), "units_per_case": pack_size,
-    }, user)
+    }, user, source="production")
     genealogy.add_edge(db, from_type="batch_pack_lot", from_id=pack_lot_id, to_type="pallet",
                        to_id=pallet.pallet_id, relation="nhập kho", quantity=ca_total, uom="case")
     p.stocked = True

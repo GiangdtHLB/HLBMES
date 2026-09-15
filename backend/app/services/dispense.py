@@ -154,10 +154,16 @@ def _execute_plan(db: Session, batch: BatchExecution, material_code: str, plan: 
     Ghi `material_code` THẬT theo từng lô (bom.material_code_for_lot), KHÔNG dùng thẳng
     `material_code` truyền vào — khi dòng BOM khai theo Nhóm vật tư thay thế, `material_code`
     truyền vào là mã NHÓM (không xuất kho trực tiếp được), còn lô thực tế tiêu thụ luôn thuộc
-    1 mã vật tư CỤ THỂ (xem _fefo_lots) — ghi đúng mã đó để sổ sách/lịch sử cấp liệu chính xác."""
+    1 mã vật tư CỤ THỂ (xem _fefo_lots) — ghi đúng mã đó để sổ sách/lịch sử cấp liệu chính xác.
+
+    consume_lot(commit=False): không commit từng lô — nếu dòng SAU trong CÙNG phiếu (khác lời
+    gọi _execute_plan, VD dòng 2 vượt trần định mức BOM) raise DomainError, cả phiếu phải rollback
+    sạch (đúng lời hứa all-or-nothing của dispense()), không để lại phần đã trừ tồn của dòng
+    trước — người gọi (dispense()/backflush()/adjust_actual()) tự commit một lần ở cuối
+    (audit rủi ro 2026-09-15)."""
     lines = []
     for lot, take in plan:
-        batch_svc.consume_lot(db, batch.batch_id, lot.lot_id, take, user, allow_over)
+        batch_svc.consume_lot(db, batch.batch_id, lot.lot_id, take, user, allow_over, commit=False)
         lines.append({"material_code": bom.material_code_for_lot(db, lot), "lot_id": lot.lot_id,
                       "lot_code": lot.lot_code, "quantity": take, "uom": lot.uom,
                       "fifo_ok": fifo_ok, "reason": reason})

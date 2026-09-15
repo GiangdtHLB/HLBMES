@@ -1525,10 +1525,17 @@
       const cls = s === "stored" ? "available" : s === "shipped" ? "obsolete" : "planned";
       return `<span class="badge ${cls}">${esc(PALLET_STATUS_LABEL[s] || s)}</span>`;
     };
+    // "manual" = đóng tay ở đây (Kho TP/WMS), KHÔNG qua duyệt KCS/Giám đốc SX, không link
+    // genealogy về lô chiết gốc — "production" = tạo qua release_pack_lot_to_wms (Lô thành
+    // phẩm), đã qua đủ 2 bước duyệt. Đánh dấu rõ để phân biệt lúc xem/kiểm toán (audit rủi ro
+    // 2026-09-15) — không chặn quyền, chỉ hiển thị.
+    const sourceBadge = (s) => s === "production"
+      ? `<span class="badge available" title="Tạo qua duyệt Lô thành phẩm — đã qua KCS + Giám đốc SX">Từ SX</span>`
+      : `<span class="badge planned" title="Đóng pallet thủ công tại Kho TP — KHÔNG qua duyệt KCS/Giám đốc SX">Thủ công</span>`;
     const palletRows = pallets.map(p => `<tr>
       <td><code class="k">${esc(p.pallet_code)}</code></td><td>${esc(p.product || "—")}</td><td class="muted">${esc(p.lot_code || "—")}</td>
       <td style="text-align:right">${p.case_count}</td><td style="text-align:right">${p.total_units}</td>
-      <td>${statusBadge(p.status)}</td><td class="muted">${esc(p.location || "—")}</td>
+      <td>${statusBadge(p.status)}</td><td>${sourceBadge(p.source)}</td><td class="muted">${esc(p.location || "—")}</td>
       <td style="white-space:nowrap">${p.status !== "shipped" ? `<select class="pl_loc" data-pallet="${p.pallet_id}" style="width:120px">
         <option value="">— vị trí —</option>${locOpt()}</select>
         ${canIssue ? `<button class="btn sm" data-putaway="${p.pallet_id}">Cất</button> <button class="btn sm sec" data-ship="${p.pallet_id}">Xuất</button>` : ""}` : ""}
@@ -1537,8 +1544,8 @@
 
     const palletsPanel = panel("🟦 Pallet", `
       <div class="tablewrap"><table><thead><tr><th>Mã pallet</th><th>SP</th><th>Lô</th>
-        <th style="text-align:right">Case</th><th style="text-align:right">Lon</th><th>Trạng thái</th><th>Vị trí</th><th></th></tr></thead>
-      <tbody>${palletRows || '<tr><td colspan="8" class="muted">Chưa có pallet nào.</td></tr>'}</tbody></table></div>`);
+        <th style="text-align:right">Case</th><th style="text-align:right">Lon</th><th>Trạng thái</th><th>Nguồn</th><th>Vị trí</th><th></th></tr></thead>
+      <tbody>${palletRows || '<tr><td colspan="9" class="muted">Chưa có pallet nào.</td></tr>'}</tbody></table></div>`);
 
     root.innerHTML = overview + locations + buildForm + palletsPanel;
 

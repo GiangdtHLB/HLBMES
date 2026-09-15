@@ -37,6 +37,10 @@ class Pallet(Base):
     units_per_case: Mapped[int] = mapped_column(Integer, default=24)
     status: Mapped[str] = mapped_column(Unicode(255), default="building", index=True)  # building|stored|shipped
     location_id: Mapped[Optional[str]] = mapped_column(ForeignKey("wms_location.loc_id"), nullable=True, index=True)
+    # "manual" (thủ kho tự đóng, KHÔNG qua duyệt KCS/Giám đốc SX) | "production" (tạo qua
+    # release_pack_lot_to_wms, đã qua đủ 2 bước duyệt) — chỉ để hiển thị/kiểm toán, không
+    # chặn quyền (xem docstring migration d921c6f199cd).
+    source: Mapped[str] = mapped_column(Unicode(32), default="manual")
     created_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
 

@@ -12,8 +12,9 @@ from ..database import get_db
 from ..errors import NotFoundError
 from ..models.materials import GenealogyEdge, MaterialLot
 from ..schemas import LotIn, LotKcsUpdateIn, LotOut
-from ..security import User, get_current_user, require_role
+from ..security import User, get_current_user, require_perm, require_role
 from ..services import qc_catalog
+from ..services import warehouse as warehouse_svc
 
 router = APIRouter(prefix="/api/lots", tags=["lots"],
                    dependencies=[Depends(get_current_user)])
@@ -115,10 +116,22 @@ def update_lot_kcs(lot_id: str, payload: LotKcsUpdateIn, db: Session = Depends(g
 @router.post("", response_model=LotOut, status_code=201)
 def create_lot(payload: LotIn, db: Session = Depends(get_db),
                user: User = Depends(get_current_user)):
+    """Tạo lô vật tư trực tiếp — KHÔNG đi qua toàn bộ quy trình nhận hàng của
+    warehouse.receive() (không kiểm tra ngày nhập/tồn đầu/hạn mức...), dùng để nạp nhanh 1 lô
+    có sẵn (VD dựng dữ liệu test/khởi tạo). Trước đây endpoint này KHÔNG kiểm tra quyền gì cả
+    (bất kỳ ai đăng nhập cũng tạo được lô số lượng tùy ý, trạng thái AVAILABLE ngay, không ghi
+    StockMovement — phá vỡ bất biến "tồn = tổng phiếu nhập/xuất" mà các báo cáo point-in-time
+    dựa vào) — audit rủi ro 2026-09-15: yêu cầu quyền warehouse.receive như nhập kho thường +
+    ghi kèm StockMovement("receipt")."""
+    require_perm(user, "warehouse.receive")
     data = payload.model_dump()
     data["lot_year"] = data["lot_year"] or datetime.utcnow().year
     lot = MaterialLot(lot_id=new_id(), **data)
     db.add(lot)
+    db.flush()
+    if lot.quantity:
+        warehouse_svc._move(db, "receipt", lot, lot.quantity, user, location_to=lot.location,
+                            reason="Tạo lô trực tiếp (POST /api/lots)")
     record_audit(db, entity_type="lot", entity_id=lot.lot_id, action="create",
                  actor=user, after={"lot_code": lot.lot_code, "quantity": lot.quantity})
     db.commit()
