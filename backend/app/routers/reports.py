@@ -50,12 +50,12 @@ def material_norm(days: int = 90, product_id: str = None, db: Session = Depends(
             b_actual += l["actual"]
         batch_rows.append({"batch_code": b.batch_code, "state": b.state,
                            "planned_qty": b.planned_qty, "uom": b.uom,
-                           "planned_total": round(b_planned, 3), "actual_total": round(b_actual, 3)})
+                           "planned_total": round(b_planned, 4), "actual_total": round(b_actual, 4)})
 
     materials = []
     for code, a in agg.items():
-        planned = round(a["planned"], 3)
-        actual = round(a["actual"], 3)
+        planned = round(a["planned"], 4)
+        actual = round(a["actual"], 4)
         # Dùng cùng quy ước dung sai theo vật tư như đối chiếu chi tiết mẻ.
         diff, pct, status = bom_svc._classify(planned, actual, a["tol"])
         materials.append({"material_code": code, "uom": a["uom"], "batches": len(a["batch_ids"]),

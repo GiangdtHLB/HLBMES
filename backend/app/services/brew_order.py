@@ -66,16 +66,16 @@ def _build_group_line(i: int, m: dict, group_code: str, group, materials_by_code
         member_declared = []
         for mq in member_qty:
             mat = materials_by_code.get(mq.get("material_code"))
-            mqty_per_batch = round(mq.get("qty", 0) or 0, 3)
+            mqty_per_batch = round(mq.get("qty", 0) or 0, 4)
             member_declared.append({
                 "material_id": mat.material_id if mat else None,
                 "material_code": mat.code if mat else mq.get("material_code"),
                 "material_name": mat.name if mat else mq.get("material_code"),
                 "qty_per_batch": mqty_per_batch,
-                "qty_total": round(mqty_per_batch * planned_batch_count, 3),
+                "qty_total": round(mqty_per_batch * planned_batch_count, 4),
             })
-        qty_per_batch = round(sum(d["qty_per_batch"] for d in member_declared), 3)
-        qty_total = round(sum(d["qty_total"] for d in member_declared), 3)
+        qty_per_batch = round(sum(d["qty_per_batch"] for d in member_declared), 4)
+        qty_total = round(sum(d["qty_total"] for d in member_declared), 4)
         return {
             "seq": i, "stt_label": str(i + 1), "is_header": False,
             "material_id": None,
@@ -88,8 +88,8 @@ def _build_group_line(i: int, m: dict, group_code: str, group, materials_by_code
             "qty_per_batch": qty_per_batch,
             "qty_total": qty_total,
         }
-    qty_per_batch = round(m.get("qty", 0) or 0, 3)
-    qty_total = round(qty_per_batch * planned_batch_count, 3)
+    qty_per_batch = round(m.get("qty", 0) or 0, 4)
+    qty_total = round(qty_per_batch * planned_batch_count, 4)
     return {
         "seq": i, "stt_label": str(i + 1), "is_header": False,
         "material_id": None,
@@ -130,8 +130,8 @@ def build_lines_from_bom(db: Session, formula_id: str, planned_batch_count: int,
                                          materials_by_code, planned_batch_count,
                                          (member_selection or {}).get(str(i))))
             continue
-        qty_per_batch = round(m.get("qty", 0) or 0, 3)
-        qty_total = round(qty_per_batch * planned_batch_count, 3)
+        qty_per_batch = round(m.get("qty", 0) or 0, 4)
+        qty_total = round(qty_per_batch * planned_batch_count, 4)
         code = m.get("material_code")
         mat = materials_by_code.get(code)
         out.append({
@@ -165,8 +165,8 @@ def build_lines_from_recipe_version(db: Session, recipe_version_id: str, planned
                                          materials_by_code, planned_batch_count,
                                          (member_selection or {}).get(str(i))))
             continue
-        qty_per_batch = round(m.get("qty", 0) or 0, 3)
-        qty_total = round(qty_per_batch * planned_batch_count, 3)
+        qty_per_batch = round(m.get("qty", 0) or 0, 4)
+        qty_total = round(qty_per_batch * planned_batch_count, 4)
         code = m.get("material_code")
         mat = materials_by_code.get(code)
         out.append({
@@ -192,7 +192,7 @@ def _convert_member_qty(mat, target_unit: str | None, qty: float) -> float:
         # round: nhân 2 float (VD 201.58 * 5.0) hay ra dư số nhị phân li ti (1007.9000000000001)
         # dù kết quả thập phân đúng là số tròn — làm tròn lại để hiển thị/so sánh sạch, khớp
         # cách stock_on_hand() đã làm tròn 3 chữ số trước khi trả ra.
-        return round(qty * mat.alt_uom_ratio, 3)
+        return round(qty * mat.alt_uom_ratio, 4)
     return qty
 
 
@@ -211,7 +211,7 @@ def _line_stock(l: dict, company_stock: dict, workshop_stock: dict, materials_by
         else:
             company = sum(company_stock.get(mid, 0) or 0 for mid in member_ids)
             workshop = sum(workshop_stock.get(mid, 0) or 0 for mid in member_ids)
-        return round(company, 3), round(workshop, 3)
+        return round(company, 4), round(workshop, 4)
     material_id = l.get("material_id")
     return company_stock.get(material_id, 0) or 0, workshop_stock.get(material_id, 0) or 0
 
@@ -301,7 +301,7 @@ def _suggest_qty_split(qty_total: float | None, workshop_stock: float) -> tuple:
         return None, None
     qty_total = qty_total or 0
     from_workshop = min(max(workshop_stock or 0, 0), qty_total)
-    return round(qty_total - from_workshop, 3), round(from_workshop, 3)
+    return round(qty_total - from_workshop, 4), round(from_workshop, 4)
 
 
 def _apply_qty_split_override(line: dict, workshop_stock: float, overrides: dict) -> tuple:
@@ -338,8 +338,8 @@ def _annotate_stock(lines: list, company_stock: dict, workshop_stock: dict, mate
         if member_declared:
             breakdown, shortage = _member_declared_breakdown(
                 member_declared, l.get("uom"), company_stock, workshop_stock, materials_by_id)
-            company = round(sum(d["stock_company"] for d in breakdown), 3)
-            workshop = round(sum(d["stock_workshop"] for d in breakdown), 3)
+            company = round(sum(d["stock_company"] for d in breakdown), 4)
+            workshop = round(sum(d["stock_workshop"] for d in breakdown), 4)
             out.append({**l, "stock_company_snapshot": company, "stock_workshop_snapshot": workshop,
                         "unit_price": l.get("unit_price"), "shortage": shortage,
                         "member_breakdown": breakdown,
@@ -394,7 +394,7 @@ def _assert_no_shortage(lines: list, company_stock: dict, workshop_stock: dict, 
                 member_declared, l.get("uom"), company_stock, workshop_stock, materials_by_id)
             if all_short:
                 detail = "; ".join(f"{d['material_name']}: cần {d['qty_total']}, hiện có "
-                                   f"{round(d['stock_company'] + d['stock_workshop'], 3)}" for d in breakdown)
+                                   f"{round(d['stock_company'] + d['stock_workshop'], 4)}" for d in breakdown)
                 shortages.append(f"{l.get('material_name')} (không mã nào đủ tồn — {detail})")
             continue
         qty_total = l.get("qty_total")
@@ -403,8 +403,8 @@ def _assert_no_shortage(lines: list, company_stock: dict, workshop_stock: dict, 
         company, workshop = _line_stock(l, company_stock, workshop_stock, materials_by_id)
         if qty_total > company + workshop:
             shortages.append(
-                f"{l.get('material_name')}: cần {qty_total}, hiện có {round(company + workshop, 3)} "
-                f"(Kho công ty {round(company, 3)} + Kho phân xưởng {round(workshop, 3)})")
+                f"{l.get('material_name')}: cần {qty_total}, hiện có {round(company + workshop, 4)} "
+                f"(Kho công ty {round(company, 4)} + Kho phân xưởng {round(workshop, 4)})")
     if shortages:
         raise DomainError("Không đủ tồn kho để lập lệnh nấu — " + "; ".join(shortages) + ".")
 
