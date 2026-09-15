@@ -194,12 +194,13 @@ def test_cancel_refunds_consumed_lot_quantity(client, admin_h):
     assert still_there.json()["state"] == "cancelled"
 
 
-def test_dispense_blocked_after_closed(client, admin_h):
-    """Sau khi mẻ đã "closed", không cấp liệu được nữa — services/batches.py::consume_lot
-    trước đây không hề check state, mẻ closed vẫn cấp liệu bình thường như chưa đóng hồ sơ gì
-    (yêu cầu người dùng 2026-09-06: "nếu closed thì không cho cấp liệu"). Chặn ở consume_lot
-    (chokepoint chung cho cả /consume, /dispense, /dispense/backflush, phần "tăng" của
-    /dispense/adjust)."""
+def test_dispense_allowed_after_closed_unless_ebr_locked(client, admin_h):
+    """Mẻ đã "closed" VẪN cấp liệu được bình thường — chỉ chặn theo `ebr_locked` (hồ sơ EBR đã
+    khóa chính thức), giống hệt mọi hàm sửa mẻ khác (adjust_actual, set_brewhouse_line...). Đảo
+    ngược yêu cầu 2026-09-06 ("closed thì không cho cấp liệu") theo yêu cầu MỚI 2026-09-15: mẻ có
+    thể đã chuyển "closed" (xong quy trình) nhưng EBR chưa khóa chính thức — vẫn cần cấp liệu bổ
+    sung/sửa được cho tới khi EBR thật sự khóa. services/batches.py::consume_lot đã bỏ chốt phụ
+    theo state=="closed", chỉ còn _assert_not_locked(ebr_locked)."""
     batch_id = _make_batch(client, admin_h, "9")
     _run_batch_to_completed(client, admin_h, batch_id)
     release = client.post("/api/quality/hold", headers=admin_h,
@@ -209,18 +210,17 @@ def test_dispense_blocked_after_closed(client, admin_h):
     assert close.status_code == 200, close.text
 
     mat = client.post("/api/materials", headers=admin_h,
-                      json={"code": "NVL-CLOSEDBLOCK-01", "name": "NVL test chặn cấp liệu closed", "uom": "kg"})
+                      json={"code": "NVL-CLOSEDOK-01", "name": "NVL test cấp liệu sau closed", "uom": "kg"})
     assert mat.status_code == 201, mat.text
     lot = client.post("/api/lots", headers=admin_h,
-                      json={"lot_code": "LOT-CLOSEDBLOCK-01", "material_id": mat.json()["material_id"],
+                      json={"lot_code": "LOT-CLOSEDOK-01", "material_id": mat.json()["material_id"],
                             "quantity": 500, "uom": "kg", "location": "Kho phân xưởng"})
     assert lot.status_code == 201, lot.text
     lot_id = lot.json()["lot_id"]
 
+    # Kiểm qua /consume (gọi thẳng consume_lot, chokepoint chung, không qua thêm chốt riêng của
+    # dispense.py::_assert_dispensable — xem test riêng cho 3 điều kiện đó ở test_dispense_*.py)
+    # — đủ để xác nhận chốt state=="closed" đã bỏ, chỉ còn ebr_locked.
     consume = client.post(f"/api/batches/{batch_id}/consume", headers=admin_h,
                           json={"lot_id": lot_id, "quantity": 10})
-    assert consume.status_code == 409, consume.text
-
-    dispense = client.post(f"/api/dispense/{batch_id}", headers=admin_h,
-                           json={"lines": [{"material_code": "NVL-CLOSEDBLOCK-01", "quantity": 10}]})
-    assert dispense.status_code == 409, dispense.text
+    assert consume.status_code == 200, consume.text
