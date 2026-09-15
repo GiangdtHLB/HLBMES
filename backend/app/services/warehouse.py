@@ -643,7 +643,12 @@ def _transfer_lot(db: Session, lot_id: str, quantity: float, location_to: str, u
     mv = _move(db, "transfer", moved_lot, quantity, user, ts=ts, location_from=loc_from, location_to=location_to,
               mode=mode, reason=reason, request_id=request_id, request_line_id=request_line_id)
     if edge is not None:
-        edge.movement_id = mv.movement_id  # mv.movement_id đã có sẵn (gán ở _move) — không cần flush
+        # Flush để stock_movement (mv) THẬT SỰ tồn tại trong DB TRƯỚC khi gán genealogy_edge.movement_id
+        # (FK → stock_movement). Model không có relationship() nên SQLAlchemy KHÔNG tự xếp INSERT mv
+        # trước edge trong 1 flush chung → MSSQL enforce FK vỡ 547 (SQLite bỏ qua). Flush ở đây chèn
+        # edge với movement_id=NULL (hợp lệ, nullable) + mv; gán bên dưới thành UPDATE khi mv đã có.
+        db.flush()
+        edge.movement_id = mv.movement_id
     record_audit(db, entity_type="lot", entity_id=moved_lot.lot_id, action="transfer", actor=user,
                  after={"from": loc_from, "to": location_to, "quantity": quantity,
                        "split_from": lot.lot_id if moved_lot is not lot else None})
