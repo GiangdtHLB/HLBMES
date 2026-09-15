@@ -2496,12 +2496,21 @@ def workshop_usage_history(db: Session, limit: int = 200) -> list[dict]:
     Nấu dùng cơ chế khác 2 công đoạn kia (Dispense/DispenseLine, không có StockMovement.
     movement_id) nên tra actor trực tiếp từ Dispense.created_by thay vì qua StockMovement —
     yêu cầu người dùng 2026-09-14: "đưa vào màn hình này bao gồm cả xuất vật tư cho mẻ nấu"
-    (trước đây chỉ có Lọc/Chiết). Dòng "hoàn lại" (adjust_actual giảm Thực tế) giữ nguyên SL âm
-    — cho thấy đúng lịch sử thật, mirror cách "Lịch sử cấp liệu" ở màn Cấp liệu hiển thị.
+    (trước đây chỉ có Lọc/Chiết).
+
+    Nấu — KHÁC Lọc/Chiết (Sửa/Xóa ở đó XÓA HẲN dòng usage, không bao giờ để lại số âm) — "Sửa
+    Thực tế"/"Xóa" ở Cấp liệu tạo THÊM dòng DispenseLine hoàn lại (SL âm) thay vì xóa dòng cũ,
+    nên cùng 1 lô có thể xuất hiện nhiều dòng cộng/trừ qua lại. Màn này chỉ nhằm trả lời "vật tư
+    nào ĐANG THẬT SỰ được gán cho mẻ/lô này" (không phải sổ giao dịch thô — sổ đó xem ở "Lịch sử
+    cấp liệu"), nên GỘP NET theo (mẻ, mã vật tư, lô NVL) — lô nào đã hoàn hết về 0 (VD cấp nhầm
+    rồi xóa) không còn hiện nữa, tránh hiểu nhầm "vẫn đang trừ kho" (yêu cầu người dùng
+    2026-09-15). ts hiển thị = lần ghi/sửa GẦN NHẤT trong nhóm net đó.
 
     Mỗi truy vấn con đã ORDER BY created_at DESC LIMIT limit trước khi gộp — vì kết quả cuối
     cùng chỉ lấy top `limit` bản ghi mới nhất trên cả 3 nguồn, top-limit của mỗi nguồn riêng
-    lẻ chắc chắn phủ hết top-limit gộp, nên không cần tải hết cả 3 bảng vào bộ nhớ."""
+    lẻ chắc chắn phủ hết top-limit gộp, nên không cần tải hết cả 3 bảng vào bộ nhớ (gộp net của
+    Nấu chỉ áp trong đúng cửa sổ `limit` bản ghi mới nhất đã tải — đủ cho mục đích "hoạt động gần
+    đây", không phải sổ cái đầy đủ mọi thời điểm)."""
     limit = max(1, min(limit or 200, 5000))
     rows = []
     for u, filter_lot_code in db.execute(
@@ -2521,16 +2530,28 @@ def workshop_usage_history(db: Session, limit: int = 200) -> list[dict]:
                     "material_name": u.material_name, "lot_code": u.lot_pm,
                     "quantity": u.quantity, "uom": u.uom, "movement_id": u.movement_id})
     mat_name_by_code = {m.code: m.name for m in db.execute(select(Material)).scalars().all()}
-    for dl, batch_code, dispensed_by in db.execute(
-            select(DispenseLine, BatchExecution.batch_code, Dispense.created_by)
+    nau_agg: dict[tuple, dict] = {}
+    for dl, batch_id, batch_code, dispensed_by in db.execute(
+            select(DispenseLine, Dispense.batch_id, BatchExecution.batch_code, Dispense.created_by)
             .join(Dispense, DispenseLine.dispense_id == Dispense.dispense_id)
             .join(BatchExecution, Dispense.batch_id == BatchExecution.batch_id)
             .order_by(DispenseLine.created_at.desc()).limit(limit)).all():
-        rows.append({"usage_id": dl.line_id, "ts": dl.created_at, "stage": "Nấu",
-                    "batch_label": f"Mẻ nấu {batch_code}",
-                    "material_name": mat_name_by_code.get(dl.material_code, dl.material_code),
-                    "lot_code": dl.lot_code, "quantity": dl.quantity, "uom": dl.uom,
-                    "movement_id": None, "actor": dispensed_by})
+        key = (batch_id, dl.material_code, dl.lot_code)
+        agg = nau_agg.setdefault(key, {"qty": 0.0, "ts": dl.created_at, "batch_code": batch_code,
+                                       "actor": dispensed_by, "uom": dl.uom, "usage_id": dl.line_id})
+        agg["qty"] = round(agg["qty"] + dl.quantity, 4)
+        if dl.created_at > agg["ts"]:
+            agg["ts"] = dl.created_at
+            agg["actor"] = dispensed_by
+            agg["usage_id"] = dl.line_id
+    for (batch_id, material_code, lot_code), agg in nau_agg.items():
+        if agg["qty"] <= 1e-9:
+            continue
+        rows.append({"usage_id": agg["usage_id"], "ts": agg["ts"], "stage": "Nấu",
+                    "batch_label": f"Mẻ nấu {agg['batch_code']}",
+                    "material_name": mat_name_by_code.get(material_code, material_code),
+                    "lot_code": lot_code, "quantity": agg["qty"], "uom": agg["uom"],
+                    "movement_id": None, "actor": agg["actor"]})
 
     movement_ids = [r["movement_id"] for r in rows if r["movement_id"]]
     actor_by_id = dict(db.execute(select(StockMovement.movement_id, StockMovement.actor)

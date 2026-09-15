@@ -218,6 +218,7 @@
           <div class="field"><label>Hoặc gõ mã mẻ để tìm</label>
             <input type="text" id="dp_batch_search" autocomplete="off" placeholder="Nhập mã mẻ..."/></div>
         </div>
+        <div id="dp_batch_time" class="muted" style="margin-top:4px"></div>
         <div id="dp_bom" class="muted" style="margin-top:8px">Đang tải định mức…</div>
         <h3 style="margin-top:12px">Cấp 1 vật tư (tự chọn lô theo FEFO — hết hạn trước xuất trước)</h3>
         <div class="row">
@@ -242,6 +243,13 @@
         GET(`/batches/${bid}`), GET(`/batches/${bid}/bom`), GET(`/dispense?batch_id=${bid}`),
         GET(`/dispense/${bid}/summary`)]);
       const canEdit = !batch.ebr_locked;
+      // Tồn kho phân xưởng dùng để đối chiếu khi cấp liệu tính TẠI thời điểm bắt đầu nấu, và mẻ
+      // nào bắt đầu trước phải cấp liệu trước (services/dispense.py::_assert_dispensable) — hiện
+      // rõ 2 mốc này ngay dưới ô chọn mẻ để người dùng hiểu vì sao có thể bị chặn cấp liệu
+      // (yêu cầu người dùng 2026-09-15).
+      $("dp_batch_time").innerHTML = batch.start_at
+        ? `Bắt đầu: <b>${fmt(batch.start_at)}</b>${batch.end_at ? ` · Kết thúc: <b>${fmt(batch.end_at)}</b>` : ""}`
+        : `<span style="color:var(--red)">⚠ Mẻ chưa có thời điểm bắt đầu — chưa thể cấp liệu (vào Mẻ sản xuất nhập thời điểm bắt đầu trước).</span>`;
       // Bảng đối chiếu tách THEO MÃ VẬT TƯ THẬT đã cấp (không gộp theo mã Nhóm vật tư thay thế
       // như bom.lines — xem services/dispense.py::batch_dispense_summary), kèm mã lô + có đúng
       // FIFO không. CHỈ hiện vật tư ĐÃ thực sự cấp — không tự liệt kê sẵn toàn bộ định mức công
@@ -250,10 +258,12 @@
       const BOM_STATUS_LABEL = { dat: "đạt", vuot: "vượt định mức", thieu: "thiếu", chua_dung: "chưa dùng", ngoai_bom: "ngoài định mức" };
       const BOM_STATUS_BADGE = { dat: "available", vuot: "critical", thieu: "due", chua_dung: "planned", ngoai_bom: "obsolete" };
       $("dp_bom").innerHTML = summary.length ? `<div class="tablewrap"><table>
-        <thead><tr><th>Vật tư</th><th>Mã lô</th><th>FIFO?</th><th>Định mức</th><th>Thực tế</th><th>Chênh</th><th>Trạng thái</th><th>Cấp tự do?</th><th></th></tr></thead>
+        <thead><tr><th>Vật tư</th><th>Mã lô</th><th>Ngày tạo</th><th>Ngày cấp</th><th>FIFO?</th><th>Định mức</th><th>Thực tế</th><th>Chênh</th><th>Trạng thái</th><th>Cấp tự do?</th><th></th></tr></thead>
         <tbody>${summary.map(l => `<tr data-bomrow="${esc(l.material_code)}">
           <td>${esc(l.material_code)}${l.material_name ? ` ${esc(l.material_name)}` : ""}</td>
           <td>${esc((l.lot_codes || []).join(", ") || "—")}</td>
+          <td class="muted" style="white-space:nowrap">${l.created_at ? fmt(l.created_at) : "—"}</td>
+          <td class="muted" style="white-space:nowrap">${l.supply_date ? fmt(l.supply_date) : "—"}</td>
           <td>${l.fifo_ok === false ? '<span style="color:var(--red)">⚠ khác FIFO</span>' : '<span style="color:var(--green)">✔ FIFO</span>'}</td>
           <td>${l.planned != null ? l.planned + " " + esc(l.uom || "") : ""}</td>
           <td class="bom-actual">${l.actual}</td><td>${l.diff != null ? l.diff : ""}</td>
