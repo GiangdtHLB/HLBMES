@@ -7339,9 +7339,10 @@ function requestBlockHtml(r, matById, lotById, canFulfill, showBulk, allLots, ca
     ? `<button class="btn sm" data-fulfillall="${esc(r.request_id)}">Duyệt cả phiếu (${pendingCount} dòng) →</button>` : "";
   const cancelBtn = (!hasFulfilled && pendingCount > 0 && (canRequest || canFulfill))
     ? `<button class="btn sm sec" data-reqcancel="${esc(r.request_id)}">Xóa phiếu</button>` : "";
-  // Sửa (ngày đề nghị nhận + các dòng còn pending) — chỉ phía đề nghị (canRequest), bất kể
-  // phiếu đã có dòng fulfilled hay chưa (ngày header luôn sửa được, xem update_request).
-  const editBtn = canRequest
+  // Sửa (ngày đề nghị nhận + các dòng còn pending) — chỉ phía đề nghị (canRequest), CHỈ khi
+  // phiếu còn ít nhất 1 dòng pending — phiếu đã xử lý xong hết (không còn dòng nào pending)
+  // không cho sửa nữa (yêu cầu người dùng 2026-09-15).
+  const editBtn = canRequest && pendingCount > 0
     ? `<button class="btn sm sec" data-reqedit="${esc(r.request_id)}">Sửa</button>` : "";
   const summary = `${r.lines.length} dòng` +
     (pendingCount ? ` · ${pendingCount} chờ xử lý` : "") +
@@ -7697,12 +7698,6 @@ function wireCartPanel() {
   });
 }
 
-// "Đang chờ xử lý" (còn dòng pending) luôn hiện hết vì cần thao tác; "Đã xử lý xong" (mọi dòng
-// đã fulfilled/rejected/cancelled) chỉ hiện REQ_DONE_VISIBLE phiếu đầu — "Tải thêm" chỉ lộ thêm
-// dữ liệu đã fetch sẵn, không gọi lại API.
-const REQ_DONE_PAGE = 10;
-let REQ_DONE_VISIBLE = REQ_DONE_PAGE;
-
 function requestsHistoryBlockHtml() {
   const requests = REQ_CACHE.allRequests || [];
   const { matById, lotById, canRequest, lots } = REQ_CACHE;
@@ -7713,29 +7708,26 @@ function requestsHistoryBlockHtml() {
   const canFulfill = false;
   const pending = requests.filter(r => r.lines.some(l => l.status === "pending"));
   const done = requests.filter(r => !r.lines.some(l => l.status === "pending"));
-  const visibleDone = done.slice(0, REQ_DONE_VISIBLE);
   const pendingHtml = pending.map(r => requestBlockHtml(r, matById, lotById, canFulfill, true, lots, canRequest)).join("") ||
     '<div class="muted">Không có phiếu nào đang chờ xử lý.</div>';
-  const doneHtml = visibleDone.map(r => requestBlockHtml(r, matById, lotById, canFulfill, false, lots, canRequest)).join("");
-  const moreBtn = done.length > visibleDone.length
-    ? `<button class="btn sm sec" id="req_done_more">Tải thêm (còn ${done.length - visibleDone.length} phiếu)</button>` : "";
+  const doneHtml = done.map(r => requestBlockHtml(r, matById, lotById, canFulfill, false, lots, canRequest)).join("") ||
+    '<div class="muted">Chưa có phiếu nào đã xử lý xong.</div>';
+  // Phân trang 10/trang cho cả 2 khối (giống "Xuất theo đề nghị" ở Kho công ty) — mỗi khối tự
+  // phân trang riêng, dùng CHUNG 1 ô tìm kiếm (xem wirePaginateCards, yêu cầu người dùng
+  // 2026-09-15) — thay cho "Tải thêm" cũ chỉ áp cho khối "Đã xử lý xong".
   return `<div id="req_history_block">
     <input class="searchbox" id="req_hist_search" placeholder="Tìm theo số phiếu, người tạo, ghi chú, vật tư..." style="margin-bottom:10px;width:100%"/>
     <h3 style="margin:14px 0 8px">Đang chờ xử lý <span class="muted">(${pending.length})</span></h3>
-    ${pendingHtml}
-    <h3 style="margin:18px 0 8px">Đã xử lý xong <span class="muted">(${visibleDone.length}/${done.length})</span></h3>
-    ${doneHtml || '<div class="muted">Chưa có phiếu nào đã xử lý xong.</div>'}
-    ${moreBtn}
+    <div id="req_pending_block">${pendingHtml}</div>
+    <h3 style="margin:18px 0 8px">Đã xử lý xong <span class="muted">(${done.length})</span></h3>
+    <div id="req_done_block">${doneHtml}</div>
   </div>`;
 }
 
 function wireRequestsHistoryBlock() {
   wireRequestBlockActions();
-  wireCardSearch("req_hist_search", "#req_history_block");
-  if ($("req_done_more")) $("req_done_more").onclick = () => {
-    REQ_DONE_VISIBLE += REQ_DONE_PAGE;
-    refreshRequestsHistoryBlock();
-  };
+  wirePaginateCards("req_pending_block", "req_hist_search", 10);
+  wirePaginateCards("req_done_block", "req_hist_search", 10);
 }
 
 function refreshRequestsHistoryBlock() {
@@ -7764,8 +7756,6 @@ async function renderRequestsSection() {
   REQ_CACHE.matOpts = mats.map(m => `<option value="${m.material_id}">${esc(m.code)} — ${esc(m.name)}</option>`).join("");
   REQ_CACHE.canRequest = canRequest;
   REQ_CACHE.canFulfill = canFulfill;
-  // Mỗi lần vào lại tab (kể cả sau 1 thao tác) là 1 lượt xem mới — reset về trang đầu.
-  REQ_DONE_VISIBLE = REQ_DONE_PAGE;
 
   const cartSection = cartPanelHtml();
 
@@ -9229,7 +9219,11 @@ function wirePaginateCards(containerId, searchInputId, defaultPageSize = 10) {
       state.page = 1; apply();
     };
   }
-  if (searchInput) searchInput.oninput = () => { state.page = 1; apply(); };
+  // addEventListener (không phải searchInput.oninput=) — 1 ô tìm kiếm có thể dùng CHUNG cho
+  // NHIỀU danh sách thẻ cùng lúc (VD "Đề nghị nhận kho": 2 khối Đang chờ/Đã xử lý xong dùng
+  // chung 1 ô tìm, mỗi khối tự phân trang riêng) — gán thẳng .oninput sẽ bị lời gọi
+  // wirePaginateCards() SAU đè mất handler của lời gọi TRƯỚC trên cùng 1 input.
+  if (searchInput) searchInput.addEventListener("input", () => { state.page = 1; apply(); });
   apply();
 }
 const chk = (v) => v ? '<span class="chk">✔</span>' : '<span class="chk no">▢</span>';
