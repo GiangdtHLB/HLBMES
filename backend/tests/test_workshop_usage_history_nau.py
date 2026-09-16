@@ -144,6 +144,54 @@ def test_history_includes_nau_dispense_and_refund(client, admin_h):
     assert nau_rows2[0]["quantity"] == 4.0
 
 
+def test_history_survives_many_redispense_reversal_cycles_with_small_limit(client, admin_h):
+    """Tái hiện đúng kịch bản gặp trên server thật (mẻ nấu 2352, 2026-09-16): 1 mẻ được "Cấp theo
+    gợi ý"/"Sửa Thực tế" LẶP ĐI LẶP LẠI rất nhiều lần (cấp -> sửa về 0 "Cấp nhầm/không dùng" ->
+    cấp lại...), mỗi lần đều ghi DispenseLine MỚI (không xoá dòng cũ) — trước đây
+    workshop_usage_history chỉ quét `limit` dòng DispenseLine GẦN NHẤT TOÀN HỆ THỐNG rồi mới cộng
+    dồn theo (mẻ, vật tư, lô), nên 1 mẻ bị sửa đi sửa lại nhiều lần có thể tự chiếm hết cửa sổ
+    `limit` đó, đẩy dòng CÒN ĐANG DÙNG THẬT ra ngoài hoặc cộng dồn sai (bug thật: Gạo/Malt Đức/
+    Malt Úc biến mất khỏi "Lịch sử xuất dùng NVL" dù tồn kho đã trừ đúng và Thực tế/Định mức vẫn
+    đúng — yêu cầu người dùng 2026-09-16: "chỉ lấy cái đang được cấp cho mẻ nấu để đưa vào thôi,
+    không được lấy cái nào mà xóa đi"). Nguồn số liệu giờ lấy từ GenealogyEdge (không phình to
+    theo số lần sửa — refund xoá thẳng cạnh cũ, mirror bom.compare_batch) nên phải SỐNG SÓT dù
+    `limit` rất nhỏ, và KHÔNG được hiện lại bất kỳ dòng nào đã "Sửa về 0" (đã hoàn tác/không dùng
+    nữa)."""
+    material_id, code = _new_material(client, admin_h, "CHURN01")
+    _receive_workshop_lot(client, admin_h, material_id, 20)
+    version_id = _recipe_version(client, admin_h, "CHURN01", code, qty=10)
+    batch = _new_batch(client, admin_h, version_id, "CHURN01")
+
+    # 15 vòng cấp -> sửa về 0 ("Cấp nhầm / không dùng") — mirror đúng kịch bản thật, mỗi vòng đều
+    # ghi thêm DispenseLine mới (không xoá dòng cũ) — đủ để vượt xa 1 `limit` rất nhỏ.
+    for _ in range(15):
+        d = client.post(f"/api/dispense/{batch['batch_id']}", headers=admin_h,
+                        json={"lines": [{"material_code": code, "quantity": 10}]})
+        assert d.status_code == 200, d.text
+        a = client.post(f"/api/dispense/{batch['batch_id']}/adjust", headers=admin_h,
+                        json={"material_code": code, "new_actual": 0, "reason": "Cấp nhầm / không dùng"})
+        assert a.status_code == 200, a.text
+
+    # Cấp lại LẦN CUỐI — đây mới là số ĐANG THẬT SỰ được cấp cho mẻ, phải hiện đúng.
+    final = client.post(f"/api/dispense/{batch['batch_id']}", headers=admin_h,
+                        json={"lines": [{"material_code": code, "quantity": 10}]})
+    assert final.status_code == 200, final.text
+
+    # `limit` CỰC NHỎ (2 dòng) — nếu vẫn còn quét theo DispenseLine (mỗi vòng 2 dòng x 15 vòng +
+    # 1 dòng cuối = 31 dòng) thì chắc chắn KHÔNG đủ để thấy đúng dòng đang dùng thật; nguồn mới
+    # (GenealogyEdge, chỉ còn ĐÚNG 1 cạnh đang sống cho lô này) phải vẫn thấy đúng dù giới hạn nhỏ
+    # thế nào, vì genealogy KHÔNG hề bị phình to theo số vòng sửa.
+    hist = client.get("/api/warehouse/workshop-usage-history?limit=2", headers=admin_h).json()
+    nau_rows = [r for r in hist if r["stage"] == "Nấu" and r["material_name"] == "Vật tư lịch sử CHURN01"]
+    assert len(nau_rows) == 1, nau_rows
+    assert nau_rows[0]["quantity"] == 10.0
+
+    # Tồn kho phải phản ánh ĐÚNG 1 lần cấp thật (10kg) — không phải 15 lần cộng dồn nhầm.
+    lots = client.get("/api/lots", headers=admin_h).json()
+    workshop_lot = next(l for l in lots if l["material_id"] == material_id)
+    assert workshop_lot["quantity"] == 10.0
+
+
 def test_history_includes_direct_consume_not_only_dispense(client, admin_h):
     """Tiêu thụ lô qua endpoint "Tiêu thụ lô" trực tiếp (POST /batches/{id}/consume,
     services/batches.py::consume_lot) KHÔNG tạo DispenseLine — chỉ ghi GenealogyEdge(relation=
