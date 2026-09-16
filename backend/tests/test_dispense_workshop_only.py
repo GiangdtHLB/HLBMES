@@ -52,6 +52,23 @@ def admin_h(client):
     return _login(client, "admin", "AdminTest123")
 
 
+@pytest.fixture(autouse=True)
+def _cleanup_dangling_batches(client, admin_h):
+    """DB tạm dùng chung cả file (module-scope) — nhiều test trong file này CỐ Ý để mẻ dở dang
+    (kịch bản cấp liệu THẤT BẠI/chỉ 1 phần) không transition tiếp. Điều kiện cấp liệu mở rộng
+    2026-09-16 (services/dispense.py::_assert_dispensable) giờ chặn theo CẢ planned/ready/
+    running/held (không chỉ running/held như trước) — mẻ dở dang của test TRƯỚC sẽ chặn oan mẻ
+    của test SAU nếu không dọn. Hủy MỌI mẻ còn ở trạng thái chưa chốt (không đụng completed/
+    closed — không phát sinh ở các test file cấp liệu này) SAU KHI mỗi test chạy xong (teardown,
+    không phải trước) để không ảnh hưởng các test tự tạo NHIỀU mẻ cùng lúc trong chính nó."""
+    yield
+    batches = client.get("/api/batches", headers=admin_h).json()
+    for b in batches:
+        if b["state"] in ("planned", "ready", "running", "held"):
+            client.post(f"/api/batches/{b['batch_id']}/transition", headers=admin_h,
+                        json={"target": "cancelled"})
+
+
 def _clear_seed_batch_9002(client, admin_h):
     """seed.py cố tình để mẻ demo "9002" ở trạng thái "running, chưa cấp liệu lần nào" (demo màn
     Cấp liệu) — với điều kiện cấp liệu mới (2026-09-15, _assert_dispensable), MỌI mẻ mà file test
@@ -301,16 +318,14 @@ def test_fully_dispensed_map_marks_only_batches_with_full_recipe_coverage(client
     _receive_lot(client, admin_h, material_id, 20, "Kho phân xưởng")
     version_id = _recipe_version(client, admin_h, "FULLMAP01", code, qty=10, base_qty=100)
 
-    empty_batch_id = _new_batch(client, admin_h, version_id, planned_qty=100, suffix="FULLMAP_EMPTY")
+    # "empty_batch_id" CỐ Ý không bao giờ cấp liệu (test fmap trả False cho mẻ trắng) — tạo SAU
+    # CÙNG (không phải đầu tiên) để không chặn oan các mẻ dispense THẬT ngay bên dưới theo điều
+    # kiện cấp liệu mở rộng 2026-09-16 (mẻ chưa cấp liệu chặn mẻ SAU nó có start_at muộn hơn).
     full_batch_id = _new_batch(client, admin_h, version_id, planned_qty=100, suffix="FULLMAP_FULL")
 
     ok = client.post(f"/api/dispense/{full_batch_id}", headers=admin_h,
                      json={"lines": [{"material_code": code, "quantity": 10}]})
     assert ok.status_code == 200, ok.text
-
-    fmap = client.get("/api/dispense/fully-dispensed-map", headers=admin_h).json()
-    assert fmap[empty_batch_id] is False
-    assert fmap[full_batch_id] is True
 
     # Mẻ khác vật tư, khai định mức 2 dòng nhưng chỉ cấp 1 -> vẫn False (thiếu 1 dòng).
     material_id2, code2 = _new_material(client, admin_h, "FULLMAP02")
@@ -339,5 +354,13 @@ def test_fully_dispensed_map_marks_only_batches_with_full_recipe_coverage(client
                       json={"lines": [{"material_code": code, "quantity": 10}]})
     assert ok2.status_code == 200, ok2.text
 
-    fmap2 = client.get("/api/dispense/fully-dispensed-map", headers=admin_h).json()
-    assert fmap2[partial_batch_id] is False
+    # allow_shortage=True: lô NVL của FULLMAP01 giờ đã bị full_batch_id/partial_batch_id dùng
+    # gần hết (khác thứ tự gốc — mẻ trắng này giờ tạo SAU CÙNG, xem comment ở lần tạo
+    # full_batch_id) — mẻ này không hề cấp liệu nên tồn thiếu lúc TẠO không quan trọng.
+    empty_batch_id = _new_batch(client, admin_h, version_id, planned_qty=100, suffix="FULLMAP_EMPTY",
+                                allow_shortage=True)
+
+    fmap = client.get("/api/dispense/fully-dispensed-map", headers=admin_h).json()
+    assert fmap[empty_batch_id] is False
+    assert fmap[full_batch_id] is True
+    assert fmap[partial_batch_id] is False
