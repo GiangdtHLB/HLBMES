@@ -144,6 +144,38 @@ def test_history_includes_nau_dispense_and_refund(client, admin_h):
     assert nau_rows2[0]["quantity"] == 4.0
 
 
+def test_history_includes_direct_consume_not_only_dispense(client, admin_h):
+    """Tiêu thụ lô qua endpoint "Tiêu thụ lô" trực tiếp (POST /batches/{id}/consume,
+    services/batches.py::consume_lot) KHÔNG tạo DispenseLine — chỉ ghi GenealogyEdge(relation=
+    consume). Trước đây workshop_usage_history CHỈ quét DispenseLine nên vật tư tiêu thụ theo
+    đường này biến mất khỏi "Lịch sử xuất dùng NVL" dù tồn kho ĐÃ trừ đúng và "Thực tế" (BOM) ĐÃ
+    tính đúng (bug thực tế 2026-09-16: "kho phân xưởng không thấy lịch sử dụng NVL gạo, trong
+    khi cấp liệu đã tính vào rồi, tồn kho cũng trừ đi rồi" — mẻ 2352 dùng "Tiêu thụ lô" trực tiếp
+    cho gạo). Số lượng giờ lấy từ genealogy edge nên phải hiện đúng dù không qua dispense()."""
+    material_id, code = _new_material(client, admin_h, "DIRECT01")
+    lot_id = _receive_workshop_lot(client, admin_h, material_id, 20)
+    version_id = _recipe_version(client, admin_h, "DIRECT01", code, qty=10)
+    batch = _new_batch(client, admin_h, version_id, "DIRECT01")
+
+    consume = client.post(f"/api/batches/{batch['batch_id']}/consume", headers=admin_h,
+                         json={"lot_id": lot_id, "quantity": 7})
+    assert consume.status_code == 200, consume.text
+
+    # Tồn kho đã trừ đúng (Kho phân xưởng).
+    lots = client.get("/api/lots", headers=admin_h).json()
+    lot = next(l for l in lots if l["lot_id"] == lot_id)
+    assert lot["quantity"] == 13.0
+
+    hist = client.get("/api/warehouse/workshop-usage-history?limit=2000", headers=admin_h).json()
+    nau_rows = [r for r in hist if r["stage"] == "Nấu" and r["material_name"] == "Vật tư lịch sử DIRECT01"]
+    assert len(nau_rows) == 1, nau_rows
+    row = nau_rows[0]
+    assert row["batch_label"] == f"Mẻ nấu {batch['batch_code']}"
+    assert row["quantity"] == 7.0
+    assert row["uom"] == "kg"
+    assert row["lot_code"]
+
+
 def test_history_still_includes_loc_chiet_unchanged(client, admin_h):
     """Không phá vỡ 2 nguồn Lọc/Chiết đã có sẵn — chỉ kiểm tra endpoint vẫn trả về đủ 3 stage
     khi có dữ liệu ở cả 3 (không cần dựng lại toàn bộ kịch bản Lọc/Chiết, seed() đã có sẵn)."""
