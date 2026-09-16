@@ -155,6 +155,12 @@ def update_tank_daily_readings(tank_id: str, payload: BatchTankDailyReadingsIn, 
     return [_tank_reading_dict(r) for r in readings]
 
 
+@router.delete("/batch-tanks/{tank_id}/process-log/readings/{day_no}", status_code=204)
+def delete_tank_daily_reading(tank_id: str, day_no: int, db: Session = Depends(get_db),
+                              user: User = Depends(get_current_user)):
+    tank_log_svc.delete_daily_reading(db, tank_id, day_no, user)
+
+
 # ==================== BatchFilterOrder (lệnh lọc) ====================
 @router.get("/batch-filter-orders", response_model=list[BatchFilterOrderOut])
 def list_filter_orders(db: Session = Depends(get_db)):

@@ -13,7 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..common import Role, new_id, utcnow
-from ..errors import DomainError
+from ..errors import DomainError, NotFoundError
 from ..models.batch_pipeline import (
     BatchTank,
     BatchTankDailyReading,
@@ -166,30 +166,57 @@ def upsert_daily_readings(db: Session, tank_id: str, rows: list[dict], user: Use
         if not reading:
             reading = BatchTankDailyReading(reading_id=new_id(), tank_id=tank_id, day_no=row["day_no"])
             db.add(reading)
+
+        # "Lưu bảng ngày" gửi lên NGUYÊN BẢNG (mọi dòng đang hiện trên form, không chỉ dòng vừa
+        # sửa/thêm) — trước đây mọi dòng CÓ giá trị đều bị ghi đè "Người ghi"/giờ ghi = người/giờ
+        # vừa bấm Lưu, kể cả dòng đã ghi từ trước (bởi người khác, giờ khác) mà giá trị KHÔNG hề
+        # đổi (yêu cầu người dùng 2026-09-16: "ấn lưu thì lưu cho lần nhập gần nhất... mỗi hàng
+        # sẽ có 1 thời gian riêng"). Chỉ cập nhật "Người ghi"/giờ của ĐÚNG NHÓM TRƯỜNG (đo đạc/
+        # KCS/trực ca) khi giá trị CỦA CHÍNH DÒNG ĐÓ thật sự đổi so với đã lưu.
+        new_measure = (row.get("nhiet_do_c"), row.get("do_s"), row.get("mat_do_tb"), row.get("ap_suat_bar"))
+        measure_changed = (reading.nhiet_do_c, reading.do_s, reading.mat_do_tb, reading.ap_suat_bar) != new_measure
         reading.reading_date = row.get("reading_date")
-        reading.nhiet_do_c = row.get("nhiet_do_c")
-        reading.do_s = row.get("do_s")
-        reading.mat_do_tb = row.get("mat_do_tb")
-        reading.ap_suat_bar = row.get("ap_suat_bar")
-        if any(v is not None for v in (reading.nhiet_do_c, reading.do_s, reading.mat_do_tb, reading.ap_suat_bar)):
-            reading.measured_by = user.username
-            reading.measured_at = now
-        else:
+        reading.nhiet_do_c, reading.do_s, reading.mat_do_tb, reading.ap_suat_bar = new_measure
+        if not any(v is not None for v in new_measure):
             reading.measured_by = None
             reading.measured_at = None
-        reading.kcs = row.get("kcs")
-        if reading.kcs is not None:
-            reading.kcs_by = user.username
-            reading.kcs_at = now
-        else:
+        elif measure_changed or reading.measured_at is None:
+            reading.measured_by = user.username
+            reading.measured_at = now
+
+        new_kcs = row.get("kcs")
+        kcs_changed = reading.kcs != new_kcs
+        reading.kcs = new_kcs
+        if reading.kcs is None:
             reading.kcs_by = None
             reading.kcs_at = None
-        reading.truc_ca = row.get("truc_ca")
-        if reading.truc_ca is not None:
-            reading.truc_ca_by = user.username
-            reading.truc_ca_at = now
-        else:
+        elif kcs_changed or reading.kcs_at is None:
+            reading.kcs_by = user.username
+            reading.kcs_at = now
+
+        new_truc_ca = row.get("truc_ca")
+        truc_ca_changed = reading.truc_ca != new_truc_ca
+        reading.truc_ca = new_truc_ca
+        if reading.truc_ca is None:
             reading.truc_ca_by = None
             reading.truc_ca_at = None
+        elif truc_ca_changed or reading.truc_ca_at is None:
+            reading.truc_ca_by = user.username
+            reading.truc_ca_at = now
     db.commit()
     return get_daily_readings(db, tank_id)
+
+
+def delete_daily_reading(db: Session, tank_id: str, day_no: int, user: User) -> None:
+    """Xóa hẳn 1 dòng theo ngày (yêu cầu người dùng 2026-09-16: "thêm nút xóa vào chỗ nhập bảng
+    theo dõi này") — trước đây chỉ có thể sửa giá trị về rỗng (vẫn giữ nguyên dòng/day_no,
+    không thật sự bỏ được 1 ngày đã lỡ thêm nhầm)."""
+    require_perm(user, "batch.execute")
+    _assert_tank_unlocked(db, tank_id)
+    reading = db.execute(select(BatchTankDailyReading).where(
+        BatchTankDailyReading.tank_id == tank_id, BatchTankDailyReading.day_no == day_no,
+    )).scalar_one_or_none()
+    if not reading:
+        raise NotFoundError("Dòng theo dõi ngày này không tồn tại.")
+    db.delete(reading)
+    db.commit()
