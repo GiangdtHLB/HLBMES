@@ -21,6 +21,7 @@ from ..models.warehouse import (FactoryLocation, MaterialRequest, MaterialReques
                                 StockCount, StockCountLine, StockMovement, TransferKcPxRequest,
                                 TransferPxRequest)
 from ..security import User, has_scope, require_perm, require_role, require_scope
+from . import bom
 from .opening_balance_import import parse_opening_balance_sheet
 from .qc_catalog import requires_kcs_hold
 
@@ -2692,25 +2693,55 @@ def workshop_usage_history(db: Session, limit: int = 200) -> list[dict]:
                     "material_name": u.material_name, "lot_code": u.lot_pm,
                     "quantity": u.quantity, "uom": u.uom, "movement_id": u.movement_id})
     mat_name_by_code = {m.code: m.name for m in db.execute(select(Material)).scalars().all()}
+    # Nấu — số lượng LUÔN lấy từ GenealogyEdge(relation=consume, to_type="batch"), KHÔNG phải
+    # tổng DispenseLine — mirror đúng cách bom.compare_batch đã sửa (2026-09-15): edge là nguồn
+    # DUY NHẤT đúng luôn dù tiêu thụ qua dispense()/backflush()/adjust_actual (có DispenseLine)
+    # HAY qua endpoint "Tiêu thụ lô" trực tiếp (routers/batches.py::consume_lot — KHÔNG tạo
+    # DispenseLine). Trước đây màn này chỉ quét DispenseLine nên vật tư tiêu thụ qua "Tiêu thụ
+    # lô" trực tiếp biến mất khỏi "Lịch sử xuất dùng NVL" dù đã trừ tồn/tính vào Thực tế đúng
+    # (bug thực tế 2026-09-16: "kho phân xưởng không thấy lịch sử dùng NVL gạo dù cấp liệu đã
+    # tính vào và tồn kho đã trừ" — gạo được cấp qua "Tiêu thụ lô" trực tiếp cho mẻ 2352).
+    # edge.quantity LUÔN NET (adjust_actual nhánh hoàn lại trừ thẳng vào edge, xoá cạnh nếu về 0)
+    # nên CỘNG DỒN nhiều cạnh cùng (mẻ, vật tư, lô) là đúng (VD cấp 2 đợt riêng từ cùng 1 lô).
+    consume_rows = db.execute(
+        select(GenealogyEdge, BatchExecution.batch_id, BatchExecution.batch_code, BatchExecution.start_at)
+        .join(BatchExecution, GenealogyEdge.to_id == BatchExecution.batch_id)
+        .where(GenealogyEdge.to_type == "batch", GenealogyEdge.from_type == "lot",
+              GenealogyEdge.relation == GenealogyRelation.CONSUME.value)
+        .order_by(GenealogyEdge.event_time.desc()).limit(limit)).all()
+    lot_ids = {e.from_id for e, *_ in consume_rows}
+    lots_by_id = {l.lot_id: l for l in db.execute(select(MaterialLot).where(
+        MaterialLot.lot_id.in_(lot_ids))).scalars().all()} if lot_ids else {}
     nau_agg: dict[tuple, dict] = {}
-    for dl, batch_id, batch_code, batch_start_at, dispensed_by in db.execute(
-            select(DispenseLine, Dispense.batch_id, BatchExecution.batch_code, BatchExecution.start_at,
-                  Dispense.created_by)
-            .join(Dispense, DispenseLine.dispense_id == Dispense.dispense_id)
-            .join(BatchExecution, Dispense.batch_id == BatchExecution.batch_id)
-            .order_by(DispenseLine.created_at.desc()).limit(limit)).all():
-        key = (batch_id, dl.material_code, dl.lot_code)
-        agg = nau_agg.setdefault(key, {"qty": 0.0, "ts": dl.created_at, "batch_code": batch_code,
+    for e, batch_id, batch_code, batch_start_at in consume_rows:
+        lot = lots_by_id.get(e.from_id)
+        if not lot or not e.quantity:
+            continue
+        code = bom.material_code_for_lot(db, lot)
+        key = (batch_id, code, lot.lot_code)
+        agg = nau_agg.setdefault(key, {"qty": 0.0, "ts": e.event_time, "batch_code": batch_code,
                                        # "Ngày cấp" = batch.start_at (ngày mẻ THỰC SỰ bắt đầu nấu,
                                        # có thể khai lùi ngày) — CHÍNH LÀ mốc đã dùng để trừ tồn
                                        # kho phân xưởng "tính đến ngày" (xem _nau_consume_as_of).
                                        "supply_date": batch_start_at,
-                                       "actor": dispensed_by, "uom": dl.uom, "usage_id": dl.line_id})
-        agg["qty"] = round(agg["qty"] + dl.quantity, 4)
-        if dl.created_at > agg["ts"]:
-            agg["ts"] = dl.created_at
+                                       "actor": None, "uom": lot.uom, "usage_id": e.edge_id})
+        agg["qty"] = round(agg["qty"] + e.quantity, 4)
+        if e.event_time > agg["ts"]:
+            agg["ts"] = e.event_time
+            agg["usage_id"] = e.edge_id
+    # DispenseLine (chỉ tồn tại khi tiêu thụ đi qua dispense()/backflush()/adjust_actual) —
+    # dùng để lấy actor + "Ngày tạo" chính xác hơn event_time khi có (GenealogyEdge không lưu
+    # actor), KHÔNG dùng để tính số lượng nữa (tránh double-count với genealogy ở trên).
+    for dl, batch_id, dispensed_by in db.execute(
+            select(DispenseLine, Dispense.batch_id, Dispense.created_by)
+            .join(Dispense, DispenseLine.dispense_id == Dispense.dispense_id)
+            .order_by(DispenseLine.created_at.desc()).limit(limit)).all():
+        agg = nau_agg.get((batch_id, dl.material_code, dl.lot_code))
+        if not agg:
+            continue
+        if agg["actor"] is None or dl.created_at > agg["ts"]:
+            agg["ts"] = max(agg["ts"], dl.created_at)
             agg["actor"] = dispensed_by
-            agg["usage_id"] = dl.line_id
     for (batch_id, material_code, lot_code), agg in nau_agg.items():
         if agg["qty"] <= 1e-9:
             continue
