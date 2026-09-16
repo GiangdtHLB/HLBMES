@@ -261,7 +261,13 @@ def suggest_dispense(db: Session, batch_id: str) -> dict:
     FEFO ở Kho phân xưởng — CHỈ TÍNH, không trừ tồn. `alternatives` liệt kê MỌI lô khả dụng
     (Kho phân xưởng, còn hạn) của vật tư đó để người dùng có thể chọn lô KHÁC lô FIFO gợi ý
     (kèm lý do, xem _plan_consume). Người dùng xem bảng này rồi bấm "Áp dụng" sẽ gọi lại
-    dispense() với đúng lô/số lượng (có thể đã sửa) lấy từ đây."""
+    dispense() với đúng lô/số lượng (có thể đã sửa) lấy từ đây.
+
+    Mỗi dòng trả về CẢ 2 cặp tồn kho công ty/phân xưởng: `stock_company`/`stock_workshop` (tồn
+    HIỆN TẠI, thời gian thực lúc gọi API) và `stock_company_asof`/`stock_workshop_asof` (tồn
+    TẠI ĐÚNG THỜI ĐIỂM `batch.start_at` — dựng lại từ lịch sử StockMovement qua
+    stock_on_hand_as_of, không lẫn biến động kho xảy ra SAU khi mẻ đã bắt đầu nấu — yêu cầu
+    người dùng 2026-09-15, tránh nhầm với tồn hiện tại ở 2 cột đầu)."""
     batch = db.get(BatchExecution, batch_id)
     if not batch:
         raise NotFoundError("Batch không tồn tại.")
@@ -273,6 +279,13 @@ def suggest_dispense(db: Session, batch_id: str) -> dict:
     # thay thế (bom.codes_for_dispense) cộng dồn tồn của MỌI mã thành viên.
     company_stock = {r["material_code"]: r["on_hand"] for r in warehouse_svc.stock_on_hand(db, "Kho công ty")}
     workshop_stock = {r["material_code"]: r["on_hand"] for r in warehouse_svc.stock_on_hand(db, "Kho phân xưởng")}
+    # Tồn TẠI THỜI ĐIỂM MẺ BẮT ĐẦU (khác 2 dict trên là tồn HIỆN TẠI) — người dùng cần đối chiếu
+    # đúng số đã có lúc nấu, không lẫn với biến động kho xảy ra SAU đó (yêu cầu người dùng
+    # 2026-09-15). batch.start_at chắc chắn có giá trị ở đây vì _assert_dispensable đã kiểm tra.
+    company_stock_asof = {r["material_code"]: r["on_hand"]
+                          for r in warehouse_svc.stock_on_hand_as_of(db, batch.start_at, "Kho công ty")}
+    workshop_stock_asof = {r["material_code"]: r["on_hand"]
+                           for r in warehouse_svc.stock_on_hand_as_of(db, batch.start_at, "Kho phân xưởng")}
     name_by_code = {m.code: m.name for m in db.execute(select(Material)).scalars().all()}
     lines = []
     for l in cmp["lines"]:
@@ -311,12 +324,16 @@ def suggest_dispense(db: Session, batch_id: str) -> dict:
                              "uom": l["uom"], "planned": l["planned"],
                              "stock_company": round(company_stock.get(mcode, 0.0), 4),
                              "stock_workshop": round(workshop_stock.get(mcode, 0.0), 4),
+                             "stock_company_asof": round(company_stock_asof.get(mcode, 0.0), 4),
+                             "stock_workshop_asof": round(workshop_stock_asof.get(mcode, 0.0), 4),
                              "need": need, "picks": picks_by_member.get(mcode, []), "alternatives": alternatives,
                              "group_code": l["material_code"], "shortfall": group_shortfall})
             continue
         real_codes = bom.codes_for_dispense(db, l["material_code"])
         stock_company = round(sum(company_stock.get(c, 0.0) for c in real_codes), 4)
         stock_workshop = round(sum(workshop_stock.get(c, 0.0) for c in real_codes), 4)
+        stock_company_asof = round(sum(company_stock_asof.get(c, 0.0) for c in real_codes), 4)
+        stock_workshop_asof = round(sum(workshop_stock_asof.get(c, 0.0) for c in real_codes), 4)
         fefo_lots = _workshop_fefo_lots(db, l["material_code"], batch.start_at)
         alternatives = [{"lot_id": lot.lot_id, "lot_code": lot.lot_code, "quantity": round(_lot_avail_qty(lot), 4),
                         "uom": lot.uom, "expiry": lot.expiry.isoformat() if lot.expiry else None}
@@ -336,6 +353,7 @@ def suggest_dispense(db: Session, batch_id: str) -> dict:
         lines.append({"material_code": l["material_code"], "material_name": l.get("material_name"),
                      "uom": l["uom"], "planned": l["planned"],
                      "stock_company": stock_company, "stock_workshop": stock_workshop,
+                     "stock_company_asof": stock_company_asof, "stock_workshop_asof": stock_workshop_asof,
                      "need": need, "picks": picks, "alternatives": alternatives,
                      "shortfall": round(remaining, 4) if remaining > 1e-6 else 0.0})
     return {"batch_id": batch_id, "batch_code": batch.batch_code, "lines": lines}
@@ -589,17 +607,37 @@ def batch_dispense_summary(db: Session, batch_id: str, only_dispensed: bool = Tr
     dlines = db.execute(select(DispenseLine).where(
         DispenseLine.dispense_id.in_(dispense_ids))).scalars().all() if dispense_ids else []
     lot_info: dict[str, dict] = {}
+    # Mã lô lấy từ GenealogyEdge(relation=consume) — nguồn DUY NHẤT ghi lại dù tiêu thụ qua
+    # dispense()/backflush()/adjust_actual (đi qua DispenseLine) HAY qua endpoint "Tiêu thụ lô"
+    # trực tiếp (KHÔNG tạo DispenseLine — trước đây lot_codes rỗng oan cho các dòng này dù thực
+    # tế CÓ trừ đúng lô, yêu cầu người dùng 2026-09-15). edge.quantity đã LUÔN Ở DẠNG NET (hoàn
+    # lại qua adjust_actual trừ thẳng vào edge.quantity, xóa hẳn cạnh nếu về 0 — xem nhánh delta<0
+    # phía trên), không cần tự trừ hoàn lại như DispenseLine nữa.
+    consume_edges = db.execute(select(GenealogyEdge).where(
+        GenealogyEdge.to_type == "batch", GenealogyEdge.to_id == batch_id,
+        GenealogyEdge.from_type == "lot", GenealogyEdge.relation == "consume")).scalars().all()
+    lots_by_id = {l.lot_id: l for l in db.execute(select(MaterialLot).where(
+        MaterialLot.lot_id.in_({e.from_id for e in consume_edges}))).scalars().all()} if consume_edges else {}
+    for e in consume_edges:
+        lot = lots_by_id.get(e.from_id)
+        if not lot or not e.quantity:
+            continue
+        code = bom.material_code_for_lot(db, lot)
+        # fifo_ok=None (KHÔNG phải True) — genealogy edge không ghi lại có đúng FIFO hay không,
+        # chỉ dispense() (qua DispenseLine.fifo_ok) mới biết; None nghĩa là "không xác định",
+        # khác hẳn True ("chắc chắn đúng FIFO") — tránh hiện nhầm ✔ FIFO cho tiêu thụ qua
+        # /consume trực tiếp (không hề kiểm tra FIFO lúc đó).
+        info = lot_info.setdefault(code, {"lot_qty": {}, "fifo_ok": None, "is_free": False, "created_at": None})
+        info["lot_qty"][lot.lot_code] = info["lot_qty"].get(lot.lot_code, 0.0) + e.quantity
+    # DispenseLine chỉ còn dùng để lấy fifo_ok/"Cấp tự do"/"Ngày tạo" — metadata không có trên
+    # genealogy edge, chỉ tồn tại với đường đi qua dispense(). Lần đầu 1 dòng nào đó của vật tư
+    # này đi qua dispense() mới có căn cứ để bắt đầu từ True (đúng FIFO), rồi lật False nếu có
+    # BẤT KỲ dòng nào khác FIFO.
     for dl in dlines:
-        info = lot_info.setdefault(dl.material_code, {"lot_qty": {}, "fifo_ok": True, "is_free": False,
+        info = lot_info.setdefault(dl.material_code, {"lot_qty": {}, "fifo_ok": None, "is_free": False,
                                                        "created_at": None})
-        # Cộng dồn THEO LÔ (không chỉ liệt kê distinct) — 1 lô đã cấp rồi HOÀN HẾT (net về 0, VD
-        # "Sửa Thực tế"/"Xóa" hoàn lại toàn bộ) không còn đóng góp gì vào Thực tế hiện tại nữa,
-        # không nên còn hiện tên trong "Mã lô" — gây hiểu lầm là "vẫn đang dùng lô đó" dù thực ra
-        # chỉ còn sót lại trong LỊCH SỬ (xem "Lịch sử cấp liệu" nếu cần xem đủ dấu vết quá khứ).
-        # Trước đây liệt kê MỌI lot_code từng xuất hiện (kể cả đã hoàn hết) khiến 1 vật tư có thể
-        # hiện "lô A, lô B" dù thực tế chỉ đang dùng lô A — yêu cầu người dùng 2026-09-15.
-        if dl.lot_code:
-            info["lot_qty"][dl.lot_code] = info["lot_qty"].get(dl.lot_code, 0.0) + dl.quantity
+        if info["fifo_ok"] is None:
+            info["fifo_ok"] = True
         if dl.fifo_ok is False:
             info["fifo_ok"] = False
         if dl.dispense_id in free_dispense_ids:
@@ -610,6 +648,9 @@ def batch_dispense_summary(db: Session, batch_id: str, only_dispensed: bool = Tr
         if info["created_at"] is None or dl.created_at > info["created_at"]:
             info["created_at"] = dl.created_at
     for info in lot_info.values():
+        # Cộng dồn THEO LÔ, chỉ hiện lô còn đóng góp thật > 0 vào Thực tế hiện tại — 1 lô đã dùng
+        # rồi HOÀN HẾT (net về 0) không nên còn hiện tên trong "Mã lô", gây hiểu lầm "vẫn đang
+        # dùng lô đó" (yêu cầu người dùng 2026-09-15).
         info["lot_codes"] = [code for code, qty in info["lot_qty"].items() if qty > 1e-9]
     rows = []
     for l in cmp["lines"]:

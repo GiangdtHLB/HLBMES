@@ -45,6 +45,20 @@ def admin_h(client):
     return _login(client, "admin", "AdminTest123")
 
 
+def _clear_seed_batch_9002(client, admin_h):
+    """seed.py cố tình để mẻ demo "9002" ở trạng thái "running, chưa cấp liệu lần nào" (demo màn
+    Cấp liệu) — với điều kiện cấp liệu mới (2026-09-15, _assert_dispensable), MỌI mẻ mà file test
+    này tạo ra SAU 9002 (cùng DB tạm) sẽ bị chặn cấp liệu vì "còn mẻ bắt đầu trước chưa cấp liệu".
+    File này không test tính năng xếp hàng đó — hủy 9002 trước khi tạo mẻ test để không bị chặn
+    oan (idempotent — gọi lại nhiều lần vô hại)."""
+    batches = client.get("/api/batches", headers=admin_h).json()
+    b9002 = next((b for b in batches if b.get("batch_code") == "9002"), None)
+    if b9002 and b9002["state"] in ("running", "held"):
+        r = client.post(f"/api/batches/{b9002['batch_id']}/transition", headers=admin_h,
+                        json={"target": "cancelled"})
+        assert r.status_code == 200, r.text
+
+
 def _new_material(client, admin_h, suffix):
     r = client.post("/api/materials", headers=admin_h,
                     json={"code": f"SUG-{suffix}", "name": f"Vật tư test {suffix}", "uom": "kg"})
@@ -88,13 +102,21 @@ def _recipe_version(client, admin_h, suffix, material_code, qty, base_qty=100):
 
 
 def _new_batch(client, admin_h, version_id, planned_qty, suffix, allow_shortage=False):
+    _clear_seed_batch_9002(client, admin_h)
     oid = client.get("/api/brewing/orders", headers=admin_h).json()[0]["brew_order_id"]
     b = client.post("/api/batches", headers=admin_h,
                     json={"order_id": oid, "recipe_version_id": version_id,
                          "planned_qty": planned_qty,   # batch_code: để tự sinh (giờ bắt buộc số nguyên)
                          "allow_shortage": allow_shortage})
     assert b.status_code == 201, b.text
-    return b.json()["batch_id"]
+    batch_id = b.json()["batch_id"]
+    # Điều kiện cấp liệu mới (yêu cầu người dùng 2026-09-15, services/dispense.py::
+    # _assert_dispensable) chặn cấp liệu khi mẻ chưa có start_at — set SAU khi lô đã nhận trước
+    # đó (nếu có) để tồn kho phân xưởng đối chiếu TẠI thời điểm bắt đầu mẻ vẫn thấy đủ lô.
+    s = client.post(f"/api/batches/{batch_id}/start", headers=admin_h,
+                    json={"start_at": utcnow().isoformat()})
+    assert s.status_code == 200, s.text
+    return batch_id
 
 
 def test_suggest_picks_fefo_across_two_lots_in_workshop_only(client, admin_h):

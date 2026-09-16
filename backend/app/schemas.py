@@ -1131,6 +1131,7 @@ class TransferPxRequestIn(BaseModel):
     lot_id: str
     quantity: float
     reason: Optional[str] = None
+    requested_transfer_date: Optional[datetime] = None
 
 
 class TransferPxRejectIn(BaseModel):
@@ -1138,9 +1139,12 @@ class TransferPxRejectIn(BaseModel):
 
 
 class TransferQuantityUpdateIn(BaseModel):
-    """Sửa đề nghị điều chuyển (2 chiều Công ty↔Phân xưởng) — chỉ số lượng/lý do, không đổi lô."""
+    """Sửa đề nghị điều chuyển (2 chiều Công ty↔Phân xưởng) — số lượng/lý do/"Ngày đề nghị điều
+    chuyển", không đổi lô. Dùng chung cho cả update_transfer_kcpx_request và
+    update_transfer_px_request."""
     quantity: float = Field(gt=0)
     reason: Optional[str] = None
+    requested_transfer_date: Optional[datetime] = None
 
 
 class TransferPxRequestOut(ORMModel):
@@ -1152,6 +1156,7 @@ class TransferPxRequestOut(ORMModel):
     reason: Optional[str] = None
     status: str
     movement_id: Optional[str] = None
+    requested_transfer_date: Optional[datetime] = None
     reversed: bool
     created_by: Optional[str] = None
     created_at: datetime
@@ -1167,6 +1172,7 @@ class TransferKcPxRequestIn(BaseModel):
     lot_id: str
     quantity: float
     reason: Optional[str] = None
+    requested_transfer_date: Optional[datetime] = None
 
 
 class TransferKcPxRejectIn(BaseModel):
@@ -1187,6 +1193,7 @@ class TransferKcPxRequestOut(ORMModel):
     status: str
     movement_id: Optional[str] = None
     workshop_location_id: Optional[str] = None
+    requested_transfer_date: Optional[datetime] = None
     reversed: bool
     created_by: Optional[str] = None
     created_at: datetime
@@ -1242,6 +1249,7 @@ class TransferToFactoryIn(BaseModel):
     quantity: float
     factory_id: str
     reason: Optional[str] = None
+    requested_transfer_date: Optional[datetime] = None
 
 
 class FactoryLocationIn(BaseModel):
@@ -2154,12 +2162,15 @@ class BatchPackLotShiftsIn(BaseModel):
 
 
 class BatchPackLotMaterialUsageIn(BaseModel):
-    """NVL (VD CO2, hóa chất vệ sinh) dùng thật cho 1 lô thành phẩm — mirror BottleMaterialUsageIn."""
+    """NVL (VD CO2, hóa chất vệ sinh) dùng thật cho 1 lô thành phẩm — mirror BottleMaterialUsageIn.
+    Chọn theo VẬT TƯ (material_id) — hệ thống tự chọn lô theo FIFO tại thời điểm "Ngày cấp"
+    (BatchPackLot.ended_at), CHỈ dùng `lot_id` khi cố ý chọn khác lô FIFO gợi ý (bắt buộc `reason`
+    khi đó). KHÔNG còn nhận tên tự do/mã lô tự do (material_name/lot_pm — trước đây cho phép ghi
+    "khống" không trừ tồn kho thật, yêu cầu người dùng 2026-09-16: "lọc và chiết đều bỏ tên tự do
+    đi")."""
+    material_id: str
     lot_id: Optional[str] = None
-    material_name: Optional[str] = None
-    lot_pm: Optional[str] = None
     quantity: float
-    uom: str = "kg"
     reason: Optional[str] = None   # bắt buộc nếu chọn lô KHÁC lô FIFO cũ nhất — xem add_pack_lot_material
 
 
@@ -2171,6 +2182,7 @@ class BatchPackLotMaterialUsageOut(ORMModel):
     material_name: Optional[str] = None
     lot_pm: Optional[str] = None
     lot_date: Optional[datetime] = None
+    supply_date: Optional[datetime] = None
     fifo_ok: Optional[bool] = None
     reason: Optional[str] = None
     quantity: float = 0.0
@@ -2179,12 +2191,15 @@ class BatchPackLotMaterialUsageOut(ORMModel):
 
 
 class BatchFilterLotMaterialUsageIn(BaseModel):
-    """NVL (VD bột trợ lọc/diatomite) dùng thật cho 1 lô lọc — mirror BatchPackLotMaterialUsageIn."""
+    """NVL (VD bột trợ lọc/diatomite) dùng thật cho 1 lô lọc — mirror BatchPackLotMaterialUsageIn.
+    Chọn theo VẬT TƯ (material_id) — hệ thống tự chọn lô theo FIFO tại thời điểm "Ngày cấp"
+    (BatchFilterLot.ended_at), CHỈ dùng `lot_id` khi cố ý chọn khác lô FIFO gợi ý (bắt buộc
+    `reason` khi đó). KHÔNG còn nhận tên tự do/mã lô tự do/ngày cấp tự khai (material_name/
+    lot_pm/supply_date — yêu cầu người dùng 2026-09-16: "lọc và chiết đều bỏ tên tự do đi...
+    lấy ngày cấp là ngày kết thúc của mẻ lọc/mẻ chiết, không cho tự điền")."""
+    material_id: str
     lot_id: Optional[str] = None
-    material_name: Optional[str] = None
-    lot_pm: Optional[str] = None
     quantity: float
-    uom: str = "kg"
     reason: Optional[str] = None   # bắt buộc nếu chọn lô KHÁC lô FIFO cũ nhất — xem add_filter_lot_material
 
 
@@ -2196,6 +2211,7 @@ class BatchFilterLotMaterialUsageOut(ORMModel):
     material_name: Optional[str] = None
     lot_pm: Optional[str] = None
     lot_date: Optional[datetime] = None
+    supply_date: Optional[datetime] = None
     fifo_ok: Optional[bool] = None
     reason: Optional[str] = None
     quantity: float = 0.0

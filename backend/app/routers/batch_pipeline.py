@@ -323,13 +323,19 @@ def get_pack_lot_materials(pack_lot_id: str, db: Session = Depends(get_db)):
     return svc.list_pack_lot_materials(db, pack_lot_id)
 
 
+@router.get("/batch-pack-lots/{pack_lot_id}/materials/suggest")
+def suggest_pack_lot_material(pack_lot_id: str, material_id: str, quantity: float,
+                              db: Session = Depends(get_db)):
+    return svc.suggest_pack_lot_material(db, pack_lot_id, material_id, quantity)
+
+
 @router.post("/batch-pack-lots", response_model=BatchPackLotOut, status_code=201)
 def create_pack_lot(payload: BatchPackLotCreateIn, db: Session = Depends(get_db),
                     user: User = Depends(get_current_user)):
     return svc.create_pack_lot_from_bbt(db, payload.model_dump(), user)
 
 
-@router.post("/batch-pack-lots/{pack_lot_id}/materials", response_model=BatchPackLotMaterialUsageOut, status_code=201)
+@router.post("/batch-pack-lots/{pack_lot_id}/materials", response_model=list[BatchPackLotMaterialUsageOut], status_code=201)
 def add_pack_lot_material(pack_lot_id: str, payload: BatchPackLotMaterialUsageIn, db: Session = Depends(get_db),
                           user: User = Depends(get_current_user)):
     return svc.add_pack_lot_material(db, pack_lot_id, payload.model_dump(), user)
@@ -345,7 +351,13 @@ def get_filter_lot_materials(filter_lot_id: str, db: Session = Depends(get_db)):
     return svc.list_filter_lot_materials(db, filter_lot_id)
 
 
-@router.post("/batch-filter-lots/{filter_lot_id}/materials", response_model=BatchFilterLotMaterialUsageOut, status_code=201)
+@router.get("/batch-filter-lots/{filter_lot_id}/materials/suggest")
+def suggest_filter_lot_material(filter_lot_id: str, material_id: str, quantity: float,
+                                db: Session = Depends(get_db)):
+    return svc.suggest_filter_lot_material(db, filter_lot_id, material_id, quantity)
+
+
+@router.post("/batch-filter-lots/{filter_lot_id}/materials", response_model=list[BatchFilterLotMaterialUsageOut], status_code=201)
 def add_filter_lot_material(filter_lot_id: str, payload: BatchFilterLotMaterialUsageIn, db: Session = Depends(get_db),
                             user: User = Depends(get_current_user)):
     return svc.add_filter_lot_material(db, filter_lot_id, payload.model_dump(), user)

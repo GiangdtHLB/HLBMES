@@ -8,6 +8,7 @@ về lại ON_HOLD (dù trước đó đã qua QC) để buộc KCS duyệt lạ
 
 import os
 import tempfile
+from datetime import timedelta
 
 _TMP = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
 os.environ["MES_DATABASE_URL"] = f"sqlite:///{_TMP.name}"
@@ -18,6 +19,7 @@ os.environ["MES_ADMIN_PASSWORD"] = "AdminTest123"
 import pytest
 from fastapi.testclient import TestClient
 
+from app.common import utcnow
 from app.main import app
 from app import seed as seed_mod
 
@@ -328,3 +330,62 @@ def test_relocate_lot_workshop(client, admin_h, thukho_h, vanhanh_h):
     wrong_endpoint = client.post(f"/api/warehouse/lots/{lot_id}/relocate", headers=vanhanh_h,
                                  json={"location_id": loc_a})
     assert wrong_endpoint.status_code == 409, wrong_endpoint.text
+
+
+def test_requested_transfer_date_used_as_stock_effective_date(client, admin_h, thukho_h, vanhanh_h):
+    """"Ngày đề nghị điều chuyển" (khai lúc tạo đề nghị) — khi Phân xưởng duyệt, dùng làm mốc
+    hiệu lực (`ts`) của StockMovement transfer, để "Xem tồn kho theo ngày" ở Kho phân xưởng phản
+    ánh đúng ngày đó thay vì ngày Phân xưởng bấm Duyệt (yêu cầu người dùng 2026-09-16, mirror
+    MaterialRequest.requested_receipt_date)."""
+    mat_id = _create_material(client, admin_h, "KCPX-RTD01")
+    recv = _receive_lot(client, thukho_h, "KCPX-LOT-RTD01", mat_id, 40)
+    requested_date = utcnow() - timedelta(hours=1)
+    r = client.post("/api/warehouse/transfer-kcpx-requests", headers=thukho_h,
+                    json={"lot_id": recv["lot_id"], "quantity": 40,
+                         "requested_transfer_date": requested_date.isoformat()})
+    assert r.status_code == 201, r.text
+    assert r.json()["requested_transfer_date"] is not None
+    request_id = r.json()["request_id"]
+    loc_id = _create_workshop_location(client, admin_h, "KCPX-LOC-RTD01")
+
+    ap = client.post(f"/api/warehouse/transfer-kcpx-requests/{request_id}/approve", headers=vanhanh_h,
+                     json={"workshop_location_id": loc_id})
+    assert ap.status_code == 200, ap.text
+
+    before = (requested_date - timedelta(minutes=1)).isoformat()
+    stock_before = client.get("/api/warehouse/stock/as-of", headers=admin_h,
+                              params={"as_of": before, "location": "Kho phân xưởng"}).json()
+    row_before = next((row for row in stock_before if row["material_id"] == mat_id), None)
+    assert row_before is None or row_before["on_hand"] == 0.0
+
+    stock_at = client.get("/api/warehouse/stock/as-of", headers=admin_h,
+                          params={"as_of": requested_date.isoformat(), "location": "Kho phân xưởng"}).json()
+    row_at = next(row for row in stock_at if row["material_id"] == mat_id)
+    assert row_at["on_hand"] == 40.0
+
+
+def test_update_transfer_kcpx_request_can_set_and_clear_requested_transfer_date(client, admin_h, thukho_h):
+    mat_id = _create_material(client, admin_h, "KCPX-RTD02")
+    recv = _receive_lot(client, thukho_h, "KCPX-LOT-RTD02", mat_id, 10)
+    r = client.post("/api/warehouse/transfer-kcpx-requests", headers=thukho_h,
+                    json={"lot_id": recv["lot_id"], "quantity": 10})
+    assert r.status_code == 201, r.text
+    assert r.json()["requested_transfer_date"] is None
+    request_id = r.json()["request_id"]
+
+    date1 = utcnow() - timedelta(hours=2)
+    upd = client.put(f"/api/warehouse/transfer-kcpx-requests/{request_id}", headers=thukho_h,
+                     json={"quantity": 10, "requested_transfer_date": date1.isoformat()})
+    assert upd.status_code == 200, upd.text
+    assert upd.json()["requested_transfer_date"] is not None
+
+    # Không gửi field này -> giữ nguyên (khác gửi null -> xoá).
+    upd2 = client.put(f"/api/warehouse/transfer-kcpx-requests/{request_id}", headers=thukho_h,
+                      json={"quantity": 9})
+    assert upd2.status_code == 200, upd2.text
+    assert upd2.json()["requested_transfer_date"] is not None
+
+    upd3 = client.put(f"/api/warehouse/transfer-kcpx-requests/{request_id}", headers=thukho_h,
+                      json={"quantity": 9, "requested_transfer_date": None})
+    assert upd3.status_code == 200, upd3.text
+    assert upd3.json()["requested_transfer_date"] is None

@@ -524,17 +524,20 @@ def issue(db: Session, lot_id: str, quantity: float, user: User, mode: str = "tu
 
 
 def transfer_to_factory(db: Session, lot_id: str, quantity: float, factory_id: str, user: User,
-                        reason: str = None) -> dict:
+                        reason: str = None, requested_transfer_date=None) -> dict:
     """Điều chuyển 1 lô đang ở Kho công ty sang 1 nhà máy khác — xuất NGAY (giảm tồn Kho công
     ty), tự do hoàn tác cho tới khi Trưởng phòng Kế hoạch duyệt (approve_transfer_to_factory),
-    sau đó chỉ ADMIN mới hoàn tác được (xem undo_issue)."""
+    sau đó chỉ ADMIN mới hoàn tác được (xem undo_issue). `requested_transfer_date` (tuỳ chọn):
+    "Ngày đề nghị điều chuyển" — dùng làm `ts` hiệu lực của StockMovement (issue() tự chặn nếu
+    ở tương lai), mirror MaterialRequest.requested_receipt_date/TransferKcPxRequest.
+    requested_transfer_date (yêu cầu người dùng 2026-09-16)."""
     require_perm(user, "warehouse.issue")
     lot = _lot(db, lot_id)
     if _is_workshop_location(lot.location):
         raise DomainError(f"Lô {lot.lot_code} đang ở Kho phân xưởng — chỉ điều chuyển sang nhà "
                           "máy khác được lô đang ở Kho công ty.")
     return issue(db, lot_id, quantity, user, mode="dieu_chuyen_nha_may", reason=reason,
-                destination_factory_id=factory_id)
+                destination_factory_id=factory_id, issued_at=requested_transfer_date)
 
 
 def approve_transfer_to_factory(db: Session, movement_id: str, user: User) -> dict:
@@ -692,16 +695,6 @@ def _assert_transfer_scope(user: User, loc_from: str, loc_to: str) -> None:
     )
 
 
-def _location_filter_clause(location_filter: str):
-    """`location_filter`: None (không lọc) | 'Kho công ty' | 'Kho phân xưởng' (khớp theo quy ước
-    "chứa 'phân xưởng'" — nhất quán với frontend)."""
-    if not location_filter:
-        return None
-    if _is_workshop_location(location_filter):
-        return func.lower(MaterialLot.location).contains("phân xưởng")
-    return ~func.coalesce(func.lower(MaterialLot.location), "").contains("phân xưởng")
-
-
 def stock_on_hand(db: Session, location: str = None) -> list[dict]:
     """Xem tồn kho theo vật tư (lọc theo kho nếu truyền `location`).
 
@@ -713,21 +706,26 @@ def stock_on_hand(db: Session, location: str = None) -> list[dict]:
 
     `pending_qc` = tổng SL đang ở lô HOLD (đã nhập kho vật lý nhưng chưa qua QC) và
     `actual_total` = on_hand + pending_qc — tổng SL thực tế đang nằm trong kho (kể cả lô chưa
-    qua QC), phục vụ đối chiếu kiểm kê thực tế, tách biệt với con số "khả dụng để xuất/chuyển"."""
-    stmt = (
-        select(MaterialLot.material_id, MaterialLot.status, func.sum(MaterialLot.quantity), MaterialLot.uom)
-        .where(MaterialLot.material_id.isnot(None),
-              MaterialLot.status.in_([LotStatus.AVAILABLE.value, LotStatus.RELEASED.value,
-                                       LotStatus.ON_HOLD.value]))
-    )
-    clause = _location_filter_clause(location)
-    if clause is not None:
-        stmt = stmt.where(clause)
-    rows = db.execute(stmt.group_by(MaterialLot.material_id, MaterialLot.status, MaterialLot.uom)).all()
+    qua QC), phục vụ đối chiếu kiểm kê thực tế, tách biệt với con số "khả dụng để xuất/chuyển".
+
+    SỬA 2026-09-15: trước đây lọc `location` bằng `_location_filter_clause` NGAY TRONG câu SQL
+    (mệnh đề phủ định `~...contains(...)` cho "Kho công ty") — kiểm chứng thật trên SQL Server
+    production phát hiện mệnh đề phủ định này KHÔNG lọc được gì (trả về y hệt không lọc), khiến
+    "Tồn kho công ty" hiển thị TRÙNG với "Tồn kho phân xưởng" cho mọi vật tư (yêu cầu người dùng
+    2026-09-15, phát hiện qua dòng "Gạo tẻ" ở gợi ý cấp liệu). Đổi sang lọc bằng PYTHON
+    (`_asof_loc_matcher`, đã dùng ổn định ở _material_balances_as_of/lot_on_hand_as_of) thay vì
+    dựa vào SQL — an toàn chắc chắn, không phụ thuộc cách SQL Server dịch mệnh đề phủ định."""
+    stmt = select(MaterialLot.material_id, MaterialLot.status, MaterialLot.quantity,
+                 MaterialLot.uom, MaterialLot.location).where(
+        MaterialLot.material_id.isnot(None),
+        MaterialLot.status.in_([LotStatus.AVAILABLE.value, LotStatus.RELEASED.value,
+                                 LotStatus.ON_HOLD.value]))
+    loc_matches = _asof_loc_matcher(location)
+    rows = [r for r in db.execute(stmt).all() if loc_matches(r.location)]
     if not rows:
         return []
     agg = {}
-    for material_id, status, total, uom in rows:
+    for material_id, status, total, uom, _loc in rows:
         a = agg.setdefault(material_id, {"uom": uom, "available": 0.0, "pending_qc": 0.0})
         if status == LotStatus.ON_HOLD.value:
             a["pending_qc"] += total or 0
@@ -759,6 +757,40 @@ def _asof_loc_matcher(location: str):
     return loc_matches
 
 
+def _nau_consume_as_of(db: Session, as_of) -> list[tuple["MaterialLot", float]]:
+    """[(lô NVL, SL đã cấp)] cho MỌI lượt cấp liệu vào mẻ Nấu (GenealogyEdge relation=consume,
+    to_type="batch") có "Ngày cấp" (mốc hiệu lực = `batch.start_at`, fallback `edge.event_time`
+    nếu mẻ chưa khai start_at — dữ liệu cũ trước khi bắt buộc) <= `as_of`. Dùng chung cho
+    _material_balances_as_of (trừ theo material_id) và _lot_balances_as_of (trừ theo lot_id) —
+    xem lý do ở docstring _material_balances_as_of."""
+    # `as_of` có thể đến từ query param HTTP naive (không kèm offset) trong khi effective (start_
+    # at/event_time, cột UTCDateTime()) luôn aware -> so sánh raise TypeError thẳng (mirror lỗi
+    # thực tế đã gặp ở _consumed_lot_edges, cùng nguyên nhân) — chuẩn hoá về aware trước khi so.
+    if as_of.tzinfo is None:
+        as_of = as_of.replace(tzinfo=utcnow().tzinfo)
+    edges = db.execute(select(GenealogyEdge).where(
+        GenealogyEdge.to_type == "batch", GenealogyEdge.from_type == "lot",
+        GenealogyEdge.relation == GenealogyRelation.CONSUME.value)).scalars().all()
+    if not edges:
+        return []
+    batch_ids = {e.to_id for e in edges}
+    start_at_by_batch = dict(db.execute(select(BatchExecution.batch_id, BatchExecution.start_at)
+                                        .where(BatchExecution.batch_id.in_(batch_ids))).all())
+    lots = {l.lot_id: l for l in db.execute(select(MaterialLot).where(
+        MaterialLot.lot_id.in_({e.from_id for e in edges}))).scalars().all()}
+    out = []
+    for e in edges:
+        if not e.quantity:
+            continue
+        lot = lots.get(e.from_id)
+        if not lot:
+            continue
+        effective = start_at_by_batch.get(e.to_id) or e.event_time
+        if effective <= as_of:
+            out.append((lot, e.quantity))
+    return out
+
+
 def _material_balances_as_of(db: Session, as_of, location: str = None) -> dict[str, float]:
     """{material_id: số dư dựng lại từ lịch sử StockMovement tính đến hết thời điểm `as_of`} —
     khác stock_on_hand() vốn đọc thẳng MaterialLot.quantity (số dư TRỰC TIẾP hiện tại, không lùi
@@ -776,7 +808,17 @@ def _material_balances_as_of(db: Session, as_of, location: str = None) -> dict[s
     - adjust (từ Kiểm kê định kỳ): CHỈ lưu |chênh lệch| — không xác định được TĂNG hay GIẢM từ dữ
       liệu đã lưu, nên BỎ QUA (giới hạn đã biết) — vật tư có kiểm kê điều chỉnh trước ngày lọc có
       thể lệch nhẹ so với thực tế thời điểm đó.
-    """
+
+    Cấp liệu vào mẻ Nấu (GenealogyEdge relation=consume, to_type="batch") KHÔNG tạo StockMovement
+    riêng (xem services/dispense.py::consume_lot) nên trước đây hoàn toàn KHÔNG bị trừ ở đây —
+    "Tồn kho phân xưởng tính đến ngày X" không phản ánh NVL đã cấp cho mẻ Nấu (yêu cầu người dùng
+    2026-09-15: "khi xem tồn kho phân xưởng thì phải tính tồn trừ đi lượng đã xuất, tức là ngày
+    cấp liệu"). Mốc trừ dùng `batch.start_at` ("Ngày cấp" — ngày mẻ THỰC SỰ bắt đầu nấu, có thể
+    khai lùi ngày, KHÁC `event_time` là giờ bấm nút thật) — coi như NVL đã "rời khỏi" Kho phân
+    xưởng kể từ đúng thời điểm mẻ bắt đầu, không phải lúc dữ liệu được nhập vào hệ thống. Lọc/Chiết
+    (BatchFilterLotMaterialUsage/BatchPackLotMaterialUsage) KHÔNG cần xử lý riêng — cả 2 đều gọi
+    thẳng warehouse_svc.issue() (tạo StockMovement thật, xem services/batch_pipeline.py::
+    add_filter_lot_material/add_pack_lot_material) nên đã được tính đúng qua nhánh "issue" ở trên."""
     stmt = select(StockMovement.material_id, StockMovement.movement_type, StockMovement.quantity,
                  StockMovement.location_from, StockMovement.location_to).where(
         StockMovement.ts <= as_of, StockMovement.material_id.isnot(None))
@@ -804,6 +846,13 @@ def _material_balances_as_of(db: Session, as_of, location: str = None) -> dict[s
     # "có mặt" nguyên vẹn kể từ created_at, tính vào mọi as_of >= created_at.
     moved_lot_ids = {r[0] for r in db.execute(select(StockMovement.lot_id).where(
         StockMovement.lot_id.isnot(None)).distinct())}
+    if loc_matches("Kho phân xưởng"):
+        # CHỈ trừ cho lô đã có StockMovement thật (moved_lot_ids) — lô "mồ côi" dùng thẳng
+        # MaterialLot.quantity HIỆN TẠI bên dưới, đã tự nhiên trừ sẵn phần cấp Nấu rồi (tránh trừ
+        # trùng 2 lần — xem giải thích tương tự ở _lot_balances_as_of).
+        for lot, qty in _nau_consume_as_of(db, as_of):
+            if lot.material_id and lot.lot_id in moved_lot_ids:
+                out[lot.material_id] = out.get(lot.material_id, 0.0) - qty
     orphan_lots = db.execute(select(MaterialLot).where(
         MaterialLot.lot_type == "material", MaterialLot.created_at <= as_of,
         ~MaterialLot.lot_id.in_(moved_lot_ids) if moved_lot_ids else True)).scalars().all()
@@ -857,7 +906,10 @@ def _lot_balances_as_of(db: Session, as_of) -> tuple[dict[str, float], dict[str,
 
     adjust (từ Kiểm kê định kỳ): CHỈ lưu |chênh lệch| — không xác định được TĂNG hay GIẢM từ dữ
     liệu đã lưu, nên BỎ QUA (giới hạn đã biết) — vật tư có kiểm kê điều chỉnh trước ngày lọc có
-    thể lệch nhẹ so với thực tế thời điểm đó."""
+    thể lệch nhẹ so với thực tế thời điểm đó.
+
+    Cấp liệu vào mẻ Nấu (GenealogyEdge relation=consume) trừ riêng qua _nau_consume_as_of, dùng
+    `batch.start_at` ("Ngày cấp") làm mốc hiệu lực — xem lý do ở _material_balances_as_of."""
     origin_by_movement = dict(db.execute(select(GenealogyEdge.movement_id, GenealogyEdge.from_id).where(
         GenealogyEdge.from_type == "lot", GenealogyEdge.to_type == "lot",
         GenealogyEdge.relation == GenealogyRelation.SPLIT.value,
@@ -893,6 +945,12 @@ def _lot_balances_as_of(db: Session, as_of) -> tuple[dict[str, float], dict[str,
     # _material_balances_as_of, xem giải thích ở đó).
     moved_lot_ids = {r[0] for r in db.execute(select(StockMovement.lot_id).where(
         StockMovement.lot_id.isnot(None)).distinct())}
+    # Trừ cấp liệu Nấu CHỈ cho lô đã có StockMovement thật (moved_lot_ids) — lô "mồ côi" (không
+    # StockMovement nào) dùng thẳng MaterialLot.quantity HIỆN TẠI làm mốc duy nhất đã biết (bên
+    # dưới), số đó ĐÃ tự nhiên trừ sẵn phần đã cấp Nấu rồi — trừ thêm ở đây sẽ bị trừ TRÙNG 2 lần.
+    for lot, qty in _nau_consume_as_of(db, as_of):
+        if lot.lot_id in moved_lot_ids:
+            balances[lot.lot_id] = balances.get(lot.lot_id, 0.0) - qty
     orphan_lots = db.execute(select(MaterialLot).where(
         MaterialLot.lot_type == "material", MaterialLot.created_at <= as_of,
         ~MaterialLot.lot_id.in_(moved_lot_ids) if moved_lot_ids else True)).scalars().all()
@@ -1017,19 +1075,41 @@ def _consumed_lot_edges(db: Session, since: datetime, until: datetime = None) ->
     riêng, cũng tạo thêm GenealogyEdge(consume) nhưng với to_type khác ("brew_batch"/"filter"/
     "bottle"), lọc CHỈ to_type="batch" ở đây để không cộng trùng 2 lần cho nhánh cũ.
 
-    Trả về list[(GenealogyEdge, MaterialLot)] — cần join MaterialLot để biết material_id/
-    lô/vị trí (event_time không lưu trên StockMovement nên phải xét riêng khỏi vòng lặp `moves`
-    ở trên). Bug thực tế đã gặp: cả năm 2026 báo "Xuất: 0" cho 1 vật tư dù có lô đã dùng hết
-    (tiêu thụ qua consume_lot) — yêu cầu người dùng 2026-09-05: "trong báo cáo xuất nhập tồn
-    phải có chứ"."""
-    stmt = select(GenealogyEdge, MaterialLot).join(
+    Trả về list[(GenealogyEdge, MaterialLot, ngày_cấp)] — `ngày_cấp` = `batch.start_at` ("Ngày
+    cấp" — ngày mẻ THỰC SỰ bắt đầu nấu, có thể khai lùi ngày), fallback `edge.event_time` nếu mẻ
+    chưa khai start_at (dữ liệu cũ). Lọc theo `ngày_cấp` (KHÔNG phải `event_time` — giờ bấm nút
+    cấp liệu thật) — yêu cầu người dùng 2026-09-15: "ngày trừ tồn kho là ngày cấp liệu", phải
+    tính đúng và nhất quán vào CẢ báo cáo xuất-nhập-tồn (inventory_report) LẪN Sổ chi tiết vật tư
+    (material_transaction_detail), không chỉ riêng "Tồn kho tính đến ngày" (_material_balances_
+    as_of/_lot_balances_as_of, xem _nau_consume_as_of — đã sửa trước, cùng nguyên tắc). Bug thực
+    tế đã gặp trước đó: cả năm 2026 báo "Xuất: 0" cho 1 vật tư dù có lô đã dùng hết (tiêu thụ qua
+    consume_lot) — yêu cầu người dùng 2026-09-05: "trong báo cáo xuất nhập tồn phải có chứ"."""
+    # `since`/`until` có thể đến thẳng từ query param HTTP (routers/warehouse.py::report/
+    # report_material_detail nhận `datetime` không bắt buộc offset) -> naive nếu người gọi
+    # không kèm "+00:00"/"Z" — trong khi supply_date (start_at/event_time, cột UTCDateTime())
+    # LUÔN aware khi đọc từ CSDL. So sánh naive với aware raise TypeError thẳng, sập cả báo cáo
+    # (bug thực tế đã gặp: BC nhập-xuất-tồn/Sổ chi tiết vật tư phân xưởng lỗi 500 ngay khi kỳ
+    # báo cáo phủ tới 1 mẻ Nấu đã cấp liệu qua pipeline "Mẻ sản xuất" mới) — chuẩn hoá về aware
+    # (coi naive = UTC, mirror cách issue() xử lý issued_at) ngay từ đầu hàm.
+    now_tz = utcnow().tzinfo
+    if since.tzinfo is None:
+        since = since.replace(tzinfo=now_tz)
+    if until is not None and until.tzinfo is None:
+        until = until.replace(tzinfo=now_tz)
+    stmt = select(GenealogyEdge, MaterialLot, BatchExecution.start_at).join(
         MaterialLot, MaterialLot.lot_id == GenealogyEdge.from_id
+    ).join(BatchExecution, BatchExecution.batch_id == GenealogyEdge.to_id
     ).where(GenealogyEdge.from_type == "lot", GenealogyEdge.to_type == "batch",
-            GenealogyEdge.relation == GenealogyRelation.CONSUME.value,
-            GenealogyEdge.event_time >= since)
-    if until:
-        stmt = stmt.where(GenealogyEdge.event_time <= until)
-    return db.execute(stmt).all()
+            GenealogyEdge.relation == GenealogyRelation.CONSUME.value)
+    out = []
+    for edge, lot, start_at in db.execute(stmt).all():
+        supply_date = start_at or edge.event_time
+        if supply_date < since:
+            continue
+        if until and supply_date > until:
+            continue
+        out.append((edge, lot, supply_date))
+    return out
 
 
 def _blank_movement_agg() -> dict:
@@ -1081,26 +1161,34 @@ def material_transaction_detail(db: Session, material_id: str, date_from: dateti
         rows.append({"ts": m.ts, "type": m.movement_type, "lot_code": m.lot_code,
                     "quantity": m.quantity * sign, "uom": m.uom,
                     "location_from": m.location_from, "location_to": m.location_to,
-                    "mode": m.mode, "reason": m.reason, "actor": m.actor})
+                    "mode": m.mode, "reason": m.reason, "actor": m.actor,
+                    "_movement_id": m.movement_id, "_reversal_of": m.reversal_of})
     batch_ids = set()
     consume_rows = []
-    for edge, lot in _consumed_lot_edges(db, date_from, date_to):
+    for edge, lot, supply_date in _consumed_lot_edges(db, date_from, date_to):
         if lot.material_id != material_id:
             continue
         if location and _is_workshop_location(lot.location) != workshop:
             continue
         batch_ids.add(edge.to_id)
-        consume_rows.append((edge, lot))
+        consume_rows.append((edge, lot, supply_date))
     batches = {b.batch_id: b for b in db.execute(
         select(BatchExecution).where(BatchExecution.batch_id.in_(batch_ids))).scalars().all()} if batch_ids else {}
-    for edge, lot in consume_rows:
+    for edge, lot, supply_date in consume_rows:
         batch = batches.get(edge.to_id)
-        rows.append({"ts": edge.event_time, "type": "consume", "lot_code": lot.lot_code,
+        # ts = "Ngày cấp" (supply_date — batch.start_at), KHÔNG phải edge.event_time (giờ bấm nút
+        # thật) — nhất quán với opening_balance ở dưới (stock_on_hand_as_of cũng đã dùng
+        # batch.start_at qua _nau_consume_as_of, xem _consumed_lot_edges).
+        rows.append({"ts": supply_date, "type": "consume", "lot_code": lot.lot_code,
                     "quantity": -(edge.quantity or 0.0), "uom": edge.uom or lot.uom,
                     "location_from": lot.location, "location_to": None,
                     "mode": "cap_lieu", "actor": None,
                     "reason": f"Cấp liệu mẻ nấu {batch.batch_code}" if batch else "Cấp liệu mẻ nấu"})
     rows.sort(key=lambda r: r["ts"])
+    rows = _hide_reversed_transfer_pairs(rows)
+    for r in rows:
+        r.pop("_movement_id", None)
+        r.pop("_reversal_of", None)
     opening = 0.0
     for r in stock_on_hand_as_of(db, date_from, location):
         if r["material_id"] == material_id:
@@ -1114,6 +1202,40 @@ def material_transaction_detail(db: Session, material_id: str, date_from: dateti
         r["out"] = -r["quantity"] if r["quantity"] < 0 else 0.0
     return {"opening_balance": round(opening, 4), "rows": rows,
             "closing_balance": round(balance, 4)}
+
+
+def _hide_reversed_transfer_pairs(rows: list[dict]) -> list[dict]:
+    """Ẩn khỏi Sổ chi tiết vật tư các cặp "điều chuyển đi rồi hoàn tác ngay sau đó" (net = 0,
+    tồn kho chưa hề thật sự tăng lên/mất đi lâu dài — VD "Xuất theo đề nghị" rồi bị "Hoàn tác")
+    — chỉ giữ lại giao dịch làm tồn kho THẬT SỰ thay đổi (yêu cầu người dùng 2026-09-15: "chỉ cần
+    hiện khi kho tăng lên, hoặc mất đi thôi, các thao tác liên quan đến hoàn tác không cần hiển
+    thị"). Ghép cặp qua 2 cơ chế (đã sort theo `ts` tăng dần trước khi gọi hàm này):
+      1. `reversal_of` (undo_issue ghi FK thẳng tới StockMovement gốc) — đáng tin nhất.
+      2. Cùng `lot_code` + số lượng NGƯỢC DẤU + dòng sau có `reason` bắt đầu "Hoàn tác" — dùng cho
+         hoàn tác điều chuyển/xuất theo đề nghị (undo_fulfill_line/undo_transfer_px_request/
+         undo_sang_ngang không ghi `reversal_of`, chỉ có tiền tố "Hoàn tác" trong `reason`)."""
+    hidden = set()
+    by_movement_id = {r["_movement_id"]: i for i, r in enumerate(rows) if r.get("_movement_id")}
+    for i, r in enumerate(rows):
+        rev_of = r.get("_reversal_of")
+        if rev_of and rev_of in by_movement_id:
+            hidden.add(i)
+            hidden.add(by_movement_id[rev_of])
+    used = set()
+    for i, r in enumerate(rows):
+        if i in hidden or r["type"] != "transfer" or not (r.get("reason") or "").startswith("Hoàn tác"):
+            continue
+        for j in range(i - 1, -1, -1):
+            if j in hidden or j in used or rows[j]["type"] != "transfer":
+                continue
+            if (rows[j].get("reason") or "").startswith("Hoàn tác"):
+                continue
+            if rows[j]["lot_code"] == r["lot_code"] and abs(rows[j]["quantity"] + r["quantity"]) < 1e-9:
+                hidden.add(i)
+                hidden.add(j)
+                used.add(j)
+                break
+    return [r for i, r in enumerate(rows) if i not in hidden]
 
 
 def inventory_report(db: Session, days: int = 30, location: str = None,
@@ -1162,10 +1284,10 @@ def inventory_report(db: Session, days: int = 30, location: str = None,
                 continue
         if m.movement_type in ("receipt", "issue", "return"):
             _touch(agg.setdefault(m.material_id, _blank_agg()), m.movement_type, m.quantity, m.ts)
-    for edge, lot in _consumed_lot_edges(db, since, until):
+    for edge, lot, supply_date in _consumed_lot_edges(db, since, until):
         if location and _is_workshop_location(lot.location) != workshop:
             continue
-        _touch(agg.setdefault(lot.material_id, _blank_agg()), "issue", edge.quantity or 0.0, edge.event_time)
+        _touch(agg.setdefault(lot.material_id, _blank_agg()), "issue", edge.quantity or 0.0, supply_date)
     mat_ids = set(on_hand) | set(agg)
     mats = {mt.material_id: mt for mt in db.execute(
         select(Material).where(Material.material_id.in_(mat_ids))).scalars().all()} if mat_ids else {}
@@ -1222,10 +1344,10 @@ def lot_inventory_report(db: Session, days: int = 30, location: str = None,
                 continue
         if m.movement_type in ("receipt", "issue", "return"):
             _touch(agg.setdefault(m.lot_id, _blank_agg()), m.movement_type, m.quantity, m.ts)
-    for edge, lot in _consumed_lot_edges(db, since, until):
+    for edge, lot, supply_date in _consumed_lot_edges(db, since, until):
         if location and _is_workshop_location(lot.location) != workshop:
             continue
-        _touch(agg.setdefault(lot.lot_id, _blank_agg()), "issue", edge.quantity or 0.0, edge.event_time)
+        _touch(agg.setdefault(lot.lot_id, _blank_agg()), "issue", edge.quantity or 0.0, supply_date)
 
     if location:
         current_ids = {l.lot_id for l in all_lots if l.quantity > 0 and _is_workshop_location(l.location) == workshop}
@@ -1316,14 +1438,16 @@ def _request_dict(db: Session, req: MaterialRequest, lines: list[MaterialRequest
 def _stock_at_company(db: Session, material_id: str) -> float:
     """Tổng tồn KHẢ DỤNG của 1 vật tư tại Kho công ty (dùng để chặn đề nghị vượt tồn) — loại
     trừ lô đang HOLD/SCRAPPED, nếu không phiếu đề nghị vẫn tạo được nhưng không bao giờ xuất
-    nổi vì issue()/transfer() chặn lô hold (mirror material_fifo_detail đã lọc đúng)."""
-    clause = _location_filter_clause("Kho công ty")
-    total = db.execute(
-        select(func.sum(MaterialLot.quantity)).where(
-            MaterialLot.material_id == material_id, clause,
+    nổi vì issue()/transfer() chặn lô hold (mirror material_fifo_detail đã lọc đúng).
+
+    Lọc kho bằng PYTHON (`_asof_loc_matcher`) — xem lý do ở stock_on_hand (SỬA 2026-09-15)."""
+    loc_matches = _asof_loc_matcher("Kho công ty")
+    rows = db.execute(
+        select(MaterialLot.quantity, MaterialLot.location).where(
+            MaterialLot.material_id == material_id,
             MaterialLot.status.in_([LotStatus.AVAILABLE.value, LotStatus.RELEASED.value]))
-    ).scalar()
-    return total or 0.0
+    ).all()
+    return sum(q for q, loc in rows if loc_matches(loc)) or 0.0
 
 
 def _aggregate_source_material_lines(db: Session, source_type: str, source_id: str) -> list[dict]:
@@ -1589,13 +1713,15 @@ def _is_oldest_company_lot(db: Session, material_id: str, lot_id: str) -> bool:
     Chỉ so sánh trong số lô KHẢ DỤNG (không tính lô đang HOLD/SCRAPPED) — lô cũ nhất tuyệt đối
     có thể đang chờ duyệt QC nên không thể chọn được; nếu vẫn tính lô đó vào danh sách so sánh,
     thủ kho chọn đúng lô khả dụng cũ nhất vẫn bị báo oan "vi phạm FIFO" dù không có lựa chọn nào
-    khác."""
-    clause = _location_filter_clause("Kho công ty")
-    candidates = db.execute(
-        select(MaterialLot).where(MaterialLot.material_id == material_id, MaterialLot.quantity > 0, clause,
+    khác.
+
+    Lọc kho bằng PYTHON (`_asof_loc_matcher`) — xem lý do ở stock_on_hand (SỬA 2026-09-15)."""
+    loc_matches = _asof_loc_matcher("Kho công ty")
+    candidates = [l for l in db.execute(
+        select(MaterialLot).where(MaterialLot.material_id == material_id, MaterialLot.quantity > 0,
                                   MaterialLot.status.in_([LotStatus.AVAILABLE.value, LotStatus.RELEASED.value]))
         .order_by(MaterialLot.created_at)
-    ).scalars().all()
+    ).scalars().all() if loc_matches(l.location)]
     return bool(candidates) and candidates[0].lot_id == lot_id
 
 
@@ -1604,13 +1730,15 @@ def is_oldest_workshop_lot(db: Session, material_id: str, lot_id: str) -> bool:
     không — mirror _is_oldest_company_lot (cùng loại trừ lô đang HOLD/SCRAPPED khỏi so sánh),
     dùng cho NVL dùng thật ở lô lọc/lô thành phẩm (pipeline "Mẻ sản xuất", xem
     BatchFilterLotMaterialUsage/BatchPackLotMaterialUsage.fifo_ok). Gọi NGAY TRƯỚC LÚC issue()
-    trừ kho — so sánh live sau khi đã xuất sẽ sai lệch vì lô có thể đã hết."""
-    clause = _location_filter_clause("Kho phân xưởng")
-    candidates = db.execute(
-        select(MaterialLot).where(MaterialLot.material_id == material_id, MaterialLot.quantity > 0, clause,
+    trừ kho — so sánh live sau khi đã xuất sẽ sai lệch vì lô có thể đã hết.
+
+    Lọc kho bằng PYTHON (`_asof_loc_matcher`) — xem lý do ở stock_on_hand (SỬA 2026-09-15)."""
+    loc_matches = _asof_loc_matcher("Kho phân xưởng")
+    candidates = [l for l in db.execute(
+        select(MaterialLot).where(MaterialLot.material_id == material_id, MaterialLot.quantity > 0,
                                   MaterialLot.status.in_([LotStatus.AVAILABLE.value, LotStatus.RELEASED.value]))
         .order_by(MaterialLot.created_at)
-    ).scalars().all()
+    ).scalars().all() if loc_matches(l.location)]
     return bool(candidates) and candidates[0].lot_id == lot_id
 
 
@@ -1759,7 +1887,8 @@ def reject_request_line(db: Session, request_id: str, line_id: str, reason: str,
 def _transfer_px_request_dict(req: TransferPxRequest) -> dict:
     return {"request_id": req.request_id, "request_code": req.request_code, "lot_id": req.lot_id,
             "quantity": req.quantity, "uom": req.uom, "reason": req.reason, "status": req.status,
-            "movement_id": req.movement_id, "reversed": req.reversed,
+            "movement_id": req.movement_id, "requested_transfer_date": req.requested_transfer_date,
+            "reversed": req.reversed,
             "created_by": req.created_by, "created_at": req.created_at,
             "approved_by": req.approved_by, "approved_at": req.approved_at,
             "rejected_by": req.rejected_by, "rejected_at": req.rejected_at,
@@ -1777,8 +1906,11 @@ def _get_transfer_px_request(db, request_id) -> TransferPxRequest:
 
 
 def create_transfer_px_request(db: Session, lot_id: str, quantity: float, user: User,
-                               reason: str = None) -> dict:
-    """Thủ kho phân xưởng tạo đề nghị điều chuyển 1 lô về Kho công ty — chưa động tồn kho."""
+                               reason: str = None, requested_transfer_date=None) -> dict:
+    """Thủ kho phân xưởng tạo đề nghị điều chuyển 1 lô về Kho công ty — chưa động tồn kho.
+    `requested_transfer_date` (tuỳ chọn): "Ngày đề nghị điều chuyển" — dùng làm `ts` hiệu lực
+    của StockMovement khi Kho công ty duyệt, mirror TransferKcPxRequest.requested_transfer_date
+    (yêu cầu người dùng 2026-09-16)."""
     require_perm(user, "warehouse.request")
     lot = _lot(db, lot_id)
     if not _is_workshop_location(lot.location):
@@ -1790,6 +1922,7 @@ def create_transfer_px_request(db: Session, lot_id: str, quantity: float, user: 
         raise DomainError(f"Số lượng đề nghị không hợp lệ (tồn {lot.quantity} {lot.uom}).")
     req = TransferPxRequest(request_id=new_id(), request_code=f"DCPX-{utcnow():%Y%m%d}-{new_id()[:5].upper()}",
                             lot_id=lot_id, quantity=quantity, uom=lot.uom, reason=reason,
+                            requested_transfer_date=requested_transfer_date,
                             status="pending", created_by=user.username, created_at=utcnow())
     db.add(req)
     record_audit(db, entity_type="transfer_px_request", entity_id=req.request_id, action="create",
@@ -1800,12 +1933,15 @@ def create_transfer_px_request(db: Session, lot_id: str, quantity: float, user: 
 
 
 def update_transfer_px_request(db: Session, request_id: str, quantity: float, reason: str,
-                               user: User) -> dict:
+                               user: User, requested_transfer_date=None,
+                               requested_transfer_date_set: bool = False) -> dict:
     """Sửa đề nghị điều chuyển Phân xưởng → Công ty — CHỈ khi còn "pending" (chưa Kho công ty
-    duyệt/từ chối). Chỉ sửa số lượng/lý do (không đổi lô — đổi lô coi như huỷ rồi tạo đề nghị
-    mới, tránh phức tạp việc dò lại trạng thái khoá/HOLD của lô khác). Không cần chặn theo QC
-    như chiều Công ty→Phân xưởng: create_transfer_px_request() đã chặn cứng không cho tạo đề
-    nghị với lô đang HOLD ngay từ đầu, nên lô của 1 đề nghị pending luôn chắc chắn không HOLD."""
+    duyệt/từ chối). Sửa được số lượng/lý do/"Ngày đề nghị điều chuyển" (không đổi lô — đổi lô
+    coi như huỷ rồi tạo đề nghị mới, tránh phức tạp việc dò lại trạng thái khoá/HOLD của lô
+    khác). Không cần chặn theo QC như chiều Công ty→Phân xưởng: create_transfer_px_request() đã
+    chặn cứng không cho tạo đề nghị với lô đang HOLD ngay từ đầu, nên lô của 1 đề nghị pending
+    luôn chắc chắn không HOLD. `requested_transfer_date_set` phân biệt "không gửi field này"
+    (giữ nguyên) với "gửi None" (xoá về rỗng), mirror update_transfer_kcpx_request."""
     require_perm(user, "warehouse.request")
     req = _get_transfer_px_request(db, request_id)
     if req.status != "pending":
@@ -1815,6 +1951,8 @@ def update_transfer_px_request(db: Session, request_id: str, quantity: float, re
         raise DomainError(f"Số lượng đề nghị không hợp lệ (tồn {lot.quantity} {lot.uom}).")
     req.quantity = quantity
     req.reason = reason
+    if requested_transfer_date_set:
+        req.requested_transfer_date = requested_transfer_date
     record_audit(db, entity_type="transfer_px_request", entity_id=req.request_id, action="update",
                 actor=user, after={"quantity": quantity, "reason": reason})
     db.commit()
@@ -1862,7 +2000,7 @@ def approve_transfer_px_request(db: Session, request_id: str, user: User) -> dic
         raise DomainError(f"Lô {lot.lot_code} hiện không còn ở Kho phân xưởng — có thể đã được "
                           "xử lý bởi thao tác khác.")
     result = transfer(db, req.lot_id, req.quantity, "Kho công ty", user, reason=req.reason,
-                      mode="dieu_chuyen")
+                      mode="dieu_chuyen", ts=req.requested_transfer_date)
     req.movement_id = result["movement_id"]
     req.status = "approved"
     req.approved_by = user.username
@@ -1937,6 +2075,7 @@ def _transfer_kcpx_dict(db: Session, req: TransferKcPxRequest) -> dict:
     return {"request_id": req.request_id, "request_code": req.request_code, "lot_id": req.lot_id,
             "quantity": req.quantity, "uom": req.uom, "reason": req.reason, "status": req.status,
             "movement_id": req.movement_id, "workshop_location_id": req.workshop_location_id,
+            "requested_transfer_date": req.requested_transfer_date,
             "reversed": req.reversed, "created_by": req.created_by, "created_at": req.created_at,
             "approved_by": req.approved_by, "approved_at": req.approved_at,
             "rejected_by": req.rejected_by, "rejected_at": req.rejected_at,
@@ -1951,7 +2090,7 @@ def _get_transfer_kcpx_request(db, request_id) -> TransferKcPxRequest:
 
 
 def create_transfer_kcpx_request(db: Session, lot_id: str, quantity: float, user: User,
-                                 reason: str = None) -> dict:
+                                 reason: str = None, requested_transfer_date=None) -> dict:
     """Kho công ty tạo đề nghị điều chuyển 1 lô ĐANG CÓ SẴN sang Kho phân xưởng — chưa động tồn
     kho. Nếu vật tư có chỉ tiêu chất lượng bắt buộc, đưa lô về HOLD ngay lúc tạo (dù đang
     Released) để buộc KCS duyệt lại trước khi Phân xưởng duyệt được — lô có thể đã nằm kho một
@@ -1970,6 +2109,7 @@ def create_transfer_kcpx_request(db: Session, lot_id: str, quantity: float, user
     req = TransferKcPxRequest(request_id=new_id(),
                               request_code=f"DCKP-{utcnow():%Y%m%d}-{new_id()[:5].upper()}",
                               lot_id=lot_id, quantity=quantity, uom=lot.uom, reason=reason,
+                              requested_transfer_date=requested_transfer_date,
                               status="pending", created_by=user.username, created_at=utcnow())
     db.add(req)
     record_audit(db, entity_type="transfer_kcpx_request", entity_id=req.request_id, action="create",
@@ -1990,10 +2130,13 @@ def _assert_kcpx_editable(db: Session, req: TransferKcPxRequest, lot: MaterialLo
 
 
 def update_transfer_kcpx_request(db: Session, request_id: str, quantity: float, reason: str,
-                                 user: User) -> dict:
-    """Sửa đề nghị điều chuyển Công ty → Phân xưởng — chỉ số lượng/lý do (không đổi lô, xem
-    update_transfer_px_request). CHỈ khi còn pending VÀ (vật tư không cần KCS HOẶC lô còn đang
-    "Chờ KCS duyệt" — xem _assert_kcpx_editable)."""
+                                 user: User, requested_transfer_date=None,
+                                 requested_transfer_date_set: bool = False) -> dict:
+    """Sửa đề nghị điều chuyển Công ty → Phân xưởng — số lượng/lý do/"Ngày đề nghị điều chuyển"
+    (không đổi lô, xem update_transfer_px_request). CHỈ khi còn pending VÀ (vật tư không cần KCS
+    HOẶC lô còn đang "Chờ KCS duyệt" — xem _assert_kcpx_editable). `requested_transfer_date_set`
+    phân biệt "không gửi field này" (giữ nguyên) với "gửi None" (xoá về rỗng), mirror
+    update_request."""
     require_perm(user, "warehouse.issue")
     req = _get_transfer_kcpx_request(db, request_id)
     lot = _lot(db, req.lot_id)
@@ -2002,6 +2145,8 @@ def update_transfer_kcpx_request(db: Session, request_id: str, quantity: float, 
         raise DomainError(f"Số lượng đề nghị không hợp lệ (tồn {lot.quantity} {lot.uom}).")
     req.quantity = quantity
     req.reason = reason
+    if requested_transfer_date_set:
+        req.requested_transfer_date = requested_transfer_date
     record_audit(db, entity_type="transfer_kcpx_request", entity_id=req.request_id, action="update",
                 actor=user, after={"quantity": quantity, "reason": reason})
     db.commit()
@@ -2060,7 +2205,7 @@ def approve_transfer_kcpx_request(db: Session, request_id: str, workshop_locatio
         raise DomainError(f"Lô {lot.lot_code} đang chờ KCS khai báo/duyệt chỉ tiêu chất lượng — "
                           "chưa thể nhận vào Kho phân xưởng.")
     result = _transfer_lot(db, req.lot_id, req.quantity, "Kho phân xưởng", user, reason=req.reason,
-                           mode="dieu_chuyen_kcpx")
+                           mode="dieu_chuyen_kcpx", ts=req.requested_transfer_date)
     moved_lot = db.get(MaterialLot, result["lot_id"])
     moved_lot.workshop_location_id = workshop_location_id
     moved_lot.location_id = None  # rời khỏi vị trí kho công ty (nếu có)
@@ -2511,6 +2656,12 @@ def workshop_usage_history(db: Session, limit: int = 200) -> list[dict]:
     rồi xóa) không còn hiện nữa, tránh hiểu nhầm "vẫn đang trừ kho" (yêu cầu người dùng
     2026-09-15). ts hiển thị = lần ghi/sửa GẦN NHẤT trong nhóm net đó.
 
+    Mỗi dòng trả về CẢ 2 mốc thời gian (yêu cầu người dùng 2026-09-15): `ts` ("Ngày tạo" — giờ
+    thao tác THẬT trên hệ thống, không sửa được) và `supply_date` ("Ngày cấp" — mốc HIỆU LỰC dùng
+    để trừ tồn kho phân xưởng, có thể khai lùi ngày: batch.start_at cho Nấu, BatchPackLot.pack_date
+    cho Chiết; Lọc không có khái niệm khai lùi ngày riêng nên `supply_date` = `ts`). `supply_date`
+    chính là mốc `_nau_consume_as_of`/StockMovement.ts dùng để dựng lại "Tồn kho tính đến ngày X".
+
     Mỗi truy vấn con đã ORDER BY created_at DESC LIMIT limit trước khi gộp — vì kết quả cuối
     cùng chỉ lấy top `limit` bản ghi mới nhất trên cả 3 nguồn, top-limit của mỗi nguồn riêng
     lẻ chắc chắn phủ hết top-limit gộp, nên không cần tải hết cả 3 bảng vào bộ nhớ (gộp net của
@@ -2522,27 +2673,38 @@ def workshop_usage_history(db: Session, limit: int = 200) -> list[dict]:
             select(BatchFilterLotMaterialUsage, BatchFilterLot.filter_lot_code)
             .join(BatchFilterLot, BatchFilterLotMaterialUsage.filter_lot_id == BatchFilterLot.filter_lot_id)
             .order_by(BatchFilterLotMaterialUsage.created_at.desc()).limit(limit)).all():
-        rows.append({"usage_id": u.usage_id, "ts": u.created_at, "stage": "Lọc",
-                    "batch_label": f"Lô lọc {filter_lot_code}",
+        # Lọc không có mốc "hiệu lực" riêng khác giờ tạo — NVL luôn gán thẳng lúc thao tác thật,
+        # không khai lùi ngày được (khác Nấu/Chiết) — "Ngày cấp" = "Ngày tạo" (yêu cầu người dùng
+        # 2026-09-15: rà soát các công đoạn khác, bổ sung nếu thiếu — Lọc không thiếu, chỉ là
+        # không có khái niệm khai lùi ngày).
+        rows.append({"usage_id": u.usage_id, "ts": u.created_at, "supply_date": u.created_at,
+                    "stage": "Lọc", "batch_label": f"Lô lọc {filter_lot_code}",
                     "material_name": u.material_name, "lot_code": u.lot_pm,
                     "quantity": u.quantity, "uom": u.uom, "movement_id": u.movement_id})
-    for u, pack_lot_code in db.execute(
-            select(BatchPackLotMaterialUsage, BatchPackLot.pack_lot_code)
+    for u, pack_lot_code, pack_date in db.execute(
+            select(BatchPackLotMaterialUsage, BatchPackLot.pack_lot_code, BatchPackLot.pack_date)
             .join(BatchPackLot, BatchPackLotMaterialUsage.pack_lot_id == BatchPackLot.pack_lot_id)
             .order_by(BatchPackLotMaterialUsage.created_at.desc()).limit(limit)).all():
-        rows.append({"usage_id": u.usage_id, "ts": u.created_at, "stage": "Chiết",
-                    "batch_label": f"Lô thành phẩm {pack_lot_code}",
+        # "Ngày cấp" = BatchPackLot.pack_date (mốc bắt đầu chiết, khai tay lúc tạo lô — mirror
+        # BottleRecord.bottle_date, có thể KHÁC created_at thật).
+        rows.append({"usage_id": u.usage_id, "ts": u.created_at, "supply_date": pack_date,
+                    "stage": "Chiết", "batch_label": f"Lô thành phẩm {pack_lot_code}",
                     "material_name": u.material_name, "lot_code": u.lot_pm,
                     "quantity": u.quantity, "uom": u.uom, "movement_id": u.movement_id})
     mat_name_by_code = {m.code: m.name for m in db.execute(select(Material)).scalars().all()}
     nau_agg: dict[tuple, dict] = {}
-    for dl, batch_id, batch_code, dispensed_by in db.execute(
-            select(DispenseLine, Dispense.batch_id, BatchExecution.batch_code, Dispense.created_by)
+    for dl, batch_id, batch_code, batch_start_at, dispensed_by in db.execute(
+            select(DispenseLine, Dispense.batch_id, BatchExecution.batch_code, BatchExecution.start_at,
+                  Dispense.created_by)
             .join(Dispense, DispenseLine.dispense_id == Dispense.dispense_id)
             .join(BatchExecution, Dispense.batch_id == BatchExecution.batch_id)
             .order_by(DispenseLine.created_at.desc()).limit(limit)).all():
         key = (batch_id, dl.material_code, dl.lot_code)
         agg = nau_agg.setdefault(key, {"qty": 0.0, "ts": dl.created_at, "batch_code": batch_code,
+                                       # "Ngày cấp" = batch.start_at (ngày mẻ THỰC SỰ bắt đầu nấu,
+                                       # có thể khai lùi ngày) — CHÍNH LÀ mốc đã dùng để trừ tồn
+                                       # kho phân xưởng "tính đến ngày" (xem _nau_consume_as_of).
+                                       "supply_date": batch_start_at,
                                        "actor": dispensed_by, "uom": dl.uom, "usage_id": dl.line_id})
         agg["qty"] = round(agg["qty"] + dl.quantity, 4)
         if dl.created_at > agg["ts"]:
@@ -2552,8 +2714,8 @@ def workshop_usage_history(db: Session, limit: int = 200) -> list[dict]:
     for (batch_id, material_code, lot_code), agg in nau_agg.items():
         if agg["qty"] <= 1e-9:
             continue
-        rows.append({"usage_id": agg["usage_id"], "ts": agg["ts"], "stage": "Nấu",
-                    "batch_label": f"Mẻ nấu {agg['batch_code']}",
+        rows.append({"usage_id": agg["usage_id"], "ts": agg["ts"], "supply_date": agg["supply_date"],
+                    "stage": "Nấu", "batch_label": f"Mẻ nấu {agg['batch_code']}",
                     "material_name": mat_name_by_code.get(material_code, material_code),
                     "lot_code": lot_code, "quantity": agg["qty"], "uom": agg["uom"],
                     "movement_id": None, "actor": agg["actor"]})
@@ -2610,10 +2772,8 @@ def create_count(db: Session, location: Optional[str], user: User, note: str = N
     require_perm(user, "warehouse.receive")
     _assert_location_scope(user, location)
     stmt = select(MaterialLot).where(MaterialLot.material_id.isnot(None), MaterialLot.quantity != 0)
-    clause = _location_filter_clause(location)
-    if clause is not None:
-        stmt = stmt.where(clause)
-    lots = db.execute(stmt).scalars().all()
+    loc_matches = _asof_loc_matcher(location)
+    lots = [l for l in db.execute(stmt).scalars().all() if loc_matches(l.location)]
     if not lots:
         raise DomainError("Không có lô nào đang tồn tại kho này để kiểm kê.")
     stamp = f"{utcnow():%y%m%d}-{new_id()[:4].upper()}"

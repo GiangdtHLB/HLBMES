@@ -28,6 +28,7 @@ os.environ["MES_ADMIN_PASSWORD"] = "AdminTest123"
 import pytest
 from fastapi.testclient import TestClient
 
+from app.common import utcnow
 from app.main import app
 from app import seed as seed_mod
 
@@ -52,6 +53,48 @@ def _login(client, u, p):
 @pytest.fixture(scope="module")
 def admin_h(client):
     return _login(client, "admin", "AdminTest123")
+
+
+def _force_finish_filter_lot(client, admin_h, filter_lot_id):
+    """Đưa 1 lô lọc "dang_loc" ra khỏi trạng thái đó (Kết thúc mẻ dở dang nếu cần rồi "Hoàn thành
+    lọc") — dùng để dọn đường cho hàng đợi (_assert_filter_material_addable) mà KHÔNG cần thêm
+    nguyên liệu thật (tên tự do đã bị bỏ, không còn cách "thêm 1 dòng 0.001kg vô hại" như trước
+    2026-09-16 nữa)."""
+    fl = client.get(f"/api/batch-filter-lots/{filter_lot_id}", headers=admin_h).json()
+    if fl["status"] != "dang_loc":
+        return
+    if fl.get("ended_at") is None:
+        sources = client.get(f"/api/batch-filter-lots/{filter_lot_id}/sources", headers=admin_h).json()
+        draws = [{"source_link_id": s["link_id"], "dich_nha_hl": 1} for s in sources]
+        batches = client.get(f"/api/batch-filter-lots/{filter_lot_id}/batches", headers=admin_h).json()
+        for b in batches:
+            if b.get("ended_at"):
+                continue
+            fin = client.put(f"/api/batch-filter-lots/batches/{b['batch_link_id']}/finish", headers=admin_h,
+                             json={"draws": draws, "nuoc_bai_khi_hl": 0})
+            assert fin.status_code == 200, fin.text
+    done = client.post(f"/api/batch-filter-lots/{filter_lot_id}/finish-filtering", headers=admin_h)
+    assert done.status_code == 200, done.text
+
+
+@pytest.fixture(autouse=True)
+def _unblock_dangling_filter_lots_before_each_test(client, admin_h):
+    """Dọn đường TRƯỚC MỖI TEST — điều kiện xếp hàng mới cho Lọc (_assert_filter_material_
+    addable, yêu cầu người dùng 2026-09-15: "lô lọc mở trước phải thêm NVL trước") sẽ chặn oan
+    lô lọc mà 1 test SAU tạo ra nếu còn lô lọc "dang_loc" từ test TRƯỚC chưa hề có nguyên liệu
+    nào (nhiều test trong file này tạo lô lọc chỉ để test xóa/sửa/khóa, không thêm nguyên liệu
+    thật). Chuyển hẳn các lô đó sang "hoan_thanh" (không còn "chiếm hàng" nữa, tên tự do đã bị bỏ
+    nên không thể "thêm 1 dòng vô hại" như trước 2026-09-16) trước khi test hiện tại tạo lô MỚI
+    của chính nó."""
+    lots = client.get("/api/batch-filter-lots", headers=admin_h).json()
+    for fl in lots:
+        if fl["status"] != "dang_loc":
+            continue
+        usage = client.get(f"/api/batch-filter-lots/{fl['filter_lot_id']}/materials", headers=admin_h).json()
+        if usage:
+            continue
+        _force_finish_filter_lot(client, admin_h, fl["filter_lot_id"])
+    yield
 
 
 def _make_batch(client, admin_h, batch_code=None):
@@ -198,9 +241,10 @@ def test_delete_filter_lot_blocked_when_qc_approved(client, admin_h):
 
 def test_delete_filter_lot_undoes_material_usage_and_qc(client, admin_h):
     filter_lot_id, _tank_id = _make_filter_lot(client, admin_h, "DELMATFL1")
-    _material_id, lot_id = _a_material_workshop_lot(client, admin_h, "MAT-DELMATFL1", 50)
+    material_id, lot_id = _a_material_workshop_lot(client, admin_h, "MAT-DELMATFL1", 50)
+    _finish_only_source(client, admin_h, filter_lot_id)
     add = client.post(f"/api/batch-filter-lots/{filter_lot_id}/materials", headers=admin_h,
-                      json={"lot_id": lot_id, "quantity": 12, "uom": "kg"})
+                      json={"material_id": material_id, "quantity": 12})
     assert add.status_code == 201, add.text
     assert _lot_qty(client, admin_h, lot_id) == 38
 
@@ -227,10 +271,13 @@ def test_delete_pack_lot_undoes_material_usage_and_qc(client, admin_h):
     filter_lot_id, _tank_id = _make_filter_lot(client, admin_h, "DELMATPK1")
     _finish_only_source(client, admin_h, filter_lot_id)
     pack_lot_id = _make_pack_lot(client, admin_h, filter_lot_id, "DELMATPK1")
+    material_id, lot_id = _a_material_workshop_lot(client, admin_h, "MAT-DELMATPK1", 50)
+    shifts = client.put(f"/api/batch-pack-lots/{pack_lot_id}/shifts", headers=admin_h,
+                        json={"ca1_qty": 500, "ca1_end_at": utcnow().isoformat()})
+    assert shifts.status_code == 200, shifts.text
 
-    _material_id, lot_id = _a_material_workshop_lot(client, admin_h, "MAT-DELMATPK1", 50)
     add = client.post(f"/api/batch-pack-lots/{pack_lot_id}/materials", headers=admin_h,
-                      json={"lot_id": lot_id, "quantity": 12, "uom": "kg"})
+                      json={"material_id": material_id, "quantity": 12})
     assert add.status_code == 201, add.text
     assert _lot_qty(client, admin_h, lot_id) == 38
 

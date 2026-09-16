@@ -22,6 +22,7 @@ os.environ["MES_ADMIN_PASSWORD"] = "AdminTest123"
 import pytest
 from fastapi.testclient import TestClient
 
+from app.common import utcnow
 from app.main import app
 from app import seed as seed_mod
 
@@ -190,7 +191,10 @@ def test_pack_lot_from_bbt_blocked_when_not_all_finished(client, admin_h):
     assert bad.status_code == 409, bad.text
 
 
-def test_pack_lot_material_usage_free_text_add_list_delete(client, admin_h):
+def test_pack_lot_material_usage_add_list_delete(client, admin_h):
+    """Tên tự do đã bị bỏ (2026-09-16) — thêm NVL cho lô thành phẩm giờ LUÔN chọn theo vật tư
+    (material_id), hệ thống tự chọn lô FIFO tại đúng "Ngày cấp" = ended_at, và bắt buộc lô đã có
+    "Giờ kết thúc chiết" (ended_at) trước khi thêm được."""
     _batch, _tank_id, filter_lot_id, to_bbt = _build_approved_filter_lot(client, admin_h, "MAT")
     pack = client.post("/api/batch-pack-lots", headers=admin_h,
                        json={"from_bbt": to_bbt, "qty": 200, "pack_lot_code": "PKG-CHIET-MAT", "lot_no": "LOT-CHIET-MAT"})
@@ -200,16 +204,36 @@ def test_pack_lot_material_usage_free_text_add_list_delete(client, admin_h):
     empty = client.get(f"/api/batch-pack-lots/{pack_lot_id}/materials", headers=admin_h).json()
     assert empty == []
 
-    add = client.post(f"/api/batch-pack-lots/{pack_lot_id}/materials", headers=admin_h,
-                      json={"material_name": "CO2 thực phẩm", "quantity": 5, "uom": "kg"})
-    assert add.status_code == 201, add.text
-    usage_id = add.json()["usage_id"]
-    assert add.json()["material_name"] == "CO2 thực phẩm"
-    assert add.json()["movement_id"] is None  # không chọn lot_id -> không trừ kho thật
+    mat = client.post("/api/materials", headers=admin_h,
+                      json={"code": "MAT-CHIETCO2", "name": "CO2 thực phẩm", "uom": "kg"})
+    assert mat.status_code == 201, mat.text
+    material_id = mat.json()["material_id"]
+    recv = client.post("/api/warehouse/receive", headers=admin_h,
+                       json={"lot_code": "LOT-CHIETCO2-PX", "material_id": material_id,
+                             "quantity": 20, "uom": "kg", "location": "Kho phân xưởng"})
+    assert recv.status_code == 200, recv.text
 
-    no_name_no_lot = client.post(f"/api/batch-pack-lots/{pack_lot_id}/materials", headers=admin_h,
-                                 json={"quantity": 1})
-    assert no_name_no_lot.status_code == 409, no_name_no_lot.text
+    # Chưa có "Giờ kết thúc chiết" (ended_at) -> chưa thể thêm nguyên liệu.
+    too_early = client.post(f"/api/batch-pack-lots/{pack_lot_id}/materials", headers=admin_h,
+                            json={"material_id": material_id, "quantity": 5})
+    assert too_early.status_code == 409, too_early.text
+
+    upd = client.put(f"/api/batch-pack-lots/{pack_lot_id}/shifts", headers=admin_h,
+                     json={"ca1_qty": 200, "ca1_end_at": utcnow().isoformat()})
+    assert upd.status_code == 200, upd.text
+
+    add = client.post(f"/api/batch-pack-lots/{pack_lot_id}/materials", headers=admin_h,
+                      json={"material_id": material_id, "quantity": 5})
+    assert add.status_code == 201, add.text
+    rows = add.json()
+    assert len(rows) == 1
+    usage_id = rows[0]["usage_id"]
+    assert rows[0]["material_name"] == "CO2 thực phẩm"
+    assert rows[0]["movement_id"]   # material_id-based -> luôn trừ kho thật qua lô FIFO
+
+    no_material = client.post(f"/api/batch-pack-lots/{pack_lot_id}/materials", headers=admin_h,
+                              json={"quantity": 1})
+    assert no_material.status_code == 422, no_material.text   # material_id là field bắt buộc
 
     listed = client.get(f"/api/batch-pack-lots/{pack_lot_id}/materials", headers=admin_h).json()
     assert len(listed) == 1 and listed[0]["usage_id"] == usage_id

@@ -45,6 +45,7 @@ from ..models.quality import Deviation, QualityResult
 from ..models.signature import Signature
 from ..models.workorder import WorkOrder
 from ..security import User, require_perm
+from . import dispense as dispense_svc
 from . import genealogy, ops_setting, qc_catalog, quality
 from . import warehouse as warehouse_svc
 from . import wms as wms_svc
@@ -1694,50 +1695,75 @@ def list_pack_lot_materials(db: Session, pack_lot_id: str) -> list[BatchPackLotM
         BatchPackLotMaterialUsage.pack_lot_id == pack_lot_id)).scalars().all()
 
 
-def add_pack_lot_material(db: Session, pack_lot_id: str, payload: dict, user: User) -> BatchPackLotMaterialUsage:
+def suggest_pack_lot_material(db: Session, pack_lot_id: str, material_id: str, quantity: float) -> dict:
+    """Xem trước lô sẽ dùng (FIFO, Kho phân xưởng, tại đúng "Ngày cấp" = ended_at) cho 1 vật tư +
+    số lượng SẮP thêm vào lô thành phẩm — mirror suggest_filter_lot_material (yêu cầu người dùng
+    2026-09-16)."""
+    p = get_pack_lot(db, pack_lot_id)
+    if p.ended_at is None:
+        raise DomainError('Lô thành phẩm chưa có "Giờ kết thúc chiết" — chưa có "Ngày cấp" để tính tồn.')
+    material = db.get(Material, material_id)
+    if not material:
+        raise NotFoundError("Vật tư không tồn tại.")
+    fefo_lots = dispense_svc._workshop_fefo_lots(db, material.code, p.ended_at)
+    picks, remaining = [], round(quantity, 4)
+    for lot in fefo_lots:
+        if remaining <= 1e-9:
+            break
+        take = min(remaining, dispense_svc._lot_avail_qty(lot))
+        if take <= 0:
+            continue
+        picks.append({"lot_id": lot.lot_id, "lot_code": lot.lot_code, "quantity": round(take, 4),
+                     "uom": lot.uom, "expiry": lot.expiry.isoformat() if lot.expiry else None})
+        remaining = round(remaining - take, 4)
+    return {"supply_date": p.ended_at, "picks": picks,
+           "shortfall": round(remaining, 4) if remaining > 1e-6 else 0.0}
+
+
+def add_pack_lot_material(db: Session, pack_lot_id: str, payload: dict, user: User) -> list[BatchPackLotMaterialUsage]:
+    """Ghi NVL dùng cho 1 lô thành phẩm — chọn theo VẬT TƯ (material_id), hệ thống TỰ CHỌN lô
+    theo FIFO tại đúng thời điểm "Ngày cấp" = BatchPackLot.ended_at (mirror
+    services/dispense.py::_plan_consume — dùng CHUNG logic FEFO/as_of/all-or-nothing với Nấu,
+    yêu cầu người dùng 2026-09-16). `lot_id` (tuỳ chọn) chỉ dùng khi cố ý chọn khác lô FIFO gợi ý
+    (bắt buộc `reason`). Không đủ tồn kho phân xưởng TẠI THỜI ĐIỂM `ended_at` cho đủ `quantity`
+    thì CHẶN HẲN (all-or-nothing, không trừ dở dang) — _plan_consume tự raise. 1 lần gọi có thể
+    tạo NHIỀU dòng usage (1 dòng/lô thực sự dùng, nếu 1 lô không đủ phải lấy tiếp lô sau)."""
     require_perm(user, "batch.execute")
     p = get_pack_lot(db, pack_lot_id)
     _assert_unlocked(p)
+    supply_date = p.ended_at
+    if supply_date is None:
+        raise DomainError('Lô thành phẩm chưa có "Giờ kết thúc chiết" (ended_at, tính từ SL chiết '
+                          "theo ca) — ghi đủ SL + giờ kết thúc ít nhất 1 ca trước khi thêm nguyên liệu.")
     data = dict(payload)
-    lot_id = data.get("lot_id")
+    material_id = data.get("material_id")
+    if not material_id:
+        raise DomainError("Chọn nguyên liệu từ tồn kho Kho phân xưởng.")
+    material = db.get(Material, material_id)
+    if not material:
+        raise NotFoundError("Vật tư không tồn tại.")
+    quantity = data["quantity"]
     reason = (data.get("reason") or "").strip() or None
-    if lot_id:
-        lot = db.get(MaterialLot, lot_id)
-        if not lot:
-            raise NotFoundError("Lô nguyên liệu không tồn tại.")
-        if not warehouse_svc._is_workshop_location(lot.location):
-            raise DomainError(f"Lô {lot.lot_code} không ở Kho phân xưởng — chỉ được dùng nguyên liệu "
-                             "từ Kho phân xưởng cho lô thành phẩm.")
-        material = db.get(Material, lot.material_id) if lot.material_id else None
-        data["material_name"] = material.name if material else lot.lot_code
-        data["lot_pm"] = lot.lot_code
-        data["lot_date"] = lot.created_at
-        # fifo_ok=False (còn lô khác cũ hơn chưa dùng hết) bắt buộc ghi rõ lý do (mirror
-        # services/dispense.py::_plan_consume, yêu cầu người dùng 2026-09-01) — kiểm tra TRƯỚC
-        # khi issue() trừ kho thật, tránh trừ tồn rồi mới báo lỗi.
-        data["fifo_ok"] = warehouse_svc.is_oldest_workshop_lot(db, lot.material_id, lot_id)
-        if not data["fifo_ok"] and not reason:
-            raise DomainError(f"Lô {lot.lot_code} không phải lô FIFO (cũ nhất) của vật tư này — "
-                             "bắt buộc nhập lý do chọn lô khác.")
-        data["uom"] = lot.uom
-        result = warehouse_svc.issue(db, lot_id, data["quantity"], user, mode="tu_do",
+    plan, fifo_ok = dispense_svc._plan_consume(db, material.code, quantity, picked_lot_id=data.get("lot_id"),
+                                               reason=reason, as_of=supply_date)
+    rows = []
+    for lot, take in plan:
+        result = warehouse_svc.issue(db, lot.lot_id, take, user, mode="tu_do",
                                      reason=f"Dùng cho lô thành phẩm {p.pack_lot_code}",
-                                     ref_doc=p.pack_lot_code, skip_perm_check=True)
-        data["movement_id"] = result["movement_id"]
-    elif not (data.get("material_name") or "").strip():
-        raise DomainError("Chọn nguyên liệu từ tồn kho Kho phân xưởng, hoặc nhập tên tự do.")
-    u = BatchPackLotMaterialUsage(
-        usage_id=new_id(), pack_lot_id=pack_lot_id, lot_id=lot_id, movement_id=data.get("movement_id"),
-        material_name=data.get("material_name"), lot_pm=data.get("lot_pm"), lot_date=data.get("lot_date"),
-        fifo_ok=data.get("fifo_ok"), reason=reason, quantity=data["quantity"], uom=data.get("uom") or "kg",
-        created_at=utcnow(),
-    )
-    db.add(u)
+                                     ref_doc=p.pack_lot_code, skip_perm_check=True, issued_at=supply_date)
+        u = BatchPackLotMaterialUsage(
+            usage_id=new_id(), pack_lot_id=pack_lot_id, lot_id=lot.lot_id, movement_id=result["movement_id"],
+            material_name=material.name, lot_pm=lot.lot_code, lot_date=lot.created_at, supply_date=supply_date,
+            fifo_ok=fifo_ok, reason=reason, quantity=take, uom=lot.uom, created_at=utcnow(),
+        )
+        db.add(u)
+        rows.append(u)
     record_audit(db, entity_type="batch_pack_lot", entity_id=pack_lot_id, action="material_add", actor=user,
-                after={"material_name": u.material_name, "lot_pm": u.lot_pm, "quantity": u.quantity, "uom": u.uom})
+                after={"material_name": material.name, "quantity": quantity, "lots": [r.lot_pm for r in rows]})
     db.commit()
-    db.refresh(u)
-    return u
+    for u in rows:
+        db.refresh(u)
+    return rows
 
 
 def delete_pack_lot_material(db: Session, usage_id: str, user: User) -> None:
@@ -1758,52 +1784,112 @@ def delete_pack_lot_material(db: Session, usage_id: str, user: User) -> None:
 
 # ==================== NVL dùng cho Lô lọc — mirror BatchPackLotMaterialUsage trên ====================
 
+def _assert_filter_material_addable(db: Session, filter_lot: BatchFilterLot) -> None:
+    """Lô lọc nào MỞ (tạo) trước phải được thêm NVL trước — mirror services/dispense.py::
+    _assert_dispensable áp dụng cho Nấu, nay áp dụng thêm cho Lọc (yêu cầu người dùng
+    2026-09-15: "cấp liệu thì mẻ sản xuất trước phải cấp trước... áp dụng cho Lọc luôn").
+    Dùng `created_at` làm mốc "bắt đầu" (Lô lọc không có trường start_at riêng như Mẻ nấu —
+    tạo lô lọc chính là lúc THỰC SỰ mở ra để lọc, khác Mẻ nấu có thể tạo trước rồi mới khai
+    "Bắt đầu" sau). Chỉ xét lô lọc ĐANG LỌC (status="dang_loc") — lô đã "Hoàn thành lọc" không
+    còn "chiếm hàng" (mirror chỉ xét RUNNING/HELD ở Nấu, không xét COMPLETED/CLOSED/CANCELLED).
+    Chỉ cần lô đó đã thêm NVL ÍT NHẤT 1 lần (không cần đủ hết) là coi như "đến lượt", không
+    chặn lô sau nữa."""
+    earlier = db.execute(select(BatchFilterLot).where(
+        BatchFilterLot.status == "dang_loc",
+        BatchFilterLot.filter_lot_id != filter_lot.filter_lot_id,
+        BatchFilterLot.created_at < filter_lot.created_at,
+    ).order_by(BatchFilterLot.created_at.asc())).scalars().all()
+    if not earlier:
+        return
+    earlier_ids = [f.filter_lot_id for f in earlier]
+    has_usage = set(db.execute(select(BatchFilterLotMaterialUsage.filter_lot_id).where(
+        BatchFilterLotMaterialUsage.filter_lot_id.in_(earlier_ids)).distinct()).scalars().all())
+    blocking = [f for f in earlier if f.filter_lot_id not in has_usage]
+    if not blocking:
+        return
+    codes = ", ".join(f.filter_lot_code for f in blocking[:5])
+    raise DomainError(f"Lô lọc {codes} mở trước lô này và chưa thêm nguyên liệu lần nào — "
+                      "thêm nguyên liệu cho (các) lô đó trước.")
+
+
 def list_filter_lot_materials(db: Session, filter_lot_id: str) -> list[BatchFilterLotMaterialUsage]:
     return db.execute(select(BatchFilterLotMaterialUsage).where(
         BatchFilterLotMaterialUsage.filter_lot_id == filter_lot_id)).scalars().all()
 
 
-def add_filter_lot_material(db: Session, filter_lot_id: str, payload: dict, user: User) -> BatchFilterLotMaterialUsage:
+def suggest_filter_lot_material(db: Session, filter_lot_id: str, material_id: str, quantity: float) -> dict:
+    """Xem trước lô sẽ dùng (FIFO, Kho phân xưởng, tại đúng "Ngày cấp" = ended_at) cho 1 vật tư +
+    số lượng SẮP thêm — CHỈ TÍNH, không trừ tồn (mirror services/dispense.py::suggest_dispense) —
+    cho biết "sẽ lấy lô nào" TRƯỚC khi bấm "+ Thêm" thật (yêu cầu người dùng 2026-09-16: "hiện
+    tại không biết lấy lô nào khi chọn vật tư trong list"). Không raise khi thiếu tồn — trả
+    `shortfall` > 0 để frontend tự cảnh báo/chặn nút "+ Thêm" (khác add_filter_lot_material vốn
+    chặn hẳn bằng exception khi submit thật)."""
+    fl = get_filter_lot(db, filter_lot_id)
+    if fl.ended_at is None:
+        raise DomainError('Lô lọc chưa "Kết thúc" mẻ lọc nào — chưa có "Ngày cấp" để tính tồn.')
+    material = db.get(Material, material_id)
+    if not material:
+        raise NotFoundError("Vật tư không tồn tại.")
+    fefo_lots = dispense_svc._workshop_fefo_lots(db, material.code, fl.ended_at)
+    picks, remaining = [], round(quantity, 4)
+    for lot in fefo_lots:
+        if remaining <= 1e-9:
+            break
+        take = min(remaining, dispense_svc._lot_avail_qty(lot))
+        if take <= 0:
+            continue
+        picks.append({"lot_id": lot.lot_id, "lot_code": lot.lot_code, "quantity": round(take, 4),
+                     "uom": lot.uom, "expiry": lot.expiry.isoformat() if lot.expiry else None})
+        remaining = round(remaining - take, 4)
+    return {"supply_date": fl.ended_at, "picks": picks,
+           "shortfall": round(remaining, 4) if remaining > 1e-6 else 0.0}
+
+
+def add_filter_lot_material(db: Session, filter_lot_id: str, payload: dict, user: User) -> list[BatchFilterLotMaterialUsage]:
+    """Ghi NVL dùng cho 1 lô lọc — chọn theo VẬT TƯ (material_id), hệ thống TỰ CHỌN lô theo FIFO
+    tại đúng thời điểm "Ngày cấp" = BatchFilterLot.ended_at (mirror services/dispense.py::
+    _plan_consume — dùng CHUNG logic FEFO/as_of/all-or-nothing với Nấu, yêu cầu người dùng
+    2026-09-16). `lot_id` (tuỳ chọn) chỉ dùng khi cố ý chọn khác lô FIFO gợi ý (bắt buộc
+    `reason`). Không đủ tồn kho phân xưởng TẠI THỜI ĐIỂM `ended_at` cho đủ `quantity` thì CHẶN
+    HẲN (all-or-nothing) — _plan_consume tự raise. 1 lần gọi có thể tạo NHIỀU dòng usage (1
+    dòng/lô thực sự dùng, nếu 1 lô không đủ phải lấy tiếp lô sau)."""
     require_perm(user, "batch.execute")
     fl = get_filter_lot(db, filter_lot_id)
     _assert_unlocked(fl)
+    _assert_filter_material_addable(db, fl)
+    supply_date = fl.ended_at
+    if supply_date is None:
+        raise DomainError('Lô lọc chưa "Kết thúc" mẻ lọc nào (ended_at) — kết thúc ít nhất 1 mẻ '
+                          "lọc trước khi thêm nguyên liệu.")
     data = dict(payload)
-    lot_id = data.get("lot_id")
+    material_id = data.get("material_id")
+    if not material_id:
+        raise DomainError("Chọn nguyên liệu từ tồn kho Kho phân xưởng.")
+    material = db.get(Material, material_id)
+    if not material:
+        raise NotFoundError("Vật tư không tồn tại.")
+    quantity = data["quantity"]
     reason = (data.get("reason") or "").strip() or None
-    if lot_id:
-        lot = db.get(MaterialLot, lot_id)
-        if not lot:
-            raise NotFoundError("Lô nguyên liệu không tồn tại.")
-        if not warehouse_svc._is_workshop_location(lot.location):
-            raise DomainError(f"Lô {lot.lot_code} không ở Kho phân xưởng — chỉ được dùng nguyên liệu "
-                             "từ Kho phân xưởng cho lô lọc.")
-        material = db.get(Material, lot.material_id) if lot.material_id else None
-        data["material_name"] = material.name if material else lot.lot_code
-        data["lot_pm"] = lot.lot_code
-        data["lot_date"] = lot.created_at
-        data["fifo_ok"] = warehouse_svc.is_oldest_workshop_lot(db, lot.material_id, lot_id)
-        if not data["fifo_ok"] and not reason:
-            raise DomainError(f"Lô {lot.lot_code} không phải lô FIFO (cũ nhất) của vật tư này — "
-                             "bắt buộc nhập lý do chọn lô khác.")
-        data["uom"] = lot.uom
-        result = warehouse_svc.issue(db, lot_id, data["quantity"], user, mode="tu_do",
+    plan, fifo_ok = dispense_svc._plan_consume(db, material.code, quantity, picked_lot_id=data.get("lot_id"),
+                                               reason=reason, as_of=supply_date)
+    rows = []
+    for lot, take in plan:
+        result = warehouse_svc.issue(db, lot.lot_id, take, user, mode="tu_do",
                                      reason=f"Dùng cho lô lọc {fl.filter_lot_code}",
-                                     ref_doc=fl.filter_lot_code, skip_perm_check=True)
-        data["movement_id"] = result["movement_id"]
-    elif not (data.get("material_name") or "").strip():
-        raise DomainError("Chọn nguyên liệu từ tồn kho Kho phân xưởng, hoặc nhập tên tự do.")
-    u = BatchFilterLotMaterialUsage(
-        usage_id=new_id(), filter_lot_id=filter_lot_id, lot_id=lot_id, movement_id=data.get("movement_id"),
-        material_name=data.get("material_name"), lot_pm=data.get("lot_pm"), lot_date=data.get("lot_date"),
-        fifo_ok=data.get("fifo_ok"), reason=reason, quantity=data["quantity"], uom=data.get("uom") or "kg",
-        created_at=utcnow(),
-    )
-    db.add(u)
+                                     ref_doc=fl.filter_lot_code, skip_perm_check=True, issued_at=supply_date)
+        u = BatchFilterLotMaterialUsage(
+            usage_id=new_id(), filter_lot_id=filter_lot_id, lot_id=lot.lot_id, movement_id=result["movement_id"],
+            material_name=material.name, lot_pm=lot.lot_code, lot_date=lot.created_at, supply_date=supply_date,
+            fifo_ok=fifo_ok, reason=reason, quantity=take, uom=lot.uom, created_at=utcnow(),
+        )
+        db.add(u)
+        rows.append(u)
     record_audit(db, entity_type="batch_filter_lot", entity_id=filter_lot_id, action="material_add", actor=user,
-                after={"material_name": u.material_name, "lot_pm": u.lot_pm, "quantity": u.quantity, "uom": u.uom})
+                after={"material_name": material.name, "quantity": quantity, "lots": [r.lot_pm for r in rows]})
     db.commit()
-    db.refresh(u)
-    return u
+    for u in rows:
+        db.refresh(u)
+    return rows
 
 
 def delete_filter_lot_material(db: Session, usage_id: str, user: User) -> None:

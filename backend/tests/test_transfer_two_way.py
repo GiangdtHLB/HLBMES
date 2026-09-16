@@ -12,6 +12,7 @@ Cũng test guarded-delete cho FactoryLocation (danh mục nhà máy khác)."""
 
 import os
 import tempfile
+from datetime import timedelta
 
 _TMP = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
 os.environ["MES_DATABASE_URL"] = f"sqlite:///{_TMP.name}"
@@ -22,6 +23,7 @@ os.environ["MES_ADMIN_PASSWORD"] = "AdminTest123"
 import pytest
 from fastapi.testclient import TestClient
 
+from app.common import utcnow
 from app.main import app
 from app import seed as seed_mod
 
@@ -140,6 +142,63 @@ def test_transfer_px_request_full_flow(client, admin_h, thukho_h, vanhanh_h):
     assert undo_again.status_code == 409, undo_again.text
 
 
+def test_transfer_px_request_requested_transfer_date_used_as_stock_effective_date(client, admin_h, thukho_h, vanhanh_h):
+    """"Ngày đề nghị điều chuyển" (khai lúc tạo đề nghị, chiều Phân xưởng -> Công ty) — khi Kho
+    công ty duyệt, dùng làm mốc hiệu lực (`ts`) của StockMovement transfer, mirror
+    TransferKcPxRequest.requested_transfer_date (yêu cầu người dùng 2026-09-16: áp dụng cho cả
+    2 chiều điều chuyển)."""
+    mat_id = _create_material(client, admin_h, "TPW-RTD01")
+    lot_id = _receive_at_workshop(client, thukho_h, mat_id, "LOT-TPW-RTD01", qty=40)
+    requested_date = utcnow() - timedelta(hours=1)
+
+    req = client.post("/api/warehouse/transfer-px-requests", headers=vanhanh_h,
+                      json={"lot_id": lot_id, "quantity": 40,
+                           "requested_transfer_date": requested_date.isoformat()})
+    assert req.status_code == 201, req.text
+    assert req.json()["requested_transfer_date"] is not None
+    request_id = req.json()["request_id"]
+
+    ok = client.post(f"/api/warehouse/transfer-px-requests/{request_id}/approve", headers=thukho_h)
+    assert ok.status_code == 200, ok.text
+
+    before = (requested_date - timedelta(minutes=1)).isoformat()
+    stock_before = client.get("/api/warehouse/stock/as-of", headers=admin_h,
+                              params={"as_of": before, "location": "Kho công ty"}).json()
+    row_before = next((r for r in stock_before if r["material_id"] == mat_id), None)
+    assert row_before is None or row_before["on_hand"] == 0.0
+
+    stock_at = client.get("/api/warehouse/stock/as-of", headers=admin_h,
+                          params={"as_of": requested_date.isoformat(), "location": "Kho công ty"}).json()
+    row_at = next(r for r in stock_at if r["material_id"] == mat_id)
+    assert row_at["on_hand"] == 40.0
+
+
+def test_update_transfer_px_request_can_set_and_clear_requested_transfer_date(client, admin_h, thukho_h, vanhanh_h):
+    mat_id = _create_material(client, admin_h, "TPW-RTD02")
+    lot_id = _receive_at_workshop(client, thukho_h, mat_id, "LOT-TPW-RTD02", qty=10)
+    req = client.post("/api/warehouse/transfer-px-requests", headers=vanhanh_h,
+                      json={"lot_id": lot_id, "quantity": 10})
+    assert req.status_code == 201, req.text
+    assert req.json()["requested_transfer_date"] is None
+    request_id = req.json()["request_id"]
+
+    date1 = utcnow() - timedelta(hours=2)
+    upd = client.put(f"/api/warehouse/transfer-px-requests/{request_id}", headers=vanhanh_h,
+                     json={"quantity": 10, "requested_transfer_date": date1.isoformat()})
+    assert upd.status_code == 200, upd.text
+    assert upd.json()["requested_transfer_date"] is not None
+
+    upd2 = client.put(f"/api/warehouse/transfer-px-requests/{request_id}", headers=vanhanh_h,
+                      json={"quantity": 9})
+    assert upd2.status_code == 200, upd2.text
+    assert upd2.json()["requested_transfer_date"] is not None   # không gửi field -> giữ nguyên
+
+    upd3 = client.put(f"/api/warehouse/transfer-px-requests/{request_id}", headers=vanhanh_h,
+                      json={"quantity": 9, "requested_transfer_date": None})
+    assert upd3.status_code == 200, upd3.text
+    assert upd3.json()["requested_transfer_date"] is None   # gửi null -> xoá
+
+
 def test_transfer_px_request_reject(client, admin_h, thukho_h, vanhanh_h):
     mat_id = _create_material(client, admin_h, "TPW-REJ")
     lot_id = _receive_at_workshop(client, thukho_h, mat_id, "LOT-TPW-REJ", qty=10)
@@ -225,6 +284,33 @@ def test_transfer_to_factory_full_flow(client, admin_h, thukho_h, truongphong_kh
     lot = client.get("/api/lots", headers=admin_h).json()
     lot = next(l for l in lot if l["lot_id"] == lot_id)
     assert lot["quantity"] == 60
+
+
+def test_transfer_to_factory_requested_transfer_date_used_as_movement_ts(client, admin_h, thukho_h):
+    """"Ngày đề nghị điều chuyển" (tuỳ chọn) — dùng làm `ts` hiệu lực của StockMovement thay vì
+    giờ bấm nút thật (yêu cầu người dùng 2026-09-16, mirror TransferKcPxRequest.
+    requested_transfer_date/MaterialRequest.requested_receipt_date)."""
+    from datetime import timedelta
+    from app.common import utcnow
+    factory_id = _create_factory(client, admin_h, "NM-RTD01", "Nhà máy test RTD")
+    mat_id = _create_material(client, admin_h, "CTNM-RTD01")
+    rc = client.post("/api/warehouse/receive", headers=thukho_h,
+                     json={"lot_code": "LOT-CTNM-RTD01", "material_id": mat_id, "quantity": 20, "uom": "kg"})
+    lot_id = rc.json()["lot_id"]
+
+    requested_date = utcnow() - timedelta(hours=1)
+    r = client.post("/api/warehouse/transfer-to-factory", headers=thukho_h,
+                    json={"lot_id": lot_id, "quantity": 20, "factory_id": factory_id,
+                         "requested_transfer_date": requested_date.isoformat()})
+    assert r.status_code == 200, r.text
+    movement_id = r.json()["movement_id"]
+
+    movements = client.get("/api/warehouse/movements", headers=admin_h,
+                           params={"movement_type": "issue", "mode": "dieu_chuyen_nha_may"}).json()
+    mv = next(m for m in movements if m["movement_id"] == movement_id)
+    from datetime import datetime
+    got = datetime.fromisoformat(mv["ts"].replace("Z", "+00:00"))
+    assert abs((got - requested_date).total_seconds()) < 2
 
 
 def test_transfer_to_factory_blocked_when_at_workshop(client, admin_h, thukho_h):

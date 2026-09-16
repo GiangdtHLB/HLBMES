@@ -3401,7 +3401,7 @@ async function showBatchFilterLot(filterLotId) {
     <div class="row" style="flex-wrap:wrap;gap:6px;margin-top:4px">
       ${orderMaterials.map((m, mi) => `<button type="button" class="btn sm sec" data-flmusuggest="${mi}">${esc(m.material_code ? `${m.material_code} — ${m.material_name}` : m.material_name)} (${m.qty_planned} ${esc(m.uom || "")})</button>`).join("")}
     </div>` : ""}
-    ${materialUsageSectionHtml("flmu", matUsage, lk)}
+    ${materialUsageSectionHtml("flmu", matUsage, lk, f.ended_at)}
     <div class="row" style="margin-top:10px">
       ${(!lk && f.status === "dang_loc") ? '<button class="btn sm sec" id="fl_finish">Hoàn thành lọc</button>' : ""}
       ${(!lk && !f.qc_approved) ? '<button class="btn sm sec" id="fl_approve">✔ Duyệt KCS</button>' : ""}
@@ -3411,37 +3411,26 @@ async function showBatchFilterLot(filterLotId) {
       ${lk ? "" : '<button class="btn sm" style="background:var(--red)" id="fl_del">Xóa lô lọc</button>'}
     </div>
     <div class="muted" style="margin-top:10px">Lô lọc chỉ dùng để lọc — tách lô thành phẩm (chiết) thực hiện ở màn <b>"Chiết"</b>, chọn tank BBT tương ứng.</div>`;
-  wireMaterialUsageSection("flmu", lots, materials,
+  const flmuHandle = wireMaterialUsageSection("flmu", lots, materials,
     { postUrl: `/batch-filter-lots/${filterLotId}/materials`, deleteBaseUrl: `/batch-filter-lots/materials`,
+      suggestUrl: `/batch-filter-lots/${filterLotId}/materials/suggest`,
       onChange: () => showBatchFilterLot(filterLotId) });
-  // Gợi ý vật tư từ lệnh lọc — nếu vật tư gợi ý (có material_id, không phải tên tự do) đang có
-  // tồn ở Kho phân xưởng thì TỰ CHỌN LUÔN đúng lô FIFO (cũ nhất) của vật tư đó — mirror đúng
-  // cách wireSearchableSelect/wireMaterialUsageSection tự tính (workshopLots/oldestByMaterial),
-  // để bấm gợi ý xong hiện luôn Số lô PM/Ngày lô/FIFO như chọn tay, không phải tự tìm lại. Chỉ
-  // rơi về điền tên tự do khi vật tư đó KHÔNG có lô nào còn tồn ở Kho phân xưởng (không có gì
-  // để chọn FIFO). Người dùng vẫn đổi lô/tên tự do khác trước khi bấm "+ Thêm" như bình thường,
-  // không tự động gửi.
+  // Gợi ý vật tư từ lệnh lọc — điền sẵn ĐÚNG vật tư (material_id) vào form "+ Thêm nguyên liệu",
+  // hệ thống tự tính lô FIFO qua pickMaterial() (yêu cầu người dùng 2026-09-16: bỏ hẳn đường
+  // "tên tự do" — gợi ý không có material_id thật thì không điền được gì, báo cho biết).
   const flmuMatById = Object.fromEntries(materials.map(m => [m.material_id, m]));
-  const flmuWorkshopLots = sortLotsFifo(lots.filter(l => l.quantity > 0 && l.status !== "on_hold" && /phân xưởng/i.test(l.location || "")));
-  const flmuOldestByMaterial = {};
-  flmuWorkshopLots.forEach(l => { if (l.material_id && !(l.material_id in flmuOldestByMaterial)) flmuOldestByMaterial[l.material_id] = l; });
   document.querySelectorAll("[data-flmusuggest]").forEach(b => b.onclick = () => {
     const m = orderMaterials[parseInt(b.dataset.flmusuggest, 10)];
     if (!m) return;
-    const fifoLot = m.material_id ? flmuOldestByMaterial[m.material_id] : null;
-    if (fifoLot) {
-      const mat = flmuMatById[fifoLot.material_id];
-      if ($("flmu_mat_lot")) $("flmu_mat_lot").value = fifoLot.lot_id;
-      if ($("flmu_mat_txt")) $("flmu_mat_txt").value = `${mat ? mat.name : fifoLot.lot_code} — lô ${fifoLot.lot_code} (còn ${fifoLot.quantity}${fifoLot.uom}, nhập ${fmt(fifoLot.created_at)})`;
-      if ($("flmu_name")) $("flmu_name").value = "";
-      if ($("flmu_uom")) $("flmu_uom").value = fifoLot.uom || m.uom || "";
-    } else {
-      if ($("flmu_mat_lot")) $("flmu_mat_lot").value = "";
-      if ($("flmu_mat_txt")) $("flmu_mat_txt").value = "";
-      if ($("flmu_name")) $("flmu_name").value = m.material_name || "";
-      if ($("flmu_uom")) $("flmu_uom").value = m.uom || "";
+    if (!m.material_id || !flmuHandle) {
+      toast(`"${m.material_name || m.material_code}" không có vật tư thật trong danh mục — tự tìm và chọn tay ở ô Vật tư bên dưới.`, "err");
+      return;
     }
     if ($("flmu_qty")) $("flmu_qty").value = m.qty_planned || "";
+    // Set SL TRƯỚC rồi mới pickMaterial() (gọi refreshSuggest() nội bộ ngay sau khi chọn vật tư)
+    // — nếu làm ngược lại, gợi ý FIFO sẽ tính với SL cũ/0 vì set qty bằng .value = không tự bắn
+    // sự kiện "input".
+    flmuHandle.pickMaterial(m.material_id, flmuMatById[m.material_id] ? flmuMatById[m.material_id].name : m.material_name);
   });
   if ($("fl_finish")) $("fl_finish").onclick = () => guard(async () => {
     await POST(`/batch-filter-lots/${filterLotId}/finish-filtering`, {});
@@ -3685,7 +3674,7 @@ async function showBatchPackLot(packLotId) {
     <div class="muted" style="margin-top:8px">${pkQc.can_release ? '<span style="color:var(--green)">✓ Đã đủ chỉ tiêu bắt buộc</span>' :
       pkQc.pending.length ? `⚠ Còn thiếu: ${pkQc.pending.map(esc).join(", ")}` :
       '<span style="color:var(--red)">✗ Có chỉ tiêu bắt buộc không đạt (FAIL)</span>'}</div>`}
-    ${materialUsageSectionHtml("pkmu", matUsage, lk)}
+    ${materialUsageSectionHtml("pkmu", matUsage, lk, p.ended_at)}
     <div class="row" style="margin-top:10px">
       ${p.approved ? "" : '<button class="btn sm sec" id="pk_approve">✔ Duyệt KCS</button>'}
       ${(p.approved && !p.stocked) ? '<button class="btn sm sec" id="pk_release_wms">📦 Duyệt nhập kho TP</button>' : ""}
@@ -3697,6 +3686,7 @@ async function showBatchPackLot(packLotId) {
     </div>`;
   wireMaterialUsageSection("pkmu", lots, materials,
     { postUrl: `/batch-pack-lots/${packLotId}/materials`, deleteBaseUrl: `/batch-pack-lots/materials`,
+      suggestUrl: `/batch-pack-lots/${packLotId}/materials/suggest`,
       onChange: () => showBatchPackLot(packLotId) });
   $("pk_ebr").onclick = () => openPackLotEBR(packLotId);
   $("pk_audit").onclick = (e) => { e.preventDefault(); document.querySelector('[data-view="audit"]').click(); setTimeout(() => { $("au_entity").value = packLotId; $("au_load").click(); }, 50); };
@@ -3750,65 +3740,116 @@ async function showBatchPackLot(packLotId) {
 // (yêu cầu người dùng 2026-09-01) — lấy theo FIFO (cũ nhất trước, gõ-để-tìm thay <select> dài
 // mirror wireSearchableSelect ở Kho NVL) + BẮT BUỘC ghi lý do nếu chọn lô KHÁC lô FIFO cũ nhất.
 // `prefix` ("flmu"/"pkmu") tách id để dùng chung 1 cặp hàm cho cả lô lọc và lô thành phẩm.
-function materialUsageSectionHtml(prefix, usage, locked) {
-  return `<h3 style="margin-top:16px">Nguyên liệu ${prefix === "flmu" ? "lọc" : "chiết"}</h3>
+function materialUsageSectionHtml(prefix, usage, locked, endedAt) {
+  // "Ngày cấp" LUÔN = giờ kết thúc mẻ lọc/mẻ chiết (endedAt — BatchFilterLot.ended_at /
+  // BatchPackLot.ended_at), KHÔNG cho khai tay nữa (yêu cầu người dùng 2026-09-16: "lấy ngày
+  // cấp là ngày kết thúc của mẻ lọc và mẻ chiết, không cho tự điền") — khác "Ngày tạo" (giờ ghi
+  // vào hệ thống, luôn utcnow() thật). Chưa có endedAt thì KHÔNG cho thêm nguyên liệu (không có
+  // mốc để trừ tồn kho đúng).
+  const stageLabel = prefix === "flmu" ? "lọc" : "chiết";
+  return `<h3 style="margin-top:16px">Nguyên liệu ${stageLabel}</h3>
     <div class="tablewrap"><table>
-      <thead><tr><th>Nguyên liệu</th><th>Số lô PM</th><th>Ngày lô</th><th>FIFO</th><th>Lý do (nếu khác FIFO)</th><th>Số lượng</th><th>ĐVT</th><th></th></tr></thead>
+      <thead><tr><th>Nguyên liệu</th><th>Số lô PM</th><th>Ngày lô</th><th>Ngày tạo</th><th>Ngày cấp</th><th>FIFO</th><th>Lý do (nếu khác FIFO)</th><th>Số lượng</th><th>ĐVT</th><th></th></tr></thead>
       <tbody>${usage.map(u => `<tr>
         <td>${esc(u.material_name)}</td><td class="muted">${esc(u.lot_pm || "—")}</td>
         <td class="muted">${u.lot_date ? fmt(u.lot_date) : "—"}</td>
+        <td class="muted">${u.created_at ? fmt(u.created_at) : "—"}</td>
+        <td class="muted">${u.supply_date ? fmt(u.supply_date) : "—"}</td>
         <td>${fifoBadgeHtml(u.fifo_ok)}</td>
         <td class="muted">${esc(u.reason || "—")}</td>
         <td>${u.quantity}</td><td>${esc(u.uom)}</td>
         <td>${locked ? "" : `<button class="btn sm sec" data-delmatusage="${esc(u.usage_id)}">Xóa</button>`}</td></tr>`).join("") ||
-        `<tr><td colspan=8 class="muted">Chưa ghi nguyên liệu nào cho lô này.</td></tr>`}</tbody>
+        `<tr><td colspan=10 class="muted">Chưa ghi nguyên liệu nào cho lô này.</td></tr>`}</tbody>
     </table></div>
-    ${locked ? '<div class="muted" style="margin-top:6px">🔒 Hồ sơ EBR đã khóa — không thêm/sửa/xóa được nữa.</div>' : `
-    <div class="muted" style="margin-top:6px">+ Thêm nguyên liệu — lấy từ tồn kho <b>Kho phân xưởng</b> (chọn lô sẽ trừ tồn kho thật ngay), gõ để tìm vật tư; chọn lô khác lô FIFO (cũ nhất) phải ghi rõ lý do.</div>
+    ${locked ? '<div class="muted" style="margin-top:6px">🔒 Hồ sơ EBR đã khóa — không thêm/sửa/xóa được nữa.</div>' :
+      !endedAt ? `<div class="muted" style="margin-top:6px;color:var(--red)">⚠ Lô ${stageLabel} chưa có "Giờ kết thúc" — kết thúc mẻ ${stageLabel} trước khi thêm nguyên liệu (Ngày cấp lấy đúng giờ kết thúc này).</div>` : `
+    <div class="muted" style="margin-top:6px">+ Thêm nguyên liệu — chọn VẬT TƯ (hệ thống tự lấy đúng lô theo FIFO tại tồn kho <b>Kho phân xưởng</b> ĐÚNG THỜI ĐIỂM kết thúc mẻ ${stageLabel} — ${esc(fmt(endedAt))}, không phải tồn hiện tại); không đủ tồn tại thời điểm đó sẽ báo thiếu và không cho thêm.</div>
     <div class="row" style="margin-top:4px">
-      <div class="field" style="min-width:280px"><label>Tìm vật tư trong tồn Kho phân xưởng</label>
+      <div class="field" style="min-width:280px"><label>Vật tư (tồn Kho phân xưởng)</label>
         <input id="${prefix}_mat_txt" placeholder="Gõ tên vật tư..." autocomplete="off"/>
-        <input type="hidden" id="${prefix}_mat_lot"/></div>
-      <div class="field"><label>Hoặc tên tự do</label><input id="${prefix}_name" placeholder="(nếu không chọn ở trên)"/></div>
+        <input type="hidden" id="${prefix}_mat_id"/></div>
       <div class="field"><label>SL thực tế</label><input id="${prefix}_qty" type="number" value="0" style="width:100px"/></div>
-      <div class="field"><label>ĐVT</label><input id="${prefix}_uom" value="kg" size="4" readonly title="Tự động lấy theo đơn vị của nguyên vật liệu đã chọn — không sửa tay được"/></div>
+      <div class="field"><label>ĐVT</label><input id="${prefix}_uom" value="" size="4" readonly title="Tự động lấy theo đơn vị của vật tư đã chọn"/></div>
+      <div class="field" style="min-width:260px"><label>Lô sẽ dùng <span class="muted" style="font-weight:400">(gợi ý FIFO)</span></label>
+        <select id="${prefix}_override_lot"><option value="">— Tự động theo FIFO —</option></select></div>
       <div class="field" style="flex:1;min-width:220px"><label>Lý do <span class="muted" style="font-weight:400">(bắt buộc nếu chọn lô khác FIFO)</span></label><input id="${prefix}_reason" placeholder="VD: lô cũ đã hết chỗ chứa"/></div>
       <button class="btn sm" id="${prefix}_add" style="align-self:flex-end">+ Thêm</button>
-    </div>`}`;
+    </div>
+    <div id="${prefix}_suggest" class="muted" style="margin-top:6px"></div>`}`;
 }
 function wireMaterialUsageSection(prefix, lots, materials, opts) {
-  // Hồ sơ đã khóa -> materialUsageSectionHtml không render form "+ Thêm"/nút "Xóa" nào cả (xem
-  // đó) — không có gì để wire (2026-09-02, audit module "Mẻ sản xuất": trước đây HTML vẫn luôn
-  // render form dù đã khóa, chỉ bị chặn SAU KHI bấm Lưu bằng lỗi 409 từ server).
+  // Hồ sơ đã khóa HOẶC chưa có "Ngày cấp" (endedAt) -> materialUsageSectionHtml không render
+  // form "+ Thêm" (xem đó) — không có gì để wire (2026-09-02, audit "Mẻ sản xuất": trước đây
+  // HTML vẫn luôn render form dù đã khóa, chỉ bị chặn SAU KHI bấm Lưu bằng lỗi 409 từ server).
   if (!$(`${prefix}_add`)) return;
   const matById = Object.fromEntries(materials.map(m => [m.material_id, m]));
   const workshopLots = sortLotsFifo(lots.filter(l => l.quantity > 0 && l.status !== "on_hold" && /phân xưởng/i.test(l.location || "")));
-  const oldestByMaterial = {};
-  workshopLots.forEach(l => { if (l.material_id && !(l.material_id in oldestByMaterial)) oldestByMaterial[l.material_id] = l.lot_id; });
-  const items = workshopLots.map(l => {
+  // Chọn theo VẬT TƯ (không phải lô — yêu cầu người dùng 2026-09-16: bỏ "tên tự do", hệ thống tự
+  // chọn lô FIFO tại đúng thời điểm "Ngày cấp") — mỗi vật tư CÓ tồn ở Kho phân xưởng hiện 1 dòng,
+  // ĐVT lấy theo lô đầu tiên gặp (mọi lô cùng vật tư luôn cùng ĐVT).
+  const matItems = [];
+  const seenMat = new Set();
+  workshopLots.forEach(l => {
+    if (!l.material_id || seenMat.has(l.material_id)) return;
+    seenMat.add(l.material_id);
     const mat = matById[l.material_id];
-    const isOldest = !l.material_id || oldestByMaterial[l.material_id] === l.lot_id;
-    return { value: l.lot_id, isOldest, uom: l.uom,
-      label: `${mat ? mat.name : l.lot_code} — lô ${l.lot_code} (còn ${l.quantity}${l.uom}, nhập ${fmt(l.created_at)})${isOldest ? "" : " ⚠ không phải lô FIFO"}` };
+    matItems.push({ value: l.material_id, uom: l.uom, label: mat ? mat.name : l.lot_code });
   });
-  // ĐVT LUÔN lấy theo đơn vị thật của lô NVL đã chọn — không cho gõ tay để tránh ghi sai đơn vị
-  // so với tồn kho thật (yêu cầu người dùng 2026-09-01).
-  wireSearchableSelect(`${prefix}_mat_txt`, `${prefix}_mat_lot`, items,
-    (item) => { $(`${prefix}_uom`).value = item.uom || "kg"; });
+  const lotsByMaterial = (materialId) => sortLotsFifo(workshopLots.filter(l => l.material_id === materialId));
+
+  const renderOverrideOptions = (materialId) => {
+    const sel = $(`${prefix}_override_lot`);
+    if (!sel) return;
+    const mLots = lotsByMaterial(materialId);
+    sel.innerHTML = '<option value="">— Tự động theo FIFO —</option>' +
+      mLots.map((l, i) => `<option value="${esc(l.lot_id)}">${esc(l.lot_code)} (còn ${l.quantity}${esc(l.uom)}, nhập ${fmt(l.created_at)})${i === 0 ? "" : " ⚠ không phải lô FIFO"}</option>`).join("");
+  };
+
+  let suggestSeq = 0;
+  const refreshSuggest = async () => {
+    const box = $(`${prefix}_suggest`);
+    const materialId = $(`${prefix}_mat_id`).value;
+    const qty = parseFloat($(`${prefix}_qty`).value);
+    if (!box) return;
+    if (!materialId || !qty || qty <= 0) { box.innerHTML = ""; return; }
+    const seq = ++suggestSeq;
+    box.innerHTML = "Đang tính gợi ý FIFO...";
+    try {
+      const r = await GET(`${opts.suggestUrl}?material_id=${encodeURIComponent(materialId)}&quantity=${qty}`);
+      if (seq !== suggestSeq) return;   // trả lời chậm của lần gõ trước — bỏ qua, đã có lần mới hơn
+      if (r.shortfall > 0) {
+        box.innerHTML = `<span style="color:var(--red)">⚠ Thiếu ${r.shortfall}${$(`${prefix}_uom`).value || ""} tồn kho phân xưởng TẠI THỜI ĐIỂM kết thúc mẻ — không đủ để thêm.</span>` +
+          (r.picks.length ? ` (đã tìm được: ${r.picks.map(p => `lô ${esc(p.lot_code)} (${p.quantity}${esc(p.uom)})`).join(", ")})` : "");
+      } else {
+        box.innerHTML = `<span style="color:var(--green)">Sẽ lấy: ${r.picks.map(p => `lô ${esc(p.lot_code)} (${p.quantity}${esc(p.uom)})`).join(", ") || "—"}</span>`;
+      }
+    } catch (e) {
+      if (seq === suggestSeq) box.innerHTML = `<span style="color:var(--red)">${esc(e.message || "Không tính được gợi ý.")}</span>`;
+    }
+  };
+
+  const onMaterialPicked = (materialId, label) => {
+    $(`${prefix}_mat_id`).value = materialId || "";
+    $(`${prefix}_mat_txt`).value = label || "";
+    const item = matItems.find(i => i.value === materialId);
+    $(`${prefix}_uom`).value = (item && item.uom) || "";
+    renderOverrideOptions(materialId);
+    refreshSuggest();
+  };
+  wireSearchableSelect(`${prefix}_mat_txt`, `${prefix}_mat_id`, matItems,
+    (item) => onMaterialPicked(item.value, item.label));
+  $(`${prefix}_qty`).addEventListener("input", refreshSuggest);
+  $(`${prefix}_override_lot`).addEventListener("change", refreshSuggest);
+
   $(`${prefix}_add`).onclick = () => guard(async () => {
-    const lotId = $(`${prefix}_mat_lot`).value || null;
-    const name = $(`${prefix}_name`).value.trim() || null;
-    if (!lotId && !name) throw new Error("Chọn nguyên liệu từ tồn kho Kho phân xưởng, hoặc nhập tên tự do.");
+    const materialId = $(`${prefix}_mat_id`).value || null;
+    if (!materialId) throw new Error("Chọn vật tư từ tồn kho Kho phân xưởng.");
     const qty = parseFloat($(`${prefix}_qty`).value);
     if (!qty || qty <= 0) throw new Error("Số lượng phải > 0.");
-    const reason = $(`${prefix}_reason`).value.trim();
-    if (lotId) {
-      const item = items.find(i => i.value === lotId);
-      if (item && !item.isOldest && !reason) throw new Error("Lô đã chọn không phải lô FIFO (cũ nhất) của vật tư này — bắt buộc nhập Lý do.");
-    }
-    await POST(opts.postUrl, { lot_id: lotId, material_name: name, quantity: qty,
-      uom: $(`${prefix}_uom`).value.trim() || "kg", reason: reason || null });
-    toast("Đã thêm nguyên liệu" + (lotId ? " — đã trừ tồn Kho phân xưởng" : ""));
+    const lotId = $(`${prefix}_override_lot`).value || null;
+    const reason = $(`${prefix}_reason`).value.trim() || null;
+    await POST(opts.postUrl, { material_id: materialId, lot_id: lotId, quantity: qty, reason });
+    toast("Đã thêm nguyên liệu — đã trừ tồn Kho phân xưởng");
     opts.onChange();
   });
   document.querySelectorAll("[data-delmatusage]").forEach(b => b.onclick = () => guard(async () => {
@@ -3816,6 +3857,10 @@ function wireMaterialUsageSection(prefix, lots, materials, opts) {
     await DELETE(`${opts.deleteBaseUrl}/${b.dataset.delmatusage}`);
     toast("Đã xóa"); opts.onChange();
   }));
+  // Trả ra pickMaterial() để nơi gọi (VD nút gợi ý vật tư từ lệnh lọc) điền sẵn vật tư + SL vào
+  // form mà không cần thao tác chuột qua wireSearchableSelect (yêu cầu người dùng 2026-09-16,
+  // thay thế cơ chế điền tay cũ dựa vào các field lot/tên tự do đã bỏ).
+  return { pickMaterial: onMaterialPicked };
 }
 
 // ---- EBR neo ở lô thành phẩm (blueprint mới) — gộp cả cây genealogy ngược tới mẻ nấu gốc ----
@@ -5645,15 +5690,15 @@ VIEWS.warehouse_kc = async function () {
         <div class="muted" style="margin-bottom:6px">Thủ kho phân xưởng gửi đề nghị (tab Kho phân xưởng → Điều chuyển) — chưa
           động tồn kho, chỉ khi duyệt ở đây lệnh mới thật sự chuyển. Sau khi duyệt, chỉ ADMIN mới "Hoàn tác" được.</div>
         <div class="tablewrap"><table id="t_pxpending">
-          <thead><tr><th>Ngày tạo</th><th>Số đề nghị</th><th>Vật tư</th><th>Lô</th><th>SL</th><th>Lý do</th><th>Người tạo</th>${canApproveTransferPx ? "<th></th>" : ""}</tr></thead>
+          <thead><tr><th>Ngày tạo</th><th>Ngày đề nghị điều chuyển</th><th>Số đề nghị</th><th>Vật tư</th><th>Lô</th><th>SL</th><th>Lý do</th><th>Người tạo</th>${canApproveTransferPx ? "<th></th>" : ""}</tr></thead>
           <tbody>${pxPending.map(r => transferPxRequestRowHtml(r, matByIdGiao, lotByIdGiao, canApproveTransferPx, isAdminGiao)).join("") ||
-            `<tr><td colspan="${canApproveTransferPx ? 8 : 7}" class="muted">Không có đề nghị nào đang chờ.</td></tr>`}</tbody>
+            `<tr><td colspan="${canApproveTransferPx ? 9 : 8}" class="muted">Không có đề nghị nào đang chờ.</td></tr>`}</tbody>
         </table></div>
         <h4 style="margin-top:14px">Lịch sử đề nghị đã xử lý <span class="muted">(${pxDone.length})</span></h4>
         <div class="tablewrap"><table id="t_pxdone">
-          <thead><tr><th>Ngày tạo</th><th>Số đề nghị</th><th>Vật tư</th><th>Lô</th><th>SL</th><th>Lý do</th><th>Trạng thái</th><th>Người xử lý</th>${isAdminGiao ? "<th></th>" : ""}</tr></thead>
+          <thead><tr><th>Ngày tạo</th><th>Ngày đề nghị điều chuyển</th><th>Số đề nghị</th><th>Vật tư</th><th>Lô</th><th>SL</th><th>Lý do</th><th>Trạng thái</th><th>Người xử lý</th>${isAdminGiao ? "<th></th>" : ""}</tr></thead>
           <tbody>${pxDone.map(r => transferPxRequestHistoryRowHtml(r, matByIdGiao, lotByIdGiao, isAdminGiao)).join("") ||
-            `<tr><td colspan="${isAdminGiao ? 8 : 7}" class="muted">Chưa có đề nghị nào đã xử lý.</td></tr>`}</tbody>
+            `<tr><td colspan="${isAdminGiao ? 9 : 8}" class="muted">Chưa có đề nghị nào đã xử lý.</td></tr>`}</tbody>
         </table></div>
       </div>
 
@@ -5666,6 +5711,7 @@ VIEWS.warehouse_kc = async function () {
           <select id="dcnm_lot">${companyLotOptsGiao}</select></div>
           <div class="field"><label>SL</label><input id="dcnm_qty" type="number" value="50"/></div>
           <div class="field"><label>Nhà máy đến</label><select id="dcnm_factory">${activeFactoryOpts}</select></div>
+          <div class="field"><label>Ngày đề nghị điều chuyển (tuỳ chọn)</label><input id="dcnm_date" type="date"/></div>
           <div class="field" style="flex:1"><label>Lý do (tuỳ chọn)</label><input id="dcnm_reason" placeholder="(tuỳ chọn)"/></div>
           <button class="btn sec" id="dcnm_do" style="align-self:flex-end">Điều chuyển</button></div>`
           : '<div class="muted">Bạn không có quyền điều chuyển sang nhà máy khác.</div>'}
@@ -5681,20 +5727,21 @@ VIEWS.warehouse_kc = async function () {
           <input id="dckp_lot_q" placeholder="Tìm nhanh (gõ mã/tên vật tư)..." style="margin-bottom:2px"/>
           <select id="dckp_lot">${companyLotOptsGiao}</select></div>
           <div class="field"><label>SL</label><input id="dckp_qty" type="number" value="50"/></div>
+          <div class="field"><label>Ngày đề nghị điều chuyển (tuỳ chọn)</label><input id="dckp_date" type="date"/></div>
           <div class="field" style="flex:1"><label>Lý do (tuỳ chọn)</label><input id="dckp_reason" placeholder="(tuỳ chọn)"/></div>
           <button class="btn sec" id="dckp_do" style="align-self:flex-end">Gửi đề nghị</button></div>`
           : '<div class="muted">Bạn không có quyền tạo đề nghị điều chuyển.</div>'}
         <h4 style="margin-top:14px">Đang chờ Phân xưởng duyệt <span class="muted">(${kcpxPending.length})</span></h4>
         <div class="tablewrap"><table id="t_kcpx_pending">
-          <thead><tr><th>Ngày tạo</th><th>Số đề nghị</th><th>Mã VT</th><th>Tên vật tư</th><th>Lô</th><th>SL</th><th>Người tạo</th><th>Trạng thái QC</th><th></th></tr></thead>
+          <thead><tr><th>Ngày tạo</th><th>Số đề nghị</th><th>Mã VT</th><th>Tên vật tư</th><th>Lô</th><th>SL</th><th>Người tạo</th><th>Ngày đề nghị điều chuyển</th><th>Trạng thái QC</th><th></th></tr></thead>
           <tbody>${kcpxPending.map(r => transferKcPxKcRowHtml(r, matByIdGiao, lotByIdGiao, qcReqSetGiao)).join("") ||
-            `<tr><td colspan=9 class="muted">Không có đề nghị nào đang chờ.</td></tr>`}</tbody>
+            `<tr><td colspan=10 class="muted">Không có đề nghị nào đang chờ.</td></tr>`}</tbody>
         </table></div>
         <h4 style="margin-top:14px">Lịch sử đã xử lý <span class="muted">(${kcpxDone.length})</span></h4>
         <div class="tablewrap"><table id="t_kcpx_done">
-          <thead><tr><th>Ngày tạo</th><th>Số đề nghị</th><th>Mã VT</th><th>Tên vật tư</th><th>Lô</th><th>SL</th><th>Trạng thái</th><th>Người xử lý</th></tr></thead>
+          <thead><tr><th>Ngày tạo</th><th>Số đề nghị</th><th>Mã VT</th><th>Tên vật tư</th><th>Lô</th><th>SL</th><th>Ngày đề nghị điều chuyển</th><th>Trạng thái</th><th>Người xử lý</th></tr></thead>
           <tbody>${kcpxDone.map(r => transferKcPxHistoryRowHtml(r, matByIdGiao, lotByIdGiao)).join("") ||
-            `<tr><td colspan=8 class="muted">Chưa có đề nghị nào đã xử lý.</td></tr>`}</tbody>
+            `<tr><td colspan=9 class="muted">Chưa có đề nghị nào đã xử lý.</td></tr>`}</tbody>
         </table></div>
       </div></div>`;
   } else if (sec === "tra") {
@@ -6062,13 +6109,15 @@ VIEWS.warehouse_kc = async function () {
       if (!$("dcnm_lot").value) throw new Error("Không có lô nào đang ở kho công ty để điều chuyển.");
       if (!$("dcnm_factory").value) throw new Error("Chưa có nhà máy nào trong danh mục — vào Danh mục để tạo trước.");
       await POST("/warehouse/transfer-to-factory", { lot_id: $("dcnm_lot").value, quantity: parseFloat($("dcnm_qty").value),
-        factory_id: $("dcnm_factory").value, reason: $("dcnm_reason").value.trim() || null });
+        factory_id: $("dcnm_factory").value, reason: $("dcnm_reason").value.trim() || null,
+        requested_transfer_date: dateInputToIsoNoon($("dcnm_date").value) });
       toast("Đã điều chuyển sang nhà máy khác"); render("warehouse_kc");
     });
     if ($("dckp_do")) $("dckp_do").onclick = () => guard(async () => {
       if (!$("dckp_lot").value) throw new Error("Không có lô nào đang ở kho công ty để điều chuyển.");
       await POST("/warehouse/transfer-kcpx-requests", { lot_id: $("dckp_lot").value,
-        quantity: parseFloat($("dckp_qty").value), reason: $("dckp_reason").value.trim() || null });
+        quantity: parseFloat($("dckp_qty").value), reason: $("dckp_reason").value.trim() || null,
+        requested_transfer_date: dateInputToIsoNoon($("dckp_date").value) });
       toast("Đã gửi đề nghị điều chuyển sang Phân xưởng — chờ Phân xưởng duyệt"); render("warehouse_kc");
     });
     document.querySelectorAll("[data-kcpxdcedit]").forEach(b => b.onclick = () =>
@@ -6192,14 +6241,15 @@ VIEWS.warehouse_px = async function () {
       <input class="searchbox" data-tbl="t_px" placeholder="Tìm mã lô/vật tư..." style="margin-bottom:8px"/>
       <div id="px_total" class="muted" style="margin-bottom:6px"></div>
       <div class="tablewrap"><table id="t_px">
-        <thead><tr><th>Lô</th><th>Vật tư</th><th>Tên vật tư</th><th>SL tính đến ngày</th><th>Vị trí (ước tính)</th></tr></thead>
+        <thead><tr><th>Lô</th><th>Vật tư</th><th>Tên vật tư</th><th>Ngày nhập</th><th>SL tính đến ngày</th><th>Vị trí (ước tính)</th></tr></thead>
         <tbody>${asOfRows.map(l => `<tr data-qty="${l.quantity}" data-uom="${esc(l.uom)}">
           <td><code class="k">${esc(l.lot_code)}</code></td>
           <td class="muted">${esc(l.material_code)}</td>
           <td>${esc(l.material_name)}</td>
+          <td class="muted">${l.created_at ? fmt(l.created_at) : "—"}</td>
           <td>${l.quantity} ${l.uom}</td>
           <td class="muted">${esc(l.location || "—")}</td></tr>`).join("") ||
-          `<tr><td colspan=5 class="muted">Không có lô nào tại ngày này ở ${esc(pxLoc || "kho nào")}.</td></tr>`}</tbody>
+          `<tr><td colspan=6 class="muted">Không có lô nào tại ngày này ở ${esc(pxLoc || "kho nào")}.</td></tr>`}</tbody>
       </table></div>
     </div>`;
   } else if (sec === "tondau") {
@@ -6260,14 +6310,15 @@ VIEWS.warehouse_px = async function () {
       const mat = lot ? matById[lot.material_id] : null;
       return `<tr>
         <td class="muted">${fmt(r.created_at)}</td>
+        <td class="muted">${r.requested_transfer_date ? fmt(r.requested_transfer_date) : "—"}</td>
         <td><code class="k">${esc(r.request_code)}</code></td>
         <td>${esc(mat ? mat.code : "—")}</td>
         <td class="muted">${lotCodeCellHtml(lot)}</td>
         <td>${r.quantity} ${esc(r.uom)}</td>
         <td class="muted">${esc(r.reason || "")}</td>
         <td>${badge(r.status)}</td>
-        ${transferEditDelCell(r, "data-pxdcedit", "data-pxdcdel")}</tr>`;
-    }).join("") || `<tr><td colspan=8 class="muted">Chưa có đề nghị nào.</td></tr>`;
+        ${transferEditDelCell(r, "data-pxdcedit", "data-pxdcdel", r.requested_transfer_date)}</tr>`;
+    }).join("") || `<tr><td colspan=9 class="muted">Chưa có đề nghị nào.</td></tr>`;
     const kcpxPendingPx = kcpxRequestsPx.filter(r => r.status === "pending").sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
     const kcpxDonePx = kcpxRequestsPx.filter(r => r.status !== "pending").sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
     const kcpxPendingRows = kcpxPendingPx.map(r => {
@@ -6276,6 +6327,7 @@ VIEWS.warehouse_px = async function () {
       const qcBlocked = lot && qcReqSetKcpx.has(lot.material_id) && lot.status === "on_hold";
       return `<tr>
         <td class="muted">${fmt(r.created_at)}</td>
+        <td class="muted">${r.requested_transfer_date ? fmt(r.requested_transfer_date) : "—"}</td>
         <td><code class="k">${esc(r.request_code)}</code></td>
         <td>${esc(mat ? mat.code : "—")}</td>
         <td>${esc(mat ? mat.name : "—")}</td>
@@ -6286,7 +6338,7 @@ VIEWS.warehouse_px = async function () {
         ${canApproveKcpx ? `<td style="white-space:nowrap">
           <button class="btn sm" data-kcpxapprove="${esc(r.request_id)}" ${qcBlocked ? "disabled title=\"Đang chờ KCS duyệt chỉ tiêu chất lượng\"" : ""}>Duyệt</button>
           <button class="btn sm sec" data-kcpxreject="${esc(r.request_id)}">Từ chối</button></td>` : ""}</tr>`;
-    }).join("") || `<tr><td colspan="${canApproveKcpx ? 9 : 8}" class="muted">Không có đề nghị nào đang chờ.</td></tr>`;
+    }).join("") || `<tr><td colspan="${canApproveKcpx ? 10 : 9}" class="muted">Không có đề nghị nào đang chờ.</td></tr>`;
     const kcpxDoneRows = kcpxDonePx.map(r => {
       const lot = lotByIdPxDc[r.lot_id];
       const mat = lot ? matById[lot.material_id] : null;
@@ -6299,6 +6351,7 @@ VIEWS.warehouse_px = async function () {
       } else if (isAdminDc) actionCellKcpx = "<td></td>";
       return `<tr>
         <td class="muted">${fmt(r.created_at)}</td>
+        <td class="muted">${r.requested_transfer_date ? fmt(r.requested_transfer_date) : "—"}</td>
         <td><code class="k">${esc(r.request_code)}</code></td>
         <td>${esc(mat ? mat.code : "—")}</td>
         <td>${esc(mat ? mat.name : "—")}</td>
@@ -6308,7 +6361,7 @@ VIEWS.warehouse_px = async function () {
         <td>${badge(r.status)}</td>
         <td class="muted">${esc(processedBy || "")}</td>
         ${actionCellKcpx}</tr>`;
-    }).join("") || `<tr><td colspan="${isAdminDc ? 9 : 8}" class="muted">Chưa có đề nghị nào đã xử lý.</td></tr>`;
+    }).join("") || `<tr><td colspan="${isAdminDc ? 10 : 9}" class="muted">Chưa có đề nghị nào đã xử lý.</td></tr>`;
     body = `<div class="split">
       <div class="panel"><h2>Gửi đề nghị về Kho công ty</h2>
       <div class="muted" style="margin-bottom:6px">Gửi đề nghị điều chuyển 1 lô đang ở Kho phân xưởng về lại Kho công ty —
@@ -6318,12 +6371,13 @@ VIEWS.warehouse_px = async function () {
         <input id="dcpx_lot_q" placeholder="Tìm nhanh (gõ mã/tên vật tư)..." style="margin-bottom:2px"/>
         <select id="dcpx_lot">${workshopLotOpts}</select></div>
         <div class="field"><label>SL</label><input id="dcpx_qty" type="number" value="50"/></div>
+        <div class="field"><label>Ngày đề nghị điều chuyển (tuỳ chọn)</label><input id="dcpx_date" type="date"/></div>
         <div class="field" style="flex:1"><label>Lý do (tuỳ chọn)</label><input id="dcpx_reason" placeholder="(tuỳ chọn)"/></div>
         <button class="btn" id="dcpx_do" style="align-self:flex-end">Gửi đề nghị</button></div>`
         : '<div class="muted">Bạn không có quyền tạo đề nghị điều chuyển.</div>'}
       <input class="searchbox" data-tbl="t_dcpx" placeholder="Tìm mã đề nghị/vật tư/lô..." style="margin-top:12px"/>
       <div class="tablewrap" style="margin-top:6px"><table id="t_dcpx">
-        <thead><tr><th>Ngày tạo</th><th>Số đề nghị</th><th>Vật tư</th><th>Lô</th><th>SL</th><th>Lý do</th><th>Trạng thái</th><th></th></tr></thead>
+        <thead><tr><th>Ngày tạo</th><th>Ngày đề nghị điều chuyển</th><th>Số đề nghị</th><th>Vật tư</th><th>Lô</th><th>SL</th><th>Lý do</th><th>Trạng thái</th><th></th></tr></thead>
         <tbody>${pxRows}</tbody>
       </table></div>
       </div>
@@ -6333,12 +6387,12 @@ VIEWS.warehouse_px = async function () {
         để thật sự nhận (bắt buộc chọn vị trí cất). Nếu vật tư có chỉ tiêu chất lượng bắt buộc, phải chờ KCS duyệt xong (hết "Đang chờ
         KCS duyệt") mới duyệt được.</div>
       <div class="tablewrap"><table id="t_kcpx_pending_px">
-        <thead><tr><th>Ngày tạo</th><th>Số đề nghị</th><th>Mã VT</th><th>Tên vật tư</th><th>Lô</th><th>SL</th><th>Người tạo</th><th>Trạng thái QC</th>${canApproveKcpx ? "<th></th>" : ""}</tr></thead>
+        <thead><tr><th>Ngày tạo</th><th>Ngày đề nghị điều chuyển</th><th>Số đề nghị</th><th>Mã VT</th><th>Tên vật tư</th><th>Lô</th><th>SL</th><th>Người tạo</th><th>Trạng thái QC</th>${canApproveKcpx ? "<th></th>" : ""}</tr></thead>
         <tbody>${kcpxPendingRows}</tbody>
       </table></div>
       <h4 style="margin-top:14px">Lịch sử đã xử lý <span class="muted">(${kcpxDonePx.length})</span></h4>
       <div class="tablewrap"><table id="t_kcpx_done_px">
-        <thead><tr><th>Ngày tạo</th><th>Số đề nghị</th><th>Mã VT</th><th>Tên vật tư</th><th>Lô</th><th>SL</th><th>Vị trí cất</th><th>Trạng thái</th><th>Người xử lý</th>${isAdminDc ? "<th></th>" : ""}</tr></thead>
+        <thead><tr><th>Ngày tạo</th><th>Ngày đề nghị điều chuyển</th><th>Số đề nghị</th><th>Mã VT</th><th>Tên vật tư</th><th>Lô</th><th>SL</th><th>Vị trí cất</th><th>Trạng thái</th><th>Người xử lý</th>${isAdminDc ? "<th></th>" : ""}</tr></thead>
         <tbody>${kcpxDoneRows}</tbody>
       </table></div>
       </div></div>`;
@@ -6439,16 +6493,17 @@ VIEWS.warehouse_px = async function () {
         từng mẻ) — cho biết đúng công đoạn, mẻ, lô NVL đã dùng, khác với "Xuất tự do" (chỉ ghi lý do dạng tự do).</div>
       <input class="searchbox" data-tbl="t_nvlhist" placeholder="Tìm theo công đoạn, mẻ, vật tư, lô, người..." style="margin-bottom:8px;width:100%"/>
       <div class="tablewrap"><table id="t_nvlhist">
-        <thead><tr><th>Thời gian</th><th>Công đoạn</th><th>Mẻ</th><th>Vật tư</th><th>Lô NVL</th><th>SL</th><th>Người thực hiện</th></tr></thead>
+        <thead><tr><th>Ngày tạo</th><th>Ngày cấp</th><th>Công đoạn</th><th>Mẻ</th><th>Vật tư</th><th>Lô NVL</th><th>SL</th><th>Người thực hiện</th></tr></thead>
         <tbody>${rows.map(r => `<tr>
           <td class="muted">${fmt(r.ts)}</td>
+          <td class="muted">${r.supply_date ? fmt(r.supply_date) : "—"}</td>
           <td>${esc(r.stage)}</td>
           <td class="muted">${esc(r.batch_label || "")}</td>
           <td>${esc(r.material_name || "")}</td>
           <td class="muted">${esc(r.lot_code || "")}</td>
           <td>${r.quantity} ${esc(r.uom)}</td>
           <td class="muted">${esc(r.actor || "")}</td></tr>`).join("") ||
-          `<tr><td colspan=7 class="muted">Chưa có giao dịch xuất dùng NVL nào.</td></tr>`}</tbody>
+          `<tr><td colspan=8 class="muted">Chưa có giao dịch xuất dùng NVL nào.</td></tr>`}</tbody>
       </table></div>
     </div>`;
   } else if (sec === "vitri") {
@@ -6582,7 +6637,8 @@ VIEWS.warehouse_px = async function () {
     if ($("dcpx_do")) $("dcpx_do").onclick = () => guard(async () => {
       if (!$("dcpx_lot").value) throw new Error("Không có lô nào đang ở kho phân xưởng để điều chuyển.");
       await POST("/warehouse/transfer-px-requests", { lot_id: $("dcpx_lot").value, quantity: parseFloat($("dcpx_qty").value),
-        reason: $("dcpx_reason").value.trim() || null });
+        reason: $("dcpx_reason").value.trim() || null,
+        requested_transfer_date: dateInputToIsoNoon($("dcpx_date").value) });
       toast("Đã gửi đề nghị điều chuyển"); render("warehouse_px");
     });
     document.querySelectorAll("[data-kcpxapprove]").forEach(b => b.onclick = () => {
@@ -6794,6 +6850,7 @@ function transferPxRequestRowHtml(r, matById, lotById, canApprove, isAdmin) {
       <button class="btn sm sec" data-pxreject="${esc(r.request_id)}">Từ chối</button></td>` : "";
   return `<tr>
     <td class="muted">${fmt(r.created_at)}</td>
+    <td class="muted">${r.requested_transfer_date ? fmt(r.requested_transfer_date) : "—"}</td>
     <td><code class="k">${esc(r.request_code)}</code></td>
     <td>${esc(mat ? mat.code : "—")}</td>
     <td class="muted">${lotCodeCellHtml(lot)}</td>
@@ -6817,6 +6874,7 @@ function transferPxRequestHistoryRowHtml(r, matById, lotById, isAdmin) {
   }
   return `<tr>
     <td class="muted">${fmt(r.created_at)}</td>
+    <td class="muted">${r.requested_transfer_date ? fmt(r.requested_transfer_date) : "—"}</td>
     <td><code class="k">${esc(r.request_code)}</code></td>
     <td>${esc(mat ? mat.code : "—")}</td>
     <td class="muted">${lotCodeCellHtml(lot)}</td>
@@ -6868,27 +6926,36 @@ function sangNgangKcRowHtml(r, matById, lotById, qcReqSet) {
 // sẵn, xem services/warehouse.py::_transfer_kcpx_dict/_transfer_px_request_dict): còn pending,
 // và riêng chiều Công ty→Phân xưởng thêm điều kiện lô chưa được KCS duyệt xong (yêu cầu người
 // dùng 2026-09-14, mirror sangNgangEditDelCell).
-function transferEditDelCell(r, editAttr, delAttr) {
+function transferEditDelCell(r, editAttr, delAttr, requestedTransferDate) {
   if (!r.can_edit) return "<td></td>";
+  const dateAttr = requestedTransferDate !== undefined
+    ? ` data-txdate="${requestedTransferDate ? esc(toISODateLocal(new Date(requestedTransferDate))) : ""}"` : "";
   return `<td style="white-space:nowrap">
     <button class="btn sm sec" ${editAttr}="${esc(r.request_id)}" data-txcode="${esc(r.request_code)}"
-      data-txqty="${r.quantity}" data-txuom="${esc(r.uom)}" data-txreason="${esc(r.reason || "")}">Sửa</button>
+      data-txqty="${r.quantity}" data-txuom="${esc(r.uom)}" data-txreason="${esc(r.reason || "")}"${dateAttr}>Sửa</button>
     <button class="btn sm sec" ${delAttr}="${esc(r.request_id)}" style="color:var(--red)">Xóa</button></td>`;
 }
 
 // Modal sửa số lượng/lý do đề nghị điều chuyển (2 chiều) — mirror openSangNgangEditModal nhưng
-// đơn giản hơn (chỉ 2 trường, không đổi lô — xem services/warehouse.py::update_transfer_px_request/
+// đơn giản hơn (không đổi lô — xem services/warehouse.py::update_transfer_px_request/
 // update_transfer_kcpx_request). `apiPath`: đúng endpoint PUT theo chiều (px hoặc kcpx).
+// `ds.txdate` (chỉ có ở chiều Công ty->Phân xưởng, xem transferEditDelCell) hiện thêm ô "Ngày
+// đề nghị điều chuyển" (yêu cầu người dùng 2026-09-16) — undefined ở chiều Phân xưởng->Công ty
+// thì ẩn hẳn ô này, tránh gửi field server không hiểu tới nhầm chiều.
 function openTransferEditModal(requestId, ds, apiPath, viewName) {
-  const { txcode, txqty, txuom, txreason } = ds;
+  const { txcode, txqty, txuom, txreason, txdate } = ds;
+  const showDate = txdate !== undefined;
   modal(`<h3>Sửa đề nghị điều chuyển — <code class="k">${esc(txcode)}</code></h3>
-    <div class="muted" style="margin-bottom:10px">Chỉ sửa được số lượng/lý do — không đổi lô. Nếu đề nghị đã được xử lý, lưu sẽ báo lỗi.</div>
+    <div class="muted" style="margin-bottom:10px">Chỉ sửa được số lượng/lý do${showDate ? "/ngày đề nghị điều chuyển" : ""} — không đổi lô. Nếu đề nghị đã được xử lý, lưu sẽ báo lỗi.</div>
     <div class="row"><div class="field"><label>Số lượng</label><input id="etx_qty" type="number" value="${txqty}"/></div>
-      <div class="field"><label>ĐVT</label><input value="${esc(txuom)}" size="4" readonly/></div></div>
+      <div class="field"><label>ĐVT</label><input value="${esc(txuom)}" size="4" readonly/></div>
+      ${showDate ? `<div class="field"><label>Ngày đề nghị điều chuyển (tuỳ chọn)</label><input id="etx_date" type="date" value="${esc(txdate)}"/></div>` : ""}</div>
     <div class="row"><div class="field" style="flex:1"><label>Lý do (tuỳ chọn)</label><input id="etx_reason" value="${esc(txreason)}"/></div>
       <button class="btn" id="etx_save" style="align-self:flex-end">Lưu</button></div>`);
   $("etx_save").onclick = () => guard(async () => {
-    await PUT(`${apiPath}/${requestId}`, { quantity: parseFloat($("etx_qty").value), reason: $("etx_reason").value.trim() || null });
+    const payload = { quantity: parseFloat($("etx_qty").value), reason: $("etx_reason").value.trim() || null };
+    if (showDate) payload.requested_transfer_date = dateInputToIsoNoon($("etx_date").value);
+    await PUT(`${apiPath}/${requestId}`, payload);
     toast("Đã lưu"); closeModal(); render(viewName);
   });
 }
@@ -6905,8 +6972,9 @@ function transferKcPxKcRowHtml(r, matById, lotById, qcReqSet) {
     <td class="muted">${lotCodeCellHtml(lot)}</td>
     <td>${r.quantity} ${esc(r.uom)}</td>
     <td class="muted">${esc(r.created_by || "")}</td>
+    <td class="muted">${r.requested_transfer_date ? fmt(r.requested_transfer_date) : "—"}</td>
     <td>${sangNgangQcBadge(r, lotById, qcReqSet)}</td>
-    ${transferEditDelCell(r, "data-kcpxdcedit", "data-kcpxdcdel")}</tr>`;
+    ${transferEditDelCell(r, "data-kcpxdcedit", "data-kcpxdcdel", r.requested_transfer_date)}</tr>`;
 }
 
 function transferKcPxHistoryRowHtml(r, matById, lotById) {
@@ -6920,6 +6988,7 @@ function transferKcPxHistoryRowHtml(r, matById, lotById) {
     <td>${esc(mat ? mat.name : "—")}</td>
     <td class="muted">${lotCodeCellHtml(lot)}</td>
     <td>${r.quantity} ${esc(r.uom)}</td>
+    <td class="muted">${r.requested_transfer_date ? fmt(r.requested_transfer_date) : "—"}</td>
     <td>${badge(r.status)}${r.reversed ? ' <span class="muted" style="font-size:11px">(đã hoàn tác)</span>' : ""}</td>
     <td class="muted">${esc(processedBy || "")}</td></tr>`;
 }
@@ -7256,6 +7325,14 @@ function requestLineRowHtml(r, l, matById, lotById, canFulfill, allLots) {
     ? `<select class="reqlot-select" id="reqlot-${esc(l.line_id)}">${lotOpts.html}</select>`
     : `<span class="muted">${fulLot ? esc(fulLot.lot_code) : "—"}</span>`;
   const dateCell = showLotPicker ? "" : `<span class="muted">${fulLot ? fmt(fulLot.created_at) : "—"}</span>`;
+  // "Ngày xuất" = mốc hiệu lực THẬT của StockMovement transfer (ts) khi dòng đã xuất — ĐÚNG
+  // "Ngày đề nghị nhận kho" (r.requested_receipt_date) nếu phiếu có khai, mirror
+  // fulfill_request_line/fulfill_all_lines (luôn dùng field đó làm `ts`); nếu phiếu KHÔNG khai
+  // thì ts mặc định = lúc bấm Duyệt thật (≈ l.fulfilled_at) — không có field riêng lưu ts trên
+  // từng dòng nên xấp xỉ bằng fulfilled_at trong trường hợp này (yêu cầu người dùng 2026-09-16:
+  // "thêm cột ngày đề nghị nhận kho cho ... phiếu xuất").
+  const issuedAtCell = l.status !== "fulfilled" ? "" :
+    `<span class="muted">${fmt(r.requested_receipt_date || l.fulfilled_at)}</span>`;
   const dispLot = fulLot || (l.preferred_lot_id ? lotById[l.preferred_lot_id] : null);
   const dispLoc = dispLot && dispLot.location_id ? (WH_CACHE.matLocById || {})[dispLot.location_id] : null;
   const locCell = dispLoc ? `<code class="k">${esc(dispLoc.code)}</code>` : `<span class="muted">—</span>`;
@@ -7270,6 +7347,7 @@ function requestLineRowHtml(r, l, matById, lotById, canFulfill, allLots) {
     <td>${l.quantity} ${esc(l.uom)}</td>
     <td>${lotCell}</td>
     <td>${dateCell}</td>
+    <td>${issuedAtCell}</td>
     <td>${locCell}</td>
     <td>${l.status === "fulfilled" ? fulfilledFifoBadgeHtml(l.fifo_ok) : requestFifoBadgeHtml(l.material_id, l.preferred_lot_id, allLots)}</td>
     <td>${badge(REQ_STATUS_BADGE[l.status] || "planned")}${esc(l.status)}</td>
@@ -7367,9 +7445,9 @@ function requestBlockHtml(r, matById, lotById, canFulfill, showBulk, allLots, ca
       </div>
       <div class="reqdetail" style="display:none;margin-top:8px">
         <table>
-          <thead><tr><th>Vật tư</th><th>SL</th><th>Lô</th><th>Ngày nhập</th><th>Vị trí kho</th><th>FIFO</th><th>Trạng thái</th><th></th></tr></thead>
+          <thead><tr><th>Vật tư</th><th>SL</th><th>Lô</th><th>Ngày nhập</th><th>Ngày xuất</th><th>Vị trí kho</th><th>FIFO</th><th>Trạng thái</th><th></th></tr></thead>
           <tbody>${r.lines.map(l => requestLineRowHtml(r, l, matById, lotById, canFulfill, allLots)).join("") ||
-            '<tr><td colspan=8 class="muted">Phiếu không có dòng nào.</td></tr>'}</tbody>
+            '<tr><td colspan=9 class="muted">Phiếu không có dòng nào.</td></tr>'}</tbody>
         </table>
       </div>
     </div>`;

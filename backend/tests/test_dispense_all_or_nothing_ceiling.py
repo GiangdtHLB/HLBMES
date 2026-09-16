@@ -20,6 +20,7 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app import seed as seed_mod
+from app.common import utcnow
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -44,7 +45,23 @@ def admin_h(client):
     return _login(client, "admin", "AdminTest123")
 
 
+def _clear_seed_batch_9002(client, admin_h):
+    """seed.py cố tình để mẻ demo "9002" ở trạng thái "running, chưa cấp liệu lần nào" (demo màn
+    Cấp liệu) — với điều kiện cấp liệu mới (2026-09-15, _assert_dispensable), MỌI mẻ mà file test
+    này tạo ra SAU 9002 (cùng DB tạm) sẽ bị chặn cấp liệu vì "còn mẻ bắt đầu trước chưa cấp liệu".
+    File này không test tính năng xếp hàng đó — hủy 9002 trước khi tạo mẻ test để không bị chặn
+    oan. Gọi trực tiếp trong _new_batch/mỗi test (không dùng fixture riêng) để tránh phụ thuộc
+    thứ tự khởi tạo fixture cùng scope với _seeded."""
+    batches = client.get("/api/batches", headers=admin_h).json()
+    b9002 = next((b for b in batches if b.get("batch_code") == "9002"), None)
+    if b9002 and b9002["state"] in ("running", "held"):
+        r = client.post(f"/api/batches/{b9002['batch_id']}/transition", headers=admin_h,
+                        json={"target": "cancelled"})
+        assert r.status_code == 200, r.text
+
+
 def test_dispense_rolls_back_fully_when_a_later_line_exceeds_bom_ceiling(client, admin_h):
+    _clear_seed_batch_9002(client, admin_h)
     mat = client.post("/api/materials", headers=admin_h,
                       json={"code": "AON-CEIL-01", "name": "Vật tư AON ceiling", "uom": "kg"})
     assert mat.status_code == 201, mat.text
@@ -83,6 +100,13 @@ def test_dispense_rolls_back_fully_when_a_later_line_exceeds_bom_ceiling(client,
         "material_id": material_id, "quantity": 20, "uom": "kg", "location": "Kho phân xưởng"})
     assert lot.status_code == 200, lot.text
     lot_id = lot.json()["lot_id"]
+
+    # Điều kiện cấp liệu mới (yêu cầu người dùng 2026-09-15, services/dispense.py::
+    # _assert_dispensable) chặn cấp liệu khi mẻ chưa có start_at — set SAU khi đã nhận lô (tồn
+    # kho phân xưởng đối chiếu TẠI thời điểm bắt đầu mẻ, lô nhận trước start_at mới tính vào).
+    s = client.post(f"/api/batches/{batch_id}/start", headers=admin_h,
+                    json={"start_at": utcnow().isoformat()})
+    assert s.status_code == 200, s.text
 
     # 1 phiếu, 2 dòng CÙNG vật tư: 8kg (trong trần) + 5kg (8+5=13kg > 10.5kg trần) -> pha lập kế
     # hoạch (chỉ xét đủ tồn 20kg >= 13kg) cho qua cả 2 dòng; trần BOM chỉ bị phát hiện lúc THỰC

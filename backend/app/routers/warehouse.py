@@ -244,7 +244,8 @@ def undo_fulfill_line(request_id: str, line_id: str, db: Session = Depends(get_d
 @router.post("/transfer-px-requests", response_model=TransferPxRequestOut, status_code=201)
 def create_transfer_px_request(payload: TransferPxRequestIn, db: Session = Depends(get_db),
                                user: User = Depends(get_current_user)):
-    return svc.create_transfer_px_request(db, payload.lot_id, payload.quantity, user, payload.reason)
+    return svc.create_transfer_px_request(db, payload.lot_id, payload.quantity, user, payload.reason,
+                                          payload.requested_transfer_date)
 
 
 @router.get("/transfer-px-requests", response_model=list[TransferPxRequestOut])
@@ -256,7 +257,10 @@ def list_transfer_px_requests(status: str = None, limit: int = 500, offset: int 
 @router.put("/transfer-px-requests/{request_id}", response_model=TransferPxRequestOut)
 def update_transfer_px_request(request_id: str, payload: TransferQuantityUpdateIn, db: Session = Depends(get_db),
                                user: User = Depends(get_current_user)):
-    return svc.update_transfer_px_request(db, request_id, payload.quantity, payload.reason, user)
+    return svc.update_transfer_px_request(
+        db, request_id, payload.quantity, payload.reason, user,
+        requested_transfer_date=payload.requested_transfer_date,
+        requested_transfer_date_set="requested_transfer_date" in payload.model_fields_set)
 
 
 @router.delete("/transfer-px-requests/{request_id}", response_model=TransferPxRequestOut)
@@ -288,7 +292,8 @@ def undo_transfer_px_request(request_id: str, db: Session = Depends(get_db),
 @router.post("/transfer-kcpx-requests", response_model=TransferKcPxRequestOut, status_code=201)
 def create_transfer_kcpx_request(payload: TransferKcPxRequestIn, db: Session = Depends(get_db),
                                  user: User = Depends(get_current_user)):
-    return svc.create_transfer_kcpx_request(db, payload.lot_id, payload.quantity, user, payload.reason)
+    return svc.create_transfer_kcpx_request(db, payload.lot_id, payload.quantity, user, payload.reason,
+                                            payload.requested_transfer_date)
 
 
 @router.get("/transfer-kcpx-requests", response_model=list[TransferKcPxRequestOut])
@@ -300,7 +305,10 @@ def list_transfer_kcpx_requests(status: str = None, limit: int = 500, offset: in
 @router.put("/transfer-kcpx-requests/{request_id}", response_model=TransferKcPxRequestOut)
 def update_transfer_kcpx_request(request_id: str, payload: TransferQuantityUpdateIn, db: Session = Depends(get_db),
                                  user: User = Depends(get_current_user)):
-    return svc.update_transfer_kcpx_request(db, request_id, payload.quantity, payload.reason, user)
+    return svc.update_transfer_kcpx_request(
+        db, request_id, payload.quantity, payload.reason, user,
+        requested_transfer_date=payload.requested_transfer_date,
+        requested_transfer_date_set="requested_transfer_date" in payload.model_fields_set)
 
 
 @router.delete("/transfer-kcpx-requests/{request_id}", response_model=TransferKcPxRequestOut)
@@ -389,7 +397,7 @@ def delete_sang_ngang(request_id: str, db: Session = Depends(get_db),
 def transfer_to_factory(payload: TransferToFactoryIn, db: Session = Depends(get_db),
                         user: User = Depends(get_current_user)):
     return svc.transfer_to_factory(db, payload.lot_id, payload.quantity, payload.factory_id,
-                                   user, payload.reason)
+                                   user, payload.reason, payload.requested_transfer_date)
 
 
 @router.post("/movements/{movement_id}/approve-factory")
