@@ -2851,6 +2851,10 @@ async function showBatchTank(tankId, allBatches) {
   } else {
     dayNos = [1];
   }
+  // Ngày nào ĐÃ có sẵn trên server (từ log.readings, chụp 1 lần lúc mở màn) — dùng để phân biệt
+  // "Xóa" 1 dòng đã lưu thật (phải gọi API xóa hẳn) với "Xóa" 1 dòng vừa "+ Thêm ngày" nhưng
+  // CHƯA bấm "Lưu bảng ngày" lần nào (chỉ cần bỏ khỏi form, không có gì trên server để xóa).
+  const savedDayNos = new Set(log.readings.map(r => r.day_no));
   let haphuEvents = (log.ha_phu_events || []).map(e => ({ ...e }));
   const lk = t.locked;   // Hồ sơ EBR đã khóa -> ghi chép lên men bị chặn ở server
                         // (batch_tank_log.py::_assert_tank_unlocked); vô hiệu hóa NGAY trên UI
@@ -2913,10 +2917,11 @@ async function showBatchTank(tankId, allBatches) {
         <td>${_flDayInput("mat_do_tb", "num", r.mat_do_tb, d, null, lk)}</td>
         <td>${_flDayInput("ap_suat_bar", "num", r.ap_suat_bar, d, null, lk)}</td>
         <td class="muted" style="font-size:12px;white-space:nowrap">${_flAuditText(r.measured_by, r.measured_at)}</td>
+        <td>${lk ? "" : `<button class="btn sm sec" data-delday="${d}">Xóa</button>`}</td>
       </tr>`;
     }).join("");
     $("bt_daily_wrap").innerHTML = `<div class="tablewrap"><table class="bf-mini">
-      <thead><tr><th>Ngày giờ</th><th>Nhiệt độ, °C</th><th>°P</th><th>Mật độ tb, 10⁶/ml</th><th>Áp suất, bar</th><th>Người ghi</th></tr></thead>
+      <thead><tr><th>Ngày giờ</th><th>Nhiệt độ, °C</th><th>°P</th><th>Mật độ tb, 10⁶/ml</th><th>Áp suất, bar</th><th>Người ghi</th><th></th></tr></thead>
       <tbody>${rowsHtml}</tbody></table></div>
       <button class="btn sm sec" id="bt_addday" style="margin-top:6px" ${lkDis}>+ Thêm ngày</button>`;
     document.querySelectorAll("#bt_daily_wrap .fl-daily-cell").forEach(el => {
@@ -2928,6 +2933,21 @@ async function showBatchTank(tankId, allBatches) {
       el.oninput = handler; el.onchange = handler;
     });
     $("bt_addday").onclick = () => { dayNos.push((dayNos[dayNos.length - 1] || 0) + 1); renderBtDailyTable(); };
+    document.querySelectorAll("#bt_daily_wrap [data-delday]").forEach(b => b.onclick = () => guard(async () => {
+      const d = parseInt(b.dataset.delday, 10);
+      // Ngày CHƯA từng lưu (vừa "+ Thêm ngày", chưa bấm "Lưu bảng ngày" lần nào) -> chỉ bỏ khỏi
+      // form, không có gì trên server để gọi xóa. Ngày ĐÃ có trên server -> xóa hẳn qua API rồi
+      // tải lại (đủ 1 nguồn dữ liệu duy nhất, tránh form/server lệch nhau).
+      if (savedDayNos.has(d)) {
+        if (!confirm(`Xóa hẳn dòng theo dõi ngày ${d}? Không thể hoàn tác.`)) return;
+        await DELETE(`/batch-tanks/${tankId}/process-log/readings/${d}`);
+        savedDayNos.delete(d);
+        toast("Đã xóa");
+      }
+      dayNos = dayNos.filter(x => x !== d);
+      delete readingsByDay[d];
+      renderBtDailyTable();
+    }));
   }
   renderBtDailyTable();
 
@@ -3368,7 +3388,7 @@ async function showBatchFilterLot(filterLotId) {
         <td>${b.nuoc_bai_khi_hl ?? "—"}</td>
         <td class="muted">${fmt(b.created_at)}</td>
         <td class="muted">${b.ended_at ? fmt(b.ended_at) : "—"}</td>
-        <td>${b.is_final_batch ? badge("da_chiet_het") + " mẻ cuối" : ""}</td>
+        <td>${b.is_final_batch ? '<span class="badge completed">Mẻ cuối</span>' : ""}</td>
         <td style="white-space:nowrap">
           ${lk ? "" : `<button class="btn sm sec" data-finbatch="${b.batch_link_id}">${b.ended_at ? "Sửa" : "Kết thúc"}</button>
           <button class="btn sm sec" data-togglefinal="${b.batch_link_id}">${b.is_final_batch ? "Bỏ mẻ cuối" : "Mẻ cuối"}</button>

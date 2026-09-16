@@ -301,6 +301,73 @@ def test_process_log_header_and_daily_readings(client, admin_h):
     assert len(final["readings"]) == 3
 
 
+def test_daily_readings_keep_each_row_own_measured_at_and_support_delete(client, admin_h, vanhanh_h):
+    """"Lưu bảng ngày" gửi lên NGUYÊN BẢNG mỗi lần bấm — dòng nào giá trị KHÔNG đổi phải giữ
+    nguyên "Người ghi"/giờ ghi CỦA CHÍNH DÒNG ĐÓ (không bị ghi đè thành người/giờ vừa bấm Lưu),
+    và có nút xóa hẳn 1 dòng theo ngày (yêu cầu người dùng 2026-09-16: "ấn lưu thì lưu cho lần
+    nhập gần nhất... mỗi hàng sẽ có 1 thời gian riêng", "thêm nút xóa vào chỗ nhập bảng theo dõi
+    này")."""
+    tank = _make_tank(client, admin_h, "16", "TANK-GAP-16")
+    tank_id = tank["tank_id"]
+
+    r1 = client.put(f"/api/batch-tanks/{tank_id}/process-log/readings", headers=admin_h, json={
+        "readings": [
+            {"day_no": 1, "reading_date": "2026-09-14", "nhiet_do_c": 9.1, "ap_suat_bar": 0.5},
+            {"day_no": 2, "reading_date": "2026-09-15", "nhiet_do_c": 9.3, "do_s": 10.5, "ap_suat_bar": 0.5},
+        ],
+    })
+    assert r1.status_code == 200, r1.text
+    day1_first = next(r for r in r1.json() if r["day_no"] == 1)
+    day2_first = next(r for r in r1.json() if r["day_no"] == 2)
+    assert day1_first["measured_by"] == "admin" and day1_first["measured_at"] is not None
+
+    # Người khác bấm "Lưu bảng ngày" LẦN 2 — gửi lại NGUYÊN 2 dòng cũ (giá trị KHÔNG đổi) + thêm
+    # 1 dòng mới (ngày 3). 2 dòng cũ phải giữ NGUYÊN measured_by/measured_at ban đầu (của admin),
+    # KHÔNG bị đổi thành vanhanh/giờ vừa bấm — chỉ dòng 3 (mới) mới được đóng dấu vanhanh.
+    r2 = client.put(f"/api/batch-tanks/{tank_id}/process-log/readings", headers=vanhanh_h, json={
+        "readings": [
+            {"day_no": 1, "reading_date": "2026-09-14", "nhiet_do_c": 9.1, "ap_suat_bar": 0.5},
+            {"day_no": 2, "reading_date": "2026-09-15", "nhiet_do_c": 9.3, "do_s": 10.5, "ap_suat_bar": 0.5},
+            {"day_no": 3, "reading_date": "2026-09-16", "nhiet_do_c": 9.0, "do_s": 8.7, "ap_suat_bar": 0.5},
+        ],
+    })
+    assert r2.status_code == 200, r2.text
+    day1_second = next(r for r in r2.json() if r["day_no"] == 1)
+    day2_second = next(r for r in r2.json() if r["day_no"] == 2)
+    day3 = next(r for r in r2.json() if r["day_no"] == 3)
+    assert day1_second["measured_by"] == day1_first["measured_by"]
+    assert day1_second["measured_at"] == day1_first["measured_at"]
+    assert day2_second["measured_by"] == day2_first["measured_by"]
+    assert day2_second["measured_at"] == day2_first["measured_at"]
+    assert day3["measured_by"] == "vanhanh" and day3["measured_at"] is not None
+
+    # Sửa THẬT giá trị ngày 2 -> LẦN NÀY measured_by/at của ĐÚNG dòng 2 phải đổi, dòng 1/3 vẫn
+    # giữ nguyên như cũ.
+    r3 = client.put(f"/api/batch-tanks/{tank_id}/process-log/readings", headers=admin_h, json={
+        "readings": [
+            {"day_no": 1, "reading_date": "2026-09-14", "nhiet_do_c": 9.1, "ap_suat_bar": 0.5},
+            {"day_no": 2, "reading_date": "2026-09-15", "nhiet_do_c": 9.9, "do_s": 10.5, "ap_suat_bar": 0.5},
+            {"day_no": 3, "reading_date": "2026-09-16", "nhiet_do_c": 9.0, "do_s": 8.7, "ap_suat_bar": 0.5},
+        ],
+    })
+    assert r3.status_code == 200, r3.text
+    day1_third = next(r for r in r3.json() if r["day_no"] == 1)
+    day2_third = next(r for r in r3.json() if r["day_no"] == 2)
+    assert day1_third["measured_at"] == day1_first["measured_at"]   # vẫn không đổi
+    assert day2_third["measured_by"] == "admin"
+    assert day2_third["measured_at"] != day2_first["measured_at"]   # ĐÃ đổi vì giá trị đổi thật
+
+    # Xóa hẳn dòng ngày 3.
+    delr = client.delete(f"/api/batch-tanks/{tank_id}/process-log/readings/3", headers=admin_h)
+    assert delr.status_code == 204, delr.text
+    after = client.get(f"/api/batch-tanks/{tank_id}/process-log", headers=admin_h).json()
+    assert {r["day_no"] for r in after["readings"]} == {1, 2}
+
+    # Xóa lần 2 (đã xóa rồi) -> 404.
+    delr2 = client.delete(f"/api/batch-tanks/{tank_id}/process-log/readings/3", headers=admin_h)
+    assert delr2.status_code == 404, delr2.text
+
+
 def test_available_tank_lines_reflects_occupied_state(client, admin_h):
     line = client.post("/api/lines", headers=admin_h,
                        json={"code": "FV-GAPTEST-01", "name": "Tank test gap", "kind": "tank"})

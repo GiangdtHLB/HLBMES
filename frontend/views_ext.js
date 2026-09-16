@@ -386,7 +386,7 @@
         <tbody>${rows.join("")}</tbody></table></div>
         <div class="row" style="margin-top:8px;align-items:center">
           <button class="btn" id="sg_apply">✔ Áp dụng gợi ý</button>
-          <label style="display:flex;gap:4px;align-items:center"><input type="checkbox" id="sg_over"/> cho phép cấp vượt định mức</label>
+          <label style="display:flex;gap:4px;align-items:center"><input type="checkbox" id="sg_over"/> cho phép cấp lệch định mức (trên hoặc dưới)</label>
         </div>`;
       document.querySelectorAll(".sg-lot").forEach(sel => {
         sel.value = sel.dataset.orig;
@@ -407,16 +407,20 @@
         // lấy vật tư đó lần này) thì KHÔNG tính là lỗi, vẫn cho áp dụng bình thường các dòng khác
         // (yêu cầu người dùng 2026-09-15: trước đây dùng thẳng `shortfall` gốc lúc gợi ý — không
         // phản ánh việc người dùng đã tự sửa SL thực tế về 0 để bỏ qua dòng đó).
+        // "cho phép cấp vượt định mức" (sg_over) — BỎ HẲN kiểm tra này khi đã tick: ô đó vốn
+        // dùng để nới lỏng định mức 2 CHIỀU (cấp trên HOẶC dưới định mức), không chỉ riêng chiều
+        // trên như trước (yêu cầu người dùng 2026-09-16: "bấm nút cho cấp vượt định mức, tức là
+        // có thể cho phép cấp dưới định mức hoặc trên định mức").
         const qtyByLi = {};
         document.querySelectorAll(".sg-qty").forEach(inp => {
           qtyByLi[inp.dataset.li] = (qtyByLi[inp.dataset.li] || 0) + (parseFloat(inp.value) || 0);
         });
-        const shortLine = sug.lines.find((l, li) => {
+        const shortLine = $("sg_over").checked ? null : sug.lines.find((l, li) => {
           const entered = qtyByLi[li] || 0;
           return entered > 1e-9 && entered < l.need - 1e-6;
         });
         if (shortLine) {
-          toast(`"${shortLine.material_code}" chưa nhập đủ SL thực tế theo Còn thiếu — nhập đủ hoặc để 0 nếu không cấp vật tư này`, "err");
+          toast(`"${shortLine.material_code}" chưa nhập đủ SL thực tế theo Còn thiếu — nhập đủ hoặc để 0 nếu không cấp vật tư này (hoặc tick "cho phép cấp vượt định mức" để cấp 1 phần)`, "err");
           return;
         }
         const lotSels = Array.from(document.querySelectorAll(".sg-lot"));
