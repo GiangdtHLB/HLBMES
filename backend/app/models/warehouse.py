@@ -87,6 +87,11 @@ class TransferPxRequest(Base):
     reason: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)
     status: Mapped[str] = mapped_column(Unicode(255), default="pending", index=True)  # pending|approved|rejected
     movement_id: Mapped[Optional[str]] = mapped_column(ForeignKey("stock_movement.movement_id"), nullable=True)
+    # Ngày Kho công ty MUỐN nhận lại (khai lúc tạo/sửa đề nghị) — khác created_at (ngày lập
+    # phiếu, không sửa được). Khi duyệt (approve_transfer_px_request) dùng làm `ts` hiệu lực của
+    # StockMovement transfer, mirror TransferKcPxRequest.requested_transfer_date/MaterialRequest.
+    # requested_receipt_date (yêu cầu người dùng 2026-09-16: áp dụng cho cả 2 chiều điều chuyển).
+    requested_transfer_date: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
     reversed: Mapped[bool] = mapped_column(Boolean, default=False)
     created_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)

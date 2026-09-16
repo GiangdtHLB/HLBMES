@@ -763,6 +763,11 @@ def _nau_consume_as_of(db: Session, as_of) -> list[tuple["MaterialLot", float]]:
     nếu mẻ chưa khai start_at — dữ liệu cũ trước khi bắt buộc) <= `as_of`. Dùng chung cho
     _material_balances_as_of (trừ theo material_id) và _lot_balances_as_of (trừ theo lot_id) —
     xem lý do ở docstring _material_balances_as_of."""
+    # `as_of` có thể đến từ query param HTTP naive (không kèm offset) trong khi effective (start_
+    # at/event_time, cột UTCDateTime()) luôn aware -> so sánh raise TypeError thẳng (mirror lỗi
+    # thực tế đã gặp ở _consumed_lot_edges, cùng nguyên nhân) — chuẩn hoá về aware trước khi so.
+    if as_of.tzinfo is None:
+        as_of = as_of.replace(tzinfo=utcnow().tzinfo)
     edges = db.execute(select(GenealogyEdge).where(
         GenealogyEdge.to_type == "batch", GenealogyEdge.from_type == "lot",
         GenealogyEdge.relation == GenealogyRelation.CONSUME.value)).scalars().all()
@@ -1079,6 +1084,18 @@ def _consumed_lot_edges(db: Session, since: datetime, until: datetime = None) ->
     as_of/_lot_balances_as_of, xem _nau_consume_as_of — đã sửa trước, cùng nguyên tắc). Bug thực
     tế đã gặp trước đó: cả năm 2026 báo "Xuất: 0" cho 1 vật tư dù có lô đã dùng hết (tiêu thụ qua
     consume_lot) — yêu cầu người dùng 2026-09-05: "trong báo cáo xuất nhập tồn phải có chứ"."""
+    # `since`/`until` có thể đến thẳng từ query param HTTP (routers/warehouse.py::report/
+    # report_material_detail nhận `datetime` không bắt buộc offset) -> naive nếu người gọi
+    # không kèm "+00:00"/"Z" — trong khi supply_date (start_at/event_time, cột UTCDateTime())
+    # LUÔN aware khi đọc từ CSDL. So sánh naive với aware raise TypeError thẳng, sập cả báo cáo
+    # (bug thực tế đã gặp: BC nhập-xuất-tồn/Sổ chi tiết vật tư phân xưởng lỗi 500 ngay khi kỳ
+    # báo cáo phủ tới 1 mẻ Nấu đã cấp liệu qua pipeline "Mẻ sản xuất" mới) — chuẩn hoá về aware
+    # (coi naive = UTC, mirror cách issue() xử lý issued_at) ngay từ đầu hàm.
+    now_tz = utcnow().tzinfo
+    if since.tzinfo is None:
+        since = since.replace(tzinfo=now_tz)
+    if until is not None and until.tzinfo is None:
+        until = until.replace(tzinfo=now_tz)
     stmt = select(GenealogyEdge, MaterialLot, BatchExecution.start_at).join(
         MaterialLot, MaterialLot.lot_id == GenealogyEdge.from_id
     ).join(BatchExecution, BatchExecution.batch_id == GenealogyEdge.to_id
@@ -1870,7 +1887,8 @@ def reject_request_line(db: Session, request_id: str, line_id: str, reason: str,
 def _transfer_px_request_dict(req: TransferPxRequest) -> dict:
     return {"request_id": req.request_id, "request_code": req.request_code, "lot_id": req.lot_id,
             "quantity": req.quantity, "uom": req.uom, "reason": req.reason, "status": req.status,
-            "movement_id": req.movement_id, "reversed": req.reversed,
+            "movement_id": req.movement_id, "requested_transfer_date": req.requested_transfer_date,
+            "reversed": req.reversed,
             "created_by": req.created_by, "created_at": req.created_at,
             "approved_by": req.approved_by, "approved_at": req.approved_at,
             "rejected_by": req.rejected_by, "rejected_at": req.rejected_at,
@@ -1888,8 +1906,11 @@ def _get_transfer_px_request(db, request_id) -> TransferPxRequest:
 
 
 def create_transfer_px_request(db: Session, lot_id: str, quantity: float, user: User,
-                               reason: str = None) -> dict:
-    """Thủ kho phân xưởng tạo đề nghị điều chuyển 1 lô về Kho công ty — chưa động tồn kho."""
+                               reason: str = None, requested_transfer_date=None) -> dict:
+    """Thủ kho phân xưởng tạo đề nghị điều chuyển 1 lô về Kho công ty — chưa động tồn kho.
+    `requested_transfer_date` (tuỳ chọn): "Ngày đề nghị điều chuyển" — dùng làm `ts` hiệu lực
+    của StockMovement khi Kho công ty duyệt, mirror TransferKcPxRequest.requested_transfer_date
+    (yêu cầu người dùng 2026-09-16)."""
     require_perm(user, "warehouse.request")
     lot = _lot(db, lot_id)
     if not _is_workshop_location(lot.location):
@@ -1901,6 +1922,7 @@ def create_transfer_px_request(db: Session, lot_id: str, quantity: float, user: 
         raise DomainError(f"Số lượng đề nghị không hợp lệ (tồn {lot.quantity} {lot.uom}).")
     req = TransferPxRequest(request_id=new_id(), request_code=f"DCPX-{utcnow():%Y%m%d}-{new_id()[:5].upper()}",
                             lot_id=lot_id, quantity=quantity, uom=lot.uom, reason=reason,
+                            requested_transfer_date=requested_transfer_date,
                             status="pending", created_by=user.username, created_at=utcnow())
     db.add(req)
     record_audit(db, entity_type="transfer_px_request", entity_id=req.request_id, action="create",
@@ -1911,12 +1933,15 @@ def create_transfer_px_request(db: Session, lot_id: str, quantity: float, user: 
 
 
 def update_transfer_px_request(db: Session, request_id: str, quantity: float, reason: str,
-                               user: User) -> dict:
+                               user: User, requested_transfer_date=None,
+                               requested_transfer_date_set: bool = False) -> dict:
     """Sửa đề nghị điều chuyển Phân xưởng → Công ty — CHỈ khi còn "pending" (chưa Kho công ty
-    duyệt/từ chối). Chỉ sửa số lượng/lý do (không đổi lô — đổi lô coi như huỷ rồi tạo đề nghị
-    mới, tránh phức tạp việc dò lại trạng thái khoá/HOLD của lô khác). Không cần chặn theo QC
-    như chiều Công ty→Phân xưởng: create_transfer_px_request() đã chặn cứng không cho tạo đề
-    nghị với lô đang HOLD ngay từ đầu, nên lô của 1 đề nghị pending luôn chắc chắn không HOLD."""
+    duyệt/từ chối). Sửa được số lượng/lý do/"Ngày đề nghị điều chuyển" (không đổi lô — đổi lô
+    coi như huỷ rồi tạo đề nghị mới, tránh phức tạp việc dò lại trạng thái khoá/HOLD của lô
+    khác). Không cần chặn theo QC như chiều Công ty→Phân xưởng: create_transfer_px_request() đã
+    chặn cứng không cho tạo đề nghị với lô đang HOLD ngay từ đầu, nên lô của 1 đề nghị pending
+    luôn chắc chắn không HOLD. `requested_transfer_date_set` phân biệt "không gửi field này"
+    (giữ nguyên) với "gửi None" (xoá về rỗng), mirror update_transfer_kcpx_request."""
     require_perm(user, "warehouse.request")
     req = _get_transfer_px_request(db, request_id)
     if req.status != "pending":
@@ -1926,6 +1951,8 @@ def update_transfer_px_request(db: Session, request_id: str, quantity: float, re
         raise DomainError(f"Số lượng đề nghị không hợp lệ (tồn {lot.quantity} {lot.uom}).")
     req.quantity = quantity
     req.reason = reason
+    if requested_transfer_date_set:
+        req.requested_transfer_date = requested_transfer_date
     record_audit(db, entity_type="transfer_px_request", entity_id=req.request_id, action="update",
                 actor=user, after={"quantity": quantity, "reason": reason})
     db.commit()
@@ -1973,7 +2000,7 @@ def approve_transfer_px_request(db: Session, request_id: str, user: User) -> dic
         raise DomainError(f"Lô {lot.lot_code} hiện không còn ở Kho phân xưởng — có thể đã được "
                           "xử lý bởi thao tác khác.")
     result = transfer(db, req.lot_id, req.quantity, "Kho công ty", user, reason=req.reason,
-                      mode="dieu_chuyen")
+                      mode="dieu_chuyen", ts=req.requested_transfer_date)
     req.movement_id = result["movement_id"]
     req.status = "approved"
     req.approved_by = user.username

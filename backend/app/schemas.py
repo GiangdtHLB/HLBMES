@@ -1131,6 +1131,7 @@ class TransferPxRequestIn(BaseModel):
     lot_id: str
     quantity: float
     reason: Optional[str] = None
+    requested_transfer_date: Optional[datetime] = None
 
 
 class TransferPxRejectIn(BaseModel):
@@ -1138,9 +1139,9 @@ class TransferPxRejectIn(BaseModel):
 
 
 class TransferQuantityUpdateIn(BaseModel):
-    """Sửa đề nghị điều chuyển (2 chiều Công ty↔Phân xưởng) — chỉ số lượng/lý do, không đổi lô.
-    `requested_transfer_date` chỉ áp dụng cho chiều Công ty->Phân xưởng (update_transfer_kcpx_
-    request) — bỏ qua ở chiều ngược (update_transfer_px_request không nhận field này)."""
+    """Sửa đề nghị điều chuyển (2 chiều Công ty↔Phân xưởng) — số lượng/lý do/"Ngày đề nghị điều
+    chuyển", không đổi lô. Dùng chung cho cả update_transfer_kcpx_request và
+    update_transfer_px_request."""
     quantity: float = Field(gt=0)
     reason: Optional[str] = None
     requested_transfer_date: Optional[datetime] = None
@@ -1155,6 +1156,7 @@ class TransferPxRequestOut(ORMModel):
     reason: Optional[str] = None
     status: str
     movement_id: Optional[str] = None
+    requested_transfer_date: Optional[datetime] = None
     reversed: bool
     created_by: Optional[str] = None
     created_at: datetime

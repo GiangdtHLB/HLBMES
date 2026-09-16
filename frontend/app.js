@@ -5690,15 +5690,15 @@ VIEWS.warehouse_kc = async function () {
         <div class="muted" style="margin-bottom:6px">Thủ kho phân xưởng gửi đề nghị (tab Kho phân xưởng → Điều chuyển) — chưa
           động tồn kho, chỉ khi duyệt ở đây lệnh mới thật sự chuyển. Sau khi duyệt, chỉ ADMIN mới "Hoàn tác" được.</div>
         <div class="tablewrap"><table id="t_pxpending">
-          <thead><tr><th>Ngày tạo</th><th>Số đề nghị</th><th>Vật tư</th><th>Lô</th><th>SL</th><th>Lý do</th><th>Người tạo</th>${canApproveTransferPx ? "<th></th>" : ""}</tr></thead>
+          <thead><tr><th>Ngày tạo</th><th>Ngày đề nghị điều chuyển</th><th>Số đề nghị</th><th>Vật tư</th><th>Lô</th><th>SL</th><th>Lý do</th><th>Người tạo</th>${canApproveTransferPx ? "<th></th>" : ""}</tr></thead>
           <tbody>${pxPending.map(r => transferPxRequestRowHtml(r, matByIdGiao, lotByIdGiao, canApproveTransferPx, isAdminGiao)).join("") ||
-            `<tr><td colspan="${canApproveTransferPx ? 8 : 7}" class="muted">Không có đề nghị nào đang chờ.</td></tr>`}</tbody>
+            `<tr><td colspan="${canApproveTransferPx ? 9 : 8}" class="muted">Không có đề nghị nào đang chờ.</td></tr>`}</tbody>
         </table></div>
         <h4 style="margin-top:14px">Lịch sử đề nghị đã xử lý <span class="muted">(${pxDone.length})</span></h4>
         <div class="tablewrap"><table id="t_pxdone">
-          <thead><tr><th>Ngày tạo</th><th>Số đề nghị</th><th>Vật tư</th><th>Lô</th><th>SL</th><th>Lý do</th><th>Trạng thái</th><th>Người xử lý</th>${isAdminGiao ? "<th></th>" : ""}</tr></thead>
+          <thead><tr><th>Ngày tạo</th><th>Ngày đề nghị điều chuyển</th><th>Số đề nghị</th><th>Vật tư</th><th>Lô</th><th>SL</th><th>Lý do</th><th>Trạng thái</th><th>Người xử lý</th>${isAdminGiao ? "<th></th>" : ""}</tr></thead>
           <tbody>${pxDone.map(r => transferPxRequestHistoryRowHtml(r, matByIdGiao, lotByIdGiao, isAdminGiao)).join("") ||
-            `<tr><td colspan="${isAdminGiao ? 8 : 7}" class="muted">Chưa có đề nghị nào đã xử lý.</td></tr>`}</tbody>
+            `<tr><td colspan="${isAdminGiao ? 9 : 8}" class="muted">Chưa có đề nghị nào đã xử lý.</td></tr>`}</tbody>
         </table></div>
       </div>
 
@@ -6310,14 +6310,15 @@ VIEWS.warehouse_px = async function () {
       const mat = lot ? matById[lot.material_id] : null;
       return `<tr>
         <td class="muted">${fmt(r.created_at)}</td>
+        <td class="muted">${r.requested_transfer_date ? fmt(r.requested_transfer_date) : "—"}</td>
         <td><code class="k">${esc(r.request_code)}</code></td>
         <td>${esc(mat ? mat.code : "—")}</td>
         <td class="muted">${lotCodeCellHtml(lot)}</td>
         <td>${r.quantity} ${esc(r.uom)}</td>
         <td class="muted">${esc(r.reason || "")}</td>
         <td>${badge(r.status)}</td>
-        ${transferEditDelCell(r, "data-pxdcedit", "data-pxdcdel")}</tr>`;
-    }).join("") || `<tr><td colspan=8 class="muted">Chưa có đề nghị nào.</td></tr>`;
+        ${transferEditDelCell(r, "data-pxdcedit", "data-pxdcdel", r.requested_transfer_date)}</tr>`;
+    }).join("") || `<tr><td colspan=9 class="muted">Chưa có đề nghị nào.</td></tr>`;
     const kcpxPendingPx = kcpxRequestsPx.filter(r => r.status === "pending").sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
     const kcpxDonePx = kcpxRequestsPx.filter(r => r.status !== "pending").sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
     const kcpxPendingRows = kcpxPendingPx.map(r => {
@@ -6326,6 +6327,7 @@ VIEWS.warehouse_px = async function () {
       const qcBlocked = lot && qcReqSetKcpx.has(lot.material_id) && lot.status === "on_hold";
       return `<tr>
         <td class="muted">${fmt(r.created_at)}</td>
+        <td class="muted">${r.requested_transfer_date ? fmt(r.requested_transfer_date) : "—"}</td>
         <td><code class="k">${esc(r.request_code)}</code></td>
         <td>${esc(mat ? mat.code : "—")}</td>
         <td>${esc(mat ? mat.name : "—")}</td>
@@ -6336,7 +6338,7 @@ VIEWS.warehouse_px = async function () {
         ${canApproveKcpx ? `<td style="white-space:nowrap">
           <button class="btn sm" data-kcpxapprove="${esc(r.request_id)}" ${qcBlocked ? "disabled title=\"Đang chờ KCS duyệt chỉ tiêu chất lượng\"" : ""}>Duyệt</button>
           <button class="btn sm sec" data-kcpxreject="${esc(r.request_id)}">Từ chối</button></td>` : ""}</tr>`;
-    }).join("") || `<tr><td colspan="${canApproveKcpx ? 9 : 8}" class="muted">Không có đề nghị nào đang chờ.</td></tr>`;
+    }).join("") || `<tr><td colspan="${canApproveKcpx ? 10 : 9}" class="muted">Không có đề nghị nào đang chờ.</td></tr>`;
     const kcpxDoneRows = kcpxDonePx.map(r => {
       const lot = lotByIdPxDc[r.lot_id];
       const mat = lot ? matById[lot.material_id] : null;
@@ -6349,6 +6351,7 @@ VIEWS.warehouse_px = async function () {
       } else if (isAdminDc) actionCellKcpx = "<td></td>";
       return `<tr>
         <td class="muted">${fmt(r.created_at)}</td>
+        <td class="muted">${r.requested_transfer_date ? fmt(r.requested_transfer_date) : "—"}</td>
         <td><code class="k">${esc(r.request_code)}</code></td>
         <td>${esc(mat ? mat.code : "—")}</td>
         <td>${esc(mat ? mat.name : "—")}</td>
@@ -6358,7 +6361,7 @@ VIEWS.warehouse_px = async function () {
         <td>${badge(r.status)}</td>
         <td class="muted">${esc(processedBy || "")}</td>
         ${actionCellKcpx}</tr>`;
-    }).join("") || `<tr><td colspan="${isAdminDc ? 9 : 8}" class="muted">Chưa có đề nghị nào đã xử lý.</td></tr>`;
+    }).join("") || `<tr><td colspan="${isAdminDc ? 10 : 9}" class="muted">Chưa có đề nghị nào đã xử lý.</td></tr>`;
     body = `<div class="split">
       <div class="panel"><h2>Gửi đề nghị về Kho công ty</h2>
       <div class="muted" style="margin-bottom:6px">Gửi đề nghị điều chuyển 1 lô đang ở Kho phân xưởng về lại Kho công ty —
@@ -6368,12 +6371,13 @@ VIEWS.warehouse_px = async function () {
         <input id="dcpx_lot_q" placeholder="Tìm nhanh (gõ mã/tên vật tư)..." style="margin-bottom:2px"/>
         <select id="dcpx_lot">${workshopLotOpts}</select></div>
         <div class="field"><label>SL</label><input id="dcpx_qty" type="number" value="50"/></div>
+        <div class="field"><label>Ngày đề nghị điều chuyển (tuỳ chọn)</label><input id="dcpx_date" type="date"/></div>
         <div class="field" style="flex:1"><label>Lý do (tuỳ chọn)</label><input id="dcpx_reason" placeholder="(tuỳ chọn)"/></div>
         <button class="btn" id="dcpx_do" style="align-self:flex-end">Gửi đề nghị</button></div>`
         : '<div class="muted">Bạn không có quyền tạo đề nghị điều chuyển.</div>'}
       <input class="searchbox" data-tbl="t_dcpx" placeholder="Tìm mã đề nghị/vật tư/lô..." style="margin-top:12px"/>
       <div class="tablewrap" style="margin-top:6px"><table id="t_dcpx">
-        <thead><tr><th>Ngày tạo</th><th>Số đề nghị</th><th>Vật tư</th><th>Lô</th><th>SL</th><th>Lý do</th><th>Trạng thái</th><th></th></tr></thead>
+        <thead><tr><th>Ngày tạo</th><th>Ngày đề nghị điều chuyển</th><th>Số đề nghị</th><th>Vật tư</th><th>Lô</th><th>SL</th><th>Lý do</th><th>Trạng thái</th><th></th></tr></thead>
         <tbody>${pxRows}</tbody>
       </table></div>
       </div>
@@ -6383,12 +6387,12 @@ VIEWS.warehouse_px = async function () {
         để thật sự nhận (bắt buộc chọn vị trí cất). Nếu vật tư có chỉ tiêu chất lượng bắt buộc, phải chờ KCS duyệt xong (hết "Đang chờ
         KCS duyệt") mới duyệt được.</div>
       <div class="tablewrap"><table id="t_kcpx_pending_px">
-        <thead><tr><th>Ngày tạo</th><th>Số đề nghị</th><th>Mã VT</th><th>Tên vật tư</th><th>Lô</th><th>SL</th><th>Người tạo</th><th>Trạng thái QC</th>${canApproveKcpx ? "<th></th>" : ""}</tr></thead>
+        <thead><tr><th>Ngày tạo</th><th>Ngày đề nghị điều chuyển</th><th>Số đề nghị</th><th>Mã VT</th><th>Tên vật tư</th><th>Lô</th><th>SL</th><th>Người tạo</th><th>Trạng thái QC</th>${canApproveKcpx ? "<th></th>" : ""}</tr></thead>
         <tbody>${kcpxPendingRows}</tbody>
       </table></div>
       <h4 style="margin-top:14px">Lịch sử đã xử lý <span class="muted">(${kcpxDonePx.length})</span></h4>
       <div class="tablewrap"><table id="t_kcpx_done_px">
-        <thead><tr><th>Ngày tạo</th><th>Số đề nghị</th><th>Mã VT</th><th>Tên vật tư</th><th>Lô</th><th>SL</th><th>Vị trí cất</th><th>Trạng thái</th><th>Người xử lý</th>${isAdminDc ? "<th></th>" : ""}</tr></thead>
+        <thead><tr><th>Ngày tạo</th><th>Ngày đề nghị điều chuyển</th><th>Số đề nghị</th><th>Mã VT</th><th>Tên vật tư</th><th>Lô</th><th>SL</th><th>Vị trí cất</th><th>Trạng thái</th><th>Người xử lý</th>${isAdminDc ? "<th></th>" : ""}</tr></thead>
         <tbody>${kcpxDoneRows}</tbody>
       </table></div>
       </div></div>`;
@@ -6633,7 +6637,8 @@ VIEWS.warehouse_px = async function () {
     if ($("dcpx_do")) $("dcpx_do").onclick = () => guard(async () => {
       if (!$("dcpx_lot").value) throw new Error("Không có lô nào đang ở kho phân xưởng để điều chuyển.");
       await POST("/warehouse/transfer-px-requests", { lot_id: $("dcpx_lot").value, quantity: parseFloat($("dcpx_qty").value),
-        reason: $("dcpx_reason").value.trim() || null });
+        reason: $("dcpx_reason").value.trim() || null,
+        requested_transfer_date: dateInputToIsoNoon($("dcpx_date").value) });
       toast("Đã gửi đề nghị điều chuyển"); render("warehouse_px");
     });
     document.querySelectorAll("[data-kcpxapprove]").forEach(b => b.onclick = () => {
@@ -6845,6 +6850,7 @@ function transferPxRequestRowHtml(r, matById, lotById, canApprove, isAdmin) {
       <button class="btn sm sec" data-pxreject="${esc(r.request_id)}">Từ chối</button></td>` : "";
   return `<tr>
     <td class="muted">${fmt(r.created_at)}</td>
+    <td class="muted">${r.requested_transfer_date ? fmt(r.requested_transfer_date) : "—"}</td>
     <td><code class="k">${esc(r.request_code)}</code></td>
     <td>${esc(mat ? mat.code : "—")}</td>
     <td class="muted">${lotCodeCellHtml(lot)}</td>
@@ -6868,6 +6874,7 @@ function transferPxRequestHistoryRowHtml(r, matById, lotById, isAdmin) {
   }
   return `<tr>
     <td class="muted">${fmt(r.created_at)}</td>
+    <td class="muted">${r.requested_transfer_date ? fmt(r.requested_transfer_date) : "—"}</td>
     <td><code class="k">${esc(r.request_code)}</code></td>
     <td>${esc(mat ? mat.code : "—")}</td>
     <td class="muted">${lotCodeCellHtml(lot)}</td>

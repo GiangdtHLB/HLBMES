@@ -138,3 +138,33 @@ def test_report_and_detail_count_nau_dispense_by_batch_start_at(client, admin_h)
         "date_from": date_from2, "date_to": date_to2, "location": "Kho phân xưởng"}).json()
     row2 = next((r for r in rep2 if r["material_id"] == material_id), None)
     assert row2 is None or row2["issued"] == 0.0
+
+    # Frontend (bcReportSectionHtml) gửi date_from/date_to KHÔNG kèm offset (toDTLocal(), khác
+    # test ở trên dùng .isoformat() của datetime AWARE) — naive string này parse ra datetime
+    # naive, trong khi batch.start_at đọc từ CSDL (UTCDateTime()) luôn aware. So sánh trực tiếp
+    # (_consumed_lot_edges/_nau_consume_as_of) từng raise "can't compare offset-naive and
+    # offset-aware datetimes" (500), sập cả 3 báo cáo bất cứ khi nào kỳ lọc phủ tới 1 mẻ đã cấp
+    # liệu qua pipeline "Mẻ sản xuất" (bug thực tế 2026-09-16: "Nút báo cáo xuất nhập tồn kho
+    # phân xưởng không chạy được"). Test bằng chuỗi naive y hệt frontend để không tái diễn.
+    naive_from = (now - timedelta(hours=4)).replace(tzinfo=None).isoformat()
+    naive_to = (batch_start_at + timedelta(minutes=5)).replace(tzinfo=None).isoformat()
+    assert "+" not in naive_from and "Z" not in naive_from
+
+    rep3 = client.get("/api/warehouse/report", headers=admin_h, params={
+        "date_from": naive_from, "date_to": naive_to, "location": "Kho phân xưởng"})
+    assert rep3.status_code == 200, rep3.text
+    row3 = next(r for r in rep3.json() if r["material_id"] == material_id)
+    assert row3["issued"] == pytest.approx(40.0)
+
+    rep3_lot = client.get("/api/warehouse/report/by-lot", headers=admin_h, params={
+        "date_from": naive_from, "date_to": naive_to, "location": "Kho phân xưởng"})
+    assert rep3_lot.status_code == 200, rep3_lot.text
+
+    detail3 = client.get("/api/warehouse/report/material-detail", headers=admin_h, params={
+        "material_id": material_id, "date_from": naive_from, "date_to": naive_to,
+        "location": "Kho phân xưởng"})
+    assert detail3.status_code == 200, detail3.text
+
+    stock_asof = client.get("/api/warehouse/stock/as-of", headers=admin_h,
+                            params={"as_of": naive_to, "location": "Kho phân xưởng"})
+    assert stock_asof.status_code == 200, stock_asof.text
