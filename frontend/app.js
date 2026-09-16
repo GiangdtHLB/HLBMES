@@ -3368,7 +3368,7 @@ async function showBatchFilterLot(filterLotId) {
         <td>${b.nuoc_bai_khi_hl ?? "—"}</td>
         <td class="muted">${fmt(b.created_at)}</td>
         <td class="muted">${b.ended_at ? fmt(b.ended_at) : "—"}</td>
-        <td>${b.is_final_batch ? badge("da_chiet_het") + " mẻ cuối" : ""}</td>
+        <td>${b.is_final_batch ? '<span class="badge completed">Mẻ cuối</span>' : ""}</td>
         <td style="white-space:nowrap">
           ${lk ? "" : `<button class="btn sm sec" data-finbatch="${b.batch_link_id}">${b.ended_at ? "Sửa" : "Kết thúc"}</button>
           <button class="btn sm sec" data-togglefinal="${b.batch_link_id}">${b.is_final_batch ? "Bỏ mẻ cuối" : "Mẻ cuối"}</button>
