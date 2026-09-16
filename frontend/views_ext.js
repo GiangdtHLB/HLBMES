@@ -258,11 +258,11 @@
       const BOM_STATUS_LABEL = { dat: "đạt", vuot: "vượt định mức", thieu: "thiếu", chua_dung: "chưa dùng", ngoai_bom: "ngoài định mức" };
       const BOM_STATUS_BADGE = { dat: "available", vuot: "critical", thieu: "due", chua_dung: "planned", ngoai_bom: "obsolete" };
       $("dp_bom").innerHTML = summary.length ? `<div class="tablewrap"><table>
-        <thead><tr><th>Vật tư</th><th>Mã lô</th><th>Ngày tạo</th><th>Ngày cấp</th><th>FIFO?</th><th>Định mức</th><th>Thực tế</th><th>Chênh</th><th>Trạng thái</th><th>Cấp tự do?</th><th></th></tr></thead>
+        <thead><tr><th>Vật tư</th><th>Mã lô</th><th>Người nhập / Ngày tạo</th><th>Ngày cấp</th><th>FIFO?</th><th>Định mức</th><th>Thực tế</th><th>Chênh</th><th>Trạng thái</th><th>Cấp tự do?</th><th></th></tr></thead>
         <tbody>${summary.map(l => `<tr data-bomrow="${esc(l.material_code)}">
           <td>${esc(l.material_code)}${l.material_name ? ` ${esc(l.material_name)}` : ""}</td>
           <td>${esc((l.lot_codes || []).join(", ") || "—")}</td>
-          <td class="muted" style="white-space:nowrap">${l.created_at ? fmt(l.created_at) : "—"}</td>
+          <td class="muted" style="white-space:nowrap">${_flAuditText(l.actor, l.created_at)}</td>
           <td class="muted" style="white-space:nowrap">${l.supply_date ? fmt(l.supply_date) : "—"}</td>
           <td>${l.fifo_ok === false ? '<span style="color:var(--red)">⚠ khác FIFO</span>' : '<span style="color:var(--green)">✔ FIFO</span>'}</td>
           <td>${l.planned != null ? l.planned + " " + esc(l.uom || "") : ""}</td>
@@ -378,6 +378,15 @@
             <td>${pi === 0 ? (isRedundantGroupMember ? '<span class="muted">nhóm đã đủ</span>' : statusCell) : ""}</td>
           </tr>`);
         });
+        // "+ Thêm lô khác" (yêu cầu người dùng 2026-09-16: cấp vượt định mức nhưng lô đang chọn
+        // không đủ số lượng, cần thêm 1 dòng CÙNG mã vật tư, khác lô, tự chọn lô FIFO kế tiếp
+        // chưa dùng tới trong các dòng hiện có của CHÍNH vật tư này) — không hiện cho dòng thành
+        // viên nhóm thay thế đã đủ (isRedundantGroupMember, không cần lấy thêm mã này).
+        if (!isRedundantGroupMember) {
+          rows.push(`<tr class="sg-addrow"><td colspan="12" style="padding:2px 8px">
+            <button class="btn sm sec" data-addlot="${li}">+ Thêm lô khác (cùng ${esc(l.material_code)})</button>
+          </td></tr>`);
+        }
       });
       $("sg_result").innerHTML = `<div class="tablewrap"><table>
         <thead><tr><th>Vật tư</th><th>Tồn kho công ty</th><th>Tồn kho phân xưởng</th>
@@ -388,8 +397,7 @@
           <button class="btn" id="sg_apply">✔ Áp dụng gợi ý</button>
           <label style="display:flex;gap:4px;align-items:center"><input type="checkbox" id="sg_over"/> cho phép cấp lệch định mức (trên hoặc dưới)</label>
         </div>`;
-      document.querySelectorAll(".sg-lot").forEach(sel => {
-        sel.value = sel.dataset.orig;
+      const wireLotSelectFifo = (sel) => {
         const updateFifo = () => {
           const noteInput = document.querySelector(`.sg-note[data-li="${sel.dataset.li}"][data-pi="${sel.dataset.pi}"]`);
           const fifoCell = document.querySelector(`.sg-fifo[data-li="${sel.dataset.li}"][data-pi="${sel.dataset.pi}"]`);
@@ -400,6 +408,35 @@
         };
         sel.onchange = updateFifo;
         updateFifo();
+      };
+      document.querySelectorAll(".sg-lot").forEach(sel => {
+        sel.value = sel.dataset.orig;
+        wireLotSelectFifo(sel);
+      });
+      document.querySelectorAll("[data-addlot]").forEach(btn => btn.onclick = () => {
+        const li = btn.dataset.addlot;
+        const line = sug.lines[li];
+        const usedLotIds = new Set(Array.from(document.querySelectorAll(`.sg-lot[data-li="${li}"]`)).map(s => s.value));
+        const nextAlt = line.alternatives.find(a => !usedLotIds.has(a.lot_id));
+        if (!nextAlt) { toast(`Không còn lô nào khác của "${line.material_code}" để chọn.`, "err"); return; }
+        const pi = Math.max(...Array.from(document.querySelectorAll(`.sg-lot[data-li="${li}"]`)).map(s => parseInt(s.dataset.pi, 10))) + 1;
+        const altOpts = line.alternatives.map(a =>
+          `<option value="${a.lot_id}">${esc(a.lot_code)} (còn ${a.quantity}${a.expiry ? ", HSD " + fmt(a.expiry) : ""})</option>`).join("");
+        // Chèn bằng insertAdjacentHTML (không dùng el(), vốn dựng DOM qua <div> — <tr> không
+        // parse đúng ngoài ngữ cảnh <table>/<tbody>) để dòng mới nằm ĐÚNG trong <tbody> hiện có.
+        const addRowEl = btn.closest("tr");
+        addRowEl.insertAdjacentHTML("beforebegin", `<tr>
+          <td></td><td></td><td></td><td></td><td></td><td></td><td></td>
+          <td><input type="number" class="sg-qty" data-li="${li}" data-pi="${pi}" value="0" style="width:80px"/></td>
+          <td><select class="sg-lot" data-li="${li}" data-pi="${pi}" data-orig="${nextAlt.lot_id}">${altOpts}</select></td>
+          <td class="sg-fifo" data-li="${li}" data-pi="${pi}"></td>
+          <td><input class="sg-note" data-li="${li}" data-pi="${pi}" placeholder="Bắt buộc nếu chọn khác FIFO" style="width:170px;display:none"/></td>
+          <td></td>
+        </tr>`);
+        const newRow = addRowEl.previousElementSibling;
+        const sel = newRow.querySelector(".sg-lot");
+        sel.value = nextAlt.lot_id;
+        wireLotSelectFifo(sel);
       });
       $("sg_apply").onclick = () => guard(async () => {
         // Chỉ chặn khi dòng nào đó BỊ THIẾU tồn NHƯNG người dùng vẫn đang cố cấp 1 phần dở dang

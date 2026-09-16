@@ -1533,7 +1533,10 @@ def update_pack_lot_qty(db: Session, pack_lot_id: str, qty: float, user: User) -
                          f"({fl.on_hand * L_PER_HL:g} lít), cần thêm {(qty - p.qty):g} lít.")
     fl.on_hand = round(fl.on_hand - delta_hl, 3)
     _sync_filter_lot_status(fl)
+    before_qty = p.qty
     p.qty = qty
+    record_audit(db, entity_type="batch_pack_lot", entity_id=pack_lot_id, action="update_qty",
+                actor=user, before={"qty": before_qty}, after={"qty": qty})
     db.commit()
     db.refresh(p)
     return _stamp_pack_lot_status(db, p)
@@ -1544,7 +1547,10 @@ def update_pack_lot_pack_date(db: Session, pack_lot_id: str, pack_date, user: Us
     require_perm(user, "batch.execute")
     p = get_pack_lot(db, pack_lot_id)
     _assert_unlocked(p)
+    before_date = p.pack_date.isoformat() if p.pack_date else None
     p.pack_date = pack_date
+    record_audit(db, entity_type="batch_pack_lot", entity_id=pack_lot_id, action="update_pack_date",
+                actor=user, before={"pack_date": before_date}, after={"pack_date": pack_date.isoformat()})
     db.commit()
     db.refresh(p)
     return _stamp_pack_lot_status(db, p)
@@ -1552,7 +1558,8 @@ def update_pack_lot_pack_date(db: Session, pack_lot_id: str, pack_date, user: Us
 
 def update_pack_lot_shifts(db: Session, pack_lot_id: str, payload: dict, user: User) -> BatchPackLot:
     """Ghi SL chiết theo ca 1/2/3 + giờ bắt đầu/kết thúc từng ca — mirror finish_bottle's
-    ca1/ca2/ca3 (module Nấu-Lọc-Chiết cũ), sửa lại được nhiều lần. Trạng thái (dang_chiet/
+    ca1/ca2/ca3 (module Nấu-Lọc-Chiết cũ), sửa lại được nhiều lần (kể cả CHỈ 1 ca — `payload` chỉ
+    cần có đúng 3 khóa của ca đó, dùng cho nút Lưu RIÊNG từng ca ở UI). Trạng thái (dang_chiet/
     chiet_1_phan/chiet_het, xem _pack_lot_status) suy lại NGAY sau khi ghi ca — đây chính là nơi
     duy nhất ca_total có thể chuyển từ 0 sang >0.
 
@@ -1567,10 +1574,22 @@ def update_pack_lot_shifts(db: Session, pack_lot_id: str, payload: dict, user: U
         v = payload.get(qty_key)
         if v is not None and v < 0:
             raise DomainError(f"SL chiết ({qty_key}) không được âm.")
-    for key in ("ca1_qty", "ca1_start_at", "ca1_end_at", "ca2_qty", "ca2_start_at", "ca2_end_at",
-                "ca3_qty", "ca3_start_at", "ca3_end_at"):
-        if key in payload:
-            setattr(p, key, payload[key])
+    now = utcnow()
+    for n in (1, 2, 3):
+        keys = (f"ca{n}_qty", f"ca{n}_start_at", f"ca{n}_end_at")
+        if not any(k in payload for k in keys):
+            continue
+        before = tuple(getattr(p, k) for k in keys)
+        for k in keys:
+            if k in payload:
+                setattr(p, k, payload[k])
+        after = tuple(getattr(p, k) for k in keys)
+        if not any(v is not None for v in after):
+            setattr(p, f"ca{n}_by", None)
+            setattr(p, f"ca{n}_at", None)
+        elif after != before or getattr(p, f"ca{n}_at") is None:
+            setattr(p, f"ca{n}_by", user.username)
+            setattr(p, f"ca{n}_at", now)
     db.commit()
     db.refresh(p)
     return _stamp_pack_lot_status(db, p)
@@ -1755,6 +1774,7 @@ def add_pack_lot_material(db: Session, pack_lot_id: str, payload: dict, user: Us
             usage_id=new_id(), pack_lot_id=pack_lot_id, lot_id=lot.lot_id, movement_id=result["movement_id"],
             material_name=material.name, lot_pm=lot.lot_code, lot_date=lot.created_at, supply_date=supply_date,
             fifo_ok=fifo_ok, reason=reason, quantity=take, uom=lot.uom, created_at=utcnow(),
+            created_by=user.username,
         )
         db.add(u)
         rows.append(u)
@@ -1881,6 +1901,7 @@ def add_filter_lot_material(db: Session, filter_lot_id: str, payload: dict, user
             usage_id=new_id(), filter_lot_id=filter_lot_id, lot_id=lot.lot_id, movement_id=result["movement_id"],
             material_name=material.name, lot_pm=lot.lot_code, lot_date=lot.created_at, supply_date=supply_date,
             fifo_ok=fifo_ok, reason=reason, quantity=take, uom=lot.uom, created_at=utcnow(),
+            created_by=user.username,
         )
         db.add(u)
         rows.append(u)
