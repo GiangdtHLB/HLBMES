@@ -210,16 +210,25 @@ def compare_batch(db: Session, batch) -> dict:
             "factor": round(factor, 4), "lines": lines, "extras": extras}
 
 
+_FULLY_DISPENSED_MIN_RATIO = 0.6
+
+
 def batches_fully_dispensed_map(db: Session) -> dict[str, bool]:
-    """{batch_id: True/False} — mẻ đã cấp ĐỦ mọi dòng định mức (BOM) hay chưa (không dòng nào
-    "thieu"/"chua_dung"; mẻ chưa khai định mức nào coi là CHƯA đủ, an toàn hơn tự nhận "đủ" khi
-    không biết) — dùng đánh dấu ✓ ở danh sách chọn mẻ (màn Cấp liệu, yêu cầu người dùng
-    2026-09-14). Viết riêng thay vì gọi compare_batch() theo từng mẻ (N+1: mỗi lần gọi lại
-    actual_consumed() + _expand_materials() tự fetch lại toàn bộ Danh mục vật tư) — ở đây gộp
-    TRƯỚC 1 lần: 1 câu SELECT lấy mọi cạnh genealogy consume của MỌI mẻ, 1 câu tra material_code
-    theo lô, rồi mới lặp qua từng mẻ chỉ để đối chiếu (không truy vấn gì thêm ngoài
-    _expand_materials's phần group/brew_order — vẫn còn, nhưng đã cắt hẳn phần actual_consumed
-    N+1 tốn nhất)."""
+    """{batch_id: True/False} — mẻ coi như "đã cấp đủ" hay chưa, dùng đánh dấu ✓ ở danh sách
+    chọn mẻ (màn Cấp liệu, yêu cầu người dùng 2026-09-14). KHÔNG bắt buộc 100% số dòng định mức
+    (BOM) phải đạt/vượt nữa — chỉ cần tỉ lệ SỐ DÒNG ĐÃ NHẬP (thực tế > 0, kể cả mới cấp 1 PHẦN
+    — status "thieu"/"dat"/"vuot", KHÔNG cần đạt/vượt định mức) trên TỔNG SỐ DÒNG đạt >=
+    _FULLY_DISPENSED_MIN_RATIO (60%) là coi như đủ (yêu cầu người dùng 2026-09-17: "chỉ cần 60%
+    số dòng đã được nhập nguyên vật liệu, chứ không cần các dòng đạt/vượt định mức" — chỉnh lại
+    từ yêu cầu ban đầu "6 vật tư được cấp" vốn tôi hiểu nhầm thành "đạt/vượt định mức"). Dòng
+    CHƯA hề cấp gì ("chua_dung", thực tế = 0) mới KHÔNG tính. Mẻ chưa khai định mức nào coi là
+    CHƯA đủ, an toàn hơn tự nhận "đủ" khi không biết.
+
+    Viết riêng thay vì gọi compare_batch() theo từng mẻ (N+1: mỗi lần gọi lại actual_consumed() +
+    _expand_materials() tự fetch lại toàn bộ Danh mục vật tư) — ở đây gộp TRƯỚC 1 lần: 1 câu
+    SELECT lấy mọi cạnh genealogy consume của MỌI mẻ, 1 câu tra material_code theo lô, rồi mới
+    lặp qua từng mẻ chỉ để đối chiếu (không truy vấn gì thêm ngoài _expand_materials's phần
+    group/brew_order — vẫn còn, nhưng đã cắt hẳn phần actual_consumed N+1 tốn nhất)."""
     batches = db.execute(select(BatchExecution)).scalars().all()
     if not batches:
         return {}
@@ -243,17 +252,16 @@ def batches_fully_dispensed_map(db: Session) -> dict[str, bool]:
             out[b.batch_id] = False
             continue
         actual = actual_by_batch.get(b.batch_id, {})
-        ok = True
+        satisfied = 0
         for m in lines:
             match_codes = m.get("match_codes") or {m.get("material_code")}
             planned = round(m.get("qty", 0) or 0, 4)
             act = round(sum(actual.get(c, 0.0) for c in match_codes), 4)
             tol = m.get("tol_pct", 0) or 0
             _, _, status = _classify(planned, act, tol)
-            if status in ("thieu", "chua_dung"):
-                ok = False
-                break
-        out[b.batch_id] = ok
+            if status != "chua_dung":
+                satisfied += 1
+        out[b.batch_id] = (satisfied / len(lines)) >= _FULLY_DISPENSED_MIN_RATIO
     return out
 
 
