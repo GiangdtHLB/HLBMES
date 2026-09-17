@@ -237,15 +237,25 @@ class BatchPackLot(Base):
     note: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)
     # SL chiết theo ca (mirror BottleRecord.ca1/ca2/ca3), bổ sung giờ bắt đầu/kết thúc từng ca
     # (module cũ không có mốc giờ, chỉ có SL) — điền sau khi tạo, không bắt buộc lúc tạo.
+    # "Người nhập/ngày giờ nhập" RIÊNG cho từng ca (yêu cầu người dùng 2026-09-16: mỗi ca có nút
+    # Lưu/Sửa/Xóa riêng) — chỉ đóng dấu lại khi CHÍNH ca đó (qty+start+end) thật sự đổi so với
+    # đã lưu, mirror batch_tank_daily_reading.measured_by/measured_at (services/batch_tank_log.py
+    # ::upsert_daily_readings) — không đè "người nhập" của ca A khi chỉ ca B được sửa.
     ca1_qty: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     ca1_start_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
     ca1_end_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+    ca1_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    ca1_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
     ca2_qty: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     ca2_start_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
     ca2_end_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+    ca2_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    ca2_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
     ca3_qty: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     ca3_start_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
     ca3_end_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+    ca3_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    ca3_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
     approved: Mapped[bool] = mapped_column(Boolean, default=False)
     approved_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
     approved_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
@@ -296,6 +306,7 @@ class BatchPackLotMaterialUsage(Base):
     quantity: Mapped[float] = mapped_column(Float, default=0.0)
     uom: Mapped[str] = mapped_column(Unicode(32), default="kg")
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    created_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
 
 
 class BatchFilterLotMaterialUsage(Base):
@@ -322,6 +333,7 @@ class BatchFilterLotMaterialUsage(Base):
     quantity: Mapped[float] = mapped_column(Float, default=0.0)
     uom: Mapped[str] = mapped_column(Unicode(32), default="kg")
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    created_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
 
 
 class BatchTankProcessLog(Base):

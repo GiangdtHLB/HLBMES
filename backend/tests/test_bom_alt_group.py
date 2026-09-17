@@ -46,6 +46,22 @@ def admin_h(client):
     return _login(client, "admin", "AdminTest123")
 
 
+@pytest.fixture(autouse=True)
+def _cleanup_dangling_batches(client, admin_h):
+    """DB tạm dùng chung cả file (module-scope) — nhiều test trong file này để mẻ dở dang
+    (kịch bản cấp liệu 1 phần/vẫn thiếu). Điều kiện cấp liệu mở rộng 2026-09-16 (services/
+    dispense.py::_assert_dispensable) giờ chặn theo CẢ planned/ready/running/held (không chỉ
+    running/held như trước) — mẻ dở dang của test TRƯỚC sẽ chặn oan mẻ của test SAU nếu không
+    dọn. Hủy MỌI mẻ còn ở trạng thái chưa chốt SAU KHI mỗi test chạy xong (teardown, không phải
+    trước) để không ảnh hưởng các test tự tạo NHIỀU mẻ cùng lúc trong chính nó."""
+    yield
+    batches = client.get("/api/batches", headers=admin_h).json()
+    for b in batches:
+        if b["state"] in ("planned", "ready", "running", "held"):
+            client.post(f"/api/batches/{b['batch_id']}/transition", headers=admin_h,
+                        json={"target": "cancelled"})
+
+
 def _new_material(client, admin_h, suffix):
     r = client.post("/api/materials", headers=admin_h,
                     json={"code": f"AG-{suffix}", "name": f"Vật tư nhóm {suffix}", "uom": "kg"})

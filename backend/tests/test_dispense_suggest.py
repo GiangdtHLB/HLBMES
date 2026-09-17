@@ -45,6 +45,23 @@ def admin_h(client):
     return _login(client, "admin", "AdminTest123")
 
 
+@pytest.fixture(autouse=True)
+def _cleanup_dangling_batches(client, admin_h):
+    """DB tạm dùng chung cả file (module-scope) — nhiều test trong file này CỐ Ý để mẻ dở dang
+    (kịch bản cấp liệu THẤT BẠI/chỉ 1 phần) không transition tiếp. Điều kiện cấp liệu mở rộng
+    2026-09-16 (services/dispense.py::_assert_dispensable) giờ chặn theo CẢ planned/ready/
+    running/held (không chỉ running/held như trước) — mẻ dở dang của test TRƯỚC sẽ chặn oan mẻ
+    của test SAU nếu không dọn. Hủy MỌI mẻ còn ở trạng thái chưa chốt (không đụng completed/
+    closed — không phát sinh ở các test file cấp liệu này) SAU KHI mỗi test chạy xong (teardown,
+    không phải trước) để không ảnh hưởng các test tự tạo NHIỀU mẻ cùng lúc trong chính nó."""
+    yield
+    batches = client.get("/api/batches", headers=admin_h).json()
+    for b in batches:
+        if b["state"] in ("planned", "ready", "running", "held"):
+            client.post(f"/api/batches/{b['batch_id']}/transition", headers=admin_h,
+                        json={"target": "cancelled"})
+
+
 def _clear_seed_batch_9002(client, admin_h):
     """seed.py cố tình để mẻ demo "9002" ở trạng thái "running, chưa cấp liệu lần nào" (demo màn
     Cấp liệu) — với điều kiện cấp liệu mới (2026-09-15, _assert_dispensable), MỌI mẻ mà file test

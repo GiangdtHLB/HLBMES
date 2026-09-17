@@ -2119,12 +2119,18 @@ class BatchPackLotOut(ORMModel):
     ca1_qty: Optional[float] = None
     ca1_start_at: Optional[datetime] = None
     ca1_end_at: Optional[datetime] = None
+    ca1_by: Optional[str] = None
+    ca1_at: Optional[datetime] = None
     ca2_qty: Optional[float] = None
     ca2_start_at: Optional[datetime] = None
     ca2_end_at: Optional[datetime] = None
+    ca2_by: Optional[str] = None
+    ca2_at: Optional[datetime] = None
     ca3_qty: Optional[float] = None
     ca3_start_at: Optional[datetime] = None
     ca3_end_at: Optional[datetime] = None
+    ca3_by: Optional[str] = None
+    ca3_at: Optional[datetime] = None
     ended_at: Optional[datetime] = None   # tính từ ca1/2/3 (computed property) — xem models/batch_pipeline.py
     approved: bool = False
     approved_by: Optional[str] = None
@@ -2188,6 +2194,7 @@ class BatchPackLotMaterialUsageOut(ORMModel):
     quantity: float = 0.0
     uom: str = "kg"
     created_at: datetime
+    created_by: Optional[str] = None
 
 
 class BatchFilterLotMaterialUsageIn(BaseModel):
@@ -2217,3 +2224,4 @@ class BatchFilterLotMaterialUsageOut(ORMModel):
     quantity: float = 0.0
     uom: str = "kg"
     created_at: datetime
+    created_by: Optional[str] = None

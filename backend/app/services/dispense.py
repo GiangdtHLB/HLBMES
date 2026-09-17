@@ -7,13 +7,13 @@
   đã tiêu thụ trước đó (tránh trừ trùng), tự chọn lô FEFO.
 """
 
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..audit import record_audit
-from ..common import BatchState, LotStatus, Role, new_id, utcnow
+from ..common import BatchState, GenealogyRelation, LotStatus, Role, new_id, utcnow
 from ..errors import DomainError, NotFoundError
 from ..models.batches import BatchExecution
 from ..models.master import Material
@@ -35,6 +35,16 @@ def _is_expired(lot: MaterialLot) -> bool:
     return exp < now
 
 
+# Mốc chốt mở rộng điều kiện #2 (bên dưới) sang các trạng thái planned/ready/completed/closed —
+# CỐ Ý là hằng số 1 lần (KHÔNG tính theo "hôm nay" của utcnow() tại thời điểm hàm chạy, vì như
+# vậy mốc sẽ tự trôi tới mỗi ngày, khiến các mẻ tạo hôm qua dần dần cũng bị coi là "mẻ cũ" được
+# miễn) — chỉ mẻ có `start_at` TỪ mốc này trở đi mới có thể là "mẻ trước" chặn mẻ khác qua các
+# trạng thái mới thêm; mẻ cũ trước mốc này (rất nhiều mẻ closed/completed từ trước không hề cấp
+# liệu qua hệ thống, xem lịch sử) được miễn hẳn, tránh khóa cứng toàn bộ tính năng Cấp liệu cho
+# mọi mẻ về sau (yêu cầu người dùng 2026-09-16: "tính từ hôm nay, thêm cho tôi cả ready vào nữa").
+_ORDER_RULE_EXTENDED_STATES_SINCE = datetime(2026, 9, 15, 17, 0, 0, tzinfo=timezone.utc)  # 2026-09-16 00:00 giờ VN
+
+
 def _assert_dispensable(db: Session, batch: BatchExecution) -> None:
     """2 điều kiện bắt buộc trước khi cấp liệu (áp dụng cho MỌI cách cấp — Cấp 1 vật tư/Áp dụng
     gợi ý/Backflush/tăng Thực tế qua adjust_actual; KHÔNG áp dụng cho nhánh HOÀN LẠI của
@@ -44,26 +54,48 @@ def _assert_dispensable(db: Session, batch: BatchExecution) -> None:
     1. Mẻ phải có `start_at` (thời điểm bắt đầu nấu) — tồn kho phân xưởng dùng để đối chiếu
        (xem _workshop_fefo_lots's `as_of`) tính TẠI thời điểm này, không có mốc thì không tính
        được, cũng không có cơ sở xác định "hàng nào đã về trước lúc mẻ bắt đầu".
-    2. Mẻ nào bắt đầu nấu TRƯỚC phải được cấp liệu TRƯỚC: chặn nếu còn mẻ khác đang chạy
-       (running/held) có `start_at` sớm hơn mà CHƯA cấp liệu lần nào (0 dòng DispenseLine thật
-       sự) — đảm bảo tồn phân xưởng được nhường đúng thứ tự, mẻ sau không "chen ngang" trước khi
-       mẻ cần trước kịp lấy phần của mình. Chỉ cần mẻ trước đã cấp ÍT NHẤT 1 vật tư (không cần đủ
-       100% định mức) là coi như đã "đến lượt", không chặn mẻ sau nữa."""
+    2. Mẻ nào bắt đầu nấu TRƯỚC phải được cấp liệu TRƯỚC: chặn nếu còn mẻ khác có `start_at`
+       sớm hơn mà CHƯA cấp liệu lần nào (0 dòng DispenseLine thật sự) — đảm bảo tồn phân xưởng
+       được nhường đúng thứ tự, mẻ sau không "chen ngang" trước khi mẻ cần trước kịp lấy phần
+       của mình. Chỉ cần mẻ trước đã cấp ÍT NHẤT 1 vật tư (không cần đủ 100% định mức) là coi
+       như đã "đến lượt", không chặn mẻ sau nữa. Áp dụng cho mẻ khác đang running/held (như cũ)
+       VÀ CẢ planned/ready/completed/closed (yêu cầu người dùng 2026-09-16: mẻ "sắp chạy"/"đã
+       xong" mà lỡ quên cấp liệu vẫn phải xử lý trước, không chỉ mẻ đang chạy dở) — nhưng CHỈ mẻ
+       "mẻ trước" có `start_at >= _ORDER_RULE_EXTENDED_STATES_SINCE` mới tính qua 4 trạng thái
+       mới này, tránh mẻ cũ (closed/completed từ trước, không đi qua cấp liệu module này) khóa
+       cứng vĩnh viễn mọi mẻ cấp liệu về sau. cancelled KHÔNG bao giờ tính (mẻ coi như chưa từng
+       xảy ra)."""
     if batch.start_at is None:
         raise DomainError("Mẻ chưa có thời điểm bắt đầu nấu — không thể cấp liệu. "
                           "Vào Mẻ sản xuất nhập thời điểm bắt đầu trước.")
+    always_states = [BatchState.RUNNING.value, BatchState.HELD.value]
+    extended_states = [BatchState.PLANNED.value, BatchState.READY.value,
+                       BatchState.COMPLETED.value, BatchState.CLOSED.value]
     earlier = db.execute(select(BatchExecution).where(
-        BatchExecution.state.in_([BatchState.RUNNING.value, BatchState.HELD.value]),
         BatchExecution.batch_id != batch.batch_id,
         BatchExecution.start_at.isnot(None),
         BatchExecution.start_at < batch.start_at,
+        (BatchExecution.state.in_(always_states)) |
+        (BatchExecution.state.in_(extended_states) &
+         (BatchExecution.start_at >= _ORDER_RULE_EXTENDED_STATES_SINCE)),
     ).order_by(BatchExecution.start_at.asc())).scalars().all()
     if not earlier:
         return
     earlier_ids = [b.batch_id for b in earlier]
-    dispensed_ids = {bid for (bid,) in db.execute(
+    # "Đã cấp liệu lần nào" phải tính CẢ 2 đường — qua Dispense/DispenseLine (Cấp 1 vật tư/Áp
+    # dụng gợi ý/Backflush) VÀ qua GenealogyEdge consume trực tiếp (API "Tiêu thụ lô", KHÔNG tạo
+    # DispenseLine — mirror đúng bug/fix workshop_usage_history đã gặp trong phiên này: chỉ nhìn
+    # DispenseLine bỏ sót tiêu thụ trực tiếp, khiến mẻ ĐÃ dùng NVL vẫn bị coi nhầm là "chưa cấp
+    # liệu" và chặn oan mẻ sau — lộ rõ nhất khi mở rộng rule sang completed/closed, vì mẻ cũ tiêu
+    # thụ qua đường "Tiêu thụ lô" rồi đóng lại rất phổ biến).
+    dispensed_via_line = {bid for (bid,) in db.execute(
         select(Dispense.batch_id).join(DispenseLine, DispenseLine.dispense_id == Dispense.dispense_id)
         .where(Dispense.batch_id.in_(earlier_ids)).distinct())}
+    dispensed_via_consume = {bid for (bid,) in db.execute(
+        select(GenealogyEdge.to_id).where(
+            GenealogyEdge.to_type == "batch", GenealogyEdge.to_id.in_(earlier_ids),
+            GenealogyEdge.relation == GenealogyRelation.CONSUME.value).distinct())}
+    dispensed_ids = dispensed_via_line | dispensed_via_consume
     pending = [b for b in earlier if b.batch_id not in dispensed_ids]
     if pending:
         codes = ", ".join(b.batch_code for b in pending[:5])
@@ -600,10 +632,11 @@ def batch_dispense_summary(db: Session, batch_id: str, only_dispensed: bool = Tr
     # vật tư CÓ định mức vẫn có thể vừa được "Áp dụng gợi ý" vừa được "Cấp 1 vật tư" thêm — chỉ
     # cần có ít nhất 1 lần qua "Cấp 1 vật tư" là đánh dấu cả dòng, mirror đúng cách "fifo_ok" bị
     # lật false nếu có BẤT KỲ lần cấp lệch FIFO nào).
-    dispenses = db.execute(select(Dispense.dispense_id, Dispense.note).where(
+    dispenses = db.execute(select(Dispense.dispense_id, Dispense.note, Dispense.created_by).where(
         Dispense.batch_id == batch_id)).all()
-    free_dispense_ids = {did for did, note in dispenses if note == "Cấp tự do"}
-    dispense_ids = [did for did, _ in dispenses]
+    free_dispense_ids = {did for did, note, _ in dispenses if note == "Cấp tự do"}
+    dispense_ids = [did for did, _, _ in dispenses]
+    actor_by_dispense_id = {did: by for did, _, by in dispenses}
     dlines = db.execute(select(DispenseLine).where(
         DispenseLine.dispense_id.in_(dispense_ids))).scalars().all() if dispense_ids else []
     lot_info: dict[str, dict] = {}
@@ -627,7 +660,7 @@ def batch_dispense_summary(db: Session, batch_id: str, only_dispensed: bool = Tr
         # chỉ dispense() (qua DispenseLine.fifo_ok) mới biết; None nghĩa là "không xác định",
         # khác hẳn True ("chắc chắn đúng FIFO") — tránh hiện nhầm ✔ FIFO cho tiêu thụ qua
         # /consume trực tiếp (không hề kiểm tra FIFO lúc đó).
-        info = lot_info.setdefault(code, {"lot_qty": {}, "fifo_ok": None, "is_free": False, "created_at": None})
+        info = lot_info.setdefault(code, {"lot_qty": {}, "fifo_ok": None, "is_free": False, "created_at": None, "actor": None})
         info["lot_qty"][lot.lot_code] = info["lot_qty"].get(lot.lot_code, 0.0) + e.quantity
     # DispenseLine chỉ còn dùng để lấy fifo_ok/"Cấp tự do"/"Ngày tạo" — metadata không có trên
     # genealogy edge, chỉ tồn tại với đường đi qua dispense(). Lần đầu 1 dòng nào đó của vật tư
@@ -635,7 +668,7 @@ def batch_dispense_summary(db: Session, batch_id: str, only_dispensed: bool = Tr
     # BẤT KỲ dòng nào khác FIFO.
     for dl in dlines:
         info = lot_info.setdefault(dl.material_code, {"lot_qty": {}, "fifo_ok": None, "is_free": False,
-                                                       "created_at": None})
+                                                       "created_at": None, "actor": None})
         if info["fifo_ok"] is None:
             info["fifo_ok"] = True
         if dl.fifo_ok is False:
@@ -644,9 +677,12 @@ def batch_dispense_summary(db: Session, batch_id: str, only_dispensed: bool = Tr
             info["is_free"] = True
         # "Ngày tạo" = lần ghi/sửa GẦN NHẤT (dispense/backflush/sửa Thực tế) cho vật tư này — thời
         # điểm THẬT sự bấm nút trên hệ thống, khác "Ngày cấp" (batch.start_at, xem bên dưới) vốn
-        # là ngày mẻ BẮT ĐẦU NẤU dùng cho hồ sơ (yêu cầu người dùng 2026-09-15).
+        # là ngày mẻ BẮT ĐẦU NẤU dùng cho hồ sơ (yêu cầu người dùng 2026-09-15). "actor" đi kèm
+        # cùng lần ghi/sửa gần nhất đó (yêu cầu người dùng 2026-09-16: "cấp liệu cũng thêm thông
+        # tin người nhập, ngày giờ nhập").
         if info["created_at"] is None or dl.created_at > info["created_at"]:
             info["created_at"] = dl.created_at
+            info["actor"] = actor_by_dispense_id.get(dl.dispense_id)
     for info in lot_info.values():
         # Cộng dồn THEO LÔ, chỉ hiện lô còn đóng góp thật > 0 vào Thực tế hiện tại — 1 lô đã dùng
         # rồi HOÀN HẾT (net về 0) không nên còn hiện tên trong "Mã lô", gây hiểu lầm "vẫn đang
@@ -663,7 +699,7 @@ def batch_dispense_summary(db: Session, batch_id: str, only_dispensed: bool = Tr
                         "uom": l["uom"], "planned": l["planned"], "actual": l["actual"],
                         "diff": l["diff"], "pct": l["pct"], "status": l["status"],
                         "lot_codes": [], "fifo_ok": None, "is_free": False,
-                        "created_at": None, "supply_date": batch.start_at})
+                        "created_at": None, "actor": None, "supply_date": batch.start_at})
             continue
         for i, code in enumerate(dispensed):
             info = lot_info.get(code)
@@ -680,6 +716,7 @@ def batch_dispense_summary(db: Session, batch_id: str, only_dispensed: bool = Tr
                 "fifo_ok": info["fifo_ok"] if info else None,
                 "is_free": bool(info and info["is_free"]),
                 "created_at": info["created_at"] if info else None,
+                "actor": info["actor"] if info else None,
                 "supply_date": batch.start_at,
             })
     # Vật tư đã tiêu thụ nhưng KHÔNG khớp mã/nhóm nào trong BOM công thức — compare_batch() đã
@@ -694,6 +731,7 @@ def batch_dispense_summary(db: Session, batch_id: str, only_dispensed: bool = Tr
             "planned": None, "actual": e["actual"], "diff": None, "pct": None, "status": e["status"],
             "lot_codes": info["lot_codes"] if info else [], "fifo_ok": info["fifo_ok"] if info else None,
             "is_free": bool(info and info["is_free"]),
-            "created_at": info["created_at"] if info else None, "supply_date": batch.start_at,
+            "created_at": info["created_at"] if info else None,
+            "actor": info["actor"] if info else None, "supply_date": batch.start_at,
         })
     return rows

@@ -2279,6 +2279,14 @@ async function showBatch(id) {
   const bom = await GET("/batches/" + id + "/bom");
   const qcParams = await GET("/qc/parameters?active_only=false").catch(() => []);
   const paramByCode = Object.fromEntries(qcParams.map(p => [p.code, p]));
+  // "Người nhập/ngày giờ nhập" cho Dây chuyền nấu/SL kế hoạch-thực tế/Bắt đầu-Kết thúc — không
+  // cần thêm cột DB riêng, các hàm sửa 3 trường này đã ghi record_audit() sẵn từ trước (services/
+  // batches.py::set_brewhouse_line/set_actual_qty/set_start_at/set_end_at) — chỉ cần đọc lại bản
+  // ghi audit MỚI NHẤT của từng action (yêu cầu người dùng 2026-09-16).
+  const bAudit = await GET(`/audit?entity_id=${id}&entity_type=batch&action=set_brewhouse_line,set_actual_qty,set_start_at,set_end_at&limit=50`).catch(() => []);
+  const lastAudit = (action) => bAudit.find(a => a.action === action) || null;  // đã sort seq desc
+  const lineAudit = lastAudit("set_brewhouse_line"), actualAudit = lastAudit("set_actual_qty");
+  const startAudit = lastAudit("set_start_at"), endAudit = lastAudit("set_end_at");
   let woCode = null;
   let waterQc = null;
   if (b.work_order_id) {
@@ -2327,13 +2335,17 @@ async function showBatch(id) {
       <dt>Chất lượng</dt><dd>${badge(b.quality_status)}</dd>
       ${woCode ? `<dt>Lệnh SX (điều độ)</dt><dd><code class="k">${esc(woCode)}</code></dd>` : ""}
       <dt>Dây chuyền nấu</dt><dd><select id="bd_line" style="width:auto" ${lkDis}>${bLineOptsDetail}</select>
-        <button class="btn sm" id="bd_line_save" ${lkDis}>Lưu</button></dd>
+        <button class="btn sm" id="bd_line_save" ${lkDis}>Lưu</button>
+        <span class="muted" style="font-size:12px;white-space:nowrap;margin-left:6px">${lineAudit ? _flAuditText(lineAudit.actor, lineAudit.ts) : ""}</span></dd>
       <dt>Recipe snapshot</dt><dd>v${snap.version_no ?? "?"} (bất biến) · ${(snap.parameters || []).length} tham số · ${(snap.quality_checks || []).length} QC</dd>
       <dt>SL kế hoạch/thực tế</dt><dd>${b.planned_qty} / <input type="number" id="bd_actual" value="${b.actual_qty ?? ""}" placeholder="chưa nhập" style="width:90px" ${lkDis}/> ${esc(b.uom)}
-        <button class="btn sm" id="bd_actual_save" ${lkDis}>Lưu</button></dd>
+        <button class="btn sm" id="bd_actual_save" ${lkDis}>Lưu</button>
+        <span class="muted" style="font-size:12px;white-space:nowrap;margin-left:6px">${actualAudit ? _flAuditText(actualAudit.actor, actualAudit.ts) : ""}</span></dd>
       <dt>Bắt đầu / Kết thúc</dt><dd>
-        <input type="datetime-local" id="bd_start" value="${b.start_at ? toDTLocal(new Date(b.start_at)) : ""}" style="width:210px" ${lkDis}/> →
+        <input type="datetime-local" id="bd_start" value="${b.start_at ? toDTLocal(new Date(b.start_at)) : ""}" style="width:210px" ${lkDis}/>
+        <span class="muted" style="font-size:12px;white-space:nowrap">${startAudit ? _flAuditText(startAudit.actor, startAudit.ts) : ""}</span> →
         <input type="datetime-local" id="bd_end" value="${b.end_at ? toDTLocal(new Date(b.end_at)) : ""}" style="width:210px" ${lkDis}/>
+        <span class="muted" style="font-size:12px;white-space:nowrap">${endAudit ? _flAuditText(endAudit.actor, endAudit.ts) : ""}</span>
         <button class="btn sm" id="bd_time_save" ${lkDis}>Lưu</button></dd>
     </dl>
     ${curves ? `<h3>Đường cong lên men</h3>${curves}` : ""}
@@ -2855,6 +2867,10 @@ async function showBatchTank(tankId, allBatches) {
   // "Xóa" 1 dòng đã lưu thật (phải gọi API xóa hẳn) với "Xóa" 1 dòng vừa "+ Thêm ngày" nhưng
   // CHƯA bấm "Lưu bảng ngày" lần nào (chỉ cần bỏ khỏi form, không có gì trên server để xóa).
   const savedDayNos = new Set(log.readings.map(r => r.day_no));
+  // Dòng nào đang ở chế độ SỬA (hiện input) — dòng vừa "+ Thêm ngày" (chưa từng lưu) tự động ở
+  // chế độ sửa luôn; dòng đã lưu mặc định hiện dạng chữ (chỉ đọc), bấm "Sửa" mới bật input (yêu
+  // cầu người dùng 2026-09-16: bỏ nút "Lưu bảng ngày" gộp, mỗi hàng có Lưu/Sửa/Xóa riêng).
+  const editingDays = new Set(dayNos.filter(d => !savedDayNos.has(d)));
   let haphuEvents = (log.ha_phu_events || []).map(e => ({ ...e }));
   const lk = t.locked;   // Hồ sơ EBR đã khóa -> ghi chép lên men bị chặn ở server
                         // (batch_tank_log.py::_assert_tank_unlocked); vô hiệu hóa NGAY trên UI
@@ -2888,7 +2904,6 @@ async function showBatchTank(tankId, allBatches) {
     ${qcSampleRoundsHtml(qcPhuHistory.items)}
     <h3 style="margin-top:16px">Bảng theo dõi lên men theo ngày</h3>
     <div id="bt_daily_wrap"></div>
-    <button class="btn sm" id="bt_save_readings" style="margin-top:8px" ${lkDis}>Lưu bảng ngày</button>
     <h3 style="margin-top:16px">Hạ phụ</h3>
     <div class="tablewrap"><table><thead><tr><th>Thời điểm</th><th>°P</th><th>Người lưu</th><th></th></tr></thead>
       <tbody id="bt_haphu_wrap"></tbody></table></div>
@@ -2910,15 +2925,27 @@ async function showBatchTank(tankId, allBatches) {
   function renderBtDailyTable() {
     const rowsHtml = dayNos.map(d => {
       const r = readingsByDay[d] || {};
-      return `<tr>
-        <td>${_flDayInput("reading_date", "datetime", r.reading_date, d, null, lk)}</td>
+      const editing = !lk && editingDays.has(d);
+      const cells = editing
+        ? `<td>${_flDayInput("reading_date", "datetime", r.reading_date, d, null, lk)}</td>
         <td>${_flDayInput("nhiet_do_c", "num", r.nhiet_do_c, d, null, lk)}</td>
         <td>${_flDayInput("do_s", "num", r.do_s, d, null, lk)}</td>
         <td>${_flDayInput("mat_do_tb", "num", r.mat_do_tb, d, null, lk)}</td>
         <td>${_flDayInput("ap_suat_bar", "num", r.ap_suat_bar, d, null, lk)}</td>
         <td class="muted" style="font-size:12px;white-space:nowrap">${_flAuditText(r.measured_by, r.measured_at)}</td>
-        <td>${lk ? "" : `<button class="btn sm sec" data-delday="${d}">Xóa</button>`}</td>
-      </tr>`;
+        <td style="white-space:nowrap">
+          <button class="btn sm" data-saveday="${d}">Lưu</button>
+          <button class="btn sm sec" data-delday="${d}">Xóa</button>
+        </td>`
+        : `<td>${r.reading_date ? fmt(r.reading_date) : "—"}</td>
+        <td>${r.nhiet_do_c ?? "—"}</td>
+        <td>${r.do_s ?? "—"}</td>
+        <td>${r.mat_do_tb ?? "—"}</td>
+        <td>${r.ap_suat_bar ?? "—"}</td>
+        <td class="muted" style="font-size:12px;white-space:nowrap">${_flAuditText(r.measured_by, r.measured_at)}</td>
+        <td style="white-space:nowrap">${lk ? "" : `<button class="btn sm sec" data-editday="${d}">Sửa</button>
+          <button class="btn sm sec" data-delday="${d}">Xóa</button>`}</td>`;
+      return `<tr>${cells}</tr>`;
     }).join("");
     $("bt_daily_wrap").innerHTML = `<div class="tablewrap"><table class="bf-mini">
       <thead><tr><th>Ngày giờ</th><th>Nhiệt độ, °C</th><th>°P</th><th>Mật độ tb, 10⁶/ml</th><th>Áp suất, bar</th><th>Người ghi</th><th></th></tr></thead>
@@ -2932,12 +2959,29 @@ async function showBatchTank(tankId, allBatches) {
       };
       el.oninput = handler; el.onchange = handler;
     });
-    $("bt_addday").onclick = () => { dayNos.push((dayNos[dayNos.length - 1] || 0) + 1); renderBtDailyTable(); };
+    $("bt_addday").onclick = () => {
+      const d = (dayNos[dayNos.length - 1] || 0) + 1;
+      dayNos.push(d);
+      editingDays.add(d);
+      renderBtDailyTable();
+    };
+    document.querySelectorAll("#bt_daily_wrap [data-editday]").forEach(b => b.onclick = () => {
+      editingDays.add(parseInt(b.dataset.editday, 10));
+      renderBtDailyTable();
+    });
+    // Lưu ĐÚNG 1 dòng (không gửi cả bảng) — server upsert theo từng day_no độc lập, không đụng
+    // các dòng khác (xem services/batch_tank_log.py::upsert_daily_readings), nên gửi 1 dòng vẫn
+    // an toàn và mỗi dòng có "Người ghi"/giờ ghi riêng đúng lúc dòng đó thật sự được lưu.
+    document.querySelectorAll("#bt_daily_wrap [data-saveday]").forEach(b => b.onclick = () => guard(async () => {
+      const d = parseInt(b.dataset.saveday, 10);
+      await PUT(`/batch-tanks/${tankId}/process-log/readings`, { readings: [{ day_no: d, ...(readingsByDay[d] || {}) }] });
+      toast(`Đã lưu ngày ${d}`); showBatchTank(tankId, allBatches);
+    }));
     document.querySelectorAll("#bt_daily_wrap [data-delday]").forEach(b => b.onclick = () => guard(async () => {
       const d = parseInt(b.dataset.delday, 10);
-      // Ngày CHƯA từng lưu (vừa "+ Thêm ngày", chưa bấm "Lưu bảng ngày" lần nào) -> chỉ bỏ khỏi
-      // form, không có gì trên server để gọi xóa. Ngày ĐÃ có trên server -> xóa hẳn qua API rồi
-      // tải lại (đủ 1 nguồn dữ liệu duy nhất, tránh form/server lệch nhau).
+      // Ngày CHƯA từng lưu (vừa "+ Thêm ngày", chưa bấm "Lưu" lần nào) -> chỉ bỏ khỏi form,
+      // không có gì trên server để gọi xóa. Ngày ĐÃ có trên server -> xóa hẳn qua API rồi tải
+      // lại (đủ 1 nguồn dữ liệu duy nhất, tránh form/server lệch nhau).
       if (savedDayNos.has(d)) {
         if (!confirm(`Xóa hẳn dòng theo dõi ngày ${d}? Không thể hoàn tác.`)) return;
         await DELETE(`/batch-tanks/${tankId}/process-log/readings/${d}`);
@@ -2945,6 +2989,7 @@ async function showBatchTank(tankId, allBatches) {
         toast("Đã xóa");
       }
       dayNos = dayNos.filter(x => x !== d);
+      editingDays.delete(d);
       delete readingsByDay[d];
       renderBtDailyTable();
     }));
@@ -2971,11 +3016,6 @@ async function showBatchTank(tankId, allBatches) {
   }
   renderBtHaphu();
   if ($("bt_addhaphu")) $("bt_addhaphu").onclick = () => { haphuEvents.push({ at: null }); renderBtHaphu(); };
-  $("bt_save_readings").onclick = () => guard(async () => {
-    const readings = dayNos.map(d => ({ day_no: d, ...(readingsByDay[d] || {}) }));
-    await PUT(`/batch-tanks/${tankId}/process-log/readings`, { readings });
-    toast("Đã lưu bảng theo ngày"); showBatchTank(tankId, allBatches);
-  });
   $("bt_save_haphu").onclick = () => guard(async () => {
     await PUT(`/batch-tanks/${tankId}/process-log`, { ha_phu_events: haphuEvents });
     toast("Đã lưu mốc hạ phụ"); showBatchTank(tankId, allBatches);
@@ -3131,7 +3171,7 @@ VIEWS.batchfilterorders = async function () {
             <input id="foc_mat_txt_${ci}_${mi}" value="${esc(m.materialName || "")}" placeholder="Gõ để tìm vật tư, hoặc nhập tên tự do..." autocomplete="off"/>
             <input type="hidden" id="foc_mat_id_${ci}_${mi}" value="${esc(m.materialId || "")}"/></div>
           <div class="field"><label>SL kế hoạch</label><input class="focm_qty" data-ci="${ci}" data-mi="${mi}" type="number" value="${esc(m.qty ?? "")}" style="width:110px"/></div>
-          <div class="field"><label>ĐVT</label><input class="focm_uom" data-ci="${ci}" data-mi="${mi}" value="${esc(m.uom || "")}" size="6"/></div>
+          <div class="field"><label>ĐVT</label><input class="focm_uom" data-ci="${ci}" data-mi="${mi}" value="${esc(m.uom || "")}" size="6" readonly title="Lấy tự động từ danh mục nguyên liệu — không sửa được"/></div>
           <button class="btn sm sec" data-focmrm="${mi}" data-ci="${ci}" style="align-self:flex-end">Xóa</button>
         </div>`).join("") || '<div class="muted" style="margin-bottom:4px">Chưa khai báo vật tư nào.</div>'}
       <button class="btn sm sec" data-focmadd="${ci}" style="margin-top:2px">+ Thêm vật tư</button>`;
@@ -3151,9 +3191,6 @@ VIEWS.batchfilterorders = async function () {
     });
     box.querySelectorAll(".focm_qty").forEach(inp => inp.onchange = () => {
       foChildren[parseInt(inp.dataset.ci, 10)].materials[parseInt(inp.dataset.mi, 10)].qty = inp.value;
-    });
-    box.querySelectorAll(".focm_uom").forEach(inp => inp.onchange = () => {
-      foChildren[parseInt(inp.dataset.ci, 10)].materials[parseInt(inp.dataset.mi, 10)].uom = inp.value;
     });
     box.querySelectorAll("[data-focmrm]").forEach(b => b.onclick = () => {
       const ci2 = parseInt(b.dataset.ci, 10);
@@ -3630,6 +3667,11 @@ async function showBatchPackLot(packLotId) {
   if (f.beer_type_id) pkQcQs += `&beer_type_id=${encodeURIComponent(f.beer_type_id)}`;
   if (p.finished_product_id) pkQcQs += `&finished_product_id=${encodeURIComponent(p.finished_product_id)}`;
   const pkQc = await GET(`/brewing/qc-status?${pkQcQs}`).catch(() => null);
+  // "Người nhập/ngày giờ nhập" cho Giờ bắt đầu chiết/SL cấp chiết — mirror showBatch, đọc lại
+  // audit log mới nhất của 2 action này thay vì thêm cột riêng (yêu cầu người dùng 2026-09-16).
+  const pkAudit = await GET(`/audit?entity_id=${packLotId}&entity_type=batch_pack_lot&action=update_qty,update_pack_date&limit=20`).catch(() => []);
+  const pkLastAudit = (action) => pkAudit.find(a => a.action === action) || null;
+  const qtyAudit = pkLastAudit("update_qty"), dateAudit = pkLastAudit("update_pack_date");
   // Gợi ý giờ ca theo quy ước 3 ca cố định của nhà máy (06-14/14-22/22-06 ngày sau), neo theo
   // ngày bắt đầu chiết — chỉ dùng làm mặc định khi CHƯA lưu giờ thật cho ca đó (không đè giờ
   // đã ghi nhận thật).
@@ -3653,28 +3695,19 @@ async function showBatchPackLot(packLotId) {
       <dt>Sản phẩm</dt><dd>${fp ? esc(fp.code) + " — " + esc(fp.name) : "—"}</dd>
       <dt>Dây chuyền</dt><dd>${esc(p.line || "—")}</dd>
       <dt>Giờ bắt đầu chiết</dt><dd><input id="pk_date_edit" type="datetime-local" value="${toDTLocal(new Date(p.pack_date))}" style="width:220px" ${dis}/>
-        <button class="btn sm sec" id="pk_date_save" ${dis}>Lưu giờ</button></dd>
+        <button class="btn sm sec" id="pk_date_save" ${dis}>Lưu giờ</button>
+        <span class="muted" style="font-size:12px;white-space:nowrap;margin-left:6px">${dateAudit ? _flAuditText(dateAudit.actor, dateAudit.ts) : ""}</span></dd>
       <dt>Giờ kết thúc chiết</dt><dd class="muted">${p.ended_at ? fmt(p.ended_at) : "— (chưa có ca nào khai đủ SL + giờ kết thúc)"}</dd>
       <dt>Số lượng cấp chiết (lít) <span style="color:var(--red)">*</span></dt><dd><input id="pk_qty_edit" type="number" min="0.01" step="any" value="${p.qty}" style="width:120px" ${dis}/>
-        <button class="btn sm sec" id="pk_qty_save" ${dis}>Lưu SL</button></dd>
+        <button class="btn sm sec" id="pk_qty_save" ${dis}>Lưu SL</button>
+        <span class="muted" style="font-size:12px;white-space:nowrap;margin-left:6px">${qtyAudit ? _flAuditText(qtyAudit.actor, qtyAudit.ts) : ""}</span></dd>
       <dt>Số lô bia</dt><dd>${esc(p.lot_no || "—")}</dd>
       <dt>Duyệt KCS</dt><dd>${p.approved ? badge("released") + ` bởi ${esc(p.approved_by)} lúc ${fmt(p.approved_at)}` : badge("pending") + " chưa duyệt"}</dd>
       <dt>Nhập kho thành phẩm</dt><dd>${p.stocked ? badge("released") + ` bởi ${esc(p.stocked_by)} lúc ${fmt(p.stocked_at)}` : badge("pending") + " chưa nhập kho"}</dd>
     </dl>
     <h3>SL chiết theo ca${fp ? ` — ${esc(fp.code)}` : ""}</h3>
     <div class="muted" style="margin-bottom:6px">Giờ ca gợi ý theo quy ước: Ca 1 06h00–14h00, Ca 2 14h00–22h00, Ca 3 22h00–06h00 (ngày sau) — sửa lại nếu ca thực tế khác.</div>
-    <table><thead><tr><th>Ca</th><th>Giờ bắt đầu</th><th>Giờ kết thúc</th><th>SL${unitLabel ? ` (${unitLabel})` : ""}</th></tr></thead>
-      <tbody>${[1, 2, 3].map(n => {
-        const savedStart = p[`ca${n}_start_at`], savedEnd = p[`ca${n}_end_at`];
-        const [defStart, defEnd] = caDefaults[n];
-        return `<tr>
-        <td>Ca ${n}</td>
-        <td><input type="datetime-local" id="pk_ca${n}_start" value="${toDTLocal(savedStart ? new Date(savedStart) : defStart)}" ${dis}/></td>
-        <td><input type="datetime-local" id="pk_ca${n}_end" value="${toDTLocal(savedEnd ? new Date(savedEnd) : defEnd)}" ${dis}/></td>
-        <td><input type="number" min="0" id="pk_ca${n}_qty" value="${p[`ca${n}_qty`] ?? ""}" style="width:90px" ${dis}/></td>
-        </tr>`;
-      }).join("")}</tbody></table>
-    <button class="btn sm sec" id="pk_shifts_save" ${dis}>Lưu SL theo ca</button>
+    <div id="pk_shifts_wrap"></div>
     <h3 style="margin-top:16px">Chỉ tiêu thành phẩm</h3>
     <div class="muted" style="margin-bottom:8px">Chỉ hiển thị — khai báo/sửa giá trị ở tab <b>"Chất lượng"</b> (panel "Công đoạn chờ khai báo chỉ tiêu chất lượng").</div>
     ${!pkQc || !qcRowsWithOrphans(pkQc).length ? '<div class="muted">Chưa gán nhóm chỉ tiêu nào cho công đoạn Thành phẩm (gán ở tab Danh mục).</div>' : `
@@ -3722,18 +3755,54 @@ async function showBatchPackLot(packLotId) {
     await PUT(`/batch-pack-lots/${packLotId}/pack-date`, { pack_date: new Date(v).toISOString() });
     toast("Đã lưu giờ bắt đầu chiết"); showBatchPackLot(packLotId);
   });
-  $("pk_shifts_save").onclick = () => guard(async () => {
-    const dtVal = (id) => { const v = $(id).value; return v ? new Date(v).toISOString() : null; };
-    const numVal = (id) => { const v = $(id).value; return v === "" ? null : parseFloat(v); };
-    const body = {};
-    for (const n of [1, 2, 3]) {
-      body[`ca${n}_qty`] = numVal(`pk_ca${n}_qty`);
-      body[`ca${n}_start_at`] = dtVal(`pk_ca${n}_start`);
-      body[`ca${n}_end_at`] = dtVal(`pk_ca${n}_end`);
-    }
-    await PUT(`/batch-pack-lots/${packLotId}/shifts`, body);
-    toast("Đã lưu SL theo ca"); showBatchPackLot(packLotId);
-  });
+  // "SL chiết theo ca" — mỗi ca 1 nút Lưu/Sửa/Xóa riêng, kèm người nhập/giờ nhập RIÊNG cho ca đó
+  // (mirror renderBtDailyTable ở showBatchTank, yêu cầu người dùng 2026-09-16). Ca CHƯA từng lưu
+  // (ca{n}_at rỗng) mặc định ở chế độ Sửa luôn (không có gì để hiện dạng chữ); ca đã lưu mặc
+  // định hiện dạng chữ, bấm "Sửa" mới bật input.
+  const editingCas = new Set([1, 2, 3].filter(n => !p[`ca${n}_at`]));
+  function renderPkShiftsTable() {
+    const rowsHtml = [1, 2, 3].map(n => {
+      const savedStart = p[`ca${n}_start_at`], savedEnd = p[`ca${n}_end_at`], savedQty = p[`ca${n}_qty`];
+      const [defStart, defEnd] = caDefaults[n];
+      const editing = !dis && editingCas.has(n);
+      const cells = editing
+        ? `<td><input type="datetime-local" id="pk_ca${n}_start" value="${toDTLocal(savedStart ? new Date(savedStart) : defStart)}"/></td>
+        <td><input type="datetime-local" id="pk_ca${n}_end" value="${toDTLocal(savedEnd ? new Date(savedEnd) : defEnd)}"/></td>
+        <td><input type="number" min="0" id="pk_ca${n}_qty" value="${savedQty ?? ""}" style="width:90px"/></td>
+        <td class="muted" style="font-size:12px;white-space:nowrap">${_flAuditText(p[`ca${n}_by`], p[`ca${n}_at`])}</td>
+        <td style="white-space:nowrap"><button class="btn sm" data-caksave="${n}">Lưu</button>
+          <button class="btn sm sec" data-cakdel="${n}">Xóa</button></td>`
+        : `<td>${fmt(savedStart)}</td><td>${fmt(savedEnd)}</td><td>${savedQty ?? "—"}</td>
+        <td class="muted" style="font-size:12px;white-space:nowrap">${_flAuditText(p[`ca${n}_by`], p[`ca${n}_at`])}</td>
+        <td style="white-space:nowrap">${dis ? "" : `<button class="btn sm sec" data-caksedit="${n}">Sửa</button>
+          <button class="btn sm sec" data-cakdel="${n}">Xóa</button>`}</td>`;
+      return `<tr><td>Ca ${n}</td>${cells}</tr>`;
+    }).join("");
+    $("pk_shifts_wrap").innerHTML = `<div class="tablewrap"><table>
+      <thead><tr><th>Ca</th><th>Giờ bắt đầu</th><th>Giờ kết thúc</th><th>SL${unitLabel ? ` (${unitLabel})` : ""}</th><th>Người nhập / Ngày giờ</th><th></th></tr></thead>
+      <tbody>${rowsHtml}</tbody></table></div>`;
+    document.querySelectorAll("[data-caksedit]").forEach(b => b.onclick = () => {
+      editingCas.add(parseInt(b.dataset.caksedit, 10)); renderPkShiftsTable();
+    });
+    document.querySelectorAll("[data-caksave]").forEach(b => b.onclick = () => guard(async () => {
+      const n = parseInt(b.dataset.caksave, 10);
+      const dtVal = (id) => { const v = $(id).value; return v ? new Date(v).toISOString() : null; };
+      const numVal = (id) => { const v = $(id).value; return v === "" ? null : parseFloat(v); };
+      await PUT(`/batch-pack-lots/${packLotId}/shifts`, {
+        [`ca${n}_qty`]: numVal(`pk_ca${n}_qty`), [`ca${n}_start_at`]: dtVal(`pk_ca${n}_start`),
+        [`ca${n}_end_at`]: dtVal(`pk_ca${n}_end`),
+      });
+      toast(`Đã lưu Ca ${n}`); showBatchPackLot(packLotId);
+    }));
+    document.querySelectorAll("[data-cakdel]").forEach(b => b.onclick = () => guard(async () => {
+      const n = parseInt(b.dataset.cakdel, 10);
+      if (!confirm(`Xóa dữ liệu Ca ${n}? Không thể hoàn tác.`)) return;
+      await PUT(`/batch-pack-lots/${packLotId}/shifts`,
+        { [`ca${n}_qty`]: null, [`ca${n}_start_at`]: null, [`ca${n}_end_at`]: null });
+      toast(`Đã xóa Ca ${n}`); showBatchPackLot(packLotId);
+    }));
+  }
+  renderPkShiftsTable();
   if ($("pk_approve")) $("pk_approve").onclick = () => guard(async () => {
     const r = await POST(`/batch-pack-lots/${packLotId}/approve`, {});
     toast("Đã duyệt KCS lô thành phẩm" + (r.qc_has_fail ? " (còn chỉ tiêu FAIL — cảnh báo)" : "")); showBatchPackLot(packLotId);
@@ -3769,11 +3838,11 @@ function materialUsageSectionHtml(prefix, usage, locked, endedAt) {
   const stageLabel = prefix === "flmu" ? "lọc" : "chiết";
   return `<h3 style="margin-top:16px">Nguyên liệu ${stageLabel}</h3>
     <div class="tablewrap"><table>
-      <thead><tr><th>Nguyên liệu</th><th>Số lô PM</th><th>Ngày lô</th><th>Ngày tạo</th><th>Ngày cấp</th><th>FIFO</th><th>Lý do (nếu khác FIFO)</th><th>Số lượng</th><th>ĐVT</th><th></th></tr></thead>
+      <thead><tr><th>Nguyên liệu</th><th>Số lô PM</th><th>Ngày lô</th><th>Người nhập / Ngày tạo</th><th>Ngày cấp</th><th>FIFO</th><th>Lý do (nếu khác FIFO)</th><th>Số lượng</th><th>ĐVT</th><th></th></tr></thead>
       <tbody>${usage.map(u => `<tr>
         <td>${esc(u.material_name)}</td><td class="muted">${esc(u.lot_pm || "—")}</td>
         <td class="muted">${u.lot_date ? fmt(u.lot_date) : "—"}</td>
-        <td class="muted">${u.created_at ? fmt(u.created_at) : "—"}</td>
+        <td class="muted" style="white-space:nowrap">${_flAuditText(u.created_by, u.created_at)}</td>
         <td class="muted">${u.supply_date ? fmt(u.supply_date) : "—"}</td>
         <td>${fifoBadgeHtml(u.fifo_ok)}</td>
         <td class="muted">${esc(u.reason || "—")}</td>
@@ -7214,7 +7283,7 @@ let REQUEST_SOURCE = null;   // {type: "brew_order", id, label} — tuỳ chọn
 // Giữ giá trị "Ngày đề nghị nhận kho" qua các lần refreshCartPanel() (thêm/xoá dòng render lại
 // cả khung) — không dùng lại `new Date()` mặc định mỗi lần render, kẻo xoá mất ngày người dùng
 // vừa chọn (bug thực tế phát hiện lúc kiểm thử trực tiếp trên trình duyệt 2026-09-14).
-let REQUEST_RECEIPT_DATE = toISODateLocal(new Date());
+let REQUEST_RECEIPT_DATE = toDTLocal(new Date());
 
 const REQ_STATUS_BADGE = { pending: "on_hold", fulfilled: "available", rejected: "obsolete", cancelled: "obsolete" };
 
@@ -7379,7 +7448,7 @@ function requestLineRowHtml(r, l, matById, lotById, canFulfill, allLots) {
 // đọc) — mirror đúng phạm vi services/warehouse.py::update_request, chỉ hiện nút ở phía đề
 // nghị (canRequest, xem requestBlockHtml).
 function openEditRequestModal(r, matById) {
-  const dateVal = r.requested_receipt_date ? toISODateLocal(new Date(r.requested_receipt_date)) : "";
+  const dateVal = r.requested_receipt_date ? toDTLocal(new Date(r.requested_receipt_date)) : "";
   const rows = r.lines.map(l => {
     const mat = matById[l.material_id];
     if (l.status !== "pending") {
@@ -7393,8 +7462,8 @@ function openEditRequestModal(r, matById) {
       <td>${badge(REQ_STATUS_BADGE[l.status] || "planned")}${esc(l.status)}</td></tr>`;
   }).join("");
   modal(`<h3>Sửa phiếu <code class="k">${esc(r.request_code)}</code></h3>
-    <div class="field" style="margin-bottom:10px;max-width:220px"><label>Ngày đề nghị nhận kho</label>
-      <input id="reqedit_date" type="date" value="${esc(dateVal)}"/></div>
+    <div class="field" style="margin-bottom:10px;max-width:220px"><label>Ngày giờ đề nghị nhận kho</label>
+      <input id="reqedit_date" type="datetime-local" value="${esc(dateVal)}"/></div>
     <div class="tablewrap"><table><thead><tr><th>Vật tư</th><th>SL</th><th>Trạng thái</th></tr></thead>
       <tbody>${rows}</tbody></table></div>
     <div class="muted" style="margin:8px 0;font-size:12px">Chỉ sửa được vật tư/số lượng của dòng còn "pending" — dòng đã xử lý giữ nguyên, không sửa được.</div>
@@ -7413,7 +7482,7 @@ function openEditRequestModal(r, matById) {
       quantity: parseFloat(tr.querySelector(".reqedit-qty").value),
     }));
     await PUT(`/warehouse/requests/${r.request_id}`, {
-      requested_receipt_date: dateInputToIsoNoon($("reqedit_date").value),
+      requested_receipt_date: $("reqedit_date").value ? new Date($("reqedit_date").value).toISOString() : null,
       lines,
     });
     toast("Đã lưu thay đổi phiếu đề nghị");
@@ -7601,8 +7670,8 @@ function cartPanelHtml() {
       <button class="btn sec" id="rq_add" style="align-self:flex-end">+ Thêm dòng</button>
     </div>
     <div class="row" style="margin-top:10px">
-      <div class="field"><label>Ngày đề nghị nhận kho (tuỳ chọn)</label>
-        <input id="rq_recv_date" type="date" value="${esc(REQUEST_RECEIPT_DATE)}"/></div>
+      <div class="field"><label>Ngày giờ đề nghị nhận kho (tuỳ chọn)</label>
+        <input id="rq_recv_date" type="datetime-local" value="${esc(REQUEST_RECEIPT_DATE)}"/></div>
       <div class="field" style="flex:1"><label>Ghi chú chung (tuỳ chọn)</label><input id="rq_note" placeholder="(tuỳ chọn)"/></div>
       <button class="btn" id="rq_submit" style="align-self:flex-end" ${REQUEST_CART.some(c => c.quantity > 0) ? "" : "disabled"}>
         Gửi đề nghị (${REQUEST_CART.filter(c => c.quantity > 0).length} dòng)</button>
@@ -7786,12 +7855,12 @@ function wireCartPanel() {
       note,
       source_type: REQUEST_SOURCE ? REQUEST_SOURCE.type : null,
       source_id: REQUEST_SOURCE ? REQUEST_SOURCE.id : null,
-      requested_receipt_date: dateInputToIsoNoon(REQUEST_RECEIPT_DATE),
+      requested_receipt_date: REQUEST_RECEIPT_DATE ? new Date(REQUEST_RECEIPT_DATE).toISOString() : null,
     });
     toast(`Đã gửi phiếu ${res.request_code} (${submitRows.length} dòng)`);
     REQUEST_CART = [];
     REQUEST_SOURCE = null;
-    REQUEST_RECEIPT_DATE = toISODateLocal(new Date());
+    REQUEST_RECEIPT_DATE = toDTLocal(new Date());
     render("warehouse_px");
   });
 }
@@ -11807,7 +11876,7 @@ async function doLogout() {
   // liệu của người trước: giỏ hàng yêu cầu xuất kho đang soạn dở (có thể vô tình bị gửi đi dưới
   // danh tính người mới), và các cờ "điều hướng 1 lần" từ Dashboard (mở thẳng CAPA/Deviation/
   // Hold-Release theo scope đã chọn) — nếu còn sót sẽ tự mở nhầm màn cho người dùng kế tiếp.
-  REQUEST_CART = []; REQUEST_SOURCE = null; REQUEST_RECEIPT_DATE = toISODateLocal(new Date());
+  REQUEST_CART = []; REQUEST_SOURCE = null; REQUEST_RECEIPT_DATE = toDTLocal(new Date());
   PENDING_QUALITY_SCOPE = null; PENDING_CAPA_DEVIATION = null;
   PENDING_OPEN_CAPA_ID = null; PENDING_OPEN_DEVIATION_ID = null;
   showLogin();
