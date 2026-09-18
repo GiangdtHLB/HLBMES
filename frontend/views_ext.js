@@ -223,9 +223,13 @@
         <h3 style="margin-top:12px">Cấp 1 vật tư (tự chọn lô theo FEFO — hết hạn trước xuất trước)</h3>
         <div class="row">
           <div class="field"><label>Vật tư</label><select id="dp_mat"></select></div>
+          <div class="field"><label>Chọn lô</label><select id="dp_lot" style="min-width:220px"><option value="">(tự động FEFO)</option></select></div>
           <div class="field"><label>Số lượng</label><input id="dp_qty" style="width:110px"/></div>
           <div class="field" style="align-self:flex-end"><label style="display:flex;gap:4px;align-items:center"><input type="checkbox" id="dp_over"/> cho vượt ĐM</label></div>
           <div class="field" style="align-self:flex-end"><button class="btn" id="dp_go">Cấp liệu</button></div>
+        </div>
+        <div class="row" id="dp_lot_reason_wrap" style="display:none">
+          <div class="field"><label>Lý do chọn khác FIFO (bắt buộc)</label><input id="dp_lot_reason" style="width:260px"/></div>
         </div>`)}
       ${panel("💡 Gợi ý cấp liệu (tự động, FEFO — Kho phân xưởng)", `
         <div class="muted" style="margin-bottom:8px">Tính vật tư còn thiếu theo Định mức (BOM) của mẻ, tự chọn lô theo FEFO ở Kho phân xưởng — chỉ xem trước, chưa trừ tồn.</div>
@@ -236,12 +240,36 @@
       ${panel("📜 Lịch sử cấp liệu", `<div id="dp_hist" class="muted">Đang tải…</div>`)}
     `;
 
+    let currentBatch = null;
+    async function refreshDpLots() {
+      const code = $("dp_mat").value;
+      const lotSel = $("dp_lot");
+      $("dp_lot_reason_wrap").style.display = "none";
+      $("dp_lot_reason").value = "";
+      if (!code || !currentBatch || !currentBatch.start_at) {
+        lotSel.innerHTML = `<option value="">(tự động FEFO)</option>`;
+        lotSel.dataset.fefoFirst = "";
+        return;
+      }
+      const bid = $("dp_batch").value;
+      const lots = await GET(`/dispense/${bid}/material-lots?material_code=${encodeURIComponent(code)}`).catch(() => []);
+      lotSel.dataset.fefoFirst = lots[0] ? lots[0].lot_id : "";
+      lotSel.innerHTML = `<option value="">(tự động FEFO)</option>` + lots.map(l =>
+        `<option value="${l.lot_id}">${esc(l.lot_code)} (còn ${l.quantity} ${esc(l.uom || "")}${l.expiry ? ", HSD " + fmt(l.expiry) : ""})</option>`).join("");
+    }
+    $("dp_lot").onchange = () => {
+      const sel = $("dp_lot");
+      const isDefault = !sel.value || sel.value === sel.dataset.fefoFirst;
+      $("dp_lot_reason_wrap").style.display = isDefault ? "none" : "";
+      if (isDefault) $("dp_lot_reason").value = "";
+    };
     async function refresh() {
       const bid = $("dp_batch").value;
       if (!bid) { $("dp_bom").innerHTML = '<div class="muted">Chưa có mẻ nào để cấp liệu.</div>'; return; }
       const [batch, bom, hist, summary] = await Promise.all([
         GET(`/batches/${bid}`), GET(`/batches/${bid}/bom`), GET(`/dispense?batch_id=${bid}`),
         GET(`/dispense/${bid}/summary`)]);
+      currentBatch = batch;
       const canEdit = !batch.ebr_locked;
       // Tồn kho phân xưởng dùng để đối chiếu khi cấp liệu tính TẠI thời điểm bắt đầu nấu, và mẻ
       // nào bắt đầu trước phải cấp liệu trước (services/dispense.py::_assert_dispensable) — hiện
@@ -264,7 +292,11 @@
           <td>${esc((l.lot_codes || []).join(", ") || "—")}</td>
           <td class="muted" style="white-space:nowrap">${_flAuditText(l.actor, l.created_at)}</td>
           <td class="muted" style="white-space:nowrap">${l.supply_date ? fmt(l.supply_date) : "—"}</td>
-          <td>${l.fifo_ok === false ? '<span style="color:var(--red)">⚠ khác FIFO</span>' : '<span style="color:var(--green)">✔ FIFO</span>'}</td>
+          <td>${l.fifo_ok === false
+            ? `<span style="color:var(--red)">⚠ khác FIFO${l.fifo_computed ? " (suy luận)" : ""}</span>`
+            : l.fifo_ok === true
+            ? `<span style="color:var(--green)" title="${l.fifo_computed ? 'Suy luận lại từ lịch sử tồn kho (tiêu thụ qua đường cũ, không kiểm tra FIFO lúc đó) — không phải xác nhận thật lúc cấp liệu' : 'Đã xác nhận đúng FIFO ngay lúc cấp liệu'}">✔ FIFO${l.fifo_computed ? " (suy luận)" : ""}</span>`
+            : '<span class="muted" title="Không dựng lại được tồn kho lịch sử tại thời điểm mẻ bắt đầu (VD mẻ chưa có Bắt đầu) — không suy đoán được">— (không xác định)</span>'}</td>
           <td>${l.planned != null ? l.planned + " " + esc(l.uom || "") : ""}</td>
           <td class="bom-actual">${l.actual}</td><td>${l.diff != null ? l.diff : ""}</td>
           <td>${l.status != null ? badge(BOM_STATUS_BADGE[l.status] || "planned") + esc(BOM_STATUS_LABEL[l.status] || l.status) : ""}</td>
@@ -274,6 +306,8 @@
         <div class="muted" style="margin-top:6px">${canEdit ? "" : "Hồ sơ mẻ (EBR) đã khóa — không thể sửa Thực tế."}</div>`
         : '<div class="muted">Chưa cấp vật tư nào cho mẻ này — dùng "Gợi ý cấp liệu" hoặc "Cấp 1 vật tư" bên dưới.</div>';
       $("dp_mat").innerHTML = (bom.lines || []).map(l => `<option value="${esc(l.material_code)}">${esc(l.material_code)}${l.material_name ? " — " + esc(l.material_name) : ""} (ĐM ${l.planned})</option>`).join("");
+      $("dp_mat").onchange = () => guard(refreshDpLots);
+      await refreshDpLots();
       // Mỗi phiếu cấp liệu (Dispense) — dp_go ("Cấp 1 vật tư") và sg_apply ("Áp dụng gợi ý")
       // đều gọi CHUNG endpoint POST /dispense/{bid} nên chỉ phân biệt được nguồn gốc qua `note`
       // ("Cấp tự do"/"Cấp theo gợi ý (FEFO)") — luôn hiện `note` rõ ràng, kèm dịch `mode` sang
@@ -329,8 +363,13 @@
     wireSearchableSelect("dp_batch_search", "dp_batch", batchItems, onBatchPicked);
     $("dp_go").onclick = () => guard(async () => {
       const bid = $("dp_batch").value;
-      await POST(`/dispense/${bid}`, { lines: [{ material_code: $("dp_mat").value, quantity: num("dp_qty") || 0, allow_over: $("dp_over").checked }],
-        note: "Cấp tự do" });
+      const lotId = $("dp_lot").value || null;
+      const reason = $("dp_lot_reason").value.trim() || null;
+      if (lotId && lotId !== $("dp_lot").dataset.fefoFirst && !reason) {
+        toast('Chọn lô khác FIFO phải nhập "Lý do chọn khác FIFO"', "err"); return;
+      }
+      await POST(`/dispense/${bid}`, { lines: [{ material_code: $("dp_mat").value, quantity: num("dp_qty") || 0,
+        lot_id: lotId, reason, allow_over: $("dp_over").checked }], note: "Cấp tự do" });
       toast("Đã cấp liệu"); $("dp_qty").value = ""; refresh();
     });
     $("sg_go").onclick = () => guard(async () => {

@@ -41,6 +41,15 @@ def suggest_dispense(batch_id: str, db: Session = Depends(get_db), user: User = 
     return svc.suggest_dispense(db, batch_id)
 
 
+@router.get("/{batch_id}/material-lots")
+def material_lots_for_batch(batch_id: str, material_code: str, db: Session = Depends(get_db),
+                            user: User = Depends(get_current_user)):
+    """Danh sách lô khả dụng (FEFO, Kho phân xưởng) của 1 vật tư — cho ô "Chọn lô" ở "Cấp 1 vật
+    tư". Dùng chung điều kiện với dispense()/suggest — mẻ chưa có thời điểm bắt đầu nấu thì báo
+    lỗi ngay."""
+    return svc.lots_for_material(db, batch_id, material_code)
+
+
 @router.post("/{batch_id}")
 def dispense(batch_id: str, payload: DispenseIn, db: Session = Depends(get_db),
              user: User = Depends(get_current_user)):

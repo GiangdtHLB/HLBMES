@@ -2341,12 +2341,8 @@ async function showBatch(id) {
       <dt>SL kế hoạch/thực tế</dt><dd>${b.planned_qty} / <input type="number" id="bd_actual" value="${b.actual_qty ?? ""}" placeholder="chưa nhập" style="width:90px" ${lkDis}/> ${esc(b.uom)}
         <button class="btn sm" id="bd_actual_save" ${lkDis}>Lưu</button>
         <span class="muted" style="font-size:12px;white-space:nowrap;margin-left:6px">${actualAudit ? _flAuditText(actualAudit.actor, actualAudit.ts) : ""}</span></dd>
-      <dt>Bắt đầu / Kết thúc</dt><dd>
-        <input type="datetime-local" id="bd_start" value="${b.start_at ? toDTLocal(new Date(b.start_at)) : ""}" style="width:210px" ${lkDis}/>
-        <span class="muted" style="font-size:12px;white-space:nowrap">${startAudit ? _flAuditText(startAudit.actor, startAudit.ts) : ""}</span> →
-        <input type="datetime-local" id="bd_end" value="${b.end_at ? toDTLocal(new Date(b.end_at)) : ""}" style="width:210px" ${lkDis}/>
-        <span class="muted" style="font-size:12px;white-space:nowrap">${endAudit ? _flAuditText(endAudit.actor, endAudit.ts) : ""}</span>
-        <button class="btn sm" id="bd_time_save" ${lkDis}>Lưu</button></dd>
+      <dt>Bắt đầu</dt><dd id="bd_start_wrap"></dd>
+      <dt>Kết thúc</dt><dd id="bd_end_wrap"></dd>
     </dl>
     ${curves ? `<h3>Đường cong lên men</h3>${curves}` : ""}
     <h3>Tiêu thụ nguyên liệu (genealogy)</h3>
@@ -2356,7 +2352,11 @@ async function showBatch(id) {
       <tbody>${bom.lines.map(l => `<tr class="row-${{dat:"blue",vuot:"red",thieu:"green",chua_dung:""}[l.status] || ""}">
         <td><code class="k">${esc(l.material_code)}</code>${l.material_name ? ` ${esc(l.material_name)}` : ""}</td>
         <td>${esc((l.lot_codes || []).join(", "))}</td>
-        <td>${l.fifo_ok === false ? '<span style="color:var(--red)">⚠ khác FIFO</span>' : l.fifo_ok === true ? '<span style="color:var(--green)">✔ FIFO</span>' : ""}</td>
+        <td>${l.fifo_ok === false
+          ? `<span style="color:var(--red)">⚠ khác FIFO${l.fifo_computed ? " (suy luận)" : ""}</span>`
+          : l.fifo_ok === true
+          ? `<span style="color:var(--green)" title="${l.fifo_computed ? 'Suy luận lại từ lịch sử tồn kho (tiêu thụ qua đường cũ, không kiểm tra FIFO lúc đó) — không phải xác nhận thật lúc cấp liệu' : 'Đã xác nhận đúng FIFO ngay lúc cấp liệu'}">✔ FIFO${l.fifo_computed ? " (suy luận)" : ""}</span>`
+          : ""}</td>
         <td>${l.planned != null ? l.planned + " " + esc(l.uom || "") : ""}</td>
         <td>${l.actual}</td><td style="color:${l.diff > 0 ? "var(--red)" : l.diff < 0 ? "var(--orange)" : "var(--muted)"}">${l.diff != null ? (l.diff > 0 ? "+" : "") + l.diff : ""}</td>
         <td>${l.pct != null ? l.pct + "%" : ""}</td><td>${l.status != null ? `<span class="badge ${{dat:"available",vuot:"critical",thieu:"due",chua_dung:"planned",ngoai_bom:"obsolete"}[l.status] || "planned"}">${{dat:"đạt",vuot:"vượt định mức",thieu:"thiếu",chua_dung:"chưa dùng",ngoai_bom:"ngoài định mức"}[l.status] || l.status}</span>` : ""}</td>
@@ -2428,17 +2428,46 @@ async function showBatch(id) {
     await POST(`/batches/${id}/actual-qty`, { actual_qty: v });
     toast("Đã lưu SL thực tế"); showBatch(id);
   });
-  $("bd_time_save").onclick = () => guard(async () => {
-    const startRaw = $("bd_start").value, endRaw = $("bd_end").value;
-    if (!startRaw && !endRaw) throw new Error("Chọn ít nhất 1 mốc giờ để lưu.");
-    const effectiveStartRaw = startRaw || (b.start_at ? toDTLocal(new Date(b.start_at)) : "");
-    if (endRaw && effectiveStartRaw && new Date(endRaw) <= new Date(effectiveStartRaw)) {
-      throw new Error("Giờ kết thúc phải sau giờ bắt đầu.");
-    }
-    if (startRaw) await POST(`/batches/${id}/start`, { start_at: new Date(startRaw).toISOString() });
-    if (endRaw) await POST(`/batches/${id}/finish`, { end_at: new Date(endRaw).toISOString() });
-    toast("Đã lưu thời gian"); showBatch(id);
-  });
+  // Bắt đầu/Kết thúc — mặc định hiện chữ (24h qua fmt(), như tank lên men) + nút Sửa bật ô nhập
+  // riêng từng mốc (yêu cầu người dùng 2026-09-17), thay vì luôn hiện sẵn 2 ô nhập gốc trình
+  // duyệt (AM/PM tùy máy) + 1 nút Lưu chung như trước. Vẫn giữ đúng validate "kết thúc phải sau
+  // bắt đầu" — mẻ 2361 từng bị nhập lộn ngược 2 mốc này (phát hiện lúc rà soát 2026-09-17),
+  // validate 2 CHIỀU (sửa Bắt đầu thì so với Kết thúc đã lưu, và ngược lại) để chặn chắc hơn vì
+  // giờ sửa riêng từng ô, không còn sửa cùng lúc cả 2 để tự so nhau như code cũ.
+  let editingStart = !b.start_at, editingEnd = !b.end_at;
+  function renderBdStart() {
+    $("bd_start_wrap").innerHTML = editingStart
+      ? `<input type="datetime-local" id="bd_start" value="${b.start_at ? toDTLocal(new Date(b.start_at)) : ""}" style="width:210px" ${lkDis}/>
+         <button class="btn sm" id="bd_start_save" ${lkDis}>Lưu</button>`
+      : `${fmt(b.start_at)}
+         <span class="muted" style="font-size:12px;white-space:nowrap">${startAudit ? " — " + _flAuditText(startAudit.actor, startAudit.ts) : ""}</span>
+         ${lkDis ? "" : `<button class="btn sm sec" id="bd_start_edit">Sửa</button>`}`;
+    if ($("bd_start_edit")) $("bd_start_edit").onclick = () => { editingStart = true; renderBdStart(); };
+    if ($("bd_start_save")) $("bd_start_save").onclick = () => guard(async () => {
+      const v = $("bd_start").value;
+      if (!v) throw new Error("Nhập giờ bắt đầu.");
+      if (b.end_at && new Date(v) >= new Date(b.end_at)) throw new Error("Giờ bắt đầu phải trước giờ kết thúc.");
+      await POST(`/batches/${id}/start`, { start_at: new Date(v).toISOString() });
+      toast("Đã lưu giờ bắt đầu"); showBatch(id);
+    });
+  }
+  function renderBdEnd() {
+    $("bd_end_wrap").innerHTML = editingEnd
+      ? `<input type="datetime-local" id="bd_end" value="${b.end_at ? toDTLocal(new Date(b.end_at)) : ""}" style="width:210px" ${lkDis}/>
+         <button class="btn sm" id="bd_end_save" ${lkDis}>Lưu</button>`
+      : `${fmt(b.end_at)}
+         <span class="muted" style="font-size:12px;white-space:nowrap">${endAudit ? " — " + _flAuditText(endAudit.actor, endAudit.ts) : ""}</span>
+         ${lkDis ? "" : `<button class="btn sm sec" id="bd_end_edit">Sửa</button>`}`;
+    if ($("bd_end_edit")) $("bd_end_edit").onclick = () => { editingEnd = true; renderBdEnd(); };
+    if ($("bd_end_save")) $("bd_end_save").onclick = () => guard(async () => {
+      const v = $("bd_end").value;
+      if (!v) throw new Error("Nhập giờ kết thúc.");
+      if (b.start_at && new Date(v) <= new Date(b.start_at)) throw new Error("Giờ kết thúc phải sau giờ bắt đầu.");
+      await POST(`/batches/${id}/finish`, { end_at: new Date(v).toISOString() });
+      toast("Đã lưu giờ kết thúc"); showBatch(id);
+    });
+  }
+  renderBdStart(); renderBdEnd();
   // "Tiêu thụ nguyên liệu (genealogy)" tạm thời tắt (yêu cầu người dùng 2026-09-01) — bỏ HTML
   // nút/ô nhập ở trên nhưng giữ nguyên hàm xử lý, chỉ gắn khi nút còn tồn tại, để bật lại dễ dàng.
   if ($("c_do")) $("c_do").onclick = () => guard(async () => {
@@ -2905,10 +2934,9 @@ async function showBatchTank(tankId, allBatches) {
     <h3 style="margin-top:16px">Bảng theo dõi lên men theo ngày</h3>
     <div id="bt_daily_wrap"></div>
     <h3 style="margin-top:16px">Hạ phụ</h3>
-    <div class="tablewrap"><table><thead><tr><th>Thời điểm</th><th>°P</th><th>Người lưu</th><th></th></tr></thead>
+    <div class="tablewrap"><table><thead><tr><th>Thời điểm</th><th>°P</th><th>Người nhập / Ngày giờ</th><th></th></tr></thead>
       <tbody id="bt_haphu_wrap"></tbody></table></div>
     <button class="btn sm sec" id="bt_addhaphu" style="margin-top:6px" ${lkDis}>+ Thêm mốc hạ phụ</button>
-    <button class="btn sm" id="bt_save_haphu" style="margin-top:6px" ${lkDis}>Lưu mốc hạ phụ</button>
     <h3 style="margin-top:16px">Lịch sử làm rỗng tank</h3>
     <div class="muted" style="margin-bottom:6px">Tự ghi lại mỗi lần bấm "Làm rỗng tank" bên dưới — không tự nhập/sửa được.</div>
     <div class="tablewrap"><table><thead><tr><th>Ngày giờ làm rỗng</th><th>Số lít bia còn lại (hl)</th><th>Số đã làm rỗng (hl)</th><th>Người thực hiện</th></tr></thead>
@@ -2996,30 +3024,63 @@ async function showBatchTank(tankId, allBatches) {
   }
   renderBtDailyTable();
 
+  // Mốc CHƯA từng lưu (recorded_at rỗng) mặc định ở chế độ Sửa; mốc đã lưu mặc định hiện chữ
+  // (24h qua fmt(), giống tank lên men) — bấm "Sửa" mới bật input (yêu cầu người dùng
+  // 2026-09-17, mirror renderBtDailyTable). Dùng VỊ TRÍ MẢNG (idx) để gắn input/nút — đủ ổn định
+  // vì luôn render lại toàn bộ ngay sau mỗi lần thêm/xóa/sửa (không có thao tác nào khác chen
+  // vào giữa làm lệch idx trước khi render lại).
+  const editingHaphu = new Set(haphuEvents.map((e, i) => [e, i]).filter(([e]) => !e.recorded_at).map(([, i]) => i));
   function renderBtHaphu() {
-    $("bt_haphu_wrap").innerHTML = haphuEvents.map((ev, idx) => `<tr>
-      <td><input type="datetime-local" class="fl-haphu-cell" data-hpkey="at" data-hpidx="${idx}"
-        value="${esc(ev.at === null || ev.at === undefined ? "" : String(ev.at))}" style="width:220px" ${lkDis}/></td>
-      <td><input type="number" class="fl-haphu-cell" data-hpkey="op_value" data-hpidx="${idx}"
-        value="${esc(ev.op_value === null || ev.op_value === undefined ? "" : String(ev.op_value))}" style="width:80px" ${lkDis}/></td>
-      <td class="muted" style="font-size:12px;white-space:nowrap">${_flAuditText(ev.recorded_by, ev.recorded_at)}</td>
-      <td>${lk ? "" : `<button class="btn sm sec" data-delhaphu="${idx}">Xóa</button>`}</td></tr>`).join("")
-      || `<tr><td colspan=4 class="muted">Chưa có mốc hạ phụ nào.</td></tr>`;
+    $("bt_haphu_wrap").innerHTML = haphuEvents.map((ev, idx) => {
+      const editing = !lk && editingHaphu.has(idx);
+      const cells = editing
+        ? `<td><input type="datetime-local" class="fl-haphu-cell" data-hpkey="at" data-hpidx="${idx}"
+            value="${esc(ev.at === null || ev.at === undefined ? "" : String(ev.at))}" style="width:220px"/></td>
+          <td><input type="number" class="fl-haphu-cell" data-hpkey="op_value" data-hpidx="${idx}"
+            value="${esc(ev.op_value === null || ev.op_value === undefined ? "" : String(ev.op_value))}" style="width:80px"/></td>
+          <td class="muted" style="font-size:12px;white-space:nowrap">${_flAuditText(ev.recorded_by, ev.recorded_at)}</td>
+          <td style="white-space:nowrap"><button class="btn sm" data-haphusave="${idx}">Lưu</button>
+            <button class="btn sm sec" data-delhaphu="${idx}">Xóa</button></td>`
+        : `<td>${fmt(ev.at)}</td><td>${ev.op_value ?? "—"}</td>
+          <td class="muted" style="font-size:12px;white-space:nowrap">${_flAuditText(ev.recorded_by, ev.recorded_at)}</td>
+          <td style="white-space:nowrap">${lk ? "" : `<button class="btn sm sec" data-haphuedit="${idx}">Sửa</button>
+            <button class="btn sm sec" data-delhaphu="${idx}">Xóa</button>`}</td>`;
+      return `<tr>${cells}</tr>`;
+    }).join("") || `<tr><td colspan=4 class="muted">Chưa có mốc hạ phụ nào.</td></tr>`;
     document.querySelectorAll("#bt_haphu_wrap .fl-haphu-cell").forEach(el => el.oninput = () => {
-      const idx = parseInt(el.dataset.hpidx, 10);
-      haphuEvents[idx][el.dataset.hpkey] = el.value.trim() || null;
+      haphuEvents[parseInt(el.dataset.hpidx, 10)][el.dataset.hpkey] = el.value.trim() || null;
     });
-    document.querySelectorAll("#bt_haphu_wrap [data-delhaphu]").forEach(b => b.onclick = () => {
-      haphuEvents.splice(parseInt(b.dataset.delhaphu, 10), 1);
+    document.querySelectorAll("#bt_haphu_wrap [data-haphuedit]").forEach(b => b.onclick = () => {
+      editingHaphu.add(parseInt(b.dataset.haphuedit, 10));
       renderBtHaphu();
     });
+    // Backend chỉ có 1 API thay NGUYÊN mảng (không có API lưu/xóa từng mốc riêng) — "Lưu"/"Xóa"
+    // 1 dòng vẫn phải gửi CẢ mảng, nhưng nay backend so khớp theo GIÁ TRỊ (at, op_value) với
+    // mảng cũ nên chỉ mốc thật sự đổi mới bị đóng dấu lại người/giờ ghi, các mốc khác giữ
+    // nguyên (xem update_process_log).
+    document.querySelectorAll("#bt_haphu_wrap [data-haphusave]").forEach(b => b.onclick = () => guard(async () => {
+      await PUT(`/batch-tanks/${tankId}/process-log`, { ha_phu_events: haphuEvents });
+      toast("Đã lưu mốc hạ phụ"); showBatchTank(tankId, allBatches);
+    }));
+    document.querySelectorAll("#bt_haphu_wrap [data-delhaphu]").forEach(b => b.onclick = () => guard(async () => {
+      const idx = parseInt(b.dataset.delhaphu, 10);
+      const wasSaved = !!haphuEvents[idx].recorded_at;
+      if (wasSaved && !confirm("Xóa hẳn mốc hạ phụ này? Không thể hoàn tác.")) return;
+      haphuEvents.splice(idx, 1);
+      editingHaphu.delete(idx);
+      if (wasSaved) {
+        await PUT(`/batch-tanks/${tankId}/process-log`, { ha_phu_events: haphuEvents });
+        toast("Đã xóa mốc hạ phụ");
+      }
+      renderBtHaphu();
+    }));
   }
   renderBtHaphu();
-  if ($("bt_addhaphu")) $("bt_addhaphu").onclick = () => { haphuEvents.push({ at: null }); renderBtHaphu(); };
-  $("bt_save_haphu").onclick = () => guard(async () => {
-    await PUT(`/batch-tanks/${tankId}/process-log`, { ha_phu_events: haphuEvents });
-    toast("Đã lưu mốc hạ phụ"); showBatchTank(tankId, allBatches);
-  });
+  if ($("bt_addhaphu")) $("bt_addhaphu").onclick = () => {
+    haphuEvents.push({ at: null });
+    editingHaphu.add(haphuEvents.length - 1);
+    renderBtHaphu();
+  };
 
   $("bt_trace").onclick = () => goTraceBackward(t.tank_code);
   $("bt_ebr").onclick = () => openTankEBR(tankId);
@@ -3694,9 +3755,7 @@ async function showBatchPackLot(packLotId) {
       <dt>Tank BBT</dt><dd>${esc(p.from_bbt || "—")}</dd>
       <dt>Sản phẩm</dt><dd>${fp ? esc(fp.code) + " — " + esc(fp.name) : "—"}</dd>
       <dt>Dây chuyền</dt><dd>${esc(p.line || "—")}</dd>
-      <dt>Giờ bắt đầu chiết</dt><dd><input id="pk_date_edit" type="datetime-local" value="${toDTLocal(new Date(p.pack_date))}" style="width:220px" ${dis}/>
-        <button class="btn sm sec" id="pk_date_save" ${dis}>Lưu giờ</button>
-        <span class="muted" style="font-size:12px;white-space:nowrap;margin-left:6px">${dateAudit ? _flAuditText(dateAudit.actor, dateAudit.ts) : ""}</span></dd>
+      <dt>Giờ bắt đầu chiết</dt><dd id="pk_date_wrap"></dd>
       <dt>Giờ kết thúc chiết</dt><dd class="muted">${p.ended_at ? fmt(p.ended_at) : "— (chưa có ca nào khai đủ SL + giờ kết thúc)"}</dd>
       <dt>Số lượng cấp chiết (lít) <span style="color:var(--red)">*</span></dt><dd><input id="pk_qty_edit" type="number" min="0.01" step="any" value="${p.qty}" style="width:120px" ${dis}/>
         <button class="btn sm sec" id="pk_qty_save" ${dis}>Lưu SL</button>
@@ -3749,12 +3808,26 @@ async function showBatchPackLot(packLotId) {
     await PUT(`/batch-pack-lots/${packLotId}/qty`, { qty });
     toast("Đã lưu SL"); showBatchPackLot(packLotId);
   });
-  $("pk_date_save").onclick = () => guard(async () => {
-    const v = $("pk_date_edit").value;
-    if (!v) throw new Error("Nhập giờ bắt đầu chiết.");
-    await PUT(`/batch-pack-lots/${packLotId}/pack-date`, { pack_date: new Date(v).toISOString() });
-    toast("Đã lưu giờ bắt đầu chiết"); showBatchPackLot(packLotId);
-  });
+  // Giờ bắt đầu chiết — mặc định hiện chữ (24h) + nút Sửa bật ô nhập, giống Bắt đầu/Kết thúc ở
+  // Mẻ sản xuất (yêu cầu người dùng 2026-09-17). p.pack_date luôn có giá trị (khác Mẻ sản xuất
+  // có thể chưa nhập) nên mặc định bắt đầu ở chế độ xem, không tự bật sửa.
+  let editingPkDate = false;
+  function renderPkDate() {
+    $("pk_date_wrap").innerHTML = editingPkDate
+      ? `<input id="pk_date_edit" type="datetime-local" value="${toDTLocal(new Date(p.pack_date))}" style="width:220px"/>
+         <button class="btn sm sec" id="pk_date_save">Lưu giờ</button>`
+      : `${fmt(p.pack_date)}
+         <span class="muted" style="font-size:12px;white-space:nowrap">${dateAudit ? " — " + _flAuditText(dateAudit.actor, dateAudit.ts) : ""}</span>
+         ${dis ? "" : `<button class="btn sm sec" id="pk_date_edit_btn">Sửa</button>`}`;
+    if ($("pk_date_edit_btn")) $("pk_date_edit_btn").onclick = () => { editingPkDate = true; renderPkDate(); };
+    if ($("pk_date_save")) $("pk_date_save").onclick = () => guard(async () => {
+      const v = $("pk_date_edit").value;
+      if (!v) throw new Error("Nhập giờ bắt đầu chiết.");
+      await PUT(`/batch-pack-lots/${packLotId}/pack-date`, { pack_date: new Date(v).toISOString() });
+      toast("Đã lưu giờ bắt đầu chiết"); showBatchPackLot(packLotId);
+    });
+  }
+  renderPkDate();
   // "SL chiết theo ca" — mỗi ca 1 nút Lưu/Sửa/Xóa riêng, kèm người nhập/giờ nhập RIÊNG cho ca đó
   // (mirror renderBtDailyTable ở showBatchTank, yêu cầu người dùng 2026-09-16). Ca CHƯA từng lưu
   // (ca{n}_at rỗng) mặc định ở chế độ Sửa luôn (không có gì để hiện dạng chữ); ca đã lưu mặc
@@ -7383,12 +7456,12 @@ function groupMemberFifoBadgeHtml(materialId, memberIds, allLots) {
 function requestLotOptionsHtml(materialId, allLots, selectedLotId) {
   const avail = allLots.filter(l => l.material_id === materialId && l.quantity > 0 && !/phân xưởng/i.test(l.location || ""))
     .sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
-  if (!avail.length) return { html: '<option value="">(không còn lô khả dụng)</option>', defaultId: "" };
+  if (!avail.length) return { html: '<option value="">(không còn lô khả dụng)</option>', defaultId: "", fifoFirstId: "" };
   const defaultId = selectedLotId && avail.some(l => l.lot_id === selectedLotId) ? selectedLotId : avail[0].lot_id;
   const html = avail.map((l, i) => `<option value="${l.lot_id}" ${l.lot_id === defaultId ? "selected" : ""}>` +
     `${esc(l.lot_code)} (${l.quantity}${l.uom}, nhập ${fmt(l.created_at)})${i === 0 ? " — FIFO, lô cũ nhất" : ""}` +
     `${l.status === "on_hold" ? " — CHỜ DUYỆT QC" : ""}</option>`).join("");
-  return { html, defaultId };
+  return { html, defaultId, fifoFirstId: avail[0].lot_id };
 }
 
 // Dòng đã fulfilled: hiện lại đúng trạng thái FIFO đã chụp NGAY LÚC XUẤT (fifo_ok, xem
@@ -7410,9 +7483,15 @@ function requestLineRowHtml(r, l, matById, lotById, canFulfill, allLots) {
   const fulLot = l.fulfilled_lot_id ? lotById[l.fulfilled_lot_id] : null;
   const showLotPicker = canFulfill && l.status === "pending";
   const lotOpts = showLotPicker ? requestLotOptionsHtml(l.material_id, allLots, l.preferred_lot_id) : null;
+  // fulfilled_lot_codes: ĐẦY ĐỦ mọi lô đã dùng nếu "Duyệt cả phiếu" phải tách dòng thành nhiều
+  // lô theo FIFO (yêu cầu người dùng 2026-09-18, xem services/warehouse.py::fulfill_all_lines)
+  // — fulfilled_lot_id chỉ giữ lô CUỐI nên hiện riêng không đủ khi có nhiều hơn 1 lô.
+  const lotCodesLabel = (l.fulfilled_lot_codes && l.fulfilled_lot_codes.length)
+    ? l.fulfilled_lot_codes.join(", ") : (fulLot ? fulLot.lot_code : null);
   const lotCell = showLotPicker
-    ? `<select class="reqlot-select" id="reqlot-${esc(l.line_id)}">${lotOpts.html}</select>`
-    : `<span class="muted">${fulLot ? esc(fulLot.lot_code) : "—"}</span>`;
+    ? `<select class="reqlot-select" id="reqlot-${esc(l.line_id)}" data-lineid="${esc(l.line_id)}"
+        data-fifofirst="${esc(lotOpts.fifoFirstId)}" data-materialid="${esc(l.material_id)}">${lotOpts.html}</select>`
+    : `<span class="muted">${lotCodesLabel ? esc(lotCodesLabel) : "—"}</span>`;
   const dateCell = showLotPicker ? "" : `<span class="muted">${fulLot ? fmt(fulLot.created_at) : "—"}</span>`;
   // "Ngày xuất" = mốc hiệu lực THẬT của StockMovement transfer (ts) khi dòng đã xuất — ĐÚNG
   // "Ngày đề nghị nhận kho" (r.requested_receipt_date) nếu phiếu có khai, mirror
@@ -7430,7 +7509,16 @@ function requestLineRowHtml(r, l, matById, lotById, canFulfill, allLots) {
        <button class="btn sm sec" data-reqreject data-reqid="${esc(r.request_id)}" data-lineid="${esc(l.line_id)}">Từ chối</button>`
     : (isAdminReqUndo && l.status === "fulfilled")
     ? `<button class="btn sm sec" data-requndo data-reqid="${esc(r.request_id)}" data-lineid="${esc(l.line_id)}">Hoàn tác</button>`
-    : (l.reason ? `<span class="muted">${esc(l.reason)}</span>` : "—");
+    : "—";
+  // Lý do khác FIFO (yêu cầu người dùng 2026-09-18): dòng đang pending hiện ô nhập, ẩn/hiện theo
+  // đúng lô đang chọn ở reqlot-select có phải FIFO cũ nhất hay không (wireReqLotFifo, gắn sau khi
+  // chèn HTML) — bắt buộc điền mới cho "Xuất dòng này"/"Duyệt cả phiếu" xuất được (xem
+  // services/warehouse.py::fulfill_request_line/fulfill_all_lines). Dòng đã xử lý xong hiện lại
+  // đúng lý do đã lưu (line.reason), không cho sửa nữa.
+  const reasonCell = showLotPicker
+    ? `<input class="reqfifo-reason" id="reqreason-${esc(l.line_id)}" data-lineid="${esc(l.line_id)}"
+        placeholder="Bắt buộc nếu chọn khác FIFO" style="display:none;width:170px"/>`
+    : `<span class="muted">${l.reason ? esc(l.reason) : "—"}</span>`;
   return `<tr>
     <td>${matLabel}</td>
     <td>${l.quantity} ${esc(l.uom)}</td>
@@ -7438,7 +7526,8 @@ function requestLineRowHtml(r, l, matById, lotById, canFulfill, allLots) {
     <td>${dateCell}</td>
     <td>${issuedAtCell}</td>
     <td>${locCell}</td>
-    <td>${l.status === "fulfilled" ? fulfilledFifoBadgeHtml(l.fifo_ok) : requestFifoBadgeHtml(l.material_id, l.preferred_lot_id, allLots)}</td>
+    <td id="reqfifo-${esc(l.line_id)}">${l.status === "fulfilled" ? fulfilledFifoBadgeHtml(l.fifo_ok) : requestFifoBadgeHtml(l.material_id, l.preferred_lot_id, allLots)}</td>
+    <td>${reasonCell}</td>
     <td>${badge(REQ_STATUS_BADGE[l.status] || "planned")}${esc(l.status)}</td>
     <td>${actions}</td></tr>`;
 }
@@ -7534,9 +7623,9 @@ function requestBlockHtml(r, matById, lotById, canFulfill, showBulk, allLots, ca
       </div>
       <div class="reqdetail" style="display:none;margin-top:8px">
         <table>
-          <thead><tr><th>Vật tư</th><th>SL</th><th>Lô</th><th>Ngày nhập</th><th>Ngày xuất</th><th>Vị trí kho</th><th>FIFO</th><th>Trạng thái</th><th></th></tr></thead>
+          <thead><tr><th>Vật tư</th><th>SL</th><th>Lô</th><th>Ngày nhập</th><th>Ngày xuất</th><th>Vị trí kho</th><th>FIFO</th><th>Lý do (nếu khác FIFO)</th><th>Trạng thái</th><th></th></tr></thead>
           <tbody>${r.lines.map(l => requestLineRowHtml(r, l, matById, lotById, canFulfill, allLots)).join("") ||
-            '<tr><td colspan=9 class="muted">Phiếu không có dòng nào.</td></tr>'}</tbody>
+            '<tr><td colspan=10 class="muted">Phiếu không có dòng nào.</td></tr>'}</tbody>
         </table>
       </div>
     </div>`;
@@ -7561,14 +7650,39 @@ function wireRequestBlockActions() {
     const v = document.querySelector("#nav button.active[data-view]")?.dataset.view;
     if (v) render(v);
   };
+  // Lý do khác FIFO (yêu cầu người dùng 2026-09-18): ẩn/hiện ô "Lý do" + cập nhật lại badge FIFO
+  // mỗi khi đổi lô ở <select> — so trực tiếp với data-fifofirst (lô cũ nhất tại thời điểm render,
+  // xem requestLotOptionsHtml) thay vì gọi lại API, đủ dùng vì tồn kho không đổi trong lúc thao
+  // tác trên cùng 1 lần tải trang.
+  const reqIsFifo = sel => !sel.value || sel.value === sel.dataset.fifofirst;
+  const wireReqLotFifo = sel => {
+    const update = () => {
+      const reasonInput = document.getElementById(`reqreason-${sel.dataset.lineid}`);
+      const fifoCell = document.getElementById(`reqfifo-${sel.dataset.lineid}`);
+      const isFifo = reqIsFifo(sel);
+      if (reasonInput) { reasonInput.style.display = isFifo ? "none" : ""; if (isFifo) reasonInput.value = ""; }
+      if (fifoCell) fifoCell.innerHTML = isFifo
+        ? '<span class="badge available">✓ Lô cũ nhất (FIFO)</span>'
+        : '<span class="badge on_hold">⚠ Không phải lô cũ nhất</span>';
+    };
+    sel.onchange = update;
+    update();
+  };
+  document.querySelectorAll(".reqlot-select").forEach(wireReqLotFifo);
   // Xuất trực tiếp từ lô đã chọn ở <select> ngay trong dòng (không cần mở modal riêng) — lô
   // mặc định đã gợi ý theo FIFO (requestLotOptionsHtml), thủ kho chỉ cần đổi lại nếu muốn.
   document.querySelectorAll("[data-reqfulfill]").forEach(b => b.onclick = () => guard(async () => {
     const sel = document.getElementById(`reqlot-${b.dataset.lineid}`);
     const lotId = sel ? sel.value : "";
     if (!lotId) throw new Error("Không còn lô khả dụng để xuất cho dòng này.");
+    const reasonInput = document.getElementById(`reqreason-${b.dataset.lineid}`);
+    const reason = reasonInput ? reasonInput.value.trim() : "";
+    if (sel && !reqIsFifo(sel) && !reason) {
+      toast('Lô đã chọn không phải lô cũ nhất (FIFO) — bắt buộc nhập "Lý do (nếu khác FIFO)"', "err");
+      return;
+    }
     await POST(`/warehouse/requests/${b.dataset.reqid}/lines/${b.dataset.lineid}/fulfill`,
-      { lot_id: lotId, quantity: parseFloat(b.dataset.qty), location_to: "Kho phân xưởng" });
+      { lot_id: lotId, quantity: parseFloat(b.dataset.qty), location_to: "Kho phân xưởng", reason: reason || null });
     toast("Đã xuất dòng theo lô đã chọn"); renderCurrentWarehouseView();
   }));
   document.querySelectorAll("[data-reqreject]").forEach(b => b.onclick = () => guard(async () => {
@@ -7576,8 +7690,27 @@ function wireRequestBlockActions() {
     await POST(`/warehouse/requests/${b.dataset.reqid}/lines/${b.dataset.lineid}/reject`, { reason });
     toast("Đã từ chối dòng đề nghị"); renderCurrentWarehouseView();
   }));
+  // "Duyệt cả phiếu": nếu có dòng đang chọn lô KHÁC FIFO mà chưa nhập lý do, KHÔNG gửi request
+  // — bắt thủ kho nhập lý do trước (rồi bấm lại), hoặc chỉ duyệt riêng dòng đó qua "Xuất dòng
+  // này" (yêu cầu người dùng 2026-09-18: dòng khác FIFO thiếu lý do không được lẫn vào "Duyệt cả
+  // phiếu" mù mờ). Dòng đã có lý do vẫn gửi kèm qua `reasons` để backend lưu lại (xem
+  // services/warehouse.py::fulfill_all_lines).
   document.querySelectorAll("[data-fulfillall]").forEach(b => b.onclick = () => guard(async () => {
-    const res = await POST(`/warehouse/requests/${b.dataset.fulfillall}/fulfill-all`, {});
+    const block = b.closest(".tablewrap");
+    const sels = Array.from(block.querySelectorAll(".reqlot-select"));
+    const reasons = {};
+    for (const sel of sels) {
+      if (reqIsFifo(sel)) continue;
+      const reasonInput = document.getElementById(`reqreason-${sel.dataset.lineid}`);
+      const reason = reasonInput ? reasonInput.value.trim() : "";
+      if (!reason) {
+        toast('Có dòng đang chọn lô khác FIFO chưa nhập lý do — nhập lý do rồi bấm lại, hoặc dùng "Xuất dòng này" để duyệt riêng dòng đó.', "err");
+        reasonInput && reasonInput.focus();
+        return;
+      }
+      reasons[sel.dataset.lineid] = reason;
+    }
+    const res = await POST(`/warehouse/requests/${b.dataset.fulfillall}/fulfill-all`, { reasons });
     const msg = `Đã xuất ${res.fulfilled.length} dòng sang Kho phân xưởng` +
       (res.skipped.length ? `; ${res.skipped.length} dòng cần xử lý thủ công (không đủ 1 lô hoặc đang chờ QC)` : "");
     toast(msg, res.skipped.length ? "err" : "ok");

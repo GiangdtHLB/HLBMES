@@ -110,18 +110,33 @@ def update_process_log(db: Session, tank_id: str, payload: dict, user: User) -> 
         if events is None:
             values.pop("ha_phu_events", None)
         else:
-            # Đóng dấu người/lúc lưu cho từng mốc có thời điểm — mirror measured_by/measured_at
-            # ở bảng theo ngày (upsert_daily_readings): ai bấm "Lưu mốc hạ phụ" thì đứng tên cho
-            # MỌI mốc có "at" trong lần lưu đó (không cần xác nhận riêng của người lệnh/nhận lệnh/
-            # trực ca — yêu cầu người dùng 2026-09-01, đã bỏ 3 field đó khỏi giao diện).
+            # Đóng dấu người/lúc lưu CHỈ cho mốc THẬT SỰ đổi giá trị — mirror measured_by/
+            # measured_at ở bảng theo ngày (upsert_daily_readings). Trước đây đóng dấu lại
+            # người/giờ cho MỌI mốc có "at" mỗi lần Lưu, kể cả mốc không đổi gì (chỉ vì gửi lên
+            # trong CÙNG payload với 1 mốc khác vừa sửa) — cùng lớp lỗi "Người ghi bị ghi đè cho
+            # mọi dòng" đã sửa ở bảng theo ngày, lộ ra khi tách nút Lưu riêng từng mốc hạ phụ
+            # (yêu cầu người dùng 2026-09-17). Mốc hạ phụ không có khóa ổn định nào (không như
+            # "day_no" ở bảng theo ngày) nên so khớp trực tiếp theo GIÁ TRỊ (at, op_value) với
+            # mảng đã lưu trước đó — mỗi mốc cũ chỉ "nhận diện" được 1 lần (used_old_idx) để 2
+            # mốc trùng giá trị không cùng khớp nhầm vào 1 mốc cũ.
             now = utcnow()
+            old_events = list(values.get("ha_phu_events") or [])
+            used_old_idx = set()
             for ev in events:
-                if ev.get("at") is not None:
-                    ev["recorded_by"] = user.username
-                    ev["recorded_at"] = now.isoformat()
-                else:
+                if ev.get("at") is None:
                     ev.pop("recorded_by", None)
                     ev.pop("recorded_at", None)
+                    continue
+                match_idx = next((i for i, old in enumerate(old_events)
+                                  if i not in used_old_idx
+                                  and (old.get("at"), old.get("op_value")) == (ev.get("at"), ev.get("op_value"))), None)
+                if match_idx is not None:
+                    used_old_idx.add(match_idx)
+                    ev["recorded_by"] = old_events[match_idx].get("recorded_by")
+                    ev["recorded_at"] = old_events[match_idx].get("recorded_at")
+                else:
+                    ev["recorded_by"] = user.username
+                    ev["recorded_at"] = now.isoformat()
             values["ha_phu_events"] = events
     for key, value in payload.items():
         if key in ("note", "ha_phu_events") or key not in MANUAL_FIELD_KEYS:
