@@ -300,15 +300,22 @@ def test_fulfill_line_snapshots_fifo_ok_false_when_older_lot_skipped(client, adm
     req = r.json()
     line_id = req["lines"][0]["line_id"]
 
-    # Thủ kho vẫn chọn đúng lô ưu tiên (mới hơn) dù còn lô cũ hơn — hệ thống KHÔNG chặn,
-    # chỉ chụp lại cảnh báo FIFO để xem sau.
+    # Chọn lô ưu tiên (mới hơn) dù còn lô cũ hơn PHẢI có lý do (2026-09-18) — thiếu lý do bị chặn.
+    blocked = client.post(f"/api/warehouse/requests/{req['request_id']}/lines/{line_id}/fulfill", headers=thukho_h,
+                          json={"lot_id": newer_lot, "quantity": 10, "location_to": "Kho phân xưởng"})
+    assert blocked.status_code >= 400
+    assert "lý do" in blocked.json()["detail"].lower()
+
+    # Có lý do rồi thì hệ thống KHÔNG chặn, chỉ chụp lại cảnh báo FIFO + lý do để xem sau.
     f = client.post(f"/api/warehouse/requests/{req['request_id']}/lines/{line_id}/fulfill", headers=thukho_h,
-                    json={"lot_id": newer_lot, "quantity": 10, "location_to": "Kho phân xưởng"})
+                    json={"lot_id": newer_lot, "quantity": 10, "location_to": "Kho phân xưởng",
+                          "reason": "Lô cũ đang chờ khách hàng kiểm tra riêng, chưa dùng được"})
     assert f.status_code == 200, f.text
 
     listed = client.get("/api/warehouse/requests", headers=thukho_h).json()
     row = next(x for x in listed if x["request_id"] == req["request_id"])
     assert row["lines"][0]["fifo_ok"] is False
+    assert row["lines"][0]["reason"] == "Lô cũ đang chờ khách hàng kiểm tra riêng, chưa dùng được"
     # Xuất 10/50 (một phần) — transfer() tách lô mới mang đúng 10 sang Kho phân xưởng (xem
     # services/warehouse.py::transfer split-lot), nên fulfilled_lot_id KHÔNG còn bằng newer_lot
     # gốc nữa; xác nhận đúng nguồn (newer_lot, không phải older_lot) qua tồn còn lại của nó.
@@ -361,5 +368,86 @@ def test_fulfill_all_lines_snapshots_fifo_ok(client, admin_h, thukho_h, vanhanh_
     assert fulfilled_lot["quantity"] == 10
     original_lot = next(l for l in lots if l["lot_id"] == lot_id)
     assert original_lot["quantity"] == 40
+
+
+def test_fulfill_all_lines_splits_across_multiple_lots_when_oldest_alone_is_short(
+        client, admin_h, thukho_h, vanhanh_h):
+    """Regression 2026-09-18: bản cũ của fulfill_all_lines lọc `MaterialLot.quantity >=
+    line.quantity` TRƯỚC KHI tìm lô cũ nhất — nếu lô THẬT SỰ cũ nhất còn hàng nhưng không đủ 1
+    mình, nó bị loại thẳng, hệ thống nhảy sang lô MỚI HƠN (dù cộng lô cũ + lô mới vẫn đủ) rồi tự
+    gắn fifo_ok=False. Giờ phải LẤY HẾT lô cũ nhất trước, thiếu bao nhiêu lấy tiếp lô cũ kế tiếp
+    (mirror dispense.py._plan_consume) — kết quả phải dùng CẢ 2 lô và fifo_ok=True."""
+    mat_id = _create_material(client, admin_h, "FIFO-SPLIT-MAT")
+    old_lot_id = _receive(client, thukho_h, "LOT-SPLIT-OLD", mat_id, 3)
+    new_lot_id = _receive(client, thukho_h, "LOT-SPLIT-NEW", mat_id, 50)
+
+    r = client.post("/api/warehouse/requests", headers=vanhanh_h,
+                    json={"lines": [{"material_id": mat_id, "quantity": 10, "uom": "kg"}]})
+    req = r.json()
+
+    fa = client.post(f"/api/warehouse/requests/{req['request_id']}/fulfill-all", headers=thukho_h, json={})
+    assert fa.status_code == 200, fa.text
+    assert len(fa.json()["fulfilled"]) == 1
+    assert fa.json()["skipped"] == []
+
+    listed = client.get("/api/warehouse/requests", headers=thukho_h).json()
+    row = next(x for x in listed if x["request_id"] == req["request_id"])
+    line = row["lines"][0]
+    assert line["fifo_ok"] is True
+    assert sorted(line["fulfilled_lot_codes"]) == ["LOT-SPLIT-NEW", "LOT-SPLIT-OLD"]
+
+    lots = {l["lot_id"]: l for l in client.get("/api/lots", headers=thukho_h).json()}
+    # Lô cũ chuyển NGUYÊN dòng sang Kho phân xưởng (lấy đúng hết 3kg, không tách dòng vì chuyển
+    # hết tồn — xem _transfer_lot), lô mới chỉ mất đúng phần còn thiếu (7kg), không bị bỏ qua.
+    assert lots[old_lot_id]["quantity"] == 3
+    assert lots[old_lot_id]["location"] == "Kho phân xưởng"
+    assert lots[new_lot_id]["quantity"] == 43
+
+
+def test_fulfill_all_lines_skips_line_needing_fifo_reason_without_blocking_others(
+        client, admin_h, thukho_h, vanhanh_h):
+    """Yêu cầu người dùng 2026-09-18: nếu 1 dòng dùng preferred_lot_id KHÁC lô cũ nhất (sẽ ra
+    fifo_ok=False), "Duyệt cả phiếu" phải BỎ QUA đúng dòng đó (không chặn các dòng FIFO đúng khác
+    trong cùng phiếu) trừ khi có sẵn lý do trong `reasons`; dòng bị bỏ qua phải duyệt riêng qua
+    "Xuất dòng này" kèm lý do."""
+    mat_bad = _create_material(client, admin_h, "FIFO-ALLSKIP-BAD")
+    mat_ok = _create_material(client, admin_h, "FIFO-ALLSKIP-OK")
+    older_lot = _receive(client, thukho_h, "LOT-ALLSKIP-OLD", mat_bad, 50)
+    newer_lot = _receive(client, thukho_h, "LOT-ALLSKIP-NEW", mat_bad, 50)
+    _receive(client, thukho_h, "LOT-ALLSKIP-OK", mat_ok, 50)
+
+    r = client.post("/api/warehouse/requests", headers=vanhanh_h,
+                    json={"lines": [{"material_id": mat_bad, "quantity": 10, "uom": "kg",
+                                     "preferred_lot_id": newer_lot},
+                                    {"material_id": mat_ok, "quantity": 5, "uom": "kg"}]})
+    req = r.json()
+    bad_line_id = next(l["line_id"] for l in req["lines"] if l["material_id"] == mat_bad)
+    ok_line_id = next(l["line_id"] for l in req["lines"] if l["material_id"] == mat_ok)
+
+    # Thiếu lý do -> dòng mat_bad bị bỏ qua, dòng mat_ok (FIFO đúng, không cần lý do) vẫn xuất.
+    fa = client.post(f"/api/warehouse/requests/{req['request_id']}/fulfill-all", headers=thukho_h, json={})
+    assert fa.status_code == 200, fa.text
+    assert [f["line_id"] for f in fa.json()["fulfilled"]] == [ok_line_id]
+    assert [s["line_id"] for s in fa.json()["skipped"]] == [bad_line_id]
+
+    listed = client.get("/api/warehouse/requests", headers=thukho_h).json()
+    row = next(x for x in listed if x["request_id"] == req["request_id"])
+    by_id = {l["line_id"]: l for l in row["lines"]}
+    assert by_id[bad_line_id]["status"] == "pending"
+    assert by_id[ok_line_id]["status"] == "fulfilled"
+
+    # Có lý do trong `reasons` -> dòng mat_bad giờ xuất được, fifo_ok=False + lý do lưu lại đúng.
+    fa2 = client.post(f"/api/warehouse/requests/{req['request_id']}/fulfill-all", headers=thukho_h,
+                      json={"reasons": {bad_line_id: "Khách chỉ định đúng lô mới do khác biệt bao bì"}})
+    assert fa2.status_code == 200, fa2.text
+    assert [f["line_id"] for f in fa2.json()["fulfilled"]] == [bad_line_id]
+    assert fa2.json()["skipped"] == []
+
+    listed2 = client.get("/api/warehouse/requests", headers=thukho_h).json()
+    row2 = next(x for x in listed2 if x["request_id"] == req["request_id"])
+    bad_line = next(l for l in row2["lines"] if l["line_id"] == bad_line_id)
+    assert bad_line["status"] == "fulfilled"
+    assert bad_line["fifo_ok"] is False
+    assert bad_line["reason"] == "Khách chỉ định đúng lô mới do khác biệt bao bì"
 
 

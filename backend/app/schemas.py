@@ -1079,6 +1079,9 @@ class MaterialRequestLineOut(ORMModel):
     status: str
     fulfilled_lot_id: Optional[str] = None
     fulfilled_qty: Optional[float] = None
+    # Đầy đủ mọi lô THẬT đã dùng nếu fulfill_all_lines phải tách dòng thành nhiều lô theo FIFO
+    # (yêu cầu người dùng 2026-09-18) — fulfilled_lot_id chỉ giữ lô CUỐI nên không đủ khi >1 lô.
+    fulfilled_lot_codes: list[str] = []
     fulfilled_by: Optional[str] = None
     fulfilled_at: Optional[datetime] = None
     reason: Optional[str] = None
@@ -1117,6 +1120,7 @@ class RequestFulfillIn(BaseModel):
     lot_id: str
     quantity: float
     location_to: str = "Kho phân xưởng"
+    reason: Optional[str] = None   # bắt buộc nếu lot_id KHÁC lô FIFO/FEFO (cũ nhất) hiện có
 
 
 class RequestRejectIn(BaseModel):
@@ -1125,6 +1129,10 @@ class RequestRejectIn(BaseModel):
 
 class RequestFulfillAllIn(BaseModel):
     location_to: str = "Kho phân xưởng"
+    # line_id -> lý do — bắt buộc cho dòng nào có preferred_lot_id KHÁC lô cũ nhất (yêu cầu
+    # người dùng 2026-09-18: dòng thiếu lý do sẽ bị bỏ qua khỏi "Duyệt cả phiếu", không chặn
+    # các dòng khác trong cùng phiếu).
+    reasons: dict[str, str] = {}
 
 
 class TransferPxRequestIn(BaseModel):

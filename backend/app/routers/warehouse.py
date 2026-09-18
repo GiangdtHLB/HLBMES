@@ -214,7 +214,7 @@ def update_request(request_id: str, payload: MaterialRequestUpdateIn, db: Sessio
 def fulfill_request_line(request_id: str, line_id: str, payload: RequestFulfillIn, db: Session = Depends(get_db),
                          user: User = Depends(get_current_user)):
     return svc.fulfill_request_line(db, request_id, line_id, payload.lot_id, payload.quantity,
-                                    user, payload.location_to)
+                                    user, payload.location_to, payload.reason)
 
 
 @router.post("/requests/{request_id}/lines/{line_id}/reject")
@@ -226,7 +226,7 @@ def reject_request_line(request_id: str, line_id: str, payload: RequestRejectIn,
 @router.post("/requests/{request_id}/fulfill-all")
 def fulfill_all_lines(request_id: str, payload: RequestFulfillAllIn, db: Session = Depends(get_db),
                       user: User = Depends(get_current_user)):
-    return svc.fulfill_all_lines(db, request_id, user, payload.location_to)
+    return svc.fulfill_all_lines(db, request_id, user, payload.location_to, payload.reasons)
 
 
 @router.delete("/requests/{request_id}")

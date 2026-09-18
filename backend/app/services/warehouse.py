@@ -1404,11 +1404,22 @@ def _lock_lot(db, lot_id):
 # 1 phiếu (MaterialRequest) có thể gồm nhiều dòng vật tư khác nhau (MaterialRequestLine);
 # mỗi dòng xử lý duyệt/từ chối độc lập vì mỗi vật tư cần chọn lô riêng.
 
-def _line_dict(line: MaterialRequestLine) -> dict:
+def _line_dict(db: Session, line: MaterialRequestLine) -> dict:
+    # fulfilled_lot_id/fulfilled_qty chỉ giữ lô CUỐI CÙNG đã dùng (schema cũ, 1 dòng = 1 lô) —
+    # từ khi fulfill_all_lines hỗ trợ tách 1 dòng thành NHIỀU lô theo FIFO (yêu cầu người dùng
+    # 2026-09-18, xem fulfill_all_lines), danh sách ĐẦY ĐỦ các lô thực đã dùng cho dòng này lấy
+    # lại từ StockMovement (mỗi lượt transfer() đều ghi request_line_id) thay vì đổi schema.
+    lot_codes = []
+    if line.status == "fulfilled":
+        lot_codes = [r[0] for r in db.execute(
+            select(StockMovement.lot_code).where(
+                StockMovement.request_line_id == line.line_id, StockMovement.movement_type == "transfer")
+            .order_by(StockMovement.created_at)).all()]
     return {"line_id": line.line_id, "request_id": line.request_id, "seq": line.seq,
             "material_id": line.material_id, "quantity": line.quantity, "uom": line.uom,
             "preferred_lot_id": line.preferred_lot_id, "status": line.status,
             "fulfilled_lot_id": line.fulfilled_lot_id, "fulfilled_qty": line.fulfilled_qty,
+            "fulfilled_lot_codes": lot_codes,
             "fulfilled_by": line.fulfilled_by, "fulfilled_at": line.fulfilled_at, "reason": line.reason,
             "fifo_ok": line.fifo_ok}
 
@@ -1433,7 +1444,7 @@ def _request_dict(db: Session, req: MaterialRequest, lines: list[MaterialRequest
             "requested_receipt_date": req.requested_receipt_date,
             "source_type": req.source_type, "source_id": req.source_id,
             "source_label": _source_label(db, req.source_type, req.source_id),
-            "lines": [_line_dict(l) for l in sorted(lines, key=lambda l: l.seq)]}
+            "lines": [_line_dict(db, l) for l in sorted(lines, key=lambda l: l.seq)]}
 
 
 def _stock_at_company(db: Session, material_id: str) -> float:
@@ -1744,17 +1755,24 @@ def is_oldest_workshop_lot(db: Session, material_id: str, lot_id: str) -> bool:
 
 
 def fulfill_request_line(db: Session, request_id: str, line_id: str, lot_id: str, quantity: float,
-                         user: User, location_to: str = "Kho phân xưởng") -> dict:
+                         user: User, location_to: str = "Kho phân xưởng", reason: str = None) -> dict:
     """Thủ kho công ty duyệt 1 dòng của phiếu: chuyển lô sang kho đích đã chọn (transfer,
     không phải issue — nguyên liệu vẫn được theo dõi trong hệ thống, chỉ đổi kho). Dùng
     `req.requested_receipt_date` (nếu có khai) làm `ts` hiệu lực — mirror approve_sang_ngang,
-    xem MaterialRequest.requested_receipt_date."""
+    xem MaterialRequest.requested_receipt_date.
+
+    Lô chọn KHÁC lô cũ nhất (FIFO) hiện có thì bắt buộc `reason` (mirror dispense.py::
+    _plan_consume — yêu cầu người dùng 2026-09-18), lưu lại vào line.reason để truy vết —
+    trước đây chỉ chụp cờ fifo_ok=False mà không bắt giải thích lý do."""
     require_perm(user, "warehouse.issue")
     req = _get_request(db, request_id)
     line = _get_request_line(db, request_id, line_id)
     if line.status != "pending":
         raise DomainError(f"Dòng vật tư này đã ở trạng thái '{line.status}', không thể xử lý lại.")
     fifo_ok = _is_oldest_company_lot(db, line.material_id, lot_id)
+    reason = (reason or "").strip() or None
+    if not fifo_ok and not reason:
+        raise DomainError("Lô đã chọn không phải lô cũ nhất (FIFO) hiện có — bắt buộc nhập lý do chọn khác FIFO.")
     result = transfer(db, lot_id, quantity, location_to, user, mode="xuat_theo_de_nghi",
                       reason=f"Xuất theo đề nghị {req.request_code} (dòng {line.seq + 1})",
                       request_id=req.request_id, request_line_id=line.line_id,
@@ -1768,6 +1786,7 @@ def fulfill_request_line(db: Session, request_id: str, line_id: str, lot_id: str
     line.fulfilled_by = user.username
     line.fulfilled_at = utcnow()
     line.fifo_ok = fifo_ok
+    line.reason = reason
     # BUG cũ đã sửa (2026-09-14, phát hiện lúc kiểm thử chuỗi Nhập kho→Đề nghị→Cấp liệu→Lọc→
     # Chiết đầy đủ): audit/response trước đây ghi `lot_id` (tham số ĐẦU VÀO — lô GỐC còn ở Kho
     # công ty với phần dư) thay vì `result["lot_id"]` (lô THỰC SỰ đã sang Kho phân xưởng, có thể
@@ -1775,7 +1794,8 @@ def fulfill_request_line(db: Session, request_id: str, line_id: str, lot_id: str
     # trước nên không ảnh hưởng nghiệp vụ hoàn tác/truy vết đã lưu, chỉ audit "after" + response
     # trả cho FE lúc bấm Duyệt bị sai — FE không lộ vì luôn tải lại /requests ngay sau đó.
     record_audit(db, entity_type="material_request_line", entity_id=line.line_id, action="fulfill",
-                 actor=user, after={"lot_id": result["lot_id"], "quantity": quantity, "location_to": location_to})
+                 actor=user, after={"lot_id": result["lot_id"], "quantity": quantity, "location_to": location_to,
+                                    "reason": reason})
     db.commit()
     return {"request_id": request_id, "line_id": line.line_id, "status": line.status, "lot_id": result["lot_id"],
             "quantity": quantity, "location": result["location"]}
@@ -1787,40 +1807,70 @@ def undo_fulfill_line(db: Session, request_id: str, line_id: str, user: User) ->
     genealogy có sẵn để tự kiểm tra, không cần thủ kho tự xác nhận. Xuất theo đề nghị coi
     như khóa lại sau khi fulfilled, chỉ ADMIN mới hoàn tác được (mirror đúng quy ước đã áp
     dụng cho hoàn tác Điều chuyển/Xuất sang ngang — xem undo_transfer_px_request/
-    undo_sang_ngang), không phải thủ kho thường (warehouse.issue) như lúc fulfill."""
+    undo_sang_ngang), không phải thủ kho thường (warehouse.issue) như lúc fulfill.
+
+    Hoàn tác TỪNG LÔ đã thực sự dùng (tra qua StockMovement.request_line_id, xem
+    fulfill_all_lines) — không chỉ mỗi line.fulfilled_lot_id/fulfilled_qty (bản cũ, chỉ đúng
+    khi dòng dùng ĐÚNG 1 lô) — từ khi fulfill_all_lines hỗ trợ tách 1 dòng thành NHIỀU lô theo
+    FIFO (2026-09-18), hoàn tác kiểu cũ sẽ trừ nhầm toàn bộ số lượng vào MỘT lô (lô cuối) thay
+    vì trả đúng từng phần về đúng từng lô đã lấy."""
     require_role(user, Role.ADMIN)
     req = _get_request(db, request_id)
     line = _get_request_line(db, request_id, line_id)
     if line.status != "fulfilled":
         raise DomainError(f"Dòng này đang ở trạng thái '{line.status}', không phải 'fulfilled' để hoàn tác.")
-    consumed = db.execute(
-        select(GenealogyEdge).where(GenealogyEdge.from_id == line.fulfilled_lot_id,
-                                    GenealogyEdge.relation == GenealogyRelation.CONSUME.value)
-    ).scalars().first()
-    if consumed:
-        raise DomainError("Lô này đã được dùng cho mẻ sản xuất, không thể hoàn tác.")
-    transfer(db, line.fulfilled_lot_id, line.fulfilled_qty, "Kho công ty", user, mode="dieu_chuyen",
-            reason=f"Hoàn tác xuất theo đề nghị {req.request_code} (dòng {line.seq + 1})")
+    moves = db.execute(select(StockMovement).where(
+        StockMovement.request_line_id == line.line_id, StockMovement.movement_type == "transfer",
+    ).order_by(StockMovement.created_at)).scalars().all()
+    if not moves:
+        raise DomainError("Không tìm thấy giao dịch xuất nào cho dòng này để hoàn tác.")
+    for mv in moves:
+        consumed = db.execute(
+            select(GenealogyEdge).where(GenealogyEdge.from_id == mv.lot_id,
+                                        GenealogyEdge.relation == GenealogyRelation.CONSUME.value)
+        ).scalars().first()
+        if consumed:
+            raise DomainError(f"Lô {mv.lot_code} đã được dùng cho mẻ sản xuất, không thể hoàn tác.")
+    for mv in moves:
+        transfer(db, mv.lot_id, mv.quantity, "Kho công ty", user, mode="dieu_chuyen",
+                reason=f"Hoàn tác xuất theo đề nghị {req.request_code} (dòng {line.seq + 1})")
     line.status = "pending"
     line.fulfilled_lot_id = None
     line.fulfilled_qty = None
     line.fulfilled_by = None
     line.fulfilled_at = None
     line.fifo_ok = None
+    line.reason = None
     record_audit(db, entity_type="material_request_line", entity_id=line.line_id, action="undo_fulfill", actor=user)
     db.commit()
-    return _line_dict(line)
+    return _line_dict(db, line)
 
 
 def fulfill_all_lines(db: Session, request_id: str, user: User,
-                      location_to: str = "Kho phân xưởng") -> dict:
-    """Duyệt cả phiếu 1 lần: với mỗi dòng đang pending, tự chọn lô (ưu tiên lô đã chọn khi đề
-    nghị nếu đủ số lượng và không đang HOLD, ngược lại chọn lô FIFO đủ số lượng) rồi transfer.
-    Dòng nào không có lô đơn lẻ nào đủ số lượng (hoặc lô đang chờ QC) sẽ bị bỏ qua để xử lý
-    thủ công riêng — vì việc tách 1 dòng ra nhiều lô nằm ngoài phạm vi MVP này. Dùng
-    `req.requested_receipt_date` (nếu có khai) làm `ts` hiệu lực cho mọi dòng, mirror
-    fulfill_request_line."""
+                      location_to: str = "Kho phân xưởng", reasons: dict = None) -> dict:
+    """Duyệt cả phiếu 1 lần: với mỗi dòng đang pending, tự chọn lô — ưu tiên lô đã chọn khi đề
+    nghị (preferred_lot_id) nếu MỘT MÌNH nó đủ số lượng và không đang HOLD; nếu không, LẤY XUYÊN
+    SUỐT NHIỀU LÔ theo FIFO (mirror dispense.py::_plan_consume dùng cho Cấp liệu — yêu cầu người
+    dùng 2026-09-18): lấy hết lô cũ nhất trước, còn thiếu bao nhiêu lấy tiếp lô cũ kế tiếp, có
+    thể tách 1 dòng thành NHIỀU lượt transfer (nhiều StockMovement cùng request_line_id, xem
+    _line_dict's fulfilled_lot_codes) — thay vì chỉ chấp nhận đúng 1 lô đủ NGUYÊN cả số lượng
+    như bản cũ.
+    BUG cũ đã sửa: bản cũ lọc `MaterialLot.quantity >= line.quantity` trước khi tìm lô cũ nhất —
+    nếu lô THẬT SỰ cũ nhất còn hàng nhưng không đủ 1 mình, nó bị loại thẳng khỏi so sánh, hệ
+    thống nhảy sang lô mới hơn (dù vẫn còn đủ lô cũ hơn nếu cộng dồn) rồi tự gắn cờ "sai FIFO"
+    (_is_oldest_company_lot so sánh KHÔNG lọc theo số lượng) nhưng vẫn cứ xuất — phát hiện lúc
+    rà soát 2026-09-18 (nhiều phiếu cùng cần 1 vật tư, lô cũ nhất cạn dần qua từng phiếu).
+    Dòng nào tổng tồn CỘNG DỒN mọi lô vẫn không đủ (hoặc không còn lô nào ngoài HOLD) mới bị bỏ
+    qua để xử lý thủ công. Dùng `req.requested_receipt_date` (nếu có khai) làm `ts` hiệu lực cho
+    mọi dòng, mirror fulfill_request_line.
+
+    `reasons` ({line_id: lý do}) — dòng nào rơi vào nhánh preferred_lot_id KHÁC lô cũ nhất
+    (fifo_ok sẽ là False) mà KHÔNG có lý do tương ứng trong `reasons` thì bị BỎ QUA (thêm vào
+    `skipped`, không chặn các dòng khác) — bắt buộc thủ kho duyệt riêng dòng đó qua "Xuất dòng
+    này" (nhập lý do ở đó) thay vì để "Duyệt cả phiếu" âm thầm xuất sai FIFO mà không giải thích
+    (yêu cầu người dùng 2026-09-18)."""
     require_perm(user, "warehouse.issue")
+    reasons = reasons or {}
     req = _get_request(db, request_id)
     lines = db.execute(
         select(MaterialRequestLine).where(MaterialRequestLine.request_id == request_id,
@@ -1829,36 +1879,62 @@ def fulfill_all_lines(db: Session, request_id: str, user: User,
     ).scalars().all()
     fulfilled, skipped = [], []
     for line in lines:
-        candidates = db.execute(
+        all_avail = [c for c in db.execute(
             select(MaterialLot).where(MaterialLot.material_id == line.material_id,
-                                      MaterialLot.quantity >= line.quantity,
-                                      MaterialLot.status != LotStatus.ON_HOLD.value)
-        ).scalars().all()
-        candidates = [c for c in candidates if not _is_workshop_location(c.location)]
-        lot = None
-        if line.preferred_lot_id:
-            lot = next((c for c in candidates if c.lot_id == line.preferred_lot_id), None)
-        if not lot and candidates:
-            lot = sorted(candidates, key=lambda c: c.created_at)[0]   # FIFO
-        if not lot:
+                                      MaterialLot.quantity > 0,
+                                      MaterialLot.status.in_([LotStatus.AVAILABLE.value, LotStatus.RELEASED.value]))
+            .order_by(MaterialLot.created_at)
+        ).scalars().all() if not _is_workshop_location(c.location)]
+        preferred = (next((c for c in all_avail if c.lot_id == line.preferred_lot_id), None)
+                    if line.preferred_lot_id else None)
+        if preferred and preferred.quantity >= line.quantity - 1e-6:
+            plan = [(preferred, line.quantity)]
+        else:
+            plan, remaining = [], round(line.quantity, 4)
+            for c in all_avail:
+                if remaining <= 1e-9:
+                    break
+                take = min(remaining, c.quantity)
+                if take <= 0:
+                    continue
+                plan.append((c, take))
+                remaining = round(remaining - take, 4)
+            if remaining > 1e-6:
+                plan = []
+        if not plan:
             skipped.append({"line_id": line.line_id, "material_id": line.material_id,
-                            "reason": "Không có lô nào đủ số lượng (hoặc đang chờ duyệt QC) — cần xử lý thủ công."})
+                            "reason": "Không đủ tồn (kể cả cộng nhiều lô) hoặc đang chờ duyệt QC — cần xử lý thủ công."})
             continue
-        fifo_ok = _is_oldest_company_lot(db, line.material_id, lot.lot_id)
-        result = transfer(db, lot.lot_id, line.quantity, location_to, user, mode="xuat_theo_de_nghi",
-                          reason=f"Xuất theo đề nghị {req.request_code} (dòng {line.seq + 1}, duyệt cả phiếu)",
-                          request_id=req.request_id, request_line_id=line.line_id,
-                          ts=req.requested_receipt_date)
+        # Lấy oldest-first xuyên suốt nên lô ĐẦU trong plan luôn là lô cũ nhất khả dụng — cùng
+        # tiêu chí với _is_oldest_company_lot (không lọc theo số lượng) nên fifo_ok LUÔN true ở
+        # nhánh nhiều lô; chỉ có thể false ở nhánh preferred_lot_id nếu người tạo phiếu CỐ Ý chọn
+        # khác lô cũ nhất lúc đề nghị (giữ nguyên hành vi cũ cho nhánh này).
+        fifo_ok = _is_oldest_company_lot(db, line.material_id, plan[0][0].lot_id)
+        line_reason = (reasons.get(line.line_id) or "").strip() or None
+        if not fifo_ok and not line_reason:
+            skipped.append({"line_id": line.line_id, "material_id": line.material_id,
+                            "reason": "Lô ưu tiên khác lô cũ nhất (FIFO) — thiếu lý do, cần duyệt riêng dòng này "
+                                     "qua \"Xuất dòng này\" kèm lý do."})
+            continue
+        result = None
+        for lot, take in plan:
+            result = transfer(db, lot.lot_id, take, location_to, user, mode="xuat_theo_de_nghi",
+                              reason=f"Xuất theo đề nghị {req.request_code} (dòng {line.seq + 1}, duyệt cả phiếu)",
+                              request_id=req.request_id, request_line_id=line.line_id,
+                              ts=req.requested_receipt_date)
         line.status = "fulfilled"
-        # Dùng lot_id TRẢ VỀ từ transfer() (có thể là lô tách), không phải lot.lot_id gốc —
-        # mirror fulfill_request_line (xem đó), tránh cùng lỗi cho đường "duyệt cả phiếu".
+        # Dùng lot_id TRẢ VỀ từ transfer() của LƯỢT CUỐI (có thể là lô tách/gộp) — mirror
+        # fulfill_request_line; danh sách ĐẦY ĐỦ mọi lô đã dùng (nếu tách nhiều lô) lấy lại từ
+        # StockMovement qua _line_dict's fulfilled_lot_codes, không lưu được hết vào 1 cột.
         line.fulfilled_lot_id = result["lot_id"]
         line.fulfilled_qty = line.quantity
         line.fulfilled_by = user.username
         line.fulfilled_at = utcnow()
         line.fifo_ok = fifo_ok
+        line.reason = line_reason
         record_audit(db, entity_type="material_request_line", entity_id=line.line_id, action="fulfill",
-                     actor=user, after={"lot_id": lot.lot_id, "quantity": line.quantity, "location_to": location_to})
+                     actor=user, after={"lots": [{"lot_id": lot.lot_id, "quantity": take} for lot, take in plan],
+                                        "quantity": line.quantity, "location_to": location_to, "reason": line_reason})
         db.commit()
         fulfilled.append({"line_id": line.line_id, "material_id": line.material_id,
                           "lot_id": result["lot_id"], "quantity": line.quantity, "location": result["location"]})
@@ -1876,7 +1952,7 @@ def reject_request_line(db: Session, request_id: str, line_id: str, reason: str,
                  actor=user, reason=reason)
     db.commit()
     db.refresh(line)
-    return _line_dict(line)
+    return _line_dict(db, line)
 
 
 # ---- Điều chuyển phân xưởng → công ty / trả nhà cung cấp / hoàn xuất tự do / lịch sử ----

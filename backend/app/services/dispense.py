@@ -391,6 +391,21 @@ def suggest_dispense(db: Session, batch_id: str) -> dict:
     return {"batch_id": batch_id, "batch_code": batch.batch_code, "lines": lines}
 
 
+def lots_for_material(db: Session, batch_id: str, material_code: str) -> list[dict]:
+    """Danh sách lô khả dụng (FEFO, Kho phân xưởng, tại thời điểm batch.start_at) của 1 vật tư —
+    cho ô "Chọn lô" ở "Cấp 1 vật tư" (yêu cầu người dùng 2026-09-18: tự chọn đúng lô thay vì luôn
+    để hệ thống tự chọn FEFO). Dùng chung _assert_dispensable với dispense()/suggest_dispense —
+    mẻ chưa có start_at thì raise ngay (không âm thầm trả rỗng, tránh hiểu nhầm "không có lô")."""
+    batch = db.get(BatchExecution, batch_id)
+    if not batch:
+        raise NotFoundError("Batch không tồn tại.")
+    _assert_dispensable(db, batch)
+    lots = _workshop_fefo_lots(db, material_code, batch.start_at)
+    return [{"lot_id": lot.lot_id, "lot_code": lot.lot_code, "quantity": round(_lot_avail_qty(lot), 4),
+             "uom": lot.uom, "expiry": lot.expiry.isoformat() if lot.expiry else None}
+            for lot in lots if _lot_avail_qty(lot) > 1e-9]
+
+
 def dispense(db: Session, batch_id: str, lines_in: list, user: User, note: str = None) -> dict:
     """Cấp liệu cho mẻ. lines_in = [{material_code, quantity, lot_id?, reason?}]. All-or-nothing:
     LẬP KẾ HOẠCH cho MỌI dòng trước (không trừ tồn) — nếu BẤT KỲ dòng nào không đủ tồn (hoặc
@@ -611,7 +626,14 @@ def batch_dispense_summary(db: Session, batch_id: str, only_dispensed: bool = Tr
     `only_dispensed=True` (màn "Cấp liệu"): bỏ hẳn dòng BOM nào CHƯA cấp gì (theo yêu cầu người
     dùng — không tự liệt kê sẵn định mức công thức khi chưa cấp). `only_dispensed=False` (Mẻ
     sản xuất/EBR — cần thấy ĐỦ mọi dòng BOM kể cả chưa cấp): dòng chưa cấp gì giữ nguyên GỘP
-    THEO NHÓM y hệt compare_batch (chưa biết sẽ cấp qua thành viên nào nên không tách được)."""
+    THEO NHÓM y hệt compare_batch (chưa biết sẽ cấp qua thành viên nào nên không tách được).
+
+    `fifo_ok=None` (tiêu thụ qua /consume trực tiếp, không qua DispenseLine) được SUY LUẬN LẠI
+    (`fifo_computed=True`) bằng đúng tiêu chí is_oldest_workshop_lot áp NGƯỢC cho lịch sử (dựng
+    lại tồn theo lô tại Kho phân xưởng, đúng thời điểm batch.start_at) — yêu cầu người dùng
+    2026-09-18, sau khi xác minh bằng SQL cho 1 mẻ cụ thể. `fifo_computed=False` nghĩa là
+    fifo_ok (nếu có) đã được XÁC NHẬN THẬT lúc cấp liệu, không phải suy luận lại — 2 mức độ tin
+    cậy khác nhau, frontend cần hiện phân biệt rõ."""
     batch = db.get(BatchExecution, batch_id)
     if not batch:
         raise NotFoundError("Batch không tồn tại.")
@@ -660,15 +682,17 @@ def batch_dispense_summary(db: Session, batch_id: str, only_dispensed: bool = Tr
         # chỉ dispense() (qua DispenseLine.fifo_ok) mới biết; None nghĩa là "không xác định",
         # khác hẳn True ("chắc chắn đúng FIFO") — tránh hiện nhầm ✔ FIFO cho tiêu thụ qua
         # /consume trực tiếp (không hề kiểm tra FIFO lúc đó).
-        info = lot_info.setdefault(code, {"lot_qty": {}, "fifo_ok": None, "is_free": False, "created_at": None, "actor": None})
+        info = lot_info.setdefault(code, {"lot_qty": {}, "fifo_ok": None, "fifo_computed": False, "is_free": False,
+                                          "created_at": None, "actor": None, "material_id": lot.material_id})
         info["lot_qty"][lot.lot_code] = info["lot_qty"].get(lot.lot_code, 0.0) + e.quantity
     # DispenseLine chỉ còn dùng để lấy fifo_ok/"Cấp tự do"/"Ngày tạo" — metadata không có trên
     # genealogy edge, chỉ tồn tại với đường đi qua dispense(). Lần đầu 1 dòng nào đó của vật tư
     # này đi qua dispense() mới có căn cứ để bắt đầu từ True (đúng FIFO), rồi lật False nếu có
     # BẤT KỲ dòng nào khác FIFO.
     for dl in dlines:
-        info = lot_info.setdefault(dl.material_code, {"lot_qty": {}, "fifo_ok": None, "is_free": False,
-                                                       "created_at": None, "actor": None})
+        info = lot_info.setdefault(dl.material_code, {"lot_qty": {}, "fifo_ok": None, "fifo_computed": False,
+                                                       "is_free": False, "created_at": None, "actor": None,
+                                                       "material_id": None})
         if info["fifo_ok"] is None:
             info["fifo_ok"] = True
         if dl.fifo_ok is False:
@@ -688,6 +712,29 @@ def batch_dispense_summary(db: Session, batch_id: str, only_dispensed: bool = Tr
         # rồi HOÀN HẾT (net về 0) không nên còn hiện tên trong "Mã lô", gây hiểu lầm "vẫn đang
         # dùng lô đó" (yêu cầu người dùng 2026-09-15).
         info["lot_codes"] = [code for code, qty in info["lot_qty"].items() if qty > 1e-9]
+    # Suy luận lại FIFO cho tiêu thụ qua đường KHÔNG kiểm tra lúc đó (/consume trực tiếp, tính
+    # năng cũ đã tắt — fifo_ok vẫn None sau 2 vòng lặp trên) — áp dụng NGƯỢC đúng tiêu chí
+    # is_oldest_workshop_lot/_workshop_fefo_lots (Kho phân xưởng, dựng lại tồn theo lô tại đúng
+    # batch.start_at) cho dữ liệu lịch sử, thay vì để mãi mãi "không xác định" (yêu cầu người
+    # dùng 2026-09-18, sau khi tự tay xác minh bằng SQL cho 1 mẻ cụ thể: đúng FIFO thật nhưng hệ
+    # thống không hiện được vì thiếu snapshot lúc tiêu thụ). Đánh dấu fifo_computed=True để phân
+    # biệt với fifo_ok đã được XÁC NHẬN THẬT lúc cấp liệu (không lẫn 2 mức độ tin cậy khác nhau).
+    if batch.start_at is not None:
+        asof_by_lot = None
+        for info in lot_info.values():
+            if info["fifo_ok"] is not None or not info["lot_codes"] or not info.get("material_id"):
+                continue
+            if asof_by_lot is None:
+                asof_by_lot = {r["lot_id"]: r["quantity"]
+                              for r in warehouse_svc.lot_on_hand_as_of(db, batch.start_at, "Kho phân xưởng")}
+            candidates = [l for l in db.execute(
+                select(MaterialLot).where(MaterialLot.material_id == info["material_id"])
+                .order_by(MaterialLot.created_at)).scalars().all()
+                if asof_by_lot.get(l.lot_id, 0.0) > 1e-9]
+            if not candidates:
+                continue
+            info["fifo_ok"] = candidates[0].lot_code in info["lot_codes"]
+            info["fifo_computed"] = True
     rows = []
     for l in cmp["lines"]:
         codes = l.get("match_codes") or [l["material_code"]]
@@ -698,7 +745,7 @@ def batch_dispense_summary(db: Session, batch_id: str, only_dispensed: bool = Tr
             rows.append({"material_code": l["material_code"], "material_name": l.get("material_name"),
                         "uom": l["uom"], "planned": l["planned"], "actual": l["actual"],
                         "diff": l["diff"], "pct": l["pct"], "status": l["status"],
-                        "lot_codes": [], "fifo_ok": None, "is_free": False,
+                        "lot_codes": [], "fifo_ok": None, "fifo_computed": False, "is_free": False,
                         "created_at": None, "actor": None, "supply_date": batch.start_at})
             continue
         for i, code in enumerate(dispensed):
@@ -714,6 +761,7 @@ def batch_dispense_summary(db: Session, batch_id: str, only_dispensed: bool = Tr
                 "status": l["status"] if i == 0 else None,
                 "lot_codes": info["lot_codes"] if info else [],
                 "fifo_ok": info["fifo_ok"] if info else None,
+                "fifo_computed": bool(info and info.get("fifo_computed")),
                 "is_free": bool(info and info["is_free"]),
                 "created_at": info["created_at"] if info else None,
                 "actor": info["actor"] if info else None,
@@ -730,6 +778,7 @@ def batch_dispense_summary(db: Session, batch_id: str, only_dispensed: bool = Tr
             "material_code": code, "material_name": e.get("material_name"), "uom": e.get("uom"),
             "planned": None, "actual": e["actual"], "diff": None, "pct": None, "status": e["status"],
             "lot_codes": info["lot_codes"] if info else [], "fifo_ok": info["fifo_ok"] if info else None,
+            "fifo_computed": bool(info and info.get("fifo_computed")),
             "is_free": bool(info and info["is_free"]),
             "created_at": info["created_at"] if info else None,
             "actor": info["actor"] if info else None, "supply_date": batch.start_at,
