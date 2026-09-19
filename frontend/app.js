@@ -7473,15 +7473,52 @@ function groupMemberFifoBadgeHtml(materialId, memberIds, allLots) {
 }
 // Danh sách lô khả dụng của 1 vật tư tại Kho công ty, sắp theo FIFO (cũ nhất trước) — dùng để
 // dựng <select> chọn lô ngay trong bảng dòng đề nghị (đỡ phải mở modal riêng cho từng dòng).
-function requestLotOptionsHtml(materialId, allLots, selectedLotId) {
-  const avail = allLots.filter(l => l.material_id === materialId && l.quantity > 0 && !/phân xưởng/i.test(l.location || ""))
+function requestLotOptionsHtml(materialId, allLots, selectedLotId, asOfDate) {
+  // asOfDate (r.requested_receipt_date): loại bỏ lô Nhập kho SAU ngày đề nghị nhận — hiện lô đó
+  // ra vẫn chọn được sẽ bị backend chặn khi bấm "Xuất dòng này" (fulfill_request_line đã kiểm
+  // tra as-of, xem services/warehouse.py), nhưng để lộ trong dropdown vẫn gây hiểu nhầm "đủ
+  // hàng" và mất công thủ kho chọn nhầm rồi mới thấy lỗi — yêu cầu người dùng 2026-09-19: "bạn
+  // không được cho hiện ra như vậy chứ, bạn hiện ra người sử dụng chọn vào thì sao".
+  const asOf = asOfDate ? new Date(asOfDate) : null;
+  const avail = allLots.filter(l => l.material_id === materialId && l.quantity > 0 && !/phân xưởng/i.test(l.location || "")
+    && (!asOf || new Date(l.created_at) <= asOf))
     .sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
-  if (!avail.length) return { html: '<option value="">(không còn lô khả dụng)</option>', defaultId: "", fifoFirstId: "" };
+  if (!avail.length) {
+    const msg = asOf ? "(không có lô nào đã Nhập kho tính đến ngày đề nghị)" : "(không còn lô khả dụng)";
+    return { html: `<option value="">${msg}</option>`, defaultId: "", fifoFirstId: "" };
+  }
   const defaultId = selectedLotId && avail.some(l => l.lot_id === selectedLotId) ? selectedLotId : avail[0].lot_id;
   const html = avail.map((l, i) => `<option value="${l.lot_id}" ${l.lot_id === defaultId ? "selected" : ""}>` +
     `${esc(l.lot_code)} (${l.quantity}${l.uom}, nhập ${fmt(l.created_at)})${i === 0 ? " — FIFO, lô cũ nhất" : ""}` +
     `${l.status === "on_hold" ? " — CHỜ DUYỆT QC" : ""}</option>`).join("");
   return { html, defaultId, fifoFirstId: avail[0].lot_id };
+}
+
+// Kế hoạch cấp XUYÊN SUỐT nhiều lô (FIFO/lô cũ nhất trước) cho 1 dòng đề nghị — mirror
+// dispense.py::_workshop_fefo_lots + suggest_dispense (Cấp liệu), áp dụng cho "Xuất theo đề
+// nghị" — yêu cầu người dùng 2026-09-19: "giống kiểu cấp liệu đó, bạn tự thêm dòng nguyên liệu
+// cần lấy thêm theo fifo tiếp theo" (lô cũ nhất không đủ 1 mình thì tự động chia sang lô kế
+// tiếp thay vì chỉ hiện đúng 1 lô rồi báo thiếu). Tính HOÀN TOÀN ở client từ `allLots` đã tải
+// sẵn (đủ dữ liệu: quantity/created_at/location), không cần gọi thêm API.
+function requestFifoPlan(materialId, allLots, neededQty, asOfDate) {
+  const asOf = asOfDate ? new Date(asOfDate) : null;
+  const avail = allLots.filter(l => l.material_id === materialId && l.quantity > 0 && !/phân xưởng/i.test(l.location || "")
+    && (!asOf || new Date(l.created_at) <= asOf))
+    .sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+  const plan = [];
+  let remaining = Math.round(neededQty * 10000) / 10000;
+  for (const lot of avail) {
+    if (remaining <= 1e-9) break;
+    const take = Math.round(Math.min(remaining, lot.quantity) * 10000) / 10000;
+    if (take <= 0) continue;
+    plan.push({ lot_id: lot.lot_id, quantity: take });
+    remaining = Math.round((remaining - take) * 10000) / 10000;
+  }
+  // Không đủ tồn (kể cả cộng hết mọi lô hợp lệ) -> vẫn trả plan đã lấy được tối đa, cộng thêm 1
+  // dòng trống (SL=0, chưa chọn lô) để thủ kho biết còn thiếu và tự chọn tay nếu muốn cấp vượt.
+  if (remaining > 1e-6 && avail.length) plan.push({ lot_id: avail[avail.length - 1].lot_id, quantity: 0 });
+  if (!plan.length) plan.push({ lot_id: "", quantity: 0 });
+  return { plan, remaining, avail };
 }
 
 // Dòng đã fulfilled: hiện lại đúng trạng thái FIFO đã chụp NGAY LÚC XUẤT (fifo_ok, xem
@@ -7493,26 +7530,62 @@ function fulfilledFifoBadgeHtml(fifoOk) {
   return "—";
 }
 
+// 1 dòng đề nghị PENDING trong bảng — nếu lô cũ nhất không đủ nguyên số lượng, tự tách thành
+// NHIỀU <tr> (mỗi lô 1 dòng phụ, cột Vật tư/Ngày.../Trạng thái/Actions để trống, chỉ hiện ở dòng
+// đầu) — mirror hệt cách dispense.py's "Gợi ý cấp liệu" (sg_result) hiển thị nhiều lô cho 1 vật
+// tư, cộng thêm "+ Thêm lô khác" để thủ kho tự thêm/sửa nếu muốn (yêu cầu người dùng 2026-09-19).
+function requestPendingLineRowsHtml(r, l, matById, allLots, colspanShared) {
+  const mat = matById[l.material_id];
+  const matLabel = mat ? `${esc(mat.code)} — ${esc(mat.name)}` : esc(l.material_id);
+  const { plan } = requestFifoPlan(l.material_id, allLots || [], l.quantity, r.requested_receipt_date);
+  const actions = `<button class="btn sm sec" data-reqfulfill data-reqid="${esc(r.request_id)}" data-lineid="${esc(l.line_id)}">Xuất dòng này</button>
+     <button class="btn sm sec" data-reqreject data-reqid="${esc(r.request_id)}" data-lineid="${esc(l.line_id)}">Từ chối</button>`;
+  const pickRowHtml = (pick, pi, isFirst) => {
+    const lotOpts = requestLotOptionsHtml(l.material_id, allLots || [], pick.lot_id, r.requested_receipt_date);
+    return `<tr data-reqpickrow="${esc(l.line_id)}-${pi}">
+      <td>${isFirst ? matLabel : ""}</td>
+      <td>${isFirst ? `${l.quantity} ${esc(l.uom)}<div id="reqsum-${esc(l.line_id)}" class="muted" style="font-size:11px"></div>` : ""}</td>
+      <td>
+        <input type="number" min="0" step="any" class="reqlot-qty" data-lineid="${esc(l.line_id)}" data-pi="${pi}"
+          data-target="${l.quantity}" value="${pick.quantity}" style="width:70px"/> ${esc(l.uom)}
+        <select class="reqlot-select" id="reqlot-${esc(l.line_id)}-${pi}" data-lineid="${esc(l.line_id)}" data-pi="${pi}"
+          data-fifoexpected="${esc(pick.lot_id)}" data-fifofirst="${esc(lotOpts.fifoFirstId)}"
+          data-materialid="${esc(l.material_id)}" style="margin-left:6px">${lotOpts.html}</select>
+      </td>
+      <td></td><td></td><td></td>
+      <td id="reqfifo-${esc(l.line_id)}-${pi}"></td>
+      <td><input class="reqfifo-reason" id="reqreason-${esc(l.line_id)}-${pi}" data-lineid="${esc(l.line_id)}" data-pi="${pi}"
+        placeholder="Bắt buộc nếu chọn khác FIFO" style="display:none;width:170px"/></td>
+      <td>${isFirst ? badge(REQ_STATUS_BADGE[l.status] || "planned") + esc(l.status) : ""}</td>
+      <td>${isFirst ? actions : ""}</td></tr>`;
+  };
+  const rows = plan.map((p, pi) => pickRowHtml(p, pi, pi === 0)).join("");
+  const addRow = `<tr class="req-addlotrow"><td colspan="${colspanShared}" style="padding:2px 8px">
+    <button class="btn sm sec" data-reqaddlot="${esc(l.line_id)}" data-materialid="${esc(l.material_id)}"
+      data-reqdate="${esc(r.requested_receipt_date || "")}">+ Thêm lô khác (cùng ${esc(mat ? mat.code : "")})</button>
+  </td></tr>`;
+  return rows + addRow;
+}
+
 function requestLineRowHtml(r, l, matById, lotById, canFulfill, allLots) {
   // Hoàn tác xuất theo đề nghị coi như khóa lại sau khi fulfilled — chỉ ADMIN mới hoàn tác
   // được (mirror đúng quy ước đã áp dụng cho nút Hoàn tác Điều chuyển/Xuất sang ngang, xem
   // isAdminDc/isAdminSngPx), KHÔNG dùng chung quyền warehouse.issue (canFulfill) như lúc xuất.
   const isAdminReqUndo = CURRENT_USER && CURRENT_USER.role === "admin";
+  if (canFulfill && l.status === "pending") {
+    return requestPendingLineRowsHtml(r, l, matById, allLots, 10);
+  }
   const mat = matById[l.material_id];
   const matLabel = mat ? `${esc(mat.code)} — ${esc(mat.name)}` : esc(l.material_id);
   const fulLot = l.fulfilled_lot_id ? lotById[l.fulfilled_lot_id] : null;
-  const showLotPicker = canFulfill && l.status === "pending";
-  const lotOpts = showLotPicker ? requestLotOptionsHtml(l.material_id, allLots, l.preferred_lot_id) : null;
-  // fulfilled_lot_codes: ĐẦY ĐỦ mọi lô đã dùng nếu "Duyệt cả phiếu" phải tách dòng thành nhiều
-  // lô theo FIFO (yêu cầu người dùng 2026-09-18, xem services/warehouse.py::fulfill_all_lines)
-  // — fulfilled_lot_id chỉ giữ lô CUỐI nên hiện riêng không đủ khi có nhiều hơn 1 lô.
+  // fulfilled_lot_codes: ĐẦY ĐỦ mọi lô đã dùng nếu "Duyệt cả phiếu"/"Xuất dòng này" phải tách
+  // dòng thành nhiều lô theo FIFO (yêu cầu người dùng 2026-09-18/19, xem services/warehouse.py::
+  // fulfill_all_lines/fulfill_request_line) — fulfilled_lot_id chỉ giữ lô CUỐI nên hiện riêng
+  // không đủ khi có nhiều hơn 1 lô.
   const lotCodesLabel = (l.fulfilled_lot_codes && l.fulfilled_lot_codes.length)
     ? l.fulfilled_lot_codes.join(", ") : (fulLot ? fulLot.lot_code : null);
-  const lotCell = showLotPicker
-    ? `<select class="reqlot-select" id="reqlot-${esc(l.line_id)}" data-lineid="${esc(l.line_id)}"
-        data-fifofirst="${esc(lotOpts.fifoFirstId)}" data-materialid="${esc(l.material_id)}">${lotOpts.html}</select>`
-    : `<span class="muted">${lotCodesLabel ? esc(lotCodesLabel) : "—"}</span>`;
-  const dateCell = showLotPicker ? "" : `<span class="muted">${fulLot ? fmt(fulLot.created_at) : "—"}</span>`;
+  const lotCell = `<span class="muted">${lotCodesLabel ? esc(lotCodesLabel) : "—"}</span>`;
+  const dateCell = `<span class="muted">${fulLot ? fmt(fulLot.created_at) : "—"}</span>`;
   // "Ngày xuất" = mốc hiệu lực THẬT của StockMovement transfer (ts) khi dòng đã xuất — ĐÚNG
   // "Ngày đề nghị nhận kho" (r.requested_receipt_date) nếu phiếu có khai, mirror
   // fulfill_request_line/fulfill_all_lines (luôn dùng field đó làm `ts`); nếu phiếu KHÔNG khai
@@ -7524,21 +7597,10 @@ function requestLineRowHtml(r, l, matById, lotById, canFulfill, allLots) {
   const dispLot = fulLot || (l.preferred_lot_id ? lotById[l.preferred_lot_id] : null);
   const dispLoc = dispLot && dispLot.location_id ? (WH_CACHE.matLocById || {})[dispLot.location_id] : null;
   const locCell = dispLoc ? `<code class="k">${esc(dispLoc.code)}</code>` : `<span class="muted">—</span>`;
-  const actions = (canFulfill && l.status === "pending")
-    ? `<button class="btn sm sec" data-reqfulfill data-reqid="${esc(r.request_id)}" data-lineid="${esc(l.line_id)}" data-qty="${l.quantity}">Xuất dòng này</button>
-       <button class="btn sm sec" data-reqreject data-reqid="${esc(r.request_id)}" data-lineid="${esc(l.line_id)}">Từ chối</button>`
-    : (isAdminReqUndo && l.status === "fulfilled")
+  const actions = (isAdminReqUndo && l.status === "fulfilled")
     ? `<button class="btn sm sec" data-requndo data-reqid="${esc(r.request_id)}" data-lineid="${esc(l.line_id)}">Hoàn tác</button>`
     : "—";
-  // Lý do khác FIFO (yêu cầu người dùng 2026-09-18): dòng đang pending hiện ô nhập, ẩn/hiện theo
-  // đúng lô đang chọn ở reqlot-select có phải FIFO cũ nhất hay không (wireReqLotFifo, gắn sau khi
-  // chèn HTML) — bắt buộc điền mới cho "Xuất dòng này"/"Duyệt cả phiếu" xuất được (xem
-  // services/warehouse.py::fulfill_request_line/fulfill_all_lines). Dòng đã xử lý xong hiện lại
-  // đúng lý do đã lưu (line.reason), không cho sửa nữa.
-  const reasonCell = showLotPicker
-    ? `<input class="reqfifo-reason" id="reqreason-${esc(l.line_id)}" data-lineid="${esc(l.line_id)}"
-        placeholder="Bắt buộc nếu chọn khác FIFO" style="display:none;width:170px"/>`
-    : `<span class="muted">${l.reason ? esc(l.reason) : "—"}</span>`;
+  const reasonCell = `<span class="muted">${l.reason ? esc(l.reason) : "—"}</span>`;
   return `<tr>
     <td>${matLabel}</td>
     <td>${l.quantity} ${esc(l.uom)}</td>
@@ -7613,7 +7675,11 @@ function requestBlockHtml(r, matById, lotById, canFulfill, showBulk, allLots, ca
   const hasFulfilled = fulfilledCount > 0;
   const bulkBtn = (showBulk && canFulfill && pendingCount > 0)
     ? `<button class="btn sm" data-fulfillall="${esc(r.request_id)}">Duyệt cả phiếu (${pendingCount} dòng) →</button>` : "";
-  const cancelBtn = (!hasFulfilled && pendingCount > 0 && (canRequest || canFulfill))
+  // CHỈ bên đề nghị (canRequest, phân xưởng) mới được xóa phiếu — thủ kho công ty (canFulfill)
+  // là bên XUẤT theo đề nghị, không phải bên tạo, không được xóa (yêu cầu người dùng 2026-09-19:
+  // "thủ kho công ty là người xuất, không được xóa phiếu, xóa phiếu chỉ áp dụng cho bên đề nghị
+  // nhận thôi").
+  const cancelBtn = (!hasFulfilled && pendingCount > 0 && canRequest)
     ? `<button class="btn sm sec" data-reqcancel="${esc(r.request_id)}">Xóa phiếu</button>` : "";
   // Sửa (ngày đề nghị nhận + các dòng còn pending) — chỉ phía đề nghị (canRequest), CHỈ khi
   // phiếu còn ít nhất 1 dòng pending — phiếu đã xử lý xong hết (không còn dòng nào pending)
@@ -7670,40 +7736,128 @@ function wireRequestBlockActions() {
     const v = document.querySelector("#nav button.active[data-view]")?.dataset.view;
     if (v) render(v);
   };
-  // Lý do khác FIFO (yêu cầu người dùng 2026-09-18): ẩn/hiện ô "Lý do" + cập nhật lại badge FIFO
-  // mỗi khi đổi lô ở <select> — so trực tiếp với data-fifofirst (lô cũ nhất tại thời điểm render,
-  // xem requestLotOptionsHtml) thay vì gọi lại API, đủ dùng vì tồn kho không đổi trong lúc thao
-  // tác trên cùng 1 lần tải trang.
-  const reqIsFifo = sel => !sel.value || sel.value === sel.dataset.fifofirst;
+  // Lý do khác FIFO (yêu cầu người dùng 2026-09-18/19): ẩn/hiện ô "Lý do" + cập nhật lại badge
+  // FIFO mỗi khi đổi lô ở <select> — so trực tiếp với data-fifoexpected (lô đã gợi ý sẵn cho
+  // ĐÚNG vị trí (pi) đó lúc render/thêm dòng, xem requestFifoPlan/requestPendingLineRowsHtml)
+  // thay vì gọi lại API, đủ dùng vì tồn kho không đổi trong lúc thao tác trên cùng 1 lần tải
+  // trang. Mỗi dòng đề nghị giờ có thể gồm NHIỀU <select> (1 lô/dòng phụ, cùng data-lineid khác
+  // data-pi) khi phải tách nhiều lô — yêu cầu người dùng 2026-09-19: "giống kiểu cấp liệu đó,
+  // bạn tự thêm dòng nguyên liệu cần lấy thêm theo fifo tiếp theo".
+  const reqIsFifo = sel => !sel.value || sel.value === sel.dataset.fifoexpected;
   const wireReqLotFifo = sel => {
     const update = () => {
-      const reasonInput = document.getElementById(`reqreason-${sel.dataset.lineid}`);
-      const fifoCell = document.getElementById(`reqfifo-${sel.dataset.lineid}`);
+      const reasonInput = document.getElementById(`reqreason-${sel.dataset.lineid}-${sel.dataset.pi}`);
+      const fifoCell = document.getElementById(`reqfifo-${sel.dataset.lineid}-${sel.dataset.pi}`);
       const isFifo = reqIsFifo(sel);
       if (reasonInput) { reasonInput.style.display = isFifo ? "none" : ""; if (isFifo) reasonInput.value = ""; }
       if (fifoCell) fifoCell.innerHTML = isFifo
-        ? '<span class="badge available">✓ Lô cũ nhất (FIFO)</span>'
-        : '<span class="badge on_hold">⚠ Không phải lô cũ nhất</span>';
+        ? '<span class="badge available">✓ FIFO</span>'
+        : '<span class="badge on_hold">⚠ khác FIFO</span>';
     };
     sel.onchange = update;
     update();
   };
   document.querySelectorAll(".reqlot-select").forEach(wireReqLotFifo);
-  // Xuất trực tiếp từ lô đã chọn ở <select> ngay trong dòng (không cần mở modal riêng) — lô
-  // mặc định đã gợi ý theo FIFO (requestLotOptionsHtml), thủ kho chỉ cần đổi lại nếu muốn.
+  // Cảnh báo TRỰC TIẾP (không đợi bấm "Xuất dòng này" mới biết) khi tổng SL đã nhập cho 1 dòng
+  // KHÁC số lượng đề nghị — nhấn mạnh rõ khi VƯỢT (yêu cầu người dùng 2026-09-19: "cần bạn đưa ra
+  // 1 cảnh báo và không cho phép xuất nếu người xuất cố tình điền lượng nhiều hơn"). Chỉ hiển
+  // thị — chặn THẬT xảy ra ở [data-reqfulfill] (và ở backend, luôn là nguồn sự thật cuối cùng).
+  const updateReqSum = (lineId) => {
+    const qtyInputs = Array.from(document.querySelectorAll(`.reqlot-qty[data-lineid="${CSS.escape(lineId)}"]`));
+    const sumEl = document.getElementById(`reqsum-${lineId}`);
+    if (!qtyInputs.length || !sumEl) return;
+    const target = parseFloat(qtyInputs[0].dataset.target) || 0;
+    const sum = Math.round(qtyInputs.reduce((s, inp) => s + (parseFloat(inp.value) || 0), 0) * 10000) / 10000;
+    if (Math.abs(sum - target) < 1e-6) {
+      sumEl.innerHTML = "";
+    } else if (sum > target) {
+      sumEl.innerHTML = `<span style="color:var(--red)">⚠ Đã nhập ${sum} — VƯỢT đề nghị (${target}), sẽ không xuất được</span>`;
+    } else {
+      sumEl.innerHTML = `<span style="color:var(--red)">⚠ Đã nhập ${sum} — còn thiếu ${Math.round((target - sum) * 10000) / 10000}</span>`;
+    }
+  };
+  document.querySelectorAll(".reqlot-qty").forEach(inp => {
+    inp.oninput = () => updateReqSum(inp.dataset.lineid);
+    updateReqSum(inp.dataset.lineid);
+  });
+  // "+ Thêm lô khác" (yêu cầu người dùng 2026-09-19: lô cũ nhất không đủ/không muốn dùng lô đã
+  // gợi ý, cần thêm 1 dòng phụ CÙNG dòng đề nghị, khác lô, tự chọn lô FIFO kế tiếp chưa dùng tới
+  // trong các dòng phụ hiện có của CHÍNH dòng đề nghị đó) — mirror hệt dispense.py's "sg-addrow".
+  document.querySelectorAll("[data-reqaddlot]").forEach(btn => btn.onclick = () => {
+    const lineId = btn.dataset.reqaddlot;
+    const materialId = btn.dataset.materialid;
+    if (!materialId) return;
+    const allLots = WH_CACHE.allLots || [];
+    const existingSels = Array.from(document.querySelectorAll(`.reqlot-select[data-lineid="${CSS.escape(lineId)}"]`));
+    const usedLotIds = new Set(existingSels.map(s => s.value));
+    const reqDate = btn.dataset.reqdate || null;
+    const asOf = reqDate ? new Date(reqDate) : null;
+    const avail = allLots.filter(l => l.material_id === materialId && l.quantity > 0 && !/phân xưởng/i.test(l.location || "")
+      && (!asOf || new Date(l.created_at) <= asOf))
+      .sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+    const nextLot = avail.find(l => !usedLotIds.has(l.lot_id));
+    if (!nextLot) { toast("Không còn lô nào khác của vật tư này để chọn.", "err"); return; }
+    const pi = Math.max(...existingSels.map(s => parseInt(s.dataset.pi, 10))) + 1;
+    const lotOpts = requestLotOptionsHtml(materialId, allLots, nextLot.lot_id, reqDate);
+    const existingQty = document.querySelector(`.reqlot-qty[data-lineid="${CSS.escape(lineId)}"]`);
+    const target = existingQty ? existingQty.dataset.target : "";
+    const addRowTr = btn.closest("tr");
+    addRowTr.insertAdjacentHTML("beforebegin", `<tr data-reqpickrow="${esc(lineId)}-${pi}">
+      <td></td><td></td>
+      <td>
+        <input type="number" min="0" step="any" class="reqlot-qty" data-lineid="${esc(lineId)}" data-pi="${pi}"
+          data-target="${esc(target)}" value="0" style="width:70px"/> ${esc(nextLot.uom || "")}
+        <select class="reqlot-select" id="reqlot-${esc(lineId)}-${pi}" data-lineid="${esc(lineId)}" data-pi="${pi}"
+          data-fifoexpected="${esc(nextLot.lot_id)}" data-materialid="${esc(materialId)}" style="margin-left:6px">${lotOpts.html}</select>
+      </td>
+      <td></td><td></td><td></td>
+      <td id="reqfifo-${esc(lineId)}-${pi}"></td>
+      <td><input class="reqfifo-reason" id="reqreason-${esc(lineId)}-${pi}" data-lineid="${esc(lineId)}" data-pi="${pi}"
+        placeholder="Bắt buộc nếu chọn khác FIFO" style="display:none;width:170px"/></td>
+      <td></td><td></td></tr>`);
+    const newRow = addRowTr.previousElementSibling;
+    wireReqLotFifo(newRow.querySelector(".reqlot-select"));
+    const newQtyInput = newRow.querySelector(".reqlot-qty");
+    newQtyInput.oninput = () => updateReqSum(lineId);
+    updateReqSum(lineId);
+  });
+  // Xuất trực tiếp từ (các) lô đã chọn ngay trong dòng (không cần mở modal riêng) — lô mặc định
+  // đã gợi ý theo FIFO, tự tách nhiều lô nếu lô cũ nhất không đủ (requestFifoPlan), thủ kho chỉ
+  // cần đổi lại/thêm dòng nếu muốn.
   document.querySelectorAll("[data-reqfulfill]").forEach(b => b.onclick = () => guard(async () => {
-    const sel = document.getElementById(`reqlot-${b.dataset.lineid}`);
-    const lotId = sel ? sel.value : "";
-    if (!lotId) throw new Error("Không còn lô khả dụng để xuất cho dòng này.");
-    const reasonInput = document.getElementById(`reqreason-${b.dataset.lineid}`);
-    const reason = reasonInput ? reasonInput.value.trim() : "";
-    if (sel && !reqIsFifo(sel) && !reason) {
-      toast('Lô đã chọn không phải lô cũ nhất (FIFO) — bắt buộc nhập "Lý do (nếu khác FIFO)"', "err");
+    const lineId = b.dataset.lineid;
+    const sels = Array.from(document.querySelectorAll(`.reqlot-select[data-lineid="${CSS.escape(lineId)}"]`));
+    if (!sels.length) throw new Error("Không còn lô khả dụng để xuất cho dòng này.");
+    const lots = [];
+    for (const sel of sels) {
+      const qtyInput = document.querySelector(`.reqlot-qty[data-lineid="${CSS.escape(lineId)}"][data-pi="${sel.dataset.pi}"]`);
+      const qty = qtyInput ? (parseFloat(qtyInput.value) || 0) : 0;
+      if (qty <= 0) continue;
+      if (!sel.value) { toast("Có dòng chưa chọn lô — chọn lô hoặc để số lượng về 0.", "err"); return; }
+      const reasonInput = document.getElementById(`reqreason-${lineId}-${sel.dataset.pi}`);
+      const reason = reasonInput ? reasonInput.value.trim() : "";
+      if (!reqIsFifo(sel) && !reason) {
+        toast('Có lô chọn khác FIFO chưa nhập lý do — nhập "Lý do (nếu khác FIFO)" rồi bấm lại.', "err");
+        reasonInput && reasonInput.focus();
+        return;
+      }
+      lots.push({ lot_id: sel.value, quantity: qty, reason: reason || null });
+    }
+    if (!lots.length) { toast("Chưa nhập số lượng cho lô nào — nhập số lượng rồi bấm lại.", "err"); return; }
+    // Chặn TRƯỚC khi gọi API nếu tổng đã nhập KHÁC số lượng đề nghị — nhấn mạnh rõ khi VƯỢT
+    // (yêu cầu người dùng 2026-09-19: không cho xuất nếu cố tình điền nhiều hơn đề nghị). Backend
+    // (fulfill_request_line) vẫn tự chặn lại lần cuối, đây chỉ để báo sớm/rõ ràng hơn cho thủ kho.
+    const target = parseFloat((document.querySelector(`.reqlot-qty[data-lineid="${CSS.escape(lineId)}"]`) || {}).dataset?.target) || 0;
+    const entered = Math.round(lots.reduce((s, l) => s + l.quantity, 0) * 10000) / 10000;
+    if (Math.abs(entered - target) > 1e-6) {
+      toast(entered > target
+        ? `Tổng số lượng đã nhập (${entered}) VƯỢT quá số lượng đề nghị (${target}) — không được xuất vượt. Sửa lại cho khớp đúng ${target}.`
+        : `Tổng số lượng đã nhập (${entered}) chưa đủ số lượng đề nghị (${target}) — nhập đủ hoặc dùng "+ Thêm lô khác".`, "err");
       return;
     }
-    await POST(`/warehouse/requests/${b.dataset.reqid}/lines/${b.dataset.lineid}/fulfill`,
-      { lot_id: lotId, quantity: parseFloat(b.dataset.qty), location_to: "Kho phân xưởng", reason: reason || null });
-    toast("Đã xuất dòng theo lô đã chọn"); renderCurrentWarehouseView();
+    await POST(`/warehouse/requests/${b.dataset.reqid}/lines/${lineId}/fulfill`,
+      { lots, location_to: "Kho phân xưởng" });
+    toast("Đã xuất dòng theo (các) lô đã chọn"); renderCurrentWarehouseView();
   }));
   document.querySelectorAll("[data-reqreject]").forEach(b => b.onclick = () => guard(async () => {
     const reason = prompt("Lý do từ chối (tuỳ chọn):") || null;
@@ -7721,7 +7875,7 @@ function wireRequestBlockActions() {
     const reasons = {};
     for (const sel of sels) {
       if (reqIsFifo(sel)) continue;
-      const reasonInput = document.getElementById(`reqreason-${sel.dataset.lineid}`);
+      const reasonInput = document.getElementById(`reqreason-${sel.dataset.lineid}-${sel.dataset.pi}`);
       const reason = reasonInput ? reasonInput.value.trim() : "";
       if (!reason) {
         toast('Có dòng đang chọn lô khác FIFO chưa nhập lý do — nhập lý do rồi bấm lại, hoặc dùng "Xuất dòng này" để duyệt riêng dòng đó.', "err");

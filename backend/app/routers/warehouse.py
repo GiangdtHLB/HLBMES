@@ -218,8 +218,9 @@ def update_request(request_id: str, payload: MaterialRequestUpdateIn, db: Sessio
 @router.post("/requests/{request_id}/lines/{line_id}/fulfill")
 def fulfill_request_line(request_id: str, line_id: str, payload: RequestFulfillIn, db: Session = Depends(get_db),
                          user: User = Depends(get_current_user)):
-    return svc.fulfill_request_line(db, request_id, line_id, payload.lot_id, payload.quantity,
-                                    user, payload.location_to, payload.reason)
+    return svc.fulfill_request_line(db, request_id, line_id, user, payload.lot_id, payload.quantity,
+                                    [l.model_dump() for l in payload.lots] if payload.lots else None,
+                                    payload.location_to, payload.reason)
 
 
 @router.post("/requests/{request_id}/lines/{line_id}/reject")

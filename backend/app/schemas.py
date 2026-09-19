@@ -1116,9 +1116,19 @@ class SourceMaterialLineOut(BaseModel):
     member_material_ids: list[str] = []
 
 
-class RequestFulfillIn(BaseModel):
+class RequestFulfillLotIn(BaseModel):
     lot_id: str
-    quantity: float
+    quantity: float = Field(gt=0)
+    reason: Optional[str] = None   # bắt buộc nếu lot_id KHÁC lô cũ nhất (FIFO) CÒN LẠI
+
+
+class RequestFulfillIn(BaseModel):
+    # lot_id/quantity (1 lô) HOẶC lots (nhiều lô, tổng phải bằng đúng số lượng đề nghị) — không
+    # truyền lots thì dùng lot_id/quantity như cũ (tương thích ngược, xem
+    # services/warehouse.py::fulfill_request_line).
+    lot_id: Optional[str] = None
+    quantity: Optional[float] = None
+    lots: Optional[list[RequestFulfillLotIn]] = None
     location_to: str = "Kho phân xưởng"
     reason: Optional[str] = None   # bắt buộc nếu lot_id KHÁC lô FIFO/FEFO (cũ nhất) hiện có
 

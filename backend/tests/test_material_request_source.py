@@ -451,25 +451,35 @@ def test_fulfill_all_lines_skips_line_needing_fifo_reason_without_blocking_other
     assert bad_line["reason"] == "Khách chỉ định đúng lô mới do khác biệt bao bì"
 
 
-def test_fulfill_request_line_rejects_lot_not_yet_received_as_of_requested_date(
+def test_fulfill_request_line_rejects_explicit_lot_not_yet_received_as_of_requested_date(
         client, admin_h, thukho_h, vanhanh_h):
     """Regression 2026-09-18 (báo cáo thật trên production mes-dma.biahalong.com, vật tư 2NP09):
     trước đây fulfill_request_line/fulfill_all_lines chỉ tra MaterialLot.quantity > 0 HIỆN TẠI để
     chọn lô nguồn, không so với `req.requested_receipt_date` — cho phép 1 lô Nhập kho SAU đó vẫn
-    bị gán vào 1 giao dịch khai hiệu lực SỚM HƠN ngày lô đó thực sự về kho. Giờ phải chặn cứng."""
+    bị gán vào 1 giao dịch khai hiệu lực SỚM HƠN ngày lô đó thực sự về kho. Giờ phải chặn cứng.
+
+    Dựng lô CŨ (đủ tồn tại đúng ngày đề nghị -> phiếu tạo được, không bị create_request's kiểm
+    tra as-of ở dưới chặn mất) + lô MỚI (về kho SAU ngày đề nghị) rồi CHỈ ĐỊNH TAY đúng lô mới ở
+    "Xuất dòng này" — vẫn phải bị chặn dù tổng tồn (cộng cả 2 lô) thật ra đủ."""
     from datetime import timedelta
     from app.common import utcnow
 
     mat_id = _create_material(client, admin_h, "ASOF-REJECT-MAT")
     now = utcnow()
-    received_at = (now - timedelta(days=3)).isoformat()
-    r = client.post("/api/warehouse/receive", headers=thukho_h,
-                    json={"lot_code": "LOT-ASOF-LATE", "material_id": mat_id, "quantity": 50,
-                          "uom": "kg", "location": "Kho công ty", "received_at": received_at})
-    assert r.status_code == 200, r.text
-    lot_id = r.json()["lot_id"]
+    old_r = client.post("/api/warehouse/receive", headers=thukho_h,
+                        json={"lot_code": "LOT-ASOF-OLD", "material_id": mat_id, "quantity": 50,
+                             "uom": "kg", "location": "Kho công ty",
+                             "received_at": (now - timedelta(days=10)).isoformat()})
+    assert old_r.status_code == 200, old_r.text
+    old_lot = old_r.json()["lot_id"]
+    late_r = client.post("/api/warehouse/receive", headers=thukho_h,
+                         json={"lot_code": "LOT-ASOF-LATE", "material_id": mat_id, "quantity": 50,
+                              "uom": "kg", "location": "Kho công ty",
+                              "received_at": (now - timedelta(days=3)).isoformat()})
+    assert late_r.status_code == 200, late_r.text
+    late_lot = late_r.json()["lot_id"]
 
-    requested_receipt_date = (now - timedelta(days=6)).isoformat()   # 3 ngày TRƯỚC khi lô về kho
+    requested_receipt_date = (now - timedelta(days=6)).isoformat()   # SAU old_lot, TRƯỚC late_lot
     req = client.post("/api/warehouse/requests", headers=vanhanh_h,
                       json={"lines": [{"material_id": mat_id, "quantity": 10, "uom": "kg"}],
                            "requested_receipt_date": requested_receipt_date}).json()
@@ -477,43 +487,104 @@ def test_fulfill_request_line_rejects_lot_not_yet_received_as_of_requested_date(
 
     blocked = client.post(f"/api/warehouse/requests/{req['request_id']}/lines/{line_id}/fulfill",
                           headers=thukho_h,
-                          json={"lot_id": lot_id, "quantity": 10, "location_to": "Kho phân xưởng"})
+                          json={"lot_id": late_lot, "quantity": 10, "location_to": "Kho phân xưởng"})
     assert blocked.status_code >= 400, blocked.text
     assert "chưa đủ tồn" in blocked.json()["detail"].lower()
 
     lots = {l["lot_id"]: l["quantity"] for l in client.get("/api/lots", headers=thukho_h).json()}
-    assert lots[lot_id] == 50   # không bị trừ tồn dù bị chặn giữa đường
+    assert lots[late_lot] == 50   # không bị trừ tồn dù bị chặn giữa đường
+
+    # Chỉ định đúng lô CŨ (hợp lệ tại ngày đề nghị) thì vẫn xuất được bình thường.
+    ok = client.post(f"/api/warehouse/requests/{req['request_id']}/lines/{line_id}/fulfill",
+                     headers=thukho_h,
+                     json={"lot_id": old_lot, "quantity": 10, "location_to": "Kho phân xưởng"})
+    assert ok.status_code == 200, ok.text
 
 
-def test_fulfill_all_lines_skips_line_when_only_lot_not_yet_received_as_of_requested_date(
+def test_create_request_blocked_when_insufficient_stock_as_of_requested_date(
         client, admin_h, thukho_h, vanhanh_h):
-    """Cùng bug trên nhưng qua đường "Duyệt cả phiếu" (tự chọn lô, không chỉ định tay) — dòng phải
-    bị BỎ QUA (skipped) thay vì lặng lẽ dùng lô chưa kịp về kho."""
+    """Yêu cầu người dùng 2026-09-19: "Khi tạo đề nghị nhận kho, nếu ... vật tư tồn trong công ty
+    kho tính tại ngày giờ đề nghị nhận không đủ, thì không cho tạo phiếu đề nghị nhận" — chặn
+    NGAY LÚC TẠO, không đợi tới lúc Duyệt mới phát hiện. Tồn HIỆN TẠI (sau khi lô mới về) có thể
+    đủ, nhưng không được lấy tồn của TƯƠNG LAI (so với ngày đề nghị) để hợp lệ hoá."""
     from datetime import timedelta
     from app.common import utcnow
 
-    mat_id = _create_material(client, admin_h, "ASOF-ALLSKIP-MAT")
+    mat_id = _create_material(client, admin_h, "ASOF-CREATE-BLOCK-MAT")
     now = utcnow()
-    received_at = (now - timedelta(days=3)).isoformat()
-    r = client.post("/api/warehouse/receive", headers=thukho_h,
-                    json={"lot_code": "LOT-ASOF-ALLSKIP", "material_id": mat_id, "quantity": 50,
-                          "uom": "kg", "location": "Kho công ty", "received_at": received_at})
-    assert r.status_code == 200, r.text
-    lot_id = r.json()["lot_id"]
+    old_r = client.post("/api/warehouse/receive", headers=thukho_h,
+                        json={"lot_code": "LOT-ASOF-CB-OLD", "material_id": mat_id, "quantity": 3,
+                             "uom": "kg", "location": "Kho công ty",
+                             "received_at": (now - timedelta(days=10)).isoformat()})
+    assert old_r.status_code == 200, old_r.text   # chỉ 3kg tại ngày đề nghị
+    late_r = client.post("/api/warehouse/receive", headers=thukho_h,
+                         json={"lot_code": "LOT-ASOF-CB-LATE", "material_id": mat_id, "quantity": 50,
+                              "uom": "kg", "location": "Kho công ty",
+                              "received_at": (now - timedelta(days=3)).isoformat()})
+    assert late_r.status_code == 200, late_r.text
 
-    requested_receipt_date = (now - timedelta(days=6)).isoformat()
-    req = client.post("/api/warehouse/requests", headers=vanhanh_h,
-                      json={"lines": [{"material_id": mat_id, "quantity": 10, "uom": "kg"}],
-                           "requested_receipt_date": requested_receipt_date}).json()
-    line_id = req["lines"][0]["line_id"]
+    requested_receipt_date = (now - timedelta(days=6)).isoformat()   # trước khi lô 50kg về kho
+    blocked = client.post("/api/warehouse/requests", headers=vanhanh_h,
+                          json={"lines": [{"material_id": mat_id, "quantity": 10, "uom": "kg"}],
+                               "requested_receipt_date": requested_receipt_date})
+    assert blocked.status_code >= 400, blocked.text
+    assert "tồn kho công ty" in blocked.json()["detail"]
 
-    fa = client.post(f"/api/warehouse/requests/{req['request_id']}/fulfill-all", headers=thukho_h, json={})
-    assert fa.status_code == 200, fa.text
-    assert fa.json()["fulfilled"] == []
-    assert [s["line_id"] for s in fa.json()["skipped"]] == [line_id]
+    # Đề nghị đúng bằng phần THẬT SỰ có tại ngày đó (3kg) thì vẫn tạo được bình thường.
+    ok = client.post("/api/warehouse/requests", headers=vanhanh_h,
+                     json={"lines": [{"material_id": mat_id, "quantity": 3, "uom": "kg"}],
+                          "requested_receipt_date": requested_receipt_date}).json()
+    # Từ chối lại ngay — không để lại dòng "pending" mang ngày trong quá khứ, tránh làm các test
+    # khác (áp dụng quy tắc thứ tự TOÀN BỘ phiếu, không có mốc ân hạn — yêu cầu người dùng
+    # 2026-09-19) tưởng nhầm đây là "phiếu trước" chưa xử lý xong rồi bị chặn oan.
+    client.post(f"/api/warehouse/requests/{ok['request_id']}/lines/{ok['lines'][0]['line_id']}/reject",
+               headers=thukho_h, json={})
 
-    lots = {l["lot_id"]: l["quantity"] for l in client.get("/api/lots", headers=thukho_h).json()}
-    assert lots[lot_id] == 50
+
+def test_fulfill_blocked_by_earlier_dated_request_not_yet_processed(
+        client, admin_h, thukho_h, vanhanh_h):
+    """Yêu cầu người dùng 2026-09-19: "duyệt cả phiếu hay duyệt từng vật tư ... phải dựa vào ngày
+    đề nghị nhận, phiếu nào trước thì duyệt trước, không cho phép duyệt phiếu có ngày đề nghị
+    nhận kho sau mà phiếu có ngày đề nghị nhận kho trước chưa được duyệt" — áp dụng CẢ PHIẾU,
+    không phân biệt vật tư (đã xác nhận phạm vi)."""
+    from datetime import timedelta
+    from app.common import utcnow
+
+    mat_a = _create_material(client, admin_h, "ORDER-RULE-MAT-A")
+    mat_b = _create_material(client, admin_h, "ORDER-RULE-MAT-B")
+    lot_a = _receive(client, thukho_h, "LOT-ORDER-A", mat_a, 50)
+    lot_b = _receive(client, thukho_h, "LOT-ORDER-B", mat_b, 50)
+    now = utcnow()   # đảm bảo cả 2 ngày đề nghị đều SAU mốc ân hạn _REQUEST_ORDER_RULE_SINCE, VÀ
+    # sau khi lô đã về kho (create_request tự chặn nếu đề nghị SỚM hơn ngày lô về, xem test khác)
+    date_earlier = (now + timedelta(hours=1)).isoformat()
+    date_later = (now + timedelta(hours=2)).isoformat()
+
+    req_earlier = client.post("/api/warehouse/requests", headers=vanhanh_h,
+                              json={"lines": [{"material_id": mat_a, "quantity": 10, "uom": "kg"}],
+                                   "requested_receipt_date": date_earlier}).json()
+    req_later = client.post("/api/warehouse/requests", headers=vanhanh_h,
+                            json={"lines": [{"material_id": mat_b, "quantity": 10, "uom": "kg"}],
+                                 "requested_receipt_date": date_later}).json()
+    line_later = req_later["lines"][0]["line_id"]
+    line_earlier = req_earlier["lines"][0]["line_id"]
+
+    # Phiếu SAU (mat_b, dù KHÁC vật tư với phiếu trước) bị chặn vì phiếu TRƯỚC (mat_a) còn pending.
+    blocked = client.post(f"/api/warehouse/requests/{req_later['request_id']}/lines/{line_later}/fulfill",
+                          headers=thukho_h, json={"lot_id": lot_b, "quantity": 10})
+    assert blocked.status_code >= 400, blocked.text
+    assert "sớm hơn" in blocked.json()["detail"].lower()
+
+    blocked_all = client.post(f"/api/warehouse/requests/{req_later['request_id']}/fulfill-all",
+                              headers=thukho_h, json={})
+    assert blocked_all.status_code >= 400, blocked_all.text
+
+    # Xử lý xong phiếu TRƯỚC rồi thì phiếu SAU duyệt được bình thường.
+    ok_earlier = client.post(f"/api/warehouse/requests/{req_earlier['request_id']}/lines/{line_earlier}/fulfill",
+                             headers=thukho_h, json={"lot_id": lot_a, "quantity": 10})
+    assert ok_earlier.status_code == 200, ok_earlier.text
+    ok_later = client.post(f"/api/warehouse/requests/{req_later['request_id']}/lines/{line_later}/fulfill",
+                           headers=thukho_h, json={"lot_id": lot_b, "quantity": 10})
+    assert ok_later.status_code == 200, ok_later.text
 
 
 def test_fulfill_request_line_allows_lot_received_before_requested_date(
@@ -542,4 +613,82 @@ def test_fulfill_request_line_allows_lot_received_before_requested_date(
                     headers=thukho_h,
                     json={"lot_id": lot_id, "quantity": 10, "location_to": "Kho phân xưởng"})
     assert f.status_code == 200, f.text
+
+
+def test_fulfill_request_line_splits_across_multiple_lots(client, admin_h, thukho_h, vanhanh_h):
+    """Yêu cầu người dùng 2026-09-19: "Xuất dòng này" (1 dòng, KHÔNG qua "Duyệt cả phiếu") phải
+    hỗ trợ tách 1 dòng thành nhiều lô khi lô cũ nhất không đủ nguyên số lượng — mirror dispense.py
+    cho phép Cấp liệu tách nhiều lô. Lấy hết lô cũ nhất trước, còn thiếu lấy tiếp lô mới hơn ->
+    fifo_ok=True vì đúng thứ tự FIFO xuyên suốt (không có lô cũ hơn nào bị bỏ qua)."""
+    mat_id = _create_material(client, admin_h, "MULTILOT-LINE-MAT")
+    old_lot = _receive(client, thukho_h, "LOT-MULTILINE-OLD", mat_id, 3)
+    new_lot = _receive(client, thukho_h, "LOT-MULTILINE-NEW", mat_id, 50)
+
+    req = client.post("/api/warehouse/requests", headers=vanhanh_h,
+                      json={"lines": [{"material_id": mat_id, "quantity": 10, "uom": "kg"}]}).json()
+    line_id = req["lines"][0]["line_id"]
+
+    f = client.post(f"/api/warehouse/requests/{req['request_id']}/lines/{line_id}/fulfill",
+                    headers=thukho_h,
+                    json={"lots": [{"lot_id": old_lot, "quantity": 3}, {"lot_id": new_lot, "quantity": 7}],
+                         "location_to": "Kho phân xưởng"})
+    assert f.status_code == 200, f.text
+
+    listed = client.get("/api/warehouse/requests", headers=thukho_h).json()
+    row = next(x for x in listed if x["request_id"] == req["request_id"])
+    line = row["lines"][0]
+    assert line["status"] == "fulfilled"
+    assert line["fifo_ok"] is True
+    assert sorted(line["fulfilled_lot_codes"]) == ["LOT-MULTILINE-NEW", "LOT-MULTILINE-OLD"]
+
+    lots = {l["lot_id"]: l for l in client.get("/api/lots", headers=thukho_h).json()}
+    assert lots[old_lot]["quantity"] == 3
+    assert lots[old_lot]["location"] == "Kho phân xưởng"
+    assert lots[new_lot]["quantity"] == 43
+
+
+def test_fulfill_request_line_lots_must_sum_to_line_quantity(client, admin_h, thukho_h, vanhanh_h):
+    mat_id = _create_material(client, admin_h, "MULTILOT-SUM-MAT")
+    lot_id = _receive(client, thukho_h, "LOT-MULTISUM-01", mat_id, 50)
+
+    req = client.post("/api/warehouse/requests", headers=vanhanh_h,
+                      json={"lines": [{"material_id": mat_id, "quantity": 10, "uom": "kg"}]}).json()
+    line_id = req["lines"][0]["line_id"]
+
+    f = client.post(f"/api/warehouse/requests/{req['request_id']}/lines/{line_id}/fulfill",
+                    headers=thukho_h, json={"lots": [{"lot_id": lot_id, "quantity": 7}]})
+    assert f.status_code >= 400, f.text
+    assert "bằng đúng số lượng đề nghị" in f.json()["detail"]
+
+
+def test_fulfill_request_line_multilot_skipping_older_lot_requires_reason(client, admin_h, thukho_h, vanhanh_h):
+    """Trong `lots`, nếu 1 lô KHÔNG phải lô cũ nhất CÒN LẠI (sau khi trừ phần các lô đứng trước
+    trong cùng danh sách) thì bắt buộc reason riêng cho đúng lô đó — thiếu thì chặn TOÀN BỘ (chưa
+    xuất lô nào), có đủ lý do thì xuất hết, fifo_ok=False."""
+    mat_id = _create_material(client, admin_h, "MULTILOT-REASON-MAT")
+    older_lot = _receive(client, thukho_h, "LOT-MULTIREASON-OLD", mat_id, 3)
+    newer_lot = _receive(client, thukho_h, "LOT-MULTIREASON-NEW", mat_id, 50)
+
+    req = client.post("/api/warehouse/requests", headers=vanhanh_h,
+                      json={"lines": [{"material_id": mat_id, "quantity": 10, "uom": "kg"}]}).json()
+    line_id = req["lines"][0]["line_id"]
+
+    # Bỏ qua hẳn lô cũ nhất (older_lot còn 3kg), lấy toàn bộ 10kg từ lô mới hơn -> cần lý do.
+    blocked = client.post(f"/api/warehouse/requests/{req['request_id']}/lines/{line_id}/fulfill",
+                          headers=thukho_h, json={"lots": [{"lot_id": newer_lot, "quantity": 10}]})
+    assert blocked.status_code >= 400, blocked.text
+    assert "lý do" in blocked.json()["detail"].lower()
+
+    lots_unchanged = {l["lot_id"]: l["quantity"] for l in client.get("/api/lots", headers=thukho_h).json()}
+    assert lots_unchanged[older_lot] == 3   # chưa xuất lô nào (kiểm tra trước, xuất sau)
+    assert lots_unchanged[newer_lot] == 50
+
+    ok = client.post(f"/api/warehouse/requests/{req['request_id']}/lines/{line_id}/fulfill",
+                     headers=thukho_h, json={"lots": [{"lot_id": newer_lot, "quantity": 10,
+                                                       "reason": "Khách chỉ định đúng lô mới"}]})
+    assert ok.status_code == 200, ok.text
+    listed = client.get("/api/warehouse/requests", headers=thukho_h).json()
+    row = next(x for x in listed if x["request_id"] == req["request_id"])
+    assert row["lines"][0]["fifo_ok"] is False
+    assert row["lines"][0]["reason"] == "Khách chỉ định đúng lô mới"
 
