@@ -62,16 +62,22 @@ def _create_material(client, admin_h, code):
     return r.json()["material_id"]
 
 
-def _receive(client, thukho_h, mat_id, lot_code, qty):
-    r = client.post("/api/warehouse/receive", headers=thukho_h,
-                    json={"lot_code": lot_code, "material_id": mat_id, "quantity": qty, "uom": "kg"})
+def _receive(client, thukho_h, mat_id, lot_code, qty, received_at=None):
+    payload = {"lot_code": lot_code, "material_id": mat_id, "quantity": qty, "uom": "kg"}
+    if received_at:
+        payload["received_at"] = received_at
+    r = client.post("/api/warehouse/receive", headers=thukho_h, json=payload)
     assert r.status_code == 200, r.text
     return r.json()["lot_id"]
 
 
 def test_create_request_with_receipt_date_and_edit(client, admin_h, thukho_h, vanhanh_h):
     mat_id = _create_material(client, admin_h, "REQEDIT-01")
-    _receive(client, thukho_h, mat_id, "LOT-REQEDIT-01", 100)
+    # Nhận kho TRƯỚC cả "Ngày đề nghị nhận kho" sẽ khai dưới đây (2026-09-18: fulfill giờ chặn
+    # cứng nếu lô chưa Nhập kho tính đến ngày đề nghị — mirror dispense.py as_of), để không lẫn
+    # với chính bug đang được test bằng test_material_request_source.py.
+    _receive(client, thukho_h, mat_id, "LOT-REQEDIT-01", 100,
+             received_at=(utcnow() - timedelta(days=5)).isoformat())
 
     wanted_date = (utcnow() - timedelta(days=2)).isoformat()
     req = client.post("/api/warehouse/requests", headers=vanhanh_h,
