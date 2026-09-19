@@ -156,6 +156,11 @@ def material_fifo(material_id: str, db: Session = Depends(get_db)):
     return svc.material_fifo_detail(db, material_id)
 
 
+@router.get("/materials/{material_id}/last-receipt-defaults")
+def material_last_receipt_defaults(material_id: str, db: Session = Depends(get_db)):
+    return svc.last_receipt_defaults(db, material_id)
+
+
 @router.get("/card")
 def card(material_id: str = None, lot_id: str = None, db: Session = Depends(get_db)):
     return svc.stock_card(db, material_id, lot_id)

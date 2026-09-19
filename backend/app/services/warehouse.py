@@ -1000,6 +1000,23 @@ def low_stock_report(db: Session) -> list[dict]:
     return sorted(rows, key=lambda r: r["deficit"], reverse=True)
 
 
+def last_receipt_defaults(db: Session, material_id: str) -> dict:
+    """Gợi ý mặc định cho màn "Nhập kho" (Nhà CC + Vị trí cất) khi chọn 1 nguyên liệu — lấy từ
+    lượt Nhập kho GẦN NHẤT của cùng vật tư này vào Kho công ty (sắp theo `created_at` — thời
+    điểm bấm nút thật, KHÔNG dùng `ts` vì có thể bị khai lùi ngày, xem receive()) — yêu cầu
+    người dùng 2026-09-19: "Nhà cung cấp cho gợi nhà cung cấp nhập cho vật tư đó lần gần nhất"
+    (mirror luôn cho Vị trí cất, cùng logic)."""
+    moves = db.execute(select(StockMovement).where(
+        StockMovement.material_id == material_id, StockMovement.movement_type == "receipt",
+    ).order_by(StockMovement.created_at.desc()).limit(20)).scalars().all()
+    for mv in moves:
+        if mv.lot_id and not _is_workshop_location(mv.location_to or ""):
+            lot = db.get(MaterialLot, mv.lot_id)
+            if lot:
+                return {"supplier_id": lot.supplier_id, "location_id": lot.location_id}
+    return {"supplier_id": None, "location_id": None}
+
+
 def material_fifo_detail(db: Session, material_id: str) -> dict:
     """Chi tiết tồn theo lô của 1 vật tư, sắp FIFO (created_at tăng dần), tách theo kho —
     dùng để hiển thị cho người lập Lệnh lọc biết có đủ tồn theo đúng thứ tự lô cũ nhất
