@@ -451,3 +451,95 @@ def test_fulfill_all_lines_skips_line_needing_fifo_reason_without_blocking_other
     assert bad_line["reason"] == "Khách chỉ định đúng lô mới do khác biệt bao bì"
 
 
+def test_fulfill_request_line_rejects_lot_not_yet_received_as_of_requested_date(
+        client, admin_h, thukho_h, vanhanh_h):
+    """Regression 2026-09-18 (báo cáo thật trên production mes-dma.biahalong.com, vật tư 2NP09):
+    trước đây fulfill_request_line/fulfill_all_lines chỉ tra MaterialLot.quantity > 0 HIỆN TẠI để
+    chọn lô nguồn, không so với `req.requested_receipt_date` — cho phép 1 lô Nhập kho SAU đó vẫn
+    bị gán vào 1 giao dịch khai hiệu lực SỚM HƠN ngày lô đó thực sự về kho. Giờ phải chặn cứng."""
+    from datetime import timedelta
+    from app.common import utcnow
+
+    mat_id = _create_material(client, admin_h, "ASOF-REJECT-MAT")
+    now = utcnow()
+    received_at = (now - timedelta(days=3)).isoformat()
+    r = client.post("/api/warehouse/receive", headers=thukho_h,
+                    json={"lot_code": "LOT-ASOF-LATE", "material_id": mat_id, "quantity": 50,
+                          "uom": "kg", "location": "Kho công ty", "received_at": received_at})
+    assert r.status_code == 200, r.text
+    lot_id = r.json()["lot_id"]
+
+    requested_receipt_date = (now - timedelta(days=6)).isoformat()   # 3 ngày TRƯỚC khi lô về kho
+    req = client.post("/api/warehouse/requests", headers=vanhanh_h,
+                      json={"lines": [{"material_id": mat_id, "quantity": 10, "uom": "kg"}],
+                           "requested_receipt_date": requested_receipt_date}).json()
+    line_id = req["lines"][0]["line_id"]
+
+    blocked = client.post(f"/api/warehouse/requests/{req['request_id']}/lines/{line_id}/fulfill",
+                          headers=thukho_h,
+                          json={"lot_id": lot_id, "quantity": 10, "location_to": "Kho phân xưởng"})
+    assert blocked.status_code >= 400, blocked.text
+    assert "chưa đủ tồn" in blocked.json()["detail"].lower()
+
+    lots = {l["lot_id"]: l["quantity"] for l in client.get("/api/lots", headers=thukho_h).json()}
+    assert lots[lot_id] == 50   # không bị trừ tồn dù bị chặn giữa đường
+
+
+def test_fulfill_all_lines_skips_line_when_only_lot_not_yet_received_as_of_requested_date(
+        client, admin_h, thukho_h, vanhanh_h):
+    """Cùng bug trên nhưng qua đường "Duyệt cả phiếu" (tự chọn lô, không chỉ định tay) — dòng phải
+    bị BỎ QUA (skipped) thay vì lặng lẽ dùng lô chưa kịp về kho."""
+    from datetime import timedelta
+    from app.common import utcnow
+
+    mat_id = _create_material(client, admin_h, "ASOF-ALLSKIP-MAT")
+    now = utcnow()
+    received_at = (now - timedelta(days=3)).isoformat()
+    r = client.post("/api/warehouse/receive", headers=thukho_h,
+                    json={"lot_code": "LOT-ASOF-ALLSKIP", "material_id": mat_id, "quantity": 50,
+                          "uom": "kg", "location": "Kho công ty", "received_at": received_at})
+    assert r.status_code == 200, r.text
+    lot_id = r.json()["lot_id"]
+
+    requested_receipt_date = (now - timedelta(days=6)).isoformat()
+    req = client.post("/api/warehouse/requests", headers=vanhanh_h,
+                      json={"lines": [{"material_id": mat_id, "quantity": 10, "uom": "kg"}],
+                           "requested_receipt_date": requested_receipt_date}).json()
+    line_id = req["lines"][0]["line_id"]
+
+    fa = client.post(f"/api/warehouse/requests/{req['request_id']}/fulfill-all", headers=thukho_h, json={})
+    assert fa.status_code == 200, fa.text
+    assert fa.json()["fulfilled"] == []
+    assert [s["line_id"] for s in fa.json()["skipped"]] == [line_id]
+
+    lots = {l["lot_id"]: l["quantity"] for l in client.get("/api/lots", headers=thukho_h).json()}
+    assert lots[lot_id] == 50
+
+
+def test_fulfill_request_line_allows_lot_received_before_requested_date(
+        client, admin_h, thukho_h, vanhanh_h):
+    """Đối chứng: lô ĐÃ về kho trước ngày đề nghị nhận kho thì vẫn xuất bình thường — không bị
+    chặn nhầm bởi kiểm tra as-of mới thêm."""
+    from datetime import timedelta
+    from app.common import utcnow
+
+    mat_id = _create_material(client, admin_h, "ASOF-ALLOW-MAT")
+    now = utcnow()
+    received_at = (now - timedelta(days=6)).isoformat()
+    r = client.post("/api/warehouse/receive", headers=thukho_h,
+                    json={"lot_code": "LOT-ASOF-ALLOW", "material_id": mat_id, "quantity": 50,
+                          "uom": "kg", "location": "Kho công ty", "received_at": received_at})
+    assert r.status_code == 200, r.text
+    lot_id = r.json()["lot_id"]
+
+    requested_receipt_date = (now - timedelta(days=3)).isoformat()   # SAU ngày lô về kho -> hợp lệ
+    req = client.post("/api/warehouse/requests", headers=vanhanh_h,
+                      json={"lines": [{"material_id": mat_id, "quantity": 10, "uom": "kg"}],
+                           "requested_receipt_date": requested_receipt_date}).json()
+    line_id = req["lines"][0]["line_id"]
+
+    f = client.post(f"/api/warehouse/requests/{req['request_id']}/lines/{line_id}/fulfill",
+                    headers=thukho_h,
+                    json={"lot_id": lot_id, "quantity": 10, "location_to": "Kho phân xưởng"})
+    assert f.status_code == 200, f.text
+

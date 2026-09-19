@@ -1763,12 +1763,29 @@ def fulfill_request_line(db: Session, request_id: str, line_id: str, lot_id: str
 
     Lô chọn KHÁC lô cũ nhất (FIFO) hiện có thì bắt buộc `reason` (mirror dispense.py::
     _plan_consume — yêu cầu người dùng 2026-09-18), lưu lại vào line.reason để truy vết —
-    trước đây chỉ chụp cờ fifo_ok=False mà không bắt giải thích lý do."""
+    trước đây chỉ chụp cờ fifo_ok=False mà không bắt giải thích lý do.
+
+    Nếu `req.requested_receipt_date` bị khai LÙI ngày, lô chỉ định phải THẬT SỰ đã Nhập kho (còn
+    tồn tại Kho công ty) tính đến ĐÚNG ngày đó — chặn CỨNG, không cho vượt bằng lý do (khác lệch
+    FIFO ở trên: đây là bất khả thi vật lý, không phải lựa chọn nghiệp vụ) — bug thực tế đã gặp
+    (yêu cầu người dùng 2026-09-18): trước đây chỉ tra `MaterialLot.quantity > 0` HIỆN TẠI, cho
+    phép 1 lô Nhập kho ngày 7/9 bị gán vào giao dịch khai hiệu lực 3-5/9 (trước cả khi lô đó về
+    kho) — mirror đúng cơ chế `as_of` dispense.py đã áp cho Cấp liệu."""
     require_perm(user, "warehouse.issue")
     req = _get_request(db, request_id)
     line = _get_request_line(db, request_id, line_id)
     if line.status != "pending":
         raise DomainError(f"Dòng vật tư này đã ở trạng thái '{line.status}', không thể xử lý lại.")
+    ts = req.requested_receipt_date
+    if ts is not None:
+        lot_for_check = db.get(MaterialLot, lot_id)
+        if not lot_for_check:
+            raise NotFoundError("Lô vật tư không tồn tại.")
+        cap = {r["lot_id"]: r["quantity"] for r in
+              lot_on_hand_as_of(db, ts, "Kho công ty")}.get(lot_id, 0.0)
+        if cap + 1e-6 < quantity:
+            raise DomainError(f"Lô {lot_for_check.lot_code} chưa đủ tồn ở Kho công ty tính đến ngày "
+                              f"{ts:%d/%m/%Y} (ngày đề nghị nhận kho) — không được chọn.")
     fifo_ok = _is_oldest_company_lot(db, line.material_id, lot_id)
     reason = (reason or "").strip() or None
     if not fifo_ok and not reason:
@@ -1868,10 +1885,18 @@ def fulfill_all_lines(db: Session, request_id: str, user: User,
     (fifo_ok sẽ là False) mà KHÔNG có lý do tương ứng trong `reasons` thì bị BỎ QUA (thêm vào
     `skipped`, không chặn các dòng khác) — bắt buộc thủ kho duyệt riêng dòng đó qua "Xuất dòng
     này" (nhập lý do ở đó) thay vì để "Duyệt cả phiếu" âm thầm xuất sai FIFO mà không giải thích
-    (yêu cầu người dùng 2026-09-18)."""
+    (yêu cầu người dùng 2026-09-18).
+
+    Nếu `req.requested_receipt_date` bị khai LÙI ngày, mỗi lô ứng viên chỉ được tính tối đa bằng
+    tồn dựng lại tính đến ĐÚNG ngày đó ở Kho công ty (KHÔNG phải tồn thật hiện tại) — chặn CỨNG,
+    không có đường vòng bằng lý do, mirror `fulfill_request_line`/`dispense.py::_plan_consume`.
+    Bug thực tế đã gặp (yêu cầu người dùng 2026-09-18): trước đây chọn theo `MaterialLot.quantity
+    > 0` HIỆN TẠI, nên khi lô cũ nhất thật (đúng khung ngày) đã bị các phiếu khác rút cạn trước,
+    hệ thống lặng lẽ nhảy sang lô MỚI HƠN — dù lô đó còn chưa Nhập kho tính đến ngày đang khai."""
     require_perm(user, "warehouse.issue")
     reasons = reasons or {}
     req = _get_request(db, request_id)
+    ts = req.requested_receipt_date
     lines = db.execute(
         select(MaterialRequestLine).where(MaterialRequestLine.request_id == request_id,
                                           MaterialRequestLine.status == "pending")
@@ -1885,16 +1910,20 @@ def fulfill_all_lines(db: Session, request_id: str, user: User,
                                       MaterialLot.status.in_([LotStatus.AVAILABLE.value, LotStatus.RELEASED.value]))
             .order_by(MaterialLot.created_at)
         ).scalars().all() if not _is_workshop_location(c.location)]
+        asof_cap = ({r["lot_id"]: r["quantity"] for r in lot_on_hand_as_of(db, ts, "Kho công ty")}
+                   if ts is not None else None)
+        avail_qty = ((lambda c: min(c.quantity, asof_cap.get(c.lot_id, 0.0))) if asof_cap is not None
+                    else (lambda c: c.quantity))
         preferred = (next((c for c in all_avail if c.lot_id == line.preferred_lot_id), None)
                     if line.preferred_lot_id else None)
-        if preferred and preferred.quantity >= line.quantity - 1e-6:
+        if preferred and avail_qty(preferred) >= line.quantity - 1e-6:
             plan = [(preferred, line.quantity)]
         else:
             plan, remaining = [], round(line.quantity, 4)
             for c in all_avail:
                 if remaining <= 1e-9:
                     break
-                take = min(remaining, c.quantity)
+                take = min(remaining, avail_qty(c))
                 if take <= 0:
                     continue
                 plan.append((c, take))
