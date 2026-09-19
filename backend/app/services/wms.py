@@ -86,6 +86,30 @@ def list_pallets(db: Session, status: str = None) -> list:
     return out
 
 
+def list_lots(db: Session) -> list:
+    """Tổng hợp theo Lô TP (lot_code) — nhiều pallet (mỗi pallet 1 mã SSCC riêng theo chuẩn GS1)
+    có thể cùng chung 1 lot_code (1 lô sản xuất). Dùng để chọn CẢ LÔ xuất 1 lần thay vì từng
+    pallet (yêu cầu người dùng 2026-09-20: "có thể cho chọn cả lô để xuất... báo lô đó có tổng
+    bao nhiêu pallet, tổng bao nhiêu vỉ"). Chỉ liệt kê lô CÒN pallet chưa xuất — lô đã xuất hết
+    không còn gì để chọn xuất tiếp."""
+    pallets = db.execute(select(Pallet).where(
+        Pallet.lot_code.isnot(None), Pallet.status != "shipped")).scalars().all()
+    by_lot: dict[str, list[Pallet]] = {}
+    for p in pallets:
+        by_lot.setdefault(p.lot_code, []).append(p)
+    cases_by_pallet: dict[str, float] = dict(db.execute(
+        select(Case.pallet_id, func.coalesce(func.sum(Case.units), 0)).group_by(Case.pallet_id)).all())
+    out = []
+    for lot_code, plist in by_lot.items():
+        total_units = sum(cases_by_pallet.get(p.pallet_id, 0) for p in plist)
+        by_status: dict[str, int] = {}
+        for p in plist:
+            by_status[p.status] = by_status.get(p.status, 0) + 1
+        out.append({"lot_code": lot_code, "product": plist[0].product,
+                    "pallet_count": len(plist), "total_units": int(total_units), "by_status": by_status})
+    return sorted(out, key=lambda x: x["lot_code"])
+
+
 def build_pallet(db: Session, payload: dict, user: User) -> Pallet:
     require_perm(user, "warehouse.receive")
     return _build_pallet(db, payload, user, source="manual")
@@ -162,6 +186,25 @@ def ship(db: Session, pallet_id: str, user: User) -> dict:
                  after={"pallet_code": p.pallet_code})
     db.commit()
     return {"pallet_code": p.pallet_code, "status": "shipped"}
+
+
+def ship_lot(db: Session, lot_code: str, user: User) -> dict:
+    """Xuất TOÀN BỘ pallet còn lại của 1 Lô TP (lot_code) trong 1 lần, thay vì phải xuất từng
+    pallet lẻ (yêu cầu người dùng 2026-09-20 — nhiều pallet cùng lô là bình thường theo chuẩn
+    GS1: SSCC riêng từng pallet, Batch/Lot Number chung cả lô). Lặp gọi ship() cho từng pallet —
+    giữ nguyên đúng 1 bản ghi audit/pallet như xuất tay từng cái."""
+    require_perm(user, "warehouse.issue")
+    pallets = db.execute(select(Pallet).where(
+        Pallet.lot_code == lot_code, Pallet.status != "shipped")).scalars().all()
+    if not pallets:
+        raise NotFoundError(f"Không có pallet nào của lô '{lot_code}' để xuất (có thể đã xuất hết).")
+    cases_by_pallet: dict[str, float] = dict(db.execute(
+        select(Case.pallet_id, func.coalesce(func.sum(Case.units), 0))
+        .where(Case.pallet_id.in_([p.pallet_id for p in pallets])).group_by(Case.pallet_id)).all())
+    total_units = int(sum(cases_by_pallet.get(p.pallet_id, 0) for p in pallets))
+    results = [ship(db, p.pallet_id, user) for p in pallets]
+    return {"lot_code": lot_code, "pallet_count": len(results),
+            "pallet_codes": [r["pallet_code"] for r in results], "total_units": total_units}
 
 
 def resolve(db: Session, code: str) -> dict:

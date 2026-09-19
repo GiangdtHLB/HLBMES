@@ -39,7 +39,7 @@ from ..models.batch_pipeline import (
 )
 from ..models.batches import BatchExecution
 from ..models.lines import ProductionLine
-from ..models.master import BeerType, FinishedProduct, Material, Product
+from ..models.master import BeerType, FinishedProduct, Material, PackingSpec, Product
 from ..models.materials import MaterialLot
 from ..models.quality import Deviation, QualityResult
 from ..models.signature import Signature
@@ -1662,46 +1662,136 @@ def approve_pack_lot(db: Session, pack_lot_id: str, user: User) -> dict:
     return {"pack_lot_id": pack_lot_id, "approved": True, "qc_has_fail": status["has_fail"]}
 
 
-def release_pack_lot_to_wms(db: Session, pack_lot_id: str, user: User) -> dict:
-    """Giám đốc/Phó GĐ Sản xuất - Kỹ thuật duyệt cho nhập kho thành phẩm — mirror
-    routers/brewing.py::approve_bottle (module Nấu-Lọc-Chiết cũ; module đó đã THÁO khỏi WMS,
-    Lô thành phẩm là nơi thay thế duy nhất tạo hàng nhập kho từ sản xuất). Yêu cầu đã Duyệt KCS
-    (p.approved) và đã khai SL theo ca (ca1+ca2+ca3 > 0, đơn vị vỉ/két/keg theo
-    FinishedProduct.unit_type — KHÁC qty (lít) ở trên). Tạo 1 Pallet (đã đóng sẵn case, xem
-    wms_svc.build_pallet) — case_count = số vỉ/keg đã khai (làm tròn lên), units_per_case =
-    pack_size của SKU."""
+def save_pack_lot_allocations(db: Session, pack_lot_id: str, allocations: list[dict], user: User) -> BatchPackLot:
+    """Nhân viên chiết khai phân bổ quy cách đóng gói pallet (spec_id + số lượng) — LƯU NGAY
+    trong lúc chiết, cùng quyền `batch.execute` như update_pack_lot_shifts, KHÔNG chờ Duyệt KCS
+    hay Giám đốc/Phó GĐ SX duyệt nhập kho (yêu cầu người dùng 2026-09-20: "hiện ra luôn để nhân
+    viên chiết thực hiện"). Mỗi dòng lưu lại rõ AI vừa lưu (saved_by/saved_at) — TÁCH biệt với
+    ai đã bấm "Duyệt nhập kho TP" cho ĐÚNG dòng đó (released_by/released_at, xem
+    release_pack_lot_allocation — mỗi dòng/quy cách giờ có nút duyệt RIÊNG, yêu cầu người dùng
+    2026-09-20: "Mỗi quy cách sẽ có 1 nút duyệt nhập kho TP").
+
+    KHÔNG chặn nếu tổng chưa khớp ca_total ở đây (SL theo ca có thể còn đang khai tiếp) — validate
+    khớp đúng tổng không còn áp dụng cứng ở release (release giờ theo TỪNG dòng độc lập), thay
+    vào đó dùng pack_lot_unstocked_remainder() để CẢNH BÁO phần còn thiếu.
+
+    Dòng đã released=True là BẤT BIẾN (đã tạo pallet thật) — nếu client không gửi lại đúng dòng
+    đó (mất do state cũ) thì tự khôi phục lại nguyên trạng; nếu gửi lại NHƯNG đổi spec/số lượng
+    thì chặn cứng (không cho sửa dữ liệu đã phát sinh pallet)."""
+    require_perm(user, "batch.execute")
+    p = get_pack_lot(db, pack_lot_id)
+    _assert_unlocked(p)
+    existing_by_id = {r["row_id"]: r for r in (p.pack_allocations or []) if r.get("row_id")}
+    released_ids = {rid for rid, r in existing_by_id.items() if r.get("released")}
+    incoming = [a for a in (allocations or []) if a.get("spec_id") and float(a.get("quantity") or 0) > 0]
+    if incoming and not p.finished_product_id:
+        raise DomainError("Lô thành phẩm chưa gán Sản phẩm (SKU) — không thể chọn quy cách đóng gói pallet.")
+    now = utcnow()
+    seen_ids = set()
+    new_rows = []
+    for a in incoming:
+        rid = a.get("row_id")
+        if rid and rid in released_ids:
+            existing = existing_by_id[rid]
+            if (abs(float(a.get("quantity") or 0) - float(existing["quantity"])) > 1e-6
+                    or a.get("spec_id") != existing["spec_id"]):
+                raise DomainError("Dòng đã Duyệt nhập kho thành phẩm — không thể sửa.")
+            new_rows.append(existing)
+            seen_ids.add(rid)
+            continue
+        spec = db.get(PackingSpec, a["spec_id"])
+        if not spec:
+            raise NotFoundError("Quy cách đóng gói không tồn tại.")
+        if spec.finished_product_id != p.finished_product_id:
+            raise DomainError(f"Quy cách '{spec.code}' không thuộc SKU của lô thành phẩm này.")
+        new_rows.append({
+            "row_id": rid or new_id(), "spec_id": a["spec_id"], "quantity": float(a["quantity"]),
+            "saved_by": user.username, "saved_at": now.isoformat(),
+            "released": False, "released_by": None, "released_at": None, "pallet_codes": [],
+        })
+        if rid:
+            seen_ids.add(rid)
+    for rid in released_ids - seen_ids:
+        new_rows.append(existing_by_id[rid])
+    p.pack_allocations = new_rows
+    record_audit(db, entity_type="batch_pack_lot", entity_id=pack_lot_id, action="save_pack_allocations",
+                actor=user, after={"allocations": new_rows})
+    db.commit()
+    db.refresh(p)
+    return p
+
+
+def release_pack_lot_allocation(db: Session, pack_lot_id: str, row_id: str, user: User) -> dict:
+    """Giám đốc/Phó GĐ Sản xuất - Kỹ thuật duyệt nhập kho THEO TỪNG DÒNG phân bổ/quy cách —
+    mirror routers/brewing.py::approve_bottle (module Nấu-Lọc-Chiết cũ; module đó đã THÁO khỏi
+    WMS, Lô thành phẩm là nơi thay thế duy nhất tạo hàng nhập kho từ sản xuất), nhưng áp dụng
+    RIÊNG cho 1 dòng/quy cách thay vì cả lô 1 lần (yêu cầu người dùng 2026-09-20: "Mỗi quy cách
+    sẽ có 1 nút duyệt nhập kho TP") — vẫn yêu cầu đã Duyệt KCS (p.approved) như trước, chỉ khác
+    thứ tự "duyệt" giờ tính theo dòng. Lưu released_by/released_at RIÊNG cho dòng đó — khác
+    saved_by/saved_at (ai lưu phân bổ, xem save_pack_lot_allocations). Tạo `quantity //
+    spec.units_per_pallet` pallet đầy + 1 pallet lẻ nếu còn dư, giống đúng logic release toàn
+    lô trước đây, chỉ khác phạm vi là 1 dòng."""
     require_perm(user, "production.release_to_wms")
     p = get_pack_lot(db, pack_lot_id)
     _assert_unlocked(p)
-    if p.stocked:
-        raise DomainError("Lô thành phẩm này đã nhập kho thành phẩm.")
     if not p.approved:
         raise DomainError("Chưa Duyệt KCS — không thể nhập kho thành phẩm.")
-    ca_total = (p.ca1_qty or 0.0) + (p.ca2_qty or 0.0) + (p.ca3_qty or 0.0)
-    if ca_total <= 0:
-        raise DomainError("Chưa nhập SL theo ca (Ca 1/2/3) — không thể duyệt nhập kho thành phẩm.")
-    # with_for_update(): khóa lô TP trước khi ghi stocked — 2 lần bấm/2 request gần như đồng
-    # thời đều có thể qua được check "p.stocked" ở trên rồi cùng tạo pallet, nhân đôi tồn kho
-    # thành phẩm (cùng lớp race đã sửa cho split/update_qty ở trên, 2026-09-15).
+    if not p.finished_product_id:
+        raise DomainError("Lô thành phẩm chưa gán Sản phẩm (SKU) — không thể chọn quy cách đóng gói pallet.")
+    rows = list(p.pack_allocations or [])
+    idx = next((i for i, r in enumerate(rows) if r.get("row_id") == row_id), None)
+    if idx is None:
+        raise NotFoundError("Dòng phân bổ không tồn tại.")
+    if rows[idx].get("released"):
+        raise DomainError("Dòng này đã được Duyệt nhập kho thành phẩm rồi.")
+    spec = db.get(PackingSpec, rows[idx]["spec_id"])
+    if not spec:
+        raise NotFoundError("Quy cách đóng gói không tồn tại.")
+    if spec.finished_product_id != p.finished_product_id:
+        raise DomainError(f"Quy cách '{spec.code}' không thuộc SKU của lô thành phẩm này.")
+    # with_for_update(): khóa lô TP trước khi ghi — 2 lần bấm gần như đồng thời cùng dòng đều có
+    # thể qua check "released" ở trên rồi cùng tạo pallet trùng (cùng lớp race đã sửa nhiều nơi
+    # khác trong module này, 2026-09-15/20).
     p = db.execute(select(BatchPackLot).where(
         BatchPackLot.pack_lot_id == pack_lot_id).with_for_update()).scalar_one()
-    if p.stocked:
-        raise DomainError("Lô thành phẩm này đã nhập kho thành phẩm.")
-    finished_product = db.get(FinishedProduct, p.finished_product_id) if p.finished_product_id else None
+    rows = list(p.pack_allocations or [])
+    if rows[idx].get("released"):
+        raise DomainError("Dòng này đã được Duyệt nhập kho thành phẩm rồi.")
+    finished_product = db.get(FinishedProduct, p.finished_product_id)
     pack_size = finished_product.pack_size if finished_product else 24
     product_name = finished_product.code if finished_product else p.pack_lot_code
-    pallet = wms_svc._build_pallet(db, {
-        "product": product_name, "lot_code": p.lot_no or p.pack_lot_code,
-        "case_count": math.ceil(ca_total), "units_per_case": pack_size,
-    }, user, source="production")
-    genealogy.add_edge(db, from_type="batch_pack_lot", from_id=pack_lot_id, to_type="pallet",
-                       to_id=pallet.pallet_id, relation="nhập kho", quantity=ca_total, uom="case")
-    p.stocked = True
-    p.stocked_by = user.username
-    p.stocked_at = utcnow()
-    record_audit(db, entity_type="batch_pack_lot", entity_id=pack_lot_id, action="release_to_wms", actor=user)
+    lot_code = p.lot_no or p.pack_lot_code
+    qty_int = int(round(float(rows[idx]["quantity"])))
+    full_pallets, remainder_units = divmod(qty_int, spec.units_per_pallet)
+    case_counts = [spec.units_per_pallet] * full_pallets
+    if remainder_units > 0:
+        case_counts.append(remainder_units)
+    pallet_codes = []
+    for case_count in case_counts:
+        pallet = wms_svc._build_pallet(db, {
+            "product": product_name, "lot_code": lot_code,
+            "case_count": case_count, "units_per_case": pack_size,
+        }, user, source="production")
+        genealogy.add_edge(db, from_type="batch_pack_lot", from_id=pack_lot_id, to_type="pallet",
+                           to_id=pallet.pallet_id, relation="nhập kho", quantity=case_count, uom="case")
+        pallet_codes.append(pallet.pallet_code)
+    row = dict(rows[idx])
+    row["released"] = True
+    row["released_by"] = user.username
+    row["released_at"] = utcnow().isoformat()
+    row["pallet_codes"] = pallet_codes
+    rows[idx] = row
+    p.pack_allocations = rows
+    if not p.stocked and p.unstocked_remainder <= 0:
+        p.stocked = True
+        p.stocked_by = user.username
+        p.stocked_at = utcnow()
+    record_audit(db, entity_type="batch_pack_lot", entity_id=pack_lot_id, action="release_pack_allocation",
+                actor=user, after={"row_id": row_id, "spec_id": row["spec_id"], "quantity": row["quantity"],
+                                   "pallet_codes": pallet_codes})
     db.commit()
-    return {"pack_lot_id": pack_lot_id, "stocked": True, "pallet_code": pallet.pallet_code, "count": ca_total}
+    return {"pack_lot_id": pack_lot_id, "row_id": row_id, "released": True,
+            "pallet_codes": pallet_codes, "stocked": p.stocked}
 
 
 # ==================== NVL dùng cho lô thành phẩm (chiết) ====================

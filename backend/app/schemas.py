@@ -98,6 +98,37 @@ class MaterialAltGroupOut(ORMModel):
     selection_mode: str = "single"
 
 
+class PalletAllocationRowIn(BaseModel):
+    row_id: Optional[str] = None
+    spec_id: str
+    quantity: float
+
+
+class PackLotAllocationsIn(BaseModel):
+    allocations: list[PalletAllocationRowIn]
+
+
+class PackingSpecIn(BaseModel):
+    code: str
+    name: Optional[str] = None
+    finished_product_id: str
+    units_per_pallet: int
+    layers: Optional[int] = None
+    active: bool = True
+
+
+class PackingSpecOut(ORMModel):
+    spec_id: str
+    code: str
+    name: Optional[str] = None
+    finished_product_id: str
+    units_per_pallet: int
+    layers: Optional[int] = None
+    active: bool
+    created_by: Optional[str] = None
+    created_at: datetime
+
+
 class LotKcsUpdateIn(BaseModel):
     kcs_lot_no: Optional[str] = None
     supplier_lot: Optional[str] = None
@@ -2150,6 +2181,8 @@ class BatchPackLotOut(ORMModel):
     ca3_by: Optional[str] = None
     ca3_at: Optional[datetime] = None
     ended_at: Optional[datetime] = None   # tính từ ca1/2/3 (computed property) — xem models/batch_pipeline.py
+    pack_allocations: Optional[list] = None
+    unstocked_remainder: float = 0.0
     approved: bool = False
     approved_by: Optional[str] = None
     approved_at: Optional[datetime] = None

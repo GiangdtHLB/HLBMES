@@ -66,6 +66,16 @@ def ship(pallet_id: str, db: Session = Depends(get_db), user: User = Depends(get
     return svc.ship(db, pallet_id, user)
 
 
+@router.get("/lots")
+def lots(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    return svc.list_lots(db)
+
+
+@router.post("/lots/{lot_code}/ship")
+def ship_lot(lot_code: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    return svc.ship_lot(db, lot_code, user)
+
+
 @router.get("/resolve")
 def resolve(code: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     return svc.resolve(db, code)

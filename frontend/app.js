@@ -3675,7 +3675,7 @@ VIEWS.batchpacklots = async function () {
             <td>${esc(p.from_bbt || "—")}</td>
             <td>${p.qty}</td><td>${esc(p.lot_no || "—")}</td>
             <td>${statusBadge(PACK_LOT_BADGE_CLASS[p.status], p.status_label)}</td>
-            <td>${p.approved ? badge("released") + " đã duyệt" : badge("pending")}</td></tr>`).join("")
+            <td>${p.approved ? badge("released") + " đã duyệt" : badge("pending")}${p.unstocked_remainder > 0 ? ` <span style="color:var(--red)" title="Còn ${p.unstocked_remainder} chưa được duyệt nhập kho thành phẩm">⚠ còn ${p.unstocked_remainder}</span>` : ""}</td></tr>`).join("")
             || '<tr><td colspan=7 class="muted">Chưa có lô thành phẩm nào.</td></tr>'}</tbody></table></div>
       </div>
       <div class="panel" id="pk_detail"><h2>Chi tiết lô thành phẩm</h2><div class="muted">Chọn một lô để xem.</div></div>
@@ -3712,6 +3712,134 @@ VIEWS.batchpacklots = async function () {
   });
   document.querySelectorAll("[data-pklot2]").forEach(tr => tr.onclick = () => showBatchPackLot(tr.dataset.pklot2));
 };
+// Phân bổ quy cách đóng gói pallet — NHÂN VIÊN CHIẾT khai/lưu ngay trong lúc chiết (quyền
+// batch.execute, mirror "SL chiết theo ca" — mỗi dòng có Lưu/Sửa/Xóa RIÊNG, xem
+// renderPkShiftsTable), KHÔNG chờ Duyệt KCS. MỖI DÒNG/quy cách có nút "📦 Duyệt nhập kho TP"
+// RIÊNG (quyền production.release_to_wms, Giám đốc/PGĐ SX — tạo pallet thật cho ĐÚNG dòng đó,
+// yêu cầu người dùng 2026-09-20: "Mỗi quy cách sẽ có 1 nút duyệt nhập kho TP") — nút này CHỈ
+// sáng lên khi đã Duyệt KCS. Lưu lại rõ ai đã LƯU dòng (saved_by/saved_at) và ai đã DUYỆT NHẬP
+// KHO dòng đó (released_by/released_at) — 2 mốc khác nhau. Dòng đã duyệt nhập kho rồi thì khóa
+// cứng (không Sửa/Xóa được nữa). Cảnh báo còn bao nhiêu vỉ/két CHƯA được duyệt nhập kho
+// (unstocked_remainder, tính từ server) — yêu cầu người dùng: "Có cảnh báo nếu module chiết còn
+// vỉ hoặc két gì đó chưa được duyệt nhập kho thành phẩm".
+function renderPkWmsAllocUi(packLotId, specs, caTotal, existingAllocations, unitLabel, approved, unstockedRemainder) {
+  const specOptsHtml = (selectedId) => specs.map(s =>
+    `<option value="${esc(s.spec_id)}" data-units="${s.units_per_pallet}" ${s.spec_id === selectedId ? "selected" : ""}>${esc(s.code)}${s.name ? " — " + esc(s.name) : ""} (${s.units_per_pallet}/pallet)</option>`).join("");
+  const specById = Object.fromEntries(specs.map(s => [s.spec_id, s]));
+  const u = unitLabel ? ` ${esc(unitLabel)}` : "";
+  const toRow = (a) => ({ rowId: a.row_id, specId: a.spec_id, qty: String(a.quantity), editing: false,
+    savedBy: a.saved_by, savedAt: a.saved_at, released: !!a.released,
+    releasedBy: a.released_by, releasedAt: a.released_at, palletCodes: a.pallet_codes || [] });
+  let rows = (existingAllocations && existingAllocations.length) ? existingAllocations.map(toRow) : [];
+  // Dòng chưa lưu lần nào (mảng rỗng) tự bật sẵn 1 dòng ở chế độ Sửa để nhập ngay — mirror
+  // editingCas (renderPkShiftsTable): ca chưa từng lưu mặc định ở chế độ Sửa luôn.
+  if (!rows.length) rows.push({ rowId: null, specId: (specs[0] || {}).spec_id, qty: "", editing: true,
+    savedBy: null, savedAt: null, released: false, releasedBy: null, releasedAt: null, palletCodes: [] });
+  const wrap = $("pk_wms_alloc_wrap");
+  // Xem trước "quy đổi pallet" — tính sẵn số pallet đầy + pallet lẻ, mirror ĐÚNG phép tính
+  // divmod ở services/batch_pipeline.py::release_pack_lot_allocation (int hóa qty trước khi chia).
+  const breakdownHtml = (specId, qtyRaw) => {
+    const spec = specById[specId];
+    const qty = Math.round(parseFloat(qtyRaw) || 0);
+    if (!spec || qty <= 0) return "";
+    const full = Math.floor(qty / spec.units_per_pallet);
+    const rem = qty - full * spec.units_per_pallet;
+    if (full > 0 && rem === 0) return `<span class="muted">→ ${full} pallet đầy (${spec.units_per_pallet}${u}/pallet), không dư</span>`;
+    if (full > 0 && rem > 0) return `<span class="muted">→ ${full} pallet đầy (${spec.units_per_pallet}${u}/pallet) + <b>pallet cuối chỉ có ${rem}${u}</b></span>`;
+    return `<span class="muted">→ 1 pallet — <b>pallet cuối chỉ có ${rem}${u}</b></span>`;
+  };
+  const render = () => {
+    wrap.innerHTML = `<h3>Phân bổ quy cách đóng gói pallet${caTotal ? "" : ` <span class="muted">(chưa có SL theo ca)</span>`}</h3>
+      <div class="muted" style="margin-bottom:6px">Nhân viên chiết khai NGAY trong lúc chiết, không cần chờ Duyệt KCS. Tổng SL cần phân bổ theo ca: <b>${caTotal}${u}</b>. Mỗi dòng chọn 1 quy cách đóng gói pallet đã dùng thật + số lượng đã đóng theo quy cách đó — MỖI dòng có nút "Duyệt nhập kho TP" riêng (chỉ sáng khi đã Duyệt KCS).</div>
+      ${unstockedRemainder > 0 ? `<div style="color:var(--red);margin-bottom:8px">⚠ Còn <b>${unstockedRemainder}${u}</b> chưa được duyệt nhập kho thành phẩm.</div>` : ""}
+      <div id="pk_wmsalloc_rows"></div>
+      <button class="btn sm sec" id="pk_wmsalloc_addrow" type="button" style="margin-top:6px">+ Thêm dòng</button>
+      <div id="pk_wmsalloc_sum" style="margin-top:6px"></div>`;
+    $("pk_wmsalloc_rows").innerHTML = rows.map((row, i) => {
+      const spec = specById[row.specId];
+      let cells;
+      if (row.released) {
+        cells = `<div class="field"><label>Quy cách đóng gói</label><div>${spec ? esc(spec.code) + (spec.name ? " — " + esc(spec.name) : "") : "—"}</div></div>
+           <div class="field"><label>Số lượng</label><div>${esc(row.qty)}${u}</div></div>
+           <div style="min-width:220px">${breakdownHtml(row.specId, row.qty)}</div>
+           <div class="muted" style="font-size:12px">Lưu: ${row.savedBy ? esc(row.savedBy) : "—"} · ${row.savedAt ? fmt(row.savedAt) : "—"}<br/>
+             <span style="color:var(--green)">✓ Đã nhập kho</span>: ${esc(row.releasedBy)} · ${fmt(row.releasedAt)}</div>`;
+      } else if (row.editing) {
+        cells = `<div class="field"><label>Quy cách đóng gói</label><select class="wmsalloc-spec" data-i="${i}">${specOptsHtml(row.specId)}</select></div>
+           <div class="field"><label>Số lượng</label><input type="number" min="0" step="any" class="wmsalloc-qty" data-i="${i}" value="${esc(row.qty)}" style="width:110px"/></div>
+           <div style="min-width:220px">${breakdownHtml(row.specId, row.qty)}</div>
+           <button class="btn sm" data-wmsallocsave="${i}" type="button">Lưu</button>
+           <button class="btn sm sec" data-wmsallocdel="${i}" type="button">Xóa</button>`;
+      } else {
+        cells = `<div class="field"><label>Quy cách đóng gói</label><div>${spec ? esc(spec.code) + (spec.name ? " — " + esc(spec.name) : "") : "—"}</div></div>
+           <div class="field"><label>Số lượng</label><div>${esc(row.qty)}${u}</div></div>
+           <div style="min-width:220px">${breakdownHtml(row.specId, row.qty)}</div>
+           <div class="muted" style="font-size:12px">Lưu: ${row.savedBy ? esc(row.savedBy) : "—"} · ${row.savedAt ? fmt(row.savedAt) : "—"}</div>
+           <button class="btn sm sec" data-wmsallocedit="${i}" type="button">Sửa</button>
+           <button class="btn sm sec" data-wmsallocdel="${i}" type="button">Xóa</button>
+           ${approved && row.rowId ? `<button class="btn sm" data-wmsallocrelease="${i}" type="button">📦 Duyệt nhập kho TP</button>` : ""}`;
+      }
+      return `<div class="row" data-wmsallocrow="${i}" style="align-items:flex-end;flex-wrap:wrap">${cells}</div>`;
+    }).join("");
+    const updateSum = () => {
+      const sum = Math.round(rows.reduce((s, r) => s + (parseFloat(r.qty) || 0), 0) * 10000) / 10000;
+      const sumEl = $("pk_wmsalloc_sum");
+      if (Math.abs(sum - caTotal) < 1e-6) {
+        sumEl.innerHTML = `<span style="color:var(--green)">✓ Đã phân bổ đủ ${sum} / ${caTotal}${u}</span>`;
+      } else {
+        sumEl.innerHTML = `<span style="color:var(--red)">⚠ Đã phân bổ ${sum} / ${caTotal}${u} — ${sum > caTotal ? "vượt" : "còn thiếu " + (Math.round((caTotal - sum) * 10000) / 10000)}</span>`;
+      }
+    };
+    const saveAll = async () => {
+      const r = await PUT(`/batch-pack-lots/${packLotId}/pack-allocations`, {
+        allocations: rows.map(row => ({ row_id: row.rowId || undefined, spec_id: row.specId, quantity: parseFloat(row.qty) || 0 }))
+          .filter(a => a.quantity > 0),
+      });
+      rows = (r.pack_allocations || []).map(toRow);
+      return r;
+    };
+    document.querySelectorAll(".wmsalloc-spec").forEach(sel => sel.onchange = () => {
+      rows[parseInt(sel.dataset.i, 10)].specId = sel.value; render();
+    });
+    document.querySelectorAll(".wmsalloc-qty").forEach(inp => inp.oninput = () => {
+      rows[parseInt(inp.dataset.i, 10)].qty = inp.value;
+      const rowEl = document.querySelector(`[data-wmsallocrow="${inp.dataset.i}"]`);
+      const bdEl = rowEl && rowEl.querySelector("div[style*='min-width']");
+      if (bdEl) bdEl.innerHTML = breakdownHtml(rows[parseInt(inp.dataset.i, 10)].specId, inp.value);
+      updateSum();
+    });
+    document.querySelectorAll("[data-wmsallocedit]").forEach(b => b.onclick = () => {
+      rows[parseInt(b.dataset.wmsallocedit, 10)].editing = true; render();
+    });
+    document.querySelectorAll("[data-wmsallocsave]").forEach(b => b.onclick = () => guard(async () => {
+      await saveAll();
+      toast("Đã lưu phân bổ quy cách đóng gói");
+      render();
+    }));
+    document.querySelectorAll("[data-wmsallocdel]").forEach(b => b.onclick = () => guard(async () => {
+      if (!confirm("Xóa dòng phân bổ này? Không thể hoàn tác.")) return;
+      const i = parseInt(b.dataset.wmsallocdel, 10);
+      rows.splice(i, 1);
+      await saveAll();
+      toast("Đã xóa dòng phân bổ");
+      render();
+    }));
+    document.querySelectorAll("[data-wmsallocrelease]").forEach(b => b.onclick = () => guard(async () => {
+      const row = rows[parseInt(b.dataset.wmsallocrelease, 10)];
+      if (!confirm(`Duyệt nhập kho thành phẩm cho quy cách "${(specById[row.specId] || {}).code || ""}", số lượng ${row.qty}${u}?`)) return;
+      const r = await POST(`/batch-pack-lots/${packLotId}/pack-allocations/${row.rowId}/release`, {});
+      toast(`Đã duyệt nhập kho — tạo ${r.pallet_codes.length} pallet`);
+      showBatchPackLot(packLotId);
+    }));
+    $("pk_wmsalloc_addrow").onclick = () => {
+      rows.push({ rowId: null, specId: (specs[0] || {}).spec_id, qty: "", editing: true,
+        savedBy: null, savedAt: null, released: false, releasedBy: null, releasedAt: null, palletCodes: [] });
+      render();
+    };
+    updateSum();
+  };
+  render();
+}
 async function showBatchPackLot(packLotId) {
   const [p, finishedProducts, unitTypes, matUsage, lots, materials] = await Promise.all([
     GET(`/batch-pack-lots/${packLotId}`), GET("/finished-products").catch(() => []),
@@ -3787,9 +3915,9 @@ async function showBatchPackLot(packLotId) {
       pkQc.pending.length ? `⚠ Còn thiếu: ${pkQc.pending.map(esc).join(", ")}` :
       '<span style="color:var(--red)">✗ Có chỉ tiêu bắt buộc không đạt (FAIL)</span>'}</div>`}
     ${materialUsageSectionHtml("pkmu", matUsage, lk, p.ended_at)}
+    ${!p.stocked ? '<div id="pk_wms_alloc_wrap" style="margin-top:16px"></div>' : ""}
     <div class="row" style="margin-top:10px">
       ${p.approved ? "" : '<button class="btn sm sec" id="pk_approve">✔ Duyệt KCS</button>'}
-      ${(p.approved && !p.stocked) ? '<button class="btn sm sec" id="pk_release_wms">📦 Duyệt nhập kho TP</button>' : ""}
       ${f.on_hand !== 0 ? `<button class="btn sm sec" id="pk_empty" title="Buộc tồn tank BBT (${f.on_hand} hl) về 0 khi tank vật lý đã chiết cạn thật nhưng số liệu còn lệch — cho phép cả khi hồ sơ EBR đã khóa">Làm rỗng tank</button>` : ""}
       <button class="btn sm sec" id="pk_trace">🔍 Truy ngược</button>
       <button class="btn sm sec" id="pk_ebr">📄 Hồ sơ lô TP (EBR)</button>
@@ -3880,11 +4008,20 @@ async function showBatchPackLot(packLotId) {
     const r = await POST(`/batch-pack-lots/${packLotId}/approve`, {});
     toast("Đã duyệt KCS lô thành phẩm" + (r.qc_has_fail ? " (còn chỉ tiêu FAIL — cảnh báo)" : "")); showBatchPackLot(packLotId);
   });
-  if ($("pk_release_wms")) $("pk_release_wms").onclick = () => guard(async () => {
-    const r = await POST(`/batch-pack-lots/${packLotId}/release-to-wms`, {});
-    toast(`Đã duyệt nhập kho thành phẩm — pallet ${r.pallet_code} (${r.count} case)`);
-    showBatchPackLot(packLotId);
-  });
+  if ($("pk_wms_alloc_wrap")) {
+    const caTotal = (p.ca1_qty || 0) + (p.ca2_qty || 0) + (p.ca3_qty || 0);
+    if (!fp) {
+      $("pk_wms_alloc_wrap").innerHTML = `<div class="muted">Lô thành phẩm chưa gán Sản phẩm (SKU) — không thể chọn quy cách đóng gói pallet để nhập kho.</div>`;
+    } else {
+      const specs = await GET(`/packing-specs?finished_product_id=${encodeURIComponent(fp.finished_product_id)}`).catch(() => []);
+      const activeSpecs = specs.filter(s => s.active);
+      if (!activeSpecs.length) {
+        $("pk_wms_alloc_wrap").innerHTML = `<div class="muted">Chưa khai "Quy cách đóng gói pallet" cho SKU ${esc(fp.code)} — khai ở tab Danh mục → Kho thành phẩm trước khi duyệt nhập kho.</div>`;
+      } else {
+        renderPkWmsAllocUi(packLotId, activeSpecs, caTotal, p.pack_allocations, unitLabel, p.approved, p.unstocked_remainder);
+      }
+    }
+  }
   $("pk_trace").onclick = () => goTraceBackward(p.pack_lot_code);
   if ($("pk_empty")) $("pk_empty").onclick = () => guard(async () => {
     if (!confirm(`Làm rỗng tank BBT ${p.from_bbt || ""}? Tồn hiện tại ${f.on_hand} hl sẽ về 0 (chỉ cho phép trong ngưỡng dung sai cấu hình).`)) return;
@@ -10343,6 +10480,7 @@ const MASTER_GROUPS = [
   ] },
   { key: "khotp", label: "Kho thành phẩm", items: [
     { key: "nhamaykhac", label: "Nhà máy khác" }, { key: "loaidonvi", label: "Loại đơn vị tồn kho" },
+    { key: "quycachpallet", label: "Quy cách đóng gói pallet" },
   ] },
   { key: "chatluong", label: "Chất lượng", items: [
     { key: "chitieucl", label: "Danh mục chỉ tiêu chất lượng" }, { key: "nhomchitieucl", label: "Nhóm chỉ tiêu chất lượng" },
@@ -10356,7 +10494,7 @@ const MASTER_GROUPS = [
 ];
 let MASTER_GROUP = "sanxuat";
 VIEWS.master = async function () {
-  const [products, finishedProducts, materials, plines, qcParams, qcGroups, stageGroups, beerTypes, suppliers, materialGroups, opsSettings, unitTypes, materialAltGroups, factoryLocations, materialLocations, scopeCatalog, processParams, processParamGroups, processPhases] = await Promise.all([
+  const [products, finishedProducts, materials, plines, qcParams, qcGroups, stageGroups, beerTypes, suppliers, materialGroups, opsSettings, unitTypes, materialAltGroups, factoryLocations, materialLocations, scopeCatalog, processParams, processParamGroups, processPhases, packingSpecs] = await Promise.all([
     GET("/products"), GET("/finished-products").catch(() => []), GET("/materials"), GET("/lines").catch(() => []),
     GET("/qc/parameters?active_only=false").catch(() => []),
     GET("/qc/groups").catch(() => []), GET("/qc/stage-groups").catch(() => []), GET("/beer-types").catch(() => []),
@@ -10368,7 +10506,8 @@ VIEWS.master = async function () {
     GET("/auth/scope-catalog").catch(() => ({ areas: [] })),
     GET("/process-params/parameters?active_only=false").catch(() => []),
     GET("/process-params/groups").catch(() => []),
-    GET("/process-params/phases").catch(() => [])]);
+    GET("/process-params/phases").catch(() => []),
+    GET("/packing-specs").catch(() => [])]);
   // Danh mục "Khu vực" chuẩn — dùng chung với phạm vi phân quyền Tài khoản (security.py::
   // SCOPE_AREAS: nau/len_men/loc/chiet/kho) — Dây chuyền chỉ được CHỌN trong danh sách này,
   // không gõ tay tự do (tránh gõ sai/lệch chính tả khỏi các nơi khác đang dùng đúng mã này).
@@ -10676,6 +10815,33 @@ VIEWS.master = async function () {
             <button class="btn sm sec" data-utdel="${esc(ut.unit_type_id)}">Xóa</button>
           </td>` : ""}</tr>`).join("") ||
           `<tr><td colspan="${canManage ? 5 : 4}" class="muted">Chưa có loại đơn vị nào.</td></tr>`}</tbody>
+      </table></div>
+    </div>
+
+    <div class="panel" ${mi("quycachpallet")}><h2>📦 Quy cách đóng gói pallet <span class="muted">(${packingSpecs.length})</span></h2>
+      <div class="muted" style="margin-bottom:6px">Khai theo TỪNG Sản phẩm (SKU) — VD "Quy cách 01": 110 vỉ/pallet, xếp 10 hàng. Dùng ở bước "Duyệt nhập kho thành phẩm" (Mẻ sản xuất → Lô thành phẩm): người duyệt chọn quy cách đã dùng thật cho từng phần SL, hệ thống tự tách đúng số pallet (kể cả pallet lẻ nếu SL không chia hết). Mỗi quy cách chỉ chọn được cho ĐÚNG SKU đã khai ở đây — không tự nhập tay số vỉ/pallet ở màn duyệt.</div>
+      ${noPerm}
+      ${canManage ? `<div class="row">
+        <div class="field"><label>Sản phẩm (SKU)</label><select id="pks_fp"><option value="">(chọn SKU)</option>${finishedProducts.map(fp => `<option value="${esc(fp.finished_product_id)}">${esc(fp.code)} — ${esc(fp.name)}</option>`).join("")}</select></div>
+        <div class="field"><label>Mã quy cách</label><input id="pks_code" placeholder="QC01"/></div>
+        <div class="field"><label>Tên quy cách</label><input id="pks_name" placeholder="Quy cách 01"/></div>
+        <div class="field"><label>SL/pallet (vỉ hoặc keg)</label><input id="pks_units" type="number" min="1" placeholder="110" style="width:120px"/></div>
+        <div class="field"><label>Số hàng xếp <span class="muted">(chỉ tham khảo)</span></label><input id="pks_layers" type="number" min="1" placeholder="10" style="width:110px"/></div>
+        <button class="btn" id="pks_add" style="align-self:flex-end">+ Tạo quy cách</button>
+      </div>` : ""}
+      <input class="searchbox" data-tbl="t_pks" placeholder="Tìm theo mã SKU, mã/tên quy cách..." style="margin-top:10px"/>
+      <div class="tablewrap" style="margin-top:6px"><table id="t_pks">
+        <thead><tr><th>SKU</th><th>Mã quy cách</th><th>Tên</th><th>SL/pallet</th><th>Số hàng xếp</th><th>Trạng thái</th>${canManage ? "<th></th>" : ""}</tr></thead>
+        <tbody>${packingSpecs.map(s => { const fp = finishedProducts.find(x => x.finished_product_id === s.finished_product_id); return `<tr>
+          <td>${fp ? `<code class="k">${esc(fp.code)}</code>` : "—"}</td>
+          <td><code class="k">${esc(s.code)}</code></td><td>${esc(s.name || "—")}</td>
+          <td>${s.units_per_pallet}</td><td class="muted">${s.layers ?? "—"}</td>
+          <td>${s.active ? '<span style="color:var(--green)">Đang dùng</span>' : '<span class="muted">Đã ẩn</span>'}</td>
+          ${canManage ? `<td style="white-space:nowrap">
+            <button class="btn sm sec" data-epks="${esc(s.spec_id)}">Sửa</button>
+            <button class="btn sm sec" data-pksdel="${esc(s.spec_id)}">Xóa</button>
+          </td>` : ""}</tr>`; }).join("") ||
+          `<tr><td colspan="${canManage ? 7 : 6}" class="muted">Chưa có quy cách đóng gói nào.</td></tr>`}</tbody>
       </table></div>
     </div>
 
@@ -11008,6 +11174,43 @@ VIEWS.master = async function () {
       if (!confirm("Xóa loại đơn vị tồn kho này? Không thể hoàn tác.")) return;
       await DELETE(`/unit-types/${b.dataset.utdel}`);
       toast("Đã xóa loại đơn vị"); render("master");
+    }));
+    if ($("pks_add")) $("pks_add").onclick = () => guard(async () => {
+      const finished_product_id = $("pks_fp").value, code = $("pks_code").value.trim();
+      const units_per_pallet = parseInt($("pks_units").value, 10);
+      const layersVal = $("pks_layers").value.trim();
+      if (!finished_product_id) throw new Error("Chọn Sản phẩm (SKU).");
+      if (!code) throw new Error("Nhập Mã quy cách.");
+      if (!units_per_pallet || units_per_pallet <= 0) throw new Error("SL/pallet phải lớn hơn 0.");
+      await POST("/packing-specs", { finished_product_id, code, name: $("pks_name").value.trim() || null,
+        units_per_pallet, layers: layersVal ? parseInt(layersVal, 10) : null });
+      toast("Đã tạo quy cách đóng gói"); render("master");
+    });
+    document.querySelectorAll("[data-epks]").forEach(b => b.onclick = () => {
+      const s = packingSpecs.find(x => x.spec_id === b.dataset.epks);
+      modal(`<h3>Sửa quy cách đóng gói pallet</h3>
+        <div class="field"><label>Sản phẩm (SKU)</label><select id="epks_fp">${finishedProducts.map(fp => `<option value="${esc(fp.finished_product_id)}" ${fp.finished_product_id === s.finished_product_id ? "selected" : ""}>${esc(fp.code)} — ${esc(fp.name)}</option>`).join("")}</select></div>
+        <div class="field" style="margin-top:8px"><label>Mã quy cách</label><input id="epks_code" value="${esc(s.code)}"/></div>
+        <div class="field" style="margin-top:8px"><label>Tên quy cách</label><input id="epks_name" value="${esc(s.name || "")}"/></div>
+        <div class="field" style="margin-top:8px"><label>SL/pallet (vỉ hoặc keg)</label><input id="epks_units" type="number" min="1" value="${s.units_per_pallet}" style="width:120px"/></div>
+        <div class="field" style="margin-top:8px"><label>Số hàng xếp <span class="muted">(chỉ tham khảo)</span></label><input id="epks_layers" type="number" min="1" value="${s.layers ?? ""}" style="width:110px"/></div>
+        <div class="field" style="margin-top:8px"><label><input type="checkbox" id="epks_active" ${s.active ? "checked" : ""}/> Đang dùng (hiện trong danh sách chọn lúc Duyệt nhập kho thành phẩm)</label></div>
+        <button class="btn" id="epks_save" style="margin-top:12px">Lưu</button>`);
+      $("epks_save").onclick = () => guard(async () => {
+        const units_per_pallet = parseInt($("epks_units").value, 10);
+        const layersVal = $("epks_layers").value.trim();
+        if (!units_per_pallet || units_per_pallet <= 0) throw new Error("SL/pallet phải lớn hơn 0.");
+        await PUT(`/packing-specs/${s.spec_id}`, { finished_product_id: $("epks_fp").value,
+          code: $("epks_code").value.trim(), name: $("epks_name").value.trim() || null,
+          units_per_pallet, layers: layersVal ? parseInt(layersVal, 10) : null,
+          active: $("epks_active").checked });
+        closeModal(); toast("Đã cập nhật"); render("master");
+      });
+    });
+    document.querySelectorAll("[data-pksdel]").forEach(b => b.onclick = () => guard(async () => {
+      if (!confirm("Xóa quy cách đóng gói này? Không thể hoàn tác.")) return;
+      await DELETE(`/packing-specs/${b.dataset.pksdel}`);
+      toast("Đã xóa quy cách đóng gói"); render("master");
     }));
     if ($("sp_add")) $("sp_add").onclick = () => guard(async () => {
       await POST("/suppliers", { code: $("sp_code").value.trim(), name: $("sp_name").value.trim(),

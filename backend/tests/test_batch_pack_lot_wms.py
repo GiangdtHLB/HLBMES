@@ -1,8 +1,20 @@
 """Test Lô thành phẩm (Mẻ SX) nhập kho thành phẩm (WMS, hệ pallet/case) — thay thế vai trò của
 routers/brewing.py::approve_bottle (module Nấu-Lọc-Chiết cũ, đã THÁO khỏi WMS, xem docstring
-hiện tại của approve_bottle). services/batch_pipeline.py::release_pack_lot_to_wms là nơi DUY
-NHẤT còn tạo hàng nhập kho từ sản xuất — tạo 1 Pallet (case_count = số vỉ/keg đã khai làm tròn
-lên, units_per_case = pack_size của SKU), xem services/wms.py::_build_pallet.
+hiện tại của approve_bottle).
+
+MỖI DÒNG phân bổ (quy cách đóng gói) có nút "Duyệt nhập kho TP" RIÊNG (yêu cầu người dùng
+2026-09-20: "Mỗi quy cách sẽ có 1 nút duyệt nhập kho TP") — 2 hành động tách biệt:
+- save_pack_lot_allocations (PUT .../pack-allocations, quyền batch.execute) — nhân viên chiết
+  khai/lưu phân bổ NGAY trong lúc chiết, không chờ Duyệt KCS. Lưu lại saved_by/saved_at cho
+  TỪNG dòng.
+- release_pack_lot_allocation (POST .../pack-allocations/{row_id}/release, quyền
+  production.release_to_wms) — Giám đốc/Phó GĐ SX duyệt nhập kho CHO ĐÚNG 1 dòng, vẫn phải chờ
+  đã Duyệt KCS (p.approved). Lưu lại released_by/released_at cho dòng đó, tạo đúng số Pallet
+  thật theo quy cách (case_count = units_per_pallet, + 1 pallet lẻ nếu còn dư). Dòng đã release
+  là bất biến — không sửa/xóa được nữa.
+`unstocked_remainder` (BatchPackLot property) = SL theo ca - tổng SL các dòng ĐÃ release — dùng
+để cảnh báo "còn vỉ/két chưa được duyệt nhập kho thành phẩm".
+Xem services/wms.py::_build_pallet.
 """
 
 import os
@@ -46,6 +58,11 @@ def admin_h(client):
 @pytest.fixture(scope="module")
 def vanhanh_h(client):
     return _login(client, "vanhanh", "123456")
+
+
+@pytest.fixture(scope="module")
+def kcs_h(client):
+    return _login(client, "kcs", "123456")
 
 
 def _make_batch(client, admin_h, batch_code):
@@ -93,16 +110,38 @@ def _finish_source(client, admin_h, source, dich_nha_hl, nuoc_bai_khi_hl=0):
                            "nuoc_bai_khi_hl": nuoc_bai_khi_hl})
 
 
-def _build_pack_lot(client, admin_h, suffix, fp_payload=None, ca1=10, ca2=0, ca3=0, v_drawn=900):
-    """mẻ nấu -> tank -> lô lọc duyệt KCS -> lô thành phẩm đã Duyệt KCS + khai SL theo ca,
-    SẴN SÀNG để release_pack_lot_to_wms. Trả về pack_lot_id."""
-    fp_id = None
-    if fp_payload:
-        fp = client.post("/api/finished-products", headers=admin_h,
-                         json={**fp_payload, "code": f"SKU-{suffix}"})
-        assert fp.status_code == 201, fp.text
-        fp_id = fp.json()["finished_product_id"]
+def _make_sku(client, admin_h, suffix, unit_type="vi", pack_size=24):
+    fp = client.post("/api/finished-products", headers=admin_h,
+                     json={"name": f"SKU test {suffix}", "code": f"SKU-{suffix}",
+                          "uom": "lon", "unit_type": unit_type, "pack_size": pack_size})
+    assert fp.status_code == 201, fp.text
+    return fp.json()["finished_product_id"]
 
+
+def _make_spec(client, admin_h, fp_id, code, units_per_pallet, layers=None):
+    r = client.post("/api/packing-specs", headers=admin_h,
+                    json={"code": code, "name": code, "finished_product_id": fp_id,
+                         "units_per_pallet": units_per_pallet, "layers": layers})
+    assert r.status_code == 201, r.text
+    return r.json()["spec_id"]
+
+
+def _save_allocations(client, headers, pack_lot_id, allocations):
+    return client.put(f"/api/batch-pack-lots/{pack_lot_id}/pack-allocations", headers=headers,
+                      json={"allocations": allocations})
+
+
+def _release_row(client, headers, pack_lot_id, row_id):
+    return client.post(f"/api/batch-pack-lots/{pack_lot_id}/pack-allocations/{row_id}/release", headers=headers)
+
+
+def _row_id_for_spec(pack_lot, spec_id):
+    return next(r["row_id"] for r in pack_lot["pack_allocations"] if r["spec_id"] == spec_id)
+
+
+def _build_pack_lot(client, admin_h, suffix, fp_id, ca1=10, ca2=0, ca3=0, v_drawn=900, approve=True):
+    """mẻ nấu -> tank -> lô lọc duyệt KCS -> lô thành phẩm + khai SL theo ca, SẴN SÀNG để lưu
+    phân bổ/nhập kho. `approve=True` cũng Duyệt KCS lô TP luôn. Trả về pack_lot_id."""
     batch_id = _make_batch(client, admin_h, None)
     _run_batch_to_completed(client, admin_h, batch_id)
     tank = client.post("/api/batch-tanks", headers=admin_h,
@@ -132,85 +171,179 @@ def _build_pack_lot(client, admin_h, suffix, fp_payload=None, ca1=10, ca2=0, ca3
                         json={"ca1_qty": ca1, "ca2_qty": ca2, "ca3_qty": ca3})
     assert shifts.status_code == 200, shifts.text
 
-    approve = client.post(f"/api/batch-pack-lots/{pack_lot_id}/approve", headers=admin_h)
-    assert approve.status_code == 200, approve.text
-    return pack_lot_id, fp_id
+    if approve:
+        approve_r = client.post(f"/api/batch-pack-lots/{pack_lot_id}/approve", headers=admin_h)
+        assert approve_r.status_code == 200, approve_r.text
+    return pack_lot_id
 
 
-def test_release_creates_pallet_with_correct_case_count(client, admin_h):
-    """release_pack_lot_to_wms tạo 1 Pallet, case_count = số vỉ đã khai (ca1+ca2+ca3), mirror
-    _build_pallet (trước đây test qua approve_bottle — xem docs/WMS-LOT-LEVEL-REDESIGN.md)."""
-    pack_lot_id, fp_id = _build_pack_lot(
-        client, admin_h, "ROW01", {"name": "SKU vi test", "uom": "lon", "unit_type": "vi", "pack_size": 24},
-        ca1=100)
-    release = client.post(f"/api/batch-pack-lots/{pack_lot_id}/release-to-wms", headers=admin_h)
+def test_release_row_creates_full_and_remainder_pallets_and_stamps_who(client, admin_h):
+    """110 vỉ/pallet, khai 250 vỉ trong 1 dòng -> 2 pallet đầy (110) + 1 pallet lẻ (30). Lưu lại
+    đúng saved_by lúc lưu và released_by lúc duyệt nhập kho cho dòng đó."""
+    fp_id = _make_sku(client, admin_h, "ROW01")
+    spec_id = _make_spec(client, admin_h, fp_id, "QC01", 110, layers=10)
+    pack_lot_id = _build_pack_lot(client, admin_h, "ROW01", fp_id, ca1=250)
+
+    saved = _save_allocations(client, admin_h, pack_lot_id, [{"spec_id": spec_id, "quantity": 250}])
+    assert saved.status_code == 200, saved.text
+    row = saved.json()["pack_allocations"][0]
+    assert row["saved_by"] == "admin" and row["released"] is False
+    assert saved.json()["unstocked_remainder"] == 250
+
+    release = _release_row(client, admin_h, pack_lot_id, row["row_id"])
     assert release.status_code == 200, release.text
     result = release.json()
-    assert result["count"] == 100   # 100 vỉ thật
-
-    pallets = client.get("/api/wms/pallets", headers=admin_h).json()
-    made = next(p for p in pallets if p["pallet_code"] == result["pallet_code"])
-    assert made["case_count"] == 100
-    assert made["units_per_case"] == 24
-    assert made["total_units"] == 2400   # 100 case x 24 lon/case
-    assert made["status"] == "building"
+    assert len(result["pallet_codes"]) == 3
+    assert result["stocked"] is True
 
     p = client.get(f"/api/batch-pack-lots/{pack_lot_id}", headers=admin_h).json()
+    released_row = p["pack_allocations"][0]
+    assert released_row["released"] is True and released_row["released_by"] == "admin"
     assert p["stocked"] is True and p["stocked_by"] == "admin"
-
-
-def test_release_creates_pallet_for_keg_sku(client, admin_h):
-    pack_lot_id, _ = _build_pack_lot(
-        client, admin_h, "KEG01", {"name": "SKU keg test", "uom": "lít", "unit_type": "keg", "pack_size": 1},
-        ca1=10)
-    release = client.post(f"/api/batch-pack-lots/{pack_lot_id}/release-to-wms", headers=admin_h)
-    assert release.status_code == 200, release.text
-    assert release.json()["count"] == 10
+    assert p["unstocked_remainder"] == 0
 
     pallets = client.get("/api/wms/pallets", headers=admin_h).json()
-    made = next(p for p in pallets if p["pallet_code"] == release.json()["pallet_code"])
-    assert made["case_count"] == 10 and made["units_per_case"] == 1 and made["total_units"] == 10
+    made = [pl for pl in pallets if pl["pallet_code"] in result["pallet_codes"]]
+    case_counts = sorted(pl["case_count"] for pl in made)
+    assert case_counts == [30, 110, 110]
+    for pl in made:
+        assert pl["units_per_case"] == 24
+        assert pl["status"] == "building"
 
 
-def test_release_blocked_until_approved_and_ca_declared(client, admin_h):
-    batch_id = _make_batch(client, admin_h, None)
-    _run_batch_to_completed(client, admin_h, batch_id)
-    tank = client.post("/api/batch-tanks", headers=admin_h,
-                       json={"batch_ids": [batch_id], "tank_code": "TANK-PKWMS-GATE"})
-    to_bbt = _make_bbt_line(client, admin_h, "GATE")
-    draw = client.post("/api/batch-filter-lots", headers=admin_h, json={
-        "filter_lot_code": "FLOT-PKWMS-GATE", "to_bbt": to_bbt,
-        "sources": [{"source_type": "tank", "source_tank_id": tank.json()["tank_id"]}],
-    })
-    filter_lot_id = draw.json()["filter_lot_id"]
-    src = client.get(f"/api/batch-filter-lots/{filter_lot_id}/sources", headers=admin_h).json()[0]
-    _finish_source(client, admin_h, src, 900)
-    client.post(f"/api/batch-filter-lots/{filter_lot_id}/approve", headers=admin_h)
+def test_each_row_has_independent_release_button_and_remainder_warning(client, admin_h):
+    """2 dòng (2 quy cách khác nhau) — duyệt nhập kho từng dòng RIÊNG, cảnh báo còn thiếu giảm
+    dần đúng theo từng lần duyệt (yêu cầu người dùng 2026-09-20)."""
+    fp_id = _make_sku(client, admin_h, "ROW02", unit_type="keg", pack_size=1)
+    spec_a = _make_spec(client, admin_h, fp_id, "QC-A", 100)
+    spec_b = _make_spec(client, admin_h, fp_id, "QC-B", 110)
+    pack_lot_id = _build_pack_lot(client, admin_h, "ROW02", fp_id, ca1=100, ca2=110)
 
-    pack = client.post("/api/batch-pack-lots", headers=admin_h, json={
-        "from_bbt": to_bbt, "qty": 500, "pack_lot_code": "PKG-PKWMS-GATE", "lot_no": "LOT-PKWMS-GATE"})
-    pack_lot_id = pack.json()["pack_lot_id"]
+    saved = _save_allocations(client, admin_h, pack_lot_id,
+                              [{"spec_id": spec_a, "quantity": 100}, {"spec_id": spec_b, "quantity": 110}])
+    assert saved.status_code == 200, saved.text
+    row_a = _row_id_for_spec(saved.json(), spec_a)
+    row_b = _row_id_for_spec(saved.json(), spec_b)
+    assert saved.json()["unstocked_remainder"] == 210
 
-    not_approved = client.post(f"/api/batch-pack-lots/{pack_lot_id}/release-to-wms", headers=admin_h)
-    assert not_approved.status_code == 409, not_approved.text
+    release_a = _release_row(client, admin_h, pack_lot_id, row_a)
+    assert release_a.status_code == 200, release_a.text
+    assert release_a.json()["stocked"] is False   # còn dòng B chưa duyệt
+
+    mid = client.get(f"/api/batch-pack-lots/{pack_lot_id}", headers=admin_h).json()
+    assert mid["unstocked_remainder"] == 110
+    assert mid["stocked"] is False
+
+    release_b = _release_row(client, admin_h, pack_lot_id, row_b)
+    assert release_b.status_code == 200, release_b.text
+    assert release_b.json()["stocked"] is True
+
+    done = client.get(f"/api/batch-pack-lots/{pack_lot_id}", headers=admin_h).json()
+    assert done["unstocked_remainder"] == 0
+    assert done["stocked"] is True
+
+    pallets = client.get("/api/wms/pallets", headers=admin_h).json()
+    codes = release_a.json()["pallet_codes"] + release_b.json()["pallet_codes"]
+    made = [pl for pl in pallets if pl["pallet_code"] in codes]
+    assert sorted(pl["case_count"] for pl in made) == [100, 110]
+
+
+def test_release_row_blocked_until_kcs_approved(client, admin_h):
+    fp_id = _make_sku(client, admin_h, "NOAPPROVE")
+    spec_id = _make_spec(client, admin_h, fp_id, "QC01", 110)
+    pack_lot_id = _build_pack_lot(client, admin_h, "NOAPPROVE", fp_id, ca1=110, approve=False)
+
+    saved = _save_allocations(client, admin_h, pack_lot_id, [{"spec_id": spec_id, "quantity": 110}])
+    assert saved.status_code == 200, saved.text
+    row_id = saved.json()["pack_allocations"][0]["row_id"]
+
+    blocked = _release_row(client, admin_h, pack_lot_id, row_id)
+    assert blocked.status_code == 409, blocked.text
+    assert "Duyệt KCS" in blocked.json()["detail"]
 
     approve = client.post(f"/api/batch-pack-lots/{pack_lot_id}/approve", headers=admin_h)
     assert approve.status_code == 200, approve.text
 
-    no_ca = client.post(f"/api/batch-pack-lots/{pack_lot_id}/release-to-wms", headers=admin_h)
-    assert no_ca.status_code == 409, no_ca.text
+    release = _release_row(client, admin_h, pack_lot_id, row_id)
+    assert release.status_code == 200, release.text
 
-    client.put(f"/api/batch-pack-lots/{pack_lot_id}/shifts", headers=admin_h, json={"ca1_qty": 5})
-    ok = client.post(f"/api/batch-pack-lots/{pack_lot_id}/release-to-wms", headers=admin_h)
+
+def test_release_row_blocked_when_already_released(client, admin_h):
+    fp_id = _make_sku(client, admin_h, "DUPROW")
+    spec_id = _make_spec(client, admin_h, fp_id, "QC01", 110)
+    pack_lot_id = _build_pack_lot(client, admin_h, "DUPROW", fp_id, ca1=110)
+    saved = _save_allocations(client, admin_h, pack_lot_id, [{"spec_id": spec_id, "quantity": 110}])
+    row_id = saved.json()["pack_allocations"][0]["row_id"]
+
+    ok = _release_row(client, admin_h, pack_lot_id, row_id)
     assert ok.status_code == 200, ok.text
 
-    dup = client.post(f"/api/batch-pack-lots/{pack_lot_id}/release-to-wms", headers=admin_h)
+    dup = _release_row(client, admin_h, pack_lot_id, row_id)
     assert dup.status_code == 409, dup.text
 
 
-def test_release_requires_production_release_to_wms_permission(client, admin_h, vanhanh_h):
-    pack_lot_id, _ = _build_pack_lot(client, admin_h, "PERM01", ca1=5)
-    forbidden = client.post(f"/api/batch-pack-lots/{pack_lot_id}/release-to-wms", headers=vanhanh_h)
+def test_release_row_not_found(client, admin_h):
+    fp_id = _make_sku(client, admin_h, "NOROW")
+    pack_lot_id = _build_pack_lot(client, admin_h, "NOROW", fp_id, ca1=110)
+    missing = _release_row(client, admin_h, pack_lot_id, "not-a-real-row-id")
+    assert missing.status_code == 404, missing.text
+
+
+def test_save_cannot_modify_or_drop_released_row(client, admin_h):
+    """Dòng đã Duyệt nhập kho (đã tạo pallet thật) là bất biến — không cho đổi spec/số lượng,
+    và nếu client gửi thiếu dòng đó thì tự khôi phục lại nguyên trạng (không mất vết pallet)."""
+    fp_id = _make_sku(client, admin_h, "IMMUT")
+    spec_id = _make_spec(client, admin_h, fp_id, "QC01", 110)
+    spec_other = _make_spec(client, admin_h, fp_id, "QC02", 50)
+    pack_lot_id = _build_pack_lot(client, admin_h, "IMMUT", fp_id, ca1=110)
+    saved = _save_allocations(client, admin_h, pack_lot_id, [{"spec_id": spec_id, "quantity": 110}])
+    row_id = saved.json()["pack_allocations"][0]["row_id"]
+    _release_row(client, admin_h, pack_lot_id, row_id)
+
+    tampered = _save_allocations(client, admin_h, pack_lot_id,
+                                 [{"row_id": row_id, "spec_id": spec_id, "quantity": 999}])
+    assert tampered.status_code == 409, tampered.text
+    assert "không thể sửa" in tampered.json()["detail"]
+
+    # Gửi thiếu dòng đã released (client cũ) — server tự khôi phục lại, không mất.
+    dropped = _save_allocations(client, admin_h, pack_lot_id, [{"spec_id": spec_other, "quantity": 5}])
+    assert dropped.status_code == 200, dropped.text
+    rows = dropped.json()["pack_allocations"]
+    assert any(r["row_id"] == row_id and r["released"] for r in rows)
+    assert any(r["spec_id"] == spec_other for r in rows)
+
+
+def test_release_row_blocked_when_spec_belongs_to_other_sku(client, admin_h):
+    """Chặn ngay lúc LƯU (spec sai SKU không thể lưu được) — xác nhận vẫn giữ nguyên hành vi cũ."""
+    fp_a = _make_sku(client, admin_h, "SKUA")
+    fp_b = _make_sku(client, admin_h, "SKUB")
+    spec_b = _make_spec(client, admin_h, fp_b, "QC-B", 110)
+    pack_lot_id = _build_pack_lot(client, admin_h, "SKUA", fp_a, ca1=110)
+
+    saved = _save_allocations(client, admin_h, pack_lot_id, [{"spec_id": spec_b, "quantity": 110}])
+    assert saved.status_code == 409, saved.text
+    assert "không thuộc SKU" in saved.json()["detail"]
+
+
+def test_save_allocations_requires_batch_execute_permission(client, admin_h, kcs_h):
+    """kcs chỉ có quyền quality.release, không có batch.execute (chỉ nhân viên vận hành/kỹ
+    thuật mới khai được phân bổ đóng gói — mirror update_pack_lot_shifts)."""
+    fp_id = _make_sku(client, admin_h, "PERMSAVE")
+    spec_id = _make_spec(client, admin_h, fp_id, "QC01", 110)
+    pack_lot_id = _build_pack_lot(client, admin_h, "PERMSAVE", fp_id, ca1=110)
+
+    forbidden = _save_allocations(client, kcs_h, pack_lot_id, [{"spec_id": spec_id, "quantity": 110}])
+    assert forbidden.status_code == 403, forbidden.text
+
+
+def test_release_row_requires_production_release_to_wms_permission(client, admin_h, vanhanh_h):
+    fp_id = _make_sku(client, admin_h, "PERM01")
+    spec_id = _make_spec(client, admin_h, fp_id, "QC01", 110)
+    pack_lot_id = _build_pack_lot(client, admin_h, "PERM01", fp_id, ca1=5)
+    saved = _save_allocations(client, admin_h, pack_lot_id, [{"spec_id": spec_id, "quantity": 5}])
+    row_id = saved.json()["pack_allocations"][0]["row_id"]
+
+    forbidden = _release_row(client, vanhanh_h, pack_lot_id, row_id)
     assert forbidden.status_code == 403, forbidden.text
 
 
@@ -218,7 +351,8 @@ def test_pack_lot_rejects_duplicate_lot_no_same_year(client, admin_h):
     """Số lô bia (lot_no) là số lô GMP thật in trên bao bì — PHẢI duy nhất trong cùng 1 năm,
     mirror đúng quy ước (năm, mã) đã áp cho pack_lot_code/filter_lot_code/batch_code (yêu cầu
     người dùng 2026-09-01: 2 lô thành phẩm khác nhau đã lỡ trùng cùng "Số lô bia")."""
-    pack_lot_id, _ = _build_pack_lot(client, admin_h, "DUPLOT1", ca1=5)
+    fp_id = _make_sku(client, admin_h, "DUPLOT")
+    pack_lot_id = _build_pack_lot(client, admin_h, "DUPLOT1", fp_id, ca1=5)
     dup_lot_no = client.get(f"/api/batch-pack-lots/{pack_lot_id}", headers=admin_h).json()["lot_no"]
 
     batch_id = _make_batch(client, admin_h, None)
