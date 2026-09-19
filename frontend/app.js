@@ -5735,7 +5735,7 @@ VIEWS.warehouse_kc = async function () {
           <div class="field" style="position:relative"><label>Nguyên liệu</label>
             <input type="text" id="rc_mat_txt" autocomplete="off" placeholder="Tìm mã/tên nguyên liệu..." value="${esc(matItemsGiao[0]?.label || "")}"/>
             <input type="hidden" id="rc_mat" value="${esc(matItemsGiao[0]?.value || "")}"/></div>
-          <div class="field" style="position:relative"><label>Nhà CC</label>
+          <div class="field" style="position:relative;flex:1"><label>Nhà CC</label>
             <input type="text" id="rc_supplier_txt" autocomplete="off" placeholder="Tìm nhà cung cấp..."/>
             <input type="hidden" id="rc_supplier"/></div></div>
         <div class="row"><div class="field"><label>Số lượng</label><input id="rc_qty" type="number" value="500"/></div>
@@ -6082,8 +6082,28 @@ VIEWS.warehouse_kc = async function () {
   if (sec === "bc") wireBcReportSection("bc", "warehouse_kc");
   if (sec === "nhap") {
     wirePaginate("rc_hist", 10);
-    wireSearchableSelect("rc_mat_txt", "rc_mat", WH_CACHE.matItems, (item) => { $("rc_uom").value = item.uom || ""; });
+    // Gợi ý Nhà CC + Vị trí cất theo đúng lượt Nhập kho GẦN NHẤT của vật tư đang chọn (yêu cầu
+    // người dùng 2026-09-19) — không chặn nhập liệu nếu tra chậm/lỗi, chỉ điền thêm khi có.
+    const applyRcDefaults = (materialId) => {
+      if (!materialId) return;
+      GET(`/warehouse/materials/${materialId}/last-receipt-defaults`).then(d => {
+        if (d.supplier_id) {
+          const s = WH_CACHE.supplierItems.find(i => i.value === d.supplier_id);
+          if (s) { $("rc_supplier").value = s.value; $("rc_supplier_txt").value = s.label; }
+        }
+        if (d.location_id && $("rc_loc").querySelector(`option[value="${d.location_id}"]`)) {
+          $("rc_loc").value = d.location_id;
+        }
+      }).catch(() => {});
+    };
+    wireSearchableSelect("rc_mat_txt", "rc_mat", WH_CACHE.matItems, (item) => {
+      $("rc_uom").value = item.uom || "";
+      applyRcDefaults(item.value);
+    });
     wireSearchableSelect("rc_supplier_txt", "rc_supplier", WH_CACHE.supplierItems);
+    // Vật tư đã có sẵn giá trị mặc định lúc mở màn (matItemsGiao[0]) — tự gợi ý luôn lần đầu,
+    // không cần đợi người dùng đổi lại nguyên liệu mới thấy Nhà CC/Vị trí cất tự điền.
+    applyRcDefaults($("rc_mat").value);
     $("rc_do").onclick = () => guard(async () => {
       const rcDtRaw = $("rc_dt").value;
       if (!rcDtRaw) throw new Error("Chọn ngày nhập.");
