@@ -229,10 +229,21 @@ def _json(obj) -> str:
 # ---- Engine luật nội bộ (offline) ----
 
 INTENTS = [
-    (("tồn", "kho", "vật tư", "nguyên liệu", "inventory"), "get_inventory_status"),
-    (("oee", "hiệu suất", "đóng gói"), "get_oee"),
+    # Các tool "kho"/"chiết" MỚI (2026-09-18) đặt TRƯỚC tool cũ có từ khóa chung dễ đụng
+    # ("kho", "đóng gói") — vd "kho thành phẩm" phải ra get_wms_status, không rơi vào
+    # get_inventory_status chỉ vì có chữ "kho".
+    (("wms", "pallet", "kho thành phẩm", "kho tp"), "get_wms_status"),
+    (("cấp liệu", "định mức", "fifo"), "get_dispense_status"),
+    (("lệnh nấu", "điều độ", "work order", "wo "), "get_brew_order_status"),
+    (("lên men", "tank", "cct"), "get_fermentation_status"),
+    (("lô lọc", "filter"), "get_filter_status"),
+    (("chiết", "pack lot", "lô thành phẩm"), "get_pack_status"),
+    (("công thức", "recipe", "bom "), "get_recipe_status"),
+    (("capa", "deviation", "sai lệch"), "get_capa_status"),
+    (("tồn kho", "vật tư", "nguyên liệu", "inventory"), "get_inventory_status"),
+    (("oee", "hiệu suất đóng gói"), "get_oee"),
     (("cảnh báo", "chỉ tiêu", "alert", "chất lượng"), "get_quality_alerts"),
-    (("mẻ", "batch", "lên men", "trạng thái sản xuất"), "get_batch_status"),
+    (("mẻ", "batch", "trạng thái sản xuất"), "get_batch_status"),
     (("kiểm định", "hiệu chuẩn", "calib"), "get_calibrations_due"),
     (("sự cố", "bảo trì", "incident", "hỏng"), "get_open_incidents"),
     (("năng lượng", "điện", "nước", "hơi", "energy"), "get_energy_summary"),
@@ -258,11 +269,23 @@ def _chat_local(db: Session, message: str) -> dict:
                 if "code" not in payload:
                     return {"answer": "Bạn cho tôi mã lô/mẻ cần truy xuất (vd PKG-2406-0001).",
                             "tools_used": [], "mode": "local"}
+            if tool == "get_dispense_status":
+                # get_dispense_status bắt buộc batch_code (khác get_batch_status tùy chọn) —
+                # lấy token toàn số làm mã mẻ Braumat (vd "2354").
+                for w in message.split():
+                    w2 = w.strip(".,?")
+                    if w2.isdigit():
+                        payload["batch_code"] = w2
+                        break
+                if "batch_code" not in payload:
+                    return {"answer": "Bạn cho tôi mã mẻ cần xem cấp liệu (vd 2354).",
+                            "tools_used": [], "mode": "local"}
             data = ai_tools.call_tool(db, tool, payload)
             return {"answer": _summarize(tool, data), "tools_used": [tool], "data": data, "mode": "local"}
 
-    return {"answer": "Tôi chưa hiểu rõ. Hãy hỏi về tồn kho, OEE, cảnh báo chất lượng, "
-            "trạng thái mẻ, kiểm định, sự cố, năng lượng, hoặc truy xuất lô.",
+    return {"answer": "Tôi chưa hiểu rõ. Hãy hỏi về tồn kho, OEE, cảnh báo chất lượng, cấp liệu/FIFO, "
+            "trạng thái mẻ, lệnh nấu, lên men, lọc, chiết, kho thành phẩm, công thức, CAPA, "
+            "kiểm định, sự cố, năng lượng, hoặc truy xuất lô.",
             "tools_used": [], "mode": "local"}
 
 
@@ -293,4 +316,39 @@ def _summarize(tool: str, data: dict) -> str:
         if data.get("error"):
             return data["error"]
         return f"Mã {data['code']}: ảnh hưởng {len(data.get('affected_forward', []))} lô/mẻ (truy xuôi)."
+    if tool == "get_brew_order_status":
+        os_ = data.get("orders", [])
+        done = sum(1 for o in os_ if o.get("is_complete"))
+        return f"Có {len(os_)} Lệnh nấu; {done} đã hoàn thành."
+    if tool == "get_dispense_status":
+        if data.get("error"):
+            return data["error"]
+        short = data.get("shortfall_count", 0)
+        not_fifo = sum(1 for l in data.get("lines", []) if l.get("fifo_ok") is False)
+        return (f"Mẻ {data['batch_code']}: {len(data.get('lines', []))} dòng định mức, "
+                f"{short} dòng còn thiếu, {not_fifo} dòng không đúng FIFO.")
+    if tool == "get_fermentation_status":
+        if data.get("error"):
+            return data["error"]
+        ts = data.get("tanks", [])
+        return f"Có {len(ts)} tank lên men; " + "; ".join(
+            f"{t['tank_code']} ({t.get('status_label') or '—'})" for t in ts[:3]) + "."
+    if tool == "get_filter_status":
+        if data.get("error"):
+            return data["error"]
+        return f"Có {len(data.get('filter_lots', []))} lô lọc."
+    if tool == "get_pack_status":
+        if data.get("error"):
+            return data["error"]
+        return f"Có {len(data.get('pack_lots', []))} lô thành phẩm (chiết)."
+    if tool == "get_wms_status":
+        return (f"Kho TP: {data.get('pallets_stored', 0)}/{data.get('capacity_pallets', 0)} pallet "
+                f"({data.get('fill_pct', 0)}% đầy).")
+    if tool == "get_recipe_status":
+        if data.get("error"):
+            return data["error"]
+        return f"Có {len(data.get('recipe_versions', []))} công thức đang hiệu lực (effective)."
+    if tool == "get_capa_status":
+        return (f"{len(data.get('open_deviations', []))} deviation đang mở, "
+                f"{len(data.get('open_capa', []))} CAPA đang mở.")
     return "Đã lấy dữ liệu."
