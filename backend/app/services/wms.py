@@ -124,7 +124,8 @@ def list_lots(db: Session) -> list:
         shipped_units = sum(cases_by_pallet.get(p.pallet_id, 0) for p in shipped_plist)
         shipped_dates = [p.shipped_at for p in shipped_plist if p.shipped_at]
         out.append({"lot_code": lot_code, "product": plist[0].product,
-                    "pallet_count": len(plist), "total_units": int(total_units),
+                    "pallet_count": len(plist), "pallet_count_all_time": len(plist) + len(shipped_plist),
+                    "total_units": int(total_units),
                     "total_units_all_time": int(total_units + shipped_units), "by_status": by_status,
                     "first_stocked_at": min(stocked_dates).isoformat() if stocked_dates else None,
                     "last_shipped_at": max(shipped_dates).isoformat() if shipped_dates else None})

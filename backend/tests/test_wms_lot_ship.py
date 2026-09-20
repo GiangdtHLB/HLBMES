@@ -62,6 +62,7 @@ def test_list_lots_aggregates_multiple_pallets_same_lot(client, admin_h):
     lots = client.get("/api/wms/lots", headers=admin_h).json()
     row = next(l for l in lots if l["lot_code"] == lot_code)
     assert row["pallet_count"] == 2
+    assert row["pallet_count_all_time"] == 2
     assert row["total_units"] == (100 + 50) * 24
     assert row["total_units_all_time"] == (100 + 50) * 24
     assert row["by_status"]["building"] == 2
@@ -195,6 +196,7 @@ def test_list_lots_reports_first_stocked_and_last_shipped_dates(client, admin_h)
     lots = client.get("/api/wms/lots", headers=admin_h).json()
     row = next(l for l in lots if l["lot_code"] == lot_code)
     assert row["pallet_count"] == 1  # chỉ p2 (chưa xuất) còn được liệt kê
+    assert row["pallet_count_all_time"] == 2  # lũy kế cả p1 đã xuất trước đó
     assert row["total_units"] == 60 * 24  # "còn tồn chưa xuất" — chỉ p2
     assert row["total_units_all_time"] == (40 + 60) * 24  # lũy kế cả p1 đã xuất trước đó
     assert row["first_stocked_at"]
