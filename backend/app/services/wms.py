@@ -101,16 +101,18 @@ def list_lots(db: Session) -> list:
         by_lot.setdefault(p.lot_code, []).append(p)
     cases_by_pallet: dict[str, float] = dict(db.execute(
         select(Case.pallet_id, func.coalesce(func.sum(Case.units), 0)).group_by(Case.pallet_id)).all())
-    # Pallet đã xuất cùng lô (nếu có) — để hiển thị "ngày xuất gần nhất" ngay cả khi lô còn
-    # pallet chưa xuất khác (xuất một phần), không giới hạn ở tập pallet active phía trên.
-    shipped_at_by_lot: dict[str, object] = {}
+    # Pallet ĐÃ xuất cùng lô (nếu có) — 1 lô có thể đóng pallet làm NHIỀU LẦN/nhiều đợt, có đợt
+    # đã xuất trước rồi (yêu cầu người dùng 2026-09-20: "1 lô có thể đóng pallet làm nhiều lần").
+    # Dùng để: (1) hiển thị "ngày xuất gần nhất" dù lô còn pallet chưa xuất khác, (2) tính
+    # "Tổng SL" LŨY KẾ toàn bộ lô (kể cả phần đã xuất) — phân biệt với "Còn tồn chưa xuất" (chỉ
+    # tính phần CHƯA xuất, = total_units, vẫn dùng để xuất cả lô, KHÔNG đổi để không ảnh hưởng
+    # số lượng thật sự được xuất khi bấm "Xuất cả lô").
+    shipped_by_lot: dict[str, list[Pallet]] = {}
     if by_lot:
-        shipped = db.execute(select(Pallet.lot_code, Pallet.shipped_at).where(
-            Pallet.lot_code.in_(by_lot.keys()), Pallet.status == "shipped",
-            Pallet.shipped_at.isnot(None))).all()
-        for lot_code, shipped_at in shipped:
-            if shipped_at_by_lot.get(lot_code) is None or shipped_at > shipped_at_by_lot[lot_code]:
-                shipped_at_by_lot[lot_code] = shipped_at
+        shipped = db.execute(select(Pallet).where(
+            Pallet.lot_code.in_(by_lot.keys()), Pallet.status == "shipped")).scalars().all()
+        for p in shipped:
+            shipped_by_lot.setdefault(p.lot_code, []).append(p)
     out = []
     for lot_code, plist in by_lot.items():
         total_units = sum(cases_by_pallet.get(p.pallet_id, 0) for p in plist)
@@ -118,11 +120,14 @@ def list_lots(db: Session) -> list:
         for p in plist:
             by_status[p.status] = by_status.get(p.status, 0) + 1
         stocked_dates = [p.created_at for p in plist if p.created_at]
-        shipped_at = shipped_at_by_lot.get(lot_code)
+        shipped_plist = shipped_by_lot.get(lot_code, [])
+        shipped_units = sum(cases_by_pallet.get(p.pallet_id, 0) for p in shipped_plist)
+        shipped_dates = [p.shipped_at for p in shipped_plist if p.shipped_at]
         out.append({"lot_code": lot_code, "product": plist[0].product,
-                    "pallet_count": len(plist), "total_units": int(total_units), "by_status": by_status,
+                    "pallet_count": len(plist), "total_units": int(total_units),
+                    "total_units_all_time": int(total_units + shipped_units), "by_status": by_status,
                     "first_stocked_at": min(stocked_dates).isoformat() if stocked_dates else None,
-                    "last_shipped_at": shipped_at.isoformat() if shipped_at else None})
+                    "last_shipped_at": max(shipped_dates).isoformat() if shipped_dates else None})
     return sorted(out, key=lambda x: x["lot_code"])
 
 

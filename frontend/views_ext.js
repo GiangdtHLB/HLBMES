@@ -1663,7 +1663,8 @@
     // bao nhiêu vỉ"). Chỉ liệt kê lô còn pallet chưa xuất (xem services/wms.py::list_lots).
     const lotRows = lots.map(l => `<tr>
       <td><code class="k">${esc(l.lot_code)}</code></td><td>${esc(l.product || "—")}</td>
-      <td style="text-align:right">${l.pallet_count}</td><td style="text-align:right">${l.total_units}</td>
+      <td style="text-align:right">${l.pallet_count}</td><td style="text-align:right">${l.total_units_all_time}</td>
+      <td style="text-align:right"><b>${l.total_units}</b></td>
       <td class="muted">${Object.entries(l.by_status || {}).map(([k, v]) => `${esc(PALLET_STATUS_LABEL[k] || k)}: ${v}`).join(" · ") || "—"}</td>
       <td class="muted" style="white-space:nowrap">${l.first_stocked_at ? fmt(l.first_stocked_at) : "—"}</td>
       <td class="muted" style="white-space:nowrap">${l.last_shipped_at ? fmt(l.last_shipped_at) : "—"}</td>
@@ -1672,9 +1673,12 @@
     const lotsPanel = panel("🚚 Xuất theo lô", `
       <div class="muted" style="margin-bottom:6px">1 Lô TP có thể gồm nhiều pallet (mỗi pallet 1 mã riêng) — xuất cả lô 1 lần thay vì từng pallet.</div>
       <input class="searchbox" data-tbl="t_wms_lot" placeholder="Tìm theo lô, SP..."/>
-      <div class="tablewrap"><table id="t_wms_lot"><thead><tr><th>Lô</th><th>SP</th><th style="text-align:right">Số pallet</th><th style="text-align:right">Tổng SL</th><th>Trạng thái pallet</th>
+      <div class="tablewrap"><table id="t_wms_lot"><thead><tr><th>Lô</th><th>SP</th><th style="text-align:right">Số pallet</th>
+        <th style="text-align:right" title="Tổng SL lũy kế của lô này, kể cả phần đã xuất trước đó (1 lô có thể đóng pallet nhiều lần)">Tổng SL (lũy kế)</th>
+        <th style="text-align:right" title="SL còn trong kho, CHƯA xuất — đúng bằng SL sẽ xuất nếu bấm Xuất cả lô">Còn tồn chưa xuất</th>
+        <th>Trạng thái pallet</th>
         <th>Ngày nhập kho TP</th><th>Ngày xuất gần nhất</th><th></th></tr></thead>
-      <tbody>${lotRows || '<tr><td colspan="8" class="muted">Không có lô nào còn pallet chưa xuất.</td></tr>'}</tbody></table></div>`);
+      <tbody>${lotRows || '<tr><td colspan="9" class="muted">Không có lô nào còn pallet chưa xuất.</td></tr>'}</tbody></table></div>`);
 
     root.innerHTML = overview + locations + buildForm + lotsPanel + palletsPanel;
     wirePaginate("t_wms_lot", 10);
