@@ -1665,12 +1665,12 @@
       <td><code class="k">${esc(l.lot_code)}</code></td><td>${esc(l.product || "—")}</td>
       <td style="text-align:right">${l.pallet_count_all_time}</td>
       <td style="text-align:right"><b>${l.pallet_count}</b></td>
-      <td style="text-align:right">${l.total_units_all_time}</td>
-      <td style="text-align:right"><b>${l.total_units}</b></td>
+      <td style="text-align:right">${l.total_cases_all_time}</td>
+      <td style="text-align:right"><b>${l.total_cases}</b></td>
       <td class="muted">${Object.entries(l.by_status || {}).map(([k, v]) => `${esc(PALLET_STATUS_LABEL[k] || k)}: ${v}`).join(" · ") || "—"}</td>
       <td class="muted" style="white-space:nowrap">${l.first_stocked_at ? fmt(l.first_stocked_at) : "—"}</td>
       <td class="muted" style="white-space:nowrap">${l.last_shipped_at ? fmt(l.last_shipped_at) : "—"}</td>
-      <td>${canIssue ? `<button class="btn sm sec" data-shiplot="${esc(l.lot_code)}" data-lotpallets="${l.pallet_count}" data-lotunits="${l.total_units}">Xuất...</button>` : ""}</td>
+      <td>${canIssue ? `<button class="btn sm sec" data-shiplot="${esc(l.lot_code)}" data-lotpallets="${l.pallet_count}" data-lotcases="${l.total_cases}">Xuất...</button>` : ""}</td>
     </tr>`).join("");
     const lotsPanel = panel("🚚 Xuất theo lô", `
       <div class="muted" style="margin-bottom:6px">1 Lô TP có thể gồm nhiều pallet (mỗi pallet 1 mã riêng) — xuất cả lô 1 lần thay vì từng pallet.</div>
@@ -1678,8 +1678,8 @@
       <div class="tablewrap"><table id="t_wms_lot"><thead><tr><th>Lô</th><th>SP</th>
         <th style="text-align:right" title="Tổng số pallet lũy kế của lô này, kể cả pallet đã xuất trước đó (1 lô có thể đóng pallet nhiều lần)">Số pallet (lũy kế)</th>
         <th style="text-align:right" title="Số pallet còn trong kho, CHƯA xuất — đúng bằng số pallet sẽ xuất nếu bấm Xuất...">Pallet còn tồn</th>
-        <th style="text-align:right" title="Tổng SL lũy kế của lô này, kể cả phần đã xuất trước đó (1 lô có thể đóng pallet nhiều lần)">Tổng SL (lũy kế)</th>
-        <th style="text-align:right" title="SL còn trong kho, CHƯA xuất — đúng bằng SL sẽ xuất nếu bấm Xuất cả lô">Còn tồn chưa xuất</th>
+        <th style="text-align:right" title="Tổng số case lũy kế của lô này, kể cả phần đã xuất trước đó (1 lô có thể đóng pallet nhiều lần)">Tổng case (lũy kế)</th>
+        <th style="text-align:right" title="Số case còn trong kho, CHƯA xuất — đúng bằng số case sẽ xuất nếu bấm Xuất...">Case còn tồn</th>
         <th>Trạng thái pallet</th>
         <th>Ngày nhập kho TP</th><th>Ngày xuất gần nhất</th><th></th></tr></thead>
       <tbody>${lotRows || '<tr><td colspan="10" class="muted">Không có lô nào còn pallet chưa xuất.</td></tr>'}</tbody></table></div>`);
@@ -1747,9 +1747,9 @@
     root.querySelectorAll("[data-shiplot]").forEach(b => b.onclick = () => {
       const lotCode = b.dataset.shiplot;
       const totalPallets = parseInt(b.dataset.lotpallets, 10);
-      const totalUnits = b.dataset.lotunits;
+      const totalCases = b.dataset.lotcases;
       modal(`<h3>Xuất lô ${esc(lotCode)}</h3>
-        <div class="muted" style="margin-bottom:10px">Còn tồn chưa xuất: <b>${totalPallets} pallet</b>, ${esc(totalUnits)} đơn vị. Hệ thống tự chọn pallet nhập kho SỚM NHẤT trước (FIFO) — không chọn tay từng cái.</div>
+        <div class="muted" style="margin-bottom:10px">Còn tồn chưa xuất: <b>${totalPallets} pallet</b>, ${esc(totalCases)} case. Hệ thống tự chọn pallet nhập kho SỚM NHẤT trước (FIFO) — không chọn tay từng cái.</div>
         <div class="field"><label>Số pallet muốn xuất (tối đa ${totalPallets})</label>
           <input id="shiplot_count" type="number" min="1" max="${totalPallets}" value="${totalPallets}" style="width:120px"/></div>
         <div class="row" style="margin-top:14px;gap:8px">
@@ -1765,7 +1765,7 @@
         if (!confirm(`${partial ? `Xuất ${n}/${totalPallets} pallet CŨ NHẤT` : `Xuất CẢ LÔ ${totalPallets} pallet`} của lô ${lotCode}? Không thể hoàn tác.`)) return;
         const r = await POST(`/wms/lots/${encodeURIComponent(lotCode)}/ship`, { pallet_count: n });
         closeModal();
-        toast(`Đã xuất lô ${lotCode} — ${r.pallet_count} pallet, ${r.total_units} đơn vị`); render("wms");
+        toast(`Đã xuất lô ${lotCode} — ${r.pallet_count} pallet, ${r.total_cases} case`); render("wms");
       });
     });
     root.querySelectorAll("[data-label]").forEach(b => b.onclick = () => labelModal(b.dataset.label));

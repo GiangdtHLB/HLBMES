@@ -63,8 +63,8 @@ def test_list_lots_aggregates_multiple_pallets_same_lot(client, admin_h):
     row = next(l for l in lots if l["lot_code"] == lot_code)
     assert row["pallet_count"] == 2
     assert row["pallet_count_all_time"] == 2
-    assert row["total_units"] == (100 + 50) * 24
-    assert row["total_units_all_time"] == (100 + 50) * 24
+    assert row["total_cases"] == 100 + 50
+    assert row["total_cases_all_time"] == 100 + 50
     assert row["by_status"]["building"] == 2
 
 
@@ -77,7 +77,7 @@ def test_ship_lot_ships_all_pallets_and_reports_totals(client, admin_h):
     assert ship.status_code == 200, ship.text
     result = ship.json()
     assert result["pallet_count"] == 2
-    assert result["total_units"] == (110 + 30) * 24
+    assert result["total_cases"] == 110 + 30
     assert sorted(result["pallet_codes"]) == sorted([p1["pallet_code"], p2["pallet_code"]])
 
     pallets = client.get("/api/wms/pallets", headers=admin_h).json()
@@ -102,7 +102,7 @@ def test_ship_lot_partial_ships_oldest_pallets_first_fifo(client, admin_h):
     assert ship.status_code == 200, ship.text
     result = ship.json()
     assert result["pallet_count"] == 2
-    assert result["total_units"] == (10 + 20) * 24
+    assert result["total_cases"] == 10 + 20
     assert sorted(result["pallet_codes"]) == sorted([p1["pallet_code"], p2["pallet_code"]])
 
     # p3 (nhập sau cùng) vẫn còn nguyên, chưa xuất — lô vẫn hiện trong danh sách với đúng 1 pallet còn lại.
@@ -112,7 +112,7 @@ def test_ship_lot_partial_ships_oldest_pallets_first_fifo(client, admin_h):
     lots = client.get("/api/wms/lots", headers=admin_h).json()
     row = next(l for l in lots if l["lot_code"] == lot_code)
     assert row["pallet_count"] == 1
-    assert row["total_units"] == 30 * 24
+    assert row["total_cases"] == 30
 
 
 def test_ship_lot_partial_rejects_count_exceeding_remaining(client, admin_h):
@@ -152,7 +152,7 @@ def test_ship_lot_only_ships_unshipped_pallets_in_lot(client, admin_h):
     result = ship.json()
     assert result["pallet_count"] == 1
     assert result["pallet_codes"] == [p2["pallet_code"]]
-    assert result["total_units"] == 60 * 24
+    assert result["total_cases"] == 60
 
 
 def test_ship_lot_requires_warehouse_issue_permission(client, admin_h, vanhanh_h):
@@ -197,7 +197,7 @@ def test_list_lots_reports_first_stocked_and_last_shipped_dates(client, admin_h)
     row = next(l for l in lots if l["lot_code"] == lot_code)
     assert row["pallet_count"] == 1  # chỉ p2 (chưa xuất) còn được liệt kê
     assert row["pallet_count_all_time"] == 2  # lũy kế cả p1 đã xuất trước đó
-    assert row["total_units"] == 60 * 24  # "còn tồn chưa xuất" — chỉ p2
-    assert row["total_units_all_time"] == (40 + 60) * 24  # lũy kế cả p1 đã xuất trước đó
+    assert row["total_cases"] == 60  # "còn tồn chưa xuất" — chỉ p2
+    assert row["total_cases_all_time"] == 40 + 60  # lũy kế cả p1 đã xuất trước đó
     assert row["first_stocked_at"]
     assert row["last_shipped_at"]  # phản ánh ngày xuất của p1, dù p1 không nằm trong tập trên
