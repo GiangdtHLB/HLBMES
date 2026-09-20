@@ -7,8 +7,16 @@ from sqlalchemy.orm import Session
 from ..audit import record_audit
 from ..common import new_id, utcnow
 from ..errors import DomainError, NotFoundError
+from ..models.master import FinishedProduct
 from ..models.wms import Case, Pallet, WmsLocation
 from ..security import User, require_perm
+
+
+def _product_name_by_code(db: Session) -> dict:
+    """`Pallet.product` lưu CODE của FinishedProduct (chuỗi tự do, không FK) — tra tên thật để
+    hiển thị (yêu cầu người dùng 2026-09-20: "thêm cả tên của SKU vào cho tôi"), không đổi
+    Pallet.product vì nhiều nơi khác đã dùng nó làm mã hiển thị/tham chiếu genealogy."""
+    return dict(db.execute(select(FinishedProduct.code, FinishedProduct.name)).all())
 
 
 def list_locations(db: Session) -> list:
@@ -75,10 +83,12 @@ def list_pallets(db: Session, status: str = None) -> list:
         stmt = stmt.where(Pallet.status == status)
     out = []
     loc_by = {l.loc_id: l for l in db.execute(select(WmsLocation)).scalars().all()}
+    product_name_by = _product_name_by_code(db)
     for p in db.execute(stmt).scalars().all():
         loc = loc_by.get(p.location_id)
         cases = db.execute(select(Case).where(Case.pallet_id == p.pallet_id)).scalars().all()
         out.append({"pallet_id": p.pallet_id, "pallet_code": p.pallet_code, "product": p.product,
+                    "product_name": product_name_by.get(p.product),
                     "lot_code": p.lot_code, "case_count": p.case_count, "units_per_case": p.units_per_case,
                     "total_units": sum(c.units for c in cases), "status": p.status, "source": p.source,
                     "location": loc.code if loc else None,
@@ -115,6 +125,7 @@ def list_lots(db: Session) -> list:
             Pallet.lot_code.in_(by_lot.keys()), Pallet.status == "shipped")).scalars().all()
         for p in shipped:
             shipped_by_lot.setdefault(p.lot_code, []).append(p)
+    product_name_by = _product_name_by_code(db)
     out = []
     for lot_code, plist in by_lot.items():
         total_cases = sum(p.case_count for p in plist)
@@ -126,6 +137,7 @@ def list_lots(db: Session) -> list:
         shipped_cases = sum(p.case_count for p in shipped_plist)
         shipped_dates = [p.shipped_at for p in shipped_plist if p.shipped_at]
         out.append({"lot_code": lot_code, "product": plist[0].product,
+                    "product_name": product_name_by.get(plist[0].product),
                     "pallet_count": len(plist), "pallet_count_all_time": len(plist) + len(shipped_plist),
                     "total_cases": total_cases,
                     "total_cases_all_time": total_cases + shipped_cases, "by_status": by_status,

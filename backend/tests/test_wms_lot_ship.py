@@ -183,6 +183,28 @@ def test_pallet_exposes_created_at_and_shipped_at(client, admin_h):
     assert row2["shipped_at"]
 
 
+def test_pallet_and_lot_resolve_sku_name_from_product_code(client, admin_h):
+    """`Pallet.product` lưu CODE của SKU (chuỗi tự do, không FK) — yêu cầu người dùng
+    2026-09-20: "thêm cả tên của SKU vào cho tôi" — /wms/pallets và /wms/lots phải tra thêm
+    product_name thật từ finished_product.code, không chỉ hiện mỗi mã."""
+    fp = client.post("/api/finished-products", headers=admin_h,
+                     json={"name": "Bia lon Cội Nguồn 330ml", "code": "SKU-NAMED-01",
+                          "uom": "lon", "unit_type": "vi", "pack_size": 24})
+    assert fp.status_code == 201, fp.text
+    lot_code = "LOT-NAMED-01"
+    p = _build_pallet(client, admin_h, "SKU-NAMED-01", lot_code, 10, 24)
+
+    pallets = client.get("/api/wms/pallets", headers=admin_h).json()
+    row = next(x for x in pallets if x["pallet_code"] == p["pallet_code"])
+    assert row["product"] == "SKU-NAMED-01"
+    assert row["product_name"] == "Bia lon Cội Nguồn 330ml"
+
+    lots = client.get("/api/wms/lots", headers=admin_h).json()
+    lot_row = next(l for l in lots if l["lot_code"] == lot_code)
+    assert lot_row["product"] == "SKU-NAMED-01"
+    assert lot_row["product_name"] == "Bia lon Cội Nguồn 330ml"
+
+
 def test_list_lots_reports_first_stocked_and_last_shipped_dates(client, admin_h):
     """Lô còn 1 pallet chưa xuất + 1 pallet đã xuất trước đó -> dòng lô vẫn hiển thị
     first_stocked_at (từ các pallet đang liệt kê) và last_shipped_at (từ pallet đã xuất cùng

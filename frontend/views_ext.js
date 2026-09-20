@@ -1638,8 +1638,9 @@
     const sourceBadge = (s) => s === "production"
       ? `<span class="badge available" title="Tạo qua duyệt Lô thành phẩm — đã qua KCS + Giám đốc SX">Từ SX</span>`
       : `<span class="badge planned" title="Đóng pallet thủ công tại Kho TP — KHÔNG qua duyệt KCS/Giám đốc SX">Thủ công</span>`;
+    const skuLabel = (code, name) => code ? esc(code) + (name ? ` — ${esc(name)}` : "") : "—";
     const palletRows = pallets.map(p => `<tr>
-      <td><code class="k">${esc(p.pallet_code)}</code></td><td>${esc(p.product || "—")}</td><td class="muted">${esc(p.lot_code || "—")}</td>
+      <td><code class="k">${esc(p.pallet_code)}</code></td><td>${skuLabel(p.product, p.product_name)}</td><td class="muted">${esc(p.lot_code || "—")}</td>
       <td style="text-align:right">${p.case_count}</td>
       <td>${statusBadge(p.status)}</td><td>${sourceBadge(p.source)}</td><td class="muted">${esc(p.location || "—")}</td>
       <td class="muted" style="white-space:nowrap">${fmt(p.created_at)}</td>
@@ -1662,7 +1663,7 @@
     // 2026-09-20: "có thể cho chọn cả lô để xuất... báo lô đó có tổng bao nhiêu pallet, tổng
     // bao nhiêu vỉ"). Chỉ liệt kê lô còn pallet chưa xuất (xem services/wms.py::list_lots).
     const lotRows = lots.map(l => `<tr>
-      <td><code class="k">${esc(l.lot_code)}</code></td><td>${esc(l.product || "—")}</td>
+      <td><code class="k">${esc(l.lot_code)}</code></td><td>${skuLabel(l.product, l.product_name)}</td>
       <td style="text-align:right">${l.pallet_count_all_time}</td>
       <td style="text-align:right"><b>${l.pallet_count}</b></td>
       <td style="text-align:right">${l.total_cases_all_time}</td>
