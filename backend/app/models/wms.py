@@ -43,6 +43,7 @@ class Pallet(Base):
     source: Mapped[str] = mapped_column(Unicode(32), default="manual")
     created_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    shipped_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
 
 
 class Case(Base):

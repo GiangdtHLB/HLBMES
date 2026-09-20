@@ -1782,6 +1782,14 @@ def release_pack_lot_allocation(db: Session, pack_lot_id: str, row_id: str, user
     case_counts = [spec.units_per_pallet] * full_pallets
     if remainder_units > 0:
         case_counts.append(remainder_units)
+    # Chặn sớm nếu số lượng nhập nhầm sinh ra quá nhiều pallet trong 1 lần duyệt (mỗi pallet là
+    # 1 db.commit() + N dòng Case riêng — hàng nghìn pallet/lần khiến request treo/timeout, trả
+    # về lỗi 500 khó hiểu thay vì thông báo rõ ràng). SL thật của 1 dòng/ca không bao giờ cần đến
+    # mức này — đây gần như chắc chắn là nhập nhầm số lượng.
+    if len(case_counts) > 500:
+        raise DomainError(
+            f"Số lượng {qty_int} sẽ tạo {len(case_counts)} pallet trong 1 lần duyệt — vượt quá "
+            f"giới hạn an toàn (500 pallet/lần). Kiểm tra lại số lượng đã nhập cho dòng này.")
     used = db.execute(select(func.count(Pallet.pallet_id)).where(
         Pallet.location_id == loc.loc_id, Pallet.status == "stored")).scalar() or 0
     if used + len(case_counts) > loc.capacity:

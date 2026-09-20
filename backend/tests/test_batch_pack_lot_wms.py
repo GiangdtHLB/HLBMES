@@ -339,6 +339,28 @@ def test_release_row_blocked_when_location_full(client, admin_h):
     assert p["pack_allocations"][0]["released"] is False
 
 
+def test_release_row_blocked_when_pallet_count_absurdly_high(client, admin_h):
+    """Nhập nhầm số lượng (vd. dư số 0) có thể sinh ra hàng nghìn pallet trong 1 lần duyệt —
+    mỗi pallet là 1 db.commit() riêng nên số lượng lớn khiến request treo/timeout, trả về lỗi
+    500 khó hiểu thay vì thông báo rõ ràng (lỗi thật gặp khi test 2026-09-20: duyệt 1 dòng
+    300.000 vỉ / 100 vỉ mỗi pallet = 3000 pallet). Chặn sớm, không tạo pallet nào."""
+    fp_id = _make_sku(client, admin_h, "HUGEQTY")
+    spec_id = _make_spec(client, admin_h, fp_id, "QC01", 1)
+    loc_id = _make_location(client, admin_h, "HUGEQTY", capacity=10000)
+    pack_lot_id = _build_pack_lot(client, admin_h, "HUGEQTY", fp_id, ca1=501)
+    saved = _save_allocations(client, admin_h, pack_lot_id, [{"spec_id": spec_id, "quantity": 501}])
+    row_id = saved.json()["pack_allocations"][0]["row_id"]
+
+    blocked = _release_row(client, admin_h, pack_lot_id, row_id, loc_id)
+    assert blocked.status_code == 409, blocked.text
+    assert "vượt quá" in blocked.json()["detail"]
+
+    p = client.get(f"/api/batch-pack-lots/{pack_lot_id}", headers=admin_h).json()
+    assert p["pack_allocations"][0]["released"] is False
+    pallets = client.get("/api/wms/pallets", headers=admin_h).json()
+    assert not any(pl["lot_code"] == p["lot_no"] for pl in pallets)
+
+
 def test_save_cannot_modify_or_drop_released_row(client, admin_h):
     """Dòng đã Duyệt nhập kho (đã tạo pallet thật) là bất biến — không cho đổi spec/số lượng,
     và nếu client gửi thiếu dòng đó thì tự khôi phục lại nguyên trạng (không mất vết pallet)."""

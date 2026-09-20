@@ -115,3 +115,40 @@ def test_ship_lot_requires_warehouse_issue_permission(client, admin_h, vanhanh_h
 
     forbidden = client.post(f"/api/wms/lots/{lot_code}/ship", headers=vanhanh_h)
     assert forbidden.status_code == 403, forbidden.text
+
+
+def test_pallet_exposes_created_at_and_shipped_at(client, admin_h):
+    """Yêu cầu người dùng 2026-09-20: "thêm cột ngày nhập kho thành phẩm, ngày xuất" — pallet
+    phải trả về created_at (ngày nhập kho, có ngay lúc tạo) và shipped_at (rỗng cho tới khi
+    xuất, có giá trị ngay sau khi ship())."""
+    lot_code = "LOT-DATES-01"
+    p = _build_pallet(client, admin_h, "SKU-DATES", lot_code, 20, 24)
+
+    before_ship = client.get("/api/wms/pallets", headers=admin_h).json()
+    row = next(x for x in before_ship if x["pallet_code"] == p["pallet_code"])
+    assert row["created_at"]
+    assert row["shipped_at"] is None
+
+    ship = client.post(f"/api/wms/pallets/{p['pallet_id']}/ship", headers=admin_h)
+    assert ship.status_code == 200, ship.text
+
+    after_ship = client.get("/api/wms/pallets", headers=admin_h).json()
+    row2 = next(x for x in after_ship if x["pallet_code"] == p["pallet_code"])
+    assert row2["shipped_at"]
+
+
+def test_list_lots_reports_first_stocked_and_last_shipped_dates(client, admin_h):
+    """Lô còn 1 pallet chưa xuất + 1 pallet đã xuất trước đó -> dòng lô vẫn hiển thị
+    first_stocked_at (từ các pallet đang liệt kê) và last_shipped_at (từ pallet đã xuất cùng
+    lô, dù pallet đó không còn nằm trong tập đang liệt kê)."""
+    lot_code = "LOT-DATES-AGG-01"
+    p1 = _build_pallet(client, admin_h, "SKU-DATES-AGG", lot_code, 40, 24)
+    p2 = _build_pallet(client, admin_h, "SKU-DATES-AGG", lot_code, 60, 24)
+    ship1 = client.post(f"/api/wms/pallets/{p1['pallet_id']}/ship", headers=admin_h)
+    assert ship1.status_code == 200, ship1.text
+
+    lots = client.get("/api/wms/lots", headers=admin_h).json()
+    row = next(l for l in lots if l["lot_code"] == lot_code)
+    assert row["pallet_count"] == 1  # chỉ p2 (chưa xuất) còn được liệt kê
+    assert row["first_stocked_at"]
+    assert row["last_shipped_at"]  # phản ánh ngày xuất của p1, dù p1 không nằm trong tập trên

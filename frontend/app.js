@@ -3829,10 +3829,11 @@ function renderPkWmsAllocUi(packLotId, specs, caTotal, existingAllocations, unit
            <td style="white-space:nowrap"><button class="btn sm" data-wmsallocsave="${i}" type="button">Lưu</button>
            <button class="btn sm sec" data-wmsallocdel="${i}" type="button">Xóa</button></td>`;
       } else {
+        const locName = row.locId ? (locations.find(l => l.loc_id === row.locId) || {}).code : null;
         cells = `<td>${spec ? esc(spec.code) + (spec.name ? " — " + esc(spec.name) : "") : "—"}</td>
            <td>${esc(row.qty)}${u}</td>
            <td>${breakdownHtml(row.specId, row.qty)}</td>
-           <td><select class="wmsalloc-loc" data-i="${i}" style="width:150px">${locOptsHtml(row.locId)}</select></td>
+           <td>${locName ? esc(locName) : `<span class="muted">Chưa chọn</span>`}</td>
            <td class="muted" style="font-size:12px;white-space:nowrap">${row.savedBy ? esc(row.savedBy) : "—"} · ${row.savedAt ? fmt(row.savedAt) : "—"}</td>
            <td class="muted">Chưa nhập kho</td>
            <td style="white-space:nowrap"><button class="btn sm sec" data-wmsallocedit="${i}" type="button">Sửa</button>

@@ -82,6 +82,8 @@ def list_pallets(db: Session, status: str = None) -> list:
                     "lot_code": p.lot_code, "case_count": p.case_count, "units_per_case": p.units_per_case,
                     "total_units": sum(c.units for c in cases), "status": p.status, "source": p.source,
                     "location": loc.code if loc else None,
+                    "created_at": p.created_at.isoformat() if p.created_at else None,
+                    "shipped_at": p.shipped_at.isoformat() if p.shipped_at else None,
                     "cases": [{"case_code": c.case_code, "units": c.units} for c in cases]})
     return out
 
@@ -99,14 +101,28 @@ def list_lots(db: Session) -> list:
         by_lot.setdefault(p.lot_code, []).append(p)
     cases_by_pallet: dict[str, float] = dict(db.execute(
         select(Case.pallet_id, func.coalesce(func.sum(Case.units), 0)).group_by(Case.pallet_id)).all())
+    # Pallet đã xuất cùng lô (nếu có) — để hiển thị "ngày xuất gần nhất" ngay cả khi lô còn
+    # pallet chưa xuất khác (xuất một phần), không giới hạn ở tập pallet active phía trên.
+    shipped_at_by_lot: dict[str, object] = {}
+    if by_lot:
+        shipped = db.execute(select(Pallet.lot_code, Pallet.shipped_at).where(
+            Pallet.lot_code.in_(by_lot.keys()), Pallet.status == "shipped",
+            Pallet.shipped_at.isnot(None))).all()
+        for lot_code, shipped_at in shipped:
+            if shipped_at_by_lot.get(lot_code) is None or shipped_at > shipped_at_by_lot[lot_code]:
+                shipped_at_by_lot[lot_code] = shipped_at
     out = []
     for lot_code, plist in by_lot.items():
         total_units = sum(cases_by_pallet.get(p.pallet_id, 0) for p in plist)
         by_status: dict[str, int] = {}
         for p in plist:
             by_status[p.status] = by_status.get(p.status, 0) + 1
+        stocked_dates = [p.created_at for p in plist if p.created_at]
+        shipped_at = shipped_at_by_lot.get(lot_code)
         out.append({"lot_code": lot_code, "product": plist[0].product,
-                    "pallet_count": len(plist), "total_units": int(total_units), "by_status": by_status})
+                    "pallet_count": len(plist), "total_units": int(total_units), "by_status": by_status,
+                    "first_stocked_at": min(stocked_dates).isoformat() if stocked_dates else None,
+                    "last_shipped_at": shipped_at.isoformat() if shipped_at else None})
     return sorted(out, key=lambda x: x["lot_code"])
 
 
@@ -182,6 +198,7 @@ def ship(db: Session, pallet_id: str, user: User) -> dict:
         raise NotFoundError("Pallet không tồn tại.")
     p.status = "shipped"
     p.location_id = None
+    p.shipped_at = utcnow()
     record_audit(db, entity_type="pallet", entity_id=pallet_id, action="ship", actor=user,
                  after={"pallet_code": p.pallet_code})
     db.commit()

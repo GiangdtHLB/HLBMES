@@ -1642,6 +1642,8 @@
       <td><code class="k">${esc(p.pallet_code)}</code></td><td>${esc(p.product || "—")}</td><td class="muted">${esc(p.lot_code || "—")}</td>
       <td style="text-align:right">${p.case_count}</td><td style="text-align:right">${p.total_units}</td>
       <td>${statusBadge(p.status)}</td><td>${sourceBadge(p.source)}</td><td class="muted">${esc(p.location || "—")}</td>
+      <td class="muted" style="white-space:nowrap">${fmt(p.created_at)}</td>
+      <td class="muted" style="white-space:nowrap">${p.shipped_at ? fmt(p.shipped_at) : "—"}</td>
       <td style="white-space:nowrap">${p.status !== "shipped" ? `<select class="pl_loc" data-pallet="${p.pallet_id}" style="width:120px">
         <option value="">— vị trí —</option>${locOpt()}</select>
         ${canIssue ? `<button class="btn sm" data-putaway="${p.pallet_id}">Cất</button> <button class="btn sm sec" data-ship="${p.pallet_id}">Xuất</button>` : ""}` : ""}
@@ -1651,8 +1653,9 @@
     const palletsPanel = panel("🟦 Pallet", `
       <input class="searchbox" data-tbl="t_wms_pallet" placeholder="Tìm theo mã pallet, SP, lô, trạng thái, vị trí..."/>
       <div class="tablewrap"><table id="t_wms_pallet"><thead><tr><th>Mã pallet</th><th>SP</th><th>Lô</th>
-        <th style="text-align:right">Case</th><th style="text-align:right">Lon</th><th>Trạng thái</th><th>Nguồn</th><th>Vị trí</th><th></th></tr></thead>
-      <tbody>${palletRows || '<tr><td colspan="9" class="muted">Chưa có pallet nào.</td></tr>'}</tbody></table></div>`);
+        <th style="text-align:right">Case</th><th style="text-align:right">Lon</th><th>Trạng thái</th><th>Nguồn</th><th>Vị trí</th>
+        <th>Ngày nhập kho TP</th><th>Ngày xuất</th><th></th></tr></thead>
+      <tbody>${palletRows || '<tr><td colspan="11" class="muted">Chưa có pallet nào.</td></tr>'}</tbody></table></div>`);
 
     // Xuất CẢ LÔ (nhiều pallet — mỗi pallet 1 mã SSCC riêng theo chuẩn GS1 — có thể cùng chung
     // 1 Lô TP/lot_code) trong 1 lần, thay vì phải xuất từng pallet lẻ (yêu cầu người dùng
@@ -1662,13 +1665,16 @@
       <td><code class="k">${esc(l.lot_code)}</code></td><td>${esc(l.product || "—")}</td>
       <td style="text-align:right">${l.pallet_count}</td><td style="text-align:right">${l.total_units}</td>
       <td class="muted">${Object.entries(l.by_status || {}).map(([k, v]) => `${esc(PALLET_STATUS_LABEL[k] || k)}: ${v}`).join(" · ") || "—"}</td>
+      <td class="muted" style="white-space:nowrap">${l.first_stocked_at ? fmt(l.first_stocked_at) : "—"}</td>
+      <td class="muted" style="white-space:nowrap">${l.last_shipped_at ? fmt(l.last_shipped_at) : "—"}</td>
       <td>${canIssue ? `<button class="btn sm sec" data-shiplot="${esc(l.lot_code)}" data-lotpallets="${l.pallet_count}" data-lotunits="${l.total_units}">Xuất cả lô</button>` : ""}</td>
     </tr>`).join("");
     const lotsPanel = panel("🚚 Xuất theo lô", `
       <div class="muted" style="margin-bottom:6px">1 Lô TP có thể gồm nhiều pallet (mỗi pallet 1 mã riêng) — xuất cả lô 1 lần thay vì từng pallet.</div>
       <input class="searchbox" data-tbl="t_wms_lot" placeholder="Tìm theo lô, SP..."/>
-      <div class="tablewrap"><table id="t_wms_lot"><thead><tr><th>Lô</th><th>SP</th><th style="text-align:right">Số pallet</th><th style="text-align:right">Tổng SL</th><th>Trạng thái pallet</th><th></th></tr></thead>
-      <tbody>${lotRows || '<tr><td colspan="6" class="muted">Không có lô nào còn pallet chưa xuất.</td></tr>'}</tbody></table></div>`);
+      <div class="tablewrap"><table id="t_wms_lot"><thead><tr><th>Lô</th><th>SP</th><th style="text-align:right">Số pallet</th><th style="text-align:right">Tổng SL</th><th>Trạng thái pallet</th>
+        <th>Ngày nhập kho TP</th><th>Ngày xuất gần nhất</th><th></th></tr></thead>
+      <tbody>${lotRows || '<tr><td colspan="8" class="muted">Không có lô nào còn pallet chưa xuất.</td></tr>'}</tbody></table></div>`);
 
     root.innerHTML = overview + locations + buildForm + lotsPanel + palletsPanel;
     wirePaginate("t_wms_lot", 10);
