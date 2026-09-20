@@ -1665,7 +1665,7 @@
     const lotRows = lots.map(l => `<tr>
       <td><code class="k">${esc(l.lot_code)}</code></td><td>${skuLabel(l.product, l.product_name)}</td>
       <td style="text-align:right">${l.pallet_count_all_time}</td>
-      <td style="text-align:right"><b>${l.pallet_count}</b></td>
+      <td style="text-align:right"><b${l.pallet_count > 0 ? ` style="color:var(--orange)"` : ""}>${l.pallet_count}</b></td>
       <td style="text-align:right">${l.total_cases_all_time}</td>
       <td style="text-align:right"><b>${l.total_cases}</b></td>
       <td class="muted">${Object.entries(l.by_status || {}).map(([k, v]) => `${esc(PALLET_STATUS_LABEL[k] || k)}: ${v}`).join(" · ") || "—"}</td>
