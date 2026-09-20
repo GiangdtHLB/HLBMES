@@ -130,3 +130,42 @@ class DowntimeEvent(Base):
     note: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)
     recorded_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
     recorded_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+
+
+class OeeCountEvent(Base):
+    """Sản lượng TỐT ra khỏi line theo mốc thời gian (counter cuối line) — nuôi Performance +
+    Quality cho công thức OEE tính theo KHUNG GIỜ BẤT KỲ (không khóa vào "ca"), xem blueprint
+    "OEE khung giờ bất kỳ" 2026-09-20: lưu sự kiện thô có timestamp thay vì tổng theo ca, để
+    tính OEE cho giờ/ca/ngày/đang-chạy đều dùng đúng 1 hàm lọc theo [t1, t2].
+
+    `source` = "manual" (nhập tay, bước đệm khi chưa có counter PLC thật) | "counter" (tương
+    lai, khi nối counter PLC thật) — chỉ để hiển thị/kiểm toán, không chặn quyền."""
+
+    __tablename__ = "oee_count_event"
+
+    event_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
+    line: Mapped[str] = mapped_column(Unicode(255), index=True)
+    ts: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, index=True)
+    qty: Mapped[float] = mapped_column(Float, default=0.0)
+    source: Mapped[str] = mapped_column(Unicode(32), default="manual")
+    note: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)
+    recorded_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    recorded_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+
+
+class OeeRejectEvent(Base):
+    """Phế phẩm theo mốc thời gian, đếm ĐỘC LẬP tại máy kiểm/nhập tay — KHÔNG được suy ra bằng
+    (Tổng − Tốt), vì lúc dừng máy không có count nào (tổn thất đó thuộc Availability theo thời
+    gian, không phải Quality) và luôn có hàng đang di chuyển giữa 2 counter (WIP) làm chênh lệch
+    giả. Nuôi Quality cho công thức OEE tính theo khung giờ bất kỳ — xem OeeCountEvent."""
+
+    __tablename__ = "oee_reject_event"
+
+    event_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
+    line: Mapped[str] = mapped_column(Unicode(255), index=True)
+    ts: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, index=True)
+    qty: Mapped[float] = mapped_column(Float, default=0.0)
+    reason: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    source: Mapped[str] = mapped_column(Unicode(32), default="manual")
+    recorded_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    recorded_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)

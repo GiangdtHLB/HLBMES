@@ -942,6 +942,20 @@ class DowntimeIn(BaseModel):
     note: Optional[str] = None
 
 
+class OeeCountEventIn(BaseModel):
+    line: str
+    ts: Optional[datetime] = None
+    qty: float
+    note: Optional[str] = None
+
+
+class OeeRejectEventIn(BaseModel):
+    line: str
+    ts: Optional[datetime] = None
+    qty: float
+    reason: Optional[str] = None
+
+
 class OeeReasonCatalogIn(BaseModel):
     line_code: Optional[str] = None
     category: str

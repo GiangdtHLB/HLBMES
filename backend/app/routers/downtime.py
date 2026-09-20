@@ -4,11 +4,14 @@
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
+from datetime import datetime
+
 from ..database import get_db
-from ..schemas import DowntimeIn, OeeMinorStopTallyIn, OeeReasonCatalogIn, OeeReasonCatalogUpdate
+from ..schemas import (DowntimeIn, OeeCountEventIn, OeeMinorStopTallyIn, OeeReasonCatalogIn,
+                       OeeReasonCatalogUpdate, OeeRejectEventIn)
 from ..security import User, get_current_user
 from ..services import downtime as svc
-from ..services import oee_minor_stop, oee_summary, oee_waterfall
+from ..services import oee_minor_stop, oee_summary, oee_waterfall, oee_window
 
 router = APIRouter(prefix="/api/downtime", tags=["downtime"])
 
@@ -114,3 +117,25 @@ def upsert_minor_stop_tally(payload: OeeMinorStopTallyIn, db: Session = Depends(
 def minor_stop_pareto(line_code: str, iso_year: int, db: Session = Depends(get_db),
                       user: User = Depends(get_current_user)):
     return oee_minor_stop.weekly_pareto(db, line_code, iso_year)
+
+
+# ---- Blueprint "OEE khung giờ bất kỳ" (2026-09-20): sự kiện thô có mốc thời gian, tính OEE
+# theo [t1, t2] bất kỳ thay vì chỉ theo "ca" cố định (xem services/oee_window.py). ----
+@router.post("/count-events", status_code=201)
+def record_count_event(payload: OeeCountEventIn, db: Session = Depends(get_db),
+                       user: User = Depends(get_current_user)):
+    ev = oee_window.record_count_event(db, payload.model_dump(), user)
+    return {"event_id": ev.event_id, "line": ev.line, "ts": ev.ts, "qty": ev.qty}
+
+
+@router.post("/reject-events", status_code=201)
+def record_reject_event(payload: OeeRejectEventIn, db: Session = Depends(get_db),
+                        user: User = Depends(get_current_user)):
+    ev = oee_window.record_reject_event(db, payload.model_dump(), user)
+    return {"event_id": ev.event_id, "line": ev.line, "ts": ev.ts, "qty": ev.qty, "reason": ev.reason}
+
+
+@router.get("/oee-window")
+def oee_window_calc(line: str, t1: datetime, t2: datetime, db: Session = Depends(get_db),
+                    user: User = Depends(get_current_user)):
+    return oee_window.compute_oee_window(db, line, t1, t2)

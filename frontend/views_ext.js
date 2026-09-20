@@ -797,8 +797,10 @@
   // ======================================================================
   VIEWS.oee = async function () {
     const root = $("view-oee");
+    // OEE đóng gói CHỈ lấy dây chuyền khu vực "chiet" (không lẫn Nấu/Lên men...), và chỉ 5
+    // ngày gần nhất — tránh hiển thị quá nhiều dòng cũ (yêu cầu người dùng 2026-09-20).
     const [oee, pareto, losses, mtbf, lns] = await Promise.all([
-      GET("/oee"), GET("/downtime/pareto"),
+      GET("/oee?area=chiet&days=5"), GET("/downtime/pareto"),
       GET("/downtime/big-losses"), GET("/downtime/mtbf"), GET("/lines?active_only=true&kind=line").catch(() => [])]);
     const donuts = oee.map(r => `<div class="panel" style="text-align:center">
       <h3>${esc(r.line)} · ca ${esc(r.shift)}</h3>${CH.donut(r.oee, { label: "OEE" })}
@@ -819,7 +821,7 @@
     };
     let dtTree = await dtTreeForLine(lns[0] && lns[0].code);
     root.innerHTML = `
-      ${panel("⚙️ OEE đóng gói", `<div class="split">${donuts || '<div class="muted">—</div>'}</div>`)}
+      ${panel("⚙️ OEE đóng gói", `<div class="muted" style="margin-bottom:8px">Dây chuyền khu vực Chiết · 5 ngày gần nhất.</div><div class="split">${donuts || '<div class="muted">Chưa có dữ liệu OEE trong 5 ngày gần nhất.</div>'}</div>`)}
       ${panel("📝 Nhập OEE theo ca (chọn dây chuyền)", `
         <div class="row">
           <div class="field"><label>Dây chuyền</label><select id="oe_line">${lineOpts}</select></div>
@@ -840,6 +842,38 @@
           <div class="field"><label>Phút</label><input id="dt_min" value="15" style="width:80px"/></div>
           <div class="field"><label>Ca</label><select id="dt_shift"><option>A</option><option>B</option><option>C</option></select></div>
           <div class="field" style="align-self:flex-end"><button class="btn" id="dt_go">Ghi</button></div>
+        </div>`)}
+      ${panel("🕐 OEE khung giờ bất kỳ", `
+        <div class="muted" style="margin-bottom:8px">Tính OEE cho BẤT KỲ khung giờ (không khóa vào "ca") — lọc 3 luồng sự kiện có mốc thời gian: dừng máy (ở trên), sản lượng tốt và phế phẩm (ghi riêng bên dưới, KHÔNG suy phế phẩm từ Tổng − Tốt).</div>
+        <div class="row" style="flex-wrap:wrap;align-items:flex-end">
+          <div class="field"><label>Dây chuyền</label><select id="ow_line">${lineOpts}</select></div>
+          <div class="field"><label>Từ</label><input type="datetime-local" id="ow_t1" style="width:190px"/></div>
+          <div class="field"><label>Đến</label><input type="datetime-local" id="ow_t2" style="width:190px"/></div>
+          <button class="btn sec sm" id="ow_preset_hour" type="button">1 giờ gần nhất</button>
+          <button class="btn sec sm" id="ow_preset_today" type="button">Hôm nay</button>
+          <button class="btn" id="ow_go" type="button">Xem OEE</button>
+        </div>
+        <div id="ow_result" class="muted" style="margin-top:10px">Chọn khung giờ rồi bấm "Xem OEE".</div>
+        <div class="row" style="flex-wrap:wrap;margin-top:16px;gap:24px">
+          <div style="min-width:280px">
+            <h4 style="margin:0 0 6px">🔢 Ghi sản lượng tốt</h4>
+            <div class="row" style="flex-wrap:wrap">
+              <div class="field"><label>Dây chuyền</label><select id="cg_line">${lineOpts}</select></div>
+              <div class="field"><label>Lúc</label><input type="datetime-local" id="cg_ts" style="width:190px"/></div>
+              <div class="field"><label>Số lượng</label><input id="cg_qty" value="0" style="width:90px"/></div>
+              <div class="field" style="align-self:flex-end"><button class="btn sm" id="cg_go" type="button">Ghi</button></div>
+            </div>
+          </div>
+          <div style="min-width:280px">
+            <h4 style="margin:0 0 6px">❌ Ghi phế phẩm</h4>
+            <div class="row" style="flex-wrap:wrap">
+              <div class="field"><label>Dây chuyền</label><select id="rj_line">${lineOpts}</select></div>
+              <div class="field"><label>Lúc</label><input type="datetime-local" id="rj_ts" style="width:190px"/></div>
+              <div class="field"><label>Số lượng</label><input id="rj_qty" value="0" style="width:90px"/></div>
+              <div class="field"><label>Lý do</label><input id="rj_reason" style="width:160px"/></div>
+              <div class="field" style="align-self:flex-end"><button class="btn sm" id="rj_go" type="button">Ghi</button></div>
+            </div>
+          </div>
         </div>`)}
       ${panel("📊 Pareto thời gian dừng theo lý do", `
         ${CH.vbars((pareto.items || []).map(i => ({ label: i.label, value: i.minutes })), { unit: "phút", color: "#e67e22" })}
@@ -884,6 +918,47 @@
         ideal_rate_per_min: num("oe_rate") || 0, total_count: num("oe_tot") || 0,
         good_count: num("oe_good") || 0 });
       toast("Đã ghi OEE ca"); render("oee");
+    });
+    // ---- OEE khung giờ bất kỳ (blueprint 2026-09-20) ----
+    const nowLocal = new Date();
+    const hourAgoLocal = new Date(nowLocal.getTime() - 60 * 60 * 1000);
+    $("ow_t1").value = toDTLocal(hourAgoLocal);
+    $("ow_t2").value = toDTLocal(nowLocal);
+    $("cg_ts").value = toDTLocal(nowLocal);
+    $("rj_ts").value = toDTLocal(nowLocal);
+    $("ow_preset_hour").onclick = () => {
+      const n = new Date();
+      $("ow_t1").value = toDTLocal(new Date(n.getTime() - 60 * 60 * 1000));
+      $("ow_t2").value = toDTLocal(n);
+    };
+    $("ow_preset_today").onclick = () => {
+      const n = new Date();
+      $("ow_t1").value = toDTLocal(new Date(n.getFullYear(), n.getMonth(), n.getDate(), 0, 0));
+      $("ow_t2").value = toDTLocal(n);
+    };
+    $("ow_go").onclick = () => guard(async () => {
+      const line = $("ow_line").value;
+      if (!line) { toast("Chưa có dây chuyền — thêm ở Danh mục", "err"); return; }
+      const t1v = $("ow_t1").value, t2v = $("ow_t2").value;
+      if (!t1v || !t2v) { toast("Chọn đủ khung Từ/Đến.", "err"); return; }
+      const t1 = new Date(t1v).toISOString(), t2 = new Date(t2v).toISOString();
+      const r = await GET(`/downtime/oee-window?line=${encodeURIComponent(line)}&t1=${encodeURIComponent(t1)}&t2=${encodeURIComponent(t2)}`);
+      $("ow_result").innerHTML = `<b style="font-size:22px">${(r.oee * 100).toFixed(1)}% OEE</b>
+        <span class="muted">— A ${(r.availability * 100).toFixed(1)}% · P ${(r.performance * 100).toFixed(1)}% · Q ${(r.quality * 100).toFixed(1)}%</span>
+        <div class="muted" style="font-size:12px;margin-top:4px">Khung ${r.window_min.toFixed(0)}' · Dừng ${r.downtime_min.toFixed(0)}' · Chạy ${r.run_time_min.toFixed(0)}' · Tốt ${r.good} · Phế ${r.reject}</div>`;
+    });
+    $("cg_go").onclick = () => guard(async () => {
+      if (!$("cg_line").value) { toast("Chưa có dây chuyền — thêm ở Danh mục", "err"); return; }
+      await POST("/downtime/count-events", { line: $("cg_line").value,
+        ts: $("cg_ts").value ? new Date($("cg_ts").value).toISOString() : undefined, qty: num("cg_qty") || 0 });
+      toast("Đã ghi sản lượng tốt");
+    });
+    $("rj_go").onclick = () => guard(async () => {
+      if (!$("rj_line").value) { toast("Chưa có dây chuyền — thêm ở Danh mục", "err"); return; }
+      await POST("/downtime/reject-events", { line: $("rj_line").value,
+        ts: $("rj_ts").value ? new Date($("rj_ts").value).toISOString() : undefined,
+        qty: num("rj_qty") || 0, reason: $("rj_reason").value || undefined });
+      toast("Đã ghi phế phẩm");
     });
   };
 

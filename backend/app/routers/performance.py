@@ -1,11 +1,14 @@
 """OEE đóng gói (tài liệu §7.7)."""
 
+from datetime import timedelta
+
 from fastapi import APIRouter, Depends
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..common import Role, new_id, utcnow
 from ..database import get_db
+from ..models.lines import ProductionLine
 from ..models.metrics import OEERecord
 from ..schemas import OEEIn, OEEOut
 from ..security import User, get_current_user, require_role
@@ -16,10 +19,17 @@ router = APIRouter(prefix="/api/oee", tags=["performance"],
 
 
 @router.get("", response_model=list[OEEOut])
-def list_oee(line: str = None, db: Session = Depends(get_db)):
+def list_oee(line: str = None, area: str = None, days: int = None, db: Session = Depends(get_db)):
     stmt = select(OEERecord)
     if line:
         stmt = stmt.where(OEERecord.line == line)
+    if area:
+        # OEERecord.line là chuỗi tự do (khớp ProductionLine.code) — lọc theo khu vực (yêu cầu
+        # người dùng 2026-09-20: "OEE lấy theo dây chuyền chiết, tránh hiển thị quá nhiều").
+        codes = db.execute(select(ProductionLine.code).where(ProductionLine.area == area)).scalars().all()
+        stmt = stmt.where(OEERecord.line.in_(codes))
+    if days:
+        stmt = stmt.where(OEERecord.shift_date >= utcnow() - timedelta(days=days))
     recs = db.execute(stmt.order_by(OEERecord.shift_date.desc())).scalars().all()
     return [compute_oee(r) for r in recs]
 

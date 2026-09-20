@@ -51,7 +51,7 @@ from .quality_ext import (
     Sample,
     StageQcGroup,
 )
-from .oee_ext import DowntimeEvent
+from .oee_ext import DowntimeEvent, OeeCountEvent, OeeRejectEvent
 from .ai_memory import AiConversation, AiMessage
 from .jobs import Job
 from .isa88 import BatchPhaseRun
