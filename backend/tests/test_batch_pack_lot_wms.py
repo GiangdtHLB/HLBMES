@@ -131,8 +131,16 @@ def _save_allocations(client, headers, pack_lot_id, allocations):
                       json={"allocations": allocations})
 
 
-def _release_row(client, headers, pack_lot_id, row_id):
-    return client.post(f"/api/batch-pack-lots/{pack_lot_id}/pack-allocations/{row_id}/release", headers=headers)
+def _make_location(client, admin_h, suffix, capacity=50):
+    r = client.post("/api/wms/locations", headers=admin_h,
+                    json={"code": f"LOC-{suffix}", "name": f"Vị trí {suffix}", "capacity": capacity})
+    assert r.status_code == 201, r.text
+    return r.json()["loc_id"]
+
+
+def _release_row(client, headers, pack_lot_id, row_id, loc_id):
+    return client.post(f"/api/batch-pack-lots/{pack_lot_id}/pack-allocations/{row_id}/release",
+                       headers=headers, json={"loc_id": loc_id})
 
 
 def _row_id_for_spec(pack_lot, spec_id):
@@ -184,21 +192,24 @@ def test_release_row_creates_full_and_remainder_pallets_and_stamps_who(client, a
     spec_id = _make_spec(client, admin_h, fp_id, "QC01", 110, layers=10)
     pack_lot_id = _build_pack_lot(client, admin_h, "ROW01", fp_id, ca1=250)
 
+    loc_id = _make_location(client, admin_h, "ROW01")
     saved = _save_allocations(client, admin_h, pack_lot_id, [{"spec_id": spec_id, "quantity": 250}])
     assert saved.status_code == 200, saved.text
     row = saved.json()["pack_allocations"][0]
     assert row["saved_by"] == "admin" and row["released"] is False
     assert saved.json()["unstocked_remainder"] == 250
 
-    release = _release_row(client, admin_h, pack_lot_id, row["row_id"])
+    release = _release_row(client, admin_h, pack_lot_id, row["row_id"], loc_id)
     assert release.status_code == 200, release.text
     result = release.json()
     assert len(result["pallet_codes"]) == 3
     assert result["stocked"] is True
+    assert result["location"] == "LOC-ROW01"
 
     p = client.get(f"/api/batch-pack-lots/{pack_lot_id}", headers=admin_h).json()
     released_row = p["pack_allocations"][0]
     assert released_row["released"] is True and released_row["released_by"] == "admin"
+    assert released_row["location"] == "LOC-ROW01"
     assert p["stocked"] is True and p["stocked_by"] == "admin"
     assert p["unstocked_remainder"] == 0
 
@@ -208,7 +219,8 @@ def test_release_row_creates_full_and_remainder_pallets_and_stamps_who(client, a
     assert case_counts == [30, 110, 110]
     for pl in made:
         assert pl["units_per_case"] == 24
-        assert pl["status"] == "building"
+        assert pl["status"] == "stored"
+        assert pl["location"] == "LOC-ROW01"
 
 
 def test_each_row_has_independent_release_button_and_remainder_warning(client, admin_h):
@@ -219,6 +231,7 @@ def test_each_row_has_independent_release_button_and_remainder_warning(client, a
     spec_b = _make_spec(client, admin_h, fp_id, "QC-B", 110)
     pack_lot_id = _build_pack_lot(client, admin_h, "ROW02", fp_id, ca1=100, ca2=110)
 
+    loc_id = _make_location(client, admin_h, "ROW02")
     saved = _save_allocations(client, admin_h, pack_lot_id,
                               [{"spec_id": spec_a, "quantity": 100}, {"spec_id": spec_b, "quantity": 110}])
     assert saved.status_code == 200, saved.text
@@ -226,7 +239,7 @@ def test_each_row_has_independent_release_button_and_remainder_warning(client, a
     row_b = _row_id_for_spec(saved.json(), spec_b)
     assert saved.json()["unstocked_remainder"] == 210
 
-    release_a = _release_row(client, admin_h, pack_lot_id, row_a)
+    release_a = _release_row(client, admin_h, pack_lot_id, row_a, loc_id)
     assert release_a.status_code == 200, release_a.text
     assert release_a.json()["stocked"] is False   # còn dòng B chưa duyệt
 
@@ -234,7 +247,7 @@ def test_each_row_has_independent_release_button_and_remainder_warning(client, a
     assert mid["unstocked_remainder"] == 110
     assert mid["stocked"] is False
 
-    release_b = _release_row(client, admin_h, pack_lot_id, row_b)
+    release_b = _release_row(client, admin_h, pack_lot_id, row_b, loc_id)
     assert release_b.status_code == 200, release_b.text
     assert release_b.json()["stocked"] is True
 
@@ -253,18 +266,19 @@ def test_release_row_blocked_until_kcs_approved(client, admin_h):
     spec_id = _make_spec(client, admin_h, fp_id, "QC01", 110)
     pack_lot_id = _build_pack_lot(client, admin_h, "NOAPPROVE", fp_id, ca1=110, approve=False)
 
+    loc_id = _make_location(client, admin_h, "NOAPPROVE")
     saved = _save_allocations(client, admin_h, pack_lot_id, [{"spec_id": spec_id, "quantity": 110}])
     assert saved.status_code == 200, saved.text
     row_id = saved.json()["pack_allocations"][0]["row_id"]
 
-    blocked = _release_row(client, admin_h, pack_lot_id, row_id)
+    blocked = _release_row(client, admin_h, pack_lot_id, row_id, loc_id)
     assert blocked.status_code == 409, blocked.text
     assert "Duyệt KCS" in blocked.json()["detail"]
 
     approve = client.post(f"/api/batch-pack-lots/{pack_lot_id}/approve", headers=admin_h)
     assert approve.status_code == 200, approve.text
 
-    release = _release_row(client, admin_h, pack_lot_id, row_id)
+    release = _release_row(client, admin_h, pack_lot_id, row_id, loc_id)
     assert release.status_code == 200, release.text
 
 
@@ -272,21 +286,57 @@ def test_release_row_blocked_when_already_released(client, admin_h):
     fp_id = _make_sku(client, admin_h, "DUPROW")
     spec_id = _make_spec(client, admin_h, fp_id, "QC01", 110)
     pack_lot_id = _build_pack_lot(client, admin_h, "DUPROW", fp_id, ca1=110)
+    loc_id = _make_location(client, admin_h, "DUPROW")
     saved = _save_allocations(client, admin_h, pack_lot_id, [{"spec_id": spec_id, "quantity": 110}])
     row_id = saved.json()["pack_allocations"][0]["row_id"]
 
-    ok = _release_row(client, admin_h, pack_lot_id, row_id)
+    ok = _release_row(client, admin_h, pack_lot_id, row_id, loc_id)
     assert ok.status_code == 200, ok.text
 
-    dup = _release_row(client, admin_h, pack_lot_id, row_id)
+    dup = _release_row(client, admin_h, pack_lot_id, row_id, loc_id)
     assert dup.status_code == 409, dup.text
 
 
 def test_release_row_not_found(client, admin_h):
     fp_id = _make_sku(client, admin_h, "NOROW")
+    loc_id = _make_location(client, admin_h, "NOROW")
     pack_lot_id = _build_pack_lot(client, admin_h, "NOROW", fp_id, ca1=110)
-    missing = _release_row(client, admin_h, pack_lot_id, "not-a-real-row-id")
+    missing = _release_row(client, admin_h, pack_lot_id, "not-a-real-row-id", loc_id)
     assert missing.status_code == 404, missing.text
+
+
+def test_release_row_requires_loc_id(client, admin_h):
+    fp_id = _make_sku(client, admin_h, "NOLOC")
+    spec_id = _make_spec(client, admin_h, fp_id, "QC01", 110)
+    pack_lot_id = _build_pack_lot(client, admin_h, "NOLOC", fp_id, ca1=110)
+    saved = _save_allocations(client, admin_h, pack_lot_id, [{"spec_id": spec_id, "quantity": 110}])
+    row_id = saved.json()["pack_allocations"][0]["row_id"]
+
+    missing_loc = client.post(f"/api/batch-pack-lots/{pack_lot_id}/pack-allocations/{row_id}/release",
+                              headers=admin_h, json={"loc_id": ""})
+    assert missing_loc.status_code == 409, missing_loc.text
+    assert "vị trí kho" in missing_loc.json()["detail"]
+
+    bad_loc = _release_row(client, admin_h, pack_lot_id, row_id, "not-a-real-loc-id")
+    assert bad_loc.status_code == 404, bad_loc.text
+
+
+def test_release_row_blocked_when_location_full(client, admin_h):
+    fp_id = _make_sku(client, admin_h, "LOCFULL")
+    spec_id = _make_spec(client, admin_h, fp_id, "QC01", 100)
+    loc_id = _make_location(client, admin_h, "LOCFULL", capacity=1)
+    pack_lot_id = _build_pack_lot(client, admin_h, "LOCFULL", fp_id, ca1=150)
+    saved = _save_allocations(client, admin_h, pack_lot_id, [{"spec_id": spec_id, "quantity": 150}])
+    row_id = saved.json()["pack_allocations"][0]["row_id"]
+
+    # 150 vỉ / 100 mỗi pallet -> 2 pallet (1 đầy + 1 lẻ), vị trí chỉ chứa được 1 -> chặn, không
+    # tạo pallet nào cả (kiểm tra trước, xuất sau).
+    blocked = _release_row(client, admin_h, pack_lot_id, row_id, loc_id)
+    assert blocked.status_code == 409, blocked.text
+    assert "không đủ chỗ" in blocked.json()["detail"]
+
+    p = client.get(f"/api/batch-pack-lots/{pack_lot_id}", headers=admin_h).json()
+    assert p["pack_allocations"][0]["released"] is False
 
 
 def test_save_cannot_modify_or_drop_released_row(client, admin_h):
@@ -296,9 +346,10 @@ def test_save_cannot_modify_or_drop_released_row(client, admin_h):
     spec_id = _make_spec(client, admin_h, fp_id, "QC01", 110)
     spec_other = _make_spec(client, admin_h, fp_id, "QC02", 50)
     pack_lot_id = _build_pack_lot(client, admin_h, "IMMUT", fp_id, ca1=110)
+    loc_id = _make_location(client, admin_h, "IMMUT")
     saved = _save_allocations(client, admin_h, pack_lot_id, [{"spec_id": spec_id, "quantity": 110}])
     row_id = saved.json()["pack_allocations"][0]["row_id"]
-    _release_row(client, admin_h, pack_lot_id, row_id)
+    _release_row(client, admin_h, pack_lot_id, row_id, loc_id)
 
     tampered = _save_allocations(client, admin_h, pack_lot_id,
                                  [{"row_id": row_id, "spec_id": spec_id, "quantity": 999}])
@@ -340,10 +391,11 @@ def test_release_row_requires_production_release_to_wms_permission(client, admin
     fp_id = _make_sku(client, admin_h, "PERM01")
     spec_id = _make_spec(client, admin_h, fp_id, "QC01", 110)
     pack_lot_id = _build_pack_lot(client, admin_h, "PERM01", fp_id, ca1=5)
+    loc_id = _make_location(client, admin_h, "PERM01")
     saved = _save_allocations(client, admin_h, pack_lot_id, [{"spec_id": spec_id, "quantity": 5}])
     row_id = saved.json()["pack_allocations"][0]["row_id"]
 
-    forbidden = _release_row(client, vanhanh_h, pack_lot_id, row_id)
+    forbidden = _release_row(client, vanhanh_h, pack_lot_id, row_id, loc_id)
     assert forbidden.status_code == 403, forbidden.text
 
 

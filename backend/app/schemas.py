@@ -108,6 +108,10 @@ class PackLotAllocationsIn(BaseModel):
     allocations: list[PalletAllocationRowIn]
 
 
+class ReleasePackLotAllocationIn(BaseModel):
+    loc_id: str
+
+
 class PackingSpecIn(BaseModel):
     code: str
     name: Optional[str] = None

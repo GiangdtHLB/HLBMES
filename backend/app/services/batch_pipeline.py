@@ -14,7 +14,7 @@ import re
 from datetime import timedelta
 from typing import Optional
 
-from sqlalchemy import select, true
+from sqlalchemy import func, select, true
 from sqlalchemy.orm import Session
 
 from ..audit import record_audit
@@ -43,6 +43,7 @@ from ..models.master import BeerType, FinishedProduct, Material, PackingSpec, Pr
 from ..models.materials import MaterialLot
 from ..models.quality import Deviation, QualityResult
 from ..models.signature import Signature
+from ..models.wms import Pallet, WmsLocation
 from ..models.workorder import WorkOrder
 from ..security import User, require_perm
 from . import dispense as dispense_svc
@@ -1721,7 +1722,7 @@ def save_pack_lot_allocations(db: Session, pack_lot_id: str, allocations: list[d
     return p
 
 
-def release_pack_lot_allocation(db: Session, pack_lot_id: str, row_id: str, user: User) -> dict:
+def release_pack_lot_allocation(db: Session, pack_lot_id: str, row_id: str, user: User, loc_id: str) -> dict:
     """Giám đốc/Phó GĐ Sản xuất - Kỹ thuật duyệt nhập kho THEO TỪNG DÒNG phân bổ/quy cách —
     mirror routers/brewing.py::approve_bottle (module Nấu-Lọc-Chiết cũ; module đó đã THÁO khỏi
     WMS, Lô thành phẩm là nơi thay thế duy nhất tạo hàng nhập kho từ sản xuất), nhưng áp dụng
@@ -1730,7 +1731,17 @@ def release_pack_lot_allocation(db: Session, pack_lot_id: str, row_id: str, user
     thứ tự "duyệt" giờ tính theo dòng. Lưu released_by/released_at RIÊNG cho dòng đó — khác
     saved_by/saved_at (ai lưu phân bổ, xem save_pack_lot_allocations). Tạo `quantity //
     spec.units_per_pallet` pallet đầy + 1 pallet lẻ nếu còn dư, giống đúng logic release toàn
-    lô trước đây, chỉ khác phạm vi là 1 dòng."""
+    lô trước đây, chỉ khác phạm vi là 1 dòng.
+
+    `loc_id` BẮT BUỘC (yêu cầu người dùng 2026-09-20: "không gán vị trí thì không cho duyệt") —
+    khác trước đây pallet tạo ra ở trạng thái "building" không vị trí, chờ Kho TP tự "Cất" sau.
+    Giờ TẤT CẢ pallet của dòng này được "Cất" thẳng vào ĐÚNG 1 vị trí đã chọn ngay khi duyệt
+    (status="stored" luôn, không qua "building"/không vị trí nữa) — KHÔNG gọi thẳng
+    wms_svc.putaway() vì hàm đó tự đòi quyền warehouse.issue (người duyệt ở đây chỉ chắc chắn có
+    production.release_to_wms), nên kiểm tra sức chứa + gán vị trí NGAY TẠI ĐÂY, không qua lớp
+    quyền của putaway. Kiểm tra sức chứa 1 LẦN cho TOÀN BỘ số pallet dòng này sẽ tạo ra (không
+    phải từng pallet — nếu không đủ chỗ thì KHÔNG tạo pallet nào cả, mirror pattern "kiểm tra
+    trước, xuất sau" đã dùng ở warehouse.py::fulfill_request_line)."""
     require_perm(user, "production.release_to_wms")
     p = get_pack_lot(db, pack_lot_id)
     _assert_unlocked(p)
@@ -1738,6 +1749,11 @@ def release_pack_lot_allocation(db: Session, pack_lot_id: str, row_id: str, user
         raise DomainError("Chưa Duyệt KCS — không thể nhập kho thành phẩm.")
     if not p.finished_product_id:
         raise DomainError("Lô thành phẩm chưa gán Sản phẩm (SKU) — không thể chọn quy cách đóng gói pallet.")
+    if not loc_id:
+        raise DomainError("Chưa chọn vị trí kho — không thể duyệt nhập kho thành phẩm.")
+    loc = db.get(WmsLocation, loc_id)
+    if not loc:
+        raise NotFoundError("Vị trí kho không tồn tại.")
     rows = list(p.pack_allocations or [])
     idx = next((i for i, r in enumerate(rows) if r.get("row_id") == row_id), None)
     if idx is None:
@@ -1766,12 +1782,20 @@ def release_pack_lot_allocation(db: Session, pack_lot_id: str, row_id: str, user
     case_counts = [spec.units_per_pallet] * full_pallets
     if remainder_units > 0:
         case_counts.append(remainder_units)
+    used = db.execute(select(func.count(Pallet.pallet_id)).where(
+        Pallet.location_id == loc.loc_id, Pallet.status == "stored")).scalar() or 0
+    if used + len(case_counts) > loc.capacity:
+        raise DomainError(
+            f"Vị trí {loc.code} không đủ chỗ cho {len(case_counts)} pallet "
+            f"(còn trống {max(loc.capacity - used, 0)}/{loc.capacity}).")
     pallet_codes = []
     for case_count in case_counts:
         pallet = wms_svc._build_pallet(db, {
             "product": product_name, "lot_code": lot_code,
             "case_count": case_count, "units_per_case": pack_size,
         }, user, source="production")
+        pallet.location_id = loc.loc_id
+        pallet.status = "stored"
         genealogy.add_edge(db, from_type="batch_pack_lot", from_id=pack_lot_id, to_type="pallet",
                            to_id=pallet.pallet_id, relation="nhập kho", quantity=case_count, uom="case")
         pallet_codes.append(pallet.pallet_code)
@@ -1780,6 +1804,7 @@ def release_pack_lot_allocation(db: Session, pack_lot_id: str, row_id: str, user
     row["released_by"] = user.username
     row["released_at"] = utcnow().isoformat()
     row["pallet_codes"] = pallet_codes
+    row["location"] = loc.code
     rows[idx] = row
     p.pack_allocations = rows
     if not p.stocked and p.unstocked_remainder <= 0:
@@ -1788,10 +1813,10 @@ def release_pack_lot_allocation(db: Session, pack_lot_id: str, row_id: str, user
         p.stocked_at = utcnow()
     record_audit(db, entity_type="batch_pack_lot", entity_id=pack_lot_id, action="release_pack_allocation",
                 actor=user, after={"row_id": row_id, "spec_id": row["spec_id"], "quantity": row["quantity"],
-                                   "pallet_codes": pallet_codes})
+                                   "pallet_codes": pallet_codes, "location": loc.code})
     db.commit()
     return {"pack_lot_id": pack_lot_id, "row_id": row_id, "released": True,
-            "pallet_codes": pallet_codes, "stocked": p.stocked}
+            "pallet_codes": pallet_codes, "stocked": p.stocked, "location": loc.code}
 
 
 # ==================== NVL dùng cho lô thành phẩm (chiết) ====================

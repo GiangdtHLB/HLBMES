@@ -35,6 +35,7 @@ from ..schemas import (
     FilterLotFromOrderIn,
     FinishFilterLotBatchIn,
     PackLotAllocationsIn,
+    ReleasePackLotAllocationIn,
 )
 from ..security import User, get_current_user
 from ..services import batch_pipeline as svc
@@ -416,9 +417,9 @@ def save_pack_lot_allocations(pack_lot_id: str, payload: PackLotAllocationsIn,
 
 
 @router.post("/batch-pack-lots/{pack_lot_id}/pack-allocations/{row_id}/release")
-def release_pack_lot_allocation(pack_lot_id: str, row_id: str, db: Session = Depends(get_db),
-                                user: User = Depends(get_current_user)):
-    return svc.release_pack_lot_allocation(db, pack_lot_id, row_id, user)
+def release_pack_lot_allocation(pack_lot_id: str, row_id: str, payload: ReleasePackLotAllocationIn,
+                                db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    return svc.release_pack_lot_allocation(db, pack_lot_id, row_id, user, payload.loc_id)
 
 
 # ==================== EBR neo ở lô thành phẩm ====================

@@ -3722,64 +3722,124 @@ VIEWS.batchpacklots = async function () {
 // cứng (không Sửa/Xóa được nữa). Cảnh báo còn bao nhiêu vỉ/két CHƯA được duyệt nhập kho
 // (unstocked_remainder, tính từ server) — yêu cầu người dùng: "Có cảnh báo nếu module chiết còn
 // vỉ hoặc két gì đó chưa được duyệt nhập kho thành phẩm".
-function renderPkWmsAllocUi(packLotId, specs, caTotal, existingAllocations, unitLabel, approved, unstockedRemainder) {
+function renderPkWmsAllocUi(packLotId, specs, caTotal, existingAllocations, unitLabel, approved, unstockedRemainder, locations) {
   const specOptsHtml = (selectedId) => specs.map(s =>
     `<option value="${esc(s.spec_id)}" data-units="${s.units_per_pallet}" ${s.spec_id === selectedId ? "selected" : ""}>${esc(s.code)}${s.name ? " — " + esc(s.name) : ""} (${s.units_per_pallet}/pallet)</option>`).join("");
   const specById = Object.fromEntries(specs.map(s => [s.spec_id, s]));
   const u = unitLabel ? ` ${esc(unitLabel)}` : "";
+  // Vị trí kho — BẮT BUỘC chọn trước khi "Duyệt nhập kho TP" được (yêu cầu người dùng
+  // 2026-09-20: "thêm cho tôi cột gán vị trí vào, không gán vị trí thì không cho duyệt") — toàn
+  // bộ pallet của dòng đó "Cất" thẳng vào ĐÚNG vị trí đã chọn ngay khi duyệt (status="stored"
+  // luôn), không còn phải "Cất" tay sau ở màn Kho TP nữa.
+  const locOptsHtml = (selectedId) => `<option value="">— chọn vị trí —</option>` + locations.map(l =>
+    `<option value="${esc(l.loc_id)}" ${l.loc_id === selectedId ? "selected" : ""}>${esc(l.code)} — ${esc(l.name)}${l.used >= l.capacity ? " (đầy)" : ""}</option>`).join("");
   const toRow = (a) => ({ rowId: a.row_id, specId: a.spec_id, qty: String(a.quantity), editing: false,
     savedBy: a.saved_by, savedAt: a.saved_at, released: !!a.released,
-    releasedBy: a.released_by, releasedAt: a.released_at, palletCodes: a.pallet_codes || [] });
+    releasedBy: a.released_by, releasedAt: a.released_at, palletCodes: a.pallet_codes || [], confirmFinal: false,
+    locId: "", location: a.location || null });
   let rows = (existingAllocations && existingAllocations.length) ? existingAllocations.map(toRow) : [];
   // Dòng chưa lưu lần nào (mảng rỗng) tự bật sẵn 1 dòng ở chế độ Sửa để nhập ngay — mirror
   // editingCas (renderPkShiftsTable): ca chưa từng lưu mặc định ở chế độ Sửa luôn.
   if (!rows.length) rows.push({ rowId: null, specId: (specs[0] || {}).spec_id, qty: "", editing: true,
-    savedBy: null, savedAt: null, released: false, releasedBy: null, releasedAt: null, palletCodes: [] });
+    savedBy: null, savedAt: null, released: false, releasedBy: null, releasedAt: null, palletCodes: [], confirmFinal: false,
+    locId: "", location: null });
   const wrap = $("pk_wms_alloc_wrap");
   // Xem trước "quy đổi pallet" — tính sẵn số pallet đầy + pallet lẻ, mirror ĐÚNG phép tính
   // divmod ở services/batch_pipeline.py::release_pack_lot_allocation (int hóa qty trước khi chia).
-  const breakdownHtml = (specId, qtyRaw) => {
+  const computeBreakdown = (specId, qtyRaw) => {
     const spec = specById[specId];
     const qty = Math.round(parseFloat(qtyRaw) || 0);
-    if (!spec || qty <= 0) return "";
+    if (!spec || qty <= 0) return null;
     const full = Math.floor(qty / spec.units_per_pallet);
     const rem = qty - full * spec.units_per_pallet;
-    if (full > 0 && rem === 0) return `<span class="muted">→ ${full} pallet đầy (${spec.units_per_pallet}${u}/pallet), không dư</span>`;
-    if (full > 0 && rem > 0) return `<span class="muted">→ ${full} pallet đầy (${spec.units_per_pallet}${u}/pallet) + <b>pallet cuối chỉ có ${rem}${u}</b></span>`;
-    return `<span class="muted">→ 1 pallet — <b>pallet cuối chỉ có ${rem}${u}</b></span>`;
+    return { spec, qty, full, rem };
+  };
+  // "Số pallet" hiện SỐ ĐẾM rõ ràng (yêu cầu người dùng 2026-09-20: "tôi chưa thấy, số pallet
+  // đã đóng") — không chỉ mô tả bằng chữ như trước.
+  const breakdownHtml = (specId, qtyRaw) => {
+    const bd = computeBreakdown(specId, qtyRaw);
+    if (!bd) return "—";
+    const { spec, full, rem } = bd;
+    const total = full + (rem > 0 ? 1 : 0);
+    if (full > 0 && rem === 0) return `<b>${total} pallet</b><br/><span class="muted">${full} đầy (${spec.units_per_pallet}${u}/pallet), không dư</span>`;
+    if (full > 0 && rem > 0) return `<b>${total} pallet</b><br/><span class="muted">${full} đầy (${spec.units_per_pallet}${u}/pallet) + pallet cuối chỉ có <b>${rem}${u}</b></span>`;
+    return `<b>${total} pallet</b><br/><span class="muted">pallet cuối chỉ có <b>${rem}${u}</b></span>`;
+  };
+  const releasedPalletHtml = (row) => `<b>${row.palletCodes.length} pallet</b><br/><span class="muted">${row.palletCodes.map(esc).join(", ")}</span>`;
+  const palletsBuilt = rows.reduce((s, r) => s + (r.released ? r.palletCodes.length : 0), 0);
+  // SL còn thiếu SAU KHI tính cả mọi dòng đang khai (kể cả dòng đang gõ dở) — mirror đúng số
+  // hiện ở "Đã phân bổ X / Y — còn thiếu Z" (updateSum). Dùng số NÀY (không phải
+  // unstockedRemainder — số đó chỉ tính phần đã release lên WMS) để quyết định có cho phép 1
+  // dòng lẻ pallet hay không, vì đây là câu hỏi "còn bao nhiêu CHƯA ĐƯỢC KHAI ở dòng nào cả".
+  const sumRemaining = () => Math.round((caTotal - rows.reduce((s, r) => s + (parseFloat(r.qty) || 0), 0)) * 10000) / 10000;
+  // Còn lại BAO NHIÊU tính riêng cho dòng i — tổng cần trừ đi TẤT CẢ CÁC DÒNG KHÁC (không trừ
+  // chính dòng i) — dùng để biết "nếu dòng i không tồn tại thì còn thiếu bao nhiêu", từ đó suy
+  // ra dòng i có phải "lần đóng cuối" hay không VÀ nếu phải thì SL dòng i buộc phải bằng đúng
+  // số này (yêu cầu người dùng 2026-09-20: "trường hợp tồn vỉ cuối < 1 pallet thì bắt buộc phải
+  // nhập số vỉ bằng đúng số vỉ còn lại").
+  const remainingBeforeRow = (i) => Math.round((caTotal - rows.reduce(
+    (s, r, idx) => idx === i ? s : s + (parseFloat(r.qty) || 0), 0)) * 10000) / 10000;
+  const extraHtml = (i) => {
+    const row = rows[i];
+    const bd = computeBreakdown(row.specId, row.qty);
+    const bdHtml = breakdownHtml(row.specId, row.qty);
+    if (!bd) return bdHtml;
+    const remBefore = remainingBeforeRow(i);
+    const isFinalStretch = remBefore > 0 && remBefore < bd.spec.units_per_pallet;
+    if (!isFinalStretch) {
+      if (bd.rem <= 0) return bdHtml;
+      return `${bdHtml}<div style="color:var(--red);font-size:12px;margin-top:4px">⚠ Còn thiếu ${sumRemaining()}${u} (≥ 1 pallet) — phải nhập số TRÒN PALLET (bội số của ${bd.spec.units_per_pallet}), chưa được nhập lẻ.</div>`;
+    }
+    if (bd.qty !== remBefore) {
+      return `${bdHtml}<div style="color:var(--red);font-size:12px;margin-top:4px">⚠ Đây là lần đóng cuối (còn lại &lt; 1 pallet) — phải nhập ĐÚNG số còn lại: <b>${remBefore}${u}</b>.</div>`;
+    }
+    return `${bdHtml}<label style="display:block;font-size:12px;margin-top:4px;font-weight:normal">
+      <input type="checkbox" class="wmsalloc-confirmfinal" data-i="${i}" ${row.confirmFinal ? "checked" : ""}/>
+      Xác nhận SL cuối cùng (không đóng thêm)</label>`;
   };
   const render = () => {
     wrap.innerHTML = `<h3>Phân bổ quy cách đóng gói pallet${caTotal ? "" : ` <span class="muted">(chưa có SL theo ca)</span>`}</h3>
       <div class="muted" style="margin-bottom:6px">Nhân viên chiết khai NGAY trong lúc chiết, không cần chờ Duyệt KCS. Tổng SL cần phân bổ theo ca: <b>${caTotal}${u}</b>. Mỗi dòng chọn 1 quy cách đóng gói pallet đã dùng thật + số lượng đã đóng theo quy cách đó — MỖI dòng có nút "Duyệt nhập kho TP" riêng (chỉ sáng khi đã Duyệt KCS).</div>
+      <div class="muted" style="margin-bottom:6px">📦 Đã đóng: <b>${palletsBuilt} pallet</b> · Còn tồn: <b>${unstockedRemainder}${u}</b> chưa đóng pallet</div>
       ${unstockedRemainder > 0 ? `<div style="color:var(--red);margin-bottom:8px">⚠ Còn <b>${unstockedRemainder}${u}</b> chưa được duyệt nhập kho thành phẩm.</div>` : ""}
-      <div id="pk_wmsalloc_rows"></div>
+      <div class="tablewrap"><table>
+        <thead><tr><th>Quy cách đóng gói</th><th>Số lượng</th><th>Số pallet</th><th>Vị trí kho</th><th>Lưu bởi / Ngày giờ</th><th>Nhập kho thành phẩm</th><th></th></tr></thead>
+        <tbody id="pk_wmsalloc_rows"></tbody>
+      </table></div>
       <button class="btn sm sec" id="pk_wmsalloc_addrow" type="button" style="margin-top:6px">+ Thêm dòng</button>
       <div id="pk_wmsalloc_sum" style="margin-top:6px"></div>`;
     $("pk_wmsalloc_rows").innerHTML = rows.map((row, i) => {
       const spec = specById[row.specId];
       let cells;
       if (row.released) {
-        cells = `<div class="field"><label>Quy cách đóng gói</label><div>${spec ? esc(spec.code) + (spec.name ? " — " + esc(spec.name) : "") : "—"}</div></div>
-           <div class="field"><label>Số lượng</label><div>${esc(row.qty)}${u}</div></div>
-           <div style="min-width:220px">${breakdownHtml(row.specId, row.qty)}</div>
-           <div class="muted" style="font-size:12px">Lưu: ${row.savedBy ? esc(row.savedBy) : "—"} · ${row.savedAt ? fmt(row.savedAt) : "—"}<br/>
-             <span style="color:var(--green)">✓ Đã nhập kho</span>: ${esc(row.releasedBy)} · ${fmt(row.releasedAt)}</div>`;
+        cells = `<td>${spec ? esc(spec.code) + (spec.name ? " — " + esc(spec.name) : "") : "—"}</td>
+           <td>${esc(row.qty)}${u}</td>
+           <td>${releasedPalletHtml(row)}</td>
+           <td>${row.location ? esc(row.location) : "—"}</td>
+           <td class="muted" style="font-size:12px;white-space:nowrap">${row.savedBy ? esc(row.savedBy) : "—"} · ${row.savedAt ? fmt(row.savedAt) : "—"}</td>
+           <td style="font-size:12px"><span style="color:var(--green)">✓ Đã nhập kho</span><br/>${esc(row.releasedBy)} · ${fmt(row.releasedAt)}</td>
+           <td></td>`;
       } else if (row.editing) {
-        cells = `<div class="field"><label>Quy cách đóng gói</label><select class="wmsalloc-spec" data-i="${i}">${specOptsHtml(row.specId)}</select></div>
-           <div class="field"><label>Số lượng</label><input type="number" min="0" step="any" class="wmsalloc-qty" data-i="${i}" value="${esc(row.qty)}" style="width:110px"/></div>
-           <div style="min-width:220px">${breakdownHtml(row.specId, row.qty)}</div>
-           <button class="btn sm" data-wmsallocsave="${i}" type="button">Lưu</button>
-           <button class="btn sm sec" data-wmsallocdel="${i}" type="button">Xóa</button>`;
+        cells = `<td><select class="wmsalloc-spec" data-i="${i}">${specOptsHtml(row.specId)}</select></td>
+           <td><input type="number" min="0" step="any" class="wmsalloc-qty" data-i="${i}" value="${esc(row.qty)}" style="width:110px"/></td>
+           <td class="wmsalloc-extra" data-i="${i}">${extraHtml(i)}</td>
+           <td><select class="wmsalloc-loc" data-i="${i}" style="width:150px">${locOptsHtml(row.locId)}</select></td>
+           <td class="muted" style="font-size:12px;white-space:nowrap">${row.savedBy ? esc(row.savedBy) : "—"} · ${row.savedAt ? fmt(row.savedAt) : "—"}</td>
+           <td class="muted">—</td>
+           <td style="white-space:nowrap"><button class="btn sm" data-wmsallocsave="${i}" type="button">Lưu</button>
+           <button class="btn sm sec" data-wmsallocdel="${i}" type="button">Xóa</button></td>`;
       } else {
-        cells = `<div class="field"><label>Quy cách đóng gói</label><div>${spec ? esc(spec.code) + (spec.name ? " — " + esc(spec.name) : "") : "—"}</div></div>
-           <div class="field"><label>Số lượng</label><div>${esc(row.qty)}${u}</div></div>
-           <div style="min-width:220px">${breakdownHtml(row.specId, row.qty)}</div>
-           <div class="muted" style="font-size:12px">Lưu: ${row.savedBy ? esc(row.savedBy) : "—"} · ${row.savedAt ? fmt(row.savedAt) : "—"}</div>
-           <button class="btn sm sec" data-wmsallocedit="${i}" type="button">Sửa</button>
+        cells = `<td>${spec ? esc(spec.code) + (spec.name ? " — " + esc(spec.name) : "") : "—"}</td>
+           <td>${esc(row.qty)}${u}</td>
+           <td>${breakdownHtml(row.specId, row.qty)}</td>
+           <td><select class="wmsalloc-loc" data-i="${i}" style="width:150px">${locOptsHtml(row.locId)}</select></td>
+           <td class="muted" style="font-size:12px;white-space:nowrap">${row.savedBy ? esc(row.savedBy) : "—"} · ${row.savedAt ? fmt(row.savedAt) : "—"}</td>
+           <td class="muted">Chưa nhập kho</td>
+           <td style="white-space:nowrap"><button class="btn sm sec" data-wmsallocedit="${i}" type="button">Sửa</button>
            <button class="btn sm sec" data-wmsallocdel="${i}" type="button">Xóa</button>
-           ${approved && row.rowId ? `<button class="btn sm" data-wmsallocrelease="${i}" type="button">📦 Duyệt nhập kho TP</button>` : ""}`;
+           ${approved && row.rowId ? `<button class="btn sm" data-wmsallocrelease="${i}" type="button">📦 Duyệt nhập kho TP</button>` : ""}</td>`;
       }
-      return `<div class="row" data-wmsallocrow="${i}" style="align-items:flex-end;flex-wrap:wrap">${cells}</div>`;
+      return `<tr data-wmsallocrow="${i}">${cells}</tr>`;
     }).join("");
     const updateSum = () => {
       const sum = Math.round(rows.reduce((s, r) => s + (parseFloat(r.qty) || 0), 0) * 10000) / 10000;
@@ -3791,27 +3851,70 @@ function renderPkWmsAllocUi(packLotId, specs, caTotal, existingAllocations, unit
       }
     };
     const saveAll = async () => {
+      // Giữ lại lựa chọn "Vị trí kho" qua lần lưu — server KHÔNG lưu locId cho dòng chưa release
+      // (chỉ ghi lại location THẬT lúc Duyệt nhập kho), nên phải tự khớp lại theo row_id (dòng
+      // đã có id từ trước) hoặc theo vị trí thứ tự (dòng mới toanh, id server vừa cấp).
+      const prevLocByRowId = Object.fromEntries(rows.filter(row => row.rowId).map(row => [row.rowId, row.locId]));
+      const prevLocByIndex = rows.map(row => row.locId);
       const r = await PUT(`/batch-pack-lots/${packLotId}/pack-allocations`, {
         allocations: rows.map(row => ({ row_id: row.rowId || undefined, spec_id: row.specId, quantity: parseFloat(row.qty) || 0 }))
           .filter(a => a.quantity > 0),
       });
-      rows = (r.pack_allocations || []).map(toRow);
+      rows = (r.pack_allocations || []).map((a, idx) => {
+        const row = toRow(a);
+        row.locId = (a.row_id && prevLocByRowId[a.row_id]) || prevLocByIndex[idx] || "";
+        return row;
+      });
       return r;
     };
     document.querySelectorAll(".wmsalloc-spec").forEach(sel => sel.onchange = () => {
-      rows[parseInt(sel.dataset.i, 10)].specId = sel.value; render();
+      const i = parseInt(sel.dataset.i, 10);
+      rows[i].specId = sel.value; rows[i].confirmFinal = false; render();
     });
+    const wireConfirmFinal = (i) => {
+      const cb = document.querySelector(`.wmsalloc-confirmfinal[data-i="${i}"]`);
+      if (cb) cb.onchange = () => { rows[i].confirmFinal = cb.checked; };
+    };
     document.querySelectorAll(".wmsalloc-qty").forEach(inp => inp.oninput = () => {
-      rows[parseInt(inp.dataset.i, 10)].qty = inp.value;
-      const rowEl = document.querySelector(`[data-wmsallocrow="${inp.dataset.i}"]`);
-      const bdEl = rowEl && rowEl.querySelector("div[style*='min-width']");
-      if (bdEl) bdEl.innerHTML = breakdownHtml(rows[parseInt(inp.dataset.i, 10)].specId, inp.value);
+      const i = parseInt(inp.dataset.i, 10);
+      rows[i].qty = inp.value;
+      rows[i].confirmFinal = false;
+      const extraEl = document.querySelector(`.wmsalloc-extra[data-i="${i}"]`);
+      if (extraEl) { extraEl.innerHTML = extraHtml(i); wireConfirmFinal(i); }
       updateSum();
+    });
+    document.querySelectorAll(".wmsalloc-confirmfinal").forEach(cb => wireConfirmFinal(parseInt(cb.dataset.i, 10)));
+    document.querySelectorAll(".wmsalloc-loc").forEach(sel => sel.onchange = () => {
+      rows[parseInt(sel.dataset.i, 10)].locId = sel.value;
     });
     document.querySelectorAll("[data-wmsallocedit]").forEach(b => b.onclick = () => {
       rows[parseInt(b.dataset.wmsallocedit, 10)].editing = true; render();
     });
     document.querySelectorAll("[data-wmsallocsave]").forEach(b => b.onclick = () => guard(async () => {
+      for (let i = 0; i < rows.length; i++) {
+        const r = rows[i];
+        if (!r.editing) continue;
+        const bd = computeBreakdown(r.specId, r.qty);
+        if (!bd) continue;
+        if (!r.locId) {
+          toast(`Chưa chọn vị trí kho cho dòng "${bd.spec.code}" — phải chọn vị trí trước khi lưu.`, "err");
+          return;
+        }
+        const remBefore = remainingBeforeRow(i);
+        const isFinalStretch = remBefore > 0 && remBefore < bd.spec.units_per_pallet;
+        if (!isFinalStretch) {
+          if (bd.rem > 0) {
+            toast(`Còn thiếu ${sumRemaining()}${u} (≥ 1 pallet) — phải nhập số tròn pallet (bội số của ${bd.spec.units_per_pallet}) cho dòng "${bd.spec.code}".`, "err");
+            return;
+          }
+        } else if (bd.qty !== remBefore) {
+          toast(`Đây là lần đóng cuối cho dòng "${bd.spec.code}" (còn lại < 1 pallet) — phải nhập ĐÚNG số còn lại: ${remBefore}${u}.`, "err");
+          return;
+        } else if (!r.confirmFinal) {
+          toast('Cần tick "Xác nhận SL cuối cùng" cho dòng có pallet lẻ trước khi lưu.', "err");
+          return;
+        }
+      }
       await saveAll();
       toast("Đã lưu phân bổ quy cách đóng gói");
       render();
@@ -3826,14 +3929,19 @@ function renderPkWmsAllocUi(packLotId, specs, caTotal, existingAllocations, unit
     }));
     document.querySelectorAll("[data-wmsallocrelease]").forEach(b => b.onclick = () => guard(async () => {
       const row = rows[parseInt(b.dataset.wmsallocrelease, 10)];
+      if (!row.locId) {
+        toast("Chưa chọn vị trí kho — không thể duyệt nhập kho thành phẩm.", "err");
+        return;
+      }
       if (!confirm(`Duyệt nhập kho thành phẩm cho quy cách "${(specById[row.specId] || {}).code || ""}", số lượng ${row.qty}${u}?`)) return;
-      const r = await POST(`/batch-pack-lots/${packLotId}/pack-allocations/${row.rowId}/release`, {});
-      toast(`Đã duyệt nhập kho — tạo ${r.pallet_codes.length} pallet`);
+      const r = await POST(`/batch-pack-lots/${packLotId}/pack-allocations/${row.rowId}/release`, { loc_id: row.locId });
+      toast(`Đã duyệt nhập kho — tạo ${r.pallet_codes.length} pallet, cất vào ${r.location}`);
       showBatchPackLot(packLotId);
     }));
     $("pk_wmsalloc_addrow").onclick = () => {
       rows.push({ rowId: null, specId: (specs[0] || {}).spec_id, qty: "", editing: true,
-        savedBy: null, savedAt: null, released: false, releasedBy: null, releasedAt: null, palletCodes: [] });
+        savedBy: null, savedAt: null, released: false, releasedBy: null, releasedAt: null, palletCodes: [], confirmFinal: false,
+        locId: "", location: null });
       render();
     };
     updateSum();
@@ -4018,7 +4126,8 @@ async function showBatchPackLot(packLotId) {
       if (!activeSpecs.length) {
         $("pk_wms_alloc_wrap").innerHTML = `<div class="muted">Chưa khai "Quy cách đóng gói pallet" cho SKU ${esc(fp.code)} — khai ở tab Danh mục → Kho thành phẩm trước khi duyệt nhập kho.</div>`;
       } else {
-        renderPkWmsAllocUi(packLotId, activeSpecs, caTotal, p.pack_allocations, unitLabel, p.approved, p.unstocked_remainder);
+        const locations = await GET("/wms/locations").catch(() => []);
+        renderPkWmsAllocUi(packLotId, activeSpecs, caTotal, p.pack_allocations, unitLabel, p.approved, p.unstocked_remainder, locations);
       }
     }
   }

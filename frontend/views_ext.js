@@ -1649,7 +1649,8 @@
     </tr>`).join("");
 
     const palletsPanel = panel("🟦 Pallet", `
-      <div class="tablewrap"><table><thead><tr><th>Mã pallet</th><th>SP</th><th>Lô</th>
+      <input class="searchbox" data-tbl="t_wms_pallet" placeholder="Tìm theo mã pallet, SP, lô, trạng thái, vị trí..."/>
+      <div class="tablewrap"><table id="t_wms_pallet"><thead><tr><th>Mã pallet</th><th>SP</th><th>Lô</th>
         <th style="text-align:right">Case</th><th style="text-align:right">Lon</th><th>Trạng thái</th><th>Nguồn</th><th>Vị trí</th><th></th></tr></thead>
       <tbody>${palletRows || '<tr><td colspan="9" class="muted">Chưa có pallet nào.</td></tr>'}</tbody></table></div>`);
 
@@ -1665,10 +1666,13 @@
     </tr>`).join("");
     const lotsPanel = panel("🚚 Xuất theo lô", `
       <div class="muted" style="margin-bottom:6px">1 Lô TP có thể gồm nhiều pallet (mỗi pallet 1 mã riêng) — xuất cả lô 1 lần thay vì từng pallet.</div>
-      <div class="tablewrap"><table><thead><tr><th>Lô</th><th>SP</th><th style="text-align:right">Số pallet</th><th style="text-align:right">Tổng SL</th><th>Trạng thái pallet</th><th></th></tr></thead>
+      <input class="searchbox" data-tbl="t_wms_lot" placeholder="Tìm theo lô, SP..."/>
+      <div class="tablewrap"><table id="t_wms_lot"><thead><tr><th>Lô</th><th>SP</th><th style="text-align:right">Số pallet</th><th style="text-align:right">Tổng SL</th><th>Trạng thái pallet</th><th></th></tr></thead>
       <tbody>${lotRows || '<tr><td colspan="6" class="muted">Không có lô nào còn pallet chưa xuất.</td></tr>'}</tbody></table></div>`);
 
     root.innerHTML = overview + locations + buildForm + lotsPanel + palletsPanel;
+    wirePaginate("t_wms_lot", 10);
+    wirePaginate("t_wms_pallet", 10);
 
     if (isAdmin) {
       $("wl_add").onclick = () => guard(async () => {
