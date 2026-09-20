@@ -634,6 +634,10 @@ class PutawayIn(BaseModel):
     loc_id: str
 
 
+class ShipLotIn(BaseModel):
+    pallet_count: Optional[int] = None
+
+
 # ---- Dây chuyền (line master) ----
 class LineIn(BaseModel):
     code: str

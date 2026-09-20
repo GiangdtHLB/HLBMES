@@ -88,6 +88,50 @@ def test_ship_lot_ships_all_pallets_and_reports_totals(client, admin_h):
     assert not any(l["lot_code"] == lot_code for l in lots)
 
 
+def test_ship_lot_partial_ships_oldest_pallets_first_fifo(client, admin_h):
+    """Yêu cầu người dùng 2026-09-20: "300 pallet thì xuất 1 phần trước, khoảng 100 pallet...
+    chọn pallet nào nhập trước thì xuất trước tự động" — xuất 1 phần theo `pallet_count`, tự
+    động chọn pallet có created_at SỚM NHẤT (FIFO), không cho chọn tay từng cái."""
+    lot_code = "LOT-FIFO-01"
+    p1 = _build_pallet(client, admin_h, "SKU-FIFO", lot_code, 10, 24)  # nhập trước nhất
+    p2 = _build_pallet(client, admin_h, "SKU-FIFO", lot_code, 20, 24)
+    p3 = _build_pallet(client, admin_h, "SKU-FIFO", lot_code, 30, 24)  # nhập sau cùng
+
+    ship = client.post(f"/api/wms/lots/{lot_code}/ship", headers=admin_h, json={"pallet_count": 2})
+    assert ship.status_code == 200, ship.text
+    result = ship.json()
+    assert result["pallet_count"] == 2
+    assert result["total_units"] == (10 + 20) * 24
+    assert sorted(result["pallet_codes"]) == sorted([p1["pallet_code"], p2["pallet_code"]])
+
+    # p3 (nhập sau cùng) vẫn còn nguyên, chưa xuất — lô vẫn hiện trong danh sách với đúng 1 pallet còn lại.
+    pallets = client.get("/api/wms/pallets", headers=admin_h).json()
+    p3_row = next(p for p in pallets if p["pallet_code"] == p3["pallet_code"])
+    assert p3_row["status"] != "shipped"
+    lots = client.get("/api/wms/lots", headers=admin_h).json()
+    row = next(l for l in lots if l["lot_code"] == lot_code)
+    assert row["pallet_count"] == 1
+    assert row["total_units"] == 30 * 24
+
+
+def test_ship_lot_partial_rejects_count_exceeding_remaining(client, admin_h):
+    lot_code = "LOT-FIFO-02"
+    _build_pallet(client, admin_h, "SKU-FIFO2", lot_code, 10, 24)
+    _build_pallet(client, admin_h, "SKU-FIFO2", lot_code, 20, 24)
+
+    blocked = client.post(f"/api/wms/lots/{lot_code}/ship", headers=admin_h, json={"pallet_count": 5})
+    assert blocked.status_code == 409, blocked.text
+    assert "chỉ còn 2 pallet" in blocked.json()["detail"]
+
+
+def test_ship_lot_partial_rejects_non_positive_count(client, admin_h):
+    lot_code = "LOT-FIFO-03"
+    _build_pallet(client, admin_h, "SKU-FIFO3", lot_code, 10, 24)
+
+    blocked = client.post(f"/api/wms/lots/{lot_code}/ship", headers=admin_h, json={"pallet_count": 0})
+    assert blocked.status_code == 409, blocked.text
+
+
 def test_ship_lot_blocked_when_no_pallets_left(client, admin_h):
     missing = client.post("/api/wms/lots/LOT-NEVER-EXISTED/ship", headers=admin_h)
     assert missing.status_code == 404, missing.text

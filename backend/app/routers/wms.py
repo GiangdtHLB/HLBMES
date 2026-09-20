@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 
 from ..common import Role
 from ..database import get_db
-from ..schemas import PalletBuildIn, PutawayIn, WmsLocationIn, WmsLocationUpdate
+from ..schemas import PalletBuildIn, PutawayIn, ShipLotIn, WmsLocationIn, WmsLocationUpdate
 from ..security import User, get_current_user, require_role
 from ..services import wms as svc
 
@@ -72,8 +72,9 @@ def lots(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
 
 
 @router.post("/lots/{lot_code}/ship")
-def ship_lot(lot_code: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    return svc.ship_lot(db, lot_code, user)
+def ship_lot(lot_code: str, payload: ShipLotIn = ShipLotIn(), db: Session = Depends(get_db),
+            user: User = Depends(get_current_user)):
+    return svc.ship_lot(db, lot_code, user, pallet_count=payload.pallet_count)
 
 
 @router.get("/resolve")

@@ -210,16 +210,31 @@ def ship(db: Session, pallet_id: str, user: User) -> dict:
     return {"pallet_code": p.pallet_code, "status": "shipped"}
 
 
-def ship_lot(db: Session, lot_code: str, user: User) -> dict:
-    """Xuất TOÀN BỘ pallet còn lại của 1 Lô TP (lot_code) trong 1 lần, thay vì phải xuất từng
-    pallet lẻ (yêu cầu người dùng 2026-09-20 — nhiều pallet cùng lô là bình thường theo chuẩn
-    GS1: SSCC riêng từng pallet, Batch/Lot Number chung cả lô). Lặp gọi ship() cho từng pallet —
-    giữ nguyên đúng 1 bản ghi audit/pallet như xuất tay từng cái."""
+def ship_lot(db: Session, lot_code: str, user: User, pallet_count: int = None) -> dict:
+    """Xuất pallet còn lại của 1 Lô TP (lot_code) trong 1 lần, thay vì phải xuất từng pallet lẻ
+    (yêu cầu người dùng 2026-09-20 — nhiều pallet cùng lô là bình thường theo chuẩn GS1: SSCC
+    riêng từng pallet, Batch/Lot Number chung cả lô). Lặp gọi ship() cho từng pallet — giữ
+    nguyên đúng 1 bản ghi audit/pallet như xuất tay từng cái.
+
+    `pallet_count` (tùy chọn) — XUẤT MỘT PHẦN thay vì toàn bộ (yêu cầu người dùng 2026-09-20:
+    "chọn xuất 1 phần... 300 pallet thì xuất 1 phần trước, khoảng 100 pallet"). Sắp theo
+    `created_at` TĂNG DẦN (pallet nhập kho SỚM NHẤT đứng đầu) rồi lấy đúng `pallet_count` pallet
+    đầu tiên — tự động FIFO "nhập trước xuất trước", không cho người dùng tự chọn tay từng cái.
+    Bỏ trống (None) = xuất TOÀN BỘ như trước đây."""
     require_perm(user, "warehouse.issue")
     pallets = db.execute(select(Pallet).where(
-        Pallet.lot_code == lot_code, Pallet.status != "shipped")).scalars().all()
+        Pallet.lot_code == lot_code, Pallet.status != "shipped")
+        .order_by(Pallet.created_at.asc())).scalars().all()
     if not pallets:
         raise NotFoundError(f"Không có pallet nào của lô '{lot_code}' để xuất (có thể đã xuất hết).")
+    if pallet_count is not None:
+        if pallet_count <= 0:
+            raise DomainError("Số pallet muốn xuất phải lớn hơn 0.")
+        if pallet_count > len(pallets):
+            raise DomainError(
+                f"Lô '{lot_code}' chỉ còn {len(pallets)} pallet chưa xuất, "
+                f"không thể xuất {pallet_count} pallet.")
+        pallets = pallets[:pallet_count]
     cases_by_pallet: dict[str, float] = dict(db.execute(
         select(Case.pallet_id, func.coalesce(func.sum(Case.units), 0))
         .where(Case.pallet_id.in_([p.pallet_id for p in pallets])).group_by(Case.pallet_id)).all())

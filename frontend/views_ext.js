@@ -1668,7 +1668,7 @@
       <td class="muted">${Object.entries(l.by_status || {}).map(([k, v]) => `${esc(PALLET_STATUS_LABEL[k] || k)}: ${v}`).join(" · ") || "—"}</td>
       <td class="muted" style="white-space:nowrap">${l.first_stocked_at ? fmt(l.first_stocked_at) : "—"}</td>
       <td class="muted" style="white-space:nowrap">${l.last_shipped_at ? fmt(l.last_shipped_at) : "—"}</td>
-      <td>${canIssue ? `<button class="btn sm sec" data-shiplot="${esc(l.lot_code)}" data-lotpallets="${l.pallet_count}" data-lotunits="${l.total_units}">Xuất cả lô</button>` : ""}</td>
+      <td>${canIssue ? `<button class="btn sm sec" data-shiplot="${esc(l.lot_code)}" data-lotpallets="${l.pallet_count}" data-lotunits="${l.total_units}">Xuất...</button>` : ""}</td>
     </tr>`).join("");
     const lotsPanel = panel("🚚 Xuất theo lô", `
       <div class="muted" style="margin-bottom:6px">1 Lô TP có thể gồm nhiều pallet (mỗi pallet 1 mã riêng) — xuất cả lô 1 lần thay vì từng pallet.</div>
@@ -1736,12 +1736,34 @@
       await POST(`/wms/pallets/${b.dataset.ship}/ship`, {});
       toast("Đã xuất pallet"); render("wms");
     }));
-    root.querySelectorAll("[data-shiplot]").forEach(b => b.onclick = () => guard(async () => {
+    // Xuất cả lô HOẶC xuất 1 phần (yêu cầu người dùng 2026-09-20: "300 pallet thì xuất 1 phần
+    // trước, khoảng 100 pallet... chọn pallet nào nhập trước thì xuất trước tự động") — mở modal
+    // cho nhập số pallet muốn xuất, mặc định = toàn bộ còn tồn; backend tự chọn FIFO theo
+    // created_at (xem services/wms.py::ship_lot), người dùng không tự chọn tay từng pallet.
+    root.querySelectorAll("[data-shiplot]").forEach(b => b.onclick = () => {
       const lotCode = b.dataset.shiplot;
-      if (!confirm(`Xuất CẢ LÔ ${lotCode}? Tổng ${b.dataset.lotpallets} pallet, ${b.dataset.lotunits} đơn vị. Không thể hoàn tác.`)) return;
-      const r = await POST(`/wms/lots/${encodeURIComponent(lotCode)}/ship`, {});
-      toast(`Đã xuất lô ${lotCode} — ${r.pallet_count} pallet, ${r.total_units} đơn vị`); render("wms");
-    }));
+      const totalPallets = parseInt(b.dataset.lotpallets, 10);
+      const totalUnits = b.dataset.lotunits;
+      modal(`<h3>Xuất lô ${esc(lotCode)}</h3>
+        <div class="muted" style="margin-bottom:10px">Còn tồn chưa xuất: <b>${totalPallets} pallet</b>, ${esc(totalUnits)} đơn vị. Hệ thống tự chọn pallet nhập kho SỚM NHẤT trước (FIFO) — không chọn tay từng cái.</div>
+        <div class="field"><label>Số pallet muốn xuất (tối đa ${totalPallets})</label>
+          <input id="shiplot_count" type="number" min="1" max="${totalPallets}" value="${totalPallets}" style="width:120px"/></div>
+        <div class="row" style="margin-top:14px;gap:8px">
+          <button class="btn" id="shiplot_go">Xuất</button>
+          <button class="btn sec" id="shiplot_cancel">Hủy</button>
+        </div>`);
+      $("shiplot_cancel").onclick = () => closeModal();
+      $("shiplot_go").onclick = () => guard(async () => {
+        const n = parseInt($("shiplot_count").value, 10);
+        if (!n || n <= 0) { toast("Nhập số pallet hợp lệ (> 0).", "err"); return; }
+        if (n > totalPallets) { toast(`Chỉ còn ${totalPallets} pallet chưa xuất.`, "err"); return; }
+        const partial = n < totalPallets;
+        if (!confirm(`${partial ? `Xuất ${n}/${totalPallets} pallet CŨ NHẤT` : `Xuất CẢ LÔ ${totalPallets} pallet`} của lô ${lotCode}? Không thể hoàn tác.`)) return;
+        const r = await POST(`/wms/lots/${encodeURIComponent(lotCode)}/ship`, { pallet_count: n });
+        closeModal();
+        toast(`Đã xuất lô ${lotCode} — ${r.pallet_count} pallet, ${r.total_units} đơn vị`); render("wms");
+      });
+    });
     root.querySelectorAll("[data-label]").forEach(b => b.onclick = () => labelModal(b.dataset.label));
   };
 
