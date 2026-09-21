@@ -3675,7 +3675,7 @@ VIEWS.batchpacklots = async function () {
             <td>${esc(p.from_bbt || "—")}</td>
             <td>${p.qty}</td><td>${esc(p.lot_no || "—")}</td>
             <td>${statusBadge(PACK_LOT_BADGE_CLASS[p.status], p.status_label)}</td>
-            <td>${p.approved ? badge("released") + " đã duyệt" : badge("pending")}</td></tr>`).join("")
+            <td>${p.approved ? badge("released") + " đã duyệt" : badge("pending")}${p.unstocked_remainder > 0 ? ` <span style="color:var(--red)" title="Còn ${p.unstocked_remainder} chưa được duyệt nhập kho thành phẩm">⚠ còn ${p.unstocked_remainder}</span>` : ""}</td></tr>`).join("")
             || '<tr><td colspan=7 class="muted">Chưa có lô thành phẩm nào.</td></tr>'}</tbody></table></div>
       </div>
       <div class="panel" id="pk_detail"><h2>Chi tiết lô thành phẩm</h2><div class="muted">Chọn một lô để xem.</div></div>
@@ -3712,6 +3712,243 @@ VIEWS.batchpacklots = async function () {
   });
   document.querySelectorAll("[data-pklot2]").forEach(tr => tr.onclick = () => showBatchPackLot(tr.dataset.pklot2));
 };
+// Phân bổ quy cách đóng gói pallet — NHÂN VIÊN CHIẾT khai/lưu ngay trong lúc chiết (quyền
+// batch.execute, mirror "SL chiết theo ca" — mỗi dòng có Lưu/Sửa/Xóa RIÊNG, xem
+// renderPkShiftsTable), KHÔNG chờ Duyệt KCS. MỖI DÒNG/quy cách có nút "📦 Duyệt nhập kho TP"
+// RIÊNG (quyền production.release_to_wms, Giám đốc/PGĐ SX — tạo pallet thật cho ĐÚNG dòng đó,
+// yêu cầu người dùng 2026-09-20: "Mỗi quy cách sẽ có 1 nút duyệt nhập kho TP") — nút này CHỈ
+// sáng lên khi đã Duyệt KCS. Lưu lại rõ ai đã LƯU dòng (saved_by/saved_at) và ai đã DUYỆT NHẬP
+// KHO dòng đó (released_by/released_at) — 2 mốc khác nhau. Dòng đã duyệt nhập kho rồi thì khóa
+// cứng (không Sửa/Xóa được nữa). Cảnh báo còn bao nhiêu vỉ/két CHƯA được duyệt nhập kho
+// (unstocked_remainder, tính từ server) — yêu cầu người dùng: "Có cảnh báo nếu module chiết còn
+// vỉ hoặc két gì đó chưa được duyệt nhập kho thành phẩm".
+function renderPkWmsAllocUi(packLotId, specs, caTotal, existingAllocations, unitLabel, approved, unstockedRemainder, locations) {
+  const specOptsHtml = (selectedId) => specs.map(s =>
+    `<option value="${esc(s.spec_id)}" data-units="${s.units_per_pallet}" ${s.spec_id === selectedId ? "selected" : ""}>${esc(s.code)}${s.name ? " — " + esc(s.name) : ""} (${s.units_per_pallet}/pallet)</option>`).join("");
+  const specById = Object.fromEntries(specs.map(s => [s.spec_id, s]));
+  const u = unitLabel ? ` ${esc(unitLabel)}` : "";
+  // Vị trí kho — BẮT BUỘC chọn trước khi "Duyệt nhập kho TP" được (yêu cầu người dùng
+  // 2026-09-20: "thêm cho tôi cột gán vị trí vào, không gán vị trí thì không cho duyệt") — toàn
+  // bộ pallet của dòng đó "Cất" thẳng vào ĐÚNG vị trí đã chọn ngay khi duyệt (status="stored"
+  // luôn), không còn phải "Cất" tay sau ở màn Kho TP nữa.
+  const locOptsHtml = (selectedId) => `<option value="">— chọn vị trí —</option>` + locations.map(l =>
+    `<option value="${esc(l.loc_id)}" ${l.loc_id === selectedId ? "selected" : ""}>${esc(l.code)} — ${esc(l.name)}${l.used >= l.capacity ? " (đầy)" : ""}</option>`).join("");
+  const toRow = (a) => ({ rowId: a.row_id, specId: a.spec_id, qty: String(a.quantity), editing: false,
+    savedBy: a.saved_by, savedAt: a.saved_at, released: !!a.released,
+    releasedBy: a.released_by, releasedAt: a.released_at, palletCodes: a.pallet_codes || [], confirmFinal: false,
+    locId: "", location: a.location || null });
+  let rows = (existingAllocations && existingAllocations.length) ? existingAllocations.map(toRow) : [];
+  // Dòng chưa lưu lần nào (mảng rỗng) tự bật sẵn 1 dòng ở chế độ Sửa để nhập ngay — mirror
+  // editingCas (renderPkShiftsTable): ca chưa từng lưu mặc định ở chế độ Sửa luôn.
+  if (!rows.length) rows.push({ rowId: null, specId: (specs[0] || {}).spec_id, qty: "", editing: true,
+    savedBy: null, savedAt: null, released: false, releasedBy: null, releasedAt: null, palletCodes: [], confirmFinal: false,
+    locId: "", location: null });
+  const wrap = $("pk_wms_alloc_wrap");
+  // Xem trước "quy đổi pallet" — tính sẵn số pallet đầy + pallet lẻ, mirror ĐÚNG phép tính
+  // divmod ở services/batch_pipeline.py::release_pack_lot_allocation (int hóa qty trước khi chia).
+  const computeBreakdown = (specId, qtyRaw) => {
+    const spec = specById[specId];
+    const qty = Math.round(parseFloat(qtyRaw) || 0);
+    if (!spec || qty <= 0) return null;
+    const full = Math.floor(qty / spec.units_per_pallet);
+    const rem = qty - full * spec.units_per_pallet;
+    return { spec, qty, full, rem };
+  };
+  // "Số pallet" hiện SỐ ĐẾM rõ ràng (yêu cầu người dùng 2026-09-20: "tôi chưa thấy, số pallet
+  // đã đóng") — không chỉ mô tả bằng chữ như trước.
+  const breakdownHtml = (specId, qtyRaw) => {
+    const bd = computeBreakdown(specId, qtyRaw);
+    if (!bd) return "—";
+    const { spec, full, rem } = bd;
+    const total = full + (rem > 0 ? 1 : 0);
+    if (full > 0 && rem === 0) return `<b>${total} pallet</b><br/><span class="muted">${full} đầy (${spec.units_per_pallet}${u}/pallet), không dư</span>`;
+    if (full > 0 && rem > 0) return `<b>${total} pallet</b><br/><span class="muted">${full} đầy (${spec.units_per_pallet}${u}/pallet) + pallet cuối chỉ có <b>${rem}${u}</b></span>`;
+    return `<b>${total} pallet</b><br/><span class="muted">pallet cuối chỉ có <b>${rem}${u}</b></span>`;
+  };
+  const releasedPalletHtml = (row) => `<b>${row.palletCodes.length} pallet</b><br/><span class="muted">${row.palletCodes.map(esc).join(", ")}</span>`;
+  const palletsBuilt = rows.reduce((s, r) => s + (r.released ? r.palletCodes.length : 0), 0);
+  // SL còn thiếu SAU KHI tính cả mọi dòng đang khai (kể cả dòng đang gõ dở) — mirror đúng số
+  // hiện ở "Đã phân bổ X / Y — còn thiếu Z" (updateSum). Dùng số NÀY (không phải
+  // unstockedRemainder — số đó chỉ tính phần đã release lên WMS) để quyết định có cho phép 1
+  // dòng lẻ pallet hay không, vì đây là câu hỏi "còn bao nhiêu CHƯA ĐƯỢC KHAI ở dòng nào cả".
+  const sumRemaining = () => Math.round((caTotal - rows.reduce((s, r) => s + (parseFloat(r.qty) || 0), 0)) * 10000) / 10000;
+  // Còn lại BAO NHIÊU tính riêng cho dòng i — tổng cần trừ đi TẤT CẢ CÁC DÒNG KHÁC (không trừ
+  // chính dòng i) — dùng để biết "nếu dòng i không tồn tại thì còn thiếu bao nhiêu", từ đó suy
+  // ra dòng i có phải "lần đóng cuối" hay không VÀ nếu phải thì SL dòng i buộc phải bằng đúng
+  // số này (yêu cầu người dùng 2026-09-20: "trường hợp tồn vỉ cuối < 1 pallet thì bắt buộc phải
+  // nhập số vỉ bằng đúng số vỉ còn lại").
+  const remainingBeforeRow = (i) => Math.round((caTotal - rows.reduce(
+    (s, r, idx) => idx === i ? s : s + (parseFloat(r.qty) || 0), 0)) * 10000) / 10000;
+  const extraHtml = (i) => {
+    const row = rows[i];
+    const bd = computeBreakdown(row.specId, row.qty);
+    const bdHtml = breakdownHtml(row.specId, row.qty);
+    if (!bd) return bdHtml;
+    const remBefore = remainingBeforeRow(i);
+    const isFinalStretch = remBefore > 0 && remBefore < bd.spec.units_per_pallet;
+    if (!isFinalStretch) {
+      if (bd.rem <= 0) return bdHtml;
+      return `${bdHtml}<div style="color:var(--red);font-size:12px;margin-top:4px">⚠ Còn thiếu ${sumRemaining()}${u} (≥ 1 pallet) — phải nhập số TRÒN PALLET (bội số của ${bd.spec.units_per_pallet}), chưa được nhập lẻ.</div>`;
+    }
+    if (bd.qty !== remBefore) {
+      return `${bdHtml}<div style="color:var(--red);font-size:12px;margin-top:4px">⚠ Đây là lần đóng cuối (còn lại &lt; 1 pallet) — phải nhập ĐÚNG số còn lại: <b>${remBefore}${u}</b>.</div>`;
+    }
+    return `${bdHtml}<label style="display:block;font-size:12px;margin-top:4px;font-weight:normal">
+      <input type="checkbox" class="wmsalloc-confirmfinal" data-i="${i}" ${row.confirmFinal ? "checked" : ""}/>
+      Xác nhận SL cuối cùng (không đóng thêm)</label>`;
+  };
+  const render = () => {
+    wrap.innerHTML = `<h3>Phân bổ quy cách đóng gói pallet${caTotal ? "" : ` <span class="muted">(chưa có SL theo ca)</span>`}</h3>
+      <div class="muted" style="margin-bottom:6px">Nhân viên chiết khai NGAY trong lúc chiết, không cần chờ Duyệt KCS. Tổng SL cần phân bổ theo ca: <b>${caTotal}${u}</b>. Mỗi dòng chọn 1 quy cách đóng gói pallet đã dùng thật + số lượng đã đóng theo quy cách đó — MỖI dòng có nút "Duyệt nhập kho TP" riêng (chỉ sáng khi đã Duyệt KCS).</div>
+      <div class="muted" style="margin-bottom:6px">📦 Đã đóng: <b>${palletsBuilt} pallet</b> · Còn tồn: <b>${unstockedRemainder}${u}</b> chưa đóng pallet</div>
+      ${unstockedRemainder > 0 ? `<div style="color:var(--red);margin-bottom:8px">⚠ Còn <b>${unstockedRemainder}${u}</b> chưa được duyệt nhập kho thành phẩm.</div>` : ""}
+      <div class="tablewrap"><table>
+        <thead><tr><th>Quy cách đóng gói</th><th>Số lượng</th><th>Số pallet</th><th>Vị trí kho</th><th>Lưu bởi / Ngày giờ</th><th>Nhập kho thành phẩm</th><th></th></tr></thead>
+        <tbody id="pk_wmsalloc_rows"></tbody>
+      </table></div>
+      <button class="btn sm sec" id="pk_wmsalloc_addrow" type="button" style="margin-top:6px">+ Thêm dòng</button>
+      <div id="pk_wmsalloc_sum" style="margin-top:6px"></div>`;
+    $("pk_wmsalloc_rows").innerHTML = rows.map((row, i) => {
+      const spec = specById[row.specId];
+      let cells;
+      if (row.released) {
+        cells = `<td>${spec ? esc(spec.code) + (spec.name ? " — " + esc(spec.name) : "") : "—"}</td>
+           <td>${esc(row.qty)}${u}</td>
+           <td>${releasedPalletHtml(row)}</td>
+           <td>${row.location ? esc(row.location) : "—"}</td>
+           <td class="muted" style="font-size:12px;white-space:nowrap">${row.savedBy ? esc(row.savedBy) : "—"} · ${row.savedAt ? fmt(row.savedAt) : "—"}</td>
+           <td style="font-size:12px"><span style="color:var(--green)">✓ Đã nhập kho</span><br/>${esc(row.releasedBy)} · ${fmt(row.releasedAt)}</td>
+           <td></td>`;
+      } else if (row.editing) {
+        cells = `<td><select class="wmsalloc-spec" data-i="${i}">${specOptsHtml(row.specId)}</select></td>
+           <td><input type="number" min="0" step="any" class="wmsalloc-qty" data-i="${i}" value="${esc(row.qty)}" style="width:110px"/></td>
+           <td class="wmsalloc-extra" data-i="${i}">${extraHtml(i)}</td>
+           <td><select class="wmsalloc-loc" data-i="${i}" style="width:150px">${locOptsHtml(row.locId)}</select></td>
+           <td class="muted" style="font-size:12px;white-space:nowrap">${row.savedBy ? esc(row.savedBy) : "—"} · ${row.savedAt ? fmt(row.savedAt) : "—"}</td>
+           <td class="muted">—</td>
+           <td style="white-space:nowrap"><button class="btn sm" data-wmsallocsave="${i}" type="button">Lưu</button>
+           <button class="btn sm sec" data-wmsallocdel="${i}" type="button">Xóa</button></td>`;
+      } else {
+        const locName = row.locId ? (locations.find(l => l.loc_id === row.locId) || {}).code : null;
+        cells = `<td>${spec ? esc(spec.code) + (spec.name ? " — " + esc(spec.name) : "") : "—"}</td>
+           <td>${esc(row.qty)}${u}</td>
+           <td>${breakdownHtml(row.specId, row.qty)}</td>
+           <td>${locName ? esc(locName) : `<span class="muted">Chưa chọn</span>`}</td>
+           <td class="muted" style="font-size:12px;white-space:nowrap">${row.savedBy ? esc(row.savedBy) : "—"} · ${row.savedAt ? fmt(row.savedAt) : "—"}</td>
+           <td class="muted">Chưa nhập kho</td>
+           <td style="white-space:nowrap"><button class="btn sm sec" data-wmsallocedit="${i}" type="button">Sửa</button>
+           <button class="btn sm sec" data-wmsallocdel="${i}" type="button">Xóa</button>
+           ${approved && row.rowId ? `<button class="btn sm" data-wmsallocrelease="${i}" type="button">📦 Duyệt nhập kho TP</button>` : ""}</td>`;
+      }
+      return `<tr data-wmsallocrow="${i}">${cells}</tr>`;
+    }).join("");
+    const updateSum = () => {
+      const sum = Math.round(rows.reduce((s, r) => s + (parseFloat(r.qty) || 0), 0) * 10000) / 10000;
+      const sumEl = $("pk_wmsalloc_sum");
+      if (Math.abs(sum - caTotal) < 1e-6) {
+        sumEl.innerHTML = `<span style="color:var(--green)">✓ Đã phân bổ đủ ${sum} / ${caTotal}${u}</span>`;
+      } else {
+        sumEl.innerHTML = `<span style="color:var(--red)">⚠ Đã phân bổ ${sum} / ${caTotal}${u} — ${sum > caTotal ? "vượt" : "còn thiếu " + (Math.round((caTotal - sum) * 10000) / 10000)}</span>`;
+      }
+    };
+    const saveAll = async () => {
+      // Giữ lại lựa chọn "Vị trí kho" qua lần lưu — server KHÔNG lưu locId cho dòng chưa release
+      // (chỉ ghi lại location THẬT lúc Duyệt nhập kho), nên phải tự khớp lại theo row_id (dòng
+      // đã có id từ trước) hoặc theo vị trí thứ tự (dòng mới toanh, id server vừa cấp).
+      const prevLocByRowId = Object.fromEntries(rows.filter(row => row.rowId).map(row => [row.rowId, row.locId]));
+      const prevLocByIndex = rows.map(row => row.locId);
+      const r = await PUT(`/batch-pack-lots/${packLotId}/pack-allocations`, {
+        allocations: rows.map(row => ({ row_id: row.rowId || undefined, spec_id: row.specId, quantity: parseFloat(row.qty) || 0 }))
+          .filter(a => a.quantity > 0),
+      });
+      rows = (r.pack_allocations || []).map((a, idx) => {
+        const row = toRow(a);
+        row.locId = (a.row_id && prevLocByRowId[a.row_id]) || prevLocByIndex[idx] || "";
+        return row;
+      });
+      return r;
+    };
+    document.querySelectorAll(".wmsalloc-spec").forEach(sel => sel.onchange = () => {
+      const i = parseInt(sel.dataset.i, 10);
+      rows[i].specId = sel.value; rows[i].confirmFinal = false; render();
+    });
+    const wireConfirmFinal = (i) => {
+      const cb = document.querySelector(`.wmsalloc-confirmfinal[data-i="${i}"]`);
+      if (cb) cb.onchange = () => { rows[i].confirmFinal = cb.checked; };
+    };
+    document.querySelectorAll(".wmsalloc-qty").forEach(inp => inp.oninput = () => {
+      const i = parseInt(inp.dataset.i, 10);
+      rows[i].qty = inp.value;
+      rows[i].confirmFinal = false;
+      const extraEl = document.querySelector(`.wmsalloc-extra[data-i="${i}"]`);
+      if (extraEl) { extraEl.innerHTML = extraHtml(i); wireConfirmFinal(i); }
+      updateSum();
+    });
+    document.querySelectorAll(".wmsalloc-confirmfinal").forEach(cb => wireConfirmFinal(parseInt(cb.dataset.i, 10)));
+    document.querySelectorAll(".wmsalloc-loc").forEach(sel => sel.onchange = () => {
+      rows[parseInt(sel.dataset.i, 10)].locId = sel.value;
+    });
+    document.querySelectorAll("[data-wmsallocedit]").forEach(b => b.onclick = () => {
+      rows[parseInt(b.dataset.wmsallocedit, 10)].editing = true; render();
+    });
+    document.querySelectorAll("[data-wmsallocsave]").forEach(b => b.onclick = () => guard(async () => {
+      for (let i = 0; i < rows.length; i++) {
+        const r = rows[i];
+        if (!r.editing) continue;
+        const bd = computeBreakdown(r.specId, r.qty);
+        if (!bd) continue;
+        if (!r.locId) {
+          toast(`Chưa chọn vị trí kho cho dòng "${bd.spec.code}" — phải chọn vị trí trước khi lưu.`, "err");
+          return;
+        }
+        const remBefore = remainingBeforeRow(i);
+        const isFinalStretch = remBefore > 0 && remBefore < bd.spec.units_per_pallet;
+        if (!isFinalStretch) {
+          if (bd.rem > 0) {
+            toast(`Còn thiếu ${sumRemaining()}${u} (≥ 1 pallet) — phải nhập số tròn pallet (bội số của ${bd.spec.units_per_pallet}) cho dòng "${bd.spec.code}".`, "err");
+            return;
+          }
+        } else if (bd.qty !== remBefore) {
+          toast(`Đây là lần đóng cuối cho dòng "${bd.spec.code}" (còn lại < 1 pallet) — phải nhập ĐÚNG số còn lại: ${remBefore}${u}.`, "err");
+          return;
+        } else if (!r.confirmFinal) {
+          toast('Cần tick "Xác nhận SL cuối cùng" cho dòng có pallet lẻ trước khi lưu.', "err");
+          return;
+        }
+      }
+      await saveAll();
+      toast("Đã lưu phân bổ quy cách đóng gói");
+      render();
+    }));
+    document.querySelectorAll("[data-wmsallocdel]").forEach(b => b.onclick = () => guard(async () => {
+      if (!confirm("Xóa dòng phân bổ này? Không thể hoàn tác.")) return;
+      const i = parseInt(b.dataset.wmsallocdel, 10);
+      rows.splice(i, 1);
+      await saveAll();
+      toast("Đã xóa dòng phân bổ");
+      render();
+    }));
+    document.querySelectorAll("[data-wmsallocrelease]").forEach(b => b.onclick = () => guard(async () => {
+      const row = rows[parseInt(b.dataset.wmsallocrelease, 10)];
+      if (!row.locId) {
+        toast("Chưa chọn vị trí kho — không thể duyệt nhập kho thành phẩm.", "err");
+        return;
+      }
+      if (!confirm(`Duyệt nhập kho thành phẩm cho quy cách "${(specById[row.specId] || {}).code || ""}", số lượng ${row.qty}${u}?`)) return;
+      const r = await POST(`/batch-pack-lots/${packLotId}/pack-allocations/${row.rowId}/release`, { loc_id: row.locId });
+      toast(`Đã duyệt nhập kho — tạo ${r.pallet_codes.length} pallet, cất vào ${r.location}`);
+      showBatchPackLot(packLotId);
+    }));
+    $("pk_wmsalloc_addrow").onclick = () => {
+      rows.push({ rowId: null, specId: (specs[0] || {}).spec_id, qty: "", editing: true,
+        savedBy: null, savedAt: null, released: false, releasedBy: null, releasedAt: null, palletCodes: [], confirmFinal: false,
+        locId: "", location: null });
+      render();
+    };
+    updateSum();
+  };
+  render();
+}
 async function showBatchPackLot(packLotId) {
   const [p, finishedProducts, unitTypes, matUsage, lots, materials] = await Promise.all([
     GET(`/batch-pack-lots/${packLotId}`), GET("/finished-products").catch(() => []),
@@ -3787,9 +4024,9 @@ async function showBatchPackLot(packLotId) {
       pkQc.pending.length ? `⚠ Còn thiếu: ${pkQc.pending.map(esc).join(", ")}` :
       '<span style="color:var(--red)">✗ Có chỉ tiêu bắt buộc không đạt (FAIL)</span>'}</div>`}
     ${materialUsageSectionHtml("pkmu", matUsage, lk, p.ended_at)}
+    ${!p.stocked ? '<div id="pk_wms_alloc_wrap" style="margin-top:16px"></div>' : ""}
     <div class="row" style="margin-top:10px">
       ${p.approved ? "" : '<button class="btn sm sec" id="pk_approve">✔ Duyệt KCS</button>'}
-      ${(p.approved && !p.stocked) ? '<button class="btn sm sec" id="pk_release_wms">📦 Duyệt nhập kho TP</button>' : ""}
       ${f.on_hand !== 0 ? `<button class="btn sm sec" id="pk_empty" title="Buộc tồn tank BBT (${f.on_hand} hl) về 0 khi tank vật lý đã chiết cạn thật nhưng số liệu còn lệch — cho phép cả khi hồ sơ EBR đã khóa">Làm rỗng tank</button>` : ""}
       <button class="btn sm sec" id="pk_trace">🔍 Truy ngược</button>
       <button class="btn sm sec" id="pk_ebr">📄 Hồ sơ lô TP (EBR)</button>
@@ -3880,11 +4117,21 @@ async function showBatchPackLot(packLotId) {
     const r = await POST(`/batch-pack-lots/${packLotId}/approve`, {});
     toast("Đã duyệt KCS lô thành phẩm" + (r.qc_has_fail ? " (còn chỉ tiêu FAIL — cảnh báo)" : "")); showBatchPackLot(packLotId);
   });
-  if ($("pk_release_wms")) $("pk_release_wms").onclick = () => guard(async () => {
-    const r = await POST(`/batch-pack-lots/${packLotId}/release-to-wms`, {});
-    toast(`Đã duyệt nhập kho thành phẩm — pallet ${r.pallet_code} (${r.count} case)`);
-    showBatchPackLot(packLotId);
-  });
+  if ($("pk_wms_alloc_wrap")) {
+    const caTotal = (p.ca1_qty || 0) + (p.ca2_qty || 0) + (p.ca3_qty || 0);
+    if (!fp) {
+      $("pk_wms_alloc_wrap").innerHTML = `<div class="muted">Lô thành phẩm chưa gán Sản phẩm (SKU) — không thể chọn quy cách đóng gói pallet để nhập kho.</div>`;
+    } else {
+      const specs = await GET(`/packing-specs?finished_product_id=${encodeURIComponent(fp.finished_product_id)}`).catch(() => []);
+      const activeSpecs = specs.filter(s => s.active);
+      if (!activeSpecs.length) {
+        $("pk_wms_alloc_wrap").innerHTML = `<div class="muted">Chưa khai "Quy cách đóng gói pallet" cho SKU ${esc(fp.code)} — khai ở tab Danh mục → Kho thành phẩm trước khi duyệt nhập kho.</div>`;
+      } else {
+        const locations = await GET("/wms/locations").catch(() => []);
+        renderPkWmsAllocUi(packLotId, activeSpecs, caTotal, p.pack_allocations, unitLabel, p.approved, p.unstocked_remainder, locations);
+      }
+    }
+  }
   $("pk_trace").onclick = () => goTraceBackward(p.pack_lot_code);
   if ($("pk_empty")) $("pk_empty").onclick = () => guard(async () => {
     if (!confirm(`Làm rỗng tank BBT ${p.from_bbt || ""}? Tồn hiện tại ${f.on_hand} hl sẽ về 0 (chỉ cho phép trong ngưỡng dung sai cấu hình).`)) return;
@@ -7473,15 +7720,52 @@ function groupMemberFifoBadgeHtml(materialId, memberIds, allLots) {
 }
 // Danh sách lô khả dụng của 1 vật tư tại Kho công ty, sắp theo FIFO (cũ nhất trước) — dùng để
 // dựng <select> chọn lô ngay trong bảng dòng đề nghị (đỡ phải mở modal riêng cho từng dòng).
-function requestLotOptionsHtml(materialId, allLots, selectedLotId) {
-  const avail = allLots.filter(l => l.material_id === materialId && l.quantity > 0 && !/phân xưởng/i.test(l.location || ""))
+function requestLotOptionsHtml(materialId, allLots, selectedLotId, asOfDate) {
+  // asOfDate (r.requested_receipt_date): loại bỏ lô Nhập kho SAU ngày đề nghị nhận — hiện lô đó
+  // ra vẫn chọn được sẽ bị backend chặn khi bấm "Xuất dòng này" (fulfill_request_line đã kiểm
+  // tra as-of, xem services/warehouse.py), nhưng để lộ trong dropdown vẫn gây hiểu nhầm "đủ
+  // hàng" và mất công thủ kho chọn nhầm rồi mới thấy lỗi — yêu cầu người dùng 2026-09-19: "bạn
+  // không được cho hiện ra như vậy chứ, bạn hiện ra người sử dụng chọn vào thì sao".
+  const asOf = asOfDate ? new Date(asOfDate) : null;
+  const avail = allLots.filter(l => l.material_id === materialId && l.quantity > 0 && !/phân xưởng/i.test(l.location || "")
+    && (!asOf || new Date(l.created_at) <= asOf))
     .sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
-  if (!avail.length) return { html: '<option value="">(không còn lô khả dụng)</option>', defaultId: "", fifoFirstId: "" };
+  if (!avail.length) {
+    const msg = asOf ? "(không có lô nào đã Nhập kho tính đến ngày đề nghị)" : "(không còn lô khả dụng)";
+    return { html: `<option value="">${msg}</option>`, defaultId: "", fifoFirstId: "" };
+  }
   const defaultId = selectedLotId && avail.some(l => l.lot_id === selectedLotId) ? selectedLotId : avail[0].lot_id;
   const html = avail.map((l, i) => `<option value="${l.lot_id}" ${l.lot_id === defaultId ? "selected" : ""}>` +
     `${esc(l.lot_code)} (${l.quantity}${l.uom}, nhập ${fmt(l.created_at)})${i === 0 ? " — FIFO, lô cũ nhất" : ""}` +
     `${l.status === "on_hold" ? " — CHỜ DUYỆT QC" : ""}</option>`).join("");
   return { html, defaultId, fifoFirstId: avail[0].lot_id };
+}
+
+// Kế hoạch cấp XUYÊN SUỐT nhiều lô (FIFO/lô cũ nhất trước) cho 1 dòng đề nghị — mirror
+// dispense.py::_workshop_fefo_lots + suggest_dispense (Cấp liệu), áp dụng cho "Xuất theo đề
+// nghị" — yêu cầu người dùng 2026-09-19: "giống kiểu cấp liệu đó, bạn tự thêm dòng nguyên liệu
+// cần lấy thêm theo fifo tiếp theo" (lô cũ nhất không đủ 1 mình thì tự động chia sang lô kế
+// tiếp thay vì chỉ hiện đúng 1 lô rồi báo thiếu). Tính HOÀN TOÀN ở client từ `allLots` đã tải
+// sẵn (đủ dữ liệu: quantity/created_at/location), không cần gọi thêm API.
+function requestFifoPlan(materialId, allLots, neededQty, asOfDate) {
+  const asOf = asOfDate ? new Date(asOfDate) : null;
+  const avail = allLots.filter(l => l.material_id === materialId && l.quantity > 0 && !/phân xưởng/i.test(l.location || "")
+    && (!asOf || new Date(l.created_at) <= asOf))
+    .sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+  const plan = [];
+  let remaining = Math.round(neededQty * 10000) / 10000;
+  for (const lot of avail) {
+    if (remaining <= 1e-9) break;
+    const take = Math.round(Math.min(remaining, lot.quantity) * 10000) / 10000;
+    if (take <= 0) continue;
+    plan.push({ lot_id: lot.lot_id, quantity: take });
+    remaining = Math.round((remaining - take) * 10000) / 10000;
+  }
+  // Không đủ tồn (kể cả cộng hết mọi lô hợp lệ) -> vẫn trả plan đã lấy được tối đa, cộng thêm 1
+  // dòng trống (SL=0, chưa chọn lô) để thủ kho biết còn thiếu và tự chọn tay nếu muốn cấp vượt.
+  if (remaining > 1e-6 && avail.length) plan.push({ lot_id: avail[avail.length - 1].lot_id, quantity: 0 });
+  if (!plan.length) plan.push({ lot_id: "", quantity: 0 });
+  return { plan, remaining, avail };
 }
 
 // Dòng đã fulfilled: hiện lại đúng trạng thái FIFO đã chụp NGAY LÚC XUẤT (fifo_ok, xem
@@ -7493,26 +7777,62 @@ function fulfilledFifoBadgeHtml(fifoOk) {
   return "—";
 }
 
+// 1 dòng đề nghị PENDING trong bảng — nếu lô cũ nhất không đủ nguyên số lượng, tự tách thành
+// NHIỀU <tr> (mỗi lô 1 dòng phụ, cột Vật tư/Ngày.../Trạng thái/Actions để trống, chỉ hiện ở dòng
+// đầu) — mirror hệt cách dispense.py's "Gợi ý cấp liệu" (sg_result) hiển thị nhiều lô cho 1 vật
+// tư, cộng thêm "+ Thêm lô khác" để thủ kho tự thêm/sửa nếu muốn (yêu cầu người dùng 2026-09-19).
+function requestPendingLineRowsHtml(r, l, matById, allLots, colspanShared) {
+  const mat = matById[l.material_id];
+  const matLabel = mat ? `${esc(mat.code)} — ${esc(mat.name)}` : esc(l.material_id);
+  const { plan } = requestFifoPlan(l.material_id, allLots || [], l.quantity, r.requested_receipt_date);
+  const actions = `<button class="btn sm sec" data-reqfulfill data-reqid="${esc(r.request_id)}" data-lineid="${esc(l.line_id)}">Xuất dòng này</button>
+     <button class="btn sm sec" data-reqreject data-reqid="${esc(r.request_id)}" data-lineid="${esc(l.line_id)}">Từ chối</button>`;
+  const pickRowHtml = (pick, pi, isFirst) => {
+    const lotOpts = requestLotOptionsHtml(l.material_id, allLots || [], pick.lot_id, r.requested_receipt_date);
+    return `<tr data-reqpickrow="${esc(l.line_id)}-${pi}">
+      <td>${isFirst ? matLabel : ""}</td>
+      <td>${isFirst ? `${l.quantity} ${esc(l.uom)}<div id="reqsum-${esc(l.line_id)}" class="muted" style="font-size:11px"></div>` : ""}</td>
+      <td>
+        <input type="number" min="0" step="any" class="reqlot-qty" data-lineid="${esc(l.line_id)}" data-pi="${pi}"
+          data-target="${l.quantity}" value="${pick.quantity}" style="width:70px"/> ${esc(l.uom)}
+        <select class="reqlot-select" id="reqlot-${esc(l.line_id)}-${pi}" data-lineid="${esc(l.line_id)}" data-pi="${pi}"
+          data-fifoexpected="${esc(pick.lot_id)}" data-fifofirst="${esc(lotOpts.fifoFirstId)}"
+          data-materialid="${esc(l.material_id)}" style="margin-left:6px">${lotOpts.html}</select>
+      </td>
+      <td></td><td></td><td></td>
+      <td id="reqfifo-${esc(l.line_id)}-${pi}"></td>
+      <td><input class="reqfifo-reason" id="reqreason-${esc(l.line_id)}-${pi}" data-lineid="${esc(l.line_id)}" data-pi="${pi}"
+        placeholder="Bắt buộc nếu chọn khác FIFO" style="display:none;width:170px"/></td>
+      <td>${isFirst ? badge(REQ_STATUS_BADGE[l.status] || "planned") + esc(l.status) : ""}</td>
+      <td>${isFirst ? actions : ""}</td></tr>`;
+  };
+  const rows = plan.map((p, pi) => pickRowHtml(p, pi, pi === 0)).join("");
+  const addRow = `<tr class="req-addlotrow"><td colspan="${colspanShared}" style="padding:2px 8px">
+    <button class="btn sm sec" data-reqaddlot="${esc(l.line_id)}" data-materialid="${esc(l.material_id)}"
+      data-reqdate="${esc(r.requested_receipt_date || "")}">+ Thêm lô khác (cùng ${esc(mat ? mat.code : "")})</button>
+  </td></tr>`;
+  return rows + addRow;
+}
+
 function requestLineRowHtml(r, l, matById, lotById, canFulfill, allLots) {
   // Hoàn tác xuất theo đề nghị coi như khóa lại sau khi fulfilled — chỉ ADMIN mới hoàn tác
   // được (mirror đúng quy ước đã áp dụng cho nút Hoàn tác Điều chuyển/Xuất sang ngang, xem
   // isAdminDc/isAdminSngPx), KHÔNG dùng chung quyền warehouse.issue (canFulfill) như lúc xuất.
   const isAdminReqUndo = CURRENT_USER && CURRENT_USER.role === "admin";
+  if (canFulfill && l.status === "pending") {
+    return requestPendingLineRowsHtml(r, l, matById, allLots, 10);
+  }
   const mat = matById[l.material_id];
   const matLabel = mat ? `${esc(mat.code)} — ${esc(mat.name)}` : esc(l.material_id);
   const fulLot = l.fulfilled_lot_id ? lotById[l.fulfilled_lot_id] : null;
-  const showLotPicker = canFulfill && l.status === "pending";
-  const lotOpts = showLotPicker ? requestLotOptionsHtml(l.material_id, allLots, l.preferred_lot_id) : null;
-  // fulfilled_lot_codes: ĐẦY ĐỦ mọi lô đã dùng nếu "Duyệt cả phiếu" phải tách dòng thành nhiều
-  // lô theo FIFO (yêu cầu người dùng 2026-09-18, xem services/warehouse.py::fulfill_all_lines)
-  // — fulfilled_lot_id chỉ giữ lô CUỐI nên hiện riêng không đủ khi có nhiều hơn 1 lô.
+  // fulfilled_lot_codes: ĐẦY ĐỦ mọi lô đã dùng nếu "Duyệt cả phiếu"/"Xuất dòng này" phải tách
+  // dòng thành nhiều lô theo FIFO (yêu cầu người dùng 2026-09-18/19, xem services/warehouse.py::
+  // fulfill_all_lines/fulfill_request_line) — fulfilled_lot_id chỉ giữ lô CUỐI nên hiện riêng
+  // không đủ khi có nhiều hơn 1 lô.
   const lotCodesLabel = (l.fulfilled_lot_codes && l.fulfilled_lot_codes.length)
     ? l.fulfilled_lot_codes.join(", ") : (fulLot ? fulLot.lot_code : null);
-  const lotCell = showLotPicker
-    ? `<select class="reqlot-select" id="reqlot-${esc(l.line_id)}" data-lineid="${esc(l.line_id)}"
-        data-fifofirst="${esc(lotOpts.fifoFirstId)}" data-materialid="${esc(l.material_id)}">${lotOpts.html}</select>`
-    : `<span class="muted">${lotCodesLabel ? esc(lotCodesLabel) : "—"}</span>`;
-  const dateCell = showLotPicker ? "" : `<span class="muted">${fulLot ? fmt(fulLot.created_at) : "—"}</span>`;
+  const lotCell = `<span class="muted">${lotCodesLabel ? esc(lotCodesLabel) : "—"}</span>`;
+  const dateCell = `<span class="muted">${fulLot ? fmt(fulLot.created_at) : "—"}</span>`;
   // "Ngày xuất" = mốc hiệu lực THẬT của StockMovement transfer (ts) khi dòng đã xuất — ĐÚNG
   // "Ngày đề nghị nhận kho" (r.requested_receipt_date) nếu phiếu có khai, mirror
   // fulfill_request_line/fulfill_all_lines (luôn dùng field đó làm `ts`); nếu phiếu KHÔNG khai
@@ -7524,21 +7844,10 @@ function requestLineRowHtml(r, l, matById, lotById, canFulfill, allLots) {
   const dispLot = fulLot || (l.preferred_lot_id ? lotById[l.preferred_lot_id] : null);
   const dispLoc = dispLot && dispLot.location_id ? (WH_CACHE.matLocById || {})[dispLot.location_id] : null;
   const locCell = dispLoc ? `<code class="k">${esc(dispLoc.code)}</code>` : `<span class="muted">—</span>`;
-  const actions = (canFulfill && l.status === "pending")
-    ? `<button class="btn sm sec" data-reqfulfill data-reqid="${esc(r.request_id)}" data-lineid="${esc(l.line_id)}" data-qty="${l.quantity}">Xuất dòng này</button>
-       <button class="btn sm sec" data-reqreject data-reqid="${esc(r.request_id)}" data-lineid="${esc(l.line_id)}">Từ chối</button>`
-    : (isAdminReqUndo && l.status === "fulfilled")
+  const actions = (isAdminReqUndo && l.status === "fulfilled")
     ? `<button class="btn sm sec" data-requndo data-reqid="${esc(r.request_id)}" data-lineid="${esc(l.line_id)}">Hoàn tác</button>`
     : "—";
-  // Lý do khác FIFO (yêu cầu người dùng 2026-09-18): dòng đang pending hiện ô nhập, ẩn/hiện theo
-  // đúng lô đang chọn ở reqlot-select có phải FIFO cũ nhất hay không (wireReqLotFifo, gắn sau khi
-  // chèn HTML) — bắt buộc điền mới cho "Xuất dòng này"/"Duyệt cả phiếu" xuất được (xem
-  // services/warehouse.py::fulfill_request_line/fulfill_all_lines). Dòng đã xử lý xong hiện lại
-  // đúng lý do đã lưu (line.reason), không cho sửa nữa.
-  const reasonCell = showLotPicker
-    ? `<input class="reqfifo-reason" id="reqreason-${esc(l.line_id)}" data-lineid="${esc(l.line_id)}"
-        placeholder="Bắt buộc nếu chọn khác FIFO" style="display:none;width:170px"/>`
-    : `<span class="muted">${l.reason ? esc(l.reason) : "—"}</span>`;
+  const reasonCell = `<span class="muted">${l.reason ? esc(l.reason) : "—"}</span>`;
   return `<tr>
     <td>${matLabel}</td>
     <td>${l.quantity} ${esc(l.uom)}</td>
@@ -7613,7 +7922,11 @@ function requestBlockHtml(r, matById, lotById, canFulfill, showBulk, allLots, ca
   const hasFulfilled = fulfilledCount > 0;
   const bulkBtn = (showBulk && canFulfill && pendingCount > 0)
     ? `<button class="btn sm" data-fulfillall="${esc(r.request_id)}">Duyệt cả phiếu (${pendingCount} dòng) →</button>` : "";
-  const cancelBtn = (!hasFulfilled && pendingCount > 0 && (canRequest || canFulfill))
+  // CHỈ bên đề nghị (canRequest, phân xưởng) mới được xóa phiếu — thủ kho công ty (canFulfill)
+  // là bên XUẤT theo đề nghị, không phải bên tạo, không được xóa (yêu cầu người dùng 2026-09-19:
+  // "thủ kho công ty là người xuất, không được xóa phiếu, xóa phiếu chỉ áp dụng cho bên đề nghị
+  // nhận thôi").
+  const cancelBtn = (!hasFulfilled && pendingCount > 0 && canRequest)
     ? `<button class="btn sm sec" data-reqcancel="${esc(r.request_id)}">Xóa phiếu</button>` : "";
   // Sửa (ngày đề nghị nhận + các dòng còn pending) — chỉ phía đề nghị (canRequest), CHỈ khi
   // phiếu còn ít nhất 1 dòng pending — phiếu đã xử lý xong hết (không còn dòng nào pending)
@@ -7670,40 +7983,128 @@ function wireRequestBlockActions() {
     const v = document.querySelector("#nav button.active[data-view]")?.dataset.view;
     if (v) render(v);
   };
-  // Lý do khác FIFO (yêu cầu người dùng 2026-09-18): ẩn/hiện ô "Lý do" + cập nhật lại badge FIFO
-  // mỗi khi đổi lô ở <select> — so trực tiếp với data-fifofirst (lô cũ nhất tại thời điểm render,
-  // xem requestLotOptionsHtml) thay vì gọi lại API, đủ dùng vì tồn kho không đổi trong lúc thao
-  // tác trên cùng 1 lần tải trang.
-  const reqIsFifo = sel => !sel.value || sel.value === sel.dataset.fifofirst;
+  // Lý do khác FIFO (yêu cầu người dùng 2026-09-18/19): ẩn/hiện ô "Lý do" + cập nhật lại badge
+  // FIFO mỗi khi đổi lô ở <select> — so trực tiếp với data-fifoexpected (lô đã gợi ý sẵn cho
+  // ĐÚNG vị trí (pi) đó lúc render/thêm dòng, xem requestFifoPlan/requestPendingLineRowsHtml)
+  // thay vì gọi lại API, đủ dùng vì tồn kho không đổi trong lúc thao tác trên cùng 1 lần tải
+  // trang. Mỗi dòng đề nghị giờ có thể gồm NHIỀU <select> (1 lô/dòng phụ, cùng data-lineid khác
+  // data-pi) khi phải tách nhiều lô — yêu cầu người dùng 2026-09-19: "giống kiểu cấp liệu đó,
+  // bạn tự thêm dòng nguyên liệu cần lấy thêm theo fifo tiếp theo".
+  const reqIsFifo = sel => !sel.value || sel.value === sel.dataset.fifoexpected;
   const wireReqLotFifo = sel => {
     const update = () => {
-      const reasonInput = document.getElementById(`reqreason-${sel.dataset.lineid}`);
-      const fifoCell = document.getElementById(`reqfifo-${sel.dataset.lineid}`);
+      const reasonInput = document.getElementById(`reqreason-${sel.dataset.lineid}-${sel.dataset.pi}`);
+      const fifoCell = document.getElementById(`reqfifo-${sel.dataset.lineid}-${sel.dataset.pi}`);
       const isFifo = reqIsFifo(sel);
       if (reasonInput) { reasonInput.style.display = isFifo ? "none" : ""; if (isFifo) reasonInput.value = ""; }
       if (fifoCell) fifoCell.innerHTML = isFifo
-        ? '<span class="badge available">✓ Lô cũ nhất (FIFO)</span>'
-        : '<span class="badge on_hold">⚠ Không phải lô cũ nhất</span>';
+        ? '<span class="badge available">✓ FIFO</span>'
+        : '<span class="badge on_hold">⚠ khác FIFO</span>';
     };
     sel.onchange = update;
     update();
   };
   document.querySelectorAll(".reqlot-select").forEach(wireReqLotFifo);
-  // Xuất trực tiếp từ lô đã chọn ở <select> ngay trong dòng (không cần mở modal riêng) — lô
-  // mặc định đã gợi ý theo FIFO (requestLotOptionsHtml), thủ kho chỉ cần đổi lại nếu muốn.
+  // Cảnh báo TRỰC TIẾP (không đợi bấm "Xuất dòng này" mới biết) khi tổng SL đã nhập cho 1 dòng
+  // KHÁC số lượng đề nghị — nhấn mạnh rõ khi VƯỢT (yêu cầu người dùng 2026-09-19: "cần bạn đưa ra
+  // 1 cảnh báo và không cho phép xuất nếu người xuất cố tình điền lượng nhiều hơn"). Chỉ hiển
+  // thị — chặn THẬT xảy ra ở [data-reqfulfill] (và ở backend, luôn là nguồn sự thật cuối cùng).
+  const updateReqSum = (lineId) => {
+    const qtyInputs = Array.from(document.querySelectorAll(`.reqlot-qty[data-lineid="${CSS.escape(lineId)}"]`));
+    const sumEl = document.getElementById(`reqsum-${lineId}`);
+    if (!qtyInputs.length || !sumEl) return;
+    const target = parseFloat(qtyInputs[0].dataset.target) || 0;
+    const sum = Math.round(qtyInputs.reduce((s, inp) => s + (parseFloat(inp.value) || 0), 0) * 10000) / 10000;
+    if (Math.abs(sum - target) < 1e-6) {
+      sumEl.innerHTML = "";
+    } else if (sum > target) {
+      sumEl.innerHTML = `<span style="color:var(--red)">⚠ Đã nhập ${sum} — VƯỢT đề nghị (${target}), sẽ không xuất được</span>`;
+    } else {
+      sumEl.innerHTML = `<span style="color:var(--red)">⚠ Đã nhập ${sum} — còn thiếu ${Math.round((target - sum) * 10000) / 10000}</span>`;
+    }
+  };
+  document.querySelectorAll(".reqlot-qty").forEach(inp => {
+    inp.oninput = () => updateReqSum(inp.dataset.lineid);
+    updateReqSum(inp.dataset.lineid);
+  });
+  // "+ Thêm lô khác" (yêu cầu người dùng 2026-09-19: lô cũ nhất không đủ/không muốn dùng lô đã
+  // gợi ý, cần thêm 1 dòng phụ CÙNG dòng đề nghị, khác lô, tự chọn lô FIFO kế tiếp chưa dùng tới
+  // trong các dòng phụ hiện có của CHÍNH dòng đề nghị đó) — mirror hệt dispense.py's "sg-addrow".
+  document.querySelectorAll("[data-reqaddlot]").forEach(btn => btn.onclick = () => {
+    const lineId = btn.dataset.reqaddlot;
+    const materialId = btn.dataset.materialid;
+    if (!materialId) return;
+    const allLots = WH_CACHE.allLots || [];
+    const existingSels = Array.from(document.querySelectorAll(`.reqlot-select[data-lineid="${CSS.escape(lineId)}"]`));
+    const usedLotIds = new Set(existingSels.map(s => s.value));
+    const reqDate = btn.dataset.reqdate || null;
+    const asOf = reqDate ? new Date(reqDate) : null;
+    const avail = allLots.filter(l => l.material_id === materialId && l.quantity > 0 && !/phân xưởng/i.test(l.location || "")
+      && (!asOf || new Date(l.created_at) <= asOf))
+      .sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+    const nextLot = avail.find(l => !usedLotIds.has(l.lot_id));
+    if (!nextLot) { toast("Không còn lô nào khác của vật tư này để chọn.", "err"); return; }
+    const pi = Math.max(...existingSels.map(s => parseInt(s.dataset.pi, 10))) + 1;
+    const lotOpts = requestLotOptionsHtml(materialId, allLots, nextLot.lot_id, reqDate);
+    const existingQty = document.querySelector(`.reqlot-qty[data-lineid="${CSS.escape(lineId)}"]`);
+    const target = existingQty ? existingQty.dataset.target : "";
+    const addRowTr = btn.closest("tr");
+    addRowTr.insertAdjacentHTML("beforebegin", `<tr data-reqpickrow="${esc(lineId)}-${pi}">
+      <td></td><td></td>
+      <td>
+        <input type="number" min="0" step="any" class="reqlot-qty" data-lineid="${esc(lineId)}" data-pi="${pi}"
+          data-target="${esc(target)}" value="0" style="width:70px"/> ${esc(nextLot.uom || "")}
+        <select class="reqlot-select" id="reqlot-${esc(lineId)}-${pi}" data-lineid="${esc(lineId)}" data-pi="${pi}"
+          data-fifoexpected="${esc(nextLot.lot_id)}" data-materialid="${esc(materialId)}" style="margin-left:6px">${lotOpts.html}</select>
+      </td>
+      <td></td><td></td><td></td>
+      <td id="reqfifo-${esc(lineId)}-${pi}"></td>
+      <td><input class="reqfifo-reason" id="reqreason-${esc(lineId)}-${pi}" data-lineid="${esc(lineId)}" data-pi="${pi}"
+        placeholder="Bắt buộc nếu chọn khác FIFO" style="display:none;width:170px"/></td>
+      <td></td><td></td></tr>`);
+    const newRow = addRowTr.previousElementSibling;
+    wireReqLotFifo(newRow.querySelector(".reqlot-select"));
+    const newQtyInput = newRow.querySelector(".reqlot-qty");
+    newQtyInput.oninput = () => updateReqSum(lineId);
+    updateReqSum(lineId);
+  });
+  // Xuất trực tiếp từ (các) lô đã chọn ngay trong dòng (không cần mở modal riêng) — lô mặc định
+  // đã gợi ý theo FIFO, tự tách nhiều lô nếu lô cũ nhất không đủ (requestFifoPlan), thủ kho chỉ
+  // cần đổi lại/thêm dòng nếu muốn.
   document.querySelectorAll("[data-reqfulfill]").forEach(b => b.onclick = () => guard(async () => {
-    const sel = document.getElementById(`reqlot-${b.dataset.lineid}`);
-    const lotId = sel ? sel.value : "";
-    if (!lotId) throw new Error("Không còn lô khả dụng để xuất cho dòng này.");
-    const reasonInput = document.getElementById(`reqreason-${b.dataset.lineid}`);
-    const reason = reasonInput ? reasonInput.value.trim() : "";
-    if (sel && !reqIsFifo(sel) && !reason) {
-      toast('Lô đã chọn không phải lô cũ nhất (FIFO) — bắt buộc nhập "Lý do (nếu khác FIFO)"', "err");
+    const lineId = b.dataset.lineid;
+    const sels = Array.from(document.querySelectorAll(`.reqlot-select[data-lineid="${CSS.escape(lineId)}"]`));
+    if (!sels.length) throw new Error("Không còn lô khả dụng để xuất cho dòng này.");
+    const lots = [];
+    for (const sel of sels) {
+      const qtyInput = document.querySelector(`.reqlot-qty[data-lineid="${CSS.escape(lineId)}"][data-pi="${sel.dataset.pi}"]`);
+      const qty = qtyInput ? (parseFloat(qtyInput.value) || 0) : 0;
+      if (qty <= 0) continue;
+      if (!sel.value) { toast("Có dòng chưa chọn lô — chọn lô hoặc để số lượng về 0.", "err"); return; }
+      const reasonInput = document.getElementById(`reqreason-${lineId}-${sel.dataset.pi}`);
+      const reason = reasonInput ? reasonInput.value.trim() : "";
+      if (!reqIsFifo(sel) && !reason) {
+        toast('Có lô chọn khác FIFO chưa nhập lý do — nhập "Lý do (nếu khác FIFO)" rồi bấm lại.', "err");
+        reasonInput && reasonInput.focus();
+        return;
+      }
+      lots.push({ lot_id: sel.value, quantity: qty, reason: reason || null });
+    }
+    if (!lots.length) { toast("Chưa nhập số lượng cho lô nào — nhập số lượng rồi bấm lại.", "err"); return; }
+    // Chặn TRƯỚC khi gọi API nếu tổng đã nhập KHÁC số lượng đề nghị — nhấn mạnh rõ khi VƯỢT
+    // (yêu cầu người dùng 2026-09-19: không cho xuất nếu cố tình điền nhiều hơn đề nghị). Backend
+    // (fulfill_request_line) vẫn tự chặn lại lần cuối, đây chỉ để báo sớm/rõ ràng hơn cho thủ kho.
+    const target = parseFloat((document.querySelector(`.reqlot-qty[data-lineid="${CSS.escape(lineId)}"]`) || {}).dataset?.target) || 0;
+    const entered = Math.round(lots.reduce((s, l) => s + l.quantity, 0) * 10000) / 10000;
+    if (Math.abs(entered - target) > 1e-6) {
+      toast(entered > target
+        ? `Tổng số lượng đã nhập (${entered}) VƯỢT quá số lượng đề nghị (${target}) — không được xuất vượt. Sửa lại cho khớp đúng ${target}.`
+        : `Tổng số lượng đã nhập (${entered}) chưa đủ số lượng đề nghị (${target}) — nhập đủ hoặc dùng "+ Thêm lô khác".`, "err");
       return;
     }
-    await POST(`/warehouse/requests/${b.dataset.reqid}/lines/${b.dataset.lineid}/fulfill`,
-      { lot_id: lotId, quantity: parseFloat(b.dataset.qty), location_to: "Kho phân xưởng", reason: reason || null });
-    toast("Đã xuất dòng theo lô đã chọn"); renderCurrentWarehouseView();
+    await POST(`/warehouse/requests/${b.dataset.reqid}/lines/${lineId}/fulfill`,
+      { lots, location_to: "Kho phân xưởng" });
+    toast("Đã xuất dòng theo (các) lô đã chọn"); renderCurrentWarehouseView();
   }));
   document.querySelectorAll("[data-reqreject]").forEach(b => b.onclick = () => guard(async () => {
     const reason = prompt("Lý do từ chối (tuỳ chọn):") || null;
@@ -7721,7 +8122,7 @@ function wireRequestBlockActions() {
     const reasons = {};
     for (const sel of sels) {
       if (reqIsFifo(sel)) continue;
-      const reasonInput = document.getElementById(`reqreason-${sel.dataset.lineid}`);
+      const reasonInput = document.getElementById(`reqreason-${sel.dataset.lineid}-${sel.dataset.pi}`);
       const reason = reasonInput ? reasonInput.value.trim() : "";
       if (!reason) {
         toast('Có dòng đang chọn lô khác FIFO chưa nhập lý do — nhập lý do rồi bấm lại, hoặc dùng "Xuất dòng này" để duyệt riêng dòng đó.', "err");
@@ -10189,6 +10590,7 @@ const MASTER_GROUPS = [
   ] },
   { key: "khotp", label: "Kho thành phẩm", items: [
     { key: "nhamaykhac", label: "Nhà máy khác" }, { key: "loaidonvi", label: "Loại đơn vị tồn kho" },
+    { key: "quycachpallet", label: "Quy cách đóng gói pallet" },
   ] },
   { key: "chatluong", label: "Chất lượng", items: [
     { key: "chitieucl", label: "Danh mục chỉ tiêu chất lượng" }, { key: "nhomchitieucl", label: "Nhóm chỉ tiêu chất lượng" },
@@ -10202,7 +10604,7 @@ const MASTER_GROUPS = [
 ];
 let MASTER_GROUP = "sanxuat";
 VIEWS.master = async function () {
-  const [products, finishedProducts, materials, plines, qcParams, qcGroups, stageGroups, beerTypes, suppliers, materialGroups, opsSettings, unitTypes, materialAltGroups, factoryLocations, materialLocations, scopeCatalog, processParams, processParamGroups, processPhases] = await Promise.all([
+  const [products, finishedProducts, materials, plines, qcParams, qcGroups, stageGroups, beerTypes, suppliers, materialGroups, opsSettings, unitTypes, materialAltGroups, factoryLocations, materialLocations, scopeCatalog, processParams, processParamGroups, processPhases, packingSpecs] = await Promise.all([
     GET("/products"), GET("/finished-products").catch(() => []), GET("/materials"), GET("/lines").catch(() => []),
     GET("/qc/parameters?active_only=false").catch(() => []),
     GET("/qc/groups").catch(() => []), GET("/qc/stage-groups").catch(() => []), GET("/beer-types").catch(() => []),
@@ -10214,7 +10616,8 @@ VIEWS.master = async function () {
     GET("/auth/scope-catalog").catch(() => ({ areas: [] })),
     GET("/process-params/parameters?active_only=false").catch(() => []),
     GET("/process-params/groups").catch(() => []),
-    GET("/process-params/phases").catch(() => [])]);
+    GET("/process-params/phases").catch(() => []),
+    GET("/packing-specs").catch(() => [])]);
   // Danh mục "Khu vực" chuẩn — dùng chung với phạm vi phân quyền Tài khoản (security.py::
   // SCOPE_AREAS: nau/len_men/loc/chiet/kho) — Dây chuyền chỉ được CHỌN trong danh sách này,
   // không gõ tay tự do (tránh gõ sai/lệch chính tả khỏi các nơi khác đang dùng đúng mã này).
@@ -10522,6 +10925,33 @@ VIEWS.master = async function () {
             <button class="btn sm sec" data-utdel="${esc(ut.unit_type_id)}">Xóa</button>
           </td>` : ""}</tr>`).join("") ||
           `<tr><td colspan="${canManage ? 5 : 4}" class="muted">Chưa có loại đơn vị nào.</td></tr>`}</tbody>
+      </table></div>
+    </div>
+
+    <div class="panel" ${mi("quycachpallet")}><h2>📦 Quy cách đóng gói pallet <span class="muted">(${packingSpecs.length})</span></h2>
+      <div class="muted" style="margin-bottom:6px">Khai theo TỪNG Sản phẩm (SKU) — VD "Quy cách 01": 110 vỉ/pallet, xếp 10 hàng. Dùng ở bước "Duyệt nhập kho thành phẩm" (Mẻ sản xuất → Lô thành phẩm): người duyệt chọn quy cách đã dùng thật cho từng phần SL, hệ thống tự tách đúng số pallet (kể cả pallet lẻ nếu SL không chia hết). Mỗi quy cách chỉ chọn được cho ĐÚNG SKU đã khai ở đây — không tự nhập tay số vỉ/pallet ở màn duyệt.</div>
+      ${noPerm}
+      ${canManage ? `<div class="row">
+        <div class="field"><label>Sản phẩm (SKU)</label><select id="pks_fp"><option value="">(chọn SKU)</option>${finishedProducts.map(fp => `<option value="${esc(fp.finished_product_id)}">${esc(fp.code)} — ${esc(fp.name)}</option>`).join("")}</select></div>
+        <div class="field"><label>Mã quy cách</label><input id="pks_code" placeholder="QC01"/></div>
+        <div class="field"><label>Tên quy cách</label><input id="pks_name" placeholder="Quy cách 01"/></div>
+        <div class="field"><label>SL/pallet (vỉ hoặc keg)</label><input id="pks_units" type="number" min="1" placeholder="110" style="width:120px"/></div>
+        <div class="field"><label>Số hàng xếp <span class="muted">(chỉ tham khảo)</span></label><input id="pks_layers" type="number" min="1" placeholder="10" style="width:110px"/></div>
+        <button class="btn" id="pks_add" style="align-self:flex-end">+ Tạo quy cách</button>
+      </div>` : ""}
+      <input class="searchbox" data-tbl="t_pks" placeholder="Tìm theo mã SKU, mã/tên quy cách..." style="margin-top:10px"/>
+      <div class="tablewrap" style="margin-top:6px"><table id="t_pks">
+        <thead><tr><th>SKU</th><th>Mã quy cách</th><th>Tên</th><th>SL/pallet</th><th>Số hàng xếp</th><th>Trạng thái</th>${canManage ? "<th></th>" : ""}</tr></thead>
+        <tbody>${packingSpecs.map(s => { const fp = finishedProducts.find(x => x.finished_product_id === s.finished_product_id); return `<tr>
+          <td>${fp ? `<code class="k">${esc(fp.code)}</code>` : "—"}</td>
+          <td><code class="k">${esc(s.code)}</code></td><td>${esc(s.name || "—")}</td>
+          <td>${s.units_per_pallet}</td><td class="muted">${s.layers ?? "—"}</td>
+          <td>${s.active ? '<span style="color:var(--green)">Đang dùng</span>' : '<span class="muted">Đã ẩn</span>'}</td>
+          ${canManage ? `<td style="white-space:nowrap">
+            <button class="btn sm sec" data-epks="${esc(s.spec_id)}">Sửa</button>
+            <button class="btn sm sec" data-pksdel="${esc(s.spec_id)}">Xóa</button>
+          </td>` : ""}</tr>`; }).join("") ||
+          `<tr><td colspan="${canManage ? 7 : 6}" class="muted">Chưa có quy cách đóng gói nào.</td></tr>`}</tbody>
       </table></div>
     </div>
 
@@ -10854,6 +11284,43 @@ VIEWS.master = async function () {
       if (!confirm("Xóa loại đơn vị tồn kho này? Không thể hoàn tác.")) return;
       await DELETE(`/unit-types/${b.dataset.utdel}`);
       toast("Đã xóa loại đơn vị"); render("master");
+    }));
+    if ($("pks_add")) $("pks_add").onclick = () => guard(async () => {
+      const finished_product_id = $("pks_fp").value, code = $("pks_code").value.trim();
+      const units_per_pallet = parseInt($("pks_units").value, 10);
+      const layersVal = $("pks_layers").value.trim();
+      if (!finished_product_id) throw new Error("Chọn Sản phẩm (SKU).");
+      if (!code) throw new Error("Nhập Mã quy cách.");
+      if (!units_per_pallet || units_per_pallet <= 0) throw new Error("SL/pallet phải lớn hơn 0.");
+      await POST("/packing-specs", { finished_product_id, code, name: $("pks_name").value.trim() || null,
+        units_per_pallet, layers: layersVal ? parseInt(layersVal, 10) : null });
+      toast("Đã tạo quy cách đóng gói"); render("master");
+    });
+    document.querySelectorAll("[data-epks]").forEach(b => b.onclick = () => {
+      const s = packingSpecs.find(x => x.spec_id === b.dataset.epks);
+      modal(`<h3>Sửa quy cách đóng gói pallet</h3>
+        <div class="field"><label>Sản phẩm (SKU)</label><select id="epks_fp">${finishedProducts.map(fp => `<option value="${esc(fp.finished_product_id)}" ${fp.finished_product_id === s.finished_product_id ? "selected" : ""}>${esc(fp.code)} — ${esc(fp.name)}</option>`).join("")}</select></div>
+        <div class="field" style="margin-top:8px"><label>Mã quy cách</label><input id="epks_code" value="${esc(s.code)}"/></div>
+        <div class="field" style="margin-top:8px"><label>Tên quy cách</label><input id="epks_name" value="${esc(s.name || "")}"/></div>
+        <div class="field" style="margin-top:8px"><label>SL/pallet (vỉ hoặc keg)</label><input id="epks_units" type="number" min="1" value="${s.units_per_pallet}" style="width:120px"/></div>
+        <div class="field" style="margin-top:8px"><label>Số hàng xếp <span class="muted">(chỉ tham khảo)</span></label><input id="epks_layers" type="number" min="1" value="${s.layers ?? ""}" style="width:110px"/></div>
+        <div class="field" style="margin-top:8px"><label><input type="checkbox" id="epks_active" ${s.active ? "checked" : ""}/> Đang dùng (hiện trong danh sách chọn lúc Duyệt nhập kho thành phẩm)</label></div>
+        <button class="btn" id="epks_save" style="margin-top:12px">Lưu</button>`);
+      $("epks_save").onclick = () => guard(async () => {
+        const units_per_pallet = parseInt($("epks_units").value, 10);
+        const layersVal = $("epks_layers").value.trim();
+        if (!units_per_pallet || units_per_pallet <= 0) throw new Error("SL/pallet phải lớn hơn 0.");
+        await PUT(`/packing-specs/${s.spec_id}`, { finished_product_id: $("epks_fp").value,
+          code: $("epks_code").value.trim(), name: $("epks_name").value.trim() || null,
+          units_per_pallet, layers: layersVal ? parseInt(layersVal, 10) : null,
+          active: $("epks_active").checked });
+        closeModal(); toast("Đã cập nhật"); render("master");
+      });
+    });
+    document.querySelectorAll("[data-pksdel]").forEach(b => b.onclick = () => guard(async () => {
+      if (!confirm("Xóa quy cách đóng gói này? Không thể hoàn tác.")) return;
+      await DELETE(`/packing-specs/${b.dataset.pksdel}`);
+      toast("Đã xóa quy cách đóng gói"); render("master");
     }));
     if ($("sp_add")) $("sp_add").onclick = () => guard(async () => {
       await POST("/suppliers", { code: $("sp_code").value.trim(), name: $("sp_name").value.trim(),

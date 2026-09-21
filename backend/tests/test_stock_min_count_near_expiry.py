@@ -284,6 +284,20 @@ def test_stock_count_undo_blocked_after_approved(client, admin_h, thukho_h):
     assert undo.status_code == 409, undo.text
 
 
+def test_stock_count_undo_blocked_when_real_movement_happened_after_post(client, admin_h, thukho_h):
+    """Chốt phiếu kiểm kê xong (posted, chưa approve), rồi có 1 phiếu xuất THẬT xảy ra trên lô
+    đó — hoàn tác kiểm kê lúc này sẽ ghi đè lot.quantity về đúng system_qty cũ, xóa mất giao
+    dịch xuất thật đó khỏi tồn kho, nên phải bị chặn (yêu cầu người dùng 2026-09-21)."""
+    count_id, mat_id, lot_id = _posted_count_with_variance(client, admin_h, thukho_h, "UNDO-INTERIM", on_hand=100, counted=92)
+
+    iss = client.post("/api/warehouse/issue", headers=admin_h,
+                      json={"lot_id": lot_id, "quantity": 10, "mode": "tu_do"})
+    assert iss.status_code == 200, iss.text
+
+    blocked = client.post(f"/api/warehouse/counts/{count_id}/undo", headers=admin_h)
+    assert blocked.status_code == 409, blocked.text
+
+
 def test_stock_count_undo_and_approve_require_posted_status(client, admin_h, thukho_h):
     mat_id = _create_material(client, admin_h, "KK-MAT-DRAFTGATE")
     rc = client.post("/api/warehouse/receive", headers=thukho_h,

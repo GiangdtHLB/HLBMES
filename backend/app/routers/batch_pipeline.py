@@ -34,6 +34,8 @@ from ..schemas import (
     EbrSignIn,
     FilterLotFromOrderIn,
     FinishFilterLotBatchIn,
+    PackLotAllocationsIn,
+    ReleasePackLotAllocationIn,
 )
 from ..security import User, get_current_user
 from ..services import batch_pipeline as svc
@@ -408,9 +410,16 @@ def approve_pack_lot(pack_lot_id: str, db: Session = Depends(get_db), user: User
     return svc.approve_pack_lot(db, pack_lot_id, user)
 
 
-@router.post("/batch-pack-lots/{pack_lot_id}/release-to-wms")
-def release_pack_lot_to_wms(pack_lot_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    return svc.release_pack_lot_to_wms(db, pack_lot_id, user)
+@router.put("/batch-pack-lots/{pack_lot_id}/pack-allocations", response_model=BatchPackLotOut)
+def save_pack_lot_allocations(pack_lot_id: str, payload: PackLotAllocationsIn,
+                              db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    return svc.save_pack_lot_allocations(db, pack_lot_id, [a.model_dump() for a in payload.allocations], user)
+
+
+@router.post("/batch-pack-lots/{pack_lot_id}/pack-allocations/{row_id}/release")
+def release_pack_lot_allocation(pack_lot_id: str, row_id: str, payload: ReleasePackLotAllocationIn,
+                                db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    return svc.release_pack_lot_allocation(db, pack_lot_id, row_id, user, payload.loc_id)
 
 
 # ==================== EBR neo ở lô thành phẩm ====================

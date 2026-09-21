@@ -98,6 +98,41 @@ class MaterialAltGroupOut(ORMModel):
     selection_mode: str = "single"
 
 
+class PalletAllocationRowIn(BaseModel):
+    row_id: Optional[str] = None
+    spec_id: str
+    quantity: float
+
+
+class PackLotAllocationsIn(BaseModel):
+    allocations: list[PalletAllocationRowIn]
+
+
+class ReleasePackLotAllocationIn(BaseModel):
+    loc_id: str
+
+
+class PackingSpecIn(BaseModel):
+    code: str
+    name: Optional[str] = None
+    finished_product_id: str
+    units_per_pallet: int
+    layers: Optional[int] = None
+    active: bool = True
+
+
+class PackingSpecOut(ORMModel):
+    spec_id: str
+    code: str
+    name: Optional[str] = None
+    finished_product_id: str
+    units_per_pallet: int
+    layers: Optional[int] = None
+    active: bool
+    created_by: Optional[str] = None
+    created_at: datetime
+
+
 class LotKcsUpdateIn(BaseModel):
     kcs_lot_no: Optional[str] = None
     supplier_lot: Optional[str] = None
@@ -599,6 +634,10 @@ class PutawayIn(BaseModel):
     loc_id: str
 
 
+class ShipLotIn(BaseModel):
+    pallet_count: Optional[int] = None
+
+
 # ---- Dây chuyền (line master) ----
 class LineIn(BaseModel):
     code: str
@@ -903,6 +942,20 @@ class DowntimeIn(BaseModel):
     note: Optional[str] = None
 
 
+class OeeCountEventIn(BaseModel):
+    line: str
+    ts: Optional[datetime] = None
+    qty: float
+    note: Optional[str] = None
+
+
+class OeeRejectEventIn(BaseModel):
+    line: str
+    ts: Optional[datetime] = None
+    qty: float
+    reason: Optional[str] = None
+
+
 class OeeReasonCatalogIn(BaseModel):
     line_code: Optional[str] = None
     category: str
@@ -1116,9 +1169,19 @@ class SourceMaterialLineOut(BaseModel):
     member_material_ids: list[str] = []
 
 
-class RequestFulfillIn(BaseModel):
+class RequestFulfillLotIn(BaseModel):
     lot_id: str
-    quantity: float
+    quantity: float = Field(gt=0)
+    reason: Optional[str] = None   # bắt buộc nếu lot_id KHÁC lô cũ nhất (FIFO) CÒN LẠI
+
+
+class RequestFulfillIn(BaseModel):
+    # lot_id/quantity (1 lô) HOẶC lots (nhiều lô, tổng phải bằng đúng số lượng đề nghị) — không
+    # truyền lots thì dùng lot_id/quantity như cũ (tương thích ngược, xem
+    # services/warehouse.py::fulfill_request_line).
+    lot_id: Optional[str] = None
+    quantity: Optional[float] = None
+    lots: Optional[list[RequestFulfillLotIn]] = None
     location_to: str = "Kho phân xưởng"
     reason: Optional[str] = None   # bắt buộc nếu lot_id KHÁC lô FIFO/FEFO (cũ nhất) hiện có
 
@@ -2140,6 +2203,8 @@ class BatchPackLotOut(ORMModel):
     ca3_by: Optional[str] = None
     ca3_at: Optional[datetime] = None
     ended_at: Optional[datetime] = None   # tính từ ca1/2/3 (computed property) — xem models/batch_pipeline.py
+    pack_allocations: Optional[list] = None
+    unstocked_remainder: float = 0.0
     approved: bool = False
     approved_by: Optional[str] = None
     approved_at: Optional[datetime] = None

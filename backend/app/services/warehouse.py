@@ -26,18 +26,6 @@ from .opening_balance_import import parse_opening_balance_sheet
 from .qc_catalog import requires_kcs_hold
 
 
-def _require_any_perm(user: User, *perms: str) -> None:
-    last_err = None
-    for p in perms:
-        try:
-            require_perm(user, p)
-            return
-        except PermissionError_ as e:
-            last_err = e
-    if last_err:
-        raise last_err
-
-
 def _move(db, mtype, lot, quantity, user, ts=None, **kw):
     # created_at LUÔN là utcnow() thật — ts mới là ngày hiệu lực có thể khai lùi (xem model).
     mv = StockMovement(movement_id=new_id(), movement_type=mtype,
@@ -299,6 +287,24 @@ def _lot_used(db: Session, lot_id: str) -> bool:
     làm nguồn sự thật duy nhất thay vì dò khắp các bảng usage khác nhau."""
     n = db.execute(select(func.count()).select_from(StockMovement).where(
         StockMovement.lot_id == lot_id, StockMovement.movement_type != "receipt")).scalar_one()
+    return n > 0
+
+
+def _lot_touched_since(db: Session, lot_id: str, since_movement_id: str) -> bool:
+    """Lô đã bị động tới THÊM (issue/transfer/adjust khác) SAU một giao dịch cụ thể (KHÁC bản
+    thân giao dịch đó) — dùng cho các hàm "Hoàn tác" mà chính giao dịch đang hoàn tác cũng là 1
+    StockMovement non-receipt trên lô đó, nên không thể dùng `_lot_used` thẳng (luôn đúng do
+    chính nó). Dùng khi hoàn tác 1 điều chuyển/xuất sang ngang — nếu lô ở kho đích đã bị dùng
+    tiếp SAU khi nó tới đó (VD thủ kho đã xuất/điều chuyển tiếp phần vừa nhận), hoàn tác về vị
+    trí cũ sẽ làm sai lệch tồn 2 đầu, không thể cho hoàn tác nữa (yêu cầu người dùng 2026-09-21:
+    "nếu đã dùng rồi thì không thể xóa, hoàn tác, hay sửa")."""
+    since_mv = db.get(StockMovement, since_movement_id)
+    if not since_mv:
+        return False
+    n = db.execute(select(func.count()).select_from(StockMovement).where(
+        StockMovement.lot_id == lot_id, StockMovement.movement_type != "receipt",
+        StockMovement.movement_id != since_movement_id,
+        StockMovement.created_at > since_mv.created_at)).scalar_one()
     return n > 0
 
 
@@ -1479,6 +1485,16 @@ def _stock_at_company(db: Session, material_id: str) -> float:
     return sum(q for q, loc in rows if loc_matches(loc)) or 0.0
 
 
+def _stock_at_company_as_of(db: Session, material_id: str, ts) -> float:
+    """Tổng tồn tại Kho công ty của 1 vật tư tính đến hết `ts` — dùng để chặn TẠO/SỬA Đề nghị
+    nhận kho không vượt quá tồn TẠI ĐÚNG "Ngày đề nghị nhận kho" đang khai, không phải tồn thật
+    HIỆN TẠI (mirror as_of dispense.py/fulfill_request_line's as-of check) — yêu cầu người dùng
+    2026-09-19: "Khi tạo đề nghị nhận kho, nếu ... vật tư tồn trong công ty kho tính tại ngày
+    giờ đề nghị nhận không đủ, thì không cho tạo phiếu đề nghị nhận."."""
+    return round(sum(r["quantity"] for r in lot_on_hand_as_of(db, ts, "Kho công ty")
+                     if r["material_id"] == material_id), 4)
+
+
 def _aggregate_source_material_lines(db: Session, source_type: str, source_id: str) -> list[dict]:
     """Nhu cầu NVL của 1 Lệnh nấu, gộp theo vật tư (cộng dồn nếu 1 vật tư xuất hiện nhiều
     dòng) — dùng để tự động điền sẵn phiếu đề nghị nhận kho, mirror dữ liệu định mức đã có sẵn
@@ -1583,7 +1599,13 @@ def create_request(db: Session, payload: dict, user: User) -> dict:
     """Phân xưởng tạo 1 phiếu đề nghị nhận kho gồm 1 hoặc nhiều dòng vật tư — tuỳ chọn gắn
     với 1 Lệnh nấu (`source_type`/`source_id`, chỉ để tham chiếu/báo cáo).
 
-    Mỗi dòng không được đề nghị vượt quá tồn kho công ty hiện có của vật tư đó."""
+    Mỗi dòng không được đề nghị vượt quá tồn kho công ty — tính TẠI ĐÚNG "Ngày đề nghị nhận
+    kho" nếu có khai (KHÔNG phải tồn thật hiện tại), chặn ngay từ lúc TẠO phiếu (yêu cầu người
+    dùng 2026-09-19: "Khi tạo đề nghị nhận kho, nếu ... vật tư tồn trong công ty kho tính tại
+    ngày giờ đề nghị nhận không đủ, thì không cho tạo phiếu đề nghị nhận") — tránh lặp lại đúng
+    lớp lỗi đã gặp ở fulfill_request_line/fulfill_all_lines (tồn ảo do khai lùi ngày), lần này
+    chặn sớm hơn 1 bước, ngay từ lúc lập phiếu. Không khai "Ngày đề nghị nhận kho" thì dùng tồn
+    thật HIỆN TẠI như cũ (không có mốc để tính as-of)."""
     require_perm(user, "warehouse.request")
     source_type = payload.get("source_type")
     source_id = payload.get("source_id")
@@ -1598,6 +1620,7 @@ def create_request(db: Session, payload: dict, user: User) -> dict:
     lines_payload = payload.get("lines") or []
     if not lines_payload:
         raise DomainError("Đề nghị phải có ít nhất 1 dòng vật tư.")
+    ts = payload.get("requested_receipt_date")
     for line in lines_payload:
         mat = db.get(Material, line["material_id"])
         if not mat:
@@ -1605,11 +1628,12 @@ def create_request(db: Session, payload: dict, user: User) -> dict:
         qty = float(line["quantity"])
         if qty <= 0:
             raise DomainError("Số lượng đề nghị phải > 0.")
-        on_hand = _stock_at_company(db, line["material_id"])
+        on_hand = _stock_at_company_as_of(db, line["material_id"], ts) if ts is not None else _stock_at_company(db, line["material_id"])
         if qty > on_hand:
+            when = f" tính đến ngày đề nghị nhận kho {ts:%d/%m/%Y %H:%M}" if ts is not None else " hiện có"
             raise DomainError(
                 f"Số lượng đề nghị của '{mat.code}' ({qty} {line.get('uom', 'kg')}) vượt quá "
-                f"tồn kho công ty hiện có ({on_hand} {line.get('uom', 'kg')})."
+                f"tồn kho công ty{when} ({on_hand} {line.get('uom', 'kg')})."
             )
         if line.get("preferred_lot_id"):
             _lot(db, line["preferred_lot_id"])
@@ -1674,8 +1698,12 @@ def _get_request_line(db, request_id: str, line_id: str) -> MaterialRequestLine:
 
 
 def cancel_request(db: Session, request_id: str, user: User) -> dict:
-    """Hủy phiếu (soft-cancel, vẫn còn trong lịch sử) — chỉ khi CHƯA có dòng nào được duyệt."""
-    _require_any_perm(user, "warehouse.request", "warehouse.issue")
+    """Hủy phiếu (soft-cancel, vẫn còn trong lịch sử) — chỉ khi CHƯA có dòng nào được duyệt.
+    CHỈ bên đề nghị (`warehouse.request`, phân xưởng) mới được hủy — thủ kho công ty
+    (`warehouse.issue`) là bên XUẤT theo đề nghị, không phải bên tạo, nên không được xóa phiếu
+    (yêu cầu người dùng 2026-09-19: "thủ kho công ty là người xuất, không được xóa phiếu, xóa
+    phiếu chỉ áp dụng cho bên đề nghị nhận thôi")."""
+    require_perm(user, "warehouse.request")
     req = _get_request(db, request_id)
     lines = db.execute(
         select(MaterialRequestLine).where(MaterialRequestLine.request_id == request_id)
@@ -1702,6 +1730,7 @@ def update_request(db: Session, request_id: str, payload: dict, user: User) -> d
     req = _get_request(db, request_id)
     if "requested_receipt_date" in payload:
         req.requested_receipt_date = payload["requested_receipt_date"]
+    ts = req.requested_receipt_date
     for line_upd in payload.get("lines") or []:
         line = _get_request_line(db, request_id, line_upd["line_id"])
         if line.status != "pending":
@@ -1714,11 +1743,15 @@ def update_request(db: Session, request_id: str, payload: dict, user: User) -> d
             raise NotFoundError(f"Vật tư '{new_material_id}' không tồn tại.")
         if new_qty <= 0:
             raise DomainError("Số lượng đề nghị phải > 0.")
-        on_hand = _stock_at_company(db, new_material_id)
+        # Cùng mốc "Ngày đề nghị nhận kho" (as-of) như create_request, xem _stock_at_company_
+        # as_of — nếu sửa số lượng/ngày khiến vượt tồn tại đúng ngày đó thì chặn (yêu cầu người
+        # dùng 2026-09-19).
+        on_hand = _stock_at_company_as_of(db, new_material_id, ts) if ts is not None else _stock_at_company(db, new_material_id)
         if new_qty > on_hand:
+            when = f" tính đến ngày đề nghị nhận kho {ts:%d/%m/%Y %H:%M}" if ts is not None else " hiện có"
             raise DomainError(
                 f"Số lượng đề nghị của '{mat.code}' ({new_qty} {line.uom}) vượt quá tồn kho "
-                f"công ty hiện có ({on_hand} {line.uom})."
+                f"công ty{when} ({on_hand} {line.uom})."
             )
         line.material_id = new_material_id
         line.quantity = new_qty
@@ -1771,68 +1804,152 @@ def is_oldest_workshop_lot(db: Session, material_id: str, lot_id: str) -> bool:
     return bool(candidates) and candidates[0].lot_id == lot_id
 
 
-def fulfill_request_line(db: Session, request_id: str, line_id: str, lot_id: str, quantity: float,
-                         user: User, location_to: str = "Kho phân xưởng", reason: str = None) -> dict:
+def _oldest_company_lot_with_reserved(db: Session, material_id: str, reserved: dict) -> Optional[str]:
+    """Mirror `_is_oldest_company_lot` nhưng coi phần đã "giữ chỗ" (`reserved`, lot_id -> số đã
+    dùng bởi các lô ĐỨNG TRƯỚC trong CÙNG 1 lượt duyệt nhiều lô) là đã hết — trả về lot_id cũ
+    nhất CÒN THỰC SỰ DÙNG ĐƯỢC sau khi trừ phần đó, dùng để so khớp FIFO cho pick thứ 2 trở đi
+    (xem fulfill_request_line's `lots`)."""
+    loc_matches = _asof_loc_matcher("Kho công ty")
+    candidates = [l for l in db.execute(
+        select(MaterialLot).where(MaterialLot.material_id == material_id, MaterialLot.quantity > 0,
+                                  MaterialLot.status.in_([LotStatus.AVAILABLE.value, LotStatus.RELEASED.value]))
+        .order_by(MaterialLot.created_at)
+    ).scalars().all() if loc_matches(l.location)]
+    for c in candidates:
+        if c.quantity - reserved.get(c.lot_id, 0.0) > 1e-9:
+            return c.lot_id
+    return None
+
+
+def _assert_request_order(db: Session, req: MaterialRequest) -> None:
+    """Phiếu nào có "Ngày đề nghị nhận kho" SỚM HƠN phải được xử lý HẾT (mọi dòng đã fulfilled/
+    rejected, không còn dòng pending) TRƯỚC — mirror dispense.py::_assert_dispensable áp dụng
+    cho "Đề nghị nhận kho" (yêu cầu người dùng 2026-09-19: "duyệt cả phiếu hay duyệt từng vật tư
+    ... thì phải dựa vào ngày đề nghị nhận, phiếu nào trước thì duyệt trước"), KHÔNG phân biệt
+    vật tư (đúng như Cấp liệu không phân biệt — cả phiếu, không riêng dòng nào) — người dùng đã
+    xác nhận phạm vi 2026-09-19.
+
+    Áp dụng cho TẤT CẢ phiếu đang pending, không có mốc ân hạn/không hồi tố nào — yêu cầu người
+    dùng 2026-09-19 sau khi cân nhắc rủi ro khóa cứng backlog phiếu nhập bù dữ liệu lịch sử vẫn
+    còn pending: "Tính tất cả phiếu đang pending cho tôi, áp dụng toàn bộ." Hệ quả CHỦ ĐỘNG: nếu
+    có phiếu cũ chưa xử lý xong, MỌI phiếu tạo sau đó (kể cả phiếu nghiệp vụ mới hôm nay) đều bị
+    chặn cho tới khi phiếu cũ đó được xử lý (duyệt hết hoặc từ chối) — đây là hành vi ĐÚNG NHƯ Ý,
+    không phải bug.
+
+    Phiếu KHÔNG khai "Ngày đề nghị nhận kho" không tham gia thứ tự này (không có mốc để so
+    sánh) — cả về phía bị chặn (không tự chặn ai) lẫn phía có thể chặn (không thể là "phiếu
+    trước" của ai)."""
+    if req.requested_receipt_date is None:
+        return
+    earlier_pending = db.execute(
+        select(MaterialRequest.request_code, MaterialRequest.requested_receipt_date)
+        .join(MaterialRequestLine, MaterialRequestLine.request_id == MaterialRequest.request_id)
+        .where(MaterialRequest.request_id != req.request_id,
+              MaterialRequest.requested_receipt_date.isnot(None),
+              MaterialRequest.requested_receipt_date < req.requested_receipt_date,
+              MaterialRequestLine.status == "pending")
+        .order_by(MaterialRequest.requested_receipt_date.asc())
+        .distinct()
+    ).first()
+    if earlier_pending:
+        code, dt = earlier_pending
+        raise DomainError(f"Phiếu {code} (ngày đề nghị nhận kho {dt:%d/%m/%Y %H:%M}) có ngày đề nghị "
+                          "SỚM HƠN và còn dòng chưa xử lý xong — phải xử lý (duyệt/từ chối) phiếu đó trước.")
+
+
+def fulfill_request_line(db: Session, request_id: str, line_id: str, user: User,
+                         lot_id: str = None, quantity: float = None, lots: list[dict] = None,
+                         location_to: str = "Kho phân xưởng", reason: str = None) -> dict:
     """Thủ kho công ty duyệt 1 dòng của phiếu: chuyển lô sang kho đích đã chọn (transfer,
     không phải issue — nguyên liệu vẫn được theo dõi trong hệ thống, chỉ đổi kho). Dùng
     `req.requested_receipt_date` (nếu có khai) làm `ts` hiệu lực — mirror approve_sang_ngang,
     xem MaterialRequest.requested_receipt_date.
 
-    Lô chọn KHÁC lô cũ nhất (FIFO) hiện có thì bắt buộc `reason` (mirror dispense.py::
-    _plan_consume — yêu cầu người dùng 2026-09-18), lưu lại vào line.reason để truy vết —
-    trước đây chỉ chụp cờ fifo_ok=False mà không bắt giải thích lý do.
+    Hỗ trợ TÁCH 1 dòng thành NHIỀU lô qua `lots` ([{"lot_id":, "quantity":, "reason":?}], tổng
+    phải bằng đúng `line.quantity` — all-or-nothing) khi lô cũ nhất không đủ nguyên số lượng,
+    mirror dispense.py cho phép Cấp liệu tách nhiều lô — trước đây "Xuất dòng này" chỉ nhận
+    đúng 1 lô/1 lần gọi, gọi lại lần 2 cho phần còn thiếu sẽ báo lỗi ngay (dòng đã "fulfilled")
+    — yêu cầu người dùng 2026-09-19: "giống kiểu cấp liệu đó, bạn tự thêm dòng nguyên liệu cần
+    lấy thêm theo fifo tiếp theo". Không truyền `lots` thì dùng `lot_id`/`quantity`/`reason` đơn
+    lẻ như cũ (tương thích ngược, 1 lô).
 
-    Nếu `req.requested_receipt_date` bị khai LÙI ngày, lô chỉ định phải THẬT SỰ đã Nhập kho (còn
-    tồn tại Kho công ty) tính đến ĐÚNG ngày đó — chặn CỨNG, không cho vượt bằng lý do (khác lệch
-    FIFO ở trên: đây là bất khả thi vật lý, không phải lựa chọn nghiệp vụ) — bug thực tế đã gặp
-    (yêu cầu người dùng 2026-09-18): trước đây chỉ tra `MaterialLot.quantity > 0` HIỆN TẠI, cho
-    phép 1 lô Nhập kho ngày 7/9 bị gán vào giao dịch khai hiệu lực 3-5/9 (trước cả khi lô đó về
-    kho) — mirror đúng cơ chế `as_of` dispense.py đã áp cho Cấp liệu."""
+    Lô nào KHÁC lô cũ nhất (FIFO) CÒN LẠI (sau khi trừ phần các lô ĐỨNG TRƯỚC trong cùng `lots`
+    đã "lấy") thì bắt buộc `reason` riêng (mirror dispense.py::_plan_consume — yêu cầu người
+    dùng 2026-09-18), lưu gộp lại vào line.reason (dòng lý do đầu tiên tìm thấy) để truy vết.
+
+    Nếu `req.requested_receipt_date` bị khai LÙI ngày, MỖI lô chỉ định phải THẬT SỰ đã Nhập kho
+    (còn tồn tại Kho công ty) tính đến ĐÚNG ngày đó — chặn CỨNG, không cho vượt bằng lý do (khác
+    lệch FIFO ở trên: đây là bất khả thi vật lý, không phải lựa chọn nghiệp vụ) — bug thực tế đã
+    gặp (yêu cầu người dùng 2026-09-18): trước đây chỉ tra `MaterialLot.quantity > 0` HIỆN TẠI,
+    cho phép 1 lô Nhập kho ngày 7/9 bị gán vào giao dịch khai hiệu lực 3-5/9 (trước cả khi lô đó
+    về kho) — mirror đúng cơ chế `as_of` dispense.py đã áp cho Cấp liệu.
+
+    Kiểm tra TRƯỚC, xuất SAU (giống `_plan_consume`/`_execute_plan`) — nếu BẤT KỲ lô nào trong
+    `lots` không hợp lệ (thiếu tồn/thiếu lý do FIFO) thì KHÔNG xuất lô nào cả, tránh xuất dở
+    dang rồi mới báo lỗi phần còn lại.
+
+    Chặn CỨNG nếu còn phiếu khác có "Ngày đề nghị nhận kho" SỚM HƠN mà chưa xử lý xong — xem
+    `_assert_request_order` (yêu cầu người dùng 2026-09-19)."""
     require_perm(user, "warehouse.issue")
     req = _get_request(db, request_id)
     line = _get_request_line(db, request_id, line_id)
     if line.status != "pending":
         raise DomainError(f"Dòng vật tư này đã ở trạng thái '{line.status}', không thể xử lý lại.")
+    _assert_request_order(db, req)
+    picks = lots if lots else [{"lot_id": lot_id, "quantity": quantity, "reason": reason}]
+    picks = [p for p in picks if p.get("lot_id") and float(p.get("quantity") or 0) > 0]
+    if not picks:
+        raise DomainError("Danh sách lô rỗng hoặc số lượng đều bằng 0.")
+    total = round(sum(float(p["quantity"]) for p in picks), 4)
+    if abs(total - line.quantity) > 1e-6:
+        raise DomainError(f"Tổng số lượng các lô ({total}) phải bằng đúng số lượng đề nghị ({line.quantity}).")
     ts = req.requested_receipt_date
-    if ts is not None:
-        lot_for_check = db.get(MaterialLot, lot_id)
-        if not lot_for_check:
+    asof_cap = {r["lot_id"]: r["quantity"] for r in lot_on_hand_as_of(db, ts, "Kho công ty")} if ts is not None else None
+    reserved: dict = {}
+    plan = []   # [(lot_id, qty, reason, fifo_ok)]
+    for p in picks:
+        p_lot_id, qty = p["lot_id"], round(float(p["quantity"]), 4)
+        p_reason = (p.get("reason") or "").strip() or None
+        lot_row = db.get(MaterialLot, p_lot_id)
+        if not lot_row:
             raise NotFoundError("Lô vật tư không tồn tại.")
-        cap = {r["lot_id"]: r["quantity"] for r in
-              lot_on_hand_as_of(db, ts, "Kho công ty")}.get(lot_id, 0.0)
-        if cap + 1e-6 < quantity:
-            raise DomainError(f"Lô {lot_for_check.lot_code} chưa đủ tồn ở Kho công ty tính đến ngày "
-                              f"{ts:%d/%m/%Y} (ngày đề nghị nhận kho) — không được chọn.")
-    fifo_ok = _is_oldest_company_lot(db, line.material_id, lot_id)
-    reason = (reason or "").strip() or None
-    if not fifo_ok and not reason:
-        raise DomainError("Lô đã chọn không phải lô cũ nhất (FIFO) hiện có — bắt buộc nhập lý do chọn khác FIFO.")
-    result = transfer(db, lot_id, quantity, location_to, user, mode="xuat_theo_de_nghi",
-                      reason=f"Xuất theo đề nghị {req.request_code} (dòng {line.seq + 1})",
-                      request_id=req.request_id, request_line_id=line.line_id,
-                      ts=req.requested_receipt_date)
+        if asof_cap is not None:
+            cap = asof_cap.get(p_lot_id, 0.0) - reserved.get(p_lot_id, 0.0)
+            if cap + 1e-6 < qty:
+                raise DomainError(f"Lô {lot_row.lot_code} chưa đủ tồn ở Kho công ty tính đến ngày "
+                                  f"{ts:%d/%m/%Y} (ngày đề nghị nhận kho) — không được chọn.")
+        fifo_ok = _oldest_company_lot_with_reserved(db, line.material_id, reserved) == p_lot_id
+        if not fifo_ok and not p_reason:
+            raise DomainError(f"Lô {lot_row.lot_code} không phải lô cũ nhất (FIFO) hiện có — bắt buộc nhập lý do chọn khác FIFO.")
+        reserved[p_lot_id] = reserved.get(p_lot_id, 0.0) + qty
+        plan.append((p_lot_id, qty, p_reason, fifo_ok))
+    results, overall_fifo_ok, combined_reason = [], True, None
+    for p_lot_id, qty, p_reason, fifo_ok in plan:
+        result = transfer(db, p_lot_id, qty, location_to, user, mode="xuat_theo_de_nghi",
+                          reason=f"Xuất theo đề nghị {req.request_code} (dòng {line.seq + 1})",
+                          request_id=req.request_id, request_line_id=line.line_id,
+                          ts=req.requested_receipt_date)
+        results.append(result)
+        overall_fifo_ok = overall_fifo_ok and fifo_ok
+        combined_reason = combined_reason or p_reason
     line.status = "fulfilled"
-    # Dùng lot_id TRẢ VỀ từ transfer(), không phải lot_id truyền vào — nếu quantity < tồn của
-    # lô gốc, transfer() tách 1 lô mới mang đúng quantity đã xuất; lot_id gốc lúc này vẫn còn
-    # nằm ở kho cũ với phần dư, không phải lô thực sự đã sang Kho phân xưởng.
-    line.fulfilled_lot_id = result["lot_id"]
-    line.fulfilled_qty = quantity
+    # Dùng lot_id TRẢ VỀ từ transfer() của LƯỢT CUỐI, không phải lot_id truyền vào — nếu quantity
+    # < tồn của lô gốc, transfer() tách 1 lô mới mang đúng quantity đã xuất; lot_id gốc lúc này
+    # vẫn còn nằm ở kho cũ với phần dư, không phải lô thực sự đã sang Kho phân xưởng. Danh sách
+    # ĐẦY ĐỦ mọi lô đã dùng (nếu tách nhiều lô) lấy lại từ StockMovement qua _line_dict's
+    # fulfilled_lot_codes, không lưu được hết vào 1 cột.
+    line.fulfilled_lot_id = results[-1]["lot_id"]
+    line.fulfilled_qty = line.quantity
     line.fulfilled_by = user.username
     line.fulfilled_at = utcnow()
-    line.fifo_ok = fifo_ok
-    line.reason = reason
-    # BUG cũ đã sửa (2026-09-14, phát hiện lúc kiểm thử chuỗi Nhập kho→Đề nghị→Cấp liệu→Lọc→
-    # Chiết đầy đủ): audit/response trước đây ghi `lot_id` (tham số ĐẦU VÀO — lô GỐC còn ở Kho
-    # công ty với phần dư) thay vì `result["lot_id"]` (lô THỰC SỰ đã sang Kho phân xưởng, có thể
-    # là lô mới tách nếu xuất 1 phần) — line.fulfilled_lot_id đã lưu ĐÚNG result["lot_id"] từ
-    # trước nên không ảnh hưởng nghiệp vụ hoàn tác/truy vết đã lưu, chỉ audit "after" + response
-    # trả cho FE lúc bấm Duyệt bị sai — FE không lộ vì luôn tải lại /requests ngay sau đó.
+    line.fifo_ok = overall_fifo_ok
+    line.reason = combined_reason
     record_audit(db, entity_type="material_request_line", entity_id=line.line_id, action="fulfill",
-                 actor=user, after={"lot_id": result["lot_id"], "quantity": quantity, "location_to": location_to,
-                                    "reason": reason})
+                 actor=user, after={"lots": [{"lot_id": lid, "quantity": q} for lid, q, _, _ in plan],
+                                    "quantity": line.quantity, "location_to": location_to, "reason": combined_reason})
     db.commit()
-    return {"request_id": request_id, "line_id": line.line_id, "status": line.status, "lot_id": result["lot_id"],
-            "quantity": quantity, "location": result["location"]}
+    return {"request_id": request_id, "line_id": line.line_id, "status": line.status,
+            "lot_id": results[-1]["lot_id"], "quantity": line.quantity, "location": results[-1]["location"]}
 
 
 def undo_fulfill_line(db: Session, request_id: str, line_id: str, user: User) -> dict:
@@ -1909,10 +2026,14 @@ def fulfill_all_lines(db: Session, request_id: str, user: User,
     không có đường vòng bằng lý do, mirror `fulfill_request_line`/`dispense.py::_plan_consume`.
     Bug thực tế đã gặp (yêu cầu người dùng 2026-09-18): trước đây chọn theo `MaterialLot.quantity
     > 0` HIỆN TẠI, nên khi lô cũ nhất thật (đúng khung ngày) đã bị các phiếu khác rút cạn trước,
-    hệ thống lặng lẽ nhảy sang lô MỚI HƠN — dù lô đó còn chưa Nhập kho tính đến ngày đang khai."""
+    hệ thống lặng lẽ nhảy sang lô MỚI HƠN — dù lô đó còn chưa Nhập kho tính đến ngày đang khai.
+
+    Chặn CỨNG nếu còn phiếu khác có "Ngày đề nghị nhận kho" SỚM HƠN mà chưa xử lý xong — xem
+    `_assert_request_order` (yêu cầu người dùng 2026-09-19)."""
     require_perm(user, "warehouse.issue")
     reasons = reasons or {}
     req = _get_request(db, request_id)
+    _assert_request_order(db, req)
     ts = req.requested_receipt_date
     lines = db.execute(
         select(MaterialRequestLine).where(MaterialRequestLine.request_id == request_id,
@@ -2169,6 +2290,8 @@ def undo_transfer_px_request(db: Session, request_id: str, user: User) -> dict:
     # req.lot_id vẫn là lô gốc còn ở Kho phân xưởng với phần dư, không phải lô đã sang Kho công ty.
     mv = db.get(StockMovement, req.movement_id) if req.movement_id else None
     lot_id_to_revert = mv.lot_id if mv else req.lot_id
+    if req.movement_id and _lot_touched_since(db, lot_id_to_revert, req.movement_id):
+        raise DomainError("Lô đã bị xuất/điều chuyển/tiêu thụ tiếp sau khi nhận — không thể hoàn tác.")
     transfer(db, lot_id_to_revert, req.quantity, "Kho phân xưởng", user,
             reason=f"Hoàn tác điều chuyển {req.request_code}", mode="dieu_chuyen")
     req.status = "pending"
@@ -2371,6 +2494,8 @@ def undo_transfer_kcpx_request(db: Session, request_id: str, user: User) -> dict
     require_role(user, Role.ADMIN)
     mv = db.get(StockMovement, req.movement_id) if req.movement_id else None
     lot_id_to_revert = mv.lot_id if mv else req.lot_id
+    if req.movement_id and _lot_touched_since(db, lot_id_to_revert, req.movement_id):
+        raise DomainError("Lô đã bị xuất/điều chuyển/tiêu thụ tiếp sau khi nhận — không thể hoàn tác.")
     result = transfer(db, lot_id_to_revert, req.quantity, "Kho công ty", user,
                       reason=f"Hoàn tác điều chuyển {req.request_code}", mode="dieu_chuyen_kcpx")
     reverted_lot = db.get(MaterialLot, result["lot_id"])
@@ -2586,6 +2711,8 @@ def undo_sang_ngang(db: Session, request_id: str, user: User) -> dict:
     require_role(user, Role.ADMIN)
     mv = db.get(StockMovement, req.movement_id) if req.movement_id else None
     lot_id_to_revert = mv.lot_id if mv else req.lot_id
+    if req.movement_id and _lot_touched_since(db, lot_id_to_revert, req.movement_id):
+        raise DomainError("Lô đã bị xuất/điều chuyển/tiêu thụ tiếp sau khi nhận — không thể hoàn tác.")
     _transfer_lot(db, lot_id_to_revert, req.quantity, "Kho công ty", user,
                  reason=f"Hoàn tác xuất sang ngang {req.request_code}", mode="sang_ngang")
     req.status = "pending"
@@ -3101,6 +3228,18 @@ def undo_count(db: Session, count_id: str, user: User) -> dict:
             MaterialLot.lot_id == line.lot_id).with_for_update()).scalar_one_or_none()
         if not lot:
             continue
+        # Chặn nếu có phiếu nhập/xuất/điều chuyển THẬT nào xảy ra SAU khi chốt phiếu kiểm kê
+        # (post_count) cho lô này — trước đây post_count chỉ CẢNH BÁO (không chặn chốt) đúng
+        # trường hợp này, nhưng HOÀN TÁC lại ghi đè thẳng lot.quantity về system_qty cũ, sẽ xóa
+        # mất giao dịch thật đó khỏi tồn kho (yêu cầu người dùng 2026-09-21: "đã dùng rồi thì
+        # không thể hoàn tác").
+        interim = db.execute(select(func.count()).select_from(StockMovement).where(
+            StockMovement.lot_id == line.lot_id, StockMovement.movement_type != "adjust",
+            StockMovement.created_at > count.posted_at)).scalar_one()
+        if interim:
+            raise DomainError(
+                f"Lô {lot.lot_code} đã có {interim} phiếu nhập/xuất/điều chuyển thật xảy ra sau "
+                "khi chốt phiếu kiểm kê này — không thể hoàn tác.")
         _move(db, "adjust", lot, abs(diff), user,
               reason=f"Hoàn tác kiểm kê {count.count_code}: thực tế {line.counted_qty}{lot.uom} → hệ thống {line.system_qty}{lot.uom}",
               location_from=lot.location, location_to=lot.location)

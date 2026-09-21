@@ -232,6 +232,27 @@ def test_add_filter_lot_material_insufficient_stock_at_ended_at_blocks_all_or_no
     assert _lot_id_by_code(client, admin_h, f"LOT-MAT-{suffix}-PX")["quantity"] == 5
 
 
+def test_delete_filter_lot_material_blocked_after_kcs_approve(client, admin_h):
+    """Sau khi KCS duyệt lô lọc (qc_approved=True), không thể xóa/hoàn NVL đã dùng nữa — mirror
+    đúng chặn của delete_filter_lot (yêu cầu người dùng 2026-09-21: "đã dùng rồi thì không thể
+    xóa, hoàn tác, hay sửa")."""
+    suffix = "FLMU-APPR"
+    material_id = _a_material_with_stock(client, admin_h, f"MAT-{suffix}", qty_workshop=50)
+    filter_lot_id = _make_filter_lot(client, admin_h, suffix)
+    _finish_only_source(client, admin_h, filter_lot_id)
+
+    add = client.post(f"/api/batch-filter-lots/{filter_lot_id}/materials", headers=admin_h,
+                      json={"material_id": material_id, "quantity": 12})
+    assert add.status_code == 201, add.text
+    usage_id = add.json()[0]["usage_id"]
+
+    appr = client.post(f"/api/batch-filter-lots/{filter_lot_id}/approve", headers=admin_h)
+    assert appr.status_code == 200, appr.text
+
+    blocked = client.delete(f"/api/batch-filter-lots/materials/{usage_id}", headers=admin_h)
+    assert blocked.status_code == 409, blocked.text
+
+
 def test_suggest_filter_lot_material_previews_fifo_pick_without_deducting(client, admin_h):
     """GET .../materials/suggest xem trước lô sẽ dùng (FIFO, tại đúng ended_at) mà KHÔNG trừ tồn
     (yêu cầu người dùng 2026-09-16: "hiện tại không biết lấy lô nào khi chọn vật tư trong list")."""

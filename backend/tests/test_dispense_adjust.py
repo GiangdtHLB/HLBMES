@@ -219,6 +219,36 @@ def test_adjust_decrease_blocked_when_more_than_consumed_history(client, admin_h
     assert over.status_code == 409, over.text   # muốn hoàn 5kg nhưng chỉ có 4kg lịch sử để hoàn
 
 
+def test_adjust_decrease_blocked_when_own_output_consumed_downstream(client, admin_h):
+    """Mirror đúng chặn của delete_batch — nếu lô mà mẻ này SẢN XUẤT RA đã bị mẻ khác dùng tiếp,
+    không thể giảm "Thực tế" (hoàn lại NVL đã dùng) nữa, dù EBR chưa khóa (yêu cầu người dùng
+    2026-09-21: "đã dùng rồi thì không thể sửa")."""
+    material_id, code = _new_material(client, admin_h, "DECOUT01")
+    _receive_workshop_lot(client, admin_h, material_id, 10, days_to_expiry=10)
+    version_id = _recipe_version(client, admin_h, "DECOUT01", code, qty=100, base_qty=100)
+    batch_id = _new_batch(client, admin_h, version_id, planned_qty=100, suffix="DECOUT01", allow_shortage=True)
+    disp = client.post(f"/api/dispense/{batch_id}", headers=admin_h,
+                       json={"lines": [{"material_code": code, "quantity": 4}]})
+    assert disp.status_code == 200, disp.text
+
+    produce = client.post(f"/api/batches/{batch_id}/produce", headers=admin_h,
+                          json={"lot_code": "LOT-DECOUT01-OUT", "quantity": 200, "lot_type": "brew"})
+    assert produce.status_code == 201, produce.text
+    out_lot_id = produce.json()["lot_id"]
+    release = client.post("/api/quality/hold", headers=admin_h,
+                          json={"scope_type": "lot", "scope_id": out_lot_id, "on_hold": False})
+    assert release.status_code == 200, release.text
+
+    batch2_id = _new_batch(client, admin_h, version_id, planned_qty=100, suffix="DECOUT01-B2", allow_shortage=True)
+    consume2 = client.post(f"/api/batches/{batch2_id}/consume", headers=admin_h,
+                           json={"lot_id": out_lot_id, "quantity": 50})
+    assert consume2.status_code == 200, consume2.text
+
+    blocked = client.post(f"/api/dispense/{batch_id}/adjust", headers=admin_h,
+                          json={"material_code": code, "new_actual": 1, "reason": "test giảm sau khi output đã dùng"})
+    assert blocked.status_code == 409, blocked.text
+
+
 def test_adjust_no_op_when_same_value_rejected(client, admin_h):
     material_id, code = _new_material(client, admin_h, "NOOP01")
     _receive_workshop_lot(client, admin_h, material_id, 10, days_to_expiry=10)

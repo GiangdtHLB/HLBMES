@@ -7,8 +7,16 @@ from sqlalchemy.orm import Session
 from ..audit import record_audit
 from ..common import new_id, utcnow
 from ..errors import DomainError, NotFoundError
+from ..models.master import FinishedProduct
 from ..models.wms import Case, Pallet, WmsLocation
 from ..security import User, require_perm
+
+
+def _product_name_by_code(db: Session) -> dict:
+    """`Pallet.product` lưu CODE của FinishedProduct (chuỗi tự do, không FK) — tra tên thật để
+    hiển thị (yêu cầu người dùng 2026-09-20: "thêm cả tên của SKU vào cho tôi"), không đổi
+    Pallet.product vì nhiều nơi khác đã dùng nó làm mã hiển thị/tham chiếu genealogy."""
+    return dict(db.execute(select(FinishedProduct.code, FinishedProduct.name)).all())
 
 
 def list_locations(db: Session) -> list:
@@ -75,15 +83,67 @@ def list_pallets(db: Session, status: str = None) -> list:
         stmt = stmt.where(Pallet.status == status)
     out = []
     loc_by = {l.loc_id: l for l in db.execute(select(WmsLocation)).scalars().all()}
+    product_name_by = _product_name_by_code(db)
     for p in db.execute(stmt).scalars().all():
         loc = loc_by.get(p.location_id)
         cases = db.execute(select(Case).where(Case.pallet_id == p.pallet_id)).scalars().all()
         out.append({"pallet_id": p.pallet_id, "pallet_code": p.pallet_code, "product": p.product,
+                    "product_name": product_name_by.get(p.product),
                     "lot_code": p.lot_code, "case_count": p.case_count, "units_per_case": p.units_per_case,
                     "total_units": sum(c.units for c in cases), "status": p.status, "source": p.source,
                     "location": loc.code if loc else None,
+                    "created_at": p.created_at.isoformat() if p.created_at else None,
+                    "shipped_at": p.shipped_at.isoformat() if p.shipped_at else None,
                     "cases": [{"case_code": c.case_code, "units": c.units} for c in cases]})
     return out
+
+
+def list_lots(db: Session) -> list:
+    """Tổng hợp theo Lô TP (lot_code) — nhiều pallet (mỗi pallet 1 mã SSCC riêng theo chuẩn GS1)
+    có thể cùng chung 1 lot_code (1 lô sản xuất). Dùng để chọn CẢ LÔ xuất 1 lần thay vì từng
+    pallet (yêu cầu người dùng 2026-09-20: "có thể cho chọn cả lô để xuất... báo lô đó có tổng
+    bao nhiêu pallet, tổng bao nhiêu vỉ"). Chỉ liệt kê lô CÒN pallet chưa xuất — lô đã xuất hết
+    không còn gì để chọn xuất tiếp."""
+    pallets = db.execute(select(Pallet).where(
+        Pallet.lot_code.isnot(None), Pallet.status != "shipped")).scalars().all()
+    by_lot: dict[str, list[Pallet]] = {}
+    for p in pallets:
+        by_lot.setdefault(p.lot_code, []).append(p)
+    # Pallet ĐÃ xuất cùng lô (nếu có) — 1 lô có thể đóng pallet làm NHIỀU LẦN/nhiều đợt, có đợt
+    # đã xuất trước rồi (yêu cầu người dùng 2026-09-20: "1 lô có thể đóng pallet làm nhiều lần").
+    # Dùng để: (1) hiển thị "ngày xuất gần nhất" dù lô còn pallet chưa xuất khác, (2) tính
+    # "Tổng SL" LŨY KẾ toàn bộ lô (kể cả phần đã xuất) — phân biệt với "Còn tồn chưa xuất" (chỉ
+    # tính phần CHƯA xuất, vẫn dùng để xuất cả lô, KHÔNG đổi để không ảnh hưởng số lượng thật sự
+    # được xuất khi bấm "Xuất...").
+    #
+    # Đơn vị hiển thị là SỐ CASE (pallet.case_count), KHÔNG phải số lon/vỉ (yêu cầu người dùng
+    # 2026-09-20: "phải là số case, không cần hiển thị số lon, hay chai gì cả") — vì units_per_case
+    # tùy SKU (lon/vỉ/đơn vị khác), còn case_count là số case/thùng thật, không mơ hồ theo SKU.
+    shipped_by_lot: dict[str, list[Pallet]] = {}
+    if by_lot:
+        shipped = db.execute(select(Pallet).where(
+            Pallet.lot_code.in_(by_lot.keys()), Pallet.status == "shipped")).scalars().all()
+        for p in shipped:
+            shipped_by_lot.setdefault(p.lot_code, []).append(p)
+    product_name_by = _product_name_by_code(db)
+    out = []
+    for lot_code, plist in by_lot.items():
+        total_cases = sum(p.case_count for p in plist)
+        by_status: dict[str, int] = {}
+        for p in plist:
+            by_status[p.status] = by_status.get(p.status, 0) + 1
+        stocked_dates = [p.created_at for p in plist if p.created_at]
+        shipped_plist = shipped_by_lot.get(lot_code, [])
+        shipped_cases = sum(p.case_count for p in shipped_plist)
+        shipped_dates = [p.shipped_at for p in shipped_plist if p.shipped_at]
+        out.append({"lot_code": lot_code, "product": plist[0].product,
+                    "product_name": product_name_by.get(plist[0].product),
+                    "pallet_count": len(plist), "pallet_count_all_time": len(plist) + len(shipped_plist),
+                    "total_cases": total_cases,
+                    "total_cases_all_time": total_cases + shipped_cases, "by_status": by_status,
+                    "first_stocked_at": min(stocked_dates).isoformat() if stocked_dates else None,
+                    "last_shipped_at": max(shipped_dates).isoformat() if shipped_dates else None})
+    return sorted(out, key=lambda x: x["lot_code"])
 
 
 def build_pallet(db: Session, payload: dict, user: User) -> Pallet:
@@ -158,10 +218,42 @@ def ship(db: Session, pallet_id: str, user: User) -> dict:
         raise NotFoundError("Pallet không tồn tại.")
     p.status = "shipped"
     p.location_id = None
+    p.shipped_at = utcnow()
     record_audit(db, entity_type="pallet", entity_id=pallet_id, action="ship", actor=user,
                  after={"pallet_code": p.pallet_code})
     db.commit()
     return {"pallet_code": p.pallet_code, "status": "shipped"}
+
+
+def ship_lot(db: Session, lot_code: str, user: User, pallet_count: int = None) -> dict:
+    """Xuất pallet còn lại của 1 Lô TP (lot_code) trong 1 lần, thay vì phải xuất từng pallet lẻ
+    (yêu cầu người dùng 2026-09-20 — nhiều pallet cùng lô là bình thường theo chuẩn GS1: SSCC
+    riêng từng pallet, Batch/Lot Number chung cả lô). Lặp gọi ship() cho từng pallet — giữ
+    nguyên đúng 1 bản ghi audit/pallet như xuất tay từng cái.
+
+    `pallet_count` (tùy chọn) — XUẤT MỘT PHẦN thay vì toàn bộ (yêu cầu người dùng 2026-09-20:
+    "chọn xuất 1 phần... 300 pallet thì xuất 1 phần trước, khoảng 100 pallet"). Sắp theo
+    `created_at` TĂNG DẦN (pallet nhập kho SỚM NHẤT đứng đầu) rồi lấy đúng `pallet_count` pallet
+    đầu tiên — tự động FIFO "nhập trước xuất trước", không cho người dùng tự chọn tay từng cái.
+    Bỏ trống (None) = xuất TOÀN BỘ như trước đây."""
+    require_perm(user, "warehouse.issue")
+    pallets = db.execute(select(Pallet).where(
+        Pallet.lot_code == lot_code, Pallet.status != "shipped")
+        .order_by(Pallet.created_at.asc())).scalars().all()
+    if not pallets:
+        raise NotFoundError(f"Không có pallet nào của lô '{lot_code}' để xuất (có thể đã xuất hết).")
+    if pallet_count is not None:
+        if pallet_count <= 0:
+            raise DomainError("Số pallet muốn xuất phải lớn hơn 0.")
+        if pallet_count > len(pallets):
+            raise DomainError(
+                f"Lô '{lot_code}' chỉ còn {len(pallets)} pallet chưa xuất, "
+                f"không thể xuất {pallet_count} pallet.")
+        pallets = pallets[:pallet_count]
+    total_cases = sum(p.case_count for p in pallets)
+    results = [ship(db, p.pallet_id, user) for p in pallets]
+    return {"lot_code": lot_code, "pallet_count": len(results),
+            "pallet_codes": [r["pallet_code"] for r in results], "total_cases": total_cases}
 
 
 def resolve(db: Session, code: str) -> dict:

@@ -527,6 +527,20 @@ def adjust_actual(db: Session, batch_id: str, material_code: str, new_actual: fl
     delta = round(new_actual - current, 4)
     if abs(delta) <= 1e-6:
         raise DomainError("Số Thực tế mới giống hệt hiện tại — không có gì để sửa.")
+    if delta < 0:
+        # Mirror đúng chặn của delete_batch — nếu lô mẻ này SẢN XUẤT RA đã bị dùng tiếp ở nơi
+        # khác (VD dịch nha đã được mẻ lọc rút đi), giảm lại số NVL "đã dùng" để tạo ra nó là sai
+        # lệch hồ sơ ngược, dù EBR chưa khóa (yêu cầu người dùng 2026-09-21: "đã dùng rồi thì
+        # không thể sửa").
+        produced_edges = db.execute(select(GenealogyEdge).where(
+            GenealogyEdge.from_type == "batch", GenealogyEdge.from_id == batch_id,
+            GenealogyEdge.to_type == "lot")).scalars().all()
+        for pe in produced_edges:
+            if db.execute(select(GenealogyEdge.edge_id).where(
+                    GenealogyEdge.from_type == "lot", GenealogyEdge.from_id == pe.to_id)).first():
+                raise DomainError(
+                    f"Lô '{pe.to_id}' do mẻ này sản xuất đã được dùng tiếp ở nơi khác — không "
+                    "thể giảm Thực tế (hoàn lại NVL đã dùng).")
 
     disp = Dispense(dispense_id=new_id(),
                     dispense_code=f"ADJ-{utcnow():%Y%m%d}-{new_id()[:5].upper()}",

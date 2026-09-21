@@ -11,7 +11,7 @@ services/qc_catalog.py::stage_qc_status (scope_type tự do, không hardwire the
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import Boolean, Float, ForeignKey, Integer, Unicode, UnicodeText, UniqueConstraint
+from sqlalchemy import JSON, Boolean, Float, ForeignKey, Integer, Unicode, UnicodeText, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ..common import QualityStatus, UTCDateTime, new_id, utcnow
@@ -259,9 +259,18 @@ class BatchPackLot(Base):
     approved: Mapped[bool] = mapped_column(Boolean, default=False)
     approved_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
     approved_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+    # Phân bổ quy cách đóng gói pallet — nhân viên chiết khai NGAY trong lúc chiết (quyền
+    # batch.execute, mirror ca1/2/3 ở trên), KHÔNG chờ Duyệt KCS/Giám đốc duyệt nhập kho (yêu cầu
+    # người dùng 2026-09-20: "hiện ra luôn để nhân viên chiết thực hiện" — đảo lại thiết kế cũ
+    # gộp vào bước release_pack_lot_to_wms). list[{"spec_id": str, "quantity": float}] — validate
+    # khớp đúng ca_total CHỈ lúc release_pack_lot_to_wms thật sự tạo pallet (services/
+    # batch_pipeline.py::save_pack_lot_allocations không chặn tổng, vì SL theo ca có thể chưa
+    # khai xong hết lúc lưu).
+    pack_allocations: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
     # Đã nhập kho thành phẩm (mirror BottleRecord.stocked) — xem
-    # services/batch_pipeline.py::release_pack_lot_to_wms. Tách khỏi `approved` (Duyệt KCS)
-    # đúng sơ đồ tổ chức module cũ: KCS duyệt chỉ tiêu, Giám đốc/Phó GĐ SX duyệt nhập kho.
+    # services/batch_pipeline.py::release_pack_lot_to_wms. Tách khỏi `approved` (Duyệt KCS) —
+    # 2 luồng HOÀN TOÀN ĐỘC LẬP, làm theo thứ tự bất kỳ (yêu cầu người dùng 2026-09-20, đảo lại
+    # quyết định ban đầu là release phải chờ approved).
     stocked: Mapped[bool] = mapped_column(Boolean, default=False)
     stocked_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
     stocked_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
@@ -280,6 +289,28 @@ class BatchPackLot(Base):
             (self.ca1_qty, self.ca1_end_at), (self.ca2_qty, self.ca2_end_at), (self.ca3_qty, self.ca3_end_at),
         ) if qty is not None and end is not None]
         return max(ends) if ends else None
+
+    @property
+    def unstocked_remainder(self) -> float:
+        """Còn bao nhiêu vỉ/két/keg (theo SL đã khai theo ca) CHƯA được Duyệt nhập kho thành
+        phẩm — mỗi dòng phân bổ (pack_allocations) giờ có nút "Duyệt nhập kho TP" RIÊNG (xem
+        services/batch_pipeline.py::release_pack_lot_allocation), nên 1 lô có thể có phần đã
+        duyệt, phần khác vẫn đang chờ. Dùng để cảnh báo trên UI (yêu cầu người dùng 2026-09-20:
+        "Có cảnh báo nếu module chiết còn vỉ hoặc két gì đó chưa được duyệt nhập kho thành
+        phẩm"). Chỉ tính phần đã LƯU nhưng CHƯA release là "chưa nhập kho" (chưa có pallet thật).
+
+        `self.stocked` luôn thắng, trả về 0 nếu đã True — dữ liệu lô cũ (tạo trước khi có
+        release theo từng dòng, 2026-09-20) có thể đã stocked=True từ luồng release nguyên lô
+        cũ mà KHÔNG có cờ `released` trên từng dòng pack_allocations, nếu chỉ tính theo dòng sẽ
+        báo sai "còn thiếu" cho lô đã nhập kho xong thật."""
+        if self.stocked:
+            return 0.0
+        ca_total = (self.ca1_qty or 0.0) + (self.ca2_qty or 0.0) + (self.ca3_qty or 0.0)
+        if ca_total <= 0:
+            return 0.0
+        released_total = sum(float(r.get("quantity") or 0) for r in (self.pack_allocations or []) if r.get("released"))
+        remainder = round(ca_total - released_total, 4)
+        return remainder if remainder > 1e-6 else 0.0
 
 
 class BatchPackLotMaterialUsage(Base):

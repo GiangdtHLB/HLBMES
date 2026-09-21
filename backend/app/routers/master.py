@@ -3,6 +3,8 @@
 Tạo/sửa danh mục yêu cầu quyền 'master.manage' và được ghi audit (SoR nội bộ;
 thực tế đồng bộ từ ERP/PLM — tài liệu §5.2, §8.1)."""
 
+from typing import Optional
+
 from fastapi import APIRouter, Depends
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -12,14 +14,15 @@ from ..common import new_id
 from ..database import get_db
 from ..errors import DomainError, NotFoundError, PermissionError_
 from ..models.master import (BeerType, FinishedProduct, FinishedProductGroup, FinishedProductMonthlyPlan,
-    Material, MaterialAltGroup, MaterialGroup, Product, UnitTypeCatalog)
+    Material, MaterialAltGroup, MaterialGroup, PackingSpec, Product, UnitTypeCatalog)
 from ..models.materials import Supplier
 from ..models.warehouse import FactoryLocation
 from ..schemas import (BeerTypeIn, BeerTypeOut, FactoryLocationIn, FactoryLocationOut,
     FinishedProductGroupIn, FinishedProductGroupOut, FinishedProductIn, FinishedProductMonthlyPlanOut,
     FinishedProductOut, MaterialAltGroupIn, MaterialAltGroupOut, MaterialGroupIn,
     MaterialGroupOut, MaterialIn, MaterialOut, MaterialQcGroupIn, MonthlyPlanRowIn, OpsSettingIn, OpsSettingOut,
-    ProductBrewSpecIn, ProductIn, ProductOut, SupplierIn, SupplierOut, UnitTypeCatalogIn, UnitTypeCatalogOut)
+    PackingSpecIn, PackingSpecOut, ProductBrewSpecIn, ProductIn, ProductOut, SupplierIn, SupplierOut,
+    UnitTypeCatalogIn, UnitTypeCatalogOut)
 from ..security import User, get_current_user, require_perm
 from ..services import master_data, ops_setting as ops_setting_svc
 from ..services import qc_catalog
@@ -508,6 +511,82 @@ def update_monthly_plan(finished_product_id: str, payload: MonthlyPlanRowIn, db:
 def delete_finished_product(finished_product_id: str, db: Session = Depends(get_db),
                             user: User = Depends(get_current_user)):
     master_data.delete_finished_product(db, finished_product_id, user)
+
+
+# ---- Quy cách đóng gói pallet — khai theo TỪNG SKU (finished_product_id); dùng ở bước "Duyệt
+# nhập kho thành phẩm" (services/batch_pipeline.py::release_pack_lot_to_wms) để tách đúng số
+# pallet thật theo quy cách người duyệt chọn, thay vì gộp hết SL đã chiết vào 1 pallet ----
+@router.get("/packing-specs", response_model=list[PackingSpecOut])
+def list_packing_specs(finished_product_id: Optional[str] = None, db: Session = Depends(get_db)):
+    q = select(PackingSpec).order_by(PackingSpec.code)
+    if finished_product_id:
+        q = q.where(PackingSpec.finished_product_id == finished_product_id)
+    return db.execute(q).scalars().all()
+
+
+@router.post("/packing-specs", response_model=PackingSpecOut, status_code=201)
+def create_packing_spec(payload: PackingSpecIn, db: Session = Depends(get_db),
+                        user: User = Depends(get_current_user)):
+    require_perm(user, "master.manage")
+    if not db.get(FinishedProduct, payload.finished_product_id):
+        raise NotFoundError("Sản phẩm không tồn tại.")
+    if payload.units_per_pallet <= 0:
+        raise DomainError("Số vỉ/pallet phải lớn hơn 0.")
+    if db.execute(select(PackingSpec).where(
+            PackingSpec.finished_product_id == payload.finished_product_id,
+            PackingSpec.code == payload.code)).scalar_one_or_none():
+        raise DomainError(f"Mã quy cách '{payload.code}' đã tồn tại cho sản phẩm này.")
+    s = PackingSpec(spec_id=new_id(), created_by=user.username, **payload.model_dump())
+    db.add(s)
+    record_audit(db, entity_type="packing_spec", entity_id=s.spec_id, action="create",
+                 actor=user, after=payload.model_dump())
+    db.commit()
+    db.refresh(s)
+    return s
+
+
+@router.put("/packing-specs/{spec_id}", response_model=PackingSpecOut)
+def update_packing_spec(spec_id: str, payload: PackingSpecIn, db: Session = Depends(get_db),
+                        user: User = Depends(get_current_user)):
+    require_perm(user, "master.manage")
+    s = db.get(PackingSpec, spec_id)
+    if not s:
+        raise NotFoundError("Quy cách đóng gói không tồn tại.")
+    if not db.get(FinishedProduct, payload.finished_product_id):
+        raise NotFoundError("Sản phẩm không tồn tại.")
+    if payload.units_per_pallet <= 0:
+        raise DomainError("Số vỉ/pallet phải lớn hơn 0.")
+    if (payload.code != s.code or payload.finished_product_id != s.finished_product_id) and db.execute(
+            select(PackingSpec).where(
+                PackingSpec.finished_product_id == payload.finished_product_id,
+                PackingSpec.code == payload.code)).scalar_one_or_none():
+        raise DomainError(f"Mã quy cách '{payload.code}' đã tồn tại cho sản phẩm này.")
+    before = {"code": s.code, "name": s.name, "finished_product_id": s.finished_product_id,
+              "units_per_pallet": s.units_per_pallet, "layers": s.layers, "active": s.active}
+    s.code = payload.code
+    s.name = payload.name
+    s.finished_product_id = payload.finished_product_id
+    s.units_per_pallet = payload.units_per_pallet
+    s.layers = payload.layers
+    s.active = payload.active
+    record_audit(db, entity_type="packing_spec", entity_id=s.spec_id, action="update",
+                 actor=user, before=before, after=payload.model_dump())
+    db.commit()
+    db.refresh(s)
+    return s
+
+
+@router.delete("/packing-specs/{spec_id}", status_code=204)
+def delete_packing_spec(spec_id: str, db: Session = Depends(get_db),
+                        user: User = Depends(get_current_user)):
+    require_perm(user, "master.manage")
+    s = db.get(PackingSpec, spec_id)
+    if not s:
+        raise NotFoundError("Quy cách đóng gói không tồn tại.")
+    record_audit(db, entity_type="packing_spec", entity_id=spec_id, action="delete",
+                 actor=user, before={"code": s.code, "finished_product_id": s.finished_product_id})
+    db.delete(s)
+    db.commit()
 
 
 def _fpg_out(g: FinishedProductGroup) -> dict:

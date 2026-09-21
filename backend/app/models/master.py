@@ -99,6 +99,35 @@ class FinishedProduct(Base):
     weight_single_kg: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
 
 
+class PackingSpec(Base):
+    """Quy cách đóng gói pallet — khai theo TỪNG SKU (finished_product_id), VD "Quy cách 01":
+    110 vỉ/pallet, xếp 10 hàng. Dùng ở bước "Duyệt nhập kho thành phẩm" (services/
+    batch_pipeline.py::release_pack_lot_to_wms) — SL vỉ/keg đã chiết trong 1 ca có thể được
+    đóng theo NHIỀU quy cách khác nhau (dây chuyền đổi cách xếp giữa ca), người duyệt khai
+    từng phần SL theo đúng quy cách đã dùng thật, hệ thống tự tách đúng số pallet (kể cả
+    pallet lẻ nếu SL không chia hết) cho từng phần — yêu cầu người dùng 2026-09-20: "quy cách
+    đóng gói pallet chỉ được chọn ở đó ra" (chỉ được chọn từ danh mục này, không tự nhập tay
+    số vỉ/pallet ở màn duyệt).
+
+    `layers` (số hàng xếp cao) CHỈ để hiển thị/tham khảo (giúp người xếp pallet đối chiếu xếp
+    đúng), KHÔNG dùng trong phép tính số pallet — số pallet tính thẳng từ `units_per_pallet`."""
+
+    __tablename__ = "packing_spec"
+
+    spec_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
+    code: Mapped[str] = mapped_column(Unicode(64), index=True)
+    name: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    finished_product_id: Mapped[str] = mapped_column(
+        ForeignKey("finished_product.finished_product_id"), index=True)
+    units_per_pallet: Mapped[int] = mapped_column(Integer)
+    layers: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+
+    __table_args__ = (UniqueConstraint("finished_product_id", "code", name="uq_packing_spec_product_code"),)
+
+
 class FinishedProductMonthlyPlan(Base):
     """Kế hoạch tiêu thụ tháng theo SKU — mỗi (SKU, năm, tháng) có 3 giá trị: kế hoạch ban đầu
     (lập từ đầu tháng), kế hoạch điều chỉnh (sửa lại giữa/cuối kỳ, tuỳ chọn), và lượng sản xuất
