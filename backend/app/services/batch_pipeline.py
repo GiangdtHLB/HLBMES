@@ -1916,6 +1916,11 @@ def delete_pack_lot_material(db: Session, usage_id: str, user: User) -> None:
         raise NotFoundError("Dòng nguyên liệu không tồn tại.")
     p = get_pack_lot(db, u.pack_lot_id)
     _assert_unlocked(p)
+    # Mirror đúng chặn của delete_pack_lot (xóa cả lô) — lô thành phẩm đã KCS duyệt thì hồ sơ
+    # NVL dùng cho nó không còn được coi là "khai nhầm" nữa, dù chỉ xóa/sửa 1 dòng (yêu cầu
+    # người dùng 2026-09-21: "đã dùng rồi thì không thể xóa, hoàn tác, hay sửa").
+    if p.approved:
+        raise DomainError("Lô thành phẩm đã được KCS duyệt — không thể sửa/xóa nguyên liệu.")
     if u.movement_id:
         warehouse_svc.undo_issue(db, u.movement_id, user, strict=False, skip_perm_check=True)
     before = {"material_name": u.material_name, "lot_pm": u.lot_pm, "quantity": u.quantity, "uom": u.uom}
@@ -2043,6 +2048,13 @@ def delete_filter_lot_material(db: Session, usage_id: str, user: User) -> None:
         raise NotFoundError("Dòng nguyên liệu không tồn tại.")
     fl = get_filter_lot(db, u.filter_lot_id)
     _assert_unlocked(fl)
+    # Mirror đúng chặn của delete_filter_lot (xóa cả lô) — lô lọc đã KCS duyệt, hoặc đã có lô
+    # thành phẩm tách từ lô lọc này, thì hồ sơ NVL dùng cho nó không còn được coi là "khai nhầm"
+    # nữa, dù chỉ xóa/sửa 1 dòng (yêu cầu người dùng 2026-09-21).
+    if fl.qc_approved:
+        raise DomainError("Lô lọc này đã được KCS duyệt — không thể sửa/xóa nguyên liệu.")
+    if db.execute(select(BatchPackLot).where(BatchPackLot.filter_lot_id == u.filter_lot_id)).first():
+        raise DomainError("Đã có lô thành phẩm tách từ lô lọc này — không thể sửa/xóa nguyên liệu.")
     if u.movement_id:
         warehouse_svc.undo_issue(db, u.movement_id, user, strict=False, skip_perm_check=True)
     before = {"material_name": u.material_name, "lot_pm": u.lot_pm, "quantity": u.quantity, "uom": u.uom}

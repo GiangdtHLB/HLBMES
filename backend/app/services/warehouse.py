@@ -290,6 +290,24 @@ def _lot_used(db: Session, lot_id: str) -> bool:
     return n > 0
 
 
+def _lot_touched_since(db: Session, lot_id: str, since_movement_id: str) -> bool:
+    """Lô đã bị động tới THÊM (issue/transfer/adjust khác) SAU một giao dịch cụ thể (KHÁC bản
+    thân giao dịch đó) — dùng cho các hàm "Hoàn tác" mà chính giao dịch đang hoàn tác cũng là 1
+    StockMovement non-receipt trên lô đó, nên không thể dùng `_lot_used` thẳng (luôn đúng do
+    chính nó). Dùng khi hoàn tác 1 điều chuyển/xuất sang ngang — nếu lô ở kho đích đã bị dùng
+    tiếp SAU khi nó tới đó (VD thủ kho đã xuất/điều chuyển tiếp phần vừa nhận), hoàn tác về vị
+    trí cũ sẽ làm sai lệch tồn 2 đầu, không thể cho hoàn tác nữa (yêu cầu người dùng 2026-09-21:
+    "nếu đã dùng rồi thì không thể xóa, hoàn tác, hay sửa")."""
+    since_mv = db.get(StockMovement, since_movement_id)
+    if not since_mv:
+        return False
+    n = db.execute(select(func.count()).select_from(StockMovement).where(
+        StockMovement.lot_id == lot_id, StockMovement.movement_type != "receipt",
+        StockMovement.movement_id != since_movement_id,
+        StockMovement.created_at > since_mv.created_at)).scalar_one()
+    return n > 0
+
+
 def update_receipt(db: Session, movement_id: str, payload: dict, user: User) -> dict:
     """Sửa 1 lượt nhập kho (StockMovement type=receipt) — CHỈ khi lô liên quan CHƯA bị dùng
     (chưa xuất/chuyển/tiêu thụ) — lúc đó lot.quantity vẫn đúng bằng tổng các lượt receipt nên
@@ -2272,6 +2290,8 @@ def undo_transfer_px_request(db: Session, request_id: str, user: User) -> dict:
     # req.lot_id vẫn là lô gốc còn ở Kho phân xưởng với phần dư, không phải lô đã sang Kho công ty.
     mv = db.get(StockMovement, req.movement_id) if req.movement_id else None
     lot_id_to_revert = mv.lot_id if mv else req.lot_id
+    if req.movement_id and _lot_touched_since(db, lot_id_to_revert, req.movement_id):
+        raise DomainError("Lô đã bị xuất/điều chuyển/tiêu thụ tiếp sau khi nhận — không thể hoàn tác.")
     transfer(db, lot_id_to_revert, req.quantity, "Kho phân xưởng", user,
             reason=f"Hoàn tác điều chuyển {req.request_code}", mode="dieu_chuyen")
     req.status = "pending"
@@ -2474,6 +2494,8 @@ def undo_transfer_kcpx_request(db: Session, request_id: str, user: User) -> dict
     require_role(user, Role.ADMIN)
     mv = db.get(StockMovement, req.movement_id) if req.movement_id else None
     lot_id_to_revert = mv.lot_id if mv else req.lot_id
+    if req.movement_id and _lot_touched_since(db, lot_id_to_revert, req.movement_id):
+        raise DomainError("Lô đã bị xuất/điều chuyển/tiêu thụ tiếp sau khi nhận — không thể hoàn tác.")
     result = transfer(db, lot_id_to_revert, req.quantity, "Kho công ty", user,
                       reason=f"Hoàn tác điều chuyển {req.request_code}", mode="dieu_chuyen_kcpx")
     reverted_lot = db.get(MaterialLot, result["lot_id"])
@@ -2689,6 +2711,8 @@ def undo_sang_ngang(db: Session, request_id: str, user: User) -> dict:
     require_role(user, Role.ADMIN)
     mv = db.get(StockMovement, req.movement_id) if req.movement_id else None
     lot_id_to_revert = mv.lot_id if mv else req.lot_id
+    if req.movement_id and _lot_touched_since(db, lot_id_to_revert, req.movement_id):
+        raise DomainError("Lô đã bị xuất/điều chuyển/tiêu thụ tiếp sau khi nhận — không thể hoàn tác.")
     _transfer_lot(db, lot_id_to_revert, req.quantity, "Kho công ty", user,
                  reason=f"Hoàn tác xuất sang ngang {req.request_code}", mode="sang_ngang")
     req.status = "pending"
@@ -3204,6 +3228,18 @@ def undo_count(db: Session, count_id: str, user: User) -> dict:
             MaterialLot.lot_id == line.lot_id).with_for_update()).scalar_one_or_none()
         if not lot:
             continue
+        # Chặn nếu có phiếu nhập/xuất/điều chuyển THẬT nào xảy ra SAU khi chốt phiếu kiểm kê
+        # (post_count) cho lô này — trước đây post_count chỉ CẢNH BÁO (không chặn chốt) đúng
+        # trường hợp này, nhưng HOÀN TÁC lại ghi đè thẳng lot.quantity về system_qty cũ, sẽ xóa
+        # mất giao dịch thật đó khỏi tồn kho (yêu cầu người dùng 2026-09-21: "đã dùng rồi thì
+        # không thể hoàn tác").
+        interim = db.execute(select(func.count()).select_from(StockMovement).where(
+            StockMovement.lot_id == line.lot_id, StockMovement.movement_type != "adjust",
+            StockMovement.created_at > count.posted_at)).scalar_one()
+        if interim:
+            raise DomainError(
+                f"Lô {lot.lot_code} đã có {interim} phiếu nhập/xuất/điều chuyển thật xảy ra sau "
+                "khi chốt phiếu kiểm kê này — không thể hoàn tác.")
         _move(db, "adjust", lot, abs(diff), user,
               reason=f"Hoàn tác kiểm kê {count.count_code}: thực tế {line.counted_qty}{lot.uom} → hệ thống {line.system_qty}{lot.uom}",
               location_from=lot.location, location_to=lot.location)

@@ -209,6 +209,28 @@ def test_undo_after_approve_admin_only(client, admin_h, thukho_h, vanhanh_h):
     assert lot["quantity"] == 15
 
 
+def test_undo_transfer_kcpx_blocked_when_lot_used_further(client, admin_h, thukho_h, vanhanh_h):
+    """Sau khi duyệt (lô đã sang Kho phân xưởng), nếu lô đó đã bị xuất tiếp thì không thể hoàn
+    tác điều chuyển nữa (yêu cầu người dùng 2026-09-21)."""
+    mat_id = _create_material(client, admin_h, "KCPX-USED")
+    recv = _receive_lot(client, thukho_h, "KCPX-LOT-USED", mat_id, 15)
+    r = client.post("/api/warehouse/transfer-kcpx-requests", headers=thukho_h,
+                    json={"lot_id": recv["lot_id"], "quantity": 15})
+    request_id = r.json()["request_id"]
+    loc_id = _create_workshop_location(client, admin_h, "KCPX-LOC-USED")
+    ap = client.post(f"/api/warehouse/transfer-kcpx-requests/{request_id}/approve", headers=vanhanh_h,
+                     json={"workshop_location_id": loc_id})
+    assert ap.status_code == 200, ap.text
+    lot = _get_lot(client, admin_h, recv["lot_id"])
+
+    iss = client.post("/api/warehouse/issue", headers=admin_h,
+                      json={"lot_id": lot["lot_id"], "quantity": 5, "mode": "tu_do"})
+    assert iss.status_code == 200, iss.text
+
+    blocked = client.post(f"/api/warehouse/transfer-kcpx-requests/{request_id}/undo", headers=admin_h)
+    assert blocked.status_code == 409, blocked.text
+
+
 def test_qc_required_material_rehold_on_create_blocks_until_kcs_release(client, admin_h, thukho_h, vanhanh_h, kcs_h):
     mat_id = _create_material(client, admin_h, "KCPX-QC-01")
     p = client.post("/api/qc/parameters", headers=admin_h,

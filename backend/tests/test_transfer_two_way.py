@@ -142,6 +142,31 @@ def test_transfer_px_request_full_flow(client, admin_h, thukho_h, vanhanh_h):
     assert undo_again.status_code == 409, undo_again.text
 
 
+def test_undo_transfer_px_request_blocked_when_lot_used_further(client, admin_h, thukho_h, vanhanh_h):
+    """Sau khi duyệt (lô đã sang Kho công ty), nếu lô đó đã bị xuất tiếp thì không thể hoàn tác
+    điều chuyển nữa — hoàn tác sẽ làm sai lệch tồn 2 đầu (yêu cầu người dùng 2026-09-21)."""
+    mat_id = _create_material(client, admin_h, "TPW-USED")
+    lot_id = _receive_at_workshop(client, thukho_h, mat_id, "LOT-TPW-USED", qty=40)
+
+    req = client.post("/api/warehouse/transfer-px-requests", headers=vanhanh_h,
+                      json={"lot_id": lot_id, "quantity": 40, "reason": "Nhận thừa"})
+    request_id = req.json()["request_id"]
+    ok = client.post(f"/api/warehouse/transfer-px-requests/{request_id}/approve", headers=thukho_h)
+    assert ok.status_code == 200, ok.text
+
+    lots = client.get("/api/lots", headers=admin_h).json()
+    lot_at_company = next(l for l in lots if l["lot_id"] == lot_id and l["location"] == "Kho công ty")
+
+    # Xuất tiếp 1 phần lô ngay tại Kho công ty sau khi đã nhận về.
+    iss = client.post("/api/warehouse/issue", headers=admin_h,
+                      json={"lot_id": lot_at_company["lot_id"], "quantity": 10, "mode": "tu_do"})
+    assert iss.status_code == 200, iss.text
+
+    blocked = client.post(f"/api/warehouse/transfer-px-requests/{request_id}/undo", headers=admin_h)
+    assert blocked.status_code == 409, blocked.text
+    assert "dùng" in blocked.json()["detail"].lower() or "xuất" in blocked.json()["detail"].lower()
+
+
 def test_transfer_px_request_requested_transfer_date_used_as_stock_effective_date(client, admin_h, thukho_h, vanhanh_h):
     """"Ngày đề nghị điều chuyển" (khai lúc tạo đề nghị, chiều Phân xưởng -> Công ty) — khi Kho
     công ty duyệt, dùng làm mốc hiệu lực (`ts`) của StockMovement transfer, mirror

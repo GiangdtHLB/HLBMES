@@ -163,6 +163,27 @@ def test_undo_after_approve_admin_only(client, admin_h, thukho_h, vanhanh_h):
     assert lot["quantity"] == 40
 
 
+def test_undo_sang_ngang_blocked_when_lot_used_further(client, admin_h, thukho_h, vanhanh_h):
+    """Sau khi duyệt (lô đã sang Kho phân xưởng), nếu lô đó đã bị xuất tiếp thì không thể hoàn
+    tác xuất sang ngang nữa (yêu cầu người dùng 2026-09-21)."""
+    mat_id = _create_material(client, admin_h, "SNG-USED")
+    r = client.post("/api/warehouse/sang-ngang", headers=thukho_h,
+                    json={"lot_code": "SNG-LOT-USED", "material_id": mat_id, "quantity": 40, "uom": "kg"})
+    req = r.json()
+    ap = client.post(f"/api/warehouse/sang-ngang/{req['request_id']}/approve", headers=vanhanh_h)
+    assert ap.status_code == 200, ap.text
+
+    lots = client.get("/api/lots", headers=admin_h).json()
+    lot = next(l for l in lots if l["lot_code"] == "SNG-LOT-USED" and "phân xưởng" in (l["location"] or "").lower())
+
+    iss = client.post("/api/warehouse/issue", headers=admin_h,
+                      json={"lot_id": lot["lot_id"], "quantity": 15, "mode": "tu_do"})
+    assert iss.status_code == 200, iss.text
+
+    blocked = client.post(f"/api/warehouse/sang-ngang/{req['request_id']}/undo", headers=admin_h)
+    assert blocked.status_code == 409, blocked.text
+
+
 def test_qc_required_material_blocks_approve_until_kcs_release(client, admin_h, thukho_h, vanhanh_h, kcs_h):
     mat_id = _create_material(client, admin_h, "SNG-QC-01")
     p = client.post("/api/qc/parameters", headers=admin_h,

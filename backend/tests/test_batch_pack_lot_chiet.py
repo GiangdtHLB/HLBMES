@@ -242,6 +242,39 @@ def test_pack_lot_material_usage_add_list_delete(client, admin_h):
     assert delr.status_code == 204, delr.text
 
 
+def test_pack_lot_material_delete_blocked_after_kcs_approve(client, admin_h):
+    """Sau khi KCS duyệt lô thành phẩm (approved=True), không thể xóa/hoàn NVL đã dùng nữa —
+    xóa lúc đó sẽ nói ngược "chưa từng dùng NVL này" cho 1 lô đã được ký duyệt chính thức
+    (yêu cầu người dùng 2026-09-21: "đã dùng rồi thì không thể xóa, hoàn tác, hay sửa")."""
+    _batch, _tank_id, filter_lot_id, to_bbt = _build_approved_filter_lot(client, admin_h, "MATDEL")
+    pack = client.post("/api/batch-pack-lots", headers=admin_h,
+                       json={"from_bbt": to_bbt, "qty": 200, "pack_lot_code": "PKG-CHIET-MATDEL", "lot_no": "LOT-CHIET-MATDEL"})
+    assert pack.status_code == 201, pack.text
+    pack_lot_id = pack.json()["pack_lot_id"]
+
+    mat = client.post("/api/materials", headers=admin_h,
+                      json={"code": "MAT-MATDEL", "name": "CO2 test xóa", "uom": "kg"})
+    material_id = mat.json()["material_id"]
+    recv = client.post("/api/warehouse/receive", headers=admin_h,
+                       json={"lot_code": "LOT-MATDEL-PX", "material_id": material_id,
+                             "quantity": 20, "uom": "kg", "location": "Kho phân xưởng"})
+    assert recv.status_code == 200, recv.text
+
+    upd = client.put(f"/api/batch-pack-lots/{pack_lot_id}/shifts", headers=admin_h,
+                     json={"ca1_qty": 200, "ca1_end_at": utcnow().isoformat()})
+    assert upd.status_code == 200, upd.text
+    add = client.post(f"/api/batch-pack-lots/{pack_lot_id}/materials", headers=admin_h,
+                      json={"material_id": material_id, "quantity": 5})
+    assert add.status_code == 201, add.text
+    usage_id = add.json()[0]["usage_id"]
+
+    appr = client.post(f"/api/batch-pack-lots/{pack_lot_id}/approve", headers=admin_h)
+    assert appr.status_code == 200, appr.text
+
+    blocked = client.delete(f"/api/batch-pack-lots/materials/{usage_id}", headers=admin_h)
+    assert blocked.status_code == 409, blocked.text
+
+
 def test_pack_lot_shifts_qty_and_time_editable_repeatedly(client, admin_h):
     _batch, _tank_id, _filter_lot_id, to_bbt = _build_approved_filter_lot(client, admin_h, "SHIFT")
     pack = client.post("/api/batch-pack-lots", headers=admin_h,
