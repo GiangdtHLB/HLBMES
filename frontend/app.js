@@ -123,15 +123,6 @@ const toDTLocal = (d) => {
 // Tương tự toDTLocal nhưng chỉ lấy phần ngày (cho input type="date") — cùng lý do phải dùng
 // giờ LOCAL: gần nửa đêm, toISOString() có thể lệch sang NGÀY KHÁC do quy đổi UTC.
 const toISODateLocal = (d) => toDTLocal(d).slice(0, 10);
-// input type="date" (VD "2026-09-07") -> ISO gửi server, chốt vào 12:00 TRƯA giờ địa phương
-// (không phải 00:00) — tránh trường hợp Việt Nam (UTC+7) đã sang ngày mới nhưng UTC server
-// chưa sang, khiến "hôm nay" bị hiểu nhầm thành tương lai (bị chặn "Ngày nhập không được sau
-// thời điểm hiện tại") nếu chốt 00:00.
-function dateInputToIsoNoon(dateStr) {
-  if (!dateStr) return null;
-  const [y, m, d] = dateStr.split("-").map(Number);
-  return new Date(y, m - 1, d, 12, 0, 0).toISOString();
-}
 // input type="date" -> ISO CUỐI ngày đó (23:59:59 giờ địa phương) — dùng làm mốc "tính đến hết
 // ngày X" khi xem tồn kho quá khứ ("Chỉ 1 ngày" ở Xem tồn kho), gồm trọn mọi giao dịch trong
 // ngày đó.
@@ -170,6 +161,20 @@ function readDtPicker(idPrefix) {
   if (month < 1 || month > 12 || hour > 23 || minute > 59 || second > 59) throw new Error(`"${raw}" không đúng định dạng ngày giờ (VD 21/09/2026 14:30:00).`);
   const dt = new Date(year, month - 1, day, hour, minute, second, 0);
   if (dt.getDate() !== day || dt.getMonth() !== month - 1) throw new Error(`Ngày "${raw}" không hợp lệ.`);
+  return dt;
+}
+// readDtPicker + chặn NGAY trên trình duyệt nếu chọn giờ ở tương lai (server cũng chặn — xem
+// services/warehouse.py::receive/issue — nhưng báo lỗi sớm ở đây rõ ràng hơn) và tùy chọn chặn
+// quá xa trong quá khứ (maxPastDays, VD "Xuất sang ngang" giới hạn 15 ngày). Dùng cho các ô
+// "Ngày nhập"/"Ngày xuất" thay type="date" (không còn né được giờ trong ngày nhờ dtPickerHtml).
+function readDtPickerBounded(idPrefix, label, maxPastDays) {
+  const dt = readDtPicker(idPrefix);
+  if (!dt) return null;
+  const now = new Date();
+  if (dt > now) throw new Error(`${label} không được sau thời điểm hiện tại.`);
+  if (maxPastDays && dt < new Date(now - maxPastDays * 86400000)) {
+    throw new Error(`${label} không được quá ${maxPastDays} ngày trước thời điểm hiện tại.`);
+  }
   return dt;
 }
 function toast(msg, kind = "ok") {
@@ -6066,7 +6071,7 @@ VIEWS.warehouse_kc = async function () {
           <div class="field" style="position:relative"><label>Vật tư</label>
             <input type="text" id="ob_mat_txt" autocomplete="off" placeholder="Tìm mã/tên nguyên liệu..." value="${esc(matItemsGiao[0]?.label || "")}"/>
             <input type="hidden" id="ob_mat" value="${esc(matItemsGiao[0]?.value || "")}"/></div>
-          <div class="field"><label>Ngày nhập tồn đầu</label><input id="ob_date" type="date" value="${toISODateLocal(new Date())}" max="${toISODateLocal(new Date())}"/></div></div>
+          <div class="field"><label>Ngày nhập tồn đầu</label>${dtPickerHtml("ob_date", new Date(), "")}</div></div>
         <div class="row"><div class="field"><label>SL</label><input id="ob_qty" type="number" value="500"/></div>
           <div class="field"><label>ĐVT</label><input id="ob_uom" value="${esc(matItemsGiao[0]?.uom || "")}" size="4" readonly title="Lấy tự động từ danh mục nguyên liệu — không sửa được"/></div>
           <div class="field"><label>Hạn dùng</label><input id="ob_exp" type="date"/></div>
@@ -6107,7 +6112,7 @@ VIEWS.warehouse_kc = async function () {
           <div class="field" style="position:relative"><label>Nhà CC</label>
             <input type="text" id="sng_supplier_txt" autocomplete="off" placeholder="Tìm nhà cung cấp..."/>
             <input type="hidden" id="sng_supplier"/></div>
-          <div class="field"><label>Ngày xuất sang ngang</label><input id="sng_date" type="date" value="${toISODateLocal(new Date())}" max="${toISODateLocal(new Date())}" min="${toISODateLocal(new Date(Date.now() - 15 * 86400000))}"/></div></div>
+          <div class="field"><label>Ngày xuất sang ngang</label>${dtPickerHtml("sng_date", new Date(), "")}</div></div>
         <div class="row"><div class="field"><label>Số lượng</label><input id="sng_qty" type="number" value="500"/></div>
           <div class="field"><label>ĐVT</label><span id="sng_uom_wrap">${altUomFieldHtml(matByIdGiao[matItemsGiao[0]?.value], "sng_uom", 60)}</span></div>
           <div class="field"><label>Đơn giá</label><input id="sng_price" type="number" placeholder="(tuỳ chọn)"/></div>
@@ -6141,7 +6146,7 @@ VIEWS.warehouse_kc = async function () {
           <select id="xt_lot">${lotsAvail}</select></div>
           <div class="field"><label>SL</label><input id="xt_qty" type="number" value="50"/></div>
           <div class="field"><label>ĐVT</label><span id="xt_uom"></span></div>
-          <div class="field"><label>Ngày xuất tự do</label><input id="xt_date" type="date" value="${toISODateLocal(new Date())}" max="${toISODateLocal(new Date())}"/></div>
+          <div class="field"><label>Ngày xuất tự do</label>${dtPickerHtml("xt_date", new Date(), "")}</div>
           <div class="field" style="flex:1"><label>Lý do (tuỳ chọn)</label><input id="xt_reason" placeholder="(tuỳ chọn)"/></div>
           <button class="btn sec" id="xt_do" style="align-self:flex-end">Xuất tự do</button></div>`
           : '<div class="muted">Chỉ tài khoản Admin mới được thực hiện xuất tự do.</div>'}
@@ -6175,7 +6180,7 @@ VIEWS.warehouse_kc = async function () {
           <select id="dcnm_lot">${companyLotOptsGiao}</select></div>
           <div class="field"><label>SL</label><input id="dcnm_qty" type="number" value="50"/></div>
           <div class="field"><label>Nhà máy đến</label><select id="dcnm_factory">${activeFactoryOpts}</select></div>
-          <div class="field"><label>Ngày đề nghị điều chuyển (tuỳ chọn)</label><input id="dcnm_date" type="date"/></div>
+          <div class="field"><label>Ngày đề nghị điều chuyển (tuỳ chọn)</label>${dtPickerHtml("dcnm_date", new Date(), "")}</div>
           <div class="field" style="flex:1"><label>Lý do (tuỳ chọn)</label><input id="dcnm_reason" placeholder="(tuỳ chọn)"/></div>
           <button class="btn sec" id="dcnm_do" style="align-self:flex-end">Điều chuyển</button></div>`
           : '<div class="muted">Bạn không có quyền điều chuyển sang nhà máy khác.</div>'}
@@ -6191,7 +6196,7 @@ VIEWS.warehouse_kc = async function () {
           <input id="dckp_lot_q" placeholder="Tìm nhanh (gõ mã/tên vật tư)..." style="margin-bottom:2px"/>
           <select id="dckp_lot">${companyLotOptsGiao}</select></div>
           <div class="field"><label>SL</label><input id="dckp_qty" type="number" value="50"/></div>
-          <div class="field"><label>Ngày đề nghị điều chuyển (tuỳ chọn)</label><input id="dckp_date" type="date"/></div>
+          <div class="field"><label>Ngày đề nghị điều chuyển (tuỳ chọn)</label>${dtPickerHtml("dckp_date", new Date(), "")}</div>
           <div class="field" style="flex:1"><label>Lý do (tuỳ chọn)</label><input id="dckp_reason" placeholder="(tuỳ chọn)"/></div>
           <button class="btn sec" id="dckp_do" style="align-self:flex-end">Gửi đề nghị</button></div>`
           : '<div class="muted">Bạn không có quyền tạo đề nghị điều chuyển.</div>'}
@@ -6466,7 +6471,7 @@ VIEWS.warehouse_kc = async function () {
         quantity: parseFloat($("ob_qty").value), uom: $("ob_uom").value, location: "Kho công ty",
         expiry: $("ob_exp").value || null, kcs_lot_no: $("ob_kcs").value.trim() || null,
         supplier_lot: $("ob_supplier_lot").value.trim() || null,
-        received_at: dateInputToIsoNoon($("ob_date").value),
+        received_at: readDtPickerBounded("ob_date", "Ngày nhập")?.toISOString() ?? null,
         reason: "Nhập tồn đầu", is_opening_balance: true });
       if (res.status === "on_hold") toast("Đã nhập tồn đầu — lô đang CHỜ khai báo & duyệt chỉ tiêu chất lượng", "err");
       else toast("Đã nhập tồn đầu tại Kho công ty");
@@ -6506,7 +6511,7 @@ VIEWS.warehouse_kc = async function () {
         supplier_id: $("sng_supplier").value || null, unit_price: $("sng_price").value ? parseFloat($("sng_price").value) : null,
         quantity: sngQty, uom: sngMat ? sngMat.uom : $("sng_uom").value, location_id: $("sng_loc").value || null,
         supplier_lot: $("sng_supplier_lot").value.trim() || null,
-        received_at: dateInputToIsoNoon($("sng_date").value),
+        received_at: readDtPickerBounded("sng_date", "Ngày xuất sang ngang", 15)?.toISOString() ?? null,
         expiry: $("sng_exp").value || null, reason: $("sng_note").value.trim() || "Xuất sang ngang" });
       toast(`Đã tạo đề nghị xuất sang ngang (số ${res.request_code}) — chờ phân xưởng duyệt`);
       render("warehouse_kc");
@@ -6562,7 +6567,7 @@ VIEWS.warehouse_kc = async function () {
       const qty = lotAltUomQty("xt_lot", "xt_uom", parseFloat($("xt_qty").value));
       await POST("/warehouse/issue", { lot_id: $("xt_lot").value, quantity: qty,
         mode: "tu_do", reason: $("xt_reason").value.trim() || null,
-        issued_at: dateInputToIsoNoon($("xt_date").value) });
+        issued_at: readDtPickerBounded("xt_date", "Ngày xuất")?.toISOString() ?? null });
       toast("Đã xuất tự do"); render("warehouse_kc");
     });
     Object.keys(WH_HIST_VISIBLE).forEach(wireMovementHistoryBlock);
@@ -6594,14 +6599,14 @@ VIEWS.warehouse_kc = async function () {
       if (!$("dcnm_factory").value) throw new Error("Chưa có nhà máy nào trong danh mục — vào Danh mục để tạo trước.");
       await POST("/warehouse/transfer-to-factory", { lot_id: $("dcnm_lot").value, quantity: parseFloat($("dcnm_qty").value),
         factory_id: $("dcnm_factory").value, reason: $("dcnm_reason").value.trim() || null,
-        requested_transfer_date: dateInputToIsoNoon($("dcnm_date").value) });
+        requested_transfer_date: readDtPickerBounded("dcnm_date", "Ngày đề nghị điều chuyển")?.toISOString() ?? null });
       toast("Đã điều chuyển sang nhà máy khác"); render("warehouse_kc");
     });
     if ($("dckp_do")) $("dckp_do").onclick = () => guard(async () => {
       if (!$("dckp_lot").value) throw new Error("Không có lô nào đang ở kho công ty để điều chuyển.");
       await POST("/warehouse/transfer-kcpx-requests", { lot_id: $("dckp_lot").value,
         quantity: parseFloat($("dckp_qty").value), reason: $("dckp_reason").value.trim() || null,
-        requested_transfer_date: dateInputToIsoNoon($("dckp_date").value) });
+        requested_transfer_date: readDtPickerBounded("dckp_date", "Ngày đề nghị điều chuyển")?.toISOString() ?? null });
       toast("Đã gửi đề nghị điều chuyển sang Phân xưởng — chờ Phân xưởng duyệt"); render("warehouse_kc");
     });
     document.querySelectorAll("[data-kcpxdcedit]").forEach(b => b.onclick = () =>
@@ -6751,7 +6756,7 @@ VIEWS.warehouse_px = async function () {
         <div class="field" style="position:relative"><label>Vật tư</label>
           <input type="text" id="obpx_mat_txt" autocomplete="off" placeholder="Tìm mã/tên nguyên liệu..." value="${esc(matItemsPx[0]?.label || "")}"/>
           <input type="hidden" id="obpx_mat" value="${esc(matItemsPx[0]?.value || "")}"/></div>
-        <div class="field"><label>Ngày nhập tồn đầu</label><input id="obpx_date" type="date" value="${toISODateLocal(new Date())}" max="${toISODateLocal(new Date())}"/></div></div>
+        <div class="field"><label>Ngày nhập tồn đầu</label>${dtPickerHtml("obpx_date", new Date(), "")}</div></div>
         <div class="row"><div class="field"><label>SL</label><input id="obpx_qty" type="number" value="500"/></div>
           <div class="field"><label>ĐVT</label><input id="obpx_uom" value="${esc(matItemsPx[0]?.uom || "")}" size="4" readonly title="Lấy tự động từ danh mục nguyên liệu — không sửa được"/></div>
           <div class="field"><label>Hạn dùng</label><input id="obpx_exp" type="date"/></div>
@@ -6855,7 +6860,7 @@ VIEWS.warehouse_px = async function () {
         <input id="dcpx_lot_q" placeholder="Tìm nhanh (gõ mã/tên vật tư)..." style="margin-bottom:2px"/>
         <select id="dcpx_lot">${workshopLotOpts}</select></div>
         <div class="field"><label>SL</label><input id="dcpx_qty" type="number" value="50"/></div>
-        <div class="field"><label>Ngày đề nghị điều chuyển (tuỳ chọn)</label><input id="dcpx_date" type="date"/></div>
+        <div class="field"><label>Ngày đề nghị điều chuyển (tuỳ chọn)</label>${dtPickerHtml("dcpx_date", new Date(), "")}</div>
         <div class="field" style="flex:1"><label>Lý do (tuỳ chọn)</label><input id="dcpx_reason" placeholder="(tuỳ chọn)"/></div>
         <button class="btn" id="dcpx_do" style="align-self:flex-end">Gửi đề nghị</button></div>`
         : '<div class="muted">Bạn không có quyền tạo đề nghị điều chuyển.</div>'}
@@ -6964,7 +6969,7 @@ VIEWS.warehouse_px = async function () {
         ? `<div class="row"><div class="field"><label>Lô</label><select id="xtpx_lot">${workshopLotOpts}</select></div>
         <div class="field"><label>SL</label><input id="xtpx_qty" type="number" value="50"/></div>
         <div class="field"><label>ĐVT</label><span id="xtpx_uom"></span></div>
-        <div class="field"><label>Ngày xuất tự do</label><input id="xtpx_date" type="date" value="${toISODateLocal(new Date())}" max="${toISODateLocal(new Date())}"/></div>
+        <div class="field"><label>Ngày xuất tự do</label>${dtPickerHtml("xtpx_date", new Date(), "")}</div>
         <div class="field" style="flex:1"><label>Lý do (tuỳ chọn)</label><input id="xtpx_reason" placeholder="(tuỳ chọn)"/></div>
         <button class="btn sec" id="xtpx_do" style="align-self:flex-end">Xuất tự do</button></div>`
         : '<div class="muted">Chỉ tài khoản Admin mới được thực hiện xuất tự do.</div>'}
@@ -7087,7 +7092,7 @@ VIEWS.warehouse_px = async function () {
         quantity: parseFloat($("obpx_qty").value), uom: $("obpx_uom").value, location: "Kho phân xưởng",
         expiry: $("obpx_exp").value || null, kcs_lot_no: $("obpx_kcs").value.trim() || null,
         supplier_lot: $("obpx_supplier_lot").value.trim() || null,
-        received_at: dateInputToIsoNoon($("obpx_date").value),
+        received_at: readDtPickerBounded("obpx_date", "Ngày nhập")?.toISOString() ?? null,
         reason: "Nhập tồn đầu", is_opening_balance: true });
       if (res.status === "on_hold") toast("Đã nhập tồn đầu — lô đang CHỜ khai báo & duyệt chỉ tiêu chất lượng", "err");
       else toast("Đã nhập tồn đầu tại Kho phân xưởng");
@@ -7122,7 +7127,7 @@ VIEWS.warehouse_px = async function () {
       if (!$("dcpx_lot").value) throw new Error("Không có lô nào đang ở kho phân xưởng để điều chuyển.");
       await POST("/warehouse/transfer-px-requests", { lot_id: $("dcpx_lot").value, quantity: parseFloat($("dcpx_qty").value),
         reason: $("dcpx_reason").value.trim() || null,
-        requested_transfer_date: dateInputToIsoNoon($("dcpx_date").value) });
+        requested_transfer_date: readDtPickerBounded("dcpx_date", "Ngày đề nghị điều chuyển")?.toISOString() ?? null });
       toast("Đã gửi đề nghị điều chuyển"); render("warehouse_px");
     });
     document.querySelectorAll("[data-kcpxapprove]").forEach(b => b.onclick = () => {
@@ -7183,7 +7188,7 @@ VIEWS.warehouse_px = async function () {
       const qty = lotAltUomQty("xtpx_lot", "xtpx_uom", parseFloat($("xtpx_qty").value), WH_CACHE.matById);
       await POST("/warehouse/issue", { lot_id: $("xtpx_lot").value, quantity: qty,
         mode: "tu_do", reason: $("xtpx_reason").value.trim() || null,
-        issued_at: dateInputToIsoNoon($("xtpx_date").value) });
+        issued_at: readDtPickerBounded("xtpx_date", "Ngày xuất")?.toISOString() ?? null });
       toast("Đã xuất tự do"); render("warehouse_px");
     });
     wireMovementHistoryBlock("tu_do_px");
@@ -7413,7 +7418,7 @@ function sangNgangKcRowHtml(r, matById, lotById, qcReqSet) {
 function transferEditDelCell(r, editAttr, delAttr, requestedTransferDate) {
   if (!r.can_edit) return "<td></td>";
   const dateAttr = requestedTransferDate !== undefined
-    ? ` data-txdate="${requestedTransferDate ? esc(toISODateLocal(new Date(requestedTransferDate))) : ""}"` : "";
+    ? ` data-txdate="${requestedTransferDate ? esc(new Date(requestedTransferDate).toISOString()) : ""}"` : "";
   return `<td style="white-space:nowrap">
     <button class="btn sm sec" ${editAttr}="${esc(r.request_id)}" data-txcode="${esc(r.request_code)}"
       data-txqty="${r.quantity}" data-txuom="${esc(r.uom)}" data-txreason="${esc(r.reason || "")}"${dateAttr}>Sửa</button>
@@ -7433,12 +7438,12 @@ function openTransferEditModal(requestId, ds, apiPath, viewName) {
     <div class="muted" style="margin-bottom:10px">Chỉ sửa được số lượng/lý do${showDate ? "/ngày đề nghị điều chuyển" : ""} — không đổi lô. Nếu đề nghị đã được xử lý, lưu sẽ báo lỗi.</div>
     <div class="row"><div class="field"><label>Số lượng</label><input id="etx_qty" type="number" value="${txqty}"/></div>
       <div class="field"><label>ĐVT</label><input value="${esc(txuom)}" size="4" readonly/></div>
-      ${showDate ? `<div class="field"><label>Ngày đề nghị điều chuyển (tuỳ chọn)</label><input id="etx_date" type="date" value="${esc(txdate)}"/></div>` : ""}</div>
+      ${showDate ? `<div class="field"><label>Ngày đề nghị điều chuyển (tuỳ chọn)</label>${dtPickerHtml("etx_date", txdate ? new Date(txdate) : new Date(), "")}</div>` : ""}</div>
     <div class="row"><div class="field" style="flex:1"><label>Lý do (tuỳ chọn)</label><input id="etx_reason" value="${esc(txreason)}"/></div>
       <button class="btn" id="etx_save" style="align-self:flex-end">Lưu</button></div>`);
   $("etx_save").onclick = () => guard(async () => {
     const payload = { quantity: parseFloat($("etx_qty").value), reason: $("etx_reason").value.trim() || null };
-    if (showDate) payload.requested_transfer_date = dateInputToIsoNoon($("etx_date").value);
+    if (showDate) payload.requested_transfer_date = readDtPickerBounded("etx_date", "Ngày đề nghị điều chuyển")?.toISOString() ?? null;
     await PUT(`${apiPath}/${requestId}`, payload);
     toast("Đã lưu"); closeModal(); render(viewName);
   });
