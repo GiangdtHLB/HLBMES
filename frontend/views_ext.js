@@ -199,7 +199,17 @@
   // ======================================================================
   VIEWS.dispense = async function () {
     const root = $("view-dispense");
-    const [batches, fullyDispensedMap] = await Promise.all([GET("/batches"), GET("/dispense/fully-dispensed-map").catch(() => ({}))]);
+    const [batches, fullyDispensedMap, allMaterials, materialGroups] = await Promise.all([
+      GET("/batches"), GET("/dispense/fully-dispensed-map").catch(() => ({})),
+      GET("/materials").catch(() => []), GET("/material-groups").catch(() => [])]);
+    // "Cấp 1 vật tư" (thủ công) không giới hạn trong Định mức (BOM) của mẻ — cho chọn BẤT KỲ vật
+    // tư nào thuộc nhóm "Nguyên liệu (chính/phụ)" (MaterialGroup.is_raw_material) trong Danh mục
+    // vật tư, kể cả vật tư không có trong công thức mẻ này (yêu cầu người dùng 2026-09-22: "hiện
+    // toàn bộ nhóm nguyên liệu chính và nguyên liệu phụ ở danh mục vật tư"). Cấp ngoài BOM tự
+    // được đánh dấu "Cấp tự do" (services/dispense.py) như cơ chế sẵn có.
+    const rawGroupCodes = new Set(materialGroups.filter(g => g.is_raw_material).map(g => g.code));
+    const rawMaterials = allMaterials.filter(m => m.category && rawGroupCodes.has(m.category))
+      .sort((a, b) => a.code.localeCompare(b.code));
     const running = batches.find(b => b.state === "running") || batches[0];
     // ✔ = đã cấp ĐỦ mọi dòng định mức (BOM) của mẻ — yêu cầu người dùng 2026-09-14, xem
     // services/bom.py::batches_fully_dispensed_map. batchLabel: chữ thường (dùng lọc tìm kiếm +
@@ -266,9 +276,8 @@
     async function refresh() {
       const bid = $("dp_batch").value;
       if (!bid) { $("dp_bom").innerHTML = '<div class="muted">Chưa có mẻ nào để cấp liệu.</div>'; return; }
-      const [batch, bom, hist, summary] = await Promise.all([
-        GET(`/batches/${bid}`), GET(`/batches/${bid}/bom`), GET(`/dispense?batch_id=${bid}`),
-        GET(`/dispense/${bid}/summary`)]);
+      const [batch, bom, hist] = await Promise.all([
+        GET(`/batches/${bid}`), GET(`/batches/${bid}/bom`), GET(`/dispense?batch_id=${bid}`)]);
       currentBatch = batch;
       const canEdit = !batch.ebr_locked;
       // Tồn kho phân xưởng dùng để đối chiếu khi cấp liệu tính TẠI thời điểm bắt đầu nấu, và mẻ
@@ -279,18 +288,22 @@
         ? `Bắt đầu: <b>${fmt(batch.start_at)}</b>${batch.end_at ? ` · Kết thúc: <b>${fmt(batch.end_at)}</b>` : ""}`
         : `<span style="color:var(--red)">⚠ Mẻ chưa có thời điểm bắt đầu — chưa thể cấp liệu (vào Mẻ sản xuất nhập thời điểm bắt đầu trước).</span>`;
       // Bảng đối chiếu tách THEO MÃ VẬT TƯ THẬT đã cấp (không gộp theo mã Nhóm vật tư thay thế
-      // như bom.lines — xem services/dispense.py::batch_dispense_summary), kèm mã lô + có đúng
-      // FIFO không. CHỈ hiện vật tư ĐÃ thực sự cấp — không tự liệt kê sẵn toàn bộ định mức công
-      // thức khi chưa cấp gì, để người dùng tự chủ động cấp qua "Gợi ý cấp liệu"/"Cấp 1 vật tư"
-      // bên dưới thay vì bị gợi ý sẵn (theo yêu cầu người dùng).
+      // — xem services/dispense.py::batch_dispense_summary), kèm mã lô + có đúng FIFO không.
+      // LUÔN hiện ĐỦ toàn bộ định mức công thức (cả nguyên liệu chính lẫn phụ), kể cả chỉ tiêu
+      // CHƯA cấp gì (yêu cầu người dùng 2026-09-22: "hiện hết tất cả nguyên liệu chính và
+      // nguyên liệu phụ") — dùng `bom.lines` (only_dispensed=False, giống hệt bảng BOM ở Mẻ sản
+      // xuất/EBR) thay vì gọi riêng /dispense/{bid}/summary (only_dispensed=True, trước đây ẩn
+      // hẳn dòng chưa cấp). Nút "Xóa" chỉ hiện khi ĐÃ có Thực tế > 0 — chưa cấp gì thì không có
+      // gì để xóa, "Sửa" vẫn dùng được để cấp trực tiếp từ dòng này (adjust_actual tự tính từ 0).
       const BOM_STATUS_LABEL = { dat: "đạt", vuot: "vượt định mức", thieu: "thiếu", chua_dung: "chưa dùng", ngoai_bom: "ngoài định mức" };
       const BOM_STATUS_BADGE = { dat: "available", vuot: "critical", thieu: "due", chua_dung: "planned", ngoai_bom: "obsolete" };
-      $("dp_bom").innerHTML = summary.length ? `<div class="tablewrap"><table>
+      const bomLines = bom.lines || [];
+      $("dp_bom").innerHTML = bomLines.length ? `<div class="tablewrap"><table>
         <thead><tr><th>Vật tư</th><th>Mã lô</th><th>Người nhập / Ngày tạo</th><th>Ngày cấp</th><th>FIFO?</th><th>Định mức</th><th>Thực tế</th><th>Chênh</th><th>Trạng thái</th><th>Cấp tự do?</th><th></th></tr></thead>
-        <tbody>${summary.map(l => `<tr data-bomrow="${esc(l.material_code)}">
+        <tbody>${bomLines.map(l => `<tr data-bomrow="${esc(l.material_code)}">
           <td>${esc(l.material_code)}${l.material_name ? ` ${esc(l.material_name)}` : ""}</td>
           <td>${esc((l.lot_codes || []).join(", ") || "—")}</td>
-          <td class="muted" style="white-space:nowrap">${_flAuditText(l.actor, l.created_at)}</td>
+          <td class="muted" style="white-space:nowrap">${l.actor || l.created_at ? _flAuditText(l.actor, l.created_at) : "—"}</td>
           <td class="muted" style="white-space:nowrap">${l.supply_date ? fmt(l.supply_date) : "—"}</td>
           <td>${l.fifo_ok === false
             ? `<span style="color:var(--red)">⚠ khác FIFO${l.fifo_computed ? " (suy luận)" : ""}</span>`
@@ -302,10 +315,13 @@
           <td>${l.status != null ? badge(BOM_STATUS_BADGE[l.status] || "planned") + esc(BOM_STATUS_LABEL[l.status] || l.status) : ""}</td>
           <td>${l.is_free ? badge("obsolete") + "Cấp tự do" : ""}</td>
           <td>${canEdit ? `<button class="btn sm sec" data-bomedit="${esc(l.material_code)}">Sửa</button>
-            <button class="btn sm sec" data-bomdel="${esc(l.material_code)}" style="color:var(--red)">Xóa</button>` : ""}</td></tr>`).join("")}</tbody></table></div>
+            ${l.actual ? `<button class="btn sm sec" data-bomdel="${esc(l.material_code)}" style="color:var(--red)">Xóa</button>` : ""}` : ""}</td></tr>`).join("")}</tbody></table></div>
         <div class="muted" style="margin-top:6px">${canEdit ? "" : "Hồ sơ mẻ (EBR) đã khóa — không thể sửa Thực tế."}</div>`
-        : '<div class="muted">Chưa cấp vật tư nào cho mẻ này — dùng "Gợi ý cấp liệu" hoặc "Cấp 1 vật tư" bên dưới.</div>';
-      $("dp_mat").innerHTML = (bom.lines || []).map(l => `<option value="${esc(l.material_code)}">${esc(l.material_code)}${l.material_name ? " — " + esc(l.material_name) : ""} (ĐM ${l.planned})</option>`).join("");
+        : '<div class="muted">Công thức mẻ này chưa khai báo vật tư nào.</div>';
+      const bomMatCodes = new Set(bomLines.map(l => l.material_code));
+      const extraRawMats = rawMaterials.filter(m => !bomMatCodes.has(m.code));
+      $("dp_mat").innerHTML = bomLines.map(l => `<option value="${esc(l.material_code)}">${esc(l.material_code)}${l.material_name ? " — " + esc(l.material_name) : ""} (ĐM ${l.planned})</option>`).join("")
+        + extraRawMats.map(m => `<option value="${esc(m.code)}">${esc(m.code)}${m.name ? " — " + esc(m.name) : ""} (ngoài định mức)</option>`).join("");
       $("dp_mat").onchange = () => guard(refreshDpLots);
       await refreshDpLots();
       // Mỗi phiếu cấp liệu (Dispense) — dp_go ("Cấp 1 vật tư") và sg_apply ("Áp dụng gợi ý")
