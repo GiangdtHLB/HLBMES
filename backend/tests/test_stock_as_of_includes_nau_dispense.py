@@ -90,8 +90,11 @@ def test_stock_as_of_reflects_nau_dispense_at_batch_start_at(client, admin_h):
         assert t.status_code == 200, t.text
 
     oid = client.get("/api/brewing/orders", headers=admin_h).json()[0]["brew_order_id"]
+    # batch_code="1" (thấp) để không có mẻ nào "trước" nó theo mã (tránh vướng seed "9001"/"9002"
+    # còn ở trạng thái running, xem services/batches.py::_prev_batch_by_code — mã sau không được
+    # có giờ bắt đầu sớm hơn mã trước, mà batch_start_at ở test này backdated có chủ đích).
     b = client.post("/api/batches", headers=admin_h,
-                    json={"order_id": oid, "recipe_version_id": version_id,
+                    json={"order_id": oid, "recipe_version_id": version_id, "batch_code": "1",
                          "planned_qty": 100, "allow_shortage": True})
     assert b.status_code == 201, b.text
     batch_id = b.json()["batch_id"]

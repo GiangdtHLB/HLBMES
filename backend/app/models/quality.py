@@ -39,12 +39,46 @@ class QualityResult(Base):
 
     recorded_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
     approved_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    # Mốc TẠO lần đầu — KHÔNG đổi sau đó nữa (2026-09-21: trước đây record_stage_result ghi đè
+    # cả recorded_by/recorded_at mỗi lần sửa, làm mất luôn "ngày giờ tạo/nhập" gốc). Lần SỬA sau
+    # đó ghi vào updated_by/updated_at bên dưới, không đụng 2 cột này.
     recorded_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    # Mốc SỬA gần nhất (NULL nếu chưa từng sửa sau khi tạo) — xem QualityResultHistory để có
+    # toàn bộ lịch sử các lần sửa trước đó, không chỉ lần gần nhất.
+    updated_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    updated_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
     # Mốc ngày giờ LẤY MẪU do người dùng khai báo (có thể lùi lại nếu ghi trễ) — khác
-    # recorded_at (mốc HỆ THỐNG lưu bản ghi). Chỉ dùng cho các stage lấy mẫu NHIỀU LẦN
-    # (len_men_chinh/len_men_phu, xem qc_catalog.MULTI_SAMPLE_STAGES) — NULL ở mọi nơi khác,
-    # nơi mỗi (scope, parameter) chỉ có đúng 1 dòng "giá trị hiện tại" (ghi đè tại chỗ).
+    # recorded_at (mốc HỆ THỐNG lưu bản ghi). Trước đây chỉ dùng cho các stage lấy mẫu NHIỀU
+    # LẦN (len_men_chinh/len_men_phu, xem qc_catalog.MULTI_SAMPLE_STAGES); từ 2026-09-21 cũng
+    # dùng cho record_stage_result (mọi stage 1-dòng/chỉ tiêu, VD "nau") — vẫn NULL nếu người
+    # dùng không khai (không bắt buộc).
     sampled_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+
+
+class QualityResultHistory(Base):
+    """Snapshot giá trị TRƯỚC MỖI LẦN sửa 1 QualityResult (record_stage_result ghi đè tại chỗ,
+    record_qc_sample/update_qc_sample sửa 1 dòng đã lưu) — yêu cầu người dùng 2026-09-21: "ghi
+    lại lịch sử" khi sửa chỉ tiêu đã khai. Không snapshot lúc TẠO mới (chưa có gì để mất)."""
+
+    __tablename__ = "quality_result_history"
+
+    history_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
+    result_id: Mapped[str] = mapped_column(Unicode(64), index=True)
+    # Giá trị TRƯỚC lần sửa này (bản chụp, không phải FK sống).
+    value: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    value_text: Mapped[Optional[str]] = mapped_column(Unicode(1000), nullable=True)
+    unit: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    lower_limit: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    upper_limit: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    status: Mapped[str] = mapped_column(Unicode(255))
+    sampled_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+    # Ai/lúc nào đã lưu bản GIÁ TRỊ NÀY (trước khi bị sửa) — khớp recorded_by/at (nếu đây là bản
+    # đầu) hoặc updated_by/at (nếu đây đã là 1 lần sửa trước đó).
+    saved_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    saved_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+    # Ai/lúc nào THỰC HIỆN lần sửa khiến bản ghi này bị thay — luôn có giá trị (khác saved_by/at).
+    changed_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    changed_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
 
 
 class Deviation(Base):

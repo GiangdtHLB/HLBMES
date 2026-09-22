@@ -15,7 +15,7 @@ from ..errors import DomainError
 from ..models.batch_pipeline import BatchFilterLot, BatchPackLot, BatchTank
 from ..models.batches import BatchExecution
 from ..models.brewing import BrewOrder
-from ..schemas import BrewOrderIn, QcSampleIn, StageQcResultIn
+from ..schemas import BrewOrderIn, QcSampleIn, QcSampleUpdateIn, StageQcResultIn
 from ..security import User, get_current_user, require_any_perm, require_perm
 from ..services import batch_pipeline as batch_pipeline_svc
 from ..services import brew_order as brew_order_svc
@@ -116,13 +116,43 @@ def add_qc_sample(payload: QcSampleIn, db: Session = Depends(get_db), user: User
     require_perm(user, "quality.release" if payload.scope_type == "batch_tank" else "batch.execute")
     _assert_stage_scope_unlocked(db, payload.scope_type, payload.scope_id)
     return qc_catalog.record_qc_sample(db, payload.stage, payload.scope_type, payload.scope_id,
-                                       payload.sampled_at, [r.model_dump() for r in payload.results], user)
+                                       payload.sampled_at, [r.model_dump() for r in payload.results], user,
+                                       sample_id=payload.sample_id)
 
 
 @router.get("/qc-samples")
 def get_qc_samples(scope_type: str, scope_id: str, db: Session = Depends(get_db)):
     """Lịch sử các lần lấy mẫu (mới nhất trước) cho 1 scope — xem qc_catalog.list_qc_samples."""
     return {"items": qc_catalog.list_qc_samples(db, scope_type, scope_id)}
+
+
+@router.put("/qc-samples/{sample_id}")
+def update_qc_sample(sample_id: str, payload: QcSampleUpdateIn, db: Session = Depends(get_db),
+                     user: User = Depends(get_current_user)):
+    """Sửa 1 lần lấy mẫu đã lưu — cùng quyền với lúc tạo (add_qc_sample): chỉ KCS cho
+    scope_type="batch_tank" (CT chính/phụ lên men), "batch.execute" cho các scope khác."""
+    scope_type, scope_id = qc_catalog.peek_qc_sample_scope(db, sample_id)
+    require_perm(user, "quality.release" if scope_type == "batch_tank" else "batch.execute")
+    _assert_stage_scope_unlocked(db, scope_type, scope_id)
+    return qc_catalog.update_qc_sample(db, sample_id, payload.model_dump(), user)
+
+
+@router.get("/qc-results/{result_id}/history")
+def get_qc_result_history(result_id: str, db: Session = Depends(get_db)):
+    """Lịch sử các lần SỬA của 1 chỉ tiêu đã ghi (record_stage_result/update_qc_sample)."""
+    return {"items": qc_catalog.get_qc_result_history(db, result_id)}
+
+
+@router.delete("/qc-results/{result_id}", status_code=204)
+def delete_qc_result(result_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """Xóa 1 chỉ tiêu đã khai (dòng công đoạn 1-dòng/chỉ tiêu HOẶC 1 dòng trong 1 lần lấy mẫu) —
+    cùng quyền với lúc ghi: scope_type="batch_tank" LUÔN là CT chính/phụ lên men (2 stage duy
+    nhất dùng scope này trong toàn hệ thống) nên suy được kcs_only thẳng từ đó, không cần biết
+    trước `stage`."""
+    scope_type, scope_id = qc_catalog.peek_qc_result_scope(db, result_id)
+    require_perm(user, "quality.release" if scope_type == "batch_tank" else "batch.execute")
+    _assert_stage_scope_unlocked(db, scope_type, scope_id)
+    qc_catalog.delete_qc_result(db, result_id, user)
 
 
 # Chỉ tiêu lên men (chính/phụ) CỦA PIPELINE "MẺ SẢN XUẤT" (scope_type="batch_tank") là chỉ

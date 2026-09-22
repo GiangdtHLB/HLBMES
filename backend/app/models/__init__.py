@@ -32,7 +32,7 @@ from .master import BeerType, FinishedProduct, Material, Product
 from .materials import GenealogyEdge, MaterialLot, Supplier
 from .metrics import OEERecord, ProcessReading
 from .process import ChemicalUsage, YeastIssue, YeastLot
-from .quality import Deviation, QualityResult
+from .quality import Deviation, QualityResult, QualityResultHistory
 from .recipes import Recipe, RecipeVersion, RecipeVersionParamItem, RecipeVersionQcItem
 from .recipe_ext import BatchYieldActual, RecipeChange
 from .signature import EBRSnapshot, Signature

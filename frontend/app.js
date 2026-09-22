@@ -140,6 +140,38 @@ function dateInputToIsoEndOfDay(dateStr) {
   const [y, m, d] = dateStr.split("-").map(Number);
   return new Date(y, m - 1, d, 23, 59, 59).toISOString();
 }
+// input type="datetime-local" hiện AM/PM hay 24h là do TRÌNH DUYỆT/HĐH người dùng tự quyết định
+// (locale máy) — gắn lang="vi-VN" lên cả input LẪN <html> đều KHÔNG ăn với Chrome/Windows của
+// vận hành (báo lại 2026-09-21 vẫn thấy AM/PM). Thử tách thành 2 input rời (ngày + giờ) cũng bị
+// từ chối ngay sau đó ("không chọn 1 lần cả ngày và giờ, vẫn tách làm 2") — vận hành muốn ĐÚNG
+// 1 ô, 1 lần bấm/gõ. Giải pháp chắc chắn nhất không lệ thuộc trình duyệt/HĐH: 1 ô TEXT DUY NHẤT
+// gõ tay "dd/mm/yyyy HH:MM" — không qua bất kỳ control ngày/giờ gốc nào nữa nên không thể tự ý
+// đổi 12h/24h. Dùng cho "Bắt đầu"/"Kết thúc" mẻ (renderBdStart/renderBdEnd) và "Ngày giờ lấy
+// mẫu" (openStageQcModal/openFermentQcSampleModal). LUÔN điền sẵn giá trị (mặc định NGAY LÚC
+// MỞ nếu chưa có gì) thay vì để trống chỉ hiện placeholder — yêu cầu người dùng: "hiện rõ chữ
+// dd/mm/yyyy hh:mm, trong đó gợi ý tháng năm là tháng năm hiện tại, ngày là ngày hiện tại, giờ
+// phút giây là giờ phút giây hiện tại, người vận hành sẽ tự sửa lại" (gõ đè/sửa nhanh hơn gõ từ
+// đầu — vận hành chỉ cần sửa đúng phần khác với hiện tại, VD đổi ngày nếu lấy mẫu hôm qua).
+function dtPickerHtml(idPrefix, d, disabledAttr) {
+  const dd = d || new Date();
+  const p2 = (n) => String(n).padStart(2, "0");
+  const val = `${p2(dd.getDate())}/${p2(dd.getMonth() + 1)}/${dd.getFullYear()} ${p2(dd.getHours())}:${p2(dd.getMinutes())}:${p2(dd.getSeconds())}`;
+  return `<input type="text" id="${idPrefix}" value="${esc(val)}" placeholder="dd/mm/yyyy HH:MM:SS" style="width:172px" ${disabledAttr}/>`;
+}
+// Đọc lại input của dtPickerHtml -> Date, hoặc null nếu chưa nhập gì cả (bị xóa trắng tay — mặc
+// định luôn có sẵn giá trị nên đây là chủ ý bỏ trống, không phải quên điền). Giây tùy chọn (bỏ
+// giây vẫn đọc được, mặc định :00) — ném lỗi rõ ràng nếu sai định dạng/ngày không hợp lệ.
+function readDtPicker(idPrefix) {
+  const raw = $(idPrefix).value.trim();
+  if (!raw) return null;
+  const m = raw.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})\s+(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+  if (!m) throw new Error(`"${raw}" không đúng định dạng ngày giờ (VD 21/09/2026 14:30:00).`);
+  const day = +m[1], month = +m[2], year = +m[3], hour = +m[4], minute = +m[5], second = m[6] ? +m[6] : 0;
+  if (month < 1 || month > 12 || hour > 23 || minute > 59 || second > 59) throw new Error(`"${raw}" không đúng định dạng ngày giờ (VD 21/09/2026 14:30:00).`);
+  const dt = new Date(year, month - 1, day, hour, minute, second, 0);
+  if (dt.getDate() !== day || dt.getMonth() !== month - 1) throw new Error(`Ngày "${raw}" không hợp lệ.`);
+  return dt;
+}
 function toast(msg, kind = "ok") {
   const t = el(`<div class="toast ${kind}">${esc(msg)}</div>`);
   document.body.appendChild(t);
@@ -663,7 +695,12 @@ VIEWS.dashboard = async function () {
   const fermentGroupHead = (product, isFirst) => `<div style="font-size:12px;font-weight:700;color:var(--text);
     margin:${isFirst ? "0" : "12px"} 0 6px;padding-top:${isFirst ? "0" : "8px"};${isFirst ? "" : "border-top:1px solid #2b3a47"}">${esc(product)}</div>`;
   const fermentBarScaleMax = Math.max(1, ...fermentTankItems.map(it => Math.max(it.days, it.std)));
-  let fermentBarHtml = "", fermentGridHtml = "", lastFermentProduct = null, gridOpen = false;
+  // Danh sách dạng thanh (trái) chỉ hiện 10 tank đầu, còn lại ẩn sau nút "Xem thêm" (yêu cầu
+  // người dùng 2026-09-21: "hiển thị 10 tank thôi, bấm vào xem hết thì mới hiện ra") — mirror
+  // đúng cơ chế data-minimore đã dùng ở các panel cảnh báo phía trên (ẩn/hiện bằng CSS, không
+  // re-render). Lưới ô màu (phải) không giới hạn — mỗi ô nhỏ, xem cùng lúc nhiều tank vẫn rõ.
+  const FERMENT_LIST_LIMIT = 10;
+  let fermentBarHtml = "", fermentGridHtml = "", lastFermentProduct = null, gridOpen = false, fermentRowIdx = 0;
   fermentTankItems.forEach(it => {
     if (it.product !== lastFermentProduct) {
       fermentBarHtml += fermentGroupHead(it.product, lastFermentProduct === null);
@@ -676,7 +713,8 @@ VIEWS.dashboard = async function () {
     const basePct = Math.min(it.days, it.std) / fermentBarScaleMax * 100;
     const overPct = Math.max(it.over, 0) / fermentBarScaleMax * 100;
     const label = it.over > 0 ? `Quá ${it.over} ngày` : `Còn ${Math.abs(it.over)} ngày`;
-    fermentBarHtml += `<div style="display:grid;grid-template-columns:82px 1fr 88px;align-items:center;gap:10px;padding:5px 0">
+    const hideRow = fermentRowIdx >= FERMENT_LIST_LIMIT;
+    fermentBarHtml += `<div class="${hideRow ? "fermbar-extra" : ""}" style="display:${hideRow ? "none" : "grid"};grid-template-columns:82px 1fr 88px;align-items:center;gap:10px;padding:5px 0">
       <div style="font-size:13px;font-weight:700">${esc(it.tank)}${fermentQcBadge(it.qcFail, "margin-left:5px;vertical-align:2px", it.tankId, it.productId)}</div>
       <div style="position:relative;height:20px;background:var(--panel2);border-radius:3px;overflow:hidden;display:flex">
         <div style="width:${basePct}%;height:100%;background:var(--blue)"></div>
@@ -685,6 +723,7 @@ VIEWS.dashboard = async function () {
       </div>
       <div style="font-size:12px;font-weight:700;color:${it.over > 0 ? "var(--red)" : "var(--muted)"}">${label}</div>
     </div>`;
+    fermentRowIdx++;
     fermentGridHtml += `<div style="position:relative;background:${FERMENT_STAGE_BG[it.stage]};border-radius:6px;padding:6px 8px;text-align:center">
       ${fermentQcBadge(it.qcFail, "position:absolute;top:-6px;right:-6px", it.tankId, it.productId)}
       <div style="font-size:12px;font-weight:700;color:${FERMENT_STAGE_FG[it.stage]}">${esc(it.tank)}</div>
@@ -692,6 +731,10 @@ VIEWS.dashboard = async function () {
     </div>`;
   });
   if (gridOpen) fermentGridHtml += `</div>`;
+  const fermentMoreCount = fermentTankItems.length - FERMENT_LIST_LIMIT;
+  if (fermentMoreCount > 0) {
+    fermentBarHtml += `<button type="button" class="btn sm sec" data-fermbarmore data-fermbarmorecount="${fermentMoreCount}" style="margin-top:8px">Xem thêm (${fermentMoreCount})</button>`;
+  }
   if (!fermentTankItems.length) {
     fermentBarHtml = '<div class="muted">Không có tank nào đang lên men.</div>';
     fermentGridHtml = fermentBarHtml;
@@ -769,6 +812,15 @@ VIEWS.dashboard = async function () {
       btn.textContent = expanding ? "Thu gọn" : `Xem thêm (${btn.dataset.minimorecount})`;
     };
   });
+  if ($("view-dashboard").querySelector("[data-fermbarmore]")) {
+    const btn = $("view-dashboard").querySelector("[data-fermbarmore]");
+    btn.onclick = () => {
+      const rows = document.querySelectorAll("#view-dashboard .fermbar-extra");
+      const expanding = rows[0] && rows[0].style.display === "none";
+      rows.forEach(r => r.style.display = expanding ? "grid" : "none");
+      btn.textContent = expanding ? "Thu gọn" : `Xem thêm (${btn.dataset.fermbarmorecount})`;
+    };
+  }
   document.querySelectorAll("#view-dashboard [data-fermqc]").forEach(el => {
     el.onclick = () => {
       const [tankId] = el.dataset.fermqc.split("|");
@@ -2437,33 +2489,33 @@ async function showBatch(id) {
   let editingStart = !b.start_at, editingEnd = !b.end_at;
   function renderBdStart() {
     $("bd_start_wrap").innerHTML = editingStart
-      ? `<input type="datetime-local" id="bd_start" value="${b.start_at ? toDTLocal(new Date(b.start_at)) : ""}" style="width:210px" ${lkDis}/>
+      ? `${dtPickerHtml("bd_start", b.start_at ? new Date(b.start_at) : null, lkDis)}
          <button class="btn sm" id="bd_start_save" ${lkDis}>Lưu</button>`
       : `${fmt(b.start_at)}
          <span class="muted" style="font-size:12px;white-space:nowrap">${startAudit ? " — " + _flAuditText(startAudit.actor, startAudit.ts) : ""}</span>
          ${lkDis ? "" : `<button class="btn sm sec" id="bd_start_edit">Sửa</button>`}`;
     if ($("bd_start_edit")) $("bd_start_edit").onclick = () => { editingStart = true; renderBdStart(); };
     if ($("bd_start_save")) $("bd_start_save").onclick = () => guard(async () => {
-      const v = $("bd_start").value;
+      const v = readDtPicker("bd_start");
       if (!v) throw new Error("Nhập giờ bắt đầu.");
-      if (b.end_at && new Date(v) >= new Date(b.end_at)) throw new Error("Giờ bắt đầu phải trước giờ kết thúc.");
-      await POST(`/batches/${id}/start`, { start_at: new Date(v).toISOString() });
+      if (b.end_at && v >= new Date(b.end_at)) throw new Error("Giờ bắt đầu phải trước giờ kết thúc.");
+      await POST(`/batches/${id}/start`, { start_at: v.toISOString() });
       toast("Đã lưu giờ bắt đầu"); showBatch(id);
     });
   }
   function renderBdEnd() {
     $("bd_end_wrap").innerHTML = editingEnd
-      ? `<input type="datetime-local" id="bd_end" value="${b.end_at ? toDTLocal(new Date(b.end_at)) : ""}" style="width:210px" ${lkDis}/>
+      ? `${dtPickerHtml("bd_end", b.end_at ? new Date(b.end_at) : null, lkDis)}
          <button class="btn sm" id="bd_end_save" ${lkDis}>Lưu</button>`
       : `${fmt(b.end_at)}
          <span class="muted" style="font-size:12px;white-space:nowrap">${endAudit ? " — " + _flAuditText(endAudit.actor, endAudit.ts) : ""}</span>
          ${lkDis ? "" : `<button class="btn sm sec" id="bd_end_edit">Sửa</button>`}`;
     if ($("bd_end_edit")) $("bd_end_edit").onclick = () => { editingEnd = true; renderBdEnd(); };
     if ($("bd_end_save")) $("bd_end_save").onclick = () => guard(async () => {
-      const v = $("bd_end").value;
+      const v = readDtPicker("bd_end");
       if (!v) throw new Error("Nhập giờ kết thúc.");
-      if (b.start_at && new Date(v) <= new Date(b.start_at)) throw new Error("Giờ kết thúc phải sau giờ bắt đầu.");
-      await POST(`/batches/${id}/finish`, { end_at: new Date(v).toISOString() });
+      if (b.start_at && v <= new Date(b.start_at)) throw new Error("Giờ kết thúc phải sau giờ bắt đầu.");
+      await POST(`/batches/${id}/finish`, { end_at: v.toISOString() });
       toast("Đã lưu giờ kết thúc"); showBatch(id);
     });
   }
@@ -3115,8 +3167,11 @@ VIEWS.batchfilterorders = async function () {
   let foChildren = [newFoChild()];
   const materialItemsFo = materialsFo.map(m => ({ value: m.material_id, label: `${m.code} — ${m.name}`, uom: m.uom }));
 
+  // Hiện thêm tên tank lên men vật lý (VD "FV-04") bên cạnh mã lô, không chỉ mã lô trần — yêu
+  // cầu người dùng 2026-09-21: "cho hiện thêm cả tên tank lên men vào nữa" (tái dùng đúng
+  // batchTankDisplayName() đã dùng ở Danh sách mẻ/chi tiết mẻ, xem app.js:65).
   const tankOptsFo = (ci, ti, selected) => `<option value="">(chọn tank)</option>` +
-    availTanks.map(t => `<option value="${t.tank_id}" ${t.tank_id === selected ? "selected" : ""}>${esc(t.tank_code)} — tồn ${t.on_hand} hl</option>`).join("");
+    availTanks.map(t => `<option value="${t.tank_id}" ${t.tank_id === selected ? "selected" : ""}>${esc(batchTankDisplayName(t))} — tồn ${t.on_hand} hl</option>`).join("");
   const bbtRefilterOptsFo = (selected) => `<option value="">(chọn tank thành phẩm)</option>` +
     eligibleRefilterBbtLines.map(l => `<option value="${esc(l.code)}" ${l.code === selected ? "selected" : ""}>${esc(l.code)} — ${esc(l.name)} — tồn ${l.on_hand_bbt} hl</option>`).join("");
   // Lô lọc ĐẠI DIỆN đang chứa nội dung của 1 tank BBT vật lý — mới nhất (created_at) còn tồn
@@ -8530,23 +8585,26 @@ function qcValueLabel(p, value, valueText) {
   if (p.value_type === "pass_fail") return value === 1 ? "Đạt" : value === 0 ? "Không đạt" : esc(String(value));
   return esc(String(value));
 }
-function qcValueInputHtml(cls, p) {
+function qcValueInputHtml(cls, p, current) {
   if (p.value_type === "pass_fail") {
     return `<select class="${cls}" data-code="${esc(p.code)}" data-lsl="1" data-usl="1" style="width:130px">
-      <option value="">— chọn —</option><option value="1">Đạt</option><option value="0">Không đạt</option></select>`;
+      <option value="">— chọn —</option>
+      <option value="1" ${current === 1 ? "selected" : ""}>Đạt</option>
+      <option value="0" ${current === 0 ? "selected" : ""}>Không đạt</option></select>`;
   }
   // Chỉ tiêu kiểu "text" — người vận hành nhập ghi chú tự do, không so target/USL/LSL, không
   // tính pass/fail (đánh dấu data-text để submit handler gửi value_text thay vì value số).
   if (p.value_type === "text") {
-    return `<input type="text" class="${cls}" data-code="${esc(p.code)}" data-text="1" style="width:180px"/>`;
+    return `<input type="text" class="${cls}" data-code="${esc(p.code)}" data-text="1" style="width:180px" value="${esc(current ?? "")}"/>`;
   }
-  return `<input type="number" step="any" class="${cls}" data-code="${esc(p.code)}" data-lsl="${p.lsl ?? ""}" data-usl="${p.usl ?? ""}" style="width:110px"/>`;
+  return `<input type="number" step="any" class="${cls}" data-code="${esc(p.code)}" data-lsl="${p.lsl ?? ""}" data-usl="${p.usl ?? ""}" style="width:110px" value="${current ?? ""}"/>`;
 }
 // Người điền + ngày giờ điền — áp dụng cho mọi bảng khai báo chỉ tiêu (Kho NVL/Nấu/Lên men/
 // Lọc/Chiết đều dùng chung QualityResult.recorded_by/recorded_at, xem qc_catalog.py).
 function qcRecordedMetaHtml(r) {
   if (!r) return "—";
-  return `<span class="muted" style="font-size:12px">${esc(r.recorded_by || "—")}<br/>${r.recorded_at ? fmt(r.recorded_at) : "—"}</span>`;
+  return `<span class="muted" style="font-size:12px">${esc(r.recorded_by || "—")}<br/>${r.recorded_at ? fmt(r.recorded_at) : "—"}
+    ${r.updated_at ? `<br/><span style="color:var(--accent)">Sửa: ${esc(r.updated_by || "—")} · ${fmt(r.updated_at)}</span>` : ""}</span>`;
 }
 // Gộp danh sách chỉ tiêu ĐANG áp dụng (status.required, theo Danh mục/nhóm hiện tại) với các
 // chỉ tiêu ĐÃ GHI KẾT QUẢ (status.recorded) nhưng bản ghi Danh mục gốc đã bị xóa hoặc gỡ khỏi
@@ -8712,38 +8770,46 @@ async function openStageQcModal(stage, scopeType, scopeId, opts, onBack) {
   if (opts.finishedProductId) qs += `&finished_product_id=${encodeURIComponent(opts.finishedProductId)}`;
   const st = await GET(`/brewing/qc-status?${qs}`);
   const recordedByParam = Object.fromEntries(st.recorded.map(r => [r.parameter, r]));
+  // Mỗi hàng lưu/sửa/xóa ĐỘC LẬP (yêu cầu người dùng 2026-09-21: "mỗi hàng thêm nút lưu, sửa,
+  // xóa. Bỏ chữ lưu giá trị đã nhập") — không còn nút Lưu chung cho cả bảng. idPrefix theo INDEX
+  // (không theo mã chỉ tiêu, vì mã có thể chứa ký tự không hợp lệ cho id HTML) để ghép với
+  // dtPickerHtml/readDtPicker (cặp input ngày+giờ 24h riêng, xem toDTLocal ở trên).
   modal(`<h3>Chỉ tiêu ${esc(title)} — <code class="k">${esc(opts.displayId || scopeId)}</code></h3>
     ${isProductScopedStage && !opts.productId ? '<div class="muted" style="margin-bottom:8px">⚠ Bản ghi này chưa gắn dịch bia — chỉ hiện nhóm chỉ tiêu áp dụng cho mọi dịch bia (nếu có).</div>' : ""}
     ${isBeerTypeScopedStage && !opts.beerTypeId ? '<div class="muted" style="margin-bottom:8px">⚠ Bản ghi này chưa gắn Loại bia — chỉ hiện nhóm chỉ tiêu áp dụng cho mọi loại bia (nếu có).</div>' : ""}
     ${stage === "thanh_pham" && !opts.finishedProductId ? '<div class="muted" style="margin-bottom:8px">⚠ Bản ghi này chưa gắn Sản phẩm — chỉ hiện nhóm chỉ tiêu áp dụng cho mọi sản phẩm (nếu có).</div>' : ""}
     <div class="tablewrap"><table>
-      <thead><tr><th>Chỉ tiêu</th><th>Min</th><th>Max</th><th>Giá trị đã khai báo</th><th>Kết quả</th><th>Người/Thời gian điền</th><th>Nhập giá trị mới</th></tr></thead>
-      <tbody>${st.required.map(p => { const r = recordedByParam[p.code]; return `<tr>
+      <thead><tr><th>Chỉ tiêu</th><th>Min</th><th>Max</th><th>Giá trị đã khai báo</th><th>Kết quả</th><th>Ngày giờ nhập</th><th>Ngày giờ lấy mẫu</th><th>Nhập giá trị mới</th><th></th></tr></thead>
+      <tbody>${st.required.map((p, i) => { const r = recordedByParam[p.code]; const idp = `sqc_sampled_${i}`; return `<tr>
         <td>${esc(p.name)}${p.mandatory ? "" : ' <span class="muted" style="font-size:11px">(không bắt buộc)</span>'}<div class="muted">${esc(p.code)}${p.unit ? " (" + esc(p.unit) + ")" : ""}</div></td>
         <td>${p.value_type !== "numeric" ? "—" : (p.lsl ?? "—")}</td><td>${p.value_type !== "numeric" ? "—" : (p.usl ?? "—")}</td>
         <td>${r ? qcValueLabel(p, r.value, r.value_text) : "—"}</td>
         <td>${r ? badge(r.status) + r.status : '<span class="muted">chưa khai báo</span>'}</td>
         <td>${qcRecordedMetaHtml(r)}</td>
-        <td>${qcValueInputHtml("sqc-val", p)}</td>
-        </tr>`; }).join("") || `<tr><td colspan=7 class="muted">Chưa gán nhóm chỉ tiêu nào cho công đoạn này (gán ở tab Danh mục).</td></tr>`}</tbody>
+        <td>${dtPickerHtml(idp, r && r.sampled_at ? new Date(r.sampled_at) : null, "")}</td>
+        <td>${qcValueInputHtml("sqc-val", p, r ? (r.value_text ?? r.value) : undefined)}</td>
+        <td style="white-space:nowrap"><button class="btn sm" data-sqc-save="${esc(p.code)}" data-idp="${idp}">${r ? "Sửa" : "Lưu"}</button>
+          ${r ? `<button class="btn sm sec" data-sqc-del="${esc(r.result_id)}">Xóa</button>` : ""}</td>
+        </tr>`; }).join("") || `<tr><td colspan=9 class="muted">Chưa gán nhóm chỉ tiêu nào cho công đoạn này (gán ở tab Danh mục).</td></tr>`}</tbody>
     </table></div>
+    <div class="muted" style="font-size:12px;margin-top:4px">"Ngày giờ nhập" là mốc hệ thống lưu lần đầu (không đổi khi sửa) — "Ngày giờ lấy mẫu" do người dùng khai, có thể sửa lại.</div>
     <div class="muted" style="margin-top:8px">${st.can_release ? '<span style="color:var(--green)">✓ Đã đủ chỉ tiêu bắt buộc</span>' :
       st.pending.length ? `⚠ Còn thiếu: ${st.pending.map(esc).join(", ")}` :
-      st.required.length ? '<span style="color:var(--red)">✗ Có chỉ tiêu bắt buộc không đạt (FAIL)</span>' : ""}</div>
-    ${st.required.length ? `<button class="btn" id="sqc_submit" style="margin-top:12px">Lưu giá trị đã nhập</button>` : ""}`, onBack);
-  if ($("sqc_submit")) $("sqc_submit").onclick = () => guard(async () => {
-    const inputs = Array.from(document.querySelectorAll(".sqc-val")).filter(i => i.value !== "");
-    if (!inputs.length) throw new Error("Chưa nhập giá trị nào.");
-    for (const inp of inputs) {
-      const isText = inp.dataset.text === "1";
-      await POST("/brewing/qc-results", {
-        stage, scope_type: scopeType, scope_id: scopeId, parameter: inp.dataset.code,
-        value: isText ? null : parseFloat(inp.value),
-        value_text: isText ? inp.value : null,
-        lower_limit: isText ? null : (inp.dataset.lsl === "" ? null : parseFloat(inp.dataset.lsl)),
-        upper_limit: isText ? null : (inp.dataset.usl === "" ? null : parseFloat(inp.dataset.usl)),
-      });
-    }
+      st.required.length ? '<span style="color:var(--red)">✗ Có chỉ tiêu bắt buộc không đạt (FAIL)</span>' : ""}</div>`, onBack);
+  document.querySelectorAll("[data-sqc-save]").forEach(b => b.onclick = () => guard(async () => {
+    const code = b.dataset.sqcSave;
+    const inp = document.querySelector(`.sqc-val[data-code="${CSS.escape(code)}"]`);
+    if (inp.value === "") throw new Error("Chưa nhập giá trị.");
+    const isText = inp.dataset.text === "1";
+    const sampled = readDtPicker(b.dataset.idp);
+    await POST("/brewing/qc-results", {
+      stage, scope_type: scopeType, scope_id: scopeId, parameter: code,
+      value: isText ? null : parseFloat(inp.value),
+      value_text: isText ? inp.value : null,
+      lower_limit: isText ? null : (inp.dataset.lsl === "" ? null : parseFloat(inp.dataset.lsl)),
+      upper_limit: isText ? null : (inp.dataset.usl === "" ? null : parseFloat(inp.dataset.usl)),
+      sampled_at: sampled ? sampled.toISOString() : null,
+    });
     toast("Đã lưu chỉ tiêu");
     // Bảng nền (Nấu/Lên men/Lọc/Chiết) tô màu theo trạng thái chỉ tiêu lúc load trang — sửa
     // FAIL thành PASS rồi lưu ở đây không tự cập nhật màu bảng nền vì modal render tách biệt
@@ -8752,7 +8818,15 @@ async function openStageQcModal(stage, scopeType, scopeId, opts, onBack) {
     const curView = document.querySelector("#nav button.active[data-view]")?.dataset.view;
     if (curView) render(curView);
     openStageQcModal(stage, scopeType, scopeId, opts, onBack);
-  });
+  }));
+  document.querySelectorAll("[data-sqc-del]").forEach(b => b.onclick = () => guard(async () => {
+    if (!confirm("Xóa chỉ tiêu này? Giá trị cũ vẫn tra lại được qua lịch sử.")) return;
+    await DELETE(`/brewing/qc-results/${b.dataset.sqcDel}`);
+    toast("Đã xóa chỉ tiêu");
+    const curView = document.querySelector("#nav button.active[data-view]")?.dataset.view;
+    if (curView) render(curView);
+    openStageQcModal(stage, scopeType, scopeId, opts, onBack);
+  }));
 }
 
 // Popup nhỏ xem chi tiết chỉ tiêu đang FAIL của 1 tank lên men (bấm vào badge đỏ ở biểu đồ
@@ -8796,21 +8870,56 @@ async function openFermentQcFailModal(code, scopeType = "ferment", displayLabel)
 // giới hạn chỉ tiêu resolve sẵn ở server) — dùng chung cho CẢ modal "+Thêm lần lấy mẫu" LẪN
 // hiển thị (chỉ đọc) ngay trên màn Tank lên men (yêu cầu người dùng 2026-09-02: "chỉ tiêu lên
 // men chính và chỉ tiêu lên men phụ đã lấy > 1 lần, cũng phải hiển thị hết ra đây").
-function qcSampleRoundsHtml(items) {
+// Sửa/Xóa giờ theo TỪNG CHỈ TIÊU (không còn sửa cả nhóm 1 lượt) — yêu cầu người dùng 2026-09-21:
+// "mỗi chỉ tiêu sẽ có thêm nút Lưu, sửa, xóa... mỗi hàng sẽ thêm cột ngày giờ nhập, người nhập",
+// bỏ hẳn dòng tiêu đề chung "HH:MM:SS d/m/Y — actor" của cả nhóm.
+function qcSampleRoundsHtml(items, opts = {}) {
+  const { editable = false, editingResultId = null, editingWhenSampleId = null } = opts;
   if (!items.length) return '<div class="muted">Chưa có lần lấy mẫu nào.</div>';
-  return items.map(s => `
+  return items.map((s, si) => {
+    const whenIdp = `qcsamp_when_${si}`;
+    const editingWhen = editable && editingWhenSampleId === s.sample_id;
+    return `
     <div style="margin-bottom:14px;padding:10px 12px;background:var(--panel2);border:1px solid var(--border);border-radius:8px">
-      <div style="font-weight:700;margin-bottom:6px">${fmt(s.sampled_at)} <span class="muted" style="font-weight:400">— ${esc(s.recorded_by || "—")}</span></div>
+      <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px;gap:8px;flex-wrap:wrap">
+        ${editingWhen ? `<div style="display:flex;align-items:center;gap:8px">
+            <label class="muted" style="font-size:12px">Ngày giờ lấy mẫu</label>
+            ${dtPickerHtml(whenIdp, new Date(s.sampled_at), "")}
+            <button class="btn sm" data-qcsamp-savewhen="${esc(s.sample_id)}" type="button">Lưu</button>
+            <button class="btn sm sec" data-qcsamp-cancelwhen type="button">Hủy</button>
+          </div>`
+          : `<div style="font-weight:700">Ngày giờ lấy mẫu: ${fmt(s.sampled_at)}</div>
+            ${editable ? `<button class="btn sm sec" data-qcsamp-editwhen="${esc(s.sample_id)}" type="button">Sửa</button>` : ""}`}
+      </div>
       <table style="width:100%">
-        <thead><tr><th>Chỉ tiêu</th><th>Min</th><th>Max</th><th>Giá trị</th><th>Kết quả</th></tr></thead>
-        <tbody>${s.results.map(r => `<tr>
+        <thead><tr><th>Chỉ tiêu</th><th>Min</th><th>Max</th><th>Giá trị</th><th>Kết quả</th><th>Ngày giờ nhập</th><th>Người nhập</th>${editable ? "<th></th>" : ""}</tr></thead>
+        <tbody>${s.results.map(r => {
+          const editingRow = editable && editingResultId === r.result_id;
+          if (editingRow) {
+            return `<tr data-result-editing="${esc(r.result_id)}">
+              <td>${esc(r.name)}${r.unit ? ` <span class="muted">(${esc(r.unit)})</span>` : ""}</td>
+              <td>${r.value_type !== "numeric" ? "—" : (r.lower_limit ?? "—")}</td><td>${r.value_type !== "numeric" ? "—" : (r.upper_limit ?? "—")}</td>
+              <td colspan="2">${qcValueInputHtml("qcsamp-edit-val", { code: r.parameter, value_type: r.value_type || "numeric", lsl: r.lower_limit, usl: r.upper_limit }, r.value_text ?? r.value)}</td>
+              <td colspan="2" class="muted" style="font-size:12px">${esc(r.recorded_by || "—")} · ${fmt(r.recorded_at)}</td>
+              <td style="white-space:nowrap"><button class="btn sm" data-qcsamp-saverow="${esc(r.result_id)}" type="button">Lưu</button>
+                <button class="btn sm sec" data-qcsamp-cancelrow type="button">Hủy</button></td>
+              </tr>`;
+          }
+          return `<tr>
           <td>${esc(r.name)}${r.unit ? ` <span class="muted">(${esc(r.unit)})</span>` : ""}</td>
           <td>${r.value_type !== "numeric" ? "—" : (r.lower_limit ?? "—")}</td><td>${r.value_type !== "numeric" ? "—" : (r.upper_limit ?? "—")}</td>
           <td>${qcValueLabel({ value_type: r.value_type || "numeric" }, r.value, r.value_text)}</td>
-          <td>${badge(r.status)}${r.status}</td>
-          </tr>`).join("")}</tbody>
+          <td>${badge(r.status)}${r.status}
+            ${r.updated_at ? `<div class="muted" style="font-size:11px">Sửa lúc ${fmt(r.updated_at)} — ${esc(r.updated_by || "—")}</div>` : ""}</td>
+          <td>${fmt(r.recorded_at)}</td>
+          <td>${esc(r.recorded_by || "—")}</td>
+          ${editable ? `<td style="white-space:nowrap"><button class="btn sm sec" data-qcsamp-editrow="${esc(r.result_id)}" type="button">Sửa</button>
+            <button class="btn sm sec" data-qcsamp-delrow="${esc(r.result_id)}" type="button">Xóa</button></td>` : ""}
+          </tr>`;
+        }).join("")}</tbody>
       </table>
-    </div>`).join("");
+    </div>`;
+  }).join("");
 }
 
 // Lấy mẫu NHIỀU LẦN cho CT chính/CT phụ lên men (lần 1 ngày giờ X, lần 2 ngày giờ Y...) —
@@ -8822,66 +8931,200 @@ async function openFermentQcSampleModal(stage, scopeType, scopeId, productId, on
   const lmCode = scopeId.split("__")[0];
   const qs = `stage=${encodeURIComponent(stage)}&scope_type=${encodeURIComponent(scopeType)}&scope_id=${encodeURIComponent(scopeId)}`
     + (productId ? `&product_id=${encodeURIComponent(productId)}` : "");
-  const [status, history] = await Promise.all([
-    GET(`/brewing/qc-status?${qs}`),
-    GET(`/brewing/qc-samples?scope_type=${encodeURIComponent(scopeType)}&scope_id=${encodeURIComponent(scopeId)}`),
-  ]);
+  const samplesUrl = `/brewing/qc-samples?scope_type=${encodeURIComponent(scopeType)}&scope_id=${encodeURIComponent(scopeId)}`;
+  let status = await GET(`/brewing/qc-status?${qs}`);
+  let history = (await GET(samplesUrl)).items;
+  // Mỗi chỉ tiêu lưu/sửa/xóa RIÊNG LẺ (yêu cầu người dùng 2026-09-21: "Thêm lần lấy mẫu" thành
+  // nút bấm, mỗi lần thêm hiện toàn bộ chỉ tiêu cần thêm, mỗi chỉ tiêu có nút Lưu/sửa/xóa, bỏ
+  // nút lưu lần lấy mẫu) — draftSampleId SINH Ở CLIENT khi mở panel, gửi kèm mỗi lần lưu 1 chỉ
+  // tiêu để nối đúng vào 1 "lần lấy mẫu" thay vì tách vụn (xem qc_catalog.record_qc_sample).
+  let addingNew = false;
+  let draftSampleId = null;
+  let editingResultId = null;
+  let editingWhenSampleId = null;
 
-  const formRows = status.required.map(p => `<tr>
-      <td>${esc(p.name)}<div class="muted">${esc(p.code)}${p.unit ? " (" + esc(p.unit) + ")" : ""}</div></td>
-      <td>${p.value_type !== "numeric" ? "—" : (p.lsl ?? "—")}</td>
-      <td>${p.value_type !== "numeric" ? "—" : (p.usl ?? "—")}</td>
-      <td>${qcValueInputHtml("sqc-sample-val", p)}</td>
-      </tr>`).join("")
-    || `<tr><td colspan=4 class="muted">Chưa gán nhóm chỉ tiêu nào cho công đoạn này (gán ở tab Danh mục).</td></tr>`;
+  const refresh = async () => {
+    status = await GET(`/brewing/qc-status?${qs}`);
+    history = (await GET(samplesUrl)).items;
+    // Bảng nền (Tank lên men) tô màu theo trạng thái chỉ tiêu lúc load trang — refresh view nền
+    // để màu đúng ngay, không cần F5 mới thấy (mirror hành vi cũ, nay chạy sau MỌI thao tác
+    // thêm/sửa/xóa từng chỉ tiêu, không chỉ lúc submit cả lần).
+    const curView = document.querySelector("#nav button.active[data-view]")?.dataset.view;
+    if (curView) render(curView);
+  };
 
-  const historyHtml = qcSampleRoundsHtml(history.items);
+  const renderModal = () => {
+    const draftGroup = draftSampleId ? history.find(s => s.sample_id === draftSampleId) : null;
+    const draftParams = new Set((draftGroup ? draftGroup.results : []).map(r => r.parameter));
+    const remaining = status.required.filter(p => !draftParams.has(p.code));
+    // Khai báo LẦN ĐẦU của 1 lần lấy mẫu (chưa lưu chỉ tiêu nào trong lần này) -> ẩn nút Lưu
+    // riêng từng dòng, chỉ còn "Lưu tất cả" (yêu cầu người dùng 2026-09-21: "khai báo lần đầu
+    // thì ẩn nút này đi") — nút Lưu riêng từng dòng chỉ hiện lại SAU KHI lần này đã có ít nhất
+    // 1 chỉ tiêu, lúc đó mới là bổ sung thêm (VD kết quả xét nghiệm về trễ), không phải khai
+    // lần đầu nữa.
+    const isFirstEntry = draftParams.size === 0;
+    // Chỉ tiêu ĐÃ lưu trong lần đang thêm này — hiện NGAY TẠI ĐÂY (chỉ đọc, kèm Kết quả), KHÔNG
+    // biến mất khỏi khung "Thêm lần lấy mẫu mới" nữa dù đã lưu xong (yêu cầu người dùng
+    // 2026-09-21: "khi tôi ấn lưu bạn lại bỏ mất cái này ra, bạn cho cả vào lần nhập đó cho
+    // tôi") — trước đây bấm Lưu xong dòng đó chỉ còn thấy lại ở "Lịch sử" bên dưới, cảm giác bị
+    // mất khỏi khung đang thao tác. Sửa/Xóa vẫn chỉ làm ở "Lịch sử các lần lấy mẫu" (nguồn duy
+    // nhất để sửa), khung này chỉ để xem lại + nhập tiếp phần còn thiếu.
+    const savedRowsHtml = !draftGroup || !draftGroup.results.length ? "" : `<div class="tablewrap"><table>
+          <thead><tr><th>Chỉ tiêu</th><th>Min</th><th>Max</th><th>Giá trị</th><th>Kết quả</th></tr></thead>
+          <tbody>${draftGroup.results.map(r => `<tr>
+            <td>${esc(r.name)}</td>
+            <td>${r.value_type !== "numeric" ? "—" : (r.lower_limit ?? "—")}</td>
+            <td>${r.value_type !== "numeric" ? "—" : (r.upper_limit ?? "—")}</td>
+            <td>${qcValueLabel({ value_type: r.value_type || "numeric" }, r.value, r.value_text)}</td>
+            <td>${badge(r.status)}${r.status}</td>
+            </tr>`).join("")}</tbody>
+        </table></div>`;
+    const addPanelHtml = !addingNew ? "" : `
+      <div style="margin:10px 0 18px;padding:10px 12px;background:var(--panel2);border:1px solid var(--accent);border-radius:8px">
+        <div class="field" style="margin-bottom:10px"><label>Ngày giờ lấy mẫu</label>
+          ${dtPickerHtml("qcsamp_new_when", draftGroup ? new Date(draftGroup.sampled_at) : new Date(), "")}</div>
+        ${savedRowsHtml}
+        ${remaining.length ? `<div class="tablewrap" style="margin-top:${savedRowsHtml ? "10px" : "0"}"><table>
+          <thead><tr><th>Chỉ tiêu</th><th>Min</th><th>Max</th><th>Giá trị đo được</th>${isFirstEntry ? "" : "<th></th>"}</tr></thead>
+          <tbody>${remaining.map(p => `<tr>
+            <td>${esc(p.name)}<div class="muted">${esc(p.code)}${p.unit ? " (" + esc(p.unit) + ")" : ""}</div></td>
+            <td>${p.value_type !== "numeric" ? "—" : (p.lsl ?? "—")}</td>
+            <td>${p.value_type !== "numeric" ? "—" : (p.usl ?? "—")}</td>
+            <td>${qcValueInputHtml("sqc-sample-val", p)}</td>
+            ${isFirstEntry ? "" : `<td><button class="btn sm" data-qcsamp-addrow="${esc(p.code)}" type="button">Lưu</button></td>`}
+            </tr>`).join("")}</tbody>
+        </table></div>
+        <button class="btn" id="qcsamp_addall" style="margin-top:10px" type="button">Lưu tất cả</button>
+        <div class="muted" style="font-size:12px;margin-top:4px">${isFirstEntry
+          ? `Khai báo lần đầu — điền xong bấm "Lưu tất cả". Sau khi đã lưu ít nhất 1 chỉ tiêu, các chỉ tiêu còn lại có thể lưu riêng từng cái.`
+          : `Lưu từng chỉ tiêu riêng (nút "Lưu" ở mỗi dòng) khi đo xong tới đâu ghi tới đó, hoặc điền hết rồi bấm "Lưu tất cả" 1 lần.`}</div>`
+        : `<div class="muted" style="margin-top:${savedRowsHtml ? "10px" : "0"}">Đã thêm đủ chỉ tiêu cho lần lấy mẫu này. Sửa/xóa từng chỉ tiêu ngay ở bảng trên, hoặc ở "Lịch sử các lần lấy mẫu" bên dưới.</div>`}
+      </div>`;
 
-  modal(`<h3>${esc(label)} — tank <code class="k">${esc(lmCode)}</code></h3>
-    <div class="muted" style="margin-bottom:8px">${status.can_release ? '<span style="color:var(--green)">✓ Đã đủ chỉ tiêu bắt buộc (theo lần lấy mẫu mới nhất)</span>' :
-      status.pending.length ? `⚠ Còn thiếu: ${status.pending.map(esc).join(", ")}` :
-      status.required.length ? '<span style="color:var(--red)">✗ Có chỉ tiêu bắt buộc không đạt (FAIL) — theo lần mới nhất</span>' : ""}</div>
-    <h4 style="margin:14px 0 8px">Thêm lần lấy mẫu mới</h4>
-    <div class="field" style="margin-bottom:10px"><label>Ngày giờ lấy mẫu</label>
-      <input type="datetime-local" id="sqc_sample_when" value="${toDTLocal(new Date())}"/></div>
-    <div class="tablewrap"><table>
-      <thead><tr><th>Chỉ tiêu</th><th>Min</th><th>Max</th><th>Giá trị đo được</th></tr></thead>
-      <tbody>${formRows}</tbody>
-    </table></div>
-    ${status.required.length ? `<button class="btn" id="sqc_sample_submit" style="margin-top:12px">Lưu lần lấy mẫu</button>` : ""}
-    <h4 style="margin:18px 0 8px">Lịch sử các lần lấy mẫu</h4>
-    ${historyHtml}`, onBack);
+    modal(`<h3>${esc(label)} — tank <code class="k">${esc(lmCode)}</code></h3>
+      <div class="muted" style="margin-bottom:8px">${status.can_release ? '<span style="color:var(--green)">✓ Đã đủ chỉ tiêu bắt buộc (theo lần lấy mẫu mới nhất)</span>' :
+        status.pending.length ? `⚠ Còn thiếu: ${status.pending.map(esc).join(", ")}` :
+        status.required.length ? '<span style="color:var(--red)">✗ Có chỉ tiêu bắt buộc không đạt (FAIL) — theo lần mới nhất</span>' : ""}</div>
+      ${status.required.length ? `<button class="btn${addingNew ? " sec" : ""}" id="qcsamp_add_toggle" type="button">${addingNew ? "− Đóng" : "+ Thêm lần lấy mẫu mới"}</button>` : ""}
+      ${addPanelHtml}
+      <h4 style="margin:18px 0 8px">Lịch sử các lần lấy mẫu</h4>
+      ${qcSampleRoundsHtml(history, { editable: true, editingResultId, editingWhenSampleId })}`, onBack);
+    wire();
+  };
 
-  if ($("sqc_sample_submit")) $("sqc_sample_submit").onclick = () => guard(async () => {
-    // Bắt buộc điền ĐỦ cả bộ chỉ tiêu trong 1 lần lấy mẫu — trước đây cho lưu dở dang (chỉ
-    // điền vài ô rồi bấm lưu) khiến 1 lần lấy mẫu thật bị tách vụn thành nhiều "lần" chỉ có
-    // đúng 1 chỉ tiêu mỗi lần trong lịch sử (yêu cầu người dùng 2026-09-02: "tách rõ lần 1,
-    // lần 2 ra, mỗi lần phải đủ cả bộ chỉ tiêu đó").
-    const allInputs = Array.from(document.querySelectorAll(".sqc-sample-val"));
-    const inputs = allInputs.filter(i => i.value !== "");
-    if (inputs.length < allInputs.length) {
-      throw new Error(`Cần điền đủ cả ${allInputs.length} chỉ tiêu rồi mới lưu được lần lấy mẫu (còn thiếu ${allInputs.length - inputs.length} ô).`);
-    }
-    const whenLocal = $("sqc_sample_when").value;
-    await POST("/brewing/qc-samples", {
-      stage, scope_type: scopeType, scope_id: scopeId,
-      sampled_at: whenLocal ? new Date(whenLocal).toISOString() : null,
-      results: inputs.map(inp => {
-        const isText = inp.dataset.text === "1";
-        return {
-          parameter: inp.dataset.code,
+  const wire = () => {
+    if ($("qcsamp_add_toggle")) $("qcsamp_add_toggle").onclick = () => {
+      addingNew = !addingNew;
+      draftSampleId = addingNew ? ("S-" + crypto.randomUUID()) : null;
+      renderModal();
+    };
+
+    document.querySelectorAll("[data-qcsamp-addrow]").forEach(b => b.onclick = () => guard(async () => {
+      const code = b.dataset.qcsampAddrow;
+      const inp = document.querySelector(`.sqc-sample-val[data-code="${CSS.escape(code)}"]`);
+      if (!inp || inp.value === "") throw new Error("Chưa nhập giá trị.");
+      const isText = inp.dataset.text === "1";
+      const when = readDtPicker("qcsamp_new_when");
+      await POST("/brewing/qc-samples", {
+        stage, scope_type: scopeType, scope_id: scopeId, sample_id: draftSampleId,
+        sampled_at: when ? when.toISOString() : null,
+        results: [{
+          parameter: code,
           value: isText ? null : parseFloat(inp.value),
           value_text: isText ? inp.value : null,
           lower_limit: isText ? null : (inp.dataset.lsl === "" ? null : parseFloat(inp.dataset.lsl)),
           upper_limit: isText ? null : (inp.dataset.usl === "" ? null : parseFloat(inp.dataset.usl)),
-        };
-      }),
+        }],
+      });
+      toast("Đã lưu chỉ tiêu");
+      await refresh();
+      renderModal();
+    }));
+
+    if ($("qcsamp_addall")) $("qcsamp_addall").onclick = () => guard(async () => {
+      // "Lưu tất cả" bắt buộc điền ĐỦ mọi chỉ tiêu còn lại mới cho lưu (yêu cầu người dùng
+      // 2026-09-21: "yêu cầu nhập đủ các chỉ tiêu mới cho ấn lưu tất cả") — khác nút Lưu riêng
+      // từng dòng (không bắt buộc đủ bộ, lưu được từng cái một lúc đo xong tới đâu). 2 nút phục
+      // vụ 2 kiểu thao tác khác nhau, không lẫn điều kiện của nhau.
+      const allInputs = Array.from(document.querySelectorAll(".sqc-sample-val"));
+      const inputs = allInputs.filter(i => i.value !== "");
+      if (inputs.length < allInputs.length) {
+        throw new Error(`Cần điền đủ cả ${allInputs.length} chỉ tiêu rồi mới lưu tất cả được (còn thiếu ${allInputs.length - inputs.length} ô) — hoặc lưu riêng từng chỉ tiêu.`);
+      }
+      const when = readDtPicker("qcsamp_new_when");
+      await POST("/brewing/qc-samples", {
+        stage, scope_type: scopeType, scope_id: scopeId, sample_id: draftSampleId,
+        sampled_at: when ? when.toISOString() : null,
+        results: inputs.map(inp => {
+          const isText = inp.dataset.text === "1";
+          return {
+            parameter: inp.dataset.code,
+            value: isText ? null : parseFloat(inp.value),
+            value_text: isText ? inp.value : null,
+            lower_limit: isText ? null : (inp.dataset.lsl === "" ? null : parseFloat(inp.dataset.lsl)),
+            upper_limit: isText ? null : (inp.dataset.usl === "" ? null : parseFloat(inp.dataset.usl)),
+          };
+        }),
+      });
+      toast(`Đã lưu ${inputs.length} chỉ tiêu`);
+      await refresh();
+      renderModal();
     });
-    toast("Đã lưu lần lấy mẫu");
-    const curView = document.querySelector("#nav button.active[data-view]")?.dataset.view;
-    if (curView) render(curView);
-    openFermentQcSampleModal(stage, scopeType, scopeId, productId, onBack);
-  });
+
+    document.querySelectorAll("[data-qcsamp-editrow]").forEach(b => b.onclick = () => {
+      editingResultId = b.dataset.qcsampEditrow;
+      renderModal();
+    });
+    document.querySelectorAll("[data-qcsamp-cancelrow]").forEach(b => b.onclick = () => {
+      editingResultId = null;
+      renderModal();
+    });
+    document.querySelectorAll("[data-qcsamp-saverow]").forEach(b => b.onclick = () => guard(async () => {
+      const resultId = b.dataset.qcsampSaverow;
+      const inp = b.closest("tr").querySelector(".qcsamp-edit-val");
+      const isText = inp.dataset.text === "1";
+      const group = history.find(s => s.results.some(r => r.result_id === resultId));
+      await PUT(`/brewing/qc-samples/${group.sample_id}`, {
+        results: [{ result_id: resultId,
+          value: isText ? null : (inp.value === "" ? null : parseFloat(inp.value)),
+          value_text: isText ? (inp.value || null) : null }],
+      });
+      toast("Đã lưu sửa chỉ tiêu");
+      editingResultId = null;
+      await refresh();
+      renderModal();
+    }));
+
+    document.querySelectorAll("[data-qcsamp-delrow]").forEach(b => b.onclick = () => guard(async () => {
+      if (!confirm("Xóa chỉ tiêu này? Giá trị cũ vẫn tra lại được qua lịch sử.")) return;
+      await DELETE(`/brewing/qc-results/${b.dataset.qcsampDelrow}`);
+      toast("Đã xóa chỉ tiêu");
+      await refresh();
+      renderModal();
+    }));
+
+    document.querySelectorAll("[data-qcsamp-editwhen]").forEach(b => b.onclick = () => {
+      editingWhenSampleId = b.dataset.qcsampEditwhen;
+      renderModal();
+    });
+    document.querySelectorAll("[data-qcsamp-cancelwhen]").forEach(b => b.onclick = () => {
+      editingWhenSampleId = null;
+      renderModal();
+    });
+    document.querySelectorAll("[data-qcsamp-savewhen]").forEach(b => b.onclick = () => guard(async () => {
+      const sampleId = b.dataset.qcsampSavewhen;
+      const si = history.findIndex(s => s.sample_id === sampleId);
+      const when = readDtPicker(`qcsamp_when_${si}`);
+      if (!when) throw new Error("Nhập ngày giờ lấy mẫu.");
+      await PUT(`/brewing/qc-samples/${sampleId}`, { sampled_at: when.toISOString() });
+      toast("Đã lưu ngày giờ lấy mẫu");
+      editingWhenSampleId = null;
+      await refresh();
+      renderModal();
+    }));
+  };
+
+  renderModal();
 }
 
 // Chú thích "đã dùng đúng lô cũ nhất (FIFO) tại Kho phân xưởng chưa" — chụp lại (snapshot)

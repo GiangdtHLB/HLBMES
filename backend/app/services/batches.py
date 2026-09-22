@@ -167,13 +167,47 @@ def set_brewhouse_line(db: Session, batch_id: str, brewhouse_line_id: str, user:
     return batch
 
 
+def _prev_batch_by_code(db: Session, batch: BatchExecution) -> BatchExecution | None:
+    """Mẻ NGAY TRƯỚC mẻ này theo mã Braumat (batch_code, số nguyên, cùng batch_year) — mã lớn
+    nhất còn nhỏ hơn mã mẻ này (không giả định liên tục, có thể có mẻ bị xóa/hủy ở giữa). Chỉ áp
+    dụng cho mã dạng số (dữ liệu cũ trước khi ép định dạng số nguyên có thể còn mã dạng chữ,
+    không so được — mirror create_batch::batch_code validate). Bỏ qua mẻ đã "cancelled" — mẻ hủy
+    không thực sự diễn ra ở nồi nấu nên giờ bắt đầu (nếu có) của nó không có ý nghĩa chặn trình
+    tự thời gian của các mẻ THẬT sau đó."""
+    if not batch.batch_code.isdigit():
+        return None
+    candidates = db.execute(
+        select(BatchExecution).where(BatchExecution.batch_year == batch.batch_year,
+                                     BatchExecution.batch_id != batch.batch_id,
+                                     BatchExecution.state != BatchState.CANCELLED)
+    ).scalars().all()
+    numeric_code = int(batch.batch_code)
+    best = None
+    for c in candidates:
+        if c.batch_code.isdigit() and int(c.batch_code) < numeric_code:
+            if best is None or int(c.batch_code) > int(best.batch_code):
+                best = c
+    return best
+
+
 def set_start_at(db: Session, batch_id: str, start_at, user: User) -> BatchExecution:
     """Sửa giờ bắt đầu mẻ trực tiếp — độc lập với transition() (vốn chỉ tự set = utcnow() lúc
     chuyển sang running, không cho sửa lại) — gọi lại được nhiều lần để sửa nếu bấm nhầm,
-    mirror routers/brewing.py::update_brew_batch_start (module Nấu-Lọc-Chiết cũ)."""
+    mirror routers/brewing.py::update_brew_batch_start (module Nấu-Lọc-Chiết cũ).
+
+    Bắt buộc giờ bắt đầu PHẢI SAU giờ bắt đầu của mẻ ngay trước (theo mã Braumat, xem
+    _prev_batch_by_code) — phát hiện thực tế trên môi trường thật 2026-09-21: vài mẻ (VD 2544,
+    2549) bị nhập nhầm ngày (lệch ~1 ngày, khả năng do gõ AM/PM ngược trên input giờ hệ thống)
+    khiến mã mẻ sau lại có giờ bắt đầu sớm hơn nhiều mẻ mã nhỏ hơn — chặn ngay từ đây để không
+    lặp lại lỗi tương tự."""
     require_role(user, Role.OPERATOR, Role.SUPERVISOR, Role.ENGINEER)
     batch = _get(db, batch_id)
     _assert_not_locked(batch)
+    prev = _prev_batch_by_code(db, batch)
+    if prev and prev.start_at and start_at <= prev.start_at:
+        raise DomainError(f"Giờ bắt đầu phải SAU giờ bắt đầu của mẻ {prev.batch_code} "
+                          f"({prev.start_at.strftime('%d/%m/%Y %H:%M')}) — mã mẻ sau không được "
+                          f"bắt đầu trước mã mẻ trước.")
     before = {"start_at": batch.start_at.isoformat() if batch.start_at else None}
     batch.start_at = start_at
     record_audit(db, entity_type="batch", entity_id=batch.batch_id, action="set_start_at",
