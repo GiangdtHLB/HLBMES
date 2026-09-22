@@ -6090,12 +6090,8 @@ VIEWS.warehouse_kc = async function () {
     body = `<div class="panel"><h2>Xuất theo số phiếu đề nghị <span class="muted">(${allRequests.length} phiếu đang chờ)</span></h2>
         <div class="muted" style="margin-bottom:6px">Mỗi phiếu hiện đầy đủ danh mục vật tư đã đề nghị — bấm "Duyệt cả phiếu" để xuất
           toàn bộ 1 lần (SL đề nghị đã được chặn không vượt tồn kho công ty từ lúc tạo phiếu), hoặc xử lý riêng từng dòng.</div>
-        <input class="searchbox" id="xtdn_search" placeholder="Tìm theo số phiếu, người tạo, ghi chú, vật tư..." style="margin-bottom:8px;width:100%"/>
-        <div id="xtdn_block">
-          ${allRequests.length
-            ? allRequests.map(r => requestBlockHtml(r, matByIdGiao, lotByIdGiao, canFulfillGiao, true, allLots)).join("")
-            : '<div class="muted">Không có phiếu đề nghị nào đang chờ.</div>'}
-        </div>
+        <input class="searchbox" data-tbl="xtdn_table" placeholder="Tìm theo số phiếu, người tạo, ghi chú, vật tư..." style="margin-bottom:8px;width:100%"/>
+        ${requestTableHtml(allRequests, matByIdGiao, lotByIdGiao, canFulfillGiao, true, allLots, false, "xtdn_table")}
         ${movementHistoryBlockHtml("xuat_theo_de_nghi")}
       </div>`;
   } else if (sec === "sng") {
@@ -6630,7 +6626,7 @@ VIEWS.warehouse_kc = async function () {
   if (sec === "xtdn") {
     Object.keys(WH_HIST_VISIBLE).forEach(wireMovementHistoryBlock);
     wireRequestBlockActions();
-    wirePaginateCards("xtdn_block", "xtdn_search", 10);
+    wirePaginate("xtdn_table", 10);
   }
   if (sec === "ton") {
     $("ton_loc").onchange = () => { TON_LOC.warehouse_kc = $("ton_loc").value; render("warehouse_kc"); };
@@ -7556,14 +7552,10 @@ function movementHistoryBlockHtml(key) {
   const delBtn = isAdmin && WH_HIST_DELETE[key]
     ? ` <button class="btn sm sec" data-delhist="${key}" style="color:var(--red)">🗑️ Xóa lịch sử</button>` : "";
   if (key === "xuat_theo_de_nghi") {
-    const visible = all.slice(0, WH_HIST_VISIBLE[key] || WH_HIST_PAGE);
-    const moreBtn = all.length > visible.length
-      ? `<button class="btn sm sec" data-loadmorehist="${key}" style="margin-top:6px">Tải thêm (còn ${all.length - visible.length})</button>` : "";
     return `<div id="wh_hist_${key}" style="margin-top:14px">
-      <h4>${esc(WH_HIST_TITLE[key])} <span class="muted">(${visible.length}/${all.length} phiếu)</span>${delBtn}</h4>
-      ${visible.map(r => requestBlockHtml(r, WH_CACHE.matById, WH_CACHE.lotById, WH_CACHE.canFulfill, false, WH_CACHE.allLots)).join("") ||
-        '<div class="muted">Chưa có phiếu nào đã xuất.</div>'}
-      ${moreBtn}
+      <h4>${esc(WH_HIST_TITLE[key])} <span class="muted">(${all.length} phiếu)</span>${delBtn}</h4>
+      <input class="searchbox" data-tbl="wh_histtbl_xtdn_all" placeholder="Tìm theo số phiếu, người tạo, ghi chú, vật tư..." style="margin-bottom:8px;width:100%"/>
+      ${requestTableHtml(all, WH_CACHE.matById, WH_CACHE.lotById, WH_CACHE.canFulfill, false, WH_CACHE.allLots, false, "wh_histtbl_xtdn_all")}
     </div>`;
   }
   if (key === "dieu_chuyen_nha_may") {
@@ -7609,7 +7601,7 @@ function wireMovementHistoryBlock(key) {
     toast(`Đã xóa ${res.deleted} dòng lịch sử`);
     render(WH_HIST_VIEW[key] || "warehouse_kc");
   });
-  if (key === "xuat_theo_de_nghi") { wireRequestBlockActions(); return; }
+  if (key === "xuat_theo_de_nghi") { wireRequestBlockActions(); wirePaginate("wh_histtbl_xtdn_all", WH_HIST_PAGE); return; }
   if (WH_HIST_UNDO[key]) {
     document.querySelectorAll(`#wh_hist_${key} [data-undoissue]`).forEach(b => b.onclick = () => guard(async () => {
       if (!confirm("Hoàn lại giao dịch xuất tự do này? Vật tư sẽ trở về lại lô.")) return;
@@ -7976,6 +7968,21 @@ function openEditRequestModal(r, matById) {
 // có hàng trăm/nghìn phiếu sẽ rất khó xem. "Duyệt cả phiếu" tự chọn lô (FIFO/lô ưu tiên) cho
 // MỌI dòng đang pending trong 1 lần bấm — an toàn vì SL mỗi dòng đã được chặn không vượt tồn
 // kho công ty ngay từ lúc tạo phiếu.
+// Bảng thật (Số phiếu ĐN/NV đề nghị/Ngày lập phiếu/Ngày đề nghị nhận kho/Ghi chú/Trạng thái đều
+// là CỘT RIÊNG, không còn gộp chung 1 dòng chữ) thay cho kiểu thẻ accordion cũ — dùng chung
+// wirePaginate (tìm 1 ô + sắp xếp theo cột + phân trang) giống mọi bảng khác trong app, thay vì
+// tự chế cơ chế tìm/phân trang riêng cho kiểu thẻ (yêu cầu người dùng 2026-09-23: "phân rõ các
+// cột ... tôi tìm phải tìm được hết các trường này"). Mỗi phiếu vẫn giữ 1 dòng chi tiết theo
+// từng vật tư (requestLineRowHtml, không đổi) — xem toàn bộ ở dòng <tr data-detailrow> ngay sau.
+function requestTableHtml(requests, matById, lotById, canFulfill, showBulk, allLots, canRequest, tableId) {
+  return `<div class="tablewrap"><table id="${esc(tableId)}">
+    <thead><tr><th>Số phiếu ĐN</th><th>NV đề nghị</th><th>Ngày lập phiếu</th><th>Ngày đề nghị nhận kho</th>
+      <th>NV xuất</th><th>Ghi chú / Lệnh nguồn</th><th>Trạng thái</th><th></th><th></th></tr></thead>
+    <tbody>${requests.map(r => requestBlockHtml(r, matById, lotById, canFulfill, showBulk, allLots, canRequest)).join("") ||
+      '<tr><td colspan=9 class="muted">Không có phiếu nào.</td></tr>'}</tbody>
+  </table></div>`;
+}
+
 function requestBlockHtml(r, matById, lotById, canFulfill, showBulk, allLots, canRequest) {
   const pendingCount = r.lines.filter(l => l.status === "pending").length;
   const fulfilledCount = r.lines.filter(l => l.status === "fulfilled").length;
@@ -7996,43 +8003,44 @@ function requestBlockHtml(r, matById, lotById, canFulfill, showBulk, allLots, ca
   const summary = `${r.lines.length} dòng` +
     (pendingCount ? ` · ${pendingCount} chờ xử lý` : "") +
     (fulfilledCount ? ` · ${fulfilledCount} đã xuất` : "");
-  const matCodes = r.lines.map(l => (matById[l.material_id] || {}).code || "").join(" ");
-  const searchKey = [r.request_code, r.requested_by, r.note, r.source_label, matCodes]
-    .filter(Boolean).join(" ").toLowerCase();
-  return `<div class="tablewrap" data-search="${esc(searchKey)}" style="margin-bottom:10px">
-      <div class="row" style="align-items:center;justify-content:space-between;flex-wrap:wrap;gap:6px">
-        <div class="row" style="align-items:center;gap:8px">
-          <button class="btn sm sec" data-reqtoggle>▸ Chi tiết</button>
-          <div class="muted">
-            Số phiếu <code class="k">${esc(r.request_code)}</code>
-            · người tạo <b>${esc(r.requested_by || "")}</b> · ngày lập phiếu ${fmt(r.requested_at)}
-            ${r.requested_receipt_date ? ` · <b>ngày đề nghị nhận kho ${fmt(r.requested_receipt_date)}</b>` : ""}
-            ${r.source_label ? " · " + esc(r.source_label) : ""}
-            · ${summary}
-            ${r.note ? " · " + esc(r.note) : ""}
-          </div>
-        </div>
-        <div class="row" style="gap:6px">${bulkBtn}${editBtn}${cancelBtn}</div>
-      </div>
-      <div class="reqdetail" style="display:none;margin-top:8px">
+  const noteCell = [r.source_label, r.note].filter(Boolean).map(esc).join(" · ");
+  // NV xuất: gộp theo TỪNG NGƯỜI đã xử lý ít nhất 1 dòng (fulfilled_by) — 1 phiếu có thể có NHIỀU
+  // người xuất khác nhau nếu vừa "Duyệt cả phiếu" (1 người) vừa "Xuất dòng này" riêng lẻ dòng
+  // khác (người khác) ở thời điểm khác nhau, nên không lấy 1 tên duy nhất (yêu cầu người dùng
+  // 2026-09-23: "Phiếu xuất thiếu thông tin người xuất").
+  const fulfilledActors = [...new Set(r.lines.filter(l => l.status === "fulfilled" && l.fulfilled_by).map(l => l.fulfilled_by))];
+  const actorCell = fulfilledActors.length ? esc(fulfilledActors.join(", ")) : '<span class="muted">—</span>';
+  return `<tr>
+      <td><code class="k">${esc(r.request_code)}</code></td>
+      <td>${esc(r.requested_by || "")}</td>
+      <td class="muted" style="white-space:nowrap">${fmt(r.requested_at)}</td>
+      <td class="muted" style="white-space:nowrap">${r.requested_receipt_date ? `<b>${fmt(r.requested_receipt_date)}</b>` : "—"}</td>
+      <td>${actorCell}</td>
+      <td>${noteCell || '<span class="muted">—</span>'}</td>
+      <td>${summary}</td>
+      <td style="white-space:nowrap">${bulkBtn}${editBtn}${cancelBtn}</td>
+      <td><button class="btn sm sec" data-reqtoggle>▸ Chi tiết</button></td>
+    </tr>
+    <tr data-detailrow="1" style="display:none">
+      <td colspan="9">
         <table>
           <thead><tr><th>Vật tư</th><th>SL</th><th>Lô</th><th>Ngày nhập</th><th>Ngày xuất</th><th>Vị trí kho</th><th>FIFO</th><th>Lý do (nếu khác FIFO)</th><th>Trạng thái</th><th></th></tr></thead>
           <tbody>${r.lines.map(l => requestLineRowHtml(r, l, matById, lotById, canFulfill, allLots)).join("") ||
             '<tr><td colspan=10 class="muted">Phiếu không có dòng nào.</td></tr>'}</tbody>
         </table>
-      </div>
-    </div>`;
+      </td>
+    </tr>`;
 }
 
 function wireRequestBlockActions() {
-  // Tìm khối chi tiết qua quan hệ DOM (sibling trong cùng .tablewrap), KHÔNG dùng
-  // document.getElementById — cùng 1 phiếu MaterialRequest render đồng thời ở cả Kho công ty
+  // Tìm dòng chi tiết qua quan hệ DOM (sibling <tr> ngay sau, đánh dấu [data-detailrow]), KHÔNG
+  // dùng document.getElementById — cùng 1 phiếu MaterialRequest render đồng thời ở cả Kho công ty
   // (tab "giao") và Kho phân xưởng (tab "req"), 2 khối luôn cùng tồn tại trong DOM (chỉ 1 view
   // đang hiện qua CSS) nên id trùng nhau sẽ khiến getElementById luôn trả về bản đầu tiên,
   // có thể là bản đang ẩn ở view khác — bấm "Chi tiết" không thấy gì đổi trên màn hình đang xem.
   document.querySelectorAll("[data-reqtoggle]").forEach(b => b.onclick = () => {
-    const panel = b.closest(".tablewrap")?.querySelector(".reqdetail");
-    if (!panel) return;
+    const panel = b.closest("tr")?.nextElementSibling;
+    if (!panel || !panel.hasAttribute("data-detailrow")) return;
     const open = panel.style.display !== "none";
     panel.style.display = open ? "none" : "";
     b.textContent = (open ? "▸" : "▾") + " Chi tiết";
@@ -8489,26 +8497,24 @@ function requestsHistoryBlockHtml() {
   const canFulfill = false;
   const pending = requests.filter(r => r.lines.some(l => l.status === "pending"));
   const done = requests.filter(r => !r.lines.some(l => l.status === "pending"));
-  const pendingHtml = pending.map(r => requestBlockHtml(r, matById, lotById, canFulfill, true, lots, canRequest)).join("") ||
-    '<div class="muted">Không có phiếu nào đang chờ xử lý.</div>';
-  const doneHtml = done.map(r => requestBlockHtml(r, matById, lotById, canFulfill, false, lots, canRequest)).join("") ||
-    '<div class="muted">Chưa có phiếu nào đã xử lý xong.</div>';
-  // Phân trang 10/trang cho cả 2 khối (giống "Xuất theo đề nghị" ở Kho công ty) — mỗi khối tự
-  // phân trang riêng, dùng CHUNG 1 ô tìm kiếm (xem wirePaginateCards, yêu cầu người dùng
-  // 2026-09-15) — thay cho "Tải thêm" cũ chỉ áp cho khối "Đã xử lý xong".
+  // Bảng thật (không còn thẻ accordion) + wirePaginate riêng cho từng khối — cùng cơ chế tìm 1
+  // ô + sắp xếp cột + phân trang như mọi bảng khác trong app (yêu cầu người dùng 2026-09-23:
+  // "phân rõ các cột ... tôi tìm phải tìm được hết các trường này"). 2 khối "đang chờ"/"đã xử lý"
+  // tách riêng bảng nên mỗi khối có ô tìm riêng (khác bản cũ dùng chung 1 ô cho cả 2).
   return `<div id="req_history_block">
-    <input class="searchbox" id="req_hist_search" placeholder="Tìm theo số phiếu, người tạo, ghi chú, vật tư..." style="margin-bottom:10px;width:100%"/>
     <h3 style="margin:14px 0 8px">Đang chờ xử lý <span class="muted">(${pending.length})</span></h3>
-    <div id="req_pending_block">${pendingHtml}</div>
+    <input class="searchbox" data-tbl="req_pending_table" placeholder="Tìm theo số phiếu, người tạo, ghi chú, vật tư..." style="margin-bottom:8px;width:100%"/>
+    ${requestTableHtml(pending, matById, lotById, canFulfill, true, lots, canRequest, "req_pending_table")}
     <h3 style="margin:18px 0 8px">Đã xử lý xong <span class="muted">(${done.length})</span></h3>
-    <div id="req_done_block">${doneHtml}</div>
+    <input class="searchbox" data-tbl="req_done_table" placeholder="Tìm theo số phiếu, người tạo, ghi chú, vật tư..." style="margin-bottom:8px;width:100%"/>
+    ${requestTableHtml(done, matById, lotById, canFulfill, false, lots, canRequest, "req_done_table")}
   </div>`;
 }
 
 function wireRequestsHistoryBlock() {
   wireRequestBlockActions();
-  wirePaginateCards("req_pending_block", "req_hist_search", 10);
-  wirePaginateCards("req_done_block", "req_hist_search", 10);
+  wirePaginate("req_pending_table", 10);
+  wirePaginate("req_done_table", 10);
 }
 
 function refreshRequestsHistoryBlock() {
@@ -10045,7 +10051,21 @@ function wirePaginate(tableId, defaultPageSize = 10, opts = {}) {
   if (!table) return;
   table.dataset.paginated = "1";
   const tbody = table.querySelector("tbody");
-  let allRows = Array.from(tbody.children);
+  // Một số bảng có "dòng chi tiết" đi kèm ngay sau dòng chính (VD nút "Chi tiết" ở Xuất theo đề
+  // nghị/Đề nghị nhận kho — xem requestBlockHtml), đánh dấu [data-detailrow] — KHÔNG tính là 1
+  // bản ghi riêng khi đếm/lọc/sắp xếp/phân trang, nhưng phải DI CHUYỂN CÙNG dòng chính khi sắp
+  // xếp (xem sortRows) và LUÔN thu gọn lại mỗi khi đổi trang/lọc/sắp xếp (xem apply) — yêu cầu
+  // người dùng 2026-09-23: đổi "Xuất theo đề nghị"/"Đề nghị nhận kho" từ thẻ accordion sang bảng
+  // thật để dùng chung wirePaginate (tìm 1 ô + sắp xếp cột + phân trang) như mọi bảng khác, thay
+  // vì tự chế cơ chế riêng cho kiểu thẻ (wirePaginateCards).
+  const allChildren = Array.from(tbody.children);
+  let allRows = allChildren.filter(tr => !tr.hasAttribute("data-detailrow"));
+  const detailOf = new Map();
+  allChildren.forEach(tr => {
+    if (tr.hasAttribute("data-detailrow") && tr.previousElementSibling) {
+      detailOf.set(tr.previousElementSibling, tr);
+    }
+  });
   const searchInput = document.querySelector(`.searchbox[data-tbl="${tableId}"]`);
   const state = _pagerState[tableId] || { page: 1, pageSize: defaultPageSize, sortCol: null, sortDir: 1 };
   if (state.sortCol === undefined) { state.sortCol = null; state.sortDir = 1; }
@@ -10083,7 +10103,11 @@ function wirePaginate(tableId, defaultPageSize = 10, opts = {}) {
     const withVal = allRows.map(tr => [tr, _sortCellValue(type, cellText(tr, idx))]);
     withVal.sort((a, b) => _sortCompare(a[1], b[1], type, state.sortDir));
     allRows = withVal.map(p => p[0]);
-    allRows.forEach(tr => tbody.appendChild(tr));
+    allRows.forEach(tr => {
+      tbody.appendChild(tr);
+      const d = detailOf.get(tr);
+      if (d) tbody.appendChild(d);   // dòng chi tiết đi theo NGAY SAU dòng chính vừa di chuyển
+    });
   }
   function wireSortHeaders() {
     const headRow = table.querySelector("thead tr");
@@ -10120,7 +10144,18 @@ function wirePaginate(tableId, defaultPageSize = 10, opts = {}) {
     const start = pageSize === Infinity ? 0 : (state.page - 1) * pageSize;
     const end = pageSize === Infinity ? matched.length : start + pageSize;
     const visible = new Set(matched.slice(start, end));
-    allRows.forEach(tr => { tr.style.display = visible.has(tr) ? "" : "none"; });
+    allRows.forEach(tr => {
+      tr.style.display = visible.has(tr) ? "" : "none";
+      const d = detailOf.get(tr);
+      if (d) {
+        // Luôn thu gọn dòng chi tiết mỗi khi đổi trang/lọc/sắp xếp — tránh dòng chi tiết đang mở
+        // bị "trôi" khỏi đúng dòng chính của nó (VD dòng chính bị lọc mất trang, dòng chi tiết
+        // vẫn hiện lơ lửng); bấm lại nút "Chi tiết" để mở lại bình thường.
+        d.style.display = "none";
+        const toggleBtn = tr.querySelector("[data-reqtoggle]");
+        if (toggleBtn) toggleBtn.textContent = "▸ Chi tiết";
+      }
+    });
     bar.innerHTML = `
       <span class="muted">${matched.length} dòng${q ? " (đã lọc)" : ""}</span>
       <button type="button" class="btn sm sec" data-pg="prev" ${state.page <= 1 ? "disabled" : ""}>‹ Trước</button>
