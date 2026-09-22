@@ -1167,6 +1167,15 @@ def material_transaction_detail(db: Session, material_id: str, date_from: dateti
     stmt = select(StockMovement).where(StockMovement.material_id == material_id,
                                        StockMovement.ts >= date_from, StockMovement.ts <= date_to)
     moves = db.execute(stmt.order_by(StockMovement.ts, StockMovement.created_at)).scalars().all()
+    # Cột "Diễn giải" của chứng từ "Xuất theo đề nghị" vốn ghi cứng "(dòng N, duyệt cả phiếu)"
+    # (services/warehouse.py::fulfill_request_line/fulfill_all_lines) — không có ý nghĩa nghiệp
+    # vụ với người xem Sổ chi tiết vật tư (chỉ là số thứ tự dòng nội bộ), thay bằng Ghi chú thật
+    # của phiếu đề nghị (MaterialRequest.note) nếu có khai (yêu cầu người dùng 2026-09-23: "bỏ chỗ
+    # khoanh đỏ, thêm vào đó ghi chú của phiếu").
+    xtdn_request_ids = {m.request_id for m in moves if m.mode == "xuat_theo_de_nghi" and m.request_id}
+    xtdn_requests = {r.request_id: r for r in db.execute(
+        select(MaterialRequest).where(MaterialRequest.request_id.in_(xtdn_request_ids))).scalars().all()} \
+        if xtdn_request_ids else {}
     rows = []
     for m in moves:
         if m.movement_type == "transfer":
@@ -1182,10 +1191,14 @@ def material_transaction_detail(db: Session, material_id: str, date_from: dateti
             if location and _is_workshop_location(loc) != workshop:
                 continue
             sign = 1 if m.movement_type in ("receipt", "return") else -1
+        reason = m.reason
+        if m.mode == "xuat_theo_de_nghi" and m.request_id in xtdn_requests:
+            req = xtdn_requests[m.request_id]
+            reason = f"Xuất theo đề nghị {req.request_code}" + (f" — {req.note}" if req.note else "")
         rows.append({"ts": m.ts, "type": m.movement_type, "lot_code": m.lot_code,
                     "quantity": m.quantity * sign, "uom": m.uom,
                     "location_from": m.location_from, "location_to": m.location_to,
-                    "mode": m.mode, "reason": m.reason, "actor": m.actor,
+                    "mode": m.mode, "reason": reason, "actor": m.actor,
                     "_movement_id": m.movement_id, "_reversal_of": m.reversal_of})
     batch_ids = set()
     consume_rows = []
