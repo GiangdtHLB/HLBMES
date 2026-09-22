@@ -105,6 +105,37 @@ def test_set_actual_qty_rejects_negative(client, admin_h):
     assert r.status_code == 409, r.text
 
 
+def test_start_at_must_be_after_prev_batch_by_code(client, admin_h):
+    """Yêu cầu người dùng 2026-09-21: mã mẻ SAU không được có giờ bắt đầu SỚM HƠN mã mẻ TRƯỚC
+    (phát hiện trên môi trường thật vài mẻ bị nhập lộn ngày do sửa tay ô AM/PM) — chặn ngay ở
+    services/batches.py::set_start_at/_prev_batch_by_code. Dùng mốc tương đối theo utcnow() (chứ
+    không phải ngày cố định) để không lệ thuộc seed data (batch mã "9001"/"9002" đã có sẵn, start_at
+    ~ giờ chạy test)."""
+    from datetime import timedelta
+
+    prev_id = _make_batch(client, admin_h, "9101")
+    next_id = _make_batch(client, admin_h, "9102")
+
+    prev_start = (utcnow() + timedelta(hours=1)).isoformat()
+    r = client.post(f"/api/batches/{prev_id}/start", headers=admin_h, json={"start_at": prev_start})
+    assert r.status_code == 200, r.text
+
+    # Mã 9102 (sau) mà đặt giờ bắt đầu SỚM HƠN mã 9101 (trước) -> bị chặn.
+    earlier = (utcnow() + timedelta(minutes=30)).isoformat()
+    bad = client.post(f"/api/batches/{next_id}/start", headers=admin_h, json={"start_at": earlier})
+    assert bad.status_code == 409, bad.text
+    assert "9101" in bad.json()["detail"]
+
+    # Đúng bằng giờ mẻ trước cũng bị chặn (phải SAU, không phải >=).
+    same = client.post(f"/api/batches/{next_id}/start", headers=admin_h, json={"start_at": prev_start})
+    assert same.status_code == 409, same.text
+
+    # Giờ sau đó thì lưu được bình thường.
+    later = (utcnow() + timedelta(hours=2)).isoformat()
+    ok = client.post(f"/api/batches/{next_id}/start", headers=admin_h, json={"start_at": later})
+    assert ok.status_code == 200, ok.text
+
+
 def test_direct_edits_blocked_when_ebr_locked(client, admin_h):
     batch_id = _make_batch(client, admin_h, "5")
     sign = client.post(f"/api/batches/{batch_id}/ebr/sign", headers=admin_h,
