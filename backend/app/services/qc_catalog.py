@@ -18,7 +18,7 @@ from ..models.batch_pipeline import BatchFilterLot, BatchPackLot, BatchTank, Bat
 from ..models.master import BeerType, Material, MaterialGroup
 from ..models.materials import MaterialLot
 from ..models.materials_ext import MaterialQcGroup
-from ..models.quality import QualityResult
+from ..models.quality import QualityResult, QualityResultHistory
 from ..models.quality_ext import QCParameter, QCParameterGroup, QCParameterGroupItem, StageQcGroup
 from ..models.workorder import WorkOrder
 from ..security import User, require_perm
@@ -601,14 +601,72 @@ def _evaluate_stage_result(value, lower, upper) -> str:
     return "pass"
 
 
+def _snapshot_result_history(db: Session, result: QualityResult, user: User) -> None:
+    """Chụp lại giá trị HIỆN TẠI của 1 QualityResult (trước khi bị sửa đè) — yêu cầu người dùng
+    2026-09-21: "ghi lại lịch sử" khi sửa chỉ tiêu đã khai. Gọi TRƯỚC khi gán giá trị mới."""
+    db.add(QualityResultHistory(
+        history_id=new_id(), result_id=result.result_id, value=result.value,
+        value_text=result.value_text, unit=result.unit, lower_limit=result.lower_limit,
+        upper_limit=result.upper_limit, status=result.status, sampled_at=result.sampled_at,
+        saved_by=result.updated_by or result.recorded_by, saved_at=result.updated_at or result.recorded_at,
+        changed_by=user.username, changed_at=utcnow(),
+    ))
+
+
+def get_qc_result_history(db: Session, result_id: str) -> list[dict]:
+    """Lịch sử các lần SỬA của 1 QualityResult (mới nhất trước) — rỗng nếu chưa từng sửa."""
+    rows = db.execute(select(QualityResultHistory).where(
+        QualityResultHistory.result_id == result_id).order_by(QualityResultHistory.changed_at.desc())).scalars().all()
+    return [{"value": r.value, "value_text": r.value_text, "unit": r.unit,
+            "lower_limit": r.lower_limit, "upper_limit": r.upper_limit, "status": r.status,
+            "sampled_at": r.sampled_at, "saved_by": r.saved_by, "saved_at": r.saved_at,
+            "changed_by": r.changed_by, "changed_at": r.changed_at} for r in rows]
+
+
+def peek_qc_result_scope(db: Session, result_id: str) -> tuple[str, str]:
+    """Tra scope_type/scope_id của 1 QualityResult — dùng để chọn đúng quyền/kiểm tra khóa
+    TRƯỚC khi cho xóa (routers/brewing.py::delete_qc_result), mirror peek_qc_sample_scope."""
+    result = db.get(QualityResult, result_id)
+    if not result:
+        raise NotFoundError("Chỉ tiêu này không tồn tại.")
+    return result.scope_type, result.scope_id
+
+
+def delete_qc_result(db: Session, result_id: str, user: User) -> None:
+    """Xóa 1 chỉ tiêu đã khai (record_stage_result HOẶC 1 dòng trong record_qc_sample) — yêu cầu
+    người dùng 2026-09-21: "mỗi hàng thêm nút lưu, sửa, xóa". Chụp lại giá trị vào
+    QualityResultHistory TRƯỚC khi xóa hẳn dòng (như 1 lần "sửa" cuối về rỗng) để vẫn tra lại
+    được đã từng có giá trị gì/ai xóa lúc nào qua GET .../history (dùng result_id cũ) dù dòng
+    hiện tại (QualityResult) không còn tồn tại nữa — không có API sửa/xóa QualityResultHistory,
+    chỉ có thêm (append-only, mirror audit log)."""
+    result = db.get(QualityResult, result_id)
+    if not result:
+        raise NotFoundError("Chỉ tiêu này không tồn tại.")
+    _snapshot_result_history(db, result, user)
+    record_audit(db, entity_type="quality_result", entity_id=result.result_id, action="delete",
+                actor=user, before={"parameter": result.parameter, "value": result.value,
+                                    "value_text": result.value_text, "status": result.status,
+                                    "sample_id": result.sample_id})
+    db.delete(result)
+    db.commit()
+
+
 def record_stage_result(db: Session, stage: str, scope_type: str, scope_id: str, payload: dict, user: User) -> dict:
     """Ghi 1 giá trị chỉ tiêu công đoạn sản xuất vào QualityResult dùng chung.
     Không đi qua services/quality.py::record_result vì hàm đó gắn với vòng đời
     batch/lot (tự động ON_HOLD khi FAIL) — không áp dụng cho bản ghi công đoạn
     (mẻ nấu/lô LM/lô lọc/mã chiết) vốn không có trạng thái quality_status riêng.
     Cập nhật đè lên bản ghi cũ nếu đã khai (cùng scope_type/scope_id/parameter) — chỉ tiêu công
-    đoạn là "giá trị hiện tại", không tích lũy lịch sử; tránh 1 lần khai FAIL cũ còn sót lại
-    mãi chặn duyệt dù giá trị mới đã đạt.
+    đoạn là "giá trị hiện tại", không cộng dồn thành nhiều dòng; NHƯNG từ 2026-09-21, mỗi lần
+    ghi đè đều chụp lại giá trị CŨ vào QualityResultHistory trước khi thay (yêu cầu người dùng:
+    "ghi lại lịch sử"), và recorded_by/recorded_at giữ nguyên mốc TẠO lần đầu — lần sửa ghi vào
+    updated_by/updated_at riêng (không còn mất "ngày giờ tạo/nhập" gốc như trước). Tránh 1 lần
+    khai FAIL cũ còn sót lại mãi chặn duyệt dù giá trị mới đã đạt vẫn không đổi (vẫn chỉ 1 dòng
+    "giá trị hiện tại", lịch sử chỉ để xem lại).
+
+    `sampled_at` (tùy chọn, mới 2026-09-21): "Ngày giờ lấy mẫu" người dùng khai — trước đây chỉ
+    có ở record_qc_sample (lấy mẫu nhiều lần); giờ dùng chung cho cả stage 1-dòng/chỉ tiêu (VD
+    "nau") để phân biệt với recorded_at (mốc hệ thống lưu).
 
     NGOẠI LỆ scope_type="batch" (Mẻ sản xuất/BatchExecution qua stage "nau"): scope_id ở đây LÀ
     PK thật (batch_id, không ghép chuỗi như len_men_chinh/phu/loc/thanh_pham) nên CÓ quality_status
@@ -619,6 +677,7 @@ def record_stage_result(db: Session, stage: str, scope_type: str, scope_id: str,
     value_text = payload.get("value_text")
     lower = payload.get("lower_limit")
     upper = payload.get("upper_limit")
+    sampled_at = payload.get("sampled_at")
     # Chỉ tiêu kiểu "text" — ghi chú tự do, không so target/USL/LSL, không tính pass/fail
     # (xem cùng quy ước ở services/quality.py::record_result).
     if value_text:
@@ -631,20 +690,23 @@ def record_stage_result(db: Session, stage: str, scope_type: str, scope_id: str,
                                     QualityResult.parameter == payload["parameter"])
     ).scalar_one_or_none()
     if result:
+        _snapshot_result_history(db, result, user)
         result.value = value
         result.value_text = value_text
         result.unit = payload.get("unit")
         result.lower_limit = lower
         result.upper_limit = upper
         result.status = status
-        result.recorded_by = user.username
-        result.recorded_at = utcnow()
+        if sampled_at is not None:
+            result.sampled_at = sampled_at
+        result.updated_by = user.username
+        result.updated_at = utcnow()
     else:
         result = QualityResult(
             result_id=new_id(), sample_id=f"S-{new_id()[:8].upper()}",
             scope_type=scope_type, scope_id=scope_id, parameter=payload["parameter"],
             value=value, value_text=value_text, unit=payload.get("unit"),
-            lower_limit=lower, upper_limit=upper,
+            lower_limit=lower, upper_limit=upper, sampled_at=sampled_at,
             status=status, recorded_by=user.username,
         )
         db.add(result)
@@ -656,8 +718,10 @@ def record_stage_result(db: Session, stage: str, scope_type: str, scope_id: str,
         quality.attempt_auto_release(db, scope_type, scope_id, user)
     db.commit()
     db.refresh(result)
-    return {"parameter": result.parameter, "value": result.value, "value_text": result.value_text,
-            "status": result.status, "recorded_by": result.recorded_by, "recorded_at": result.recorded_at}
+    return {"result_id": result.result_id, "parameter": result.parameter, "value": result.value,
+            "value_text": result.value_text, "status": result.status, "sampled_at": result.sampled_at,
+            "recorded_by": result.recorded_by, "recorded_at": result.recorded_at,
+            "updated_by": result.updated_by, "updated_at": result.updated_at}
 
 
 def _orphaned_param_names(db: Session, codes: set) -> dict:
@@ -718,9 +782,10 @@ def stage_qc_status(db: Session, stage: str, scope_type: str, scope_id: str, pro
     return {
         "stage": stage, "scope_type": scope_type, "scope_id": scope_id,
         "required": required,
-        "recorded": [{"parameter": r.parameter, "name": orphaned_names.get(r.parameter), "value": r.value,
-                      "value_text": r.value_text, "status": r.status,
+        "recorded": [{"result_id": r.result_id, "parameter": r.parameter, "name": orphaned_names.get(r.parameter),
+                      "value": r.value, "value_text": r.value_text, "status": r.status,
                       "recorded_by": r.recorded_by, "recorded_at": r.recorded_at,
+                      "updated_by": r.updated_by, "updated_at": r.updated_at, "sampled_at": r.sampled_at,
                       "lower_limit": r.lower_limit, "upper_limit": r.upper_limit}
                      for r in latest_by_param.values()],
         "pending": pending,
@@ -738,15 +803,37 @@ MULTI_SAMPLE_STAGES = {"len_men_chinh", "len_men_phu"}
 
 
 def record_qc_sample(db: Session, stage: str, scope_type: str, scope_id: str,
-                     sampled_at, results: list[dict], user: User) -> dict:
-    """Ghi 1 LẦN lấy mẫu (nhiều chỉ tiêu cùng lúc, cùng 1 mốc ngày giờ) — luôn INSERT dòng
-    mới, không tìm/ghi đè dòng cũ (khác record_stage_result)."""
+                     sampled_at, results: list[dict], user: User, sample_id: str = None) -> dict:
+    """Ghi 1 LẦN lấy mẫu (nhiều chỉ tiêu, có thể gửi cùng lúc HOẶC RIÊNG LẺ từng chỉ tiêu — xem
+    tham số `sample_id`) — luôn INSERT dòng mới, không tìm/ghi đè dòng cũ (khác record_stage_result).
+
+    `sample_id` (tùy chọn, mới 2026-09-21): frontend tự sinh 1 mã khi mở "Thêm lần lấy mẫu mới"
+    rồi gửi kèm mỗi lần bấm Lưu (dù chỉ 1 chỉ tiêu) để NỐI vào đúng 1 nhóm thay vì tách vụn —
+    yêu cầu người dùng: "mỗi chỉ tiêu sẽ có thêm nút Lưu... mỗi lần thêm thì sẽ hiện ra toàn bộ
+    các chỉ tiêu cần thêm". Không truyền -> tự sinh mã mới (hành vi cũ, dùng khi gửi đủ cả bộ
+    1 lần). Nếu mã được truyền đã có dòng nào trùng `parameter` trong CÙNG scope rồi thì báo lỗi
+    rõ ràng thay vì âm thầm chèn trùng — chỉ tiêu đó phải sửa qua update_qc_sample, không ghi
+    thêm dòng mới cho nó ở đây."""
     if stage not in MULTI_SAMPLE_STAGES:
         raise DomainError(f"Stage '{stage}' không hỗ trợ lấy mẫu nhiều lần.")
     if not results:
         raise DomainError("Chưa nhập giá trị chỉ tiêu nào.")
-    sample_id = new_id()
-    when = sampled_at or utcnow()
+    existing_rows = []
+    if sample_id:
+        existing_rows = db.execute(select(QualityResult).where(
+            QualityResult.sample_id == sample_id)).scalars().all()
+        if existing_rows and (existing_rows[0].scope_type != scope_type or existing_rows[0].scope_id != scope_id):
+            raise DomainError("Lần lấy mẫu này không thuộc đúng phạm vi (scope) đang ghi.")
+        existing_params = {r.parameter for r in existing_rows}
+        dup = [item["parameter"] for item in results if item["parameter"] in existing_params]
+        if dup:
+            raise DomainError(f"Chỉ tiêu {', '.join(dup)} đã có trong lần lấy mẫu này — sửa qua nút Sửa, không thêm mới.")
+    else:
+        sample_id = new_id()
+    # Mốc chung của cả nhóm: LẦN GHI ĐẦU TIÊN của sample_id này quyết định (dòng sau nối vào
+    # nhóm dùng lại đúng mốc đó, bỏ qua sampled_at gửi kèm nếu khác — sửa mốc chung đã có route
+    # riêng, update_qc_sample) — nếu nhóm đã tồn tại, ưu tiên mốc đã lưu.
+    when = existing_rows[0].sampled_at if existing_rows else (sampled_at or utcnow())
     rows = []
     for item in results:
         value = item.get("value")
@@ -773,8 +860,73 @@ def record_qc_sample(db: Session, stage: str, scope_type: str, scope_id: str,
     for row in rows:
         db.refresh(row)
     return {"sample_id": sample_id, "sampled_at": when,
-            "results": [{"parameter": r.parameter, "value": r.value, "value_text": r.value_text,
-                        "status": r.status} for r in rows]}
+            "results": [{"result_id": r.result_id, "parameter": r.parameter, "value": r.value,
+                        "value_text": r.value_text, "status": r.status} for r in rows]}
+
+
+def peek_qc_sample_scope(db: Session, sample_id: str) -> tuple[str, str]:
+    """Tra scope_type/scope_id của 1 lần lấy mẫu đã lưu — dùng để chọn đúng quyền/kiểm tra khóa
+    trước khi cho sửa (routers/brewing.py::update_qc_sample), không cần biết trước scope."""
+    first = db.execute(select(QualityResult).where(
+        QualityResult.sample_id == sample_id)).scalars().first()
+    if not first:
+        raise NotFoundError("Lần lấy mẫu này không tồn tại.")
+    return first.scope_type, first.scope_id
+
+
+def update_qc_sample(db: Session, sample_id: str, payload: dict, user: User) -> dict:
+    """Sửa 1 LẦN lấy mẫu đã lưu (record_qc_sample) — yêu cầu người dùng 2026-09-21: "thêm nút
+    sửa, có thể sửa kết quả, ngày giờ lấy mẫu, sẽ lưu lại ngày giờ tạo, nếu sửa 1 chỉ tiêu thôi
+    thì chỉ cần ghi lại ngày giờ sửa chỉ tiêu đó."
+
+    `sampled_at` (tùy chọn) — áp dụng cho CẢ NHÓM (mọi dòng cùng sample_id), vì đây là mốc
+    CHUNG của 1 lần lấy mẫu; sửa mốc này tự tính là 1 lần sửa cho MỌI dòng trong nhóm (dù giá
+    trị đo không đổi), vì bản ghi (dòng) đó vẫn thực sự bị thay đổi.
+    `results` (tùy chọn) — [{result_id, value?, value_text?}] — CHỈ sửa giá trị của ĐÚNG các
+    dòng có mặt trong danh sách; dòng KHÔNG có mặt (chỉ tiêu không sửa) không bị đụng tới —
+    không set updated_by/updated_at nếu dòng đó không nằm trong cả `results` lẫn ảnh hưởng bởi
+    `sampled_at` thay đổi.
+    recorded_by/recorded_at (mốc TẠO) giữ nguyên — không bao giờ bị hàm này đổi."""
+    rows = db.execute(select(QualityResult).where(QualityResult.sample_id == sample_id)).scalars().all()
+    if not rows:
+        raise NotFoundError("Lần lấy mẫu này không tồn tại.")
+    by_result_id = {r.result_id: r for r in rows}
+    sampled_at = payload.get("sampled_at")
+    now = utcnow()
+    if sampled_at is not None:
+        for r in rows:
+            if r.sampled_at != sampled_at:
+                _snapshot_result_history(db, r, user)
+                r.sampled_at = sampled_at
+                r.updated_by = user.username
+                r.updated_at = now
+    for item in (payload.get("results") or []):
+        r = by_result_id.get(item.get("result_id"))
+        if not r:
+            raise NotFoundError(f"Dòng chỉ tiêu '{item.get('result_id')}' không thuộc lần lấy mẫu này.")
+        value = item.get("value")
+        value_text = item.get("value_text")
+        lower, upper = r.lower_limit, r.upper_limit
+        if value_text:
+            status, value = "pass", None
+        else:
+            status = _evaluate_stage_result(value, lower, upper)
+        _snapshot_result_history(db, r, user)
+        r.value = value
+        r.value_text = value_text
+        r.status = status
+        r.updated_by = user.username
+        r.updated_at = now
+    record_audit(db, entity_type="quality_result", entity_id=sample_id, action="update_sample",
+                actor=user, after={"sampled_at": sampled_at.isoformat() if sampled_at else None,
+                                   "results": payload.get("results") or []})
+    db.commit()
+    for r in rows:
+        db.refresh(r)
+    return {"sample_id": sample_id, "sampled_at": rows[0].sampled_at,
+            "results": [{"result_id": r.result_id, "parameter": r.parameter, "value": r.value,
+                        "value_text": r.value_text, "status": r.status,
+                        "updated_by": r.updated_by, "updated_at": r.updated_at} for r in rows]}
 
 
 def merge_duplicate_qc_samples(db: Session, tolerance_seconds: float = 2.0) -> dict:
@@ -832,22 +984,33 @@ def merge_duplicate_qc_samples(db: Session, tolerance_seconds: float = 2.0) -> d
 def list_qc_samples(db: Session, scope_type: str, scope_id: str) -> list[dict]:
     """Lịch sử các lần lấy mẫu (mới nhất trước) cho 1 stage/scope — gộp theo sample_id.
     Tên/ĐVT chỉ tiêu tra theo QCParameter.code hiện tại (giới hạn min/max lấy từ chính dòng
-    đã lưu — đúng ngưỡng áp dụng LÚC ghi, không lấy ngưỡng hiện tại có thể đã đổi)."""
+    đã lưu — đúng ngưỡng áp dụng LÚC ghi, không lấy ngưỡng hiện tại có thể đã đổi).
+
+    Mỗi chỉ tiêu trong 1 lần lấy mẫu giờ có thể được LƯU RIÊNG LẺ, khác thời điểm/người (xem
+    record_qc_sample::sample_id) nên `recorded_by`/`recorded_at` mức NHÓM (lấy theo dòng ghi
+    SỚM NHẤT — ORDER BY recorded_at trước khi gộp) chỉ còn mang nghĩa "người/lúc mở lần lấy mẫu
+    này", KHÔNG còn đại diện cho mọi dòng — mỗi dòng trong `results` mang recorded_by/recorded_at
+    RIÊNG của chính nó (yêu cầu người dùng 2026-09-21: "mỗi hàng sẽ thêm cột ngày giờ nhập,
+    người nhập")."""
     rows = db.execute(
         select(QualityResult).where(QualityResult.scope_type == scope_type, QualityResult.scope_id == scope_id)
+        .order_by(QualityResult.recorded_at)
     ).scalars().all()
     params_by_code = {p.code: p for p in db.execute(select(QCParameter)).scalars().all()}
     sessions: dict[str, dict] = {}
     for r in rows:
         eff_time = r.sampled_at or r.recorded_at
         s = sessions.setdefault(r.sample_id, {"sample_id": r.sample_id, "sampled_at": eff_time,
-                                              "recorded_by": r.recorded_by, "results": []})
+                                              "recorded_by": r.recorded_by, "recorded_at": r.recorded_at,
+                                              "results": []})
         p = params_by_code.get(r.parameter)
         s["results"].append({
-            "parameter": r.parameter, "name": p.name if p else r.parameter, "unit": r.unit,
-            "value_type": p.value_type if p else "numeric",
+            "result_id": r.result_id, "parameter": r.parameter, "name": p.name if p else r.parameter,
+            "unit": r.unit, "value_type": p.value_type if p else "numeric",
             "value": r.value, "value_text": r.value_text, "status": r.status,
             "lower_limit": r.lower_limit, "upper_limit": r.upper_limit,
+            "recorded_by": r.recorded_by, "recorded_at": r.recorded_at,
+            "updated_by": r.updated_by, "updated_at": r.updated_at,
         })
     return sorted(sessions.values(), key=lambda s: s["sampled_at"], reverse=True)
 

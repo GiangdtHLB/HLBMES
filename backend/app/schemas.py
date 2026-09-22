@@ -1752,6 +1752,7 @@ class StageQcResultIn(BaseModel):
     unit: Optional[str] = None
     lower_limit: Optional[float] = None
     upper_limit: Optional[float] = None
+    sampled_at: Optional[datetime] = None   # "Ngày giờ lấy mẫu" — tùy chọn, khác recorded_at
 
 
 class QcSampleResultIn(BaseModel):
@@ -1765,12 +1766,32 @@ class QcSampleResultIn(BaseModel):
 
 class QcSampleIn(BaseModel):
     # Lấy mẫu NHIỀU LẦN (lần 1/lần 2/...) — chỉ hỗ trợ len_men_chinh/len_men_phu, xem
-    # qc_catalog.MULTI_SAMPLE_STAGES. Mỗi lần gọi LUÔN thêm 1 bản ghi mới (không ghi đè).
+    # qc_catalog.MULTI_SAMPLE_STAGES. Mỗi lần gọi LUÔN thêm bản ghi mới (không ghi đè).
     stage: str = Field(min_length=1)
     scope_type: str = Field(min_length=1)
     scope_id: str = Field(min_length=1)
     sampled_at: Optional[datetime] = None   # ngày giờ lấy mẫu do người dùng khai — mặc định "bây giờ"
     results: list[QcSampleResultIn] = Field(min_length=1)
+    # sample_id (tùy chọn, mới 2026-09-21): cho phép LƯU TỪNG CHỈ TIÊU RIÊNG LẺ mà vẫn gộp
+    # đúng vào 1 "lần lấy mẫu" — frontend tự sinh 1 sample_id khi mở "Thêm lần lấy mẫu mới",
+    # mỗi lần bấm Lưu (1 chỉ tiêu) gửi kèm cùng sample_id đó để nối vào ĐÚNG nhóm thay vì tách
+    # vụn thành nhiều lần khác nhau (xem qc_catalog.record_qc_sample — đúng nỗi lo đã gặp và
+    # từng phải viết merge_duplicate_qc_samples để dọn dẹp trước đây, 2026-09-02). Không truyền
+    # -> hành vi cũ (tự sinh sample_id mới, dùng khi gửi đủ cả bộ 1 lần).
+    sample_id: Optional[str] = None
+
+
+class QcSampleResultUpdateIn(BaseModel):
+    result_id: str = Field(min_length=1)
+    value: Optional[float] = None
+    value_text: Optional[str] = None
+
+
+class QcSampleUpdateIn(BaseModel):
+    # Sửa 1 lần lấy mẫu đã lưu — sampled_at (tùy chọn) áp dụng cho cả nhóm; results (tùy chọn)
+    # chỉ sửa đúng các dòng có mặt, xem qc_catalog.update_qc_sample.
+    sampled_at: Optional[datetime] = None
+    results: list[QcSampleResultUpdateIn] = []
 
 
 # ---- CIP (vệ sinh thiết bị) ----
