@@ -3413,12 +3413,27 @@ VIEWS.batchfilterorders = async function () {
   });
   document.querySelectorAll("[data-flotorder]").forEach(tr => tr.onclick = () => showBatchFilterOrder(tr.dataset.flotorder));
 };
-async function showBatchFilterOrder(orderId) {
+async function showBatchFilterOrder(orderId, editing = false) {
   const [o, sources, finishedProducts, orderMaterials] = await Promise.all([
     GET(`/batch-filter-orders/${orderId}`), GET(`/batch-filter-orders/${orderId}/sources`),
     GET("/finished-products").catch(() => []), GET(`/batch-filter-orders/${orderId}/materials`).catch(() => [])]);
-  const available = !o.is_complete && !o.consumed_downstream;
+  // "Còn dùng được" (cho tạo thêm lô lọc) = CHƯA "hoàn thành" thủ công VÀ chưa bị tiêu thụ hạ
+  // lưu — is_complete (đủ SL kế hoạch) KHÔNG còn tự chặn nữa (yêu cầu người dùng 2026-09-23:
+  // "lệnh lọc đó chưa ở trạng thái hoàn thành, thì cho phép tạo thêm 1 mã lô lọc", mirror đúng
+  // gate ở services/batch_pipeline.py::draw_from_filter_order).
+  const available = o.status !== "hoan_thanh" && !o.consumed_downstream;
   const fp = o.finished_product_id ? finishedProducts.find(x => x.finished_product_id === o.finished_product_id) : null;
+  // "Sửa" — CHỈ khi lệnh CHƯA có lô lọc nào (o.lot_count === 0, mirror đúng điều kiện "Xóa lệnh
+  // lọc") — cho sửa "SL dự kiến" từng nguồn + "SL kế hoạch" từng vật tư (yêu cầu người dùng
+  // 2026-09-23: "lệnh lọc chưa hoàn thành thì cho thêm nút sửa, để tôi sửa số lượng theo kế
+  // hoạch, số lượng vật tư"). Không thêm/xóa nguồn hay dòng vật tư — chỉ sửa 2 con số đó.
+  const canEdit = o.lot_count === 0;
+  // "Hoàn thành lệnh lọc" — mốc XÁC NHẬN riêng, TÁCH BIỆT khỏi việc từng Lô lọc con tự "Hoàn
+  // thành lọc" của riêng nó — chỉ hiện khi đã có ≥1 lô lọc tạo từ lệnh (yêu cầu người dùng
+  // 2026-09-23: "khi bấm hoàn thành của lô lọc thì chỉ hoàn thành của mã lô lọc đó thôi, chưa
+  // phải là hoàn thành lệnh lọc đó... tạo thêm ra 1 nút hoàn thành lệnh lọc, chỉ hiển thị khi có
+  // ít nhất 1 mã lọc được lấy từ lệnh đó"). Server tự chặn nếu chưa đủ SL kế hoạch trừ dung sai.
+  const canFinish = o.lot_count > 0 && !o.completed;
   $("fo_detail").innerHTML = `<h2>Lệnh lọc ${esc(o.order_code)}</h2>
     <dl class="detail">
       <dt>Kiểu</dt><dd>${o.blend_mode === "phoi" ? "Phối" : "Không phối"}</dd>
@@ -3427,20 +3442,41 @@ async function showBatchFilterOrder(orderId) {
       <dt>Số lô KCS</dt><dd>${esc(o.kcs_lot_no || "—")}</dd>
       <dt>Sản phẩm</dt><dd>${fp ? esc(fp.code) + " — " + esc(fp.name) : "(Mọi sản phẩm)"}</dd>
       <dt>Ghi chú</dt><dd class="muted">${esc(o.note || "—")}</dd>
-      <dt>Trạng thái</dt><dd>${statusBadge(FILTER_ORDER_BADGE_CLASS[o.status], o.status_label)}</dd>
+      <dt>Trạng thái</dt><dd>${statusBadge(FILTER_ORDER_BADGE_CLASS[o.status], o.status_label)}${o.completed ? ` <span class="muted" style="font-size:12px">— hoàn thành bởi ${esc(o.completed_by)} lúc ${fmt(o.completed_at)}</span>` : ""}</dd>
     </dl>
     <h3>Nguồn khai báo</h3>
     <table><thead><tr><th>Nguồn</th><th>SL dự kiến (hl)</th><th>Lý do lọc lại</th></tr></thead>
-      <tbody>${sources.map(s => `<tr><td>${esc(s.source_label)}</td><td>${s.planned_v_dich_hl}</td>
+      <tbody>${sources.map(s => `<tr><td>${esc(s.source_label)}</td>
+        <td>${editing ? `<input type="number" min="0" step="any" class="fosrc-qty" data-fosrc="${esc(s.link_id)}" value="${s.planned_v_dich_hl}" style="width:90px"/>` : s.planned_v_dich_hl}</td>
         <td class="muted">${s.source_type === "filter_lot" ? esc(s.reason || "—") : ""}</td></tr>`).join("")}</tbody></table>
     ${orderMaterials.length ? `<h3 style="margin-top:12px">Vật tư dự kiến</h3>
     <table><thead><tr><th>Vật tư</th><th>SL kế hoạch</th><th>ĐVT</th></tr></thead>
       <tbody>${orderMaterials.map(m => `<tr><td>${esc(m.material_code ? `${m.material_code} — ${m.material_name}` : m.material_name)}</td>
-        <td>${m.qty_planned}</td><td>${esc(m.uom || "")}</td></tr>`).join("")}</tbody></table>` : ""}
+        <td>${editing ? `<input type="number" min="0" step="any" class="foline-qty" data-foline="${esc(m.line_id)}" value="${m.qty_planned}" style="width:90px"/>` : m.qty_planned}</td><td>${esc(m.uom || "")}</td></tr>`).join("")}</tbody></table>` : ""}
     ${available ? `<div class="muted" style="margin-top:8px">Còn dùng được — sang màn <b>"Lọc"</b> để chọn lệnh này và tạo Lô lọc thật.</div>` : ""}
     <div class="row" style="margin-top:10px">
-      ${o.lot_count === 0 ? '<button class="btn sm" style="background:var(--red)" id="fo_del">Xóa lệnh lọc</button>' : ""}
+      ${editing ? `<button class="btn sm" id="fo_save">Lưu</button><button class="btn sm sec" id="fo_cancel">Hủy</button>`
+        : `${canEdit ? '<button class="btn sm sec" id="fo_edit">Sửa</button>' : ""}
+           ${canFinish ? '<button class="btn sm" id="fo_finish">✔ Hoàn thành lệnh lọc</button>' : ""}
+           ${o.lot_count === 0 ? '<button class="btn sm" style="background:var(--red)" id="fo_del">Xóa lệnh lọc</button>' : ""}`}
     </div>`;
+  if ($("fo_edit")) $("fo_edit").onclick = () => showBatchFilterOrder(orderId, true);
+  if ($("fo_cancel")) $("fo_cancel").onclick = () => showBatchFilterOrder(orderId, false);
+  if ($("fo_save")) $("fo_save").onclick = () => guard(async () => {
+    const srcPayload = Array.from(document.querySelectorAll("[data-fosrc]")).map(inp => ({
+      link_id: inp.dataset.fosrc, planned_v_dich_hl: parseFloat(inp.value) || 0 }));
+    const linePayload = Array.from(document.querySelectorAll("[data-foline]")).map(inp => ({
+      line_id: inp.dataset.foline, qty_planned: parseFloat(inp.value) || 0 }));
+    await PUT(`/batch-filter-orders/${orderId}`, { sources: srcPayload, lines: linePayload });
+    toast("Đã lưu thay đổi lệnh lọc");
+    showBatchFilterOrder(orderId, false);
+  });
+  if ($("fo_finish")) $("fo_finish").onclick = () => guard(async () => {
+    if (!confirm(`Xác nhận đã hoàn thành lệnh lọc ${esc(o.order_code)}? Sẽ không tạo thêm được lô lọc từ lệnh này nữa.`)) return;
+    await POST(`/batch-filter-orders/${orderId}/finish`, {});
+    toast("Đã xác nhận hoàn thành lệnh lọc");
+    showBatchFilterOrder(orderId, false);
+  });
   if ($("fo_del")) $("fo_del").onclick = () => guard(async () => {
     if (!confirm("Xóa lệnh lọc này? Không thể hoàn tác.")) return;
     await DELETE(`/batch-filter-orders/${orderId}`); toast("Đã xóa lệnh lọc"); render("batchfilterorders");
@@ -3458,7 +3494,10 @@ VIEWS.batchfilterlots = async function () {
   const orderById = Object.fromEntries(orders.map(o => [o.order_id, o]));
   const tankLmNames = (lot) => { const o = orderById[lot.order_id]; return o && o.tank_lm_names && o.tank_lm_names.length ? o.tank_lm_names.join(", ") : "—"; };
   const plannedVol = (lot) => { const o = orderById[lot.order_id]; return o ? o.planned_volume_hl : null; };
-  const available = orders.filter(o => !o.is_complete && !o.consumed_downstream);
+  // "Còn dùng được" = CHƯA "hoàn thành" thủ công (order.status !== "hoan_thanh") VÀ chưa tiêu
+  // thụ hạ lưu — is_complete (đủ SL kế hoạch) KHÔNG còn tự chặn chọn nữa (mirror showBatchFilterOrder,
+  // yêu cầu người dùng 2026-09-23).
+  const available = orders.filter(o => o.status !== "hoan_thanh" && !o.consumed_downstream);
   const orderOpts = `<option value="">(chọn lệnh lọc)</option>` +
     available.map(o => `<option value="${o.order_id}">${esc(o.order_code)} — ${o.blend_mode === "phoi" ? "Phối" : "Không phối"} — ${o.actual_volume_hl}/${o.planned_volume_hl} hl</option>`).join("");
   const bbtOpts = `<option value="">(chọn tank thành phẩm)</option>` +
@@ -3466,7 +3505,7 @@ VIEWS.batchfilterlots = async function () {
   $("view-batchfilterlots").innerHTML = `
     ${productionTabsHtml("batchfilterlots")}
     <div class="panel"><h2>🧪 Tạo Lô lọc từ Lệnh lọc</h2>
-      <div class="muted" style="margin-bottom:8px">Chọn 1 lệnh lọc còn dùng được (chưa đủ SL kế hoạch, chưa tiêu thụ hạ lưu) — nguồn/loại bia/sản phẩm tự kế thừa từ lệnh, không cần chọn lại. Tạo lệnh lọc mới ở màn <b>"Lệnh lọc"</b>. Bắt buộc chọn Tank thành phẩm (BBT) — dịch lọc xong sẽ đưa vào tank đó (chỉ hiện tank đang trống).</div>
+      <div class="muted" style="margin-bottom:8px">Chọn 1 lệnh lọc còn dùng được (chưa hoàn thành, chưa tiêu thụ hạ lưu) — nguồn/loại bia/sản phẩm tự kế thừa từ lệnh, không cần chọn lại. Tạo lệnh lọc mới ở màn <b>"Lệnh lọc"</b>. Bắt buộc chọn Tank thành phẩm (BBT) — dịch lọc xong sẽ đưa vào tank đó (chỉ hiện tank đang trống).</div>
       <div class="row">
         <div class="field" style="flex:1"><label>Lệnh lọc</label><select id="fl_order_sel">${orderOpts}</select></div>
         <div class="field"><label>Mã lô lọc</label><input id="fl_code" placeholder="FLOT-2026-01"/></div>
@@ -3478,14 +3517,16 @@ VIEWS.batchfilterlots = async function () {
     <div class="split">
       <div class="panel"><h2>Danh sách lô lọc</h2>
         <input class="searchbox" data-tbl="t_batfilterlot" placeholder="Tìm theo mã lô, sản phẩm, trạng thái..."/>
-        <div class="tablewrap"><table id="t_batfilterlot"><thead><tr><th>Mã lô lọc</th><th>Trạng thái</th><th>Sản phẩm bia</th><th>Tank lên men</th><th>Kế hoạch (hl)</th><th>Tank BBT</th><th>Tồn/Tổng (hl)</th></tr></thead>
+        <div class="tablewrap"><table id="t_batfilterlot"><thead><tr><th>Mã lô lọc</th><th>Lệnh lọc</th><th>Trạng thái</th><th>Sản phẩm bia</th><th>Tank lên men</th><th>Kế hoạch (hl)</th><th>Tank BBT</th><th>Tồn/Tổng (hl)</th></tr></thead>
           <tbody>${lots.map(f => `<tr data-flot="${f.filter_lot_id}" style="cursor:pointer">
-            <td><code class="k">${esc(f.filter_lot_code)}</code></td><td>${statusBadge(FILTER_LOT_BADGE_CLASS[f.status], f.status_label)}</td>
+            <td><code class="k">${esc(f.filter_lot_code)}</code></td>
+            <td class="muted">${esc(orderById[f.order_id] ? orderById[f.order_id].order_code : "—")}</td>
+            <td>${statusBadge(FILTER_LOT_BADGE_CLASS[f.status], f.status_label)}</td>
             <td>${esc(beerTypeName(f.beer_type_id))}</td>
             <td class="muted">${esc(tankLmNames(f))}</td>
             <td class="muted">${plannedVol(f) ?? "—"}</td>
             <td>${esc(f.to_bbt || "—")}</td>
-            <td>${f.on_hand} / ${f.volume_hl}</td></tr>`).join("") || '<tr><td colspan=7 class="muted">Chưa có lô lọc nào.</td></tr>'}</tbody></table></div>
+            <td>${f.on_hand} / ${f.volume_hl}</td></tr>`).join("") || '<tr><td colspan=8 class="muted">Chưa có lô lọc nào.</td></tr>'}</tbody></table></div>
       </div>
       <div class="panel" id="fl_detail"><h2>Chi tiết lô lọc</h2><div class="muted">Chọn một lô lọc để xem.</div></div>
     </div>`;

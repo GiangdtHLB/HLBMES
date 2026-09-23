@@ -17,6 +17,7 @@ from ..schemas import (
     BatchFilterOrderMaterialLineOut,
     BatchFilterOrderOut,
     BatchFilterOrderSourceOut,
+    BatchFilterOrderUpdateIn,
     BatchPackLotCreateIn,
     BatchPackLotMaterialUsageIn,
     BatchPackLotMaterialUsageOut,
@@ -188,6 +189,17 @@ def get_filter_order_materials(order_id: str, db: Session = Depends(get_db)):
 def create_filter_order(payload: BatchFilterOrderCreateIn, db: Session = Depends(get_db),
                         user: User = Depends(get_current_user)):
     return svc.create_filter_order(db, [s.model_dump() for s in payload.sources], payload.model_dump(), user)
+
+
+@router.put("/batch-filter-orders/{order_id}", response_model=BatchFilterOrderOut)
+def update_filter_order(order_id: str, payload: BatchFilterOrderUpdateIn, db: Session = Depends(get_db),
+                        user: User = Depends(get_current_user)):
+    return svc.update_filter_order(db, order_id, payload.model_dump(), user)
+
+
+@router.post("/batch-filter-orders/{order_id}/finish", response_model=BatchFilterOrderOut)
+def finish_filter_order(order_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    return svc.finish_filter_order(db, order_id, user)
 
 
 @router.delete("/batch-filter-orders/{order_id}", status_code=204)

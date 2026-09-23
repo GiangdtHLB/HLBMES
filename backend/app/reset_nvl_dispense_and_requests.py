@@ -53,7 +53,7 @@ Cách chạy (từ thư mục backend/, đã kích hoạt venv có đúng MES_DA
 import argparse
 import sys
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, false, func, select
 
 from .common import LotStatus, Role
 from .database import SessionLocal
@@ -192,7 +192,7 @@ def _undo_free_issue_and_factory_transfer(db) -> tuple[int, list[str]]:
 
     movements = db.execute(select(StockMovement).where(
         StockMovement.mode.in_(("tu_do", "dieu_chuyen_nha_may")),
-        StockMovement.reversed.is_(False))).scalars().all()
+        StockMovement.reversed == false())).scalars().all()
     errors = []
     done = 0
     for mv in movements:
@@ -258,7 +258,7 @@ def _summary(db) -> None:
     remaining_filter_usage = db.execute(select(func.count()).select_from(BatchFilterLotMaterialUsage)).scalar_one()
     remaining_pack_usage = db.execute(select(func.count()).select_from(BatchPackLotMaterialUsage)).scalar_one()
     remaining_tu_do = db.execute(select(func.count()).select_from(StockMovement).where(
-        StockMovement.mode.in_(("tu_do", "dieu_chuyen_nha_may")), StockMovement.reversed.is_(False))).scalar_one()
+        StockMovement.mode.in_(("tu_do", "dieu_chuyen_nha_may")), StockMovement.reversed == false())).scalar_one()
     remaining_px_transfer = db.execute(select(func.count()).select_from(TransferPxRequest)
                                        .where(TransferPxRequest.status == "approved")).scalar_one()
     print(f"  material_request_line còn 'fulfilled':      {remaining_fulfilled}")
@@ -295,7 +295,7 @@ def main() -> None:
         n_filter_usage_before = db.execute(select(func.count()).select_from(BatchFilterLotMaterialUsage)).scalar_one()
         n_pack_usage_before = db.execute(select(func.count()).select_from(BatchPackLotMaterialUsage)).scalar_one()
         n_tu_do_before = db.execute(select(func.count()).select_from(StockMovement).where(
-            StockMovement.mode.in_(("tu_do", "dieu_chuyen_nha_may")), StockMovement.reversed.is_(False))).scalar_one()
+            StockMovement.mode.in_(("tu_do", "dieu_chuyen_nha_may")), StockMovement.reversed == false())).scalar_one()
         n_px_transfer_before = db.execute(select(func.count()).select_from(TransferPxRequest)
                                           .where(TransferPxRequest.status == "approved")).scalar_one()
         print(f"\nHiện trạng trước khi sửa: {n_fulfilled_before} dòng đề nghị đã fulfilled, "

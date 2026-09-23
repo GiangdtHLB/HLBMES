@@ -78,6 +78,15 @@ class BatchFilterOrder(Base):
     locked: Mapped[bool] = mapped_column(Boolean, default=False)
     locked_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
     locked_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+    # "Hoàn thành lệnh lọc" — mốc XÁC NHẬN riêng, TÁCH BIỆT khỏi việc từng Lô lọc (BatchFilterLot)
+    # con tự bấm "Hoàn thành lọc" của riêng nó (yêu cầu người dùng 2026-09-23: "khi bấm hoàn
+    # thành của lô lọc thì chỉ hoàn thành của mã lô lọc đó thôi, chưa phải là hoàn thành lệnh lọc
+    # đó" — trước đây status "hoan_thanh" của lệnh lọc suy tự động qua is_complete/
+    # consumed_downstream, không có nút riêng). Đặt tên `completed` (không phải `finished`) để
+    # không trùng nghĩa với cột `finished_product_id` (FK) đã có sẵn ở model này.
+    completed: Mapped[bool] = mapped_column(Boolean, default=False)
+    completed_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
 
 
 class BatchFilterOrderSource(Base):
