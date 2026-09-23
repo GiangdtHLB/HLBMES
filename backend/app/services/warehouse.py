@@ -1734,8 +1734,12 @@ def cancel_request(db: Session, request_id: str, user: User) -> dict:
 def update_request(db: Session, request_id: str, payload: dict, user: User) -> dict:
     """Sửa phiếu đề nghị nhận kho — CHỈ người có quyền tạo đề nghị (`warehouse.request`, phía
     phân xưởng), không phải thủ kho công ty (yêu cầu người dùng 2026-09-14). Sửa được:
-    - `requested_receipt_date` (ngày MUỐN nhận) — bất kể phiếu đã có dòng fulfilled hay chưa,
-      vì đây là header, không gắn với 1 dòng cụ thể. Không đổi `requested_at` (ngày lập phiếu).
+    - `requested_receipt_date` (ngày MUỐN nhận) — CHỈ khi phiếu CHƯA có dòng nào fulfilled (yêu
+      cầu người dùng 2026-09-23: "nếu có ít nhất 1 vật tư đã được xuất thì không cho sửa ngày đề
+      nghị nhận" — trước đây cho sửa bất kể, nhưng ngày này chính là `ts` hiệu lực đã ghi CỨNG
+      vào StockMovement của các dòng đã xuất; sửa sau khi đã xuất sẽ làm header lệch khỏi chứng
+      từ đã phát sinh thật, đúng lớp lỗi StockMovement "khai lùi ngày" đã rà soát/sửa trước đó).
+      Không đổi `requested_at` (ngày lập phiếu).
     - Từng dòng qua `lines` ([{line_id, material_id?, quantity?}]) — CHỈ áp dụng cho dòng đang
       "pending"; dòng đã fulfilled/rejected/cancelled thì chặn (đã khóa, giữ đúng lịch sử đã
       xử lý). Chỉ sửa GIÁ TRỊ dòng đã có — thêm/xóa hẳn 1 dòng dùng riêng add_request_line/
@@ -1744,6 +1748,10 @@ def update_request(db: Session, request_id: str, payload: dict, user: User) -> d
     require_perm(user, "warehouse.request")
     req = _get_request(db, request_id)
     if "requested_receipt_date" in payload:
+        existing_lines = db.execute(select(MaterialRequestLine).where(
+            MaterialRequestLine.request_id == request_id)).scalars().all()
+        if any(l.status == "fulfilled" for l in existing_lines):
+            raise DomainError("Phiếu đã có vật tư được xuất — không thể sửa ngày đề nghị nhận kho nữa.")
         req.requested_receipt_date = payload["requested_receipt_date"]
     ts = req.requested_receipt_date
     for line_upd in payload.get("lines") or []:

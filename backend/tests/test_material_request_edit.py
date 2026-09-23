@@ -142,11 +142,13 @@ def test_cannot_edit_already_fulfilled_line(client, admin_h, thukho_h, vanhanh_h
                                 json={"lines": [{"line_id": line_id, "quantity": 5}]})
     assert edit_fulfilled.status_code == 409, edit_fulfilled.text
 
-    # Nhưng ngày đề nghị nhận (header) vẫn sửa được dù phiếu đã có dòng fulfilled.
+    # Đã có dòng fulfilled -> ngày đề nghị nhận (header) cũng KHÔNG sửa được nữa (yêu cầu người
+    # dùng 2026-09-23: "nếu có ít nhất 1 vật tư đã được xuất thì không cho sửa ngày đề nghị
+    # nhận" — đảo lại quyết định cũ, vì ngày này đã ghi cứng vào StockMovement.ts của dòng đã xuất).
     new_date = utcnow().isoformat()
     edit_date = client.put(f"/api/warehouse/requests/{request_id}", headers=vanhanh_h,
                            json={"requested_receipt_date": new_date})
-    assert edit_date.status_code == 200, edit_date.text
+    assert edit_date.status_code == 409, edit_date.text
 
 
 def test_edit_multi_line_request_only_touches_pending_line(client, admin_h, thukho_h, vanhanh_h):

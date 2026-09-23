@@ -7926,6 +7926,10 @@ function requestLineRowHtml(r, l, matById, lotById, canFulfill, allLots) {
 // nghị (canRequest, xem requestBlockHtml).
 function openEditRequestModal(r, matById) {
   const dateVal = r.requested_receipt_date ? toDTLocal(new Date(r.requested_receipt_date)) : "";
+  // Đã có ít nhất 1 vật tư được xuất -> KHÔNG cho sửa "Ngày đề nghị nhận kho" nữa (yêu cầu người
+  // dùng 2026-09-23: ngày này đã ghi cứng vào StockMovement.ts của dòng đã xuất, sửa sau sẽ làm
+  // header lệch khỏi chứng từ thật — mirror chặn ở services/warehouse.py::update_request).
+  const hasFulfilled = r.lines.some(l => l.status === "fulfilled");
   const rows = r.lines.map(l => {
     const mat = matById[l.material_id];
     if (l.status !== "pending") {
@@ -7945,7 +7949,9 @@ function openEditRequestModal(r, matById) {
   // phiếu đã cập nhật) để thêm/xóa liên tiếp nhiều dòng không phải đóng mở lại từ đầu.
   modal(`<h3>Sửa phiếu <code class="k">${esc(r.request_code)}</code></h3>
     <div class="field" style="margin-bottom:10px;max-width:220px"><label>Ngày giờ đề nghị nhận kho</label>
-      <input id="reqedit_date" type="datetime-local" value="${esc(dateVal)}"/></div>
+      <input id="reqedit_date" type="datetime-local" value="${esc(dateVal)}" ${hasFulfilled ? "disabled" : ""}/>
+      ${hasFulfilled ? '<div class="muted" style="font-size:12px;margin-top:4px">Đã có vật tư được xuất — không thể sửa ngày này nữa.</div>' : ""}
+    </div>
     <div class="tablewrap"><table><thead><tr><th>Vật tư</th><th>SL</th><th>Trạng thái</th><th></th></tr></thead>
       <tbody>${rows}</tbody></table></div>
     <div class="muted" style="margin:8px 0;font-size:12px">Chỉ sửa/xóa được vật tư/số lượng của dòng còn "pending" — dòng đã xử lý giữ nguyên, không sửa/xóa được.</div>
@@ -7985,10 +7991,13 @@ function openEditRequestModal(r, matById) {
       material_id: tr.querySelector(".reqedit-mat").value,
       quantity: parseFloat(tr.querySelector(".reqedit-qty").value),
     }));
-    await PUT(`/warehouse/requests/${r.request_id}`, {
-      requested_receipt_date: $("reqedit_date").value ? new Date($("reqedit_date").value).toISOString() : null,
-      lines,
-    });
+    const payload = { lines };
+    // Chỉ gửi requested_receipt_date khi CÒN sửa được — gửi cả khi đã disabled (ô vẫn còn giá
+    // trị cũ) sẽ khiến server chặn 409 dù người dùng không hề đụng vào ngày này.
+    if (!hasFulfilled) {
+      payload.requested_receipt_date = $("reqedit_date").value ? new Date($("reqedit_date").value).toISOString() : null;
+    }
+    await PUT(`/warehouse/requests/${r.request_id}`, payload);
     toast("Đã lưu thay đổi phiếu đề nghị");
     closeModal();
     const v = document.querySelector("#nav button.active[data-view]")?.dataset.view;
