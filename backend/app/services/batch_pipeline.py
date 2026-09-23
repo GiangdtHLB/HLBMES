@@ -1628,7 +1628,10 @@ def create_pack_lot_from_bbt(db: Session, payload: dict, user: User) -> BatchPac
     """Tạo lô thành phẩm bằng cách chọn "Tank BBT nào đi chiết" (mirror add_bottle's from_bbt) —
     server tự tìm lô lọc nguồn mới nhất còn tồn ứng với tank đó, người dùng không cần tự chọn
     lô lọc. Đây là lối vào MỚI cho màn "Lô thành phẩm (Mẻ SX)"; split_filter_lot_to_pack_lot
-    (chọn thẳng filter_lot_id) vẫn giữ nguyên cho API cấp thấp."""
+    (chọn thẳng filter_lot_id) vẫn giữ nguyên cho API cấp thấp, KHÔNG bắt buộc Sản phẩm/Dây
+    chuyền (VD gọi nội bộ/test không cần khai 2 trường này) — bắt buộc CHỈ áp cho lối vào UI
+    "Tạo lô thành phẩm (chiết)" ở đây (yêu cầu người dùng 2026-09-23: chọn đúng 1 Sản phẩm + 1
+    Dây chuyền là bắt buộc, không được để trống/chọn nhiều)."""
     require_perm(user, "batch.execute")
     from_bbt = (payload.get("from_bbt") or "").strip()
     if not from_bbt:
@@ -1640,7 +1643,13 @@ def create_pack_lot_from_bbt(db: Session, payload: dict, user: User) -> BatchPac
     fl = _latest_filter_lot_for_bbt(db, from_bbt)
     if not fl:
         raise NotFoundError(f"Không tìm thấy lô lọc nguồn cho tank BBT '{from_bbt}'.")
-    payload = {**payload, "from_bbt": from_bbt}
+    finished_product_id = (payload.get("finished_product_id") or "").strip()
+    if not finished_product_id:
+        raise DomainError("Chọn sản phẩm để chiết.")
+    line = (payload.get("line") or "").strip()
+    if not line:
+        raise DomainError("Chọn dây chuyền để chiết.")
+    payload = {**payload, "from_bbt": from_bbt, "finished_product_id": finished_product_id, "line": line}
     return split_filter_lot_to_pack_lot(db, fl.filter_lot_id, payload, user)
 
 

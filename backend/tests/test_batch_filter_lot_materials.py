@@ -159,6 +159,13 @@ def _make_filter_lot(client, admin_h, suffix):
     return fl.json()["filter_lot_id"]
 
 
+def _make_finished_product(client, admin_h, suffix):
+    r = client.post("/api/finished-products", headers=admin_h,
+                    json={"code": f"SKU-{suffix}", "name": f"SKU test {suffix}", "uom": "lon"})
+    assert r.status_code == 201, r.text
+    return r.json()["finished_product_id"]
+
+
 def _finish_only_source(client, admin_h, filter_lot_id, v_drawn=900, ended_at=None):
     """Kết thúc mẻ lọc duy nhất của 1 lô lọc mới tạo — đặt "Ngày cấp" (BatchFilterLot.ended_at)
     cho lô đó, điều kiện bắt buộc TRƯỚC khi thêm bất kỳ nguyên liệu nào (2026-09-16)."""
@@ -393,9 +400,10 @@ def test_add_pack_lot_material_uses_ended_at_for_stock_as_of(client, admin_h):
     appr = client.post(f"/api/batch-filter-lots/{filter_lot_id}/approve", headers=admin_h)
     assert appr.status_code == 200, appr.text
     to_bbt = client.get(f"/api/batch-filter-lots/{filter_lot_id}", headers=admin_h).json()["to_bbt"]
+    fp_id = _make_finished_product(client, admin_h, suffix)
     pack = client.post("/api/batch-pack-lots", headers=admin_h,
                        json={"from_bbt": to_bbt, "qty": 200, "pack_lot_code": f"PKG-{suffix}",
-                            "lot_no": f"LOT-{suffix}"})
+                            "lot_no": f"LOT-{suffix}", "finished_product_id": fp_id, "line": "CL01"})
     assert pack.status_code == 201, pack.text
     pack_lot_id = pack.json()["pack_lot_id"]
 
@@ -433,8 +441,10 @@ def test_add_pack_lot_material_non_fifo_requires_reason(client, admin_h):
     appr = client.post(f"/api/batch-filter-lots/{filter_lot_id}/approve", headers=admin_h)
     assert appr.status_code == 200, appr.text
     to_bbt = client.get(f"/api/batch-filter-lots/{filter_lot_id}", headers=admin_h).json()["to_bbt"]
+    fp_id = _make_finished_product(client, admin_h, suffix)
     pack = client.post("/api/batch-pack-lots", headers=admin_h,
-                       json={"from_bbt": to_bbt, "qty": 200, "pack_lot_code": f"PKG-{suffix}", "lot_no": f"LOT-{suffix}"})
+                       json={"from_bbt": to_bbt, "qty": 200, "pack_lot_code": f"PKG-{suffix}", "lot_no": f"LOT-{suffix}",
+                             "finished_product_id": fp_id, "line": "CL01"})
     assert pack.status_code == 201, pack.text
     pack_lot_id = pack.json()["pack_lot_id"]
     shifts = client.put(f"/api/batch-pack-lots/{pack_lot_id}/shifts", headers=admin_h,

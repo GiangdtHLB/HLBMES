@@ -3752,7 +3752,6 @@ VIEWS.batchpacklots = async function () {
       `<option value="${esc(fp.finished_product_id)}" ${fp.finished_product_id === selected ? "selected" : ""}>${esc(fp.code)} — ${esc(fp.name)}</option>`).join("");
   };
   const packagingLines = lines.filter(l => l.kind === "line" && l.active);
-  const lineItems = packagingLines.map(l => ({ value: l.code, label: `${l.code} — ${l.name}` }));
   $("view-batchpacklots").innerHTML = `
     ${productionTabsHtml("batchpacklots")}
     <div class="panel"><h2>🍺 Tạo lô thành phẩm (chiết)</h2>
@@ -3761,7 +3760,8 @@ VIEWS.batchpacklots = async function () {
         <div class="field"><label>Chiết từ tank BBT</label><select id="pk_bbt"><option value=""></option>${bbtOpts}</select></div>
         <div class="field"><label>Sản phẩm</label><select id="pk_fp">${pkFpOpts(null, null)}</select>
           <div class="muted pk_fp_note" style="font-size:12px;margin-top:2px">Chưa xác định Loại bia — chọn tank BBT trước để chỉ hiện đúng sản phẩm cùng Loại bia.</div></div>
-        <div class="field"><label>Dây chuyền</label><div id="pk_line_wrap" data-items="${esc(JSON.stringify(lineItems))}"></div></div>
+        <div class="field"><label>Dây chuyền</label><select id="pk_line"><option value="">(chọn dây chuyền)</option>${packagingLines.map(l =>
+          `<option value="${esc(l.code)}">${esc(l.code)} — ${esc(l.name)}</option>`).join("")}</select></div>
         <div class="field"><label>Ngày giờ bắt đầu chiết</label><input id="pk_date" type="datetime-local" value="${toDTLocal(new Date())}"/></div>
       </div>
       <div class="row">
@@ -3788,7 +3788,6 @@ VIEWS.batchpacklots = async function () {
     </div>`;
   wireProductionTabs();
   wirePaginate("t_packlot", 10);
-  const pkLinePicker = initCheckboxMultiSelect($("pk_line_wrap"), lineItems, []);
   const updatePkFp = () => {
     const opt = $("pk_bbt").selectedOptions[0];
     const beerTypeId = opt ? opt.dataset.beertype : "";
@@ -3799,19 +3798,23 @@ VIEWS.batchpacklots = async function () {
   $("pk_bbt").onchange = updatePkFp;
   $("pk_create").onclick = () => guard(async () => {
     if (!$("pk_bbt").value) throw new Error("Chọn tank BBT để chiết.");
+    // Sản phẩm/Dây chuyền BẮT BUỘC chọn đúng 1 — cả 2 vốn là <select> đơn nên không thể chọn
+    // nhiều, chỉ cần chặn để trống (yêu cầu người dùng 2026-09-23: trước đây "Sản phẩm" bỏ
+    // trống được, "Dây chuyền" còn cho chọn NHIỀU dây chuyền cùng lúc qua ô multi-select).
+    if (!$("pk_fp").value) throw new Error("Chọn sản phẩm để chiết.");
+    if (!$("pk_line").value) throw new Error("Chọn dây chuyền để chiết.");
     const qty = parseFloat($("pk_qty").value);
     if (!qty || qty <= 0) throw new Error("Nhập Số lượng cấp chiết (lít) > 0.");
     const lotNo = $("pk_lotno").value.trim();
     if (!lotNo) throw new Error("Nhập số lô bia.");
-    const selectedLines = pkLinePicker.getSelected();
     const dateRaw = $("pk_date").value;
     // Mã lô TP là mã nội bộ để truy xuất — tự sinh, người dùng chỉ cần quan tâm Số lô bia
     // (mirror bottle_code tự sinh ở màn Chiết cũ, xem frontend/app.js ~10340).
     const p = await POST("/batch-pack-lots", {
       from_bbt: $("pk_bbt").value, qty,
       pack_lot_code: "PKG-" + Date.now().toString().slice(-6),
-      finished_product_id: $("pk_fp").value || null, lot_no: lotNo,
-      line: selectedLines.join(", ") || null,
+      finished_product_id: $("pk_fp").value, lot_no: lotNo,
+      line: $("pk_line").value,
       pack_date: dateRaw ? new Date(dateRaw).toISOString() : null,
     });
     toast("Đã tạo lô thành phẩm " + p.pack_lot_code); render("batchpacklots");
