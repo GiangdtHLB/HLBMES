@@ -547,24 +547,27 @@ def list_filter_order_sources(db: Session, order_id: str) -> list[BatchFilterOrd
 
 
 def _filter_order_status(db: Session, order: BatchFilterOrder) -> dict:
-    """"Còn dùng được" (chưa complete) khi: chưa có Lô lọc nào, HOẶC còn nguồn chưa kết thúc,
-    HOẶC tổng SL thực tế (volume_hl) các Lô lọc đã tạo từ lệnh này còn dưới kế hoạch - dung sai
-    — mirror filter_order.py::_is_complete. "Đã tiêu thụ hạ lưu" (mirror _chiet_started) khi đã
-    có Lô thành phẩm tách từ 1 trong các Lô lọc của lệnh này — chặn tạo thêm Lô lọc mới dù chưa
-    đủ SL kế hoạch."""
+    """`is_complete` = tổng SL thực tế (volume_hl) các Lô lọc đã tạo từ lệnh này đã đạt kế hoạch
+    - dung sai chưa — CHỈ mang tính THÔNG TIN/gợi ý (đủ điều kiện bấm "Hoàn thành lệnh lọc"),
+    KHÔNG tự động đổi status nữa (yêu cầu người dùng 2026-09-23: "khi bấm hoàn thành của lô lọc
+    thì chỉ hoàn thành của mã lô lọc đó thôi, chưa phải là hoàn thành lệnh lọc đó" — trước đây
+    is_complete/consumed_downstream tự suy ra status="hoan_thanh", không có nút riêng, dễ hiểu
+    lầm 1 Lô lọc con tự "Hoàn thành lọc" xong là lệnh lọc cũng xong theo). "Đã tiêu thụ hạ lưu"
+    (mirror _chiet_started) khi đã có Lô thành phẩm tách từ 1 trong các Lô lọc của lệnh này —
+    KHÔNG đổi status, chỉ vẫn dùng để chặn tạo thêm Lô lọc mới (ràng buộc vật lý thật, xem
+    VIEWS.batchfilterlots — khác hẳn "hoàn thành", xem finish_filter_order)."""
     lots = db.execute(select(BatchFilterLot).where(BatchFilterLot.order_id == order.order_id)).scalars().all()
     actual = sum(l.volume_hl or 0.0 for l in lots)
-    all_ended = bool(lots) and all(l.ended_at is not None for l in lots)
-    is_complete = all_ended and actual >= (order.planned_volume_hl - order.volume_tolerance_hl)
+    is_complete = actual >= (order.planned_volume_hl - order.volume_tolerance_hl)
     consumed_downstream = any(
         db.execute(select(BatchPackLot.pack_lot_id).where(
             BatchPackLot.filter_lot_id == l.filter_lot_id)).first()
         for l in lots
     )
-    # Trạng thái hiển thị (yêu cầu người dùng 2026-09-01): planned (chưa tạo lô lọc nào) ->
-    # dang_loc (đã có lô lọc, chưa đủ SL/chưa tiêu thụ hạ lưu) -> hoan_thanh (đủ SL kế hoạch,
-    # HOẶC đã bị tiêu thụ hạ lưu — dù chưa đủ SL cũng coi như xong việc vì không thể lọc thêm).
-    status = "planned" if not lots else ("hoan_thanh" if (is_complete or consumed_downstream) else "dang_loc")
+    # Trạng thái hiển thị: planned (chưa tạo lô lọc nào) -> dang_loc (đã có lô lọc, CHƯA bấm
+    # "Hoàn thành lệnh lọc") -> hoan_thanh (order.completed=True, mốc XÁC NHẬN thủ công riêng —
+    # xem finish_filter_order).
+    status = "planned" if not lots else ("hoan_thanh" if order.completed else "dang_loc")
     return {"lot_count": len(lots), "actual_volume_hl": round(actual, 3),
             "is_complete": is_complete, "consumed_downstream": consumed_downstream,
             "status": status, "status_label": FILTER_ORDER_STATUS_LABEL[status]}
@@ -592,6 +595,7 @@ def _filter_order_out(db: Session, order: BatchFilterOrder) -> dict:
         "finished_product_id": order.finished_product_id, "kcs_lot_no": order.kcs_lot_no, "note": order.note,
         "created_by": order.created_by, "created_at": order.created_at, "locked": order.locked,
         "tank_lm_names": _filter_order_tank_lm_names(db, order.order_id),
+        "completed": order.completed, "completed_by": order.completed_by, "completed_at": order.completed_at,
         **_filter_order_status(db, order),
     }
 
@@ -759,6 +763,91 @@ def create_filter_order(db: Session, sources: list[dict], payload: dict, user: U
     return _filter_order_out(db, order)
 
 
+def update_filter_order(db: Session, order_id: str, payload: dict, user: User) -> dict:
+    """Sửa "SL dự kiến" (planned_v_dich_hl) theo từng nguồn + "SL kế hoạch" (qty_planned) theo
+    từng vật tư của 1 Lệnh lọc — CHỈ khi lệnh CHƯA có Lô lọc nào tạo ra (status="planned", mirror
+    đúng điều kiện của delete_filter_order — đã có lô lọc thì kế hoạch coi như đã dùng, sửa lại
+    sẽ làm sai lệch lô lọc đã tạo dựa trên kế hoạch đó). Không thêm/xóa nguồn hay dòng vật tư,
+    không đổi order_code/blend_mode — chỉ sửa 2 con số trên (yêu cầu người dùng 2026-09-23: "lệnh
+    lọc chưa hoàn thành thì cho thêm nút sửa, để tôi sửa số lượng theo kế hoạch, số lượng vật
+    tư"). Kiểm tra TRƯỚC, ghi SAU (mirror create_filter_order/dispense._plan_consume) — thiếu tồn
+    ở BẤT KỲ dòng vật tư nào thì KHÔNG ghi dòng nào cả."""
+    require_perm(user, "batch.execute")
+    order = db.get(BatchFilterOrder, order_id)
+    if not order:
+        raise NotFoundError("Lệnh lọc không tồn tại.")
+    _assert_unlocked(order)
+    if db.execute(select(BatchFilterLot).where(BatchFilterLot.order_id == order_id)).first():
+        raise DomainError("Đã có lô lọc tạo từ lệnh này — không thể sửa.")
+
+    source_updates = payload.get("sources") or []
+    sources_by_id = {s.link_id: s for s in list_filter_order_sources(db, order_id)}
+    for upd in source_updates:
+        src = sources_by_id.get(upd["link_id"])
+        if not src:
+            raise NotFoundError(f"Nguồn '{upd['link_id']}' không thuộc lệnh lọc này.")
+
+    line_updates = payload.get("lines") or []
+    lines_by_id = {l.line_id: l for l in db.execute(select(BatchFilterOrderMaterialLine).where(
+        BatchFilterOrderMaterialLine.order_id == order_id)).scalars().all()}
+    if line_updates:
+        company_stock, workshop_stock = _filter_order_stock_snapshot(db)
+        check_lines = []
+        for upd in line_updates:
+            line = lines_by_id.get(upd["line_id"])
+            if not line:
+                raise NotFoundError(f"Vật tư '{upd['line_id']}' không thuộc lệnh lọc này.")
+            check_lines.append({"material_id": line.material_id, "material_name": line.material_name,
+                                "qty_planned": upd["qty_planned"]})
+        _assert_filter_order_material_stock(check_lines, company_stock, workshop_stock)
+
+    for upd in source_updates:
+        sources_by_id[upd["link_id"]].planned_v_dich_hl = upd["planned_v_dich_hl"]
+    for upd in line_updates:
+        lines_by_id[upd["line_id"]].qty_planned = upd["qty_planned"]
+    # planned_volume_hl LUÔN = tổng planned_v_dich_hl mọi nguồn (mirror create_filter_order) —
+    # tính lại TOÀN BỘ (không chỉ các nguồn vừa sửa) để không lệch nếu chỉ sửa 1/nhiều nguồn.
+    order.planned_volume_hl = sum(s.planned_v_dich_hl or 0.0 for s in sources_by_id.values())
+    record_audit(db, entity_type="batch_filter_order", entity_id=order_id, action="update", actor=user,
+                after={"sources": source_updates, "lines": line_updates,
+                      "planned_volume_hl": order.planned_volume_hl})
+    db.commit()
+    return _filter_order_out(db, order)
+
+
+def finish_filter_order(db: Session, order_id: str, user: User) -> dict:
+    """"Hoàn thành lệnh lọc" — mốc XÁC NHẬN riêng của vận hành, TÁCH BIỆT hoàn toàn khỏi việc
+    từng Lô lọc (BatchFilterLot) con tự bấm "Hoàn thành lọc" (finish_filtering) của riêng nó
+    (yêu cầu người dùng 2026-09-23). Điều kiện DUY NHẤT: tổng SL thực tế (volume_hl) các Lô lọc
+    đã tạo từ lệnh này đã đạt kế hoạch - dung sai (mirror is_complete ở _filter_order_status) —
+    KHÔNG đòi mọi Lô lọc/mẻ lọc phải "Kết thúc" trước (khác is_complete bản cũ)."""
+    require_perm(user, "batch.execute")
+    order = db.get(BatchFilterOrder, order_id)
+    if not order:
+        raise NotFoundError("Lệnh lọc không tồn tại.")
+    _assert_unlocked(order)
+    if order.completed:
+        raise DomainError("Lệnh lọc này đã hoàn thành rồi.")
+    lots = db.execute(select(BatchFilterLot).where(BatchFilterLot.order_id == order_id)).scalars().all()
+    if not lots:
+        raise DomainError("Chưa có lô lọc nào tạo từ lệnh này — chưa thể hoàn thành.")
+    actual = round(sum(l.volume_hl or 0.0 for l in lots), 3)
+    target = round(order.planned_volume_hl - order.volume_tolerance_hl, 3)
+    if actual < target:
+        raise DomainError(
+            f"Thể tích lọc thực tế ({actual} hl) chưa đạt kế hoạch trừ dung sai ({target} hl) "
+            "— chưa thể hoàn thành lệnh lọc."
+        )
+    order.completed = True
+    order.completed_by = user.username
+    order.completed_at = utcnow()
+    record_audit(db, entity_type="batch_filter_order", entity_id=order_id, action="finish", actor=user,
+                after={"actual_volume_hl": actual, "target_volume_hl": target})
+    db.commit()
+    db.refresh(order)
+    return _filter_order_out(db, order)
+
+
 def delete_filter_order(db: Session, order_id: str, user: User) -> None:
     require_perm(user, "batch.execute")
     order = db.get(BatchFilterOrder, order_id)
@@ -768,6 +857,10 @@ def delete_filter_order(db: Session, order_id: str, user: User) -> None:
         raise DomainError("Đã có lô lọc tạo từ lệnh này — không thể xóa.")
     for s in list_filter_order_sources(db, order_id):
         db.delete(s)
+    for m in db.execute(select(BatchFilterOrderMaterialLine).where(
+            BatchFilterOrderMaterialLine.order_id == order_id)).scalars().all():
+        db.delete(m)
+    db.flush()
     db.delete(order)
     record_audit(db, entity_type="batch_filter_order", entity_id=order_id, action="delete", actor=user)
     db.commit()
@@ -848,16 +941,20 @@ def draw_from_filter_order(db: Session, order_id: str, payload: dict, user: User
     """Tạo 1 Lô lọc (BatchFilterLot) từ 1 Lệnh lọc đã khai báo — nhân bản các dòng nguồn kế
     hoạch (BatchFilterOrderSource) thành BatchFilterLotSource thật, kế thừa Loại bia/Sản phẩm
     đích từ lệnh (mirror add_filter). Gọi lại được nhiều lần trên CÙNG 1 lệnh (VD rút dịch
-    nhiều đợt) miễn lệnh chưa complete/chưa bị tiêu thụ hạ lưu. Bắt buộc chọn `to_bbt` (tank
-    thành phẩm đích) — dịch lọc xong phải biết đưa vào tank vật lý nào."""
+    nhiều đợt) miễn lệnh CHƯA "Hoàn thành" (order.completed, mốc xác nhận thủ công riêng — xem
+    finish_filter_order) và chưa bị tiêu thụ hạ lưu — yêu cầu người dùng 2026-09-23: "lệnh lọc
+    đó chưa ở trạng thái hoàn thành, thì cho phép tạo thêm 1 mã lô lọc từ lệnh lọc đó" (trước đây
+    chặn ngay khi is_complete=True dù chưa ai bấm hoàn thành, dễ chặn oan khi vẫn còn muốn rút
+    thêm dịch). Bắt buộc chọn `to_bbt` (tank thành phẩm đích) — dịch lọc xong phải biết đưa vào
+    tank vật lý nào."""
     require_perm(user, "batch.execute")
     order = db.get(BatchFilterOrder, order_id)
     if not order:
         raise NotFoundError("Lệnh lọc không tồn tại.")
     _assert_unlocked(order)
     status = _filter_order_status(db, order)
-    if status["is_complete"]:
-        raise DomainError("Lệnh lọc này đã đủ sản lượng kế hoạch — không thể tạo thêm lô lọc.")
+    if status["status"] == "hoan_thanh":
+        raise DomainError("Lệnh lọc này đã hoàn thành — không thể tạo thêm lô lọc.")
     if status["consumed_downstream"]:
         raise DomainError("Đã có lô thành phẩm tách từ lô lọc của lệnh này — không thể tạo thêm lô lọc.")
     templates = list_filter_order_sources(db, order_id)

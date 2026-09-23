@@ -1978,6 +1978,9 @@ class BatchFilterOrderOut(BaseModel):
     status: str = "planned"
     status_label: str = ""
     tank_lm_names: list[str] = []
+    completed: bool = False
+    completed_by: Optional[str] = None
+    completed_at: Optional[datetime] = None
 
 
 class BatchFilterOrderSourceOut(BaseModel):
@@ -2003,6 +2006,24 @@ class BatchFilterOrderMaterialLineOut(BaseModel):
     qty_planned: float = 0.0
     stock_company_snapshot: Optional[float] = None
     stock_workshop_snapshot: Optional[float] = None
+
+
+class BatchFilterOrderSourceUpdateIn(BaseModel):
+    link_id: str
+    planned_v_dich_hl: float = Field(ge=0)
+
+
+class BatchFilterOrderMaterialLineUpdateIn(BaseModel):
+    line_id: str
+    qty_planned: float = Field(ge=0)
+
+
+class BatchFilterOrderUpdateIn(BaseModel):
+    """Sửa "SL dự kiến" theo từng nguồn + "SL kế hoạch" theo từng vật tư của 1 Lệnh lọc CHƯA có
+    Lô lọc nào tạo ra (status="planned") — yêu cầu người dùng 2026-09-23: "lệnh lọc chưa hoàn
+    thành thì cho thêm nút sửa, để tôi sửa số lượng theo kế hoạch, số lượng vật tư"."""
+    sources: list[BatchFilterOrderSourceUpdateIn] = []
+    lines: list[BatchFilterOrderMaterialLineUpdateIn] = []
 
 
 class FilterLotFromOrderIn(BaseModel):

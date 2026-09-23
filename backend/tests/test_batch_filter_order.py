@@ -124,7 +124,10 @@ def test_create_order_single_tank_and_draw_filter_lot(client, admin_h):
     assert order_after_create["lot_count"] == 1 and order_after_create["is_complete"] is False   # chưa kết thúc nguồn
 
 
-def test_order_available_until_complete_then_blocked(client, admin_h):
+def test_order_available_after_complete_until_manually_finished(client, admin_h):
+    """Yêu cầu người dùng 2026-09-23: "lệnh lọc đó chưa ở trạng thái hoàn thành, thì cho phép tạo
+    thêm 1 mã lô lọc" — is_complete=True (đủ SL kế hoạch) KHÔNG còn tự chặn tạo thêm lô lọc nữa,
+    chỉ order["status"]=="hoan_thanh" (đã bấm nút "Hoàn thành lệnh lọc") mới chặn."""
     tank = _make_tank(client, admin_h, "2", "TANK-FO-02")
     order = client.post("/api/batch-filter-orders", headers=admin_h, json={
         "order_code": "LOC-FO-02",
@@ -140,10 +143,49 @@ def test_order_available_until_complete_then_blocked(client, admin_h):
     order_after = client.get(f"/api/batch-filter-orders/{order['order_id']}", headers=admin_h).json()
     assert order_after["is_complete"] is True
     assert order_after["actual_volume_hl"] == 900
+    assert order_after["status"] == "dang_loc"   # đủ SL nhưng CHƯA bấm "Hoàn thành lệnh lọc"
 
+    # Đủ SL kế hoạch rồi nhưng chưa hoàn thành thủ công -> vẫn tạo thêm lô lọc được bình thường.
+    still_ok = client.post(f"/api/batch-filter-orders/{order['order_id']}/filter-lots", headers=admin_h,
+                           json={"filter_lot_code": "FLOT-FO-02-DUP", "to_bbt": _make_bbt_line(client, admin_h, "FO02DUP")})
+    assert still_ok.status_code == 201, still_ok.text
+
+    # Bấm "Hoàn thành lệnh lọc" — chỉ hoàn thành LỆNH, KHÔNG đụng status của các Lô lọc con.
+    finish = client.post(f"/api/batch-filter-orders/{order['order_id']}/finish", headers=admin_h)
+    assert finish.status_code == 200, finish.text
+    assert finish.json()["status"] == "hoan_thanh"
+    assert finish.json()["completed_by"] == "admin"
+    lot_after_finish = client.get(f"/api/batch-filter-lots/{draw['filter_lot_id']}", headers=admin_h).json()
+    assert lot_after_finish["status"] == "dang_loc"   # Lô lọc con KHÔNG tự hoàn thành theo
+
+    # Bấm lần 2 -> chặn (đã hoàn thành rồi).
+    again = client.post(f"/api/batch-filter-orders/{order['order_id']}/finish", headers=admin_h)
+    assert again.status_code == 409, again.text
+
+    # Đã hoàn thành -> không tạo thêm lô lọc được nữa.
     blocked = client.post(f"/api/batch-filter-orders/{order['order_id']}/filter-lots", headers=admin_h,
-                          json={"filter_lot_code": "FLOT-FO-02-DUP", "to_bbt": _make_bbt_line(client, admin_h, "FO02DUP")})
+                          json={"filter_lot_code": "FLOT-FO-02-DUP2", "to_bbt": _make_bbt_line(client, admin_h, "FO02DUP2")})
     assert blocked.status_code == 409, blocked.text
+
+
+def test_finish_order_blocked_before_volume_target_reached(client, admin_h):
+    tank = _make_tank(client, admin_h, "12", "TANK-FO-02B")
+    order = client.post("/api/batch-filter-orders", headers=admin_h, json={
+        "order_code": "LOC-FO-02B",
+        "sources": [{"source_type": "tank", "source_tank_id": tank["tank_id"], "planned_v_dich_hl": 900}],
+    }).json()
+
+    no_lot = client.post(f"/api/batch-filter-orders/{order['order_id']}/finish", headers=admin_h)
+    assert no_lot.status_code == 409, no_lot.text   # chưa có lô lọc nào
+
+    draw = client.post(f"/api/batch-filter-orders/{order['order_id']}/filter-lots", headers=admin_h,
+                       json={"filter_lot_code": "FLOT-FO-02B", "to_bbt": _make_bbt_line(client, admin_h, "FO02B")}).json()
+    src = client.get(f"/api/batch-filter-lots/{draw['filter_lot_id']}/sources", headers=admin_h).json()[0]
+    _finish_source(client, admin_h, src, 500)   # 500 < 900 kế hoạch
+
+    too_early = client.post(f"/api/batch-filter-orders/{order['order_id']}/finish", headers=admin_h)
+    assert too_early.status_code == 409, too_early.text
+    assert "chưa đạt kế hoạch" in too_early.json()["detail"]
 
 
 def test_order_blocked_after_pack_lot_split(client, admin_h):
@@ -293,3 +335,55 @@ def test_filter_lot_requires_to_bbt_and_blocks_occupied_tank(client, admin_h):
     reoccupied = client.get("/api/batch-filter-lots/available-bbt-lines", headers=admin_h).json()
     row_reoccupied = next(r for r in reoccupied if r["code"] == bbt_code)
     assert row_reoccupied["occupied"] is True
+
+
+def test_update_order_edits_planned_qty_blocked_after_filter_lot(client, admin_h):
+    """Yêu cầu người dùng 2026-09-23: "lệnh lọc chưa hoàn thành thì cho thêm nút sửa, để tôi sửa
+    số lượng theo kế hoạch, số lượng vật tư"."""
+    mat = client.post("/api/materials", headers=admin_h,
+                      json={"code": "MAT-FO-UPD", "name": "Bột trợ lọc FO update", "uom": "kg"})
+    assert mat.status_code == 201, mat.text
+    material_id = mat.json()["material_id"]
+    recv = client.post("/api/warehouse/receive", headers=admin_h,
+                       json={"lot_code": "LOT-FO-UPD", "material_id": material_id,
+                             "quantity": 100, "uom": "kg", "location": "Kho công ty"})
+    assert recv.status_code == 200, recv.text
+
+    tank = _make_tank(client, admin_h, "11", "TANK-FO-08")
+    order = client.post("/api/batch-filter-orders", headers=admin_h, json={
+        "order_code": "LOC-FO-08",
+        "sources": [{"source_type": "tank", "source_tank_id": tank["tank_id"], "planned_v_dich_hl": 900}],
+        "lines": [{"material_id": material_id, "material_name": "Bột trợ lọc FO update",
+                  "uom": "kg", "qty_planned": 5}],
+    }).json()
+    src = client.get(f"/api/batch-filter-orders/{order['order_id']}/sources", headers=admin_h).json()[0]
+    line = client.get(f"/api/batch-filter-orders/{order['order_id']}/materials", headers=admin_h).json()[0]
+
+    # Sửa SL dự kiến của nguồn + SL kế hoạch của vật tư.
+    upd = client.put(f"/api/batch-filter-orders/{order['order_id']}", headers=admin_h, json={
+        "sources": [{"link_id": src["link_id"], "planned_v_dich_hl": 850}],
+        "lines": [{"line_id": line["line_id"], "qty_planned": 20}],
+    })
+    assert upd.status_code == 200, upd.text
+    assert upd.json()["planned_volume_hl"] == 850
+    sources_after = client.get(f"/api/batch-filter-orders/{order['order_id']}/sources", headers=admin_h).json()
+    assert sources_after[0]["planned_v_dich_hl"] == 850
+    lines_after = client.get(f"/api/batch-filter-orders/{order['order_id']}/materials", headers=admin_h).json()
+    assert lines_after[0]["qty_planned"] == 20
+
+    # Sửa vượt quá tồn kho (100kg đã nhập) -> chặn, không ghi gì cả (kể cả nguồn).
+    over = client.put(f"/api/batch-filter-orders/{order['order_id']}", headers=admin_h, json={
+        "sources": [{"link_id": src["link_id"], "planned_v_dich_hl": 500}],
+        "lines": [{"line_id": line["line_id"], "qty_planned": 9999}],
+    })
+    assert over.status_code == 409, over.text
+    unchanged = client.get(f"/api/batch-filter-orders/{order['order_id']}/sources", headers=admin_h).json()
+    assert unchanged[0]["planned_v_dich_hl"] == 850   # vẫn giữ giá trị đã sửa thành công lần trước
+
+    # Đã có lô lọc tạo từ lệnh -> không sửa được nữa.
+    client.post(f"/api/batch-filter-orders/{order['order_id']}/filter-lots", headers=admin_h,
+               json={"filter_lot_code": "FLOT-FO-08", "to_bbt": _make_bbt_line(client, admin_h, "FO08")})
+    blocked = client.put(f"/api/batch-filter-orders/{order['order_id']}", headers=admin_h, json={
+        "sources": [{"link_id": src["link_id"], "planned_v_dich_hl": 700}],
+    })
+    assert blocked.status_code == 409, blocked.text
