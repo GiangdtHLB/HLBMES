@@ -1738,7 +1738,9 @@ def update_request(db: Session, request_id: str, payload: dict, user: User) -> d
       vì đây là header, không gắn với 1 dòng cụ thể. Không đổi `requested_at` (ngày lập phiếu).
     - Từng dòng qua `lines` ([{line_id, material_id?, quantity?}]) — CHỈ áp dụng cho dòng đang
       "pending"; dòng đã fulfilled/rejected/cancelled thì chặn (đã khóa, giữ đúng lịch sử đã
-      xử lý). Không thêm/xóa dòng — chỉ sửa giá trị dòng đã có (giữ đúng phạm vi yêu cầu)."""
+      xử lý). Chỉ sửa GIÁ TRỊ dòng đã có — thêm/xóa hẳn 1 dòng dùng riêng add_request_line/
+      delete_request_line bên dưới (yêu cầu người dùng 2026-09-23: "cho tôi sửa số lượng, hoặc
+      xóa hoặc thêm vật tư ... nếu vật tư đó chưa được xuất")."""
     require_perm(user, "warehouse.request")
     req = _get_request(db, request_id)
     if "requested_receipt_date" in payload:
@@ -1776,6 +1778,69 @@ def update_request(db: Session, request_id: str, payload: dict, user: User) -> d
                       "lines": [{"line_id": ln.line_id, "material_id": ln.material_id, "quantity": ln.quantity}
                                 for ln in lines]})
     db.commit()
+    return _request_dict(db, req, lines)
+
+
+def add_request_line(db: Session, request_id: str, payload: dict, user: User) -> dict:
+    """Thêm 1 dòng vật tư MỚI vào phiếu đề nghị đã có sẵn — CHỈ bên đề nghị (`warehouse.request`),
+    dòng mới luôn bắt đầu "pending" giống lúc tạo phiếu (yêu cầu người dùng 2026-09-23: "sửa đề
+    nghị nhận vật tư thì cho tôi sửa số lượng, hoặc xóa hoặc thêm vật tư ... nếu vật tư đó chưa
+    được xuất" — trước đây `update_request` chỉ sửa được dòng đã có, không thêm được dòng mới).
+    Cùng kiểm tra tồn kho công ty tại đúng "Ngày đề nghị nhận kho" (as-of) như create_request/
+    update_request, và cùng gán `seq` tiếp theo (max seq hiện có + 1, không tái dùng seq đã xóa
+    để không trùng "(dòng N)" với dòng cũ trong lịch sử/chứng từ đã ghi)."""
+    require_perm(user, "warehouse.request")
+    req = _get_request(db, request_id)
+    material_id = payload.get("material_id")
+    mat = db.get(Material, material_id)
+    if not mat:
+        raise NotFoundError(f"Vật tư '{material_id}' không tồn tại.")
+    qty = payload.get("quantity")
+    if not qty or qty <= 0:
+        raise DomainError("Số lượng đề nghị phải > 0.")
+    uom = payload.get("uom") or mat.uom
+    ts = req.requested_receipt_date
+    on_hand = _stock_at_company_as_of(db, material_id, ts) if ts is not None else _stock_at_company(db, material_id)
+    if qty > on_hand:
+        when = f" tính đến ngày đề nghị nhận kho {ts:%d/%m/%Y %H:%M}" if ts is not None else " hiện có"
+        raise DomainError(
+            f"Số lượng đề nghị của '{mat.code}' ({qty} {uom}) vượt quá tồn kho công ty{when} ({on_hand} {uom})."
+        )
+    if payload.get("preferred_lot_id"):
+        _lot(db, payload["preferred_lot_id"])
+    existing = db.execute(select(MaterialRequestLine).where(
+        MaterialRequestLine.request_id == request_id)).scalars().all()
+    next_seq = max([l.seq for l in existing], default=-1) + 1
+    line = MaterialRequestLine(line_id=new_id(), request_id=request_id, seq=next_seq,
+                               material_id=material_id, quantity=qty, uom=uom,
+                               preferred_lot_id=payload.get("preferred_lot_id"), status="pending")
+    db.add(line)
+    record_audit(db, entity_type="material_request", entity_id=request_id, action="add_line",
+                actor=user, after={"material_id": material_id, "quantity": qty, "uom": uom})
+    db.commit()
+    db.refresh(line)
+    return _request_dict(db, req, existing + [line])
+
+
+def delete_request_line(db: Session, request_id: str, line_id: str, user: User) -> dict:
+    """Xóa hẳn 1 dòng vật tư CÒN "pending" khỏi phiếu đề nghị — CHỈ bên đề nghị
+    (`warehouse.request`), CHỈ khi dòng CHƯA xử lý (chưa xuất/chưa từ chối) — dòng đã fulfilled/
+    rejected/cancelled thì chặn, giữ đúng lịch sử đã xử lý (mirror update_request, yêu cầu người
+    dùng 2026-09-23). An toàn xóa hẳn (không chỉ đổi status): dòng "pending" chưa từng có
+    StockMovement nào tham chiếu tới (request_line_id chỉ được gắn lúc fulfill), nên không vướng
+    khóa ngoại nào."""
+    require_perm(user, "warehouse.request")
+    req = _get_request(db, request_id)
+    line = _get_request_line(db, request_id, line_id)
+    if line.status != "pending":
+        raise DomainError(f"Dòng vật tư (vị trí {line.seq + 1}) đã ở trạng thái "
+                          f"'{line.status}', không thể xóa.")
+    record_audit(db, entity_type="material_request", entity_id=request_id, action="delete_line",
+                actor=user, before={"material_id": line.material_id, "quantity": line.quantity})
+    db.delete(line)
+    db.commit()
+    lines = db.execute(select(MaterialRequestLine).where(
+        MaterialRequestLine.request_id == request_id)).scalars().all()
     return _request_dict(db, req, lines)
 
 

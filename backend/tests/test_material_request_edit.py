@@ -170,3 +170,51 @@ def test_edit_multi_line_request_only_touches_pending_line(client, admin_h, thuk
     assert upd.status_code == 200, upd.text
     line2 = next(l for l in upd.json()["lines"] if l["line_id"] == line2_id)
     assert line2["quantity"] == 22
+
+
+def test_add_and_delete_request_line(client, admin_h, thukho_h, vanhanh_h):
+    """Yêu cầu người dùng 2026-09-23: "sửa đề nghị nhận vật tư thì cho tôi sửa số lượng, hoặc xóa
+    hoặc thêm vật tư ... nếu vật tư đó chưa được xuất"."""
+    mat1 = _create_material(client, admin_h, "REQEDIT-04A")
+    mat2 = _create_material(client, admin_h, "REQEDIT-04B")
+    _receive(client, thukho_h, mat1, "LOT-REQEDIT-04A", 100)
+    lot2_id = _receive(client, thukho_h, mat2, "LOT-REQEDIT-04B", 50)
+
+    req = client.post("/api/warehouse/requests", headers=vanhanh_h,
+                      json={"lines": [{"material_id": mat1, "quantity": 10}]})
+    assert req.status_code == 201, req.text
+    request_id = req.json()["request_id"]
+    line1_id = req.json()["lines"][0]["line_id"]
+
+    # thukho (chỉ warehouse.issue) không được thêm/xóa dòng.
+    denied_add = client.post(f"/api/warehouse/requests/{request_id}/lines", headers=thukho_h,
+                             json={"material_id": mat2, "quantity": 5})
+    assert denied_add.status_code == 403, denied_add.text
+
+    # Thêm 1 dòng vật tư mới vào phiếu đã có sẵn.
+    add = client.post(f"/api/warehouse/requests/{request_id}/lines", headers=vanhanh_h,
+                      json={"material_id": mat2, "quantity": 5})
+    assert add.status_code == 201, add.text
+    body = add.json()
+    assert len(body["lines"]) == 2
+    line2 = next(l for l in body["lines"] if l["material_id"] == mat2)
+    assert line2["quantity"] == 5 and line2["status"] == "pending"
+    line2_id = line2["line_id"]
+
+    # Thêm vượt quá tồn kho công ty -> chặn, không thêm dòng.
+    over = client.post(f"/api/warehouse/requests/{request_id}/lines", headers=vanhanh_h,
+                       json={"material_id": mat2, "quantity": 9999})
+    assert over.status_code == 409, over.text
+
+    # Duyệt dòng 2 -> không xóa được nữa (đã xuất).
+    ful = client.post(f"/api/warehouse/requests/{request_id}/lines/{line2_id}/fulfill",
+                      headers=thukho_h, json={"lot_id": lot2_id, "quantity": 5})
+    assert ful.status_code == 200, ful.text
+    denied_del = client.delete(f"/api/warehouse/requests/{request_id}/lines/{line2_id}", headers=vanhanh_h)
+    assert denied_del.status_code == 409, denied_del.text
+
+    # Dòng 1 vẫn "pending" (chưa xuất) -> xóa được.
+    delr = client.delete(f"/api/warehouse/requests/{request_id}/lines/{line1_id}", headers=vanhanh_h)
+    assert delr.status_code == 200, delr.text
+    remaining = [l["line_id"] for l in delr.json()["lines"]]
+    assert line1_id not in remaining and line2_id in remaining

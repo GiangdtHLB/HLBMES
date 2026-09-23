@@ -2238,6 +2238,9 @@ class BatchPackLotOut(ORMModel):
     quality_status: str
     status: str = "dang_chiet"
     status_label: str = ""
+    finished: bool = False
+    finished_by: Optional[str] = None
+    finished_at: Optional[datetime] = None
 
 
 class BatchPackLotPackDateIn(BaseModel):

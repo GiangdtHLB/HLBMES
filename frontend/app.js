@@ -63,7 +63,7 @@ const TANK_BADGE_CLASS = { planned: "planned", dang_nau: "pending", len_men: "ru
 // tank_code trần — tránh lặp lại đúng bug đã sửa ở panel "chờ khai báo" (yêu cầu người dùng
 // 2026-09-02: "không rõ tank 01, 02, 04 là gì, tank men phải là lấy từ danh mục tank men chứ").
 const batchTankDisplayName = (t) => t && t.tank_lm ? `${t.tank_lm} (Lô ${t.tank_code})` : `Lô ${t ? t.tank_code : "?"} (chưa gán tank vật lý)`;
-const PACK_LOT_BADGE_CLASS = { dang_chiet: "in_progress", chiet_1_phan: "due", chiet_het: "done" };
+const PACK_LOT_BADGE_CLASS = { dang_chiet: "in_progress", chiet_1_phan: "due", chiet_het: "done", hoan_thanh: "released" };
 const FILTER_LOT_BADGE_CLASS = { dang_loc: "in_progress", hoan_thanh: "released", am: "critical" };
 const FILTER_ORDER_BADGE_CLASS = { planned: "pending", dang_loc: "in_progress", hoan_thanh: "released" };
 const statusBadge = (cls, label) => `<span class="badge ${cls || "pending"}">${esc(label)}</span>`;
@@ -4047,6 +4047,7 @@ async function showBatchPackLot(packLotId) {
   const dis = lk ? "disabled" : "";
   $("pk_detail").innerHTML = `<h2>Lô thành phẩm ${esc(p.pack_lot_code)} ${lk ? '<span class="muted" style="font-size:13px">🔒 Đã khóa</span>' : ""}</h2>
     <dl class="detail">
+      <dt>Trạng thái</dt><dd>${statusBadge(PACK_LOT_BADGE_CLASS[p.status], p.status_label)}${p.finished ? ` <span class="muted" style="font-size:12px">— hoàn thành bởi ${esc(p.finished_by)} lúc ${fmt(p.finished_at)}</span>` : ""}</dd>
       <dt>Chất lượng</dt><dd>${badge(p.quality_status)}</dd>
       <dt>Lô lọc nguồn</dt><dd><code class="k">${esc(f.filter_lot_code)}</code> (còn tồn ${f.on_hand} hl)</dd>
       <dt>Tank BBT</dt><dd>${esc(p.from_bbt || "—")}</dd>
@@ -4086,6 +4087,7 @@ async function showBatchPackLot(packLotId) {
     ${materialUsageSectionHtml("pkmu", matUsage, lk, p.ended_at)}
     ${!p.stocked ? '<div id="pk_wms_alloc_wrap" style="margin-top:16px"></div>' : ""}
     <div class="row" style="margin-top:10px">
+      ${(!p.finished && !lk) ? '<button class="btn sm" id="pk_finish">✔ Hoàn thành chiết</button>' : ""}
       ${p.approved ? "" : '<button class="btn sm sec" id="pk_approve">✔ Duyệt KCS</button>'}
       ${f.on_hand !== 0 ? `<button class="btn sm sec" id="pk_empty" title="Buộc tồn tank BBT (${f.on_hand} hl) về 0 khi tank vật lý đã chiết cạn thật nhưng số liệu còn lệch — cho phép cả khi hồ sơ EBR đã khóa">Làm rỗng tank</button>` : ""}
       <button class="btn sm sec" id="pk_trace">🔍 Truy ngược</button>
@@ -4098,6 +4100,11 @@ async function showBatchPackLot(packLotId) {
       suggestUrl: `/batch-pack-lots/${packLotId}/materials/suggest`,
       onChange: () => showBatchPackLot(packLotId) });
   $("pk_ebr").onclick = () => openPackLotEBR(packLotId);
+  if ($("pk_finish")) $("pk_finish").onclick = () => guard(async () => {
+    if (!confirm(`Xác nhận đã hoàn thành chiết lô ${esc(p.pack_lot_code)}?`)) return;
+    await POST(`/batch-pack-lots/${packLotId}/finish-chiet`, {});
+    toast("Đã xác nhận hoàn thành chiết"); showBatchPackLot(packLotId);
+  });
   $("pk_audit").onclick = (e) => { e.preventDefault(); document.querySelector('[data-view="audit"]').click(); setTimeout(() => { $("au_entity").value = packLotId; $("au_load").click(); }, 50); };
   $("pk_qty_save").onclick = () => guard(async () => {
     const qty = parseFloat($("pk_qty_edit").value);
@@ -7924,19 +7931,29 @@ function openEditRequestModal(r, matById) {
     if (l.status !== "pending") {
       const matLabel = mat ? `${esc(mat.code)} — ${esc(mat.name)}` : esc(l.material_id);
       return `<tr><td>${matLabel}</td><td>${l.quantity} ${esc(l.uom)}</td>
-        <td>${badge(REQ_STATUS_BADGE[l.status] || "planned")}${esc(l.status)}</td></tr>`;
+        <td>${badge(REQ_STATUS_BADGE[l.status] || "planned")}${esc(l.status)}</td><td></td></tr>`;
     }
     return `<tr data-editline="${esc(l.line_id)}">
       <td><select class="reqedit-mat" style="width:100%">${REQ_CACHE.matOpts}</select></td>
       <td><input type="number" min="0" step="any" class="reqedit-qty" value="${l.quantity}" style="width:90px"/> ${esc(l.uom)}</td>
-      <td>${badge(REQ_STATUS_BADGE[l.status] || "planned")}${esc(l.status)}</td></tr>`;
+      <td>${badge(REQ_STATUS_BADGE[l.status] || "planned")}${esc(l.status)}</td>
+      <td><button class="btn sm sec" data-reqlinedel="${esc(l.line_id)}" style="color:var(--red)">Xóa</button></td></tr>`;
   }).join("");
+  // + Thêm dòng/Xóa dòng — CHỈ khi dòng còn "pending" (chưa xuất), yêu cầu người dùng 2026-09-23:
+  // "sửa đề nghị nhận vật tư thì cho tôi sửa số lượng, hoặc xóa hoặc thêm vật tư ... nếu vật tư
+  // đó chưa được xuất". Thêm/xóa xong tự mở lại modal với dữ liệu mới (server trả về nguyên
+  // phiếu đã cập nhật) để thêm/xóa liên tiếp nhiều dòng không phải đóng mở lại từ đầu.
   modal(`<h3>Sửa phiếu <code class="k">${esc(r.request_code)}</code></h3>
     <div class="field" style="margin-bottom:10px;max-width:220px"><label>Ngày giờ đề nghị nhận kho</label>
       <input id="reqedit_date" type="datetime-local" value="${esc(dateVal)}"/></div>
-    <div class="tablewrap"><table><thead><tr><th>Vật tư</th><th>SL</th><th>Trạng thái</th></tr></thead>
+    <div class="tablewrap"><table><thead><tr><th>Vật tư</th><th>SL</th><th>Trạng thái</th><th></th></tr></thead>
       <tbody>${rows}</tbody></table></div>
-    <div class="muted" style="margin:8px 0;font-size:12px">Chỉ sửa được vật tư/số lượng của dòng còn "pending" — dòng đã xử lý giữ nguyên, không sửa được.</div>
+    <div class="muted" style="margin:8px 0;font-size:12px">Chỉ sửa/xóa được vật tư/số lượng của dòng còn "pending" — dòng đã xử lý giữ nguyên, không sửa/xóa được.</div>
+    <div class="row" style="margin:10px 0;align-items:flex-end;gap:8px">
+      <div class="field" style="flex:1"><label>+ Thêm vật tư</label><select id="reqedit_addmat" style="width:100%">${REQ_CACHE.matOpts}</select></div>
+      <div class="field"><label>SL</label><input type="number" min="0" step="any" id="reqedit_addqty" style="width:90px"/></div>
+      <button class="btn sm sec" id="reqedit_addbtn">+ Thêm dòng</button>
+    </div>
     <div class="row" style="margin-top:10px;justify-content:flex-end">
       <button class="btn" id="reqedit_save">Lưu</button>
     </div>`, null, true);
@@ -7944,6 +7961,23 @@ function openEditRequestModal(r, matById) {
     const line = r.lines.find(l => l.line_id === tr.dataset.editline);
     const sel = tr.querySelector(".reqedit-mat");
     if (sel && line) sel.value = line.material_id;
+  });
+  document.querySelectorAll("[data-reqlinedel]").forEach(btn => btn.onclick = () => guard(async () => {
+    if (!confirm("Xóa dòng vật tư này khỏi phiếu đề nghị?")) return;
+    const updated = await DELETE(`/warehouse/requests/${r.request_id}/lines/${btn.dataset.reqlinedel}`);
+    toast("Đã xóa dòng vật tư");
+    closeModal();
+    openEditRequestModal(updated, matById);
+  }));
+  $("reqedit_addbtn").onclick = () => guard(async () => {
+    const material_id = $("reqedit_addmat").value;
+    const quantity = parseFloat($("reqedit_addqty").value);
+    if (!material_id) throw new Error("Chọn vật tư cần thêm.");
+    if (!quantity || quantity <= 0) throw new Error("Nhập số lượng > 0.");
+    const updated = await POST(`/warehouse/requests/${r.request_id}/lines`, { material_id, quantity });
+    toast("Đã thêm dòng vật tư");
+    closeModal();
+    openEditRequestModal(updated, matById);
   });
   $("reqedit_save").onclick = () => guard(async () => {
     const lines = Array.from(document.querySelectorAll("[data-editline]")).map(tr => ({

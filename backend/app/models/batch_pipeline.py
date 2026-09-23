@@ -280,6 +280,15 @@ class BatchPackLot(Base):
     locked_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
     locked_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
     quality_status: Mapped[str] = mapped_column(Unicode(255), default=QualityStatus.RELEASED.value)
+    # "Hoàn thành chiết" — mốc XÁC NHẬN riêng của vận hành (mirror BatchFilterLot.status
+    # "dang_loc"->"hoan_thanh" qua finish_filtering) — KHÁC `status` (dang_chiet/chiet_1_phan/
+    # chiet_het, suy hoàn toàn tự động từ ca1/2/3 + độ rỗng tank BBT nguồn, xem _pack_lot_status)
+    # và KHÁC approved/stocked (2 luồng độc lập khác) — yêu cầu người dùng 2026-09-23: "chiết
+    # thiếu ô trạng thái, thiếu nút hoàn thành chiết". Khi finished=True, _pack_lot_status trả về
+    # "hoan_thanh" thay vì suy theo ca/tồn tank.
+    finished: Mapped[bool] = mapped_column(Boolean, default=False)
+    finished_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    finished_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
 
     @property
     def ended_at(self) -> Optional[datetime]:

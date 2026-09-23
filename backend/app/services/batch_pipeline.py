@@ -901,6 +901,10 @@ def draw_from_filter_order(db: Session, order_id: str, payload: dict, user: User
     )
     db.add(fl)
     db.flush()
+    # quality_status khởi tạo ĐÚNG theo chỉ tiêu Lọc bắt buộc thật (ON_HOLD nếu còn thiếu) thay
+    # vì mặc định cứng RELEASED của cột (bug thực tế 2026-09-23: lô lọc mới tạo, chưa khai chỉ
+    # tiêu nào, vẫn hiện "released" — xem qc_catalog.sync_stage_quality_status).
+    qc_catalog.sync_stage_quality_status(db, "loc", "batch_filter_lot", fl.filter_lot_id)
     src_rows = []
     for t in templates:
         src = BatchFilterLotSource(link_id=new_id(), filter_lot_id=fl.filter_lot_id, source_type=t.source_type,
@@ -1012,6 +1016,7 @@ def draw_from_tank_into_filter_lot(db: Session, sources: list[dict], payload: di
     )
     db.add(fl)
     db.flush()
+    qc_catalog.sync_stage_quality_status(db, "loc", "batch_filter_lot", fl.filter_lot_id)
     src_rows = []
     seq = 1
     for src, tank in zip((s for s in sources if s.get("source_type") != "filter_lot"), tanks):
@@ -1383,7 +1388,8 @@ def finish_filtering(db: Session, filter_lot_id: str, user: User) -> BatchFilter
 
 # ==================== BatchPackLot (lô thành phẩm) ====================
 
-PACK_LOT_STATUS_LABEL = {"dang_chiet": "Đang chiết", "chiet_1_phan": "Chiết 1 phần", "chiet_het": "Chiết hết"}
+PACK_LOT_STATUS_LABEL = {"dang_chiet": "Đang chiết", "chiet_1_phan": "Chiết 1 phần",
+                         "chiet_het": "Chiết hết", "hoan_thanh": "Hoàn thành"}
 
 
 def _pack_lot_status(db: Session, p: BatchPackLot) -> str:
@@ -1400,6 +1406,8 @@ def _pack_lot_status(db: Session, p: BatchPackLot) -> str:
     làm rỗng tank" = settings.empty_bbt_tolerance_hl (đúng ngưỡng dùng cho nút "Làm rỗng tank" ở
     Lô lọc) — lô lọc NGUỒN (filter_lot.on_hand) đã về gần 0 trong ngưỡng đó nghĩa là tank BBT đã
     chiết cạn thật, không còn gì để chiết tiếp cho lô TP này."""
+    if p.finished:
+        return "hoan_thanh"
     ca_total = (p.ca1_qty or 0.0) + (p.ca2_qty or 0.0) + (p.ca3_qty or 0.0)
     if ca_total <= 0:
         return "dang_chiet"
@@ -1429,6 +1437,29 @@ def get_pack_lot(db: Session, pack_lot_id: str) -> BatchPackLot:
     p = db.get(BatchPackLot, pack_lot_id)
     if not p:
         raise NotFoundError("Lô thành phẩm không tồn tại.")
+    return _stamp_pack_lot_status(db, p)
+
+
+def finish_pack_lot(db: Session, pack_lot_id: str, user: User) -> BatchPackLot:
+    """"Hoàn thành chiết" — mốc XÁC NHẬN riêng của vận hành (mirror finish_filtering — "Hoàn
+    thành lọc"), TÁCH BIỆT khỏi `status` (suy tự động từ ca1/2/3 + độ rỗng tank BBT nguồn) và
+    khỏi approved (Duyệt KCS)/stocked (nhập kho) — 3 luồng độc lập, làm theo thứ tự bất kỳ. Yêu
+    cầu đã "Kết thúc" ít nhất 1 ca chiết (p.ended_at, tính từ ca1/2/3) — chưa chiết gì mà xác
+    nhận hoàn thành thì sai (yêu cầu người dùng 2026-09-23)."""
+    require_perm(user, "batch.execute")
+    p = get_pack_lot(db, pack_lot_id)
+    _assert_unlocked(p)
+    if p.finished:
+        raise DomainError("Lô thành phẩm này đã hoàn thành chiết rồi.")
+    if p.ended_at is None:
+        raise DomainError('Lô thành phẩm chưa có "Giờ kết thúc chiết" — kết thúc ít nhất 1 ca '
+                          "chiết (nhập đủ SL + giờ kết thúc) trước khi xác nhận hoàn thành.")
+    p.finished = True
+    p.finished_by = user.username
+    p.finished_at = utcnow()
+    record_audit(db, entity_type="batch_pack_lot", entity_id=pack_lot_id, action="finish_chiet", actor=user)
+    db.commit()
+    db.refresh(p)
     return _stamp_pack_lot_status(db, p)
 
 
@@ -1483,6 +1514,7 @@ def split_filter_lot_to_pack_lot(db: Session, filter_lot_id: str, payload: dict,
     _sync_filter_lot_status(fl)
     db.add(p)
     db.flush()
+    qc_catalog.sync_stage_quality_status(db, "thanh_pham", "batch_pack_lot", p.pack_lot_id)
     genealogy.add_edge(db, from_type="batch_filter_lot", from_id=filter_lot_id, to_type="batch_pack_lot",
                        to_id=p.pack_lot_id, relation="chiết", quantity=qty, uom="L")
     record_audit(db, entity_type="batch_pack_lot", entity_id=p.pack_lot_id, action="create",

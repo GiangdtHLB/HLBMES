@@ -10,7 +10,7 @@ from sqlalchemy import func, select, true
 from sqlalchemy.orm import Session
 
 from ..audit import record_audit
-from ..common import ResultStatus, new_id, utcnow
+from ..common import QualityStatus, ResultStatus, new_id, utcnow
 from ..errors import DomainError, NotFoundError
 from ..models.audit import AuditLog
 from ..models.batches import BatchExecution
@@ -375,11 +375,41 @@ def lot_qc_status(db: Session, lot: MaterialLot) -> dict:
     }
 
 
+# (stage, model) cho 2 scope pipeline "Mẻ sản xuất" CÓ quality_status riêng nhưng khai chỉ tiêu
+# qua stage_qc_status (không qua lot_qc_status như 'lot'/'batch') — batch_tank (Lên men) không
+# nằm ở đây vì Lên men chính/phụ dùng MULTI_SAMPLE_STAGES (record_qc_sample), luôn cần QA bấm
+# RELEASE thủ công qua set_hold() (xem docstring services/quality.py), không tự release được.
+_STAGE_LOT_MODELS = {"batch_filter_lot": ("loc", BatchFilterLot), "batch_pack_lot": ("thanh_pham", BatchPackLot)}
+
+
+def _filter_pack_stage_context(db: Session, scope_type: str, scope_id: str):
+    """(stage, beer_type_id, finished_product_id) cho scope_type batch_filter_lot/batch_pack_lot —
+    dùng CHUNG bởi missing_mandatory_params() và sync_stage_quality_status() để tránh lệch cách
+    suy beer_type_id/finished_product_id giữa 2 nơi (cả 2 stage "loc"/"thanh_pham" đều thuộc
+    BEER_TYPE_SCOPED_STAGES + SKU_SCOPED_STAGES — không có product_id). None nếu không tìm thấy
+    bản ghi. BatchPackLot không có cột beer_type_id riêng — kế thừa từ BatchFilterLot nguồn
+    (mirror cách finished_product_id/beer_type_id được kế thừa xuống lúc tạo lô lọc)."""
+    entry = _STAGE_LOT_MODELS.get(scope_type)
+    if not entry:
+        return None
+    stage, model = entry
+    obj = db.get(model, scope_id)
+    if not obj:
+        return None
+    if scope_type == "batch_filter_lot":
+        return stage, obj.beer_type_id, obj.finished_product_id
+    filter_lot = db.get(BatchFilterLot, obj.filter_lot_id) if obj.filter_lot_id else None
+    return stage, (filter_lot.beer_type_id if filter_lot else None), obj.finished_product_id
+
+
 def missing_mandatory_params(db: Session, scope_type: str, scope_id: str) -> list[str]:
-    """Dùng bởi services/quality.py::_assert_releasable — áp dụng cho scope 'lot' (lô NVL)
-    và 'batch' (Mẻ sản xuất — BatchExecution, stage "nau"). Chỉ tiêu theo công đoạn sản xuất
-    của module Nấu-Lọc-Chiết cũ (mẻ nấu/lên men/lọc/chiết) dùng stage_qc_status() riêng (gọi
-    trực tiếp từ routers/brewing.py) vì cần biết `stage` cụ thể, không chỉ scope_id."""
+    """Dùng bởi services/quality.py::_assert_releasable — áp dụng cho scope 'lot' (lô NVL),
+    'batch' (Mẻ sản xuất — BatchExecution, stage "nau"), và batch_filter_lot/batch_pack_lot
+    (Lọc/Chiết, xem _filter_pack_stage_context — thêm 2026-09-23, bug thực tế: nút "Release" thủ
+    công của KCS trước đây LUÔN cho qua vì hàm này trả về [] cho 2 scope này dù chỉ tiêu Lọc/Chiết
+    thật vẫn còn thiếu). Chỉ tiêu công đoạn khác của module Nấu-Lọc-Chiết cũ (lên men) dùng
+    stage_qc_status() riêng (gọi trực tiếp từ routers/brewing.py) vì cần biết `stage` cụ thể,
+    không chỉ scope_id."""
     if scope_type == "lot":
         lot = db.get(MaterialLot, scope_id)
         if not lot:
@@ -390,6 +420,11 @@ def missing_mandatory_params(db: Session, scope_type: str, scope_id: str) -> lis
         if not batch:
             return []
         return stage_qc_status(db, "nau", "batch", scope_id, product_id=batch.product_id)["pending"]
+    ctx = _filter_pack_stage_context(db, scope_type, scope_id)
+    if ctx:
+        stage, beer_type_id, finished_product_id = ctx
+        return stage_qc_status(db, stage, scope_type, scope_id, finished_product_id=finished_product_id,
+                               beer_type_id=beer_type_id)["pending"]
     return []
 
 
@@ -647,7 +682,15 @@ def delete_qc_result(db: Session, result_id: str, user: User) -> None:
                 actor=user, before={"parameter": result.parameter, "value": result.value,
                                     "value_text": result.value_text, "status": result.status,
                                     "sample_id": result.sample_id})
+    scope_type, scope_id = result.scope_type, result.scope_id
     db.delete(result)
+    db.flush()
+    # Xóa 1 chỉ tiêu có thể làm mất chỉ tiêu bắt buộc đã đủ trước đó — hạ lại ON_HOLD nếu cần
+    # (xem sync_stage_quality_status). stage suy trực tiếp từ scope_type (1-1: batch_filter_lot
+    # luôn là "loc", batch_pack_lot luôn là "thanh_pham" — 2 stage duy nhất dùng từng scope này).
+    _STAGE_BY_SCOPE = {"batch_filter_lot": "loc", "batch_pack_lot": "thanh_pham"}
+    if scope_type in _STAGE_BY_SCOPE:
+        sync_stage_quality_status(db, _STAGE_BY_SCOPE[scope_type], scope_type, scope_id)
     db.commit()
 
 
@@ -716,6 +759,8 @@ def record_stage_result(db: Session, stage: str, scope_type: str, scope_id: str,
     if scope_type == "batch" and status != "fail":
         from . import quality
         quality.attempt_auto_release(db, scope_type, scope_id, user)
+    elif scope_type in ("batch_filter_lot", "batch_pack_lot"):
+        sync_stage_quality_status(db, stage, scope_type, scope_id)
     db.commit()
     db.refresh(result)
     return {"result_id": result.result_id, "parameter": result.parameter, "value": result.value,
@@ -751,6 +796,28 @@ def _orphaned_param_names(db: Session, codes: set) -> dict:
             if code in remaining and name:
                 out[code] = name
     return out
+
+
+def sync_stage_quality_status(db: Session, stage: str, scope_type: str, scope_id: str) -> None:
+    """Đồng bộ BatchFilterLot/BatchPackLot.quality_status theo đúng tiến độ khai "Chỉ tiêu Lọc"/
+    "Chỉ tiêu Chiết" THẬT (stage_qc_status) — 2 cột này trước đây mặc định RELEASED ngay lúc tạo
+    (models/batch_pipeline.py) và KHÔNG BAO GIỜ được cập nhật lại sau đó (record_stage_result chỉ
+    tự release cho scope_type="batch", "loc"/"thanh_pham" bị bỏ sót) — bug thực tế phát hiện
+    2026-09-23: "lô lọc chưa nhập chỉ tiêu chất lượng mà đã release rồi". ON_HOLD nếu còn thiếu
+    chỉ tiêu bắt buộc HOẶC còn FAIL, ngược lại RELEASED — mirror attempt_auto_release() nhưng
+    tự set cả 2 chiều (kể cả hạ về ON_HOLD, không chỉ nâng lên RELEASED như bản gốc).
+
+    Gọi từ record_stage_result() (mỗi lần ghi 1 chỉ tiêu) và delete_qc_result() (xóa 1 chỉ tiêu
+    có thể làm mất chỉ tiêu bắt buộc đã đủ trước đó, phải hạ lại ON_HOLD)."""
+    ctx = _filter_pack_stage_context(db, scope_type, scope_id)
+    if not ctx:
+        return
+    _, beer_type_id, finished_product_id = ctx
+    status = stage_qc_status(db, stage, scope_type, scope_id,
+                             finished_product_id=finished_product_id, beer_type_id=beer_type_id)
+    obj = db.get(_STAGE_LOT_MODELS[scope_type][1], scope_id)
+    obj.quality_status = (QualityStatus.ON_HOLD.value if (status["pending"] or status["has_fail"])
+                          else QualityStatus.RELEASED.value)
 
 
 def stage_qc_status(db: Session, stage: str, scope_type: str, scope_id: str, product_id: str = None,
