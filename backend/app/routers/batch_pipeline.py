@@ -405,6 +405,11 @@ def delete_pack_lot(pack_lot_id: str, db: Session = Depends(get_db), user: User 
     svc.delete_pack_lot(db, pack_lot_id, user)
 
 
+@router.post("/batch-pack-lots/{pack_lot_id}/finish-chiet", response_model=BatchPackLotOut)
+def finish_pack_lot(pack_lot_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    return svc.finish_pack_lot(db, pack_lot_id, user)
+
+
 @router.post("/batch-pack-lots/{pack_lot_id}/approve")
 def approve_pack_lot(pack_lot_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     return svc.approve_pack_lot(db, pack_lot_id, user)

@@ -63,7 +63,7 @@ const TANK_BADGE_CLASS = { planned: "planned", dang_nau: "pending", len_men: "ru
 // tank_code trần — tránh lặp lại đúng bug đã sửa ở panel "chờ khai báo" (yêu cầu người dùng
 // 2026-09-02: "không rõ tank 01, 02, 04 là gì, tank men phải là lấy từ danh mục tank men chứ").
 const batchTankDisplayName = (t) => t && t.tank_lm ? `${t.tank_lm} (Lô ${t.tank_code})` : `Lô ${t ? t.tank_code : "?"} (chưa gán tank vật lý)`;
-const PACK_LOT_BADGE_CLASS = { dang_chiet: "in_progress", chiet_1_phan: "due", chiet_het: "done" };
+const PACK_LOT_BADGE_CLASS = { dang_chiet: "in_progress", chiet_1_phan: "due", chiet_het: "done", hoan_thanh: "released" };
 const FILTER_LOT_BADGE_CLASS = { dang_loc: "in_progress", hoan_thanh: "released", am: "critical" };
 const FILTER_ORDER_BADGE_CLASS = { planned: "pending", dang_loc: "in_progress", hoan_thanh: "released" };
 const statusBadge = (cls, label) => `<span class="badge ${cls || "pending"}">${esc(label)}</span>`;
@@ -123,15 +123,6 @@ const toDTLocal = (d) => {
 // Tương tự toDTLocal nhưng chỉ lấy phần ngày (cho input type="date") — cùng lý do phải dùng
 // giờ LOCAL: gần nửa đêm, toISOString() có thể lệch sang NGÀY KHÁC do quy đổi UTC.
 const toISODateLocal = (d) => toDTLocal(d).slice(0, 10);
-// input type="date" (VD "2026-09-07") -> ISO gửi server, chốt vào 12:00 TRƯA giờ địa phương
-// (không phải 00:00) — tránh trường hợp Việt Nam (UTC+7) đã sang ngày mới nhưng UTC server
-// chưa sang, khiến "hôm nay" bị hiểu nhầm thành tương lai (bị chặn "Ngày nhập không được sau
-// thời điểm hiện tại") nếu chốt 00:00.
-function dateInputToIsoNoon(dateStr) {
-  if (!dateStr) return null;
-  const [y, m, d] = dateStr.split("-").map(Number);
-  return new Date(y, m - 1, d, 12, 0, 0).toISOString();
-}
 // input type="date" -> ISO CUỐI ngày đó (23:59:59 giờ địa phương) — dùng làm mốc "tính đến hết
 // ngày X" khi xem tồn kho quá khứ ("Chỉ 1 ngày" ở Xem tồn kho), gồm trọn mọi giao dịch trong
 // ngày đó.
@@ -170,6 +161,20 @@ function readDtPicker(idPrefix) {
   if (month < 1 || month > 12 || hour > 23 || minute > 59 || second > 59) throw new Error(`"${raw}" không đúng định dạng ngày giờ (VD 21/09/2026 14:30:00).`);
   const dt = new Date(year, month - 1, day, hour, minute, second, 0);
   if (dt.getDate() !== day || dt.getMonth() !== month - 1) throw new Error(`Ngày "${raw}" không hợp lệ.`);
+  return dt;
+}
+// readDtPicker + chặn NGAY trên trình duyệt nếu chọn giờ ở tương lai (server cũng chặn — xem
+// services/warehouse.py::receive/issue — nhưng báo lỗi sớm ở đây rõ ràng hơn) và tùy chọn chặn
+// quá xa trong quá khứ (maxPastDays, VD "Xuất sang ngang" giới hạn 15 ngày). Dùng cho các ô
+// "Ngày nhập"/"Ngày xuất" thay type="date" (không còn né được giờ trong ngày nhờ dtPickerHtml).
+function readDtPickerBounded(idPrefix, label, maxPastDays) {
+  const dt = readDtPicker(idPrefix);
+  if (!dt) return null;
+  const now = new Date();
+  if (dt > now) throw new Error(`${label} không được sau thời điểm hiện tại.`);
+  if (maxPastDays && dt < new Date(now - maxPastDays * 86400000)) {
+    throw new Error(`${label} không được quá ${maxPastDays} ngày trước thời điểm hiện tại.`);
+  }
   return dt;
 }
 function toast(msg, kind = "ok") {
@@ -4042,6 +4047,7 @@ async function showBatchPackLot(packLotId) {
   const dis = lk ? "disabled" : "";
   $("pk_detail").innerHTML = `<h2>Lô thành phẩm ${esc(p.pack_lot_code)} ${lk ? '<span class="muted" style="font-size:13px">🔒 Đã khóa</span>' : ""}</h2>
     <dl class="detail">
+      <dt>Trạng thái</dt><dd>${statusBadge(PACK_LOT_BADGE_CLASS[p.status], p.status_label)}${p.finished ? ` <span class="muted" style="font-size:12px">— hoàn thành bởi ${esc(p.finished_by)} lúc ${fmt(p.finished_at)}</span>` : ""}</dd>
       <dt>Chất lượng</dt><dd>${badge(p.quality_status)}</dd>
       <dt>Lô lọc nguồn</dt><dd><code class="k">${esc(f.filter_lot_code)}</code> (còn tồn ${f.on_hand} hl)</dd>
       <dt>Tank BBT</dt><dd>${esc(p.from_bbt || "—")}</dd>
@@ -4081,6 +4087,7 @@ async function showBatchPackLot(packLotId) {
     ${materialUsageSectionHtml("pkmu", matUsage, lk, p.ended_at)}
     ${!p.stocked ? '<div id="pk_wms_alloc_wrap" style="margin-top:16px"></div>' : ""}
     <div class="row" style="margin-top:10px">
+      ${(!p.finished && !lk) ? '<button class="btn sm" id="pk_finish">✔ Hoàn thành chiết</button>' : ""}
       ${p.approved ? "" : '<button class="btn sm sec" id="pk_approve">✔ Duyệt KCS</button>'}
       ${f.on_hand !== 0 ? `<button class="btn sm sec" id="pk_empty" title="Buộc tồn tank BBT (${f.on_hand} hl) về 0 khi tank vật lý đã chiết cạn thật nhưng số liệu còn lệch — cho phép cả khi hồ sơ EBR đã khóa">Làm rỗng tank</button>` : ""}
       <button class="btn sm sec" id="pk_trace">🔍 Truy ngược</button>
@@ -4093,6 +4100,11 @@ async function showBatchPackLot(packLotId) {
       suggestUrl: `/batch-pack-lots/${packLotId}/materials/suggest`,
       onChange: () => showBatchPackLot(packLotId) });
   $("pk_ebr").onclick = () => openPackLotEBR(packLotId);
+  if ($("pk_finish")) $("pk_finish").onclick = () => guard(async () => {
+    if (!confirm(`Xác nhận đã hoàn thành chiết lô ${esc(p.pack_lot_code)}?`)) return;
+    await POST(`/batch-pack-lots/${packLotId}/finish-chiet`, {});
+    toast("Đã xác nhận hoàn thành chiết"); showBatchPackLot(packLotId);
+  });
   $("pk_audit").onclick = (e) => { e.preventDefault(); document.querySelector('[data-view="audit"]').click(); setTimeout(() => { $("au_entity").value = packLotId; $("au_load").click(); }, 50); };
   $("pk_qty_save").onclick = () => guard(async () => {
     const qty = parseFloat($("pk_qty_edit").value);
@@ -6066,7 +6078,7 @@ VIEWS.warehouse_kc = async function () {
           <div class="field" style="position:relative"><label>Vật tư</label>
             <input type="text" id="ob_mat_txt" autocomplete="off" placeholder="Tìm mã/tên nguyên liệu..." value="${esc(matItemsGiao[0]?.label || "")}"/>
             <input type="hidden" id="ob_mat" value="${esc(matItemsGiao[0]?.value || "")}"/></div>
-          <div class="field"><label>Ngày nhập tồn đầu</label><input id="ob_date" type="date" value="${toISODateLocal(new Date())}" max="${toISODateLocal(new Date())}"/></div></div>
+          <div class="field"><label>Ngày nhập tồn đầu</label>${dtPickerHtml("ob_date", new Date(), "")}</div></div>
         <div class="row"><div class="field"><label>SL</label><input id="ob_qty" type="number" value="500"/></div>
           <div class="field"><label>ĐVT</label><input id="ob_uom" value="${esc(matItemsGiao[0]?.uom || "")}" size="4" readonly title="Lấy tự động từ danh mục nguyên liệu — không sửa được"/></div>
           <div class="field"><label>Hạn dùng</label><input id="ob_exp" type="date"/></div>
@@ -6085,12 +6097,8 @@ VIEWS.warehouse_kc = async function () {
     body = `<div class="panel"><h2>Xuất theo số phiếu đề nghị <span class="muted">(${allRequests.length} phiếu đang chờ)</span></h2>
         <div class="muted" style="margin-bottom:6px">Mỗi phiếu hiện đầy đủ danh mục vật tư đã đề nghị — bấm "Duyệt cả phiếu" để xuất
           toàn bộ 1 lần (SL đề nghị đã được chặn không vượt tồn kho công ty từ lúc tạo phiếu), hoặc xử lý riêng từng dòng.</div>
-        <input class="searchbox" id="xtdn_search" placeholder="Tìm theo số phiếu, người tạo, ghi chú, vật tư..." style="margin-bottom:8px;width:100%"/>
-        <div id="xtdn_block">
-          ${allRequests.length
-            ? allRequests.map(r => requestBlockHtml(r, matByIdGiao, lotByIdGiao, canFulfillGiao, true, allLots)).join("")
-            : '<div class="muted">Không có phiếu đề nghị nào đang chờ.</div>'}
-        </div>
+        <input class="searchbox" data-tbl="xtdn_table" placeholder="Tìm theo số phiếu, người tạo, ghi chú, vật tư..." style="margin-bottom:8px;width:100%"/>
+        ${requestTableHtml(allRequests, matByIdGiao, lotByIdGiao, canFulfillGiao, true, allLots, false, "xtdn_table")}
         ${movementHistoryBlockHtml("xuat_theo_de_nghi")}
       </div>`;
   } else if (sec === "sng") {
@@ -6107,7 +6115,7 @@ VIEWS.warehouse_kc = async function () {
           <div class="field" style="position:relative"><label>Nhà CC</label>
             <input type="text" id="sng_supplier_txt" autocomplete="off" placeholder="Tìm nhà cung cấp..."/>
             <input type="hidden" id="sng_supplier"/></div>
-          <div class="field"><label>Ngày xuất sang ngang</label><input id="sng_date" type="date" value="${toISODateLocal(new Date())}" max="${toISODateLocal(new Date())}" min="${toISODateLocal(new Date(Date.now() - 15 * 86400000))}"/></div></div>
+          <div class="field"><label>Ngày xuất sang ngang</label>${dtPickerHtml("sng_date", new Date(), "")}</div></div>
         <div class="row"><div class="field"><label>Số lượng</label><input id="sng_qty" type="number" value="500"/></div>
           <div class="field"><label>ĐVT</label><span id="sng_uom_wrap">${altUomFieldHtml(matByIdGiao[matItemsGiao[0]?.value], "sng_uom", 60)}</span></div>
           <div class="field"><label>Đơn giá</label><input id="sng_price" type="number" placeholder="(tuỳ chọn)"/></div>
@@ -6141,7 +6149,7 @@ VIEWS.warehouse_kc = async function () {
           <select id="xt_lot">${lotsAvail}</select></div>
           <div class="field"><label>SL</label><input id="xt_qty" type="number" value="50"/></div>
           <div class="field"><label>ĐVT</label><span id="xt_uom"></span></div>
-          <div class="field"><label>Ngày xuất tự do</label><input id="xt_date" type="date" value="${toISODateLocal(new Date())}" max="${toISODateLocal(new Date())}"/></div>
+          <div class="field"><label>Ngày xuất tự do</label>${dtPickerHtml("xt_date", new Date(), "")}</div>
           <div class="field" style="flex:1"><label>Lý do (tuỳ chọn)</label><input id="xt_reason" placeholder="(tuỳ chọn)"/></div>
           <button class="btn sec" id="xt_do" style="align-self:flex-end">Xuất tự do</button></div>`
           : '<div class="muted">Chỉ tài khoản Admin mới được thực hiện xuất tự do.</div>'}
@@ -6175,7 +6183,7 @@ VIEWS.warehouse_kc = async function () {
           <select id="dcnm_lot">${companyLotOptsGiao}</select></div>
           <div class="field"><label>SL</label><input id="dcnm_qty" type="number" value="50"/></div>
           <div class="field"><label>Nhà máy đến</label><select id="dcnm_factory">${activeFactoryOpts}</select></div>
-          <div class="field"><label>Ngày đề nghị điều chuyển (tuỳ chọn)</label><input id="dcnm_date" type="date"/></div>
+          <div class="field"><label>Ngày đề nghị điều chuyển (tuỳ chọn)</label>${dtPickerHtml("dcnm_date", new Date(), "")}</div>
           <div class="field" style="flex:1"><label>Lý do (tuỳ chọn)</label><input id="dcnm_reason" placeholder="(tuỳ chọn)"/></div>
           <button class="btn sec" id="dcnm_do" style="align-self:flex-end">Điều chuyển</button></div>`
           : '<div class="muted">Bạn không có quyền điều chuyển sang nhà máy khác.</div>'}
@@ -6191,7 +6199,7 @@ VIEWS.warehouse_kc = async function () {
           <input id="dckp_lot_q" placeholder="Tìm nhanh (gõ mã/tên vật tư)..." style="margin-bottom:2px"/>
           <select id="dckp_lot">${companyLotOptsGiao}</select></div>
           <div class="field"><label>SL</label><input id="dckp_qty" type="number" value="50"/></div>
-          <div class="field"><label>Ngày đề nghị điều chuyển (tuỳ chọn)</label><input id="dckp_date" type="date"/></div>
+          <div class="field"><label>Ngày đề nghị điều chuyển (tuỳ chọn)</label>${dtPickerHtml("dckp_date", new Date(), "")}</div>
           <div class="field" style="flex:1"><label>Lý do (tuỳ chọn)</label><input id="dckp_reason" placeholder="(tuỳ chọn)"/></div>
           <button class="btn sec" id="dckp_do" style="align-self:flex-end">Gửi đề nghị</button></div>`
           : '<div class="muted">Bạn không có quyền tạo đề nghị điều chuyển.</div>'}
@@ -6466,7 +6474,7 @@ VIEWS.warehouse_kc = async function () {
         quantity: parseFloat($("ob_qty").value), uom: $("ob_uom").value, location: "Kho công ty",
         expiry: $("ob_exp").value || null, kcs_lot_no: $("ob_kcs").value.trim() || null,
         supplier_lot: $("ob_supplier_lot").value.trim() || null,
-        received_at: dateInputToIsoNoon($("ob_date").value),
+        received_at: readDtPickerBounded("ob_date", "Ngày nhập")?.toISOString() ?? null,
         reason: "Nhập tồn đầu", is_opening_balance: true });
       if (res.status === "on_hold") toast("Đã nhập tồn đầu — lô đang CHỜ khai báo & duyệt chỉ tiêu chất lượng", "err");
       else toast("Đã nhập tồn đầu tại Kho công ty");
@@ -6506,7 +6514,7 @@ VIEWS.warehouse_kc = async function () {
         supplier_id: $("sng_supplier").value || null, unit_price: $("sng_price").value ? parseFloat($("sng_price").value) : null,
         quantity: sngQty, uom: sngMat ? sngMat.uom : $("sng_uom").value, location_id: $("sng_loc").value || null,
         supplier_lot: $("sng_supplier_lot").value.trim() || null,
-        received_at: dateInputToIsoNoon($("sng_date").value),
+        received_at: readDtPickerBounded("sng_date", "Ngày xuất sang ngang", 15)?.toISOString() ?? null,
         expiry: $("sng_exp").value || null, reason: $("sng_note").value.trim() || "Xuất sang ngang" });
       toast(`Đã tạo đề nghị xuất sang ngang (số ${res.request_code}) — chờ phân xưởng duyệt`);
       render("warehouse_kc");
@@ -6562,7 +6570,7 @@ VIEWS.warehouse_kc = async function () {
       const qty = lotAltUomQty("xt_lot", "xt_uom", parseFloat($("xt_qty").value));
       await POST("/warehouse/issue", { lot_id: $("xt_lot").value, quantity: qty,
         mode: "tu_do", reason: $("xt_reason").value.trim() || null,
-        issued_at: dateInputToIsoNoon($("xt_date").value) });
+        issued_at: readDtPickerBounded("xt_date", "Ngày xuất")?.toISOString() ?? null });
       toast("Đã xuất tự do"); render("warehouse_kc");
     });
     Object.keys(WH_HIST_VISIBLE).forEach(wireMovementHistoryBlock);
@@ -6594,14 +6602,14 @@ VIEWS.warehouse_kc = async function () {
       if (!$("dcnm_factory").value) throw new Error("Chưa có nhà máy nào trong danh mục — vào Danh mục để tạo trước.");
       await POST("/warehouse/transfer-to-factory", { lot_id: $("dcnm_lot").value, quantity: parseFloat($("dcnm_qty").value),
         factory_id: $("dcnm_factory").value, reason: $("dcnm_reason").value.trim() || null,
-        requested_transfer_date: dateInputToIsoNoon($("dcnm_date").value) });
+        requested_transfer_date: readDtPickerBounded("dcnm_date", "Ngày đề nghị điều chuyển")?.toISOString() ?? null });
       toast("Đã điều chuyển sang nhà máy khác"); render("warehouse_kc");
     });
     if ($("dckp_do")) $("dckp_do").onclick = () => guard(async () => {
       if (!$("dckp_lot").value) throw new Error("Không có lô nào đang ở kho công ty để điều chuyển.");
       await POST("/warehouse/transfer-kcpx-requests", { lot_id: $("dckp_lot").value,
         quantity: parseFloat($("dckp_qty").value), reason: $("dckp_reason").value.trim() || null,
-        requested_transfer_date: dateInputToIsoNoon($("dckp_date").value) });
+        requested_transfer_date: readDtPickerBounded("dckp_date", "Ngày đề nghị điều chuyển")?.toISOString() ?? null });
       toast("Đã gửi đề nghị điều chuyển sang Phân xưởng — chờ Phân xưởng duyệt"); render("warehouse_kc");
     });
     document.querySelectorAll("[data-kcpxdcedit]").forEach(b => b.onclick = () =>
@@ -6625,7 +6633,7 @@ VIEWS.warehouse_kc = async function () {
   if (sec === "xtdn") {
     Object.keys(WH_HIST_VISIBLE).forEach(wireMovementHistoryBlock);
     wireRequestBlockActions();
-    wirePaginateCards("xtdn_block", "xtdn_search", 10);
+    wirePaginate("xtdn_table", 10);
   }
   if (sec === "ton") {
     $("ton_loc").onchange = () => { TON_LOC.warehouse_kc = $("ton_loc").value; render("warehouse_kc"); };
@@ -6751,7 +6759,7 @@ VIEWS.warehouse_px = async function () {
         <div class="field" style="position:relative"><label>Vật tư</label>
           <input type="text" id="obpx_mat_txt" autocomplete="off" placeholder="Tìm mã/tên nguyên liệu..." value="${esc(matItemsPx[0]?.label || "")}"/>
           <input type="hidden" id="obpx_mat" value="${esc(matItemsPx[0]?.value || "")}"/></div>
-        <div class="field"><label>Ngày nhập tồn đầu</label><input id="obpx_date" type="date" value="${toISODateLocal(new Date())}" max="${toISODateLocal(new Date())}"/></div></div>
+        <div class="field"><label>Ngày nhập tồn đầu</label>${dtPickerHtml("obpx_date", new Date(), "")}</div></div>
         <div class="row"><div class="field"><label>SL</label><input id="obpx_qty" type="number" value="500"/></div>
           <div class="field"><label>ĐVT</label><input id="obpx_uom" value="${esc(matItemsPx[0]?.uom || "")}" size="4" readonly title="Lấy tự động từ danh mục nguyên liệu — không sửa được"/></div>
           <div class="field"><label>Hạn dùng</label><input id="obpx_exp" type="date"/></div>
@@ -6855,7 +6863,7 @@ VIEWS.warehouse_px = async function () {
         <input id="dcpx_lot_q" placeholder="Tìm nhanh (gõ mã/tên vật tư)..." style="margin-bottom:2px"/>
         <select id="dcpx_lot">${workshopLotOpts}</select></div>
         <div class="field"><label>SL</label><input id="dcpx_qty" type="number" value="50"/></div>
-        <div class="field"><label>Ngày đề nghị điều chuyển (tuỳ chọn)</label><input id="dcpx_date" type="date"/></div>
+        <div class="field"><label>Ngày đề nghị điều chuyển (tuỳ chọn)</label>${dtPickerHtml("dcpx_date", new Date(), "")}</div>
         <div class="field" style="flex:1"><label>Lý do (tuỳ chọn)</label><input id="dcpx_reason" placeholder="(tuỳ chọn)"/></div>
         <button class="btn" id="dcpx_do" style="align-self:flex-end">Gửi đề nghị</button></div>`
         : '<div class="muted">Bạn không có quyền tạo đề nghị điều chuyển.</div>'}
@@ -6964,7 +6972,7 @@ VIEWS.warehouse_px = async function () {
         ? `<div class="row"><div class="field"><label>Lô</label><select id="xtpx_lot">${workshopLotOpts}</select></div>
         <div class="field"><label>SL</label><input id="xtpx_qty" type="number" value="50"/></div>
         <div class="field"><label>ĐVT</label><span id="xtpx_uom"></span></div>
-        <div class="field"><label>Ngày xuất tự do</label><input id="xtpx_date" type="date" value="${toISODateLocal(new Date())}" max="${toISODateLocal(new Date())}"/></div>
+        <div class="field"><label>Ngày xuất tự do</label>${dtPickerHtml("xtpx_date", new Date(), "")}</div>
         <div class="field" style="flex:1"><label>Lý do (tuỳ chọn)</label><input id="xtpx_reason" placeholder="(tuỳ chọn)"/></div>
         <button class="btn sec" id="xtpx_do" style="align-self:flex-end">Xuất tự do</button></div>`
         : '<div class="muted">Chỉ tài khoản Admin mới được thực hiện xuất tự do.</div>'}
@@ -7087,7 +7095,7 @@ VIEWS.warehouse_px = async function () {
         quantity: parseFloat($("obpx_qty").value), uom: $("obpx_uom").value, location: "Kho phân xưởng",
         expiry: $("obpx_exp").value || null, kcs_lot_no: $("obpx_kcs").value.trim() || null,
         supplier_lot: $("obpx_supplier_lot").value.trim() || null,
-        received_at: dateInputToIsoNoon($("obpx_date").value),
+        received_at: readDtPickerBounded("obpx_date", "Ngày nhập")?.toISOString() ?? null,
         reason: "Nhập tồn đầu", is_opening_balance: true });
       if (res.status === "on_hold") toast("Đã nhập tồn đầu — lô đang CHỜ khai báo & duyệt chỉ tiêu chất lượng", "err");
       else toast("Đã nhập tồn đầu tại Kho phân xưởng");
@@ -7122,7 +7130,7 @@ VIEWS.warehouse_px = async function () {
       if (!$("dcpx_lot").value) throw new Error("Không có lô nào đang ở kho phân xưởng để điều chuyển.");
       await POST("/warehouse/transfer-px-requests", { lot_id: $("dcpx_lot").value, quantity: parseFloat($("dcpx_qty").value),
         reason: $("dcpx_reason").value.trim() || null,
-        requested_transfer_date: dateInputToIsoNoon($("dcpx_date").value) });
+        requested_transfer_date: readDtPickerBounded("dcpx_date", "Ngày đề nghị điều chuyển")?.toISOString() ?? null });
       toast("Đã gửi đề nghị điều chuyển"); render("warehouse_px");
     });
     document.querySelectorAll("[data-kcpxapprove]").forEach(b => b.onclick = () => {
@@ -7183,7 +7191,7 @@ VIEWS.warehouse_px = async function () {
       const qty = lotAltUomQty("xtpx_lot", "xtpx_uom", parseFloat($("xtpx_qty").value), WH_CACHE.matById);
       await POST("/warehouse/issue", { lot_id: $("xtpx_lot").value, quantity: qty,
         mode: "tu_do", reason: $("xtpx_reason").value.trim() || null,
-        issued_at: dateInputToIsoNoon($("xtpx_date").value) });
+        issued_at: readDtPickerBounded("xtpx_date", "Ngày xuất")?.toISOString() ?? null });
       toast("Đã xuất tự do"); render("warehouse_px");
     });
     wireMovementHistoryBlock("tu_do_px");
@@ -7413,7 +7421,7 @@ function sangNgangKcRowHtml(r, matById, lotById, qcReqSet) {
 function transferEditDelCell(r, editAttr, delAttr, requestedTransferDate) {
   if (!r.can_edit) return "<td></td>";
   const dateAttr = requestedTransferDate !== undefined
-    ? ` data-txdate="${requestedTransferDate ? esc(toISODateLocal(new Date(requestedTransferDate))) : ""}"` : "";
+    ? ` data-txdate="${requestedTransferDate ? esc(new Date(requestedTransferDate).toISOString()) : ""}"` : "";
   return `<td style="white-space:nowrap">
     <button class="btn sm sec" ${editAttr}="${esc(r.request_id)}" data-txcode="${esc(r.request_code)}"
       data-txqty="${r.quantity}" data-txuom="${esc(r.uom)}" data-txreason="${esc(r.reason || "")}"${dateAttr}>Sửa</button>
@@ -7433,12 +7441,12 @@ function openTransferEditModal(requestId, ds, apiPath, viewName) {
     <div class="muted" style="margin-bottom:10px">Chỉ sửa được số lượng/lý do${showDate ? "/ngày đề nghị điều chuyển" : ""} — không đổi lô. Nếu đề nghị đã được xử lý, lưu sẽ báo lỗi.</div>
     <div class="row"><div class="field"><label>Số lượng</label><input id="etx_qty" type="number" value="${txqty}"/></div>
       <div class="field"><label>ĐVT</label><input value="${esc(txuom)}" size="4" readonly/></div>
-      ${showDate ? `<div class="field"><label>Ngày đề nghị điều chuyển (tuỳ chọn)</label><input id="etx_date" type="date" value="${esc(txdate)}"/></div>` : ""}</div>
+      ${showDate ? `<div class="field"><label>Ngày đề nghị điều chuyển (tuỳ chọn)</label>${dtPickerHtml("etx_date", txdate ? new Date(txdate) : new Date(), "")}</div>` : ""}</div>
     <div class="row"><div class="field" style="flex:1"><label>Lý do (tuỳ chọn)</label><input id="etx_reason" value="${esc(txreason)}"/></div>
       <button class="btn" id="etx_save" style="align-self:flex-end">Lưu</button></div>`);
   $("etx_save").onclick = () => guard(async () => {
     const payload = { quantity: parseFloat($("etx_qty").value), reason: $("etx_reason").value.trim() || null };
-    if (showDate) payload.requested_transfer_date = dateInputToIsoNoon($("etx_date").value);
+    if (showDate) payload.requested_transfer_date = readDtPickerBounded("etx_date", "Ngày đề nghị điều chuyển")?.toISOString() ?? null;
     await PUT(`${apiPath}/${requestId}`, payload);
     toast("Đã lưu"); closeModal(); render(viewName);
   });
@@ -7551,14 +7559,10 @@ function movementHistoryBlockHtml(key) {
   const delBtn = isAdmin && WH_HIST_DELETE[key]
     ? ` <button class="btn sm sec" data-delhist="${key}" style="color:var(--red)">🗑️ Xóa lịch sử</button>` : "";
   if (key === "xuat_theo_de_nghi") {
-    const visible = all.slice(0, WH_HIST_VISIBLE[key] || WH_HIST_PAGE);
-    const moreBtn = all.length > visible.length
-      ? `<button class="btn sm sec" data-loadmorehist="${key}" style="margin-top:6px">Tải thêm (còn ${all.length - visible.length})</button>` : "";
     return `<div id="wh_hist_${key}" style="margin-top:14px">
-      <h4>${esc(WH_HIST_TITLE[key])} <span class="muted">(${visible.length}/${all.length} phiếu)</span>${delBtn}</h4>
-      ${visible.map(r => requestBlockHtml(r, WH_CACHE.matById, WH_CACHE.lotById, WH_CACHE.canFulfill, false, WH_CACHE.allLots)).join("") ||
-        '<div class="muted">Chưa có phiếu nào đã xuất.</div>'}
-      ${moreBtn}
+      <h4>${esc(WH_HIST_TITLE[key])} <span class="muted">(${all.length} phiếu)</span>${delBtn}</h4>
+      <input class="searchbox" data-tbl="wh_histtbl_xtdn_all" placeholder="Tìm theo số phiếu, người tạo, ghi chú, vật tư..." style="margin-bottom:8px;width:100%"/>
+      ${requestTableHtml(all, WH_CACHE.matById, WH_CACHE.lotById, WH_CACHE.canFulfill, false, WH_CACHE.allLots, false, "wh_histtbl_xtdn_all")}
     </div>`;
   }
   if (key === "dieu_chuyen_nha_may") {
@@ -7604,7 +7608,7 @@ function wireMovementHistoryBlock(key) {
     toast(`Đã xóa ${res.deleted} dòng lịch sử`);
     render(WH_HIST_VIEW[key] || "warehouse_kc");
   });
-  if (key === "xuat_theo_de_nghi") { wireRequestBlockActions(); return; }
+  if (key === "xuat_theo_de_nghi") { wireRequestBlockActions(); wirePaginate("wh_histtbl_xtdn_all", WH_HIST_PAGE); return; }
   if (WH_HIST_UNDO[key]) {
     document.querySelectorAll(`#wh_hist_${key} [data-undoissue]`).forEach(b => b.onclick = () => guard(async () => {
       if (!confirm("Hoàn lại giao dịch xuất tự do này? Vật tư sẽ trở về lại lô.")) return;
@@ -7922,24 +7926,40 @@ function requestLineRowHtml(r, l, matById, lotById, canFulfill, allLots) {
 // nghị (canRequest, xem requestBlockHtml).
 function openEditRequestModal(r, matById) {
   const dateVal = r.requested_receipt_date ? toDTLocal(new Date(r.requested_receipt_date)) : "";
+  // Đã có ít nhất 1 vật tư được xuất -> KHÔNG cho sửa "Ngày đề nghị nhận kho" nữa (yêu cầu người
+  // dùng 2026-09-23: ngày này đã ghi cứng vào StockMovement.ts của dòng đã xuất, sửa sau sẽ làm
+  // header lệch khỏi chứng từ thật — mirror chặn ở services/warehouse.py::update_request).
+  const hasFulfilled = r.lines.some(l => l.status === "fulfilled");
   const rows = r.lines.map(l => {
     const mat = matById[l.material_id];
     if (l.status !== "pending") {
       const matLabel = mat ? `${esc(mat.code)} — ${esc(mat.name)}` : esc(l.material_id);
       return `<tr><td>${matLabel}</td><td>${l.quantity} ${esc(l.uom)}</td>
-        <td>${badge(REQ_STATUS_BADGE[l.status] || "planned")}${esc(l.status)}</td></tr>`;
+        <td>${badge(REQ_STATUS_BADGE[l.status] || "planned")}${esc(l.status)}</td><td></td></tr>`;
     }
     return `<tr data-editline="${esc(l.line_id)}">
       <td><select class="reqedit-mat" style="width:100%">${REQ_CACHE.matOpts}</select></td>
       <td><input type="number" min="0" step="any" class="reqedit-qty" value="${l.quantity}" style="width:90px"/> ${esc(l.uom)}</td>
-      <td>${badge(REQ_STATUS_BADGE[l.status] || "planned")}${esc(l.status)}</td></tr>`;
+      <td>${badge(REQ_STATUS_BADGE[l.status] || "planned")}${esc(l.status)}</td>
+      <td><button class="btn sm sec" data-reqlinedel="${esc(l.line_id)}" style="color:var(--red)">Xóa</button></td></tr>`;
   }).join("");
+  // + Thêm dòng/Xóa dòng — CHỈ khi dòng còn "pending" (chưa xuất), yêu cầu người dùng 2026-09-23:
+  // "sửa đề nghị nhận vật tư thì cho tôi sửa số lượng, hoặc xóa hoặc thêm vật tư ... nếu vật tư
+  // đó chưa được xuất". Thêm/xóa xong tự mở lại modal với dữ liệu mới (server trả về nguyên
+  // phiếu đã cập nhật) để thêm/xóa liên tiếp nhiều dòng không phải đóng mở lại từ đầu.
   modal(`<h3>Sửa phiếu <code class="k">${esc(r.request_code)}</code></h3>
     <div class="field" style="margin-bottom:10px;max-width:220px"><label>Ngày giờ đề nghị nhận kho</label>
-      <input id="reqedit_date" type="datetime-local" value="${esc(dateVal)}"/></div>
-    <div class="tablewrap"><table><thead><tr><th>Vật tư</th><th>SL</th><th>Trạng thái</th></tr></thead>
+      <input id="reqedit_date" type="datetime-local" value="${esc(dateVal)}" ${hasFulfilled ? "disabled" : ""}/>
+      ${hasFulfilled ? '<div class="muted" style="font-size:12px;margin-top:4px">Đã có vật tư được xuất — không thể sửa ngày này nữa.</div>' : ""}
+    </div>
+    <div class="tablewrap"><table><thead><tr><th>Vật tư</th><th>SL</th><th>Trạng thái</th><th></th></tr></thead>
       <tbody>${rows}</tbody></table></div>
-    <div class="muted" style="margin:8px 0;font-size:12px">Chỉ sửa được vật tư/số lượng của dòng còn "pending" — dòng đã xử lý giữ nguyên, không sửa được.</div>
+    <div class="muted" style="margin:8px 0;font-size:12px">Chỉ sửa/xóa được vật tư/số lượng của dòng còn "pending" — dòng đã xử lý giữ nguyên, không sửa/xóa được.</div>
+    <div class="row" style="margin:10px 0;align-items:flex-end;gap:8px">
+      <div class="field" style="flex:1"><label>+ Thêm vật tư</label><select id="reqedit_addmat" style="width:100%">${REQ_CACHE.matOpts}</select></div>
+      <div class="field"><label>SL</label><input type="number" min="0" step="any" id="reqedit_addqty" style="width:90px"/></div>
+      <button class="btn sm sec" id="reqedit_addbtn">+ Thêm dòng</button>
+    </div>
     <div class="row" style="margin-top:10px;justify-content:flex-end">
       <button class="btn" id="reqedit_save">Lưu</button>
     </div>`, null, true);
@@ -7948,16 +7968,36 @@ function openEditRequestModal(r, matById) {
     const sel = tr.querySelector(".reqedit-mat");
     if (sel && line) sel.value = line.material_id;
   });
+  document.querySelectorAll("[data-reqlinedel]").forEach(btn => btn.onclick = () => guard(async () => {
+    if (!confirm("Xóa dòng vật tư này khỏi phiếu đề nghị?")) return;
+    const updated = await DELETE(`/warehouse/requests/${r.request_id}/lines/${btn.dataset.reqlinedel}`);
+    toast("Đã xóa dòng vật tư");
+    closeModal();
+    openEditRequestModal(updated, matById);
+  }));
+  $("reqedit_addbtn").onclick = () => guard(async () => {
+    const material_id = $("reqedit_addmat").value;
+    const quantity = parseFloat($("reqedit_addqty").value);
+    if (!material_id) throw new Error("Chọn vật tư cần thêm.");
+    if (!quantity || quantity <= 0) throw new Error("Nhập số lượng > 0.");
+    const updated = await POST(`/warehouse/requests/${r.request_id}/lines`, { material_id, quantity });
+    toast("Đã thêm dòng vật tư");
+    closeModal();
+    openEditRequestModal(updated, matById);
+  });
   $("reqedit_save").onclick = () => guard(async () => {
     const lines = Array.from(document.querySelectorAll("[data-editline]")).map(tr => ({
       line_id: tr.dataset.editline,
       material_id: tr.querySelector(".reqedit-mat").value,
       quantity: parseFloat(tr.querySelector(".reqedit-qty").value),
     }));
-    await PUT(`/warehouse/requests/${r.request_id}`, {
-      requested_receipt_date: $("reqedit_date").value ? new Date($("reqedit_date").value).toISOString() : null,
-      lines,
-    });
+    const payload = { lines };
+    // Chỉ gửi requested_receipt_date khi CÒN sửa được — gửi cả khi đã disabled (ô vẫn còn giá
+    // trị cũ) sẽ khiến server chặn 409 dù người dùng không hề đụng vào ngày này.
+    if (!hasFulfilled) {
+      payload.requested_receipt_date = $("reqedit_date").value ? new Date($("reqedit_date").value).toISOString() : null;
+    }
+    await PUT(`/warehouse/requests/${r.request_id}`, payload);
     toast("Đã lưu thay đổi phiếu đề nghị");
     closeModal();
     const v = document.querySelector("#nav button.active[data-view]")?.dataset.view;
@@ -7971,6 +8011,21 @@ function openEditRequestModal(r, matById) {
 // có hàng trăm/nghìn phiếu sẽ rất khó xem. "Duyệt cả phiếu" tự chọn lô (FIFO/lô ưu tiên) cho
 // MỌI dòng đang pending trong 1 lần bấm — an toàn vì SL mỗi dòng đã được chặn không vượt tồn
 // kho công ty ngay từ lúc tạo phiếu.
+// Bảng thật (Số phiếu ĐN/NV đề nghị/Ngày lập phiếu/Ngày đề nghị nhận kho/Ghi chú/Trạng thái đều
+// là CỘT RIÊNG, không còn gộp chung 1 dòng chữ) thay cho kiểu thẻ accordion cũ — dùng chung
+// wirePaginate (tìm 1 ô + sắp xếp theo cột + phân trang) giống mọi bảng khác trong app, thay vì
+// tự chế cơ chế tìm/phân trang riêng cho kiểu thẻ (yêu cầu người dùng 2026-09-23: "phân rõ các
+// cột ... tôi tìm phải tìm được hết các trường này"). Mỗi phiếu vẫn giữ 1 dòng chi tiết theo
+// từng vật tư (requestLineRowHtml, không đổi) — xem toàn bộ ở dòng <tr data-detailrow> ngay sau.
+function requestTableHtml(requests, matById, lotById, canFulfill, showBulk, allLots, canRequest, tableId) {
+  return `<div class="tablewrap"><table id="${esc(tableId)}">
+    <thead><tr><th>Số phiếu ĐN</th><th>NV đề nghị</th><th>Ngày lập phiếu</th><th>Ngày đề nghị nhận kho</th>
+      <th>NV xuất</th><th>Ghi chú / Lệnh nguồn</th><th>Trạng thái</th><th></th><th></th></tr></thead>
+    <tbody>${requests.map(r => requestBlockHtml(r, matById, lotById, canFulfill, showBulk, allLots, canRequest)).join("") ||
+      '<tr><td colspan=9 class="muted">Không có phiếu nào.</td></tr>'}</tbody>
+  </table></div>`;
+}
+
 function requestBlockHtml(r, matById, lotById, canFulfill, showBulk, allLots, canRequest) {
   const pendingCount = r.lines.filter(l => l.status === "pending").length;
   const fulfilledCount = r.lines.filter(l => l.status === "fulfilled").length;
@@ -7991,43 +8046,44 @@ function requestBlockHtml(r, matById, lotById, canFulfill, showBulk, allLots, ca
   const summary = `${r.lines.length} dòng` +
     (pendingCount ? ` · ${pendingCount} chờ xử lý` : "") +
     (fulfilledCount ? ` · ${fulfilledCount} đã xuất` : "");
-  const matCodes = r.lines.map(l => (matById[l.material_id] || {}).code || "").join(" ");
-  const searchKey = [r.request_code, r.requested_by, r.note, r.source_label, matCodes]
-    .filter(Boolean).join(" ").toLowerCase();
-  return `<div class="tablewrap" data-search="${esc(searchKey)}" style="margin-bottom:10px">
-      <div class="row" style="align-items:center;justify-content:space-between;flex-wrap:wrap;gap:6px">
-        <div class="row" style="align-items:center;gap:8px">
-          <button class="btn sm sec" data-reqtoggle>▸ Chi tiết</button>
-          <div class="muted">
-            Số phiếu <code class="k">${esc(r.request_code)}</code>
-            · người tạo <b>${esc(r.requested_by || "")}</b> · ngày lập phiếu ${fmt(r.requested_at)}
-            ${r.requested_receipt_date ? ` · <b>ngày đề nghị nhận kho ${fmt(r.requested_receipt_date)}</b>` : ""}
-            ${r.source_label ? " · " + esc(r.source_label) : ""}
-            · ${summary}
-            ${r.note ? " · " + esc(r.note) : ""}
-          </div>
-        </div>
-        <div class="row" style="gap:6px">${bulkBtn}${editBtn}${cancelBtn}</div>
-      </div>
-      <div class="reqdetail" style="display:none;margin-top:8px">
+  const noteCell = [r.source_label, r.note].filter(Boolean).map(esc).join(" · ");
+  // NV xuất: gộp theo TỪNG NGƯỜI đã xử lý ít nhất 1 dòng (fulfilled_by) — 1 phiếu có thể có NHIỀU
+  // người xuất khác nhau nếu vừa "Duyệt cả phiếu" (1 người) vừa "Xuất dòng này" riêng lẻ dòng
+  // khác (người khác) ở thời điểm khác nhau, nên không lấy 1 tên duy nhất (yêu cầu người dùng
+  // 2026-09-23: "Phiếu xuất thiếu thông tin người xuất").
+  const fulfilledActors = [...new Set(r.lines.filter(l => l.status === "fulfilled" && l.fulfilled_by).map(l => l.fulfilled_by))];
+  const actorCell = fulfilledActors.length ? esc(fulfilledActors.join(", ")) : '<span class="muted">—</span>';
+  return `<tr>
+      <td><code class="k">${esc(r.request_code)}</code></td>
+      <td>${esc(r.requested_by || "")}</td>
+      <td class="muted" style="white-space:nowrap">${fmt(r.requested_at)}</td>
+      <td class="muted" style="white-space:nowrap">${r.requested_receipt_date ? `<b>${fmt(r.requested_receipt_date)}</b>` : "—"}</td>
+      <td>${actorCell}</td>
+      <td>${noteCell || '<span class="muted">—</span>'}</td>
+      <td>${summary}</td>
+      <td style="white-space:nowrap">${bulkBtn}${editBtn}${cancelBtn}</td>
+      <td><button class="btn sm sec" data-reqtoggle>▸ Chi tiết</button></td>
+    </tr>
+    <tr data-detailrow="1" style="display:none">
+      <td colspan="9">
         <table>
           <thead><tr><th>Vật tư</th><th>SL</th><th>Lô</th><th>Ngày nhập</th><th>Ngày xuất</th><th>Vị trí kho</th><th>FIFO</th><th>Lý do (nếu khác FIFO)</th><th>Trạng thái</th><th></th></tr></thead>
           <tbody>${r.lines.map(l => requestLineRowHtml(r, l, matById, lotById, canFulfill, allLots)).join("") ||
             '<tr><td colspan=10 class="muted">Phiếu không có dòng nào.</td></tr>'}</tbody>
         </table>
-      </div>
-    </div>`;
+      </td>
+    </tr>`;
 }
 
 function wireRequestBlockActions() {
-  // Tìm khối chi tiết qua quan hệ DOM (sibling trong cùng .tablewrap), KHÔNG dùng
-  // document.getElementById — cùng 1 phiếu MaterialRequest render đồng thời ở cả Kho công ty
+  // Tìm dòng chi tiết qua quan hệ DOM (sibling <tr> ngay sau, đánh dấu [data-detailrow]), KHÔNG
+  // dùng document.getElementById — cùng 1 phiếu MaterialRequest render đồng thời ở cả Kho công ty
   // (tab "giao") và Kho phân xưởng (tab "req"), 2 khối luôn cùng tồn tại trong DOM (chỉ 1 view
   // đang hiện qua CSS) nên id trùng nhau sẽ khiến getElementById luôn trả về bản đầu tiên,
   // có thể là bản đang ẩn ở view khác — bấm "Chi tiết" không thấy gì đổi trên màn hình đang xem.
   document.querySelectorAll("[data-reqtoggle]").forEach(b => b.onclick = () => {
-    const panel = b.closest(".tablewrap")?.querySelector(".reqdetail");
-    if (!panel) return;
+    const panel = b.closest("tr")?.nextElementSibling;
+    if (!panel || !panel.hasAttribute("data-detailrow")) return;
     const open = panel.style.display !== "none";
     panel.style.display = open ? "none" : "";
     b.textContent = (open ? "▸" : "▾") + " Chi tiết";
@@ -8484,26 +8540,24 @@ function requestsHistoryBlockHtml() {
   const canFulfill = false;
   const pending = requests.filter(r => r.lines.some(l => l.status === "pending"));
   const done = requests.filter(r => !r.lines.some(l => l.status === "pending"));
-  const pendingHtml = pending.map(r => requestBlockHtml(r, matById, lotById, canFulfill, true, lots, canRequest)).join("") ||
-    '<div class="muted">Không có phiếu nào đang chờ xử lý.</div>';
-  const doneHtml = done.map(r => requestBlockHtml(r, matById, lotById, canFulfill, false, lots, canRequest)).join("") ||
-    '<div class="muted">Chưa có phiếu nào đã xử lý xong.</div>';
-  // Phân trang 10/trang cho cả 2 khối (giống "Xuất theo đề nghị" ở Kho công ty) — mỗi khối tự
-  // phân trang riêng, dùng CHUNG 1 ô tìm kiếm (xem wirePaginateCards, yêu cầu người dùng
-  // 2026-09-15) — thay cho "Tải thêm" cũ chỉ áp cho khối "Đã xử lý xong".
+  // Bảng thật (không còn thẻ accordion) + wirePaginate riêng cho từng khối — cùng cơ chế tìm 1
+  // ô + sắp xếp cột + phân trang như mọi bảng khác trong app (yêu cầu người dùng 2026-09-23:
+  // "phân rõ các cột ... tôi tìm phải tìm được hết các trường này"). 2 khối "đang chờ"/"đã xử lý"
+  // tách riêng bảng nên mỗi khối có ô tìm riêng (khác bản cũ dùng chung 1 ô cho cả 2).
   return `<div id="req_history_block">
-    <input class="searchbox" id="req_hist_search" placeholder="Tìm theo số phiếu, người tạo, ghi chú, vật tư..." style="margin-bottom:10px;width:100%"/>
     <h3 style="margin:14px 0 8px">Đang chờ xử lý <span class="muted">(${pending.length})</span></h3>
-    <div id="req_pending_block">${pendingHtml}</div>
+    <input class="searchbox" data-tbl="req_pending_table" placeholder="Tìm theo số phiếu, người tạo, ghi chú, vật tư..." style="margin-bottom:8px;width:100%"/>
+    ${requestTableHtml(pending, matById, lotById, canFulfill, true, lots, canRequest, "req_pending_table")}
     <h3 style="margin:18px 0 8px">Đã xử lý xong <span class="muted">(${done.length})</span></h3>
-    <div id="req_done_block">${doneHtml}</div>
+    <input class="searchbox" data-tbl="req_done_table" placeholder="Tìm theo số phiếu, người tạo, ghi chú, vật tư..." style="margin-bottom:8px;width:100%"/>
+    ${requestTableHtml(done, matById, lotById, canFulfill, false, lots, canRequest, "req_done_table")}
   </div>`;
 }
 
 function wireRequestsHistoryBlock() {
   wireRequestBlockActions();
-  wirePaginateCards("req_pending_block", "req_hist_search", 10);
-  wirePaginateCards("req_done_block", "req_hist_search", 10);
+  wirePaginate("req_pending_table", 10);
+  wirePaginate("req_done_table", 10);
 }
 
 function refreshRequestsHistoryBlock() {
@@ -10040,7 +10094,21 @@ function wirePaginate(tableId, defaultPageSize = 10, opts = {}) {
   if (!table) return;
   table.dataset.paginated = "1";
   const tbody = table.querySelector("tbody");
-  let allRows = Array.from(tbody.children);
+  // Một số bảng có "dòng chi tiết" đi kèm ngay sau dòng chính (VD nút "Chi tiết" ở Xuất theo đề
+  // nghị/Đề nghị nhận kho — xem requestBlockHtml), đánh dấu [data-detailrow] — KHÔNG tính là 1
+  // bản ghi riêng khi đếm/lọc/sắp xếp/phân trang, nhưng phải DI CHUYỂN CÙNG dòng chính khi sắp
+  // xếp (xem sortRows) và LUÔN thu gọn lại mỗi khi đổi trang/lọc/sắp xếp (xem apply) — yêu cầu
+  // người dùng 2026-09-23: đổi "Xuất theo đề nghị"/"Đề nghị nhận kho" từ thẻ accordion sang bảng
+  // thật để dùng chung wirePaginate (tìm 1 ô + sắp xếp cột + phân trang) như mọi bảng khác, thay
+  // vì tự chế cơ chế riêng cho kiểu thẻ (wirePaginateCards).
+  const allChildren = Array.from(tbody.children);
+  let allRows = allChildren.filter(tr => !tr.hasAttribute("data-detailrow"));
+  const detailOf = new Map();
+  allChildren.forEach(tr => {
+    if (tr.hasAttribute("data-detailrow") && tr.previousElementSibling) {
+      detailOf.set(tr.previousElementSibling, tr);
+    }
+  });
   const searchInput = document.querySelector(`.searchbox[data-tbl="${tableId}"]`);
   const state = _pagerState[tableId] || { page: 1, pageSize: defaultPageSize, sortCol: null, sortDir: 1 };
   if (state.sortCol === undefined) { state.sortCol = null; state.sortDir = 1; }
@@ -10078,7 +10146,11 @@ function wirePaginate(tableId, defaultPageSize = 10, opts = {}) {
     const withVal = allRows.map(tr => [tr, _sortCellValue(type, cellText(tr, idx))]);
     withVal.sort((a, b) => _sortCompare(a[1], b[1], type, state.sortDir));
     allRows = withVal.map(p => p[0]);
-    allRows.forEach(tr => tbody.appendChild(tr));
+    allRows.forEach(tr => {
+      tbody.appendChild(tr);
+      const d = detailOf.get(tr);
+      if (d) tbody.appendChild(d);   // dòng chi tiết đi theo NGAY SAU dòng chính vừa di chuyển
+    });
   }
   function wireSortHeaders() {
     const headRow = table.querySelector("thead tr");
@@ -10115,7 +10187,18 @@ function wirePaginate(tableId, defaultPageSize = 10, opts = {}) {
     const start = pageSize === Infinity ? 0 : (state.page - 1) * pageSize;
     const end = pageSize === Infinity ? matched.length : start + pageSize;
     const visible = new Set(matched.slice(start, end));
-    allRows.forEach(tr => { tr.style.display = visible.has(tr) ? "" : "none"; });
+    allRows.forEach(tr => {
+      tr.style.display = visible.has(tr) ? "" : "none";
+      const d = detailOf.get(tr);
+      if (d) {
+        // Luôn thu gọn dòng chi tiết mỗi khi đổi trang/lọc/sắp xếp — tránh dòng chi tiết đang mở
+        // bị "trôi" khỏi đúng dòng chính của nó (VD dòng chính bị lọc mất trang, dòng chi tiết
+        // vẫn hiện lơ lửng); bấm lại nút "Chi tiết" để mở lại bình thường.
+        d.style.display = "none";
+        const toggleBtn = tr.querySelector("[data-reqtoggle]");
+        if (toggleBtn) toggleBtn.textContent = "▸ Chi tiết";
+      }
+    });
     bar.innerHTML = `
       <span class="muted">${matched.length} dòng${q ? " (đã lọc)" : ""}</span>
       <button type="button" class="btn sm sec" data-pg="prev" ${state.page <= 1 ? "disabled" : ""}>‹ Trước</button>

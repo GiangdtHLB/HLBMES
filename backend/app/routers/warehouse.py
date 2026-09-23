@@ -16,6 +16,7 @@ from ..schemas import (
     MaterialLocationIn,
     MaterialLocationOut,
     MaterialRequestIn,
+    MaterialRequestLineIn,
     MaterialRequestOut,
     MaterialRequestUpdateIn,
     ReceiptIn,
@@ -213,6 +214,18 @@ def list_requests(status: str = None, limit: int = 500, offset: int = 0, db: Ses
 def update_request(request_id: str, payload: MaterialRequestUpdateIn, db: Session = Depends(get_db),
                    user: User = Depends(get_current_user)):
     return svc.update_request(db, request_id, payload.model_dump(exclude_unset=True), user)
+
+
+@router.post("/requests/{request_id}/lines", response_model=MaterialRequestOut, status_code=201)
+def add_request_line(request_id: str, payload: MaterialRequestLineIn, db: Session = Depends(get_db),
+                     user: User = Depends(get_current_user)):
+    return svc.add_request_line(db, request_id, payload.model_dump(), user)
+
+
+@router.delete("/requests/{request_id}/lines/{line_id}", response_model=MaterialRequestOut)
+def delete_request_line(request_id: str, line_id: str, db: Session = Depends(get_db),
+                        user: User = Depends(get_current_user)):
+    return svc.delete_request_line(db, request_id, line_id, user)
 
 
 @router.post("/requests/{request_id}/lines/{line_id}/fulfill")

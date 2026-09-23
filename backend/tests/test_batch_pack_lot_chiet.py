@@ -358,3 +358,39 @@ def test_tank_shows_vao_dich_dates_and_ferment_duration(client, admin_h):
     assert done["vao_dich_end"] is not None
     assert done["days_elapsed"] is not None and done["days_elapsed"] >= 0
     assert done["ready_date"] is not None
+
+
+def test_finish_pack_lot_requires_ended_at_and_sets_status_hoan_thanh(client, admin_h):
+    """Bug thực tế 2026-09-23: "chiết thiếu ô trạng thái, thiếu nút hoàn thành chiết" — thêm mốc
+    xác nhận riêng "Hoàn thành chiết" (finished), tách biệt khỏi status tự suy (dang_chiet/
+    chiet_1_phan/chiet_het) và khỏi approved/stocked."""
+    _batch, _tank_id, filter_lot_id, to_bbt = _build_approved_filter_lot(client, admin_h, "FIN")
+    pack = client.post("/api/batch-pack-lots", headers=admin_h,
+                       json={"from_bbt": to_bbt, "qty": 200, "pack_lot_code": "PKG-CHIET-FIN", "lot_no": "LOT-CHIET-FIN"})
+    assert pack.status_code == 201, pack.text
+    pack_lot_id = pack.json()["pack_lot_id"]
+    assert pack.json()["status"] == "dang_chiet"
+    assert pack.json()["finished"] is False
+
+    # Chưa có ca nào (ended_at rỗng) -> chưa xác nhận "Hoàn thành chiết" được.
+    too_early = client.post(f"/api/batch-pack-lots/{pack_lot_id}/finish-chiet", headers=admin_h)
+    assert too_early.status_code == 409, too_early.text
+
+    upd = client.put(f"/api/batch-pack-lots/{pack_lot_id}/shifts", headers=admin_h,
+                     json={"ca1_qty": 200, "ca1_end_at": utcnow().isoformat()})
+    assert upd.status_code == 200, upd.text
+
+    fin = client.post(f"/api/batch-pack-lots/{pack_lot_id}/finish-chiet", headers=admin_h)
+    assert fin.status_code == 200, fin.text
+    body = fin.json()
+    assert body["finished"] is True
+    assert body["finished_by"] == "admin"
+    assert body["finished_at"] is not None
+    assert body["status"] == "hoan_thanh"
+    assert body["status_label"] == "Hoàn thành"
+
+    again = client.post(f"/api/batch-pack-lots/{pack_lot_id}/finish-chiet", headers=admin_h)
+    assert again.status_code == 409, again.text   # đã hoàn thành rồi, không cho bấm lần 2
+
+    fetched = client.get(f"/api/batch-pack-lots/{pack_lot_id}", headers=admin_h).json()
+    assert fetched["status"] == "hoan_thanh"
