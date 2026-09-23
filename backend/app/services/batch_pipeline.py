@@ -548,14 +548,17 @@ def list_filter_order_sources(db: Session, order_id: str) -> list[BatchFilterOrd
 
 def _filter_order_status(db: Session, order: BatchFilterOrder) -> dict:
     """`is_complete` = tổng SL thực tế (volume_hl) các Lô lọc đã tạo từ lệnh này đã đạt kế hoạch
-    - dung sai chưa — CHỈ mang tính THÔNG TIN/gợi ý (đủ điều kiện bấm "Hoàn thành lệnh lọc"),
-    KHÔNG tự động đổi status nữa (yêu cầu người dùng 2026-09-23: "khi bấm hoàn thành của lô lọc
-    thì chỉ hoàn thành của mã lô lọc đó thôi, chưa phải là hoàn thành lệnh lọc đó" — trước đây
-    is_complete/consumed_downstream tự suy ra status="hoan_thanh", không có nút riêng, dễ hiểu
-    lầm 1 Lô lọc con tự "Hoàn thành lọc" xong là lệnh lọc cũng xong theo). "Đã tiêu thụ hạ lưu"
-    (mirror _chiet_started) khi đã có Lô thành phẩm tách từ 1 trong các Lô lọc của lệnh này —
-    KHÔNG đổi status, chỉ vẫn dùng để chặn tạo thêm Lô lọc mới (ràng buộc vật lý thật, xem
-    VIEWS.batchfilterlots — khác hẳn "hoàn thành", xem finish_filter_order)."""
+    - dung sai chưa. Khi True, lệnh lọc TỰ ĐỘNG coi là "hoàn thành" (status="hoan_thanh") — KHÔNG
+    cần bấm gì (yêu cầu người dùng 2026-09-23, làm rõ lại: "sản lượng thực tế >= sản lượng kế
+    hoạch - sai số thì lệnh lọc đó được coi là hoàn thành"). Việc 1 Lô lọc (BatchFilterLot) con tự
+    bấm "Hoàn thành lọc" (finish_filtering) của riêng nó KHÔNG ảnh hưởng gì tới is_complete/status
+    ở đây — is_complete chỉ suy từ tổng volume_hl, tách biệt hoàn toàn khỏi mốc lô con. Nút "Hoàn
+    thành lệnh lọc" (order.completed, xem finish_filter_order) dùng cho trường hợp NGƯỢC LẠI: vận
+    hành CHỦ ĐỘNG dừng sớm khi CHƯA đạt đủ SL kế hoạch (VD chỉ lọc một nửa kế hoạch rồi quyết định
+    không lọc thêm nữa) — cũng cho ra status="hoan_thanh" y hệt. "Đã tiêu thụ hạ lưu" (mirror
+    _chiet_started) khi đã có Lô thành phẩm tách từ 1 trong các Lô lọc của lệnh này — KHÔNG đổi
+    status, chỉ vẫn dùng để chặn tạo thêm Lô lọc mới (ràng buộc vật lý thật, xem
+    VIEWS.batchfilterlots — khác hẳn "hoàn thành")."""
     lots = db.execute(select(BatchFilterLot).where(BatchFilterLot.order_id == order.order_id)).scalars().all()
     actual = sum(l.volume_hl or 0.0 for l in lots)
     is_complete = actual >= (order.planned_volume_hl - order.volume_tolerance_hl)
@@ -564,10 +567,10 @@ def _filter_order_status(db: Session, order: BatchFilterOrder) -> dict:
             BatchPackLot.filter_lot_id == l.filter_lot_id)).first()
         for l in lots
     )
-    # Trạng thái hiển thị: planned (chưa tạo lô lọc nào) -> dang_loc (đã có lô lọc, CHƯA bấm
-    # "Hoàn thành lệnh lọc") -> hoan_thanh (order.completed=True, mốc XÁC NHẬN thủ công riêng —
-    # xem finish_filter_order).
-    status = "planned" if not lots else ("hoan_thanh" if order.completed else "dang_loc")
+    # Trạng thái hiển thị: planned (chưa tạo lô lọc nào) -> dang_loc (đã có lô lọc, chưa đủ SL kế
+    # hoạch VÀ chưa bấm "Hoàn thành lệnh lọc") -> hoan_thanh (is_complete TỰ ĐỘNG, HOẶC
+    # order.completed = mốc dừng sớm thủ công — xem finish_filter_order).
+    status = "planned" if not lots else ("hoan_thanh" if (is_complete or order.completed) else "dang_loc")
     return {"lot_count": len(lots), "actual_volume_hl": round(actual, 3),
             "is_complete": is_complete, "consumed_downstream": consumed_downstream,
             "status": status, "status_label": FILTER_ORDER_STATUS_LABEL[status]}
@@ -816,11 +819,13 @@ def update_filter_order(db: Session, order_id: str, payload: dict, user: User) -
 
 
 def finish_filter_order(db: Session, order_id: str, user: User) -> dict:
-    """"Hoàn thành lệnh lọc" — mốc XÁC NHẬN riêng của vận hành, TÁCH BIỆT hoàn toàn khỏi việc
-    từng Lô lọc (BatchFilterLot) con tự bấm "Hoàn thành lọc" (finish_filtering) của riêng nó
-    (yêu cầu người dùng 2026-09-23). Điều kiện DUY NHẤT: tổng SL thực tế (volume_hl) các Lô lọc
-    đã tạo từ lệnh này đã đạt kế hoạch - dung sai (mirror is_complete ở _filter_order_status) —
-    KHÔNG đòi mọi Lô lọc/mẻ lọc phải "Kết thúc" trước (khác is_complete bản cũ)."""
+    """"Hoàn thành lệnh lọc" SỚM — vận hành CHỦ ĐỘNG dừng lọc dù CHƯA đạt đủ SL kế hoạch trừ dung
+    sai (VD chỉ lọc một nửa kế hoạch rồi quyết định không lọc thêm nữa), TÁCH BIỆT hoàn toàn khỏi
+    việc từng Lô lọc (BatchFilterLot) con tự bấm "Hoàn thành lọc" (finish_filtering) của riêng nó
+    (yêu cầu người dùng 2026-09-23). Khi ĐÃ đạt đủ SL kế hoạch trừ dung sai, lệnh lọc TỰ ĐỘNG coi
+    là hoàn thành (is_complete, xem _filter_order_status) — không cần/không cho bấm nút này nữa
+    (yêu cầu người dùng 2026-09-23, làm rõ lại sau khi thấy lệnh đủ SL vẫn còn hiện ở dropdown
+    "chọn lệnh lọc" do version trước đòi ĐỦ SL mới cho bấm, ngược hẳn với nhu cầu thật)."""
     require_perm(user, "batch.execute")
     order = db.get(BatchFilterOrder, order_id)
     if not order:
@@ -833,10 +838,10 @@ def finish_filter_order(db: Session, order_id: str, user: User) -> dict:
         raise DomainError("Chưa có lô lọc nào tạo từ lệnh này — chưa thể hoàn thành.")
     actual = round(sum(l.volume_hl or 0.0 for l in lots), 3)
     target = round(order.planned_volume_hl - order.volume_tolerance_hl, 3)
-    if actual < target:
+    if actual >= target:
         raise DomainError(
-            f"Thể tích lọc thực tế ({actual} hl) chưa đạt kế hoạch trừ dung sai ({target} hl) "
-            "— chưa thể hoàn thành lệnh lọc."
+            f"Thể tích lọc thực tế ({actual} hl) đã đạt kế hoạch trừ dung sai ({target} hl) "
+            "— lệnh lọc tự động coi là hoàn thành, không cần bấm nút này."
         )
     order.completed = True
     order.completed_by = user.username
@@ -940,13 +945,11 @@ def eligible_bbt_lines_for_pack(db: Session) -> list[dict]:
 def draw_from_filter_order(db: Session, order_id: str, payload: dict, user: User) -> BatchFilterLot:
     """Tạo 1 Lô lọc (BatchFilterLot) từ 1 Lệnh lọc đã khai báo — nhân bản các dòng nguồn kế
     hoạch (BatchFilterOrderSource) thành BatchFilterLotSource thật, kế thừa Loại bia/Sản phẩm
-    đích từ lệnh (mirror add_filter). Gọi lại được nhiều lần trên CÙNG 1 lệnh (VD rút dịch
-    nhiều đợt) miễn lệnh CHƯA "Hoàn thành" (order.completed, mốc xác nhận thủ công riêng — xem
-    finish_filter_order) và chưa bị tiêu thụ hạ lưu — yêu cầu người dùng 2026-09-23: "lệnh lọc
-    đó chưa ở trạng thái hoàn thành, thì cho phép tạo thêm 1 mã lô lọc từ lệnh lọc đó" (trước đây
-    chặn ngay khi is_complete=True dù chưa ai bấm hoàn thành, dễ chặn oan khi vẫn còn muốn rút
-    thêm dịch). Bắt buộc chọn `to_bbt` (tank thành phẩm đích) — dịch lọc xong phải biết đưa vào
-    tank vật lý nào."""
+    đích từ lệnh (mirror add_filter). Gọi lại được nhiều lần trên CÙNG 1 lệnh (VD rút dịch nhiều
+    đợt) miễn lệnh CHƯA ở status "hoàn thành" (mirror _filter_order_status — TỰ ĐỘNG khi đủ SL kế
+    hoạch trừ dung sai, HOẶC order.completed khi vận hành chủ động dừng sớm, xem finish_filter_order)
+    và chưa bị tiêu thụ hạ lưu. Bắt buộc chọn `to_bbt` (tank thành phẩm đích) — dịch lọc xong phải
+    biết đưa vào tank vật lý nào."""
     require_perm(user, "batch.execute")
     order = db.get(BatchFilterOrder, order_id)
     if not order:
