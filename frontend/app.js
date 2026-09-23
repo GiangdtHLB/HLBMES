@@ -3417,10 +3417,9 @@ async function showBatchFilterOrder(orderId, editing = false) {
   const [o, sources, finishedProducts, orderMaterials] = await Promise.all([
     GET(`/batch-filter-orders/${orderId}`), GET(`/batch-filter-orders/${orderId}/sources`),
     GET("/finished-products").catch(() => []), GET(`/batch-filter-orders/${orderId}/materials`).catch(() => [])]);
-  // "Còn dùng được" (cho tạo thêm lô lọc) = CHƯA "hoàn thành" thủ công VÀ chưa bị tiêu thụ hạ
-  // lưu — is_complete (đủ SL kế hoạch) KHÔNG còn tự chặn nữa (yêu cầu người dùng 2026-09-23:
-  // "lệnh lọc đó chưa ở trạng thái hoàn thành, thì cho phép tạo thêm 1 mã lô lọc", mirror đúng
-  // gate ở services/batch_pipeline.py::draw_from_filter_order).
+  // "Còn dùng được" (cho tạo thêm lô lọc) = status CHƯA "hoàn thành" (tự động khi đủ SL kế hoạch
+  // trừ dung sai, HOẶC đã bấm "Hoàn thành lệnh lọc" dừng sớm — mirror _filter_order_status) VÀ
+  // chưa bị tiêu thụ hạ lưu, mirror đúng gate ở services/batch_pipeline.py::draw_from_filter_order.
   const available = o.status !== "hoan_thanh" && !o.consumed_downstream;
   const fp = o.finished_product_id ? finishedProducts.find(x => x.finished_product_id === o.finished_product_id) : null;
   // "Sửa" — CHỈ khi lệnh CHƯA có lô lọc nào (o.lot_count === 0, mirror đúng điều kiện "Xóa lệnh
@@ -3428,12 +3427,12 @@ async function showBatchFilterOrder(orderId, editing = false) {
   // 2026-09-23: "lệnh lọc chưa hoàn thành thì cho thêm nút sửa, để tôi sửa số lượng theo kế
   // hoạch, số lượng vật tư"). Không thêm/xóa nguồn hay dòng vật tư — chỉ sửa 2 con số đó.
   const canEdit = o.lot_count === 0;
-  // "Hoàn thành lệnh lọc" — mốc XÁC NHẬN riêng, TÁCH BIỆT khỏi việc từng Lô lọc con tự "Hoàn
-  // thành lọc" của riêng nó — chỉ hiện khi đã có ≥1 lô lọc tạo từ lệnh (yêu cầu người dùng
-  // 2026-09-23: "khi bấm hoàn thành của lô lọc thì chỉ hoàn thành của mã lô lọc đó thôi, chưa
-  // phải là hoàn thành lệnh lọc đó... tạo thêm ra 1 nút hoàn thành lệnh lọc, chỉ hiển thị khi có
-  // ít nhất 1 mã lọc được lấy từ lệnh đó"). Server tự chặn nếu chưa đủ SL kế hoạch trừ dung sai.
-  const canFinish = o.lot_count > 0 && !o.completed;
+  // "Hoàn thành lệnh lọc" — nút để vận hành CHỦ ĐỘNG dừng sớm khi CHƯA đủ SL kế hoạch (VD chỉ lọc
+  // một nửa kế hoạch rồi quyết định không lọc thêm nữa). Khi ĐÃ đủ SL kế hoạch trừ dung sai, lệnh
+  // TỰ ĐỘNG coi là hoàn thành (is_complete, mirror _filter_order_status) — ẩn nút vì không cần
+  // bấm nữa (server cũng chặn nếu vẫn gọi). Vẫn cần có ≥1 lô lọc tạo từ lệnh mới hiện nút (yêu
+  // cầu người dùng 2026-09-23).
+  const canFinish = o.lot_count > 0 && o.status !== "hoan_thanh";
   $("fo_detail").innerHTML = `<h2>Lệnh lọc ${esc(o.order_code)}</h2>
     <dl class="detail">
       <dt>Kiểu</dt><dd>${o.blend_mode === "phoi" ? "Phối" : "Không phối"}</dd>
@@ -3469,12 +3468,19 @@ async function showBatchFilterOrder(orderId, editing = false) {
       line_id: inp.dataset.foline, qty_planned: parseFloat(inp.value) || 0 }));
     await PUT(`/batch-filter-orders/${orderId}`, { sources: srcPayload, lines: linePayload });
     toast("Đã lưu thay đổi lệnh lọc");
+    // Bảng "Danh sách lệnh lọc" bên trái chỉ dựng 1 lần lúc vào view, không tự cập nhật theo —
+    // phải dựng lại cả view (cột "Thực tế/KH" đổi theo SL kế hoạch mới) rồi mở lại đúng lệnh này.
+    await VIEWS.batchfilterorders();
     showBatchFilterOrder(orderId, false);
   });
   if ($("fo_finish")) $("fo_finish").onclick = () => guard(async () => {
     if (!confirm(`Xác nhận đã hoàn thành lệnh lọc ${esc(o.order_code)}? Sẽ không tạo thêm được lô lọc từ lệnh này nữa.`)) return;
     await POST(`/batch-filter-orders/${orderId}/finish`, {});
     toast("Đã xác nhận hoàn thành lệnh lọc");
+    // Mirror fo_save — bảng "Danh sách lệnh lọc" không tự cập nhật cột "Trạng thái", phải dựng
+    // lại cả view rồi mở lại đúng lệnh này (yêu cầu người dùng: bấm hoàn thành mà bảng vẫn hiện
+    // "Đang lọc", chỉ panel chi tiết bên phải đổi).
+    await VIEWS.batchfilterorders();
     showBatchFilterOrder(orderId, false);
   });
   if ($("fo_del")) $("fo_del").onclick = () => guard(async () => {
@@ -3494,9 +3500,8 @@ VIEWS.batchfilterlots = async function () {
   const orderById = Object.fromEntries(orders.map(o => [o.order_id, o]));
   const tankLmNames = (lot) => { const o = orderById[lot.order_id]; return o && o.tank_lm_names && o.tank_lm_names.length ? o.tank_lm_names.join(", ") : "—"; };
   const plannedVol = (lot) => { const o = orderById[lot.order_id]; return o ? o.planned_volume_hl : null; };
-  // "Còn dùng được" = CHƯA "hoàn thành" thủ công (order.status !== "hoan_thanh") VÀ chưa tiêu
-  // thụ hạ lưu — is_complete (đủ SL kế hoạch) KHÔNG còn tự chặn chọn nữa (mirror showBatchFilterOrder,
-  // yêu cầu người dùng 2026-09-23).
+  // "Còn dùng được" = status CHƯA "hoàn thành" (tự động khi đủ SL kế hoạch trừ dung sai, hoặc đã
+  // bấm "Hoàn thành lệnh lọc" dừng sớm) VÀ chưa tiêu thụ hạ lưu — mirror showBatchFilterOrder.
   const available = orders.filter(o => o.status !== "hoan_thanh" && !o.consumed_downstream);
   const orderOpts = `<option value="">(chọn lệnh lọc)</option>` +
     available.map(o => `<option value="${o.order_id}">${esc(o.order_code)} — ${o.blend_mode === "phoi" ? "Phối" : "Không phối"} — ${o.actual_volume_hl}/${o.planned_volume_hl} hl</option>`).join("");

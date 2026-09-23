@@ -124,10 +124,11 @@ def test_create_order_single_tank_and_draw_filter_lot(client, admin_h):
     assert order_after_create["lot_count"] == 1 and order_after_create["is_complete"] is False   # chưa kết thúc nguồn
 
 
-def test_order_available_after_complete_until_manually_finished(client, admin_h):
-    """Yêu cầu người dùng 2026-09-23: "lệnh lọc đó chưa ở trạng thái hoàn thành, thì cho phép tạo
-    thêm 1 mã lô lọc" — is_complete=True (đủ SL kế hoạch) KHÔNG còn tự chặn tạo thêm lô lọc nữa,
-    chỉ order["status"]=="hoan_thanh" (đã bấm nút "Hoàn thành lệnh lọc") mới chặn."""
+def test_order_auto_completes_and_locks_when_volume_reached(client, admin_h):
+    """Yêu cầu người dùng 2026-09-23 (làm rõ lại): "sản lượng thực tế >= sản lượng kế hoạch - sai
+    số thì lệnh lọc đó được coi là hoàn thành" — is_complete=True (đủ SL kế hoạch) TỰ ĐỘNG chuyển
+    status="hoan_thanh", KHÔNG cần bấm nút, và tự chặn tạo thêm lô lọc/bấm "Hoàn thành lệnh lọc"
+    (nút đó chỉ dành cho dừng sớm khi CHƯA đủ SL, xem test_finish_order_allows_early_stop...)."""
     tank = _make_tank(client, admin_h, "2", "TANK-FO-02")
     order = client.post("/api/batch-filter-orders", headers=admin_h, json={
         "order_code": "LOC-FO-02",
@@ -143,32 +144,25 @@ def test_order_available_after_complete_until_manually_finished(client, admin_h)
     order_after = client.get(f"/api/batch-filter-orders/{order['order_id']}", headers=admin_h).json()
     assert order_after["is_complete"] is True
     assert order_after["actual_volume_hl"] == 900
-    assert order_after["status"] == "dang_loc"   # đủ SL nhưng CHƯA bấm "Hoàn thành lệnh lọc"
-
-    # Đủ SL kế hoạch rồi nhưng chưa hoàn thành thủ công -> vẫn tạo thêm lô lọc được bình thường.
-    still_ok = client.post(f"/api/batch-filter-orders/{order['order_id']}/filter-lots", headers=admin_h,
-                           json={"filter_lot_code": "FLOT-FO-02-DUP", "to_bbt": _make_bbt_line(client, admin_h, "FO02DUP")})
-    assert still_ok.status_code == 201, still_ok.text
-
-    # Bấm "Hoàn thành lệnh lọc" — chỉ hoàn thành LỆNH, KHÔNG đụng status của các Lô lọc con.
-    finish = client.post(f"/api/batch-filter-orders/{order['order_id']}/finish", headers=admin_h)
-    assert finish.status_code == 200, finish.text
-    assert finish.json()["status"] == "hoan_thanh"
-    assert finish.json()["completed_by"] == "admin"
+    assert order_after["status"] == "hoan_thanh"   # tự động, KHÔNG cần bấm gì
+    assert order_after["completed"] is False        # KHÔNG do bấm nút — completed_by vẫn trống
     lot_after_finish = client.get(f"/api/batch-filter-lots/{draw['filter_lot_id']}", headers=admin_h).json()
     assert lot_after_finish["status"] == "dang_loc"   # Lô lọc con KHÔNG tự hoàn thành theo
 
-    # Bấm lần 2 -> chặn (đã hoàn thành rồi).
-    again = client.post(f"/api/batch-filter-orders/{order['order_id']}/finish", headers=admin_h)
-    assert again.status_code == 409, again.text
-
-    # Đã hoàn thành -> không tạo thêm lô lọc được nữa.
+    # Đã tự động hoàn thành -> không tạo thêm lô lọc được nữa.
     blocked = client.post(f"/api/batch-filter-orders/{order['order_id']}/filter-lots", headers=admin_h,
-                          json={"filter_lot_code": "FLOT-FO-02-DUP2", "to_bbt": _make_bbt_line(client, admin_h, "FO02DUP2")})
+                          json={"filter_lot_code": "FLOT-FO-02-DUP", "to_bbt": _make_bbt_line(client, admin_h, "FO02DUP")})
     assert blocked.status_code == 409, blocked.text
 
+    # Bấm "Hoàn thành lệnh lọc" khi đã tự động hoàn thành rồi -> chặn, không cần bấm.
+    finish = client.post(f"/api/batch-filter-orders/{order['order_id']}/finish", headers=admin_h)
+    assert finish.status_code == 409, finish.text
+    assert "không cần bấm" in finish.json()["detail"]
 
-def test_finish_order_blocked_before_volume_target_reached(client, admin_h):
+
+def test_finish_order_allows_early_stop_before_volume_target_reached(client, admin_h):
+    """Nút "Hoàn thành lệnh lọc" dùng để vận hành CHỦ ĐỘNG dừng sớm khi CHƯA đủ SL kế hoạch (VD
+    chỉ lọc một nửa kế hoạch rồi quyết định không lọc thêm nữa) — yêu cầu người dùng 2026-09-23."""
     tank = _make_tank(client, admin_h, "12", "TANK-FO-02B")
     order = client.post("/api/batch-filter-orders", headers=admin_h, json={
         "order_code": "LOC-FO-02B",
@@ -181,11 +175,25 @@ def test_finish_order_blocked_before_volume_target_reached(client, admin_h):
     draw = client.post(f"/api/batch-filter-orders/{order['order_id']}/filter-lots", headers=admin_h,
                        json={"filter_lot_code": "FLOT-FO-02B", "to_bbt": _make_bbt_line(client, admin_h, "FO02B")}).json()
     src = client.get(f"/api/batch-filter-lots/{draw['filter_lot_id']}/sources", headers=admin_h).json()[0]
-    _finish_source(client, admin_h, src, 500)   # 500 < 900 kế hoạch
+    _finish_source(client, admin_h, src, 500)   # 500 < 900 kế hoạch -> is_complete vẫn False
 
-    too_early = client.post(f"/api/batch-filter-orders/{order['order_id']}/finish", headers=admin_h)
-    assert too_early.status_code == 409, too_early.text
-    assert "chưa đạt kế hoạch" in too_early.json()["detail"]
+    order_mid = client.get(f"/api/batch-filter-orders/{order['order_id']}", headers=admin_h).json()
+    assert order_mid["is_complete"] is False and order_mid["status"] == "dang_loc"
+
+    # Dừng sớm — vận hành chủ động bấm "Hoàn thành lệnh lọc" dù chưa đủ SL kế hoạch.
+    finish = client.post(f"/api/batch-filter-orders/{order['order_id']}/finish", headers=admin_h)
+    assert finish.status_code == 200, finish.text
+    assert finish.json()["status"] == "hoan_thanh"
+    assert finish.json()["completed_by"] == "admin"
+
+    # Bấm lần 2 -> chặn (đã hoàn thành rồi).
+    again = client.post(f"/api/batch-filter-orders/{order['order_id']}/finish", headers=admin_h)
+    assert again.status_code == 409, again.text
+
+    # Đã hoàn thành -> không tạo thêm lô lọc được nữa.
+    blocked = client.post(f"/api/batch-filter-orders/{order['order_id']}/filter-lots", headers=admin_h,
+                          json={"filter_lot_code": "FLOT-FO-02B-DUP", "to_bbt": _make_bbt_line(client, admin_h, "FO02BDUP")})
+    assert blocked.status_code == 409, blocked.text
 
 
 def test_order_blocked_after_pack_lot_split(client, admin_h):
