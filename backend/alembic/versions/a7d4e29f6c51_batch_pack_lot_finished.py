@@ -25,7 +25,7 @@ depends_on = None
 def upgrade() -> None:
     op.add_column('batch_pack_lot', sa.Column('finished', sa.Boolean(), nullable=False, server_default=sa.false()))
     op.add_column('batch_pack_lot', sa.Column('finished_by', sa.Unicode(length=255), nullable=True))
-    op.add_column('batch_pack_lot', sa.Column('finished_at', sa.DateTime(), nullable=True))
+    op.add_column('batch_pack_lot', sa.Column('finished_at', sa.DateTime(timezone=True), nullable=True))
 
 
 def downgrade() -> None:
