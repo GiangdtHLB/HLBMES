@@ -1139,6 +1139,10 @@ class MaterialRequestLineOut(ORMModel):
     fulfilled_at: Optional[datetime] = None
     reason: Optional[str] = None
     fifo_ok: Optional[bool] = None
+    # Tồn kho công ty tính ĐÚNG tại "Ngày đề nghị nhận kho" của phiếu (hoặc hiện tại nếu phiếu
+    # chưa khai ngày) — hiển thị để người dùng thấy TRƯỚC khi bấm lưu, cùng con số dùng để chặn
+    # tạo/sửa phiếu vượt tồn (yêu cầu người dùng 2026-09-23).
+    company_stock_as_of: float = 0.0
 
 
 class MaterialRequestOut(ORMModel):

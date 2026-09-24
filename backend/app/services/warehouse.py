@@ -1440,7 +1440,7 @@ def _lock_lot(db, lot_id):
 # 1 phiếu (MaterialRequest) có thể gồm nhiều dòng vật tư khác nhau (MaterialRequestLine);
 # mỗi dòng xử lý duyệt/từ chối độc lập vì mỗi vật tư cần chọn lô riêng.
 
-def _line_dict(db: Session, line: MaterialRequestLine) -> dict:
+def _line_dict(db: Session, line: MaterialRequestLine, requested_receipt_date=None) -> dict:
     # fulfilled_lot_id/fulfilled_qty chỉ giữ lô CUỐI CÙNG đã dùng (schema cũ, 1 dòng = 1 lô) —
     # từ khi fulfill_all_lines hỗ trợ tách 1 dòng thành NHIỀU lô theo FIFO (yêu cầu người dùng
     # 2026-09-18, xem fulfill_all_lines), danh sách ĐẦY ĐỦ các lô thực đã dùng cho dòng này lấy
@@ -1451,13 +1451,19 @@ def _line_dict(db: Session, line: MaterialRequestLine) -> dict:
             select(StockMovement.lot_code).where(
                 StockMovement.request_line_id == line.line_id, StockMovement.movement_type == "transfer")
             .order_by(StockMovement.created_at)).all()]
+    # "Tồn kho công ty (tại ngày đề nghị)" — hiển thị đúng con số dùng để chặn tạo/sửa phiếu
+    # (_stock_at_company_as_of/_stock_at_company), để người dùng thấy TRƯỚC khi bấm lưu thay vì
+    # chỉ biết qua thông báo lỗi (yêu cầu người dùng 2026-09-23: "thêm cho tôi 1 cột tồn kho tại
+    # kho công ty tại thời điểm ngày đề nghị nhận kho").
+    company_stock_as_of = (_stock_at_company_as_of(db, line.material_id, requested_receipt_date)
+                           if requested_receipt_date is not None else _stock_at_company(db, line.material_id))
     return {"line_id": line.line_id, "request_id": line.request_id, "seq": line.seq,
             "material_id": line.material_id, "quantity": line.quantity, "uom": line.uom,
             "preferred_lot_id": line.preferred_lot_id, "status": line.status,
             "fulfilled_lot_id": line.fulfilled_lot_id, "fulfilled_qty": line.fulfilled_qty,
             "fulfilled_lot_codes": lot_codes,
             "fulfilled_by": line.fulfilled_by, "fulfilled_at": line.fulfilled_at, "reason": line.reason,
-            "fifo_ok": line.fifo_ok}
+            "fifo_ok": line.fifo_ok, "company_stock_as_of": company_stock_as_of}
 
 
 def _source_label(db: Session, source_type: str, source_id: str) -> Optional[str]:
@@ -1480,7 +1486,7 @@ def _request_dict(db: Session, req: MaterialRequest, lines: list[MaterialRequest
             "requested_receipt_date": req.requested_receipt_date,
             "source_type": req.source_type, "source_id": req.source_id,
             "source_label": _source_label(db, req.source_type, req.source_id),
-            "lines": [_line_dict(db, l) for l in sorted(lines, key=lambda l: l.seq)]}
+            "lines": [_line_dict(db, l, req.requested_receipt_date) for l in sorted(lines, key=lambda l: l.seq)]}
 
 
 def _stock_at_company(db: Session, material_id: str) -> float:
@@ -2080,7 +2086,7 @@ def undo_fulfill_line(db: Session, request_id: str, line_id: str, user: User) ->
     line.reason = None
     record_audit(db, entity_type="material_request_line", entity_id=line.line_id, action="undo_fulfill", actor=user)
     db.commit()
-    return _line_dict(db, line)
+    return _line_dict(db, line, req.requested_receipt_date)
 
 
 def fulfill_all_lines(db: Session, request_id: str, user: User,
@@ -2196,6 +2202,7 @@ def fulfill_all_lines(db: Session, request_id: str, user: User,
 
 def reject_request_line(db: Session, request_id: str, line_id: str, reason: str, user: User) -> dict:
     require_perm(user, "warehouse.issue")
+    req = _get_request(db, request_id)
     line = _get_request_line(db, request_id, line_id)
     if line.status != "pending":
         raise DomainError(f"Dòng vật tư này đã ở trạng thái '{line.status}', không thể xử lý lại.")
@@ -2205,7 +2212,7 @@ def reject_request_line(db: Session, request_id: str, line_id: str, reason: str,
                  actor=user, reason=reason)
     db.commit()
     db.refresh(line)
-    return _line_dict(db, line)
+    return _line_dict(db, line, req.requested_receipt_date)
 
 
 # ---- Điều chuyển phân xưởng → công ty / trả nhà cung cấp / hoàn xuất tự do / lịch sử ----
