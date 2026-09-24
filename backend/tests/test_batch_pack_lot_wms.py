@@ -170,7 +170,7 @@ def _build_pack_lot(client, admin_h, suffix, fp_id, ca1=10, ca2=0, ca3=0, v_draw
 
     pack = client.post("/api/batch-pack-lots", headers=admin_h, json={
         "from_bbt": to_bbt, "qty": 1000, "pack_lot_code": f"PKG-PKWMS-{suffix}",
-        "lot_no": f"LOT-PKWMS-{suffix}", "finished_product_id": fp_id,
+        "lot_no": f"LOT-PKWMS-{suffix}", "finished_product_id": fp_id, "line": "CL01",
     })
     assert pack.status_code == 201, pack.text
     pack_lot_id = pack.json()["pack_lot_id"]
@@ -444,10 +444,12 @@ def test_pack_lot_rejects_duplicate_lot_no_same_year(client, admin_h):
     client.post(f"/api/batch-filter-lots/{filter_lot_id}/approve", headers=admin_h)
 
     dup = client.post("/api/batch-pack-lots", headers=admin_h, json={
-        "from_bbt": to_bbt, "qty": 500, "pack_lot_code": "PKG-PKWMS-DUPLOT2", "lot_no": dup_lot_no})
+        "from_bbt": to_bbt, "qty": 500, "pack_lot_code": "PKG-PKWMS-DUPLOT2", "lot_no": dup_lot_no,
+        "finished_product_id": fp_id, "line": "CL01"})
     assert dup.status_code == 409, dup.text
     assert "duy nhất" in dup.json()["detail"]
 
     ok = client.post("/api/batch-pack-lots", headers=admin_h, json={
-        "from_bbt": to_bbt, "qty": 500, "pack_lot_code": "PKG-PKWMS-DUPLOT3", "lot_no": dup_lot_no + "-B"})
+        "from_bbt": to_bbt, "qty": 500, "pack_lot_code": "PKG-PKWMS-DUPLOT3", "lot_no": dup_lot_no + "-B",
+        "finished_product_id": fp_id, "line": "CL01"})
     assert ok.status_code == 201, ok.text

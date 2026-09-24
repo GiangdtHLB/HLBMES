@@ -83,6 +83,13 @@ def _make_bbt_line(client, admin_h, suffix):
     return r.json()["code"]
 
 
+def _make_finished_product(client, admin_h, suffix):
+    r = client.post("/api/finished-products", headers=admin_h,
+                    json={"code": f"SKU-{suffix}", "name": f"SKU test {suffix}", "uom": "lon"})
+    assert r.status_code == 201, r.text
+    return r.json()["finished_product_id"]
+
+
 def _finish_source(client, admin_h, source, dich_nha_hl, nuoc_bai_khi_hl=0):
     """1 mẻ lọc tự có sẵn 1 khoản rút (draw) cho MỖI nguồn ngay lúc tạo lô lọc — "Kết thúc" tức
     là kết thúc mẻ đó, khai V dịch nha cho khoản rút của nguồn này. `source` là dict trả về từ
@@ -136,17 +143,18 @@ def test_pack_lot_from_bbt_creates_with_line_and_pack_date(client, admin_h):
     assert row is not None, eligible
     assert row["on_hand_bbt"] == 900.0
 
+    fp_id = _make_finished_product(client, admin_h, "CHIET01")
     # qty (Số lượng cấp chiết) đơn vị LÍT — 30000 lít = 300 hl, quy đổi khi trừ tồn lô lọc (hl).
     pack = client.post("/api/batch-pack-lots", headers=admin_h, json={
         "from_bbt": to_bbt, "qty": 30000, "pack_lot_code": "PKG-CHIET-01",
-        "lot_no": "LOTBIA-01", "line": "CL01, CL02",
+        "lot_no": "LOTBIA-01", "finished_product_id": fp_id, "line": "CL01",
         "pack_date": "2026-08-20T08:00:00",
     })
     assert pack.status_code == 201, pack.text
     p = pack.json()
     assert p["from_bbt"] == to_bbt
     assert p["filter_lot_id"] == filter_lot_id
-    assert p["line"] == "CL01, CL02"
+    assert p["line"] == "CL01"
     assert p["pack_date"].startswith("2026-08-20T08:00:00")
 
     fl = client.get(f"/api/batch-filter-lots/{filter_lot_id}", headers=admin_h).json()
@@ -196,8 +204,10 @@ def test_pack_lot_material_usage_add_list_delete(client, admin_h):
     (material_id), hệ thống tự chọn lô FIFO tại đúng "Ngày cấp" = ended_at, và bắt buộc lô đã có
     "Giờ kết thúc chiết" (ended_at) trước khi thêm được."""
     _batch, _tank_id, filter_lot_id, to_bbt = _build_approved_filter_lot(client, admin_h, "MAT")
+    fp_id = _make_finished_product(client, admin_h, "CHIETMAT")
     pack = client.post("/api/batch-pack-lots", headers=admin_h,
-                       json={"from_bbt": to_bbt, "qty": 200, "pack_lot_code": "PKG-CHIET-MAT", "lot_no": "LOT-CHIET-MAT"})
+                       json={"from_bbt": to_bbt, "qty": 200, "pack_lot_code": "PKG-CHIET-MAT", "lot_no": "LOT-CHIET-MAT",
+                             "finished_product_id": fp_id, "line": "CL01"})
     assert pack.status_code == 201, pack.text
     pack_lot_id = pack.json()["pack_lot_id"]
 
@@ -247,8 +257,10 @@ def test_pack_lot_material_delete_blocked_after_kcs_approve(client, admin_h):
     xóa lúc đó sẽ nói ngược "chưa từng dùng NVL này" cho 1 lô đã được ký duyệt chính thức
     (yêu cầu người dùng 2026-09-21: "đã dùng rồi thì không thể xóa, hoàn tác, hay sửa")."""
     _batch, _tank_id, filter_lot_id, to_bbt = _build_approved_filter_lot(client, admin_h, "MATDEL")
+    fp_id = _make_finished_product(client, admin_h, "CHIETMATDEL")
     pack = client.post("/api/batch-pack-lots", headers=admin_h,
-                       json={"from_bbt": to_bbt, "qty": 200, "pack_lot_code": "PKG-CHIET-MATDEL", "lot_no": "LOT-CHIET-MATDEL"})
+                       json={"from_bbt": to_bbt, "qty": 200, "pack_lot_code": "PKG-CHIET-MATDEL", "lot_no": "LOT-CHIET-MATDEL",
+                             "finished_product_id": fp_id, "line": "CL01"})
     assert pack.status_code == 201, pack.text
     pack_lot_id = pack.json()["pack_lot_id"]
 
@@ -277,9 +289,10 @@ def test_pack_lot_material_delete_blocked_after_kcs_approve(client, admin_h):
 
 def test_pack_lot_shifts_qty_and_time_editable_repeatedly(client, admin_h):
     _batch, _tank_id, _filter_lot_id, to_bbt = _build_approved_filter_lot(client, admin_h, "SHIFT")
+    fp_id = _make_finished_product(client, admin_h, "CHIETSHIFT")
     pack = client.post("/api/batch-pack-lots", headers=admin_h,
                        json={"from_bbt": to_bbt, "qty": 900, "pack_lot_code": "PKG-CHIET-SHIFT",
-                             "lot_no": "LOT-CHIET-SHIFT"})
+                             "lot_no": "LOT-CHIET-SHIFT", "finished_product_id": fp_id, "line": "CL01"})
     assert pack.status_code == 201, pack.text
     pack_lot_id = pack.json()["pack_lot_id"]
     assert pack.json()["ca1_qty"] is None and pack.json()["ca1_start_at"] is None
@@ -307,8 +320,10 @@ def test_pack_lot_qty_liters_converts_to_hl_on_filter_lot(client, admin_h):
     """Số lượng cấp chiết (qty) đơn vị LÍT; lô lọc nguồn (on_hand) đơn vị hl — mọi thao tác
     tạo/sửa/xóa lô TP phải quy đổi đúng 1 hl = 100 lít khi trừ/hoàn tồn lô lọc."""
     _batch, _tank_id, filter_lot_id, to_bbt = _build_approved_filter_lot(client, admin_h, "LITER", v_drawn=1000)
+    fp_id = _make_finished_product(client, admin_h, "CHIETLITER")
     pack = client.post("/api/batch-pack-lots", headers=admin_h, json={
-        "from_bbt": to_bbt, "qty": 25000, "pack_lot_code": "PKG-CHIET-LITER", "lot_no": "LOT-CHIET-LITER"})
+        "from_bbt": to_bbt, "qty": 25000, "pack_lot_code": "PKG-CHIET-LITER", "lot_no": "LOT-CHIET-LITER",
+        "finished_product_id": fp_id, "line": "CL01"})
     assert pack.status_code == 201, pack.text
     pack_lot_id = pack.json()["pack_lot_id"]
     assert pack.json()["qty"] == 25000   # lưu nguyên đơn vị lít, không quy đổi khi hiển thị
@@ -365,8 +380,10 @@ def test_finish_pack_lot_requires_ended_at_and_sets_status_hoan_thanh(client, ad
     xác nhận riêng "Hoàn thành chiết" (finished), tách biệt khỏi status tự suy (dang_chiet/
     chiet_1_phan/chiet_het) và khỏi approved/stocked."""
     _batch, _tank_id, filter_lot_id, to_bbt = _build_approved_filter_lot(client, admin_h, "FIN")
+    fp_id = _make_finished_product(client, admin_h, "CHIETFIN")
     pack = client.post("/api/batch-pack-lots", headers=admin_h,
-                       json={"from_bbt": to_bbt, "qty": 200, "pack_lot_code": "PKG-CHIET-FIN", "lot_no": "LOT-CHIET-FIN"})
+                       json={"from_bbt": to_bbt, "qty": 200, "pack_lot_code": "PKG-CHIET-FIN", "lot_no": "LOT-CHIET-FIN",
+                             "finished_product_id": fp_id, "line": "CL01"})
     assert pack.status_code == 201, pack.text
     pack_lot_id = pack.json()["pack_lot_id"]
     assert pack.json()["status"] == "dang_chiet"

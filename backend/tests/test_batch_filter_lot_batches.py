@@ -90,6 +90,13 @@ def _make_bbt_line(client, admin_h, suffix):
     return r.json()["code"]
 
 
+def _make_finished_product(client, admin_h, suffix):
+    r = client.post("/api/finished-products", headers=admin_h,
+                    json={"code": f"SKU-{suffix}", "name": f"SKU test {suffix}", "uom": "lon"})
+    assert r.status_code == 201, r.text
+    return r.json()["finished_product_id"]
+
+
 def _draw_single_source(client, admin_h, suffix, tank_qty=1000):
     tank_id = _make_tank(client, admin_h, suffix, tank_qty)
     to_bbt = _make_bbt_line(client, admin_h, suffix)
@@ -251,9 +258,10 @@ def test_delete_batch_blocked_when_pack_lot_already_consumed_more_than_remaining
     appr = client.post(f"/api/batch-filter-lots/{filter_lot_id}/approve", headers=admin_h)
     assert appr.status_code == 200, appr.text
     to_bbt = client.get(f"/api/batch-filter-lots/{filter_lot_id}", headers=admin_h).json()["to_bbt"]
+    fp_id = _make_finished_product(client, admin_h, "DELGUARD01")
     pack = client.post("/api/batch-pack-lots", headers=admin_h,
                        json={"from_bbt": to_bbt, "qty": 25000, "pack_lot_code": "PKG-DELGUARD01",
-                             "lot_no": "LOT-DELGUARD01"})
+                             "lot_no": "LOT-DELGUARD01", "finished_product_id": fp_id, "line": "CL01"})
     assert pack.status_code == 201, pack.text
 
     blocked = client.delete(f"/api/batch-filter-lots/batches/{second_batch_id}", headers=admin_h)

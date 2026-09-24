@@ -243,13 +243,14 @@ function closeModal(triggerOnBack = true) {
 // Trả về {getSelected(): string[]} để lấy lựa chọn hiện tại lúc submit.
 // Cửa sổ nổi tự do (không phải overlay như modal()), kéo được bằng thanh tiêu đề, CHỈ đóng
 // bằng nút X đỏ — không tự đóng khi rê chuột qua các dòng tick (tránh mất cửa sổ ngoài ý muốn).
-function initCheckboxMultiSelect(container, items, initialSelected) {
+function initCheckboxMultiSelect(container, items, initialSelected, label) {
+  label = label || "dây chuyền";
   const selected = new Set(initialSelected || []);
   const trigger = el(`<button type="button" class="btn sec" style="width:100%;text-align:left"></button>`);
   container.appendChild(trigger);
   const summary = () => {
     const chosen = items.filter(i => selected.has(i.value));
-    return chosen.length ? chosen.map(i => i.label).join(", ") : "— (chọn dây chuyền)";
+    return chosen.length ? chosen.map(i => i.label).join(", ") : `— (chọn ${label})`;
   };
   const renderTrigger = () => { trigger.textContent = summary(); };
   renderTrigger();
@@ -261,7 +262,7 @@ function initCheckboxMultiSelect(container, items, initialSelected) {
     if (panel) { closePanel(); return; }
     const rect = trigger.getBoundingClientRect();
     panel = el(`<div class="msdd-panel" style="top:${rect.bottom + window.scrollY + 4}px; left:${rect.left + window.scrollX}px">
-      <div class="msdd-head"><span>Chọn dây chuyền</span><span class="msdd-x" title="Đóng">✕</span></div>
+      <div class="msdd-head"><span>Chọn ${esc(label)}</span><span class="msdd-x" title="Đóng">✕</span></div>
       <div class="msdd-body">${items.map(i => `<label class="msdd-item"><input type="checkbox" value="${esc(i.value)}" ${selected.has(i.value) ? "checked" : ""}/> ${esc(i.label)}</label>`).join("") ||
         '<div class="muted">Không có mục nào.</div>'}</div>
     </div>`);
@@ -3752,7 +3753,6 @@ VIEWS.batchpacklots = async function () {
       `<option value="${esc(fp.finished_product_id)}" ${fp.finished_product_id === selected ? "selected" : ""}>${esc(fp.code)} — ${esc(fp.name)}</option>`).join("");
   };
   const packagingLines = lines.filter(l => l.kind === "line" && l.active);
-  const lineItems = packagingLines.map(l => ({ value: l.code, label: `${l.code} — ${l.name}` }));
   $("view-batchpacklots").innerHTML = `
     ${productionTabsHtml("batchpacklots")}
     <div class="panel"><h2>🍺 Tạo lô thành phẩm (chiết)</h2>
@@ -3761,7 +3761,8 @@ VIEWS.batchpacklots = async function () {
         <div class="field"><label>Chiết từ tank BBT</label><select id="pk_bbt"><option value=""></option>${bbtOpts}</select></div>
         <div class="field"><label>Sản phẩm</label><select id="pk_fp">${pkFpOpts(null, null)}</select>
           <div class="muted pk_fp_note" style="font-size:12px;margin-top:2px">Chưa xác định Loại bia — chọn tank BBT trước để chỉ hiện đúng sản phẩm cùng Loại bia.</div></div>
-        <div class="field"><label>Dây chuyền</label><div id="pk_line_wrap" data-items="${esc(JSON.stringify(lineItems))}"></div></div>
+        <div class="field"><label>Dây chuyền</label><select id="pk_line"><option value="">(chọn dây chuyền)</option>${packagingLines.map(l =>
+          `<option value="${esc(l.code)}">${esc(l.code)} — ${esc(l.name)}</option>`).join("")}</select></div>
         <div class="field"><label>Ngày giờ bắt đầu chiết</label><input id="pk_date" type="datetime-local" value="${toDTLocal(new Date())}"/></div>
       </div>
       <div class="row">
@@ -3788,7 +3789,6 @@ VIEWS.batchpacklots = async function () {
     </div>`;
   wireProductionTabs();
   wirePaginate("t_packlot", 10);
-  const pkLinePicker = initCheckboxMultiSelect($("pk_line_wrap"), lineItems, []);
   const updatePkFp = () => {
     const opt = $("pk_bbt").selectedOptions[0];
     const beerTypeId = opt ? opt.dataset.beertype : "";
@@ -3799,19 +3799,23 @@ VIEWS.batchpacklots = async function () {
   $("pk_bbt").onchange = updatePkFp;
   $("pk_create").onclick = () => guard(async () => {
     if (!$("pk_bbt").value) throw new Error("Chọn tank BBT để chiết.");
+    // Sản phẩm/Dây chuyền BẮT BUỘC chọn đúng 1 — cả 2 vốn là <select> đơn nên không thể chọn
+    // nhiều, chỉ cần chặn để trống (yêu cầu người dùng 2026-09-23: trước đây "Sản phẩm" bỏ
+    // trống được, "Dây chuyền" còn cho chọn NHIỀU dây chuyền cùng lúc qua ô multi-select).
+    if (!$("pk_fp").value) throw new Error("Chọn sản phẩm để chiết.");
+    if (!$("pk_line").value) throw new Error("Chọn dây chuyền để chiết.");
     const qty = parseFloat($("pk_qty").value);
     if (!qty || qty <= 0) throw new Error("Nhập Số lượng cấp chiết (lít) > 0.");
     const lotNo = $("pk_lotno").value.trim();
     if (!lotNo) throw new Error("Nhập số lô bia.");
-    const selectedLines = pkLinePicker.getSelected();
     const dateRaw = $("pk_date").value;
     // Mã lô TP là mã nội bộ để truy xuất — tự sinh, người dùng chỉ cần quan tâm Số lô bia
     // (mirror bottle_code tự sinh ở màn Chiết cũ, xem frontend/app.js ~10340).
     const p = await POST("/batch-pack-lots", {
       from_bbt: $("pk_bbt").value, qty,
       pack_lot_code: "PKG-" + Date.now().toString().slice(-6),
-      finished_product_id: $("pk_fp").value || null, lot_no: lotNo,
-      line: selectedLines.join(", ") || null,
+      finished_product_id: $("pk_fp").value, lot_no: lotNo,
+      line: $("pk_line").value,
       pack_date: dateRaw ? new Date(dateRaw).toISOString() : null,
     });
     toast("Đã tạo lô thành phẩm " + p.pack_lot_code); render("batchpacklots");
@@ -7978,14 +7982,19 @@ function openEditRequestModal(r, matById) {
   const hasFulfilled = r.lines.some(l => l.status === "fulfilled");
   const rows = r.lines.map(l => {
     const mat = matById[l.material_id];
+    // Tồn kho công ty đúng TẠI "Ngày đề nghị nhận kho" của phiếu (server tính sẵn, xem
+    // _line_dict/_stock_at_company_as_of) — tô đỏ khi không đủ SL đang đề nghị, để thấy TRƯỚC
+    // khi bấm lưu thay vì chỉ biết qua thông báo lỗi (yêu cầu người dùng 2026-09-23).
+    const stockCell = `<td${l.company_stock_as_of < l.quantity ? ' style="color:var(--red)"' : ""}>${l.company_stock_as_of} ${esc(l.uom)}</td>`;
     if (l.status !== "pending") {
       const matLabel = mat ? `${esc(mat.code)} — ${esc(mat.name)}` : esc(l.material_id);
-      return `<tr><td>${matLabel}</td><td>${l.quantity} ${esc(l.uom)}</td>
+      return `<tr><td>${matLabel}</td><td>${l.quantity} ${esc(l.uom)}</td>${stockCell}
         <td>${badge(REQ_STATUS_BADGE[l.status] || "planned")}${esc(l.status)}</td><td></td></tr>`;
     }
     return `<tr data-editline="${esc(l.line_id)}">
       <td><select class="reqedit-mat" style="width:100%">${REQ_CACHE.matOpts}</select></td>
       <td><input type="number" min="0" step="any" class="reqedit-qty" value="${l.quantity}" style="width:90px"/> ${esc(l.uom)}</td>
+      ${stockCell}
       <td>${badge(REQ_STATUS_BADGE[l.status] || "planned")}${esc(l.status)}</td>
       <td><button class="btn sm sec" data-reqlinedel="${esc(l.line_id)}" style="color:var(--red)">Xóa</button></td></tr>`;
   }).join("");
@@ -7998,7 +8007,7 @@ function openEditRequestModal(r, matById) {
       <input id="reqedit_date" type="datetime-local" value="${esc(dateVal)}" ${hasFulfilled ? "disabled" : ""}/>
       ${hasFulfilled ? '<div class="muted" style="font-size:12px;margin-top:4px">Đã có vật tư được xuất — không thể sửa ngày này nữa.</div>' : ""}
     </div>
-    <div class="tablewrap"><table><thead><tr><th>Vật tư</th><th>SL</th><th>Trạng thái</th><th></th></tr></thead>
+    <div class="tablewrap"><table><thead><tr><th>Vật tư</th><th>SL</th><th>Tồn kho công ty (tại ngày đề nghị)</th><th>Trạng thái</th><th></th></tr></thead>
       <tbody>${rows}</tbody></table></div>
     <div class="muted" style="margin:8px 0;font-size:12px">Chỉ sửa/xóa được vật tư/số lượng của dòng còn "pending" — dòng đã xử lý giữ nguyên, không sửa/xóa được.</div>
     <div class="row" style="margin:10px 0;align-items:flex-end;gap:8px">
@@ -11313,17 +11322,19 @@ VIEWS.master = async function () {
       </div>` : ""}
       <input class="searchbox" data-tbl="t_pks" placeholder="Tìm theo mã SKU, mã/tên quy cách..." style="margin-top:10px"/>
       <div class="tablewrap" style="margin-top:6px"><table id="t_pks">
-        <thead><tr><th>SKU</th><th>Mã quy cách</th><th>Tên</th><th>SL/pallet</th><th>Số hàng xếp</th><th>Trạng thái</th>${canManage ? "<th></th>" : ""}</tr></thead>
+        <thead><tr><th>SKU</th><th>Tên SKU</th><th>Mã quy cách</th><th>Tên</th><th>SL/pallet</th><th>Số hàng xếp</th><th>Trạng thái</th>${canManage ? "<th></th>" : ""}</tr></thead>
         <tbody>${packingSpecs.map(s => { const fp = finishedProducts.find(x => x.finished_product_id === s.finished_product_id); return `<tr>
           <td>${fp ? `<code class="k">${esc(fp.code)}</code>` : "—"}</td>
+          <td class="muted">${fp ? esc(fp.name) : "—"}</td>
           <td><code class="k">${esc(s.code)}</code></td><td>${esc(s.name || "—")}</td>
           <td>${s.units_per_pallet}</td><td class="muted">${s.layers ?? "—"}</td>
           <td>${s.active ? '<span style="color:var(--green)">Đang dùng</span>' : '<span class="muted">Đã ẩn</span>'}</td>
           ${canManage ? `<td style="white-space:nowrap">
             <button class="btn sm sec" data-epks="${esc(s.spec_id)}">Sửa</button>
+            <button class="btn sm sec" data-pkscopy="${esc(s.spec_id)}">Copy sang SKU khác</button>
             <button class="btn sm sec" data-pksdel="${esc(s.spec_id)}">Xóa</button>
           </td>` : ""}</tr>`; }).join("") ||
-          `<tr><td colspan="${canManage ? 7 : 6}" class="muted">Chưa có quy cách đóng gói nào.</td></tr>`}</tbody>
+          `<tr><td colspan="${canManage ? 8 : 7}" class="muted">Chưa có quy cách đóng gói nào.</td></tr>`}</tbody>
       </table></div>
     </div>
 
@@ -11694,6 +11705,43 @@ VIEWS.master = async function () {
       await DELETE(`/packing-specs/${b.dataset.pksdel}`);
       toast("Đã xóa quy cách đóng gói"); render("master");
     }));
+    // "Copy sang SKU khác" — sao chép NGUYÊN mã/tên quy cách + SL/pallet + số hàng xếp sang 1
+    // hoặc nhiều SKU khác (yêu cầu người dùng 2026-09-24: nhiều SKU dùng chung 1 kiểu đóng gói,
+    // đỡ phải khai tay lại từng SKU). Mã quy cách chỉ cần DUY NHẤT theo TỪNG SKU (xem
+    // uq_packing_spec_product_code) nên copy y nguyên mã sang SKU khác không đụng độ, TRỪ KHI
+    // SKU đích đã có sẵn đúng mã đó — báo riêng SKU nào bị bỏ qua, không chặn cả loạt.
+    document.querySelectorAll("[data-pkscopy]").forEach(b => b.onclick = () => {
+      const s = packingSpecs.find(x => x.spec_id === b.dataset.pkscopy);
+      const srcFp = finishedProducts.find(x => x.finished_product_id === s.finished_product_id);
+      const targets = finishedProducts.filter(fp => fp.finished_product_id !== s.finished_product_id)
+        .map(fp => ({ value: fp.finished_product_id, label: `${fp.code} — ${fp.name}` }));
+      modal(`<h3>Copy quy cách đóng gói sang SKU khác</h3>
+        <div class="muted" style="margin-bottom:10px">Copy quy cách <code class="k">${esc(s.code)}</code>
+          (${esc(s.name || "—")} — ${s.units_per_pallet} vỉ/pallet${s.layers ? `, ${s.layers} hàng` : ""})
+          từ SKU <code class="k">${esc(srcFp ? srcFp.code : s.finished_product_id)}</code> sang các SKU chọn bên dưới.</div>
+        <div class="field"><label>Copy đến SKU</label><div id="pkscopy_wrap"></div></div>
+        <button class="btn" id="pkscopy_go" style="margin-top:12px">Copy</button>`);
+      const picker = initCheckboxMultiSelect($("pkscopy_wrap"), targets, [], "SKU đích");
+      $("pkscopy_go").onclick = () => guard(async () => {
+        const targetIds = picker.getSelected();
+        if (!targetIds.length) throw new Error("Chọn ít nhất 1 SKU đích.");
+        const okCodes = [], failMsgs = [];
+        for (const finished_product_id of targetIds) {
+          const targetFp = finishedProducts.find(fp => fp.finished_product_id === finished_product_id);
+          try {
+            await POST("/packing-specs", { finished_product_id, code: s.code, name: s.name,
+              units_per_pallet: s.units_per_pallet, layers: s.layers });
+            okCodes.push(targetFp ? targetFp.code : finished_product_id);
+          } catch (e) {
+            failMsgs.push(`${targetFp ? targetFp.code : finished_product_id}: ${e.message}`);
+          }
+        }
+        closeModal();
+        if (okCodes.length) toast(`Đã copy quy cách sang ${okCodes.length} SKU: ${okCodes.join(", ")}`);
+        if (failMsgs.length) toast(`Bỏ qua ${failMsgs.length} SKU — ${failMsgs.join("; ")}`, "err");
+        render("master");
+      });
+    });
     if ($("sp_add")) $("sp_add").onclick = () => guard(async () => {
       await POST("/suppliers", { code: $("sp_code").value.trim(), name: $("sp_name").value.trim(),
         address: $("sp_address").value.trim() || null, contact: $("sp_contact").value.trim() || null });
