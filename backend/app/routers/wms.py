@@ -45,8 +45,9 @@ def delete_location(loc_id: str, db: Session = Depends(get_db), user: User = Dep
 
 
 @router.get("/pallets")
-def pallets(status: str | None = None, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    return svc.list_pallets(db, status)
+def pallets(status: str | None = None, lot_code: str | None = None, db: Session = Depends(get_db),
+           user: User = Depends(get_current_user)):
+    return svc.list_pallets(db, status, lot_code)
 
 
 @router.post("/pallets", status_code=201)

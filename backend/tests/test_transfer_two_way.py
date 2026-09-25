@@ -258,6 +258,26 @@ def test_transfer_px_request_requires_perm(client, admin_h, thukho_h, kcs_h):
     assert r.status_code == 403, r.text
 
 
+def test_transfer_px_request_blocked_when_other_pending_would_exceed_stock(client, admin_h, thukho_h, vanhanh_h):
+    """Mirror test_create_blocked_when_other_pending_request_would_exceed_stock (chiều kcpx) —
+    2 đề nghị pending trên CÙNG 1 lô cộng lại vượt tồn thật phải bị chặn ngay lúc tạo đề nghị thứ
+    2, không để tới lúc duyệt (phát hiện thực tế 2026-09-24)."""
+    mat_id = _create_material(client, admin_h, "TPW-DBL")
+    lot_id = _receive_at_workshop(client, thukho_h, mat_id, "LOT-TPW-DBL", qty=100)
+    r1 = client.post("/api/warehouse/transfer-px-requests", headers=vanhanh_h,
+                     json={"lot_id": lot_id, "quantity": 60})
+    assert r1.status_code == 201, r1.text
+
+    r2 = client.post("/api/warehouse/transfer-px-requests", headers=vanhanh_h,
+                     json={"lot_id": lot_id, "quantity": 50})
+    assert r2.status_code == 409, r2.text
+    assert "40" in r2.json()["detail"]
+
+    r3 = client.post("/api/warehouse/transfer-px-requests", headers=vanhanh_h,
+                     json={"lot_id": lot_id, "quantity": 40})
+    assert r3.status_code == 201, r3.text
+
+
 # ---- Chiều 2: Kho công ty → Nhà máy khác ----
 
 def test_transfer_to_factory_full_flow(client, admin_h, thukho_h, truongphong_kh_h):

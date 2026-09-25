@@ -3442,7 +3442,8 @@ async function showBatchFilterOrder(orderId, editing = false) {
       <dt>Số lô KCS</dt><dd>${esc(o.kcs_lot_no || "—")}</dd>
       <dt>Sản phẩm</dt><dd>${fp ? esc(fp.code) + " — " + esc(fp.name) : "(Mọi sản phẩm)"}</dd>
       <dt>Ghi chú</dt><dd class="muted">${esc(o.note || "—")}</dd>
-      <dt>Trạng thái</dt><dd>${statusBadge(FILTER_ORDER_BADGE_CLASS[o.status], o.status_label)}${o.completed ? ` <span class="muted" style="font-size:12px">— hoàn thành bởi ${esc(o.completed_by)} lúc ${fmt(o.completed_at)}</span>` : ""}</dd>
+      <dt>Trạng thái</dt><dd>${statusBadge(FILTER_ORDER_BADGE_CLASS[o.status], o.status_label)}${o.completed ? ` <span class="muted" style="font-size:12px">— hoàn thành bởi ${esc(o.completed_by)} lúc ${fmt(o.completed_at)}</span>` :
+        (o.status === "hoan_thanh" && o.tank_sources_drained && !o.is_complete) ? ` <span class="muted" style="font-size:12px">— tự động, do tank lên men nguồn đã lọc hết (chưa đủ SL kế hoạch)</span>` : ""}</dd>
     </dl>
     <h3>Nguồn khai báo</h3>
     <table><thead><tr><th>Nguồn</th><th>SL dự kiến (hl)</th><th>Lý do lọc lại</th></tr></thead>
@@ -3523,7 +3524,7 @@ VIEWS.batchfilterlots = async function () {
     <div class="split">
       <div class="panel"><h2>Danh sách lô lọc</h2>
         <input class="searchbox" data-tbl="t_batfilterlot" placeholder="Tìm theo mã lô, sản phẩm, trạng thái..."/>
-        <div class="tablewrap"><table id="t_batfilterlot"><thead><tr><th>Mã lô lọc</th><th>Lệnh lọc</th><th>Trạng thái</th><th>Sản phẩm bia</th><th>Tank lên men</th><th>Kế hoạch (hl)</th><th>Tank BBT</th><th>Tồn/Tổng (hl)</th></tr></thead>
+        <div class="tablewrap"><table id="t_batfilterlot"><thead><tr><th>Mã lô lọc</th><th>Lệnh lọc</th><th>Trạng thái</th><th>Sản phẩm bia</th><th>Tank lên men</th><th>Kế hoạch (hl)</th><th>Tank BBT</th><th>Trạng thái chiết</th><th>Tồn/Tổng (hl)</th></tr></thead>
           <tbody>${lots.map(f => `<tr data-flot="${f.filter_lot_id}" style="cursor:pointer">
             <td><code class="k">${esc(f.filter_lot_code)}</code></td>
             <td class="muted">${esc(orderById[f.order_id] ? orderById[f.order_id].order_code : "—")}</td>
@@ -3532,7 +3533,8 @@ VIEWS.batchfilterlots = async function () {
             <td class="muted">${esc(tankLmNames(f))}</td>
             <td class="muted">${plannedVol(f) ?? "—"}</td>
             <td>${esc(f.to_bbt || "—")}</td>
-            <td>${f.on_hand} / ${f.volume_hl}</td></tr>`).join("") || '<tr><td colspan=8 class="muted">Chưa có lô lọc nào.</td></tr>'}</tbody></table></div>
+            <td>${f.chiet_status ? statusBadge(PACK_LOT_BADGE_CLASS[f.chiet_status], f.chiet_status_label) : '<span class="muted">—</span>'}</td>
+            <td>${f.on_hand} / ${f.volume_hl}</td></tr>`).join("") || '<tr><td colspan=9 class="muted">Chưa có lô lọc nào.</td></tr>'}</tbody></table></div>
       </div>
       <div class="panel" id="fl_detail"><h2>Chi tiết lô lọc</h2><div class="muted">Chọn một lô lọc để xem.</div></div>
     </div>`;
@@ -4135,6 +4137,7 @@ async function showBatchPackLot(packLotId) {
       pkQc.pending.length ? `⚠ Còn thiếu: ${pkQc.pending.map(esc).join(", ")}` :
       '<span style="color:var(--red)">✗ Có chỉ tiêu bắt buộc không đạt (FAIL)</span>'}</div>`}
     ${materialUsageSectionHtml("pkmu", matUsage, lk, p.ended_at)}
+    <div id="pk_pallet_summary_wrap"></div>
     ${!p.stocked ? '<div id="pk_wms_alloc_wrap" style="margin-top:16px"></div>' : ""}
     <div class="row" style="margin-top:10px">
       ${(!p.finished && !lk) ? '<button class="btn sm" id="pk_finish">✔ Hoàn thành chiết</button>' : ""}
@@ -4230,6 +4233,28 @@ async function showBatchPackLot(packLotId) {
     }));
   }
   renderPkShiftsTable();
+  // "Pallet đã đóng theo số vỉ/pallet" — gộp SL pallet ĐÃ Duyệt nhập kho (mọi dòng
+  // pack_allocations released=true, có thể nhiều quy cách khác nhau) theo ĐÚNG số vỉ THẬT của
+  // từng pallet (Pallet.case_count — pallet lẻ/cuối cùng của 1 dòng có thể ít vỉ hơn quy cách
+  // danh nghĩa, xem release_pack_lot_allocation) — yêu cầu người dùng 2026-09-25: "đã nhập bao
+  // nhiêu pallet có số vỉ là X, bao nhiêu pallet có số vỉ là Y".
+  const releasedPalletCodes = (p.pack_allocations || []).filter(r => r.released)
+    .flatMap(r => r.pallet_codes || []);
+  if (releasedPalletCodes.length) {
+    const lotCodeForPallets = p.lot_no || p.pack_lot_code;
+    const pallets = await GET(`/wms/pallets?lot_code=${encodeURIComponent(lotCodeForPallets)}`).catch(() => []);
+    const relevant = pallets.filter(pl => releasedPalletCodes.includes(pl.pallet_code));
+    if (relevant.length) {
+      const byCaseCount = {};
+      relevant.forEach(pl => { byCaseCount[pl.case_count] = (byCaseCount[pl.case_count] || 0) + 1; });
+      const rowsHtml = Object.keys(byCaseCount).map(Number).sort((a, b) => b - a)
+        .map(cc => `<tr><td>${cc} ${esc(unitLabel)}</td><td>${byCaseCount[cc]}</td></tr>`).join("");
+      $("pk_pallet_summary_wrap").innerHTML = `<h3 style="margin-top:16px">📦 Pallet đã đóng theo số vỉ/pallet</h3>
+        <div class="muted" style="margin-bottom:6px">Tổng ${relevant.length} pallet đã Duyệt nhập kho thành phẩm cho lô này (mọi quy cách đóng gói đã dùng).</div>
+        <div class="tablewrap"><table><thead><tr><th>SL/pallet</th><th>Số pallet</th></tr></thead>
+        <tbody>${rowsHtml}</tbody></table></div>`;
+    }
+  }
   if ($("pk_approve")) $("pk_approve").onclick = () => guard(async () => {
     const r = await POST(`/batch-pack-lots/${packLotId}/approve`, {});
     toast("Đã duyệt KCS lô thành phẩm" + (r.qc_has_fail ? " (còn chỉ tiêu FAIL — cảnh báo)" : "")); showBatchPackLot(packLotId);
@@ -4423,7 +4448,14 @@ async function buildPackLotEBRHtml(packLotId, opts = {}) {
     if (e.genealogy) walk(e.genealogy);
     return tanks;
   })();
-  const batchByLot = {}; ebrTanks.forEach(t => t.batches.forEach(b => b.lots.forEach(l => { batchByLot[l.id] = b.id; })));
+  // 1 LÔ NVL có thể được cấp cho NHIỀU mẻ nấu khác nhau (VD 1 bao malt dùng cho cả buổi nấu nhiều
+  // mẻ) — batchByLot PHẢI là map 1-NHIỀU (mảng), không phải 1-1 (bản cũ chỉ giữ được ĐÚNG 1 mẻ do
+  // ghi đè, khiến TẤT CẢ mẻ khác cùng dùng lô đó hiện "chưa có dữ liệu" dù thật ra CÓ dữ liệu —
+  // chỉ bị gán nhầm cho 1 mẻ duy nhất, phát hiện thực tế 2026-09-25 ở "Kết quả QC (toàn cây)").
+  const batchByLot = {};
+  ebrTanks.forEach(t => t.batches.forEach(b => b.lots.forEach(l => {
+    (batchByLot[l.id] = batchByLot[l.id] || []).push(b.id);
+  })));
   const totalEbrBatches = ebrTanks.reduce((n, t) => n + t.batches.length, 0);
   const showTankGroups = ebrTanks.length > 1;
   const showBatchGroups = totalEbrBatches > 1;
@@ -4450,6 +4482,8 @@ async function buildPackLotEBRHtml(packLotId, opts = {}) {
   // Nhóm theo TANK > MẺ NẤU (dùng cho "Lô nguyên vật liệu nấu" — `ownerBatchOf` tra qua
   // batchByLot — và "Chỉ tiêu nấu" — node của chính dòng đó LÀ mẻ nấu nên `ownerBatchOf` = chính
   // node_id). Không nhóm gì thêm khi chỉ có ĐÚNG 1 tank/1 mẻ nấu (không cần tách khi không mơ hồ).
+  // `ownerBatchOf` LUÔN trả về MẢNG mẻ nấu sở hữu dòng đó (1 lô NVL có thể thuộc NHIỀU mẻ cùng
+  // lúc — xem batchByLot) — 1 dòng QC được LẶP LẠI dưới MỌI mẻ nó thuộc về, không chỉ 1 mẻ.
   const qcByTankBatchHtml = (label, rows, ownerBatchOf) => {
     if (!showTankGroups && !showBatchGroups) {
       return qcGroupHeader(label) + (rows.length ? rows.map(q => qcRowHtml(q, 0)).join("") : qcEmptyRow(0));
@@ -4462,13 +4496,13 @@ async function buildPackLotEBRHtml(packLotId, opts = {}) {
       if (!t.batches.length) { out += qcEmptyRow(tankIndent); continue; }
       for (const b of t.batches) {
         seenBatch.add(b.id);
-        const bRows = rows.filter(q => ownerBatchOf(q) === b.id);
+        const bRows = rows.filter(q => ownerBatchOf(q).includes(b.id));
         if (showBatchGroups) out += `<tr><td colspan="4" style="padding-left:${tankIndent + 8}px"><i>Mẻ nấu ${esc(b.code)}</i></td></tr>`;
         const rowIndent = showBatchGroups ? tankIndent + 16 : tankIndent;
         out += bRows.length ? bRows.map(q => qcRowHtml(q, rowIndent)).join("") : qcEmptyRow(rowIndent);
       }
     }
-    const stray = rows.filter(q => !seenBatch.has(ownerBatchOf(q)));
+    const stray = rows.filter(q => !ownerBatchOf(q).some(bid => seenBatch.has(bid)));
     if (stray.length) out += stray.map(q => qcRowHtml(q, 0)).join("");
     return out;
   };
@@ -4490,8 +4524,8 @@ async function buildPackLotEBRHtml(packLotId, opts = {}) {
         (wRows.length ? wRows.map(r => nuocNauRowHtml(r, 16)).join("") : qcEmptyRow(16));
     }).join("");
   })();
-  const qcLeft = qcByTankBatchHtml("Lô nguyên vật liệu nấu", qcAll.filter(q => q.node_type === "lot"), q => batchByLot[q.node_id])
-    + qcByTankBatchHtml("Chỉ tiêu nấu", qcAll.filter(q => q.stage === "nau"), q => q.node_id)
+  const qcLeft = qcByTankBatchHtml("Lô nguyên vật liệu nấu", qcAll.filter(q => q.node_type === "lot"), q => batchByLot[q.node_id] || [])
+    + qcByTankBatchHtml("Chỉ tiêu nấu", qcAll.filter(q => q.stage === "nau"), q => [q.node_id])
     + qcNuocNauHtml
     + qcGroupHeader("Nguyên vật liệu lên men") + qcEmptyRow(0)
     + qcGroupsHtml([["Chỉ tiêu bia thành phẩm", qcAll.filter(q => q.stage === "thanh_pham")]]);
@@ -5874,15 +5908,23 @@ async function loadGiaoData() {
   const pxDone = pxRequests.filter(r => r.status !== "pending").sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
   const kcpxPending = kcpxRequests.filter(r => r.status === "pending").sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
   const kcpxDone = kcpxRequests.filter(r => r.status !== "pending").sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+  // Đánh dấu lô CŨ NHẤT (FIFO) của MỖI vật tư trong danh sách gộp nhiều vật tư (dùng cho Điều
+  // chuyển) — danh sách đã sắp tăng dần theo ngày nhập nên lô XUẤT HIỆN ĐẦU TIÊN của 1 vật tư
+  // chính là lô FIFO của vật tư đó, chỉ cần nhớ đã thấy vật tư nào rồi (yêu cầu người dùng
+  // 2026-09-24: "điều chuyển cũng phải lấy theo FIFO, gợi ý lô FIFO lúc tìm kiếm").
+  const _fifoSeenMat = new Set();
   const workshopLotOpts = allLots.filter(l => l.quantity > 0 && /phân xưởng/i.test(l.location || ""))
     .sort((a, b) => new Date(a.created_at) - new Date(b.created_at))
     .map(l => { const m = matByIdGiao[l.material_id];
-      return `<option value="${l.lot_id}">${lotCodePlain(l)}${m ? ` — ${esc(m.code)} ${esc(m.name)}` : ""} (${l.quantity}${l.uom}, tại ${esc(l.location)})</option>`; }).join("") ||
+      const isFifo = l.material_id && !_fifoSeenMat.has(l.material_id); if (l.material_id) _fifoSeenMat.add(l.material_id);
+      return `<option value="${l.lot_id}">${lotCodePlain(l)}${m ? ` — ${esc(m.code)} ${esc(m.name)}` : ""} (${l.quantity}${l.uom}, tại ${esc(l.location)})${isFifo ? " — FIFO, lô cũ nhất" : ""}</option>`; }).join("") ||
     `<option value="">(không có lô nào ở kho phân xưởng)</option>`;
+  _fifoSeenMat.clear();
   const companyLotOptsGiao = allLots.filter(l => l.quantity > 0 && !/phân xưởng/i.test(l.location || "") && l.status !== "on_hold")
     .sort((a, b) => new Date(a.created_at) - new Date(b.created_at))
     .map(l => { const m = matByIdGiao[l.material_id];
-      return `<option value="${l.lot_id}">${lotCodePlain(l)}${m ? ` — ${esc(m.code)} ${esc(m.name)}` : ""} (${l.quantity}${l.uom})</option>`; }).join("") ||
+      const isFifo = l.material_id && !_fifoSeenMat.has(l.material_id); if (l.material_id) _fifoSeenMat.add(l.material_id);
+      return `<option value="${l.lot_id}">${lotCodePlain(l)}${m ? ` — ${esc(m.code)} ${esc(m.name)}` : ""} (${l.quantity}${l.uom})${isFifo ? " — FIFO, lô cũ nhất" : ""}</option>`; }).join("") ||
     `<option value="">(không có lô nào ở kho công ty)</option>`;
   const canEditReceipt = _hasPerm("warehouse.receive");
   const receiptRows = receipts.slice().sort((a, b) => new Date(b.ts) - new Date(a.ts)).map(m => {
@@ -6645,8 +6687,8 @@ VIEWS.warehouse_kc = async function () {
       await POST(`/warehouse/transfer-px-requests/${b.dataset.pxundo}/undo`, {});
       toast("Đã hoàn tác điều chuyển"); render("warehouse_kc");
     }));
-    wireSelectSearch("dcnm_lot", "dcnm_lot_q");
-    wireSelectSearch("dckp_lot", "dckp_lot_q");
+    wireSelectSearch("dcnm_lot", "dcnm_lot_q", true);
+    wireSelectSearch("dckp_lot", "dckp_lot_q", true);
     if ($("dcnm_do")) $("dcnm_do").onclick = () => guard(async () => {
       if (!$("dcnm_lot").value) throw new Error("Không có lô nào đang ở kho công ty để điều chuyển.");
       if (!$("dcnm_factory").value) throw new Error("Chưa có nhà máy nào trong danh mục — vào Danh mục để tạo trước.");
@@ -6799,6 +6841,11 @@ VIEWS.warehouse_px = async function () {
     const matItemsPx = mats.map(m => ({ value: m.material_id, label: `${m.code} — ${m.name}`, uom: m.uom }));
     const isAdminTondauPx = CURRENT_USER && CURRENT_USER.role === "admin";
     WH_CACHE.matItemsPx = matItemsPx;
+    // Thiếu dòng này khiến bảng "Lịch sử nhập tồn đầu (kho phân xưởng)" hiện thẳng material_id
+    // (UUID) thay vì mã/tên vật tư — movementRowHtml() tra cứu qua WH_CACHE.matById, các section
+    // khác đều tự gán (VD "obal" qua loadGiaoData()), riêng "tondau" tự fetch mats() nhưng quên
+    // gán vào cache (phát hiện thực tế 2026-09-25, sau đợt import Excel 51 dòng).
+    WH_CACHE.matById = Object.fromEntries(mats.map(m => [m.material_id, m]));
     const tondauHist = await GET("/warehouse/movements?movement_type=receipt&is_opening_balance=true");
     WH_CACHE.tondau = tondauHist.filter(m => /phân xưởng/i.test(m.location_to || ""));
     body = `<div class="panel"><h2>🏁 Nhập tồn đầu (kho phân xưởng)</h2>
@@ -6841,10 +6888,14 @@ VIEWS.warehouse_px = async function () {
     WH_CACHE.lotById = lotByIdPxDc;
     WH_CACHE.workshopLocs = activeWorkshopLocs;
     const workshopLocByIdPx = Object.fromEntries(workshopLocsPx.map(l => [l.loc_id, l]));
+    // Đánh dấu lô FIFO (cũ nhất) của mỗi vật tư — mirror loadGiaoData()::workshopLotOpts/
+    // companyLotOptsGiao (yêu cầu người dùng 2026-09-24: gợi ý lô FIFO lúc tìm kiếm).
+    const _fifoSeenMatPxDc = new Set();
     const workshopLotOpts = allLots.filter(l => l.quantity > 0 && /phân xưởng/i.test(l.location || "") && l.status !== "on_hold")
       .sort((a, b) => new Date(a.created_at) - new Date(b.created_at))
       .map(l => { const m = matById[l.material_id];
-        return `<option value="${l.lot_id}">${lotCodePlain(l)}${m ? ` — ${esc(m.code)} ${esc(m.name)}` : ""} (${l.quantity}${l.uom})</option>`; }).join("") ||
+        const isFifo = l.material_id && !_fifoSeenMatPxDc.has(l.material_id); if (l.material_id) _fifoSeenMatPxDc.add(l.material_id);
+        return `<option value="${l.lot_id}">${lotCodePlain(l)}${m ? ` — ${esc(m.code)} ${esc(m.name)}` : ""} (${l.quantity}${l.uom})${isFifo ? " — FIFO, lô cũ nhất" : ""}</option>`; }).join("") ||
       `<option value="">(không có lô nào ở kho phân xưởng)</option>`;
     const sortedPx = pxRequests.slice().sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
     const pxRows = sortedPx.map(r => {
@@ -7175,7 +7226,7 @@ VIEWS.warehouse_px = async function () {
     wirePaginate("t_dcpx", 10);
     wirePaginate("t_kcpx_pending_px", 10);
     wirePaginate("t_kcpx_done_px", 10);
-    wireSelectSearch("dcpx_lot", "dcpx_lot_q");
+    wireSelectSearch("dcpx_lot", "dcpx_lot_q", true);
     if ($("dcpx_do")) $("dcpx_do").onclick = () => guard(async () => {
       if (!$("dcpx_lot").value) throw new Error("Không có lô nào đang ở kho phân xưởng để điều chuyển.");
       await POST("/warehouse/transfer-px-requests", { lot_id: $("dcpx_lot").value, quantity: parseFloat($("dcpx_qty").value),
@@ -10056,14 +10107,25 @@ VIEWS.calib = async function () {
 
 // Ô tìm kiếm đi kèm 1 <select> nhiều lựa chọn (sản phẩm, nơi xuất đến...) — ẩn các
 // <option> không khớp để dò nhanh hơn cuộn tay, vẫn giữ nguyên hành vi chọn/submit của select.
-function wireSelectSearch(selectId, searchId) {
+// `autoSelectFirst`: tự chọn luôn <option> khớp ĐẦU TIÊN còn hiện — dùng cho các <select> chọn
+// LÔ đã sắp sẵn theo FIFO (cũ nhất trước, xem companyLotOptsGiao/workshopLotOpts) để gõ tên vật
+// tư là tự gợi ý đúng lô FIFO của vật tư đó luôn, đỡ phải tự mở dropdown dò lại (yêu cầu người
+// dùng 2026-09-24: "điều chuyển cũng phải lấy theo FIFO, gợi ý lô FIFO lúc tìm kiếm") — KHÔNG
+// bật mặc định cho mọi nơi dùng chung hàm này vì có nơi <select> không theo thứ tự ưu tiên gì
+// (VD "Phạm vi" chỉ tiêu chất lượng) nên tự chọn hộ sẽ gây khó hiểu.
+function wireSelectSearch(selectId, searchId, autoSelectFirst) {
   const sel = document.getElementById(selectId);
   const inp = document.getElementById(searchId);
   if (!sel || !inp) return;
   const opts = Array.from(sel.options).filter(o => o.value);
   inp.oninput = () => {
     const q = inp.value.toLowerCase();
-    opts.forEach(o => { o.hidden = q && !o.textContent.toLowerCase().includes(q); });
+    let firstVisible = null;
+    opts.forEach(o => {
+      o.hidden = q && !o.textContent.toLowerCase().includes(q);
+      if (!o.hidden && !firstVisible) firstVisible = o;
+    });
+    if (autoSelectFirst && q && firstVisible) sel.value = firstVisible.value;
   };
 }
 

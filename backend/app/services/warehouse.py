@@ -1,5 +1,6 @@
 """Nghiệp vụ kho: nhập/xuất/hoàn/sang ngang + tồn/thẻ kho/hạn dùng/báo cáo."""
 
+import re
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -1241,6 +1242,13 @@ def material_transaction_detail(db: Session, material_id: str, date_from: dateti
             "closing_balance": round(balance, 4)}
 
 
+# Mã phiếu (MaterialRequest/TransferKcPxRequest/TransferPxRequest/SangNgangRequest...) đều sinh
+# theo cùng khuôn "PREFIX-YYYYMMDD-XXXXX" (VD "DN-20260917-3D166", xem create_request/
+# create_transfer_kcpx_request/...) — dùng để khớp CHÍNH XÁC 1 cặp "Hoàn tác" với ĐÚNG giao dịch
+# gốc mà nó hoàn tác, xem _hide_reversed_transfer_pairs.
+_REQUEST_CODE_RE = re.compile(r'[A-Z]{2,6}-\d{8}-[0-9A-F]{5}')
+
+
 def _hide_reversed_transfer_pairs(rows: list[dict]) -> list[dict]:
     """Ẩn khỏi Sổ chi tiết vật tư các cặp "điều chuyển đi rồi hoàn tác ngay sau đó" (net = 0,
     tồn kho chưa hề thật sự tăng lên/mất đi lâu dài — VD "Xuất theo đề nghị" rồi bị "Hoàn tác")
@@ -1250,7 +1258,13 @@ def _hide_reversed_transfer_pairs(rows: list[dict]) -> list[dict]:
       1. `reversal_of` (undo_issue ghi FK thẳng tới StockMovement gốc) — đáng tin nhất.
       2. Cùng `lot_code` + số lượng NGƯỢC DẤU + dòng sau có `reason` bắt đầu "Hoàn tác" — dùng cho
          hoàn tác điều chuyển/xuất theo đề nghị (undo_fulfill_line/undo_transfer_px_request/
-         undo_sang_ngang không ghi `reversal_of`, chỉ có tiền tố "Hoàn tác" trong `reason`)."""
+         undo_sang_ngang không ghi `reversal_of`, chỉ có tiền tố "Hoàn tác" trong `reason`). BẮT
+         BUỘC khớp thêm đúng MÃ PHIẾU trích từ `reason` (nếu trích được ở cả 2 phía) — chỉ khớp
+         lot_code+số lượng KHÔNG đủ khi 1 lô bị rút NHIỀU LẦN CÙNG SỐ LƯỢNG cho các phiếu KHÁC
+         nhau (VD "duyệt cả phiếu" rút cùng lúc 45kg cho 3 phiếu khác nhau từ cùng 1 lô) — dễ ghép
+         nhầm "Hoàn tác của phiếu A" với "Xuất của phiếu B" (bug thực tế phát hiện 2026-09-24:
+         DN-20260917-3D166 đã hoàn tác thật nhưng Sổ chi tiết vật tư ẩn nhầm phiếu KHÁC — chưa hề
+         hoàn tác — rồi để lộ đúng phiếu đã hoàn tác, gây hiểu lầm "chưa hoàn tác" dù đã hoàn tác)."""
     hidden = set()
     by_movement_id = {r["_movement_id"]: i for i, r in enumerate(rows) if r.get("_movement_id")}
     for i, r in enumerate(rows):
@@ -1262,16 +1276,24 @@ def _hide_reversed_transfer_pairs(rows: list[dict]) -> list[dict]:
     for i, r in enumerate(rows):
         if i in hidden or r["type"] != "transfer" or not (r.get("reason") or "").startswith("Hoàn tác"):
             continue
+        i_code_m = _REQUEST_CODE_RE.search(r.get("reason") or "")
+        i_code = i_code_m.group(0) if i_code_m else None
         for j in range(i - 1, -1, -1):
             if j in hidden or j in used or rows[j]["type"] != "transfer":
                 continue
             if (rows[j].get("reason") or "").startswith("Hoàn tác"):
                 continue
-            if rows[j]["lot_code"] == r["lot_code"] and abs(rows[j]["quantity"] + r["quantity"]) < 1e-9:
-                hidden.add(i)
-                hidden.add(j)
-                used.add(j)
-                break
+            if rows[j]["lot_code"] != r["lot_code"] or abs(rows[j]["quantity"] + r["quantity"]) >= 1e-9:
+                continue
+            if i_code:
+                j_code_m = _REQUEST_CODE_RE.search(rows[j].get("reason") or "")
+                j_code = j_code_m.group(0) if j_code_m else None
+                if j_code and j_code != i_code:
+                    continue
+            hidden.add(i)
+            hidden.add(j)
+            used.add(j)
+            break
     return [r for i, r in enumerate(rows) if i not in hidden]
 
 
@@ -2250,6 +2272,28 @@ def _get_transfer_px_request(db, request_id) -> TransferPxRequest:
     return req
 
 
+def _assert_transfer_qty_not_double_booked(db: Session, model, lot, quantity: float,
+                                           exclude_request_id: str = None) -> None:
+    """Chặn "xí phần trùng" trên CÙNG 1 lô: tạo/sửa đề nghị điều chuyển KHÔNG khoá tồn ngay (chỉ
+    khoá lúc DUYỆT), nên 2 đề nghị pending trên cùng 1 lô có thể mỗi cái đều hợp lệ RIÊNG LẺ lúc
+    tạo (đều thấy đủ tồn) nhưng cộng lại vượt tồn thật — phiếu tạo sau chỉ lộ ra lúc DUYỆT mới
+    biết bị thiếu, phải tra ngược mới hiểu vì sao (phát hiện thực tế 2026-09-24: DCKP-20260914-
+    6BFD4 xin 50.000kg trong khi lô chỉ còn 18.900kg do 1 đề nghị KHÁC tạo trước đó, 31.100kg, đã
+    được duyệt trước — cả 2 đều hợp lệ lúc tự tạo). Trừ sẵn tổng SL các đề nghị "pending" KHÁC
+    trên cùng lô (loại trừ chính đề nghị đang sửa, nếu có) khỏi tồn khả dụng trước khi so sánh —
+    báo NGAY lúc tạo/sửa thay vì để đến lúc duyệt mới biết."""
+    conds = [model.lot_id == lot.lot_id, model.status == "pending"]
+    if exclude_request_id:
+        conds.append(model.request_id != exclude_request_id)
+    other_pending = db.execute(select(func.coalesce(func.sum(model.quantity), 0.0)).where(*conds)).scalar() or 0.0
+    available = round(lot.quantity - other_pending, 4)
+    if quantity <= 0 or quantity > available + 1e-6:
+        extra = (f" (đã có {other_pending:g} {lot.uom} đang chờ duyệt ở (các) đề nghị khác trên "
+                f"cùng lô này)" if other_pending > 1e-6 else "")
+        raise DomainError(f"Số lượng đề nghị không hợp lệ — tồn thực tế {lot.quantity:g} {lot.uom}"
+                          f"{extra}, chỉ còn tối đa {available:g} {lot.uom} có thể đề nghị thêm.")
+
+
 def create_transfer_px_request(db: Session, lot_id: str, quantity: float, user: User,
                                reason: str = None, requested_transfer_date=None) -> dict:
     """Thủ kho phân xưởng tạo đề nghị điều chuyển 1 lô về Kho công ty — chưa động tồn kho.
@@ -2263,8 +2307,7 @@ def create_transfer_px_request(db: Session, lot_id: str, quantity: float, user: 
                           "được lô đang ở kho phân xưởng.")
     if lot.status == LotStatus.ON_HOLD.value:
         raise DomainError(f"Lô {lot.lot_code} đang HOLD, không được đề nghị điều chuyển.")
-    if quantity <= 0 or quantity > lot.quantity:
-        raise DomainError(f"Số lượng đề nghị không hợp lệ (tồn {lot.quantity} {lot.uom}).")
+    _assert_transfer_qty_not_double_booked(db, TransferPxRequest, lot, quantity)
     req = TransferPxRequest(request_id=new_id(), request_code=f"DCPX-{utcnow():%Y%m%d}-{new_id()[:5].upper()}",
                             lot_id=lot_id, quantity=quantity, uom=lot.uom, reason=reason,
                             requested_transfer_date=requested_transfer_date,
@@ -2292,8 +2335,7 @@ def update_transfer_px_request(db: Session, request_id: str, quantity: float, re
     if req.status != "pending":
         raise DomainError(f"Đề nghị {req.request_code} đã được xử lý (trạng thái: {req.status}) — không thể sửa.")
     lot = _lot(db, req.lot_id)
-    if quantity <= 0 or quantity > lot.quantity:
-        raise DomainError(f"Số lượng đề nghị không hợp lệ (tồn {lot.quantity} {lot.uom}).")
+    _assert_transfer_qty_not_double_booked(db, TransferPxRequest, lot, quantity, exclude_request_id=req.request_id)
     req.quantity = quantity
     req.reason = reason
     if requested_transfer_date_set:
@@ -2449,8 +2491,7 @@ def create_transfer_kcpx_request(db: Session, lot_id: str, quantity: float, user
         raise DomainError(f"Lô {lot.lot_code} đang ở Kho phân xưởng — chỉ tạo được đề nghị cho "
                           "lô đang ở Kho công ty.")
     _assert_location_scope(user, lot.location)
-    if quantity <= 0 or quantity > lot.quantity:
-        raise DomainError(f"Số lượng đề nghị không hợp lệ (tồn {lot.quantity} {lot.uom}).")
+    _assert_transfer_qty_not_double_booked(db, TransferKcPxRequest, lot, quantity)
     if lot.material_id and requires_kcs_hold(db, lot.material_id):
         lot.status = LotStatus.ON_HOLD.value
     req = TransferKcPxRequest(request_id=new_id(),
@@ -2488,8 +2529,7 @@ def update_transfer_kcpx_request(db: Session, request_id: str, quantity: float, 
     req = _get_transfer_kcpx_request(db, request_id)
     lot = _lot(db, req.lot_id)
     _assert_kcpx_editable(db, req, lot)
-    if quantity <= 0 or quantity > lot.quantity:
-        raise DomainError(f"Số lượng đề nghị không hợp lệ (tồn {lot.quantity} {lot.uom}).")
+    _assert_transfer_qty_not_double_booked(db, TransferKcPxRequest, lot, quantity, exclude_request_id=req.request_id)
     req.quantity = quantity
     req.reason = reason
     if requested_transfer_date_set:

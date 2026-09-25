@@ -261,6 +261,40 @@ def test_each_row_has_independent_release_button_and_remainder_warning(client, a
     assert sorted(pl["case_count"] for pl in made) == [100, 110]
 
 
+def test_pallets_endpoint_filters_by_lot_code(client, admin_h):
+    """`GET /wms/pallets?lot_code=...` (thêm 2026-09-25 cho trang chi tiết Lô thành phẩm — tóm tắt
+    "đã đóng bao nhiêu pallet theo từng số vỉ") CHỈ trả đúng pallet của lô đó, không lẫn pallet
+    của lô KHÁC (khác lot_no) dù cùng SKU/cùng thời điểm."""
+    fp_id = _make_sku(client, admin_h, "LOTFILTER", unit_type="keg", pack_size=1)
+    spec_a = _make_spec(client, admin_h, fp_id, "QC-A", 100)
+    spec_b = _make_spec(client, admin_h, fp_id, "QC-B", 110)
+    loc_id = _make_location(client, admin_h, "LOTFILTER")
+
+    pack_lot_1 = _build_pack_lot(client, admin_h, "LOTFILTER1", fp_id, ca1=100)
+    saved1 = _save_allocations(client, admin_h, pack_lot_1, [{"spec_id": spec_a, "quantity": 100}])
+    row1 = saved1.json()["pack_allocations"][0]["row_id"]
+    rel1 = _release_row(client, admin_h, pack_lot_1, row1, loc_id)
+    assert rel1.status_code == 200, rel1.text
+
+    pack_lot_2 = _build_pack_lot(client, admin_h, "LOTFILTER2", fp_id, ca1=110)
+    saved2 = _save_allocations(client, admin_h, pack_lot_2, [{"spec_id": spec_b, "quantity": 110}])
+    row2 = saved2.json()["pack_allocations"][0]["row_id"]
+    rel2 = _release_row(client, admin_h, pack_lot_2, row2, loc_id)
+    assert rel2.status_code == 200, rel2.text
+
+    p1 = client.get(f"/api/batch-pack-lots/{pack_lot_1}", headers=admin_h).json()
+    lot_code_1 = p1["lot_no"] or p1["pack_lot_code"]
+
+    filtered = client.get("/api/wms/pallets", headers=admin_h, params={"lot_code": lot_code_1}).json()
+    assert filtered, filtered
+    assert all(pl["lot_code"] == lot_code_1 for pl in filtered)
+    codes_1 = set(rel1.json()["pallet_codes"])
+    codes_2 = set(rel2.json()["pallet_codes"])
+    returned_codes = {pl["pallet_code"] for pl in filtered}
+    assert returned_codes == codes_1
+    assert not (returned_codes & codes_2)
+
+
 def test_release_row_blocked_until_kcs_approved(client, admin_h):
     fp_id = _make_sku(client, admin_h, "NOAPPROVE")
     spec_id = _make_spec(client, admin_h, fp_id, "QC01", 110)
