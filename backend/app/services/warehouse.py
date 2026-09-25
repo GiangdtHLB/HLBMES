@@ -1840,9 +1840,13 @@ def delete_request_line(db: Session, request_id: str, line_id: str, user: User) 
     """Xóa hẳn 1 dòng vật tư CÒN "pending" khỏi phiếu đề nghị — CHỈ bên đề nghị
     (`warehouse.request`), CHỈ khi dòng CHƯA xử lý (chưa xuất/chưa từ chối) — dòng đã fulfilled/
     rejected/cancelled thì chặn, giữ đúng lịch sử đã xử lý (mirror update_request, yêu cầu người
-    dùng 2026-09-23). An toàn xóa hẳn (không chỉ đổi status): dòng "pending" chưa từng có
-    StockMovement nào tham chiếu tới (request_line_id chỉ được gắn lúc fulfill), nên không vướng
-    khóa ngoại nào."""
+    dùng 2026-09-23).
+
+    LƯU Ý: dòng "pending" VẪN có thể bị StockMovement tham chiếu — dòng đã fulfill rồi ADMIN bấm
+    "Hoàn tác" (undo_fulfill) quay về "pending" nhưng các StockMovement cũ vẫn giữ
+    request_line_id. MSSQL enforce FK fk_stock_movement_request_line_id nên DELETE dòng sẽ vỡ 547
+    (SQLite bỏ qua FK nên không lộ). Gỡ liên kết (set NULL) trên các movement đó trước khi xóa —
+    KHÔNG xóa movement vì đó là chứng từ kho đã ghi nhận thật (sổ nhập/xuất phải giữ nguyên)."""
     require_perm(user, "warehouse.request")
     req = _get_request(db, request_id)
     line = _get_request_line(db, request_id, line_id)
@@ -1851,6 +1855,10 @@ def delete_request_line(db: Session, request_id: str, line_id: str, user: User) 
                           f"'{line.status}', không thể xóa.")
     record_audit(db, entity_type="material_request", entity_id=request_id, action="delete_line",
                 actor=user, before={"material_id": line.material_id, "quantity": line.quantity})
+    # Gỡ FK từ chứng từ kho cũ (nếu dòng từng fulfill rồi bị hoàn tác) + flush TRƯỚC khi xóa dòng.
+    db.execute(update(StockMovement).where(
+        StockMovement.request_line_id == line.line_id).values(request_line_id=None))
+    db.flush()
     db.delete(line)
     db.commit()
     lines = db.execute(select(MaterialRequestLine).where(
