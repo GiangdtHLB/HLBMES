@@ -1308,6 +1308,7 @@
       root.querySelectorAll("[data-editloc]").forEach(b => b.onclick = () => {
         const l = locs.find(x => x.loc_id === b.dataset.editloc);
         modal(`<h3>Sửa vị trí ${esc(l.code)}</h3>
+          <div class="field"><label>Mã</label><input id="el_code" value="${esc(l.code)}"/></div>
           <div class="field"><label>Tên</label><input id="el_name" value="${esc(l.name)}"/></div>
           <div class="field"><label>Khu</label><input id="el_zone" value="${esc(l.zone || "")}"/></div>
           <div class="field"><label>Sức chứa</label><input id="el_cap" value="${l.capacity}"/></div>
@@ -1315,7 +1316,7 @@
           <button class="btn" id="el_save" style="margin-top:10px">Lưu</button>`);
         $("el_save").onclick = () => guard(async () => {
           await PUT(`/wms/locations/${l.loc_id}`, {
-            name: $("el_name").value, zone: $("el_zone").value || null,
+            code: $("el_code").value, name: $("el_name").value, zone: $("el_zone").value || null,
             capacity: parseInt($("el_cap").value) || 10, active: $("el_active").checked,
           });
           closeModal(); toast("Đã lưu"); render("wms");

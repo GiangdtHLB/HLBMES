@@ -314,30 +314,6 @@ def _material_usage_display(rows) -> list[dict]:
              "uom": m.uom, "fifo_ok": m.fifo_ok, "reason": m.reason} for m in rows]
 
 
-def _batch_materials_display(db: Session, nodes: list[dict]) -> list[dict]:
-    """NVL dùng cho nấu — KHÁC filter_lot/pack_lot (không có bảng Usage riêng cho nấu): nguồn dữ
-    liệu là DispenseLine (qua Dispense.batch_id, xem services/dispense.py) — chỉ có mã lô/FIFO
-    khi tiêu thụ qua Cấp liệu (dispense/adjust); tiêu thụ qua /consume trực tiếp không suy đoán
-    được FIFO (fifo_ok=None, mirror hạn chế đã ghi ở batch_dispense_summary). Gắn kèm batch_id để
-    hồ sơ EBR tách theo đúng mẻ nấu (yêu cầu người dùng 2026-09-01: "Lô nguyên liệu dùng cho nấu
-    thiếu mã lô PM, FIFO")."""
-    from ..models.master import Material
-    from ..models.materials_ext import Dispense, DispenseLine
-    batch_ids = [n["id"] for n in nodes if n["type"] == "batch"]
-    if not batch_ids:
-        return []
-    dispenses = db.execute(select(Dispense).where(Dispense.batch_id.in_(batch_ids))).scalars().all()
-    dispense_batch = {d.dispense_id: d.batch_id for d in dispenses}
-    if not dispense_batch:
-        return []
-    lines = db.execute(select(DispenseLine).where(
-        DispenseLine.dispense_id.in_(dispense_batch.keys()))).scalars().all()
-    mat_names = {m.code: m.name for m in db.execute(select(Material)).scalars().all()}
-    return [{"batch_id": dispense_batch[l.dispense_id], "material_name": mat_names.get(l.material_code, l.material_code),
-             "lot_pm": l.lot_code, "fifo_ok": l.fifo_ok, "reason": l.reason, "quantity": l.quantity, "uom": l.uom}
-            for l in lines]
-
-
 def _nuoc_nau_display(db: Session, nodes: list[dict]) -> list[dict]:
     """Chỉ tiêu Nước nấu bia — khai theo MÃ ĐIỀU ĐỘ (WorkOrder), không phải theo mẻ nấu/genealogy
     edge thật (WorkOrder nối Mẻ nấu qua BatchExecution.work_order_id, không qua GenealogyEdge —
@@ -438,7 +414,6 @@ def assemble_pack_lot(db: Session, pack_lot_id: str) -> dict:
             BatchFilterLotMaterialUsage.filter_lot_id == pack_lot.filter_lot_id)).scalars().all()),
         "pack_lot_materials_display": _material_usage_display(db.execute(select(BatchPackLotMaterialUsage).where(
             BatchPackLotMaterialUsage.pack_lot_id == pack_lot_id)).scalars().all()),
-        "batch_materials_display": _batch_materials_display(db, nodes),
         "nuoc_nau_display": _nuoc_nau_display(db, nodes),
         "tank_lm_by_id": _tank_lm_labels(db, [n["id"] for n in nodes if n["type"] == "batch_tank"]),
         "snapshot": ({"version": snapshot.snapshot_version, "hash": snapshot.content_hash,

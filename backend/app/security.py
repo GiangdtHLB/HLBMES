@@ -44,7 +44,7 @@ PERMISSION_CATALOG = {
     "recipe.approve": "Duyệt/ban hành công thức",
     "quality.release": "Release chất lượng (QC)",
     "quality.deviation": "Mở/xử lý deviation",
-    "production.release_to_wms": "Duyệt lô chiết nhập kho thành phẩm (Giám đốc/Phó GĐ Sản xuất)",
+    "production.release_to_wms": "Nhập kho thành phẩm cho lô chiết (Vận hành/Giám đốc/Phó GĐ Sản xuất — vẫn phải chờ KCS đã duyệt)",
     "quality.capa_approve_kcs": "Duyệt CAPA — bước Trưởng phòng KCS",
     "quality.capa_approve_director": "Duyệt CAPA — bước Giám đốc/Phó GĐ Sản xuất - Kỹ thuật",
     "ebr.sign": "Ký điện tử hồ sơ mẻ (EBR)",

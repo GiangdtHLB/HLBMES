@@ -222,10 +222,44 @@ def _walk(db: Session, node_type: str, node_id: str, direction: str,
             child["quantity"] = e.quantity
             child["uom"] = e.uom
             children.append(child)
+        if direction == "backward" and ntype == "batch":
+            _attach_dispense_fifo(db, nid, children)
         node["children"] = children
         return node
 
     return recurse(node_type, node_id, frozenset())
+
+
+def _attach_dispense_fifo(db: Session, batch_id: str, children: list[dict]) -> None:
+    """Gắn fifo_ok/reason (từ DispenseLine) vào các node "lot" con của 1 Mẻ nấu trong cây Truy
+    ngược — trước đây thông tin này CHỈ hiện ở bảng "NVL dùng cho nấu" riêng trong Hồ sơ điện tử
+    (mirror services/ebr.py::_batch_materials_display), trùng lặp với bảng NVL đã có sẵn ở Truy
+    ngược (yêu cầu người dùng 2026-09-25: gộp FIFO/Lý do vào Truy ngược, bỏ hẳn bảng dưới). Ghép
+    theo lot_id trước (chính xác), rồi lot_code (dữ liệu cũ thiếu lot_id) — 1 lô có thể được cấp
+    NHIỀU lần vào CÙNG mẻ (nhiều dòng DispenseLine/nhiều cạnh genealogy cùng lot_id), nên ghép
+    theo THỨ TỰ xuất hiện (zip) giữa 2 danh sách thay vì chỉ lấy 1 dòng đại diện."""
+    from ..models.materials_ext import Dispense, DispenseLine
+    lot_children = [c for c in children if c["type"] == "lot"]
+    if not lot_children:
+        return
+    dispense_ids = db.execute(select(Dispense.dispense_id).where(Dispense.batch_id == batch_id)).scalars().all()
+    if not dispense_ids:
+        return
+    lines = db.execute(select(DispenseLine).where(
+        DispenseLine.dispense_id.in_(dispense_ids)).order_by(DispenseLine.created_at)).scalars().all()
+    by_lot_id: dict[str, list] = {}
+    by_lot_code: dict[str, list] = {}
+    for l in lines:
+        if l.lot_id:
+            by_lot_id.setdefault(l.lot_id, []).append(l)
+        elif l.lot_code:
+            by_lot_code.setdefault(l.lot_code, []).append(l)
+    for c in lot_children:
+        bucket = by_lot_id.get(c["id"]) or by_lot_code.get(c["code"])
+        if bucket:
+            line = bucket.pop(0)
+            c["fifo_ok"] = line.fifo_ok
+            c["reason"] = line.reason
 
 
 def trace_backward(db: Session, node_type: str, node_id: str) -> dict:

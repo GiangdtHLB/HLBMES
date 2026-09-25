@@ -683,7 +683,7 @@ VIEWS.dashboard = async function () {
       const over = days - std;
       const ratio = days / std;
       const stage = over > 2 ? "danger" : over >= 0 ? "warning" : ratio >= 0.8 ? "success" : "accent";
-      return { tank: r.tank_lm || r.tank_code, product: r.product_code || "—", days, std, over, stage,
+      return { tank: r.tank_lm || r.tank_code, product: r.beer_type_name || r.product_code || "—", days, std, over, stage,
                qcFail: r.qc_fail_count || 0, tankId: r.tank_id, productId: r.product_id };
     })
     .sort((a, b) => {
@@ -3492,9 +3492,19 @@ async function showBatchFilterOrder(orderId, editing = false) {
 }
 
 VIEWS.batchfilterlots = async function () {
-  const [orders, lots, bbtLines, beerTypes] = await Promise.all([
+  const [orders, lots, bbtLines, beerTypes, finishedProducts] = await Promise.all([
     GET("/batch-filter-orders"), GET("/batch-filter-lots"), GET("/batch-filter-lots/available-bbt-lines").catch(() => []),
-    GET("/beer-types").catch(() => [])]);
+    GET("/beer-types").catch(() => []), GET("/finished-products").catch(() => [])]);
+  // Sản phẩm của Lô lọc LUÔN kế thừa nguyên từ Lệnh lọc nguồn (draw_from_filter_order chép thẳng
+  // finished_product_id, không cho chọn lại) — hiện đọc lại ở đây (cả lúc chọn Lệnh lọc để tạo
+  // lẫn ở chi tiết Lô lọc đã tạo) để khỏi phải mở riêng màn Lệnh lọc mới biết (yêu cầu người dùng
+  // 2026-09-26: "bên lọc chọn mọi sản phẩm thì bên này cũng là mọi sản phẩm, bên tạo lô lọc chỉ
+  // đọc lại thôi").
+  const fpLabel = (id) => {
+    if (!id) return "(Mọi sản phẩm)";
+    const fp = finishedProducts.find(x => x.finished_product_id === id);
+    return fp ? `${fp.code} — ${fp.name}` : "—";
+  };
   // Cột "Sản phẩm bia" ở bảng danh sách phải hiện đúng LOẠI BIA (thương hiệu, VD "Sapphire") —
   // không phải Dịch bia (VD "Sapphire 14oP", gắn theo độ oP cụ thể) — yêu cầu người dùng
   // 2026-09-01. BatchFilterLot đã có sẵn cột beer_type_id riêng (không cần suy qua product_id).
@@ -3519,6 +3529,7 @@ VIEWS.batchfilterlots = async function () {
         <div class="field"><label>Tank thành phẩm</label><select id="fl_bbt">${bbtOpts}</select></div>
         <button class="btn" id="fl_create">Tạo lô lọc</button>
       </div>
+      <div class="muted" style="margin-top:4px">Sản phẩm (kế thừa từ lệnh lọc): <b id="fl_order_product">—</b></div>
       ${available.length ? "" : '<div class="muted">Chưa có lệnh lọc nào còn dùng được.</div>'}
     </div>
     <div class="split">
@@ -3540,6 +3551,12 @@ VIEWS.batchfilterlots = async function () {
     </div>`;
   wireProductionTabs();
   wirePaginate("t_batfilterlot", 10);
+  const updateFlOrderProduct = () => {
+    const o = orderById[$("fl_order_sel").value];
+    $("fl_order_product").textContent = o ? fpLabel(o.finished_product_id) : "—";
+  };
+  $("fl_order_sel").onchange = updateFlOrderProduct;
+  updateFlOrderProduct();
   $("fl_create").onclick = () => guard(async () => {
     if (!$("fl_order_sel").value) throw new Error("Chọn 1 lệnh lọc.");
     if (!$("fl_bbt").value) throw new Error("Chọn tank thành phẩm (BBT).");
@@ -3550,10 +3567,13 @@ VIEWS.batchfilterlots = async function () {
   document.querySelectorAll("[data-flot]").forEach(tr => tr.onclick = () => showBatchFilterLot(tr.dataset.flot));
 };
 async function showBatchFilterLot(filterLotId) {
-  const [f, sources, batches, matUsage, lots, materials] = await Promise.all([
+  const [f, sources, batches, matUsage, lots, materials, finishedProducts] = await Promise.all([
     GET(`/batch-filter-lots/${filterLotId}`), GET(`/batch-filter-lots/${filterLotId}/sources`),
     GET(`/batch-filter-lots/${filterLotId}/batches`), GET(`/batch-filter-lots/${filterLotId}/materials`),
-    GET("/lots"), GET("/materials")]);
+    GET("/lots"), GET("/materials"), GET("/finished-products").catch(() => [])]);
+  // Sản phẩm luôn kế thừa nguyên từ Lệnh lọc nguồn (draw_from_filter_order), chỉ đọc lại ở đây —
+  // mirror hiển thị ở showBatchFilterOrder (yêu cầu người dùng 2026-09-26).
+  const flFp = f.finished_product_id ? finishedProducts.find(x => x.finished_product_id === f.finished_product_id) : null;
   // Vật tư dự kiến đã khai báo ở Lệnh lọc nguồn (nếu có) — chỉ để GỢI Ý khi ghi nguyên liệu lọc
   // thật bên dưới (bấm điền sẵn tên/SL/ĐVT vào ô tự do, KHÔNG đụng tới ô chọn lô/FIFO thật —
   // xem materialUsageSectionHtml/wireMaterialUsageSection, giữ nguyên không đổi). Vẫn cho thêm
@@ -3576,6 +3596,7 @@ async function showBatchFilterLot(filterLotId) {
     <dl class="detail">
       <dt>Trạng thái</dt><dd>${statusBadge(FILTER_LOT_BADGE_CLASS[f.status], f.status_label)}</dd>
       <dt>Chất lượng</dt><dd>${badge(f.quality_status)}</dd>
+      <dt>Sản phẩm</dt><dd>${flFp ? esc(flFp.code) + " — " + esc(flFp.name) : "(Mọi sản phẩm)"}</dd>
       <dt>V dịch nha (hl)</dt><dd>${f.v_dich_hl}</dd>
       <dt>Nước bài khí/DAW (hl)</dt><dd>${f.nuoc_bai_khi_hl}</dd>
       <dt>Tồn/Tổng (V Bia)</dt><dd>${f.on_hand} / ${f.volume_hl} hl</dd>
@@ -3784,7 +3805,7 @@ VIEWS.batchpacklots = async function () {
             <td>${esc(p.from_bbt || "—")}</td>
             <td>${p.qty}</td><td>${esc(p.lot_no || "—")}</td>
             <td>${statusBadge(PACK_LOT_BADGE_CLASS[p.status], p.status_label)}</td>
-            <td>${p.approved ? badge("released") + " đã duyệt" : badge("pending")}${p.unstocked_remainder > 0 ? ` <span style="color:var(--red)" title="Còn ${p.unstocked_remainder} chưa được duyệt nhập kho thành phẩm">⚠ còn ${p.unstocked_remainder}</span>` : ""}</td></tr>`).join("")
+            <td>${pkDuyetCellHtml(p)}</td></tr>`).join("")
             || '<tr><td colspan=7 class="muted">Chưa có lô thành phẩm nào.</td></tr>'}</tbody></table></div>
       </div>
       <div class="panel" id="pk_detail"><h2>Chi tiết lô thành phẩm</h2><div class="muted">Chọn một lô để xem.</div></div>
@@ -3848,7 +3869,7 @@ function renderPkWmsAllocUi(packLotId, specs, caTotal, existingAllocations, unit
   const toRow = (a) => ({ rowId: a.row_id, specId: a.spec_id, qty: String(a.quantity), editing: false,
     savedBy: a.saved_by, savedAt: a.saved_at, released: !!a.released,
     releasedBy: a.released_by, releasedAt: a.released_at, palletCodes: a.pallet_codes || [], confirmFinal: false,
-    locId: "", location: a.location || null });
+    locId: a.loc_id || "", location: a.location || null });
   let rows = (existingAllocations && existingAllocations.length) ? existingAllocations.map(toRow) : [];
   // Dòng chưa lưu lần nào (mảng rỗng) tự bật sẵn 1 dòng ở chế độ Sửa để nhập ngay — mirror
   // editingCas (renderPkShiftsTable): ca chưa từng lưu mặc định ở chế độ Sửa luôn.
@@ -3877,7 +3898,7 @@ function renderPkWmsAllocUi(packLotId, specs, caTotal, existingAllocations, unit
     if (full > 0 && rem > 0) return `<b>${total} pallet</b><br/><span class="muted">${full} đầy (${spec.units_per_pallet}${u}/pallet) + pallet cuối chỉ có <b>${rem}${u}</b></span>`;
     return `<b>${total} pallet</b><br/><span class="muted">pallet cuối chỉ có <b>${rem}${u}</b></span>`;
   };
-  const releasedPalletHtml = (row) => `<b>${row.palletCodes.length} pallet</b><br/><span class="muted">${row.palletCodes.map(esc).join(", ")}</span>`;
+  const releasedPalletHtml = (row) => `<b>${row.palletCodes.length} pallet</b>`;
   const palletsBuilt = rows.reduce((s, r) => s + (r.released ? r.palletCodes.length : 0), 0);
   // SL còn thiếu SAU KHI tính cả mọi dòng đang khai (kể cả dòng đang gõ dở) — mirror đúng số
   // hiện ở "Đã phân bổ X / Y — còn thiếu Z" (updateSum). Dùng số NÀY (không phải
@@ -3964,20 +3985,12 @@ function renderPkWmsAllocUi(packLotId, specs, caTotal, existingAllocations, unit
       }
     };
     const saveAll = async () => {
-      // Giữ lại lựa chọn "Vị trí kho" qua lần lưu — server KHÔNG lưu locId cho dòng chưa release
-      // (chỉ ghi lại location THẬT lúc Duyệt nhập kho), nên phải tự khớp lại theo row_id (dòng
-      // đã có id từ trước) hoặc theo vị trí thứ tự (dòng mới toanh, id server vừa cấp).
-      const prevLocByRowId = Object.fromEntries(rows.filter(row => row.rowId).map(row => [row.rowId, row.locId]));
-      const prevLocByIndex = rows.map(row => row.locId);
       const r = await PUT(`/batch-pack-lots/${packLotId}/pack-allocations`, {
-        allocations: rows.map(row => ({ row_id: row.rowId || undefined, spec_id: row.specId, quantity: parseFloat(row.qty) || 0 }))
+        allocations: rows.map(row => ({ row_id: row.rowId || undefined, spec_id: row.specId,
+          quantity: parseFloat(row.qty) || 0, loc_id: row.locId || undefined }))
           .filter(a => a.quantity > 0),
       });
-      rows = (r.pack_allocations || []).map((a, idx) => {
-        const row = toRow(a);
-        row.locId = (a.row_id && prevLocByRowId[a.row_id]) || prevLocByIndex[idx] || "";
-        return row;
-      });
+      rows = (r.pack_allocations || []).map(toRow);
       return r;
     };
     document.querySelectorAll(".wmsalloc-spec").forEach(sel => sel.onchange = () => {
@@ -4061,11 +4074,28 @@ function renderPkWmsAllocUi(packLotId, specs, caTotal, existingAllocations, unit
   };
   render();
 }
+function pkDuyetCellHtml(p) {
+  return `${p.approved ? badge("released") + " đã duyệt" : badge("pending")}${p.unstocked_remainder > 0 ? ` <span style="color:var(--red)" title="Còn ${p.unstocked_remainder} chưa được duyệt nhập kho thành phẩm">⚠ còn ${p.unstocked_remainder}</span>` : ""}`;
+}
 async function showBatchPackLot(packLotId) {
   const [p, finishedProducts, unitTypes, matUsage, lots, materials] = await Promise.all([
     GET(`/batch-pack-lots/${packLotId}`), GET("/finished-products").catch(() => []),
     GET("/unit-types").catch(() => []), GET(`/batch-pack-lots/${packLotId}/materials`),
     GET("/lots"), GET("/materials")]);
+  // Trang "Danh sách lô thành phẩm" hiện danh sách + chi tiết CÙNG 1 màn (master-detail) — dòng
+  // trong bảng danh sách chỉ dựng 1 LẦN lúc vào trang, không tự cập nhật khi thao tác (Lưu SL,
+  // Lưu SL theo ca, Duyệt nhập kho TP...) làm đổi dữ liệu ngay trong panel chi tiết bên cạnh, nên
+  // phải vá lại tay các ô liên quan của dòng đó mỗi lần showBatchPackLot chạy lại — không có thì
+  // phải bấm F5 mới thấy cập nhật (yêu cầu người dùng 2026-09-25, mở rộng 2026-09-26: "số lít
+  // chiết, số lượng còn lại" cũng phải cập nhật ngay, không chỉ cột Duyệt). Không tồn tại (VD gọi
+  // từ Truy xuất) thì bỏ qua, vô hại.
+  const listRow = document.querySelector(`[data-pklot2="${packLotId}"]`);
+  if (listRow) {
+    const cells = listRow.querySelectorAll("td");
+    cells[3].textContent = p.qty;
+    cells[5].innerHTML = statusBadge(PACK_LOT_BADGE_CLASS[p.status], p.status_label);
+    cells[6].innerHTML = pkDuyetCellHtml(p);
+  }
   const f = await GET(`/batch-filter-lots/${p.filter_lot_id}`);
   const fp = finishedProducts.find(x => x.finished_product_id === p.finished_product_id);
   const unitLabel = fp ? ((unitTypes.find(ut => ut.code === fp.unit_type) || {}).name || fp.unit_type) : "";
@@ -4137,7 +4167,6 @@ async function showBatchPackLot(packLotId) {
       pkQc.pending.length ? `⚠ Còn thiếu: ${pkQc.pending.map(esc).join(", ")}` :
       '<span style="color:var(--red)">✗ Có chỉ tiêu bắt buộc không đạt (FAIL)</span>'}</div>`}
     ${materialUsageSectionHtml("pkmu", matUsage, lk, p.ended_at)}
-    <div id="pk_pallet_summary_wrap"></div>
     ${!p.stocked ? '<div id="pk_wms_alloc_wrap" style="margin-top:16px"></div>' : ""}
     <div class="row" style="margin-top:10px">
       ${(!p.finished && !lk) ? '<button class="btn sm" id="pk_finish">✔ Hoàn thành chiết</button>' : ""}
@@ -4233,28 +4262,6 @@ async function showBatchPackLot(packLotId) {
     }));
   }
   renderPkShiftsTable();
-  // "Pallet đã đóng theo số vỉ/pallet" — gộp SL pallet ĐÃ Duyệt nhập kho (mọi dòng
-  // pack_allocations released=true, có thể nhiều quy cách khác nhau) theo ĐÚNG số vỉ THẬT của
-  // từng pallet (Pallet.case_count — pallet lẻ/cuối cùng của 1 dòng có thể ít vỉ hơn quy cách
-  // danh nghĩa, xem release_pack_lot_allocation) — yêu cầu người dùng 2026-09-25: "đã nhập bao
-  // nhiêu pallet có số vỉ là X, bao nhiêu pallet có số vỉ là Y".
-  const releasedPalletCodes = (p.pack_allocations || []).filter(r => r.released)
-    .flatMap(r => r.pallet_codes || []);
-  if (releasedPalletCodes.length) {
-    const lotCodeForPallets = p.lot_no || p.pack_lot_code;
-    const pallets = await GET(`/wms/pallets?lot_code=${encodeURIComponent(lotCodeForPallets)}`).catch(() => []);
-    const relevant = pallets.filter(pl => releasedPalletCodes.includes(pl.pallet_code));
-    if (relevant.length) {
-      const byCaseCount = {};
-      relevant.forEach(pl => { byCaseCount[pl.case_count] = (byCaseCount[pl.case_count] || 0) + 1; });
-      const rowsHtml = Object.keys(byCaseCount).map(Number).sort((a, b) => b - a)
-        .map(cc => `<tr><td>${cc} ${esc(unitLabel)}</td><td>${byCaseCount[cc]}</td></tr>`).join("");
-      $("pk_pallet_summary_wrap").innerHTML = `<h3 style="margin-top:16px">📦 Pallet đã đóng theo số vỉ/pallet</h3>
-        <div class="muted" style="margin-bottom:6px">Tổng ${relevant.length} pallet đã Duyệt nhập kho thành phẩm cho lô này (mọi quy cách đóng gói đã dùng).</div>
-        <div class="tablewrap"><table><thead><tr><th>SL/pallet</th><th>Số pallet</th></tr></thead>
-        <tbody>${rowsHtml}</tbody></table></div>`;
-    }
-  }
   if ($("pk_approve")) $("pk_approve").onclick = () => guard(async () => {
     const r = await POST(`/batch-pack-lots/${packLotId}/approve`, {});
     toast("Đã duyệt KCS lô thành phẩm" + (r.qc_has_fail ? " (còn chỉ tiêu FAIL — cảnh báo)" : "")); showBatchPackLot(packLotId);
@@ -4460,9 +4467,9 @@ async function buildPackLotEBRHtml(packLotId, opts = {}) {
   const showTankGroups = ebrTanks.length > 1;
   const showBatchGroups = totalEbrBatches > 1;
   const qcRowHtml = (q, indent) => `<tr><td${indent ? ` style="padding-left:${indent}px"` : ""}>${esc(TRACE_NODE_LABEL[q.node_type] || q.node_type)}${q.lot_code ? " " + esc(q.lot_code) : ""}${q.material_label ? " — " + esc(q.material_label) : ""}</td>
-      <td>${esc(q.parameter_name || q.parameter)}</td><td>${q.value ?? "—"} ${esc(q.unit || "")}</td><td>${badge(q.status)}</td></tr>`;
-  const qcEmptyRow = (indent) => `<tr><td colspan="4" class="muted"${indent ? ` style="padding-left:${indent}px"` : ""}>— chưa có dữ liệu</td></tr>`;
-  const qcGroupHeader = (label) => `<tr><td colspan="4" style="background:var(--panel2)"><b>${esc(label)}</b></td></tr>`;
+      <td>${esc(q.parameter_name || q.parameter)}</td><td class="muted">${q.lower ?? "—"}</td><td class="muted">${q.upper ?? "—"}</td><td>${q.value ?? "—"} ${esc(q.unit || "")}</td><td>${badge(q.status)}</td></tr>`;
+  const qcEmptyRow = (indent) => `<tr><td colspan="6" class="muted"${indent ? ` style="padding-left:${indent}px"` : ""}>— chưa có dữ liệu</td></tr>`;
+  const qcGroupHeader = (label) => `<tr><td colspan="6" style="background:var(--panel2)"><b>${esc(label)}</b></td></tr>`;
   // Nhóm 1 danh sách dòng chỉ tiêu/NVL (không cần tách thêm — chỉ 1 pack lot/1 filter lot) —
   // hành vi cũ, giữ nguyên cho "Chỉ tiêu bia thành phẩm"/"Chỉ tiêu lọc".
   const qcGroupsHtml = (groups) => groups.map(([label, rows]) => qcGroupHeader(label) +
@@ -4473,7 +4480,7 @@ async function buildPackLotEBRHtml(packLotId, opts = {}) {
     ? (rows.length ? rows.map(q => qcRowHtml(q, 0)).join("") : qcEmptyRow(0))
     : ebrTanks.map(t => {
         const tRows = rows.filter(q => q.node_id === t.id);
-        return `<tr><td colspan="4" style="padding-left:8px"><i>Tank lên men ${esc(t.code)}</i></td></tr>` +
+        return `<tr><td colspan="6" style="padding-left:8px"><i>Tank lên men ${esc(t.code)}</i></td></tr>` +
           (tRows.length ? tRows.map(q => qcRowHtml(q, 16)).join("") : qcEmptyRow(16));
       }).join("") + (() => {
         const stray = rows.filter(q => !ebrTanks.some(t => t.id === q.node_id));
@@ -4491,13 +4498,13 @@ async function buildPackLotEBRHtml(packLotId, opts = {}) {
     let out = qcGroupHeader(label);
     const seenBatch = new Set();
     for (const t of ebrTanks) {
-      if (showTankGroups) out += `<tr><td colspan="4" style="padding-left:8px"><i>Tank lên men ${esc(t.code)}</i></td></tr>`;
+      if (showTankGroups) out += `<tr><td colspan="6" style="padding-left:8px"><i>Tank lên men ${esc(t.code)}</i></td></tr>`;
       const tankIndent = showTankGroups ? 16 : 0;
       if (!t.batches.length) { out += qcEmptyRow(tankIndent); continue; }
       for (const b of t.batches) {
         seenBatch.add(b.id);
         const bRows = rows.filter(q => ownerBatchOf(q).includes(b.id));
-        if (showBatchGroups) out += `<tr><td colspan="4" style="padding-left:${tankIndent + 8}px"><i>Mẻ nấu ${esc(b.code)}</i></td></tr>`;
+        if (showBatchGroups) out += `<tr><td colspan="6" style="padding-left:${tankIndent + 8}px"><i>Mẻ nấu ${esc(b.code)}</i></td></tr>`;
         const rowIndent = showBatchGroups ? tankIndent + 16 : tankIndent;
         out += bRows.length ? bRows.map(q => qcRowHtml(q, rowIndent)).join("") : qcEmptyRow(rowIndent);
       }
@@ -4513,14 +4520,14 @@ async function buildPackLotEBRHtml(packLotId, opts = {}) {
   const nuocNauRows = e.nuoc_nau_display || [];
   const nuocNauWoCodes = [...new Set(nuocNauRows.map(r => r.wo_code))];
   const nuocNauRowHtml = (r, indent) => `<tr><td${indent ? ` style="padding-left:${indent}px"` : ""}>Nước nấu bia</td>
-    <td>${esc(r.parameter_name || r.parameter)}</td><td>${r.value ?? "—"} ${esc(r.unit || "")}</td><td>${badge(r.status)}</td></tr>`;
+    <td>${esc(r.parameter_name || r.parameter)}</td><td class="muted">${r.lower ?? "—"}</td><td class="muted">${r.upper ?? "—"}</td><td>${r.value ?? "—"} ${esc(r.unit || "")}</td><td>${badge(r.status)}</td></tr>`;
   const qcNuocNauHtml = (() => {
     const header = qcGroupHeader("Chỉ tiêu nước nấu bia");
     if (!nuocNauRows.length) return header + qcEmptyRow(0);
     if (nuocNauWoCodes.length <= 1) return header + nuocNauRows.map(r => nuocNauRowHtml(r, 0)).join("");
     return header + nuocNauWoCodes.map(wo => {
       const wRows = nuocNauRows.filter(r => r.wo_code === wo);
-      return `<tr><td colspan="4" style="padding-left:8px"><i>Mã điều độ ${esc(wo)}</i></td></tr>` +
+      return `<tr><td colspan="6" style="padding-left:8px"><i>Mã điều độ ${esc(wo)}</i></td></tr>` +
         (wRows.length ? wRows.map(r => nuocNauRowHtml(r, 16)).join("") : qcEmptyRow(16));
     }).join("");
   })();
@@ -4555,36 +4562,6 @@ async function buildPackLotEBRHtml(packLotId, opts = {}) {
     <td>${m.quantity}</td><td>${esc(m.uom)}</td></tr>`).join("") : '<tr><td colspan=6 class="muted">Chưa ghi nguyên liệu nào.</td></tr>';
   const filterMats = matRows(e.filter_lot_materials_display || []);
   const packMats = matRows(e.pack_lot_materials_display || []);
-  // NVL dùng cho nấu — trước đây chỉ hiện ở bảng "Lô nguyên vật liệu nấu" dưới dạng chỉ tiêu QC
-  // (Node/Chỉ tiêu/Giá trị/KQ), THIẾU hẳn mã lô PM/FIFO/SL thật đã dùng — mirror đúng cấu trúc
-  // "NVL dùng cho lọc/chiết" (yêu cầu người dùng 2026-09-01), tách theo tank>mẻ nấu khi có từ
-  // 2 mẻ trở lên (dùng chung showTankGroups/showBatchGroups đã tính ở trên).
-  const matRowHtml = (m, indent) => `<tr><td${indent ? ` style="padding-left:${indent}px"` : ""}>${esc(m.material_name || "—")}</td>
-    <td class="muted">${esc(m.lot_pm || "—")}</td><td>${fifoBadgeHtml(m.fifo_ok)}</td><td class="muted">${esc(m.reason || "—")}</td>
-    <td>${m.quantity}</td><td>${esc(m.uom)}</td></tr>`;
-  const matEmptyRow = (indent) => `<tr><td colspan=6 class="muted"${indent ? ` style="padding-left:${indent}px"` : ""}>Chưa ghi nguyên liệu nào.</td></tr>`;
-  const batchMats = (() => {
-    const rows = e.batch_materials_display || [];
-    if (!showTankGroups && !showBatchGroups) {
-      return rows.length ? rows.map(m => matRowHtml(m, 0)).join("") : matEmptyRow(0);
-    }
-    let out = ""; const seenBatch = new Set();
-    for (const t of ebrTanks) {
-      if (showTankGroups) out += `<tr><td colspan=6 style="padding-left:8px"><i>Tank lên men ${esc(t.code)}</i></td></tr>`;
-      const tankIndent = showTankGroups ? 16 : 0;
-      if (!t.batches.length) { out += matEmptyRow(tankIndent); continue; }
-      for (const b of t.batches) {
-        seenBatch.add(b.id);
-        const bRows = rows.filter(m => m.batch_id === b.id);
-        if (showBatchGroups) out += `<tr><td colspan=6 style="padding-left:${tankIndent + 8}px"><i>Mẻ nấu ${esc(b.code)}</i></td></tr>`;
-        const rowIndent = showBatchGroups ? tankIndent + 16 : tankIndent;
-        out += bRows.length ? bRows.map(m => matRowHtml(m, rowIndent)).join("") : matEmptyRow(rowIndent);
-      }
-    }
-    const stray = rows.filter(m => !seenBatch.has(m.batch_id));
-    if (stray.length) out += stray.map(m => matRowHtml(m, 0)).join("");
-    return out || matEmptyRow(0);
-  })();
   // Biểu đồ theo dõi lên men của MỌI Tank nguồn (không chỉ tank đầu tiên — lô thành phẩm có thể
   // bắt nguồn từ nhiều tank phối, mỗi tank có đường theo dõi riêng, yêu cầu người dùng
   // 2026-09-01) — gọi thêm API riêng/tank (process-log không nằm trong core/hash EBR, chỉ để
@@ -4612,18 +4589,16 @@ async function buildPackLotEBRHtml(packLotId, opts = {}) {
     <h3>Các bước thực thi (step-by-step, gộp toàn cây)</h3>
     <div class="timeline" style="max-height:220px;overflow-y:auto">${steps || '<div class="muted">—</div>'}</div>
     <div class="split">
-      <div><h3>Kết quả QC (toàn cây)</h3><table><thead><tr><th>Node</th><th>Chỉ tiêu</th><th>Giá trị</th><th>KQ</th></tr></thead>
+      <div><h3>Kết quả QC (toàn cây)</h3><table><thead><tr><th>Node</th><th>Chỉ tiêu</th><th>Min</th><th>Max</th><th>Giá trị</th><th>KQ</th></tr></thead>
         <tbody>${qcLeft}</tbody></table></div>
       <div>
         <h3>Deviation (toàn cây)</h3><table><thead><tr><th>Node</th><th>Mã</th><th>Mức</th><th>Lý do</th><th>TT</th></tr></thead>
           <tbody>${devs || '<tr><td colspan=5 class="muted">—</td></tr>'}</tbody></table>
         <h3 style="margin-top:14px">Chỉ tiêu lên men &amp; lọc</h3>
-        <table><thead><tr><th>Node</th><th>Chỉ tiêu</th><th>Giá trị</th><th>KQ</th></tr></thead>
+        <table><thead><tr><th>Node</th><th>Chỉ tiêu</th><th>Min</th><th>Max</th><th>Giá trị</th><th>KQ</th></tr></thead>
           <tbody>${qcRight}</tbody></table>
       </div>
     </div>
-    <h3>NVL dùng cho nấu</h3><table><thead><tr><th>Nguyên liệu</th><th>Lô PM</th><th>FIFO</th><th>Lý do</th><th>SL</th><th>ĐVT</th></tr></thead>
-      <tbody>${batchMats}</tbody></table>
     <div class="split">
       <div><h3>NVL dùng cho lọc</h3><table><thead><tr><th>Nguyên liệu</th><th>Lô PM</th><th>FIFO</th><th>Lý do</th><th>SL</th><th>ĐVT</th></tr></thead>
         <tbody>${filterMats}</tbody></table></div>
@@ -5437,11 +5412,13 @@ function renderTree(tree, title) {
   // bảng compact (mã NVL/số lượng/chỉ tiêu) thay vì đệ quy từng box; các loại con khác (ferment,
   // filter, bottle...) vẫn hiện đệ quy như cũ.
   const lotTable = (lots) => `<table class="nvl-table"><thead><tr>
-      <th>Mã nguyên vật liệu</th><th>Quan hệ</th><th>Số lượng</th><th>Chỉ tiêu</th></tr></thead>
+      <th>Mã nguyên vật liệu</th><th>Quan hệ</th><th>Số lượng</th><th>FIFO</th><th>Lý do</th><th>Chỉ tiêu</th></tr></thead>
     <tbody>${lots.map(l => `<tr><td>${esc(l.material_label || "")}
         <span class="muted" style="font-size:11px">(lô ${esc(l.code)})</span></td>
       <td>${l.relation ? `<span class="qc-pill ${l.relation === "split" ? "ok" : "muted"}" title="Dùng ở bước &quot;${esc(l.relation)}&quot; để tạo ra bản ghi cha bên trên">${esc(RELATION_LABEL[l.relation] || l.relation)}</span>` : '<span class="muted">—</span>'}</td>
       <td>${l.quantity != null ? l.quantity : ""} ${esc(l.uom || "")}</td>
+      <td>${fifoBadgeHtml(l.fifo_ok)}</td>
+      <td class="muted">${esc(l.reason || "—")}</td>
       <td>${(l.qc || []).map(qcPill).join("") || '<span class="muted">—</span>'}</td></tr>`).join("")}</tbody></table>`;
   const node = (n) => {
     const kids = n.children || [];
