@@ -1978,6 +1978,7 @@ class BatchFilterOrderOut(BaseModel):
     lot_count: int = 0
     actual_volume_hl: float = 0.0
     is_complete: bool = False
+    tank_sources_drained: bool = False
     consumed_downstream: bool = False
     status: str = "planned"
     status_label: str = ""
@@ -2115,6 +2116,8 @@ class BatchFilterLotOut(ORMModel):
     on_hand: float = 0.0
     status: str
     status_label: str = ""
+    chiet_status: Optional[str] = None
+    chiet_status_label: str = ""
     note: Optional[str] = None
     ended_at: Optional[datetime] = None
     qc_approved: bool = False

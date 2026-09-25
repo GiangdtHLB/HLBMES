@@ -77,10 +77,15 @@ def summary(db: Session) -> dict:
             "by_status": by_status, "cases": cases, "units": int(units)}
 
 
-def list_pallets(db: Session, status: str = None) -> list:
+def list_pallets(db: Session, status: str = None, lot_code: str = None) -> list:
     stmt = select(Pallet).order_by(Pallet.created_at.desc())
     if status:
         stmt = stmt.where(Pallet.status == status)
+    if lot_code:
+        # Lọc riêng pallet của 1 lô thành phẩm (Pallet.lot_code = BatchPackLot.lot_no/pack_lot_code,
+        # KHÔNG phải FK) — dùng ở trang chi tiết Lô thành phẩm để tóm tắt "đã đóng bao nhiêu pallet
+        # theo từng số vỉ/pallet", tránh phải tải TOÀN BỘ pallet trong kho mỗi lần xem 1 lô.
+        stmt = stmt.where(Pallet.lot_code == lot_code)
     out = []
     loc_by = {l.loc_id: l for l in db.execute(select(WmsLocation)).scalars().all()}
     product_name_by = _product_name_by_code(db)

@@ -126,3 +126,54 @@ def test_real_unreversed_transfer_still_shows(client, admin_h):
     assert body["rows"][0]["type"] == "transfer"
     assert body["rows"][0]["quantity"] == 15.0
     assert body["closing_balance"] == 15.0
+
+
+def test_reversed_pair_matched_by_request_code_not_just_quantity(client, admin_h):
+    """Bug thực tế 2026-09-24: 2 phiếu KHÁC NHAU cùng rút CÙNG SỐ LƯỢNG từ CÙNG 1 lô (VD "duyệt
+    cả phiếu" rút cùng lúc 45kg cho nhiều phiếu) — chỉ 1 phiếu được hoàn tác, phiếu còn lại vẫn
+    còn thật (chưa hoàn tác). Ghép cặp CHỈ theo lot_code + số lượng ngược dấu (không xét đúng mã
+    phiếu trong `reason`) dễ ghép nhầm "Hoàn tác của phiếu A" với "Xuất của phiếu B" — ẩn nhầm
+    đúng phiếu còn thật (B), để lộ đúng phiếu đã hoàn tác (A), khiến người xem hiểu lầm ngược lại
+    hoàn toàn (thấy phiếu ĐÃ hoàn tác báo như CHƯA hoàn tác, phiếu CHƯA hoàn tác lại biến mất)."""
+    mat = client.post("/api/materials", headers=admin_h,
+                      json={"code": "MTD-DUAL01", "name": "Vật tư MTD 2 phiếu cùng SL", "uom": "kg"})
+    assert mat.status_code == 201, mat.text
+    material_id = mat.json()["material_id"]
+
+    date_from = (utcnow() - timedelta(days=1)).isoformat()
+
+    recv = client.post("/api/warehouse/receive", headers=admin_h, json={
+        "material_id": material_id, "quantity": 100, "uom": "kg", "location": "Kho công ty"})
+    assert recv.status_code == 200, recv.text
+    lot_id = recv.json()["lot_id"]
+
+    # Phiếu A (AAAA1) xuất 45kg — SAU NÀY sẽ hoàn tác.
+    outA = client.post("/api/warehouse/transfer", headers=admin_h, json={
+        "lot_id": lot_id, "quantity": 45, "location_to": "Kho phân xưởng",
+        "reason": "Xuất theo đề nghị DN-20260917-AAAA1"})
+    assert outA.status_code == 200, outA.text
+    lot_at_px = outA.json()["lot_id"]
+
+    # Phiếu B (BBBB1) xuất CÙNG 45kg từ CÙNG lô nguồn — KHÔNG BAO GIỜ hoàn tác (vẫn còn thật).
+    outB = client.post("/api/warehouse/transfer", headers=admin_h, json={
+        "lot_id": lot_id, "quantity": 45, "location_to": "Kho phân xưởng",
+        "reason": "Xuất theo đề nghị DN-20260917-BBBB1"})
+    assert outB.status_code == 200, outB.text
+
+    # Chỉ hoàn tác phiếu A.
+    backA = client.post("/api/warehouse/transfer", headers=admin_h, json={
+        "lot_id": lot_at_px, "quantity": 45, "location_to": "Kho công ty",
+        "reason": "Hoàn tác xuất theo đề nghị DN-20260917-AAAA1 (dòng 1)"})
+    assert backA.status_code == 200, backA.text
+
+    date_to = utcnow().isoformat()
+
+    detail = client.get("/api/warehouse/report/material-detail", headers=admin_h, params={
+        "material_id": material_id, "date_from": date_from, "date_to": date_to,
+        "location": "Kho công ty"})
+    assert detail.status_code == 200, detail.text
+    reasons = [r["reason"] for r in detail.json()["rows"]]
+    # Phiếu B (chưa hoàn tác) PHẢI còn hiện — đây chính là điều bug làm sai (ẩn nhầm B).
+    assert any("BBBB1" in (r or "") for r in reasons), reasons
+    # Phiếu A (đã hoàn tác) và dòng "Hoàn tác" của nó PHẢI biến mất hoàn toàn.
+    assert not any("AAAA1" in (r or "") for r in reasons), reasons

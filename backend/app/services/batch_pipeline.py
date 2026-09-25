@@ -76,12 +76,38 @@ FILTER_LOT_STATUS_LABEL = {"dang_loc": "Đang lọc", "hoan_thanh": "Hoàn thàn
 FILTER_ORDER_STATUS_LABEL = {"planned": "Lập kế hoạch", "dang_loc": "Đang lọc", "hoan_thanh": "Hoàn thành"}
 
 
-def _stamp_filter_lot_label(fl: BatchFilterLot) -> BatchFilterLot:
+def _filter_lot_chiet_status(db: Session, fl: BatchFilterLot) -> Optional[str]:
+    """Trạng thái CHIẾT (đóng gói) của lô lọc này — tóm tắt tiến độ rút dịch qua các Lô thành
+    phẩm (BatchPackLot) đã tách ra, dùng ĐÚNG 3 mốc/logic đã có sẵn cho BatchPackLot.status (xem
+    _pack_lot_status, yêu cầu người dùng gốc 2026-09-02), chỉ khác là GỘP tất cả Lô TP con của lô
+    lọc này lại thay vì tính riêng từng lô — cột hiển thị THÊM, THUẦN THÔNG TIN ở màn "Lô lọc",
+    KHÔNG đụng gì tới BatchFilterLot.status (mốc "Hoàn thành lọc" riêng, đã tách hẳn khỏi tiến độ
+    chiết theo yêu cầu người dùng 2026-09-06 — xem _sync_filter_lot_status) (yêu cầu người dùng
+    2026-09-25: "thêm cho tôi trạng thái chiết vào đây, khi tạo lô chiết thì sẽ là đang chiết, khi
+    chiết > 0 nhưng nhỏ hơn tổng hl, thì là chiết 1 phần, khi tồn là 0 thì là chiết hết"). Trả về
+    None nếu CHƯA có Lô thành phẩm nào tách từ lô lọc này (chưa chiết gì cả — không hiện badge)."""
+    pack_lots = db.execute(select(BatchPackLot).where(
+        BatchPackLot.filter_lot_id == fl.filter_lot_id)).scalars().all()
+    if not pack_lots:
+        return None
+    tolerance = ops_setting.get_settings(db).empty_bbt_tolerance_hl
+    if abs(fl.on_hand) <= tolerance:
+        return "chiet_het"
+    ca_total = sum((p.ca1_qty or 0.0) + (p.ca2_qty or 0.0) + (p.ca3_qty or 0.0) for p in pack_lots)
+    if ca_total <= 0:
+        return "dang_chiet"
+    return "chiet_1_phan"
+
+
+def _stamp_filter_lot_label(db: Session, fl: BatchFilterLot) -> BatchFilterLot:
     """BatchFilterLot trả thẳng ORM object qua response_model=BatchFilterLotOut (không qua dict
     "_out" như BatchTank/BatchFilterOrder) — gắn status_label làm thuộc tính TẠM trên instance
     (không phải cột DB) để Pydantic (from_attributes) đọc được, mirror routers/brewing.py::FILTER_STATUS
     nhưng tính ngay ở đây cho gọn."""
     fl.status_label = FILTER_LOT_STATUS_LABEL.get(fl.status, fl.status)
+    chiet_status = _filter_lot_chiet_status(db, fl)
+    fl.chiet_status = chiet_status
+    fl.chiet_status_label = PACK_LOT_STATUS_LABEL.get(chiet_status, "") if chiet_status else ""
     return fl
 
 
@@ -337,7 +363,7 @@ def empty_filter_lot(db: Session, filter_lot_id: str, user: User) -> dict:
     _sync_filter_lot_status(fl)
     db.commit()
     db.refresh(fl)
-    return _stamp_filter_lot_label(fl)
+    return _stamp_filter_lot_label(db, fl)
 
 
 def usable_capacity_for_code(db: Session, code: Optional[str], kind: str) -> Optional[float]:
@@ -546,6 +572,22 @@ def list_filter_order_sources(db: Session, order_id: str) -> list[BatchFilterOrd
                       .order_by(BatchFilterOrderSource.seq)).scalars().all()
 
 
+def _order_tank_sources_drained(db: Session, order_id: str) -> bool:
+    """TẤT CẢ tank lên men nguồn (source_type="tank") của lệnh lọc này đã "Lọc hết" (_tank_status
+    == "da_loc_het", tức tank.on_hand <= 0 sau khi rút dịch) chưa — lệnh KHÔNG có nguồn tank nào
+    (VD lệnh lọc lại thuần từ Lô lọc khác, source_type="filter_lot") trả về False, không tự động
+    hoàn thành theo tiêu chí này (yêu cầu người dùng 2026-09-25: "khi lô lên men đó đã báo lọc
+    hết, thì toàn bộ lệnh lọc đi theo lô đó sẽ sang hoàn thành luôn" — áp dụng cho CẢ lệnh phối
+    nhiều tank: phải HẾT CẢ, không phải chỉ 1 tank trong số đó, mới coi là lệnh đã xong nguồn)."""
+    tank_ids = db.execute(select(BatchFilterOrderSource.source_tank_id).where(
+        BatchFilterOrderSource.order_id == order_id, BatchFilterOrderSource.source_type == "tank",
+        BatchFilterOrderSource.source_tank_id.isnot(None))).scalars().all()
+    if not tank_ids:
+        return False
+    tanks = db.execute(select(BatchTank).where(BatchTank.tank_id.in_(tank_ids))).scalars().all()
+    return len(tanks) == len(tank_ids) and all(_tank_status(db, t) == "da_loc_het" for t in tanks)
+
+
 def _filter_order_status(db: Session, order: BatchFilterOrder) -> dict:
     """`is_complete` = tổng SL thực tế (volume_hl) các Lô lọc đã tạo từ lệnh này đã đạt kế hoạch
     - dung sai chưa. Khi True, lệnh lọc TỰ ĐỘNG coi là "hoàn thành" (status="hoan_thanh") — KHÔNG
@@ -555,24 +597,31 @@ def _filter_order_status(db: Session, order: BatchFilterOrder) -> dict:
     ở đây — is_complete chỉ suy từ tổng volume_hl, tách biệt hoàn toàn khỏi mốc lô con. Nút "Hoàn
     thành lệnh lọc" (order.completed, xem finish_filter_order) dùng cho trường hợp NGƯỢC LẠI: vận
     hành CHỦ ĐỘNG dừng sớm khi CHƯA đạt đủ SL kế hoạch (VD chỉ lọc một nửa kế hoạch rồi quyết định
-    không lọc thêm nữa) — cũng cho ra status="hoan_thanh" y hệt. "Đã tiêu thụ hạ lưu" (mirror
-    _chiet_started) khi đã có Lô thành phẩm tách từ 1 trong các Lô lọc của lệnh này — KHÔNG đổi
-    status, chỉ vẫn dùng để chặn tạo thêm Lô lọc mới (ràng buộc vật lý thật, xem
-    VIEWS.batchfilterlots — khác hẳn "hoàn thành")."""
+    không lọc thêm nữa) — cũng cho ra status="hoan_thanh" y hệt. `tank_sources_drained` (yêu cầu
+    người dùng 2026-09-25) là tiêu chí TỰ ĐỘNG thứ 3, độc lập với `is_complete`: lô lên men nguồn
+    có thể có ÍT dịch hơn kế hoạch (hao hụt thật) khiến `is_complete` không bao giờ đạt — nhưng
+    tank đã rút cạn (không còn gì để lọc thêm nữa) thì lệnh lọc cũng coi như xong, không cần đợi
+    vận hành bấm "Hoàn thành lệnh lọc" thủ công. "Đã tiêu thụ hạ lưu" (mirror _chiet_started) khi
+    đã có Lô thành phẩm tách từ 1 trong các Lô lọc của lệnh này — KHÔNG đổi status, chỉ vẫn dùng
+    để chặn tạo thêm Lô lọc mới (ràng buộc vật lý thật, xem VIEWS.batchfilterlots — khác hẳn
+    "hoàn thành")."""
     lots = db.execute(select(BatchFilterLot).where(BatchFilterLot.order_id == order.order_id)).scalars().all()
     actual = sum(l.volume_hl or 0.0 for l in lots)
     is_complete = actual >= (order.planned_volume_hl - order.volume_tolerance_hl)
+    tank_sources_drained = _order_tank_sources_drained(db, order.order_id)
     consumed_downstream = any(
         db.execute(select(BatchPackLot.pack_lot_id).where(
             BatchPackLot.filter_lot_id == l.filter_lot_id)).first()
         for l in lots
     )
     # Trạng thái hiển thị: planned (chưa tạo lô lọc nào) -> dang_loc (đã có lô lọc, chưa đủ SL kế
-    # hoạch VÀ chưa bấm "Hoàn thành lệnh lọc") -> hoan_thanh (is_complete TỰ ĐỘNG, HOẶC
-    # order.completed = mốc dừng sớm thủ công — xem finish_filter_order).
-    status = "planned" if not lots else ("hoan_thanh" if (is_complete or order.completed) else "dang_loc")
+    # hoạch VÀ chưa bấm "Hoàn thành lệnh lọc" VÀ tank nguồn chưa lọc hết) -> hoan_thanh (is_complete
+    # TỰ ĐỘNG, HOẶC tank_sources_drained TỰ ĐỘNG, HOẶC order.completed = mốc dừng sớm thủ công —
+    # xem finish_filter_order).
+    status = "planned" if not lots else ("hoan_thanh" if (is_complete or tank_sources_drained or order.completed) else "dang_loc")
     return {"lot_count": len(lots), "actual_volume_hl": round(actual, 3),
-            "is_complete": is_complete, "consumed_downstream": consumed_downstream,
+            "is_complete": is_complete, "tank_sources_drained": tank_sources_drained,
+            "consumed_downstream": consumed_downstream,
             "status": status, "status_label": FILTER_ORDER_STATUS_LABEL[status]}
 
 
@@ -843,6 +892,11 @@ def finish_filter_order(db: Session, order_id: str, user: User) -> dict:
             f"Thể tích lọc thực tế ({actual} hl) đã đạt kế hoạch trừ dung sai ({target} hl) "
             "— lệnh lọc tự động coi là hoàn thành, không cần bấm nút này."
         )
+    if _order_tank_sources_drained(db, order_id):
+        raise DomainError(
+            "Tank lên men nguồn của lệnh này đã lọc hết — lệnh lọc tự động coi là hoàn thành, "
+            "không cần bấm nút này."
+        )
     order.completed = True
     order.completed_by = user.username
     order.completed_at = utcnow()
@@ -1024,7 +1078,7 @@ def draw_from_filter_order(db: Session, order_id: str, payload: dict, user: User
                 actor=user, after={"filter_lot_code": filter_lot_code, "order_id": order_id})
     db.commit()
     db.refresh(fl)
-    return _stamp_filter_lot_label(fl)
+    return _stamp_filter_lot_label(db, fl)
 
 
 # ==================== BatchFilterLot (lô lọc) ====================
@@ -1047,7 +1101,7 @@ def list_filter_lots(db: Session) -> list[BatchFilterLot]:
     lots = db.execute(select(BatchFilterLot).order_by(BatchFilterLot.created_at.desc())).scalars().all()
     for fl in lots:
         _resync_filter_lot_status_if_stale(db, fl)
-    return [_stamp_filter_lot_label(fl) for fl in lots]
+    return [_stamp_filter_lot_label(db, fl) for fl in lots]
 
 
 def get_filter_lot(db: Session, filter_lot_id: str) -> BatchFilterLot:
@@ -1055,7 +1109,7 @@ def get_filter_lot(db: Session, filter_lot_id: str) -> BatchFilterLot:
     if not fl:
         raise NotFoundError("Lô lọc không tồn tại.")
     _resync_filter_lot_status_if_stale(db, fl)
-    return _stamp_filter_lot_label(fl)
+    return _stamp_filter_lot_label(db, fl)
 
 
 def list_filter_lot_sources(db: Session, filter_lot_id: str) -> list[BatchFilterLotSource]:
@@ -1142,7 +1196,7 @@ def draw_from_tank_into_filter_lot(db: Session, sources: list[dict], payload: di
                 actor=user, after={"filter_lot_code": filter_lot_code})
     db.commit()
     db.refresh(fl)
-    return _stamp_filter_lot_label(fl)
+    return _stamp_filter_lot_label(db, fl)
 
 
 def _open_first_batch(db: Session, fl: BatchFilterLot, src_rows: list[BatchFilterLotSource]) -> BatchFilterLotBatch:
@@ -1304,7 +1358,7 @@ def finish_filter_lot_batch(db: Session, batch_link_id: str, draws: list[dict],
                             fl.to_bbt, "tank thành phẩm")
     db.commit()
     db.refresh(fl)
-    return _stamp_filter_lot_label(fl)
+    return _stamp_filter_lot_label(db, fl)
 
 
 def toggle_final_batch(db: Session, batch_link_id: str, user: User) -> BatchFilterLotBatch:
@@ -1357,7 +1411,7 @@ def delete_filter_lot_batch(db: Session, batch_link_id: str, user: User) -> Batc
     _sync_filter_lot_aggregate(db, fl)
     db.commit()
     db.refresh(fl)
-    return _stamp_filter_lot_label(fl)
+    return _stamp_filter_lot_label(db, fl)
 
 
 def update_filter_lot(db: Session, filter_lot_id: str, payload: dict, user: User) -> BatchFilterLot:
@@ -1383,7 +1437,7 @@ def update_filter_lot(db: Session, filter_lot_id: str, payload: dict, user: User
     record_audit(db, entity_type="batch_filter_lot", entity_id=filter_lot_id, action="edit", actor=user, after=payload)
     db.commit()
     db.refresh(fl)
-    return _stamp_filter_lot_label(fl)
+    return _stamp_filter_lot_label(db, fl)
 
 
 def delete_filter_lot(db: Session, filter_lot_id: str, user: User) -> None:
@@ -1483,7 +1537,7 @@ def finish_filtering(db: Session, filter_lot_id: str, user: User) -> BatchFilter
     record_audit(db, entity_type="batch_filter_lot", entity_id=filter_lot_id, action="finish_filtering", actor=user)
     db.commit()
     db.refresh(fl)
-    return _stamp_filter_lot_label(fl)
+    return _stamp_filter_lot_label(db, fl)
 
 
 # ==================== BatchPackLot (lô thành phẩm) ====================

@@ -196,6 +196,89 @@ def test_finish_order_allows_early_stop_before_volume_target_reached(client, adm
     assert blocked.status_code == 409, blocked.text
 
 
+def test_order_auto_completes_when_source_tank_drained_even_below_planned(client, admin_h):
+    """Yêu cầu người dùng 2026-09-25: "khi lô lên men đó đã báo lọc hết, thì toàn bộ lệnh lọc đi
+    theo lô đó sẽ sang hoàn thành luôn" — tank nguồn hao hụt thật (ít dịch hơn kế hoạch) khiến
+    is_complete KHÔNG BAO GIỜ đạt, nhưng tank đã rút cạn (on_hand=0) thì lệnh lọc vẫn tự động
+    "hoàn thành", không cần đợi is_complete lẫn không cần bấm nút thủ công."""
+    tank = _make_tank(client, admin_h, "13", "TANK-FO-DRAINED")
+    tank_before = client.get(f"/api/batch-tanks/{tank['tank_id']}", headers=admin_h).json()
+    full_volume = tank_before["volume_hl"]
+    assert full_volume > 0
+
+    # Kế hoạch CỐ Ý lớn hơn hẳn tồn thật của tank -> is_complete sẽ không bao giờ đạt được.
+    order = client.post("/api/batch-filter-orders", headers=admin_h, json={
+        "order_code": "LOC-FO-DRAINED",
+        "sources": [{"source_type": "tank", "source_tank_id": tank["tank_id"], "planned_v_dich_hl": full_volume * 3}],
+    }).json()
+
+    draw = client.post(f"/api/batch-filter-orders/{order['order_id']}/filter-lots", headers=admin_h,
+                       json={"filter_lot_code": "FLOT-FO-DRAINED", "to_bbt": _make_bbt_line(client, admin_h, "FODRAINED")}).json()
+    src = client.get(f"/api/batch-filter-lots/{draw['filter_lot_id']}/sources", headers=admin_h).json()[0]
+
+    # Rút HẾT sạch tồn thật của tank (không đủ so với kế hoạch) -> tank chuyển "da_loc_het".
+    fin = _finish_source(client, admin_h, src, full_volume)
+    assert fin.status_code == 200, fin.text
+    tank_after = client.get(f"/api/batch-tanks/{tank['tank_id']}", headers=admin_h).json()
+    assert tank_after["status"] == "da_loc_het"
+    assert tank_after["on_hand"] <= 1e-6
+
+    order_after = client.get(f"/api/batch-filter-orders/{order['order_id']}", headers=admin_h).json()
+    assert order_after["is_complete"] is False   # chưa đủ SL kế hoạch (planned = full_volume * 3)
+    assert order_after["tank_sources_drained"] is True
+    assert order_after["status"] == "hoan_thanh"
+    assert order_after["completed"] is False   # tự động, KHÔNG do bấm nút
+
+    # Đã tự động hoàn thành -> không tạo thêm lô lọc được nữa.
+    blocked = client.post(f"/api/batch-filter-orders/{order['order_id']}/filter-lots", headers=admin_h,
+                          json={"filter_lot_code": "FLOT-FO-DRAINED-DUP", "to_bbt": _make_bbt_line(client, admin_h, "FODRAINEDDUP")})
+    assert blocked.status_code == 409, blocked.text
+
+    # Bấm "Hoàn thành lệnh lọc" thủ công khi đã tự động hoàn thành rồi -> chặn, không cần bấm.
+    finish = client.post(f"/api/batch-filter-orders/{order['order_id']}/finish", headers=admin_h)
+    assert finish.status_code == 409, finish.text
+    assert "không cần bấm" in finish.json()["detail"]
+
+
+def test_blend_order_needs_all_tank_sources_drained_not_just_one(client, admin_h):
+    """Lệnh lọc PHỐI nhiều tank — chỉ 1 trong số các tank nguồn "lọc hết" thì CHƯA đủ để tự động
+    hoàn thành, phải HẾT CẢ (yêu cầu người dùng 2026-09-25, áp dụng đúng cho trường hợp phối)."""
+    tank_a = _make_tank(client, admin_h, "14", "TANK-FO-BLEND-A")
+    tank_b = _make_tank(client, admin_h, "15", "TANK-FO-BLEND-B")
+    vol_a = client.get(f"/api/batch-tanks/{tank_a['tank_id']}", headers=admin_h).json()["volume_hl"]
+    vol_b = client.get(f"/api/batch-tanks/{tank_b['tank_id']}", headers=admin_h).json()["volume_hl"]
+
+    order = client.post("/api/batch-filter-orders", headers=admin_h, json={
+        "order_code": "LOC-FO-BLEND-DRAIN", "blend_mode": "phoi",
+        "sources": [
+            {"source_type": "tank", "source_tank_id": tank_a["tank_id"], "planned_v_dich_hl": vol_a * 3},
+            {"source_type": "tank", "source_tank_id": tank_b["tank_id"], "planned_v_dich_hl": vol_b * 3},
+        ],
+    }).json()
+
+    draw = client.post(f"/api/batch-filter-orders/{order['order_id']}/filter-lots", headers=admin_h,
+                       json={"filter_lot_code": "FLOT-FO-BLEND-DRAIN", "to_bbt": _make_bbt_line(client, admin_h, "FOBLENDDRAIN")}).json()
+    sources = client.get(f"/api/batch-filter-lots/{draw['filter_lot_id']}/sources", headers=admin_h).json()
+    src_a = next(s for s in sources if s["source_tank_id"] == tank_a["tank_id"])
+    src_b = next(s for s in sources if s["source_tank_id"] == tank_b["tank_id"])
+
+    # Chỉ rút hết tank A — tank B vẫn còn nguyên (chưa rút gì).
+    fin_a = _finish_source(client, admin_h, src_a, vol_a)
+    assert fin_a.status_code == 200, fin_a.text
+
+    mid = client.get(f"/api/batch-filter-orders/{order['order_id']}", headers=admin_h).json()
+    assert mid["tank_sources_drained"] is False   # tank B chưa hết -> CHƯA tự động hoàn thành
+    assert mid["status"] == "dang_loc"
+
+    # Rút hết nốt tank B -> CẢ HAI đã lọc hết -> lệnh tự động hoàn thành.
+    fin_b = _finish_source(client, admin_h, src_b, vol_b)
+    assert fin_b.status_code == 200, fin_b.text
+
+    done = client.get(f"/api/batch-filter-orders/{order['order_id']}", headers=admin_h).json()
+    assert done["tank_sources_drained"] is True
+    assert done["status"] == "hoan_thanh"
+
+
 def test_order_blocked_after_pack_lot_split(client, admin_h):
     tank = _make_tank(client, admin_h, "3", "TANK-FO-03")
     order = client.post("/api/batch-filter-orders", headers=admin_h, json={

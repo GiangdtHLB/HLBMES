@@ -411,3 +411,48 @@ def test_update_transfer_kcpx_request_can_set_and_clear_requested_transfer_date(
                       json={"quantity": 9, "requested_transfer_date": None})
     assert upd3.status_code == 200, upd3.text
     assert upd3.json()["requested_transfer_date"] is None
+
+
+def test_create_blocked_when_other_pending_request_would_exceed_stock(client, admin_h, thukho_h):
+    """2 đề nghị pending trên CÙNG 1 lô, mỗi cái tạo ra đều hợp lệ riêng lẻ (tạo phiếu không khoá
+    tồn ngay) nhưng cộng lại vượt tồn thật -> phải chặn NGAY lúc tạo đề nghị thứ 2, không để đến
+    lúc duyệt mới báo lỗi (phát hiện thực tế 2026-09-24: DCKP-20260914-6BFD4 xin 50.000kg trong
+    khi 1 đề nghị khác tạo trước đó đã rút mất phần tồn, chỉ lộ ra lúc duyệt)."""
+    mat_id = _create_material(client, admin_h, "KCPX-DBL")
+    recv = _receive_lot(client, thukho_h, "KCPX-LOT-DBL", mat_id, 100)
+    r1 = client.post("/api/warehouse/transfer-kcpx-requests", headers=thukho_h,
+                     json={"lot_id": recv["lot_id"], "quantity": 60})
+    assert r1.status_code == 201, r1.text
+
+    # Đề nghị thứ 2 xin 50 -> 60 + 50 = 110 > 100 tồn thật -> phải bị chặn ngay lúc tạo.
+    r2 = client.post("/api/warehouse/transfer-kcpx-requests", headers=thukho_h,
+                     json={"lot_id": recv["lot_id"], "quantity": 50})
+    assert r2.status_code == 409, r2.text
+    assert "40" in r2.json()["detail"]  # còn tối đa 40 (100-60)
+
+    # Xin đúng phần còn lại (40) thì tạo được bình thường.
+    r3 = client.post("/api/warehouse/transfer-kcpx-requests", headers=thukho_h,
+                     json={"lot_id": recv["lot_id"], "quantity": 40})
+    assert r3.status_code == 201, r3.text
+
+
+def test_update_blocked_when_raising_qty_would_exceed_stock_with_other_pending(client, admin_h, thukho_h):
+    """Sửa SL của 1 đề nghị pending phải loại trừ CHÍNH nó khỏi "các đề nghị khác" khi tính tồn
+    khả dụng, nhưng vẫn phải tính các đề nghị pending KHÁC trên cùng lô."""
+    mat_id = _create_material(client, admin_h, "KCPX-DBL2")
+    recv = _receive_lot(client, thukho_h, "KCPX-LOT-DBL2", mat_id, 100)
+    client.post("/api/warehouse/transfer-kcpx-requests", headers=thukho_h,
+               json={"lot_id": recv["lot_id"], "quantity": 60})
+    r2 = client.post("/api/warehouse/transfer-kcpx-requests", headers=thukho_h,
+                     json={"lot_id": recv["lot_id"], "quantity": 20})
+    request_id_2 = r2.json()["request_id"]
+
+    # Sửa đề nghị 2 lên 41 -> 60 + 41 = 101 > 100 -> chặn.
+    bad = client.put(f"/api/warehouse/transfer-kcpx-requests/{request_id_2}", headers=thukho_h,
+                     json={"quantity": 41})
+    assert bad.status_code == 409, bad.text
+
+    # Sửa xuống đúng phần còn lại (40) thì được (không tự chặn nhầm chính nó).
+    ok = client.put(f"/api/warehouse/transfer-kcpx-requests/{request_id_2}", headers=thukho_h,
+                    json={"quantity": 40})
+    assert ok.status_code == 200, ok.text

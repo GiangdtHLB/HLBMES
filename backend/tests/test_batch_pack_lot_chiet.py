@@ -166,6 +166,59 @@ def test_pack_lot_from_bbt_creates_with_line_and_pack_date(client, admin_h):
     assert row2 is not None and row2["on_hand_bbt"] == 600.0
 
 
+def test_filter_lot_chiet_status_progresses_dang_chiet_1_phan_het(client, admin_h):
+    """Yêu cầu người dùng 2026-09-25: "thêm cho tôi trạng thái chiết vào đây [màn Lô lọc], khi
+    tạo lô chiết thì sẽ là đang chiết, khi chiết > 0 nhưng nhỏ hơn tổng hl, thì là chiết 1 phần,
+    khi tồn là 0 thì là chiết hết" — đúng khuôn với _pack_lot_status (yêu cầu gốc 2026-09-02),
+    chỉ khác là GỘP theo lô lọc (nhiều Lô TP con) thay vì tính riêng từng Lô TP."""
+    _batch, _tank_id, filter_lot_id, to_bbt = _build_approved_filter_lot(client, admin_h, "CHIETSTATUS", v_drawn=900)
+    fp_id = _make_finished_product(client, admin_h, "CHIETSTATUS")
+
+    # Chưa có Lô TP nào tách ra -> chưa có trạng thái chiết (None/rỗng), không hiện badge.
+    fl0 = client.get(f"/api/batch-filter-lots/{filter_lot_id}", headers=admin_h).json()
+    assert fl0["chiet_status"] is None
+    assert fl0["chiet_status_label"] == ""
+
+    # Tạo Lô TP đầu tiên (200 hl trong tổng 900hl) — CHƯA ghi ca nào -> "Đang chiết".
+    pack1 = client.post("/api/batch-pack-lots", headers=admin_h, json={
+        "from_bbt": to_bbt, "qty": 20000, "pack_lot_code": "PKG-CHIETSTATUS-1",
+        "lot_no": "LOTBIA-CHIETSTATUS-1", "finished_product_id": fp_id, "line": "CL01",
+    })
+    assert pack1.status_code == 201, pack1.text
+    pack_lot_id_1 = pack1.json()["pack_lot_id"]
+
+    fl1 = client.get(f"/api/batch-filter-lots/{filter_lot_id}", headers=admin_h).json()
+    assert fl1["on_hand"] == 700.0   # 900 - 200 hl (qty 20000 lít)
+    assert fl1["chiet_status"] == "dang_chiet"
+    assert fl1["chiet_status_label"] == "Đang chiết"
+
+    # Ghi SL chiết ca 1 cho Lô TP đó (tổng 3 ca > 0) — tồn lô lọc (700hl) còn xa 0 -> "Chiết 1 phần".
+    shift = client.put(f"/api/batch-pack-lots/{pack_lot_id_1}/shifts", headers=admin_h,
+                       json={"ca1_qty": 5000, "ca1_end_at": "2026-09-25T08:00:00"})
+    assert shift.status_code == 200, shift.text
+
+    fl2 = client.get(f"/api/batch-filter-lots/{filter_lot_id}", headers=admin_h).json()
+    assert fl2["chiet_status"] == "chiet_1_phan"
+    assert fl2["chiet_status_label"] == "Chiết 1 phần"
+
+    # Tạo Lô TP thứ 2 rút HẾT phần còn lại (700hl) -> tồn lô lọc về 0 -> "Chiết hết".
+    pack2 = client.post("/api/batch-pack-lots", headers=admin_h, json={
+        "from_bbt": to_bbt, "qty": 70000, "pack_lot_code": "PKG-CHIETSTATUS-2",
+        "lot_no": "LOTBIA-CHIETSTATUS-2", "finished_product_id": fp_id, "line": "CL01",
+    })
+    assert pack2.status_code == 201, pack2.text
+
+    fl3 = client.get(f"/api/batch-filter-lots/{filter_lot_id}", headers=admin_h).json()
+    assert fl3["on_hand"] == 0.0
+    assert fl3["chiet_status"] == "chiet_het"
+    assert fl3["chiet_status_label"] == "Chiết hết"
+
+    # Danh sách (list_filter_lots) phải cho ra CÙNG kết quả như get 1 lô (không lệch giữa 2 đường).
+    listed = client.get("/api/batch-filter-lots", headers=admin_h).json()
+    row = next(l for l in listed if l["filter_lot_id"] == filter_lot_id)
+    assert row["chiet_status"] == "chiet_het"
+
+
 def test_pack_lot_from_bbt_blocked_when_not_all_finished(client, admin_h):
     """1 tank thành phẩm cần NHIỀU mẻ lọc mới đầy — mẻ 1 đã kết thúc, mẻ 2 vừa mở CHƯA kết thúc
     -> tank BBT KHÔNG đủ điều kiện chiết (ended_at yêu cầu TẤT CẢ mẻ đã kết thúc) — approve cũng
