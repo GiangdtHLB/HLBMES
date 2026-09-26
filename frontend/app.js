@@ -4176,6 +4176,7 @@ async function showBatchPackLot(packLotId) {
       pkQc.pending.length ? `⚠ Còn thiếu: ${pkQc.pending.map(esc).join(", ")}` :
       '<span style="color:var(--red)">✗ Có chỉ tiêu bắt buộc không đạt (FAIL)</span>'}</div>`}
     ${materialUsageSectionHtml("pkmu", matUsage, lk, p.ended_at)}
+    <div id="pk_pallet_summary_wrap"></div>
     ${!p.stocked ? '<div id="pk_wms_alloc_wrap" style="margin-top:16px"></div>' : ""}
     <div class="row" style="margin-top:10px">
       ${(!p.finished && !lk) ? '<button class="btn sm" id="pk_finish">✔ Hoàn thành chiết</button>' : ""}
@@ -4271,6 +4272,43 @@ async function showBatchPackLot(packLotId) {
     }));
   }
   renderPkShiftsTable();
+  // "Đã nhập kho thành phẩm" — tóm tắt số vỉ/số pallet/người đóng pallet/người duyệt nhập kho,
+  // ĐỘC LẬP với p.stocked (bảng "Phân bổ quy cách đóng gói pallet" TỰ ẨN khi đã stocked xong hết,
+  // nên phải có chỗ khác vẫn luôn hiện lại đúng các thông tin này) — yêu cầu người dùng 2026-09-26:
+  // "hiện cho tôi số vỉ, số pallet đã nhập kho thành phẩm, người đóng pallet, người duyệt nhập
+  // kho thành phẩm".
+  const releasedRows = (p.pack_allocations || []).filter(r => r.released);
+  const releasedPalletCodes = releasedRows.flatMap(r => r.pallet_codes || []);
+  if (releasedPalletCodes.length) {
+    const releaserByPalletCode = {};
+    releasedRows.forEach(r => (r.pallet_codes || []).forEach(code => {
+      releaserByPalletCode[code] = { by: r.released_by, at: r.released_at };
+    }));
+    const lotCodeForPallets = p.lot_no || p.pack_lot_code;
+    const pallets = await GET(`/wms/pallets?lot_code=${encodeURIComponent(lotCodeForPallets)}`).catch(() => []);
+    const relevant = pallets.filter(pl => releasedPalletCodes.includes(pl.pallet_code));
+    if (relevant.length) {
+      const byCaseCount = {};
+      relevant.forEach(pl => {
+        const g = byCaseCount[pl.case_count] || (byCaseCount[pl.case_count] = { count: 0, builders: new Set(), releasers: new Map() });
+        g.count++;
+        g.builders.add(pl.created_by || "—");
+        const rel = releaserByPalletCode[pl.pallet_code] || { by: null, at: null };
+        g.releasers.set(`${rel.by || ""}|${rel.at || ""}`, rel);
+      });
+      const releaserCellHtml = (g) => [...g.releasers.values()]
+        .map(rel => rel.by ? `${esc(rel.by)} · ${fmt(rel.at)}` : '<span class="muted">—</span>').join("<br/>");
+      const totalUnits = relevant.reduce((s, pl) => s + (pl.total_units || 0), 0);
+      const rowsHtml = Object.keys(byCaseCount).map(Number).sort((a, b) => b - a)
+        .map(cc => `<tr><td>${cc} ${esc(unitLabel)}</td><td>${byCaseCount[cc].count}</td>
+          <td>${[...byCaseCount[cc].builders].map(esc).join(", ")}</td>
+          <td style="font-size:12px">${releaserCellHtml(byCaseCount[cc])}</td></tr>`).join("");
+      $("pk_pallet_summary_wrap").innerHTML = `<h3 style="margin-top:16px">📦 Đã nhập kho thành phẩm</h3>
+        <div class="muted" style="margin-bottom:6px">Tổng ${relevant.length} pallet · ${totalUnits}${unitLabel ? " " + esc(unitLabel) : " đơn vị"} đã Duyệt nhập kho thành phẩm cho lô này (mọi quy cách đóng gói đã dùng).</div>
+        <div class="tablewrap"><table><thead><tr><th>SL/pallet</th><th>Số pallet</th><th>Người đóng pallet</th><th>Người duyệt / Ngày giờ duyệt</th></tr></thead>
+        <tbody>${rowsHtml}</tbody></table></div>`;
+    }
+  }
   if ($("pk_approve")) $("pk_approve").onclick = () => guard(async () => {
     const r = await POST(`/batch-pack-lots/${packLotId}/approve`, {});
     toast("Đã duyệt KCS lô thành phẩm" + (r.qc_has_fail ? " (còn chỉ tiêu FAIL — cảnh báo)" : "")); showBatchPackLot(packLotId);
