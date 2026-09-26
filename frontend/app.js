@@ -3514,7 +3514,13 @@ VIEWS.batchfilterlots = async function () {
   const plannedVol = (lot) => { const o = orderById[lot.order_id]; return o ? o.planned_volume_hl : null; };
   // "Còn dùng được" = status CHƯA "hoàn thành" (tự động khi đủ SL kế hoạch trừ dung sai, hoặc đã
   // bấm "Hoàn thành lệnh lọc" dừng sớm) VÀ chưa tiêu thụ hạ lưu — mirror showBatchFilterOrder.
-  const available = orders.filter(o => o.status !== "hoan_thanh" && !o.consumed_downstream);
+  // Backend (draw_from_filter_order) vẫn CHO PHÉP rút dịch nhiều đợt trên CÙNG 1 lệnh (lệnh chưa
+  // hoàn thành) — nhưng ẩn khỏi dropdown TẠO MỚI ngay khi lệnh đã có ≥1 lô lọc (lot_count > 0):
+  // thực tế đã gặp lệnh có SL đợt 1 CHƯA đạt dung sai (lệnh còn "available"), vận hành lỡ chọn lại
+  // đúng lệnh đó rút thêm 1 lô lọc thứ 2 to hơn hẳn phần còn thiếu, khiến tổng thực tế vượt xa kế
+  // hoạch (VD 252 + 450 = 702 hl cho lệnh kế hoạch 400 hl) — yêu cầu người dùng 2026-09-26: "nếu có
+  // lô lọc đã chọn lệnh lọc đó rồi, thì không hiển thị lại lệnh lọc đó cho chọn nữa".
+  const available = orders.filter(o => o.status !== "hoan_thanh" && !o.consumed_downstream && o.lot_count === 0);
   const orderOpts = `<option value="">(chọn lệnh lọc)</option>` +
     available.map(o => `<option value="${o.order_id}">${esc(o.order_code)} — ${o.blend_mode === "phoi" ? "Phối" : "Không phối"} — ${o.actual_volume_hl}/${o.planned_volume_hl} hl</option>`).join("");
   const bbtOpts = `<option value="">(chọn tank thành phẩm)</option>` +
@@ -3522,7 +3528,7 @@ VIEWS.batchfilterlots = async function () {
   $("view-batchfilterlots").innerHTML = `
     ${productionTabsHtml("batchfilterlots")}
     <div class="panel"><h2>🧪 Tạo Lô lọc từ Lệnh lọc</h2>
-      <div class="muted" style="margin-bottom:8px">Chọn 1 lệnh lọc còn dùng được (chưa hoàn thành, chưa tiêu thụ hạ lưu) — nguồn/loại bia/sản phẩm tự kế thừa từ lệnh, không cần chọn lại. Tạo lệnh lọc mới ở màn <b>"Lệnh lọc"</b>. Bắt buộc chọn Tank thành phẩm (BBT) — dịch lọc xong sẽ đưa vào tank đó (chỉ hiện tank đang trống).</div>
+      <div class="muted" style="margin-bottom:8px">Chọn 1 lệnh lọc còn dùng được (chưa hoàn thành, chưa tiêu thụ hạ lưu, chưa có lô lọc nào tạo từ lệnh này) — nguồn/loại bia/sản phẩm tự kế thừa từ lệnh, không cần chọn lại. Tạo lệnh lọc mới ở màn <b>"Lệnh lọc"</b>. Bắt buộc chọn Tank thành phẩm (BBT) — dịch lọc xong sẽ đưa vào tank đó (chỉ hiện tank đang trống).</div>
       <div class="row">
         <div class="field" style="flex:1"><label>Lệnh lọc</label><select id="fl_order_sel">${orderOpts}</select></div>
         <div class="field"><label>Mã lô lọc</label><input id="fl_code" placeholder="FLOT-2026-01"/></div>
