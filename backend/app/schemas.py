@@ -2078,6 +2078,7 @@ class BatchTankOut(ORMModel):
     days_elapsed: Optional[int] = None
     ready_date: Optional[datetime] = None
     product_code: Optional[str] = None
+    product_name: Optional[str] = None
     beer_type_name: Optional[str] = None
     qc_fail_count: int = 0
 
