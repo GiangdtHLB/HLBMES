@@ -683,7 +683,7 @@ VIEWS.dashboard = async function () {
       const over = days - std;
       const ratio = days / std;
       const stage = over > 2 ? "danger" : over >= 0 ? "warning" : ratio >= 0.8 ? "success" : "accent";
-      return { tank: r.tank_lm || r.tank_code, product: r.beer_type_name || r.product_code || "—", days, std, over, stage,
+      return { tank: r.tank_lm || r.tank_code, product: r.product_name || r.beer_type_name || r.product_code || "—", days, std, over, stage,
                qcFail: r.qc_fail_count || 0, tankId: r.tank_id, productId: r.product_id };
     })
     .sort((a, b) => {

@@ -255,7 +255,8 @@ def _tank_out(db: Session, tank: BatchTank) -> dict:
         "quality_status": tank.quality_status,
         "vao_dich_start": vao_dich_start, "vao_dich_end": vao_dich_end,
         "ferment_days_std": ferment_days_std, "days_elapsed": days_elapsed, "ready_date": ready_date,
-        "product_code": product.code if product else None, "beer_type_name": beer_type.name if beer_type else None,
+        "product_code": product.code if product else None, "product_name": product.name if product else None,
+        "beer_type_name": beer_type.name if beer_type else None,
         "qc_fail_count": qc_fail_count,
     }
 
