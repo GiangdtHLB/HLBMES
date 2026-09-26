@@ -3612,6 +3612,7 @@ async function showBatchFilterLot(filterLotId) {
       <dt>Tank thành phẩm</dt><dd>${esc(f.to_bbt || "—")}</dd>
       <dt>Kết thúc</dt><dd class="muted">${f.ended_at ? fmt(f.ended_at) : "chưa kết thúc hết mẻ lọc"}</dd>
       ${f.order_id ? `<dt>Lệnh lọc</dt><dd><a href="#" id="fl_gotoorder" style="color:var(--accent2)">Xem lệnh lọc nguồn</a></dd>` : ""}
+      <dt>Người tạo / Ngày giờ tạo</dt><dd class="muted">${esc(f.created_by || "—")} · ${fmt(f.created_at)}</dd>
     </dl>
     <h3>Các mẻ lọc</h3>
     <div class="muted" style="margin-bottom:8px">1 mẻ lọc có thể rút dịch CÙNG LÚC từ nhiều nguồn (VD phối tank lên men 01 + tank 02 trong 1 lần chạy máy) — "Mẻ cuối" đánh dấu mẻ vét, dùng để loại khỏi so sánh hiệu suất.</div>
@@ -4152,6 +4153,7 @@ async function showBatchPackLot(packLotId) {
       <dt>Số lô bia</dt><dd>${esc(p.lot_no || "—")}</dd>
       <dt>Duyệt KCS</dt><dd>${p.approved ? badge("released") + ` bởi ${esc(p.approved_by)} lúc ${fmt(p.approved_at)}` : badge("pending") + " chưa duyệt"}</dd>
       <dt>Nhập kho thành phẩm</dt><dd>${p.stocked ? badge("released") + ` bởi ${esc(p.stocked_by)} lúc ${fmt(p.stocked_at)}` : badge("pending") + " chưa nhập kho"}</dd>
+      <dt>Người tạo / Ngày giờ tạo</dt><dd class="muted">${esc(p.created_by || "—")} · ${fmt(p.created_at)}</dd>
     </dl>
     <h3>SL chiết theo ca${fp ? ` — ${esc(fp.code)}` : ""}</h3>
     <div class="muted" style="margin-bottom:6px">Giờ ca gợi ý theo quy ước: Ca 1 06h00–14h00, Ca 2 14h00–22h00, Ca 3 22h00–06h00 (ngày sau) — sửa lại nếu ca thực tế khác.</div>

@@ -939,10 +939,9 @@ def _bbt_aggregate(db: Session) -> dict:
     for code, group in by_code.items():
         on_hand = round(sum(fl.on_hand or 0.0 for fl in group), 3)
         all_finished = all(fl.ended_at is not None for fl in group)
-        any_qc_approved = any(fl.qc_approved for fl in group)
         all_qc_approved = all(fl.qc_approved for fl in group)
         out[code] = {"on_hand_bbt": on_hand, "all_finished": all_finished,
-                    "any_qc_approved": any_qc_approved, "all_qc_approved": all_qc_approved}
+                    "all_qc_approved": all_qc_approved}
     return out
 
 
@@ -950,18 +949,20 @@ def available_bbt_lines(db: Session) -> list[dict]:
     """Danh mục "Tank thành phẩm (BBT)" (ProductionLine kind=tank_bbt) kèm cờ đang chiếm dụng —
     mirror _bbt_target_blocked_by (module cũ): tank bị chặn (không chọn được làm đích mới) nếu
     CÒN mẻ chưa kết thúc (!all_finished, không thể vừa rót vừa cho mẻ khác vào cùng lúc) HOẶC
-    còn dịch VÀ đã có mẻ được duyệt KCS (nhiều lô được phép cùng đổ vào 1 tank TRƯỚC khi duyệt,
-    chỉ chặn SAU khi đã duyệt) HOẶC tồn ÂM (đồng hồ đo lúc lọc/chiết ra số vượt tồn phần mềm —
-    LUÔN coi là chiếm dụng bất kể đã duyệt hay chưa, phải "Làm rỗng tank" về đúng 0 trước khi
-    dùng lại tank cho lô lọc mới, yêu cầu người dùng 2026-09-02)."""
+    còn tồn KHÁC 0 (dương: còn dịch CHƯA chiết hết — kể cả đã duyệt KCS hay chưa, không còn mốc
+    "chỉ chặn sau khi duyệt" như bản cũ; âm: đồng hồ đo lúc lọc/chiết ra số vượt tồn phần mềm) —
+    trước đây cho phép NHIỀU lô lọc (kể cả khác hẳn Lệnh lọc, khác nguồn) cùng rót vào 1 tank
+    MIỄN LÀ chưa duyệt KCS, dẫn tới bug thực tế: 1 lô lọc CŨ lọc xong nhưng bị quên duyệt KCS
+    (còn nguyên tồn trong tank) vẫn bị 1 Lệnh lọc HOÀN TOÀN KHÁC (nguồn tank lên men khác) rót
+    tiếp vào CÙNG tank vật lý đó, trộn lẫn 2 mẻ không liên quan (yêu cầu người dùng 2026-09-26:
+    "cứ tank thành phẩm đó có thể tích tồn >0 thì không cho lọc vào đó")."""
     lines = db.execute(select(ProductionLine).where(
         ProductionLine.kind == "tank_bbt", ProductionLine.active == true())).scalars().all()
     agg = _bbt_aggregate(db)
     out = []
     for l in sorted(lines, key=lambda x: x.code):
         a = agg.get(l.code)
-        occupied = bool(a) and (not a["all_finished"] or a["on_hand_bbt"] < -1e-6
-                                or (a["on_hand_bbt"] > 1e-6 and a["any_qc_approved"]))
+        occupied = bool(a) and (not a["all_finished"] or abs(a["on_hand_bbt"]) > 1e-6)
         out.append({"code": l.code, "name": l.name, "occupied": occupied,
                    "on_hand_bbt": a["on_hand_bbt"] if a else 0.0})
     return out
@@ -978,9 +979,9 @@ def _latest_filter_lot_for_bbt(db: Session, to_bbt: str) -> Optional[BatchFilter
 def eligible_bbt_lines_for_pack(db: Session) -> list[dict]:
     """Tank BBT đủ điều kiện chọn "đi chiết" — mirror filter_order.py::available_bbt_tanks's
     eligible_for_chiet (module cũ): còn dịch (on_hand>0), TẤT CẢ lô lọc đổ vào đã lọc xong
-    (all_finished) VÀ đã được KCS duyệt HẾT (all_qc_approved — khác available_bbt_lines ở trên,
-    vốn chỉ cần any_qc_approved để CHẶN nạp thêm; ở đây phải chắc chắn 100% đã duyệt mới cho
-    chiết)."""
+    (all_finished) VÀ đã được KCS duyệt HẾT (all_qc_approved) — khác available_bbt_lines ở trên
+    (chỉ cần còn tồn khác 0 là đã chặn nạp thêm, không cần đợi duyệt); ở đây phải chắc chắn
+    100% đã duyệt mới cho chiết."""
     lines = db.execute(select(ProductionLine).where(
         ProductionLine.kind == "tank_bbt", ProductionLine.active == true())).scalars().all()
     agg = _bbt_aggregate(db)

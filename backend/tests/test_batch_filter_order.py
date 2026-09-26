@@ -412,15 +412,17 @@ def test_filter_lot_requires_to_bbt_and_blocks_occupied_tank(client, admin_h):
                               json={"filter_lot_code": "FLOT-FO-07C", "to_bbt": "NO-SUCH-BBT-CODE"})
     assert unknown_bbt.status_code == 404, unknown_bbt.text
 
-    # Kết thúc nguồn + chưa duyệt KCS -> tank BBT hết bị chiếm dụng nếu chưa duyệt, dù còn dịch
-    # (nhiều lô được phép cùng đổ vào 1 tank TRƯỚC khi duyệt KCS).
+    # Kết thúc nguồn (all_finished=True) nhưng CÒN DỊCH (on_hand=900>0) -> tank BBT VẪN bị chiếm
+    # dụng dù CHƯA duyệt KCS — bỏ hẳn mốc "chỉ chặn sau khi duyệt" cũ (yêu cầu người dùng
+    # 2026-09-26: "cứ tank thành phẩm đó có thể tích tồn >0 thì không cho lọc vào đó" — mốc cũ
+    # từng để lọt 1 lô lọc KHÁC hẳn Lệnh lọc rót nhầm vào tank còn tồn nhưng chưa kịp duyệt).
     src = client.get(f"/api/batch-filter-lots/{draw.json()['filter_lot_id']}/sources", headers=admin_h).json()[0]
     _finish_source(client, admin_h, src, 900)
-    freed = client.get("/api/batch-filter-lots/available-bbt-lines", headers=admin_h).json()
-    row_freed = next(r for r in freed if r["code"] == bbt_code)
-    assert row_freed["occupied"] is False
+    still_occupied = client.get("/api/batch-filter-lots/available-bbt-lines", headers=admin_h).json()
+    row_still = next(r for r in still_occupied if r["code"] == bbt_code)
+    assert row_still["occupied"] is True
 
-    # Sau khi duyệt KCS (còn dịch) -> tank BBT bị chiếm dụng trở lại (chặn đổ thêm mẻ khác vào).
+    # Duyệt KCS không đổi gì thêm — còn dịch thì vẫn chiếm dụng trước lẫn sau khi duyệt.
     approve = client.post(f"/api/batch-filter-lots/{draw.json()['filter_lot_id']}/approve", headers=admin_h)
     assert approve.status_code == 200, approve.text
     reoccupied = client.get("/api/batch-filter-lots/available-bbt-lines", headers=admin_h).json()
