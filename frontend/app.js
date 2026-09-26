@@ -709,7 +709,10 @@ VIEWS.dashboard = async function () {
   let fermentBarHtml = "", fermentGridHtml = "", lastFermentProduct = null, gridOpen = false, fermentRowIdx = 0;
   fermentTankItems.forEach(it => {
     if (it.product !== lastFermentProduct) {
-      fermentBarHtml += fermentGroupHead(it.product, lastFermentProduct === null);
+      // Bảng lưới (phải) vẫn giữ tiêu đề nhóm — mỗi ô nhỏ, không đủ chỗ ghi tên dịch bia riêng.
+      // Bảng thanh (trái) BỎ tiêu đề nhóm, ghi thẳng tên dịch bia vào trong thanh của từng tank
+      // (yêu cầu người dùng 2026-09-26: "hiện dịch bia bao nhiêu vào khung xanh đó luôn, không
+      // cần chia ra").
       if (gridOpen) fermentGridHtml += `</div>`;
       fermentGridHtml += fermentGroupHead(it.product, lastFermentProduct === null)
         + `<div style="display:grid;grid-template-columns:repeat(auto-fill, minmax(84px, 1fr));gap:8px">`;
@@ -725,7 +728,7 @@ VIEWS.dashboard = async function () {
       <div style="position:relative;height:20px;background:var(--panel2);border-radius:3px;overflow:hidden;display:flex">
         <div style="width:${basePct}%;height:100%;background:var(--blue)"></div>
         <div style="width:${overPct}%;height:100%;background:var(--red)"></div>
-        <div style="position:absolute;inset:0;display:flex;align-items:center;padding-left:8px;font-size:11px;color:#fff;font-weight:700">${it.days}/${it.std} ngày</div>
+        <div style="position:absolute;inset:0;display:flex;align-items:center;padding-left:8px;font-size:11px;color:#fff;font-weight:700">${esc(it.product)} · ${it.days}/${it.std} ngày</div>
       </div>
       <div style="font-size:12px;font-weight:700;color:${it.over > 0 ? "var(--red)" : "var(--muted)"}">${label}</div>
     </div>`;
