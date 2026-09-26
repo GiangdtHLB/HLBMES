@@ -1245,8 +1245,15 @@ def _seed_users(db) -> None:
         # xưởng — _assert_location_scope (services/warehouse.py) vẫn chặn không cho đụng tới Kho
         # công ty vì scope_warehouse="phan_xuong" (không phải "*"), nên không mở rộng quyền nhận
         # hàng ở Kho công ty.
+        # production.release_to_wms: Duyệt nhập kho thành phẩm — trước đây CHỈ Giám đốc/Phó GĐ
+        # Sản xuất mới có, nhưng bước duyệt KCS (p.approved) đã CHẶN CỨNG rồi (release_pack_lot_
+        # allocation raise nếu chưa p.approved) nên để vận hành tự nhập kho SAU KHI KCS đã duyệt
+        # không bỏ qua bước kiểm soát chất lượng nào — chỉ đỡ phải chờ thêm 1 người duyệt nữa cho
+        # bước thuần thao tác kho (yêu cầu người dùng 2026-09-26: "vận hành được quyền nhập, khi
+        # KCS đã duyệt").
         ("vanhanh", "123456", "Phạm Văn Hành", "Nhân viên vận hành", "operator",
-         "dashboard,batches,isa88,dispense,process,realtime,warehouse_px,cip", "batch.execute,ebr.sign,warehouse.request,warehouse.receive,cip.manage",
+         "dashboard,batches,isa88,dispense,process,realtime,warehouse_px,cip",
+         "batch.execute,ebr.sign,warehouse.request,warehouse.receive,cip.manage,production.release_to_wms",
          "Nấu A", "nau,len_men", "*", "phan_xuong"),
         ("kcs", "123456", "Hoàng Thị Kiểm", "Nhân viên KCS / QA", "qa",
          "dashboard,quality,qclab,process,trace,ai,cip", "quality.release,quality.deviation,recipe.approve,ebr.sign,ebr.approve",
@@ -1311,7 +1318,8 @@ def _seed_role_templates(db) -> None:
          "batch.execute,ebr.sign,ebr.approve,quality.deviation,cip.manage",
          "*", "*", "*", "*"),
         ("Nhân viên vận hành", "operator",
-         "dashboard,batches,isa88,dispense,process,realtime,warehouse_px,cip", "batch.execute,ebr.sign,warehouse.request,warehouse.receive,cip.manage",
+         "dashboard,batches,isa88,dispense,process,realtime,warehouse_px,cip",
+         "batch.execute,ebr.sign,warehouse.request,warehouse.receive,cip.manage,production.release_to_wms",
          "Nấu A", "nau,len_men", "*", "phan_xuong"),
         ("Nhân viên KCS / QA", "qa",
          "dashboard,quality,qclab,process,trace,ai,cip", "quality.release,quality.deviation,recipe.approve,ebr.sign,ebr.approve",

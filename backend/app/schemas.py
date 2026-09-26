@@ -102,6 +102,7 @@ class PalletAllocationRowIn(BaseModel):
     row_id: Optional[str] = None
     spec_id: str
     quantity: float
+    loc_id: Optional[str] = None
 
 
 class PackLotAllocationsIn(BaseModel):
@@ -2076,6 +2077,9 @@ class BatchTankOut(ORMModel):
     ferment_days_std: Optional[float] = None
     days_elapsed: Optional[int] = None
     ready_date: Optional[datetime] = None
+    product_code: Optional[str] = None
+    beer_type_name: Optional[str] = None
+    qc_fail_count: int = 0
 
 
 class BatchFilterLotSourceIn(BaseModel):

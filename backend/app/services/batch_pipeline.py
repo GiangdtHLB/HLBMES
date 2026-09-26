@@ -1899,6 +1899,17 @@ def save_pack_lot_allocations(db: Session, pack_lot_id: str, allocations: list[d
             new_rows.append(existing)
             seen_ids.add(rid)
             continue
+        existing = existing_by_id.get(rid) if rid else None
+        # Dòng CHƯA release nhưng KHÔNG hề đổi gì (client luôn gửi lại TOÀN BỘ rows mỗi lần Lưu,
+        # kể cả các dòng không đang sửa) — giữ nguyên saved_by/saved_at cũ thay vì đóng dấu người
+        # vừa bấm Lưu cho MỌI dòng, kể cả dòng người đó không hề động vào (yêu cầu người dùng
+        # 2026-09-25: "sửa 1 dòng mà cả 2 đều đổi tên lưu bởi/ngày giờ").
+        if (existing and existing.get("spec_id") == a.get("spec_id")
+                and abs(float(existing.get("quantity") or 0) - float(a.get("quantity") or 0)) < 1e-6
+                and (existing.get("loc_id") or None) == (a.get("loc_id") or None)):
+            new_rows.append(existing)
+            seen_ids.add(rid)
+            continue
         spec = db.get(PackingSpec, a["spec_id"])
         if not spec:
             raise NotFoundError("Quy cách đóng gói không tồn tại.")
@@ -1908,6 +1919,10 @@ def save_pack_lot_allocations(db: Session, pack_lot_id: str, allocations: list[d
             "row_id": rid or new_id(), "spec_id": a["spec_id"], "quantity": float(a["quantity"]),
             "saved_by": user.username, "saved_at": now.isoformat(),
             "released": False, "released_by": None, "released_at": None, "pallet_codes": [],
+            # Lưu lại vị trí kho đã chọn (chưa Duyệt nhập kho TP nên chưa có `location` thật) —
+            # trước đây chỉ giữ ở state trình duyệt, mất khi tải lại trang khiến người dùng tưởng
+            # "đã lưu vị trí" nhưng biến mất (yêu cầu người dùng 2026-09-25).
+            "loc_id": a.get("loc_id"),
         })
         if rid:
             seen_ids.add(rid)
@@ -1922,12 +1937,15 @@ def save_pack_lot_allocations(db: Session, pack_lot_id: str, allocations: list[d
 
 
 def release_pack_lot_allocation(db: Session, pack_lot_id: str, row_id: str, user: User, loc_id: str) -> dict:
-    """Giám đốc/Phó GĐ Sản xuất - Kỹ thuật duyệt nhập kho THEO TỪNG DÒNG phân bổ/quy cách —
-    mirror routers/brewing.py::approve_bottle (module Nấu-Lọc-Chiết cũ; module đó đã THÁO khỏi
-    WMS, Lô thành phẩm là nơi thay thế duy nhất tạo hàng nhập kho từ sản xuất), nhưng áp dụng
-    RIÊNG cho 1 dòng/quy cách thay vì cả lô 1 lần (yêu cầu người dùng 2026-09-20: "Mỗi quy cách
-    sẽ có 1 nút duyệt nhập kho TP") — vẫn yêu cầu đã Duyệt KCS (p.approved) như trước, chỉ khác
-    thứ tự "duyệt" giờ tính theo dòng. Lưu released_by/released_at RIÊNG cho dòng đó — khác
+    """Vận hành (hoặc Giám đốc/Phó GĐ Sản xuất - Kỹ thuật) duyệt nhập kho THEO TỪNG DÒNG phân
+    bổ/quy cách — mirror routers/brewing.py::approve_bottle (module Nấu-Lọc-Chiết cũ; module đó
+    đã THÁO khỏi WMS, Lô thành phẩm là nơi thay thế duy nhất tạo hàng nhập kho từ sản xuất),
+    nhưng áp dụng RIÊNG cho 1 dòng/quy cách thay vì cả lô 1 lần (yêu cầu người dùng 2026-09-20:
+    "Mỗi quy cách sẽ có 1 nút duyệt nhập kho TP") — vẫn yêu cầu đã Duyệt KCS (p.approved) như
+    trước, đây là chốt chặn chất lượng thật sự, không phải quyền `production.release_to_wms`
+    (quyền đó giờ vận hành cũng có — yêu cầu người dùng 2026-09-26: "vận hành được quyền nhập,
+    khi KCS đã duyệt" — chỉ bớt 1 bước chờ Giám đốc SX duyệt THAO TÁC KHO thuần túy, KHÔNG bỏ
+    qua bước KCS), chỉ khác thứ tự "duyệt" giờ tính theo dòng. Lưu released_by/released_at RIÊNG cho dòng đó — khác
     saved_by/saved_at (ai lưu phân bổ, xem save_pack_lot_allocations). Tạo `quantity //
     spec.units_per_pallet` pallet đầy + 1 pallet lẻ nếu còn dư, giống đúng logic release toàn
     lô trước đây, chỉ khác phạm vi là 1 dòng.

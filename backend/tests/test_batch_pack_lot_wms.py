@@ -443,7 +443,10 @@ def test_save_allocations_requires_batch_execute_permission(client, admin_h, kcs
     assert forbidden.status_code == 403, forbidden.text
 
 
-def test_release_row_requires_production_release_to_wms_permission(client, admin_h, vanhanh_h):
+def test_release_row_requires_production_release_to_wms_permission(client, admin_h, kcs_h):
+    """kcs KHÔNG có production.release_to_wms (KCS chỉ duyệt chất lượng — quyền nhập kho là việc
+    khác) — vanhanh giờ CÓ quyền này (xem test_release_row_allowed_for_vanhanh bên dưới, yêu cầu
+    người dùng 2026-09-26: "vận hành được quyền nhập, khi KCS đã duyệt")."""
     fp_id = _make_sku(client, admin_h, "PERM01")
     spec_id = _make_spec(client, admin_h, fp_id, "QC01", 110)
     pack_lot_id = _build_pack_lot(client, admin_h, "PERM01", fp_id, ca1=5)
@@ -451,8 +454,24 @@ def test_release_row_requires_production_release_to_wms_permission(client, admin
     saved = _save_allocations(client, admin_h, pack_lot_id, [{"spec_id": spec_id, "quantity": 5}])
     row_id = saved.json()["pack_allocations"][0]["row_id"]
 
-    forbidden = _release_row(client, vanhanh_h, pack_lot_id, row_id, loc_id)
+    forbidden = _release_row(client, kcs_h, pack_lot_id, row_id, loc_id)
     assert forbidden.status_code == 403, forbidden.text
+
+
+def test_release_row_allowed_for_vanhanh(client, admin_h, vanhanh_h):
+    """Vận hành được nhập kho thành phẩm SAU KHI KCS đã duyệt (p.approved) — release_pack_lot_
+    allocation vẫn tự chặn nếu chưa Duyệt KCS, quyền production.release_to_wms chỉ quyết định AI
+    được bấm nút, không bỏ qua chốt chất lượng (yêu cầu người dùng 2026-09-26)."""
+    fp_id = _make_sku(client, admin_h, "PERM02")
+    spec_id = _make_spec(client, admin_h, fp_id, "QC02", 110)
+    pack_lot_id = _build_pack_lot(client, admin_h, "PERM02", fp_id, ca1=5)
+    loc_id = _make_location(client, admin_h, "PERM02")
+    saved = _save_allocations(client, admin_h, pack_lot_id, [{"spec_id": spec_id, "quantity": 5}])
+    row_id = saved.json()["pack_allocations"][0]["row_id"]
+
+    ok = _release_row(client, vanhanh_h, pack_lot_id, row_id, loc_id)
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["pallet_codes"]
 
 
 def test_pack_lot_rejects_duplicate_lot_no_same_year(client, admin_h):
