@@ -916,9 +916,13 @@ def delete_filter_order(db: Session, order_id: str, user: User) -> None:
         raise DomainError("Đã có lô lọc tạo từ lệnh này — không thể xóa.")
     for s in list_filter_order_sources(db, order_id):
         db.delete(s)
-    for m in db.execute(select(BatchFilterOrderMaterialLine).where(
+    # Dòng vật tư dự kiến (BatchFilterOrderMaterialLine, migration a1b2c3d4e5fa) cũng là con FK
+    # của lệnh lọc — trước đây bỏ sót nên MSSQL enforce FK chặn DELETE (547 "Xóa lệnh lọc" 500;
+    # SQLite bỏ qua FK nên không lộ). Xóa con + flush TRƯỚC khi xóa cha (model không dùng
+    # relationship() + autoflush=False nên SQLAlchemy không tự xếp thứ tự — DEPLOY-CONTRACT §3b).
+    for line in db.execute(select(BatchFilterOrderMaterialLine).where(
             BatchFilterOrderMaterialLine.order_id == order_id)).scalars().all():
-        db.delete(m)
+        db.delete(line)
     db.flush()
     db.delete(order)
     record_audit(db, entity_type="batch_filter_order", entity_id=order_id, action="delete", actor=user)
