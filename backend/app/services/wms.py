@@ -96,7 +96,7 @@ def list_pallets(db: Session, status: str = None, lot_code: str = None) -> list:
                     "product_name": product_name_by.get(p.product),
                     "lot_code": p.lot_code, "case_count": p.case_count, "units_per_case": p.units_per_case,
                     "total_units": sum(c.units for c in cases), "status": p.status, "source": p.source,
-                    "location": loc.code if loc else None,
+                    "location": loc.code if loc else None, "created_by": p.created_by,
                     "created_at": p.created_at.isoformat() if p.created_at else None,
                     "shipped_at": p.shipped_at.isoformat() if p.shipped_at else None,
                     "cases": [{"case_code": c.case_code, "units": c.units} for c in cases]})
