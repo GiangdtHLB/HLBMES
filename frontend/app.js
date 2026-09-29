@@ -8003,6 +8003,20 @@ function requestPendingLineRowsHtml(r, l, matById, allLots, colspanShared) {
   const mat = matById[l.material_id];
   const matLabel = mat ? `${esc(mat.code)} — ${esc(mat.name)}` : esc(l.material_id);
   const { plan } = requestFifoPlan(l.material_id, allLots || [], l.quantity, r.requested_receipt_date);
+  // Cảnh báo NGAY TRÊN MÀN HÌNH khi tồn Kho công ty tính đến "Ngày đề nghị nhận kho" không đủ SL
+  // đang đề nghị — trước đây chỉ biết qua toast thoáng qua của "Duyệt cả phiếu" (chung chung,
+  // không nói rõ dòng nào/thiếu bao nhiêu, biến mất sau vài giây) nên thủ kho không biết vì sao
+  // dòng không tự xuất được (yêu cầu người dùng 2026-09-29: "trên màn hình có báo thiếu gì đâu,
+  // làm sao tôi biết được"). `l.company_stock_as_of` đã có sẵn từ BE (_line_dict) — chỉ thiếu
+  // hiển thị. Không hiện khi phiếu không khai "Ngày đề nghị nhận kho" (company_stock_as_of sẽ là
+  // tồn hiện tại luôn đủ theo đúng nghĩa, hoặc null).
+  const shortfall = (r.requested_receipt_date && l.company_stock_as_of != null && l.company_stock_as_of < l.quantity - 1e-6)
+    ? `<tr><td colspan="${colspanShared}" style="padding:4px 8px;color:var(--red);font-size:12px">
+        ⚠ Tồn Kho công ty tính đến ${esc(fmt(r.requested_receipt_date))} (Ngày đề nghị nhận kho) chỉ có
+        <b>${l.company_stock_as_of} ${esc(l.uom)}</b> — thiếu <b>${round4(l.quantity - l.company_stock_as_of)} ${esc(l.uom)}</b>
+        so với đề nghị (${l.quantity} ${esc(l.uom)}). Không thể "Duyệt cả phiếu" tự động cho dòng này — sửa lại SL/ngày đề nghị,
+        hoặc xuất theo tồn hiện tại (đổi "Ngày đề nghị nhận kho" của phiếu) rồi thử lại.</td></tr>`
+    : "";
   const actions = `<button class="btn sm sec" data-reqfulfill data-reqid="${esc(r.request_id)}" data-lineid="${esc(l.line_id)}">Xuất dòng này</button>
      <button class="btn sm sec" data-reqreject data-reqid="${esc(r.request_id)}" data-lineid="${esc(l.line_id)}">Từ chối</button>`;
   const pickRowHtml = (pick, pi, isFirst) => {
@@ -8029,7 +8043,7 @@ function requestPendingLineRowsHtml(r, l, matById, allLots, colspanShared) {
     <button class="btn sm sec" data-reqaddlot="${esc(l.line_id)}" data-materialid="${esc(l.material_id)}"
       data-reqdate="${esc(r.requested_receipt_date || "")}">+ Thêm lô khác (cùng ${esc(mat ? mat.code : "")})</button>
   </td></tr>`;
-  return rows + addRow;
+  return shortfall + rows + addRow;
 }
 
 function requestLineRowHtml(r, l, matById, lotById, canFulfill, allLots) {
@@ -8407,8 +8421,17 @@ function wireRequestBlockActions() {
       reasons[sel.dataset.lineid] = reason;
     }
     const res = await POST(`/warehouse/requests/${b.dataset.fulfillall}/fulfill-all`, { reasons });
+    // Liệt kê RÕ vật tư + lý do thật của từng dòng bị bỏ qua (backend đã trả `reason` riêng cho
+    // từng dòng, xem services/warehouse.py::fulfill_all_lines) thay vì 1 câu chung chung không
+    // nói dòng nào/vì sao — trước đây toast biến mất sau vài giây mà không cho biết gì cụ thể,
+    // người dùng không có cách nào tự tra ra lý do (yêu cầu người dùng 2026-09-29). Xem thêm
+    // cảnh báo THƯỜNG TRỰC ngay trong bảng (requestPendingLineRowsHtml's `shortfall`).
+    const skipDetail = res.skipped.map(s => {
+      const mat = REQ_CACHE.matById[s.material_id];
+      return `${mat ? mat.code : s.material_id}: ${s.reason}`;
+    }).join(" | ");
     const msg = `Đã xuất ${res.fulfilled.length} dòng sang Kho phân xưởng` +
-      (res.skipped.length ? `; ${res.skipped.length} dòng cần xử lý thủ công (không đủ 1 lô hoặc đang chờ QC)` : "");
+      (res.skipped.length ? `; ${res.skipped.length} dòng cần xử lý thủ công — ${skipDetail}` : "");
     toast(msg, res.skipped.length ? "err" : "ok");
     renderCurrentWarehouseView();
   }));
