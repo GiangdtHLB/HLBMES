@@ -697,6 +697,11 @@ VIEWS.dashboard = async function () {
       const p = a.product.localeCompare(b.product, "vi");
       return p !== 0 ? p : b.over - a.over;
     });
+  // Danh sách dạng thanh (trái) sắp riêng theo số ngày lên men DÀI NHẤT trước, KHÔNG gộp theo
+  // dịch bia nữa (yêu cầu người dùng 2026-09-29: "sắp xếp theo số ngày lên men dài nhất từ trên
+  // xuống dưới") — tách khỏi fermentTankItems (vẫn giữ nguyên thứ tự gộp-theo-dịch-bia cho lưới ô
+  // màu bên phải, nơi tiêu đề nhóm cần các tank cùng dịch bia đứng liền nhau).
+  const fermentTankItemsByDays = [...fermentTankItems].sort((a, b) => b.days - a.days);
   const fermentQcBadge = (n, extraStyle = "", tankId = null, productId = null) => n > 0
     ? `<span ${tankId ? `data-fermqc="${esc(tankId)}|${esc(productId || "")}"` : ""}
         title="${n} chỉ tiêu CT chính/phụ đang fail${tankId ? " — bấm để xem chi tiết" : ""}"
@@ -714,18 +719,7 @@ VIEWS.dashboard = async function () {
   // re-render). Lưới ô màu (phải) không giới hạn — mỗi ô nhỏ, xem cùng lúc nhiều tank vẫn rõ.
   const FERMENT_LIST_LIMIT = 10;
   let fermentBarHtml = "", fermentGridHtml = "", lastFermentProduct = null, gridOpen = false, fermentRowIdx = 0;
-  fermentTankItems.forEach(it => {
-    if (it.product !== lastFermentProduct) {
-      // Bảng lưới (phải) vẫn giữ tiêu đề nhóm — mỗi ô nhỏ, không đủ chỗ ghi tên dịch bia riêng.
-      // Bảng thanh (trái) BỎ tiêu đề nhóm, ghi thẳng tên dịch bia vào trong thanh của từng tank
-      // (yêu cầu người dùng 2026-09-26: "hiện dịch bia bao nhiêu vào khung xanh đó luôn, không
-      // cần chia ra").
-      if (gridOpen) fermentGridHtml += `</div>`;
-      fermentGridHtml += fermentGroupHead(it.product, lastFermentProduct === null)
-        + `<div style="display:grid;grid-template-columns:repeat(auto-fill, minmax(84px, 1fr));gap:8px">`;
-      gridOpen = true;
-      lastFermentProduct = it.product;
-    }
+  fermentTankItemsByDays.forEach(it => {
     const basePct = Math.min(it.days, it.std) / fermentBarScaleMax * 100;
     const overPct = Math.max(it.over, 0) / fermentBarScaleMax * 100;
     const label = it.over > 0 ? `Quá ${it.over} ngày` : `Còn ${Math.abs(it.over)} ngày`;
@@ -747,6 +741,18 @@ VIEWS.dashboard = async function () {
       <div style="font-size:12px;font-weight:700;color:${it.over > 0 ? "var(--red)" : "var(--muted)"}">${label}</div>
     </div>`;
     fermentRowIdx++;
+  });
+  // Lưới ô màu (phải) vẫn gộp theo dịch bia (fermentTankItems giữ nguyên thứ tự cũ) — tiêu đề
+  // nhóm cần các tank cùng dịch bia đứng liền nhau, khác hẳn bar list bên trái giờ sắp thẳng
+  // theo số ngày (xem fermentTankItemsByDays ở trên).
+  fermentTankItems.forEach(it => {
+    if (it.product !== lastFermentProduct) {
+      if (gridOpen) fermentGridHtml += `</div>`;
+      fermentGridHtml += fermentGroupHead(it.product, lastFermentProduct === null)
+        + `<div style="display:grid;grid-template-columns:repeat(auto-fill, minmax(84px, 1fr));gap:8px">`;
+      gridOpen = true;
+      lastFermentProduct = it.product;
+    }
     fermentGridHtml += `<div style="position:relative;background:${FERMENT_STAGE_BG[it.stage]};border-radius:6px;padding:6px 8px;text-align:center">
       ${fermentQcBadge(it.qcFail, "position:absolute;top:-6px;right:-6px", it.tankId, it.productId)}
       <div style="font-size:12px;font-weight:700;color:${FERMENT_STAGE_FG[it.stage]}">${esc(it.tank)}</div>
