@@ -227,3 +227,26 @@ def test_create_request_batch_filter_order_source_not_found(client, admin_h, thu
         "source_type": "batch_filter_order", "source_id": "does-not-exist",
     })
     assert r.status_code == 404, r.text
+
+
+def test_delete_filter_order_with_material_lines(client, admin_h, thukho_h):
+    """Xóa lệnh lọc CÒN dòng vật tư dự kiến — batch_filter_order_material_line.order_id là FK
+    tới batch_filter_order, phải xóa dòng con + flush TRƯỚC khi xóa lệnh, nếu không MSSQL enforce
+    FK sẽ vỡ 547 (nút "Xóa lệnh lọc" trả 500; SQLite bỏ qua FK nên không lộ)."""
+    mat_id = _create_material(client, admin_h, "FLOML-DEL-MAT")
+    _receive(client, thukho_h, "LOT-FLOML-DEL-01", mat_id, 100)
+    tank = _make_tank(client, admin_h, "109", "TANK-FLOML-DEL")
+
+    order = client.post("/api/batch-filter-orders", headers=admin_h, json={
+        "order_code": "LOC-FLOML-DEL",
+        "sources": [{"source_type": "tank", "source_tank_id": tank["tank_id"], "planned_v_dich_hl": 900}],
+        "lines": [{"material_id": mat_id, "uom": "kg", "qty_planned": 30}],
+    })
+    assert order.status_code == 201, order.text
+    order_id = order.json()["order_id"]
+    assert len(client.get(f"/api/batch-filter-orders/{order_id}/materials", headers=admin_h).json()) == 1
+
+    d = client.delete(f"/api/batch-filter-orders/{order_id}", headers=admin_h)
+    assert d.status_code in (200, 204), d.text
+    listed = client.get("/api/batch-filter-orders", headers=admin_h).json()
+    assert not any(o["order_id"] == order_id for o in listed)
