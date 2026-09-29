@@ -194,7 +194,12 @@ def receive(db: Session, payload: dict, user: User) -> dict:
         # Nhập tồn đầu (nạp số dư ban đầu khi triển khai hệ thống, không qua nhận hàng NCC
         # thật) — CHỈ ADMIN, khác nhập kho thường vốn mở cho thủ kho (Role.OPERATOR trở lên).
         require_role(user, Role.ADMIN)
-    qty = float(payload["quantity"])
+    # round ngay từ đầu: giá trị đọc từ Excel/form có thể đã mang sẵn nhiễu số thực nhị phân
+    # (VD ô Excel do công thức/paste tạo ra lưu thành 918.9700000000003 thay vì 918.97) — trước
+    # đây chỉ nhánh CỘNG DỒN vào lô đã có (bên dưới) làm tròn, còn nhánh TẠO LÔ MỚI (đa số các
+    # dòng import tồn đầu, vì luôn tạo lô mới) giữ nguyên qty thô, khiến StockMovement.quantity
+    # và MaterialLot.quantity lưu số lẻ vô nghĩa (phát hiện 2026-09-28, import tồn đầu kho PX).
+    qty = round(float(payload["quantity"]), 4)
     if qty <= 0:
         raise DomainError("Số lượng nhập phải > 0.")
     now = utcnow()
@@ -1880,16 +1885,19 @@ def delete_request_line(db: Session, request_id: str, line_id: str, user: User) 
     return _request_dict(db, req, lines)
 
 
-def _is_oldest_company_lot(db: Session, material_id: str, lot_id: str) -> bool:
-    """Lô đang chọn có phải lô cũ nhất (FIFO) hiện có tại Kho công ty của vật tư đó hay
-    không — gọi NGAY TRƯỚC LÚC transfer() để chụp lại (snapshot) vào
-    MaterialRequestLine.fifo_ok; so sánh live SAU KHI đã xuất sẽ sai lệch vì lô cũ hơn có
-    thể đã hết hoặc lô mới đã nhập thêm.
+def _oldest_company_lot_candidates(db: Session, material_id: str, as_of=None) -> list:
+    """Danh sách lô KHẢ DỤNG (không HOLD/SCRAPPED) tại Kho công ty của 1 vật tư, sắp cũ nhất
+    trước — dùng chung cho `_is_oldest_company_lot`/`_oldest_company_lot_with_reserved`.
 
-    Chỉ so sánh trong số lô KHẢ DỤNG (không tính lô đang HOLD/SCRAPPED) — lô cũ nhất tuyệt đối
-    có thể đang chờ duyệt QC nên không thể chọn được; nếu vẫn tính lô đó vào danh sách so sánh,
-    thủ kho chọn đúng lô khả dụng cũ nhất vẫn bị báo oan "vi phạm FIFO" dù không có lựa chọn nào
-    khác.
+    `as_of` (thường là `req.requested_receipt_date` khi phiếu khai lùi ngày) — nếu truyền, LOẠI
+    HẲN các lô mà tồn dựng lại tính đến đúng ngày đó = 0 (`lot_on_hand_as_of`) khỏi danh sách so
+    sánh, dù tồn HIỆN TẠI của lô đó > 0. Sửa bug thực tế (audit 2026-09-29, phiếu
+    DN-20260918-CDC6C): lô `TD-KCT-09` đã dùng hết sạch tính đến ngày phiếu khai (8/9), nhưng
+    sau đó có 1 giao dịch "Hoàn tác" (ngày 22/9) trả lại vài kg vào lô này khiến tồn HIỆN TẠI >
+    0 trở lại — trước đây hàm này chỉ tra tồn hiện tại nên tưởng lô đó là "lô cũ nhất" phải ưu
+    tiên, trong khi `fulfill_all_lines`/`fulfill_request_line` (đã tính đúng theo as_of) buộc
+    phải bỏ qua nó và chọn lô mới hơn còn tồn tại đúng ngày khai — 2 nơi lệch nhau khiến dòng bị
+    báo oan "khác FIFO", chặn "Duyệt cả phiếu" dù đó là lựa chọn ĐÚNG duy nhất khả dĩ.
 
     Lọc kho bằng PYTHON (`_asof_loc_matcher`) — xem lý do ở stock_on_hand (SỬA 2026-09-15)."""
     loc_matches = _asof_loc_matcher("Kho công ty")
@@ -1898,6 +1906,23 @@ def _is_oldest_company_lot(db: Session, material_id: str, lot_id: str) -> bool:
                                   MaterialLot.status.in_([LotStatus.AVAILABLE.value, LotStatus.RELEASED.value]))
         .order_by(MaterialLot.created_at)
     ).scalars().all() if loc_matches(l.location)]
+    if as_of is not None:
+        asof_cap = {r["lot_id"]: r["quantity"] for r in lot_on_hand_as_of(db, as_of, "Kho công ty")}
+        candidates = [c for c in candidates if asof_cap.get(c.lot_id, 0.0) > 1e-9]
+    return candidates
+
+
+def _is_oldest_company_lot(db: Session, material_id: str, lot_id: str, as_of=None) -> bool:
+    """Lô đang chọn có phải lô cũ nhất (FIFO) hiện có tại Kho công ty của vật tư đó hay
+    không — gọi NGAY TRƯỚC LÚC transfer() để chụp lại (snapshot) vào
+    MaterialRequestLine.fifo_ok; so sánh live SAU KHI đã xuất sẽ sai lệch vì lô cũ hơn có
+    thể đã hết hoặc lô mới đã nhập thêm.
+
+    Chỉ so sánh trong số lô KHẢ DỤNG (không tính lô đang HOLD/SCRAPPED) — lô cũ nhất tuyệt đối
+    có thể đang chờ duyệt QC nên không thể chọn được; nếu vẫn tính lô đó vào danh sách so sánh,
+    thủ kho chọn đúng lô khả dụng cũ nhất vẫn bị báo oan "vi phạm FIFO" dù không có lựa chọn nào
+    khác. `as_of` — xem `_oldest_company_lot_candidates`."""
+    candidates = _oldest_company_lot_candidates(db, material_id, as_of)
     return bool(candidates) and candidates[0].lot_id == lot_id
 
 
@@ -1918,17 +1943,12 @@ def is_oldest_workshop_lot(db: Session, material_id: str, lot_id: str) -> bool:
     return bool(candidates) and candidates[0].lot_id == lot_id
 
 
-def _oldest_company_lot_with_reserved(db: Session, material_id: str, reserved: dict) -> Optional[str]:
+def _oldest_company_lot_with_reserved(db: Session, material_id: str, reserved: dict, as_of=None) -> Optional[str]:
     """Mirror `_is_oldest_company_lot` nhưng coi phần đã "giữ chỗ" (`reserved`, lot_id -> số đã
     dùng bởi các lô ĐỨNG TRƯỚC trong CÙNG 1 lượt duyệt nhiều lô) là đã hết — trả về lot_id cũ
     nhất CÒN THỰC SỰ DÙNG ĐƯỢC sau khi trừ phần đó, dùng để so khớp FIFO cho pick thứ 2 trở đi
-    (xem fulfill_request_line's `lots`)."""
-    loc_matches = _asof_loc_matcher("Kho công ty")
-    candidates = [l for l in db.execute(
-        select(MaterialLot).where(MaterialLot.material_id == material_id, MaterialLot.quantity > 0,
-                                  MaterialLot.status.in_([LotStatus.AVAILABLE.value, LotStatus.RELEASED.value]))
-        .order_by(MaterialLot.created_at)
-    ).scalars().all() if loc_matches(l.location)]
+    (xem fulfill_request_line's `lots`). `as_of` — xem `_oldest_company_lot_candidates`."""
+    candidates = _oldest_company_lot_candidates(db, material_id, as_of)
     for c in candidates:
         if c.quantity - reserved.get(c.lot_id, 0.0) > 1e-9:
             return c.lot_id
@@ -2032,7 +2052,7 @@ def fulfill_request_line(db: Session, request_id: str, line_id: str, user: User,
             if cap + 1e-6 < qty:
                 raise DomainError(f"Lô {lot_row.lot_code} chưa đủ tồn ở Kho công ty tính đến ngày "
                                   f"{ts:%d/%m/%Y} (ngày đề nghị nhận kho) — không được chọn.")
-        fifo_ok = _oldest_company_lot_with_reserved(db, line.material_id, reserved) == p_lot_id
+        fifo_ok = _oldest_company_lot_with_reserved(db, line.material_id, reserved, as_of=ts) == p_lot_id
         if not fifo_ok and not p_reason:
             raise DomainError(f"Lô {lot_row.lot_code} không phải lô cũ nhất (FIFO) hiện có — bắt buộc nhập lý do chọn khác FIFO.")
         reserved[p_lot_id] = reserved.get(p_lot_id, 0.0) + qty
@@ -2186,11 +2206,14 @@ def fulfill_all_lines(db: Session, request_id: str, user: User,
             skipped.append({"line_id": line.line_id, "material_id": line.material_id,
                             "reason": "Không đủ tồn (kể cả cộng nhiều lô) hoặc đang chờ duyệt QC — cần xử lý thủ công."})
             continue
-        # Lấy oldest-first xuyên suốt nên lô ĐẦU trong plan luôn là lô cũ nhất khả dụng — cùng
-        # tiêu chí với _is_oldest_company_lot (không lọc theo số lượng) nên fifo_ok LUÔN true ở
-        # nhánh nhiều lô; chỉ có thể false ở nhánh preferred_lot_id nếu người tạo phiếu CỐ Ý chọn
-        # khác lô cũ nhất lúc đề nghị (giữ nguyên hành vi cũ cho nhánh này).
-        fifo_ok = _is_oldest_company_lot(db, line.material_id, plan[0][0].lot_id)
+        # Lấy oldest-first xuyên suốt nên lô ĐẦU trong plan luôn là lô cũ nhất khả dụng TÍNH ĐẾN
+        # ĐÚNG `ts` — phải truyền as_of=ts cho _is_oldest_company_lot để dùng CHUNG tiêu chí lọc
+        # (bỏ lô đã hết tính đến ts dù tồn HIỆN TẠI > 0) với plan ở trên, nếu không 2 nơi lệch
+        # nhau sẽ báo oan "khác FIFO" cho đúng lô plan vừa chọn (bug thực tế, audit 2026-09-29,
+        # phiếu DN-20260918-CDC6C — xem docstring _oldest_company_lot_candidates) — nhờ vậy
+        # fifo_ok LUÔN true ở nhánh nhiều lô; chỉ có thể false ở nhánh preferred_lot_id nếu người
+        # tạo phiếu CỐ Ý chọn khác lô cũ nhất lúc đề nghị (giữ nguyên hành vi cũ cho nhánh này).
+        fifo_ok = _is_oldest_company_lot(db, line.material_id, plan[0][0].lot_id, as_of=ts)
         line_reason = (reasons.get(line.line_id) or "").strip() or None
         if not fifo_ok and not line_reason:
             skipped.append({"line_id": line.line_id, "material_id": line.material_id,

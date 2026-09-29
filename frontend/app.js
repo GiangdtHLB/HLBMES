@@ -666,17 +666,23 @@ VIEWS.dashboard = async function () {
       ${bnaPanel}
     </div>` : "";
   // Tank đang lên men theo số ngày lên men so ngày quy định — 2 dạng xem (thanh liên tục + lưới ô
-  // màu), nhóm theo loại dịch bia rồi sắp theo số ngày quá hạn giảm dần trong từng nhóm. Chỉ lấy
-  // tank đang thật sự lên men (status="len_men", xem services/batch_pipeline.py::_tank_status —
-  // pipeline "Mẻ sản xuất" mới, đổi từ services/derived.py::ferment_status module cũ, yêu cầu
-  // người dùng 2026-09-02) và có khai báo ngày lên men chuẩn (ferment_days_std) — thiếu 1 trong
-  // 2 thì không xét được quá/còn hạn.
+  // màu), nhóm theo loại dịch bia rồi sắp theo số ngày quá hạn giảm dần trong từng nhóm. Lấy tank
+  // đang lên men (status="len_men") HOẶC đã có Lệnh lọc/đang lọc nhưng CHƯA rút hết dịch
+  // (status="cho_loc"/"loc_1_phan", xem services/batch_pipeline.py::_tank_status) — trước đây chỉ
+  // lấy "len_men" nên tank biến mất khỏi dashboard ngay khi bắt đầu lọc dù còn nguyên/còn 1 phần
+  // dịch trong tank, gây hiểu lầm là đã xong (yêu cầu người dùng 2026-09-28: "nếu tank lên men mà
+  // chưa được lọc hết thì vẫn cho hiện ra, cho 1 cách nhận diện để biết tank này đang lọc") — badge
+  // trạng thái (fermentFilteringBadge) chỉ hiện cho 2 trạng thái này để phân biệt với tank còn
+  // "len_men" thuần. "da_loc_het" (đã rút hết) vẫn loại khỏi danh sách như cũ — không còn gì để
+  // theo dõi số ngày lên men nữa. Bắt buộc có khai báo ngày lên men chuẩn (ferment_days_std) —
+  // thiếu thì không xét được quá/còn hạn.
+  const FERMENT_FILTERING_STATUSES = new Set(["cho_loc", "loc_1_phan"]);
   const FERMENT_STAGE_BG = { accent: "#E7F0FB", success: "#E4F3EA", warning: "#FBEEDD", danger: "#FBE7E7" };
   const FERMENT_STAGE_FG = { accent: "var(--blue)", success: "var(--green)", warning: "var(--orange)", danger: "var(--red)" };
   const FERMENT_STAGE_LABEL = { accent: "Đang lên men", success: "Sắp đủ ngày", warning: "Đã đủ ngày", danger: "Quá hạn" };
   const FERMENT_STAGE_ORDER = ["accent", "success", "warning", "danger"];
   const fermentTankItems = (batchTanksRaw || [])
-    .filter(r => r.status === "len_men" && r.vao_dich_end && r.ferment_days_std)
+    .filter(r => (r.status === "len_men" || FERMENT_FILTERING_STATUSES.has(r.status)) && r.vao_dich_end && r.ferment_days_std)
     .map(r => {
       const days = Math.floor(Math.max(0, new Date() - new Date(r.vao_dich_end)) / 86400000);
       const std = r.ferment_days_std;
@@ -684,7 +690,8 @@ VIEWS.dashboard = async function () {
       const ratio = days / std;
       const stage = over > 2 ? "danger" : over >= 0 ? "warning" : ratio >= 0.8 ? "success" : "accent";
       return { tank: r.tank_lm || r.tank_code, product: r.product_name || r.beer_type_name || r.product_code || "—", days, std, over, stage,
-               qcFail: r.qc_fail_count || 0, tankId: r.tank_id, productId: r.product_id };
+               qcFail: r.qc_fail_count || 0, tankId: r.tank_id, productId: r.product_id,
+               filtering: FERMENT_FILTERING_STATUSES.has(r.status), filteringLabel: r.status_label };
     })
     .sort((a, b) => {
       const p = a.product.localeCompare(b.product, "vi");
@@ -723,12 +730,19 @@ VIEWS.dashboard = async function () {
     const overPct = Math.max(it.over, 0) / fermentBarScaleMax * 100;
     const label = it.over > 0 ? `Quá ${it.over} ngày` : `Còn ${Math.abs(it.over)} ngày`;
     const hideRow = fermentRowIdx >= FERMENT_LIST_LIMIT;
+    // "Đang lọc" (yêu cầu người dùng 2026-09-28, chỉnh 2026-09-29: "cho vào cạnh chữ ngày này,
+    // không cần màu, để ghi lên thanh đó luôn") — chỉ hiện cho tank đã có Lệnh lọc/đang lọc dở
+    // (xem FERMENT_FILTERING_STATUSES), ghi thẳng vào cuối dòng chữ overlay trên thanh, cùng kiểu
+    // chữ trắng đậm như phần ngày, không còn pill/màu riêng để phân biệt với tank còn "len_men".
+    const filteringSuffix = it.filtering
+      ? ` · <span title="Tank đã bắt đầu lọc nhưng chưa rút hết dịch — vẫn tính số ngày lên men như bình thường">🧪 ${esc(it.filteringLabel)}</span>`
+      : "";
     fermentBarHtml += `<div class="${hideRow ? "fermbar-extra" : ""}" style="display:${hideRow ? "none" : "grid"};grid-template-columns:82px 1fr 88px;align-items:center;gap:10px;padding:5px 0">
       <div style="font-size:13px;font-weight:700">${esc(it.tank)}${fermentQcBadge(it.qcFail, "margin-left:5px;vertical-align:2px", it.tankId, it.productId)}</div>
       <div style="position:relative;height:20px;background:var(--panel2);border-radius:3px;overflow:hidden;display:flex">
         <div style="width:${basePct}%;height:100%;background:var(--blue)"></div>
         <div style="width:${overPct}%;height:100%;background:var(--red)"></div>
-        <div style="position:absolute;inset:0;display:flex;align-items:center;padding-left:8px;font-size:11px;color:#fff;font-weight:700">${esc(it.product)} · ${it.days}/${it.std} ngày</div>
+        <div style="position:absolute;inset:0;display:flex;align-items:center;padding-left:8px;font-size:11px;color:#fff;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(it.product)} · ${it.days}/${it.std} ngày${filteringSuffix}</div>
       </div>
       <div style="font-size:12px;font-weight:700;color:${it.over > 0 ? "var(--red)" : "var(--muted)"}">${label}</div>
     </div>`;
@@ -736,7 +750,7 @@ VIEWS.dashboard = async function () {
     fermentGridHtml += `<div style="position:relative;background:${FERMENT_STAGE_BG[it.stage]};border-radius:6px;padding:6px 8px;text-align:center">
       ${fermentQcBadge(it.qcFail, "position:absolute;top:-6px;right:-6px", it.tankId, it.productId)}
       <div style="font-size:12px;font-weight:700;color:${FERMENT_STAGE_FG[it.stage]}">${esc(it.tank)}</div>
-      <div style="font-size:10px;color:var(--muted)">${it.days}/${it.std} ngày</div>
+      <div style="font-size:10px;color:var(--muted)">${it.days}/${it.std} ngày${it.filtering ? ` · <span title="${esc(it.filteringLabel)} — chưa rút hết dịch">🧪</span>` : ""}</div>
     </div>`;
   });
   if (gridOpen) fermentGridHtml += `</div>`;
@@ -751,7 +765,10 @@ VIEWS.dashboard = async function () {
   const fermentLegendHtml = FERMENT_STAGE_ORDER.map(s => `
     <span style="display:inline-flex;align-items:center;gap:6px;margin-right:14px;font-size:11px;color:var(--muted)">
       <span style="width:9px;height:9px;border-radius:2px;background:${FERMENT_STAGE_FG[s]};display:inline-block"></span>${FERMENT_STAGE_LABEL[s]}</span>`).join("")
-    + `<span style="display:inline-flex;align-items:center;gap:6px;font-size:11px;color:var(--muted)">${fermentQcBadge(1)} Số chỉ tiêu CT chính/phụ đang fail</span>`;
+    + `<span style="display:inline-flex;align-items:center;gap:6px;font-size:11px;color:var(--muted)">${fermentQcBadge(1)} Số chỉ tiêu CT chính/phụ đang fail</span>`
+    + `<span style="display:inline-flex;align-items:center;gap:6px;margin-left:14px;font-size:11px;color:var(--muted)">
+      <span style="padding:1px 7px;border-radius:20px;background:#4a3410;color:var(--orange);font-size:10px;font-weight:700">🧪</span>
+      Đã bắt đầu lọc, chưa rút hết dịch (Chờ lọc/Lọc 1 phần)</span>`;
 
   // Mặc định NGÀY HÔM QUA (giờ máy client) — giống hệt quy ước ở Báo cáo > Chiết (lon):
   // hôm nay chưa qua hết ca 3 nên chưa có đủ dữ liệu để tính trọn 3 ca.
@@ -4292,22 +4309,37 @@ async function showBatchPackLot(packLotId) {
     if (relevant.length) {
       const byCaseCount = {};
       relevant.forEach(pl => {
-        const g = byCaseCount[pl.case_count] || (byCaseCount[pl.case_count] = { count: 0, builders: new Set(), releasers: new Map() });
+        const g = byCaseCount[pl.case_count] || (byCaseCount[pl.case_count] = {
+          count: 0, builders: new Set(), releasers: new Map(), locations: new Set(), createdAts: [] });
         g.count++;
         g.builders.add(pl.created_by || "—");
+        g.locations.add(pl.location || "—");
+        if (pl.created_at) g.createdAts.push(pl.created_at);
         const rel = releaserByPalletCode[pl.pallet_code] || { by: null, at: null };
         g.releasers.set(`${rel.by || ""}|${rel.at || ""}`, rel);
       });
       const releaserCellHtml = (g) => [...g.releasers.values()]
         .map(rel => rel.by ? `${esc(rel.by)} · ${fmt(rel.at)}` : '<span class="muted">—</span>').join("<br/>");
+      // "Ngày giờ đóng pallet" gộp theo NHÓM (cùng SL/pallet) nên 1 nhóm có thể gồm nhiều pallet
+      // đóng ở nhiều thời điểm khác nhau — hiện khoảng SỚM NHẤT–MUỘN NHẤT thay vì liệt kê từng cái
+      // (yêu cầu người dùng 2026-09-28: "thiếu cột ai là người đóng pallet, đóng ngày giờ nào, rồi
+      // vị trí kho nào" — Pallet.created_at/location đã có sẵn ở GET /wms/pallets, chỉ thiếu hiển thị).
+      const createdAtCellHtml = (g) => {
+        if (!g.createdAts.length) return '<span class="muted">—</span>';
+        const sorted = [...g.createdAts].sort();
+        const first = fmt(sorted[0]), last = fmt(sorted[sorted.length - 1]);
+        return first === last ? first : `${first} – ${last}`;
+      };
       const totalUnits = relevant.reduce((s, pl) => s + (pl.total_units || 0), 0);
       const rowsHtml = Object.keys(byCaseCount).map(Number).sort((a, b) => b - a)
         .map(cc => `<tr><td>${cc} ${esc(unitLabel)}</td><td>${byCaseCount[cc].count}</td>
           <td>${[...byCaseCount[cc].builders].map(esc).join(", ")}</td>
+          <td class="muted" style="white-space:nowrap">${createdAtCellHtml(byCaseCount[cc])}</td>
+          <td>${[...byCaseCount[cc].locations].map(esc).join(", ")}</td>
           <td style="font-size:12px">${releaserCellHtml(byCaseCount[cc])}</td></tr>`).join("");
       $("pk_pallet_summary_wrap").innerHTML = `<h3 style="margin-top:16px">📦 Đã nhập kho thành phẩm</h3>
         <div class="muted" style="margin-bottom:6px">Tổng ${relevant.length} pallet · ${totalUnits}${unitLabel ? " " + esc(unitLabel) : " đơn vị"} đã Duyệt nhập kho thành phẩm cho lô này (mọi quy cách đóng gói đã dùng).</div>
-        <div class="tablewrap"><table><thead><tr><th>SL/pallet</th><th>Số pallet</th><th>Người đóng pallet</th><th>Người duyệt / Ngày giờ duyệt</th></tr></thead>
+        <div class="tablewrap"><table><thead><tr><th>SL/pallet</th><th>Số pallet</th><th>Người đóng pallet</th><th>Ngày giờ đóng pallet</th><th>Vị trí kho</th><th>Người duyệt / Ngày giờ duyệt</th></tr></thead>
         <tbody>${rowsHtml}</tbody></table></div>`;
     }
   }
