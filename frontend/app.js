@@ -6277,15 +6277,15 @@ VIEWS.warehouse_kc = async function () {
           : '<div class="muted">Bạn không có quyền tạo Xuất sang ngang.</div>'}
         <h4 style="margin-top:14px">Đang chờ phân xưởng duyệt <span class="muted">(${sngPending.length})</span></h4>
         <div class="tablewrap"><table id="t_sng_pending">
-          <thead><tr><th>Ngày xuất sang ngang</th><th>Ngày lập phiếu</th><th>Số đề nghị</th><th>Mã VT</th><th>Tên vật tư</th><th>Lô</th><th>SL</th><th>Trạng thái QC</th><th></th></tr></thead>
+          <thead><tr><th>Ngày xuất sang ngang</th><th>Ngày lập phiếu</th><th>Số đề nghị</th><th>Mã VT</th><th>Tên vật tư</th><th>Lô</th><th>SL</th><th>Ghi chú</th><th>Trạng thái QC</th><th></th></tr></thead>
           <tbody>${sngPending.map(r => sangNgangKcRowHtml(r, matByIdGiao, lotByIdGiao, qcReqSetGiao)).join("") ||
-            `<tr><td colspan=9 class="muted">Không có đề nghị nào đang chờ.</td></tr>`}</tbody>
+            `<tr><td colspan=10 class="muted">Không có đề nghị nào đang chờ.</td></tr>`}</tbody>
         </table></div>
         <h4 style="margin-top:14px">Lịch sử đã xử lý <span class="muted">(${sngDone.length})</span></h4>
         <div class="tablewrap"><table id="t_sng_done">
-          <thead><tr><th>Ngày xuất sang ngang</th><th>Ngày lập phiếu</th><th>Số đề nghị</th><th>Mã VT</th><th>Tên vật tư</th><th>Lô</th><th>SL</th><th>Trạng thái</th><th>Người xử lý</th><th></th></tr></thead>
+          <thead><tr><th>Ngày xuất sang ngang</th><th>Ngày lập phiếu</th><th>Số đề nghị</th><th>Mã VT</th><th>Tên vật tư</th><th>Lô</th><th>SL</th><th>Ghi chú</th><th>Trạng thái</th><th>Người xử lý</th><th></th></tr></thead>
           <tbody>${sngDone.map(r => sangNgangHistoryRowHtml(r, matByIdGiao, lotByIdGiao)).join("") ||
-            `<tr><td colspan=10 class="muted">Chưa có đề nghị nào đã xử lý.</td></tr>`}</tbody>
+            `<tr><td colspan=11 class="muted">Chưa có đề nghị nào đã xử lý.</td></tr>`}</tbody>
         </table></div>
       </div>`;
   } else if (sec === "tudo") {
@@ -7072,11 +7072,12 @@ VIEWS.warehouse_px = async function () {
         <td class="muted">${lotCodeCellHtml(lot)}</td>
         <td>${r.quantity} ${esc(r.uom)}</td>
         <td class="muted">${esc(r.created_by || "")}</td>
+        <td class="muted">${esc(r.reason || "—")}</td>
         <td>${sangNgangQcBadge(r, lotByIdPx, qcReqSetPx)}</td>
         ${canApproveSangNgang ? `<td style="white-space:nowrap">
           <button class="btn sm" data-sngapprove="${esc(r.request_id)}" ${qcBlocked ? "disabled title=\"Đang chờ KCS duyệt chỉ tiêu chất lượng\"" : ""}>Duyệt</button>
           <button class="btn sm sec" data-sngreject="${esc(r.request_id)}">Từ chối</button></td>` : ""}</tr>`;
-    }).join("") || `<tr><td colspan="${canApproveSangNgang ? 10 : 9}" class="muted">Không có đề nghị nào đang chờ.</td></tr>`;
+    }).join("") || `<tr><td colspan="${canApproveSangNgang ? 11 : 10}" class="muted">Không có đề nghị nào đang chờ.</td></tr>`;
     const sngDoneRows = sngDonePx.map(r => {
       const lot = lotByIdPx[r.lot_id];
       const mat = lot ? matById[lot.material_id] : null;
@@ -7094,21 +7095,22 @@ VIEWS.warehouse_px = async function () {
         <td>${esc(mat ? mat.name : "—")}</td>
         <td class="muted">${lotCodeCellHtml(lot)}</td>
         <td>${r.quantity} ${esc(r.uom)}</td>
+        <td class="muted">${esc(r.reason || "—")}</td>
         <td>${badge(r.status)}</td>
         <td class="muted">${esc(processedBy || "")}</td>
         ${actionCell}</tr>`;
-    }).join("") || `<tr><td colspan="${isAdminSngPx ? 10 : 9}" class="muted">Chưa có đề nghị nào đã xử lý.</td></tr>`;
+    }).join("") || `<tr><td colspan="${isAdminSngPx ? 11 : 10}" class="muted">Chưa có đề nghị nào đã xử lý.</td></tr>`;
     body = `<div class="panel"><h2>Xuất sang ngang <span class="muted">(${sngPendingPx.length} đang chờ duyệt)</span></h2>
       <div class="muted" style="margin-bottom:6px">Vật tư do Kho công ty khai báo "Xuất sang ngang" (đã tăng tồn Kho công ty) — bấm "Duyệt"
         để thật sự nhận vào Kho phân xưởng. Nếu vật tư có chỉ tiêu chất lượng bắt buộc, phải chờ KCS duyệt xong (hết "Đang chờ KCS duyệt")
         mới duyệt được.</div>
       <div class="tablewrap"><table id="t_sng_pending_px">
-        <thead><tr><th>Ngày xuất sang ngang</th><th>Ngày tạo</th><th>Số đề nghị</th><th>Mã VT</th><th>Tên vật tư</th><th>Lô</th><th>SL</th><th>Người tạo</th><th>Trạng thái QC</th>${canApproveSangNgang ? "<th></th>" : ""}</tr></thead>
+        <thead><tr><th>Ngày xuất sang ngang</th><th>Ngày tạo</th><th>Số đề nghị</th><th>Mã VT</th><th>Tên vật tư</th><th>Lô</th><th>SL</th><th>Người tạo</th><th>Ghi chú</th><th>Trạng thái QC</th>${canApproveSangNgang ? "<th></th>" : ""}</tr></thead>
         <tbody>${sngPendingRows}</tbody>
       </table></div>
       <h4 style="margin-top:14px">Lịch sử đã xử lý <span class="muted">(${sngDonePx.length})</span></h4>
       <div class="tablewrap"><table id="t_sng_done_px">
-        <thead><tr><th>Ngày xuất sang ngang</th><th>Ngày tạo</th><th>Số đề nghị</th><th>Mã VT</th><th>Tên vật tư</th><th>Lô</th><th>SL</th><th>Trạng thái</th><th>Người xử lý</th>${isAdminSngPx ? "<th></th>" : ""}</tr></thead>
+        <thead><tr><th>Ngày xuất sang ngang</th><th>Ngày tạo</th><th>Số đề nghị</th><th>Mã VT</th><th>Tên vật tư</th><th>Lô</th><th>SL</th><th>Ghi chú</th><th>Trạng thái</th><th>Người xử lý</th>${isAdminSngPx ? "<th></th>" : ""}</tr></thead>
         <tbody>${sngDoneRows}</tbody>
       </table></div>
     </div>`;
@@ -7569,6 +7571,7 @@ function sangNgangKcRowHtml(r, matById, lotById, qcReqSet) {
     <td>${esc(mat ? mat.name : "—")}</td>
     <td class="muted">${lotCodeCellHtml(lot)}</td>
     <td>${r.quantity} ${esc(r.uom)}</td>
+    <td class="muted">${esc(r.reason || "—")}</td>
     <td>${sangNgangQcBadge(r, lotById, qcReqSet)}</td>
     ${sangNgangEditDelCell(r)}</tr>`;
 }
@@ -7656,6 +7659,7 @@ function sangNgangHistoryRowHtml(r, matById, lotById) {
     <td>${esc(mat ? mat.name : "—")}</td>
     <td class="muted">${lotCodeCellHtml(lot)}</td>
     <td>${r.quantity} ${esc(r.uom)}</td>
+    <td class="muted">${esc(r.reason || "—")}</td>
     <td>${badge(r.status)}${r.reversed ? ' <span class="muted" style="font-size:11px">(đã hoàn tác)</span>' : ""}</td>
     <td class="muted">${esc(processedBy || "")}</td>
     ${sangNgangEditDelCell(r)}</tr>`;
