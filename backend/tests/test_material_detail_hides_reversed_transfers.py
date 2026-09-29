@@ -128,6 +128,60 @@ def test_real_unreversed_transfer_still_shows(client, admin_h):
     assert body["closing_balance"] == 15.0
 
 
+def test_inventory_report_matches_material_detail_after_reversed_transfer(client, admin_h):
+    """Bug thực tế 2026-09-29 (vật tư 2NP73 production): "BC nhập-xuất-tồn" (inventory_report)
+    không hề áp dụng cùng cơ chế ẩn cặp Xuất/Hoàn tác như Sổ chi tiết vật tư, nên cộng thô cả 2
+    chiều của 1 cặp đã tự triệt tiêu — báo Nhập/Xuất gộp sai (dù Tồn cuối vẫn đúng vì net vẫn =
+    0). Xác nhận sau khi sửa: cả 2 báo cáo phải cho ĐÚNG cùng 1 số received/issued, đúng như
+    docstring material_transaction_detail đã hứa từ 2026-09-14 ("khớp ĐÚNG số Nhập/Xuất đã hiển
+    thị ở inventory_report()")."""
+    mat = client.post("/api/materials", headers=admin_h,
+                      json={"code": "MTD-INVREP01", "name": "Vật tư MTD inventory_report", "uom": "kg"})
+    assert mat.status_code == 201, mat.text
+    material_id = mat.json()["material_id"]
+
+    date_from = (utcnow() - timedelta(days=1)).isoformat()
+
+    recv = client.post("/api/warehouse/receive", headers=admin_h, json={
+        "material_id": material_id, "quantity": 40, "uom": "kg", "location": "Kho công ty"})
+    assert recv.status_code == 200, recv.text
+    lot_id = recv.json()["lot_id"]
+
+    out = client.post("/api/warehouse/transfer", headers=admin_h, json={
+        "lot_id": lot_id, "quantity": 12, "location_to": "Kho phân xưởng",
+        "reason": "Xuất theo đề nghị DN-INVREP1 (dòng 1, duyệt cả phiếu)"})
+    assert out.status_code == 200, out.text
+    moved_lot_id = out.json()["lot_id"]
+
+    back = client.post("/api/warehouse/transfer", headers=admin_h, json={
+        "lot_id": moved_lot_id, "quantity": 12, "location_to": "Kho công ty",
+        "reason": "Hoàn tác xuất theo đề nghị DN-INVREP1 (dòng 1)"})
+    assert back.status_code == 200, back.text
+
+    date_to = utcnow().isoformat()
+
+    detail = client.get("/api/warehouse/report/material-detail", headers=admin_h, params={
+        "material_id": material_id, "date_from": date_from, "date_to": date_to,
+        "location": "Kho phân xưởng"})
+    assert detail.status_code == 200, detail.text
+    detail_body = detail.json()
+    detail_received = sum(r["in"] for r in detail_body["rows"])
+    detail_issued = sum(r["out"] for r in detail_body["rows"])
+
+    report = client.get("/api/warehouse/report", headers=admin_h, params={
+        "location": "Kho phân xưởng", "date_from": date_from, "date_to": date_to})
+    assert report.status_code == 200, report.text
+    row = next((r for r in report.json() if r["material_id"] == material_id), None)
+
+    # Cặp Xuất/Hoàn tác net = 0 nên vật tư này hoàn toàn không có hoạt động thật ở Kho phân
+    # xưởng trong kỳ — ĐÚNG là không nên xuất hiện trong "BC nhập-xuất-tồn" nữa (mirror hành vi
+    # "vật tư không hề có giao dịch" — khớp với Sổ chi tiết vật tư cũng rỗng/net=0 dưới đây).
+    assert row is None or (row["received"] == 0.0 and row["issued"] == 0.0)
+    assert detail_received == 0.0
+    assert detail_issued == 0.0
+    assert detail_body["closing_balance"] == 0.0
+
+
 def test_reversed_pair_matched_by_request_code_not_just_quantity(client, admin_h):
     """Bug thực tế 2026-09-24: 2 phiếu KHÁC NHAU cùng rút CÙNG SỐ LƯỢNG từ CÙNG 1 lô (VD "duyệt
     cả phiếu" rút cùng lúc 45kg cho nhiều phiếu) — chỉ 1 phiếu được hoàn tác, phiếu còn lại vẫn

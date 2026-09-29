@@ -1173,6 +1173,7 @@ def material_transaction_detail(db: Session, material_id: str, date_from: dateti
     stmt = select(StockMovement).where(StockMovement.material_id == material_id,
                                        StockMovement.ts >= date_from, StockMovement.ts <= date_to)
     moves = db.execute(stmt.order_by(StockMovement.ts, StockMovement.created_at)).scalars().all()
+    hidden_ids = _reversed_movement_ids(moves)
     # Cột "Diễn giải" của chứng từ "Xuất theo đề nghị" vốn ghi cứng "(dòng N, duyệt cả phiếu)"
     # (services/warehouse.py::fulfill_request_line/fulfill_all_lines) — không có ý nghĩa nghiệp
     # vụ với người xem Sổ chi tiết vật tư (chỉ là số thứ tự dòng nội bộ), thay bằng Ghi chú thật
@@ -1184,6 +1185,8 @@ def material_transaction_detail(db: Session, material_id: str, date_from: dateti
         if xtdn_request_ids else {}
     rows = []
     for m in moves:
+        if m.movement_id in hidden_ids:
+            continue
         if m.movement_type == "transfer":
             if not location:
                 continue   # không đổi tổng tồn toàn nhà máy -> chỉ có ý nghĩa khi đã lọc 1 kho
@@ -1204,8 +1207,7 @@ def material_transaction_detail(db: Session, material_id: str, date_from: dateti
         rows.append({"ts": m.ts, "type": m.movement_type, "lot_code": m.lot_code,
                     "quantity": m.quantity * sign, "uom": m.uom,
                     "location_from": m.location_from, "location_to": m.location_to,
-                    "mode": m.mode, "reason": reason, "actor": m.actor,
-                    "_movement_id": m.movement_id, "_reversal_of": m.reversal_of})
+                    "mode": m.mode, "reason": reason, "actor": m.actor})
     batch_ids = set()
     consume_rows = []
     for edge, lot, supply_date in _consumed_lot_edges(db, date_from, date_to):
@@ -1228,10 +1230,6 @@ def material_transaction_detail(db: Session, material_id: str, date_from: dateti
                     "mode": "cap_lieu", "actor": None,
                     "reason": f"Cấp liệu mẻ nấu {batch.batch_code}" if batch else "Cấp liệu mẻ nấu"})
     rows.sort(key=lambda r: r["ts"])
-    rows = _hide_reversed_transfer_pairs(rows)
-    for r in rows:
-        r.pop("_movement_id", None)
-        r.pop("_reversal_of", None)
     opening = 0.0
     for r in stock_on_hand_as_of(db, date_from, location):
         if r["material_id"] == material_id:
@@ -1250,56 +1248,67 @@ def material_transaction_detail(db: Session, material_id: str, date_from: dateti
 # Mã phiếu (MaterialRequest/TransferKcPxRequest/TransferPxRequest/SangNgangRequest...) đều sinh
 # theo cùng khuôn "PREFIX-YYYYMMDD-XXXXX" (VD "DN-20260917-3D166", xem create_request/
 # create_transfer_kcpx_request/...) — dùng để khớp CHÍNH XÁC 1 cặp "Hoàn tác" với ĐÚNG giao dịch
-# gốc mà nó hoàn tác, xem _hide_reversed_transfer_pairs.
+# gốc mà nó hoàn tác, xem _reversed_movement_ids.
 _REQUEST_CODE_RE = re.compile(r'[A-Z]{2,6}-\d{8}-[0-9A-F]{5}')
 
 
-def _hide_reversed_transfer_pairs(rows: list[dict]) -> list[dict]:
-    """Ẩn khỏi Sổ chi tiết vật tư các cặp "điều chuyển đi rồi hoàn tác ngay sau đó" (net = 0,
-    tồn kho chưa hề thật sự tăng lên/mất đi lâu dài — VD "Xuất theo đề nghị" rồi bị "Hoàn tác")
-    — chỉ giữ lại giao dịch làm tồn kho THẬT SỰ thay đổi (yêu cầu người dùng 2026-09-15: "chỉ cần
-    hiện khi kho tăng lên, hoặc mất đi thôi, các thao tác liên quan đến hoàn tác không cần hiển
-    thị"). Ghép cặp qua 2 cơ chế (đã sort theo `ts` tăng dần trước khi gọi hàm này):
+def _reversed_movement_ids(moves: list) -> set:
+    """Trả về set `movement_id` cần ẨN khỏi MỌI báo cáo Nhập/Xuất — các cặp "điều chuyển đi rồi
+    hoàn tác ngay sau đó" (net = 0, tồn kho chưa hề thật sự tăng lên/mất đi lâu dài — VD "Xuất
+    theo đề nghị" rồi bị "Hoàn tác"). Dùng CHUNG cho `material_transaction_detail`/
+    `inventory_report`/`lot_inventory_report` để 3 báo cáo LUÔN khớp đúng 1 con số Nhập/Xuất
+    (yêu cầu người dùng 2026-09-14: "bấm vào 1 mã ở BC nhập-xuất-tồn ra đúng sổ chi tiết") —
+    trước đây chỉ `material_transaction_detail` có cơ chế này (hàm cũ
+    `_hide_reversed_transfer_pairs`, chỉ nhận list rows đã build sẵn của riêng hàm đó), 2 báo cáo
+    kia cộng thô toàn bộ StockMovement nên bị lệch số Nhập/Xuất gộp dù Tồn cuối vẫn đúng (bug
+    thực tế phát hiện 2026-09-29: vật tư 2NP73 báo Nhập 5.9 ở BC nhập-xuất-tồn nhưng Sổ chi tiết
+    chỉ 3.4 — do BC nhập-xuất-tồn đếm luôn cả 1 cặp Xuất theo đề nghị + Hoàn tác của chính nó).
+    Nhận thẳng `moves` (list[StockMovement] bất kỳ thứ tự, hàm tự sort theo ts/created_at) thay
+    vì list rows đã build sẵn — gọi TRƯỚC khi tổng hợp/build rows, để mọi nơi dùng đúng 1 nguồn.
+
+    Ghép cặp qua 2 cơ chế:
       1. `reversal_of` (undo_issue ghi FK thẳng tới StockMovement gốc) — đáng tin nhất.
-      2. Cùng `lot_code` + số lượng NGƯỢC DẤU + dòng sau có `reason` bắt đầu "Hoàn tác" — dùng cho
-         hoàn tác điều chuyển/xuất theo đề nghị (undo_fulfill_line/undo_transfer_px_request/
-         undo_sang_ngang không ghi `reversal_of`, chỉ có tiền tố "Hoàn tác" trong `reason`). BẮT
-         BUỘC khớp thêm đúng MÃ PHIẾU trích từ `reason` (nếu trích được ở cả 2 phía) — chỉ khớp
-         lot_code+số lượng KHÔNG đủ khi 1 lô bị rút NHIỀU LẦN CÙNG SỐ LƯỢNG cho các phiếu KHÁC
-         nhau (VD "duyệt cả phiếu" rút cùng lúc 45kg cho 3 phiếu khác nhau từ cùng 1 lô) — dễ ghép
-         nhầm "Hoàn tác của phiếu A" với "Xuất của phiếu B" (bug thực tế phát hiện 2026-09-24:
-         DN-20260917-3D166 đã hoàn tác thật nhưng Sổ chi tiết vật tư ẩn nhầm phiếu KHÁC — chưa hề
-         hoàn tác — rồi để lộ đúng phiếu đã hoàn tác, gây hiểu lầm "chưa hoàn tác" dù đã hoàn tác)."""
+      2. Cùng `lot_code` + cùng `quantity` (StockMovement.quantity luôn dương, không cần đảo dấu)
+         + dòng sau có `reason` bắt đầu "Hoàn tác" — dùng cho hoàn tác điều chuyển/xuất theo đề
+         nghị (undo_fulfill_line/undo_transfer_px_request/undo_sang_ngang không ghi
+         `reversal_of`, chỉ có tiền tố "Hoàn tác" trong `reason`). BẮT BUỘC khớp thêm đúng MÃ
+         PHIẾU trích từ `reason` (nếu trích được ở cả 2 phía) — chỉ khớp lot_code+số lượng KHÔNG
+         đủ khi 1 lô bị rút NHIỀU LẦN CÙNG SỐ LƯỢNG cho các phiếu KHÁC nhau (VD "duyệt cả phiếu"
+         rút cùng lúc 45kg cho 3 phiếu khác nhau từ cùng 1 lô) — dễ ghép nhầm "Hoàn tác của phiếu
+         A" với "Xuất của phiếu B" (bug thực tế phát hiện 2026-09-24: DN-20260917-3D166 đã hoàn
+         tác thật nhưng Sổ chi tiết vật tư ẩn nhầm phiếu KHÁC — chưa hề hoàn tác — rồi để lộ đúng
+         phiếu đã hoàn tác, gây hiểu lầm "chưa hoàn tác" dù đã hoàn tác)."""
+    ordered = sorted(moves, key=lambda m: (m.ts, m.created_at))
+    by_movement_id = {m.movement_id: m for m in ordered}
     hidden = set()
-    by_movement_id = {r["_movement_id"]: i for i, r in enumerate(rows) if r.get("_movement_id")}
-    for i, r in enumerate(rows):
-        rev_of = r.get("_reversal_of")
-        if rev_of and rev_of in by_movement_id:
-            hidden.add(i)
-            hidden.add(by_movement_id[rev_of])
+    for m in ordered:
+        if m.reversal_of and m.reversal_of in by_movement_id:
+            hidden.add(m.movement_id)
+            hidden.add(m.reversal_of)
     used = set()
-    for i, r in enumerate(rows):
-        if i in hidden or r["type"] != "transfer" or not (r.get("reason") or "").startswith("Hoàn tác"):
+    for i, m in enumerate(ordered):
+        if m.movement_id in hidden or m.movement_type != "transfer" or not (m.reason or "").startswith("Hoàn tác"):
             continue
-        i_code_m = _REQUEST_CODE_RE.search(r.get("reason") or "")
+        i_code_m = _REQUEST_CODE_RE.search(m.reason or "")
         i_code = i_code_m.group(0) if i_code_m else None
         for j in range(i - 1, -1, -1):
-            if j in hidden or j in used or rows[j]["type"] != "transfer":
+            cand = ordered[j]
+            if cand.movement_id in hidden or cand.movement_id in used or cand.movement_type != "transfer":
                 continue
-            if (rows[j].get("reason") or "").startswith("Hoàn tác"):
+            if (cand.reason or "").startswith("Hoàn tác"):
                 continue
-            if rows[j]["lot_code"] != r["lot_code"] or abs(rows[j]["quantity"] + r["quantity"]) >= 1e-9:
+            if cand.lot_code != m.lot_code or abs(cand.quantity - m.quantity) >= 1e-9:
                 continue
             if i_code:
-                j_code_m = _REQUEST_CODE_RE.search(rows[j].get("reason") or "")
+                j_code_m = _REQUEST_CODE_RE.search(cand.reason or "")
                 j_code = j_code_m.group(0) if j_code_m else None
                 if j_code and j_code != i_code:
                     continue
-            hidden.add(i)
-            hidden.add(j)
-            used.add(j)
+            hidden.add(m.movement_id)
+            hidden.add(cand.movement_id)
+            used.add(cand.movement_id)
             break
-    return [r for i, r in enumerate(rows) if i not in hidden]
+    return hidden
 
 
 def inventory_report(db: Session, days: int = 30, location: str = None,
@@ -1311,7 +1320,14 @@ def inventory_report(db: Session, days: int = 30, location: str = None,
     Vật tư được liệt kê là HỢP của (1) vật tư còn tồn tại kho được lọc và (2) vật tư có giao
     dịch trong kỳ — trước đây chỉ lấy theo (1) nên vật tư nhập rồi chuyển hết đi trong kỳ (VD
     "Xuất sang ngang": nhập vào Kho công ty rồi chuyển thẳng sang Kho phân xưởng luôn) không còn
-    tồn tại Kho công ty nên biến mất khỏi báo cáo dù có phát sinh nhập/xuất thật trong kỳ."""
+    tồn tại Kho công ty nên biến mất khỏi báo cáo dù có phát sinh nhập/xuất thật trong kỳ.
+
+    Bỏ qua các cặp "Xuất theo đề nghị/Điều chuyển rồi Hoàn tác" (`_reversed_movement_ids`) —
+    khớp đúng số Nhập/Xuất với `material_transaction_detail` (Sổ chi tiết vật tư), theo đúng
+    tài liệu ghi ở đó (yêu cầu người dùng 2026-09-14: 2 báo cáo phải khớp nhau). Trước đây hàm
+    này cộng thô, đếm dư cả 2 chiều của cặp đã tự triệt tiêu — Tồn cuối vẫn đúng (không đổi) vì
+    tổng Nhập-Xuất net vẫn = 0, chỉ có số gộp (gross) Nhập/Xuất riêng lẻ bị thổi phồng sai (bug
+    thực tế phát hiện 2026-09-29, vật tư 2NP73)."""
     since = date_from or (utcnow() - timedelta(days=days))
     until = date_to
     on_hand = {r["material_id"]: r for r in stock_on_hand(db, location)}
@@ -1319,11 +1335,12 @@ def inventory_report(db: Session, days: int = 30, location: str = None,
     if until:
         stmt = stmt.where(StockMovement.ts <= until)
     moves = db.execute(stmt).scalars().all()
+    hidden_ids = _reversed_movement_ids(moves)
     workshop = _is_workshop_location(location) if location else None
     _blank_agg, _touch = _blank_movement_agg, _touch_movement_agg
     agg = {}
     for m in moves:
-        if m.material_id is None:
+        if m.material_id is None or m.movement_id in hidden_ids:
             continue
         # Chỉ chạm vào `agg` (kể cả setdefault) SAU KHI đã xác định giao dịch thực sự thuộc kho
         # đang lọc — nếu setdefault chạy trước rồi mới `continue` khi không khớp kho, vật tư vẫn
@@ -1377,7 +1394,8 @@ def lot_inventory_report(db: Session, days: int = 30, location: str = None,
     """BC nhập-xuất-tồn trong kỳ THEO TỪNG LÔ — mirror inventory_report nhưng nhóm theo lot_id
     thay vì material_id, để tra được đúng 1 lô cụ thể đã nhập/xuất bao nhiêu, kể cả lô đã dùng
     hết (quantity=0, không còn hiện ở "Xem tồn kho" — yêu cầu người dùng 2026-09-05: tra 1 lô
-    NVL đã hết vẫn phải thấy được ở đâu đó ngoài Truy xuất từng lô một)."""
+    NVL đã hết vẫn phải thấy được ở đâu đó ngoài Truy xuất từng lô một). Cũng bỏ qua cặp "Xuất
+    theo đề nghị/Điều chuyển rồi Hoàn tác" như inventory_report — xem `_reversed_movement_ids`."""
     since = date_from or (utcnow() - timedelta(days=days))
     until = date_to
     workshop = _is_workshop_location(location) if location else None
@@ -1390,9 +1408,10 @@ def lot_inventory_report(db: Session, days: int = 30, location: str = None,
     if until:
         stmt = stmt.where(StockMovement.ts <= until)
     moves = db.execute(stmt).scalars().all()
+    hidden_ids = _reversed_movement_ids(moves)
     agg: dict[str, dict] = {}
     for m in moves:
-        if not m.lot_id:
+        if not m.lot_id or m.movement_id in hidden_ids:
             continue
         if m.movement_type == "transfer":
             if not location:
@@ -2117,8 +2136,15 @@ def undo_fulfill_line(db: Session, request_id: str, line_id: str, user: User) ->
         if consumed:
             raise DomainError(f"Lô {mv.lot_code} đã được dùng cho mẻ sản xuất, không thể hoàn tác.")
     for mv in moves:
+        # ts=mv.ts (KHÔNG mặc định "bây giờ"): giao dịch xuất gốc thường đã lùi ngày theo
+        # "Ngày đề nghị nhận kho" — nếu hoàn tác không lùi theo ĐÚNG ngày đó, cặp xuất/hoàn trả
+        # sẽ KHÔNG triệt tiêu nhau khi dựng lại tồn as-of cho các mốc GIỮA 2 ngày đó (xuất bị
+        # tính, hoàn trả thì không, vì ts hoàn trả rơi SAU mốc đang xét) — khiến các phiếu khác
+        # khai lùi ngày vào đúng khung đó bị báo THIẾU TỒN OAN dù giao dịch xuất ban đầu đã bị
+        # hoàn tác/từ chối từ lâu (bug thực tế phát hiện 2026-09-29, audit 37 lượt hoàn tác trên
+        # production — TẤT CẢ đều dính, ảnh hưởng 12 dòng đang chờ xử lý ở 8 phiếu khác nhau).
         transfer(db, mv.lot_id, mv.quantity, "Kho công ty", user, mode="dieu_chuyen",
-                reason=f"Hoàn tác xuất theo đề nghị {req.request_code} (dòng {line.seq + 1})")
+                reason=f"Hoàn tác xuất theo đề nghị {req.request_code} (dòng {line.seq + 1})", ts=mv.ts)
     line.status = "pending"
     line.fulfilled_lot_id = None
     line.fulfilled_qty = None
@@ -2450,8 +2476,13 @@ def undo_transfer_px_request(db: Session, request_id: str, user: User) -> dict:
     lot_id_to_revert = mv.lot_id if mv else req.lot_id
     if req.movement_id and _lot_touched_since(db, lot_id_to_revert, req.movement_id):
         raise DomainError("Lô đã bị xuất/điều chuyển/tiêu thụ tiếp sau khi nhận — không thể hoàn tác.")
+    # ts=mv.ts (mirror undo_fulfill_line, sửa cùng ngày 2026-09-29): nếu không truyền, transfer()
+    # mặc định lấy "bây giờ" — cặp điều chuyển/hoàn tác sẽ KHÔNG triệt tiêu nhau khi dựng lại tồn
+    # as-of ở các mốc GIỮA 2 ngày đó (bug thực tế phát hiện qua audit vật tư 2NC02, phiếu
+    # DCKP-20260911-00844). Không có `mv` (movement_id cũ/thiếu) thì đành giữ mặc định "bây giờ".
     transfer(db, lot_id_to_revert, req.quantity, "Kho phân xưởng", user,
-            reason=f"Hoàn tác điều chuyển {req.request_code}", mode="dieu_chuyen")
+            reason=f"Hoàn tác điều chuyển {req.request_code}", mode="dieu_chuyen",
+            ts=mv.ts if mv else None)
     req.status = "pending"
     req.approved_by = None
     req.approved_at = None
@@ -2652,8 +2683,11 @@ def undo_transfer_kcpx_request(db: Session, request_id: str, user: User) -> dict
     lot_id_to_revert = mv.lot_id if mv else req.lot_id
     if req.movement_id and _lot_touched_since(db, lot_id_to_revert, req.movement_id):
         raise DomainError("Lô đã bị xuất/điều chuyển/tiêu thụ tiếp sau khi nhận — không thể hoàn tác.")
+    # ts=mv.ts — xem giải thích ở undo_transfer_px_request (mirror hệt, cùng bug; đây chính là
+    # nguyên nhân bug thực tế phát hiện ở vật tư 2NC02, phiếu DCKP-20260911-00844).
     result = transfer(db, lot_id_to_revert, req.quantity, "Kho công ty", user,
-                      reason=f"Hoàn tác điều chuyển {req.request_code}", mode="dieu_chuyen_kcpx")
+                      reason=f"Hoàn tác điều chuyển {req.request_code}", mode="dieu_chuyen_kcpx",
+                      ts=mv.ts if mv else None)
     reverted_lot = db.get(MaterialLot, result["lot_id"])
     reverted_lot.workshop_location_id = None
     req.status = "pending"
@@ -2869,8 +2903,10 @@ def undo_sang_ngang(db: Session, request_id: str, user: User) -> dict:
     lot_id_to_revert = mv.lot_id if mv else req.lot_id
     if req.movement_id and _lot_touched_since(db, lot_id_to_revert, req.movement_id):
         raise DomainError("Lô đã bị xuất/điều chuyển/tiêu thụ tiếp sau khi nhận — không thể hoàn tác.")
+    # ts=mv.ts — xem giải thích ở undo_transfer_px_request (mirror hệt, cùng bug).
     _transfer_lot(db, lot_id_to_revert, req.quantity, "Kho công ty", user,
-                 reason=f"Hoàn tác xuất sang ngang {req.request_code}", mode="sang_ngang")
+                 reason=f"Hoàn tác xuất sang ngang {req.request_code}", mode="sang_ngang",
+                 ts=mv.ts if mv else None)
     req.status = "pending"
     req.approved_by = None
     req.approved_at = None
