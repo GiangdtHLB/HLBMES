@@ -295,8 +295,8 @@
       // xuất/EBR) thay vì gọi riêng /dispense/{bid}/summary (only_dispensed=True, trước đây ẩn
       // hẳn dòng chưa cấp). Nút "Xóa" chỉ hiện khi ĐÃ có Thực tế > 0 — chưa cấp gì thì không có
       // gì để xóa, "Sửa" vẫn dùng được để cấp trực tiếp từ dòng này (adjust_actual tự tính từ 0).
-      const BOM_STATUS_LABEL = { dat: "đạt", vuot: "vượt định mức", thieu: "thiếu", chua_dung: "chưa dùng", ngoai_bom: "ngoài định mức" };
-      const BOM_STATUS_BADGE = { dat: "available", vuot: "critical", thieu: "due", chua_dung: "planned", ngoai_bom: "obsolete" };
+      const BOM_STATUS_LABEL = { dat: "đạt", vuot: "vượt định mức", thieu: "thiếu", chua_dung: "chưa dùng", khong_su_dung: "không sử dụng", ngoai_bom: "ngoài định mức" };
+      const BOM_STATUS_BADGE = { dat: "available", vuot: "critical", thieu: "due", chua_dung: "planned", khong_su_dung: "obsolete", ngoai_bom: "obsolete" };
       const bomLines = bom.lines || [];
       $("dp_bom").innerHTML = bomLines.length ? `<div class="tablewrap"><table>
         <thead><tr><th>Vật tư</th><th>Mã lô</th><th>Người nhập / Ngày tạo</th><th>Ngày cấp</th><th>FIFO?</th><th>Định mức</th><th>Thực tế</th><th>Chênh</th><th>Trạng thái</th><th>Cấp tự do?</th><th></th></tr></thead>
@@ -314,8 +314,10 @@
           <td class="bom-actual">${l.actual}</td><td>${l.diff != null ? l.diff : ""}</td>
           <td>${l.status != null ? badge(BOM_STATUS_BADGE[l.status] || "planned") + esc(BOM_STATUS_LABEL[l.status] || l.status) : ""}</td>
           <td>${l.is_free ? badge("obsolete") + "Cấp tự do" : ""}</td>
-          <td>${canEdit ? `<button class="btn sm sec" data-bomedit="${esc(l.material_code)}">Sửa</button>
-            ${l.actual ? `<button class="btn sm sec" data-bomdel="${esc(l.material_code)}" style="color:var(--red)">Xóa</button>` : ""}` : ""}</td></tr>`).join("")}</tbody></table></div>
+          <td style="white-space:nowrap">${canEdit ? `<button class="btn sm sec" data-bomedit="${esc(l.material_code)}">Sửa</button>
+            ${l.actual ? `<button class="btn sm sec" data-bomdel="${esc(l.material_code)}" style="color:var(--red)">Xóa</button>` : ""}
+            ${l.status === "chua_dung" ? `<button class="btn sm sec" data-bomnotused="${esc(l.material_code)}">Xác nhận không sử dụng</button>` : ""}
+            ${l.status === "khong_su_dung" ? `<button class="btn sm sec" data-bomundonotused="${esc(l.material_code)}">Bỏ xác nhận</button>` : ""}` : ""}</td></tr>`).join("")}</tbody></table></div>
         <div class="muted" style="margin-top:6px">${canEdit ? "" : "Hồ sơ mẻ (EBR) đã khóa — không thể sửa Thực tế."}</div>`
         : '<div class="muted">Công thức mẻ này chưa khai báo vật tư nào.</div>';
       const bomMatCodes = new Set(bomLines.map(l => l.material_code));
@@ -363,6 +365,21 @@
         if (!reason.trim()) throw new Error("Bắt buộc nhập lý do khi xóa.");
         await POST(`/dispense/${bid}/adjust`, { material_code: code, new_actual: 0, reason: reason.trim() });
         toast("Đã xóa dòng cấp liệu"); refresh();
+      }));
+      // "Xác nhận không sử dụng" (yêu cầu người dùng 2026-09-30): phân biệt "Chưa dùng" (mơ hồ,
+      // chưa biết sẽ cấp hay không) với "Không sử dụng" (đã chủ ý xác nhận bỏ qua vật tư này cho
+      // mẻ) — chỉ hiện khi Thực tế vẫn = 0 (status "chua_dung"), ẩn khỏi "Gợi ý cấp liệu" sau khi
+      // xác nhận (xem services/dispense.py::confirm_material_not_used/suggest_dispense).
+      document.querySelectorAll("[data-bomnotused]").forEach(btn => btn.onclick = () => guard(async () => {
+        const code = btn.dataset.bomnotused;
+        if (!confirm(`Xác nhận KHÔNG SỬ DỤNG "${code}" cho mẻ này? (chỉ áp dụng khi Thực tế vẫn = 0, có thể bỏ xác nhận lại sau nếu cần)`)) return;
+        await POST(`/dispense/${bid}/materials/${encodeURIComponent(code)}/not-used`, {});
+        toast("Đã xác nhận không sử dụng"); refresh();
+      }));
+      document.querySelectorAll("[data-bomundonotused]").forEach(btn => btn.onclick = () => guard(async () => {
+        const code = btn.dataset.bomundonotused;
+        await DELETE(`/dispense/${bid}/materials/${encodeURIComponent(code)}/not-used`);
+        toast("Đã bỏ xác nhận — quay lại 'Chưa dùng'"); refresh();
       }));
     }
     // 2 cách chọn mẻ (yêu cầu người dùng 2026-09-06): (1) bấm thẳng vào ô "Mẻ" — mở popup duyệt

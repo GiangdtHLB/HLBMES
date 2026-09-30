@@ -11,7 +11,7 @@ Việc trừ tồn lô + tạo genealogy + chặn vượt định mức tái dù
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import Boolean, UnicodeText, Float, ForeignKey, Unicode
+from sqlalchemy import Boolean, UnicodeText, Float, ForeignKey, Unicode, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ..common import UTCDateTime, new_id, utcnow
@@ -46,6 +46,22 @@ class DispenseLine(Base):
     fifo_ok: Mapped[bool] = mapped_column(Boolean, default=True)
     reason: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+
+
+class BatchMaterialNotUsed(Base):
+    """Đánh dấu 1 dòng BOM của 1 mẻ là "Không sử dụng" (xác nhận CHỦ Ý không cấp, khác hẳn
+    "Chưa dùng" — chỉ đơn thuần chưa ghi nhận gì, còn mơ hồ chưa biết sẽ cấp hay không, xem
+    services/bom.py::_classify). Chỉ có ý nghĩa khi thực tế tiêu thụ vẫn = 0 — nếu sau đó có
+    cấp liệu thật cho đúng vật tư này, dòng đánh dấu vẫn còn nhưng bom.compare_batch không còn
+    áp dụng nữa (status tính lại theo thực tế > 0 như bình thường, xem compare_batch)."""
+    __tablename__ = "batch_material_not_used"
+    __table_args__ = (UniqueConstraint("batch_id", "material_code", name="uq_batch_material_not_used"),)
+
+    id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
+    batch_id: Mapped[str] = mapped_column(ForeignKey("batch_execution.batch_id"), index=True)
+    material_code: Mapped[str] = mapped_column(Unicode(64), index=True)
+    confirmed_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    confirmed_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
 
 
 class MaterialQcGroup(Base):

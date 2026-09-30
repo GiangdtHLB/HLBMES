@@ -2443,7 +2443,7 @@ async function showBatch(id) {
           : ""}</td>
         <td>${l.planned != null ? l.planned + " " + esc(l.uom || "") : ""}</td>
         <td>${l.actual}</td><td style="color:${l.diff > 0 ? "var(--red)" : l.diff < 0 ? "var(--orange)" : "var(--muted)"}">${l.diff != null ? (l.diff > 0 ? "+" : "") + l.diff : ""}</td>
-        <td>${l.pct != null ? l.pct + "%" : ""}</td><td>${l.status != null ? `<span class="badge ${{dat:"available",vuot:"critical",thieu:"due",chua_dung:"planned",ngoai_bom:"obsolete"}[l.status] || "planned"}">${{dat:"đạt",vuot:"vượt định mức",thieu:"thiếu",chua_dung:"chưa dùng",ngoai_bom:"ngoài định mức"}[l.status] || l.status}</span>` : ""}</td>
+        <td>${l.pct != null ? l.pct + "%" : ""}</td><td>${l.status != null ? `<span class="badge ${{dat:"available",vuot:"critical",thieu:"due",chua_dung:"planned",khong_su_dung:"obsolete",ngoai_bom:"obsolete"}[l.status] || "planned"}">${{dat:"đạt",vuot:"vượt định mức",thieu:"thiếu",chua_dung:"chưa dùng",khong_su_dung:"không sử dụng",ngoai_bom:"ngoài định mức"}[l.status] || l.status}</span>` : ""}</td>
         <td>${l.is_free ? '<span class="badge obsolete">Cấp tự do</span>' : ""}</td></tr>`).join("")}</tbody></table>`
       : '<div class="muted">Công thức của mẻ chưa khai báo BOM.</div>'}
     <h3>Ghi actual (tham số quy trình)</h3>
@@ -2604,11 +2604,13 @@ async function openEBR(batchId) {
   // "materials_display" tách theo mã vật tư THẬT đã cấp + mã lô/FIFO — KHÁC "core.materials"
   // (gộp theo mã Nhóm vật tư thay thế, giữ nguyên vì đã tính vào content_hash của hồ sơ, xem
   // services/ebr.py::assemble). Định mức/Trạng thái là null ở dòng con (i>0, dùng chung nhóm).
+  const EBR_BOM_STATUS_LABEL = { dat: "đạt", vuot: "vượt định mức", thieu: "thiếu", chua_dung: "chưa dùng", khong_su_dung: "không sử dụng", ngoai_bom: "ngoài định mức" };
+  const EBR_BOM_STATUS_BADGE = { dat: "available", vuot: "critical", thieu: "due", chua_dung: "planned", khong_su_dung: "obsolete", ngoai_bom: "obsolete" };
   const matRows = (e.materials_display || []).map(l => `<tr class="row-${{dat:"blue",vuot:"red",thieu:"green",chua_dung:""}[l.status] || ""}">
     <td><code class="k">${esc(l.material_code)}</code>${l.material_name ? ` ${esc(l.material_name)}` : ""}</td>
     <td>${l.planned != null ? l.planned + " " + esc(l.uom || "") : ""}</td><td>${l.actual}</td>
     <td>${(l.lot_codes || []).join(", ")}${l.fifo_ok === false ? ' <span style="color:var(--red)">⚠</span>' : l.fifo_ok === true ? ' <span style="color:var(--green)">✔</span>' : ""}</td>
-    <td>${l.status != null ? badge({dat:"available",vuot:"critical",thieu:"due",chua_dung:"planned"}[l.status] || "planned") + l.status : ""}</td></tr>`).join("");
+    <td>${l.status != null ? badge(EBR_BOM_STATUS_BADGE[l.status] || "planned") + esc(EBR_BOM_STATUS_LABEL[l.status] || l.status) : ""}</td></tr>`).join("");
   // Ngưỡng (lower–upper) cho Kết quả QC + Chỉ tiêu nước nấu (yêu cầu người dùng 2026-09-06:
   // "bổ sung thêm cột ngưỡng giá trị") — dữ liệu đã có sẵn ở cả 2 nguồn (QualityResult.lower_
   // limit/upper_limit), chỉ chưa hiện ra ở popup EBR này.
@@ -8416,6 +8418,7 @@ function wireRequestBlockActions() {
   // phiếu" mù mờ). Dòng đã có lý do vẫn gửi kèm qua `reasons` để backend lưu lại (xem
   // services/warehouse.py::fulfill_all_lines).
   document.querySelectorAll("[data-fulfillall]").forEach(b => b.onclick = () => guard(async () => {
+    if (!confirm("Bạn có chắc chắn muốn duyệt cả phiếu này không?")) return;
     const block = b.closest(".tablewrap");
     const sels = Array.from(block.querySelectorAll(".reqlot-select"));
     const reasons = {};

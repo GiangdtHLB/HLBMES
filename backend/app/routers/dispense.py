@@ -72,3 +72,19 @@ def adjust_actual(batch_id: str, payload: AdjustActualIn, db: Session = Depends(
     """Sửa Thực tế 1 vật tư — tự cấp thêm/hoàn lại cho khớp số mới, bắt buộc lý do."""
     require_perm(user, "batch.execute")
     return svc.adjust_actual(db, batch_id, payload.material_code, payload.new_actual, user, payload.reason)
+
+
+@router.post("/{batch_id}/materials/{material_code}/not-used")
+def confirm_material_not_used(batch_id: str, material_code: str, db: Session = Depends(get_db),
+                              user: User = Depends(get_current_user)):
+    """Xác nhận 1 dòng BOM đang "Chưa dùng" là CHỦ Ý không cấp cho mẻ này."""
+    require_perm(user, "batch.execute")
+    return svc.confirm_material_not_used(db, batch_id, material_code, user)
+
+
+@router.delete("/{batch_id}/materials/{material_code}/not-used")
+def unconfirm_material_not_used(batch_id: str, material_code: str, db: Session = Depends(get_db),
+                                user: User = Depends(get_current_user)):
+    """Bỏ đánh dấu "Không sử dụng" — đưa dòng về lại "Chưa dùng"."""
+    require_perm(user, "batch.execute")
+    return svc.unconfirm_material_not_used(db, batch_id, material_code, user)
