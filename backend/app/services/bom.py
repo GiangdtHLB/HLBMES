@@ -13,6 +13,7 @@ from ..models.batches import BatchExecution
 from ..models.brewing import BrewOrderMaterialLine
 from ..models.master import Material, MaterialAltGroup
 from ..models.materials import GenealogyEdge, MaterialLot
+from ..models.materials_ext import BatchMaterialNotUsed
 
 
 def material_code_for_lot(db: Session, lot) -> str:
@@ -180,12 +181,22 @@ def _classify(planned, act, tol):
     return diff, pct, status
 
 
+def not_used_codes(db: Session, batch_id: str) -> set[str]:
+    """Mã vật tư đã được xác nhận "Không sử dụng" cho 1 mẻ (xem BatchMaterialNotUsed) — chỉ có
+    hiệu lực khi thực tế vẫn = 0, áp dụng ở compare_batch/batches_fully_dispensed_map để đổi
+    status "chua_dung" (mơ hồ, chưa biết sẽ cấp hay không) thành "khong_su_dung" (đã xác nhận
+    chủ ý bỏ qua, không phải quên chưa cấp)."""
+    return set(db.execute(select(BatchMaterialNotUsed.material_code).where(
+        BatchMaterialNotUsed.batch_id == batch_id)).scalars().all())
+
+
 def compare_batch(db: Session, batch) -> dict:
     """Đối chiếu định mức ↔ thực tế cho một mẻ — định mức LUÔN là số công thức đã khai cho
     "1 mẻ" (m.get("qty")), KHÔNG scale theo SL kế hoạch (hl) của riêng mẻ này (xem factor_for)."""
     snap = batch.recipe_snapshot or {}
     factor = factor_for(snap, batch.planned_qty)
     actual = actual_consumed(db, batch.batch_id)
+    not_used = not_used_codes(db, batch.batch_id)
     lines, seen = [], set()
     for m in _expand_materials(db, snap.get("materials"), brew_order_id=batch.order_id):
         code = m.get("material_code")
@@ -195,6 +206,8 @@ def compare_batch(db: Session, batch) -> dict:
         act = round(sum(actual.get(c, 0.0) for c in match_codes), 4)
         tol = m.get("tol_pct", 0) or 0
         diff, pct, status = _classify(planned, act, tol)
+        if status == "chua_dung" and code in not_used:
+            status = "khong_su_dung"
         lines.append({"material_code": code, "material_name": m.get("material_name"), "uom": m.get("uom"),
                       "tol_pct": tol, "planned": planned, "actual": act, "diff": diff, "pct": pct,
                       "status": status, "is_group": bool(m.get("is_group")), "match_codes": sorted(match_codes)})
@@ -244,6 +257,14 @@ def batches_fully_dispensed_map(db: Session) -> dict[str, bool]:
         code = code_by_lot_id.get(lot_id, "?")
         bucket = actual_by_batch.setdefault(batch_id, {})
         bucket[code] = bucket.get(code, 0.0) + (qty or 0.0)
+    # Gộp trước 1 lần (mirror actual_by_batch ở trên) — {batch_id: {material_code,...}} các dòng
+    # đã xác nhận "Không sử dụng", coi như ĐÃ xử lý (không còn tính là "chua_dung" mơ hồ) giống
+    # hệt cách compare_batch() áp dụng, để tỉ lệ % không bị kéo thấp oan bởi các dòng đã chủ ý bỏ.
+    not_used_rows = db.execute(select(BatchMaterialNotUsed.batch_id, BatchMaterialNotUsed.material_code)
+                               .where(BatchMaterialNotUsed.batch_id.in_(batch_ids))).all()
+    not_used_by_batch: dict[str, set[str]] = {}
+    for batch_id, code in not_used_rows:
+        not_used_by_batch.setdefault(batch_id, set()).add(code)
     out = {}
     for b in batches:
         snap = b.recipe_snapshot or {}
@@ -252,6 +273,7 @@ def batches_fully_dispensed_map(db: Session) -> dict[str, bool]:
             out[b.batch_id] = False
             continue
         actual = actual_by_batch.get(b.batch_id, {})
+        not_used = not_used_by_batch.get(b.batch_id, set())
         satisfied = 0
         for m in lines:
             match_codes = m.get("match_codes") or {m.get("material_code")}
@@ -259,6 +281,8 @@ def batches_fully_dispensed_map(db: Session) -> dict[str, bool]:
             act = round(sum(actual.get(c, 0.0) for c in match_codes), 4)
             tol = m.get("tol_pct", 0) or 0
             _, _, status = _classify(planned, act, tol)
+            if status == "chua_dung" and m.get("material_code") in not_used:
+                status = "khong_su_dung"
             if status != "chua_dung":
                 satisfied += 1
         out[b.batch_id] = (satisfied / len(lines)) >= _FULLY_DISPENSED_MIN_RATIO

@@ -303,6 +303,20 @@ class MaterialIn(BaseModel):
     alt_uom: Optional[str] = None
     alt_uom_ratio: Optional[float] = None
 
+    # `code`/`name` rỗng lọt qua được trước đây (không có ràng buộc gì ngoài kiểu `str`, chấp
+    # nhận "") — do UniqueConstraint chỉ chặn được TỪ LẦN THỨ 2, 1 vật tư mã rỗng vẫn tạo được
+    # (phát hiện thực tế 2026-09-29, audit dữ liệu production): vì `list_materials` sắp theo
+    # `Material.code` nên nó luôn đứng ĐẦU danh sách, âm thầm trở thành lựa chọn MẶC ĐỊNH ở các
+    # form chọn nhanh (VD "Nhập tồn đầu" kho phân xưởng dùng matItemsPx[0]) — ai không để ý đổi
+    # lại "Vật tư" trước khi bấm Nhập sẽ vô tình tạo lô dưới đúng vật tư rỗng này.
+    @field_validator("code", "name")
+    @classmethod
+    def _reject_blank(cls, v: str, info) -> str:
+        v = (v or "").strip()
+        if not v:
+            raise ValueError(f"{info.field_name} không được để trống.")
+        return v
+
 
 class MaterialOut(ORMModel):
     material_id: str

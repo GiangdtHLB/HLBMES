@@ -18,7 +18,7 @@ from ..errors import DomainError, NotFoundError
 from ..models.batches import BatchExecution
 from ..models.master import Material
 from ..models.materials import GenealogyEdge, MaterialLot
-from ..models.materials_ext import Dispense, DispenseLine
+from ..models.materials_ext import BatchMaterialNotUsed, Dispense, DispenseLine
 from ..security import User, require_role
 from . import batches as batch_svc
 from . import bom
@@ -321,6 +321,8 @@ def suggest_dispense(db: Session, batch_id: str) -> dict:
     name_by_code = {m.code: m.name for m in db.execute(select(Material)).scalars().all()}
     lines = []
     for l in cmp["lines"]:
+        if l["status"] == "khong_su_dung":
+            continue  # đã xác nhận chủ ý không cấp — không gợi ý cấp liệu cho dòng này nữa
         need = round(-l["diff"], 4) if l["diff"] < 0 else 0.0
         if need <= 1e-6:
             continue
@@ -610,6 +612,60 @@ def adjust_actual(db: Session, batch_id: str, material_code: str, new_actual: fl
                 after={"material_code": material_code, "from": current, "to": new_actual, "reason": reason})
     db.commit()
     return {"dispense_code": disp.dispense_code, "lines": all_lines, "bom": bom.compare_batch(db, batch)}
+
+
+def confirm_material_not_used(db: Session, batch_id: str, material_code: str, user: User) -> dict:
+    """Xác nhận 1 dòng BOM đang "Chưa dùng" (thực tế = 0) là CHỦ Ý không cấp cho mẻ này — đổi
+    hiển thị từ "Chưa dùng" (mơ hồ, chưa biết sẽ cấp hay không) sang "Không sử dụng" (đã xác
+    nhận, không phải quên chưa cấp — yêu cầu người dùng 2026-09-30). Mirror đúng khoá của
+    adjust_actual: chỉ ADMIN/vận hành sửa được, và không sửa được khi hồ sơ mẻ (EBR) đã khóa.
+
+    Chỉ cho phép xác nhận dòng THẬT SỰ đang "chua_dung" (thực tế = 0) — không cho đánh dấu dòng
+    đã có cấp liệu thật (tránh nhầm lẫn/che giấu số liệu), và không cho đánh dấu mã không có
+    trong BOM của mẻ này."""
+    require_role(user, Role.OPERATOR, Role.SUPERVISOR, Role.ENGINEER)
+    batch = db.get(BatchExecution, batch_id)
+    if not batch:
+        raise NotFoundError("Batch không tồn tại.")
+    if batch.ebr_locked:
+        raise DomainError("Hồ sơ mẻ (EBR) đã khóa — không thể sửa.")
+    cmp = bom.compare_batch(db, batch)
+    line = next((l for l in cmp["lines"] if l["material_code"] == material_code), None)
+    if not line:
+        raise DomainError(f"Vật tư '{material_code}' không có trong định mức (BOM) của mẻ này.")
+    if line["status"] not in ("chua_dung", "khong_su_dung"):
+        raise DomainError(
+            f"Vật tư '{material_code}' đã có cấp liệu thực tế — không đánh dấu 'Không sử dụng' được nữa.")
+    existing = db.execute(select(BatchMaterialNotUsed).where(
+        BatchMaterialNotUsed.batch_id == batch_id,
+        BatchMaterialNotUsed.material_code == material_code)).scalar_one_or_none()
+    if not existing:
+        db.add(BatchMaterialNotUsed(batch_id=batch_id, material_code=material_code,
+                                    confirmed_by=user.username, confirmed_at=utcnow()))
+        record_audit(db, entity_type="batch", entity_id=batch_id, action="confirm_material_not_used",
+                    actor=user, after={"material_code": material_code})
+        db.commit()
+    return {"bom": bom.compare_batch(db, batch)}
+
+
+def unconfirm_material_not_used(db: Session, batch_id: str, material_code: str, user: User) -> dict:
+    """Bỏ đánh dấu "Không sử dụng" (đưa dòng về lại "Chưa dùng") — mirror khoá của
+    confirm_material_not_used."""
+    require_role(user, Role.OPERATOR, Role.SUPERVISOR, Role.ENGINEER)
+    batch = db.get(BatchExecution, batch_id)
+    if not batch:
+        raise NotFoundError("Batch không tồn tại.")
+    if batch.ebr_locked:
+        raise DomainError("Hồ sơ mẻ (EBR) đã khóa — không thể sửa.")
+    existing = db.execute(select(BatchMaterialNotUsed).where(
+        BatchMaterialNotUsed.batch_id == batch_id,
+        BatchMaterialNotUsed.material_code == material_code)).scalar_one_or_none()
+    if existing:
+        db.delete(existing)
+        record_audit(db, entity_type="batch", entity_id=batch_id, action="unconfirm_material_not_used",
+                    actor=user, after={"material_code": material_code})
+        db.commit()
+    return {"bom": bom.compare_batch(db, batch)}
 
 
 def list_dispenses(db: Session, batch_id: str = None) -> list:

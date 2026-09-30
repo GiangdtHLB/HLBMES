@@ -697,6 +697,11 @@ VIEWS.dashboard = async function () {
       const p = a.product.localeCompare(b.product, "vi");
       return p !== 0 ? p : b.over - a.over;
     });
+  // Danh sách dạng thanh (trái) sắp riêng theo số ngày lên men DÀI NHẤT trước, KHÔNG gộp theo
+  // dịch bia nữa (yêu cầu người dùng 2026-09-29: "sắp xếp theo số ngày lên men dài nhất từ trên
+  // xuống dưới") — tách khỏi fermentTankItems (vẫn giữ nguyên thứ tự gộp-theo-dịch-bia cho lưới ô
+  // màu bên phải, nơi tiêu đề nhóm cần các tank cùng dịch bia đứng liền nhau).
+  const fermentTankItemsByDays = [...fermentTankItems].sort((a, b) => b.days - a.days);
   const fermentQcBadge = (n, extraStyle = "", tankId = null, productId = null) => n > 0
     ? `<span ${tankId ? `data-fermqc="${esc(tankId)}|${esc(productId || "")}"` : ""}
         title="${n} chỉ tiêu CT chính/phụ đang fail${tankId ? " — bấm để xem chi tiết" : ""}"
@@ -714,18 +719,7 @@ VIEWS.dashboard = async function () {
   // re-render). Lưới ô màu (phải) không giới hạn — mỗi ô nhỏ, xem cùng lúc nhiều tank vẫn rõ.
   const FERMENT_LIST_LIMIT = 10;
   let fermentBarHtml = "", fermentGridHtml = "", lastFermentProduct = null, gridOpen = false, fermentRowIdx = 0;
-  fermentTankItems.forEach(it => {
-    if (it.product !== lastFermentProduct) {
-      // Bảng lưới (phải) vẫn giữ tiêu đề nhóm — mỗi ô nhỏ, không đủ chỗ ghi tên dịch bia riêng.
-      // Bảng thanh (trái) BỎ tiêu đề nhóm, ghi thẳng tên dịch bia vào trong thanh của từng tank
-      // (yêu cầu người dùng 2026-09-26: "hiện dịch bia bao nhiêu vào khung xanh đó luôn, không
-      // cần chia ra").
-      if (gridOpen) fermentGridHtml += `</div>`;
-      fermentGridHtml += fermentGroupHead(it.product, lastFermentProduct === null)
-        + `<div style="display:grid;grid-template-columns:repeat(auto-fill, minmax(84px, 1fr));gap:8px">`;
-      gridOpen = true;
-      lastFermentProduct = it.product;
-    }
+  fermentTankItemsByDays.forEach(it => {
     const basePct = Math.min(it.days, it.std) / fermentBarScaleMax * 100;
     const overPct = Math.max(it.over, 0) / fermentBarScaleMax * 100;
     const label = it.over > 0 ? `Quá ${it.over} ngày` : `Còn ${Math.abs(it.over)} ngày`;
@@ -747,6 +741,18 @@ VIEWS.dashboard = async function () {
       <div style="font-size:12px;font-weight:700;color:${it.over > 0 ? "var(--red)" : "var(--muted)"}">${label}</div>
     </div>`;
     fermentRowIdx++;
+  });
+  // Lưới ô màu (phải) vẫn gộp theo dịch bia (fermentTankItems giữ nguyên thứ tự cũ) — tiêu đề
+  // nhóm cần các tank cùng dịch bia đứng liền nhau, khác hẳn bar list bên trái giờ sắp thẳng
+  // theo số ngày (xem fermentTankItemsByDays ở trên).
+  fermentTankItems.forEach(it => {
+    if (it.product !== lastFermentProduct) {
+      if (gridOpen) fermentGridHtml += `</div>`;
+      fermentGridHtml += fermentGroupHead(it.product, lastFermentProduct === null)
+        + `<div style="display:grid;grid-template-columns:repeat(auto-fill, minmax(84px, 1fr));gap:8px">`;
+      gridOpen = true;
+      lastFermentProduct = it.product;
+    }
     fermentGridHtml += `<div style="position:relative;background:${FERMENT_STAGE_BG[it.stage]};border-radius:6px;padding:6px 8px;text-align:center">
       ${fermentQcBadge(it.qcFail, "position:absolute;top:-6px;right:-6px", it.tankId, it.productId)}
       <div style="font-size:12px;font-weight:700;color:${FERMENT_STAGE_FG[it.stage]}">${esc(it.tank)}</div>
@@ -2437,7 +2443,7 @@ async function showBatch(id) {
           : ""}</td>
         <td>${l.planned != null ? l.planned + " " + esc(l.uom || "") : ""}</td>
         <td>${l.actual}</td><td style="color:${l.diff > 0 ? "var(--red)" : l.diff < 0 ? "var(--orange)" : "var(--muted)"}">${l.diff != null ? (l.diff > 0 ? "+" : "") + l.diff : ""}</td>
-        <td>${l.pct != null ? l.pct + "%" : ""}</td><td>${l.status != null ? `<span class="badge ${{dat:"available",vuot:"critical",thieu:"due",chua_dung:"planned",ngoai_bom:"obsolete"}[l.status] || "planned"}">${{dat:"đạt",vuot:"vượt định mức",thieu:"thiếu",chua_dung:"chưa dùng",ngoai_bom:"ngoài định mức"}[l.status] || l.status}</span>` : ""}</td>
+        <td>${l.pct != null ? l.pct + "%" : ""}</td><td>${l.status != null ? `<span class="badge ${{dat:"available",vuot:"critical",thieu:"due",chua_dung:"planned",khong_su_dung:"obsolete",ngoai_bom:"obsolete"}[l.status] || "planned"}">${{dat:"đạt",vuot:"vượt định mức",thieu:"thiếu",chua_dung:"chưa dùng",khong_su_dung:"không sử dụng",ngoai_bom:"ngoài định mức"}[l.status] || l.status}</span>` : ""}</td>
         <td>${l.is_free ? '<span class="badge obsolete">Cấp tự do</span>' : ""}</td></tr>`).join("")}</tbody></table>`
       : '<div class="muted">Công thức của mẻ chưa khai báo BOM.</div>'}
     <h3>Ghi actual (tham số quy trình)</h3>
@@ -2598,11 +2604,13 @@ async function openEBR(batchId) {
   // "materials_display" tách theo mã vật tư THẬT đã cấp + mã lô/FIFO — KHÁC "core.materials"
   // (gộp theo mã Nhóm vật tư thay thế, giữ nguyên vì đã tính vào content_hash của hồ sơ, xem
   // services/ebr.py::assemble). Định mức/Trạng thái là null ở dòng con (i>0, dùng chung nhóm).
+  const EBR_BOM_STATUS_LABEL = { dat: "đạt", vuot: "vượt định mức", thieu: "thiếu", chua_dung: "chưa dùng", khong_su_dung: "không sử dụng", ngoai_bom: "ngoài định mức" };
+  const EBR_BOM_STATUS_BADGE = { dat: "available", vuot: "critical", thieu: "due", chua_dung: "planned", khong_su_dung: "obsolete", ngoai_bom: "obsolete" };
   const matRows = (e.materials_display || []).map(l => `<tr class="row-${{dat:"blue",vuot:"red",thieu:"green",chua_dung:""}[l.status] || ""}">
     <td><code class="k">${esc(l.material_code)}</code>${l.material_name ? ` ${esc(l.material_name)}` : ""}</td>
     <td>${l.planned != null ? l.planned + " " + esc(l.uom || "") : ""}</td><td>${l.actual}</td>
     <td>${(l.lot_codes || []).join(", ")}${l.fifo_ok === false ? ' <span style="color:var(--red)">⚠</span>' : l.fifo_ok === true ? ' <span style="color:var(--green)">✔</span>' : ""}</td>
-    <td>${l.status != null ? badge({dat:"available",vuot:"critical",thieu:"due",chua_dung:"planned"}[l.status] || "planned") + l.status : ""}</td></tr>`).join("");
+    <td>${l.status != null ? badge(EBR_BOM_STATUS_BADGE[l.status] || "planned") + esc(EBR_BOM_STATUS_LABEL[l.status] || l.status) : ""}</td></tr>`).join("");
   // Ngưỡng (lower–upper) cho Kết quả QC + Chỉ tiêu nước nấu (yêu cầu người dùng 2026-09-06:
   // "bổ sung thêm cột ngưỡng giá trị") — dữ liệu đã có sẵn ở cả 2 nguồn (QualityResult.lower_
   // limit/upper_limit), chỉ chưa hiện ra ở popup EBR này.
@@ -6277,15 +6285,15 @@ VIEWS.warehouse_kc = async function () {
           : '<div class="muted">Bạn không có quyền tạo Xuất sang ngang.</div>'}
         <h4 style="margin-top:14px">Đang chờ phân xưởng duyệt <span class="muted">(${sngPending.length})</span></h4>
         <div class="tablewrap"><table id="t_sng_pending">
-          <thead><tr><th>Ngày xuất sang ngang</th><th>Ngày lập phiếu</th><th>Số đề nghị</th><th>Mã VT</th><th>Tên vật tư</th><th>Lô</th><th>SL</th><th>Trạng thái QC</th><th></th></tr></thead>
+          <thead><tr><th>Ngày xuất sang ngang</th><th>Ngày lập phiếu</th><th>Số đề nghị</th><th>Mã VT</th><th>Tên vật tư</th><th>Lô</th><th>SL</th><th>Ghi chú</th><th>Trạng thái QC</th><th></th></tr></thead>
           <tbody>${sngPending.map(r => sangNgangKcRowHtml(r, matByIdGiao, lotByIdGiao, qcReqSetGiao)).join("") ||
-            `<tr><td colspan=9 class="muted">Không có đề nghị nào đang chờ.</td></tr>`}</tbody>
+            `<tr><td colspan=10 class="muted">Không có đề nghị nào đang chờ.</td></tr>`}</tbody>
         </table></div>
         <h4 style="margin-top:14px">Lịch sử đã xử lý <span class="muted">(${sngDone.length})</span></h4>
         <div class="tablewrap"><table id="t_sng_done">
-          <thead><tr><th>Ngày xuất sang ngang</th><th>Ngày lập phiếu</th><th>Số đề nghị</th><th>Mã VT</th><th>Tên vật tư</th><th>Lô</th><th>SL</th><th>Trạng thái</th><th>Người xử lý</th><th></th></tr></thead>
+          <thead><tr><th>Ngày xuất sang ngang</th><th>Ngày lập phiếu</th><th>Số đề nghị</th><th>Mã VT</th><th>Tên vật tư</th><th>Lô</th><th>SL</th><th>Ghi chú</th><th>Trạng thái</th><th>Người xử lý</th><th></th></tr></thead>
           <tbody>${sngDone.map(r => sangNgangHistoryRowHtml(r, matByIdGiao, lotByIdGiao)).join("") ||
-            `<tr><td colspan=10 class="muted">Chưa có đề nghị nào đã xử lý.</td></tr>`}</tbody>
+            `<tr><td colspan=11 class="muted">Chưa có đề nghị nào đã xử lý.</td></tr>`}</tbody>
         </table></div>
       </div>`;
   } else if (sec === "tudo") {
@@ -7072,11 +7080,12 @@ VIEWS.warehouse_px = async function () {
         <td class="muted">${lotCodeCellHtml(lot)}</td>
         <td>${r.quantity} ${esc(r.uom)}</td>
         <td class="muted">${esc(r.created_by || "")}</td>
+        <td class="muted">${esc(r.reason || "—")}</td>
         <td>${sangNgangQcBadge(r, lotByIdPx, qcReqSetPx)}</td>
         ${canApproveSangNgang ? `<td style="white-space:nowrap">
           <button class="btn sm" data-sngapprove="${esc(r.request_id)}" ${qcBlocked ? "disabled title=\"Đang chờ KCS duyệt chỉ tiêu chất lượng\"" : ""}>Duyệt</button>
           <button class="btn sm sec" data-sngreject="${esc(r.request_id)}">Từ chối</button></td>` : ""}</tr>`;
-    }).join("") || `<tr><td colspan="${canApproveSangNgang ? 10 : 9}" class="muted">Không có đề nghị nào đang chờ.</td></tr>`;
+    }).join("") || `<tr><td colspan="${canApproveSangNgang ? 11 : 10}" class="muted">Không có đề nghị nào đang chờ.</td></tr>`;
     const sngDoneRows = sngDonePx.map(r => {
       const lot = lotByIdPx[r.lot_id];
       const mat = lot ? matById[lot.material_id] : null;
@@ -7094,21 +7103,22 @@ VIEWS.warehouse_px = async function () {
         <td>${esc(mat ? mat.name : "—")}</td>
         <td class="muted">${lotCodeCellHtml(lot)}</td>
         <td>${r.quantity} ${esc(r.uom)}</td>
+        <td class="muted">${esc(r.reason || "—")}</td>
         <td>${badge(r.status)}</td>
         <td class="muted">${esc(processedBy || "")}</td>
         ${actionCell}</tr>`;
-    }).join("") || `<tr><td colspan="${isAdminSngPx ? 10 : 9}" class="muted">Chưa có đề nghị nào đã xử lý.</td></tr>`;
+    }).join("") || `<tr><td colspan="${isAdminSngPx ? 11 : 10}" class="muted">Chưa có đề nghị nào đã xử lý.</td></tr>`;
     body = `<div class="panel"><h2>Xuất sang ngang <span class="muted">(${sngPendingPx.length} đang chờ duyệt)</span></h2>
       <div class="muted" style="margin-bottom:6px">Vật tư do Kho công ty khai báo "Xuất sang ngang" (đã tăng tồn Kho công ty) — bấm "Duyệt"
         để thật sự nhận vào Kho phân xưởng. Nếu vật tư có chỉ tiêu chất lượng bắt buộc, phải chờ KCS duyệt xong (hết "Đang chờ KCS duyệt")
         mới duyệt được.</div>
       <div class="tablewrap"><table id="t_sng_pending_px">
-        <thead><tr><th>Ngày xuất sang ngang</th><th>Ngày tạo</th><th>Số đề nghị</th><th>Mã VT</th><th>Tên vật tư</th><th>Lô</th><th>SL</th><th>Người tạo</th><th>Trạng thái QC</th>${canApproveSangNgang ? "<th></th>" : ""}</tr></thead>
+        <thead><tr><th>Ngày xuất sang ngang</th><th>Ngày tạo</th><th>Số đề nghị</th><th>Mã VT</th><th>Tên vật tư</th><th>Lô</th><th>SL</th><th>Người tạo</th><th>Ghi chú</th><th>Trạng thái QC</th>${canApproveSangNgang ? "<th></th>" : ""}</tr></thead>
         <tbody>${sngPendingRows}</tbody>
       </table></div>
       <h4 style="margin-top:14px">Lịch sử đã xử lý <span class="muted">(${sngDonePx.length})</span></h4>
       <div class="tablewrap"><table id="t_sng_done_px">
-        <thead><tr><th>Ngày xuất sang ngang</th><th>Ngày tạo</th><th>Số đề nghị</th><th>Mã VT</th><th>Tên vật tư</th><th>Lô</th><th>SL</th><th>Trạng thái</th><th>Người xử lý</th>${isAdminSngPx ? "<th></th>" : ""}</tr></thead>
+        <thead><tr><th>Ngày xuất sang ngang</th><th>Ngày tạo</th><th>Số đề nghị</th><th>Mã VT</th><th>Tên vật tư</th><th>Lô</th><th>SL</th><th>Ghi chú</th><th>Trạng thái</th><th>Người xử lý</th>${isAdminSngPx ? "<th></th>" : ""}</tr></thead>
         <tbody>${sngDoneRows}</tbody>
       </table></div>
     </div>`;
@@ -7569,6 +7579,7 @@ function sangNgangKcRowHtml(r, matById, lotById, qcReqSet) {
     <td>${esc(mat ? mat.name : "—")}</td>
     <td class="muted">${lotCodeCellHtml(lot)}</td>
     <td>${r.quantity} ${esc(r.uom)}</td>
+    <td class="muted">${esc(r.reason || "—")}</td>
     <td>${sangNgangQcBadge(r, lotById, qcReqSet)}</td>
     ${sangNgangEditDelCell(r)}</tr>`;
 }
@@ -7656,6 +7667,7 @@ function sangNgangHistoryRowHtml(r, matById, lotById) {
     <td>${esc(mat ? mat.name : "—")}</td>
     <td class="muted">${lotCodeCellHtml(lot)}</td>
     <td>${r.quantity} ${esc(r.uom)}</td>
+    <td class="muted">${esc(r.reason || "—")}</td>
     <td>${badge(r.status)}${r.reversed ? ' <span class="muted" style="font-size:11px">(đã hoàn tác)</span>' : ""}</td>
     <td class="muted">${esc(processedBy || "")}</td>
     ${sangNgangEditDelCell(r)}</tr>`;
@@ -8406,6 +8418,7 @@ function wireRequestBlockActions() {
   // phiếu" mù mờ). Dòng đã có lý do vẫn gửi kèm qua `reasons` để backend lưu lại (xem
   // services/warehouse.py::fulfill_all_lines).
   document.querySelectorAll("[data-fulfillall]").forEach(b => b.onclick = () => guard(async () => {
+    if (!confirm("Bạn có chắc chắn muốn duyệt cả phiếu này không?")) return;
     const block = b.closest(".tablewrap");
     const sels = Array.from(block.querySelectorAll(".reqlot-select"));
     const reasons = {};

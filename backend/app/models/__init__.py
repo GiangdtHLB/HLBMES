@@ -38,7 +38,7 @@ from .recipe_ext import BatchYieldActual, RecipeChange
 from .signature import EBRSnapshot, Signature
 from .warehouse import MaterialRequest, MaterialRequestLine, StockMovement
 from .workorder import WorkOrder
-from .materials_ext import Dispense, DispenseLine, MaterialQcGroup
+from .materials_ext import BatchMaterialNotUsed, Dispense, DispenseLine, MaterialQcGroup
 from .quality_ext import (
     CAPA,
     ProcessParameter,
