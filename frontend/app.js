@@ -628,7 +628,7 @@ VIEWS.dashboard = async function () {
       ${lowYieldItems.length ? `<div class="tablewrap" style="max-height:240px;overflow:auto"><table>
         <thead><tr><th>Lô lọc</th><th>Mẻ lọc số</th><th>Loại dịch bia</th><th>V lọc (lít)</th><th>Phân loại</th></tr></thead>
         <tbody>${lowYieldItems.map(it => `<tr style="cursor:pointer" data-goto="batchfilterlots" tabindex="0" role="button">
-          <td>${esc(it.filter_lot_code || "—")}</td>
+          <td>${esc(it.filter_lot_code || "—")}${it.lot_count > 1 ? ` <span class="muted" style="font-size:11px">(tổng ${it.lot_count} lô)</span>` : ""}</td>
           <td class="muted">${esc(it.batch_seq_no || "—")}</td>
           <td>${esc(it.beer_type || "—")}</td>
           <td>${it.v_l != null ? it.v_l.toLocaleString("vi-VN") : "—"}</td>

@@ -261,7 +261,7 @@ def test_dashboard_tank_planned_only_counted_as_dat_cho_not_trong(client, admin_
     assert after_running["tank_len_men"]["dang_nap"] == before["tank_len_men"]["dang_nap"] + 1
 
 
-def _finish_one_me_loc(client, admin_h, suffix, dich_nha_hl):
+def _finish_one_me_loc(client, admin_h, suffix, dich_nha_hl, batch_seq_no=None):
     """Dựng đủ chuỗi Mẻ nấu -> Tank -> Lô lọc (pipeline mới) và "Kết thúc" 1 mẻ lọc với
     dich_nha_hl chỉ định, trả về filter_lot_id — dùng để test phân loại sản lượng lọc."""
     batch_id = _make_batch(client, admin_h, None)
@@ -288,7 +288,7 @@ def _finish_one_me_loc(client, admin_h, suffix, dich_nha_hl):
     batch_link_id = batches[0]["batch_link_id"]
     fin = client.put(f"/api/batch-filter-lots/batches/{batch_link_id}/finish", headers=admin_h,
                      json={"draws": [{"source_link_id": src["link_id"], "dich_nha_hl": dich_nha_hl}],
-                          "nuoc_bai_khi_hl": 0})
+                          "nuoc_bai_khi_hl": 0, "batch_seq_no": batch_seq_no})
     assert fin.status_code == 200, fin.text
     return filter_lot_id
 
@@ -318,3 +318,31 @@ def test_low_yield_filter_alerts_source_from_new_batch_pipeline(client, admin_h)
     r2 = client.get("/api/reports/low-yield-filter-alerts?limit=1", headers=admin_h)
     assert len(r2.json()["items"]) == 1
     assert r2.json()["items"][0]["v_l"] == 100.0
+
+
+def test_low_yield_filter_alerts_sums_same_batch_seq_no_across_filter_lots(client, admin_h):
+    """1 mẻ nấu lớn có thể phải lọc qua NHIỀU lô lọc/tank khác nhau mới hết — mỗi lô lọc tự gõ
+    trùng "Mẻ lọc số" (batch_seq_no) để đánh dấu cùng 1 mẻ. "V lọc" thật của mẻ đó phải là TỔNG
+    của mọi lô lọc cùng batch_seq_no (yêu cầu người dùng 2026-09-30), không phải hiện N dòng
+    riêng lẻ — và ngưỡng Thấp/Cao phải so với TỔNG đó, không so với từng lô lọc riêng.
+
+    Nhóm "42": 2 lô lọc, mỗi lô 100L (tự nó đã "Thấp" — ngưỡng mặc định 500L) -> tổng 200L vẫn
+    "Thấp", phải gộp thành đúng 1 dòng. Nhóm "77": 2 lô lọc, mỗi lô 300L (tự nó cũng "Thấp") NHƯNG
+    tổng 600L đã vượt ngưỡng Thấp (500L) -> không còn là mẻ "Thấp" thật nữa, KHÔNG được xuất hiện
+    trong danh sách cảnh báo (bug thực tế trước khi sửa: mỗi lô lọc bị báo "Thấp" riêng dù mẻ tổng
+    hoàn toàn bình thường)."""
+    _finish_one_me_loc(client, admin_h, "SEQ42-A", 1, batch_seq_no="42")   # 100L
+    _finish_one_me_loc(client, admin_h, "SEQ42-B", 1, batch_seq_no="42")   # 100L -> tổng 200L, vẫn Thấp
+    _finish_one_me_loc(client, admin_h, "SEQ77-A", 3, batch_seq_no="77")   # 300L
+    _finish_one_me_loc(client, admin_h, "SEQ77-B", 3, batch_seq_no="77")   # 300L -> tổng 600L, KHÔNG còn Thấp
+
+    r = client.get("/api/reports/low-yield-filter-alerts?days=30&limit=50", headers=admin_h)
+    assert r.status_code == 200, r.text
+    items = r.json()["items"]
+    seq42 = [it for it in items if it["batch_seq_no"] == "42"]
+    assert len(seq42) == 1, "phải gộp thành đúng 1 dòng cho mẻ 42, không tách 2 dòng riêng"
+    assert seq42[0]["v_l"] == 200.0
+    assert seq42[0]["lot_count"] == 2
+    assert set(seq42[0]["filter_lot_code"].split(", ")) == {"FLOT-YIELD-SEQ42-A", "FLOT-YIELD-SEQ42-B"}
+    seq77 = [it for it in items if it["batch_seq_no"] == "77"]
+    assert seq77 == [], "tổng mẻ 77 = 600L đã vượt ngưỡng Thấp -> không được báo động giả"

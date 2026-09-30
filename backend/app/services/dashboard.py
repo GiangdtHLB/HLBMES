@@ -257,24 +257,33 @@ def qc_attention_alerts(db: Session) -> dict:
 def _batch_filter_lot_yield_items(db: Session, date_from, date_to, low_l: float, high_l: float) -> list[dict]:
     """Mirror filter_yield_report.filter_line_yield_report (module Nấu-Lọc-Chiết cũ, theo
     FilterOrderTank) nhưng cho pipeline "Mẻ sản xuất" mới — BatchFilterLotBatch (1 mẻ lọc/lần
-    chạy máy) ĐÃ tự là đơn vị atomic (không bị tách ghi nhận qua nhiều FilterRecord như module
-    cũ) nên KHÔNG cần gộp theo (batch_number/order_number/batch_seq_no) — mỗi mẻ = đúng 1 dòng.
-    V lọc (V dịch nha + Nước bài khí, đổi hl -> lít) so ngưỡng Thấp/Cao cấu hình — mẻ "cuối"
-    (is_final_batch, mẻ vét) loại khỏi phân loại để không báo động giả (yêu cầu người dùng
-    2026-09-02)."""
-    batches = db.execute(
-        select(BatchFilterLotBatch)
-        .where(BatchFilterLotBatch.ended_at.is_not(None),
-               BatchFilterLotBatch.ended_at >= date_from, BatchFilterLotBatch.ended_at < date_to)
-        .order_by(BatchFilterLotBatch.ended_at)
+    chạy máy) tự là đơn vị atomic trong PHẠM VI 1 lô lọc (không bị tách ghi nhận qua nhiều
+    FilterRecord như module cũ). NHƯNG 1 mẻ nấu lớn có thể phải lọc qua NHIỀU lô lọc/tank khác
+    nhau mới hết (mỗi lô lọc tự gõ trùng "Mẻ lọc số" — batch_seq_no — để đánh dấu cùng 1 mẻ) —
+    "V lọc" thật của mẻ đó là TỔNG của mọi lô lọc cùng batch_seq_no, CỘNG DỒN bất kể khác lô
+    lọc/lệnh lọc/tank nguồn (yêu cầu người dùng 2026-09-30, ví dụ thực tế: mẻ 42 tách ra 4 lô lọc
+    T11.1378/T12.1376/T1.1375/T2.1374, tổng thật = 113.200 lít chứ không phải 4 dòng riêng lẻ
+    20.900/32.500/20.000/39.800). batch_seq_no rỗng (không gõ) không nhóm được với gì -> giữ
+    riêng theo từng batch_link_id như cũ.
+
+    Vì 1 nhóm có thể có phần tử kết thúc ở NHIỀU thời điểm khác nhau, lọc theo kỳ [date_from,
+    date_to) dựa trên `ended_at` CUỐI CÙNG của nhóm (mẻ chỉ tính "xong" khi phần cuối cùng xong)
+    — nên phải nạp TOÀN BỘ batch đã kết thúc (không lọc theo kỳ ngay từ đầu) để không bỏ sót
+    phần tử cùng nhóm kết thúc trước `date_from`.
+
+    "Mẻ cuối" (is_final_batch, mẻ vét) chỉ loại nhóm khỏi phân loại khi MỌI phần tử trong nhóm
+    đều là mẻ vét — nếu nhóm có ít nhất 1 phần KHÔNG vét, tổng cả nhóm là sản lượng thật của cả
+    mẻ (không còn là "vét" nữa) nên vẫn phân loại bình thường theo tổng."""
+    all_batches = db.execute(
+        select(BatchFilterLotBatch).where(BatchFilterLotBatch.ended_at.is_not(None))
     ).scalars().all()
-    batch_ids = [b.batch_link_id for b in batches]
+    batch_ids = [b.batch_link_id for b in all_batches]
     draws = db.execute(select(BatchFilterLotBatchDraw).where(
         BatchFilterLotBatchDraw.batch_link_id.in_(batch_ids))).scalars().all() if batch_ids else []
     draw_hl_by_batch: dict[str, float] = {}
     for d in draws:
         draw_hl_by_batch[d.batch_link_id] = draw_hl_by_batch.get(d.batch_link_id, 0.0) + (d.dich_nha_hl or 0.0)
-    filter_lot_ids = {b.filter_lot_id for b in batches}
+    filter_lot_ids = {b.filter_lot_id for b in all_batches}
     filter_lots_by_id = {fl.filter_lot_id: fl for fl in db.execute(
         select(BatchFilterLot).where(BatchFilterLot.filter_lot_id.in_(filter_lot_ids))).scalars().all()} if filter_lot_ids else {}
     from ..models.master import BeerType
@@ -282,20 +291,35 @@ def _batch_filter_lot_yield_items(db: Session, date_from, date_to, low_l: float,
     beer_types_by_id = {bt.beer_type_id: bt for bt in db.execute(
         select(BeerType).where(BeerType.beer_type_id.in_(beer_type_ids))).scalars().all()} if beer_type_ids else {}
 
+    groups: dict[tuple, list[BatchFilterLotBatch]] = {}
+    for b in all_batches:
+        key = ("seq", b.batch_seq_no) if b.batch_seq_no else ("solo", b.batch_link_id)
+        groups.setdefault(key, []).append(b)
+
     items = []
-    for b in batches:
-        fl = filter_lots_by_id.get(b.filter_lot_id)
-        bt = beer_types_by_id.get(fl.beer_type_id) if fl and fl.beer_type_id else None
-        v_dich_l = draw_hl_by_batch.get(b.batch_link_id, 0.0) * 100
-        v_daw_l = (b.nuoc_bai_khi_hl or 0.0) * 100
+    for members in groups.values():
+        last_ended = max(m.ended_at for m in members)
+        if not (date_from <= last_ended < date_to):
+            continue
+        v_dich_l = sum(draw_hl_by_batch.get(m.batch_link_id, 0.0) for m in members) * 100
+        v_daw_l = sum((m.nuoc_bai_khi_hl or 0.0) for m in members) * 100
         v_l = v_dich_l + v_daw_l
-        cls = "cuoi" if b.is_final_batch else classify_yield_l(v_l, low_l, high_l)
+        all_final = all(m.is_final_batch for m in members)
+        cls = "cuoi" if all_final else classify_yield_l(v_l, low_l, high_l)
+        lot_codes = sorted({filter_lots_by_id[m.filter_lot_id].filter_lot_code
+                            for m in members if filter_lots_by_id.get(m.filter_lot_id)})
+        fl0 = next((filter_lots_by_id.get(m.filter_lot_id) for m in members
+                   if filter_lots_by_id.get(m.filter_lot_id)), None)
+        bt0 = beer_types_by_id.get(fl0.beer_type_id) if fl0 and fl0.beer_type_id else None
         items.append({
-            "batch_link_id": b.batch_link_id, "batch_seq_no": b.batch_seq_no,
-            "filter_lot_id": fl.filter_lot_id if fl else None,
-            "filter_lot_code": fl.filter_lot_code if fl else None,
-            "beer_type": bt.name if bt else None,
-            "ended_at": b.ended_at.isoformat() if b.ended_at else None,
+            "batch_link_id": members[0].batch_link_id if len(members) == 1 else None,
+            "batch_link_ids": [m.batch_link_id for m in members],
+            "batch_seq_no": members[0].batch_seq_no,
+            "filter_lot_id": fl0.filter_lot_id if fl0 else None,
+            "filter_lot_code": ", ".join(lot_codes) if lot_codes else None,
+            "lot_count": len(members),
+            "beer_type": bt0.name if bt0 else None,
+            "ended_at": last_ended.isoformat() if last_ended else None,
             "v_dich_l": round(v_dich_l, 1), "v_daw_l": round(v_daw_l, 1),
             "v_l": round(v_l, 1), "classification": cls, "classification_label": _YIELD_LABEL[cls],
         })
