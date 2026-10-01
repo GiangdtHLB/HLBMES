@@ -3973,7 +3973,8 @@ VIEWS.batchpacklots = async function () {
     GET("/batch-pack-lots/eligible-bbt-lines").catch(() => [])]);
   const lotByCode = Object.fromEntries(lots.map(f => [f.filter_lot_id, f.filter_lot_code]));
   const bbtOpts = eligibleBbt.map(t =>
-    `<option value="${esc(t.code)}" data-fp="${esc(t.finished_product_id || "")}" data-beertype="${esc(t.beer_type_id || "")}">${esc(t.code)} — ${esc(t.name)} (còn ${t.on_hand_bbt} hl)</option>`).join("");
+    `<option value="${esc(t.code)}" data-fp="${esc(t.finished_product_id || "")}" data-beertype="${esc(t.beer_type_id || "")}">${esc(t.code)} — ${esc(t.name)} (còn ${t.on_hand_bbt} hl)` +
+    `${t.filter_lot_codes && t.filter_lot_codes.length ? " — Lô lọc " + esc(t.filter_lot_codes.join(", ")) : ""}</option>`).join("");
   // Sản phẩm chiết CHỈ hiện đúng Loại bia của dịch trong tank BBT đã chọn (hoặc sản phẩm chưa
   // gán Loại bia nào) — mirror đúng bộ lọc đã làm ở form Lệnh lọc (yêu cầu người dùng 2026-09-01).
   const pkFpOpts = (beerTypeId, selected) => {
@@ -11240,17 +11241,19 @@ VIEWS.reports = async function () {
       </div>
       <input class="searchbox" data-tbl="t_filterrep" placeholder="Tìm theo mẻ lọc số, mã lô lọc, tank, loại bia..."/>
       <div class="tablewrap"><table id="t_filterrep">
-        <thead><tr><th>Mẻ lọc số</th><th>Kiểu</th><th>Tank lên men</th><th>Tank thành phẩm</th><th>Ngày lọc</th><th>Sản lượng lọc (lít)</th><th>Loại bia</th></tr></thead>
+        <thead><tr><th>Mẻ lọc số</th><th>Kiểu</th><th>Mẻ cuối</th><th>Tank lên men</th><th>Tank thành phẩm</th><th>Ngày lọc</th><th>Sản lượng lọc (lít)</th><th>Dịch bia</th><th>Loại bia</th></tr></thead>
         <tbody>${items.map(r => `<tr>
           <td><code class="k">${esc(r.batch_seq_no || r.filter_lot_code || "—")}</code>
             ${r.lot_count > 1 ? `<div class="muted" style="font-size:11px">${esc(r.filter_lot_code)} (tổng ${r.lot_count} lô)</div>` : ""}</td>
           <td>${r.is_blend ? '<span class="badge held">Phối</span>' : '<span class="muted">Không phối</span>'}</td>
+          <td>${r.is_final ? '<span class="badge on_hold">Mẻ cuối</span>' : '<span class="muted">—</span>'}</td>
           <td class="muted">${r.tanks.length ? r.tanks.map(t => `<button type="button" class="btn sm sec" data-tankqc="${esc(t.tank_id)}" style="margin:1px">${esc(t.tank_lm || "?")}</button>`).join(" ") : "—"}</td>
           <td class="muted">${esc(r.to_bbt || "—")}</td>
           <td class="muted">${r.ended_at ? fmt(r.ended_at) : "—"}</td>
           <td>${r.v_l.toLocaleString("vi-VN")}</td>
+          <td class="muted">${r.product_names && r.product_names.length ? esc(r.product_names.join(", ")) : "—"}</td>
           <td class="muted">${esc(r.beer_type_name || "—")}</td></tr>`).join("") ||
-          '<tr><td colspan=7 class="muted">Chưa có dữ liệu.</td></tr>'}</tbody>
+          '<tr><td colspan=9 class="muted">Chưa có dữ liệu.</td></tr>'}</tbody>
       </table></div>
     </div>`;
   }

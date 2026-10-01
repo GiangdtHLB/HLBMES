@@ -996,8 +996,13 @@ def _bbt_aggregate(db: Session) -> dict:
         on_hand = round(sum(fl.on_hand or 0.0 for fl in group), 3)
         all_finished = all(fl.ended_at is not None for fl in group)
         all_qc_approved = all(fl.qc_approved for fl in group)
+        # Chỉ gồm mã lô lọc của các lô CÒN tồn thật trong tank (on_hand>0) — lô đã chiết hết từ
+        # đợt trước không còn đóng góp dịch vật lý hiện tại, liệt kê vào sẽ gây hiểu nhầm (yêu
+        # cầu người dùng 2026-10-01: "chỗ này hiển thị cả Mã lô lọc thêm vào nữa" ở dropdown chọn
+        # tank BBT để chiết).
+        filter_lot_codes = sorted({fl.filter_lot_code for fl in group if (fl.on_hand or 0.0) > 1e-6})
         out[code] = {"on_hand_bbt": on_hand, "all_finished": all_finished,
-                    "all_qc_approved": all_qc_approved}
+                    "all_qc_approved": all_qc_approved, "filter_lot_codes": filter_lot_codes}
     return out
 
 
@@ -1050,7 +1055,8 @@ def eligible_bbt_lines_for_pack(db: Session) -> list[dict]:
         out.append({"code": l.code, "name": l.name, "on_hand_bbt": a["on_hand_bbt"],
                     "product_id": fl.product_id if fl else None,
                     "beer_type_id": fl.beer_type_id if fl else None,
-                    "finished_product_id": fl.finished_product_id if fl else None})
+                    "finished_product_id": fl.finished_product_id if fl else None,
+                    "filter_lot_codes": a["filter_lot_codes"]})
     return out
 
 
