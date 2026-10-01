@@ -168,7 +168,7 @@ def test_transfer_kcpx_request_edit_blocked_after_kcs_release(client, admin_h, t
     assert recv.json()["status"] == "on_hold"
 
     req = client.post("/api/warehouse/transfer-kcpx-requests", headers=thukho_h,
-                      json={"lot_id": lot_id, "quantity": 20})
+                      json={"lot_id": lot_id, "quantity": 20, "require_kcs": True})
     assert req.status_code == 201, req.text
     request_id = req.json()["request_id"]
 

@@ -312,7 +312,7 @@ def undo_transfer_px_request(request_id: str, db: Session = Depends(get_db),
 def create_transfer_kcpx_request(payload: TransferKcPxRequestIn, db: Session = Depends(get_db),
                                  user: User = Depends(get_current_user)):
     return svc.create_transfer_kcpx_request(db, payload.lot_id, payload.quantity, user, payload.reason,
-                                            payload.requested_transfer_date)
+                                            payload.requested_transfer_date, payload.require_kcs)
 
 
 @router.get("/transfer-kcpx-requests", response_model=list[TransferKcPxRequestOut])

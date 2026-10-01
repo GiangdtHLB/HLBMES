@@ -1263,6 +1263,10 @@ class TransferKcPxRequestIn(BaseModel):
     quantity: float
     reason: Optional[str] = None
     requested_transfer_date: Optional[datetime] = None
+    # Tick chọn = lô bị đưa về HOLD ngay lúc tạo, buộc KCS duyệt lại trước khi Phân xưởng duyệt
+    # được; KHÔNG tick (mặc định) = bỏ qua KCS, chuyển thẳng sang Phân xưởng để duyệt (yêu cầu
+    # người dùng 2026-09-30).
+    require_kcs: bool = False
 
 
 class TransferKcPxRejectIn(BaseModel):
@@ -1285,6 +1289,7 @@ class TransferKcPxRequestOut(ORMModel):
     workshop_location_id: Optional[str] = None
     requested_transfer_date: Optional[datetime] = None
     reversed: bool
+    require_kcs: bool = False
     created_by: Optional[str] = None
     created_at: datetime
     approved_by: Optional[str] = None
@@ -1757,6 +1762,7 @@ class StageQcGroupIn(BaseModel):
     # tương ứng = áp dụng mọi dịch bia/loại bia.
     product_id: Optional[str] = None
     beer_type_id: Optional[str] = None
+    category: Optional[str] = None   # Loại sản phẩm (Bia chai/lon/hơi/tươi) — dùng với stage loc|thanh_pham — để trống = áp dụng mọi loại sản phẩm
     finished_product_id: Optional[str] = None   # sản phẩm đóng gói (thường dùng với stage=thanh_pham) — để trống = áp dụng mọi sản phẩm
     mandatory: bool = True
 
@@ -1970,6 +1976,14 @@ class BatchFilterOrderCreateIn(BaseModel):
     blend_mode: Optional[str] = None    # tự suy từ số nguồn nếu bỏ trống
     volume_tolerance_hl: float = 0.0
     beer_type_id: Optional[str] = None
+    # Bắt buộc xác nhận lại khi Loại bia chọn KHÁC với Loại bia suy được từ chính Dịch bia của
+    # nguồn (xem services/batch_pipeline.py::create_filter_order) — client tự set True sau khi
+    # người dùng xác nhận ở hộp thoại cảnh báo "không phải Dịch bia gốc".
+    confirm_beer_type_mismatch: bool = False
+    category: Optional[str] = None   # Loại sản phẩm (Bia chai/lon/hơi/tươi) — tra chỉ tiêu Lọc
+    # "Ngày giờ tạo lệnh" — mốc hiệu lực người lập TỰ CHỌN (có thể lùi ngày); bỏ trống = bây giờ.
+    # Dùng để soi tồn vật tư dự kiến TẠI thời điểm này, KHÁC created_at (luôn = lúc bấm nút thật).
+    effective_at: Optional[datetime] = None
     finished_product_id: Optional[str] = None
     kcs_lot_no: Optional[str] = None
     note: Optional[str] = None
@@ -1984,11 +1998,15 @@ class BatchFilterOrderOut(BaseModel):
     planned_volume_hl: float = 0.0
     volume_tolerance_hl: float = 0.0
     beer_type_id: Optional[str] = None
+    beer_type_mismatch: bool = False
+    category: Optional[str] = None
     finished_product_id: Optional[str] = None
     kcs_lot_no: Optional[str] = None
     note: Optional[str] = None
     created_by: Optional[str] = None
     created_at: datetime
+    effective_at: Optional[datetime] = None
+    material_shortages: list[str] = []
     locked: bool = False
     lot_count: int = 0
     actual_volume_hl: float = 0.0
@@ -2095,6 +2113,8 @@ class BatchTankOut(ORMModel):
     product_name: Optional[str] = None
     beer_type_name: Optional[str] = None
     qc_fail_count: int = 0
+    has_len_men_chinh_result: bool = False
+    has_len_men_phu_result: bool = False
 
 
 class BatchFilterLotSourceIn(BaseModel):
@@ -2128,6 +2148,8 @@ class BatchFilterLotOut(ORMModel):
     to_bbt: Optional[str] = None
     product_id: Optional[str] = None
     beer_type_id: Optional[str] = None
+    beer_type_mismatch: bool = False
+    category: Optional[str] = None
     finished_product_id: Optional[str] = None
     v_dich_hl: float = 0.0
     nuoc_bai_khi_hl: float = 0.0
@@ -2146,6 +2168,7 @@ class BatchFilterLotOut(ORMModel):
     created_at: datetime
     locked: bool = False
     quality_status: str
+    has_loc_result: bool = False
 
 
 class BatchFilterLotSourceOut(ORMModel):

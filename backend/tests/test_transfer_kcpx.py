@@ -3,8 +3,10 @@ ngang: không có receive() đi kèm — lô đã tồn tại từ trước). Th
 warehouse.issue) tạo đề nghị — CHƯA động tồn kho; Thủ kho phân xưởng (vanhanh, warehouse.request)
 duyệt mới thật sự chuyển, BẮT BUỘC chọn vị trí cất tại Phân xưởng (services/warehouse.py::
 create_transfer_kcpx_request/approve_transfer_kcpx_request/reject_transfer_kcpx_request/
-undo_transfer_kcpx_request). Nếu vật tư có chỉ tiêu chất lượng bắt buộc, TẠO đề nghị sẽ đưa lô
-về lại ON_HOLD (dù trước đó đã qua QC) để buộc KCS duyệt lại trước khi Phân xưởng duyệt được."""
+undo_transfer_kcpx_request). Người tạo đề nghị TỰ CHỌN (tick `require_kcs` lúc tạo, mặc định
+KHÔNG chọn) có đưa lô về lại ON_HOLD (dù trước đó đã qua QC) để buộc KCS duyệt lại trước khi Phân
+xưởng duyệt được hay không — KHÔNG còn tự suy theo vật tư có chỉ tiêu chất lượng bắt buộc trong
+Danh mục nữa (yêu cầu người dùng 2026-09-30)."""
 
 import os
 import tempfile
@@ -232,6 +234,9 @@ def test_undo_transfer_kcpx_blocked_when_lot_used_further(client, admin_h, thukh
 
 
 def test_qc_required_material_rehold_on_create_blocks_until_kcs_release(client, admin_h, thukho_h, vanhanh_h, kcs_h):
+    """Tick `require_kcs=True` lúc tạo -> lô bị đưa lại về HOLD dù trước đó đã qua QC, Phân xưởng
+    không duyệt được cho tới khi KCS duyệt lại (bất kể vật tư có/không cấu hình chỉ tiêu bắt buộc
+    trong Danh mục — require_kcs giờ là lựa chọn thủ công, không tự suy từ material nữa)."""
     mat_id = _create_material(client, admin_h, "KCPX-QC-01")
     p = client.post("/api/qc/parameters", headers=admin_h,
                     json={"code": "KCPX_QC_PARAM", "name": "Độ ẩm", "unit": "%", "lsl": 3, "usl": 6})
@@ -262,10 +267,12 @@ def test_qc_required_material_rehold_on_create_blocks_until_kcs_release(client, 
     lot = _get_lot(client, admin_h, recv["lot_id"])
     assert lot["status"] != "on_hold"
 
-    # Tạo đề nghị điều chuyển CT->PX cho lô ĐÃ được duyệt trước đó -> vẫn bị đưa lại về HOLD.
+    # Tạo đề nghị điều chuyển CT->PX cho lô ĐÃ được duyệt trước đó, TICK require_kcs -> bị đưa
+    # lại về HOLD.
     r = client.post("/api/warehouse/transfer-kcpx-requests", headers=thukho_h,
-                    json={"lot_id": recv["lot_id"], "quantity": 60})
+                    json={"lot_id": recv["lot_id"], "quantity": 60, "require_kcs": True})
     assert r.status_code == 201, r.text
+    assert r.json()["require_kcs"] is True
     request_id = r.json()["request_id"]
     lot = _get_lot(client, admin_h, recv["lot_id"])
     assert lot["status"] == "on_hold"
@@ -281,6 +288,54 @@ def test_qc_required_material_rehold_on_create_blocks_until_kcs_release(client, 
     rel2 = client.post("/api/quality/hold", headers=kcs_h,
                        json={"scope_type": "lot", "scope_id": lot["lot_id"], "on_hold": False})
     assert rel2.status_code == 200, rel2.text
+    ap = client.post(f"/api/warehouse/transfer-kcpx-requests/{request_id}/approve", headers=vanhanh_h,
+                     json={"workshop_location_id": loc_id})
+    assert ap.status_code == 200, ap.text
+    assert ap.json()["status"] == "approved"
+
+
+def test_require_kcs_false_default_skips_hold_even_for_qc_required_material(client, admin_h, thukho_h, vanhanh_h):
+    """KHÔNG tick require_kcs (mặc định False) -> lô KHÔNG bị đưa về HOLD dù vật tư đang cấu hình
+    chỉ tiêu chất lượng bắt buộc trong Danh mục -> Phân xưởng duyệt được ngay, không cần qua KCS
+    (yêu cầu người dùng 2026-09-30: "nếu không chọn thì mặc định lô đó chuyển sang phân xưởng để
+    duyệt, không cần duyệt qua KCS")."""
+    mat_id = _create_material(client, admin_h, "KCPX-QC-02")
+    p = client.post("/api/qc/parameters", headers=admin_h,
+                    json={"code": "KCPX_QC_PARAM2", "name": "Độ ẩm 2", "unit": "%", "lsl": 3, "usl": 6})
+    assert p.status_code == 201, p.text
+    param_id = p.json()["param_id"]
+    g = client.post("/api/qc/groups", headers=admin_h,
+                    json={"code": "KCPX-GRP-02", "name": "Chỉ tiêu điều chuyển kcpx test 2"})
+    assert g.status_code == 201, g.text
+    group_id = g.json()["group_id"]
+    it = client.post(f"/api/qc/groups/{group_id}/items", headers=admin_h,
+                     json={"param_id": param_id, "mandatory": True})
+    assert it.status_code == 201, it.text
+    link = client.post(f"/api/materials/{mat_id}/qc-groups", headers=admin_h,
+                       json={"group_id": group_id, "mandatory": True})
+    assert link.status_code == 201, link.text
+
+    recv = _receive_lot(client, thukho_h, "KCPX-LOT-QC-02", mat_id, 30)
+    lot = _get_lot(client, admin_h, recv["lot_id"])
+    assert lot["status"] == "on_hold"   # nhận hàng vẫn HOLD như bình thường (không đổi)
+
+    # KCS duyệt lần đầu -> released, rồi mới tạo đề nghị điều chuyển (không tick require_kcs).
+    client.post("/api/quality/results", headers=thukho_h,
+               json={"scope_type": "lot", "scope_id": lot["lot_id"], "parameter": "KCPX_QC_PARAM2",
+                     "value": 4.5, "lower_limit": 3, "upper_limit": 6})
+    client.post("/api/quality/hold", headers=admin_h,
+               json={"scope_type": "lot", "scope_id": lot["lot_id"], "on_hold": False})
+
+    r = client.post("/api/warehouse/transfer-kcpx-requests", headers=thukho_h,
+                    json={"lot_id": recv["lot_id"], "quantity": 30})
+    assert r.status_code == 201, r.text
+    assert r.json()["require_kcs"] is False
+    request_id = r.json()["request_id"]
+    lot = _get_lot(client, admin_h, recv["lot_id"])
+    assert lot["status"] != "on_hold"   # KHÔNG bị đưa lại về HOLD dù vật tư có chỉ tiêu bắt buộc
+
+    # Phân xưởng duyệt được NGAY, không cần KCS xử lý gì thêm.
+    loc_id = _create_workshop_location(client, admin_h, "KCPX-LOC-QC-02")
     ap = client.post(f"/api/warehouse/transfer-kcpx-requests/{request_id}/approve", headers=vanhanh_h,
                      json={"workshop_location_id": loc_id})
     assert ap.status_code == 200, ap.text

@@ -165,6 +165,14 @@ class TransferKcPxRequest(Base):
     # StockMovement transfer, mirror đúng MaterialRequest.requested_receipt_date (yêu cầu người
     # dùng 2026-09-16: "vật tư vào kho phân xưởng ... chính là ngày đề nghị điều chuyển").
     requested_transfer_date: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+    # Người tạo đề nghị TỰ CHỌN có bắt lô về ON_HOLD chờ KCS duyệt lại hay không — KHÔNG còn tự
+    # suy theo requires_kcs_hold(material_id) như trước (yêu cầu người dùng 2026-09-30: "nếu chọn
+    # tích vào đó thì mới cần KCS nhập chỉ tiêu, nếu không chọn thì mặc định lô đó chuyển sang
+    # phân xưởng để duyệt, không cần duyệt qua KCS" — mặc định KHÔNG chọn = bỏ qua KCS, kể cả vật
+    # tư đang cấu hình chỉ tiêu bắt buộc trong Danh mục). Lưu lại trên chính đề nghị (không suy
+    # lại từ material mỗi lần đọc) để _assert_kcpx_editable/approve tra đúng quyết định gốc lúc
+    # tạo, không lệch nếu Danh mục đổi cấu hình chỉ tiêu SAU KHI đề nghị đã tạo.
+    require_kcs: Mapped[bool] = mapped_column(Boolean, default=False)
     reversed: Mapped[bool] = mapped_column(Boolean, default=False)
     created_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
