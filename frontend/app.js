@@ -4040,25 +4040,30 @@ VIEWS.batchpacklots = async function () {
     if (!qty || qty <= 0) throw new Error("Nhập Số lượng cấp chiết (lít) > 0.");
     const lotNo = $("pk_lotno").value.trim();
     if (!lotNo) throw new Error("Nhập số lô bia.");
-    // Số lô bia không còn bị chặn cứng khi trùng — chỉ hỏi xác nhận lại (yêu cầu người dùng
-    // 2026-10-01: "cho phép nhập 2 lô giống nhau và hỏi bạn có muốn nhập 2 lô giống nhau
-    // không"), mirror cảnh báo confirm_beer_type_mismatch ở Lệnh lọc: hỏi TRƯỚC (đồng bộ, có
-    // thể hủy) dựa trên danh sách đã tải sẵn — server vẫn tự kiểm tra lại độc lập (phòng trường
-    // hợp danh sách đã tải bị cũ), không chỉ tin mỗi check phía trước.
-    const dupLot = packLots.find(p => p.lot_no === lotNo);
-    if (dupLot && !confirm(`Số lô bia "${lotNo}" đã dùng cho lô thành phẩm "${dupLot.pack_lot_code}".\n\n`
-      + "Bạn có chắc vẫn muốn dùng lại số lô bia này không?")) return;
     const dateRaw = $("pk_date").value;
     // Mã lô TP là mã nội bộ để truy xuất — tự sinh, người dùng chỉ cần quan tâm Số lô bia
     // (mirror bottle_code tự sinh ở màn Chiết cũ, xem frontend/app.js ~10340).
-    const p = await POST("/batch-pack-lots", {
+    const basePayload = {
       from_bbt: $("pk_bbt").value, qty,
       pack_lot_code: "PKG-" + Date.now().toString().slice(-6),
       finished_product_id: $("pk_fp").value, lot_no: lotNo,
       line: $("pk_line").value,
       pack_date: dateRaw ? new Date(dateRaw).toISOString() : null,
-      confirm_duplicate_lot_no: !!dupLot,
-    });
+    };
+    // Số lô bia không còn bị chặn cứng khi trùng — chỉ hỏi xác nhận lại (yêu cầu người dùng
+    // 2026-10-01: "cho phép nhập 2 lô giống nhau và hỏi bạn có muốn nhập 2 lô giống nhau
+    // không"). Dựa THẲNG vào phản hồi thật từ server thay vì tự đoán trùng ở client bằng
+    // danh sách packLots đã tải lúc mở màn — danh sách đó có thể đã CŨ (VD vừa tạo xong 1 lô
+    // dùng chung số lô bia ngay trước đó mà màn chưa kịp render lại), khiến bỏ sót cảnh báo và
+    // lỗi thẳng 409 không rõ ràng thay vì hỏi trước (lỗi thực tế người dùng gặp 2026-10-01).
+    let p;
+    try {
+      p = await POST("/batch-pack-lots", basePayload);
+    } catch (e) {
+      if (!e.message.includes("Bạn có chắc vẫn muốn dùng lại số lô bia này không")) throw e;
+      if (!confirm(e.message)) return;
+      p = await POST("/batch-pack-lots", { ...basePayload, confirm_duplicate_lot_no: true });
+    }
     toast("Đã tạo lô thành phẩm " + p.pack_lot_code); render("batchpacklots");
   });
   document.querySelectorAll("[data-pklot2]").forEach(tr => tr.onclick = () => showBatchPackLot(tr.dataset.pklot2));
@@ -5182,7 +5187,7 @@ VIEWS.quality = async function () {
           <td class="muted">${p.stage === "thanh_pham" ? esc(p.lot_no || "—") : ""}</td>
           <td class="${declaredOk ? "" : "muted"}">${declaredOk ? '<span style="color:var(--green)">✅ Đã khai báo</span>' :
             p.pending.map(c => esc(paramByCode[c] ? paramByCode[c].name : c)).join(", ")}</td>
-          <td><button class="btn sm" data-declare="${esc(p.stage)}|${esc(p.scope_type)}|${esc(p.scope_id)}|${esc(p.product_id || "")}|${esc(p.beer_type_id || "")}|${esc(p.finished_product_id || "")}">${esc(btnLabel)}</button></td>
+          <td><button class="btn sm" data-declare="${esc(p.stage)}|${esc(p.scope_type)}|${esc(p.scope_id)}|${esc(p.product_id || "")}|${esc(p.beer_type_id || "")}|${esc(p.finished_product_id || "")}|${esc(p.category || "")}">${esc(btnLabel)}</button></td>
           <td>${hasDetail ? `<button type="button" class="btn sm sec" data-pqcdetail="${pi}">Xem chi tiết</button>` : ""}</td></tr>`; }).join("") ||
           '<tr><td colspan=8 class="muted">Không có công đoạn nào đang chờ.</td></tr>'}</tbody>
       </table></div>
@@ -5454,7 +5459,7 @@ VIEWS.quality = async function () {
   // công đoạn đó, khai xong lưu ngay tại đây, KHÔNG điều hướng rời màn Chất lượng (khác
   // data-navscope ở trên — dùng cho "Kết quả QC gần đây" vốn cần xem đầy đủ ngữ cảnh mẻ/lô).
   document.querySelectorAll("[data-declare]").forEach(b => b.onclick = () => {
-    const [stage, scopeType, scopeId, productId, beerTypeId, finishedProductId] = b.dataset.declare.split("|");
+    const [stage, scopeType, scopeId, productId, beerTypeId, finishedProductId, category] = b.dataset.declare.split("|");
     // Lên men chính/phụ (Tank lên men, Mẻ SX) lấy mẫu NHIỀU LẦN — phải mở đúng
     // openFermentQcSampleModal (hiện đủ lịch sử mọi lần lấy mẫu + form thêm lần mới), không phải
     // openStageQcModal (chỉ ghi đè 1 giá trị hiện tại, dùng cho Nấu/Lọc/Chiết) — yêu cầu người
@@ -5466,7 +5471,8 @@ VIEWS.quality = async function () {
     }
     openStageQcModal(stage, scopeType, scopeId, {
       productId: productId || undefined, beerTypeId: beerTypeId || undefined,
-      finishedProductId: finishedProductId || undefined, displayId: scopeId,
+      finishedProductId: finishedProductId || undefined, category: category || undefined,
+      displayId: scopeId,
     }, () => render("quality"));
   });
   wirePaginate("t_qcresults", 10);
@@ -9224,6 +9230,7 @@ async function openStageQcModal(stage, scopeType, scopeId, opts, onBack) {
   if (opts.productId) qs += `&product_id=${encodeURIComponent(opts.productId)}`;
   if (opts.beerTypeId) qs += `&beer_type_id=${encodeURIComponent(opts.beerTypeId)}`;
   if (opts.finishedProductId) qs += `&finished_product_id=${encodeURIComponent(opts.finishedProductId)}`;
+  if (opts.category) qs += `&category=${encodeURIComponent(opts.category)}`;
   const st = await GET(`/brewing/qc-status?${qs}`);
   const recordedByParam = Object.fromEntries(st.recorded.map(r => [r.parameter, r]));
   // Lần khai báo ĐẦU TIÊN cho cả công đoạn (chưa ai ghi chỉ tiêu nào): dùng 1 mốc ngày giờ lấy
