@@ -24,7 +24,10 @@ def upgrade() -> None:
         batch_op.add_column(sa.Column('usage_stages', sa.JSON(), nullable=True))
     op.execute("UPDATE material SET usage_stages = '[]' WHERE usage_stages IS NULL")
     with op.batch_alter_table('material') as batch_op:
-        batch_op.alter_column('usage_stages', nullable=False)
+        # existing_type BẮT BUỘC khi đổi NULL/NOT NULL: MSSQL cần kiểu để sinh
+        # "ALTER TABLE ... ALTER COLUMN <col> <type> NOT NULL" (alembic báo lỗi cứng nếu thiếu;
+        # SQLite recreate bảng nên không cần, vì vậy bỏ sót không lộ khi test trên SQLite).
+        batch_op.alter_column('usage_stages', existing_type=sa.JSON(), nullable=False)
 
 
 def downgrade() -> None:
