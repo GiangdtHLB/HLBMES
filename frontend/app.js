@@ -4323,6 +4323,7 @@ async function showBatchPackLot(packLotId) {
   let pkQcQs = `stage=thanh_pham&scope_type=batch_pack_lot&scope_id=${encodeURIComponent(packLotId)}`;
   if (f.product_id) pkQcQs += `&product_id=${encodeURIComponent(f.product_id)}`;
   if (f.beer_type_id) pkQcQs += `&beer_type_id=${encodeURIComponent(f.beer_type_id)}`;
+  if (f.category) pkQcQs += `&category=${encodeURIComponent(f.category)}`;
   if (p.finished_product_id) pkQcQs += `&finished_product_id=${encodeURIComponent(p.finished_product_id)}`;
   const pkQc = await GET(`/brewing/qc-status?${pkQcQs}`).catch(() => null);
   // "Người nhập/ngày giờ nhập" cho Giờ bắt đầu chiết/SL cấp chiết — mirror showBatch, đọc lại
