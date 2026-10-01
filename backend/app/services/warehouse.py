@@ -1486,7 +1486,7 @@ def _lock_lot(db, lot_id):
 # 1 phiếu (MaterialRequest) có thể gồm nhiều dòng vật tư khác nhau (MaterialRequestLine);
 # mỗi dòng xử lý duyệt/từ chối độc lập vì mỗi vật tư cần chọn lô riêng.
 
-def _line_dict(db: Session, line: MaterialRequestLine, requested_receipt_date=None) -> dict:
+def _line_dict(db: Session, line: MaterialRequestLine, requested_receipt_date=None, cache: dict = None) -> dict:
     # fulfilled_lot_id/fulfilled_qty chỉ giữ lô CUỐI CÙNG đã dùng (schema cũ, 1 dòng = 1 lô) —
     # từ khi fulfill_all_lines hỗ trợ tách 1 dòng thành NHIỀU lô theo FIFO (yêu cầu người dùng
     # 2026-09-18, xem fulfill_all_lines), danh sách ĐẦY ĐỦ các lô thực đã dùng cho dòng này lấy
@@ -1500,8 +1500,11 @@ def _line_dict(db: Session, line: MaterialRequestLine, requested_receipt_date=No
     # "Tồn kho công ty (tại ngày đề nghị)" — hiển thị đúng con số dùng để chặn tạo/sửa phiếu
     # (_stock_at_company_as_of/_stock_at_company), để người dùng thấy TRƯỚC khi bấm lưu thay vì
     # chỉ biết qua thông báo lỗi (yêu cầu người dùng 2026-09-23: "thêm cho tôi 1 cột tồn kho tại
-    # kho công ty tại thời điểm ngày đề nghị nhận kho").
-    company_stock_as_of = (_stock_at_company_as_of(db, line.material_id, requested_receipt_date)
+    # kho công ty tại thời điểm ngày đề nghị nhận kho"). `cache` (tùy chọn, xem _stock_at_company_as_of)
+    # — truyền qua để tái dùng kết quả dựng lại tồn kho giữa nhiều dòng/phiếu CÙNG 1
+    # requested_receipt_date thay vì quét lại toàn bộ StockMovement mỗi dòng (2026-10-01, audit
+    # hiệu năng "Xuất theo đề nghị" — 46 phiếu × nhiều dòng/phiếu từng mất >20s vì gọi lặp lại).
+    company_stock_as_of = (_stock_at_company_as_of(db, line.material_id, requested_receipt_date, cache)
                            if requested_receipt_date is not None else _stock_at_company(db, line.material_id))
     return {"line_id": line.line_id, "request_id": line.request_id, "seq": line.seq,
             "material_id": line.material_id, "quantity": line.quantity, "uom": line.uom,
@@ -1526,13 +1529,18 @@ def _source_label(db: Session, source_type: str, source_id: str) -> Optional[str
     return None
 
 
-def _request_dict(db: Session, req: MaterialRequest, lines: list[MaterialRequestLine]) -> dict:
+def _request_dict(db: Session, req: MaterialRequest, lines: list[MaterialRequestLine], cache: dict = None) -> dict:
+    # `cache`: dict dùng chung cho _stock_at_company_as_of (mặc định tự tạo riêng cho phiếu này
+    # nếu không được truyền sẵn — MỌI dòng của CÙNG 1 phiếu luôn cùng 1 requested_receipt_date,
+    # nên dựng lại tồn kho 1 lần là đủ cho cả phiếu thay vì lặp lại theo từng dòng).
+    if cache is None:
+        cache = {}
     return {"request_id": req.request_id, "request_code": req.request_code, "note": req.note,
             "requested_by": req.requested_by, "requested_at": req.requested_at,
             "requested_receipt_date": req.requested_receipt_date,
             "source_type": req.source_type, "source_id": req.source_id,
             "source_label": _source_label(db, req.source_type, req.source_id),
-            "lines": [_line_dict(db, l, req.requested_receipt_date) for l in sorted(lines, key=lambda l: l.seq)]}
+            "lines": [_line_dict(db, l, req.requested_receipt_date, cache) for l in sorted(lines, key=lambda l: l.seq)]}
 
 
 def _stock_at_company(db: Session, material_id: str) -> float:
@@ -1550,14 +1558,26 @@ def _stock_at_company(db: Session, material_id: str) -> float:
     return sum(q for q, loc in rows if loc_matches(loc)) or 0.0
 
 
-def _stock_at_company_as_of(db: Session, material_id: str, ts) -> float:
+def _stock_at_company_as_of(db: Session, material_id: str, ts, cache: dict = None) -> float:
     """Tổng tồn tại Kho công ty của 1 vật tư tính đến hết `ts` — dùng để chặn TẠO/SỬA Đề nghị
     nhận kho không vượt quá tồn TẠI ĐÚNG "Ngày đề nghị nhận kho" đang khai, không phải tồn thật
     HIỆN TẠI (mirror as_of dispense.py/fulfill_request_line's as-of check) — yêu cầu người dùng
     2026-09-19: "Khi tạo đề nghị nhận kho, nếu ... vật tư tồn trong công ty kho tính tại ngày
-    giờ đề nghị nhận không đủ, thì không cho tạo phiếu đề nghị nhận."."""
-    return round(sum(r["quantity"] for r in lot_on_hand_as_of(db, ts, "Kho công ty")
-                     if r["material_id"] == material_id), 4)
+    giờ đề nghị nhận không đủ, thì không cho tạo phiếu đề nghị nhận."
+
+    `lot_on_hand_as_of` quét lại TOÀN BỘ StockMovement mỗi lần gọi (dựng lại lịch sử từ đầu) —
+    tốn dần theo thời gian khi bảng StockMovement lớn lên. `cache` (tùy chọn, dict do caller tự
+    tạo/giữ) ghi nhớ kết quả theo `ts` để TÁI DÙNG giữa nhiều lần gọi CÙNG 1 mốc `ts` (VD nhiều
+    dòng/nhiều phiếu cùng 1 "Ngày đề nghị nhận kho") thay vì quét lại từ đầu mỗi lần — 2026-10-01,
+    audit hiệu năng: "Xuất theo đề nghị" (list_requests) từng mất >20s vì gọi hàm này hàng trăm
+    lần (mỗi dòng/phiếu 1 lần) với rất nhiều mốc `ts` trùng nhau giữa các dòng/phiếu."""
+    if cache is not None:
+        if ts not in cache:
+            cache[ts] = lot_on_hand_as_of(db, ts, "Kho công ty")
+        rows = cache[ts]
+    else:
+        rows = lot_on_hand_as_of(db, ts, "Kho công ty")
+    return round(sum(r["quantity"] for r in rows if r["material_id"] == material_id), 4)
 
 
 def _aggregate_source_material_lines(db: Session, source_type: str, source_id: str) -> list[dict]:
@@ -1686,6 +1706,10 @@ def create_request(db: Session, payload: dict, user: User) -> dict:
     if not lines_payload:
         raise DomainError("Đề nghị phải có ít nhất 1 dòng vật tư.")
     ts = payload.get("requested_receipt_date")
+    # Mọi dòng của 1 phiếu MỚI TẠO luôn chia sẻ ĐÚNG 1 `ts` — cache dùng chung để tránh quét lại
+    # StockMovement mỗi dòng (2026-10-01, audit hiệu năng, cùng lớp lỗi đã sửa ở list_requests/
+    # fulfill_all_lines/fulfill_request_line).
+    asof_cache: dict = {}
     for line in lines_payload:
         mat = db.get(Material, line["material_id"])
         if not mat:
@@ -1693,7 +1717,8 @@ def create_request(db: Session, payload: dict, user: User) -> dict:
         qty = float(line["quantity"])
         if qty <= 0:
             raise DomainError("Số lượng đề nghị phải > 0.")
-        on_hand = _stock_at_company_as_of(db, line["material_id"], ts) if ts is not None else _stock_at_company(db, line["material_id"])
+        on_hand = (_stock_at_company_as_of(db, line["material_id"], ts, asof_cache) if ts is not None
+                  else _stock_at_company(db, line["material_id"]))
         if qty > on_hand:
             when = f" tính đến ngày đề nghị nhận kho {ts:%d/%m/%Y %H:%M}" if ts is not None else " hiện có"
             raise DomainError(
@@ -1739,12 +1764,18 @@ def list_requests(db: Session, status: str = None, limit: int = 500, offset: int
     lines_by_request: dict[str, list] = {}
     for l in all_lines:
         lines_by_request.setdefault(l.request_id, []).append(l)
+    # 1 cache DÙNG CHUNG cho cả trang (không phải riêng từng phiếu) — nhiều phiếu khác nhau
+    # thường trùng NGUYÊN "Ngày đề nghị nhận kho" (VD cùng khai theo giờ chốt ca/giờ duyệt lệnh
+    # nấu), nên gộp cache ở đây tái dùng được GIỮA CÁC PHIẾU, không chỉ giữa các dòng trong 1
+    # phiếu (xem _stock_at_company_as_of) — đây là chỗ quyết định hiệu năng của trang "Xuất theo
+    # đề nghị" (2026-10-01).
+    as_of_cache: dict = {}
     out = []
     for h in headers:
         lines = lines_by_request.get(h.request_id, [])
         if status and not any(l.status == status for l in lines):
             continue
-        out.append(_request_dict(db, h, lines))
+        out.append(_request_dict(db, h, lines, as_of_cache))
     return out
 
 
@@ -1806,6 +1837,8 @@ def update_request(db: Session, request_id: str, payload: dict, user: User) -> d
             raise DomainError("Phiếu đã có vật tư được xuất — không thể sửa ngày đề nghị nhận kho nữa.")
         req.requested_receipt_date = payload["requested_receipt_date"]
     ts = req.requested_receipt_date
+    # Cache dùng chung — xem create_request (2026-10-01, audit hiệu năng).
+    asof_cache: dict = {}
     for line_upd in payload.get("lines") or []:
         line = _get_request_line(db, request_id, line_upd["line_id"])
         if line.status != "pending":
@@ -1821,7 +1854,8 @@ def update_request(db: Session, request_id: str, payload: dict, user: User) -> d
         # Cùng mốc "Ngày đề nghị nhận kho" (as-of) như create_request, xem _stock_at_company_
         # as_of — nếu sửa số lượng/ngày khiến vượt tồn tại đúng ngày đó thì chặn (yêu cầu người
         # dùng 2026-09-19).
-        on_hand = _stock_at_company_as_of(db, new_material_id, ts) if ts is not None else _stock_at_company(db, new_material_id)
+        on_hand = (_stock_at_company_as_of(db, new_material_id, ts, asof_cache) if ts is not None
+                  else _stock_at_company(db, new_material_id))
         if new_qty > on_hand:
             when = f" tính đến ngày đề nghị nhận kho {ts:%d/%m/%Y %H:%M}" if ts is not None else " hiện có"
             raise DomainError(
@@ -1904,9 +1938,16 @@ def delete_request_line(db: Session, request_id: str, line_id: str, user: User) 
     return _request_dict(db, req, lines)
 
 
-def _oldest_company_lot_candidates(db: Session, material_id: str, as_of=None) -> list:
+def _oldest_company_lot_candidates(db: Session, material_id: str, as_of=None, cache: dict = None) -> list:
     """Danh sách lô KHẢ DỤNG (không HOLD/SCRAPPED) tại Kho công ty của 1 vật tư, sắp cũ nhất
     trước — dùng chung cho `_is_oldest_company_lot`/`_oldest_company_lot_with_reserved`.
+
+    `cache` (tùy chọn, dict do caller tự tạo/giữ) — mirror `_stock_at_company_as_of`: nhớ kết quả
+    `lot_on_hand_as_of(db, as_of, "Kho công ty")` theo `as_of` để TÁI DÙNG giữa nhiều dòng/phiếu
+    cùng mốc thời gian đó, thay vì quét lại TOÀN BỘ StockMovement mỗi dòng — 2026-10-01, audit
+    hiệu năng: `fulfill_all_lines` gọi hàm này 1 lần/dòng (CỘNG DỒN với lần gọi trực tiếp
+    `lot_on_hand_as_of` ngay trong vòng lặp của nó) dù mọi dòng trong CÙNG 1 phiếu luôn chia sẻ
+    đúng 1 `as_of` — cùng lớp lỗi với `list_requests` đã sửa (gọi hàng trăm lần cho cùng 1 mốc).
 
     `as_of` (thường là `req.requested_receipt_date` khi phiếu khai lùi ngày) — nếu truyền, LOẠI
     HẲN các lô mà tồn dựng lại tính đến đúng ngày đó = 0 (`lot_on_hand_as_of`) khỏi danh sách so
@@ -1926,12 +1967,18 @@ def _oldest_company_lot_candidates(db: Session, material_id: str, as_of=None) ->
         .order_by(MaterialLot.created_at)
     ).scalars().all() if loc_matches(l.location)]
     if as_of is not None:
-        asof_cap = {r["lot_id"]: r["quantity"] for r in lot_on_hand_as_of(db, as_of, "Kho công ty")}
+        if cache is not None:
+            if as_of not in cache:
+                cache[as_of] = lot_on_hand_as_of(db, as_of, "Kho công ty")
+            asof_rows = cache[as_of]
+        else:
+            asof_rows = lot_on_hand_as_of(db, as_of, "Kho công ty")
+        asof_cap = {r["lot_id"]: r["quantity"] for r in asof_rows}
         candidates = [c for c in candidates if asof_cap.get(c.lot_id, 0.0) > 1e-9]
     return candidates
 
 
-def _is_oldest_company_lot(db: Session, material_id: str, lot_id: str, as_of=None) -> bool:
+def _is_oldest_company_lot(db: Session, material_id: str, lot_id: str, as_of=None, cache: dict = None) -> bool:
     """Lô đang chọn có phải lô cũ nhất (FIFO) hiện có tại Kho công ty của vật tư đó hay
     không — gọi NGAY TRƯỚC LÚC transfer() để chụp lại (snapshot) vào
     MaterialRequestLine.fifo_ok; so sánh live SAU KHI đã xuất sẽ sai lệch vì lô cũ hơn có
@@ -1940,8 +1987,8 @@ def _is_oldest_company_lot(db: Session, material_id: str, lot_id: str, as_of=Non
     Chỉ so sánh trong số lô KHẢ DỤNG (không tính lô đang HOLD/SCRAPPED) — lô cũ nhất tuyệt đối
     có thể đang chờ duyệt QC nên không thể chọn được; nếu vẫn tính lô đó vào danh sách so sánh,
     thủ kho chọn đúng lô khả dụng cũ nhất vẫn bị báo oan "vi phạm FIFO" dù không có lựa chọn nào
-    khác. `as_of` — xem `_oldest_company_lot_candidates`."""
-    candidates = _oldest_company_lot_candidates(db, material_id, as_of)
+    khác. `as_of`/`cache` — xem `_oldest_company_lot_candidates`."""
+    candidates = _oldest_company_lot_candidates(db, material_id, as_of, cache)
     return bool(candidates) and candidates[0].lot_id == lot_id
 
 
@@ -1962,12 +2009,13 @@ def is_oldest_workshop_lot(db: Session, material_id: str, lot_id: str) -> bool:
     return bool(candidates) and candidates[0].lot_id == lot_id
 
 
-def _oldest_company_lot_with_reserved(db: Session, material_id: str, reserved: dict, as_of=None) -> Optional[str]:
+def _oldest_company_lot_with_reserved(db: Session, material_id: str, reserved: dict, as_of=None,
+                                      cache: dict = None) -> Optional[str]:
     """Mirror `_is_oldest_company_lot` nhưng coi phần đã "giữ chỗ" (`reserved`, lot_id -> số đã
     dùng bởi các lô ĐỨNG TRƯỚC trong CÙNG 1 lượt duyệt nhiều lô) là đã hết — trả về lot_id cũ
     nhất CÒN THỰC SỰ DÙNG ĐƯỢC sau khi trừ phần đó, dùng để so khớp FIFO cho pick thứ 2 trở đi
-    (xem fulfill_request_line's `lots`). `as_of` — xem `_oldest_company_lot_candidates`."""
-    candidates = _oldest_company_lot_candidates(db, material_id, as_of)
+    (xem fulfill_request_line's `lots`). `as_of`/`cache` — xem `_oldest_company_lot_candidates`."""
+    candidates = _oldest_company_lot_candidates(db, material_id, as_of, cache)
     for c in candidates:
         if c.quantity - reserved.get(c.lot_id, 0.0) > 1e-9:
             return c.lot_id
@@ -2057,7 +2105,14 @@ def fulfill_request_line(db: Session, request_id: str, line_id: str, user: User,
     if abs(total - line.quantity) > 1e-6:
         raise DomainError(f"Tổng số lượng các lô ({total}) phải bằng đúng số lượng đề nghị ({line.quantity}).")
     ts = req.requested_receipt_date
-    asof_cap = {r["lot_id"]: r["quantity"] for r in lot_on_hand_as_of(db, ts, "Kho công ty")} if ts is not None else None
+    # 1 cache DÙNG CHUNG cho cả hàm — mọi pick của dòng này đều cùng 1 `ts`, nên
+    # lot_on_hand_as_of chỉ cần quét lại StockMovement 1 LẦN (seed sẵn từ asof_cap bên dưới) thay
+    # vì mỗi pick trong vòng lặp lại tự gọi riêng qua _oldest_company_lot_with_reserved (2026-10-01,
+    # audit hiệu năng, cùng lớp lỗi đã sửa ở list_requests/fulfill_all_lines).
+    asof_cache: dict = {}
+    if ts is not None:
+        asof_cache[ts] = lot_on_hand_as_of(db, ts, "Kho công ty")
+    asof_cap = {r["lot_id"]: r["quantity"] for r in asof_cache[ts]} if ts is not None else None
     reserved: dict = {}
     plan = []   # [(lot_id, qty, reason, fifo_ok)]
     for p in picks:
@@ -2071,7 +2126,7 @@ def fulfill_request_line(db: Session, request_id: str, line_id: str, user: User,
             if cap + 1e-6 < qty:
                 raise DomainError(f"Lô {lot_row.lot_code} chưa đủ tồn ở Kho công ty tính đến ngày "
                                   f"{ts:%d/%m/%Y} (ngày đề nghị nhận kho) — không được chọn.")
-        fifo_ok = _oldest_company_lot_with_reserved(db, line.material_id, reserved, as_of=ts) == p_lot_id
+        fifo_ok = _oldest_company_lot_with_reserved(db, line.material_id, reserved, as_of=ts, cache=asof_cache) == p_lot_id
         if not fifo_ok and not p_reason:
             raise DomainError(f"Lô {lot_row.lot_code} không phải lô cũ nhất (FIFO) hiện có — bắt buộc nhập lý do chọn khác FIFO.")
         reserved[p_lot_id] = reserved.get(p_lot_id, 0.0) + qty
@@ -2200,6 +2255,10 @@ def fulfill_all_lines(db: Session, request_id: str, user: User,
                                           MaterialRequestLine.status == "pending")
         .order_by(MaterialRequestLine.seq)
     ).scalars().all()
+    # Mọi dòng của phiếu này luôn chia sẻ ĐÚNG 1 `ts` (req.requested_receipt_date) — dùng 1 cache
+    # DÙNG CHUNG cho cả vòng lặp để lot_on_hand_as_of chỉ quét lại StockMovement 1 LẦN cho cả
+    # phiếu thay vì mỗi dòng 1 lần (2026-10-01, audit hiệu năng, cùng lớp lỗi đã sửa ở list_requests).
+    asof_cache: dict = {}
     fulfilled, skipped = [], []
     for line in lines:
         all_avail = [c for c in db.execute(
@@ -2208,8 +2267,12 @@ def fulfill_all_lines(db: Session, request_id: str, user: User,
                                       MaterialLot.status.in_([LotStatus.AVAILABLE.value, LotStatus.RELEASED.value]))
             .order_by(MaterialLot.created_at)
         ).scalars().all() if not _is_workshop_location(c.location)]
-        asof_cap = ({r["lot_id"]: r["quantity"] for r in lot_on_hand_as_of(db, ts, "Kho công ty")}
-                   if ts is not None else None)
+        if ts is not None:
+            if ts not in asof_cache:
+                asof_cache[ts] = lot_on_hand_as_of(db, ts, "Kho công ty")
+            asof_cap = {r["lot_id"]: r["quantity"] for r in asof_cache[ts]}
+        else:
+            asof_cap = None
         avail_qty = ((lambda c: min(c.quantity, asof_cap.get(c.lot_id, 0.0))) if asof_cap is not None
                     else (lambda c: c.quantity))
         preferred = (next((c for c in all_avail if c.lot_id == line.preferred_lot_id), None)
@@ -2239,7 +2302,7 @@ def fulfill_all_lines(db: Session, request_id: str, user: User,
         # phiếu DN-20260918-CDC6C — xem docstring _oldest_company_lot_candidates) — nhờ vậy
         # fifo_ok LUÔN true ở nhánh nhiều lô; chỉ có thể false ở nhánh preferred_lot_id nếu người
         # tạo phiếu CỐ Ý chọn khác lô cũ nhất lúc đề nghị (giữ nguyên hành vi cũ cho nhánh này).
-        fifo_ok = _is_oldest_company_lot(db, line.material_id, plan[0][0].lot_id, as_of=ts)
+        fifo_ok = _is_oldest_company_lot(db, line.material_id, plan[0][0].lot_id, as_of=ts, cache=asof_cache)
         line_reason = (reasons.get(line.line_id) or "").strip() or None
         if not fifo_ok and not line_reason:
             skipped.append({"line_id": line.line_id, "material_id": line.material_id,
