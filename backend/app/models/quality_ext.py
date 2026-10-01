@@ -82,7 +82,14 @@ class StageQcGroup(Base):
       services/filter_order.py::_validate_tanks), nên chỉ tiêu phải tra theo Loại bia
       chứ không theo 1 Dịch bia cụ thể.
     Cột tương ứng để trống = áp dụng cho mọi dịch bia/loại bia; finished_product_id (SKU
-    đóng gói, chỉ có ý nghĩa với stage=thanh_pham) để trống = áp dụng cho mọi sản phẩm."""
+    đóng gói, chỉ có ý nghĩa với stage=thanh_pham) để trống = áp dụng cho mọi sản phẩm.
+
+    `category` ("Loại sản phẩm" — Bia chai/Bia lon/Bia hơi/Bia tươi, mirror
+    FinishedProduct.category) — thêm cho stage=loc (yêu cầu người dùng 2026-09-30): lúc lập
+    Lệnh lọc thường CHƯA biết đúng 1 SKU cuối cùng (1 tank BBT có thể chiết ra nhiều SKU khác
+    nhau), nhưng biết chắc "Loại sản phẩm" (VD lọc để đi Keg hay đi dây Chiết lon/chai) — nên
+    dùng category làm mức phân biệt trung gian giữa Loại bia (chung nhất) và Sản phẩm/SKU cụ
+    thể (chi tiết nhất). Để trống = áp dụng cho mọi Loại sản phẩm."""
 
     __tablename__ = "stage_qc_group"
 
@@ -90,6 +97,7 @@ class StageQcGroup(Base):
     stage: Mapped[str] = mapped_column(Unicode(64), index=True)
     product_id: Mapped[Optional[str]] = mapped_column(ForeignKey("product.product_id"), nullable=True, index=True)
     beer_type_id: Mapped[Optional[str]] = mapped_column(ForeignKey("beer_type.beer_type_id"), nullable=True, index=True)
+    category: Mapped[Optional[str]] = mapped_column(Unicode(64), nullable=True, index=True)
     finished_product_id: Mapped[Optional[str]] = mapped_column(ForeignKey("finished_product.finished_product_id"), nullable=True, index=True)
     group_id: Mapped[str] = mapped_column(ForeignKey("qc_parameter_group.group_id"), index=True)
     mandatory: Mapped[bool] = mapped_column(default=True)

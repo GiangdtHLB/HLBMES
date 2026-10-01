@@ -383,12 +383,13 @@ _STAGE_LOT_MODELS = {"batch_filter_lot": ("loc", BatchFilterLot), "batch_pack_lo
 
 
 def _filter_pack_stage_context(db: Session, scope_type: str, scope_id: str):
-    """(stage, beer_type_id, finished_product_id) cho scope_type batch_filter_lot/batch_pack_lot —
-    dùng CHUNG bởi missing_mandatory_params() và sync_stage_quality_status() để tránh lệch cách
-    suy beer_type_id/finished_product_id giữa 2 nơi (cả 2 stage "loc"/"thanh_pham" đều thuộc
-    BEER_TYPE_SCOPED_STAGES + SKU_SCOPED_STAGES — không có product_id). None nếu không tìm thấy
-    bản ghi. BatchPackLot không có cột beer_type_id riêng — kế thừa từ BatchFilterLot nguồn
-    (mirror cách finished_product_id/beer_type_id được kế thừa xuống lúc tạo lô lọc)."""
+    """(stage, beer_type_id, category, finished_product_id) cho scope_type batch_filter_lot/
+    batch_pack_lot — dùng CHUNG bởi missing_mandatory_params() và sync_stage_quality_status() để
+    tránh lệch cách suy beer_type_id/category/finished_product_id giữa 2 nơi (cả 2 stage
+    "loc"/"thanh_pham" đều thuộc BEER_TYPE_SCOPED_STAGES + CATEGORY_SCOPED_STAGES +
+    SKU_SCOPED_STAGES — không có product_id). None nếu không tìm thấy bản ghi. BatchPackLot
+    không có cột beer_type_id/category riêng — kế thừa từ BatchFilterLot nguồn (mirror cách
+    finished_product_id/beer_type_id được kế thừa xuống lúc tạo lô lọc)."""
     entry = _STAGE_LOT_MODELS.get(scope_type)
     if not entry:
         return None
@@ -397,9 +398,10 @@ def _filter_pack_stage_context(db: Session, scope_type: str, scope_id: str):
     if not obj:
         return None
     if scope_type == "batch_filter_lot":
-        return stage, obj.beer_type_id, obj.finished_product_id
+        return stage, obj.beer_type_id, obj.category, obj.finished_product_id
     filter_lot = db.get(BatchFilterLot, obj.filter_lot_id) if obj.filter_lot_id else None
-    return stage, (filter_lot.beer_type_id if filter_lot else None), obj.finished_product_id
+    return (stage, (filter_lot.beer_type_id if filter_lot else None),
+           (filter_lot.category if filter_lot else None), obj.finished_product_id)
 
 
 def missing_mandatory_params(db: Session, scope_type: str, scope_id: str) -> list[str]:
@@ -422,9 +424,9 @@ def missing_mandatory_params(db: Session, scope_type: str, scope_id: str) -> lis
         return stage_qc_status(db, "nau", "batch", scope_id, product_id=batch.product_id)["pending"]
     ctx = _filter_pack_stage_context(db, scope_type, scope_id)
     if ctx:
-        stage, beer_type_id, finished_product_id = ctx
+        stage, beer_type_id, category, finished_product_id = ctx
         return stage_qc_status(db, stage, scope_type, scope_id, finished_product_id=finished_product_id,
-                               beer_type_id=beer_type_id)["pending"]
+                               beer_type_id=beer_type_id, category=category)["pending"]
     return []
 
 
@@ -447,6 +449,12 @@ BEER_TYPE_SCOPED_STAGES = {"loc", "thanh_pham"}
 # BatchFilterLot — mirror cách beer_type_id được kế thừa. Các stage còn lại (nau/lên men/nước
 # nấu) ép về NULL vì không có khái niệm SKU ở đó.
 SKU_SCOPED_STAGES = {"loc", "thanh_pham"}
+# category ("Loại sản phẩm" — Bia chai/Bia lon/Bia hơi/Bia tươi) — mức phân biệt TRUNG GIAN
+# giữa beer_type_id (chung nhất) và finished_product_id (SKU cụ thể, chi tiết nhất), có ý
+# nghĩa ở CÙNG 2 stage với finished_product_id (yêu cầu người dùng 2026-09-30: lúc lập Lệnh
+# lọc thường chưa biết đúng 1 SKU, nhưng biết chắc Loại sản phẩm — dùng category tra chỉ tiêu
+# Lọc thay vì phải biết trước SKU).
+CATEGORY_SCOPED_STAGES = {"loc", "thanh_pham"}
 
 
 def _stage_group_out(db: Session, link: StageQcGroup) -> dict:
@@ -455,6 +463,7 @@ def _stage_group_out(db: Session, link: StageQcGroup) -> dict:
     return {"link_id": link.link_id, "stage": link.stage, "product_id": link.product_id,
             "beer_type_id": link.beer_type_id,
             "beer_type_code": bt.code if bt else None, "beer_type_name": bt.name if bt else None,
+            "category": link.category,
             "finished_product_id": link.finished_product_id,
             "group_id": link.group_id, "mandatory": link.mandatory, "active": link.active,
             "group_code": g.code if g else None, "group_name": g.name if g else None}
@@ -481,11 +490,13 @@ def link_stage_group(db: Session, payload: dict, user: User) -> dict:
     is_beer_type_scoped = payload["stage"] in BEER_TYPE_SCOPED_STAGES
     product_id = (payload.get("product_id") or None) if is_product_scoped else None
     beer_type_id = (payload.get("beer_type_id") or None) if is_beer_type_scoped else None
+    category = (payload.get("category") or None) if payload["stage"] in CATEGORY_SCOPED_STAGES else None
     finished_product_id = (payload.get("finished_product_id") or None) if payload["stage"] in SKU_SCOPED_STAGES else None
     existing = db.execute(
         select(StageQcGroup).where(StageQcGroup.stage == payload["stage"],
                                    StageQcGroup.product_id == product_id,
                                    StageQcGroup.beer_type_id == beer_type_id,
+                                   StageQcGroup.category == category,
                                    StageQcGroup.finished_product_id == finished_product_id,
                                    StageQcGroup.group_id == payload["group_id"])
     ).scalar_one_or_none()
@@ -495,13 +506,13 @@ def link_stage_group(db: Session, payload: dict, user: User) -> dict:
         link = existing
     else:
         link = StageQcGroup(link_id=new_id(), stage=payload["stage"], product_id=product_id,
-                            beer_type_id=beer_type_id,
+                            beer_type_id=beer_type_id, category=category,
                             finished_product_id=finished_product_id,
                             group_id=payload["group_id"], mandatory=payload.get("mandatory", True))
         db.add(link)
     record_audit(db, entity_type="stage_qc_group", entity_id=link.link_id, action="link",
                  actor=user, after={"stage": link.stage, "product_id": product_id,
-                                    "beer_type_id": beer_type_id,
+                                    "beer_type_id": beer_type_id, "category": category,
                                     "finished_product_id": finished_product_id, "group_id": payload["group_id"]})
     db.commit()
     db.refresh(link)
@@ -521,29 +532,33 @@ def update_stage_group(db: Session, link_id: str, payload: dict, user: User) -> 
     is_beer_type_scoped = payload["stage"] in BEER_TYPE_SCOPED_STAGES
     product_id = (payload.get("product_id") or None) if is_product_scoped else None
     beer_type_id = (payload.get("beer_type_id") or None) if is_beer_type_scoped else None
+    category = (payload.get("category") or None) if payload["stage"] in CATEGORY_SCOPED_STAGES else None
     finished_product_id = (payload.get("finished_product_id") or None) if payload["stage"] in SKU_SCOPED_STAGES else None
     dup = db.execute(
         select(StageQcGroup).where(StageQcGroup.link_id != link_id, StageQcGroup.active == true(),
                                    StageQcGroup.stage == payload["stage"],
                                    StageQcGroup.product_id == product_id,
                                    StageQcGroup.beer_type_id == beer_type_id,
+                                   StageQcGroup.category == category,
                                    StageQcGroup.finished_product_id == finished_product_id,
                                    StageQcGroup.group_id == payload["group_id"])
     ).scalar_one_or_none()
     if dup:
         raise DomainError("Đã có gán trùng công đoạn/phạm vi/nhóm chỉ tiêu này.")
     before = {"stage": link.stage, "product_id": link.product_id, "beer_type_id": link.beer_type_id,
+              "category": link.category,
               "finished_product_id": link.finished_product_id, "group_id": link.group_id,
               "mandatory": link.mandatory}
     link.stage = payload["stage"]
     link.product_id = product_id
     link.beer_type_id = beer_type_id
+    link.category = category
     link.finished_product_id = finished_product_id
     link.group_id = payload["group_id"]
     link.mandatory = payload.get("mandatory", True)
     record_audit(db, entity_type="stage_qc_group", entity_id=link.link_id, action="update",
                  actor=user, before=before, after={"stage": link.stage, "product_id": product_id,
-                                                   "beer_type_id": beer_type_id,
+                                                   "beer_type_id": beer_type_id, "category": category,
                                                    "finished_product_id": finished_product_id,
                                                    "group_id": link.group_id, "mandatory": link.mandatory})
     db.commit()
@@ -563,22 +578,25 @@ def unlink_stage_group(db: Session, link_id: str, user: User) -> None:
 
 def required_params_for_stage(db: Session, stage: str, product_id: str = None,
                               finished_product_id: str = None, mandatory_only: bool = True,
-                              beer_type_id: str = None) -> list[dict]:
+                              beer_type_id: str = None, category: str = None) -> list[dict]:
     """Danh sách chỉ tiêu bắt buộc khai báo cho một công đoạn sản xuất (rỗng nếu chưa gán nhóm nào).
     Gộp cả nhóm gán riêng cho `product_id` (Dịch bia, chỉ áp dụng PRODUCT_SCOPED_STAGES)
-    hoặc `beer_type_id` (Loại bia, các stage còn lại — VD loc/thanh_pham) / `finished_product_id`
-    (sản phẩm đóng gói, chủ yếu dùng ở stage=thanh_pham) và nhóm áp dụng chung (field đó để
-    NULL trên nhóm).
+    hoặc `beer_type_id` (Loại bia, các stage còn lại — VD loc/thanh_pham) / `category` (Loại
+    sản phẩm — Bia chai/lon/hơi/tươi, mirror FinishedProduct.category) / `finished_product_id`
+    (sản phẩm đóng gói/SKU cụ thể) và nhóm áp dụng chung (field đó để NULL trên nhóm).
 
     Cùng 1 mã chỉ tiêu (QCParameter.code, duy nhất toàn hệ thống) có thể được gán qua NHIỀU
-    nhóm khớp cùng lúc — VD 1 nhóm áp dụng chung (Loại bia, không chọn SKU) và 1 nhóm gán
-    riêng cho đúng 1 SKU (finished_product_id) — mỗi nhóm có thể đặt ngưỡng
+    nhóm khớp cùng lúc — VD 1 nhóm áp dụng chung (Loại bia, không chọn Loại sản phẩm/SKU) và 1
+    nhóm gán riêng cho đúng 1 SKU (finished_product_id) — mỗi nhóm có thể đặt ngưỡng
     (target/usl/lsl_override) khác nhau cho cùng mã đó. Nhóm gán CÀNG CỤ THỂ phải THẮNG hoàn
-    toàn (không hiển thị trùng cả 2 dòng cho cùng 1 chỉ tiêu): khớp đúng finished_product_id
-    được ưu tiên cao nhất, sau đó tới khớp đúng product_id/beer_type_id, thấp nhất là nhóm áp
-    dụng chung (mọi field scope đều NULL). Đây cũng chính là nguồn dữ liệu cho mọi báo cáo/
-    trạng thái chỉ tiêu (stage_qc_status, GET /qc-status, hồ sơ điện tử lot_record, tóm tắt QC
-    trong genealogy) — sửa 1 chỗ này áp dụng nhất quán ở mọi nơi."""
+    toàn (không hiển thị trùng cả 2 dòng cho cùng 1 chỉ tiêu), theo thứ tự: khớp đúng
+    finished_product_id (SKU) > khớp đúng category (Loại sản phẩm) > khớp đúng
+    product_id/beer_type_id, thấp nhất là nhóm áp dụng chung (mọi field scope đều NULL). `category`
+    thêm cho stage Lọc (yêu cầu người dùng 2026-09-30) — lúc lập Lệnh lọc thường CHƯA biết đúng
+    1 SKU (1 tank BBT có thể chiết ra nhiều SKU khác nhau) nhưng biết chắc Loại sản phẩm, nên
+    dùng category làm mức tra trung gian thay finished_product_id. Đây cũng chính là nguồn dữ
+    liệu cho mọi báo cáo/trạng thái chỉ tiêu (stage_qc_status, GET /qc-status, hồ sơ điện tử
+    lot_record, tóm tắt QC trong genealogy) — sửa 1 chỗ này áp dụng nhất quán ở mọi nơi."""
     if not stage:
         return []
     stmt = (
@@ -597,6 +615,10 @@ def required_params_for_stage(db: Session, stage: str, product_id: str = None,
             stmt = stmt.where((StageQcGroup.beer_type_id == beer_type_id) | (StageQcGroup.beer_type_id.is_(None)))
         else:
             stmt = stmt.where(StageQcGroup.beer_type_id.is_(None))
+    if stage in CATEGORY_SCOPED_STAGES and category:
+        stmt = stmt.where((StageQcGroup.category == category) | (StageQcGroup.category.is_(None)))
+    else:
+        stmt = stmt.where(StageQcGroup.category.is_(None))
     if finished_product_id:
         stmt = stmt.where((StageQcGroup.finished_product_id == finished_product_id) |
                           (StageQcGroup.finished_product_id.is_(None)))
@@ -607,7 +629,7 @@ def required_params_for_stage(db: Session, stage: str, product_id: str = None,
     rows = db.execute(stmt.order_by(QCParameterGroupItem.seq)).all()
     best_by_code: dict[str, dict] = {}
     for item, param, link in rows:
-        specificity = (1 if link.finished_product_id else 0,
+        specificity = (1 if link.finished_product_id else 0, 1 if link.category else 0,
                       1 if (link.product_id or link.beer_type_id) else 0)
         current = best_by_code.get(param.code)
         if current is not None and specificity <= current["_specificity"]:
@@ -812,16 +834,17 @@ def sync_stage_quality_status(db: Session, stage: str, scope_type: str, scope_id
     ctx = _filter_pack_stage_context(db, scope_type, scope_id)
     if not ctx:
         return
-    _, beer_type_id, finished_product_id = ctx
+    _, beer_type_id, category, finished_product_id = ctx
     status = stage_qc_status(db, stage, scope_type, scope_id,
-                             finished_product_id=finished_product_id, beer_type_id=beer_type_id)
+                             finished_product_id=finished_product_id, beer_type_id=beer_type_id,
+                             category=category)
     obj = db.get(_STAGE_LOT_MODELS[scope_type][1], scope_id)
     obj.quality_status = (QualityStatus.ON_HOLD.value if (status["pending"] or status["has_fail"])
                           else QualityStatus.RELEASED.value)
 
 
 def stage_qc_status(db: Session, stage: str, scope_type: str, scope_id: str, product_id: str = None,
-                    finished_product_id: str = None, beer_type_id: str = None) -> dict:
+                    finished_product_id: str = None, beer_type_id: str = None, category: str = None) -> dict:
     """Trạng thái khai báo chỉ tiêu của một bản ghi công đoạn (mẻ nấu/lô LM/lô lọc/mã chiết)
     — giá trị đã khai báo lưu ở QualityResult dùng chung (như lot_qc_status).
     Dùng latest_results_by_param (thay vì đọc thẳng mọi dòng) để CHỈ tính theo giá trị MỚI
@@ -837,7 +860,7 @@ def stage_qc_status(db: Session, stage: str, scope_type: str, scope_id: str, pro
     from . import quality
     required = required_params_for_stage(db, stage, product_id=product_id,
                                          finished_product_id=finished_product_id, mandatory_only=False,
-                                         beer_type_id=beer_type_id)
+                                         beer_type_id=beer_type_id, category=category)
     latest_by_param = quality.latest_results_by_param(db, scope_type, scope_id)
     mandatory_codes = {p["code"] for p in required if p["mandatory"]}
     pending = [p["code"] for p in required if p["mandatory"] and p["code"] not in latest_by_param]
@@ -1182,5 +1205,5 @@ def list_pending_stage_declarations(db: Session) -> list[dict]:
                        "pending": st["pending"], "product_id": fl.product_id if fl else None,
                        "beer_type_id": fl.beer_type_id if fl else None,
                        "finished_product_id": p.finished_product_id,
-                       "tank_lm": fl.to_bbt if fl else None})
+                       "tank_lm": fl.to_bbt if fl else None, "lot_no": p.lot_no})
     return out

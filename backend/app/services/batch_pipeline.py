@@ -108,6 +108,10 @@ def _stamp_filter_lot_label(db: Session, fl: BatchFilterLot) -> BatchFilterLot:
     chiet_status = _filter_lot_chiet_status(db, fl)
     fl.chiet_status = chiet_status
     fl.chiet_status_label = PACK_LOT_STATUS_LABEL.get(chiet_status, "") if chiet_status else ""
+    # Đã nhập ÍT NHẤT 1 chỉ tiêu Lọc (bất kể đạt/fail) hay chưa — cột "Chất lượng" ở Danh sách lô
+    # lọc, xanh lá = đã nhập, cam = chưa (yêu cầu người dùng 2026-09-30) — mirror
+    # has_len_men_chinh_result/has_len_men_phu_result ở BatchTank (_tank_out).
+    fl.has_loc_result = bool(quality.latest_results_by_param(db, "batch_filter_lot", fl.filter_lot_id))
     return fl
 
 
@@ -241,11 +245,10 @@ def _tank_out(db: Session, tank: BatchTank) -> dict:
     # 2 biểu đồ đó sang BatchTank).
     chinh_scope_id = qc_catalog.batch_tank_scope_id(tank.tank_id, "len_men_chinh")
     phu_scope_id = qc_catalog.batch_tank_scope_id(tank.tank_id, "len_men_phu")
-    qc_fail_count = sum(
-        1 for res in quality.latest_results_by_param(db, "batch_tank", chinh_scope_id).values() if res.status == "fail"
-    ) + sum(
-        1 for res in quality.latest_results_by_param(db, "batch_tank", phu_scope_id).values() if res.status == "fail"
-    )
+    chinh_results = quality.latest_results_by_param(db, "batch_tank", chinh_scope_id)
+    phu_results = quality.latest_results_by_param(db, "batch_tank", phu_scope_id)
+    qc_fail_count = (sum(1 for res in chinh_results.values() if res.status == "fail")
+                    + sum(1 for res in phu_results.values() if res.status == "fail"))
     return {
         "tank_id": tank.tank_id, "tank_code": tank.tank_code, "tank_year": tank.tank_year,
         "tank_lm": tank.tank_lm, "product_id": tank.product_id, "volume_hl": tank.volume_hl,
@@ -258,6 +261,12 @@ def _tank_out(db: Session, tank: BatchTank) -> dict:
         "product_code": product.code if product else None, "product_name": product.name if product else None,
         "beer_type_name": beer_type.name if beer_type else None,
         "qc_fail_count": qc_fail_count,
+        # Đã nhập ÍT NHẤT 1 chỉ tiêu (bất kể đạt/fail) hay chưa — cột "Chất lượng" (badge CTLM
+        # Chính/Phụ) ở Danh sách lô lên men, xanh lá = đã nhập, cam = chưa (yêu cầu người dùng
+        # 2026-09-30). Tái dùng chinh_results/phu_results đã tính sẵn cho qc_fail_count ở trên,
+        # không query thêm.
+        "has_len_men_chinh_result": bool(chinh_results),
+        "has_len_men_phu_result": bool(phu_results),
     }
 
 
@@ -645,8 +654,10 @@ def _filter_order_out(db: Session, order: BatchFilterOrder) -> dict:
         "order_id": order.order_id, "order_code": order.order_code, "order_year": order.order_year,
         "blend_mode": order.blend_mode, "planned_volume_hl": order.planned_volume_hl,
         "volume_tolerance_hl": order.volume_tolerance_hl, "beer_type_id": order.beer_type_id,
+        "beer_type_mismatch": order.beer_type_mismatch, "category": order.category,
         "finished_product_id": order.finished_product_id, "kcs_lot_no": order.kcs_lot_no, "note": order.note,
-        "created_by": order.created_by, "created_at": order.created_at, "locked": order.locked,
+        "created_by": order.created_by, "created_at": order.created_at,
+        "effective_at": order.effective_at or order.created_at, "locked": order.locked,
         "tank_lm_names": _filter_order_tank_lm_names(db, order.order_id),
         "completed": order.completed, "completed_by": order.completed_by, "completed_at": order.completed_at,
         **_filter_order_status(db, order),
@@ -689,19 +700,23 @@ def list_filter_order_sources_out(db: Session, order_id: str) -> list[dict]:
             for s in list_filter_order_sources(db, order_id)]
 
 
-def _filter_order_stock_snapshot(db: Session) -> tuple[dict, dict]:
-    """Trả 2 dict {material_id: on_hand} — mirror brew_order.py::_stock_snapshot, dùng cho vật
-    tư dự kiến khai báo lúc lập lệnh lọc (BatchFilterOrderMaterialLine)."""
-    company = {r["material_id"]: r["on_hand"] for r in warehouse_svc.stock_on_hand(db, "Kho công ty")}
-    workshop = {r["material_id"]: r["on_hand"] for r in warehouse_svc.stock_on_hand(db, "Kho phân xưởng")}
+def _filter_order_stock_snapshot_as_of(db: Session, as_of) -> tuple[dict, dict]:
+    """Trả 2 dict {material_id: on_hand} tính TỒN TẠI ĐÚNG THỜI ĐIỂM `as_of` (không phải tồn
+    hiện tại) — mirror brew_order.py::_stock_snapshot nhưng dùng stock_on_hand_as_of() thay vì
+    stock_on_hand(), vì "Ngày giờ tạo lệnh" (BatchFilterOrder.effective_at) có thể lùi ngày, và
+    vật tư dự kiến phải soi đúng tồn TẠI THỜI ĐIỂM ĐÓ, không phải lúc bấm nút (yêu cầu người dùng
+    2026-09-30)."""
+    company = {r["material_id"]: r["on_hand"] for r in warehouse_svc.stock_on_hand_as_of(db, as_of, "Kho công ty")}
+    workshop = {r["material_id"]: r["on_hand"] for r in warehouse_svc.stock_on_hand_as_of(db, as_of, "Kho phân xưởng")}
     return company, workshop
 
 
-def _assert_filter_order_material_stock(lines: list[dict], company_stock: dict, workshop_stock: dict) -> None:
-    """Chặn hẳn việc lập lệnh lọc nếu có dòng vật tư dự kiến thiếu tồn (tổng 2 kho) — mirror
-    brew_order.py::_assert_no_shortage nhưng đơn giản hơn (không có header/nhóm vật tư thay
-    thế). Dòng chỉ có material_name tự do (không chọn từ danh mục) bỏ qua kiểm tra tồn vì
-    không tra được tồn kho cho vật tư không có trong danh mục."""
+def _filter_order_material_shortages(lines: list[dict], company_stock: dict, workshop_stock: dict) -> list[str]:
+    """Liệt kê CẢNH BÁO (không chặn) các dòng vật tư dự kiến thiếu tồn (tổng 2 kho) tại thời điểm
+    đã soi — KHÔNG raise nữa (yêu cầu người dùng 2026-09-30: "không đủ tại thời điểm tạo lệnh vẫn
+    cho phép tạo lệnh, chỉ cảnh báo lên" — trước đây chặn hẳn qua DomainError). Dòng chỉ có
+    material_name tự do (không chọn từ danh mục) bỏ qua kiểm tra tồn vì không tra được tồn kho
+    cho vật tư không có trong danh mục."""
     shortages = []
     for line in lines:
         material_id = line.get("material_id")
@@ -715,8 +730,7 @@ def _assert_filter_order_material_stock(lines: list[dict], company_stock: dict, 
             shortages.append(
                 f"{name}: cần {qty_planned}, hiện có {round(company + workshop, 3)} "
                 f"(Kho công ty {round(company, 3)} + Kho phân xưởng {round(workshop, 3)})")
-    if shortages:
-        raise DomainError("Không đủ tồn kho để lập lệnh lọc — " + "; ".join(shortages) + ".")
+    return shortages
 
 
 def list_filter_order_materials(db: Session, order_id: str) -> list[dict]:
@@ -738,6 +752,19 @@ def list_filter_order_materials(db: Session, order_id: str) -> list[dict]:
     return out
 
 
+def _derive_beer_type_ids(db: Session, tanks: list, filter_lots: list) -> set[str]:
+    """Tập hợp Loại bia (beer_type_id) suy được từ Dịch bia (product_id) của các tank/lô lọc
+    nguồn — trả về NHIỀU giá trị nếu nguồn lẫn nhiều Loại bia khác nhau, RỖNG nếu không nguồn
+    nào xác định được Dịch bia. Dùng chung bởi create_filter_order để biết Loại bia "gốc" thật
+    của dịch, phân biệt với Loại bia người dùng CHỌN TAY (có thể khác — xem
+    BatchFilterOrder.beer_type_mismatch)."""
+    product_ids = {t.product_id for t in tanks if t.product_id} | {f.product_id for f in filter_lots if f.product_id}
+    if not product_ids:
+        return set()
+    products = db.execute(select(Product).where(Product.product_id.in_(product_ids))).scalars().all()
+    return {p.beer_type_id for p in products if p.beer_type_id}
+
+
 def create_filter_order(db: Session, sources: list[dict], payload: dict, user: User) -> dict:
     require_perm(user, "batch.execute")
     if not sources:
@@ -755,11 +782,16 @@ def create_filter_order(db: Session, sources: list[dict], payload: dict, user: U
                   BatchFilterOrder.order_year == order_year)).scalar_one_or_none():
         raise DomainError(f"Số lệnh lọc '{order_code}' đã tồn tại trong năm {order_year}.")
 
+    # "Ngày giờ tạo lệnh" (effective_at) — mốc hiệu lực người lập TỰ CHỌN (mặc định bây giờ nếu bỏ
+    # trống), KHÁC created_at (luôn = lúc bấm nút thật, chỉ hiển thị) — dùng để soi tồn vật tư dự
+    # kiến TẠI ĐÚNG thời điểm đó, không phải tồn hiện tại (yêu cầu người dùng 2026-09-30).
+    effective_at = payload.get("effective_at") or utcnow()
     material_lines = payload.get("lines") or []
     company_stock, workshop_stock = ({}, {})
+    material_shortages = []
     if material_lines:
-        company_stock, workshop_stock = _filter_order_stock_snapshot(db)
-        _assert_filter_order_material_stock(material_lines, company_stock, workshop_stock)
+        company_stock, workshop_stock = _filter_order_stock_snapshot_as_of(db, effective_at)
+        material_shortages = _filter_order_material_shortages(material_lines, company_stock, workshop_stock)
 
     tanks, filter_lots = [], []
     for src in sources:
@@ -770,22 +802,38 @@ def create_filter_order(db: Session, sources: list[dict], payload: dict, user: U
         else:
             tanks.append(get_tank(db, src["source_tank_id"]))
 
-    # Tự suy Loại bia nếu tất cả tank/lô lọc nguồn cùng 1 Dịch bia (mirror _validate_tanks) —
-    # nếu lẫn hoặc không rõ thì để trống, KHÔNG chặn tạo lệnh (giản lược so với module cũ).
-    beer_type_id = payload.get("beer_type_id")
-    if not beer_type_id:
-        product_ids = {t.product_id for t in tanks if t.product_id} | {f.product_id for f in filter_lots if f.product_id}
-        if len(product_ids) == 1:
-            product = db.get(Product, next(iter(product_ids)))
-            beer_type_id = product.beer_type_id if product else None
+    # Tự suy Loại bia từ Dịch bia (product_id) của các tank/lô lọc nguồn (mirror _validate_tanks)
+    # — gộp theo BEER_TYPE (không phải product_id chính xác) nên phối 2 Dịch bia khác oP CÙNG 1
+    # Loại bia vẫn suy ra được (yêu cầu người dùng 2026-09-30). Nếu người dùng CHỌN TAY 1 Loại
+    # bia khác với Loại bia suy được duy nhất từ nguồn (kể cả phối hay không phối) — hoặc nguồn
+    # lẫn NHIỀU Loại bia khác nhau (không suy ra được 1 giá trị) mà vẫn chọn 1 trong số đó — coi
+    # là "không phải Dịch bia gốc", phải XÁC NHẬN LẠI (payload["confirm_beer_type_mismatch"]) mới
+    # cho tạo, và lưu cờ `beer_type_mismatch=True` trên lệnh để biết đây không phải Loại bia gốc
+    # thật của dịch (yêu cầu người dùng 2026-09-30: "lưu lại lịch sử đây không phải là dịch bia
+    # gốc"). Để trống hoàn toàn (không chọn gì) vẫn KHÔNG bị chặn như trước — chỉ chặn khi có
+    # CHỌN mà chọn sai/không suy được.
+    derived_beer_type_ids = _derive_beer_type_ids(db, tanks, filter_lots)
+    derived_single = next(iter(derived_beer_type_ids)) if len(derived_beer_type_ids) == 1 else None
+    beer_type_id = payload.get("beer_type_id") or derived_single
+    beer_type_mismatch = bool(beer_type_id) and beer_type_id != derived_single
+    if beer_type_mismatch and not payload.get("confirm_beer_type_mismatch"):
+        chosen = db.get(BeerType, beer_type_id)
+        derived_bts = db.execute(select(BeerType).where(
+            BeerType.beer_type_id.in_(derived_beer_type_ids))).scalars().all() if derived_beer_type_ids else []
+        derived_label = "/".join(bt.name for bt in derived_bts) if derived_bts else "không xác định được"
+        raise DomainError(
+            f"Loại bia '{chosen.name if chosen else beer_type_id}' bạn chọn KHÁC với Dịch bia gốc "
+            f"của (các) tank/lô lọc nguồn ({derived_label}) — không phải Dịch bia gốc. Xác nhận vẫn "
+            "muốn chọn Loại bia này không?")
 
     planned_volume = sum(s.get("planned_v_dich_hl") or 0.0 for s in sources)
     order = BatchFilterOrder(
         order_id=new_id(), order_code=order_code, order_year=order_year, blend_mode=blend_mode,
         planned_volume_hl=planned_volume, volume_tolerance_hl=payload.get("volume_tolerance_hl") or 0.0,
-        beer_type_id=beer_type_id, finished_product_id=payload.get("finished_product_id"),
+        beer_type_id=beer_type_id, beer_type_mismatch=beer_type_mismatch,
+        category=payload.get("category"), finished_product_id=payload.get("finished_product_id"),
         kcs_lot_no=payload.get("kcs_lot_no"), note=payload.get("note"),
-        created_by=user.username, created_at=utcnow(),
+        created_by=user.username, created_at=utcnow(), effective_at=effective_at,
     )
     db.add(order)
     db.flush()
@@ -811,9 +859,13 @@ def create_filter_order(db: Session, sources: list[dict], payload: dict, user: U
         ))
     record_audit(db, entity_type="batch_filter_order", entity_id=order.order_id, action="create",
                 actor=user, after={"order_code": order_code, "blend_mode": blend_mode,
-                                   "planned_volume_hl": planned_volume})
+                                   "planned_volume_hl": planned_volume, "beer_type_id": beer_type_id,
+                                   "beer_type_mismatch": beer_type_mismatch,
+                                   "derived_beer_type_ids": sorted(derived_beer_type_ids),
+                                   "effective_at": effective_at.isoformat(),
+                                   "material_shortages": material_shortages})
     db.commit()
-    return _filter_order_out(db, order)
+    return {**_filter_order_out(db, order), "material_shortages": material_shortages}
 
 
 def update_filter_order(db: Session, order_id: str, payload: dict, user: User) -> dict:
@@ -823,8 +875,9 @@ def update_filter_order(db: Session, order_id: str, payload: dict, user: User) -
     sẽ làm sai lệch lô lọc đã tạo dựa trên kế hoạch đó). Không thêm/xóa nguồn hay dòng vật tư,
     không đổi order_code/blend_mode — chỉ sửa 2 con số trên (yêu cầu người dùng 2026-09-23: "lệnh
     lọc chưa hoàn thành thì cho thêm nút sửa, để tôi sửa số lượng theo kế hoạch, số lượng vật
-    tư"). Kiểm tra TRƯỚC, ghi SAU (mirror create_filter_order/dispense._plan_consume) — thiếu tồn
-    ở BẤT KỲ dòng vật tư nào thì KHÔNG ghi dòng nào cả."""
+    tư"). Soi tồn TẠI ĐÚNG "Ngày giờ tạo lệnh" (effective_at) đã chốt lúc tạo — thiếu tồn ở dòng
+    vật tư nào KHÔNG còn chặn ghi nữa, chỉ trả về cảnh báo `material_shortages` (yêu cầu người
+    dùng 2026-09-30: "không đủ tại thời điểm tạo lệnh vẫn cho phép tạo lệnh, chỉ cảnh báo lên")."""
     require_perm(user, "batch.execute")
     order = db.get(BatchFilterOrder, order_id)
     if not order:
@@ -843,8 +896,10 @@ def update_filter_order(db: Session, order_id: str, payload: dict, user: User) -
     line_updates = payload.get("lines") or []
     lines_by_id = {l.line_id: l for l in db.execute(select(BatchFilterOrderMaterialLine).where(
         BatchFilterOrderMaterialLine.order_id == order_id)).scalars().all()}
+    material_shortages = []
     if line_updates:
-        company_stock, workshop_stock = _filter_order_stock_snapshot(db)
+        company_stock, workshop_stock = _filter_order_stock_snapshot_as_of(
+            db, order.effective_at or order.created_at)
         check_lines = []
         for upd in line_updates:
             line = lines_by_id.get(upd["line_id"])
@@ -852,7 +907,7 @@ def update_filter_order(db: Session, order_id: str, payload: dict, user: User) -
                 raise NotFoundError(f"Vật tư '{upd['line_id']}' không thuộc lệnh lọc này.")
             check_lines.append({"material_id": line.material_id, "material_name": line.material_name,
                                 "qty_planned": upd["qty_planned"]})
-        _assert_filter_order_material_stock(check_lines, company_stock, workshop_stock)
+        material_shortages = _filter_order_material_shortages(check_lines, company_stock, workshop_stock)
 
     for upd in source_updates:
         sources_by_id[upd["link_id"]].planned_v_dich_hl = upd["planned_v_dich_hl"]
@@ -863,9 +918,10 @@ def update_filter_order(db: Session, order_id: str, payload: dict, user: User) -
     order.planned_volume_hl = sum(s.planned_v_dich_hl or 0.0 for s in sources_by_id.values())
     record_audit(db, entity_type="batch_filter_order", entity_id=order_id, action="update", actor=user,
                 after={"sources": source_updates, "lines": line_updates,
-                      "planned_volume_hl": order.planned_volume_hl})
+                      "planned_volume_hl": order.planned_volume_hl,
+                      "material_shortages": material_shortages})
     db.commit()
-    return _filter_order_out(db, order)
+    return {**_filter_order_out(db, order), "material_shortages": material_shortages}
 
 
 def finish_filter_order(db: Session, order_id: str, user: User) -> dict:
@@ -1056,7 +1112,8 @@ def draw_from_filter_order(db: Session, order_id: str, payload: dict, user: User
         filter_lot_id=new_id(), filter_lot_code=filter_lot_code, filter_lot_year=filter_lot_year,
         order_id=order_id, to_bbt=to_bbt, status="dang_loc",
         product_id=next(iter(product_ids)) if len(product_ids) == 1 else None,
-        beer_type_id=order.beer_type_id, finished_product_id=order.finished_product_id,
+        beer_type_id=order.beer_type_id, beer_type_mismatch=order.beer_type_mismatch,
+        category=order.category, finished_product_id=order.finished_product_id,
         note=payload.get("note"), created_by=user.username, created_at=utcnow(),
     )
     db.add(fl)

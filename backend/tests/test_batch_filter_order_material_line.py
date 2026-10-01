@@ -151,7 +151,10 @@ def test_create_filter_order_with_free_text_material_line_skips_stock_check(clie
     assert materials[0]["qty_planned"] == 999999
 
 
-def test_create_filter_order_blocked_when_material_line_exceeds_stock(client, admin_h, thukho_h):
+def test_create_filter_order_warns_but_allows_when_material_line_exceeds_stock(client, admin_h, thukho_h):
+    """Thiếu tồn vật tư dự kiến KHÔNG còn chặn tạo lệnh lọc nữa — chỉ trả về cảnh báo
+    `material_shortages`, lệnh vẫn được tạo bình thường (yêu cầu người dùng 2026-09-30: "không đủ
+    tại thời điểm tạo lệnh vẫn cho phép tạo lệnh, chỉ cảnh báo lên")."""
     mat_id = _create_material(client, admin_h, "FLOML-SHORT-MAT")
     _receive(client, thukho_h, "LOT-FLOML-SHORT-01", mat_id, 10)
     tank = _make_tank(client, admin_h, "103", "TANK-FLOML-03")
@@ -161,10 +164,12 @@ def test_create_filter_order_blocked_when_material_line_exceeds_stock(client, ad
         "sources": [{"source_type": "tank", "source_tank_id": tank["tank_id"], "planned_v_dich_hl": 900}],
         "lines": [{"material_id": mat_id, "uom": "kg", "qty_planned": 500}],
     })
-    assert order.status_code == 409, order.text
+    assert order.status_code == 201, order.text
+    assert len(order.json()["material_shortages"]) == 1
+    assert "cần 500" in order.json()["material_shortages"][0]
 
     listed = client.get("/api/batch-filter-orders", headers=admin_h).json()
-    assert not any(o["order_code"] == "LOC-FLOML-03" for o in listed)
+    assert any(o["order_code"] == "LOC-FLOML-03" for o in listed)
 
 
 def test_material_request_source_preview_batch_filter_order(client, admin_h, thukho_h):

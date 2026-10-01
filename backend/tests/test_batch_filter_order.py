@@ -464,14 +464,18 @@ def test_update_order_edits_planned_qty_blocked_after_filter_lot(client, admin_h
     lines_after = client.get(f"/api/batch-filter-orders/{order['order_id']}/materials", headers=admin_h).json()
     assert lines_after[0]["qty_planned"] == 20
 
-    # Sửa vượt quá tồn kho (100kg đã nhập) -> chặn, không ghi gì cả (kể cả nguồn).
+    # Sửa vượt quá tồn kho (100kg đã nhập) -> KHÔNG còn chặn nữa, chỉ cảnh báo qua
+    # material_shortages, vẫn ghi bình thường (yêu cầu người dùng 2026-09-30: "không đủ tại thời
+    # điểm tạo lệnh vẫn cho phép tạo lệnh, chỉ cảnh báo lên").
     over = client.put(f"/api/batch-filter-orders/{order['order_id']}", headers=admin_h, json={
         "sources": [{"link_id": src["link_id"], "planned_v_dich_hl": 500}],
         "lines": [{"line_id": line["line_id"], "qty_planned": 9999}],
     })
-    assert over.status_code == 409, over.text
+    assert over.status_code == 200, over.text
+    assert len(over.json()["material_shortages"]) == 1
+    assert "cần 9999" in over.json()["material_shortages"][0]
     unchanged = client.get(f"/api/batch-filter-orders/{order['order_id']}/sources", headers=admin_h).json()
-    assert unchanged[0]["planned_v_dich_hl"] == 850   # vẫn giữ giá trị đã sửa thành công lần trước
+    assert unchanged[0]["planned_v_dich_hl"] == 500   # lần sửa vượt tồn vẫn được ghi, không bị chặn
 
     # Đã có lô lọc tạo từ lệnh -> không sửa được nữa.
     client.post(f"/api/batch-filter-orders/{order['order_id']}/filter-lots", headers=admin_h,

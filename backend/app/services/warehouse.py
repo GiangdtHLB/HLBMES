@@ -2504,14 +2504,14 @@ def undo_transfer_px_request(db: Session, request_id: str, user: User) -> dict:
 
 def _kcpx_can_edit(db: Session, req: TransferKcPxRequest) -> bool:
     """`can_edit` hiện ở FE (nút Sửa/Xóa, mirror sang_ngang's can_edit) — True khi còn pending VÀ
-    (vật tư không cần KCS HOẶC lô còn đang "Chờ KCS duyệt"), xem _assert_kcpx_editable."""
+    (đề nghị này không bắt qua KCS HOẶC lô còn đang "Chờ KCS duyệt"), xem _assert_kcpx_editable.
+    Tra theo req.require_kcs (quyết định GỐC lúc tạo) — không suy lại từ material mỗi lần đọc."""
     if req.status != "pending":
         return False
     lot = db.get(MaterialLot, req.lot_id)
     if not lot:
         return False
-    return not (lot.material_id and requires_kcs_hold(db, lot.material_id)
-               and lot.status != LotStatus.ON_HOLD.value)
+    return not (req.require_kcs and lot.status != LotStatus.ON_HOLD.value)
 
 
 def _transfer_kcpx_dict(db: Session, req: TransferKcPxRequest) -> dict:
@@ -2519,7 +2519,8 @@ def _transfer_kcpx_dict(db: Session, req: TransferKcPxRequest) -> dict:
             "quantity": req.quantity, "uom": req.uom, "reason": req.reason, "status": req.status,
             "movement_id": req.movement_id, "workshop_location_id": req.workshop_location_id,
             "requested_transfer_date": req.requested_transfer_date,
-            "reversed": req.reversed, "created_by": req.created_by, "created_at": req.created_at,
+            "reversed": req.reversed, "require_kcs": req.require_kcs,
+            "created_by": req.created_by, "created_at": req.created_at,
             "approved_by": req.approved_by, "approved_at": req.approved_at,
             "rejected_by": req.rejected_by, "rejected_at": req.rejected_at,
             "reject_reason": req.reject_reason, "can_edit": _kcpx_can_edit(db, req)}
@@ -2533,12 +2534,17 @@ def _get_transfer_kcpx_request(db, request_id) -> TransferKcPxRequest:
 
 
 def create_transfer_kcpx_request(db: Session, lot_id: str, quantity: float, user: User,
-                                 reason: str = None, requested_transfer_date=None) -> dict:
+                                 reason: str = None, requested_transfer_date=None,
+                                 require_kcs: bool = False) -> dict:
     """Kho công ty tạo đề nghị điều chuyển 1 lô ĐANG CÓ SẴN sang Kho phân xưởng — chưa động tồn
-    kho. Nếu vật tư có chỉ tiêu chất lượng bắt buộc, đưa lô về HOLD ngay lúc tạo (dù đang
-    Released) để buộc KCS duyệt lại trước khi Phân xưởng duyệt được — lô có thể đã nằm kho một
-    thời gian, không được coi là "vẫn còn hợp lệ" chỉ vì đã qua QC từ trước (mirror đúng lý do
-    receive() làm vậy khi cộng dồn lô cũ, xem receive())."""
+    kho. `require_kcs` (tick chọn lúc tạo, mặc định KHÔNG chọn) quyết định có đưa lô về HOLD ngay
+    lúc tạo (dù đang Released) để buộc KCS duyệt lại trước khi Phân xưởng duyệt được hay không —
+    KHÔNG còn tự suy theo vật tư có chỉ tiêu chất lượng bắt buộc trong Danh mục nữa (yêu cầu người
+    dùng 2026-09-30: "nếu chọn tích vào đó thì mới cần KCS nhập chỉ tiêu, nếu không chọn thì mặc
+    định lô đó chuyển sang phân xưởng để duyệt, không cần duyệt qua KCS"). Trước đây tự động HOLD
+    khi vật tư có chỉ tiêu bắt buộc (lô có thể đã nằm kho một thời gian, không được coi là "vẫn
+    còn hợp lệ" chỉ vì đã qua QC từ trước, mirror lý do receive() làm vậy khi cộng dồn lô cũ) —
+    giờ người tạo đề nghị tự quyết định, lưu lại lựa chọn trên chính đề nghị."""
     require_perm(user, "warehouse.issue")
     lot = _lot(db, lot_id)
     if _is_workshop_location(lot.location):
@@ -2546,16 +2552,16 @@ def create_transfer_kcpx_request(db: Session, lot_id: str, quantity: float, user
                           "lô đang ở Kho công ty.")
     _assert_location_scope(user, lot.location)
     _assert_transfer_qty_not_double_booked(db, TransferKcPxRequest, lot, quantity)
-    if lot.material_id and requires_kcs_hold(db, lot.material_id):
+    if require_kcs:
         lot.status = LotStatus.ON_HOLD.value
     req = TransferKcPxRequest(request_id=new_id(),
                               request_code=f"DCKP-{utcnow():%Y%m%d}-{new_id()[:5].upper()}",
                               lot_id=lot_id, quantity=quantity, uom=lot.uom, reason=reason,
-                              requested_transfer_date=requested_transfer_date,
+                              requested_transfer_date=requested_transfer_date, require_kcs=require_kcs,
                               status="pending", created_by=user.username, created_at=utcnow())
     db.add(req)
     record_audit(db, entity_type="transfer_kcpx_request", entity_id=req.request_id, action="create",
-                actor=user, after={"lot_id": lot_id, "quantity": quantity})
+                actor=user, after={"lot_id": lot_id, "quantity": quantity, "require_kcs": require_kcs})
     db.commit()
     db.refresh(req)
     return _transfer_kcpx_dict(db, req)
@@ -2563,11 +2569,12 @@ def create_transfer_kcpx_request(db: Session, lot_id: str, quantity: float, user
 
 def _assert_kcpx_editable(db: Session, req: TransferKcPxRequest, lot: MaterialLot) -> None:
     """Chặn sửa/xóa nếu KCS ĐÃ duyệt xong lô (yêu cầu người dùng 2026-09-14: chỉ cho sửa/xóa khi
-    lô còn "Chờ KCS duyệt") — vật tư KHÔNG cần chỉ tiêu chất lượng bắt buộc thì không có khái
-    niệm "chờ KCS" nên luôn cho sửa/xóa trong lúc còn pending, không bị chặn bởi điều kiện này."""
+    lô còn "Chờ KCS duyệt") — đề nghị KHÔNG tick "cần KCS" lúc tạo (req.require_kcs=False) thì
+    không có khái niệm "chờ KCS" nên luôn cho sửa/xóa trong lúc còn pending, không bị chặn bởi
+    điều kiện này."""
     if req.status != "pending":
         raise DomainError(f"Đề nghị {req.request_code} đã được xử lý (trạng thái: {req.status}) — không thể sửa/xóa.")
-    if lot.material_id and requires_kcs_hold(db, lot.material_id) and lot.status != LotStatus.ON_HOLD.value:
+    if req.require_kcs and lot.status != LotStatus.ON_HOLD.value:
         raise DomainError(f"Lô {lot.lot_code} đã được KCS duyệt xong — không thể sửa/xóa đề nghị này nữa.")
 
 
@@ -2626,8 +2633,8 @@ def approve_transfer_kcpx_request(db: Session, request_id: str, workshop_locatio
                                   user: User) -> dict:
     """Thủ kho phân xưởng duyệt — BẮT BUỘC chọn vị trí cất tại Phân xưởng. Chốt bằng
     _assert_location_scope("Kho phân xưởng") để người tạo đề nghị (Kho công ty) KHÔNG tự duyệt
-    được đề nghị của chính mình (maker-checker, mirror approve_sang_ngang). Nếu vật tư có chỉ
-    tiêu chất lượng bắt buộc và lô vẫn đang HOLD (chưa qua KCS), chặn duyệt."""
+    được đề nghị của chính mình (maker-checker, mirror approve_sang_ngang). Nếu đề nghị có tick
+    "cần KCS" (require_kcs) và lô vẫn đang HOLD (chưa qua KCS), chặn duyệt."""
     require_perm(user, "warehouse.request")
     _assert_location_scope(user, "Kho phân xưởng")
     req = _get_transfer_kcpx_request(db, request_id)

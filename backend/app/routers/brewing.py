@@ -101,9 +101,10 @@ def delete_brew_order(brew_order_id: str, db: Session = Depends(get_db),
 # "Mẻ sản xuất" mới qua scope_type="batch_tank"/"batch_filter_lot"/"batch_pack_lot") =====
 @router.get("/qc-status")
 def brewing_qc_status(stage: str, scope_type: str, scope_id: str, product_id: str = None,
-                      finished_product_id: str = None, beer_type_id: str = None, db: Session = Depends(get_db)):
+                      finished_product_id: str = None, beer_type_id: str = None,
+                      category: str = None, db: Session = Depends(get_db)):
     return qc_catalog.stage_qc_status(db, stage, scope_type, scope_id, product_id,
-                                      finished_product_id, beer_type_id)
+                                      finished_product_id, beer_type_id, category)
 
 
 @router.post("/qc-samples", status_code=201)

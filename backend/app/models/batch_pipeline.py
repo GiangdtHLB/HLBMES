@@ -71,10 +71,30 @@ class BatchFilterOrder(Base):
     beer_type_id: Mapped[Optional[str]] = mapped_column(ForeignKey("beer_type.beer_type_id"), nullable=True, index=True)
     finished_product_id: Mapped[Optional[str]] = mapped_column(ForeignKey("finished_product.finished_product_id"),
                                                                 nullable=True, index=True)
+    # "Loại sản phẩm" (category tự do — Bia chai/Bia lon/Bia hơi/Bia tươi, mirror
+    # FinishedProduct.category, xem models/master.py) — khai TRỰC TIẾP ở Lệnh lọc (khác
+    # finished_product_id/SKU chính xác, thường CHƯA biết lúc lọc vì 1 tank BBT có thể chiết ra
+    # nhiều SKU khác nhau) — dùng để tra đúng nhóm chỉ tiêu Lọc theo (Loại bia, Loại sản phẩm)
+    # thay vì phải biết trước SKU (yêu cầu người dùng 2026-09-30).
+    category: Mapped[Optional[str]] = mapped_column(Unicode(64), nullable=True, index=True)
+    # True nếu beer_type_id do người dùng CHỌN TAY khác với Loại bia suy được từ chính Dịch bia
+    # của (các) tank/lô lọc nguồn (VD lọc phối 2 Dịch bia khác Loại bia, không có đáp án "đúng"
+    # duy nhất — người lập phải tự chọn 1 Loại bia làm chuẩn tra chỉ tiêu) — lưu lại để biết đây
+    # KHÔNG phải Loại bia gốc thật của dịch, tránh hiểu lầm khi tra cứu/kiểm toán sau này (yêu
+    # cầu người dùng 2026-09-30: "lưu lại lịch sử đây không phải là dịch bia gốc").
+    beer_type_mismatch: Mapped[bool] = mapped_column(Boolean, default=False)
     kcs_lot_no: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)   # người lập tự đánh số
     note: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)
     created_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    # "Ngày giờ tạo lệnh" — mốc HIỆU LỰC người lập tự chọn (mặc định = created_at nếu không chọn,
+    # có thể lùi ngày) — coi như lệnh này "được tạo từ" thời điểm này để tra tồn vật tư dự kiến
+    # (xem create_filter_order::_filter_order_stock_snapshot_as_of), KHÁC created_at (luôn là lúc
+    # bấm "Tạo lệnh lọc" thật, chỉ để hiển thị, không sửa được) — mirror phân biệt StockMovement.ts
+    # (ngày hiệu lực) / created_at (ngày tạo phiếu thật) đã dùng ở nơi khác trong hệ thống (yêu
+    # cầu người dùng 2026-09-30). Nullable vì lệnh tạo TRƯỚC khi có field này không có giá trị —
+    # xem effective_at đó là None thì tự hiểu = created_at.
+    effective_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
     locked: Mapped[bool] = mapped_column(Boolean, default=False)
     locked_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
     locked_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
@@ -139,6 +159,11 @@ class BatchFilterLot(Base):
     beer_type_id: Mapped[Optional[str]] = mapped_column(ForeignKey("beer_type.beer_type_id"), nullable=True, index=True)
     finished_product_id: Mapped[Optional[str]] = mapped_column(ForeignKey("finished_product.finished_product_id"),
                                                                 nullable=True, index=True)
+    # category/beer_type_mismatch: kế thừa NGUYÊN từ Lệnh lọc nguồn (order.category/
+    # order.beer_type_mismatch), xem services/batch_pipeline.py::draw_from_filter_order — mirror
+    # beer_type_id/finished_product_id ở trên.
+    category: Mapped[Optional[str]] = mapped_column(Unicode(64), nullable=True, index=True)
+    beer_type_mismatch: Mapped[bool] = mapped_column(Boolean, default=False)
     # volume_hl = v_dich_hl + nuoc_bai_khi_hl (mirror FilterRecord.v_beer_hl), cộng dồn từ MỌI
     # mẻ lọc (BatchFilterLotBatch, mỗi mẻ có thể rút từ NHIỀU nguồn qua BatchFilterLotBatchDraw)
     # — xem services/batch_pipeline.py::_sync_filter_lot_aggregate.
