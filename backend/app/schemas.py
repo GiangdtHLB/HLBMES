@@ -302,6 +302,7 @@ class MaterialIn(BaseModel):
     stock_min: Optional[float] = None
     alt_uom: Optional[str] = None
     alt_uom_ratio: Optional[float] = None
+    usage_stages: list[str] = []
 
     # `code`/`name` rỗng lọt qua được trước đây (không có ràng buộc gì ngoài kiểu `str`, chấp
     # nhận "") — do UniqueConstraint chỉ chặn được TỪ LẦN THỨ 2, 1 vật tư mã rỗng vẫn tạo được
@@ -327,6 +328,7 @@ class MaterialOut(ORMModel):
     stock_min: Optional[float] = None
     alt_uom: Optional[str] = None
     alt_uom_ratio: Optional[float] = None
+    usage_stages: list[str] = []
 
 
 # ---- Work Orders / Điều độ ----
@@ -2246,6 +2248,9 @@ class BatchPackLotSplitIn(BaseModel):
     from_bbt: Optional[str] = None
     pack_date: Optional[datetime] = None
     note: Optional[str] = None
+    # Số lô bia KHÔNG còn bị chặn cứng khi trùng — xác nhận lại mới cho tạo khi trùng (yêu cầu
+    # người dùng 2026-10-01), mirror confirm_beer_type_mismatch.
+    confirm_duplicate_lot_no: bool = False
 
 
 class BatchPackLotCreateIn(BaseModel):
@@ -2260,6 +2265,7 @@ class BatchPackLotCreateIn(BaseModel):
     line: Optional[str] = None
     pack_date: Optional[datetime] = None
     note: Optional[str] = None
+    confirm_duplicate_lot_no: bool = False
 
 
 class BatchPackLotQtyIn(BaseModel):

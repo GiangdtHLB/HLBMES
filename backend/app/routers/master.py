@@ -684,6 +684,7 @@ def update_material(material_id: str, payload: MaterialIn, db: Session = Depends
     m.stock_min = payload.stock_min
     m.alt_uom = payload.alt_uom
     m.alt_uom_ratio = payload.alt_uom_ratio
+    m.usage_stages = payload.usage_stages
     record_audit(db, entity_type="material", entity_id=m.material_id, action="update",
                  actor=user, before=before, after=payload.model_dump())
     db.commit()

@@ -3,6 +3,7 @@
 from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends
+from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
 from ..database import get_db
@@ -123,5 +124,25 @@ def low_yield_filter_alerts(days: int = 5, limit: int = 5, db: Session = Depends
 def bottled_not_approved(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     from ..services import dashboard as dashboard_svc
     return dashboard_svc.bottled_not_approved_report(db)
+
+
+# ---- BC hệ lọc: mỗi dòng = 1 MẺ LỌC (cộng dồn qua nhiều lô lọc nếu có), kèm phối hay không,
+# tank lên men/thành phẩm, ngày lọc, sản lượng, loại bia — yêu cầu người dùng 2026-10-01 ----
+@router.get("/filter-production")
+def filter_production_report(days: int = 3650, db: Session = Depends(get_db),
+                             user: User = Depends(get_current_user)):
+    from ..services import dashboard as dashboard_svc
+    return {"items": dashboard_svc.filter_production_report(db, days)}
+
+
+@router.get("/filter-production/export")
+def filter_production_report_export(days: int = 3650, db: Session = Depends(get_db),
+                                     user: User = Depends(get_current_user)):
+    from ..services import dashboard as dashboard_svc
+    content = dashboard_svc.export_filter_production_xlsx(db, days)
+    fname = f"bao_cao_he_loc_{datetime.now():%Y%m%d_%H%M}.xlsx"
+    return Response(content=content,
+                    media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    headers={"Content-Disposition": f'attachment; filename="{fname}"'})
 
 
