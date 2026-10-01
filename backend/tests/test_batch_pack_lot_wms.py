@@ -474,10 +474,13 @@ def test_release_row_allowed_for_vanhanh(client, admin_h, vanhanh_h):
     assert ok.json()["pallet_codes"]
 
 
-def test_pack_lot_rejects_duplicate_lot_no_same_year(client, admin_h):
-    """Số lô bia (lot_no) là số lô GMP thật in trên bao bì — PHẢI duy nhất trong cùng 1 năm,
-    mirror đúng quy ước (năm, mã) đã áp cho pack_lot_code/filter_lot_code/batch_code (yêu cầu
-    người dùng 2026-09-01: 2 lô thành phẩm khác nhau đã lỡ trùng cùng "Số lô bia")."""
+def test_pack_lot_warns_then_allows_duplicate_lot_no_with_confirm(client, admin_h):
+    """Số lô bia (lot_no) KHÔNG còn bị chặn cứng khi trùng (đổi 2026-10-01, yêu cầu người dùng:
+    "cho phép nhập 2 lô giống nhau và hỏi bạn có muốn nhập 2 lô giống nhau không") — thiếu
+    confirm_duplicate_lot_no thì vẫn báo lỗi (409) để CẢNH BÁO, nhưng gửi kèm confirm_duplicate_
+    lot_no=True thì PHẢI tạo được, kể cả trùng y hệt số lô bia của lô khác (trước 2026-10-01 đây
+    là UniqueConstraint DB thật, chặn tuyệt đối không có đường vòng — yêu cầu người dùng
+    2026-09-01)."""
     fp_id = _make_sku(client, admin_h, "DUPLOT")
     pack_lot_id = _build_pack_lot(client, admin_h, "DUPLOT1", fp_id, ca1=5)
     dup_lot_no = client.get(f"/api/batch-pack-lots/{pack_lot_id}", headers=admin_h).json()["lot_no"]
@@ -500,7 +503,14 @@ def test_pack_lot_rejects_duplicate_lot_no_same_year(client, admin_h):
         "from_bbt": to_bbt, "qty": 500, "pack_lot_code": "PKG-PKWMS-DUPLOT2", "lot_no": dup_lot_no,
         "finished_product_id": fp_id, "line": "CL01"})
     assert dup.status_code == 409, dup.text
-    assert "duy nhất" in dup.json()["detail"]
+    assert "Bạn có chắc vẫn muốn dùng lại" in dup.json()["detail"]
+
+    # Xác nhận lại (confirm_duplicate_lot_no=True) -> PHẢI tạo được, dù trùng y hệt số lô bia.
+    confirmed = client.post("/api/batch-pack-lots", headers=admin_h, json={
+        "from_bbt": to_bbt, "qty": 500, "pack_lot_code": "PKG-PKWMS-DUPLOT2B", "lot_no": dup_lot_no,
+        "finished_product_id": fp_id, "line": "CL01", "confirm_duplicate_lot_no": True})
+    assert confirmed.status_code == 201, confirmed.text
+    assert confirmed.json()["lot_no"] == dup_lot_no
 
     ok = client.post("/api/batch-pack-lots", headers=admin_h, json={
         "from_bbt": to_bbt, "qty": 500, "pack_lot_code": "PKG-PKWMS-DUPLOT3", "lot_no": dup_lot_no + "-B",

@@ -239,3 +239,12 @@ class Material(Base):
     # xem app.js altUomConvert) — không đổi cách lưu trữ/tính tồn kho (luôn theo uom chính).
     alt_uom: Mapped[Optional[str]] = mapped_column(Unicode(64), nullable=True)
     alt_uom_ratio: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    # "Nơi dùng" — công đoạn sản xuất tiêu thụ vật tư này, CHO PHÉP NHIỀU giá trị cùng lúc (VD
+    # hóa chất CIP cũng có thể dùng chung cho vệ sinh đường ống ở cả Nấu lẫn Lọc) — mã khớp với
+    # vocabulary stage đã dùng ở StageQcGroup (nau/loc/thanh_pham, xem qc_catalog.py) + 2 mã MỚI
+    # "len_men" (gộp len_men_chinh/len_men_phu — vật tư không cần phân biệt CT chính/phụ) và
+    # "cip" (đã có module CIP riêng, tiêu thụ hóa chất qua ChemicalUsage.stage="cip", nhưng CHƯA
+    # từng gắn với Material trước đây). Rỗng = chưa khai báo (không lọc theo công đoạn nào), chỉ
+    # mang tính gợi ý/lọc nhanh ở Danh mục, KHÔNG chặn xuất kho vật tư khác nơi dùng đã khai (yêu
+    # cầu người dùng 2026-10-01).
+    usage_stages: Mapped[list] = mapped_column(JSON, default=list)

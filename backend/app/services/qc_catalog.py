@@ -1182,28 +1182,39 @@ def list_pending_stage_declarations(db: Session) -> list[dict]:
     # Lô lọc (Mẻ SX, scope_id = chính filter_lot_id, không cần ghép năm vì đã là khóa chính
     # duy nhất toàn hệ thống, mirror cách gọi có sẵn ở batch_pipeline.py::approve_filter_lot).
     for fl in db.execute(select(BatchFilterLot)).scalars().all():
+        # BỎ SÓT category trước đây (thêm category cho stage=loc từ 2026-09-30 — xem
+        # required_params_for_stage — nhưng panel tổng hợp này chưa được cập nhật theo) khiến lô
+        # lọc đã gán đúng category vẫn tra như category rỗng, không khớp nhóm chỉ tiêu đã gán
+        # riêng cho Loại sản phẩm — mirror đúng cách showBatchFilterLot đã truyền category
+        # (2026-10-01, phát hiện qua lô lọc 1390 "Bia lon" không hiện ở panel này dù đã hiện đúng
+        # ở màn chi tiết lô lọc).
         st = stage_qc_status(db, "loc", "batch_filter_lot", fl.filter_lot_id, fl.product_id,
-                             beer_type_id=fl.beer_type_id, finished_product_id=fl.finished_product_id)
+                             beer_type_id=fl.beer_type_id, finished_product_id=fl.finished_product_id,
+                             category=fl.category)
         if st["required"]:
             out.append({"stage": "loc", "stage_label": "Lọc (Mẻ SX)", "scope_type": "batch_filter_lot",
                        "scope_id": fl.filter_lot_id, "label": f"Lô lọc {fl.filter_lot_code}",
                        "pending": st["pending"], "product_id": fl.product_id,
                        "beer_type_id": fl.beer_type_id, "finished_product_id": fl.finished_product_id,
-                       "tank_lm": fl.to_bbt})
-    # Lô thành phẩm (Mẻ SX) — product_id/beer_type_id kế thừa từ BatchFilterLot nguồn
-    # (BatchPackLot không tự lưu 2 field này, mirror approve_pack_lot).
+                       "category": fl.category, "tank_lm": fl.to_bbt})
+    # Lô thành phẩm (Mẻ SX) — product_id/beer_type_id/category kế thừa từ BatchFilterLot nguồn
+    # (BatchPackLot không tự lưu 3 field này, mirror approve_pack_lot). category cũng BỊ BỎ SÓT
+    # như nhánh "loc" ở trên (thanh_pham cũng thuộc CATEGORY_SCOPED_STAGES) — sửa cùng lúc
+    # (2026-10-01).
     filter_lots_by_id = {fl.filter_lot_id: fl for fl in db.execute(select(BatchFilterLot)).scalars().all()}
     for p in db.execute(select(BatchPackLot)).scalars().all():
         fl = filter_lots_by_id.get(p.filter_lot_id)
         st = stage_qc_status(db, "thanh_pham", "batch_pack_lot", p.pack_lot_id,
                              product_id=fl.product_id if fl else None,
                              beer_type_id=fl.beer_type_id if fl else None,
-                             finished_product_id=p.finished_product_id)
+                             finished_product_id=p.finished_product_id,
+                             category=fl.category if fl else None)
         if st["required"]:
             out.append({"stage": "thanh_pham", "stage_label": "Chiết (Mẻ SX)", "scope_type": "batch_pack_lot",
                        "scope_id": p.pack_lot_id, "label": f"Lô TP {p.pack_lot_code}",
                        "pending": st["pending"], "product_id": fl.product_id if fl else None,
                        "beer_type_id": fl.beer_type_id if fl else None,
+                       "category": fl.category if fl else None,
                        "finished_product_id": p.finished_product_id,
                        "tank_lm": fl.to_bbt if fl else None, "lot_no": p.lot_no})
     return out

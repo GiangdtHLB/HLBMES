@@ -2,16 +2,24 @@
 thật, không phải trạng thái ERP). Sản lượng chiết lon theo ngày+ca hiển thị trên
 dashboard lấy trực tiếp từ báo cáo SCADA thật (services/filling_external.py) — không
 tính lại ở đây."""
-from datetime import timedelta
+from datetime import datetime, timedelta
+from typing import Optional
 
 from sqlalchemy import false, select, true
 from sqlalchemy.orm import Session
 
 from ..common import DeviationState, LotStatus, QualityStatus, ResultStatus, utcnow
 from ..models.batches import BatchExecution
-from ..models.batch_pipeline import BatchFilterLot, BatchFilterLotBatch, BatchFilterLotBatchDraw, BatchPackLot
+from ..models.batch_pipeline import (
+    BatchFilterLot,
+    BatchFilterLotBatch,
+    BatchFilterLotBatchDraw,
+    BatchFilterLotSource,
+    BatchPackLot,
+    BatchTank,
+)
 from ..models.lines import ProductionLine
-from ..models.master import FinishedProduct, Material
+from ..models.master import BeerType, FinishedProduct, Material, Product
 from ..models.materials import MaterialLot
 from ..models.quality import Deviation, QualityResult
 from ..models.quality_ext import CAPA, QCParameter
@@ -324,6 +332,130 @@ def _batch_filter_lot_yield_items(db: Session, date_from, date_to, low_l: float,
             "v_l": round(v_l, 1), "classification": cls, "classification_label": _YIELD_LABEL[cls],
         })
     return items
+
+
+def filter_production_report(db: Session, days: int = 3650) -> list[dict]:
+    """Báo cáo hệ lọc (tab Báo cáo) — mỗi dòng = 1 MẺ LỌC, nhóm theo `batch_seq_no` qua NHIỀU lô
+    lọc nếu có (reuse _batch_filter_lot_yield_items — yêu cầu người dùng 2026-10-01: "Tính theo
+    mẻ lọc, ví dụ mẻ lọc 1 xuất hiện tại 2-3-4 lô lọc thì phải cộng dồn vào"). Mỗi dòng kèm:
+    - `is_blend`: suy từ SỐ TANK LÊN MEN NGUỒN phân biệt của cả nhóm (> 1 = phối) — KHÔNG dùng
+      BatchFilterOrder.blend_mode vì 1 mẻ lọc có thể gộp nhiều lô lọc thuộc nhiều lệnh lọc khác
+      nhau, blend_mode của 1 lệnh đơn lẻ không còn đại diện đúng cho cả nhóm.
+    - `tanks`: tank lên men nguồn (tank_id + tên) — frontend dùng để bấm "truy ngược" sang xem lại
+      chỉ tiêu CT chính/phụ của tank đó (chỉ tiêu chất lượng TRƯỚC LỌC).
+    - `to_bbt`: tank thành phẩm (BBT) đích.
+    - `ended_at`: "Ngày lọc" = mốc kết thúc CUỐI CÙNG của cả nhóm (mirror hàm nguồn).
+    - `v_l`: sản lượng lọc (lít), cộng dồn cả nhóm.
+    - `product_names`/`beer_type_name`: dịch bia + loại bia của (các) tank nguồn — nếu bản thân
+      BatchFilterLot chưa gán beer_type_id (dữ liệu cũ/thiếu) thì SUY từ Product.beer_type_id của
+      tank nguồn thay vì bỏ trống (yêu cầu người dùng 2026-10-01: "chưa thấy dịch bia nào").
+    Chỉ gồm mẻ lọc ĐÃ KẾT THÚC (mirror _batch_filter_lot_yield_items — "ngày lọc" vô nghĩa với mẻ
+    chưa xong). `days` tính SERVER-SIDE từ utcnow() (mirror material_norm?days=N) — tránh nhận
+    date_from/date_to thô từ client: _batch_filter_lot_yield_items so sánh datetime NGAY TRONG
+    PYTHON (không phải ở tầng SQL), nên 1 datetime client gửi lên THIẾU tzinfo (naive) sẽ vỡ
+    TypeError khi so với `ended_at` tz-aware đọc từ CSDL — 2026-10-01, audit báo cáo "Hệ lọc".
+    Prefetch hàng loạt theo ID, không query trong vòng lặp."""
+    date_to = utcnow()
+    date_from = date_to - timedelta(days=days)
+    base_items = _batch_filter_lot_yield_items(db, date_from, date_to, 0, 10 ** 9)
+    if not base_items:
+        return []
+    all_batch_ids = {bid for it in base_items for bid in it["batch_link_ids"]}
+    batches_by_id = {b.batch_link_id: b for b in db.execute(
+        select(BatchFilterLotBatch).where(BatchFilterLotBatch.batch_link_id.in_(all_batch_ids))).scalars().all()}
+    filter_lot_ids = {b.filter_lot_id for b in batches_by_id.values()}
+    filter_lots_by_id = {fl.filter_lot_id: fl for fl in db.execute(
+        select(BatchFilterLot).where(BatchFilterLot.filter_lot_id.in_(filter_lot_ids))).scalars().all()}
+    sources = db.execute(select(BatchFilterLotSource).where(
+        BatchFilterLotSource.filter_lot_id.in_(filter_lot_ids))).scalars().all()
+    sources_by_lot: dict[str, list] = {}
+    for s in sources:
+        sources_by_lot.setdefault(s.filter_lot_id, []).append(s)
+    tank_ids = {s.source_tank_id for s in sources if s.source_type == "tank" and s.source_tank_id}
+    tanks_by_id = {t.tank_id: t for t in db.execute(
+        select(BatchTank).where(BatchTank.tank_id.in_(tank_ids))).scalars().all()} if tank_ids else {}
+    # Dịch bia (Product) của tank nguồn — cũng dùng làm DỰ PHÒNG suy ra "Loại bia" khi bản thân
+    # BatchFilterLot chưa gán beer_type_id (dữ liệu cũ/thiếu sót) — yêu cầu người dùng 2026-10-01:
+    # "chưa thấy dịch bia nào".
+    product_ids = {t.product_id for t in tanks_by_id.values() if t.product_id}
+    products_by_id = {p.product_id: p for p in db.execute(
+        select(Product).where(Product.product_id.in_(product_ids))).scalars().all()} if product_ids else {}
+    fallback_beer_type_ids = {p.beer_type_id for p in products_by_id.values() if p.beer_type_id}
+    beer_types_by_id = {bt.beer_type_id: bt for bt in db.execute(
+        select(BeerType).where(BeerType.beer_type_id.in_(fallback_beer_type_ids))).scalars().all()} if fallback_beer_type_ids else {}
+
+    rows = []
+    for it in base_items:
+        member_lot_ids = {batches_by_id[bid].filter_lot_id for bid in it["batch_link_ids"] if bid in batches_by_id}
+        tanks_in_group: dict[str, str] = {}
+        product_names = set()
+        fallback_beer_type_names = set()
+        bbt_set = set()
+        for lot_id in member_lot_ids:
+            fl = filter_lots_by_id.get(lot_id)
+            if fl and fl.to_bbt:
+                bbt_set.add(fl.to_bbt)
+            for s in sources_by_lot.get(lot_id, []):
+                if s.source_type == "tank":
+                    t = tanks_by_id.get(s.source_tank_id)
+                    if t:
+                        tanks_in_group[t.tank_id] = t.tank_lm or t.tank_code
+                        product = products_by_id.get(t.product_id)
+                        if product:
+                            product_names.add(product.name)
+                            bt = beer_types_by_id.get(product.beer_type_id)
+                            if bt:
+                                fallback_beer_type_names.add(bt.name)
+        rows.append({
+            "batch_seq_no": it["batch_seq_no"], "lot_count": it["lot_count"],
+            "filter_lot_code": it["filter_lot_code"], "filter_lot_id": it["filter_lot_id"],
+            "ended_at": it["ended_at"], "v_l": it["v_l"],
+            "beer_type_name": it["beer_type"] or (", ".join(sorted(fallback_beer_type_names)) or None),
+            "product_names": sorted(product_names),
+            "to_bbt": ", ".join(sorted(bbt_set)) if bbt_set else None,
+            "is_blend": len(tanks_in_group) > 1,
+            "tanks": [{"tank_id": tid, "tank_lm": name}
+                     for tid, name in sorted(tanks_in_group.items(), key=lambda x: x[1] or "")],
+        })
+    rows.sort(key=lambda r: r["ended_at"] or "", reverse=True)
+    return rows
+
+
+def _fmt_vn_dt(iso_str: Optional[str]) -> str:
+    """ISO UTC (từ filter_production_report) -> chuỗi hiển thị giờ Việt Nam (UTC+7, cố định —
+    không có nhà máy nào ở múi giờ khác) dạng dd/mm/yyyy HH:MM, mirror fmt() ở frontend (vốn tự
+    quy đổi theo giờ trình duyệt — ở đây quy đổi tay vì file Excel xuất ra không chạy JS)."""
+    if not iso_str:
+        return ""
+    return (datetime.fromisoformat(iso_str) + VN_OFFSET).strftime("%d/%m/%Y %H:%M")
+
+
+def export_filter_production_xlsx(db: Session, days: int = 3650) -> bytes:
+    """Xuất báo cáo hệ lọc (filter_production_report) ra file .xlsx thật — mirror
+    import_mapping.py::export_report (cùng dùng openpyxl, đã là dependency sẵn có, không cần
+    thêm thư viện) — yêu cầu người dùng 2026-10-01: "thêm mục xuất ra file excel"."""
+    from openpyxl import Workbook
+    import io
+
+    rows = filter_production_report(db, days)
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Hệ lọc"
+    headers = ["Mẻ lọc số", "Lô lọc", "Kiểu", "Tank lên men", "Tank thành phẩm",
+              "Ngày lọc", "Sản lượng lọc (lít)", "Loại bia"]
+    ws.append(headers)
+    for r in rows:
+        ws.append([
+            r["batch_seq_no"] or "", r["filter_lot_code"] or "",
+            "Phối" if r["is_blend"] else "Không phối",
+            ", ".join(t["tank_lm"] for t in r["tanks"] if t["tank_lm"]),
+            r["to_bbt"] or "", _fmt_vn_dt(r["ended_at"]), r["v_l"], r["beer_type_name"] or "",
+        ])
+    for col_idx in range(1, len(headers) + 1):
+        ws.column_dimensions[chr(64 + col_idx)].width = 18
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
 
 
 def low_yield_filter_alerts(db: Session, days: int = 5, limit: int = 5) -> dict:

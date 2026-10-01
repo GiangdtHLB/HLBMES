@@ -129,6 +129,42 @@ def test_batch_filter_lot_shows_pending_then_stays_listed_after_declare(client, 
     client.delete(f"/api/qc/stage-groups/{link.json()['link_id']}", headers=admin_h)
 
 
+def test_pending_stage_qc_respects_category_for_loc_and_thanh_pham(client, admin_h):
+    """Bug thực tế (2026-10-01, phát hiện qua lô lọc "1390" gán category="Bia lon" nhưng không
+    hiện ở panel "chờ khai báo" dù ĐÃ hiện đúng ở màn chi tiết lô lọc): list_pending_stage_
+    declarations quên truyền `category` cho CẢ 2 nhánh "loc" và "thanh_pham" (2 stage duy nhất
+    thuộc CATEGORY_SCOPED_STAGES) khi gọi stage_qc_status — luôn tra như category rỗng, không
+    khớp được nhóm chỉ tiêu đã gán riêng cho 1 Loại sản phẩm cụ thể. Lô/mã đã gán ĐÚNG category
+    khớp 1 nhóm category-scoped PHẢI xuất hiện ở panel này, không chỉ ở màn chi tiết riêng lẻ."""
+    group_id, code = _make_group_with_param(client, admin_h, "CATFIX")
+    link = client.post("/api/qc/stage-groups", headers=admin_h,
+                       json={"stage": "loc", "group_id": group_id, "mandatory": True, "category": "Bia lon"})
+    assert link.status_code == 201, link.text
+
+    tank = _make_batch_tank(client, admin_h, None, "TANK-CATFIX")
+    order = client.post("/api/batch-filter-orders", headers=admin_h, json={
+        "order_code": "LOC-CATFIX", "category": "Bia lon",
+        "sources": [{"source_type": "tank", "source_tank_id": tank["tank_id"], "planned_v_dich_hl": 900}],
+    })
+    assert order.status_code == 201, order.text
+    assert order.json()["category"] == "Bia lon"
+    bbt = client.post("/api/lines", headers=admin_h,
+                      json={"code": "BBT-CATFIX", "name": "Tank thành phẩm CATFIX", "kind": "tank_bbt"})
+    assert bbt.status_code == 201, bbt.text
+    fl = client.post(f"/api/batch-filter-orders/{order.json()['order_id']}/filter-lots", headers=admin_h,
+                     json={"filter_lot_code": "FLOT-CATFIX", "to_bbt": bbt.json()["code"]})
+    assert fl.status_code == 201, fl.text
+    filter_lot_id = fl.json()["filter_lot_id"]
+    assert fl.json()["category"] == "Bia lon"   # kế thừa từ Lệnh lọc, xác nhận tiền đề của bug
+
+    pending = client.get("/api/quality/pending-stage-qc", headers=admin_h).json()
+    row = next((p for p in pending if p["scope_type"] == "batch_filter_lot" and p["scope_id"] == filter_lot_id), None)
+    assert row is not None, "Lô lọc đã gán category khớp nhóm chỉ tiêu nhưng không hiện ở panel — bug chưa sửa."
+    assert code in row["pending"]
+
+    client.delete(f"/api/qc/stage-groups/{link.json()['link_id']}", headers=admin_h)
+
+
 def test_len_men_chinh_stays_listed_after_fully_declared(client, admin_h):
     """Lên men chính/phụ (MULTI_SAMPLE_STAGES — lấy mẫu LẶP LẠI) KHÔNG được biến mất khỏi panel
     "chờ khai báo" sau khi đã khai đủ (khác mọi stage khác, vốn biến mất ngay khi hết pending)

@@ -246,14 +246,14 @@ class BatchPackLot(Base):
     BottleRecord). qty (Số lượng cấp chiết, đơn vị LÍT) trừ vào filter_lot.on_hand (đơn vị hl)
     theo DELTA, quy đổi 1 hl = 100 lít (mirror finish_bottle, xem services/batch_pipeline.py::L_PER_HL)."""
     __tablename__ = "batch_pack_lot"
-    # lot_no ("Số lô bia" — số GMP thật in trên bao bì) trước đây chỉ được check-rồi-ghi ở tầng
-    # service (split_filter_lot_to_pack_lot), không có backstop DB nào — khác mọi mã anh em khác
-    # (pack_lot_code/filter_lot_code/batch_code đều có UniqueConstraint thật) nên 2 request gần
-    # như đồng thời có thể lọt trùng lot_no. Thêm ràng buộc DB thật (2026-09-02, audit module
-    # "Mẻ sản xuất"): NULL không đụng NULL trong UNIQUE constraint (SQLite/Postgres/SQL Server
-    # đều vậy) nên không ảnh hưởng bản ghi cũ (nếu có) chưa có lot_no.
-    __table_args__ = (UniqueConstraint("pack_lot_year", "pack_lot_code", name="uq_batch_pack_lot_year_code"),
-                      UniqueConstraint("pack_lot_year", "lot_no", name="uq_batch_pack_lot_year_lotno"))
+    # lot_no ("Số lô bia" — số GMP thật in trên bao bì): 2026-09-02 từng thêm UniqueConstraint
+    # DB thật (pack_lot_year, lot_no) để chặn cứng trùng số lô bia. Gỡ bỏ lại 2026-10-01 (yêu cầu
+    # người dùng: "cho phép nhập 2 lô giống nhau và hỏi bạn có muốn nhập 2 lô giống nhau không")
+    # — thực tế vận hành đôi khi CẦN lặp lại đúng 1 số lô bia (VD tiếp tục cùng lô vật lý qua
+    # nhiều lần tách), nên chuyển hẳn sang cảnh báo + xác nhận lại ở tầng service
+    # (split_filter_lot_to_pack_lot::confirm_duplicate_lot_no) thay vì chặn cứng không có đường
+    # vòng. Xem migration drop_batch_pack_lot_lotno_unique.
+    __table_args__ = (UniqueConstraint("pack_lot_year", "pack_lot_code", name="uq_batch_pack_lot_year_code"),)
 
     pack_lot_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
     pack_lot_code: Mapped[str] = mapped_column(Unicode(64), index=True)

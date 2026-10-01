@@ -1710,13 +1710,18 @@ def split_filter_lot_to_pack_lot(db: Session, filter_lot_id: str, payload: dict,
     if db.execute(select(BatchPackLot).where(BatchPackLot.pack_lot_code == pack_lot_code,
                   BatchPackLot.pack_lot_year == pack_lot_year)).scalar_one_or_none():
         raise DomainError(f"Mã lô thành phẩm '{pack_lot_code}' đã tồn tại trong năm {pack_lot_year}.")
-    # Số lô bia (lot_no) là số lô GMP thật in trên bao bì — phải DUY NHẤT toàn hệ thống trong
-    # cùng 1 năm (mirror quy ước mã lô/mã nấu khác — pack_lot_code/filter_lot_code/batch_code —
-    # đều unique theo (năm, mã), yêu cầu người dùng 2026-09-01: 2 lô thành phẩm khác nhau đã lỡ
-    # trùng cùng "Số lô bia" 1).
-    if db.execute(select(BatchPackLot).where(BatchPackLot.lot_no == lot_no,
-                  BatchPackLot.pack_lot_year == pack_lot_year)).scalar_one_or_none():
-        raise DomainError(f"Số lô bia '{lot_no}' đã tồn tại trong năm {pack_lot_year} — mỗi số lô bia phải duy nhất.")
+    # Số lô bia (lot_no) — KHÔNG còn chặn cứng khi trùng (yêu cầu người dùng 2026-10-01: "cho
+    # phép nhập 2 lô giống nhau và hỏi bạn có muốn nhập 2 lô giống nhau không") — chỉ CẢNH BÁO +
+    # bắt XÁC NHẬN LẠI (payload["confirm_duplicate_lot_no"]) mới cho tạo, mirror đúng cơ chế
+    # confirm_beer_type_mismatch ở create_filter_order (hỏi 1 lần, có thể hủy, không âm thầm tạo
+    # trùng). Trước 2026-10-01 đây là UniqueConstraint DB thật (uq_batch_pack_lot_year_lotno) —
+    # xem docstring BatchPackLot.
+    dup = db.execute(select(BatchPackLot).where(BatchPackLot.lot_no == lot_no,
+                  BatchPackLot.pack_lot_year == pack_lot_year)).scalar_one_or_none()
+    if dup and not payload.get("confirm_duplicate_lot_no"):
+        raise DomainError(
+            f"Số lô bia '{lot_no}' đã dùng cho lô thành phẩm '{dup.pack_lot_code}' trong năm "
+            f"{pack_lot_year}. Bạn có chắc vẫn muốn dùng lại số lô bia này không?")
     p = BatchPackLot(
         pack_lot_id=new_id(), pack_lot_code=pack_lot_code, pack_lot_year=pack_lot_year,
         filter_lot_id=filter_lot_id, qty=qty,
