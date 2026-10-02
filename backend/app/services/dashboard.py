@@ -312,8 +312,17 @@ def _batch_filter_lot_yield_items(db: Session, date_from, date_to, low_l: float,
         v_dich_l = sum(draw_hl_by_batch.get(m.batch_link_id, 0.0) for m in members) * 100
         v_daw_l = sum((m.nuoc_bai_khi_hl or 0.0) for m in members) * 100
         v_l = v_dich_l + v_daw_l
-        all_final = all(m.is_final_batch for m in members)
-        cls = "cuoi" if all_final else classify_yield_l(v_l, low_l, high_l)
+        # "Mẻ cuối" (mẻ vét) của cả NHÓM: CHỈ CẦN 1 lô lọc/mẻ con trong nhóm được đánh dấu là đủ
+        # (OR, không phải AND như trước) — yêu cầu người dùng 2026-10-02: "nếu 1 trong các lô lọc
+        # của mẻ lọc đó có tích mẻ cuối, thì cả mẻ lọc đó được coi là mẻ cuối". Phân loại
+        # Thấp/Bình thường/Cao giờ LUÔN tính theo ngưỡng thật (không còn "cuoi" đè lên, loại khỏi
+        # so sánh như trước) — mẻ cuối hay không vẫn so với ngưỡng bình thường để tô màu đỏ/xanh
+        # trên "BC hệ lọc" (yêu cầu người dùng: "so sánh với cài đặt này, nếu ở mức thấp thì sẽ
+        # màu đỏ, ở mức cao thì sẽ màu xanh, còn nếu mức bình thường thì màu bình thường"). Dashboard
+        # "Sản lượng lọc thấp" (low_yield_filter_alerts) tự loại riêng is_final=True khỏi cảnh báo
+        # (mẻ vét thấp là chuyện bình thường, không phải cảnh báo hiệu suất).
+        is_final = any(m.is_final_batch for m in members)
+        cls = classify_yield_l(v_l, low_l, high_l)
         lot_codes = sorted({filter_lots_by_id[m.filter_lot_id].filter_lot_code
                             for m in members if filter_lots_by_id.get(m.filter_lot_id)})
         fl0 = next((filter_lots_by_id.get(m.filter_lot_id) for m in members
@@ -330,6 +339,7 @@ def _batch_filter_lot_yield_items(db: Session, date_from, date_to, low_l: float,
             "ended_at": last_ended.isoformat() if last_ended else None,
             "v_dich_l": round(v_dich_l, 1), "v_daw_l": round(v_daw_l, 1),
             "v_l": round(v_l, 1), "classification": cls, "classification_label": _YIELD_LABEL[cls],
+            "is_final": is_final,
         })
     return items
 
@@ -341,17 +351,27 @@ def filter_production_report(db: Session, days: int = 3650) -> list[dict]:
     - `is_blend`: suy từ SỐ TANK LÊN MEN NGUỒN phân biệt của cả nhóm (> 1 = phối) — KHÔNG dùng
       BatchFilterOrder.blend_mode vì 1 mẻ lọc có thể gộp nhiều lô lọc thuộc nhiều lệnh lọc khác
       nhau, blend_mode của 1 lệnh đơn lẻ không còn đại diện đúng cho cả nhóm.
-    - `is_final`: true khi CẢ NHÓM là "mẻ cuối" (mẻ vét, `BatchFilterLotBatch.is_final_batch`) —
-      mirror `classification == "cuoi"` của _batch_filter_lot_yield_items (yêu cầu người dùng
-      2026-10-01: "thêm cột mẻ cuối hay không").
-    - `tanks`: tank lên men nguồn (tank_id + tên) — frontend dùng để bấm "truy ngược" sang xem lại
-      chỉ tiêu CT chính/phụ của tank đó (chỉ tiêu chất lượng TRƯỚC LỌC).
-    - `to_bbt`: tank thành phẩm (BBT) đích.
+    - `is_final`: true khi ÍT NHẤT 1 lô lọc/mẻ con trong nhóm là "mẻ cuối" (mẻ vét,
+      `BatchFilterLotBatch.is_final_batch`) — OR, không phải AND (yêu cầu người dùng 2026-10-02:
+      "nếu 1 trong các lô lọc của mẻ lọc đó có tích mẻ cuối, thì cả mẻ lọc đó được coi là mẻ
+      cuối").
+    - `classification`/`classification_label`: Thấp/Bình thường/Cao theo ngưỡng thật
+      (OpsSetting.filter_line_yield_low_l/high_l) — LUÔN tính, kể cả khi `is_final` — mẻ cuối
+      không còn bị loại khỏi so sánh ở báo cáo này (khác `low_yield_filter_alerts`, nơi mẻ cuối
+      vẫn bị loại khỏi cảnh báo "thấp" vì mẻ vét thấp là chuyện bình thường) — dùng để tô màu đỏ/
+      xanh cột "Sản lượng lọc" (yêu cầu người dùng 2026-10-02).
+    - `tanks`: tank lên men nguồn, mỗi tank kèm `tank_id`/`tank_lm`/`product_name` (Dịch bia CỦA
+      RIÊNG tank đó, VD "B25" + "Sapphire 14oP") — frontend ghép thành nhãn "B25 — Sapphire 14oP"
+      và dùng `tank_id` để bấm "truy ngược" xem lại chỉ tiêu CT chính/phụ (chỉ tiêu chất lượng
+      TRƯỚC LỌC). Không còn cột "Dịch bia" riêng cho cả nhóm — gắn thẳng vào từng tank (yêu cầu
+      người dùng 2026-10-02: "bỏ cột dịch bia, tại cột tank lên men, thêm loại dịch bia vào").
+    - `bbt_list`: tank thành phẩm (BBT) đích, mỗi tank kèm `to_bbt`/`beer_type_name` (Loại bia CỦA
+      RIÊNG lô lọc đổ vào tank đó) + `filter_lot_id` — frontend ghép thành nhãn "T01 — Sapphire"
+      và dùng `filter_lot_id` để bấm xem "Chỉ tiêu Lọc" của lô lọc đó ngay tại báo cáo (yêu cầu
+      người dùng 2026-10-02: "Tank thành phẩm cũng tương tự ... bổ sung thêm chỉ tiêu tank thành
+      phẩm xem luôn ở màn hình này khi bấm vào").
     - `ended_at`: "Ngày lọc" = mốc kết thúc CUỐI CÙNG của cả nhóm (mirror hàm nguồn).
     - `v_l`: sản lượng lọc (lít), cộng dồn cả nhóm.
-    - `product_names`: tên (các) Dịch bia của tank nguồn — nhóm Phối gộp nhiều tank nguồn khác
-      Dịch bia thì hiện ĐỦ, không chỉ 1 cái (yêu cầu người dùng 2026-10-01: "nếu phối thì hiện ra
-      cả 2 loại dịch").
     - `beer_type_name`: gộp ĐỦ Loại bia đã gán thẳng trên TỪNG BatchFilterLot của cả nhóm (không
       chỉ 1 lô đại diện) — nếu KHÔNG lô nào trong nhóm có beer_type_id (dữ liệu cũ/thiếu) thì SUY
       từ Product.beer_type_id của tank nguồn thay vì bỏ trống (yêu cầu người dùng 2026-10-01:
@@ -362,9 +382,12 @@ def filter_production_report(db: Session, days: int = 3650) -> list[dict]:
     PYTHON (không phải ở tầng SQL), nên 1 datetime client gửi lên THIẾU tzinfo (naive) sẽ vỡ
     TypeError khi so với `ended_at` tz-aware đọc từ CSDL — 2026-10-01, audit báo cáo "Hệ lọc".
     Prefetch hàng loạt theo ID, không query trong vòng lặp."""
+    from . import ops_setting as ops_setting_svc
+    settings = ops_setting_svc.get_settings(db)
     date_to = utcnow()
     date_from = date_to - timedelta(days=days)
-    base_items = _batch_filter_lot_yield_items(db, date_from, date_to, 0, 10 ** 9)
+    base_items = _batch_filter_lot_yield_items(
+        db, date_from, date_to, settings.filter_line_yield_low_l, settings.filter_line_yield_high_l)
     if not base_items:
         return []
     all_batch_ids = {bid for it in base_items for bid in it["batch_link_ids"]}
@@ -399,30 +422,42 @@ def filter_production_report(db: Session, days: int = 3650) -> list[dict]:
     rows = []
     for it in base_items:
         member_lot_ids = {batches_by_id[bid].filter_lot_id for bid in it["batch_link_ids"] if bid in batches_by_id}
-        tanks_in_group: dict[str, str] = {}
-        product_names = set()
+        # tanks_in_group: tank nguồn (Lên men) kèm ĐÚNG Dịch bia của riêng tank đó — gắn thẳng
+        # vào nhãn (VD "B25 — Sapphire 14oP") thay vì tách riêng 1 cột "Dịch bia" chung cho cả
+        # nhóm (yêu cầu người dùng 2026-10-02: "bỏ cột dịch bia, ... thêm loại dịch bia vào" cột
+        # Tank lên men). bbt_by_code: tank thành phẩm kèm ĐÚNG Loại bia của riêng lô lọc đổ vào
+        # tank đó (không phải Loại bia gộp cả nhóm) + filter_lot_id để bấm xem "Chỉ tiêu Lọc"
+        # ngay tại đây (yêu cầu: "Tank thành phẩm cũng tương tự ... bổ sung thêm chỉ tiêu tank
+        # thành phẩm xem luôn ở màn hình này khi bấm vào").
+        tanks_in_group: dict[str, dict] = {}
+        bbt_by_code: dict[str, dict] = {}
         explicit_beer_type_names = set()
         fallback_beer_type_names = set()
-        bbt_set = set()
         for lot_id in member_lot_ids:
             fl = filter_lots_by_id.get(lot_id)
-            if fl and fl.to_bbt:
-                bbt_set.add(fl.to_bbt)
+            fl_explicit = set()
             if fl and fl.beer_type_id:
                 bt = beer_types_by_id.get(fl.beer_type_id)
                 if bt:
+                    fl_explicit.add(bt.name)
                     explicit_beer_type_names.add(bt.name)
+            fl_fallback = set()
             for s in sources_by_lot.get(lot_id, []):
                 if s.source_type == "tank":
                     t = tanks_by_id.get(s.source_tank_id)
                     if t:
-                        tanks_in_group[t.tank_id] = t.tank_lm or t.tank_code
                         product = products_by_id.get(t.product_id)
-                        if product:
-                            product_names.add(product.name)
+                        tanks_in_group[t.tank_id] = {"tank_lm": t.tank_lm or t.tank_code,
+                                                     "product_name": product.name if product else None}
+                        if product and product.beer_type_id:
                             bt = beer_types_by_id.get(product.beer_type_id)
                             if bt:
+                                fl_fallback.add(bt.name)
                                 fallback_beer_type_names.add(bt.name)
+            if fl and fl.to_bbt and fl.to_bbt not in bbt_by_code:
+                fl_beer_type_name = ", ".join(sorted(fl_explicit)) or ", ".join(sorted(fl_fallback)) or None
+                bbt_by_code[fl.to_bbt] = {"to_bbt": fl.to_bbt, "beer_type_name": fl_beer_type_name,
+                                          "filter_lot_id": fl.filter_lot_id}
         # Mẻ lọc Phối có thể gộp nhiều lô lọc gán Loại bia KHÁC nhau (VD lọc chung Sapphire +
         # Legend) — trước đây chỉ lấy `it["beer_type"]` của 1 lô ĐẠI DIỆN (fl0 — xem
         # _batch_filter_lot_yield_items), bỏ sót Loại bia của các lô còn lại trong nhóm (yêu cầu
@@ -435,12 +470,12 @@ def filter_production_report(db: Session, days: int = 3650) -> list[dict]:
             "filter_lot_code": it["filter_lot_code"], "filter_lot_id": it["filter_lot_id"],
             "ended_at": it["ended_at"], "v_l": it["v_l"],
             "beer_type_name": beer_type_name,
-            "product_names": sorted(product_names),
-            "to_bbt": ", ".join(sorted(bbt_set)) if bbt_set else None,
             "is_blend": len(tanks_in_group) > 1,
-            "is_final": it["classification"] == "cuoi",
-            "tanks": [{"tank_id": tid, "tank_lm": name}
-                     for tid, name in sorted(tanks_in_group.items(), key=lambda x: x[1] or "")],
+            "is_final": it["is_final"],
+            "classification": it["classification"], "classification_label": it["classification_label"],
+            "tanks": [{"tank_id": tid, "tank_lm": v["tank_lm"], "product_name": v["product_name"]}
+                     for tid, v in sorted(tanks_in_group.items(), key=lambda x: x[1]["tank_lm"] or "")],
+            "bbt_list": [bbt_by_code[code] for code in sorted(bbt_by_code)],
         })
     rows.sort(key=lambda r: r["ended_at"] or "", reverse=True)
     return rows
@@ -460,6 +495,7 @@ def export_filter_production_xlsx(db: Session, days: int = 3650) -> bytes:
     import_mapping.py::export_report (cùng dùng openpyxl, đã là dependency sẵn có, không cần
     thêm thư viện) — yêu cầu người dùng 2026-10-01: "thêm mục xuất ra file excel"."""
     from openpyxl import Workbook
+    from openpyxl.styles import PatternFill
     import io
 
     rows = filter_production_report(db, days)
@@ -467,17 +503,29 @@ def export_filter_production_xlsx(db: Session, days: int = 3650) -> bytes:
     ws = wb.active
     ws.title = "Hệ lọc"
     headers = ["Mẻ lọc số", "Lô lọc", "Kiểu", "Mẻ cuối", "Tank lên men", "Tank thành phẩm",
-              "Ngày lọc", "Sản lượng lọc (lít)", "Dịch bia", "Loại bia"]
+              "Ngày lọc", "Sản lượng lọc (lít)", "Loại bia"]
     ws.append(headers)
+    # Tô màu cột "Sản lượng lọc" theo đúng phân loại Thấp/Cao (mirror màu đỏ/xanh trên web) — kể
+    # cả dòng "Mẻ cuối" cũng tô theo phân loại thật, không loại trừ (yêu cầu người dùng 2026-10-02).
+    fill_by_cls = {"thap": PatternFill("solid", fgColor="FFC7CE"), "cao": PatternFill("solid", fgColor="C6EFCE")}
+    v_l_col = headers.index("Sản lượng lọc (lít)") + 1
+    # Mỗi tank/BBT kèm thẳng Dịch bia/Loại bia của riêng nó (VD "B25 - Sapphire 14oP") — bỏ cột
+    # "Dịch bia" chung cho cả nhóm (yêu cầu người dùng 2026-10-02: "bỏ cột dịch bia ... thêm loại
+    # dịch bia vào" cột Tank lên men/Tank thành phẩm).
+    tank_label = lambda t: f'{t["tank_lm"]} - {t["product_name"]}' if t["product_name"] else t["tank_lm"]
+    bbt_label = lambda b: f'{b["to_bbt"]} - {b["beer_type_name"]}' if b["beer_type_name"] else b["to_bbt"]
     for r in rows:
         ws.append([
             r["batch_seq_no"] or "", r["filter_lot_code"] or "",
             "Phối" if r["is_blend"] else "Không phối",
             "Mẻ cuối" if r["is_final"] else "",
-            ", ".join(t["tank_lm"] for t in r["tanks"] if t["tank_lm"]),
-            r["to_bbt"] or "", _fmt_vn_dt(r["ended_at"]), r["v_l"],
-            ", ".join(r["product_names"]) or "", r["beer_type_name"] or "",
+            ", ".join(tank_label(t) for t in r["tanks"] if t["tank_lm"]),
+            ", ".join(bbt_label(b) for b in r["bbt_list"]), _fmt_vn_dt(r["ended_at"]), r["v_l"],
+            r["beer_type_name"] or "",
         ])
+        fill = fill_by_cls.get(r["classification"])
+        if fill:
+            ws.cell(row=ws.max_row, column=v_l_col).fill = fill
     for col_idx in range(1, len(headers) + 1):
         ws.column_dimensions[chr(64 + col_idx)].width = 18
     buf = io.BytesIO()
@@ -489,16 +537,18 @@ def low_yield_filter_alerts(db: Session, days: int = 5, limit: int = 5) -> dict:
     """Cảnh báo sản lượng lọc thấp cho Dashboard — pipeline "Mẻ sản xuất" mới (yêu cầu người
     dùng 2026-09-02: đổi nguồn từ module Nấu-Lọc-Chiết cũ sang BatchFilterLotBatch, tính toán
     tương tự y hệt cách cũ — xem _batch_filter_lot_yield_items). Trong N ngày gần nhất (mặc
-    định 5, tính theo `ended_at` — thời điểm kết thúc mẻ lọc), chỉ giữ classification="thap",
-    sắp theo V lọc thấp nhất lên trước (mẻ hụt sản lượng nặng nhất đáng chú ý nhất), giới hạn
-    top N dòng — mirror qc_attention_alerts (widget cảnh báo gọn trên Dashboard)."""
+    định 5, tính theo `ended_at` — thời điểm kết thúc mẻ lọc), chỉ giữ classification="thap" VÀ
+    is_final=False (mẻ cuối/mẻ vét vốn dĩ thấp — không phải cảnh báo hiệu suất thật, xem
+    _batch_filter_lot_yield_items), sắp theo V lọc thấp nhất lên trước (mẻ hụt sản lượng nặng
+    nhất đáng chú ý nhất), giới hạn top N dòng — mirror qc_attention_alerts (widget cảnh báo gọn
+    trên Dashboard)."""
     from . import ops_setting as ops_setting_svc
     settings = ops_setting_svc.get_settings(db)
     date_to = utcnow()
     date_from = date_to - timedelta(days=days)
     all_items = _batch_filter_lot_yield_items(
         db, date_from, date_to, settings.filter_line_yield_low_l, settings.filter_line_yield_high_l)
-    low_items = sorted((it for it in all_items if it["classification"] == "thap"),
+    low_items = sorted((it for it in all_items if it["classification"] == "thap" and not it["is_final"]),
                        key=lambda it: it["v_l"])
     return {"items": low_items[:limit], "total": len(low_items),
             "date_from": date_from.isoformat(), "date_to": date_to.isoformat(),
