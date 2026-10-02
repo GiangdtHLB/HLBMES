@@ -178,9 +178,20 @@ def _walk(db: Session, node_type: str, node_id: str, direction: str,
     direction='forward' đi theo cạnh từ->tới (node này sinh ra cái gì). stop_types: các loại
     node vẫn hiện trong cây nhưng KHÔNG đi tiếp xuống con của nó."""
     stop_types = stop_types or set()
+    # memo: (ntype, nid) -> node đã mở rộng ĐẦY ĐỦ (children/qc/period xong xuôi), DÙNG CHUNG cho
+    # toàn bộ lệnh gọi — khác `ancestors` (chỉ theo PATH, để phân biệt chu trình thật với diamond
+    # hợp lệ, xem comment dưới). Cây con của 1 node CHỈ phụ thuộc chính node đó + dữ liệu
+    # GenealogyEdge hiện có, KHÔNG phụ thuộc đường đi đã tới nó — nên khi gặp lại CÙNG 1 node qua
+    # 1 nhánh khác (diamond, không phải tổ tiên trên đường đi hiện tại), mở rộng lại là THỪA. Trả
+    # về 1 BẢN SAO ở mỗi lần dùng lại (`dict(memo[key])`) để caller gắn relation/quantity/uom
+    # riêng của CẠNH dẫn tới nó (xem vòng lặp children bên dưới) mà không đụng tới bản dùng
+    # chung — `children` lồng bên trong KHÔNG bị sửa thêm sau khi đã trả về nên dùng chung an
+    # toàn (2026-10-01, audit hiệu năng: hồ sơ EBR 1 lô thành phẩm có mẻ nấu dùng NVL mua số
+    # lượng lớn, tách lô cho hàng trăm mẻ khác — mỗi lần cây gặp lại lô NVL đó qua nhánh khác lại
+    # mở rộng lại y hệt, 1475 node cho 6 mẻ nấu, mất 27-39 giây).
+    memo: dict[tuple, dict] = {}
 
     def recurse(ntype: str, nid: str, ancestors: frozenset) -> dict:
-        node = _label(db, ntype, nid)
         key = (ntype, nid)
         if key in ancestors:
             # CHỈ đánh dấu "cycle" thật (node tự lặp lại trên CHÍNH đường đi từ gốc xuống) —
@@ -191,13 +202,19 @@ def _walk(db: Session, node_type: str, node_id: str, direction: str,
             # trước đây gắn nhãn "cycle" sai VÀ bỏ dở việc mở rộng nhánh đó). `ancestors` chỉ gồm
             # tổ tiên TRÊN đường đi hiện tại (truyền xuống dạng frozenset mới mỗi lần đệ quy, tự
             # "quên" khi quay lui sang nhánh khác) — 1 diamond thật giờ được mở rộng ĐẦY ĐỦ ở CẢ
-            # 2 nhánh, chỉ chu trình thật (node là tổ tiên của chính nó) mới bị cắt + gắn nhãn.
+            # 2 nhánh (qua `memo`, không phải quét lại CSDL), chỉ chu trình thật (node là tổ tiên
+            # của chính nó) mới bị cắt + gắn nhãn — hành vi cây hiển thị KHÔNG đổi so với trước.
+            node = _label(db, ntype, nid)
             node["children"] = []
             node["cycle"] = True
             return node
+        if key in memo:
+            return dict(memo[key])
+        node = _label(db, ntype, nid)
         if ntype in stop_types:
             node["children"] = []
-            return node
+            memo[key] = node
+            return dict(node)
         ancestors = ancestors | {key}
 
         if direction == "backward":
@@ -225,7 +242,8 @@ def _walk(db: Session, node_type: str, node_id: str, direction: str,
         if direction == "backward" and ntype == "batch":
             _attach_dispense_fifo(db, nid, children)
         node["children"] = children
-        return node
+        memo[key] = node
+        return dict(node)
 
     return recurse(node_type, node_id, frozenset())
 

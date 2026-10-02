@@ -341,14 +341,21 @@ def filter_production_report(db: Session, days: int = 3650) -> list[dict]:
     - `is_blend`: suy từ SỐ TANK LÊN MEN NGUỒN phân biệt của cả nhóm (> 1 = phối) — KHÔNG dùng
       BatchFilterOrder.blend_mode vì 1 mẻ lọc có thể gộp nhiều lô lọc thuộc nhiều lệnh lọc khác
       nhau, blend_mode của 1 lệnh đơn lẻ không còn đại diện đúng cho cả nhóm.
+    - `is_final`: true khi CẢ NHÓM là "mẻ cuối" (mẻ vét, `BatchFilterLotBatch.is_final_batch`) —
+      mirror `classification == "cuoi"` của _batch_filter_lot_yield_items (yêu cầu người dùng
+      2026-10-01: "thêm cột mẻ cuối hay không").
     - `tanks`: tank lên men nguồn (tank_id + tên) — frontend dùng để bấm "truy ngược" sang xem lại
       chỉ tiêu CT chính/phụ của tank đó (chỉ tiêu chất lượng TRƯỚC LỌC).
     - `to_bbt`: tank thành phẩm (BBT) đích.
     - `ended_at`: "Ngày lọc" = mốc kết thúc CUỐI CÙNG của cả nhóm (mirror hàm nguồn).
     - `v_l`: sản lượng lọc (lít), cộng dồn cả nhóm.
-    - `product_names`/`beer_type_name`: dịch bia + loại bia của (các) tank nguồn — nếu bản thân
-      BatchFilterLot chưa gán beer_type_id (dữ liệu cũ/thiếu) thì SUY từ Product.beer_type_id của
-      tank nguồn thay vì bỏ trống (yêu cầu người dùng 2026-10-01: "chưa thấy dịch bia nào").
+    - `product_names`: tên (các) Dịch bia của tank nguồn — nhóm Phối gộp nhiều tank nguồn khác
+      Dịch bia thì hiện ĐỦ, không chỉ 1 cái (yêu cầu người dùng 2026-10-01: "nếu phối thì hiện ra
+      cả 2 loại dịch").
+    - `beer_type_name`: gộp ĐỦ Loại bia đã gán thẳng trên TỪNG BatchFilterLot của cả nhóm (không
+      chỉ 1 lô đại diện) — nếu KHÔNG lô nào trong nhóm có beer_type_id (dữ liệu cũ/thiếu) thì SUY
+      từ Product.beer_type_id của tank nguồn thay vì bỏ trống (yêu cầu người dùng 2026-10-01:
+      "chưa thấy dịch bia nào").
     Chỉ gồm mẻ lọc ĐÃ KẾT THÚC (mirror _batch_filter_lot_yield_items — "ngày lọc" vô nghĩa với mẻ
     chưa xong). `days` tính SERVER-SIDE từ utcnow() (mirror material_norm?days=N) — tránh nhận
     date_from/date_to thô từ client: _batch_filter_lot_yield_items so sánh datetime NGAY TRONG
@@ -381,20 +388,30 @@ def filter_production_report(db: Session, days: int = 3650) -> list[dict]:
     products_by_id = {p.product_id: p for p in db.execute(
         select(Product).where(Product.product_id.in_(product_ids))).scalars().all()} if product_ids else {}
     fallback_beer_type_ids = {p.beer_type_id for p in products_by_id.values() if p.beer_type_id}
+    # explicit_beer_type_ids: beer_type_id gán THẲNG trên TỪNG BatchFilterLot của cả nhóm (không
+    # chỉ 1 lô đại diện như `it["beer_type"]` của _batch_filter_lot_yield_items) — cần để hiện
+    # ĐỦ khi 1 mẻ lọc Phối gộp nhiều lô lọc có Loại bia khác nhau (xem giải thích ở dưới).
+    explicit_beer_type_ids = {fl.beer_type_id for fl in filter_lots_by_id.values() if fl.beer_type_id}
     beer_types_by_id = {bt.beer_type_id: bt for bt in db.execute(
-        select(BeerType).where(BeerType.beer_type_id.in_(fallback_beer_type_ids))).scalars().all()} if fallback_beer_type_ids else {}
+        select(BeerType).where(BeerType.beer_type_id.in_(fallback_beer_type_ids | explicit_beer_type_ids)))
+        .scalars().all()} if (fallback_beer_type_ids or explicit_beer_type_ids) else {}
 
     rows = []
     for it in base_items:
         member_lot_ids = {batches_by_id[bid].filter_lot_id for bid in it["batch_link_ids"] if bid in batches_by_id}
         tanks_in_group: dict[str, str] = {}
         product_names = set()
+        explicit_beer_type_names = set()
         fallback_beer_type_names = set()
         bbt_set = set()
         for lot_id in member_lot_ids:
             fl = filter_lots_by_id.get(lot_id)
             if fl and fl.to_bbt:
                 bbt_set.add(fl.to_bbt)
+            if fl and fl.beer_type_id:
+                bt = beer_types_by_id.get(fl.beer_type_id)
+                if bt:
+                    explicit_beer_type_names.add(bt.name)
             for s in sources_by_lot.get(lot_id, []):
                 if s.source_type == "tank":
                     t = tanks_by_id.get(s.source_tank_id)
@@ -406,14 +423,22 @@ def filter_production_report(db: Session, days: int = 3650) -> list[dict]:
                             bt = beer_types_by_id.get(product.beer_type_id)
                             if bt:
                                 fallback_beer_type_names.add(bt.name)
+        # Mẻ lọc Phối có thể gộp nhiều lô lọc gán Loại bia KHÁC nhau (VD lọc chung Sapphire +
+        # Legend) — trước đây chỉ lấy `it["beer_type"]` của 1 lô ĐẠI DIỆN (fl0 — xem
+        # _batch_filter_lot_yield_items), bỏ sót Loại bia của các lô còn lại trong nhóm (yêu cầu
+        # người dùng 2026-10-01: "nếu phối thì hiện ra cả 2 loại dịch"). Giờ gộp ĐỦ mọi Loại bia
+        # đã gán thẳng trên TỪNG lô của cả nhóm; chỉ dùng tới fallback (suy từ Product của tank
+        # nguồn) khi KHÔNG lô nào trong nhóm có beer_type_id.
+        beer_type_name = ", ".join(sorted(explicit_beer_type_names)) or ", ".join(sorted(fallback_beer_type_names)) or None
         rows.append({
             "batch_seq_no": it["batch_seq_no"], "lot_count": it["lot_count"],
             "filter_lot_code": it["filter_lot_code"], "filter_lot_id": it["filter_lot_id"],
             "ended_at": it["ended_at"], "v_l": it["v_l"],
-            "beer_type_name": it["beer_type"] or (", ".join(sorted(fallback_beer_type_names)) or None),
+            "beer_type_name": beer_type_name,
             "product_names": sorted(product_names),
             "to_bbt": ", ".join(sorted(bbt_set)) if bbt_set else None,
             "is_blend": len(tanks_in_group) > 1,
+            "is_final": it["classification"] == "cuoi",
             "tanks": [{"tank_id": tid, "tank_lm": name}
                      for tid, name in sorted(tanks_in_group.items(), key=lambda x: x[1] or "")],
         })
@@ -441,15 +466,17 @@ def export_filter_production_xlsx(db: Session, days: int = 3650) -> bytes:
     wb = Workbook()
     ws = wb.active
     ws.title = "Hệ lọc"
-    headers = ["Mẻ lọc số", "Lô lọc", "Kiểu", "Tank lên men", "Tank thành phẩm",
-              "Ngày lọc", "Sản lượng lọc (lít)", "Loại bia"]
+    headers = ["Mẻ lọc số", "Lô lọc", "Kiểu", "Mẻ cuối", "Tank lên men", "Tank thành phẩm",
+              "Ngày lọc", "Sản lượng lọc (lít)", "Dịch bia", "Loại bia"]
     ws.append(headers)
     for r in rows:
         ws.append([
             r["batch_seq_no"] or "", r["filter_lot_code"] or "",
             "Phối" if r["is_blend"] else "Không phối",
+            "Mẻ cuối" if r["is_final"] else "",
             ", ".join(t["tank_lm"] for t in r["tanks"] if t["tank_lm"]),
-            r["to_bbt"] or "", _fmt_vn_dt(r["ended_at"]), r["v_l"], r["beer_type_name"] or "",
+            r["to_bbt"] or "", _fmt_vn_dt(r["ended_at"]), r["v_l"],
+            ", ".join(r["product_names"]) or "", r["beer_type_name"] or "",
         ])
     for col_idx in range(1, len(headers) + 1):
         ws.column_dimensions[chr(64 + col_idx)].width = 18

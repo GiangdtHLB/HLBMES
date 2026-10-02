@@ -578,7 +578,7 @@ def unlink_stage_group(db: Session, link_id: str, user: User) -> None:
 
 def required_params_for_stage(db: Session, stage: str, product_id: str = None,
                               finished_product_id: str = None, mandatory_only: bool = True,
-                              beer_type_id: str = None, category: str = None) -> list[dict]:
+                              beer_type_id: str = None, category: str = None, cache: dict = None) -> list[dict]:
     """Danh sách chỉ tiêu bắt buộc khai báo cho một công đoạn sản xuất (rỗng nếu chưa gán nhóm nào).
     Gộp cả nhóm gán riêng cho `product_id` (Dịch bia, chỉ áp dụng PRODUCT_SCOPED_STAGES)
     hoặc `beer_type_id` (Loại bia, các stage còn lại — VD loc/thanh_pham) / `category` (Loại
@@ -596,9 +596,18 @@ def required_params_for_stage(db: Session, stage: str, product_id: str = None,
     1 SKU (1 tank BBT có thể chiết ra nhiều SKU khác nhau) nhưng biết chắc Loại sản phẩm, nên
     dùng category làm mức tra trung gian thay finished_product_id. Đây cũng chính là nguồn dữ
     liệu cho mọi báo cáo/trạng thái chỉ tiêu (stage_qc_status, GET /qc-status, hồ sơ điện tử
-    lot_record, tóm tắt QC trong genealogy) — sửa 1 chỗ này áp dụng nhất quán ở mọi nơi."""
+    lot_record, tóm tắt QC trong genealogy) — sửa 1 chỗ này áp dụng nhất quán ở mọi nơi.
+
+    `cache` (tùy chọn, dict do caller tự tạo/giữ): kết quả hàm này CHỈ phụ thuộc vào các tham số
+    truyền vào (không phụ thuộc scope_id) — list/report lặp qua NHIỀU bản ghi có thể dùng chung
+    `cache` để tránh truy vấn lại CÙNG 1 tổ hợp (stage, product_id, finished_product_id,
+    beer_type_id, category) nhiều lần (VD nhiều mẻ nấu cùng sản phẩm) — 2026-10-01, audit hiệu
+    năng panel "Công đoạn chờ khai báo" (list_pending_stage_declarations)."""
     if not stage:
         return []
+    cache_key = (stage, product_id, finished_product_id, mandatory_only, beer_type_id, category)
+    if cache is not None and cache_key in cache:
+        return cache[cache_key]
     stmt = (
         select(QCParameterGroupItem, QCParameter, StageQcGroup)
         .join(StageQcGroup, StageQcGroup.group_id == QCParameterGroupItem.group_id)
@@ -645,6 +654,8 @@ def required_params_for_stage(db: Session, stage: str, product_id: str = None,
     out = sorted(best_by_code.values(), key=lambda p: p["_seq"])
     for p in out:
         del p["_specificity"]; del p["_seq"]
+    if cache is not None:
+        cache[cache_key] = out
     return out
 
 
@@ -844,7 +855,8 @@ def sync_stage_quality_status(db: Session, stage: str, scope_type: str, scope_id
 
 
 def stage_qc_status(db: Session, stage: str, scope_type: str, scope_id: str, product_id: str = None,
-                    finished_product_id: str = None, beer_type_id: str = None, category: str = None) -> dict:
+                    finished_product_id: str = None, beer_type_id: str = None, category: str = None,
+                    cache: dict = None) -> dict:
     """Trạng thái khai báo chỉ tiêu của một bản ghi công đoạn (mẻ nấu/lô LM/lô lọc/mã chiết)
     — giá trị đã khai báo lưu ở QualityResult dùng chung (như lot_qc_status).
     Dùng latest_results_by_param (thay vì đọc thẳng mọi dòng) để CHỈ tính theo giá trị MỚI
@@ -856,11 +868,15 @@ def stage_qc_status(db: Session, stage: str, scope_type: str, scope_id: str, pro
     `required` trả về CẢ chỉ tiêu không bắt buộc (mandatory=False trên QCParameterGroupItem) —
     vẫn phải hiện trong bảng để nhập được (không bắt buộc khác với "ẩn hẳn đi"); chỉ khi tính
     pending/has_fail/can_release mới LỌC RIÊNG tập mandatory=True, đúng nghĩa "không bắt buộc"
-    là không cần khai và không chặn duyệt vì nó."""
+    là không cần khai và không chặn duyệt vì nó.
+
+    `cache` — truyền qua cho required_params_for_stage (xem đó) khi gọi lặp lại nhiều bản ghi
+    cùng lúc (VD list_pending_stage_declarations); mặc định None, không ảnh hưởng mọi nơi gọi
+    đơn lẻ khác."""
     from . import quality
     required = required_params_for_stage(db, stage, product_id=product_id,
                                          finished_product_id=finished_product_id, mandatory_only=False,
-                                         beer_type_id=beer_type_id, category=category)
+                                         beer_type_id=beer_type_id, category=category, cache=cache)
     latest_by_param = quality.latest_results_by_param(db, scope_type, scope_id)
     mandatory_codes = {p["code"] for p in required if p["mandatory"]}
     pending = [p["code"] for p in required if p["mandatory"] and p["code"] not in latest_by_param]
@@ -1121,8 +1137,18 @@ def list_pending_stage_declarations(db: Session) -> list[dict]:
     hiện đủ mọi chỉ tiêu bắt buộc kèm giá trị hiện tại, không chỉ riêng phần còn thiếu). RIÊNG
     len_men_chinh/len_men_phu (MULTI_SAMPLE_STAGES — lấy mẫu LẶP LẠI) đổi hẳn nút thành "+ Thêm
     lần lấy mẫu" thay vì chỉ sửa đè, vì bản chất là thêm 1 lần mới chứ không ghi đè (xem
-    MULTI_SAMPLE_STAGES ở dưới)."""
+    MULTI_SAMPLE_STAGES ở dưới).
+
+    `req_params_cache`: nhiều bản ghi khác nhau (VD nhiều mẻ nấu cùng sản phẩm, hoặc nhiều lô lọc
+    cùng Loại bia/Loại sản phẩm) thường trùng NGUYÊN tổ hợp (stage, product_id, beer_type_id,
+    category, finished_product_id) — dùng 1 cache DÙNG CHUNG cho cả hàm để required_params_for_stage
+    chỉ truy vấn 1 lần cho mỗi tổ hợp thay vì lặp lại theo từng bản ghi (2026-10-01, audit hiệu
+    năng: hàm này quét TOÀN BỘ lịch sử — mọi BatchExecution/BatchTank/WorkOrder/BatchFilterLot/
+    BatchPackLot từng tạo, không giới hạn theo ngày/limit — nên càng nhiều dữ liệu tích lũy càng
+    chậm; cache này giảm được phần lặp lại do TRÙNG tổ hợp, phần còn lại (quét toàn bộ lịch sử)
+    cần xử lý riêng — vd thêm bộ lọc theo trạng thái "chưa hoàn thành" — nếu sau này vẫn chậm)."""
     out = []
+    req_params_cache: dict = {}
     # Cột "tank_lm" ở panel này dùng CHUNG 1 tên field cho 2 ý nghĩa khác nhau tuỳ công đoạn
     # (yêu cầu người dùng 2026-09-05: "cột này để cả tank lên men/tank thành phẩm được không,
     # nếu là nấu và lên men thì để tank lên men, còn lọc và chiết thì để tank thành phẩm"):
@@ -1140,7 +1166,7 @@ def list_pending_stage_declarations(db: Session) -> list[dict]:
         if t:
             tank_by_batch_id[link.batch_id] = t
     for b in db.execute(select(BatchExecution)).scalars().all():
-        st = stage_qc_status(db, "nau", "batch", b.batch_id, product_id=b.product_id)
+        st = stage_qc_status(db, "nau", "batch", b.batch_id, product_id=b.product_id, cache=req_params_cache)
         if st["required"]:
             merged_tank = tank_by_batch_id.get(b.batch_id)
             out.append({"stage": "nau", "stage_label": "Nấu (Mẻ SX)", "scope_type": "batch",
@@ -1163,7 +1189,7 @@ def list_pending_stage_declarations(db: Session) -> list[dict]:
         tank_label = f"Tank {t.tank_lm} (Lô {t.tank_code})" if t.tank_lm else f"Lô {t.tank_code} (chưa gán tank vật lý)"
         for stage, part_label in (("len_men_chinh", "CT chính"), ("len_men_phu", "CT phụ")):
             scope_id = batch_tank_scope_id(t.tank_id, stage)
-            st = stage_qc_status(db, stage, "batch_tank", scope_id, t.product_id)
+            st = stage_qc_status(db, stage, "batch_tank", scope_id, t.product_id, cache=req_params_cache)
             if st["required"] and (st["pending"] or stage in MULTI_SAMPLE_STAGES):
                 out.append({"stage": stage, "stage_label": f"Lên men (Mẻ SX) — {part_label}",
                            "scope_type": "batch_tank", "scope_id": scope_id,
@@ -1174,14 +1200,17 @@ def list_pending_stage_declarations(db: Session) -> list[dict]:
     # từng Mẻ nấu (BatchExecution) — 1 WO có thể "Phát mẻ" nhiều lần ra nhiều mẻ nhưng vẫn dùng
     # chung 1 nguồn nước duy nhất.
     for wo in db.execute(select(WorkOrder)).scalars().all():
-        st_water_wo = stage_qc_status(db, "nuoc_nau", "work_order", wo.wo_id)
+        st_water_wo = stage_qc_status(db, "nuoc_nau", "work_order", wo.wo_id, cache=req_params_cache)
         if st_water_wo["required"]:
             out.append({"stage": "nuoc_nau", "stage_label": "Nước nấu bia", "scope_type": "work_order",
                        "scope_id": wo.wo_id, "label": f"WO {wo.wo_code} — Nước nấu",
                        "pending": st_water_wo["pending"]})
     # Lô lọc (Mẻ SX, scope_id = chính filter_lot_id, không cần ghép năm vì đã là khóa chính
     # duy nhất toàn hệ thống, mirror cách gọi có sẵn ở batch_pipeline.py::approve_filter_lot).
-    for fl in db.execute(select(BatchFilterLot)).scalars().all():
+    # Tải 1 LẦN DUY NHẤT, dùng lại cho cả khối BatchPackLot bên dưới (filter_lots_by_id) — trước
+    # đây query lại y hệt lần 2 (2026-10-01, audit hiệu năng).
+    all_filter_lots = db.execute(select(BatchFilterLot)).scalars().all()
+    for fl in all_filter_lots:
         # BỎ SÓT category trước đây (thêm category cho stage=loc từ 2026-09-30 — xem
         # required_params_for_stage — nhưng panel tổng hợp này chưa được cập nhật theo) khiến lô
         # lọc đã gán đúng category vẫn tra như category rỗng, không khớp nhóm chỉ tiêu đã gán
@@ -1190,7 +1219,7 @@ def list_pending_stage_declarations(db: Session) -> list[dict]:
         # ở màn chi tiết lô lọc).
         st = stage_qc_status(db, "loc", "batch_filter_lot", fl.filter_lot_id, fl.product_id,
                              beer_type_id=fl.beer_type_id, finished_product_id=fl.finished_product_id,
-                             category=fl.category)
+                             category=fl.category, cache=req_params_cache)
         if st["required"]:
             out.append({"stage": "loc", "stage_label": "Lọc (Mẻ SX)", "scope_type": "batch_filter_lot",
                        "scope_id": fl.filter_lot_id, "label": f"Lô lọc {fl.filter_lot_code}",
@@ -1201,14 +1230,14 @@ def list_pending_stage_declarations(db: Session) -> list[dict]:
     # (BatchPackLot không tự lưu 3 field này, mirror approve_pack_lot). category cũng BỊ BỎ SÓT
     # như nhánh "loc" ở trên (thanh_pham cũng thuộc CATEGORY_SCOPED_STAGES) — sửa cùng lúc
     # (2026-10-01).
-    filter_lots_by_id = {fl.filter_lot_id: fl for fl in db.execute(select(BatchFilterLot)).scalars().all()}
+    filter_lots_by_id = {fl.filter_lot_id: fl for fl in all_filter_lots}
     for p in db.execute(select(BatchPackLot)).scalars().all():
         fl = filter_lots_by_id.get(p.filter_lot_id)
         st = stage_qc_status(db, "thanh_pham", "batch_pack_lot", p.pack_lot_id,
                              product_id=fl.product_id if fl else None,
                              beer_type_id=fl.beer_type_id if fl else None,
                              finished_product_id=p.finished_product_id,
-                             category=fl.category if fl else None)
+                             category=fl.category if fl else None, cache=req_params_cache)
         if st["required"]:
             out.append({"stage": "thanh_pham", "stage_label": "Chiết (Mẻ SX)", "scope_type": "batch_pack_lot",
                        "scope_id": p.pack_lot_id, "label": f"Lô TP {p.pack_lot_code}",
