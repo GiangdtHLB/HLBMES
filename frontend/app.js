@@ -1,5 +1,19 @@
 "use strict";
 
+// Vô hiệu hóa lăn chuột tăng/giảm giá trị trên MỌI ô nhập số (input[type=number]) — hành vi mặc
+// định của trình duyệt (đặc biệt Chrome: lăn chuột khi đang focus 1 ô number sẽ tự tăng/giảm giá
+// trị) rất dễ gây nhập nhầm (VD lỡ lăn chuột cuộn trang ngang qua ô đang gõ dở) — yêu cầu người
+// dùng 2026-10-02: "không cho phép lăn chuột để tăng giảm", áp dụng toàn hệ thống. Gắn DUY NHẤT
+// 1 listener ở document (bắt được MỌI ô input number hiện có VÀ render thêm sau này, không cần
+// sửa từng ô trong hàng trăm chỗ) — chỉ chặn khi con trỏ đang ở ĐÚNG ô number ĐANG FOCUS (khớp
+// chính xác điều kiện trình duyệt tự tăng/giảm), không ảnh hưởng cuộn trang ở nơi khác dù 1 ô
+// number khác đang giữ focus. {passive:false} bắt buộc để preventDefault() có tác dụng.
+document.addEventListener("wheel", (e) => {
+  if (e.target === document.activeElement && e.target.tagName === "INPUT" && e.target.type === "number") {
+    e.preventDefault();
+  }
+}, { passive: false });
+
 // ---------- Auth + API helper ----------
 let TOKEN = localStorage.getItem("mes_token") || "";
 let CURRENT_USER = null;  // {username, full_name, job_title, role, views}
