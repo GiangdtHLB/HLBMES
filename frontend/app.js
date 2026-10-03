@@ -11202,9 +11202,13 @@ async function openFilterReportBbtQc(filterLotId, toBbt) {
     `&product_id=${encodeURIComponent(fl.product_id || "")}&beer_type_id=${encodeURIComponent(fl.beer_type_id || "")}` +
     `&category=${encodeURIComponent(fl.category || "")}&finished_product_id=${encodeURIComponent(fl.finished_product_id || "")}`;
   const st = await GET(`/brewing/qc-status?${qs}`).catch(() => null);
-  const rows = (st?.required || []).map(p => {
+  // qcRowsWithOrphans (không chỉ st.required) — mirror đúng showBatchFilterLot (app.js:3854):
+  // kết quả đã khai báo nhưng nhóm chỉ tiêu sau đó bị đổi/xóa khỏi Danh mục vẫn phải hiện ra,
+  // nếu không popup sẽ báo nhầm "chưa gán chỉ tiêu" dù lô đã có đầy đủ kết quả QC (phát hiện
+  // qua lô lọc 1379 — 2026-10-03).
+  const rows = (st ? qcRowsWithOrphans(st) : []).map(p => {
     const r = (st.recorded || []).find(x => x.parameter === p.code);
-    return `<tr><td>${esc(p.name)}</td><td>${p.value_type !== "numeric" ? "—" : (p.lsl ?? "—")}</td>
+    return `<tr><td>${qcParamNameCell(p)}</td><td>${p.value_type !== "numeric" ? "—" : (p.lsl ?? "—")}</td>
       <td>${p.value_type !== "numeric" ? "—" : (p.usl ?? "—")}</td>
       <td>${r ? qcValueLabel(p, r.value, r.value_text) : "—"}</td>
       <td>${r ? badge(r.status) + r.status : '<span class="muted">chưa khai báo</span>'}</td>
