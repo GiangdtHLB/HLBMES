@@ -1,5 +1,19 @@
 "use strict";
 
+// Vô hiệu hóa lăn chuột tăng/giảm giá trị trên MỌI ô nhập số (input[type=number]) — hành vi mặc
+// định của trình duyệt (đặc biệt Chrome: lăn chuột khi đang focus 1 ô number sẽ tự tăng/giảm giá
+// trị) rất dễ gây nhập nhầm (VD lỡ lăn chuột cuộn trang ngang qua ô đang gõ dở) — yêu cầu người
+// dùng 2026-10-02: "không cho phép lăn chuột để tăng giảm", áp dụng toàn hệ thống. Gắn DUY NHẤT
+// 1 listener ở document (bắt được MỌI ô input number hiện có VÀ render thêm sau này, không cần
+// sửa từng ô trong hàng trăm chỗ) — chỉ chặn khi con trỏ đang ở ĐÚNG ô number ĐANG FOCUS (khớp
+// chính xác điều kiện trình duyệt tự tăng/giảm), không ảnh hưởng cuộn trang ở nơi khác dù 1 ô
+// number khác đang giữ focus. {passive:false} bắt buộc để preventDefault() có tác dụng.
+document.addEventListener("wheel", (e) => {
+  if (e.target === document.activeElement && e.target.tagName === "INPUT" && e.target.type === "number") {
+    e.preventDefault();
+  }
+}, { passive: false });
+
 // ---------- Auth + API helper ----------
 let TOKEN = localStorage.getItem("mes_token") || "";
 let CURRENT_USER = null;  // {username, full_name, job_title, role, views}
@@ -11177,6 +11191,41 @@ async function openFilterReportTankQc(tankId) {
     <button type="button" class="btn sm sec" id="frq_full" style="margin-top:12px">Xem đầy đủ (chuyển trang)</button>`);
   $("frq_full").onclick = () => { closeModal(); gotoBatchTank(t.tank_id); };
 }
+// Mirror openFilterReportTankQc nhưng cho "Tank thành phẩm" (BBT) — xem lại "Chỉ tiêu Lọc"
+// (stage="loc", chỉ tiêu chất lượng SAU lọc) của đúng lô lọc đã đổ vào tank đó, CHỈ XEM (không
+// sửa được ở đây, khai báo/sửa vẫn làm ở tab Chất lượng) — yêu cầu người dùng 2026-10-02:
+// "Tank thành phẩm cũng tương tự ... bổ sung thêm chỉ tiêu tank thành phẩm xem luôn ở màn hình
+// này khi bấm vào".
+async function openFilterReportBbtQc(filterLotId, toBbt) {
+  const fl = await GET(`/batch-filter-lots/${filterLotId}`);
+  const qs = `stage=loc&scope_type=batch_filter_lot&scope_id=${encodeURIComponent(filterLotId)}` +
+    `&product_id=${encodeURIComponent(fl.product_id || "")}&beer_type_id=${encodeURIComponent(fl.beer_type_id || "")}` +
+    `&category=${encodeURIComponent(fl.category || "")}&finished_product_id=${encodeURIComponent(fl.finished_product_id || "")}`;
+  const st = await GET(`/brewing/qc-status?${qs}`).catch(() => null);
+  const rows = (st?.required || []).map(p => {
+    const r = (st.recorded || []).find(x => x.parameter === p.code);
+    return `<tr><td>${esc(p.name)}</td><td>${p.value_type !== "numeric" ? "—" : (p.lsl ?? "—")}</td>
+      <td>${p.value_type !== "numeric" ? "—" : (p.usl ?? "—")}</td>
+      <td>${r ? qcValueLabel(p, r.value, r.value_text) : "—"}</td>
+      <td>${r ? badge(r.status) + r.status : '<span class="muted">chưa khai báo</span>'}</td>
+      <td>${qcRecordedMetaHtml(r)}</td></tr>`;
+  }).join("") || `<tr><td colspan=6 class="muted">Chưa gán nhóm chỉ tiêu nào cho công đoạn này.</td></tr>`;
+  modal(`<h3>Chỉ tiêu Lọc — ${esc(toBbt)} <span class="muted">(lô lọc ${esc(fl.filter_lot_code)})</span></h3>
+    <div class="tablewrap"><table>
+      <thead><tr><th>Chỉ tiêu</th><th>Min</th><th>Max</th><th>Giá trị đã khai báo</th><th>Kết quả</th><th>Người/Thời gian điền</th></tr></thead>
+      <tbody>${rows}</tbody></table></div>
+    <button type="button" class="btn sm sec" id="frq_bbt_full" style="margin-top:12px">Xem đầy đủ (chuyển trang)</button>`);
+  $("frq_bbt_full").onclick = () => { closeModal(); gotoBatchFilterLot(filterLotId); };
+}
+function gotoBatchFilterLot(filterLotId) {
+  switchView("batchfilterlots");
+  let tries = 0;
+  const tick = () => {
+    if ($("fl_detail")) { showBatchFilterLot(filterLotId); return; }
+    if (++tries < 40) setTimeout(tick, 50);
+  };
+  setTimeout(tick, 50);
+}
 VIEWS.reports = async function () {
   const sec = SUB.reports || "material";
   const sections = [{ key: "material", label: "Định mức NVL" }, { key: "filling", label: "Chiết (lon)" },
@@ -11231,29 +11280,33 @@ VIEWS.reports = async function () {
   } else if (sec === "filter") {
     const days = SUB.reports_filter_days || 3650;
     const rep = await GET(`/reports/filter-production?days=${days}`);
-    const items = rep.items || [];
-    body = `<div class="panel"><h2>BC hệ lọc <span class="muted">(${items.length} mẻ lọc)</span></h2>
+    const allItems = rep.items || [];
+    const clsFilter = SUB.reports_filter_cls || "";
+    const items = clsFilter ? allItems.filter(r => r.classification === clsFilter) : allItems;
+    const CLS_FILTER_OPTS = [["", "Tất cả"], ["thap", "Sản lượng thấp"], ["binh_thuong", "Sản lượng bình thường"], ["cao", "Sản lượng cao"]];
+    body = `<div class="panel"><h2>BC hệ lọc <span class="muted">(${items.length}${clsFilter ? `/${allItems.length}` : ""} mẻ lọc)</span></h2>
       <div class="muted" style="margin-bottom:8px">Mỗi dòng là 1 mẻ lọc — nếu cùng 1 mẻ lọc trải ra nhiều lô lọc (gõ cùng "Mẻ lọc số") thì sản lượng được cộng dồn vào 1 dòng. Bấm vào tên tank lên men để xem lại chỉ tiêu CT chính/phụ (chỉ tiêu chất lượng trước lọc).</div>
       <div class="row">
         <div class="field"><label>Kỳ (ngày gần đây)</label>
           <select id="rpf_days"><option value="30">30 ngày</option><option value="90">90 ngày</option><option value="365">365 ngày</option><option value="3650" ${days == 3650 ? "selected" : ""}>Tất cả</option></select></div>
+        <div class="field"><label>Sản lượng</label>
+          <select id="rpf_cls">${CLS_FILTER_OPTS.map(([v, l]) => `<option value="${v}" ${v === clsFilter ? "selected" : ""}>${esc(l)}</option>`).join("")}</select></div>
         <button class="btn sec" id="rpf_export" style="align-self:flex-end">📥 Xuất Excel</button>
       </div>
       <input class="searchbox" data-tbl="t_filterrep" placeholder="Tìm theo mẻ lọc số, mã lô lọc, tank, loại bia..."/>
       <div class="tablewrap"><table id="t_filterrep">
-        <thead><tr><th>Mẻ lọc số</th><th>Kiểu</th><th>Mẻ cuối</th><th>Tank lên men</th><th>Tank thành phẩm</th><th>Ngày lọc</th><th>Sản lượng lọc (lít)</th><th>Dịch bia</th><th>Loại bia</th></tr></thead>
+        <thead><tr><th>Mẻ lọc số</th><th>Kiểu</th><th>Mẻ cuối</th><th>Tank lên men</th><th>Tank thành phẩm</th><th>Ngày lọc</th><th>Sản lượng lọc (lít)</th><th>Loại bia</th></tr></thead>
         <tbody>${items.map(r => `<tr>
           <td><code class="k">${esc(r.batch_seq_no || r.filter_lot_code || "—")}</code>
             ${r.lot_count > 1 ? `<div class="muted" style="font-size:11px">${esc(r.filter_lot_code)} (tổng ${r.lot_count} lô)</div>` : ""}</td>
-          <td>${r.is_blend ? '<span class="badge held">Phối</span>' : '<span class="muted">Không phối</span>'}</td>
+          <td>${r.is_blend ? `<span class="badge held">Phối</span><div class="muted" style="font-size:11px;white-space:nowrap">${r.tanks.map(t => esc(t.tank_lm || "?")).join(" + ")}</div>` : '<span class="muted">Không phối</span>'}</td>
           <td>${r.is_final ? '<span class="badge on_hold">Mẻ cuối</span>' : '<span class="muted">—</span>'}</td>
-          <td class="muted">${r.tanks.length ? r.tanks.map(t => `<button type="button" class="btn sm sec" data-tankqc="${esc(t.tank_id)}" style="margin:1px">${esc(t.tank_lm || "?")}</button>`).join(" ") : "—"}</td>
-          <td class="muted">${esc(r.to_bbt || "—")}</td>
+          <td class="muted">${r.tanks.length ? r.tanks.map(t => `<button type="button" class="btn sm sec" data-tankqc="${esc(t.tank_id)}" style="margin:1px">${esc(t.tank_lm || "?")}${t.product_name ? " — " + esc(t.product_name) : ""}</button>`).join(" ") : "—"}</td>
+          <td class="muted">${r.bbt_list.length ? r.bbt_list.map(b => `<button type="button" class="btn sm sec" data-bbtqc="${esc(b.filter_lot_id)}|${esc(b.to_bbt)}" style="margin:1px">${esc(b.to_bbt)}${b.beer_type_name ? " — " + esc(b.beer_type_name) : ""}</button>`).join(" ") : "—"}</td>
           <td class="muted">${r.ended_at ? fmt(r.ended_at) : "—"}</td>
-          <td>${r.v_l.toLocaleString("vi-VN")}</td>
-          <td class="muted">${r.product_names && r.product_names.length ? esc(r.product_names.join(", ")) : "—"}</td>
+          <td${r.classification === "thap" ? ' style="color:var(--red)"' : r.classification === "cao" ? ' style="color:var(--green)"' : ""}>${r.v_l.toLocaleString("vi-VN")}</td>
           <td class="muted">${esc(r.beer_type_name || "—")}</td></tr>`).join("") ||
-          '<tr><td colspan=9 class="muted">Chưa có dữ liệu.</td></tr>'}</tbody>
+          '<tr><td colspan=8 class="muted">Chưa có dữ liệu.</td></tr>'}</tbody>
       </table></div>
     </div>`;
   }
@@ -11269,10 +11322,15 @@ VIEWS.reports = async function () {
     wirePaginate("t_filterrep", 20);
     $("rpf_days").value = String(SUB.reports_filter_days || 3650);
     $("rpf_days").onchange = () => { SUB.reports_filter_days = parseInt($("rpf_days").value); render("reports"); };
+    $("rpf_cls").onchange = () => { SUB.reports_filter_cls = $("rpf_cls").value; render("reports"); };
     $("rpf_export").onclick = () => guard(() => downloadFile(
       `/reports/filter-production/export?days=${SUB.reports_filter_days || 3650}`,
       `bao_cao_he_loc_${toISODateLocal(new Date())}.xlsx`));
     document.querySelectorAll("[data-tankqc]").forEach(b => b.onclick = () => guard(() => openFilterReportTankQc(b.dataset.tankqc)));
+    document.querySelectorAll("[data-bbtqc]").forEach(b => b.onclick = () => guard(() => {
+      const [filterLotId, toBbt] = b.dataset.bbtqc.split("|");
+      return openFilterReportBbtQc(filterLotId, toBbt);
+    }));
   }
   if (sec === "filling") {
     $("fp_mode").onchange = () => {
