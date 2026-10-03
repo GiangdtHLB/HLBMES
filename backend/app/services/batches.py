@@ -150,8 +150,12 @@ def set_brewhouse_line(db: Session, batch_id: str, brewhouse_line_id: str, user:
     """Chọn/sửa Dây chuyền nấu của 1 mẻ đã tồn tại — độc lập với lúc tạo mẻ (kể cả mẻ tạo qua
     "Phát mẻ", nơi giá trị này chỉ tự kế thừa từ Work Order chứ người dùng chưa hề chọn, xem
     services/workorders.py::dispatch). Cho phép bỏ chọn (truyền None) — mirror validate ở
-    create_batch, chỉ chặn khi có giá trị nhưng không hợp lệ."""
-    require_role(user, Role.SUPERVISOR, Role.ENGINEER)
+    create_batch, chỉ chặn khi có giá trị nhưng không hợp lệ.
+
+    Role.OPERATOR được phép từ 2026-10-02 (yêu cầu người dùng: "cho phép nhân viên vận hành được
+    chọn, không cần đến supervisor") — mở chung cho MỌI tài khoản operator, không giới hạn riêng
+    1 người."""
+    require_role(user, Role.SUPERVISOR, Role.ENGINEER, Role.OPERATOR)
     batch = _get(db, batch_id)
     _assert_not_locked(batch)
     if brewhouse_line_id:
