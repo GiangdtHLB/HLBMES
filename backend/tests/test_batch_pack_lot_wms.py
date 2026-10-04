@@ -159,6 +159,7 @@ def _build_pack_lot(client, admin_h, suffix, fp_id, ca1=10, ca2=0, ca3=0, v_draw
     draw = client.post("/api/batch-filter-lots", headers=admin_h, json={
         "filter_lot_code": f"FLOT-PKWMS-{suffix}", "to_bbt": to_bbt,
         "sources": [{"source_type": "tank", "source_tank_id": tank.json()["tank_id"]}],
+        "category": "Bia lon",
     })
     assert draw.status_code == 201, draw.text
     filter_lot_id = draw.json()["filter_lot_id"]
@@ -493,6 +494,7 @@ def test_pack_lot_warns_then_allows_duplicate_lot_no_with_confirm(client, admin_
     draw = client.post("/api/batch-filter-lots", headers=admin_h, json={
         "filter_lot_code": "FLOT-PKWMS-DUPLOT2", "to_bbt": to_bbt,
         "sources": [{"source_type": "tank", "source_tank_id": tank.json()["tank_id"]}],
+        "category": "Bia lon",
     })
     filter_lot_id = draw.json()["filter_lot_id"]
     src = client.get(f"/api/batch-filter-lots/{filter_lot_id}/sources", headers=admin_h).json()[0]

@@ -76,7 +76,8 @@ def _build_chain(client, admin_h, suffix):
     assert bbt.status_code == 201, bbt.text
     draw = client.post("/api/batch-filter-lots", headers=admin_h, json={
         "filter_lot_code": f"FLOT-FLRESYNC-{suffix}", "to_bbt": bbt.json()["code"],
-        "sources": [{"source_type": "tank", "source_tank_id": tank_id}]})
+        "sources": [{"source_type": "tank", "source_tank_id": tank_id}],
+        "category": "Bia lon"})
     assert draw.status_code == 201, draw.text
     filter_lot_id = draw.json()["filter_lot_id"]
     src = client.get(f"/api/batch-filter-lots/{filter_lot_id}/sources", headers=admin_h).json()[0]
@@ -161,7 +162,8 @@ def test_freshly_created_filter_lot_stays_dang_loc_not_da_chiet_het(client, admi
     assert bbt.status_code == 201, bbt.text
     draw = client.post("/api/batch-filter-lots", headers=admin_h, json={
         "filter_lot_code": "FLOT-FLRESYNC-FRESH1", "to_bbt": bbt.json()["code"],
-        "sources": [{"source_type": "tank", "source_tank_id": tank_id}]})
+        "sources": [{"source_type": "tank", "source_tank_id": tank_id}],
+        "category": "Bia lon"})
     assert draw.status_code == 201, draw.text
     filter_lot_id = draw.json()["filter_lot_id"]
     assert draw.json()["status"] == "dang_loc"

@@ -96,6 +96,7 @@ def _build_chain(client, admin_h, suffix):
     draw = client.post("/api/batch-filter-lots", headers=admin_h, json={
         "filter_lot_code": f"FLOT-EBR-{suffix}", "to_bbt": bbt.json()["code"],
         "sources": [{"source_type": "tank", "source_tank_id": tank_id}],
+        "category": "Bia lon",
     })
     assert draw.status_code == 201, draw.text
     filter_lot_id = draw.json()["filter_lot_id"]
@@ -368,6 +369,7 @@ def test_empty_tank_and_filter_lot_allowed_after_ebr_lock(client, admin_h):
     draw = client.post("/api/batch-filter-lots", headers=admin_h, json={
         "filter_lot_code": f"FLOT-EBR-{suffix}", "to_bbt": bbt.json()["code"],
         "sources": [{"source_type": "tank", "source_tank_id": tank_id}],
+        "category": "Bia lon",
     })
     assert draw.status_code == 201, draw.text
     filter_lot_id = draw.json()["filter_lot_id"]
@@ -420,6 +422,7 @@ def test_empty_filter_lot_rejects_residual_beyond_tolerance(client, admin_h):
     draw = client.post("/api/batch-filter-lots", headers=admin_h, json={
         "filter_lot_code": f"FLOT-EBR-{suffix}", "to_bbt": bbt.json()["code"],
         "sources": [{"source_type": "tank", "source_tank_id": tank_id}],
+        "category": "Bia lon",
     })
     filter_lot_id = draw.json()["filter_lot_id"]
     src = client.get(f"/api/batch-filter-lots/{filter_lot_id}/sources", headers=admin_h).json()[0]
@@ -500,6 +503,7 @@ def test_lock_pack_lot_also_creates_tank_and_filter_lot_snapshots(client, admin_
     draw2 = client.post("/api/batch-filter-lots", headers=admin_h, json={
         "filter_lot_code": "FLOT-TANKFLSNAP1-2", "to_bbt": "BBT-TANKFLSNAP1-2",
         "sources": [{"source_type": "tank", "source_tank_id": tank_id}],
+        "category": "Bia lon",
     })
     assert draw2.status_code == 201, draw2.text
     filter_lot_id2 = draw2.json()["filter_lot_id"]

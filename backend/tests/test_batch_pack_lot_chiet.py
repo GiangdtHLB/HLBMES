@@ -114,6 +114,7 @@ def _build_approved_filter_lot(client, admin_h, suffix, v_drawn=900):
     draw = client.post("/api/batch-filter-lots", headers=admin_h, json={
         "filter_lot_code": f"FLOT-CHIET-{suffix}", "to_bbt": to_bbt,
         "sources": [{"source_type": "tank", "source_tank_id": tank_id}],
+        "category": "Bia lon",
     })
     assert draw.status_code == 201, draw.text
     filter_lot_id = draw.json()["filter_lot_id"]
@@ -231,6 +232,7 @@ def test_pack_lot_from_bbt_blocked_when_not_all_finished(client, admin_h):
     draw = client.post("/api/batch-filter-lots", headers=admin_h, json={
         "filter_lot_code": "FLOT-CHIETBLK", "to_bbt": to_bbt,
         "sources": [{"source_type": "tank", "source_tank_id": t1["tank_id"]}],
+        "category": "Bia lon",
     })
     assert draw.status_code == 201, draw.text
     filter_lot_id = draw.json()["filter_lot_id"]
@@ -399,12 +401,16 @@ def test_tank_shows_vao_dich_dates_and_ferment_duration(client, admin_h):
     b1 = _make_batch(client, admin_h, "2")
     b2 = _make_batch(client, admin_h, "3")
     product_id = b1["product_id"]
+    _existing_product = next(p for p in client.get("/api/products", headers=admin_h).json()
+                             if p["product_id"] == product_id)
     upd = client.put(f"/api/products/{product_id}", headers=admin_h, json={
-        "code": next(p["code"] for p in client.get("/api/products", headers=admin_h).json()
-                    if p["product_id"] == product_id),
-        "name": next(p["name"] for p in client.get("/api/products", headers=admin_h).json()
-                    if p["product_id"] == product_id),
+        "code": _existing_product["code"],
+        "name": _existing_product["name"],
         "ferment_days_std": 14,
+        # PUT là full-replace — phải gửi lại beer_type_id hiện có, nếu không sẽ bị NULL mất
+        # (sau đó chặn cứng "Chưa chọn Loại bia" ở _derive_beer_type_ids cho các lô lọc rút từ
+        # Dịch bia này ở các test CHẠY SAU trong cùng file, 2026-10-04).
+        "beer_type_id": _existing_product.get("beer_type_id"),
     })
     assert upd.status_code == 200, upd.text
 

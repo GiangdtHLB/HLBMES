@@ -103,6 +103,7 @@ def _draw_single_source(client, admin_h, suffix, tank_qty=1000):
     draw = client.post("/api/batch-filter-lots", headers=admin_h, json={
         "filter_lot_code": f"FLOT-FLBATCH-{suffix}", "to_bbt": to_bbt,
         "sources": [{"source_type": "tank", "source_tank_id": tank_id}],
+        "category": "Bia lon",
     })
     assert draw.status_code == 201, draw.text
     filter_lot_id = draw.json()["filter_lot_id"]
@@ -118,6 +119,7 @@ def _draw_two_sources(client, admin_h, suffix, tank_qty=1000):
         "filter_lot_code": f"FLOT-FLBATCH-{suffix}", "to_bbt": to_bbt,
         "sources": [{"source_type": "tank", "source_tank_id": tank_a},
                    {"source_type": "tank", "source_tank_id": tank_b}],
+        "category": "Bia lon",
     })
     assert draw.status_code == 201, draw.text
     filter_lot_id = draw.json()["filter_lot_id"]

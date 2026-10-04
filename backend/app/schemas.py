@@ -2131,6 +2131,11 @@ class BatchFilterLotDrawIn(BaseModel):
     filter_lot_code: str = Field(min_length=1)
     to_bbt: str = Field(min_length=1)
     beer_type_id: Optional[str] = None
+    # category: bắt buộc ở service (draw_from_tank_into_filter_lot) cùng beer_type_id — thiếu field
+    # này ở schema thì payload.get("category") luôn None dù client gửi gì (model_dump() chỉ giữ
+    # field đã khai báo), lỗ hổng tương tự category NULL vĩnh viễn đã vá ở create_filter_order
+    # (audit 2026-10-04).
+    category: Optional[str] = None
     finished_product_id: Optional[str] = None
     note: Optional[str] = None
 

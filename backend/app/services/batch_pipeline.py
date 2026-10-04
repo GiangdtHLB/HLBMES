@@ -1238,10 +1238,23 @@ def draw_from_tank_into_filter_lot(db: Session, sources: list[dict], payload: di
                   BatchFilterLot.filter_lot_year == filter_lot_year)).scalar_one_or_none():
         raise DomainError(f"Mã lô lọc '{filter_lot_code}' đã tồn tại trong năm {filter_lot_year}.")
     product_ids = {t.product_id for t in tanks if t.product_id} | {f.product_id for f in filter_lots if f.product_id}
+    # Bắt buộc có Loại bia + Loại sản phẩm — CÙNG LỖI với create_filter_order đã vá 2026-10-04
+    # (12 lệnh lọc NULL category phát hiện hôm đó) nhưng chưa lan ra đường tạo BatchFilterLot
+    # TRỰC TIẾP này (không qua BatchFilterOrder). Tự suy Loại bia từ Dịch bia nguồn giống hệt
+    # create_filter_order (_derive_beer_type_ids) khi không truyền tay; thiếu cả 2 thì chặn cứng,
+    # không để lại NULL vĩnh viễn trên lô lọc (audit phát hiện 2026-10-04).
+    derived_beer_type_ids = _derive_beer_type_ids(db, tanks, filter_lots)
+    derived_single = next(iter(derived_beer_type_ids)) if len(derived_beer_type_ids) == 1 else None
+    beer_type_id = payload.get("beer_type_id") or derived_single
+    if not beer_type_id:
+        raise DomainError("Chưa chọn Loại bia (không suy được từ nguồn — chọn tay).")
+    if not payload.get("category"):
+        raise DomainError("Chưa chọn Loại sản phẩm.")
     fl = BatchFilterLot(
         filter_lot_id=new_id(), filter_lot_code=filter_lot_code, filter_lot_year=filter_lot_year,
         to_bbt=to_bbt, status="dang_loc", product_id=next(iter(product_ids)) if len(product_ids) == 1 else None,
-        beer_type_id=payload.get("beer_type_id"), finished_product_id=payload.get("finished_product_id"),
+        beer_type_id=beer_type_id, category=payload.get("category"),
+        finished_product_id=payload.get("finished_product_id"),
         note=payload.get("note"), created_by=user.username, created_at=utcnow(),
     )
     db.add(fl)
@@ -1348,6 +1361,7 @@ def add_filter_lot_batch(db: Session, filter_lot_id: str, user: User) -> BatchFi
     require_perm(user, "batch.execute")
     fl = get_filter_lot(db, filter_lot_id)
     _assert_unlocked(fl)
+    _assert_no_ebr_signature(db, filter_lot_id)
     batches = list_filter_lot_batches(db, filter_lot_id)
     if batches and batches[-1].ended_at is None:
         raise DomainError("Mẻ lọc gần nhất chưa kết thúc — kết thúc mẻ đó trước khi thêm mẻ mới.")
@@ -1402,6 +1416,7 @@ def finish_filter_lot_batch(db: Session, batch_link_id: str, draws: list[dict],
         raise NotFoundError("Mẻ lọc không tồn tại.")
     fl = get_filter_lot(db, b.filter_lot_id)
     _assert_unlocked(fl)
+    _assert_no_ebr_signature(db, fl.filter_lot_id)
     if nuoc_bai_khi_hl is not None and nuoc_bai_khi_hl < 0:
         raise DomainError("Nước bài khí (hl) không được âm.")
     existing_draws = {d.source_link_id: d for d in list_batch_draws(db, batch_link_id)}
@@ -1464,6 +1479,7 @@ def delete_filter_lot_batch(db: Session, batch_link_id: str, user: User) -> Batc
         raise NotFoundError("Mẻ lọc không tồn tại.")
     fl = get_filter_lot(db, b.filter_lot_id)
     _assert_unlocked(fl)
+    _assert_no_ebr_signature(db, fl.filter_lot_id)
     all_batches = _all_batches_for_filter_lot(db, fl.filter_lot_id)
     if len(all_batches) <= 1:
         raise DomainError("Đây là mẻ lọc duy nhất của lô lọc này — xóa cả lô lọc nếu muốn bỏ hẳn.")
@@ -1502,6 +1518,7 @@ def update_filter_lot(db: Session, filter_lot_id: str, payload: dict, user: User
     require_perm(user, "batch.execute")
     fl = get_filter_lot(db, filter_lot_id)
     _assert_unlocked(fl)
+    _assert_no_ebr_signature(db, filter_lot_id)
     if "filter_lot_code" in payload:
         new_code = (payload["filter_lot_code"] or "").strip()
         if not new_code:
@@ -1590,6 +1607,13 @@ def approve_filter_lot(db: Session, filter_lot_id: str, user: User) -> dict:
                                         finished_product_id=fl.finished_product_id)
     if status["pending"]:
         raise DomainError(f"Còn thiếu chỉ tiêu bắt buộc (lọc): {', '.join(status['pending'])}.")
+    # with_for_update(): khóa lô lọc trước khi ghi qc_approved — 2 lần bấm "Duyệt KCS" gần như
+    # đồng thời đều có thể qua được check "fl.qc_approved" ở trên rồi cùng ghi audit (mirror
+    # approve_pack_lot, cùng lớp race đã sửa cho split/update_qty, 2026-09-15).
+    fl = db.execute(select(BatchFilterLot).where(
+        BatchFilterLot.filter_lot_id == filter_lot_id).with_for_update()).scalar_one()
+    if fl.qc_approved:
+        raise DomainError("Lô lọc này đã được duyệt.")
     fl.qc_approved = True
     fl.qc_approved_by = user.username
     fl.qc_approved_at = utcnow()
@@ -1704,6 +1728,7 @@ def split_filter_lot_to_pack_lot(db: Session, filter_lot_id: str, payload: dict,
     require_perm(user, "batch.execute")
     fl = get_filter_lot(db, filter_lot_id)
     _assert_unlocked(fl)
+    _assert_no_ebr_signature(db, filter_lot_id)
     qty = payload.get("qty") or 0.0
     if qty <= 0:
         raise DomainError("Số lượng cấp chiết (lít) phải lớn hơn 0.")
@@ -1798,6 +1823,7 @@ def update_pack_lot_qty(db: Session, pack_lot_id: str, qty: float, user: User) -
     require_perm(user, "batch.execute")
     p = get_pack_lot(db, pack_lot_id)
     _assert_unlocked(p)
+    _assert_no_ebr_signature(db, pack_lot_id)
     if qty <= 0:
         raise DomainError("Số lượng cấp chiết (lít) phải lớn hơn 0.")
     # with_for_update(): khóa CẢ lô TP (đọc p.qty cũ) LẪN lô lọc nguồn (đọc/ghi on_hand) trước
@@ -1827,6 +1853,7 @@ def update_pack_lot_pack_date(db: Session, pack_lot_id: str, pack_date, user: Us
     require_perm(user, "batch.execute")
     p = get_pack_lot(db, pack_lot_id)
     _assert_unlocked(p)
+    _assert_no_ebr_signature(db, pack_lot_id)
     before_date = p.pack_date.isoformat() if p.pack_date else None
     p.pack_date = pack_date
     record_audit(db, entity_type="batch_pack_lot", entity_id=pack_lot_id, action="update_pack_date",
@@ -1850,6 +1877,7 @@ def update_pack_lot_shifts(db: Session, pack_lot_id: str, payload: dict, user: U
     require_perm(user, "batch.execute")
     p = get_pack_lot(db, pack_lot_id)
     _assert_unlocked(p)
+    _assert_no_ebr_signature(db, pack_lot_id)
     for qty_key in ("ca1_qty", "ca2_qty", "ca3_qty"):
         v = payload.get(qty_key)
         if v is not None and v < 0:
@@ -1961,6 +1989,7 @@ def save_pack_lot_allocations(db: Session, pack_lot_id: str, allocations: list[d
     require_perm(user, "batch.execute")
     p = get_pack_lot(db, pack_lot_id)
     _assert_unlocked(p)
+    _assert_no_ebr_signature(db, pack_lot_id)
     existing_by_id = {r["row_id"]: r for r in (p.pack_allocations or []) if r.get("row_id")}
     released_ids = {rid for rid, r in existing_by_id.items() if r.get("released")}
     incoming = [a for a in (allocations or []) if a.get("spec_id") and float(a.get("quantity") or 0) > 0]
@@ -2042,6 +2071,7 @@ def release_pack_lot_allocation(db: Session, pack_lot_id: str, row_id: str, user
     require_perm(user, "production.release_to_wms")
     p = get_pack_lot(db, pack_lot_id)
     _assert_unlocked(p)
+    _assert_no_ebr_signature(db, pack_lot_id)
     if not p.approved:
         raise DomainError("Chưa Duyệt KCS — không thể nhập kho thành phẩm.")
     if not p.finished_product_id:
@@ -2170,6 +2200,7 @@ def add_pack_lot_material(db: Session, pack_lot_id: str, payload: dict, user: Us
     require_perm(user, "batch.execute")
     p = get_pack_lot(db, pack_lot_id)
     _assert_unlocked(p)
+    _assert_no_ebr_signature(db, pack_lot_id)
     supply_date = p.ended_at
     if supply_date is None:
         raise DomainError('Lô thành phẩm chưa có "Giờ kết thúc chiết" (ended_at, tính từ SL chiết '
@@ -2213,6 +2244,7 @@ def delete_pack_lot_material(db: Session, usage_id: str, user: User) -> None:
         raise NotFoundError("Dòng nguyên liệu không tồn tại.")
     p = get_pack_lot(db, u.pack_lot_id)
     _assert_unlocked(p)
+    _assert_no_ebr_signature(db, p.pack_lot_id)
     # Mirror đúng chặn của delete_pack_lot (xóa cả lô) — lô thành phẩm đã KCS duyệt thì hồ sơ
     # NVL dùng cho nó không còn được coi là "khai nhầm" nữa, dù chỉ xóa/sửa 1 dòng (yêu cầu
     # người dùng 2026-09-21: "đã dùng rồi thì không thể xóa, hoàn tác, hay sửa").
@@ -2301,6 +2333,7 @@ def add_filter_lot_material(db: Session, filter_lot_id: str, payload: dict, user
     require_perm(user, "batch.execute")
     fl = get_filter_lot(db, filter_lot_id)
     _assert_unlocked(fl)
+    _assert_no_ebr_signature(db, filter_lot_id)
     _assert_filter_material_addable(db, fl)
     supply_date = fl.ended_at
     if supply_date is None:
@@ -2345,6 +2378,7 @@ def delete_filter_lot_material(db: Session, usage_id: str, user: User) -> None:
         raise NotFoundError("Dòng nguyên liệu không tồn tại.")
     fl = get_filter_lot(db, u.filter_lot_id)
     _assert_unlocked(fl)
+    _assert_no_ebr_signature(db, fl.filter_lot_id)
     # Mirror đúng chặn của delete_filter_lot (xóa cả lô) — lô lọc đã KCS duyệt, hoặc đã có lô
     # thành phẩm tách từ lô lọc này, thì hồ sơ NVL dùng cho nó không còn được coi là "khai nhầm"
     # nữa, dù chỉ xóa/sửa 1 dòng (yêu cầu người dùng 2026-09-21).
