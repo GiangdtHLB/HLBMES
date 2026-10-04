@@ -99,6 +99,7 @@ def _finish_source(client, admin_h, source, dich_nha_hl, nuoc_bai_khi_hl=0):
 def test_create_order_single_tank_and_draw_filter_lot(client, admin_h):
     tank = _make_tank(client, admin_h, "1", "TANK-FO-01")
     order = client.post("/api/batch-filter-orders", headers=admin_h, json={
+        "category": "Bia lon",
         "order_code": "LOC-FO-01",
         "sources": [{"source_type": "tank", "source_tank_id": tank["tank_id"], "planned_v_dich_hl": 900}],
     })
@@ -131,6 +132,7 @@ def test_order_auto_completes_and_locks_when_volume_reached(client, admin_h):
     (nút đó chỉ dành cho dừng sớm khi CHƯA đủ SL, xem test_finish_order_allows_early_stop...)."""
     tank = _make_tank(client, admin_h, "2", "TANK-FO-02")
     order = client.post("/api/batch-filter-orders", headers=admin_h, json={
+        "category": "Bia lon",
         "order_code": "LOC-FO-02",
         "sources": [{"source_type": "tank", "source_tank_id": tank["tank_id"], "planned_v_dich_hl": 900}],
     }).json()
@@ -165,6 +167,7 @@ def test_finish_order_allows_early_stop_before_volume_target_reached(client, adm
     chỉ lọc một nửa kế hoạch rồi quyết định không lọc thêm nữa) — yêu cầu người dùng 2026-09-23."""
     tank = _make_tank(client, admin_h, "12", "TANK-FO-02B")
     order = client.post("/api/batch-filter-orders", headers=admin_h, json={
+        "category": "Bia lon",
         "order_code": "LOC-FO-02B",
         "sources": [{"source_type": "tank", "source_tank_id": tank["tank_id"], "planned_v_dich_hl": 900}],
     }).json()
@@ -208,6 +211,7 @@ def test_order_auto_completes_when_source_tank_drained_even_below_planned(client
 
     # Kế hoạch CỐ Ý lớn hơn hẳn tồn thật của tank -> is_complete sẽ không bao giờ đạt được.
     order = client.post("/api/batch-filter-orders", headers=admin_h, json={
+        "category": "Bia lon",
         "order_code": "LOC-FO-DRAINED",
         "sources": [{"source_type": "tank", "source_tank_id": tank["tank_id"], "planned_v_dich_hl": full_volume * 3}],
     }).json()
@@ -249,6 +253,7 @@ def test_blend_order_needs_all_tank_sources_drained_not_just_one(client, admin_h
     vol_b = client.get(f"/api/batch-tanks/{tank_b['tank_id']}", headers=admin_h).json()["volume_hl"]
 
     order = client.post("/api/batch-filter-orders", headers=admin_h, json={
+        "category": "Bia lon",
         "order_code": "LOC-FO-BLEND-DRAIN", "blend_mode": "phoi",
         "sources": [
             {"source_type": "tank", "source_tank_id": tank_a["tank_id"], "planned_v_dich_hl": vol_a * 3},
@@ -282,6 +287,7 @@ def test_blend_order_needs_all_tank_sources_drained_not_just_one(client, admin_h
 def test_order_blocked_after_pack_lot_split(client, admin_h):
     tank = _make_tank(client, admin_h, "3", "TANK-FO-03")
     order = client.post("/api/batch-filter-orders", headers=admin_h, json={
+        "category": "Bia lon",
         "order_code": "LOC-FO-03",
         "sources": [{"source_type": "tank", "source_tank_id": tank["tank_id"], "planned_v_dich_hl": 2000}],
     }).json()   # planned lớn hơn thực tế rút -> is_complete vẫn False sau khi finish 1 phần
@@ -311,12 +317,14 @@ def test_blend_mode_validation_and_auto_beer_type(client, admin_h):
     tank2 = _make_tank(client, admin_h, "5", "TANK-FO-04B")
 
     single_but_phoi = client.post("/api/batch-filter-orders", headers=admin_h, json={
+        "category": "Bia lon",
         "order_code": "LOC-FO-04-BAD", "blend_mode": "phoi",
         "sources": [{"source_type": "tank", "source_tank_id": tank1["tank_id"], "planned_v_dich_hl": 500}],
     })
     assert single_but_phoi.status_code == 409, single_but_phoi.text
 
     blend = client.post("/api/batch-filter-orders", headers=admin_h, json={
+        "category": "Bia lon",
         "order_code": "LOC-FO-04",
         "sources": [{"source_type": "tank", "source_tank_id": tank1["tank_id"], "planned_v_dich_hl": 500},
                     {"source_type": "tank", "source_tank_id": tank2["tank_id"], "planned_v_dich_hl": 500}],
@@ -329,6 +337,7 @@ def test_blend_mode_validation_and_auto_beer_type(client, admin_h):
 def test_refilter_source_requires_reason(client, admin_h):
     tank = _make_tank(client, admin_h, "6", "TANK-FO-05")
     order1 = client.post("/api/batch-filter-orders", headers=admin_h, json={
+        "category": "Bia lon",
         "order_code": "LOC-FO-05A",
         "sources": [{"source_type": "tank", "source_tank_id": tank["tank_id"], "planned_v_dich_hl": 900}],
     }).json()
@@ -336,6 +345,7 @@ def test_refilter_source_requires_reason(client, admin_h):
                         json={"filter_lot_code": "FLOT-FO-05", "to_bbt": _make_bbt_line(client, admin_h, "FO05")}).json()
 
     missing_reason = client.post("/api/batch-filter-orders", headers=admin_h, json={
+        "category": "Bia lon",
         "order_code": "LOC-FO-05B",
         "sources": [{"source_type": "filter_lot", "source_filter_lot_id": draw1["filter_lot_id"],
                     "planned_v_dich_hl": 500}],
@@ -343,6 +353,7 @@ def test_refilter_source_requires_reason(client, admin_h):
     assert missing_reason.status_code == 409, missing_reason.text
 
     ok = client.post("/api/batch-filter-orders", headers=admin_h, json={
+        "category": "Bia lon",
         "order_code": "LOC-FO-05B",
         "sources": [{"source_type": "filter_lot", "source_filter_lot_id": draw1["filter_lot_id"],
                     "reason": "Lọc lại do chưa đạt độ trong", "planned_v_dich_hl": 500}],
@@ -353,6 +364,7 @@ def test_refilter_source_requires_reason(client, admin_h):
 def test_delete_order_blocked_once_filter_lot_created(client, admin_h):
     tank = _make_tank(client, admin_h, "7", "TANK-FO-06")
     order = client.post("/api/batch-filter-orders", headers=admin_h, json={
+        "category": "Bia lon",
         "order_code": "LOC-FO-06",
         "sources": [{"source_type": "tank", "source_tank_id": tank["tank_id"], "planned_v_dich_hl": 900}],
     }).json()
@@ -364,6 +376,7 @@ def test_delete_order_blocked_once_filter_lot_created(client, admin_h):
 
     tank2 = _make_tank(client, admin_h, "8", "TANK-FO-06B")
     order2 = client.post("/api/batch-filter-orders", headers=admin_h, json={
+        "category": "Bia lon",
         "order_code": "LOC-FO-06B",
         "sources": [{"source_type": "tank", "source_tank_id": tank2["tank_id"], "planned_v_dich_hl": 900}],
     }).json()
@@ -375,6 +388,7 @@ def test_delete_order_blocked_once_filter_lot_created(client, admin_h):
 def test_filter_lot_requires_to_bbt_and_blocks_occupied_tank(client, admin_h):
     tank = _make_tank(client, admin_h, "9", "TANK-FO-07")
     order = client.post("/api/batch-filter-orders", headers=admin_h, json={
+        "category": "Bia lon",
         "order_code": "LOC-FO-07",
         "sources": [{"source_type": "tank", "source_tank_id": tank["tank_id"], "planned_v_dich_hl": 900}],
     }).json()
@@ -400,6 +414,7 @@ def test_filter_lot_requires_to_bbt_and_blocks_occupied_tank(client, admin_h):
 
     tank2 = _make_tank(client, admin_h, "10", "TANK-FO-07B")
     order2 = client.post("/api/batch-filter-orders", headers=admin_h, json={
+        "category": "Bia lon",
         "order_code": "LOC-FO-07B",
         "sources": [{"source_type": "tank", "source_tank_id": tank2["tank_id"], "planned_v_dich_hl": 900}],
     }).json()
@@ -444,6 +459,7 @@ def test_update_order_edits_planned_qty_blocked_after_filter_lot(client, admin_h
 
     tank = _make_tank(client, admin_h, "11", "TANK-FO-08")
     order = client.post("/api/batch-filter-orders", headers=admin_h, json={
+        "category": "Bia lon",
         "order_code": "LOC-FO-08",
         "sources": [{"source_type": "tank", "source_tank_id": tank["tank_id"], "planned_v_dich_hl": 900}],
         "lines": [{"material_id": material_id, "material_name": "Bột trợ lọc FO update",

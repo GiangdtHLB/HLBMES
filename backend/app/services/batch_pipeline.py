@@ -810,8 +810,9 @@ def create_filter_order(db: Session, sources: list[dict], payload: dict, user: U
     # là "không phải Dịch bia gốc", phải XÁC NHẬN LẠI (payload["confirm_beer_type_mismatch"]) mới
     # cho tạo, và lưu cờ `beer_type_mismatch=True` trên lệnh để biết đây không phải Loại bia gốc
     # thật của dịch (yêu cầu người dùng 2026-09-30: "lưu lại lịch sử đây không phải là dịch bia
-    # gốc"). Để trống hoàn toàn (không chọn gì) vẫn KHÔNG bị chặn như trước — chỉ chặn khi có
-    # CHỌN mà chọn sai/không suy được.
+    # gốc"). Trước đây để trống hoàn toàn (không chọn gì) vẫn KHÔNG bị chặn ở bước xác nhận
+    # mismatch này — chỉ chặn khi có CHỌN mà chọn sai/không suy được; nhưng để trống hẳn giờ vẫn
+    # bị chặn ở bước RIÊNG ngay dưới đây (Loại bia là trường bắt buộc, xem comment ở đó).
     derived_beer_type_ids = _derive_beer_type_ids(db, tanks, filter_lots)
     derived_single = next(iter(derived_beer_type_ids)) if len(derived_beer_type_ids) == 1 else None
     beer_type_id = payload.get("beer_type_id") or derived_single
@@ -825,6 +826,16 @@ def create_filter_order(db: Session, sources: list[dict], payload: dict, user: U
             f"Loại bia '{chosen.name if chosen else beer_type_id}' bạn chọn KHÁC với Dịch bia gốc "
             f"của (các) tank/lô lọc nguồn ({derived_label}) — không phải Dịch bia gốc. Xác nhận vẫn "
             "muốn chọn Loại bia này không?")
+    # Bắt buộc có Loại bia (kể cả tự suy được) + Loại sản phẩm — frontend đã chặn từ 2026-09-30
+    # nhưng chỉ ở client, gọi thẳng API (hoặc cache trình duyệt cũ) vẫn qua được, để lại NULL
+    # vĩnh viễn trên lệnh (và mọi lô lọc kế thừa sau này) — không có cách sửa lại trên lô lọc,
+    # chỉ sửa được từ lệnh gốc hoặc phải vá dữ liệu bằng tay (bug thực tế phát hiện 2026-10-04:
+    # 12 lệnh lọc NULL category tạo ngày 2026-09-29/30, đúng lúc tính năng mới ra). Chặn cứng ở
+    # đây để không bao giờ tái diễn, bất kể qua đường nào.
+    if not beer_type_id:
+        raise DomainError("Chưa chọn Loại bia (không suy được từ nguồn — chọn tay).")
+    if not payload.get("category"):
+        raise DomainError("Chưa chọn Loại sản phẩm.")
 
     planned_volume = sum(s.get("planned_v_dich_hl") or 0.0 for s in sources)
     order = BatchFilterOrder(

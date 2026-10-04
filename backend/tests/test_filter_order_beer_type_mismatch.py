@@ -122,6 +122,7 @@ def test_khong_phoi_beer_type_mismatch_blocked_then_confirmed(client, admin_h):
     other_beer_type_id, _ = _other_beer_type_id(client, admin_h, "01")
 
     blocked = client.post("/api/batch-filter-orders", headers=admin_h, json={
+        "category": "Bia lon",
         "order_code": "LOC-MM-01", "beer_type_id": other_beer_type_id,
         "sources": [{"source_type": "tank", "source_tank_id": tank["tank_id"], "planned_v_dich_hl": 500}],
     })
@@ -129,6 +130,7 @@ def test_khong_phoi_beer_type_mismatch_blocked_then_confirmed(client, admin_h):
     assert "không phải Dịch bia gốc" in blocked.json()["detail"]
 
     ok = client.post("/api/batch-filter-orders", headers=admin_h, json={
+        "category": "Bia lon",
         "order_code": "LOC-MM-01", "beer_type_id": other_beer_type_id,
         "confirm_beer_type_mismatch": True,
         "sources": [{"source_type": "tank", "source_tank_id": tank["tank_id"], "planned_v_dich_hl": 500}],
@@ -151,6 +153,7 @@ def test_khong_phoi_matching_beer_type_no_confirm_needed(client, admin_h):
     db.close()
 
     ok = client.post("/api/batch-filter-orders", headers=admin_h, json={
+        "category": "Bia lon",
         "order_code": "LOC-MM-02", "beer_type_id": derived_beer_type_id,
         "sources": [{"source_type": "tank", "source_tank_id": tank["tank_id"], "planned_v_dich_hl": 500}],
     })
@@ -159,24 +162,27 @@ def test_khong_phoi_matching_beer_type_no_confirm_needed(client, admin_h):
 
 
 def test_phoi_2_loai_bia_khac_nhau_any_choice_needs_confirm(client, admin_h):
-    """Phối 2 tank khác hẳn Loại bia (không suy ra được 1 giá trị chung) — để trống Loại bia vẫn
-    tạo được bình thường (không chặn), nhưng CHỌN 1 trong 2 Loại bia đó vẫn phải xác nhận lại vì
-    không đại diện đúng cho cả mẻ phối (yêu cầu người dùng 2026-09-30: "chọn 1 trong 2 loại bia
-    đó...kể cả lọc phối hoặc không phối, thì sẽ đều có cảnh báo")."""
+    """Phối 2 tank khác hẳn Loại bia (không suy ra được 1 giá trị chung) — để trống Loại bia giờ
+    BỊ CHẶN (Loại bia là trường bắt buộc kể từ yêu cầu người dùng 2026-10-04: "loại bia và loại
+    sản phẩm bắt buộc phải chọn, nếu không chọn thì không cho tạo lệnh" — mirror đúng validate đã
+    có sẵn ở frontend/app.js::fo_create từ 2026-09-30, trước đó chỉ chặn ở client). CHỌN 1 trong
+    2 Loại bia đó vẫn phải xác nhận lại vì không đại diện đúng cho cả mẻ phối (yêu cầu người dùng
+    2026-09-30: "chọn 1 trong 2 loại bia đó...kể cả lọc phối hoặc không phối, thì sẽ đều có cảnh
+    báo")."""
     tank_a = _make_tank(client, admin_h, "103", "TANK-MM-03A")
     other_beer_type_id, other_product_id = _other_beer_type_id(client, admin_h, "03")
     tank_b = _make_tank_with_product(client, admin_h, "104", "TANK-MM-03B", other_product_id)
 
     left_blank = client.post("/api/batch-filter-orders", headers=admin_h, json={
+        "category": "Bia lon",
         "order_code": "LOC-MM-03-BLANK",
         "sources": [{"source_type": "tank", "source_tank_id": tank_a["tank_id"], "planned_v_dich_hl": 500},
                     {"source_type": "tank", "source_tank_id": tank_b["tank_id"], "planned_v_dich_hl": 500}],
     })
-    assert left_blank.status_code == 201, left_blank.text
-    assert left_blank.json()["beer_type_id"] is None
-    assert left_blank.json()["beer_type_mismatch"] is False
+    assert left_blank.status_code == 409, left_blank.text
 
     blocked = client.post("/api/batch-filter-orders", headers=admin_h, json={
+        "category": "Bia lon",
         "order_code": "LOC-MM-03-PICK", "beer_type_id": other_beer_type_id,
         "sources": [{"source_type": "tank", "source_tank_id": tank_a["tank_id"], "planned_v_dich_hl": 500},
                     {"source_type": "tank", "source_tank_id": tank_b["tank_id"], "planned_v_dich_hl": 500}],
@@ -184,6 +190,7 @@ def test_phoi_2_loai_bia_khac_nhau_any_choice_needs_confirm(client, admin_h):
     assert blocked.status_code == 409, blocked.text
 
     confirmed = client.post("/api/batch-filter-orders", headers=admin_h, json={
+        "category": "Bia lon",
         "order_code": "LOC-MM-03-PICK", "beer_type_id": other_beer_type_id,
         "confirm_beer_type_mismatch": True,
         "sources": [{"source_type": "tank", "source_tank_id": tank_a["tank_id"], "planned_v_dich_hl": 500},
@@ -241,6 +248,7 @@ def test_filter_lot_inherits_category_and_mismatch_flag(client, admin_h):
     assert link_chung.status_code == 201, link_chung.text
 
     order = client.post("/api/batch-filter-orders", headers=admin_h, json={
+        "category": "Bia lon",
         "order_code": "LOC-MM-04", "beer_type_id": beer_type_id, "category": "Bia lon",
         "sources": [{"source_type": "tank", "source_tank_id": tank["tank_id"], "planned_v_dich_hl": 900}],
     })

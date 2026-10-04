@@ -218,6 +218,7 @@ def test_delete_tank_cleans_up_process_log_daily_readings_and_qc(client, admin_h
 def test_delete_tank_blocked_by_planned_filter_order_source(client, admin_h):
     tank = _make_tank(client, admin_h, "TANK-DELPLANNED1")
     order = client.post("/api/batch-filter-orders", headers=admin_h, json={
+        "category": "Bia lon",
         "order_code": "LOC-DELPLANNED1",
         "sources": [{"source_type": "tank", "source_tank_id": tank["tank_id"], "planned_v_dich_hl": 900}],
     })

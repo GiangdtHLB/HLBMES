@@ -166,6 +166,7 @@ def test_empty_tank_within_tolerance_and_blocked_over_tolerance(client, admin_h)
     tank = _make_tank(client, admin_h, "3", "TANK-GAP-03")
     # Rút hết gần như toàn bộ, chỉ để lại phần dư trong ngưỡng dung sai.
     order = client.post("/api/batch-filter-orders", headers=admin_h, json={
+        "category": "Bia lon",
         "order_code": "LOC-TGAP-03",
         "sources": [{"source_type": "tank", "source_tank_id": tank["tank_id"], "planned_v_dich_hl": 1000}],
     }).json()
@@ -214,6 +215,7 @@ def test_over_draw_allows_negative_on_hand_with_am_status(client, admin_h):
     assert line.status_code == 201, line.text
     tank = _make_tank(client, admin_h, "7", "TANK-GAP-07", tank_lm="FV-GAPTEST-AM1")
     order = client.post("/api/batch-filter-orders", headers=admin_h, json={
+        "category": "Bia lon",
         "order_code": "LOC-TGAP-07",
         "sources": [{"source_type": "tank", "source_tank_id": tank["tank_id"], "planned_v_dich_hl": 1000}],
     }).json()
@@ -243,6 +245,7 @@ def test_over_draw_allows_negative_on_hand_with_am_status(client, admin_h):
 def test_empty_tank_rejects_negative_residual_beyond_tolerance(client, admin_h):
     tank = _make_tank(client, admin_h, "8", "TANK-GAP-08")
     order = client.post("/api/batch-filter-orders", headers=admin_h, json={
+        "category": "Bia lon",
         "order_code": "LOC-TGAP-08",
         "sources": [{"source_type": "tank", "source_tank_id": tank["tank_id"], "planned_v_dich_hl": 1000}],
     }).json()
@@ -385,6 +388,7 @@ def test_available_tank_lines_reflects_occupied_state(client, admin_h):
 
     # Rút hết + làm rỗng -> tank vật lý phải trống lại.
     order = client.post("/api/batch-filter-orders", headers=admin_h, json={
+        "category": "Bia lon",
         "order_code": "LOC-TGAP-06",
         "sources": [{"source_type": "tank", "source_tank_id": tank["tank_id"], "planned_v_dich_hl": 1000}],
     }).json()

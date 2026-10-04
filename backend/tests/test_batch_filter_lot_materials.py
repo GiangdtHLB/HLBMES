@@ -146,6 +146,7 @@ def _make_filter_lot(client, admin_h, suffix):
     # số) chỉ dùng cho tank_code (tự do định dạng).
     tank = _make_batch_tank(client, admin_h, None, f"TANK-{suffix}")
     order = client.post("/api/batch-filter-orders", headers=admin_h, json={
+        "category": "Bia lon",
         "order_code": f"LOC-{suffix}",
         "sources": [{"source_type": "tank", "source_tank_id": tank["tank_id"], "planned_v_dich_hl": 900}],
     })

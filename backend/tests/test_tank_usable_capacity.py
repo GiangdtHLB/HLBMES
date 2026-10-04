@@ -140,6 +140,7 @@ def test_finish_filter_lot_batch_blocked_over_bbt_usable_capacity(client, admin_
     tank_id = _make_source_tank(client, admin_h, "01", actual_qty=50)
 
     order = client.post("/api/batch-filter-orders", headers=admin_h, json={
+        "category": "Bia lon",
         "order_code": "LOC-CAP-01",
         "sources": [{"source_type": "tank", "source_tank_id": tank_id, "planned_v_dich_hl": 50}]})
     assert order.status_code == 201, order.text
