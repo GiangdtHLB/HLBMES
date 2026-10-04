@@ -117,6 +117,7 @@ def test_create_filter_order_with_material_lines_enough_stock_succeeds(client, a
     tank = _make_tank(client, admin_h, "101", "TANK-FLOML-01")
 
     order = client.post("/api/batch-filter-orders", headers=admin_h, json={
+        "category": "Bia lon",
         "order_code": "LOC-FLOML-01",
         "sources": [{"source_type": "tank", "source_tank_id": tank["tank_id"], "planned_v_dich_hl": 900}],
         "lines": [{"material_id": mat_id, "uom": "kg", "qty_planned": 30}],
@@ -139,6 +140,7 @@ def test_create_filter_order_with_material_lines_enough_stock_succeeds(client, a
 def test_create_filter_order_with_free_text_material_line_skips_stock_check(client, admin_h):
     tank = _make_tank(client, admin_h, "102", "TANK-FLOML-02")
     order = client.post("/api/batch-filter-orders", headers=admin_h, json={
+        "category": "Bia lon",
         "order_code": "LOC-FLOML-02",
         "sources": [{"source_type": "tank", "source_tank_id": tank["tank_id"], "planned_v_dich_hl": 900}],
         "lines": [{"material_name": "Bột trợ lọc tự do", "uom": "kg", "qty_planned": 999999}],
@@ -160,6 +162,7 @@ def test_create_filter_order_warns_but_allows_when_material_line_exceeds_stock(c
     tank = _make_tank(client, admin_h, "103", "TANK-FLOML-03")
 
     order = client.post("/api/batch-filter-orders", headers=admin_h, json={
+        "category": "Bia lon",
         "order_code": "LOC-FLOML-03",
         "sources": [{"source_type": "tank", "source_tank_id": tank["tank_id"], "planned_v_dich_hl": 900}],
         "lines": [{"material_id": mat_id, "uom": "kg", "qty_planned": 500}],
@@ -178,6 +181,7 @@ def test_material_request_source_preview_batch_filter_order(client, admin_h, thu
     tank = _make_tank(client, admin_h, "104", "TANK-FLOML-04")
 
     order = client.post("/api/batch-filter-orders", headers=admin_h, json={
+        "category": "Bia lon",
         "order_code": "LOC-FLOML-04",
         "sources": [{"source_type": "tank", "source_tank_id": tank["tank_id"], "planned_v_dich_hl": 900}],
         "lines": [{"material_id": mat_id, "uom": "kg", "qty_planned": 40}],
@@ -202,6 +206,7 @@ def test_create_request_with_batch_filter_order_source_stores_and_shows_label(cl
     tank = _make_tank(client, admin_h, "105", "TANK-FLOML-05")
 
     order = client.post("/api/batch-filter-orders", headers=admin_h, json={
+        "category": "Bia lon",
         "order_code": "LOC-FLOML-05",
         "sources": [{"source_type": "tank", "source_tank_id": tank["tank_id"], "planned_v_dich_hl": 900}],
         "lines": [{"material_id": mat_id, "uom": "kg", "qty_planned": 25}],

@@ -810,8 +810,9 @@ def create_filter_order(db: Session, sources: list[dict], payload: dict, user: U
     # là "không phải Dịch bia gốc", phải XÁC NHẬN LẠI (payload["confirm_beer_type_mismatch"]) mới
     # cho tạo, và lưu cờ `beer_type_mismatch=True` trên lệnh để biết đây không phải Loại bia gốc
     # thật của dịch (yêu cầu người dùng 2026-09-30: "lưu lại lịch sử đây không phải là dịch bia
-    # gốc"). Để trống hoàn toàn (không chọn gì) vẫn KHÔNG bị chặn như trước — chỉ chặn khi có
-    # CHỌN mà chọn sai/không suy được.
+    # gốc"). Trước đây để trống hoàn toàn (không chọn gì) vẫn KHÔNG bị chặn ở bước xác nhận
+    # mismatch này — chỉ chặn khi có CHỌN mà chọn sai/không suy được; nhưng để trống hẳn giờ vẫn
+    # bị chặn ở bước RIÊNG ngay dưới đây (Loại bia là trường bắt buộc, xem comment ở đó).
     derived_beer_type_ids = _derive_beer_type_ids(db, tanks, filter_lots)
     derived_single = next(iter(derived_beer_type_ids)) if len(derived_beer_type_ids) == 1 else None
     beer_type_id = payload.get("beer_type_id") or derived_single
@@ -825,6 +826,16 @@ def create_filter_order(db: Session, sources: list[dict], payload: dict, user: U
             f"Loại bia '{chosen.name if chosen else beer_type_id}' bạn chọn KHÁC với Dịch bia gốc "
             f"của (các) tank/lô lọc nguồn ({derived_label}) — không phải Dịch bia gốc. Xác nhận vẫn "
             "muốn chọn Loại bia này không?")
+    # Bắt buộc có Loại bia (kể cả tự suy được) + Loại sản phẩm — frontend đã chặn từ 2026-09-30
+    # nhưng chỉ ở client, gọi thẳng API (hoặc cache trình duyệt cũ) vẫn qua được, để lại NULL
+    # vĩnh viễn trên lệnh (và mọi lô lọc kế thừa sau này) — không có cách sửa lại trên lô lọc,
+    # chỉ sửa được từ lệnh gốc hoặc phải vá dữ liệu bằng tay (bug thực tế phát hiện 2026-10-04:
+    # 12 lệnh lọc NULL category tạo ngày 2026-09-29/30, đúng lúc tính năng mới ra). Chặn cứng ở
+    # đây để không bao giờ tái diễn, bất kể qua đường nào.
+    if not beer_type_id:
+        raise DomainError("Chưa chọn Loại bia (không suy được từ nguồn — chọn tay).")
+    if not payload.get("category"):
+        raise DomainError("Chưa chọn Loại sản phẩm.")
 
     planned_volume = sum(s.get("planned_v_dich_hl") or 0.0 for s in sources)
     order = BatchFilterOrder(
@@ -1300,6 +1311,7 @@ def batch_with_draws(db: Session, b: BatchFilterLotBatch) -> dict:
         "batch_link_id": b.batch_link_id, "filter_lot_id": b.filter_lot_id,
         "batch_seq_no": b.batch_seq_no, "nuoc_bai_khi_hl": b.nuoc_bai_khi_hl,
         "is_final_batch": b.is_final_batch, "ended_at": b.ended_at, "created_at": b.created_at,
+        "note": b.note,
         "draws": [{"source_link_id": d.source_link_id, "dich_nha_hl": d.dich_nha_hl}
                  for d in list_batch_draws(db, b.batch_link_id)],
     }
@@ -1379,14 +1391,15 @@ def _lock_origin(db: Session, source: BatchFilterLotSource):
 
 def finish_filter_lot_batch(db: Session, batch_link_id: str, draws: list[dict],
                             nuoc_bai_khi_hl: float, batch_seq_no: str, user: User,
-                            started_at=None, ended_at=None) -> BatchFilterLot:
+                            started_at=None, ended_at=None, note: str = None) -> BatchFilterLot:
     """Kết thúc/sửa 1 mẻ lọc — mirror finish_filter_tank, gọi lại được nhiều lần để sửa. `draws`:
     [{"source_link_id", "dich_nha_hl"}] — 1 khoản/nguồn, trừ/hoàn on_hand tank/lô lọc NGUỒN
     tương ứng theo CHÊNH LỆCH dich_nha_hl (nuoc_bai_khi_hl là nước DAW phối thêm CHUNG cho cả
     mẻ, KHÔNG rút từ tank nào nên không trừ on_hand nguồn nào) — tổng hợp lại BatchFilterLot
     (xem _sync_filter_lot_aggregate: volume_hl = v_dich_hl + nuoc_bai_khi_hl). `started_at`/
     `ended_at`: sửa lại giờ thực tế qua popup "Sửa" — không truyền thì giữ nguyên created_at,
-    ended_at mặc định = giờ hiện tại (yêu cầu người dùng 2026-09-01)."""
+    ended_at mặc định = giờ hiện tại (yêu cầu người dùng 2026-09-01). `note`: ghi chú tự do cho
+    mẻ (yêu cầu người dùng 2026-10-03)."""
     require_perm(user, "batch.execute")
     b = db.get(BatchFilterLotBatch, batch_link_id)
     if not b:
@@ -1418,6 +1431,7 @@ def finish_filter_lot_batch(db: Session, batch_link_id: str, draws: list[dict],
         raise DomainError("Tổng V dịch nha (các nguồn) phải lớn hơn 0 mới được kết thúc.")
     b.nuoc_bai_khi_hl = nuoc_bai_khi_hl or 0.0
     b.batch_seq_no = batch_seq_no
+    b.note = note
     if started_at:
         b.created_at = started_at
     b.ended_at = ended_at or utcnow()

@@ -2197,6 +2197,7 @@ class BatchFilterLotBatchOut(ORMModel):
     is_final_batch: bool = False
     ended_at: Optional[datetime] = None
     created_at: datetime
+    note: Optional[str] = None
     draws: list[BatchFilterLotBatchDrawOut] = []
 
 
@@ -2214,6 +2215,7 @@ class FinishFilterLotBatchIn(BaseModel):
     # vi cũ), yêu cầu người dùng 2026-09-01.
     started_at: Optional[datetime] = None
     ended_at: Optional[datetime] = None
+    note: Optional[str] = None
 
 
 class BatchTankProcessLogIn(BaseModel):

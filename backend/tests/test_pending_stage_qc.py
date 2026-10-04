@@ -98,6 +98,7 @@ def test_batch_filter_lot_shows_pending_then_stays_listed_after_declare(client, 
 
     tank = _make_batch_tank(client, admin_h, None, "TANK-PENDINGBFL")
     order = client.post("/api/batch-filter-orders", headers=admin_h, json={
+        "category": "Bia lon",
         "order_code": "LOC-PENDINGBFL",
         "sources": [{"source_type": "tank", "source_tank_id": tank["tank_id"], "planned_v_dich_hl": 900}],
     })
@@ -143,6 +144,7 @@ def test_pending_stage_qc_respects_category_for_loc_and_thanh_pham(client, admin
 
     tank = _make_batch_tank(client, admin_h, None, "TANK-CATFIX")
     order = client.post("/api/batch-filter-orders", headers=admin_h, json={
+        "category": "Bia lon",
         "order_code": "LOC-CATFIX", "category": "Bia lon",
         "sources": [{"source_type": "tank", "source_tank_id": tank["tank_id"], "planned_v_dich_hl": 900}],
     })

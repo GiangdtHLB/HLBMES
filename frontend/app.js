@@ -3751,18 +3751,19 @@ VIEWS.batchfilterlots = async function () {
     <div class="split">
       <div class="panel"><h2>Danh sách lô lọc</h2>
         <input class="searchbox" data-tbl="t_batfilterlot" placeholder="Tìm theo mã lô, sản phẩm, trạng thái..."/>
-        <div class="tablewrap"><table id="t_batfilterlot"><thead><tr><th>Mã lô lọc</th><th>Lệnh lọc</th><th>Trạng thái</th><th>Sản phẩm bia</th><th>Tank lên men</th><th>Kế hoạch (hl)</th><th>Chất lượng</th><th>Tank BBT</th><th>Trạng thái chiết</th><th>Tồn/Tổng (hl)</th></tr></thead>
+        <div class="tablewrap"><table id="t_batfilterlot"><thead><tr><th>Mã lô lọc</th><th>Ngày lọc</th><th>Lệnh lọc</th><th>Trạng thái</th><th>Sản phẩm bia</th><th>Tank lên men</th><th>Kế hoạch (hl)</th><th>Chất lượng</th><th>Tank BBT</th><th>Trạng thái chiết</th><th>Tồn/Tổng (hl)</th></tr></thead>
           <tbody>${lots.map(f => `<tr data-flot="${f.filter_lot_id}" style="cursor:pointer">
             <td><code class="k">${esc(f.filter_lot_code)}</code></td>
+            <td class="muted">${fmt(f.ended_at)}</td>
             <td class="muted">${esc(orderById[f.order_id] ? orderById[f.order_id].order_code : "—")}</td>
             <td>${statusBadge(FILTER_LOT_BADGE_CLASS[f.status], f.status_label)}</td>
             <td>${esc(beerTypeName(f.beer_type_id))}</td>
             <td class="muted">${esc(tankLmNames(f))}</td>
             <td class="muted">${plannedVol(f) ?? "—"}</td>
-            <td><span class="badge ${f.has_loc_result ? "released" : "held"}">Chỉ tiêu Lọc</span></td>
+            <td>${badge(f.has_loc_result ? "released" : "pending")}</td>
             <td>${esc(f.to_bbt || "—")}</td>
             <td>${f.chiet_status ? statusBadge(PACK_LOT_BADGE_CLASS[f.chiet_status], f.chiet_status_label) : '<span class="muted">—</span>'}</td>
-            <td>${f.on_hand} / ${f.volume_hl}</td></tr>`).join("") || '<tr><td colspan=10 class="muted">Chưa có lô lọc nào.</td></tr>'}</tbody></table></div>
+            <td>${f.on_hand} / ${f.volume_hl}</td></tr>`).join("") || '<tr><td colspan=11 class="muted">Chưa có lô lọc nào.</td></tr>'}</tbody></table></div>
       </div>
       <div class="panel" id="fl_detail"><h2>Chi tiết lô lọc</h2><div class="muted">Chọn một lô lọc để xem.</div></div>
     </div>`;
@@ -3830,7 +3831,7 @@ async function showBatchFilterLot(filterLotId) {
     <h3>Các mẻ lọc</h3>
     <div class="muted" style="margin-bottom:8px">1 mẻ lọc có thể rút dịch CÙNG LÚC từ nhiều nguồn (VD phối tank lên men 01 + tank 02 trong 1 lần chạy máy) — "Mẻ cuối" đánh dấu mẻ vét, dùng để loại khỏi so sánh hiệu suất.</div>
     <div class="tablewrap"><table>
-      <thead><tr><th>Mẻ số</th>${sources.map(s => `<th>${esc(sourceLabel(s))} (hl)</th>`).join("")}<th>Nước DAW (hl)</th><th>Bắt đầu</th><th>Kết thúc lúc</th><th>Mẻ cuối</th><th></th></tr></thead>
+      <thead><tr><th>Mẻ số</th>${sources.map(s => `<th>${esc(sourceLabel(s))} (hl)</th>`).join("")}<th>Nước DAW (hl)</th><th>Bắt đầu</th><th>Kết thúc lúc</th><th>Mẻ cuối</th><th>Ghi chú</th><th></th></tr></thead>
       <tbody>${batches.map(b => {
         const drawMap = Object.fromEntries(b.draws.map(d => [d.source_link_id, d.dich_nha_hl]));
         return `<tr>
@@ -3840,6 +3841,7 @@ async function showBatchFilterLot(filterLotId) {
         <td class="muted">${fmt(b.created_at)}</td>
         <td class="muted">${b.ended_at ? fmt(b.ended_at) : "—"}</td>
         <td>${b.is_final_batch ? '<span class="badge completed">Mẻ cuối</span>' : ""}</td>
+        <td class="muted">${esc(b.note || "—")}</td>
         <td style="white-space:nowrap">
           ${lk ? "" : `<button class="btn sm sec" data-finbatch="${b.batch_link_id}">${b.ended_at ? "Sửa" : "Kết thúc"}</button>
           <button class="btn sm sec" data-togglefinal="${b.batch_link_id}">${b.is_final_batch ? "Bỏ mẻ cuối" : "Mẻ cuối"}</button>
@@ -3949,6 +3951,7 @@ async function showBatchFilterLot(filterLotId) {
         <div class="field"><label>Bắt đầu</label><input id="fbm_start" type="datetime-local" value="${toDTLocal(new Date(b.created_at))}"/></div>
         <div class="field"><label>Kết thúc</label><input id="fbm_end" type="datetime-local" value="${toDTLocal(b.ended_at ? new Date(b.ended_at) : new Date())}"/></div>
       </div>
+      <div class="field" style="margin-top:10px"><label>Ghi chú</label><textarea id="fbm_note" rows="2" placeholder="(tuỳ chọn)">${esc(b.note || "")}</textarea></div>
       <button class="btn" id="fbm_save" style="margin-top:14px">Lưu</button>`);
     $("fbm_save").onclick = () => guard(async () => {
       const draws = sources.map(s => {
@@ -3964,13 +3967,20 @@ async function showBatchFilterLot(filterLotId) {
         batch_seq_no: $("fbm_seq").value.trim() || null,
         started_at: startVal ? new Date(startVal).toISOString() : null,
         ended_at: new Date(endVal).toISOString(),
+        note: $("fbm_note").value.trim() || null,
       });
       closeModal();
       toast("Đã lưu mẻ lọc"); showBatchFilterLot(filterLotId);
     });
   });
   document.querySelectorAll("[data-togglefinal]").forEach(btn => btn.onclick = () => guard(async () => {
-    await POST(`/batch-filter-lots/batches/${btn.dataset.togglefinal}/toggle-final`, {});
+    const id = btn.dataset.togglefinal;
+    const b = batches.find(x => x.batch_link_id === id);
+    // Chỉ hỏi xác nhận khi ĐÁNH DẤU mẻ cuối (không hỏi khi bỏ đánh dấu) — tránh bấm nhầm
+    // (yêu cầu người dùng 2026-10-03): "mẻ cuối" nghĩa là mẻ kết thúc sản xuất/bắt buộc dừng
+    // sự cố hoặc CIP dù máy lọc vẫn còn lọc được, KHÔNG phải cứ mẻ sản lượng thấp là mẻ cuối.
+    if (!b.is_final_batch && !confirm('Mẻ này có phải là mẻ kết thúc sản xuất, hoặc bắt buộc phải dừng do sự cố/CIP dù máy lọc vẫn còn lọc được không?\n\nBấm OK sẽ đánh dấu đây là "Mẻ cuối" (mẻ vét, loại khỏi so sánh hiệu suất).')) return;
+    await POST(`/batch-filter-lots/batches/${id}/toggle-final`, {});
     toast("Đã cập nhật mẻ cuối"); showBatchFilterLot(filterLotId);
   }));
   document.querySelectorAll("[data-delbatch]").forEach(btn => btn.onclick = () => guard(async () => {
@@ -4022,15 +4032,16 @@ VIEWS.batchpacklots = async function () {
     <div class="split">
       <div class="panel"><h2>Danh sách lô thành phẩm</h2>
         <input class="searchbox" data-tbl="t_packlot" placeholder="Tìm theo mã lô, số lô bia, trạng thái..."/>
-        <div class="tablewrap"><table id="t_packlot"><thead><tr><th>Mã lô TP</th><th>Lô lọc nguồn</th><th>Tank BBT</th><th>SL cấp chiết (lít)</th><th>Số lô bia</th><th>Trạng thái</th><th>Duyệt</th></tr></thead>
+        <div class="tablewrap"><table id="t_packlot"><thead><tr><th>Mã lô TP</th><th>Ngày chiết</th><th>Lô lọc nguồn</th><th>Tank BBT</th><th>SL cấp chiết (lít)</th><th>Số lô bia</th><th>Trạng thái</th><th>Duyệt</th></tr></thead>
           <tbody>${packLots.map(p => `<tr data-pklot2="${p.pack_lot_id}" style="cursor:pointer">
             <td><code class="k">${esc(p.pack_lot_code)}</code></td>
+            <td class="muted">${fmt(p.pack_date)}</td>
             <td><code class="k">${esc(lotByCode[p.filter_lot_id] || p.filter_lot_id)}</code></td>
             <td>${esc(p.from_bbt || "—")}</td>
             <td>${p.qty}</td><td>${esc(p.lot_no || "—")}</td>
             <td>${statusBadge(PACK_LOT_BADGE_CLASS[p.status], p.status_label)}</td>
             <td>${pkDuyetCellHtml(p)}</td></tr>`).join("")
-            || '<tr><td colspan=7 class="muted">Chưa có lô thành phẩm nào.</td></tr>'}</tbody></table></div>
+            || '<tr><td colspan=8 class="muted">Chưa có lô thành phẩm nào.</td></tr>'}</tbody></table></div>
       </div>
       <div class="panel" id="pk_detail"><h2>Chi tiết lô thành phẩm</h2><div class="muted">Chọn một lô để xem.</div></div>
     </div>`;
