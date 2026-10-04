@@ -40,14 +40,20 @@ def admin_h(client):
     return _login(client, "admin", "AdminTest123")
 
 
-def test_dashboard_counts_brew_orders(client, admin_h):
+@pytest.fixture(scope="module")
+def lager_product_id(client, admin_h):
+    products = client.get("/api/products", headers=admin_h).json()
+    return next(p["product_id"] for p in products if p["code"] == "BIA-LAGER")
+
+
+def test_dashboard_counts_brew_orders(client, admin_h, lager_product_id):
     before = client.get("/api/reports/dashboard-summary", headers=admin_h).json()
 
     created1 = client.post("/api/brewing/orders", headers=admin_h, json={
-        "order_code": "LN-DASH-TEST-1", "auto_from_bom": False, "planned_volume_hl": 100.0})
+        "order_code": "LN-DASH-TEST-1", "product_id": lager_product_id, "auto_from_bom": False, "planned_volume_hl": 100.0})
     assert created1.status_code == 201, created1.text
     created2 = client.post("/api/brewing/orders", headers=admin_h, json={
-        "order_code": "LN-DASH-TEST-2", "auto_from_bom": False, "planned_volume_hl": 100.0})
+        "order_code": "LN-DASH-TEST-2", "product_id": lager_product_id, "auto_from_bom": False, "planned_volume_hl": 100.0})
     assert created2.status_code == 201, created2.text
 
     after = client.get("/api/reports/dashboard-summary", headers=admin_h).json()
@@ -131,6 +137,7 @@ def test_dashboard_stat_cards_source_from_new_batch_pipeline(client, admin_h):
     draw = client.post("/api/batch-filter-lots", headers=admin_h, json={
         "filter_lot_code": "FLOT-DASHNEW-1", "to_bbt": "BBT-DASHNEW-1",
         "sources": [{"source_type": "tank", "source_tank_id": tank_id}],
+        "category": "Bia lon",
     })
     assert draw.status_code == 201, draw.text
     filter_lot_id = draw.json()["filter_lot_id"]
@@ -280,6 +287,7 @@ def _finish_one_me_loc(client, admin_h, suffix, dich_nha_hl, batch_seq_no=None):
     draw = client.post("/api/batch-filter-lots", headers=admin_h, json={
         "filter_lot_code": f"FLOT-YIELD-{suffix}", "to_bbt": f"BBT-YIELD-{suffix}",
         "sources": [{"source_type": "tank", "source_tank_id": tank_id}],
+        "category": "Bia lon",
     })
     assert draw.status_code == 201, draw.text
     filter_lot_id = draw.json()["filter_lot_id"]
