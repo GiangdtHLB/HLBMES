@@ -576,7 +576,7 @@ def approve_transfer_to_factory(db: Session, movement_id: str, user: User) -> di
 
 def transfer(db: Session, lot_id: str, quantity: float, location_to: str, user: User,
              reason: str = None, mode: str = "sang_ngang", request_id: str = None,
-             request_line_id: str = None, ts=None) -> dict:
+             request_line_id: str = None, ts=None, reversal_of: str = None) -> dict:
     """Chuyển vị trí (không đổi tổng tồn) — entrypoint công khai, đòi `warehouse.issue`. `mode`
     phân biệt nguồn gốc giao dịch trong lịch sử: "xuat_theo_de_nghi" (công ty→phân xưởng qua đề
     nghị) | "dieu_chuyen" (phân xưởng→công ty thủ công). `ts` (tuỳ chọn): ngày hiệu lực của
@@ -587,14 +587,22 @@ def transfer(db: Session, lot_id: str, quantity: float, location_to: str, user: 
     mới tại `location_to` mang đúng `quantity` (giữ nguyên lô gốc ở vị trí cũ với phần còn lại,
     nối genealogy "split" để vẫn truy xuất được về lô gốc) — trước đây hàm này luôn di chuyển
     NGUYÊN LÔ bất kể `quantity` truyền vào, khiến sổ sách ghi sai số lượng đã chuyển khi người
-    dùng chỉ định chuyển một phần lô."""
+    dùng chỉ định chuyển một phần lô.
+
+    `reversal_of` (tuỳ chọn): movement_id GỐC đang được hoàn tác — truyền từ undo_fulfill_line/
+    undo_transfer_px_request/undo_sang_ngang để StockMovement.material_transaction_detail::
+    _reversed_movement_ids ghép cặp qua FK chính xác (mirror undo_issue), thay vì phải đoán mò
+    theo lot_code+số lượng — vật tư có nhiều giao dịch trùng số lượng (VD nhiều phiếu cùng rút
+    đúng 25kg) dễ bị ghép NHẦM cặp hoàn tác, ẩn sai dòng khỏi Sổ chi tiết vật tư (bug thực tế
+    phát hiện 2026-10-04, vật tư Cacl2 - Phần Lan/2NP10)."""
     require_perm(user, "warehouse.issue")
-    return _transfer_lot(db, lot_id, quantity, location_to, user, reason, mode, request_id, request_line_id, ts=ts)
+    return _transfer_lot(db, lot_id, quantity, location_to, user, reason, mode, request_id, request_line_id,
+                         ts=ts, reversal_of=reversal_of)
 
 
 def _transfer_lot(db: Session, lot_id: str, quantity: float, location_to: str, user: User,
                   reason: str = None, mode: str = "sang_ngang", request_id: str = None,
-                  request_line_id: str = None, ts=None) -> dict:
+                  request_line_id: str = None, ts=None, reversal_of: str = None) -> dict:
     """Logic chuyển vị trí thực sự, KHÔNG kiểm tra `warehouse.issue` — dùng cho các nơi đã tự
     xác thực quyền theo cách khác (vd approve_sang_ngang/undo_sang_ngang: thủ kho phân xưởng
     duyệt qua `warehouse.request` + phạm vi kho, không phải người cầm quyền "xuất kho" chung).
@@ -657,7 +665,8 @@ def _transfer_lot(db: Session, lot_id: str, quantity: float, location_to: str, u
                              quantity=quantity, uom=lot.uom, source_event="transfer")
         db.add(edge)
     mv = _move(db, "transfer", moved_lot, quantity, user, ts=ts, location_from=loc_from, location_to=location_to,
-              mode=mode, reason=reason, request_id=request_id, request_line_id=request_line_id)
+              mode=mode, reason=reason, request_id=request_id, request_line_id=request_line_id,
+              reversal_of=reversal_of)
     if edge is not None:
         # Flush để stock_movement (mv) THẬT SỰ tồn tại trong DB TRƯỚC khi gán genealogy_edge.movement_id
         # (FK → stock_movement). Model không có relationship() nên SQLAlchemy KHÔNG tự xếp INSERT mv
@@ -2184,6 +2193,8 @@ def undo_fulfill_line(db: Session, request_id: str, line_id: str, user: User) ->
     if not moves:
         raise DomainError("Không tìm thấy giao dịch xuất nào cho dòng này để hoàn tác.")
     for mv in moves:
+        if mv.reversed:
+            continue
         consumed = db.execute(
             select(GenealogyEdge).where(GenealogyEdge.from_id == mv.lot_id,
                                         GenealogyEdge.relation == GenealogyRelation.CONSUME.value)
@@ -2191,6 +2202,15 @@ def undo_fulfill_line(db: Session, request_id: str, line_id: str, user: User) ->
         if consumed:
             raise DomainError(f"Lô {mv.lot_code} đã được dùng cho mẻ sản xuất, không thể hoàn tác.")
     for mv in moves:
+        # Bỏ qua giao dịch ĐÃ hoàn tác trước đó (mv.reversed) — trước đây hàm này không bao giờ
+        # đánh dấu lại `reversed` sau khi hoàn tác xong, nên 1 dòng từng được hoàn tác RỒI fulfill
+        # lại (VD tách FIFO nhiều lô, hoàn 1 lô rồi fulfill lại bằng lô khác) sẽ khiến lần hoàn
+        # tác SAU cố hoàn LẠI cả giao dịch đã hoàn xong — lô gốc lúc đó có thể đã bị dùng tiếp cho
+        # NHIỀU phiếu khác (tồn giảm theo FIFO bình thường), gây lỗi "Số lượng chuyển không hợp lệ"
+        # dù thực ra không có gì sai, chỉ là xử lý lại đúng giao dịch 1 lần nữa (bug thực tế phát
+        # hiện 2026-10-04, phiếu DN-20260918-6F2EF/2NP10 — Cacl2 Phần Lan).
+        if mv.reversed:
+            continue
         # ts=mv.ts (KHÔNG mặc định "bây giờ"): giao dịch xuất gốc thường đã lùi ngày theo
         # "Ngày đề nghị nhận kho" — nếu hoàn tác không lùi theo ĐÚNG ngày đó, cặp xuất/hoàn trả
         # sẽ KHÔNG triệt tiêu nhau khi dựng lại tồn as-of cho các mốc GIỮA 2 ngày đó (xuất bị
@@ -2199,7 +2219,9 @@ def undo_fulfill_line(db: Session, request_id: str, line_id: str, user: User) ->
         # hoàn tác/từ chối từ lâu (bug thực tế phát hiện 2026-09-29, audit 37 lượt hoàn tác trên
         # production — TẤT CẢ đều dính, ảnh hưởng 12 dòng đang chờ xử lý ở 8 phiếu khác nhau).
         transfer(db, mv.lot_id, mv.quantity, "Kho công ty", user, mode="dieu_chuyen",
-                reason=f"Hoàn tác xuất theo đề nghị {req.request_code} (dòng {line.seq + 1})", ts=mv.ts)
+                reason=f"Hoàn tác xuất theo đề nghị {req.request_code} (dòng {line.seq + 1})", ts=mv.ts,
+                reversal_of=mv.movement_id)
+        mv.reversed = True
     line.status = "pending"
     line.fulfilled_lot_id = None
     line.fulfilled_qty = None
@@ -2545,7 +2567,7 @@ def undo_transfer_px_request(db: Session, request_id: str, user: User) -> dict:
     # DCKP-20260911-00844). Không có `mv` (movement_id cũ/thiếu) thì đành giữ mặc định "bây giờ".
     transfer(db, lot_id_to_revert, req.quantity, "Kho phân xưởng", user,
             reason=f"Hoàn tác điều chuyển {req.request_code}", mode="dieu_chuyen",
-            ts=mv.ts if mv else None)
+            ts=mv.ts if mv else None, reversal_of=mv.movement_id if mv else None)
     req.status = "pending"
     req.approved_by = None
     req.approved_at = None
@@ -2757,7 +2779,7 @@ def undo_transfer_kcpx_request(db: Session, request_id: str, user: User) -> dict
     # nguyên nhân bug thực tế phát hiện ở vật tư 2NC02, phiếu DCKP-20260911-00844).
     result = transfer(db, lot_id_to_revert, req.quantity, "Kho công ty", user,
                       reason=f"Hoàn tác điều chuyển {req.request_code}", mode="dieu_chuyen_kcpx",
-                      ts=mv.ts if mv else None)
+                      ts=mv.ts if mv else None, reversal_of=mv.movement_id if mv else None)
     reverted_lot = db.get(MaterialLot, result["lot_id"])
     reverted_lot.workshop_location_id = None
     req.status = "pending"
@@ -2976,7 +2998,7 @@ def undo_sang_ngang(db: Session, request_id: str, user: User) -> dict:
     # ts=mv.ts — xem giải thích ở undo_transfer_px_request (mirror hệt, cùng bug).
     _transfer_lot(db, lot_id_to_revert, req.quantity, "Kho công ty", user,
                  reason=f"Hoàn tác xuất sang ngang {req.request_code}", mode="sang_ngang",
-                 ts=mv.ts if mv else None)
+                 ts=mv.ts if mv else None, reversal_of=mv.movement_id if mv else None)
     req.status = "pending"
     req.approved_by = None
     req.approved_at = None
