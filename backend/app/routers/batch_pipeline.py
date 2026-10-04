@@ -278,7 +278,8 @@ def finish_filter_lot_batch(batch_link_id: str, payload: FinishFilterLotBatchIn,
                             db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     return svc.finish_filter_lot_batch(db, batch_link_id, [d.model_dump() for d in payload.draws],
                                        payload.nuoc_bai_khi_hl, payload.batch_seq_no, user,
-                                       started_at=payload.started_at, ended_at=payload.ended_at)
+                                       started_at=payload.started_at, ended_at=payload.ended_at,
+                                       note=payload.note)
 
 
 @router.post("/batch-filter-lots/batches/{batch_link_id}/toggle-final", response_model=BatchFilterLotBatchOut)

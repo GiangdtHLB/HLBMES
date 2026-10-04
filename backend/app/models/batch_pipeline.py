@@ -227,6 +227,7 @@ class BatchFilterLotBatch(Base):
     is_final_batch: Mapped[bool] = mapped_column(Boolean, default=False)
     ended_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    note: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)
 
 
 class BatchFilterLotBatchDraw(Base):
