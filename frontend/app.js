@@ -2390,9 +2390,10 @@ VIEWS.batches = async function () {
 };
 function tableBatches(batches, clickable, woById, tableId, tankByBatchId) {
   const tankLabel = tankByBatchId || {};
-  return `<table${tableId ? ` id="${tableId}"` : ""}><thead><tr><th>Mã mẻ Braumat</th><th>Mã WO</th><th>Tank lên men</th><th>Trạng thái</th><th>Chất lượng</th><th>KH</th><th>Thực tế</th></tr></thead>
+  return `<table${tableId ? ` id="${tableId}"` : ""}><thead><tr><th>Mã mẻ Braumat</th><th>Ngày nấu</th><th>Mã WO</th><th>Tank lên men</th><th>Trạng thái</th><th>Chất lượng</th><th>KH</th><th>Thực tế</th></tr></thead>
     <tbody>${batches.map(b => `<tr ${clickable ? `data-batch="${b.batch_id}" style="cursor:pointer"` : ""}>
       <td><code class="k">${esc(b.batch_code)}</code></td>
+      <td class="muted">${fmt(b.start_at)}</td>
       <td class="muted">${(woById && woById[b.work_order_id]) ? esc(woById[b.work_order_id].wo_code) : "—"}</td>
       <td class="muted">${tankLabel[b.batch_id] ? esc(tankLabel[b.batch_id]) : "—"}</td>
       <td>${badge(b.state)}</td>
