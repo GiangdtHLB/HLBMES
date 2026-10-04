@@ -54,6 +54,21 @@ def _build_pallet(client, admin_h, product, lot_code, case_count, units_per_case
     return r.json()
 
 
+@pytest.fixture(scope="module")
+def loc_id(client, admin_h):
+    # TP-COLD (seed) có sức chứa 80 — đủ cho mọi pallet mà các test trong file này cất (putaway)
+    # tại 1 thời điểm. Cần vì ship() giờ bắt buộc pallet phải ở status "stored" (đã qua
+    # putaway()) trước khi xuất (audit code 2026-10-04 — sửa lỗi xuất thẳng pallet "building").
+    locs = client.get("/api/wms/locations", headers=admin_h).json()
+    return next(l["loc_id"] for l in locs if l["code"] == "TP-COLD")
+
+
+def _putaway(client, admin_h, loc_id, pallet_id):
+    r = client.post(f"/api/wms/pallets/{pallet_id}/putaway", headers=admin_h, json={"loc_id": loc_id})
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
 def test_list_lots_aggregates_multiple_pallets_same_lot(client, admin_h):
     lot_code = "LOT-AGG-01"
     _build_pallet(client, admin_h, "SKU-AGG", lot_code, 100, 24)
@@ -68,10 +83,12 @@ def test_list_lots_aggregates_multiple_pallets_same_lot(client, admin_h):
     assert row["by_status"]["building"] == 2
 
 
-def test_ship_lot_ships_all_pallets_and_reports_totals(client, admin_h):
+def test_ship_lot_ships_all_pallets_and_reports_totals(client, admin_h, loc_id):
     lot_code = "LOT-SHIPALL-01"
     p1 = _build_pallet(client, admin_h, "SKU-SHIP", lot_code, 110, 24)
     p2 = _build_pallet(client, admin_h, "SKU-SHIP", lot_code, 30, 24)
+    _putaway(client, admin_h, loc_id, p1["pallet_id"])
+    _putaway(client, admin_h, loc_id, p2["pallet_id"])
 
     ship = client.post(f"/api/wms/lots/{lot_code}/ship", headers=admin_h)
     assert ship.status_code == 200, ship.text
@@ -89,7 +106,7 @@ def test_ship_lot_ships_all_pallets_and_reports_totals(client, admin_h):
     assert not any(l["lot_code"] == lot_code for l in lots)
 
 
-def test_ship_lot_partial_ships_oldest_pallets_first_fifo(client, admin_h):
+def test_ship_lot_partial_ships_oldest_pallets_first_fifo(client, admin_h, loc_id):
     """Yêu cầu người dùng 2026-09-20: "300 pallet thì xuất 1 phần trước, khoảng 100 pallet...
     chọn pallet nào nhập trước thì xuất trước tự động" — xuất 1 phần theo `pallet_count`, tự
     động chọn pallet có created_at SỚM NHẤT (FIFO), không cho chọn tay từng cái."""
@@ -97,6 +114,8 @@ def test_ship_lot_partial_ships_oldest_pallets_first_fifo(client, admin_h):
     p1 = _build_pallet(client, admin_h, "SKU-FIFO", lot_code, 10, 24)  # nhập trước nhất
     p2 = _build_pallet(client, admin_h, "SKU-FIFO", lot_code, 20, 24)
     p3 = _build_pallet(client, admin_h, "SKU-FIFO", lot_code, 30, 24)  # nhập sau cùng
+    _putaway(client, admin_h, loc_id, p1["pallet_id"])
+    _putaway(client, admin_h, loc_id, p2["pallet_id"])
 
     ship = client.post(f"/api/wms/lots/{lot_code}/ship", headers=admin_h, json={"pallet_count": 2})
     assert ship.status_code == 200, ship.text
@@ -138,12 +157,14 @@ def test_ship_lot_blocked_when_no_pallets_left(client, admin_h):
     assert missing.status_code == 404, missing.text
 
 
-def test_ship_lot_only_ships_unshipped_pallets_in_lot(client, admin_h):
+def test_ship_lot_only_ships_unshipped_pallets_in_lot(client, admin_h, loc_id):
     """1 lô có pallet ĐÃ xuất từ trước (lẻ tay) + pallet chưa xuất — ship_lot chỉ xuất phần
     còn lại, không đụng tới pallet đã xuất rồi."""
     lot_code = "LOT-PARTIAL-01"
     p1 = _build_pallet(client, admin_h, "SKU-PARTIAL", lot_code, 40, 24)
     p2 = _build_pallet(client, admin_h, "SKU-PARTIAL", lot_code, 60, 24)
+    _putaway(client, admin_h, loc_id, p1["pallet_id"])
+    _putaway(client, admin_h, loc_id, p2["pallet_id"])
     already = client.post(f"/api/wms/pallets/{p1['pallet_id']}/ship", headers=admin_h)
     assert already.status_code == 200, already.text
 
@@ -163,12 +184,13 @@ def test_ship_lot_requires_warehouse_issue_permission(client, admin_h, vanhanh_h
     assert forbidden.status_code == 403, forbidden.text
 
 
-def test_pallet_exposes_created_at_and_shipped_at(client, admin_h):
+def test_pallet_exposes_created_at_and_shipped_at(client, admin_h, loc_id):
     """Yêu cầu người dùng 2026-09-20: "thêm cột ngày nhập kho thành phẩm, ngày xuất" — pallet
     phải trả về created_at (ngày nhập kho, có ngay lúc tạo) và shipped_at (rỗng cho tới khi
     xuất, có giá trị ngay sau khi ship())."""
     lot_code = "LOT-DATES-01"
     p = _build_pallet(client, admin_h, "SKU-DATES", lot_code, 20, 24)
+    _putaway(client, admin_h, loc_id, p["pallet_id"])
 
     before_ship = client.get("/api/wms/pallets", headers=admin_h).json()
     row = next(x for x in before_ship if x["pallet_code"] == p["pallet_code"])
@@ -205,13 +227,14 @@ def test_pallet_and_lot_resolve_sku_name_from_product_code(client, admin_h):
     assert lot_row["product_name"] == "Bia lon Cội Nguồn 330ml"
 
 
-def test_list_lots_reports_first_stocked_and_last_shipped_dates(client, admin_h):
+def test_list_lots_reports_first_stocked_and_last_shipped_dates(client, admin_h, loc_id):
     """Lô còn 1 pallet chưa xuất + 1 pallet đã xuất trước đó -> dòng lô vẫn hiển thị
     first_stocked_at (từ các pallet đang liệt kê) và last_shipped_at (từ pallet đã xuất cùng
     lô, dù pallet đó không còn nằm trong tập đang liệt kê)."""
     lot_code = "LOT-DATES-AGG-01"
     p1 = _build_pallet(client, admin_h, "SKU-DATES-AGG", lot_code, 40, 24)
     p2 = _build_pallet(client, admin_h, "SKU-DATES-AGG", lot_code, 60, 24)
+    _putaway(client, admin_h, loc_id, p1["pallet_id"])
     ship1 = client.post(f"/api/wms/pallets/{p1['pallet_id']}/ship", headers=admin_h)
     assert ship1.status_code == 200, ship1.text
 

@@ -64,16 +64,17 @@ def summary(db: Session) -> dict:
     """Tổng hợp toàn kho: số vị trí + sức chứa, tổng pallet (theo trạng thái), case/units."""
     locs = db.execute(select(WmsLocation)).scalars().all()
     capacity = sum(l.capacity for l in locs)
-    pallets = db.execute(select(Pallet)).scalars().all()
-    stored = [p for p in pallets if p.status == "stored"]
+    # GROUP BY status (như list_locations() đã làm đúng) thay vì tải TOÀN BỘ bảng Pallet vào
+    # Python rồi đếm bằng vòng lặp (audit code 2026-10-04 — tốn bộ nhớ/thời gian khi bảng lớn).
+    by_status = dict(db.execute(
+        select(Pallet.status, func.count()).group_by(Pallet.status)).all())
+    pallets_total = sum(by_status.values())
+    pallets_stored = by_status.get("stored", 0)
     cases = db.execute(select(func.count(Case.case_id))).scalar() or 0
     units = db.execute(select(func.coalesce(func.sum(Case.units), 0))).scalar() or 0
-    by_status = {}
-    for p in pallets:
-        by_status[p.status] = by_status.get(p.status, 0) + 1
     return {"locations": len(locs), "capacity_pallets": capacity,
-            "pallets_total": len(pallets), "pallets_stored": len(stored),
-            "fill_pct": round(len(stored) / capacity * 100, 1) if capacity else 0.0,
+            "pallets_total": pallets_total, "pallets_stored": pallets_stored,
+            "fill_pct": round(pallets_stored / capacity * 100, 1) if capacity else 0.0,
             "by_status": by_status, "cases": cases, "units": int(units)}
 
 
@@ -89,9 +90,17 @@ def list_pallets(db: Session, status: str = None, lot_code: str = None) -> list:
     out = []
     loc_by = {l.loc_id: l for l in db.execute(select(WmsLocation)).scalars().all()}
     product_name_by = _product_name_by_code(db)
-    for p in db.execute(stmt).scalars().all():
+    pallets = db.execute(stmt).scalars().all()
+    # Gộp lấy Case của TẤT CẢ pallet bằng 1 câu IN(...) thay vì 1 SELECT riêng/pallet trong vòng
+    # lặp (N+1 query — chậm hẳn khi danh sách dài, audit code 2026-10-04).
+    cases_by_pallet: dict[str, list[Case]] = {}
+    if pallets:
+        pallet_ids = [p.pallet_id for p in pallets]
+        for c in db.execute(select(Case).where(Case.pallet_id.in_(pallet_ids))).scalars().all():
+            cases_by_pallet.setdefault(c.pallet_id, []).append(c)
+    for p in pallets:
         loc = loc_by.get(p.location_id)
-        cases = db.execute(select(Case).where(Case.pallet_id == p.pallet_id)).scalars().all()
+        cases = cases_by_pallet.get(p.pallet_id, [])
         out.append({"pallet_id": p.pallet_id, "pallet_code": p.pallet_code, "product": p.product,
                     "product_name": product_name_by.get(p.product),
                     "lot_code": p.lot_code, "case_count": p.case_count, "units_per_case": p.units_per_case,
@@ -171,6 +180,8 @@ def _build_pallet(db: Session, payload: dict, user: User, source: str = "manual"
     upc = int(payload.get("units_per_case", 24) or 24)
     if n <= 0:
         raise DomainError("Số case phải > 0.")
+    if upc <= 0:
+        raise DomainError("Số lượng/case (units_per_case) phải > 0.")
     stamp = f"{utcnow():%y%m%d}-{new_id()[:4].upper()}"
     pallet = Pallet(pallet_id=new_id(), pallet_code=f"PLT-{stamp}",
                     product=payload.get("product"), lot_code=payload.get("lot_code"),
@@ -202,7 +213,12 @@ def putaway(db: Session, pallet_id: str, loc_id: str, user: User) -> dict:
         raise NotFoundError("Pallet không tồn tại.")
     if p.status == "shipped":
         raise DomainError("Pallet đã xuất — không thể cất.")
-    loc = db.get(WmsLocation, loc_id)
+    # with_for_update(): khóa dòng VỊ TRÍ TRƯỚC khi đếm "đã dùng" cho _capacity_ok() — 2 thủ kho
+    # cất 2 pallet khác nhau vào CÙNG 1 vị trí còn đúng 1 chỗ trống gần như đồng thời có thể cùng
+    # đọc used < capacity là True trước khi bên kia commit, cả 2 cùng qua được kiểm tra rồi cùng
+    # ghi location_id — vị trí vượt sức chứa khai báo (audit rủi ro 2026-10-04, cùng lớp race đã
+    # sửa cho lot.quantity ở warehouse.py/batches.py::consume_lot). Giữ khóa xuyên suốt tới commit.
+    loc = db.execute(select(WmsLocation).where(WmsLocation.loc_id == loc_id).with_for_update()).scalar_one_or_none()
     if not loc:
         raise NotFoundError("Vị trí không tồn tại.")
     if not _capacity_ok(db, loc, exclude_pallet=pallet_id):
@@ -218,9 +234,18 @@ def putaway(db: Session, pallet_id: str, loc_id: str, user: User) -> dict:
 
 def ship(db: Session, pallet_id: str, user: User) -> dict:
     require_perm(user, "warehouse.issue")
-    p = db.get(Pallet, pallet_id)
+    # with_for_update(): khóa dòng PALLET TRƯỚC khi đọc/kiểm tra status — bấm nhanh 2 lần nút
+    # "Xuất" (double-click/mạng chậm) trên CÙNG pallet gần như đồng thời có thể cùng đọc
+    # status="stored" trước khi bên kia kịp ghi "shipped", cả 2 cùng qua được kiểm tra rồi cùng
+    # ghi đè shipped_at + tạo 2 bản ghi audit "ship" trùng (audit rủi ro 2026-10-04, cùng lớp
+    # race đã sửa ở putaway()/batches.py::consume_lot).
+    p = db.execute(select(Pallet).where(Pallet.pallet_id == pallet_id).with_for_update()).scalar_one_or_none()
     if not p:
         raise NotFoundError("Pallet không tồn tại.")
+    if p.status == "shipped":
+        raise DomainError("Pallet này đã được xuất trước đó.")
+    if p.status != "stored":
+        raise DomainError("Pallet chưa được cất vào vị trí kho — phải Cất kho trước khi Xuất.")
     p.status = "shipped"
     p.location_id = None
     p.shipped_at = utcnow()
