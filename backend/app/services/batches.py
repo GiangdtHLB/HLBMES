@@ -28,8 +28,9 @@ from ..models.brewing import BrewOrder
 from ..models.isa88 import BatchPhaseRun
 from ..models.lines import ProductionLine
 from ..models.materials import GenealogyEdge, MaterialLot
-from ..models.materials_ext import Dispense, DispenseLine
+from ..models.materials_ext import BatchMaterialNotUsed, Dispense, DispenseLine
 from ..models.metrics import ProcessReading
+from ..models.process import ChemicalUsage, YeastIssue
 from ..models.quality import QualityResult
 from ..models.recipe_ext import BatchYieldActual
 from ..models.recipes import RecipeVersion
@@ -248,7 +249,14 @@ def set_actual_qty(db: Session, batch_id: str, actual_qty: float, user: User) ->
     khi actual_qty được ghi/sửa, cộng thêm đúng phần CHÊNH LỆCH (mirror on_hand giảm theo DELTA ở
     finish_filter_tank/finish_bottle) vào on_hand/volume_hl của tank đang gộp (nếu có)."""
     require_role(user, Role.OPERATOR, Role.SUPERVISOR, Role.ENGINEER)
-    batch = _get(db, batch_id)
+    # with_for_update(): khóa dòng MẺ TRƯỚC khi đọc actual_qty cũ để tính delta — 2 request sửa
+    # actual_qty gần như đồng thời trên CÙNG mẻ có thể cùng đọc actual_qty cũ, ghi đè mất lần ghi
+    # trước (lost update, audit rủi ro 2026-10-04). Khóa MẺ trước rồi mới khóa TANK bên dưới (giữ
+    # đúng thứ tự mẻ-trước-lô/tank đã dùng ở consume_lot/transition, tránh deadlock ngược chiều).
+    batch = db.execute(select(BatchExecution).where(
+        BatchExecution.batch_id == batch_id).with_for_update()).scalar_one_or_none()
+    if not batch:
+        raise NotFoundError("Batch không tồn tại.")
     _assert_not_locked(batch)
     if actual_qty < 0:
         raise DomainError("SL thực tế phải >= 0.")
@@ -286,7 +294,17 @@ def set_actual_qty(db: Session, batch_id: str, actual_qty: float, user: User) ->
 
 
 def transition(db: Session, batch_id: str, target: str, user: User, reason: str = None) -> BatchExecution:
-    batch = _get(db, batch_id)
+    # with_for_update(): khóa dòng MẺ TRƯỚC khi đọc/kiểm tra trạng thái — 2 lời gọi hủy mẻ gần
+    # như đồng thời (hoặc hủy 1 mẻ qua đây đồng thời với hủy cascade từ Lệnh SX cha, xem
+    # workorders.py::_cancel_active_batches) trên CÙNG mẻ trước đây đều đọc được state CHƯA khóa
+    # và CÙNG tập GenealogyEdge consume CHƯA bị xóa (bên kia chưa commit) — cả 2 cùng tính
+    # "take = edge.quantity" rồi cùng hoàn vào lô NVL, hoàn NVL 2 LẦN cho cùng 1 lượt hủy (audit
+    # rủi ro 2026-10-04). Khóa mẻ TRƯỚC lô NVL (_refund_consumed_materials khóa lô sau, giữ đúng
+    # thứ tự mẻ-trước-lô mà consume_lot đã dùng, tránh deadlock ngược chiều).
+    batch = db.execute(select(BatchExecution).where(
+        BatchExecution.batch_id == batch_id).with_for_update()).scalar_one_or_none()
+    if not batch:
+        raise NotFoundError("Batch không tồn tại.")
     _assert_not_locked(batch)
     try:
         target_state = BatchState(target)
@@ -335,7 +353,12 @@ def cancel_batch_system(db: Session, batch: BatchExecution, user: User, reason: 
     state + hoàn NVL đã cấp qua _refund_consumed_materials), nhưng KHÔNG check lại role thao
     tác mẻ riêng lẻ (người gọi đã qua require_perm(wo.manage) ở lệnh cha) và KHÔNG tự commit
     (gộp chung 1 transaction với lệnh cha). Chỉ gọi cho mẻ đang active (planned/ready/running/
-    held) — completed/closed không được cancel (BATCH_TRANSITIONS chặn, mẻ đã có kết quả thật)."""
+    held) — completed/closed không được cancel (BATCH_TRANSITIONS chặn, mẻ đã có kết quả thật).
+
+    QUAN TRỌNG: hàm này KHÔNG tự load/khóa `batch` (nhận object đã load sẵn từ caller) — CALLER
+    BẮT BUỘC phải SELECT ... with_for_update() batch này TRƯỚC khi gọi vào đây (mirror khóa đã
+    thêm ở transition() cho nhánh "cancelled" đơn lẻ), nếu không sẽ gặp lại đúng race hoàn NVL 2
+    lần đã sửa ở transition() (audit 2026-10-04) — xem workorders.py::_cancel_active_batches."""
     before = {"state": batch.state}
     batch.state = BatchState.CANCELLED.value
     batch.version += 1
@@ -377,7 +400,14 @@ def record_actual(db: Session, batch_id: str, actual: dict, user: User) -> Batch
     services/recipes.py::_resolve_param_items), mirror cách record_result (quality.py) nhận
     lower_limit/upper_limit do client gửi kèm (đã lấy từ server trước đó) để tính pass/fail,
     không tự tra lại danh mục ở đây."""
-    batch = _get(db, batch_id)
+    # with_for_update(): khóa dòng MẺ TRƯỚC khi đọc batch.actuals để nối thêm entry — ghi đè CẢ
+    # CỘT JSON (list) chứ không update từng dòng, nên 2 request ghi actual gần như đồng thời
+    # (2 vận hành viên nhập quan trắc khác nhau) có thể cùng đọc actuals cũ, ai ghi sau sẽ ghi đè
+    # mất kết quả người ghi trước (lost update, audit rủi ro 2026-10-04).
+    batch = db.execute(select(BatchExecution).where(
+        BatchExecution.batch_id == batch_id).with_for_update()).scalar_one_or_none()
+    if not batch:
+        raise NotFoundError("Batch không tồn tại.")
     _assert_not_locked(batch)
     if batch.state != BatchState.RUNNING.value:
         raise DomainError("Chỉ ghi actual khi mẻ đang running.")
@@ -631,6 +661,19 @@ def delete_batch(db: Session, batch_id: str, user: User) -> None:
                 DispenseLine.dispense_id == disp.dispense_id)).scalars().all():
             db.delete(dl)
         db.delete(disp)
+    # ChemicalUsage/YeastIssue/BatchMaterialNotUsed đều có FK THẬT tới batch_execution.batch_id
+    # (xem models/process.py ChemicalUsage.batch_id, YeastIssue.batch_id; models/materials_ext.py
+    # BatchMaterialNotUsed.batch_id) — phải xóa con TRƯỚC cha (batch) ở đây, nếu không sẽ vỡ FK
+    # trên SQL Server. reset_batch_pipeline_data.py (script bulk-reset) đã xử lý đúng 2 bảng đầu
+    # cho trường hợp xóa hàng loạt, nhưng delete_batch (xóa TỪNG mẻ lẻ) trước đây bỏ sót cả 3
+    # bảng này (audit 2026-10-04).
+    for cu in db.execute(select(ChemicalUsage).where(ChemicalUsage.batch_id == batch_id)).scalars().all():
+        db.delete(cu)
+    for yi in db.execute(select(YeastIssue).where(YeastIssue.batch_id == batch_id)).scalars().all():
+        db.delete(yi)
+    for nu in db.execute(select(BatchMaterialNotUsed).where(
+            BatchMaterialNotUsed.batch_id == batch_id)).scalars().all():
+        db.delete(nu)
 
     db.flush()
     genealogy.delete_edges_for(db, "batch", batch_id)
