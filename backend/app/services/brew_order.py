@@ -428,6 +428,30 @@ def _validate_member_selection(lines: list) -> None:
             raise DomainError(f"{l.get('material_name')}: chọn ít nhất 1 vật tư trong nhóm.")
 
 
+def _require_product_selected(payload: dict) -> None:
+    """Loại bia (Dịch bia, product_id) BẮT BUỘC phải chọn khi tạo/sửa Lệnh nấu — trước đây
+    CHỈ frontend chặn lúc tạo mới (app.js: "Chọn Loại bia trước khi tạo Lệnh nấu."), backend
+    không enforce gì, nên gọi thẳng API (POST/PUT /api/brewing/orders) không gửi product_id
+    vẫn tạo/sửa thành công thành 1 lệnh "rỗng" (không dịch bia, không recipe_version_id, và
+    lines=[] vì build_lines_from_recipe_version chỉ chạy "if auto_from_bom and
+    payload.get('product_id')") — để lọt dữ liệu NULL thật trên production, mirror lỗi đã sửa
+    ở batch_pipeline.py::create_filter_order.
+
+    Đây là chặn MỚI, TÁCH BIỆT với _validate_formula_selection/_validate_recipe_version_selection
+    bên dưới — 2 hàm đó có `if not product_id: return` là ĐÚNG Ý ĐỒ của chúng (chỉ validate
+    "nếu CÓ chọn công thức mà công thức không khớp/không hiệu lực thì báo lỗi", không phải chỗ
+    bắt buộc phải chọn product_id).
+
+    update_order cũng gọi hàm này y hệt create_order (không chỉ chặn lúc tạo mới): router
+    update_brew_order gửi `payload.model_dump()` của TOÀN BỘ BrewOrderIn mỗi lần PUT (không
+    phải PATCH merge từng phần còn thiếu giữ nguyên giá trị cũ — xem routers/brewing.py,
+    update_order cũng chỉ làm "for field, value in payload.items(): setattr(...)" cho mọi field
+    có mặt trong payload) — nên product_id rỗng trong payload sửa lệnh LUÔN có nghĩa là đang
+    chủ động xóa/không chọn, không có khái niệm "field vắng mặt thì giữ nguyên" ở tầng này."""
+    if not payload.get("product_id"):
+        raise DomainError("Chưa chọn Loại bia (Dịch bia).")
+
+
 def _validate_volume_plan(planned_volume_hl, tolerance_hl) -> None:
     """Sản lượng nấu kế hoạch (hl) bắt buộc phải > 0 — nếu để 0/None, logic hoàn thành
     (thực tế >= kế hoạch - sai số) sẽ coi lệnh "hoàn thành ngay từ đầu" khi thực tế
@@ -543,6 +567,7 @@ def _create_order_row(db: Session, order_code: str, order_year: int, payload: di
 
 def create_order(db: Session, payload: dict, user) -> BrewOrder:
     payload = dict(payload)
+    _require_product_selected(payload)
     order_code = payload.pop("order_code")
     order_year = utcnow().year
     if db.execute(select(BrewOrder).where(BrewOrder.order_code == order_code,
@@ -569,6 +594,7 @@ def update_order(db: Session, brew_order_id: str, payload: dict, user) -> BrewOr
         raise NotFoundError("Lệnh nấu không tồn tại.")
     if _has_any_execution(db, brew_order_id):
         raise DomainError("Lệnh nấu đã được thực hiện — không thể sửa.")
+    _require_product_selected(payload)
 
     lines_in = payload.pop("lines", None) or []
     auto_from_bom = payload.pop("auto_from_bom", True)
@@ -693,21 +719,61 @@ def _wo_derived_status(db: Session, brew_order_id: str) -> tuple:
     return is_executed, is_complete, wo_status
 
 
+def _batch_summaries_bulk(db: Session, brew_order_ids: list) -> dict:
+    """Mirror _batch_summaries nhưng lấy 1 lần cho CẢ danh sách order (dùng bởi list_orders) —
+    tránh N+1 query (trước đây 1 SELECT BatchExecution riêng cho MỖI order trong vòng lặp)."""
+    if not brew_order_ids:
+        return {}
+    out = {bid: [] for bid in brew_order_ids}
+    for b in db.execute(select(BatchExecution).where(
+            BatchExecution.order_id.in_(brew_order_ids))).scalars().all():
+        out.setdefault(b.order_id, []).append(b)
+    return out
+
+
+def _wo_derived_status_bulk(db: Session, brew_order_ids: list) -> dict:
+    """Mirror _wo_derived_status nhưng lấy 1 lần cho CẢ danh sách order (dùng bởi list_orders) —
+    tránh N+1 query (trước đây 1 SELECT WorkOrder riêng cho MỖI order trong vòng lặp). Trả
+    {brew_order_id: (is_executed, is_complete, wo_status) | None} — None nếu order đó chưa có
+    Lệnh SX (điều độ) nào, y hệt giá trị _wo_derived_status trả cho từng order riêng lẻ."""
+    if not brew_order_ids:
+        return {}
+    wos_by_order: dict = {}
+    for w in db.execute(select(WorkOrder).where(
+            WorkOrder.brew_order_id.in_(brew_order_ids))).scalars().all():
+        wos_by_order.setdefault(w.brew_order_id, []).append(w)
+    out = {}
+    for bid in brew_order_ids:
+        wos = wos_by_order.get(bid)
+        if not wos:
+            out[bid] = None
+            continue
+        wo_status = _wo_aggregate_status(wos)
+        is_executed = wo_status in (WorkOrderState.IN_PROGRESS.value, WorkOrderState.COMPLETED.value,
+                                    WorkOrderState.CLOSED.value)
+        is_complete = wo_status in (WorkOrderState.COMPLETED.value, WorkOrderState.CLOSED.value)
+        out[bid] = (is_executed, is_complete, wo_status)
+    return out
+
+
 def list_orders(db: Session) -> list:
     orders = db.execute(select(BrewOrder).order_by(BrewOrder.created_at.desc())).scalars().all()
     products = {p.product_id: p for p in db.execute(select(Product)).scalars().all()}
     recipe_versions = {rv.version_id: rv for rv in db.execute(select(RecipeVersion)).scalars().all()}
     recipes = {r.recipe_id: r for r in db.execute(select(Recipe)).scalars().all()}
     beer_types = {bt.beer_type_id: bt for bt in db.execute(select(BeerType)).scalars().all()}
+    order_ids = [o.brew_order_id for o in orders]
+    batches_by_order = _batch_summaries_bulk(db, order_ids)
+    wo_derived_by_order = _wo_derived_status_bulk(db, order_ids)
     out = []
     for o in orders:
-        batches = _batch_summaries(db, o.brew_order_id)
+        batches = batches_by_order.get(o.brew_order_id, [])
         prod = products.get(o.product_id)
         rv = recipe_versions.get(o.recipe_version_id)
         recipe = recipes.get(rv.recipe_id) if rv else None
         beer_type = beer_types.get(recipe.beer_type_id) if recipe else None
         tolerance = o.volume_tolerance_hl
-        wo_derived = _wo_derived_status(db, o.brew_order_id)
+        wo_derived = wo_derived_by_order.get(o.brew_order_id)
         if wo_derived is not None:
             is_executed, is_complete, wo_status = wo_derived
         else:

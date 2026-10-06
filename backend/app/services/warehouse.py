@@ -1981,7 +1981,10 @@ def _oldest_company_lot_candidates(db: Session, material_id: str, as_of=None, ca
     candidates = [l for l in db.execute(
         select(MaterialLot).where(MaterialLot.material_id == material_id, MaterialLot.quantity > 0,
                                   MaterialLot.status.in_([LotStatus.AVAILABLE.value, LotStatus.RELEASED.value]))
-        .order_by(MaterialLot.created_at)
+        # Tie-break bằng lot_id (luôn duy nhất, KHÁC lot_code có thể trùng giữa các năm/kho) khi
+        # created_at trùng tuyệt đối — đảm bảo kết quả FIFO ổn định giữa các lần gọi, không phụ
+        # thuộc thứ tự vật lý không xác định của DB (audit 2026-10-04).
+        .order_by(MaterialLot.created_at, MaterialLot.lot_id)
     ).scalars().all() if loc_matches(l.location)]
     if as_of is not None:
         if cache is not None:
@@ -2021,7 +2024,8 @@ def is_oldest_workshop_lot(db: Session, material_id: str, lot_id: str) -> bool:
     candidates = [l for l in db.execute(
         select(MaterialLot).where(MaterialLot.material_id == material_id, MaterialLot.quantity > 0,
                                   MaterialLot.status.in_([LotStatus.AVAILABLE.value, LotStatus.RELEASED.value]))
-        .order_by(MaterialLot.created_at)
+        # Tie-break bằng lot_id — xem giải thích ở _oldest_company_lot_candidates (mirror).
+        .order_by(MaterialLot.created_at, MaterialLot.lot_id)
     ).scalars().all() if loc_matches(l.location)]
     return bool(candidates) and candidates[0].lot_id == lot_id
 
@@ -2295,7 +2299,8 @@ def fulfill_all_lines(db: Session, request_id: str, user: User,
             select(MaterialLot).where(MaterialLot.material_id == line.material_id,
                                       MaterialLot.quantity > 0,
                                       MaterialLot.status.in_([LotStatus.AVAILABLE.value, LotStatus.RELEASED.value]))
-            .order_by(MaterialLot.created_at)
+            # Tie-break bằng lot_id — xem giải thích ở _oldest_company_lot_candidates (mirror).
+            .order_by(MaterialLot.created_at, MaterialLot.lot_id)
         ).scalars().all() if not _is_workshop_location(c.location)]
         if ts is not None:
             if ts not in asof_cache:
@@ -2576,6 +2581,11 @@ def undo_transfer_px_request(db: Session, request_id: str, user: User) -> dict:
     transfer(db, lot_id_to_revert, req.quantity, "Kho phân xưởng", user,
             reason=f"Hoàn tác điều chuyển {req.request_code}", mode="dieu_chuyen",
             ts=mv.ts if mv else None, reversal_of=mv.movement_id if mv else None)
+    if mv:
+        # Đánh dấu ĐÃ hoàn tác trên chính StockMovement gốc đang bị hoàn tác (mirror
+        # undo_fulfill_line/undo_issue) — trước đây chỉ set req.reversed (bản ghi đề nghị), bỏ sót
+        # cờ này trên StockMovement (audit 2026-10-04).
+        mv.reversed = True
     req.status = "pending"
     req.approved_by = None
     req.approved_at = None
@@ -2790,6 +2800,10 @@ def undo_transfer_kcpx_request(db: Session, request_id: str, user: User) -> dict
                       ts=mv.ts if mv else None, reversal_of=mv.movement_id if mv else None)
     reverted_lot = db.get(MaterialLot, result["lot_id"])
     reverted_lot.workshop_location_id = None
+    if mv:
+        # Đánh dấu ĐÃ hoàn tác trên chính StockMovement gốc — mirror undo_fulfill_line/undo_issue
+        # (audit 2026-10-04, xem giải thích ở undo_transfer_px_request).
+        mv.reversed = True
     req.status = "pending"
     req.approved_by = None
     req.approved_at = None
@@ -3007,6 +3021,10 @@ def undo_sang_ngang(db: Session, request_id: str, user: User) -> dict:
     _transfer_lot(db, lot_id_to_revert, req.quantity, "Kho công ty", user,
                  reason=f"Hoàn tác xuất sang ngang {req.request_code}", mode="sang_ngang",
                  ts=mv.ts if mv else None, reversal_of=mv.movement_id if mv else None)
+    if mv:
+        # Đánh dấu ĐÃ hoàn tác trên chính StockMovement gốc — mirror undo_fulfill_line/undo_issue
+        # (audit 2026-10-04, xem giải thích ở undo_transfer_px_request).
+        mv.reversed = True
     req.status = "pending"
     req.approved_by = None
     req.approved_at = None
@@ -3110,6 +3128,14 @@ def delete_receipt_history(db: Session, user: User) -> dict:
     giao dịch nhập đó."""
     require_role(user, Role.ADMIN)
     rows = db.execute(select(StockMovement).where(StockMovement.movement_type == "receipt")).scalars().all()
+    # Loại trừ các receipt-movement đang bị SangNgangRequest.receipt_movement_id tham chiếu (FK
+    # NOT NULL/enforce trên MSSQL, gán lúc create_sang_ngang và giữ nguyên suốt vòng đời phiếu
+    # pending/approved/rejected) — mirror cách delete_receipt() đơn lẻ đã xử lý: KHÔNG xóa thẳng,
+    # giữ lại các dòng còn bị tham chiếu để không vỡ FK (audit 2026-10-04).
+    referenced_ids = {r[0] for r in db.execute(
+        select(SangNgangRequest.receipt_movement_id).where(
+            SangNgangRequest.receipt_movement_id.isnot(None))).all()}
+    rows = [m for m in rows if m.movement_id not in referenced_ids]
     count = len(rows)
     for m in rows:
         db.delete(m)
@@ -3139,12 +3165,36 @@ def delete_request_history(db: Session, user: User) -> dict:
         # trước khi có cột này) không có request_id nên vẫn dự phòng khớp theo `reason` như trước.
         codes = [req.request_code for req, _ in done]
         xtdn = db.execute(select(StockMovement).where(StockMovement.mode == "xuat_theo_de_nghi")).scalars().all()
-        for m in xtdn:
-            if m.request_id in request_ids or (
-                m.request_id is None and m.reason and
-                any(m.reason.startswith(f"Xuất theo đề nghị {code}") for code in codes)):
+        to_delete = [m for m in xtdn if m.request_id in request_ids or (
+            m.request_id is None and m.reason and
+            any(m.reason.startswith(f"Xuất theo đề nghị {code}") for code in codes))]
+        ids = {m.movement_id for m in to_delete}
+        if ids:
+            # Dọn StockMovement con có reversal_of trỏ ngược tới các dòng này TRƯỚC (tự tham
+            # chiếu stock_movement.reversal_of -> stock_movement.movement_id, mirror
+            # delete_free_issue_history) — VD 1 dòng "xuat_theo_de_nghi" từng fulfill ->
+            # undo_fulfill_line (tạo StockMovement mode="dieu_chuyen" với reversal_of trỏ về
+            # dòng này) -> fulfill lại: giao dịch "Hoàn tác" đó KHÔNG nằm trong `ids` (mode khác
+            # "xuat_theo_de_nghi") nhưng vẫn phải xóa trước, nếu không sẽ vỡ FK (audit 2026-10-04).
+            reversal_children = db.execute(
+                select(StockMovement).where(StockMovement.reversal_of.in_(ids))).scalars().all()
+            child_ids = {m.movement_id for m in reversal_children}
+            for m in reversal_children:
                 db.delete(m)
-        db.flush()
+            db.flush()
+            # Dọn GenealogyEdge.movement_id trỏ tới MỌI dòng sắp xóa (cả `ids` lẫn `child_ids` ở
+            # trên) — _transfer_lot() ghi GenealogyEdge(source_event="transfer", movement_id=
+            # mv.movement_id) mỗi khi giao dịch tách/gộp lô (rất phổ biến cho "xuất theo đề
+            # nghị") — không dọn trước sẽ vỡ FK genealogy_edge.movement_id -> stock_movement.
+            # movement_id trên SQL Server.
+            all_ids = ids | child_ids
+            for e in db.execute(
+                    select(GenealogyEdge).where(GenealogyEdge.movement_id.in_(all_ids))).scalars().all():
+                db.delete(e)
+            db.flush()
+            for m in to_delete:
+                db.delete(m)
+            db.flush()
         for req, lines in done:
             for l in lines:
                 db.delete(l)

@@ -142,6 +142,7 @@ def _make_filter_lot(client, admin_h, suffix, tank_id=None):
     draw = client.post("/api/batch-filter-lots", headers=admin_h, json={
         "filter_lot_code": f"FLOT-{suffix}", "to_bbt": bbt.json()["code"],
         "sources": [{"source_type": "tank", "source_tank_id": tank_id}],
+        "category": "Bia lon",
     })
     assert draw.status_code == 201, draw.text
     return draw.json()["filter_lot_id"], tank_id
@@ -452,6 +453,7 @@ def test_genealogy_diamond_not_mislabeled_as_cycle(client, admin_h):
             {"source_type": "tank", "source_tank_id": tank_id},
             {"source_type": "filter_lot", "source_filter_lot_id": fl1_id, "reason": "test diamond"},
         ],
+        "category": "Bia lon",
     })
     assert fl3.status_code == 201, fl3.text
     fl3_id = fl3.json()["filter_lot_id"]

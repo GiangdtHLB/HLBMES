@@ -73,9 +73,9 @@ def _receive(client, thukho_h, lot_code, material_id, quantity, location="Kho c�
     return r.json()["lot_id"]
 
 
-def _a_brew_order_with_lines(client, admin_h, order_code, mat_id, qty_total):
+def _a_brew_order_with_lines(client, admin_h, order_code, mat_id, qty_total, product_id=None):
     r = client.post("/api/brewing/orders", headers=admin_h, json={
-        "order_code": order_code, "auto_from_bom": False, "planned_volume_hl": 100,
+        "order_code": order_code, "product_id": product_id, "auto_from_bom": False, "planned_volume_hl": 100,
         "lines": [
             {"stt_label": "A", "is_header": True, "material_name": "Nguyên liệu chính"},
             {"stt_label": "1", "material_id": mat_id, "uom": "kg",
@@ -108,10 +108,10 @@ def lager_recipe_version_id(client, admin_h, lager_product_id, lager_beer_type_i
 
 
 
-def test_preview_source_materials_brew_order_skips_header_row(client, admin_h, thukho_h):
+def test_preview_source_materials_brew_order_skips_header_row(client, admin_h, thukho_h, lager_product_id):
     mat_id = _create_material(client, admin_h, "SRC-BREW-MAT")
     _receive(client, thukho_h, "LOT-SRCPRE-01", mat_id, 50)
-    order_id = _a_brew_order_with_lines(client, admin_h, "LN-SRCPRE01", mat_id, qty_total=12.5)
+    order_id = _a_brew_order_with_lines(client, admin_h, "LN-SRCPRE01", mat_id, qty_total=12.5, product_id=lager_product_id)
 
     r = client.get("/api/warehouse/requests/source-preview", headers=admin_h,
                    params={"source_type": "brew_order", "source_id": order_id})
@@ -228,10 +228,10 @@ def test_preview_source_materials_not_found(client, admin_h):
     assert r.status_code == 404, r.text
 
 
-def test_create_request_with_source_stores_and_shows_label(client, admin_h, thukho_h, vanhanh_h):
+def test_create_request_with_source_stores_and_shows_label(client, admin_h, thukho_h, vanhanh_h, lager_product_id):
     mat_id = _create_material(client, admin_h, "SRC-CREATE-MAT")
     _receive(client, thukho_h, "LOT-SRCCREATE-01", mat_id, 50)
-    order_id = _a_brew_order_with_lines(client, admin_h, "LN-SRCCREATE01", mat_id, qty_total=5)
+    order_id = _a_brew_order_with_lines(client, admin_h, "LN-SRCCREATE01", mat_id, qty_total=5, product_id=lager_product_id)
 
     r = client.post("/api/warehouse/requests", headers=vanhanh_h, json={
         "lines": [{"material_id": mat_id, "quantity": 5, "uom": "kg"}],

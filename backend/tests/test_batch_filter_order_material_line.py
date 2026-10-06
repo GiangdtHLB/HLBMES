@@ -248,6 +248,7 @@ def test_delete_filter_order_with_material_lines(client, admin_h, thukho_h):
     tank = _make_tank(client, admin_h, "109", "TANK-FLOML-DEL")
 
     order = client.post("/api/batch-filter-orders", headers=admin_h, json={
+        "category": "Bia lon",
         "order_code": "LOC-FLOML-DEL",
         "sources": [{"source_type": "tank", "source_tank_id": tank["tank_id"], "planned_v_dich_hl": 900}],
         "lines": [{"material_id": mat_id, "uom": "kg", "qty_planned": 30}],

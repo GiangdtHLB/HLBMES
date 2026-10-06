@@ -145,10 +145,16 @@ def _cancel_active_batches(db: Session, wo: WorkOrder, user: User, reason: str =
     đã có kết quả thật, BATCH_TRANSITIONS cũng không cho phép cancel từ 2 trạng thái đó. Tái
     dùng batch_svc.cancel_batch_system (đổi state + hoàn NVL đã cấp qua genealogy, xem
     batches.py::_refund_consumed_materials) — an toàn cho cả mẻ đã cấp liệu/đang chạy vì NVL
-    được hoàn lại đầy đủ, không còn lý do phải chặn hủy khi có mẻ đang dở dang."""
+    được hoàn lại đầy đủ, không còn lý do phải chặn hủy khi có mẻ đang dở dang.
+
+    with_for_update(): khóa MỌI dòng mẻ active NGAY KHI load — cancel_batch_system() nhận batch
+    đã load sẵn, không tự khóa, nên phải khóa ở đây trước khi gọi vào (mirror khóa mẻ đã thêm ở
+    transition() cho nhánh "cancelled" đơn lẻ) để tránh 2 lượt hủy gần như đồng thời (hủy lệnh
+    cha cùng lúc hủy 1 mẻ con riêng lẻ) cùng đọc được 1 tập GenealogyEdge consume CHƯA bị xóa rồi
+    cùng hoàn NVL 2 lần (audit rủi ro 2026-10-04)."""
     active = db.execute(select(BatchExecution).where(
         BatchExecution.work_order_id == wo.wo_id,
-        BatchExecution.state.in_(_BATCH_ACTIVE_STATES))).scalars().all()
+        BatchExecution.state.in_(_BATCH_ACTIVE_STATES)).with_for_update()).scalars().all()
     locked = [b.batch_code for b in active if b.ebr_locked]
     if locked:
         raise DomainError(

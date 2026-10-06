@@ -7,7 +7,7 @@
   đã tiêu thụ trước đó (tránh trừ trùng), tự chọn lô FEFO.
 """
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -104,12 +104,47 @@ def _assert_dispensable(db: Session, batch: BatchExecution) -> None:
                           "cấp liệu cho (các) mẻ đó trước.")
 
 
+# Sentinel "hết hạn xa vô cực" cho lô không khai expiry — đẩy xuống CUỐI hàng đợi FEFO, không
+# phải mốc tính theo utcnow() (không cần "trôi" theo ngày — chỉ cần lớn hơn MỌI expiry thật).
+_FAR_FUTURE_EXPIRY = datetime(9999, 1, 1)
+
+
+def _fefo_sort_key(lot: MaterialLot):
+    """Sort key FEFO (hết hạn trước) rồi FIFO (created_at) rồi `lot_id` — tie-break CUỐI CÙNG ổn
+    định khi 2 lô trùng CẢ `expiry` lẫn `created_at` (Lỗi 2: trước đây không có tie-break phụ,
+    thứ tự giữa 2 lô như vậy phụ thuộc thứ tự trả về không đảm bảo của DB, có thể đổi giữa các
+    lần gọi). DÙNG CHUNG bởi `_fefo_lots()` và `batch_dispense_summary()` (suy luận lại FIFO lịch
+    sử) để đảm bảo CHỈ 1 tiêu chí FEFO/FIFO duy nhất, nhất quán trong toàn module — tránh lệch
+    tiêu chí như trước (batch_dispense_summary từng chỉ `order_by(created_at)`, thiếu `expiry`)."""
+    e = lot.expiry
+    if e is None:
+        e = _FAR_FUTURE_EXPIRY
+    elif e.tzinfo is not None:
+        e = e.replace(tzinfo=None)
+    c = lot.created_at
+    if c is not None and c.tzinfo is not None:
+        c = c.replace(tzinfo=None)
+    return (e, c, lot.lot_id)
+
+
 def _fefo_lots(db: Session, material_code: str) -> list:
-    """Các lô khả dụng (available/released — mirror warehouse.py::stock_on_hand, KHÔNG chỉ
-    "available") của một material_code Ở MỌI KHO, sắp theo FEFO (hết hạn trước) rồi FIFO — nếu
-    `material_code` thực ra là mã 1 Nhóm vật tư thay thế (dòng BOM khai theo nhóm, không có mã
-    vật tư cụ thể — xem bom.py::codes_for_dispense), gộp lô của MỌI thành viên rồi mới sắp
-    chung 1 hàng đợi FEFO (thủ kho xuất mã thành viên nào cũng hợp lệ).
+    """TẤT CẢ lô (MỌI status, kể cả status=CONSUMED/quantity=0 HIỆN TẠI — xem lý do bên dưới) của
+    một material_code Ở MỌI KHO, sắp theo FEFO (hết hạn trước) rồi FIFO rồi `lot_id` (tie-break
+    ổn định, xem `_fefo_sort_key`/Lỗi 2) — nếu `material_code` thực ra là mã 1 Nhóm vật tư thay
+    thế (dòng BOM khai theo nhóm, không có mã vật tư cụ thể — xem bom.py::codes_for_dispense),
+    gộp lô của MỌI thành viên rồi mới sắp chung 1 hàng đợi FEFO (thủ kho xuất mã thành viên nào
+    cũng hợp lệ).
+
+    CỐ Ý KHÔNG lọc theo status/quantity HIỆN TẠI (trước đây có `status.in_([AVAILABLE, RELEASED])
+    AND quantity > 0` ngay ở đây — Lỗi 1/bug "as-of": lọc TRƯỚC khi _workshop_fefo_lots kịp áp
+    `as_of` khiến 1 lô ĐÃ hoàn toàn đúng FEFO tại thời điểm `as_of` nhưng đã bị MẺ KHÁC rút cạn
+    SAU đó (status hiện tại = CONSUMED, quantity hiện tại = 0) bị loại khỏi danh sách ứng viên
+    NGAY TỪ ĐẦU, không bao giờ "sống lại" được dù `lot_on_hand_as_of` xác nhận nó thực sự còn tồn
+    tại đúng lúc `as_of`. Hậu quả: _is_fifo_choice/_workshop_fefo_lots nhảy thẳng sang lô mới hơn
+    rồi gắn `fifo_ok=True` SAI cho lựa chọn đó. Mirror ĐÚNG cách `batch_dispense_summary()` (dòng
+    ~800 vùng lân cận) đã làm — lấy MỌI lô trước, chỉ lọc SAU bằng tồn dựng lại `as_of`, xem
+    _workshop_fefo_lots's `as_of`. Lọc theo HẾT HẠN vẫn giữ nguyên ở đây (không liên quan bug
+    as-of — 1 lô đã hết hạn vật lý thì hết hạn vĩnh viễn, không phụ thuộc thời điểm xét).
 
     CHỈ dùng làm building-block nội bộ cho _workshop_fefo_lots() — không lọc kho nên KHÔNG được
     gọi trực tiếp ở bất kỳ đường cấp liệu/gợi ý thật nào (bug thực tế đã gặp: _plan_consume và
@@ -122,44 +157,44 @@ def _fefo_lots(db: Session, material_code: str) -> list:
     if not material_ids:
         return []
     lots = db.execute(select(MaterialLot).where(
-        MaterialLot.material_id.in_(material_ids),
-        MaterialLot.status.in_([LotStatus.AVAILABLE.value, LotStatus.RELEASED.value]),
-        MaterialLot.quantity > 0)).scalars().all()
+        MaterialLot.material_id.in_(material_ids))).scalars().all()
     lots = [l for l in lots if not _is_expired(l)]
-    # expiry None → cuối hàng đợi (giá trị lớn); cùng expiry → FIFO theo created_at
-    far = utcnow().replace(tzinfo=None) + timedelta(days=36500)
-
-    def key(l):
-        e = l.expiry
-        if e is None:
-            e = far
-        elif e.tzinfo is not None:
-            e = e.replace(tzinfo=None)
-        c = l.created_at
-        if c is not None and c.tzinfo is not None:
-            c = c.replace(tzinfo=None)
-        return (e, c)
-    return sorted(lots, key=key)
+    return sorted(lots, key=_fefo_sort_key)
 
 
 def _workshop_fefo_lots(db: Session, material_code: str, as_of=None) -> list:
     """Như _fefo_lots nhưng chỉ lấy lô ở Kho phân xưởng — nơi NVL thật sự cấp cho mẻ nấu
     (tài liệu §9.0: "nguyên liệu phân bổ vào mẻ nấu ... luôn lấy từ Kho phân xưởng").
 
-    `as_of` (thường là batch.start_at, xem _assert_dispensable): nếu truyền, mỗi lô CHỈ được coi
-    khả dụng tối đa bằng tồn dựng lại tính đến hết thời điểm đó (warehouse.py::lot_on_hand_as_of)
-    — không cho mượn hàng về kho phân xưởng SAU khi mẻ đã bắt đầu nấu (yêu cầu người dùng
-    2026-09-15). Lô nào tồn dựng lại = 0 tại thời điểm đó (chưa về kho lúc mẻ bắt đầu) bị loại
-    hẳn khỏi hàng đợi FEFO của mẻ này. Gắn `asof_cap` tạm lên từng lô còn lại (đọc bởi
-    _effective_qty) = MIN(tồn sống hiện tại, tồn dựng lại tại `as_of`) — vừa không vượt trần lịch
-    sử (hàng mới về sau không tính), vừa không vượt tồn thật hiện có (nếu phần cũ đã bị mẻ khác
-    lấy bớt từ đó tới giờ). Tiêu chí phụ FIFO vẫn theo `created_at` GỐC của lô (ngày nhập đầu
-    tiên, xem _fefo_lots) — xác nhận lại với người dùng 2026-09-15: KHÔNG đổi sang ngày điều
-    chuyển vào phân xưởng, chỉ cần đảm bảo lọc kho đúng (Kho phân xưởng, không lấy sang Kho công
-    ty — đã tự nhiên đúng qua bộ lọc _is_workshop_location bên dưới)."""
+    `as_of` (thường là batch.start_at, xem _assert_dispensable): nếu truyền, 1 lô chỉ còn nằm
+    trong hàng đợi FEFO nếu tồn DỰNG LẠI tính đến hết thời điểm đó
+    (warehouse.py::lot_on_hand_as_of) > 0 — BẤT KỂ status/quantity HIỆN TẠI của lô là gì (Lỗi 1:
+    xem _fefo_lots — trước đây lọc current-status TRƯỚC nên 1 lô đã bị mẻ KHÁC rút cạn SAU
+    `as_of` không bao giờ "sống lại" được, dù thực sự còn tồn tại đúng lúc `as_of`). Gắn 2 giá
+    trị tạm lên từng lô còn lại:
+      - `asof_cap_raw` = tồn dựng lại THUẦN tại `as_of` (KHÔNG clamp theo tồn hiện tại) — đọc bởi
+        `_asof_available`, DÙNG DUY NHẤT để `_is_fifo_choice` xác định đúng thứ tự FEFO LỊCH SỬ
+        (mirror chính xác cách `batch_dispense_summary` suy luận lại FIFO lịch sử — 1 lô dù đã bị
+        mẻ khác rút cạn SAU `as_of` vẫn phải tính là "còn tồn tại as-of" khi xét xem lựa chọn của
+        mẻ này có lệch FEFO hay không).
+      - `asof_cap` = MIN(tồn sống hiện tại, `asof_cap_raw`) — đọc bởi `_effective_qty`, DÙNG CHO
+        THỰC THI/lập kế hoạch cấp liệu thật (_plan_consume) — không cho mượn hàng về kho phân
+        xưởng SAU khi mẻ đã bắt đầu nấu (hàng mới về sau không tính), VÀ không được lấy vượt quá
+        tồn vật lý hiện có thật (nếu phần cũ đã bị mẻ khác lấy bớt từ đó tới giờ — như Lô X ở
+        kịch bản Lỗi 1, vẫn đúng FEFO lịch sử nhưng không còn gì để thực sự cấp nữa, tự nhiên bị
+        bỏ qua khi lập kế hoạch dù vẫn xuất hiện trong hàng đợi để tính fifo_ok).
+    Tiêu chí phụ FIFO vẫn theo `created_at` GỐC của lô (ngày nhập đầu tiên, xem _fefo_lots) — xác
+    nhận lại với người dùng 2026-09-15: KHÔNG đổi sang ngày điều chuyển vào phân xưởng, chỉ cần
+    đảm bảo lọc kho đúng (Kho phân xưởng, không lấy sang Kho công ty — đã tự nhiên đúng qua bộ
+    lọc _is_workshop_location bên dưới)."""
     lots = [l for l in _fefo_lots(db, material_code) if warehouse_svc._is_workshop_location(l.location)]
     if as_of is None:
-        return lots
+        # Không có đường gọi thật nào trong hệ thống truyền None (mọi lời gọi đều có
+        # batch.start_at sau _assert_dispensable) — fallback an toàn mirror "tồn khả dụng HIỆN
+        # TẠI" (status available/released + quantity > 0) mà _fefo_lots trả về TRƯỚC khi sửa Lỗi
+        # 1, tránh vô tình trả lô CONSUMED/quantity=0 cho đường gọi nào đó lỡ không truyền as_of.
+        return [l for l in lots if l.status in (LotStatus.AVAILABLE.value, LotStatus.RELEASED.value)
+               and l.quantity > 0]
     asof_by_lot = {r["lot_id"]: r["quantity"] for r in
                   warehouse_svc.lot_on_hand_as_of(db, as_of, "Kho phân xưởng")}
     out = []
@@ -167,6 +202,7 @@ def _workshop_fefo_lots(db: Session, material_code: str, as_of=None) -> list:
         cap = asof_by_lot.get(l.lot_id, 0.0)
         if cap <= 1e-9:
             continue
+        l.asof_cap_raw = cap
         l.asof_cap = min(l.quantity, cap)
         out.append(l)
     return out
@@ -184,6 +220,20 @@ def _effective_qty(lot: MaterialLot, reserved: dict) -> float:
     return round(total_cap - reserved.get(lot.lot_id, 0.0), 4)
 
 
+def _asof_available(lot: MaterialLot, reserved: dict) -> float:
+    """Tồn "as of" THUẦN (đọc `asof_cap_raw`, KHÔNG clamp theo tồn vật lý HIỆN TẠI của lô) sau
+    khi trừ phần đã giữ chỗ cùng phiếu — DÙNG DUY NHẤT bởi `_is_fifo_choice` để xác định đúng thứ
+    tự FEFO LỊCH SỬ tại thời điểm `as_of` (Lỗi 1: mirror chính xác cách `batch_dispense_summary`
+    suy luận lại FIFO lịch sử — dòng ~800 vùng lân cận — không quan tâm lô đó HIỆN TẠI còn hay đã
+    bị MẺ KHÁC rút cạn SAU `as_of`, vì đó chính xác là tình huống cần phát hiện để gắn
+    `fifo_ok=False` cho lựa chọn lệch FEFO). KHÁC `_effective_qty` (đọc `asof_cap`, dùng cho THỰC
+    THI/lập kế hoạch cấp liệu thật — phải tôn trọng tồn vật lý hiện tại, không được lấy vượt quá
+    cái không còn tồn tại thật nữa)."""
+    cap = getattr(lot, "asof_cap_raw", None)
+    total = lot.quantity if cap is None else cap
+    return round(total - reserved.get(lot.lot_id, 0.0), 4)
+
+
 def _lot_avail_qty(lot: MaterialLot) -> float:
     """Tồn khả dụng của 1 lô cho MỤC ĐÍCH HIỂN THỊ/GỢI Ý (suggest_dispense) — không giữ chỗ
     (reserved) như _effective_qty vì đây chỉ là xem trước từng dòng độc lập. Tôn trọng `asof_cap`
@@ -195,14 +245,20 @@ def _lot_avail_qty(lot: MaterialLot) -> float:
 
 def _is_fifo_choice(db: Session, material_code: str, lot_id: str, reserved: dict, as_of=None) -> bool:
     """1 lô được coi là "đúng FIFO/FEFO" nếu KHÔNG có lô nào xếp TRƯỚC nó (theo FEFO, Kho phân
-    xưởng, cùng giới hạn `as_of` nếu có) mà còn tồn > 0 (SAU khi trừ phần đã giữ chỗ bởi dòng
-    khác cùng phiếu) bị bỏ qua. Lô không nằm trong danh sách FEFO hợp lệ (khác Kho phân xưởng /
-    đã hết hạn / khác vật tư / chưa tồn tại tại `as_of`) luôn coi là lệch."""
+    xưởng, cùng giới hạn `as_of` nếu có) mà còn tồn "as of" > 0 (SAU khi trừ phần đã giữ chỗ bởi
+    dòng khác cùng phiếu) bị bỏ qua. Lô không nằm trong danh sách FEFO hợp lệ (khác Kho phân
+    xưởng / đã hết hạn / khác vật tư / chưa tồn tại tại `as_of`) luôn coi là lệch.
+
+    Dùng `_asof_available` (KHÔNG phải `_effective_qty`) để xét "còn tồn > 0" — Lỗi 1: 1 lô xếp
+    trước nhưng ĐÃ bị mẻ KHÁC rút cạn SAU `as_of` (quantity hiện tại = 0) vẫn phải tính là "còn
+    tồn tại as-of" ở đây, nếu không lựa chọn lô xếp SAU nó sẽ bị gắn `fifo_ok=True` SAI (hệ thống
+    coi như không còn lô nào xếp trước còn hàng, trong khi thực ra CÓ — chỉ là đã bị lấy mất bởi
+    1 mẻ khác, không liên quan gì đến tính đúng-sai FEFO của lựa chọn đang xét)."""
     order = _workshop_fefo_lots(db, material_code, as_of)
     idx = next((i for i, l in enumerate(order) if l.lot_id == lot_id), None)
     if idx is None:
         return False
-    return not any(_effective_qty(l, reserved) > 1e-9 for l in order[:idx])
+    return not any(_asof_available(l, reserved) > 1e-9 for l in order[:idx])
 
 
 def _plan_consume(db: Session, material_code: str, qty: float, picked_lot_id: str = None,
@@ -235,6 +291,7 @@ def _plan_consume(db: Session, material_code: str, qty: float, picked_lot_id: st
             if cap <= 1e-9:
                 raise DomainError(f"Lô {lot.lot_code} chưa tồn tại ở Kho phân xưởng tính đến "
                                   "thời điểm mẻ bắt đầu nấu — không được chọn.")
+            lot.asof_cap_raw = cap
             lot.asof_cap = min(lot.quantity, cap)
         fifo_ok = _is_fifo_choice(db, material_code, lot.lot_id, reserved, as_of)
         if not fifo_ok and not (reason or "").strip():
@@ -789,6 +846,12 @@ def batch_dispense_summary(db: Session, batch_id: str, only_dispensed: bool = Tr
     # dùng 2026-09-18, sau khi tự tay xác minh bằng SQL cho 1 mẻ cụ thể: đúng FIFO thật nhưng hệ
     # thống không hiện được vì thiếu snapshot lúc tiêu thụ). Đánh dấu fifo_computed=True để phân
     # biệt với fifo_ok đã được XÁC NHẬN THẬT lúc cấp liệu (không lẫn 2 mức độ tin cậy khác nhau).
+    #
+    # Lỗi 2 (sửa 2026-10): trước đây `.order_by(MaterialLot.created_at)` — CHỈ FIFO, THIẾU
+    # `expiry` làm tiêu chí ưu tiên — khiến "lô đáng ra là FEFO sớm nhất" suy luận SAI nếu 1 lô
+    # tạo sau nhưng hết hạn SỚM hơn lô tạo trước. Dùng ĐÚNG `_fefo_sort_key` (expiry, created_at,
+    # lot_id) — CÙNG 1 tiêu chí duy nhất với `_fefo_lots`/`_workshop_fefo_lots` (sort ở Python,
+    # không ở SQL, để áp dụng được tie-break `lot_id` và sentinel expiry=None giống hệt).
     if batch.start_at is not None:
         asof_by_lot = None
         for info in lot_info.values():
@@ -797,10 +860,10 @@ def batch_dispense_summary(db: Session, batch_id: str, only_dispensed: bool = Tr
             if asof_by_lot is None:
                 asof_by_lot = {r["lot_id"]: r["quantity"]
                               for r in warehouse_svc.lot_on_hand_as_of(db, batch.start_at, "Kho phân xưởng")}
-            candidates = [l for l in db.execute(
-                select(MaterialLot).where(MaterialLot.material_id == info["material_id"])
-                .order_by(MaterialLot.created_at)).scalars().all()
-                if asof_by_lot.get(l.lot_id, 0.0) > 1e-9]
+            all_lots = db.execute(select(MaterialLot).where(
+                MaterialLot.material_id == info["material_id"])).scalars().all()
+            candidates = [l for l in sorted(all_lots, key=_fefo_sort_key)
+                         if asof_by_lot.get(l.lot_id, 0.0) > 1e-9]
             if not candidates:
                 continue
             info["fifo_ok"] = candidates[0].lot_code in info["lot_codes"]

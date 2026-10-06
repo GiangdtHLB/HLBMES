@@ -159,8 +159,8 @@ def test_bom_preview_flags_shortage_for_huge_batch(client, admin_h, lager_produc
     assert any(l["shortage"] for l in lines), "Số mẻ kế hoạch cực lớn phải bị đánh dấu thiếu tồn"
 
 
-def test_create_order_manual_lines(client, admin_h):
-    order_id = _a_brew_order(client, admin_h, "LN-MANUAL01", auto_from_bom=False, lines=[
+def test_create_order_manual_lines(client, admin_h, lager_product_id):
+    order_id = _a_brew_order(client, admin_h, "LN-MANUAL01", product_id=lager_product_id, auto_from_bom=False, lines=[
         {"stt_label": "A", "is_header": True, "material_name": "Nguyên liệu chính"},
         {"stt_label": "1", "material_name": "Đường Việt Nam", "uom": "Kg",
          "qty_per_batch": 0, "qty_total": 0},
@@ -172,7 +172,7 @@ def test_create_order_manual_lines(client, admin_h):
     assert detail["lines"][1]["material_id"] is None
 
 
-def test_add_batch_requires_valid_order(client, admin_h, lager_recipe_version_id):
+def test_add_batch_requires_valid_order(client, admin_h, lager_product_id, lager_recipe_version_id):
     """order_id bắt buộc tồn tại thật — tạo Mẻ sản xuất (BatchExecution) với order_id giả
     phải báo lỗi nghiệp vụ (404), mirror kiểm tra cũ ở create_brew_record (module Nấu-Lọc-
     Chiết cũ) nay chuyển hẳn sang services/batches.py::create_batch."""
@@ -180,7 +180,7 @@ def test_add_batch_requires_valid_order(client, admin_h, lager_recipe_version_id
                         json={"order_id": "does-not-exist", "recipe_version_id": lager_recipe_version_id})
     assert bogus.status_code == 404, bogus.text
 
-    order_id = _a_brew_order(client, admin_h, "LN-EXEC01", planned_batch_count=1)
+    order_id = _a_brew_order(client, admin_h, "LN-EXEC01", product_id=lager_product_id, planned_batch_count=1)
     ok = client.post("/api/batches", headers=admin_h,
                      json={"order_id": order_id, "recipe_version_id": lager_recipe_version_id,
                            "allow_shortage": True})
@@ -208,8 +208,8 @@ def test_create_order_requires_positive_planned_volume(client, admin_h):
     assert negative_tol.status_code == 409, negative_tol.text
 
 
-def test_order_completes_when_actual_volume_within_tolerance(client, admin_h, lager_recipe_version_id):
-    order_id = _a_brew_order(client, admin_h, "LN-VOL03", planned_volume_hl=100, volume_tolerance_hl=5)
+def test_order_completes_when_actual_volume_within_tolerance(client, admin_h, lager_product_id, lager_recipe_version_id):
+    order_id = _a_brew_order(client, admin_h, "LN-VOL03", product_id=lager_product_id, planned_volume_hl=100, volume_tolerance_hl=5)
 
     _set_real_actual_volume(client, admin_h, order_id, lager_recipe_version_id, 96)
 
@@ -223,8 +223,8 @@ def test_order_completes_when_actual_volume_within_tolerance(client, admin_h, la
     # đổi ở đây — không assert 409 nữa.
 
 
-def test_multiple_batches_accumulate_volume_independently(client, admin_h, lager_recipe_version_id):
-    order_id = _a_brew_order(client, admin_h, "LN-VOL04", planned_volume_hl=100, volume_tolerance_hl=5)
+def test_multiple_batches_accumulate_volume_independently(client, admin_h, lager_product_id, lager_recipe_version_id):
+    order_id = _a_brew_order(client, admin_h, "LN-VOL04", product_id=lager_product_id, planned_volume_hl=100, volume_tolerance_hl=5)
 
     _set_real_actual_volume(client, admin_h, order_id, lager_recipe_version_id, 40)
 
@@ -239,11 +239,11 @@ def test_multiple_batches_accumulate_volume_independently(client, admin_h, lager
     assert detail2["is_complete"] is True
 
 
-def test_order_not_complete_while_any_batch_unfinished(client, admin_h, lager_recipe_version_id):
+def test_order_not_complete_while_any_batch_unfinished(client, admin_h, lager_product_id, lager_recipe_version_id):
     """Sản lượng đã khớp kế hoạch (±sai số) KHÔNG đủ để lệnh hoàn thành — còn mẻ nào chưa
     kết thúc thì lệnh vẫn coi như đang thực hiện; chỉ hoàn thành khi TẤT CẢ mẻ thuộc lệnh
     đã kết thúc (end_at có giá trị)."""
-    order_id = _a_brew_order(client, admin_h, "LN-VOL05", planned_volume_hl=100, volume_tolerance_hl=5)
+    order_id = _a_brew_order(client, admin_h, "LN-VOL05", product_id=lager_product_id, planned_volume_hl=100, volume_tolerance_hl=5)
 
     batch_id = _set_real_actual_volume(client, admin_h, order_id, lager_recipe_version_id, 98, finish=False)
 
@@ -273,11 +273,11 @@ def test_order_not_complete_while_any_batch_unfinished(client, admin_h, lager_re
     assert detail2["is_complete"] is True, "đủ sản lượng VÀ tất cả mẻ đã kết thúc -> hoàn thành"
 
 
-def test_order_completes_when_actual_volume_exceeds_plan(client, admin_h, lager_recipe_version_id):
+def test_order_completes_when_actual_volume_exceeds_plan(client, admin_h, lager_product_id, lager_recipe_version_id):
     """Vượt kế hoạch (dù vượt xa hơn sai số cho phép) vẫn phải coi là hoàn thành — chỉ chặn
     hoàn thành khi HỤT quá sai số, không còn chặn khi VƯỢT (một chiều, khác hành vi cũ
     ±sai số 2 chiều)."""
-    order_id = _a_brew_order(client, admin_h, "LN-VOL06", planned_volume_hl=50, volume_tolerance_hl=5)
+    order_id = _a_brew_order(client, admin_h, "LN-VOL06", product_id=lager_product_id, planned_volume_hl=50, volume_tolerance_hl=5)
 
     _set_real_actual_volume(client, admin_h, order_id, lager_recipe_version_id, 200)
 
@@ -286,9 +286,9 @@ def test_order_completes_when_actual_volume_exceeds_plan(client, admin_h, lager_
     assert detail["is_complete"] is True, "200hl vượt xa 50hl kế hoạch nhưng vẫn phải hoàn thành"
 
 
-def test_order_not_complete_when_shortfall_exceeds_tolerance(client, admin_h, lager_recipe_version_id):
+def test_order_not_complete_when_shortfall_exceeds_tolerance(client, admin_h, lager_product_id, lager_recipe_version_id):
     """Hụt quá sai số cho phép (dưới kế hoạch - sai số) vẫn phải chặn hoàn thành như cũ."""
-    order_id = _a_brew_order(client, admin_h, "LN-VOL07", planned_volume_hl=50, volume_tolerance_hl=5)
+    order_id = _a_brew_order(client, admin_h, "LN-VOL07", product_id=lager_product_id, planned_volume_hl=50, volume_tolerance_hl=5)
 
     _set_real_actual_volume(client, admin_h, order_id, lager_recipe_version_id, 40)
 
@@ -297,8 +297,8 @@ def test_order_not_complete_when_shortfall_exceeds_tolerance(client, admin_h, la
     assert detail["is_complete"] is False, "40hl hụt hơn 5hl sai số so với 50hl kế hoạch -> chưa hoàn thành"
 
 
-def test_delete_order_blocked_once_executed(client, admin_h, lager_recipe_version_id):
-    order_id = _a_brew_order(client, admin_h, "LN-DEL01", planned_batch_count=1)
+def test_delete_order_blocked_once_executed(client, admin_h, lager_product_id, lager_recipe_version_id):
+    order_id = _a_brew_order(client, admin_h, "LN-DEL01", product_id=lager_product_id, planned_batch_count=1)
     deletable = client.delete(f"/api/brewing/orders/{order_id}", headers=admin_h)
     assert deletable.status_code == 204, deletable.text
     # Xác nhận đã xóa THẬT trong DB (không chỉ status 204) — bug thực tế đã gặp: thiếu
@@ -307,7 +307,7 @@ def test_delete_order_blocked_once_executed(client, admin_h, lager_recipe_versio
     gone = client.get(f"/api/brewing/orders/{order_id}", headers=admin_h)
     assert gone.status_code == 404, gone.text
 
-    order_id2 = _a_brew_order(client, admin_h, "LN-DEL02", planned_batch_count=1)
+    order_id2 = _a_brew_order(client, admin_h, "LN-DEL02", product_id=lager_product_id, planned_batch_count=1)
     used = client.post("/api/batches", headers=admin_h,
                        json={"order_id": order_id2, "recipe_version_id": lager_recipe_version_id,
                              "allow_shortage": True})
@@ -353,13 +353,13 @@ def test_update_order_blocked_once_executed(client, admin_h, lager_product_id, l
     assert blocked.status_code == 409, blocked.text
 
 
-def test_create_order_blocked_when_shortage(client, admin_h):
+def test_create_order_blocked_when_shortage(client, admin_h, lager_product_id):
     """Thiếu tồn (tổng 2 kho) thì CHẶN HẲN việc tạo lệnh nấu, không cho lưu bất kỳ dòng nào —
     khác trước đây (chỉ cảnh báo cờ "shortage" ở preview/get_order rồi vẫn cho lưu), mirror
     Lệnh lọc (xem services/brew_order.py::_assert_no_shortage)."""
     before = client.get("/api/brewing/orders", headers=admin_h).json()
     r = client.post("/api/brewing/orders", headers=admin_h, json={
-        "order_code": "LN-SHORT01", "product_id": None,
+        "order_code": "LN-SHORT01", "product_id": lager_product_id,
         "planned_batch_count": 1, "planned_volume_hl": 100.0, "volume_tolerance_hl": 0.0,
         "auto_from_bom": False, "lines": [
             {"material_name": "Vật tư không đủ", "uom": "kg", "qty_total": 999999999},
@@ -372,12 +372,12 @@ def test_create_order_blocked_when_shortage(client, admin_h):
     assert len(after) == len(before), "Lệnh thiếu tồn bị chặn thì không được tạo ra bất kỳ lệnh nào"
 
 
-def test_create_and_update_order_admin_fields_roundtrip(client, admin_h):
+def test_create_and_update_order_admin_fields_roundtrip(client, admin_h, lager_product_id):
     """7 field hành chính (mirror ProductionOrder) phải lưu/đọc lại đúng qua create/update/get —
     trước đây các field này chỉ tồn tại trên BrewMasterOrder (lệnh nấu lớn), giờ nằm thẳng trên
     BrewOrder sau khi bỏ lớp lồng "lệnh nấu nhỏ"."""
     r = client.post("/api/brewing/orders", headers=admin_h, json={
-        "order_code": "LN-ADMIN01", "auto_from_bom": False, "planned_volume_hl": 100.0,
+        "order_code": "LN-ADMIN01", "product_id": lager_product_id, "auto_from_bom": False, "planned_volume_hl": 100.0,
         "issued_by": "Người ra lệnh test", "executor_unit": "Phân xưởng bia Đông Mai",
         "warehouse_keeper": "Thủ kho test", "reference_note": "Căn cứ kế hoạch sản xuất",
         "safety_note": "Đeo bảo hộ đầy đủ",
@@ -392,7 +392,7 @@ def test_create_and_update_order_admin_fields_roundtrip(client, admin_h):
     assert detail["safety_note"] == "Đeo bảo hộ đầy đủ"
 
     updated = client.put(f"/api/brewing/orders/{order_id}", headers=admin_h, json={
-        "order_code": "LN-ADMIN01", "auto_from_bom": False, "planned_volume_hl": 100.0,
+        "order_code": "LN-ADMIN01", "product_id": lager_product_id, "auto_from_bom": False, "planned_volume_hl": 100.0,
         "issued_by": "Người ra lệnh mới", "executor_unit": "Phân xưởng bia Đông Mai",
         "warehouse_keeper": "Thủ kho test", "reference_note": "Căn cứ kế hoạch sản xuất",
         "safety_note": "An toàn mới",

@@ -94,7 +94,8 @@ def _make_filter_lot(client, admin_h, suffix):
     assert bbt.status_code == 201, bbt.text
     draw = client.post("/api/batch-filter-lots", headers=admin_h, json={
         "filter_lot_code": f"FLOT-{suffix}", "to_bbt": bbt.json()["code"],
-        "sources": [{"source_type": "tank", "source_tank_id": tank.json()["tank_id"]}]})
+        "sources": [{"source_type": "tank", "source_tank_id": tank.json()["tank_id"]}],
+        "category": "Bia lon"})
     assert draw.status_code == 201, draw.text
     return draw.json()["filter_lot_id"]
 

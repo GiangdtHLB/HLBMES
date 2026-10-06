@@ -191,6 +191,7 @@ def test_draw_blend_finish_and_split_pack_lots(client, admin_h):
         "filter_lot_code": "FLOT-PIPE-01", "to_bbt": _make_bbt_line(client, admin_h, "PIPE01"),
         "sources": [{"source_type": "tank", "source_tank_id": tank1["tank_id"]},
                     {"source_type": "tank", "source_tank_id": tank2["tank_id"]}],
+        "category": "Bia lon",
     })
     assert draw.status_code == 201, draw.text
     filter_lot_id = draw.json()["filter_lot_id"]
@@ -255,6 +256,7 @@ def test_refilter_chain_and_source_delete_guard(client, admin_h):
     draw1 = client.post("/api/batch-filter-lots", headers=admin_h, json={
         "filter_lot_code": "FLOT-PIPE-02", "to_bbt": _make_bbt_line(client, admin_h, "PIPE02"),
         "sources": [{"source_type": "tank", "source_tank_id": tank1["tank_id"]}],
+        "category": "Bia lon",
     })
     assert draw1.status_code == 201, draw1.text
     fl1_id = draw1.json()["filter_lot_id"]
@@ -264,6 +266,7 @@ def test_refilter_chain_and_source_delete_guard(client, admin_h):
     missing_reason = client.post("/api/batch-filter-lots", headers=admin_h, json={
         "filter_lot_code": "FLOT-PIPE-03-BAD", "to_bbt": _make_bbt_line(client, admin_h, "PIPE03BAD"),
         "sources": [{"source_type": "filter_lot", "source_filter_lot_id": fl1_id}],
+        "category": "Bia lon",
     })
     assert missing_reason.status_code == 409, missing_reason.text
 
@@ -271,6 +274,7 @@ def test_refilter_chain_and_source_delete_guard(client, admin_h):
         "filter_lot_code": "FLOT-PIPE-03", "to_bbt": _make_bbt_line(client, admin_h, "PIPE03"),
         "sources": [{"source_type": "filter_lot", "source_filter_lot_id": fl1_id,
                     "reason": "Lọc lại do chưa đạt độ trong"}],
+        "category": "Bia lon",
     })
     assert draw2.status_code == 201, draw2.text
     fl2_id = draw2.json()["filter_lot_id"]
@@ -304,6 +308,7 @@ def test_filter_lot_and_pack_lot_qc_gate(client, admin_h):
     draw = client.post("/api/batch-filter-lots", headers=admin_h, json={
         "filter_lot_code": "FLOT-PIPE-QC", "to_bbt": _make_bbt_line(client, admin_h, "PIPEQC"),
         "sources": [{"source_type": "tank", "source_tank_id": tank1["tank_id"]}],
+        "category": "Bia lon",
     })
     filter_lot_id = draw.json()["filter_lot_id"]
     s = client.get(f"/api/batch-filter-lots/{filter_lot_id}/sources", headers=admin_h).json()[0]
@@ -364,6 +369,7 @@ def test_pack_lot_status_dang_chiet_1_phan_chiet_het(client, admin_h):
     draw = client.post("/api/batch-filter-lots", headers=admin_h, json={
         "filter_lot_code": "FLOT-PSTATUS-01", "to_bbt": _make_bbt_line(client, admin_h, "PSTATUS01"),
         "sources": [{"source_type": "tank", "source_tank_id": tank1["tank_id"]}],
+        "category": "Bia lon",
     })
     assert draw.status_code == 201, draw.text
     filter_lot_id = draw.json()["filter_lot_id"]

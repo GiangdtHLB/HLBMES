@@ -797,7 +797,8 @@ VIEWS.dashboard = async function () {
       gridOpen = true;
       lastFermentProduct = it.product;
     }
-    fermentGridHtml += `<div style="position:relative;background:${FERMENT_STAGE_BG[it.stage]};border-radius:6px;padding:6px 8px;text-align:center">
+    fermentGridHtml += `<div data-gototank="${esc(it.tankId)}" title="Bấm để xem chi tiết tank này ở Lô lên men"
+      style="position:relative;background:${FERMENT_STAGE_BG[it.stage]};border-radius:6px;padding:6px 8px;text-align:center;cursor:pointer">
       ${fermentQcBadge(it.qcFail, "position:absolute;top:-6px;right:-6px", it.tankId, it.productId)}
       <div style="font-size:12px;font-weight:700;color:${FERMENT_STAGE_FG[it.stage]}">${esc(it.tank)}</div>
       <div style="font-size:10px;color:var(--muted)">${it.days}/${it.std} ngày${it.filtering ? ` · <span title="${esc(it.filteringLabel)} — chưa rút hết dịch">🧪</span>` : ""}</div>
@@ -898,11 +899,15 @@ VIEWS.dashboard = async function () {
     };
   }
   document.querySelectorAll("#view-dashboard [data-fermqc]").forEach(el => {
-    el.onclick = () => {
+    el.onclick = (ev) => {
+      ev.stopPropagation();
       const [tankId] = el.dataset.fermqc.split("|");
       const it = fermentTankItems.find(x => x.tankId === tankId);
       openFermentQcFailModal(tankId, "batch_tank", it ? it.tank : tankId);
     };
+  });
+  document.querySelectorAll("#view-dashboard [data-gototank]").forEach(el => {
+    el.onclick = () => gotoBatchTank(el.dataset.gototank);
   });
   wireAuditDetail();
   $("db_chiet_apply").onclick = () => {
@@ -2390,9 +2395,10 @@ VIEWS.batches = async function () {
 };
 function tableBatches(batches, clickable, woById, tableId, tankByBatchId) {
   const tankLabel = tankByBatchId || {};
-  return `<table${tableId ? ` id="${tableId}"` : ""}><thead><tr><th>Mã mẻ Braumat</th><th>Mã WO</th><th>Tank lên men</th><th>Trạng thái</th><th>Chất lượng</th><th>KH</th><th>Thực tế</th></tr></thead>
+  return `<table${tableId ? ` id="${tableId}"` : ""}><thead><tr><th>Mã mẻ Braumat</th><th>Ngày nấu</th><th>Mã WO</th><th>Tank lên men</th><th>Trạng thái</th><th>Chất lượng</th><th>KH</th><th>Thực tế</th></tr></thead>
     <tbody>${batches.map(b => `<tr ${clickable ? `data-batch="${b.batch_id}" style="cursor:pointer"` : ""}>
       <td><code class="k">${esc(b.batch_code)}</code></td>
+      <td class="muted">${fmt(b.start_at)}</td>
       <td class="muted">${(woById && woById[b.work_order_id]) ? esc(woById[b.work_order_id].wo_code) : "—"}</td>
       <td class="muted">${tankLabel[b.batch_id] ? esc(tankLabel[b.batch_id]) : "—"}</td>
       <td>${badge(b.state)}</td>
