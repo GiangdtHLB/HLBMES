@@ -2468,13 +2468,9 @@ async function showBatch(id) {
       <dt>Trạng thái</dt><dd>${badge(b.state)} ${transBtns}</dd>
       <dt>Chất lượng</dt><dd>${badge(b.quality_status)}</dd>
       ${woCode ? `<dt>Lệnh SX (điều độ)</dt><dd><code class="k">${esc(woCode)}</code></dd>` : ""}
-      <dt>Dây chuyền nấu</dt><dd><select id="bd_line" style="width:auto" ${lkDis}>${bLineOptsDetail}</select>
-        <button class="btn sm" id="bd_line_save" ${lkDis}>Lưu</button>
-        <span class="muted" style="font-size:12px;white-space:nowrap;margin-left:6px">${lineAudit ? _flAuditText(lineAudit.actor, lineAudit.ts) : ""}</span></dd>
+      <dt>Dây chuyền nấu</dt><dd id="bd_line_wrap"></dd>
       <dt>Recipe snapshot</dt><dd>v${snap.version_no ?? "?"} (bất biến) · ${(snap.parameters || []).length} tham số · ${(snap.quality_checks || []).length} QC</dd>
-      <dt>SL kế hoạch/thực tế</dt><dd>${b.planned_qty} / <input type="number" id="bd_actual" value="${b.actual_qty ?? ""}" placeholder="chưa nhập" style="width:90px" ${lkDis}/> ${esc(b.uom)}
-        <button class="btn sm" id="bd_actual_save" ${lkDis}>Lưu</button>
-        <span class="muted" style="font-size:12px;white-space:nowrap;margin-left:6px">${actualAudit ? _flAuditText(actualAudit.actor, actualAudit.ts) : ""}</span></dd>
+      <dt>SL kế hoạch/thực tế</dt><dd>${b.planned_qty} ${esc(b.uom)} / <span id="bd_actual_wrap"></span></dd>
       <dt>Bắt đầu</dt><dd id="bd_start_wrap"></dd>
       <dt>Kết thúc</dt><dd id="bd_end_wrap"></dd>
     </dl>
@@ -2552,16 +2548,40 @@ async function showBatch(id) {
     }
     await POST(`/batches/${id}/transition`, { target: x.dataset.bt }); toast("→ " + x.dataset.bt); render("batches");
   }));
-  $("bd_line_save").onclick = () => guard(async () => {
-    await POST(`/batches/${id}/brewhouse-line`, { brewhouse_line_id: $("bd_line").value || null });
-    toast("Đã lưu Dây chuyền nấu"); showBatch(id);
-  });
-  $("bd_actual_save").onclick = () => guard(async () => {
-    const v = parseFloat($("bd_actual").value);
-    if (!Number.isFinite(v) || v < 0) throw new Error("Nhập SL thực tế hợp lệ (>= 0).");
-    await POST(`/batches/${id}/actual-qty`, { actual_qty: v });
-    toast("Đã lưu SL thực tế"); showBatch(id);
-  });
+  // Dây chuyền nấu/SL thực tế — mặc định hiện chữ + nút Sửa bật ô chọn/nhập riêng, mirror đúng
+  // Bắt đầu/Kết thúc bên dưới (yêu cầu người dùng 2026-10-06: "còn dây chuyền nấu và số lượng
+  // thực tế chưa có" — trước đây 2 trường này luôn hiện sẵn select/input, không toggle).
+  let editingLine = !b.brewhouse_line_id, editingActual = b.actual_qty == null;
+  function renderBdLine() {
+    const lineName = b.brewhouse_line_id ? allBrewLinesDetail.find(l => l.line_id === b.brewhouse_line_id) : null;
+    $("bd_line_wrap").innerHTML = editingLine
+      ? `<select id="bd_line" style="width:auto" ${lkDis}>${bLineOptsDetail}</select>
+         <button class="btn sm" id="bd_line_save" ${lkDis}>Lưu</button>`
+      : `${lineName ? esc(lineName.name) : '<span class="muted">chưa chọn</span>'}
+         <span class="muted" style="font-size:12px;white-space:nowrap">${lineAudit ? " — " + _flAuditText(lineAudit.actor, lineAudit.ts) : ""}</span>
+         ${lkDis ? "" : `<button class="btn sm sec" id="bd_line_edit">Sửa</button>`}`;
+    if ($("bd_line_edit")) $("bd_line_edit").onclick = () => { editingLine = true; renderBdLine(); };
+    if ($("bd_line_save")) $("bd_line_save").onclick = () => guard(async () => {
+      await POST(`/batches/${id}/brewhouse-line`, { brewhouse_line_id: $("bd_line").value || null });
+      toast("Đã lưu Dây chuyền nấu"); showBatch(id);
+    });
+  }
+  function renderBdActual() {
+    $("bd_actual_wrap").innerHTML = editingActual
+      ? `<input type="number" id="bd_actual" value="${b.actual_qty ?? ""}" placeholder="chưa nhập" style="width:90px" ${lkDis}/> ${esc(b.uom)}
+         <button class="btn sm" id="bd_actual_save" ${lkDis}>Lưu</button>`
+      : `${b.actual_qty ?? "—"} ${esc(b.uom)}
+         <span class="muted" style="font-size:12px;white-space:nowrap">${actualAudit ? " — " + _flAuditText(actualAudit.actor, actualAudit.ts) : ""}</span>
+         ${lkDis ? "" : `<button class="btn sm sec" id="bd_actual_edit">Sửa</button>`}`;
+    if ($("bd_actual_edit")) $("bd_actual_edit").onclick = () => { editingActual = true; renderBdActual(); };
+    if ($("bd_actual_save")) $("bd_actual_save").onclick = () => guard(async () => {
+      const v = parseFloat($("bd_actual").value);
+      if (!Number.isFinite(v) || v < 0) throw new Error("Nhập SL thực tế hợp lệ (>= 0).");
+      await POST(`/batches/${id}/actual-qty`, { actual_qty: v });
+      toast("Đã lưu SL thực tế"); showBatch(id);
+    });
+  }
+  renderBdLine(); renderBdActual();
   // Bắt đầu/Kết thúc — mặc định hiện chữ (24h qua fmt(), như tank lên men) + nút Sửa bật ô nhập
   // riêng từng mốc (yêu cầu người dùng 2026-09-17), thay vì luôn hiện sẵn 2 ô nhập gốc trình
   // duyệt (AM/PM tùy máy) + 1 nút Lưu chung như trước. Vẫn giữ đúng validate "kết thúc phải sau
@@ -2582,6 +2602,11 @@ async function showBatch(id) {
       if (!v) throw new Error("Nhập giờ bắt đầu.");
       if (b.end_at && v >= new Date(b.end_at)) throw new Error("Giờ bắt đầu phải trước giờ kết thúc.");
       await POST(`/batches/${id}/start`, { start_at: v.toISOString() });
+      // Cột "Ngày nấu" ở Danh sách mẻ (tableBatches) lấy đúng start_at này — cập nhật ngay tại
+      // dòng tương ứng, không đợi tải lại cả danh sách (yêu cầu người dùng 2026-10-06: "ngày nấu
+      // lấy theo ngày bắt đầu này").
+      const row = document.querySelector(`[data-batch="${id}"]`);
+      if (row && row.children[1]) row.children[1].textContent = fmt(v);
       toast("Đã lưu giờ bắt đầu"); showBatch(id);
     });
   }
@@ -4626,7 +4651,8 @@ function materialUsageSectionHtml(prefix, usage, locked, endedAt) {
         <td>${fifoBadgeHtml(u.fifo_ok)}</td>
         <td class="muted">${esc(u.reason || "—")}</td>
         <td>${u.quantity}</td><td>${esc(u.uom)}</td>
-        <td>${locked ? "" : `<button class="btn sm sec" data-delmatusage="${esc(u.usage_id)}">Xóa</button>`}</td></tr>`).join("") ||
+        <td style="white-space:nowrap">${locked ? "" : `<button class="btn sm sec" data-editmatusage="${esc(u.usage_id)}" data-curqty="${u.quantity}">Sửa</button>
+          <button class="btn sm sec" data-delmatusage="${esc(u.usage_id)}">Xóa</button>`}</td></tr>`).join("") ||
         `<tr><td colspan=10 class="muted">Chưa ghi nguyên liệu nào cho lô này.</td></tr>`}</tbody>
     </table></div>
     ${locked ? '<div class="muted" style="margin-top:6px">🔒 Hồ sơ EBR đã khóa — không thêm/sửa/xóa được nữa.</div>' :
@@ -4646,9 +4672,27 @@ function materialUsageSectionHtml(prefix, usage, locked, endedAt) {
     <div id="${prefix}_suggest" class="muted" style="margin-top:6px"></div>`}`;
 }
 function wireMaterialUsageSection(prefix, lots, materials, opts) {
+  // Nút Sửa/Xóa từng dòng render độc lập với form "+ Thêm" (chỉ cần chưa khóa — xem
+  // materialUsageSectionHtml), nên phải wire TRƯỚC guard bên dưới — nếu không, 1 lô có dòng NVL
+  // đã ghi từ trước nhưng hiện thiếu "Ngày cấp" (endedAt — VD do sửa lại sau khi đã thêm NVL) sẽ
+  // khiến Sửa/Xóa hiện nút nhưng bấm không có phản ứng gì (tìm thấy 2026-10-06 khi thêm nút Sửa).
+  document.querySelectorAll("[data-delmatusage]").forEach(b => b.onclick = () => guard(async () => {
+    if (!confirm("Xóa dòng nguyên liệu đã ghi cho lô này? Không thể hoàn tác.")) return;
+    await DELETE(`${opts.deleteBaseUrl}/${b.dataset.delmatusage}`);
+    toast("Đã xóa"); opts.onChange();
+  }));
+  document.querySelectorAll("[data-editmatusage]").forEach(b => b.onclick = () => guard(async () => {
+    const cur = b.dataset.curqty;
+    const val = prompt(`Sửa số lượng (hiện tại: ${cur}):`, cur);
+    if (val === null) return;
+    const qty = parseFloat(val);
+    if (!qty || qty <= 0) throw new Error("Số lượng phải > 0.");
+    await PUT(`${opts.deleteBaseUrl}/${b.dataset.editmatusage}`, { quantity: qty });
+    toast("Đã sửa số lượng"); opts.onChange();
+  }));
   // Hồ sơ đã khóa HOẶC chưa có "Ngày cấp" (endedAt) -> materialUsageSectionHtml không render
-  // form "+ Thêm" (xem đó) — không có gì để wire (2026-09-02, audit "Mẻ sản xuất": trước đây
-  // HTML vẫn luôn render form dù đã khóa, chỉ bị chặn SAU KHI bấm Lưu bằng lỗi 409 từ server).
+  // form "+ Thêm" (xem đó) — không có gì thêm để wire (2026-09-02, audit "Mẻ sản xuất": trước
+  // đây HTML vẫn luôn render form dù đã khóa, chỉ bị chặn SAU KHI bấm Lưu bằng lỗi 409 từ server).
   if (!$(`${prefix}_add`)) return;
   const matById = Object.fromEntries(materials.map(m => [m.material_id, m]));
   const workshopLots = sortLotsFifo(lots.filter(l => l.quantity > 0 && l.status !== "on_hold" && /phân xưởng/i.test(l.location || "")));
@@ -4720,11 +4764,6 @@ function wireMaterialUsageSection(prefix, lots, materials, opts) {
     toast("Đã thêm nguyên liệu — đã trừ tồn Kho phân xưởng");
     opts.onChange();
   });
-  document.querySelectorAll("[data-delmatusage]").forEach(b => b.onclick = () => guard(async () => {
-    if (!confirm("Xóa dòng nguyên liệu đã ghi cho lô này? Không thể hoàn tác.")) return;
-    await DELETE(`${opts.deleteBaseUrl}/${b.dataset.delmatusage}`);
-    toast("Đã xóa"); opts.onChange();
-  }));
   // Trả ra pickMaterial() để nơi gọi (VD nút gợi ý vật tư từ lệnh lọc) điền sẵn vật tư + SL vào
   // form mà không cần thao tác chuột qua wireSearchableSelect (yêu cầu người dùng 2026-09-16,
   // thay thế cơ chế điền tay cũ dựa vào các field lot/tên tự do đã bỏ).
