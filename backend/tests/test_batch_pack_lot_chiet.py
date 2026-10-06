@@ -90,6 +90,11 @@ def _make_finished_product(client, admin_h, suffix):
     return r.json()["finished_product_id"]
 
 
+def _lot_id_by_code(client, admin_h, lot_code):
+    lots = client.get("/api/lots", headers=admin_h).json()
+    return next(l for l in lots if l["lot_code"] == lot_code)
+
+
 def _finish_source(client, admin_h, source, dich_nha_hl, nuoc_bai_khi_hl=0):
     """1 mẻ lọc tự có sẵn 1 khoản rút (draw) cho MỖI nguồn ngay lúc tạo lô lọc — "Kết thúc" tức
     là kết thúc mẻ đó, khai V dịch nha cho khoản rút của nguồn này. `source` là dict trả về từ
@@ -307,10 +312,78 @@ def test_pack_lot_material_usage_add_list_delete(client, admin_h):
     assert delr.status_code == 204, delr.text
 
 
-def test_pack_lot_material_delete_blocked_after_kcs_approve(client, admin_h):
-    """Sau khi KCS duyệt lô thành phẩm (approved=True), không thể xóa/hoàn NVL đã dùng nữa —
-    xóa lúc đó sẽ nói ngược "chưa từng dùng NVL này" cho 1 lô đã được ký duyệt chính thức
-    (yêu cầu người dùng 2026-09-21: "đã dùng rồi thì không thể xóa, hoàn tác, hay sửa")."""
+def test_update_pack_lot_material_qty_adjusts_stock_both_directions(client, admin_h):
+    """Nút "Sửa" — đổi số lượng 1 dòng NVL đã dùng cho lô thành phẩm, giữ nguyên lô đã chọn, tồn
+    kho phân xưởng điều chỉnh đúng theo chênh lệch cả khi tăng lẫn giảm (yêu cầu người dùng
+    2026-10-06: "thêm nút sửa, cho sửa số lượng")."""
+    _batch, _tank_id, filter_lot_id, to_bbt = _build_approved_filter_lot(client, admin_h, "MATUPD")
+    fp_id = _make_finished_product(client, admin_h, "CHIETMATUPD")
+    pack = client.post("/api/batch-pack-lots", headers=admin_h,
+                       json={"from_bbt": to_bbt, "qty": 200, "pack_lot_code": "PKG-CHIET-MATUPD", "lot_no": "LOT-CHIET-MATUPD",
+                             "finished_product_id": fp_id, "line": "CL01"})
+    assert pack.status_code == 201, pack.text
+    pack_lot_id = pack.json()["pack_lot_id"]
+
+    mat = client.post("/api/materials", headers=admin_h,
+                      json={"code": "MAT-MATUPD", "name": "CO2 test sửa", "uom": "kg"})
+    material_id = mat.json()["material_id"]
+    recv = client.post("/api/warehouse/receive", headers=admin_h,
+                       json={"lot_code": "LOT-MATUPD-PX", "material_id": material_id,
+                             "quantity": 20, "uom": "kg", "location": "Kho phân xưởng"})
+    assert recv.status_code == 200, recv.text
+    upd = client.put(f"/api/batch-pack-lots/{pack_lot_id}/shifts", headers=admin_h,
+                     json={"ca1_qty": 200, "ca1_end_at": utcnow().isoformat()})
+    assert upd.status_code == 200, upd.text
+    add = client.post(f"/api/batch-pack-lots/{pack_lot_id}/materials", headers=admin_h,
+                      json={"material_id": material_id, "quantity": 5})
+    assert add.status_code == 201, add.text
+    usage_id = add.json()[0]["usage_id"]
+    assert _lot_id_by_code(client, admin_h, "LOT-MATUPD-PX")["quantity"] == 15
+
+    inc = client.put(f"/api/batch-pack-lots/materials/{usage_id}", headers=admin_h, json={"quantity": 9})
+    assert inc.status_code == 200, inc.text
+    assert inc.json()["quantity"] == 9
+    assert _lot_id_by_code(client, admin_h, "LOT-MATUPD-PX")["quantity"] == 11
+
+    dec = client.put(f"/api/batch-pack-lots/materials/{usage_id}", headers=admin_h, json={"quantity": 2})
+    assert dec.status_code == 200, dec.text
+    assert dec.json()["quantity"] == 2
+    assert _lot_id_by_code(client, admin_h, "LOT-MATUPD-PX")["quantity"] == 18
+
+
+def test_update_pack_lot_material_qty_insufficient_stock_blocked(client, admin_h):
+    _batch, _tank_id, filter_lot_id, to_bbt = _build_approved_filter_lot(client, admin_h, "MATUPDSHORT")
+    fp_id = _make_finished_product(client, admin_h, "CHIETMATUPDSHORT")
+    pack = client.post("/api/batch-pack-lots", headers=admin_h,
+                       json={"from_bbt": to_bbt, "qty": 200, "pack_lot_code": "PKG-CHIET-MATUPDSHORT",
+                             "lot_no": "LOT-CHIET-MATUPDSHORT", "finished_product_id": fp_id, "line": "CL01"})
+    assert pack.status_code == 201, pack.text
+    pack_lot_id = pack.json()["pack_lot_id"]
+
+    mat = client.post("/api/materials", headers=admin_h,
+                      json={"code": "MAT-MATUPDSHORT", "name": "CO2 test sửa thiếu", "uom": "kg"})
+    material_id = mat.json()["material_id"]
+    recv = client.post("/api/warehouse/receive", headers=admin_h,
+                       json={"lot_code": "LOT-MATUPDSHORT-PX", "material_id": material_id,
+                             "quantity": 10, "uom": "kg", "location": "Kho phân xưởng"})
+    assert recv.status_code == 200, recv.text
+    upd = client.put(f"/api/batch-pack-lots/{pack_lot_id}/shifts", headers=admin_h,
+                     json={"ca1_qty": 200, "ca1_end_at": utcnow().isoformat()})
+    assert upd.status_code == 200, upd.text
+    add = client.post(f"/api/batch-pack-lots/{pack_lot_id}/materials", headers=admin_h,
+                      json={"material_id": material_id, "quantity": 6})
+    assert add.status_code == 201, add.text
+    usage_id = add.json()[0]["usage_id"]
+
+    blocked = client.put(f"/api/batch-pack-lots/materials/{usage_id}", headers=admin_h, json={"quantity": 15})
+    assert blocked.status_code == 409, blocked.text
+    assert _lot_id_by_code(client, admin_h, "LOT-MATUPDSHORT-PX")["quantity"] == 4
+
+
+def test_pack_lot_material_delete_allowed_after_kcs_approve_blocked_after_ebr_lock(client, admin_h):
+    """KCS duyệt lô thành phẩm (approved=True) KHÔNG còn chặn xóa/sửa NVL nữa — chỉ hồ sơ EBR
+    đã PHÊ DUYỆT & KHÓA (locked) mới chặn (đổi từ quy tắc cũ 2026-09-21, theo yêu cầu người dùng
+    2026-10-06: "cho phép sửa khi KCS duyệt, chỉ không được sửa khi đã phê duyệt và khóa hồ sơ")."""
     _batch, _tank_id, filter_lot_id, to_bbt = _build_approved_filter_lot(client, admin_h, "MATDEL")
     fp_id = _make_finished_product(client, admin_h, "CHIETMATDEL")
     pack = client.post("/api/batch-pack-lots", headers=admin_h,
@@ -338,8 +411,25 @@ def test_pack_lot_material_delete_blocked_after_kcs_approve(client, admin_h):
     appr = client.post(f"/api/batch-pack-lots/{pack_lot_id}/approve", headers=admin_h)
     assert appr.status_code == 200, appr.text
 
-    blocked = client.delete(f"/api/batch-pack-lots/materials/{usage_id}", headers=admin_h)
+    allowed = client.delete(f"/api/batch-pack-lots/materials/{usage_id}", headers=admin_h)
+    assert allowed.status_code == 204, allowed.text
+
+    # Thêm lại rồi khóa hồ sơ EBR — lúc này mới thực sự bị chặn.
+    add2 = client.post(f"/api/batch-pack-lots/{pack_lot_id}/materials", headers=admin_h,
+                       json={"material_id": material_id, "quantity": 3})
+    assert add2.status_code == 201, add2.text
+    usage_id2 = add2.json()[0]["usage_id"]
+    sign = client.post(f"/api/batch-pack-lots/{pack_lot_id}/ebr/sign", headers=admin_h,
+                       json={"password": "AdminTest123", "meaning": "Xác nhận chiết đạt", "reason": ""})
+    assert sign.status_code == 200, sign.text
+    lock = client.post(f"/api/batch-pack-lots/{pack_lot_id}/ebr/lock", headers=admin_h,
+                       json={"password": "AdminTest123", "reason": "Chiết hoàn tất"})
+    assert lock.status_code == 200, lock.text
+
+    blocked = client.delete(f"/api/batch-pack-lots/materials/{usage_id2}", headers=admin_h)
     assert blocked.status_code == 409, blocked.text
+    blocked_upd = client.put(f"/api/batch-pack-lots/materials/{usage_id2}", headers=admin_h, json={"quantity": 1})
+    assert blocked_upd.status_code == 409, blocked_upd.text
 
 
 def test_pack_lot_shifts_qty_and_time_editable_repeatedly(client, admin_h):

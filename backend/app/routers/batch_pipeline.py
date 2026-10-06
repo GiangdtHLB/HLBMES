@@ -35,6 +35,7 @@ from ..schemas import (
     EbrSignIn,
     FilterLotFromOrderIn,
     FinishFilterLotBatchIn,
+    MaterialUsageQtyIn,
     PackLotAllocationsIn,
     ReleasePackLotAllocationIn,
 )
@@ -362,6 +363,12 @@ def add_pack_lot_material(pack_lot_id: str, payload: BatchPackLotMaterialUsageIn
     return svc.add_pack_lot_material(db, pack_lot_id, payload.model_dump(), user)
 
 
+@router.put("/batch-pack-lots/materials/{usage_id}", response_model=BatchPackLotMaterialUsageOut)
+def update_pack_lot_material(usage_id: str, payload: MaterialUsageQtyIn, db: Session = Depends(get_db),
+                             user: User = Depends(get_current_user)):
+    return svc.update_pack_lot_material(db, usage_id, payload.quantity, user)
+
+
 @router.delete("/batch-pack-lots/materials/{usage_id}", status_code=204)
 def delete_pack_lot_material(usage_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     svc.delete_pack_lot_material(db, usage_id, user)
@@ -382,6 +389,12 @@ def suggest_filter_lot_material(filter_lot_id: str, material_id: str, quantity: 
 def add_filter_lot_material(filter_lot_id: str, payload: BatchFilterLotMaterialUsageIn, db: Session = Depends(get_db),
                             user: User = Depends(get_current_user)):
     return svc.add_filter_lot_material(db, filter_lot_id, payload.model_dump(), user)
+
+
+@router.put("/batch-filter-lots/materials/{usage_id}", response_model=BatchFilterLotMaterialUsageOut)
+def update_filter_lot_material(usage_id: str, payload: MaterialUsageQtyIn, db: Session = Depends(get_db),
+                               user: User = Depends(get_current_user)):
+    return svc.update_filter_lot_material(db, usage_id, payload.quantity, user)
 
 
 @router.delete("/batch-filter-lots/materials/{usage_id}", status_code=204)

@@ -2199,8 +2199,8 @@ def add_pack_lot_material(db: Session, pack_lot_id: str, payload: dict, user: Us
     tạo NHIỀU dòng usage (1 dòng/lô thực sự dùng, nếu 1 lô không đủ phải lấy tiếp lô sau)."""
     require_perm(user, "batch.execute")
     p = get_pack_lot(db, pack_lot_id)
+    # Chỉ chặn khi hồ sơ EBR đã PHÊ DUYỆT & KHÓA — xem ghi chú ở delete_pack_lot_material.
     _assert_unlocked(p)
-    _assert_no_ebr_signature(db, pack_lot_id)
     supply_date = p.ended_at
     if supply_date is None:
         raise DomainError('Lô thành phẩm chưa có "Giờ kết thúc chiết" (ended_at, tính từ SL chiết '
@@ -2237,19 +2237,60 @@ def add_pack_lot_material(db: Session, pack_lot_id: str, payload: dict, user: Us
     return rows
 
 
+def _update_material_usage_qty(db: Session, u, new_quantity: float, lot_use_reason: str, user: User) -> dict:
+    """Sửa số lượng 1 dòng NVL đã dùng (Lọc/Chiết) — hoàn giao dịch xuất cũ rồi xuất lại ĐÚNG lô
+    đó với số lượng mới (giữ nguyên lô đã chọn, không re-plan FIFO sang lô khác — yêu cầu người
+    dùng 2026-10-06: "thêm nút sửa, cho sửa số lượng"). Validate đủ tồn TRƯỚC khi đụng DB —
+    undo_issue tự commit() riêng nên phải chắc chắn bước xuất lại sau đó sẽ thành công, tránh dở
+    dang (đã hoàn giao dịch cũ nhưng xuất lại số lượng mới thất bại giữa chừng)."""
+    if not new_quantity or new_quantity <= 0:
+        raise DomainError("Số lượng phải > 0.")
+    lot = db.get(MaterialLot, u.lot_id)
+    if not lot:
+        raise NotFoundError("Lô nguyên vật liệu không tồn tại.")
+    available_if_returned = lot.quantity + u.quantity
+    if new_quantity > available_if_returned + 1e-6:
+        raise DomainError(f"Số lượng không hợp lệ (tối đa {available_if_returned}{u.uom}, tính cả phần dòng này đang dùng).")
+    old_quantity = u.quantity
+    if abs(new_quantity - old_quantity) < 1e-6:
+        return {"quantity": u.quantity, "changed": False}
+    if u.movement_id:
+        warehouse_svc.undo_issue(db, u.movement_id, user, strict=True, skip_perm_check=True)
+    result = warehouse_svc.issue(db, u.lot_id, new_quantity, user, mode="tu_do", reason=lot_use_reason,
+                                 ref_doc=lot_use_reason, skip_perm_check=True, issued_at=u.supply_date)
+    u.quantity = new_quantity
+    u.movement_id = result["movement_id"]
+    return {"quantity": u.quantity, "changed": True, "old_quantity": old_quantity}
+
+
+def update_pack_lot_material(db: Session, usage_id: str, quantity: float, user: User) -> BatchPackLotMaterialUsage:
+    require_perm(user, "batch.execute")
+    u = db.get(BatchPackLotMaterialUsage, usage_id)
+    if not u:
+        raise NotFoundError("Dòng nguyên liệu không tồn tại.")
+    p = get_pack_lot(db, u.pack_lot_id)
+    # Chỉ chặn khi hồ sơ EBR đã PHÊ DUYỆT & KHÓA — xem ghi chú ở delete_pack_lot_material.
+    _assert_unlocked(p)
+    r = _update_material_usage_qty(db, u, quantity, f"Dùng cho lô thành phẩm {p.pack_lot_code} (sửa số lượng)", user)
+    if r["changed"]:
+        record_audit(db, entity_type="batch_pack_lot", entity_id=u.pack_lot_id, action="material_update",
+                     actor=user, before={"quantity": r["old_quantity"]}, after={"quantity": r["quantity"]})
+    db.commit()
+    db.refresh(u)
+    return u
+
+
 def delete_pack_lot_material(db: Session, usage_id: str, user: User) -> None:
     require_perm(user, "batch.execute")
     u = db.get(BatchPackLotMaterialUsage, usage_id)
     if not u:
         raise NotFoundError("Dòng nguyên liệu không tồn tại.")
     p = get_pack_lot(db, u.pack_lot_id)
+    # Chỉ chặn khi hồ sơ EBR đã PHÊ DUYỆT & KHÓA (`locked`) — KCS duyệt chất lượng (p.approved)
+    # hay đã ký điện tử (_assert_no_ebr_signature) không còn chặn sửa/xóa NVL lọc/chiết nữa (đổi
+    # từ quy tắc cũ 2026-09-21 "đã dùng rồi thì không thể xóa/sửa", theo yêu cầu người dùng
+    # 2026-10-06: "cho phép sửa khi KCS duyệt, chỉ không được sửa khi đã phê duyệt và khóa hồ sơ").
     _assert_unlocked(p)
-    _assert_no_ebr_signature(db, p.pack_lot_id)
-    # Mirror đúng chặn của delete_pack_lot (xóa cả lô) — lô thành phẩm đã KCS duyệt thì hồ sơ
-    # NVL dùng cho nó không còn được coi là "khai nhầm" nữa, dù chỉ xóa/sửa 1 dòng (yêu cầu
-    # người dùng 2026-09-21: "đã dùng rồi thì không thể xóa, hoàn tác, hay sửa").
-    if p.approved:
-        raise DomainError("Lô thành phẩm đã được KCS duyệt — không thể sửa/xóa nguyên liệu.")
     if u.movement_id:
         warehouse_svc.undo_issue(db, u.movement_id, user, strict=False, skip_perm_check=True)
     before = {"material_name": u.material_name, "lot_pm": u.lot_pm, "quantity": u.quantity, "uom": u.uom}
@@ -2332,8 +2373,8 @@ def add_filter_lot_material(db: Session, filter_lot_id: str, payload: dict, user
     dòng/lô thực sự dùng, nếu 1 lô không đủ phải lấy tiếp lô sau)."""
     require_perm(user, "batch.execute")
     fl = get_filter_lot(db, filter_lot_id)
+    # Chỉ chặn khi hồ sơ EBR đã PHÊ DUYỆT & KHÓA — xem ghi chú ở delete_filter_lot_material.
     _assert_unlocked(fl)
-    _assert_no_ebr_signature(db, filter_lot_id)
     _assert_filter_material_addable(db, fl)
     supply_date = fl.ended_at
     if supply_date is None:
@@ -2371,19 +2412,37 @@ def add_filter_lot_material(db: Session, filter_lot_id: str, payload: dict, user
     return rows
 
 
+def update_filter_lot_material(db: Session, usage_id: str, quantity: float, user: User) -> BatchFilterLotMaterialUsage:
+    require_perm(user, "batch.execute")
+    u = db.get(BatchFilterLotMaterialUsage, usage_id)
+    if not u:
+        raise NotFoundError("Dòng nguyên liệu không tồn tại.")
+    fl = get_filter_lot(db, u.filter_lot_id)
+    # Chỉ chặn khi hồ sơ EBR đã PHÊ DUYỆT & KHÓA — xem ghi chú ở delete_filter_lot_material.
+    _assert_unlocked(fl)
+    if db.execute(select(BatchPackLot).where(BatchPackLot.filter_lot_id == u.filter_lot_id)).first():
+        raise DomainError("Đã có lô thành phẩm tách từ lô lọc này — không thể sửa/xóa nguyên liệu.")
+    r = _update_material_usage_qty(db, u, quantity, f"Dùng cho lô lọc {fl.filter_lot_code} (sửa số lượng)", user)
+    if r["changed"]:
+        record_audit(db, entity_type="batch_filter_lot", entity_id=u.filter_lot_id, action="material_update",
+                     actor=user, before={"quantity": r["old_quantity"]}, after={"quantity": r["quantity"]})
+    db.commit()
+    db.refresh(u)
+    return u
+
+
 def delete_filter_lot_material(db: Session, usage_id: str, user: User) -> None:
     require_perm(user, "batch.execute")
     u = db.get(BatchFilterLotMaterialUsage, usage_id)
     if not u:
         raise NotFoundError("Dòng nguyên liệu không tồn tại.")
     fl = get_filter_lot(db, u.filter_lot_id)
+    # Chỉ chặn khi hồ sơ EBR đã PHÊ DUYỆT & KHÓA (`locked`) — KCS duyệt chất lượng (fl.qc_approved)
+    # hay đã ký điện tử (_assert_no_ebr_signature) không còn chặn sửa/xóa NVL lọc/chiết nữa (đổi
+    # từ quy tắc cũ 2026-09-21, theo yêu cầu người dùng 2026-10-06: "cho phép sửa khi KCS duyệt,
+    # chỉ không được sửa khi đã phê duyệt và khóa hồ sơ"). Vẫn giữ chặn khi đã có lô thành phẩm
+    # tách từ lô lọc này — sửa NVL lúc đó sẽ làm sai lệch hồ sơ lô thành phẩm đã tách.
     _assert_unlocked(fl)
-    _assert_no_ebr_signature(db, fl.filter_lot_id)
-    # Mirror đúng chặn của delete_filter_lot (xóa cả lô) — lô lọc đã KCS duyệt, hoặc đã có lô
-    # thành phẩm tách từ lô lọc này, thì hồ sơ NVL dùng cho nó không còn được coi là "khai nhầm"
-    # nữa, dù chỉ xóa/sửa 1 dòng (yêu cầu người dùng 2026-09-21).
-    if fl.qc_approved:
-        raise DomainError("Lô lọc này đã được KCS duyệt — không thể sửa/xóa nguyên liệu.")
     if db.execute(select(BatchPackLot).where(BatchPackLot.filter_lot_id == u.filter_lot_id)).first():
         raise DomainError("Đã có lô thành phẩm tách từ lô lọc này — không thể sửa/xóa nguyên liệu.")
     if u.movement_id:

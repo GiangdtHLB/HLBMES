@@ -2347,6 +2347,12 @@ class BatchPackLotShiftsIn(BaseModel):
     ca3_end_at: Optional[datetime] = None
 
 
+class MaterialUsageQtyIn(BaseModel):
+    """Sửa số lượng 1 dòng NVL đã dùng cho Lọc/Chiết — giữ nguyên lô đã chọn, chỉ đổi số lượng
+    (yêu cầu người dùng 2026-10-06: "thêm nút sửa, cho sửa số lượng")."""
+    quantity: float = Field(gt=0)
+
+
 class BatchPackLotMaterialUsageIn(BaseModel):
     """NVL (VD CO2, hóa chất vệ sinh) dùng thật cho 1 lô thành phẩm — mirror BottleMaterialUsageIn.
     Chọn theo VẬT TƯ (material_id) — hệ thống tự chọn lô theo FIFO tại thời điểm "Ngày cấp"
