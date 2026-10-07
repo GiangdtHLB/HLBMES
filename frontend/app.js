@@ -3314,17 +3314,21 @@ async function showBatchTank(tankId, allBatches) {
 }
 
 VIEWS.batchfilterorders = async function () {
-  const [orders, lots, tanks, finishedProducts, bbtLines, productsFo, materialsFo, beerTypes] = await Promise.all([
+  const [orders, lots, tanks, finishedProducts, eligibleRefilterBbtLines, productsFo, materialsFo, beerTypes] = await Promise.all([
     GET("/batch-filter-orders"), GET("/batch-filter-lots"), GET("/batch-tanks"),
-    GET("/finished-products").catch(() => []), GET("/batch-filter-lots/available-bbt-lines").catch(() => []),
+    GET("/finished-products").catch(() => []), GET("/batch-pack-lots/eligible-bbt-lines").catch(() => []),
     GET("/products").catch(() => []), GET("/materials").catch(() => []), GET("/beer-types").catch(() => [])]);
   const availTanks = tanks.filter(t => t.on_hand > 0);
   const beerTypeByProductId = Object.fromEntries(productsFo.map(p => [p.product_id, p.beer_type_id]));
   const beerTypeNameFo = (id) => { const bt = beerTypes.find(x => x.beer_type_id === id); return bt ? bt.name : id; };
-  // Tank BBT đủ điều kiện làm NGUỒN lọc lại — đã lọc xong (all_finished) + KCS duyệt hết
-  // (all_qc_approved) + còn dịch (on_hand_bbt>0), mirror filter_order.py::available_bbt_tanks's
-  // eligible_for_refilter_source (module Nấu-Lọc-Chiết cũ).
-  const eligibleRefilterBbtLines = bbtLines.filter(l => l.on_hand_bbt > 1e-6 && l.all_finished && l.all_qc_approved);
+  // Tank BBT đủ điều kiện làm NGUỒN lọc lại — đã lọc xong + KCS duyệt hết + còn dịch — LẤY THẲNG
+  // từ /batch-pack-lots/eligible-bbt-lines (services/batch_pipeline.py::eligible_bbt_lines_for_pack,
+  // đã lọc sẵn on_hand_bbt>0 + all_finished + all_qc_approved ở backend), KHÔNG dùng
+  // /batch-filter-lots/available-bbt-lines (available_bbt_lines) như trước — hàm đó trả về
+  // {code,name,occupied,on_hand_bbt}, KHÔNG có all_finished/all_qc_approved, nên filter
+  // `l.all_finished && l.all_qc_approved` cũ luôn undefined → luôn rỗng, dropdown "Tank thành
+  // phẩm (BBT) lọc lại" không bao giờ hiện gì dù tank thật sự đủ điều kiện (phát hiện qua báo cáo
+  // người dùng 2026-10-07: "không thấy hiển thị tank thành phẩm").
   const orderStatusBadge = (o) => statusBadge(FILTER_ORDER_BADGE_CLASS[o.status], o.status_label);
 
   const newFoTank = () => ({ sourceType: "tank", tankId: "", bbtCode: "", filterLotId: "", reason: "", vol: "" });
