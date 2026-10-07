@@ -531,14 +531,22 @@ function switchView(view) {
 // [data-navscope] — xem wiring panel Chất lượng) — dùng cho nút "truy ngược" chỉ tiêu CT
 // chính/phụ TRƯỚC LỌC ở Báo cáo › Hệ lọc (yêu cầu người dùng 2026-10-01).
 function gotoBatchTank(tankId) {
-  switchView("batchtanks");
-  let tries = 0;
-  const tick = () => {
-    const row = document.querySelector(`[data-tank="${tankId}"]`);
-    if (row) { row.click(); return; }
-    if (++tries < 40) setTimeout(tick, 50);
-  };
-  setTimeout(tick, 50);
+  // "Danh sách lô lên men" giờ lọc theo năm (mặc định năm hiện tại) — phải tự đặt đúng năm của
+  // CHÍNH tank đang nhảy tới trước khi chuyển màn, nếu không tank thuộc năm khác (hiếm nhưng có
+  // thể, VD tank mở cuối tháng 12 vẫn còn lên men sang năm sau) sẽ không có trong danh sách đang
+  // lọc, khiến vòng lặp chờ dưới đây không bao giờ tìm thấy dòng để bấm.
+  guard(async () => {
+    const t = await GET(`/batch-tanks/${tankId}`).catch(() => null);
+    if (t) YEARS.batchtanks = [t.tank_year];
+    switchView("batchtanks");
+    let tries = 0;
+    const tick = () => {
+      const row = document.querySelector(`[data-tank="${tankId}"]`);
+      if (row) { row.click(); return; }
+      if (++tries < 40) setTimeout(tick, 50);
+    };
+    setTimeout(tick, 50);
+  });
 }
 
 // ================= DASHBOARD =================
@@ -2312,6 +2320,7 @@ VIEWS.batches = async function () {
   const brewLinesB = allLinesB.filter(l => l.kind === "brewhouse" && l.active);
   const brewLineOptsB = `<option value="">— chưa chọn —</option>` +
     brewLinesB.map(l => `<option value="${l.line_id}">${esc(l.code)} — ${esc(l.name)}</option>`).join("");
+  const batchesInYear = yearFilterApply("batches", batches, "batch_year");
   $("view-batches").innerHTML = `
     ${productionTabsHtml("batches")}
     <div class="panel"><h2>Tạo mẻ (từ Lệnh nấu + recipe version 'effective')</h2>
@@ -2329,12 +2338,14 @@ VIEWS.batches = async function () {
     </div>
     <div class="split">
       <div class="panel"><h2>Danh sách mẻ</h2>
+        ${yearFilterControl("batches", YEARS.batches)}
         <input class="searchbox" data-tbl="t_batches" placeholder="Tìm theo mã mẻ, WO, trạng thái..."/>
-        <div class="tablewrap">${tableBatches(batches, true, woByIdB, "t_batches", batchTankLabelById)}</div>
+        <div class="tablewrap">${tableBatches(batchesInYear, true, woByIdB, "t_batches", batchTankLabelById)}</div>
       </div>
       <div class="panel" id="b_detail"><h2>Chi tiết mẻ</h2><div class="muted">Chọn một mẻ để xem.</div></div>
     </div>`;
   wireProductionTabs();
+  wireYearFilter("batches", "batches");
   wirePaginate("t_batches", 10);
   $("b_wo").onchange = () => {
     const opt = $("b_wo").options[$("b_wo").selectedIndex];
@@ -2979,6 +2990,7 @@ VIEWS.batchtanks = async function () {
     || '<div class="muted">Không còn mẻ nấu nào chưa gộp vào lô.</div>';
   const tankLineOpts = `<option value="">(không gán tank vật lý)</option>` +
     tankLines.filter(l => !l.occupied).map(l => `<option value="${esc(l.code)}">${esc(l.code)} — ${esc(l.name)}</option>`).join("");
+  const tanksInYear = yearFilterApply("batchtanks", tanks, "tank_year");
   $("view-batchtanks").innerHTML = `
     ${productionTabsHtml("batchtanks")}
     <div class="panel"><h2>🛢️ Gộp mẻ nấu vào lô lên men</h2>
@@ -2993,9 +3005,10 @@ VIEWS.batchtanks = async function () {
     </div>
     <div class="split">
       <div class="panel"><h2>Danh sách lô lên men</h2>
+        ${yearFilterControl("batchtanks", YEARS.batchtanks)}
         <input class="searchbox" data-tbl="t_battank" placeholder="Tìm theo lô, tank, trạng thái..."/>
         <div class="tablewrap"><table id="t_battank"><thead><tr><th>Lô lên men</th><th>Tank lên men</th><th>Trạng thái</th><th>Dịch bia</th><th>Tồn/Tổng (hl)</th><th>Ngày vào dịch</th><th>Ngày KT vào dịch</th><th>Số ngày đã lên men</th><th>Chất lượng</th></tr></thead>
-          <tbody>${tanks.map(t => `<tr data-tank="${t.tank_id}" style="cursor:pointer">
+          <tbody>${tanksInYear.map(t => `<tr data-tank="${t.tank_id}" style="cursor:pointer">
             <td><code class="k">${esc(t.tank_code)}</code></td>
             <td>${esc(t.tank_lm || "—")}</td><td>${statusBadge(TANK_BADGE_CLASS[t.status], t.status_label)}</td>
             <td class="muted">${t.product_id && productByIdBT[t.product_id] ? esc(productByIdBT[t.product_id].code) : "—"}</td>
@@ -3008,6 +3021,7 @@ VIEWS.batchtanks = async function () {
       <div class="panel" id="bt_detail"><h2>Chi tiết lô lên men</h2><div class="muted">Chọn một lô để xem.</div></div>
     </div>`;
   wireProductionTabs();
+  wireYearFilter("batchtanks", "batchtanks");
   wirePaginate("t_battank", 10);
   $("bt_create").onclick = () => guard(async () => {
     const batch_ids = Array.from(document.querySelectorAll(".bt-pick-batch:checked")).map(x => x.value);
@@ -3766,6 +3780,7 @@ VIEWS.batchfilterlots = async function () {
     available.map(o => `<option value="${o.order_id}">${esc(o.order_code)} — ${o.blend_mode === "phoi" ? "Phối" : "Không phối"} — ${o.actual_volume_hl}/${o.planned_volume_hl} hl</option>`).join("");
   const bbtOpts = `<option value="">(chọn tank thành phẩm)</option>` +
     bbtLines.filter(l => !l.occupied).map(l => `<option value="${esc(l.code)}">${esc(l.code)} — ${esc(l.name)}</option>`).join("");
+  const lotsInYear = yearFilterApply("batchfilterlots", lots, "filter_lot_year");
   $("view-batchfilterlots").innerHTML = `
     ${productionTabsHtml("batchfilterlots")}
     <div class="panel"><h2>🧪 Tạo Lô lọc từ Lệnh lọc</h2>
@@ -3781,9 +3796,10 @@ VIEWS.batchfilterlots = async function () {
     </div>
     <div class="split">
       <div class="panel"><h2>Danh sách lô lọc</h2>
+        ${yearFilterControl("batchfilterlots", YEARS.batchfilterlots)}
         <input class="searchbox" data-tbl="t_batfilterlot" placeholder="Tìm theo mã lô, sản phẩm, trạng thái..."/>
         <div class="tablewrap"><table id="t_batfilterlot"><thead><tr><th>Mã lô lọc</th><th>Ngày lọc</th><th>Lệnh lọc</th><th>Trạng thái</th><th>Sản phẩm bia</th><th>Tank lên men</th><th>Kế hoạch (hl)</th><th>Chất lượng</th><th>Tank BBT</th><th>Trạng thái chiết</th><th>Tồn/Tổng (hl)</th></tr></thead>
-          <tbody>${lots.map(f => `<tr data-flot="${f.filter_lot_id}" style="cursor:pointer">
+          <tbody>${lotsInYear.map(f => `<tr data-flot="${f.filter_lot_id}" style="cursor:pointer">
             <td><code class="k">${esc(f.filter_lot_code)}</code></td>
             <td class="muted">${fmt(f.ended_at)}</td>
             <td class="muted">${esc(orderById[f.order_id] ? orderById[f.order_id].order_code : "—")}</td>
@@ -3799,6 +3815,7 @@ VIEWS.batchfilterlots = async function () {
       <div class="panel" id="fl_detail"><h2>Chi tiết lô lọc</h2><div class="muted">Chọn một lô lọc để xem.</div></div>
     </div>`;
   wireProductionTabs();
+  wireYearFilter("batchfilterlots", "batchfilterlots");
   wirePaginate("t_batfilterlot", 10);
   const updateFlOrderProduct = () => {
     const o = orderById[$("fl_order_sel").value];
@@ -4041,6 +4058,7 @@ VIEWS.batchpacklots = async function () {
       `<option value="${esc(fp.finished_product_id)}" ${fp.finished_product_id === selected ? "selected" : ""}>${esc(fp.code)} — ${esc(fp.name)}</option>`).join("");
   };
   const packagingLines = lines.filter(l => l.kind === "line" && l.active);
+  const packLotsInYear = yearFilterApply("batchpacklots", packLots, "pack_lot_year");
   $("view-batchpacklots").innerHTML = `
     ${productionTabsHtml("batchpacklots")}
     <div class="panel"><h2>🍺 Tạo lô thành phẩm (chiết)</h2>
@@ -4062,9 +4080,10 @@ VIEWS.batchpacklots = async function () {
     </div>
     <div class="split">
       <div class="panel"><h2>Danh sách lô thành phẩm</h2>
+        ${yearFilterControl("batchpacklots", YEARS.batchpacklots)}
         <input class="searchbox" data-tbl="t_packlot" placeholder="Tìm theo mã lô, số lô bia, trạng thái..."/>
         <div class="tablewrap"><table id="t_packlot"><thead><tr><th>Mã lô TP</th><th>Ngày chiết</th><th>Lô lọc nguồn</th><th>Tank BBT</th><th>SL cấp chiết (lít)</th><th>Số lô bia</th><th>Trạng thái</th><th>Duyệt</th></tr></thead>
-          <tbody>${packLots.map(p => `<tr data-pklot2="${p.pack_lot_id}" style="cursor:pointer">
+          <tbody>${packLotsInYear.map(p => `<tr data-pklot2="${p.pack_lot_id}" style="cursor:pointer">
             <td><code class="k">${esc(p.pack_lot_code)}</code></td>
             <td class="muted">${fmt(p.pack_date)}</td>
             <td><code class="k">${esc(lotByCode[p.filter_lot_id] || p.filter_lot_id)}</code></td>
@@ -4077,6 +4096,7 @@ VIEWS.batchpacklots = async function () {
       <div class="panel" id="pk_detail"><h2>Chi tiết lô thành phẩm</h2><div class="muted">Chọn một lô để xem.</div></div>
     </div>`;
   wireProductionTabs();
+  wireYearFilter("batchpacklots", "batchpacklots");
   wirePaginate("t_packlot", 10);
   const updatePkFp = () => {
     const opt = $("pk_bbt").selectedOptions[0];
@@ -4584,7 +4604,14 @@ async function showBatchPackLot(packLotId) {
         const first = fmt(sorted[0]), last = fmt(sorted[sorted.length - 1]);
         return first === last ? first : `${first} – ${last}`;
       };
-      const totalUnits = relevant.reduce((s, pl) => s + (pl.total_units || 0), 0);
+      // totalUnits PHẢI cộng theo pl.case_count (đúng = số Vỉ/Két thật trong pallet, giống cột
+      // "SL/pallet" bên dưới) — KHÔNG dùng pl.total_units (= case_count × units_per_case, tức số
+      // LON lẻ sau khi quy đổi theo pack_size của SKU). Trước đây cộng nhầm total_units nhưng vẫn
+      // gắn unitLabel ("Vỉ"/"Két"...) nên dòng tổng bị nhân khống theo đúng pack_size của từng SKU
+      // (VD CSPS330 pack_size=24 → tổng hiện gấp 24 lần số Vỉ thật) — phát hiện qua đối chiếu với
+      // báo cáo Asana PKG-863372 (2026-10-07): ca chiết + bảng pallet đều đúng 5.100 Vỉ, chỉ dòng
+      // tổng này hiện sai 122.400 "Vỉ" (thực chất là số lon).
+      const totalUnits = relevant.reduce((s, pl) => s + (pl.case_count || 0), 0);
       const rowsHtml = Object.keys(byCaseCount).map(Number).sort((a, b) => b - a)
         .map(cc => `<tr><td>${cc} ${esc(unitLabel)}</td><td>${byCaseCount[cc].count}</td>
           <td>${[...byCaseCount[cc].builders].map(esc).join(", ")}</td>
@@ -5494,14 +5521,7 @@ VIEWS.quality = async function () {
     // showBatchFilterLot: switchView xong DOM chưa kịp dựng nên phải poll tới khi thấy).
     if (scopeType === "batch_tank") {
       const [tankId] = scopeId.split("__");
-      switchView("batchtanks");
-      let tries = 0;
-      const tick = () => {
-        const row = document.querySelector(`[data-tank="${tankId}"]`);
-        if (row) { row.click(); return; }
-        if (++tries < 40) setTimeout(tick, 50);
-      };
-      setTimeout(tick, 50);
+      gotoBatchTank(tankId);
       return;
     }
     if (scopeType === "batch_filter_lot") {
@@ -5515,14 +5535,20 @@ VIEWS.quality = async function () {
       return;
     }
     if (scopeType === "batch_pack_lot") {
-      switchView("batchpacklots");
-      let tries = 0;
-      const tick = () => {
-        const row = document.querySelector(`[data-pklot2="${scopeId}"]`);
-        if (row) { row.click(); return; }
-        if (++tries < 40) setTimeout(tick, 50);
-      };
-      setTimeout(tick, 50);
+      // "Danh sách lô thành phẩm" giờ lọc theo năm — tự đặt đúng năm của lô đang nhảy tới trước
+      // (mirror gotoBatchTank), nếu không lô thuộc năm khác sẽ không có trong danh sách đang lọc.
+      guard(async () => {
+        const p = await GET(`/batch-pack-lots/${scopeId}`).catch(() => null);
+        if (p) YEARS.batchpacklots = [p.pack_lot_year];
+        switchView("batchpacklots");
+        let tries = 0;
+        const tick = () => {
+          const row = document.querySelector(`[data-pklot2="${scopeId}"]`);
+          if (row) { row.click(); return; }
+          if (++tries < 40) setTimeout(tick, 50);
+        };
+        setTimeout(tick, 50);
+      });
       return;
     }
   });
@@ -6029,6 +6055,15 @@ function wireYearFilter(key, view) {
     YEARS[key] = b ? [a, b].sort((x, y) => x - y) : [a];
     render(view);
   };
+}
+// Lọc 1 danh sách theo năm đã chọn cho màn hình `key` (mặc định năm hiện tại khi chưa chọn gì —
+// mirror đúng docstring backend common.py::resolve_years) — dùng CHUNG cho 4 màn liệt kê theo
+// mã/số hiệu theo năm (Nấu/Lên men/Lọc/Chiết, yêu cầu người dùng 2026-10-07: "mã mẻ/lô lên men/
+// lô lọc/lô thành phẩm/số lô bia/mẻ số 1 năm reset 1 lần... thêm chỗ tìm kiếm xem theo năm").
+function yearFilterApply(key, rows, yearField) {
+  if (!YEARS[key]) YEARS[key] = [new Date().getFullYear()];
+  const years = YEARS[key];
+  return rows.filter(r => years.includes(r[yearField]));
 }
 function subnav(view, sections, current) {
   return `<div class="subnav">${sections.map(s =>
