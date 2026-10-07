@@ -12,6 +12,24 @@ from ..models.wms import Case, Pallet, WmsLocation
 from ..security import User, require_perm
 
 
+_IN_CHUNK = 900   # < 2100 (giới hạn tham số bind của SQL Server), chừa chỗ cho tham số khác
+
+
+def _scalars_in_chunks(db: Session, stmt_for, values) -> list:
+    """Chạy `stmt_for(chunk)` theo từng mẻ ≤ _IN_CHUNK rồi gộp kết quả.
+
+    SQL Server giới hạn 2100 THAM SỐ BIND cho 1 câu lệnh; `col.in_(danh_sách)` sinh 1 tham số
+    cho mỗi phần tử, nên danh sách dài làm pyodbc báo "07002 COUNT field incorrect or syntax
+    error" → 500 (SQLite/Postgres không có giới hạn này nên không lộ khi test). Kho TP có 4737
+    pallet (2026-10-07) nên `Case.pallet_id.in_(pallet_ids)` vỡ ngay khi mở màn Kho TP (WMS).
+    """
+    out = []
+    vals = list(values)
+    for i in range(0, len(vals), _IN_CHUNK):
+        out.extend(db.execute(stmt_for(vals[i:i + _IN_CHUNK])).scalars().all())
+    return out
+
+
 def _product_name_by_code(db: Session) -> dict:
     """`Pallet.product` lưu CODE của FinishedProduct (chuỗi tự do, không FK) — tra tên thật để
     hiển thị (yêu cầu người dùng 2026-09-20: "thêm cả tên của SKU vào cho tôi"), không đổi
@@ -96,7 +114,8 @@ def list_pallets(db: Session, status: str = None, lot_code: str = None) -> list:
     cases_by_pallet: dict[str, list[Case]] = {}
     if pallets:
         pallet_ids = [p.pallet_id for p in pallets]
-        for c in db.execute(select(Case).where(Case.pallet_id.in_(pallet_ids))).scalars().all():
+        for c in _scalars_in_chunks(
+                db, lambda ids: select(Case).where(Case.pallet_id.in_(ids)), pallet_ids):
             cases_by_pallet.setdefault(c.pallet_id, []).append(c)
     for p in pallets:
         loc = loc_by.get(p.location_id)
@@ -135,8 +154,10 @@ def list_lots(db: Session) -> list:
     # tùy SKU (lon/vỉ/đơn vị khác), còn case_count là số case/thùng thật, không mơ hồ theo SKU.
     shipped_by_lot: dict[str, list[Pallet]] = {}
     if by_lot:
-        shipped = db.execute(select(Pallet).where(
-            Pallet.lot_code.in_(by_lot.keys()), Pallet.status == "shipped")).scalars().all()
+        shipped = _scalars_in_chunks(
+            db, lambda codes: select(Pallet).where(
+                Pallet.lot_code.in_(codes), Pallet.status == "shipped"),
+            by_lot.keys())
         for p in shipped:
             shipped_by_lot.setdefault(p.lot_code, []).append(p)
     product_name_by = _product_name_by_code(db)
