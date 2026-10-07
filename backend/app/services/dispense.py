@@ -9,7 +9,7 @@
 
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..audit import record_audit
@@ -19,6 +19,7 @@ from ..models.batches import BatchExecution
 from ..models.master import Material
 from ..models.materials import GenealogyEdge, MaterialLot
 from ..models.materials_ext import BatchMaterialNotUsed, Dispense, DispenseLine
+from ..models.warehouse import StockMovement
 from ..security import User, require_role
 from . import batches as batch_svc
 from . import bom
@@ -33,6 +34,30 @@ def _is_expired(lot: MaterialLot) -> bool:
     if exp.tzinfo is None:
         now = now.replace(tzinfo=None)
     return exp < now
+
+
+def _lot_touched_since_consume(db: Session, lot_id: str, since_time, exclude_batch_id: str) -> bool:
+    """Lô đã bị động tới (tiêu thụ bởi mẻ/lô lọc/lô chiết KHÁC, hoặc điều chuyển/xuất kho) SAU
+    một thời điểm cụ thể — mirror warehouse.py::_lot_touched_since, áp dụng cho nhánh hoàn lại
+    (giảm Thực tế) của adjust_actual. Cấp liệu không ghi StockMovement nên phải kiểm tra CẢ 2
+    nguồn: GenealogyEdge tiêu thụ khác (của batch/lô lọc/lô chiết khác dùng chung lô này) lẫn
+    StockMovement không phải nhập kho (điều chuyển/xuất) — nếu không, hoàn lại vào 1 lô đã bị
+    dùng tiếp/chuyển đi sẽ tạo tồn ảo (phát hiện thực tế 2026-10-07, khi audit theo yêu cầu người
+    dùng không thấy xảy ra trên dữ liệu hiện có, nhưng lỗ hổng cấu trúc vẫn còn). Loại trừ
+    `exclude_batch_id` (CHÍNH mẻ đang sửa) khỏi "khác" — mẻ này tự dùng tiếp lô này ở 1 cạnh
+    genealogy KHÁC (lần cấp liệu sau) không tính là bị động tới bởi bên ngoài (id toàn hệ thống
+    là UUID duy nhất nên so to_id trực tiếp là đủ, không cần so thêm to_type)."""
+    other_edge = db.execute(select(func.count()).select_from(GenealogyEdge).where(
+        GenealogyEdge.from_type == "lot", GenealogyEdge.from_id == lot_id,
+        GenealogyEdge.relation == GenealogyRelation.CONSUME.value,
+        GenealogyEdge.to_id != exclude_batch_id,
+        GenealogyEdge.event_time > since_time)).scalar_one()
+    if other_edge > 0:
+        return True
+    other_mv = db.execute(select(func.count()).select_from(StockMovement).where(
+        StockMovement.lot_id == lot_id, StockMovement.movement_type != "receipt",
+        StockMovement.created_at > since_time)).scalar_one()
+    return other_mv > 0
 
 
 # Mốc chốt mở rộng điều kiện #2 (bên dưới) sang các trạng thái planned/ready/completed/closed —
@@ -653,6 +678,16 @@ def adjust_actual(db: Session, batch_id: str, material_code: str, new_actual: fl
             raise DomainError(
                 f"Không đủ lịch sử tiêu thụ (qua Cấp liệu/Consume) để hoàn lại — thiếu "
                 f"{remaining} {material_code}.")
+        # Chặn TRƯỚC khi đụng DB (all-or-nothing, mirror các chặn "đã dùng rồi" khác trong hệ
+        # thống) — nếu lô đã bị mẻ/lô lọc/lô chiết KHÁC dùng tiếp, hoặc đã bị điều chuyển/xuất đi
+        # sau đúng thời điểm mẻ này tiêu thụ, hoàn lại lúc này sẽ tạo tồn ảo (xem
+        # _lot_touched_since_consume).
+        for edge, lot, take in plan_refund:
+            if _lot_touched_since_consume(db, lot.lot_id, edge.event_time, batch_id):
+                raise DomainError(
+                    f"Lô {lot.lot_code} đã được dùng tiếp (mẻ/lô lọc/lô chiết khác, hoặc điều "
+                    "chuyển/xuất kho) sau khi mẻ này tiêu thụ — không thể hoàn lại, sẽ làm sai "
+                    "lệch tồn kho.")
         for edge, lot, take in plan_refund:
             lot.quantity = round(lot.quantity + take, 4)
             if lot.status == LotStatus.CONSUMED.value:
