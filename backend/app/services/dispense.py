@@ -195,19 +195,12 @@ def _workshop_fefo_lots(db: Session, material_code: str, as_of=None) -> list:
     trong hàng đợi FEFO nếu tồn DỰNG LẠI tính đến hết thời điểm đó
     (warehouse.py::lot_on_hand_as_of) > 0 — BẤT KỂ status/quantity HIỆN TẠI của lô là gì (Lỗi 1:
     xem _fefo_lots — trước đây lọc current-status TRƯỚC nên 1 lô đã bị mẻ KHÁC rút cạn SAU
-    `as_of` không bao giờ "sống lại" được, dù thực sự còn tồn tại đúng lúc `as_of`). Gắn 2 giá
-    trị tạm lên từng lô còn lại:
-      - `asof_cap_raw` = tồn dựng lại THUẦN tại `as_of` (KHÔNG clamp theo tồn hiện tại) — đọc bởi
-        `_asof_available`, DÙNG DUY NHẤT để `_is_fifo_choice` xác định đúng thứ tự FEFO LỊCH SỬ
-        (mirror chính xác cách `batch_dispense_summary` suy luận lại FIFO lịch sử — 1 lô dù đã bị
-        mẻ khác rút cạn SAU `as_of` vẫn phải tính là "còn tồn tại as-of" khi xét xem lựa chọn của
-        mẻ này có lệch FEFO hay không).
-      - `asof_cap` = MIN(tồn sống hiện tại, `asof_cap_raw`) — đọc bởi `_effective_qty`, DÙNG CHO
-        THỰC THI/lập kế hoạch cấp liệu thật (_plan_consume) — không cho mượn hàng về kho phân
-        xưởng SAU khi mẻ đã bắt đầu nấu (hàng mới về sau không tính), VÀ không được lấy vượt quá
-        tồn vật lý hiện có thật (nếu phần cũ đã bị mẻ khác lấy bớt từ đó tới giờ — như Lô X ở
-        kịch bản Lỗi 1, vẫn đúng FEFO lịch sử nhưng không còn gì để thực sự cấp nữa, tự nhiên bị
-        bỏ qua khi lập kế hoạch dù vẫn xuất hiện trong hàng đợi để tính fifo_ok).
+    `as_of` không bao giờ "sống lại" được, dù thực sự còn tồn tại đúng lúc `as_of`, khiến lô xếp
+    SAU nó bị tính nhảy vọt lên đầu hàng đợi — sai thứ tự). Gắn `asof_cap` = MIN(tồn sống hiện
+    tại, tồn dựng lại tại `as_of`) lên từng lô còn lại — đọc bởi `_effective_qty`
+    (dùng cho CẢ việc lập kế hoạch cấp liệu thật lẫn xét FIFO ở `_is_fifo_choice`, xem đó — không
+    cho mượn hàng về kho phân xưởng SAU khi mẻ đã bắt đầu nấu, và không được lấy vượt quá tồn vật
+    lý hiện có thật).
     Tiêu chí phụ FIFO vẫn theo `created_at` GỐC của lô (ngày nhập đầu tiên, xem _fefo_lots) — xác
     nhận lại với người dùng 2026-09-15: KHÔNG đổi sang ngày điều chuyển vào phân xưởng, chỉ cần
     đảm bảo lọc kho đúng (Kho phân xưởng, không lấy sang Kho công ty — đã tự nhiên đúng qua bộ
@@ -227,7 +220,6 @@ def _workshop_fefo_lots(db: Session, material_code: str, as_of=None) -> list:
         cap = asof_by_lot.get(l.lot_id, 0.0)
         if cap <= 1e-9:
             continue
-        l.asof_cap_raw = cap
         l.asof_cap = min(l.quantity, cap)
         out.append(l)
     return out
@@ -245,20 +237,6 @@ def _effective_qty(lot: MaterialLot, reserved: dict) -> float:
     return round(total_cap - reserved.get(lot.lot_id, 0.0), 4)
 
 
-def _asof_available(lot: MaterialLot, reserved: dict) -> float:
-    """Tồn "as of" THUẦN (đọc `asof_cap_raw`, KHÔNG clamp theo tồn vật lý HIỆN TẠI của lô) sau
-    khi trừ phần đã giữ chỗ cùng phiếu — DÙNG DUY NHẤT bởi `_is_fifo_choice` để xác định đúng thứ
-    tự FEFO LỊCH SỬ tại thời điểm `as_of` (Lỗi 1: mirror chính xác cách `batch_dispense_summary`
-    suy luận lại FIFO lịch sử — dòng ~800 vùng lân cận — không quan tâm lô đó HIỆN TẠI còn hay đã
-    bị MẺ KHÁC rút cạn SAU `as_of`, vì đó chính xác là tình huống cần phát hiện để gắn
-    `fifo_ok=False` cho lựa chọn lệch FEFO). KHÁC `_effective_qty` (đọc `asof_cap`, dùng cho THỰC
-    THI/lập kế hoạch cấp liệu thật — phải tôn trọng tồn vật lý hiện tại, không được lấy vượt quá
-    cái không còn tồn tại thật nữa)."""
-    cap = getattr(lot, "asof_cap_raw", None)
-    total = lot.quantity if cap is None else cap
-    return round(total - reserved.get(lot.lot_id, 0.0), 4)
-
-
 def _lot_avail_qty(lot: MaterialLot) -> float:
     """Tồn khả dụng của 1 lô cho MỤC ĐÍCH HIỂN THỊ/GỢI Ý (suggest_dispense) — không giữ chỗ
     (reserved) như _effective_qty vì đây chỉ là xem trước từng dòng độc lập. Tôn trọng `asof_cap`
@@ -268,34 +246,67 @@ def _lot_avail_qty(lot: MaterialLot) -> float:
     return lot.quantity if cap is None else min(lot.quantity, cap)
 
 
-def _is_fifo_choice(db: Session, material_code: str, lot_id: str, reserved: dict, as_of=None) -> bool:
-    """1 lô được coi là "đúng FIFO/FEFO" nếu KHÔNG có lô nào xếp TRƯỚC nó (theo FEFO, Kho phân
-    xưởng, cùng giới hạn `as_of` nếu có) mà còn tồn "as of" > 0 (SAU khi trừ phần đã giữ chỗ bởi
-    dòng khác cùng phiếu) bị bỏ qua. Lô không nằm trong danh sách FEFO hợp lệ (khác Kho phân
-    xưởng / đã hết hạn / khác vật tư / chưa tồn tại tại `as_of`) luôn coi là lệch.
+def _resolve_fifo_queue_code(db: Session, material_code: str, group_code: str = None) -> str:
+    """Trả về mã dùng để DỰNG HÀNG ĐỢI FEFO khi xét "có đúng FIFO không" cho 1 lựa chọn lô —
+    `group_code` (nếu có, client gửi kèm từ gợi ý — xem suggest_dispense's dòng "group_code") CHỈ
+    được tin nếu `material_code` THẬT SỰ là 1 thành viên của đúng nhóm đó (chặn client gửi bừa 1
+    group_code không liên quan để lách kiểm tra FIFO bằng hàng đợi khác) — nếu không khớp, coi
+    như không có group_code, quay về đúng hành vi cũ (chỉ xét riêng material_code).
 
-    Dùng `_asof_available` (KHÔNG phải `_effective_qty`) để xét "còn tồn > 0" — Lỗi 1: 1 lô xếp
-    trước nhưng ĐÃ bị mẻ KHÁC rút cạn SAU `as_of` (quantity hiện tại = 0) vẫn phải tính là "còn
-    tồn tại as-of" ở đây, nếu không lựa chọn lô xếp SAU nó sẽ bị gắn `fifo_ok=True` SAI (hệ thống
-    coi như không còn lô nào xếp trước còn hàng, trong khi thực ra CÓ — chỉ là đã bị lấy mất bởi
-    1 mẻ khác, không liên quan gì đến tính đúng-sai FEFO của lựa chọn đang xét)."""
-    order = _workshop_fefo_lots(db, material_code, as_of)
+    Lý do cần hàm này: suggest_dispense gộp FEFO của CẢ NHÓM vật tư thay thế (VD "1NC02"+"2NC02"
+    cùng 1 Nhóm) để chọn lô cho từng mã thành viên — nếu lúc duyệt (_is_fifo_choice) chỉ xét riêng
+    1 mã thành viên, lô gợi ý đúng theo nhóm có thể bị coi là "lệch FIFO" (lô đó không phải lô cũ
+    nhất CỦA RIÊNG mã đó, dù là lô cũ nhất CỦA CẢ NHÓM) — bug thực tế phát hiện 2026-10-07: mẻ
+    2639, vật tư "Malt Anh (bao)" (nhóm 1NC02/2NC02), gợi ý chọn đúng lô theo nhóm nhưng bấm "Cấp
+    liệu" vẫn báo "không phải lô FIFO/FEFO gợi ý", bắt nhập lý do dù không hề chọn khác gợi ý."""
+    if not group_code:
+        return material_code
+    if material_code in bom.codes_for_dispense(db, group_code):
+        return group_code
+    return material_code
+
+
+def _is_fifo_choice(db: Session, material_code: str, lot_id: str, reserved: dict, as_of=None,
+                    group_code: str = None) -> bool:
+    """1 lô được coi là "đúng FIFO/FEFO" nếu KHÔNG có lô nào xếp TRƯỚC nó (theo FEFO, Kho phân
+    xưởng, cùng giới hạn `as_of` nếu có) mà còn tồn THẬT SỰ CÒN CẤP ĐƯỢC > 0 (`_effective_qty` —
+    SAU khi trừ phần đã giữ chỗ bởi dòng khác cùng phiếu) bị bỏ qua. Lô không nằm trong danh sách
+    FEFO hợp lệ (khác Kho phân xưởng / đã hết hạn / khác vật tư / chưa tồn tại tại `as_of`) luôn
+    coi là lệch.
+
+    `group_code` — xem _resolve_fifo_queue_code: khi `material_code` thuộc 1 Nhóm vật tư thay
+    thế, hàng đợi FEFO phải gộp CẢ NHÓM (mirror đúng cách suggest_dispense chọn lô), không chỉ
+    riêng `material_code`.
+
+    Dùng CHUNG `_effective_qty` với `_plan_consume`/suggest_dispense (KHÔNG còn tách riêng 1 phép
+    tính "as-of lịch sử thuần" nữa) — quyết định nghiệp vụ 2026-10-07: 1 lô xếp trước nhưng ĐÃ bị
+    mẻ KHÁC rút cạn SAU `as_of` (tồn hiện tại = 0) thì KHÔNG còn tính là "đang chặn" nữa — mẻ đang
+    xét không thể làm khác được (lô đó thực sự không còn gì để cấp), nên không cần bắt nhập lý do.
+    (Trước đây — "Lỗi 1" — cố tình tính lô đó là "còn chặn" dù đã về 0, để không bỏ sót trường hợp
+    cố ý bỏ qua 1 lô vẫn còn tồn — nhưng gây khó chịu thực tế: gợi ý tự động đã tự bỏ qua đúng lô
+    rỗng đó rồi, hệ thống lại quay sang bắt người dùng giải trình cho chính lựa chọn gợi ý tự đưa
+    ra, dù họ không hề có lựa chọn nào khác — yêu cầu người dùng 2026-10-07, mẻ 2639: "lô kia = 0
+    rồi mà, nhập gì nữa". Lô vẫn còn tồn thật (effective_qty > 0) thì vẫn chặn như cũ, không đổi)."""
+    queue_code = _resolve_fifo_queue_code(db, material_code, group_code)
+    order = _workshop_fefo_lots(db, queue_code, as_of)
     idx = next((i for i, l in enumerate(order) if l.lot_id == lot_id), None)
     if idx is None:
         return False
-    return not any(_asof_available(l, reserved) > 1e-9 for l in order[:idx])
+    return not any(_effective_qty(l, reserved) > 1e-9 for l in order[:idx])
 
 
 def _plan_consume(db: Session, material_code: str, qty: float, picked_lot_id: str = None,
-                  reason: str = None, reserved: dict = None, as_of=None) -> tuple:
+                  reason: str = None, reserved: dict = None, as_of=None, group_code: str = None) -> tuple:
     """Lập kế hoạch cấp liệu cho `qty` của material_code — CHỈ TÍNH, KHÔNG trừ tồn (all-or-
     nothing: raise NGAY nếu không đủ 100%, tránh trừ 1 phần rồi mới báo thiếu). Nếu chỉ định lot
     mà lot đó KHÔNG phải lô FIFO/FEFO gợi ý (còn lô xếp trước còn tồn) thì bắt buộc có `reason`.
     `reserved` (dict lot_id -> đã giữ chỗ) dùng CHUNG cho mọi dòng trong 1 lần gọi dispense()/
     backflush() — CẬP NHẬT TRỰC TIẾP (mutate) để dòng sau thấy đúng phần lô mà dòng trước đã
     dùng, dù chưa commit DB thật. `as_of` (batch.start_at) — xem _workshop_fefo_lots — áp dụng
-    CẢ cho lô chỉ định tay (picked_lot_id), không chỉ nhánh tự động FEFO. Trả về (plan, fifo_ok)
-    — plan: list[(lot, take)] để _execute_plan thực thi thật khi đã chắc chắn đủ."""
+    CẢ cho lô chỉ định tay (picked_lot_id), không chỉ nhánh tự động FEFO. `group_code` — xem
+    _resolve_fifo_queue_code, chỉ ảnh hưởng nhánh `picked_lot_id` (xét FIFO theo cả Nhóm vật tư
+    thay thế thay vì riêng `material_code`). Trả về (plan, fifo_ok) — plan: list[(lot, take)] để
+    _execute_plan thực thi thật khi đã chắc chắn đủ."""
     reserved = reserved if reserved is not None else {}
     remaining = round(qty, 4)
     plan = []
@@ -316,9 +327,8 @@ def _plan_consume(db: Session, material_code: str, qty: float, picked_lot_id: st
             if cap <= 1e-9:
                 raise DomainError(f"Lô {lot.lot_code} chưa tồn tại ở Kho phân xưởng tính đến "
                                   "thời điểm mẻ bắt đầu nấu — không được chọn.")
-            lot.asof_cap_raw = cap
             lot.asof_cap = min(lot.quantity, cap)
-        fifo_ok = _is_fifo_choice(db, material_code, lot.lot_id, reserved, as_of)
+        fifo_ok = _is_fifo_choice(db, material_code, lot.lot_id, reserved, as_of, group_code)
         if not fifo_ok and not (reason or "").strip():
             raise DomainError(
                 f"Lô {lot.lot_code} không phải lô FIFO/FEFO gợi ý cho {material_code} — "
@@ -433,9 +443,14 @@ def suggest_dispense(db: Session, batch_id: str) -> dict:
             group_shortfall = round(remaining, 4) if remaining > 1e-6 else 0.0
             for mcode in member_codes:
                 member_lots = _workshop_fefo_lots(db, mcode, batch.start_at)
+                # Chỉ hiện lô CÒN TỒN THẬT (> 0) để người dùng chọn tay — member_lots vẫn có thể
+                # chứa lô đã về 0 do bị mẻ KHÁC rút cạn SAU `as_of` (giữ lại đúng chủ ý để
+                # _is_fifo_choice tính FIFO lịch sử, xem _workshop_fefo_lots), nhưng cho CHỌN được
+                # lô rỗng chỉ khiến người dùng cấp nhầm 0kg mà không rõ vì sao (yêu cầu người dùng
+                # 2026-10-07: "lô tồn 0 vẫn hiện ra để chọn").
                 alternatives = [{"lot_id": lot.lot_id, "lot_code": lot.lot_code, "quantity": round(_lot_avail_qty(lot), 4),
                                 "uom": lot.uom, "expiry": lot.expiry.isoformat() if lot.expiry else None}
-                               for lot in member_lots]
+                               for lot in member_lots if _lot_avail_qty(lot) > 1e-9]
                 lines.append({"material_code": mcode, "material_name": name_by_code.get(mcode),
                              "uom": l["uom"], "planned": l["planned"],
                              "stock_company": round(company_stock.get(mcode, 0.0), 4),
@@ -451,9 +466,10 @@ def suggest_dispense(db: Session, batch_id: str) -> dict:
         stock_company_asof = round(sum(company_stock_asof.get(c, 0.0) for c in real_codes), 4)
         stock_workshop_asof = round(sum(workshop_stock_asof.get(c, 0.0) for c in real_codes), 4)
         fefo_lots = _workshop_fefo_lots(db, l["material_code"], batch.start_at)
+        # Chỉ hiện lô còn tồn thật > 0 để chọn tay — xem chú thích ở nhánh "is_group" phía trên.
         alternatives = [{"lot_id": lot.lot_id, "lot_code": lot.lot_code, "quantity": round(_lot_avail_qty(lot), 4),
                         "uom": lot.uom, "expiry": lot.expiry.isoformat() if lot.expiry else None}
-                       for lot in fefo_lots]
+                       for lot in fefo_lots if _lot_avail_qty(lot) > 1e-9]
         picks = []
         remaining = need
         for lot in fefo_lots:
@@ -491,9 +507,12 @@ def lots_for_material(db: Session, batch_id: str, material_code: str) -> list[di
 
 
 def dispense(db: Session, batch_id: str, lines_in: list, user: User, note: str = None) -> dict:
-    """Cấp liệu cho mẻ. lines_in = [{material_code, quantity, lot_id?, reason?}]. All-or-nothing:
-    LẬP KẾ HOẠCH cho MỌI dòng trước (không trừ tồn) — nếu BẤT KỲ dòng nào không đủ tồn (hoặc
-    chọn lô lệch FIFO mà thiếu lý do) thì KHÔNG cấp liệu dòng nào cả, báo lỗi gộp ngay."""
+    """Cấp liệu cho mẻ. lines_in = [{material_code, quantity, lot_id?, reason?, group_code?}].
+    `group_code` (tuỳ chọn, xem _resolve_fifo_queue_code) — gửi kèm khi dòng này thuộc 1 Nhóm vật
+    tư thay thế (suggest_dispense đã gộp FEFO theo cả nhóm lúc gợi ý), để duyệt FIFO đúng theo
+    cùng hàng đợi đã dùng lúc gợi ý thay vì chỉ riêng `material_code`. All-or-nothing: LẬP KẾ
+    HOẠCH cho MỌI dòng trước (không trừ tồn) — nếu BẤT KỲ dòng nào không đủ tồn (hoặc chọn lô
+    lệch FIFO mà thiếu lý do) thì KHÔNG cấp liệu dòng nào cả, báo lỗi gộp ngay."""
     require_role(user, Role.OPERATOR, Role.SUPERVISOR, Role.ENGINEER)
     batch = db.get(BatchExecution, batch_id)
     if not batch:
@@ -509,7 +528,8 @@ def dispense(db: Session, batch_id: str, lines_in: list, user: User, note: str =
             continue
         try:
             plan, fifo_ok = _plan_consume(db, code, qty, picked_lot_id=ln.get("lot_id"),
-                                          reason=ln.get("reason"), reserved=reserved, as_of=batch.start_at)
+                                          reason=ln.get("reason"), reserved=reserved, as_of=batch.start_at,
+                                          group_code=ln.get("group_code"))
             planned.append((code, plan, bool(ln.get("allow_over")), fifo_ok, ln.get("reason")))
         except DomainError as e:
             errors.append(str(e))
