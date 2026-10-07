@@ -11364,7 +11364,7 @@ VIEWS.reports = async function () {
           <td class="muted">${r.tanks.length ? r.tanks.map(t => `<button type="button" class="btn sm sec" data-tankqc="${esc(t.tank_id)}" style="margin:1px">${esc(t.tank_lm || "?")}${t.product_name ? " — " + esc(t.product_name) : ""}</button>`).join(" ") : "—"}</td>
           <td class="muted">${r.bbt_list.length ? r.bbt_list.map(b => `<button type="button" class="btn sm sec" data-bbtqc="${esc(b.filter_lot_id)}|${esc(b.to_bbt)}" style="margin:1px">${esc(b.to_bbt)}${b.beer_type_name ? " — " + esc(b.beer_type_name) : ""}</button>`).join(" ") : "—"}</td>
           <td class="muted">${r.ended_at ? fmt(r.ended_at) : "—"}</td>
-          <td${r.classification === "thap" ? ' style="color:var(--red)"' : r.classification === "cao" ? ' style="color:var(--green)"' : ""}>${r.v_l.toLocaleString("vi-VN")}</td>
+          <td${r.is_final ? "" : r.classification === "thap" ? ' style="color:var(--red)"' : r.classification === "cao" ? ' style="color:var(--green)"' : ""}>${r.v_l.toLocaleString("vi-VN")}</td>
           <td class="muted">${esc(r.beer_type_name || "—")}</td></tr>`).join("") ||
           '<tr><td colspan=8 class="muted">Chưa có dữ liệu.</td></tr>'}</tbody>
       </table></div>
