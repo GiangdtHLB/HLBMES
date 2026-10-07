@@ -108,6 +108,15 @@ def _stamp_filter_lot_label(db: Session, fl: BatchFilterLot) -> BatchFilterLot:
     chiet_status = _filter_lot_chiet_status(db, fl)
     fl.chiet_status = chiet_status
     fl.chiet_status_label = PACK_LOT_STATUS_LABEL.get(chiet_status, "") if chiet_status else ""
+    # Lô lọc này đã TỪNG được chọn làm NGUỒN "lọc lại" cho 1 lô lọc khác chưa — tách riêng khỏi
+    # chiet_status (vốn chỉ suy từ BatchPackLot con) vì 2 việc độc lập nhau: 1 lô có thể vừa chiết
+    # 1 phần vừa lọc lại phần còn lại (yêu cầu người dùng 2026-10-07: "nếu lọc lại thì báo lọc lại,
+    # nếu đã chiết 1 phần và vẫn có lọc lại thì là Lọc lại + Chiết 1 phần" — cột "Trạng thái chiết"
+    # trước đây hiện "—" y hệt cho cả 2 case "chưa ai đụng" lẫn "đã lọc lại hết", không phân biệt
+    # được). Chỉ cần tồn tại >=1 dòng nguồn, không cần biết khối lượng.
+    fl.used_for_refilter = bool(db.execute(select(func.count()).select_from(BatchFilterLotSource).where(
+        BatchFilterLotSource.source_filter_lot_id == fl.filter_lot_id,
+        BatchFilterLotSource.source_type == "filter_lot")).scalar_one())
     # Đã nhập ÍT NHẤT 1 chỉ tiêu Lọc (bất kể đạt/fail) hay chưa — cột "Chất lượng" ở Danh sách lô
     # lọc, xanh lá = đã nhập, cam = chưa (yêu cầu người dùng 2026-09-30) — mirror
     # has_len_men_chinh_result/has_len_men_phu_result ở BatchTank (_tank_out).
