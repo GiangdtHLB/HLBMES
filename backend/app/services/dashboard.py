@@ -356,10 +356,12 @@ def filter_production_report(db: Session, days: int = 3650) -> list[dict]:
       "nếu 1 trong các lô lọc của mẻ lọc đó có tích mẻ cuối, thì cả mẻ lọc đó được coi là mẻ
       cuối").
     - `classification`/`classification_label`: Thấp/Bình thường/Cao theo ngưỡng thật
-      (OpsSetting.filter_line_yield_low_l/high_l) — LUÔN tính, kể cả khi `is_final` — mẻ cuối
-      không còn bị loại khỏi so sánh ở báo cáo này (khác `low_yield_filter_alerts`, nơi mẻ cuối
-      vẫn bị loại khỏi cảnh báo "thấp" vì mẻ vét thấp là chuyện bình thường) — dùng để tô màu đỏ/
-      xanh cột "Sản lượng lọc" (yêu cầu người dùng 2026-10-02).
+      (OpsSetting.filter_line_yield_low_l/high_l) — LUÔN tính, kể cả khi `is_final` (vẫn dùng để
+      lọc theo dropdown "Sản lượng"). Riêng việc TÔ MÀU đỏ/xanh cột "Sản lượng lọc" ở frontend/
+      xuất Excel thì BỎ QUA dòng `is_final` (đổi lại quyết định 2026-10-02, theo yêu cầu người
+      dùng 2026-10-07: "mẻ cuối thì không tính vào hiệu suất, không cần bôi đỏ" — mẻ vét sản
+      lượng thấp là chuyện bình thường, không phải cảnh báo hiệu suất, mirror đúng cách
+      `low_yield_filter_alerts` đã loại trừ is_final từ trước).
     - `tanks`: tank lên men nguồn, mỗi tank kèm `tank_id`/`tank_lm`/`product_name` (Dịch bia CỦA
       RIÊNG tank đó, VD "B25" + "Sapphire 14oP") — frontend ghép thành nhãn "B25 — Sapphire 14oP"
       và dùng `tank_id` để bấm "truy ngược" xem lại chỉ tiêu CT chính/phụ (chỉ tiêu chất lượng
@@ -505,8 +507,9 @@ def export_filter_production_xlsx(db: Session, days: int = 3650) -> bytes:
     headers = ["Mẻ lọc số", "Lô lọc", "Kiểu", "Mẻ cuối", "Tank lên men", "Tank thành phẩm",
               "Ngày lọc", "Sản lượng lọc (lít)", "Loại bia"]
     ws.append(headers)
-    # Tô màu cột "Sản lượng lọc" theo đúng phân loại Thấp/Cao (mirror màu đỏ/xanh trên web) — kể
-    # cả dòng "Mẻ cuối" cũng tô theo phân loại thật, không loại trừ (yêu cầu người dùng 2026-10-02).
+    # Tô màu cột "Sản lượng lọc" theo đúng phân loại Thấp/Cao (mirror màu đỏ/xanh trên web) — BỎ
+    # QUA dòng "Mẻ cuối" (không tô), mẻ vét sản lượng thấp là chuyện bình thường, không phải cảnh
+    # báo hiệu suất (đổi lại quyết định 2026-10-02, theo yêu cầu người dùng 2026-10-07).
     fill_by_cls = {"thap": PatternFill("solid", fgColor="FFC7CE"), "cao": PatternFill("solid", fgColor="C6EFCE")}
     v_l_col = headers.index("Sản lượng lọc (lít)") + 1
     # Mỗi tank/BBT kèm thẳng Dịch bia/Loại bia của riêng nó (VD "B25 - Sapphire 14oP") — bỏ cột
@@ -523,7 +526,7 @@ def export_filter_production_xlsx(db: Session, days: int = 3650) -> bytes:
             ", ".join(bbt_label(b) for b in r["bbt_list"]), _fmt_vn_dt(r["ended_at"]), r["v_l"],
             r["beer_type_name"] or "",
         ])
-        fill = fill_by_cls.get(r["classification"])
+        fill = fill_by_cls.get(r["classification"]) if not r["is_final"] else None
         if fill:
             ws.cell(row=ws.max_row, column=v_l_col).fill = fill
     for col_idx in range(1, len(headers) + 1):

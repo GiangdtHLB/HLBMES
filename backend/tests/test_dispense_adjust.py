@@ -249,6 +249,39 @@ def test_adjust_decrease_blocked_when_own_output_consumed_downstream(client, adm
     assert blocked.status_code == 409, blocked.text
 
 
+def test_adjust_decrease_blocked_when_lot_consumed_by_other_batch_since(client, admin_h):
+    """Lô mà mẻ này đã lấy, nếu bị MẺ KHÁC dùng tiếp (rút cạn) sau đó, không thể hoàn lại nữa dù
+    chính mẻ này chưa khóa EBR — hoàn lúc này sẽ tạo tồn ảo (lô báo "còn hàng" nhưng vật lý không
+    còn gì, do mẻ khác đã lấy hết) — phát hiện thực tế 2026-10-07 khi audit theo yêu cầu người
+    dùng, chưa từng xảy ra trên dữ liệu thật nhưng lỗ hổng cấu trúc có thật. Mirror đúng chặn
+    "lô đã bị động tới" của warehouse.py::_lot_touched_since."""
+    material_id, code = _new_material(client, admin_h, "DECTOUCH01")
+    lot_id = _receive_workshop_lot(client, admin_h, material_id, 10, days_to_expiry=10)
+    version_id = _recipe_version(client, admin_h, "DECTOUCH01", code, qty=100, base_qty=100)
+    batch_a = _new_batch(client, admin_h, version_id, planned_qty=100, suffix="DECTOUCH01-A", allow_shortage=True)
+    disp_a = client.post(f"/api/dispense/{batch_a}", headers=admin_h,
+                        json={"lines": [{"material_code": code, "quantity": 4}]})
+    assert disp_a.status_code == 200, disp_a.text
+
+    batch_b = _new_batch(client, admin_h, version_id, planned_qty=100, suffix="DECTOUCH01-B", allow_shortage=True)
+    disp_b = client.post(f"/api/dispense/{batch_b}", headers=admin_h,
+                        json={"lines": [{"material_code": code, "quantity": 6}]})
+    assert disp_b.status_code == 200, disp_b.text   # mẻ B lấy nốt 6kg còn lại -> lô về 0
+
+    lot_before = next(l for l in client.get("/api/lots", headers=admin_h).json() if l["lot_id"] == lot_id)
+    assert lot_before["quantity"] == 0.0
+
+    blocked = client.post(f"/api/dispense/{batch_a}/adjust", headers=admin_h,
+                          json={"material_code": code, "new_actual": 2, "reason": "cân lại thấy dùng ít hơn"})
+    assert blocked.status_code == 409, blocked.text
+    assert "dùng tiếp" in blocked.json()["detail"].lower()
+
+    # Không đụng gì tới tồn kho hay Thực tế của mẻ A — chặn TRƯỚC khi sửa gì (all-or-nothing).
+    lot_after = next(l for l in client.get("/api/lots", headers=admin_h).json() if l["lot_id"] == lot_id)
+    assert lot_after["quantity"] == 0.0
+    assert _bom_actual(client, admin_h, batch_a, code) == 4.0
+
+
 def test_adjust_no_op_when_same_value_rejected(client, admin_h):
     material_id, code = _new_material(client, admin_h, "NOOP01")
     _receive_workshop_lot(client, admin_h, material_id, 10, days_to_expiry=10)

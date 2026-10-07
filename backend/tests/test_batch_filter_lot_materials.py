@@ -223,6 +223,79 @@ def test_add_filter_lot_material_from_workshop_lot_deducts_stock(client, admin_h
     assert _lot_id_by_code(client, admin_h, f"LOT-MAT-{suffix}-PX")["quantity"] == 50
 
 
+def test_update_filter_lot_material_qty_adjusts_stock_both_directions(client, admin_h):
+    """Nút "Sửa" — đổi số lượng 1 dòng NVL đã dùng, giữ nguyên lô đã chọn, tồn kho phân xưởng
+    điều chỉnh đúng theo chênh lệch cả khi tăng lẫn giảm (yêu cầu người dùng 2026-10-06: "thêm
+    nút sửa, cho sửa số lượng")."""
+    suffix = "FLMU-UPD"
+    material_id = _a_material_with_stock(client, admin_h, f"MAT-{suffix}", qty_workshop=50)
+    filter_lot_id = _make_filter_lot(client, admin_h, suffix)
+    _finish_only_source(client, admin_h, filter_lot_id)
+
+    add = client.post(f"/api/batch-filter-lots/{filter_lot_id}/materials", headers=admin_h,
+                      json={"material_id": material_id, "quantity": 12})
+    assert add.status_code == 201, add.text
+    usage_id = add.json()[0]["usage_id"]
+    assert _lot_id_by_code(client, admin_h, f"LOT-MAT-{suffix}-PX")["quantity"] == 38
+
+    # Tăng số lượng 12 -> 20: tồn phải giảm thêm đúng 8.
+    inc = client.put(f"/api/batch-filter-lots/materials/{usage_id}", headers=admin_h, json={"quantity": 20})
+    assert inc.status_code == 200, inc.text
+    assert inc.json()["quantity"] == 20
+    assert _lot_id_by_code(client, admin_h, f"LOT-MAT-{suffix}-PX")["quantity"] == 30
+
+    # Giảm số lượng 20 -> 5: tồn phải tăng lại đúng 15.
+    dec = client.put(f"/api/batch-filter-lots/materials/{usage_id}", headers=admin_h, json={"quantity": 5})
+    assert dec.status_code == 200, dec.text
+    assert dec.json()["quantity"] == 5
+    assert _lot_id_by_code(client, admin_h, f"LOT-MAT-{suffix}-PX")["quantity"] == 45
+
+
+def test_update_filter_lot_material_qty_insufficient_stock_blocked(client, admin_h):
+    suffix = "FLMU-UPDSHORT"
+    material_id = _a_material_with_stock(client, admin_h, f"MAT-{suffix}", qty_workshop=20)
+    filter_lot_id = _make_filter_lot(client, admin_h, suffix)
+    _finish_only_source(client, admin_h, filter_lot_id)
+
+    add = client.post(f"/api/batch-filter-lots/{filter_lot_id}/materials", headers=admin_h,
+                      json={"material_id": material_id, "quantity": 12})
+    assert add.status_code == 201, add.text
+    usage_id = add.json()[0]["usage_id"]
+
+    # Tồn còn 8kg sau khi dùng 12/20 — xin tăng lên 25 (vượt cả 8+12=20 đang có sẵn) phải bị chặn.
+    blocked = client.put(f"/api/batch-filter-lots/materials/{usage_id}", headers=admin_h, json={"quantity": 25})
+    assert blocked.status_code == 409, blocked.text
+    assert "không hợp lệ" in blocked.json()["detail"].lower()
+    assert _lot_id_by_code(client, admin_h, f"LOT-MAT-{suffix}-PX")["quantity"] == 8
+
+
+def test_update_filter_lot_material_qty_allowed_after_kcs_approve_blocked_after_ebr_lock(client, admin_h):
+    suffix = "FLMU-UPDLOCK"
+    material_id = _a_material_with_stock(client, admin_h, f"MAT-{suffix}", qty_workshop=50)
+    filter_lot_id = _make_filter_lot(client, admin_h, suffix)
+    _finish_only_source(client, admin_h, filter_lot_id)
+
+    add = client.post(f"/api/batch-filter-lots/{filter_lot_id}/materials", headers=admin_h,
+                      json={"material_id": material_id, "quantity": 12})
+    assert add.status_code == 201, add.text
+    usage_id = add.json()[0]["usage_id"]
+
+    appr = client.post(f"/api/batch-filter-lots/{filter_lot_id}/approve", headers=admin_h)
+    assert appr.status_code == 200, appr.text
+    allowed = client.put(f"/api/batch-filter-lots/materials/{usage_id}", headers=admin_h, json={"quantity": 10})
+    assert allowed.status_code == 200, allowed.text
+
+    sign = client.post(f"/api/batch-filter-lots/{filter_lot_id}/ebr/sign", headers=admin_h,
+                       json={"password": "AdminTest123", "meaning": "Xác nhận lọc đạt", "reason": ""})
+    assert sign.status_code == 200, sign.text
+    lock = client.post(f"/api/batch-filter-lots/{filter_lot_id}/ebr/lock", headers=admin_h,
+                       json={"password": "AdminTest123", "reason": "Lọc hoàn tất"})
+    assert lock.status_code == 200, lock.text
+
+    blocked = client.put(f"/api/batch-filter-lots/materials/{usage_id}", headers=admin_h, json={"quantity": 7})
+    assert blocked.status_code == 409, blocked.text
+
+
 def test_add_filter_lot_material_insufficient_stock_at_ended_at_blocks_all_or_nothing(client, admin_h):
     """Không đủ tồn kho phân xưởng TẠI THỜI ĐIỂM ended_at cho đủ quantity -> chặn hẳn, không trừ
     dở dang (yêu cầu người dùng 2026-09-16: "nếu không đủ vật tư tại thời điểm kết thúc thì sẽ
@@ -240,10 +313,10 @@ def test_add_filter_lot_material_insufficient_stock_at_ended_at_blocks_all_or_no
     assert _lot_id_by_code(client, admin_h, f"LOT-MAT-{suffix}-PX")["quantity"] == 5
 
 
-def test_delete_filter_lot_material_blocked_after_kcs_approve(client, admin_h):
-    """Sau khi KCS duyệt lô lọc (qc_approved=True), không thể xóa/hoàn NVL đã dùng nữa — mirror
-    đúng chặn của delete_filter_lot (yêu cầu người dùng 2026-09-21: "đã dùng rồi thì không thể
-    xóa, hoàn tác, hay sửa")."""
+def test_delete_filter_lot_material_allowed_after_kcs_approve_blocked_after_ebr_lock(client, admin_h):
+    """KCS duyệt lô lọc (qc_approved=True) KHÔNG còn chặn xóa/sửa NVL nữa — chỉ hồ sơ EBR đã
+    PHÊ DUYỆT & KHÓA (locked) mới chặn (đổi từ quy tắc cũ 2026-09-21, theo yêu cầu người dùng
+    2026-10-06: "cho phép sửa khi KCS duyệt, chỉ không được sửa khi đã phê duyệt và khóa hồ sơ")."""
     suffix = "FLMU-APPR"
     material_id = _a_material_with_stock(client, admin_h, f"MAT-{suffix}", qty_workshop=50)
     filter_lot_id = _make_filter_lot(client, admin_h, suffix)
@@ -257,7 +330,22 @@ def test_delete_filter_lot_material_blocked_after_kcs_approve(client, admin_h):
     appr = client.post(f"/api/batch-filter-lots/{filter_lot_id}/approve", headers=admin_h)
     assert appr.status_code == 200, appr.text
 
-    blocked = client.delete(f"/api/batch-filter-lots/materials/{usage_id}", headers=admin_h)
+    allowed = client.delete(f"/api/batch-filter-lots/materials/{usage_id}", headers=admin_h)
+    assert allowed.status_code == 204, allowed.text
+
+    # Thêm lại rồi khóa hồ sơ EBR — lúc này mới thực sự bị chặn.
+    add2 = client.post(f"/api/batch-filter-lots/{filter_lot_id}/materials", headers=admin_h,
+                       json={"material_id": material_id, "quantity": 5})
+    assert add2.status_code == 201, add2.text
+    usage_id2 = add2.json()[0]["usage_id"]
+    sign = client.post(f"/api/batch-filter-lots/{filter_lot_id}/ebr/sign", headers=admin_h,
+                       json={"password": "AdminTest123", "meaning": "Xác nhận lọc đạt", "reason": ""})
+    assert sign.status_code == 200, sign.text
+    lock = client.post(f"/api/batch-filter-lots/{filter_lot_id}/ebr/lock", headers=admin_h,
+                       json={"password": "AdminTest123", "reason": "Lọc hoàn tất"})
+    assert lock.status_code == 200, lock.text
+
+    blocked = client.delete(f"/api/batch-filter-lots/materials/{usage_id2}", headers=admin_h)
     assert blocked.status_code == 409, blocked.text
 
 
