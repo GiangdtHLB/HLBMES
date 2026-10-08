@@ -68,6 +68,21 @@ Luôn để `alembic revision` tự sinh ID ngẫu nhiên. Trước khi push, ki
 `grep -hoE "^revision = ['\"][^'\"]+" backend/alembic/versions/*.py | sort | uniq -d` → phải RỖNG.
 (Đợt này 2 migration mới đụng ID sql_connection 2026-07-10 → phải đổi tay.)
 
+**(G) `alter_column` đổi NULL/NOT NULL THIẾU `existing_type`.** alembic báo lỗi cứng
+"MS-SQL ALTER COLUMN operations with NULL or NOT NULL require the existing_type or a new type_
+be passed" → `alembic upgrade head` dừng giữa chừng, **container prod không khởi động được**.
+SQLite recreate bảng nên không cần, vì vậy không lộ khi test SQLite. Luôn truyền
+`existing_type=...` (VD `batch_op.alter_column('usage_stages', existing_type=sa.JSON(),
+nullable=False)` — migration `82828129a3d1`).
+
+**(H) `col.in_(danh_sách)` quá 2100 phần tử.** SQL Server giới hạn **2100 tham số bind**/câu
+lệnh; `in_()` sinh 1 tham số mỗi phần tử → pyodbc báo `07002 COUNT field incorrect or syntax
+error` → 500. SQLite/Postgres không có giới hạn này nên test không lộ; lỗi chỉ xuất hiện khi
+DỮ LIỆU THẬT đủ lớn (Kho TP 4737 pallet, 2026-10-07 — màn Kho TP (WMS) trắng toàn bộ). Khi
+`in_()` nhận danh sách lấy từ 1 bảng có thể phình to (pallet/case/unit/lot/movement...), phải
+chia mẻ ≤ ~900 — xem `services/wms.py::_scalars_in_chunks`. Cảnh giác nhất ở các chỗ "gộp
+N+1 thành 1 câu IN" — tối ưu đúng về số truy vấn nhưng đổi lại trần tham số.
+
 ## 3. Điều kiện DỮ LIỆU (cổng MSSQL trên DB rỗng KHÔNG bắt được)
 Migration tạo `UNIQUE`/`NOT NULL`/`FK` chạy sạch trên DB test rỗng nhưng **fail trên prod
 có sẵn dữ liệu vi phạm**. VD `create unique index recipe(product_id)` fail vì prod có 2
