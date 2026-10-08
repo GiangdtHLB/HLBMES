@@ -109,25 +109,26 @@ def list_pallets(db: Session, status: str = None, lot_code: str = None) -> list:
     loc_by = {l.loc_id: l for l in db.execute(select(WmsLocation)).scalars().all()}
     product_name_by = _product_name_by_code(db)
     pallets = db.execute(stmt).scalars().all()
-    # Gộp lấy Case của TẤT CẢ pallet bằng 1 câu IN(...) thay vì 1 SELECT riêng/pallet trong vòng
-    # lặp (N+1 query — chậm hẳn khi danh sách dài, audit code 2026-10-04).
-    cases_by_pallet: dict[str, list[Case]] = {}
-    if pallets:
-        pallet_ids = [p.pallet_id for p in pallets]
-        for c in _scalars_in_chunks(
-                db, lambda ids: select(Case).where(Case.pallet_id.in_(ids)), pallet_ids):
-            cases_by_pallet.setdefault(c.pallet_id, []).append(c)
+    # KHÔNG còn tải bảng Case ở đây — trước đó gộp 1 câu IN(...) cho TẤT CẢ pallet (audit
+    # 2026-10-04, tự nó đã hết N+1), nhưng vẫn phải tải TOÀN BỘ dòng Case (hàng trăm nghìn dòng
+    # khi kho đã tích luỹ nhiều pallet) chỉ để tính `total_units`/`cases` — 2 trường KHÔNG CÒN
+    # NƠI NÀO DÙNG nữa (frontend chỉ đọc case_count/units_per_case, xem app.js's showBatchPackLot
+    # + VIEWS.wms's palletRows) từ khi sửa lỗi hiển thị "Vỉ bị nhân khống theo pack_size"
+    # (2026-10-07) — đây chính là nguyên nhân "Kho TP (WMS)" tải chậm trên production (phát hiện
+    # 2026-10-08, màn Kho TP gọi /wms/pallets KHÔNG lọc, kéo hết Case của mọi pallet trong kho).
+    # case_count (số case/thùng THẬT, lưu sẵn trên Pallet) đã đủ cho mọi màn hình hiện có.
+    # Bỏ hẳn query này cũng loại luôn rủi ro vượt 2100 tham số bind của SQL Server mà bản chunk
+    # trước đó (hotfix 2026-10-07, _scalars_in_chunks) phải xử lý — xem DEPLOY-CONTRACT §2(H).
+    # _scalars_in_chunks vẫn dùng ở list_lots (Pallet.lot_code.in_), KHÔNG xoá.
     for p in pallets:
         loc = loc_by.get(p.location_id)
-        cases = cases_by_pallet.get(p.pallet_id, [])
         out.append({"pallet_id": p.pallet_id, "pallet_code": p.pallet_code, "product": p.product,
                     "product_name": product_name_by.get(p.product),
                     "lot_code": p.lot_code, "case_count": p.case_count, "units_per_case": p.units_per_case,
-                    "total_units": sum(c.units for c in cases), "status": p.status, "source": p.source,
+                    "status": p.status, "source": p.source,
                     "location": loc.code if loc else None, "created_by": p.created_by,
                     "created_at": p.created_at.isoformat() if p.created_at else None,
-                    "shipped_at": p.shipped_at.isoformat() if p.shipped_at else None,
-                    "cases": [{"case_code": c.case_code, "units": c.units} for c in cases]})
+                    "shipped_at": p.shipped_at.isoformat() if p.shipped_at else None})
     return out
 
 

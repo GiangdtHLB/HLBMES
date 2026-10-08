@@ -339,3 +339,37 @@ def test_suggest_expired_workshop_lot_excluded(client, admin_h):
     line = sug["lines"][0]
     assert [p["lot_id"] for p in line["picks"]] == [fresh_lot]
     assert line["shortfall"] == 0.0
+
+
+def test_apply_suggested_lot_succeeds_even_if_earlier_lot_drained_by_other_batch_meanwhile(client, admin_h):
+    """Quyết định nghiệp vụ 2026-10-07 (mẻ 2639 thật): lô xếp TRƯỚC (lot_old) còn tồn ĐÚNG lúc mẻ
+    này bắt đầu nấu, nhưng bị 1 mẻ KHÁC rút cạn (về 0) SAU đó — mẻ này không có lựa chọn nào khác
+    ngoài lot_new, nên áp dụng ĐÚNG gợi ý (không đổi gì) phải thành công luôn, KHÔNG bắt nhập lý do
+    (khác hành vi cũ trước ngày này — xem services/dispense.py::_is_fifo_choice)."""
+    material_id, code = _new_material(client, admin_h, "DRAIN01")
+    lot_old = _receive_workshop_lot(client, admin_h, material_id, 10, days_to_expiry=10)
+    lot_new = _receive_workshop_lot(client, admin_h, material_id, 10, days_to_expiry=30)
+    version_id = _recipe_version(client, admin_h, "DRAIN01", code, qty=10, base_qty=100)
+    batch_id = _new_batch(client, admin_h, version_id, planned_qty=100, suffix="DRAIN01A")
+
+    # Mẻ KHÁC bắt đầu SAU batch_id, rút cạn đúng lot_old (còn 0) — mirror đúng tình huống thật.
+    other_batch_id = _new_batch(client, admin_h, version_id, planned_qty=100, suffix="DRAIN01B", allow_shortage=True)
+    drain = client.post(f"/api/batches/{other_batch_id}/consume", headers=admin_h,
+                       json={"lot_id": lot_old, "quantity": 10})
+    assert drain.status_code == 200, drain.text
+    lots_mid = {l["lot_id"]: l["quantity"] for l in client.get("/api/lots", headers=admin_h).json()}
+    assert lots_mid[lot_old] == 0.0 and lots_mid[lot_new] == 10.0
+
+    sug = client.get(f"/api/dispense/{batch_id}/suggest", headers=admin_h).json()
+    line = sug["lines"][0]
+    assert [p["lot_id"] for p in line["picks"]] == [lot_new]   # tự bỏ qua lot_old (đã 0), chọn lot_new
+    # lot_old KHÔNG hiện trong lựa chọn tay nữa (đã về 0 — xem services/dispense.py::suggest_dispense
+    # lọc alternatives theo _lot_avail_qty > 0).
+    assert lot_old not in {a["lot_id"] for a in line["alternatives"]}
+
+    apply = client.post(f"/api/dispense/{batch_id}", headers=admin_h, json={
+        "lines": [{"material_code": code, "lot_id": lot_new, "quantity": 10}]})
+    assert apply.status_code == 200, apply.text
+
+    hist = client.get(f"/api/dispense?batch_id={batch_id}", headers=admin_h).json()
+    assert hist[0]["lines"][0]["fifo_ok"] is True   # không bị gắn lệch FIFO dù lot_old từng xếp trước

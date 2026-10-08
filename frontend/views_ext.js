@@ -543,7 +543,7 @@
           const qty = parseFloat(document.querySelector(`.sg-qty[data-li="${sel.dataset.li}"][data-pi="${sel.dataset.pi}"]`).value) || 0;
           const note = document.querySelector(`.sg-note[data-li="${sel.dataset.li}"][data-pi="${sel.dataset.pi}"]`).value.trim();
           return { material_code: sug.lines[sel.dataset.li].material_code, lot_id: sel.value, quantity: qty, reason: note || null,
-                  allow_over: $("sg_over").checked };
+                  allow_over: $("sg_over").checked, group_code: sug.lines[sel.dataset.li].group_code || null };
         }).filter(l => l.quantity > 0);
         if (!lines.length) { toast("Không có dòng nào để áp dụng", "err"); return; }
         await POST(`/dispense/${bid}`, { lines, note: "Cấp theo gợi ý (FEFO)" });

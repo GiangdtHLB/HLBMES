@@ -574,6 +574,8 @@ class DispenseLineIn(BaseModel):
     lot_id: Optional[str] = None       # None → tự chọn lô theo FEFO
     allow_over: bool = False
     reason: Optional[str] = None       # bắt buộc nếu lot_id KHÁC lô FIFO/FEFO gợi ý
+    group_code: Optional[str] = None   # Nhóm vật tư thay thế (nếu dòng này thuộc 1 nhóm) — xem
+                                        # services/dispense.py::_resolve_fifo_queue_code
 
 
 class DispenseIn(BaseModel):
@@ -2166,6 +2168,7 @@ class BatchFilterLotOut(ORMModel):
     status_label: str = ""
     chiet_status: Optional[str] = None
     chiet_status_label: str = ""
+    used_for_refilter: bool = False
     note: Optional[str] = None
     ended_at: Optional[datetime] = None
     qc_approved: bool = False

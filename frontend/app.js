@@ -3813,7 +3813,9 @@ VIEWS.batchfilterlots = async function () {
             <td class="muted">${plannedVol(f) ?? "—"}</td>
             <td>${badge(f.has_loc_result ? "released" : "pending")}</td>
             <td>${esc(f.to_bbt || "—")}</td>
-            <td>${f.chiet_status ? statusBadge(PACK_LOT_BADGE_CLASS[f.chiet_status], f.chiet_status_label) : '<span class="muted">—</span>'}</td>
+            <td>${[f.used_for_refilter ? statusBadge("review", "Lọc lại") : "",
+                   f.chiet_status ? statusBadge(PACK_LOT_BADGE_CLASS[f.chiet_status], f.chiet_status_label) : ""]
+                   .filter(Boolean).join(" ") || '<span class="muted">—</span>'}</td>
             <td>${f.on_hand} / ${f.volume_hl}</td></tr>`).join("") || '<tr><td colspan=11 class="muted">Chưa có lô lọc nào.</td></tr>'}</tbody></table></div>
       </div>
       <div class="panel" id="fl_detail"><h2>Chi tiết lô lọc</h2><div class="muted">Chọn một lô lọc để xem.</div></div>
