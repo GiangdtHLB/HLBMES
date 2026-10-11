@@ -140,15 +140,31 @@ def test_batch_auto_created_with_one_draw_per_source_on_create(client, admin_h):
 
 
 def test_finish_batch_deducts_each_tank_by_its_own_draw_not_nuoc_bai_khi(client, admin_h):
+    """Lọc phối thực tế: hết tank A mới chuyển rút sang tank B, KHÔNG mở đồng thời 2 tank cùng
+    lúc (yêu cầu người dùng 2026-10-11) — mỗi mẻ chỉ rút từ ĐÚNG 1 nguồn, phối 2 nguồn phải tách
+    thành 2 mẻ kế tiếp nhau (mirror test_add_batch_blocked_until_previous_finished_then_aggregates_across_batches,
+    áp dụng cho nguồn tank thay vì cùng 1 nguồn lặp lại)."""
     filter_lot_id, src_a, src_b, tank_a, tank_b = _draw_two_sources(client, admin_h, "DAW01")
     batches = client.get(f"/api/batch-filter-lots/{filter_lot_id}/batches", headers=admin_h).json()
-    batch_link_id = batches[0]["batch_link_id"]
+    first_batch_id = batches[0]["batch_link_id"]
 
-    fin = client.put(f"/api/batch-filter-lots/batches/{batch_link_id}/finish", headers=admin_h,
-                     json={"draws": [{"source_link_id": src_a, "dich_nha_hl": 300},
-                                     {"source_link_id": src_b, "dich_nha_hl": 150}],
-                          "nuoc_bai_khi_hl": 50})
-    assert fin.status_code == 200, fin.text
+    # Mẻ 1: chỉ rút tank A (tank B để 0) — 2 nguồn cùng > 0 trong 1 mẻ bị chặn (test riêng bên dưới).
+    fin1 = client.put(f"/api/batch-filter-lots/batches/{first_batch_id}/finish", headers=admin_h,
+                      json={"draws": [{"source_link_id": src_a, "dich_nha_hl": 300},
+                                      {"source_link_id": src_b, "dich_nha_hl": 0}],
+                           "nuoc_bai_khi_hl": 50, "batch_seq_no": "1"})
+    assert fin1.status_code == 200, fin1.text
+
+    added = client.post(f"/api/batch-filter-lots/{filter_lot_id}/batches", headers=admin_h)
+    assert added.status_code == 201, added.text
+    second_batch_id = added.json()["batch_link_id"]
+
+    # Mẻ 2: chuyển hẳn sang rút tank B (tank A để 0).
+    fin2 = client.put(f"/api/batch-filter-lots/batches/{second_batch_id}/finish", headers=admin_h,
+                      json={"draws": [{"source_link_id": src_a, "dich_nha_hl": 0},
+                                      {"source_link_id": src_b, "dich_nha_hl": 150}],
+                           "nuoc_bai_khi_hl": 0, "batch_seq_no": "2"})
+    assert fin2.status_code == 200, fin2.text
 
     tank_a_after = client.get(f"/api/batch-tanks/{tank_a}", headers=admin_h).json()
     tank_b_after = client.get(f"/api/batch-tanks/{tank_b}", headers=admin_h).json()
@@ -156,11 +172,25 @@ def test_finish_batch_deducts_each_tank_by_its_own_draw_not_nuoc_bai_khi(client,
     assert tank_b_after["on_hand"] == 850.0   # 1000 - 150 (nước DAW không rút từ tank nào)
 
     fl = client.get(f"/api/batch-filter-lots/{filter_lot_id}", headers=admin_h).json()
-    assert fl["v_dich_hl"] == 450.0   # 300 + 150
+    assert fl["v_dich_hl"] == 450.0   # 300 + 150 (2 mẻ kế tiếp)
     assert fl["nuoc_bai_khi_hl"] == 50.0
     assert fl["volume_hl"] == 500.0   # tổng BBT = dịch 2 tank đã lọc + nước DAW
     assert fl["on_hand"] == 500.0
-    assert fl["ended_at"] is not None   # mẻ duy nhất, đã kết thúc
+    assert fl["ended_at"] is not None   # cả 2 mẻ đã kết thúc
+
+
+def test_finish_batch_rejects_two_sources_over_zero_in_same_batch(client, admin_h):
+    """Chốt quyết định 2026-10-11: không cho "mở đồng thời 2 tank" trong CÙNG 1 mẻ lọc nữa."""
+    filter_lot_id, src_a, src_b, _tank_a, _tank_b = _draw_two_sources(client, admin_h, "SAMEBATCH01")
+    batches = client.get(f"/api/batch-filter-lots/{filter_lot_id}/batches", headers=admin_h).json()
+    batch_link_id = batches[0]["batch_link_id"]
+
+    blocked = client.put(f"/api/batch-filter-lots/batches/{batch_link_id}/finish", headers=admin_h,
+                         json={"draws": [{"source_link_id": src_a, "dich_nha_hl": 300},
+                                         {"source_link_id": src_b, "dich_nha_hl": 150}],
+                              "nuoc_bai_khi_hl": 0})
+    assert blocked.status_code == 409, blocked.text
+    assert "ĐÚNG 1 nguồn" in blocked.json()["detail"]
 
 
 def test_add_batch_blocked_until_previous_finished_then_aggregates_across_batches(client, admin_h):
@@ -214,35 +244,50 @@ def test_toggle_final_batch_flag(client, admin_h):
 
 
 def test_delete_batch_refunds_each_source_and_blocked_when_last_of_filter_lot(client, admin_h):
+    """Mỗi mẻ chỉ rút 1 nguồn (2026-10-11) — 4 mẻ kế tiếp: A=200, B=100, A=50, B=30 (mirror đúng
+    2 "đợt" A+B của bản cũ, chỉ tách mỗi đợt thành 2 mẻ riêng thay vì gộp chung 1 mẻ)."""
     filter_lot_id, src_a, src_b, tank_a, tank_b = _draw_two_sources(client, admin_h, "DELBATCH01")
     batches = client.get(f"/api/batch-filter-lots/{filter_lot_id}/batches", headers=admin_h).json()
-    first_batch_id = batches[0]["batch_link_id"]
-    client.put(f"/api/batch-filter-lots/batches/{first_batch_id}/finish", headers=admin_h,
+    b1 = batches[0]["batch_link_id"]
+    client.put(f"/api/batch-filter-lots/batches/{b1}/finish", headers=admin_h,
               json={"draws": [{"source_link_id": src_a, "dich_nha_hl": 200},
+                              {"source_link_id": src_b, "dich_nha_hl": 0}],
+                   "nuoc_bai_khi_hl": 0, "batch_seq_no": "1"})
+    b2 = client.post(f"/api/batch-filter-lots/{filter_lot_id}/batches", headers=admin_h).json()["batch_link_id"]
+    client.put(f"/api/batch-filter-lots/batches/{b2}/finish", headers=admin_h,
+              json={"draws": [{"source_link_id": src_a, "dich_nha_hl": 0},
                               {"source_link_id": src_b, "dich_nha_hl": 100}],
-                    "nuoc_bai_khi_hl": 0})
-
-    added = client.post(f"/api/batch-filter-lots/{filter_lot_id}/batches", headers=admin_h)
-    second_batch_id = added.json()["batch_link_id"]
-    client.put(f"/api/batch-filter-lots/batches/{second_batch_id}/finish", headers=admin_h,
+                   "nuoc_bai_khi_hl": 0, "batch_seq_no": "2"})
+    b3 = client.post(f"/api/batch-filter-lots/{filter_lot_id}/batches", headers=admin_h).json()["batch_link_id"]
+    client.put(f"/api/batch-filter-lots/batches/{b3}/finish", headers=admin_h,
               json={"draws": [{"source_link_id": src_a, "dich_nha_hl": 50},
+                              {"source_link_id": src_b, "dich_nha_hl": 0}],
+                   "nuoc_bai_khi_hl": 0, "batch_seq_no": "3"})
+    b4 = client.post(f"/api/batch-filter-lots/{filter_lot_id}/batches", headers=admin_h).json()["batch_link_id"]
+    client.put(f"/api/batch-filter-lots/batches/{b4}/finish", headers=admin_h,
+              json={"draws": [{"source_link_id": src_a, "dich_nha_hl": 0},
                               {"source_link_id": src_b, "dich_nha_hl": 30}],
-                    "nuoc_bai_khi_hl": 0})
+                   "nuoc_bai_khi_hl": 0, "batch_seq_no": "4"})
 
     fl_mid = client.get(f"/api/batch-filter-lots/{filter_lot_id}", headers=admin_h).json()
     assert fl_mid["on_hand"] == 380.0   # 200+100+50+30
 
-    deleted = client.delete(f"/api/batch-filter-lots/batches/{second_batch_id}", headers=admin_h)
-    assert deleted.status_code == 200, deleted.text
-    assert deleted.json()["on_hand"] == 300.0   # hoàn 50+30 về 2 tank, chỉ còn mẻ 1
+    # Xóa 2 mẻ cuối (b4: hoàn B 30, b3: hoàn A 50) -> về lại đúng trạng thái "300" như bản cũ.
+    del4 = client.delete(f"/api/batch-filter-lots/batches/{b4}", headers=admin_h)
+    assert del4.status_code == 200, del4.text
+    del3 = client.delete(f"/api/batch-filter-lots/batches/{b3}", headers=admin_h)
+    assert del3.status_code == 200, del3.text
+    assert del3.json()["on_hand"] == 300.0   # hoàn 50+30 về 2 tank, chỉ còn mẻ 1 (A=200) + mẻ 2 (B=100)
 
     tank_a_after = client.get(f"/api/batch-tanks/{tank_a}", headers=admin_h).json()
     tank_b_after = client.get(f"/api/batch-tanks/{tank_b}", headers=admin_h).json()
-    assert tank_a_after["on_hand"] == 800.0   # 1000 - 200 (mẻ 2 đã hoàn 50)
-    assert tank_b_after["on_hand"] == 900.0   # 1000 - 100 (mẻ 2 đã hoàn 30)
+    assert tank_a_after["on_hand"] == 800.0   # 1000 - 200 (mẻ 3 đã hoàn 50)
+    assert tank_b_after["on_hand"] == 900.0   # 1000 - 100 (mẻ 4 đã hoàn 30)
 
-    # mẻ 1 giờ là mẻ DUY NHẤT của cả lô lọc -> chặn xóa
-    blocked = client.delete(f"/api/batch-filter-lots/batches/{first_batch_id}", headers=admin_h)
+    # Xóa tiếp mẻ 2 (B=100) -> chỉ còn mẻ 1 (A=200), là mẻ DUY NHẤT của cả lô lọc -> chặn xóa tiếp.
+    del2 = client.delete(f"/api/batch-filter-lots/batches/{b2}", headers=admin_h)
+    assert del2.status_code == 200, del2.text
+    blocked = client.delete(f"/api/batch-filter-lots/batches/{b1}", headers=admin_h)
     assert blocked.status_code == 409, blocked.text
 
 

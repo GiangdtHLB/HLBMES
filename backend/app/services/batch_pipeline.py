@@ -99,24 +99,30 @@ def _filter_lot_chiet_status(db: Session, fl: BatchFilterLot) -> Optional[str]:
     return "chiet_1_phan"
 
 
-def _refilter_source_ids(db: Session) -> set:
-    """TOÀN BỘ filter_lot_id đã từng được chọn làm NGUỒN "lọc lại" cho 1 lô lọc khác — tính 1 LẦN
-    DUY NHẤT (1 câu query) để list_filter_lots dùng chung cho mọi lô, tránh N+1 (trước đây
-    _stamp_filter_lot_label tự truy vấn riêng cho TỪNG lô — với ~100+ lô lọc tích luỹ, mỗi lần
-    load "Danh sách lô lọc"/"Danh sách lô thành phẩm" (cũng gọi list_filter_lots để tra lotByCode)
-    cộng thêm hàng trăm round-trip DB, gây lag thật — phát hiện 2026-10-08)."""
-    rows = db.execute(select(BatchFilterLotSource.source_filter_lot_id).where(
-        BatchFilterLotSource.source_type == "filter_lot")).scalars().all()
-    return {r for r in rows if r}
+def _refilter_targets(db: Session) -> dict:
+    """TOÀN BỘ lô lọc đã từng được chọn làm NGUỒN "lọc lại" cho 1 lô lọc khác — map
+    source_filter_lot_id -> {filter_lot_id, filter_lot_code, to_bbt} của lô lọc KẾT QUẢ (lô lọc
+    MỚI, lọc lại ra). Tính 1 LẦN DUY NHẤT (1 câu query, JOIN sẵn BatchFilterLot) để
+    list_filter_lots dùng chung cho mọi lô, tránh N+1 (trước đây _stamp_filter_lot_label tự truy
+    vấn riêng cho TỪNG lô — với ~100+ lô lọc tích luỹ, mỗi lần load "Danh sách lô lọc"/"Danh sách
+    lô thành phẩm" (cũng gọi list_filter_lots để tra lotByCode) cộng thêm hàng trăm round-trip DB,
+    gây lag thật — phát hiện 2026-10-08). Chỉ 1 kết quả/nguồn vì backend đã chặn tạo 2 lô lọc lại
+    cùng 1 nguồn (xem create_filter_order's "Đã có lô lọc khác lọc lại từ lô lọc này")."""
+    rows = db.execute(select(BatchFilterLotSource.source_filter_lot_id, BatchFilterLot.filter_lot_id,
+                             BatchFilterLot.filter_lot_code, BatchFilterLot.to_bbt)
+                      .join(BatchFilterLot, BatchFilterLot.filter_lot_id == BatchFilterLotSource.filter_lot_id)
+                      .where(BatchFilterLotSource.source_type == "filter_lot")).all()
+    return {src_id: {"filter_lot_id": fid, "filter_lot_code": code, "to_bbt": bbt}
+            for src_id, fid, code, bbt in rows if src_id}
 
 
-def _stamp_filter_lot_label(db: Session, fl: BatchFilterLot, refilter_source_ids: set = None) -> BatchFilterLot:
+def _stamp_filter_lot_label(db: Session, fl: BatchFilterLot, refilter_targets: dict = None) -> BatchFilterLot:
     """BatchFilterLot trả thẳng ORM object qua response_model=BatchFilterLotOut (không qua dict
     "_out" như BatchTank/BatchFilterOrder) — gắn status_label làm thuộc tính TẠM trên instance
     (không phải cột DB) để Pydantic (from_attributes) đọc được, mirror routers/brewing.py::FILTER_STATUS
     nhưng tính ngay ở đây cho gọn.
 
-    `refilter_source_ids` (tuỳ chọn) — xem _refilter_source_ids: truyền vào khi gọi HÀNG LOẠT
+    `refilter_targets` (tuỳ chọn) — xem _refilter_targets: truyền vào khi gọi HÀNG LOẠT
     (list_filter_lots) để tránh N+1; bỏ trống thì tự truy vấn riêng cho đúng 1 lô này (các đường
     gọi đơn lẻ — create/approve/update 1 lô — chi phí không đáng kể)."""
     fl.status_label = FILTER_LOT_STATUS_LABEL.get(fl.status, fl.status)
@@ -128,13 +134,22 @@ def _stamp_filter_lot_label(db: Session, fl: BatchFilterLot, refilter_source_ids
     # 1 phần vừa lọc lại phần còn lại (yêu cầu người dùng 2026-10-07: "nếu lọc lại thì báo lọc lại,
     # nếu đã chiết 1 phần và vẫn có lọc lại thì là Lọc lại + Chiết 1 phần" — cột "Trạng thái chiết"
     # trước đây hiện "—" y hệt cho cả 2 case "chưa ai đụng" lẫn "đã lọc lại hết", không phân biệt
-    # được). Chỉ cần tồn tại >=1 dòng nguồn, không cần biết khối lượng.
-    if refilter_source_ids is not None:
-        fl.used_for_refilter = fl.filter_lot_id in refilter_source_ids
+    # được). Thêm luôn lô lọc + tank BBT ĐÍCH đã lọc lại ra (yêu cầu người dùng 2026-10-11: "lọc
+    # lại thì lọc lại vào tank BBT nào, xem thế nào" — trước đây chỉ có cờ true/false, không biết
+    # tra ở đâu ra lô kết quả).
+    if refilter_targets is not None:
+        target = refilter_targets.get(fl.filter_lot_id)
     else:
-        fl.used_for_refilter = bool(db.execute(select(func.count()).select_from(BatchFilterLotSource).where(
-            BatchFilterLotSource.source_filter_lot_id == fl.filter_lot_id,
-            BatchFilterLotSource.source_type == "filter_lot")).scalar_one())
+        row = db.execute(select(BatchFilterLotSource.filter_lot_id, BatchFilterLot.filter_lot_code,
+                                BatchFilterLot.to_bbt)
+                         .join(BatchFilterLot, BatchFilterLot.filter_lot_id == BatchFilterLotSource.filter_lot_id)
+                         .where(BatchFilterLotSource.source_filter_lot_id == fl.filter_lot_id,
+                                BatchFilterLotSource.source_type == "filter_lot")).first()
+        target = {"filter_lot_id": row[0], "filter_lot_code": row[1], "to_bbt": row[2]} if row else None
+    fl.used_for_refilter = bool(target)
+    fl.refilter_target_filter_lot_id = target["filter_lot_id"] if target else None
+    fl.refilter_target_filter_lot_code = target["filter_lot_code"] if target else None
+    fl.refilter_target_bbt = target["to_bbt"] if target else None
     # Đã nhập ÍT NHẤT 1 chỉ tiêu Lọc (bất kể đạt/fail) hay chưa — cột "Chất lượng" ở Danh sách lô
     # lọc, xanh lá = đã nhập, cam = chưa (yêu cầu người dùng 2026-09-30) — mirror
     # has_len_men_chinh_result/has_len_men_phu_result ở BatchTank (_tank_out).
@@ -663,16 +678,23 @@ def _filter_order_status(db: Session, order: BatchFilterOrder) -> dict:
 
 
 def _filter_order_tank_lm_names(db: Session, order_id: str) -> list[str]:
-    """Tên tank lên men vật lý (BatchTank.tank_lm) của các nguồn tank_type="tank" thuộc lệnh —
-    hiển thị ở cột "Tank lên men" trong danh sách lệnh lọc, để phân biệt với Lô lên men (mã số,
-    BatchTank.tank_code) — nguồn lọc lại (tank_type="filter_lot") không có tank lên men riêng nên
-    bỏ qua, KHÔNG hiện gì cho loại đó."""
+    """Tên tank lên men vật lý (BatchTank.tank_lm) của các nguồn source_type="tank" thuộc lệnh,
+    CỘNG THÊM tank BBT (lọc lại) của các nguồn source_type="filter_lot" — hiển thị ở cột "Tank
+    lên men" trong danh sách lệnh lọc/lô lọc, để phân biệt với Lô lên men (mã số, BatchTank.
+    tank_code). Trước đây nguồn lọc lại bị BỎ QUA hoàn toàn ở cột này (không hiện gì), khiến 1
+    lệnh "Phối" giữa tank lên men + BBT lọc lại chỉ hiện đúng 1 nửa nguồn, trông như lệnh
+    "Không phối" bình thường — sai (yêu cầu người dùng 2026-10-11: "nếu phối thì phải hiển thị cả
+    2"). Tank BBT ghi thêm nhãn "(lọc lại)" để phân biệt rõ với tank lên men thật."""
     names = []
     for s in list_filter_order_sources(db, order_id):
         if s.source_type == "tank":
             t = db.get(BatchTank, s.source_tank_id)
             if t and t.tank_lm:
                 names.append(t.tank_lm)
+        elif s.source_type == "filter_lot":
+            fl = db.get(BatchFilterLot, s.source_filter_lot_id)
+            if fl and fl.to_bbt:
+                names.append(f"{fl.to_bbt} (lọc lại)")
     return names
 
 
@@ -1204,8 +1226,8 @@ def list_filter_lots(db: Session) -> list[BatchFilterLot]:
     lots = db.execute(select(BatchFilterLot).order_by(BatchFilterLot.created_at.desc())).scalars().all()
     for fl in lots:
         _resync_filter_lot_status_if_stale(db, fl)
-    refilter_source_ids = _refilter_source_ids(db)
-    return [_stamp_filter_lot_label(db, fl, refilter_source_ids) for fl in lots]
+    refilter_targets = _refilter_targets(db)
+    return [_stamp_filter_lot_label(db, fl, refilter_targets) for fl in lots]
 
 
 def get_filter_lot(db: Session, filter_lot_id: str) -> BatchFilterLot:
@@ -1448,6 +1470,26 @@ def finish_filter_lot_batch(db: Session, batch_link_id: str, draws: list[dict],
     if nuoc_bai_khi_hl is not None and nuoc_bai_khi_hl < 0:
         raise DomainError("Nước bài khí (hl) không được âm.")
     existing_draws = {d.source_link_id: d for d in list_batch_draws(db, batch_link_id)}
+    # Thực tế lọc phối (nhiều nguồn): hết tank này mới chuyển rút sang tank kia, KHÔNG mở đồng
+    # thời 2 tank cùng lúc — 1 mẻ lọc (1 đợt chạy máy liên tục) chỉ rút từ ĐÚNG 1 nguồn tại 1 thời
+    # điểm. Trước đây modal "Sửa mẻ lọc" hiện đủ ô cho MỌI nguồn cùng lúc, không chặn gì, dẫn tới
+    # có thể nhập khống nhiều nguồn cùng > 0 vào 1 mẻ như thể chạy song song (yêu cầu người dùng
+    # 2026-10-11: "lọc tank B1 50 hl, khi đủ thì mới lọc sang tank B2, chứ không phải mở 2 tank
+    # cùng lúc"). Chặn ở ĐÚNG 1 nơi (backend) để không phụ thuộc client — muốn phối nhiều nguồn
+    # thì bấm "+ Thêm mẻ" tạo riêng 1 đợt/nguồn, đúng thứ tự thời gian thật. Chỉ áp dụng khi lô lọc
+    # THẬT SỰ có ≥2 nguồn (phối) — lô "Không phối" chỉ 1 nguồn thì không có gì để chặn.
+    if len(existing_draws) > 1:
+        nonzero_sources = sum(1 for item in draws if (item.get("dich_nha_hl") or 0.0) > 1e-9)
+        if nonzero_sources > 1:
+            raise DomainError(
+                "Mỗi mẻ lọc chỉ được rút dịch từ ĐÚNG 1 nguồn tại 1 thời điểm — nếu phối nhiều "
+                'nguồn, bấm "+ Thêm mẻ" để khai riêng 1 đợt mỗi khi chuyển sang nguồn khác (đúng '
+                "cách lọc thực tế: hết tank này mới chuyển sang tank kia, không mở cùng lúc).")
+        # Phối nhiều nguồn, mỗi mẻ giờ ứng với ĐÚNG 1 nguồn — bắt buộc "Mẻ số" để phân biệt từng
+        # đợt (nguồn nào, thứ tự nào), không như "Không phối" (chỉ 1 nguồn, 1 mẻ) vốn không cần
+        # đánh số gì (2026-10-11).
+        if not (batch_seq_no or "").strip():
+            raise DomainError("Nhập Mẻ số — bắt buộc khi phối nhiều nguồn, để phân biệt từng đợt.")
     total_v = 0.0
     for item in draws:
         d = existing_draws.get(item["source_link_id"])

@@ -3528,6 +3528,7 @@ VIEWS.batchfilterorders = async function () {
       <div class="panel" style="margin-top:8px;border:1px solid var(--border)">
         <div class="row" style="align-items:center">
           <h3 style="font-size:14px;margin:0;flex:1">TANK THÀNH PHẨM SỐ ${String(ci + 1).padStart(2, "0")}</h3>
+          ${ci > 0 ? `<button class="btn sm sec" data-fochildcopy="${ci}">Copy từ Tank TP 01</button>` : ""}
           ${foChildren.length > 1 ? `<button class="btn sm sec" data-fochildrm="${ci}">Xóa tank</button>` : ""}
         </div>
         <div class="row">
@@ -3570,6 +3571,11 @@ VIEWS.batchfilterorders = async function () {
     });
     document.querySelectorAll(".foc_category").forEach(sel => sel.onchange = () => { foChildren[parseInt(sel.dataset.ci, 10)].category = sel.value; });
     document.querySelectorAll("[data-fochildrm]").forEach(b => b.onclick = () => { foChildren.splice(parseInt(b.dataset.fochildrm, 10), 1); renderFoChildren(); });
+    document.querySelectorAll("[data-fochildcopy]").forEach(b => b.onclick = () => {
+      const ci = parseInt(b.dataset.fochildcopy, 10);
+      foChildren[ci] = JSON.parse(JSON.stringify(foChildren[0]));
+      renderFoChildren();
+    });
   }
 
   $("view-batchfilterorders").innerHTML = `
@@ -3589,7 +3595,7 @@ VIEWS.batchfilterorders = async function () {
     <div class="split">
       <div class="panel"><h2>Danh sách lệnh lọc</h2>
         <input class="searchbox" data-tbl="t_flotorder" placeholder="Tìm theo số lệnh, tank, trạng thái..."/>
-        <div class="tablewrap"><table id="t_flotorder"><thead><tr><th>Số lệnh</th><th>Kiểu</th><th>Tank lên men</th><th>Trạng thái</th><th>Thực tế/KH (hl)</th></tr></thead>
+        <div class="tablewrap"><table id="t_flotorder"><thead><tr><th>Số lệnh</th><th>Kiểu</th><th>Tank lên men/Tank TP</th><th>Trạng thái</th><th>Thực tế/KH (hl)</th></tr></thead>
           <tbody>${orders.map(o => `<tr data-flotorder="${o.order_id}" style="cursor:pointer">
             <td><code class="k">${esc(o.order_code)}</code></td><td>${o.blend_mode === "phoi" ? "Phối" : "Không phối"}</td>
             <td class="muted">${o.tank_lm_names && o.tank_lm_names.length ? esc(o.tank_lm_names.join(", ")) : "—"}</td>
@@ -3802,7 +3808,7 @@ VIEWS.batchfilterlots = async function () {
       <div class="panel"><h2>Danh sách lô lọc</h2>
         ${yearFilterControl("batchfilterlots", YEARS.batchfilterlots)}
         <input class="searchbox" data-tbl="t_batfilterlot" placeholder="Tìm theo mã lô, sản phẩm, trạng thái..."/>
-        <div class="tablewrap"><table id="t_batfilterlot"><thead><tr><th>Mã lô lọc</th><th>Ngày lọc</th><th>Lệnh lọc</th><th>Trạng thái</th><th>Sản phẩm bia</th><th>Tank lên men</th><th>Kế hoạch (hl)</th><th>Chất lượng</th><th>Tank BBT</th><th>Trạng thái chiết</th><th>Tồn/Tổng (hl)</th></tr></thead>
+        <div class="tablewrap"><table id="t_batfilterlot"><thead><tr><th>Mã lô lọc</th><th>Ngày lọc</th><th>Lệnh lọc</th><th>Trạng thái</th><th>Sản phẩm bia</th><th>Tank lên men/Tank TP</th><th>Kế hoạch (hl)</th><th>Chất lượng</th><th>Tank BBT</th><th>Trạng thái chiết</th><th>Tồn/Tổng (hl)</th></tr></thead>
           <tbody>${lotsInYear.map(f => `<tr data-flot="${f.filter_lot_id}" style="cursor:pointer">
             <td><code class="k">${esc(f.filter_lot_code)}</code></td>
             <td class="muted">${fmt(f.ended_at)}</td>
@@ -3813,7 +3819,7 @@ VIEWS.batchfilterlots = async function () {
             <td class="muted">${plannedVol(f) ?? "—"}</td>
             <td>${badge(f.has_loc_result ? "released" : "pending")}</td>
             <td>${esc(f.to_bbt || "—")}</td>
-            <td>${[f.used_for_refilter ? statusBadge("review", "Lọc lại") : "",
+            <td>${[f.used_for_refilter ? `<span class="badge review" title="Đã lọc lại thành ${esc(f.refilter_target_filter_lot_code || "—")}${f.refilter_target_bbt ? " — vào tank " + esc(f.refilter_target_bbt) : ""}">Lọc lại</span>` : "",
                    f.chiet_status ? statusBadge(PACK_LOT_BADGE_CLASS[f.chiet_status], f.chiet_status_label) : ""]
                    .filter(Boolean).join(" ") || '<span class="muted">—</span>'}</td>
             <td>${f.on_hand} / ${f.volume_hl}</td></tr>`).join("") || '<tr><td colspan=11 class="muted">Chưa có lô lọc nào.</td></tr>'}</tbody></table></div>
@@ -3879,11 +3885,12 @@ async function showBatchFilterLot(filterLotId) {
       <dt>Tồn/Tổng (V Bia)</dt><dd>${f.on_hand} / ${f.volume_hl} hl</dd>
       <dt>Tank thành phẩm</dt><dd>${esc(f.to_bbt || "—")}</dd>
       <dt>Kết thúc</dt><dd class="muted">${f.ended_at ? fmt(f.ended_at) : "chưa kết thúc hết mẻ lọc"}</dd>
+      ${f.used_for_refilter ? `<dt>Đã lọc lại thành</dt><dd><a href="#" id="fl_gotorefilter" style="color:var(--accent2)">${esc(f.refilter_target_filter_lot_code || "—")}</a>${f.refilter_target_bbt ? ` — vào tank <code class="k">${esc(f.refilter_target_bbt)}</code>` : ""}</dd>` : ""}
       ${f.order_id ? `<dt>Lệnh lọc</dt><dd><a href="#" id="fl_gotoorder" style="color:var(--accent2)">Xem lệnh lọc nguồn</a></dd>` : ""}
       <dt>Người tạo / Ngày giờ tạo</dt><dd class="muted">${esc(f.created_by || "—")} · ${fmt(f.created_at)}</dd>
     </dl>
     <h3>Các mẻ lọc</h3>
-    <div class="muted" style="margin-bottom:8px">1 mẻ lọc có thể rút dịch CÙNG LÚC từ nhiều nguồn (VD phối tank lên men 01 + tank 02 trong 1 lần chạy máy) — "Mẻ cuối" đánh dấu mẻ vét, dùng để loại khỏi so sánh hiệu suất.</div>
+    <div class="muted" style="margin-bottom:8px">Nếu phối nhiều nguồn: 1 mẻ lọc chỉ rút từ ĐÚNG 1 nguồn tại 1 thời điểm (hết tank này mới chuyển sang tank kia) — hết nguồn này thì bấm "+ Thêm mẻ" để khai đợt kế tiếp cho nguồn khác, không nhập nhiều nguồn cùng lúc trong 1 mẻ. "Mẻ cuối" đánh dấu mẻ vét, dùng để loại khỏi so sánh hiệu suất.</div>
     <div class="tablewrap"><table>
       <thead><tr><th>Mẻ số</th>${sources.map(s => `<th>${esc(sourceLabel(s))} (hl)</th>`).join("")}<th>Nước DAW (hl)</th><th>Bắt đầu</th><th>Kết thúc lúc</th><th>Mẻ cuối</th><th>Ghi chú</th><th></th></tr></thead>
       <tbody>${batches.map(b => {
@@ -3974,6 +3981,10 @@ async function showBatchFilterLot(filterLotId) {
     };
     setTimeout(tick, 50);
   };
+  if ($("fl_gotorefilter")) $("fl_gotorefilter").onclick = (e) => {
+    e.preventDefault();
+    showBatchFilterLot(f.refilter_target_filter_lot_id);
+  };
   if ($("fl_approve")) $("fl_approve").onclick = () => guard(async () => {
     const r = await POST(`/batch-filter-lots/${filterLotId}/approve`, {});
     toast("Đã duyệt KCS lô lọc" + (r.qc_has_fail ? " (còn chỉ tiêu FAIL — cảnh báo)" : "")); showBatchFilterLot(filterLotId);
@@ -3993,9 +4004,12 @@ async function showBatchFilterLot(filterLotId) {
     const id = btn.dataset.finbatch;
     const b = batches.find(x => x.batch_link_id === id);
     const drawMap = Object.fromEntries(b.draws.map(d => [d.source_link_id, d.dich_nha_hl]));
+    const seqRequired = sources.length > 1;   // phối nhiều nguồn: bắt buộc Mẻ số để phân biệt từng đợt
     modal(`<h3>${b.ended_at ? "Sửa" : "Kết thúc"} mẻ lọc${b.batch_seq_no ? " " + esc(b.batch_seq_no) : ""}</h3>
-      <div class="field"><label>Mẻ số</label><input id="fbm_seq" value="${esc(b.batch_seq_no || "")}" placeholder="(tuỳ chọn)"/></div>
+      <div class="field"><label>Mẻ số${seqRequired ? ' <span style="color:var(--red)">*</span>' : ""}</label>
+        <input id="fbm_seq" value="${esc(b.batch_seq_no || "")}" placeholder="${seqRequired ? "Bắt buộc — VD: 1, 2..." : "(tuỳ chọn)"}"/></div>
       <h4 style="margin-top:10px">V dịch nha rút (hl)</h4>
+      <div class="muted" style="font-size:12px;margin-bottom:4px">${sources.length > 1 ? "Chỉ nhập 1 nguồn/mẻ — nhập xong 1 ô, ô còn lại tự khóa." : ""}</div>
       <div class="row">
         ${sources.map(s => `<div class="field"><label>${esc(sourceLabel(s))}</label>
           <input type="number" class="fbm-draw" data-src="${s.link_id}" value="${drawMap[s.link_id] ?? ""}" style="width:100px"/></div>`).join("")}
@@ -4007,12 +4021,31 @@ async function showBatchFilterLot(filterLotId) {
       </div>
       <div class="field" style="margin-top:10px"><label>Ghi chú</label><textarea id="fbm_note" rows="2" placeholder="(tuỳ chọn)">${esc(b.note || "")}</textarea></div>
       <button class="btn" id="fbm_save" style="margin-top:14px">Lưu</button>`);
+    if (sources.length > 1) {
+      // Phối nhiều nguồn: nhập > 0 vào 1 ô thì KHÓA luôn các ô còn lại (mờ đi, không cho gõ) —
+      // ngăn ngay từ lúc nhập, không đợi tới lúc bấm Lưu mới báo lỗi (yêu cầu người dùng
+      // 2026-10-11: "khi nhập vào 1 tank rồi, thì tank kia sẽ mờ đi không cho nhập"). Về lại 0/rỗng
+      // thì tự mở khóa lại các ô khác.
+      const drawInputs = Array.from(document.querySelectorAll(".fbm-draw"));
+      const syncLock = () => {
+        const active = drawInputs.find(inp => parseFloat(inp.value) > 0);
+        drawInputs.forEach(inp => { inp.disabled = !!active && inp !== active; });
+      };
+      drawInputs.forEach(inp => inp.oninput = syncLock);
+      syncLock();
+    }
     $("fbm_save").onclick = () => guard(async () => {
       const draws = sources.map(s => {
         const input = document.querySelector(`.fbm-draw[data-src="${s.link_id}"]`);
         return { source_link_id: s.link_id, dich_nha_hl: parseFloat(input.value) || 0 };
       });
       if (!draws.some(d => d.dich_nha_hl > 0)) throw new Error("Nhập V dịch nha (hl) cho ít nhất 1 nguồn.");
+      // Phối nhiều nguồn: chỉ rút từ ĐÚNG 1 nguồn/mẻ (xem muted phía trên) — báo lỗi ngay ở
+      // client, không cần đợi round-trip server (server vẫn tự chặn lại, xem finish_filter_lot_batch).
+      if (sources.length > 1 && draws.filter(d => d.dich_nha_hl > 0).length > 1)
+        throw new Error('Mỗi mẻ lọc chỉ rút từ ĐÚNG 1 nguồn — bấm "+ Thêm mẻ" để khai riêng đợt cho nguồn khác.');
+      if (seqRequired && !$("fbm_seq").value.trim())
+        throw new Error("Nhập Mẻ số — bắt buộc khi phối nhiều nguồn, để phân biệt từng đợt.");
       const startVal = $("fbm_start").value;
       const endVal = $("fbm_end").value;
       if (!endVal) throw new Error("Nhập thời gian kết thúc.");
@@ -4398,9 +4431,14 @@ async function showBatchPackLot(packLotId) {
   const listRow = document.querySelector(`[data-pklot2="${packLotId}"]`);
   if (listRow) {
     const cells = listRow.querySelectorAll("td");
-    cells[3].textContent = p.qty;
-    cells[5].innerHTML = statusBadge(PACK_LOT_BADGE_CLASS[p.status], p.status_label);
-    cells[6].innerHTML = pkDuyetCellHtml(p);
+    // Chỉ số cột ĐÚNG theo bảng hiện tại: [0]Mã lô TP [1]Ngày chiết [2]Lô lọc nguồn [3]Tank BBT
+    // [4]SL cấp chiết [5]Số lô bia [6]Trạng thái [7]Duyệt — trước đây lệch 1 cột (chèn thêm cột
+    // "Lô lọc nguồn" sau này nhưng quên dời lại các chỉ số vá tay ở đây), khiến bấm vào 1 lô làm
+    // "Số lô bia" bị ghi đè thành chữ trạng thái ("Hoàn thành"...) và "Tank BBT" bị ghi đè thành
+    // số lít — phát hiện 2026-10-11.
+    cells[4].textContent = p.qty;
+    cells[6].innerHTML = statusBadge(PACK_LOT_BADGE_CLASS[p.status], p.status_label);
+    cells[7].innerHTML = pkDuyetCellHtml(p);
   }
   const f = await GET(`/batch-filter-lots/${p.filter_lot_id}`);
   const fp = finishedProducts.find(x => x.finished_product_id === p.finished_product_id);

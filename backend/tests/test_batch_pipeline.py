@@ -113,15 +113,18 @@ def _finish_source(client, admin_h, source, dich_nha_hl, nuoc_bai_khi_hl=0):
                            "nuoc_bai_khi_hl": nuoc_bai_khi_hl})
 
 
-def _finish_batch_all_sources(client, admin_h, filter_lot_id, source_amounts, nuoc_bai_khi_hl=0):
-    """Kết thúc mẻ lọc số 1 của 1 lô lọc CÙNG LÚC cho MỌI nguồn phối (1 lần chạy máy) —
-    `source_amounts`: {source_link_id: dich_nha_hl}."""
+def _finish_batch_all_sources(client, admin_h, filter_lot_id, source_amounts, nuoc_bai_khi_hl=0,
+                              batch_seq_no=None):
+    """Kết thúc mẻ lọc MỚI NHẤT của 1 lô lọc — `source_amounts`: {source_link_id: dich_nha_hl}
+    (từ 2026-10-11: chỉ 1 nguồn được > 0 nếu lô có ≥2 nguồn, bắt buộc kèm `batch_seq_no`, xem
+    services/batch_pipeline.py::finish_filter_lot_batch — tên hàm giữ nguyên "all_sources" vì vẫn
+    nhận đủ dict mọi nguồn (đa số 0), chỉ khác là KHÔNG còn cho >1 nguồn cùng > 0 nữa)."""
     batches = client.get(f"/api/batch-filter-lots/{filter_lot_id}/batches", headers=admin_h).json()
     batch_link_id = batches[-1]["batch_link_id"]
     return client.put(f"/api/batch-filter-lots/batches/{batch_link_id}/finish", headers=admin_h,
                       json={"draws": [{"source_link_id": sid, "dich_nha_hl": v}
                                      for sid, v in source_amounts.items()],
-                           "nuoc_bai_khi_hl": nuoc_bai_khi_hl})
+                           "nuoc_bai_khi_hl": nuoc_bai_khi_hl, "batch_seq_no": batch_seq_no})
 
 
 def test_merge_batches_into_tank_and_double_link_blocked(client, admin_h):
@@ -200,9 +203,14 @@ def test_draw_blend_finish_and_split_pack_lots(client, admin_h):
     sources = client.get(f"/api/batch-filter-lots/{filter_lot_id}/sources", headers=admin_h).json()
     assert len(sources) == 2
 
-    # 1 mẻ lọc phối cả 2 tank trong CÙNG 1 lần chạy máy -> kết thúc 1 lần cho cả 2 khoản rút.
-    fin = _finish_batch_all_sources(client, admin_h, filter_lot_id,
-                                    {s["link_id"]: 900 for s in sources})
+    # Lọc phối tuần tự (2026-10-11): hết tank 1 mới chuyển rút sang tank 2, mỗi mẻ chỉ 1 nguồn.
+    fin1 = _finish_batch_all_sources(client, admin_h, filter_lot_id, {sources[0]["link_id"]: 900},
+                                     batch_seq_no="1")
+    assert fin1.status_code == 200, fin1.text
+    added = client.post(f"/api/batch-filter-lots/{filter_lot_id}/batches", headers=admin_h)
+    assert added.status_code == 201, added.text
+    fin = _finish_batch_all_sources(client, admin_h, filter_lot_id, {sources[1]["link_id"]: 900},
+                                    batch_seq_no="2")
     assert fin.status_code == 200, fin.text
 
     fl = client.get(f"/api/batch-filter-lots/{filter_lot_id}", headers=admin_h).json()
