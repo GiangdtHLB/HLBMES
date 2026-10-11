@@ -85,15 +85,16 @@ def _make_bbt_line(client, admin_h, suffix):
     return r.json()["code"]
 
 
-def _finish_source(client, admin_h, source, dich_nha_hl, nuoc_bai_khi_hl=0):
+def _finish_source(client, admin_h, source, dich_nha_hl, nuoc_bai_khi_hl=0, batch_seq_no=None):
     """1 mẻ lọc tự có sẵn 1 khoản rút (draw) cho MỖI nguồn ngay lúc tạo lô lọc — "Kết thúc" tức
     là kết thúc mẻ đó, khai V dịch nha cho khoản rút của nguồn này. `source` là dict trả về từ
-    GET .../sources (cần cả filter_lot_id lẫn link_id)."""
+    GET .../sources (cần cả filter_lot_id lẫn link_id). `batch_seq_no` bắt buộc khi lô lọc có
+    ≥2 nguồn (phối, 2026-10-11) — chỉ cần truyền ở các test phối, bỏ trống vẫn ổn cho lô 1 nguồn."""
     batches = client.get(f"/api/batch-filter-lots/{source['filter_lot_id']}/batches", headers=admin_h).json()
     batch_link_id = batches[-1]["batch_link_id"]
     return client.put(f"/api/batch-filter-lots/batches/{batch_link_id}/finish", headers=admin_h,
                       json={"draws": [{"source_link_id": source["link_id"], "dich_nha_hl": dich_nha_hl}],
-                           "nuoc_bai_khi_hl": nuoc_bai_khi_hl})
+                           "nuoc_bai_khi_hl": nuoc_bai_khi_hl, "batch_seq_no": batch_seq_no})
 
 
 def test_create_order_single_tank_and_draw_filter_lot(client, admin_h):
@@ -268,15 +269,17 @@ def test_blend_order_needs_all_tank_sources_drained_not_just_one(client, admin_h
     src_b = next(s for s in sources if s["source_tank_id"] == tank_b["tank_id"])
 
     # Chỉ rút hết tank A — tank B vẫn còn nguyên (chưa rút gì).
-    fin_a = _finish_source(client, admin_h, src_a, vol_a)
+    fin_a = _finish_source(client, admin_h, src_a, vol_a, batch_seq_no="1")
     assert fin_a.status_code == 200, fin_a.text
 
     mid = client.get(f"/api/batch-filter-orders/{order['order_id']}", headers=admin_h).json()
     assert mid["tank_sources_drained"] is False   # tank B chưa hết -> CHƯA tự động hoàn thành
     assert mid["status"] == "dang_loc"
 
-    # Rút hết nốt tank B -> CẢ HAI đã lọc hết -> lệnh tự động hoàn thành.
-    fin_b = _finish_source(client, admin_h, src_b, vol_b)
+    added = client.post(f"/api/batch-filter-lots/{draw['filter_lot_id']}/batches", headers=admin_h)
+    assert added.status_code == 201, added.text
+    # Rút hết nốt tank B (mẻ MỚI, tuần tự sau khi hết tank A) -> CẢ HAI đã lọc hết -> lệnh tự động hoàn thành.
+    fin_b = _finish_source(client, admin_h, src_b, vol_b, batch_seq_no="2")
     assert fin_b.status_code == 200, fin_b.text
 
     done = client.get(f"/api/batch-filter-orders/{order['order_id']}", headers=admin_h).json()

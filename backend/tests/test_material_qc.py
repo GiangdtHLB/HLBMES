@@ -698,11 +698,15 @@ def test_free_issue_issued_at_backdates_ts_but_created_at_stays_now(client, admi
     """"Ngày xuất tự do" (issued_at) chỉ khai lùi `ts` (ngày hiệu lực) — `created_at` (ngày tạo
     phiếu thật) vẫn luôn là thời điểm gọi API, không đổi theo issued_at."""
     mat_id = _create_material(client, admin_h, "FREE-ISSUED-AT")
+    received_at = (datetime.now(timezone.utc) - timedelta(days=14)).isoformat()
     rc = client.post("/api/warehouse/receive", headers=thukho_h,
-                     json={"lot_code": "LOT-FREE-ISSUED-AT", "material_id": mat_id, "quantity": 50, "uom": "kg"})
+                     json={"lot_code": "LOT-FREE-ISSUED-AT", "material_id": mat_id, "quantity": 50, "uom": "kg",
+                           "received_at": received_at})
     lot_id = rc.json()["lot_id"]
 
-    backdated = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+    # issued_at phải SAU ngày nhập (received_at) — issue() nay chặn khai lùi ngày xuất sớm hơn
+    # lúc lô thực sự có đủ tồn (xem services/warehouse.py::issue, rà soát 2026-10-11).
+    backdated = (datetime.now(timezone.utc) - timedelta(days=5)).isoformat()
     before_call = datetime.now(timezone.utc)
     issue = client.post("/api/warehouse/issue", headers=admin_h,
                         json={"lot_id": lot_id, "quantity": 10, "mode": "tu_do", "reason": "Thử nghiệm",
@@ -713,7 +717,7 @@ def test_free_issue_issued_at_backdates_ts_but_created_at_stays_now(client, admi
     m = next(m for m in hist if m["lot_id"] == lot_id)
     ts = datetime.fromisoformat(m["ts"].replace("Z", "+00:00"))
     created_at = datetime.fromisoformat(m["created_at"].replace("Z", "+00:00"))
-    assert ts < before_call - timedelta(days=29)
+    assert ts < before_call - timedelta(days=4)
     assert created_at >= before_call - timedelta(seconds=5)
 
 
@@ -726,6 +730,29 @@ def test_free_issue_issued_at_cannot_be_future(client, admin_h, thukho_h):
     r = client.post("/api/warehouse/issue", headers=admin_h,
                     json={"lot_id": lot_id, "quantity": 5, "mode": "tu_do", "issued_at": future})
     assert r.status_code == 409, r.text
+
+
+def test_free_issue_issued_at_cannot_be_before_receipt(client, admin_h, thukho_h):
+    """Bug thực tế 2026-10-11 (rà soát toàn bộ luồng Đề nghị/Điều chuyển): issue() trước đây chỉ
+    chặn `issued_at` ở TƯƠNG LAI, không chặn ngày trong QUÁ KHỨ trước khi lô thực sự về kho — cho
+    phép ghi StockMovement("issue") ở 1 ngày mà lô còn chưa tồn tại. Nay phải chặn (cùng lớp lỗi
+    "backdated transfer trước khi nhận kho" đã vá ở fulfill_request_line, 2026-09-18)."""
+    mat_id = _create_material(client, admin_h, "FREE-ISSUED-BEFORE-RECEIPT")
+    received_at = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    rc = client.post("/api/warehouse/receive", headers=thukho_h,
+                     json={"lot_code": "LOT-FREE-ISSUED-BEFORE-RECEIPT", "material_id": mat_id,
+                           "quantity": 20, "uom": "kg", "received_at": received_at})
+    lot_id = rc.json()["lot_id"]
+    too_early = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+    r = client.post("/api/warehouse/issue", headers=admin_h,
+                    json={"lot_id": lot_id, "quantity": 5, "mode": "tu_do", "issued_at": too_early})
+    assert r.status_code == 409, r.text
+    assert "chưa đủ tồn" in r.json()["detail"]
+
+    # Không bị trừ tồn — lô vẫn còn nguyên 20kg.
+    lots = client.get("/api/lots", headers=admin_h).json()
+    lot = next(l for l in lots if l["lot_id"] == lot_id)
+    assert lot["quantity"] == 20
 
 
 def test_movements_filter_is_opening_balance(client, admin_h, thukho_h):

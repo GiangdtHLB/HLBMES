@@ -404,6 +404,28 @@ def ceiling_for_material(db: Session, batch, material_code: str):
     return round(qty_sum * (1 + tol / 100.0), 4), round(qty_sum, 4)
 
 
+def match_codes_for_material(db: Session, batch, material_code: str) -> set[str]:
+    """Mọi mã THẬT "tính chung 1 ngưỡng/1 thực tế" với `material_code` theo ĐÚNG dòng BOM của
+    batch này (mirror cách ceiling_for_material/actual_consumed_for_match tra match_codes) —
+    dùng cho dispense.py::adjust_actual khi HOÀN LẠI (giảm Thực tế), để phạm vi tìm lô hoàn lại
+    khớp ĐÚNG với phạm vi đã dùng tính "current" (actual_consumed_for_match), tránh lệch nhau.
+
+    Bug thực tế 2026-10-11: vật tư thuộc Nhóm vật tư thay thế khai KHÔNG member_qty (VD "1NC42"
+    trong nhóm "MALT_DUC", cùng nhóm với "1NC35") — current tính GỘP CẢ NHÓM (actual_consumed_
+    for_match), nhưng refund_codes trước đây chỉ dùng codes_for_dispense(material_code), KHÔNG
+    mở rộng ra cả nhóm khi material_code là 1 mã THÀNH VIÊN (chỉ mở rộng khi material_code CHÍNH
+    LÀ mã nhóm) — "Xóa"/giảm Thực tế báo thiếu lịch sử hoàn lại dù dữ liệu NVL thật vẫn đủ, chỉ
+    vì tìm sai phạm vi mã.
+
+    Trả về `{material_code}` nếu không khớp dòng BOM nào (vật tư "Cấp tự do", ngoài công thức)."""
+    snap = batch.recipe_snapshot or {}
+    for m in _expand_materials(db, snap.get("materials"), brew_order_id=batch.order_id):
+        match_codes = m.get("match_codes") or {m.get("material_code")}
+        if material_code in match_codes or material_code == m.get("material_code"):
+            return match_codes
+    return {material_code}
+
+
 def actual_consumed_for_match(db: Session, batch, material_code: str) -> float:
     """Thực tế ĐÃ tiêu thụ tính cho phần "ngưỡng" của material_code (xem ceiling_for_material)
     — nếu material_code thuộc 1 dòng BOM khai theo Nhóm vật tư thay thế (không member_qty

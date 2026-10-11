@@ -2169,6 +2169,9 @@ class BatchFilterLotOut(ORMModel):
     chiet_status: Optional[str] = None
     chiet_status_label: str = ""
     used_for_refilter: bool = False
+    refilter_target_filter_lot_id: Optional[str] = None
+    refilter_target_filter_lot_code: Optional[str] = None
+    refilter_target_bbt: Optional[str] = None
     note: Optional[str] = None
     ended_at: Optional[datetime] = None
     qc_approved: bool = False

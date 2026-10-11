@@ -70,9 +70,11 @@ def _create_material(client, admin_h, code):
     return r.json()["material_id"]
 
 
-def _receive_lot(client, thukho_h, lot_code, mat_id, quantity):
-    r = client.post("/api/warehouse/receive", headers=thukho_h,
-                    json={"lot_code": lot_code, "material_id": mat_id, "quantity": quantity, "uom": "kg"})
+def _receive_lot(client, thukho_h, lot_code, mat_id, quantity, received_at=None):
+    payload = {"lot_code": lot_code, "material_id": mat_id, "quantity": quantity, "uom": "kg"}
+    if received_at is not None:
+        payload["received_at"] = received_at.isoformat()
+    r = client.post("/api/warehouse/receive", headers=thukho_h, json=payload)
     assert r.status_code == 200, r.text
     return r.json()
 
@@ -415,7 +417,7 @@ def test_requested_transfer_date_used_as_stock_effective_date(client, admin_h, t
     ánh đúng ngày đó thay vì ngày Phân xưởng bấm Duyệt (yêu cầu người dùng 2026-09-16, mirror
     MaterialRequest.requested_receipt_date)."""
     mat_id = _create_material(client, admin_h, "KCPX-RTD01")
-    recv = _receive_lot(client, thukho_h, "KCPX-LOT-RTD01", mat_id, 40)
+    recv = _receive_lot(client, thukho_h, "KCPX-LOT-RTD01", mat_id, 40, received_at=utcnow() - timedelta(hours=2))
     requested_date = utcnow() - timedelta(hours=1)
     r = client.post("/api/warehouse/transfer-kcpx-requests", headers=thukho_h,
                     json={"lot_id": recv["lot_id"], "quantity": 40,
@@ -439,6 +441,34 @@ def test_requested_transfer_date_used_as_stock_effective_date(client, admin_h, t
                           params={"as_of": requested_date.isoformat(), "location": "Kho phân xưởng"}).json()
     row_at = next(row for row in stock_at if row["material_id"] == mat_id)
     assert row_at["on_hand"] == 40.0
+
+
+def test_approve_blocked_when_requested_transfer_date_before_receipt(client, admin_h, thukho_h, vanhanh_h):
+    """Bug thực tế 2026-10-11 (rà soát toàn bộ luồng Đề nghị/Điều chuyển): approve_transfer_kcpx_
+    request trước đây KHÔNG kiểm tra "Ngày đề nghị điều chuyển" có sớm hơn lúc lô thực sự về Kho
+    công ty hay không — cho phép ghi StockMovement ở 1 ngày mà lô còn chưa tồn tại (cùng lớp lỗi
+    "backdated transfer trước khi nhận kho" đã vá ở fulfill_request_line, 2026-09-18, nhưng sót
+    2 luồng chị em TransferPx/Kcpx). Nay phải chặn."""
+    mat_id = _create_material(client, admin_h, "KCPX-BACKDATE")
+    recv = _receive_lot(client, thukho_h, "KCPX-LOT-BACKDATE", mat_id, 40,
+                        received_at=utcnow() - timedelta(hours=1))
+    too_early = utcnow() - timedelta(hours=2)   # TRƯỚC khi lô về Kho công ty (1 giờ trước).
+    r = client.post("/api/warehouse/transfer-kcpx-requests", headers=thukho_h,
+                    json={"lot_id": recv["lot_id"], "quantity": 40,
+                         "requested_transfer_date": too_early.isoformat()})
+    assert r.status_code == 201, r.text
+    request_id = r.json()["request_id"]
+    loc_id = _create_workshop_location(client, admin_h, "KCPX-LOC-BACKDATE")
+
+    ap = client.post(f"/api/warehouse/transfer-kcpx-requests/{request_id}/approve", headers=vanhanh_h,
+                     json={"workshop_location_id": loc_id})
+    assert ap.status_code == 409, ap.text
+    assert "chưa đủ tồn" in ap.json()["detail"]
+
+    # Đề nghị vẫn còn "pending" (không bị động tồn kho) — lô vẫn ở Kho công ty.
+    lot = _get_lot(client, admin_h, recv["lot_id"])
+    assert lot["location"] == "Kho công ty"
+    assert lot["quantity"] == 40
 
 
 def test_update_transfer_kcpx_request_can_set_and_clear_requested_transfer_date(client, admin_h, thukho_h):

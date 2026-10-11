@@ -298,6 +298,31 @@ def test_stock_count_undo_blocked_when_real_movement_happened_after_post(client,
     assert blocked.status_code == 409, blocked.text
 
 
+def test_stock_as_of_reflects_count_adjustment_increase_and_decrease(client, admin_h, thukho_h):
+    """Bug thực tế 2026-10-11 (rà soát toàn bộ luồng Đề nghị/Điều chuyển): StockMovement("adjust")
+    từ Kiểm kê định kỳ trước đây CHỈ lưu |chênh lệch| (location_from=location_to=cùng 1 giá trị,
+    không mang thông tin dấu) — "Tồn kho tính đến ngày"/Thẻ kho phải BỎ QUA hẳn mọi điều chỉnh
+    kiểm kê khi dựng lại lịch sử, nên vẫn hiện đúng số receive() gốc dù đã kiểm kê lệch. Nay phải
+    phản ánh đúng cả 2 chiều TĂNG/GIẢM (xem services/warehouse.py::_adjust_loc_kwargs,
+    _material_balances_as_of, _lot_balances_as_of)."""
+    from datetime import datetime, timedelta, timezone
+    _, mat_inc, lot_inc = _posted_count_with_variance(client, admin_h, thukho_h, "ASOF-INC", on_hand=100, counted=120)
+    _, mat_dec, lot_dec = _posted_count_with_variance(client, admin_h, thukho_h, "ASOF-DEC", on_hand=100, counted=80)
+
+    as_of = (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat()
+    rows = client.get("/api/warehouse/stock/as-of", params={"as_of": as_of}, headers=admin_h).json()
+    row_inc = next(r for r in rows if r["material_id"] == mat_inc)
+    row_dec = next(r for r in rows if r["material_id"] == mat_dec)
+    assert row_inc["on_hand"] == 120
+    assert row_dec["on_hand"] == 80
+
+    lot_rows = client.get("/api/warehouse/stock/as-of/lots", params={"as_of": as_of}, headers=admin_h).json()
+    lot_row_inc = next(r for r in lot_rows if r["lot_id"] == lot_inc)
+    lot_row_dec = next(r for r in lot_rows if r["lot_id"] == lot_dec)
+    assert lot_row_inc["quantity"] == 120
+    assert lot_row_dec["quantity"] == 80
+
+
 def test_stock_count_undo_and_approve_require_posted_status(client, admin_h, thukho_h):
     mat_id = _create_material(client, admin_h, "KK-MAT-DRAFTGATE")
     rc = client.post("/api/warehouse/receive", headers=thukho_h,

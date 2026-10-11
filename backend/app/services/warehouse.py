@@ -512,6 +512,18 @@ def issue(db: Session, lot_id: str, quantity: float, user: User, mode: str = "tu
             issued_dt = issued_dt.replace(tzinfo=now.tzinfo)
         if issued_dt > now:
             raise DomainError("Ngày xuất không được sau thời điểm hiện tại.")
+        # Chặn khai lùi ngày xuất SỚM HƠN lúc lô này thực sự có đủ tồn (cùng lớp lỗi "backdated
+        # transfer trước khi nhận kho" đã vá ở fulfill_request_line, 2026-09-18) — trước đây chỉ
+        # chặn ngày TƯƠNG LAI, không chặn ngày trong QUÁ KHỨ trước khi lô tồn tại, cho phép ghi
+        # StockMovement("issue") ở 1 ngày mà lô còn chưa về kho (rà soát 2026-10-11, theo yêu cầu
+        # người dùng). Dùng _lot_balances_as_of (không lọc kho) vì ở đây chỉ cần biết ĐÚNG lô này
+        # đã có đủ số lượng tại `issued_dt` hay chưa, bất kể đang ở kho nào.
+        balances, _ = _lot_balances_as_of(db, issued_dt)
+        cap = balances.get(lot_id, 0.0)
+        if cap + 1e-6 < quantity:
+            raise DomainError(
+                f"Lô {lot.lot_code} chưa đủ tồn tính đến ngày {issued_dt:%d/%m/%Y} (ngày xuất) — "
+                f"chỉ có {cap:g} {lot.uom} vào thời điểm đó, không thể xuất với ngày này.")
     factory = None
     if mode == "dieu_chuyen_nha_may":
         if not destination_factory_id:
@@ -827,9 +839,10 @@ def _material_balances_as_of(db: Session, as_of, location: str = None) -> dict[s
     - issue: LUÔN -quantity; chỉ tính nếu location_from khớp bộ lọc.
     - transfer: không đổi TỔNG công ty (chỉ đổi vị trí) — lọc "Tất cả" thì BỎ QUA hẳn (net 0);
       lọc theo 1 kho cụ thể thì +quantity nếu location_to khớp, -quantity nếu location_from khớp.
-    - adjust (từ Kiểm kê định kỳ): CHỈ lưu |chênh lệch| — không xác định được TĂNG hay GIẢM từ dữ
-      liệu đã lưu, nên BỎ QUA (giới hạn đã biết) — vật tư có kiểm kê điều chỉnh trước ngày lọc có
-      thể lệch nhẹ so với thực tế thời điểm đó.
+    - adjust (từ Kiểm kê định kỳ): location_to-only = TĂNG (+quantity), location_from-only =
+      GIẢM (-quantity) — xem _adjust_loc_kwargs (chỉ 1 trong 2 field được set từ 2026-10-11). Dữ
+      liệu CŨ (cả 2 field cùng set, trước fix) vẫn BỎ QUA như trước (không xác định được dấu) —
+      vật tư có kiểm kê điều chỉnh TRƯỚC 2026-10-11 có thể lệch nhẹ nếu tra as-of trước ngày lọc.
 
     Cấp liệu vào mẻ Nấu (GenealogyEdge relation=consume, to_type="batch") KHÔNG tạo StockMovement
     riêng (xem services/dispense.py::consume_lot) nên trước đây hoàn toàn KHÔNG bị trừ ở đây —
@@ -860,6 +873,14 @@ def _material_balances_as_of(db: Session, as_of, location: str = None) -> dict[s
                 delta += qty
             if loc_matches(loc_from):
                 delta -= qty
+        elif mtype == "adjust":
+            if loc_to and not loc_from:
+                if loc_matches(loc_to):
+                    delta = qty
+            elif loc_from and not loc_to:
+                if loc_matches(loc_from):
+                    delta = -qty
+            # else: cả 2 field cùng set (dữ liệu cũ) hoặc đều rỗng -> không xác định, bỏ qua.
         if delta:
             out[material_id] = out.get(material_id, 0.0) + delta
     # Bù cho lô KHÔNG có StockMovement nào (VD dữ liệu nạp thẳng vào DB từ hệ thống cũ, không qua
@@ -926,9 +947,10 @@ def _lot_balances_as_of(db: Session, as_of) -> tuple[dict[str, float], dict[str,
     NGUYÊN 1 dòng, không tách/gộp) → không đổi số dư, chỉ đổi vị trí (bug đã phát hiện 2026-09-09,
     audit approve_sang_ngang: lô chuyển nguyên vẹn 70kg bị cộng dồn nhầm thành 140kg).
 
-    adjust (từ Kiểm kê định kỳ): CHỈ lưu |chênh lệch| — không xác định được TĂNG hay GIẢM từ dữ
-    liệu đã lưu, nên BỎ QUA (giới hạn đã biết) — vật tư có kiểm kê điều chỉnh trước ngày lọc có
-    thể lệch nhẹ so với thực tế thời điểm đó.
+    adjust (từ Kiểm kê định kỳ): location_to-only = TĂNG, location_from-only = GIẢM (xem
+    _adjust_loc_kwargs, chỉ 1 trong 2 field được set từ 2026-10-11) — không đổi vị trí lô (kiểm
+    kê không chuyển kho) nên KHÔNG cập nhật `locations`. Dữ liệu CŨ (cả 2 field cùng set, trước
+    fix) vẫn BỎ QUA như trước (không xác định được dấu).
 
     Cấp liệu vào mẻ Nấu (GenealogyEdge relation=consume) trừ riêng qua _nau_consume_as_of, dùng
     `batch.start_at` ("Ngày cấp") làm mốc hiệu lực — xem lý do ở _material_balances_as_of."""
@@ -938,13 +960,13 @@ def _lot_balances_as_of(db: Session, as_of) -> tuple[dict[str, float], dict[str,
         GenealogyEdge.source_event == "transfer",
         GenealogyEdge.movement_id.isnot(None))).all())
     stmt = select(StockMovement.movement_id, StockMovement.lot_id, StockMovement.movement_type,
-                 StockMovement.quantity, StockMovement.location_to).where(
+                 StockMovement.quantity, StockMovement.location_from, StockMovement.location_to).where(
         StockMovement.ts <= as_of, StockMovement.lot_id.isnot(None)
     ).order_by(StockMovement.ts.asc(), StockMovement.created_at.asc())
     rows = db.execute(stmt).all()
     balances: dict[str, float] = {}
     locations: dict[str, str] = {}
-    for movement_id, lot_id, mtype, qty, loc_to in rows:
+    for movement_id, lot_id, mtype, qty, loc_from, loc_to in rows:
         if mtype in ("receipt", "return"):
             balances[lot_id] = balances.get(lot_id, 0.0) + qty
             if loc_to:
@@ -961,7 +983,12 @@ def _lot_balances_as_of(db: Session, as_of) -> tuple[dict[str, float], dict[str,
             # else: đổi vị trí NGUYÊN 1 dòng, không tách/gộp -> không đổi số dư.
             if loc_to:
                 locations[lot_id] = loc_to
-        # adjust: bỏ qua (giới hạn đã biết, xem docstring)
+        elif mtype == "adjust":
+            if loc_to and not loc_from:
+                balances[lot_id] = balances.get(lot_id, 0.0) + qty
+            elif loc_from and not loc_to:
+                balances[lot_id] = balances.get(lot_id, 0.0) - qty
+            # else: cả 2 field cùng set (dữ liệu cũ) hoặc đều rỗng -> không xác định, bỏ qua.
     # Bù cho lô KHÔNG có StockMovement nào (VD dữ liệu nạp thẳng vào DB từ hệ thống cũ) — lấy tạm
     # MaterialLot.quantity/location/created_at HIỆN TẠI làm mốc duy nhất đã biết (mirror
     # _material_balances_as_of, xem giải thích ở đó).
@@ -1060,7 +1087,10 @@ def material_fifo_detail(db: Session, material_id: str) -> dict:
 
 
 def stock_card(db: Session, material_id: str = None, lot_id: str = None) -> list[dict]:
-    """Thẻ kho: ledger có số dư luỹ kế."""
+    """Thẻ kho: ledger có số dư luỹ kế. "adjust" (Kiểm kê định kỳ): dấu suy từ location_from/
+    location_to (xem _adjust_loc_kwargs, chỉ 1 trong 2 field được set từ 2026-10-11) — dữ liệu
+    CŨ (cả 2 field cùng set) coi là KHÔNG XÁC ĐỊNH, giữ sign=0 y hệt hành vi trước đây (không
+    hồi tố/suy diễn sai cho dữ liệu lịch sử)."""
     stmt = select(StockMovement)
     if lot_id:
         stmt = stmt.where(StockMovement.lot_id == lot_id)
@@ -1072,7 +1102,19 @@ def stock_card(db: Session, material_id: str = None, lot_id: str = None) -> list
     bal = 0.0
     out = []
     for m in movements:
-        sign = 1 if m.movement_type in ("receipt", "return") else (-1 if m.movement_type == "issue" else 0)
+        if m.movement_type in ("receipt", "return"):
+            sign = 1
+        elif m.movement_type == "issue":
+            sign = -1
+        elif m.movement_type == "adjust":
+            if m.location_to and not m.location_from:
+                sign = 1
+            elif m.location_from and not m.location_to:
+                sign = -1
+            else:
+                sign = 0
+        else:
+            sign = 0
         bal += sign * m.quantity
         out.append({"ts": m.ts, "type": m.movement_type, "lot_code": m.lot_code,
                     "in": m.quantity if sign > 0 else 0, "out": m.quantity if sign < 0 else 0,
@@ -2433,6 +2475,26 @@ def _assert_transfer_qty_not_double_booked(db: Session, model, lot, quantity: fl
                           f"{extra}, chỉ còn tối đa {available:g} {lot.uom} có thể đề nghị thêm.")
 
 
+def _assert_transfer_date_has_stock(db: Session, lot, quantity: float, location: str, ts) -> None:
+    """Chặn DUYỆT điều chuyển với `ts` ("Ngày đề nghị điều chuyển") SỚM HƠN lúc lô thực sự có đủ
+    tồn ở `location` — cùng lớp lỗi "backdated transfer trước khi nhận kho" đã phát hiện+vá ở
+    fulfill_request_line/fulfill_all_lines (2026-09-18, dùng asof_cap/lot_on_hand_as_of) nhưng
+    TRƯỚC ĐÂY bị sót ở approve_transfer_px_request/approve_transfer_kcpx_request — 2 hàm này gọi
+    thẳng transfer(ts=req.requested_transfer_date) không hề kiểm tra gì, cho phép ghi StockMovement
+    ở 1 ngày mà lô còn chưa tồn tại đủ số lượng đó (phát hiện khi rà soát toàn bộ luồng Đề nghị/
+    Điều chuyển 2026-10-11, theo yêu cầu người dùng). `ts=None` (không khai ngày) bỏ qua — khi đó
+    transfer() tự dùng utcnow() thật, không có gì để kiểm tra lùi ngày."""
+    if ts is None:
+        return
+    rows = lot_on_hand_as_of(db, ts, location)
+    cap = next((r["quantity"] for r in rows if r["lot_id"] == lot.lot_id), 0.0)
+    if cap + 1e-6 < quantity:
+        raise DomainError(
+            f"Lô {lot.lot_code} chưa đủ tồn ở {location} tính đến ngày {ts:%d/%m/%Y} (ngày đề "
+            f"nghị điều chuyển) — chỉ có {cap:g} {lot.uom} vào thời điểm đó, không thể duyệt với "
+            "ngày này.")
+
+
 def create_transfer_px_request(db: Session, lot_id: str, quantity: float, user: User,
                                reason: str = None, requested_transfer_date=None) -> dict:
     """Thủ kho phân xưởng tạo đề nghị điều chuyển 1 lô về Kho công ty — chưa động tồn kho.
@@ -2525,6 +2587,7 @@ def approve_transfer_px_request(db: Session, request_id: str, user: User) -> dic
     if not _is_workshop_location(lot.location):
         raise DomainError(f"Lô {lot.lot_code} hiện không còn ở Kho phân xưởng — có thể đã được "
                           "xử lý bởi thao tác khác.")
+    _assert_transfer_date_has_stock(db, lot, req.quantity, "Kho phân xưởng", req.requested_transfer_date)
     result = transfer(db, req.lot_id, req.quantity, "Kho công ty", user, reason=req.reason,
                       mode="dieu_chuyen", ts=req.requested_transfer_date)
     req.movement_id = result["movement_id"]
@@ -2747,6 +2810,7 @@ def approve_transfer_kcpx_request(db: Session, request_id: str, workshop_locatio
     if lot.status == LotStatus.ON_HOLD.value:
         raise DomainError(f"Lô {lot.lot_code} đang chờ KCS khai báo/duyệt chỉ tiêu chất lượng — "
                           "chưa thể nhận vào Kho phân xưởng.")
+    _assert_transfer_date_has_stock(db, lot, req.quantity, "Kho công ty", req.requested_transfer_date)
     result = _transfer_lot(db, req.lot_id, req.quantity, "Kho phân xưởng", user, reason=req.reason,
                            mode="dieu_chuyen_kcpx", ts=req.requested_transfer_date)
     moved_lot = db.get(MaterialLot, result["lot_id"])
@@ -3473,12 +3537,28 @@ def update_count_lines(db: Session, count_id: str, lines: list[dict], user: User
     return _count_dict(db, count)
 
 
+def _adjust_loc_kwargs(location: str, increase: bool) -> dict:
+    """location_from/location_to cho StockMovement("adjust") (Kiểm kê định kỳ) — CHỈ set 1 trong
+    2 field (không set cả 2 như trước), mirror đúng quy ước receipt (chỉ location_to)/issue (chỉ
+    location_from): location_to-only = TĂNG, location_from-only = GIẢM. Nhờ vậy
+    _material_balances_as_of/_lot_balances_as_of/stock_card suy được dấu chênh lệch thay vì phải
+    bỏ qua hẳn (rà soát 2026-10-11, theo yêu cầu người dùng — trước đây set CẢ 2 field cùng giá
+    trị, không mang thông tin gì vì location không đổi do kiểm kê không chuyển kho).
+
+    Dữ liệu CŨ (ghi trước fix này) vẫn có cả 2 field cùng giá trị — các hàm đọc coi trường hợp
+    "cả 2 field cùng có giá trị" là KHÔNG XÁC ĐỊNH (ambiguous) và tiếp tục bỏ qua y hệt hành vi
+    trước đây, không hồi tố/suy diễn sai cho dữ liệu lịch sử đã lưu theo quy ước cũ."""
+    return {"location_to": location} if increase else {"location_from": location}
+
+
 def post_count(db: Session, count_id: str, user: User) -> dict:
     """Chốt phiếu kiểm kê: với mỗi dòng đã điền counted_qty và có lệch so với system_qty, ghi
     1 StockMovement(movement_type="adjust") làm sổ cái rồi cập nhật thẳng MaterialLot.quantity
     = counted_qty (MaterialLot.quantity là nguồn sự thật duy nhất về tồn — xem stock_on_hand).
     "adjust" có sign=0 trong received/issued aggregation (services/warehouse.py::inventory_report)
-    nên không làm lệch báo cáo nhập/xuất trong kỳ."""
+    nên không làm lệch báo cáo nhập/xuất trong kỳ. Dấu TĂNG/GIẢM của mỗi lượt vẫn được ghi lại
+    qua location_from/location_to (xem _adjust_loc_kwargs) để các báo cáo as-of/Thẻ kho dựng lại
+    đúng, dù không tính vào báo cáo nhập/xuất trong kỳ."""
     require_perm(user, "warehouse.receive")
     count = _get_count(db, count_id)
     _assert_location_scope(user, count.location)
@@ -3511,7 +3591,7 @@ def post_count(db: Session, count_id: str, user: User) -> dict:
                 "phiếu kiểm kê — đối chiếu lại thủ công)" if interim_moves else "")
         _move(db, "adjust", lot, abs(diff), user,
               reason=f"Kiểm kê {count.count_code}: hệ thống {line.system_qty}{lot.uom} → thực tế {line.counted_qty}{lot.uom}{warn}",
-              location_from=lot.location, location_to=lot.location)
+              **_adjust_loc_kwargs(lot.location, diff > 0))
         lot.quantity = line.counted_qty
         adjustments.append({"lot_code": lot.lot_code, "system_qty": line.system_qty,
                             "counted_qty": line.counted_qty, "variance": diff,
@@ -3584,7 +3664,7 @@ def undo_count(db: Session, count_id: str, user: User) -> dict:
                 "khi chốt phiếu kiểm kê này — không thể hoàn tác.")
         _move(db, "adjust", lot, abs(diff), user,
               reason=f"Hoàn tác kiểm kê {count.count_code}: thực tế {line.counted_qty}{lot.uom} → hệ thống {line.system_qty}{lot.uom}",
-              location_from=lot.location, location_to=lot.location)
+              **_adjust_loc_kwargs(lot.location, diff < 0))
         lot.quantity = line.system_qty
         reverted.append({"lot_code": lot.lot_code, "restored_qty": line.system_qty})
     count.status = "draft"

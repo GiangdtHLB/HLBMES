@@ -90,9 +90,25 @@ def _assert_dispensable(db: Session, batch: BatchExecution) -> None:
        mới này, tránh mẻ cũ (closed/completed từ trước, không đi qua cấp liệu module này) khóa
        cứng vĩnh viễn mọi mẻ cấp liệu về sau. cancelled KHÔNG bao giờ tính (mẻ coi như chưa từng
        xảy ra)."""
+    _assert_has_start_at(batch)
+    _assert_dispense_order(db, batch)
+
+
+def _assert_has_start_at(batch: BatchExecution) -> None:
+    """Điều kiện (1) tách riêng khỏi (2) — xem _assert_dispensable: áp dụng cho CẢ đường XEM (gợi
+    ý/tra lô khả dụng), không chỉ đường cấp liệu thật, vì suggest_dispense/lots_for_material cũng
+    cần `start_at` để tính tồn "as of" (xem _workshop_fefo_lots)."""
     if batch.start_at is None:
         raise DomainError("Mẻ chưa có thời điểm bắt đầu nấu — không thể cấp liệu. "
                           "Vào Mẻ sản xuất nhập thời điểm bắt đầu trước.")
+
+
+def _assert_dispense_order(db: Session, batch: BatchExecution) -> None:
+    """Điều kiện (2) — xem _assert_dispensable: CHỈ áp dụng cho các hành động THẬT SỰ lấy tồn
+    (dispense/backflush/adjust_actual tăng), KHÔNG áp dụng cho xem gợi ý/tra lô khả dụng
+    (suggest_dispense/lots_for_material) — xem KHÔNG trừ tồn, không "chen ngang" lấy mất phần của
+    mẻ trước, nên không cần xếp hàng (yêu cầu người dùng 2026-10-08: "cho phép xem gợi ý, chỉ
+    không cho phép cấp liệu")."""
     always_states = [BatchState.RUNNING.value, BatchState.HELD.value]
     extended_states = [BatchState.PLANNED.value, BatchState.READY.value,
                        BatchState.COMPLETED.value, BatchState.CLOSED.value]
@@ -395,7 +411,10 @@ def suggest_dispense(db: Session, batch_id: str) -> dict:
     batch = db.get(BatchExecution, batch_id)
     if not batch:
         raise NotFoundError("Batch không tồn tại.")
-    _assert_dispensable(db, batch)
+    # Chỉ cần start_at để tính as-of — KHÔNG xếp hàng theo thứ tự mẻ (_assert_dispense_order):
+    # xem gợi ý không trừ tồn, không "chen ngang" lấy mất phần của mẻ trước (yêu cầu người dùng
+    # 2026-10-08: "cho phép xem gợi ý, chỉ không cho phép cấp liệu").
+    _assert_has_start_at(batch)
     cmp = bom.compare_batch(db, batch)
     # Tồn hiện tại theo material_code THẬT ở mỗi kho — dùng để hiển thị tham khảo "Tồn kho công
     # ty"/"Tồn kho phân xưởng" cạnh gợi ý (khác `alternatives`/`picks` vốn CHỈ xét Kho phân
@@ -494,12 +513,13 @@ def suggest_dispense(db: Session, batch_id: str) -> dict:
 def lots_for_material(db: Session, batch_id: str, material_code: str) -> list[dict]:
     """Danh sách lô khả dụng (FEFO, Kho phân xưởng, tại thời điểm batch.start_at) của 1 vật tư —
     cho ô "Chọn lô" ở "Cấp 1 vật tư" (yêu cầu người dùng 2026-09-18: tự chọn đúng lô thay vì luôn
-    để hệ thống tự chọn FEFO). Dùng chung _assert_dispensable với dispense()/suggest_dispense —
-    mẻ chưa có start_at thì raise ngay (không âm thầm trả rỗng, tránh hiểu nhầm "không có lô")."""
+    để hệ thống tự chọn FEFO). Chỉ cần start_at (mẻ chưa có thì raise ngay, không âm thầm trả rỗng,
+    tránh hiểu nhầm "không có lô") — KHÔNG xếp hàng theo thứ tự mẻ (_assert_dispense_order), mirror
+    suggest_dispense: xem danh sách lô không trừ tồn (2026-10-08)."""
     batch = db.get(BatchExecution, batch_id)
     if not batch:
         raise NotFoundError("Batch không tồn tại.")
-    _assert_dispensable(db, batch)
+    _assert_has_start_at(batch)
     lots = _workshop_fefo_lots(db, material_code, batch.start_at)
     return [{"lot_id": lot.lot_id, "lot_code": lot.lot_code, "quantity": round(_lot_avail_qty(lot), 4),
              "uom": lot.uom, "expiry": lot.expiry.isoformat() if lot.expiry else None}
@@ -666,9 +686,13 @@ def adjust_actual(db: Session, batch_id: str, material_code: str, new_actual: fl
             all_lines.append(r)
     else:
         need_refund = round(-delta, 4)
-        # material_code có thể là mã Nhóm vật tư thay thế (dòng BOM khai theo nhóm) — hoàn lại
-        # phải khớp BẤT KỲ mã thành viên nào đã thực sự tiêu thụ, không chỉ đúng mã nhóm.
-        refund_codes = set(bom.codes_for_dispense(db, material_code))
+        # material_code có thể là mã Nhóm vật tư thay thế HOẶC 1 mã thành viên THẬT thuộc 1 dòng
+        # BOM khai theo nhóm (không member_qty) — hoàn lại phải khớp ĐÚNG phạm vi mã đã dùng để
+        # tính "current" ở trên (bom.actual_consumed_for_match, cũng gộp cả nhóm trong 2 trường
+        # hợp này), không chỉ riêng material_code — xem bom.match_codes_for_material (bug thực tế
+        # 2026-10-11: "Xóa" 1 mã thành viên nhóm báo thiếu lịch sử hoàn lại dù dữ liệu vẫn đủ, vì
+        # trước đây dùng codes_for_dispense — chỉ mở rộng khi material_code CHÍNH LÀ mã nhóm).
+        refund_codes = bom.match_codes_for_material(db, batch, material_code)
         edges = db.execute(select(GenealogyEdge).where(
             GenealogyEdge.to_type == "batch", GenealogyEdge.to_id == batch_id,
             GenealogyEdge.from_type == "lot", GenealogyEdge.relation == "consume")

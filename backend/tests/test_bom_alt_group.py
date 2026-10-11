@@ -243,3 +243,35 @@ def test_adjust_actual_refunds_across_group_members(client, admin_h, group):
 
     bom = client.get(f"/api/batches/{batch_id}/bom", headers=admin_h).json()
     assert bom["lines"][0]["actual"] == 3.0
+
+
+def test_adjust_actual_refunds_via_member_code_not_just_own_lot_history(client, admin_h, group):
+    """Bug thực tế 2026-10-11 (mẻ 2664): tiêu thụ qua 2 mã THÀNH VIÊN khác nhau (lot1 qua code1,
+    lot2 qua code2) rồi "Xóa"/giảm Thực tế gọi adjust BẰNG MÃ THÀNH VIÊN (không phải mã nhóm) —
+    `current` tính GỘP CẢ NHÓM (13 = 8+5) nhưng refund_codes TRƯỚC ĐÂY chỉ tìm lịch sử tiêu thụ
+    của RIÊNG mã thành viên đó (code2: chỉ 5) -> báo thiếu lịch sử hoàn lại dù dữ liệu đủ. Xem
+    bom.py::match_codes_for_material."""
+    lot1 = _receive_workshop_lot(client, admin_h, group["mid1"], 20)
+    lot2 = _receive_workshop_lot(client, admin_h, group["mid2"], 20)
+    version_id = _recipe_version_group(client, admin_h, "ADJ02", group["group_code"], qty=20)
+    batch_id = _new_batch(client, admin_h, version_id, planned_qty=100, suffix="ADJ02")
+
+    c1 = client.post(f"/api/batches/{batch_id}/consume", headers=admin_h,
+                     json={"lot_id": lot1, "quantity": 8})
+    assert c1.status_code == 200, c1.text
+    c2 = client.post(f"/api/batches/{batch_id}/consume", headers=admin_h,
+                     json={"lot_id": lot2, "quantity": 5})
+    assert c2.status_code == 200, c2.text
+
+    # Giảm Thực tế về 0 BẰNG MÃ THÀNH VIÊN code2 -> phải hoàn lại ĐÚNG 8kg cho lot1 (tiêu qua
+    # code1) + 5kg cho lot2 (tiêu qua code2), không được báo thiếu lịch sử.
+    adj = client.post(f"/api/dispense/{batch_id}/adjust", headers=admin_h, json={
+        "material_code": group["code2"], "new_actual": 0, "reason": "test hoàn lại qua mã thành viên"})
+    assert adj.status_code == 200, adj.text
+
+    lots = {l["lot_id"]: l["quantity"] for l in client.get("/api/lots", headers=admin_h).json()}
+    assert lots[lot1] == 20.0
+    assert lots[lot2] == 20.0
+
+    bom = client.get(f"/api/batches/{batch_id}/bom", headers=admin_h).json()
+    assert bom["lines"][0]["actual"] == 0.0
