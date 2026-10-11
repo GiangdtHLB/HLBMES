@@ -174,7 +174,11 @@ def test_transfer_px_request_requested_transfer_date_used_as_stock_effective_dat
     2 chiều điều chuyển)."""
     mat_id = _create_material(client, admin_h, "TPW-RTD01")
     lot_id = _receive_at_workshop(client, thukho_h, mat_id, "LOT-TPW-RTD01", qty=40)
-    requested_date = utcnow() - timedelta(hours=1)
+    # requested_date phải SAU lúc lô thực sự về Kho phân xưởng (_receive_at_workshop's transfer()
+    # dùng utcnow() thật, không backdate được qua endpoint chung /transfer) — approve_transfer_px_
+    # request nay chặn khai ngày sớm hơn lúc lô có đủ tồn (xem services/warehouse.py::
+    # _assert_transfer_date_has_stock, rà soát 2026-10-11).
+    requested_date = utcnow()
 
     req = client.post("/api/warehouse/transfer-px-requests", headers=vanhanh_h,
                       json={"lot_id": lot_id, "quantity": 40,
@@ -196,6 +200,31 @@ def test_transfer_px_request_requested_transfer_date_used_as_stock_effective_dat
                           params={"as_of": requested_date.isoformat(), "location": "Kho công ty"}).json()
     row_at = next(r for r in stock_at if r["material_id"] == mat_id)
     assert row_at["on_hand"] == 40.0
+
+
+def test_approve_px_blocked_when_requested_transfer_date_before_lot_at_workshop(client, admin_h, thukho_h, vanhanh_h):
+    """Bug thực tế 2026-10-11 (rà soát toàn bộ luồng Đề nghị/Điều chuyển): approve_transfer_px_
+    request trước đây KHÔNG kiểm tra "Ngày đề nghị điều chuyển" có sớm hơn lúc lô thực sự về Kho
+    phân xưởng hay không — cùng lớp lỗi "backdated transfer trước khi nhận kho" đã vá ở
+    fulfill_request_line (2026-09-18) nhưng sót luồng này. Nay phải chặn."""
+    too_early = utcnow()   # chụp TRƯỚC khi lô thực sự về Kho phân xưởng (bên dưới).
+    mat_id = _create_material(client, admin_h, "TPW-BACKDATE")
+    lot_id = _receive_at_workshop(client, thukho_h, mat_id, "LOT-TPW-BACKDATE", qty=40)
+
+    req = client.post("/api/warehouse/transfer-px-requests", headers=vanhanh_h,
+                      json={"lot_id": lot_id, "quantity": 40,
+                           "requested_transfer_date": too_early.isoformat()})
+    assert req.status_code == 201, req.text
+    request_id = req.json()["request_id"]
+
+    ap = client.post(f"/api/warehouse/transfer-px-requests/{request_id}/approve", headers=thukho_h)
+    assert ap.status_code == 409, ap.text
+    assert "chưa đủ tồn" in ap.json()["detail"]
+
+    lots = client.get("/api/lots", headers=admin_h).json()
+    lot = next(l for l in lots if l["lot_id"] == lot_id)
+    assert "phân xưởng" in lot["location"].lower()
+    assert lot["quantity"] == 40
 
 
 def test_update_transfer_px_request_can_set_and_clear_requested_transfer_date(client, admin_h, thukho_h, vanhanh_h):
@@ -340,9 +369,12 @@ def test_transfer_to_factory_requested_transfer_date_used_as_movement_ts(client,
     factory_id = _create_factory(client, admin_h, "NM-RTD01", "Nhà máy test RTD")
     mat_id = _create_material(client, admin_h, "CTNM-RTD01")
     rc = client.post("/api/warehouse/receive", headers=thukho_h,
-                     json={"lot_code": "LOT-CTNM-RTD01", "material_id": mat_id, "quantity": 20, "uom": "kg"})
+                     json={"lot_code": "LOT-CTNM-RTD01", "material_id": mat_id, "quantity": 20, "uom": "kg",
+                           "received_at": (utcnow() - timedelta(hours=2)).isoformat()})
     lot_id = rc.json()["lot_id"]
 
+    # requested_date phải SAU received_at — issue() nay chặn khai ngày xuất sớm hơn lúc lô có đủ
+    # tồn (xem services/warehouse.py::issue, rà soát 2026-10-11).
     requested_date = utcnow() - timedelta(hours=1)
     r = client.post("/api/warehouse/transfer-to-factory", headers=thukho_h,
                     json={"lot_id": lot_id, "quantity": 20, "factory_id": factory_id,
