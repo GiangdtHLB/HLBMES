@@ -327,10 +327,13 @@ def test_finish_rejects_draw_source_not_belonging_to_batch(client, admin_h):
 
 def test_finish_batch_accepts_custom_started_at_and_ended_at(client, admin_h):
     """Popup "Sửa" mẻ lọc cho sửa cả giờ bắt đầu/kết thúc (yêu cầu người dùng 2026-09-01) — không
-    còn tự động ghi đè ended_at = utcnow() mỗi lần "Sửa", và created_at ("Bắt đầu") sửa được."""
+    còn tự động ghi đè ended_at = utcnow() mỗi lần "Sửa", và started_at ("Bắt đầu") sửa được.
+    created_at (mốc tạo bản ghi THẬT, audit "người nhập") không còn bị ghi đè theo started_at nữa
+    (tách riêng từ migration d2e4f6a8b1c3, yêu cầu người dùng 2026-10-11)."""
     filter_lot_id, source_link_id, _tank_id = _draw_single_source(client, admin_h, "TIMES01")
     batches = client.get(f"/api/batch-filter-lots/{filter_lot_id}/batches", headers=admin_h).json()
     batch_link_id = batches[0]["batch_link_id"]
+    original_created_at = batches[0]["created_at"]
 
     fin = client.put(f"/api/batch-filter-lots/batches/{batch_link_id}/finish", headers=admin_h,
                      json={"draws": [{"source_link_id": source_link_id, "dich_nha_hl": 200}],
@@ -339,14 +342,36 @@ def test_finish_batch_accepts_custom_started_at_and_ended_at(client, admin_h):
     assert fin.status_code == 200, fin.text
 
     b = client.get(f"/api/batch-filter-lots/{filter_lot_id}/batches", headers=admin_h).json()[0]
-    assert b["created_at"].startswith("2026-01-01T08:00:00")
+    assert b["started_at"].startswith("2026-01-01T08:00:00")
     assert b["ended_at"].startswith("2026-01-01T09:30:00")
+    assert b["created_at"] == original_created_at   # không bị ghi đè theo started_at
 
-    # Sửa lại (không đổi giờ bắt đầu, đổi giờ kết thúc) -> created_at giữ nguyên nếu không truyền started_at.
+    # Sửa lại (không đổi giờ bắt đầu, đổi giờ kết thúc) -> started_at giữ nguyên nếu không truyền.
     fin2 = client.put(f"/api/batch-filter-lots/batches/{batch_link_id}/finish", headers=admin_h,
                       json={"draws": [{"source_link_id": source_link_id, "dich_nha_hl": 250}],
                            "nuoc_bai_khi_hl": 0, "ended_at": "2026-01-01T10:00:00"})
     assert fin2.status_code == 200, fin2.text
     b2 = client.get(f"/api/batch-filter-lots/{filter_lot_id}/batches", headers=admin_h).json()[0]
-    assert b2["created_at"].startswith("2026-01-01T08:00:00")   # giữ nguyên, không bị ghi đè
+    assert b2["started_at"].startswith("2026-01-01T08:00:00")   # giữ nguyên, không bị ghi đè
     assert b2["ended_at"].startswith("2026-01-01T10:00:00")     # cập nhật theo giờ mới sửa
+    assert b2["created_at"] == original_created_at
+
+
+def test_finish_batch_records_created_by_and_updated_by(client, admin_h):
+    """Yêu cầu người dùng 2026-10-11: "thêm cột thông tin người nhập, ngày giờ nhập, nếu sửa thì
+    hiện thông tin người sửa nữa" — created_by/created_at ghi lại lúc MỞ mẻ (_open_first_batch),
+    updated_by/updated_at ghi lại mỗi lần gọi "Kết thúc"/"Sửa" (finish_filter_lot_batch)."""
+    filter_lot_id, source_link_id, _tank_id = _draw_single_source(client, admin_h, "AUDIT01")
+    b0 = client.get(f"/api/batch-filter-lots/{filter_lot_id}/batches", headers=admin_h).json()[0]
+    assert b0["created_by"] == "admin"
+    assert b0["updated_by"] is None
+    assert b0["updated_at"] is None
+
+    fin = client.put(f"/api/batch-filter-lots/batches/{b0['batch_link_id']}/finish", headers=admin_h,
+                     json={"draws": [{"source_link_id": source_link_id, "dich_nha_hl": 200}],
+                          "nuoc_bai_khi_hl": 0})
+    assert fin.status_code == 200, fin.text
+    b1 = client.get(f"/api/batch-filter-lots/{filter_lot_id}/batches", headers=admin_h).json()[0]
+    assert b1["created_by"] == "admin"   # không đổi
+    assert b1["updated_by"] == "admin"
+    assert b1["updated_at"] is not None

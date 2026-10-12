@@ -750,4 +750,5 @@ def update_ops_settings(payload: OpsSettingIn, db: Session = Depends(get_db),
                                            payload.fg_days_in_stock_warning_days,
                                            payload.finished_goods_receive_max_backdate_days,
                                            payload.fg_day_cutoff_hour,
-                                           payload.erp_order_volume_tolerance_hl)
+                                           payload.erp_order_volume_tolerance_hl,
+                                           payload.session_hours)

@@ -217,7 +217,14 @@ class BatchFilterLotBatch(Base):
     CÙNG LÚC (VD 1 lần chạy máy phối tank lên men 01 + tank 02), mỗi khoản rút theo từng nguồn
     xem BatchFilterLotBatchDraw. nuoc_bai_khi_hl (nước DAW) phối thêm CHUNG cho cả mẻ — KHÔNG rút
     từ tank nào. is_final_batch ("Mẻ cuối") đánh dấu mẻ vét cuối cùng — dùng để loại khỏi phân
-    loại hiệu suất (mẻ vét thường có sản lượng thấp, không phản ánh hiệu suất thật)."""
+    loại hiệu suất (mẻ vét thường có sản lượng thấp, không phản ánh hiệu suất thật).
+
+    created_at/created_by: mốc tạo bản ghi THẬT, bất biến (audit — "người nhập/ngày giờ nhập",
+    yêu cầu người dùng 2026-10-11) — KHÔNG dùng để hiển thị "Bắt đầu" nữa (xem started_at).
+    started_at: giờ bắt đầu rút dịch THEO NGHIỆP VỤ, sửa được qua popup "Sửa" (mirror cách
+    supply_date tách khỏi created_at ở BatchFilterLotMaterialUsage) — TRƯỚC migration
+    d2e4f6a8b1c3 trường này không tồn tại, created_at bị dùng kiêm nhiệm cho cả 2 vai trò.
+    updated_by/updated_at: ai/khi nào gọi "Kết thúc"/"Sửa" gần nhất cho mẻ này."""
     __tablename__ = "batch_filter_lot_batch"
 
     batch_link_id: Mapped[str] = mapped_column(Unicode(64), primary_key=True, default=new_id)
@@ -225,8 +232,12 @@ class BatchFilterLotBatch(Base):
     batch_seq_no: Mapped[Optional[str]] = mapped_column(Unicode(64), nullable=True)   # "Mẻ lọc số" — tự gõ, không auto-tăng
     nuoc_bai_khi_hl: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     is_final_batch: Mapped[bool] = mapped_column(Boolean, default=False)
+    started_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
     ended_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    created_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    updated_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    updated_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
     note: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)
 
 

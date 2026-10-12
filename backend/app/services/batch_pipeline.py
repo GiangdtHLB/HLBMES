@@ -1202,7 +1202,7 @@ def draw_from_filter_order(db: Session, order_id: str, payload: dict, user: User
         else:
             genealogy.add_edge(db, from_type="batch_filter_lot", from_id=t.source_filter_lot_id,
                                to_type="batch_filter_lot", to_id=fl.filter_lot_id, relation="lọc lại")
-    _open_first_batch(db, fl, src_rows)
+    _open_first_batch(db, fl, src_rows, user)
     record_audit(db, entity_type="batch_filter_lot", entity_id=fl.filter_lot_id, action="create",
                 actor=user, after={"filter_lot_code": filter_lot_code, "order_id": order_id})
     db.commit()
@@ -1334,7 +1334,7 @@ def draw_from_tank_into_filter_lot(db: Session, sources: list[dict], payload: di
         genealogy.add_edge(db, from_type="batch_filter_lot", from_id=src_fl.filter_lot_id,
                            to_type="batch_filter_lot", to_id=fl.filter_lot_id, relation="lọc lại")
         seq += 1
-    _open_first_batch(db, fl, src_rows)
+    _open_first_batch(db, fl, src_rows, user)
     record_audit(db, entity_type="batch_filter_lot", entity_id=fl.filter_lot_id, action="create",
                 actor=user, after={"filter_lot_code": filter_lot_code})
     db.commit()
@@ -1342,10 +1342,13 @@ def draw_from_tank_into_filter_lot(db: Session, sources: list[dict], payload: di
     return _stamp_filter_lot_label(db, fl)
 
 
-def _open_first_batch(db: Session, fl: BatchFilterLot, src_rows: list[BatchFilterLotSource]) -> BatchFilterLotBatch:
+def _open_first_batch(db: Session, fl: BatchFilterLot, src_rows: list[BatchFilterLotSource],
+                      user: User) -> BatchFilterLotBatch:
     """Mở sẵn mẻ lọc số 1 lúc tạo lô lọc, có sẵn 1 khoản rút (draw) trống cho MỖI nguồn đã khai
     báo — người dùng chỉ cần điền V dịch nha từng nguồn lúc "Kết thúc" mẻ."""
-    b = BatchFilterLotBatch(batch_link_id=new_id(), filter_lot_id=fl.filter_lot_id, created_at=utcnow())
+    now = utcnow()
+    b = BatchFilterLotBatch(batch_link_id=new_id(), filter_lot_id=fl.filter_lot_id,
+                           created_at=now, created_by=user.username, started_at=now)
     db.add(b)
     db.flush()
     for src in src_rows:
@@ -1373,7 +1376,9 @@ def batch_with_draws(db: Session, b: BatchFilterLotBatch) -> dict:
     return {
         "batch_link_id": b.batch_link_id, "filter_lot_id": b.filter_lot_id,
         "batch_seq_no": b.batch_seq_no, "nuoc_bai_khi_hl": b.nuoc_bai_khi_hl,
-        "is_final_batch": b.is_final_batch, "ended_at": b.ended_at, "created_at": b.created_at,
+        "is_final_batch": b.is_final_batch, "started_at": b.started_at or b.created_at,
+        "ended_at": b.ended_at, "created_at": b.created_at, "created_by": b.created_by,
+        "updated_at": b.updated_at, "updated_by": b.updated_by,
         "note": b.note,
         "draws": [{"source_link_id": d.source_link_id, "dich_nha_hl": d.dich_nha_hl}
                  for d in list_batch_draws(db, b.batch_link_id)],
@@ -1420,7 +1425,7 @@ def add_filter_lot_batch(db: Session, filter_lot_id: str, user: User) -> BatchFi
     if batches and batches[-1].ended_at is None:
         raise DomainError("Mẻ lọc gần nhất chưa kết thúc — kết thúc mẻ đó trước khi thêm mẻ mới.")
     src_rows = list_filter_lot_sources(db, filter_lot_id)
-    b = _open_first_batch(db, fl, src_rows)
+    b = _open_first_batch(db, fl, src_rows, user)
     # Mẻ mới chưa "Kết thúc" -> lô lọc KHÔNG còn "đã lọc xong hết" (ended_at phải về None ngay,
     # không đợi tới lần "Kết thúc" mẻ tiếp theo mới cập nhật lại).
     _sync_filter_lot_aggregate(db, fl)
@@ -1461,9 +1466,13 @@ def finish_filter_lot_batch(db: Session, batch_link_id: str, draws: list[dict],
     tương ứng theo CHÊNH LỆCH dich_nha_hl (nuoc_bai_khi_hl là nước DAW phối thêm CHUNG cho cả
     mẻ, KHÔNG rút từ tank nào nên không trừ on_hand nguồn nào) — tổng hợp lại BatchFilterLot
     (xem _sync_filter_lot_aggregate: volume_hl = v_dich_hl + nuoc_bai_khi_hl). `started_at`/
-    `ended_at`: sửa lại giờ thực tế qua popup "Sửa" — không truyền thì giữ nguyên created_at,
-    ended_at mặc định = giờ hiện tại (yêu cầu người dùng 2026-09-01). `note`: ghi chú tự do cho
-    mẻ (yêu cầu người dùng 2026-10-03)."""
+    `ended_at`: sửa lại giờ thực tế qua popup "Sửa" — không truyền thì giữ nguyên started_at cũ
+    (KHÔNG còn ghi đè created_at nữa, xem models/batch_pipeline.py::BatchFilterLotBatch,
+    migration d2e4f6a8b1c3), ended_at mặc định = giờ hiện tại (yêu cầu người dùng 2026-09-01).
+    `note`: ghi chú tự do cho mẻ (yêu cầu người dùng 2026-10-03). Mỗi lần gọi (kể cả lần "Kết
+    thúc" đầu tiên) đều ghi lại updated_by/updated_at — "người sửa/ngày giờ sửa" (yêu cầu người
+    dùng 2026-10-11), tách biệt với created_by/created_at ("người nhập" — lúc mẻ được MỞ, xem
+    _open_first_batch/add_filter_lot_batch)."""
     require_perm(user, "batch.execute")
     b = db.get(BatchFilterLotBatch, batch_link_id)
     if not b:
@@ -1518,8 +1527,10 @@ def finish_filter_lot_batch(db: Session, batch_link_id: str, draws: list[dict],
     b.batch_seq_no = batch_seq_no
     b.note = note
     if started_at:
-        b.created_at = started_at
+        b.started_at = started_at
     b.ended_at = ended_at or utcnow()
+    b.updated_by = user.username
+    b.updated_at = utcnow()
     db.flush()
     _sync_filter_lot_aggregate(db, fl)
     _assert_within_capacity(fl.on_hand, usable_capacity_for_code(db, fl.to_bbt, "tank_bbt"),

@@ -8,7 +8,7 @@ Xem services/bom.py::_expand_materials/codes_for_dispense, services/dispense.py:
 
 import os
 import tempfile
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 _TMP = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
 os.environ["MES_DATABASE_URL"] = f"sqlite:///{_TMP.name}"
@@ -69,12 +69,12 @@ def _new_material(client, admin_h, suffix):
     return r.json()["material_id"], r.json()["code"]
 
 
-def _receive_workshop_lot(client, admin_h, material_id, qty, days_to_expiry=30):
-    r = client.post("/api/warehouse/receive", headers=admin_h, json={
-        "material_id": material_id, "quantity": qty, "uom": "kg",
-        "location": "Kho phân xưởng",
-        "expiry": (utcnow() + timedelta(days=days_to_expiry)).isoformat(),
-    })
+def _receive_workshop_lot(client, admin_h, material_id, qty, days_to_expiry=30, received_at=None):
+    payload = {"material_id": material_id, "quantity": qty, "uom": "kg", "location": "Kho phân xưởng",
+              "expiry": (utcnow() + timedelta(days=days_to_expiry)).isoformat()}
+    if received_at is not None:
+        payload["received_at"] = received_at.isoformat()
+    r = client.post("/api/warehouse/receive", headers=admin_h, json=payload)
     assert r.status_code == 200, r.text
     return r.json()["lot_id"]
 
@@ -275,3 +275,58 @@ def test_adjust_actual_refunds_via_member_code_not_just_own_lot_history(client, 
 
     bom = client.get(f"/api/batches/{batch_id}/bom", headers=admin_h).json()
     assert bom["lines"][0]["actual"] == 0.0
+
+
+def test_suggest_group_rows_ordered_by_fefo_pick_not_by_declared_code_order(client, admin_h):
+    """Yêu cầu người dùng 2026-10-11 (mẻ 2664): các dòng thành viên của 1 Nhóm vật tư thay thế
+    trong "Gợi ý cấp liệu" phải hiện theo ĐÚNG thứ tự lô được dùng trước (lô cũ nhất/FEFO trước),
+    KHÔNG theo thứ tự khai báo mã trong nhóm (trước đây luôn lặp theo match_codes cố định — gây
+    hiểu lầm khi lô CŨ của 1 mã thành viên lại hiện SAU lô MỚI của mã thành viên khác). Cũng xác
+    nhận mỗi lô (pick/alternative) có kèm "received_at" để biết ngày nhập.
+
+    Dùng 1 nhóm/vật tư RIÊNG (không tái dùng fixture `group` dùng chung cả file) để không bị lẫn
+    tồn kho còn sót lại từ các test trước — expiry là tiêu chí FEFO chính, nếu lẫn lô cũ của test
+    khác thì không kiểm soát được thứ tự thật."""
+    mid1, code1 = _new_material(client, admin_h, "ORD1")
+    mid2, code2 = _new_material(client, admin_h, "ORD2")
+    g = client.post("/api/material-alt-groups", headers=admin_h, json={
+        "code": "AG-GROUP-ORDER01", "name": "Malt test thứ tự FEFO", "member_material_ids": [mid1, mid2],
+        "unit": "kg", "selection_mode": "single"})
+    assert g.status_code == 201, g.text
+
+    same_expiry = (utcnow() + timedelta(days=30)).isoformat()
+    # code2 (mid2): lô CŨ hơn, tồn ít — sẽ được dùng HẾT trước trong hàng đợi FEFO chung.
+    r_old = client.post("/api/warehouse/receive", headers=admin_h, json={
+        "material_id": mid2, "quantity": 4, "uom": "kg", "location": "Kho phân xưởng",
+        "expiry": same_expiry, "received_at": (utcnow() - timedelta(days=10)).isoformat()})
+    assert r_old.status_code == 200, r_old.text
+    lot_old = r_old.json()["lot_id"]
+    # code1 (mid1): lô MỚI hơn, tồn nhiều — chỉ được dùng tới SAU khi lô cũ ở trên đã hết.
+    r_new = client.post("/api/warehouse/receive", headers=admin_h, json={
+        "material_id": mid1, "quantity": 50, "uom": "kg", "location": "Kho phân xưởng",
+        "expiry": same_expiry, "received_at": (utcnow() - timedelta(days=2)).isoformat()})
+    assert r_new.status_code == 200, r_new.text
+    lot_new = r_new.json()["lot_id"]
+
+    version_id = _recipe_version_group(client, admin_h, "ORDER01", "AG-GROUP-ORDER01", qty=10)
+    batch_id = _new_batch(client, admin_h, version_id, planned_qty=100, suffix="ORDER01")
+
+    sug = client.get(f"/api/dispense/{batch_id}/suggest", headers=admin_h).json()
+    assert len(sug["lines"]) == 2
+    # Dòng ĐẦU phải là mã của lô CŨ hơn (code2, được dùng/pick trước), không phải theo thứ tự
+    # khai báo mã (code1 < code2) như trước đây.
+    assert sug["lines"][0]["material_code"] == code2
+    assert sug["lines"][1]["material_code"] == code1
+    assert sug["lines"][0]["picks"] == [{
+        "lot_id": lot_old, "lot_code": sug["lines"][0]["picks"][0]["lot_code"], "quantity": 4.0,
+        "uom": "kg", "expiry": sug["lines"][0]["picks"][0]["expiry"],
+        "received_at": sug["lines"][0]["picks"][0]["received_at"]}]
+    assert sug["lines"][1]["picks"][0]["lot_id"] == lot_new
+    assert sug["lines"][1]["picks"][0]["quantity"] == 6.0
+
+    # "received_at" phải có mặt và đúng ngày nhập thật của từng lô (để FE hiện "nhập ngày...").
+    got_old = datetime.fromisoformat(sug["lines"][0]["picks"][0]["received_at"].replace("Z", "+00:00"))
+    got_new = datetime.fromisoformat(sug["lines"][1]["picks"][0]["received_at"].replace("Z", "+00:00"))
+    assert got_old < got_new
+    alt_old = next(a for a in sug["lines"][0]["alternatives"] if a["lot_id"] == lot_old)
+    assert alt_old["received_at"] is not None

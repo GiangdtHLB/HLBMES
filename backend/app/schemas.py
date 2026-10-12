@@ -162,6 +162,7 @@ class OpsSettingIn(BaseModel):
     fg_day_cutoff_hour: int = 0
     factory_code: Optional[str] = None
     erp_order_volume_tolerance_hl: float = 5.0
+    session_hours: int = 8760   # thời hạn phiên đăng nhập (giờ) — xem routers/auth.py::login
 
 
 class OpsSettingOut(ORMModel):
@@ -182,6 +183,7 @@ class OpsSettingOut(ORMModel):
     fg_day_cutoff_hour: int
     factory_code: Optional[str] = None
     erp_order_volume_tolerance_hl: float = 5.0
+    session_hours: int = 8760
     updated_by: Optional[str] = None
     updated_at: datetime
 
@@ -2206,8 +2208,12 @@ class BatchFilterLotBatchOut(ORMModel):
     batch_seq_no: Optional[str] = None
     nuoc_bai_khi_hl: Optional[float] = None
     is_final_batch: bool = False
+    started_at: Optional[datetime] = None
     ended_at: Optional[datetime] = None
     created_at: datetime
+    created_by: Optional[str] = None
+    updated_at: Optional[datetime] = None
+    updated_by: Optional[str] = None
     note: Optional[str] = None
     draws: list[BatchFilterLotBatchDrawOut] = []
 

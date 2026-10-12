@@ -6,6 +6,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..common import new_id, utcnow
+from ..config import SESSION_HOURS
+from ..errors import DomainError
 from ..models.brewing import OpsSetting
 from ..security import User
 
@@ -20,7 +22,7 @@ def get_settings(db: Session) -> OpsSetting:
                        finished_goods_restock_days=7.0, fg_days_of_stock_critical_days=3.0,
                        fg_days_in_stock_warning_days=30.0,
                        finished_goods_receive_max_backdate_days=15.0, fg_day_cutoff_hour=0,
-                       erp_order_volume_tolerance_hl=5.0)
+                       erp_order_volume_tolerance_hl=5.0, session_hours=SESSION_HOURS)
         db.add(s)
         db.commit()
         db.refresh(s)
@@ -37,7 +39,10 @@ def update_settings(db: Session, empty_cct_tolerance_hl: float, empty_bbt_tolera
                     fg_days_in_stock_warning_days: float = 30.0,
                     finished_goods_receive_max_backdate_days: float = 15.0,
                     fg_day_cutoff_hour: int = 0,
-                    erp_order_volume_tolerance_hl: float = 5.0) -> OpsSetting:
+                    erp_order_volume_tolerance_hl: float = 5.0,
+                    session_hours: int = 8760) -> OpsSetting:
+    if session_hours <= 0:
+        raise DomainError("Thời hạn phiên đăng nhập (giờ) phải lớn hơn 0.")
     s = get_settings(db)
     s.empty_cct_tolerance_hl = empty_cct_tolerance_hl
     s.empty_bbt_tolerance_hl = empty_bbt_tolerance_hl
@@ -55,6 +60,7 @@ def update_settings(db: Session, empty_cct_tolerance_hl: float, empty_bbt_tolera
     s.fg_day_cutoff_hour = fg_day_cutoff_hour
     s.factory_code = factory_code
     s.erp_order_volume_tolerance_hl = erp_order_volume_tolerance_hl
+    s.session_hours = session_hours
     s.updated_by = user.username
     s.updated_at = utcnow()
     db.commit()

@@ -35,7 +35,12 @@ class Settings(BaseSettings):
 
     # --- Bảo mật / phiên ---
     dev_header_auth: bool = False          # MES_DEV_HEADER_AUTH (CHỈ dev)
-    session_hours: int = 12                # MES_SESSION_HOURS
+    # Phiên đăng nhập KHÔNG gia hạn khi hoạt động (hết hạn tuyệt đối tính từ lúc login, xem
+    # routers/auth.py::login/security.py::get_current_user) — mặc định 1 năm (8760h) theo yêu
+    # cầu người dùng 2026-10-12: "không muốn tài khoản bị buộc out sau 12h". Trước đây mặc định
+    # 12h NHƯNG routers/auth.py tự khai hằng số SESSION_HOURS=12 riêng, không đọc biến này —
+    # MES_SESSION_HOURS từng hoàn toàn không có tác dụng (đã vá, xem routers/auth.py).
+    session_hours: int = 8760              # MES_SESSION_HOURS
     admin_password: str = ""               # MES_ADMIN_PASSWORD (rỗng → mặc định + buộc đổi)
 
     # --- Seed ---

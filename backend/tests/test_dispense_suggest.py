@@ -199,7 +199,8 @@ def test_suggest_reports_shortfall_when_workshop_stock_insufficient(client, admi
     line = sug["lines"][0]
     assert line["need"] == 10.0
     assert line["picks"] == [{"lot_id": lot_id, "lot_code": line["picks"][0]["lot_code"],
-                              "quantity": 3.0, "uom": "kg", "expiry": line["picks"][0]["expiry"]}]
+                              "quantity": 3.0, "uom": "kg", "expiry": line["picks"][0]["expiry"],
+                              "received_at": line["picks"][0]["received_at"]}]
     assert line["shortfall"] == 7.0
 
 
