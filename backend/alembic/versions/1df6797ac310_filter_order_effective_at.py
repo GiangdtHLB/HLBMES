@@ -26,7 +26,7 @@ depends_on = None
 
 def upgrade() -> None:
     with op.batch_alter_table('batch_filter_order') as batch_op:
-        batch_op.add_column(sa.Column('effective_at', sa.DateTime(), nullable=True))
+        batch_op.add_column(sa.Column('effective_at', sa.DateTime(timezone=True), nullable=True))
 
 
 def downgrade() -> None:
