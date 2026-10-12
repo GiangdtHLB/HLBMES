@@ -3892,17 +3892,19 @@ async function showBatchFilterLot(filterLotId) {
     <h3>Các mẻ lọc</h3>
     <div class="muted" style="margin-bottom:8px">Nếu phối nhiều nguồn: 1 mẻ lọc chỉ rút từ ĐÚNG 1 nguồn tại 1 thời điểm (hết tank này mới chuyển sang tank kia) — hết nguồn này thì bấm "+ Thêm mẻ" để khai đợt kế tiếp cho nguồn khác, không nhập nhiều nguồn cùng lúc trong 1 mẻ. "Mẻ cuối" đánh dấu mẻ vét, dùng để loại khỏi so sánh hiệu suất.</div>
     <div class="tablewrap"><table>
-      <thead><tr><th>Mẻ số</th>${sources.map(s => `<th>${esc(sourceLabel(s))} (hl)</th>`).join("")}<th>Nước DAW (hl)</th><th>Bắt đầu</th><th>Kết thúc lúc</th><th>Mẻ cuối</th><th>Ghi chú</th><th></th></tr></thead>
+      <thead><tr><th>Mẻ số</th>${sources.map(s => `<th>${esc(sourceLabel(s))} (hl)</th>`).join("")}<th>Nước DAW (hl)</th><th>Bắt đầu</th><th>Kết thúc lúc</th><th>Mẻ cuối</th><th>Ghi chú</th><th>Người nhập / Ngày giờ nhập</th><th>Người sửa / Ngày giờ sửa</th><th></th></tr></thead>
       <tbody>${batches.map(b => {
         const drawMap = Object.fromEntries(b.draws.map(d => [d.source_link_id, d.dich_nha_hl]));
         return `<tr>
         <td>${esc(b.batch_seq_no || "—")}</td>
         ${sources.map(s => `<td>${drawMap[s.link_id] ?? "—"}</td>`).join("")}
         <td>${b.nuoc_bai_khi_hl ?? "—"}</td>
-        <td class="muted">${fmt(b.created_at)}</td>
+        <td class="muted">${fmt(b.started_at || b.created_at)}</td>
         <td class="muted">${b.ended_at ? fmt(b.ended_at) : "—"}</td>
         <td>${b.is_final_batch ? '<span class="badge completed">Mẻ cuối</span>' : ""}</td>
         <td class="muted">${esc(b.note || "—")}</td>
+        <td class="muted" style="font-size:12px">${esc(b.created_by || "—")}${b.created_by ? "<br>" + fmt(b.created_at) : ""}</td>
+        <td class="muted" style="font-size:12px">${b.updated_by ? `${esc(b.updated_by)}<br>${fmt(b.updated_at)}` : "—"}</td>
         <td style="white-space:nowrap">
           ${lk ? "" : `<button class="btn sm sec" data-finbatch="${b.batch_link_id}">${b.ended_at ? "Sửa" : "Kết thúc"}</button>
           <button class="btn sm sec" data-togglefinal="${b.batch_link_id}">${b.is_final_batch ? "Bỏ mẻ cuối" : "Mẻ cuối"}</button>
@@ -12219,6 +12221,12 @@ VIEWS.master = async function () {
       <div class="row">
         <div class="field"><label>Mã nhà máy</label><input id="ops_factory_code" value="${esc(opsSettings.factory_code || "")}" placeholder="VD: DM01" style="width:120px" ${canManage ? "" : "disabled"}/></div>
       </div>
+      <div class="muted" style="margin:10px 0 6px">Thời hạn phiên đăng nhập (giờ) — tính TUYỆT ĐỐI từ lúc đăng nhập, KHÔNG tự gia hạn dù vẫn
+        đang thao tác. VD 12 = sau 12 giờ kể từ lúc đăng nhập phải đăng nhập lại; 8760 ≈ 1 năm. Chỉ áp dụng cho phiên đăng nhập MỚI
+        (không ảnh hưởng các phiên đang đăng nhập sẵn).</div>
+      <div class="row">
+        <div class="field"><label>Thời hạn phiên đăng nhập (giờ)</label><input id="ops_session_hours" type="number" step="1" min="1" value="${opsSettings.session_hours ?? 8760}" style="width:140px" ${canManage ? "" : "disabled"}/></div>
+      </div>
       ${canManage ? `<button class="btn" id="ops_save" style="margin-top:10px">Lưu tất cả cài đặt vận hành</button>` : ""}
       ${opsSettings.updated_by ? `<div class="muted" style="font-size:12px;margin-top:6px">Cập nhật lần cuối: ${esc(opsSettings.updated_by)} · ${fmt(opsSettings.updated_at)}</div>` : ""}
     </div>
@@ -12287,6 +12295,7 @@ VIEWS.master = async function () {
         finished_goods_receive_max_backdate_days: parseFloat($("ops_fg_max_backdate_days").value) || 15,
         fg_day_cutoff_hour: Math.min(23, Math.max(0, parseInt($("ops_fg_cutoff_hour").value, 10) || 0)),
         factory_code: $("ops_factory_code").value.trim() || null,
+        session_hours: parseInt($("ops_session_hours").value, 10) || 8760,
       });
       toast("Đã lưu cài đặt vận hành"); render("master");
     });

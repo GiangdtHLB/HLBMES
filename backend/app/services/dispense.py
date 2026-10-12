@@ -447,6 +447,11 @@ def suggest_dispense(db: Session, batch_id: str) -> dict:
             # consume_lot/ceiling_for_material, không phải ở đây)."""
             combined_lots = _workshop_fefo_lots(db, l["material_code"], batch.start_at)
             picks_by_member = {c: [] for c in member_codes}
+            # Thứ tự mã THÀNH VIÊN được pick lần đầu trong hàng đợi FEFO chung — dùng để hiện
+            # các dòng thành viên ĐÚNG theo thứ tự lô cũ nhất trước (yêu cầu người dùng 2026-10-
+            # 11: "xếp lô xa nhất lên trước, tránh hiểu lầm" — trước đây hiện theo thứ tự khai
+            # báo match_codes cố định, không liên quan gì tới lô nào được dùng trước).
+            pick_order = []
             remaining = need
             for lot in combined_lots:
                 if remaining <= 1e-9:
@@ -455,12 +460,16 @@ def suggest_dispense(db: Session, batch_id: str) -> dict:
                 if take <= 0:
                     continue
                 mcode = bom.material_code_for_lot(db, lot)
+                if not picks_by_member.get(mcode):
+                    pick_order.append(mcode)
                 picks_by_member.setdefault(mcode, []).append(
                     {"lot_id": lot.lot_id, "lot_code": lot.lot_code, "quantity": round(take, 4),
-                     "uom": lot.uom, "expiry": lot.expiry.isoformat() if lot.expiry else None})
+                     "uom": lot.uom, "expiry": lot.expiry.isoformat() if lot.expiry else None,
+                     "received_at": lot.created_at.isoformat() if lot.created_at else None})
                 remaining = round(remaining - take, 4)
             group_shortfall = round(remaining, 4) if remaining > 1e-6 else 0.0
-            for mcode in member_codes:
+            ordered_member_codes = pick_order + [c for c in member_codes if c not in pick_order]
+            for mcode in ordered_member_codes:
                 member_lots = _workshop_fefo_lots(db, mcode, batch.start_at)
                 # Chỉ hiện lô CÒN TỒN THẬT (> 0) để người dùng chọn tay — member_lots vẫn có thể
                 # chứa lô đã về 0 do bị mẻ KHÁC rút cạn SAU `as_of` (giữ lại đúng chủ ý để
@@ -468,7 +477,8 @@ def suggest_dispense(db: Session, batch_id: str) -> dict:
                 # lô rỗng chỉ khiến người dùng cấp nhầm 0kg mà không rõ vì sao (yêu cầu người dùng
                 # 2026-10-07: "lô tồn 0 vẫn hiện ra để chọn").
                 alternatives = [{"lot_id": lot.lot_id, "lot_code": lot.lot_code, "quantity": round(_lot_avail_qty(lot), 4),
-                                "uom": lot.uom, "expiry": lot.expiry.isoformat() if lot.expiry else None}
+                                "uom": lot.uom, "expiry": lot.expiry.isoformat() if lot.expiry else None,
+                                "received_at": lot.created_at.isoformat() if lot.created_at else None}
                                for lot in member_lots if _lot_avail_qty(lot) > 1e-9]
                 lines.append({"material_code": mcode, "material_name": name_by_code.get(mcode),
                              "uom": l["uom"], "planned": l["planned"],
@@ -487,7 +497,8 @@ def suggest_dispense(db: Session, batch_id: str) -> dict:
         fefo_lots = _workshop_fefo_lots(db, l["material_code"], batch.start_at)
         # Chỉ hiện lô còn tồn thật > 0 để chọn tay — xem chú thích ở nhánh "is_group" phía trên.
         alternatives = [{"lot_id": lot.lot_id, "lot_code": lot.lot_code, "quantity": round(_lot_avail_qty(lot), 4),
-                        "uom": lot.uom, "expiry": lot.expiry.isoformat() if lot.expiry else None}
+                        "uom": lot.uom, "expiry": lot.expiry.isoformat() if lot.expiry else None,
+                        "received_at": lot.created_at.isoformat() if lot.created_at else None}
                        for lot in fefo_lots if _lot_avail_qty(lot) > 1e-9]
         picks = []
         remaining = need
@@ -499,7 +510,8 @@ def suggest_dispense(db: Session, batch_id: str) -> dict:
                 continue
             picks.append({"lot_id": lot.lot_id, "lot_code": lot.lot_code,
                          "quantity": round(take, 4), "uom": lot.uom,
-                         "expiry": lot.expiry.isoformat() if lot.expiry else None})
+                         "expiry": lot.expiry.isoformat() if lot.expiry else None,
+                         "received_at": lot.created_at.isoformat() if lot.created_at else None})
             remaining = round(remaining - take, 4)
         lines.append({"material_code": l["material_code"], "material_name": l.get("material_name"),
                      "uom": l["uom"], "planned": l["planned"],

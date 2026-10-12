@@ -12,6 +12,7 @@ from ..common import Role, new_id, utcnow
 from ..database import get_db
 from ..errors import DomainError, NotFoundError, PermissionError_
 from ..models.auth import RoleTemplate, User as UserModel, UserSession
+from ..services import ops_setting as ops_setting_svc
 from ..security import (
     PERMISSION_CATALOG,
     User,
@@ -24,8 +25,6 @@ from ..security import (
 )
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
-
-SESSION_HOURS = 12
 
 
 class LoginIn(BaseModel):
@@ -116,8 +115,12 @@ def login(payload: LoginIn, db: Session = Depends(get_db)):
         db.commit()
         raise PermissionError_("Sai tài khoản hoặc mật khẩu.")
     token = new_token()
+    # Thời hạn phiên lấy từ Cài đặt vận hành (ops_setting.session_hours, chỉnh được qua UI —
+    # yêu cầu người dùng 2026-10-12), KHÔNG còn cố định theo config.SESSION_HOURS — giá trị đó
+    # giờ chỉ còn dùng làm mặc định lúc tạo dòng ops_setting lần đầu (xem services/ops_setting.py).
+    session_hours = ops_setting_svc.get_settings(db).session_hours
     db.add(UserSession(token=token, user_id=u.user_id, username=u.username, role=u.role,
-                       created_at=utcnow(), expires_at=utcnow() + timedelta(hours=SESSION_HOURS)))
+                       created_at=utcnow(), expires_at=utcnow() + timedelta(hours=session_hours)))
     u.last_login_at = utcnow()
     _audit_auth(db, u.username, u.role, "login")
     db.commit()

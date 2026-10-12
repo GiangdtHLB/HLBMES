@@ -429,7 +429,7 @@
           return;
         }
         const altOpts = l.alternatives.map(a =>
-          `<option value="${a.lot_id}">${esc(a.lot_code)} (còn ${a.quantity}${a.expiry ? ", HSD " + fmt(a.expiry) : ""})</option>`).join("");
+          `<option value="${a.lot_id}">${esc(a.lot_code)}${a.received_at ? " — nhập " + fmt(a.received_at) : ""} (còn ${a.quantity}${a.expiry ? ", HSD " + fmt(a.expiry) : ""})</option>`).join("");
         // Nếu gợi ý tự động không phân bổ gì cho vật tư này (VD 1 vật tư khác trong CÙNG nhóm
         // đã đủ đáp ứng qua FIFO) nhưng vẫn có lô khả dụng — vẫn hiện dòng này (không ẩn), NHƯNG
         // làm mờ + khóa nhập nếu nhóm ĐÃ đủ tồn qua thành viên khác rồi (không cần lấy thêm mã
@@ -493,7 +493,7 @@
         if (!nextAlt) { toast(`Không còn lô nào khác của "${line.material_code}" để chọn.`, "err"); return; }
         const pi = Math.max(...Array.from(document.querySelectorAll(`.sg-lot[data-li="${li}"]`)).map(s => parseInt(s.dataset.pi, 10))) + 1;
         const altOpts = line.alternatives.map(a =>
-          `<option value="${a.lot_id}">${esc(a.lot_code)} (còn ${a.quantity}${a.expiry ? ", HSD " + fmt(a.expiry) : ""})</option>`).join("");
+          `<option value="${a.lot_id}">${esc(a.lot_code)}${a.received_at ? " — nhập " + fmt(a.received_at) : ""} (còn ${a.quantity}${a.expiry ? ", HSD " + fmt(a.expiry) : ""})</option>`).join("");
         // Chèn bằng insertAdjacentHTML (không dùng el(), vốn dựng DOM qua <div> — <tr> không
         // parse đúng ngoài ngữ cảnh <table>/<tbody>) để dòng mới nằm ĐÚNG trong <tbody> hiện có.
         const addRowEl = btn.closest("tr");

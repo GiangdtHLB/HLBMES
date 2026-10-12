@@ -163,5 +163,12 @@ class OpsSetting(Base):
     # SX (ERP, ProductionOrder, đã xóa hẳn). Giữ lại cột (không đáng để migration riêng), không
     # còn code nào đọc field này. BrewOrder tự tính "hoàn thành" qua volume_tolerance_hl riêng.
     erp_order_volume_tolerance_hl: Mapped[float] = mapped_column(Float, default=5.0)
+    # Thời hạn phiên đăng nhập (giờ, tuyệt đối tính từ lúc đăng nhập, KHÔNG gia hạn khi hoạt
+    # động) — xem routers/auth.py::login/security.py::get_current_user. Trước đây hardcode 12h
+    # ở routers/auth.py (biến môi trường MES_SESSION_HOURS từng không có tác dụng gì — đã vá),
+    # nay cấu hình được ở Cài đặt vận hành (yêu cầu người dùng 2026-10-12). Dòng mới tạo lấy mặc
+    # định từ config.SESSION_HOURS (chính là MES_SESSION_HOURS nếu có khai, xem
+    # services/ops_setting.py::get_settings) — sau đó admin tự chỉnh qua UI, lưu ở đây.
+    session_hours: Mapped[int] = mapped_column(Integer, default=8760)
     updated_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
