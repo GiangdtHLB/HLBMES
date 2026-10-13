@@ -84,9 +84,17 @@ def _batch_tank_len_men_counts(db: Session) -> dict:
     lines = db.execute(select(ProductionLine).where(
         ProductionLine.kind == "tank", ProductionLine.active == true())).scalars().all()
     tanks_by_code: dict[str, str] = {}
+    # list_tanks_out (qua list_tanks) trả về theo created_at GIẢM DẦN (mới nhất trước) — 1 tank
+    # vật lý có thể có NHIỀU dòng BatchTank qua nhiều đợt lên men khác nhau theo thời gian (đợt
+    # cũ đã xong, đợt mới đang chạy). CHỈ giữ dòng ĐẦU TIÊN gặp cho mỗi mã tank (= dòng MỚI NHẤT,
+    # đúng trạng thái HIỆN TẠI) — trước đây gán đè `=` ở MỌI dòng nên dòng CŨ xử lý sau lại ghi
+    # đè lên dòng mới, kết quả cuối cùng là trạng thái của đợt CŨ NHẤT chứ không phải hiện tại
+    # (bug thực tế 2026-10-13: dashboard báo "5 tank đang lên men" trong khi tra lại đúng theo
+    # dòng mới nhất mỗi tank thì có tới 20 tank đang lên men — 17 tank đã lọc XONG từ đợt trước
+    # bị hiểu nhầm trạng thái của đợt CŨ đó thay vì đợt MỚI đang chạy thật).
     for t in batch_pipeline_svc.list_tanks_out(db):
         if t["tank_lm"]:
-            tanks_by_code[t["tank_lm"]] = t["status"]
+            tanks_by_code.setdefault(t["tank_lm"], t["status"])
     total = len(lines)
     dang_su_dung = sum(1 for l in lines if tanks_by_code.get(l.code) in ("len_men", "cho_loc"))
     dang_loc = sum(1 for l in lines if tanks_by_code.get(l.code) == "loc_1_phan")

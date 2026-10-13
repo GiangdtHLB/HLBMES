@@ -14,7 +14,9 @@ os.environ["MES_ADMIN_PASSWORD"] = "AdminTest123"
 import pytest
 from fastapi.testclient import TestClient
 
+from app.database import SessionLocal
 from app.main import app
+from app.models.batch_pipeline import BatchTank
 from app import seed as seed_mod
 
 
@@ -194,6 +196,49 @@ def test_dashboard_stat_cards_source_from_new_batch_pipeline(client, admin_h):
 
     bna = client.get("/api/reports/bottled-not-approved", headers=admin_h).json()
     assert any(it["pack_lot_code"] == "PKG-DASHNEW-1" for it in bna["items"])
+
+
+def test_dashboard_tank_reused_code_counts_latest_cycle_not_oldest(client, admin_h):
+    """Bug thực tế 2026-10-13: 1 tank vật lý dùng lại qua nhiều đợt lên men khác nhau theo thời
+    gian (đợt cũ đã lọc xong "da_loc_het", đợt mới đang "len_men") bị dashboard đếm NHẦM theo
+    trạng thái đợt CŨ NHẤT thay vì đợt MỚI NHẤT đang chạy thật. Nguyên nhân: _batch_tank_len_men_
+    counts duyệt list_tanks_out (mới nhất trước, created_at DESC) rồi gán đè `=` ở MỌI dòng cùng
+    mã tank — dòng xử lý SAU CÙNG (chính là dòng CŨ NHẤT, vì duyệt giảm dần) mới là giá trị cuối
+    cùng còn lại trong dict, không phải dòng mới nhất như ý đồ. Phát hiện qua dashboard thật:
+    "Tank đang lên men" báo 5 trong khi tra lại đúng theo đợt mới nhất mỗi tank thì phải là 20."""
+    tank_lm = "FV-DASHREUSE-1"
+    line = client.post("/api/lines", headers=admin_h,
+                       json={"code": tank_lm, "name": "Tank reuse test", "kind": "tank"})
+    assert line.status_code == 201, line.text
+
+    # Đợt 1 (CŨ): mẻ đã xong, gộp vào tank, rồi ép on_hand về 0 (mô phỏng đã lọc rút hết dịch)
+    # -> trạng thái "da_loc_het".
+    batch1_id = _make_batch(client, admin_h, None)
+    _run_batch_to_completed(client, admin_h, batch1_id)
+    tank1 = client.post("/api/batch-tanks", headers=admin_h,
+                       json={"batch_ids": [batch1_id], "tank_code": "TANK-DASHREUSE-OLD", "tank_lm": tank_lm})
+    assert tank1.status_code == 201, tank1.text
+    db = SessionLocal()
+    try:
+        t = db.get(BatchTank, tank1.json()["tank_id"])
+        t.on_hand = 0.0
+        db.commit()
+    finally:
+        db.close()
+    mid = client.get("/api/reports/dashboard-summary", headers=admin_h).json()
+
+    # Đợt 2 (MỚI): mẻ khác, gộp vào ĐÚNG tank vật lý đó (đợt cũ đã giải phóng vì on_hand=0 + đã
+    # kết thúc) — tank vật lý không đổi (total không tăng thêm), nhưng trạng thái HIỆN TẠI phải
+    # là "len_men" của đợt mới, không phải "da_loc_het" của đợt cũ.
+    batch2_id = _make_batch(client, admin_h, None)
+    _run_batch_to_completed(client, admin_h, batch2_id)
+    tank2 = client.post("/api/batch-tanks", headers=admin_h,
+                       json={"batch_ids": [batch2_id], "tank_code": "TANK-DASHREUSE-NEW", "tank_lm": tank_lm})
+    assert tank2.status_code == 201, tank2.text
+
+    after = client.get("/api/reports/dashboard-summary", headers=admin_h).json()
+    assert after["tank_len_men"]["total"] == mid["tank_len_men"]["total"]
+    assert after["tank_len_men"]["dang_su_dung"] == mid["tank_len_men"]["dang_su_dung"] + 1
 
 
 def test_dashboard_tank_dang_nau_not_counted_as_trong(client, admin_h):
