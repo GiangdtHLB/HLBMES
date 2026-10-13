@@ -230,15 +230,53 @@ def test_delete_tank_blocked_by_planned_filter_order_source(client, admin_h):
     assert "Lệnh lọc" in d.json()["detail"]
 
 
-def test_delete_filter_lot_blocked_when_qc_approved(client, admin_h):
+def test_delete_filter_lot_blocked_when_qc_approved_without_reason_allowed_with_reason(client, admin_h):
+    """2026-10-13: đổi từ chặn cứng sang cho xóa có kiểm soát — lô đã KCS duyệt vẫn xóa được
+    NHƯNG bắt buộc nhập lý do (ghi vào audit_log), tránh buộc người dùng phải lách qua SQL trực
+    tiếp (không để lại audit nào) mỗi khi cần sửa 1 lô duyệt nhầm."""
     filter_lot_id, _tank_id = _make_filter_lot(client, admin_h, "DELAPPR1")
     _finish_only_source(client, admin_h, filter_lot_id)
     appr = client.post(f"/api/batch-filter-lots/{filter_lot_id}/approve", headers=admin_h)
     assert appr.status_code == 200, appr.text
 
+    no_reason = client.delete(f"/api/batch-filter-lots/{filter_lot_id}", headers=admin_h)
+    assert no_reason.status_code == 409, no_reason.text
+    assert "lý do" in no_reason.json()["detail"]
+
+    d = client.delete(f"/api/batch-filter-lots/{filter_lot_id}", headers=admin_h,
+                      params={"reason": "Duyet nham, huy de tao lai"})
+    assert d.status_code == 204, d.text
+
+    au = client.get("/api/audit", headers=admin_h,
+                    params={"entity_type": "batch_filter_lot", "entity_id": filter_lot_id}).json()
+    delete_entry = next(a for a in au if a["action"] == "delete")
+    assert delete_entry["reason"] == "Duyet nham, huy de tao lai"
+
+
+def test_delete_filter_lot_not_blocked_when_not_approved_no_reason_needed(client, admin_h):
+    """Lô CHƯA duyệt thì không bắt buộc lý do — giữ nguyên hành vi cũ."""
+    filter_lot_id, _tank_id = _make_filter_lot(client, admin_h, "DELNOAPPR1")
+    _finish_only_source(client, admin_h, filter_lot_id)
+
     d = client.delete(f"/api/batch-filter-lots/{filter_lot_id}", headers=admin_h)
-    assert d.status_code == 409, d.text
-    assert "duyệt" in d.json()["detail"]
+    assert d.status_code == 204, d.text
+
+
+def test_delete_filter_lot_blocked_when_already_has_pack_lot_even_with_reason(client, admin_h):
+    """Yêu cầu người dùng 2026-10-13: "nếu lô lọc đã được chiết thì không được xóa" — chặn CỨNG,
+    không bypass được bằng lý do (khác hẳn chặn qc_approved ở trên) vì đã có lô thành phẩm thật
+    tách ra, xóa lô lọc sẽ làm batch_pack_lot.filter_lot_id mồ côi. Check này vốn đã tồn tại
+    trước 2026-10-13, chỉ xác nhận lại nó không bị ảnh hưởng bởi đổi hành vi `qc_approved`."""
+    filter_lot_id, _tank_id = _make_filter_lot(client, admin_h, "DELHASPACK1")
+    _finish_only_source(client, admin_h, filter_lot_id)
+    appr = client.post(f"/api/batch-filter-lots/{filter_lot_id}/approve", headers=admin_h)
+    assert appr.status_code == 200, appr.text
+    _make_pack_lot(client, admin_h, filter_lot_id, "DELHASPACK1")
+
+    blocked = client.delete(f"/api/batch-filter-lots/{filter_lot_id}", headers=admin_h,
+                            params={"reason": "Thu xoa du co ly do"})
+    assert blocked.status_code == 409, blocked.text
+    assert "lô thành phẩm" in blocked.json()["detail"]
 
 
 def test_delete_filter_lot_undoes_material_usage_and_qc(client, admin_h):
@@ -291,6 +329,29 @@ def test_delete_pack_lot_undoes_material_usage_and_qc(client, admin_h):
     d = client.delete(f"/api/batch-pack-lots/{pack_lot_id}", headers=admin_h)
     assert d.status_code == 204, d.text
     assert _lot_qty(client, admin_h, lot_id) == 50
+
+
+def test_delete_pack_lot_blocked_when_approved_without_reason_allowed_with_reason(client, admin_h):
+    """Mirror test_delete_filter_lot_blocked_when_qc_approved_without_reason_allowed_with_reason
+    — cùng đổi từ chặn cứng sang cho xóa có kiểm soát (2026-10-13)."""
+    filter_lot_id, _tank_id = _make_filter_lot(client, admin_h, "DELPKAPPR1")
+    _finish_only_source(client, admin_h, filter_lot_id)
+    pack_lot_id = _make_pack_lot(client, admin_h, filter_lot_id, "DELPKAPPR1")
+    appr = client.post(f"/api/batch-pack-lots/{pack_lot_id}/approve", headers=admin_h)
+    assert appr.status_code == 200, appr.text
+
+    no_reason = client.delete(f"/api/batch-pack-lots/{pack_lot_id}", headers=admin_h)
+    assert no_reason.status_code == 409, no_reason.text
+    assert "lý do" in no_reason.json()["detail"]
+
+    d = client.delete(f"/api/batch-pack-lots/{pack_lot_id}", headers=admin_h,
+                      params={"reason": "Duyet nham, huy de tao lai"})
+    assert d.status_code == 204, d.text
+
+    au = client.get("/api/audit", headers=admin_h,
+                    params={"entity_type": "batch_pack_lot", "entity_id": pack_lot_id}).json()
+    delete_entry = next(a for a in au if a["action"] == "delete")
+    assert delete_entry["reason"] == "Duyet nham, huy de tao lai"
 
     from app.database import SessionLocal
     from app.models.quality import QualityResult

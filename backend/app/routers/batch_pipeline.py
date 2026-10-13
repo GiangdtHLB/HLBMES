@@ -302,8 +302,9 @@ def update_filter_lot(filter_lot_id: str, payload: BatchFilterLotEditIn, db: Ses
 
 
 @router.delete("/batch-filter-lots/{filter_lot_id}", status_code=204)
-def delete_filter_lot(filter_lot_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    svc.delete_filter_lot(db, filter_lot_id, user)
+def delete_filter_lot(filter_lot_id: str, reason: str = None, db: Session = Depends(get_db),
+                      user: User = Depends(get_current_user)):
+    svc.delete_filter_lot(db, filter_lot_id, user, reason)
 
 
 @router.post("/batch-filter-lots/{filter_lot_id}/approve")
@@ -427,8 +428,9 @@ def update_pack_lot_pack_date(pack_lot_id: str, payload: BatchPackLotPackDateIn,
 
 
 @router.delete("/batch-pack-lots/{pack_lot_id}", status_code=204)
-def delete_pack_lot(pack_lot_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    svc.delete_pack_lot(db, pack_lot_id, user)
+def delete_pack_lot(pack_lot_id: str, reason: str = None, db: Session = Depends(get_db),
+                    user: User = Depends(get_current_user)):
+    svc.delete_pack_lot(db, pack_lot_id, user, reason)
 
 
 @router.post("/batch-pack-lots/{pack_lot_id}/finish-chiet", response_model=BatchPackLotOut)

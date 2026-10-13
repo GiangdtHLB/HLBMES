@@ -224,6 +224,87 @@ def test_release_row_creates_full_and_remainder_pallets_and_stamps_who(client, a
         assert pl["location"] == "LOC-ROW01"
 
 
+def test_delete_pack_lot_blocked_once_stocked_even_with_reason(client, admin_h):
+    """Yêu cầu người dùng 2026-10-13: "lô chiết đã nhập kho thành phẩm thì không được xóa" —
+    chặn CỨNG kể cả có lý do (khác hẳn chặn `approved` một mình, có thể bypass bằng lý do, xem
+    test_batch_pipeline_audit_fixes.py) vì đã tạo Pallet THẬT trong kho — xóa sẽ để Pallet mồ
+    côi, lệch tồn kho thật."""
+    fp_id = _make_sku(client, admin_h, "DELSTOCK01")
+    spec_id = _make_spec(client, admin_h, fp_id, "QC-DELSTOCK01", 50)
+    pack_lot_id = _build_pack_lot(client, admin_h, "DELSTOCK01", fp_id, ca1=50)
+    loc_id = _make_location(client, admin_h, "DELSTOCK01")
+    saved = _save_allocations(client, admin_h, pack_lot_id, [{"spec_id": spec_id, "quantity": 50}])
+    assert saved.status_code == 200, saved.text
+    row = saved.json()["pack_allocations"][0]
+    release = _release_row(client, admin_h, pack_lot_id, row["row_id"], loc_id)
+    assert release.status_code == 200, release.text
+
+    blocked = client.delete(f"/api/batch-pack-lots/{pack_lot_id}", headers=admin_h,
+                            params={"reason": "Thu xoa du co ly do"})
+    assert blocked.status_code == 409, blocked.text
+    assert "nhập kho" in blocked.json()["detail"]
+
+
+def test_delete_pack_lot_blocked_when_partially_released_not_fully_stocked(client, admin_h):
+    """`stocked` chỉ True khi HẾT quy cách đã release — nhưng 1 dòng released đã tạo Pallet thật,
+    nên vẫn phải chặn xóa dù pack lot CHƯA fully stocked."""
+    fp_id = _make_sku(client, admin_h, "DELPARTIAL01", unit_type="keg", pack_size=1)
+    spec_a = _make_spec(client, admin_h, fp_id, "QC-A-DELPARTIAL01", 100)
+    spec_b = _make_spec(client, admin_h, fp_id, "QC-B-DELPARTIAL01", 110)
+    pack_lot_id = _build_pack_lot(client, admin_h, "DELPARTIAL01", fp_id, ca1=100, ca2=110)
+    loc_id = _make_location(client, admin_h, "DELPARTIAL01")
+    saved = _save_allocations(client, admin_h, pack_lot_id,
+                              [{"spec_id": spec_a, "quantity": 100}, {"spec_id": spec_b, "quantity": 110}])
+    assert saved.status_code == 200, saved.text
+    row_a = _row_id_for_spec(saved.json(), spec_a)
+    release_a = _release_row(client, admin_h, pack_lot_id, row_a, loc_id)
+    assert release_a.status_code == 200, release_a.text
+    p = client.get(f"/api/batch-pack-lots/{pack_lot_id}", headers=admin_h).json()
+    assert p["stocked"] is False   # còn dòng B chưa release
+
+    blocked = client.delete(f"/api/batch-pack-lots/{pack_lot_id}", headers=admin_h,
+                            params={"reason": "Thu xoa du co ly do"})
+    assert blocked.status_code == 409, blocked.text
+
+
+def test_update_pack_lot_qty_blocked_once_stocked(client, admin_h):
+    """Yêu cầu người dùng 2026-10-13: đã nhập kho thì không cho sửa "Số lượng cấp chiết" nữa —
+    Pallet thật đã tạo theo SL cũ, sửa sau đó sẽ hoàn/trừ sai on_hand lô lọc nguồn, lệch hẳn với
+    tồn kho WMS thật (mirror chặn xóa ở test_delete_pack_lot_blocked_once_stocked_even_with_reason)."""
+    fp_id = _make_sku(client, admin_h, "QTYSTOCK01")
+    spec_id = _make_spec(client, admin_h, fp_id, "QC-QTYSTOCK01", 50)
+    pack_lot_id = _build_pack_lot(client, admin_h, "QTYSTOCK01", fp_id, ca1=50)
+    loc_id = _make_location(client, admin_h, "QTYSTOCK01")
+    saved = _save_allocations(client, admin_h, pack_lot_id, [{"spec_id": spec_id, "quantity": 50}])
+    assert saved.status_code == 200, saved.text
+    row = saved.json()["pack_allocations"][0]
+    release = _release_row(client, admin_h, pack_lot_id, row["row_id"], loc_id)
+    assert release.status_code == 200, release.text
+
+    blocked = client.put(f"/api/batch-pack-lots/{pack_lot_id}/qty", headers=admin_h, json={"qty": 500})
+    assert blocked.status_code == 409, blocked.text
+    assert "nhập kho" in blocked.json()["detail"]
+
+
+def test_update_pack_lot_shifts_blocked_once_stocked(client, admin_h):
+    """Mirror test_update_pack_lot_qty_blocked_once_stocked — đã nhập kho thì không cho sửa SL
+    chiết theo ca nữa (tránh unstocked_remainder lệch thành số âm vô nghĩa)."""
+    fp_id = _make_sku(client, admin_h, "SHIFTSTOCK01")
+    spec_id = _make_spec(client, admin_h, fp_id, "QC-SHIFTSTOCK01", 50)
+    pack_lot_id = _build_pack_lot(client, admin_h, "SHIFTSTOCK01", fp_id, ca1=50)
+    loc_id = _make_location(client, admin_h, "SHIFTSTOCK01")
+    saved = _save_allocations(client, admin_h, pack_lot_id, [{"spec_id": spec_id, "quantity": 50}])
+    assert saved.status_code == 200, saved.text
+    row = saved.json()["pack_allocations"][0]
+    release = _release_row(client, admin_h, pack_lot_id, row["row_id"], loc_id)
+    assert release.status_code == 200, release.text
+
+    blocked = client.put(f"/api/batch-pack-lots/{pack_lot_id}/shifts", headers=admin_h,
+                         json={"ca1_qty": 30})
+    assert blocked.status_code == 409, blocked.text
+    assert "nhập kho" in blocked.json()["detail"]
+
+
 def test_each_row_has_independent_release_button_and_remainder_warning(client, admin_h):
     """2 dòng (2 quy cách khác nhau) — duyệt nhập kho từng dòng RIÊNG, cảnh báo còn thiếu giảm
     dần đúng theo từng lần duyệt (yêu cầu người dùng 2026-09-20)."""

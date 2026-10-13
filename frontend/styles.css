@@ -149,6 +149,11 @@ button.btn:disabled:hover { filter: none; }
 .badge.in_progress, .badge.planned, .badge.done { background: #2c3e50; color: var(--blue); }
 .badge.major { background: #4a3410; color: var(--orange); }
 .badge.minor { background: #2b3a47; color: var(--muted); }
+/* Dashboard "Hold/Release"/"Sản lượng lọc thấp": nháy badge để thu hút chú ý vào các dòng
+   đang thật sự cần xử lý (vượt chỉ tiêu QC / mẻ lọc thấp) — yêu cầu người dùng 2026-10-13. */
+@keyframes badge-blink { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+.badge-blink { animation: badge-blink 1.1s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) { .badge-blink { animation: none; } }
 /* pipeline "Mẻ SX" (Tank lên men/Lô lọc) — trạng thái riêng, không dùng chung tên với báo cáo khác */
 .badge.len_men, .badge.cho_chiet { background: #2c3e50; color: var(--blue); }
 .badge.chiet_1_phan { background: #4a3410; color: var(--orange); }
