@@ -273,3 +273,52 @@ def test_same_param_in_common_and_override_group_deduped_override_wins(client, a
     matches = [p for p in st["required"] if p["code"] == "ABV-OVR"]
     assert len(matches) == 1, f"Phải chỉ có 1 dòng cho mã chỉ tiêu trùng, thấy {len(matches)}"
     assert matches[0]["lsl"] == 4.5 and matches[0]["usl"] == 4.6
+
+
+def test_sku_specific_group_excludes_params_only_in_broader_beer_type_group(client, admin_h):
+    """Yêu cầu người dùng 2026-10-13, ca thực tế: SKU Keg (Bia tươi) gán riêng 1 nhóm chỉ tiêu
+    thành phẩm CỐ TÌNH bớt vài chỉ tiêu không áp dụng cho Keg (VD Air, Độ bền bọt — chỉ có ý
+    nghĩa với bia đóng chai/lon), trong khi nhóm "chung" theo Loại bia (không giới hạn SKU) vẫn
+    có đủ 2 chỉ tiêu đó cho các SKU chai/lon khác CÙNG loại bia. Trước đây finished_product_id
+    chỉ "thắng" được PER-CODE (ghi đè ngưỡng cho mã TRÙNG), nên 2 mã KHÔNG có trong nhóm riêng
+    của Keg vẫn bị dính theo từ nhóm chung — khác hẳn test_same_param_in_common_and_override_
+    group_deduped_override_wins (chỉ test đúng 1 mã trùng cả 2 nhóm, không phát hiện được lỗi
+    này). Giờ phải loại HẲN, không chỉ ghi đè."""
+    bt = client.post("/api/beer-types", headers=admin_h, json={"code": "KEGTYPE", "name": "Loại bia keg test"})
+    assert bt.status_code == 201, bt.text
+    beer_type_id = bt.json()["beer_type_id"]
+
+    fp_keg = client.post("/api/finished-products", headers=admin_h,
+                         json={"code": "SKU-KEG-01", "name": "SKU Keg 01", "uom": "keg"})
+    assert fp_keg.status_code == 201, fp_keg.text
+    fp_keg_id = fp_keg.json()["finished_product_id"]
+
+    common_group_id, code_abv = _make_group_with_param(client, admin_h, "KEGCOMMONABV")
+    air_param = client.post("/api/qc/parameters", headers=admin_h,
+                            json={"code": "AIR-KEGTEST", "name": "Air", "lsl": None, "usl": None})
+    assert air_param.status_code == 201, air_param.text
+    add_air = client.post(f"/api/qc/groups/{common_group_id}/items", headers=admin_h,
+                          json={"param_id": air_param.json()["param_id"], "mandatory": True})
+    assert add_air.status_code == 201, add_air.text
+    link_common = client.post("/api/qc/stage-groups", headers=admin_h,
+                              json={"stage": "thanh_pham", "group_id": common_group_id,
+                                    "beer_type_id": beer_type_id, "mandatory": True})
+    assert link_common.status_code == 201, link_common.text
+
+    keg_group_id, code_co2 = _make_group_with_param(client, admin_h, "KEGONLYCO2")
+    link_keg = client.post("/api/qc/stage-groups", headers=admin_h,
+                           json={"stage": "thanh_pham", "group_id": keg_group_id,
+                                 "finished_product_id": fp_keg_id, "mandatory": True})
+    assert link_keg.status_code == 201, link_keg.text
+
+    fl = _make_filter_lot(client, admin_h, "KEG-01")
+    _finish_only_source(client, admin_h, fl)
+    pack_lot_id = _make_pack_lot(client, admin_h, fl, "KEG-01", finished_product_id=fp_keg_id)
+
+    st = client.get(f"/api/brewing/qc-status?stage=thanh_pham&scope_type=batch_pack_lot&"
+                    f"scope_id={pack_lot_id}&beer_type_id={beer_type_id}&finished_product_id={fp_keg_id}",
+                    headers=admin_h).json()
+    codes = {p["code"] for p in st["required"]}
+    assert code_co2 in codes            # nhóm riêng của Keg
+    assert "AIR-KEGTEST" not in codes   # chỉ có ở nhóm chung -> KHÔNG kế thừa
+    assert code_abv not in codes        # chỉ có ở nhóm chung -> KHÔNG kế thừa
