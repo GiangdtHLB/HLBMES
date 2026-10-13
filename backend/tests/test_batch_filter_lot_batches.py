@@ -315,6 +315,50 @@ def test_delete_batch_blocked_when_pack_lot_already_consumed_more_than_remaining
     assert blocked.status_code == 409, blocked.text
 
 
+def test_finish_batch_blocked_when_editing_reduces_volume_below_pack_lot_consumed(client, admin_h):
+    """Yêu cầu người dùng 2026-10-13, ví dụ thực tế: tank BBT tổng 100hl, đã chiết 50hl, nếu
+    "Sửa" lại mẻ lọc làm V lọc MỚI còn 40hl thì phải chặn (không cho sửa xuống dưới mức đã tách
+    50hl) — trước đây _sync_filter_lot_aggregate chỉ kẹp on_hand về 0 một cách ÂM THẦM, không
+    báo lỗi gì (khác hẳn test_delete_batch_blocked_when_pack_lot_already_consumed_more_than_remaining
+    ở trên, vốn đã chặn đúng khi XÓA cả mẻ — nhưng SỬA lại 1 mẻ đã "Kết thúc" thì chưa có check
+    tương tự)."""
+    filter_lot_id, source_link_id, _tank_id = _draw_single_source(client, admin_h, "EDITGUARD01", tank_qty=1000)
+    batches = client.get(f"/api/batch-filter-lots/{filter_lot_id}/batches", headers=admin_h).json()
+    batch_link_id = batches[0]["batch_link_id"]
+    fin = client.put(f"/api/batch-filter-lots/batches/{batch_link_id}/finish", headers=admin_h,
+                     json={"draws": [{"source_link_id": source_link_id, "dich_nha_hl": 100}],
+                          "nuoc_bai_khi_hl": 0})
+    assert fin.status_code == 200, fin.text
+
+    appr = client.post(f"/api/batch-filter-lots/{filter_lot_id}/approve", headers=admin_h)
+    assert appr.status_code == 200, appr.text
+    to_bbt = client.get(f"/api/batch-filter-lots/{filter_lot_id}", headers=admin_h).json()["to_bbt"]
+    fp_id = _make_finished_product(client, admin_h, "EDITGUARD01")
+    pack = client.post("/api/batch-pack-lots", headers=admin_h,
+                       json={"from_bbt": to_bbt, "qty": 5000, "pack_lot_code": "PKG-EDITGUARD01",
+                             "lot_no": "LOT-EDITGUARD01", "finished_product_id": fp_id, "line": "CL01"})
+    assert pack.status_code == 201, pack.text   # đã tách 5000 lít = 50 hl, còn tồn 50 hl
+
+    blocked = client.put(f"/api/batch-filter-lots/batches/{batch_link_id}/finish", headers=admin_h,
+                         json={"draws": [{"source_link_id": source_link_id, "dich_nha_hl": 40}],
+                              "nuoc_bai_khi_hl": 0})
+    assert blocked.status_code == 409, blocked.text
+    assert "tách" in blocked.json()["detail"]
+
+    fl = client.get(f"/api/batch-filter-lots/{filter_lot_id}", headers=admin_h).json()
+    assert fl["volume_hl"] == 100.0   # không đổi — sửa bị chặn, không âm thầm kẹp on_hand về 0
+    assert fl["on_hand"] == 50.0
+
+    # Sửa về đúng bằng mức đã tách (50 hl) vẫn phải cho qua (biên hợp lệ, không chặn oan).
+    ok = client.put(f"/api/batch-filter-lots/batches/{batch_link_id}/finish", headers=admin_h,
+                    json={"draws": [{"source_link_id": source_link_id, "dich_nha_hl": 50}],
+                         "nuoc_bai_khi_hl": 0})
+    assert ok.status_code == 200, ok.text
+    fl2 = client.get(f"/api/batch-filter-lots/{filter_lot_id}", headers=admin_h).json()
+    assert fl2["volume_hl"] == 50.0
+    assert fl2["on_hand"] == 0.0
+
+
 def test_finish_rejects_draw_source_not_belonging_to_batch(client, admin_h):
     filter_lot_id, source_link_id, _tank_id = _draw_single_source(client, admin_h, "BADSRC01")
     batches = client.get(f"/api/batch-filter-lots/{filter_lot_id}/batches", headers=admin_h).json()

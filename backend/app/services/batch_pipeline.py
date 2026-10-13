@@ -1395,7 +1395,16 @@ def _sync_filter_lot_aggregate(db: Session, fl: BatchFilterLot) -> None:
     của mọi mẻ (1 mẻ có thể có N khoản, mỗi nguồn 1 khoản), nuoc_bai_khi_hl cộng theo TỪNG MẺ
     (mirror _sync_filter_aggregate module cũ, v_beer_hl = v_dich_hl + nuoc_bai_khi_hl). on_hand
     điều chỉnh theo CHÊNH LỆCH, giữ nguyên phần đã tách vào lô thành phẩm. ended_at chỉ có giá
-    trị khi TẤT CẢ mẻ đã kết thúc."""
+    trị khi TẤT CẢ mẻ đã kết thúc.
+
+    Chặn sửa (finish_filter_lot_batch sửa lại dich_nha_hl của 1 mẻ đã "Kết thúc") làm V lọc MỚI
+    thấp hơn phần đã tách vào lô thành phẩm (`consumed`) — trước đây chỉ `max(0.0, ...)` kẹp
+    on_hand về 0 một cách ÂM THẦM, để volume_hl < consumed trôi qua mà không báo gì, như thể lô
+    thành phẩm đã lấy "nhiều hơn tổng lọc được" (yêu cầu người dùng 2026-10-13, ví dụ thực tế:
+    tank BBT tổng 100hl, đã chiết 50hl, nếu sửa lùi V lọc còn 40hl thì phải chặn, không cho sửa
+    xuống dưới 50hl). delete_filter_lot_batch (xóa cả 1 mẻ) đã có check tương tự riêng TRƯỚC khi
+    gọi hàm này nên không bao giờ chạm nhánh raise ở đây; add_filter_lot_batch (mở mẻ mới, mọi
+    khoản rút = 0) không giảm volume nên cũng không bao giờ chạm."""
     batches = _all_batches_for_filter_lot(db, fl.filter_lot_id)
     old_volume = fl.volume_hl or 0.0
     consumed = old_volume - fl.on_hand
@@ -1405,6 +1414,10 @@ def _sync_filter_lot_aggregate(db: Session, fl: BatchFilterLot) -> None:
         nuoc_bai_khi += b.nuoc_bai_khi_hl or 0.0
         v_dich += sum(d.dich_nha_hl or 0.0 for d in list_batch_draws(db, b.batch_link_id))
     new_volume = v_dich + nuoc_bai_khi
+    if new_volume < consumed - 1e-6:
+        raise DomainError(
+            f"Không thể sửa — đã tách {consumed:g} hl vào lô thành phẩm, V lọc mới "
+            f"({new_volume:g} hl) thấp hơn mức đã tách. Sửa lô thành phẩm trước nếu cần giảm.")
     fl.v_dich_hl = round(v_dich, 3)
     fl.nuoc_bai_khi_hl = round(nuoc_bai_khi, 3)
     fl.volume_hl = round(new_volume, 3)
@@ -1621,19 +1634,22 @@ def update_filter_lot(db: Session, filter_lot_id: str, payload: dict, user: User
     return _stamp_filter_lot_label(db, fl)
 
 
-def delete_filter_lot(db: Session, filter_lot_id: str, user: User) -> None:
+def delete_filter_lot(db: Session, filter_lot_id: str, user: User, reason: str = None) -> None:
     """Xóa 1 BatchFilterLot — mirror delete_filter (module cũ, routers/brewing.py:1786-1818):
     hoàn NVL đã dùng thật (BatchFilterLotMaterialUsage, undo_issue trả kho) + dọn QualityResult
     con — trước đây bỏ sót cả 2, để lại NVL đã xuất kho không hoàn/rác QualityResult mồ côi
-    (2026-09-02, audit module "Mẻ sản xuất"). Cũng chặn xóa khi đã KCS duyệt (`qc_approved`) —
-    mirror delete_pack_lot's check `p.approved` (bất đối xứng vô lý trước đây: xóa lô TP đã
-    duyệt bị chặn, xóa lô lọc đã duyệt lại KHÔNG — phá hủy 1 bản ghi QC đã ký duyệt)."""
+    (2026-09-02, audit module "Mẻ sản xuất"). Nếu đã KCS duyệt (`qc_approved`) vẫn cho xóa
+    NHƯNG bắt buộc nhập `reason` (lý do xóa, ghi vào audit_log) — trước đây chặn cứng hoàn
+    toàn, nhưng thực tế vẫn cần sửa sai 1 lô duyệt nhầm; đổi sang cho xóa có kiểm soát (bắt
+    buộc giải trình) thay vì chặn tuyệt đối, buộc người dùng phải lách qua SQL trực tiếp
+    (không để lại audit nào) để sửa sai (yêu cầu người dùng 2026-10-13). Lô CHƯA duyệt thì
+    không bắt buộc lý do (giữ nguyên hành vi cũ)."""
     require_perm(user, "batch.execute")
     fl = get_filter_lot(db, filter_lot_id)
     _assert_unlocked(fl)
     _assert_no_ebr_signature(db, filter_lot_id)
-    if fl.qc_approved:
-        raise DomainError("Lô lọc này đã được KCS duyệt — không thể xóa.")
+    if fl.qc_approved and not (reason or "").strip():
+        raise DomainError("Lô lọc này đã được KCS duyệt — phải nhập lý do xóa.")
     if db.execute(select(BatchPackLot).where(BatchPackLot.filter_lot_id == filter_lot_id)).first():
         raise DomainError("Đã có lô thành phẩm tách từ lô lọc này — xóa lô thành phẩm trước.")
     if db.execute(select(BatchFilterLotSource).where(
@@ -1670,7 +1686,8 @@ def delete_filter_lot(db: Session, filter_lot_id: str, user: User) -> None:
     db.flush()
     genealogy.delete_edges_for(db, "batch_filter_lot", filter_lot_id)
     db.delete(fl)
-    record_audit(db, entity_type="batch_filter_lot", entity_id=filter_lot_id, action="delete", actor=user)
+    record_audit(db, entity_type="batch_filter_lot", entity_id=filter_lot_id, action="delete",
+                actor=user, reason=reason)
     db.commit()
 
 
@@ -1909,6 +1926,13 @@ def update_pack_lot_qty(db: Session, pack_lot_id: str, qty: float, user: User) -
     p = get_pack_lot(db, pack_lot_id)
     _assert_unlocked(p)
     _assert_no_ebr_signature(db, pack_lot_id)
+    # Đã nhập kho thành phẩm (toàn bộ hoặc 1 phần) -> chặn cứng, không bypass được — Pallet thật
+    # đã tạo theo SL cũ, sửa "Số lượng cấp chiết" sau đó (và tự hoàn/trừ chênh lệch on_hand lô
+    # lọc theo SL MỚI) sẽ làm lệch hẳn giữa hồ sơ và tồn kho WMS thật (yêu cầu người dùng
+    # 2026-10-13, mirror chặn xóa ở delete_pack_lot — cùng lý do, không phải quyết định nghiệp
+    # vụ có thể giải trình mà là hàng thật đã có trong kho).
+    if p.stocked or any(r.get("released") for r in (p.pack_allocations or [])):
+        raise DomainError("Lô thành phẩm đã nhập kho thành phẩm — không thể sửa số lượng cấp chiết.")
     if qty <= 0:
         raise DomainError("Số lượng cấp chiết (lít) phải lớn hơn 0.")
     # with_for_update(): khóa CẢ lô TP (đọc p.qty cũ) LẪN lô lọc nguồn (đọc/ghi on_hand) trước
@@ -1963,6 +1987,12 @@ def update_pack_lot_shifts(db: Session, pack_lot_id: str, payload: dict, user: U
     p = get_pack_lot(db, pack_lot_id)
     _assert_unlocked(p)
     _assert_no_ebr_signature(db, pack_lot_id)
+    # Mirror chặn ở update_pack_lot_qty — đã nhập kho (toàn bộ/1 phần) thì ca_total không còn
+    # được sửa nữa: Pallet thật đã tạo theo SL phân bổ cũ, sửa SL theo ca sau đó làm
+    # unstocked_remainder (= ca_total - đã release) lệch, có thể thành số âm vô nghĩa (yêu cầu
+    # người dùng 2026-10-13).
+    if p.stocked or any(r.get("released") for r in (p.pack_allocations or [])):
+        raise DomainError("Lô thành phẩm đã nhập kho thành phẩm — không thể sửa SL chiết theo ca.")
     for qty_key in ("ca1_qty", "ca2_qty", "ca3_qty"):
         v = payload.get(qty_key)
         if v is not None and v < 0:
@@ -1988,17 +2018,27 @@ def update_pack_lot_shifts(db: Session, pack_lot_id: str, payload: dict, user: U
     return _stamp_pack_lot_status(db, p)
 
 
-def delete_pack_lot(db: Session, pack_lot_id: str, user: User) -> None:
+def delete_pack_lot(db: Session, pack_lot_id: str, user: User, reason: str = None) -> None:
     """Xóa 1 BatchPackLot — mirror delete_bottle (module cũ, routers/brewing.py:1911-1942):
     hoàn NVL đã dùng thật (BatchPackLotMaterialUsage, undo_issue trả kho) + dọn QualityResult
     con — trước đây bỏ sót cả 2, để lại NVL đã xuất kho không hoàn/rác QualityResult mồ côi
-    (2026-09-02, audit module "Mẻ sản xuất")."""
+    (2026-09-02, audit module "Mẻ sản xuất"). Nếu đã duyệt KCS (`approved`) vẫn cho xóa NHƯNG
+    bắt buộc nhập `reason` (lý do xóa, ghi vào audit_log) — mirror delete_filter_lot, cùng lý
+    do đổi từ chặn cứng sang cho xóa có kiểm soát (yêu cầu người dùng 2026-10-13). Lô CHƯA
+    duyệt thì không bắt buộc lý do (giữ nguyên hành vi cũ)."""
     require_perm(user, "batch.execute")
     p = get_pack_lot(db, pack_lot_id)
     _assert_unlocked(p)
     _assert_no_ebr_signature(db, pack_lot_id)
-    if p.approved:
-        raise DomainError("Lô thành phẩm đã được duyệt KCS — không thể xóa.")
+    # Đã nhập kho thành phẩm (toàn bộ hoặc 1 phần — `stocked` chỉ True khi HẾT, nhưng 1 dòng
+    # phân bổ `released` đã tạo Pallet THẬT trong kho) -> chặn cứng, không cho bypass bằng lý do
+    # như `approved`: đây không còn là quyết định nghiệp vụ nội bộ có thể giải trình, mà là hàng
+    # vật lý đã có trong kho (WMS) — xóa bản ghi sẽ để lại Pallet mồ côi, không trùng tồn kho
+    # thật (yêu cầu người dùng 2026-10-13: "lô chiết đã nhập kho thành phẩm thì không được xóa").
+    if p.stocked or any(r.get("released") for r in (p.pack_allocations or [])):
+        raise DomainError("Lô thành phẩm đã nhập kho thành phẩm — không thể xóa.")
+    if p.approved and not (reason or "").strip():
+        raise DomainError("Lô thành phẩm đã được duyệt KCS — phải nhập lý do xóa.")
     # with_for_update(): khóa lô lọc trước khi hoàn on_hand — cùng lớp race với split/update qty
     # (2026-09-03, audit pipeline "Mẻ SX" đợt 2).
     fl = db.execute(select(BatchFilterLot).where(
@@ -2018,7 +2058,8 @@ def delete_pack_lot(db: Session, pack_lot_id: str, user: User) -> None:
     db.flush()
     genealogy.delete_edges_for(db, "batch_pack_lot", pack_lot_id)
     db.delete(p)
-    record_audit(db, entity_type="batch_pack_lot", entity_id=pack_lot_id, action="delete", actor=user)
+    record_audit(db, entity_type="batch_pack_lot", entity_id=pack_lot_id, action="delete",
+                actor=user, reason=reason)
     db.commit()
 
 

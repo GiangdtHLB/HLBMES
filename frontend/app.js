@@ -624,11 +624,17 @@ VIEWS.dashboard = async function () {
     </div>`;
   // Ô "Cảnh báo QC" trước đây gộp chung 1 bảng — nay tách thành 3 panel riêng theo đúng yêu cầu,
   // mỗi panel lọc từ CÙNG 1 nguồn dữ liệu alerts.items (BE không đổi): (1) Cảnh báo QC = lô có
-  // chỉ tiêu đang fail, (2) Hold/Release = lô đang giữ MaterialLot.status=on_hold, (3) Deviation =
-  // scope đang có deviation mở. 1 lô có thể xuất hiện ở nhiều panel nếu thoả nhiều điều kiện.
+  // chỉ tiêu đang fail, (2) Hold/Release = lô đang giữ MaterialLot.status=on_hold VÀ đã có chỉ
+  // tiêu FAIL thật sự (không còn hiện lô chỉ đang chờ nhập chỉ tiêu), (3) Deviation = scope đang
+  // có deviation mở. 1 lô có thể xuất hiện ở nhiều panel nếu thoả nhiều điều kiện.
   const REASON_LABEL = { on_hold: "Đang giữ", deviation: "Deviation mở" };
   const qcFailItems = alerts ? alerts.items.filter(it => it.fail_param_count > 0) : [];
-  const holdItems = alerts ? alerts.items.filter(it => it.reasons.includes("on_hold")) : [];
+  // Hold/Release: trước đây hiện MỌI lô on_hold, kể cả lô mới nhận hàng còn đang CHỜ NHẬP chỉ
+  // tiêu (chưa có kết quả nào, fail_param_count=0 — on_hold mặc định lúc nhận, không phải vì
+  // lỗi) — gây nhiễu panel với các lô bình thường chưa tới lượt kiểm. Yêu cầu người dùng
+  // 2026-10-13: "không hiển thị các lô ... chưa nhập chỉ tiêu, chỉ hiện hold/release khi vượt
+  // chỉ tiêu thôi" -> chỉ giữ lô on_hold có ÍT NHẤT 1 chỉ tiêu đã nhập và FAIL thật sự.
+  const holdItems = alerts ? alerts.items.filter(it => it.reasons.includes("on_hold") && it.fail_param_count > 0) : [];
   const devItems = alerts ? alerts.items.filter(it => it.reasons.includes("deviation")) : [];
   const MINI_ALERT_LIMIT = 5;
   // Cột "Chi tiết": trước đây luôn hiện "Vật tư"/"SL" — 2 cột này chỉ có ý nghĩa với scope="lot"
@@ -683,7 +689,7 @@ VIEWS.dashboard = async function () {
           <td class="muted">${esc(it.batch_seq_no || "—")}</td>
           <td>${esc(it.beer_type || "—")}</td>
           <td>${it.v_l != null ? it.v_l.toLocaleString("vi-VN") : "—"}</td>
-          <td><span class="badge critical">Thấp</span></td>
+          <td><span class="badge critical badge-blink">Thấp</span></td>
         </tr>`).join("")}</tbody></table></div>`
         : `<div class="muted">Không có mẻ lọc nào dưới ngưỡng Thấp trong 5 ngày gần nhất.</div>`}
     </div>`;
@@ -710,7 +716,7 @@ VIEWS.dashboard = async function () {
       ${miniAlertPanel("Cảnh báo QC", "🚨", qcFailItems, "Không có chỉ tiêu QC nào đang fail.",
         { label: "Chỉ tiêu fail", render: it => `<b style="color:var(--red)">${it.fail_param_count}</b>` }, "qc")}
       ${miniAlertPanel("Hold / Release", "🔒", holdItems, "Không có lô nào đang giữ.",
-        { label: "Trạng thái", render: () => `<span class="badge on_hold">${REASON_LABEL.on_hold}</span>` }, "hold")}
+        { label: "Trạng thái", render: () => `<span class="badge on_hold badge-blink">${REASON_LABEL.on_hold}</span>` }, "hold")}
       ${miniAlertPanel("Deviation", "📋", devItems, "Không có deviation nào đang mở.",
         { label: "Số lượng mở", render: it => `<span class="badge on_hold">${it.deviation_count}</span>` }, "dev")}
       ${lowYieldPanel}
@@ -3995,8 +4001,13 @@ async function showBatchFilterLot(filterLotId) {
   $("fl_ebr").onclick = () => openFilterLotEBR(filterLotId);
   $("fl_audit").onclick = (e) => { e.preventDefault(); document.querySelector('[data-view="audit"]').click(); setTimeout(() => { $("au_entity").value = filterLotId; $("au_load").click(); }, 50); };
   if ($("fl_del")) $("fl_del").onclick = () => guard(async () => {
-    if (!confirm("Xóa lô lọc này? Không thể hoàn tác.")) return;
-    await DELETE(`/batch-filter-lots/${filterLotId}`); toast("Đã xóa lô lọc"); render("batchfilterlots");
+    let reason = "";
+    if (f.qc_approved) {
+      reason = (prompt("Lô lọc này đã được KCS duyệt — nhập lý do xóa:") || "").trim();
+      if (!reason) return;
+    } else if (!confirm("Xóa lô lọc này? Không thể hoàn tác.")) return;
+    await DELETE(`/batch-filter-lots/${filterLotId}` + (reason ? `?reason=${encodeURIComponent(reason)}` : ""));
+    toast("Đã xóa lô lọc"); render("batchfilterlots");
   });
   if ($("fb_add")) $("fb_add").onclick = () => guard(async () => {
     await POST(`/batch-filter-lots/${filterLotId}/batches`, {});
@@ -4696,8 +4707,13 @@ async function showBatchPackLot(packLotId) {
     toast("Đã làm rỗng tank"); showBatchPackLot(packLotId);
   });
   if ($("pk_del")) $("pk_del").onclick = () => guard(async () => {
-    if (!confirm("Xóa lô thành phẩm này? Hoàn lại tồn về lô lọc.")) return;
-    await DELETE(`/batch-pack-lots/${packLotId}`); toast("Đã xóa lô thành phẩm"); render("batchpacklots");
+    let reason = "";
+    if (p.approved) {
+      reason = (prompt("Lô thành phẩm này đã được duyệt KCS — nhập lý do xóa:") || "").trim();
+      if (!reason) return;
+    } else if (!confirm("Xóa lô thành phẩm này? Hoàn lại tồn về lô lọc.")) return;
+    await DELETE(`/batch-pack-lots/${packLotId}` + (reason ? `?reason=${encodeURIComponent(reason)}` : ""));
+    toast("Đã xóa lô thành phẩm"); render("batchpacklots");
   });
 }
 

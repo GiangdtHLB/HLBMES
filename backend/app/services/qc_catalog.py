@@ -585,18 +585,23 @@ def required_params_for_stage(db: Session, stage: str, product_id: str = None,
     sản phẩm — Bia chai/lon/hơi/tươi, mirror FinishedProduct.category) / `finished_product_id`
     (sản phẩm đóng gói/SKU cụ thể) và nhóm áp dụng chung (field đó để NULL trên nhóm).
 
-    Cùng 1 mã chỉ tiêu (QCParameter.code, duy nhất toàn hệ thống) có thể được gán qua NHIỀU
-    nhóm khớp cùng lúc — VD 1 nhóm áp dụng chung (Loại bia, không chọn Loại sản phẩm/SKU) và 1
-    nhóm gán riêng cho đúng 1 SKU (finished_product_id) — mỗi nhóm có thể đặt ngưỡng
-    (target/usl/lsl_override) khác nhau cho cùng mã đó. Nhóm gán CÀNG CỤ THỂ phải THẮNG hoàn
-    toàn (không hiển thị trùng cả 2 dòng cho cùng 1 chỉ tiêu), theo thứ tự: khớp đúng
-    finished_product_id (SKU) > khớp đúng category (Loại sản phẩm) > khớp đúng
-    product_id/beer_type_id, thấp nhất là nhóm áp dụng chung (mọi field scope đều NULL). `category`
-    thêm cho stage Lọc (yêu cầu người dùng 2026-09-30) — lúc lập Lệnh lọc thường CHƯA biết đúng
-    1 SKU (1 tank BBT có thể chiết ra nhiều SKU khác nhau) nhưng biết chắc Loại sản phẩm, nên
-    dùng category làm mức tra trung gian thay finished_product_id. Đây cũng chính là nguồn dữ
-    liệu cho mọi báo cáo/trạng thái chỉ tiêu (stage_qc_status, GET /qc-status, hồ sơ điện tử
-    lot_record, tóm tắt QC trong genealogy) — sửa 1 chỗ này áp dụng nhất quán ở mọi nơi.
+    Nhiều nhóm có thể khớp CÙNG LÚC — VD 1 nhóm áp dụng chung (Loại bia, không chọn Loại sản
+    phẩm/SKU) và 1 nhóm gán riêng cho đúng 1 SKU (finished_product_id). `finished_product_id`
+    (SKU chính xác) là mức CỤ THỂ NHẤT, luôn đồng nghĩa "đã biết chính xác sản phẩm đóng gói
+    nào" — nếu có ít nhất 1 nhóm gán đúng SKU này, coi đó là DANH SÁCH ĐẦY ĐỦ, THẮNG HOÀN TOÀN,
+    không gộp thêm mã nào từ category/loại bia/nhóm chung nữa (yêu cầu người dùng 2026-10-13:
+    SKU Keg Legend/Sapphire gán riêng 6 chỉ tiêu — cố tình bớt Air/Độ bền bọt vì không áp dụng
+    cho bia tươi/keg — nhưng trước đây vẫn bị dính thêm 2 mã đó từ nhóm chung "Bia chai, lon"
+    8 chỉ tiêu của CÙNG loại bia, vì khi đó chỉ "thắng" ở mức TỪNG MÃ CHỈ TIÊU trùng, không
+    loại hẳn mã KHÔNG có trong nhóm riêng). Dưới mức finished_product_id, 3 mức còn lại
+    (category/product_id hoặc beer_type_id/nhóm chung) vẫn GIỮ NGUYÊN kiểu "gộp — nhóm cụ thể
+    hơn chỉ ghi đè NGƯỠNG cho đúng mã trùng, không loại mã khác" như trước: `category` dùng làm
+    mức trung gian CHO STAGE LỌC khi CHƯA biết đúng SKU (yêu cầu người dùng 2026-09-30) — ở đó
+    "nhóm chung" (không chọn category) vẫn cố ý muốn áp dụng THÊM các chỉ tiêu phổ quát, không
+    bị category-cụ-thể-hơn thay thế hoàn toàn (mirror test_filter_lot_inherits_category_and_
+    mismatch_flag). Đây cũng chính là nguồn dữ liệu cho mọi báo cáo/trạng thái chỉ tiêu
+    (stage_qc_status, GET /qc-status, hồ sơ điện tử lot_record, tóm tắt QC trong genealogy) —
+    sửa 1 chỗ này áp dụng nhất quán ở mọi nơi.
 
     `cache` (tùy chọn, dict do caller tự tạo/giữ): kết quả hàm này CHỈ phụ thuộc vào các tham số
     truyền vào (không phụ thuộc scope_id) — list/report lặp qua NHIỀU bản ghi có thể dùng chung
@@ -636,10 +641,17 @@ def required_params_for_stage(db: Session, stage: str, product_id: str = None,
     if mandatory_only:
         stmt = stmt.where(QCParameterGroupItem.mandatory == true())
     rows = db.execute(stmt.order_by(QCParameterGroupItem.seq)).all()
+
+    # finished_product_id (SKU chính xác) loại hẳn các mức rộng hơn nếu có ít nhất 1 nhóm gán
+    # đúng SKU này — xem docstring. 3 mức còn lại (category/product_id hoặc beer_type_id/nhóm
+    # chung) không đụng tới, vẫn gộp theo logic cũ ngay bên dưới.
+    fp_specific_rows = [row for row in rows if row[2].finished_product_id]
+    if fp_specific_rows:
+        rows = fp_specific_rows
+
     best_by_code: dict[str, dict] = {}
     for item, param, link in rows:
-        specificity = (1 if link.finished_product_id else 0, 1 if link.category else 0,
-                      1 if (link.product_id or link.beer_type_id) else 0)
+        specificity = (1 if link.category else 0, 1 if (link.product_id or link.beer_type_id) else 0)
         current = best_by_code.get(param.code)
         if current is not None and specificity <= current["_specificity"]:
             continue
