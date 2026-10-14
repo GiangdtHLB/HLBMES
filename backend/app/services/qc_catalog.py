@@ -871,21 +871,30 @@ def sync_stage_quality_status(db: Session, stage: str, scope_type: str, scope_id
 
 def _snapshot_required_params(db: Session, scope_type: str, scope_id: str, stage: str):
     """Trả lại danh sách chỉ tiêu đã CHỤP SẴN (`qc_spec_snapshot`) lúc TẠO tank/lô lọc/lô thành
-    phẩm, nếu có — None nếu bản ghi tạo TRƯỚC khi có cơ chế này (dữ liệu cũ, tra Danh mục SỐNG
-    như hành vi cũ) hoặc scope_type không thuộc 3 loại có snapshot (VD "batch" — mẻ nấu, không
-    nằm trong yêu cầu người dùng 2026-10-13: chỉ áp dụng lên men chính/phụ, lọc, chiết)."""
+    phẩm — LUÔN trả về 1 list cho đúng 3 scope_type có snapshot (rỗng nếu bản ghi tạo TRƯỚC khi
+    có cơ chế này/không tìm thấy, KHÔNG fallback tra Danh mục sống nữa — yêu cầu người dùng
+    2026-10-14: "lô cũ cũng không được tra sống... không có thì thôi", sau khi phát hiện 117 lô
+    lọc cũ hiện Min/Max MỚI nhất của Danh mục dù lúc ghi nhận hoàn toàn chưa có ngưỡng nào, gây
+    hiểu lầm y hệt lỗi snapshot vốn định chặn). Chỉ tiêu đã ghi nhận trước đó cho các lô này vẫn
+    hiện đủ qua cơ chế "orphaned" sẵn có (frontend::qcRowsWithOrphans — hiện lại theo đúng
+    lower_limit/upper_limit đã lưu TRÊN CHÍNH kết quả đó, không lấy từ đâu khác), nên không mất
+    dữ liệu, chỉ không còn hiện Min/Max giả từ Danh mục hiện tại nữa.
+
+    Trả về None CHỈ khi scope_type không thuộc 3 loại có snapshot (VD "batch" — mẻ nấu, không
+    nằm trong yêu cầu người dùng 2026-10-13: chỉ áp dụng lên men chính/phụ, lọc, chiết) — caller
+    (stage_qc_status) hiểu None là "tra Danh mục sống như trước giờ", giữ nguyên hành vi cũ cho
+    mẻ nấu."""
     if scope_type == "batch_tank":
         tank_id = scope_id.rsplit("__", 1)[0]
         tank = db.get(BatchTank, tank_id)
-        if not tank or not tank.qc_spec_snapshot:
-            return None
-        return tank.qc_spec_snapshot.get(stage)
+        snapshot = tank.qc_spec_snapshot if tank else None
+        return (snapshot or {}).get(stage) or []
     if scope_type == "batch_filter_lot":
         fl = db.get(BatchFilterLot, scope_id)
-        return fl.qc_spec_snapshot if fl else None
+        return (fl.qc_spec_snapshot if fl else None) or []
     if scope_type == "batch_pack_lot":
         p = db.get(BatchPackLot, scope_id)
-        return p.qc_spec_snapshot if p else None
+        return (p.qc_spec_snapshot if p else None) or []
     return None
 
 
@@ -909,10 +918,11 @@ def stage_qc_status(db: Session, stage: str, scope_type: str, scope_id: str, pro
     cùng lúc (VD list_pending_stage_declarations); mặc định None, không ảnh hưởng mọi nơi gọi
     đơn lẻ khác.
 
-    `required` ưu tiên lấy từ `qc_spec_snapshot` đã chụp sẵn lúc TẠO tank/lô lọc/lô thành phẩm
-    (xem _snapshot_required_params) — Danh mục sửa ngưỡng SAU đó không còn ảnh hưởng ngược các
-    mẻ đã tạo trước, chỉ áp dụng cho mẻ MỚI (yêu cầu người dùng 2026-10-13). Bản ghi tạo TRƯỚC
-    khi có cơ chế này (snapshot=None) vẫn tra Danh mục SỐNG như hành vi cũ."""
+    `required`, với scope_type thuộc lên men/lọc/chiết, LUÔN lấy từ `qc_spec_snapshot` đã chụp
+    sẵn lúc TẠO tank/lô lọc/lô thành phẩm (xem _snapshot_required_params) — KHÔNG fallback tra
+    Danh mục sống nữa, kể cả bản ghi tạo TRƯỚC khi có cơ chế này (snapshot rỗng → required rỗng,
+    yêu cầu người dùng 2026-10-14: "lô cũ cũng không được tra sống... không có thì thôi"). Chỉ
+    scope_type "batch" (mẻ nấu, không thuộc phạm vi snapshot) mới còn tra Danh mục sống như cũ."""
     from . import quality
     snapshot = _snapshot_required_params(db, scope_type, scope_id, stage)
     required = snapshot if snapshot is not None else required_params_for_stage(
