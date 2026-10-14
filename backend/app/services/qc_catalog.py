@@ -460,6 +460,43 @@ SKU_SCOPED_STAGES = {"loc", "thanh_pham"}
 CATEGORY_SCOPED_STAGES = {"loc", "thanh_pham"}
 
 
+def _assert_no_qc_param_overlap(db: Session, stage: str, product_id, beer_type_id, category,
+                                finished_product_id, group_id: str, exclude_link_id: str = None) -> None:
+    """Chặn gán 1 nhóm chỉ tiêu vào ĐÚNG cùng phạm vi (stage + product_id/beer_type_id/category/
+    finished_product_id) với 1 nhóm KHÁC đã active sẵn, nếu 2 nhóm có TRÙNG mã chỉ tiêu nào đó —
+    required_params_for_stage() gộp chỉ tiêu của mọi nhóm khớp cùng phạm vi, dedup theo
+    param.code chỉ giữ 1 bản ghi (xem docstring required_params_for_stage) nên nếu 2 nhóm cùng
+    khai 1 mã chỉ tiêu với Min/Max khác nhau, 1 trong 2 ngưỡng sẽ bị bỏ ÂM THẦM, không cảnh báo,
+    không xác định trước nhóm nào thắng (phụ thuộc thứ tự trả về của query) — yêu cầu người dùng
+    2026-10-14 (đặt câu hỏi "2 công đoạn thành phẩm gán cùng 1 SKU thì sao" rồi chọn hướng chặn
+    ngay lúc gán thay vì chỉ cảnh báo)."""
+    other_links_stmt = select(StageQcGroup.group_id).where(
+        StageQcGroup.active == true(), StageQcGroup.group_id != group_id,
+        StageQcGroup.stage == stage, StageQcGroup.product_id == product_id,
+        StageQcGroup.beer_type_id == beer_type_id, StageQcGroup.category == category,
+        StageQcGroup.finished_product_id == finished_product_id)
+    if exclude_link_id:
+        other_links_stmt = other_links_stmt.where(StageQcGroup.link_id != exclude_link_id)
+    other_group_ids = set(db.execute(other_links_stmt).scalars().all())
+    if not other_group_ids:
+        return
+    codes_of = lambda gid: set(db.execute(
+        select(QCParameter.code).join(QCParameterGroupItem, QCParameterGroupItem.param_id == QCParameter.param_id)
+        .where(QCParameterGroupItem.group_id == gid)).scalars().all())
+    new_codes = codes_of(group_id)
+    if not new_codes:
+        return
+    for other_gid in other_group_ids:
+        overlap = new_codes & codes_of(other_gid)
+        if overlap:
+            other_group = db.get(QCParameterGroup, other_gid)
+            raise DomainError(
+                f"Chỉ tiêu {', '.join(sorted(overlap))} đã có trong nhóm "
+                f"\"{other_group.code if other_group else other_gid}\" đang gán cho đúng phạm vi "
+                f"này — không thể gán thêm nhóm khác cũng chứa chỉ tiêu trùng, vì sẽ không rõ "
+                f"ngưỡng Min/Max nào có hiệu lực.")
+
+
 def _stage_group_out(db: Session, link: StageQcGroup) -> dict:
     g = db.get(QCParameterGroup, link.group_id)
     bt = db.get(BeerType, link.beer_type_id) if link.beer_type_id else None
@@ -508,6 +545,8 @@ def link_stage_group(db: Session, payload: dict, user: User) -> dict:
         existing.active = True
         link = existing
     else:
+        _assert_no_qc_param_overlap(db, payload["stage"], product_id, beer_type_id, category,
+                                    finished_product_id, payload["group_id"])
         link = StageQcGroup(link_id=new_id(), stage=payload["stage"], product_id=product_id,
                             beer_type_id=beer_type_id, category=category,
                             finished_product_id=finished_product_id,
@@ -548,6 +587,8 @@ def update_stage_group(db: Session, link_id: str, payload: dict, user: User) -> 
     ).scalar_one_or_none()
     if dup:
         raise DomainError("Đã có gán trùng công đoạn/phạm vi/nhóm chỉ tiêu này.")
+    _assert_no_qc_param_overlap(db, payload["stage"], product_id, beer_type_id, category,
+                                finished_product_id, payload["group_id"], exclude_link_id=link_id)
     before = {"stage": link.stage, "product_id": link.product_id, "beer_type_id": link.beer_type_id,
               "category": link.category,
               "finished_product_id": link.finished_product_id, "group_id": link.group_id,

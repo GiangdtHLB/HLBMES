@@ -11664,6 +11664,32 @@ const MASTER_GROUPS = [
   ] },
 ];
 let MASTER_GROUP = "sanxuat";
+// Danh sách Sản phẩm (SKU) dạng tích chọn (checkbox) có ô tìm nhanh — dùng chung cho form "+ Gán"
+// và modal "Sửa" của "Nhóm chỉ tiêu theo công đoạn" (yêu cầu người dùng 2026-10-14: đổi từ
+// <select multiple> giữ Ctrl/Cmd — khó thấy đang chọn gì — sang tích chọn trực quan hơn).
+// `idPrefix` phân biệt 2 nơi dùng (tránh trùng id DOM); `checkedIds` (Set) tô sẵn các SKU đang gán.
+function fpCheckboxListHtml(idPrefix, finishedProducts, checkedIds) {
+  return `<input id="${idPrefix}_search" placeholder="Tìm mã/tên sản phẩm..." style="width:100%;margin-bottom:4px"/>
+    <div id="${idPrefix}_list" style="max-height:170px;overflow:auto;border:1px solid var(--border);border-radius:6px;padding:6px;min-width:260px">
+      ${finishedProducts.map(fp => `<label class="${idPrefix}-opt" data-search="${esc((fp.code + " " + fp.name).toLowerCase())}" style="display:block;padding:2px 0;cursor:pointer">
+        <input type="checkbox" class="${idPrefix}-chk" value="${esc(fp.finished_product_id)}" ${checkedIds.has(fp.finished_product_id) ? "checked" : ""}/>
+        ${esc(fp.code)} — ${esc(fp.name)}</label>`).join("") ||
+        `<span class="muted">Chưa có sản phẩm nào — tạo ở Danh mục › Kho thành phẩm.</span>`}
+    </div>`;
+}
+function wireFpCheckboxSearch(idPrefix) {
+  const input = $(`${idPrefix}_search`);
+  if (!input) return;
+  input.oninput = () => {
+    const q = input.value.trim().toLowerCase();
+    document.querySelectorAll(`.${idPrefix}-opt`).forEach(el => {
+      el.style.display = !q || el.dataset.search.includes(q) ? "" : "none";
+    });
+  };
+}
+function checkedFpIds(idPrefix) {
+  return [...document.querySelectorAll(`.${idPrefix}-chk:checked`)].map(c => c.value);
+}
 VIEWS.master = async function () {
   const [products, finishedProducts, materials, plines, qcParams, qcGroups, stageGroups, beerTypes, suppliers, materialGroups, opsSettings, unitTypes, materialAltGroups, factoryLocations, materialLocations, scopeCatalog, processParams, processParamGroups, processPhases, packingSpecs] = await Promise.all([
     GET("/products"), GET("/finished-products").catch(() => []), GET("/materials"), GET("/lines").catch(() => []),
@@ -12091,7 +12117,9 @@ VIEWS.master = async function () {
         <div class="field" id="sg_product_wrap"><label>Dịch bia (tuỳ chọn)</label><select id="sg_product"><option value="">(Mọi dịch bia)</option>${products.map(p => `<option value="${p.product_id}">${esc(p.code)}</option>`).join("")}</select></div>
         <div class="field" id="sg_beertype_wrap" style="display:none"><label>Loại bia (tuỳ chọn)</label><select id="sg_beertype"><option value="">(Mọi loại bia)</option>${beerTypes.map(bt => `<option value="${bt.beer_type_id}">${esc(bt.code)} — ${esc(bt.name)}</option>`).join("")}</select></div>
         <div class="field" id="sg_category_wrap" style="display:none"><label>Loại sản phẩm (tuỳ chọn)</label><select id="sg_category"><option value="">(Mọi loại sản phẩm)</option>${FP_CATEGORIES.map(c => `<option>${esc(c)}</option>`).join("")}</select></div>
-        <div class="field" id="sg_fproduct_wrap" style="display:none"><label>Sản phẩm (tuỳ chọn)</label><select id="sg_fproduct"><option value="">(Mọi sản phẩm)</option>${finishedProducts.map(fp => `<option value="${fp.finished_product_id}">${esc(fp.code)} — ${esc(fp.name)}</option>`).join("")}</select></div>
+        <div class="field" id="sg_fproduct_wrap" style="display:none"><label>Sản phẩm (tuỳ chọn — tích chọn nhiều)</label>
+          ${fpCheckboxListHtml("sg_fp", finishedProducts, new Set())}
+          <div class="muted" style="font-size:11px;margin-top:2px">Không tích gì = (Mọi sản phẩm). Tích nhiều SKU chung 1 bộ chỉ tiêu sẽ gán riêng cho từng SKU (mỗi SKU 1 dòng, cùng trỏ về nhóm chỉ tiêu này).</div></div>
         <div class="field" style="min-width:200px"><label>Nhóm chỉ tiêu</label><select id="sg_group">${qcGroups.map(g => `<option value="${g.group_id}">${esc(g.code)} — ${esc(g.name)}</option>`).join("") ||
           "<option value=''>(chưa có nhóm nào — tạo ở bảng trên)</option>"}</select></div>
         <div class="field"><label>Bắt buộc</label><input id="sg_mandatory" type="checkbox" checked/></div>
@@ -12868,6 +12896,7 @@ VIEWS.master = async function () {
       };
       $("sg_stage").onchange = toggleSgScope;
       toggleSgScope();
+      wireFpCheckboxSearch("sg_fp");
     }
     if ($("sg_add")) $("sg_add").onclick = () => guard(async () => {
       const groupId = $("sg_group").value;
@@ -12876,13 +12905,23 @@ VIEWS.master = async function () {
       if (!stage) throw new Error("Chọn công đoạn trước khi gán.");
       const isProductScoped = PRODUCT_SCOPED_STAGES.includes(stage);
       const isBeerTypeScoped = BEER_TYPE_SCOPED_STAGES.includes(stage);
-      await POST("/qc/stage-groups", { stage, group_id: groupId,
+      const basePayload = { stage, group_id: groupId,
         product_id: isProductScoped ? ($("sg_product").value || null) : null,
         beer_type_id: isBeerTypeScoped ? ($("sg_beertype").value || null) : null,
         category: SKU_SCOPED_STAGES.includes(stage) ? ($("sg_category").value || null) : null,
-        finished_product_id: SKU_SCOPED_STAGES.includes(stage) ? ($("sg_fproduct").value || null) : null,
-        mandatory: $("sg_mandatory").checked });
-      toast("Đã gán nhóm chỉ tiêu cho công đoạn"); render("master");
+        mandatory: $("sg_mandatory").checked };
+      // "Sản phẩm" cho phép tích chọn NHIỀU SKU cùng lúc (yêu cầu người dùng 2026-10-14: "nhiều
+      // sản phẩm này có thể chung 1 bộ chỉ tiêu") — gán lần lượt từng SKU thành 1 dòng riêng, cùng
+      // trỏ về 1 nhóm chỉ tiêu (backend link_stage_group đã tự idempotent theo đúng tổ hợp
+      // scope+group nên gọi lặp lại an toàn, không tạo trùng). Không tích SKU nào -> giữ nguyên
+      // nghĩa "(Mọi sản phẩm)" như trước (1 request, finished_product_id=null).
+      const selectedFps = SKU_SCOPED_STAGES.includes(stage) ? checkedFpIds("sg_fp") : [];
+      const targets = selectedFps.length ? selectedFps : [null];
+      for (const fpId of targets) {
+        await POST("/qc/stage-groups", { ...basePayload, finished_product_id: fpId });
+      }
+      toast(targets.length > 1 ? `Đã gán nhóm chỉ tiêu cho ${targets.length} sản phẩm` : "Đã gán nhóm chỉ tiêu cho công đoạn");
+      render("master");
     });
     document.querySelectorAll("[data-sgedit]").forEach(b => b.onclick = () => {
       const sg = stageGroups.find(x => x.link_id === b.dataset.sgedit);
@@ -12894,15 +12933,22 @@ VIEWS.master = async function () {
         `<option value="${bt.beer_type_id}" ${bt.beer_type_id === sg.beer_type_id ? "selected" : ""}>${esc(bt.code)} — ${esc(bt.name)}</option>`).join("");
       const categoryOptions = `<option value="">(Mọi loại sản phẩm)</option>` + FP_CATEGORIES.map(c =>
         `<option ${c === sg.category ? "selected" : ""}>${esc(c)}</option>`).join("");
-      const fproductOptions = `<option value="">(Mọi sản phẩm)</option>` + finishedProducts.map(fp =>
-        `<option value="${fp.finished_product_id}" ${fp.finished_product_id === sg.finished_product_id ? "selected" : ""}>${esc(fp.code)} — ${esc(fp.name)}</option>`).join("");
       const groupOptions = qcGroups.map(g => `<option value="${g.group_id}" ${g.group_id === sg.group_id ? "selected" : ""}>${esc(g.code)} — ${esc(g.name)}</option>`).join("");
+      // "Sửa" SỬA CẢ NHÓM các dòng cùng phạm vi (stage/dịch bia/loại bia/loại sản phẩm/nhóm chỉ
+      // tiêu — CHỈ khác nhau ở Sản phẩm), không chỉ riêng dòng vừa bấm — tích/bỏ tích SKU nào ở
+      // đây sẽ thêm/xóa đúng dòng đó khi Lưu (yêu cầu người dùng 2026-10-14: "sửa thì cũng phải
+      // chọn tích" — đồng bộ với "+ Gán" cho chọn nhiều SKU).
+      const siblings = stageGroups.filter(x => x.stage === sg.stage && x.product_id === sg.product_id &&
+        x.beer_type_id === sg.beer_type_id && x.category === sg.category && x.group_id === sg.group_id);
+      const checkedIds = new Set(siblings.filter(s => s.finished_product_id).map(s => s.finished_product_id));
       modal(`<h3>Sửa gán nhóm chỉ tiêu công đoạn</h3>
         <div class="field"><label>Công đoạn</label><select id="sge_stage">${stageOptions}</select></div>
         <div class="field" id="sge_product_wrap" style="margin-top:8px"><label>Dịch bia (tuỳ chọn)</label><select id="sge_product">${productOptions}</select></div>
         <div class="field" id="sge_beertype_wrap" style="margin-top:8px"><label>Loại bia (tuỳ chọn)</label><select id="sge_beertype">${beerTypeOptions}</select></div>
         <div class="field" id="sge_category_wrap" style="margin-top:8px"><label>Loại sản phẩm (tuỳ chọn)</label><select id="sge_category">${categoryOptions}</select></div>
-        <div class="field" id="sge_fproduct_wrap" style="margin-top:8px"><label>Sản phẩm (tuỳ chọn)</label><select id="sge_fproduct">${fproductOptions}</select></div>
+        <div class="field" id="sge_fproduct_wrap" style="margin-top:8px"><label>Sản phẩm (tuỳ chọn — tích chọn nhiều)</label>
+          ${fpCheckboxListHtml("sge_fp", finishedProducts, checkedIds)}
+          <div class="muted" style="font-size:11px;margin-top:2px">Bỏ tích 1 SKU đang có = xóa dòng gán của SKU đó. Tích thêm SKU mới = tạo dòng gán mới cho SKU đó.</div></div>
         <div class="field" style="margin-top:8px"><label>Nhóm chỉ tiêu</label><select id="sge_group">${groupOptions}</select></div>
         <div class="field" style="margin-top:8px"><label>Bắt buộc</label><input id="sge_mandatory" type="checkbox" ${sg.mandatory ? "checked" : ""}/></div>
         <button class="btn" id="sge_save" style="margin-top:12px">Lưu</button>`);
@@ -12917,18 +12963,40 @@ VIEWS.master = async function () {
       };
       $("sge_stage").onchange = toggleSgeScope;
       toggleSgeScope();
+      wireFpCheckboxSearch("sge_fp");
       $("sge_save").onclick = () => guard(async () => {
         const groupId = $("sge_group").value;
         if (!groupId) throw new Error("Chưa có nhóm chỉ tiêu nào để gán — tạo nhóm ở bảng trên trước.");
         const stage = $("sge_stage").value;
         const isProductScoped = PRODUCT_SCOPED_STAGES.includes(stage);
         const isBeerTypeScoped = BEER_TYPE_SCOPED_STAGES.includes(stage);
-        await PUT(`/qc/stage-groups/${sg.link_id}`, { stage, group_id: groupId,
+        const basePayload = { stage, group_id: groupId,
           product_id: isProductScoped ? ($("sge_product").value || null) : null,
           beer_type_id: isBeerTypeScoped ? ($("sge_beertype").value || null) : null,
           category: SKU_SCOPED_STAGES.includes(stage) ? ($("sge_category").value || null) : null,
-          finished_product_id: SKU_SCOPED_STAGES.includes(stage) ? ($("sge_fproduct").value || null) : null,
-          mandatory: $("sge_mandatory").checked });
+          mandatory: $("sge_mandatory").checked };
+        if (!SKU_SCOPED_STAGES.includes(stage)) {
+          // Stage không theo SKU -> chỉ còn đúng 1 dòng (không có khái niệm "nhiều SKU"), sửa
+          // tại chỗ như cũ.
+          await PUT(`/qc/stage-groups/${sg.link_id}`, { ...basePayload, finished_product_id: null });
+        } else {
+          const checked = checkedFpIds("sge_fp");
+          const desired = checked.length ? checked : [null];   // không tích gì = (Mọi sản phẩm)
+          const existingByFp = new Map(siblings.map(s => [s.finished_product_id || null, s.link_id]));
+          for (const fpId of desired) {
+            const existingLinkId = existingByFp.get(fpId);
+            if (existingLinkId) {
+              await PUT(`/qc/stage-groups/${existingLinkId}`, { ...basePayload, finished_product_id: fpId });
+              existingByFp.delete(fpId);
+            } else {
+              await POST("/qc/stage-groups", { ...basePayload, finished_product_id: fpId });
+            }
+          }
+          // Các dòng CŨ không còn nằm trong danh sách tích chọn -> xóa hẳn.
+          for (const staleLinkId of existingByFp.values()) {
+            await DELETE(`/qc/stage-groups/${staleLinkId}`);
+          }
+        }
         closeModal(); toast("Đã cập nhật gán nhóm chỉ tiêu"); render("master");
       });
     });
