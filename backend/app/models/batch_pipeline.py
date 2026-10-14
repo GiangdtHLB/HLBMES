@@ -42,6 +42,14 @@ class BatchTank(Base):
     locked_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
     locked_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
     quality_status: Mapped[str] = mapped_column(Unicode(255), default=QualityStatus.RELEASED.value)
+    # Chụp lại (snapshot) danh sách chỉ tiêu bắt buộc + ngưỡng (Min/Max) đang cấu hình ở Danh
+    # mục TẠI THỜI ĐIỂM gộp mẻ vào tank — dict {"len_men_chinh": [...], "len_men_phu": [...]},
+    # mỗi phần tử cùng hình dạng với required_params_for_stage() trả về. NULL = tank tạo TRƯỚC
+    # khi có cơ chế này (dữ liệu cũ), stage_qc_status tự tra trực tiếp theo Danh mục HIỆN TẠI
+    # như trước (xem qc_catalog.py::_snapshot_required_params). Mục đích: Danh mục sửa ngưỡng
+    # SAU này KHÔNG được đổi ngược cách đánh giá của các tank đã lên men từ trước — chỉ tank MỚI
+    # tạo sau khi sửa mới áp ngưỡng mới (yêu cầu người dùng 2026-10-13).
+    qc_spec_snapshot: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
 
 
 class BatchTankLink(Base):
@@ -193,6 +201,9 @@ class BatchFilterLot(Base):
     locked_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
     locked_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
     quality_status: Mapped[str] = mapped_column(Unicode(255), default=QualityStatus.RELEASED.value)
+    # Mirror BatchTank.qc_spec_snapshot — chụp lại chỉ tiêu bắt buộc + ngưỡng TẠI LÚC TẠO lô lọc
+    # (stage "loc"), là 1 LIST (chỉ 1 stage, khác BatchTank có 2 stage nên phải dùng dict).
+    qc_spec_snapshot: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
 
 
 class BatchFilterLotSource(Base):
@@ -335,6 +346,9 @@ class BatchPackLot(Base):
     finished: Mapped[bool] = mapped_column(Boolean, default=False)
     finished_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
     finished_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+    # Mirror BatchTank.qc_spec_snapshot/BatchFilterLot.qc_spec_snapshot — chụp lại chỉ tiêu bắt
+    # buộc + ngưỡng TẠI LÚC TÁCH lô thành phẩm (stage "thanh_pham").
+    qc_spec_snapshot: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
 
     @property
     def ended_at(self) -> Optional[datetime]:

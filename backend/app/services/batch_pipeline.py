@@ -516,6 +516,13 @@ def merge_batches_into_tank(db: Session, batch_ids: list[str], payload: dict, us
     )
     db.add(tank)
     db.flush()
+    # Chụp lại chỉ tiêu bắt buộc + ngưỡng (Min/Max) đang cấu hình ở Danh mục NGAY LÚC TẠO tank —
+    # Danh mục sửa ngưỡng sau này không còn ảnh hưởng ngược tank đã lên men từ trước (yêu cầu
+    # người dùng 2026-10-13, xem qc_catalog.py::_snapshot_required_params).
+    tank.qc_spec_snapshot = {
+        s: qc_catalog.required_params_for_stage(db, s, product_id=tank.product_id, mandatory_only=False)
+        for s in ("len_men_chinh", "len_men_phu")
+    }
     for b in batches:
         db.add(BatchTankLink(link_id=new_id(), tank_id=tank.tank_id, batch_id=b.batch_id))
         genealogy.add_edge(db, from_type="batch", from_id=b.batch_id, to_type="batch_tank",
@@ -1184,6 +1191,11 @@ def draw_from_filter_order(db: Session, order_id: str, payload: dict, user: User
     )
     db.add(fl)
     db.flush()
+    # Chụp lại chỉ tiêu bắt buộc + ngưỡng (Min/Max) đang cấu hình ở Danh mục NGAY LÚC TẠO lô lọc
+    # — mirror merge_batches_into_tank (yêu cầu người dùng 2026-10-13).
+    fl.qc_spec_snapshot = qc_catalog.required_params_for_stage(
+        db, "loc", beer_type_id=fl.beer_type_id, category=fl.category,
+        finished_product_id=fl.finished_product_id, mandatory_only=False)
     # quality_status khởi tạo ĐÚNG theo chỉ tiêu Lọc bắt buộc thật (ON_HOLD nếu còn thiếu) thay
     # vì mặc định cứng RELEASED của cột (bug thực tế 2026-09-23: lô lọc mới tạo, chưa khai chỉ
     # tiêu nào, vẫn hiện "released" — xem qc_catalog.sync_stage_quality_status).
@@ -1313,6 +1325,11 @@ def draw_from_tank_into_filter_lot(db: Session, sources: list[dict], payload: di
     )
     db.add(fl)
     db.flush()
+    # Chụp lại chỉ tiêu bắt buộc + ngưỡng (Min/Max) đang cấu hình ở Danh mục NGAY LÚC TẠO lô lọc
+    # — mirror draw_from_filter_order (yêu cầu người dùng 2026-10-13).
+    fl.qc_spec_snapshot = qc_catalog.required_params_for_stage(
+        db, "loc", beer_type_id=fl.beer_type_id, category=fl.category,
+        finished_product_id=fl.finished_product_id, mandatory_only=False)
     qc_catalog.sync_stage_quality_status(db, "loc", "batch_filter_lot", fl.filter_lot_id)
     src_rows = []
     seq = 1
@@ -1879,6 +1896,12 @@ def split_filter_lot_to_pack_lot(db: Session, filter_lot_id: str, payload: dict,
     _sync_filter_lot_status(fl)
     db.add(p)
     db.flush()
+    # Chụp lại chỉ tiêu bắt buộc + ngưỡng (Min/Max) đang cấu hình ở Danh mục NGAY LÚC TÁCH lô
+    # thành phẩm — mirror draw_from_filter_order/draw_from_tank_into_filter_lot (yêu cầu người
+    # dùng 2026-10-13).
+    p.qc_spec_snapshot = qc_catalog.required_params_for_stage(
+        db, "thanh_pham", beer_type_id=fl.beer_type_id, category=fl.category,
+        finished_product_id=p.finished_product_id, mandatory_only=False)
     qc_catalog.sync_stage_quality_status(db, "thanh_pham", "batch_pack_lot", p.pack_lot_id)
     genealogy.add_edge(db, from_type="batch_filter_lot", from_id=filter_lot_id, to_type="batch_pack_lot",
                        to_id=p.pack_lot_id, relation="chiết", quantity=qty, uom="L")

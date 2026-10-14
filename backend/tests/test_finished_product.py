@@ -207,14 +207,31 @@ def test_finished_product_scoping_by_beer_type_applies_across_skus(client, admin
     assert link.json()["finished_product_id"] is None
     assert link.json()["beer_type_id"] == beer_type_id
 
-    fl = _make_filter_lot(client, admin_h, "COMPAT-01")
+    # _make_filter_lot dùng chung sản phẩm/lô lọc SEED (không thuộc beer_type_id compat vừa tạo)
+    # — tạo thẳng lô lọc TRUYỀN beer_type_id compat để BẢN GHI THẬT mang đúng Loại bia (từ
+    # 2026-10-13, qc_spec_snapshot chụp theo field THẬT lưu trên lô lọc lúc tạo, không còn đọc
+    # được override chỉ truyền ở query param GET /qc-status như trước — xem
+    # qc_catalog.py::_snapshot_required_params).
+    batch_id = _make_batch(client, admin_h)
+    _run_batch_to_completed(client, admin_h, batch_id)
+    tank = client.post("/api/batch-tanks", headers=admin_h,
+                       json={"batch_ids": [batch_id], "tank_code": "TANK-COMPAT-01"})
+    assert tank.status_code == 201, tank.text
+    bbt = client.post("/api/lines", headers=admin_h,
+                      json={"code": "BBT-COMPAT-01", "name": "Tank thành phẩm COMPAT-01", "kind": "tank_bbt"})
+    assert bbt.status_code == 201, bbt.text
+    draw = client.post("/api/batch-filter-lots", headers=admin_h, json={
+        "filter_lot_code": "FLOT-COMPAT-01", "to_bbt": bbt.json()["code"],
+        "sources": [{"source_type": "tank", "source_tank_id": tank.json()["tank_id"]}],
+        "category": "Bia lon", "beer_type_id": beer_type_id,
+    })
+    assert draw.status_code == 201, draw.text
+    fl = draw.json()["filter_lot_id"]
     _finish_only_source(client, admin_h, fl)
-    pack_lot_id = _make_pack_lot(client, admin_h, fl, "COMPAT-01")
-    # beer_type_id không tự gắn qua nguồn trong test này nên gán thủ công qua qc-status params.
+    pack_lot_id = _make_pack_lot(client, admin_h, fl, "COMPAT-01", finished_product_id=fp_id)
 
     st = client.get(f"/api/brewing/qc-status?stage=thanh_pham&scope_type=batch_pack_lot&"
-                    f"scope_id={pack_lot_id}&beer_type_id={beer_type_id}&finished_product_id={fp_id}",
-                    headers=admin_h).json()
+                    f"scope_id={pack_lot_id}", headers=admin_h).json()
     assert any(p["code"] == code for p in st["required"])
 
 
