@@ -141,8 +141,16 @@ def test_len_men_chinh_snapshot_frozen_at_tank_creation(client, admin_h):
                              "product_id": product_id, "mandatory": True})
     assert link.status_code == 201, link.text
 
-    # Tank đã tạo TRƯỚC link gán nhóm -> snapshot của nó rỗng (chưa có nhóm nào lúc tạo), chỉ
-    # xác nhận hành vi: tạo tank MỚI sau khi gán nhóm mới có chỉ tiêu này trong snapshot.
+    # Tank đã tạo TRƯỚC link gán nhóm -> snapshot của nó rỗng THẬT (không phải giả lập bằng
+    # scope_id không tồn tại) -> required rỗng, KHÔNG tra Danh mục sống để "vớt" ra chỉ tiêu vừa
+    # gán sau (mirror đúng ca thực tế lô lọc cũ 2026-10-14: tạo trước khi Danh mục có nhóm/ngưỡng
+    # -> không được hiện Min/Max của Danh mục hiện tại).
+    scope_id1 = f"{tank_id}__len_men_chinh"
+    st1 = client.get(f"/api/brewing/qc-status?stage=len_men_chinh&scope_type=batch_tank&"
+                     f"scope_id={scope_id1}&product_id={product_id}", headers=admin_h).json()
+    assert st1["required"] == []
+
+    # Tank MỚI (tạo SAU khi đã gán nhóm) mới có chỉ tiêu này trong snapshot.
     tank_id2, _ = _make_tank(client, admin_h, "LMCSNAP02")
     scope_id2 = f"{tank_id2}__len_men_chinh"
     st2 = client.get(f"/api/brewing/qc-status?stage=len_men_chinh&scope_type=batch_tank&"
@@ -152,11 +160,14 @@ def test_len_men_chinh_snapshot_frozen_at_tank_creation(client, admin_h):
     # Sửa ngưỡng trong Danh mục SAU khi tank2 đã tạo.
     _reconfigure_item(client, admin_h, group_id, item_id, param_id, lsl_override=2, usl_override=8)
 
-    # Danh mục hiện tại đã đổi (tra sống sẽ ra 2/8)...
-    live_check = client.get(f"/api/brewing/qc-status?stage=len_men_chinh&scope_type=batch_tank&"
-                            f"scope_id=KHONGTONTAI__len_men_chinh&product_id={product_id}",
-                            headers=admin_h).json()
-    assert _lsl_usl_for_code(live_check["required"], code) == (2, 8)
+    # Tank KHÔNG tồn tại (mirror "tạo trước khi có snapshot", snapshot=None/rỗng) -> required
+    # rỗng, KHÔNG tra Danh mục sống nữa (yêu cầu người dùng 2026-10-14: "lô cũ cũng không được
+    # tra sống... không có thì thôi" — phát hiện sau khi thấy 117 lô lọc cũ hiện Min/Max MỚI
+    # nhất dù lúc ghi nhận hoàn toàn chưa có ngưỡng nào).
+    no_snapshot_check = client.get(f"/api/brewing/qc-status?stage=len_men_chinh&scope_type=batch_tank&"
+                                   f"scope_id=KHONGTONTAI__len_men_chinh&product_id={product_id}",
+                                   headers=admin_h).json()
+    assert no_snapshot_check["required"] == []
 
     # ...nhưng tank2 (đã tạo TRƯỚC khi sửa) vẫn phải giữ nguyên snapshot cũ (1/10).
     st2_after = client.get(f"/api/brewing/qc-status?stage=len_men_chinh&scope_type=batch_tank&"
