@@ -13050,18 +13050,19 @@ VIEWS.master = async function () {
     modal(`<h3>Chỉ tiêu trong nhóm — ${esc(group.name)}</h3>
       ${canManage ? "" : `<div class="muted" style="margin-bottom:8px">Bạn chỉ có quyền xem (cần quyền <code class="k">master.manage</code> để thêm/sửa/xóa chỉ tiêu trong nhóm).</div>`}
       <div class="tablewrap"><table>
-        <thead><tr><th>Mã CT</th><th>Tên</th><th>ĐVT</th><th>Min</th><th>Max</th><th>Bắt buộc</th>${canManage ? "<th></th>" : ""}</tr></thead>
+        <thead><tr><th>Mã CT</th><th>Tên</th><th>ĐVT</th><th>Min</th><th>Max</th><th>Bắt buộc</th><th>Người sửa / Ngày giờ sửa</th>${canManage ? "<th></th>" : ""}</tr></thead>
         <tbody>${items.map(it => `<tr>
           <td><code class="k">${esc(it.param_code || "—")}</code></td><td>${esc(it.param_name || "—")}</td>
           <td>${esc(it.param_unit || "—")}</td>
           ${canManage ? `<td><input type="number" step="any" class="qgi-lsl-edit" data-item="${esc(it.item_id)}" value="${it.lsl_override ?? ""}" style="width:85px"/></td>
           <td><input type="number" step="any" class="qgi-usl-edit" data-item="${esc(it.item_id)}" value="${it.usl_override ?? ""}" style="width:85px"/></td>
-          <td><input type="checkbox" class="qgi-mand-edit" data-item="${esc(it.item_id)}" ${it.mandatory ? "checked" : ""}/></td>
-          <td style="white-space:nowrap"><button class="btn sm sec" data-saveitem="${esc(it.item_id)}">Lưu</button>
-            <button class="btn sm sec" data-delitem="${esc(it.item_id)}">Xóa</button></td>` : `<td>${it.lsl_override ?? "—"}</td>
+          <td><input type="checkbox" class="qgi-mand-edit" data-item="${esc(it.item_id)}" ${it.mandatory ? "checked" : ""}/></td>` : `<td>${it.lsl_override ?? "—"}</td>
           <td>${it.usl_override ?? "—"}</td>
-          <td>${it.mandatory ? "Có" : "Không"}</td>`}</tr>`).join("") ||
-          `<tr><td colspan="${canManage ? 7 : 6}" class="muted">Chưa có chỉ tiêu nào trong nhóm.</td></tr>`}</tbody>
+          <td>${it.mandatory ? "Có" : "Không"}</td>`}
+          <td class="muted" style="font-size:12px;white-space:nowrap">${it.updated_by ? `${esc(it.updated_by)}<br>${fmt(it.updated_at)}` : "—"}</td>
+          ${canManage ? `<td style="white-space:nowrap"><button class="btn sm sec" data-saveitem="${esc(it.item_id)}">Lưu</button>
+            <button class="btn sm sec" data-delitem="${esc(it.item_id)}">Xóa</button></td>` : ""}</tr>`).join("") ||
+          `<tr><td colspan="${canManage ? 8 : 7}" class="muted">Chưa có chỉ tiêu nào trong nhóm.</td></tr>`}</tbody>
       </table></div>
       ${canManage ? `<h4 style="margin-top:14px">+ Thêm chỉ tiêu vào nhóm</h4>
       <div class="row">

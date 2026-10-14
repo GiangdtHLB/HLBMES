@@ -67,6 +67,12 @@ class QCParameterGroupItem(Base):
     target_override: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     usl_override: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     lsl_override: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    # "Người sửa/ngày giờ sửa" — yêu cầu người dùng 2026-10-14: màn "Chỉ tiêu trong nhóm" không
+    # hiện ai vừa sửa Min/Max, phải tra audit_log thủ công mới biết (ca thực tế phát hiện khi
+    # điều tra lô lọc 1420 — hoangdd vừa thêm ngưỡng Độ cồn không ai để ý). NULL = item chưa
+    # từng sửa kể từ lúc tạo (hoặc tạo trước khi có cột này).
+    updated_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
+    updated_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
 
 
 class StageQcGroup(Base):

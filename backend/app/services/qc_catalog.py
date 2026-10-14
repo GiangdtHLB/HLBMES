@@ -102,6 +102,7 @@ def _item_out(db: Session, item: QCParameterGroupItem) -> dict:
         "seq": item.seq, "mandatory": item.mandatory,
         "target_override": item.target_override, "usl_override": item.usl_override,
         "lsl_override": item.lsl_override,
+        "updated_by": item.updated_by, "updated_at": item.updated_at,
         "param_code": param.code if param else None,
         "param_name": param.name if param else None,
         "param_unit": param.unit if param else None,
@@ -174,6 +175,8 @@ def update_item(db: Session, item_id: str, payload: dict, user: User) -> dict:
         raise NotFoundError("Chỉ tiêu trong nhóm không tồn tại.")
     for k, v in payload.items():
         setattr(item, k, v)
+    item.updated_by = user.username
+    item.updated_at = utcnow()
     record_audit(db, entity_type="qc_parameter_group_item", entity_id=item.item_id, action="update",
                  actor=user, after=payload)
     db.commit()
@@ -866,6 +869,26 @@ def sync_stage_quality_status(db: Session, stage: str, scope_type: str, scope_id
                           else QualityStatus.RELEASED.value)
 
 
+def _snapshot_required_params(db: Session, scope_type: str, scope_id: str, stage: str):
+    """Trả lại danh sách chỉ tiêu đã CHỤP SẴN (`qc_spec_snapshot`) lúc TẠO tank/lô lọc/lô thành
+    phẩm, nếu có — None nếu bản ghi tạo TRƯỚC khi có cơ chế này (dữ liệu cũ, tra Danh mục SỐNG
+    như hành vi cũ) hoặc scope_type không thuộc 3 loại có snapshot (VD "batch" — mẻ nấu, không
+    nằm trong yêu cầu người dùng 2026-10-13: chỉ áp dụng lên men chính/phụ, lọc, chiết)."""
+    if scope_type == "batch_tank":
+        tank_id = scope_id.rsplit("__", 1)[0]
+        tank = db.get(BatchTank, tank_id)
+        if not tank or not tank.qc_spec_snapshot:
+            return None
+        return tank.qc_spec_snapshot.get(stage)
+    if scope_type == "batch_filter_lot":
+        fl = db.get(BatchFilterLot, scope_id)
+        return fl.qc_spec_snapshot if fl else None
+    if scope_type == "batch_pack_lot":
+        p = db.get(BatchPackLot, scope_id)
+        return p.qc_spec_snapshot if p else None
+    return None
+
+
 def stage_qc_status(db: Session, stage: str, scope_type: str, scope_id: str, product_id: str = None,
                     finished_product_id: str = None, beer_type_id: str = None, category: str = None,
                     cache: dict = None) -> dict:
@@ -884,11 +907,17 @@ def stage_qc_status(db: Session, stage: str, scope_type: str, scope_id: str, pro
 
     `cache` — truyền qua cho required_params_for_stage (xem đó) khi gọi lặp lại nhiều bản ghi
     cùng lúc (VD list_pending_stage_declarations); mặc định None, không ảnh hưởng mọi nơi gọi
-    đơn lẻ khác."""
+    đơn lẻ khác.
+
+    `required` ưu tiên lấy từ `qc_spec_snapshot` đã chụp sẵn lúc TẠO tank/lô lọc/lô thành phẩm
+    (xem _snapshot_required_params) — Danh mục sửa ngưỡng SAU đó không còn ảnh hưởng ngược các
+    mẻ đã tạo trước, chỉ áp dụng cho mẻ MỚI (yêu cầu người dùng 2026-10-13). Bản ghi tạo TRƯỚC
+    khi có cơ chế này (snapshot=None) vẫn tra Danh mục SỐNG như hành vi cũ."""
     from . import quality
-    required = required_params_for_stage(db, stage, product_id=product_id,
-                                         finished_product_id=finished_product_id, mandatory_only=False,
-                                         beer_type_id=beer_type_id, category=category, cache=cache)
+    snapshot = _snapshot_required_params(db, scope_type, scope_id, stage)
+    required = snapshot if snapshot is not None else required_params_for_stage(
+        db, stage, product_id=product_id, finished_product_id=finished_product_id, mandatory_only=False,
+        beer_type_id=beer_type_id, category=category, cache=cache)
     latest_by_param = quality.latest_results_by_param(db, scope_type, scope_id)
     mandatory_codes = {p["code"] for p in required if p["mandatory"]}
     pending = [p["code"] for p in required if p["mandatory"] and p["code"] not in latest_by_param]
