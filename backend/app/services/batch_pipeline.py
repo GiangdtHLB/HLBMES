@@ -517,8 +517,10 @@ def merge_batches_into_tank(db: Session, batch_ids: list[str], payload: dict, us
     db.add(tank)
     db.flush()
     # Chụp lại chỉ tiêu bắt buộc + ngưỡng (Min/Max) đang cấu hình ở Danh mục NGAY LÚC TẠO tank —
-    # Danh mục sửa ngưỡng sau này không còn ảnh hưởng ngược tank đã lên men từ trước (yêu cầu
-    # người dùng 2026-10-13, xem qc_catalog.py::_snapshot_required_params).
+    # LƯU Ý 2026-10-15: cột này KHÔNG còn được qc_catalog.stage_qc_status đọc nữa (bug thực tế:
+    # làm tank đang lên men hiện "đạt đủ chỉ tiêu" dù 0 mẫu nhập, vì nhóm chỉ tiêu gán SAU lúc
+    # tạo tank không có trong snapshot) — required giờ luôn tra Danh mục SỐNG. Giữ lại cột/ghi dữ
+    # liệu này (không xoá) phòng khi cần dùng lại cho mục đích khác, nhưng hiện là dữ liệu chết.
     tank.qc_spec_snapshot = {
         s: qc_catalog.required_params_for_stage(db, s, product_id=tank.product_id, mandatory_only=False)
         for s in ("len_men_chinh", "len_men_phu")

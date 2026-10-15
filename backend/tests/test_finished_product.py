@@ -208,10 +208,10 @@ def test_finished_product_scoping_by_beer_type_applies_across_skus(client, admin
     assert link.json()["beer_type_id"] == beer_type_id
 
     # _make_filter_lot dùng chung sản phẩm/lô lọc SEED (không thuộc beer_type_id compat vừa tạo)
-    # — tạo thẳng lô lọc TRUYỀN beer_type_id compat để BẢN GHI THẬT mang đúng Loại bia (từ
-    # 2026-10-13, qc_spec_snapshot chụp theo field THẬT lưu trên lô lọc lúc tạo, không còn đọc
-    # được override chỉ truyền ở query param GET /qc-status như trước — xem
-    # qc_catalog.py::_snapshot_required_params).
+    # — tạo thẳng lô lọc TRUYỀN beer_type_id compat để BẢN GHI THẬT mang đúng Loại bia. GET
+    # /qc-status tra Danh mục SỐNG theo đúng query param truyền vào (không tự suy từ bản ghi —
+    # caller, VD frontend::openStageQcModal, luôn truyền kèm beer_type_id/category/
+    # finished_product_id của chính bản ghi, xem qc_catalog.py::required_params_for_stage).
     batch_id = _make_batch(client, admin_h)
     _run_batch_to_completed(client, admin_h, batch_id)
     tank = client.post("/api/batch-tanks", headers=admin_h,
@@ -231,7 +231,7 @@ def test_finished_product_scoping_by_beer_type_applies_across_skus(client, admin
     pack_lot_id = _make_pack_lot(client, admin_h, fl, "COMPAT-01", finished_product_id=fp_id)
 
     st = client.get(f"/api/brewing/qc-status?stage=thanh_pham&scope_type=batch_pack_lot&"
-                    f"scope_id={pack_lot_id}", headers=admin_h).json()
+                    f"scope_id={pack_lot_id}&beer_type_id={beer_type_id}", headers=admin_h).json()
     assert any(p["code"] == code for p in st["required"])
 
 

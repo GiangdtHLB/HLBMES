@@ -1,8 +1,22 @@
-"""Test chụp (snapshot) chỉ tiêu bắt buộc + ngưỡng (Min/Max) NGAY LÚC TẠO tank lên men/lô lọc/
-lô thành phẩm — yêu cầu người dùng 2026-10-13: Danh mục sửa Min/Max của 1 chỉ tiêu SAU KHI 1 mẻ
-đã tạo/ghi nhận giá trị không còn được đổi ngược cách đánh giá của mẻ đó — chỉ mẻ MỚI tạo SAU
-mới áp ngưỡng mới. Xem services/qc_catalog.py::_snapshot_required_params/stage_qc_status,
-models/batch_pipeline.py::BatchTank/BatchFilterLot/BatchPackLot.qc_spec_snapshot.
+"""Test chỉ tiêu bắt buộc theo công đoạn sản xuất (mẻ nấu/lên men chính-phụ/lọc/chiết/thành
+phẩm) LUÔN tra Danh mục SỐNG — kể cả với tank/lô lọc/lô thành phẩm đã tạo TRƯỚC khi nhóm chỉ tiêu
+được gán hoặc Min/Max được sửa.
+
+Lịch sử: 2026-10-13 từng đổi sang "chụp ảnh" (snapshot) 1 LẦN DUY NHẤT lúc tạo tank/lô, để Danh
+mục sửa Min/Max sau đó không ảnh hưởng ngược các bản ghi đã tạo. Nhưng bug thực tế 2026-10-15 (lô
+285/tank B27): tank ĐANG lên men (chưa khóa, chưa xong), nhóm chỉ tiêu "Lên men phụ" được gán VÀO
+Danh mục SAU lúc tank được tạo -> snapshot chụp lúc tạo rỗng -> hệ thống báo "Đạt đủ chỉ tiêu bắt
+buộc" dù 0 mẫu được nhập, dù nhóm chỉ tiêu ĐANG áp dụng thật ở Danh mục. Việc 1 công đoạn CHƯA XẢY
+RA có bắt buộc khai hay không phải luôn phản ánh đúng cấu hình HIỆN TẠI (không phải lịch sử cần
+giữ nguyên) — quay lại tra sống hoàn toàn cho `required` (mọi scope_type, không riêng "nau").
+
+Việc KHÔNG được đổi ngược là Min/Max HIỂN THỊ kèm 1 giá trị ĐÃ GHI — nhưng việc đó lấy thẳng từ
+`lower_limit`/`upper_limit` đã đóng băng trên CHÍNH QualityResult lúc ghi (xem
+qc_catalog.record_stage_result), độc lập hoàn toàn với `required`/Danh mục, không cần snapshot gì
+thêm (xem test_recorded_result_keeps_original_bounds_after_catalog_change bên dưới + frontend
+app.js::qcMinMaxCellsHtml cho phần hiển thị).
+
+Xem services/qc_catalog.py::stage_qc_status, required_params_for_stage.
 """
 
 import os
@@ -112,176 +126,98 @@ def _make_filter_lot(client, admin_h, suffix, tank_id):
     return draw.json()["filter_lot_id"]
 
 
-def _finish_only_source(client, admin_h, filter_lot_id, v_drawn=900):
-    src = client.get(f"/api/batch-filter-lots/{filter_lot_id}/sources", headers=admin_h).json()[0]
-    batches = client.get(f"/api/batch-filter-lots/{filter_lot_id}/batches", headers=admin_h).json()
-    fin = client.put(f"/api/batch-filter-lots/batches/{batches[0]['batch_link_id']}/finish", headers=admin_h,
-                     json={"draws": [{"source_link_id": src["link_id"], "dich_nha_hl": v_drawn}],
-                          "nuoc_bai_khi_hl": 0})
-    assert fin.status_code == 200, fin.text
-
-
-def _make_pack_lot(client, admin_h, filter_lot_id, suffix, qty=500):
-    pack = client.post(f"/api/batch-filter-lots/{filter_lot_id}/pack-lots", headers=admin_h,
-                       json={"qty": qty, "pack_lot_code": f"PKG-{suffix}", "lot_no": f"LOT-{suffix}"})
-    assert pack.status_code == 201, pack.text
-    return pack.json()["pack_lot_id"]
-
-
 def _lsl_usl_for_code(required, code):
     row = next(p for p in required if p["code"] == code)
     return row["lsl"], row["usl"]
 
 
-def test_len_men_chinh_snapshot_frozen_at_tank_creation(client, admin_h):
-    group_id, item_id, param_id, code = _make_group_with_param(client, admin_h, "LMCSNAP01", lsl=1, usl=10)
-    tank_id, product_id = _make_tank(client, admin_h, "LMCSNAP01")
+def test_tank_created_before_group_assigned_still_sees_requirement_once_assigned(client, admin_h):
+    """Mirror đúng bug thực tế 2026-10-15 (lô 285/tank B27): tank tạo TRƯỚC khi nhóm "Lên men
+    phụ" được gán vào Danh mục -> ngay sau khi gán, required PHẢI thấy chỉ tiêu đó (không được
+    rỗng mãi mãi) vì tank chưa khóa/chưa xong công đoạn này."""
+    tank_id, product_id = _make_tank(client, admin_h, "LATEGRP01")
+    scope_id = f"{tank_id}__len_men_phu"
+
+    # Trước khi gán nhóm: chưa có gì bắt buộc.
+    st_before = client.get(f"/api/brewing/qc-status?stage=len_men_phu&scope_type=batch_tank&"
+                           f"scope_id={scope_id}&product_id={product_id}", headers=admin_h).json()
+    assert st_before["required"] == []
+    assert st_before["can_release"] is True   # đúng — chưa có chỉ tiêu nào để thiếu
+
+    # Gán nhóm SAU KHI tank đã tồn tại.
+    group_id, item_id, param_id, code = _make_group_with_param(client, admin_h, "LATEGRP01", lsl=1, usl=10)
+    link = client.post("/api/qc/stage-groups", headers=admin_h,
+                       json={"stage": "len_men_phu", "group_id": group_id,
+                             "product_id": product_id, "mandatory": True})
+    assert link.status_code == 201, link.text
+
+    # Phải thấy NGAY — tank vẫn đang chạy, công đoạn len_men_phu chưa hoàn thành.
+    st_after = client.get(f"/api/brewing/qc-status?stage=len_men_phu&scope_type=batch_tank&"
+                          f"scope_id={scope_id}&product_id={product_id}", headers=admin_h).json()
+    assert code in {p["code"] for p in st_after["required"]}
+    assert code in st_after["pending"]
+    assert st_after["can_release"] is False   # KHÔNG được "Đạt đủ chỉ tiêu bắt buộc" khi 0 mẫu
+
+
+def test_reconfigured_threshold_applies_immediately_to_existing_unrecorded_tank(client, admin_h):
+    """Sửa Min/Max của 1 chỉ tiêu ĐANG áp dụng cho 1 tank CHƯA ghi chỉ tiêu đó -> required phải
+    đổi theo ngay (không còn "đóng băng" theo lúc tank tạo như bản 2026-10-13 cũ)."""
+    group_id, item_id, param_id, code = _make_group_with_param(client, admin_h, "LIVEUPD01", lsl=1, usl=10)
+    tank_id, product_id = _make_tank(client, admin_h, "LIVEUPD01")
     link = client.post("/api/qc/stage-groups", headers=admin_h,
                        json={"stage": "len_men_chinh", "group_id": group_id,
                              "product_id": product_id, "mandatory": True})
     assert link.status_code == 201, link.text
+    scope_id = f"{tank_id}__len_men_chinh"
 
-    # Tank đã tạo TRƯỚC link gán nhóm -> snapshot của nó rỗng THẬT (không phải giả lập bằng
-    # scope_id không tồn tại) -> required rỗng, KHÔNG tra Danh mục sống để "vớt" ra chỉ tiêu vừa
-    # gán sau (mirror đúng ca thực tế lô lọc cũ 2026-10-14: tạo trước khi Danh mục có nhóm/ngưỡng
-    # -> không được hiện Min/Max của Danh mục hiện tại).
-    scope_id1 = f"{tank_id}__len_men_chinh"
     st1 = client.get(f"/api/brewing/qc-status?stage=len_men_chinh&scope_type=batch_tank&"
-                     f"scope_id={scope_id1}&product_id={product_id}", headers=admin_h).json()
-    assert st1["required"] == []
+                     f"scope_id={scope_id}&product_id={product_id}", headers=admin_h).json()
+    assert _lsl_usl_for_code(st1["required"], code) == (1, 10)
 
-    # Tank MỚI (tạo SAU khi đã gán nhóm) mới có chỉ tiêu này trong snapshot.
-    tank_id2, _ = _make_tank(client, admin_h, "LMCSNAP02")
-    scope_id2 = f"{tank_id2}__len_men_chinh"
-    st2 = client.get(f"/api/brewing/qc-status?stage=len_men_chinh&scope_type=batch_tank&"
-                     f"scope_id={scope_id2}&product_id={product_id}", headers=admin_h).json()
-    assert _lsl_usl_for_code(st2["required"], code) == (1, 10)
-
-    # Sửa ngưỡng trong Danh mục SAU khi tank2 đã tạo.
     _reconfigure_item(client, admin_h, group_id, item_id, param_id, lsl_override=2, usl_override=8)
 
-    # Tank KHÔNG tồn tại (mirror "tạo trước khi có snapshot", snapshot=None/rỗng) -> required
-    # rỗng, KHÔNG tra Danh mục sống nữa (yêu cầu người dùng 2026-10-14: "lô cũ cũng không được
-    # tra sống... không có thì thôi" — phát hiện sau khi thấy 117 lô lọc cũ hiện Min/Max MỚI
-    # nhất dù lúc ghi nhận hoàn toàn chưa có ngưỡng nào).
-    no_snapshot_check = client.get(f"/api/brewing/qc-status?stage=len_men_chinh&scope_type=batch_tank&"
-                                   f"scope_id=KHONGTONTAI__len_men_chinh&product_id={product_id}",
-                                   headers=admin_h).json()
-    assert no_snapshot_check["required"] == []
-
-    # ...nhưng tank2 (đã tạo TRƯỚC khi sửa) vẫn phải giữ nguyên snapshot cũ (1/10).
-    st2_after = client.get(f"/api/brewing/qc-status?stage=len_men_chinh&scope_type=batch_tank&"
-                           f"scope_id={scope_id2}&product_id={product_id}", headers=admin_h).json()
-    assert _lsl_usl_for_code(st2_after["required"], code) == (1, 10)
-
-    # Tank MỚI tạo SAU khi sửa -> áp ngưỡng MỚI (2/8).
-    tank_id3, _ = _make_tank(client, admin_h, "LMCSNAP03")
-    scope_id3 = f"{tank_id3}__len_men_chinh"
-    st3 = client.get(f"/api/brewing/qc-status?stage=len_men_chinh&scope_type=batch_tank&"
-                     f"scope_id={scope_id3}&product_id={product_id}", headers=admin_h).json()
-    assert _lsl_usl_for_code(st3["required"], code) == (2, 8)
+    st2 = client.get(f"/api/brewing/qc-status?stage=len_men_chinh&scope_type=batch_tank&"
+                     f"scope_id={scope_id}&product_id={product_id}", headers=admin_h).json()
+    assert _lsl_usl_for_code(st2["required"], code) == (2, 8)   # đổi ngay, không còn giữ (1,10)
 
 
-def test_len_men_phu_uses_same_tank_snapshot_separate_stage_key(client, admin_h):
-    """BatchTank.qc_spec_snapshot là dict {"len_men_chinh": [...], "len_men_phu": [...]} — xác
-    nhận 2 stage trên CÙNG 1 tank không lẫn vào nhau."""
-    group_chinh_id, item_chinh_id, param_chinh_id, code_chinh = _make_group_with_param(
-        client, admin_h, "LMPSNAPCHINH01", lsl=1, usl=10)
-    group_phu_id, item_phu_id, param_phu_id, code_phu = _make_group_with_param(
-        client, admin_h, "LMPSNAPPHU01", lsl=3, usl=6)
-    tank_id, product_id = _make_tank(client, admin_h, "LMPSNAP01")
-    lc = client.post("/api/qc/stage-groups", headers=admin_h,
-                     json={"stage": "len_men_chinh", "group_id": group_chinh_id,
-                          "product_id": product_id, "mandatory": True})
-    assert lc.status_code == 201, lc.text
-    lp = client.post("/api/qc/stage-groups", headers=admin_h,
-                     json={"stage": "len_men_phu", "group_id": group_phu_id,
-                          "product_id": product_id, "mandatory": True})
-    assert lp.status_code == 201, lp.text
-
-    tank_id2, _ = _make_tank(client, admin_h, "LMPSNAP02")
-    chinh_scope = f"{tank_id2}__len_men_chinh"
-    phu_scope = f"{tank_id2}__len_men_phu"
-    st_chinh = client.get(f"/api/brewing/qc-status?stage=len_men_chinh&scope_type=batch_tank&"
-                          f"scope_id={chinh_scope}&product_id={product_id}", headers=admin_h).json()
-    st_phu = client.get(f"/api/brewing/qc-status?stage=len_men_phu&scope_type=batch_tank&"
-                        f"scope_id={phu_scope}&product_id={product_id}", headers=admin_h).json()
-    assert code_chinh in {p["code"] for p in st_chinh["required"]}
-    assert code_chinh not in {p["code"] for p in st_phu["required"]}
-    assert code_phu in {p["code"] for p in st_phu["required"]}
-    assert code_phu not in {p["code"] for p in st_chinh["required"]}
-
-
-def test_loc_snapshot_frozen_at_filter_lot_creation(client, admin_h):
-    group_id, item_id, param_id, code = _make_group_with_param(client, admin_h, "LOCSNAP01", lsl=4.4, usl=4.6)
-    tank_id, _product_id = _make_tank(client, admin_h, "LOCSNAP01")
+def test_recorded_result_keeps_original_bounds_after_catalog_change(client, admin_h):
+    """Giá trị ĐÃ GHI (lô lọc 1487/lô 1420 thực tế) phải giữ NGUYÊN lower_limit/upper_limit/status
+    đã đóng băng lúc ghi, dù Danh mục sửa ngưỡng sau đó — xem `recorded` (không phải `required`)
+    trong stage_qc_status. required_params_for_stage() không liên quan gì tới việc này (luôn tra
+    sống, xem 2 test trên) — lịch sử ĐÃ GHI chỉ đọc đúng cột lưu sẵn trên QualityResult."""
+    group_id, item_id, param_id, code = _make_group_with_param(client, admin_h, "FROZEN01", lsl=4.4, usl=4.6)
+    tank_id, _product_id = _make_tank(client, admin_h, "FROZEN01")
     link = client.post("/api/qc/stage-groups", headers=admin_h,
                        json={"stage": "loc", "group_id": group_id, "category": "Bia lon", "mandatory": True})
     assert link.status_code == 201, link.text
+    filter_lot_id = _make_filter_lot(client, admin_h, "FROZEN01", tank_id)
 
-    filter_lot_id = _make_filter_lot(client, admin_h, "LOCSNAP01", tank_id)
-    st = client.get(f"/api/brewing/qc-status?stage=loc&scope_type=batch_filter_lot&"
-                    f"scope_id={filter_lot_id}&category=Bia%20lon", headers=admin_h).json()
-    assert _lsl_usl_for_code(st["required"], code) == (4.4, 4.6)
-
-    _reconfigure_item(client, admin_h, group_id, item_id, param_id, lsl_override=5.0, usl_override=5.5)
-
-    # Lô lọc này ghi nhận ngay 4.75 — với ngưỡng CŨ đã chụp (4.4-4.6) thì FAIL (vượt max 4.6),
-    # đúng ca thực tế người dùng báo (lô 1420, Độ cồn 4.75 > 4.6 phải fail, không được "pass").
+    # Ghi nhận 4.75 với ngưỡng ĐANG áp dụng lúc đó (4.4-4.6) -> vượt max -> fail.
     rec = client.post("/api/brewing/qc-results", headers=admin_h,
                       json={"stage": "loc", "scope_type": "batch_filter_lot", "scope_id": filter_lot_id,
                             "parameter": code, "value": 4.75, "lower_limit": 4.4, "upper_limit": 4.6})
     assert rec.status_code == 201, rec.text
     assert rec.json()["status"] == "fail"
 
+    # Danh mục đổi ngưỡng SAU KHI đã ghi.
+    _reconfigure_item(client, admin_h, group_id, item_id, param_id, lsl_override=4.0, usl_override=5.0)
+
     st_after = client.get(f"/api/brewing/qc-status?stage=loc&scope_type=batch_filter_lot&"
                           f"scope_id={filter_lot_id}&category=Bia%20lon", headers=admin_h).json()
-    assert _lsl_usl_for_code(st_after["required"], code) == (4.4, 4.6)   # không bị đổi theo Danh mục mới
+    # `required` (chuẩn hiện tại, để biết còn thiếu gì) đổi theo Danh mục mới ngay.
+    assert _lsl_usl_for_code(st_after["required"], code) == (4.0, 5.0)
+    # Nhưng giá trị ĐÃ GHI vẫn hiện đúng ngưỡng lúc ghi + kết quả đã chốt — không bị tính lại.
+    recorded_row = next(r for r in st_after["recorded"] if r["parameter"] == code)
+    assert (recorded_row["lower_limit"], recorded_row["upper_limit"]) == (4.4, 4.6)
+    assert recorded_row["status"] == "fail"
     assert st_after["has_fail"] is True
 
-    tank_id2, _ = _make_tank(client, admin_h, "LOCSNAP02")
-    filter_lot_id2 = _make_filter_lot(client, admin_h, "LOCSNAP02", tank_id2)
-    st2 = client.get(f"/api/brewing/qc-status?stage=loc&scope_type=batch_filter_lot&"
-                     f"scope_id={filter_lot_id2}&category=Bia%20lon", headers=admin_h).json()
-    assert _lsl_usl_for_code(st2["required"], code) == (5.0, 5.5)   # lô MỚI áp ngưỡng mới
 
-
-def test_thanh_pham_snapshot_frozen_at_pack_lot_creation(client, admin_h):
-    group_id, item_id, param_id, code = _make_group_with_param(client, admin_h, "TPSNAP01", lsl=1, usl=10)
-    tank_id, _product_id = _make_tank(client, admin_h, "TPSNAP01")
-    link = client.post("/api/qc/stage-groups", headers=admin_h,
-                       json={"stage": "thanh_pham", "group_id": group_id,
-                            "category": "Bia lon", "mandatory": True})
-    assert link.status_code == 201, link.text
-
-    filter_lot_id = _make_filter_lot(client, admin_h, "TPSNAP01", tank_id)
-    _finish_only_source(client, admin_h, filter_lot_id)
-    pack_lot_id = _make_pack_lot(client, admin_h, filter_lot_id, "TPSNAP01")
-
-    st = client.get(f"/api/brewing/qc-status?stage=thanh_pham&scope_type=batch_pack_lot&"
-                    f"scope_id={pack_lot_id}&category=Bia%20lon", headers=admin_h).json()
-    assert _lsl_usl_for_code(st["required"], code) == (1, 10)
-
-    _reconfigure_item(client, admin_h, group_id, item_id, param_id, lsl_override=2, usl_override=9)
-
-    st_after = client.get(f"/api/brewing/qc-status?stage=thanh_pham&scope_type=batch_pack_lot&"
-                          f"scope_id={pack_lot_id}&category=Bia%20lon", headers=admin_h).json()
-    assert _lsl_usl_for_code(st_after["required"], code) == (1, 10)   # không bị đổi theo Danh mục mới
-
-    tank_id2, _ = _make_tank(client, admin_h, "TPSNAP02")
-    filter_lot_id2 = _make_filter_lot(client, admin_h, "TPSNAP02", tank_id2)
-    _finish_only_source(client, admin_h, filter_lot_id2)
-    pack_lot_id2 = _make_pack_lot(client, admin_h, filter_lot_id2, "TPSNAP02")
-    st2 = client.get(f"/api/brewing/qc-status?stage=thanh_pham&scope_type=batch_pack_lot&"
-                     f"scope_id={pack_lot_id2}&category=Bia%20lon", headers=admin_h).json()
-    assert _lsl_usl_for_code(st2["required"], code) == (2, 9)   # lô MỚI áp ngưỡng mới
-
-
-def test_nau_stage_not_affected_still_uses_live_catalog(client, admin_h):
-    """Yêu cầu người dùng 2026-10-13 CHỈ áp dụng lên men chính/phụ, lọc, chiết — mẻ nấu (stage
-    "nau", scope_type "batch") KHÔNG có snapshot, vẫn tra Danh mục SỐNG như trước (không đổi
-    hành vi)."""
-    group_id, item_id, param_id, code = _make_group_with_param(client, admin_h, "NAUNOSNAP01", lsl=1, usl=10)
+def test_nau_stage_live_catalog_unchanged_behavior(client, admin_h):
+    """Mẻ nấu (stage "nau", scope_type "batch") vẫn tra Danh mục sống như trước — hành vi này nay
+    áp dụng chung cho MỌI stage, không còn là ngoại lệ riêng của "nau" nữa."""
+    group_id, item_id, param_id, code = _make_group_with_param(client, admin_h, "NAULIVE01", lsl=1, usl=10)
     batch_id, product_id = _make_batch(client, admin_h)
     link = client.post("/api/qc/stage-groups", headers=admin_h,
                        json={"stage": "nau", "group_id": group_id,
@@ -296,4 +232,4 @@ def test_nau_stage_not_affected_still_uses_live_catalog(client, admin_h):
 
     st_after = client.get(f"/api/brewing/qc-status?stage=nau&scope_type=batch&"
                           f"scope_id={batch_id}&product_id={product_id}", headers=admin_h).json()
-    assert _lsl_usl_for_code(st_after["required"], code) == (2, 8)   # KHÔNG snapshot -> theo Danh mục mới ngay
+    assert _lsl_usl_for_code(st_after["required"], code) == (2, 8)

@@ -910,35 +910,6 @@ def sync_stage_quality_status(db: Session, stage: str, scope_type: str, scope_id
                           else QualityStatus.RELEASED.value)
 
 
-def _snapshot_required_params(db: Session, scope_type: str, scope_id: str, stage: str):
-    """Trả lại danh sách chỉ tiêu đã CHỤP SẴN (`qc_spec_snapshot`) lúc TẠO tank/lô lọc/lô thành
-    phẩm — LUÔN trả về 1 list cho đúng 3 scope_type có snapshot (rỗng nếu bản ghi tạo TRƯỚC khi
-    có cơ chế này/không tìm thấy, KHÔNG fallback tra Danh mục sống nữa — yêu cầu người dùng
-    2026-10-14: "lô cũ cũng không được tra sống... không có thì thôi", sau khi phát hiện 117 lô
-    lọc cũ hiện Min/Max MỚI nhất của Danh mục dù lúc ghi nhận hoàn toàn chưa có ngưỡng nào, gây
-    hiểu lầm y hệt lỗi snapshot vốn định chặn). Chỉ tiêu đã ghi nhận trước đó cho các lô này vẫn
-    hiện đủ qua cơ chế "orphaned" sẵn có (frontend::qcRowsWithOrphans — hiện lại theo đúng
-    lower_limit/upper_limit đã lưu TRÊN CHÍNH kết quả đó, không lấy từ đâu khác), nên không mất
-    dữ liệu, chỉ không còn hiện Min/Max giả từ Danh mục hiện tại nữa.
-
-    Trả về None CHỈ khi scope_type không thuộc 3 loại có snapshot (VD "batch" — mẻ nấu, không
-    nằm trong yêu cầu người dùng 2026-10-13: chỉ áp dụng lên men chính/phụ, lọc, chiết) — caller
-    (stage_qc_status) hiểu None là "tra Danh mục sống như trước giờ", giữ nguyên hành vi cũ cho
-    mẻ nấu."""
-    if scope_type == "batch_tank":
-        tank_id = scope_id.rsplit("__", 1)[0]
-        tank = db.get(BatchTank, tank_id)
-        snapshot = tank.qc_spec_snapshot if tank else None
-        return (snapshot or {}).get(stage) or []
-    if scope_type == "batch_filter_lot":
-        fl = db.get(BatchFilterLot, scope_id)
-        return (fl.qc_spec_snapshot if fl else None) or []
-    if scope_type == "batch_pack_lot":
-        p = db.get(BatchPackLot, scope_id)
-        return (p.qc_spec_snapshot if p else None) or []
-    return None
-
-
 def stage_qc_status(db: Session, stage: str, scope_type: str, scope_id: str, product_id: str = None,
                     finished_product_id: str = None, beer_type_id: str = None, category: str = None,
                     cache: dict = None) -> dict:
@@ -959,14 +930,18 @@ def stage_qc_status(db: Session, stage: str, scope_type: str, scope_id: str, pro
     cùng lúc (VD list_pending_stage_declarations); mặc định None, không ảnh hưởng mọi nơi gọi
     đơn lẻ khác.
 
-    `required`, với scope_type thuộc lên men/lọc/chiết, LUÔN lấy từ `qc_spec_snapshot` đã chụp
-    sẵn lúc TẠO tank/lô lọc/lô thành phẩm (xem _snapshot_required_params) — KHÔNG fallback tra
-    Danh mục sống nữa, kể cả bản ghi tạo TRƯỚC khi có cơ chế này (snapshot rỗng → required rỗng,
-    yêu cầu người dùng 2026-10-14: "lô cũ cũng không được tra sống... không có thì thôi"). Chỉ
-    scope_type "batch" (mẻ nấu, không thuộc phạm vi snapshot) mới còn tra Danh mục sống như cũ."""
+    `required` LUÔN tra Danh mục SỐNG qua required_params_for_stage (mọi scope_type, không riêng
+    "batch") — bug thực tế 2026-10-15: bản sửa 2026-10-14 (dùng `qc_spec_snapshot` chụp 1 LẦN DUY
+    NHẤT lúc tạo tank/lô để quyết định "có bắt buộc khai báo hay không") làm 1 tank ĐANG lên men
+    (chưa khóa, chưa xong) hiện "Đạt đủ chỉ tiêu bắt buộc" dù 0 mẫu được nhập, chỉ vì nhóm chỉ
+    tiêu lên men phụ được gán VÀO Danh mục SAU lúc tank được tạo nên snapshot chụp lúc đó rỗng.
+    Việc 1 công đoạn CHƯA XẢY RA có bắt buộc khai hay không phải luôn phản ánh đúng cấu hình HIỆN
+    TẠI (không phải lịch sử cần giữ nguyên) — khác với Min/Max HIỂN THỊ kèm 1 giá trị ĐÃ GHI (xem
+    `recorded` bên dưới, lấy đúng lower_limit/upper_limit đã đóng băng trên chính kết quả đó, và
+    frontend::qcRowsWithOrphans/cách each view ghép theo `result.parameter` — không lấy từ
+    `required`), nên không còn bị tra sống kiểu gây hiểu lầm như lô lọc 1487 nữa."""
     from . import quality
-    snapshot = _snapshot_required_params(db, scope_type, scope_id, stage)
-    required = snapshot if snapshot is not None else required_params_for_stage(
+    required = required_params_for_stage(
         db, stage, product_id=product_id, finished_product_id=finished_product_id, mandatory_only=False,
         beer_type_id=beer_type_id, category=category, cache=cache)
     latest_by_param = quality.latest_results_by_param(db, scope_type, scope_id)

@@ -1627,7 +1627,7 @@ async function openWaterQcViewModal(woId, woCode) {
       <thead><tr><th>Chỉ tiêu</th><th>Min</th><th>Max</th><th>Giá trị đã khai báo</th><th>Kết quả</th><th>Người/Thời gian điền</th></tr></thead>
       <tbody>${qcRowsWithOrphans(st).map(p => { const r = recordedByParam[p.code]; return `<tr>
         <td>${qcParamNameCell(p)}</td>
-        <td>${p.value_type !== "numeric" ? "—" : (p.lsl ?? "—")}</td><td>${p.value_type !== "numeric" ? "—" : (p.usl ?? "—")}</td>
+        ${qcMinMaxCellsHtml(p, r)}
         <td>${r ? qcValueLabel(p, r.value, r.value_text) : "—"}</td>
         <td>${r ? badge(r.status) + r.status : '<span class="muted">chưa khai báo</span>'}</td>
         <td>${qcRecordedMetaHtml(r)}</td>
@@ -2537,7 +2537,7 @@ async function showBatch(id) {
       <table><thead><tr><th>Chỉ tiêu</th><th>Min</th><th>Max</th><th>Giá trị đã khai báo</th><th>Kết quả</th><th>Người/Thời gian điền</th></tr></thead>
         <tbody>${qcRowsWithOrphans(waterQc).map(p => { const r = (waterQc.recorded || []).find(x => x.parameter === p.code); return `<tr>
           <td>${qcParamNameCell(p)}</td>
-          <td>${p.value_type !== "numeric" ? "—" : (p.lsl ?? "—")}</td><td>${p.value_type !== "numeric" ? "—" : (p.usl ?? "—")}</td>
+          ${qcMinMaxCellsHtml(p, r)}
           <td>${r ? qcValueLabel(p, r.value, r.value_text) : "—"}</td>
           <td>${r ? badge(r.status) + r.status : '<span class="muted">chưa khai báo</span>'}</td>
           <td>${qcRecordedMetaHtml(r)}</td></tr>`; }).join("")}</tbody></table>`
@@ -3929,7 +3929,7 @@ async function showBatchFilterLot(filterLotId) {
         const r = (qc.recorded || []).find(x => x.parameter === p.code);
         return `<tr>
         <td>${qcParamNameCell(p)}</td>
-        <td>${p.value_type !== "numeric" ? "—" : (p.lsl ?? "—")}</td><td>${p.value_type !== "numeric" ? "—" : (p.usl ?? "—")}</td>
+        ${qcMinMaxCellsHtml(p, r)}
         <td>${r ? qcValueLabel(p, r.value, r.value_text) : "—"}</td>
         <td>${r ? badge(r.status) + r.status : '<span class="muted">chưa khai báo</span>'}</td>
         <td>${qcRecordedMetaHtml(r)}</td>
@@ -4515,7 +4515,7 @@ async function showBatchPackLot(packLotId) {
         const r = (pkQc.recorded || []).find(x => x.parameter === pm.code);
         return `<tr>
         <td>${qcParamNameCell(pm)}</td>
-        <td>${pm.value_type !== "numeric" ? "—" : (pm.lsl ?? "—")}</td><td>${pm.value_type !== "numeric" ? "—" : (pm.usl ?? "—")}</td>
+        ${qcMinMaxCellsHtml(pm, r)}
         <td>${r ? qcValueLabel(pm, r.value, r.value_text) : "—"}</td>
         <td>${r ? badge(r.status) + r.status : '<span class="muted">chưa khai báo</span>'}</td>
         <td>${qcRecordedMetaHtml(r)}</td>
@@ -9253,6 +9253,19 @@ function qcRowsWithOrphans(status) {
   }));
   return [...required, ...orphaned];
 }
+// Min/Max hiển thị kèm 1 dòng chỉ tiêu: nếu dòng này ĐÃ có giá trị ghi (`r`) thì lấy ĐÚNG
+// lower_limit/upper_limit đã đóng băng trên CHÍNH kết quả đó lúc ghi — không đổi theo Danh mục
+// sửa sau này (bug thực tế 2026-10-15, lô lọc 1487: hiện Min/Max SỐNG cạnh 1 giá trị đã chốt kết
+// quả pass/fail từ trước, gây nghịch lý "giá trị vượt ngưỡng hiện nhưng vẫn pass" — vì `required`
+// nay luôn tra Danh mục sống, xem qc_catalog.py::stage_qc_status). Chưa ghi gì (`r` rỗng) thì vẫn
+// hiện Min/Max đang cấu hình SỐNG (`p.lsl`/`p.usl`) — đúng vì chưa có lịch sử gì để giữ nguyên,
+// cần biết chuẩn HIỆN TẠI để nhập đúng.
+function qcMinMaxCellsHtml(p, r) {
+  if (p.value_type !== "numeric") return `<td>—</td><td>—</td>`;
+  const lsl = r ? (r.lower_limit ?? "—") : (p.lsl ?? "—");
+  const usl = r ? (r.upper_limit ?? "—") : (p.usl ?? "—");
+  return `<td>${lsl}</td><td>${usl}</td>`;
+}
 // Nhãn tên chỉ tiêu cho 1 dòng trong bảng xem lại — chỉ tiêu đã bị xóa khỏi Danh mục (xem
 // qcRowsWithOrphans) vẫn hiện bình thường, không đánh dấu gì khác biệt (yêu cầu người dùng
 // 2026-09-11: xóa khỏi Danh mục chỉ ảnh hưởng các lô/mẻ SAU, không cần ghi chú gì ở đây).
@@ -9421,7 +9434,7 @@ async function openStageQcModal(stage, scopeType, scopeId, opts, onBack) {
       <thead><tr><th>Chỉ tiêu</th><th>Min</th><th>Max</th><th>Giá trị đã khai báo</th><th>Kết quả</th><th>Ngày giờ nhập</th>${anyRecorded ? "<th>Ngày giờ lấy mẫu</th>" : ""}<th>Nhập giá trị mới</th>${anyRecorded ? "<th></th>" : ""}</tr></thead>
       <tbody>${st.required.map((p, i) => { const r = recordedByParam[p.code]; const idp = `sqc_sampled_${i}`; return `<tr>
         <td>${esc(p.name)}${p.mandatory ? "" : ' <span class="muted" style="font-size:11px">(không bắt buộc)</span>'}<div class="muted">${esc(p.code)}${p.unit ? " (" + esc(p.unit) + ")" : ""}</div></td>
-        <td>${p.value_type !== "numeric" ? "—" : (p.lsl ?? "—")}</td><td>${p.value_type !== "numeric" ? "—" : (p.usl ?? "—")}</td>
+        ${qcMinMaxCellsHtml(p, r)}
         <td>${r ? qcValueLabel(p, r.value, r.value_text) : "—"}</td>
         <td>${r ? badge(r.status) + r.status : '<span class="muted">chưa khai báo</span>'}</td>
         <td>${qcRecordedMetaHtml(r)}</td>
@@ -11361,8 +11374,7 @@ async function openFilterReportBbtQc(filterLotId, toBbt) {
   // qua lô lọc 1379 — 2026-10-03).
   const rows = (st ? qcRowsWithOrphans(st) : []).map(p => {
     const r = (st.recorded || []).find(x => x.parameter === p.code);
-    return `<tr><td>${qcParamNameCell(p)}</td><td>${p.value_type !== "numeric" ? "—" : (p.lsl ?? "—")}</td>
-      <td>${p.value_type !== "numeric" ? "—" : (p.usl ?? "—")}</td>
+    return `<tr><td>${qcParamNameCell(p)}</td>${qcMinMaxCellsHtml(p, r)}
       <td>${r ? qcValueLabel(p, r.value, r.value_text) : "—"}</td>
       <td>${r ? badge(r.status) + r.status : '<span class="muted">chưa khai báo</span>'}</td>
       <td>${qcRecordedMetaHtml(r)}</td></tr>`;
