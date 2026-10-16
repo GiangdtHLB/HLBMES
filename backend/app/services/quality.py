@@ -300,16 +300,31 @@ def _assert_releasable(db: Session, scope_type: str, scope_id: str) -> None:
     latest_by_param = latest_results_by_param(db, scope_type, scope_id)
     fails = [r for r in latest_by_param.values() if r.status == ResultStatus.FAIL.value]
     if fails:
-        # Còn FAIL: chỉ release được khi mọi deviation liên quan đã CLOSED.
+        # Còn FAIL: chỉ release được khi MỖI mã chỉ tiêu đang FAIL đều được ít nhất 1 deviation
+        # ĐÃ ĐÓNG liệt kê tới (Deviation.parameter, nối bằng dấu phẩy — xem open_deviation) —
+        # trước đây chỉ cần CÓ 1 deviation bất kỳ đã đóng cho cả phạm vi là đủ để release, dù
+        # deviation đó chỉ nhắc tới 1 trong nhiều mã đang fail; các mã FAIL còn lại chưa ai mở
+        # deviation xử lý vẫn release được theo lỗ hổng cũ (bug thực tế 2026-10-15, phát hiện qua
+        # lô lọc 1495 — 4 chỉ tiêu FAIL ADF/RDF/Ea/Độ cồn nhưng chỉ cần đóng 1 deviation ghi đúng
+        # 1 mã là release được cả lô, 3 mã còn lại chưa từng được xem xét).
         devs = db.execute(
             select(Deviation).where(
                 Deviation.scope_type == scope_type, Deviation.scope_id == scope_id
             )
         ).scalars().all()
         open_devs = [d for d in devs if d.state != DeviationState.CLOSED.value]
-        if open_devs or not devs:
+        if open_devs:
             raise DomainError(
-                "Không thể release: còn kết quả FAIL chưa được deviation đóng (disposition/approval)."
+                "Không thể release: còn deviation đang xử lý dở (chưa đóng) — đóng xong trước."
+            )
+        covered_params = set()
+        for d in devs:
+            if d.state == DeviationState.CLOSED.value and d.parameter:
+                covered_params.update(code.strip() for code in d.parameter.split(",") if code.strip())
+        uncovered = sorted({r.parameter for r in fails} - covered_params)
+        if uncovered:
+            raise DomainError(
+                f"Không thể release: còn chỉ tiêu FAIL chưa được deviation đóng xử lý: {', '.join(uncovered)}."
             )
 
 

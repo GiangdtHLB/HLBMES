@@ -780,6 +780,8 @@ def delete_qc_result(db: Session, result_id: str, user: User) -> None:
     _STAGE_BY_SCOPE = {"batch_filter_lot": "loc", "batch_pack_lot": "thanh_pham"}
     if scope_type in _STAGE_BY_SCOPE:
         sync_stage_quality_status(db, _STAGE_BY_SCOPE[scope_type], scope_type, scope_id)
+    elif scope_type == "batch_tank":
+        sync_tank_quality_status(db, scope_id.rsplit("__", 1)[0])
     db.commit()
 
 
@@ -850,6 +852,8 @@ def record_stage_result(db: Session, stage: str, scope_type: str, scope_id: str,
         quality.attempt_auto_release(db, scope_type, scope_id, user)
     elif scope_type in ("batch_filter_lot", "batch_pack_lot"):
         sync_stage_quality_status(db, stage, scope_type, scope_id)
+    elif scope_type == "batch_tank":
+        sync_tank_quality_status(db, scope_id.rsplit("__", 1)[0])
     db.commit()
     db.refresh(result)
     return {"result_id": result.result_id, "parameter": result.parameter, "value": result.value,
@@ -908,6 +912,35 @@ def sync_stage_quality_status(db: Session, stage: str, scope_type: str, scope_id
     obj = db.get(_STAGE_LOT_MODELS[scope_type][1], scope_id)
     obj.quality_status = (QualityStatus.ON_HOLD.value if (status["pending"] or status["has_fail"])
                           else QualityStatus.RELEASED.value)
+
+
+def sync_tank_quality_status(db: Session, tank_id: str) -> None:
+    """Đồng bộ BatchTank.quality_status theo tiến độ khai CT Chính/CT Phụ THẬT — mirror
+    sync_stage_quality_status nhưng gộp 2 công đoạn (len_men_chinh/len_men_phu) trên CÙNG 1 tank
+    thay vì 1-1 như Lọc/Thành phẩm, vì tank chỉ có 1 cột quality_status chung cho cả 2 công đoạn.
+    ON_HOLD nếu MỘT TRONG HAI công đoạn còn thiếu chỉ tiêu bắt buộc HOẶC còn FAIL — logic OR, chỉ
+    cần 1 bên có vấn đề là đủ để tank chuyển on_hold; RELEASED chỉ khi CẢ HAI đều đủ và không fail
+    (yêu cầu người dùng 2026-10-16: tank trước giờ KHÔNG có cơ chế đồng bộ nào — mặc định
+    RELEASED ngay lúc tạo và không bao giờ cập nhật lại, y hệt bug 2026-09-23 từng gặp ở Lọc/
+    Thành phẩm trước khi có sync_stage_quality_status).
+
+    CỐ Ý KHÔNG chặn thao tác nào khi tank on_hold (yêu cầu người dùng: "onhold thì vẫn cho đi
+    lọc") — khác hẳn ý nghĩa "giữ lô" ở Lọc/Thành phẩm, ở đây chỉ để HIỂN THỊ đúng trạng thái,
+    không có _assert_unlocked/_assert_not_on_hold nào tham chiếu tới quality_status của tank.
+
+    Gọi từ record_stage_result()/delete_qc_result() mỗi khi ghi/xóa 1 chỉ tiêu scope_type=
+    "batch_tank" (scope_id dạng "{tank_id}__len_men_chinh"/"__len_men_phu" — tách lấy tank_id)."""
+    tank = db.get(BatchTank, tank_id)
+    if not tank:
+        return
+    on_hold = False
+    for stage in ("len_men_chinh", "len_men_phu"):
+        status = stage_qc_status(db, stage, "batch_tank", batch_tank_scope_id(tank_id, stage),
+                                 product_id=tank.product_id)
+        if status["pending"] or status["has_fail"]:
+            on_hold = True
+            break
+    tank.quality_status = QualityStatus.ON_HOLD.value if on_hold else QualityStatus.RELEASED.value
 
 
 def stage_qc_status(db: Session, stage: str, scope_type: str, scope_id: str, product_id: str = None,
@@ -1029,6 +1062,8 @@ def record_qc_sample(db: Session, stage: str, scope_type: str, scope_id: str,
                                    "sampled_at": when.isoformat(),
                                    "results": [{"parameter": r["parameter"], "value": r.get("value")}
                                               for r in results]})
+    if scope_type == "batch_tank":
+        sync_tank_quality_status(db, scope_id.rsplit("__", 1)[0])
     db.commit()
     for row in rows:
         db.refresh(row)
@@ -1093,6 +1128,8 @@ def update_qc_sample(db: Session, sample_id: str, payload: dict, user: User) -> 
     record_audit(db, entity_type="quality_result", entity_id=sample_id, action="update_sample",
                 actor=user, after={"sampled_at": sampled_at.isoformat() if sampled_at else None,
                                    "results": payload.get("results") or []})
+    if rows and rows[0].scope_type == "batch_tank":
+        sync_tank_quality_status(db, rows[0].scope_id.rsplit("__", 1)[0])
     db.commit()
     for r in rows:
         db.refresh(r)
