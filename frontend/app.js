@@ -3874,7 +3874,7 @@ VIEWS.batchfilterlots = async function () {
       <div class="panel"><h2>Danh sách lô lọc</h2>
         ${yearFilterControl("batchfilterlots", YEARS.batchfilterlots)}
         <input class="searchbox" data-tbl="t_batfilterlot" placeholder="Tìm theo mã lô, sản phẩm, trạng thái..."/>
-        <div class="tablewrap"><table id="t_batfilterlot"><thead><tr><th>Mã lô lọc</th><th>Ngày lọc</th><th>Lệnh lọc</th><th>Trạng thái</th><th>Sản phẩm bia</th><th>Tank lên men/Tank TP</th><th>Kế hoạch (hl)</th><th>Chất lượng</th><th>Tank BBT</th><th>Trạng thái chiết</th><th>Tồn/Tổng (hl)</th></tr></thead>
+        <div class="tablewrap"><table id="t_batfilterlot"><thead><tr><th>Mã lô lọc</th><th>Ngày lọc</th><th>Lệnh lọc</th><th>Trạng thái</th><th>Sản phẩm bia</th><th>Tank lên men/Tank TP</th><th>Kế hoạch (hl)</th><th>Chất lượng</th><th>Duyệt KCS</th><th>Tank BBT</th><th>Trạng thái chiết</th><th>Tồn/Tổng (hl)</th></tr></thead>
           <tbody>${lotsInYear.map(f => `<tr data-flot="${f.filter_lot_id}" style="cursor:pointer">
             <td><code class="k">${esc(f.filter_lot_code)}</code></td>
             <td class="muted">${fmt(f.ended_at)}</td>
@@ -3884,11 +3884,12 @@ VIEWS.batchfilterlots = async function () {
             <td class="muted">${esc(tankLmNames(f))}</td>
             <td class="muted">${plannedVol(f) ?? "—"}</td>
             <td>${badge(f.quality_status)}</td>
+            <td>${f.qc_approved ? badge("released") + " đã duyệt" : badge("pending") + " chưa duyệt"}</td>
             <td>${esc(f.to_bbt || "—")}</td>
             <td>${[f.used_for_refilter ? `<span class="badge review" title="Đã lọc lại thành ${esc(f.refilter_target_filter_lot_code || "—")}${f.refilter_target_bbt ? " — vào tank " + esc(f.refilter_target_bbt) : ""}">Lọc lại</span>` : "",
                    f.chiet_status ? statusBadge(PACK_LOT_BADGE_CLASS[f.chiet_status], f.chiet_status_label) : ""]
                    .filter(Boolean).join(" ") || '<span class="muted">—</span>'}</td>
-            <td>${f.on_hand} / ${f.volume_hl}</td></tr>`).join("") || '<tr><td colspan=11 class="muted">Chưa có lô lọc nào.</td></tr>'}</tbody></table></div>
+            <td>${f.on_hand} / ${f.volume_hl}</td></tr>`).join("") || '<tr><td colspan=12 class="muted">Chưa có lô lọc nào.</td></tr>'}</tbody></table></div>
       </div>
       <div class="panel" id="fl_detail"><h2>Chi tiết lô lọc</h2><div class="muted">Chọn một lô lọc để xem.</div></div>
     </div>`;
@@ -4198,7 +4199,7 @@ VIEWS.batchpacklots = async function () {
       <div class="panel"><h2>Danh sách lô thành phẩm</h2>
         ${yearFilterControl("batchpacklots", YEARS.batchpacklots)}
         <input class="searchbox" data-tbl="t_packlot" placeholder="Tìm theo mã lô, số lô bia, trạng thái..."/>
-        <div class="tablewrap"><table id="t_packlot"><thead><tr><th>Mã lô TP</th><th>Ngày chiết</th><th>Lô lọc nguồn</th><th>Tank BBT</th><th>SL cấp chiết (hl)</th><th>Số lô bia</th><th>Trạng thái</th><th>Duyệt</th></tr></thead>
+        <div class="tablewrap"><table id="t_packlot"><thead><tr><th>Mã lô TP</th><th>Ngày chiết</th><th>Lô lọc nguồn</th><th>Tank BBT</th><th>SL cấp chiết (hl)</th><th>Số lô bia</th><th>Trạng thái</th><th>Chất lượng</th><th>Duyệt KCS</th></tr></thead>
           <tbody>${packLotsInYear.map(p => `<tr data-pklot2="${p.pack_lot_id}" style="cursor:pointer">
             <td><code class="k">${esc(p.pack_lot_code)}</code></td>
             <td class="muted">${fmt(p.pack_date)}</td>
@@ -4206,8 +4207,9 @@ VIEWS.batchpacklots = async function () {
             <td>${esc(p.from_bbt || "—")}</td>
             <td>${(p.qty / 100).toLocaleString("vi-VN", {maximumFractionDigits: 3})}</td><td>${esc(p.lot_no || "—")}</td>
             <td>${statusBadge(PACK_LOT_BADGE_CLASS[p.status], p.status_label)}</td>
+            <td>${badge(p.quality_status)}</td>
             <td>${pkDuyetCellHtml(p)}</td></tr>`).join("")
-            || '<tr><td colspan=8 class="muted">Chưa có lô thành phẩm nào.</td></tr>'}</tbody></table></div>
+            || '<tr><td colspan=9 class="muted">Chưa có lô thành phẩm nào.</td></tr>'}</tbody></table></div>
       </div>
       <div class="panel" id="pk_detail"><h2>Chi tiết lô thành phẩm</h2><div class="muted">Chọn một lô để xem.</div></div>
     </div>`;
@@ -4531,13 +4533,15 @@ async function showBatchPackLot(packLotId) {
   if (listRow) {
     const cells = listRow.querySelectorAll("td");
     // Chỉ số cột ĐÚNG theo bảng hiện tại: [0]Mã lô TP [1]Ngày chiết [2]Lô lọc nguồn [3]Tank BBT
-    // [4]SL cấp chiết [5]Số lô bia [6]Trạng thái [7]Duyệt — trước đây lệch 1 cột (chèn thêm cột
-    // "Lô lọc nguồn" sau này nhưng quên dời lại các chỉ số vá tay ở đây), khiến bấm vào 1 lô làm
-    // "Số lô bia" bị ghi đè thành chữ trạng thái ("Hoàn thành"...) và "Tank BBT" bị ghi đè thành
-    // số lít — phát hiện 2026-10-11.
-    cells[4].textContent = p.qty;
+    // [4]SL cấp chiết [5]Số lô bia [6]Trạng thái [7]Chất lượng [8]Duyệt — trước đây lệch 1 cột
+    // (chèn thêm cột "Lô lọc nguồn" sau này nhưng quên dời lại các chỉ số vá tay ở đây), khiến
+    // bấm vào 1 lô làm "Số lô bia" bị ghi đè thành chữ trạng thái ("Hoàn thành"...) và "Tank BBT"
+    // bị ghi đè thành số lít — phát hiện 2026-10-11; rồi lại lệch tiếp khi thêm cột "Chất lượng"
+    // 2026-10-16 (xem pkDuyetCellHtml) — luôn đếm lại chỉ số cột mỗi khi đổi cấu trúc bảng.
+    cells[4].textContent = (p.qty / 100).toLocaleString("vi-VN", {maximumFractionDigits: 3});
     cells[6].innerHTML = statusBadge(PACK_LOT_BADGE_CLASS[p.status], p.status_label);
-    cells[7].innerHTML = pkDuyetCellHtml(p);
+    cells[7].innerHTML = badge(p.quality_status);
+    cells[8].innerHTML = pkDuyetCellHtml(p);
   }
   const f = await GET(`/batch-filter-lots/${p.filter_lot_id}`);
   const fp = finishedProducts.find(x => x.finished_product_id === p.finished_product_id);
