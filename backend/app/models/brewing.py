@@ -170,5 +170,11 @@ class OpsSetting(Base):
     # định từ config.SESSION_HOURS (chính là MES_SESSION_HOURS nếu có khai, xem
     # services/ops_setting.py::get_settings) — sau đó admin tự chỉnh qua UI, lưu ở đây.
     session_hours: Mapped[int] = mapped_column(Integer, default=8760)
+    # Số PHÚT nấu chuẩn tối đa (từ "Bắt đầu" tới "Kết thúc" mẻ nấu, BatchExecution.start_at/
+    # end_at) — vượt ngưỡng này KHÔNG chặn ghi (vận hành vẫn lưu được bình thường), chỉ hiện
+    # thêm 1 ghi chú cảnh báo "quá X giờ Y phút" ngay dưới giờ kết thúc (yêu cầu người dùng
+    # 2026-10-16: "vẫn cho người vận hành ghi và hiển thị một ghi chú"). Mặc định 480 phút
+    # (8 giờ 00) — nhập ở Cài đặt vận hành dạng giờ+phút riêng, cộng lại thành phút khi lưu.
+    max_brewing_minutes: Mapped[int] = mapped_column(Integer, default=480)
     updated_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)

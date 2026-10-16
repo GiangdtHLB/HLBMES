@@ -173,17 +173,20 @@ function dateInputToIsoEndOfDay(dateStr) {
 // dd/mm/yyyy hh:mm, trong đó gợi ý tháng năm là tháng năm hiện tại, ngày là ngày hiện tại, giờ
 // phút giây là giờ phút giây hiện tại, người vận hành sẽ tự sửa lại" (gõ đè/sửa nhanh hơn gõ từ
 // đầu — vận hành chỉ cần sửa đúng phần khác với hiện tại, VD đổi ngày nếu lấy mẫu hôm qua).
-function dtPickerHtml(idPrefix, d, disabledAttr) {
+// Định dạng 1 Date thành chuỗi "dd/mm/yyyy HH:MM:SS" (null/undefined -> giờ hiện tại) — phần lõi
+// dùng chung bởi dtPickerHtml VÀ bất kỳ input kiểu "datetime" nào khác cần cùng định dạng (VD
+// _flDayInput — "Bảng theo dõi lên men theo ngày").
+function formatDtText(d) {
   const dd = d || new Date();
   const p2 = (n) => String(n).padStart(2, "0");
-  const val = `${p2(dd.getDate())}/${p2(dd.getMonth() + 1)}/${dd.getFullYear()} ${p2(dd.getHours())}:${p2(dd.getMinutes())}:${p2(dd.getSeconds())}`;
-  return `<input type="text" id="${idPrefix}" value="${esc(val)}" placeholder="dd/mm/yyyy HH:MM:SS" style="width:172px" ${disabledAttr}/>`;
+  return `${p2(dd.getDate())}/${p2(dd.getMonth() + 1)}/${dd.getFullYear()} ${p2(dd.getHours())}:${p2(dd.getMinutes())}:${p2(dd.getSeconds())}`;
 }
-// Đọc lại input của dtPickerHtml -> Date, hoặc null nếu chưa nhập gì cả (bị xóa trắng tay — mặc
-// định luôn có sẵn giá trị nên đây là chủ ý bỏ trống, không phải quên điền). Giây tùy chọn (bỏ
-// giây vẫn đọc được, mặc định :00) — ném lỗi rõ ràng nếu sai định dạng/ngày không hợp lệ.
-function readDtPicker(idPrefix) {
-  const raw = $(idPrefix).value.trim();
+// Đọc chuỗi "dd/mm/yyyy HH:MM(:SS)" -> Date, hoặc null nếu rỗng — phần lõi dùng chung bởi
+// readDtPicker (đọc theo id) VÀ chỗ nào cần đọc thẳng 1 chuỗi (VD oninput handler của
+// _flDayInput, không gắn id riêng từng dòng). Giây tùy chọn (bỏ giây vẫn đọc được, mặc định
+// :00) — ném lỗi rõ ràng nếu sai định dạng/ngày không hợp lệ.
+function parseDtText(raw) {
+  raw = (raw || "").trim();
   if (!raw) return null;
   const m = raw.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})\s+(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
   if (!m) throw new Error(`"${raw}" không đúng định dạng ngày giờ (VD 21/09/2026 14:30:00).`);
@@ -192,6 +195,26 @@ function readDtPicker(idPrefix) {
   const dt = new Date(year, month - 1, day, hour, minute, second, 0);
   if (dt.getDate() !== day || dt.getMonth() !== month - 1) throw new Error(`Ngày "${raw}" không hợp lệ.`);
   return dt;
+}
+// input type="datetime-local" hiện AM/PM hay 24h là do TRÌNH DUYỆT/HĐH người dùng tự quyết định
+// (locale máy) — gắn lang="vi-VN" lên cả input LẪN <html> đều KHÔNG ăn với Chrome/Windows của
+// vận hành (báo lại 2026-09-21 vẫn thấy AM/PM). Thử tách thành 2 input rời (ngày + giờ) cũng bị
+// từ chối ngay sau đó ("không chọn 1 lần cả ngày và giờ, vẫn tách làm 2") — vận hành muốn ĐÚNG
+// 1 ô, 1 lần bấm/gõ. Giải pháp chắc chắn nhất không lệ thuộc trình duyệt/HĐH: 1 ô TEXT DUY NHẤT
+// gõ tay "dd/mm/yyyy HH:MM" — không qua bất kỳ control ngày/giờ gốc nào nữa nên không thể tự ý
+// đổi 12h/24h. Dùng cho "Bắt đầu"/"Kết thúc" mẻ (renderBdStart/renderBdEnd) và "Ngày giờ lấy
+// mẫu" (openStageQcModal/openFermentQcSampleModal). LUÔN điền sẵn giá trị (mặc định NGAY LÚC
+// MỞ nếu chưa có gì) thay vì để trống chỉ hiện placeholder — yêu cầu người dùng: "hiện rõ chữ
+// dd/mm/yyyy hh:mm, trong đó gợi ý tháng năm là tháng năm hiện tại, ngày là ngày hiện tại, giờ
+// phút giây là giờ phút giây hiện tại, người vận hành sẽ tự sửa lại" (gõ đè/sửa nhanh hơn gõ từ
+// đầu — vận hành chỉ cần sửa đúng phần khác với hiện tại, VD đổi ngày nếu lấy mẫu hôm qua).
+function dtPickerHtml(idPrefix, d, disabledAttr) {
+  return `<input type="text" id="${idPrefix}" value="${esc(formatDtText(d))}" placeholder="dd/mm/yyyy HH:MM:SS" style="width:172px" ${disabledAttr}/>`;
+}
+// Đọc lại input của dtPickerHtml -> Date, hoặc null nếu chưa nhập gì cả (bị xóa trắng tay — mặc
+// định luôn có sẵn giá trị nên đây là chủ ý bỏ trống, không phải quên điền).
+function readDtPicker(idPrefix) {
+  return parseDtText($(idPrefix).value);
 }
 // readDtPicker + chặn NGAY trên trình duyệt nếu chọn giờ ở tương lai (server cũng chặn — xem
 // services/warehouse.py::receive/issue — nhưng báo lỗi sớm ở đây rõ ràng hơn) và tùy chọn chặn
@@ -2424,6 +2447,9 @@ function tableBatches(batches, clickable, woById, tableId, tankByBatchId) {
 async function showBatch(id) {
   SELECTED_BATCH = id;
   const b = await GET("/batches/" + id);
+  // Ngưỡng cảnh báo (KHÔNG chặn) số giờ nấu chuẩn tối đa — cấu hình ở Danh mục › Cài đặt
+  // (yêu cầu người dùng 2026-10-16). Lỗi tải thì coi như 480 phút (8h00), không chặn hiển thị.
+  const opsSettingsForDuration = await GET("/ops-settings").catch(() => ({ max_brewing_minutes: 480 }));
   const lots = await GET("/lots");
   const results = await GET("/quality/results?scope_id=" + id);
   const readings = await GET("/batches/" + id + "/readings");
@@ -2627,12 +2653,25 @@ async function showBatch(id) {
       toast("Đã lưu giờ bắt đầu"); showBatch(id);
     });
   }
+  // Cảnh báo (KHÔNG chặn lưu) khi "Kết thúc" - "Bắt đầu" vượt ngưỡng chuẩn cấu hình ở Cài đặt
+  // vận hành — vẫn cho vận hành ghi bình thường, chỉ thêm 1 ghi chú ngay dưới giờ kết thúc
+  // (yêu cầu người dùng 2026-10-16: "nếu quá thì sẽ cảnh báo... nhưng vẫn cho người vận hành
+  // ghi và hiển thị một ghi chú số giờ quá").
+  const brewDurationNoteHtml = () => {
+    if (!b.start_at || !b.end_at) return "";
+    const minutes = (new Date(b.end_at) - new Date(b.start_at)) / 60000;
+    const maxMin = opsSettingsForDuration.max_brewing_minutes ?? 480;
+    if (!(minutes > maxMin)) return "";
+    const fmtHm = (m) => `${Math.floor(m / 60)}h${String(Math.round(m) % 60).padStart(2, "0")}`;
+    return ` <span style="color:var(--red)">⚠ Số giờ nấu đang quá ${fmtHm(maxMin)} (vượt ${fmtHm(minutes - maxMin)})</span>`;
+  };
   function renderBdEnd() {
     $("bd_end_wrap").innerHTML = editingEnd
       ? `${dtPickerHtml("bd_end", b.end_at ? new Date(b.end_at) : null, lkDis)}
          <button class="btn sm" id="bd_end_save" ${lkDis}>Lưu</button>`
       : `${fmt(b.end_at)}
          <span class="muted" style="font-size:12px;white-space:nowrap">${endAudit ? " — " + _flAuditText(endAudit.actor, endAudit.ts) : ""}</span>
+         ${brewDurationNoteHtml()}
          ${lkDis ? "" : `<button class="btn sm sec" id="bd_end_edit">Sửa</button>`}`;
     if ($("bd_end_edit")) $("bd_end_edit").onclick = () => { editingEnd = true; renderBdEnd(); };
     if ($("bd_end_save")) $("bd_end_save").onclick = () => guard(async () => {
@@ -3189,7 +3228,19 @@ async function showBatchTank(tankId, allBatches) {
       const handler = () => {
         const d = parseInt(el.dataset.flday, 10), k = el.dataset.flkey;
         readingsByDay[d] = readingsByDay[d] || { day_no: d };
-        readingsByDay[d][k] = el.dataset.flkind === "num" ? (el.value === "" ? null : parseFloat(el.value)) : (el.value.trim() || null);
+        if (el.dataset.flkind === "num") {
+          readingsByDay[d][k] = el.value === "" ? null : parseFloat(el.value);
+        } else if (el.dataset.flkind === "datetime") {
+          // Lưu nội bộ LUÔN ở dạng ISO (khớp dữ liệu tải từ server) — ô nhập là text "dd/mm/yyyy
+          // HH:MM:SS" (xem _flDayInput), bỏ qua không cập nhật nếu đang gõ dở/chưa hợp lệ, giữ
+          // nguyên giá trị hợp lệ gần nhất cho tới khi gõ xong đúng định dạng.
+          try {
+            const dt = parseDtText(el.value);
+            readingsByDay[d][k] = dt ? dt.toISOString() : null;
+          } catch { /* đang gõ dở */ }
+        } else {
+          readingsByDay[d][k] = el.value.trim() || null;
+        }
       };
       el.oninput = handler; el.onchange = handler;
     });
@@ -3202,7 +3253,7 @@ async function showBatchTank(tankId, allBatches) {
       const latest = _btLatestReadingDate();
       if (latest) {
         const next = new Date(latest.getTime() + 24 * 3600 * 1000);
-        readingsByDay[d] = { ...(readingsByDay[d] || { day_no: d }), reading_date: toDTLocal(next) };
+        readingsByDay[d] = { ...(readingsByDay[d] || { day_no: d }), reading_date: next.toISOString() };
       }
       renderBtDailyTable();
     };
@@ -3257,8 +3308,8 @@ async function showBatchTank(tankId, allBatches) {
     $("bt_haphu_wrap").innerHTML = haphuEvents.map((ev, idx) => {
       const editing = !lk && editingHaphu.has(idx);
       const cells = editing
-        ? `<td><input type="datetime-local" class="fl-haphu-cell" data-hpkey="at" data-hpidx="${idx}"
-            value="${esc(ev.at === null || ev.at === undefined ? "" : String(ev.at))}" style="width:220px"/></td>
+        ? `<td><input type="text" class="fl-haphu-cell" data-hpkey="at" data-hpidx="${idx}"
+            value="${esc(formatDtText(ev.at ? new Date(ev.at) : null))}" placeholder="dd/mm/yyyy HH:MM:SS" style="width:170px"/></td>
           <td><input type="number" class="fl-haphu-cell" data-hpkey="op_value" data-hpidx="${idx}"
             value="${esc(ev.op_value === null || ev.op_value === undefined ? "" : String(ev.op_value))}" style="width:80px"/></td>
           <td class="muted" style="font-size:12px;white-space:nowrap">${_flAuditText(ev.recorded_by, ev.recorded_at)}</td>
@@ -3271,7 +3322,16 @@ async function showBatchTank(tankId, allBatches) {
       return `<tr>${cells}</tr>`;
     }).join("") || `<tr><td colspan=4 class="muted">Chưa có mốc hạ phụ nào.</td></tr>`;
     document.querySelectorAll("#bt_haphu_wrap .fl-haphu-cell").forEach(el => el.oninput = () => {
-      haphuEvents[parseInt(el.dataset.hpidx, 10)][el.dataset.hpkey] = el.value.trim() || null;
+      const idx = parseInt(el.dataset.hpidx, 10), key = el.dataset.hpkey;
+      if (key === "at") {
+        // Lưu nội bộ ISO (khớp dữ liệu server) — bỏ qua nếu đang gõ dở/chưa hợp lệ.
+        try {
+          const dt = parseDtText(el.value);
+          haphuEvents[idx][key] = dt ? dt.toISOString() : null;
+        } catch { /* đang gõ dở */ }
+      } else {
+        haphuEvents[idx][key] = el.value.trim() || null;
+      }
     });
     document.querySelectorAll("#bt_haphu_wrap [data-haphuedit]").forEach(b => b.onclick = () => {
       editingHaphu.add(parseInt(b.dataset.haphuedit, 10));
@@ -3823,7 +3883,7 @@ VIEWS.batchfilterlots = async function () {
             <td>${esc(beerTypeName(f.beer_type_id))}</td>
             <td class="muted">${esc(tankLmNames(f))}</td>
             <td class="muted">${plannedVol(f) ?? "—"}</td>
-            <td>${badge(f.has_loc_result ? "released" : "pending")}</td>
+            <td>${badge(f.quality_status)}</td>
             <td>${esc(f.to_bbt || "—")}</td>
             <td>${[f.used_for_refilter ? `<span class="badge review" title="Đã lọc lại thành ${esc(f.refilter_target_filter_lot_code || "—")}${f.refilter_target_bbt ? " — vào tank " + esc(f.refilter_target_bbt) : ""}">Lọc lại</span>` : "",
                    f.chiet_status ? statusBadge(PACK_LOT_BADGE_CLASS[f.chiet_status], f.chiet_status_label) : ""]
@@ -4029,8 +4089,8 @@ async function showBatchFilterLot(filterLotId) {
       </div>
       <div class="row" style="margin-top:10px">
         <div class="field"><label>Nước DAW (hl)</label><input id="fbm_daw" type="number" value="${b.nuoc_bai_khi_hl ?? ""}" style="width:100px"/></div>
-        <div class="field"><label>Bắt đầu</label><input id="fbm_start" type="datetime-local" value="${toDTLocal(new Date(b.created_at))}"/></div>
-        <div class="field"><label>Kết thúc</label><input id="fbm_end" type="datetime-local" value="${toDTLocal(b.ended_at ? new Date(b.ended_at) : new Date())}"/></div>
+        <div class="field"><label>Bắt đầu</label>${dtPickerHtml("fbm_start", new Date(b.created_at))}</div>
+        <div class="field"><label>Kết thúc</label>${dtPickerHtml("fbm_end", b.ended_at ? new Date(b.ended_at) : new Date())}</div>
       </div>
       <div class="field" style="margin-top:10px"><label>Ghi chú</label><textarea id="fbm_note" rows="2" placeholder="(tuỳ chọn)">${esc(b.note || "")}</textarea></div>
       <button class="btn" id="fbm_save" style="margin-top:14px">Lưu</button>`);
@@ -4059,14 +4119,14 @@ async function showBatchFilterLot(filterLotId) {
         throw new Error('Mỗi mẻ lọc chỉ rút từ ĐÚNG 1 nguồn — bấm "+ Thêm mẻ" để khai riêng đợt cho nguồn khác.');
       if (seqRequired && !$("fbm_seq").value.trim())
         throw new Error("Nhập Mẻ số — bắt buộc khi phối nhiều nguồn, để phân biệt từng đợt.");
-      const startVal = $("fbm_start").value;
-      const endVal = $("fbm_end").value;
-      if (!endVal) throw new Error("Nhập thời gian kết thúc.");
+      const startDt = readDtPicker("fbm_start");
+      const endDt = readDtPicker("fbm_end");
+      if (!endDt) throw new Error("Nhập thời gian kết thúc.");
       await PUT(`/batch-filter-lots/batches/${id}/finish`, {
         draws, nuoc_bai_khi_hl: parseFloat($("fbm_daw").value) || 0,
         batch_seq_no: $("fbm_seq").value.trim() || null,
-        started_at: startVal ? new Date(startVal).toISOString() : null,
-        ended_at: new Date(endVal).toISOString(),
+        started_at: startDt ? startDt.toISOString() : null,
+        ended_at: endDt.toISOString(),
         note: $("fbm_note").value.trim() || null,
       });
       closeModal();
@@ -4091,13 +4151,17 @@ async function showBatchFilterLot(filterLotId) {
 }
 
 VIEWS.batchpacklots = async function () {
-  const [packLots, lots, finishedProducts, lines, eligibleBbt] = await Promise.all([
+  const [packLots, lots, finishedProducts, lines, eligibleBbt, beerTypesPk] = await Promise.all([
     GET("/batch-pack-lots"), GET("/batch-filter-lots"),
     GET("/finished-products").catch(() => []), GET("/lines").catch(() => []),
-    GET("/batch-pack-lots/eligible-bbt-lines").catch(() => [])]);
+    GET("/batch-pack-lots/eligible-bbt-lines").catch(() => []), GET("/beer-types").catch(() => [])]);
   const lotByCode = Object.fromEntries(lots.map(f => [f.filter_lot_id, f.filter_lot_code]));
+  // Hiện ngay Loại bia của dịch trong tank BBT ở MỖI dòng dropdown — yêu cầu người dùng
+  // 2026-10-16: "tạo lô thành phẩm từ chiết thì hiện luôn dịch bia là loại dịch nào" (trước đây
+  // chỉ suy ra ngầm để lọc "Sản phẩm", người vận hành không thấy ngay trong danh sách chọn tank).
+  const beerTypeNamePk = (id) => { const bt = beerTypesPk.find(x => x.beer_type_id === id); return bt ? bt.name : null; };
   const bbtOpts = eligibleBbt.map(t =>
-    `<option value="${esc(t.code)}" data-fp="${esc(t.finished_product_id || "")}" data-beertype="${esc(t.beer_type_id || "")}">${esc(t.code)} — ${esc(t.name)} (còn ${t.on_hand_bbt} hl)` +
+    `<option value="${esc(t.code)}" data-fp="${esc(t.finished_product_id || "")}" data-beertype="${esc(t.beer_type_id || "")}">${esc(t.code)} — ${esc(t.name)} — ${esc(beerTypeNamePk(t.beer_type_id) || "(chưa xác định loại bia)")} (còn ${t.on_hand_bbt} hl)` +
     `${t.filter_lot_codes && t.filter_lot_codes.length ? " — Lô lọc " + esc(t.filter_lot_codes.join(", ")) : ""}</option>`).join("");
   // Sản phẩm chiết CHỈ hiện đúng Loại bia của dịch trong tank BBT đã chọn (hoặc sản phẩm chưa
   // gán Loại bia nào) — mirror đúng bộ lọc đã làm ở form Lệnh lọc (yêu cầu người dùng 2026-09-01).
@@ -4121,10 +4185,10 @@ VIEWS.batchpacklots = async function () {
           <div class="muted pk_fp_note" style="font-size:12px;margin-top:2px">Chưa xác định Loại bia — chọn tank BBT trước để chỉ hiện đúng sản phẩm cùng Loại bia.</div></div>
         <div class="field"><label>Dây chuyền</label><select id="pk_line"><option value="">(chọn dây chuyền)</option>${packagingLines.map(l =>
           `<option value="${esc(l.code)}">${esc(l.code)} — ${esc(l.name)}</option>`).join("")}</select></div>
-        <div class="field"><label>Ngày giờ bắt đầu chiết</label><input id="pk_date" type="datetime-local" value="${toDTLocal(new Date())}"/></div>
+        <div class="field"><label>Ngày giờ bắt đầu chiết</label>${dtPickerHtml("pk_date", new Date())}</div>
       </div>
       <div class="row">
-        <div class="field"><label>Số lượng cấp chiết (lít) <span style="color:var(--red)">*</span></label><input id="pk_qty" type="number" placeholder="Bắt buộc" min="0.01" step="any"/></div>
+        <div class="field"><label>Số lượng cấp chiết (hl) <span style="color:var(--red)">*</span></label><input id="pk_qty" type="number" placeholder="Bắt buộc" min="0.01" step="any"/></div>
         <div class="field"><label>Số lô bia</label><input id="pk_lotno" placeholder="Bắt buộc"/></div>
         <button class="btn" id="pk_create">Tạo lô thành phẩm</button>
       </div>
@@ -4134,13 +4198,13 @@ VIEWS.batchpacklots = async function () {
       <div class="panel"><h2>Danh sách lô thành phẩm</h2>
         ${yearFilterControl("batchpacklots", YEARS.batchpacklots)}
         <input class="searchbox" data-tbl="t_packlot" placeholder="Tìm theo mã lô, số lô bia, trạng thái..."/>
-        <div class="tablewrap"><table id="t_packlot"><thead><tr><th>Mã lô TP</th><th>Ngày chiết</th><th>Lô lọc nguồn</th><th>Tank BBT</th><th>SL cấp chiết (lít)</th><th>Số lô bia</th><th>Trạng thái</th><th>Duyệt</th></tr></thead>
+        <div class="tablewrap"><table id="t_packlot"><thead><tr><th>Mã lô TP</th><th>Ngày chiết</th><th>Lô lọc nguồn</th><th>Tank BBT</th><th>SL cấp chiết (hl)</th><th>Số lô bia</th><th>Trạng thái</th><th>Duyệt</th></tr></thead>
           <tbody>${packLotsInYear.map(p => `<tr data-pklot2="${p.pack_lot_id}" style="cursor:pointer">
             <td><code class="k">${esc(p.pack_lot_code)}</code></td>
             <td class="muted">${fmt(p.pack_date)}</td>
             <td><code class="k">${esc(lotByCode[p.filter_lot_id] || p.filter_lot_id)}</code></td>
             <td>${esc(p.from_bbt || "—")}</td>
-            <td>${p.qty}</td><td>${esc(p.lot_no || "—")}</td>
+            <td>${(p.qty / 100).toLocaleString("vi-VN", {maximumFractionDigits: 3})}</td><td>${esc(p.lot_no || "—")}</td>
             <td>${statusBadge(PACK_LOT_BADGE_CLASS[p.status], p.status_label)}</td>
             <td>${pkDuyetCellHtml(p)}</td></tr>`).join("")
             || '<tr><td colspan=8 class="muted">Chưa có lô thành phẩm nào.</td></tr>'}</tbody></table></div>
@@ -4150,14 +4214,33 @@ VIEWS.batchpacklots = async function () {
   wireProductionTabs();
   wireYearFilter("batchpacklots", "batchpacklots");
   wirePaginate("t_packlot", 10);
+  // Dây chuyền tự chọn sẵn theo Loại sản phẩm (category: Bia lon/chai/hơi/tươi) của Sản phẩm
+  // đang chọn — khớp theo từ khóa trong tên/đơn vị công suất dây chuyền (VD "Bia lon" -> dây
+  // chuyền có chữ "lon"); không tìm thấy khớp nào thì để trống, không đoán bừa (yêu cầu người
+  // dùng 2026-10-16: tự chọn sẵn Sản phẩm/Dây chuyền theo đúng tank BBT đã chọn, không mặc định
+  // cứng 1 giá trị cố định vì dễ chọn nhầm sang lô Loại bia/đóng gói khác).
+  const LINE_CATEGORY_KEYWORD = { "Bia lon": "lon", "Bia chai": "chai", "Bia hơi": "hơi", "Bia tươi": "tươi" };
+  const lineCodeForCategory = (category) => {
+    const kw = LINE_CATEGORY_KEYWORD[category];
+    if (!kw) return null;
+    const match = packagingLines.find(l => (l.name || "").toLowerCase().includes(kw) || (l.capacity_uom || "").toLowerCase().includes(kw));
+    return match ? match.code : null;
+  };
+  const updatePkLine = () => {
+    const fp = finishedProducts.find(x => x.finished_product_id === $("pk_fp").value);
+    const defCode = fp ? lineCodeForCategory(fp.category) : null;
+    if (defCode) $("pk_line").value = defCode;
+  };
   const updatePkFp = () => {
     const opt = $("pk_bbt").selectedOptions[0];
     const beerTypeId = opt ? opt.dataset.beertype : "";
     $("pk_fp").innerHTML = pkFpOpts(beerTypeId || null, opt && opt.dataset.fp ? opt.dataset.fp : null);
     const note = document.querySelector(".pk_fp_note");
     if (note) note.textContent = beerTypeId ? "" : "Chưa xác định Loại bia — chọn tank BBT trước để chỉ hiện đúng sản phẩm cùng Loại bia.";
+    updatePkLine();
   };
   $("pk_bbt").onchange = updatePkFp;
+  $("pk_fp").onchange = updatePkLine;
   $("pk_create").onclick = () => guard(async () => {
     if (!$("pk_bbt").value) throw new Error("Chọn tank BBT để chiết.");
     // Sản phẩm/Dây chuyền BẮT BUỘC chọn đúng 1 — cả 2 vốn là <select> đơn nên không thể chọn
@@ -4165,11 +4248,14 @@ VIEWS.batchpacklots = async function () {
     // trống được, "Dây chuyền" còn cho chọn NHIỀU dây chuyền cùng lúc qua ô multi-select).
     if (!$("pk_fp").value) throw new Error("Chọn sản phẩm để chiết.");
     if (!$("pk_line").value) throw new Error("Chọn dây chuyền để chiết.");
-    const qty = parseFloat($("pk_qty").value);
-    if (!qty || qty <= 0) throw new Error("Nhập Số lượng cấp chiết (lít) > 0.");
+    const qtyHl = parseFloat($("pk_qty").value);
+    if (!qtyHl || qtyHl <= 0) throw new Error("Nhập Số lượng cấp chiết (hl) > 0.");
+    // API vẫn nhận "qty" theo LÍT (giữ nguyên backend/CSDL, xem L_PER_HL) — chỉ đổi đơn vị
+    // NGƯỜI DÙNG nhìn thấy/gõ sang hl cho khớp các màn khác (yêu cầu người dùng 2026-10-16).
+    const qty = qtyHl * 100;
     const lotNo = $("pk_lotno").value.trim();
     if (!lotNo) throw new Error("Nhập số lô bia.");
-    const dateRaw = $("pk_date").value;
+    const dateDt = readDtPicker("pk_date");
     // Mã lô TP là mã nội bộ để truy xuất — tự sinh, người dùng chỉ cần quan tâm Số lô bia
     // (mirror bottle_code tự sinh ở màn Chiết cũ, xem frontend/app.js ~10340).
     const basePayload = {
@@ -4177,7 +4263,7 @@ VIEWS.batchpacklots = async function () {
       pack_lot_code: "PKG-" + Date.now().toString().slice(-6),
       finished_product_id: $("pk_fp").value, lot_no: lotNo,
       line: $("pk_line").value,
-      pack_date: dateRaw ? new Date(dateRaw).toISOString() : null,
+      pack_date: dateDt ? dateDt.toISOString() : null,
     };
     // Số lô bia không còn bị chặn cứng khi trùng — chỉ hỏi xác nhận lại (yêu cầu người dùng
     // 2026-10-01: "cho phép nhập 2 lô giống nhau và hỏi bạn có muốn nhập 2 lô giống nhau
@@ -4495,7 +4581,7 @@ async function showBatchPackLot(packLotId) {
       <dt>Dây chuyền</dt><dd>${esc(p.line || "—")}</dd>
       <dt>Giờ bắt đầu chiết</dt><dd id="pk_date_wrap"></dd>
       <dt>Giờ kết thúc chiết</dt><dd class="muted">${p.ended_at ? fmt(p.ended_at) : "— (chưa có ca nào khai đủ SL + giờ kết thúc)"}</dd>
-      <dt>Số lượng cấp chiết (lít) <span style="color:var(--red)">*</span></dt><dd><input id="pk_qty_edit" type="number" min="0.01" step="any" value="${p.qty}" style="width:120px" ${dis}/>
+      <dt>Số lượng cấp chiết (hl) <span style="color:var(--red)">*</span></dt><dd><input id="pk_qty_edit" type="number" min="0.01" step="any" value="${p.qty / 100}" style="width:120px" ${dis}/>
         <button class="btn sm sec" id="pk_qty_save" ${dis}>Lưu SL</button>
         <span class="muted" style="font-size:12px;white-space:nowrap;margin-left:6px">${qtyAudit ? _flAuditText(qtyAudit.actor, qtyAudit.ts) : ""}</span></dd>
       <dt>Số lô bia</dt><dd>${esc(p.lot_no || "—")}</dd>
@@ -4549,9 +4635,9 @@ async function showBatchPackLot(packLotId) {
   });
   $("pk_audit").onclick = (e) => { e.preventDefault(); document.querySelector('[data-view="audit"]').click(); setTimeout(() => { $("au_entity").value = packLotId; $("au_load").click(); }, 50); };
   $("pk_qty_save").onclick = () => guard(async () => {
-    const qty = parseFloat($("pk_qty_edit").value);
-    if (!qty || qty <= 0) throw new Error("Nhập Số lượng cấp chiết (lít) > 0.");
-    await PUT(`/batch-pack-lots/${packLotId}/qty`, { qty });
+    const qtyHl = parseFloat($("pk_qty_edit").value);
+    if (!qtyHl || qtyHl <= 0) throw new Error("Nhập Số lượng cấp chiết (hl) > 0.");
+    await PUT(`/batch-pack-lots/${packLotId}/qty`, { qty: qtyHl * 100 });   // API vẫn nhận lít
     toast("Đã lưu SL"); showBatchPackLot(packLotId);
   });
   // Giờ bắt đầu chiết — mặc định hiện chữ (24h) + nút Sửa bật ô nhập, giống Bắt đầu/Kết thúc ở
@@ -4560,16 +4646,16 @@ async function showBatchPackLot(packLotId) {
   let editingPkDate = false;
   function renderPkDate() {
     $("pk_date_wrap").innerHTML = editingPkDate
-      ? `<input id="pk_date_edit" type="datetime-local" value="${toDTLocal(new Date(p.pack_date))}" style="width:220px"/>
+      ? `${dtPickerHtml("pk_date_edit", new Date(p.pack_date))}
          <button class="btn sm sec" id="pk_date_save">Lưu giờ</button>`
       : `${fmt(p.pack_date)}
          <span class="muted" style="font-size:12px;white-space:nowrap">${dateAudit ? " — " + _flAuditText(dateAudit.actor, dateAudit.ts) : ""}</span>
          ${dis ? "" : `<button class="btn sm sec" id="pk_date_edit_btn">Sửa</button>`}`;
     if ($("pk_date_edit_btn")) $("pk_date_edit_btn").onclick = () => { editingPkDate = true; renderPkDate(); };
     if ($("pk_date_save")) $("pk_date_save").onclick = () => guard(async () => {
-      const v = $("pk_date_edit").value;
+      const v = readDtPicker("pk_date_edit");
       if (!v) throw new Error("Nhập giờ bắt đầu chiết.");
-      await PUT(`/batch-pack-lots/${packLotId}/pack-date`, { pack_date: new Date(v).toISOString() });
+      await PUT(`/batch-pack-lots/${packLotId}/pack-date`, { pack_date: v.toISOString() });
       toast("Đã lưu giờ bắt đầu chiết"); showBatchPackLot(packLotId);
     });
   }
@@ -4585,8 +4671,8 @@ async function showBatchPackLot(packLotId) {
       const [defStart, defEnd] = caDefaults[n];
       const editing = !dis && editingCas.has(n);
       const cells = editing
-        ? `<td><input type="datetime-local" id="pk_ca${n}_start" value="${toDTLocal(savedStart ? new Date(savedStart) : defStart)}"/></td>
-        <td><input type="datetime-local" id="pk_ca${n}_end" value="${toDTLocal(savedEnd ? new Date(savedEnd) : defEnd)}"/></td>
+        ? `<td>${dtPickerHtml(`pk_ca${n}_start`, savedStart ? new Date(savedStart) : defStart)}</td>
+        <td>${dtPickerHtml(`pk_ca${n}_end`, savedEnd ? new Date(savedEnd) : defEnd)}</td>
         <td><input type="number" min="0" id="pk_ca${n}_qty" value="${savedQty ?? ""}" style="width:90px"/></td>
         <td class="muted" style="font-size:12px;white-space:nowrap">${_flAuditText(p[`ca${n}_by`], p[`ca${n}_at`])}</td>
         <td style="white-space:nowrap"><button class="btn sm" data-caksave="${n}">Lưu</button>
@@ -4605,7 +4691,7 @@ async function showBatchPackLot(packLotId) {
     });
     document.querySelectorAll("[data-caksave]").forEach(b => b.onclick = () => guard(async () => {
       const n = parseInt(b.dataset.caksave, 10);
-      const dtVal = (id) => { const v = $(id).value; return v ? new Date(v).toISOString() : null; };
+      const dtVal = (id) => { const v = readDtPicker(id); return v ? v.toISOString() : null; };
       const numVal = (id) => { const v = $(id).value; return v === "" ? null : parseFloat(v); };
       await PUT(`/batch-pack-lots/${packLotId}/shifts`, {
         [`ca${n}_qty`]: numVal(`pk_ca${n}_qty`), [`ca${n}_start_at`]: dtVal(`pk_ca${n}_start`),
@@ -5013,7 +5099,7 @@ async function buildPackLotEBRHtml(packLotId, opts = {}) {
   const lockBadge = e.locked ? `${badge("closed")}ĐÃ KHÓA (v${e.snapshot ? e.snapshot.version : "?"})` : `${badge("planned")}chưa khóa`;
   const html = `<h2>📄 Hồ sơ lô thành phẩm điện tử (EBR) — ${esc(c.pack_lot_code)} ${lockBadge}</h2>
     <dl class="detail">
-      <dt>SL cấp chiết (lít) / Số lô bia</dt><dd>${c.qty} ${esc(c.line || "")} · ${esc(c.lot_no || "—")}</dd>
+      <dt>SL cấp chiết (hl) / Số lô bia</dt><dd>${c.qty / 100} ${esc(c.line || "")} · ${esc(c.lot_no || "—")}</dd>
       <dt>Loại bia</dt><dd>${esc(ctx.beer_type_name || "—")}</dd>
       <dt>Dịch bia</dt><dd>${esc(ctx.product_name || "—")}</dd>
       <dt>Sản phẩm chiết</dt><dd>${esc(ctx.finished_product_name || "—")}</dd>
@@ -9981,9 +10067,17 @@ function _flDayInput(key, kind, value, dayNo, options, disabled) {
       ${(options || []).map(([v, label]) => `<option value="${v}" ${(value || "") === v ? "selected" : ""}>${esc(label)}</option>`).join("")}
     </select>`;
   }
-  const type = kind === "num" ? "number" : (kind === "date" ? "date" : (kind === "datetime" ? "datetime-local" : "text"));
+  if (kind === "datetime") {
+    // Input TEXT "dd/mm/yyyy HH:MM:SS" (mirror dtPickerHtml) thay vì type="datetime-local" —
+    // control gốc hiện AM/PM tùy trình duyệt/HĐH người dùng, không đồng nhất với các màn khác
+    // (yêu cầu người dùng 2026-10-16: định dạng giờ của mẻ nấu/lên men/lọc/chiết dùng chung 1
+    // định dạng, không AM/PM). `value` (nếu có) luôn là chuỗi ISO lưu nội bộ, xem oninput handler.
+    return `<input type="text" class="fl-daily-cell" data-flkey="${key}" data-flday="${dayNo}" data-flkind="${kind}"
+      value="${esc(formatDtText(value ? new Date(value) : null))}" placeholder="dd/mm/yyyy HH:MM:SS" style="width:170px" ${dis}/>`;
+  }
+  const type = kind === "num" ? "number" : (kind === "date" ? "date" : "text");
   const step = kind === "num" ? ' step="any"' : "";
-  const width = kind === "date" ? 130 : (kind === "datetime" ? 170 : 88);
+  const width = kind === "date" ? 130 : 88;
   return `<input type="${type}"${step} class="fl-daily-cell" data-flkey="${key}" data-flday="${dayNo}" data-flkind="${kind}"
     value="${esc(value === null || value === undefined ? "" : String(value))}" style="width:${width}px" ${dis}/>`;
 }
@@ -12283,6 +12377,12 @@ VIEWS.master = async function () {
       <div class="row">
         <div class="field"><label>Thời hạn phiên đăng nhập (giờ)</label><input id="ops_session_hours" type="number" step="1" min="1" value="${opsSettings.session_hours ?? 8760}" style="width:140px" ${canManage ? "" : "disabled"}/></div>
       </div>
+      <div class="muted" style="margin:10px 0 6px">Số giờ nấu chuẩn tối đa (từ "Bắt đầu" tới "Kết thúc" mẻ nấu) — vượt ngưỡng này KHÔNG chặn
+        ghi, chỉ hiện thêm ghi chú cảnh báo ngay dưới giờ kết thúc để quản đốc/vận hành biết mẻ đó nấu quá lâu.</div>
+      <div class="row">
+        <div class="field"><label>Số giờ nấu chuẩn — Giờ</label><input id="ops_brewhr_h" type="number" min="0" step="1" value="${Math.floor((opsSettings.max_brewing_minutes ?? 480) / 60)}" style="width:100px" ${canManage ? "" : "disabled"}/></div>
+        <div class="field"><label>Số giờ nấu chuẩn — Phút</label><input id="ops_brewhr_m" type="number" min="0" max="59" step="1" value="${(opsSettings.max_brewing_minutes ?? 480) % 60}" style="width:100px" ${canManage ? "" : "disabled"}/></div>
+      </div>
       ${canManage ? `<button class="btn" id="ops_save" style="margin-top:10px">Lưu tất cả cài đặt vận hành</button>` : ""}
       ${opsSettings.updated_by ? `<div class="muted" style="font-size:12px;margin-top:6px">Cập nhật lần cuối: ${esc(opsSettings.updated_by)} · ${fmt(opsSettings.updated_at)}</div>` : ""}
     </div>
@@ -12352,6 +12452,8 @@ VIEWS.master = async function () {
         fg_day_cutoff_hour: Math.min(23, Math.max(0, parseInt($("ops_fg_cutoff_hour").value, 10) || 0)),
         factory_code: $("ops_factory_code").value.trim() || null,
         session_hours: parseInt($("ops_session_hours").value, 10) || 8760,
+        max_brewing_minutes: (Math.max(0, parseInt($("ops_brewhr_h").value, 10) || 0) * 60) +
+          Math.max(0, Math.min(59, parseInt($("ops_brewhr_m").value, 10) || 0)),
       });
       toast("Đã lưu cài đặt vận hành"); render("master");
     });
