@@ -220,3 +220,33 @@ def test_add_and_delete_request_line(client, admin_h, thukho_h, vanhanh_h):
     assert delr.status_code == 200, delr.text
     remaining = [l["line_id"] for l in delr.json()["lines"]]
     assert line1_id not in remaining and line2_id in remaining
+
+
+def test_delete_line_after_undo_fulfill(client, admin_h, thukho_h, vanhanh_h):
+    """Dòng đã fulfill rồi ADMIN "Hoàn tác" quay về pending — StockMovement cũ VẪN giữ
+    request_line_id, nên xóa dòng phải gỡ liên kết trước, nếu không MSSQL enforce FK
+    fk_stock_movement_request_line_id vỡ 547 (nút "Xóa" dòng trong Sửa phiếu trả 500;
+    SQLite bỏ qua FK nên không lộ)."""
+    mat_id = _create_material(client, admin_h, "REQEDIT-UNDO")
+    lot_id = _receive(client, thukho_h, mat_id, "LOT-REQEDIT-UNDO", 100,
+                      received_at=(utcnow() - timedelta(days=5)).isoformat())
+    req = client.post("/api/warehouse/requests", headers=vanhanh_h,
+                      json={"lines": [{"material_id": mat_id, "quantity": 20}],
+                            "requested_receipt_date": (utcnow() - timedelta(days=2)).isoformat()})
+    assert req.status_code == 201, req.text
+    request_id = req.json()["request_id"]
+    line_id = req.json()["lines"][0]["line_id"]
+
+    ful = client.post(f"/api/warehouse/requests/{request_id}/lines/{line_id}/fulfill",
+                      headers=thukho_h, json={"lot_id": lot_id, "quantity": 20})
+    assert ful.status_code == 200, ful.text
+
+    undo = client.post(f"/api/warehouse/requests/{request_id}/lines/{line_id}/undo-fulfill",
+                       headers=admin_h)
+    assert undo.status_code == 200, undo.text
+    assert undo.json()["status"] == "pending"
+
+    # Giờ xóa dòng pending đó — trước fix sẽ 500 (FK 547).
+    d = client.delete(f"/api/warehouse/requests/{request_id}/lines/{line_id}", headers=vanhanh_h)
+    assert d.status_code == 200, d.text
+    assert not any(l["line_id"] == line_id for l in d.json()["lines"])
