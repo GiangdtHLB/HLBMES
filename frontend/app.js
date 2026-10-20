@@ -21,6 +21,11 @@ let PENDING_QUALITY_SCOPE = null;  // {key: "scope_type:scope_id", kind: "hold"|
 let PENDING_CAPA_DEVIATION = null;  // deviation_id — set by "+ Tạo CAPA cho deviation này" trong devRow, consumed once by VIEWS.qclab để chọn sẵn ca_dev
 let PENDING_OPEN_CAPA_ID = null;  // capa_id — set khi bấm mã CAPA ở cột "CAPA liên kết" (Deviations), consumed once by VIEWS.qclab để tự mở modal chi tiết CAPA đó
 let PENDING_OPEN_DEVIATION_ID = null;  // deviation_id — set khi bấm mã Deviation ở cột "Deviation liên kết" (CAPA), consumed once by VIEWS.quality để cuộn/hiện đúng deviation đó
+// Bộ lọc trạng thái bảng "Deviations" ở màn Chất lượng — "open" (mặc định, mirror hành vi cũ:
+// ẩn deviation đã đóng cho đỡ rối), "closed", "all". Biến module-level để giữ nguyên lựa chọn
+// qua các lần render("quality") lại (VD sau khi Hold/Release/Mở deviation) — yêu cầu người dùng
+// 2026-10-20: "mở deviation rồi, đóng rồi ... giờ không biết xem lại ở đâu".
+let DEV_STATE_FILTER = "open";
 
 async function api(path, opts = {}) {
   const headers = { "Content-Type": "application/json" };
@@ -5259,24 +5264,6 @@ VIEWS.quality = async function () {
   // ngoài Mẻ SX (ISA-88)/Lô NVL đã có — mỗi <optgroup> 1 công đoạn, nhãn kèm trạng thái hiện
   // tại để thấy ngay công đoạn nào đang bị giữ. Xem services/quality.py::_STAGE_MODELS.
   const hqLabel = (q) => q === "on_hold" ? " — ĐANG HOLD" : "";
-  // Deviation đã "closed" (đã qua CAPA/approval) coi như xong việc — ẩn khỏi danh sách, chỉ
-  // hiện những cái còn đang xử lý để không làm rối bảng theo thời gian.
-  const openDevs = devs.filter(d => d.state !== "closed");
-  // Điều hướng từ CAPA -> Deviation (bấm mã Deviation trong cột "Deviation liên kết" ở CAPA) —
-  // tiêu thụ 1 lần đúng mẫu PENDING_CAPA_DEVIATION (chiều ngược lại). Deviation đã đóng bị ẩn
-  // khỏi openDevs nên không cuộn tới được — hiện thông báo thay vào đó.
-  let devNavNotice = "";
-  let devNavHighlightId = null;
-  if (PENDING_OPEN_DEVIATION_ID) {
-    const targetId = PENDING_OPEN_DEVIATION_ID;
-    PENDING_OPEN_DEVIATION_ID = null;
-    if (openDevs.some(d => d.deviation_id === targetId)) {
-      devNavHighlightId = targetId;
-    } else {
-      const closedDev = devs.find(d => d.deviation_id === targetId);
-      devNavNotice = `<div class="muted" style="margin-bottom:6px">Deviation ${esc(closedDev?.deviation_code || "")} đã đóng — không hiện trong danh sách này.</div>`;
-    }
-  }
   const batchById = Object.fromEntries(batches.map(b => [b.batch_id, b]));
   const lotById = Object.fromEntries(lots.map(l => [l.lot_id, l]));
   const matById = Object.fromEntries(materials.map(m => [m.material_id, m]));
@@ -5297,6 +5284,28 @@ VIEWS.quality = async function () {
   const qcGroups = groupQcResultsByScope(qcResultsWithGroupLabel(results,
     { batchById, lotById, paramByCode,
       batchTankById, batchFilterLotById, batchPackLotById, workOrderById }));
+  // Dùng chung ctx này để tra "Phạm vi" (mẻ nấu/lô lọc/lô chiết/tank lên men nào) cho bảng
+  // Deviations — mirror scopeDisplayLabel đã dùng cho qcGroups ở trên (yêu cầu người dùng
+  // 2026-10-20: "không biết mở cho mẻ nấu, lọc, hay chiết, hay lên men").
+  const devScopeCtx = { batchById, lotById, batchTankById, batchFilterLotById, batchPackLotById, workOrderById };
+  // Bộ lọc trạng thái (DEV_STATE_FILTER, mặc định "open" — mirror hành vi cũ ẩn deviation đã
+  // đóng cho đỡ rối) thay vì luôn ẩn cứng "closed" như trước (yêu cầu người dùng 2026-10-20:
+  // "mở deviation rồi, đóng rồi ... giờ không biết xem lại ở đâu").
+  // Điều hướng từ CAPA -> Deviation (bấm mã Deviation trong cột "Deviation liên kết" ở CAPA) —
+  // tiêu thụ 1 lần đúng mẫu PENDING_CAPA_DEVIATION (chiều ngược lại). Deviation đã đóng mà bộ
+  // lọc đang để "open" thì tự chuyển sang "all" để luôn thấy được, thay vì chỉ báo suông rồi
+  // chịu (hành vi cũ trước 2026-10-20).
+  let devNavHighlightId = null;
+  if (PENDING_OPEN_DEVIATION_ID) {
+    const targetId = PENDING_OPEN_DEVIATION_ID;
+    PENDING_OPEN_DEVIATION_ID = null;
+    const targetDev = devs.find(d => d.deviation_id === targetId);
+    if (targetDev && targetDev.state === "closed" && DEV_STATE_FILTER === "open") DEV_STATE_FILTER = "all";
+    devNavHighlightId = targetId;
+  }
+  const devsToShow = DEV_STATE_FILTER === "all" ? devs
+    : DEV_STATE_FILTER === "closed" ? devs.filter(d => d.state === "closed")
+    : devs.filter(d => d.state !== "closed");
   // Tra thẳng kết quả QC ĐÃ GHI cho panel "Công đoạn chờ khai báo" — scope_type/scope_id ở đây
   // trùng NGUYÊN VĂN với QualityResult.scope_type/scope_id lúc ghi (mọi stage đều dùng chung 1
   // quy ước scope_id qua qc_catalog.py, kể cả len_men_chinh/phu compound "tank_id__stage"), nên
@@ -5496,12 +5505,18 @@ VIEWS.quality = async function () {
         <td class="muted">${esc(g.recordedBy || "")}</td><td class="muted">${fmt(g.latestAt)}</td>
         <td><button type="button" class="btn sm sec" data-qcdetail="${gi}">Xem chi tiết</button></td></tr>`).join("") ||
         '<tr><td colspan=6 class="muted">Chưa có kết quả QC nào.</td></tr>'}</tbody></table></div></div>
-    <div class="panel"><h2>Deviations <span class="muted">(${openDevs.length} đang mở)</span></h2>
-      ${devNavNotice}
-      <input class="searchbox" data-tbl="t_deviations" placeholder="Tìm theo mã, lý do..."/>
-      <table id="t_deviations"><thead><tr><th>Mã</th><th>Mức</th><th>Lý do</th><th>Chỉ tiêu không đạt</th><th>CAPA liên kết</th><th>Trạng thái</th><th>Hành động</th></tr></thead>
-      <tbody>${openDevs.map(d => devRow(d, scopeKeyToFailParams[`${d.scope_type}:${d.scope_id}`], closedCapaDevIds.has(d.deviation_id), anyCapaDevIds.has(d.deviation_id), capaByDevId[d.deviation_id] || [])).join("") ||
-        '<tr><td colspan=7 class="muted">Không còn deviation nào đang mở.</td></tr>'}</tbody></table></div>`;
+    <div class="panel"><h2>Deviations <span class="muted">(${devsToShow.length}${DEV_STATE_FILTER === "open" ? " đang mở" : DEV_STATE_FILTER === "closed" ? " đã đóng" : ""})</span></h2>
+      <div class="row" style="margin-bottom:6px">
+        <input class="searchbox" data-tbl="t_deviations" placeholder="Tìm theo mã, lý do..." style="flex:1"/>
+        <select id="dev_state_filter" style="width:160px">
+          <option value="open" ${DEV_STATE_FILTER === "open" ? "selected" : ""}>Đang mở</option>
+          <option value="closed" ${DEV_STATE_FILTER === "closed" ? "selected" : ""}>Đã đóng</option>
+          <option value="all" ${DEV_STATE_FILTER === "all" ? "selected" : ""}>Tất cả</option>
+        </select>
+      </div>
+      <table id="t_deviations"><thead><tr><th>Mã</th><th>Phạm vi</th><th>Mức</th><th>Lý do</th><th>Chỉ tiêu không đạt</th><th>CAPA liên kết</th><th>Trạng thái</th><th>Hành động</th></tr></thead>
+      <tbody>${devsToShow.map(d => devRow(d, scopeDisplayLabel(d.scope_type, d.scope_id, devScopeCtx), scopeKeyToFailParams[`${d.scope_type}:${d.scope_id}`], closedCapaDevIds.has(d.deviation_id), anyCapaDevIds.has(d.deviation_id), capaByDevId[d.deviation_id] || [])).join("") ||
+        `<tr><td colspan=8 class="muted">${DEV_STATE_FILTER === "closed" ? "Chưa có deviation nào đã đóng." : DEV_STATE_FILTER === "all" ? "Chưa có deviation nào." : "Không còn deviation nào đang mở."}</td></tr>`}</tbody></table></div>`;
   const parseScope = (v) => { const [t, i] = v.split(":"); return { scope_type: t, scope_id: i }; };
   // Lấy chỉ tiêu ĐÃ khai báo cho 1 phạm vi (mẻ/lô) để hiện trước khi Hold/Release/Mở deviation —
   // người bấm cần thấy NGAY vì sao (chỉ tiêu nào fail/đạt) thay vì chỉ gõ lý do tự do. Quy ước
@@ -5585,6 +5600,7 @@ VIEWS.quality = async function () {
   });
   wireSelectSearch("h_scope", "h_scope_q");
   wireSelectSearch("d_scope", "d_scope_q");
+  $("dev_state_filter").onchange = () => { DEV_STATE_FILTER = $("dev_state_filter").value; render("quality"); };
   $("d_open").onclick = () => guard(async () => {
     await POST("/quality/deviations", { ...parseScope($("d_scope").value), severity: $("d_sev").value,
       reason: $("d_reason").value, parameter: checkedParams("d_scope_qc"), due_date: $("d_due").value || null });
@@ -5604,6 +5620,11 @@ VIEWS.quality = async function () {
   document.querySelectorAll("[data-devcapa]").forEach(b => b.onclick = () => {
     PENDING_CAPA_DEVIATION = b.dataset.devcapa;
     gotoView("qclab");
+  });
+  document.querySelectorAll("[data-devdetail]").forEach(b => b.onclick = () => {
+    const d = devs.find(x => x.deviation_id === b.dataset.devdetail);
+    if (!d) return;
+    devDetailModal(d, scopeDisplayLabel(d.scope_type, d.scope_id, devScopeCtx), capaByDevId[d.deviation_id] || []);
   });
   document.querySelectorAll("[data-opencapa]").forEach(b => b.onclick = () => {
     PENDING_OPEN_CAPA_ID = b.dataset.opencapa;
@@ -5734,45 +5755,50 @@ VIEWS.quality = async function () {
 // 1 mẻ/lô đứng cạnh nhau thay vì xen lẫn theo thời gian ghi như trước. Đồng thời dịch mã
 // tham số (QCParameter.code, VD "6245") sang tên thật, và đánh dấu dòng nào bấm được để
 // nhảy về đúng khu vực (Nấu/Lên men/Lọc/Chiết/Mẻ sản xuất) đang chứa mẻ/lô đó.
+// Nhãn hiển thị + điều hướng được cho 1 cặp scope_type/scope_id — DÙNG CHUNG bởi
+// qcResultsWithGroupLabel ("Kết quả QC gần đây") và bảng Deviations (cột "Phạm vi", yêu cầu
+// người dùng 2026-10-20: "mở deviation rồi, đóng rồi ... không biết mở cho mẻ nấu, lọc, hay
+// chiết, hay lên men") — Deviation.scope_type/scope_id dùng ĐÚNG quy ước PK thật giống
+// QualityResult nên tra label kiểu này là dùng lại được nguyên vẹn, không cần viết lại.
+function scopeDisplayLabel(scopeType, scopeId, ctx) {
+  const { batchById, lotById, batchTankById, batchFilterLotById, batchPackLotById, workOrderById } = ctx;
+  if (scopeType === "work_order") {
+    const w = workOrderById && workOrderById[scopeId];
+    // Chưa có route sâu hơn theo đúng WO (data-navscope work_order chỉ nhảy chung tới Điều
+    // độ) nên vẫn navigable=true kể cả khi WO không còn (mirror "batch", khác batch_tank/
+    // batch_filter_lot/batch_pack_lot vốn cần đúng bản ghi để mở chi tiết).
+    return { label: w ? `Nước nấu bia — ${w.wo_code}` : `Nước nấu bia — WO ${scopeId} (không còn tồn tại)`, navigable: true };
+  }
+  if (scopeType === "batch_tank") {
+    const [tankId, part] = scopeId.split("__");
+    const t = batchTankById && batchTankById[tankId];
+    const partLabel = part === "len_men_phu" ? " — CT phụ" : part === "len_men_chinh" ? " — CT chính" : "";
+    return { label: t ? `Lô lên men ${batchTankDisplayName(t)}${partLabel}` : `Lô lên men ${tankId}${partLabel} (không còn tồn tại)`, navigable: !!t };
+  }
+  if (scopeType === "batch_filter_lot") {
+    const f = batchFilterLotById && batchFilterLotById[scopeId];
+    return { label: f ? `Lô lọc ${f.filter_lot_code}` : `Lô lọc ${scopeId} (không còn tồn tại)`, navigable: !!f };
+  }
+  if (scopeType === "batch_pack_lot") {
+    const p = batchPackLotById && batchPackLotById[scopeId];
+    return { label: p ? `Lô thành phẩm ${p.pack_lot_code}` : `Lô thành phẩm ${scopeId} (không còn tồn tại)`, navigable: !!p };
+  }
+  if (scopeType === "batch") {
+    const b = batchById && batchById[scopeId];
+    return { label: b ? `Mẻ SX ${b.batch_code}` : `Mẻ SX ${scopeId}`, navigable: true };
+  }
+  if (scopeType === "lot") {
+    const l = lotById && lotById[scopeId];
+    return { label: l ? `Lô NVL ${l.lot_code}` : `Lô NVL ${scopeId}`, navigable: true };
+  }
+  // Dữ liệu lịch sử của module Nấu-Lọc-Chiết cũ (brew_batch/ferment/filter/bottle) đã bị gỡ
+  // bỏ khỏi UI — rơi về nhãn mặc định bên dưới (không điều hướng được) nếu còn sót bản ghi cũ.
+  return { label: `${scopeType} ${scopeId}`, navigable: false };
+}
 function qcResultsWithGroupLabel(results, ctx) {
-  const { batchById, lotById, paramByCode,
-    batchTankById, batchFilterLotById, batchPackLotById, workOrderById } = ctx;
-  const labelFor = (r) => {
-    if (r.scope_type === "work_order") {
-      const w = workOrderById && workOrderById[r.scope_id];
-      // Chưa có route sâu hơn theo đúng WO (data-navscope work_order chỉ nhảy chung tới Điều
-      // độ) nên vẫn navigable=true kể cả khi WO không còn (mirror "batch", khác batch_tank/
-      // batch_filter_lot/batch_pack_lot vốn cần đúng bản ghi để mở chi tiết).
-      return { label: w ? `Nước nấu bia — ${w.wo_code}` : `Nước nấu bia — WO ${r.scope_id} (không còn tồn tại)`, navigable: true };
-    }
-    if (r.scope_type === "batch_tank") {
-      const [tankId, part] = r.scope_id.split("__");
-      const t = batchTankById[tankId];
-      const partLabel = part === "len_men_phu" ? " — CT phụ" : part === "len_men_chinh" ? " — CT chính" : "";
-      return { label: t ? `Lô lên men ${batchTankDisplayName(t)}${partLabel}` : `Lô lên men ${tankId}${partLabel} (không còn tồn tại)`, navigable: !!t };
-    }
-    if (r.scope_type === "batch_filter_lot") {
-      const f = batchFilterLotById[r.scope_id];
-      return { label: f ? `Lô lọc ${f.filter_lot_code}` : `Lô lọc ${r.scope_id} (không còn tồn tại)`, navigable: !!f };
-    }
-    if (r.scope_type === "batch_pack_lot") {
-      const p = batchPackLotById[r.scope_id];
-      return { label: p ? `Lô thành phẩm ${p.pack_lot_code}` : `Lô thành phẩm ${r.scope_id} (không còn tồn tại)`, navigable: !!p };
-    }
-    if (r.scope_type === "batch") {
-      const b = batchById[r.scope_id];
-      return { label: b ? `Mẻ SX ${b.batch_code}` : `Mẻ SX ${r.scope_id}`, navigable: true };
-    }
-    if (r.scope_type === "lot") {
-      const l = lotById[r.scope_id];
-      return { label: l ? `Lô NVL ${l.lot_code}` : `Lô NVL ${r.scope_id}`, navigable: true };
-    }
-    // Dữ liệu lịch sử của module Nấu-Lọc-Chiết cũ (brew_batch/ferment/filter/bottle) đã bị gỡ
-    // bỏ khỏi UI — rơi về nhãn mặc định bên dưới (không điều hướng được) nếu còn sót bản ghi cũ.
-    return { label: `${r.scope_type} ${r.scope_id}`, navigable: false };
-  };
+  const { paramByCode } = ctx;
   return results.map(r => {
-    const { label, navigable } = labelFor(r);
+    const { label, navigable } = scopeDisplayLabel(r.scope_type, r.scope_id, ctx);
     const p = paramByCode[r.parameter];
     const paramLabel = p ? `${p.name}${p.unit && !p.name.includes(p.unit) ? ` (${p.unit})` : ""}` : r.parameter;
     return { ...r, groupLabel: label, navigable, paramLabel };
@@ -5814,7 +5840,7 @@ const DEV_TEXT_FIELD = {
 // hasClosedCapa/hasAnyCapa: tính sẵn ở VIEWS.quality từ GET /qc/capa — dùng để cảnh báo sớm
 // phía UI khi severity major/critical còn thiếu CAPA đã đóng (chặn thật ở backend,
 // services/quality.py::transition_deviation nhánh CLOSED).
-function devRow(d, failParams, hasClosedCapa, hasAnyCapa, capaList) {
+function devRow(d, scopeLabel, failParams, hasClosedCapa, hasAnyCapa, capaList) {
   const next = { open: ["triage"], triage: ["investigation"], investigation: ["disposition"],
     disposition: ["approval"], approval: ["closed"], closed: [] }[d.state] || [];
   const needsCapa = ["major", "critical"].includes(d.severity) && !hasClosedCapa;
@@ -5826,19 +5852,47 @@ function devRow(d, failParams, hasClosedCapa, hasAnyCapa, capaList) {
       <button class="btn sm sec" data-dt="${n}" data-did="${d.deviation_id}" data-devfield="${t.field}">→ ${n}</button>
     </span>`;
   }).join(" ");
-  const notes = [d.investigation ? `<div class="muted">Điều tra: ${esc(d.investigation)}</div>` : "",
-    d.disposition ? `<div class="muted">Xử lý: ${esc(d.disposition)}</div>` : "",
-    d.due_date ? `<div class="muted">Hạn xử lý: ${esc(d.due_date)}</div>` : "",
-    needsCapa ? `<div class="muted" style="color:var(--red)">⚠ Chưa có CAPA đóng — bắt buộc trước khi đóng deviation này.
-      <button class="btn sm sec" data-devcapa="${d.deviation_id}">+ Tạo CAPA</button></div>` : ""].join("");
+  // Điều tra/Xử lý/Ghi chú đóng dồn vào modal "Xem chi tiết" (xem devDetailModal) thay vì liệt
+  // kê thẳng trong dòng — bảng đã có thêm cột "Phạm vi" nên để dòng gọn, tránh mỗi deviation
+  // chiếm cả khối cao (yêu cầu người dùng 2026-10-20: "có nút xem chi tiết lại không", mirror
+  // đúng cách "Kết quả QC gần đây" làm — tóm tắt ở dòng, bấm "Xem chi tiết" mới thấy đầy đủ).
+  const capaWarning = needsCapa ? `<div class="muted" style="color:var(--red)">⚠ Chưa có CAPA đóng — bắt buộc trước khi đóng deviation này.
+      <button class="btn sm sec" data-devcapa="${d.deviation_id}">+ Tạo CAPA</button></div>` : "";
   const failCell = failParams && failParams.length
     ? `<span class="badge fail">${esc([...new Set(failParams)].join(", "))}</span>`
     : d.parameter ? `<span class="muted">${esc(d.parameter)} (đã chọn khi mở)</span>` : `<span class="muted">—</span>`;
   const capaCell = (capaList && capaList.length)
     ? capaList.map(c => `<button class="btn sm sec" data-opencapa="${esc(c.capa_id)}">${esc(c.capa_code)}</button>`).join(" ")
     : `<span class="muted">—</span>`;
-  return `<tr data-devid="${esc(d.deviation_id)}"><td><code class="k">${esc(d.deviation_code)}</code></td><td>${badge(d.severity)}</td>
-    <td>${esc(d.reason)}${notes}</td><td>${failCell}</td><td>${capaCell}</td><td>${badge(d.state)}</td><td style="white-space:nowrap">${actions || "—"}</td></tr>`;
+  const scopeCell = scopeLabel.navigable
+    ? `<button type="button" class="btn sm sec" data-navscope="${esc(d.scope_type)}|${esc(d.scope_id)}">${esc(scopeLabel.label)}</button>`
+    : esc(scopeLabel.label);
+  return `<tr data-devid="${esc(d.deviation_id)}"><td><code class="k">${esc(d.deviation_code)}</code></td><td class="muted">${scopeCell}</td><td>${badge(d.severity)}</td>
+    <td>${esc(d.reason)}${capaWarning}</td><td>${failCell}</td><td>${capaCell}</td><td>${badge(d.state)}</td>
+    <td style="white-space:nowrap">${actions || "—"} <button type="button" class="btn sm sec" data-devdetail="${esc(d.deviation_id)}">Xem chi tiết</button></td></tr>`;
+}
+// "Xem chi tiết" ở bảng Deviations — mirror data-qcdetail ("Kết quả QC gần đây"): dòng chỉ tóm
+// tắt, bấm mới thấy đủ Lý do/Điều tra/Xử lý/Ghi chú đóng/người-lúc mở-đóng (yêu cầu người dùng
+// 2026-10-20, tiếp sau khi thêm cột "Phạm vi" + bộ lọc Đang mở/Đã đóng/Tất cả).
+function devDetailModal(d, scopeLabel, capaList) {
+  const capaCell = (capaList && capaList.length)
+    ? capaList.map(c => `<button class="btn sm sec" data-opencapa="${esc(c.capa_id)}">${esc(c.capa_code)}</button>`).join(" ")
+    : "—";
+  modal(`<h3>Deviation ${esc(d.deviation_code)}</h3>
+    <dl class="detail">
+      <dt>Phạm vi</dt><dd>${esc(scopeLabel.label)}</dd>
+      <dt>Mức</dt><dd>${badge(d.severity)}</dd>
+      <dt>Trạng thái</dt><dd>${badge(d.state)}</dd>
+      <dt>Lý do mở</dt><dd>${esc(d.reason)}</dd>
+      <dt>Chỉ tiêu chọn lúc mở</dt><dd>${d.parameter ? esc(d.parameter) : "—"}</dd>
+      <dt>Điều tra</dt><dd>${d.investigation ? esc(d.investigation) : "—"}</dd>
+      <dt>Hướng xử lý</dt><dd>${d.disposition ? esc(d.disposition) : "—"}</dd>
+      <dt>Hạn xử lý</dt><dd>${d.due_date ? esc(d.due_date) : "—"}</dd>
+      <dt>Ghi chú đóng</dt><dd>${d.close_note ? esc(d.close_note) : "—"}</dd>
+      <dt>Người mở / lúc mở</dt><dd class="muted">${esc(d.opened_by || "—")} · ${fmt(d.opened_at)}</dd>
+      <dt>Người đóng / lúc đóng</dt><dd class="muted">${d.state === "closed" ? `${esc(d.approved_by || "—")} · ${fmt(d.closed_at)}` : "—"}</dd>
+      <dt>CAPA liên kết</dt><dd>${capaCell}</dd>
+    </dl>`);
 }
 
 // ================= TRACEABILITY =================
