@@ -779,9 +779,9 @@ def delete_qc_result(db: Session, result_id: str, user: User) -> None:
     # luôn là "loc", batch_pack_lot luôn là "thanh_pham" — 2 stage duy nhất dùng từng scope này).
     _STAGE_BY_SCOPE = {"batch_filter_lot": "loc", "batch_pack_lot": "thanh_pham"}
     if scope_type in _STAGE_BY_SCOPE:
-        sync_stage_quality_status(db, _STAGE_BY_SCOPE[scope_type], scope_type, scope_id)
+        sync_stage_quality_status(db, _STAGE_BY_SCOPE[scope_type], scope_type, scope_id, user)
     elif scope_type == "batch_tank":
-        sync_tank_quality_status(db, scope_id.rsplit("__", 1)[0])
+        sync_tank_quality_status(db, scope_id.rsplit("__", 1)[0], user)
     db.commit()
 
 
@@ -851,9 +851,9 @@ def record_stage_result(db: Session, stage: str, scope_type: str, scope_id: str,
         from . import quality
         quality.attempt_auto_release(db, scope_type, scope_id, user)
     elif scope_type in ("batch_filter_lot", "batch_pack_lot"):
-        sync_stage_quality_status(db, stage, scope_type, scope_id)
+        sync_stage_quality_status(db, stage, scope_type, scope_id, user)
     elif scope_type == "batch_tank":
-        sync_tank_quality_status(db, scope_id.rsplit("__", 1)[0])
+        sync_tank_quality_status(db, scope_id.rsplit("__", 1)[0], user)
     db.commit()
     db.refresh(result)
     return {"result_id": result.result_id, "parameter": result.parameter, "value": result.value,
@@ -891,7 +891,7 @@ def _orphaned_param_names(db: Session, codes: set) -> dict:
     return out
 
 
-def sync_stage_quality_status(db: Session, stage: str, scope_type: str, scope_id: str) -> None:
+def sync_stage_quality_status(db: Session, stage: str, scope_type: str, scope_id: str, user: User) -> None:
     """Đồng bộ BatchFilterLot/BatchPackLot.quality_status theo đúng tiến độ khai "Chỉ tiêu Lọc"/
     "Chỉ tiêu Chiết" THẬT (stage_qc_status) — 2 cột này trước đây mặc định RELEASED ngay lúc tạo
     (models/batch_pipeline.py) và KHÔNG BAO GIỜ được cập nhật lại sau đó (record_stage_result chỉ
@@ -901,7 +901,12 @@ def sync_stage_quality_status(db: Session, stage: str, scope_type: str, scope_id
     tự set cả 2 chiều (kể cả hạ về ON_HOLD, không chỉ nâng lên RELEASED như bản gốc).
 
     Gọi từ record_stage_result() (mỗi lần ghi 1 chỉ tiêu) và delete_qc_result() (xóa 1 chỉ tiêu
-    có thể làm mất chỉ tiêu bắt buộc đã đủ trước đó, phải hạ lại ON_HOLD)."""
+    có thể làm mất chỉ tiêu bắt buộc đã đủ trước đó, phải hạ lại ON_HOLD).
+
+    Ghi audit log (action "hold"/"release") CHỈ khi thật sự đổi trạng thái — trước 2026-10-16 hàm
+    này đổi `quality_status` âm thầm, không ai tra được lô bắt đầu bị giữ lúc nào/vì sao (chỉ thấy
+    "ĐANG HOLD" ở trạng thái hiện tại, "Lịch sử Hold/Release" không có dòng nào), khác hẳn set_hold()
+    (giữ/thả tay) luôn ghi audit — phát hiện qua báo cáo người dùng 2026-10-16."""
     ctx = _filter_pack_stage_context(db, scope_type, scope_id)
     if not ctx:
         return
@@ -910,11 +915,21 @@ def sync_stage_quality_status(db: Session, stage: str, scope_type: str, scope_id
                              finished_product_id=finished_product_id, beer_type_id=beer_type_id,
                              category=category)
     obj = db.get(_STAGE_LOT_MODELS[scope_type][1], scope_id)
-    obj.quality_status = (QualityStatus.ON_HOLD.value if (status["pending"] or status["has_fail"])
-                          else QualityStatus.RELEASED.value)
+    new_status = (QualityStatus.ON_HOLD.value if (status["pending"] or status["has_fail"])
+                  else QualityStatus.RELEASED.value)
+    before_status = obj.quality_status
+    obj.quality_status = new_status
+    if new_status != before_status:
+        record_audit(db, entity_type=scope_type, entity_id=scope_id,
+                    action="hold" if new_status == QualityStatus.ON_HOLD.value else "release",
+                    actor=user, before={"quality_status": before_status},
+                    after={"quality_status": new_status},
+                    reason=("Tự động hold — còn thiếu chỉ tiêu bắt buộc hoặc còn FAIL treo"
+                            if new_status == QualityStatus.ON_HOLD.value else
+                            "Tự động release — đủ chỉ tiêu bắt buộc, không còn FAIL treo"))
 
 
-def sync_tank_quality_status(db: Session, tank_id: str) -> None:
+def sync_tank_quality_status(db: Session, tank_id: str, user: User) -> None:
     """Đồng bộ BatchTank.quality_status theo tiến độ khai CT Chính/CT Phụ THẬT — mirror
     sync_stage_quality_status nhưng gộp 2 công đoạn (len_men_chinh/len_men_phu) trên CÙNG 1 tank
     thay vì 1-1 như Lọc/Thành phẩm, vì tank chỉ có 1 cột quality_status chung cho cả 2 công đoạn.
@@ -929,7 +944,10 @@ def sync_tank_quality_status(db: Session, tank_id: str) -> None:
     không có _assert_unlocked/_assert_not_on_hold nào tham chiếu tới quality_status của tank.
 
     Gọi từ record_stage_result()/delete_qc_result() mỗi khi ghi/xóa 1 chỉ tiêu scope_type=
-    "batch_tank" (scope_id dạng "{tank_id}__len_men_chinh"/"__len_men_phu" — tách lấy tank_id)."""
+    "batch_tank" (scope_id dạng "{tank_id}__len_men_chinh"/"__len_men_phu" — tách lấy tank_id).
+
+    Ghi audit log (action "hold"/"release") CHỈ khi thật sự đổi trạng thái — mirror
+    sync_stage_quality_status (xem docstring hàm đó), cùng gốc phát hiện 2026-10-16."""
     tank = db.get(BatchTank, tank_id)
     if not tank:
         return
@@ -940,7 +958,17 @@ def sync_tank_quality_status(db: Session, tank_id: str) -> None:
         if status["pending"] or status["has_fail"]:
             on_hold = True
             break
-    tank.quality_status = QualityStatus.ON_HOLD.value if on_hold else QualityStatus.RELEASED.value
+    new_status = QualityStatus.ON_HOLD.value if on_hold else QualityStatus.RELEASED.value
+    before_status = tank.quality_status
+    tank.quality_status = new_status
+    if new_status != before_status:
+        record_audit(db, entity_type="batch_tank", entity_id=tank_id,
+                    action="hold" if new_status == QualityStatus.ON_HOLD.value else "release",
+                    actor=user, before={"quality_status": before_status},
+                    after={"quality_status": new_status},
+                    reason=("Tự động hold — còn thiếu chỉ tiêu bắt buộc hoặc còn FAIL treo "
+                            "(CT Chính/Phụ)" if new_status == QualityStatus.ON_HOLD.value else
+                            "Tự động release — đủ chỉ tiêu bắt buộc, không còn FAIL treo (CT Chính/Phụ)"))
 
 
 def stage_qc_status(db: Session, stage: str, scope_type: str, scope_id: str, product_id: str = None,
@@ -1063,7 +1091,7 @@ def record_qc_sample(db: Session, stage: str, scope_type: str, scope_id: str,
                                    "results": [{"parameter": r["parameter"], "value": r.get("value")}
                                               for r in results]})
     if scope_type == "batch_tank":
-        sync_tank_quality_status(db, scope_id.rsplit("__", 1)[0])
+        sync_tank_quality_status(db, scope_id.rsplit("__", 1)[0], user)
     db.commit()
     for row in rows:
         db.refresh(row)
@@ -1129,7 +1157,7 @@ def update_qc_sample(db: Session, sample_id: str, payload: dict, user: User) -> 
                 actor=user, after={"sampled_at": sampled_at.isoformat() if sampled_at else None,
                                    "results": payload.get("results") or []})
     if rows and rows[0].scope_type == "batch_tank":
-        sync_tank_quality_status(db, rows[0].scope_id.rsplit("__", 1)[0])
+        sync_tank_quality_status(db, rows[0].scope_id.rsplit("__", 1)[0], user)
     db.commit()
     for r in rows:
         db.refresh(r)
