@@ -11547,10 +11547,40 @@ function gotoBatchFilterLot(filterLotId) {
   };
   setTimeout(tick, 50);
 }
+// Gantt/timeline "Dây chuyền chiết" — mirror cách vẽ gantt(board) ở views_ext.js (Lập lịch tank/
+// CIP/bảo trì) nhưng viết riêng ở đây vì views_ext.js bọc trong 1 IIFE (function gantt ở đó
+// không lộ ra ngoài được) và chỉ cần ĐÚNG 1 màu (đang chiết) — khoảng trống giữa các thanh tự
+// nhiên đã là "không chiết", không cần vẽ riêng (yêu cầu người dùng 2026-10-21).
+function packLineGanttSvg(report) {
+  const lines = report.lines || [];
+  const from = report.from ? new Date(report.from).getTime() : 0;
+  const to = report.to ? new Date(report.to).getTime() : 0;
+  if (!lines.length || !from || !to || to <= from) return '<div class="muted">Chưa có dữ liệu chiết theo ca trong kỳ này.</div>';
+  const W = 900, laneH = 30, padL = 150, padT = 26, H = padT + lines.length * laneH + 8, span = to - from;
+  const x = (t) => padL + (new Date(t).getTime() - from) / span * (W - padL - 12);
+  const day = 86400000;
+  let svg = `<svg viewBox="0 0 ${W} ${H}" width="100%" style="display:block;background:var(--panel2);border-radius:8px">`;
+  for (let t = Math.ceil(from / day) * day; t <= to; t += day) {
+    const xx = x(t);
+    svg += `<line x1="${xx.toFixed(1)}" y1="${padT - 4}" x2="${xx.toFixed(1)}" y2="${H - 4}" stroke="var(--border)" stroke-dasharray="2 3"/>
+      <text x="${(xx + 2).toFixed(1)}" y="14" fill="var(--muted)" font-size="9">${new Date(t).toLocaleDateString("vi-VN", { day: "2-digit", month: "2-digit" })}</text>`;
+  }
+  lines.forEach((l, i) => {
+    const y = padT + i * laneH;
+    svg += `<text x="6" y="${y + 18}" fill="var(--text)" font-size="11">${esc(l.line)}</text>
+      <line x1="${padL}" y1="${y + laneH - 1}" x2="${W - 12}" y2="${y + laneH - 1}" stroke="var(--border)"/>`;
+    (l.segments || []).forEach(s => {
+      const x1 = x(s.start_at), w = Math.max(x(s.end_at) - x1, 3);
+      svg += `<rect x="${x1.toFixed(1)}" y="${y + 4}" width="${w.toFixed(1)}" height="${laneH - 9}" rx="3" fill="#3498db">
+        <title>${esc(l.line)} · ${esc(s.pack_lot_code || "")} · Ca ${s.ca} (${fmt(s.start_at)} → ${fmt(s.end_at)})</title></rect>`;
+    });
+  });
+  return svg + "</svg>";
+}
 VIEWS.reports = async function () {
   const sec = SUB.reports || "material";
   const sections = [{ key: "material", label: "Định mức NVL" }, { key: "filling", label: "Chiết (lon)" },
-    { key: "filter", label: "Hệ lọc" }];
+    { key: "filter", label: "Hệ lọc" }, { key: "pack_line", label: "Dây chuyền chiết" }];
   let body = "";
 
   if (sec === "material") {
@@ -11599,24 +11629,59 @@ VIEWS.reports = async function () {
       </div></div>
       <div id="fp_data"><div class="panel muted">⏳ Đang tải dữ liệu từ CSDL SCADA...</div></div>`;
   } else if (sec === "filter") {
-    const days = SUB.reports_filter_days || 3650;
-    const rep = await GET(`/reports/filter-production?days=${days}`);
+    // "Từ ngày - đến ngày" tường minh (mirror bcReportSectionHtml) BÊN CẠNH các mốc "N ngày gần
+    // đây" có sẵn — chọn "custom" mới hiện 2 ô ngày + nút "Xem" (yêu cầu người dùng 2026-10-21:
+    // "thêm 1 giá trị chọn từ ngày đến ngày ... ấn xem thì sẽ xem theo lọc đó").
+    const periodMode = SUB.reports_filter_days === "custom" ? "custom" : "days";
+    const days = periodMode === "days" ? (SUB.reports_filter_days || 3650) : 3650;
+    const today = new Date(); const from30 = new Date(); from30.setDate(today.getDate() - 30);
+    const dateFrom = SUB.reports_filter_date_from || toISODateLocal(from30);
+    const dateTo = SUB.reports_filter_date_to || toISODateLocal(today);
+    const qs = periodMode === "custom" ? `date_from=${dateFrom}&date_to=${dateTo}` : `days=${days}`;
+    const rep = await GET(`/reports/filter-production?${qs}`);
     const allItems = rep.items || [];
     const clsFilter = SUB.reports_filter_cls || "";
     const items = clsFilter ? allItems.filter(r => r.classification === clsFilter) : allItems;
     const CLS_FILTER_OPTS = [["", "Tất cả"], ["thap", "Sản lượng thấp"], ["binh_thuong", "Sản lượng bình thường"], ["cao", "Sản lượng cao"]];
+    // TB/Lớn nhất/Nhỏ nhất của "Sản lượng lọc" trên ĐÚNG các dòng đang hiện (sau mọi bộ lọc) —
+    // Nhỏ nhất LOẠI TRỪ "Mẻ cuối" (mẻ vét sản lượng thấp là bình thường, không phản ánh hiệu
+    // suất thật — mirror is_final đã loại trừ ở tô màu/cảnh báo Dashboard) — yêu cầu người dùng
+    // 2026-10-21: "giá trị nhỏ nhất không tính mẻ nào là mẻ cuối".
+    const vAll = items.map(r => r.v_l);
+    const vForMin = items.filter(r => !r.is_final).map(r => r.v_l);
+    const avgV = vAll.length ? vAll.reduce((a, b) => a + b, 0) / vAll.length : null;
+    const maxV = vAll.length ? Math.max(...vAll) : null;
+    const minV = vForMin.length ? Math.min(...vForMin) : null;
+    const fmtL = (n) => n == null ? "—" : Math.round(n).toLocaleString("vi-VN") + " lít";
+    // "Tổng thời gian lọc" dạng "Xh Ym" (mirror brewDurationNoteHtml) thay vì số giờ thập phân
+    // khó đọc.
+    const fmtDurationH = (h) => { const totalMin = Math.round(h * 60);
+      return `${Math.floor(totalMin / 60)}h${String(totalMin % 60).padStart(2, "0")}`; };
     body = `<div class="panel"><h2>BC hệ lọc <span class="muted">(${items.length}${clsFilter ? `/${allItems.length}` : ""} mẻ lọc)</span></h2>
       <div class="muted" style="margin-bottom:8px">Mỗi dòng là 1 mẻ lọc — nếu cùng 1 mẻ lọc trải ra nhiều lô lọc (gõ cùng "Mẻ lọc số") thì sản lượng được cộng dồn vào 1 dòng. Bấm vào tên tank lên men để xem lại chỉ tiêu CT chính/phụ (chỉ tiêu chất lượng trước lọc).</div>
       <div class="row">
-        <div class="field"><label>Kỳ (ngày gần đây)</label>
-          <select id="rpf_days"><option value="30">30 ngày</option><option value="90">90 ngày</option><option value="365">365 ngày</option><option value="3650" ${days == 3650 ? "selected" : ""}>Tất cả</option></select></div>
+        <div class="field"><label>Kỳ</label>
+          <select id="rpf_days"><option value="30">30 ngày gần đây</option><option value="90">90 ngày gần đây</option><option value="365">365 ngày gần đây</option>
+            <option value="3650" ${periodMode === "days" && days == 3650 ? "selected" : ""}>Tất cả</option>
+            <option value="custom" ${periodMode === "custom" ? "selected" : ""}>Từ ngày - đến ngày</option></select></div>
+        ${periodMode === "custom" ? `
+        <div class="field"><label>Từ ngày</label><input id="rpf_from" type="date" value="${dateFrom}"/></div>
+        <div class="field"><label>Đến ngày</label><input id="rpf_to" type="date" value="${dateTo}"/></div>
+        <button class="btn" id="rpf_apply" style="align-self:flex-end">Xem</button>` : ""}
         <div class="field"><label>Sản lượng</label>
           <select id="rpf_cls">${CLS_FILTER_OPTS.map(([v, l]) => `<option value="${v}" ${v === clsFilter ? "selected" : ""}>${esc(l)}</option>`).join("")}</select></div>
         <button class="btn sec" id="rpf_export" style="align-self:flex-end">📥 Xuất Excel</button>
       </div>
+      <div class="row" style="margin-bottom:8px">
+        <div class="field"><label class="muted">Tổng số mẻ lọc</label><b>${items.length.toLocaleString("vi-VN")}</b></div>
+        <div class="field"><label class="muted">Tổng sản lượng lọc</label><b>${fmtL(vAll.length ? vAll.reduce((a, b) => a + b, 0) : 0)}</b></div>
+        <div class="field"><label class="muted">TB sản lượng lọc</label><b>${fmtL(avgV)}</b></div>
+        <div class="field"><label class="muted">Lớn nhất</label><b style="color:var(--green)">${fmtL(maxV)}</b></div>
+        <div class="field"><label class="muted">Nhỏ nhất <span title="Không tính mẻ nào là Mẻ cuối">(không tính Mẻ cuối)</span></label><b style="color:var(--red)">${fmtL(minV)}</b></div>
+      </div>
       <input class="searchbox" data-tbl="t_filterrep" placeholder="Tìm theo mẻ lọc số, mã lô lọc, tank, loại bia..."/>
       <div class="tablewrap"><table id="t_filterrep">
-        <thead><tr><th>Mẻ lọc số</th><th>Kiểu</th><th>Mẻ cuối</th><th>Tank lên men</th><th>Tank thành phẩm</th><th>Ngày lọc</th><th>Sản lượng lọc (lít)</th><th>Loại bia</th></tr></thead>
+        <thead><tr><th>Mẻ lọc số</th><th>Kiểu</th><th>Mẻ cuối</th><th>Tank lên men</th><th>Tank thành phẩm</th><th>Ngày bắt đầu</th><th>Ngày kết thúc</th><th>Tổng thời gian lọc</th><th>Sản lượng lọc (lít)</th><th>TB lọc/giờ</th><th>% Hiệu suất</th><th>Loại bia</th></tr></thead>
         <tbody>${items.map(r => `<tr>
           <td><code class="k">${esc(r.batch_seq_no || r.filter_lot_code || "—")}</code>
             ${r.lot_count > 1 ? `<div class="muted" style="font-size:11px">${esc(r.filter_lot_code)} (tổng ${r.lot_count} lô)</div>` : ""}</td>
@@ -11624,11 +11689,51 @@ VIEWS.reports = async function () {
           <td>${r.is_final ? '<span class="badge on_hold">Mẻ cuối</span>' : '<span class="muted">—</span>'}</td>
           <td class="muted">${r.tanks.length ? r.tanks.map(t => `<button type="button" class="btn sm sec" data-tankqc="${esc(t.tank_id)}" style="margin:1px">${esc(t.tank_lm || "?")}${t.product_name ? " — " + esc(t.product_name) : ""}</button>`).join(" ") : "—"}</td>
           <td class="muted">${r.bbt_list.length ? r.bbt_list.map(b => `<button type="button" class="btn sm sec" data-bbtqc="${esc(b.filter_lot_id)}|${esc(b.to_bbt)}" style="margin:1px">${esc(b.to_bbt)}${b.beer_type_name ? " — " + esc(b.beer_type_name) : ""}</button>`).join(" ") : "—"}</td>
+          <td class="muted">${r.started_at ? fmt(r.started_at) : "—"}</td>
           <td class="muted">${r.ended_at ? fmt(r.ended_at) : "—"}</td>
+          <td class="muted">${r.duration_hours != null ? fmtDurationH(r.duration_hours) : "—"}</td>
           <td${r.is_final ? "" : r.classification === "thap" ? ' style="color:var(--red)"' : r.classification === "cao" ? ' style="color:var(--green)"' : ""}>${r.v_l.toLocaleString("vi-VN")}</td>
+          <td class="muted">${r.avg_l_per_hour != null ? r.avg_l_per_hour.toLocaleString("vi-VN") : "—"}</td>
+          <td class="muted">${r.efficiency_pct != null ? r.efficiency_pct.toLocaleString("vi-VN") + "%" : "—"}</td>
           <td class="muted">${esc(r.beer_type_name || "—")}</td></tr>`).join("") ||
-          '<tr><td colspan=8 class="muted">Chưa có dữ liệu.</td></tr>'}</tbody>
+          '<tr><td colspan=12 class="muted">Chưa có dữ liệu.</td></tr>'}</tbody>
       </table></div>
+    </div>`;
+  } else if (sec === "pack_line") {
+    // BC "Dây chuyền chiết" — Gantt/timeline giờ chiết/không chiết theo TỪNG dây chuyền đóng
+    // gói, căn cứ đúng giờ bắt đầu/kết thúc từng CA đã xác nhận xong (mirror cách BC hệ lọc
+    // nhận "Kỳ"/"Từ ngày - đến ngày" — yêu cầu người dùng 2026-10-21).
+    const plPeriodMode = SUB.reports_pl_days === "custom" ? "custom" : "days";
+    const plDays = plPeriodMode === "days" ? (SUB.reports_pl_days || 3650) : 3650;
+    const plToday = new Date(); const plFrom30 = new Date(); plFrom30.setDate(plToday.getDate() - 30);
+    const plDateFrom = SUB.reports_pl_date_from || toISODateLocal(plFrom30);
+    const plDateTo = SUB.reports_pl_date_to || toISODateLocal(plToday);
+    const plQs = plPeriodMode === "custom" ? `date_from=${plDateFrom}&date_to=${plDateTo}` : `days=${plDays}`;
+    const plRep = await GET(`/reports/pack-line-gantt?${plQs}`);
+    const plLines = plRep.lines || [];
+    const fmtDurationH2 = (h) => { const totalMin = Math.round(h * 60);
+      return `${Math.floor(totalMin / 60)}h${String(totalMin % 60).padStart(2, "0")}`; };
+    body = `<div class="panel"><h2>BC dây chuyền chiết <span class="muted">(${plLines.length} dây chuyền)</span></h2>
+      <div class="muted" style="margin-bottom:8px">Mỗi thanh trên biểu đồ = 1 ca chiết ĐÃ xác nhận xong (đủ SL + giờ bắt đầu/kết thúc) — khoảng trống giữa các thanh là thời gian KHÔNG chiết. "Số lần chiết" tính theo SỐ LÔ CHIẾT của dây chuyền đó trong kỳ (không theo số ca).</div>
+      <div class="row">
+        <div class="field"><label>Kỳ</label>
+          <select id="rpl_days"><option value="30">30 ngày gần đây</option><option value="90">90 ngày gần đây</option><option value="365">365 ngày gần đây</option>
+            <option value="3650" ${plPeriodMode === "days" && plDays == 3650 ? "selected" : ""}>Tất cả</option>
+            <option value="custom" ${plPeriodMode === "custom" ? "selected" : ""}>Từ ngày - đến ngày</option></select></div>
+        ${plPeriodMode === "custom" ? `
+        <div class="field"><label>Từ ngày</label><input id="rpl_from" type="date" value="${plDateFrom}"/></div>
+        <div class="field"><label>Đến ngày</label><input id="rpl_to" type="date" value="${plDateTo}"/></div>
+        <button class="btn" id="rpl_apply" style="align-self:flex-end">Xem</button>` : ""}
+      </div>
+      <div class="tablewrap"><table>
+        <thead><tr><th>Dây chuyền</th><th>Số lần chiết</th><th>Tổng thời gian đã chiết</th></tr></thead>
+        <tbody>${plLines.map(l => `<tr>
+          <td><code class="k">${esc(l.line)}</code>${l.line_name ? `<div class="muted" style="font-size:11px">${esc(l.line_name)}</div>` : ""}</td>
+          <td>${l.lot_count}</td>
+          <td>${l.total_duration_hours > 0 ? fmtDurationH2(l.total_duration_hours) : "—"}</td></tr>`).join("") ||
+          '<tr><td colspan=3 class="muted">Chưa có dây chuyền nào.</td></tr>'}</tbody>
+      </table></div>
+      <div id="rpl_gantt" style="margin-top:14px">${packLineGanttSvg(plRep)}</div>
     </div>`;
   }
 
@@ -11642,16 +11747,46 @@ VIEWS.reports = async function () {
   if (sec === "filter") {
     wirePaginate("t_filterrep", 20);
     $("rpf_days").value = String(SUB.reports_filter_days || 3650);
-    $("rpf_days").onchange = () => { SUB.reports_filter_days = parseInt($("rpf_days").value); render("reports"); };
+    $("rpf_days").onchange = () => {
+      const v = $("rpf_days").value;
+      SUB.reports_filter_days = v === "custom" ? "custom" : parseInt(v);
+      render("reports");
+    };
     $("rpf_cls").onchange = () => { SUB.reports_filter_cls = $("rpf_cls").value; render("reports"); };
-    $("rpf_export").onclick = () => guard(() => downloadFile(
-      `/reports/filter-production/export?days=${SUB.reports_filter_days || 3650}`,
-      `bao_cao_he_loc_${toISODateLocal(new Date())}.xlsx`));
+    if ($("rpf_apply")) {
+      $("rpf_apply").onclick = () => {
+        SUB.reports_filter_date_from = $("rpf_from").value;
+        SUB.reports_filter_date_to = $("rpf_to").value;
+        render("reports");
+      };
+    }
+    $("rpf_export").onclick = () => guard(() => {
+      const qs = SUB.reports_filter_days === "custom"
+        ? `date_from=${SUB.reports_filter_date_from}&date_to=${SUB.reports_filter_date_to}`
+        : `days=${SUB.reports_filter_days || 3650}`;
+      return downloadFile(`/reports/filter-production/export?${qs}`,
+        `bao_cao_he_loc_${toISODateLocal(new Date())}.xlsx`);
+    });
     document.querySelectorAll("[data-tankqc]").forEach(b => b.onclick = () => guard(() => openFilterReportTankQc(b.dataset.tankqc)));
     document.querySelectorAll("[data-bbtqc]").forEach(b => b.onclick = () => guard(() => {
       const [filterLotId, toBbt] = b.dataset.bbtqc.split("|");
       return openFilterReportBbtQc(filterLotId, toBbt);
     }));
+  }
+  if (sec === "pack_line") {
+    $("rpl_days").value = String(SUB.reports_pl_days || 3650);
+    $("rpl_days").onchange = () => {
+      const v = $("rpl_days").value;
+      SUB.reports_pl_days = v === "custom" ? "custom" : parseInt(v);
+      render("reports");
+    };
+    if ($("rpl_apply")) {
+      $("rpl_apply").onclick = () => {
+        SUB.reports_pl_date_from = $("rpl_from").value;
+        SUB.reports_pl_date_to = $("rpl_to").value;
+        render("reports");
+      };
+    }
   }
   if (sec === "filling") {
     $("fp_mode").onchange = () => {
@@ -12441,6 +12576,11 @@ VIEWS.master = async function () {
         <div class="field"><label>Số giờ nấu chuẩn — Giờ</label><input id="ops_brewhr_h" type="number" min="0" step="1" value="${Math.floor((opsSettings.max_brewing_minutes ?? 480) / 60)}" style="width:100px" ${canManage ? "" : "disabled"}/></div>
         <div class="field"><label>Số giờ nấu chuẩn — Phút</label><input id="ops_brewhr_m" type="number" min="0" max="59" step="1" value="${(opsSettings.max_brewing_minutes ?? 480) % 60}" style="width:100px" ${canManage ? "" : "disabled"}/></div>
       </div>
+      <div class="muted" style="margin:10px 0 6px">Sản lượng CHUẨN ứng với 100% hiệu suất của 1 mẻ lọc — dùng để tính cột "% Hiệu suất" ở BC hệ lọc
+        (VD khai 200.000 lít, mẻ lọc thực tế lọc được 100.000 lít thì hiệu suất là 50%). Áp dụng CHUNG cho mọi mẻ lọc.</div>
+      <div class="row">
+        <div class="field"><label>Sản lượng chuẩn 100% hiệu suất mẻ lọc (lít)</label><input id="ops_filter_target_l" type="number" min="1" step="any" value="${opsSettings.filter_batch_target_l ?? 200000}" style="width:150px" ${canManage ? "" : "disabled"}/></div>
+      </div>
       ${canManage ? `<button class="btn" id="ops_save" style="margin-top:10px">Lưu tất cả cài đặt vận hành</button>` : ""}
       ${opsSettings.updated_by ? `<div class="muted" style="font-size:12px;margin-top:6px">Cập nhật lần cuối: ${esc(opsSettings.updated_by)} · ${fmt(opsSettings.updated_at)}</div>` : ""}
     </div>
@@ -12512,6 +12652,7 @@ VIEWS.master = async function () {
         session_hours: parseInt($("ops_session_hours").value, 10) || 8760,
         max_brewing_minutes: (Math.max(0, parseInt($("ops_brewhr_h").value, 10) || 0) * 60) +
           Math.max(0, Math.min(59, parseInt($("ops_brewhr_m").value, 10) || 0)),
+        filter_batch_target_l: parseFloat($("ops_filter_target_l").value) || 200000,
       });
       toast("Đã lưu cài đặt vận hành"); render("master");
     });

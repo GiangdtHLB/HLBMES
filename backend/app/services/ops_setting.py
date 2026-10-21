@@ -23,7 +23,7 @@ def get_settings(db: Session) -> OpsSetting:
                        fg_days_in_stock_warning_days=30.0,
                        finished_goods_receive_max_backdate_days=15.0, fg_day_cutoff_hour=0,
                        erp_order_volume_tolerance_hl=5.0, session_hours=SESSION_HOURS,
-                       max_brewing_minutes=480)
+                       max_brewing_minutes=480, filter_batch_target_l=200000.0)
         db.add(s)
         db.commit()
         db.refresh(s)
@@ -42,11 +42,14 @@ def update_settings(db: Session, empty_cct_tolerance_hl: float, empty_bbt_tolera
                     fg_day_cutoff_hour: int = 0,
                     erp_order_volume_tolerance_hl: float = 5.0,
                     session_hours: int = 8760,
-                    max_brewing_minutes: int = 480) -> OpsSetting:
+                    max_brewing_minutes: int = 480,
+                    filter_batch_target_l: float = 200000.0) -> OpsSetting:
     if session_hours <= 0:
         raise DomainError("Thời hạn phiên đăng nhập (giờ) phải lớn hơn 0.")
     if max_brewing_minutes <= 0:
         raise DomainError("Số giờ nấu chuẩn tối đa phải lớn hơn 0.")
+    if filter_batch_target_l <= 0:
+        raise DomainError("Sản lượng chuẩn 100% hiệu suất mẻ lọc phải lớn hơn 0.")
     s = get_settings(db)
     s.empty_cct_tolerance_hl = empty_cct_tolerance_hl
     s.empty_bbt_tolerance_hl = empty_bbt_tolerance_hl
@@ -66,6 +69,7 @@ def update_settings(db: Session, empty_cct_tolerance_hl: float, empty_bbt_tolera
     s.erp_order_volume_tolerance_hl = erp_order_volume_tolerance_hl
     s.session_hours = session_hours
     s.max_brewing_minutes = max_brewing_minutes
+    s.filter_batch_target_l = filter_batch_target_l
     s.updated_by = user.username
     s.updated_at = utcnow()
     db.commit()

@@ -2,7 +2,7 @@
 thật, không phải trạng thái ERP). Sản lượng chiết lon theo ngày+ca hiển thị trên
 dashboard lấy trực tiếp từ báo cáo SCADA thật (services/filling_external.py) — không
 tính lại ở đây."""
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 from sqlalchemy import false, select, true
@@ -39,6 +39,14 @@ VN_OFFSET = timedelta(hours=7)
 
 def _local_date(dt):
     return (dt + VN_OFFSET).date() if dt else None
+
+
+def _vn_day_start_utc(d) -> datetime:
+    """Mốc 00:00 giờ VN của ngày `d` (date), quy đổi sang datetime UTC tz-aware — nghịch đảo của
+    `_local_date` (dt + VN_OFFSET).date()). Dùng để nhận date_from/date_to dạng "yyyy-mm-dd" từ
+    client (bộ lọc "Từ ngày - Đến ngày") mà KHÔNG vỡ lỗi naive/tz-aware khi so với `ended_at` đọc
+    từ CSDL (xem cảnh báo cũ ở filter_production_report — lý do trước đây CHỈ nhận `days` int)."""
+    return datetime(d.year, d.month, d.day, tzinfo=timezone.utc) - VN_OFFSET
 
 
 def _order_counts(items: list, complete_key: str, executed_key: str) -> dict:
@@ -338,6 +346,12 @@ def _batch_filter_lot_yield_items(db: Session, date_from, date_to, low_l: float,
         last_ended = max(m.ended_at for m in members)
         if not (date_from <= last_ended < date_to):
             continue
+        # "Ngày bắt đầu" của cả nhóm (mốc SỚM NHẤT) — dùng để tính "Tổng thời gian lọc"/"TB lọc/
+        # giờ" ở filter_production_report (yêu cầu người dùng 2026-10-21). started_at optional
+        # (field mới từ migration d2e4f6a8b1c3, dữ liệu cũ có thể chưa có) — bỏ qua phần tử thiếu,
+        # None nếu KHÔNG phần tử nào trong nhóm có started_at.
+        started_candidates = [m.started_at for m in members if m.started_at]
+        first_started = min(started_candidates) if started_candidates else None
         v_dich_l = sum(draw_hl_by_batch.get(m.batch_link_id, 0.0) for m in members) * 100
         v_daw_l = sum((m.nuoc_bai_khi_hl or 0.0) for m in members) * 100
         v_l = v_dich_l + v_daw_l
@@ -365,6 +379,7 @@ def _batch_filter_lot_yield_items(db: Session, date_from, date_to, low_l: float,
             "filter_lot_code": ", ".join(lot_codes) if lot_codes else None,
             "lot_count": len(members),
             "beer_type": bt0.name if bt0 else None,
+            "started_at": first_started.isoformat() if first_started else None,
             "ended_at": last_ended.isoformat() if last_ended else None,
             "v_dich_l": round(v_dich_l, 1), "v_daw_l": round(v_daw_l, 1),
             "v_l": round(v_l, 1), "classification": cls, "classification_label": _YIELD_LABEL[cls],
@@ -373,7 +388,8 @@ def _batch_filter_lot_yield_items(db: Session, date_from, date_to, low_l: float,
     return items
 
 
-def filter_production_report(db: Session, days: int = 3650) -> list[dict]:
+def filter_production_report(db: Session, days: int = 3650, date_from_str: str = None,
+                              date_to_str: str = None) -> list[dict]:
     """Báo cáo hệ lọc (tab Báo cáo) — mỗi dòng = 1 MẺ LỌC, nhóm theo `batch_seq_no` qua NHIỀU lô
     lọc nếu có (reuse _batch_filter_lot_yield_items — yêu cầu người dùng 2026-10-01: "Tính theo
     mẻ lọc, ví dụ mẻ lọc 1 xuất hiện tại 2-3-4 lô lọc thì phải cộng dồn vào"). Mỗi dòng kèm:
@@ -408,15 +424,23 @@ def filter_production_report(db: Session, days: int = 3650) -> list[dict]:
       từ Product.beer_type_id của tank nguồn thay vì bỏ trống (yêu cầu người dùng 2026-10-01:
       "chưa thấy dịch bia nào").
     Chỉ gồm mẻ lọc ĐÃ KẾT THÚC (mirror _batch_filter_lot_yield_items — "ngày lọc" vô nghĩa với mẻ
-    chưa xong). `days` tính SERVER-SIDE từ utcnow() (mirror material_norm?days=N) — tránh nhận
-    date_from/date_to thô từ client: _batch_filter_lot_yield_items so sánh datetime NGAY TRONG
-    PYTHON (không phải ở tầng SQL), nên 1 datetime client gửi lên THIẾU tzinfo (naive) sẽ vỡ
-    TypeError khi so với `ended_at` tz-aware đọc từ CSDL — 2026-10-01, audit báo cáo "Hệ lọc".
+    chưa xong). Mặc định `days` tính SERVER-SIDE từ utcnow() (mirror material_norm?days=N) —
+    TRÁNH NHẬN datetime thô từ client vì _batch_filter_lot_yield_items so sánh NGAY TRONG PYTHON
+    (không phải tầng SQL), 1 datetime thiếu tzinfo (naive) sẽ vỡ TypeError khi so với `ended_at`
+    tz-aware đọc từ CSDL (2026-10-01, audit báo cáo "Hệ lọc"). Khi người dùng chọn "Từ ngày - Đến
+    ngày" tường minh (date_from_str/date_to_str, dạng "yyyy-mm-dd", HIỂU LÀ ngày giờ VN), quy đổi
+    qua `_vn_day_start_utc` (tz-aware) trước khi dùng — tránh đúng lỗi cũ chứ không bỏ hẳn tính
+    năng chọn khoảng ngày (yêu cầu người dùng 2026-10-21: "thêm 1 giá trị chọn từ ngày đến
+    ngày"). `date_to_str` lấy TRỌN ngày đó (mốc loại trừ = đầu ngày VN kế tiếp).
     Prefetch hàng loạt theo ID, không query trong vòng lặp."""
     from . import ops_setting as ops_setting_svc
     settings = ops_setting_svc.get_settings(db)
-    date_to = utcnow()
-    date_from = date_to - timedelta(days=days)
+    if date_from_str and date_to_str:
+        date_from = _vn_day_start_utc(date.fromisoformat(date_from_str))
+        date_to = _vn_day_start_utc(date.fromisoformat(date_to_str) + timedelta(days=1))
+    else:
+        date_to = utcnow()
+        date_from = date_to - timedelta(days=days)
     base_items = _batch_filter_lot_yield_items(
         db, date_from, date_to, settings.filter_line_yield_low_l, settings.filter_line_yield_high_l)
     if not base_items:
@@ -496,10 +520,27 @@ def filter_production_report(db: Session, days: int = 3650) -> list[dict]:
         # đã gán thẳng trên TỪNG lô của cả nhóm; chỉ dùng tới fallback (suy từ Product của tank
         # nguồn) khi KHÔNG lô nào trong nhóm có beer_type_id.
         beer_type_name = ", ".join(sorted(explicit_beer_type_names)) or ", ".join(sorted(fallback_beer_type_names)) or None
+        # Tổng thời gian lọc (giờ)/TB lọc mỗi giờ — cần CẢ started_at lẫn ended_at; None nếu
+        # thiếu started_at (dữ liệu cũ, xem _batch_filter_lot_yield_items) hoặc 2 mốc trùng/lệch
+        # (duration <= 0, dữ liệu nhập tay sai thứ tự) để tránh chia 0/âm (yêu cầu người dùng
+        # 2026-10-21: "cột tổng thời gian lọc, trung bình mỗi giờ lọc được").
+        duration_hours = None
+        if it["started_at"] and it["ended_at"]:
+            delta_h = (datetime.fromisoformat(it["ended_at"]) - datetime.fromisoformat(it["started_at"])).total_seconds() / 3600
+            if delta_h > 0:
+                duration_hours = round(delta_h, 2)
+        avg_l_per_hour = round(it["v_l"] / duration_hours, 1) if duration_hours else None
+        # % Hiệu suất = sản lượng thật / sản lượng CHUẨN 100% (1 giá trị chung cho mọi mẻ lọc,
+        # OpsSetting.filter_batch_target_l — yêu cầu người dùng 2026-10-21, ví dụ: khai 200.000
+        # lít, lọc được 100.000 lít -> 50%).
+        efficiency_pct = (round(it["v_l"] / settings.filter_batch_target_l * 100, 1)
+                         if settings.filter_batch_target_l > 0 else None)
         rows.append({
             "batch_seq_no": it["batch_seq_no"], "lot_count": it["lot_count"],
             "filter_lot_code": it["filter_lot_code"], "filter_lot_id": it["filter_lot_id"],
-            "ended_at": it["ended_at"], "v_l": it["v_l"],
+            "started_at": it["started_at"], "ended_at": it["ended_at"], "v_l": it["v_l"],
+            "duration_hours": duration_hours, "avg_l_per_hour": avg_l_per_hour,
+            "efficiency_pct": efficiency_pct,
             "beer_type_name": beer_type_name,
             "is_blend": len(tanks_in_group) > 1,
             "is_final": it["is_final"],
@@ -521,20 +562,24 @@ def _fmt_vn_dt(iso_str: Optional[str]) -> str:
     return (datetime.fromisoformat(iso_str) + VN_OFFSET).strftime("%d/%m/%Y %H:%M")
 
 
-def export_filter_production_xlsx(db: Session, days: int = 3650) -> bytes:
+def export_filter_production_xlsx(db: Session, days: int = 3650, date_from_str: str = None,
+                                   date_to_str: str = None) -> bytes:
     """Xuất báo cáo hệ lọc (filter_production_report) ra file .xlsx thật — mirror
     import_mapping.py::export_report (cùng dùng openpyxl, đã là dependency sẵn có, không cần
-    thêm thư viện) — yêu cầu người dùng 2026-10-01: "thêm mục xuất ra file excel"."""
+    thêm thư viện) — yêu cầu người dùng 2026-10-01: "thêm mục xuất ra file excel". Bổ sung
+    2026-10-21: cột Ngày bắt đầu/Ngày kết thúc/Tổng thời gian lọc/TB lọc mỗi giờ/% Hiệu suất +
+    3 dòng tổng kết TB/Lớn nhất/Nhỏ nhất cuối file (mirror đúng web — xem renderFilterReport)."""
     from openpyxl import Workbook
-    from openpyxl.styles import PatternFill
+    from openpyxl.styles import Font, PatternFill
     import io
 
-    rows = filter_production_report(db, days)
+    rows = filter_production_report(db, days, date_from_str, date_to_str)
     wb = Workbook()
     ws = wb.active
     ws.title = "Hệ lọc"
     headers = ["Mẻ lọc số", "Lô lọc", "Kiểu", "Mẻ cuối", "Tank lên men", "Tank thành phẩm",
-              "Ngày lọc", "Sản lượng lọc (lít)", "Loại bia"]
+              "Ngày bắt đầu", "Ngày kết thúc", "Tổng thời gian lọc (giờ)", "Sản lượng lọc (lít)",
+              "TB lọc/giờ (lít)", "% Hiệu suất", "Loại bia"]
     ws.append(headers)
     # Tô màu cột "Sản lượng lọc" theo đúng phân loại Thấp/Cao (mirror màu đỏ/xanh trên web) — BỎ
     # QUA dòng "Mẻ cuối" (không tô), mẻ vét sản lượng thấp là chuyện bình thường, không phải cảnh
@@ -552,7 +597,12 @@ def export_filter_production_xlsx(db: Session, days: int = 3650) -> bytes:
             "Phối" if r["is_blend"] else "Không phối",
             "Mẻ cuối" if r["is_final"] else "",
             ", ".join(tank_label(t) for t in r["tanks"] if t["tank_lm"]),
-            ", ".join(bbt_label(b) for b in r["bbt_list"]), _fmt_vn_dt(r["ended_at"]), r["v_l"],
+            ", ".join(bbt_label(b) for b in r["bbt_list"]),
+            _fmt_vn_dt(r["started_at"]), _fmt_vn_dt(r["ended_at"]),
+            r["duration_hours"] if r["duration_hours"] is not None else "",
+            r["v_l"],
+            r["avg_l_per_hour"] if r["avg_l_per_hour"] is not None else "",
+            r["efficiency_pct"] if r["efficiency_pct"] is not None else "",
             r["beer_type_name"] or "",
         ])
         fill = fill_by_cls.get(r["classification"]) if not r["is_final"] else None
@@ -560,9 +610,97 @@ def export_filter_production_xlsx(db: Session, days: int = 3650) -> bytes:
             ws.cell(row=ws.max_row, column=v_l_col).fill = fill
     for col_idx in range(1, len(headers) + 1):
         ws.column_dimensions[chr(64 + col_idx)].width = 18
+    # Tổng kết TB/Lớn nhất/Nhỏ nhất của "Sản lượng lọc (lít)" trên TOÀN BỘ các dòng đã xuất — Nhỏ
+    # nhất loại trừ "Mẻ cuối" (mẻ vét sản lượng thấp là bình thường, không phản ánh hiệu suất thật
+    # — mirror is_final đã loại trừ ở low_yield_filter_alerts/tô màu) — yêu cầu người dùng
+    # 2026-10-21: "giá trị trung bình của toàn bộ ngày đó, giá trị lớn nhất, giá trị nhỏ nhất
+    # (giá trị nhỏ nhất không tính mẻ nào là mẻ cuối)".
+    if rows:
+        v_all = [r["v_l"] for r in rows]
+        v_for_min = [r["v_l"] for r in rows if not r["is_final"]]
+        ws.append([])
+        bold = Font(bold=True)
+        for label, value in [
+            ("TB sản lượng lọc (lít)", round(sum(v_all) / len(v_all), 1)),
+            ("Lớn nhất (lít)", max(v_all)),
+            ("Nhỏ nhất (lít, không tính Mẻ cuối)", min(v_for_min) if v_for_min else "—"),
+        ]:
+            ws.append([label])
+            ws.cell(row=ws.max_row, column=1).font = bold
+            ws.cell(row=ws.max_row, column=v_l_col, value=value).font = bold
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
+
+
+def pack_line_gantt_report(db: Session, days: int = 3650, date_from_str: str = None,
+                           date_to_str: str = None) -> dict:
+    """Báo cáo "Dây chuyền chiết" (tab Báo cáo) — 1 biểu đồ Gantt/timeline cho MỖI dây chuyền
+    đóng gói (BatchPackLot.line, free-text khớp ProductionLine.code kind="line"), thể hiện
+    khoảng thời gian ĐANG CHIẾT (mỗi thanh = 1 ca ĐÃ xác nhận xong — có đủ cả SL lẫn giờ bắt
+    đầu/kết thúc, mirror đúng điều kiện BatchPackLot.ended_at property: "ca thiếu 1 trong 2
+    không tính") — khoảng trống giữa các thanh = KHÔNG CHIẾT (yêu cầu người dùng 2026-10-21:
+    "căn cứ vào giờ bắt đầu và giờ kết thúc của dây chuyền chiết ... thể hiện khoảng thời gian
+    chiết và thời gian không chiết").
+
+    Dùng dữ liệu CA (ca1/2/3_start_at/end_at/qty) thay vì bao trọn pack_date->ended_at của cả
+    lô, vì 1 lô chiết có thể trải qua nhiều ca KHÔNG LIÊN TỤC (ca1 xong, dừng, vài giờ/ngày sau
+    mới chạy ca2) — dùng bao trọn sẽ tính nhầm khoảng dừng đó thành "đang chiết".
+
+    - `lot_count` ("Số lần chiết"): đếm SỐ LÔ CHIẾT (BatchPackLot) có `line` này trong kỳ — MỖI
+      LÔ = 1 LẦN CHIẾT của dây chuyền đó (yêu cầu người dùng: "mỗi lần line đó tính là 1 lô
+      chiết của line đó") — đếm theo lô, KHÔNG theo số ca, kể cả lô chưa khai ca nào vẫn tính.
+    - `total_duration_hours` ("Tổng thời gian đã chiết"): tổng CỘNG DỒN đúng các khoảng ca đã vẽ
+      trên biểu đồ (nhất quán với chính biểu đồ — không tính khoảng dừng giữa các ca).
+    - Gồm CẢ dây chuyền đang active mà KHÔNG có lô nào trong kỳ (lot_count=0, segments=[]) để
+      thấy ngay dây chuyền nào "trắng" trong kỳ, không chỉ liệt kê dây chuyền có hoạt động.
+    Lọc theo kỳ dựa trên `pack_date` (mốc bắt đầu chiết, mirror cách màn "Lô thành phẩm" lọc
+    theo năm) — mirror filter_production_report cho cách nhận days/date_from_str/date_to_str
+    (custom date range qua `_vn_day_start_utc`, tránh lỗi naive/tz-aware)."""
+    if date_from_str and date_to_str:
+        date_from = _vn_day_start_utc(date.fromisoformat(date_from_str))
+        date_to = _vn_day_start_utc(date.fromisoformat(date_to_str) + timedelta(days=1))
+    else:
+        date_to = utcnow()
+        date_from = date_to - timedelta(days=days)
+
+    lots = db.execute(select(BatchPackLot).where(
+        BatchPackLot.pack_date >= date_from, BatchPackLot.pack_date < date_to,
+        BatchPackLot.line.is_not(None), BatchPackLot.line != "")).scalars().all()
+    lines_catalog = db.execute(select(ProductionLine).where(
+        ProductionLine.kind == "line", ProductionLine.active == true())).scalars().all()
+    line_names = {l.code: l.name for l in lines_catalog}
+
+    by_line: dict[str, dict] = {}
+    for lot in lots:
+        entry = by_line.setdefault(lot.line, {"lot_count": 0, "segments": []})
+        entry["lot_count"] += 1
+        for n in (1, 2, 3):
+            qty, start, end = (getattr(lot, f"ca{n}_qty"), getattr(lot, f"ca{n}_start_at"),
+                               getattr(lot, f"ca{n}_end_at"))
+            if qty is not None and start is not None and end is not None and end > start:
+                entry["segments"].append({"start_at": start.isoformat(), "end_at": end.isoformat(),
+                                          "pack_lot_code": lot.pack_lot_code, "ca": n, "qty": qty})
+    for code in line_names:
+        by_line.setdefault(code, {"lot_count": 0, "segments": []})
+
+    all_starts = [s["start_at"] for e in by_line.values() for s in e["segments"]]
+    all_ends = [s["end_at"] for e in by_line.values() for s in e["segments"]]
+    window_from = min(all_starts) if all_starts else date_from.isoformat()
+    window_to = max(all_ends) if all_ends else date_to.isoformat()
+
+    out_lines = []
+    for code, entry in sorted(by_line.items()):
+        total_seconds = sum(
+            (datetime.fromisoformat(s["end_at"]) - datetime.fromisoformat(s["start_at"])).total_seconds()
+            for s in entry["segments"])
+        out_lines.append({
+            "line": code, "line_name": line_names.get(code),
+            "lot_count": entry["lot_count"],
+            "total_duration_hours": round(total_seconds / 3600, 1),
+            "segments": sorted(entry["segments"], key=lambda s: s["start_at"]),
+        })
+    return {"from": window_from, "to": window_to, "lines": out_lines}
 
 
 def low_yield_filter_alerts(db: Session, days: int = 5, limit: int = 5) -> dict:

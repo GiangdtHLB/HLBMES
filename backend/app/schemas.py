@@ -164,6 +164,7 @@ class OpsSettingIn(BaseModel):
     erp_order_volume_tolerance_hl: float = 5.0
     session_hours: int = 8760   # thời hạn phiên đăng nhập (giờ) — xem routers/auth.py::login
     max_brewing_minutes: int = 480   # ngưỡng cảnh báo (không chặn) số phút nấu chuẩn tối đa
+    filter_batch_target_l: float = 200000.0   # sản lượng chuẩn (lít) ứng 100% hiệu suất 1 mẻ lọc
 
 
 class OpsSettingOut(ORMModel):
@@ -186,6 +187,7 @@ class OpsSettingOut(ORMModel):
     erp_order_volume_tolerance_hl: float = 5.0
     session_hours: int = 8760
     max_brewing_minutes: int = 480
+    filter_batch_target_l: float = 200000.0
     updated_by: Optional[str] = None
     updated_at: datetime
 
