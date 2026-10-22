@@ -23,6 +23,7 @@ from ..models.master import BeerType, FinishedProduct, Material, Product
 from ..models.materials import MaterialLot
 from ..models.quality import Deviation, QualityResult
 from ..models.quality_ext import CAPA, QCParameter
+from ..models.workorder import WorkOrder
 from . import batch_pipeline as batch_pipeline_svc
 from . import brew_order as brew_order_svc
 from . import quality as quality_svc
@@ -135,9 +136,12 @@ def production_summary(db: Session) -> dict:
 # Nhãn hiển thị + thuộc tính chứa mã người-đọc-được cho từng loại phạm vi (scope_type) mà
 # Deviation/QualityResult dùng — mirror app.js::holdScopeLabel (VIEWS.quality Hold/Release)
 # để "Lô/Phạm vi" trên Dashboard hiện đúng mã thay vì UUID scope_id thô.
-_SCOPE_MODELS = {"lot": MaterialLot, "batch": BatchExecution}
-_SCOPE_CODE_ATTR = {"lot": "lot_code", "batch": "batch_code"}
-_SCOPE_LABEL_PREFIX = {"lot": "Lô NVL", "batch": "Mẻ SX"}
+_SCOPE_MODELS = {"lot": MaterialLot, "batch": BatchExecution, "batch_tank": BatchTank,
+                 "batch_filter_lot": BatchFilterLot, "batch_pack_lot": BatchPackLot, "work_order": WorkOrder}
+_SCOPE_CODE_ATTR = {"lot": "lot_code", "batch": "batch_code", "batch_tank": "tank_code",
+                    "batch_filter_lot": "filter_lot_code", "batch_pack_lot": "pack_lot_code", "work_order": "wo_code"}
+_SCOPE_LABEL_PREFIX = {"lot": "Lô NVL", "batch": "Mẻ SX", "batch_tank": "Tank lên men",
+                       "batch_filter_lot": "Lô lọc", "batch_pack_lot": "Lô thành phẩm", "work_order": "WO"}
 _SCOPE_ID_ATTR: dict[str, str] = {}
 
 
@@ -232,29 +236,46 @@ def qc_attention_alerts(db: Session) -> dict:
         items[key]["deviation_count"] = dev_counts[key]
         items[key]["opened_at"] = dev_earliest[key]
 
-    # Lô NVL đã được duyệt (RELEASED) dù còn chỉ tiêu FAIL — từ 2026-08-01 duyệt NVL không còn
-    # bị chặn bởi FAIL (xem quality.py::_assert_releasable) nên các lô này rời khỏi on_hold, và
-    # NVL không dùng luồng deviation (xem comment ở _assert_releasable) nên cũng không có Deviation
-    # mở kèm theo — 2 khối trên vì vậy bỏ sót các lô này dù vẫn còn chỉ tiêu FAIL cần chú ý.
-    fail_lot_ids = db.execute(
-        select(QualityResult.scope_id).where(QualityResult.scope_type == "lot").distinct()
-    ).scalars().all()
-    for lot_id in fail_lot_ids:
-        key = f"lot:{lot_id}"
-        if key in items:
-            continue
-        lot = db.get(MaterialLot, lot_id)
-        if not lot or lot.quantity <= 0:
-            continue
-        latest_by_param = quality_svc.latest_results_by_param(db, "lot", lot_id)
-        if not any(r.status == ResultStatus.FAIL.value for r in latest_by_param.values()):
-            continue
-        items[key] = {"scope_type": "lot", "scope_id": lot_id, "lot_code": lot.lot_code,
-                      "scope_code": lot.lot_code, "scope_label": _scope_label("lot", lot.lot_code, lot_id),
-                      "material_code": mat_by_id[lot.material_id].code if lot.material_id in mat_by_id else None,
-                      "material_name": mat_by_id[lot.material_id].name if lot.material_id in mat_by_id else None,
-                      "quantity": lot.quantity, "uom": lot.uom, "parent_label": None,
-                      "reasons": ["qc_fail"], "deviation_count": 0, "opened_at": None}
+    # Bản ghi đã được duyệt/hoàn thành dù còn chỉ tiêu FAIL — từ 2026-08-01 duyệt NVL không còn
+    # bị chặn bởi FAIL (xem quality.py::_assert_releasable), và pipeline "Mẻ sản xuất" (mẻ nấu/
+    # tank lên men/lô lọc/lô thành phẩm/WO nước nấu) không dùng luồng deviation cho FAIL thông
+    # thường — 2 khối trên (on_hold/deviation) vì vậy bỏ sót các bản ghi này dù vẫn còn chỉ tiêu
+    # FAIL cần chú ý. TRƯỚC ĐÂY chỉ quét scope_type="lot" (lô NVL) — bỏ sót HOÀN TOÀN mọi FAIL ở
+    # pipeline "Mẻ sản xuất" (2026-10-16, người dùng báo "có rất nhiều chỉ tiêu đang fail" nhưng
+    # Dashboard hiện trống trơn — tra thực tế: 84 kết quả FAIL, 66 ở Lô lọc + 18 ở Lô thành phẩm,
+    # 0 ở Lô NVL, nên nhánh cũ không bắt được cái nào). Giờ quét ĐỦ mọi scope_type đã biết
+    # (_SCOPE_MODELS) có kết quả QC — material_code/quantity/uom chỉ có ý nghĩa với "lot", scope
+    # khác để trống (mirror khối deviation ở trên).
+    for scope_type, model in _SCOPE_MODELS.items():
+        scope_ids = db.execute(
+            select(QualityResult.scope_id).where(QualityResult.scope_type == scope_type).distinct()
+        ).scalars().all()
+        for scope_id in scope_ids:
+            key = f"{scope_type}:{scope_id}"
+            if key in items:
+                continue
+            # "batch_tank" ghép chuỗi "{tank_id}__len_men_chinh/phu" làm scope_id (1 tank có 2
+            # stage chỉ tiêu riêng, xem qc_catalog.py::batch_tank_scope_id) — không phải khóa
+            # chính thật của BatchTank, phải tách lấy đúng tank_id trước khi tra (mirror
+            # routers/brewing.py:40).
+            real_id = scope_id.split("__")[0] if scope_type == "batch_tank" else scope_id
+            obj = db.get(model, real_id)
+            if not obj:
+                continue
+            if scope_type == "lot" and obj.quantity <= 0:
+                continue
+            latest_by_param = quality_svc.latest_results_by_param(db, scope_type, scope_id)
+            if not any(r.status == ResultStatus.FAIL.value for r in latest_by_param.values()):
+                continue
+            code = getattr(obj, _SCOPE_CODE_ATTR[scope_type], None)
+            lot = obj if scope_type == "lot" else None
+            items[key] = {"scope_type": scope_type, "scope_id": scope_id, "lot_code": lot.lot_code if lot else None,
+                          "scope_code": code, "scope_label": _scope_label(scope_type, code, scope_id),
+                          "material_code": mat_by_id[lot.material_id].code if lot and lot.material_id in mat_by_id else None,
+                          "material_name": mat_by_id[lot.material_id].name if lot and lot.material_id in mat_by_id else None,
+                          "quantity": lot.quantity if lot else None, "uom": lot.uom if lot else None,
+                          "parent_label": _parent_label(db, scope_type, obj) if scope_type != "lot" else None,
+                          "reasons": ["qc_fail"], "deviation_count": 0, "opened_at": None}
 
     param_name_by_code = {p.code: p.name for p in db.execute(select(QCParameter)).scalars().all()}
     for key, item in items.items():

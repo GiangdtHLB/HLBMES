@@ -101,9 +101,18 @@ def record_result(db: Session, payload: dict, user: User) -> QualityResult:
     )
     db.add(result)
 
-    # Kết quả FAIL tự động đưa scope về ON_HOLD (tài liệu §7.5).
+    # Kết quả FAIL tự động đưa scope về ON_HOLD (tài liệu §7.5). Chỉ ghi audit "hold" khi THẬT SỰ
+    # đổi trạng thái — trước 2026-10-16 bước này đổi quality_status âm thầm, không để lại dấu vết
+    # trong "Lịch sử Hold/Release" (khác set_hold() thao tác tay, luôn ghi audit) — phát hiện qua
+    # báo cáo người dùng 2026-10-16: "sao không thấy mẻ nào onhold ở đây".
     if status == ResultStatus.FAIL.value:
-        _set_quality_status(db, scope_type, scope_id, QualityStatus.ON_HOLD.value)
+        before = _set_quality_status(db, scope_type, scope_id, QualityStatus.ON_HOLD.value)
+        prev_status = before.get("quality_status", before.get("status"))
+        if prev_status != QualityStatus.ON_HOLD.value:
+            record_audit(db, entity_type=scope_type, entity_id=scope_id, action="hold", actor=user,
+                        before=before, after={"quality_status": QualityStatus.ON_HOLD.value,
+                                              "parameter": payload["parameter"]},
+                        reason=f"Tự động hold — chỉ tiêu '{payload['parameter']}' FAIL")
     else:
         attempt_auto_release(db, scope_type, scope_id, user)
 

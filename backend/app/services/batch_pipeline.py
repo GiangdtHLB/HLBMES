@@ -1201,7 +1201,7 @@ def draw_from_filter_order(db: Session, order_id: str, payload: dict, user: User
     # quality_status khởi tạo ĐÚNG theo chỉ tiêu Lọc bắt buộc thật (ON_HOLD nếu còn thiếu) thay
     # vì mặc định cứng RELEASED của cột (bug thực tế 2026-09-23: lô lọc mới tạo, chưa khai chỉ
     # tiêu nào, vẫn hiện "released" — xem qc_catalog.sync_stage_quality_status).
-    qc_catalog.sync_stage_quality_status(db, "loc", "batch_filter_lot", fl.filter_lot_id)
+    qc_catalog.sync_stage_quality_status(db, "loc", "batch_filter_lot", fl.filter_lot_id, user)
     src_rows = []
     for t in templates:
         src = BatchFilterLotSource(link_id=new_id(), filter_lot_id=fl.filter_lot_id, source_type=t.source_type,
@@ -1332,7 +1332,7 @@ def draw_from_tank_into_filter_lot(db: Session, sources: list[dict], payload: di
     fl.qc_spec_snapshot = qc_catalog.required_params_for_stage(
         db, "loc", beer_type_id=fl.beer_type_id, category=fl.category,
         finished_product_id=fl.finished_product_id, mandatory_only=False)
-    qc_catalog.sync_stage_quality_status(db, "loc", "batch_filter_lot", fl.filter_lot_id)
+    qc_catalog.sync_stage_quality_status(db, "loc", "batch_filter_lot", fl.filter_lot_id, user)
     src_rows = []
     seq = 1
     for src, tank in zip((s for s in sources if s.get("source_type") != "filter_lot"), tanks):
@@ -1904,7 +1904,7 @@ def split_filter_lot_to_pack_lot(db: Session, filter_lot_id: str, payload: dict,
     p.qc_spec_snapshot = qc_catalog.required_params_for_stage(
         db, "thanh_pham", beer_type_id=fl.beer_type_id, category=fl.category,
         finished_product_id=p.finished_product_id, mandatory_only=False)
-    qc_catalog.sync_stage_quality_status(db, "thanh_pham", "batch_pack_lot", p.pack_lot_id)
+    qc_catalog.sync_stage_quality_status(db, "thanh_pham", "batch_pack_lot", p.pack_lot_id, user)
     genealogy.add_edge(db, from_type="batch_filter_lot", from_id=filter_lot_id, to_type="batch_pack_lot",
                        to_id=p.pack_lot_id, relation="chiết", quantity=qty, uom="L")
     record_audit(db, entity_type="batch_pack_lot", entity_id=p.pack_lot_id, action="create",
