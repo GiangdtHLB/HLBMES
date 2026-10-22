@@ -752,4 +752,5 @@ def update_ops_settings(payload: OpsSettingIn, db: Session = Depends(get_db),
                                            payload.fg_day_cutoff_hour,
                                            payload.erp_order_volume_tolerance_hl,
                                            payload.session_hours,
-                                           payload.max_brewing_minutes)
+                                           payload.max_brewing_minutes,
+                                           payload.filter_batch_target_l)

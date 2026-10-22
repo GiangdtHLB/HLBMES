@@ -176,5 +176,11 @@ class OpsSetting(Base):
     # 2026-10-16: "vẫn cho người vận hành ghi và hiển thị một ghi chú"). Mặc định 480 phút
     # (8 giờ 00) — nhập ở Cài đặt vận hành dạng giờ+phút riêng, cộng lại thành phút khi lưu.
     max_brewing_minutes: Mapped[int] = mapped_column(Integer, default=480)
+    # Sản lượng CHUẨN (lít) ứng với 100% hiệu suất của 1 mẻ lọc — dùng để tính cột "% Hiệu suất"
+    # ở báo cáo "BC hệ lọc" (services/dashboard.py::filter_production_report): hieu_suat = v_l /
+    # filter_batch_target_l * 100 (yêu cầu người dùng 2026-10-21, ví dụ: khai 200.000 lít, lọc
+    # được 100.000 lít -> 50%). MỘT giá trị chuẩn DÙNG CHUNG cho mọi mẻ lọc (không khai riêng
+    # từng mẻ/lệnh lọc — người dùng chọn phương án đơn giản nhất khi được hỏi 3 lựa chọn).
+    filter_batch_target_l: Mapped[float] = mapped_column(Float, default=200000.0)
     updated_by: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
