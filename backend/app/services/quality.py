@@ -152,6 +152,21 @@ def open_deviation(db: Session, payload: dict, user: User) -> Deviation:
     scope_type = payload.get("scope_type", "batch")
     scope_id = payload["scope_id"]
     _assert_scope_exists(db, scope_type, scope_id)
+    # Bắt buộc tick ít nhất 1 chỉ tiêu ĐANG FAIL khi mở deviation (nếu phạm vi này đang có FAIL
+    # nào) — trước đây `parameter` hoàn toàn tuỳ chọn, cho mở (và đóng) deviation "trống" không
+    # gắn với chỉ tiêu FAIL cụ thể nào, miễn có Lý do là đủ. Hệ quả: deviation đó dù đóng xong
+    # vẫn KHÔNG cover được gì ở _assert_releasable (so khớp theo mã chỉ tiêu đã tick, không đọc
+    # nội dung chữ Lý do/Điều tra) — Release vẫn bị chặn dù người xem tưởng đã xử lý xong (bug
+    # thực tế 2026-10-22, DEV-20261019-BDF92: ghi rõ "Bx" trong Điều tra nhưng không tick ô Bx
+    # lúc mở, nên vẫn không release được "Bx" sau khi đóng). Không chặn khi phạm vi KHÔNG có FAIL
+    # nào (không có gì để tick).
+    fails = {p for p, r in latest_results_by_param(db, scope_type, scope_id).items()
+            if r.status == ResultStatus.FAIL.value}
+    if fails and not (payload.get("parameter") or "").strip():
+        raise DomainError(
+            "Phạm vi này đang có chỉ tiêu FAIL — bắt buộc tick ít nhất 1 chỉ tiêu liên quan khi "
+            "mở deviation (nếu không tick, deviation đóng xong vẫn không giải phóng được Release)."
+        )
     dev = Deviation(
         deviation_id=new_id(),
         deviation_code=f"DEV-{utcnow():%Y%m%d}-{new_id()[:5].upper()}",

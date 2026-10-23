@@ -5342,8 +5342,12 @@ VIEWS.quality = async function () {
     return ` ⚠ FAIL: ${esc(uniq.slice(0, 2).join(", "))}${uniq.length > 2 ? "…" : ""}`;
   };
   const scopeStages = [
+    // hqLabel("— ĐANG HOLD") trước đây CHỈ gắn cho Lên men/Lọc/Chiết, bỏ sót "Mẻ SX" (Mẻ nấu) —
+    // khiến dropdown chỉ hiện "⚠ FAIL: ..." mà không nói rõ mẻ ĐANG on_hold hay không, trong khi
+    // tab Chất lượng lại hiện đúng badge on_hold — gây hiểu nhầm "không thấy hold ở đây" (yêu
+    // cầu người dùng 2026-10-22: "mẻ 2955 này đang hold hay không ... ở đây không thấy").
     { tag: "Mẻ SX", items: batches, keyFn: b => `batch:${b.batch_id}`,
-      optFn: b => `mẻ ${esc(b.batch_code)}` },
+      optFn: b => `mẻ ${esc(b.batch_code)}${hqLabel(b.quality_status)}` },
     // Pipeline "Mẻ SX" mới (BatchTank/BatchFilterLot/BatchPackLot) — trước đây hoàn toàn không
     // có mặt ở đây nên Hold/Release/Deviation không thấy được lô lên men/lọc/chiết của pipeline
     // mới dù đã khai báo chỉ tiêu và có FAIL (yêu cầu người dùng 2026-09-01).
@@ -5522,6 +5526,18 @@ VIEWS.quality = async function () {
   // người bấm cần thấy NGAY vì sao (chỉ tiêu nào fail/đạt) thay vì chỉ gõ lý do tự do. Quy ước
   // scope_id lưu ở QualityResult khác nhau theo loại: lot/batch dùng thẳng scope_id (khớp
   // _get_scope_obj), còn batch_tank ghép "tank_id__len_men_chinh/phu" — xem nhánh riêng bên dưới.
+  // Mã chỉ tiêu đã được 1 deviation ĐÃ ĐÓNG của ĐÚNG phạm vi này liệt kê tới — dùng `devs` (đã
+  // tải sẵn cho cả màn) để không phải gọi API riêng. Hiện ngay trong bảng tick chỉ tiêu (Hold/
+  // Release + Mở deviation) để người dùng biết chỉ tiêu nào ĐÃ được xử lý từ trước, khỏi phải
+  // mở từng deviation ra xem (yêu cầu người dùng 2026-10-22: "hiện thêm cho tôi chỉ tiêu đã
+  // được deviation, chỉ release khi toàn bộ chỉ tiêu fail đã được closed ở deviation" — vế sau
+  // là đúng hành vi _assert_releasable đã có sẵn, vế trước là phần hiển thị mới thêm ở đây).
+  const coveredParamCodes = (scopeType, scopeId) => {
+    const codes = new Set();
+    devs.filter(d => d.scope_type === scopeType && d.scope_id === scopeId && d.state === "closed" && d.parameter)
+      .forEach(d => d.parameter.split(",").forEach(c => { if (c.trim()) codes.add(c.trim()); }));
+    return codes;
+  };
   async function scopeQcParams(scopeValue) {
     const [type, id] = scopeValue.split(":");
     const paramLabel = (code) => { const p = paramByCode[code]; return p ? p.name : code; };
@@ -5551,22 +5567,25 @@ VIEWS.quality = async function () {
       return out;
     } catch (e) { return []; }
   }
-  async function renderScopeQcPanel(containerId, scopeValue) {
+  async function renderScopeQcPanel(containerId, scopeValue, autoCheckCovered = false) {
     const el = $(containerId);
     if (!el) return;
     el.innerHTML = `<span class="muted">Đang tải chỉ tiêu của phạm vi này...</span>`;
+    const [scopeType, scopeId] = scopeValue.split(":");
     const allParams = await scopeQcParams(scopeValue);
     // Chỉ hiện chỉ tiêu đang FAIL — Hold/Release/Mở deviation chỉ có ý nghĩa gắn với chỉ tiêu
     // KHÔNG đạt, chỉ tiêu pass không cần tick/không liên quan (yêu cầu người dùng 2026-09-01).
     const params = allParams.filter(p => p.status === "fail");
     if (!allParams.length) { el.innerHTML = `<span class="muted">Phạm vi này chưa khai báo chỉ tiêu chất lượng nào.</span>`; return; }
     if (!params.length) { el.innerHTML = `<span class="muted">Phạm vi này không còn chỉ tiêu nào đang FAIL.</span>`; return; }
-    el.innerHTML = `<div class="muted" style="margin-bottom:4px">Chỉ tiêu ĐANG FAIL của phạm vi này — tick chỉ tiêu liên quan tới thao tác này:</div>
-      <div style="display:flex;flex-wrap:wrap;gap:6px">${params.map(p => `
-        <label style="display:inline-flex;align-items:center;gap:4px;border:1px solid var(--border);border-radius:6px;padding:2px 8px;font-size:12px">
-          <input type="checkbox" class="scope-qc-param" value="${esc(p.code)}"/>
-          ${esc(p.label)}: ${p.value ?? "—"} ${badge(p.status)}
-        </label>`).join("")}</div>`;
+    const covered = coveredParamCodes(scopeType, scopeId);
+    el.innerHTML = `<div class="muted" style="margin-bottom:4px">Chỉ tiêu ĐANG FAIL của phạm vi này — tick chỉ tiêu liên quan tới thao tác này
+      (<span style="color:var(--green)">xanh</span> = đã có deviation đóng che phủ; Release chỉ qua khi TẤT CẢ chỉ tiêu FAIL đều xanh):</div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px">${params.map(p => { const isCovered = covered.has(p.code);
+        return `<label style="display:inline-flex;align-items:center;gap:4px;border:1px solid ${isCovered ? "var(--green)" : "var(--border)"};border-radius:6px;padding:2px 8px;font-size:12px">
+          <input type="checkbox" class="scope-qc-param" value="${esc(p.code)}" ${autoCheckCovered && isCovered ? "checked" : ""}/>
+          ${esc(p.label)}: ${p.value ?? "—"} ${badge(p.status)}${isCovered ? ` <span style="color:var(--green)">✓ đã đóng deviation</span>` : ""}
+        </label>`; }).join("")}</div>`;
   }
   const checkedParams = (containerId) => Array.from(document.querySelectorAll(`#${containerId} .scope-qc-param:checked`))
     .map(i => i.value).join(",") || null;
@@ -5582,9 +5601,13 @@ VIEWS.quality = async function () {
       targetSelect.closest(".panel")?.scrollIntoView({ behavior: "smooth", block: "start" });
     }
   }
-  renderScopeQcPanel("h_scope_qc", $("h_scope").value);
+  // Tự tick sẵn các chỉ tiêu ĐÃ được deviation đóng che phủ ở panel Hold/Release (RIÊNG panel
+  // này — "để release", không áp dụng cho Mở Deviation vì ở đó cần tick chỉ tiêu CHƯA xử lý,
+  // tick sẵn cái đã xử lý rồi không có ý nghĩa) — đỡ phải tự tick tay trước khi bấm RELEASE
+  // (yêu cầu người dùng 2026-10-22: "tự chọn chỉ tiêu đã đóng để release").
+  renderScopeQcPanel("h_scope_qc", $("h_scope").value, true);
   renderScopeQcPanel("d_scope_qc", $("d_scope").value);
-  $("h_scope").addEventListener("change", () => renderScopeQcPanel("h_scope_qc", $("h_scope").value));
+  $("h_scope").addEventListener("change", () => renderScopeQcPanel("h_scope_qc", $("h_scope").value, true));
   $("d_scope").addEventListener("change", () => renderScopeQcPanel("d_scope_qc", $("d_scope").value));
   $("h_hold").onclick = () => guard(async () => {
     const reason = $("h_hold_reason").value.trim();
@@ -5602,8 +5625,15 @@ VIEWS.quality = async function () {
   wireSelectSearch("d_scope", "d_scope_q");
   $("dev_state_filter").onchange = () => { DEV_STATE_FILTER = $("dev_state_filter").value; render("quality"); };
   $("d_open").onclick = () => guard(async () => {
+    const paramVal = checkedParams("d_scope_qc");
+    // Bắt buộc tick ít nhất 1 chỉ tiêu ĐANG FAIL khi phạm vi này có FAIL nào — chặn sớm phía UI
+    // (backend cũng tự chặn, đây chỉ để báo lỗi rõ ràng ngay, mirror services/quality.py::
+    // open_deviation). Không chặn khi phạm vi không có chỉ tiêu FAIL nào (không có gì để tick).
+    if (document.querySelectorAll("#d_scope_qc .scope-qc-param").length > 0 && !paramVal) {
+      throw new Error("Phạm vi này đang có chỉ tiêu FAIL — bắt buộc tick ít nhất 1 chỉ tiêu liên quan trước khi mở deviation (không tick thì đóng xong vẫn không giải phóng được Release).");
+    }
     await POST("/quality/deviations", { ...parseScope($("d_scope").value), severity: $("d_sev").value,
-      reason: $("d_reason").value, parameter: checkedParams("d_scope_qc"), due_date: $("d_due").value || null });
+      reason: $("d_reason").value, parameter: paramVal, due_date: $("d_due").value || null });
     toast("Đã mở deviation"); render("quality");
   });
   document.querySelectorAll("[data-dt]").forEach(b => b.onclick = () => guard(async () => {
