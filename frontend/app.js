@@ -27,6 +27,13 @@ let PENDING_OPEN_DEVIATION_ID = null;  // deviation_id — set khi bấm mã Dev
 // 2026-10-20: "mở deviation rồi, đóng rồi ... giờ không biết xem lại ở đâu".
 let DEV_STATE_FILTER = "open";
 
+// Ẩn/hiện các dòng "Lịch sử Hold/Release" ứng với mẻ/lô ĐÃ BỊ XÓA — mặc định ẨN (đỡ rối, vì
+// phạm vi không còn tồn tại để xem lại), có thể bật lại khi cần tra cứu đầy đủ (yêu cầu người
+// dùng 2026-10-24: thấy UUID lạ trong lịch sử, hỏi "lô đã xóa không cần hiện ra có được không").
+// CHỈ ẩn ở MÀN HÌNH, không xóa dòng audit_log nào — dữ liệu gốc vẫn giữ nguyên, bật lại checkbox
+// là thấy đủ ngay.
+let HIDE_DELETED_HOLD_HIST = true;
+
 async function api(path, opts = {}) {
   const headers = { "Content-Type": "application/json" };
   if (TOKEN) headers["Authorization"] = "Bearer " + TOKEN;
@@ -5373,13 +5380,27 @@ VIEWS.quality = async function () {
   // Nhãn hiển thị cho lịch sử Hold/Release — scope_id ở đây LUÔN là PK thật (khác quy ước
   // scope_id ghép chuỗi của qc_catalog dùng cho khai báo chỉ tiêu), xem services/quality.py.
   const holdScopeLabel = (scopeType, scopeId) => {
-    if (scopeType === "batch") return `Mẻ SX ${batchById[scopeId] ? esc(batchById[scopeId].batch_code) : scopeId}`;
-    if (scopeType === "lot") return `Lô NVL ${lotById[scopeId] ? esc(lotById[scopeId].lot_code) : scopeId}`;
-    if (scopeType === "batch_tank") return batchTankById[scopeId] ? esc(batchTankDisplayName(batchTankById[scopeId])) : `Tank ${scopeId}`;
-    if (scopeType === "batch_filter_lot") return `Lô lọc ${batchFilterLotById[scopeId] ? esc(batchFilterLotById[scopeId].filter_lot_code) : scopeId}`;
-    if (scopeType === "batch_pack_lot") return `Lô TP ${batchPackLotById[scopeId] ? esc(batchPackLotById[scopeId].pack_lot_code) : scopeId}`;
+    const gone = " <span class=\"muted\">(đã xóa)</span>";
+    if (scopeType === "batch") return batchById[scopeId] ? `Mẻ SX ${esc(batchById[scopeId].batch_code)}` : `Mẻ SX ${scopeId}${gone}`;
+    if (scopeType === "lot") return lotById[scopeId] ? `Lô NVL ${esc(lotById[scopeId].lot_code)}` : `Lô NVL ${scopeId}${gone}`;
+    if (scopeType === "batch_tank") return batchTankById[scopeId] ? esc(batchTankDisplayName(batchTankById[scopeId])) : `Tank ${scopeId}${gone}`;
+    if (scopeType === "batch_filter_lot") return batchFilterLotById[scopeId] ? `Lô lọc ${esc(batchFilterLotById[scopeId].filter_lot_code)}` : `Lô lọc ${scopeId}${gone}`;
+    if (scopeType === "batch_pack_lot") return batchPackLotById[scopeId] ? `Lô TP ${esc(batchPackLotById[scopeId].pack_lot_code)}` : `Lô TP ${scopeId}${gone}`;
     return `${esc(scopeType)} ${scopeId}`;
   };
+  // true nếu phạm vi của dòng lịch sử này đã bị xóa khỏi hệ thống — dùng để lọc checkbox "Ẩn các
+  // bản ghi đã xóa" (mirror đúng 5 nhánh đã biết xử lý ở holdScopeLabel, loại khác coi như còn).
+  const holdScopeDeleted = (scopeType, scopeId) => {
+    if (scopeType === "batch") return !batchById[scopeId];
+    if (scopeType === "lot") return !lotById[scopeId];
+    if (scopeType === "batch_tank") return !batchTankById[scopeId];
+    if (scopeType === "batch_filter_lot") return !batchFilterLotById[scopeId];
+    if (scopeType === "batch_pack_lot") return !batchPackLotById[scopeId];
+    return false;
+  };
+  const deletedHoldHistCount = holdHistory.filter(h => holdScopeDeleted(h.entity_type, h.entity_id)).length;
+  const holdHistToShow = HIDE_DELETED_HOLD_HIST
+    ? holdHistory.filter(h => !holdScopeDeleted(h.entity_type, h.entity_id)) : holdHistory;
   // Lọc đúng "Lô NVL" (material_id có giá trị) — lô bright tank/thành phẩm cũng dùng chung
   // MaterialLot.status=on_hold cho lý do khác (QC mẻ/sản phẩm, không phải chỉ tiêu NVL) nên
   // không có material_id; hiện lẫn vào đây sẽ mở "Khai báo/Duyệt" ra trống trơn (không có chỉ
@@ -5483,11 +5504,14 @@ VIEWS.quality = async function () {
         </div>
         <div class="muted" style="margin-bottom:8px">Deviation mức <b>major/critical</b> bắt buộc phải có CAPA liên kết đã đóng (root cause + action plan + hiệu lực + ngày kiểm tra) trước khi đóng được.</div>
         <div id="d_scope_qc" class="muted" style="margin-bottom:8px">Đang tải chỉ tiêu của phạm vi này...</div>
-        <h3>Lịch sử Hold/Release <span class="muted">(${holdHistory.length})</span></h3>
-        <input class="searchbox" data-tbl="t_holdrelease" placeholder="Tìm theo phạm vi, hành động, lý do, người thực hiện..."/>
+        <h3>Lịch sử Hold/Release <span class="muted">(${holdHistToShow.length}${HIDE_DELETED_HOLD_HIST && deletedHoldHistCount ? `, đã ẩn ${deletedHoldHistCount} dòng của phạm vi đã xóa` : ""})</span></h3>
+        <div class="row" style="align-items:center;margin-bottom:6px">
+          <input class="searchbox" data-tbl="t_holdrelease" placeholder="Tìm theo phạm vi, hành động, lý do, người thực hiện..." style="flex:1"/>
+          <label class="muted" style="white-space:nowrap"><input type="checkbox" id="h_hide_deleted" ${HIDE_DELETED_HOLD_HIST ? "checked" : ""}/> Ẩn các bản ghi của phạm vi đã xóa</label>
+        </div>
         <div class="tablewrap" style="margin-top:6px"><table id="t_holdrelease">
           <thead><tr><th>Lúc</th><th>Phạm vi</th><th>Hành động</th><th>Lý do</th><th>Chỉ tiêu liên quan</th><th>Người thực hiện</th></tr></thead>
-          <tbody>${holdHistory.map(h => `<tr>
+          <tbody>${holdHistToShow.map(h => `<tr>
             <td class="muted">${fmt(h.ts)}</td>
             <td>${holdScopeLabel(h.entity_type, h.entity_id)}</td>
             <td>${h.action === "hold" ? badge("on_hold") + "HOLD" : badge("available") + "RELEASE"}</td>
@@ -5624,6 +5648,7 @@ VIEWS.quality = async function () {
   wireSelectSearch("h_scope", "h_scope_q");
   wireSelectSearch("d_scope", "d_scope_q");
   $("dev_state_filter").onchange = () => { DEV_STATE_FILTER = $("dev_state_filter").value; render("quality"); };
+  $("h_hide_deleted").onchange = () => { HIDE_DELETED_HOLD_HIST = $("h_hide_deleted").checked; render("quality"); };
   $("d_open").onclick = () => guard(async () => {
     const paramVal = checkedParams("d_scope_qc");
     // Bắt buộc tick ít nhất 1 chỉ tiêu ĐANG FAIL khi phạm vi này có FAIL nào — chặn sớm phía UI
