@@ -155,16 +155,22 @@ STEP_LABELS_BY_EQUIPMENT = {
         19: "WHP1 End",
     },
 }
-# Dây nấu 2 dùng CHUNG đúng số thứ tự + tên bước với dây nấu 1 cho 4 thiết bị này — xác nhận
-# người dùng 2026-11-01: "các bước của nồi malt 2 giống nồi malt 1, nồi lọc 2 giống nồi lọc 1,
-# nồi trung gian 2 giống nồi trung gian 1, nồi lắng xoáy 2 giống nồi lắng xoáy 1" (giữ nguyên tên
-# "MT1/LT1/HV1/WHP1..." dù là thiết bị dây 2, vì người dùng nói "giống" chứ không đổi tên riêng).
-# Nồi sôi hoa 2 (ID=11) cũng giống nồi sôi hoa 1 — xác nhận người dùng 2026-11-01.
-STEP_LABELS_BY_EQUIPMENT[8] = STEP_LABELS_BY_EQUIPMENT[2]    # Nồi malt 2
-STEP_LABELS_BY_EQUIPMENT[9] = STEP_LABELS_BY_EQUIPMENT[3]    # Nồi lọc 2
-STEP_LABELS_BY_EQUIPMENT[10] = STEP_LABELS_BY_EQUIPMENT[4]   # Nồi trung gian 2
-STEP_LABELS_BY_EQUIPMENT[11] = STEP_LABELS_BY_EQUIPMENT[5]   # Nồi sôi hoa 2
-STEP_LABELS_BY_EQUIPMENT[12] = STEP_LABELS_BY_EQUIPMENT[6]   # Nồi lắng xoáy 2
+def _relabel(labels: dict, old_prefix: str, new_prefix: str) -> dict:
+    """Nhân bản bộ tên bước, đổi tiền tố mã thiết bị (vd "MT1 ..." -> "MT2 ...") cho dây nấu 2."""
+    return {step_no: name.replace(old_prefix, new_prefix, 1) for step_no, name in labels.items()}
+
+
+# Dây nấu 2 dùng CHUNG đúng số thứ tự bước với dây nấu 1 cho 4 thiết bị này — xác nhận người dùng
+# 2026-11-01: "các bước của nồi malt 2 giống nồi malt 1, nồi lọc 2 giống nồi lọc 1, nồi trung gian
+# 2 giống nồi trung gian 1, nồi lắng xoáy 2 giống nồi lắng xoáy 1" (nồi sôi hoa 2 cũng giống nồi
+# sôi hoa 1). Tên bước đổi tiền tố "1"->"2" (MT1->MT2, LT1->LT2, HV1->HV2, WK1->WK2, WHP1->WHP2)
+# để đúng với thiết bị dây 2 — xác nhận người dùng 2026-11-01: "chuyển tất cả như sau: MT1 thành
+# MT2, LT1 thành LT2, HV1 thành HV2, WK1 thành WK2, WHP1 thành WHP2".
+STEP_LABELS_BY_EQUIPMENT[8] = _relabel(STEP_LABELS_BY_EQUIPMENT[2], "MT1", "MT2")    # Nồi malt 2
+STEP_LABELS_BY_EQUIPMENT[9] = _relabel(STEP_LABELS_BY_EQUIPMENT[3], "LT1", "LT2")    # Nồi lọc 2
+STEP_LABELS_BY_EQUIPMENT[10] = _relabel(STEP_LABELS_BY_EQUIPMENT[4], "HV1", "HV2")   # Nồi trung gian 2
+STEP_LABELS_BY_EQUIPMENT[11] = _relabel(STEP_LABELS_BY_EQUIPMENT[5], "WK1", "WK2")   # Nồi sôi hoa 2
+STEP_LABELS_BY_EQUIPMENT[12] = _relabel(STEP_LABELS_BY_EQUIPMENT[6], "WHP1", "WHP2") # Nồi lắng xoáy 2
 
 
 def _get_brewhouse_connection(db: Session):
@@ -199,6 +205,16 @@ def _row_to_status(row, equipment_id: int) -> dict:
         # 2026-10-31 + 2026-11-01).
         "step_minutes": float(row.StTime_AV) if row.StTime_AV is not None else None,
         "step_minutes_setpoint": float(row.SpTime) if row.SpTime is not None else None,
+        # Độ đục dịch lọc (EBC) thực/đặt — chỉ có ý nghĩa ở Nồi lọc (xác nhận người dùng 2026-11-01).
+        "ebc_actual": float(row.EBC) if row.EBC is not None else None,
+        "ebc_setpoint": float(row.SpEBC) if row.SpEBC is not None else None,
+        # Khí thổi (AirFlow, lít/phút) — chỉ có ý nghĩa ở Nồi lắng xoáy, không có setpoint riêng
+        # (xác nhận người dùng 2026-11-01).
+        "air_flow": float(row.AirFlow) if row.AirFlow is not None else None,
+        # Lưu lượng chuyển dịch thực/đặt (hl/h) — chỉ có ý nghĩa ở Chuyển dịch lạnh nhanh
+        # (xác nhận người dùng 2026-11-01).
+        "flow_actual": float(row.Flow) if row.Flow is not None else None,
+        "flow_setpoint": float(row.SpFlow) if row.SpFlow is not None else None,
     }
 
 
@@ -213,7 +229,8 @@ def brewhouse_equipment_realtime_status(db: Session, equipment_id: int = RICE_CO
             with engine.connect() as db_conn:
                 row = db_conn.execute(
                     select(tbl.c.NewStep, tbl.c.BA_Year, tbl.c.BA_ONo, tbl.c.BA_BNo, tbl.c.EOPState,
-                           tbl.c.S_0201TET, tbl.c.SPTemp, tbl.c.Volume, tbl.c.StTime_AV, tbl.c.SpTime)
+                           tbl.c.S_0201TET, tbl.c.SPTemp, tbl.c.Volume, tbl.c.StTime_AV, tbl.c.SpTime,
+                           tbl.c.EBC, tbl.c.SpEBC, tbl.c.AirFlow, tbl.c.Flow, tbl.c.SpFlow)
                     .where(tbl.c.ID == equipment_id)
                     .limit(1)
                 ).first()
@@ -240,7 +257,7 @@ def brewhouse_overview(db: Session) -> dict:
                 rows = db_conn.execute(
                     select(tbl.c.ID, tbl.c.NewStep, tbl.c.BA_Year, tbl.c.BA_ONo, tbl.c.BA_BNo,
                            tbl.c.EOPState, tbl.c.S_0201TET, tbl.c.SPTemp, tbl.c.Volume, tbl.c.StTime_AV,
-                           tbl.c.SpTime)
+                           tbl.c.SpTime, tbl.c.EBC, tbl.c.SpEBC, tbl.c.AirFlow, tbl.c.Flow, tbl.c.SpFlow)
                     .where(tbl.c.ID.in_(EQUIPMENT_NAMES.keys()))
                 ).all()
     finally:
