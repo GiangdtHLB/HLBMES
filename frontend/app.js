@@ -11126,16 +11126,18 @@ const RICE_EOP_STATE_META = {
 function riceRecipeOperationTable(s) {
   const meta = RICE_EOP_STATE_META[s.eop_state_label] || { opLabel: "—", color: "var(--muted)" };
   const minutes = s.step_minutes != null ? s.step_minutes.toFixed(1) : "—";
+  const spMinutes = s.step_minutes_setpoint != null ? s.step_minutes_setpoint.toFixed(1) : "—";
   const row = (label, valueHtml) =>
-    `<tr><td style="padding:3px 8px;color:var(--muted)">${label}</td><td style="padding:3px 8px;text-align:right">${valueHtml}</td></tr>`;
+    `<tr><td style="padding:3px 8px;color:var(--muted);white-space:nowrap">${label}</td><td style="padding:3px 8px;text-align:right">${valueHtml}</td></tr>`;
   return `
-  <div style="max-width:150px;margin:0 auto;border:1px solid var(--border);border-radius:6px;overflow:hidden;font-size:11px">
+  <div style="max-width:190px;margin:0 auto;border:1px solid var(--border);border-radius:6px;overflow:hidden;font-size:11px">
     <div style="background:var(--border);padding:3px 6px;font-weight:700;text-align:left">Recipe Operation</div>
     <table style="width:100%;border-collapse:collapse">
       ${row("Step", s.step_no ?? "—")}
       ${row("Status", `<span style="background:${meta.color}33;color:${meta.color};font-weight:700;padding:1px 6px;border-radius:3px">${esc(meta.opLabel)}</span>`)}
       ${row("Name", esc(s.step || "—"))}
       ${row("Time (phút)", minutes)}
+      ${row("Đặt (phút)", spMinutes)}
     </table>
   </div>`;
 }
@@ -11154,9 +11156,9 @@ function equipmentCard(name, img, s, overlay = true) {
   const year = s.ba_year != null ? (s.ba_year < 100 ? 2000 + s.ba_year : s.ba_year) : null;
   const grainText = "#1a1308";  // chữ tối trên nền vàng gạo (ảnh) cho đủ tương phản
   const row = (label, value) =>
-    `<tr><td style="padding:1px 6px;color:var(--muted)">${label}</td><td style="padding:1px 6px;text-align:right">${value}</td></tr>`;
+    `<tr><td style="padding:1px 6px;color:var(--muted);white-space:nowrap">${label}</td><td style="padding:1px 6px;text-align:right">${value}</td></tr>`;
   return `
-  <div style="max-width:150px;margin:0 auto;text-align:center;flex:none">
+  <div style="max-width:190px;margin:0 auto;text-align:center;flex:none">
     <div style="font-size:12px;font-weight:700;margin-bottom:4px">${esc(name)}</div>
     ${riceRecipeOperationTable(s)}
     <div style="position:relative;margin-top:8px">
@@ -11168,7 +11170,7 @@ function equipmentCard(name, img, s, overlay = true) {
       </div>
       <div style="position:absolute;top:61%;left:0;right:0;font-size:13px;font-weight:700;color:${grainText}">${vol}</div>` : ""}
     </div>
-    <table style="width:100%;max-width:150px;margin:6px auto 0;border-collapse:collapse;font-size:11px">
+    <table style="width:100%;max-width:190px;margin:6px auto 0;border-collapse:collapse;font-size:11px">
       ${row("Order Number", esc(s.ba_order_no ?? "—"))}
       ${row("Batch Number", esc(s.ba_batch_no ?? "—"))}
       ${row("Year", esc(year ?? "—"))}

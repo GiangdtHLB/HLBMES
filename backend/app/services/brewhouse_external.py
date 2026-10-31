@@ -194,9 +194,11 @@ def _row_to_status(row, equipment_id: int) -> dict:
         "temp_actual": float(row.S_0201TET) if row.S_0201TET is not None else None,
         "temp_setpoint": float(row.SPTemp) if row.SPTemp is not None else None,
         "volume_hl": float(row.Volume) if row.Volume is not None else None,
-        # Thời gian đã chạy trong bước hiện tại (phút) — cột StTime_AV, đơn vị phút sẵn trong CSDL
-        # nguồn (xác nhận người dùng 2026-10-31, vd 0.2333333 = ~14 giây sau khi vào bước mới).
+        # Thời gian đã chạy trong bước hiện tại (phút, StTime_AV) và thời gian ĐẶT cho bước đó
+        # (phút, SpTime) — 2 cột riêng, đơn vị phút sẵn trong CSDL nguồn (xác nhận người dùng
+        # 2026-10-31 + 2026-11-01).
         "step_minutes": float(row.StTime_AV) if row.StTime_AV is not None else None,
+        "step_minutes_setpoint": float(row.SpTime) if row.SpTime is not None else None,
     }
 
 
@@ -211,7 +213,7 @@ def brewhouse_equipment_realtime_status(db: Session, equipment_id: int = RICE_CO
             with engine.connect() as db_conn:
                 row = db_conn.execute(
                     select(tbl.c.NewStep, tbl.c.BA_Year, tbl.c.BA_ONo, tbl.c.BA_BNo, tbl.c.EOPState,
-                           tbl.c.S_0201TET, tbl.c.SPTemp, tbl.c.Volume, tbl.c.StTime_AV)
+                           tbl.c.S_0201TET, tbl.c.SPTemp, tbl.c.Volume, tbl.c.StTime_AV, tbl.c.SpTime)
                     .where(tbl.c.ID == equipment_id)
                     .limit(1)
                 ).first()
@@ -237,7 +239,8 @@ def brewhouse_overview(db: Session) -> dict:
             with engine.connect() as db_conn:
                 rows = db_conn.execute(
                     select(tbl.c.ID, tbl.c.NewStep, tbl.c.BA_Year, tbl.c.BA_ONo, tbl.c.BA_BNo,
-                           tbl.c.EOPState, tbl.c.S_0201TET, tbl.c.SPTemp, tbl.c.Volume, tbl.c.StTime_AV)
+                           tbl.c.EOPState, tbl.c.S_0201TET, tbl.c.SPTemp, tbl.c.Volume, tbl.c.StTime_AV,
+                           tbl.c.SpTime)
                     .where(tbl.c.ID.in_(EQUIPMENT_NAMES.keys()))
                 ).all()
     finally:
