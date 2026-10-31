@@ -81,6 +81,20 @@ def filling_realtime(db: Session = Depends(get_db), user: User = Depends(get_cur
     return filling_external.filling_realtime_status(db)
 
 
+@router.get("/brewhouse-realtime")
+def brewhouse_realtime(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """Trạng thái tức thời nồi gạo (bảng Brewhouse_Realtime, ID=1, cùng kết nối purpose="filling")."""
+    from ..services import brewhouse_external
+    return brewhouse_external.rice_cooker_realtime_status(db)
+
+
+@router.get("/brewhouse-overview")
+def brewhouse_overview(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """Trạng thái tức thời TOÀN BỘ thiết bị hệ nấu (nồi gạo + 2 dây nấu), 1 lượt duy nhất."""
+    from ..services import brewhouse_external
+    return brewhouse_external.brewhouse_overview(db)
+
+
 @router.get("/filling-report")
 def filling_report(date_from: datetime = None, date_to: datetime = None,
                    db: Session = Depends(get_db), user: User = Depends(get_current_user)):
