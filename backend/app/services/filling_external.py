@@ -251,7 +251,8 @@ def filling_realtime_status(db: Session) -> dict:
             with engine.connect() as db_conn:
                 row = db_conn.execute(
                     select(tbl.c.MachineRunning, tbl.c.Production_Flow, tbl.c.TotalProduct,
-                           tbl.c.TotalCan, tbl.c.LastUpdate, tbl.c.MachineSpeed)
+                           tbl.c.TotalCan, tbl.c.LastUpdate, tbl.c.MachineSpeed,
+                           tbl.c.Clean_Fulshing, tbl.c.RinsReturnGasChannel)
                     .order_by(tbl.c.LastUpdate.desc()).limit(1)
                 ).first()
     finally:
@@ -266,6 +267,10 @@ def filling_realtime_status(db: Session) -> dict:
         "machine_speed": float(row.MachineSpeed) if row.MachineSpeed is not None else None,
         "total_product": float(row.TotalProduct) if row.TotalProduct is not None else None,
         "total_can": int(row.TotalCan) if row.TotalCan is not None else None,
+        # Tráng nước nóng (CIP) / đuổi CO2 — 2 tín hiệu phụ của máy chiết 30K, cùng quy ước
+        # 1=đang chạy/0=đang dừng như MachineRunning (yêu cầu người dùng 2026-10-31).
+        "clean_flushing": bool(row.Clean_Fulshing) if row.Clean_Fulshing is not None else None,
+        "rins_return_gas_channel": bool(row.RinsReturnGasChannel) if row.RinsReturnGasChannel is not None else None,
         "last_update": row.LastUpdate.isoformat() if row.LastUpdate else None,
         "connection_name": conn.name,
     }

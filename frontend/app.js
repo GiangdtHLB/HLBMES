@@ -27,6 +27,13 @@ let PENDING_OPEN_DEVIATION_ID = null;  // deviation_id — set khi bấm mã Dev
 // 2026-10-20: "mở deviation rồi, đóng rồi ... giờ không biết xem lại ở đâu".
 let DEV_STATE_FILTER = "open";
 
+// Ẩn/hiện các dòng "Lịch sử Hold/Release" ứng với mẻ/lô ĐÃ BỊ XÓA — mặc định ẨN (đỡ rối, vì
+// phạm vi không còn tồn tại để xem lại), có thể bật lại khi cần tra cứu đầy đủ (yêu cầu người
+// dùng 2026-10-24: thấy UUID lạ trong lịch sử, hỏi "lô đã xóa không cần hiện ra có được không").
+// CHỈ ẩn ở MÀN HÌNH, không xóa dòng audit_log nào — dữ liệu gốc vẫn giữ nguyên, bật lại checkbox
+// là thấy đủ ngay.
+let HIDE_DELETED_HOLD_HIST = true;
+
 async function api(path, opts = {}) {
   const headers = { "Content-Type": "application/json" };
   if (TOKEN) headers["Authorization"] = "Bearer " + TOKEN;
@@ -518,6 +525,7 @@ document.querySelectorAll("#nav .nav-topgroup").forEach(b => {
 function render(view) {
   if (window.__rt) { clearInterval(window.__rt); window.__rt = null; }  // dừng auto-refresh realtime
   if (window.__rt30k) { clearInterval(window.__rt30k); window.__rt30k = null; }
+  if (window.__rtRice) { clearInterval(window.__rtRice); window.__rtRice = null; }
   if (window.__scRetry) { clearInterval(window.__scRetry); window.__scRetry = null; }
   guard(VIEWS[view]);
 }
@@ -5373,13 +5381,27 @@ VIEWS.quality = async function () {
   // Nhãn hiển thị cho lịch sử Hold/Release — scope_id ở đây LUÔN là PK thật (khác quy ước
   // scope_id ghép chuỗi của qc_catalog dùng cho khai báo chỉ tiêu), xem services/quality.py.
   const holdScopeLabel = (scopeType, scopeId) => {
-    if (scopeType === "batch") return `Mẻ SX ${batchById[scopeId] ? esc(batchById[scopeId].batch_code) : scopeId}`;
-    if (scopeType === "lot") return `Lô NVL ${lotById[scopeId] ? esc(lotById[scopeId].lot_code) : scopeId}`;
-    if (scopeType === "batch_tank") return batchTankById[scopeId] ? esc(batchTankDisplayName(batchTankById[scopeId])) : `Tank ${scopeId}`;
-    if (scopeType === "batch_filter_lot") return `Lô lọc ${batchFilterLotById[scopeId] ? esc(batchFilterLotById[scopeId].filter_lot_code) : scopeId}`;
-    if (scopeType === "batch_pack_lot") return `Lô TP ${batchPackLotById[scopeId] ? esc(batchPackLotById[scopeId].pack_lot_code) : scopeId}`;
+    const gone = " <span class=\"muted\">(đã xóa)</span>";
+    if (scopeType === "batch") return batchById[scopeId] ? `Mẻ SX ${esc(batchById[scopeId].batch_code)}` : `Mẻ SX ${scopeId}${gone}`;
+    if (scopeType === "lot") return lotById[scopeId] ? `Lô NVL ${esc(lotById[scopeId].lot_code)}` : `Lô NVL ${scopeId}${gone}`;
+    if (scopeType === "batch_tank") return batchTankById[scopeId] ? esc(batchTankDisplayName(batchTankById[scopeId])) : `Tank ${scopeId}${gone}`;
+    if (scopeType === "batch_filter_lot") return batchFilterLotById[scopeId] ? `Lô lọc ${esc(batchFilterLotById[scopeId].filter_lot_code)}` : `Lô lọc ${scopeId}${gone}`;
+    if (scopeType === "batch_pack_lot") return batchPackLotById[scopeId] ? `Lô TP ${esc(batchPackLotById[scopeId].pack_lot_code)}` : `Lô TP ${scopeId}${gone}`;
     return `${esc(scopeType)} ${scopeId}`;
   };
+  // true nếu phạm vi của dòng lịch sử này đã bị xóa khỏi hệ thống — dùng để lọc checkbox "Ẩn các
+  // bản ghi đã xóa" (mirror đúng 5 nhánh đã biết xử lý ở holdScopeLabel, loại khác coi như còn).
+  const holdScopeDeleted = (scopeType, scopeId) => {
+    if (scopeType === "batch") return !batchById[scopeId];
+    if (scopeType === "lot") return !lotById[scopeId];
+    if (scopeType === "batch_tank") return !batchTankById[scopeId];
+    if (scopeType === "batch_filter_lot") return !batchFilterLotById[scopeId];
+    if (scopeType === "batch_pack_lot") return !batchPackLotById[scopeId];
+    return false;
+  };
+  const deletedHoldHistCount = holdHistory.filter(h => holdScopeDeleted(h.entity_type, h.entity_id)).length;
+  const holdHistToShow = HIDE_DELETED_HOLD_HIST
+    ? holdHistory.filter(h => !holdScopeDeleted(h.entity_type, h.entity_id)) : holdHistory;
   // Lọc đúng "Lô NVL" (material_id có giá trị) — lô bright tank/thành phẩm cũng dùng chung
   // MaterialLot.status=on_hold cho lý do khác (QC mẻ/sản phẩm, không phải chỉ tiêu NVL) nên
   // không có material_id; hiện lẫn vào đây sẽ mở "Khai báo/Duyệt" ra trống trơn (không có chỉ
@@ -5483,11 +5505,14 @@ VIEWS.quality = async function () {
         </div>
         <div class="muted" style="margin-bottom:8px">Deviation mức <b>major/critical</b> bắt buộc phải có CAPA liên kết đã đóng (root cause + action plan + hiệu lực + ngày kiểm tra) trước khi đóng được.</div>
         <div id="d_scope_qc" class="muted" style="margin-bottom:8px">Đang tải chỉ tiêu của phạm vi này...</div>
-        <h3>Lịch sử Hold/Release <span class="muted">(${holdHistory.length})</span></h3>
-        <input class="searchbox" data-tbl="t_holdrelease" placeholder="Tìm theo phạm vi, hành động, lý do, người thực hiện..."/>
+        <h3>Lịch sử Hold/Release <span class="muted">(${holdHistToShow.length}${HIDE_DELETED_HOLD_HIST && deletedHoldHistCount ? `, đã ẩn ${deletedHoldHistCount} dòng của phạm vi đã xóa` : ""})</span></h3>
+        <div class="row" style="align-items:center;margin-bottom:6px">
+          <input class="searchbox" data-tbl="t_holdrelease" placeholder="Tìm theo phạm vi, hành động, lý do, người thực hiện..." style="flex:1"/>
+          <label class="muted" style="white-space:nowrap"><input type="checkbox" id="h_hide_deleted" ${HIDE_DELETED_HOLD_HIST ? "checked" : ""}/> Ẩn các bản ghi của phạm vi đã xóa</label>
+        </div>
         <div class="tablewrap" style="margin-top:6px"><table id="t_holdrelease">
           <thead><tr><th>Lúc</th><th>Phạm vi</th><th>Hành động</th><th>Lý do</th><th>Chỉ tiêu liên quan</th><th>Người thực hiện</th></tr></thead>
-          <tbody>${holdHistory.map(h => `<tr>
+          <tbody>${holdHistToShow.map(h => `<tr>
             <td class="muted">${fmt(h.ts)}</td>
             <td>${holdScopeLabel(h.entity_type, h.entity_id)}</td>
             <td>${h.action === "hold" ? badge("on_hold") + "HOLD" : badge("available") + "RELEASE"}</td>
@@ -5624,6 +5649,7 @@ VIEWS.quality = async function () {
   wireSelectSearch("h_scope", "h_scope_q");
   wireSelectSearch("d_scope", "d_scope_q");
   $("dev_state_filter").onchange = () => { DEV_STATE_FILTER = $("dev_state_filter").value; render("quality"); };
+  $("h_hide_deleted").onchange = () => { HIDE_DELETED_HOLD_HIST = $("h_hide_deleted").checked; render("quality"); };
   $("d_open").onclick = () => guard(async () => {
     const paramVal = checkedParams("d_scope_qc");
     // Bắt buộc tick ít nhất 1 chỉ tiêu ĐANG FAIL khi phạm vi này có FAIL nào — chặn sớm phía UI
@@ -11087,13 +11113,156 @@ function wirePaginateCards(containerId, searchInputId, defaultPageSize = 10) {
 }
 const chk = (v) => v ? '<span class="chk">✔</span>' : '<span class="chk no">▢</span>';
 
-// ================= REALTIME (trạm quan trắc nước thải + máy chiết lon 30K) =================
+// Nồi gạo — dùng đúng ảnh minh họa người dùng cung cấp (frontend/img/noi_gao.png), đè số liệu
+// lên bằng div position:absolute theo % chiều cao ảnh (yêu cầu người dùng 2026-10-31: "lấy đúng
+// ảnh nồi gạo này đi" — bản đầu tự vẽ SVG bị từ chối, đổi sang dùng file ảnh thật).
+const RICE_EOP_STATE_META = {
+  running: { label: "Đang chạy", opLabel: "Running", color: "var(--green)" },
+  idle: { label: "Idle (dừng)", opLabel: "Idle", color: "var(--muted)" },
+  hold: { label: "Hold (tạm giữ)", opLabel: "Hold", color: "var(--accent)" },
+};
+// Bảng "Recipe Operation" — mirror đúng layout màn hình operator Braumat (Step/Status/Name/Time)
+// người dùng gửi ảnh chụp (2026-10-31), Status tô nền theo màu trạng thái.
+function riceRecipeOperationTable(s) {
+  const meta = RICE_EOP_STATE_META[s.eop_state_label] || { opLabel: "—", color: "var(--muted)" };
+  const minutes = s.step_minutes != null ? s.step_minutes.toFixed(1) : "—";
+  const spMinutes = s.step_minutes_setpoint != null ? s.step_minutes_setpoint.toFixed(1) : "—";
+  const row = (label, valueHtml) =>
+    `<tr><td style="padding:3px 8px;color:var(--muted);white-space:nowrap">${label}</td><td style="padding:3px 8px;text-align:right">${valueHtml}</td></tr>`;
+  return `
+  <div style="max-width:190px;margin:0 auto;border:1px solid var(--border);border-radius:6px;overflow:hidden;font-size:11px">
+    <div style="background:var(--border);padding:3px 6px;font-weight:700;text-align:left">Recipe Operation</div>
+    <table style="width:100%;border-collapse:collapse">
+      ${row("Step", s.step_no ?? "—")}
+      ${row("Status", `<span style="background:${meta.color}33;color:${meta.color};font-weight:700;padding:1px 6px;border-radius:3px">${esc(meta.opLabel)}</span>`)}
+      ${row("Name", esc(s.step || "—"))}
+      ${row("Time (phút)", minutes)}
+      ${row("Đặt (phút)", spMinutes)}
+    </table>
+  </div>`;
+}
+// Thẻ 1 thiết bị hệ nấu — DÙNG CHUNG cho mọi nồi/thiết bị (Nồi gạo lẫn 12 thiết bị còn lại ở 2
+// dây nấu): tên + bảng Recipe Operation + ảnh (đè nhiệt độ/thể tích nếu overlay=true, chỉ hợp
+// với nồi hình trụ-đáy côn) + bảng Order/Batch/Year — xác nhận người dùng 2026-10-31: "Recipe
+// Operation và cụm Order/Batch/Year tất cả các nồi đều giống nhau". `s` null/rỗng ở các field
+// (chưa nối SCADA) vẫn ra đúng khung với "—", sẵn sàng nối dữ liệu thật sau mà không cần sửa lại
+// giao diện — mirror đúng cách Nồi gạo đã làm.
+const RICE_EMPTY_STATUS = {};
+function equipmentCard(name, img, s, overlay = true) {
+  s = s || RICE_EMPTY_STATUS;
+  const tempActual = s.temp_actual != null ? s.temp_actual.toFixed(1) + "°C" : "—";
+  const tempSp = s.temp_setpoint != null ? "Đặt: " + s.temp_setpoint.toFixed(1) + "°C" : "Đặt: —";
+  const vol = s.volume_hl != null ? s.volume_hl.toLocaleString("vi-VN", { maximumFractionDigits: 1 }) + " hl" : "—";
+  const year = s.ba_year != null ? (s.ba_year < 100 ? 2000 + s.ba_year : s.ba_year) : null;
+  const grainText = "#1a1308";  // chữ tối trên nền vàng gạo (ảnh) cho đủ tương phản
+  const row = (label, value) =>
+    `<tr><td style="padding:1px 6px;color:var(--muted);white-space:nowrap">${label}</td><td style="padding:1px 6px;text-align:right">${value}</td></tr>`;
+  return `
+  <div style="max-width:190px;margin:0 auto;text-align:center;flex:none">
+    <div style="font-size:12px;font-weight:700;margin-bottom:4px">${esc(name)}</div>
+    ${riceRecipeOperationTable(s)}
+    <div style="position:relative;margin-top:8px">
+      <img src="${img}" alt="${esc(name)}" style="width:100%;max-height:186px;object-fit:contain;display:block;margin:0 auto"/>
+      ${overlay ? `
+      <div style="position:absolute;top:46%;left:0;right:0">
+        <div style="font-size:13px;font-weight:700;color:${grainText};line-height:1.05">${tempActual}</div>
+        <div style="font-size:13px;color:${grainText};line-height:1.05">${tempSp}</div>
+      </div>
+      <div style="position:absolute;top:61%;left:0;right:0;font-size:13px;font-weight:700;color:${grainText}">${vol}</div>` : ""}
+    </div>
+    <table style="width:100%;max-width:190px;margin:6px auto 0;border-collapse:collapse;font-size:11px">
+      ${row("Order Number", esc(s.ba_order_no ?? "—"))}
+      ${row("Batch Number", esc(s.ba_batch_no ?? "—"))}
+      ${row("Year", esc(year ?? "—"))}
+    </table>
+  </div>`;
+}
+function riceKettleCard(s) { return equipmentCard("Nồi gạo", "/img/noi_gao.png", s); }
+
+// Sơ đồ dòng chảy dịch bia qua từng công đoạn của 1 dây nấu — hiện tạm CHƯA có dữ liệu thật,
+// nhưng dùng ĐÚNG ảnh minh họa thiết bị thật (như Nồi gạo) cho thiết bị nào đã có ảnh — thiết bị
+// chưa có ảnh tạm hiện icon, chờ người dùng gửi ảnh (yêu cầu người dùng 2026-10-31: "vẽ 2 dây có
+// các nồi giống như nồi gạo ra... sau này insert hiển thị dữ liệu thực thì hiện giống như nồi
+// gạo" — khung sẵn sàng nhận overlay số liệu sau, không phải sửa lại giao diện).
+// 5 nồi hình trụ-đáy côn (malt/lọc/trung gian/sôi hoa/lắng xoáy) dùng CHUNG 1 ảnh minh họa với
+// Nồi gạo — xác nhận người dùng 2026-10-31: "5 nồi còn lại giống như nhau hết" (chỉ khác tên/
+// dữ liệu, hình dáng vật lý như nhau); riêng Chuyển dịch lạnh nhanh là thiết bị trao đổi nhiệt
+// dạng tấm, hình dáng khác hẳn nên giữ ảnh riêng và KHÔNG đè nhiệt độ/thể tích lên ảnh (overlay
+// đó chỉ hợp hình trụ-đáy côn).
+// ID trong bảng Brewhouse_Realtime — xác nhận người dùng 2026-11-01 (xem thêm
+// brewhouse_external.py::EQUIPMENT_NAMES, giữ 2 nơi khớp nhau nếu sau này ID đổi).
+// Nồi lắng xoáy/trung gian dùng ảnh riêng (yêu cầu người dùng 2026-11-01) — hình dáng khác hẳn
+// nồi hình trụ-đáy côn chứa gạo (lắng xoáy rộng-thấp có bọt+xoáy ở bề mặt, trung gian là bồn trơn
+// không có vùng dịch màu vàng) nên overlay:false như Chuyển dịch lạnh nhanh, tránh đè chữ sai chỗ.
+const BREW_LINE_EQUIPMENT = (n) => n === 1 ? [
+  { id: 2, name: `Nồi malt 1`, img: "/img/noi_gao.png", overlay: true },
+  { id: 3, name: `Nồi lọc 1`, img: "/img/noi_gao.png", overlay: true },
+  { id: 4, name: `Nồi trung gian 1`, img: "/img/noi_trung_gian.png", overlay: false },
+  { id: 5, name: `Nồi sôi hoa 1`, img: "/img/noi_soi_hoa.png", overlay: true },
+  { id: 6, name: `Nồi lắng xoáy 1`, img: "/img/noi_lang_xoay.png", overlay: false },
+  { id: 7, name: `Chuyển dịch lạnh nhanh 1`, img: "/img/chuyen_dich_lanh_nhanh.png", overlay: false },
+] : [
+  { id: 8, name: `Nồi malt 2`, img: "/img/noi_gao.png", overlay: true },
+  { id: 9, name: `Nồi lọc 2`, img: "/img/noi_gao.png", overlay: true },
+  { id: 10, name: `Nồi trung gian 2`, img: "/img/noi_trung_gian.png", overlay: false },
+  { id: 11, name: `Nồi sôi hoa 2`, img: "/img/noi_soi_hoa.png", overlay: true },
+  { id: 12, name: `Nồi lắng xoáy 2`, img: "/img/noi_lang_xoay.png", overlay: false },
+  { id: 13, name: `Chuyển dịch lạnh nhanh 2`, img: "/img/chuyen_dich_lanh_nhanh.png", overlay: false },
+];
+function brewLineFlowRow(equipments, statusById) {
+  const box = (e) => `<div class="card" style="flex:none">${equipmentCard(e.name, e.img, (statusById || {})[e.id], e.overlay)}</div>`;
+  const arrow = `<span class="muted" style="font-size:20px;flex:none">→</span>`;
+  return `
+  <div class="tablewrap">
+    <div style="display:flex;align-items:center;gap:6px;padding:4px 0;min-width:max-content">
+      ${equipments.map(box).join(arrow)}
+    </div>
+  </div>`;
+}
+
+// ================= REALTIME (trạm quan trắc nước thải + hệ nấu bia + máy chiết lon 30K) =================
 VIEWS.realtime = async function () {
   $("view-realtime").innerHTML = `
+    <div class="panel"><h2>🍚 Realtime hệ nấu bia <span id="rtrice_clock" class="muted"></span></h2>
+      <div class="muted">Dữ liệu thật từ SCADA hệ nấu (nhà máy Đông Mai), qua kết nối <code class="k">CSDL_NL_ĐM</code> (WAN). Tự cập nhật mỗi 15 giây. Nồi gạo dùng chung cho cả 2 dây (bảng <code class="k">Brewhouse_Realtime</code>).</div>
+      <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-top:12px">
+        <div id="rtrice_body" class="muted">Đang tải…</div>
+        <div style="flex:1;min-width:280px;display:flex;flex-direction:column;gap:12px">
+          <div><h3 style="margin:0 0 6px">Dây nấu 1</h3><div id="rtrice_line1" class="muted">Đang tải…</div></div>
+          <div><h3 style="margin:0 0 6px">Dây nấu 2</h3><div id="rtrice_line2" class="muted">Đang tải…</div></div>
+        </div>
+      </div>
+    </div>
     <div class="panel"><h2>🥫 Máy chiết lon 30K — Realtime <span id="rt30k_clock" class="muted"></span></h2>
       <div class="muted">Dữ liệu thật từ SCADA máy chiết lon "30K" (nhà máy Đông Mai) — bảng <code class="k">30K_Realtime</code>, qua kết nối <code class="k">CSDL_NL_ĐM</code> (WAN). Tự cập nhật mỗi 15 giây.</div>
       <div id="rt30k_body" class="muted" style="margin-top:12px">Đang tải…</div>
     </div>`;
+  let rtRiceBusy = false;
+  const refreshRice = async () => {
+    if (rtRiceBusy) return;
+    rtRiceBusy = true;
+    try {
+      let o;
+      try { o = await GET("/reports/brewhouse-overview"); }
+      catch (e) {
+        $("rtrice_clock").textContent = "· cập nhật " + new Date().toLocaleTimeString("vi-VN");
+        const msg = `<div class="muted" style="color:var(--red)">Không lấy được dữ liệu từ SCADA: ${esc(e.message)}</div>`;
+        $("rtrice_body").innerHTML = msg; $("rtrice_line1").innerHTML = msg; $("rtrice_line2").innerHTML = msg;
+        return;
+      }
+      $("rtrice_clock").textContent = "· cập nhật " + new Date().toLocaleTimeString("vi-VN");
+      if (!o.available) {
+        const msg = `<div class="muted" style="color:var(--red)">Không có bản ghi nào trong bảng Brewhouse_Realtime.</div>`;
+        $("rtrice_body").innerHTML = msg; $("rtrice_line1").innerHTML = msg; $("rtrice_line2").innerHTML = msg;
+        return;
+      }
+      $("rtrice_body").innerHTML = riceKettleCard(o.equipment[1] || {});
+      $("rtrice_line1").innerHTML = brewLineFlowRow(BREW_LINE_EQUIPMENT(1), o.equipment);
+      $("rtrice_line2").innerHTML = brewLineFlowRow(BREW_LINE_EQUIPMENT(2), o.equipment);
+    } finally { rtRiceBusy = false; }
+  };
+  await refreshRice();
+  window.__rtRice = setInterval(() => { refreshRice(); }, 15000);
   let rt30kBusy = false;
   const refresh30k = async () => {
     if (rt30kBusy) return;   // kết nối WAN có thể chậm — không gọi chồng lượt trước chưa xong
@@ -11118,6 +11287,8 @@ VIEWS.realtime = async function () {
           <div class="card"><div class="n" style="font-size:22px">${s.machine_speed != null ? s.machine_speed.toLocaleString("vi-VN") : "—"}<span style="font-size:12px;color:var(--muted)"> lon/h</span></div><div class="l">Tốc độ máy (MachineSpeed)</div></div>
           <div class="card"><div class="n" style="font-size:22px">${s.total_product != null ? Math.round(s.total_product).toLocaleString("vi-VN") : "—"}<span style="font-size:12px;color:var(--muted)"> m³</span></div><div class="l">Sản lượng lũy kế (TotalProduct)</div></div>
           <div class="card"><div class="n" style="font-size:22px">${s.total_can != null ? s.total_can.toLocaleString("vi-VN") : "—"}<span style="font-size:12px;color:var(--muted)"> lon</span></div><div class="l">Số lon lũy kế (TotalCan)</div></div>
+          <div class="card"><div class="n" style="font-size:20px">${s.clean_flushing == null ? "—" : badge(s.clean_flushing ? "available" : "overdue") + (s.clean_flushing ? "Đang chạy" : "Đang dừng")}</div><div class="l">Tráng nước nóng (Clean_Flushing)</div></div>
+          <div class="card"><div class="n" style="font-size:20px">${s.rins_return_gas_channel == null ? "—" : badge(s.rins_return_gas_channel ? "available" : "overdue") + (s.rins_return_gas_channel ? "Đang chạy" : "Đang dừng")}</div><div class="l">Đuổi CO2 (RinsReturnGasChannel)</div></div>
         </div>
         <div class="muted" style="margin-top:8px">Bản ghi SCADA lúc: ${s.last_update ? fmt(s.last_update) : "—"} · Kết nối: <code class="k">${esc(s.connection_name)}</code></div>`;
     } finally { rt30kBusy = false; }
