@@ -11160,7 +11160,7 @@ function equipmentCard(name, img, s, overlay = true) {
     <div style="font-size:12px;font-weight:700;margin-bottom:4px">${esc(name)}</div>
     ${riceRecipeOperationTable(s)}
     <div style="position:relative;margin-top:8px">
-      <img src="${img}" alt="${esc(name)}" style="width:100%;display:block"/>
+      <img src="${img}" alt="${esc(name)}" style="width:100%;max-height:186px;object-fit:contain;display:block;margin:0 auto"/>
       ${overlay ? `
       <div style="position:absolute;top:46%;left:0;right:0">
         <div style="font-size:13px;font-weight:700;color:${grainText};line-height:1.05">${tempActual}</div>
