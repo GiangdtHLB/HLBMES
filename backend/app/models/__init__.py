@@ -23,6 +23,7 @@ from .batch_pipeline import (
 )
 from .cip import CipEquipment, CipFormType, CipLink, CipRecord
 from .brewing import OpsSetting
+from .brewhouse_log import BrewhouseStepLog
 from .energy import EnergyArea, EnergyGroup, EnergyReading
 from .formula import Formula
 from .historian import HistorianPoint
@@ -146,4 +147,5 @@ __all__ = [
     "ProductionLine",
     "PackagingType",
     "PackagingMove",
+    "BrewhouseStepLog",
 ]

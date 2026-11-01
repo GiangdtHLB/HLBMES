@@ -1,5 +1,6 @@
 """Điểm vào ứng dụng FastAPI (modular monolith)."""
 
+import asyncio
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -81,7 +82,17 @@ ENCODERS_BY_TYPE[_datetime] = _encode_utc_datetime
 async def lifespan(app: FastAPI):
     init_db()
     get_logger("mes").info("MES khởi động — %s", APP_NAME)
+    # Tác vụ nền ghi log từng bước hệ nấu (nồi gạo + 2 dây nấu) theo oder/batch/year, phục vụ
+    # báo cáo "mỗi nồi chạy hết bao nhiêu phút" — yêu cầu người dùng 2026-11-01. Chỉ 1 instance
+    # trong tiến trình này (xem cảnh báo multi-worker ở services/brewhouse_log.py).
+    from .services.brewhouse_log import poll_loop
+    brewhouse_log_task = asyncio.create_task(poll_loop())
     yield
+    brewhouse_log_task.cancel()
+    try:
+        await brewhouse_log_task
+    except asyncio.CancelledError:
+        pass
 
 
 app = FastAPI(

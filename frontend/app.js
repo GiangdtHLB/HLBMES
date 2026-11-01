@@ -11285,7 +11285,7 @@ function brewLineFlowRow(equipments, statusById) {
 VIEWS.realtime = async function () {
   $("view-realtime").innerHTML = `
     <div class="panel"><h2>🍚 Realtime hệ nấu bia <span id="rtrice_clock" class="muted"></span></h2>
-      <div class="muted">Dữ liệu thật từ SCADA hệ nấu (nhà máy Đông Mai), qua kết nối <code class="k">CSDL_NL_ĐM</code> (WAN). Tự cập nhật mỗi 15 giây. Nồi gạo dùng chung cho cả 2 dây (bảng <code class="k">Brewhouse_Realtime</code>).</div>
+      <div class="muted">Dữ liệu thật từ SCADA hệ nấu (nhà máy Đông Mai), qua kết nối <code class="k">CSDL_NL_ĐM</code> (WAN). Tự cập nhật mỗi giây. Nồi gạo dùng chung cho cả 2 dây (bảng <code class="k">Brewhouse_Realtime</code>).</div>
       <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-top:12px">
         <div id="rtrice_body" class="muted">Đang tải…</div>
         <div style="flex:1;min-width:280px;display:flex;flex-direction:column;gap:12px">
@@ -11295,7 +11295,7 @@ VIEWS.realtime = async function () {
       </div>
     </div>
     <div class="panel"><h2>🥫 Máy chiết lon 30K — Realtime <span id="rt30k_clock" class="muted"></span></h2>
-      <div class="muted">Dữ liệu thật từ SCADA máy chiết lon "30K" (nhà máy Đông Mai) — bảng <code class="k">30K_Realtime</code>, qua kết nối <code class="k">CSDL_NL_ĐM</code> (WAN). Tự cập nhật mỗi 15 giây.</div>
+      <div class="muted">Dữ liệu thật từ SCADA máy chiết lon "30K" (nhà máy Đông Mai) — bảng <code class="k">30K_Realtime</code>, qua kết nối <code class="k">CSDL_NL_ĐM</code> (WAN). Tự cập nhật mỗi giây.</div>
       <div id="rt30k_body" class="muted" style="margin-top:12px">Đang tải…</div>
     </div>`;
   let rtRiceBusy = false;
@@ -11323,7 +11323,7 @@ VIEWS.realtime = async function () {
     } finally { rtRiceBusy = false; }
   };
   await refreshRice();
-  window.__rtRice = setInterval(() => { refreshRice(); }, 15000);
+  window.__rtRice = setInterval(() => { refreshRice(); }, 1000);
   let rt30kBusy = false;
   const refresh30k = async () => {
     if (rt30kBusy) return;   // kết nối WAN có thể chậm — không gọi chồng lượt trước chưa xong
@@ -11355,7 +11355,7 @@ VIEWS.realtime = async function () {
     } finally { rt30kBusy = false; }
   };
   await refresh30k();
-  window.__rt30k = setInterval(() => { refresh30k(); }, 15000);
+  window.__rt30k = setInterval(() => { refresh30k(); }, 1000);
 };
 
 // ================= TRỢ LÝ AI =================
@@ -11842,7 +11842,8 @@ function packLineGanttSvg(report) {
 VIEWS.reports = async function () {
   const sec = SUB.reports || "material";
   const sections = [{ key: "material", label: "Định mức NVL" }, { key: "filling", label: "Chiết (lon)" },
-    { key: "filter", label: "Hệ lọc" }, { key: "pack_line", label: "Dây chuyền chiết" }];
+    { key: "filter", label: "Hệ lọc" }, { key: "pack_line", label: "Dây chuyền chiết" },
+    { key: "brewhouse_steps", label: "Log hệ nấu" }, { key: "brewhouse_cycle", label: "Thời gian cả mẻ nấu" }];
   let body = "";
 
   if (sec === "material") {
@@ -11997,6 +11998,145 @@ VIEWS.reports = async function () {
       </table></div>
       <div id="rpl_gantt" style="margin-top:14px">${packLineGanttSvg(plRep)}</div>
     </div>`;
+  } else if (sec === "brewhouse_steps") {
+    // BC log hệ nấu — ghi TỰ ĐỘNG khi chuyển bước hoặc về Idle (services/brewhouse_log.py), lọc
+    // theo đúng oder/batch/year để xem 1 mẻ chạy qua từng nồi hết bao lâu + giá trị lúc chuyển
+    // bước — yêu cầu người dùng 2026-11-01 ("mục tiêu là chạy ra báo cáo... cùng oder, batch,
+    // year thì mỗi nồi hết bao nhiêu phút, các giá trị tại thời điểm chuyển bước thế nào").
+    const bsYear = SUB.reports_bs_year || "";
+    const bsOrder = SUB.reports_bs_order || "";
+    const bsBatch = SUB.reports_bs_batch || "";
+    const bsEquip = SUB.reports_bs_equip || "";
+    const bsDays = SUB.reports_bs_days || 3650;
+    // Mirror danh sách ID ở BREW_LINE_EQUIPMENT (realtime) — giữ khớp brewhouse_external.py::
+    // EQUIPMENT_NAMES nếu sau này ID đổi.
+    const BS_EQUIPMENT_NAMES = { 1: "Nồi gạo",
+      ...Object.fromEntries(BREW_LINE_EQUIPMENT(1).map(e => [e.id, e.name])),
+      ...Object.fromEntries(BREW_LINE_EQUIPMENT(2).map(e => [e.id, e.name])) };
+    const bsQs = [
+      bsYear ? `ba_year=${encodeURIComponent(bsYear)}` : "",
+      bsOrder ? `ba_order_no=${encodeURIComponent(bsOrder)}` : "",
+      bsBatch ? `ba_batch_no=${encodeURIComponent(bsBatch)}` : "",
+      bsEquip ? `equipment_id=${encodeURIComponent(bsEquip)}` : "",
+      `days=${bsDays}`,
+    ].filter(Boolean).join("&");
+    const bsRep = await GET(`/reports/brewhouse-step-log?${bsQs}`);
+    const bsSteps = bsRep.steps || [];
+    const bsSummary = bsRep.summary || [];
+    const fmtMin = (min) => { if (min == null) return "—"; const t = Math.round(min);
+      return t >= 60 ? `${Math.floor(t / 60)}h${String(t % 60).padStart(2, "0")}` : `${t} phút`; };
+    body = `<div class="panel"><h2>Log hệ nấu <span class="muted">(${bsSteps.length} bước)</span></h2>
+      <div class="muted" style="margin-bottom:8px">Tự động ghi khi chuyển bước hoặc về Idle (xem Realtime hệ nấu) — lọc theo đúng lệnh nấu (oder)/mẻ/năm để xem 1 mẻ chạy qua từng nồi hết bao lâu.</div>
+      <div class="row">
+        <div class="field"><label>Năm</label><input id="rbs_year" type="number" placeholder="VD 26" value="${esc(String(bsYear))}" style="width:80px"/></div>
+        <div class="field"><label>Lệnh nấu (Oder)</label><input id="rbs_order" placeholder="VD 322" value="${esc(bsOrder)}" style="width:100px"/></div>
+        <div class="field"><label>Mẻ (Batch)</label><input id="rbs_batch" placeholder="VD 3136" value="${esc(bsBatch)}" style="width:100px"/></div>
+        <div class="field"><label>Thiết bị</label><select id="rbs_equip"><option value="">Tất cả</option>
+          ${Object.entries(BS_EQUIPMENT_NAMES).map(([id, name]) => `<option value="${id}" ${String(bsEquip) === id ? "selected" : ""}>${esc(name)}</option>`).join("")}
+        </select></div>
+        <div class="field"><label>Kỳ</label><select id="rbs_days">
+          <option value="30" ${bsDays == 30 ? "selected" : ""}>30 ngày gần đây</option>
+          <option value="90" ${bsDays == 90 ? "selected" : ""}>90 ngày gần đây</option>
+          <option value="365" ${bsDays == 365 ? "selected" : ""}>365 ngày gần đây</option>
+          <option value="3650" ${bsDays == 3650 ? "selected" : ""}>Tất cả</option></select></div>
+        <button class="btn" id="rbs_apply" style="align-self:flex-end">Xem</button>
+      </div>
+      <h3>Tổng hợp theo nồi</h3>
+      <div class="tablewrap"><table id="t_bs_summary">
+        <thead><tr><th>Thiết bị</th><th>Oder</th><th>Mẻ</th><th>Năm</th><th>Số bước</th><th>Tổng thời gian</th><th>Bắt đầu</th><th>Kết thúc</th></tr></thead>
+        <tbody>${bsSummary.map(s => `<tr>
+          <td>${esc(s.equipment_name)}</td><td><code class="k">${esc(s.ba_order_no || "—")}</code></td>
+          <td><code class="k">${esc(s.ba_batch_no || "—")}</code></td><td>${s.ba_year ?? "—"}</td>
+          <td>${s.step_count}</td><td>${fmtMin(s.total_minutes)}${s.still_running ? " " + statusBadge("running", "đang chạy") : ""}</td>
+          <td class="muted">${fmt(s.started_at)}</td><td class="muted">${s.ended_at ? fmt(s.ended_at) : "—"}</td></tr>`).join("") ||
+          '<tr><td colspan=8 class="muted">Chưa có dữ liệu — hệ thống chỉ bắt đầu ghi log từ lúc bật tính năng này.</td></tr>'}</tbody>
+      </table></div>
+      <h3 style="margin-top:14px">Chi tiết từng bước</h3>
+      <input class="searchbox" data-tbl="t_bs_detail" placeholder="Tìm theo thiết bị, tên bước, oder, mẻ..."/>
+      <div class="tablewrap"><table id="t_bs_detail">
+        <thead><tr><th>Thiết bị</th><th>Bước</th><th>Tên bước</th><th>Oder</th><th>Mẻ</th><th>Bắt đầu</th><th>Kết thúc</th>
+          <th>Thời gian chạy</th><th>Đặt (phút)</th><th>Nhiệt độ (°C)</th><th>Thể tích (hl)</th>
+          <th>Độ đục EBC</th><th>Khí thổi (l/ph)</th><th>Lưu lượng (hl/h)</th></tr></thead>
+        <tbody>${bsSteps.map(r => {
+          const snap = r.end_snapshot || r.start_snapshot || {};
+          const n1 = (v) => v != null ? Number(v).toFixed(1) : "—";
+          return `<tr>
+          <td>${esc(r.equipment_name)}</td><td>${r.step_no ?? "—"}</td><td>${esc(r.step_name || "—")}</td>
+          <td><code class="k">${esc(r.ba_order_no || "—")}</code></td><td><code class="k">${esc(r.ba_batch_no || "—")}</code></td>
+          <td class="muted">${fmt(r.started_at)}</td><td class="muted">${r.ended_at ? fmt(r.ended_at) : "—"}</td>
+          <td>${r.ended_at ? fmtMin(r.duration_minutes) : statusBadge("running", "đang chạy")}</td>
+          <td class="muted">${r.step_minutes_setpoint != null ? r.step_minutes_setpoint.toLocaleString("vi-VN") : "—"}</td>
+          <td>${snap.temp_actual != null ? snap.temp_actual.toFixed(1) : "—"}</td>
+          <td>${snap.volume_hl != null ? snap.volume_hl.toFixed(2) : "—"}</td>
+          <td>${n1(snap.ebc_actual)}</td><td>${n1(snap.air_flow)}</td><td>${n1(snap.flow_actual)}</td></tr>`;
+        }).join("") || '<tr><td colspan=14 class="muted">Chưa có dữ liệu.</td></tr>'}</tbody>
+      </table></div>
+    </div>`;
+  } else if (sec === "brewhouse_cycle") {
+    // BC RIÊNG: thời gian TOÀN BỘ 1 mẻ từ lúc Nồi gạo bắt đầu (vào nguyên liệu) tới lúc Nồi
+    // lắng xoáy kết thúc, cùng oder/batch/year — khác hẳn "Log hệ nấu" (đó là chi tiết từng
+    // bước/từng nồi) — yêu cầu người dùng 2026-11-01.
+    const bcYear = SUB.reports_bc_year || "";
+    const bcOrder = SUB.reports_bc_order || "";
+    const bcBatch = SUB.reports_bc_batch || "";
+    const bcDays = SUB.reports_bc_days || 3650;
+    const bcQs = [
+      bcYear ? `ba_year=${encodeURIComponent(bcYear)}` : "",
+      bcOrder ? `ba_order_no=${encodeURIComponent(bcOrder)}` : "",
+      bcBatch ? `ba_batch_no=${encodeURIComponent(bcBatch)}` : "",
+      `days=${bcDays}`,
+    ].filter(Boolean).join("&");
+    const bcRep = await GET(`/reports/brewhouse-cycle?${bcQs}`);
+    const bcItems = bcRep.items || [];
+    const bcRoles = bcRep.roles || [];
+    const bcPairs = bcRep.pairs || [];
+    const fmtMin2 = (min) => { if (min == null) return "—"; const t = Math.round(min);
+      return t >= 60 ? `${Math.floor(t / 60)}h${String(t % 60).padStart(2, "0")}` : `${t} phút`; };
+    const BC_STAGE = { chua_toi_lang_xoay: ["pending", "Chưa tới lắng xoáy"],
+      dang_lang_xoay: ["running", "Đang lắng xoáy"], da_xong: ["done", "Đã xong"] };
+    // Chỉ 2 mốc thời gian (Nồi gạo bắt đầu / Nồi lắng xoáy kết thúc) + 1 cột/nồi thể hiện TỔNG
+    // thời gian nồi đó chạy — yêu cầu người dùng 2026-11-01 ("chỉ cần 2 thời gian... còn các
+    // cột còn lại thể hiện tổng thời gian mỗi nồi").
+    body = `<div class="panel"><h2>Thời gian cả mẻ nấu <span class="muted">(${bcItems.length} mẻ)</span></h2>
+      <div class="muted" style="margin-bottom:8px">Nồi gạo bắt đầu → Nồi lắng xoáy kết thúc (dây 1 hoặc dây 2, tuỳ mẻ chạy dây nào), kèm tổng thời gian từng nồi trong chuỗi — xem từ lúc vào nguyên liệu tới hết nấu-lọc chiếm bao nhiêu thời gian, mỗi nồi hết bao lâu.</div>
+      <div class="row">
+        <div class="field"><label>Năm</label><input id="rbc_year" type="number" placeholder="VD 26" value="${esc(String(bcYear))}" style="width:80px"/></div>
+        <div class="field"><label>Lệnh nấu (Oder)</label><input id="rbc_order" placeholder="VD 322" value="${esc(bcOrder)}" style="width:100px"/></div>
+        <div class="field"><label>Mẻ (Batch)</label><input id="rbc_batch" placeholder="VD 3136" value="${esc(bcBatch)}" style="width:100px"/></div>
+        <div class="field"><label>Kỳ</label><select id="rbc_days">
+          <option value="30" ${bcDays == 30 ? "selected" : ""}>30 ngày gần đây</option>
+          <option value="90" ${bcDays == 90 ? "selected" : ""}>90 ngày gần đây</option>
+          <option value="365" ${bcDays == 365 ? "selected" : ""}>365 ngày gần đây</option>
+          <option value="3650" ${bcDays == 3650 ? "selected" : ""}>Tất cả</option></select></div>
+        <button class="btn" id="rbc_apply" style="align-self:flex-end">Xem</button>
+      </div>
+      <div class="tablewrap"><table id="t_bc">
+        <thead><tr><th>Năm</th><th>Oder</th><th>Mẻ</th><th>Nồi gạo bắt đầu</th><th>Nồi lắng xoáy kết thúc</th>
+          ${bcRoles.map(r => `<th>${esc(r)}</th>`).join("")}<th>Trạng thái</th></tr></thead>
+        <tbody>${bcItems.map(it => `<tr>
+          <td>${it.ba_year ?? "—"}</td><td><code class="k">${esc(it.ba_order_no || "—")}</code></td>
+          <td><code class="k">${esc(it.ba_batch_no || "—")}</code></td>
+          <td class="muted">${fmt(it.rice_started_at)}</td>
+          <td class="muted">${it.whirlpool_ended_at ? fmt(it.whirlpool_ended_at) : "—"}</td>
+          ${it.vessels.map(v => `<td>${v.total_minutes == null ? "—" :
+            v.still_running ? `${fmtMin2(v.total_minutes)} ${statusBadge("running", "đang chạy")}` : fmtMin2(v.total_minutes)}</td>`).join("")}
+          <td>${statusBadge(...(BC_STAGE[it.stage] || ["pending", it.stage]))}</td></tr>`).join("") ||
+          `<tr><td colspan=${6 + bcRoles.length} class="muted">Chưa có dữ liệu.</td></tr>`}</tbody>
+      </table></div>
+    </div>
+    <div class="panel" style="margin-top:14px">
+      <h2>Năng suất lý thuyết <span class="muted">(ghép cặp 2 mẻ liên tiếp)</span></h2>
+      <div class="muted" style="margin-bottom:8px">Mỗi dòng = trung bình 2 mẻ liên tiếp (mẻ 1+2, mẻ 2+3, mẻ 3+4...) tại từng nồi — chỉ tính mẻ ĐÃ XONG, bỏ qua mẻ còn đang chạy dở. "Số mẻ đạt được/ngày" = 24 giờ × 60 phút / số phút lớn nhất trong các nồi (nút thắt cổ chai).</div>
+      <div class="tablewrap"><table id="t_bcpair">
+        <thead><tr><th>Mẻ 1</th><th>Mẻ 2</th>${bcRoles.map(r => `<th>${esc(r)}</th>`).join("")}<th>Số mẻ đạt được/ngày</th></tr></thead>
+        <tbody>${bcPairs.map(p => `<tr>
+          <td><code class="k">${esc(p.batch_a.ba_order_no || "—")}/${esc(p.batch_a.ba_batch_no || "—")}</code></td>
+          <td><code class="k">${esc(p.batch_b.ba_order_no || "—")}/${esc(p.batch_b.ba_batch_no || "—")}</code></td>
+          ${p.vessels.map(v => `<td>${fmtMin2(v.avg_minutes)}</td>`).join("")}
+          <td><b>${p.batches_per_day != null ? p.batches_per_day.toLocaleString("vi-VN") : "—"}</b></td></tr>`).join("") ||
+          `<tr><td colspan=${3 + bcRoles.length} class="muted">Cần ít nhất 2 mẻ đã có dữ liệu để ghép cặp.</td></tr>`}</tbody>
+      </table></div>
+    </div>`;
   }
 
   $("view-reports").innerHTML = subnav("reports", sections, sec) + body;
@@ -12049,6 +12189,26 @@ VIEWS.reports = async function () {
         render("reports");
       };
     }
+  }
+  if (sec === "brewhouse_steps") {
+    wirePaginate("t_bs_detail", 20);
+    $("rbs_apply").onclick = () => {
+      SUB.reports_bs_year = $("rbs_year").value;
+      SUB.reports_bs_order = $("rbs_order").value;
+      SUB.reports_bs_batch = $("rbs_batch").value;
+      SUB.reports_bs_equip = $("rbs_equip").value;
+      SUB.reports_bs_days = parseInt($("rbs_days").value);
+      render("reports");
+    };
+  }
+  if (sec === "brewhouse_cycle") {
+    $("rbc_apply").onclick = () => {
+      SUB.reports_bc_year = $("rbc_year").value;
+      SUB.reports_bc_order = $("rbc_order").value;
+      SUB.reports_bc_batch = $("rbc_batch").value;
+      SUB.reports_bc_days = parseInt($("rbc_days").value);
+      render("reports");
+    };
   }
   if (sec === "filling") {
     $("fp_mode").onchange = () => {
