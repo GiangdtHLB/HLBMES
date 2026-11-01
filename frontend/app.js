@@ -11116,6 +11116,11 @@ const chk = (v) => v ? '<span class="chk">✔</span>' : '<span class="chk no">�
 // Nồi gạo — dùng đúng ảnh minh họa người dùng cung cấp (frontend/img/noi_gao.png), đè số liệu
 // lên bằng div position:absolute theo % chiều cao ảnh (yêu cầu người dùng 2026-10-31: "lấy đúng
 // ảnh nồi gạo này đi" — bản đầu tự vẽ SVG bị từ chối, đổi sang dùng file ảnh thật).
+// Cache-bust cho ảnh thiết bị hệ nấu (frontend/img/*.png) — KHÔNG có hash tên file tự động
+// (zero-build), nên thay nội dung file (cùng tên) không tự làm trình duyệt tải lại — tăng số
+// này mỗi lần thay/ sửa bất kỳ ảnh nào trong BREW_LINE_EQUIPMENT/riceKettleCard (yêu cầu người
+// dùng 2026-11-01: "vẫn chưa thay ảnh nồi lọc" — do browser cache ảnh cũ, không phải chưa sửa).
+const BREWHOUSE_IMG_V = 2;
 const RICE_EOP_STATE_META = {
   running: { label: "Đang chạy", opLabel: "Running", color: "var(--green)" },
   idle: { label: "Idle (dừng)", opLabel: "Idle", color: "var(--muted)" },
@@ -11127,15 +11132,30 @@ function riceRecipeOperationTable(s) {
   const meta = RICE_EOP_STATE_META[s.eop_state_label] || { opLabel: "—", color: "var(--muted)" };
   const minutes = s.step_minutes != null ? s.step_minutes.toFixed(1) : "—";
   const spMinutes = s.step_minutes_setpoint != null ? s.step_minutes_setpoint.toFixed(1) : "—";
+  // table-layout:fixed + width cố định cho cột label/value + nowrap trên các dòng ngắn (Step/
+  // Status/Time) — ép các dòng đó cao bằng nhau. Riêng "Name" (tên bước, dài ngắn rất khác nhau,
+  // VD "Bước 0" so với "HV1 Tranfer>WK1") — xuống dòng bình thường trong 1 Ô CAO CỐ ĐỊNH (đủ 2
+  // dòng) thay vì co lại bằng "…" (yêu cầu người dùng 2026-11-01: "các tên dài bị mất hiển thị
+  // rồi, cho hiển thị đủ ra"). LƯU Ý: height+overflow:hidden đặt thẳng trên <td> KHÔNG thực sự ép
+  // được chiều cao dòng trong bảng (trình duyệt vẫn giãn hàng theo nội dung) — phải bọc value
+  // trong 1 <div> (block) mới overflow:hidden có tác dụng, nếu không bảng của thiết bị có tên bước
+  // dài sẽ cao hơn thiết bị tên ngắn, làm lệch hàng giữa 2 dây nấu dù "Step"/"Status"/"Time" khác
+  // đều nowrap (phát hiện khi đối chiếu getBoundingClientRect() — Nồi trung gian 1 "HV1
+  // Tranfer>WK1" cao hơn Nồi malt 1 "MT1 Rest" 12.78px dù cùng dùng height:28px). height:28px của
+  // div (2 dòng × line-height 1.3 × 11px = 28,6px) hụt đúng 0,6px so với 2 dòng thật — dòng 2 bị
+  // cắt sát viền dưới, nhìn như đè lên hàng "Time (phút)" kế tiếp (ảnh chụp người dùng 2026-11-01,
+  // "vẫn bị"): tăng lên 32px để đủ chỗ cho 2 dòng trọn vẹn, không chạm viền.
   const row = (label, valueHtml) =>
-    `<tr><td style="padding:3px 8px;color:var(--muted);white-space:nowrap">${label}</td><td style="padding:3px 8px;text-align:right">${valueHtml}</td></tr>`;
+    `<tr><td style="padding:3px 8px;color:var(--muted);white-space:nowrap;width:46%">${label}</td><td style="padding:3px 8px;text-align:right;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:0">${valueHtml}</td></tr>`;
+  const nameRow = (label, valueHtml) =>
+    `<tr><td style="padding:3px 8px;color:var(--muted);white-space:nowrap;width:46%;vertical-align:top">${label}</td><td style="padding:3px 8px;vertical-align:top"><div style="text-align:right;line-height:1.3;height:32px;overflow:hidden;overflow-wrap:break-word">${valueHtml}</div></td></tr>`;
   return `
   <div style="max-width:190px;margin:0 auto;border:1px solid var(--border);border-radius:6px;overflow:hidden;font-size:11px">
     <div style="background:var(--border);padding:3px 6px;font-weight:700;text-align:left">Recipe Operation</div>
-    <table style="width:100%;border-collapse:collapse">
+    <table style="width:100%;border-collapse:collapse;table-layout:fixed">
       ${row("Step", s.step_no ?? "—")}
       ${row("Status", `<span style="background:${meta.color}33;color:${meta.color};font-weight:700;padding:1px 6px;border-radius:3px">${esc(meta.opLabel)}</span>`)}
-      ${row("Name", esc(s.step || "—"))}
+      ${nameRow("Name", esc(s.step || "—"))}
       ${row("Time (phút)", minutes)}
       ${row("Đặt (phút)", spMinutes)}
     </table>
@@ -11148,8 +11168,18 @@ function riceRecipeOperationTable(s) {
 // (chưa nối SCADA) vẫn ra đúng khung với "—", sẵn sàng nối dữ liệu thật sau mà không cần sửa lại
 // giao diện — mirror đúng cách Nồi gạo đã làm.
 const RICE_EMPTY_STATUS = {};
-function equipmentCard(name, img, s, overlay = true) {
+// extraMetric — chọn bộ số liệu đè lên ảnh (overlay) cho đúng LOẠI thiết bị, thay cho bộ mặc
+// định nhiệt độ/thể tích (yêu cầu người dùng 2026-11-01, "hiển thị giống như nồi gạo, malt" —
+// tất cả đều đè lên ảnh, không còn tách ra bảng riêng): "ebc" (Nồi lọc — độ đục dịch, EBC/SpEBC),
+// "flow" (Nồi lắng xoáy — lưu lượng chuyển dịch, Flow/SpFlow, hl/h), "airflow" (Chuyển dịch lạnh
+// nhanh — nhiệt độ thực/đặt + khí thổi AirFlow, lít/phút, không có setpoint riêng cho AirFlow).
+// LƯU Ý: airflow/flow đã ĐẢO lại so với mô tả ban đầu của người dùng ("lắng xoáy thì thêm
+// AirFlow") — dữ liệu live xác nhận ngược lại (AirFlow luôn NULL ở ID lắng xoáy, luôn có giá trị
+// ở ID chuyển dịch lạnh nhanh, và ngược lại cho Flow/SpFlow) nên gán theo đúng dữ liệu thật, đã
+// báo lại người dùng để xác nhận.
+function equipmentCard(name, img, s, overlay = true, overlayPos, extraMetric = null, showBatchInfo = true) {
   s = s || RICE_EMPTY_STATUS;
+  const pos = overlayPos || { top: 44 };
   const tempActual = s.temp_actual != null ? s.temp_actual.toFixed(1) + "°C" : "—";
   const tempSp = s.temp_setpoint != null ? "Đặt: " + s.temp_setpoint.toFixed(1) + "°C" : "Đặt: —";
   const vol = s.volume_hl != null ? s.volume_hl.toLocaleString("vi-VN", { maximumFractionDigits: 1 }) + " hl" : "—";
@@ -11157,24 +11187,50 @@ function equipmentCard(name, img, s, overlay = true) {
   const grainText = "#1a1308";  // chữ tối trên nền vàng gạo (ảnh) cho đủ tương phản
   const row = (label, value) =>
     `<tr><td style="padding:1px 6px;color:var(--muted);white-space:nowrap">${label}</td><td style="padding:1px 6px;text-align:right">${value}</td></tr>`;
+  const fmt = (v) => v != null ? v.toLocaleString("vi-VN", { maximumFractionDigits: 1 }) : "—";
+  const overlayLineSets = {
+    // Nồi lọc: độ đục (EBC) + lưu lượng nước nha chảy ra, đơn vị hl/h như Nồi lắng xoáy (yêu cầu
+    // người dùng 2026-11-01: "bổ sung thêm lưu lượng đặt, và thực tế cho nồi lọc nữa").
+    ebc: [
+      { text: "EBC: " + fmt(s.ebc_actual), bold: true },
+      { text: "Đặt: " + fmt(s.ebc_setpoint), bold: false },
+      { text: fmt(s.flow_actual) + " hl/h", bold: true },
+      { text: "Đặt: " + fmt(s.flow_setpoint) + " hl/h", bold: false },
+    ],
+    flow: [
+      { text: fmt(s.flow_actual) + " hl/h", bold: true },
+      { text: "Đặt: " + fmt(s.flow_setpoint) + " hl/h", bold: false },
+    ],
+    airflow: [
+      { text: tempActual, bold: true },
+      { text: tempSp, bold: false },
+      { text: "AirFlow: " + fmt(s.air_flow) + " l/phút", bold: true },
+    ],
+  };
+  const overlayLines = overlayLineSets[extraMetric] || [
+    { text: tempActual, bold: true },
+    { text: tempSp, bold: false },
+    { text: vol, bold: true },
+  ];
   return `
   <div style="max-width:190px;margin:0 auto;text-align:center;flex:none">
-    <div style="font-size:12px;font-weight:700;margin-bottom:4px">${esc(name)}</div>
-    ${riceRecipeOperationTable(s)}
+    <div style="font-size:12px;font-weight:700;margin-bottom:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(name)}">${esc(name)}</div>
+    ${showBatchInfo ? riceRecipeOperationTable(s) : ""}
     <div style="position:relative;margin-top:8px">
-      <img src="${img}" alt="${esc(name)}" style="width:100%;max-height:186px;object-fit:contain;display:block;margin:0 auto"/>
+      <img src="${img}?v=${BREWHOUSE_IMG_V}" alt="${esc(name)}" style="width:100%;max-height:186px;object-fit:contain;display:block;margin:0 auto"/>
       ${overlay ? `
-      <div style="position:absolute;top:46%;left:0;right:0">
-        <div style="font-size:13px;font-weight:700;color:${grainText};line-height:1.05">${tempActual}</div>
-        <div style="font-size:13px;color:${grainText};line-height:1.05">${tempSp}</div>
-      </div>
-      <div style="position:absolute;top:61%;left:0;right:0;font-size:13px;font-weight:700;color:${grainText}">${vol}</div>` : ""}
+      <div style="position:absolute;top:${pos.top}%;left:${pos.left ?? 0};right:${pos.right ?? 0}">
+        <div style="display:inline-block;background:rgba(255,255,255,0.85);border-radius:4px;padding:2px 8px">
+          ${overlayLines.map(l => `<div style="font-size:13px;font-weight:${l.bold ? 700 : 400};color:${grainText};line-height:1.25">${l.text}</div>`).join("")}
+        </div>
+      </div>` : ""}
     </div>
+    ${showBatchInfo ? `
     <table style="width:100%;max-width:190px;margin:6px auto 0;border-collapse:collapse;font-size:11px">
       ${row("Order Number", esc(s.ba_order_no ?? "—"))}
       ${row("Batch Number", esc(s.ba_batch_no ?? "—"))}
       ${row("Year", esc(year ?? "—"))}
-    </table>
+    </table>` : ""}
   </div>`;
 }
 function riceKettleCard(s) { return equipmentCard("Nồi gạo", "/img/noi_gao.png", s); }
@@ -11196,25 +11252,30 @@ function riceKettleCard(s) { return equipmentCard("Nồi gạo", "/img/noi_gao.p
 // không có vùng dịch màu vàng) nên overlay:false như Chuyển dịch lạnh nhanh, tránh đè chữ sai chỗ.
 const BREW_LINE_EQUIPMENT = (n) => n === 1 ? [
   { id: 2, name: `Nồi malt 1`, img: "/img/noi_gao.png", overlay: true },
-  { id: 3, name: `Nồi lọc 1`, img: "/img/noi_gao.png", overlay: true },
+  { id: 3, name: `Nồi lọc 1`, img: "/img/noi_loc.png", overlay: true, overlayPos: { top: 44, right: "50%" }, extraMetric: "ebc" },
   { id: 4, name: `Nồi trung gian 1`, img: "/img/noi_trung_gian.png", overlay: false },
-  { id: 5, name: `Nồi sôi hoa 1`, img: "/img/noi_soi_hoa.png", overlay: true },
-  { id: 6, name: `Nồi lắng xoáy 1`, img: "/img/noi_lang_xoay.png", overlay: false },
-  { id: 7, name: `Chuyển dịch lạnh nhanh 1`, img: "/img/chuyen_dich_lanh_nhanh.png", overlay: false },
+  { id: 5, name: `Nồi sôi hoa 1`, img: "/img/noi_soi_hoa.png", overlay: true, overlayPos: { top: 64 } },
+  { id: 6, name: `Nồi lắng xoáy 1`, img: "/img/noi_lang_xoay.png", overlay: true, overlayPos: { top: 70 }, extraMetric: "flow" },
+  { id: 7, name: `Chuyển dịch lạnh nhanh 1`, img: "/img/chuyen_dich_lanh_nhanh.png", overlay: true, overlayPos: { top: 28 }, extraMetric: "airflow", showBatchInfo: false },
 ] : [
   { id: 8, name: `Nồi malt 2`, img: "/img/noi_gao.png", overlay: true },
-  { id: 9, name: `Nồi lọc 2`, img: "/img/noi_gao.png", overlay: true },
+  { id: 9, name: `Nồi lọc 2`, img: "/img/noi_loc.png", overlay: true, overlayPos: { top: 44, right: "50%" }, extraMetric: "ebc" },
   { id: 10, name: `Nồi trung gian 2`, img: "/img/noi_trung_gian.png", overlay: false },
-  { id: 11, name: `Nồi sôi hoa 2`, img: "/img/noi_soi_hoa.png", overlay: true },
-  { id: 12, name: `Nồi lắng xoáy 2`, img: "/img/noi_lang_xoay.png", overlay: false },
-  { id: 13, name: `Chuyển dịch lạnh nhanh 2`, img: "/img/chuyen_dich_lanh_nhanh.png", overlay: false },
+  { id: 11, name: `Nồi sôi hoa 2`, img: "/img/noi_soi_hoa.png", overlay: true, overlayPos: { top: 64 } },
+  { id: 12, name: `Nồi lắng xoáy 2`, img: "/img/noi_lang_xoay.png", overlay: true, overlayPos: { top: 70 }, extraMetric: "flow" },
+  { id: 13, name: `Chuyển dịch lạnh nhanh 2`, img: "/img/chuyen_dich_lanh_nhanh.png", overlay: true, overlayPos: { top: 28 }, extraMetric: "airflow", showBatchInfo: false },
 ];
 function brewLineFlowRow(equipments, statusById) {
-  const box = (e) => `<div class="card" style="flex:none">${equipmentCard(e.name, e.img, (statusById || {})[e.id], e.overlay)}</div>`;
-  const arrow = `<span class="muted" style="font-size:20px;flex:none">→</span>`;
+  // align-items:flex-start — mỗi thẻ thiết bị cao thấp khác nhau tuỳ dữ liệu/loại (VD Chuyển
+  // dịch lạnh nhanh không có bảng Recipe Operation/Order-Batch-Year nên thấp hẳn) — căn giữa
+  // (center) làm cả hàng lệch cao-thấp trông không cân xứng; căn theo mép trên cho thẳng hàng
+  // (yêu cầu người dùng 2026-11-01). Mũi tên dùng align-self:center để vẫn nổi ở giữa khoảng
+  // cách 2 thẻ, không bị kéo lên theo mép trên.
+  const box = (e) => `<div class="card" style="flex:none;align-self:${e.showBatchInfo === false ? "center" : "flex-start"}">${equipmentCard(e.name, e.img, (statusById || {})[e.id], e.overlay, e.overlayPos, e.extraMetric, e.showBatchInfo ?? true)}</div>`;
+  const arrow = `<span class="muted" style="font-size:20px;flex:none;align-self:center">→</span>`;
   return `
   <div class="tablewrap">
-    <div style="display:flex;align-items:center;gap:6px;padding:4px 0;min-width:max-content">
+    <div style="display:flex;align-items:flex-start;gap:6px;padding:4px 0;min-width:max-content">
       ${equipments.map(box).join(arrow)}
     </div>
   </div>`;
