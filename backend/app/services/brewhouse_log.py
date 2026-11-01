@@ -332,38 +332,42 @@ def brew_cycle_report(db: Session, ba_year: int = None, ba_order_no: str = None,
     (dây 1 hoặc dây 2, tuỳ mẻ chạy dây nào) KẾT THÚC, cùng 1 oder/batch/year, kèm tổng thời gian
     TỪNG NỒI trong cả chuỗi — yêu cầu người dùng 2026-11-01: "chỉ cần 2 thời gian là thời gian
     bắt đầu nồi gạo và thời điểm kết thúc nồi lắng xoáy, còn các cột còn lại thể hiện tổng thời
-    gian mỗi nồi". Kèm BC ghép cặp 2 mẻ LIÊN TIẾP (mirror sản lượng lý thuyết/ngày theo nút thắt
-    cổ chai) — yêu cầu người dùng 2026-11-01: "tính cho 2 mẻ liên tiếp nhau... các thời gian tại
-    các nồi thì cộng vào và chia đôi ra... số mẻ đạt được/ngày = 24h*60 / số phút lớn nhất tại
-    các nồi nấu". Báo cáo RIÊNG với step_log_report() (báo cáo đó là chi tiết từng BƯỚC)."""
+    gian mỗi nồi". Kèm BC sản lượng lý thuyết/ngày theo TỪNG MẺ RIÊNG (không ghép cặp 2 mẻ) —
+    yêu cầu người dùng 2026-11-01 (sửa lại yêu cầu trước đó, lúc đầu hiểu nhầm là ghép cặp):
+    "không phải 2 mẻ liên tiếp mà là theo từng mẻ 1, trừ nồi gạo ra, còn các nồi khác sẽ thời
+    gian sẽ chia 2, do có 2 dây nấu". Lý do chia 2: mỗi nồi khác nồi gạo có 2 thiết bị vật lý
+    (1/dây — xem ROLE_CHAIN), mỗi thiết bị chỉ xử lý 1 trong 2 mẻ xen kẽ, nên thời gian 1 mẻ
+    chiếm dụng 1 thiết bị quy đổi ra "trên cả 2 dây" chỉ bằng 1 nửa; nồi gạo dùng chung 1 thiết
+    bị cho mọi mẻ nên giữ nguyên. Báo cáo RIÊNG với step_log_report() (báo cáo đó là chi tiết
+    từng BƯỚC)."""
     items = _brew_cycle_items(db, ba_year, ba_order_no, ba_batch_no, days)
 
-    # Ghép cặp (mẻ 1,2), (mẻ 2,3), (mẻ 3,4)... theo đúng THỨ TỰ THỜI GIAN (mẻ nào vào nồi gạo
-    # trước tính trước) — không theo số hiệu oder/batch vì 2 số đó không đảm bảo tăng dần.
     items_asc = sorted(items, key=lambda x: x["rice_started_at"])
-    pairs = []
-    for a, b in zip(items_asc, items_asc[1:]):
-        vessel_avgs = []
-        for va, vb in zip(a["vessels"], b["vessels"]):
+    throughput = []
+    for it in items_asc:
+        vessel_adj = []
+        for v in it["vessels"]:
             # Chỉ dùng thời gian ĐÃ XONG (không dùng số phút của bước đang chạy dở — số đó chưa
             # phải tổng thật, lấy vào sẽ làm sản lượng/ngày bị thổi phồng sai).
-            a_min = va["total_minutes"] if not va["still_running"] else None
-            b_min = vb["total_minutes"] if not vb["still_running"] else None
-            avg = round((a_min + b_min) / 2.0, 2) if a_min is not None and b_min is not None else None
-            vessel_avgs.append({"role": va["role"], "avg_minutes": avg})
+            if v["still_running"] or v["total_minutes"] is None:
+                adj = None
+            elif v["role"] == "Nồi gạo":
+                adj = v["total_minutes"]
+            else:
+                adj = round(v["total_minutes"] / 2.0, 2)
+            vessel_adj.append({"role": v["role"], "adj_minutes": adj})
         # Chỉ tính nút thắt cổ chai/số mẻ-ngày khi có ĐỦ thời gian của TẤT CẢ các nồi trong chuỗi
         # — thiếu bất kỳ nồi nào (chưa đủ dữ liệu/mẻ đang chạy dở) thì để "—", không tính từ dữ
         # liệu không đầy đủ (yêu cầu người dùng 2026-11-01).
-        has_all = all(v["avg_minutes"] is not None for v in vessel_avgs)
-        max_minutes = max(v["avg_minutes"] for v in vessel_avgs) if has_all else None
-        pairs.append({
-            "batch_a": {"ba_year": a["ba_year"], "ba_order_no": a["ba_order_no"], "ba_batch_no": a["ba_batch_no"]},
-            "batch_b": {"ba_year": b["ba_year"], "ba_order_no": b["ba_order_no"], "ba_batch_no": b["ba_batch_no"]},
-            "vessels": vessel_avgs,
+        has_all = all(v["adj_minutes"] is not None for v in vessel_adj)
+        max_minutes = max(v["adj_minutes"] for v in vessel_adj) if has_all else None
+        throughput.append({
+            "batch": {"ba_year": it["ba_year"], "ba_order_no": it["ba_order_no"], "ba_batch_no": it["ba_batch_no"]},
+            "vessels": vessel_adj,
             "max_minutes": max_minutes,
             "batches_per_day": round((24 * 60) / max_minutes, 2) if max_minutes else None,
         })
-    pairs.reverse()  # mới nhất lên đầu, mirror thứ tự items bên dưới
+    throughput.reverse()  # mới nhất lên đầu, mirror thứ tự items bên dưới
 
     items.sort(key=lambda x: x["rice_started_at"], reverse=True)
-    return {"items": items, "pairs": pairs, "roles": [role_label for role_label, _ in ROLE_CHAIN]}
+    return {"items": items, "throughput": throughput, "roles": [role_label for role_label, _ in ROLE_CHAIN]}

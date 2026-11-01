@@ -12099,7 +12099,7 @@ VIEWS.reports = async function () {
     const bcRep = await GET(`/reports/brewhouse-cycle?${bcQs}`);
     const bcItems = bcRep.items || [];
     const bcRoles = bcRep.roles || [];
-    const bcPairs = bcRep.pairs || [];
+    const bcThrpt = bcRep.throughput || [];
     // Hiện rõ cả phút lẫn giây, cùng cách tính như fmtMin() ở tab Log hệ nấu — yêu cầu người
     // dùng 2026-11-01.
     const fmtMin2 = (min) => {
@@ -12146,16 +12146,15 @@ VIEWS.reports = async function () {
       </table></div>
     </div>
     <div class="panel" style="margin-top:14px">
-      <h2>Năng suất lý thuyết <span class="muted">(ghép cặp 2 mẻ liên tiếp)</span></h2>
-      <div class="muted" style="margin-bottom:8px">Mỗi dòng = trung bình 2 mẻ liên tiếp (mẻ 1+2, mẻ 2+3, mẻ 3+4...) tại từng nồi — chỉ tính mẻ ĐÃ XONG, bỏ qua mẻ còn đang chạy dở. "Số mẻ đạt được/ngày" = 24 giờ × 60 phút / số phút lớn nhất trong các nồi (nút thắt cổ chai).</div>
-      <div class="tablewrap"><table id="t_bcpair">
-        <thead><tr><th>Mẻ 1</th><th>Mẻ 2</th>${bcRoles.map(r => `<th>${esc(r)}</th>`).join("")}<th>Số mẻ đạt được/ngày</th></tr></thead>
-        <tbody>${bcPairs.map(p => `<tr>
-          <td><code class="k">${esc(p.batch_a.ba_order_no || "—")}/${esc(p.batch_a.ba_batch_no || "—")}</code></td>
-          <td><code class="k">${esc(p.batch_b.ba_order_no || "—")}/${esc(p.batch_b.ba_batch_no || "—")}</code></td>
-          ${p.vessels.map(v => `<td>${fmtMin2(v.avg_minutes)}</td>`).join("")}
+      <h2>Năng suất lý thuyết <span class="muted">(theo từng mẻ)</span></h2>
+      <div class="muted" style="margin-bottom:8px">Mỗi dòng = 1 mẻ ĐÃ XONG (bỏ qua mẻ còn đang chạy dở) — riêng Nồi gạo giữ nguyên thời gian (dùng chung 1 thiết bị cho cả 2 dây), các nồi còn lại chia đôi thời gian (mỗi nồi có 2 thiết bị, 1/dây, chạy xen kẽ). "Số mẻ đạt được/ngày" = 24 giờ × 60 phút / số phút lớn nhất trong các nồi (nút thắt cổ chai).</div>
+      <div class="tablewrap"><table id="t_bcthrpt">
+        <thead><tr><th>Mẻ</th>${bcRoles.map(r => `<th>${esc(r)}</th>`).join("")}<th>Số mẻ đạt được/ngày</th></tr></thead>
+        <tbody>${bcThrpt.map(p => `<tr>
+          <td><code class="k">${esc(p.batch.ba_order_no || "—")}/${esc(p.batch.ba_batch_no || "—")}</code></td>
+          ${p.vessels.map(v => `<td>${fmtMin2(v.adj_minutes)}</td>`).join("")}
           <td><b>${p.batches_per_day != null ? p.batches_per_day.toLocaleString("vi-VN") : "—"}</b></td></tr>`).join("") ||
-          `<tr><td colspan=${3 + bcRoles.length} class="muted">Cần ít nhất 2 mẻ đã có dữ liệu để ghép cặp.</td></tr>`}</tbody>
+          `<tr><td colspan=${2 + bcRoles.length} class="muted">Cần ít nhất 1 mẻ đã có dữ liệu.</td></tr>`}</tbody>
       </table></div>
     </div>`;
   }
@@ -12223,7 +12222,7 @@ VIEWS.reports = async function () {
     };
   }
   if (sec === "brewhouse_cycle") {
-    wirePaginate("t_bc", 10); wirePaginate("t_bcpair", 10);
+    wirePaginate("t_bc", 10); wirePaginate("t_bcthrpt", 10);
     $("rbc_apply").onclick = () => {
       SUB.reports_bc_year = $("rbc_year").value;
       SUB.reports_bc_order = $("rbc_order").value;
