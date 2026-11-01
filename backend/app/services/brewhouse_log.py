@@ -306,12 +306,22 @@ def _brew_cycle_items(db: Session, ba_year: int = None, ba_order_no: str = None,
                 whirlpool_ended_at = None if e["still_running"] else e["ended_at"]
                 stage = "dang_lang_xoay" if e["still_running"] else "da_xong"
 
+        # Tổng thời gian cả mẻ = Nồi lắng xoáy kết thúc - Nồi gạo bắt đầu (cùng oder/batch/year)
+        # — yêu cầu người dùng 2026-11-01. Chưa xong (chưa tới/đang lắng xoáy) thì tính tạm tới
+        # hiện tại, kèm cờ still_running để frontend gắn badge "đang chạy" (mirror cách tính mỗi
+        # nồi ở trên, không phải tổng thật cho tới khi lắng xoáy kết thúc).
+        cycle_still_running = stage != "da_xong"
+        cycle_end_reference = now if cycle_still_running else whirlpool_ended_at
+        cycle_minutes = round((cycle_end_reference - rice_started_at).total_seconds() / 60.0, 2)
+
         items.append({
             "ba_year": year, "ba_order_no": order_no, "ba_batch_no": batch_no,
             "rice_started_at": rice_started_at,
             "whirlpool_ended_at": whirlpool_ended_at,
             "stage": stage,
             "vessels": vessels,
+            "cycle_minutes": cycle_minutes,
+            "cycle_still_running": cycle_still_running,
         })
     return items
 

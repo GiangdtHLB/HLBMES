@@ -12131,17 +12131,18 @@ VIEWS.reports = async function () {
         <button class="btn" id="rbc_apply" style="align-self:flex-end">Xem</button>
       </div>
       <div class="tablewrap"><table id="t_bc">
-        <thead><tr><th>Năm</th><th>Oder</th><th>Mẻ</th><th>Nồi gạo bắt đầu</th><th>Nồi lắng xoáy kết thúc</th>
+        <thead><tr><th>Năm</th><th>Oder</th><th>Mẻ</th><th>Nồi gạo bắt đầu</th><th>Nồi lắng xoáy kết thúc</th><th>Tổng thời gian</th>
           ${bcRoles.map(r => `<th>${esc(r)}</th>`).join("")}<th>Trạng thái</th></tr></thead>
         <tbody>${bcItems.map(it => `<tr>
           <td>${it.ba_year ?? "—"}</td><td><code class="k">${esc(it.ba_order_no || "—")}</code></td>
           <td><code class="k">${esc(it.ba_batch_no || "—")}</code></td>
           <td class="muted">${fmt(it.rice_started_at)}</td>
           <td class="muted">${it.whirlpool_ended_at ? fmt(it.whirlpool_ended_at) : "—"}</td>
+          <td><b>${it.cycle_still_running ? `${fmtMin2(it.cycle_minutes)} ${statusBadge("running", "đang chạy")}` : fmtMin2(it.cycle_minutes)}</b></td>
           ${it.vessels.map(v => `<td>${v.total_minutes == null ? "—" :
             v.still_running ? `${fmtMin2(v.total_minutes)} ${statusBadge("running", "đang chạy")}` : fmtMin2(v.total_minutes)}</td>`).join("")}
           <td>${statusBadge(...(BC_STAGE[it.stage] || ["pending", it.stage]))}</td></tr>`).join("") ||
-          `<tr><td colspan=${6 + bcRoles.length} class="muted">Chưa có dữ liệu.</td></tr>`}</tbody>
+          `<tr><td colspan=${7 + bcRoles.length} class="muted">Chưa có dữ liệu.</td></tr>`}</tbody>
       </table></div>
     </div>
     <div class="panel" style="margin-top:14px">
