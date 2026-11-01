@@ -12191,7 +12191,7 @@ VIEWS.reports = async function () {
     }
   }
   if (sec === "brewhouse_steps") {
-    wirePaginate("t_bs_detail", 20);
+    wirePaginate("t_bs_summary", 10); wirePaginate("t_bs_detail", 20);
     $("rbs_apply").onclick = () => {
       SUB.reports_bs_year = $("rbs_year").value;
       SUB.reports_bs_order = $("rbs_order").value;
@@ -12202,6 +12202,7 @@ VIEWS.reports = async function () {
     };
   }
   if (sec === "brewhouse_cycle") {
+    wirePaginate("t_bc", 10); wirePaginate("t_bcpair", 10);
     $("rbc_apply").onclick = () => {
       SUB.reports_bc_year = $("rbc_year").value;
       SUB.reports_bc_order = $("rbc_order").value;
