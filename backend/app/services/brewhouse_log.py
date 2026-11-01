@@ -124,29 +124,46 @@ def process_tick(db: Session, overview: dict) -> None:
         # else: vẫn giữa bước cũ, không có gì để log
 
 
+def _tick_once(state: dict) -> None:
+    """Thân 1 lượt poll. TOÀN BỘ thân hàm là I/O ĐỒNG BỘ (chặn luồng gọi nó): đọc SCADA qua ODBC/
+    WAN (brewhouse_overview tạo engine + autoload_with = nhiều round-trip, đo thực tế trên prod
+    2026-11-01: ~0,24s/lượt, đỉnh 0,49s, tệ nhất 4s = timeout ODBC) rồi SELECT/INSERT/UPDATE trên
+    CSDL app. Vì vậy poll_loop() PHẢI gọi nó qua asyncio.to_thread — xem lý do ở đó.
+    `state` giữ cờ cảnh báo giữa các lượt (dict thay vì biến cục bộ để dùng được qua nhiều lượt)."""
+    db = SessionLocal()
+    try:
+        overview = brewhouse_external.brewhouse_overview(db)
+        if overview.get("available"):
+            process_tick(db, overview)
+            db.commit()
+        state["warned_no_connection"] = False
+    except DomainError:
+        # Chưa khai báo kết nối CSDL_NL_ĐM (vd môi trường dev) — chỉ cảnh báo 1 lần, tránh
+        # dội log mỗi POLL_INTERVAL_SECONDS giây.
+        db.rollback()
+        if not state.get("warned_no_connection"):
+            log.warning("brewhouse_log: chưa có kết nối SQL hệ nấu — tạm dừng ghi log, sẽ tự thử lại")
+            state["warned_no_connection"] = True
+    except Exception:
+        db.rollback()
+        log.exception("brewhouse_log: lượt đọc/ghi log thất bại — bỏ qua, thử lại lượt sau")
+    finally:
+        db.close()
+
+
 async def poll_loop(interval_seconds: int = POLL_INTERVAL_SECONDS) -> None:
-    """Vòng lặp nền — khởi động cùng app (xem main.py lifespan), chạy tới khi bị cancel lúc tắt app."""
-    warned_no_connection = False
+    """Vòng lặp nền — khởi động cùng app (xem main.py lifespan), chạy tới khi bị cancel lúc tắt app.
+
+    Chạy mỗi lượt trong LUỒNG RIÊNG (asyncio.to_thread), KHÔNG gọi thẳng _tick_once() ở đây: thân
+    lượt poll là I/O đồng bộ ~0,24s (đỉnh 0,49s; 4s nếu WAN tới SCADA trục trặc — timeout ODBC).
+    Gọi thẳng trong coroutine này sẽ chặn event loop chừng đó mỗi giây — ~25% thời gian, 24/7 —
+    làm TOÀN BỘ request của app bị trễ theo (uvicorn nhận/định tuyến request trên chính event
+    loop đó), và đứng hình vài giây mỗi lần SCADA chậm. to_thread đẩy phần chặn sang threadpool,
+    event loop rảnh ngay. An toàn vì mỗi lượt tự mở/đóng Session riêng, không chia sẻ trạng thái.
+    """
+    state: dict = {"warned_no_connection": False}
     while True:
-        db = SessionLocal()
-        try:
-            overview = brewhouse_external.brewhouse_overview(db)
-            if overview.get("available"):
-                process_tick(db, overview)
-                db.commit()
-            warned_no_connection = False
-        except DomainError:
-            # Chưa khai báo kết nối CSDL_NL_ĐM (vd môi trường dev) — chỉ cảnh báo 1 lần, tránh
-            # dội log mỗi POLL_INTERVAL_SECONDS giây.
-            db.rollback()
-            if not warned_no_connection:
-                log.warning("brewhouse_log: chưa có kết nối SQL hệ nấu — tạm dừng ghi log, sẽ tự thử lại")
-                warned_no_connection = True
-        except Exception:
-            db.rollback()
-            log.exception("brewhouse_log: lượt đọc/ghi log thất bại — bỏ qua, thử lại lượt sau")
-        finally:
-            db.close()
+        await asyncio.to_thread(_tick_once, state)
         await asyncio.sleep(interval_seconds)
 
 
