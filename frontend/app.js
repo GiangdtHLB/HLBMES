@@ -12023,8 +12023,18 @@ VIEWS.reports = async function () {
     const bsRep = await GET(`/reports/brewhouse-step-log?${bsQs}`);
     const bsSteps = bsRep.steps || [];
     const bsSummary = bsRep.summary || [];
-    const fmtMin = (min) => { if (min == null) return "—"; const t = Math.round(min);
-      return t >= 60 ? `${Math.floor(t / 60)}h${String(t % 60).padStart(2, "0")}` : `${t} phút`; };
+    // Hiện rõ cả phút lẫn giây (không làm tròn về phút nguyên) — yêu cầu người dùng 2026-11-01,
+    // vì bước chạy ngắn dưới 1 phút trước đó hiện "0 phút", mất hết thông tin thời lượng thật.
+    const fmtMin = (min) => {
+      if (min == null) return "—";
+      const totalSec = Math.round(min * 60);
+      const h = Math.floor(totalSec / 3600), m = Math.floor((totalSec % 3600) / 60), s = totalSec % 60;
+      const parts = [];
+      if (h > 0) parts.push(`${h}h`);
+      if (h > 0 || m > 0) parts.push(`${h > 0 ? String(m).padStart(2, "0") : m} phút`);
+      parts.push(`${String(s).padStart(2, "0")} giây`);
+      return parts.join(" ");
+    };
     body = `<div class="panel"><h2>Log hệ nấu <span class="muted">(${bsSteps.length} bước)</span></h2>
       <div class="muted" style="margin-bottom:8px">Tự động ghi khi chuyển bước hoặc về Idle (xem Realtime hệ nấu) — lọc theo đúng lệnh nấu (oder)/mẻ/năm để xem 1 mẻ chạy qua từng nồi hết bao lâu.</div>
       <div class="row">
@@ -12090,8 +12100,18 @@ VIEWS.reports = async function () {
     const bcItems = bcRep.items || [];
     const bcRoles = bcRep.roles || [];
     const bcPairs = bcRep.pairs || [];
-    const fmtMin2 = (min) => { if (min == null) return "—"; const t = Math.round(min);
-      return t >= 60 ? `${Math.floor(t / 60)}h${String(t % 60).padStart(2, "0")}` : `${t} phút`; };
+    // Hiện rõ cả phút lẫn giây, cùng cách tính như fmtMin() ở tab Log hệ nấu — yêu cầu người
+    // dùng 2026-11-01.
+    const fmtMin2 = (min) => {
+      if (min == null) return "—";
+      const totalSec = Math.round(min * 60);
+      const h = Math.floor(totalSec / 3600), m = Math.floor((totalSec % 3600) / 60), s = totalSec % 60;
+      const parts = [];
+      if (h > 0) parts.push(`${h}h`);
+      if (h > 0 || m > 0) parts.push(`${h > 0 ? String(m).padStart(2, "0") : m} phút`);
+      parts.push(`${String(s).padStart(2, "0")} giây`);
+      return parts.join(" ");
+    };
     const BC_STAGE = { chua_toi_lang_xoay: ["pending", "Chưa tới lắng xoáy"],
       dang_lang_xoay: ["running", "Đang lắng xoáy"], da_xong: ["done", "Đã xong"] };
     // Chỉ 2 mốc thời gian (Nồi gạo bắt đầu / Nồi lắng xoáy kết thúc) + 1 cột/nồi thể hiện TỔNG
