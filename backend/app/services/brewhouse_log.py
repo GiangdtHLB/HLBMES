@@ -223,6 +223,9 @@ def step_log_report(db: Session, ba_year: int = None, ba_order_no: str = None,
 # Chuỗi vai trò nồi theo ĐÚNG thứ tự quy trình nấu (bất kể dây 1 hay dây 2 — mỗi vai trò map
 # tới 1 trong 2 ID tuỳ mẻ chạy dây nào, xem brewhouse_external.EQUIPMENT_NAMES). Nồi gạo dùng
 # chung cho cả 2 dây nên chỉ có 1 ID.
+# KHÔNG đưa "Chuyển dịch lạnh nhanh" (ID 7/13) vào chuỗi — thiết bị này chạy SONG SONG với Nồi
+# lắng xoáy (cùng lúc, không phải bước tuần tự kế tiếp), nên không tính là 1 mắt xích riêng
+# trong tổng thời gian cả mẻ/nút thắt cổ chai — yêu cầu người dùng 2026-11-01.
 ROLE_CHAIN = [
     ("Nồi gạo", (brewhouse_external.RICE_COOKER_EQUIPMENT_ID,)),
     ("Nồi malt", (2, 8)),
@@ -230,7 +233,6 @@ ROLE_CHAIN = [
     ("Nồi trung gian", (4, 10)),
     ("Nồi sôi hoa", (5, 11)),
     ("Nồi lắng xoáy", (6, 12)),
-    ("Chuyển dịch lạnh nhanh", (7, 13)),
 ]
 WHIRLPOOL_ROLE = "Nồi lắng xoáy"
 
@@ -339,8 +341,11 @@ def brew_cycle_report(db: Session, ba_year: int = None, ba_order_no: str = None,
             b_min = vb["total_minutes"] if not vb["still_running"] else None
             avg = round((a_min + b_min) / 2.0, 2) if a_min is not None and b_min is not None else None
             vessel_avgs.append({"role": va["role"], "avg_minutes": avg})
-        valid = [v["avg_minutes"] for v in vessel_avgs if v["avg_minutes"] is not None]
-        max_minutes = max(valid) if valid else None
+        # Chỉ tính nút thắt cổ chai/số mẻ-ngày khi có ĐỦ thời gian của TẤT CẢ các nồi trong chuỗi
+        # — thiếu bất kỳ nồi nào (chưa đủ dữ liệu/mẻ đang chạy dở) thì để "—", không tính từ dữ
+        # liệu không đầy đủ (yêu cầu người dùng 2026-11-01).
+        has_all = all(v["avg_minutes"] is not None for v in vessel_avgs)
+        max_minutes = max(v["avg_minutes"] for v in vessel_avgs) if has_all else None
         pairs.append({
             "batch_a": {"ba_year": a["ba_year"], "ba_order_no": a["ba_order_no"], "ba_batch_no": a["ba_batch_no"]},
             "batch_b": {"ba_year": b["ba_year"], "ba_order_no": b["ba_order_no"], "ba_batch_no": b["ba_batch_no"]},
