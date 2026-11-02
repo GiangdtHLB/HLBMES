@@ -297,6 +297,26 @@ def latest_results_by_param(db: Session, scope_type: str, scope_id: str) -> dict
     return {r.parameter: r for r in results}
 
 
+def latest_results_by_param_bulk(db: Session, scope_type: str = None) -> dict[tuple, dict]:
+    """Bản gộp của latest_results_by_param() cho NHIỀU scope cùng lúc — 1 câu SELECT duy nhất
+    (lọc theo `scope_type` nếu truyền, không thì lấy mọi scope_type) thay vì gọi riêng từng
+    scope_id (N+1) — dùng khi cần tra "kết quả mới nhất/chỉ tiêu" cho NHIỀU lô/mẻ/tank cùng lúc
+    (báo cáo, dashboard — sự cố thực tế 2026-11-02: Dashboard cực kỳ chậm vì gọi
+    latest_results_by_param() riêng cho từng tank/scope trong TOÀN BỘ lịch sử). Trả
+    {(scope_type, scope_id): {parameter: QualityResult mới nhất}} — cùng quy ước "mới nhất thắng"
+    với latest_results_by_param() (coalesce(sampled_at, recorded_at), sort bằng Python thay vì
+    ORDER BY vì đã gộp nhiều scope vào 1 lần fetch)."""
+    stmt = select(QualityResult)
+    if scope_type is not None:
+        stmt = stmt.where(QualityResult.scope_type == scope_type)
+    results = db.execute(stmt).scalars().all()
+    results.sort(key=lambda r: r.sampled_at or r.recorded_at)
+    out: dict[tuple, dict] = {}
+    for r in results:
+        out.setdefault((r.scope_type, r.scope_id), {})[r.parameter] = r
+    return out
+
+
 def _assert_releasable(db: Session, scope_type: str, scope_id: str) -> None:
     from . import qc_catalog
     missing = qc_catalog.missing_mandatory_params(db, scope_type, scope_id)

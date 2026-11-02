@@ -23,6 +23,7 @@ def material_norm(days: int = 90, product_id: str = None, db: Session = Depends(
                   user: User = Depends(get_current_user)):
     from ..common import utcnow
     from ..models.batches import BatchExecution
+    from ..models.master import Material
     from ..services import bom as bom_svc
     from sqlalchemy import select
 
@@ -33,10 +34,20 @@ def material_norm(days: int = 90, product_id: str = None, db: Session = Depends(
         stmt = stmt.where(BatchExecution.product_id == product_id)
     batches = db.execute(stmt.order_by(BatchExecution.created_at)).scalars().all()
 
+    # Gộp TRƯỚC 1 lần cho MỌI mẻ thay vì để compare_batch() tự truy vấn riêng từng mẻ (N+1: mỗi
+    # mẻ lại SELECT lại toàn bộ Danh mục vật tư + 2-3 lượt genealogy/not-used riêng) — sự cố thực
+    # tế 2026-11-02: báo cáo "Định mức NVL" (mặc định xem "Tất cả" = 3650 ngày) cực kỳ chậm với
+    # nhiều mẻ lịch sử. Xem bom.py::_bulk_actual_and_not_used().
+    batch_ids = [b.batch_id for b in batches]
+    actual_by_batch, not_used_by_batch = bom_svc._bulk_actual_and_not_used(db, batch_ids)
+    name_by_code = {m.code: m.name for m in db.execute(select(Material)).scalars().all()}
+
     agg = {}   # material_code -> {planned, actual, uom, tol, batch_ids}
     batch_rows = []
     for b in batches:
-        cmp = bom_svc.compare_batch(db, b)
+        cmp = bom_svc.compare_batch(db, b, name_by_code=name_by_code,
+                                    actual=actual_by_batch.get(b.batch_id, {}),
+                                    not_used=not_used_by_batch.get(b.batch_id, set()))
         if not cmp["lines"]:
             continue
         b_planned = b_actual = 0.0

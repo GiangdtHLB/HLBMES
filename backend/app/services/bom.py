@@ -7,7 +7,7 @@ bảng đối chiếu trong chi tiết mẻ, và báo cáo định mức NVL nhi
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..common import LotStatus
+from ..common import LotStatus, execute_in_chunks
 from ..errors import DomainError
 from ..models.batches import BatchExecution
 from ..models.brewing import BrewOrderMaterialLine
@@ -76,7 +76,8 @@ def codes_for_dispense(db: Session, code: str) -> list[str]:
     return sorted(members) if members else [code]
 
 
-def _expand_materials(db: Session, materials: list, brew_order_id: str = None) -> list[dict]:
+def _expand_materials(db: Session, materials: list, brew_order_id: str = None,
+                      name_by_code: dict = None) -> list[dict]:
     """Chuẩn hoá từng dòng BOM (snapshot.materials) thành 1 dòng CỤ THỂ có material_code —
     dòng khai qua Nhóm vật tư thay thế (alt_group_code) không có material_code trực tiếp
     (mirror _build_group_line ở services/brew_order.py, module Lệnh nấu cũ, giản lược bỏ phần
@@ -93,8 +94,15 @@ def _expand_materials(db: Session, materials: list, brew_order_id: str = None) -
       tiêu thụ (actual_consumed) như dòng thường, không cần gộp gì thêm (match_codes = chính nó).
     - CHỈ có alt_group_code (không member_qty): 1 định mức DÙNG CHUNG cho cả nhóm, không quan
       tâm xuất mã thành viên nào — match_codes = TOÀN BỘ mã thành viên của nhóm, để cộng dồn
-      thực tế tiêu thụ dù ghi nhận qua bất kỳ mã nào trong nhóm. Tên hiển thị = tên nhóm."""
-    name_by_code = {m.code: m.name for m in db.execute(select(Material)).scalars().all()}
+      thực tế tiêu thụ dù ghi nhận qua bất kỳ mã nào trong nhóm. Tên hiển thị = tên nhóm.
+
+    `name_by_code`: truyền sẵn nếu gọi hàm này NHIỀU LẦN liên tiếp (vd 1 báo cáo lặp qua nhiều
+    mẻ) để tránh N+1 — mỗi lần gọi mà không truyền sẽ tự SELECT lại TOÀN BỘ Danh mục vật tư, rất
+    tốn khi lặp qua hàng nghìn mẻ (sự cố thực tế 2026-11-02: báo cáo "Định mức NVL" cực kỳ chậm
+    vì material_norm() gọi compare_batch() theo từng mẻ, mỗi lần kéo theo 1 lượt quét toàn bộ
+    bảng Material — xem reports.py::material_norm())."""
+    if name_by_code is None:
+        name_by_code = {m.code: m.name for m in db.execute(select(Material)).scalars().all()}
     out = []
     for m in materials or []:
         code = m.get("material_code")
@@ -190,15 +198,22 @@ def not_used_codes(db: Session, batch_id: str) -> set[str]:
         BatchMaterialNotUsed.batch_id == batch_id)).scalars().all())
 
 
-def compare_batch(db: Session, batch) -> dict:
+def compare_batch(db: Session, batch, *, name_by_code: dict = None,
+                  actual: dict = None, not_used: set = None) -> dict:
     """Đối chiếu định mức ↔ thực tế cho một mẻ — định mức LUÔN là số công thức đã khai cho
-    "1 mẻ" (m.get("qty")), KHÔNG scale theo SL kế hoạch (hl) của riêng mẻ này (xem factor_for)."""
+    "1 mẻ" (m.get("qty")), KHÔNG scale theo SL kế hoạch (hl) của riêng mẻ này (xem factor_for).
+
+    `name_by_code`/`actual`/`not_used`: truyền sẵn (cache dùng chung) nếu gọi hàm này LẶP LẠI
+    cho nhiều mẻ (vd báo cáo định mức NVL nhiều mẻ) để tránh N+1 — mỗi mẻ bỏ trống sẽ tự truy vấn
+    lại như cũ (1 mẻ đơn lẻ, mọi nơi gọi khác không đổi hành vi). Xem _expand_materials()."""
     snap = batch.recipe_snapshot or {}
     factor = factor_for(snap, batch.planned_qty)
-    actual = actual_consumed(db, batch.batch_id)
-    not_used = not_used_codes(db, batch.batch_id)
+    if actual is None:
+        actual = actual_consumed(db, batch.batch_id)
+    if not_used is None:
+        not_used = not_used_codes(db, batch.batch_id)
     lines, seen = [], set()
-    for m in _expand_materials(db, snap.get("materials"), brew_order_id=batch.order_id):
+    for m in _expand_materials(db, snap.get("materials"), brew_order_id=batch.order_id, name_by_code=name_by_code):
         code = m.get("material_code")
         match_codes = m.get("match_codes") or {code}
         seen |= match_codes
@@ -223,6 +238,41 @@ def compare_batch(db: Session, batch) -> dict:
             "factor": round(factor, 4), "lines": lines, "extras": extras}
 
 
+def _bulk_actual_and_not_used(db: Session, batch_ids: list[str]) -> tuple[dict, dict]:
+    """Gộp trước 1 lần cho NHIỀU mẻ cùng lúc: {batch_id: {material_code: actual}} (mirror
+    actual_consumed() nhưng 1 câu SELECT cho mọi mẻ thay vì N+1) + {batch_id: {material_code đã
+    "Không sử dụng"}} — dùng chung cho batches_fully_dispensed_map() và
+    reports.py::material_norm() (báo cáo định mức NVL lặp qua nhiều mẻ), tránh N+1 (sự cố thực
+    tế 2026-11-02: báo cáo "Định mức NVL" cực kỳ chậm vì gọi actual_consumed()/not_used_codes()
+    riêng cho từng mẻ, mỗi mẻ 3 lượt truy vấn)."""
+    if not batch_ids:
+        return {}, {}
+    # Chia mẻ MỌI .in_() ở đây: batch_ids là TẤT CẢ mẻ nấu (batches_fully_dispensed_map() không
+    # lọc ngày; BC Định mức NVL mặc định "Tất cả" = 3650 ngày) nên chỉ tăng theo thời gian — đo
+    # 02/11/2026: 774 mẻ, tốc độ ~390 mẻ/tháng, tức chạm trần 2100 tham số của SQL Server khoảng
+    # tháng 2/2027 rồi vỡ màn Cấp liệu bằng lỗi "07002 COUNT field incorrect". Xem common.py.
+    edges = execute_in_chunks(db, lambda chunk: select(
+        GenealogyEdge.to_id, GenealogyEdge.from_id, GenealogyEdge.quantity).where(
+        GenealogyEdge.to_type == "batch", GenealogyEdge.to_id.in_(chunk),
+        GenealogyEdge.relation == "consume"), batch_ids)
+    lot_ids = list({from_id for _, from_id, _ in edges})
+    lots = execute_in_chunks(db, lambda chunk: select(MaterialLot).where(
+        MaterialLot.lot_id.in_(chunk)), lot_ids, scalars=True)
+    code_by_lot_id = _material_codes_for_lots(db, lots)
+    actual_by_batch: dict[str, dict[str, float]] = {}
+    for batch_id, lot_id, qty in edges:
+        code = code_by_lot_id.get(lot_id, "?")
+        bucket = actual_by_batch.setdefault(batch_id, {})
+        bucket[code] = bucket.get(code, 0.0) + (qty or 0.0)
+    not_used_rows = execute_in_chunks(db, lambda chunk: select(
+        BatchMaterialNotUsed.batch_id, BatchMaterialNotUsed.material_code)
+        .where(BatchMaterialNotUsed.batch_id.in_(chunk)), batch_ids)
+    not_used_by_batch: dict[str, set[str]] = {}
+    for batch_id, code in not_used_rows:
+        not_used_by_batch.setdefault(batch_id, set()).add(code)
+    return actual_by_batch, not_used_by_batch
+
+
 _FULLY_DISPENSED_MIN_RATIO = 0.6
 
 
@@ -237,38 +287,20 @@ def batches_fully_dispensed_map(db: Session) -> dict[str, bool]:
     CHƯA hề cấp gì ("chua_dung", thực tế = 0) mới KHÔNG tính. Mẻ chưa khai định mức nào coi là
     CHƯA đủ, an toàn hơn tự nhận "đủ" khi không biết.
 
-    Viết riêng thay vì gọi compare_batch() theo từng mẻ (N+1: mỗi lần gọi lại actual_consumed() +
-    _expand_materials() tự fetch lại toàn bộ Danh mục vật tư) — ở đây gộp TRƯỚC 1 lần: 1 câu
-    SELECT lấy mọi cạnh genealogy consume của MỌI mẻ, 1 câu tra material_code theo lô, rồi mới
-    lặp qua từng mẻ chỉ để đối chiếu (không truy vấn gì thêm ngoài _expand_materials's phần
-    group/brew_order — vẫn còn, nhưng đã cắt hẳn phần actual_consumed N+1 tốn nhất)."""
+    Viết riêng thay vì gọi compare_batch() theo từng mẻ (N+1) — dùng _bulk_actual_and_not_used()
+    để gộp TRƯỚC 1 lần cho mọi mẻ (1 câu SELECT cạnh genealogy consume + 1 câu tra material_code
+    theo lô + 1 câu "Không sử dụng"), kèm name_by_code gộp 1 lần (tránh _expand_materials() tự
+    quét lại toàn bộ Danh mục vật tư mỗi mẻ — sự cố thực tế 2026-11-02, xem _bulk_actual_and_not_used())."""
     batches = db.execute(select(BatchExecution)).scalars().all()
     if not batches:
         return {}
     batch_ids = [b.batch_id for b in batches]
-    edges = db.execute(select(GenealogyEdge.to_id, GenealogyEdge.from_id, GenealogyEdge.quantity).where(
-        GenealogyEdge.to_type == "batch", GenealogyEdge.to_id.in_(batch_ids),
-        GenealogyEdge.relation == "consume")).all()
-    lot_ids = list({from_id for _, from_id, _ in edges})
-    lots = db.execute(select(MaterialLot).where(MaterialLot.lot_id.in_(lot_ids))).scalars().all() if lot_ids else []
-    code_by_lot_id = _material_codes_for_lots(db, lots)
-    actual_by_batch: dict[str, dict[str, float]] = {}
-    for batch_id, lot_id, qty in edges:
-        code = code_by_lot_id.get(lot_id, "?")
-        bucket = actual_by_batch.setdefault(batch_id, {})
-        bucket[code] = bucket.get(code, 0.0) + (qty or 0.0)
-    # Gộp trước 1 lần (mirror actual_by_batch ở trên) — {batch_id: {material_code,...}} các dòng
-    # đã xác nhận "Không sử dụng", coi như ĐÃ xử lý (không còn tính là "chua_dung" mơ hồ) giống
-    # hệt cách compare_batch() áp dụng, để tỉ lệ % không bị kéo thấp oan bởi các dòng đã chủ ý bỏ.
-    not_used_rows = db.execute(select(BatchMaterialNotUsed.batch_id, BatchMaterialNotUsed.material_code)
-                               .where(BatchMaterialNotUsed.batch_id.in_(batch_ids))).all()
-    not_used_by_batch: dict[str, set[str]] = {}
-    for batch_id, code in not_used_rows:
-        not_used_by_batch.setdefault(batch_id, set()).add(code)
+    actual_by_batch, not_used_by_batch = _bulk_actual_and_not_used(db, batch_ids)
+    name_by_code = {m.code: m.name for m in db.execute(select(Material)).scalars().all()}
     out = {}
     for b in batches:
         snap = b.recipe_snapshot or {}
-        lines = _expand_materials(db, snap.get("materials"), brew_order_id=b.order_id)
+        lines = _expand_materials(db, snap.get("materials"), brew_order_id=b.order_id, name_by_code=name_by_code)
         if not lines:
             out[b.batch_id] = False
             continue
