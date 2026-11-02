@@ -125,29 +125,61 @@ def process_tick(db: Session, overview: dict) -> None:
 
 
 async def poll_loop(interval_seconds: int = POLL_INTERVAL_SECONDS) -> None:
-    """Vòng lặp nền — khởi động cùng app (xem main.py lifespan), chạy tới khi bị cancel lúc tắt app."""
+    """Vòng lặp nền — khởi động cùng app (xem main.py lifespan), chạy tới khi bị cancel lúc tắt
+    app. MỌI lỗi mỗi lượt (kể cả lỗi MỞ Session, trước đây nằm NGOÀI try/except) đều phải được
+    bắt ngay trong vòng lặp — sự cố thực tế 2026-11-02: tác vụ nền chết lúc 05:43 (nghi do lỗi
+    khi mở Session lọt ra ngoài try cũ), asyncio Task chết ÂM THẦM (không có gì await lại để lộ
+    traceback), mất log hơn 2 tiếng cho tới khi phát hiện qua đối chiếu Realtime — không hề có
+    dòng log lỗi nào dù code cũ tưởng đã bắt hết ngoại lệ. Dùng CHUNG với run_poll_loop_supervised()
+    bên dưới làm lớp bảo vệ thứ 2, phòng trường hợp vẫn có lỗi lọt ra ngoài vì lý do khác."""
     warned_no_connection = False
     while True:
-        db = SessionLocal()
         try:
-            overview = brewhouse_external.brewhouse_overview(db)
-            if overview.get("available"):
-                process_tick(db, overview)
-                db.commit()
-            warned_no_connection = False
-        except DomainError:
-            # Chưa khai báo kết nối CSDL_NL_ĐM (vd môi trường dev) — chỉ cảnh báo 1 lần, tránh
-            # dội log mỗi POLL_INTERVAL_SECONDS giây.
-            db.rollback()
-            if not warned_no_connection:
-                log.warning("brewhouse_log: chưa có kết nối SQL hệ nấu — tạm dừng ghi log, sẽ tự thử lại")
-                warned_no_connection = True
+            db = SessionLocal()
+            try:
+                overview = brewhouse_external.brewhouse_overview(db)
+                if overview.get("available"):
+                    process_tick(db, overview)
+                    db.commit()
+                warned_no_connection = False
+            except DomainError:
+                # Chưa khai báo kết nối CSDL_NL_ĐM (vd môi trường dev) — chỉ cảnh báo 1 lần, tránh
+                # dội log mỗi POLL_INTERVAL_SECONDS giây.
+                db.rollback()
+                if not warned_no_connection:
+                    log.warning("brewhouse_log: chưa có kết nối SQL hệ nấu — tạm dừng ghi log, sẽ tự thử lại")
+                    warned_no_connection = True
+            except Exception:
+                db.rollback()
+                log.exception("brewhouse_log: lượt đọc/ghi log thất bại — bỏ qua, thử lại lượt sau")
+            finally:
+                db.close()
+        except asyncio.CancelledError:
+            raise
         except Exception:
-            db.rollback()
-            log.exception("brewhouse_log: lượt đọc/ghi log thất bại — bỏ qua, thử lại lượt sau")
-        finally:
-            db.close()
+            # Lỗi khi MỞ Session (hoặc bất kỳ lỗi nào khác lọt ra khỏi khối trên) — trước đây sẽ
+            # làm chết cả vòng lặp, giờ chỉ bỏ qua lượt này.
+            log.exception("brewhouse_log: lượt poll thất bại nặng (lỗi ngoài dự kiến) — bỏ qua, thử lại lượt sau")
         await asyncio.sleep(interval_seconds)
+
+
+async def run_poll_loop_supervised(interval_seconds: int = POLL_INTERVAL_SECONDS) -> None:
+    """Bọc ngoài poll_loop() — nếu vòng lặp vẫn chết vì lý do ngoài dự kiến (chưa lường hết trong
+    poll_loop(), hoặc lỗi mới phát sinh sau này), TỰ KHỞI ĐỘNG LẠI ngay sau khi ghi log CRITICAL,
+    thay vì để tác vụ nền chết âm thầm cho tới khi ai đó phát hiện qua đối chiếu thủ công (sự cố
+    2026-11-02, xem poll_loop()). main.py (lifespan) gọi hàm NÀY thay vì gọi thẳng poll_loop()."""
+    while True:
+        try:
+            await poll_loop(interval_seconds)
+            return  # poll_loop() chỉ return khi vòng while True bên trong thoát bất thường — không nên xảy ra
+        except asyncio.CancelledError:
+            raise  # tắt app bình thường — để main.py xử lý, không phải sự cố cần khởi động lại
+        except Exception:
+            log.critical(
+                "brewhouse_log: TÁC VỤ GHI LOG CHẾT NGOÀI DỰ KIẾN — tự khởi động lại sau %ss",
+                interval_seconds, exc_info=True,
+            )
+            await asyncio.sleep(interval_seconds)
 
 
 def _row_to_out(row: BrewhouseStepLog) -> dict:

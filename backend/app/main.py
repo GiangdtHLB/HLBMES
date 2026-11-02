@@ -84,9 +84,12 @@ async def lifespan(app: FastAPI):
     get_logger("mes").info("MES khởi động — %s", APP_NAME)
     # Tác vụ nền ghi log từng bước hệ nấu (nồi gạo + 2 dây nấu) theo oder/batch/year, phục vụ
     # báo cáo "mỗi nồi chạy hết bao nhiêu phút" — yêu cầu người dùng 2026-11-01. Chỉ 1 instance
-    # trong tiến trình này (xem cảnh báo multi-worker ở services/brewhouse_log.py).
-    from .services.brewhouse_log import poll_loop
-    brewhouse_log_task = asyncio.create_task(poll_loop())
+    # trong tiến trình này (xem cảnh báo multi-worker ở services/brewhouse_log.py). Dùng bản có
+    # giám sát/tự khởi động lại (run_poll_loop_supervised) thay vì gọi thẳng poll_loop() — sự cố
+    # 2026-11-02: tác vụ chết âm thầm lúc 05:43, mất log hơn 2 tiếng không ai biết cho tới khi
+    # đối chiếu thủ công với Realtime.
+    from .services.brewhouse_log import run_poll_loop_supervised
+    brewhouse_log_task = asyncio.create_task(run_poll_loop_supervised())
     yield
     brewhouse_log_task.cancel()
     try:
