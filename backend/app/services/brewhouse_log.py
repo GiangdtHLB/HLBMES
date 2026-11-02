@@ -32,7 +32,7 @@ import asyncio
 from datetime import datetime, timedelta
 from typing import Optional
 
-from sqlalchemy import select
+from sqlalchemy import false, select
 from sqlalchemy.orm import Session
 
 from ..common import utcnow
@@ -195,6 +195,45 @@ def _tick_once(state: dict) -> None:
         db.close()
 
 
+def _flag_open_rows_on_start() -> None:
+    """Đánh dấu data_gap cho MỌI dòng còn đang mở lúc vòng lặp bắt đầu — chạy 1 lần mỗi lần
+    poll_loop() khởi động (kể cả khi supervisor khởi động lại sau sự cố).
+
+    Vì sao cần: _last_tick_ok_at là biến MODULE, tiến trình mới luôn bắt đầu bằng None nên
+    gap_seconds=0 ở lượt đầu -> is_gap=False. Tức cơ chế data_gap của process_tick() CHỈ phát hiện
+    được gián đoạn khi tiến trình vẫn sống; đúng kịch bản nó sinh ra để chặn (tác vụ chết rồi
+    app khởi động lại) thì lại không bắt được. Sự cố 2026-11-02: tác vụ chết 06:03, tới lúc
+    deploy còn 11 dòng mở từ 3 tiếng trước — nếu không đánh dấu, chúng sẽ bị đóng với
+    duration_minutes ~3 tiếng (toàn bộ khoảng chết) và lọt thẳng vào báo cáo năng suất.
+
+    Đánh dấu TẤT CẢ dòng đang mở, không cố phân biệt "khởi động lại sạch" (deploy ~15s) với "chết
+    âm thầm": tiến trình mới không có cách nào biết giữa chừng đã xảy ra gì. Đánh dấu thừa thì
+    mất vài bước khỏi thống kê năng suất; đánh dấu thiếu thì đưa số giờ ảo vào báo cáo công suất
+    — sai lệch nguy hiểm hơn nhiều."""
+    db = SessionLocal()
+    try:
+        rows = db.execute(
+            select(BrewhouseStepLog).where(
+                BrewhouseStepLog.ended_at.is_(None),
+                BrewhouseStepLog.data_gap == false(),   # == false(), KHÔNG .is_(False) — xem DEPLOY-CONTRACT §2
+            )
+        ).scalars().all()
+        if rows:
+            for r in rows:
+                r.data_gap = True
+            db.commit()
+            log.warning(
+                "brewhouse_log: khởi động lại khi còn %d dòng log đang mở (cũ nhất từ %s) — đã đánh "
+                "dấu data_gap vì không biết đã gián đoạn bao lâu, báo cáo năng suất sẽ loại trừ",
+                len(rows), min(r.started_at for r in rows).isoformat(),
+            )
+    except Exception:
+        db.rollback()
+        log.exception("brewhouse_log: không đánh dấu được dòng log đang mở lúc khởi động — bỏ qua")
+    finally:
+        db.close()
+
+
 async def poll_loop(interval_seconds: int = POLL_INTERVAL_SECONDS) -> None:
     """Vòng lặp nền — khởi động cùng app (xem main.py lifespan), chạy tới khi bị cancel lúc tắt app.
 
@@ -214,6 +253,7 @@ async def poll_loop(interval_seconds: int = POLL_INTERVAL_SECONDS) -> None:
        lỗi. Dùng CHUNG với run_poll_loop_supervised() làm lớp bảo vệ thứ 2.
     """
     state: dict = {"warned_no_connection": False}
+    await asyncio.to_thread(_flag_open_rows_on_start)
     while True:
         try:
             await asyncio.to_thread(_tick_once, state)
