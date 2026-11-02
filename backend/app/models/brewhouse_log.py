@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import JSON, Float, Index, Integer, Unicode
+from sqlalchemy import JSON, Boolean, Float, Index, Integer, Unicode
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ..common import UTCDateTime, new_id, utcnow
@@ -47,6 +47,13 @@ class BrewhouseStepLog(Base):
     step_minutes_setpoint: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     start_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
     end_snapshot: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    # True nếu dòng bị ĐÓNG sau 1 khoảng gián đoạn ghi log bất thường (tác vụ nền bị treo/chết,
+    # mất kết nối SCADA kéo dài...) — xem services/brewhouse_log.py::GAP_THRESHOLD_SECONDS. Khi
+    # đó started_at/ended_at/duration_minutes KHÔNG đáng tin (bước thật có thể đã xong từ lâu
+    # trong lúc gián đoạn, trước khi đọc lại được) — báo cáo phải LOẠI các dòng này khỏi mọi tính
+    # trung bình/nút thắt cổ chai, không xoá vì vẫn có giá trị tham khảo "có chạy nhưng không đo
+    # được chính xác" — sự cố thực tế 2026-11-02 (poller chết 2+ tiếng, không ai biết).
+    data_gap: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
 
     __table_args__ = (

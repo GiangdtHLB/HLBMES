@@ -12057,7 +12057,7 @@ VIEWS.reports = async function () {
         <tbody>${bsSummary.map(s => `<tr>
           <td>${esc(s.equipment_name)}</td><td><code class="k">${esc(s.ba_order_no || "—")}</code></td>
           <td><code class="k">${esc(s.ba_batch_no || "—")}</code></td><td>${s.ba_year ?? "—"}</td>
-          <td>${s.step_count}</td><td>${fmtMin(s.total_minutes)}${s.still_running ? " " + statusBadge("running", "đang chạy") : ""}</td>
+          <td>${s.step_count}</td><td>${fmtMin(s.total_minutes)}${s.still_running ? " " + statusBadge("running", "đang chạy") : ""}${s.data_gap ? " " + statusBadge("held", "gián đoạn ghi log") : ""}</td>
           <td class="muted">${fmt(s.started_at)}</td><td class="muted">${s.ended_at ? fmt(s.ended_at) : "—"}</td></tr>`).join("") ||
           '<tr><td colspan=8 class="muted">Chưa có dữ liệu — hệ thống chỉ bắt đầu ghi log từ lúc bật tính năng này.</td></tr>'}</tbody>
       </table></div>
@@ -12074,7 +12074,7 @@ VIEWS.reports = async function () {
           <td>${esc(r.equipment_name)}</td><td>${r.step_no ?? "—"}</td><td>${esc(r.step_name || "—")}</td>
           <td><code class="k">${esc(r.ba_order_no || "—")}</code></td><td><code class="k">${esc(r.ba_batch_no || "—")}</code></td>
           <td class="muted">${fmt(r.started_at)}</td><td class="muted">${r.ended_at ? fmt(r.ended_at) : "—"}</td>
-          <td>${r.ended_at ? fmtMin(r.duration_minutes) : statusBadge("running", "đang chạy")}</td>
+          <td>${r.ended_at ? fmtMin(r.duration_minutes) : statusBadge("running", "đang chạy")}${r.data_gap ? " " + statusBadge("held", "gián đoạn ghi log") : ""}</td>
           <td class="muted">${r.step_minutes_setpoint != null ? r.step_minutes_setpoint.toLocaleString("vi-VN") : "—"}</td>
           <td>${snap.temp_actual != null ? snap.temp_actual.toFixed(1) : "—"}</td>
           <td>${snap.volume_hl != null ? snap.volume_hl.toFixed(2) : "—"}</td>
@@ -12138,16 +12138,16 @@ VIEWS.reports = async function () {
           <td><code class="k">${esc(it.ba_batch_no || "—")}</code></td>
           <td class="muted">${fmt(it.rice_started_at)}</td>
           <td class="muted">${it.whirlpool_ended_at ? fmt(it.whirlpool_ended_at) : "—"}</td>
-          <td><b>${it.cycle_still_running ? `${fmtMin2(it.cycle_minutes)} ${statusBadge("running", "đang chạy")}` : fmtMin2(it.cycle_minutes)}</b></td>
+          <td><b>${fmtMin2(it.cycle_minutes)}${it.cycle_still_running ? " " + statusBadge("running", "đang chạy") : ""}${it.cycle_data_gap ? " " + statusBadge("held", "gián đoạn ghi log") : ""}</b></td>
           ${it.vessels.map(v => `<td>${v.total_minutes == null ? "—" :
-            v.still_running ? `${fmtMin2(v.total_minutes)} ${statusBadge("running", "đang chạy")}` : fmtMin2(v.total_minutes)}</td>`).join("")}
+            `${fmtMin2(v.total_minutes)}${v.still_running ? " " + statusBadge("running", "đang chạy") : ""}${v.data_gap ? " " + statusBadge("held", "gián đoạn ghi log") : ""}`}</td>`).join("")}
           <td>${statusBadge(...(BC_STAGE[it.stage] || ["pending", it.stage]))}</td></tr>`).join("") ||
           `<tr><td colspan=${7 + bcRoles.length} class="muted">Chưa có dữ liệu.</td></tr>`}</tbody>
       </table></div>
     </div>
     <div class="panel" style="margin-top:14px">
       <h2>Năng suất lý thuyết <span class="muted">(theo từng mẻ)</span></h2>
-      <div class="muted" style="margin-bottom:8px">Mỗi dòng = 1 mẻ ĐÃ XONG (bỏ qua mẻ còn đang chạy dở) — riêng Nồi gạo giữ nguyên thời gian (dùng chung 1 thiết bị cho cả 2 dây), các nồi còn lại chia đôi thời gian (mỗi nồi có 2 thiết bị, 1/dây, chạy xen kẽ). "Số mẻ đạt được/ngày" = 24 giờ × 60 phút / số phút lớn nhất trong các nồi (nút thắt cổ chai).</div>
+      <div class="muted" style="margin-bottom:8px">Mỗi dòng = 1 mẻ ĐÃ XONG (bỏ qua mẻ còn đang chạy dở hoặc bị gián đoạn ghi log — xem bảng trên) — riêng Nồi gạo giữ nguyên thời gian (dùng chung 1 thiết bị cho cả 2 dây), các nồi còn lại chia đôi thời gian (mỗi nồi có 2 thiết bị, 1/dây, chạy xen kẽ). "Số mẻ đạt được/ngày" = 24 giờ × 60 phút / số phút lớn nhất trong các nồi (nút thắt cổ chai).</div>
       <div class="tablewrap"><table id="t_bcthrpt">
         <thead><tr><th>Mẻ</th>${bcRoles.map(r => `<th>${esc(r)}</th>`).join("")}<th>Số mẻ đạt được/ngày</th></tr></thead>
         <tbody>${bcThrpt.map(p => `<tr>

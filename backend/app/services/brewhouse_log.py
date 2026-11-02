@@ -51,6 +51,19 @@ log = get_logger("mes.brewhouse_log")
 # kể cả ngoài giờ sản xuất.
 POLL_INTERVAL_SECONDS = 1
 
+# Khoảng cách tối đa (giây) giữa 2 lượt đọc THÀNH CÔNG liên tiếp trước khi coi là "có gián đoạn
+# ghi log" (tác vụ nền treo/chết rồi tự khởi động lại, mất kết nối SCADA kéo dài...) — gấp 10 lần
+# POLL_INTERVAL_SECONDS (tối thiểu 10s) để không báo nhầm do 1 lượt đơn lẻ chạy chậm (SQL Server
+# qua WAN đôi lúc có độ trễ). Khi vượt ngưỡng này, dòng log bị ĐÓNG/MỞ ngay sau đó sẽ bị đánh dấu
+# data_gap=True (xem BrewhouseStepLog.data_gap) — sự cố thực tế 2026-11-02: tác vụ chết 2+ tiếng,
+# lúc khởi động lại sẽ đóng dòng đang mở với duration_minutes SAI (tính cả khoảng chết) nếu không
+# có cờ này để báo cáo loại trừ.
+GAP_THRESHOLD_SECONDS = max(POLL_INTERVAL_SECONDS * 10, 10)
+
+# Mốc thời gian lượt đọc THÀNH CÔNG gần nhất (module-level, chỉ 1 instance poll_loop — xem cảnh
+# báo multi-worker ở docstring module) — dùng để tính gap_seconds truyền vào process_tick().
+_last_tick_ok_at: Optional[datetime] = None
+
 
 def _get_open_row(db: Session, equipment_id: int) -> Optional[BrewhouseStepLog]:
     return db.execute(
@@ -69,7 +82,7 @@ def _s(v) -> Optional[str]:
     return None if v is None else str(v)
 
 
-def _open_step(equipment_id: int, status: dict, now: datetime) -> BrewhouseStepLog:
+def _open_step(equipment_id: int, status: dict, now: datetime, data_gap: bool = False) -> BrewhouseStepLog:
     return BrewhouseStepLog(
         equipment_id=equipment_id,
         equipment_name=brewhouse_external.EQUIPMENT_NAMES.get(equipment_id, f"Thiết bị {equipment_id}"),
@@ -82,22 +95,33 @@ def _open_step(equipment_id: int, status: dict, now: datetime) -> BrewhouseStepL
         started_at=now,
         step_minutes_setpoint=status.get("step_minutes_setpoint"),
         start_snapshot=status,
+        # Nếu tick này đến sau 1 khoảng gián đoạn dài — bước này có thể đã THẬT SỰ bắt đầu từ lúc
+        # nào đó TRONG khoảng gián đoạn, không phải đúng lúc `now` — đánh dấu để báo cáo loại trừ.
+        data_gap=data_gap,
     )
 
 
-def _close_step(row: BrewhouseStepLog, status: dict, now: datetime) -> None:
+def _close_step(row: BrewhouseStepLog, status: dict, now: datetime, data_gap: bool = False) -> None:
     row.ended_at = now
     row.duration_minutes = round((now - row.started_at).total_seconds() / 60.0, 2)
     row.end_snapshot = status
+    # Giữ True nếu dòng NÀY đã bị đánh dấu từ lúc MỞ (started_at cũng không đáng tin) — không ghi
+    # đè về False chỉ vì tick đóng dòng lần này không phải là tick có gián đoạn.
+    if data_gap:
+        row.data_gap = True
 
 
 def _batch_key(status: dict) -> tuple:
     return (status.get("ba_year"), _s(status.get("ba_order_no")), _s(status.get("ba_batch_no")))
 
 
-def process_tick(db: Session, overview: dict) -> None:
-    """Xử lý 1 lượt đọc brewhouse_overview() — mở/đóng dòng log theo logic ở docstring module."""
+def process_tick(db: Session, overview: dict, gap_seconds: float = 0.0) -> None:
+    """Xử lý 1 lượt đọc brewhouse_overview() — mở/đóng dòng log theo logic ở docstring module.
+    `gap_seconds`: khoảng cách (giây) kể từ lượt đọc THÀNH CÔNG trước đó (do poll_loop() tính) —
+    vượt GAP_THRESHOLD_SECONDS thì mọi dòng mở/đóng Ở TICK NÀY bị đánh dấu data_gap=True (xem
+    _open_step()/_close_step())."""
     now = utcnow()
+    is_gap = gap_seconds > GAP_THRESHOLD_SECONDS
     equipment = overview.get("equipment") or {}
     for equipment_id in brewhouse_external.EQUIPMENT_NAMES:
         status = equipment.get(equipment_id)
@@ -109,18 +133,18 @@ def process_tick(db: Session, overview: dict) -> None:
 
         if is_idle:
             if open_row is not None:
-                _close_step(open_row, status, now)
+                _close_step(open_row, status, now, data_gap=is_gap)
             continue
 
         if open_row is None:
-            db.add(_open_step(equipment_id, status, now))
+            db.add(_open_step(equipment_id, status, now, data_gap=is_gap))
             continue
 
         step_changed = open_row.step_no != status.get("step_no")
         batch_changed = (open_row.ba_year, open_row.ba_order_no, open_row.ba_batch_no) != _batch_key(status)
         if step_changed or batch_changed:
-            _close_step(open_row, status, now)
-            db.add(_open_step(equipment_id, status, now))
+            _close_step(open_row, status, now, data_gap=is_gap)
+            db.add(_open_step(equipment_id, status, now, data_gap=is_gap))
         # else: vẫn giữa bước cũ, không có gì để log
 
 
@@ -132,6 +156,7 @@ async def poll_loop(interval_seconds: int = POLL_INTERVAL_SECONDS) -> None:
     traceback), mất log hơn 2 tiếng cho tới khi phát hiện qua đối chiếu Realtime — không hề có
     dòng log lỗi nào dù code cũ tưởng đã bắt hết ngoại lệ. Dùng CHUNG với run_poll_loop_supervised()
     bên dưới làm lớp bảo vệ thứ 2, phòng trường hợp vẫn có lỗi lọt ra ngoài vì lý do khác."""
+    global _last_tick_ok_at
     warned_no_connection = False
     while True:
         try:
@@ -139,8 +164,17 @@ async def poll_loop(interval_seconds: int = POLL_INTERVAL_SECONDS) -> None:
             try:
                 overview = brewhouse_external.brewhouse_overview(db)
                 if overview.get("available"):
-                    process_tick(db, overview)
+                    tick_time = utcnow()
+                    gap_seconds = (tick_time - _last_tick_ok_at).total_seconds() if _last_tick_ok_at else 0.0
+                    process_tick(db, overview, gap_seconds=gap_seconds)
                     db.commit()
+                    _last_tick_ok_at = tick_time
+                    if gap_seconds > GAP_THRESHOLD_SECONDS:
+                        log.warning(
+                            "brewhouse_log: phát hiện gián đoạn ghi log %.0fs (> %ss) — các dòng "
+                            "log mở/đóng ở lượt này đã bị đánh dấu data_gap, báo cáo sẽ loại trừ",
+                            gap_seconds, GAP_THRESHOLD_SECONDS,
+                        )
                 warned_no_connection = False
             except DomainError:
                 # Chưa khai báo kết nối CSDL_NL_ĐM (vd môi trường dev) — chỉ cảnh báo 1 lần, tránh
@@ -199,6 +233,7 @@ def _row_to_out(row: BrewhouseStepLog) -> dict:
         "step_minutes_setpoint": row.step_minutes_setpoint,
         "start_snapshot": row.start_snapshot,
         "end_snapshot": row.end_snapshot,
+        "data_gap": row.data_gap,
     }
 
 
@@ -235,9 +270,15 @@ def step_log_report(db: Session, ba_year: int = None, ba_order_no: str = None,
                 "equipment_id": r.equipment_id, "equipment_name": r.equipment_name,
                 "ba_year": r.ba_year, "ba_order_no": r.ba_order_no, "ba_batch_no": r.ba_batch_no,
                 "step_count": 0, "started_at": r.started_at, "ended_at": r.ended_at, "still_running": False,
+                "data_gap": False,
             }
         s["step_count"] += 1
         s["started_at"] = min(s["started_at"], r.started_at)
+        if r.data_gap:
+            # 1 bước bất kỳ trong nhóm này bị gián đoạn ghi log -> total_minutes cộng gộp của CẢ
+            # NHÓM cũng không còn đáng tin (xem GAP_THRESHOLD_SECONDS) — đánh dấu để báo cáo loại
+            # trừ khỏi tính trung bình/nút thắt cổ chai, vẫn hiện số (có badge cảnh báo) để tham khảo.
+            s["data_gap"] = True
         if r.ended_at is None:
             s["still_running"] = True
         elif not s["still_running"]:
@@ -312,9 +353,11 @@ def _brew_cycle_items(db: Session, ba_year: int = None, ba_order_no: str = None,
             if e is None:
                 e = by_equipment[r.equipment_id] = {
                     "equipment_name": r.equipment_name, "started_at": r.started_at,
-                    "ended_at": r.ended_at, "still_running": False,
+                    "ended_at": r.ended_at, "still_running": False, "data_gap": False,
                 }
             e["started_at"] = min(e["started_at"], r.started_at)
+            if r.data_gap:
+                e["data_gap"] = True  # xem ghi chú tương tự ở step_log_report() summary_map
             if r.ended_at is None:
                 e["still_running"] = True
             elif not e["still_running"]:
@@ -322,20 +365,23 @@ def _brew_cycle_items(db: Session, ba_year: int = None, ba_order_no: str = None,
 
         vessels = []
         whirlpool_ended_at = None
+        whirlpool_data_gap = False
         stage = "chua_toi_lang_xoay"
         for role_label, equip_ids in ROLE_CHAIN:
             eq_id = next((i for i in equip_ids if i in by_equipment), None)
             if eq_id is None:
                 vessels.append({"role": role_label, "equipment_name": None,
-                                "total_minutes": None, "still_running": False})
+                                "total_minutes": None, "still_running": False, "data_gap": False})
                 continue
             e = by_equipment[eq_id]
             end_reference = now if e["still_running"] else e["ended_at"]
             total_minutes = round((end_reference - e["started_at"]).total_seconds() / 60.0, 2)
             vessels.append({"role": role_label, "equipment_name": e["equipment_name"],
-                            "total_minutes": total_minutes, "still_running": e["still_running"]})
+                            "total_minutes": total_minutes, "still_running": e["still_running"],
+                            "data_gap": e["data_gap"]})
             if role_label == WHIRLPOOL_ROLE:
                 whirlpool_ended_at = None if e["still_running"] else e["ended_at"]
+                whirlpool_data_gap = e["data_gap"]
                 stage = "dang_lang_xoay" if e["still_running"] else "da_xong"
 
         # Tổng thời gian cả mẻ = Nồi lắng xoáy kết thúc - Nồi gạo bắt đầu (cùng oder/batch/year)
@@ -345,6 +391,9 @@ def _brew_cycle_items(db: Session, ba_year: int = None, ba_order_no: str = None,
         cycle_still_running = stage != "da_xong"
         cycle_end_reference = now if cycle_still_running else whirlpool_ended_at
         cycle_minutes = round((cycle_end_reference - rice_started_at).total_seconds() / 60.0, 2)
+        # Mốc bắt đầu (Nồi gạo) HOẶC kết thúc (Nồi lắng xoáy) bị gián đoạn ghi log -> tổng thời
+        # gian cả mẻ cũng không đáng tin, dù 2 nồi ở giữa (chưa đổi dây) không gián đoạn.
+        cycle_data_gap = vessels[0]["data_gap"] or whirlpool_data_gap
 
         items.append({
             "ba_year": year, "ba_order_no": order_no, "ba_batch_no": batch_no,
@@ -354,6 +403,7 @@ def _brew_cycle_items(db: Session, ba_year: int = None, ba_order_no: str = None,
             "vessels": vessels,
             "cycle_minutes": cycle_minutes,
             "cycle_still_running": cycle_still_running,
+            "cycle_data_gap": cycle_data_gap,
         })
     return items
 
@@ -379,9 +429,10 @@ def brew_cycle_report(db: Session, ba_year: int = None, ba_order_no: str = None,
     for it in items_asc:
         vessel_adj = []
         for v in it["vessels"]:
-            # Chỉ dùng thời gian ĐÃ XONG (không dùng số phút của bước đang chạy dở — số đó chưa
-            # phải tổng thật, lấy vào sẽ làm sản lượng/ngày bị thổi phồng sai).
-            if v["still_running"] or v["total_minutes"] is None:
+            # Chỉ dùng thời gian ĐÃ XONG VÀ ĐÁNG TIN (không dùng số phút của bước đang chạy dở,
+            # cũng không dùng số bị đánh dấu data_gap — cả 2 đều không phải tổng thật, lấy vào sẽ
+            # làm sản lượng/ngày bị thổi phồng/bóp méo sai — xem GAP_THRESHOLD_SECONDS).
+            if v["still_running"] or v["total_minutes"] is None or v["data_gap"]:
                 adj = None
             elif v["role"] == "Nồi gạo":
                 adj = v["total_minutes"]
