@@ -141,6 +141,38 @@ Cách bắt (LÀM CẢ 2, vì bug ẩn ở cả đọc lẫn ghi):
 2. **Smoke GHI (POST/PUT)**: với các form chính (tạo mẻ, lưu cài đặt, nhập kho, tạo lệnh…)
    tạo 1 bản ghi thật trên DB test rồi xoá — lớp datetime→DATETIME CHỈ lộ ở đường ghi.
 
+## 3c. Tác vụ nền `async` KHÔNG được gọi thẳng I/O đồng bộ (gate GET-smoke KHÔNG bắt được)
+Gặp 2026-11-01 ở `services/brewhouse_log.py::poll_loop` (log từng bước hệ nấu).
+
+```python
+# SAI — chặn event loop
+async def poll_loop():
+    while True:
+        overview = brewhouse_external.brewhouse_overview(db)   # ODBC/WAN, đồng bộ
+        await asyncio.sleep(1)
+
+# ĐÚNG — đẩy phần chặn sang threadpool
+async def poll_loop():
+    while True:
+        await asyncio.to_thread(_tick_once, state)
+        await asyncio.sleep(1)
+```
+
+Vì sao nghiêm trọng: uvicorn **nhận và định tuyến mọi request trên chính event loop đó**. Thân
+lượt poll đo thực tế trên prod là ~0,24s (đỉnh 0,49s; 4s khi WAN tới SCADA trục trặc = timeout
+ODBC). Với `sleep(1)` thì event loop bị khóa ~25% thời gian, 24/7 → **toàn bộ** request của app
+trễ theo, và đứng hình vài giây mỗi lần SCADA chậm. Không liên quan MSSQL, nhưng cùng tính chất
+"chỉ lộ trên prod": DB/SCADA dev ở localhost nên độ trễ ~0 và lỗi không biểu hiện.
+
+Quy tắc: trong `async def`, mọi lệnh gọi DB/ODBC/HTTP đồng bộ phải bọc `asyncio.to_thread(...)`.
+Nhịp poll dày (1s) thì càng bắt buộc. Kèm theo, nhớ cân nhắc tải sinh ra: 1s/lượt = ~86.400 lượt
+đọc SCADA/ngày + ~13 SELECT/giây trên CSDL app (ở đây chấp nhận được vì đã có index
+`equipment_id`/`ended_at`, và chỉ GHI khi bước thực sự đổi).
+
+Nhiều worker: poller chạy 1 instance/tiến trình. Prod hiện chạy **1 worker** (không `--workers`)
+nên an toàn; nếu sau này tăng worker phải gom poller về 1 tiến trình hoặc thêm khóa, không thì
+N tiến trình cùng ghi log trùng.
+
 ## 4. `alembic.ini` / URL
 Mật khẩu SA test **không dùng ký tự đặc biệt** (`% @ ! /`) — ConfigParser của alembic.ini
 nội suy `%` gây lỗi. File `.env`/`docker-compose.override.yml` (chứa secret) **không commit**.
