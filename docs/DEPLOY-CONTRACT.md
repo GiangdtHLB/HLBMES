@@ -80,8 +80,18 @@ lệnh; `in_()` sinh 1 tham số mỗi phần tử → pyodbc báo `07002 COUNT 
 error` → 500. SQLite/Postgres không có giới hạn này nên test không lộ; lỗi chỉ xuất hiện khi
 DỮ LIỆU THẬT đủ lớn (Kho TP 4737 pallet, 2026-10-07 — màn Kho TP (WMS) trắng toàn bộ). Khi
 `in_()` nhận danh sách lấy từ 1 bảng có thể phình to (pallet/case/unit/lot/movement...), phải
-chia mẻ ≤ ~900 — xem `services/wms.py::_scalars_in_chunks`. Cảnh giác nhất ở các chỗ "gộp
-N+1 thành 1 câu IN" — tối ưu đúng về số truy vấn nhưng đổi lại trần tham số.
+chia mẻ ≤ ~900 — dùng **`common.py::execute_in_chunks(db, stmt_for, values, scalars=)`**
+(`services/wms.py::_scalars_in_chunks` là bản cũ cùng mục đích, chỉ cho SELECT entity).
+Cảnh giác nhất ở các chỗ "gộp N+1 thành 1 câu IN" — tối ưu đúng về số truy vấn nhưng đổi lại
+trần tham số.
+
+> ⚠️ **Hỏi "danh sách này do AI hay do người quyết định độ dài?"** `in_()` nhận danh sách người
+> dùng CHỌN TAY (vd gộp vài mẻ vào tank) thì an toàn. `in_()` nhận danh sách do DỮ LIỆU quyết
+> định — nhất là khi truy vấn **không lọc ngày** — thì độ dài chỉ tăng theo thời gian, nên
+> "hôm nay chạy tốt" không nói lên gì. Đo 2026-11-02: `bom.py::batches_fully_dispensed_map()`
+> (màn Cấp liệu) và `dashboard.py::qc_attention_alerts()` đều `in_()` TOÀN BỘ mẻ nấu — 774 mẻ,
+> tăng ~390 mẻ/tháng, tức sẽ vỡ khoảng **tháng 2/2027**. Đã chia mẻ. Cách kiểm: seed > 2100
+> dòng rồi gọi thật, đừng tin số liệu hiện tại.
 
 ## 3. Điều kiện DỮ LIỆU (cổng MSSQL trên DB rỗng KHÔNG bắt được)
 Migration tạo `UNIQUE`/`NOT NULL`/`FK` chạy sạch trên DB test rỗng nhưng **fail trên prod

@@ -38,6 +38,30 @@ def new_id() -> str:
     return str(uuid.uuid4())
 
 
+# SQL Server giới hạn 2100 THAM SỐ BIND cho 1 câu lệnh; `col.in_([...])` sinh 1 tham số mỗi phần
+# tử nên danh sách dài làm vỡ câu lệnh với lỗi khó đoán "07002 COUNT field incorrect" (đã gặp
+# 2026-10 ở màn Kho TP). Chừa chỗ cho các tham số khác trong cùng câu lệnh.
+IN_CHUNK = 900
+
+
+def execute_in_chunks(db, stmt_for, values, scalars: bool = False) -> list:
+    """Chạy `stmt_for(chunk)` theo từng mẻ ≤ IN_CHUNK phần tử rồi gộp kết quả — dùng cho MỌI
+    `col.in_(...)` mà độ dài danh sách do DỮ LIỆU quyết định (số mẻ, số lô, số scope QC…) chứ
+    không do người dùng chọn tay.
+
+    Vì sao phải chủ động: SQLite không có giới hạn này nên test ở môi trường phát triển luôn
+    xanh; lỗi chỉ nổ trên SQL Server, và chỉ khi dữ liệu đã tích đủ lớn — tức là nổ vào lúc hệ
+    thống đang chạy thật, trên màn hình dùng hàng ngày, chứ không phải lúc vừa deploy.
+
+    `scalars=True` khi SELECT nguyên entity (ORM), False khi SELECT nhiều cột (trả về tuple)."""
+    out: list = []
+    vals = list(values)
+    for i in range(0, len(vals), IN_CHUNK):
+        res = db.execute(stmt_for(vals[i:i + IN_CHUNK]))
+        out.extend(res.scalars().all() if scalars else res.all())
+    return out
+
+
 def resolve_years(years):
     """Chuẩn hoá tham số lọc năm cho các list-endpoint mã/số hiệu theo năm (mã nấu, lệnh
     nấu, lô lên men, lệnh lọc, mã lọc, mã chiết) — cho phép chọn 1 năm hoặc 2 năm LIÊN TIẾP.

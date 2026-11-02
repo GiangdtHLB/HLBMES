@@ -7,7 +7,7 @@ bảng đối chiếu trong chi tiết mẻ, và báo cáo định mức NVL nhi
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..common import LotStatus
+from ..common import LotStatus, execute_in_chunks
 from ..errors import DomainError
 from ..models.batches import BatchExecution
 from ..models.brewing import BrewOrderMaterialLine
@@ -247,19 +247,26 @@ def _bulk_actual_and_not_used(db: Session, batch_ids: list[str]) -> tuple[dict, 
     riêng cho từng mẻ, mỗi mẻ 3 lượt truy vấn)."""
     if not batch_ids:
         return {}, {}
-    edges = db.execute(select(GenealogyEdge.to_id, GenealogyEdge.from_id, GenealogyEdge.quantity).where(
-        GenealogyEdge.to_type == "batch", GenealogyEdge.to_id.in_(batch_ids),
-        GenealogyEdge.relation == "consume")).all()
+    # Chia mẻ MỌI .in_() ở đây: batch_ids là TẤT CẢ mẻ nấu (batches_fully_dispensed_map() không
+    # lọc ngày; BC Định mức NVL mặc định "Tất cả" = 3650 ngày) nên chỉ tăng theo thời gian — đo
+    # 02/11/2026: 774 mẻ, tốc độ ~390 mẻ/tháng, tức chạm trần 2100 tham số của SQL Server khoảng
+    # tháng 2/2027 rồi vỡ màn Cấp liệu bằng lỗi "07002 COUNT field incorrect". Xem common.py.
+    edges = execute_in_chunks(db, lambda chunk: select(
+        GenealogyEdge.to_id, GenealogyEdge.from_id, GenealogyEdge.quantity).where(
+        GenealogyEdge.to_type == "batch", GenealogyEdge.to_id.in_(chunk),
+        GenealogyEdge.relation == "consume"), batch_ids)
     lot_ids = list({from_id for _, from_id, _ in edges})
-    lots = db.execute(select(MaterialLot).where(MaterialLot.lot_id.in_(lot_ids))).scalars().all() if lot_ids else []
+    lots = execute_in_chunks(db, lambda chunk: select(MaterialLot).where(
+        MaterialLot.lot_id.in_(chunk)), lot_ids, scalars=True)
     code_by_lot_id = _material_codes_for_lots(db, lots)
     actual_by_batch: dict[str, dict[str, float]] = {}
     for batch_id, lot_id, qty in edges:
         code = code_by_lot_id.get(lot_id, "?")
         bucket = actual_by_batch.setdefault(batch_id, {})
         bucket[code] = bucket.get(code, 0.0) + (qty or 0.0)
-    not_used_rows = db.execute(select(BatchMaterialNotUsed.batch_id, BatchMaterialNotUsed.material_code)
-                               .where(BatchMaterialNotUsed.batch_id.in_(batch_ids))).all()
+    not_used_rows = execute_in_chunks(db, lambda chunk: select(
+        BatchMaterialNotUsed.batch_id, BatchMaterialNotUsed.material_code)
+        .where(BatchMaterialNotUsed.batch_id.in_(chunk)), batch_ids)
     not_used_by_batch: dict[str, set[str]] = {}
     for batch_id, code in not_used_rows:
         not_used_by_batch.setdefault(batch_id, set()).add(code)
