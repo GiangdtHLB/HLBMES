@@ -52,13 +52,20 @@ log = get_logger("mes.brewhouse_log")
 POLL_INTERVAL_SECONDS = 1
 
 # Khoảng cách tối đa (giây) giữa 2 lượt đọc THÀNH CÔNG liên tiếp trước khi coi là "có gián đoạn
-# ghi log" (tác vụ nền treo/chết rồi tự khởi động lại, mất kết nối SCADA kéo dài...) — gấp 10 lần
-# POLL_INTERVAL_SECONDS (tối thiểu 10s) để không báo nhầm do 1 lượt đơn lẻ chạy chậm (SQL Server
-# qua WAN đôi lúc có độ trễ). Khi vượt ngưỡng này, dòng log bị ĐÓNG/MỞ ngay sau đó sẽ bị đánh dấu
-# data_gap=True (xem BrewhouseStepLog.data_gap) — sự cố thực tế 2026-11-02: tác vụ chết 2+ tiếng,
-# lúc khởi động lại sẽ đóng dòng đang mở với duration_minutes SAI (tính cả khoảng chết) nếu không
-# có cờ này để báo cáo loại trừ.
-GAP_THRESHOLD_SECONDS = max(POLL_INTERVAL_SECONDS * 10, 10)
+# ghi log" (tác vụ nền treo/chết rồi tự khởi động lại, mất kết nối SCADA kéo dài...). Khi vượt
+# ngưỡng này, dòng log bị ĐÓNG/MỞ ngay sau đó sẽ bị đánh dấu data_gap=True (xem
+# BrewhouseStepLog.data_gap) — sự cố thực tế 2026-11-02: tác vụ chết 2+ tiếng, lúc khởi động lại
+# sẽ đóng dòng đang mở với duration_minutes SAI (tính cả khoảng chết) nếu không có cờ này để báo
+# cáo loại trừ.
+# Mốc 10s (= 10x POLL_INTERVAL_SECONDS) ban đầu quá nhạy trên production thật: SQL Server qua WAN
+# thỉnh thoảng có vài lượt đọc liên tiếp chậm (chưa phải treo/chết) cũng đủ vượt 10s, khiến gần
+# như mọi nồi/mọi mẻ đều bị gắn badge "gián đoạn ghi log" sau khi deploy 2026-11-02 — làm mất tác
+# dụng cảnh báo (không còn phân biệt được jitter mạng bình thường với sự cố thật). Nâng tối thiểu
+# lên 120s: so với thời gian 1 bước nấu thực tế (hàng chục phút tới vài giờ, xem báo cáo "Thời
+# gian cả mẻ nấu") thì sai số tối đa ~2 phút không đáng kể nếu lỡ không bị gắn cờ, nhưng đủ dài để
+# loại trừ nhiễu mạng thông thường và chỉ còn bắt đúng gián đoạn thật sự (tác vụ chết, mất kết nối
+# kéo dài).
+GAP_THRESHOLD_SECONDS = max(POLL_INTERVAL_SECONDS * 10, 120)
 
 # Mốc thời gian lượt đọc THÀNH CÔNG gần nhất (module-level, chỉ 1 instance poll_loop — xem cảnh
 # báo multi-worker ở docstring module) — dùng để tính gap_seconds truyền vào process_tick().
