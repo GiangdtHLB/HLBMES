@@ -148,6 +148,10 @@ _SCOPE_MODELS = {"lot": MaterialLot, "batch": BatchExecution, "batch_tank": Batc
                  "batch_filter_lot": BatchFilterLot, "batch_pack_lot": BatchPackLot, "work_order": WorkOrder}
 _SCOPE_CODE_ATTR = {"lot": "lot_code", "batch": "batch_code", "batch_tank": "tank_code",
                     "batch_filter_lot": "filter_lot_code", "batch_pack_lot": "pack_lot_code", "work_order": "wo_code"}
+# Tên thuộc tính khoá chính của từng model trong _SCOPE_MODELS — dùng để gộp truy vấn theo
+# .in_(...) thay vì db.get() riêng từng scope_id (xem qc_attention_alerts()).
+_SCOPE_PK_ATTR = {"lot": "lot_id", "batch": "batch_id", "batch_tank": "tank_id",
+                  "batch_filter_lot": "filter_lot_id", "batch_pack_lot": "pack_lot_id", "work_order": "wo_id"}
 _SCOPE_LABEL_PREFIX = {"lot": "Lô NVL", "batch": "Mẻ SX", "batch_tank": "Tank lên men",
                        "batch_filter_lot": "Lô lọc", "batch_pack_lot": "Lô thành phẩm", "work_order": "WO"}
 _SCOPE_ID_ATTR: dict[str, str] = {}
@@ -254,25 +258,36 @@ def qc_attention_alerts(db: Session) -> dict:
     # 0 ở Lô NVL, nên nhánh cũ không bắt được cái nào). Giờ quét ĐỦ mọi scope_type đã biết
     # (_SCOPE_MODELS) có kết quả QC — material_code/quantity/uom chỉ có ý nghĩa với "lot", scope
     # khác để trống (mirror khối deviation ở trên).
+    #
+    # Gộp TRƯỚC 1 lần, TOÀN BỘ QualityResult (không lọc theo scope_type) để tự dựng
+    # latest_by_scope = {(scope_type, scope_id): {parameter: QualityResult mới nhất}} — dùng
+    # CHUNG cho cả vòng phát hiện FAIL dưới đây LẪN vòng tính fail_param_count/fail_params cuối
+    # hàm, thay vì gọi quality_svc.latest_results_by_param() (1 SELECT riêng/scope) HAI LẦN cho
+    # MỖI scope_id trong TOÀN BỘ lịch sử — sự cố thực tế 2026-11-02: Dashboard cực kỳ chậm, N+1
+    # y hệt lỗi đã sửa ở reports.py::material_norm(). Xem quality.py::latest_results_by_param_bulk().
+    latest_by_scope = quality_svc.latest_results_by_param_bulk(db)
+
     for scope_type, model in _SCOPE_MODELS.items():
-        scope_ids = db.execute(
-            select(QualityResult.scope_id).where(QualityResult.scope_type == scope_type).distinct()
-        ).scalars().all()
+        scope_ids = [sid for (st, sid) in latest_by_scope if st == scope_type]
+        if not scope_ids:
+            continue
+        # "batch_tank" ghép chuỗi "{tank_id}__len_men_chinh/phu" làm scope_id (1 tank có 2 stage
+        # chỉ tiêu riêng, xem qc_catalog.py::batch_tank_scope_id) — không phải khóa chính thật
+        # của BatchTank, phải tách lấy đúng tank_id trước khi tra (mirror routers/brewing.py:40).
+        real_id_of = {sid: (sid.split("__")[0] if scope_type == "batch_tank" else sid) for sid in scope_ids}
+        pk_attr = getattr(model, _SCOPE_PK_ATTR[scope_type])
+        obj_by_real_id = {getattr(o, _SCOPE_PK_ATTR[scope_type]): o for o in db.execute(
+            select(model).where(pk_attr.in_(set(real_id_of.values())))).scalars().all()}
         for scope_id in scope_ids:
             key = f"{scope_type}:{scope_id}"
             if key in items:
                 continue
-            # "batch_tank" ghép chuỗi "{tank_id}__len_men_chinh/phu" làm scope_id (1 tank có 2
-            # stage chỉ tiêu riêng, xem qc_catalog.py::batch_tank_scope_id) — không phải khóa
-            # chính thật của BatchTank, phải tách lấy đúng tank_id trước khi tra (mirror
-            # routers/brewing.py:40).
-            real_id = scope_id.split("__")[0] if scope_type == "batch_tank" else scope_id
-            obj = db.get(model, real_id)
+            obj = obj_by_real_id.get(real_id_of[scope_id])
             if not obj:
                 continue
             if scope_type == "lot" and obj.quantity <= 0:
                 continue
-            latest_by_param = quality_svc.latest_results_by_param(db, scope_type, scope_id)
+            latest_by_param = latest_by_scope.get((scope_type, scope_id), {})
             if not any(r.status == ResultStatus.FAIL.value for r in latest_by_param.values()):
                 continue
             code = getattr(obj, _SCOPE_CODE_ATTR[scope_type], None)
@@ -288,7 +303,7 @@ def qc_attention_alerts(db: Session) -> dict:
     param_name_by_code = {p.code: p.name for p in db.execute(select(QCParameter)).scalars().all()}
     for key, item in items.items():
         scope_type, scope_id = key.split(":", 1)
-        latest_by_param = quality_svc.latest_results_by_param(db, scope_type, scope_id)
+        latest_by_param = latest_by_scope.get((scope_type, scope_id), {})
         fail_results = [r for r in latest_by_param.values() if r.status == ResultStatus.FAIL.value]
         item["fail_param_count"] = len(fail_results)
         # Tên chỉ tiêu đang fail (không chỉ đếm số lượng) — để Dashboard hiện ngay "Độ đục,

@@ -209,7 +209,54 @@ def tank_batch_ids(db: Session, tank_id: str) -> list[str]:
         select(BatchTankLink).where(BatchTankLink.tank_id == tank_id)).scalars().all()]
 
 
-def _tank_status(db: Session, tank: BatchTank) -> str:
+def _build_tanks_bulk_context(db: Session, tanks: list) -> dict:
+    """Gộp TRƯỚC mọi truy vấn mà _tank_out()/_tank_status() cần, cho NHIỀU tank CÙNG LÚC — dùng
+    bởi list_tanks_out() để tránh N+1 (mỗi tank trước đây tự truy vấn riêng ~8-9 lượt: mẻ nấu đã
+    gộp, Product, BeerType, trạng thái BatchExecution, BatchFilterOrderSource, 2 lượt kết quả QC
+    — sự cố thực tế 2026-11-02: Dashboard "Tổng quan" cực kỳ chậm vì gọi list_tanks_out() lặp qua
+    MỌI tank từng tồn tại, mỗi tank kéo theo chừng đó lượt truy vấn). get_tank_out() (xem 1 tank
+    đơn lẻ) không dùng hàm này, vẫn tự truy vấn như cũ (xem tham số `ctx` ở _tank_out()/
+    _tank_status())."""
+    tank_ids = [t.tank_id for t in tanks]
+    if not tank_ids:
+        return {"batch_ids_by_tank": {}, "batches_by_tank": {}, "product_by_id": {},
+                "beer_type_by_id": {}, "filter_order_tank_ids": set(), "latest_by_scope": {}}
+
+    links = db.execute(select(BatchTankLink).where(BatchTankLink.tank_id.in_(tank_ids))).scalars().all()
+    batch_ids_by_tank: dict[str, list[str]] = {}
+    for l in links:
+        batch_ids_by_tank.setdefault(l.tank_id, []).append(l.batch_id)
+    all_batch_ids = list({bid for bids in batch_ids_by_tank.values() for bid in bids})
+    batches = (db.execute(select(BatchExecution).where(BatchExecution.batch_id.in_(all_batch_ids)))
+              .scalars().all()) if all_batch_ids else []
+    batch_by_id = {b.batch_id: b for b in batches}
+    # mirror JOIN BatchTankLink<->BatchExecution của _tank_out() cũ: chỉ giữ batch THẬT SỰ tồn
+    # tại (link mồ côi, nếu có, sẽ không góp vào đây — nhưng VẪN góp vào batch_ids_by_tank ở trên
+    # để _tank_status() xét đúng như tank_batch_ids() cũ, không lọc theo tồn tại).
+    batches_by_tank = {tid: [batch_by_id[bid] for bid in bids if bid in batch_by_id]
+                       for tid, bids in batch_ids_by_tank.items()}
+
+    product_ids = {t.product_id for t in tanks if t.product_id}
+    products = (db.execute(select(Product).where(Product.product_id.in_(product_ids)))
+               .scalars().all()) if product_ids else []
+    product_by_id = {p.product_id: p for p in products}
+    beer_type_ids = {p.beer_type_id for p in products if p.beer_type_id}
+    beer_types = (db.execute(select(BeerType).where(BeerType.beer_type_id.in_(beer_type_ids)))
+                 .scalars().all()) if beer_type_ids else []
+    beer_type_by_id = {bt.beer_type_id: bt for bt in beer_types}
+
+    filter_order_tank_ids = set(db.execute(select(BatchFilterOrderSource.source_tank_id).where(
+        BatchFilterOrderSource.source_type == "tank",
+        BatchFilterOrderSource.source_tank_id.in_(tank_ids))).scalars().all())
+
+    latest_by_scope = quality.latest_results_by_param_bulk(db, "batch_tank")
+
+    return {"batch_ids_by_tank": batch_ids_by_tank, "batches_by_tank": batches_by_tank,
+            "product_by_id": product_by_id, "beer_type_by_id": beer_type_by_id,
+            "filter_order_tank_ids": filter_order_tank_ids, "latest_by_scope": latest_by_scope}
+
+
+def _tank_status(db: Session, tank: BatchTank, ctx: dict = None) -> str:
     """Suy hoàn toàn từ dữ liệu (không lưu cột status riêng) — mirror derived.py::ferment_status
     (module cũ), thêm "cho_loc" (KHÔNG có ở module cũ) khi đã có Lệnh lọc khai báo tank này làm
     nguồn nhưng CHƯA rút dịch gì (yêu cầu người dùng 2026-09-01: tách rõ "còn đang lên men, chưa
@@ -236,59 +283,88 @@ def _tank_status(db: Session, tank: BatchTank) -> str:
     ÍT NHẤT 1 mẻ đã thật sự bắt đầu nấu (running/held — đã qua "running" nên start_at đã có/
     completed/closed); nếu TẤT CẢ mẻ đã gộp còn planned/ready (chưa mẻ nào chạy) thì tank mới chỉ
     "đặt chỗ", CHƯA có gì đổ vào — không tính là "đang điền dịch" (trước đây gộp chung với
-    "dang_nau" khiến tank chưa hề bắt đầu nấu cũng hiện "Đang điền dịch", gây hiểu lầm)."""
+    "dang_nau" khiến tank chưa hề bắt đầu nấu cũng hiện "Đang điền dịch", gây hiểu lầm).
+
+    `ctx` (tuỳ chọn): kết quả _build_tanks_bulk_context() — truyền khi gọi lặp lại cho NHIỀU tank
+    (list_tanks_out()) để tra từ bộ nhớ thay vì tự truy vấn lại (tránh N+1); bỏ trống (1 tank đơn
+    lẻ, get_tank_out()) giữ nguyên hành vi cũ."""
     if tank.on_hand < -1e-6:
         return "am"
-    batch_ids = tank_batch_ids(db, tank.tank_id)
+    if ctx is not None:
+        batch_ids = ctx["batch_ids_by_tank"].get(tank.tank_id, [])
+    else:
+        batch_ids = tank_batch_ids(db, tank.tank_id)
     if batch_ids:
-        states = set(db.execute(select(BatchExecution.state).where(
-            BatchExecution.batch_id.in_(batch_ids))).scalars().all())
+        if ctx is not None:
+            batches = ctx["batches_by_tank"].get(tank.tank_id, [])
+            states = {b.state for b in batches}
+            has_open = any(b.end_at is None for b in batches)
+        else:
+            states = set(db.execute(select(BatchExecution.state).where(
+                BatchExecution.batch_id.in_(batch_ids))).scalars().all())
+            has_open = db.execute(select(BatchExecution.batch_id).where(
+                BatchExecution.batch_id.in_(batch_ids), BatchExecution.end_at.is_(None))).first() is not None
         started = {"running", "held", "completed", "closed"}
         if not (states & started):
             return "planned"
-        if db.execute(select(BatchExecution.batch_id).where(
-                BatchExecution.batch_id.in_(batch_ids), BatchExecution.end_at.is_(None))).first():
+        if has_open:
             return "dang_nau"
     if tank.volume_hl > 1e-6 and tank.on_hand <= 1e-6:
         return "da_loc_het"
     if tank.on_hand < tank.volume_hl - 1e-6:
         return "loc_1_phan"
-    has_order = db.execute(select(BatchFilterOrderSource.link_id).where(
-        BatchFilterOrderSource.source_type == "tank", BatchFilterOrderSource.source_tank_id == tank.tank_id
-    )).first() is not None
+    if ctx is not None:
+        has_order = tank.tank_id in ctx["filter_order_tank_ids"]
+    else:
+        has_order = db.execute(select(BatchFilterOrderSource.link_id).where(
+            BatchFilterOrderSource.source_type == "tank", BatchFilterOrderSource.source_tank_id == tank.tank_id
+        )).first() is not None
     return "cho_loc" if has_order else "len_men"
 
 
-def _tank_out(db: Session, tank: BatchTank) -> dict:
+def _tank_out(db: Session, tank: BatchTank, ctx: dict = None) -> dict:
     """Bổ sung mốc "vào dịch"/thời gian lên men suy từ các mẻ nấu đã gộp — mirror công thức
     inline ở routers/brewing.py::list_ferments (module Nấu-Lọc-Chiết cũ):
     - vao_dich_start = mẻ nấu SỚM NHẤT bắt đầu (mirror brew_date).
     - vao_dich_end = mẻ nấu CUỐI CÙNG kết thúc (mirror kt_date) — CHỈ có giá trị khi TẤT CẢ mẻ
       đã gộp đều đã "Kết thúc" (end_at), vì tank chưa thật sự "vào dịch xong" khi còn mẻ đang nấu.
     - ferment_days_std đọc từ Product (không phải BeerType — xem models/master.py:59).
-    - ferment_start = vao_dich_end hoặc vao_dich_start (ước tính khi tank chưa vào dịch xong)."""
-    batches = db.execute(
-        select(BatchExecution).join(BatchTankLink, BatchTankLink.batch_id == BatchExecution.batch_id)
-        .where(BatchTankLink.tank_id == tank.tank_id)).scalars().all()
+    - ferment_start = vao_dich_end hoặc vao_dich_start (ước tính khi tank chưa vào dịch xong).
+
+    `ctx` (tuỳ chọn): kết quả _build_tanks_bulk_context() — xem _tank_status()."""
+    if ctx is not None:
+        batches = ctx["batches_by_tank"].get(tank.tank_id, [])
+    else:
+        batches = db.execute(
+            select(BatchExecution).join(BatchTankLink, BatchTankLink.batch_id == BatchExecution.batch_id)
+            .where(BatchTankLink.tank_id == tank.tank_id)).scalars().all()
     starts = [b.start_at for b in batches if b.start_at]
     ends = [b.end_at for b in batches if b.end_at]
     vao_dich_start = min(starts) if starts else None
     vao_dich_end = max(ends) if (batches and len(ends) == len(batches)) else None
-    product = db.get(Product, tank.product_id) if tank.product_id else None
-    beer_type = db.get(BeerType, product.beer_type_id) if product and product.beer_type_id else None
+    if ctx is not None:
+        product = ctx["product_by_id"].get(tank.product_id) if tank.product_id else None
+        beer_type = ctx["beer_type_by_id"].get(product.beer_type_id) if product and product.beer_type_id else None
+    else:
+        product = db.get(Product, tank.product_id) if tank.product_id else None
+        beer_type = db.get(BeerType, product.beer_type_id) if product and product.beer_type_id else None
     ferment_days_std = product.ferment_days_std if product else None
     ferment_start = vao_dich_end or vao_dich_start
     days_elapsed = (utcnow() - ferment_start).days if ferment_start else None
     ready_date = (ferment_start + timedelta(days=ferment_days_std)) if ferment_start and ferment_days_std else None
-    status = _tank_status(db, tank)
+    status = _tank_status(db, tank, ctx=ctx)
     # Số chỉ tiêu CT chính + CT phụ đang FAIL (giá trị MỚI NHẤT/chỉ tiêu) — mirror
     # routers/brewing.py::list_ferments (module cũ), dùng cho badge cảnh báo ở biểu đồ Dashboard
     # "Tank đang lên men theo số ngày/theo giai đoạn" (yêu cầu người dùng 2026-09-02: đổi nguồn
     # 2 biểu đồ đó sang BatchTank).
     chinh_scope_id = qc_catalog.batch_tank_scope_id(tank.tank_id, "len_men_chinh")
     phu_scope_id = qc_catalog.batch_tank_scope_id(tank.tank_id, "len_men_phu")
-    chinh_results = quality.latest_results_by_param(db, "batch_tank", chinh_scope_id)
-    phu_results = quality.latest_results_by_param(db, "batch_tank", phu_scope_id)
+    if ctx is not None:
+        chinh_results = ctx["latest_by_scope"].get(("batch_tank", chinh_scope_id), {})
+        phu_results = ctx["latest_by_scope"].get(("batch_tank", phu_scope_id), {})
+    else:
+        chinh_results = quality.latest_results_by_param(db, "batch_tank", chinh_scope_id)
+        phu_results = quality.latest_results_by_param(db, "batch_tank", phu_scope_id)
     qc_fail_count = (sum(1 for res in chinh_results.values() if res.status == "fail")
                     + sum(1 for res in phu_results.values() if res.status == "fail"))
     return {
@@ -313,7 +389,9 @@ def _tank_out(db: Session, tank: BatchTank) -> dict:
 
 
 def list_tanks_out(db: Session) -> list[dict]:
-    return [_tank_out(db, t) for t in list_tanks(db)]
+    tanks = list_tanks(db)
+    ctx = _build_tanks_bulk_context(db, tanks)
+    return [_tank_out(db, t, ctx=ctx) for t in tanks]
 
 
 def get_tank_out(db: Session, tank_id: str) -> dict:
