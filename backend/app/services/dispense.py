@@ -13,7 +13,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..audit import record_audit
-from ..common import BatchState, GenealogyRelation, LotStatus, Role, new_id, utcnow
+from ..common import BatchState, GenealogyRelation, LotStatus, Role, execute_in_chunks, new_id, utcnow
 from ..errors import DomainError, NotFoundError
 from ..models.batches import BatchExecution
 from ..models.master import Material
@@ -129,13 +129,20 @@ def _assert_dispense_order(db: Session, batch: BatchExecution) -> None:
     # DispenseLine bỏ sót tiêu thụ trực tiếp, khiến mẻ ĐÃ dùng NVL vẫn bị coi nhầm là "chưa cấp
     # liệu" và chặn oan mẻ sau — lộ rõ nhất khi mở rộng rule sang completed/closed, vì mẻ cũ tiêu
     # thụ qua đường "Tiêu thụ lô" rồi đóng lại rất phổ biến).
-    dispensed_via_line = {bid for (bid,) in db.execute(
-        select(Dispense.batch_id).join(DispenseLine, DispenseLine.dispense_id == Dispense.dispense_id)
-        .where(Dispense.batch_id.in_(earlier_ids)).distinct())}
-    dispensed_via_consume = {bid for (bid,) in db.execute(
-        select(GenealogyEdge.to_id).where(
-            GenealogyEdge.to_type == "batch", GenealogyEdge.to_id.in_(earlier_ids),
-            GenealogyEdge.relation == GenealogyRelation.CONSUME.value).distinct())}
+    # earlier_ids tích lũy theo thời gian từ mốc cố định _ORDER_RULE_EXTENDED_STATES_SINCE (mọi
+    # mẻ bắt đầu sau 2026-09-15, không phải chỉ mẻ "trước mẻ này" trong 1 phạm vi hẹp) — chạy
+    # trên MỌI lần cấp liệu thật (hot path), chia mẻ tránh vỡ trần 2100 tham số bind của SQL
+    # Server khi phình to (mirror common.py::execute_in_chunks, memory item 18/DEPLOY-CONTRACT
+    # §2(H)). Chỉ dùng để dựng tập hợp (set) thành viên — KHÔNG phụ thuộc thứ tự trả về của SQL,
+    # nên chia mẻ an toàn, không ảnh hưởng tới `earlier` (đã ORDER BY start_at ASC ở câu query
+    # riêng phía trên, không đổi).
+    dispensed_via_line = {bid for (bid,) in execute_in_chunks(db, lambda chunk: select(
+        Dispense.batch_id).join(DispenseLine, DispenseLine.dispense_id == Dispense.dispense_id)
+        .where(Dispense.batch_id.in_(chunk)).distinct(), earlier_ids)}
+    dispensed_via_consume = {bid for (bid,) in execute_in_chunks(db, lambda chunk: select(
+        GenealogyEdge.to_id).where(
+            GenealogyEdge.to_type == "batch", GenealogyEdge.to_id.in_(chunk),
+            GenealogyEdge.relation == GenealogyRelation.CONSUME.value).distinct(), earlier_ids)}
     dispensed_ids = dispensed_via_line | dispensed_via_consume
     pending = [b for b in earlier if b.batch_id not in dispensed_ids]
     if pending:

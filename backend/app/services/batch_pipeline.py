@@ -18,7 +18,7 @@ from sqlalchemy import func, select, true
 from sqlalchemy.orm import Session
 
 from ..audit import record_audit
-from ..common import new_id, utcnow
+from ..common import execute_in_chunks, new_id, utcnow
 from ..errors import DomainError, NotFoundError
 from ..models.audit import AuditLog
 from ..models.batch_pipeline import (
@@ -222,13 +222,17 @@ def _build_tanks_bulk_context(db: Session, tanks: list) -> dict:
         return {"batch_ids_by_tank": {}, "batches_by_tank": {}, "product_by_id": {},
                 "beer_type_by_id": {}, "filter_order_tank_ids": set(), "latest_by_scope": {}}
 
-    links = db.execute(select(BatchTankLink).where(BatchTankLink.tank_id.in_(tank_ids))).scalars().all()
+    # tank_ids/all_batch_ids TÍCH LŨY THEO THỜI GIAN (mọi tank/mẻ từng tồn tại, không lọc ngày)
+    # — chia mẻ tránh vỡ trần 2100 tham số bind của SQL Server khi phình to (mirror
+    # common.py::execute_in_chunks, xem memory item 18/DEPLOY-CONTRACT §2(H)).
+    links = execute_in_chunks(db, lambda chunk: select(BatchTankLink).where(
+        BatchTankLink.tank_id.in_(chunk)), tank_ids, scalars=True)
     batch_ids_by_tank: dict[str, list[str]] = {}
     for l in links:
         batch_ids_by_tank.setdefault(l.tank_id, []).append(l.batch_id)
     all_batch_ids = list({bid for bids in batch_ids_by_tank.values() for bid in bids})
-    batches = (db.execute(select(BatchExecution).where(BatchExecution.batch_id.in_(all_batch_ids)))
-              .scalars().all()) if all_batch_ids else []
+    batches = execute_in_chunks(db, lambda chunk: select(BatchExecution).where(
+        BatchExecution.batch_id.in_(chunk)), all_batch_ids, scalars=True)
     batch_by_id = {b.batch_id: b for b in batches}
     # mirror JOIN BatchTankLink<->BatchExecution của _tank_out() cũ: chỉ giữ batch THẬT SỰ tồn
     # tại (link mồ côi, nếu có, sẽ không góp vào đây — nhưng VẪN góp vào batch_ids_by_tank ở trên
@@ -245,9 +249,10 @@ def _build_tanks_bulk_context(db: Session, tanks: list) -> dict:
                  .scalars().all()) if beer_type_ids else []
     beer_type_by_id = {bt.beer_type_id: bt for bt in beer_types}
 
-    filter_order_tank_ids = set(db.execute(select(BatchFilterOrderSource.source_tank_id).where(
+    filter_order_tank_ids = set(execute_in_chunks(db, lambda chunk: select(
+        BatchFilterOrderSource.source_tank_id).where(
         BatchFilterOrderSource.source_type == "tank",
-        BatchFilterOrderSource.source_tank_id.in_(tank_ids))).scalars().all())
+        BatchFilterOrderSource.source_tank_id.in_(chunk)), tank_ids, scalars=True))
 
     latest_by_scope = quality.latest_results_by_param_bulk(db, "batch_tank")
 
