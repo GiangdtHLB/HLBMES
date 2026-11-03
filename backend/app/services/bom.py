@@ -7,7 +7,7 @@ bảng đối chiếu trong chi tiết mẻ, và báo cáo định mức NVL nhi
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..common import LotStatus
+from ..common import LotStatus, execute_in_chunks
 from ..errors import DomainError
 from ..models.batches import BatchExecution
 from ..models.brewing import BrewOrderMaterialLine
@@ -34,10 +34,28 @@ def _material_codes_for_lots(db: Session, lots: list) -> dict:
                        else l.lot_code) for l in lots}
 
 
-def _group_member_codes(db: Session, group_code: str) -> set[str]:
+def alt_group_cache(db: Session) -> dict:
+    """{group_code: (tên_nhóm, {mã_thành_viên})} — nạp TOÀN BỘ Nhóm vật tư thay thế + Danh mục
+    vật tư bằng 2 câu SELECT, truyền vào `_expand_materials(alt_groups=...)` khi lặp qua NHIỀU mẻ.
+
+    Không có nó thì mỗi dòng BOM khai theo nhóm lại tra CSDL riêng (2 câu MaterialAltGroup + 1
+    câu Material), nhân lên theo số mẻ — đo trên prod 02/11/2026: `batches_fully_dispensed_map()`
+    (màn Cấp liệu, 774 mẻ) chạy **10.182 câu SQL / 9,0 giây**, trong đó `material_alt_group`
+    6.784 lần và `material` 3.394 lần. Cả 2 bảng đều là DANH MỤC (nhỏ, ít đổi) nên nạp 1 lần là
+    đủ. Mirror đúng cách `name_by_code` đã làm cho Danh mục vật tư."""
+    code_by_material_id = {m.material_id: m.code for m in db.execute(select(Material)).scalars().all()}
+    return {g.code: (g.name, {code_by_material_id[mid] for mid in (g.member_material_ids or [])
+                              if mid in code_by_material_id})
+            for g in db.execute(select(MaterialAltGroup)).scalars().all()}
+
+
+def _group_member_codes(db: Session, group_code: str, alt_groups: dict = None) -> set[str]:
     """Mã vật tư CỤ THỂ thuộc 1 Nhóm vật tư thay thế (models/master.py::MaterialAltGroup) —
     dùng để gộp thực tế tiêu thụ (thủ kho có thể xuất BẤT KỲ thành viên nào) khi so với dòng
-    BOM chỉ khai theo nhóm, không khai member_qty riêng từng thành viên."""
+    BOM chỉ khai theo nhóm, không khai member_qty riêng từng thành viên.
+    `alt_groups`: bộ nhớ đệm từ alt_group_cache() — truyền vào khi lặp nhiều mẻ để khỏi tra lại."""
+    if alt_groups is not None:
+        return set(alt_groups.get(group_code, (None, set()))[1])
     g = db.execute(select(MaterialAltGroup).where(MaterialAltGroup.code == group_code)).scalar_one_or_none()
     if not g or not g.member_material_ids:
         return set()
@@ -77,7 +95,7 @@ def codes_for_dispense(db: Session, code: str) -> list[str]:
 
 
 def _expand_materials(db: Session, materials: list, brew_order_id: str = None,
-                      name_by_code: dict = None) -> list[dict]:
+                      name_by_code: dict = None, alt_groups: dict = None) -> list[dict]:
     """Chuẩn hoá từng dòng BOM (snapshot.materials) thành 1 dòng CỤ THỂ có material_code —
     dòng khai qua Nhóm vật tư thay thế (alt_group_code) không có material_code trực tiếp
     (mirror _build_group_line ở services/brew_order.py, module Lệnh nấu cũ, giản lược bỏ phần
@@ -103,6 +121,8 @@ def _expand_materials(db: Session, materials: list, brew_order_id: str = None,
     bảng Material — xem reports.py::material_norm())."""
     if name_by_code is None:
         name_by_code = {m.code: m.name for m in db.execute(select(Material)).scalars().all()}
+    if alt_groups is None:
+        alt_groups = alt_group_cache(db)
     out = []
     for m in materials or []:
         code = m.get("material_code")
@@ -122,10 +142,12 @@ def _expand_materials(db: Session, materials: list, brew_order_id: str = None,
                            "group_code": group_code, "match_codes": {mcode}})
             continue
         if group_code:
-            g = db.execute(select(MaterialAltGroup).where(MaterialAltGroup.code == group_code)).scalar_one_or_none()
-            out.append({"material_code": group_code, "material_name": g.name if g else group_code,
+            # Giữ NGUYÊN ngữ nghĩa cũ `g.name if g else group_code`: nhóm có tồn tại thì dùng
+            # tên của nhóm kể cả khi tên rỗng/None, chỉ thay bằng mã khi KHÔNG tìm thấy nhóm.
+            gname, members = alt_groups.get(group_code, (group_code, set()))
+            out.append({"material_code": group_code, "material_name": gname,
                        "qty": m.get("qty", 0), "uom": m.get("uom"), "tol_pct": m.get("tol_pct", 0),
-                       "is_group": True, "match_codes": _group_member_codes(db, group_code) or {group_code}})
+                       "is_group": True, "match_codes": members or {group_code}})
     return out
 
 
@@ -199,7 +221,7 @@ def not_used_codes(db: Session, batch_id: str) -> set[str]:
 
 
 def compare_batch(db: Session, batch, *, name_by_code: dict = None,
-                  actual: dict = None, not_used: set = None) -> dict:
+                  actual: dict = None, not_used: set = None, alt_groups: dict = None) -> dict:
     """Đối chiếu định mức ↔ thực tế cho một mẻ — định mức LUÔN là số công thức đã khai cho
     "1 mẻ" (m.get("qty")), KHÔNG scale theo SL kế hoạch (hl) của riêng mẻ này (xem factor_for).
 
@@ -213,7 +235,8 @@ def compare_batch(db: Session, batch, *, name_by_code: dict = None,
     if not_used is None:
         not_used = not_used_codes(db, batch.batch_id)
     lines, seen = [], set()
-    for m in _expand_materials(db, snap.get("materials"), brew_order_id=batch.order_id, name_by_code=name_by_code):
+    for m in _expand_materials(db, snap.get("materials"), brew_order_id=batch.order_id,
+                               name_by_code=name_by_code, alt_groups=alt_groups):
         code = m.get("material_code")
         match_codes = m.get("match_codes") or {code}
         seen |= match_codes
@@ -247,19 +270,26 @@ def _bulk_actual_and_not_used(db: Session, batch_ids: list[str]) -> tuple[dict, 
     riêng cho từng mẻ, mỗi mẻ 3 lượt truy vấn)."""
     if not batch_ids:
         return {}, {}
-    edges = db.execute(select(GenealogyEdge.to_id, GenealogyEdge.from_id, GenealogyEdge.quantity).where(
-        GenealogyEdge.to_type == "batch", GenealogyEdge.to_id.in_(batch_ids),
-        GenealogyEdge.relation == "consume")).all()
+    # Chia mẻ MỌI .in_() ở đây: batch_ids là TẤT CẢ mẻ nấu (batches_fully_dispensed_map() không
+    # lọc ngày; BC Định mức NVL mặc định "Tất cả" = 3650 ngày) nên chỉ tăng theo thời gian — đo
+    # 02/11/2026: 774 mẻ, tốc độ ~390 mẻ/tháng, tức chạm trần 2100 tham số của SQL Server khoảng
+    # tháng 2/2027 rồi vỡ màn Cấp liệu bằng lỗi "07002 COUNT field incorrect". Xem common.py.
+    edges = execute_in_chunks(db, lambda chunk: select(
+        GenealogyEdge.to_id, GenealogyEdge.from_id, GenealogyEdge.quantity).where(
+        GenealogyEdge.to_type == "batch", GenealogyEdge.to_id.in_(chunk),
+        GenealogyEdge.relation == "consume"), batch_ids)
     lot_ids = list({from_id for _, from_id, _ in edges})
-    lots = db.execute(select(MaterialLot).where(MaterialLot.lot_id.in_(lot_ids))).scalars().all() if lot_ids else []
+    lots = execute_in_chunks(db, lambda chunk: select(MaterialLot).where(
+        MaterialLot.lot_id.in_(chunk)), lot_ids, scalars=True)
     code_by_lot_id = _material_codes_for_lots(db, lots)
     actual_by_batch: dict[str, dict[str, float]] = {}
     for batch_id, lot_id, qty in edges:
         code = code_by_lot_id.get(lot_id, "?")
         bucket = actual_by_batch.setdefault(batch_id, {})
         bucket[code] = bucket.get(code, 0.0) + (qty or 0.0)
-    not_used_rows = db.execute(select(BatchMaterialNotUsed.batch_id, BatchMaterialNotUsed.material_code)
-                               .where(BatchMaterialNotUsed.batch_id.in_(batch_ids))).all()
+    not_used_rows = execute_in_chunks(db, lambda chunk: select(
+        BatchMaterialNotUsed.batch_id, BatchMaterialNotUsed.material_code)
+        .where(BatchMaterialNotUsed.batch_id.in_(chunk)), batch_ids)
     not_used_by_batch: dict[str, set[str]] = {}
     for batch_id, code in not_used_rows:
         not_used_by_batch.setdefault(batch_id, set()).add(code)
@@ -290,10 +320,12 @@ def batches_fully_dispensed_map(db: Session) -> dict[str, bool]:
     batch_ids = [b.batch_id for b in batches]
     actual_by_batch, not_used_by_batch = _bulk_actual_and_not_used(db, batch_ids)
     name_by_code = {m.code: m.name for m in db.execute(select(Material)).scalars().all()}
+    alt_groups = alt_group_cache(db)
     out = {}
     for b in batches:
         snap = b.recipe_snapshot or {}
-        lines = _expand_materials(db, snap.get("materials"), brew_order_id=b.order_id, name_by_code=name_by_code)
+        lines = _expand_materials(db, snap.get("materials"), brew_order_id=b.order_id,
+                                  name_by_code=name_by_code, alt_groups=alt_groups)
         if not lines:
             out[b.batch_id] = False
             continue

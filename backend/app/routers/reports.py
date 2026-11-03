@@ -41,11 +41,14 @@ def material_norm(days: int = 90, product_id: str = None, db: Session = Depends(
     batch_ids = [b.batch_id for b in batches]
     actual_by_batch, not_used_by_batch = bom_svc._bulk_actual_and_not_used(db, batch_ids)
     name_by_code = {m.code: m.name for m in db.execute(select(Material)).scalars().all()}
+    # Nhóm vật tư thay thế cũng là DANH MỤC — nạp 1 lần, nếu không mỗi mẻ lại tra lại nhóm cho
+    # từng dòng BOM (xem bom.py::alt_group_cache, đo được 6.784 câu material_alt_group/774 mẻ).
+    alt_groups = bom_svc.alt_group_cache(db)
 
     agg = {}   # material_code -> {planned, actual, uom, tol, batch_ids}
     batch_rows = []
     for b in batches:
-        cmp = bom_svc.compare_batch(db, b, name_by_code=name_by_code,
+        cmp = bom_svc.compare_batch(db, b, name_by_code=name_by_code, alt_groups=alt_groups,
                                     actual=actual_by_batch.get(b.batch_id, {}),
                                     not_used=not_used_by_batch.get(b.batch_id, set()))
         if not cmp["lines"]:

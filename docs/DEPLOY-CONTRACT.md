@@ -80,8 +80,18 @@ lệnh; `in_()` sinh 1 tham số mỗi phần tử → pyodbc báo `07002 COUNT 
 error` → 500. SQLite/Postgres không có giới hạn này nên test không lộ; lỗi chỉ xuất hiện khi
 DỮ LIỆU THẬT đủ lớn (Kho TP 4737 pallet, 2026-10-07 — màn Kho TP (WMS) trắng toàn bộ). Khi
 `in_()` nhận danh sách lấy từ 1 bảng có thể phình to (pallet/case/unit/lot/movement...), phải
-chia mẻ ≤ ~900 — xem `services/wms.py::_scalars_in_chunks`. Cảnh giác nhất ở các chỗ "gộp
-N+1 thành 1 câu IN" — tối ưu đúng về số truy vấn nhưng đổi lại trần tham số.
+chia mẻ ≤ ~900 — dùng **`common.py::execute_in_chunks(db, stmt_for, values, scalars=)`**
+(`services/wms.py::_scalars_in_chunks` là bản cũ cùng mục đích, chỉ cho SELECT entity).
+Cảnh giác nhất ở các chỗ "gộp N+1 thành 1 câu IN" — tối ưu đúng về số truy vấn nhưng đổi lại
+trần tham số.
+
+> ⚠️ **Hỏi "danh sách này do AI hay do người quyết định độ dài?"** `in_()` nhận danh sách người
+> dùng CHỌN TAY (vd gộp vài mẻ vào tank) thì an toàn. `in_()` nhận danh sách do DỮ LIỆU quyết
+> định — nhất là khi truy vấn **không lọc ngày** — thì độ dài chỉ tăng theo thời gian, nên
+> "hôm nay chạy tốt" không nói lên gì. Đo 2026-11-02: `bom.py::batches_fully_dispensed_map()`
+> (màn Cấp liệu) và `dashboard.py::qc_attention_alerts()` đều `in_()` TOÀN BỘ mẻ nấu — 774 mẻ,
+> tăng ~390 mẻ/tháng, tức sẽ vỡ khoảng **tháng 2/2027**. Đã chia mẻ. Cách kiểm: seed > 2100
+> dòng rồi gọi thật, đừng tin số liệu hiện tại.
 
 ## 3. Điều kiện DỮ LIỆU (cổng MSSQL trên DB rỗng KHÔNG bắt được)
 Migration tạo `UNIQUE`/`NOT NULL`/`FK` chạy sạch trên DB test rỗng nhưng **fail trên prod
@@ -140,6 +150,38 @@ Cách bắt (LÀM CẢ 2, vì bug ẩn ở cả đọc lẫn ghi):
    gom HTTP 500. (Đợt trước quét 143 GET bắt trọn lớp `.is_(True)`.)
 2. **Smoke GHI (POST/PUT)**: với các form chính (tạo mẻ, lưu cài đặt, nhập kho, tạo lệnh…)
    tạo 1 bản ghi thật trên DB test rồi xoá — lớp datetime→DATETIME CHỈ lộ ở đường ghi.
+
+## 3c. Tác vụ nền `async` KHÔNG được gọi thẳng I/O đồng bộ (gate GET-smoke KHÔNG bắt được)
+Gặp 2026-11-01 ở `services/brewhouse_log.py::poll_loop` (log từng bước hệ nấu).
+
+```python
+# SAI — chặn event loop
+async def poll_loop():
+    while True:
+        overview = brewhouse_external.brewhouse_overview(db)   # ODBC/WAN, đồng bộ
+        await asyncio.sleep(1)
+
+# ĐÚNG — đẩy phần chặn sang threadpool
+async def poll_loop():
+    while True:
+        await asyncio.to_thread(_tick_once, state)
+        await asyncio.sleep(1)
+```
+
+Vì sao nghiêm trọng: uvicorn **nhận và định tuyến mọi request trên chính event loop đó**. Thân
+lượt poll đo thực tế trên prod là ~0,24s (đỉnh 0,49s; 4s khi WAN tới SCADA trục trặc = timeout
+ODBC). Với `sleep(1)` thì event loop bị khóa ~25% thời gian, 24/7 → **toàn bộ** request của app
+trễ theo, và đứng hình vài giây mỗi lần SCADA chậm. Không liên quan MSSQL, nhưng cùng tính chất
+"chỉ lộ trên prod": DB/SCADA dev ở localhost nên độ trễ ~0 và lỗi không biểu hiện.
+
+Quy tắc: trong `async def`, mọi lệnh gọi DB/ODBC/HTTP đồng bộ phải bọc `asyncio.to_thread(...)`.
+Nhịp poll dày (1s) thì càng bắt buộc. Kèm theo, nhớ cân nhắc tải sinh ra: 1s/lượt = ~86.400 lượt
+đọc SCADA/ngày + ~13 SELECT/giây trên CSDL app (ở đây chấp nhận được vì đã có index
+`equipment_id`/`ended_at`, và chỉ GHI khi bước thực sự đổi).
+
+Nhiều worker: poller chạy 1 instance/tiến trình. Prod hiện chạy **1 worker** (không `--workers`)
+nên an toàn; nếu sau này tăng worker phải gom poller về 1 tiến trình hoặc thêm khóa, không thì
+N tiến trình cùng ghi log trùng.
 
 ## 4. `alembic.ini` / URL
 Mật khẩu SA test **không dùng ký tự đặc biệt** (`% @ ! /`) — ConfigParser của alembic.ini

@@ -8,7 +8,7 @@ from typing import Optional
 from sqlalchemy import false, select, true
 from sqlalchemy.orm import Session
 
-from ..common import DeviationState, LotStatus, QualityStatus, ResultStatus, utcnow
+from ..common import DeviationState, LotStatus, QualityStatus, ResultStatus, execute_in_chunks, utcnow
 from ..models.batches import BatchExecution
 from ..models.batch_pipeline import (
     BatchFilterLot,
@@ -276,8 +276,12 @@ def qc_attention_alerts(db: Session) -> dict:
         # của BatchTank, phải tách lấy đúng tank_id trước khi tra (mirror routers/brewing.py:40).
         real_id_of = {sid: (sid.split("__")[0] if scope_type == "batch_tank" else sid) for sid in scope_ids}
         pk_attr = getattr(model, _SCOPE_PK_ATTR[scope_type])
-        obj_by_real_id = {getattr(o, _SCOPE_PK_ATTR[scope_type]): o for o in db.execute(
-            select(model).where(pk_attr.in_(set(real_id_of.values())))).scalars().all()}
+        # Chia mẻ: scope_ids là MỌI scope từng có kết quả QC, không lọc ngày — riêng scope
+        # "batch" đo 02/11/2026 đã 774 và tăng ~390/tháng, sẽ vượt trần 2100 tham số bind của
+        # SQL Server khoảng tháng 2/2027. Xem common.py::execute_in_chunks.
+        obj_by_real_id = {getattr(o, _SCOPE_PK_ATTR[scope_type]): o for o in execute_in_chunks(
+            db, lambda chunk: select(model).where(pk_attr.in_(chunk)),
+            set(real_id_of.values()), scalars=True)}
         for scope_id in scope_ids:
             key = f"{scope_type}:{scope_id}"
             if key in items:

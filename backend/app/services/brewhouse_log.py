@@ -32,7 +32,7 @@ import asyncio
 from datetime import datetime, timedelta
 from typing import Optional
 
-from sqlalchemy import select
+from sqlalchemy import false, select
 from sqlalchemy.orm import Session
 
 from ..common import utcnow
@@ -155,51 +155,118 @@ def process_tick(db: Session, overview: dict, gap_seconds: float = 0.0) -> None:
         # else: vẫn giữa bước cũ, không có gì để log
 
 
-async def poll_loop(interval_seconds: int = POLL_INTERVAL_SECONDS) -> None:
-    """Vòng lặp nền — khởi động cùng app (xem main.py lifespan), chạy tới khi bị cancel lúc tắt
-    app. MỌI lỗi mỗi lượt (kể cả lỗi MỞ Session, trước đây nằm NGOÀI try/except) đều phải được
-    bắt ngay trong vòng lặp — sự cố thực tế 2026-11-02: tác vụ nền chết lúc 05:43 (nghi do lỗi
-    khi mở Session lọt ra ngoài try cũ), asyncio Task chết ÂM THẦM (không có gì await lại để lộ
-    traceback), mất log hơn 2 tiếng cho tới khi phát hiện qua đối chiếu Realtime — không hề có
-    dòng log lỗi nào dù code cũ tưởng đã bắt hết ngoại lệ. Dùng CHUNG với run_poll_loop_supervised()
-    bên dưới làm lớp bảo vệ thứ 2, phòng trường hợp vẫn có lỗi lọt ra ngoài vì lý do khác."""
+def _tick_once(state: dict) -> None:
+    """Thân 1 lượt poll. TOÀN BỘ thân hàm là I/O ĐỒNG BỘ (chặn luồng gọi nó): đọc SCADA qua ODBC/
+    WAN (brewhouse_overview tạo engine + autoload_with = nhiều round-trip, đo thực tế trên prod
+    2026-11-01: ~0,24s/lượt, đỉnh 0,49s, tệ nhất 4s = timeout ODBC) rồi SELECT/INSERT/UPDATE trên
+    CSDL app. Vì vậy poll_loop() PHẢI gọi nó qua asyncio.to_thread — xem lý do ở đó.
+    `state` giữ cờ cảnh báo giữa các lượt (dict thay vì biến cục bộ để dùng được qua nhiều lượt).
+
+    KHÔNG tự nuốt lỗi ngoài 3 nhánh dưới: lỗi lọt ra (vd chính db.rollback()/db.close() ném tiếp
+    khi kết nối đã hỏng) sẽ nổi lên poll_loop() và được bắt+ghi log ở đó — xem sự cố 2026-11-02."""
     global _last_tick_ok_at
-    warned_no_connection = False
+    db = SessionLocal()
+    try:
+        overview = brewhouse_external.brewhouse_overview(db)
+        if overview.get("available"):
+            tick_time = utcnow()
+            gap_seconds = (tick_time - _last_tick_ok_at).total_seconds() if _last_tick_ok_at else 0.0
+            process_tick(db, overview, gap_seconds=gap_seconds)
+            db.commit()
+            _last_tick_ok_at = tick_time
+            if gap_seconds > GAP_THRESHOLD_SECONDS:
+                log.warning(
+                    "brewhouse_log: phát hiện gián đoạn ghi log %.0fs (> %ss) — các dòng "
+                    "log mở/đóng ở lượt này đã bị đánh dấu data_gap, báo cáo sẽ loại trừ",
+                    gap_seconds, GAP_THRESHOLD_SECONDS,
+                )
+        if state.get("warned_no_connection"):
+            # Ghi cả lúc HỒI PHỤC: trước đây chỉ log lúc hỏng rồi im lặng, nên nhìn log không
+            # biết sự cố kéo dài bao lâu hay đã hết chưa (sự cố 2026-11-02 mất 2+ tiếng mới lộ).
+            log.warning("brewhouse_log: đã kết nối lại được CSDL hệ nấu — ghi log tiếp tục bình thường")
+        state["warned_no_connection"] = False
+    except DomainError as e:
+        # CHÚ Ý: nhánh này gom 2 việc khác hẳn nhau, vì integration_connection.safe_query() bọc
+        # MỌI SQLAlchemyError (timeout/mất WAN/login hỏng) thành DomainError giống hệt lỗi "chưa
+        # khai báo kết nối": (a) chưa gán kết nối CSDL_NL_ĐM (vd môi trường dev), (b) SCADA tạm
+        # thời không đọc được. Vì vậy phải IN KÈM nội dung lỗi — thông báo cũ chỉ nói "chưa có
+        # kết nối" khiến sự cố mạng 2026-11-02 bị hiểu nhầm thành lỗi cấu hình.
+        db.rollback()
+        if not state.get("warned_no_connection"):
+            log.warning("brewhouse_log: không đọc được CSDL hệ nấu — tạm dừng ghi log, sẽ tự thử lại. Lý do: %s", e)
+            state["warned_no_connection"] = True
+    except Exception:
+        db.rollback()
+        log.exception("brewhouse_log: lượt đọc/ghi log thất bại — bỏ qua, thử lại lượt sau")
+    finally:
+        db.close()
+
+
+def _flag_open_rows_on_start() -> None:
+    """Đánh dấu data_gap cho MỌI dòng còn đang mở lúc vòng lặp bắt đầu — chạy 1 lần mỗi lần
+    poll_loop() khởi động (kể cả khi supervisor khởi động lại sau sự cố).
+
+    Vì sao cần: _last_tick_ok_at là biến MODULE, tiến trình mới luôn bắt đầu bằng None nên
+    gap_seconds=0 ở lượt đầu -> is_gap=False. Tức cơ chế data_gap của process_tick() CHỈ phát hiện
+    được gián đoạn khi tiến trình vẫn sống; đúng kịch bản nó sinh ra để chặn (tác vụ chết rồi
+    app khởi động lại) thì lại không bắt được. Sự cố 2026-11-02: tác vụ chết 06:03, tới lúc
+    deploy còn 11 dòng mở từ 3 tiếng trước — nếu không đánh dấu, chúng sẽ bị đóng với
+    duration_minutes ~3 tiếng (toàn bộ khoảng chết) và lọt thẳng vào báo cáo năng suất.
+
+    Đánh dấu TẤT CẢ dòng đang mở, không cố phân biệt "khởi động lại sạch" (deploy ~15s) với "chết
+    âm thầm": tiến trình mới không có cách nào biết giữa chừng đã xảy ra gì. Đánh dấu thừa thì
+    mất vài bước khỏi thống kê năng suất; đánh dấu thiếu thì đưa số giờ ảo vào báo cáo công suất
+    — sai lệch nguy hiểm hơn nhiều."""
+    db = SessionLocal()
+    try:
+        rows = db.execute(
+            select(BrewhouseStepLog).where(
+                BrewhouseStepLog.ended_at.is_(None),
+                BrewhouseStepLog.data_gap == false(),   # == false(), KHÔNG .is_(False) — xem DEPLOY-CONTRACT §2
+            )
+        ).scalars().all()
+        if rows:
+            for r in rows:
+                r.data_gap = True
+            db.commit()
+            log.warning(
+                "brewhouse_log: khởi động lại khi còn %d dòng log đang mở (cũ nhất từ %s) — đã đánh "
+                "dấu data_gap vì không biết đã gián đoạn bao lâu, báo cáo năng suất sẽ loại trừ",
+                len(rows), min(r.started_at for r in rows).isoformat(),
+            )
+    except Exception:
+        db.rollback()
+        log.exception("brewhouse_log: không đánh dấu được dòng log đang mở lúc khởi động — bỏ qua")
+    finally:
+        db.close()
+
+
+async def poll_loop(interval_seconds: int = POLL_INTERVAL_SECONDS) -> None:
+    """Vòng lặp nền — khởi động cùng app (xem main.py lifespan), chạy tới khi bị cancel lúc tắt app.
+
+    Hai điều BẮT BUỘC giữ, mỗi điều ứng với một sự cố thật:
+
+    1. Chạy mỗi lượt trong LUỒNG RIÊNG (asyncio.to_thread), KHÔNG gọi thẳng _tick_once() ở đây:
+       thân lượt poll là I/O đồng bộ ~0,24s (đỉnh 0,49s; 4s nếu WAN tới SCADA trục trặc — timeout
+       ODBC). Gọi thẳng trong coroutine này sẽ chặn event loop chừng đó mỗi giây — ~25% thời
+       gian, 24/7 — làm TOÀN BỘ request của app trễ theo (uvicorn nhận/định tuyến request trên
+       chính event loop đó). Đo A/B 2026-11-01: gọi thẳng max 250ms, qua to_thread max 1,8ms.
+       An toàn vì mỗi lượt tự mở/đóng Session riêng, không chia sẻ trạng thái.
+
+    2. BẮT MỌI lỗi của lượt ngay tại đây. Lỗi lọt ra khỏi _tick_once() (kể cả db.rollback()/
+       db.close() ném tiếp khi kết nối đã hỏng) sẽ làm asyncio Task chết ÂM THẦM — không có gì
+       await lại để lộ traceback. Sự cố 2026-11-02: tác vụ chết lúc 06:03, SCADA vẫn chạy 11
+       thiết bị và đã đổi bước nhưng không dòng log nào được ghi suốt 3 tiếng, không một dòng log
+       lỗi. Dùng CHUNG với run_poll_loop_supervised() làm lớp bảo vệ thứ 2.
+    """
+    state: dict = {"warned_no_connection": False}
+    await asyncio.to_thread(_flag_open_rows_on_start)
     while True:
         try:
-            db = SessionLocal()
-            try:
-                overview = brewhouse_external.brewhouse_overview(db)
-                if overview.get("available"):
-                    tick_time = utcnow()
-                    gap_seconds = (tick_time - _last_tick_ok_at).total_seconds() if _last_tick_ok_at else 0.0
-                    process_tick(db, overview, gap_seconds=gap_seconds)
-                    db.commit()
-                    _last_tick_ok_at = tick_time
-                    if gap_seconds > GAP_THRESHOLD_SECONDS:
-                        log.warning(
-                            "brewhouse_log: phát hiện gián đoạn ghi log %.0fs (> %ss) — các dòng "
-                            "log mở/đóng ở lượt này đã bị đánh dấu data_gap, báo cáo sẽ loại trừ",
-                            gap_seconds, GAP_THRESHOLD_SECONDS,
-                        )
-                warned_no_connection = False
-            except DomainError:
-                # Chưa khai báo kết nối CSDL_NL_ĐM (vd môi trường dev) — chỉ cảnh báo 1 lần, tránh
-                # dội log mỗi POLL_INTERVAL_SECONDS giây.
-                db.rollback()
-                if not warned_no_connection:
-                    log.warning("brewhouse_log: chưa có kết nối SQL hệ nấu — tạm dừng ghi log, sẽ tự thử lại")
-                    warned_no_connection = True
-            except Exception:
-                db.rollback()
-                log.exception("brewhouse_log: lượt đọc/ghi log thất bại — bỏ qua, thử lại lượt sau")
-            finally:
-                db.close()
+            await asyncio.to_thread(_tick_once, state)
         except asyncio.CancelledError:
-            raise
+            raise  # tắt app bình thường
         except Exception:
-            # Lỗi khi MỞ Session (hoặc bất kỳ lỗi nào khác lọt ra khỏi khối trên) — trước đây sẽ
-            # làm chết cả vòng lặp, giờ chỉ bỏ qua lượt này.
             log.exception("brewhouse_log: lượt poll thất bại nặng (lỗi ngoài dự kiến) — bỏ qua, thử lại lượt sau")
         await asyncio.sleep(interval_seconds)
 
