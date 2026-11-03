@@ -250,6 +250,22 @@ INTENTS = [
     (("bao bì", "vỏ chai", "két gông", "keg"), "get_packaging_status"),
     (("báo cáo hệ lọc",), "get_filter_production_report"),
     (("gantt",), "get_pack_line_report"),
+    # Mở rộng vòng 2 (2026-11-03, cùng ngày — "còn thiếu gì không, tôi cần AI truy cập toàn bộ hệ
+    # thống") — cùng nguyên tắc: từ khóa đặc thù, đặt TRƯỚC tool cũ/vòng 1 có từ khóa chung hơn
+    # (vd "thời gian cả mẻ nấu" có chữ "mẻ" nên phải đứng trước get_batch_status).
+    (("tổng quan", "kpi"), "get_dashboard_summary"),
+    (("hold", "đang bị giữ", "release"), "get_hold_and_qc_alerts"),
+    (("quá hạn xử lý",), "get_overdue_actions"),
+    (("sản lượng lọc thấp",), "get_low_yield_alerts"),
+    (("chiết chưa duyệt", "chờ duyệt chiết"), "get_unapproved_pack_lots"),
+    (("log hệ nấu",), "get_brewhouse_log"),
+    (("thời gian cả mẻ nấu", "chu kỳ nấu"), "get_brew_cycle_time"),
+    (("hệ nấu realtime", "nồi gạo"), "get_brewhouse_realtime"),
+    (("máy chiết lon",), "get_filling_realtime"),
+    (("rcfa",), "get_rcfa_list"),
+    (("pareto", "mtbf", "mttr"), "get_oee_loss_detail"),
+    (("ngưỡng chỉ tiêu", "chỉ tiêu bắt buộc", "spec qc"), "get_qc_spec_catalog"),
+    (("nhật ký thao tác", "ai đã làm", "lịch sử thao tác"), "get_audit_log"),
     # Các tool "kho"/"chiết" MỚI (2026-09-18) đặt TRƯỚC tool cũ có từ khóa chung dễ đụng
     # ("kho", "đóng gói") — vd "kho thành phẩm" phải ra get_wms_status, không rơi vào
     # get_inventory_status chỉ vì có chữ "kho".
@@ -428,4 +444,42 @@ def _summarize(tool: str, data: dict) -> str:
         lines = data.get("lines", [])
         return f"Có {len(lines)} dây chuyền chiết; " + "; ".join(
             f"{l['line']} ({l['lot_count']} lần chiết)" for l in lines[:3]) + "."
+    if tool == "get_dashboard_summary":
+        return (f"Mẻ nấu: {data['me_nau']['total']}; Mẻ lọc: {data['me_loc']['total']}; "
+                f"Mẻ chiết: {data['me_chiet']['total']}; {data['tank_len_men']['dang_su_dung']} tank đang lên men.")
+    if tool == "get_hold_and_qc_alerts":
+        return f"Có {data['total']} lô/mẻ đang bị giữ/có deviation mở/có chỉ tiêu QC fail cần chú ý."
+    if tool == "get_overdue_actions":
+        if data["total"] == 0:
+            return "Không có deviation/CAPA nào quá hạn xử lý."
+        return f"Có {data['total']} deviation/CAPA quá hạn xử lý — nặng nhất: {data['items'][0]['code']} ({data['items'][0]['days_overdue']} ngày)."
+    if tool == "get_low_yield_alerts":
+        return f"Có {data['total']} mẻ lọc sản lượng thấp (ngưỡng {data['low_l']}L) trong kỳ."
+    if tool == "get_unapproved_pack_lots":
+        return f"Có {data['total']} lô thành phẩm đã chiết xong nhưng chưa được KCS duyệt."
+    if tool == "get_brewhouse_log":
+        return f"Có {data['step_count']} dòng log, {len(data['summary'])} nhóm thiết bị/mẻ trong kỳ."
+    if tool == "get_brew_cycle_time":
+        return f"Có {len(data.get('items', []))} chu kỳ nấu trong kỳ (xem chi tiết từng mẻ trong dữ liệu)."
+    if tool == "get_brewhouse_realtime":
+        if not data.get("available"):
+            return "Hệ nấu hiện không đọc được dữ liệu realtime."
+        running = [e["equipment_name"] for e in data["equipment"] if e.get("eop_state_label") == "running"]
+        return f"{len(running)}/{len(data['equipment'])} thiết bị hệ nấu đang chạy: " + ", ".join(running[:5]) + "."
+    if tool == "get_filling_realtime":
+        if not data.get("available"):
+            return "Máy chiết lon 30K hiện không đọc được dữ liệu realtime."
+        return f"Máy chiết lon 30K: {'đang chạy' if data['machine_running'] else 'đang dừng'}, đã chiết {data.get('total_can', 0)} lon."
+    if tool == "get_rcfa_list":
+        return f"Có {len(data.get('rcfa', []))} RCFA."
+    if tool == "get_oee_loss_detail":
+        top = data.get("top_reasons", [])
+        return "Top lý do dừng máy: " + "; ".join(f"{t['label']} ({t['pct']}%)" for t in top[:3]) + "." if top else "Chưa có dữ liệu dừng máy."
+    if tool == "get_qc_spec_catalog":
+        if data.get("error"):
+            return data["error"]
+        n = len(data.get("material_params", []) or []) + len(data.get("stage_params", []) or [])
+        return f"Có {n} chỉ tiêu bắt buộc khớp điều kiện."
+    if tool == "get_audit_log":
+        return f"Có {len(data.get('entries', []))} dòng nhật ký thao tác khớp bộ lọc."
     return "Đã lấy dữ liệu."

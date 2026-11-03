@@ -454,6 +454,179 @@ def get_pack_line_report(db: Session, days: int = 30) -> dict:
                       "total_duration_hours": l["total_duration_hours"]} for l in r["lines"][:30]]}
 
 
+# ---- Mở rộng vòng 2 (2026-11-03, cùng ngày — yêu cầu người dùng: "còn thiếu gì không, tôi cần
+# AI truy cập toàn bộ hệ thống") — phủ nốt Dashboard (Tổng quan)/Log hệ nấu-Thời gian cả mẻ nấu/
+# Realtime SCADA/RCFA-Pareto dừng máy/Danh mục chỉ tiêu QC/Audit trail. Cùng khuôn READ-ONLY.
+
+def get_dashboard_summary(db: Session) -> dict:
+    """6 thẻ KPI chính của Tổng quan: Lệnh nấu/Lệnh lọc/Mẻ nấu/Mẻ lọc/Mẻ chiết (tổng/đã hoàn
+    thành/đang thực hiện) + số tank đang lên men."""
+    from . import dashboard as dashboard_svc
+    return dashboard_svc.production_summary(db)
+
+
+def get_hold_and_qc_alerts(db: Session) -> dict:
+    """Cảnh báo "Hold/Release + QC" của Dashboard: lô/mẻ/tank/lô lọc/lô thành phẩm/WO đang bị
+    giữ (on_hold), đang có deviation mở, hoặc đang có chỉ tiêu QC fail — gộp 1 danh sách duy
+    nhất (KHÁC get_quality_alerts, vốn chỉ là cảnh báo QC fail theo mẻ nấu đơn thuần)."""
+    from . import dashboard as dashboard_svc
+    r = dashboard_svc.qc_attention_alerts(db)
+    return {"total": r["total"], "items": [{"scope_type": i["scope_type"], "scope_label": i["scope_label"],
+                                            "reasons": i["reasons"], "deviation_count": i["deviation_count"],
+                                            "fail_param_count": i["fail_param_count"],
+                                            "fail_params": i["fail_params"], "opened_at": i["opened_at"]}
+                                           for i in r["items"][:30]]}
+
+
+def get_overdue_actions(db: Session) -> dict:
+    """Deviation/CAPA đã quá hạn xử lý (due_date đã qua, chưa đóng) — sắp theo số ngày quá hạn
+    nặng nhất lên đầu. Khác get_capa_status (không lọc/sắp theo quá hạn)."""
+    from . import dashboard as dashboard_svc
+    r = dashboard_svc.overdue_action_alerts(db)
+    return {"total": r["total"], "items": [{"kind": i["kind"], "code": i["code"], "title": i["title"],
+                                            "severity": i["severity"], "days_overdue": i["days_overdue"],
+                                            "opened_by": i["opened_by"]} for i in r["items"][:30]]}
+
+
+def get_low_yield_alerts(db: Session, days: int = 5, limit: int = 5) -> dict:
+    """Mẻ lọc sản lượng thấp bất thường trong N ngày gần nhất (loại trừ mẻ cuối/mẻ vét)."""
+    from . import dashboard as dashboard_svc
+    r = dashboard_svc.low_yield_filter_alerts(db, days=days, limit=limit)
+    return {"total": r["total"], "low_l": r["low_l"],
+            "items": [{"batch_seq_no": i.get("batch_seq_no"), "v_l": i.get("v_l"),
+                      "beer_type_name": i.get("beer_type_name"), "ended_at": i.get("ended_at")}
+                     for i in r["items"]]}
+
+
+def get_unapproved_pack_lots(db: Session) -> dict:
+    """Lô thành phẩm đã chiết xong nhưng KCS chưa duyệt chỉ tiêu — kèm số giờ đã chờ."""
+    from . import dashboard as dashboard_svc
+    r = dashboard_svc.bottled_not_approved_report(db)
+    return {"total": r["total"], "items": [{"pack_lot_code": i["pack_lot_code"], "beer_type": i["beer_type"],
+                                            "finished_product_code": i["finished_product_code"],
+                                            "qty": i["qty"], "hours_waiting": i["hours_waiting"]}
+                                           for i in r["items"][:30]]}
+
+
+def get_brewhouse_log(db: Session, ba_year: int = None, ba_order_no: str = None,
+                      ba_batch_no: str = None, days: int = 7) -> dict:
+    """Log hệ nấu: tổng số phút mỗi nồi chạy theo oder/batch/year (bỏ trống = toàn bộ trong
+    `days` ngày gần nhất). Dùng CHUNG dữ liệu với get_brew_cycle_time (khác cách tổng hợp)."""
+    from . import brewhouse_log
+    r = brewhouse_log.step_log_report(db, ba_year=ba_year, ba_order_no=ba_order_no,
+                                      ba_batch_no=ba_batch_no, days=days)
+    return {"step_count": len(r["steps"]),
+            "summary": [{"equipment_name": s["equipment_name"], "ba_year": s["ba_year"],
+                        "ba_order_no": s["ba_order_no"], "ba_batch_no": s["ba_batch_no"],
+                        "total_minutes": s["total_minutes"], "still_running": s["still_running"],
+                        "data_gap": s["data_gap"]} for s in r["summary"][:30]]}
+
+
+def get_brew_cycle_time(db: Session, ba_year: int = None, ba_order_no: str = None,
+                        ba_batch_no: str = None, days: int = 7) -> dict:
+    """Thời gian cả mẻ nấu: từ lúc Nồi gạo bắt đầu tới lúc Nồi lắng xoáy kết thúc, kèm năng
+    suất lý thuyết ước tính (mẻ/ngày) theo nồi chậm nhất trong chuỗi."""
+    from . import brewhouse_log
+    r = brewhouse_log.brew_cycle_report(db, ba_year=ba_year, ba_order_no=ba_order_no,
+                                        ba_batch_no=ba_batch_no, days=days)
+    items = [{"ba_year": i["ba_year"], "ba_order_no": i["ba_order_no"], "ba_batch_no": i["ba_batch_no"],
+             "cycle_minutes": i.get("cycle_minutes"), "cycle_still_running": i.get("cycle_still_running"),
+             "cycle_data_gap": i.get("cycle_data_gap")} for i in r["items"][:30]]
+    throughput = [{"batch": t["batch"], "max_minutes": t["max_minutes"], "batches_per_day": t["batches_per_day"]}
+                 for t in r["throughput"][:10]]
+    return {"items": items, "throughput_sample": throughput}
+
+
+def get_brewhouse_realtime(db: Session) -> dict:
+    """Trạng thái tức thời TOÀN BỘ thiết bị hệ nấu (nồi gạo + 2 dây nấu) — bước hiện tại, nhiệt
+    độ, thể tích, đang chạy mẻ nào."""
+    from . import brewhouse_external
+    r = brewhouse_external.brewhouse_overview(db)
+    if not r.get("available"):
+        return {"available": False}
+    equipment = []
+    for eq_id, s in r["equipment"].items():
+        equipment.append({"equipment_name": brewhouse_external.EQUIPMENT_NAMES.get(int(eq_id)),
+                          "step": s.get("step"), "eop_state_label": s.get("eop_state_label"),
+                          "ba_year": s.get("ba_year"), "ba_order_no": s.get("ba_order_no"),
+                          "ba_batch_no": s.get("ba_batch_no"), "temp_actual": s.get("temp_actual"),
+                          "volume_hl": s.get("volume_hl"), "step_minutes": s.get("step_minutes")})
+    return {"available": True, "equipment": equipment}
+
+
+def get_filling_realtime(db: Session) -> dict:
+    """Trạng thái tức thời máy chiết lon 30K: đang chạy không, tốc độ, lưu lượng, tổng lon đã
+    chiết, đang tráng nước/đuổi CO2 hay không."""
+    from . import filling_external
+    return filling_external.filling_realtime_status(db)
+
+
+def get_rcfa_list(db: Session, line_code: str = None) -> dict:
+    """Danh sách RCFA (phân tích nguyên nhân gốc sự cố dừng máy lớn): mô tả, hành động khắc
+    phục/phòng ngừa, đã hoàn thành tái kiểm tra bao nhiêu lần."""
+    from . import oee_rcfa
+    rows = oee_rcfa.list_rcfa(db, line_code=line_code)
+    return {"rcfa": [{"rcfa_no": r["rcfa_no"], "line_code": r["line_code"], "machine": r["machine"],
+                     "stop_at": r["stop_at"], "duration_min": r["duration_min"],
+                     "description": r["description"], "corrective_action": r["corrective_action"],
+                     "complete_date": r["complete_date"], "recheck_done": r["recheck_done"],
+                     "recheck_total": r["recheck_total"]} for r in rows[:30]]}
+
+
+def get_oee_loss_detail(db: Session, line: str = None, days: int = 30) -> dict:
+    """Phân tích tổn thất OEE/dừng máy: top lý do dừng (pareto), phân rã theo 8 nhóm tổn thất
+    OPI, 3 nhóm big losses (availability/performance/quality), MTBF/MTTR theo thiết bị."""
+    from . import downtime as downtime_svc
+    top_reasons = downtime_svc.pareto(db, line=line)
+    by_category = downtime_svc.pareto_by_category(db, line=line)
+    losses = downtime_svc.big_losses(db, line=line)
+    reliability = downtime_svc.mtbf_mttr(db, days=days)
+    return {"top_reasons": top_reasons["items"][:10], "by_category": by_category["items"],
+            "big_losses": losses, "mtbf_mttr": reliability["equipment"][:20]}
+
+
+def get_qc_spec_catalog(db: Session, material_code: str = None, stage: str = None,
+                        product_code: str = None) -> dict:
+    """Chỉ tiêu QC BẮT BUỘC khai báo (ngưỡng/giới hạn) — theo vật tư (`material_code`) hoặc theo
+    công đoạn sản xuất (`stage`, vd len_men_chinh/len_men_phu/loc/thanh_pham, kèm `product_code`
+    nếu cần đúng dịch bia). KHÁC get_quality_alerts/get_capa_status (đó là KẾT QUẢ đã đo, đây là
+    ĐỊNH NGHĨA chỉ tiêu/ngưỡng phải đo)."""
+    from . import qc_catalog
+    from ..models.master import Material, Product
+    out = {}
+    if material_code:
+        m = db.execute(select(Material).where(Material.code == material_code)).scalar_one_or_none()
+        if not m:
+            return {"error": f"Không tìm thấy vật tư có mã {material_code}"}
+        out["material_params"] = qc_catalog.required_params_for_material(db, m.material_id)
+    if stage:
+        product_id = None
+        if product_code:
+            p = db.execute(select(Product).where(Product.code == product_code)).scalar_one_or_none()
+            if not p:
+                return {"error": f"Không tìm thấy dịch bia có mã {product_code}"}
+            product_id = p.product_id
+        out["stage_params"] = qc_catalog.required_params_for_stage(db, stage, product_id=product_id)
+    if not out:
+        return {"error": "Cần truyền material_code (chỉ tiêu NVL) hoặc stage (chỉ tiêu công đoạn)"}
+    return out
+
+
+def get_audit_log(db: Session, entity_type: str = None, action: str = None, limit: int = 50) -> dict:
+    """Sổ nhật ký thao tác (ai làm gì, khi nào) — lọc theo loại đối tượng (vd 'batch', 'lot')
+    và/hoặc hành động (vd 'hold', 'release', 'ebr_sign'). Tối đa 50 dòng gần nhất."""
+    from ..models.audit import AuditLog
+    limit = max(1, min(limit or 50, 200))
+    stmt = select(AuditLog)
+    if entity_type:
+        stmt = stmt.where(AuditLog.entity_type == entity_type)
+    if action:
+        stmt = stmt.where(AuditLog.action == action)
+    rows = db.execute(stmt.order_by(AuditLog.seq.desc()).limit(limit)).scalars().all()
+    return {"entries": [{"entity_type": r.entity_type, "entity_id": r.entity_id, "action": r.action,
+                        "actor": r.actor, "reason": r.reason, "time": r.ts.isoformat()} for r in rows]}
+
+
 # ---- Registry: name -> (fn, description, input_schema) ----
 TOOLS = {
     "get_inventory_status": {
@@ -638,6 +811,90 @@ TOOLS = {
         "description": "Báo cáo dây chuyền chiết: số lần chiết + tổng thời gian đã chiết mỗi dây chuyền.",
         "input_schema": {"type": "object", "properties": {
             "days": {"type": "integer", "description": "Số ngày gần nhất (mặc định 30)."}}},
+    },
+    "get_dashboard_summary": {
+        "fn": get_dashboard_summary,
+        "description": "6 thẻ KPI Tổng quan: Lệnh nấu/Lệnh lọc/Mẻ nấu/Mẻ lọc/Mẻ chiết + số tank đang lên men.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    "get_hold_and_qc_alerts": {
+        "fn": get_hold_and_qc_alerts,
+        "description": "Cảnh báo Hold/Release + QC fail của Dashboard (lô/mẻ/tank/lô lọc/lô thành phẩm đang bị giữ hoặc có deviation mở).",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    "get_overdue_actions": {
+        "fn": get_overdue_actions,
+        "description": "Deviation/CAPA đã quá hạn xử lý, sắp theo số ngày quá hạn nặng nhất lên đầu.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    "get_low_yield_alerts": {
+        "fn": get_low_yield_alerts,
+        "description": "Mẻ lọc sản lượng thấp bất thường trong N ngày gần nhất.",
+        "input_schema": {"type": "object", "properties": {
+            "days": {"type": "integer", "description": "Số ngày gần nhất (mặc định 5)."},
+            "limit": {"type": "integer", "description": "Số dòng tối đa (mặc định 5)."}}},
+    },
+    "get_unapproved_pack_lots": {
+        "fn": get_unapproved_pack_lots,
+        "description": "Lô thành phẩm đã chiết xong nhưng KCS chưa duyệt chỉ tiêu, kèm số giờ đã chờ.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    "get_brewhouse_log": {
+        "fn": get_brewhouse_log,
+        "description": "Log hệ nấu: tổng số phút mỗi nồi chạy theo oder/mẻ/năm.",
+        "input_schema": {"type": "object", "properties": {
+            "ba_year": {"type": "integer", "description": "Năm (2 chữ số, vd 26). Bỏ trống = tất cả."},
+            "ba_order_no": {"type": "string", "description": "Mã Oder. Bỏ trống = tất cả."},
+            "ba_batch_no": {"type": "string", "description": "Mã mẻ Braumat. Bỏ trống = tất cả."},
+            "days": {"type": "integer", "description": "Số ngày gần nhất (mặc định 7)."}}},
+    },
+    "get_brew_cycle_time": {
+        "fn": get_brew_cycle_time,
+        "description": "Thời gian cả mẻ nấu (Nồi gạo bắt đầu tới Nồi lắng xoáy kết thúc) + năng suất lý thuyết ước tính.",
+        "input_schema": {"type": "object", "properties": {
+            "ba_year": {"type": "integer", "description": "Năm (2 chữ số, vd 26). Bỏ trống = tất cả."},
+            "ba_order_no": {"type": "string", "description": "Mã Oder. Bỏ trống = tất cả."},
+            "ba_batch_no": {"type": "string", "description": "Mã mẻ Braumat. Bỏ trống = tất cả."},
+            "days": {"type": "integer", "description": "Số ngày gần nhất (mặc định 7)."}}},
+    },
+    "get_brewhouse_realtime": {
+        "fn": get_brewhouse_realtime,
+        "description": "Trạng thái tức thời TOÀN BỘ thiết bị hệ nấu (nồi gạo + 2 dây nấu) đọc trực tiếp từ SCADA.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    "get_filling_realtime": {
+        "fn": get_filling_realtime,
+        "description": "Trạng thái tức thời máy chiết lon 30K đọc trực tiếp từ SCADA.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    "get_rcfa_list": {
+        "fn": get_rcfa_list,
+        "description": "Danh sách RCFA (phân tích nguyên nhân gốc sự cố dừng máy lớn), kèm hành động khắc phục/phòng ngừa.",
+        "input_schema": {"type": "object", "properties": {
+            "line_code": {"type": "string", "description": "Mã dây chuyền. Bỏ trống = tất cả."}}},
+    },
+    "get_oee_loss_detail": {
+        "fn": get_oee_loss_detail,
+        "description": "Phân tích tổn thất OEE/dừng máy: top lý do dừng, 8 nhóm tổn thất OPI, big losses, MTBF/MTTR.",
+        "input_schema": {"type": "object", "properties": {
+            "line": {"type": "string", "description": "Lọc theo line. Bỏ trống = tất cả."},
+            "days": {"type": "integer", "description": "Cửa sổ ngày tính MTBF/MTTR (mặc định 30)."}}},
+    },
+    "get_qc_spec_catalog": {
+        "fn": get_qc_spec_catalog,
+        "description": "Chỉ tiêu QC bắt buộc khai báo (ngưỡng/giới hạn) theo vật tư hoặc theo công đoạn sản xuất — khác dữ liệu KẾT QUẢ đã đo.",
+        "input_schema": {"type": "object", "properties": {
+            "material_code": {"type": "string", "description": "Mã vật tư — xem chỉ tiêu NVL."},
+            "stage": {"type": "string", "description": "Công đoạn, vd len_men_chinh/len_men_phu/loc/thanh_pham."},
+            "product_code": {"type": "string", "description": "Mã dịch bia (tùy chọn, dùng kèm `stage`)."}}},
+    },
+    "get_audit_log": {
+        "fn": get_audit_log,
+        "description": "Sổ nhật ký thao tác (ai làm gì, khi nào) — lọc theo loại đối tượng và/hoặc hành động.",
+        "input_schema": {"type": "object", "properties": {
+            "entity_type": {"type": "string", "description": "Vd 'batch', 'lot'. Bỏ trống = tất cả."},
+            "action": {"type": "string", "description": "Vd 'hold', 'release', 'ebr_sign'. Bỏ trống = tất cả."},
+            "limit": {"type": "integer", "description": "Số dòng tối đa (mặc định 50)."}}},
     },
 }
 

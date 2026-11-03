@@ -214,6 +214,59 @@ def test_2026_11_03_expansion_tools_route_and_answer_without_error(client, admin
     assert res.get("mode") == "local"
 
 
+def test_ai_status_lists_2026_11_03_round2_expansion_tools(client, admin_h):
+    """13 tool vòng 2 cùng ngày (yêu cầu người dùng: "còn thiếu gì không, tôi cần AI truy cập
+    toàn bộ hệ thống") — phủ Dashboard (Tổng quan)/Log hệ nấu-Thời gian cả mẻ nấu/Realtime SCADA/
+    RCFA-Pareto dừng máy/Danh mục chỉ tiêu QC/Audit trail."""
+    r = client.get("/api/ai/status", headers=admin_h)
+    assert r.status_code == 200, r.text
+    tools = r.json()["tools"]
+    for name in ("get_dashboard_summary", "get_hold_and_qc_alerts", "get_overdue_actions",
+                "get_low_yield_alerts", "get_unapproved_pack_lots", "get_brewhouse_log",
+                "get_brew_cycle_time", "get_brewhouse_realtime", "get_filling_realtime",
+                "get_rcfa_list", "get_oee_loss_detail", "get_qc_spec_catalog", "get_audit_log"):
+        assert name in tools, f"{name} chưa có trong manifest tool"
+    assert len(tools) == 43, f"Kỳ vọng đúng 43 tool, thực tế {len(tools)}"
+
+
+@pytest.mark.parametrize("message,expected_tool", [
+    ("cho tôi kpi tổng quan", "get_dashboard_summary"),
+    ("đang bị giữ những lô nào", "get_hold_and_qc_alerts"),
+    ("có gì quá hạn xử lý không", "get_overdue_actions"),
+    ("sản lượng lọc thấp gần đây", "get_low_yield_alerts"),
+    ("chiết chưa duyệt còn bao nhiêu", "get_unapproved_pack_lots"),
+    ("xem log hệ nấu", "get_brewhouse_log"),
+    ("thời gian cả mẻ nấu gần nhất", "get_brew_cycle_time"),
+    ("hệ nấu realtime đang chạy gì", "get_brewhouse_realtime"),
+    ("máy chiết lon đang chạy không", "get_filling_realtime"),
+    ("có rcfa nào không", "get_rcfa_list"),
+    ("xem pareto top lý do dừng", "get_oee_loss_detail"),
+    ("nhật ký thao tác gần đây", "get_audit_log"),
+])
+def test_round2_expansion_tools_route_and_answer_without_error(client, admin_h, message, expected_tool):
+    res = _ask(client, admin_h, message)
+    assert res["tools_used"] == [expected_tool], res
+    assert res.get("answer"), "Phải có câu trả lời, không được rỗng"
+    assert res.get("mode") == "local"
+
+
+def test_get_qc_spec_catalog_without_filter_asks_for_it(client, admin_h):
+    res = _ask(client, admin_h, "ngưỡng chỉ tiêu nào bắt buộc")
+    assert res["tools_used"] == ["get_qc_spec_catalog"], res
+    assert "material_code" in res["answer"] or "stage" in res["answer"]
+
+
+def test_get_qc_spec_catalog_direct_call_with_material(db):
+    from app.models.master import Material
+    from sqlalchemy import select
+    m = db.execute(select(Material)).scalars().first()
+    if m is None:
+        pytest.skip("Không có vật tư nào trong seed data")
+    r = ai_tools.call_tool(db, "get_qc_spec_catalog", {"material_code": m.code})
+    assert "error" not in r, r
+    assert "material_params" in r
+
+
 def test_get_isa88_status_routes_with_batch_code_in_message(client, admin_h, sample_batch):
     res = _ask(client, admin_h, f"isa-88 mẻ {sample_batch} tới đâu rồi")
     assert res["tools_used"] == ["get_isa88_status"], res
