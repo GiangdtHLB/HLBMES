@@ -21,10 +21,15 @@ router = APIRouter(prefix="/api/lots", tags=["lots"],
 
 
 @router.get("", response_model=list[LotOut])
-def list_lots(limit: int = 1000, offset: int = 0, db: Session = Depends(get_db)):
-    """Có phân trang (limit/offset, mặc định 1000, tối đa 5000) — số lô tích lũy tăng dần theo
-    mỗi lần nhập/tách/nhập tồn đầu nên endpoint không lọc vẫn cần chặn không tải hết bảng."""
-    limit = max(1, min(limit or 1000, 5000))
+def list_lots(limit: int = 500, offset: int = 0, db: Session = Depends(get_db)):
+    """Có phân trang (limit/offset, mặc định 500, tối đa 900) — số lô tích lũy tăng dần theo
+    mỗi lần nhập/tách/nhập tồn đầu nên endpoint không lọc vẫn cần chặn không tải hết bảng.
+    Trần hạ từ 5000 xuống 900 (2026-11-03): `_attach_split_from`/`_attach_sibling_locations`
+    bên dưới đều `.in_()` theo đúng số lô trả về — `limit=5000` tự nó đã vượt trần 2100 tham số
+    bind của SQL Server, vỡ ngay 1 request chứ không cần chờ dữ liệu tích lũy (memory item 18/
+    DEPLOY-CONTRACT §2(H)). Xác nhận 2026-11-03: không có nơi nào ở frontend truyền `limit` lớn
+    hơn mặc định (mọi lời gọi GET("/lots") đều không kèm query param này)."""
+    limit = max(1, min(limit or 500, 900))
     offset = max(0, offset or 0)
     stmt = select(MaterialLot).order_by(MaterialLot.created_at.desc()).limit(limit).offset(offset)
     lots = db.execute(stmt).scalars().all()

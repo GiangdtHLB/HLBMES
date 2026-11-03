@@ -229,6 +229,43 @@ def _json(obj) -> str:
 # ---- Engine luật nội bộ (offline) ----
 
 INTENTS = [
+    # Mở rộng 2026-11-03 — đặt TRƯỚC toàn bộ tool cũ, mirror đúng nguyên tắc ngay dưới đây ("tool
+    # mới đặt TRƯỚC tool cũ có từ khóa chung dễ đụng"): từ khóa ở đây đều khá đặc thù (cip,
+    # isa-88, gantt, bao bì...) nên không lệch routing của tool cũ khi KHÔNG xuất hiện trong câu
+    # hỏi, nhưng nếu không đặt trước thì sẽ bị các từ khóa chung hơn ở dưới "nuốt" mất trước khi
+    # tới lượt (vd "isa-88 mẻ 123" có chữ "mẻ" nên rơi vào get_batch_status; "tồn kho bao bì" có
+    # chữ "tồn kho" nên rơi vào get_inventory_status; "capa ... nguyên nhân gốc" có chữ "capa" nên
+    # rơi vào get_capa_status — xác nhận thực tế qua test, không phải suy đoán). Từ khóa cần tham
+    # số bắt buộc khó trích từ câu tự nhiên hoặc chắc chắn đụng hàng (get_material_info,
+    # get_ebr_lock_status, get_oee_detail) KHÔNG đưa vào đây — vẫn gọi được qua đường Claude
+    # tool-use thật, chỉ không có trong engine luật offline.
+    (("cip",), "get_cip_status"),
+    (("downtime", "dừng máy", "lịch bảo trì"), "get_maintenance_status"),
+    (("lệnh sản xuất", "lệnh sx"), "get_wo_status"),
+    (("lập lịch", "xung đột lịch", "chồng lấn lịch"), "get_schedule_conflicts"),
+    (("danh mục dịch bia", "dịch bia nào"), "get_product_info"),
+    (("nguyên nhân gốc",), "get_capa_detail"),
+    (("isa-88", "isa88"), "get_isa88_status"),
+    (("phiếu đề nghị",), "get_pending_material_requests"),
+    (("bao bì", "vỏ chai", "két gông", "keg"), "get_packaging_status"),
+    (("báo cáo hệ lọc",), "get_filter_production_report"),
+    (("gantt",), "get_pack_line_report"),
+    # Mở rộng vòng 2 (2026-11-03, cùng ngày — "còn thiếu gì không, tôi cần AI truy cập toàn bộ hệ
+    # thống") — cùng nguyên tắc: từ khóa đặc thù, đặt TRƯỚC tool cũ/vòng 1 có từ khóa chung hơn
+    # (vd "thời gian cả mẻ nấu" có chữ "mẻ" nên phải đứng trước get_batch_status).
+    (("tổng quan", "kpi"), "get_dashboard_summary"),
+    (("hold", "đang bị giữ", "release"), "get_hold_and_qc_alerts"),
+    (("quá hạn xử lý",), "get_overdue_actions"),
+    (("sản lượng lọc thấp",), "get_low_yield_alerts"),
+    (("chiết chưa duyệt", "chờ duyệt chiết"), "get_unapproved_pack_lots"),
+    (("log hệ nấu",), "get_brewhouse_log"),
+    (("thời gian cả mẻ nấu", "chu kỳ nấu"), "get_brew_cycle_time"),
+    (("hệ nấu realtime", "nồi gạo"), "get_brewhouse_realtime"),
+    (("máy chiết lon",), "get_filling_realtime"),
+    (("rcfa",), "get_rcfa_list"),
+    (("pareto", "mtbf", "mttr"), "get_oee_loss_detail"),
+    (("ngưỡng chỉ tiêu", "chỉ tiêu bắt buộc", "spec qc"), "get_qc_spec_catalog"),
+    (("nhật ký thao tác", "ai đã làm", "lịch sử thao tác"), "get_audit_log"),
     # Các tool "kho"/"chiết" MỚI (2026-09-18) đặt TRƯỚC tool cũ có từ khóa chung dễ đụng
     # ("kho", "đóng gói") — vd "kho thành phẩm" phải ra get_wms_status, không rơi vào
     # get_inventory_status chỉ vì có chữ "kho".
@@ -279,6 +316,15 @@ def _chat_local(db: Session, message: str) -> dict:
                         break
                 if "batch_code" not in payload:
                     return {"answer": "Bạn cho tôi mã mẻ cần xem cấp liệu (vd 2354).",
+                            "tools_used": [], "mode": "local"}
+            if tool == "get_isa88_status":
+                for w in message.split():
+                    w2 = w.strip(".,?")
+                    if w2.isdigit():
+                        payload["batch_code"] = w2
+                        break
+                if "batch_code" not in payload:
+                    return {"answer": "Bạn cho tôi mã mẻ cần xem tiến độ ISA-88 (vd 2354).",
                             "tools_used": [], "mode": "local"}
             data = ai_tools.call_tool(db, tool, payload)
             return {"answer": _summarize(tool, data), "tools_used": [tool], "data": data, "mode": "local"}
@@ -351,4 +397,89 @@ def _summarize(tool: str, data: dict) -> str:
     if tool == "get_capa_status":
         return (f"{len(data.get('open_deviations', []))} deviation đang mở, "
                 f"{len(data.get('open_capa', []))} CAPA đang mở.")
+    if tool == "get_cip_status":
+        recs = data.get("records", [])
+        if data.get("error"):
+            return data["error"]
+        fails = sum(1 for r in recs if r.get("result") == "fail")
+        return f"Có {len(recs)} lượt CIP gần đây; {fails} lượt kết quả fail."
+    if tool == "get_maintenance_status":
+        ev = data.get("downtime_events", [])
+        due = data.get("maintenance_due_or_overdue", [])
+        overdue = sum(1 for d in due if d.get("status") == "overdue")
+        return f"{len(ev)} lượt dừng máy gần đây; {len(due)} hạng mục bảo trì sắp/đã đến hạn ({overdue} quá hạn)."
+    if tool == "get_wo_status":
+        if data.get("error"):
+            return data["error"]
+        os_ = data.get("orders", [])
+        return f"Có {len(os_)} Lệnh sản xuất; " + "; ".join(
+            f"{o['wo_code']} ({o['status']})" for o in os_[:3]) + "."
+    if tool == "get_schedule_conflicts":
+        if data.get("ok"):
+            return "Lập lịch hiện không có chồng lấn hay thiếu NVL nào."
+        return (f"Phát hiện {len(data.get('overlaps', []))} chồng lấn tài nguyên, "
+                f"{len(data.get('material_short', []))} lệnh thiếu NVL dự kiến.")
+    if tool == "get_product_info":
+        if data.get("error"):
+            return data["error"]
+        return f"Có {len(data.get('products', []))} dịch bia trong danh mục."
+    if tool == "get_capa_detail":
+        if data.get("error"):
+            return data["error"]
+        return f"Có {len(data.get('capa', []))} CAPA khớp — xem root_cause/action_plan/due_date trong dữ liệu."
+    if tool == "get_isa88_status":
+        if data.get("error"):
+            return data["error"]
+        return f"Mẻ {data['batch_code']}: hoàn thành {data['completion_pct']}% ({data['phases_done']}/{data['phases_total']} phase)."
+    if tool == "get_pending_material_requests":
+        reqs = data.get("requests", [])
+        pending = sum(r.get("pending_count", 0) for r in reqs)
+        return f"Có {len(reqs)} phiếu đề nghị cấp/xuất NVL; tổng {pending} dòng còn chưa cấp."
+    if tool == "get_packaging_status":
+        return (f"Bao bì tuần hoàn: {data.get('total_on_hand', 0)} tồn kho, "
+                f"{data.get('total_in_circulation', 0)} đang lưu hành.")
+    if tool == "get_filter_production_report":
+        return f"Có {len(data.get('items', []))} mẻ lọc trong {data.get('days')} ngày gần nhất."
+    if tool == "get_pack_line_report":
+        lines = data.get("lines", [])
+        return f"Có {len(lines)} dây chuyền chiết; " + "; ".join(
+            f"{l['line']} ({l['lot_count']} lần chiết)" for l in lines[:3]) + "."
+    if tool == "get_dashboard_summary":
+        return (f"Mẻ nấu: {data['me_nau']['total']}; Mẻ lọc: {data['me_loc']['total']}; "
+                f"Mẻ chiết: {data['me_chiet']['total']}; {data['tank_len_men']['dang_su_dung']} tank đang lên men.")
+    if tool == "get_hold_and_qc_alerts":
+        return f"Có {data['total']} lô/mẻ đang bị giữ/có deviation mở/có chỉ tiêu QC fail cần chú ý."
+    if tool == "get_overdue_actions":
+        if data["total"] == 0:
+            return "Không có deviation/CAPA nào quá hạn xử lý."
+        return f"Có {data['total']} deviation/CAPA quá hạn xử lý — nặng nhất: {data['items'][0]['code']} ({data['items'][0]['days_overdue']} ngày)."
+    if tool == "get_low_yield_alerts":
+        return f"Có {data['total']} mẻ lọc sản lượng thấp (ngưỡng {data['low_l']}L) trong kỳ."
+    if tool == "get_unapproved_pack_lots":
+        return f"Có {data['total']} lô thành phẩm đã chiết xong nhưng chưa được KCS duyệt."
+    if tool == "get_brewhouse_log":
+        return f"Có {data['step_count']} dòng log, {len(data['summary'])} nhóm thiết bị/mẻ trong kỳ."
+    if tool == "get_brew_cycle_time":
+        return f"Có {len(data.get('items', []))} chu kỳ nấu trong kỳ (xem chi tiết từng mẻ trong dữ liệu)."
+    if tool == "get_brewhouse_realtime":
+        if not data.get("available"):
+            return "Hệ nấu hiện không đọc được dữ liệu realtime."
+        running = [e["equipment_name"] for e in data["equipment"] if e.get("eop_state_label") == "running"]
+        return f"{len(running)}/{len(data['equipment'])} thiết bị hệ nấu đang chạy: " + ", ".join(running[:5]) + "."
+    if tool == "get_filling_realtime":
+        if not data.get("available"):
+            return "Máy chiết lon 30K hiện không đọc được dữ liệu realtime."
+        return f"Máy chiết lon 30K: {'đang chạy' if data['machine_running'] else 'đang dừng'}, đã chiết {data.get('total_can', 0)} lon."
+    if tool == "get_rcfa_list":
+        return f"Có {len(data.get('rcfa', []))} RCFA."
+    if tool == "get_oee_loss_detail":
+        top = data.get("top_reasons", [])
+        return "Top lý do dừng máy: " + "; ".join(f"{t['label']} ({t['pct']}%)" for t in top[:3]) + "." if top else "Chưa có dữ liệu dừng máy."
+    if tool == "get_qc_spec_catalog":
+        if data.get("error"):
+            return data["error"]
+        n = len(data.get("material_params", []) or []) + len(data.get("stage_params", []) or [])
+        return f"Có {n} chỉ tiêu bắt buộc khớp điều kiện."
+    if tool == "get_audit_log":
+        return f"Có {len(data.get('entries', []))} dòng nhật ký thao tác khớp bộ lọc."
     return "Đã lấy dữ liệu."

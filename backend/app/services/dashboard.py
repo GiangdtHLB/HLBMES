@@ -342,14 +342,18 @@ def _batch_filter_lot_yield_items(db: Session, date_from, date_to, low_l: float,
         select(BatchFilterLotBatch).where(BatchFilterLotBatch.ended_at.is_not(None))
     ).scalars().all()
     batch_ids = [b.batch_link_id for b in all_batches]
-    draws = db.execute(select(BatchFilterLotBatchDraw).where(
-        BatchFilterLotBatchDraw.batch_link_id.in_(batch_ids))).scalars().all() if batch_ids else []
+    # batch_ids/filter_lot_ids TÍCH LŨY THEO THỜI GIAN (mọi mẻ lọc đã kết thúc, cố ý KHÔNG lọc
+    # ngày — xem docstring) — chia mẻ tránh vỡ trần 2100 tham số bind của SQL Server khi phình to
+    # (mirror common.py::execute_in_chunks, xem memory item 18/DEPLOY-CONTRACT §2(H)).
+    draws = execute_in_chunks(db, lambda chunk: select(BatchFilterLotBatchDraw).where(
+        BatchFilterLotBatchDraw.batch_link_id.in_(chunk)), batch_ids, scalars=True)
     draw_hl_by_batch: dict[str, float] = {}
     for d in draws:
         draw_hl_by_batch[d.batch_link_id] = draw_hl_by_batch.get(d.batch_link_id, 0.0) + (d.dich_nha_hl or 0.0)
     filter_lot_ids = {b.filter_lot_id for b in all_batches}
-    filter_lots_by_id = {fl.filter_lot_id: fl for fl in db.execute(
-        select(BatchFilterLot).where(BatchFilterLot.filter_lot_id.in_(filter_lot_ids))).scalars().all()} if filter_lot_ids else {}
+    filter_lots_by_id = {fl.filter_lot_id: fl for fl in execute_in_chunks(
+        db, lambda chunk: select(BatchFilterLot).where(BatchFilterLot.filter_lot_id.in_(chunk)),
+        filter_lot_ids, scalars=True)}
     from ..models.master import BeerType
     beer_type_ids = {fl.beer_type_id for fl in filter_lots_by_id.values() if fl.beer_type_id}
     beer_types_by_id = {bt.beer_type_id: bt for bt in db.execute(

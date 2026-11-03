@@ -8,7 +8,7 @@ from sqlalchemy import func, or_, select, update
 from sqlalchemy.orm import Session
 
 from ..audit import record_audit
-from ..common import GenealogyRelation, LotStatus, Role, new_id, utcnow
+from ..common import GenealogyRelation, LotStatus, Role, execute_in_chunks, new_id, utcnow
 from ..errors import DomainError, NotFoundError, PermissionError_
 from ..models.batch_pipeline import (BatchFilterLot, BatchFilterLotMaterialUsage, BatchFilterOrder, BatchPackLot,
                                      BatchPackLotMaterialUsage)
@@ -807,11 +807,15 @@ def _nau_consume_as_of(db: Session, as_of) -> list[tuple["MaterialLot", float]]:
         GenealogyEdge.relation == GenealogyRelation.CONSUME.value)).scalars().all()
     if not edges:
         return []
-    batch_ids = {e.to_id for e in edges}
-    start_at_by_batch = dict(db.execute(select(BatchExecution.batch_id, BatchExecution.start_at)
-                                        .where(BatchExecution.batch_id.in_(batch_ids))).all())
-    lots = {l.lot_id: l for l in db.execute(select(MaterialLot).where(
-        MaterialLot.lot_id.in_({e.from_id for e in edges}))).scalars().all()}
+    # batch_ids/lot_ids TÍCH LŨY THEO THỜI GIAN (mọi lượt cấp liệu vào mẻ Nấu từng ghi nhận,
+    # không lọc ngày) — chia mẻ tránh vỡ trần 2100 tham số bind của SQL Server khi phình to
+    # (mirror common.py::execute_in_chunks, xem memory item 18/DEPLOY-CONTRACT §2(H)).
+    batch_ids = list({e.to_id for e in edges})
+    start_at_by_batch = dict(execute_in_chunks(db, lambda chunk: select(
+        BatchExecution.batch_id, BatchExecution.start_at).where(
+        BatchExecution.batch_id.in_(chunk)), batch_ids))
+    lots = {l.lot_id: l for l in execute_in_chunks(db, lambda chunk: select(MaterialLot).where(
+        MaterialLot.lot_id.in_(chunk)), {e.from_id for e in edges}, scalars=True)}
     out = []
     for e in edges:
         if not e.quantity:
@@ -887,8 +891,13 @@ def _material_balances_as_of(db: Session, as_of, location: str = None) -> dict[s
     # receive()/issue() của app nên chưa từng ghi giao dịch) — không có lịch sử để dựng lại, nên
     # lấy tạm MaterialLot.quantity/created_at HIỆN TẠI làm mốc duy nhất đã biết: coi như lô này
     # "có mặt" nguyên vẹn kể từ created_at, tính vào mọi as_of >= created_at.
-    moved_lot_ids = {r[0] for r in db.execute(select(StockMovement.lot_id).where(
-        StockMovement.lot_id.isnot(None)).distinct())}
+    # SELECT DISTINCT bản thân nó an toàn (không có .in_()) — nhưng ~col.in_(moved_lot_ids) ngay
+    # dưới đây sinh 1 tham số bind/phần tử, cùng rủi ro trần 2100 của SQL Server khi bảng
+    # StockMovement đã tích lũy nhiều lô (đúng họ bảng gây sự cố Kho TP 4737 pallet, 2026-10) —
+    # thay NOT IN(list) bằng NOT IN(subquery), SQL Server đánh giá phía server, không sinh tham
+    # số nào dù bảng lớn tới đâu (mirror memory item 18/DEPLOY-CONTRACT §2(H)).
+    moved_lot_ids_subq = select(StockMovement.lot_id).where(StockMovement.lot_id.isnot(None)).distinct()
+    moved_lot_ids = {r[0] for r in db.execute(moved_lot_ids_subq)}
     if loc_matches("Kho phân xưởng"):
         # CHỈ trừ cho lô đã có StockMovement thật (moved_lot_ids) — lô "mồ côi" dùng thẳng
         # MaterialLot.quantity HIỆN TẠI bên dưới, đã tự nhiên trừ sẵn phần cấp Nấu rồi (tránh trừ
@@ -898,7 +907,7 @@ def _material_balances_as_of(db: Session, as_of, location: str = None) -> dict[s
                 out[lot.material_id] = out.get(lot.material_id, 0.0) - qty
     orphan_lots = db.execute(select(MaterialLot).where(
         MaterialLot.lot_type == "material", MaterialLot.created_at <= as_of,
-        ~MaterialLot.lot_id.in_(moved_lot_ids) if moved_lot_ids else True)).scalars().all()
+        MaterialLot.lot_id.not_in(moved_lot_ids_subq))).scalars().all()
     for lot in orphan_lots:
         if lot.material_id and loc_matches(lot.location) and lot.quantity:
             out[lot.material_id] = out.get(lot.material_id, 0.0) + lot.quantity
@@ -992,8 +1001,11 @@ def _lot_balances_as_of(db: Session, as_of) -> tuple[dict[str, float], dict[str,
     # Bù cho lô KHÔNG có StockMovement nào (VD dữ liệu nạp thẳng vào DB từ hệ thống cũ) — lấy tạm
     # MaterialLot.quantity/location/created_at HIỆN TẠI làm mốc duy nhất đã biết (mirror
     # _material_balances_as_of, xem giải thích ở đó).
-    moved_lot_ids = {r[0] for r in db.execute(select(StockMovement.lot_id).where(
-        StockMovement.lot_id.isnot(None)).distinct())}
+    # NOT IN(subquery) thay vì NOT IN(list) — tránh vỡ trần 2100 tham số bind của SQL Server khi
+    # StockMovement đã tích lũy nhiều lô (mirror _material_balances_as_of ngay trên, xem memory
+    # item 18/DEPLOY-CONTRACT §2(H)).
+    moved_lot_ids_subq = select(StockMovement.lot_id).where(StockMovement.lot_id.isnot(None)).distinct()
+    moved_lot_ids = {r[0] for r in db.execute(moved_lot_ids_subq)}
     # Trừ cấp liệu Nấu CHỈ cho lô đã có StockMovement thật (moved_lot_ids) — lô "mồ côi" (không
     # StockMovement nào) dùng thẳng MaterialLot.quantity HIỆN TẠI làm mốc duy nhất đã biết (bên
     # dưới), số đó ĐÃ tự nhiên trừ sẵn phần đã cấp Nấu rồi — trừ thêm ở đây sẽ bị trừ TRÙNG 2 lần.
@@ -1002,7 +1014,7 @@ def _lot_balances_as_of(db: Session, as_of) -> tuple[dict[str, float], dict[str,
             balances[lot.lot_id] = balances.get(lot.lot_id, 0.0) - qty
     orphan_lots = db.execute(select(MaterialLot).where(
         MaterialLot.lot_type == "material", MaterialLot.created_at <= as_of,
-        ~MaterialLot.lot_id.in_(moved_lot_ids) if moved_lot_ids else True)).scalars().all()
+        MaterialLot.lot_id.not_in(moved_lot_ids_subq))).scalars().all()
     for lot in orphan_lots:
         if lot.quantity:
             balances[lot.lot_id] = balances.get(lot.lot_id, 0.0) + lot.quantity
@@ -1020,8 +1032,10 @@ def lot_on_hand_as_of(db: Session, as_of, location: str = None) -> list[dict]:
     lot_ids = [lid for lid, q in balances.items() if q > 1e-6 and loc_matches(locations.get(lid))]
     if not lot_ids:
         return []
-    lots = {l.lot_id: l for l in db.execute(
-        select(MaterialLot).where(MaterialLot.lot_id.in_(lot_ids))).scalars().all()}
+    # lot_ids = mọi lô còn dư tính đến ngày, tích lũy theo thời gian — chia mẻ tránh vỡ trần 2100
+    # tham số bind của SQL Server (mirror common.py::execute_in_chunks, memory item 18).
+    lots = {l.lot_id: l for l in execute_in_chunks(db, lambda chunk: select(MaterialLot).where(
+        MaterialLot.lot_id.in_(chunk)), lot_ids, scalars=True)}
     mat_ids = {l.material_id for l in lots.values() if l.material_id}
     mats = {m.material_id: m for m in db.execute(
         select(Material).where(Material.material_id.in_(mat_ids))).scalars().all()} if mat_ids else {}
@@ -1810,8 +1824,11 @@ def list_requests(db: Session, status: str = None, limit: int = 500, offset: int
     headers = db.execute(select(MaterialRequest).order_by(MaterialRequest.requested_at.desc())
                          .limit(limit).offset(offset)).scalars().all()
     request_ids = [h.request_id for h in headers]
-    all_lines = db.execute(select(MaterialRequestLine)
-                           .where(MaterialRequestLine.request_id.in_(request_ids))).scalars().all() if request_ids else []
+    # request_ids tối đa = `limit` (tới 2000) — sát trần 2100 tham số bind của SQL Server, gần
+    # như không còn chỗ cho tham số khác trong câu lệnh — chia mẻ cho chắc (mirror
+    # common.py::execute_in_chunks, memory item 18/DEPLOY-CONTRACT §2(H)).
+    all_lines = execute_in_chunks(db, lambda chunk: select(MaterialRequestLine).where(
+        MaterialRequestLine.request_id.in_(chunk)), request_ids, scalars=True)
     lines_by_request: dict[str, list] = {}
     for l in all_lines:
         lines_by_request.setdefault(l.request_id, []).append(l)
@@ -3173,8 +3190,10 @@ def delete_free_issue_history(db: Session, workshop: bool, user: User) -> dict:
     ids = {m.movement_id for m in target}
     if ids:
         # Xóa giao dịch "Hoàn lại" trỏ ngược (reversal_of) tới các dòng này trước — tự tham
-        # chiếu nên phải xóa con trước cha.
-        for r in db.execute(select(StockMovement).where(StockMovement.reversal_of.in_(ids))).scalars().all():
+        # chiếu nên phải xóa con trước cha. `ids` tích lũy theo lịch sử xuất tự do (đúng lúc cần
+        # xóa nhiều NHẤT) — chia mẻ tránh vỡ trần 2100 tham số bind (memory item 18).
+        for r in execute_in_chunks(db, lambda chunk: select(StockMovement).where(
+                StockMovement.reversal_of.in_(chunk)), ids, scalars=True):
             db.delete(r)
         db.flush()
         for m in target:
@@ -3240,8 +3259,10 @@ def delete_request_history(db: Session, user: User) -> dict:
             # undo_fulfill_line (tạo StockMovement mode="dieu_chuyen" với reversal_of trỏ về
             # dòng này) -> fulfill lại: giao dịch "Hoàn tác" đó KHÔNG nằm trong `ids` (mode khác
             # "xuat_theo_de_nghi") nhưng vẫn phải xóa trước, nếu không sẽ vỡ FK (audit 2026-10-04).
-            reversal_children = db.execute(
-                select(StockMovement).where(StockMovement.reversal_of.in_(ids))).scalars().all()
+            # ids/all_ids tích lũy theo lịch sử "xuất theo đề nghị" (đúng lúc cần xóa nhiều NHẤT)
+            # — chia mẻ tránh vỡ trần 2100 tham số bind của SQL Server (memory item 18).
+            reversal_children = execute_in_chunks(db, lambda chunk: select(StockMovement).where(
+                StockMovement.reversal_of.in_(chunk)), ids, scalars=True)
             child_ids = {m.movement_id for m in reversal_children}
             for m in reversal_children:
                 db.delete(m)
@@ -3252,8 +3273,8 @@ def delete_request_history(db: Session, user: User) -> dict:
             # nghị") — không dọn trước sẽ vỡ FK genealogy_edge.movement_id -> stock_movement.
             # movement_id trên SQL Server.
             all_ids = ids | child_ids
-            for e in db.execute(
-                    select(GenealogyEdge).where(GenealogyEdge.movement_id.in_(all_ids))).scalars().all():
+            for e in execute_in_chunks(db, lambda chunk: select(GenealogyEdge).where(
+                    GenealogyEdge.movement_id.in_(chunk)), all_ids, scalars=True):
                 db.delete(e)
             db.flush()
             for m in to_delete:
@@ -3323,7 +3344,11 @@ def workshop_usage_history(db: Session, limit: int = 200) -> list[dict]:
     lẻ chắc chắn phủ hết top-limit gộp, nên không cần tải hết cả 3 bảng vào bộ nhớ (gộp net của
     Nấu chỉ áp trong đúng cửa sổ `limit` bản ghi mới nhất đã tải — đủ cho mục đích "hoạt động gần
     đây", không phải sổ cái đầy đủ mọi thời điểm)."""
-    limit = max(1, min(limit or 200, 5000))
+    # Trần hạ từ 5000 xuống 900 (2026-11-03): lot_ids.in_() bên dưới theo đúng `limit` dòng
+    # consume — limit=5000 tự nó đã vượt trần 2100 tham số bind của SQL Server, vỡ ngay 1
+    # request chứ không cần chờ dữ liệu tích lũy (memory item 18/DEPLOY-CONTRACT §2(H)). Mặc
+    # định 200 không đổi (frontend không bao giờ truyền limit khác, xem app.js:7716).
+    limit = max(1, min(limit or 200, 900))
     rows = []
     for u, filter_lot_code in db.execute(
             select(BatchFilterLotMaterialUsage, BatchFilterLot.filter_lot_code)
@@ -3477,10 +3502,15 @@ def create_count(db: Session, location: Optional[str], user: User, note: str = N
     return _count_dict(db, count)
 
 
-def list_counts(db: Session, status: str = None, limit: int = 1000, offset: int = 0) -> list[dict]:
-    """Có phân trang (mặc định 1000, tối đa 5000). Đếm số dòng theo 1 truy vấn GROUP BY duy
-    nhất thay vì 1 truy vấn COUNT riêng cho mỗi phiếu kiểm kê (N+1) như trước."""
-    limit = max(1, min(limit or 1000, 5000))
+def list_counts(db: Session, status: str = None, limit: int = 500, offset: int = 0) -> list[dict]:
+    """Có phân trang (mặc định 500, tối đa 900). Đếm số dòng theo 1 truy vấn GROUP BY duy
+    nhất thay vì 1 truy vấn COUNT riêng cho mỗi phiếu kiểm kê (N+1) như trước.
+
+    Trần hạ từ 5000 xuống 900 (2026-11-03): `StockCountLine.count_id.in_(count_ids)` bên dưới
+    theo đúng `limit` phiếu — limit=5000 tự nó đã vượt trần 2100 tham số bind của SQL Server, vỡ
+    ngay 1 request chứ không cần chờ dữ liệu tích lũy (memory item 18/DEPLOY-CONTRACT §2(H)).
+    Xác nhận không có nơi nào ở frontend truyền limit khác mặc định (app.js:7374)."""
+    limit = max(1, min(limit or 500, 900))
     offset = max(0, offset or 0)
     stmt = select(StockCount).order_by(StockCount.created_at.desc()).limit(limit).offset(offset)
     if status:

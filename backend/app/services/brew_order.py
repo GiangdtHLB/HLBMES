@@ -14,7 +14,7 @@ from sqlalchemy import select, true
 from sqlalchemy.orm import Session
 
 from ..audit import record_audit
-from ..common import WorkOrderState, new_id, utcnow
+from ..common import WorkOrderState, execute_in_chunks, new_id, utcnow
 from ..errors import DomainError, NotFoundError
 from ..models.batches import BatchExecution
 from ..models.brewing import BrewOrder, BrewOrderMaterialLine
@@ -725,8 +725,11 @@ def _batch_summaries_bulk(db: Session, brew_order_ids: list) -> dict:
     if not brew_order_ids:
         return {}
     out = {bid: [] for bid in brew_order_ids}
-    for b in db.execute(select(BatchExecution).where(
-            BatchExecution.order_id.in_(brew_order_ids))).scalars().all():
+    # brew_order_ids = TOÀN BỘ Lệnh nấu (list_orders() không lọc gì) — tích lũy theo thời gian,
+    # chia mẻ tránh vỡ trần 2100 tham số bind của SQL Server khi phình to (mirror
+    # common.py::execute_in_chunks, xem memory item 18/DEPLOY-CONTRACT §2(H)).
+    for b in execute_in_chunks(db, lambda chunk: select(BatchExecution).where(
+            BatchExecution.order_id.in_(chunk)), brew_order_ids, scalars=True):
         out.setdefault(b.order_id, []).append(b)
     return out
 
@@ -739,8 +742,8 @@ def _wo_derived_status_bulk(db: Session, brew_order_ids: list) -> dict:
     if not brew_order_ids:
         return {}
     wos_by_order: dict = {}
-    for w in db.execute(select(WorkOrder).where(
-            WorkOrder.brew_order_id.in_(brew_order_ids))).scalars().all():
+    for w in execute_in_chunks(db, lambda chunk: select(WorkOrder).where(
+            WorkOrder.brew_order_id.in_(chunk)), brew_order_ids, scalars=True):
         wos_by_order.setdefault(w.brew_order_id, []).append(w)
     out = {}
     for bid in brew_order_ids:

@@ -8,7 +8,7 @@ from sqlalchemy import select, true
 from sqlalchemy.orm import Session
 
 from ..audit import record_audit
-from ..common import new_id, utcnow
+from ..common import execute_in_chunks, new_id, utcnow
 from ..errors import DomainError, NotFoundError
 from ..models.batch_pipeline import BatchPackLot, BatchPackLotMaterialUsage
 from ..models.master import Material, MaterialGroup
@@ -123,10 +123,14 @@ def lot_report(db: Session) -> list[dict]:
     lots = db.execute(select(MaterialLot).where(MaterialLot.material_id.in_(material_by_id))
                       .order_by(MaterialLot.created_at.desc())).scalars().all()
     lot_ids = [l.lot_id for l in lots]
-    usages = db.execute(select(BatchPackLotMaterialUsage).where(
-        BatchPackLotMaterialUsage.lot_id.in_(lot_ids))).scalars().all() if lot_ids else []
-    pack_lot_by_id = {p.pack_lot_id: p for p in db.execute(select(BatchPackLot).where(
-        BatchPackLot.pack_lot_id.in_({u.pack_lot_id for u in usages}))).scalars().all()} if usages else {}
+    # lot_ids/pack_lot_id TÍCH LŨY THEO THỜI GIAN (mọi lô bao bì tiêu hao từng nhập, không lọc
+    # ngày) — chia mẻ tránh vỡ trần 2100 tham số bind của SQL Server khi phình to (mirror
+    # common.py::execute_in_chunks, xem memory item 18/DEPLOY-CONTRACT §2(H)).
+    usages = execute_in_chunks(db, lambda chunk: select(BatchPackLotMaterialUsage).where(
+        BatchPackLotMaterialUsage.lot_id.in_(chunk)), lot_ids, scalars=True)
+    pack_lot_by_id = {p.pack_lot_id: p for p in execute_in_chunks(
+        db, lambda chunk: select(BatchPackLot).where(BatchPackLot.pack_lot_id.in_(chunk)),
+        {u.pack_lot_id for u in usages}, scalars=True)} if usages else {}
     usages_by_lot: dict[str, list] = {}
     for u in usages:
         p = pack_lot_by_id.get(u.pack_lot_id)
