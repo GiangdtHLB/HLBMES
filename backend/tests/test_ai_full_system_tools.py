@@ -17,8 +17,10 @@ os.environ.setdefault("MES_LLM_ENABLED", "off")   # buộc dùng engine luật, 
 import pytest
 from fastapi.testclient import TestClient
 
+from app.database import SessionLocal
 from app.main import app
 from app import seed as seed_mod
+from app.services import ai_tools
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -30,6 +32,13 @@ def _seeded():
 @pytest.fixture(scope="module")
 def client():
     return TestClient(app)
+
+
+@pytest.fixture(scope="module")
+def db():
+    s = SessionLocal()
+    yield s
+    s.close()
 
 
 def _login(client, u, p):
@@ -49,6 +58,35 @@ def _ask(client, admin_h, message):
     return r.json()
 
 
+@pytest.fixture(scope="module")
+def sample_batch(client, admin_h):
+    """1 mẻ tối thiểu (có recipe effective + Lệnh nấu) để test các tool cần batch_code thật
+    (get_isa88_status/get_ebr_lock_status/get_batch_status chi tiết) — tách riêng khỏi
+    test_get_dispense_status_reports_fifo_for_real_batch để không phụ thuộc thứ tự chạy test."""
+    bt = client.post("/api/beer-types", headers=admin_h,
+                     json={"code": "BT-AISAMPLE", "name": "Loại AI sample"})
+    recipe = client.post("/api/recipes", headers=admin_h,
+                         json={"code": "CT-AISAMPLE", "name": "Recipe AI sample",
+                              "beer_type_id": bt.json()["beer_type_id"]})
+    prod = client.post("/api/products", headers=admin_h,
+                       json={"code": "PRD-AISAMPLE", "name": "Dich AI sample", "uom": "L",
+                            "beer_type_id": bt.json()["beer_type_id"]})
+    v = client.post(f"/api/recipes/{recipe.json()['recipe_id']}/versions", headers=admin_h,
+                    json={"base_qty": 100, "base_uom": "L", "product_id": prod.json()["product_id"],
+                         "materials": []})
+    version_id = v.json()["version_id"]
+    for target in ("review", "approved", "effective"):
+        t = client.post(f"/api/recipes/versions/{version_id}/transition", headers=admin_h,
+                        json={"target": target})
+        assert t.status_code == 200, t.text
+    oid = client.get("/api/brewing/orders", headers=admin_h).json()[0]["brew_order_id"]
+    b = client.post("/api/batches", headers=admin_h,
+                    json={"order_id": oid, "recipe_version_id": version_id,
+                         "planned_qty": 100, "allow_shortage": True, "batch_code": "77702"})
+    assert b.status_code == 201, b.text
+    return "77702"
+
+
 def test_ai_status_lists_all_16_tools(client, admin_h):
     r = client.get("/api/ai/status", headers=admin_h)
     assert r.status_code == 200, r.text
@@ -56,6 +94,21 @@ def test_ai_status_lists_all_16_tools(client, admin_h):
     for name in ("get_brew_order_status", "get_dispense_status", "get_fermentation_status",
                 "get_filter_status", "get_pack_status", "get_wms_status", "get_recipe_status",
                 "get_capa_status"):
+        assert name in tools, f"{name} chưa có trong manifest tool"
+
+
+def test_ai_status_lists_2026_11_03_expansion_tools(client, admin_h):
+    """14 tool mới (yêu cầu người dùng 2026-11-03: "mở rộng đầy đủ toàn bộ tính năng") — phủ
+    CIP/Bảo trì/OEE chi tiết/Điều độ/Lập lịch/Danh mục/CAPA chi tiết/EBR lock/ISA-88/đề nghị NVL/
+    Bao bì/2 báo cáo còn thiếu."""
+    r = client.get("/api/ai/status", headers=admin_h)
+    assert r.status_code == 200, r.text
+    tools = r.json()["tools"]
+    for name in ("get_cip_status", "get_maintenance_status", "get_oee_detail", "get_wo_status",
+                "get_schedule_conflicts", "get_product_info", "get_material_info",
+                "get_capa_detail", "get_ebr_lock_status", "get_isa88_status",
+                "get_pending_material_requests", "get_packaging_status",
+                "get_filter_production_report", "get_pack_line_report"):
         assert name in tools, f"{name} chưa có trong manifest tool"
 
 
@@ -140,3 +193,51 @@ def test_get_dispense_status_without_batch_code_asks_for_it(client, admin_h):
     res = _ask(client, admin_h, "xem cấp liệu mẻ này")
     assert res["tools_used"] == []
     assert "mã mẻ" in res["answer"].lower()
+
+
+@pytest.mark.parametrize("message,expected_tool", [
+    ("lịch sử cip thiết bị nào gần đây", "get_cip_status"),
+    ("có downtime nào không", "get_maintenance_status"),
+    ("xem lệnh sản xuất đang chạy", "get_wo_status"),
+    ("lập lịch có xung đột lịch không", "get_schedule_conflicts"),
+    ("danh mục dịch bia nào đang có", "get_product_info"),
+    ("capa nào có nguyên nhân gốc chưa xử lý", "get_capa_detail"),
+    ("phiếu đề nghị nào đang chờ", "get_pending_material_requests"),
+    ("tồn kho bao bì vỏ chai còn bao nhiêu", "get_packaging_status"),
+    ("báo cáo hệ lọc tháng này", "get_filter_production_report"),
+    ("xem gantt dây chuyền chiết", "get_pack_line_report"),
+])
+def test_2026_11_03_expansion_tools_route_and_answer_without_error(client, admin_h, message, expected_tool):
+    res = _ask(client, admin_h, message)
+    assert res["tools_used"] == [expected_tool], res
+    assert res.get("answer"), "Phải có câu trả lời, không được rỗng"
+    assert res.get("mode") == "local"
+
+
+def test_get_isa88_status_routes_with_batch_code_in_message(client, admin_h, sample_batch):
+    res = _ask(client, admin_h, f"isa-88 mẻ {sample_batch} tới đâu rồi")
+    assert res["tools_used"] == ["get_isa88_status"], res
+    assert res.get("answer")
+
+
+def test_get_batch_status_single_batch_includes_ebr_detail(db, sample_batch):
+    """get_batch_status(batch_code=...) phải trả thêm order_code/recipe/start_at/end_at/
+    ebr_locked/signatures (enrich 2026-11-03), không chỉ state/quality_status/planned/actual
+    như trước."""
+    data = ai_tools.call_tool(db, "get_batch_status", {"batch_code": sample_batch})
+    assert "error" not in data, data
+    for key in ("order_code", "recipe", "start_at", "end_at", "ebr_locked", "signatures"):
+        assert key in data, f"Thiếu field {key}"
+
+
+def test_new_tools_without_clean_local_keyword_callable_directly(db, sample_batch):
+    """Tool cần tham số bắt buộc khó trích từ câu tự nhiên (get_ebr_lock_status, get_material_info,
+    get_oee_detail) — không có trong engine luật offline, kiểm tra trực tiếp qua call_tool() thay
+    vì qua /api/ai/chat (mirror cách Claude tool-use thật sẽ gọi, với tham số đầy đủ)."""
+    r = ai_tools.call_tool(db, "get_ebr_lock_status", {"scope_type": "batch", "code": sample_batch})
+    assert "error" not in r, r
+    assert "locked" in r and "signatures" in r
+    r = ai_tools.call_tool(db, "get_material_info", {})
+    assert "materials" in r
+    r = ai_tools.call_tool(db, "get_oee_detail", {"line_code": "Line-1 (chai)"})
+    assert "monthly" in r and "quarterly" in r
