@@ -255,3 +255,11 @@ def qc_analysis_count_report(scope_type: str = None, date_from: str = None, date
     return qc_stat_reports.qc_analysis_count(db, scope_type, df, dt)
 
 
+# ---- Nhóm D — BC hiệu suất ----
+@router.get("/monthly-yield-detail")
+def monthly_yield_detail_report(year: int, month: int, db: Session = Depends(get_db),
+                                user: User = Depends(get_current_user)):
+    from ..services import yield_reports
+    return yield_reports.monthly_yield_detail(db, year, month)
+
+

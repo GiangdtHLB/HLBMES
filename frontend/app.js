@@ -11858,7 +11858,8 @@ VIEWS.reports = async function () {
     { key: "pack_by_category", label: "Sản lượng chiết" }, { key: "pack_cumulative", label: "Chiết lũy kế" },
     { key: "brew_volume", label: "Sản lượng nấu" }, { key: "qc_trend", label: "QC theo công đoạn" },
     { key: "fermentation_curve", label: "Đánh giá QTLM theo tank" },
-    { key: "qc_min_max_avg", label: "KCS Min-Max-AVG" }, { key: "qc_analysis_count", label: "KCS đếm số lần phân tích" }];
+    { key: "qc_min_max_avg", label: "KCS Min-Max-AVG" }, { key: "qc_analysis_count", label: "KCS đếm số lần phân tích" },
+    { key: "yield_detail", label: "BC hiệu suất chi tiết" }];
   let body = "";
 
   if (sec === "material") {
@@ -12339,6 +12340,43 @@ VIEWS.reports = async function () {
       <input class="searchbox" data-tbl="t_anlcount" placeholder="Tìm theo tên chỉ tiêu..."/>
       <div id="rac_box" class="muted" style="margin-top:8px">Đang tải…</div>
     </div>`;
+  } else if (sec === "yield_detail") {
+    // Port "BC hiệu suất chi tiết" (phần mềm cũ) — hiệu suất theo công đoạn (nấu/lên men/lọc/
+    // chiết) TRONG 1 THÁNG, gộp từ mọi mẻ — khác /batches/{id}/yield (chỉ xem được 1 mẻ).
+    // Yêu cầu người dùng 2026-11-05.
+    const now3 = new Date();
+    const ydYear = SUB.reports_yd_year || now3.getFullYear();
+    const ydMonth = SUB.reports_yd_month || (now3.getMonth() + 1);
+    const ydRep = await GET(`/reports/monthly-yield-detail?year=${ydYear}&month=${ydMonth}`);
+    const ydSummary = ydRep.summary || [], ydItems = ydRep.items || [];
+    body = `<div class="panel"><h2>BC hiệu suất chi tiết theo tháng</h2>
+      <div class="muted" style="margin-bottom:8px">Hiệu suất (output/input) theo từng công đoạn, gộp mọi mẻ có ghi nhận hiệu suất trong tháng.</div>
+      <div class="row">
+        <div class="field"><label>Năm</label><input id="ryd_year" type="number" value="${ydYear}" style="width:90px"/></div>
+        <div class="field"><label>Tháng</label><input id="ryd_month" type="number" min="1" max="12" value="${ydMonth}" style="width:70px"/></div>
+        <button class="btn" id="ryd_apply" style="align-self:flex-end">Xem</button>
+      </div>
+      <div class="tablewrap"><table>
+        <thead><tr><th>Công đoạn</th><th>Số lượt ghi</th><th>Hiệu suất TB</th><th>Kỳ vọng TB</th><th>Số lượt dưới kỳ vọng</th></tr></thead>
+        <tbody>${ydSummary.map(s => `<tr><td>${esc(s.step_label)}</td><td>${s.n}</td>
+          <td><b>${s.avg_pct != null ? s.avg_pct + "%" : "—"}</b></td>
+          <td class="muted">${s.avg_expected_pct != null ? s.avg_expected_pct + "%" : "—"}</td>
+          <td style="color:${s.below_expected_count ? "var(--red)" : "inherit"}">${s.below_expected_count}</td></tr>`).join("") ||
+          '<tr><td colspan=5 class="muted">Chưa có dữ liệu.</td></tr>'}</tbody>
+      </table></div>
+      <h3 style="margin-top:12px">Chi tiết theo mẻ</h3>
+      <input class="searchbox" data-tbl="t_yielddetail" placeholder="Tìm theo mã mẻ, công đoạn..."/>
+      <div class="tablewrap"><table id="t_yielddetail">
+        <thead><tr><th>Mẻ</th><th>Công đoạn</th><th>Input</th><th>Output</th><th>ĐVT</th><th>Hiệu suất</th><th>Kỳ vọng</th><th>Lúc ghi</th></tr></thead>
+        <tbody>${ydItems.map(i => `<tr>
+          <td><code class="k">${esc(i.batch_code || "—")}</code></td><td>${esc(i.step_label)}</td>
+          <td>${i.input_qty}</td><td>${i.output_qty}</td><td class="muted">${esc(i.uom)}</td>
+          <td style="color:${i.below_expected ? "var(--red)" : "inherit"}">${i.step_pct}%</td>
+          <td class="muted">${i.expected_pct != null ? i.expected_pct + "%" : "—"}</td>
+          <td class="muted">${fmt(i.recorded_at)}</td></tr>`).join("") ||
+          '<tr><td colspan=8 class="muted">Chưa có dữ liệu.</td></tr>'}</tbody>
+      </table></div>
+    </div>`;
   }
 
   $("view-reports").innerHTML = subnav("reports", sections, sec) + body;
@@ -12556,6 +12594,14 @@ VIEWS.reports = async function () {
       loadAnalysisCount();
     };
     loadAnalysisCount();
+  }
+  if (sec === "yield_detail") {
+    wirePaginate("t_yielddetail", 20);
+    $("ryd_apply").onclick = () => {
+      SUB.reports_yd_year = parseInt($("ryd_year").value);
+      SUB.reports_yd_month = parseInt($("ryd_month").value);
+      render("reports");
+    };
   }
 };
 
