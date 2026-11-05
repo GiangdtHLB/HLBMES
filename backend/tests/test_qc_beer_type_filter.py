@@ -21,8 +21,10 @@ import pytest
 from app.main import app  # noqa: F401
 from app import seed as seed_mod
 from app.database import SessionLocal
-from app.common import new_id
+from app.common import IN_CHUNK, new_id
+from app.models.batch_pipeline import BatchFilterLot, BatchPackLot
 from app.models.quality import QualityResult
+from app.services import qc_catalog
 from fastapi.testclient import TestClient
 
 PARAM = "BTFILTER Độ cồn"
@@ -132,3 +134,35 @@ def test_spc_without_beer_type_filter_sees_all_including_nvl(client, admin_h, tw
     r = client.get("/api/qc/spc", headers=admin_h, params={"parameter": PARAM})
     assert r.status_code == 200, r.text
     assert r.json()["n"] == 3  # 2 mẻ + 1 NVL — không lọc Loại bia thì thấy hết
+
+
+def test_scope_ids_by_beer_type_chunks_in_clause_past_in_chunk_lots(client, admin_h, two_beer_type_batches):
+    """Audit prod 2026-11 phát hiện qc_catalog.scope_ids_by_beer_type() đưa TOÀN BỘ filter_lot_ids
+    của 1 Loại bia (không giới hạn, không lọc ngày) thẳng vào .in_() khi tra batch_pack_lot — Loại
+    bia lớn nhất đã 256 lô lọc, tăng ~250/tháng, sẽ vượt trần 2100 tham số SQL Server giữa 2027,
+    vỡ báo cáo "QC theo công đoạn" (SQLite dev không bao giờ lộ lỗi này). Dựng trực tiếp qua ORM
+    (bỏ qua lifecycle đầy đủ — hàm chỉ đọc thẳng BatchFilterLot/BatchPackLot, không quan tâm
+    on_hand/trạng thái, mirror test_qc_stat_reports.py) > IN_CHUNK (900) lô lọc để xác nhận
+    execute_in_chunks() đã thay .in_() trần, không chỉ xử lý đúng 1 mẻ đầu rồi bỏ sót phần còn lại
+    (mirror test_dispense_order_rule_chunking.py)."""
+    beer_type_id = two_beer_type_batches["beer_type_a"]
+    count = IN_CHUNK + 50   # > 1 mẻ, không chia hết IN_CHUNK để lộ lỗi chia dư nếu có
+    db = SessionLocal()
+    try:
+        for i in range(count):
+            fl = BatchFilterLot(filter_lot_id=new_id(), filter_lot_code=f"BTSCALE-{i}",
+                                filter_lot_year=2031, beer_type_id=beer_type_id)
+            db.add(fl)
+            db.add(BatchPackLot(pack_lot_id=new_id(), pack_lot_code=f"BTSCALE-PKG-{i}",
+                                pack_lot_year=2031, filter_lot_id=fl.filter_lot_id, qty=100.0))
+        db.commit()
+    finally:
+        db.close()
+
+    db2 = SessionLocal()
+    try:
+        scopes = qc_catalog.scope_ids_by_beer_type(db2, beer_type_id)
+    finally:
+        db2.close()
+    assert len(scopes["batch_filter_lot"]) == count
+    assert len(scopes["batch_pack_lot"]) == count   # phải thấy ĐỦ, không chỉ 1 mẻ IN_CHUNK đầu
