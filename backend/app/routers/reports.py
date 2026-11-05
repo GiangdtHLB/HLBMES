@@ -263,3 +263,10 @@ def monthly_yield_detail_report(year: int, month: int, db: Session = Depends(get
     return yield_reports.monthly_yield_detail(db, year, month)
 
 
+@router.get("/overall-yield-and-norms")
+def overall_yield_and_norms_report(year: int, month: int, db: Session = Depends(get_db),
+                                   user: User = Depends(get_current_user)):
+    from ..services import yield_reports
+    return yield_reports.overall_yield_and_norms_report(db, year, month)
+
+

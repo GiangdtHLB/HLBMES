@@ -11859,7 +11859,8 @@ VIEWS.reports = async function () {
     { key: "brew_volume", label: "Sản lượng nấu" }, { key: "qc_trend", label: "QC theo công đoạn" },
     { key: "fermentation_curve", label: "Đánh giá QTLM theo tank" },
     { key: "qc_min_max_avg", label: "KCS Min-Max-AVG" }, { key: "qc_analysis_count", label: "KCS đếm số lần phân tích" },
-    { key: "yield_detail", label: "BC hiệu suất chi tiết" }];
+    { key: "yield_detail", label: "BC hiệu suất chi tiết" },
+    { key: "overall_yield_norms", label: "BC hiệu suất tổng + định mức" }];
   let body = "";
 
   if (sec === "material") {
@@ -12377,6 +12378,38 @@ VIEWS.reports = async function () {
           '<tr><td colspan=8 class="muted">Chưa có dữ liệu.</td></tr>'}</tbody>
       </table></div>
     </div>`;
+  } else if (sec === "overall_yield_norms") {
+    // Port "BC hiệu suất tổng + định mức dịch + định mức năng lượng" (phần mềm cũ) — yêu cầu
+    // người dùng 2026-11-05. Định mức khai theo TỪNG dịch bia (Danh mục ▸ Dịch bia), nhưng năng
+    // lượng chỉ đo được TOÀN NHÀ MÁY (không tách theo dịch bia) nên phần năng lượng so 1 số bình
+    // quân gia quyền theo sản lượng — xem docstring services/yield_reports.py::overall_yield_and_norms_report.
+    const now4 = new Date();
+    const oyYear = SUB.reports_oy_year || now4.getFullYear();
+    const oyMonth = SUB.reports_oy_month || (now4.getMonth() + 1);
+    const oyRep = await GET(`/reports/overall-yield-and-norms?year=${oyYear}&month=${oyMonth}`);
+    const oyOverall = oyRep.overall_yield, oyVdich = oyRep.v_dich_by_product || [], oyEnergy = oyRep.energy;
+    body = `<div class="panel"><h2>BC hiệu suất tổng + định mức dịch + định mức năng lượng</h2>
+      <div class="row">
+        <div class="field"><label>Năm</label><input id="roy_year" type="number" value="${oyYear}" style="width:90px"/></div>
+        <div class="field"><label>Tháng</label><input id="roy_month" type="number" min="1" max="12" value="${oyMonth}" style="width:70px"/></div>
+        <button class="btn" id="roy_apply" style="align-self:flex-end">Xem</button>
+      </div>
+      <h3 style="margin-top:12px">Hiệu suất tổng (toàn nhà máy)</h3>
+      <div class="muted" style="margin-bottom:6px">V cấp chiết đưa vào: <b>${oyOverall.input_hl.toLocaleString("vi-VN")} hl</b> · Chiết ra: <b>${oyOverall.output_l.toLocaleString("vi-VN")} lít</b> · Hiệu suất thu hồi: <b>${oyOverall.yield_pct != null ? oyOverall.yield_pct + "%" : "—"}</b></div>
+      <h3 style="margin-top:12px">Định mức V dịch theo dịch bia</h3>
+      <div class="tablewrap"><table>
+        <thead><tr><th>Dịch bia</th><th>Số mẻ</th><th>V dịch TB/mẻ (hl)</th><th>Định mức (hl/mẻ)</th><th>% so định mức</th></tr></thead>
+        <tbody>${oyVdich.map(i => `<tr><td>${esc(i.product_name)}</td><td>${i.batch_count}</td>
+          <td>${i.avg_v_dich_per_batch_hl ?? "—"}</td><td class="muted">${i.v_dich_norm_hl ?? "—"}</td>
+          <td style="color:${i.pct_of_norm == null ? "var(--muted)" : i.pct_of_norm < 95 ? "var(--red)" : "var(--green)"}">${i.pct_of_norm != null ? i.pct_of_norm + "%" : "—"}</td></tr>`).join("") ||
+          '<tr><td colspan=5 class="muted">Chưa có dữ liệu.</td></tr>'}</tbody>
+      </table></div>
+      <h3 style="margin-top:12px">Định mức năng lượng (toàn nhà máy)</h3>
+      ${oyEnergy.error ? `<div class="muted">Không lấy được dữ liệu điện tiêu thụ thực tế (CSDL ngoài): ${esc(oyEnergy.error)}. Định mức bình quân gia quyền theo dịch bia: <b>${oyEnergy.norm_kwh_per_hl ?? "—"}</b> kWh/hl.</div>` :
+        `<div class="muted">Điện tiêu thụ thực tế: <b>${oyEnergy.actual_kwh?.toLocaleString("vi-VN") ?? "—"}</b> kWh
+          · Thực tế: <b>${oyEnergy.actual_kwh_per_hl ?? "—"}</b> kWh/hl · Định mức (gia quyền theo sản lượng): <b>${oyEnergy.norm_kwh_per_hl ?? "—"}</b> kWh/hl
+          · % so định mức: <b style="color:${oyEnergy.pct_of_norm == null ? "inherit" : oyEnergy.pct_of_norm > 105 ? "var(--red)" : "var(--green)"}">${oyEnergy.pct_of_norm != null ? oyEnergy.pct_of_norm + "%" : "—"}</b></div>`}
+    </div>`;
   }
 
   $("view-reports").innerHTML = subnav("reports", sections, sec) + body;
@@ -12600,6 +12633,13 @@ VIEWS.reports = async function () {
     $("ryd_apply").onclick = () => {
       SUB.reports_yd_year = parseInt($("ryd_year").value);
       SUB.reports_yd_month = parseInt($("ryd_month").value);
+      render("reports");
+    };
+  }
+  if (sec === "overall_yield_norms") {
+    $("roy_apply").onclick = () => {
+      SUB.reports_oy_year = parseInt($("roy_year").value);
+      SUB.reports_oy_month = parseInt($("roy_month").value);
       render("reports");
     };
   }
@@ -12834,15 +12874,21 @@ VIEWS.master = async function () {
           <div class="field"><label>Số ngày lên men</label><input id="pr_ferment_days" type="number" step="any" placeholder="VD: 20 hoặc 7.5" style="width:120px"/></div>
           <div class="field"><label>Loại bia (tuỳ chọn)</label><select id="pr_beertype"><option value="">(chưa gán)</option>${beerTypes.map(bt => `<option value="${bt.beer_type_id}">${esc(bt.code)} — ${esc(bt.name)}</option>`).join("")}</select></div>
         </div>
+        <div class="row">
+          <div class="field"><label>Định mức V dịch (hl/mẻ)</label><input id="pr_vdich_norm" type="number" step="any" placeholder="(tuỳ chọn)" style="width:140px"/></div>
+          <div class="field"><label>Định mức năng lượng (kWh/hl TP)</label><input id="pr_energy_norm" type="number" step="any" placeholder="(tuỳ chọn)" style="width:160px"/></div>
+        </div>
         <div class="field"><label>Mô tả</label><input id="pr_desc" placeholder="(tuỳ chọn)" style="width:100%"/></div>
         <button class="btn" id="pr_add" style="margin-top:10px">+ Tạo dịch bia</button>` : ""}
         <input class="searchbox" data-tbl="t_products" placeholder="Tìm mã/tên dịch bia..." style="margin-top:10px"/>
         <div class="tablewrap" style="margin-top:6px"><table id="t_products">
-          <thead><tr><th>Mã</th><th>Tên</th><th>ĐVT</th><th>Số ngày lên men</th><th>Loại bia</th><th>Mô tả</th>${canManage ? "<th></th>" : ""}</tr></thead>
+          <thead><tr><th>Mã</th><th>Tên</th><th>ĐVT</th><th>Số ngày lên men</th><th>Loại bia</th><th>Định mức dịch (hl/mẻ)</th><th>Định mức NL (kWh/hl)</th><th>Mô tả</th>${canManage ? "<th></th>" : ""}</tr></thead>
           <tbody>${products.map(p => { const bt = beerTypes.find(x => x.beer_type_id === p.beer_type_id); return `<tr>
             <td><code class="k">${esc(p.code)}</code></td><td>${esc(p.name)}</td><td>${esc(p.uom)}</td>
             <td class="muted">${p.ferment_days_std ?? "—"}</td>
             <td class="muted">${bt ? esc(bt.name) : "—"}</td>
+            <td class="muted">${p.v_dich_norm_hl ?? "—"}</td>
+            <td class="muted">${p.energy_norm_kwh_per_hl ?? "—"}</td>
             <td class="muted">${esc(p.description || "—")}</td>
             ${canManage ? `<td style="white-space:nowrap">
               <button class="btn sm sec" data-ep="${esc(p.product_id)}">Sửa</button>
@@ -13425,7 +13471,9 @@ VIEWS.master = async function () {
       await POST("/products", { code: $("pr_code").value.trim(), name: $("pr_name").value.trim(),
         uom: $("pr_uom").value.trim() || "L", description: $("pr_desc").value.trim() || null,
         ferment_days_std: $("pr_ferment_days").value === "" ? null : parseFloat($("pr_ferment_days").value),
-        beer_type_id: $("pr_beertype").value || null });
+        beer_type_id: $("pr_beertype").value || null,
+        v_dich_norm_hl: $("pr_vdich_norm").value === "" ? null : parseFloat($("pr_vdich_norm").value),
+        energy_norm_kwh_per_hl: $("pr_energy_norm").value === "" ? null : parseFloat($("pr_energy_norm").value) });
       toast("Đã tạo dịch bia"); render("master");
     });
     if ($("bt_add")) $("bt_add").onclick = () => guard(async () => {
@@ -13821,13 +13869,17 @@ VIEWS.master = async function () {
         <div class="field" style="margin-top:8px"><label>ĐVT</label><input id="ep_uom" value="${esc(p.uom)}"/></div>
         <div class="field" style="margin-top:8px"><label>Số ngày lên men</label><input id="ep_ferment_days" type="number" step="any" value="${p.ferment_days_std ?? ""}"/></div>
         <div class="field" style="margin-top:8px"><label>Loại bia</label><select id="ep_beertype"><option value="">(chưa gán)</option>${beerTypes.map(bt => `<option value="${bt.beer_type_id}" ${bt.beer_type_id === p.beer_type_id ? "selected" : ""}>${esc(bt.code)} — ${esc(bt.name)}</option>`).join("")}</select></div>
+        <div class="field" style="margin-top:8px"><label>Định mức V dịch (hl/mẻ)</label><input id="ep_vdich_norm" type="number" step="any" value="${p.v_dich_norm_hl ?? ""}"/></div>
+        <div class="field" style="margin-top:8px"><label>Định mức năng lượng (kWh/hl TP)</label><input id="ep_energy_norm" type="number" step="any" value="${p.energy_norm_kwh_per_hl ?? ""}"/></div>
         <div class="field" style="margin-top:8px"><label>Mô tả</label><input id="ep_desc" value="${esc(p.description || "")}"/></div>
         <button class="btn" id="ep_save" style="margin-top:12px">Lưu</button>`);
       $("ep_save").onclick = () => guard(async () => {
         await PUT(`/products/${p.product_id}`, { code: $("ep_code").value.trim(), name: $("ep_name").value.trim(),
           uom: $("ep_uom").value.trim(), description: $("ep_desc").value.trim() || null,
           ferment_days_std: $("ep_ferment_days").value === "" ? null : parseFloat($("ep_ferment_days").value),
-          beer_type_id: $("ep_beertype").value || null });
+          beer_type_id: $("ep_beertype").value || null,
+          v_dich_norm_hl: $("ep_vdich_norm").value === "" ? null : parseFloat($("ep_vdich_norm").value),
+          energy_norm_kwh_per_hl: $("ep_energy_norm").value === "" ? null : parseFloat($("ep_energy_norm").value) });
         closeModal(); toast("Đã cập nhật"); render("master");
       });
     });

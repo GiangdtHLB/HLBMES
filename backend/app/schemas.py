@@ -217,6 +217,8 @@ class ProductIn(BaseModel):
     description: Optional[str] = None
     ferment_days_std: Optional[float] = None   # số ngày lên men chuẩn — tính ngày sẵn sàng chiết (cho phép số thực)
     beer_type_id: Optional[str] = None   # Loại bia (thương hiệu) — dùng để tra chỉ tiêu Lọc/Chiết
+    v_dich_norm_hl: Optional[float] = None          # Định mức V dịch chuẩn/mẻ (hl)
+    energy_norm_kwh_per_hl: Optional[float] = None  # Định mức năng lượng chuẩn (kWh/hl thành phẩm)
 
 
 class ProductOut(ORMModel):
@@ -227,6 +229,8 @@ class ProductOut(ORMModel):
     description: Optional[str] = None
     ferment_days_std: Optional[float] = None
     beer_type_id: Optional[str] = None
+    v_dich_norm_hl: Optional[float] = None
+    energy_norm_kwh_per_hl: Optional[float] = None
 
 
 class FinishedProductIn(BaseModel):
