@@ -60,6 +60,40 @@ def test_spc_control_chart(client):
     assert spc["out_of_control"] >= 1
 
 
+def test_spc_date_range_filter(client):
+    """date_from/date_to (thêm cho báo cáo "QC theo công đoạn" Nhóm B, yêu cầu người dùng
+    2026-11-05) phải lọc đúng theo recorded_at — không ảnh hưởng khi không truyền (mặc định
+    toàn bộ lịch sử, mirror test_spc_control_chart)."""
+    h = _login(client, "quandoc", "123456")
+    full = client.get("/api/qc/spc", params={"parameter": "Độ đường (°P)"}, headers=h).json()
+    assert full["n"] >= 20
+
+    future = client.get("/api/qc/spc", headers=h,
+                        params={"parameter": "Độ đường (°P)", "date_from": "2099-01-01"}).json()
+    assert future["n"] == 0
+
+    wide = client.get("/api/qc/spc", headers=h, params={
+        "parameter": "Độ đường (°P)", "date_from": "2000-01-01", "date_to": "2099-12-31"}).json()
+    assert wide["n"] == full["n"]
+
+
+def test_spc_survives_duplicate_qc_parameter_name(client):
+    """spc_chart tra QCParameter theo `name` để lấy USL/LSL hiển thị — `name` KHÔNG unique
+    (nhiều stage dùng chung tên, VD "pH"), chỉ `code` unique. Trước đây dùng
+    .scalar_one_or_none() -> crash 500 MultipleResultsFound ngay khi danh mục có 2 chỉ tiêu
+    trùng tên (phát hiện khi build báo cáo "QC theo công đoạn" Nhóm B, 2026-11-05)."""
+    admin_h = _login(client, "admin", "AdminTest123")
+    dup_name = "Chỉ tiêu trùng tên SPC test"
+    for code in ("SPCDUP01", "SPCDUP02"):
+        r = client.post("/api/qc/parameters", headers=admin_h,
+                        json={"code": code, "name": dup_name, "usl": 10, "lsl": 1})
+        assert r.status_code == 201, r.text
+
+    spc = client.get("/api/qc/spc", params={"parameter": dup_name}, headers=admin_h)
+    assert spc.status_code == 200, spc.text
+    assert spc.json()["n"] == 0  # chưa có QualityResult nào cho chỉ tiêu test này — chỉ cần không crash
+
+
 def test_capa_and_coa(client):
     h = _login(client, "quandoc", "123456")
     capas = client.get("/api/qc/capa", headers=h).json()

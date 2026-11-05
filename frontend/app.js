@@ -83,6 +83,17 @@ const badge = (s) => `<span class="badge ${s}">${s}</span>`;
 // class dùng để tô màu mượn từ bộ badge có sẵn (mirror cách module Nấu-Lọc-Chiết cũ làm ở
 // routers/brewing.py::FILTER_STATUS + frontend stBadge, không tự thêm class CSS mới).
 const TANK_BADGE_CLASS = { planned: "planned", dang_nau: "pending", len_men: "running", cho_loc: "in_progress", loc_1_phan: "due", da_loc_het: "done", am: "critical" };
+// Công đoạn -> scope_type của QualityResult (mirror qc_catalog.py — xem services/production_reports.py
+// để biết chi tiết từng công đoạn), dùng cho báo cáo "QC theo công đoạn" (Nhóm B).
+const QC_STAGE_SCOPE = [
+  { scope: "", label: "— Tất cả công đoạn —" },
+  { scope: "batch", label: "Dịch nha (Nấu)" },
+  { scope: "batch_tank", label: "Lên men" },
+  { scope: "batch_filter_lot", label: "Sau lọc" },
+  { scope: "batch_pack_lot", label: "Thành phẩm" },
+  { scope: "lot", label: "NVL" },
+  { scope: "work_order", label: "Nước" },
+];
 // tank_code (BatchTank) là mã LÔ tự sinh theo Lệnh SX/điều độ (VD "01"/"02"/"4") — KHÔNG nói
 // lên tank vật lý nào, chỉ tank_lm (tra từ Danh mục "Tank lên men") mới làm được việc đó. Mọi
 // nơi hiển thị ĐỘC LẬP 1 tank (không có cột tank_lm riêng đứng cạnh) phải dùng hàm này thay vì
@@ -11845,7 +11856,8 @@ VIEWS.reports = async function () {
     { key: "filter", label: "Hệ lọc" }, { key: "pack_line", label: "Dây chuyền chiết" },
     { key: "brewhouse_steps", label: "Log hệ nấu" }, { key: "brewhouse_cycle", label: "Thời gian cả mẻ nấu" },
     { key: "pack_by_category", label: "Sản lượng chiết" }, { key: "pack_cumulative", label: "Chiết lũy kế" },
-    { key: "brew_volume", label: "Sản lượng nấu" }];
+    { key: "brew_volume", label: "Sản lượng nấu" }, { key: "qc_trend", label: "QC theo công đoạn" },
+    { key: "fermentation_curve", label: "Đánh giá QTLM theo tank" }];
   let body = "";
 
   if (sec === "material") {
@@ -12244,6 +12256,50 @@ VIEWS.reports = async function () {
           '<tr><td colspan=3 class="muted">—</td></tr>'}</tbody>
       </table></div>
     </div>`;
+  } else if (sec === "qc_trend") {
+    // Port từ các báo cáo "histogram/SPC theo Nhóm chỉ tiêu" của phần mềm cũ (6 công đoạn:
+    // dịch nha/lên men/sau lọc/thành phẩm/NVL/nước) — thực chất là 1 biểu đồ xu hướng/kiểm soát
+    // (SPC) theo thời gian cho 1 chỉ tiêu, lọc theo công đoạn (scope_type) + khoảng thời gian —
+    // tái dùng /qc/spc + controlChart() (đã có sẵn ở Chất lượng ▸ QC Lab, chỉ thêm bộ lọc công
+    // đoạn + khoảng ngày chưa có ở đó). Yêu cầu người dùng 2026-11-05.
+    const qcParams = await GET("/qc/parameters").catch(() => []);
+    const qcStage = SUB.reports_qc_stage || "";
+    const qcParam = SUB.reports_qc_param || (qcParams[0] ? qcParams[0].name : "");
+    const qcFrom = SUB.reports_qc_from || "";
+    const qcTo = SUB.reports_qc_to || "";
+    body = `<div class="panel"><h2>QC theo công đoạn — biểu đồ xu hướng/kiểm soát (SPC)</h2>
+      <div class="muted" style="margin-bottom:8px">Chọn công đoạn + chỉ tiêu (và khoảng ngày nếu muốn thu hẹp) để xem biểu đồ giá trị theo thời gian kèm UCL/LCL/USL/LSL.</div>
+      <div class="row">
+        <div class="field"><label>Công đoạn</label><select id="rqc_stage">
+          ${QC_STAGE_SCOPE.map(s => `<option value="${s.scope}" ${s.scope === qcStage ? "selected" : ""}>${esc(s.label)}</option>`).join("")}
+        </select></div>
+        <div class="field"><label>Chỉ tiêu</label><select id="rqc_param">
+          ${qcParams.map(p => `<option value="${esc(p.name)}" ${p.name === qcParam ? "selected" : ""}>${esc(p.name)}</option>`).join("")}
+        </select></div>
+        <div class="field"><label>Từ ngày</label><input id="rqc_from" type="date" value="${qcFrom}"/></div>
+        <div class="field"><label>Đến ngày</label><input id="rqc_to" type="date" value="${qcTo}"/></div>
+        <button class="btn" id="rqc_apply" style="align-self:flex-end">Xem</button>
+      </div>
+      <div id="rqc_box" class="muted" style="margin-top:8px">Đang tải…</div>
+    </div>`;
+  } else if (sec === "fermentation_curve") {
+    // Port "Đánh giá QTLM theo tank" (QTLM = Quá trình lên men, phần mềm cũ) — biểu đồ theo dõi
+    // lên men (nhiệt độ/°P/áp suất/mật độ tế bào theo ngày) đã có sẵn trong modal chi tiết Lô lên
+    // men (showBatchTank, _flChartHtml) nhưng chỉ xem được khi mở TỪNG tank — mục này cho chọn
+    // thẳng 1 tank bất kỳ (kể cả tank cũ đã lọc hết) để xem lại, không phải lục trong "Mẻ sản
+    // xuất". Yêu cầu người dùng 2026-11-05.
+    const fcTanks = await GET("/batch-tanks").catch(() => []);
+    const fcTankId = SUB.reports_fc_tank || (fcTanks[0] ? fcTanks[0].tank_id : "");
+    body = `<div class="panel"><h2>Đánh giá QTLM theo tank</h2>
+      <div class="muted" style="margin-bottom:8px">Biểu đồ theo dõi lên men theo ngày (nhiệt độ, °P, áp suất, mật độ tế bào) của 1 Lô lên men (tank).</div>
+      <div class="row">
+        <div class="field" style="flex:1"><label>Lô lên men (tank)</label><select id="rfc_tank">
+          ${fcTanks.map(t => `<option value="${esc(t.tank_id)}" ${t.tank_id === fcTankId ? "selected" : ""}>${esc(t.tank_code)}${t.tank_lm ? " — " + esc(t.tank_lm) : ""}</option>`).join("")}
+        </select></div>
+        <button class="btn" id="rfc_apply" style="align-self:flex-end">Xem</button>
+      </div>
+      <div id="rfc_box" class="muted" style="margin-top:8px">${fcTanks.length ? "Đang tải…" : "Chưa có Lô lên men nào."}</div>
+    </div>`;
   }
 
   $("view-reports").innerHTML = subnav("reports", sections, sec) + body;
@@ -12349,6 +12405,53 @@ VIEWS.reports = async function () {
       SUB.reports_bv_month = parseInt($("rbv_month").value);
       render("reports");
     };
+  }
+  if (sec === "qc_trend") {
+    async function loadQcTrend() {
+      const stage = $("rqc_stage").value, param = $("rqc_param").value;
+      const from = $("rqc_from").value, to = $("rqc_to").value;
+      if (!param) { $("rqc_box").innerHTML = '<div class="muted">Chưa có chỉ tiêu nào trong danh mục.</div>'; return; }
+      $("rqc_box").innerHTML = "Đang tải…";
+      try {
+        const qs = new URLSearchParams({ parameter: param });
+        if (stage) qs.set("scope_type", stage);
+        if (from) qs.set("date_from", from);
+        if (to) qs.set("date_to", to);
+        const spc = await GET(`/qc/spc?${qs.toString()}`);
+        const cap = (spc.cp != null) ? `Cp <b>${spc.cp}</b> · Cpk <b>${spc.cpk}</b>` : "—";
+        $("rqc_box").innerHTML = window.controlChart(spc) +
+          `<div style="margin-top:6px">n=${spc.n} · Mean ${spc.mean} · σ ${spc.sigma} · UCL ${spc.ucl} · LCL ${spc.lcl} · ${cap}
+            ${spc.n ? `· ${spc.in_control ? '<span class="badge available">Trong kiểm soát</span>' : `<span class="badge critical">${spc.out_of_control} điểm vi phạm</span>`}` : ""}</div>`;
+      } catch (e) { $("rqc_box").innerHTML = `<div class="muted">Lỗi: ${esc(e.message)}</div>`; }
+    }
+    $("rqc_apply").onclick = () => {
+      SUB.reports_qc_stage = $("rqc_stage").value;
+      SUB.reports_qc_param = $("rqc_param").value;
+      SUB.reports_qc_from = $("rqc_from").value;
+      SUB.reports_qc_to = $("rqc_to").value;
+      loadQcTrend();
+    };
+    loadQcTrend();
+  }
+  if (sec === "fermentation_curve") {
+    async function loadFermCurve() {
+      const tankId = $("rfc_tank").value;
+      if (!tankId) return;
+      $("rfc_box").innerHTML = "Đang tải…";
+      try {
+        const [t, log] = await Promise.all([GET(`/batch-tanks/${tankId}`), GET(`/batch-tanks/${tankId}/process-log`)]);
+        $("rfc_box").innerHTML = `
+          <dl class="detail">
+            <dt>Trạng thái</dt><dd>${statusBadge(TANK_BADGE_CLASS[t.status], t.status_label)}</dd>
+            <dt>Tồn/Tổng</dt><dd>${t.on_hand} / ${t.volume_hl} hl</dd>
+            <dt>Ngày bắt đầu vào dịch</dt><dd>${t.vao_dich_start ? fmt(t.vao_dich_start) : "—"}</dd>
+            <dt>Ngày kết thúc vào dịch</dt><dd>${t.vao_dich_end ? fmt(t.vao_dich_end) : '<span class="muted">chưa xong</span>'}</dd>
+          </dl>
+          ${_flChartHtml(log.readings, { pressure: true })}`;
+      } catch (e) { $("rfc_box").innerHTML = `<div class="muted">Lỗi: ${esc(e.message)}</div>`; }
+    }
+    $("rfc_apply").onclick = () => { SUB.reports_fc_tank = $("rfc_tank").value; loadFermCurve(); };
+    if ($("rfc_tank").value) loadFermCurve();
   }
 };
 

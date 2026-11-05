@@ -64,6 +64,7 @@
       ${hline(spc.mean, "#2ecc71", false, "CL")}
       <polyline points="${poly}" fill="none" stroke="#3498db" stroke-width="1.5"/>${dots}</svg>`;
   }
+  window.controlChart = controlChart;   // dùng lại ở VIEWS.reports (app.js, ngoài IIFE này) cho báo cáo QC theo công đoạn
 
   // ======================================================================
   // #3 — CÔNG THỨC NÂNG CAO (yield + change-control + alternates)
