@@ -207,10 +207,11 @@ def pack_line_gantt_report(days: int = 3650, date_from: str = None, date_to: str
 # 2026-11-05: "xem mục báo cáo sản xuất của phần mềm cũ, tạo cho tôi các báo cáo như vậy, bỏ qua
 # hồ sơ điện tử". Nhóm A — BC sản lượng ----
 @router.get("/pack-output-by-category")
-def pack_output_by_category_report(year: int, month: int, db: Session = Depends(get_db),
+def pack_output_by_category_report(year: int, month: int, group_by: str = "category",
+                                   db: Session = Depends(get_db),
                                    user: User = Depends(get_current_user)):
     from ..services import production_reports
-    return production_reports.pack_output_by_category(db, year, month)
+    return production_reports.pack_output_by_category(db, year, month, group_by)
 
 
 @router.get("/pack-output-cumulative")

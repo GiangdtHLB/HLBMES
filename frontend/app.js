@@ -12177,25 +12177,38 @@ VIEWS.reports = async function () {
     </div>`;
   } else if (sec === "pack_by_category") {
     // Port từ phần mềm QLSX cũ "BC sản lượng chiết" — yêu cầu người dùng 2026-11-05. Nhóm theo
-    // Loại bia (category), kèm % hiệu suất thu hồi tính theo CẢ VÒNG ĐỜI lô lọc (xem docstring
+    // Loại bia (category) hoặc theo từng SKU (group_by="sku", yêu cầu người dùng 2026-11-05: "báo
+    // cáo theo từng SKU"), kèm % hiệu suất thu hồi tính theo CẢ VÒNG ĐỜI lô lọc (xem docstring
     // services/production_reports.py::pack_output_by_category — chỉ tính lô lọc ĐÃ CHIẾT HẾT,
-    // xếp vào tháng của lượt tách cuối cùng).
+    // xếp vào tháng của lượt tách cuối cùng; theo SKU thì input được PHÂN BỔ theo tỷ trọng output
+    // vì 1 lô lọc có thể tách ra nhiều SKU — xem docstring, yield% theo SKU là ước tính).
     const now1 = new Date();
     const pcYear = SUB.reports_pc_year || now1.getFullYear();
     const pcMonth = SUB.reports_pc_month || (now1.getMonth() + 1);
-    const pcRep = await GET(`/reports/pack-output-by-category?year=${pcYear}&month=${pcMonth}`);
+    const pcGroupBy = SUB.reports_pc_group_by || "category";
+    const pcRep = await GET(`/reports/pack-output-by-category?year=${pcYear}&month=${pcMonth}&group_by=${pcGroupBy}`);
     const pcItems = pcRep.items || [];
+    const pcBySku = pcGroupBy === "sku";
     body = `<div class="panel"><h2>BC sản lượng chiết theo tháng</h2>
-      <div class="muted" style="margin-bottom:8px">Nhóm theo Loại bia. Hiệu suất thu hồi % tính theo CẢ lô lọc (V cấp chiết đưa vào ↔ tổng lít chiết ra), chỉ tính lô lọc ĐÃ CHIẾT HẾT trong tháng — lô còn dở sẽ hiện vào tháng khi nó chiết xong.</div>
+      <div class="muted" style="margin-bottom:8px">${pcBySku
+        ? "Nhóm theo từng SKU (sản phẩm đóng gói). 1 lô lọc có thể tách ra nhiều SKU — V cấp chiết được phân bổ theo tỷ trọng sản lượng, nên hiệu suất thu hồi % theo SKU là ƯỚC TÍNH."
+        : "Nhóm theo Loại bia."} Chỉ tính lô lọc ĐÃ CHIẾT HẾT trong tháng — lô còn dở sẽ hiện vào tháng khi nó chiết xong.</div>
       <div class="row">
         <div class="field"><label>Năm</label><input id="rpc_year" type="number" value="${pcYear}" style="width:90px"/></div>
         <div class="field"><label>Tháng</label><input id="rpc_month" type="number" min="1" max="12" value="${pcMonth}" style="width:70px"/></div>
+        <div class="field"><label>Nhóm theo</label>
+          <select id="rpc_groupby">
+            <option value="category" ${!pcBySku ? "selected" : ""}>Loại bia</option>
+            <option value="sku" ${pcBySku ? "selected" : ""}>Từng SKU</option>
+          </select>
+        </div>
         <button class="btn" id="rpc_apply" style="align-self:flex-end">Xem</button>
       </div>
       <div class="tablewrap"><table>
-        <thead><tr><th>Loại bia</th><th>Số lô lọc</th><th>V cấp chiết (hl)</th><th>Quy ra lít</th><th>Số thùng/kiện</th><th>Hiệu suất thu hồi %</th></tr></thead>
+        <thead><tr><th>${pcBySku ? "SKU" : "Loại bia"}</th><th>Số lô lọc</th><th>V cấp chiết (hl)</th><th>Quy ra lít</th><th>Số thùng/kiện</th><th>Hiệu suất thu hồi %</th></tr></thead>
         <tbody>${pcItems.map(i => `<tr>
-          <td>${esc(i.category)}</td><td>${i.filter_batch_count}</td>
+          <td>${pcBySku ? `<code class="k">${esc(i.finished_product_code || "—")}</code> ${esc(i.finished_product_name)}` : esc(i.category)}</td>
+          <td>${i.filter_batch_count}</td>
           <td>${i.input_hl.toLocaleString("vi-VN")}</td><td>${i.output_l.toLocaleString("vi-VN")}</td>
           <td class="muted">${i.case_count != null ? i.case_count.toLocaleString("vi-VN") : "—"}</td>
           <td style="color:${i.yield_pct == null ? "var(--muted)" : i.yield_pct < 95 ? "var(--red)" : "var(--green)"}">${i.yield_pct != null ? i.yield_pct + "%" : "—"}</td></tr>`).join("") ||
@@ -12523,6 +12536,11 @@ VIEWS.reports = async function () {
     $("rpc_apply").onclick = () => {
       SUB.reports_pc_year = parseInt($("rpc_year").value);
       SUB.reports_pc_month = parseInt($("rpc_month").value);
+      SUB.reports_pc_group_by = $("rpc_groupby").value;
+      render("reports");
+    };
+    $("rpc_groupby").onchange = () => {
+      SUB.reports_pc_group_by = $("rpc_groupby").value;
       render("reports");
     };
   }
