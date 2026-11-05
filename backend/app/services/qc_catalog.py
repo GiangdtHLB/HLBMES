@@ -6,7 +6,7 @@
   bắt buộc khai báo/duyệt chỉ tiêu trước khi được coi là nhập kho nhà máy chính thức.
 """
 
-from sqlalchemy import func, select, true
+from sqlalchemy import distinct, func, select, true
 from sqlalchemy.orm import Session
 
 from ..audit import record_audit
@@ -15,7 +15,7 @@ from ..errors import DomainError, NotFoundError
 from ..models.audit import AuditLog
 from ..models.batches import BatchExecution
 from ..models.batch_pipeline import BatchFilterLot, BatchPackLot, BatchTank, BatchTankLink
-from ..models.master import BeerType, Material, MaterialGroup
+from ..models.master import BeerType, Material, MaterialGroup, Product
 from ..models.materials import MaterialLot
 from ..models.materials_ext import MaterialQcGroup
 from ..models.quality import QualityResult, QualityResultHistory
@@ -29,6 +29,80 @@ def batch_tank_scope_id(tank_id: str, stage: str) -> str:
     nên scope_id phải khác nhau theo stage để QualityResult không lẫn giữa 2 bộ chỉ tiêu
     (tank_id đã duy nhất toàn hệ thống, không cần ghép thêm năm)."""
     return f"{tank_id}__{stage}"
+
+
+def scope_ids_by_beer_type(db: Session, beer_type_id: str) -> dict[str, set[str]]:
+    """Tập scope_id (QualityResult.scope_id) ứng với 1 Loại bia, theo TỪNG scope_type — dùng để
+    lọc báo cáo "QC theo công đoạn" theo Loại bia (yêu cầu người dùng 2026-11-05: "tôi muốn xem
+    theo loại bia"), vì QualityResult không lưu thẳng beer_type_id mà phải suy qua Dịch bia
+    (product_id) hoặc Loại bia khai trực tiếp trên lô lọc/lệnh.
+
+    - batch (nấu)/batch_tank (lên men)/work_order (nước): suy qua Product.beer_type_id (Dịch bia
+      gắn trên mẻ/tank/WO). batch_tank cần cả 2 scope_id (len_men_chinh/len_men_phu).
+    - batch_filter_lot (sau lọc): BatchFilterLot.beer_type_id khai TRỰC TIẾP lúc tạo lô lọc
+      (không suy qua product_id — người dùng có thể chọn khác Loại bia gốc, xem beer_type_mismatch).
+    - batch_pack_lot (thành phẩm): kế thừa Loại bia từ lô lọc nguồn (filter_lot_id).
+    - lot (NVL): KHÔNG có trong dict trả về — 1 lô NVL có thể dùng cho nhiều Loại bia khác nhau,
+      không gán được 1-1, nên lọc theo Loại bia sẽ loại bỏ hẳn công đoạn NVL (không phải lỗi)."""
+    product_ids = set(db.execute(
+        select(Product.product_id).where(Product.beer_type_id == beer_type_id)).scalars().all())
+
+    batch_ids = set(db.execute(select(BatchExecution.batch_id).where(
+        BatchExecution.product_id.in_(product_ids))).scalars().all()) if product_ids else set()
+
+    tank_ids = set(db.execute(select(BatchTank.tank_id).where(
+        BatchTank.product_id.in_(product_ids))).scalars().all()) if product_ids else set()
+    tank_scope_ids = {batch_tank_scope_id(tid, stage) for tid in tank_ids
+                      for stage in ("len_men_chinh", "len_men_phu")}
+
+    wo_ids = set(db.execute(select(WorkOrder.wo_id).where(
+        WorkOrder.product_id.in_(product_ids))).scalars().all()) if product_ids else set()
+
+    filter_lot_ids = set(db.execute(select(BatchFilterLot.filter_lot_id).where(
+        BatchFilterLot.beer_type_id == beer_type_id)).scalars().all())
+
+    pack_lot_ids = set(db.execute(select(BatchPackLot.pack_lot_id).where(
+        BatchPackLot.filter_lot_id.in_(filter_lot_ids))).scalars().all()) if filter_lot_ids else set()
+
+    return {"batch": batch_ids, "batch_tank": tank_scope_ids, "work_order": wo_ids,
+            "batch_filter_lot": filter_lot_ids, "batch_pack_lot": pack_lot_ids}
+
+
+def resolve_parameter_display(db: Session, raw_parameters) -> dict[str, dict]:
+    """Tra tên hiển thị + ĐVT cho các giá trị QualityResult.parameter THẬT trong CSDL — dữ liệu
+    QC cũ (nhập từ hệ thống Braumat/QLSX cũ) lưu THẲNG MÃ chỉ tiêu (VD "2515", "6258") vào cột
+    `parameter` thay vì tên hiển thị, nên phải tra qua QCParameter.CODE (không phải .name) mới ra
+    được tên tiếng Việt + đơn vị đúng (yêu cầu người dùng 2026-11-05: "hiển thị cả tên chỉ tiêu,
+    đơn vị"). Giá trị nào KHÔNG khớp mã nào trong danh mục (đã là tên sẵn, VD "pH" ghi trực tiếp)
+    thì giữ nguyên làm tên hiển thị, đơn vị để None.
+
+    Trả {raw_parameter: {"name": str, "unit": str|None}} — luôn đủ key cho MỌI giá trị trong
+    `raw_parameters`, kể cả không khớp được."""
+    raw_parameters = set(raw_parameters)
+    if not raw_parameters:
+        return {}
+    matched = db.execute(select(QCParameter).where(QCParameter.code.in_(raw_parameters))).scalars().all()
+    by_code = {p.code: p for p in matched}
+    return {raw: ({"name": by_code[raw].name, "unit": by_code[raw].unit} if raw in by_code
+                 else {"name": raw, "unit": None})
+           for raw in raw_parameters}
+
+
+def parameters_in_use(db: Session, scope_type: str = None) -> list[dict]:
+    """Chỉ tiêu THỰC SỰ có dữ liệu (QualityResult) cho 1 công đoạn (scope_type) — khác
+    list_qc_parameters() (TOÀN BỘ danh mục QCParameter, không quan tâm công đoạn nào có ghi nhận
+    hay chưa). Dùng cho bộ chọn chỉ tiêu ở báo cáo "QC theo công đoạn" (yêu cầu người dùng
+    2026-11-05: "công đoạn nào có chỉ tiêu nào thì chỉ hiện các chỉ tiêu đó thôi, không hiện toàn
+    bộ chỉ tiêu trong cơ sở dữ liệu") — đáng tin hơn lọc theo QCParameter.stage (free-text, không
+    điền đủ cho mọi chỉ tiêu, xem ghi chú ở model). Trả [{code, name, unit}], sắp theo tên."""
+    stmt = select(distinct(QualityResult.parameter))
+    if scope_type:
+        stmt = stmt.where(QualityResult.scope_type == scope_type)
+    raw_params = db.execute(stmt).scalars().all()
+    resolved = resolve_parameter_display(db, raw_params)
+    items = [{"code": raw, "name": resolved[raw]["name"], "unit": resolved[raw]["unit"]} for raw in raw_params]
+    items.sort(key=lambda i: i["name"])
+    return items
 
 
 # ---- Nhóm chỉ tiêu ----

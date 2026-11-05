@@ -89,15 +89,36 @@ def _western_electric(values: list, cl: float, sigma: float) -> list:
     return flags
 
 
-def spc_chart(db: Session, parameter: str, scope_type: str = None) -> dict:
+def spc_chart(db: Session, parameter: str, scope_type: str = None,
+             date_from=None, date_to=None, beer_type_id: str = None) -> dict:
     """Biểu đồ kiểm soát SPC cho một chỉ tiêu (theo tên parameter).
 
-    Lấy chuỗi giá trị QualityResult (status != pending, có value) theo thời gian."""
+    Lấy chuỗi giá trị QualityResult (status != pending, có value) theo thời gian.
+    date_from/date_to (datetime, tùy chọn) lọc theo recorded_at — dùng cho báo cáo QC theo kỳ
+    (Nhóm B, port từ phần mềm QLSX cũ) khi người dùng chỉ muốn xem 1 khoảng thời gian thay vì
+    toàn bộ lịch sử. beer_type_id (tùy chọn, yêu cầu người dùng 2026-11-05: "xem theo loại bia")
+    lọc thêm theo Loại bia — xem qc_catalog.scope_ids_by_beer_type() để biết cách suy từ
+    scope_id/scope_type (QualityResult không lưu thẳng beer_type_id); công đoạn NVL ("lot")
+    luôn bị loại khi có bộ lọc này vì 1 lô NVL không gán được cho đúng 1 Loại bia."""
     stmt = select(QualityResult).where(
         QualityResult.parameter == parameter, QualityResult.value.isnot(None)
     ).order_by(QualityResult.recorded_at)
     if scope_type:
         stmt = stmt.where(QualityResult.scope_type == scope_type)
+    if date_from:
+        stmt = stmt.where(QualityResult.recorded_at >= date_from)
+    if date_to:
+        stmt = stmt.where(QualityResult.recorded_at <= date_to)
+    if beer_type_id:
+        from sqlalchemy import and_, or_
+        from . import qc_catalog
+        allowed = qc_catalog.scope_ids_by_beer_type(db, beer_type_id)
+        if scope_type:
+            stmt = stmt.where(QualityResult.scope_id.in_(allowed.get(scope_type, set())))
+        else:
+            stmt = stmt.where(or_(*[and_(QualityResult.scope_type == st, QualityResult.scope_id.in_(ids))
+                                   for st, ids in allowed.items() if ids]) if any(allowed.values())
+                              else QualityResult.scope_id.in_([]))
     rows = db.execute(stmt).scalars().all()
     values = [r.value for r in rows]
     pts = []
@@ -109,8 +130,13 @@ def spc_chart(db: Session, parameter: str, scope_type: str = None) -> dict:
                     "value": r.value, "by": r.recorded_by, "status": r.status,
                     "violations": flags[i]})
     ucl, lcl = cl + 3 * sigma, cl - 3 * sigma
-    # Capability từ QCParameter (nếu định nghĩa)
-    spec = db.execute(select(QCParameter).where(QCParameter.name == parameter)).scalar_one_or_none()
+    # Capability từ QCParameter (nếu định nghĩa) — `name` KHÔNG unique (nhiều stage/nhóm chỉ
+    # tiêu dùng chung 1 tên hiển thị, VD "pH"/"Độ màu" xuất hiện ở cả nấu/lọc/thành phẩm), nên
+    # .first() (không phải .scalar_one_or_none(), vốn crash MultipleResultsFound khi trùng tên —
+    # phát hiện khi build báo cáo "QC theo công đoạn" Nhóm B, 2026-11-05) — chỉ dùng để tham khảo
+    # USL/LSL/target/unit hiển thị, không ảnh hưởng tính pass/fail của từng QualityResult (đã có
+    # lower_limit/upper_limit riêng từ lúc ghi).
+    spec = db.execute(select(QCParameter).where(QCParameter.name == parameter)).scalars().first()
     cp = cpk = usl = lsl = None
     if spec and sigma > 0 and spec.usl is not None and spec.lsl is not None:
         usl, lsl = spec.usl, spec.lsl

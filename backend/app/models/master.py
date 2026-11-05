@@ -59,6 +59,11 @@ class Product(Base):
     ferment_days_std: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # số ngày lên men chuẩn (sẵn sàng chiết) — cho phép số thực (VD 7.5 ngày)
     spec_json: Mapped[Optional[str]] = mapped_column(UnicodeText, nullable=True)  # Quy định (chỉ tiêu công nghệ nấu) — xem services/master_data.py::SPEC_FIELD_KEYS, chỉ admin (master.manage) sửa được
     beer_type_id: Mapped[Optional[str]] = mapped_column(ForeignKey("beer_type.beer_type_id"), nullable=True, index=True)  # Loại bia (thương hiệu) — dùng để tra chỉ tiêu Lọc/Chiết
+    # Định mức dịch/năng lượng (yêu cầu người dùng 2026-11-05, cho báo cáo "BC hiệu suất tổng +
+    # định mức dịch + định mức năng lượng" — Nhóm D, port phần mềm QLSX cũ). Khai theo TỪNG dịch
+    # bia (người dùng chọn phương án này thay vì 1 cặp định mức chung cho cả nhà máy).
+    v_dich_norm_hl: Mapped[Optional[float]] = mapped_column(Float, nullable=True)         # Định mức V dịch chuẩn/mẻ (hl)
+    energy_norm_kwh_per_hl: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # Định mức năng lượng chuẩn (kWh/hl thành phẩm)
 
 
 class FinishedProduct(Base):
