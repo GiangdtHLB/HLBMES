@@ -11862,6 +11862,7 @@ VIEWS.reports = async function () {
     { key: "yield_detail", label: "BC hiệu suất chi tiết" },
     { key: "overall_yield_norms", label: "BC hiệu suất tổng + định mức" }];
   let body = "";
+  let qcParamItemsCache = [];   // dùng ở wiring "qc_trend" bên dưới để dựng initCheckboxMultiSelect
 
   if (sec === "material") {
     const days = SUB.reports_days || 3650;
@@ -12265,22 +12266,32 @@ VIEWS.reports = async function () {
     // (SPC) theo thời gian cho 1 chỉ tiêu, lọc theo công đoạn (scope_type) + khoảng thời gian —
     // tái dùng /qc/spc + controlChart() (đã có sẵn ở Chất lượng ▸ QC Lab, chỉ thêm bộ lọc công
     // đoạn + khoảng ngày chưa có ở đó). Yêu cầu người dùng 2026-11-05.
-    const [qcParams, qcBeerTypes] = await Promise.all([
+    const [qcParamsRaw, qcBeerTypes] = await Promise.all([
       GET("/qc/parameters").catch(() => []), GET("/beer-types").catch(() => [])]);
+    // Lọc trùng TÊN (QCParameter.name KHÔNG unique — nhiều chỉ tiêu ở các stage khác nhau dùng
+    // chung 1 tên hiển thị, VD "pH"/"Độ ẩm") — /qc/spc chỉ lọc theo tên nên chỉ cần giữ 1 lần,
+    // tránh dropdown tích chọn hiện trùng tên nhiều lần (bug đã gặp khi build).
+    const qcParams = [...new Map(qcParamsRaw.map(p => [p.name, p])).values()];
+    qcParamItemsCache = qcParams;   // đọc lại ở wiring bên dưới (biến const trong nhánh này không lọt ra ngoài được)
     const qcStage = SUB.reports_qc_stage || "";
-    const qcParam = SUB.reports_qc_param || (qcParams[0] ? qcParams[0].name : "");
+    // Nhiều chỉ tiêu cùng lúc (yêu cầu người dùng 2026-11-05: "cho chọn nhiều loại chỉ tiêu cùng
+    // lúc để xem nữa") — mỗi chỉ tiêu vẽ riêng 1 biểu đồ SPC (không gộp chung 1 trục vì khác đơn
+    // vị/thang đo/USL-LSL), dùng lại initCheckboxMultiSelect() (dropdown tích chọn đã có sẵn).
+    const qcParamNames = qcParams.map(p => p.name);
+    const qcValidPrevSelection = (SUB.reports_qc_params || []).filter(n => qcParamNames.includes(n));
+    const qcSelectedParams = qcValidPrevSelection.length ? qcValidPrevSelection
+      : (qcParams[0] ? [qcParams[0].name] : []);
+    SUB.reports_qc_params = qcSelectedParams;   // chuẩn hoá lại để wiring bên dưới đọc trực tiếp từ SUB
     const qcFrom = SUB.reports_qc_from || "";
     const qcTo = SUB.reports_qc_to || "";
     const qcBeerType = SUB.reports_qc_beer_type || "";
     body = `<div class="panel"><h2>QC theo công đoạn — biểu đồ xu hướng/kiểm soát (SPC)</h2>
-      <div class="muted" style="margin-bottom:8px">Chọn công đoạn + chỉ tiêu (và khoảng ngày/Loại bia nếu muốn thu hẹp) để xem biểu đồ giá trị theo thời gian kèm UCL/LCL/USL/LSL.</div>
+      <div class="muted" style="margin-bottom:8px">Chọn công đoạn + 1 hoặc nhiều chỉ tiêu (và khoảng ngày/Loại bia nếu muốn thu hẹp) để xem biểu đồ giá trị theo thời gian kèm UCL/LCL/USL/LSL — mỗi chỉ tiêu 1 biểu đồ riêng.</div>
       <div class="row">
         <div class="field"><label>Công đoạn</label><select id="rqc_stage">
           ${QC_STAGE_SCOPE.map(s => `<option value="${s.scope}" ${s.scope === qcStage ? "selected" : ""}>${esc(s.label)}</option>`).join("")}
         </select></div>
-        <div class="field"><label>Chỉ tiêu</label><select id="rqc_param">
-          ${qcParams.map(p => `<option value="${esc(p.name)}" ${p.name === qcParam ? "selected" : ""}>${esc(p.name)}</option>`).join("")}
-        </select></div>
+        <div class="field" style="min-width:220px"><label>Chỉ tiêu</label><div id="rqc_param_wrap"></div></div>
         <div class="field"><label>Loại bia</label><select id="rqc_beertype">
           <option value="">— Tất cả Loại bia —</option>
           ${qcBeerTypes.map(bt => `<option value="${esc(bt.beer_type_id)}" ${bt.beer_type_id === qcBeerType ? "selected" : ""}>${esc(bt.code)} — ${esc(bt.name)}</option>`).join("")}
@@ -12524,27 +12535,36 @@ VIEWS.reports = async function () {
     };
   }
   if (sec === "qc_trend") {
+    const qcParamPicker = initCheckboxMultiSelect($("rqc_param_wrap"),
+      qcParamItemsCache.map(p => ({ value: p.name, label: p.name })), SUB.reports_qc_params || [], "chỉ tiêu");
     async function loadQcTrend() {
-      const stage = $("rqc_stage").value, param = $("rqc_param").value;
+      const stage = $("rqc_stage").value, params = qcParamPicker.getSelected();
       const from = $("rqc_from").value, to = $("rqc_to").value, beerType = $("rqc_beertype").value;
-      if (!param) { $("rqc_box").innerHTML = '<div class="muted">Chưa có chỉ tiêu nào trong danh mục.</div>'; return; }
+      if (!params.length) { $("rqc_box").innerHTML = '<div class="muted">Chọn ít nhất 1 chỉ tiêu.</div>'; return; }
       $("rqc_box").innerHTML = "Đang tải…";
       try {
-        const qs = new URLSearchParams({ parameter: param });
-        if (stage) qs.set("scope_type", stage);
-        if (from) qs.set("date_from", from);
-        if (to) qs.set("date_to", to);
-        if (beerType) qs.set("beer_type_id", beerType);
-        const spc = await GET(`/qc/spc?${qs.toString()}`);
-        const cap = (spc.cp != null) ? `Cp <b>${spc.cp}</b> · Cpk <b>${spc.cpk}</b>` : "—";
-        $("rqc_box").innerHTML = window.controlChart(spc) +
-          `<div style="margin-top:6px">n=${spc.n} · Mean ${spc.mean} · σ ${spc.sigma} · UCL ${spc.ucl} · LCL ${spc.lcl} · ${cap}
-            ${spc.n ? `· ${spc.in_control ? '<span class="badge available">Trong kiểm soát</span>' : `<span class="badge critical">${spc.out_of_control} điểm vi phạm</span>`}` : ""}</div>`;
+        const results = await Promise.all(params.map(async (param) => {
+          const qs = new URLSearchParams({ parameter: param });
+          if (stage) qs.set("scope_type", stage);
+          if (from) qs.set("date_from", from);
+          if (to) qs.set("date_to", to);
+          if (beerType) qs.set("beer_type_id", beerType);
+          return { param, spc: await GET(`/qc/spc?${qs.toString()}`) };
+        }));
+        $("rqc_box").innerHTML = results.map(({ param, spc }) => {
+          const cap = (spc.cp != null) ? `Cp <b>${spc.cp}</b> · Cpk <b>${spc.cpk}</b>` : "—";
+          return `<div style="margin-top:${params.length > 1 ? 16 : 0}px">
+            ${params.length > 1 ? `<h3>${esc(param)}</h3>` : ""}
+            ${window.controlChart(spc)}
+            <div style="margin-top:6px">n=${spc.n} · Mean ${spc.mean} · σ ${spc.sigma} · UCL ${spc.ucl} · LCL ${spc.lcl} · ${cap}
+              ${spc.n ? `· ${spc.in_control ? '<span class="badge available">Trong kiểm soát</span>' : `<span class="badge critical">${spc.out_of_control} điểm vi phạm</span>`}` : ""}</div>
+          </div>`;
+        }).join(params.length > 1 ? '<hr style="margin:16px 0;border-color:var(--border)"/>' : "");
       } catch (e) { $("rqc_box").innerHTML = `<div class="muted">Lỗi: ${esc(e.message)}</div>`; }
     }
     $("rqc_apply").onclick = () => {
       SUB.reports_qc_stage = $("rqc_stage").value;
-      SUB.reports_qc_param = $("rqc_param").value;
+      SUB.reports_qc_params = qcParamPicker.getSelected();
       SUB.reports_qc_from = $("rqc_from").value;
       SUB.reports_qc_to = $("rqc_to").value;
       SUB.reports_qc_beer_type = $("rqc_beertype").value;
