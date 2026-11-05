@@ -10,7 +10,7 @@ from sqlalchemy import distinct, func, select, true
 from sqlalchemy.orm import Session
 
 from ..audit import record_audit
-from ..common import QualityStatus, ResultStatus, new_id, utcnow
+from ..common import QualityStatus, ResultStatus, execute_in_chunks, new_id, utcnow
 from ..errors import DomainError, NotFoundError
 from ..models.audit import AuditLog
 from ..models.batches import BatchExecution
@@ -61,8 +61,13 @@ def scope_ids_by_beer_type(db: Session, beer_type_id: str) -> dict[str, set[str]
     filter_lot_ids = set(db.execute(select(BatchFilterLot.filter_lot_id).where(
         BatchFilterLot.beer_type_id == beer_type_id)).scalars().all())
 
-    pack_lot_ids = set(db.execute(select(BatchPackLot.pack_lot_id).where(
-        BatchPackLot.filter_lot_id.in_(filter_lot_ids))).scalars().all()) if filter_lot_ids else set()
+    # Chia mẻ: filter_lot_ids là TOÀN BỘ lô lọc của Loại bia này, KHÔNG lọc ngày — chỉ tăng theo
+    # sản lượng. Đo prod 05/11/2026: Loại bia lớn nhất đã 256 lô, tăng ~250 lô/tháng, tức sẽ vượt
+    # trần 2100 tham số bind của SQL Server khoảng giữa 2027 rồi vỡ báo cáo "QC theo công đoạn"
+    # bằng lỗi 07002. Các .in_(product_ids) phía trên KHÔNG cần chia (product là danh mục, nhiều
+    # nhất 3 sản phẩm/Loại bia). Xem DEPLOY-CONTRACT §2(H).
+    pack_lot_ids = set(execute_in_chunks(db, lambda chunk: select(BatchPackLot.pack_lot_id).where(
+        BatchPackLot.filter_lot_id.in_(chunk)), filter_lot_ids, scalars=True)) if filter_lot_ids else set()
 
     return {"batch": batch_ids, "batch_tank": tank_scope_ids, "work_order": wo_ids,
             "batch_filter_lot": filter_lot_ids, "batch_pack_lot": pack_lot_ids}
