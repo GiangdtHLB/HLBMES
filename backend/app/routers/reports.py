@@ -229,3 +229,29 @@ def brew_volume_by_product_report(year: int, month: int, db: Session = Depends(g
     return production_reports.brew_volume_by_product(db, year, month)
 
 
+def _qc_date_bounds(date_from: str = None, date_to: str = None):
+    from datetime import date as date_cls, timezone
+    df = datetime.combine(date_cls.fromisoformat(date_from), datetime.min.time(), tzinfo=timezone.utc) \
+        if date_from else None
+    dt = datetime.combine(date_cls.fromisoformat(date_to), datetime.min.time(), tzinfo=timezone.utc) \
+        + timedelta(days=1) - timedelta(seconds=1) if date_to else None
+    return df, dt
+
+
+# ---- Nhóm C — KCS thống kê ----
+@router.get("/qc-min-max-avg")
+def qc_min_max_avg_report(scope_type: str = None, date_from: str = None, date_to: str = None,
+                          db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    from ..services import qc_stat_reports
+    df, dt = _qc_date_bounds(date_from, date_to)
+    return qc_stat_reports.qc_min_max_avg(db, scope_type, df, dt)
+
+
+@router.get("/qc-analysis-count")
+def qc_analysis_count_report(scope_type: str = None, date_from: str = None, date_to: str = None,
+                             db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    from ..services import qc_stat_reports
+    df, dt = _qc_date_bounds(date_from, date_to)
+    return qc_stat_reports.qc_analysis_count(db, scope_type, df, dt)
+
+

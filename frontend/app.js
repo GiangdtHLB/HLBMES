@@ -11857,7 +11857,8 @@ VIEWS.reports = async function () {
     { key: "brewhouse_steps", label: "Log hệ nấu" }, { key: "brewhouse_cycle", label: "Thời gian cả mẻ nấu" },
     { key: "pack_by_category", label: "Sản lượng chiết" }, { key: "pack_cumulative", label: "Chiết lũy kế" },
     { key: "brew_volume", label: "Sản lượng nấu" }, { key: "qc_trend", label: "QC theo công đoạn" },
-    { key: "fermentation_curve", label: "Đánh giá QTLM theo tank" }];
+    { key: "fermentation_curve", label: "Đánh giá QTLM theo tank" },
+    { key: "qc_min_max_avg", label: "KCS Min-Max-AVG" }, { key: "qc_analysis_count", label: "KCS đếm số lần phân tích" }];
   let body = "";
 
   if (sec === "material") {
@@ -12300,6 +12301,44 @@ VIEWS.reports = async function () {
       </div>
       <div id="rfc_box" class="muted" style="margin-top:8px">${fcTanks.length ? "Đang tải…" : "Chưa có Lô lên men nào."}</div>
     </div>`;
+  } else if (sec === "qc_min_max_avg") {
+    // Port "KCS Thống kê Min-Max-AVG" (phần mềm cũ) — theo từng chỉ tiêu, lọc theo công đoạn +
+    // khoảng ngày tùy chọn. Yêu cầu người dùng 2026-11-05.
+    const mmStage = SUB.reports_mm_stage || "";
+    const mmFrom = SUB.reports_mm_from || "";
+    const mmTo = SUB.reports_mm_to || "";
+    body = `<div class="panel"><h2>KCS Thống kê Min-Max-AVG</h2>
+      <div class="muted" style="margin-bottom:8px">Giá trị Min/Max/AVG của từng chỉ tiêu (chỉ tiêu dạng số), lọc theo công đoạn + khoảng ngày (tùy chọn).</div>
+      <div class="row">
+        <div class="field"><label>Công đoạn</label><select id="rmm_stage">
+          ${QC_STAGE_SCOPE.map(s => `<option value="${s.scope}" ${s.scope === mmStage ? "selected" : ""}>${esc(s.label)}</option>`).join("")}
+        </select></div>
+        <div class="field"><label>Từ ngày</label><input id="rmm_from" type="date" value="${mmFrom}"/></div>
+        <div class="field"><label>Đến ngày</label><input id="rmm_to" type="date" value="${mmTo}"/></div>
+        <button class="btn" id="rmm_apply" style="align-self:flex-end">Xem</button>
+      </div>
+      <input class="searchbox" data-tbl="t_mmavg" placeholder="Tìm theo tên chỉ tiêu..."/>
+      <div id="rmm_box" class="muted" style="margin-top:8px">Đang tải…</div>
+    </div>`;
+  } else if (sec === "qc_analysis_count") {
+    // Port "KCS đếm số lần phân tích" (phần mềm cũ) — tổng số lần phân tích theo từng chỉ tiêu
+    // (kèm Đạt/Không đạt/Chờ duyệt) và theo ngày, lọc theo công đoạn + khoảng ngày tùy chọn.
+    const acStage = SUB.reports_ac_stage || "";
+    const acFrom = SUB.reports_ac_from || "";
+    const acTo = SUB.reports_ac_to || "";
+    body = `<div class="panel"><h2>KCS đếm số lần phân tích</h2>
+      <div class="muted" style="margin-bottom:8px">Tổng số lần phân tích theo chỉ tiêu (kèm Đạt/Không đạt/Chờ duyệt) và theo ngày, lọc theo công đoạn + khoảng ngày (tùy chọn).</div>
+      <div class="row">
+        <div class="field"><label>Công đoạn</label><select id="rac_stage">
+          ${QC_STAGE_SCOPE.map(s => `<option value="${s.scope}" ${s.scope === acStage ? "selected" : ""}>${esc(s.label)}</option>`).join("")}
+        </select></div>
+        <div class="field"><label>Từ ngày</label><input id="rac_from" type="date" value="${acFrom}"/></div>
+        <div class="field"><label>Đến ngày</label><input id="rac_to" type="date" value="${acTo}"/></div>
+        <button class="btn" id="rac_apply" style="align-self:flex-end">Xem</button>
+      </div>
+      <input class="searchbox" data-tbl="t_anlcount" placeholder="Tìm theo tên chỉ tiêu..."/>
+      <div id="rac_box" class="muted" style="margin-top:8px">Đang tải…</div>
+    </div>`;
   }
 
   $("view-reports").innerHTML = subnav("reports", sections, sec) + body;
@@ -12452,6 +12491,71 @@ VIEWS.reports = async function () {
     }
     $("rfc_apply").onclick = () => { SUB.reports_fc_tank = $("rfc_tank").value; loadFermCurve(); };
     if ($("rfc_tank").value) loadFermCurve();
+  }
+  if (sec === "qc_min_max_avg") {
+    async function loadMinMaxAvg() {
+      const stage = $("rmm_stage").value, from = $("rmm_from").value, to = $("rmm_to").value;
+      $("rmm_box").innerHTML = "Đang tải…";
+      try {
+        const qs = new URLSearchParams();
+        if (stage) qs.set("scope_type", stage);
+        if (from) qs.set("date_from", from);
+        if (to) qs.set("date_to", to);
+        const r = await GET(`/reports/qc-min-max-avg?${qs.toString()}`);
+        const items = r.items || [];
+        $("rmm_box").innerHTML = `<div class="tablewrap"><table id="t_mmavg">
+          <thead><tr><th>Chỉ tiêu</th><th>ĐVT</th><th>Số lần</th><th>Min</th><th>Max</th><th>AVG</th></tr></thead>
+          <tbody>${items.map(i => `<tr><td>${esc(i.parameter)}</td><td class="muted">${esc(i.unit || "—")}</td>
+            <td>${i.n}</td><td>${i.min}</td><td>${i.max}</td><td><b>${i.avg}</b></td></tr>`).join("") ||
+            '<tr><td colspan=6 class="muted">Chưa có dữ liệu.</td></tr>'}</tbody>
+        </table></div>`;
+        wireSearch(); wirePaginate("t_mmavg", 20);
+      } catch (e) { $("rmm_box").innerHTML = `<div class="muted">Lỗi: ${esc(e.message)}</div>`; }
+    }
+    $("rmm_apply").onclick = () => {
+      SUB.reports_mm_stage = $("rmm_stage").value;
+      SUB.reports_mm_from = $("rmm_from").value;
+      SUB.reports_mm_to = $("rmm_to").value;
+      loadMinMaxAvg();
+    };
+    loadMinMaxAvg();
+  }
+  if (sec === "qc_analysis_count") {
+    async function loadAnalysisCount() {
+      const stage = $("rac_stage").value, from = $("rac_from").value, to = $("rac_to").value;
+      $("rac_box").innerHTML = "Đang tải…";
+      try {
+        const qs = new URLSearchParams();
+        if (stage) qs.set("scope_type", stage);
+        if (from) qs.set("date_from", from);
+        if (to) qs.set("date_to", to);
+        const r = await GET(`/reports/qc-analysis-count?${qs.toString()}`);
+        const byParam = r.by_parameter || [], byDay = r.by_day || [];
+        $("rac_box").innerHTML = `
+          <div class="muted" style="margin-bottom:6px">Tổng số lần phân tích: <b>${r.total}</b></div>
+          <div class="tablewrap"><table id="t_anlcount">
+            <thead><tr><th>Chỉ tiêu</th><th>Tổng số lần</th><th>Đạt</th><th>Không đạt</th><th>Chờ duyệt</th><th>Không hợp lệ</th></tr></thead>
+            <tbody>${byParam.map(i => `<tr><td>${esc(i.parameter)}</td><td><b>${i.total}</b></td>
+              <td class="muted">${i.pass}</td><td style="color:${i.fail ? "var(--red)" : "inherit"}">${i.fail}</td>
+              <td class="muted">${i.pending}</td><td class="muted">${i.invalid}</td></tr>`).join("") ||
+              '<tr><td colspan=6 class="muted">Chưa có dữ liệu.</td></tr>'}</tbody>
+          </table></div>
+          <h3 style="margin-top:12px">Theo ngày</h3>
+          <div class="tablewrap"><table>
+            <thead><tr><th>Ngày</th><th>Số lần phân tích</th></tr></thead>
+            <tbody>${byDay.map(d => `<tr><td>${esc(d.date)}</td><td>${d.count}</td></tr>`).join("") ||
+              '<tr><td colspan=2 class="muted">—</td></tr>'}</tbody>
+          </table></div>`;
+        wireSearch(); wirePaginate("t_anlcount", 20);
+      } catch (e) { $("rac_box").innerHTML = `<div class="muted">Lỗi: ${esc(e.message)}</div>`; }
+    }
+    $("rac_apply").onclick = () => {
+      SUB.reports_ac_stage = $("rac_stage").value;
+      SUB.reports_ac_from = $("rac_from").value;
+      SUB.reports_ac_to = $("rac_to").value;
+      loadAnalysisCount();
+    };
+    loadAnalysisCount();
   }
 };
 
