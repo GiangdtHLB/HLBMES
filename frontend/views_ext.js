@@ -34,6 +34,13 @@
   }
 
   // ---------- Biểu đồ kiểm soát SPC (control chart) ----------
+  // Chấm nhỏ (r=3-4.5) khó rê chuột trúng để xem <title> (yêu cầu người dùng 2026-11-05: "không
+  // thể dùng chuột để xem các đường đó, kéo tới vị trí nào để hiển thị lên giá trị đó") — thay
+  // bằng 1 lớp <rect> trong suốt phủ TOÀN BỘ vùng vẽ bắt mousemove, tự tìm điểm GẦN NHẤT theo
+  // trục X (không cần rê trúng pixel) rồi hiện hộp chú thích cố định + khoanh tròn điểm đang trỏ.
+  let _spcChartSeq = 0;
+  window.__spcCharts = window.__spcCharts || {};
+
   function controlChart(spc) {
     const pts = spc.points || [];
     if (!pts.length) return '<div class="muted">Chưa có dữ liệu cho chỉ tiêu này.</div>';
@@ -55,16 +62,53 @@
     const poly = pts.map((p, i) => `${px(i).toFixed(1)},${py(p.value).toFixed(1)}`).join(" ");
     const dots = pts.map((p, i) => {
       const bad = p.violations && p.violations.length;
-      return `<circle cx="${px(i).toFixed(1)}" cy="${py(p.value).toFixed(1)}" r="${bad ? 4.5 : 3}" fill="${bad ? "#e74c3c" : "#3498db"}">
-        <title>${esc(p.value)}${bad ? " — " + esc(p.violations.join("; ")) : ""}</title></circle>`;
+      return `<circle cx="${px(i).toFixed(1)}" cy="${py(p.value).toFixed(1)}" r="${bad ? 4.5 : 3}" fill="${bad ? "#e74c3c" : "#3498db"}" style="pointer-events:none"/>`;
     }).join("");
-    return `<svg viewBox="0 0 ${W} ${H}" width="100%" style="display:block">
-      ${hline(spc.usl, "#8a6d3b", true, "USL")}${hline(spc.lsl, "#8a6d3b", true, "LSL")}
-      ${hline(spc.ucl, "#e74c3c", false, "UCL")}${hline(spc.lcl, "#e74c3c", false, "LCL")}
-      ${hline(spc.mean, "#2ecc71", false, "CL")}
-      <polyline points="${poly}" fill="none" stroke="#3498db" stroke-width="1.5"/>${dots}</svg>`;
+    const chartId = "spc" + (++_spcChartSeq);
+    window.__spcCharts[chartId] = { pts, pxs: pts.map((_, i) => px(i)), pys: pts.map(p => py(p.value)) };
+    return `<div style="position:relative">
+      <svg viewBox="0 0 ${W} ${H}" width="100%" style="display:block">
+        ${hline(spc.usl, "#8a6d3b", true, "USL")}${hline(spc.lsl, "#8a6d3b", true, "LSL")}
+        ${hline(spc.ucl, "#e74c3c", false, "UCL")}${hline(spc.lcl, "#e74c3c", false, "LCL")}
+        ${hline(spc.mean, "#2ecc71", false, "CL")}
+        <polyline points="${poly}" fill="none" stroke="#3498db" stroke-width="1.5"/>${dots}
+        <circle id="${chartId}-hl" r="6" fill="none" stroke="#fff" stroke-width="2" style="display:none;pointer-events:none"/>
+        <rect x="0" y="0" width="${W}" height="${H}" fill="transparent" style="cursor:crosshair"
+          onmousemove="window.__spcHover(event,'${chartId}')" onmouseleave="window.__spcHoverEnd('${chartId}')"/>
+      </svg>
+      <div id="${chartId}-tip" style="position:absolute;top:6px;left:${pad.l}px;background:rgba(20,26,40,0.95);border:1px solid #3498db;padding:5px 10px;border-radius:5px;font-size:12px;pointer-events:none;display:none;white-space:nowrap;color:#fff;z-index:2"></div>
+    </div>`;
   }
   window.controlChart = controlChart;   // dùng lại ở VIEWS.reports (app.js, ngoài IIFE này) cho báo cáo QC theo công đoạn
+
+  // Rê chuột bất kỳ đâu trong vùng vẽ -> tìm điểm gần nhất theo trục X (toạ độ viewBox, không
+  // phụ thuộc kích thước hiển thị thật vì SVG tự co giãn) rồi cập nhật hộp chú thích + khoanh tròn.
+  window.__spcHover = function (evt, chartId) {
+    const data = window.__spcCharts[chartId];
+    const svg = evt.currentTarget.ownerSVGElement;
+    const hl = document.getElementById(chartId + "-hl");
+    const tip = document.getElementById(chartId + "-tip");
+    if (!data || !svg || !hl || !tip) return;
+    const rect = svg.getBoundingClientRect();
+    const vb = svg.viewBox.baseVal;
+    const mouseX = (evt.clientX - rect.left) * (vb.width / rect.width);
+    let bestI = 0, bestDist = Infinity;
+    data.pxs.forEach((x, i) => { const d = Math.abs(x - mouseX); if (d < bestDist) { bestDist = d; bestI = i; } });
+    const p = data.pts[bestI];
+    hl.setAttribute("cx", data.pxs[bestI].toFixed(1));
+    hl.setAttribute("cy", data.pys[bestI].toFixed(1));
+    hl.style.display = "block";
+    const statusLabel = { pass: "Đạt", fail: "Không đạt", pending: "Chờ duyệt", invalid: "Không hợp lệ" }[p.status] || p.status;
+    tip.innerHTML = `<b>${esc(p.value)}</b>${p.ts ? " · " + esc(fmt(p.ts)) : ""}${p.status ? " · " + esc(statusLabel) : ""}` +
+      (p.violations && p.violations.length ? `<br><span style="color:#e74c3c">${esc(p.violations.join("; "))}</span>` : "");
+    tip.style.display = "block";
+  };
+  window.__spcHoverEnd = function (chartId) {
+    const hl = document.getElementById(chartId + "-hl");
+    const tip = document.getElementById(chartId + "-tip");
+    if (hl) hl.style.display = "none";
+    if (tip) tip.style.display = "none";
+  };
 
   // ======================================================================
   // #3 — CÔNG THỨC NÂNG CAO (yield + change-control + alternates)
