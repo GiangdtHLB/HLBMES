@@ -367,6 +367,8 @@ def update_product(product_id: str, payload: ProductIn, db: Session = Depends(ge
     p.description = payload.description
     p.ferment_days_std = payload.ferment_days_std
     p.beer_type_id = payload.beer_type_id
+    p.v_dich_norm_hl = payload.v_dich_norm_hl
+    p.energy_norm_kwh_per_hl = payload.energy_norm_kwh_per_hl
     record_audit(db, entity_type="product", entity_id=p.product_id, action="update",
                  actor=user, before=before, after=payload.model_dump())
     db.commit()

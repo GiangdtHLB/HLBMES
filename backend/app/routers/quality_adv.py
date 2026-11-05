@@ -32,6 +32,15 @@ def qc_parameters(active_only: bool = True, db: Session = Depends(get_db),
     return svc.list_qc_parameters(db, active_only)
 
 
+@router.get("/parameters-in-use")
+def qc_parameters_in_use(scope_type: str = None, db: Session = Depends(get_db),
+                         user: User = Depends(get_current_user)):
+    """Chỉ tiêu THỰC SỰ có dữ liệu cho 1 công đoạn — khác /parameters (toàn bộ danh mục) — dùng
+    cho bộ chọn chỉ tiêu ở báo cáo "QC theo công đoạn" (yêu cầu người dùng 2026-11-05)."""
+    from ..services import qc_catalog
+    return qc_catalog.parameters_in_use(db, scope_type)
+
+
 @router.post("/parameters", response_model=QcParameterOut, status_code=201)
 def create_qc_parameter(payload: QcParameterIn, db: Session = Depends(get_db),
                         user: User = Depends(get_current_user)):
@@ -130,9 +139,14 @@ def unlink_stage_qc_group(link_id: str, db: Session = Depends(get_db),
 
 
 @router.get("/spc")
-def spc(parameter: str, scope_type: str = None, db: Session = Depends(get_db),
-        user: User = Depends(get_current_user)):
-    return svc.spc_chart(db, parameter, scope_type)
+def spc(parameter: str, scope_type: str = None, date_from: str = None, date_to: str = None,
+        beer_type_id: str = None, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    from datetime import date as date_cls, datetime, timedelta, timezone
+    df = datetime.combine(date_cls.fromisoformat(date_from), datetime.min.time(), tzinfo=timezone.utc) \
+        if date_from else None
+    dt = datetime.combine(date_cls.fromisoformat(date_to), datetime.min.time(), tzinfo=timezone.utc) \
+        + timedelta(days=1) - timedelta(seconds=1) if date_to else None
+    return svc.spc_chart(db, parameter, scope_type, df, dt, beer_type_id)
 
 
 # ---- CAPA ----

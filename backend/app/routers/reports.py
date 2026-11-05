@@ -203,3 +203,70 @@ def pack_line_gantt_report(days: int = 3650, date_from: str = None, date_to: str
     return dashboard_svc.pack_line_gantt_report(db, days, date_from, date_to)
 
 
+# ---- Port từ phần mềm QLSX cũ (dma.biahalong.com:88 › Báo cáo sản xuất) — yêu cầu người dùng
+# 2026-11-05: "xem mục báo cáo sản xuất của phần mềm cũ, tạo cho tôi các báo cáo như vậy, bỏ qua
+# hồ sơ điện tử". Nhóm A — BC sản lượng ----
+@router.get("/pack-output-by-category")
+def pack_output_by_category_report(year: int, month: int, db: Session = Depends(get_db),
+                                   user: User = Depends(get_current_user)):
+    from ..services import production_reports
+    return production_reports.pack_output_by_category(db, year, month)
+
+
+@router.get("/pack-output-cumulative")
+def pack_output_cumulative_report(as_of: str = None, db: Session = Depends(get_db),
+                                  user: User = Depends(get_current_user)):
+    from datetime import date as date_cls
+    from ..services import production_reports
+    d = date_cls.fromisoformat(as_of) if as_of else date_cls.today()
+    return production_reports.pack_output_cumulative(db, d)
+
+
+@router.get("/brew-volume-by-product")
+def brew_volume_by_product_report(year: int, month: int, db: Session = Depends(get_db),
+                                  user: User = Depends(get_current_user)):
+    from ..services import production_reports
+    return production_reports.brew_volume_by_product(db, year, month)
+
+
+def _qc_date_bounds(date_from: str = None, date_to: str = None):
+    from datetime import date as date_cls, timezone
+    df = datetime.combine(date_cls.fromisoformat(date_from), datetime.min.time(), tzinfo=timezone.utc) \
+        if date_from else None
+    dt = datetime.combine(date_cls.fromisoformat(date_to), datetime.min.time(), tzinfo=timezone.utc) \
+        + timedelta(days=1) - timedelta(seconds=1) if date_to else None
+    return df, dt
+
+
+# ---- Nhóm C — KCS thống kê ----
+@router.get("/qc-min-max-avg")
+def qc_min_max_avg_report(scope_type: str = None, date_from: str = None, date_to: str = None,
+                          db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    from ..services import qc_stat_reports
+    df, dt = _qc_date_bounds(date_from, date_to)
+    return qc_stat_reports.qc_min_max_avg(db, scope_type, df, dt)
+
+
+@router.get("/qc-analysis-count")
+def qc_analysis_count_report(scope_type: str = None, date_from: str = None, date_to: str = None,
+                             db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    from ..services import qc_stat_reports
+    df, dt = _qc_date_bounds(date_from, date_to)
+    return qc_stat_reports.qc_analysis_count(db, scope_type, df, dt)
+
+
+# ---- Nhóm D — BC hiệu suất ----
+@router.get("/monthly-yield-detail")
+def monthly_yield_detail_report(year: int, month: int, db: Session = Depends(get_db),
+                                user: User = Depends(get_current_user)):
+    from ..services import yield_reports
+    return yield_reports.monthly_yield_detail(db, year, month)
+
+
+@router.get("/overall-yield-and-norms")
+def overall_yield_and_norms_report(year: int, month: int, db: Session = Depends(get_db),
+                                   user: User = Depends(get_current_user)):
+    from ..services import yield_reports
+    return yield_reports.overall_yield_and_norms_report(db, year, month)
+
+

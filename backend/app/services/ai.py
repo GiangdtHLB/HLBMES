@@ -78,12 +78,20 @@ def _mk(domain, severity, finding, recommendation):
 # ===================== TRỢ LÝ CHAT =====================
 
 def llm_available() -> bool:
+    """`MES_LLM_ENABLED=on` CHỈ có nghĩa "bỏ qua kiểm tra import thư viện anthropic" (ép bật dù
+    "auto" có thể còn do dự vì lý do khác) — KHÔNG được phép bỏ qua luôn việc còn API key hay
+    không. Thứ tự cũ (kiểm "on" TRƯỚC khi kiểm key) khiến nếu ai đó gỡ ANTHROPIC_API_KEY sau này
+    mà quên đổi "on" thành "off", hàm này vẫn báo True — mọi lượt chat sẽ gọi thẳng _chat_llm(),
+    ném lỗi ngay khi khởi tạo client (key None), rồi lộ NGUYÊN VĂN exception ra người dùng qua
+    note "(LLM lỗi, đã dùng engine luật: {e})" (xem _chat_with_memory) — phát hiện qua audit
+    2026-11-03 (cuongpx), chưa xảy ra thật trên prod nhưng là lỗi logic có thật. Kiểm `LLM_API_KEY`
+    TRƯỚC "on" để bịt lỗ hổng này ở đúng gốc, không chỉ ở lớp hiển thị lỗi."""
     if LLM_ENABLED == "off":
+        return False
+    if not LLM_API_KEY:
         return False
     if LLM_ENABLED == "on":
         return True
-    if not LLM_API_KEY:
-        return False
     try:
         import anthropic  # noqa: F401
         return True

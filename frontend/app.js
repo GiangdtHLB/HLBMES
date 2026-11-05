@@ -83,6 +83,17 @@ const badge = (s) => `<span class="badge ${s}">${s}</span>`;
 // class dùng để tô màu mượn từ bộ badge có sẵn (mirror cách module Nấu-Lọc-Chiết cũ làm ở
 // routers/brewing.py::FILTER_STATUS + frontend stBadge, không tự thêm class CSS mới).
 const TANK_BADGE_CLASS = { planned: "planned", dang_nau: "pending", len_men: "running", cho_loc: "in_progress", loc_1_phan: "due", da_loc_het: "done", am: "critical" };
+// Công đoạn -> scope_type của QualityResult (mirror qc_catalog.py — xem services/production_reports.py
+// để biết chi tiết từng công đoạn), dùng cho báo cáo "QC theo công đoạn" (Nhóm B).
+const QC_STAGE_SCOPE = [
+  { scope: "", label: "— Tất cả công đoạn —" },
+  { scope: "batch", label: "Dịch nha (Nấu)" },
+  { scope: "batch_tank", label: "Lên men" },
+  { scope: "batch_filter_lot", label: "Sau lọc" },
+  { scope: "batch_pack_lot", label: "Thành phẩm" },
+  { scope: "lot", label: "NVL" },
+  { scope: "work_order", label: "Nước" },
+];
 // tank_code (BatchTank) là mã LÔ tự sinh theo Lệnh SX/điều độ (VD "01"/"02"/"4") — KHÔNG nói
 // lên tank vật lý nào, chỉ tank_lm (tra từ Danh mục "Tank lên men") mới làm được việc đó. Mọi
 // nơi hiển thị ĐỘC LẬP 1 tank (không có cột tank_lm riêng đứng cạnh) phải dùng hàm này thay vì
@@ -11843,8 +11854,15 @@ VIEWS.reports = async function () {
   const sec = SUB.reports || "material";
   const sections = [{ key: "material", label: "Định mức NVL" }, { key: "filling", label: "Chiết (lon)" },
     { key: "filter", label: "Hệ lọc" }, { key: "pack_line", label: "Dây chuyền chiết" },
-    { key: "brewhouse_steps", label: "Log hệ nấu" }, { key: "brewhouse_cycle", label: "Thời gian cả mẻ nấu" }];
+    { key: "brewhouse_steps", label: "Log hệ nấu" }, { key: "brewhouse_cycle", label: "Thời gian cả mẻ nấu" },
+    { key: "pack_by_category", label: "Sản lượng chiết" }, { key: "pack_cumulative", label: "Chiết lũy kế" },
+    { key: "brew_volume", label: "Sản lượng nấu" }, { key: "qc_trend", label: "QC theo công đoạn" },
+    { key: "fermentation_curve", label: "Đánh giá QTLM theo tank" },
+    { key: "qc_min_max_avg", label: "KCS Min-Max-AVG" }, { key: "qc_analysis_count", label: "KCS đếm số lần phân tích" },
+    { key: "yield_detail", label: "BC hiệu suất chi tiết" },
+    { key: "overall_yield_norms", label: "BC hiệu suất tổng + định mức" }];
   let body = "";
+  let qcParamItemsCache = [];   // dùng ở wiring "qc_trend" bên dưới để dựng initCheckboxMultiSelect
 
   if (sec === "material") {
     const days = SUB.reports_days || 3650;
@@ -12157,6 +12175,262 @@ VIEWS.reports = async function () {
           `<tr><td colspan=${2 + bcRoles.length} class="muted">Cần ít nhất 1 mẻ đã có dữ liệu.</td></tr>`}</tbody>
       </table></div>
     </div>`;
+  } else if (sec === "pack_by_category") {
+    // Port từ phần mềm QLSX cũ "BC sản lượng chiết" — yêu cầu người dùng 2026-11-05. Nhóm theo
+    // Loại bia (category), kèm % hiệu suất thu hồi tính theo CẢ VÒNG ĐỜI lô lọc (xem docstring
+    // services/production_reports.py::pack_output_by_category — chỉ tính lô lọc ĐÃ CHIẾT HẾT,
+    // xếp vào tháng của lượt tách cuối cùng).
+    const now1 = new Date();
+    const pcYear = SUB.reports_pc_year || now1.getFullYear();
+    const pcMonth = SUB.reports_pc_month || (now1.getMonth() + 1);
+    const pcRep = await GET(`/reports/pack-output-by-category?year=${pcYear}&month=${pcMonth}`);
+    const pcItems = pcRep.items || [];
+    body = `<div class="panel"><h2>BC sản lượng chiết theo tháng</h2>
+      <div class="muted" style="margin-bottom:8px">Nhóm theo Loại bia. Hiệu suất thu hồi % tính theo CẢ lô lọc (V cấp chiết đưa vào ↔ tổng lít chiết ra), chỉ tính lô lọc ĐÃ CHIẾT HẾT trong tháng — lô còn dở sẽ hiện vào tháng khi nó chiết xong.</div>
+      <div class="row">
+        <div class="field"><label>Năm</label><input id="rpc_year" type="number" value="${pcYear}" style="width:90px"/></div>
+        <div class="field"><label>Tháng</label><input id="rpc_month" type="number" min="1" max="12" value="${pcMonth}" style="width:70px"/></div>
+        <button class="btn" id="rpc_apply" style="align-self:flex-end">Xem</button>
+      </div>
+      <div class="tablewrap"><table>
+        <thead><tr><th>Loại bia</th><th>Số lô lọc</th><th>V cấp chiết (hl)</th><th>Quy ra lít</th><th>Số thùng/kiện</th><th>Hiệu suất thu hồi %</th></tr></thead>
+        <tbody>${pcItems.map(i => `<tr>
+          <td>${esc(i.category)}</td><td>${i.filter_batch_count}</td>
+          <td>${i.input_hl.toLocaleString("vi-VN")}</td><td>${i.output_l.toLocaleString("vi-VN")}</td>
+          <td class="muted">${i.case_count != null ? i.case_count.toLocaleString("vi-VN") : "—"}</td>
+          <td style="color:${i.yield_pct == null ? "var(--muted)" : i.yield_pct < 95 ? "var(--red)" : "var(--green)"}">${i.yield_pct != null ? i.yield_pct + "%" : "—"}</td></tr>`).join("") ||
+          '<tr><td colspan=6 class="muted">Chưa có lô lọc nào chiết xong trong tháng này.</td></tr>'}</tbody>
+        ${pcItems.length ? `<tfoot><tr style="font-weight:700"><td>Tổng</td><td>—</td>
+          <td>${pcRep.total.input_hl.toLocaleString("vi-VN")}</td><td>${pcRep.total.output_l.toLocaleString("vi-VN")}</td><td>—</td>
+          <td>${pcRep.total.yield_pct != null ? pcRep.total.yield_pct + "%" : "—"}</td></tr></tfoot>` : ""}
+      </table></div>
+    </div>`;
+  } else if (sec === "pack_cumulative") {
+    // Port từ "BC sản lượng chiết lũy kế" (phần mềm cũ) — ngày/tuần/tháng/năm song song, theo SKU.
+    const pcuDate = SUB.reports_pcu_date || toISODateLocal(new Date());
+    const pcuRep = await GET(`/reports/pack-output-cumulative?as_of=${pcuDate}`);
+    const pcuItems = pcuRep.items || [];
+    const fmtCell = (w) => `${w.case != null ? w.case.toLocaleString("vi-VN") + " kiện / " : ""}${w.l.toLocaleString("vi-VN")} lít`;
+    body = `<div class="panel"><h2>BC sản lượng chiết lũy kế</h2>
+      <div class="muted" style="margin-bottom:8px">Sản lượng chiết trong ngày, kèm lũy kế tuần (từ Thứ 2)/tháng/năm tính tới hết ngày đã chọn, theo từng sản phẩm đóng gói (SKU).</div>
+      <div class="row">
+        <div class="field"><label>Ngày</label><input id="rpcu_date" type="date" value="${pcuDate}"/></div>
+        <button class="btn" id="rpcu_apply" style="align-self:flex-end">Xem</button>
+      </div>
+      <div class="tablewrap"><table>
+        <thead><tr><th>Mã SP</th><th>Tên sản phẩm</th><th>Loại bia</th><th>Trong ngày</th><th>Lũy kế tuần</th><th>Lũy kế tháng</th><th>Lũy kế năm</th></tr></thead>
+        <tbody>${pcuItems.map(i => `<tr>
+          <td><code class="k">${esc(i.finished_product_code)}</code></td><td>${esc(i.finished_product_name)}</td>
+          <td class="muted">${esc(i.category || "—")}</td>
+          <td>${fmtCell(i.day)}</td><td>${fmtCell(i.week)}</td><td>${fmtCell(i.month)}</td><td>${fmtCell(i.year)}</td></tr>`).join("") ||
+          '<tr><td colspan=7 class="muted">Chưa có dữ liệu.</td></tr>'}</tbody>
+      </table></div>
+    </div>`;
+  } else if (sec === "brew_volume") {
+    // Port từ "BC sản lượng nấu" (phần mềm cũ) — theo tháng, nhóm theo Dịch bia.
+    const now2 = new Date();
+    const bvYear = SUB.reports_bv_year || now2.getFullYear();
+    const bvMonth = SUB.reports_bv_month || (now2.getMonth() + 1);
+    const bvRep = await GET(`/reports/brew-volume-by-product?year=${bvYear}&month=${bvMonth}`);
+    const bvItems = bvRep.items || [];
+    body = `<div class="panel"><h2>BC sản lượng nấu theo tháng</h2>
+      <div class="muted" style="margin-bottom:8px">Mỗi dòng 1 mẻ nấu. "V tồn" là tồn hiện tại của TANK mà mẻ đó đã gộp vào (nhiều mẻ cùng 1 tank sẽ hiện cùng 1 số tồn, không tách riêng được theo từng mẻ).</div>
+      <div class="row">
+        <div class="field"><label>Năm</label><input id="rbv_year" type="number" value="${bvYear}" style="width:90px"/></div>
+        <div class="field"><label>Tháng</label><input id="rbv_month" type="number" min="1" max="12" value="${bvMonth}" style="width:70px"/></div>
+        <button class="btn" id="rbv_apply" style="align-self:flex-end">Xem</button>
+      </div>
+      <input class="searchbox" data-tbl="t_brewvol" placeholder="Tìm theo mã mẻ, dịch bia, tank..."/>
+      <div class="tablewrap"><table id="t_brewvol">
+        <thead><tr><th>Mẻ</th><th>Ngày nấu</th><th>Ngày KT nạp dịch</th><th>Dịch bia</th><th>Tank CCT</th><th>V dịch</th><th>V tồn</th><th>ĐVT</th></tr></thead>
+        <tbody>${bvItems.map(b => `<tr>
+          <td><code class="k">${esc(b.batch_code)}</code></td><td class="muted">${fmt(b.start_at)}</td>
+          <td class="muted">${b.end_at ? fmt(b.end_at) : "—"}</td><td>${esc(b.product_name)}</td>
+          <td class="muted">${esc(b.tank_code || "—")}</td>
+          <td>${b.v_dich != null ? b.v_dich.toLocaleString("vi-VN") : "—"}</td>
+          <td class="muted">${b.v_ton != null ? b.v_ton.toLocaleString("vi-VN") : "—"}</td>
+          <td class="muted">${esc(b.uom)}</td></tr>`).join("") ||
+          '<tr><td colspan=8 class="muted">Chưa có mẻ nấu nào trong tháng này.</td></tr>'}</tbody>
+      </table></div>
+      <h3>Tổng cộng theo Dịch bia</h3>
+      <div class="tablewrap"><table>
+        <thead><tr><th>Dịch bia</th><th>Số mẻ</th><th>Tổng V dịch</th></tr></thead>
+        <tbody>${bvRep.subtotals.map(s => `<tr><td>${esc(s.product_name)}</td><td>${s.batch_count}</td>
+          <td><b>${s.v_dich.toLocaleString("vi-VN")}</b></td></tr>`).join("") ||
+          '<tr><td colspan=3 class="muted">—</td></tr>'}</tbody>
+      </table></div>
+    </div>`;
+  } else if (sec === "qc_trend") {
+    // Port từ các báo cáo "histogram/SPC theo Nhóm chỉ tiêu" của phần mềm cũ (6 công đoạn:
+    // dịch nha/lên men/sau lọc/thành phẩm/NVL/nước) — thực chất là 1 biểu đồ xu hướng/kiểm soát
+    // (SPC) theo thời gian cho 1 chỉ tiêu, lọc theo công đoạn (scope_type) + khoảng thời gian —
+    // tái dùng /qc/spc + controlChart() (đã có sẵn ở Chất lượng ▸ QC Lab, chỉ thêm bộ lọc công
+    // đoạn + khoảng ngày chưa có ở đó). Yêu cầu người dùng 2026-11-05.
+    const qcStage = SUB.reports_qc_stage || "";
+    // Chỉ tiêu CHỈ liệt kê những gì công đoạn này THỰC SỰ có dữ liệu (/qc/parameters-in-use),
+    // khác /qc/parameters (toàn bộ danh mục, không phân biệt công đoạn) — yêu cầu người dùng
+    // 2026-11-05: "công đoạn nào có chỉ tiêu nào thì chỉ hiện các chỉ tiêu đó thôi, không hiện
+    // toàn bộ chỉ tiêu trong cơ sở dữ liệu". Giá trị chọn là MÃ THẬT (code = QualityResult.parameter
+    // thật trong CSDL, không phải tên hiển thị — tên không unique, xem resolve_parameter_display),
+    // nhãn hiện "Tên (ĐVT)" (yêu cầu người dùng: "hiển thị cả tên chỉ tiêu, đơn vị").
+    const [qcParams, qcBeerTypes] = await Promise.all([
+      GET(`/qc/parameters-in-use${qcStage ? "?scope_type=" + qcStage : ""}`).catch(() => []),
+      GET("/beer-types").catch(() => [])]);
+    qcParamItemsCache = qcParams;   // đọc lại ở wiring bên dưới (biến const trong nhánh này không lọt ra ngoài được)
+    // Nhiều chỉ tiêu cùng lúc (yêu cầu người dùng 2026-11-05: "cho chọn nhiều loại chỉ tiêu cùng
+    // lúc để xem nữa") — mỗi chỉ tiêu vẽ riêng 1 biểu đồ SPC (không gộp chung 1 trục vì khác đơn
+    // vị/thang đo/USL-LSL), dùng lại initCheckboxMultiSelect() (dropdown tích chọn đã có sẵn).
+    const qcParamCodes = qcParams.map(p => p.code);
+    const qcValidPrevSelection = (SUB.reports_qc_params || []).filter(c => qcParamCodes.includes(c));
+    const qcSelectedParams = qcValidPrevSelection.length ? qcValidPrevSelection
+      : (qcParams[0] ? [qcParams[0].code] : []);
+    SUB.reports_qc_params = qcSelectedParams;   // chuẩn hoá lại để wiring bên dưới đọc trực tiếp từ SUB
+    const qcFrom = SUB.reports_qc_from || "";
+    const qcTo = SUB.reports_qc_to || "";
+    const qcBeerType = SUB.reports_qc_beer_type || "";
+    body = `<div class="panel"><h2>QC theo công đoạn — biểu đồ xu hướng/kiểm soát (SPC)</h2>
+      <div class="muted" style="margin-bottom:8px">Chọn công đoạn + 1 hoặc nhiều chỉ tiêu (và khoảng ngày/Loại bia nếu muốn thu hẹp) để xem biểu đồ giá trị theo thời gian kèm UCL/LCL/USL/LSL — mỗi chỉ tiêu 1 biểu đồ riêng.</div>
+      <div class="row">
+        <div class="field"><label>Công đoạn</label><select id="rqc_stage">
+          ${QC_STAGE_SCOPE.map(s => `<option value="${s.scope}" ${s.scope === qcStage ? "selected" : ""}>${esc(s.label)}</option>`).join("")}
+        </select></div>
+        <div class="field" style="min-width:220px"><label>Chỉ tiêu</label><div id="rqc_param_wrap"></div></div>
+        <div class="field"><label>Loại bia</label><select id="rqc_beertype">
+          <option value="">— Tất cả Loại bia —</option>
+          ${qcBeerTypes.map(bt => `<option value="${esc(bt.beer_type_id)}" ${bt.beer_type_id === qcBeerType ? "selected" : ""}>${esc(bt.code)} — ${esc(bt.name)}</option>`).join("")}
+        </select></div>
+        <div class="field"><label>Từ ngày</label><input id="rqc_from" type="date" value="${qcFrom}"/></div>
+        <div class="field"><label>Đến ngày</label><input id="rqc_to" type="date" value="${qcTo}"/></div>
+        <button class="btn" id="rqc_apply" style="align-self:flex-end">Xem</button>
+      </div>
+      <div class="muted" style="margin-top:4px;font-size:12px">Lưu ý: lọc theo Loại bia sẽ KHÔNG áp dụng cho công đoạn NVL — 1 lô NVL có thể dùng chung cho nhiều Loại bia, không gán được riêng cho 1 Loại bia.</div>
+      <div id="rqc_box" class="muted" style="margin-top:8px">Đang tải…</div>
+    </div>`;
+  } else if (sec === "fermentation_curve") {
+    // Port "Đánh giá QTLM theo tank" (QTLM = Quá trình lên men, phần mềm cũ) — biểu đồ theo dõi
+    // lên men (nhiệt độ/°P/áp suất/mật độ tế bào theo ngày) đã có sẵn trong modal chi tiết Lô lên
+    // men (showBatchTank, _flChartHtml) nhưng chỉ xem được khi mở TỪNG tank — mục này cho chọn
+    // thẳng 1 tank bất kỳ (kể cả tank cũ đã lọc hết) để xem lại, không phải lục trong "Mẻ sản
+    // xuất". Yêu cầu người dùng 2026-11-05.
+    const fcTanks = await GET("/batch-tanks").catch(() => []);
+    const fcTankId = SUB.reports_fc_tank || (fcTanks[0] ? fcTanks[0].tank_id : "");
+    body = `<div class="panel"><h2>Đánh giá QTLM theo tank</h2>
+      <div class="muted" style="margin-bottom:8px">Biểu đồ theo dõi lên men theo ngày (nhiệt độ, °P, áp suất, mật độ tế bào) của 1 Lô lên men (tank).</div>
+      <div class="row">
+        <div class="field" style="flex:1"><label>Lô lên men (tank)</label><select id="rfc_tank">
+          ${fcTanks.map(t => `<option value="${esc(t.tank_id)}" ${t.tank_id === fcTankId ? "selected" : ""}>${esc(t.tank_code)}${t.tank_lm ? " — " + esc(t.tank_lm) : ""}</option>`).join("")}
+        </select></div>
+        <button class="btn" id="rfc_apply" style="align-self:flex-end">Xem</button>
+      </div>
+      <div id="rfc_box" class="muted" style="margin-top:8px">${fcTanks.length ? "Đang tải…" : "Chưa có Lô lên men nào."}</div>
+    </div>`;
+  } else if (sec === "qc_min_max_avg") {
+    // Port "KCS Thống kê Min-Max-AVG" (phần mềm cũ) — theo từng chỉ tiêu, lọc theo công đoạn +
+    // khoảng ngày tùy chọn. Yêu cầu người dùng 2026-11-05.
+    const mmStage = SUB.reports_mm_stage || "";
+    const mmFrom = SUB.reports_mm_from || "";
+    const mmTo = SUB.reports_mm_to || "";
+    body = `<div class="panel"><h2>KCS Thống kê Min-Max-AVG</h2>
+      <div class="muted" style="margin-bottom:8px">Giá trị Min/Max/AVG của từng chỉ tiêu (chỉ tiêu dạng số), lọc theo công đoạn + khoảng ngày (tùy chọn).</div>
+      <div class="row">
+        <div class="field"><label>Công đoạn</label><select id="rmm_stage">
+          ${QC_STAGE_SCOPE.map(s => `<option value="${s.scope}" ${s.scope === mmStage ? "selected" : ""}>${esc(s.label)}</option>`).join("")}
+        </select></div>
+        <div class="field"><label>Từ ngày</label><input id="rmm_from" type="date" value="${mmFrom}"/></div>
+        <div class="field"><label>Đến ngày</label><input id="rmm_to" type="date" value="${mmTo}"/></div>
+        <button class="btn" id="rmm_apply" style="align-self:flex-end">Xem</button>
+      </div>
+      <input class="searchbox" data-tbl="t_mmavg" placeholder="Tìm theo tên chỉ tiêu..."/>
+      <div id="rmm_box" class="muted" style="margin-top:8px">Đang tải…</div>
+    </div>`;
+  } else if (sec === "qc_analysis_count") {
+    // Port "KCS đếm số lần phân tích" (phần mềm cũ) — tổng số lần phân tích theo từng chỉ tiêu
+    // (kèm Đạt/Không đạt/Chờ duyệt) và theo ngày, lọc theo công đoạn + khoảng ngày tùy chọn.
+    const acStage = SUB.reports_ac_stage || "";
+    const acFrom = SUB.reports_ac_from || "";
+    const acTo = SUB.reports_ac_to || "";
+    body = `<div class="panel"><h2>KCS đếm số lần phân tích</h2>
+      <div class="muted" style="margin-bottom:8px">Tổng số lần phân tích theo chỉ tiêu (kèm Đạt/Không đạt/Chờ duyệt) và theo ngày, lọc theo công đoạn + khoảng ngày (tùy chọn).</div>
+      <div class="row">
+        <div class="field"><label>Công đoạn</label><select id="rac_stage">
+          ${QC_STAGE_SCOPE.map(s => `<option value="${s.scope}" ${s.scope === acStage ? "selected" : ""}>${esc(s.label)}</option>`).join("")}
+        </select></div>
+        <div class="field"><label>Từ ngày</label><input id="rac_from" type="date" value="${acFrom}"/></div>
+        <div class="field"><label>Đến ngày</label><input id="rac_to" type="date" value="${acTo}"/></div>
+        <button class="btn" id="rac_apply" style="align-self:flex-end">Xem</button>
+      </div>
+      <input class="searchbox" data-tbl="t_anlcount" placeholder="Tìm theo tên chỉ tiêu..."/>
+      <div id="rac_box" class="muted" style="margin-top:8px">Đang tải…</div>
+    </div>`;
+  } else if (sec === "yield_detail") {
+    // Port "BC hiệu suất chi tiết" (phần mềm cũ) — hiệu suất theo công đoạn (nấu/lên men/lọc/
+    // chiết) TRONG 1 THÁNG, gộp từ mọi mẻ — khác /batches/{id}/yield (chỉ xem được 1 mẻ).
+    // Yêu cầu người dùng 2026-11-05.
+    const now3 = new Date();
+    const ydYear = SUB.reports_yd_year || now3.getFullYear();
+    const ydMonth = SUB.reports_yd_month || (now3.getMonth() + 1);
+    const ydRep = await GET(`/reports/monthly-yield-detail?year=${ydYear}&month=${ydMonth}`);
+    const ydSummary = ydRep.summary || [], ydItems = ydRep.items || [];
+    body = `<div class="panel"><h2>BC hiệu suất chi tiết theo tháng</h2>
+      <div class="muted" style="margin-bottom:8px">Hiệu suất (output/input) theo từng công đoạn, gộp mọi mẻ có ghi nhận hiệu suất trong tháng.</div>
+      <div class="row">
+        <div class="field"><label>Năm</label><input id="ryd_year" type="number" value="${ydYear}" style="width:90px"/></div>
+        <div class="field"><label>Tháng</label><input id="ryd_month" type="number" min="1" max="12" value="${ydMonth}" style="width:70px"/></div>
+        <button class="btn" id="ryd_apply" style="align-self:flex-end">Xem</button>
+      </div>
+      <div class="tablewrap"><table>
+        <thead><tr><th>Công đoạn</th><th>Số lượt ghi</th><th>Hiệu suất TB</th><th>Kỳ vọng TB</th><th>Số lượt dưới kỳ vọng</th></tr></thead>
+        <tbody>${ydSummary.map(s => `<tr><td>${esc(s.step_label)}</td><td>${s.n}</td>
+          <td><b>${s.avg_pct != null ? s.avg_pct + "%" : "—"}</b></td>
+          <td class="muted">${s.avg_expected_pct != null ? s.avg_expected_pct + "%" : "—"}</td>
+          <td style="color:${s.below_expected_count ? "var(--red)" : "inherit"}">${s.below_expected_count}</td></tr>`).join("") ||
+          '<tr><td colspan=5 class="muted">Chưa có dữ liệu.</td></tr>'}</tbody>
+      </table></div>
+      <h3 style="margin-top:12px">Chi tiết theo mẻ</h3>
+      <input class="searchbox" data-tbl="t_yielddetail" placeholder="Tìm theo mã mẻ, công đoạn..."/>
+      <div class="tablewrap"><table id="t_yielddetail">
+        <thead><tr><th>Mẻ</th><th>Công đoạn</th><th>Input</th><th>Output</th><th>ĐVT</th><th>Hiệu suất</th><th>Kỳ vọng</th><th>Lúc ghi</th></tr></thead>
+        <tbody>${ydItems.map(i => `<tr>
+          <td><code class="k">${esc(i.batch_code || "—")}</code></td><td>${esc(i.step_label)}</td>
+          <td>${i.input_qty}</td><td>${i.output_qty}</td><td class="muted">${esc(i.uom)}</td>
+          <td style="color:${i.below_expected ? "var(--red)" : "inherit"}">${i.step_pct}%</td>
+          <td class="muted">${i.expected_pct != null ? i.expected_pct + "%" : "—"}</td>
+          <td class="muted">${fmt(i.recorded_at)}</td></tr>`).join("") ||
+          '<tr><td colspan=8 class="muted">Chưa có dữ liệu.</td></tr>'}</tbody>
+      </table></div>
+    </div>`;
+  } else if (sec === "overall_yield_norms") {
+    // Port "BC hiệu suất tổng + định mức dịch + định mức năng lượng" (phần mềm cũ) — yêu cầu
+    // người dùng 2026-11-05. Định mức khai theo TỪNG dịch bia (Danh mục ▸ Dịch bia), nhưng năng
+    // lượng chỉ đo được TOÀN NHÀ MÁY (không tách theo dịch bia) nên phần năng lượng so 1 số bình
+    // quân gia quyền theo sản lượng — xem docstring services/yield_reports.py::overall_yield_and_norms_report.
+    const now4 = new Date();
+    const oyYear = SUB.reports_oy_year || now4.getFullYear();
+    const oyMonth = SUB.reports_oy_month || (now4.getMonth() + 1);
+    const oyRep = await GET(`/reports/overall-yield-and-norms?year=${oyYear}&month=${oyMonth}`);
+    const oyOverall = oyRep.overall_yield, oyVdich = oyRep.v_dich_by_product || [], oyEnergy = oyRep.energy;
+    body = `<div class="panel"><h2>BC hiệu suất tổng + định mức dịch + định mức năng lượng</h2>
+      <div class="row">
+        <div class="field"><label>Năm</label><input id="roy_year" type="number" value="${oyYear}" style="width:90px"/></div>
+        <div class="field"><label>Tháng</label><input id="roy_month" type="number" min="1" max="12" value="${oyMonth}" style="width:70px"/></div>
+        <button class="btn" id="roy_apply" style="align-self:flex-end">Xem</button>
+      </div>
+      <h3 style="margin-top:12px">Hiệu suất tổng (toàn nhà máy)</h3>
+      <div class="muted" style="margin-bottom:6px">V cấp chiết đưa vào: <b>${oyOverall.input_hl.toLocaleString("vi-VN")} hl</b> · Chiết ra: <b>${oyOverall.output_l.toLocaleString("vi-VN")} lít</b> · Hiệu suất thu hồi: <b>${oyOverall.yield_pct != null ? oyOverall.yield_pct + "%" : "—"}</b></div>
+      <h3 style="margin-top:12px">Định mức V dịch theo dịch bia</h3>
+      <div class="tablewrap"><table>
+        <thead><tr><th>Dịch bia</th><th>Số mẻ</th><th>V dịch TB/mẻ (hl)</th><th>Định mức (hl/mẻ)</th><th>% so định mức</th></tr></thead>
+        <tbody>${oyVdich.map(i => `<tr><td>${esc(i.product_name)}</td><td>${i.batch_count}</td>
+          <td>${i.avg_v_dich_per_batch_hl ?? "—"}</td><td class="muted">${i.v_dich_norm_hl ?? "—"}</td>
+          <td style="color:${i.pct_of_norm == null ? "var(--muted)" : i.pct_of_norm < 95 ? "var(--red)" : "var(--green)"}">${i.pct_of_norm != null ? i.pct_of_norm + "%" : "—"}</td></tr>`).join("") ||
+          '<tr><td colspan=5 class="muted">Chưa có dữ liệu.</td></tr>'}</tbody>
+      </table></div>
+      <h3 style="margin-top:12px">Định mức năng lượng (toàn nhà máy)</h3>
+      ${oyEnergy.error ? `<div class="muted">Không lấy được dữ liệu điện tiêu thụ thực tế (CSDL ngoài): ${esc(oyEnergy.error)}. Định mức bình quân gia quyền theo dịch bia: <b>${oyEnergy.norm_kwh_per_hl ?? "—"}</b> kWh/hl.</div>` :
+        `<div class="muted">Điện tiêu thụ thực tế: <b>${oyEnergy.actual_kwh?.toLocaleString("vi-VN") ?? "—"}</b> kWh
+          · Thực tế: <b>${oyEnergy.actual_kwh_per_hl ?? "—"}</b> kWh/hl · Định mức (gia quyền theo sản lượng): <b>${oyEnergy.norm_kwh_per_hl ?? "—"}</b> kWh/hl
+          · % so định mức: <b style="color:${oyEnergy.pct_of_norm == null ? "inherit" : oyEnergy.pct_of_norm > 105 ? "var(--red)" : "var(--green)"}">${oyEnergy.pct_of_norm != null ? oyEnergy.pct_of_norm + "%" : "—"}</b></div>`}
+    </div>`;
   }
 
   $("view-reports").innerHTML = subnav("reports", sections, sec) + body;
@@ -12244,6 +12518,174 @@ VIEWS.reports = async function () {
       render("reports");
     };
     loadFillingData();
+  }
+  if (sec === "pack_by_category") {
+    $("rpc_apply").onclick = () => {
+      SUB.reports_pc_year = parseInt($("rpc_year").value);
+      SUB.reports_pc_month = parseInt($("rpc_month").value);
+      render("reports");
+    };
+  }
+  if (sec === "pack_cumulative") {
+    $("rpcu_apply").onclick = () => { SUB.reports_pcu_date = $("rpcu_date").value; render("reports"); };
+  }
+  if (sec === "brew_volume") {
+    wirePaginate("t_brewvol", 20);
+    $("rbv_apply").onclick = () => {
+      SUB.reports_bv_year = parseInt($("rbv_year").value);
+      SUB.reports_bv_month = parseInt($("rbv_month").value);
+      render("reports");
+    };
+  }
+  if (sec === "qc_trend") {
+    const qcParamByCode = {};
+    qcParamItemsCache.forEach(p => { qcParamByCode[p.code] = p; });
+    const qcParamPicker = initCheckboxMultiSelect($("rqc_param_wrap"),
+      qcParamItemsCache.map(p => ({ value: p.code, label: p.unit ? `${p.name} (${p.unit})` : p.name })),
+      SUB.reports_qc_params || [], "chỉ tiêu");
+    // Danh sách chỉ tiêu PHỤ THUỘC công đoạn đang chọn (/qc/parameters-in-use?scope_type=...) —
+    // đổi công đoạn phải tải lại cả màn (không chỉ đổi dropdown tại chỗ) để lấy đúng danh sách mới.
+    $("rqc_stage").onchange = () => {
+      SUB.reports_qc_stage = $("rqc_stage").value;
+      SUB.reports_qc_params = [];
+      render("reports");
+    };
+    async function loadQcTrend() {
+      const stage = $("rqc_stage").value, codes = qcParamPicker.getSelected();
+      const from = $("rqc_from").value, to = $("rqc_to").value, beerType = $("rqc_beertype").value;
+      if (!codes.length) { $("rqc_box").innerHTML = '<div class="muted">Chọn ít nhất 1 chỉ tiêu.</div>'; return; }
+      $("rqc_box").innerHTML = "Đang tải…";
+      try {
+        const results = await Promise.all(codes.map(async (code) => {
+          const qs = new URLSearchParams({ parameter: code });
+          if (stage) qs.set("scope_type", stage);
+          if (from) qs.set("date_from", from);
+          if (to) qs.set("date_to", to);
+          if (beerType) qs.set("beer_type_id", beerType);
+          return { code, spc: await GET(`/qc/spc?${qs.toString()}`) };
+        }));
+        $("rqc_box").innerHTML = results.map(({ code, spc }) => {
+          const info = qcParamByCode[code];
+          const label = info ? (info.unit ? `${info.name} (${info.unit})` : info.name) : code;
+          const cap = (spc.cp != null) ? `Cp <b>${spc.cp}</b> · Cpk <b>${spc.cpk}</b>` : "—";
+          return `<div style="margin-top:${codes.length > 1 ? 16 : 0}px">
+            ${codes.length > 1 ? `<h3>${esc(label)}</h3>` : ""}
+            ${window.controlChart(spc)}
+            <div style="margin-top:6px">n=${spc.n} · Mean ${spc.mean} · σ ${spc.sigma} · UCL ${spc.ucl} · LCL ${spc.lcl} · ${cap}
+              ${spc.n ? `· ${spc.in_control ? '<span class="badge available">Trong kiểm soát</span>' : `<span class="badge critical">${spc.out_of_control} điểm vi phạm</span>`}` : ""}</div>
+          </div>`;
+        }).join(codes.length > 1 ? '<hr style="margin:16px 0;border-color:var(--border)"/>' : "");
+      } catch (e) { $("rqc_box").innerHTML = `<div class="muted">Lỗi: ${esc(e.message)}</div>`; }
+    }
+    $("rqc_apply").onclick = () => {
+      SUB.reports_qc_stage = $("rqc_stage").value;
+      SUB.reports_qc_params = qcParamPicker.getSelected();
+      SUB.reports_qc_from = $("rqc_from").value;
+      SUB.reports_qc_to = $("rqc_to").value;
+      SUB.reports_qc_beer_type = $("rqc_beertype").value;
+      loadQcTrend();
+    };
+    loadQcTrend();
+  }
+  if (sec === "fermentation_curve") {
+    async function loadFermCurve() {
+      const tankId = $("rfc_tank").value;
+      if (!tankId) return;
+      $("rfc_box").innerHTML = "Đang tải…";
+      try {
+        const [t, log] = await Promise.all([GET(`/batch-tanks/${tankId}`), GET(`/batch-tanks/${tankId}/process-log`)]);
+        $("rfc_box").innerHTML = `
+          <dl class="detail">
+            <dt>Trạng thái</dt><dd>${statusBadge(TANK_BADGE_CLASS[t.status], t.status_label)}</dd>
+            <dt>Tồn/Tổng</dt><dd>${t.on_hand} / ${t.volume_hl} hl</dd>
+            <dt>Ngày bắt đầu vào dịch</dt><dd>${t.vao_dich_start ? fmt(t.vao_dich_start) : "—"}</dd>
+            <dt>Ngày kết thúc vào dịch</dt><dd>${t.vao_dich_end ? fmt(t.vao_dich_end) : '<span class="muted">chưa xong</span>'}</dd>
+          </dl>
+          ${_flChartHtml(log.readings, { pressure: true })}`;
+      } catch (e) { $("rfc_box").innerHTML = `<div class="muted">Lỗi: ${esc(e.message)}</div>`; }
+    }
+    $("rfc_apply").onclick = () => { SUB.reports_fc_tank = $("rfc_tank").value; loadFermCurve(); };
+    if ($("rfc_tank").value) loadFermCurve();
+  }
+  if (sec === "qc_min_max_avg") {
+    async function loadMinMaxAvg() {
+      const stage = $("rmm_stage").value, from = $("rmm_from").value, to = $("rmm_to").value;
+      $("rmm_box").innerHTML = "Đang tải…";
+      try {
+        const qs = new URLSearchParams();
+        if (stage) qs.set("scope_type", stage);
+        if (from) qs.set("date_from", from);
+        if (to) qs.set("date_to", to);
+        const r = await GET(`/reports/qc-min-max-avg?${qs.toString()}`);
+        const items = r.items || [];
+        $("rmm_box").innerHTML = `<div class="tablewrap"><table id="t_mmavg">
+          <thead><tr><th>Chỉ tiêu</th><th>ĐVT</th><th>Số lần</th><th>Min</th><th>Max</th><th>AVG</th></tr></thead>
+          <tbody>${items.map(i => `<tr><td>${esc(i.parameter_name)}</td><td class="muted">${esc(i.unit || "—")}</td>
+            <td>${i.n}</td><td>${i.min}</td><td>${i.max}</td><td><b>${i.avg}</b></td></tr>`).join("") ||
+            '<tr><td colspan=6 class="muted">Chưa có dữ liệu.</td></tr>'}</tbody>
+        </table></div>`;
+        wireSearch(); wirePaginate("t_mmavg", 20);
+      } catch (e) { $("rmm_box").innerHTML = `<div class="muted">Lỗi: ${esc(e.message)}</div>`; }
+    }
+    $("rmm_apply").onclick = () => {
+      SUB.reports_mm_stage = $("rmm_stage").value;
+      SUB.reports_mm_from = $("rmm_from").value;
+      SUB.reports_mm_to = $("rmm_to").value;
+      loadMinMaxAvg();
+    };
+    loadMinMaxAvg();
+  }
+  if (sec === "qc_analysis_count") {
+    async function loadAnalysisCount() {
+      const stage = $("rac_stage").value, from = $("rac_from").value, to = $("rac_to").value;
+      $("rac_box").innerHTML = "Đang tải…";
+      try {
+        const qs = new URLSearchParams();
+        if (stage) qs.set("scope_type", stage);
+        if (from) qs.set("date_from", from);
+        if (to) qs.set("date_to", to);
+        const r = await GET(`/reports/qc-analysis-count?${qs.toString()}`);
+        const byParam = r.by_parameter || [], byDay = r.by_day || [];
+        $("rac_box").innerHTML = `
+          <div class="muted" style="margin-bottom:6px">Tổng số lần phân tích: <b>${r.total}</b></div>
+          <div class="tablewrap"><table id="t_anlcount">
+            <thead><tr><th>Chỉ tiêu</th><th>ĐVT</th><th>Tổng số lần</th><th>Đạt</th><th>Không đạt</th><th>Chờ duyệt</th><th>Không hợp lệ</th></tr></thead>
+            <tbody>${byParam.map(i => `<tr><td>${esc(i.parameter_name)}</td><td class="muted">${esc(i.unit || "—")}</td><td><b>${i.total}</b></td>
+              <td class="muted">${i.pass}</td><td style="color:${i.fail ? "var(--red)" : "inherit"}">${i.fail}</td>
+              <td class="muted">${i.pending}</td><td class="muted">${i.invalid}</td></tr>`).join("") ||
+              '<tr><td colspan=7 class="muted">Chưa có dữ liệu.</td></tr>'}</tbody>
+          </table></div>
+          <h3 style="margin-top:12px">Theo ngày</h3>
+          <div class="tablewrap"><table>
+            <thead><tr><th>Ngày</th><th>Số lần phân tích</th></tr></thead>
+            <tbody>${byDay.map(d => `<tr><td>${esc(d.date)}</td><td>${d.count}</td></tr>`).join("") ||
+              '<tr><td colspan=2 class="muted">—</td></tr>'}</tbody>
+          </table></div>`;
+        wireSearch(); wirePaginate("t_anlcount", 20);
+      } catch (e) { $("rac_box").innerHTML = `<div class="muted">Lỗi: ${esc(e.message)}</div>`; }
+    }
+    $("rac_apply").onclick = () => {
+      SUB.reports_ac_stage = $("rac_stage").value;
+      SUB.reports_ac_from = $("rac_from").value;
+      SUB.reports_ac_to = $("rac_to").value;
+      loadAnalysisCount();
+    };
+    loadAnalysisCount();
+  }
+  if (sec === "yield_detail") {
+    wirePaginate("t_yielddetail", 20);
+    $("ryd_apply").onclick = () => {
+      SUB.reports_yd_year = parseInt($("ryd_year").value);
+      SUB.reports_yd_month = parseInt($("ryd_month").value);
+      render("reports");
+    };
+  }
+  if (sec === "overall_yield_norms") {
+    $("roy_apply").onclick = () => {
+      SUB.reports_oy_year = parseInt($("roy_year").value);
+      SUB.reports_oy_month = parseInt($("roy_month").value);
+      render("reports");
+    };
   }
 };
 
@@ -12476,15 +12918,21 @@ VIEWS.master = async function () {
           <div class="field"><label>Số ngày lên men</label><input id="pr_ferment_days" type="number" step="any" placeholder="VD: 20 hoặc 7.5" style="width:120px"/></div>
           <div class="field"><label>Loại bia (tuỳ chọn)</label><select id="pr_beertype"><option value="">(chưa gán)</option>${beerTypes.map(bt => `<option value="${bt.beer_type_id}">${esc(bt.code)} — ${esc(bt.name)}</option>`).join("")}</select></div>
         </div>
+        <div class="row">
+          <div class="field"><label>Định mức V dịch (hl/mẻ)</label><input id="pr_vdich_norm" type="number" step="any" placeholder="(tuỳ chọn)" style="width:140px"/></div>
+          <div class="field"><label>Định mức năng lượng (kWh/hl TP)</label><input id="pr_energy_norm" type="number" step="any" placeholder="(tuỳ chọn)" style="width:160px"/></div>
+        </div>
         <div class="field"><label>Mô tả</label><input id="pr_desc" placeholder="(tuỳ chọn)" style="width:100%"/></div>
         <button class="btn" id="pr_add" style="margin-top:10px">+ Tạo dịch bia</button>` : ""}
         <input class="searchbox" data-tbl="t_products" placeholder="Tìm mã/tên dịch bia..." style="margin-top:10px"/>
         <div class="tablewrap" style="margin-top:6px"><table id="t_products">
-          <thead><tr><th>Mã</th><th>Tên</th><th>ĐVT</th><th>Số ngày lên men</th><th>Loại bia</th><th>Mô tả</th>${canManage ? "<th></th>" : ""}</tr></thead>
+          <thead><tr><th>Mã</th><th>Tên</th><th>ĐVT</th><th>Số ngày lên men</th><th>Loại bia</th><th>Định mức dịch (hl/mẻ)</th><th>Định mức NL (kWh/hl)</th><th>Mô tả</th>${canManage ? "<th></th>" : ""}</tr></thead>
           <tbody>${products.map(p => { const bt = beerTypes.find(x => x.beer_type_id === p.beer_type_id); return `<tr>
             <td><code class="k">${esc(p.code)}</code></td><td>${esc(p.name)}</td><td>${esc(p.uom)}</td>
             <td class="muted">${p.ferment_days_std ?? "—"}</td>
             <td class="muted">${bt ? esc(bt.name) : "—"}</td>
+            <td class="muted">${p.v_dich_norm_hl ?? "—"}</td>
+            <td class="muted">${p.energy_norm_kwh_per_hl ?? "—"}</td>
             <td class="muted">${esc(p.description || "—")}</td>
             ${canManage ? `<td style="white-space:nowrap">
               <button class="btn sm sec" data-ep="${esc(p.product_id)}">Sửa</button>
@@ -13067,7 +13515,9 @@ VIEWS.master = async function () {
       await POST("/products", { code: $("pr_code").value.trim(), name: $("pr_name").value.trim(),
         uom: $("pr_uom").value.trim() || "L", description: $("pr_desc").value.trim() || null,
         ferment_days_std: $("pr_ferment_days").value === "" ? null : parseFloat($("pr_ferment_days").value),
-        beer_type_id: $("pr_beertype").value || null });
+        beer_type_id: $("pr_beertype").value || null,
+        v_dich_norm_hl: $("pr_vdich_norm").value === "" ? null : parseFloat($("pr_vdich_norm").value),
+        energy_norm_kwh_per_hl: $("pr_energy_norm").value === "" ? null : parseFloat($("pr_energy_norm").value) });
       toast("Đã tạo dịch bia"); render("master");
     });
     if ($("bt_add")) $("bt_add").onclick = () => guard(async () => {
@@ -13463,13 +13913,17 @@ VIEWS.master = async function () {
         <div class="field" style="margin-top:8px"><label>ĐVT</label><input id="ep_uom" value="${esc(p.uom)}"/></div>
         <div class="field" style="margin-top:8px"><label>Số ngày lên men</label><input id="ep_ferment_days" type="number" step="any" value="${p.ferment_days_std ?? ""}"/></div>
         <div class="field" style="margin-top:8px"><label>Loại bia</label><select id="ep_beertype"><option value="">(chưa gán)</option>${beerTypes.map(bt => `<option value="${bt.beer_type_id}" ${bt.beer_type_id === p.beer_type_id ? "selected" : ""}>${esc(bt.code)} — ${esc(bt.name)}</option>`).join("")}</select></div>
+        <div class="field" style="margin-top:8px"><label>Định mức V dịch (hl/mẻ)</label><input id="ep_vdich_norm" type="number" step="any" value="${p.v_dich_norm_hl ?? ""}"/></div>
+        <div class="field" style="margin-top:8px"><label>Định mức năng lượng (kWh/hl TP)</label><input id="ep_energy_norm" type="number" step="any" value="${p.energy_norm_kwh_per_hl ?? ""}"/></div>
         <div class="field" style="margin-top:8px"><label>Mô tả</label><input id="ep_desc" value="${esc(p.description || "")}"/></div>
         <button class="btn" id="ep_save" style="margin-top:12px">Lưu</button>`);
       $("ep_save").onclick = () => guard(async () => {
         await PUT(`/products/${p.product_id}`, { code: $("ep_code").value.trim(), name: $("ep_name").value.trim(),
           uom: $("ep_uom").value.trim(), description: $("ep_desc").value.trim() || null,
           ferment_days_std: $("ep_ferment_days").value === "" ? null : parseFloat($("ep_ferment_days").value),
-          beer_type_id: $("ep_beertype").value || null });
+          beer_type_id: $("ep_beertype").value || null,
+          v_dich_norm_hl: $("ep_vdich_norm").value === "" ? null : parseFloat($("ep_vdich_norm").value),
+          energy_norm_kwh_per_hl: $("ep_energy_norm").value === "" ? null : parseFloat($("ep_energy_norm").value) });
         closeModal(); toast("Đã cập nhật"); render("master");
       });
     });
