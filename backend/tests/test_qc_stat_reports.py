@@ -25,9 +25,16 @@ from app import seed as seed_mod
 from app.database import SessionLocal
 from app.common import new_id
 from app.models.quality import QualityResult
-from app.services import qc_stat_reports
+from app.models.quality_ext import QCParameter
+from app.services import qc_catalog, qc_stat_reports
 
 PARAM = "QCSTAT Độ cồn"
+# Giả lập đúng kiểu dữ liệu thật trong dev DB: QualityResult.parameter lưu MÃ (code), tên/ĐVT
+# hiển thị phải tra qua QCParameter.code (yêu cầu người dùng 2026-11-05: "hiển thị cả tên chỉ
+# tiêu, đơn vị").
+CODED_PARAM = "QCSTAT-9999"
+CODED_PARAM_NAME = "Độ cồn (mã hoá)"
+CODED_PARAM_UNIT = "%v/v"
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -53,12 +60,57 @@ def seeded_results():
         # Ngoài khoảng/khác scope — phải KHÔNG bị tính vào kết quả lọc theo batch + 6/2031.
         _mk(db, "lot", 9.9, "pass", datetime(2031, 6, 11, tzinfo=timezone.utc))
         _mk(db, "batch", 100.0, "pass", datetime(2032, 1, 1, tzinfo=timezone.utc))
+        # Chỉ tiêu lưu dạng MÃ (khớp QCParameter.code) — xem resolve_parameter_display().
+        db.add(QCParameter(param_id=new_id(), code=CODED_PARAM, name=CODED_PARAM_NAME,
+                           unit=CODED_PARAM_UNIT))
+        # Ngày riêng (6/13), không trùng các ngày đã có assertion "by_day" cố định ở test khác.
+        _mk(db, "batch", 5.5, "pass", datetime(2031, 6, 13, tzinfo=timezone.utc),
+           parameter=CODED_PARAM, unit=None)
         db.commit()
     finally:
         db.close()
     db2 = SessionLocal()
     yield db2
     db2.close()
+
+
+def test_resolve_parameter_display_prefers_catalog_code_match(seeded_results):
+    db = seeded_results
+    resolved = qc_catalog.resolve_parameter_display(db, [CODED_PARAM, "khong-ton-tai-ma-nay"])
+    assert resolved[CODED_PARAM] == {"name": CODED_PARAM_NAME, "unit": CODED_PARAM_UNIT}
+    # Mã không khớp danh mục -> giữ nguyên làm tên hiển thị, ĐVT None (không crash).
+    assert resolved["khong-ton-tai-ma-nay"] == {"name": "khong-ton-tai-ma-nay", "unit": None}
+
+
+def test_qc_min_max_avg_resolves_name_and_unit_from_catalog_code(seeded_results):
+    db = seeded_results
+    r = qc_stat_reports.qc_min_max_avg(db, scope_type="batch",
+                                       date_from=datetime(2031, 6, 1, tzinfo=timezone.utc),
+                                       date_to=datetime(2031, 6, 30, tzinfo=timezone.utc))
+    row = next(i for i in r["items"] if i["parameter"] == CODED_PARAM)
+    assert row["parameter_name"] == CODED_PARAM_NAME
+    assert row["unit"] == CODED_PARAM_UNIT   # lấy từ catalog dù QualityResult.unit=None
+
+
+def test_parameters_in_use_only_lists_what_scope_actually_has(seeded_results):
+    db = seeded_results
+    batch_params = qc_catalog.parameters_in_use(db, "batch")
+    names = {p["name"] for p in batch_params}
+    assert CODED_PARAM_NAME in names
+    assert PARAM in names
+    row = next(p for p in batch_params if p["code"] == CODED_PARAM)
+    assert row["unit"] == CODED_PARAM_UNIT
+
+    # scope_type="lot" chỉ có PARAM (QCSTAT Độ cồn), KHÔNG có CODED_PARAM (chỉ ghi ở "batch").
+    lot_params = qc_catalog.parameters_in_use(db, "lot")
+    lot_names = {p["name"] for p in lot_params}
+    assert PARAM in lot_names
+    assert CODED_PARAM_NAME not in lot_names
+
+    # Không truyền scope_type -> thấy TẤT CẢ chỉ tiêu có dữ liệu ở MỌI công đoạn.
+    all_params = qc_catalog.parameters_in_use(db)
+    assert CODED_PARAM_NAME in {p["name"] for p in all_params}
+    assert PARAM in {p["name"] for p in all_params}
 
 
 def test_qc_min_max_avg_stats_per_parameter(seeded_results):

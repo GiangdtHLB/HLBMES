@@ -6,7 +6,7 @@
   bắt buộc khai báo/duyệt chỉ tiêu trước khi được coi là nhập kho nhà máy chính thức.
 """
 
-from sqlalchemy import func, select, true
+from sqlalchemy import distinct, func, select, true
 from sqlalchemy.orm import Session
 
 from ..audit import record_audit
@@ -66,6 +66,43 @@ def scope_ids_by_beer_type(db: Session, beer_type_id: str) -> dict[str, set[str]
 
     return {"batch": batch_ids, "batch_tank": tank_scope_ids, "work_order": wo_ids,
             "batch_filter_lot": filter_lot_ids, "batch_pack_lot": pack_lot_ids}
+
+
+def resolve_parameter_display(db: Session, raw_parameters) -> dict[str, dict]:
+    """Tra tên hiển thị + ĐVT cho các giá trị QualityResult.parameter THẬT trong CSDL — dữ liệu
+    QC cũ (nhập từ hệ thống Braumat/QLSX cũ) lưu THẲNG MÃ chỉ tiêu (VD "2515", "6258") vào cột
+    `parameter` thay vì tên hiển thị, nên phải tra qua QCParameter.CODE (không phải .name) mới ra
+    được tên tiếng Việt + đơn vị đúng (yêu cầu người dùng 2026-11-05: "hiển thị cả tên chỉ tiêu,
+    đơn vị"). Giá trị nào KHÔNG khớp mã nào trong danh mục (đã là tên sẵn, VD "pH" ghi trực tiếp)
+    thì giữ nguyên làm tên hiển thị, đơn vị để None.
+
+    Trả {raw_parameter: {"name": str, "unit": str|None}} — luôn đủ key cho MỌI giá trị trong
+    `raw_parameters`, kể cả không khớp được."""
+    raw_parameters = set(raw_parameters)
+    if not raw_parameters:
+        return {}
+    matched = db.execute(select(QCParameter).where(QCParameter.code.in_(raw_parameters))).scalars().all()
+    by_code = {p.code: p for p in matched}
+    return {raw: ({"name": by_code[raw].name, "unit": by_code[raw].unit} if raw in by_code
+                 else {"name": raw, "unit": None})
+           for raw in raw_parameters}
+
+
+def parameters_in_use(db: Session, scope_type: str = None) -> list[dict]:
+    """Chỉ tiêu THỰC SỰ có dữ liệu (QualityResult) cho 1 công đoạn (scope_type) — khác
+    list_qc_parameters() (TOÀN BỘ danh mục QCParameter, không quan tâm công đoạn nào có ghi nhận
+    hay chưa). Dùng cho bộ chọn chỉ tiêu ở báo cáo "QC theo công đoạn" (yêu cầu người dùng
+    2026-11-05: "công đoạn nào có chỉ tiêu nào thì chỉ hiện các chỉ tiêu đó thôi, không hiện toàn
+    bộ chỉ tiêu trong cơ sở dữ liệu") — đáng tin hơn lọc theo QCParameter.stage (free-text, không
+    điền đủ cho mọi chỉ tiêu, xem ghi chú ở model). Trả [{code, name, unit}], sắp theo tên."""
+    stmt = select(distinct(QualityResult.parameter))
+    if scope_type:
+        stmt = stmt.where(QualityResult.scope_type == scope_type)
+    raw_params = db.execute(stmt).scalars().all()
+    resolved = resolve_parameter_display(db, raw_params)
+    items = [{"code": raw, "name": resolved[raw]["name"], "unit": resolved[raw]["unit"]} for raw in raw_params]
+    items.sort(key=lambda i: i["name"])
+    return items
 
 
 # ---- Nhóm chỉ tiêu ----

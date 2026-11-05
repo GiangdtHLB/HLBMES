@@ -12266,21 +12266,24 @@ VIEWS.reports = async function () {
     // (SPC) theo thời gian cho 1 chỉ tiêu, lọc theo công đoạn (scope_type) + khoảng thời gian —
     // tái dùng /qc/spc + controlChart() (đã có sẵn ở Chất lượng ▸ QC Lab, chỉ thêm bộ lọc công
     // đoạn + khoảng ngày chưa có ở đó). Yêu cầu người dùng 2026-11-05.
-    const [qcParamsRaw, qcBeerTypes] = await Promise.all([
-      GET("/qc/parameters").catch(() => []), GET("/beer-types").catch(() => [])]);
-    // Lọc trùng TÊN (QCParameter.name KHÔNG unique — nhiều chỉ tiêu ở các stage khác nhau dùng
-    // chung 1 tên hiển thị, VD "pH"/"Độ ẩm") — /qc/spc chỉ lọc theo tên nên chỉ cần giữ 1 lần,
-    // tránh dropdown tích chọn hiện trùng tên nhiều lần (bug đã gặp khi build).
-    const qcParams = [...new Map(qcParamsRaw.map(p => [p.name, p])).values()];
-    qcParamItemsCache = qcParams;   // đọc lại ở wiring bên dưới (biến const trong nhánh này không lọt ra ngoài được)
     const qcStage = SUB.reports_qc_stage || "";
+    // Chỉ tiêu CHỈ liệt kê những gì công đoạn này THỰC SỰ có dữ liệu (/qc/parameters-in-use),
+    // khác /qc/parameters (toàn bộ danh mục, không phân biệt công đoạn) — yêu cầu người dùng
+    // 2026-11-05: "công đoạn nào có chỉ tiêu nào thì chỉ hiện các chỉ tiêu đó thôi, không hiện
+    // toàn bộ chỉ tiêu trong cơ sở dữ liệu". Giá trị chọn là MÃ THẬT (code = QualityResult.parameter
+    // thật trong CSDL, không phải tên hiển thị — tên không unique, xem resolve_parameter_display),
+    // nhãn hiện "Tên (ĐVT)" (yêu cầu người dùng: "hiển thị cả tên chỉ tiêu, đơn vị").
+    const [qcParams, qcBeerTypes] = await Promise.all([
+      GET(`/qc/parameters-in-use${qcStage ? "?scope_type=" + qcStage : ""}`).catch(() => []),
+      GET("/beer-types").catch(() => [])]);
+    qcParamItemsCache = qcParams;   // đọc lại ở wiring bên dưới (biến const trong nhánh này không lọt ra ngoài được)
     // Nhiều chỉ tiêu cùng lúc (yêu cầu người dùng 2026-11-05: "cho chọn nhiều loại chỉ tiêu cùng
     // lúc để xem nữa") — mỗi chỉ tiêu vẽ riêng 1 biểu đồ SPC (không gộp chung 1 trục vì khác đơn
     // vị/thang đo/USL-LSL), dùng lại initCheckboxMultiSelect() (dropdown tích chọn đã có sẵn).
-    const qcParamNames = qcParams.map(p => p.name);
-    const qcValidPrevSelection = (SUB.reports_qc_params || []).filter(n => qcParamNames.includes(n));
+    const qcParamCodes = qcParams.map(p => p.code);
+    const qcValidPrevSelection = (SUB.reports_qc_params || []).filter(c => qcParamCodes.includes(c));
     const qcSelectedParams = qcValidPrevSelection.length ? qcValidPrevSelection
-      : (qcParams[0] ? [qcParams[0].name] : []);
+      : (qcParams[0] ? [qcParams[0].code] : []);
     SUB.reports_qc_params = qcSelectedParams;   // chuẩn hoá lại để wiring bên dưới đọc trực tiếp từ SUB
     const qcFrom = SUB.reports_qc_from || "";
     const qcTo = SUB.reports_qc_to || "";
@@ -12535,31 +12538,43 @@ VIEWS.reports = async function () {
     };
   }
   if (sec === "qc_trend") {
+    const qcParamByCode = {};
+    qcParamItemsCache.forEach(p => { qcParamByCode[p.code] = p; });
     const qcParamPicker = initCheckboxMultiSelect($("rqc_param_wrap"),
-      qcParamItemsCache.map(p => ({ value: p.name, label: p.name })), SUB.reports_qc_params || [], "chỉ tiêu");
+      qcParamItemsCache.map(p => ({ value: p.code, label: p.unit ? `${p.name} (${p.unit})` : p.name })),
+      SUB.reports_qc_params || [], "chỉ tiêu");
+    // Danh sách chỉ tiêu PHỤ THUỘC công đoạn đang chọn (/qc/parameters-in-use?scope_type=...) —
+    // đổi công đoạn phải tải lại cả màn (không chỉ đổi dropdown tại chỗ) để lấy đúng danh sách mới.
+    $("rqc_stage").onchange = () => {
+      SUB.reports_qc_stage = $("rqc_stage").value;
+      SUB.reports_qc_params = [];
+      render("reports");
+    };
     async function loadQcTrend() {
-      const stage = $("rqc_stage").value, params = qcParamPicker.getSelected();
+      const stage = $("rqc_stage").value, codes = qcParamPicker.getSelected();
       const from = $("rqc_from").value, to = $("rqc_to").value, beerType = $("rqc_beertype").value;
-      if (!params.length) { $("rqc_box").innerHTML = '<div class="muted">Chọn ít nhất 1 chỉ tiêu.</div>'; return; }
+      if (!codes.length) { $("rqc_box").innerHTML = '<div class="muted">Chọn ít nhất 1 chỉ tiêu.</div>'; return; }
       $("rqc_box").innerHTML = "Đang tải…";
       try {
-        const results = await Promise.all(params.map(async (param) => {
-          const qs = new URLSearchParams({ parameter: param });
+        const results = await Promise.all(codes.map(async (code) => {
+          const qs = new URLSearchParams({ parameter: code });
           if (stage) qs.set("scope_type", stage);
           if (from) qs.set("date_from", from);
           if (to) qs.set("date_to", to);
           if (beerType) qs.set("beer_type_id", beerType);
-          return { param, spc: await GET(`/qc/spc?${qs.toString()}`) };
+          return { code, spc: await GET(`/qc/spc?${qs.toString()}`) };
         }));
-        $("rqc_box").innerHTML = results.map(({ param, spc }) => {
+        $("rqc_box").innerHTML = results.map(({ code, spc }) => {
+          const info = qcParamByCode[code];
+          const label = info ? (info.unit ? `${info.name} (${info.unit})` : info.name) : code;
           const cap = (spc.cp != null) ? `Cp <b>${spc.cp}</b> · Cpk <b>${spc.cpk}</b>` : "—";
-          return `<div style="margin-top:${params.length > 1 ? 16 : 0}px">
-            ${params.length > 1 ? `<h3>${esc(param)}</h3>` : ""}
+          return `<div style="margin-top:${codes.length > 1 ? 16 : 0}px">
+            ${codes.length > 1 ? `<h3>${esc(label)}</h3>` : ""}
             ${window.controlChart(spc)}
             <div style="margin-top:6px">n=${spc.n} · Mean ${spc.mean} · σ ${spc.sigma} · UCL ${spc.ucl} · LCL ${spc.lcl} · ${cap}
               ${spc.n ? `· ${spc.in_control ? '<span class="badge available">Trong kiểm soát</span>' : `<span class="badge critical">${spc.out_of_control} điểm vi phạm</span>`}` : ""}</div>
           </div>`;
-        }).join(params.length > 1 ? '<hr style="margin:16px 0;border-color:var(--border)"/>' : "");
+        }).join(codes.length > 1 ? '<hr style="margin:16px 0;border-color:var(--border)"/>' : "");
       } catch (e) { $("rqc_box").innerHTML = `<div class="muted">Lỗi: ${esc(e.message)}</div>`; }
     }
     $("rqc_apply").onclick = () => {
@@ -12605,7 +12620,7 @@ VIEWS.reports = async function () {
         const items = r.items || [];
         $("rmm_box").innerHTML = `<div class="tablewrap"><table id="t_mmavg">
           <thead><tr><th>Chỉ tiêu</th><th>ĐVT</th><th>Số lần</th><th>Min</th><th>Max</th><th>AVG</th></tr></thead>
-          <tbody>${items.map(i => `<tr><td>${esc(i.parameter)}</td><td class="muted">${esc(i.unit || "—")}</td>
+          <tbody>${items.map(i => `<tr><td>${esc(i.parameter_name)}</td><td class="muted">${esc(i.unit || "—")}</td>
             <td>${i.n}</td><td>${i.min}</td><td>${i.max}</td><td><b>${i.avg}</b></td></tr>`).join("") ||
             '<tr><td colspan=6 class="muted">Chưa có dữ liệu.</td></tr>'}</tbody>
         </table></div>`;
@@ -12634,11 +12649,11 @@ VIEWS.reports = async function () {
         $("rac_box").innerHTML = `
           <div class="muted" style="margin-bottom:6px">Tổng số lần phân tích: <b>${r.total}</b></div>
           <div class="tablewrap"><table id="t_anlcount">
-            <thead><tr><th>Chỉ tiêu</th><th>Tổng số lần</th><th>Đạt</th><th>Không đạt</th><th>Chờ duyệt</th><th>Không hợp lệ</th></tr></thead>
-            <tbody>${byParam.map(i => `<tr><td>${esc(i.parameter)}</td><td><b>${i.total}</b></td>
+            <thead><tr><th>Chỉ tiêu</th><th>ĐVT</th><th>Tổng số lần</th><th>Đạt</th><th>Không đạt</th><th>Chờ duyệt</th><th>Không hợp lệ</th></tr></thead>
+            <tbody>${byParam.map(i => `<tr><td>${esc(i.parameter_name)}</td><td class="muted">${esc(i.unit || "—")}</td><td><b>${i.total}</b></td>
               <td class="muted">${i.pass}</td><td style="color:${i.fail ? "var(--red)" : "inherit"}">${i.fail}</td>
               <td class="muted">${i.pending}</td><td class="muted">${i.invalid}</td></tr>`).join("") ||
-              '<tr><td colspan=6 class="muted">Chưa có dữ liệu.</td></tr>'}</tbody>
+              '<tr><td colspan=7 class="muted">Chưa có dữ liệu.</td></tr>'}</tbody>
           </table></div>
           <h3 style="margin-top:12px">Theo ngày</h3>
           <div class="tablewrap"><table>

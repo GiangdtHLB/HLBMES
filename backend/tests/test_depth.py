@@ -94,6 +94,32 @@ def test_spc_survives_duplicate_qc_parameter_name(client):
     assert spc.json()["n"] == 0  # chưa có QualityResult nào cho chỉ tiêu test này — chỉ cần không crash
 
 
+def test_qc_parameters_in_use_scoped_to_stage(client):
+    """GET /qc/parameters-in-use (yêu cầu người dùng 2026-11-05: "công đoạn nào có chỉ tiêu nào
+    thì chỉ hiện các chỉ tiêu đó") — khác /qc/parameters (toàn bộ danh mục), chỉ liệt kê chỉ tiêu
+    THỰC SỰ có QualityResult cho đúng scope_type truyền vào. seed._seed_quality_adv ghi "Độ đường
+    (°P)" cho mẻ 9001 với scope_type="batch"."""
+    admin_h = _login(client, "admin", "AdminTest123")
+    r = client.get("/api/qc/parameters-in-use", params={"scope_type": "batch"}, headers=admin_h)
+    assert r.status_code == 200, r.text
+    items = r.json()
+    names = {i["name"] for i in items}
+    assert "Độ đường (°P)" in names
+    for i in items:
+        assert set(i.keys()) == {"code", "name", "unit"}
+
+    # Công đoạn không có chỉ tiêu "Độ đường (°P)" nào ghi nhận -> không được liệt kê.
+    r2 = client.get("/api/qc/parameters-in-use", params={"scope_type": "lot"}, headers=admin_h)
+    assert r2.status_code == 200, r2.text
+    assert "Độ đường (°P)" not in {i["name"] for i in r2.json()}
+
+    # Không truyền scope_type -> liệt kê chỉ tiêu có dữ liệu ở MỌI công đoạn (ít nhất bằng tập
+    # con của /qc/parameters?active_only=false, không rộng hơn).
+    r3 = client.get("/api/qc/parameters-in-use", headers=admin_h)
+    assert r3.status_code == 200, r3.text
+    assert "Độ đường (°P)" in {i["name"] for i in r3.json()}
+
+
 def test_capa_and_coa(client):
     h = _login(client, "quandoc", "123456")
     capas = client.get("/api/qc/capa", headers=h).json()
