@@ -15,7 +15,7 @@ from ..errors import DomainError, NotFoundError
 from ..models.audit import AuditLog
 from ..models.batches import BatchExecution
 from ..models.batch_pipeline import BatchFilterLot, BatchPackLot, BatchTank, BatchTankLink
-from ..models.master import BeerType, Material, MaterialGroup
+from ..models.master import BeerType, Material, MaterialGroup, Product
 from ..models.materials import MaterialLot
 from ..models.materials_ext import MaterialQcGroup
 from ..models.quality import QualityResult, QualityResultHistory
@@ -29,6 +29,43 @@ def batch_tank_scope_id(tank_id: str, stage: str) -> str:
     nên scope_id phải khác nhau theo stage để QualityResult không lẫn giữa 2 bộ chỉ tiêu
     (tank_id đã duy nhất toàn hệ thống, không cần ghép thêm năm)."""
     return f"{tank_id}__{stage}"
+
+
+def scope_ids_by_beer_type(db: Session, beer_type_id: str) -> dict[str, set[str]]:
+    """Tập scope_id (QualityResult.scope_id) ứng với 1 Loại bia, theo TỪNG scope_type — dùng để
+    lọc báo cáo "QC theo công đoạn" theo Loại bia (yêu cầu người dùng 2026-11-05: "tôi muốn xem
+    theo loại bia"), vì QualityResult không lưu thẳng beer_type_id mà phải suy qua Dịch bia
+    (product_id) hoặc Loại bia khai trực tiếp trên lô lọc/lệnh.
+
+    - batch (nấu)/batch_tank (lên men)/work_order (nước): suy qua Product.beer_type_id (Dịch bia
+      gắn trên mẻ/tank/WO). batch_tank cần cả 2 scope_id (len_men_chinh/len_men_phu).
+    - batch_filter_lot (sau lọc): BatchFilterLot.beer_type_id khai TRỰC TIẾP lúc tạo lô lọc
+      (không suy qua product_id — người dùng có thể chọn khác Loại bia gốc, xem beer_type_mismatch).
+    - batch_pack_lot (thành phẩm): kế thừa Loại bia từ lô lọc nguồn (filter_lot_id).
+    - lot (NVL): KHÔNG có trong dict trả về — 1 lô NVL có thể dùng cho nhiều Loại bia khác nhau,
+      không gán được 1-1, nên lọc theo Loại bia sẽ loại bỏ hẳn công đoạn NVL (không phải lỗi)."""
+    product_ids = set(db.execute(
+        select(Product.product_id).where(Product.beer_type_id == beer_type_id)).scalars().all())
+
+    batch_ids = set(db.execute(select(BatchExecution.batch_id).where(
+        BatchExecution.product_id.in_(product_ids))).scalars().all()) if product_ids else set()
+
+    tank_ids = set(db.execute(select(BatchTank.tank_id).where(
+        BatchTank.product_id.in_(product_ids))).scalars().all()) if product_ids else set()
+    tank_scope_ids = {batch_tank_scope_id(tid, stage) for tid in tank_ids
+                      for stage in ("len_men_chinh", "len_men_phu")}
+
+    wo_ids = set(db.execute(select(WorkOrder.wo_id).where(
+        WorkOrder.product_id.in_(product_ids))).scalars().all()) if product_ids else set()
+
+    filter_lot_ids = set(db.execute(select(BatchFilterLot.filter_lot_id).where(
+        BatchFilterLot.beer_type_id == beer_type_id)).scalars().all())
+
+    pack_lot_ids = set(db.execute(select(BatchPackLot.pack_lot_id).where(
+        BatchPackLot.filter_lot_id.in_(filter_lot_ids))).scalars().all()) if filter_lot_ids else set()
+
+    return {"batch": batch_ids, "batch_tank": tank_scope_ids, "work_order": wo_ids,
+            "batch_filter_lot": filter_lot_ids, "batch_pack_lot": pack_lot_ids}
 
 
 # ---- Nhóm chỉ tiêu ----

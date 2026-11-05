@@ -12265,13 +12265,15 @@ VIEWS.reports = async function () {
     // (SPC) theo thời gian cho 1 chỉ tiêu, lọc theo công đoạn (scope_type) + khoảng thời gian —
     // tái dùng /qc/spc + controlChart() (đã có sẵn ở Chất lượng ▸ QC Lab, chỉ thêm bộ lọc công
     // đoạn + khoảng ngày chưa có ở đó). Yêu cầu người dùng 2026-11-05.
-    const qcParams = await GET("/qc/parameters").catch(() => []);
+    const [qcParams, qcBeerTypes] = await Promise.all([
+      GET("/qc/parameters").catch(() => []), GET("/beer-types").catch(() => [])]);
     const qcStage = SUB.reports_qc_stage || "";
     const qcParam = SUB.reports_qc_param || (qcParams[0] ? qcParams[0].name : "");
     const qcFrom = SUB.reports_qc_from || "";
     const qcTo = SUB.reports_qc_to || "";
+    const qcBeerType = SUB.reports_qc_beer_type || "";
     body = `<div class="panel"><h2>QC theo công đoạn — biểu đồ xu hướng/kiểm soát (SPC)</h2>
-      <div class="muted" style="margin-bottom:8px">Chọn công đoạn + chỉ tiêu (và khoảng ngày nếu muốn thu hẹp) để xem biểu đồ giá trị theo thời gian kèm UCL/LCL/USL/LSL.</div>
+      <div class="muted" style="margin-bottom:8px">Chọn công đoạn + chỉ tiêu (và khoảng ngày/Loại bia nếu muốn thu hẹp) để xem biểu đồ giá trị theo thời gian kèm UCL/LCL/USL/LSL.</div>
       <div class="row">
         <div class="field"><label>Công đoạn</label><select id="rqc_stage">
           ${QC_STAGE_SCOPE.map(s => `<option value="${s.scope}" ${s.scope === qcStage ? "selected" : ""}>${esc(s.label)}</option>`).join("")}
@@ -12279,10 +12281,15 @@ VIEWS.reports = async function () {
         <div class="field"><label>Chỉ tiêu</label><select id="rqc_param">
           ${qcParams.map(p => `<option value="${esc(p.name)}" ${p.name === qcParam ? "selected" : ""}>${esc(p.name)}</option>`).join("")}
         </select></div>
+        <div class="field"><label>Loại bia</label><select id="rqc_beertype">
+          <option value="">— Tất cả Loại bia —</option>
+          ${qcBeerTypes.map(bt => `<option value="${esc(bt.beer_type_id)}" ${bt.beer_type_id === qcBeerType ? "selected" : ""}>${esc(bt.code)} — ${esc(bt.name)}</option>`).join("")}
+        </select></div>
         <div class="field"><label>Từ ngày</label><input id="rqc_from" type="date" value="${qcFrom}"/></div>
         <div class="field"><label>Đến ngày</label><input id="rqc_to" type="date" value="${qcTo}"/></div>
         <button class="btn" id="rqc_apply" style="align-self:flex-end">Xem</button>
       </div>
+      <div class="muted" style="margin-top:4px;font-size:12px">Lưu ý: lọc theo Loại bia sẽ KHÔNG áp dụng cho công đoạn NVL — 1 lô NVL có thể dùng chung cho nhiều Loại bia, không gán được riêng cho 1 Loại bia.</div>
       <div id="rqc_box" class="muted" style="margin-top:8px">Đang tải…</div>
     </div>`;
   } else if (sec === "fermentation_curve") {
@@ -12519,7 +12526,7 @@ VIEWS.reports = async function () {
   if (sec === "qc_trend") {
     async function loadQcTrend() {
       const stage = $("rqc_stage").value, param = $("rqc_param").value;
-      const from = $("rqc_from").value, to = $("rqc_to").value;
+      const from = $("rqc_from").value, to = $("rqc_to").value, beerType = $("rqc_beertype").value;
       if (!param) { $("rqc_box").innerHTML = '<div class="muted">Chưa có chỉ tiêu nào trong danh mục.</div>'; return; }
       $("rqc_box").innerHTML = "Đang tải…";
       try {
@@ -12527,6 +12534,7 @@ VIEWS.reports = async function () {
         if (stage) qs.set("scope_type", stage);
         if (from) qs.set("date_from", from);
         if (to) qs.set("date_to", to);
+        if (beerType) qs.set("beer_type_id", beerType);
         const spc = await GET(`/qc/spc?${qs.toString()}`);
         const cap = (spc.cp != null) ? `Cp <b>${spc.cp}</b> · Cpk <b>${spc.cpk}</b>` : "—";
         $("rqc_box").innerHTML = window.controlChart(spc) +
@@ -12539,6 +12547,7 @@ VIEWS.reports = async function () {
       SUB.reports_qc_param = $("rqc_param").value;
       SUB.reports_qc_from = $("rqc_from").value;
       SUB.reports_qc_to = $("rqc_to").value;
+      SUB.reports_qc_beer_type = $("rqc_beertype").value;
       loadQcTrend();
     };
     loadQcTrend();

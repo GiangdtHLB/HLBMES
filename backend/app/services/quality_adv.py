@@ -90,13 +90,16 @@ def _western_electric(values: list, cl: float, sigma: float) -> list:
 
 
 def spc_chart(db: Session, parameter: str, scope_type: str = None,
-             date_from=None, date_to=None) -> dict:
+             date_from=None, date_to=None, beer_type_id: str = None) -> dict:
     """Biểu đồ kiểm soát SPC cho một chỉ tiêu (theo tên parameter).
 
     Lấy chuỗi giá trị QualityResult (status != pending, có value) theo thời gian.
     date_from/date_to (datetime, tùy chọn) lọc theo recorded_at — dùng cho báo cáo QC theo kỳ
     (Nhóm B, port từ phần mềm QLSX cũ) khi người dùng chỉ muốn xem 1 khoảng thời gian thay vì
-    toàn bộ lịch sử."""
+    toàn bộ lịch sử. beer_type_id (tùy chọn, yêu cầu người dùng 2026-11-05: "xem theo loại bia")
+    lọc thêm theo Loại bia — xem qc_catalog.scope_ids_by_beer_type() để biết cách suy từ
+    scope_id/scope_type (QualityResult không lưu thẳng beer_type_id); công đoạn NVL ("lot")
+    luôn bị loại khi có bộ lọc này vì 1 lô NVL không gán được cho đúng 1 Loại bia."""
     stmt = select(QualityResult).where(
         QualityResult.parameter == parameter, QualityResult.value.isnot(None)
     ).order_by(QualityResult.recorded_at)
@@ -106,6 +109,16 @@ def spc_chart(db: Session, parameter: str, scope_type: str = None,
         stmt = stmt.where(QualityResult.recorded_at >= date_from)
     if date_to:
         stmt = stmt.where(QualityResult.recorded_at <= date_to)
+    if beer_type_id:
+        from sqlalchemy import and_, or_
+        from . import qc_catalog
+        allowed = qc_catalog.scope_ids_by_beer_type(db, beer_type_id)
+        if scope_type:
+            stmt = stmt.where(QualityResult.scope_id.in_(allowed.get(scope_type, set())))
+        else:
+            stmt = stmt.where(or_(*[and_(QualityResult.scope_type == st, QualityResult.scope_id.in_(ids))
+                                   for st, ids in allowed.items() if ids]) if any(allowed.values())
+                              else QualityResult.scope_id.in_([]))
     rows = db.execute(stmt).scalars().all()
     values = [r.value for r in rows]
     pts = []
