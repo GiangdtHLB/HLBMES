@@ -11843,7 +11843,9 @@ VIEWS.reports = async function () {
   const sec = SUB.reports || "material";
   const sections = [{ key: "material", label: "Định mức NVL" }, { key: "filling", label: "Chiết (lon)" },
     { key: "filter", label: "Hệ lọc" }, { key: "pack_line", label: "Dây chuyền chiết" },
-    { key: "brewhouse_steps", label: "Log hệ nấu" }, { key: "brewhouse_cycle", label: "Thời gian cả mẻ nấu" }];
+    { key: "brewhouse_steps", label: "Log hệ nấu" }, { key: "brewhouse_cycle", label: "Thời gian cả mẻ nấu" },
+    { key: "pack_by_category", label: "Sản lượng chiết" }, { key: "pack_cumulative", label: "Chiết lũy kế" },
+    { key: "brew_volume", label: "Sản lượng nấu" }];
   let body = "";
 
   if (sec === "material") {
@@ -12157,6 +12159,91 @@ VIEWS.reports = async function () {
           `<tr><td colspan=${2 + bcRoles.length} class="muted">Cần ít nhất 1 mẻ đã có dữ liệu.</td></tr>`}</tbody>
       </table></div>
     </div>`;
+  } else if (sec === "pack_by_category") {
+    // Port từ phần mềm QLSX cũ "BC sản lượng chiết" — yêu cầu người dùng 2026-11-05. Nhóm theo
+    // Loại bia (category), kèm % hiệu suất thu hồi tính theo CẢ VÒNG ĐỜI lô lọc (xem docstring
+    // services/production_reports.py::pack_output_by_category — chỉ tính lô lọc ĐÃ CHIẾT HẾT,
+    // xếp vào tháng của lượt tách cuối cùng).
+    const now1 = new Date();
+    const pcYear = SUB.reports_pc_year || now1.getFullYear();
+    const pcMonth = SUB.reports_pc_month || (now1.getMonth() + 1);
+    const pcRep = await GET(`/reports/pack-output-by-category?year=${pcYear}&month=${pcMonth}`);
+    const pcItems = pcRep.items || [];
+    body = `<div class="panel"><h2>BC sản lượng chiết theo tháng</h2>
+      <div class="muted" style="margin-bottom:8px">Nhóm theo Loại bia. Hiệu suất thu hồi % tính theo CẢ lô lọc (V cấp chiết đưa vào ↔ tổng lít chiết ra), chỉ tính lô lọc ĐÃ CHIẾT HẾT trong tháng — lô còn dở sẽ hiện vào tháng khi nó chiết xong.</div>
+      <div class="row">
+        <div class="field"><label>Năm</label><input id="rpc_year" type="number" value="${pcYear}" style="width:90px"/></div>
+        <div class="field"><label>Tháng</label><input id="rpc_month" type="number" min="1" max="12" value="${pcMonth}" style="width:70px"/></div>
+        <button class="btn" id="rpc_apply" style="align-self:flex-end">Xem</button>
+      </div>
+      <div class="tablewrap"><table>
+        <thead><tr><th>Loại bia</th><th>Số lô lọc</th><th>V cấp chiết (hl)</th><th>Quy ra lít</th><th>Số thùng/kiện</th><th>Hiệu suất thu hồi %</th></tr></thead>
+        <tbody>${pcItems.map(i => `<tr>
+          <td>${esc(i.category)}</td><td>${i.filter_batch_count}</td>
+          <td>${i.input_hl.toLocaleString("vi-VN")}</td><td>${i.output_l.toLocaleString("vi-VN")}</td>
+          <td class="muted">${i.case_count != null ? i.case_count.toLocaleString("vi-VN") : "—"}</td>
+          <td style="color:${i.yield_pct == null ? "var(--muted)" : i.yield_pct < 95 ? "var(--red)" : "var(--green)"}">${i.yield_pct != null ? i.yield_pct + "%" : "—"}</td></tr>`).join("") ||
+          '<tr><td colspan=6 class="muted">Chưa có lô lọc nào chiết xong trong tháng này.</td></tr>'}</tbody>
+        ${pcItems.length ? `<tfoot><tr style="font-weight:700"><td>Tổng</td><td>—</td>
+          <td>${pcRep.total.input_hl.toLocaleString("vi-VN")}</td><td>${pcRep.total.output_l.toLocaleString("vi-VN")}</td><td>—</td>
+          <td>${pcRep.total.yield_pct != null ? pcRep.total.yield_pct + "%" : "—"}</td></tr></tfoot>` : ""}
+      </table></div>
+    </div>`;
+  } else if (sec === "pack_cumulative") {
+    // Port từ "BC sản lượng chiết lũy kế" (phần mềm cũ) — ngày/tuần/tháng/năm song song, theo SKU.
+    const pcuDate = SUB.reports_pcu_date || toISODateLocal(new Date());
+    const pcuRep = await GET(`/reports/pack-output-cumulative?as_of=${pcuDate}`);
+    const pcuItems = pcuRep.items || [];
+    const fmtCell = (w) => `${w.case != null ? w.case.toLocaleString("vi-VN") + " kiện / " : ""}${w.l.toLocaleString("vi-VN")} lít`;
+    body = `<div class="panel"><h2>BC sản lượng chiết lũy kế</h2>
+      <div class="muted" style="margin-bottom:8px">Sản lượng chiết trong ngày, kèm lũy kế tuần (từ Thứ 2)/tháng/năm tính tới hết ngày đã chọn, theo từng sản phẩm đóng gói (SKU).</div>
+      <div class="row">
+        <div class="field"><label>Ngày</label><input id="rpcu_date" type="date" value="${pcuDate}"/></div>
+        <button class="btn" id="rpcu_apply" style="align-self:flex-end">Xem</button>
+      </div>
+      <div class="tablewrap"><table>
+        <thead><tr><th>Mã SP</th><th>Tên sản phẩm</th><th>Loại bia</th><th>Trong ngày</th><th>Lũy kế tuần</th><th>Lũy kế tháng</th><th>Lũy kế năm</th></tr></thead>
+        <tbody>${pcuItems.map(i => `<tr>
+          <td><code class="k">${esc(i.finished_product_code)}</code></td><td>${esc(i.finished_product_name)}</td>
+          <td class="muted">${esc(i.category || "—")}</td>
+          <td>${fmtCell(i.day)}</td><td>${fmtCell(i.week)}</td><td>${fmtCell(i.month)}</td><td>${fmtCell(i.year)}</td></tr>`).join("") ||
+          '<tr><td colspan=7 class="muted">Chưa có dữ liệu.</td></tr>'}</tbody>
+      </table></div>
+    </div>`;
+  } else if (sec === "brew_volume") {
+    // Port từ "BC sản lượng nấu" (phần mềm cũ) — theo tháng, nhóm theo Dịch bia.
+    const now2 = new Date();
+    const bvYear = SUB.reports_bv_year || now2.getFullYear();
+    const bvMonth = SUB.reports_bv_month || (now2.getMonth() + 1);
+    const bvRep = await GET(`/reports/brew-volume-by-product?year=${bvYear}&month=${bvMonth}`);
+    const bvItems = bvRep.items || [];
+    body = `<div class="panel"><h2>BC sản lượng nấu theo tháng</h2>
+      <div class="muted" style="margin-bottom:8px">Mỗi dòng 1 mẻ nấu. "V tồn" là tồn hiện tại của TANK mà mẻ đó đã gộp vào (nhiều mẻ cùng 1 tank sẽ hiện cùng 1 số tồn, không tách riêng được theo từng mẻ).</div>
+      <div class="row">
+        <div class="field"><label>Năm</label><input id="rbv_year" type="number" value="${bvYear}" style="width:90px"/></div>
+        <div class="field"><label>Tháng</label><input id="rbv_month" type="number" min="1" max="12" value="${bvMonth}" style="width:70px"/></div>
+        <button class="btn" id="rbv_apply" style="align-self:flex-end">Xem</button>
+      </div>
+      <input class="searchbox" data-tbl="t_brewvol" placeholder="Tìm theo mã mẻ, dịch bia, tank..."/>
+      <div class="tablewrap"><table id="t_brewvol">
+        <thead><tr><th>Mẻ</th><th>Ngày nấu</th><th>Ngày KT nạp dịch</th><th>Dịch bia</th><th>Tank CCT</th><th>V dịch</th><th>V tồn</th><th>ĐVT</th></tr></thead>
+        <tbody>${bvItems.map(b => `<tr>
+          <td><code class="k">${esc(b.batch_code)}</code></td><td class="muted">${fmt(b.start_at)}</td>
+          <td class="muted">${b.end_at ? fmt(b.end_at) : "—"}</td><td>${esc(b.product_name)}</td>
+          <td class="muted">${esc(b.tank_code || "—")}</td>
+          <td>${b.v_dich != null ? b.v_dich.toLocaleString("vi-VN") : "—"}</td>
+          <td class="muted">${b.v_ton != null ? b.v_ton.toLocaleString("vi-VN") : "—"}</td>
+          <td class="muted">${esc(b.uom)}</td></tr>`).join("") ||
+          '<tr><td colspan=8 class="muted">Chưa có mẻ nấu nào trong tháng này.</td></tr>'}</tbody>
+      </table></div>
+      <h3>Tổng cộng theo Dịch bia</h3>
+      <div class="tablewrap"><table>
+        <thead><tr><th>Dịch bia</th><th>Số mẻ</th><th>Tổng V dịch</th></tr></thead>
+        <tbody>${bvRep.subtotals.map(s => `<tr><td>${esc(s.product_name)}</td><td>${s.batch_count}</td>
+          <td><b>${s.v_dich.toLocaleString("vi-VN")}</b></td></tr>`).join("") ||
+          '<tr><td colspan=3 class="muted">—</td></tr>'}</tbody>
+      </table></div>
+    </div>`;
   }
 
   $("view-reports").innerHTML = subnav("reports", sections, sec) + body;
@@ -12244,6 +12331,24 @@ VIEWS.reports = async function () {
       render("reports");
     };
     loadFillingData();
+  }
+  if (sec === "pack_by_category") {
+    $("rpc_apply").onclick = () => {
+      SUB.reports_pc_year = parseInt($("rpc_year").value);
+      SUB.reports_pc_month = parseInt($("rpc_month").value);
+      render("reports");
+    };
+  }
+  if (sec === "pack_cumulative") {
+    $("rpcu_apply").onclick = () => { SUB.reports_pcu_date = $("rpcu_date").value; render("reports"); };
+  }
+  if (sec === "brew_volume") {
+    wirePaginate("t_brewvol", 20);
+    $("rbv_apply").onclick = () => {
+      SUB.reports_bv_year = parseInt($("rbv_year").value);
+      SUB.reports_bv_month = parseInt($("rbv_month").value);
+      render("reports");
+    };
   }
 };
 
