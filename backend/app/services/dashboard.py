@@ -576,6 +576,75 @@ def filter_production_report(db: Session, days: int = 3650, date_from_str: str =
     return rows
 
 
+def filter_line_utilization_report(db: Session, year: int, month: int) -> dict:
+    """Báo cáo "Hiệu suất hệ lọc theo tháng" (tab Báo cáo › Hệ lọc) — % thời gian hệ lọc CHẠY so
+    với thời gian không chạy trong 1 tháng, kèm tổng sản lượng dịch lọc (lít) — yêu cầu người
+    dùng 2026-11-11: "Tạo cho tôi 1 báo cáo ở modul hệ lọc như tính ở trên, có thời gian không lọc
+    và thời gian lọc, %, số giờ, số lít dịch/tháng, cho chọn theo tháng" (mirror đúng cách tính
+    tay đã làm thủ công qua filter-production trước đó trong hội thoại: tổng `duration_hours`
+    cộng dồn mọi mẻ lọc / tổng giờ lịch của kỳ).
+
+    Khung giờ LỊCH dùng để chia % là TRỌN THÁNG (số_ngày_trong_tháng x 24h) — KHÔNG rút ngắn nếu
+    tháng đang chạy dở (hôm nay) hay ngày cuối chưa có mẻ lọc: phần "chưa chạy" của tháng đang
+    diễn ra TỰ NHIÊN rơi vào "thời gian không lọc" (đúng bản chất câu hỏi — máy đang rảnh/chưa
+    tới lượt chạy — chứ không phải lỗi dữ liệu).
+
+    `running_hours`: TỔNG CỘNG DỒN `duration_hours` (ended_at - started_at) của MỌI mẻ lọc (nhóm
+    theo batch_seq_no, mirror _batch_filter_lot_yield_items) có `ended_at` rơi trong tháng — mẻ
+    thiếu started_at (dữ liệu cũ) hoặc duration <= 0 (lệch thứ tự) bị loại khỏi running_hours
+    (không tính được) nhưng VẪN cộng vào `total_liters`/`batch_count` (sản lượng/số mẻ vẫn biết,
+    chỉ riêng thời lượng không biết) — đếm riêng ở `batches_missing_duration` để biết độ tin cậy
+    của % tính được.
+
+    LƯU Ý: nếu nhà máy có NHIỀU lô lọc/tank chạy ĐỒNG THỜI (mẻ lọc tiếp theo bắt đầu trước khi mẻ
+    trước kết thúc hẳn — xảy ra thật trong dữ liệu, VD mẻ 108 bắt đầu 07/11 01:45 trong khi mẻ 107
+    còn chạy tới 06:15), `running_hours` CỘNG DỒN cả phần chồng lấn đó — `running_pct` vì vậy có
+    thể vượt 100% nếu hệ lọc chạy song song nhiều lô cùng lúc một cách đáng kể trong tháng. Đây là
+    tính đúng theo PHƯƠNG PHÁP đã thống nhất với người dùng (tổng giờ chạy / tổng giờ lịch), không
+    clamp lại — vượt 100% tự nó là tín hiệu đáng chú ý (nhiều dòng/lô chạy song song)."""
+    from . import ops_setting as ops_setting_svc
+    settings = ops_setting_svc.get_settings(db)
+    month_start = _vn_day_start_utc(date(year, month, 1))
+    next_month = date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)
+    month_end = _vn_day_start_utc(next_month)
+    days_in_month = (next_month - date(year, month, 1)).days
+    total_hours = days_in_month * 24.0
+
+    base_items = _batch_filter_lot_yield_items(
+        db, month_start, month_end, settings.filter_line_yield_low_l, settings.filter_line_yield_high_l)
+
+    running_hours = 0.0
+    total_liters = 0.0
+    batches_missing_duration = 0
+    for it in base_items:
+        total_liters += it["v_l"]
+        delta_h = None
+        if it["started_at"] and it["ended_at"]:
+            delta_h = (datetime.fromisoformat(it["ended_at"]) - datetime.fromisoformat(it["started_at"])).total_seconds() / 3600
+        if delta_h and delta_h > 0:
+            running_hours += delta_h
+        else:
+            batches_missing_duration += 1
+
+    running_hours = round(running_hours, 2)
+    idle_hours = round(total_hours - running_hours, 2)
+    running_pct = round(running_hours / total_hours * 100, 1) if total_hours else None
+    idle_pct = round(100 - running_pct, 1) if running_pct is not None else None
+
+    return {
+        "year": year, "month": month,
+        "days_in_month": days_in_month,
+        "total_hours": total_hours,
+        "running_hours": running_hours,
+        "idle_hours": idle_hours,
+        "running_pct": running_pct,
+        "idle_pct": idle_pct,
+        "total_liters": round(total_liters, 1),
+        "batch_count": len(base_items),
+        "batches_missing_duration": batches_missing_duration,
+    }
+
+
 def _fmt_vn_dt(iso_str: Optional[str]) -> str:
     """ISO UTC (từ filter_production_report) -> chuỗi hiển thị giờ Việt Nam (UTC+7, cố định —
     không có nhà máy nào ở múi giờ khác) dạng dd/mm/yyyy HH:MM, mirror fmt() ở frontend (vốn tự

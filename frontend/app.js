@@ -11853,7 +11853,8 @@ function packLineGanttSvg(report) {
 VIEWS.reports = async function () {
   const sec = SUB.reports || "material";
   const sections = [{ key: "material", label: "Định mức NVL" }, { key: "filling", label: "Chiết (lon)" },
-    { key: "filter", label: "Hệ lọc" }, { key: "pack_line", label: "Dây chuyền chiết" },
+    { key: "filter", label: "Hệ lọc" }, { key: "filter_utilization", label: "Hiệu suất hệ lọc" },
+    { key: "pack_line", label: "Dây chuyền chiết" },
     { key: "brewhouse_steps", label: "Log hệ nấu" }, { key: "brewhouse_cycle", label: "Thời gian cả mẻ nấu" },
     { key: "pack_by_category", label: "Sản lượng chiết" }, { key: "pack_cumulative", label: "Chiết lũy kế" },
     { key: "brew_volume", label: "Sản lượng nấu" }, { key: "qc_trend", label: "QC theo công đoạn" },
@@ -11979,6 +11980,38 @@ VIEWS.reports = async function () {
           <td class="muted">${esc(r.beer_type_name || "—")}</td></tr>`).join("") ||
           '<tr><td colspan=12 class="muted">Chưa có dữ liệu.</td></tr>'}</tbody>
       </table></div>
+    </div>`;
+  } else if (sec === "filter_utilization") {
+    // "Hiệu suất hệ lọc theo tháng" — % thời gian hệ lọc chạy/không chạy + tổng lít dịch lọc
+    // trong tháng (mirror cách tính tay đã làm thủ công: tổng duration_hours cộng dồn mọi mẻ lọc
+    // / tổng giờ lịch của tháng — yêu cầu người dùng 2026-11-11).
+    const nowU = new Date();
+    const fuYear = SUB.reports_fu_year || nowU.getFullYear();
+    const fuMonth = SUB.reports_fu_month || (nowU.getMonth() + 1);
+    const fuRep = await GET(`/reports/filter-line-utilization?year=${fuYear}&month=${fuMonth}`);
+    const fmtH = (h) => h.toLocaleString("vi-VN", { maximumFractionDigits: 1 });
+    const fmtPct = (p) => p == null ? "—" : p.toLocaleString("vi-VN") + "%";
+    const runPct = fuRep.running_pct == null ? 0 : Math.max(0, Math.min(100, fuRep.running_pct));
+    body = `<div class="panel"><h2>Hiệu suất hệ lọc theo tháng</h2>
+      <div class="muted" style="margin-bottom:8px">Thời gian lọc = tổng cộng dồn "Tổng thời gian lọc" (giờ bắt đầu → kết thúc) của mọi mẻ lọc kết thúc trong tháng. Thời gian không lọc = phần còn lại trong tổng giờ lịch của tháng (số ngày × 24h) — không trừ bớt nếu tháng đang chạy dở.</div>
+      <div class="row">
+        <div class="field"><label>Năm</label><input id="rfu_year" type="number" value="${fuYear}" style="width:90px"/></div>
+        <div class="field"><label>Tháng</label><input id="rfu_month" type="number" min="1" max="12" value="${fuMonth}" style="width:70px"/></div>
+        <button class="btn" id="rfu_apply" style="align-self:flex-end">Xem</button>
+      </div>
+      <div class="row" style="margin:12px 0">
+        <div class="field"><label class="muted">Tổng giờ trong tháng</label><b>${fmtH(fuRep.total_hours)} giờ</b><div class="muted" style="font-size:11px">(${fuRep.days_in_month} ngày × 24h)</div></div>
+        <div class="field"><label class="muted">Thời gian lọc</label><b style="color:var(--green)">${fmtH(fuRep.running_hours)} giờ</b><div class="muted" style="font-size:11px">${fmtPct(fuRep.running_pct)}</div></div>
+        <div class="field"><label class="muted">Thời gian không lọc</label><b style="color:var(--red)">${fmtH(fuRep.idle_hours)} giờ</b><div class="muted" style="font-size:11px">${fmtPct(fuRep.idle_pct)}</div></div>
+        <div class="field"><label class="muted">Số mẻ lọc trong tháng</label><b>${fuRep.batch_count.toLocaleString("vi-VN")}</b></div>
+        <div class="field"><label class="muted">Tổng lít dịch lọc</label><b>${Math.round(fuRep.total_liters).toLocaleString("vi-VN")} lít</b></div>
+      </div>
+      <div style="background:var(--border);border-radius:6px;height:28px;overflow:hidden;display:flex;max-width:640px">
+        <div style="width:${runPct}%;background:var(--green);height:100%;display:flex;align-items:center;justify-content:center;color:#fff;font-size:12px;white-space:nowrap;overflow:hidden" title="Thời gian lọc: ${fmtPct(fuRep.running_pct)}">${fuRep.running_pct != null && fuRep.running_pct >= 8 ? fmtPct(fuRep.running_pct) : ""}</div>
+        <div style="flex:1;background:var(--muted);height:100%;display:flex;align-items:center;justify-content:center;color:#fff;font-size:12px;white-space:nowrap;overflow:hidden" title="Thời gian không lọc: ${fmtPct(fuRep.idle_pct)}">${fuRep.idle_pct != null && fuRep.idle_pct >= 8 ? fmtPct(fuRep.idle_pct) : ""}</div>
+      </div>
+      ${fuRep.running_pct != null && fuRep.running_pct > 100 ? `<div class="muted" style="margin-top:6px">⚠️ % thời gian lọc vượt 100% — hệ lọc có nhiều lô/tank chạy SONG SONG trong tháng này (mẻ sau bắt đầu trước khi mẻ trước kết thúc hẳn), nên tổng giờ chạy cộng dồn vượt tổng giờ lịch.</div>` : ""}
+      ${fuRep.batches_missing_duration ? `<div class="muted" style="margin-top:6px">${fuRep.batches_missing_duration} mẻ lọc thiếu dữ liệu giờ bắt đầu/kết thúc hợp lệ — không tính được vào "Thời gian lọc" (vẫn tính vào tổng lít/số mẻ).</div>` : ""}
     </div>`;
   } else if (sec === "pack_line") {
     // BC "Dây chuyền chiết" — Gantt/timeline giờ chiết/không chiết theo TỪNG dây chuyền đóng
@@ -12546,6 +12579,13 @@ VIEWS.reports = async function () {
   }
   if (sec === "pack_cumulative") {
     $("rpcu_apply").onclick = () => { SUB.reports_pcu_date = $("rpcu_date").value; render("reports"); };
+  }
+  if (sec === "filter_utilization") {
+    $("rfu_apply").onclick = () => {
+      SUB.reports_fu_year = parseInt($("rfu_year").value);
+      SUB.reports_fu_month = parseInt($("rfu_month").value);
+      render("reports");
+    };
   }
   if (sec === "brew_volume") {
     wirePaginate("t_brewvol", 20);

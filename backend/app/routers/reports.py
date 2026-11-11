@@ -194,6 +194,15 @@ def filter_production_report_export(days: int = 3650, date_from: str = None, dat
                     headers={"Content-Disposition": f'attachment; filename="{fname}"'})
 
 
+# ---- BC hiệu suất hệ lọc theo tháng: % thời gian lọc/không lọc + tổng lít dịch lọc — yêu cầu
+# người dùng 2026-11-11 ----
+@router.get("/filter-line-utilization")
+def filter_line_utilization_report(year: int, month: int, db: Session = Depends(get_db),
+                                   user: User = Depends(get_current_user)):
+    from ..services import dashboard as dashboard_svc
+    return dashboard_svc.filter_line_utilization_report(db, year, month)
+
+
 # ---- BC dây chuyền chiết: Gantt/timeline giờ chiết/không chiết theo từng dây chuyền đóng gói,
 # kèm Số lần chiết (số lô chiết) + Tổng thời gian đã chiết — yêu cầu người dùng 2026-10-21 ----
 @router.get("/pack-line-gantt")
