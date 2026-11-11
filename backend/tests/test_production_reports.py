@@ -199,6 +199,12 @@ def test_brew_volume_by_product_groups_and_subtotals(client, admin_h):
     total_v_dich_for_product = next(s["v_dich"] for s in matching)
     assert total_v_dich_for_product >= 1000 + 1500 - 1e-6
 
+    # Tổng cộng chung (mọi dịch bia gộp lại) — yêu cầu người dùng 2026-11-11: "Tính thêm tổng số
+    # mẻ/tháng, số lượng dịch/tháng".
+    assert rpt["total"]["batch_count"] == sum(s["batch_count"] for s in rpt["subtotals"])
+    assert rpt["total"]["v_dich"] == round(sum(s["v_dich"] for s in rpt["subtotals"]), 2)
+    assert rpt["total"]["v_dich"] >= 1000 + 1500 - 1e-6
+
 
 def test_pack_output_by_category_group_by_sku_allocates_input_proportionally(client, admin_h):
     """yêu cầu người dùng 2026-11-05 "báo cáo theo từng SKU" — group_by="sku" phải tách output

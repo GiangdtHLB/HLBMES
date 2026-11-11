@@ -656,7 +656,8 @@ VIEWS.dashboard = async function () {
   const stageStatCard = (icon, title, s, view, subKey) => `
     <div class="card" style="cursor:pointer;text-align:left" data-goto="${esc(view)}" data-gotosub="${esc(subKey || "")}" tabindex="0" role="button">
       <div class="n">${icon} ${s ? s.total : "–"}</div><div class="l">${esc(title)}</div>
-      ${s ? `<div class="muted" style="font-size:11px;margin-top:4px;line-height:1.6">
+      ${s ? `<div style="font-size:11px;margin-top:4px;color:var(--accent2)">${s.trong_thang ?? 0} trong tháng này</div>
+      <div class="muted" style="font-size:11px;margin-top:2px;line-height:1.6">
         ${s.hoan_thanh_hom_nay ? `<span style="color:var(--green)">${s.hoan_thanh_hom_nay} xong hôm nay</span> · ` : ""}
         <span style="color:var(--green)">${s.hoan_thanh}</span> hoàn thành ·
         <span style="color:var(--orange)">${s.dang_thuc_hien}</span> đang thực hiện
@@ -12344,6 +12345,9 @@ VIEWS.reports = async function () {
         <tbody>${bvRep.subtotals.map(s => `<tr><td>${esc(s.product_name)}</td><td>${s.batch_count}</td>
           <td><b>${s.v_dich.toLocaleString("vi-VN")}</b></td></tr>`).join("") ||
           '<tr><td colspan=3 class="muted">—</td></tr>'}</tbody>
+        ${bvRep.subtotals.length ? `<tfoot><tr style="font-weight:700"><td>Tổng cộng</td>
+          <td>${bvRep.total.batch_count.toLocaleString("vi-VN")}</td>
+          <td>${bvRep.total.v_dich.toLocaleString("vi-VN")}</td></tr></tfoot>` : ""}
       </table></div>
     </div>`;
   } else if (sec === "qc_trend") {

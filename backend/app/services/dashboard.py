@@ -71,6 +71,23 @@ def _batch_counts(rows: list, ended_attr: str = "ended_at") -> dict:
     return {"total": total, "dang_thuc_hien": total - done, "hoan_thanh": done, "hoan_thanh_hom_nay": done_today}
 
 
+def _count_this_month(items: list, date_getter) -> int:
+    """Đếm số phần tử có mốc thời gian (`date_getter(item)`, quy đổi giờ VN) rơi vào ĐÚNG
+    tháng/năm hiện tại (giờ VN) — dùng cho "trong tháng" ở production_summary() (yêu cầu người
+    dùng 2026-11-11: "Tính ra số theo tháng trên dashboard nữa"). `date_getter` nhận 1 phần tử,
+    trả về datetime hoặc None (bỏ qua None — dữ liệu cũ thiếu mốc thời gian tương ứng)."""
+    today = _local_date(utcnow())
+    count = 0
+    for it in items:
+        d = date_getter(it)
+        if d is None:
+            continue
+        ld = _local_date(d)
+        if ld and ld.year == today.year and ld.month == today.month:
+            count += 1
+    return count
+
+
 def _batch_tank_len_men_counts(db: Session) -> dict:
     """"Tank đang lên men" trên Dashboard — CHỈ tính tank còn ĐÚNG NGHĨA đang lên men (status
     "len_men" hoặc "cho_loc", xem services/batch_pipeline.py::_tank_status) — KHÁC
@@ -124,20 +141,34 @@ def production_summary(db: Session) -> dict:
     kèm ghi chú hoàn thành/đang thực hiện/chưa thực hiện ngay dưới số tổng (xem _batch_counts).
     Riêng "Tank đang lên men" (_batch_tank_len_men_counts) vẫn CHỈ tính tank còn đúng nghĩa đang
     lên men — khác hẳn ý nghĩa "tổng số mẻ", vì 1 tank vật lý chỉ có thể ở ĐÚNG 1 trạng thái tại
-    1 thời điểm (không có "lịch sử" để cộng dồn như mẻ nấu/lọc/chiết)."""
+    1 thời điểm (không có "lịch sử" để cộng dồn như mẻ nấu/lọc/chiết — KHÔNG có "trong_thang").
+
+    `trong_thang`: số phát sinh trong THÁNG HIỆN TẠI (giờ VN, xem _count_this_month) — yêu cầu
+    người dùng 2026-11-11: "Tính ra số theo tháng trên dashboard nữa". Mốc dùng để tính riêng
+    từng loại (không dùng chung 1 field vì mỗi loại lưu mốc "phát sinh" khác tên):
+    - Lệnh nấu/Lệnh lọc: `created_at` (lúc lập lệnh).
+    - Mẻ nấu: `start_at` (giờ bắt đầu nấu thật, mirror brew_volume_by_product dùng field này).
+    - Mẻ lọc: `started_at` (giờ bắt đầu rút dịch THEO NGHIỆP VỤ), lùi về `created_at` nếu thiếu
+      (dữ liệu cũ trước migration d2e4f6a8b1c3 chưa có started_at).
+    - Mẻ chiết: `pack_date` (mốc bắt đầu chiết, mirror production_reports.py)."""
     brew_orders = brew_order_svc.list_orders(db)
     filter_orders = batch_pipeline_svc.list_filter_orders(db)
     batches = db.execute(select(BatchExecution)).scalars().all()
     filter_lot_batches = db.execute(select(BatchFilterLotBatch)).scalars().all()
     pack_lots = db.execute(select(BatchPackLot)).scalars().all()
     return {
-        "lenh_nau": _order_counts(brew_orders, "is_complete", "is_executed"),
-        "lenh_loc": _order_counts(
+        "lenh_nau": {**_order_counts(brew_orders, "is_complete", "is_executed"),
+                    "trong_thang": _count_this_month(brew_orders, lambda o: o["created_at"])},
+        "lenh_loc": {**_order_counts(
             [{"is_complete": o["is_complete"], "is_executed": o["status"] != "planned"} for o in filter_orders],
             "is_complete", "is_executed"),
-        "me_nau": _batch_counts(batches, ended_attr="end_at"),
-        "me_loc": _batch_counts(filter_lot_batches, ended_attr="ended_at"),
-        "me_chiet": _batch_counts(pack_lots, ended_attr="approved_at"),
+            "trong_thang": _count_this_month(filter_orders, lambda o: o["created_at"])},
+        "me_nau": {**_batch_counts(batches, ended_attr="end_at"),
+                  "trong_thang": _count_this_month(batches, lambda b: b.start_at)},
+        "me_loc": {**_batch_counts(filter_lot_batches, ended_attr="ended_at"),
+                  "trong_thang": _count_this_month(filter_lot_batches, lambda b: b.started_at or b.created_at)},
+        "me_chiet": {**_batch_counts(pack_lots, ended_attr="approved_at"),
+                    "trong_thang": _count_this_month(pack_lots, lambda p: p.pack_date)},
         "tank_len_men": _batch_tank_len_men_counts(db),
     }
 

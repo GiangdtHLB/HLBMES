@@ -229,9 +229,11 @@ def pack_output_cumulative(db: Session, as_of_date: date) -> dict:
 
 def brew_volume_by_product(db: Session, year: int, month: int) -> dict:
     """BC sản lượng nấu theo tháng, nhóm theo Dịch bia (Product) — mỗi dòng 1 mẻ nấu, kèm tổng
-    cộng theo dịch bia. "V tồn" lấy từ BatchTank.on_hand của tank mẻ đó đã gộp vào — LƯU Ý: đây
-    là số tồn CẤP TANK (nhiều mẻ gộp 1 tank sẽ cùng hiện 1 số tồn như nhau), không tách được
-    riêng cho từng mẻ, mirror đúng giới hạn dữ liệu đã xác nhận khi khảo sát báo cáo cũ."""
+    cộng theo dịch bia + TỔNG CỘNG CHUNG (mọi dịch bia gộp lại — yêu cầu người dùng 2026-11-11:
+    "Tính thêm tổng số mẻ/tháng, số lượng dịch/tháng"). "V tồn" lấy từ BatchTank.on_hand của tank
+    mẻ đó đã gộp vào — LƯU Ý: đây là số tồn CẤP TANK (nhiều mẻ gộp 1 tank sẽ cùng hiện 1 số tồn
+    như nhau), không tách được riêng cho từng mẻ, mirror đúng giới hạn dữ liệu đã xác nhận khi
+    khảo sát báo cáo cũ."""
     start, end = _month_bounds_utc(year, month)
     batches = db.execute(select(BatchExecution).where(
         BatchExecution.start_at >= start, BatchExecution.start_at <= end
@@ -267,5 +269,8 @@ def brew_volume_by_product(db: Session, year: int, month: int) -> dict:
         s["batch_count"] += 1
     for s in subtotal_by_product.values():
         s["v_dich"] = round(s["v_dich"], 2)
+    total_batch_count = sum(s["batch_count"] for s in subtotal_by_product.values())
+    total_v_dich = round(sum(s["v_dich"] for s in subtotal_by_product.values()), 2)
     return {"year": year, "month": month, "items": rows,
-            "subtotals": sorted(subtotal_by_product.values(), key=lambda s: s["product_name"])}
+            "subtotals": sorted(subtotal_by_product.values(), key=lambda s: s["product_name"]),
+            "total": {"batch_count": total_batch_count, "v_dich": total_v_dich}}
