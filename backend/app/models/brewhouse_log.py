@@ -37,6 +37,11 @@ class BrewhouseStepLog(Base):
     ba_year: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
     ba_order_no: Mapped[Optional[str]] = mapped_column(Unicode(64), nullable=True, index=True)
     ba_batch_no: Mapped[Optional[str]] = mapped_column(Unicode(64), nullable=True, index=True)
+    # Mã công thức (BA_RecNo, Braumat) đọc từ Brewhouse_Realtime lúc mở dòng log — xác định Loại
+    # bia của mẻ (xem services/brewhouse_external.py::BEER_TYPE_BY_RECNO) — yêu cầu người dùng
+    # 2026-11-11. Lưu THÀNH CỘT RIÊNG (không chỉ trong start_snapshot JSON) để lọc/group theo
+    # Loại bia ở báo cáo mà không phải parse JSON mỗi dòng.
+    ba_rec_no: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
     step_no: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     step_name: Mapped[Optional[str]] = mapped_column(Unicode(255), nullable=True)
     eop_state_label: Mapped[Optional[str]] = mapped_column(Unicode(32), nullable=True)

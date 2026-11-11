@@ -96,6 +96,7 @@ def _open_step(equipment_id: int, status: dict, now: datetime, data_gap: bool = 
         ba_year=status.get("ba_year"),
         ba_order_no=_s(status.get("ba_order_no")),
         ba_batch_no=_s(status.get("ba_batch_no")),
+        ba_rec_no=status.get("ba_rec_no"),
         step_no=status.get("step_no"),
         step_name=status.get("step"),
         eop_state_label=status.get("eop_state_label"),
@@ -290,7 +291,7 @@ async def run_poll_loop_supervised(interval_seconds: int = POLL_INTERVAL_SECONDS
             await asyncio.sleep(interval_seconds)
 
 
-def _row_to_out(row: BrewhouseStepLog) -> dict:
+def _row_to_out(row: BrewhouseStepLog, beer_type_recno: Optional[int] = None) -> dict:
     return {
         "log_id": row.log_id,
         "equipment_id": row.equipment_id,
@@ -298,6 +299,12 @@ def _row_to_out(row: BrewhouseStepLog) -> dict:
         "ba_year": row.ba_year,
         "ba_order_no": row.ba_order_no,
         "ba_batch_no": row.ba_batch_no,
+        # beer_type_recno/beer_type_name: suy từ RecNo của NỒI GẠO thuộc cùng mẻ (oder/batch/
+        # year) — KHÔNG phải row.ba_rec_no riêng của thiết bị này (có thể thiếu/None, vd Chuyển
+        # dịch lạnh nhanh) — xem _rec_no_by_batch_key(). row.ba_rec_no vẫn giữ nguyên để tham khảo.
+        "ba_rec_no": row.ba_rec_no,
+        "beer_type_recno": beer_type_recno,
+        "beer_type_name": brewhouse_external.BEER_TYPE_BY_RECNO.get(beer_type_recno),
         "step_no": row.step_no,
         "step_name": row.step_name,
         "eop_state_label": row.eop_state_label,
@@ -311,11 +318,41 @@ def _row_to_out(row: BrewhouseStepLog) -> dict:
     }
 
 
+def _rec_no_by_batch_key(db: Session, since: datetime, ba_year: int = None, ba_order_no: str = None,
+                         ba_batch_no: str = None) -> dict[tuple, int]:
+    """Tra RecNo (-> Loại bia) của từng mẻ (oder/batch/year) từ dòng log NỒI GẠO (equipment_id=
+    RICE_COOKER_EQUIPMENT_ID) thuộc mẻ đó — CHỈ nồi gạo đáng tin cho CẢ mẻ (dùng chung 1 thiết bị
+    cho mọi mẻ/dây), các thiết bị khác RecNo riêng có thể thiếu/không đồng bộ — yêu cầu người
+    dùng 2026-11-11: "chỉ cần lấy nồi gạo là thuộc mẻ đó là được". Truy vấn RIÊNG (không lọc theo
+    equipment_id của report chính) vì report có thể đang lọc đúng 1 thiết bị KHÁC nồi gạo (vd
+    "Nồi lọc 1") — vẫn cần nồi gạo CÙNG mẻ đó để suy Loại bia."""
+    stmt = select(BrewhouseStepLog).where(
+        BrewhouseStepLog.equipment_id == brewhouse_external.RICE_COOKER_EQUIPMENT_ID,
+        BrewhouseStepLog.started_at >= since,
+        BrewhouseStepLog.ba_rec_no.is_not(None),
+    )
+    if ba_year is not None:
+        stmt = stmt.where(BrewhouseStepLog.ba_year == ba_year)
+    if ba_order_no:
+        stmt = stmt.where(BrewhouseStepLog.ba_order_no == ba_order_no)
+    if ba_batch_no:
+        stmt = stmt.where(BrewhouseStepLog.ba_batch_no == ba_batch_no)
+    result: dict[tuple, int] = {}
+    for r in db.execute(stmt).scalars().all():
+        key = (r.ba_year, r.ba_order_no, r.ba_batch_no)
+        if key not in result:
+            result[key] = r.ba_rec_no
+    return result
+
+
 def step_log_report(db: Session, ba_year: int = None, ba_order_no: str = None,
-                    ba_batch_no: str = None, equipment_id: int = None, days: int = 3650) -> dict:
+                    ba_batch_no: str = None, equipment_id: int = None, days: int = 3650,
+                    beer_type_recno: int = None) -> dict:
     """BC log từng bước (chi tiết) + tổng phút mỗi thiết bị theo oder/batch/year (yêu cầu người
     dùng 2026-11-01). Lọc theo oder/batch/year để xem đúng 1 mẻ nấu chạy qua từng nồi hết bao
-    lâu, hoặc bỏ trống để xem toàn bộ trong khoảng `days` ngày gần nhất."""
+    lâu, hoặc bỏ trống để xem toàn bộ trong khoảng `days` ngày gần nhất. `beer_type_recno` lọc
+    theo Loại bia (RecNo của nồi gạo thuộc mẻ đó — xem _rec_no_by_batch_key(), yêu cầu người dùng
+    2026-11-11)."""
     since = utcnow() - timedelta(days=days)
     stmt = select(BrewhouseStepLog).where(BrewhouseStepLog.started_at >= since)
     if ba_year is not None:
@@ -330,6 +367,11 @@ def step_log_report(db: Session, ba_year: int = None, ba_order_no: str = None,
         stmt.order_by(BrewhouseStepLog.equipment_id, BrewhouseStepLog.started_at)
     ).scalars().all()
 
+    recno_by_batch = _rec_no_by_batch_key(db, since, ba_year, ba_order_no, ba_batch_no)
+    batch_key = lambda r: (r.ba_year, r.ba_order_no, r.ba_batch_no)
+    if beer_type_recno is not None:
+        rows = [r for r in rows if recno_by_batch.get(batch_key(r)) == beer_type_recno]
+
     # Tổng thời gian mỗi nồi = TỪ LÚC KHÁC IDLE (started_at của bước ĐẦU TIÊN) ĐẾN LÚC KẾT THÚC
     # BƯỚC CUỐI CÙNG (ended_at của bước cuối, hoặc hiện tại nếu còn đang chạy) — KHÔNG phải tổng
     # cộng duration_minutes của riêng các bước đã đóng, vì cách đó bỏ sót thời gian của bước
@@ -340,9 +382,11 @@ def step_log_report(db: Session, ba_year: int = None, ba_order_no: str = None,
         key = (r.equipment_id, r.ba_year, r.ba_order_no, r.ba_batch_no)
         s = summary_map.get(key)
         if s is None:
+            recno = recno_by_batch.get(batch_key(r))
             s = summary_map[key] = {
                 "equipment_id": r.equipment_id, "equipment_name": r.equipment_name,
                 "ba_year": r.ba_year, "ba_order_no": r.ba_order_no, "ba_batch_no": r.ba_batch_no,
+                "beer_type_recno": recno, "beer_type_name": brewhouse_external.BEER_TYPE_BY_RECNO.get(recno),
                 "step_count": 0, "started_at": r.started_at, "ended_at": r.ended_at, "still_running": False,
                 "data_gap": False,
             }
@@ -364,7 +408,8 @@ def step_log_report(db: Session, ba_year: int = None, ba_order_no: str = None,
         if s["still_running"]:
             s["ended_at"] = None
 
-    return {"steps": [_row_to_out(r) for r in rows], "summary": list(summary_map.values())}
+    return {"steps": [_row_to_out(r, recno_by_batch.get(batch_key(r))) for r in rows],
+            "summary": list(summary_map.values())}
 
 
 # Chuỗi vai trò nồi theo ĐÚNG thứ tự quy trình nấu (bất kể dây 1 hay dây 2 — mỗi vai trò map
@@ -404,10 +449,16 @@ def _brew_cycle_items(db: Session, ba_year: int = None, ba_order_no: str = None,
     # Nồi gạo dùng CHUNG cho cả 2 dây — 1 mẻ có thể có NHIỀU dòng log nồi gạo (nhiều bước), lấy
     # started_at SỚM NHẤT của mỗi oder/batch/year làm mốc "bắt đầu vào nguyên liệu".
     batch_rice_start: dict[tuple, datetime] = {}
+    # RecNo (-> Loại bia) của mẻ, suy từ nồi gạo — CHỈ nồi gạo đáng tin cho CẢ mẻ (yêu cầu người
+    # dùng 2026-11-11, xem _rec_no_by_batch_key()). Lấy giá trị non-null ĐẦU TIÊN gặp được trong
+    # các dòng log nồi gạo của mẻ (RecNo không đổi giữa các bước cùng 1 mẻ).
+    batch_recno: dict[tuple, int] = {}
     for r in rice_rows:
         key = (r.ba_year, r.ba_order_no, r.ba_batch_no)
         if key not in batch_rice_start or r.started_at < batch_rice_start[key]:
             batch_rice_start[key] = r.started_at
+        if r.ba_rec_no is not None and key not in batch_recno:
+            batch_recno[key] = r.ba_rec_no
 
     now = utcnow()
     items = []
@@ -469,8 +520,10 @@ def _brew_cycle_items(db: Session, ba_year: int = None, ba_order_no: str = None,
         # gian cả mẻ cũng không đáng tin, dù 2 nồi ở giữa (chưa đổi dây) không gián đoạn.
         cycle_data_gap = vessels[0]["data_gap"] or whirlpool_data_gap
 
+        recno = batch_recno.get((year, order_no, batch_no))
         items.append({
             "ba_year": year, "ba_order_no": order_no, "ba_batch_no": batch_no,
+            "beer_type_recno": recno, "beer_type_name": brewhouse_external.BEER_TYPE_BY_RECNO.get(recno),
             "rice_started_at": rice_started_at,
             "whirlpool_ended_at": whirlpool_ended_at,
             "stage": stage,
@@ -483,7 +536,7 @@ def _brew_cycle_items(db: Session, ba_year: int = None, ba_order_no: str = None,
 
 
 def brew_cycle_report(db: Session, ba_year: int = None, ba_order_no: str = None,
-                      ba_batch_no: str = None, days: int = 3650) -> dict:
+                      ba_batch_no: str = None, days: int = 3650, beer_type_recno: int = None) -> dict:
     """BC chu kỳ TOÀN BỘ hệ nấu: từ lúc Nồi gạo (vào nguyên liệu) BẮT ĐẦU tới lúc Nồi lắng xoáy
     (dây 1 hoặc dây 2, tuỳ mẻ chạy dây nào) KẾT THÚC, cùng 1 oder/batch/year, kèm tổng thời gian
     TỪNG NỒI trong cả chuỗi — yêu cầu người dùng 2026-11-01: "chỉ cần 2 thời gian là thời gian
@@ -495,8 +548,12 @@ def brew_cycle_report(db: Session, ba_year: int = None, ba_order_no: str = None,
     (1/dây — xem ROLE_CHAIN), mỗi thiết bị chỉ xử lý 1 trong 2 mẻ xen kẽ, nên thời gian 1 mẻ
     chiếm dụng 1 thiết bị quy đổi ra "trên cả 2 dây" chỉ bằng 1 nửa; nồi gạo dùng chung 1 thiết
     bị cho mọi mẻ nên giữ nguyên. Báo cáo RIÊNG với step_log_report() (báo cáo đó là chi tiết
-    từng BƯỚC)."""
+    từng BƯỚC). `beer_type_recno` lọc theo Loại bia (RecNo nồi gạo — yêu cầu người dùng
+    2026-11-11) — lọc TRƯỚC khi dựng throughput nên "Năng suất lý thuyết" cũng tự động lọc theo
+    đúng Loại bia, không cần lọc riêng."""
     items = _brew_cycle_items(db, ba_year, ba_order_no, ba_batch_no, days)
+    if beer_type_recno is not None:
+        items = [it for it in items if it["beer_type_recno"] == beer_type_recno]
 
     items_asc = sorted(items, key=lambda x: x["rice_started_at"])
     throughput = []
@@ -519,7 +576,8 @@ def brew_cycle_report(db: Session, ba_year: int = None, ba_order_no: str = None,
         has_all = all(v["adj_minutes"] is not None for v in vessel_adj)
         max_minutes = max(v["adj_minutes"] for v in vessel_adj) if has_all else None
         throughput.append({
-            "batch": {"ba_year": it["ba_year"], "ba_order_no": it["ba_order_no"], "ba_batch_no": it["ba_batch_no"]},
+            "batch": {"ba_year": it["ba_year"], "ba_order_no": it["ba_order_no"], "ba_batch_no": it["ba_batch_no"],
+                     "beer_type_name": it["beer_type_name"]},
             "vessels": vessel_adj,
             "max_minutes": max_minutes,
             "batches_per_day": round((24 * 60) / max_minutes, 2) if max_minutes else None,

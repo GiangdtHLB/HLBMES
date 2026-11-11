@@ -113,20 +113,21 @@ def brewhouse_overview(db: Session = Depends(get_db), user: User = Depends(get_c
 # + tổng phút mỗi nồi theo oder/batch/year — yêu cầu người dùng 2026-11-01 ----
 @router.get("/brewhouse-step-log")
 def brewhouse_step_log_report(ba_year: int = None, ba_order_no: str = None, ba_batch_no: str = None,
-                              equipment_id: int = None, days: int = 3650,
+                              equipment_id: int = None, days: int = 3650, beer_type_recno: int = None,
                               db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     from ..services import brewhouse_log
-    return brewhouse_log.step_log_report(db, ba_year, ba_order_no, ba_batch_no, equipment_id, days)
+    return brewhouse_log.step_log_report(db, ba_year, ba_order_no, ba_batch_no, equipment_id, days,
+                                         beer_type_recno)
 
 
 # ---- BC chu kỳ TOÀN BỘ hệ nấu: Nồi gạo bắt đầu -> Nồi lắng xoáy kết thúc, cùng oder/batch/year
 # — "từ lúc vào nguyên liệu đến kết thúc chiếm bao nhiêu thời gian" — yêu cầu người dùng 2026-11-01 ----
 @router.get("/brewhouse-cycle")
 def brewhouse_cycle_report(ba_year: int = None, ba_order_no: str = None, ba_batch_no: str = None,
-                           days: int = 3650, db: Session = Depends(get_db),
+                           days: int = 3650, beer_type_recno: int = None, db: Session = Depends(get_db),
                            user: User = Depends(get_current_user)):
     from ..services import brewhouse_log
-    return brewhouse_log.brew_cycle_report(db, ba_year, ba_order_no, ba_batch_no, days)
+    return brewhouse_log.brew_cycle_report(db, ba_year, ba_order_no, ba_batch_no, days, beer_type_recno)
 
 
 @router.get("/filling-report")

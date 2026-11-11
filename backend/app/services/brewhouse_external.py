@@ -34,6 +34,21 @@ EQUIPMENT_NAMES = {
 # EOPState (Braumat) — 1=Running, 0=Idle, 6=Hold (xác nhận người dùng 2026-10-31).
 EOP_STATE_LABELS = {1: "running", 0: "idle", 6: "hold"}
 
+# BA_RecNo (Brewhouse_Realtime, mã công thức Braumat) -> Loại bia — xác nhận người dùng
+# 2026-11-11. Chỉ Nồi gạo (ID=1) có giá trị LUÔN đáng tin cho CẢ mẻ (dùng chung 1 thiết bị cho
+# mọi mẻ/dây — xem RICE_COOKER_EQUIPMENT_ID); các thiết bị khác có thể thiếu/không đồng bộ (vd
+# Chuyển dịch lạnh nhanh thường NULL) nên services/brewhouse_log.py suy "Loại bia" của 1 mẻ
+# (oder/batch/year) từ RecNo của dòng NỒI GẠO thuộc mẻ đó, không dùng RecNo riêng của từng thiết
+# bị — yêu cầu người dùng: "chỉ cần lấy nồi gạo là thuộc mẻ đó là được".
+BEER_TYPE_BY_RECNO = {
+    1: "Hạ Long Idol",
+    9: "Classic 16 mẻ",
+    10: "Bia hơi 16 mẻ",
+    11: "LowCarb",
+    12: "Legend 16 mẻ",
+    13: "Sapphire 16 mẻ",
+}
+
 # NewStep (Braumat) — số thứ tự bước trong quy trình nồi gạo RC1, lấy từ ảnh chụp cây quy trình
 # Braumat do người dùng cung cấp (cột "Nr.", 2026-10-31). Các số 1/8/12 không có tên (ô rẽ nhánh
 # "Synch" nối giữa 2 bước, không phải 1 bước thật) nên không map — hiện "Bước N" nếu gặp. Riêng
@@ -187,6 +202,7 @@ def _row_to_status(row, equipment_id: int) -> dict:
     eop_state = int(row.EOPState) if row.EOPState is not None else None
     step_no = int(row.NewStep) if row.NewStep is not None else None
     step_labels = STEP_LABELS_BY_EQUIPMENT.get(equipment_id, {})
+    ba_rec_no = int(row.BA_RecNo) if getattr(row, "BA_RecNo", None) is not None else None
     return {
         "available": True,
         "equipment_id": equipment_id,
@@ -195,6 +211,10 @@ def _row_to_status(row, equipment_id: int) -> dict:
         "ba_year": int(row.BA_Year) if row.BA_Year is not None else None,
         "ba_order_no": row.BA_ONo,
         "ba_batch_no": row.BA_BNo,
+        # Mã công thức (BA_RecNo) + tên Loại bia suy từ công thức — CỦA RIÊNG thiết bị này (xem
+        # BEER_TYPE_BY_RECNO: chỉ Nồi gạo đáng tin cho CẢ mẻ, thiết bị khác hiện tham khảo).
+        "ba_rec_no": ba_rec_no,
+        "beer_type_name": BEER_TYPE_BY_RECNO.get(ba_rec_no),
         "eop_state": eop_state,
         "eop_state_label": EOP_STATE_LABELS.get(eop_state),
         "temp_actual": float(row.S_0201TET) if row.S_0201TET is not None else None,
@@ -230,7 +250,7 @@ def brewhouse_equipment_realtime_status(db: Session, equipment_id: int = RICE_CO
                 row = db_conn.execute(
                     select(tbl.c.NewStep, tbl.c.BA_Year, tbl.c.BA_ONo, tbl.c.BA_BNo, tbl.c.EOPState,
                            tbl.c.S_0201TET, tbl.c.SPTemp, tbl.c.Volume, tbl.c.StTime_AV, tbl.c.SpTime,
-                           tbl.c.EBC, tbl.c.SpEBC, tbl.c.AirFlow, tbl.c.Flow, tbl.c.SpFlow)
+                           tbl.c.EBC, tbl.c.SpEBC, tbl.c.AirFlow, tbl.c.Flow, tbl.c.SpFlow, tbl.c.BA_RecNo)
                     .where(tbl.c.ID == equipment_id)
                     .limit(1)
                 ).first()
@@ -257,7 +277,8 @@ def brewhouse_overview(db: Session) -> dict:
                 rows = db_conn.execute(
                     select(tbl.c.ID, tbl.c.NewStep, tbl.c.BA_Year, tbl.c.BA_ONo, tbl.c.BA_BNo,
                            tbl.c.EOPState, tbl.c.S_0201TET, tbl.c.SPTemp, tbl.c.Volume, tbl.c.StTime_AV,
-                           tbl.c.SpTime, tbl.c.EBC, tbl.c.SpEBC, tbl.c.AirFlow, tbl.c.Flow, tbl.c.SpFlow)
+                           tbl.c.SpTime, tbl.c.EBC, tbl.c.SpEBC, tbl.c.AirFlow, tbl.c.Flow, tbl.c.SpFlow,
+                           tbl.c.BA_RecNo)
                     .where(tbl.c.ID.in_(EQUIPMENT_NAMES.keys()))
                 ).all()
     finally:

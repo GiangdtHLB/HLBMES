@@ -518,6 +518,7 @@ def get_brewhouse_log(db: Session, ba_year: int = None, ba_order_no: str = None,
     return {"step_count": len(r["steps"]),
             "summary": [{"equipment_name": s["equipment_name"], "ba_year": s["ba_year"],
                         "ba_order_no": s["ba_order_no"], "ba_batch_no": s["ba_batch_no"],
+                        "beer_type_name": s.get("beer_type_name"),
                         "total_minutes": s["total_minutes"], "still_running": s["still_running"],
                         "data_gap": s["data_gap"]} for s in r["summary"][:30]]}
 
@@ -530,6 +531,7 @@ def get_brew_cycle_time(db: Session, ba_year: int = None, ba_order_no: str = Non
     r = brewhouse_log.brew_cycle_report(db, ba_year=ba_year, ba_order_no=ba_order_no,
                                         ba_batch_no=ba_batch_no, days=days)
     items = [{"ba_year": i["ba_year"], "ba_order_no": i["ba_order_no"], "ba_batch_no": i["ba_batch_no"],
+             "beer_type_name": i.get("beer_type_name"),
              "cycle_minutes": i.get("cycle_minutes"), "cycle_still_running": i.get("cycle_still_running"),
              "cycle_data_gap": i.get("cycle_data_gap")} for i in r["items"][:30]]
     throughput = [{"batch": t["batch"], "max_minutes": t["max_minutes"], "batches_per_day": t["batches_per_day"]}

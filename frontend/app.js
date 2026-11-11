@@ -11132,6 +11132,12 @@ const chk = (v) => v ? '<span class="chk">✔</span>' : '<span class="chk no">�
 // này mỗi lần thay/ sửa bất kỳ ảnh nào trong BREW_LINE_EQUIPMENT/riceKettleCard (yêu cầu người
 // dùng 2026-11-01: "vẫn chưa thay ảnh nồi lọc" — do browser cache ảnh cũ, không phải chưa sửa).
 const BREWHOUSE_IMG_V = 2;
+// Mirror backend services/brewhouse_external.py::BEER_TYPE_BY_RECNO — giữ khớp 2 nơi nếu sau
+// này đổi RecNo (yêu cầu người dùng 2026-11-11).
+const BEER_TYPE_BY_RECNO = {
+  1: "Hạ Long Idol", 9: "Classic 16 mẻ", 10: "Bia hơi 16 mẻ",
+  11: "LowCarb", 12: "Legend 16 mẻ", 13: "Sapphire 16 mẻ",
+};
 const RICE_EOP_STATE_META = {
   running: { label: "Đang chạy", opLabel: "Running", color: "var(--green)" },
   idle: { label: "Idle (dừng)", opLabel: "Idle", color: "var(--muted)" },
@@ -11241,6 +11247,7 @@ function equipmentCard(name, img, s, overlay = true, overlayPos, extraMetric = n
       ${row("Order Number", esc(s.ba_order_no ?? "—"))}
       ${row("Batch Number", esc(s.ba_batch_no ?? "—"))}
       ${row("Year", esc(year ?? "—"))}
+      ${row("RecNo", s.ba_rec_no != null ? esc(String(s.ba_rec_no)) + (s.beer_type_name ? ` — ${esc(s.beer_type_name)}` : "") : "—")}
     </table>` : ""}
   </div>`;
 }
@@ -12059,6 +12066,7 @@ VIEWS.reports = async function () {
     const bsBatch = SUB.reports_bs_batch || "";
     const bsEquip = SUB.reports_bs_equip || "";
     const bsDays = SUB.reports_bs_days || 3650;
+    const bsBeerType = SUB.reports_bs_beertype || "";
     // Mirror danh sách ID ở BREW_LINE_EQUIPMENT (realtime) — giữ khớp brewhouse_external.py::
     // EQUIPMENT_NAMES nếu sau này ID đổi.
     const BS_EQUIPMENT_NAMES = { 1: "Nồi gạo",
@@ -12069,6 +12077,7 @@ VIEWS.reports = async function () {
       bsOrder ? `ba_order_no=${encodeURIComponent(bsOrder)}` : "",
       bsBatch ? `ba_batch_no=${encodeURIComponent(bsBatch)}` : "",
       bsEquip ? `equipment_id=${encodeURIComponent(bsEquip)}` : "",
+      bsBeerType ? `beer_type_recno=${encodeURIComponent(bsBeerType)}` : "",
       `days=${bsDays}`,
     ].filter(Boolean).join("&");
     const bsRep = await GET(`/reports/brewhouse-step-log?${bsQs}`);
@@ -12095,6 +12104,9 @@ VIEWS.reports = async function () {
         <div class="field"><label>Thiết bị</label><select id="rbs_equip"><option value="">Tất cả</option>
           ${Object.entries(BS_EQUIPMENT_NAMES).map(([id, name]) => `<option value="${id}" ${String(bsEquip) === id ? "selected" : ""}>${esc(name)}</option>`).join("")}
         </select></div>
+        <div class="field"><label>Loại bia</label><select id="rbs_beertype"><option value="">Tất cả</option>
+          ${Object.entries(BEER_TYPE_BY_RECNO).map(([recno, name]) => `<option value="${recno}" ${String(bsBeerType) === recno ? "selected" : ""}>${esc(name)}</option>`).join("")}
+        </select></div>
         <div class="field"><label>Kỳ</label><select id="rbs_days">
           <option value="30" ${bsDays == 30 ? "selected" : ""}>30 ngày gần đây</option>
           <option value="90" ${bsDays == 90 ? "selected" : ""}>90 ngày gần đây</option>
@@ -12104,18 +12116,19 @@ VIEWS.reports = async function () {
       </div>
       <h3>Tổng hợp theo nồi</h3>
       <div class="tablewrap"><table id="t_bs_summary">
-        <thead><tr><th>Thiết bị</th><th>Oder</th><th>Mẻ</th><th>Năm</th><th>Số bước</th><th>Tổng thời gian</th><th>Bắt đầu</th><th>Kết thúc</th></tr></thead>
+        <thead><tr><th>Thiết bị</th><th>Oder</th><th>Mẻ</th><th>Năm</th><th>Loại bia</th><th>Số bước</th><th>Tổng thời gian</th><th>Bắt đầu</th><th>Kết thúc</th></tr></thead>
         <tbody>${bsSummary.map(s => `<tr>
           <td>${esc(s.equipment_name)}</td><td><code class="k">${esc(s.ba_order_no || "—")}</code></td>
           <td><code class="k">${esc(s.ba_batch_no || "—")}</code></td><td>${s.ba_year ?? "—"}</td>
+          <td class="muted">${esc(s.beer_type_name || "—")}</td>
           <td>${s.step_count}</td><td>${fmtMin(s.total_minutes)}${s.still_running ? " " + statusBadge("running", "đang chạy") : ""}${s.data_gap ? " " + statusBadge("held", "gián đoạn ghi log") : ""}</td>
           <td class="muted">${fmt(s.started_at)}</td><td class="muted">${s.ended_at ? fmt(s.ended_at) : "—"}</td></tr>`).join("") ||
-          '<tr><td colspan=8 class="muted">Chưa có dữ liệu — hệ thống chỉ bắt đầu ghi log từ lúc bật tính năng này.</td></tr>'}</tbody>
+          '<tr><td colspan=9 class="muted">Chưa có dữ liệu — hệ thống chỉ bắt đầu ghi log từ lúc bật tính năng này.</td></tr>'}</tbody>
       </table></div>
       <h3 style="margin-top:14px">Chi tiết từng bước</h3>
-      <input class="searchbox" data-tbl="t_bs_detail" placeholder="Tìm theo thiết bị, tên bước, oder, mẻ..."/>
+      <input class="searchbox" data-tbl="t_bs_detail" placeholder="Tìm theo thiết bị, tên bước, oder, mẻ, loại bia..."/>
       <div class="tablewrap"><table id="t_bs_detail">
-        <thead><tr><th>Thiết bị</th><th>Bước</th><th>Tên bước</th><th>Oder</th><th>Mẻ</th><th>Bắt đầu</th><th>Kết thúc</th>
+        <thead><tr><th>Thiết bị</th><th>Bước</th><th>Tên bước</th><th>Oder</th><th>Mẻ</th><th>Loại bia</th><th>Bắt đầu</th><th>Kết thúc</th>
           <th>Thời gian chạy</th><th>Đặt (phút)</th><th>Nhiệt độ (°C)</th><th>Thể tích (hl)</th>
           <th>Độ đục EBC</th><th>Khí thổi (l/ph)</th><th>Lưu lượng (hl/h)</th></tr></thead>
         <tbody>${bsSteps.map(r => {
@@ -12124,13 +12137,14 @@ VIEWS.reports = async function () {
           return `<tr>
           <td>${esc(r.equipment_name)}</td><td>${r.step_no ?? "—"}</td><td>${esc(r.step_name || "—")}</td>
           <td><code class="k">${esc(r.ba_order_no || "—")}</code></td><td><code class="k">${esc(r.ba_batch_no || "—")}</code></td>
+          <td class="muted">${esc(r.beer_type_name || "—")}</td>
           <td class="muted">${fmt(r.started_at)}</td><td class="muted">${r.ended_at ? fmt(r.ended_at) : "—"}</td>
           <td>${r.ended_at ? fmtMin(r.duration_minutes) : statusBadge("running", "đang chạy")}${r.data_gap ? " " + statusBadge("held", "gián đoạn ghi log") : ""}</td>
           <td class="muted">${r.step_minutes_setpoint != null ? r.step_minutes_setpoint.toLocaleString("vi-VN") : "—"}</td>
           <td>${snap.temp_actual != null ? snap.temp_actual.toFixed(1) : "—"}</td>
           <td>${snap.volume_hl != null ? snap.volume_hl.toFixed(2) : "—"}</td>
           <td>${n1(snap.ebc_actual)}</td><td>${n1(snap.air_flow)}</td><td>${n1(snap.flow_actual)}</td></tr>`;
-        }).join("") || '<tr><td colspan=14 class="muted">Chưa có dữ liệu.</td></tr>'}</tbody>
+        }).join("") || '<tr><td colspan=15 class="muted">Chưa có dữ liệu.</td></tr>'}</tbody>
       </table></div>
     </div>`;
   } else if (sec === "brewhouse_cycle") {
@@ -12141,10 +12155,12 @@ VIEWS.reports = async function () {
     const bcOrder = SUB.reports_bc_order || "";
     const bcBatch = SUB.reports_bc_batch || "";
     const bcDays = SUB.reports_bc_days || 3650;
+    const bcBeerType = SUB.reports_bc_beertype || "";
     const bcQs = [
       bcYear ? `ba_year=${encodeURIComponent(bcYear)}` : "",
       bcOrder ? `ba_order_no=${encodeURIComponent(bcOrder)}` : "",
       bcBatch ? `ba_batch_no=${encodeURIComponent(bcBatch)}` : "",
+      bcBeerType ? `beer_type_recno=${encodeURIComponent(bcBeerType)}` : "",
       `days=${bcDays}`,
     ].filter(Boolean).join("&");
     const bcRep = await GET(`/reports/brewhouse-cycle?${bcQs}`);
@@ -12174,6 +12190,9 @@ VIEWS.reports = async function () {
         <div class="field"><label>Năm</label><input id="rbc_year" type="number" placeholder="VD 26" value="${esc(String(bcYear))}" style="width:80px"/></div>
         <div class="field"><label>Lệnh nấu (Oder)</label><input id="rbc_order" placeholder="VD 322" value="${esc(bcOrder)}" style="width:100px"/></div>
         <div class="field"><label>Mẻ (Batch)</label><input id="rbc_batch" placeholder="VD 3136" value="${esc(bcBatch)}" style="width:100px"/></div>
+        <div class="field"><label>Loại bia</label><select id="rbc_beertype"><option value="">Tất cả</option>
+          ${Object.entries(BEER_TYPE_BY_RECNO).map(([recno, name]) => `<option value="${recno}" ${String(bcBeerType) === recno ? "selected" : ""}>${esc(name)}</option>`).join("")}
+        </select></div>
         <div class="field"><label>Kỳ</label><select id="rbc_days">
           <option value="30" ${bcDays == 30 ? "selected" : ""}>30 ngày gần đây</option>
           <option value="90" ${bcDays == 90 ? "selected" : ""}>90 ngày gần đây</option>
@@ -12182,30 +12201,32 @@ VIEWS.reports = async function () {
         <button class="btn" id="rbc_apply" style="align-self:flex-end">Xem</button>
       </div>
       <div class="tablewrap"><table id="t_bc">
-        <thead><tr><th>Năm</th><th>Oder</th><th>Mẻ</th><th>Nồi gạo bắt đầu</th><th>Nồi lắng xoáy kết thúc</th><th>Tổng thời gian</th>
+        <thead><tr><th>Năm</th><th>Oder</th><th>Mẻ</th><th>Loại bia</th><th>Nồi gạo bắt đầu</th><th>Nồi lắng xoáy kết thúc</th><th>Tổng thời gian</th>
           ${bcRoles.map(r => `<th>${esc(r)}</th>`).join("")}<th>Trạng thái</th></tr></thead>
         <tbody>${bcItems.map(it => `<tr>
           <td>${it.ba_year ?? "—"}</td><td><code class="k">${esc(it.ba_order_no || "—")}</code></td>
           <td><code class="k">${esc(it.ba_batch_no || "—")}</code></td>
+          <td class="muted">${esc(it.beer_type_name || "—")}</td>
           <td class="muted">${fmt(it.rice_started_at)}</td>
           <td class="muted">${it.whirlpool_ended_at ? fmt(it.whirlpool_ended_at) : "—"}</td>
           <td><b>${fmtMin2(it.cycle_minutes)}${it.cycle_still_running ? " " + statusBadge("running", "đang chạy") : ""}${it.cycle_data_gap ? " " + statusBadge("held", "gián đoạn ghi log") : ""}</b></td>
           ${it.vessels.map(v => `<td>${v.total_minutes == null ? "—" :
             `${fmtMin2(v.total_minutes)}${v.still_running ? " " + statusBadge("running", "đang chạy") : ""}${v.data_gap ? " " + statusBadge("held", "gián đoạn ghi log") : ""}`}</td>`).join("")}
           <td>${statusBadge(...(BC_STAGE[it.stage] || ["pending", it.stage]))}</td></tr>`).join("") ||
-          `<tr><td colspan=${7 + bcRoles.length} class="muted">Chưa có dữ liệu.</td></tr>`}</tbody>
+          `<tr><td colspan=${8 + bcRoles.length} class="muted">Chưa có dữ liệu.</td></tr>`}</tbody>
       </table></div>
     </div>
     <div class="panel" style="margin-top:14px">
       <h2>Năng suất lý thuyết <span class="muted">(theo từng mẻ)</span></h2>
-      <div class="muted" style="margin-bottom:8px">Mỗi dòng = 1 mẻ ĐÃ XONG (bỏ qua mẻ còn đang chạy dở hoặc bị gián đoạn ghi log — xem bảng trên) — riêng Nồi gạo giữ nguyên thời gian (dùng chung 1 thiết bị cho cả 2 dây), các nồi còn lại chia đôi thời gian (mỗi nồi có 2 thiết bị, 1/dây, chạy xen kẽ). "Số mẻ đạt được/ngày" = 24 giờ × 60 phút / số phút lớn nhất trong các nồi (nút thắt cổ chai).</div>
+      <div class="muted" style="margin-bottom:8px">Mỗi dòng = 1 mẻ ĐÃ XONG (bỏ qua mẻ còn đang chạy dở hoặc bị gián đoạn ghi log — xem bảng trên) — riêng Nồi gạo giữ nguyên thời gian (dùng chung 1 thiết bị cho cả 2 dây), các nồi còn lại chia đôi thời gian (mỗi nồi có 2 thiết bị, 1/dây, chạy xen kẽ). "Số mẻ đạt được/ngày" = 24 giờ × 60 phút / số phút lớn nhất trong các nồi (nút thắt cổ chai). Bộ lọc "Loại bia" ở trên áp dụng cho CẢ bảng này.</div>
       <div class="tablewrap"><table id="t_bcthrpt">
-        <thead><tr><th>Mẻ</th>${bcRoles.map(r => `<th>${esc(r)}</th>`).join("")}<th>Số mẻ đạt được/ngày</th></tr></thead>
+        <thead><tr><th>Mẻ</th><th>Loại bia</th>${bcRoles.map(r => `<th>${esc(r)}</th>`).join("")}<th>Số mẻ đạt được/ngày</th></tr></thead>
         <tbody>${bcThrpt.map(p => `<tr>
           <td><code class="k">${esc(p.batch.ba_order_no || "—")}/${esc(p.batch.ba_batch_no || "—")}</code></td>
+          <td class="muted">${esc(p.batch.beer_type_name || "—")}</td>
           ${p.vessels.map(v => `<td>${fmtMin2(v.adj_minutes)}</td>`).join("")}
           <td><b>${p.batches_per_day != null ? p.batches_per_day.toLocaleString("vi-VN") : "—"}</b></td></tr>`).join("") ||
-          `<tr><td colspan=${2 + bcRoles.length} class="muted">Cần ít nhất 1 mẻ đã có dữ liệu.</td></tr>`}</tbody>
+          `<tr><td colspan=${3 + bcRoles.length} class="muted">Cần ít nhất 1 mẻ đã có dữ liệu.</td></tr>`}</tbody>
       </table></div>
     </div>`;
   } else if (sec === "pack_by_category") {
@@ -12537,6 +12558,7 @@ VIEWS.reports = async function () {
       SUB.reports_bs_order = $("rbs_order").value;
       SUB.reports_bs_batch = $("rbs_batch").value;
       SUB.reports_bs_equip = $("rbs_equip").value;
+      SUB.reports_bs_beertype = $("rbs_beertype").value;
       SUB.reports_bs_days = parseInt($("rbs_days").value);
       render("reports");
     };
@@ -12547,6 +12569,7 @@ VIEWS.reports = async function () {
       SUB.reports_bc_year = $("rbc_year").value;
       SUB.reports_bc_order = $("rbc_order").value;
       SUB.reports_bc_batch = $("rbc_batch").value;
+      SUB.reports_bc_beertype = $("rbc_beertype").value;
       SUB.reports_bc_days = parseInt($("rbc_days").value);
       render("reports");
     };
