@@ -106,8 +106,9 @@ def test_monthly_running_idle_hours_and_liters(client, admin_h):
 
     rep = client.get("/api/reports/filter-line-utilization",
                      params={"year": 2030, "month": 6}, headers=admin_h).json()
+    assert rep["mode"] == "month"
     assert rep["year"] == 2030 and rep["month"] == 6
-    assert rep["days_in_month"] == 30
+    assert rep["days_in_period"] == 30
     assert rep["total_hours"] == 720.0
     assert rep["batch_count"] == 2
     assert rep["running_hours"] == 10.5
@@ -116,6 +117,44 @@ def test_monthly_running_idle_hours_and_liters(client, admin_h):
     assert rep["running_pct"] == round(10.5 / 720 * 100, 1)
     assert rep["idle_pct"] == round(100 - rep["running_pct"], 1)
     assert rep["batches_missing_duration"] == 0
+    assert rep["first_started_at"] == "2030-06-10T01:00:00+00:00"
+    assert rep["last_ended_at"] == "2030-06-15T07:30:00+00:00"
+
+
+def test_date_range_mode_matches_month_mode_and_reports_first_last(client, admin_h):
+    """Cung du lieu voi test_monthly_running_idle_hours_and_liters (thang 2030-06) nhung goi qua
+    date_from/date_to tuong minh 2030-06-01..2030-06-30 - phai ra dung ket qua nhu mode "month",
+    kem first_started_at/last_ended_at (yeu cau nguoi dung 2026-11-11: "cho biet thoi gian bat
+    dau gan nhat cua ngay do, va ket thuc cua me cuoi cung")."""
+    rep = client.get("/api/reports/filter-line-utilization",
+                     params={"date_from": "2030-06-01", "date_to": "2030-06-30"}, headers=admin_h).json()
+    assert rep["mode"] == "range"
+    assert rep["year"] is None and rep["month"] is None
+    assert rep["date_from"] == "2030-06-01" and rep["date_to"] == "2030-06-30"
+    assert rep["days_in_period"] == 30
+    assert rep["total_hours"] == 720.0
+    assert rep["batch_count"] == 2
+    assert rep["running_hours"] == 10.5
+    assert rep["total_liters"] == 13000.0
+    assert rep["first_started_at"] == "2030-06-10T01:00:00+00:00"
+    assert rep["last_ended_at"] == "2030-06-15T07:30:00+00:00"
+
+
+def test_date_range_single_day_window(client, admin_h):
+    # 1 ngay (2030-06-10) -> 24 gio lich, chi gom me A (ket thuc dung ngay do).
+    rep = client.get("/api/reports/filter-line-utilization",
+                     params={"date_from": "2030-06-10", "date_to": "2030-06-10"}, headers=admin_h).json()
+    assert rep["days_in_period"] == 1
+    assert rep["total_hours"] == 24.0
+    assert rep["batch_count"] == 1
+    assert rep["running_hours"] == 4.0
+    assert rep["first_started_at"] == "2030-06-10T01:00:00+00:00"
+    assert rep["last_ended_at"] == "2030-06-10T05:00:00+00:00"
+
+
+def test_missing_both_period_kinds_is_rejected(client, admin_h):
+    r = client.get("/api/reports/filter-line-utilization", headers=admin_h)
+    assert r.status_code == 409, r.text
 
 
 def test_month_with_no_batches_is_all_idle(client, admin_h):
@@ -127,3 +166,5 @@ def test_month_with_no_batches_is_all_idle(client, admin_h):
     assert rep["running_pct"] == 0.0
     assert rep["idle_pct"] == 100.0
     assert rep["idle_hours"] == rep["total_hours"]
+    assert rep["first_started_at"] is None
+    assert rep["last_ended_at"] is None

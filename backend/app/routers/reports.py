@@ -198,10 +198,11 @@ def filter_production_report_export(days: int = 3650, date_from: str = None, dat
 # ---- BC hiệu suất hệ lọc theo tháng: % thời gian lọc/không lọc + tổng lít dịch lọc — yêu cầu
 # người dùng 2026-11-11 ----
 @router.get("/filter-line-utilization")
-def filter_line_utilization_report(year: int, month: int, db: Session = Depends(get_db),
+def filter_line_utilization_report(year: int = None, month: int = None, date_from: str = None,
+                                   date_to: str = None, db: Session = Depends(get_db),
                                    user: User = Depends(get_current_user)):
     from ..services import dashboard as dashboard_svc
-    return dashboard_svc.filter_line_utilization_report(db, year, month)
+    return dashboard_svc.filter_line_utilization_report(db, year, month, date_from, date_to)
 
 
 # ---- BC dây chuyền chiết: Gantt/timeline giờ chiết/không chiết theo từng dây chuyền đóng gói,

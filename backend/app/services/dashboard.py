@@ -9,6 +9,7 @@ from sqlalchemy import false, select, true
 from sqlalchemy.orm import Session
 
 from ..common import DeviationState, LotStatus, QualityStatus, ResultStatus, execute_in_chunks, utcnow
+from ..errors import DomainError
 from ..models.batches import BatchExecution
 from ..models.batch_pipeline import (
     BatchFilterLot,
@@ -576,48 +577,76 @@ def filter_production_report(db: Session, days: int = 3650, date_from_str: str =
     return rows
 
 
-def filter_line_utilization_report(db: Session, year: int, month: int) -> dict:
+def filter_line_utilization_report(db: Session, year: int = None, month: int = None,
+                                   date_from_str: str = None, date_to_str: str = None) -> dict:
     """Báo cáo "Hiệu suất hệ lọc theo tháng" (tab Báo cáo › Hệ lọc) — % thời gian hệ lọc CHẠY so
-    với thời gian không chạy trong 1 tháng, kèm tổng sản lượng dịch lọc (lít) — yêu cầu người
-    dùng 2026-11-11: "Tạo cho tôi 1 báo cáo ở modul hệ lọc như tính ở trên, có thời gian không lọc
-    và thời gian lọc, %, số giờ, số lít dịch/tháng, cho chọn theo tháng" (mirror đúng cách tính
-    tay đã làm thủ công qua filter-production trước đó trong hội thoại: tổng `duration_hours`
-    cộng dồn mọi mẻ lọc / tổng giờ lịch của kỳ).
+    với thời gian không chạy trong 1 kỳ, kèm tổng sản lượng dịch lọc (lít) — yêu cầu người dùng
+    2026-11-11: "Tạo cho tôi 1 báo cáo ở modul hệ lọc như tính ở trên, có thời gian không lọc và
+    thời gian lọc, %, số giờ, số lít dịch/tháng, cho chọn theo tháng" (mirror đúng cách tính tay
+    đã làm thủ công qua filter-production trước đó trong hội thoại: tổng `duration_hours` cộng
+    dồn mọi mẻ lọc / tổng giờ lịch của kỳ). Bổ sung 2026-11-11 (sau khi dùng thử): "thêm cho tôi
+    chức năng chọn từ ngày đến ngày, cho biết thời gian bắt đầu gần nhất của ngày đó, và kết thúc
+    của mẻ cuối cùng" — 2 kỳ, chọn 1 trong 2 (year+month HOẶC date_from_str+date_to_str, mirror
+    filter_production_report nhận days/date_from_str/date_to_str): "month" theo lịch (năm+tháng),
+    "range" theo khoảng ngày tường minh (quy đổi qua `_vn_day_start_utc`, TRỌN ngày date_to_str —
+    mốc loại trừ = đầu ngày VN kế tiếp, mirror filter_production_report). Thiếu cả 2 kỳ -> lỗi
+    409 rõ ràng thay vì TypeError khi date(None, None, 1).
 
-    Khung giờ LỊCH dùng để chia % là TRỌN THÁNG (số_ngày_trong_tháng x 24h) — KHÔNG rút ngắn nếu
-    tháng đang chạy dở (hôm nay) hay ngày cuối chưa có mẻ lọc: phần "chưa chạy" của tháng đang
-    diễn ra TỰ NHIÊN rơi vào "thời gian không lọc" (đúng bản chất câu hỏi — máy đang rảnh/chưa
-    tới lượt chạy — chứ không phải lỗi dữ liệu).
+    Khung giờ LỊCH dùng để chia % là TRỌN KỲ (số ngày trong kỳ x 24h) — KHÔNG rút ngắn nếu kỳ
+    đang chạy dở (hôm nay) hay ngày cuối chưa có mẻ lọc: phần "chưa chạy" của kỳ đang diễn ra TỰ
+    NHIÊN rơi vào "thời gian không lọc" (đúng bản chất câu hỏi — máy đang rảnh/chưa tới lượt chạy
+    — chứ không phải lỗi dữ liệu).
 
     `running_hours`: TỔNG CỘNG DỒN `duration_hours` (ended_at - started_at) của MỌI mẻ lọc (nhóm
-    theo batch_seq_no, mirror _batch_filter_lot_yield_items) có `ended_at` rơi trong tháng — mẻ
+    theo batch_seq_no, mirror _batch_filter_lot_yield_items) có `ended_at` rơi trong kỳ — mẻ
     thiếu started_at (dữ liệu cũ) hoặc duration <= 0 (lệch thứ tự) bị loại khỏi running_hours
     (không tính được) nhưng VẪN cộng vào `total_liters`/`batch_count` (sản lượng/số mẻ vẫn biết,
     chỉ riêng thời lượng không biết) — đếm riêng ở `batches_missing_duration` để biết độ tin cậy
     của % tính được.
 
+    `first_started_at`/`last_ended_at`: mốc SỚM NHẤT (`started_at`) và TRỄ NHẤT (`ended_at`)
+    trong TOÀN BỘ mẻ lọc của kỳ — "thời gian bắt đầu gần nhất" và "kết thúc của mẻ cuối cùng" yêu
+    cầu người dùng ở trên. None nếu kỳ không có mẻ lọc nào.
+
     LƯU Ý: nếu nhà máy có NHIỀU lô lọc/tank chạy ĐỒNG THỜI (mẻ lọc tiếp theo bắt đầu trước khi mẻ
     trước kết thúc hẳn — xảy ra thật trong dữ liệu, VD mẻ 108 bắt đầu 07/11 01:45 trong khi mẻ 107
     còn chạy tới 06:15), `running_hours` CỘNG DỒN cả phần chồng lấn đó — `running_pct` vì vậy có
-    thể vượt 100% nếu hệ lọc chạy song song nhiều lô cùng lúc một cách đáng kể trong tháng. Đây là
+    thể vượt 100% nếu hệ lọc chạy song song nhiều lô cùng lúc một cách đáng kể trong kỳ. Đây là
     tính đúng theo PHƯƠNG PHÁP đã thống nhất với người dùng (tổng giờ chạy / tổng giờ lịch), không
     clamp lại — vượt 100% tự nó là tín hiệu đáng chú ý (nhiều dòng/lô chạy song song)."""
+    if date_from_str and date_to_str:
+        mode = "range"
+        d_from = date.fromisoformat(date_from_str)
+        d_to = date.fromisoformat(date_to_str)
+        window_start = _vn_day_start_utc(d_from)
+        window_end = _vn_day_start_utc(d_to + timedelta(days=1))
+        days_in_period = (d_to - d_from).days + 1
+    elif year is not None and month is not None:
+        mode = "month"
+        window_start = _vn_day_start_utc(date(year, month, 1))
+        next_month = date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)
+        window_end = _vn_day_start_utc(next_month)
+        days_in_period = (next_month - date(year, month, 1)).days
+    else:
+        raise DomainError("Cần chọn Năm + Tháng, hoặc Từ ngày - Đến ngày.")
+    total_hours = days_in_period * 24.0
+
     from . import ops_setting as ops_setting_svc
     settings = ops_setting_svc.get_settings(db)
-    month_start = _vn_day_start_utc(date(year, month, 1))
-    next_month = date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)
-    month_end = _vn_day_start_utc(next_month)
-    days_in_month = (next_month - date(year, month, 1)).days
-    total_hours = days_in_month * 24.0
-
     base_items = _batch_filter_lot_yield_items(
-        db, month_start, month_end, settings.filter_line_yield_low_l, settings.filter_line_yield_high_l)
+        db, window_start, window_end, settings.filter_line_yield_low_l, settings.filter_line_yield_high_l)
 
     running_hours = 0.0
     total_liters = 0.0
     batches_missing_duration = 0
+    started_list = []
+    ended_list = []
     for it in base_items:
         total_liters += it["v_l"]
+        if it["started_at"]:
+            started_list.append(it["started_at"])
+        if it["ended_at"]:
+            ended_list.append(it["ended_at"])
         delta_h = None
         if it["started_at"] and it["ended_at"]:
             delta_h = (datetime.fromisoformat(it["ended_at"]) - datetime.fromisoformat(it["started_at"])).total_seconds() / 3600
@@ -632,8 +661,11 @@ def filter_line_utilization_report(db: Session, year: int, month: int) -> dict:
     idle_pct = round(100 - running_pct, 1) if running_pct is not None else None
 
     return {
-        "year": year, "month": month,
-        "days_in_month": days_in_month,
+        "mode": mode,
+        "year": year if mode == "month" else None, "month": month if mode == "month" else None,
+        "date_from": date_from_str if mode == "range" else None,
+        "date_to": date_to_str if mode == "range" else None,
+        "days_in_period": days_in_period,
         "total_hours": total_hours,
         "running_hours": running_hours,
         "idle_hours": idle_hours,
@@ -642,6 +674,8 @@ def filter_line_utilization_report(db: Session, year: int, month: int) -> dict:
         "total_liters": round(total_liters, 1),
         "batch_count": len(base_items),
         "batches_missing_duration": batches_missing_duration,
+        "first_started_at": min(started_list) if started_list else None,
+        "last_ended_at": max(ended_list) if ended_list else None,
     }
 
 
