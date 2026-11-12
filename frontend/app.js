@@ -12242,15 +12242,16 @@ VIEWS.reports = async function () {
     </div>
     <div class="panel" style="margin-top:14px">
       <h2>Năng suất lý thuyết <span class="muted">(theo từng mẻ)</span></h2>
-      <div class="muted" style="margin-bottom:8px">Mỗi dòng = 1 mẻ ĐÃ XONG (bỏ qua mẻ còn đang chạy dở hoặc bị gián đoạn ghi log — xem bảng trên) — riêng Nồi gạo giữ nguyên thời gian (dùng chung 1 thiết bị cho cả 2 dây), các nồi còn lại chia đôi thời gian (mỗi nồi có 2 thiết bị, 1/dây, chạy xen kẽ). "Số mẻ đạt được/ngày" = 24 giờ × 60 phút / số phút lớn nhất trong các nồi (nút thắt cổ chai). Bộ lọc "Loại bia" ở trên áp dụng cho CẢ bảng này.</div>
+      <div class="muted" style="margin-bottom:8px">Mỗi dòng = 1 mẻ ĐÃ XONG (bỏ qua mẻ còn đang chạy dở/thiếu dữ liệu — xem bảng trên; mẻ bị gián đoạn ghi log VẪN tính, kèm ghi chú ở cột cuối) — riêng Nồi gạo giữ nguyên thời gian (dùng chung 1 thiết bị cho cả 2 dây), các nồi còn lại chia đôi thời gian (mỗi nồi có 2 thiết bị, 1/dây, chạy xen kẽ). "Số mẻ đạt được/ngày" = 24 giờ × 60 phút / số phút lớn nhất trong các nồi (nút thắt cổ chai). Bộ lọc "Loại bia" ở trên áp dụng cho CẢ bảng này.</div>
       <div class="tablewrap"><table id="t_bcthrpt">
-        <thead><tr><th>Mẻ</th><th>Loại bia</th>${bcRoles.map(r => `<th>${esc(r)}</th>`).join("")}<th>Số mẻ đạt được/ngày</th></tr></thead>
+        <thead><tr><th>Mẻ</th><th>Loại bia</th>${bcRoles.map(r => `<th>${esc(r)}</th>`).join("")}<th>Số mẻ đạt được/ngày</th><th>Ghi chú</th></tr></thead>
         <tbody>${bcThrpt.map(p => `<tr>
           <td><code class="k">${esc(p.batch.ba_order_no || "—")}/${esc(p.batch.ba_batch_no || "—")}</code></td>
           <td class="muted">${esc(p.batch.beer_type_name || "—")}</td>
           ${p.vessels.map(v => `<td>${fmtMin2(v.adj_minutes)}</td>`).join("")}
-          <td><b>${p.batches_per_day != null ? p.batches_per_day.toLocaleString("vi-VN") : "—"}</b></td></tr>`).join("") ||
-          `<tr><td colspan=${3 + bcRoles.length} class="muted">Cần ít nhất 1 mẻ đã có dữ liệu.</td></tr>`}</tbody>
+          <td><b>${p.batches_per_day != null ? p.batches_per_day.toLocaleString("vi-VN") : "—"}</b></td>
+          <td>${p.data_gap_note ? statusBadge("held", p.data_gap_note) : ""}</td></tr>`).join("") ||
+          `<tr><td colspan=${4 + bcRoles.length} class="muted">Cần ít nhất 1 mẻ đã có dữ liệu.</td></tr>`}</tbody>
       </table></div>
     </div>`;
   } else if (sec === "pack_by_category") {

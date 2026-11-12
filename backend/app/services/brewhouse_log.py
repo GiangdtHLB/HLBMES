@@ -550,7 +550,16 @@ def brew_cycle_report(db: Session, ba_year: int = None, ba_order_no: str = None,
     bị cho mọi mẻ nên giữ nguyên. Báo cáo RIÊNG với step_log_report() (báo cáo đó là chi tiết
     từng BƯỚC). `beer_type_recno` lọc theo Loại bia (RecNo nồi gạo — yêu cầu người dùng
     2026-11-11) — lọc TRƯỚC khi dựng throughput nên "Năng suất lý thuyết" cũng tự động lọc theo
-    đúng Loại bia, không cần lọc riêng."""
+    đúng Loại bia, không cần lọc riêng.
+
+    `data_gap_note`: trước đây (2026-11-01) 1 nồi bị đánh dấu data_gap sẽ loại LUÔN CẢ MẺ đó
+    khỏi "Số mẻ đạt được/ngày" (coi số phút không đáng tin). Đổi theo yêu cầu người dùng
+    2026-11-12: "Bổ sung thêm tính cả mẻ bị gián đoạn log, thêm 1 ghi chú vào phí sau cùng là mẻ
+    bị gián đoạn log tại nồi nào" — vẫn TÍNH bình thường (không còn loại trừ số phút data_gap ra
+    khỏi max_minutes/batches_per_day nữa), chỉ còn loại trừ mẻ đang chạy dở/thiếu dữ liệu
+    (still_running/total_minutes=None — 2 trường hợp đó thật sự không có số để tính, khác
+    data_gap vẫn CÓ số, chỉ là độ tin cậy thấp hơn). Đổi lại, liệt kê rõ TÊN NỒI bị gián đoạn vào
+    `data_gap_note` ở cuối mỗi dòng để người đọc tự đánh giá độ tin cậy của số đó."""
     items = _brew_cycle_items(db, ba_year, ba_order_no, ba_batch_no, days)
     if beer_type_recno is not None:
         items = [it for it in items if it["beer_type_recno"] == beer_type_recno]
@@ -559,17 +568,20 @@ def brew_cycle_report(db: Session, ba_year: int = None, ba_order_no: str = None,
     throughput = []
     for it in items_asc:
         vessel_adj = []
+        gap_roles = []
         for v in it["vessels"]:
-            # Chỉ dùng thời gian ĐÃ XONG VÀ ĐÁNG TIN (không dùng số phút của bước đang chạy dở,
-            # cũng không dùng số bị đánh dấu data_gap — cả 2 đều không phải tổng thật, lấy vào sẽ
-            # làm sản lượng/ngày bị thổi phồng/bóp méo sai — xem GAP_THRESHOLD_SECONDS).
-            if v["still_running"] or v["total_minutes"] is None or v["data_gap"]:
+            # Chỉ loại trừ mẻ ĐANG CHẠY DỞ/THIẾU DỮ LIỆU (không có số thật để tính) — mẻ bị
+            # data_gap VẪN CÓ số phút (chỉ kém tin cậy hơn), nên vẫn tính bình thường, kèm ghi
+            # chú nồi nào bị gián đoạn (xem docstring).
+            if v["still_running"] or v["total_minutes"] is None:
                 adj = None
             elif v["role"] == "Nồi gạo":
                 adj = v["total_minutes"]
             else:
                 adj = round(v["total_minutes"] / 2.0, 2)
             vessel_adj.append({"role": v["role"], "adj_minutes": adj})
+            if v["data_gap"]:
+                gap_roles.append(v["role"])
         # Chỉ tính nút thắt cổ chai/số mẻ-ngày khi có ĐỦ thời gian của TẤT CẢ các nồi trong chuỗi
         # — thiếu bất kỳ nồi nào (chưa đủ dữ liệu/mẻ đang chạy dở) thì để "—", không tính từ dữ
         # liệu không đầy đủ (yêu cầu người dùng 2026-11-01).
@@ -581,6 +593,7 @@ def brew_cycle_report(db: Session, ba_year: int = None, ba_order_no: str = None,
             "vessels": vessel_adj,
             "max_minutes": max_minutes,
             "batches_per_day": round((24 * 60) / max_minutes, 2) if max_minutes else None,
+            "data_gap_note": ("Gián đoạn ghi log tại: " + ", ".join(gap_roles)) if gap_roles else None,
         })
     throughput.reverse()  # mới nhất lên đầu, mirror thứ tự items bên dưới
 
