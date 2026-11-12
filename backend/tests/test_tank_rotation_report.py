@@ -180,3 +180,55 @@ def test_tank_rotation_report_does_not_mix_up_unnamed_tanks(client, admin_h):
     summaries = [s for s in rep["tank_summaries"] if s["tank_lm"] is None]
     assert all(s["occurrences"] == 1 and s["cycle_count"] == 0 for s in summaries)
     assert not any(c["tank_lm"] is None for c in rep["cycles"])
+
+
+def test_tank_rotation_report_date_range_filter(client, admin_h):
+    """yêu cầu người dùng 2026-11-12: "Thêm lọc cho tank lên men từ ngày đến ngày" — lọc theo
+    Ngày vào dịch (vao_dich_start). Lượt A (05/05) và lượt B (19/05) cùng 1 tank:
+    - Lọc đúng ngày của lượt A: "current"/"history" chỉ còn A, nhưng "cycles" VẪN hiện đúng 1 lần
+      quay vòng A->B (14 ngày) — vì "từ" (A) rơi trong kỳ, dù "tới" (B) nằm NGOÀI kỳ.
+    - Lọc đúng ngày của lượt B: chỉ còn B, KHÔNG có cycle nào (B là lượt cuối, chưa có lượt sau).
+    - Không lọc: cả 2 lượt đều hiện."""
+    b1 = _make_completed_batch(client, admin_h, "90006",
+                               "2031-05-05T01:00:00+00:00", "2031-05-05T10:00:00+00:00", 1.5)
+    tank_a = client.post("/api/batch-tanks", headers=admin_h, json={
+        "batch_ids": [b1], "tank_code": "TANKROT-DATEA", "tank_lm": "ZROTDATE"})
+    assert tank_a.status_code == 201, tank_a.text
+    empt = client.post(f"/api/batch-tanks/{tank_a.json()['tank_id']}/empty", headers=admin_h)
+    assert empt.status_code == 200, empt.text
+
+    b2 = _make_completed_batch(client, admin_h, "90007",
+                               "2031-05-19T01:00:00+00:00", "2031-05-19T10:00:00+00:00", 60)
+    tank_b = client.post("/api/batch-tanks", headers=admin_h, json={
+        "batch_ids": [b2], "tank_code": "TANKROT-DATEB", "tank_lm": "ZROTDATE"})
+    assert tank_b.status_code == 201, tank_b.text
+
+    rep_no_filter = client.get("/api/reports/tank-rotation", headers=admin_h).json()
+    hist_all = [h for h in rep_no_filter["history"] if h["tank_lm"] == "ZROTDATE"]
+    assert len(hist_all) == 2
+
+    rep_a = client.get("/api/reports/tank-rotation",
+                       params={"date_from": "2031-05-05", "date_to": "2031-05-05"}, headers=admin_h).json()
+    cur_a = [r for r in rep_a["current"] if r["tank_lm"] == "ZROTDATE"]
+    assert len(cur_a) == 1 and cur_a[0]["tank_code"] == "TANKROT-DATEA"
+    hist_a = [h for h in rep_a["history"] if h["tank_lm"] == "ZROTDATE"]
+    assert len(hist_a) == 1 and hist_a[0]["tank_code"] == "TANKROT-DATEA"
+    cycles_a = [c for c in rep_a["cycles"] if c["tank_lm"] == "ZROTDATE"]
+    assert len(cycles_a) == 1
+    assert cycles_a[0]["from_tank_code"] == "TANKROT-DATEA"
+    assert cycles_a[0]["to_tank_code"] == "TANKROT-DATEB"
+    assert cycles_a[0]["days"] == 14.0
+    summary_a = next(s for s in rep_a["tank_summaries"] if s["tank_lm"] == "ZROTDATE")
+    assert summary_a["occurrences"] == 1
+    assert summary_a["cycle_count"] == 1
+
+    rep_b = client.get("/api/reports/tank-rotation",
+                       params={"date_from": "2031-05-19", "date_to": "2031-05-19"}, headers=admin_h).json()
+    cur_b = [r for r in rep_b["current"] if r["tank_lm"] == "ZROTDATE"]
+    assert len(cur_b) == 1 and cur_b[0]["tank_code"] == "TANKROT-DATEB"
+    cycles_b = [c for c in rep_b["cycles"] if c["tank_lm"] == "ZROTDATE"]
+    assert cycles_b == []   # B la luot cuoi, chua co luot sau -> khong co lan quay vong nao
+
+    rep_outside = client.get("/api/reports/tank-rotation",
+                             params={"date_from": "2031-06-01", "date_to": "2031-06-30"}, headers=admin_h).json()
+    assert not any(r["tank_lm"] == "ZROTDATE" for r in rep_outside["current"])

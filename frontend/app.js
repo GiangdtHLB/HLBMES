@@ -12258,23 +12258,40 @@ VIEWS.reports = async function () {
   } else if (sec === "tank_rotation") {
     // BC "Tank lên men" (quay vòng) — yêu cầu người dùng 2026-11-12: "Làm cho tôi 1 báo cáo về
     // tank lên men như file excel bạn làm, tank lên men thể hiện cả dung tích nhé" (tiếp nối
-    // hội thoại tính tay/Excel về "ngày vào dịch" đã trừ 78 phút + quay vòng tank). Không có bộ
-    // lọc kỳ — đây là snapshot hiện tại + toàn bộ lịch sử quay vòng, không theo tháng/ngày.
-    const trRep = await GET("/reports/tank-rotation");
+    // hội thoại tính tay/Excel về "ngày vào dịch" đã trừ 78 phút + quay vòng tank). Bộ lọc "Từ
+    // ngày - đến ngày" (yêu cầu người dùng 2026-11-12: "Thêm lọc cho tank lên men từ ngày đến
+    // ngày") lọc theo Ngày vào dịch — mặc định KHÔNG lọc (hiện snapshot/lịch sử toàn bộ).
+    const trMode = SUB.reports_tr_mode === "range" ? "range" : "all";
+    const trHasFilter = trMode === "range" && !!(SUB.reports_tr_date_from && SUB.reports_tr_date_to);
+    const trToday = new Date(); const trFrom30 = new Date(); trFrom30.setDate(trToday.getDate() - 30);
+    const trDateFrom = SUB.reports_tr_date_from || toISODateLocal(trFrom30);
+    const trDateTo = SUB.reports_tr_date_to || toISODateLocal(trToday);
+    const trQs = trHasFilter ? `date_from=${trDateFrom}&date_to=${trDateTo}` : "";
+    const trRep = await GET(`/reports/tank-rotation${trQs ? "?" + trQs : ""}`);
     const trCurrent = trRep.current || [];
     const trSummaryByTank = Object.fromEntries((trRep.tank_summaries || []).map(s => [s.tank_lm, s]));
     const trCycles = trRep.cycles || [];
     const trOverall = trRep.summary;
     const fmtDays = (d) => d == null ? "—" : d.toLocaleString("vi-VN", { maximumFractionDigits: 2 }) + " ngày";
     body = `<div class="panel"><h2>Tank lên men <span class="muted">(${trCurrent.length} tank)</span></h2>
-      <div class="muted" style="margin-bottom:8px">Mỗi tank 1 dòng = lô/trạng thái GẦN NHẤT (tank đang "hiện có"). "Ngày vào dịch" = giờ kết thúc mẻ nấu đầu tiên (sớm nhất trong các mẻ gộp vào tank) trừ 78 phút (TB thời gian chuyển dịch từ lắng xoáy sang tank, đo thực tế 127 mẻ). "Dung tích"/"Dung tích khả dụng" lấy từ Danh mục "Tank lên men".</div>
-      ${trOverall ? `<div class="cards" style="grid-template-columns:repeat(5,1fr);margin-bottom:12px">
+      <div class="muted" style="margin-bottom:8px">Mỗi tank 1 dòng = lô/trạng thái GẦN NHẤT (tank đang "hiện có" trong kỳ đã chọn). "Ngày vào dịch" = giờ kết thúc mẻ nấu đầu tiên (sớm nhất trong các mẻ gộp vào tank) trừ 78 phút (TB thời gian chuyển dịch từ lắng xoáy sang tank, đo thực tế 127 mẻ). "Dung tích"/"Dung tích khả dụng" lấy từ Danh mục "Tank lên men".</div>
+      <div class="row">
+        <div class="field"><label>Lọc theo Ngày vào dịch</label><select id="rtr_filter_mode">
+          <option value="all" ${trMode === "all" ? "selected" : ""}>Tất cả (không lọc)</option>
+          <option value="range" ${trMode === "range" ? "selected" : ""}>Từ ngày - đến ngày</option>
+        </select></div>
+        ${trMode === "range" ? `
+        <div class="field"><label>Từ ngày</label><input id="rtr_date_from" type="date" value="${trDateFrom}"/></div>
+        <div class="field"><label>Đến ngày</label><input id="rtr_date_to" type="date" value="${trDateTo}"/></div>
+        <button class="btn" id="rtr_apply" style="align-self:flex-end">Xem</button>` : ""}
+      </div>
+      ${trOverall ? `<div class="cards" style="grid-template-columns:repeat(5,1fr);margin:12px 0">
         <div class="card"><div class="n">${trOverall.count}</div><div class="l">Tổng lượt quay vòng</div></div>
         <div class="card"><div class="n">${fmtDays(trOverall.avg)}</div><div class="l">Trung bình</div></div>
         <div class="card"><div class="n">${fmtDays(trOverall.median)}</div><div class="l">Trung vị</div></div>
         <div class="card"><div class="n">${fmtDays(trOverall.min)}</div><div class="l">Nhỏ nhất</div></div>
         <div class="card"><div class="n">${fmtDays(trOverall.max)}</div><div class="l">Lớn nhất</div></div>
-      </div>` : '<div class="muted" style="margin-bottom:12px">Chưa có đủ dữ liệu để tính quay vòng (cần ít nhất 2 lượt vào dịch của cùng 1 tank).</div>'}
+      </div>` : '<div class="muted" style="margin:12px 0">Chưa có đủ dữ liệu để tính quay vòng (cần ít nhất 2 lượt vào dịch của cùng 1 tank trong kỳ đã chọn).</div>'}
       <input class="searchbox" data-tbl="t_trcurrent" placeholder="Tìm theo tank, lô, dịch bia, trạng thái..."/>
       <div class="tablewrap"><table id="t_trcurrent">
         <thead><tr><th>Tank</th><th>Lô hiện tại</th><th>Dịch bia</th><th>Loại bia</th><th>Trạng thái</th>
@@ -12664,6 +12681,21 @@ VIEWS.reports = async function () {
   }
   if (sec === "tank_rotation") {
     wirePaginate("t_trcurrent", 25); wirePaginate("t_trcycles", 25);
+    $("rtr_filter_mode").onchange = () => {
+      SUB.reports_tr_mode = $("rtr_filter_mode").value;
+      if (SUB.reports_tr_mode === "all") {
+        SUB.reports_tr_date_from = null; SUB.reports_tr_date_to = null;
+      }
+      render("reports");
+    };
+    const rtrApply = $("rtr_apply");
+    if (rtrApply) {
+      rtrApply.onclick = () => {
+        SUB.reports_tr_date_from = $("rtr_date_from").value;
+        SUB.reports_tr_date_to = $("rtr_date_to").value;
+        render("reports");
+      };
+    }
   }
   if (sec === "filling") {
     $("fp_mode").onchange = () => {

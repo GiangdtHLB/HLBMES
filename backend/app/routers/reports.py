@@ -244,9 +244,10 @@ def brew_volume_by_product_report(year: int, month: int, db: Session = Depends(g
 # ---- BC Tank lên men (quay vòng) — yêu cầu người dùng 2026-11-12: "Làm cho tôi 1 báo cáo về
 # tank lên men như file excel bạn làm, tank lên men thể hiện cả dung tích nhé" ----
 @router.get("/tank-rotation")
-def tank_rotation_report_endpoint(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+def tank_rotation_report_endpoint(date_from: str = None, date_to: str = None,
+                                  db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     from ..services import production_reports
-    return production_reports.tank_rotation_report(db)
+    return production_reports.tank_rotation_report(db, date_from, date_to)
 
 
 def _qc_date_bounds(date_from: str = None, date_to: str = None):

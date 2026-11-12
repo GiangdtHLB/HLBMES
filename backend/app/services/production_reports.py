@@ -293,7 +293,7 @@ def _tank_name_sort_key(tank_lm: str) -> tuple:
     return (tank_lm or "", 0, "")
 
 
-def tank_rotation_report(db: Session) -> dict:
+def tank_rotation_report(db: Session, date_from_str: str = None, date_to_str: str = None) -> dict:
     """BC "Tank lên men" (quay vòng) — yêu cầu người dùng 2026-11-12: "Làm cho tôi 1 báo cáo về
     tank lên men như file excel bạn làm, tank lên men thể hiện cả dung tích nhé", tiếp nối hội
     thoại tính tay trước đó (xem services/dashboard.py::VN_OFFSET note, batch_pipeline.py::
@@ -316,12 +316,34 @@ def tank_rotation_report(db: Session) -> dict:
     - "cycles": 1 dòng/LẦN QUAY VÒNG (không phải 1 dòng/lượt vào dịch) — từ lượt này sang lượt kế
       tiếp của cùng tank, kèm số ngày.
     - "summary": thống kê toàn nhà máy (số lượt quay vòng, TB/trung vị/nhỏ nhất/lớn nhất) — None
-      nếu chưa có lượt quay vòng hoàn chỉnh nào."""
+      nếu chưa có lượt quay vòng hoàn chỉnh nào.
+
+    `date_from_str`/`date_to_str` ("yyyy-mm-dd", hiểu là ngày giờ VN, TRỌN ngày date_to_str — mốc
+    loại trừ = đầu ngày VN kế tiếp, mirror dashboard.py::filter_production_report) — LỌC theo
+    "Ngày vào dịch" (vao_dich_start) — yêu cầu người dùng 2026-11-12: "Thêm lọc cho tank lên men
+    từ ngày đến ngày". Quan trọng: turnover_days/last_cycle_days vẫn tính trên TOÀN BỘ chuỗi lịch
+    sử THẬT (không lọc trước khi tính) — lọc CHỈ áp dụng vào bước cuối (chọn hiện dòng/lần quay
+    vòng nào), để khoảng cách quay vòng luôn đúng dù lượt "kế tiếp" nằm NGOÀI kỳ đã chọn.
+    - "current": với mỗi tank, chỉ xét các lượt vào dịch RƠI TRONG KỲ — lấy lượt MỚI NHẤT trong
+      số đó làm "hiện có theo kỳ" (tank không có lượt nào trong kỳ thì KHÔNG xuất hiện).
+    - "history": chỉ các lượt có vao_dich_start rơi trong kỳ.
+    - "cycles": chỉ các lần quay vòng mà lượt BẮT ĐẦU (from) rơi trong kỳ.
+    - "tank_summaries": tính lại TB/nhỏ nhất/lớn nhất CHỈ trên các lần quay vòng đã lọc ở trên."""
     all_tanks = batch_pipeline_svc.list_tanks_out(db)
     capacities = {
         l.code: {"volume": l.volume, "volume_uom": l.volume_uom, "usable_pct": l.usable_pct}
         for l in db.execute(select(ProductionLine).where(ProductionLine.kind == "tank")).scalars().all()
     }
+
+    window_start = window_end = None
+    if date_from_str and date_to_str:
+        window_start = _vn_day_bounds_utc(date.fromisoformat(date_from_str))[0]
+        window_end = _vn_day_bounds_utc(date.fromisoformat(date_to_str) + timedelta(days=1))[0]
+
+    def _in_window(dt) -> bool:
+        if window_start is None:
+            return True
+        return dt is not None and window_start <= dt < window_end
 
     # Nhóm theo tank_lm (tên tank vật lý, free-text) để tính quay vòng — NHƯNG tank_lm có thể bỏ
     # trống (NULL, không gán tank vật lý lúc tạo) — nếu gộp chung mọi dòng NULL vào 1 "nhóm" sẽ
@@ -351,11 +373,14 @@ def tank_rotation_report(db: Session) -> dict:
     for group_key in sorted(by_tank, key=_tank_name_sort_key):
         arr = by_tank[group_key]
         tank_lm = arr[0]["tank_lm"]   # hiện tên THẬT (có thể None) — group_key chỉ dùng nội bộ
+        arr_in_window = [t for t in arr if _in_window(t["vao_dich_start"])]
+        if not arr_in_window:
+            continue   # tank nay khong co luot vao dich nao roi vao ky da chon -> bo qua het
         cap = capacities.get(tank_lm)
         usable_cap = None
         if cap and cap["volume"] is not None and cap["usable_pct"] is not None:
             usable_cap = round(cap["volume"] * cap["usable_pct"] / 100, 1)
-        cur = arr[-1]
+        cur = arr_in_window[-1]   # "hiện có" THEO ĐÚNG kỳ đã chọn (không phải luôn là lượt mới nhất toàn thời gian)
         current_rows.append({
             "tank_lm": tank_lm,
             "capacity_hl": cap["volume"] if cap else None,
@@ -373,27 +398,30 @@ def tank_rotation_report(db: Session) -> dict:
             "has_len_men_phu_result": cur["has_len_men_phu_result"],
             "qc_fail_count": cur["qc_fail_count"],
         })
-        tank_cycles = [t["turnover_days"] for t in arr if t["turnover_days"] is not None]
+        tank_cycles = [t["turnover_days"] for t in arr_in_window if t["turnover_days"] is not None]
         tank_summaries.append({
-            "tank_lm": tank_lm, "occurrences": len(arr), "cycle_count": len(tank_cycles),
+            "tank_lm": tank_lm, "occurrences": len(arr_in_window), "cycle_count": len(tank_cycles),
             "avg_days": round(sum(tank_cycles) / len(tank_cycles), 2) if tank_cycles else None,
             "min_days": min(tank_cycles) if tank_cycles else None,
             "max_days": max(tank_cycles) if tank_cycles else None,
             "cycles": tank_cycles,
         })
         cycle_no = 0
-        for i in range(len(arr) - 1):
-            if arr[i]["turnover_days"] is None:
+        for t in arr_in_window:
+            if t["turnover_days"] is None:
                 continue
             cycle_no += 1
+            nxt = arr[arr.index(t) + 1]   # mẻ "kế tiếp" trong CHUỖI ĐẦY ĐỦ — có thể nằm NGOÀI kỳ
             cycles.append({
                 "tank_lm": tank_lm, "cycle_no": cycle_no,
-                "from_tank_code": arr[i]["tank_code"], "from_vao_dich": arr[i]["vao_dich_start"],
-                "to_tank_code": arr[i + 1]["tank_code"], "to_vao_dich": arr[i + 1]["vao_dich_start"],
-                "days": arr[i]["turnover_days"],
+                "from_tank_code": t["tank_code"], "from_vao_dich": t["vao_dich_start"],
+                "to_tank_code": nxt["tank_code"], "to_vao_dich": nxt["vao_dich_start"],
+                "days": t["turnover_days"],
             })
 
-    history_rows = sorted(all_tanks, key=lambda t: t["vao_dich_start"] or _MIN_DT, reverse=True)
+    history_rows = sorted(
+        [t for t in all_tanks if _in_window(t["vao_dich_start"])],
+        key=lambda t: t["vao_dich_start"] or _MIN_DT, reverse=True)
 
     all_cycle_days = [c["days"] for c in cycles]
     summary = None
