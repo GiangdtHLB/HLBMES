@@ -163,6 +163,10 @@ function setScopePicker(idPrefix, current) {
   box.querySelectorAll(`.${idPrefix}_item`).forEach(c => { c.checked = curSet.has(c.value); c.disabled = isAll; });
 }
 const fmt = (t) => t ? new Date(t).toLocaleString("vi-VN") : "—";
+// Số hl (tồn/tổng tank) có thể dính rác số thực do trừ dồn qua nhiều lượt (vd 1777.5999999999997
+// thay vì 1777.6) — ép tròn 2 chữ số thập phân trước khi hiện, tránh hiện nguyên số thực lởm
+// chởm ra màn hình (yêu cầu người dùng 2026-11-12, ảnh chụp "Danh sách lô lên men").
+const fmtHl = (v) => v == null ? "—" : Number(v).toLocaleString("vi-VN", { maximumFractionDigits: 2 });
 const esc = (s) => (s == null ? "" : String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])));
 const plateLast5 = (plate) => { const digits = String(plate || "").replace(/\D/g, ""); return digits ? digits.slice(-5) : "—"; };
 // Định dạng Date thành chuỗi cho input datetime-local — PHẢI dùng giờ LOCAL của máy (getHours...),
@@ -3082,7 +3086,7 @@ VIEWS.batchtanks = async function () {
             <td><code class="k">${esc(t.tank_code)}</code></td>
             <td>${esc(t.tank_lm || "—")}</td><td>${statusBadge(TANK_BADGE_CLASS[t.status], t.status_label)}</td>
             <td class="muted">${t.product_id && productByIdBT[t.product_id] ? esc(productByIdBT[t.product_id].code) : "—"}</td>
-            <td>${t.on_hand} / ${t.volume_hl}</td>
+            <td>${fmtHl(t.on_hand)} / ${fmtHl(t.volume_hl)}</td>
             <td class="muted">${t.vao_dich_start ? fmt(t.vao_dich_start) : "—"}</td>
             <td class="muted">${t.vao_dich_end ? fmt(t.vao_dich_end) : "—"}</td>
             <td>${batchTankDaysFermentedCell(t)}</td>
@@ -3165,7 +3169,7 @@ async function showBatchTank(tankId, allBatches) {
     <dl class="detail">
       <dt>Trạng thái</dt><dd>${statusBadge(TANK_BADGE_CLASS[t.status], t.status_label)}</dd>
       <dt>Chất lượng</dt><dd>${badge(t.quality_status)}</dd>
-      <dt>Tồn/Tổng</dt><dd>${t.on_hand} / ${t.volume_hl} hl</dd>
+      <dt>Tồn/Tổng</dt><dd>${fmtHl(t.on_hand)} / ${fmtHl(t.volume_hl)} hl</dd>
       <dt>Lô lên men</dt><dd><code class="k">${esc(t.tank_code)}</code></dd>
       <dt>Tank lên men</dt><dd>${esc(t.tank_lm || "—")}</dd>
       <dt>Mẻ nấu đã gộp</dt><dd>${memberBatches.map(b => `<code class="k">${esc(b.batch_code)}</code>`).join(", ") || "—"}</dd>
@@ -3914,7 +3918,7 @@ VIEWS.batchfilterlots = async function () {
             <td>${[f.used_for_refilter ? `<span class="badge review" title="Đã lọc lại thành ${esc(f.refilter_target_filter_lot_code || "—")}${f.refilter_target_bbt ? " — vào tank " + esc(f.refilter_target_bbt) : ""}">Lọc lại</span>` : "",
                    f.chiet_status ? statusBadge(PACK_LOT_BADGE_CLASS[f.chiet_status], f.chiet_status_label) : ""]
                    .filter(Boolean).join(" ") || '<span class="muted">—</span>'}</td>
-            <td>${f.on_hand} / ${f.volume_hl}</td></tr>`).join("") || '<tr><td colspan=12 class="muted">Chưa có lô lọc nào.</td></tr>'}</tbody></table></div>
+            <td>${fmtHl(f.on_hand)} / ${fmtHl(f.volume_hl)}</td></tr>`).join("") || '<tr><td colspan=12 class="muted">Chưa có lô lọc nào.</td></tr>'}</tbody></table></div>
       </div>
       <div class="panel" id="fl_detail"><h2>Chi tiết lô lọc</h2><div class="muted">Chọn một lô lọc để xem.</div></div>
     </div>`;
@@ -3974,7 +3978,7 @@ async function showBatchFilterLot(filterLotId) {
       <dt>Sản phẩm</dt><dd>${flFp ? esc(flFp.code) + " — " + esc(flFp.name) : "(Mọi sản phẩm)"}</dd>
       <dt>V dịch nha (hl)</dt><dd>${f.v_dich_hl}</dd>
       <dt>Nước bài khí/DAW (hl)</dt><dd>${f.nuoc_bai_khi_hl}</dd>
-      <dt>Tồn/Tổng (V Bia)</dt><dd>${f.on_hand} / ${f.volume_hl} hl</dd>
+      <dt>Tồn/Tổng (V Bia)</dt><dd>${fmtHl(f.on_hand)} / ${fmtHl(f.volume_hl)} hl</dd>
       <dt>Tank thành phẩm</dt><dd>${esc(f.to_bbt || "—")}</dd>
       <dt>Kết thúc</dt><dd class="muted">${f.ended_at ? fmt(f.ended_at) : "chưa kết thúc hết mẻ lọc"}</dd>
       ${f.used_for_refilter ? `<dt>Đã lọc lại thành</dt><dd><a href="#" id="fl_gotorefilter" style="color:var(--accent2)">${esc(f.refilter_target_filter_lot_code || "—")}</a>${f.refilter_target_bbt ? ` — vào tank <code class="k">${esc(f.refilter_target_bbt)}</code>` : ""}</dd>` : ""}
@@ -12708,7 +12712,7 @@ VIEWS.reports = async function () {
         $("rfc_box").innerHTML = `
           <dl class="detail">
             <dt>Trạng thái</dt><dd>${statusBadge(TANK_BADGE_CLASS[t.status], t.status_label)}</dd>
-            <dt>Tồn/Tổng</dt><dd>${t.on_hand} / ${t.volume_hl} hl</dd>
+            <dt>Tồn/Tổng</dt><dd>${fmtHl(t.on_hand)} / ${fmtHl(t.volume_hl)} hl</dd>
             <dt>Ngày bắt đầu vào dịch</dt><dd>${t.vao_dich_start ? fmt(t.vao_dich_start) : "—"}</dd>
             <dt>Ngày kết thúc vào dịch</dt><dd>${t.vao_dich_end ? fmt(t.vao_dich_end) : '<span class="muted">chưa xong</span>'}</dd>
           </dl>
