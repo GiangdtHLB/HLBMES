@@ -15,6 +15,8 @@ xuất của phần mềm cũ, tạo cho tôi các báo cáo như vậy, bỏ qu
 """
 
 import calendar
+import re
+import statistics
 from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy import select
@@ -29,9 +31,13 @@ from ..models.batch_pipeline import (
     BatchTank,
     BatchTankLink,
 )
+from ..models.lines import ProductionLine
 from ..models.master import FinishedProduct, Product
+from . import batch_pipeline as batch_pipeline_svc
 
 L_PER_HL = 100.0
+_MIN_DT = datetime(1970, 1, 1, tzinfo=timezone.utc)
+_TANK_NAME_RE = re.compile(r"^([A-Za-z]+)(\d+)(.*)$")
 
 # Nhãn hiển thị cho category (free-text trên FinishedProduct/BatchFilterLot — mirror
 # CATEGORIES ở services/packaging.py cho phần bao bì, nhưng đây là category CỦA BIA, khác tập
@@ -274,3 +280,132 @@ def brew_volume_by_product(db: Session, year: int, month: int) -> dict:
     return {"year": year, "month": month, "items": rows,
             "subtotals": sorted(subtotal_by_product.values(), key=lambda s: s["product_name"]),
             "total": {"batch_count": total_batch_count, "v_dich": total_v_dich}}
+
+
+def _tank_name_sort_key(tank_lm: str) -> tuple:
+    """Sắp xếp tự nhiên theo tên tank (B01..B31 theo đúng thứ tự SỐ, không phải chuỗi — rồi tới
+    các tank chữ khác như T05-LM/T06-LM) — mirror cách đã làm ở file Excel báo cáo tank lên men
+    (yêu cầu người dùng 2026-11-12: "sắp xếp tank theo thứ tự cho tôi")."""
+    m = _TANK_NAME_RE.match(tank_lm or "")
+    if m:
+        prefix, num, rest = m.groups()
+        return (prefix, int(num), rest)
+    return (tank_lm or "", 0, "")
+
+
+def tank_rotation_report(db: Session) -> dict:
+    """BC "Tank lên men" (quay vòng) — yêu cầu người dùng 2026-11-12: "Làm cho tôi 1 báo cáo về
+    tank lên men như file excel bạn làm, tank lên men thể hiện cả dung tích nhé", tiếp nối hội
+    thoại tính tay trước đó (xem services/dashboard.py::VN_OFFSET note, batch_pipeline.py::
+    WHIRLPOOL_TRANSFER_MINUTES — "Ngày vào dịch" đã trừ 78 phút đúng công thức mới).
+
+    Tái dùng batch_pipeline_svc.list_tanks_out() (ĐÃ tính đúng vao_dich_start/vao_dich_end qua
+    _tank_out(), không tính lại) — đây là TOÀN BỘ lịch sử BatchTank (mọi năm, mọi lượt vào dịch
+    của mọi tank vật lý), không chỉ tank đang hoạt động.
+
+    - "current": 1 dòng/tank vật lý (tank_lm) — lượt vào dịch GẦN NHẤT (= tank "hiện có", mirror
+      file Excel sheet "Danh sách tank"), kèm Dung tích (ProductionLine.volume, Danh mục "Tank
+      lên men", kind="tank") + Dung tích khả dụng (volume * usable_pct/100, mirror
+      batch_pipeline.usable_capacity_for_code) + "last_cycle_days" (số ngày quay vòng LẦN GẦN
+      NHẤT dẫn tới lượt vào dịch này — None nếu đây là lượt đầu tiên của tank trong lịch sử).
+    - "history": TOÀN BỘ lượt vào dịch (mọi tank, mọi năm), mỗi dòng kèm "turnover_days" (số
+      ngày tới lượt vào dịch KẾ TIẾP của CÙNG tank — None nếu là lượt mới nhất, chưa có lượt sau).
+    - "tank_summaries": 1 dòng/tank — số lượt vào dịch, số lần quay vòng ĐÃ HOÀN CHỈNH (= số lượt
+      - 1, trừ phi tank mới chỉ có 1 lượt), TB/nhỏ nhất/lớn nhất mỗi lần, kèm danh sách đủ các
+      lần (để FE tự ghép chuỗi hiển thị như cột "Chi tiết từng lần" ở file Excel).
+    - "cycles": 1 dòng/LẦN QUAY VÒNG (không phải 1 dòng/lượt vào dịch) — từ lượt này sang lượt kế
+      tiếp của cùng tank, kèm số ngày.
+    - "summary": thống kê toàn nhà máy (số lượt quay vòng, TB/trung vị/nhỏ nhất/lớn nhất) — None
+      nếu chưa có lượt quay vòng hoàn chỉnh nào."""
+    all_tanks = batch_pipeline_svc.list_tanks_out(db)
+    capacities = {
+        l.code: {"volume": l.volume, "volume_uom": l.volume_uom, "usable_pct": l.usable_pct}
+        for l in db.execute(select(ProductionLine).where(ProductionLine.kind == "tank")).scalars().all()
+    }
+
+    # Nhóm theo tank_lm (tên tank vật lý, free-text) để tính quay vòng — NHƯNG tank_lm có thể bỏ
+    # trống (NULL, không gán tank vật lý lúc tạo) — nếu gộp chung mọi dòng NULL vào 1 "nhóm" sẽ
+    # tính nhầm quay vòng giữa các tank KHÁC NHAU chỉ vì cùng thiếu tên (bug phát hiện khi test
+    # trên dev DB thật 2026-11-12: 1 dòng tank_lm=None lẫn vào nhóm khác). Mỗi dòng tank_lm=None
+    # tự đứng 1 nhóm riêng (dùng tank_id làm khoá nhóm, KHÔNG hiện ra ngoài) — vẫn hiện đủ trong
+    # "current"/"history", chỉ không tính được quay vòng (occurrences=1, đúng bản chất — không có
+    # tên tank vật lý để biết nó có "quay lại" tank nào hay không).
+    by_tank: dict[str, list[dict]] = {}
+    for t in all_tanks:
+        group_key = t["tank_lm"] if t["tank_lm"] else f"\0{t['tank_id']}"
+        by_tank.setdefault(group_key, []).append(t)
+    for arr in by_tank.values():
+        arr.sort(key=lambda t: t["vao_dich_start"] or _MIN_DT)
+        for i, t in enumerate(arr):
+            if i + 1 < len(arr) and arr[i + 1]["vao_dich_start"] and t["vao_dich_start"]:
+                delta_days = (arr[i + 1]["vao_dich_start"] - t["vao_dich_start"]).total_seconds() / 86400
+                t["turnover_days"] = round(delta_days, 2)
+            else:
+                t["turnover_days"] = None
+        for i, t in enumerate(arr):
+            t["last_cycle_days"] = arr[i - 1]["turnover_days"] if i > 0 else None
+
+    current_rows = []
+    tank_summaries = []
+    cycles = []
+    for group_key in sorted(by_tank, key=_tank_name_sort_key):
+        arr = by_tank[group_key]
+        tank_lm = arr[0]["tank_lm"]   # hiện tên THẬT (có thể None) — group_key chỉ dùng nội bộ
+        cap = capacities.get(tank_lm)
+        usable_cap = None
+        if cap and cap["volume"] is not None and cap["usable_pct"] is not None:
+            usable_cap = round(cap["volume"] * cap["usable_pct"] / 100, 1)
+        cur = arr[-1]
+        current_rows.append({
+            "tank_lm": tank_lm,
+            "capacity_hl": cap["volume"] if cap else None,
+            "capacity_usable_hl": usable_cap,
+            "capacity_usable_pct": cap["usable_pct"] if cap else None,
+            "tank_code": cur["tank_code"], "tank_year": cur["tank_year"],
+            "product_name": cur["product_name"], "beer_type_name": cur["beer_type_name"],
+            "status": cur["status"], "status_label": cur["status_label"],
+            "on_hand": cur["on_hand"], "volume_hl": cur["volume_hl"],
+            "vao_dich_start": cur["vao_dich_start"], "vao_dich_end": cur["vao_dich_end"],
+            "days_elapsed": cur["days_elapsed"], "ready_date": cur["ready_date"],
+            "last_cycle_days": cur["last_cycle_days"],
+            "quality_status": cur["quality_status"],
+            "has_len_men_chinh_result": cur["has_len_men_chinh_result"],
+            "has_len_men_phu_result": cur["has_len_men_phu_result"],
+            "qc_fail_count": cur["qc_fail_count"],
+        })
+        tank_cycles = [t["turnover_days"] for t in arr if t["turnover_days"] is not None]
+        tank_summaries.append({
+            "tank_lm": tank_lm, "occurrences": len(arr), "cycle_count": len(tank_cycles),
+            "avg_days": round(sum(tank_cycles) / len(tank_cycles), 2) if tank_cycles else None,
+            "min_days": min(tank_cycles) if tank_cycles else None,
+            "max_days": max(tank_cycles) if tank_cycles else None,
+            "cycles": tank_cycles,
+        })
+        cycle_no = 0
+        for i in range(len(arr) - 1):
+            if arr[i]["turnover_days"] is None:
+                continue
+            cycle_no += 1
+            cycles.append({
+                "tank_lm": tank_lm, "cycle_no": cycle_no,
+                "from_tank_code": arr[i]["tank_code"], "from_vao_dich": arr[i]["vao_dich_start"],
+                "to_tank_code": arr[i + 1]["tank_code"], "to_vao_dich": arr[i + 1]["vao_dich_start"],
+                "days": arr[i]["turnover_days"],
+            })
+
+    history_rows = sorted(all_tanks, key=lambda t: t["vao_dich_start"] or _MIN_DT, reverse=True)
+
+    all_cycle_days = [c["days"] for c in cycles]
+    summary = None
+    if all_cycle_days:
+        summary = {
+            "count": len(all_cycle_days),
+            "avg": round(sum(all_cycle_days) / len(all_cycle_days), 2),
+            "median": round(statistics.median(all_cycle_days), 2),
+            "min": min(all_cycle_days), "max": max(all_cycle_days),
+        }
+
+    return {
+        "current": current_rows, "history": history_rows,
+        "tank_summaries": tank_summaries, "cycles": cycles, "summary": summary,
+    }

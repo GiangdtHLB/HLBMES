@@ -11868,6 +11868,7 @@ VIEWS.reports = async function () {
     { key: "filter", label: "Hệ lọc" }, { key: "filter_utilization", label: "Hiệu suất hệ lọc" },
     { key: "pack_line", label: "Dây chuyền chiết" },
     { key: "brewhouse_steps", label: "Log hệ nấu" }, { key: "brewhouse_cycle", label: "Thời gian cả mẻ nấu" },
+    { key: "tank_rotation", label: "Tank lên men" },
     { key: "pack_by_category", label: "Sản lượng chiết" }, { key: "pack_cumulative", label: "Chiết lũy kế" },
     { key: "brew_volume", label: "Sản lượng nấu" }, { key: "qc_trend", label: "QC theo công đoạn" },
     { key: "fermentation_curve", label: "Đánh giá QTLM theo tank" },
@@ -12254,6 +12255,65 @@ VIEWS.reports = async function () {
           `<tr><td colspan=${4 + bcRoles.length} class="muted">Cần ít nhất 1 mẻ đã có dữ liệu.</td></tr>`}</tbody>
       </table></div>
     </div>`;
+  } else if (sec === "tank_rotation") {
+    // BC "Tank lên men" (quay vòng) — yêu cầu người dùng 2026-11-12: "Làm cho tôi 1 báo cáo về
+    // tank lên men như file excel bạn làm, tank lên men thể hiện cả dung tích nhé" (tiếp nối
+    // hội thoại tính tay/Excel về "ngày vào dịch" đã trừ 78 phút + quay vòng tank). Không có bộ
+    // lọc kỳ — đây là snapshot hiện tại + toàn bộ lịch sử quay vòng, không theo tháng/ngày.
+    const trRep = await GET("/reports/tank-rotation");
+    const trCurrent = trRep.current || [];
+    const trSummaryByTank = Object.fromEntries((trRep.tank_summaries || []).map(s => [s.tank_lm, s]));
+    const trCycles = trRep.cycles || [];
+    const trOverall = trRep.summary;
+    const fmtDays = (d) => d == null ? "—" : d.toLocaleString("vi-VN", { maximumFractionDigits: 2 }) + " ngày";
+    body = `<div class="panel"><h2>Tank lên men <span class="muted">(${trCurrent.length} tank)</span></h2>
+      <div class="muted" style="margin-bottom:8px">Mỗi tank 1 dòng = lô/trạng thái GẦN NHẤT (tank đang "hiện có"). "Ngày vào dịch" = giờ kết thúc mẻ nấu đầu tiên (sớm nhất trong các mẻ gộp vào tank) trừ 78 phút (TB thời gian chuyển dịch từ lắng xoáy sang tank, đo thực tế 127 mẻ). "Dung tích"/"Dung tích khả dụng" lấy từ Danh mục "Tank lên men".</div>
+      ${trOverall ? `<div class="cards" style="grid-template-columns:repeat(5,1fr);margin-bottom:12px">
+        <div class="card"><div class="n">${trOverall.count}</div><div class="l">Tổng lượt quay vòng</div></div>
+        <div class="card"><div class="n">${fmtDays(trOverall.avg)}</div><div class="l">Trung bình</div></div>
+        <div class="card"><div class="n">${fmtDays(trOverall.median)}</div><div class="l">Trung vị</div></div>
+        <div class="card"><div class="n">${fmtDays(trOverall.min)}</div><div class="l">Nhỏ nhất</div></div>
+        <div class="card"><div class="n">${fmtDays(trOverall.max)}</div><div class="l">Lớn nhất</div></div>
+      </div>` : '<div class="muted" style="margin-bottom:12px">Chưa có đủ dữ liệu để tính quay vòng (cần ít nhất 2 lượt vào dịch của cùng 1 tank).</div>'}
+      <input class="searchbox" data-tbl="t_trcurrent" placeholder="Tìm theo tank, lô, dịch bia, trạng thái..."/>
+      <div class="tablewrap"><table id="t_trcurrent">
+        <thead><tr><th>Tank</th><th>Lô hiện tại</th><th>Dịch bia</th><th>Loại bia</th><th>Trạng thái</th>
+          <th>Tồn/Tổng (hl)</th><th>Dung tích (hl)</th><th>Dung tích khả dụng (hl)</th>
+          <th>Ngày vào dịch</th><th>Ngày KT vào dịch</th><th>Số ngày đã lên men</th><th>Ngày dự kiến đủ tuổi</th>
+          <th>Quay vòng gần nhất</th><th>Tổng số lần quay vòng</th><th>TB mỗi lần</th><th>Nhỏ nhất</th><th>Lớn nhất</th>
+          <th>Chất lượng</th></tr></thead>
+        <tbody>${trCurrent.map(t => {
+          const s = trSummaryByTank[t.tank_lm] || {};
+          return `<tr>
+          <td><b>${esc(t.tank_lm) || "—"}</b></td><td><code class="k">${esc(t.tank_code)}</code></td>
+          <td>${esc(t.product_name || "—")}</td><td class="muted">${esc(t.beer_type_name || "—")}</td>
+          <td>${statusBadge(TANK_BADGE_CLASS[t.status], t.status_label)}</td>
+          <td>${fmtHl(t.on_hand)} / ${fmtHl(t.volume_hl)}</td>
+          <td class="muted">${t.capacity_hl != null ? fmtHl(t.capacity_hl) : "—"}</td>
+          <td class="muted">${t.capacity_usable_hl != null ? fmtHl(t.capacity_usable_hl) + (t.capacity_usable_pct != null ? ` (${t.capacity_usable_pct}%)` : "") : "—"}</td>
+          <td class="muted">${t.vao_dich_start ? fmt(t.vao_dich_start) : "—"}</td>
+          <td class="muted">${t.vao_dich_end ? fmt(t.vao_dich_end) : "—"}</td>
+          <td>${t.days_elapsed ?? "—"}</td>
+          <td class="muted">${t.ready_date ? fmt(t.ready_date) : "—"}</td>
+          <td>${fmtDays(t.last_cycle_days)}</td>
+          <td>${s.cycle_count ?? 0}</td>
+          <td class="muted">${fmtDays(s.avg_days)}</td><td class="muted">${fmtDays(s.min_days)}</td><td class="muted">${fmtDays(s.max_days)}</td>
+          <td>${badge(t.quality_status)}</td></tr>`;
+        }).join("") || '<tr><td colspan=17 class="muted">Chưa có tank nào.</td></tr>'}</tbody>
+      </table></div>
+      <h3 style="margin-top:16px">Chi tiết quay vòng <span class="muted">(${trCycles.length} lần)</span></h3>
+      <input class="searchbox" data-tbl="t_trcycles" placeholder="Tìm theo tank, lô..."/>
+      <div class="tablewrap"><table id="t_trcycles">
+        <thead><tr><th>Tank</th><th>Lần số</th><th>Lô (lượt này)</th><th>Ngày vào dịch (lượt này)</th>
+          <th>Lô (lượt kế tiếp)</th><th>Ngày vào dịch (lượt kế tiếp)</th><th>Số ngày quay vòng</th></tr></thead>
+        <tbody>${trCycles.map(c => `<tr>
+          <td><b>${esc(c.tank_lm)}</b></td><td>${c.cycle_no}</td>
+          <td><code class="k">${esc(c.from_tank_code)}</code></td><td class="muted">${fmt(c.from_vao_dich)}</td>
+          <td><code class="k">${esc(c.to_tank_code)}</code></td><td class="muted">${fmt(c.to_vao_dich)}</td>
+          <td><b>${fmtDays(c.days)}</b></td></tr>`).join("") ||
+          '<tr><td colspan=7 class="muted">Chưa có lần quay vòng nào (cần ≥2 lượt vào dịch cùng 1 tank).</td></tr>'}</tbody>
+      </table></div>
+    </div>`;
   } else if (sec === "pack_by_category") {
     // Port từ phần mềm QLSX cũ "BC sản lượng chiết" — yêu cầu người dùng 2026-11-05. Nhóm theo
     // Loại bia (category) hoặc theo từng SKU (group_by="sku", yêu cầu người dùng 2026-11-05: "báo
@@ -12601,6 +12661,9 @@ VIEWS.reports = async function () {
       SUB.reports_bc_days = parseInt($("rbc_days").value);
       render("reports");
     };
+  }
+  if (sec === "tank_rotation") {
+    wirePaginate("t_trcurrent", 25); wirePaginate("t_trcycles", 25);
   }
   if (sec === "filling") {
     $("fp_mode").onchange = () => {
