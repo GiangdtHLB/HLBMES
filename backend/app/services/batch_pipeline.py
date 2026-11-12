@@ -327,10 +327,27 @@ def _tank_status(db: Session, tank: BatchTank, ctx: dict = None) -> str:
     return "cho_loc" if has_order else "len_men"
 
 
+# Thời gian trung bình từ "bước 9" (bắt đầu chuyển dịch từ Nồi lắng xoáy sang tank lên men,
+# WHP1/WHP2 ->WC1/WC2 — xem brewhouse_external.STEP_LABELS_BY_EQUIPMENT) tới lúc kết thúc bước
+# cuối của Nồi lắng xoáy đó — đo trực tiếp trên log hệ nấu thật (services/brewhouse_log.py), 127
+# mẻ (Nồi lắng xoáy 1+2, loại trừ mẻ còn dở/gián đoạn ghi log), trung bình 78,2 phút — yêu cầu
+# người dùng 2026-11-12: "ngày vào dịch của tất cả các mẻ này, bạn lấy thời gian kết thúc của mẻ
+# đầu tiên trừ đi 78 phút". Dùng ƯỚC TÍNH CỐ ĐỊNH này (không tính riêng cho từng mẻ qua
+# BrewhouseStepLog) vì _tank_out() không có quyền truy cập trực tiếp vào bước log hệ nấu theo
+# đúng oder/batch/year — đổi lại số đo thực tế nếu sau này có cách tra cứu trực tiếp.
+WHIRLPOOL_TRANSFER_MINUTES = timedelta(minutes=78)
+
+
 def _tank_out(db: Session, tank: BatchTank, ctx: dict = None) -> dict:
-    """Bổ sung mốc "vào dịch"/thời gian lên men suy từ các mẻ nấu đã gộp — mirror công thức
-    inline ở routers/brewing.py::list_ferments (module Nấu-Lọc-Chiết cũ):
-    - vao_dich_start = mẻ nấu SỚM NHẤT bắt đầu (mirror brew_date).
+    """Bổ sung mốc "vào dịch"/thời gian lên men suy từ các mẻ nấu đã gộp:
+    - vao_dich_start = thời điểm dịch THẬT SỰ bắt đầu chảy vào tank — ước tính từ mẻ nấu đầu tiên
+      (mẻ có `end_at` SỚM NHẤT trong số các mẻ đã gộp, tức mẻ đầu tiên "nấu xong" nên là mẻ đầu
+      tiên chuyển dịch vào tank): `end_at` của mẻ đó TRỪ ĐI WHIRLPOOL_TRANSFER_MINUTES — xem hằng
+      số đó để biết nguồn số liệu. KHÔNG còn dùng `start_at` (giờ vào nguyên liệu ở nồi gạo, SỚM
+      HƠN lúc dịch thật sự vào tank nhiều tiếng — cả mẻ nấu, không chỉ đoạn chuyển lắng xoáy) —
+      sửa theo yêu cầu người dùng 2026-11-12, sau khi đo thực tế trung bình đoạn "bước 9 (bắt đầu
+      chuyển dịch) -> kết thúc lắng xoáy" trên 127 mẻ thật (Nồi lắng xoáy 1+2) ra ~78 phút: "ngày
+      vào dịch của tất cả các mẻ này, bạn lấy thời gian kết thúc của mẻ đầu tiên trừ đi 78 phút".
     - vao_dich_end = mẻ nấu CUỐI CÙNG kết thúc (mirror kt_date) — CHỈ có giá trị khi TẤT CẢ mẻ
       đã gộp đều đã "Kết thúc" (end_at), vì tank chưa thật sự "vào dịch xong" khi còn mẻ đang nấu.
     - ferment_days_std đọc từ Product (không phải BeerType — xem models/master.py:59).
@@ -343,9 +360,9 @@ def _tank_out(db: Session, tank: BatchTank, ctx: dict = None) -> dict:
         batches = db.execute(
             select(BatchExecution).join(BatchTankLink, BatchTankLink.batch_id == BatchExecution.batch_id)
             .where(BatchTankLink.tank_id == tank.tank_id)).scalars().all()
-    starts = [b.start_at for b in batches if b.start_at]
     ends = [b.end_at for b in batches if b.end_at]
-    vao_dich_start = min(starts) if starts else None
+    first_ended_batch = min((b for b in batches if b.end_at), key=lambda b: b.end_at, default=None)
+    vao_dich_start = (first_ended_batch.end_at - WHIRLPOOL_TRANSFER_MINUTES) if first_ended_batch else None
     vao_dich_end = max(ends) if (batches and len(ends) == len(batches)) else None
     if ctx is not None:
         product = ctx["product_by_id"].get(tank.product_id) if tank.product_id else None
