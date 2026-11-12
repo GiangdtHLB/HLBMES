@@ -113,20 +113,21 @@ def brewhouse_overview(db: Session = Depends(get_db), user: User = Depends(get_c
 # + tổng phút mỗi nồi theo oder/batch/year — yêu cầu người dùng 2026-11-01 ----
 @router.get("/brewhouse-step-log")
 def brewhouse_step_log_report(ba_year: int = None, ba_order_no: str = None, ba_batch_no: str = None,
-                              equipment_id: int = None, days: int = 3650,
+                              equipment_id: int = None, days: int = 3650, beer_type_recno: int = None,
                               db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     from ..services import brewhouse_log
-    return brewhouse_log.step_log_report(db, ba_year, ba_order_no, ba_batch_no, equipment_id, days)
+    return brewhouse_log.step_log_report(db, ba_year, ba_order_no, ba_batch_no, equipment_id, days,
+                                         beer_type_recno)
 
 
 # ---- BC chu kỳ TOÀN BỘ hệ nấu: Nồi gạo bắt đầu -> Nồi lắng xoáy kết thúc, cùng oder/batch/year
 # — "từ lúc vào nguyên liệu đến kết thúc chiếm bao nhiêu thời gian" — yêu cầu người dùng 2026-11-01 ----
 @router.get("/brewhouse-cycle")
 def brewhouse_cycle_report(ba_year: int = None, ba_order_no: str = None, ba_batch_no: str = None,
-                           days: int = 3650, db: Session = Depends(get_db),
+                           days: int = 3650, beer_type_recno: int = None, db: Session = Depends(get_db),
                            user: User = Depends(get_current_user)):
     from ..services import brewhouse_log
-    return brewhouse_log.brew_cycle_report(db, ba_year, ba_order_no, ba_batch_no, days)
+    return brewhouse_log.brew_cycle_report(db, ba_year, ba_order_no, ba_batch_no, days, beer_type_recno)
 
 
 @router.get("/filling-report")
@@ -194,6 +195,16 @@ def filter_production_report_export(days: int = 3650, date_from: str = None, dat
                     headers={"Content-Disposition": f'attachment; filename="{fname}"'})
 
 
+# ---- BC hiệu suất hệ lọc theo tháng: % thời gian lọc/không lọc + tổng lít dịch lọc — yêu cầu
+# người dùng 2026-11-11 ----
+@router.get("/filter-line-utilization")
+def filter_line_utilization_report(year: int = None, month: int = None, date_from: str = None,
+                                   date_to: str = None, db: Session = Depends(get_db),
+                                   user: User = Depends(get_current_user)):
+    from ..services import dashboard as dashboard_svc
+    return dashboard_svc.filter_line_utilization_report(db, year, month, date_from, date_to)
+
+
 # ---- BC dây chuyền chiết: Gantt/timeline giờ chiết/không chiết theo từng dây chuyền đóng gói,
 # kèm Số lần chiết (số lô chiết) + Tổng thời gian đã chiết — yêu cầu người dùng 2026-10-21 ----
 @router.get("/pack-line-gantt")
@@ -207,10 +218,11 @@ def pack_line_gantt_report(days: int = 3650, date_from: str = None, date_to: str
 # 2026-11-05: "xem mục báo cáo sản xuất của phần mềm cũ, tạo cho tôi các báo cáo như vậy, bỏ qua
 # hồ sơ điện tử". Nhóm A — BC sản lượng ----
 @router.get("/pack-output-by-category")
-def pack_output_by_category_report(year: int, month: int, db: Session = Depends(get_db),
+def pack_output_by_category_report(year: int, month: int, group_by: str = "category",
+                                   db: Session = Depends(get_db),
                                    user: User = Depends(get_current_user)):
     from ..services import production_reports
-    return production_reports.pack_output_by_category(db, year, month)
+    return production_reports.pack_output_by_category(db, year, month, group_by)
 
 
 @router.get("/pack-output-cumulative")

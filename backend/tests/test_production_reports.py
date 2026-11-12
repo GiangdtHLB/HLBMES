@@ -198,3 +198,57 @@ def test_brew_volume_by_product_groups_and_subtotals(client, admin_h):
     assert matching, rpt["subtotals"]
     total_v_dich_for_product = next(s["v_dich"] for s in matching)
     assert total_v_dich_for_product >= 1000 + 1500 - 1e-6
+
+    # Tổng cộng chung (mọi dịch bia gộp lại) — yêu cầu người dùng 2026-11-11: "Tính thêm tổng số
+    # mẻ/tháng, số lượng dịch/tháng".
+    assert rpt["total"]["batch_count"] == sum(s["batch_count"] for s in rpt["subtotals"])
+    assert rpt["total"]["v_dich"] == round(sum(s["v_dich"] for s in rpt["subtotals"]), 2)
+    assert rpt["total"]["v_dich"] >= 1000 + 1500 - 1e-6
+
+
+def test_pack_output_by_category_group_by_sku_allocates_input_proportionally(client, admin_h):
+    """yêu cầu người dùng 2026-11-05 "báo cáo theo từng SKU" — group_by="sku" phải tách output
+    theo SKU và PHÂN BỔ input_hl của lô lọc theo tỷ trọng output lít giữa các SKU (không có input
+    riêng từng SKU ở nguồn), tổng lại đúng bằng input_hl thật của lô lọc."""
+    fp_a = client.post("/api/finished-products", headers=admin_h,
+                       json={"code": "RPTSKU-A", "name": "SKU A test", "uom": "L",
+                             "unit_type": "vi", "pack_size": 24, "unit_volume_l": 0.33})
+    assert fp_a.status_code == 201, fp_a.text
+    fp_a_id = fp_a.json()["finished_product_id"]
+    fp_b = client.post("/api/finished-products", headers=admin_h,
+                       json={"code": "RPTSKU-B", "name": "SKU B test", "uom": "L",
+                             "unit_type": "vi", "pack_size": 20, "unit_volume_l": 0.5})
+    assert fp_b.status_code == 201, fp_b.text
+    fp_b_id = fp_b.json()["finished_product_id"]
+
+    # 1 lô lọc volume_hl=20 (= 2000 lít) tách ra 2 SKU: A=1500l (75%), B=500l (25%).
+    built = _build_batch_to_pack(client, admin_h, "RPTSKU01", "2031-06-09T08:00:00+00:00",
+                                 dich_nha_hl=20, pack_qty=1500, finished_product_id=fp_a_id,
+                                 pack_date_iso="2031-06-20T10:00:00+00:00",
+                                 category="Bia lon test sku")
+    pack2 = client.post(f"/api/batch-filter-lots/{built['filter_lot_id']}/pack-lots", headers=admin_h,
+                        json={"qty": 500, "pack_lot_code": "PKG-RPTSKU01-B", "lot_no": "LOT-RPTSKU01-B",
+                             "finished_product_id": fp_b_id, "pack_date": "2031-06-21T10:00:00+00:00"})
+    assert pack2.status_code == 201, pack2.text
+
+    rpt = client.get("/api/reports/pack-output-by-category", headers=admin_h,
+                     params={"year": 2031, "month": 6, "group_by": "sku"}).json()
+    assert rpt["group_by"] == "sku"
+    row_a = next(i for i in rpt["items"] if i["finished_product_code"] == "RPTSKU-A")
+    row_b = next(i for i in rpt["items"] if i["finished_product_code"] == "RPTSKU-B")
+    assert row_a["output_l"] == 1500
+    assert row_b["output_l"] == 500
+    assert row_a["input_hl"] == 15.0   # 20 hl * 75%
+    assert row_b["input_hl"] == 5.0    # 20 hl * 25%
+    assert row_a["yield_pct"] == 100.0
+    assert row_b["yield_pct"] == 100.0
+    assert row_a["filter_batch_count"] == 1
+    assert row_b["filter_batch_count"] == 1
+    # Tổng input_hl giữa các SKU phải khớp đúng tổng theo category (không mất/đếm trùng input).
+    assert round(row_a["input_hl"] + row_b["input_hl"], 2) == 20.0
+
+
+def test_pack_output_by_category_invalid_group_by_rejected(client, admin_h):
+    r = client.get("/api/reports/pack-output-by-category", headers=admin_h,
+                   params={"year": 2031, "month": 6, "group_by": "nonsense"})
+    assert r.status_code == 409, r.text

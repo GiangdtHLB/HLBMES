@@ -514,7 +514,7 @@ def test_tank_shows_vao_dich_dates_and_ferment_duration(client, admin_h):
                        json={"batch_ids": [b1["batch_id"], b2["batch_id"]], "tank_code": "TANK-DATE-01"})
     assert tank.status_code == 201, tank.text
     tank_id = tank.json()["tank_id"]
-    assert tank.json()["vao_dich_start"] is not None  # cả 2 mẻ đã "chạy" (start_at) từ trước khi gộp
+    assert tank.json()["vao_dich_start"] is not None  # cả 2 mẻ đã "hoàn thành" (end_at) từ trước khi gộp
     assert tank.json()["vao_dich_end"] is not None    # cả 2 mẻ đã "hoàn thành" (end_at) từ trước khi gộp
     assert tank.json()["ferment_days_std"] == 14
 
@@ -522,6 +522,39 @@ def test_tank_shows_vao_dich_dates_and_ferment_duration(client, admin_h):
     assert done["vao_dich_end"] is not None
     assert done["days_elapsed"] is not None and done["days_elapsed"] >= 0
     assert done["ready_date"] is not None
+
+
+def test_vao_dich_start_is_first_batch_end_minus_78_minutes(client, admin_h):
+    """yêu cầu người dùng 2026-11-12 (sau khi đo thực tế đoạn "bước 9 -> kết thúc lắng xoáy" trên
+    127 mẻ thật, TB 78,2 phút): "ngày vào dịch của tất cả các mẻ này, bạn lấy thời gian kết thúc
+    của mẻ đầu tiên trừ đi 78 phút" — xem services/batch_pipeline.py::WHIRLPOOL_TRANSFER_MINUTES/
+    _tank_out. "Mẻ đầu tiên" = mẻ có end_at SỚM NHẤT trong số các mẻ đã gộp (mẻ đầu tiên nấu
+    xong là mẻ đầu tiên chuyển dịch vào tank), KHÔNG phải mẻ gộp vào trước hay mẻ có start_at sớm
+    nhất."""
+    from datetime import datetime, timedelta
+
+    b1 = _make_batch(client, admin_h, "4")
+    b2 = _make_batch(client, admin_h, "5")
+
+    # Mẻ 1 chạy xong TRƯỚC (end_at sớm hơn) dù được nấu/gộp sau trong code bên dưới không quan
+    # trọng thứ tự lệnh gọi — chỉ cần end_at thật sự sớm hơn.
+    _run_batch_to_completed(client, admin_h, b1["batch_id"])
+    b1_after = client.get(f"/api/batches/{b1['batch_id']}", headers=admin_h).json()
+    _run_batch_to_completed(client, admin_h, b2["batch_id"])
+    b2_after = client.get(f"/api/batches/{b2['batch_id']}", headers=admin_h).json()
+
+    b1_end = datetime.fromisoformat(b1_after["end_at"])
+    b2_end = datetime.fromisoformat(b2_after["end_at"])
+    assert b1_end < b2_end, "mẻ 1 phải kết thúc trước mẻ 2 để test có ý nghĩa"
+
+    tank = client.post("/api/batch-tanks", headers=admin_h,
+                       json={"batch_ids": [b1["batch_id"], b2["batch_id"]], "tank_code": "TANK-DATE-78MIN"})
+    assert tank.status_code == 201, tank.text
+    vao_dich_start = datetime.fromisoformat(tank.json()["vao_dich_start"])
+    expected = b1_end - timedelta(minutes=78)
+    assert abs((vao_dich_start - expected).total_seconds()) < 1, (
+        f"vao_dich_start={vao_dich_start} phải = end_at mẻ 1 ({b1_end}) - 78 phút, không phải "
+        f"mẻ 2 ({b2_end}) hay start_at của mẻ nào")
 
 
 def test_finish_pack_lot_requires_ended_at_and_sets_status_hoan_thanh(client, admin_h):

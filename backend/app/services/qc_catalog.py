@@ -43,7 +43,13 @@ def scope_ids_by_beer_type(db: Session, beer_type_id: str) -> dict[str, set[str]
       (không suy qua product_id — người dùng có thể chọn khác Loại bia gốc, xem beer_type_mismatch).
     - batch_pack_lot (thành phẩm): kế thừa Loại bia từ lô lọc nguồn (filter_lot_id).
     - lot (NVL): KHÔNG có trong dict trả về — 1 lô NVL có thể dùng cho nhiều Loại bia khác nhau,
-      không gán được 1-1, nên lọc theo Loại bia sẽ loại bỏ hẳn công đoạn NVL (không phải lỗi)."""
+      không gán được 1-1, nên lọc theo Loại bia sẽ loại bỏ hẳn công đoạn NVL (không phải lỗi).
+
+    Dùng execute_in_chunks() cho .in_(filter_lot_ids) — audit trên prod (2026-11) phát hiện Loại
+    bia lớn nhất đã 256 lô lọc, tăng ~250/tháng, sẽ chạm trần 2100 tham số SQL Server giữa 2027,
+    vỡ báo cáo "QC theo công đoạn" (mirror common.py::execute_in_chunks docstring — lỗi này SQLite
+    dev không bao giờ thấy, chỉ nổ trên SQL Server khi dữ liệu đã tích đủ lớn). Các .in_(product_ids)
+    khác trong hàm KHÔNG cần chia mẻ — đã đo thực tế, nhiều nhất 3 sản phẩm/Loại bia."""
     product_ids = set(db.execute(
         select(Product.product_id).where(Product.beer_type_id == beer_type_id)).scalars().all())
 
@@ -61,13 +67,9 @@ def scope_ids_by_beer_type(db: Session, beer_type_id: str) -> dict[str, set[str]
     filter_lot_ids = set(db.execute(select(BatchFilterLot.filter_lot_id).where(
         BatchFilterLot.beer_type_id == beer_type_id)).scalars().all())
 
-    # Chia mẻ: filter_lot_ids là TOÀN BỘ lô lọc của Loại bia này, KHÔNG lọc ngày — chỉ tăng theo
-    # sản lượng. Đo prod 05/11/2026: Loại bia lớn nhất đã 256 lô, tăng ~250 lô/tháng, tức sẽ vượt
-    # trần 2100 tham số bind của SQL Server khoảng giữa 2027 rồi vỡ báo cáo "QC theo công đoạn"
-    # bằng lỗi 07002. Các .in_(product_ids) phía trên KHÔNG cần chia (product là danh mục, nhiều
-    # nhất 3 sản phẩm/Loại bia). Xem DEPLOY-CONTRACT §2(H).
-    pack_lot_ids = set(execute_in_chunks(db, lambda chunk: select(BatchPackLot.pack_lot_id).where(
-        BatchPackLot.filter_lot_id.in_(chunk)), filter_lot_ids, scalars=True)) if filter_lot_ids else set()
+    pack_lot_ids = set(execute_in_chunks(
+        db, lambda chunk: select(BatchPackLot.pack_lot_id).where(BatchPackLot.filter_lot_id.in_(chunk)),
+        filter_lot_ids, scalars=True)) if filter_lot_ids else set()
 
     return {"batch": batch_ids, "batch_tank": tank_scope_ids, "work_order": wo_ids,
             "batch_filter_lot": filter_lot_ids, "batch_pack_lot": pack_lot_ids}

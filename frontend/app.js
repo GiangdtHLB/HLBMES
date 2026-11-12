@@ -656,7 +656,8 @@ VIEWS.dashboard = async function () {
   const stageStatCard = (icon, title, s, view, subKey) => `
     <div class="card" style="cursor:pointer;text-align:left" data-goto="${esc(view)}" data-gotosub="${esc(subKey || "")}" tabindex="0" role="button">
       <div class="n">${icon} ${s ? s.total : "–"}</div><div class="l">${esc(title)}</div>
-      ${s ? `<div class="muted" style="font-size:11px;margin-top:4px;line-height:1.6">
+      ${s ? `<div style="font-size:11px;margin-top:4px;color:var(--accent2)">${s.trong_thang ?? 0} trong tháng này</div>
+      <div class="muted" style="font-size:11px;margin-top:2px;line-height:1.6">
         ${s.hoan_thanh_hom_nay ? `<span style="color:var(--green)">${s.hoan_thanh_hom_nay} xong hôm nay</span> · ` : ""}
         <span style="color:var(--green)">${s.hoan_thanh}</span> hoàn thành ·
         <span style="color:var(--orange)">${s.dang_thuc_hien}</span> đang thực hiện
@@ -11132,6 +11133,12 @@ const chk = (v) => v ? '<span class="chk">✔</span>' : '<span class="chk no">�
 // này mỗi lần thay/ sửa bất kỳ ảnh nào trong BREW_LINE_EQUIPMENT/riceKettleCard (yêu cầu người
 // dùng 2026-11-01: "vẫn chưa thay ảnh nồi lọc" — do browser cache ảnh cũ, không phải chưa sửa).
 const BREWHOUSE_IMG_V = 2;
+// Mirror backend services/brewhouse_external.py::BEER_TYPE_BY_RECNO — giữ khớp 2 nơi nếu sau
+// này đổi RecNo (yêu cầu người dùng 2026-11-11).
+const BEER_TYPE_BY_RECNO = {
+  1: "Hạ Long Idol", 9: "Classic 16 mẻ", 10: "Bia hơi 16 mẻ",
+  11: "LowCarb", 12: "Legend 16 mẻ", 13: "Sapphire 16 mẻ",
+};
 const RICE_EOP_STATE_META = {
   running: { label: "Đang chạy", opLabel: "Running", color: "var(--green)" },
   idle: { label: "Idle (dừng)", opLabel: "Idle", color: "var(--muted)" },
@@ -11241,6 +11248,7 @@ function equipmentCard(name, img, s, overlay = true, overlayPos, extraMetric = n
       ${row("Order Number", esc(s.ba_order_no ?? "—"))}
       ${row("Batch Number", esc(s.ba_batch_no ?? "—"))}
       ${row("Year", esc(year ?? "—"))}
+      ${row("RecNo", s.ba_rec_no != null ? esc(String(s.ba_rec_no)) + (s.beer_type_name ? ` — ${esc(s.beer_type_name)}` : "") : "—")}
     </table>` : ""}
   </div>`;
 }
@@ -11853,7 +11861,8 @@ function packLineGanttSvg(report) {
 VIEWS.reports = async function () {
   const sec = SUB.reports || "material";
   const sections = [{ key: "material", label: "Định mức NVL" }, { key: "filling", label: "Chiết (lon)" },
-    { key: "filter", label: "Hệ lọc" }, { key: "pack_line", label: "Dây chuyền chiết" },
+    { key: "filter", label: "Hệ lọc" }, { key: "filter_utilization", label: "Hiệu suất hệ lọc" },
+    { key: "pack_line", label: "Dây chuyền chiết" },
     { key: "brewhouse_steps", label: "Log hệ nấu" }, { key: "brewhouse_cycle", label: "Thời gian cả mẻ nấu" },
     { key: "pack_by_category", label: "Sản lượng chiết" }, { key: "pack_cumulative", label: "Chiết lũy kế" },
     { key: "brew_volume", label: "Sản lượng nấu" }, { key: "qc_trend", label: "QC theo công đoạn" },
@@ -11980,6 +11989,57 @@ VIEWS.reports = async function () {
           '<tr><td colspan=12 class="muted">Chưa có dữ liệu.</td></tr>'}</tbody>
       </table></div>
     </div>`;
+  } else if (sec === "filter_utilization") {
+    // "Hiệu suất hệ lọc" — % thời gian hệ lọc chạy/không chạy + tổng lít dịch lọc trong 1 kỳ
+    // (mirror cách tính tay đã làm thủ công: tổng duration_hours cộng dồn mọi mẻ lọc / tổng giờ
+    // lịch của kỳ — yêu cầu người dùng 2026-11-11). 2 cách chọn kỳ — theo tháng (mặc định) hoặc
+    // "Từ ngày - đến ngày" tường minh (mirror bcReportSectionHtml/"BC hệ lọc") — bổ sung 2026-11-11
+    // sau khi dùng thử: "thêm cho tôi chức năng chọn từ ngày đến ngày, cho biết thời gian bắt đầu
+    // gần nhất của ngày đó, và kết thúc của mẻ cuối cùng".
+    const nowU = new Date();
+    const fuMode = SUB.reports_fu_mode === "range" ? "range" : "month";
+    const fuYear = SUB.reports_fu_year || nowU.getFullYear();
+    const fuMonth = SUB.reports_fu_month || (nowU.getMonth() + 1);
+    const fuFrom30 = new Date(); fuFrom30.setDate(nowU.getDate() - 30);
+    const fuDateFrom = SUB.reports_fu_date_from || toISODateLocal(fuFrom30);
+    const fuDateTo = SUB.reports_fu_date_to || toISODateLocal(nowU);
+    const fuQs = fuMode === "range" ? `date_from=${fuDateFrom}&date_to=${fuDateTo}` : `year=${fuYear}&month=${fuMonth}`;
+    const fuRep = await GET(`/reports/filter-line-utilization?${fuQs}`);
+    const fmtH = (h) => h.toLocaleString("vi-VN", { maximumFractionDigits: 1 });
+    const fmtPct = (p) => p == null ? "—" : p.toLocaleString("vi-VN") + "%";
+    const runPct = fuRep.running_pct == null ? 0 : Math.max(0, Math.min(100, fuRep.running_pct));
+    body = `<div class="panel"><h2>Hiệu suất hệ lọc theo tháng</h2>
+      <div class="muted" style="margin-bottom:8px">Thời gian lọc = tổng cộng dồn "Tổng thời gian lọc" (giờ bắt đầu → kết thúc) của mọi mẻ lọc kết thúc trong kỳ. Thời gian không lọc = phần còn lại trong tổng giờ lịch của kỳ (số ngày × 24h) — không trừ bớt nếu kỳ đang chạy dở.</div>
+      <div class="row">
+        <div class="field"><label>Xem theo</label><select id="rfu_mode">
+          <option value="month" ${fuMode === "month" ? "selected" : ""}>Theo tháng</option>
+          <option value="range" ${fuMode === "range" ? "selected" : ""}>Từ ngày - đến ngày</option>
+        </select></div>
+        ${fuMode === "month" ? `
+        <div class="field"><label>Năm</label><input id="rfu_year" type="number" value="${fuYear}" style="width:90px"/></div>
+        <div class="field"><label>Tháng</label><input id="rfu_month" type="number" min="1" max="12" value="${fuMonth}" style="width:70px"/></div>` : `
+        <div class="field"><label>Từ ngày</label><input id="rfu_date_from" type="date" value="${fuDateFrom}"/></div>
+        <div class="field"><label>Đến ngày</label><input id="rfu_date_to" type="date" value="${fuDateTo}"/></div>`}
+        <button class="btn" id="rfu_apply" style="align-self:flex-end">Xem</button>
+      </div>
+      <div class="row" style="margin:12px 0">
+        <div class="field"><label class="muted">Tổng giờ trong kỳ</label><b>${fmtH(fuRep.total_hours)} giờ</b><div class="muted" style="font-size:11px">(${fuRep.days_in_period} ngày × 24h)</div></div>
+        <div class="field"><label class="muted">Thời gian lọc</label><b style="color:var(--green)">${fmtH(fuRep.running_hours)} giờ</b><div class="muted" style="font-size:11px">${fmtPct(fuRep.running_pct)}</div></div>
+        <div class="field"><label class="muted">Thời gian không lọc</label><b style="color:var(--red)">${fmtH(fuRep.idle_hours)} giờ</b><div class="muted" style="font-size:11px">${fmtPct(fuRep.idle_pct)}</div></div>
+        <div class="field"><label class="muted">Số mẻ lọc trong kỳ</label><b>${fuRep.batch_count.toLocaleString("vi-VN")}</b></div>
+        <div class="field"><label class="muted">Tổng lít dịch lọc</label><b>${Math.round(fuRep.total_liters).toLocaleString("vi-VN")} lít</b></div>
+      </div>
+      <div class="row" style="margin-bottom:12px">
+        <div class="field"><label class="muted">Bắt đầu gần nhất</label><b>${fuRep.first_started_at ? fmt(fuRep.first_started_at) : "—"}</b></div>
+        <div class="field"><label class="muted">Kết thúc mẻ cuối cùng</label><b>${fuRep.last_ended_at ? fmt(fuRep.last_ended_at) : "—"}</b></div>
+      </div>
+      <div style="background:var(--border);border-radius:6px;height:28px;overflow:hidden;display:flex;max-width:640px">
+        <div style="width:${runPct}%;background:var(--green);height:100%;display:flex;align-items:center;justify-content:center;color:#fff;font-size:12px;white-space:nowrap;overflow:hidden" title="Thời gian lọc: ${fmtPct(fuRep.running_pct)}">${fuRep.running_pct != null && fuRep.running_pct >= 8 ? fmtPct(fuRep.running_pct) : ""}</div>
+        <div style="flex:1;background:var(--muted);height:100%;display:flex;align-items:center;justify-content:center;color:#fff;font-size:12px;white-space:nowrap;overflow:hidden" title="Thời gian không lọc: ${fmtPct(fuRep.idle_pct)}">${fuRep.idle_pct != null && fuRep.idle_pct >= 8 ? fmtPct(fuRep.idle_pct) : ""}</div>
+      </div>
+      ${fuRep.running_pct != null && fuRep.running_pct > 100 ? `<div class="muted" style="margin-top:6px">⚠️ % thời gian lọc vượt 100% — hệ lọc có nhiều lô/tank chạy SONG SONG trong kỳ này (mẻ sau bắt đầu trước khi mẻ trước kết thúc hẳn), nên tổng giờ chạy cộng dồn vượt tổng giờ lịch.</div>` : ""}
+      ${fuRep.batches_missing_duration ? `<div class="muted" style="margin-top:6px">${fuRep.batches_missing_duration} mẻ lọc thiếu dữ liệu giờ bắt đầu/kết thúc hợp lệ — không tính được vào "Thời gian lọc" (vẫn tính vào tổng lít/số mẻ).</div>` : ""}
+    </div>`;
   } else if (sec === "pack_line") {
     // BC "Dây chuyền chiết" — Gantt/timeline giờ chiết/không chiết theo TỪNG dây chuyền đóng
     // gói, căn cứ đúng giờ bắt đầu/kết thúc từng CA đã xác nhận xong (mirror cách BC hệ lọc
@@ -12026,6 +12086,7 @@ VIEWS.reports = async function () {
     const bsBatch = SUB.reports_bs_batch || "";
     const bsEquip = SUB.reports_bs_equip || "";
     const bsDays = SUB.reports_bs_days || 3650;
+    const bsBeerType = SUB.reports_bs_beertype || "";
     // Mirror danh sách ID ở BREW_LINE_EQUIPMENT (realtime) — giữ khớp brewhouse_external.py::
     // EQUIPMENT_NAMES nếu sau này ID đổi.
     const BS_EQUIPMENT_NAMES = { 1: "Nồi gạo",
@@ -12036,6 +12097,7 @@ VIEWS.reports = async function () {
       bsOrder ? `ba_order_no=${encodeURIComponent(bsOrder)}` : "",
       bsBatch ? `ba_batch_no=${encodeURIComponent(bsBatch)}` : "",
       bsEquip ? `equipment_id=${encodeURIComponent(bsEquip)}` : "",
+      bsBeerType ? `beer_type_recno=${encodeURIComponent(bsBeerType)}` : "",
       `days=${bsDays}`,
     ].filter(Boolean).join("&");
     const bsRep = await GET(`/reports/brewhouse-step-log?${bsQs}`);
@@ -12062,6 +12124,9 @@ VIEWS.reports = async function () {
         <div class="field"><label>Thiết bị</label><select id="rbs_equip"><option value="">Tất cả</option>
           ${Object.entries(BS_EQUIPMENT_NAMES).map(([id, name]) => `<option value="${id}" ${String(bsEquip) === id ? "selected" : ""}>${esc(name)}</option>`).join("")}
         </select></div>
+        <div class="field"><label>Loại bia</label><select id="rbs_beertype"><option value="">Tất cả</option>
+          ${Object.entries(BEER_TYPE_BY_RECNO).map(([recno, name]) => `<option value="${recno}" ${String(bsBeerType) === recno ? "selected" : ""}>${esc(name)}</option>`).join("")}
+        </select></div>
         <div class="field"><label>Kỳ</label><select id="rbs_days">
           <option value="30" ${bsDays == 30 ? "selected" : ""}>30 ngày gần đây</option>
           <option value="90" ${bsDays == 90 ? "selected" : ""}>90 ngày gần đây</option>
@@ -12071,18 +12136,19 @@ VIEWS.reports = async function () {
       </div>
       <h3>Tổng hợp theo nồi</h3>
       <div class="tablewrap"><table id="t_bs_summary">
-        <thead><tr><th>Thiết bị</th><th>Oder</th><th>Mẻ</th><th>Năm</th><th>Số bước</th><th>Tổng thời gian</th><th>Bắt đầu</th><th>Kết thúc</th></tr></thead>
+        <thead><tr><th>Thiết bị</th><th>Oder</th><th>Mẻ</th><th>Năm</th><th>Loại bia</th><th>Số bước</th><th>Tổng thời gian</th><th>Bắt đầu</th><th>Kết thúc</th></tr></thead>
         <tbody>${bsSummary.map(s => `<tr>
           <td>${esc(s.equipment_name)}</td><td><code class="k">${esc(s.ba_order_no || "—")}</code></td>
           <td><code class="k">${esc(s.ba_batch_no || "—")}</code></td><td>${s.ba_year ?? "—"}</td>
+          <td class="muted">${esc(s.beer_type_name || "—")}</td>
           <td>${s.step_count}</td><td>${fmtMin(s.total_minutes)}${s.still_running ? " " + statusBadge("running", "đang chạy") : ""}${s.data_gap ? " " + statusBadge("held", "gián đoạn ghi log") : ""}</td>
           <td class="muted">${fmt(s.started_at)}</td><td class="muted">${s.ended_at ? fmt(s.ended_at) : "—"}</td></tr>`).join("") ||
-          '<tr><td colspan=8 class="muted">Chưa có dữ liệu — hệ thống chỉ bắt đầu ghi log từ lúc bật tính năng này.</td></tr>'}</tbody>
+          '<tr><td colspan=9 class="muted">Chưa có dữ liệu — hệ thống chỉ bắt đầu ghi log từ lúc bật tính năng này.</td></tr>'}</tbody>
       </table></div>
       <h3 style="margin-top:14px">Chi tiết từng bước</h3>
-      <input class="searchbox" data-tbl="t_bs_detail" placeholder="Tìm theo thiết bị, tên bước, oder, mẻ..."/>
+      <input class="searchbox" data-tbl="t_bs_detail" placeholder="Tìm theo thiết bị, tên bước, oder, mẻ, loại bia..."/>
       <div class="tablewrap"><table id="t_bs_detail">
-        <thead><tr><th>Thiết bị</th><th>Bước</th><th>Tên bước</th><th>Oder</th><th>Mẻ</th><th>Bắt đầu</th><th>Kết thúc</th>
+        <thead><tr><th>Thiết bị</th><th>Bước</th><th>Tên bước</th><th>Oder</th><th>Mẻ</th><th>Loại bia</th><th>Bắt đầu</th><th>Kết thúc</th>
           <th>Thời gian chạy</th><th>Đặt (phút)</th><th>Nhiệt độ (°C)</th><th>Thể tích (hl)</th>
           <th>Độ đục EBC</th><th>Khí thổi (l/ph)</th><th>Lưu lượng (hl/h)</th></tr></thead>
         <tbody>${bsSteps.map(r => {
@@ -12091,13 +12157,14 @@ VIEWS.reports = async function () {
           return `<tr>
           <td>${esc(r.equipment_name)}</td><td>${r.step_no ?? "—"}</td><td>${esc(r.step_name || "—")}</td>
           <td><code class="k">${esc(r.ba_order_no || "—")}</code></td><td><code class="k">${esc(r.ba_batch_no || "—")}</code></td>
+          <td class="muted">${esc(r.beer_type_name || "—")}</td>
           <td class="muted">${fmt(r.started_at)}</td><td class="muted">${r.ended_at ? fmt(r.ended_at) : "—"}</td>
           <td>${r.ended_at ? fmtMin(r.duration_minutes) : statusBadge("running", "đang chạy")}${r.data_gap ? " " + statusBadge("held", "gián đoạn ghi log") : ""}</td>
           <td class="muted">${r.step_minutes_setpoint != null ? r.step_minutes_setpoint.toLocaleString("vi-VN") : "—"}</td>
           <td>${snap.temp_actual != null ? snap.temp_actual.toFixed(1) : "—"}</td>
           <td>${snap.volume_hl != null ? snap.volume_hl.toFixed(2) : "—"}</td>
           <td>${n1(snap.ebc_actual)}</td><td>${n1(snap.air_flow)}</td><td>${n1(snap.flow_actual)}</td></tr>`;
-        }).join("") || '<tr><td colspan=14 class="muted">Chưa có dữ liệu.</td></tr>'}</tbody>
+        }).join("") || '<tr><td colspan=15 class="muted">Chưa có dữ liệu.</td></tr>'}</tbody>
       </table></div>
     </div>`;
   } else if (sec === "brewhouse_cycle") {
@@ -12108,10 +12175,12 @@ VIEWS.reports = async function () {
     const bcOrder = SUB.reports_bc_order || "";
     const bcBatch = SUB.reports_bc_batch || "";
     const bcDays = SUB.reports_bc_days || 3650;
+    const bcBeerType = SUB.reports_bc_beertype || "";
     const bcQs = [
       bcYear ? `ba_year=${encodeURIComponent(bcYear)}` : "",
       bcOrder ? `ba_order_no=${encodeURIComponent(bcOrder)}` : "",
       bcBatch ? `ba_batch_no=${encodeURIComponent(bcBatch)}` : "",
+      bcBeerType ? `beer_type_recno=${encodeURIComponent(bcBeerType)}` : "",
       `days=${bcDays}`,
     ].filter(Boolean).join("&");
     const bcRep = await GET(`/reports/brewhouse-cycle?${bcQs}`);
@@ -12141,6 +12210,9 @@ VIEWS.reports = async function () {
         <div class="field"><label>Năm</label><input id="rbc_year" type="number" placeholder="VD 26" value="${esc(String(bcYear))}" style="width:80px"/></div>
         <div class="field"><label>Lệnh nấu (Oder)</label><input id="rbc_order" placeholder="VD 322" value="${esc(bcOrder)}" style="width:100px"/></div>
         <div class="field"><label>Mẻ (Batch)</label><input id="rbc_batch" placeholder="VD 3136" value="${esc(bcBatch)}" style="width:100px"/></div>
+        <div class="field"><label>Loại bia</label><select id="rbc_beertype"><option value="">Tất cả</option>
+          ${Object.entries(BEER_TYPE_BY_RECNO).map(([recno, name]) => `<option value="${recno}" ${String(bcBeerType) === recno ? "selected" : ""}>${esc(name)}</option>`).join("")}
+        </select></div>
         <div class="field"><label>Kỳ</label><select id="rbc_days">
           <option value="30" ${bcDays == 30 ? "selected" : ""}>30 ngày gần đây</option>
           <option value="90" ${bcDays == 90 ? "selected" : ""}>90 ngày gần đây</option>
@@ -12149,53 +12221,68 @@ VIEWS.reports = async function () {
         <button class="btn" id="rbc_apply" style="align-self:flex-end">Xem</button>
       </div>
       <div class="tablewrap"><table id="t_bc">
-        <thead><tr><th>Năm</th><th>Oder</th><th>Mẻ</th><th>Nồi gạo bắt đầu</th><th>Nồi lắng xoáy kết thúc</th><th>Tổng thời gian</th>
+        <thead><tr><th>Năm</th><th>Oder</th><th>Mẻ</th><th>Loại bia</th><th>Nồi gạo bắt đầu</th><th>Nồi lắng xoáy kết thúc</th><th>Tổng thời gian</th>
           ${bcRoles.map(r => `<th>${esc(r)}</th>`).join("")}<th>Trạng thái</th></tr></thead>
         <tbody>${bcItems.map(it => `<tr>
           <td>${it.ba_year ?? "—"}</td><td><code class="k">${esc(it.ba_order_no || "—")}</code></td>
           <td><code class="k">${esc(it.ba_batch_no || "—")}</code></td>
+          <td class="muted">${esc(it.beer_type_name || "—")}</td>
           <td class="muted">${fmt(it.rice_started_at)}</td>
           <td class="muted">${it.whirlpool_ended_at ? fmt(it.whirlpool_ended_at) : "—"}</td>
           <td><b>${fmtMin2(it.cycle_minutes)}${it.cycle_still_running ? " " + statusBadge("running", "đang chạy") : ""}${it.cycle_data_gap ? " " + statusBadge("held", "gián đoạn ghi log") : ""}</b></td>
           ${it.vessels.map(v => `<td>${v.total_minutes == null ? "—" :
             `${fmtMin2(v.total_minutes)}${v.still_running ? " " + statusBadge("running", "đang chạy") : ""}${v.data_gap ? " " + statusBadge("held", "gián đoạn ghi log") : ""}`}</td>`).join("")}
           <td>${statusBadge(...(BC_STAGE[it.stage] || ["pending", it.stage]))}</td></tr>`).join("") ||
-          `<tr><td colspan=${7 + bcRoles.length} class="muted">Chưa có dữ liệu.</td></tr>`}</tbody>
+          `<tr><td colspan=${8 + bcRoles.length} class="muted">Chưa có dữ liệu.</td></tr>`}</tbody>
       </table></div>
     </div>
     <div class="panel" style="margin-top:14px">
       <h2>Năng suất lý thuyết <span class="muted">(theo từng mẻ)</span></h2>
-      <div class="muted" style="margin-bottom:8px">Mỗi dòng = 1 mẻ ĐÃ XONG (bỏ qua mẻ còn đang chạy dở hoặc bị gián đoạn ghi log — xem bảng trên) — riêng Nồi gạo giữ nguyên thời gian (dùng chung 1 thiết bị cho cả 2 dây), các nồi còn lại chia đôi thời gian (mỗi nồi có 2 thiết bị, 1/dây, chạy xen kẽ). "Số mẻ đạt được/ngày" = 24 giờ × 60 phút / số phút lớn nhất trong các nồi (nút thắt cổ chai).</div>
+      <div class="muted" style="margin-bottom:8px">Mỗi dòng = 1 mẻ ĐÃ XONG (bỏ qua mẻ còn đang chạy dở hoặc bị gián đoạn ghi log — xem bảng trên) — riêng Nồi gạo giữ nguyên thời gian (dùng chung 1 thiết bị cho cả 2 dây), các nồi còn lại chia đôi thời gian (mỗi nồi có 2 thiết bị, 1/dây, chạy xen kẽ). "Số mẻ đạt được/ngày" = 24 giờ × 60 phút / số phút lớn nhất trong các nồi (nút thắt cổ chai). Bộ lọc "Loại bia" ở trên áp dụng cho CẢ bảng này.</div>
       <div class="tablewrap"><table id="t_bcthrpt">
-        <thead><tr><th>Mẻ</th>${bcRoles.map(r => `<th>${esc(r)}</th>`).join("")}<th>Số mẻ đạt được/ngày</th></tr></thead>
+        <thead><tr><th>Mẻ</th><th>Loại bia</th>${bcRoles.map(r => `<th>${esc(r)}</th>`).join("")}<th>Số mẻ đạt được/ngày</th></tr></thead>
         <tbody>${bcThrpt.map(p => `<tr>
           <td><code class="k">${esc(p.batch.ba_order_no || "—")}/${esc(p.batch.ba_batch_no || "—")}</code></td>
+          <td class="muted">${esc(p.batch.beer_type_name || "—")}</td>
           ${p.vessels.map(v => `<td>${fmtMin2(v.adj_minutes)}</td>`).join("")}
           <td><b>${p.batches_per_day != null ? p.batches_per_day.toLocaleString("vi-VN") : "—"}</b></td></tr>`).join("") ||
-          `<tr><td colspan=${2 + bcRoles.length} class="muted">Cần ít nhất 1 mẻ đã có dữ liệu.</td></tr>`}</tbody>
+          `<tr><td colspan=${3 + bcRoles.length} class="muted">Cần ít nhất 1 mẻ đã có dữ liệu.</td></tr>`}</tbody>
       </table></div>
     </div>`;
   } else if (sec === "pack_by_category") {
     // Port từ phần mềm QLSX cũ "BC sản lượng chiết" — yêu cầu người dùng 2026-11-05. Nhóm theo
-    // Loại bia (category), kèm % hiệu suất thu hồi tính theo CẢ VÒNG ĐỜI lô lọc (xem docstring
+    // Loại bia (category) hoặc theo từng SKU (group_by="sku", yêu cầu người dùng 2026-11-05: "báo
+    // cáo theo từng SKU"), kèm % hiệu suất thu hồi tính theo CẢ VÒNG ĐỜI lô lọc (xem docstring
     // services/production_reports.py::pack_output_by_category — chỉ tính lô lọc ĐÃ CHIẾT HẾT,
-    // xếp vào tháng của lượt tách cuối cùng).
+    // xếp vào tháng của lượt tách cuối cùng; theo SKU thì input được PHÂN BỔ theo tỷ trọng output
+    // vì 1 lô lọc có thể tách ra nhiều SKU — xem docstring, yield% theo SKU là ước tính).
     const now1 = new Date();
     const pcYear = SUB.reports_pc_year || now1.getFullYear();
     const pcMonth = SUB.reports_pc_month || (now1.getMonth() + 1);
-    const pcRep = await GET(`/reports/pack-output-by-category?year=${pcYear}&month=${pcMonth}`);
+    const pcGroupBy = SUB.reports_pc_group_by || "category";
+    const pcRep = await GET(`/reports/pack-output-by-category?year=${pcYear}&month=${pcMonth}&group_by=${pcGroupBy}`);
     const pcItems = pcRep.items || [];
+    const pcBySku = pcGroupBy === "sku";
     body = `<div class="panel"><h2>BC sản lượng chiết theo tháng</h2>
-      <div class="muted" style="margin-bottom:8px">Nhóm theo Loại bia. Hiệu suất thu hồi % tính theo CẢ lô lọc (V cấp chiết đưa vào ↔ tổng lít chiết ra), chỉ tính lô lọc ĐÃ CHIẾT HẾT trong tháng — lô còn dở sẽ hiện vào tháng khi nó chiết xong.</div>
+      <div class="muted" style="margin-bottom:8px">${pcBySku
+        ? "Nhóm theo từng SKU (sản phẩm đóng gói). 1 lô lọc có thể tách ra nhiều SKU — V cấp chiết được phân bổ theo tỷ trọng sản lượng, nên hiệu suất thu hồi % theo SKU là ƯỚC TÍNH."
+        : "Nhóm theo Loại bia."} Chỉ tính lô lọc ĐÃ CHIẾT HẾT trong tháng — lô còn dở sẽ hiện vào tháng khi nó chiết xong.</div>
       <div class="row">
         <div class="field"><label>Năm</label><input id="rpc_year" type="number" value="${pcYear}" style="width:90px"/></div>
         <div class="field"><label>Tháng</label><input id="rpc_month" type="number" min="1" max="12" value="${pcMonth}" style="width:70px"/></div>
+        <div class="field"><label>Nhóm theo</label>
+          <select id="rpc_groupby">
+            <option value="category" ${!pcBySku ? "selected" : ""}>Loại bia</option>
+            <option value="sku" ${pcBySku ? "selected" : ""}>Từng SKU</option>
+          </select>
+        </div>
         <button class="btn" id="rpc_apply" style="align-self:flex-end">Xem</button>
       </div>
       <div class="tablewrap"><table>
-        <thead><tr><th>Loại bia</th><th>Số lô lọc</th><th>V cấp chiết (hl)</th><th>Quy ra lít</th><th>Số thùng/kiện</th><th>Hiệu suất thu hồi %</th></tr></thead>
+        <thead><tr><th>${pcBySku ? "SKU" : "Loại bia"}</th><th>Số lô lọc</th><th>V cấp chiết (hl)</th><th>Quy ra lít</th><th>Số thùng/kiện</th><th>Hiệu suất thu hồi %</th></tr></thead>
         <tbody>${pcItems.map(i => `<tr>
-          <td>${esc(i.category)}</td><td>${i.filter_batch_count}</td>
+          <td>${pcBySku ? `<code class="k">${esc(i.finished_product_code || "—")}</code> ${esc(i.finished_product_name)}` : esc(i.category)}</td>
+          <td>${i.filter_batch_count}</td>
           <td>${i.input_hl.toLocaleString("vi-VN")}</td><td>${i.output_l.toLocaleString("vi-VN")}</td>
           <td class="muted">${i.case_count != null ? i.case_count.toLocaleString("vi-VN") : "—"}</td>
           <td style="color:${i.yield_pct == null ? "var(--muted)" : i.yield_pct < 95 ? "var(--red)" : "var(--green)"}">${i.yield_pct != null ? i.yield_pct + "%" : "—"}</td></tr>`).join("") ||
@@ -12258,6 +12345,9 @@ VIEWS.reports = async function () {
         <tbody>${bvRep.subtotals.map(s => `<tr><td>${esc(s.product_name)}</td><td>${s.batch_count}</td>
           <td><b>${s.v_dich.toLocaleString("vi-VN")}</b></td></tr>`).join("") ||
           '<tr><td colspan=3 class="muted">—</td></tr>'}</tbody>
+        ${bvRep.subtotals.length ? `<tfoot><tr style="font-weight:700"><td>Tổng cộng</td>
+          <td>${bvRep.total.batch_count.toLocaleString("vi-VN")}</td>
+          <td>${bvRep.total.v_dich.toLocaleString("vi-VN")}</td></tr></tfoot>` : ""}
       </table></div>
     </div>`;
   } else if (sec === "qc_trend") {
@@ -12491,6 +12581,7 @@ VIEWS.reports = async function () {
       SUB.reports_bs_order = $("rbs_order").value;
       SUB.reports_bs_batch = $("rbs_batch").value;
       SUB.reports_bs_equip = $("rbs_equip").value;
+      SUB.reports_bs_beertype = $("rbs_beertype").value;
       SUB.reports_bs_days = parseInt($("rbs_days").value);
       render("reports");
     };
@@ -12501,6 +12592,7 @@ VIEWS.reports = async function () {
       SUB.reports_bc_year = $("rbc_year").value;
       SUB.reports_bc_order = $("rbc_order").value;
       SUB.reports_bc_batch = $("rbc_batch").value;
+      SUB.reports_bc_beertype = $("rbc_beertype").value;
       SUB.reports_bc_days = parseInt($("rbc_days").value);
       render("reports");
     };
@@ -12523,11 +12615,30 @@ VIEWS.reports = async function () {
     $("rpc_apply").onclick = () => {
       SUB.reports_pc_year = parseInt($("rpc_year").value);
       SUB.reports_pc_month = parseInt($("rpc_month").value);
+      SUB.reports_pc_group_by = $("rpc_groupby").value;
+      render("reports");
+    };
+    $("rpc_groupby").onchange = () => {
+      SUB.reports_pc_group_by = $("rpc_groupby").value;
       render("reports");
     };
   }
   if (sec === "pack_cumulative") {
     $("rpcu_apply").onclick = () => { SUB.reports_pcu_date = $("rpcu_date").value; render("reports"); };
+  }
+  if (sec === "filter_utilization") {
+    $("rfu_mode").onchange = () => { SUB.reports_fu_mode = $("rfu_mode").value; render("reports"); };
+    $("rfu_apply").onclick = () => {
+      SUB.reports_fu_mode = $("rfu_mode").value;
+      if (SUB.reports_fu_mode === "range") {
+        SUB.reports_fu_date_from = $("rfu_date_from").value;
+        SUB.reports_fu_date_to = $("rfu_date_to").value;
+      } else {
+        SUB.reports_fu_year = parseInt($("rfu_year").value);
+        SUB.reports_fu_month = parseInt($("rfu_month").value);
+      }
+      render("reports");
+    };
   }
   if (sec === "brew_volume") {
     wirePaginate("t_brewvol", 20);

@@ -3,8 +3,9 @@
 xuất của phần mềm cũ, tạo cho tôi các báo cáo như vậy, bỏ qua hồ sơ điện tử".
 
 3 báo cáo trong file này (Nhóm A — đã thống nhất phạm vi, bỏ Nhóm E/F):
-- pack_output_by_category(): BC sản lượng chiết theo tháng, nhóm theo Loại bia (category), kèm
-  % hiệu suất thu hồi (chiết ra / dịch đưa vào chiết).
+- pack_output_by_category(): BC sản lượng chiết theo tháng, nhóm theo Loại bia (category) hoặc
+  theo từng SKU (group_by="sku", yêu cầu người dùng 2026-11-05), kèm % hiệu suất thu hồi (chiết
+  ra / dịch đưa vào chiết).
 - pack_output_cumulative(): BC sản lượng chiết lũy kế — 1 ngày cụ thể, kèm lũy kế tuần/tháng/năm
   song song, theo từng SKU (FinishedProduct).
 - brew_volume_by_product(): BC sản lượng nấu theo tháng, nhóm theo Dịch bia (Product), kèm tổng
@@ -20,6 +21,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..common import execute_in_chunks
+from ..errors import DomainError
 from ..models.batches import BatchExecution
 from ..models.batch_pipeline import (
     BatchFilterLot,
@@ -56,10 +58,11 @@ def _vn_day_bounds_utc(d: date) -> tuple[datetime, datetime]:
     return start, start + timedelta(days=1) - timedelta(seconds=1)
 
 
-def pack_output_by_category(db: Session, year: int, month: int) -> dict:
+def pack_output_by_category(db: Session, year: int, month: int, group_by: str = "category") -> dict:
     """BC sản lượng chiết theo tháng, nhóm theo Loại bia (category kế thừa từ BatchFilterLot
     nguồn — mirror qc_catalog.py ghi chú "BatchPackLot không tự lưu category, kế thừa từ
-    BatchFilterLot nguồn").
+    BatchFilterLot nguồn") hoặc theo từng SKU (FinishedProduct) — yêu cầu người dùng 2026-11-05
+    "báo cáo theo từng SKU" — `group_by="sku"`.
 
     Hiệu suất thu hồi % tính theo CẢ VÒNG ĐỜI 1 lô lọc (volume_hl = v_dich_hl + nuoc_bai_khi_hl
     đưa vào ↔ tổng lít MỌI lô thành phẩm đã tách ra từ lô đó — dùng volume_hl chứ KHÔNG phải
@@ -71,7 +74,15 @@ def pack_output_by_category(db: Session, year: int, month: int) -> dict:
     lọc với TOÀN BỘ output cộng dồn của nó — so riêng theo từng lượt/từng tháng sẽ cho % vô nghĩa
     (lô lọc tách rải qua nhiều tháng, mỗi tháng chỉ thấy 1 phần output so với 100% input). Mỗi lô
     lọc được xếp vào ĐÚNG 1 tháng — tháng của lượt tách CUỐI CÙNG (coi như lô đã "chiết xong" khi
-    đó) — để không đếm trùng input giữa các tháng."""
+    đó) — để không đếm trùng input giữa các tháng.
+
+    Khi group_by="sku": 1 lô lọc có thể tách ra NHIỀU SKU khác nhau (không có input riêng từng
+    SKU) — input_hl của lô lọc được PHÂN BỔ cho từng SKU theo tỷ trọng output (lít) của SKU đó
+    trong tổng output của lô, nên yield_pct theo SKU là ƯỚC TÍNH (giả định hao hụt rải đều theo
+    tỷ lệ, không lệch theo SKU) — tổng input_hl/output_l cộng lại giữa các SKU vẫn khớp đúng
+    tổng theo category (không có input nào bị đếm trùng/thiếu khi đổi cách nhóm)."""
+    if group_by not in ("category", "sku"):
+        raise DomainError(f"group_by không hợp lệ: {group_by!r}")
     start, end = _month_bounds_utc(year, month)
     all_pack_lots = db.execute(select(BatchPackLot).where(
         BatchPackLot.finished_product_id.is_not(None) | BatchPackLot.filter_lot_id.is_not(None)
@@ -100,32 +111,64 @@ def pack_output_by_category(db: Session, year: int, month: int) -> dict:
         db, lambda chunk: select(FinishedProduct).where(FinishedProduct.finished_product_id.in_(chunk)),
         finished_product_ids, scalars=True)}
 
-    by_cat: dict[str, dict] = {}
+    by_key: dict[str, dict] = {}
     for fid in filter_lot_ids_in_month:
         fl = filter_lots_by_id.get(fid)
-        cat = (fl.category if fl else None) or _CATEGORY_LABEL_FALLBACK
-        c = by_cat.setdefault(cat, {"category": cat, "output_l": 0.0, "case_count": 0.0,
-                                    "input_hl": 0.0, "filter_batch_count": 0})
-        c["input_hl"] += (fl.volume_hl or 0.0) if fl else 0.0
-        c["filter_batch_count"] += 1
-        for p in by_filter_lot[fid]:
-            c["output_l"] += p.qty or 0.0
-            fp = fp_by_id.get(p.finished_product_id)
-            if fp and fp.pack_size and fp.unit_volume_l:
-                c["case_count"] += (p.qty or 0.0) / (fp.pack_size * fp.unit_volume_l)
+        lots = by_filter_lot[fid]
+        fl_input_hl = (fl.volume_hl or 0.0) if fl else 0.0
+        if group_by == "sku":
+            total_output_fl = sum(p.qty or 0.0 for p in lots)
+            for p in lots:
+                fp = fp_by_id.get(p.finished_product_id)
+                key = p.finished_product_id or "_khac"
+                c = by_key.setdefault(key, {
+                    "finished_product_code": fp.code if fp else None,
+                    "finished_product_name": fp.name if fp else "(Chưa gán SKU)",
+                    "output_l": 0.0, "case_count": 0.0, "input_hl": 0.0, "filter_lot_ids": set()})
+                share = (p.qty or 0.0) / total_output_fl if total_output_fl > 1e-9 else 0.0
+                c["input_hl"] += fl_input_hl * share
+                c["filter_lot_ids"].add(fid)
+                c["output_l"] += p.qty or 0.0
+                if fp and fp.pack_size and fp.unit_volume_l:
+                    c["case_count"] += (p.qty or 0.0) / (fp.pack_size * fp.unit_volume_l)
+        else:
+            cat = (fl.category if fl else None) or _CATEGORY_LABEL_FALLBACK
+            c = by_key.setdefault(cat, {"category": cat, "output_l": 0.0, "case_count": 0.0,
+                                        "input_hl": 0.0, "filter_batch_count": 0})
+            c["input_hl"] += fl_input_hl
+            c["filter_batch_count"] += 1
+            for p in lots:
+                c["output_l"] += p.qty or 0.0
+                fp = fp_by_id.get(p.finished_product_id)
+                if fp and fp.pack_size and fp.unit_volume_l:
+                    c["case_count"] += (p.qty or 0.0) / (fp.pack_size * fp.unit_volume_l)
 
     items = []
-    for cat, c in sorted(by_cat.items()):
-        input_l = c["input_hl"] * L_PER_HL
-        items.append({
-            "category": cat, "filter_batch_count": c["filter_batch_count"],
-            "input_hl": round(c["input_hl"], 2), "output_l": round(c["output_l"], 1),
-            "case_count": round(c["case_count"]) if c["case_count"] else None,
-            "yield_pct": round(c["output_l"] / input_l * 100, 2) if input_l > 1e-6 else None,
-        })
+    if group_by == "sku":
+        for c in by_key.values():
+            input_l = c["input_hl"] * L_PER_HL
+            items.append({
+                "finished_product_code": c["finished_product_code"],
+                "finished_product_name": c["finished_product_name"],
+                "filter_batch_count": len(c["filter_lot_ids"]),
+                "input_hl": round(c["input_hl"], 2), "output_l": round(c["output_l"], 1),
+                "case_count": round(c["case_count"]) if c["case_count"] else None,
+                "yield_pct": round(c["output_l"] / input_l * 100, 2) if input_l > 1e-6 else None,
+            })
+        items.sort(key=lambda i: i["finished_product_code"] or "")
+    else:
+        for cat in sorted(by_key):
+            c = by_key[cat]
+            input_l = c["input_hl"] * L_PER_HL
+            items.append({
+                "category": cat, "filter_batch_count": c["filter_batch_count"],
+                "input_hl": round(c["input_hl"], 2), "output_l": round(c["output_l"], 1),
+                "case_count": round(c["case_count"]) if c["case_count"] else None,
+                "yield_pct": round(c["output_l"] / input_l * 100, 2) if input_l > 1e-6 else None,
+            })
     total_output = sum(i["output_l"] for i in items)
     total_input_hl = sum(i["input_hl"] for i in items)
-    return {"year": year, "month": month, "items": items,
+    return {"year": year, "month": month, "group_by": group_by, "items": items,
             "total": {"output_l": round(total_output, 1), "input_hl": round(total_input_hl, 2),
                       "yield_pct": round(total_output / (total_input_hl * L_PER_HL) * 100, 2)
                       if total_input_hl > 1e-6 else None}}
@@ -186,9 +229,11 @@ def pack_output_cumulative(db: Session, as_of_date: date) -> dict:
 
 def brew_volume_by_product(db: Session, year: int, month: int) -> dict:
     """BC sản lượng nấu theo tháng, nhóm theo Dịch bia (Product) — mỗi dòng 1 mẻ nấu, kèm tổng
-    cộng theo dịch bia. "V tồn" lấy từ BatchTank.on_hand của tank mẻ đó đã gộp vào — LƯU Ý: đây
-    là số tồn CẤP TANK (nhiều mẻ gộp 1 tank sẽ cùng hiện 1 số tồn như nhau), không tách được
-    riêng cho từng mẻ, mirror đúng giới hạn dữ liệu đã xác nhận khi khảo sát báo cáo cũ."""
+    cộng theo dịch bia + TỔNG CỘNG CHUNG (mọi dịch bia gộp lại — yêu cầu người dùng 2026-11-11:
+    "Tính thêm tổng số mẻ/tháng, số lượng dịch/tháng"). "V tồn" lấy từ BatchTank.on_hand của tank
+    mẻ đó đã gộp vào — LƯU Ý: đây là số tồn CẤP TANK (nhiều mẻ gộp 1 tank sẽ cùng hiện 1 số tồn
+    như nhau), không tách được riêng cho từng mẻ, mirror đúng giới hạn dữ liệu đã xác nhận khi
+    khảo sát báo cáo cũ."""
     start, end = _month_bounds_utc(year, month)
     batches = db.execute(select(BatchExecution).where(
         BatchExecution.start_at >= start, BatchExecution.start_at <= end
@@ -224,5 +269,8 @@ def brew_volume_by_product(db: Session, year: int, month: int) -> dict:
         s["batch_count"] += 1
     for s in subtotal_by_product.values():
         s["v_dich"] = round(s["v_dich"], 2)
+    total_batch_count = sum(s["batch_count"] for s in subtotal_by_product.values())
+    total_v_dich = round(sum(s["v_dich"] for s in subtotal_by_product.values()), 2)
     return {"year": year, "month": month, "items": rows,
-            "subtotals": sorted(subtotal_by_product.values(), key=lambda s: s["product_name"])}
+            "subtotals": sorted(subtotal_by_product.values(), key=lambda s: s["product_name"]),
+            "total": {"batch_count": total_batch_count, "v_dich": total_v_dich}}

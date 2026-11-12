@@ -399,3 +399,22 @@ def test_low_yield_filter_alerts_sums_same_batch_seq_no_across_filter_lots(clien
     assert set(seq42[0]["filter_lot_code"].split(", ")) == {"FLOT-YIELD-SEQ42-A", "FLOT-YIELD-SEQ42-B"}
     seq77 = [it for it in items if it["batch_seq_no"] == "77"]
     assert seq77 == [], "tổng mẻ 77 = 600L đã vượt ngưỡng Thấp -> không được báo động giả"
+
+
+def test_dashboard_trong_thang_counts_items_created_this_month(client, admin_h, lager_product_id):
+    """yêu cầu người dùng 2026-11-11: "Tính ra số theo tháng trên dashboard nữa" — mỗi thẻ (trừ
+    "Tank đang lên men", không có lịch sử để cộng dồn) có thêm `trong_thang`, đếm số phát sinh
+    trong THÁNG HIỆN TẠI (giờ VN). Dữ liệu tạo ngay trong test này luôn mang mốc "bây giờ" (utcnow
+    mặc định) -> luôn rơi đúng tháng hiện tại, nên chỉ cần so sánh DELTA trước/sau (mirror
+    test_dashboard_counts_brew_orders — không cần biết tháng/năm thật khi test chạy)."""
+    before = client.get("/api/reports/dashboard-summary", headers=admin_h).json()
+
+    created = client.post("/api/brewing/orders", headers=admin_h, json={
+        "order_code": "LN-DASH-TTHANG", "product_id": lager_product_id, "auto_from_bom": False,
+        "planned_volume_hl": 100.0})
+    assert created.status_code == 201, created.text
+
+    after = client.get("/api/reports/dashboard-summary", headers=admin_h).json()
+    assert after["lenh_nau"]["trong_thang"] == before["lenh_nau"]["trong_thang"] + 1
+    # "Tank đang lên men" không có trong_thang (snapshot trạng thái hiện tại, không phải lịch sử).
+    assert "trong_thang" not in after["tank_len_men"]
