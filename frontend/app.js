@@ -3944,7 +3944,12 @@ async function showBatchFilterLot(filterLotId) {
   const [f, sources, batches, matUsage, lots, materials, finishedProducts, beerTypes] = await Promise.all([
     GET(`/batch-filter-lots/${filterLotId}`), GET(`/batch-filter-lots/${filterLotId}/sources`),
     GET(`/batch-filter-lots/${filterLotId}/batches`), GET(`/batch-filter-lots/${filterLotId}/materials`),
-    GET("/lots"), GET("/materials"), GET("/finished-products").catch(() => []), GET("/beer-types").catch(() => [])]);
+    // Lọc theo location (Kho phân xưởng, giới hạn 900 — max cho phép) thay vì GET("/lots") không
+    // filter: mặc định chỉ trả 500 lô MỚI TẠO GẦN NHẤT TOÀN NHÀ MÁY nên 1 vật tư còn tồn thật ở
+    // Kho phân xưởng nhưng lô cũ có thể rớt trang, khiến "chọn vật tư" (wireMaterialUsageSection)
+    // không hiện vật tư đó để ghi nguyên liệu lọc (bug thực tế 2026-11-12, xem GET /api/lots).
+    GET("/lots?location=" + encodeURIComponent("Kho phân xưởng") + "&limit=900"),
+    GET("/materials"), GET("/finished-products").catch(() => []), GET("/beer-types").catch(() => [])]);
   // Sản phẩm luôn kế thừa nguyên từ Lệnh lọc nguồn (draw_from_filter_order), chỉ đọc lại ở đây —
   // mirror hiển thị ở showBatchFilterOrder (yêu cầu người dùng 2026-09-26).
   const flFp = f.finished_product_id ? finishedProducts.find(x => x.finished_product_id === f.finished_product_id) : null;
@@ -4550,7 +4555,10 @@ async function showBatchPackLot(packLotId) {
   const [p, finishedProducts, unitTypes, matUsage, lots, materials] = await Promise.all([
     GET(`/batch-pack-lots/${packLotId}`), GET("/finished-products").catch(() => []),
     GET("/unit-types").catch(() => []), GET(`/batch-pack-lots/${packLotId}/materials`),
-    GET("/lots"), GET("/materials")]);
+    // Lọc theo location (Kho phân xưởng) thay vì GET("/lots") không filter — cùng lý do đã ghi ở
+    // showBatchFilterLot (bug thực tế 2026-11-12: vật tư còn tồn thật nhưng lô cũ rớt trang 500).
+    GET("/lots?location=" + encodeURIComponent("Kho phân xưởng") + "&limit=900"),
+    GET("/materials")]);
   // Trang "Danh sách lô thành phẩm" hiện danh sách + chi tiết CÙNG 1 màn (master-detail) — dòng
   // trong bảng danh sách chỉ dựng 1 LẦN lúc vào trang, không tự cập nhật khi thao tác (Lưu SL,
   // Lưu SL theo ca, Duyệt nhập kho TP...) làm đổi dữ liệu ngay trong panel chi tiết bên cạnh, nên
@@ -5249,8 +5257,11 @@ async function openPackLotEBR(packLotId) {
 
 // ================= QUALITY =================
 VIEWS.quality = async function () {
-  const [results, devs, batches, lots, materials, qcParams, holdHistory, pendingStageQc, capas, matLocsQuality, pendingKcPxQuality, pendingSngQuality, batchTanksQuality, batchFilterLotsQuality, batchPackLotsQuality, productsQuality, beerTypesQuality, workOrdersQuality] = await Promise.all([
-    GET("/quality/results"), GET("/quality/deviations"), GET("/batches"), GET("/lots"), GET("/materials"),
+  const [results, devs, batches, lots, onHoldLots, materials, qcParams, holdHistory, pendingStageQc, capas, matLocsQuality, pendingKcPxQuality, pendingSngQuality, batchTanksQuality, batchFilterLotsQuality, batchPackLotsQuality, productsQuality, beerTypesQuality, workOrdersQuality] = await Promise.all([
+    GET("/quality/results"), GET("/quality/deviations"), GET("/batches"), GET("/lots"),
+    // Hàng "chờ KCS duyệt" PHẢI đầy đủ, không phụ thuộc trang 500 lô mới nhất toàn nhà máy — lọc
+    // thẳng status=on_hold (xem GET /api/lots) để lô cũ bị giữ QC không lọt khỏi hàng chờ duyệt.
+    GET("/lots?status=on_hold&limit=900").catch(() => []), GET("/materials"),
     GET("/qc/parameters?active_only=false").catch(() => []),
     GET("/audit?action=hold,release&limit=100").catch(() => []),
     GET("/quality/pending-stage-qc").catch(() => []),
@@ -5289,7 +5300,10 @@ VIEWS.quality = async function () {
   // tại để thấy ngay công đoạn nào đang bị giữ. Xem services/quality.py::_STAGE_MODELS.
   const hqLabel = (q) => q === "on_hold" ? " — ĐANG HOLD" : "";
   const batchById = Object.fromEntries(batches.map(b => [b.batch_id, b]));
-  const lotById = Object.fromEntries(lots.map(l => [l.lot_id, l]));
+  // Gộp cả onHoldLots (đầy đủ, không bị cắt trang) vào lotById — tra cứu bên dưới (nghiệp vụ
+  // Điều chuyển/Sang ngang gắn với lô đang on_hold) phải thấy đúng lô dù lô đó cũ hơn 500 lô mới
+  // nhất và đã rớt khỏi `lots`.
+  const lotById = Object.fromEntries([...lots, ...onHoldLots].map(l => [l.lot_id, l]));
   const matById = Object.fromEntries(materials.map(m => [m.material_id, m]));
   const paramByCode = Object.fromEntries(qcParams.map(p => [p.code, p]));
   // Pipeline "Mẻ SX" — tra tên hiển thị cho "Kết quả QC gần đây" (trước đây rơi vào nhánh mặc
@@ -5422,7 +5436,7 @@ VIEWS.quality = async function () {
   // MaterialLot.status=on_hold cho lý do khác (QC mẻ/sản phẩm, không phải chỉ tiêu NVL) nên
   // không có material_id; hiện lẫn vào đây sẽ mở "Khai báo/Duyệt" ra trống trơn (không có chỉ
   // tiêu NVL nào để khai vì required_params_for_material cần material_id) — gây hiểu lầm.
-  const pendingQc = lots.filter(l => l.status === "on_hold" && l.material_id);
+  const pendingQc = onHoldLots.filter(l => l.material_id);
   // "Nghiệp vụ" — vì sao lô này đang HOLD: nếu có đề nghị Điều chuyển CT->PX (transfer-kcpx) hoặc
   // Xuất sang ngang đang "pending" gắn với lô, thì HOLD là do đang chờ KCS duyệt lại để PX nhận
   // hàng (xem create_transfer_kcpx_request/create_sang_ngang ở services/warehouse.py) — hiện rõ
@@ -6386,8 +6400,11 @@ function siblingLocationsHtml(l) {
   const parts = l.sibling_locations.map(s => `${s.quantity} ${esc(l.uom || "")} ở ${esc(s.location || "?")}`);
   return ` <span class="muted" style="font-size:11px">(còn ${parts.join(", ")})</span>`;
 }
-async function lotOptions(db, onlyAvailable) {
-  const [lots, mats] = await Promise.all([GET("/lots"), GET("/materials")]);
+async function lotOptions(db, onlyAvailable, location) {
+  // `location` lọc TRƯỚC khi áp limit/offset ở backend (xem GET /api/lots) — tránh lô cũ của 1
+  // kho cụ thể rớt khỏi 500 dòng mới nhất toàn nhà máy (bug thực tế 2026-11-12).
+  const locQs = location ? `&location=${encodeURIComponent(location)}` : "";
+  const [lots, mats] = await Promise.all([GET(`/lots?limit=900${locQs}`), GET("/materials")]);
   const matById = Object.fromEntries(mats.map(m => [m.material_id, m]));
   return lots.filter(l => l.quantity > 0 && (!onlyAvailable || l.status === "available"))
     .sort((a, b) => new Date(a.created_at) - new Date(b.created_at))   // FIFO: nhập trước hiện trước
@@ -6483,7 +6500,14 @@ function openMaterialLotsModal(matLabel, lots) {
 // tách ra thành hàm dùng chung để mỗi tab tự gọi khi cần, tránh phải viết lại/duy trì 2 nơi.
 async function loadGiaoData() {
   const [lotsAvail, mats, allLots, allRequestsFull, freeIssues, pxRequests, factoryLocationsGiao, factoryTransfers, supplierReturns, suppliers, receiptsRaw, sangNgangRequests, qcReqIdsGiao, matLocsGiao, kcpxRequests] = await Promise.all([
-    lotOptions(null, false), GET("/materials"), GET("/lots"), GET("/warehouse/requests"),
+    // "Xuất tự do"/"Hoàn trả NCC" (dùng lotsAvail) chỉ thao tác lô Kho công ty — lọc hẳn
+    // location="Kho công ty" (xem comment module ở trên). "allLots" thì KHÔNG lọc theo kho vì
+    // còn dùng chung cho workshopLotOpts (lô Kho phân xưởng, bên dưới) — chỉ nâng limit lên mức
+    // trần 900 để giảm (không loại hẳn) rủi ro lô cũ rớt trang so với GET("/lots") mặc định 500
+    // (bug thực tế 2026-11-12, vật tư 2NP73).
+    lotOptions(null, false, "Kho công ty"),
+    GET("/materials"), GET("/lots?limit=900"),
+    GET("/warehouse/requests"),
     GET("/warehouse/movements?movement_type=issue&mode=tu_do"),
     GET("/warehouse/transfer-px-requests"), GET("/factory-locations").catch(() => []),
     GET("/warehouse/movements?movement_type=issue&mode=dieu_chuyen_nha_may"),
@@ -6968,7 +6992,11 @@ VIEWS.warehouse_kc = async function () {
     // "Xem chỉ tiêu" chỉ hiện khi vật tư có >=1 chỉ tiêu THẬT SỰ (params_only=true) — Nguyên
     // liệu chính/phụ chỉ cần Số lô KCS/Số LOT NCC (không gán chỉ tiêu nào) thì ẩn nút này, vì
     // bấm vào chỉ thấy bảng trống, không có gì để xem (yêu cầu người dùng 2026-09-08).
-    const [allLots, mats, qcReqIds, matLocsKc] = await Promise.all([GET("/lots"), GET("/materials"),
+    // Lọc location="Kho công ty" + limit=900 ngay từ backend (màn này vốn đã tự lọc bỏ lô phân
+    // xưởng ở client — xem rowsAllKc bên dưới) thay vì GET("/lots") không filter, tránh lô cũ
+    // rớt khỏi 500 dòng mới nhất toàn nhà máy (bug thực tế 2026-11-12, vật tư 2NP73).
+    const [allLots, mats, qcReqIds, matLocsKc] = await Promise.all([
+      GET("/lots?location=" + encodeURIComponent("Kho công ty") + "&limit=900"), GET("/materials"),
       GET("/materials/qc-required?params_only=true"), GET("/warehouse/locations").catch(() => [])]);
     const matById = Object.fromEntries(mats.map(m => [m.material_id, m]));
     const qcReqSet = new Set(qcReqIds);
@@ -7002,7 +7030,10 @@ VIEWS.warehouse_kc = async function () {
       </table></div>
     </div>`;
   } else if (sec === "vitri") {
-    const [allLotsVt, matsVt, matLocsVt] = await Promise.all([GET("/lots"), GET("/materials"),
+    // Lọc location="Kho công ty" + limit=900 — màn này cũng tự lọc bỏ lô phân xưởng ở client
+    // ngay dưới đây (WH_CACHE.vtLots), cùng lý do đã sửa ở sec==="kc" phía trên.
+    const [allLotsVt, matsVt, matLocsVt] = await Promise.all([
+      GET("/lots?location=" + encodeURIComponent("Kho công ty") + "&limit=900"), GET("/materials"),
       GET("/warehouse/locations").catch(() => [])]);
     const matByIdVt = Object.fromEntries(matsVt.map(m => [m.material_id, m]));
     WH_CACHE.vtMatById = matByIdVt;
@@ -7520,8 +7551,12 @@ VIEWS.warehouse_px = async function () {
   } else if (sec === "req") {
     body = await renderRequestsSection();
   } else if (sec === "dieuchuyen") {
+    // KHÔNG lọc theo kho — lotByIdPxDc cần tra được CẢ lô Kho công ty (đề nghị "Điều chuyển
+    // CT->PX" tham chiếu lot_id nguồn ở Kho công ty) lẫn lô Kho phân xưởng (workshopLotOpts bên
+    // dưới) — chỉ nâng limit lên trần 900 để giảm rủi ro lô cũ rớt trang so với mặc định 500
+    // (bug thực tế 2026-11-12, vật tư 2NP73).
     const [allLots, mats, pxRequests, kcpxRequestsPx, qcReqIdsKcpx, workshopLocsPx] = await Promise.all([
-      GET("/lots"), GET("/materials"), GET("/warehouse/transfer-px-requests"),
+      GET("/lots?limit=900"), GET("/materials"), GET("/warehouse/transfer-px-requests"),
       GET("/warehouse/transfer-kcpx-requests").catch(() => []), GET("/materials/qc-required").catch(() => []),
       GET("/warehouse/locations").catch(() => [])]);
     const matById = Object.fromEntries(mats.map(m => [m.material_id, m]));
@@ -7637,7 +7672,10 @@ VIEWS.warehouse_px = async function () {
       </table></div>
       </div></div>`;
   } else if (sec === "sangngang") {
-    const [allLots, mats, sangNgangRequestsPx, qcReqIdsPx] = await Promise.all([GET("/lots"), GET("/materials"),
+    // KHÔNG lọc theo kho — lotByIdPx cần tra lot_id của đề nghị "Xuất sang ngang" (luôn là lô
+    // Kho công ty, nguồn chuyển sang phân xưởng) — chỉ nâng limit lên trần 900, cùng lý do đã
+    // sửa ở sec==="dieuchuyen" phía trên.
+    const [allLots, mats, sangNgangRequestsPx, qcReqIdsPx] = await Promise.all([GET("/lots?limit=900"), GET("/materials"),
       GET("/warehouse/sang-ngang"), GET("/materials/qc-required")]);
     const matById = Object.fromEntries(mats.map(m => [m.material_id, m]));
     const lotByIdPx = Object.fromEntries(allLots.map(l => [l.lot_id, l]));
@@ -7704,7 +7742,10 @@ VIEWS.warehouse_px = async function () {
       </table></div>
     </div>`;
   } else if (sec === "tudo") {
-    const [allLots, mats, freeIssuesAll] = await Promise.all([GET("/lots"), GET("/materials"),
+    // Lọc location="Kho phân xưởng" — màn này chỉ dùng lô phân xưởng (workshopLotOpts bên
+    // dưới), cùng lý do đã sửa ở các màn phân xưởng khác (bug thực tế 2026-11-12, vật tư 2NP73).
+    const [allLots, mats, freeIssuesAll] = await Promise.all([
+      GET("/lots?location=" + encodeURIComponent("Kho phân xưởng") + "&limit=900"), GET("/materials"),
       GET("/warehouse/movements?movement_type=issue&mode=tu_do")]);
     const matById = Object.fromEntries(mats.map(m => [m.material_id, m]));
     const isAdminPx = CURRENT_USER && CURRENT_USER.role === "admin";
@@ -7749,7 +7790,10 @@ VIEWS.warehouse_px = async function () {
       </table></div>
     </div>`;
   } else if (sec === "vitri") {
-    const [allLotsVtPx, matsVtPx, wsLocsVtPx] = await Promise.all([GET("/lots"), GET("/materials"),
+    // Lọc location="Kho phân xưởng" — màn này chỉ dùng lô phân xưởng (WH_CACHE.vtLotsPx bên
+    // dưới), cùng lý do đã sửa ở các màn phân xưởng khác (bug thực tế 2026-11-12, vật tư 2NP73).
+    const [allLotsVtPx, matsVtPx, wsLocsVtPx] = await Promise.all([
+      GET("/lots?location=" + encodeURIComponent("Kho phân xưởng") + "&limit=900"), GET("/materials"),
       GET("/warehouse/locations").catch(() => [])]);
     const matByIdVtPx = Object.fromEntries(matsVtPx.map(m => [m.material_id, m]));
     WH_CACHE.vtMatByIdPx = matByIdVtPx;
@@ -8455,6 +8499,25 @@ function fifoOldestLot(materialId, allLots) {
   const candidates = allLots.filter(l => l.material_id === materialId && l.quantity > 0 && !/phân xưởng/i.test(l.location || ""))
     .sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
   return candidates[0] || null;
+}
+// GET("/lots") KHÔNG filter mặc định chỉ trả 500 lô MỚI TẠO GẦN NHẤT toàn nhà máy (xem docstring
+// list_lots ở backend/app/routers/materials.py) — lô bao bì/vỏ lon tạo rất nhanh nên đẩy lô NVL
+// cũ ra khỏi trang, khiến materialAvailableCompanyQty() tính thiếu nếu dùng REQ_CACHE.lots (bug
+// thực tế 2026-11-12, vật tư 2NP73: còn 40kg available thật ở Kho công ty nhưng bị báo tồn=0 vì
+// lô đó rớt khỏi 500 dòng mới nhất). Luôn gọi hàm này (lọc theo đúng material_id cần kiểm tra)
+// ngay trước khi chặn/validate số lượng — KHÔNG dùng REQ_CACHE.lots cho việc này.
+async function fetchCompanyLotsFor(materialIds) {
+  const ids = [...new Set(materialIds)].filter(Boolean);
+  if (!ids.length) return [];
+  return GET("/lots?material_id=" + ids.map(encodeURIComponent).join(","));
+}
+// Gộp lô vừa tải chính xác (fetchCompanyLotsFor) vào REQ_CACHE.lots (theo lot_id) — để các chỗ
+// HIỂN THỊ khác đang đọc REQ_CACHE.lots (cột "Tồn kho công ty thực tế"/"Đang chờ QC duyệt" ở
+// giỏ hàng, badge FIFO) cũng thấy đúng số ngay, không chỉ riêng bước validate vừa chặn/cho qua.
+function mergeLotsIntoCache(freshLots) {
+  const byId = new Map((REQ_CACHE.lots || []).map(l => [l.lot_id, l]));
+  for (const l of freshLots) byId.set(l.lot_id, l);
+  REQ_CACHE.lots = [...byId.values()];
 }
 // Tồn kho THỰC TẾ khả dụng tại Kho công ty của 1 vật tư — chỉ tính lô status "available"/
 // "released" (mirror LotStatus ở backend/app/common.py + services/warehouse.py::material_fifo_detail),
@@ -9245,7 +9308,9 @@ function wireCartPanel() {
     const mat = REQ_CACHE.matById[matId];
     const qty = altUomToBaseQty(mat, parseFloat($("rq_qty").value), $("rq_uom").value);
     if (!qty || qty <= 0) throw new Error("Số lượng phải > 0.");
-    const onHand = materialAvailableCompanyQty(matId, REQ_CACHE.lots);
+    const freshLots = await fetchCompanyLotsFor([matId]);
+    mergeLotsIntoCache(freshLots);
+    const onHand = materialAvailableCompanyQty(matId, freshLots);
     if (qty > onHand) throw new Error(
       `Số lượng đề nghị (${qty}) vượt quá tồn kho CÔNG TY THỰC TẾ (đã trừ hàng đang chờ QC duyệt) của ` +
       `${mat ? mat.code : matId} (${onHand}).`);
@@ -9267,7 +9332,9 @@ function wireCartPanel() {
     const c = REQUEST_CART[i];
     const qty = parseFloat(inp.value);
     if (!qty || qty <= 0) throw new Error("Số lượng phải > 0.");
-    const onHand = materialAvailableCompanyQty(c.material_id, REQ_CACHE.lots);
+    const freshLotsQty = await fetchCompanyLotsFor([c.material_id]);
+    mergeLotsIntoCache(freshLotsQty);
+    const onHand = materialAvailableCompanyQty(c.material_id, freshLotsQty);
     if (qty > onHand) throw new Error(
       `Số lượng (${qty}) vượt quá tồn kho CÔNG TY THỰC TẾ (đã trừ hàng đang chờ QC duyệt) của ${c.material_code} (${onHand}).`);
     c.quantity = qty;
@@ -9280,11 +9347,14 @@ function wireCartPanel() {
     const submitRows = REQUEST_CART.filter(c => c.quantity > 0);
     if (!submitRows.length) throw new Error("Không có dòng nào có số lượng > 0 để gửi đề nghị.");
     // Chặn hẳn (không hỏi lại) nếu SL đang đề nghị vượt quá tồn kho THỰC TẾ (đã trừ hàng đang
-    // chờ QC duyệt) — không cho tạo phiếu xin nhiều hơn số thực sự có thể xuất ngay.
-    const overStockRows = submitRows.filter(c => c.quantity > materialAvailableCompanyQty(c.material_id, REQ_CACHE.lots));
+    // chờ QC duyệt) — không cho tạo phiếu xin nhiều hơn số thực sự có thể xuất ngay. Tải lại lô
+    // theo ĐÚNG các vật tư trong giỏ (không dùng REQ_CACHE.lots bị giới hạn 500 dòng mới nhất).
+    const submitLots = await fetchCompanyLotsFor(submitRows.map(c => c.material_id));
+    mergeLotsIntoCache(submitLots);
+    const overStockRows = submitRows.filter(c => c.quantity > materialAvailableCompanyQty(c.material_id, submitLots));
     if (overStockRows.length) {
       const detail = overStockRows.map(c => `${c.material_code} (cần ${c.quantity}, tồn thực tế ` +
-        `${materialAvailableCompanyQty(c.material_id, REQ_CACHE.lots)} ${c.uom})`).join("; ");
+        `${materialAvailableCompanyQty(c.material_id, submitLots)} ${c.uom})`).join("; ");
       throw new Error(`Không đủ tồn kho công ty thực tế để tạo đề nghị: ${detail}. Giảm số lượng hoặc chờ hàng hết QC.`);
     }
     // Dòng thuộc Nhóm vật tư thay thế mà SL > 0 nhưng còn mã cũ hơn trong nhóm CHƯA dùng hết tồn

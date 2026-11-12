@@ -21,18 +21,48 @@ router = APIRouter(prefix="/api/lots", tags=["lots"],
 
 
 @router.get("", response_model=list[LotOut])
-def list_lots(limit: int = 500, offset: int = 0, db: Session = Depends(get_db)):
+def list_lots(limit: int = 500, offset: int = 0, material_id: str = None, status: str = None,
+              location: str = None, db: Session = Depends(get_db)):
     """Có phân trang (limit/offset, mặc định 500, tối đa 900) — số lô tích lũy tăng dần theo
     mỗi lần nhập/tách/nhập tồn đầu nên endpoint không lọc vẫn cần chặn không tải hết bảng.
     Trần hạ từ 5000 xuống 900 (2026-11-03): `_attach_split_from`/`_attach_sibling_locations`
     bên dưới đều `.in_()` theo đúng số lô trả về — `limit=5000` tự nó đã vượt trần 2100 tham số
     bind của SQL Server, vỡ ngay 1 request chứ không cần chờ dữ liệu tích lũy (memory item 18/
-    DEPLOY-CONTRACT §2(H)). Xác nhận 2026-11-03: không có nơi nào ở frontend truyền `limit` lớn
-    hơn mặc định (mọi lời gọi GET("/lots") đều không kèm query param này)."""
+    DEPLOY-CONTRACT §2(H)).
+
+    `material_id`/`status`: lọc theo 1 hoặc nhiều giá trị (phân cách bởi dấu phẩy) TRƯỚC KHI áp
+    limit/offset — thêm 2026-11-12 sau khi phát hiện bug thực tế trên production: nhiều màn hình
+    gọi GET("/lots") KHÔNG filter rồi tự lọc ở trình duyệt, nên khi tổng số lô toàn nhà máy vượt
+    500 (lô bao bì/vỏ lon tạo rất nhanh, đẩy lô NVL cũ ra khỏi trang `created_at desc` mặc định),
+    1 vật tư có lô CÒN TỒN THẬT (vật tư 2NP73, 40kg Kho công ty, status "available") lại bị coi là
+    tồn=0 vì lô đó rớt khỏi 500 dòng mới nhất — chặn oan đề nghị nhận kho hợp lệ, hoặc lọt khỏi
+    FIFO picker/hàng chờ QC duyệt. Gọi kèm `material_id`/`status` để lấy ĐÚNG và ĐỦ lô cần, không
+    phụ thuộc việc lô đó có nằm trong top 500 mới tạo gần đây hay không.
+
+    `location`: lọc theo kho ("Kho công ty"/chứa "phân xưởng" → Kho phân xưởng, theo cùng quy ước
+    `_is_workshop_location`) — lọc Ở PYTHON (mirror lý do đã ghi ở `warehouse.stock_on_hand()`:
+    mệnh đề phủ định "Kho công ty" từng lọc SAI trên SQL Server, trả về y hệt không lọc). Khi có
+    `location`, phải tải HẾT các dòng khớp `material_id`/`status` trước (bỏ limit SQL), lọc kho
+    xong mới cắt trang — nếu limit SQL trước thì lô khớp kho có thể đã rớt trang trước khi kịp
+    lọc, lại tái diễn đúng bug này."""
     limit = max(1, min(limit or 500, 900))
     offset = max(0, offset or 0)
-    stmt = select(MaterialLot).order_by(MaterialLot.created_at.desc()).limit(limit).offset(offset)
-    lots = db.execute(stmt).scalars().all()
+    stmt = select(MaterialLot)
+    if material_id:
+        ids = [mid.strip() for mid in material_id.split(",") if mid.strip()]
+        if ids:
+            stmt = stmt.where(MaterialLot.material_id.in_(ids))
+    if status:
+        statuses = [s.strip() for s in status.split(",") if s.strip()]
+        if statuses:
+            stmt = stmt.where(MaterialLot.status.in_(statuses))
+    stmt = stmt.order_by(MaterialLot.created_at.desc())
+    if location:
+        loc_matches = warehouse_svc._asof_loc_matcher(location)
+        all_rows = db.execute(stmt).scalars().all()
+        lots = [r for r in all_rows if loc_matches(r.location)][offset:offset + limit]
+    else:
+        lots = db.execute(stmt.limit(limit).offset(offset)).scalars().all()
     _attach_split_from(db, lots)
     _attach_sibling_locations(db, lots)
     return lots
