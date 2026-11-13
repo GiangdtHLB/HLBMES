@@ -12168,8 +12168,13 @@ VIEWS.reports = async function () {
     const plLines = plRep.lines || [];
     const fmtDurationH2 = (h) => { const totalMin = Math.round(h * 60);
       return `${Math.floor(totalMin / 60)}h${String(totalMin % 60).padStart(2, "0")}`; };
-    const fsDays = parseInt(SUB.reports_fs_days || 30, 10);
-    const fsRep = await GET(`/reports/filling-status-log?days=${fsDays}`).catch(() => ({ segments: [], running_hours: 0, cip_hours: 0 }));
+    const fsPeriodMode = SUB.reports_fs_days === "custom" ? "custom" : "days";
+    const fsDays = fsPeriodMode === "days" ? (SUB.reports_fs_days || 30) : 30;
+    const fsToday = new Date(); const fsFrom30 = new Date(); fsFrom30.setDate(fsToday.getDate() - 30);
+    const fsDateFrom = SUB.reports_fs_date_from || toISODateLocal(fsFrom30);
+    const fsDateTo = SUB.reports_fs_date_to || toISODateLocal(fsToday);
+    const fsQs = fsPeriodMode === "custom" ? `date_from=${fsDateFrom}&date_to=${fsDateTo}` : `days=${fsDays}`;
+    const fsRep = await GET(`/reports/filling-status-log?${fsQs}`).catch(() => ({ segments: [], running_hours: 0, cip_hours: 0 }));
     body = `<div class="panel"><h2>BC dây chuyền chiết <span class="muted">(${plLines.length} dây chuyền)</span></h2>
       <div class="muted" style="margin-bottom:8px">Mỗi thanh trên biểu đồ = 1 ca chiết ĐÃ xác nhận xong (đủ SL + giờ bắt đầu/kết thúc) — khoảng trống giữa các thanh là thời gian KHÔNG chiết. "Số lần chiết" tính theo SỐ LÔ CHIẾT của dây chuyền đó trong kỳ (không theo số ca).</div>
       <div class="row">
@@ -12199,8 +12204,13 @@ VIEWS.reports = async function () {
       <div class="row">
         <div class="field"><label>Kỳ</label>
           <select id="rfs_days"><option value="7">7 ngày gần đây</option>
-            <option value="30" ${(SUB.reports_fs_days || 30) == 30 ? "selected" : ""}>30 ngày gần đây</option>
-            <option value="90">90 ngày gần đây</option></select></div>
+            <option value="30" ${fsPeriodMode === "days" && fsDays == 30 ? "selected" : ""}>30 ngày gần đây</option>
+            <option value="90">90 ngày gần đây</option>
+            <option value="custom" ${fsPeriodMode === "custom" ? "selected" : ""}>Từ ngày - đến ngày</option></select></div>
+        ${fsPeriodMode === "custom" ? `
+        <div class="field"><label>Từ ngày</label><input id="rfs_from" type="date" value="${fsDateFrom}"/></div>
+        <div class="field"><label>Đến ngày</label><input id="rfs_to" type="date" value="${fsDateTo}"/></div>
+        <button class="btn" id="rfs_apply" style="align-self:flex-end">Xem</button>` : ""}
       </div>
       <div class="cards" style="grid-template-columns:repeat(2,1fr);margin:12px 0">
         <div class="card"><div class="n">${fsRep.running_hours}h</div><div class="l">Tổng thời gian đang chiết</div></div>
@@ -12788,9 +12798,17 @@ VIEWS.reports = async function () {
     }
     $("rfs_days").value = String(SUB.reports_fs_days || 30);
     $("rfs_days").onchange = () => {
-      SUB.reports_fs_days = parseInt($("rfs_days").value, 10);
+      const v = $("rfs_days").value;
+      SUB.reports_fs_days = v === "custom" ? "custom" : parseInt(v, 10);
       render("reports");
     };
+    if ($("rfs_apply")) {
+      $("rfs_apply").onclick = () => {
+        SUB.reports_fs_date_from = $("rfs_from").value;
+        SUB.reports_fs_date_to = $("rfs_to").value;
+        render("reports");
+      };
+    }
   }
   if (sec === "brewhouse_steps") {
     wirePaginate("t_bs_summary", 10); wirePaginate("t_bs_detail", 20);
