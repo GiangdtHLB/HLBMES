@@ -11981,10 +11981,16 @@ function fillingStatusGanttSvg(report) {
     const minLabel = fmtMinShort(minutes);
     svg += `<rect x="${x1.toFixed(1)}" y="${barY}" width="${w.toFixed(1)}" height="${barH}" rx="3" fill="${fill}">
       <title>${esc(label)} — ${minLabel}${s.still_open ? " (đang diễn ra)" : ""} (${fmt(s.start_at)} → ${fmt(s.end_at)})</title></rect>`;
-    // Ghi số phút ngay trên đoạn, chỉ cho CIP/dừng (2/3) và chỉ khi đủ rộng để không đè chữ lên
-    // nhau — đoạn hẹp hơn vẫn xem được số phút qua tooltip (title ở trên).
-    if ((s.status === 2 || s.status === 3) && w >= 16) {
-      svg += `<text x="${(x1 + w / 2).toFixed(1)}" y="${barY - 3}" text-anchor="middle" fill="var(--muted)" font-size="8">${minLabel}</text>`;
+    // Ghi số phút ngay trên đoạn, chỉ cho CIP/dừng (2/3) và chỉ khi đoạn đủ rộng để CHỨA VỪA
+    // ĐÚNG chữ của chính nó (ước lượng ~5px/ký tự ở font-size 8) — trước đây dùng ngưỡng cố
+    // định 16px nên nhãn dài ("1h00") hoặc đoạn hẹp sát nhau tràn chữ sang đoạn bên cạnh, nhìn
+    // như nhãn thuộc về ranh giới giữa 2 đoạn chứ không rõ của đoạn nào (người dùng phát hiện
+    // qua ảnh chụp 2026-11-13). Đoạn không đủ chỗ vẫn xem được số phút qua tooltip (title ở trên).
+    if (s.status === 2 || s.status === 3) {
+      const estTextWidth = minLabel.length * 5;
+      if (w >= estTextWidth + 2) {
+        svg += `<text x="${(x1 + w / 2).toFixed(1)}" y="${barY - 3}" text-anchor="middle" fill="var(--muted)" font-size="8">${minLabel}</text>`;
+      }
     }
   });
   return svg + "</svg>";
