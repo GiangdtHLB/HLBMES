@@ -3896,7 +3896,9 @@ VIEWS.batchfilterlots = async function () {
         <div class="field"><label>Tank thành phẩm</label><select id="fl_bbt">${bbtOpts}</select></div>
         <button class="btn" id="fl_create">Tạo lô lọc</button>
       </div>
-      <div class="muted" style="margin-top:4px">Sản phẩm (kế thừa từ lệnh lọc): <b id="fl_order_product">—</b></div>
+      <div class="muted" style="margin-top:4px">Loại bia (kế thừa từ lệnh lọc, không sửa được ở đây): <b id="fl_order_beertype">—</b>
+        &nbsp;·&nbsp; Loại sản phẩm: <b id="fl_order_category">—</b>
+        &nbsp;·&nbsp; Sản phẩm: <b id="fl_order_product">—</b></div>
       ${available.length ? "" : '<div class="muted">Chưa có lệnh lọc nào còn dùng được.</div>'}
     </div>
     <div class="split">
@@ -3927,6 +3929,8 @@ VIEWS.batchfilterlots = async function () {
   wirePaginate("t_batfilterlot", 10);
   const updateFlOrderProduct = () => {
     const o = orderById[$("fl_order_sel").value];
+    $("fl_order_beertype").textContent = o ? beerTypeName(o.beer_type_id) : "—";
+    $("fl_order_category").textContent = o ? (o.category || "—") : "—";
     $("fl_order_product").textContent = o ? fpLabel(o.finished_product_id) : "—";
   };
   $("fl_order_sel").onchange = updateFlOrderProduct;
