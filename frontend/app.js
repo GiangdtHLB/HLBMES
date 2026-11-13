@@ -163,6 +163,10 @@ function setScopePicker(idPrefix, current) {
   box.querySelectorAll(`.${idPrefix}_item`).forEach(c => { c.checked = curSet.has(c.value); c.disabled = isAll; });
 }
 const fmt = (t) => t ? new Date(t).toLocaleString("vi-VN") : "—";
+// Số hl (tồn/tổng tank) có thể dính rác số thực do trừ dồn qua nhiều lượt (vd 1777.5999999999997
+// thay vì 1777.6) — ép tròn 2 chữ số thập phân trước khi hiện, tránh hiện nguyên số thực lởm
+// chởm ra màn hình (yêu cầu người dùng 2026-11-12, ảnh chụp "Danh sách lô lên men").
+const fmtHl = (v) => v == null ? "—" : Number(v).toLocaleString("vi-VN", { maximumFractionDigits: 2 });
 const esc = (s) => (s == null ? "" : String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])));
 const plateLast5 = (plate) => { const digits = String(plate || "").replace(/\D/g, ""); return digits ? digits.slice(-5) : "—"; };
 // Định dạng Date thành chuỗi cho input datetime-local — PHẢI dùng giờ LOCAL của máy (getHours...),
@@ -3082,7 +3086,7 @@ VIEWS.batchtanks = async function () {
             <td><code class="k">${esc(t.tank_code)}</code></td>
             <td>${esc(t.tank_lm || "—")}</td><td>${statusBadge(TANK_BADGE_CLASS[t.status], t.status_label)}</td>
             <td class="muted">${t.product_id && productByIdBT[t.product_id] ? esc(productByIdBT[t.product_id].code) : "—"}</td>
-            <td>${t.on_hand} / ${t.volume_hl}</td>
+            <td>${fmtHl(t.on_hand)} / ${fmtHl(t.volume_hl)}</td>
             <td class="muted">${t.vao_dich_start ? fmt(t.vao_dich_start) : "—"}</td>
             <td class="muted">${t.vao_dich_end ? fmt(t.vao_dich_end) : "—"}</td>
             <td>${batchTankDaysFermentedCell(t)}</td>
@@ -3165,7 +3169,7 @@ async function showBatchTank(tankId, allBatches) {
     <dl class="detail">
       <dt>Trạng thái</dt><dd>${statusBadge(TANK_BADGE_CLASS[t.status], t.status_label)}</dd>
       <dt>Chất lượng</dt><dd>${badge(t.quality_status)}</dd>
-      <dt>Tồn/Tổng</dt><dd>${t.on_hand} / ${t.volume_hl} hl</dd>
+      <dt>Tồn/Tổng</dt><dd>${fmtHl(t.on_hand)} / ${fmtHl(t.volume_hl)} hl</dd>
       <dt>Lô lên men</dt><dd><code class="k">${esc(t.tank_code)}</code></dd>
       <dt>Tank lên men</dt><dd>${esc(t.tank_lm || "—")}</dd>
       <dt>Mẻ nấu đã gộp</dt><dd>${memberBatches.map(b => `<code class="k">${esc(b.batch_code)}</code>`).join(", ") || "—"}</dd>
@@ -3914,7 +3918,7 @@ VIEWS.batchfilterlots = async function () {
             <td>${[f.used_for_refilter ? `<span class="badge review" title="Đã lọc lại thành ${esc(f.refilter_target_filter_lot_code || "—")}${f.refilter_target_bbt ? " — vào tank " + esc(f.refilter_target_bbt) : ""}">Lọc lại</span>` : "",
                    f.chiet_status ? statusBadge(PACK_LOT_BADGE_CLASS[f.chiet_status], f.chiet_status_label) : ""]
                    .filter(Boolean).join(" ") || '<span class="muted">—</span>'}</td>
-            <td>${f.on_hand} / ${f.volume_hl}</td></tr>`).join("") || '<tr><td colspan=12 class="muted">Chưa có lô lọc nào.</td></tr>'}</tbody></table></div>
+            <td>${fmtHl(f.on_hand)} / ${fmtHl(f.volume_hl)}</td></tr>`).join("") || '<tr><td colspan=12 class="muted">Chưa có lô lọc nào.</td></tr>'}</tbody></table></div>
       </div>
       <div class="panel" id="fl_detail"><h2>Chi tiết lô lọc</h2><div class="muted">Chọn một lô lọc để xem.</div></div>
     </div>`;
@@ -3940,7 +3944,12 @@ async function showBatchFilterLot(filterLotId) {
   const [f, sources, batches, matUsage, lots, materials, finishedProducts, beerTypes] = await Promise.all([
     GET(`/batch-filter-lots/${filterLotId}`), GET(`/batch-filter-lots/${filterLotId}/sources`),
     GET(`/batch-filter-lots/${filterLotId}/batches`), GET(`/batch-filter-lots/${filterLotId}/materials`),
-    GET("/lots"), GET("/materials"), GET("/finished-products").catch(() => []), GET("/beer-types").catch(() => [])]);
+    // Lọc theo location (Kho phân xưởng, giới hạn 900 — max cho phép) thay vì GET("/lots") không
+    // filter: mặc định chỉ trả 500 lô MỚI TẠO GẦN NHẤT TOÀN NHÀ MÁY nên 1 vật tư còn tồn thật ở
+    // Kho phân xưởng nhưng lô cũ có thể rớt trang, khiến "chọn vật tư" (wireMaterialUsageSection)
+    // không hiện vật tư đó để ghi nguyên liệu lọc (bug thực tế 2026-11-12, xem GET /api/lots).
+    GET("/lots?location=" + encodeURIComponent("Kho phân xưởng") + "&limit=900"),
+    GET("/materials"), GET("/finished-products").catch(() => []), GET("/beer-types").catch(() => [])]);
   // Sản phẩm luôn kế thừa nguyên từ Lệnh lọc nguồn (draw_from_filter_order), chỉ đọc lại ở đây —
   // mirror hiển thị ở showBatchFilterOrder (yêu cầu người dùng 2026-09-26).
   const flFp = f.finished_product_id ? finishedProducts.find(x => x.finished_product_id === f.finished_product_id) : null;
@@ -3974,7 +3983,7 @@ async function showBatchFilterLot(filterLotId) {
       <dt>Sản phẩm</dt><dd>${flFp ? esc(flFp.code) + " — " + esc(flFp.name) : "(Mọi sản phẩm)"}</dd>
       <dt>V dịch nha (hl)</dt><dd>${f.v_dich_hl}</dd>
       <dt>Nước bài khí/DAW (hl)</dt><dd>${f.nuoc_bai_khi_hl}</dd>
-      <dt>Tồn/Tổng (V Bia)</dt><dd>${f.on_hand} / ${f.volume_hl} hl</dd>
+      <dt>Tồn/Tổng (V Bia)</dt><dd>${fmtHl(f.on_hand)} / ${fmtHl(f.volume_hl)} hl</dd>
       <dt>Tank thành phẩm</dt><dd>${esc(f.to_bbt || "—")}</dd>
       <dt>Kết thúc</dt><dd class="muted">${f.ended_at ? fmt(f.ended_at) : "chưa kết thúc hết mẻ lọc"}</dd>
       ${f.used_for_refilter ? `<dt>Đã lọc lại thành</dt><dd><a href="#" id="fl_gotorefilter" style="color:var(--accent2)">${esc(f.refilter_target_filter_lot_code || "—")}</a>${f.refilter_target_bbt ? ` — vào tank <code class="k">${esc(f.refilter_target_bbt)}</code>` : ""}</dd>` : ""}
@@ -4546,7 +4555,10 @@ async function showBatchPackLot(packLotId) {
   const [p, finishedProducts, unitTypes, matUsage, lots, materials] = await Promise.all([
     GET(`/batch-pack-lots/${packLotId}`), GET("/finished-products").catch(() => []),
     GET("/unit-types").catch(() => []), GET(`/batch-pack-lots/${packLotId}/materials`),
-    GET("/lots"), GET("/materials")]);
+    // Lọc theo location (Kho phân xưởng) thay vì GET("/lots") không filter — cùng lý do đã ghi ở
+    // showBatchFilterLot (bug thực tế 2026-11-12: vật tư còn tồn thật nhưng lô cũ rớt trang 500).
+    GET("/lots?location=" + encodeURIComponent("Kho phân xưởng") + "&limit=900"),
+    GET("/materials")]);
   // Trang "Danh sách lô thành phẩm" hiện danh sách + chi tiết CÙNG 1 màn (master-detail) — dòng
   // trong bảng danh sách chỉ dựng 1 LẦN lúc vào trang, không tự cập nhật khi thao tác (Lưu SL,
   // Lưu SL theo ca, Duyệt nhập kho TP...) làm đổi dữ liệu ngay trong panel chi tiết bên cạnh, nên
@@ -5245,8 +5257,11 @@ async function openPackLotEBR(packLotId) {
 
 // ================= QUALITY =================
 VIEWS.quality = async function () {
-  const [results, devs, batches, lots, materials, qcParams, holdHistory, pendingStageQc, capas, matLocsQuality, pendingKcPxQuality, pendingSngQuality, batchTanksQuality, batchFilterLotsQuality, batchPackLotsQuality, productsQuality, beerTypesQuality, workOrdersQuality] = await Promise.all([
-    GET("/quality/results"), GET("/quality/deviations"), GET("/batches"), GET("/lots"), GET("/materials"),
+  const [results, devs, batches, lots, onHoldLots, materials, qcParams, holdHistory, pendingStageQc, capas, matLocsQuality, pendingKcPxQuality, pendingSngQuality, batchTanksQuality, batchFilterLotsQuality, batchPackLotsQuality, productsQuality, beerTypesQuality, workOrdersQuality] = await Promise.all([
+    GET("/quality/results"), GET("/quality/deviations"), GET("/batches"), GET("/lots"),
+    // Hàng "chờ KCS duyệt" PHẢI đầy đủ, không phụ thuộc trang 500 lô mới nhất toàn nhà máy — lọc
+    // thẳng status=on_hold (xem GET /api/lots) để lô cũ bị giữ QC không lọt khỏi hàng chờ duyệt.
+    GET("/lots?status=on_hold&limit=900").catch(() => []), GET("/materials"),
     GET("/qc/parameters?active_only=false").catch(() => []),
     GET("/audit?action=hold,release&limit=100").catch(() => []),
     GET("/quality/pending-stage-qc").catch(() => []),
@@ -5285,7 +5300,10 @@ VIEWS.quality = async function () {
   // tại để thấy ngay công đoạn nào đang bị giữ. Xem services/quality.py::_STAGE_MODELS.
   const hqLabel = (q) => q === "on_hold" ? " — ĐANG HOLD" : "";
   const batchById = Object.fromEntries(batches.map(b => [b.batch_id, b]));
-  const lotById = Object.fromEntries(lots.map(l => [l.lot_id, l]));
+  // Gộp cả onHoldLots (đầy đủ, không bị cắt trang) vào lotById — tra cứu bên dưới (nghiệp vụ
+  // Điều chuyển/Sang ngang gắn với lô đang on_hold) phải thấy đúng lô dù lô đó cũ hơn 500 lô mới
+  // nhất và đã rớt khỏi `lots`.
+  const lotById = Object.fromEntries([...lots, ...onHoldLots].map(l => [l.lot_id, l]));
   const matById = Object.fromEntries(materials.map(m => [m.material_id, m]));
   const paramByCode = Object.fromEntries(qcParams.map(p => [p.code, p]));
   // Pipeline "Mẻ SX" — tra tên hiển thị cho "Kết quả QC gần đây" (trước đây rơi vào nhánh mặc
@@ -5418,7 +5436,7 @@ VIEWS.quality = async function () {
   // MaterialLot.status=on_hold cho lý do khác (QC mẻ/sản phẩm, không phải chỉ tiêu NVL) nên
   // không có material_id; hiện lẫn vào đây sẽ mở "Khai báo/Duyệt" ra trống trơn (không có chỉ
   // tiêu NVL nào để khai vì required_params_for_material cần material_id) — gây hiểu lầm.
-  const pendingQc = lots.filter(l => l.status === "on_hold" && l.material_id);
+  const pendingQc = onHoldLots.filter(l => l.material_id);
   // "Nghiệp vụ" — vì sao lô này đang HOLD: nếu có đề nghị Điều chuyển CT->PX (transfer-kcpx) hoặc
   // Xuất sang ngang đang "pending" gắn với lô, thì HOLD là do đang chờ KCS duyệt lại để PX nhận
   // hàng (xem create_transfer_kcpx_request/create_sang_ngang ở services/warehouse.py) — hiện rõ
@@ -6382,8 +6400,11 @@ function siblingLocationsHtml(l) {
   const parts = l.sibling_locations.map(s => `${s.quantity} ${esc(l.uom || "")} ở ${esc(s.location || "?")}`);
   return ` <span class="muted" style="font-size:11px">(còn ${parts.join(", ")})</span>`;
 }
-async function lotOptions(db, onlyAvailable) {
-  const [lots, mats] = await Promise.all([GET("/lots"), GET("/materials")]);
+async function lotOptions(db, onlyAvailable, location) {
+  // `location` lọc TRƯỚC khi áp limit/offset ở backend (xem GET /api/lots) — tránh lô cũ của 1
+  // kho cụ thể rớt khỏi 500 dòng mới nhất toàn nhà máy (bug thực tế 2026-11-12).
+  const locQs = location ? `&location=${encodeURIComponent(location)}` : "";
+  const [lots, mats] = await Promise.all([GET(`/lots?limit=900${locQs}`), GET("/materials")]);
   const matById = Object.fromEntries(mats.map(m => [m.material_id, m]));
   return lots.filter(l => l.quantity > 0 && (!onlyAvailable || l.status === "available"))
     .sort((a, b) => new Date(a.created_at) - new Date(b.created_at))   // FIFO: nhập trước hiện trước
@@ -6479,7 +6500,14 @@ function openMaterialLotsModal(matLabel, lots) {
 // tách ra thành hàm dùng chung để mỗi tab tự gọi khi cần, tránh phải viết lại/duy trì 2 nơi.
 async function loadGiaoData() {
   const [lotsAvail, mats, allLots, allRequestsFull, freeIssues, pxRequests, factoryLocationsGiao, factoryTransfers, supplierReturns, suppliers, receiptsRaw, sangNgangRequests, qcReqIdsGiao, matLocsGiao, kcpxRequests] = await Promise.all([
-    lotOptions(null, false), GET("/materials"), GET("/lots"), GET("/warehouse/requests"),
+    // "Xuất tự do"/"Hoàn trả NCC" (dùng lotsAvail) chỉ thao tác lô Kho công ty — lọc hẳn
+    // location="Kho công ty" (xem comment module ở trên). "allLots" thì KHÔNG lọc theo kho vì
+    // còn dùng chung cho workshopLotOpts (lô Kho phân xưởng, bên dưới) — chỉ nâng limit lên mức
+    // trần 900 để giảm (không loại hẳn) rủi ro lô cũ rớt trang so với GET("/lots") mặc định 500
+    // (bug thực tế 2026-11-12, vật tư 2NP73).
+    lotOptions(null, false, "Kho công ty"),
+    GET("/materials"), GET("/lots?limit=900"),
+    GET("/warehouse/requests"),
     GET("/warehouse/movements?movement_type=issue&mode=tu_do"),
     GET("/warehouse/transfer-px-requests"), GET("/factory-locations").catch(() => []),
     GET("/warehouse/movements?movement_type=issue&mode=dieu_chuyen_nha_may"),
@@ -6964,7 +6992,11 @@ VIEWS.warehouse_kc = async function () {
     // "Xem chỉ tiêu" chỉ hiện khi vật tư có >=1 chỉ tiêu THẬT SỰ (params_only=true) — Nguyên
     // liệu chính/phụ chỉ cần Số lô KCS/Số LOT NCC (không gán chỉ tiêu nào) thì ẩn nút này, vì
     // bấm vào chỉ thấy bảng trống, không có gì để xem (yêu cầu người dùng 2026-09-08).
-    const [allLots, mats, qcReqIds, matLocsKc] = await Promise.all([GET("/lots"), GET("/materials"),
+    // Lọc location="Kho công ty" + limit=900 ngay từ backend (màn này vốn đã tự lọc bỏ lô phân
+    // xưởng ở client — xem rowsAllKc bên dưới) thay vì GET("/lots") không filter, tránh lô cũ
+    // rớt khỏi 500 dòng mới nhất toàn nhà máy (bug thực tế 2026-11-12, vật tư 2NP73).
+    const [allLots, mats, qcReqIds, matLocsKc] = await Promise.all([
+      GET("/lots?location=" + encodeURIComponent("Kho công ty") + "&limit=900"), GET("/materials"),
       GET("/materials/qc-required?params_only=true"), GET("/warehouse/locations").catch(() => [])]);
     const matById = Object.fromEntries(mats.map(m => [m.material_id, m]));
     const qcReqSet = new Set(qcReqIds);
@@ -6998,7 +7030,10 @@ VIEWS.warehouse_kc = async function () {
       </table></div>
     </div>`;
   } else if (sec === "vitri") {
-    const [allLotsVt, matsVt, matLocsVt] = await Promise.all([GET("/lots"), GET("/materials"),
+    // Lọc location="Kho công ty" + limit=900 — màn này cũng tự lọc bỏ lô phân xưởng ở client
+    // ngay dưới đây (WH_CACHE.vtLots), cùng lý do đã sửa ở sec==="kc" phía trên.
+    const [allLotsVt, matsVt, matLocsVt] = await Promise.all([
+      GET("/lots?location=" + encodeURIComponent("Kho công ty") + "&limit=900"), GET("/materials"),
       GET("/warehouse/locations").catch(() => [])]);
     const matByIdVt = Object.fromEntries(matsVt.map(m => [m.material_id, m]));
     WH_CACHE.vtMatById = matByIdVt;
@@ -7516,8 +7551,12 @@ VIEWS.warehouse_px = async function () {
   } else if (sec === "req") {
     body = await renderRequestsSection();
   } else if (sec === "dieuchuyen") {
+    // KHÔNG lọc theo kho — lotByIdPxDc cần tra được CẢ lô Kho công ty (đề nghị "Điều chuyển
+    // CT->PX" tham chiếu lot_id nguồn ở Kho công ty) lẫn lô Kho phân xưởng (workshopLotOpts bên
+    // dưới) — chỉ nâng limit lên trần 900 để giảm rủi ro lô cũ rớt trang so với mặc định 500
+    // (bug thực tế 2026-11-12, vật tư 2NP73).
     const [allLots, mats, pxRequests, kcpxRequestsPx, qcReqIdsKcpx, workshopLocsPx] = await Promise.all([
-      GET("/lots"), GET("/materials"), GET("/warehouse/transfer-px-requests"),
+      GET("/lots?limit=900"), GET("/materials"), GET("/warehouse/transfer-px-requests"),
       GET("/warehouse/transfer-kcpx-requests").catch(() => []), GET("/materials/qc-required").catch(() => []),
       GET("/warehouse/locations").catch(() => [])]);
     const matById = Object.fromEntries(mats.map(m => [m.material_id, m]));
@@ -7633,7 +7672,10 @@ VIEWS.warehouse_px = async function () {
       </table></div>
       </div></div>`;
   } else if (sec === "sangngang") {
-    const [allLots, mats, sangNgangRequestsPx, qcReqIdsPx] = await Promise.all([GET("/lots"), GET("/materials"),
+    // KHÔNG lọc theo kho — lotByIdPx cần tra lot_id của đề nghị "Xuất sang ngang" (luôn là lô
+    // Kho công ty, nguồn chuyển sang phân xưởng) — chỉ nâng limit lên trần 900, cùng lý do đã
+    // sửa ở sec==="dieuchuyen" phía trên.
+    const [allLots, mats, sangNgangRequestsPx, qcReqIdsPx] = await Promise.all([GET("/lots?limit=900"), GET("/materials"),
       GET("/warehouse/sang-ngang"), GET("/materials/qc-required")]);
     const matById = Object.fromEntries(mats.map(m => [m.material_id, m]));
     const lotByIdPx = Object.fromEntries(allLots.map(l => [l.lot_id, l]));
@@ -7700,7 +7742,10 @@ VIEWS.warehouse_px = async function () {
       </table></div>
     </div>`;
   } else if (sec === "tudo") {
-    const [allLots, mats, freeIssuesAll] = await Promise.all([GET("/lots"), GET("/materials"),
+    // Lọc location="Kho phân xưởng" — màn này chỉ dùng lô phân xưởng (workshopLotOpts bên
+    // dưới), cùng lý do đã sửa ở các màn phân xưởng khác (bug thực tế 2026-11-12, vật tư 2NP73).
+    const [allLots, mats, freeIssuesAll] = await Promise.all([
+      GET("/lots?location=" + encodeURIComponent("Kho phân xưởng") + "&limit=900"), GET("/materials"),
       GET("/warehouse/movements?movement_type=issue&mode=tu_do")]);
     const matById = Object.fromEntries(mats.map(m => [m.material_id, m]));
     const isAdminPx = CURRENT_USER && CURRENT_USER.role === "admin";
@@ -7745,7 +7790,10 @@ VIEWS.warehouse_px = async function () {
       </table></div>
     </div>`;
   } else if (sec === "vitri") {
-    const [allLotsVtPx, matsVtPx, wsLocsVtPx] = await Promise.all([GET("/lots"), GET("/materials"),
+    // Lọc location="Kho phân xưởng" — màn này chỉ dùng lô phân xưởng (WH_CACHE.vtLotsPx bên
+    // dưới), cùng lý do đã sửa ở các màn phân xưởng khác (bug thực tế 2026-11-12, vật tư 2NP73).
+    const [allLotsVtPx, matsVtPx, wsLocsVtPx] = await Promise.all([
+      GET("/lots?location=" + encodeURIComponent("Kho phân xưởng") + "&limit=900"), GET("/materials"),
       GET("/warehouse/locations").catch(() => [])]);
     const matByIdVtPx = Object.fromEntries(matsVtPx.map(m => [m.material_id, m]));
     WH_CACHE.vtMatByIdPx = matByIdVtPx;
@@ -8451,6 +8499,25 @@ function fifoOldestLot(materialId, allLots) {
   const candidates = allLots.filter(l => l.material_id === materialId && l.quantity > 0 && !/phân xưởng/i.test(l.location || ""))
     .sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
   return candidates[0] || null;
+}
+// GET("/lots") KHÔNG filter mặc định chỉ trả 500 lô MỚI TẠO GẦN NHẤT toàn nhà máy (xem docstring
+// list_lots ở backend/app/routers/materials.py) — lô bao bì/vỏ lon tạo rất nhanh nên đẩy lô NVL
+// cũ ra khỏi trang, khiến materialAvailableCompanyQty() tính thiếu nếu dùng REQ_CACHE.lots (bug
+// thực tế 2026-11-12, vật tư 2NP73: còn 40kg available thật ở Kho công ty nhưng bị báo tồn=0 vì
+// lô đó rớt khỏi 500 dòng mới nhất). Luôn gọi hàm này (lọc theo đúng material_id cần kiểm tra)
+// ngay trước khi chặn/validate số lượng — KHÔNG dùng REQ_CACHE.lots cho việc này.
+async function fetchCompanyLotsFor(materialIds) {
+  const ids = [...new Set(materialIds)].filter(Boolean);
+  if (!ids.length) return [];
+  return GET("/lots?material_id=" + ids.map(encodeURIComponent).join(","));
+}
+// Gộp lô vừa tải chính xác (fetchCompanyLotsFor) vào REQ_CACHE.lots (theo lot_id) — để các chỗ
+// HIỂN THỊ khác đang đọc REQ_CACHE.lots (cột "Tồn kho công ty thực tế"/"Đang chờ QC duyệt" ở
+// giỏ hàng, badge FIFO) cũng thấy đúng số ngay, không chỉ riêng bước validate vừa chặn/cho qua.
+function mergeLotsIntoCache(freshLots) {
+  const byId = new Map((REQ_CACHE.lots || []).map(l => [l.lot_id, l]));
+  for (const l of freshLots) byId.set(l.lot_id, l);
+  REQ_CACHE.lots = [...byId.values()];
 }
 // Tồn kho THỰC TẾ khả dụng tại Kho công ty của 1 vật tư — chỉ tính lô status "available"/
 // "released" (mirror LotStatus ở backend/app/common.py + services/warehouse.py::material_fifo_detail),
@@ -9241,7 +9308,9 @@ function wireCartPanel() {
     const mat = REQ_CACHE.matById[matId];
     const qty = altUomToBaseQty(mat, parseFloat($("rq_qty").value), $("rq_uom").value);
     if (!qty || qty <= 0) throw new Error("Số lượng phải > 0.");
-    const onHand = materialAvailableCompanyQty(matId, REQ_CACHE.lots);
+    const freshLots = await fetchCompanyLotsFor([matId]);
+    mergeLotsIntoCache(freshLots);
+    const onHand = materialAvailableCompanyQty(matId, freshLots);
     if (qty > onHand) throw new Error(
       `Số lượng đề nghị (${qty}) vượt quá tồn kho CÔNG TY THỰC TẾ (đã trừ hàng đang chờ QC duyệt) của ` +
       `${mat ? mat.code : matId} (${onHand}).`);
@@ -9263,7 +9332,9 @@ function wireCartPanel() {
     const c = REQUEST_CART[i];
     const qty = parseFloat(inp.value);
     if (!qty || qty <= 0) throw new Error("Số lượng phải > 0.");
-    const onHand = materialAvailableCompanyQty(c.material_id, REQ_CACHE.lots);
+    const freshLotsQty = await fetchCompanyLotsFor([c.material_id]);
+    mergeLotsIntoCache(freshLotsQty);
+    const onHand = materialAvailableCompanyQty(c.material_id, freshLotsQty);
     if (qty > onHand) throw new Error(
       `Số lượng (${qty}) vượt quá tồn kho CÔNG TY THỰC TẾ (đã trừ hàng đang chờ QC duyệt) của ${c.material_code} (${onHand}).`);
     c.quantity = qty;
@@ -9276,11 +9347,14 @@ function wireCartPanel() {
     const submitRows = REQUEST_CART.filter(c => c.quantity > 0);
     if (!submitRows.length) throw new Error("Không có dòng nào có số lượng > 0 để gửi đề nghị.");
     // Chặn hẳn (không hỏi lại) nếu SL đang đề nghị vượt quá tồn kho THỰC TẾ (đã trừ hàng đang
-    // chờ QC duyệt) — không cho tạo phiếu xin nhiều hơn số thực sự có thể xuất ngay.
-    const overStockRows = submitRows.filter(c => c.quantity > materialAvailableCompanyQty(c.material_id, REQ_CACHE.lots));
+    // chờ QC duyệt) — không cho tạo phiếu xin nhiều hơn số thực sự có thể xuất ngay. Tải lại lô
+    // theo ĐÚNG các vật tư trong giỏ (không dùng REQ_CACHE.lots bị giới hạn 500 dòng mới nhất).
+    const submitLots = await fetchCompanyLotsFor(submitRows.map(c => c.material_id));
+    mergeLotsIntoCache(submitLots);
+    const overStockRows = submitRows.filter(c => c.quantity > materialAvailableCompanyQty(c.material_id, submitLots));
     if (overStockRows.length) {
       const detail = overStockRows.map(c => `${c.material_code} (cần ${c.quantity}, tồn thực tế ` +
-        `${materialAvailableCompanyQty(c.material_id, REQ_CACHE.lots)} ${c.uom})`).join("; ");
+        `${materialAvailableCompanyQty(c.material_id, submitLots)} ${c.uom})`).join("; ");
       throw new Error(`Không đủ tồn kho công ty thực tế để tạo đề nghị: ${detail}. Giảm số lượng hoặc chờ hàng hết QC.`);
     }
     // Dòng thuộc Nhóm vật tư thay thế mà SL > 0 nhưng còn mã cũ hơn trong nhóm CHƯA dùng hết tồn
@@ -11864,6 +11938,7 @@ VIEWS.reports = async function () {
     { key: "filter", label: "Hệ lọc" }, { key: "filter_utilization", label: "Hiệu suất hệ lọc" },
     { key: "pack_line", label: "Dây chuyền chiết" },
     { key: "brewhouse_steps", label: "Log hệ nấu" }, { key: "brewhouse_cycle", label: "Thời gian cả mẻ nấu" },
+    { key: "tank_rotation", label: "Tank lên men" },
     { key: "pack_by_category", label: "Sản lượng chiết" }, { key: "pack_cumulative", label: "Chiết lũy kế" },
     { key: "brew_volume", label: "Sản lượng nấu" }, { key: "qc_trend", label: "QC theo công đoạn" },
     { key: "fermentation_curve", label: "Đánh giá QTLM theo tank" },
@@ -12238,15 +12313,92 @@ VIEWS.reports = async function () {
     </div>
     <div class="panel" style="margin-top:14px">
       <h2>Năng suất lý thuyết <span class="muted">(theo từng mẻ)</span></h2>
-      <div class="muted" style="margin-bottom:8px">Mỗi dòng = 1 mẻ ĐÃ XONG (bỏ qua mẻ còn đang chạy dở hoặc bị gián đoạn ghi log — xem bảng trên) — riêng Nồi gạo giữ nguyên thời gian (dùng chung 1 thiết bị cho cả 2 dây), các nồi còn lại chia đôi thời gian (mỗi nồi có 2 thiết bị, 1/dây, chạy xen kẽ). "Số mẻ đạt được/ngày" = 24 giờ × 60 phút / số phút lớn nhất trong các nồi (nút thắt cổ chai). Bộ lọc "Loại bia" ở trên áp dụng cho CẢ bảng này.</div>
+      <div class="muted" style="margin-bottom:8px">Mỗi dòng = 1 mẻ ĐÃ XONG (bỏ qua mẻ còn đang chạy dở/thiếu dữ liệu — xem bảng trên; mẻ bị gián đoạn ghi log VẪN tính, kèm ghi chú ở cột cuối) — riêng Nồi gạo giữ nguyên thời gian (dùng chung 1 thiết bị cho cả 2 dây), các nồi còn lại chia đôi thời gian (mỗi nồi có 2 thiết bị, 1/dây, chạy xen kẽ). "Số mẻ đạt được/ngày" = 24 giờ × 60 phút / số phút lớn nhất trong các nồi (nút thắt cổ chai). Bộ lọc "Loại bia" ở trên áp dụng cho CẢ bảng này.</div>
       <div class="tablewrap"><table id="t_bcthrpt">
-        <thead><tr><th>Mẻ</th><th>Loại bia</th>${bcRoles.map(r => `<th>${esc(r)}</th>`).join("")}<th>Số mẻ đạt được/ngày</th></tr></thead>
+        <thead><tr><th>Mẻ</th><th>Loại bia</th>${bcRoles.map(r => `<th>${esc(r)}</th>`).join("")}<th>Số mẻ đạt được/ngày</th><th>Ghi chú</th></tr></thead>
         <tbody>${bcThrpt.map(p => `<tr>
           <td><code class="k">${esc(p.batch.ba_order_no || "—")}/${esc(p.batch.ba_batch_no || "—")}</code></td>
           <td class="muted">${esc(p.batch.beer_type_name || "—")}</td>
           ${p.vessels.map(v => `<td>${fmtMin2(v.adj_minutes)}</td>`).join("")}
-          <td><b>${p.batches_per_day != null ? p.batches_per_day.toLocaleString("vi-VN") : "—"}</b></td></tr>`).join("") ||
-          `<tr><td colspan=${3 + bcRoles.length} class="muted">Cần ít nhất 1 mẻ đã có dữ liệu.</td></tr>`}</tbody>
+          <td><b>${p.batches_per_day != null ? p.batches_per_day.toLocaleString("vi-VN") : "—"}</b></td>
+          <td>${p.data_gap_note ? statusBadge("held", p.data_gap_note) : ""}</td></tr>`).join("") ||
+          `<tr><td colspan=${4 + bcRoles.length} class="muted">Cần ít nhất 1 mẻ đã có dữ liệu.</td></tr>`}</tbody>
+      </table></div>
+    </div>`;
+  } else if (sec === "tank_rotation") {
+    // BC "Tank lên men" (quay vòng) — yêu cầu người dùng 2026-11-12: "Làm cho tôi 1 báo cáo về
+    // tank lên men như file excel bạn làm, tank lên men thể hiện cả dung tích nhé" (tiếp nối
+    // hội thoại tính tay/Excel về "ngày vào dịch" đã trừ 78 phút + quay vòng tank). Bộ lọc "Từ
+    // ngày - đến ngày" (yêu cầu người dùng 2026-11-12: "Thêm lọc cho tank lên men từ ngày đến
+    // ngày") lọc theo Ngày vào dịch — mặc định KHÔNG lọc (hiện snapshot/lịch sử toàn bộ).
+    const trMode = SUB.reports_tr_mode === "range" ? "range" : "all";
+    const trHasFilter = trMode === "range" && !!(SUB.reports_tr_date_from && SUB.reports_tr_date_to);
+    const trToday = new Date(); const trFrom30 = new Date(); trFrom30.setDate(trToday.getDate() - 30);
+    const trDateFrom = SUB.reports_tr_date_from || toISODateLocal(trFrom30);
+    const trDateTo = SUB.reports_tr_date_to || toISODateLocal(trToday);
+    const trQs = trHasFilter ? `date_from=${trDateFrom}&date_to=${trDateTo}` : "";
+    const trRep = await GET(`/reports/tank-rotation${trQs ? "?" + trQs : ""}`);
+    const trCurrent = trRep.current || [];
+    const trSummaryByTank = Object.fromEntries((trRep.tank_summaries || []).map(s => [s.tank_lm, s]));
+    const trCycles = trRep.cycles || [];
+    const trOverall = trRep.summary;
+    const fmtDays = (d) => d == null ? "—" : d.toLocaleString("vi-VN", { maximumFractionDigits: 2 }) + " ngày";
+    body = `<div class="panel"><h2>Tank lên men <span class="muted">(${trCurrent.length} tank)</span></h2>
+      <div class="muted" style="margin-bottom:8px">Mỗi tank 1 dòng = lô/trạng thái GẦN NHẤT (tank đang "hiện có" trong kỳ đã chọn). "Ngày vào dịch" = giờ kết thúc mẻ nấu đầu tiên (sớm nhất trong các mẻ gộp vào tank) trừ 78 phút (TB thời gian chuyển dịch từ lắng xoáy sang tank, đo thực tế 127 mẻ). "Dung tích"/"Dung tích khả dụng" lấy từ Danh mục "Tank lên men".</div>
+      <div class="row">
+        <div class="field"><label>Lọc theo Ngày vào dịch</label><select id="rtr_filter_mode">
+          <option value="all" ${trMode === "all" ? "selected" : ""}>Tất cả (không lọc)</option>
+          <option value="range" ${trMode === "range" ? "selected" : ""}>Từ ngày - đến ngày</option>
+        </select></div>
+        ${trMode === "range" ? `
+        <div class="field"><label>Từ ngày</label><input id="rtr_date_from" type="date" value="${trDateFrom}"/></div>
+        <div class="field"><label>Đến ngày</label><input id="rtr_date_to" type="date" value="${trDateTo}"/></div>
+        <button class="btn" id="rtr_apply" style="align-self:flex-end">Xem</button>` : ""}
+      </div>
+      ${trOverall ? `<div class="cards" style="grid-template-columns:repeat(5,1fr);margin:12px 0">
+        <div class="card"><div class="n">${trOverall.count}</div><div class="l">Tổng lượt quay vòng</div></div>
+        <div class="card"><div class="n">${fmtDays(trOverall.avg)}</div><div class="l">Trung bình</div></div>
+        <div class="card"><div class="n">${fmtDays(trOverall.median)}</div><div class="l">Trung vị</div></div>
+        <div class="card"><div class="n">${fmtDays(trOverall.min)}</div><div class="l">Nhỏ nhất</div></div>
+        <div class="card"><div class="n">${fmtDays(trOverall.max)}</div><div class="l">Lớn nhất</div></div>
+      </div>` : '<div class="muted" style="margin:12px 0">Chưa có đủ dữ liệu để tính quay vòng (cần ít nhất 2 lượt vào dịch của cùng 1 tank trong kỳ đã chọn).</div>'}
+      <input class="searchbox" data-tbl="t_trcurrent" placeholder="Tìm theo tank, lô, dịch bia, trạng thái..."/>
+      <div class="tablewrap"><table id="t_trcurrent">
+        <thead><tr><th>Tank</th><th>Lô hiện tại</th><th>Dịch bia</th><th>Loại bia</th><th>Trạng thái</th>
+          <th>Tồn/Tổng (hl)</th><th>Dung tích (hl)</th><th>Dung tích khả dụng (hl)</th>
+          <th>Ngày vào dịch</th><th>Ngày KT vào dịch</th><th>Số ngày đã lên men</th><th>Ngày dự kiến đủ tuổi</th>
+          <th>Quay vòng gần nhất</th><th>Tổng số lần quay vòng</th><th>TB mỗi lần</th><th>Nhỏ nhất</th><th>Lớn nhất</th>
+          <th>Chất lượng</th></tr></thead>
+        <tbody>${trCurrent.map(t => {
+          const s = trSummaryByTank[t.tank_lm] || {};
+          return `<tr>
+          <td><b>${esc(t.tank_lm) || "—"}</b></td><td><code class="k">${esc(t.tank_code)}</code></td>
+          <td>${esc(t.product_name || "—")}</td><td class="muted">${esc(t.beer_type_name || "—")}</td>
+          <td>${statusBadge(TANK_BADGE_CLASS[t.status], t.status_label)}</td>
+          <td>${fmtHl(t.on_hand)} / ${fmtHl(t.volume_hl)}</td>
+          <td class="muted">${t.capacity_hl != null ? fmtHl(t.capacity_hl) : "—"}</td>
+          <td class="muted">${t.capacity_usable_hl != null ? fmtHl(t.capacity_usable_hl) + (t.capacity_usable_pct != null ? ` (${t.capacity_usable_pct}%)` : "") : "—"}</td>
+          <td class="muted">${t.vao_dich_start ? fmt(t.vao_dich_start) : "—"}</td>
+          <td class="muted">${t.vao_dich_end ? fmt(t.vao_dich_end) : "—"}</td>
+          <td>${t.days_elapsed ?? "—"}</td>
+          <td class="muted">${t.ready_date ? fmt(t.ready_date) : "—"}</td>
+          <td>${fmtDays(t.last_cycle_days)}</td>
+          <td>${s.cycle_count ?? 0}</td>
+          <td class="muted">${fmtDays(s.avg_days)}</td><td class="muted">${fmtDays(s.min_days)}</td><td class="muted">${fmtDays(s.max_days)}</td>
+          <td>${badge(t.quality_status)}</td></tr>`;
+        }).join("") || '<tr><td colspan=17 class="muted">Chưa có tank nào.</td></tr>'}</tbody>
+      </table></div>
+      <h3 style="margin-top:16px">Chi tiết quay vòng <span class="muted">(${trCycles.length} lần)</span></h3>
+      <input class="searchbox" data-tbl="t_trcycles" placeholder="Tìm theo tank, lô..."/>
+      <div class="tablewrap"><table id="t_trcycles">
+        <thead><tr><th>Tank</th><th>Lần số</th><th>Lô (lượt này)</th><th>Ngày vào dịch (lượt này)</th>
+          <th>Lô (lượt kế tiếp)</th><th>Ngày vào dịch (lượt kế tiếp)</th><th>Số ngày quay vòng</th></tr></thead>
+        <tbody>${trCycles.map(c => `<tr>
+          <td><b>${esc(c.tank_lm)}</b></td><td>${c.cycle_no}</td>
+          <td><code class="k">${esc(c.from_tank_code)}</code></td><td class="muted">${fmt(c.from_vao_dich)}</td>
+          <td><code class="k">${esc(c.to_tank_code)}</code></td><td class="muted">${fmt(c.to_vao_dich)}</td>
+          <td><b>${fmtDays(c.days)}</b></td></tr>`).join("") ||
+          '<tr><td colspan=7 class="muted">Chưa có lần quay vòng nào (cần ≥2 lượt vào dịch cùng 1 tank).</td></tr>'}</tbody>
       </table></div>
     </div>`;
   } else if (sec === "pack_by_category") {
@@ -12597,6 +12749,24 @@ VIEWS.reports = async function () {
       render("reports");
     };
   }
+  if (sec === "tank_rotation") {
+    wirePaginate("t_trcurrent", 25); wirePaginate("t_trcycles", 25);
+    $("rtr_filter_mode").onchange = () => {
+      SUB.reports_tr_mode = $("rtr_filter_mode").value;
+      if (SUB.reports_tr_mode === "all") {
+        SUB.reports_tr_date_from = null; SUB.reports_tr_date_to = null;
+      }
+      render("reports");
+    };
+    const rtrApply = $("rtr_apply");
+    if (rtrApply) {
+      rtrApply.onclick = () => {
+        SUB.reports_tr_date_from = $("rtr_date_from").value;
+        SUB.reports_tr_date_to = $("rtr_date_to").value;
+        render("reports");
+      };
+    }
+  }
   if (sec === "filling") {
     $("fp_mode").onchange = () => {
       const isMonth = $("fp_mode").value === "month";
@@ -12708,7 +12878,7 @@ VIEWS.reports = async function () {
         $("rfc_box").innerHTML = `
           <dl class="detail">
             <dt>Trạng thái</dt><dd>${statusBadge(TANK_BADGE_CLASS[t.status], t.status_label)}</dd>
-            <dt>Tồn/Tổng</dt><dd>${t.on_hand} / ${t.volume_hl} hl</dd>
+            <dt>Tồn/Tổng</dt><dd>${fmtHl(t.on_hand)} / ${fmtHl(t.volume_hl)} hl</dd>
             <dt>Ngày bắt đầu vào dịch</dt><dd>${t.vao_dich_start ? fmt(t.vao_dich_start) : "—"}</dd>
             <dt>Ngày kết thúc vào dịch</dt><dd>${t.vao_dich_end ? fmt(t.vao_dich_end) : '<span class="muted">chưa xong</span>'}</dd>
           </dl>

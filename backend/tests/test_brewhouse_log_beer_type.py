@@ -150,6 +150,55 @@ def test_brew_cycle_report_beer_type_and_throughput_filter(_seeded):
     assert len(rep_nomatch["throughput"]) == 0
 
 
+def test_brew_cycle_report_still_counts_data_gap_batches_with_note(_seeded):
+    """yêu cầu người dùng 2026-11-12: "Bổ sung thêm tính cả mẻ bị gián đoạn log, thêm 1 ghi chú
+    vào phí sau cùng là mẻ bị gián đoạn log tại nồi nào" — mẻ có 1 nồi bị data_gap=True VẪN phải
+    tính được batches_per_day (không còn bị loại thẳng như trước 2026-11-01), kèm data_gap_note
+    nêu đúng tên nồi bị gián đoạn. Mẻ khác có nồi CÒN ĐANG CHẠY DỞ (still_running, không có
+    data_gap) thì VẪN phải bị loại (không có số thật để tính) — không phá vỡ hành vi cũ đó."""
+    db = SessionLocal()
+    t0 = datetime(2030, 4, 10, 1, 0, tzinfo=timezone.utc)
+    try:
+        cursor = t0
+        for eq_id, name, minutes, gap in [
+            (1, "Nồi gạo", 30, False), (2, "Nồi malt 1", 40, False), (3, "Nồi lọc 1", 50, True),
+            (4, "Nồi trung gian 1", 10, False), (5, "Nồi sôi hoa 1", 60, False),
+            (6, "Nồi lắng xoáy 1", 20, False),
+        ]:
+            end = cursor + timedelta(minutes=minutes)
+            _add_row(db, eq_id, name, 2030, "RECTEST4", "B4", None, cursor, end, data_gap=gap)
+            cursor = end
+
+        # Me B5: 1 noi CON DANG CHAY DO (ended_at=None, khong data_gap) -> van phai bi loai.
+        cursor = t0
+        for eq_id, name, minutes in [
+            (1, "Nồi gạo", 30), (2, "Nồi malt 1", 40), (3, "Nồi lọc 1", 50),
+            (4, "Nồi trung gian 1", 10), (5, "Nồi sôi hoa 1", 60),
+        ]:
+            end = cursor + timedelta(minutes=minutes)
+            _add_row(db, eq_id, name, 2030, "RECTEST4", "B5", None, cursor, end)
+            cursor = end
+        _add_row(db, 6, "Nồi lắng xoáy 1", 2030, "RECTEST4", "B5", None, cursor, None)
+        db.commit()
+    finally:
+        db.close()
+
+    db2 = SessionLocal()
+    try:
+        rep = bl_svc.brew_cycle_report(db2, ba_year=2030, ba_order_no="RECTEST4")
+    finally:
+        db2.close()
+
+    tp_by_batch = {t["batch"]["ba_batch_no"]: t for t in rep["throughput"]}
+    b4 = tp_by_batch["B4"]
+    assert b4["batches_per_day"] is not None
+    assert b4["data_gap_note"] == "Gián đoạn ghi log tại: Nồi lọc"
+
+    b5 = tp_by_batch["B5"]
+    assert b5["batches_per_day"] is None
+    assert b5["data_gap_note"] is None
+
+
 def test_open_step_captures_ba_rec_no_from_status():
     """_open_step() phai luu ba_rec_no tu status dict (brewhouse_external._row_to_status() dang
     tra ve) vao cot rieng cua BrewhouseStepLog, khong chi trong JSON snapshot."""
