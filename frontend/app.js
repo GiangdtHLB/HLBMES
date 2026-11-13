@@ -11942,8 +11942,8 @@ function packLineGanttSvg(report) {
 // yêu cầu người dùng 2026-11-13. Chỉ có dữ liệu từ lúc tác vụ ghi log (services/filling_log.py)
 // được bật trên server, không có lịch sử trước đó (người dùng đã xác nhận chấp nhận phạm vi
 // này). 1 lane duy nhất (chỉ 1 máy), mirror cấu trúc vẽ của packLineGanttSvg.
-const FILLING_STATUS_COLOR = { 1: "#3498db", 2: "#e67e22" };
-const FILLING_STATUS_LABEL = { 1: "Đang chiết", 2: "Đang CIP máy" };
+const FILLING_STATUS_COLOR = { 1: "#3498db", 2: "#e67e22", 3: "#7f8c8d" };
+const FILLING_STATUS_LABEL = { 1: "Đang chiết", 2: "Đang CIP máy", 3: "Máy dừng" };
 function fillingStatusGanttSvg(report) {
   const segments = report.segments || [];
   const from = report.from ? new Date(report.from).getTime() : 0;
@@ -12174,7 +12174,7 @@ VIEWS.reports = async function () {
     const fsDateFrom = SUB.reports_fs_date_from || toISODateLocal(fsFrom30);
     const fsDateTo = SUB.reports_fs_date_to || toISODateLocal(fsToday);
     const fsQs = fsPeriodMode === "custom" ? `date_from=${fsDateFrom}&date_to=${fsDateTo}` : `days=${fsDays}`;
-    const fsRep = await GET(`/reports/filling-status-log?${fsQs}`).catch(() => ({ segments: [], running_hours: 0, cip_hours: 0 }));
+    const fsRep = await GET(`/reports/filling-status-log?${fsQs}`).catch(() => ({ segments: [], running_hours: 0, cip_hours: 0, stopped_hours: 0 }));
     body = `<div class="panel"><h2>BC dây chuyền chiết <span class="muted">(${plLines.length} dây chuyền)</span></h2>
       <div class="muted" style="margin-bottom:8px">Mỗi thanh trên biểu đồ = 1 ca chiết ĐÃ xác nhận xong (đủ SL + giờ bắt đầu/kết thúc) — khoảng trống giữa các thanh là thời gian KHÔNG chiết. "Số lần chiết" tính theo SỐ LÔ CHIẾT của dây chuyền đó trong kỳ (không theo số ca).</div>
       <div class="row">
@@ -12199,8 +12199,9 @@ VIEWS.reports = async function () {
     </div>
     <div class="panel"><h2>Trạng thái máy chiết 30K theo thời gian</h2>
       <div class="muted" style="margin-bottom:8px">Tự động ghi theo tín hiệu SCADA thật (MachineRunning/Clean_Flushing/RinsReturnGasChannel) —
-        <b>đang chiết</b> (xanh) khi máy chạy và không tráng nước nóng/đuổi CO2, <b>đang CIP máy</b> (cam) khi máy chạy VÀ đang tráng nước
-        nóng hoặc đuổi CO2. Chỉ có dữ liệu từ lúc tính năng này được bật — không có lịch sử trước đó.</div>
+        <b>đang chiết</b> (xanh) khi máy chạy và không tráng nước nóng/đuổi CO2, <b>đang CIP máy</b> (cam) khi đang tráng nước
+        nóng hoặc đuổi CO2 (kể cả khi máy chính không chạy), <b>máy dừng</b> (xám) khi cả 3 tín hiệu trên đều tắt — luôn có đúng 1 trạng thái
+        tại mọi thời điểm nên biểu đồ liền mạch, không có khoảng trống. Chỉ có dữ liệu từ lúc tính năng này được bật — không có lịch sử trước đó.</div>
       <div class="row">
         <div class="field"><label>Kỳ</label>
           <select id="rfs_days"><option value="7">7 ngày gần đây</option>
@@ -12212,13 +12213,15 @@ VIEWS.reports = async function () {
         <div class="field"><label>Đến ngày</label><input id="rfs_to" type="date" value="${fsDateTo}"/></div>
         <button class="btn" id="rfs_apply" style="align-self:flex-end">Xem</button>` : ""}
       </div>
-      <div class="cards" style="grid-template-columns:repeat(2,1fr);margin:12px 0">
+      <div class="cards" style="grid-template-columns:repeat(3,1fr);margin:12px 0">
         <div class="card"><div class="n">${fsRep.running_hours}h</div><div class="l">Tổng thời gian đang chiết</div></div>
         <div class="card"><div class="n">${fsRep.cip_hours}h</div><div class="l">Tổng thời gian đang CIP máy</div></div>
+        <div class="card"><div class="n">${fsRep.stopped_hours ?? 0}h</div><div class="l">Tổng thời gian máy dừng</div></div>
       </div>
       <div style="display:flex;gap:14px;margin-bottom:8px;font-size:12px" class="muted">
         <span><span style="display:inline-block;width:10px;height:10px;background:#3498db;border-radius:2px;margin-right:4px"></span>Đang chiết</span>
         <span><span style="display:inline-block;width:10px;height:10px;background:#e67e22;border-radius:2px;margin-right:4px"></span>Đang CIP máy</span>
+        <span><span style="display:inline-block;width:10px;height:10px;background:#7f8c8d;border-radius:2px;margin-right:4px"></span>Máy dừng</span>
       </div>
       <div id="rfs_gantt">${fillingStatusGanttSvg(fsRep)}</div>
     </div>`;

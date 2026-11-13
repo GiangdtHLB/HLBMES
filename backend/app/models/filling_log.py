@@ -23,11 +23,12 @@ class FillingStatusLog(Base):
     services/filling_log.py::process_tick(). ended_at=NULL nghĩa là đang ở trạng thái đó (dòng
     đang mở, tối đa 1 dòng mở cho máy này).
 
-    status: 2 nếu MachineRunning=true VÀ (Clean_Flushing=true HOẶC RinsReturnGasChannel=true)
-    ("Đang CIP máy" — yêu cầu người dùng 2026-11-13); 1 nếu MachineRunning=true và cả 2 cờ trên
-    đều false ("đang chiết" bình thường). MachineRunning=false (máy dừng hẳn) KHÔNG mở dòng nào
-    — khoảng trống giữa các dòng trên biểu đồ chính là "không chiết", mirror quy ước đã có ở BC
-    "Dây chuyền chiết" (pack_line_gantt_report)."""
+    status: 2 nếu (Clean_Flushing=true HOẶC RinsReturnGasChannel=true) — "Đang CIP máy" (tính
+    TRƯỚC machine_running, vì CIP có thể chạy độc lập ngoài giờ chiết); 1 nếu MachineRunning=true
+    và cả 2 cờ CIP đều false ("đang chiết" bình thường); 3 nếu cả 3 cờ đều false ("máy dừng hẳn")
+    — yêu cầu người dùng 2026-11-13, bổ sung cùng ngày ("các khe hở phải liền mạch") để LUÔN có
+    đúng 1 trạng thái tại mọi thời điểm, không còn khoảng trống trên biểu đồ như khi chỉ có 2
+    trạng thái 1/2 (lúc đó máy dừng không mở dòng nào)."""
 
     __tablename__ = "filling_status_log"
 

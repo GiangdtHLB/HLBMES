@@ -1,22 +1,27 @@
-"""Tự động ghi log trạng thái máy chiết lon 30K (đang chiết thường / đang CIP) vào CSDL CỦA
+"""Tự động ghi log trạng thái máy chiết lon 30K (đang chiết / đang CIP / máy dừng) vào CSDL CỦA
 PHẦN MỀM — khác filling_external.py (chỉ ĐỌC CSDL SCADA ngoài, không ghi gì). Phục vụ biểu đồ
 "Trạng thái máy chiết 30K theo thời gian" (thêm, KHÔNG thay, biểu đồ "BC dây chuyền chiết" hiện
 có — vẫn giữ nguyên theo ca xác nhận từ BatchPackLot) — yêu cầu người dùng 2026-11-13:
     "cách tính máy chạy running và (Tráng nước nóng hoặc Đuổi CO2 đang chạy) thì là Đang CIP
     máy, trạng thái bằng 2, Nếu chỉ có trạng thái máy đang Running và (Tráng nước nóng và Đuổi
     CO2 đang dừng) thì trạng thái máy là 1 ... trên biểu đồ dây chuyền 30k thể hiện như vậy."
+    Bổ sung 2026-11-13 (sau khi xem demo thấy có khoảng trống giữa các thanh): "các khe hở phải
+    liền mạch, nếu Trạng thái máy là dừng và cả đuổi CO2 và đuổi nước nóng đều dừng thì là trạng
+    thái 3, máy dừng, để 1 màu khác" — LUÔN có đúng 1 trạng thái tại mọi thời điểm (1/2/3, xem
+    _status_of()), không còn "không trạng thái nào" nữa, nên biểu đồ không còn khoảng trống (trừ
+    lúc data_gap thật — tác vụ nền treo/mất kết nối SCADA, lúc đó không log được gì nên đành vẫn
+    có khoảng trống, nhưng đây là tình huống hiếm và biểu thị đúng bản chất "không có số liệu").
 
 Cơ chế — mirror chính xác brewhouse_log.py (xem đó để biết lý do từng quyết định: chạy qua
 asyncio.to_thread, bắt lỗi tại _tick_once, tự khởi động lại qua run_poll_loop_supervised, đánh
 dấu data_gap cho dòng còn mở lúc khởi động...), nhưng ĐƠN GIẢN HƠN vì chỉ có 1 "thiết bị" (máy
 chiết 30K), không cần vòng lặp nhiều equipment_id/theo dõi oder-batch-year-step:
-- MachineRunning=false (máy dừng hẳn) -> ĐÓNG dòng đang mở nếu có, không mở dòng mới (khoảng
-  trống giữa các dòng trên biểu đồ = "không chiết", mirror quy ước đã có ở pack_line_gantt_report).
-- MachineRunning=true, status (1 hoặc 2, xem _status_of()) ĐỔI so với dòng đang mở (hoặc chưa có
-  dòng mở): ĐÓNG dòng cũ (nếu có) RỒI MỞ dòng mới cho status hiện tại.
-- MachineRunning=true, status KHÔNG đổi: bỏ qua (giữa chừng, chưa có gì để log).
-- Không đọc được SCADA (available=False/lỗi kết nối): bỏ qua tick đó (KHÔNG coi là dừng máy) —
-  tránh đóng/mở log sai do mất kết nối SCADA tạm thời.
+- status (1/2/3, xem _status_of()) ĐỔI so với dòng đang mở (hoặc chưa có dòng mở): ĐÓNG dòng cũ
+  (nếu có) RỒI MỞ dòng mới cho status hiện tại — LUÔN mở 1 dòng mới ngay, không còn nhánh "đóng
+  mà không mở" (đó là nguyên nhân gây khoảng trống trước khi có trạng thái 3).
+- status KHÔNG đổi: bỏ qua (giữa chừng, chưa có gì để log).
+- Không đọc được SCADA (available=False/lỗi kết nối): bỏ qua tick đó (KHÔNG coi là trạng thái gì
+  cả) — tránh đóng/mở log sai do mất kết nối SCADA tạm thời.
 """
 
 from __future__ import annotations
@@ -42,18 +47,21 @@ GAP_THRESHOLD_SECONDS = max(POLL_INTERVAL_SECONDS * 10, 120)  # mirror brewhouse
 
 STATUS_RUNNING = 1  # đang chiết bình thường
 STATUS_CIP = 2  # đang CIP máy (tráng nước nóng hoặc đuổi CO2)
+STATUS_STOPPED = 3  # máy dừng hẳn (không chiết, không CIP)
 
 _last_tick_ok_at: Optional[datetime] = None
 
 
-def _status_of(status: dict) -> Optional[int]:
-    """None nếu máy dừng hẳn (không mở dòng log nào) — 1/2 nếu đang chạy, theo đúng quy ước
-    người dùng 2026-11-13 (xem docstring module)."""
-    if not status.get("machine_running"):
-        return None
+def _status_of(status: dict) -> int:
+    """LUÔN trả về 1/2/3 (không còn None) — yêu cầu người dùng 2026-11-13 ("các khe hở phải
+    liền mạch"): CIP (tráng nước nóng/đuổi CO2) được tính kể cả khi máy chính KHÔNG chạy (vd CIP
+    độc lập ngoài giờ chiết) nên kiểm tra CIP TRƯỚC machine_running. Chỉ khi cả 3 cờ đều tắt mới
+    là "máy dừng" (trạng thái 3)."""
     if status.get("clean_flushing") or status.get("rins_return_gas_channel"):
         return STATUS_CIP
-    return STATUS_RUNNING
+    if status.get("machine_running"):
+        return STATUS_RUNNING
+    return STATUS_STOPPED
 
 
 def _get_open_row(db: Session) -> Optional[FillingStatusLog]:
@@ -89,11 +97,6 @@ def process_tick(db: Session, status: dict, gap_seconds: float = 0.0) -> None:
     is_gap = gap_seconds > GAP_THRESHOLD_SECONDS
     open_row = _get_open_row(db)
     new_status = _status_of(status)
-
-    if new_status is None:
-        if open_row is not None:
-            _close_row(open_row, now, data_gap=is_gap)
-        return
 
     if open_row is None:
         db.add(_open_row(status, new_status, now, data_gap=is_gap))
@@ -200,20 +203,6 @@ async def run_poll_loop_supervised(interval_seconds: int = POLL_INTERVAL_SECONDS
             await asyncio.sleep(interval_seconds)
 
 
-def _row_to_out(row: FillingStatusLog) -> dict:
-    return {
-        "log_id": row.log_id,
-        "status": row.status,
-        "machine_running": row.machine_running,
-        "clean_flushing": row.clean_flushing,
-        "rins_return_gas_channel": row.rins_return_gas_channel,
-        "started_at": row.started_at,
-        "ended_at": row.ended_at,
-        "duration_minutes": row.duration_minutes,
-        "data_gap": row.data_gap,
-    }
-
-
 def filling_status_log_report(db: Session, days: int = 30, date_from_str: str = None,
                               date_to_str: str = None) -> dict:
     """BC "Trạng thái máy chiết 30K theo thời gian" — chỉ có dữ liệu TỪ LÚC tác vụ ghi log này
@@ -250,16 +239,16 @@ def filling_status_log_report(db: Session, days: int = 30, date_from_str: str = 
             "still_open": r.ended_at is None,
         })
 
-    running_seconds = sum(
-        (datetime.fromisoformat(s["end_at"]) - datetime.fromisoformat(s["start_at"])).total_seconds()
-        for s in segments if s["status"] == STATUS_RUNNING)
-    cip_seconds = sum(
-        (datetime.fromisoformat(s["end_at"]) - datetime.fromisoformat(s["start_at"])).total_seconds()
-        for s in segments if s["status"] == STATUS_CIP)
+    def _hours(target_status):
+        seconds = sum(
+            (datetime.fromisoformat(s["end_at"]) - datetime.fromisoformat(s["start_at"])).total_seconds()
+            for s in segments if s["status"] == target_status)
+        return round(seconds / 3600, 1)
 
     return {
         "from": date_from.isoformat(), "to": date_to.isoformat(),
         "segments": segments,
-        "running_hours": round(running_seconds / 3600, 1),
-        "cip_hours": round(cip_seconds / 3600, 1),
+        "running_hours": _hours(STATUS_RUNNING),
+        "cip_hours": _hours(STATUS_CIP),
+        "stopped_hours": _hours(STATUS_STOPPED),
     }
