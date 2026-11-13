@@ -90,10 +90,20 @@ async def lifespan(app: FastAPI):
     # đối chiếu thủ công với Realtime.
     from .services.brewhouse_log import run_poll_loop_supervised
     brewhouse_log_task = asyncio.create_task(run_poll_loop_supervised())
+    # Tác vụ nền ghi log trạng thái máy chiết 30K (1=đang chiết, 2=đang CIP) — yêu cầu người dùng
+    # 2026-11-13, mirror y hệt lý do dùng bản có giám sát/tự khởi động lại ở trên (xem
+    # services/filling_log.py).
+    from .services.filling_log import run_poll_loop_supervised as run_filling_log_supervised
+    filling_log_task = asyncio.create_task(run_filling_log_supervised())
     yield
     brewhouse_log_task.cancel()
+    filling_log_task.cancel()
     try:
         await brewhouse_log_task
+    except asyncio.CancelledError:
+        pass
+    try:
+        await filling_log_task
     except asyncio.CancelledError:
         pass
 

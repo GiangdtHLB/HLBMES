@@ -11911,7 +11911,10 @@ function packLineGanttSvg(report) {
   const from = report.from ? new Date(report.from).getTime() : 0;
   const to = report.to ? new Date(report.to).getTime() : 0;
   if (!lines.length || !from || !to || to <= from) return '<div class="muted">Chưa có dữ liệu chiết theo ca trong kỳ này.</div>';
-  const W = 900, laneH = 30, padL = 150, padT = 26, H = padT + lines.length * laneH + 8, span = to - from;
+  // padL rộng hơn (150->230) để chứa tên đầy đủ dây chuyền (VD "Dây chuyền chiết lon 30k
+  // lon/h") thay vì chỉ mã ngắn "LINE 1" — yêu cầu người dùng 2026-11-13: hiện tên mô tả ngay
+  // trên biểu đồ. Nhãn lấy line_name (Danh mục › Dây chuyền), rơi về mã nếu chưa đặt tên.
+  const W = 900, laneH = 30, padL = 230, padT = 26, H = padT + lines.length * laneH + 8, span = to - from;
   const x = (t) => padL + (new Date(t).getTime() - from) / span * (W - padL - 12);
   const day = 86400000;
   let svg = `<svg viewBox="0 0 ${W} ${H}" width="100%" style="display:block;background:var(--panel2);border-radius:8px">`;
@@ -11922,13 +11925,49 @@ function packLineGanttSvg(report) {
   }
   lines.forEach((l, i) => {
     const y = padT + i * laneH;
-    svg += `<text x="6" y="${y + 18}" fill="var(--text)" font-size="11">${esc(l.line)}</text>
+    const label = l.line_name || l.line;
+    svg += `<text x="6" y="${y + 18}" fill="var(--text)" font-size="11">${esc(label)}<title>${esc(l.line)}</title></text>
       <line x1="${padL}" y1="${y + laneH - 1}" x2="${W - 12}" y2="${y + laneH - 1}" stroke="var(--border)"/>`;
     (l.segments || []).forEach(s => {
       const x1 = x(s.start_at), w = Math.max(x(s.end_at) - x1, 3);
       svg += `<rect x="${x1.toFixed(1)}" y="${y + 4}" width="${w.toFixed(1)}" height="${laneH - 9}" rx="3" fill="#3498db">
-        <title>${esc(l.line)} · ${esc(s.pack_lot_code || "")} · Ca ${s.ca} (${fmt(s.start_at)} → ${fmt(s.end_at)})</title></rect>`;
+        <title>${esc(label)} · ${esc(s.pack_lot_code || "")} · Ca ${s.ca} (${fmt(s.start_at)} → ${fmt(s.end_at)})</title></rect>`;
     });
+  });
+  return svg + "</svg>";
+}
+
+// Biểu đồ "Trạng thái máy chiết 30K theo thời gian" (1=đang chiết xanh, 2=đang CIP cam) — THÊM
+// RIÊNG, không thay biểu đồ "BC dây chuyền chiết" ở trên (vẫn giữ nguyên theo ca xác nhận) —
+// yêu cầu người dùng 2026-11-13. Chỉ có dữ liệu từ lúc tác vụ ghi log (services/filling_log.py)
+// được bật trên server, không có lịch sử trước đó (người dùng đã xác nhận chấp nhận phạm vi
+// này). 1 lane duy nhất (chỉ 1 máy), mirror cấu trúc vẽ của packLineGanttSvg.
+const FILLING_STATUS_COLOR = { 1: "#3498db", 2: "#e67e22" };
+const FILLING_STATUS_LABEL = { 1: "Đang chiết", 2: "Đang CIP máy" };
+function fillingStatusGanttSvg(report) {
+  const segments = report.segments || [];
+  const from = report.from ? new Date(report.from).getTime() : 0;
+  const to = report.to ? new Date(report.to).getTime() : 0;
+  if (!from || !to || to <= from) return '<div class="muted">Chưa có dữ liệu trạng thái máy chiết 30K trong kỳ này.</div>';
+  if (!segments.length) return '<div class="muted">Chưa có dữ liệu trạng thái máy chiết 30K trong kỳ này (tác vụ ghi log mới bật, cần thời gian để tích lũy dữ liệu).</div>';
+  const W = 900, laneH = 34, padL = 90, padT = 26, H = padT + laneH + 8, span = to - from;
+  const x = (t) => padL + (new Date(t).getTime() - from) / span * (W - padL - 12);
+  const day = 86400000;
+  let svg = `<svg viewBox="0 0 ${W} ${H}" width="100%" style="display:block;background:var(--panel2);border-radius:8px">`;
+  for (let t = Math.ceil(from / day) * day; t <= to; t += day) {
+    const xx = x(t);
+    svg += `<line x1="${xx.toFixed(1)}" y1="${padT - 4}" x2="${xx.toFixed(1)}" y2="${H - 4}" stroke="var(--border)" stroke-dasharray="2 3"/>
+      <text x="${(xx + 2).toFixed(1)}" y="14" fill="var(--muted)" font-size="9">${new Date(t).toLocaleDateString("vi-VN", { day: "2-digit", month: "2-digit" })}</text>`;
+  }
+  const y = padT;
+  svg += `<text x="6" y="${y + 20}" fill="var(--text)" font-size="11">Máy chiết 30K</text>
+    <line x1="${padL}" y1="${y + laneH - 1}" x2="${W - 12}" y2="${y + laneH - 1}" stroke="var(--border)"/>`;
+  segments.forEach(s => {
+    const x1 = x(s.start_at), w = Math.max(x(s.end_at) - x1, 3);
+    const fill = FILLING_STATUS_COLOR[s.status] || "#3498db";
+    const label = FILLING_STATUS_LABEL[s.status] || `Trạng thái ${s.status}`;
+    svg += `<rect x="${x1.toFixed(1)}" y="${y + 5}" width="${w.toFixed(1)}" height="${laneH - 11}" rx="3" fill="${fill}">
+      <title>${esc(label)}${s.still_open ? " (đang diễn ra)" : ""} (${fmt(s.start_at)} → ${fmt(s.end_at)})</title></rect>`;
   });
   return svg + "</svg>";
 }
@@ -12129,6 +12168,8 @@ VIEWS.reports = async function () {
     const plLines = plRep.lines || [];
     const fmtDurationH2 = (h) => { const totalMin = Math.round(h * 60);
       return `${Math.floor(totalMin / 60)}h${String(totalMin % 60).padStart(2, "0")}`; };
+    const fsDays = parseInt(SUB.reports_fs_days || 30, 10);
+    const fsRep = await GET(`/reports/filling-status-log?days=${fsDays}`).catch(() => ({ segments: [], running_hours: 0, cip_hours: 0 }));
     body = `<div class="panel"><h2>BC dây chuyền chiết <span class="muted">(${plLines.length} dây chuyền)</span></h2>
       <div class="muted" style="margin-bottom:8px">Mỗi thanh trên biểu đồ = 1 ca chiết ĐÃ xác nhận xong (đủ SL + giờ bắt đầu/kết thúc) — khoảng trống giữa các thanh là thời gian KHÔNG chiết. "Số lần chiết" tính theo SỐ LÔ CHIẾT của dây chuyền đó trong kỳ (không theo số ca).</div>
       <div class="row">
@@ -12150,6 +12191,26 @@ VIEWS.reports = async function () {
           '<tr><td colspan=3 class="muted">Chưa có dây chuyền nào.</td></tr>'}</tbody>
       </table></div>
       <div id="rpl_gantt" style="margin-top:14px">${packLineGanttSvg(plRep)}</div>
+    </div>
+    <div class="panel"><h2>Trạng thái máy chiết 30K theo thời gian</h2>
+      <div class="muted" style="margin-bottom:8px">Tự động ghi theo tín hiệu SCADA thật (MachineRunning/Clean_Flushing/RinsReturnGasChannel) —
+        <b>đang chiết</b> (xanh) khi máy chạy và không tráng nước nóng/đuổi CO2, <b>đang CIP máy</b> (cam) khi máy chạy VÀ đang tráng nước
+        nóng hoặc đuổi CO2. Chỉ có dữ liệu từ lúc tính năng này được bật — không có lịch sử trước đó.</div>
+      <div class="row">
+        <div class="field"><label>Kỳ</label>
+          <select id="rfs_days"><option value="7">7 ngày gần đây</option>
+            <option value="30" ${(SUB.reports_fs_days || 30) == 30 ? "selected" : ""}>30 ngày gần đây</option>
+            <option value="90">90 ngày gần đây</option></select></div>
+      </div>
+      <div class="cards" style="grid-template-columns:repeat(2,1fr);margin:12px 0">
+        <div class="card"><div class="n">${fsRep.running_hours}h</div><div class="l">Tổng thời gian đang chiết</div></div>
+        <div class="card"><div class="n">${fsRep.cip_hours}h</div><div class="l">Tổng thời gian đang CIP máy</div></div>
+      </div>
+      <div style="display:flex;gap:14px;margin-bottom:8px;font-size:12px" class="muted">
+        <span><span style="display:inline-block;width:10px;height:10px;background:#3498db;border-radius:2px;margin-right:4px"></span>Đang chiết</span>
+        <span><span style="display:inline-block;width:10px;height:10px;background:#e67e22;border-radius:2px;margin-right:4px"></span>Đang CIP máy</span>
+      </div>
+      <div id="rfs_gantt">${fillingStatusGanttSvg(fsRep)}</div>
     </div>`;
   } else if (sec === "brewhouse_steps") {
     // BC log hệ nấu — ghi TỰ ĐỘNG khi chuyển bước hoặc về Idle (services/brewhouse_log.py), lọc
@@ -12725,6 +12786,11 @@ VIEWS.reports = async function () {
         render("reports");
       };
     }
+    $("rfs_days").value = String(SUB.reports_fs_days || 30);
+    $("rfs_days").onchange = () => {
+      SUB.reports_fs_days = parseInt($("rfs_days").value, 10);
+      render("reports");
+    };
   }
   if (sec === "brewhouse_steps") {
     wirePaginate("t_bs_summary", 10); wirePaginate("t_bs_detail", 20);
