@@ -11944,13 +11944,23 @@ function packLineGanttSvg(report) {
 // này). 1 lane duy nhất (chỉ 1 máy), mirror cấu trúc vẽ của packLineGanttSvg.
 const FILLING_STATUS_COLOR = { 1: "#3498db", 2: "#e67e22", 3: "#7f8c8d" };
 const FILLING_STATUS_LABEL = { 1: "Đang chiết", 2: "Đang CIP máy", 3: "Máy dừng" };
+// "Xp"/"XhYYp" gọn cho nhãn trên biểu đồ — mirror fmtDurationH2 ở sec==="pack_line" nhưng nhận
+// thẳng số PHÚT (không phải giờ) vì đoạn CIP/dừng thường chỉ vài-vài chục phút.
+function fmtMinShort(totalMinutes) {
+  const m = Math.round(totalMinutes);
+  if (m < 60) return `${m}p`;
+  return `${Math.floor(m / 60)}h${String(m % 60).padStart(2, "0")}`;
+}
 function fillingStatusGanttSvg(report) {
   const segments = report.segments || [];
   const from = report.from ? new Date(report.from).getTime() : 0;
   const to = report.to ? new Date(report.to).getTime() : 0;
   if (!from || !to || to <= from) return '<div class="muted">Chưa có dữ liệu trạng thái máy chiết 30K trong kỳ này.</div>';
   if (!segments.length) return '<div class="muted">Chưa có dữ liệu trạng thái máy chiết 30K trong kỳ này (tác vụ ghi log mới bật, cần thời gian để tích lũy dữ liệu).</div>';
-  const W = 900, laneH = 34, padL = 90, padT = 26, H = padT + laneH + 8, span = to - from;
+  // laneH rộng hơn (34->46) để có chỗ ghi số phút phía TRÊN mỗi đoạn CIP/dừng (status 2/3) —
+  // yêu cầu người dùng 2026-11-13: "hiển thị số phút dừng cho mỗi lần máy dừng hoặc CIP". Đoạn
+  // "đang chiết" (status 1, thường dài hàng giờ) không cần nhãn nên không ghi, đỡ rối biểu đồ.
+  const W = 900, laneH = 46, padL = 90, padT = 26, H = padT + laneH + 8, span = to - from;
   const x = (t) => padL + (new Date(t).getTime() - from) / span * (W - padL - 12);
   const day = 86400000;
   let svg = `<svg viewBox="0 0 ${W} ${H}" width="100%" style="display:block;background:var(--panel2);border-radius:8px">`;
@@ -11960,14 +11970,22 @@ function fillingStatusGanttSvg(report) {
       <text x="${(xx + 2).toFixed(1)}" y="14" fill="var(--muted)" font-size="9">${new Date(t).toLocaleDateString("vi-VN", { day: "2-digit", month: "2-digit" })}</text>`;
   }
   const y = padT;
-  svg += `<text x="6" y="${y + 20}" fill="var(--text)" font-size="11">Máy chiết 30K</text>
+  const barY = y + 17, barH = laneH - 23;
+  svg += `<text x="6" y="${barY + barH / 2 + 4}" fill="var(--text)" font-size="11">Máy chiết 30K</text>
     <line x1="${padL}" y1="${y + laneH - 1}" x2="${W - 12}" y2="${y + laneH - 1}" stroke="var(--border)"/>`;
   segments.forEach(s => {
     const x1 = x(s.start_at), w = Math.max(x(s.end_at) - x1, 3);
     const fill = FILLING_STATUS_COLOR[s.status] || "#3498db";
     const label = FILLING_STATUS_LABEL[s.status] || `Trạng thái ${s.status}`;
-    svg += `<rect x="${x1.toFixed(1)}" y="${y + 5}" width="${w.toFixed(1)}" height="${laneH - 11}" rx="3" fill="${fill}">
-      <title>${esc(label)}${s.still_open ? " (đang diễn ra)" : ""} (${fmt(s.start_at)} → ${fmt(s.end_at)})</title></rect>`;
+    const minutes = (new Date(s.end_at) - new Date(s.start_at)) / 60000;
+    const minLabel = fmtMinShort(minutes);
+    svg += `<rect x="${x1.toFixed(1)}" y="${barY}" width="${w.toFixed(1)}" height="${barH}" rx="3" fill="${fill}">
+      <title>${esc(label)} — ${minLabel}${s.still_open ? " (đang diễn ra)" : ""} (${fmt(s.start_at)} → ${fmt(s.end_at)})</title></rect>`;
+    // Ghi số phút ngay trên đoạn, chỉ cho CIP/dừng (2/3) và chỉ khi đủ rộng để không đè chữ lên
+    // nhau — đoạn hẹp hơn vẫn xem được số phút qua tooltip (title ở trên).
+    if ((s.status === 2 || s.status === 3) && w >= 16) {
+      svg += `<text x="${(x1 + w / 2).toFixed(1)}" y="${barY - 3}" text-anchor="middle" fill="var(--muted)" font-size="8">${minLabel}</text>`;
+    }
   });
   return svg + "</svg>";
 }
