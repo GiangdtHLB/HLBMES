@@ -12151,7 +12151,7 @@ VIEWS.reports = async function () {
     const fmtPct = (p) => p == null ? "—" : p.toLocaleString("vi-VN") + "%";
     const runPct = fuRep.running_pct == null ? 0 : Math.max(0, Math.min(100, fuRep.running_pct));
     body = `<div class="panel"><h2>Hiệu suất hệ lọc theo tháng</h2>
-      <div class="muted" style="margin-bottom:8px">Thời gian lọc = tổng cộng dồn "Tổng thời gian lọc" (giờ bắt đầu → kết thúc) của mọi mẻ lọc kết thúc trong kỳ. Thời gian không lọc = phần còn lại trong tổng giờ lịch của kỳ (số ngày × 24h) — không trừ bớt nếu kỳ đang chạy dở.</div>
+      <div class="muted" style="margin-bottom:8px">Thời gian lọc = tổng cộng dồn "Tổng thời gian lọc" (giờ bắt đầu → kết thúc) của mọi mẻ lọc kết thúc trong kỳ. Thời gian không lọc = phần còn lại trong tổng giờ lịch của kỳ. ${fuRep.in_progress ? "Kỳ đang chạy dở (VD chọn tháng này khi mới qua vài ngày) — tổng giờ/% tính LŨY KẾ đến thời điểm hiện tại, không tính cả phần ngày chưa tới của kỳ." : "Kỳ đã kết thúc hẳn — tính trọn số ngày × 24h."}</div>
       <div class="row">
         <div class="field"><label>Xem theo</label><select id="rfu_mode">
           <option value="month" ${fuMode === "month" ? "selected" : ""}>Theo tháng</option>
@@ -12165,7 +12165,7 @@ VIEWS.reports = async function () {
         <button class="btn" id="rfu_apply" style="align-self:flex-end">Xem</button>
       </div>
       <div class="row" style="margin:12px 0">
-        <div class="field"><label class="muted">Tổng giờ trong kỳ</label><b>${fmtH(fuRep.total_hours)} giờ</b><div class="muted" style="font-size:11px">(${fuRep.days_in_period} ngày × 24h)</div></div>
+        <div class="field"><label class="muted">Tổng giờ trong kỳ</label><b>${fmtH(fuRep.total_hours)} giờ</b><div class="muted" style="font-size:11px">${fuRep.in_progress ? `(${fuRep.days_in_period.toLocaleString("vi-VN")} ngày lũy kế trong kỳ, tính đến ${fmt(fuRep.as_of)})` : `(${fuRep.days_in_period} ngày × 24h)`}</div></div>
         <div class="field"><label class="muted">Thời gian lọc</label><b style="color:var(--green)">${fmtH(fuRep.running_hours)} giờ</b><div class="muted" style="font-size:11px">${fmtPct(fuRep.running_pct)}</div></div>
         <div class="field"><label class="muted">Thời gian không lọc</label><b style="color:var(--red)">${fmtH(fuRep.idle_hours)} giờ</b><div class="muted" style="font-size:11px">${fmtPct(fuRep.idle_pct)}</div></div>
         <div class="field"><label class="muted">Số mẻ lọc trong kỳ</label><b>${fuRep.batch_count.toLocaleString("vi-VN")}</b></div>

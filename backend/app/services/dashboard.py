@@ -623,10 +623,16 @@ def filter_line_utilization_report(db: Session, year: int = None, month: int = N
     mốc loại trừ = đầu ngày VN kế tiếp, mirror filter_production_report). Thiếu cả 2 kỳ -> lỗi
     409 rõ ràng thay vì TypeError khi date(None, None, 1).
 
-    Khung giờ LỊCH dùng để chia % là TRỌN KỲ (số ngày trong kỳ x 24h) — KHÔNG rút ngắn nếu kỳ
-    đang chạy dở (hôm nay) hay ngày cuối chưa có mẻ lọc: phần "chưa chạy" của kỳ đang diễn ra TỰ
-    NHIÊN rơi vào "thời gian không lọc" (đúng bản chất câu hỏi — máy đang rảnh/chưa tới lượt chạy
-    — chứ không phải lỗi dữ liệu).
+    Khung giờ LỊCH dùng để chia % là LŨY KẾ tính đến thời điểm hiện tại nếu kỳ đang chạy dở (đảo
+    lại quyết định cũ 2026-11-11 ở trên — người dùng phản hồi 2026-11-15: "% ở biểu đồ là lũy kế
+    chứ không phải 1 tháng", xem ví dụ thực tế: chọn tháng 11 khi mới ngày 15 mà vẫn chia cho
+    "30 ngày x 24h" làm % trông thấp giả tạo vì tính cả phần ngày CHƯA TỚI của tháng — không phải
+    "máy đang rảnh"). `window_end` (mốc loại trừ TRỌN kỳ) bị CLAMP lại = min(window_end, hiện tại)
+    khi mốc đó rơi vào tương lai — áp dụng CHUNG cho cả 2 kiểu kỳ (month/range, VD "đến ngày" chọn
+    đúng hôm nay cũng bị clamp y hệt, không chỉ riêng "theo tháng"). Kỳ đã kết thúc hẳn (tháng
+    trước, hoặc "đến ngày" là ngày quá khứ) không bị ảnh hưởng gì (window_end vốn đã < hiện tại).
+    `days_in_period` theo đó có thể là SỐ THỰC (lũy kế, VD 14.58 ngày) thay vì luôn là số nguyên —
+    `in_progress=True` báo cho frontend biết để đổi nhãn hiển thị cho đúng bản chất.
 
     `running_hours`: TỔNG CỘNG DỒN `duration_hours` (ended_at - started_at) của MỌI mẻ lọc (nhóm
     theo batch_seq_no, mirror _batch_filter_lot_yield_items) có `ended_at` rơi trong kỳ — mẻ
@@ -651,21 +657,27 @@ def filter_line_utilization_report(db: Session, year: int = None, month: int = N
         d_to = date.fromisoformat(date_to_str)
         window_start = _vn_day_start_utc(d_from)
         window_end = _vn_day_start_utc(d_to + timedelta(days=1))
-        days_in_period = (d_to - d_from).days + 1
     elif year is not None and month is not None:
         mode = "month"
         window_start = _vn_day_start_utc(date(year, month, 1))
         next_month = date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)
         window_end = _vn_day_start_utc(next_month)
-        days_in_period = (next_month - date(year, month, 1)).days
     else:
         raise DomainError("Cần chọn Năm + Tháng, hoặc Từ ngày - Đến ngày.")
-    total_hours = days_in_period * 24.0
+
+    now = utcnow()
+    # Chi clamp khi "hien tai" thuc su nam TRONG ky (window_start <= now < window_end) -- ky da
+    # ket thuc han (now >= window_end, VD thang truoc) hoac con CHUA toi (now < window_start, VD
+    # nam tuong lai dung trong test) deu giu nguyen window_end, khong clamp nham thanh so am/0.
+    in_progress = window_start <= now < window_end
+    effective_end = now if in_progress else window_end
+    days_in_period = round((effective_end - window_start).total_seconds() / 86400, 2)
+    total_hours = round(days_in_period * 24.0, 1)
 
     from . import ops_setting as ops_setting_svc
     settings = ops_setting_svc.get_settings(db)
     base_items = _batch_filter_lot_yield_items(
-        db, window_start, window_end, settings.filter_line_yield_low_l, settings.filter_line_yield_high_l)
+        db, window_start, effective_end, settings.filter_line_yield_low_l, settings.filter_line_yield_high_l)
 
     running_hours = 0.0
     total_liters = 0.0
@@ -697,6 +709,8 @@ def filter_line_utilization_report(db: Session, year: int = None, month: int = N
         "date_from": date_from_str if mode == "range" else None,
         "date_to": date_to_str if mode == "range" else None,
         "days_in_period": days_in_period,
+        "in_progress": in_progress,
+        "as_of": effective_end.isoformat() if in_progress else None,
         "total_hours": total_hours,
         "running_hours": running_hours,
         "idle_hours": idle_hours,
