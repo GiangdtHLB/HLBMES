@@ -4615,6 +4615,13 @@ async function showBatchPackLot(packLotId) {
   const lk = p.locked;   // Hồ sơ EBR đã khóa -> mọi ô sửa bên dưới đều bị chặn ở server
                         // (_assert_unlocked); vô hiệu hóa NGAY trên UI thay vì để bấm Lưu mới
                         // báo lỗi 409 (2026-09-02, audit module "Mẻ sản xuất").
+  // Da nhap kho thanh pham (stocked, hoac da co 1 dong phan bo pallet "released") -> KHONG cho
+  // xoa nua (hang that da tao Pallet trong kho, xem services/batch_pipeline.py::delete_pack_lot)
+  // -- da Duyet KCS (approved) thoi thi VAN cho xoa, chi bat buoc nhap ly do (yeu cau nguoi dung
+  // 2026-11-26: "neu chua nhap kho thi van cho phep xoa, ke ca khi co KCS duyet"). Truoc day nut
+  // "Xoa lo TP" an luon khi approved=True du chua stocked, mau thuan voi chinh backend (da cho
+  // xoa lo approved-chua-stocked, chi hoi ly do) va voi cach hieu dung cua nguoi dung.
+  const stockedOrReleased = p.stocked || (p.pack_allocations || []).some(r => r && r.released);
   const dis = lk ? "disabled" : "";
   $("pk_detail").innerHTML = `<h2>Lô thành phẩm ${esc(p.pack_lot_code)} ${lk ? '<span class="muted" style="font-size:13px">🔒 Đã khóa</span>' : ""}</h2>
     <dl class="detail">
@@ -4666,7 +4673,7 @@ async function showBatchPackLot(packLotId) {
       <button class="btn sm sec" id="pk_trace">🔍 Truy ngược</button>
       <button class="btn sm sec" id="pk_ebr">📄 Hồ sơ lô TP (EBR)</button>
       <a class="btn sm sec" href="#" id="pk_audit">Xem audit lô TP này</a>
-      ${(p.approved || lk) ? "" : '<button class="btn sm" style="background:var(--red)" id="pk_del">Xóa lô TP</button>'}
+      ${(stockedOrReleased || lk) ? "" : '<button class="btn sm" style="background:var(--red)" id="pk_del">Xóa lô TP</button>'}
     </div>`;
   wireMaterialUsageSection("pkmu", lots, materials,
     { postUrl: `/batch-pack-lots/${packLotId}/materials`, deleteBaseUrl: `/batch-pack-lots/materials`,
