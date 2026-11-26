@@ -6615,7 +6615,26 @@ async function loadGiaoData() {
       <td style="white-space:nowrap">${canEditReceipt ? `<button class="btn sm sec" data-editrc="${esc(m.movement_id)}">Sửa</button>
         <button class="btn sm sec" data-delrc="${esc(m.movement_id)}" style="color:var(--red)">Xóa</button>` : ""}</td></tr>`;
   }).join("") || `<tr><td colspan="10" class="muted">Chưa có phiếu nhập kho nào.</td></tr>`;
+  // Lô khả dụng của "Xuất theo đề nghị" (requestLotOptionsHtml/requestFifoPlan) trước đây lọc
+  // THEO TỒN HIỆN TẠI (allLots.quantity > 0, SỐ LIỆU NGÀY HÔM NAY) + created_at <= ngày đề nghị —
+  // SAI khi phiếu backdate "Ngày đề nghị nhận kho" vào quá khứ xa: lô đã tồn tại đúng ngày đó
+  // nhưng SAU đó đã bị dùng hết cho việc khác (thật, không phải lỗi), nên tồn HIỆN TẠI = 0 dù
+  // tồn TẠI ĐÚNG NGÀY ĐỀ NGHỊ (phía server, _stock_at_company_as_of/lot_on_hand_as_of dựng lại
+  // từ StockMovement) vẫn còn — khiến dropdown báo "không có lô nào" dù banner cảnh báo
+  // company_stock_as_of (tính đúng) không hề báo thiếu, rất khó hiểu (yêu cầu người dùng
+  // 2026-11-26: "Tồn kho còn nhưng cứ báo thiếu"). Gọi đúng API dựng lại lịch sử
+  // (/warehouse/stock/as-of/lots, đã có sẵn cho "Kho phân xưởng > Xem tồn kho > Chỉ 1 ngày")
+  // cho TỪNG mốc "Ngày đề nghị nhận kho" khác nhau đang có dòng pending, CHỈ 1 LẦN mỗi mốc (nhiều
+  // phiếu/dòng trùng ngày dùng chung) — asOfLotsByDate[date] = danh sách lô ĐÚNG TẠI NGÀY ĐÓ.
+  const pendingReceiptDates = [...new Set(allRequests
+    .filter(r => r.requested_receipt_date && r.lines.some(l => l.status === "pending"))
+    .map(r => r.requested_receipt_date))];
+  const asOfLotsEntries = await Promise.all(pendingReceiptDates.map(async (d) =>
+    [d, await GET(`/warehouse/stock/as-of/lots?as_of=${encodeURIComponent(d)}&location=${encodeURIComponent("Kho công ty")}`)]));
+  const asOfLotsByDate = Object.fromEntries(asOfLotsEntries);
+  WH_CACHE.asOfLotsByDate = asOfLotsByDate;
   return { lotsAvail, mats, allLots, allRequestsFull, freeIssues, pxRequests, factoryLocationsGiao, factoryTransfers,
+    asOfLotsByDate,
     supplierReturns, suppliers, receipts, sangNgangRequests, qcReqIdsGiao, matLocsGiao, activeMatLocsGiao,
     matLocOptsGiao, matLocByIdGiao, allRequests, doneRequests, freeIssuesKc, matItemsGiao, matByIdGiao, lotByIdGiao,
     supplierByIdGiao, supplierItemsGiao, pending, canFulfillGiao, isAdminGiao, canApproveTransferPx,
@@ -6856,12 +6875,12 @@ VIEWS.warehouse_kc = async function () {
         ${movementHistoryBlockHtml("obal")}
       </div>`;
   } else if (sec === "xtdn") {
-    const { allRequests, matByIdGiao, lotByIdGiao, canFulfillGiao, allLots } = await loadGiaoData();
+    const { allRequests, matByIdGiao, lotByIdGiao, canFulfillGiao, allLots, asOfLotsByDate } = await loadGiaoData();
     body = `<div class="panel"><h2>Xuất theo số phiếu đề nghị <span class="muted">(${allRequests.length} phiếu đang chờ)</span></h2>
         <div class="muted" style="margin-bottom:6px">Mỗi phiếu hiện đầy đủ danh mục vật tư đã đề nghị — bấm "Duyệt cả phiếu" để xuất
           toàn bộ 1 lần (SL đề nghị đã được chặn không vượt tồn kho công ty từ lúc tạo phiếu), hoặc xử lý riêng từng dòng.</div>
         <input class="searchbox" data-tbl="xtdn_table" placeholder="Tìm theo số phiếu, người tạo, ghi chú, vật tư..." style="margin-bottom:8px;width:100%"/>
-        ${requestTableHtml(allRequests, matByIdGiao, lotByIdGiao, canFulfillGiao, true, allLots, false, "xtdn_table")}
+        ${requestTableHtml(allRequests, matByIdGiao, lotByIdGiao, canFulfillGiao, true, allLots, false, "xtdn_table", asOfLotsByDate)}
         ${movementHistoryBlockHtml("xuat_theo_de_nghi")}
       </div>`;
   } else if (sec === "sng") {
@@ -8609,18 +8628,26 @@ function groupMemberFifoBadgeHtml(materialId, memberIds, allLots) {
 }
 // Danh sách lô khả dụng của 1 vật tư tại Kho công ty, sắp theo FIFO (cũ nhất trước) — dùng để
 // dựng <select> chọn lô ngay trong bảng dòng đề nghị (đỡ phải mở modal riêng cho từng dòng).
-function requestLotOptionsHtml(materialId, allLots, selectedLotId, asOfDate) {
+function requestLotOptionsHtml(materialId, allLots, selectedLotId, asOfDate, asOfLots) {
   // asOfDate (r.requested_receipt_date): loại bỏ lô Nhập kho SAU ngày đề nghị nhận — hiện lô đó
   // ra vẫn chọn được sẽ bị backend chặn khi bấm "Xuất dòng này" (fulfill_request_line đã kiểm
   // tra as-of, xem services/warehouse.py), nhưng để lộ trong dropdown vẫn gây hiểu nhầm "đủ
   // hàng" và mất công thủ kho chọn nhầm rồi mới thấy lỗi — yêu cầu người dùng 2026-09-19: "bạn
   // không được cho hiện ra như vậy chứ, bạn hiện ra người sử dụng chọn vào thì sao".
-  const asOf = asOfDate ? new Date(asOfDate) : null;
-  const avail = allLots.filter(l => l.material_id === materialId && l.quantity > 0 && !/phân xưởng/i.test(l.location || "")
+  //
+  // `asOfLots` (nếu có — từ /warehouse/stock/as-of/lots, DỰNG LẠI đúng tồn tại NGÀY đề nghị từ
+  // lịch sử StockMovement, mirror services/warehouse.py::_stock_at_company_as_of) THAY cho lọc
+  // `allLots` (tồn HIỆN TẠI hôm nay) theo `created_at <= asOf` — lọc kiểu cũ SAI khi lô đã tồn
+  // tại đúng ngày đề nghị (quá khứ) nhưng từ đó tới NAY đã bị dùng hết cho việc khác (thật,
+  // không phải lỗi): tồn hiện tại = 0 dù tồn tại đúng ngày đề nghị vẫn còn, khiến dropdown báo
+  // "không có lô nào" sai (yêu cầu người dùng 2026-11-26: "Tồn kho còn nhưng cứ báo thiếu").
+  const source = (asOfDate && asOfLots) ? asOfLots : allLots;
+  const asOf = (!asOfLots && asOfDate) ? new Date(asOfDate) : null;
+  const avail = source.filter(l => l.material_id === materialId && l.quantity > 0 && !/phân xưởng/i.test(l.location || "")
     && (!asOf || new Date(l.created_at) <= asOf))
     .sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
   if (!avail.length) {
-    const msg = asOf ? "(không có lô nào đã Nhập kho tính đến ngày đề nghị)" : "(không còn lô khả dụng)";
+    const msg = asOfDate ? "(không có lô nào đã Nhập kho tính đến ngày đề nghị)" : "(không còn lô khả dụng)";
     return { html: `<option value="">${msg}</option>`, defaultId: "", fifoFirstId: "" };
   }
   const defaultId = selectedLotId && avail.some(l => l.lot_id === selectedLotId) ? selectedLotId : avail[0].lot_id;
@@ -8635,10 +8662,13 @@ function requestLotOptionsHtml(materialId, allLots, selectedLotId, asOfDate) {
 // nghị" — yêu cầu người dùng 2026-09-19: "giống kiểu cấp liệu đó, bạn tự thêm dòng nguyên liệu
 // cần lấy thêm theo fifo tiếp theo" (lô cũ nhất không đủ 1 mình thì tự động chia sang lô kế
 // tiếp thay vì chỉ hiện đúng 1 lô rồi báo thiếu). Tính HOÀN TOÀN ở client từ `allLots` đã tải
-// sẵn (đủ dữ liệu: quantity/created_at/location), không cần gọi thêm API.
-function requestFifoPlan(materialId, allLots, neededQty, asOfDate) {
-  const asOf = asOfDate ? new Date(asOfDate) : null;
-  const avail = allLots.filter(l => l.material_id === materialId && l.quantity > 0 && !/phân xưởng/i.test(l.location || "")
+// sẵn (đủ dữ liệu: quantity/created_at/location), không cần gọi thêm API — trừ khi có `asOfLots`
+// (xem requestLotOptionsHtml ở trên) thì dùng đúng tồn DỰNG LẠI tại ngày đề nghị thay vì tồn
+// hiện tại, tránh báo thiếu sai khi lô cũ đã dùng hết cho việc khác SAU ngày đề nghị.
+function requestFifoPlan(materialId, allLots, neededQty, asOfDate, asOfLots) {
+  const source = (asOfDate && asOfLots) ? asOfLots : allLots;
+  const asOf = (!asOfLots && asOfDate) ? new Date(asOfDate) : null;
+  const avail = source.filter(l => l.material_id === materialId && l.quantity > 0 && !/phân xưởng/i.test(l.location || "")
     && (!asOf || new Date(l.created_at) <= asOf))
     .sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
   const plan = [];
@@ -8670,10 +8700,11 @@ function fulfilledFifoBadgeHtml(fifoOk) {
 // NHIỀU <tr> (mỗi lô 1 dòng phụ, cột Vật tư/Ngày.../Trạng thái/Actions để trống, chỉ hiện ở dòng
 // đầu) — mirror hệt cách dispense.py's "Gợi ý cấp liệu" (sg_result) hiển thị nhiều lô cho 1 vật
 // tư, cộng thêm "+ Thêm lô khác" để thủ kho tự thêm/sửa nếu muốn (yêu cầu người dùng 2026-09-19).
-function requestPendingLineRowsHtml(r, l, matById, allLots, colspanShared) {
+function requestPendingLineRowsHtml(r, l, matById, allLots, colspanShared, asOfLotsByDate) {
   const mat = matById[l.material_id];
   const matLabel = mat ? `${esc(mat.code)} — ${esc(mat.name)}` : esc(l.material_id);
-  const { plan } = requestFifoPlan(l.material_id, allLots || [], l.quantity, r.requested_receipt_date);
+  const asOfLots = (r.requested_receipt_date && asOfLotsByDate) ? asOfLotsByDate[r.requested_receipt_date] : null;
+  const { plan } = requestFifoPlan(l.material_id, allLots || [], l.quantity, r.requested_receipt_date, asOfLots);
   // Cảnh báo NGAY TRÊN MÀN HÌNH khi tồn Kho công ty tính đến "Ngày đề nghị nhận kho" không đủ SL
   // đang đề nghị — trước đây chỉ biết qua toast thoáng qua của "Duyệt cả phiếu" (chung chung,
   // không nói rõ dòng nào/thiếu bao nhiêu, biến mất sau vài giây) nên thủ kho không biết vì sao
@@ -8691,7 +8722,7 @@ function requestPendingLineRowsHtml(r, l, matById, allLots, colspanShared) {
   const actions = `<button class="btn sm sec" data-reqfulfill data-reqid="${esc(r.request_id)}" data-lineid="${esc(l.line_id)}">Xuất dòng này</button>
      <button class="btn sm sec" data-reqreject data-reqid="${esc(r.request_id)}" data-lineid="${esc(l.line_id)}">Từ chối</button>`;
   const pickRowHtml = (pick, pi, isFirst) => {
-    const lotOpts = requestLotOptionsHtml(l.material_id, allLots || [], pick.lot_id, r.requested_receipt_date);
+    const lotOpts = requestLotOptionsHtml(l.material_id, allLots || [], pick.lot_id, r.requested_receipt_date, asOfLots);
     return `<tr data-reqpickrow="${esc(l.line_id)}-${pi}">
       <td>${isFirst ? matLabel : ""}</td>
       <td>${isFirst ? `${l.quantity} ${esc(l.uom)}<div id="reqsum-${esc(l.line_id)}" class="muted" style="font-size:11px"></div>` : ""}</td>
@@ -8717,13 +8748,13 @@ function requestPendingLineRowsHtml(r, l, matById, allLots, colspanShared) {
   return shortfall + rows + addRow;
 }
 
-function requestLineRowHtml(r, l, matById, lotById, canFulfill, allLots) {
+function requestLineRowHtml(r, l, matById, lotById, canFulfill, allLots, asOfLotsByDate) {
   // Hoàn tác xuất theo đề nghị coi như khóa lại sau khi fulfilled — chỉ ADMIN mới hoàn tác
   // được (mirror đúng quy ước đã áp dụng cho nút Hoàn tác Điều chuyển/Xuất sang ngang, xem
   // isAdminDc/isAdminSngPx), KHÔNG dùng chung quyền warehouse.issue (canFulfill) như lúc xuất.
   const isAdminReqUndo = CURRENT_USER && CURRENT_USER.role === "admin";
   if (canFulfill && l.status === "pending") {
-    return requestPendingLineRowsHtml(r, l, matById, allLots, 10);
+    return requestPendingLineRowsHtml(r, l, matById, allLots, 10, asOfLotsByDate);
   }
   const mat = matById[l.material_id];
   const matLabel = mat ? `${esc(mat.code)} — ${esc(mat.name)}` : esc(l.material_id);
@@ -8866,16 +8897,16 @@ function openEditRequestModal(r, matById) {
 // tự chế cơ chế tìm/phân trang riêng cho kiểu thẻ (yêu cầu người dùng 2026-09-23: "phân rõ các
 // cột ... tôi tìm phải tìm được hết các trường này"). Mỗi phiếu vẫn giữ 1 dòng chi tiết theo
 // từng vật tư (requestLineRowHtml, không đổi) — xem toàn bộ ở dòng <tr data-detailrow> ngay sau.
-function requestTableHtml(requests, matById, lotById, canFulfill, showBulk, allLots, canRequest, tableId) {
+function requestTableHtml(requests, matById, lotById, canFulfill, showBulk, allLots, canRequest, tableId, asOfLotsByDate) {
   return `<div class="tablewrap"><table id="${esc(tableId)}">
     <thead><tr><th>Số phiếu ĐN</th><th>NV đề nghị</th><th>Ngày lập phiếu</th><th>Ngày đề nghị nhận kho</th>
       <th>NV xuất</th><th>Ghi chú / Lệnh nguồn</th><th>Trạng thái</th><th></th><th></th></tr></thead>
-    <tbody>${requests.map(r => requestBlockHtml(r, matById, lotById, canFulfill, showBulk, allLots, canRequest)).join("") ||
+    <tbody>${requests.map(r => requestBlockHtml(r, matById, lotById, canFulfill, showBulk, allLots, canRequest, asOfLotsByDate)).join("") ||
       '<tr><td colspan=9 class="muted">Không có phiếu nào.</td></tr>'}</tbody>
   </table></div>`;
 }
 
-function requestBlockHtml(r, matById, lotById, canFulfill, showBulk, allLots, canRequest) {
+function requestBlockHtml(r, matById, lotById, canFulfill, showBulk, allLots, canRequest, asOfLotsByDate) {
   const pendingCount = r.lines.filter(l => l.status === "pending").length;
   const fulfilledCount = r.lines.filter(l => l.status === "fulfilled").length;
   const hasFulfilled = fulfilledCount > 0;
@@ -8917,7 +8948,7 @@ function requestBlockHtml(r, matById, lotById, canFulfill, showBulk, allLots, ca
       <td colspan="9">
         <table>
           <thead><tr><th>Vật tư</th><th>SL</th><th>Lô</th><th>Ngày nhập</th><th>Ngày xuất</th><th>Vị trí kho</th><th>FIFO</th><th>Lý do (nếu khác FIFO)</th><th>Trạng thái</th><th></th></tr></thead>
-          <tbody>${r.lines.map(l => requestLineRowHtml(r, l, matById, lotById, canFulfill, allLots)).join("") ||
+          <tbody>${r.lines.map(l => requestLineRowHtml(r, l, matById, lotById, canFulfill, allLots, asOfLotsByDate)).join("") ||
             '<tr><td colspan=10 class="muted">Phiếu không có dòng nào.</td></tr>'}</tbody>
         </table>
       </td>
@@ -8998,14 +9029,18 @@ function wireRequestBlockActions() {
     const existingSels = Array.from(document.querySelectorAll(`.reqlot-select[data-lineid="${CSS.escape(lineId)}"]`));
     const usedLotIds = new Set(existingSels.map(s => s.value));
     const reqDate = btn.dataset.reqdate || null;
-    const asOf = reqDate ? new Date(reqDate) : null;
-    const avail = allLots.filter(l => l.material_id === materialId && l.quantity > 0 && !/phân xưởng/i.test(l.location || "")
+    // asOfLots (nếu có): tồn DỰNG LẠI đúng ngày đề nghị (xem requestLotOptionsHtml) thay vì tồn
+    // hiện tại — mirror cùng fix 2026-11-26.
+    const asOfLots = (reqDate && WH_CACHE.asOfLotsByDate) ? WH_CACHE.asOfLotsByDate[reqDate] : null;
+    const source = (reqDate && asOfLots) ? asOfLots : allLots;
+    const asOf = (!asOfLots && reqDate) ? new Date(reqDate) : null;
+    const avail = source.filter(l => l.material_id === materialId && l.quantity > 0 && !/phân xưởng/i.test(l.location || "")
       && (!asOf || new Date(l.created_at) <= asOf))
       .sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
     const nextLot = avail.find(l => !usedLotIds.has(l.lot_id));
     if (!nextLot) { toast("Không còn lô nào khác của vật tư này để chọn.", "err"); return; }
     const pi = Math.max(...existingSels.map(s => parseInt(s.dataset.pi, 10))) + 1;
-    const lotOpts = requestLotOptionsHtml(materialId, allLots, nextLot.lot_id, reqDate);
+    const lotOpts = requestLotOptionsHtml(materialId, allLots, nextLot.lot_id, reqDate, asOfLots);
     const existingQty = document.querySelector(`.reqlot-qty[data-lineid="${CSS.escape(lineId)}"]`);
     const target = existingQty ? existingQty.dataset.target : "";
     const addRowTr = btn.closest("tr");
