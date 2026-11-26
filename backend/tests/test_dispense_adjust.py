@@ -282,6 +282,48 @@ def test_adjust_decrease_blocked_when_lot_consumed_by_other_batch_since(client, 
     assert _bom_actual(client, admin_h, batch_a, code) == 4.0
 
 
+def test_adjust_decrease_not_blocked_by_later_replenishment_transfer_in(client, admin_h):
+    """Lô đã cấp cho mẻ, SAU ĐÓ được Kho công ty duyệt "Xuất theo đề nghị" chuyển THÊM hàng vào
+    (merge, cùng lot_code, cùng lô phân xưởng) — đây CHỈ LÀ BỔ SUNG thêm tồn cho lô, không phải
+    dùng tiếp/rút bớt, nên KHÔNG được chặn hoàn lại Thực tế (bug thực tế 2026-11-26, vật tư
+    2NP124/lô 2026-00081 ở mẻ 3144: chặn oan "đã được dùng tiếp" dù lô chỉ tăng tồn)."""
+    material_id, code = _new_material(client, admin_h, "REPLEN01")
+    # Nhan 1 lo lon o Kho cong ty, chuyen 1 PHAN sang Kho phan xuong -> tao lo phan xuong voi
+    # CUNG lot_code (xem warehouse.py::_transfer_lot nhanh "chua co dong nao -> tach dong moi,
+    # dung lai cung lot_code").
+    r = client.post("/api/warehouse/receive", headers=admin_h, json={
+        "material_id": material_id, "quantity": 20, "uom": "kg", "location": "Kho công ty"})
+    assert r.status_code == 200, r.text
+    company_lot_id = r.json()["lot_id"]
+    t1 = client.post("/api/warehouse/transfer", headers=admin_h,
+                     json={"lot_id": company_lot_id, "quantity": 10, "location_to": "Kho phân xưởng",
+                           "reason": "chuyen dot 1"})
+    assert t1.status_code == 200, t1.text
+    workshop_lot_id = t1.json()["lot_id"]
+
+    version_id = _recipe_version(client, admin_h, "REPLEN01", code, qty=100, base_qty=100)
+    batch_id = _new_batch(client, admin_h, version_id, planned_qty=100, suffix="REPLEN01", allow_shortage=True)
+    disp = client.post(f"/api/dispense/{batch_id}", headers=admin_h,
+                       json={"lines": [{"material_code": code, "quantity": 4}]})
+    assert disp.status_code == 200, disp.text   # workshop_lot_id (10kg) la lo duy nhat -> tu dong duoc chon
+
+    # SAU khi me da cap lieu -> Kho cong ty duyet THEM 1 dot chuyen nua vao CUNG lo phan xuong do
+    # (merge, vi cung lot_code) -- chi tang ton, khong phai dung tiep.
+    t2 = client.post("/api/warehouse/transfer", headers=admin_h,
+                     json={"lot_id": company_lot_id, "quantity": 3, "location_to": "Kho phân xưởng",
+                           "reason": "chuyen dot 2, sau khi me da cap lieu"})
+    assert t2.status_code == 200, t2.text
+    assert t2.json()["lot_id"] == workshop_lot_id   # merge vao dung lo cu, khong tao lo moi
+
+    ok = client.post(f"/api/dispense/{batch_id}/adjust", headers=admin_h,
+                     json={"material_code": code, "new_actual": 1, "reason": "can lai thay dung it hon"})
+    assert ok.status_code == 200, ok.text
+    assert _bom_actual(client, admin_h, batch_id, code) == 1.0
+
+    lot_after = next(l for l in client.get("/api/lots", headers=admin_h).json() if l["lot_id"] == workshop_lot_id)
+    assert lot_after["quantity"] == 12.0   # 10 - 4 (cap lieu) + 3 (chuyen them) + 3 (hoan lai 4->1) = 12
+
+
 def test_adjust_no_op_when_same_value_rejected(client, admin_h):
     material_id, code = _new_material(client, admin_h, "NOOP01")
     _receive_workshop_lot(client, admin_h, material_id, 10, days_to_expiry=10)
