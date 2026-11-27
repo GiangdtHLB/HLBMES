@@ -25,6 +25,7 @@ from .cip import CipEquipment, CipFormType, CipLink, CipRecord
 from .brewing import OpsSetting
 from .brewhouse_log import BrewhouseStepLog
 from .energy import EnergyArea, EnergyGroup, EnergyReading
+from .filling_log import FillingStatusLog
 from .formula import Formula
 from .historian import HistorianPoint
 from .integration import ApiKey, SqlConnection, Webhook
@@ -148,4 +149,5 @@ __all__ = [
     "PackagingType",
     "PackagingMove",
     "BrewhouseStepLog",
+    "FillingStatusLog",
 ]

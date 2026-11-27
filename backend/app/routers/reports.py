@@ -214,6 +214,16 @@ def pack_line_gantt_report(days: int = 3650, date_from: str = None, date_to: str
     return dashboard_svc.pack_line_gantt_report(db, days, date_from, date_to)
 
 
+# ---- BC "Trạng thái máy chiết 30K theo thời gian" (1=đang chiết, 2=đang CIP) — THÊM, không
+# thay, BC dây chuyền chiết ở trên (vẫn giữ nguyên theo ca xác nhận) — yêu cầu người dùng
+# 2026-11-13. Chỉ có dữ liệu từ lúc tác vụ ghi log (services/filling_log.py) được bật. ----
+@router.get("/filling-status-log")
+def filling_status_log_report(days: int = 30, date_from: str = None, date_to: str = None,
+                              db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    from ..services import filling_log
+    return filling_log.filling_status_log_report(db, days, date_from, date_to)
+
+
 # ---- Port từ phần mềm QLSX cũ (dma.biahalong.com:88 › Báo cáo sản xuất) — yêu cầu người dùng
 # 2026-11-05: "xem mục báo cáo sản xuất của phần mềm cũ, tạo cho tôi các báo cáo như vậy, bỏ qua
 # hồ sơ điện tử". Nhóm A — BC sản lượng ----

@@ -12,11 +12,14 @@ os.environ["MES_DEV_HEADER_AUTH"] = "0"
 os.environ["MES_RL_ENABLED"] = "0"
 os.environ["MES_ADMIN_PASSWORD"] = "AdminTest123"
 
+from datetime import date, datetime, timezone
+
 import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
 from app import seed as seed_mod
+from app.services import dashboard as dashboard_svc
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -155,6 +158,55 @@ def test_date_range_single_day_window(client, admin_h):
 def test_missing_both_period_kinds_is_rejected(client, admin_h):
     r = client.get("/api/reports/filter-line-utilization", headers=admin_h)
     assert r.status_code == 409, r.text
+
+
+def test_in_progress_month_uses_cumulative_hours_not_full_month(client, admin_h, monkeypatch):
+    """Yeu cau nguoi dung 2026-11-15 (dao lai quyet dinh cu 2026-11-11): chon 1 thang CON DANG
+    CHAY DO (VD moi qua 15 ngay) khong duoc chia % cho CA THANG (VD "30 ngay x 24h") - phai chia
+    cho so gio LUY KE tu dau thang den HIEN TAI, neu khong % se thap gia tao vi tinh ca phan ngay
+    CHUA TOI cua thang. Gia lap "hien tai" = 2030-08-15T12:00:00Z (giua thang 8/2030, thang nay
+    chua tung dung trong test nao khac o file nay nen khong dung du lieu)."""
+    fake_now = datetime(2030, 8, 15, 12, 0, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(dashboard_svc, "utcnow", lambda: fake_now)
+
+    # Me D: 4h chay (10/8 01:00 -> 05:00), 10 hl = 1000 lit - TRUOC moc "hien tai" gia lap.
+    _build_filter_lot_with_batch(client, admin_h, "D",
+                                 started_at="2030-08-10T01:00:00Z", ended_at="2030-08-10T05:00:00Z",
+                                 dich_nha_hl=10)
+
+    rep = client.get("/api/reports/filter-line-utilization",
+                     params={"year": 2030, "month": 8}, headers=admin_h).json()
+
+    window_start = dashboard_svc._vn_day_start_utc(date(2030, 8, 1))
+    expected_days = round((fake_now - window_start).total_seconds() / 86400, 2)
+    expected_total_hours = round(expected_days * 24.0, 1)
+
+    assert rep["in_progress"] is True
+    assert rep["as_of"] == fake_now.isoformat()
+    # Lũy kế ~14.8 ngày (giữa 15/8), KHÁC hẳn 31 ngày trọn tháng 8.
+    assert rep["days_in_period"] == expected_days
+    assert rep["days_in_period"] < 31
+    assert rep["total_hours"] == expected_total_hours
+    assert rep["running_hours"] == 4.0
+    # % phải tính theo tổng giờ lũy kế (nhỏ hơn), KHÔNG phải 31 ngày x 24h = 744h.
+    assert rep["running_pct"] == round(4.0 / expected_total_hours * 100, 1)
+    assert rep["running_pct"] != round(4.0 / 744.0 * 100, 1)
+
+
+def test_past_completed_month_is_not_treated_as_in_progress(client, admin_h, monkeypatch):
+    """Thang DA KET THUC HAN (VD thang truoc so voi "hien tai" gia lap) van phai tinh TRON thang
+    (khong bi anh huong boi clamp "dang chay do") - mirror test_monthly_running_idle_hours_and_liters
+    nhung voi "hien tai" gia lap xa ve tuong lai de xac nhan thang 2030-06 (da qua) khong bi coi
+    la dang chay do."""
+    fake_now = datetime(2030, 9, 1, 0, 0, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(dashboard_svc, "utcnow", lambda: fake_now)
+
+    rep = client.get("/api/reports/filter-line-utilization",
+                     params={"year": 2030, "month": 6}, headers=admin_h).json()
+    assert rep["in_progress"] is False
+    assert rep["as_of"] is None
+    assert rep["days_in_period"] == 30
+    assert rep["total_hours"] == 720.0
 
 
 def test_month_with_no_batches_is_all_idle(client, admin_h):

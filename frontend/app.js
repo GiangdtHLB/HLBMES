@@ -3896,7 +3896,9 @@ VIEWS.batchfilterlots = async function () {
         <div class="field"><label>Tank thành phẩm</label><select id="fl_bbt">${bbtOpts}</select></div>
         <button class="btn" id="fl_create">Tạo lô lọc</button>
       </div>
-      <div class="muted" style="margin-top:4px">Sản phẩm (kế thừa từ lệnh lọc): <b id="fl_order_product">—</b></div>
+      <div class="muted" style="margin-top:4px">Loại bia (kế thừa từ lệnh lọc, không sửa được ở đây): <b id="fl_order_beertype">—</b>
+        &nbsp;·&nbsp; Loại sản phẩm: <b id="fl_order_category">—</b>
+        &nbsp;·&nbsp; Sản phẩm: <b id="fl_order_product">—</b></div>
       ${available.length ? "" : '<div class="muted">Chưa có lệnh lọc nào còn dùng được.</div>'}
     </div>
     <div class="split">
@@ -3927,6 +3929,8 @@ VIEWS.batchfilterlots = async function () {
   wirePaginate("t_batfilterlot", 10);
   const updateFlOrderProduct = () => {
     const o = orderById[$("fl_order_sel").value];
+    $("fl_order_beertype").textContent = o ? beerTypeName(o.beer_type_id) : "—";
+    $("fl_order_category").textContent = o ? (o.category || "—") : "—";
     $("fl_order_product").textContent = o ? fpLabel(o.finished_product_id) : "—";
   };
   $("fl_order_sel").onchange = updateFlOrderProduct;
@@ -4611,6 +4615,13 @@ async function showBatchPackLot(packLotId) {
   const lk = p.locked;   // Hồ sơ EBR đã khóa -> mọi ô sửa bên dưới đều bị chặn ở server
                         // (_assert_unlocked); vô hiệu hóa NGAY trên UI thay vì để bấm Lưu mới
                         // báo lỗi 409 (2026-09-02, audit module "Mẻ sản xuất").
+  // Da nhap kho thanh pham (stocked, hoac da co 1 dong phan bo pallet "released") -> KHONG cho
+  // xoa nua (hang that da tao Pallet trong kho, xem services/batch_pipeline.py::delete_pack_lot)
+  // -- da Duyet KCS (approved) thoi thi VAN cho xoa, chi bat buoc nhap ly do (yeu cau nguoi dung
+  // 2026-11-26: "neu chua nhap kho thi van cho phep xoa, ke ca khi co KCS duyet"). Truoc day nut
+  // "Xoa lo TP" an luon khi approved=True du chua stocked, mau thuan voi chinh backend (da cho
+  // xoa lo approved-chua-stocked, chi hoi ly do) va voi cach hieu dung cua nguoi dung.
+  const stockedOrReleased = p.stocked || (p.pack_allocations || []).some(r => r && r.released);
   const dis = lk ? "disabled" : "";
   $("pk_detail").innerHTML = `<h2>Lô thành phẩm ${esc(p.pack_lot_code)} ${lk ? '<span class="muted" style="font-size:13px">🔒 Đã khóa</span>' : ""}</h2>
     <dl class="detail">
@@ -4662,7 +4673,7 @@ async function showBatchPackLot(packLotId) {
       <button class="btn sm sec" id="pk_trace">🔍 Truy ngược</button>
       <button class="btn sm sec" id="pk_ebr">📄 Hồ sơ lô TP (EBR)</button>
       <a class="btn sm sec" href="#" id="pk_audit">Xem audit lô TP này</a>
-      ${(p.approved || lk) ? "" : '<button class="btn sm" style="background:var(--red)" id="pk_del">Xóa lô TP</button>'}
+      ${(stockedOrReleased || lk) ? "" : '<button class="btn sm" style="background:var(--red)" id="pk_del">Xóa lô TP</button>'}
     </div>`;
   wireMaterialUsageSection("pkmu", lots, materials,
     { postUrl: `/batch-pack-lots/${packLotId}/materials`, deleteBaseUrl: `/batch-pack-lots/materials`,
@@ -6611,7 +6622,26 @@ async function loadGiaoData() {
       <td style="white-space:nowrap">${canEditReceipt ? `<button class="btn sm sec" data-editrc="${esc(m.movement_id)}">Sửa</button>
         <button class="btn sm sec" data-delrc="${esc(m.movement_id)}" style="color:var(--red)">Xóa</button>` : ""}</td></tr>`;
   }).join("") || `<tr><td colspan="10" class="muted">Chưa có phiếu nhập kho nào.</td></tr>`;
+  // Lô khả dụng của "Xuất theo đề nghị" (requestLotOptionsHtml/requestFifoPlan) trước đây lọc
+  // THEO TỒN HIỆN TẠI (allLots.quantity > 0, SỐ LIỆU NGÀY HÔM NAY) + created_at <= ngày đề nghị —
+  // SAI khi phiếu backdate "Ngày đề nghị nhận kho" vào quá khứ xa: lô đã tồn tại đúng ngày đó
+  // nhưng SAU đó đã bị dùng hết cho việc khác (thật, không phải lỗi), nên tồn HIỆN TẠI = 0 dù
+  // tồn TẠI ĐÚNG NGÀY ĐỀ NGHỊ (phía server, _stock_at_company_as_of/lot_on_hand_as_of dựng lại
+  // từ StockMovement) vẫn còn — khiến dropdown báo "không có lô nào" dù banner cảnh báo
+  // company_stock_as_of (tính đúng) không hề báo thiếu, rất khó hiểu (yêu cầu người dùng
+  // 2026-11-26: "Tồn kho còn nhưng cứ báo thiếu"). Gọi đúng API dựng lại lịch sử
+  // (/warehouse/stock/as-of/lots, đã có sẵn cho "Kho phân xưởng > Xem tồn kho > Chỉ 1 ngày")
+  // cho TỪNG mốc "Ngày đề nghị nhận kho" khác nhau đang có dòng pending, CHỈ 1 LẦN mỗi mốc (nhiều
+  // phiếu/dòng trùng ngày dùng chung) — asOfLotsByDate[date] = danh sách lô ĐÚNG TẠI NGÀY ĐÓ.
+  const pendingReceiptDates = [...new Set(allRequests
+    .filter(r => r.requested_receipt_date && r.lines.some(l => l.status === "pending"))
+    .map(r => r.requested_receipt_date))];
+  const asOfLotsEntries = await Promise.all(pendingReceiptDates.map(async (d) =>
+    [d, await GET(`/warehouse/stock/as-of/lots?as_of=${encodeURIComponent(d)}&location=${encodeURIComponent("Kho công ty")}`)]));
+  const asOfLotsByDate = Object.fromEntries(asOfLotsEntries);
+  WH_CACHE.asOfLotsByDate = asOfLotsByDate;
   return { lotsAvail, mats, allLots, allRequestsFull, freeIssues, pxRequests, factoryLocationsGiao, factoryTransfers,
+    asOfLotsByDate,
     supplierReturns, suppliers, receipts, sangNgangRequests, qcReqIdsGiao, matLocsGiao, activeMatLocsGiao,
     matLocOptsGiao, matLocByIdGiao, allRequests, doneRequests, freeIssuesKc, matItemsGiao, matByIdGiao, lotByIdGiao,
     supplierByIdGiao, supplierItemsGiao, pending, canFulfillGiao, isAdminGiao, canApproveTransferPx,
@@ -6852,12 +6882,12 @@ VIEWS.warehouse_kc = async function () {
         ${movementHistoryBlockHtml("obal")}
       </div>`;
   } else if (sec === "xtdn") {
-    const { allRequests, matByIdGiao, lotByIdGiao, canFulfillGiao, allLots } = await loadGiaoData();
+    const { allRequests, matByIdGiao, lotByIdGiao, canFulfillGiao, allLots, asOfLotsByDate } = await loadGiaoData();
     body = `<div class="panel"><h2>Xuất theo số phiếu đề nghị <span class="muted">(${allRequests.length} phiếu đang chờ)</span></h2>
         <div class="muted" style="margin-bottom:6px">Mỗi phiếu hiện đầy đủ danh mục vật tư đã đề nghị — bấm "Duyệt cả phiếu" để xuất
           toàn bộ 1 lần (SL đề nghị đã được chặn không vượt tồn kho công ty từ lúc tạo phiếu), hoặc xử lý riêng từng dòng.</div>
         <input class="searchbox" data-tbl="xtdn_table" placeholder="Tìm theo số phiếu, người tạo, ghi chú, vật tư..." style="margin-bottom:8px;width:100%"/>
-        ${requestTableHtml(allRequests, matByIdGiao, lotByIdGiao, canFulfillGiao, true, allLots, false, "xtdn_table")}
+        ${requestTableHtml(allRequests, matByIdGiao, lotByIdGiao, canFulfillGiao, true, allLots, false, "xtdn_table", asOfLotsByDate)}
         ${movementHistoryBlockHtml("xuat_theo_de_nghi")}
       </div>`;
   } else if (sec === "sng") {
@@ -8605,18 +8635,26 @@ function groupMemberFifoBadgeHtml(materialId, memberIds, allLots) {
 }
 // Danh sách lô khả dụng của 1 vật tư tại Kho công ty, sắp theo FIFO (cũ nhất trước) — dùng để
 // dựng <select> chọn lô ngay trong bảng dòng đề nghị (đỡ phải mở modal riêng cho từng dòng).
-function requestLotOptionsHtml(materialId, allLots, selectedLotId, asOfDate) {
+function requestLotOptionsHtml(materialId, allLots, selectedLotId, asOfDate, asOfLots) {
   // asOfDate (r.requested_receipt_date): loại bỏ lô Nhập kho SAU ngày đề nghị nhận — hiện lô đó
   // ra vẫn chọn được sẽ bị backend chặn khi bấm "Xuất dòng này" (fulfill_request_line đã kiểm
   // tra as-of, xem services/warehouse.py), nhưng để lộ trong dropdown vẫn gây hiểu nhầm "đủ
   // hàng" và mất công thủ kho chọn nhầm rồi mới thấy lỗi — yêu cầu người dùng 2026-09-19: "bạn
   // không được cho hiện ra như vậy chứ, bạn hiện ra người sử dụng chọn vào thì sao".
-  const asOf = asOfDate ? new Date(asOfDate) : null;
-  const avail = allLots.filter(l => l.material_id === materialId && l.quantity > 0 && !/phân xưởng/i.test(l.location || "")
+  //
+  // `asOfLots` (nếu có — từ /warehouse/stock/as-of/lots, DỰNG LẠI đúng tồn tại NGÀY đề nghị từ
+  // lịch sử StockMovement, mirror services/warehouse.py::_stock_at_company_as_of) THAY cho lọc
+  // `allLots` (tồn HIỆN TẠI hôm nay) theo `created_at <= asOf` — lọc kiểu cũ SAI khi lô đã tồn
+  // tại đúng ngày đề nghị (quá khứ) nhưng từ đó tới NAY đã bị dùng hết cho việc khác (thật,
+  // không phải lỗi): tồn hiện tại = 0 dù tồn tại đúng ngày đề nghị vẫn còn, khiến dropdown báo
+  // "không có lô nào" sai (yêu cầu người dùng 2026-11-26: "Tồn kho còn nhưng cứ báo thiếu").
+  const source = (asOfDate && asOfLots) ? asOfLots : allLots;
+  const asOf = (!asOfLots && asOfDate) ? new Date(asOfDate) : null;
+  const avail = source.filter(l => l.material_id === materialId && l.quantity > 0 && !/phân xưởng/i.test(l.location || "")
     && (!asOf || new Date(l.created_at) <= asOf))
     .sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
   if (!avail.length) {
-    const msg = asOf ? "(không có lô nào đã Nhập kho tính đến ngày đề nghị)" : "(không còn lô khả dụng)";
+    const msg = asOfDate ? "(không có lô nào đã Nhập kho tính đến ngày đề nghị)" : "(không còn lô khả dụng)";
     return { html: `<option value="">${msg}</option>`, defaultId: "", fifoFirstId: "" };
   }
   const defaultId = selectedLotId && avail.some(l => l.lot_id === selectedLotId) ? selectedLotId : avail[0].lot_id;
@@ -8631,10 +8669,13 @@ function requestLotOptionsHtml(materialId, allLots, selectedLotId, asOfDate) {
 // nghị" — yêu cầu người dùng 2026-09-19: "giống kiểu cấp liệu đó, bạn tự thêm dòng nguyên liệu
 // cần lấy thêm theo fifo tiếp theo" (lô cũ nhất không đủ 1 mình thì tự động chia sang lô kế
 // tiếp thay vì chỉ hiện đúng 1 lô rồi báo thiếu). Tính HOÀN TOÀN ở client từ `allLots` đã tải
-// sẵn (đủ dữ liệu: quantity/created_at/location), không cần gọi thêm API.
-function requestFifoPlan(materialId, allLots, neededQty, asOfDate) {
-  const asOf = asOfDate ? new Date(asOfDate) : null;
-  const avail = allLots.filter(l => l.material_id === materialId && l.quantity > 0 && !/phân xưởng/i.test(l.location || "")
+// sẵn (đủ dữ liệu: quantity/created_at/location), không cần gọi thêm API — trừ khi có `asOfLots`
+// (xem requestLotOptionsHtml ở trên) thì dùng đúng tồn DỰNG LẠI tại ngày đề nghị thay vì tồn
+// hiện tại, tránh báo thiếu sai khi lô cũ đã dùng hết cho việc khác SAU ngày đề nghị.
+function requestFifoPlan(materialId, allLots, neededQty, asOfDate, asOfLots) {
+  const source = (asOfDate && asOfLots) ? asOfLots : allLots;
+  const asOf = (!asOfLots && asOfDate) ? new Date(asOfDate) : null;
+  const avail = source.filter(l => l.material_id === materialId && l.quantity > 0 && !/phân xưởng/i.test(l.location || "")
     && (!asOf || new Date(l.created_at) <= asOf))
     .sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
   const plan = [];
@@ -8666,10 +8707,11 @@ function fulfilledFifoBadgeHtml(fifoOk) {
 // NHIỀU <tr> (mỗi lô 1 dòng phụ, cột Vật tư/Ngày.../Trạng thái/Actions để trống, chỉ hiện ở dòng
 // đầu) — mirror hệt cách dispense.py's "Gợi ý cấp liệu" (sg_result) hiển thị nhiều lô cho 1 vật
 // tư, cộng thêm "+ Thêm lô khác" để thủ kho tự thêm/sửa nếu muốn (yêu cầu người dùng 2026-09-19).
-function requestPendingLineRowsHtml(r, l, matById, allLots, colspanShared) {
+function requestPendingLineRowsHtml(r, l, matById, allLots, colspanShared, asOfLotsByDate) {
   const mat = matById[l.material_id];
   const matLabel = mat ? `${esc(mat.code)} — ${esc(mat.name)}` : esc(l.material_id);
-  const { plan } = requestFifoPlan(l.material_id, allLots || [], l.quantity, r.requested_receipt_date);
+  const asOfLots = (r.requested_receipt_date && asOfLotsByDate) ? asOfLotsByDate[r.requested_receipt_date] : null;
+  const { plan } = requestFifoPlan(l.material_id, allLots || [], l.quantity, r.requested_receipt_date, asOfLots);
   // Cảnh báo NGAY TRÊN MÀN HÌNH khi tồn Kho công ty tính đến "Ngày đề nghị nhận kho" không đủ SL
   // đang đề nghị — trước đây chỉ biết qua toast thoáng qua của "Duyệt cả phiếu" (chung chung,
   // không nói rõ dòng nào/thiếu bao nhiêu, biến mất sau vài giây) nên thủ kho không biết vì sao
@@ -8687,7 +8729,7 @@ function requestPendingLineRowsHtml(r, l, matById, allLots, colspanShared) {
   const actions = `<button class="btn sm sec" data-reqfulfill data-reqid="${esc(r.request_id)}" data-lineid="${esc(l.line_id)}">Xuất dòng này</button>
      <button class="btn sm sec" data-reqreject data-reqid="${esc(r.request_id)}" data-lineid="${esc(l.line_id)}">Từ chối</button>`;
   const pickRowHtml = (pick, pi, isFirst) => {
-    const lotOpts = requestLotOptionsHtml(l.material_id, allLots || [], pick.lot_id, r.requested_receipt_date);
+    const lotOpts = requestLotOptionsHtml(l.material_id, allLots || [], pick.lot_id, r.requested_receipt_date, asOfLots);
     return `<tr data-reqpickrow="${esc(l.line_id)}-${pi}">
       <td>${isFirst ? matLabel : ""}</td>
       <td>${isFirst ? `${l.quantity} ${esc(l.uom)}<div id="reqsum-${esc(l.line_id)}" class="muted" style="font-size:11px"></div>` : ""}</td>
@@ -8713,13 +8755,13 @@ function requestPendingLineRowsHtml(r, l, matById, allLots, colspanShared) {
   return shortfall + rows + addRow;
 }
 
-function requestLineRowHtml(r, l, matById, lotById, canFulfill, allLots) {
+function requestLineRowHtml(r, l, matById, lotById, canFulfill, allLots, asOfLotsByDate) {
   // Hoàn tác xuất theo đề nghị coi như khóa lại sau khi fulfilled — chỉ ADMIN mới hoàn tác
   // được (mirror đúng quy ước đã áp dụng cho nút Hoàn tác Điều chuyển/Xuất sang ngang, xem
   // isAdminDc/isAdminSngPx), KHÔNG dùng chung quyền warehouse.issue (canFulfill) như lúc xuất.
   const isAdminReqUndo = CURRENT_USER && CURRENT_USER.role === "admin";
   if (canFulfill && l.status === "pending") {
-    return requestPendingLineRowsHtml(r, l, matById, allLots, 10);
+    return requestPendingLineRowsHtml(r, l, matById, allLots, 10, asOfLotsByDate);
   }
   const mat = matById[l.material_id];
   const matLabel = mat ? `${esc(mat.code)} — ${esc(mat.name)}` : esc(l.material_id);
@@ -8862,16 +8904,16 @@ function openEditRequestModal(r, matById) {
 // tự chế cơ chế tìm/phân trang riêng cho kiểu thẻ (yêu cầu người dùng 2026-09-23: "phân rõ các
 // cột ... tôi tìm phải tìm được hết các trường này"). Mỗi phiếu vẫn giữ 1 dòng chi tiết theo
 // từng vật tư (requestLineRowHtml, không đổi) — xem toàn bộ ở dòng <tr data-detailrow> ngay sau.
-function requestTableHtml(requests, matById, lotById, canFulfill, showBulk, allLots, canRequest, tableId) {
+function requestTableHtml(requests, matById, lotById, canFulfill, showBulk, allLots, canRequest, tableId, asOfLotsByDate) {
   return `<div class="tablewrap"><table id="${esc(tableId)}">
     <thead><tr><th>Số phiếu ĐN</th><th>NV đề nghị</th><th>Ngày lập phiếu</th><th>Ngày đề nghị nhận kho</th>
       <th>NV xuất</th><th>Ghi chú / Lệnh nguồn</th><th>Trạng thái</th><th></th><th></th></tr></thead>
-    <tbody>${requests.map(r => requestBlockHtml(r, matById, lotById, canFulfill, showBulk, allLots, canRequest)).join("") ||
+    <tbody>${requests.map(r => requestBlockHtml(r, matById, lotById, canFulfill, showBulk, allLots, canRequest, asOfLotsByDate)).join("") ||
       '<tr><td colspan=9 class="muted">Không có phiếu nào.</td></tr>'}</tbody>
   </table></div>`;
 }
 
-function requestBlockHtml(r, matById, lotById, canFulfill, showBulk, allLots, canRequest) {
+function requestBlockHtml(r, matById, lotById, canFulfill, showBulk, allLots, canRequest, asOfLotsByDate) {
   const pendingCount = r.lines.filter(l => l.status === "pending").length;
   const fulfilledCount = r.lines.filter(l => l.status === "fulfilled").length;
   const hasFulfilled = fulfilledCount > 0;
@@ -8913,7 +8955,7 @@ function requestBlockHtml(r, matById, lotById, canFulfill, showBulk, allLots, ca
       <td colspan="9">
         <table>
           <thead><tr><th>Vật tư</th><th>SL</th><th>Lô</th><th>Ngày nhập</th><th>Ngày xuất</th><th>Vị trí kho</th><th>FIFO</th><th>Lý do (nếu khác FIFO)</th><th>Trạng thái</th><th></th></tr></thead>
-          <tbody>${r.lines.map(l => requestLineRowHtml(r, l, matById, lotById, canFulfill, allLots)).join("") ||
+          <tbody>${r.lines.map(l => requestLineRowHtml(r, l, matById, lotById, canFulfill, allLots, asOfLotsByDate)).join("") ||
             '<tr><td colspan=10 class="muted">Phiếu không có dòng nào.</td></tr>'}</tbody>
         </table>
       </td>
@@ -8994,14 +9036,18 @@ function wireRequestBlockActions() {
     const existingSels = Array.from(document.querySelectorAll(`.reqlot-select[data-lineid="${CSS.escape(lineId)}"]`));
     const usedLotIds = new Set(existingSels.map(s => s.value));
     const reqDate = btn.dataset.reqdate || null;
-    const asOf = reqDate ? new Date(reqDate) : null;
-    const avail = allLots.filter(l => l.material_id === materialId && l.quantity > 0 && !/phân xưởng/i.test(l.location || "")
+    // asOfLots (nếu có): tồn DỰNG LẠI đúng ngày đề nghị (xem requestLotOptionsHtml) thay vì tồn
+    // hiện tại — mirror cùng fix 2026-11-26.
+    const asOfLots = (reqDate && WH_CACHE.asOfLotsByDate) ? WH_CACHE.asOfLotsByDate[reqDate] : null;
+    const source = (reqDate && asOfLots) ? asOfLots : allLots;
+    const asOf = (!asOfLots && reqDate) ? new Date(reqDate) : null;
+    const avail = source.filter(l => l.material_id === materialId && l.quantity > 0 && !/phân xưởng/i.test(l.location || "")
       && (!asOf || new Date(l.created_at) <= asOf))
       .sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
     const nextLot = avail.find(l => !usedLotIds.has(l.lot_id));
     if (!nextLot) { toast("Không còn lô nào khác của vật tư này để chọn.", "err"); return; }
     const pi = Math.max(...existingSels.map(s => parseInt(s.dataset.pi, 10))) + 1;
-    const lotOpts = requestLotOptionsHtml(materialId, allLots, nextLot.lot_id, reqDate);
+    const lotOpts = requestLotOptionsHtml(materialId, allLots, nextLot.lot_id, reqDate, asOfLots);
     const existingQty = document.querySelector(`.reqlot-qty[data-lineid="${CSS.escape(lineId)}"]`);
     const target = existingQty ? existingQty.dataset.target : "";
     const addRowTr = btn.closest("tr");
@@ -11911,7 +11957,10 @@ function packLineGanttSvg(report) {
   const from = report.from ? new Date(report.from).getTime() : 0;
   const to = report.to ? new Date(report.to).getTime() : 0;
   if (!lines.length || !from || !to || to <= from) return '<div class="muted">Chưa có dữ liệu chiết theo ca trong kỳ này.</div>';
-  const W = 900, laneH = 30, padL = 150, padT = 26, H = padT + lines.length * laneH + 8, span = to - from;
+  // padL rộng hơn (150->230) để chứa tên đầy đủ dây chuyền (VD "Dây chuyền chiết lon 30k
+  // lon/h") thay vì chỉ mã ngắn "LINE 1" — yêu cầu người dùng 2026-11-13: hiện tên mô tả ngay
+  // trên biểu đồ. Nhãn lấy line_name (Danh mục › Dây chuyền), rơi về mã nếu chưa đặt tên.
+  const W = 900, laneH = 30, padL = 230, padT = 26, H = padT + lines.length * laneH + 8, span = to - from;
   const x = (t) => padL + (new Date(t).getTime() - from) / span * (W - padL - 12);
   const day = 86400000;
   let svg = `<svg viewBox="0 0 ${W} ${H}" width="100%" style="display:block;background:var(--panel2);border-radius:8px">`;
@@ -11922,13 +11971,73 @@ function packLineGanttSvg(report) {
   }
   lines.forEach((l, i) => {
     const y = padT + i * laneH;
-    svg += `<text x="6" y="${y + 18}" fill="var(--text)" font-size="11">${esc(l.line)}</text>
+    const label = l.line_name || l.line;
+    svg += `<text x="6" y="${y + 18}" fill="var(--text)" font-size="11">${esc(label)}<title>${esc(l.line)}</title></text>
       <line x1="${padL}" y1="${y + laneH - 1}" x2="${W - 12}" y2="${y + laneH - 1}" stroke="var(--border)"/>`;
     (l.segments || []).forEach(s => {
       const x1 = x(s.start_at), w = Math.max(x(s.end_at) - x1, 3);
       svg += `<rect x="${x1.toFixed(1)}" y="${y + 4}" width="${w.toFixed(1)}" height="${laneH - 9}" rx="3" fill="#3498db">
-        <title>${esc(l.line)} · ${esc(s.pack_lot_code || "")} · Ca ${s.ca} (${fmt(s.start_at)} → ${fmt(s.end_at)})</title></rect>`;
+        <title>${esc(label)} · ${esc(s.pack_lot_code || "")} · Ca ${s.ca} (${fmt(s.start_at)} → ${fmt(s.end_at)})</title></rect>`;
     });
+  });
+  return svg + "</svg>";
+}
+
+// Biểu đồ "Trạng thái máy chiết 30K theo thời gian" (1=đang chiết xanh, 2=đang CIP cam) — THÊM
+// RIÊNG, không thay biểu đồ "BC dây chuyền chiết" ở trên (vẫn giữ nguyên theo ca xác nhận) —
+// yêu cầu người dùng 2026-11-13. Chỉ có dữ liệu từ lúc tác vụ ghi log (services/filling_log.py)
+// được bật trên server, không có lịch sử trước đó (người dùng đã xác nhận chấp nhận phạm vi
+// này). 1 lane duy nhất (chỉ 1 máy), mirror cấu trúc vẽ của packLineGanttSvg.
+const FILLING_STATUS_COLOR = { 1: "#3498db", 2: "#e67e22", 3: "#7f8c8d" };
+const FILLING_STATUS_LABEL = { 1: "Đang chiết", 2: "Đang CIP máy", 3: "Máy dừng" };
+// "Xp"/"XhYYp" gọn cho nhãn trên biểu đồ — mirror fmtDurationH2 ở sec==="pack_line" nhưng nhận
+// thẳng số PHÚT (không phải giờ) vì đoạn CIP/dừng thường chỉ vài-vài chục phút.
+function fmtMinShort(totalMinutes) {
+  const m = Math.round(totalMinutes);
+  if (m < 60) return `${m}p`;
+  return `${Math.floor(m / 60)}h${String(m % 60).padStart(2, "0")}`;
+}
+function fillingStatusGanttSvg(report) {
+  const segments = report.segments || [];
+  const from = report.from ? new Date(report.from).getTime() : 0;
+  const to = report.to ? new Date(report.to).getTime() : 0;
+  if (!from || !to || to <= from) return '<div class="muted">Chưa có dữ liệu trạng thái máy chiết 30K trong kỳ này.</div>';
+  if (!segments.length) return '<div class="muted">Chưa có dữ liệu trạng thái máy chiết 30K trong kỳ này (tác vụ ghi log mới bật, cần thời gian để tích lũy dữ liệu).</div>';
+  // laneH rộng hơn (34->46) để có chỗ ghi số phút phía TRÊN mỗi đoạn CIP/dừng (status 2/3) —
+  // yêu cầu người dùng 2026-11-13: "hiển thị số phút dừng cho mỗi lần máy dừng hoặc CIP". Đoạn
+  // "đang chiết" (status 1, thường dài hàng giờ) không cần nhãn nên không ghi, đỡ rối biểu đồ.
+  const W = 900, laneH = 46, padL = 90, padT = 26, H = padT + laneH + 8, span = to - from;
+  const x = (t) => padL + (new Date(t).getTime() - from) / span * (W - padL - 12);
+  const day = 86400000;
+  let svg = `<svg viewBox="0 0 ${W} ${H}" width="100%" style="display:block;background:var(--panel2);border-radius:8px">`;
+  for (let t = Math.ceil(from / day) * day; t <= to; t += day) {
+    const xx = x(t);
+    svg += `<line x1="${xx.toFixed(1)}" y1="${padT - 4}" x2="${xx.toFixed(1)}" y2="${H - 4}" stroke="var(--border)" stroke-dasharray="2 3"/>
+      <text x="${(xx + 2).toFixed(1)}" y="14" fill="var(--muted)" font-size="9">${new Date(t).toLocaleDateString("vi-VN", { day: "2-digit", month: "2-digit" })}</text>`;
+  }
+  const y = padT;
+  const barY = y + 17, barH = laneH - 23;
+  svg += `<text x="6" y="${barY + barH / 2 + 4}" fill="var(--text)" font-size="11">Máy chiết 30K</text>
+    <line x1="${padL}" y1="${y + laneH - 1}" x2="${W - 12}" y2="${y + laneH - 1}" stroke="var(--border)"/>`;
+  segments.forEach(s => {
+    const x1 = x(s.start_at), w = Math.max(x(s.end_at) - x1, 3);
+    const fill = FILLING_STATUS_COLOR[s.status] || "#3498db";
+    const label = FILLING_STATUS_LABEL[s.status] || `Trạng thái ${s.status}`;
+    const minutes = (new Date(s.end_at) - new Date(s.start_at)) / 60000;
+    const minLabel = fmtMinShort(minutes);
+    svg += `<rect x="${x1.toFixed(1)}" y="${barY}" width="${w.toFixed(1)}" height="${barH}" rx="3" fill="${fill}">
+      <title>${esc(label)} — ${minLabel}${s.still_open ? " (đang diễn ra)" : ""} (${fmt(s.start_at)} → ${fmt(s.end_at)})</title></rect>`;
+    // Ghi số phút ngay trên đoạn, chỉ cho CIP/dừng (2/3) và chỉ khi đoạn đủ rộng để CHỨA VỪA
+    // ĐÚNG chữ của chính nó (ước lượng ~5px/ký tự ở font-size 8) — trước đây dùng ngưỡng cố
+    // định 16px nên nhãn dài ("1h00") hoặc đoạn hẹp sát nhau tràn chữ sang đoạn bên cạnh, nhìn
+    // như nhãn thuộc về ranh giới giữa 2 đoạn chứ không rõ của đoạn nào (người dùng phát hiện
+    // qua ảnh chụp 2026-11-13). Đoạn không đủ chỗ vẫn xem được số phút qua tooltip (title ở trên).
+    if (s.status === 2 || s.status === 3) {
+      const estTextWidth = minLabel.length * 5;
+      if (w >= estTextWidth + 2) {
+        svg += `<text x="${(x1 + w / 2).toFixed(1)}" y="${barY - 3}" text-anchor="middle" fill="var(--muted)" font-size="8">${minLabel}</text>`;
+      }
+    }
   });
   return svg + "</svg>";
 }
@@ -12084,7 +12193,7 @@ VIEWS.reports = async function () {
     const fmtPct = (p) => p == null ? "—" : p.toLocaleString("vi-VN") + "%";
     const runPct = fuRep.running_pct == null ? 0 : Math.max(0, Math.min(100, fuRep.running_pct));
     body = `<div class="panel"><h2>Hiệu suất hệ lọc theo tháng</h2>
-      <div class="muted" style="margin-bottom:8px">Thời gian lọc = tổng cộng dồn "Tổng thời gian lọc" (giờ bắt đầu → kết thúc) của mọi mẻ lọc kết thúc trong kỳ. Thời gian không lọc = phần còn lại trong tổng giờ lịch của kỳ (số ngày × 24h) — không trừ bớt nếu kỳ đang chạy dở.</div>
+      <div class="muted" style="margin-bottom:8px">Thời gian lọc = tổng cộng dồn "Tổng thời gian lọc" (giờ bắt đầu → kết thúc) của mọi mẻ lọc kết thúc trong kỳ. Thời gian không lọc = phần còn lại trong tổng giờ lịch của kỳ. ${fuRep.in_progress ? "Kỳ đang chạy dở (VD chọn tháng này khi mới qua vài ngày) — tổng giờ/% tính LŨY KẾ đến thời điểm hiện tại, không tính cả phần ngày chưa tới của kỳ." : "Kỳ đã kết thúc hẳn — tính trọn số ngày × 24h."}</div>
       <div class="row">
         <div class="field"><label>Xem theo</label><select id="rfu_mode">
           <option value="month" ${fuMode === "month" ? "selected" : ""}>Theo tháng</option>
@@ -12098,7 +12207,7 @@ VIEWS.reports = async function () {
         <button class="btn" id="rfu_apply" style="align-self:flex-end">Xem</button>
       </div>
       <div class="row" style="margin:12px 0">
-        <div class="field"><label class="muted">Tổng giờ trong kỳ</label><b>${fmtH(fuRep.total_hours)} giờ</b><div class="muted" style="font-size:11px">(${fuRep.days_in_period} ngày × 24h)</div></div>
+        <div class="field"><label class="muted">Tổng giờ trong kỳ</label><b>${fmtH(fuRep.total_hours)} giờ</b><div class="muted" style="font-size:11px">${fuRep.in_progress ? `(${fuRep.days_in_period.toLocaleString("vi-VN")} ngày lũy kế trong kỳ, tính đến ${fmt(fuRep.as_of)})` : `(${fuRep.days_in_period} ngày × 24h)`}</div></div>
         <div class="field"><label class="muted">Thời gian lọc</label><b style="color:var(--green)">${fmtH(fuRep.running_hours)} giờ</b><div class="muted" style="font-size:11px">${fmtPct(fuRep.running_pct)}</div></div>
         <div class="field"><label class="muted">Thời gian không lọc</label><b style="color:var(--red)">${fmtH(fuRep.idle_hours)} giờ</b><div class="muted" style="font-size:11px">${fmtPct(fuRep.idle_pct)}</div></div>
         <div class="field"><label class="muted">Số mẻ lọc trong kỳ</label><b>${fuRep.batch_count.toLocaleString("vi-VN")}</b></div>
@@ -12129,6 +12238,13 @@ VIEWS.reports = async function () {
     const plLines = plRep.lines || [];
     const fmtDurationH2 = (h) => { const totalMin = Math.round(h * 60);
       return `${Math.floor(totalMin / 60)}h${String(totalMin % 60).padStart(2, "0")}`; };
+    const fsPeriodMode = SUB.reports_fs_days === "custom" ? "custom" : "days";
+    const fsDays = fsPeriodMode === "days" ? (SUB.reports_fs_days || 30) : 30;
+    const fsToday = new Date(); const fsFrom30 = new Date(); fsFrom30.setDate(fsToday.getDate() - 30);
+    const fsDateFrom = SUB.reports_fs_date_from || toISODateLocal(fsFrom30);
+    const fsDateTo = SUB.reports_fs_date_to || toISODateLocal(fsToday);
+    const fsQs = fsPeriodMode === "custom" ? `date_from=${fsDateFrom}&date_to=${fsDateTo}` : `days=${fsDays}`;
+    const fsRep = await GET(`/reports/filling-status-log?${fsQs}`).catch(() => ({ segments: [], running_hours: 0, cip_hours: 0, stopped_hours: 0 }));
     body = `<div class="panel"><h2>BC dây chuyền chiết <span class="muted">(${plLines.length} dây chuyền)</span></h2>
       <div class="muted" style="margin-bottom:8px">Mỗi thanh trên biểu đồ = 1 ca chiết ĐÃ xác nhận xong (đủ SL + giờ bắt đầu/kết thúc) — khoảng trống giữa các thanh là thời gian KHÔNG chiết. "Số lần chiết" tính theo SỐ LÔ CHIẾT của dây chuyền đó trong kỳ (không theo số ca).</div>
       <div class="row">
@@ -12150,6 +12266,34 @@ VIEWS.reports = async function () {
           '<tr><td colspan=3 class="muted">Chưa có dây chuyền nào.</td></tr>'}</tbody>
       </table></div>
       <div id="rpl_gantt" style="margin-top:14px">${packLineGanttSvg(plRep)}</div>
+    </div>
+    <div class="panel"><h2>Trạng thái máy chiết 30K theo thời gian</h2>
+      <div class="muted" style="margin-bottom:8px">Tự động ghi theo tín hiệu SCADA thật (MachineRunning/Clean_Flushing/RinsReturnGasChannel) —
+        <b>đang chiết</b> (xanh) khi máy chạy và không tráng nước nóng/đuổi CO2, <b>đang CIP máy</b> (cam) khi đang tráng nước
+        nóng hoặc đuổi CO2 (kể cả khi máy chính không chạy), <b>máy dừng</b> (xám) khi cả 3 tín hiệu trên đều tắt — luôn có đúng 1 trạng thái
+        tại mọi thời điểm nên biểu đồ liền mạch, không có khoảng trống. Chỉ có dữ liệu từ lúc tính năng này được bật — không có lịch sử trước đó.</div>
+      <div class="row">
+        <div class="field"><label>Kỳ</label>
+          <select id="rfs_days"><option value="7">7 ngày gần đây</option>
+            <option value="30" ${fsPeriodMode === "days" && fsDays == 30 ? "selected" : ""}>30 ngày gần đây</option>
+            <option value="90">90 ngày gần đây</option>
+            <option value="custom" ${fsPeriodMode === "custom" ? "selected" : ""}>Từ ngày - đến ngày</option></select></div>
+        ${fsPeriodMode === "custom" ? `
+        <div class="field"><label>Từ ngày</label><input id="rfs_from" type="date" value="${fsDateFrom}"/></div>
+        <div class="field"><label>Đến ngày</label><input id="rfs_to" type="date" value="${fsDateTo}"/></div>
+        <button class="btn" id="rfs_apply" style="align-self:flex-end">Xem</button>` : ""}
+      </div>
+      <div class="cards" style="grid-template-columns:repeat(3,1fr);margin:12px 0">
+        <div class="card"><div class="n">${fsRep.running_hours}h</div><div class="l">Tổng thời gian đang chiết</div></div>
+        <div class="card"><div class="n">${fsRep.cip_hours}h</div><div class="l">Tổng thời gian đang CIP máy</div></div>
+        <div class="card"><div class="n">${fsRep.stopped_hours ?? 0}h</div><div class="l">Tổng thời gian máy dừng</div></div>
+      </div>
+      <div style="display:flex;gap:14px;margin-bottom:8px;font-size:12px" class="muted">
+        <span><span style="display:inline-block;width:10px;height:10px;background:#3498db;border-radius:2px;margin-right:4px"></span>Đang chiết</span>
+        <span><span style="display:inline-block;width:10px;height:10px;background:#e67e22;border-radius:2px;margin-right:4px"></span>Đang CIP máy</span>
+        <span><span style="display:inline-block;width:10px;height:10px;background:#7f8c8d;border-radius:2px;margin-right:4px"></span>Máy dừng</span>
+      </div>
+      <div id="rfs_gantt">${fillingStatusGanttSvg(fsRep)}</div>
     </div>`;
   } else if (sec === "brewhouse_steps") {
     // BC log hệ nấu — ghi TỰ ĐỘNG khi chuyển bước hoặc về Idle (services/brewhouse_log.py), lọc
@@ -12722,6 +12866,19 @@ VIEWS.reports = async function () {
       $("rpl_apply").onclick = () => {
         SUB.reports_pl_date_from = $("rpl_from").value;
         SUB.reports_pl_date_to = $("rpl_to").value;
+        render("reports");
+      };
+    }
+    $("rfs_days").value = String(SUB.reports_fs_days || 30);
+    $("rfs_days").onchange = () => {
+      const v = $("rfs_days").value;
+      SUB.reports_fs_days = v === "custom" ? "custom" : parseInt(v, 10);
+      render("reports");
+    };
+    if ($("rfs_apply")) {
+      $("rfs_apply").onclick = () => {
+        SUB.reports_fs_date_from = $("rfs_from").value;
+        SUB.reports_fs_date_to = $("rfs_to").value;
         render("reports");
       };
     }

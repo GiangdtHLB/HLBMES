@@ -37,16 +37,25 @@ def _is_expired(lot: MaterialLot) -> bool:
 
 
 def _lot_touched_since_consume(db: Session, lot_id: str, since_time, exclude_batch_id: str) -> bool:
-    """Lô đã bị động tới (tiêu thụ bởi mẻ/lô lọc/lô chiết KHÁC, hoặc điều chuyển/xuất kho) SAU
-    một thời điểm cụ thể — mirror warehouse.py::_lot_touched_since, áp dụng cho nhánh hoàn lại
-    (giảm Thực tế) của adjust_actual. Cấp liệu không ghi StockMovement nên phải kiểm tra CẢ 2
-    nguồn: GenealogyEdge tiêu thụ khác (của batch/lô lọc/lô chiết khác dùng chung lô này) lẫn
-    StockMovement không phải nhập kho (điều chuyển/xuất) — nếu không, hoàn lại vào 1 lô đã bị
-    dùng tiếp/chuyển đi sẽ tạo tồn ảo (phát hiện thực tế 2026-10-07, khi audit theo yêu cầu người
-    dùng không thấy xảy ra trên dữ liệu hiện có, nhưng lỗ hổng cấu trúc vẫn còn). Loại trừ
+    """Lô đã bị động tới (tiêu thụ bởi mẻ/lô lọc/lô chiết KHÁC, hoặc điều chuyển/xuất đi nơi
+    khác) SAU một thời điểm cụ thể — mirror warehouse.py::_lot_touched_since, áp dụng cho nhánh
+    hoàn lại (giảm Thực tế) của adjust_actual. Cấp liệu không ghi StockMovement nên phải kiểm
+    tra CẢ 2 nguồn: GenealogyEdge tiêu thụ khác (của batch/lô lọc/lô chiết khác dùng chung lô
+    này) lẫn StockMovement không phải nhập kho (điều chuyển/xuất) — nếu không, hoàn lại vào 1 lô
+    đã bị dùng tiếp/chuyển đi sẽ tạo tồn ảo (phát hiện thực tế 2026-10-07, khi audit theo yêu cầu
+    người dùng không thấy xảy ra trên dữ liệu hiện có, nhưng lỗ hổng cấu trúc vẫn còn). Loại trừ
     `exclude_batch_id` (CHÍNH mẻ đang sửa) khỏi "khác" — mẻ này tự dùng tiếp lô này ở 1 cạnh
     genealogy KHÁC (lần cấp liệu sau) không tính là bị động tới bởi bên ngoài (id toàn hệ thống
-    là UUID duy nhất nên so to_id trực tiếp là đủ, không cần so thêm to_type)."""
+    là UUID duy nhất nên so to_id trực tiếp là đủ, không cần so thêm to_type).
+
+    StockMovement loại "transfer" đi THEO HƯỚNG Kho công ty -> Kho phân xưởng (VD "Xuất theo đề
+    nghị" duyệt THÊM 1 đợt sau, merge vào đúng lô phân xưởng đang xét — xem warehouse.py::
+    _transfer_lot "sibling") chỉ CỘNG THÊM tồn cho lô này, không phải "dùng tiếp"/rút bớt — KHÔNG
+    được tính là "bị động tới" (bug thực tế 2026-11-26, vật tư 2NP124/lô 2026-00081: mẻ 3144 cấp
+    liệu lô này 8/11, Kho công ty duyệt thêm đề nghị merge thêm hàng vào CÙNG lô này ở 14/11 và
+    25/11 — bị chặn hoàn lại Thực tế oan dù lô chỉ TĂNG tồn, không hề bị rút đi đâu). Chiều NGƯỢC
+    LẠI (phân xưởng -> nơi khác, tức rút bớt khỏi lô) hoặc bất kỳ movement nào khác vẫn bị chặn
+    như cũ."""
     other_edge = db.execute(select(func.count()).select_from(GenealogyEdge).where(
         GenealogyEdge.from_type == "lot", GenealogyEdge.from_id == lot_id,
         GenealogyEdge.relation == GenealogyRelation.CONSUME.value,
@@ -54,10 +63,14 @@ def _lot_touched_since_consume(db: Session, lot_id: str, since_time, exclude_bat
         GenealogyEdge.event_time > since_time)).scalar_one()
     if other_edge > 0:
         return True
-    other_mv = db.execute(select(func.count()).select_from(StockMovement).where(
+    other_mvs = db.execute(select(StockMovement.location_from, StockMovement.location_to).where(
         StockMovement.lot_id == lot_id, StockMovement.movement_type != "receipt",
-        StockMovement.created_at > since_time)).scalar_one()
-    return other_mv > 0
+        StockMovement.created_at > since_time)).all()
+    for loc_from, loc_to in other_mvs:
+        if warehouse_svc._is_workshop_location(loc_to) and not warehouse_svc._is_workshop_location(loc_from):
+            continue   # chi la bo sung them tu Kho cong ty vao, khong phai dung tiep/rut bot
+        return True
+    return False
 
 
 # Mốc chốt mở rộng điều kiện #2 (bên dưới) sang các trạng thái planned/ready/completed/closed —
