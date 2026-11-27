@@ -11,8 +11,22 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from datetime import timedelta
 
 from app.common import utcnow
-from app.database import SessionLocal, init_db
+from app.database import SessionLocal, engine, init_db
 from app.models.filling_log import FillingStatusLog
+
+# CHỐT CHẶN — không chỉ dựa vào dòng cảnh báo ở docstring: script này XOÁ SẠCH filling_status_log
+# (db.query(...).delete() bên dưới) rồi chèn dữ liệu giả. File nằm trong image nên CÓ MẶT trong
+# container production, nơi MES_DATABASE_URL trỏ thẳng vào SQL Server thật — gõ nhầm 1 lệnh là
+# mất toàn bộ log máy chiết thật, và log đó dùng cho báo cáo hiệu suất. Chỉ cho chạy trên SQLite
+# (DB dev local); muốn chạy chỗ khác phải khai báo ý định thật rõ ràng.
+_dialect = engine.url.get_backend_name()
+if _dialect != "sqlite" and "--toi-biet-day-khong-phai-sqlite" not in sys.argv:
+    sys.exit(
+        f"TU CHOI CHAY: script demo nay XOA SACH bang filling_status_log roi chen du lieu GIA.\n"
+        f"  CSDL dang tro toi : {_dialect} ({engine.url.host or engine.url.database})\n"
+        f"  Chi cho chay tren : sqlite (DB dev local)\n"
+        f"Neu that su co chu y, chay lai kem co --toi-biet-day-khong-phai-sqlite."
+    )
 
 init_db()
 db = SessionLocal()
