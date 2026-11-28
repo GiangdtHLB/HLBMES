@@ -733,13 +733,23 @@ def list_filter_order_sources(db: Session, order_id: str) -> list[BatchFilterOrd
                       .order_by(BatchFilterOrderSource.seq)).scalars().all()
 
 
-def _order_tank_sources_drained(db: Session, order_id: str) -> bool:
+def _order_tank_sources_drained(db: Session, order_id: str, ctx: dict = None) -> bool:
     """TẤT CẢ tank lên men nguồn (source_type="tank") của lệnh lọc này đã "Lọc hết" (_tank_status
     == "da_loc_het", tức tank.on_hand <= 0 sau khi rút dịch) chưa — lệnh KHÔNG có nguồn tank nào
     (VD lệnh lọc lại thuần từ Lô lọc khác, source_type="filter_lot") trả về False, không tự động
     hoàn thành theo tiêu chí này (yêu cầu người dùng 2026-09-25: "khi lô lên men đó đã báo lọc
     hết, thì toàn bộ lệnh lọc đi theo lô đó sẽ sang hoàn thành luôn" — áp dụng cho CẢ lệnh phối
-    nhiều tank: phải HẾT CẢ, không phải chỉ 1 tank trong số đó, mới coi là lệnh đã xong nguồn)."""
+    nhiều tank: phải HẾT CẢ, không phải chỉ 1 tank trong số đó, mới coi là lệnh đã xong nguồn).
+
+    `ctx` (tuỳ chọn): kết quả _build_filter_orders_bulk_context() — xem _filter_order_status()."""
+    if ctx is not None:
+        tank_ids = [s.source_tank_id for s in ctx["sources_by_order"].get(order_id, [])
+                   if s.source_type == "tank" and s.source_tank_id]
+        if not tank_ids:
+            return False
+        tanks = [ctx["tanks_by_id"][tid] for tid in tank_ids if tid in ctx["tanks_by_id"]]
+        return len(tanks) == len(tank_ids) and all(
+            _tank_status(db, t, ctx=ctx["tank_status_ctx"]) == "da_loc_het" for t in tanks)
     tank_ids = db.execute(select(BatchFilterOrderSource.source_tank_id).where(
         BatchFilterOrderSource.order_id == order_id, BatchFilterOrderSource.source_type == "tank",
         BatchFilterOrderSource.source_tank_id.isnot(None))).scalars().all()
@@ -749,7 +759,65 @@ def _order_tank_sources_drained(db: Session, order_id: str) -> bool:
     return len(tanks) == len(tank_ids) and all(_tank_status(db, t) == "da_loc_het" for t in tanks)
 
 
-def _filter_order_status(db: Session, order: BatchFilterOrder) -> dict:
+def _build_filter_orders_bulk_context(db: Session, orders: list) -> dict:
+    """Gộp TRƯỚC mọi truy vấn mà _filter_order_status()/_filter_order_tank_lm_names() cần, cho
+    NHIỀU lệnh lọc CÙNG LÚC — dùng bởi list_filter_orders() để tránh N+1 (mỗi lệnh trước đây tự
+    truy vấn riêng 4-6 lượt: lô lọc của lệnh, nguồn tank/lô lọc lại, trạng thái từng tank nguồn,
+    lô thành phẩm đã tiêu thụ hạ lưu — sự cố thực tế 2026-11-28: dashboard/màn "Lệnh lọc" cực kỳ
+    chậm, 489 lệnh lọc tích lũy khiến list_filter_orders() mất hơn 5 giây — mirror đúng cách đã
+    sửa list_tanks_out()/_build_tanks_bulk_context() cho sự cố N+1 tương tự 2026-11-02, kể cả
+    dùng LẠI chính hàm đó cho phần trạng thái tank nguồn). get_filter_order() (xem 1 lệnh đơn lẻ)
+    không dùng hàm này, vẫn tự truy vấn như cũ (ctx=None ở mọi hàm liên quan)."""
+    order_ids = [o.order_id for o in orders]
+    if not order_ids:
+        return {"lots_by_order": {}, "sources_by_order": {}, "tanks_by_id": {},
+                "filter_lots_by_id": {}, "tank_status_ctx": None, "consumed_filter_lot_ids": set()}
+
+    lots = execute_in_chunks(db, lambda chunk: select(BatchFilterLot).where(
+        BatchFilterLot.order_id.in_(chunk)), order_ids, scalars=True)
+    lots_by_order: dict[str, list] = {}
+    for l in lots:
+        lots_by_order.setdefault(l.order_id, []).append(l)
+
+    sources = execute_in_chunks(db, lambda chunk: select(BatchFilterOrderSource).where(
+        BatchFilterOrderSource.order_id.in_(chunk)).order_by(BatchFilterOrderSource.seq),
+        order_ids, scalars=True)
+    sources_by_order: dict[str, list] = {}
+    for s in sources:
+        sources_by_order.setdefault(s.order_id, []).append(s)
+
+    tank_ids = list({s.source_tank_id for s in sources if s.source_type == "tank" and s.source_tank_id})
+    source_filter_lot_ids = {s.source_filter_lot_id for s in sources
+                             if s.source_type == "filter_lot" and s.source_filter_lot_id}
+    produced_filter_lot_ids = {l.filter_lot_id for ls in lots_by_order.values() for l in ls}
+
+    tanks = execute_in_chunks(db, lambda chunk: select(BatchTank).where(
+        BatchTank.tank_id.in_(chunk)), tank_ids, scalars=True)
+    tanks_by_id = {t.tank_id: t for t in tanks}
+    tank_status_ctx = _build_tanks_bulk_context(db, tanks)
+
+    # filter_lots_by_id gồm CẢ lô do chính các lệnh này tạo ra (produced) LẪN lô của lệnh KHÁC
+    # được dùng làm nguồn "lọc lại" (source_filter_lot_ids) — 1 truy vấn chung, khử trùng qua set.
+    all_filter_lot_ids = list(source_filter_lot_ids | produced_filter_lot_ids)
+    filter_lots = execute_in_chunks(db, lambda chunk: select(BatchFilterLot).where(
+        BatchFilterLot.filter_lot_id.in_(chunk)), all_filter_lot_ids, scalars=True)
+    filter_lots_by_id = {fl.filter_lot_id: fl for fl in filter_lots}
+    # Lô do CHÍNH các lệnh này tạo ra đã có sẵn ở `lots` (không cần query lại) — gộp luôn vào
+    # dict chung để _filter_order_tank_lm_names() tra to_bbt không phải phân biệt nguồn.
+    for ls in lots_by_order.values():
+        for l in ls:
+            filter_lots_by_id.setdefault(l.filter_lot_id, l)
+
+    consumed_filter_lot_ids = set(execute_in_chunks(db, lambda chunk: select(
+        BatchPackLot.filter_lot_id).where(BatchPackLot.filter_lot_id.in_(chunk)).distinct(),
+        list(produced_filter_lot_ids), scalars=True))
+
+    return {"lots_by_order": lots_by_order, "sources_by_order": sources_by_order,
+            "tanks_by_id": tanks_by_id, "filter_lots_by_id": filter_lots_by_id,
+            "tank_status_ctx": tank_status_ctx, "consumed_filter_lot_ids": consumed_filter_lot_ids}
+
+
+def _filter_order_status(db: Session, order: BatchFilterOrder, ctx: dict = None) -> dict:
     """`is_complete` = tổng SL thực tế (volume_hl) các Lô lọc đã tạo từ lệnh này đã đạt kế hoạch
     - dung sai chưa. Khi True, lệnh lọc TỰ ĐỘNG coi là "hoàn thành" (status="hoan_thanh") — KHÔNG
     cần bấm gì (yêu cầu người dùng 2026-09-23, làm rõ lại: "sản lượng thực tế >= sản lượng kế
@@ -765,16 +833,26 @@ def _filter_order_status(db: Session, order: BatchFilterOrder) -> dict:
     vận hành bấm "Hoàn thành lệnh lọc" thủ công. "Đã tiêu thụ hạ lưu" (mirror _chiet_started) khi
     đã có Lô thành phẩm tách từ 1 trong các Lô lọc của lệnh này — KHÔNG đổi status, chỉ vẫn dùng
     để chặn tạo thêm Lô lọc mới (ràng buộc vật lý thật, xem VIEWS.batchfilterlots — khác hẳn
-    "hoàn thành")."""
-    lots = db.execute(select(BatchFilterLot).where(BatchFilterLot.order_id == order.order_id)).scalars().all()
+    "hoàn thành").
+
+    `ctx` (tuỳ chọn): kết quả _build_filter_orders_bulk_context() — truyền khi gọi lặp lại cho
+    NHIỀU lệnh (list_filter_orders()) để tra từ bộ nhớ thay vì tự truy vấn lại (tránh N+1); bỏ
+    trống (1 lệnh đơn lẻ, get_filter_order()) giữ nguyên hành vi cũ."""
+    if ctx is not None:
+        lots = ctx["lots_by_order"].get(order.order_id, [])
+    else:
+        lots = db.execute(select(BatchFilterLot).where(BatchFilterLot.order_id == order.order_id)).scalars().all()
     actual = sum(l.volume_hl or 0.0 for l in lots)
     is_complete = actual >= (order.planned_volume_hl - order.volume_tolerance_hl)
-    tank_sources_drained = _order_tank_sources_drained(db, order.order_id)
-    consumed_downstream = any(
-        db.execute(select(BatchPackLot.pack_lot_id).where(
-            BatchPackLot.filter_lot_id == l.filter_lot_id)).first()
-        for l in lots
-    )
+    tank_sources_drained = _order_tank_sources_drained(db, order.order_id, ctx=ctx)
+    if ctx is not None:
+        consumed_downstream = any(l.filter_lot_id in ctx["consumed_filter_lot_ids"] for l in lots)
+    else:
+        consumed_downstream = any(
+            db.execute(select(BatchPackLot.pack_lot_id).where(
+                BatchPackLot.filter_lot_id == l.filter_lot_id)).first()
+            for l in lots
+        )
     # Trạng thái hiển thị: planned (chưa tạo lô lọc nào) -> dang_loc (đã có lô lọc, chưa đủ SL kế
     # hoạch VÀ chưa bấm "Hoàn thành lệnh lọc" VÀ tank nguồn chưa lọc hết) -> hoan_thanh (is_complete
     # TỰ ĐỘNG, HOẶC tank_sources_drained TỰ ĐỘNG, HOẶC order.completed = mốc dừng sớm thủ công —
@@ -786,28 +864,32 @@ def _filter_order_status(db: Session, order: BatchFilterOrder) -> dict:
             "status": status, "status_label": FILTER_ORDER_STATUS_LABEL[status]}
 
 
-def _filter_order_tank_lm_names(db: Session, order_id: str) -> list[str]:
+def _filter_order_tank_lm_names(db: Session, order_id: str, ctx: dict = None) -> list[str]:
     """Tên tank lên men vật lý (BatchTank.tank_lm) của các nguồn source_type="tank" thuộc lệnh,
     CỘNG THÊM tank BBT (lọc lại) của các nguồn source_type="filter_lot" — hiển thị ở cột "Tank
     lên men" trong danh sách lệnh lọc/lô lọc, để phân biệt với Lô lên men (mã số, BatchTank.
     tank_code). Trước đây nguồn lọc lại bị BỎ QUA hoàn toàn ở cột này (không hiện gì), khiến 1
     lệnh "Phối" giữa tank lên men + BBT lọc lại chỉ hiện đúng 1 nửa nguồn, trông như lệnh
     "Không phối" bình thường — sai (yêu cầu người dùng 2026-10-11: "nếu phối thì phải hiển thị cả
-    2"). Tank BBT ghi thêm nhãn "(lọc lại)" để phân biệt rõ với tank lên men thật."""
+    2"). Tank BBT ghi thêm nhãn "(lọc lại)" để phân biệt rõ với tank lên men thật.
+
+    `ctx` (tuỳ chọn): kết quả _build_filter_orders_bulk_context() — xem _filter_order_status()."""
     names = []
-    for s in list_filter_order_sources(db, order_id):
+    sources = ctx["sources_by_order"].get(order_id, []) if ctx is not None else list_filter_order_sources(db, order_id)
+    for s in sources:
         if s.source_type == "tank":
-            t = db.get(BatchTank, s.source_tank_id)
+            t = ctx["tanks_by_id"].get(s.source_tank_id) if ctx is not None else db.get(BatchTank, s.source_tank_id)
             if t and t.tank_lm:
                 names.append(t.tank_lm)
         elif s.source_type == "filter_lot":
-            fl = db.get(BatchFilterLot, s.source_filter_lot_id)
+            fl = (ctx["filter_lots_by_id"].get(s.source_filter_lot_id) if ctx is not None
+                  else db.get(BatchFilterLot, s.source_filter_lot_id))
             if fl and fl.to_bbt:
                 names.append(f"{fl.to_bbt} (lọc lại)")
     return names
 
 
-def _filter_order_out(db: Session, order: BatchFilterOrder) -> dict:
+def _filter_order_out(db: Session, order: BatchFilterOrder, ctx: dict = None) -> dict:
     return {
         "order_id": order.order_id, "order_code": order.order_code, "order_year": order.order_year,
         "blend_mode": order.blend_mode, "planned_volume_hl": order.planned_volume_hl,
@@ -816,15 +898,16 @@ def _filter_order_out(db: Session, order: BatchFilterOrder) -> dict:
         "finished_product_id": order.finished_product_id, "kcs_lot_no": order.kcs_lot_no, "note": order.note,
         "created_by": order.created_by, "created_at": order.created_at,
         "effective_at": order.effective_at or order.created_at, "locked": order.locked,
-        "tank_lm_names": _filter_order_tank_lm_names(db, order.order_id),
+        "tank_lm_names": _filter_order_tank_lm_names(db, order.order_id, ctx=ctx),
         "completed": order.completed, "completed_by": order.completed_by, "completed_at": order.completed_at,
-        **_filter_order_status(db, order),
+        **_filter_order_status(db, order, ctx=ctx),
     }
 
 
 def list_filter_orders(db: Session) -> list[dict]:
     orders = db.execute(select(BatchFilterOrder).order_by(BatchFilterOrder.created_at.desc())).scalars().all()
-    return [_filter_order_out(db, o) for o in orders]
+    ctx = _build_filter_orders_bulk_context(db, orders)
+    return [_filter_order_out(db, o, ctx=ctx) for o in orders]
 
 
 def get_filter_order(db: Session, order_id: str) -> dict:

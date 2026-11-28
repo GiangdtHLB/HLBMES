@@ -116,7 +116,7 @@
   VIEWS.recipeadv = async function () {
     const root = $("view-recipeadv");
     const [recipes, batches, changes] = await Promise.all([
-      GET("/recipes"), GET("/batches"), GET("/recipes/changes").catch(() => [])]);
+      GET("/recipes"), GET("/batches?limit=200"), GET("/recipes/changes").catch(() => [])]);
     root.innerHTML = `
       ${panel("🔧 Hiệu suất theo công đoạn (Yield)", `
         <div class="row"><div class="field"><label>Chọn mẻ</label>
@@ -245,7 +245,7 @@
   VIEWS.dispense = async function () {
     const root = $("view-dispense");
     const [batches, fullyDispensedMap, allMaterials, materialGroups] = await Promise.all([
-      GET("/batches"), GET("/dispense/fully-dispensed-map").catch(() => ({})),
+      GET("/batches?limit=200"), GET("/dispense/fully-dispensed-map").catch(() => ({})),
       GET("/materials").catch(() => []), GET("/material-groups").catch(() => [])]);
     // "Cấp 1 vật tư" (thủ công) không giới hạn trong Định mức (BOM) của mẻ — cho chọn BẤT KỲ vật
     // tư nào thuộc nhóm "Nguyên liệu (chính/phụ)" (MaterialGroup.is_raw_material) trong Danh mục
@@ -613,7 +613,7 @@
   VIEWS.qclab = async function () {
     const root = $("view-qclab");
     const [params, capas, samples, batches, devs, lots] = await Promise.all([
-      GET("/qc/parameters"), GET("/qc/capa"), GET("/qc/samples"), GET("/batches"),
+      GET("/qc/parameters"), GET("/qc/capa"), GET("/qc/samples"), GET("/batches?limit=200"),
       GET("/quality/deviations").catch(() => []), GET("/lots").catch(() => [])]);
     const devById = Object.fromEntries(devs.map(d => [d.deviation_id, d]));
     const openDevOpts = devs.filter(d => d.state !== "closed")
@@ -1046,7 +1046,7 @@
   const PHASE_BADGE = { idle: "planned", running: "due", held: "critical", complete: "available", aborted: "obsolete" };
   VIEWS.isa88 = async function () {
     const root = $("view-isa88");
-    const batches = await GET("/batches");
+    const batches = await GET("/batches?limit=200");
     const running = batches.find(b => b.state === "running") || batches[0];
     root.innerHTML = `
       ${panel("🏭 Thực thi thủ tục ISA-88", `
@@ -1322,6 +1322,8 @@
     </tr>`).join("");
 
     const palletsPanel = panel("🟦 Pallet", `
+      ${pallets.length >= 500 && sm.pallets_total > pallets.length
+        ? `<div class="muted" style="margin-bottom:6px">Chỉ hiện ${pallets.length}/${sm.pallets_total} pallet gần nhất (mới nhập kho trước) — tìm pallet cũ hơn theo đúng mã ở "Xuất theo lô" bên dưới, hoặc theo Lô TP.</div>` : ""}
       <input class="searchbox" data-tbl="t_wms_pallet" placeholder="Tìm theo mã pallet, SP, lô, trạng thái, vị trí..."/>
       <div class="tablewrap"><table id="t_wms_pallet"><thead><tr><th>Mã pallet</th><th>SP</th><th>Lô</th>
         <th style="text-align:right">Case</th><th>Trạng thái</th><th>Nguồn</th><th>Vị trí</th>

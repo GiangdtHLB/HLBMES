@@ -37,12 +37,23 @@ router = APIRouter(prefix="/api/batches", tags=["batches"])
 
 
 @router.get("", response_model=list[BatchOut])
-def list_batches(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+def list_batches(limit: int = None, work_order_id: str = None,
+                 db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     from ..models.workorder import WorkOrder
     from ..security import filter_by_scope
-    rows = db.execute(
-        select(BatchExecution).order_by(BatchExecution.created_at.desc())
-    ).scalars().all()
+    # `limit` (tuỳ chọn): CHỈ lấy N mẻ gần nhất — Dashboard "Mẻ gần đây" chỉ hiện 8 dòng đầu
+    # nhưng trước đây luôn tải TOÀN BỘ lịch sử mẻ nấu (1164 mẻ, ~107KB) rồi mới cắt ở client
+    # (yêu cầu người dùng 2026-11-28: khảo sát hiệu năng — dashboard tải chậm). Không truyền thì
+    # giữ nguyên hành vi cũ (mọi nơi khác cần danh sách đầy đủ để tự tìm/lọc phía client).
+    # `work_order_id` (tuỳ chọn): lọc đúng mẻ thuộc 1 Lệnh sản xuất — modal "Mẻ sản xuất — Lệnh
+    # ..." ở "Điều độ" trước đây tải NGUYÊN toàn bộ mẻ rồi mới lọc ở client (cùng đợt khảo sát
+    # hiệu năng 2026-11-28).
+    stmt = select(BatchExecution).order_by(BatchExecution.created_at.desc())
+    if work_order_id:
+        stmt = stmt.where(BatchExecution.work_order_id == work_order_id)
+    if limit:
+        stmt = stmt.limit(limit)
+    rows = db.execute(stmt).scalars().all()
     # Lọc theo phạm vi line (§10.2): line suy ra từ work order của mẻ.
     line_map = {w.wo_id: w.line for w in db.execute(select(WorkOrder)).scalars().all()}
     return filter_by_scope(user, rows, "lines", lambda b: line_map.get(b.work_order_id))

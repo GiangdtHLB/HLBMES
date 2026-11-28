@@ -608,8 +608,12 @@ VIEWS.dashboard = async function () {
   // mới, GET /batch-tanks đã có sẵn qc_fail_count/product_code/beer_type_name — xem
   // services/batch_pipeline.py::_tank_out) thay vì GET /brewing/ferments (module cũ) — yêu cầu
   // người dùng 2026-09-02.
+  // limit=50 (không phải 8 đúng số hiện ra): "Mẻ gần đây" chỉ hiện 8 dòng đầu nhưng vẫn xin dư ra
+  // để còn đủ sau khi lọc theo phạm vi line (filter_by_scope ở backend) — trước đây tải NGUYÊN
+  // TOÀN BỘ lịch sử mẻ nấu (1164 mẻ) chỉ để cắt còn 8 ở client (yêu cầu người dùng 2026-11-28:
+  // khảo sát hiệu năng dashboard).
   const [batches, audit, prodSummary, expiryRows, alerts, batchTanksRaw, lowYield, bottledNotApproved] = await Promise.all([
-    GET("/batches"), GET("/audit?limit=10"), safe("/reports/dashboard-summary"),
+    GET("/batches?limit=50"), GET("/audit?limit=10"), safe("/reports/dashboard-summary"),
     safe("/warehouse/expiry?warn_days=14"),
     safe("/reports/qc-attention-alerts"), safe("/batch-tanks"),
     safe(`/reports/low-yield-filter-alerts?days=${lowYieldDays}&limit=5`),
@@ -846,7 +850,7 @@ VIEWS.dashboard = async function () {
       <div style="position:relative;height:20px;background:var(--panel2);border-radius:3px;overflow:hidden;display:flex">
         <div style="width:${basePct}%;height:100%;background:var(--blue)"></div>
         <div style="width:${overPct}%;height:100%;background:var(--red)"></div>
-        <div style="position:absolute;inset:0;display:flex;align-items:center;padding-left:8px;font-size:11px;color:#fff;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(it.product)} · ${it.days}/${it.std} ngày · ${it.onHand}/${it.volumeHl} hl${filteringSuffix}</div>
+        <div style="position:absolute;inset:0;display:flex;align-items:center;padding-left:8px;font-size:11px;color:#fff;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(it.product)} · ${it.days}/${it.std} ngày · ${fmtHl(it.onHand)}/${fmtHl(it.volumeHl)} hl${filteringSuffix}</div>
       </div>
       <div style="font-size:12px;font-weight:700;color:${it.over > 0 ? "var(--red)" : "var(--muted)"}">${label}</div>
     </div>`;
@@ -1521,11 +1525,12 @@ VIEWS.dispatch = async function () {
   // lại kết quả đã khai (khai báo thật làm ở tab "Chất lượng" › "Công đoạn chờ khai báo", tự
   // yêu cầu ngay khi tạo mã WO, xem qc_catalog.list_pending_stage_declarations) — yêu cầu người
   // dùng 2026-09-01.
-  const waterQcByWo = {};
-  await Promise.all(board.map(async (w) => {
-    try { waterQcByWo[w.wo_id] = await GET(`/brewing/qc-status?stage=nuoc_nau&scope_type=work_order&scope_id=${encodeURIComponent(w.wo_id)}`); }
-    catch (e) { waterQcByWo[w.wo_id] = null; }
-  }));
+  // Gộp thành 1 lượt gọi duy nhất cho MỌI WO đang hiển thị (thay vì 1 lượt/WO) — sự cố thực tế
+  // 2026-11-28 (khảo sát hiệu năng): 122 WO -> 133 request cùng lúc, ~97 giây xử lý dồn vào
+  // server, chỉ để tra trạng thái QC nước nấu cho từng mã điều độ.
+  const waterQcByWo = board.length
+    ? await GET(`/brewing/qc-status-bulk?stage=nuoc_nau&scope_type=work_order&scope_ids=${board.map(w => encodeURIComponent(w.wo_id)).join(",")}`).catch(() => ({}))
+    : {};
   // Dây chuyền nấu THẬT (ProductionLine kind=brewhouse) — không còn chọn tay lúc lập Work
   // Order (bỏ theo yêu cầu), tự gán nếu Danh mục chỉ có đúng 1 dây chuyền (xem $("wo_add")
   // bên dưới). Vẫn cần danh sách này cho "Phát mẻ"/Tank lên men dùng ở nơi khác trong view này.
@@ -1689,8 +1694,7 @@ async function openWaterQcViewModal(woId, woCode) {
 // Cột "Mẻ" ở Bảng điều độ link tới Mẻ sản xuất (BatchExecution, liên kết qua work_order_id) —
 // module Nấu-Lọc-Chiết cũ (BrewBatch) đã bị gỡ bỏ hoàn toàn (2026-09-11).
 async function openWoBatchesModal(woId, woCode) {
-  const batches = await GET("/batches");
-  const rows = batches.filter(b => b.work_order_id === woId);
+  const rows = await GET(`/batches?work_order_id=${encodeURIComponent(woId)}`);
   modal(`<h3>Mẻ sản xuất — Lệnh <code class="k">${esc(woCode)}</code></h3>
     <div class="tablewrap"><table><thead><tr><th>Mã mẻ Braumat</th><th>Trạng thái</th><th>Chất lượng</th><th>KH</th><th>Thực tế</th></tr></thead>
       <tbody>${rows.map(b => `<tr data-gotobatch="${b.batch_id}" style="cursor:pointer">
@@ -5269,7 +5273,9 @@ async function openPackLotEBR(packLotId) {
 // ================= QUALITY =================
 VIEWS.quality = async function () {
   const [results, devs, batches, lots, onHoldLots, materials, qcParams, holdHistory, pendingStageQc, capas, matLocsQuality, pendingKcPxQuality, pendingSngQuality, batchTanksQuality, batchFilterLotsQuality, batchPackLotsQuality, productsQuality, beerTypesQuality, workOrdersQuality] = await Promise.all([
-    GET("/quality/results"), GET("/quality/deviations"), GET("/batches"), GET("/lots"),
+    // days=90: du rong cho moi scope con hoat dong thuc te, tranh keo nguyen toan bo lich su
+    // QualityResult tu truoc toi gio (do thuc te 2026-11-28: 832KB, 3,6 giay).
+    GET("/quality/results?days=90"), GET("/quality/deviations"), GET("/batches?limit=200"), GET("/lots"),
     // Hàng "chờ KCS duyệt" PHẢI đầy đủ, không phụ thuộc trang 500 lô mới nhất toàn nhà máy — lọc
     // thẳng status=on_hold (xem GET /api/lots) để lô cũ bị giữ QC không lọt khỏi hàng chờ duyệt.
     GET("/lots?status=on_hold&limit=900").catch(() => []), GET("/materials"),
@@ -12304,7 +12310,9 @@ VIEWS.reports = async function () {
     const bsOrder = SUB.reports_bs_order || "";
     const bsBatch = SUB.reports_bs_batch || "";
     const bsEquip = SUB.reports_bs_equip || "";
-    const bsDays = SUB.reports_bs_days || 3650;
+    // Mac dinh 30 ngay (khong phai 3650/"Tat ca") -- bao cao doc tu bang log SCADA ngoai, mo lan
+    // dau chua loc gi se keo 10 nam lich su (do thuc te 2026-11-28: 3,3MB, 17-22 giay).
+    const bsDays = SUB.reports_bs_days || 30;
     const bsBeerType = SUB.reports_bs_beertype || "";
     // Mirror danh sách ID ở BREW_LINE_EQUIPMENT (realtime) — giữ khớp brewhouse_external.py::
     // EQUIPMENT_NAMES nếu sau này ID đổi.
@@ -12393,7 +12401,9 @@ VIEWS.reports = async function () {
     const bcYear = SUB.reports_bc_year || "";
     const bcOrder = SUB.reports_bc_order || "";
     const bcBatch = SUB.reports_bc_batch || "";
-    const bcDays = SUB.reports_bc_days || 3650;
+    // Mac dinh 30 ngay, cung ly do voi bsDays o tab "Log he nau" (do thuc te 2026-11-28: 10,4
+    // giay du payload chi 41KB -- nghen o tinh toan, cang nang khi quet cang nhieu ngay).
+    const bcDays = SUB.reports_bc_days || 30;
     const bcBeerType = SUB.reports_bc_beertype || "";
     const bcQs = [
       bcYear ? `ba_year=${encodeURIComponent(bcYear)}` : "",
@@ -15255,7 +15265,11 @@ function goToPendingTask(item) {
 function initPendingTasks() {
   refreshPendingTasks();
   if (PENDING_TASKS_TIMER) clearInterval(PENDING_TASKS_TIMER);
-  PENDING_TASKS_TIMER = setInterval(refreshPendingTasks, 90000);
+  // 300s (5 phút), trước là 90s — API này (list_pending_stage_declarations) dù đã gộp bớt N+1
+  // (2026-11-28) vẫn phải quét TOÀN BỘ lịch sử sản xuất mỗi lần gọi, lặp lại cho MỌI người đang
+  // mở app; giãn chu kỳ để giảm tải nền liên tục lên server (yêu cầu người dùng 2026-11-28:
+  // khảo sát hiệu năng — "Việc cần làm" là 1 trong các API chậm nhất, tự gọi lại định kỳ).
+  PENDING_TASKS_TIMER = setInterval(refreshPendingTasks, 300000);
   $("pt_bell").onclick = () => {
     const dd = $("pt_dropdown");
     dd.hidden = !dd.hidden;

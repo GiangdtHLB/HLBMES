@@ -107,6 +107,30 @@ def brewing_qc_status(stage: str, scope_type: str, scope_id: str, product_id: st
                                       finished_product_id, beer_type_id, category)
 
 
+@router.get("/qc-status-bulk")
+def brewing_qc_status_bulk(stage: str, scope_type: str, scope_ids: str, db: Session = Depends(get_db)):
+    """Bản gộp của /qc-status cho NHIỀU scope_id CÙNG stage/scope_type (`scope_ids` phân tách
+    bởi dấu phẩy) — trả về {scope_id: <kết quả stage_qc_status>}. KHÔNG nhận product_id/
+    beer_type_id/category riêng từng bản ghi (dùng cho stage không phụ thuộc sản phẩm, VD
+    "nuoc_nau" theo WorkOrder — nếu cần phân biệt theo sản phẩm thì vẫn phải gọi /qc-status
+    riêng từng bản ghi).
+
+    Sự cố thực tế 2026-11-28 (khảo sát hiệu năng toàn app): "Điều độ" gọi /qc-status RIÊNG cho
+    TỪNG WorkOrder đang hiển thị (122 WO -> 133 lượt gọi cùng lúc, tổng ~97 giây xử lý dồn vào
+    server) — N+1 kinh điển ở TẦNG FRONTEND (nhiều request HTTP riêng, không phải nhiều query
+    trong 1 request như các N+1 đã sửa trước đó). Endpoint này cho frontend gộp lại thành 1 lượt
+    gọi duy nhất, dùng chung quality.latest_results_by_param_bulk() + cache required_params (xem
+    qc_catalog.stage_qc_status) để server cũng chỉ cần vài câu SELECT thay vì N lượt."""
+    from ..services import quality as quality_svc
+    ids = [s for s in scope_ids.split(",") if s]
+    if not ids:
+        return {}
+    results_bulk = quality_svc.latest_results_by_param_bulk(db, scope_type)
+    cache: dict = {}
+    return {sid: qc_catalog.stage_qc_status(db, stage, scope_type, sid, cache=cache, results_bulk=results_bulk)
+            for sid in ids}
+
+
 @router.post("/qc-samples", status_code=201)
 def add_qc_sample(payload: QcSampleIn, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     """Ghi 1 lần lấy mẫu (nhiều chỉ tiêu cùng lúc) cho CT chính/CT phụ lên men — xem

@@ -96,7 +96,7 @@ def summary(db: Session) -> dict:
             "by_status": by_status, "cases": cases, "units": int(units)}
 
 
-def list_pallets(db: Session, status: str = None, lot_code: str = None) -> list:
+def list_pallets(db: Session, status: str = None, lot_code: str = None, limit: int = 500) -> list:
     stmt = select(Pallet).order_by(Pallet.created_at.desc())
     if status:
         stmt = stmt.where(Pallet.status == status)
@@ -105,6 +105,13 @@ def list_pallets(db: Session, status: str = None, lot_code: str = None) -> list:
         # KHÔNG phải FK) — dùng ở trang chi tiết Lô thành phẩm để tóm tắt "đã đóng bao nhiêu pallet
         # theo từng số vỉ/pallet", tránh phải tải TOÀN BỘ pallet trong kho mỗi lần xem 1 lô.
         stmt = stmt.where(Pallet.lot_code == lot_code)
+    # `limit` (mặc định 500, mirror đúng quy ước GET /lots — truyền 0/None để bỏ giới hạn): màn
+    # "Bao bì" gọi KHÔNG lọc gì cả để hiện bảng tìm-kiếm-tại-chỗ, trước đây kéo nguyên MỌI pallet
+    # từng tạo (sự cố thực tế 2026-11-28, khảo sát hiệu năng toàn app: 1,2MB, 6,6 giây, càng
+    # phình to theo thời gian) — giới hạn mặc định không áp dụng khi đã lọc theo `lot_code` (1 lô
+    # không bao giờ có hàng trăm pallet, không cần giới hạn thêm).
+    if limit and not lot_code:
+        stmt = stmt.limit(limit)
     out = []
     loc_by = {l.loc_id: l for l in db.execute(select(WmsLocation)).scalars().all()}
     product_name_by = _product_name_by_code(db)

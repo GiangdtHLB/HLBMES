@@ -1,0 +1,111 @@
+"""Test tham số `limit` (tuỳ chọn) của GET /api/batches — services/routers/batches.py::list_batches.
+
+Dashboard "Mẻ gần đây" trước đây tải NGUYÊN TOÀN BỘ lịch sử mẻ nấu (hàng nghìn dòng tích lũy)
+chỉ để cắt còn 8 dòng ở client — thêm `limit` để Dashboard xin đúng số dòng cần, không tải thừa
+(yêu cầu người dùng 2026-11-28: khảo sát hiệu năng dashboard). Không truyền `limit` vẫn giữ
+nguyên hành vi cũ (mọi nơi khác cần danh sách đầy đủ để tự tìm/lọc phía client)."""
+
+import os
+import tempfile
+
+_TMP = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+os.environ["MES_DATABASE_URL"] = f"sqlite:///{_TMP.name}"
+os.environ["MES_DEV_HEADER_AUTH"] = "0"
+os.environ["MES_RL_ENABLED"] = "0"
+os.environ["MES_ADMIN_PASSWORD"] = "AdminTest123"
+
+import pytest
+from fastapi.testclient import TestClient
+
+from app.main import app
+from app import seed as seed_mod
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _seeded():
+    seed_mod.seed()
+    yield
+
+
+@pytest.fixture(scope="module")
+def client():
+    return TestClient(app)
+
+
+def _login(client, u, p):
+    r = client.post("/api/auth/login", json={"username": u, "password": p})
+    assert r.status_code == 200, r.text
+    return {"Authorization": "Bearer " + r.json()["token"]}
+
+
+@pytest.fixture(scope="module")
+def admin_h(client):
+    return _login(client, "admin", "AdminTest123")
+
+
+def _make_batch(client, admin_h):
+    rid = client.get("/api/recipes", headers=admin_h).json()[0]["recipe_id"]
+    vers = client.get(f"/api/recipes/{rid}/versions", headers=admin_h).json()
+    v = next(v for v in vers if v["state"] == "effective")
+    oid = client.get("/api/brewing/orders", headers=admin_h).json()[0]["brew_order_id"]
+    b = client.post("/api/batches", headers=admin_h,
+                    json={"order_id": oid, "recipe_version_id": v["version_id"],
+                         "planned_qty": 1000, "allow_shortage": True})   # batch_code: tu sinh
+    assert b.status_code == 201, b.text
+    return b.json()["batch_id"]
+
+
+def test_limit_returns_the_n_most_recent_matching_unlimited_order(client, admin_h):
+    # Du lieu seed co the chi co 1-2 me demo -- tu tao them cho chac chan co du >=3 me.
+    for _ in range(3):
+        _make_batch(client, admin_h)
+
+    full = client.get("/api/batches", headers=admin_h).json()
+    assert len(full) >= 3
+
+    limited = client.get("/api/batches?limit=3", headers=admin_h).json()
+    assert len(limited) == 3
+    assert [b["batch_id"] for b in limited] == [b["batch_id"] for b in full[:3]]
+
+
+def test_no_limit_param_keeps_full_list(client, admin_h):
+    full = client.get("/api/batches", headers=admin_h).json()
+    no_limit = client.get("/api/batches?limit=0", headers=admin_h).json()
+    assert len(no_limit) == len(full)   # limit=0 (falsy) -> bo qua, giu nguyen hanh vi cu
+
+
+def test_limit_larger_than_total_returns_everything(client, admin_h):
+    full = client.get("/api/batches", headers=admin_h).json()
+    over = client.get(f"/api/batches?limit={len(full) + 1000}", headers=admin_h).json()
+    assert len(over) == len(full)
+
+
+def test_work_order_id_filters_to_only_its_own_dispatched_batches(client, admin_h):
+    """Modal "Mẻ sản xuất — Lệnh ..." ở Điều độ (app.js::openWoBatchesModal) trước đây tải
+    TOÀN BỘ mẻ rồi tự lọc work_order_id ở client — giờ lọc thẳng ở server."""
+    products = client.get("/api/products", headers=admin_h).json()
+    product = products[0]
+    recipes = client.get("/api/recipes", headers=admin_h).json()
+    recipe = next(r for r in recipes if r["beer_type_id"] == product["beer_type_id"])
+    version_id = next(v["version_id"] for v in
+                      client.get(f"/api/recipes/{recipe['recipe_id']}/versions", headers=admin_h).json()
+                      if v["state"] == "effective")
+    bo = client.post("/api/brewing/orders", headers=admin_h, json={
+        "order_code": "LN-WOFILTER-01", "product_id": product["product_id"],
+        "recipe_version_id": version_id, "planned_volume_hl": 100, "auto_from_bom": False})
+    assert bo.status_code == 201, bo.text
+    wo = client.post("/api/workorders", headers=admin_h, json={
+        "brew_order_id": bo.json()["brew_order_id"], "recipe_version_id": version_id,
+        "planned_qty": 100, "uom": "hl"})
+    assert wo.status_code == 201, wo.text
+    wo_id = wo.json()["wo_id"]
+    rel = client.post(f"/api/workorders/{wo_id}/transition", headers=admin_h, json={"target": "released"})
+    assert rel.status_code == 200, rel.text
+    disp = client.post(f"/api/workorders/{wo_id}/dispatch", headers=admin_h,
+                       json={"from_batch": 7001, "batch_count": 2})
+    assert disp.status_code == 200, disp.text
+    batch_ids = set(disp.json()["batch_ids"])
+
+    filtered = client.get(f"/api/batches?work_order_id={wo_id}", headers=admin_h).json()
+    assert {b["batch_id"] for b in filtered} == batch_ids
+    assert all(b["work_order_id"] == wo_id for b in filtered)
