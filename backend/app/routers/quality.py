@@ -1,9 +1,12 @@
 """Quality results, hold/release, deviations."""
 
+from datetime import timedelta
+
 from fastapi import APIRouter, Depends
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from ..common import utcnow
 from ..database import get_db
 from ..models.quality import Deviation, QualityResult
 from ..schemas import (
@@ -28,11 +31,19 @@ def pending_stage_qc(db: Session = Depends(get_db), user: User = Depends(get_cur
 
 
 @router.get("/results", response_model=list[ResultOut])
-def list_results(scope_id: str = None, db: Session = Depends(get_db),
+def list_results(scope_id: str = None, days: int = None, db: Session = Depends(get_db),
                  user: User = Depends(get_current_user)):
     stmt = select(QualityResult).order_by(QualityResult.recorded_at.desc())
     if scope_id:
         stmt = stmt.where(QualityResult.scope_id == scope_id)
+    elif days:
+        # `days` CHỈ áp dụng khi KHÔNG lọc theo `scope_id` — mọi nơi gọi tra kết quả của 1 bản
+        # ghi cụ thể (batch/tank/lô lọc/lô chiết) không bị ảnh hưởng. Tab "Chất lượng" gọi KHÔNG
+        # lọc gì để dựng bảng "scope đang cần chú ý" — trước đây kéo nguyên TOÀN BỘ QualityResult
+        # từng ghi từ trước tới giờ (sự cố thực tế 2026-11-28, khảo sát hiệu năng toàn app: 832KB,
+        # 3,6 giây, càng phình to theo thời gian) — 90 ngày đủ rộng cho mọi scope còn đang hoạt
+        # động thực tế (mẻ/lô/tank nào cũng đóng trong vài tuần).
+        stmt = stmt.where(QualityResult.recorded_at >= utcnow() - timedelta(days=days))
     return db.execute(stmt).scalars().all()
 
 
