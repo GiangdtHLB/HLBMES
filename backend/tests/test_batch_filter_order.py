@@ -503,3 +503,20 @@ def test_update_order_edits_planned_qty_blocked_after_filter_lot(client, admin_h
         "sources": [{"link_id": src["link_id"], "planned_v_dich_hl": 700}],
     })
     assert blocked.status_code == 409, blocked.text
+
+
+def test_list_endpoint_matches_single_get_for_every_order(client, admin_h):
+    """GET /batch-filter-orders (danh sách, dùng _build_filter_orders_bulk_context() để gộp
+    truy vấn tránh N+1 — sự cố thực tế 2026-11-28: 489 lệnh lọc tích lũy khiến list chậm >5s)
+    PHẢI ra đúng y hệt GET /batch-filter-orders/{id} (1 lệnh, vẫn tự truy vấn riêng như cũ,
+    ctx=None) cho MỌI lệnh đã tạo trong file test này — gồm đủ các tình huống đã test riêng ở
+    trên (tank thường, tank đã rút hết/chưa hết, lệnh phối nhiều tank, nguồn lọc lại từ lô khác,
+    đã tiêu thụ hạ lưu) — đảm bảo gộp truy vấn (bulk) không làm lệch kết quả so với đường cũ."""
+    listed = client.get("/api/batch-filter-orders", headers=admin_h).json()
+    assert len(listed) >= 8   # it nhat cac lenh da tao o cac test truoc trong file nay
+    fields = ["lot_count", "actual_volume_hl", "is_complete", "tank_sources_drained",
+             "consumed_downstream", "status", "status_label", "tank_lm_names"]
+    for item in listed:
+        single = client.get(f"/api/batch-filter-orders/{item['order_id']}", headers=admin_h).json()
+        for f in fields:
+            assert item[f] == single[f], f"{item['order_code']}.{f}: list={item[f]!r} != single={single[f]!r}"

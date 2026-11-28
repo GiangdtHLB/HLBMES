@@ -608,8 +608,12 @@ VIEWS.dashboard = async function () {
   // mới, GET /batch-tanks đã có sẵn qc_fail_count/product_code/beer_type_name — xem
   // services/batch_pipeline.py::_tank_out) thay vì GET /brewing/ferments (module cũ) — yêu cầu
   // người dùng 2026-09-02.
+  // limit=50 (không phải 8 đúng số hiện ra): "Mẻ gần đây" chỉ hiện 8 dòng đầu nhưng vẫn xin dư ra
+  // để còn đủ sau khi lọc theo phạm vi line (filter_by_scope ở backend) — trước đây tải NGUYÊN
+  // TOÀN BỘ lịch sử mẻ nấu (1164 mẻ) chỉ để cắt còn 8 ở client (yêu cầu người dùng 2026-11-28:
+  // khảo sát hiệu năng dashboard).
   const [batches, audit, prodSummary, expiryRows, alerts, batchTanksRaw, lowYield, bottledNotApproved] = await Promise.all([
-    GET("/batches"), GET("/audit?limit=10"), safe("/reports/dashboard-summary"),
+    GET("/batches?limit=50"), GET("/audit?limit=10"), safe("/reports/dashboard-summary"),
     safe("/warehouse/expiry?warn_days=14"),
     safe("/reports/qc-attention-alerts"), safe("/batch-tanks"),
     safe(`/reports/low-yield-filter-alerts?days=${lowYieldDays}&limit=5`),
@@ -15255,7 +15259,11 @@ function goToPendingTask(item) {
 function initPendingTasks() {
   refreshPendingTasks();
   if (PENDING_TASKS_TIMER) clearInterval(PENDING_TASKS_TIMER);
-  PENDING_TASKS_TIMER = setInterval(refreshPendingTasks, 90000);
+  // 300s (5 phút), trước là 90s — API này (list_pending_stage_declarations) dù đã gộp bớt N+1
+  // (2026-11-28) vẫn phải quét TOÀN BỘ lịch sử sản xuất mỗi lần gọi, lặp lại cho MỌI người đang
+  // mở app; giãn chu kỳ để giảm tải nền liên tục lên server (yêu cầu người dùng 2026-11-28:
+  // khảo sát hiệu năng — "Việc cần làm" là 1 trong các API chậm nhất, tự gọi lại định kỳ).
+  PENDING_TASKS_TIMER = setInterval(refreshPendingTasks, 300000);
   $("pt_bell").onclick = () => {
     const dd = $("pt_dropdown");
     dd.hidden = !dd.hidden;
